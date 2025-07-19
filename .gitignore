@@ -1,0 +1,8 @@
+zig-cache/
+zig-out/
+build/
+*.o
+*.elf
+*.bin
+*.iso
+.DS_Store
