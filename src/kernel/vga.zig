@@ -61,6 +61,16 @@ pub fn put_char(c: u8) void {
         }
         return;
     }
+    
+    if (c == '\x08') {
+        if (column > 0) {
+            column -= 1;
+        } else if (row > 0) {
+            row -= 1;
+            column = VGA_WIDTH - 1;
+        }
+        return;
+    }
 
     const index = row * VGA_WIDTH + column;
     buffer[index] = vga_entry(c, color);

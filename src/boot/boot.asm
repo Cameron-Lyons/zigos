@@ -16,16 +16,12 @@ global _start
 extern kernel_main
 
 _start:
-    ; Set up the stack
     mov esp, stack_top
     
-    ; Clear interrupts
     cli
     
-    ; Call the kernel main function
     call kernel_main
     
-    ; Halt the CPU if kernel_main returns
 .hang:
     cli
     hlt

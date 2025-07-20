@@ -13,13 +13,10 @@ A minimal operating system written in Zig.
 ## Building
 
 ```bash
-# Build the kernel
 zig build kernel
 
-# Create bootable ISO
 zig build iso
 
-# Run in QEMU
 zig build run
 ```
 
