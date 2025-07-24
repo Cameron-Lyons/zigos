@@ -40,6 +40,45 @@ var current_process: ?*Process = null;
 var process_list_head: ?*Process = null;
 var idle_process: *Process = undefined;
 
+pub fn getProcessList() ?*Process {
+    return process_list_head;
+}
+
+pub fn terminateProcess(pid: u32) bool {
+    if (pid == 0) return false; // Can't kill idle process
+    
+    var i: usize = 0;
+    while (i < MAX_PROCESSES) : (i += 1) {
+        if (process_table[i].pid == pid and process_table[i].state != .Terminated) {
+            process_table[i].state = .Terminated;
+            
+            // Remove from linked list
+            var prev: ?*Process = null;
+            var curr = process_list_head;
+            while (curr) |proc| {
+                if (proc == &process_table[i]) {
+                    if (prev) |p| {
+                        p.next = proc.next;
+                    } else {
+                        process_list_head = proc.next;
+                    }
+                    break;
+                }
+                prev = proc;
+                curr = proc.next;
+            }
+            
+            // If we killed the current process, switch to another
+            if (current_process == &process_table[i]) {
+                yield();
+            }
+            
+            return true;
+        }
+    }
+    return false;
+}
+
 pub fn init() void {
     vga.print("Initializing process management...\n");
     

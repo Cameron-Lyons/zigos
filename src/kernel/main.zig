@@ -5,6 +5,7 @@ const keyboard = @import("keyboard.zig");
 const paging = @import("paging.zig");
 const timer = @import("timer.zig");
 const process = @import("process.zig");
+const shell = @import("shell.zig");
 
 fn test_process1() void {
     var i: u32 = 0;
@@ -53,11 +54,16 @@ export fn kernel_main() void {
     _ = process.create_process("test1", test_process1);
     _ = process.create_process("test2", test_process2);
     
+    vga.print("Initializing shell...\n");
+    var system_shell = shell.Shell.init();
+    keyboard.setShell(&system_shell);
+    
     asm volatile ("sti");
     
-    vga.print("\nMultitasking enabled! Type something:\n");
+    vga.print("\nZigOS Shell Ready!\n");
+    system_shell.printPrompt();
     
-    while (true) {
+    while (system_shell.running) {
         asm volatile ("hlt");
     }
 }

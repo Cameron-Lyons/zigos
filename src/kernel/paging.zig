@@ -81,7 +81,9 @@ fn find_free_frame() ?u32 {
 fn alloc_frame() u32 {
     const frame_addr = find_free_frame() orelse {
         vga.print("Out of memory!\n");
-        asm volatile ("hlt");
+        while (true) {
+            asm volatile ("hlt");
+        }
     };
     set_frame(frame_addr);
     return frame_addr;
@@ -168,6 +170,18 @@ pub fn get_physical_address(virt_addr: u32) ?u32 {
     }
     
     return (@as(u32, page_entry.address) << 12) | offset;
+}
+
+pub const MemoryStats = struct {
+    total_frames: u32,
+    used_frames: u32,
+};
+
+pub fn getMemoryStats() MemoryStats {
+    return MemoryStats{
+        .total_frames = total_frames,
+        .used_frames = used_frames,
+    };
 }
 
 pub fn init() void {

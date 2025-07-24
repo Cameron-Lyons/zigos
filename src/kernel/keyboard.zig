@@ -1,5 +1,6 @@
 const std = @import("std");
 const vga = @import("vga.zig");
+const shell = @import("shell.zig");
 
 const KEYBOARD_DATA_PORT: u16 = 0x60;
 const KEYBOARD_STATUS_PORT: u16 = 0x64;
@@ -98,6 +99,7 @@ var shift_pressed: bool = false;
 var ctrl_pressed: bool = false;
 var alt_pressed: bool = false;
 var caps_lock: bool = false;
+var keyboard_shell: ?*shell.Shell = null;
 
 fn inb(port: u16) u8 {
     return asm volatile ("inb %[port], %[result]"
@@ -148,13 +150,18 @@ pub fn handleInterrupt() void {
                     }
                     
                     if (ch != 0) {
-                        if (ch == '\n') {
-                            vga.print("\n");
-                        } else if (ch == '\x08') {
-                            vga.print("\x08 \x08");
+                        if (keyboard_shell) |sh| {
+                            sh.handleChar(ch);
                         } else {
-                            var buf: [2]u8 = .{ ch, 0 };
-                            vga.print(&buf);
+                            // Fallback to direct printing if no shell
+                            if (ch == '\n') {
+                                vga.print("\n");
+                            } else if (ch == '\x08') {
+                                vga.print("\x08 \x08");
+                            } else {
+                                var buf: [2]u8 = .{ ch, 0 };
+                                vga.print(&buf);
+                            }
                         }
                     }
                 }
@@ -171,4 +178,8 @@ pub fn init() void {
     while (inb(KEYBOARD_STATUS_PORT) & 0x01 != 0) {
         _ = inb(KEYBOARD_DATA_PORT);
     }
+}
+
+pub fn setShell(sh: *shell.Shell) void {
+    keyboard_shell = sh;
 }
