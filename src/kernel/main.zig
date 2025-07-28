@@ -6,6 +6,8 @@ const paging = @import("paging.zig");
 const timer = @import("timer.zig");
 const process = @import("process.zig");
 const shell = @import("shell.zig");
+const syscall = @import("syscall.zig");
+const test_syscall = @import("test_syscall.zig");
 
 fn test_process1() void {
     var i: u32 = 0;
@@ -37,6 +39,10 @@ export fn kernel_main() void {
     isr.init();
     vga.print("Interrupts enabled!\n");
     
+    vga.print("Initializing system calls...\n");
+    syscall.init();
+    vga.print("System calls ready!\n");
+    
     vga.print("Initializing paging...\n");
     paging.init();
     
@@ -53,6 +59,7 @@ export fn kernel_main() void {
     vga.print("Creating test processes...\n");
     _ = process.create_process("test1", test_process1);
     _ = process.create_process("test2", test_process2);
+    _ = process.create_process("syscall_test", test_syscall.test_syscall_process);
     
     vga.print("Initializing shell...\n");
     var system_shell = shell.Shell.init();

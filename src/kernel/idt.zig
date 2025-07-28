@@ -23,6 +23,29 @@ pub const InterruptFrame = struct {
     stack_segment: u64,
 };
 
+pub const InterruptRegisters = packed struct {
+    // Pushed by interrupt handler
+    edi: u32,
+    esi: u32,
+    ebp: u32,
+    esp: u32,
+    ebx: u32,
+    edx: u32,
+    ecx: u32,
+    eax: u32,
+    
+    // Interrupt number and error code
+    int_no: u32,
+    err_code: u32,
+    
+    // Pushed by CPU
+    eip: u32,
+    cs: u32,
+    eflags: u32,
+    useresp: u32,
+    ss: u32,
+};
+
 const IDT_TYPE_INTERRUPT = 0x8E;
 const IDT_TYPE_TRAP = 0x8F;
 
@@ -41,6 +64,16 @@ pub fn setGate(n: u8, handler: *const fn () callconv(.Naked) void, selector: u16
         .type_attr = type_attr,
         .offset_high = @truncate((addr >> 16) & 0xFFFF),
     };
+}
+
+pub var interrupt_handlers: [IDT_ENTRIES]?*const fn(*InterruptRegisters) callconv(.C) void = [_]?*const fn(*InterruptRegisters) callconv(.C) void{null} ** IDT_ENTRIES;
+
+pub fn register_interrupt_handler(n: u8, handler: *const fn(*InterruptRegisters) callconv(.C) void) void {
+    interrupt_handlers[n] = handler;
+}
+
+pub fn set_gate_flags(n: u8, flags: u8) void {
+    idt[n].type_attr = flags;
 }
 
 pub fn init() void {

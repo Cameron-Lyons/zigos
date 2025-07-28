@@ -35,6 +35,7 @@ extern fn isr28() callconv(.Naked) void;
 extern fn isr29() callconv(.Naked) void;
 extern fn isr30() callconv(.Naked) void;
 extern fn isr31() callconv(.Naked) void;
+extern fn isr128() callconv(.Naked) void;
 
 extern fn irq0() callconv(.Naked) void;
 extern fn irq1() callconv(.Naked) void;
@@ -199,6 +200,9 @@ pub fn init() void {
     idt.setGate(45, &irq13, 0x08, 0x8E);
     idt.setGate(46, &irq14, 0x08, 0x8E);
     idt.setGate(47, &irq15, 0x08, 0x8E);
+    
+    // System call interrupt (int 0x80)
+    idt.setGate(128, &isr128, 0x08, 0x8E | 0x60); // DPL=3 to allow userspace calls
 
     idt.init();
 }

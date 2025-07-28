@@ -31,12 +31,13 @@ pub const Process = struct {
     stack_size: u32,
     name: [64]u8,
     next: ?*Process,
+    exit_code: i32 = 0,
 };
 
 const MAX_PROCESSES = 256;
 var process_table: [MAX_PROCESSES]Process = undefined;
 var next_pid: u32 = 1;
-var current_process: ?*Process = null;
+pub var current_process: ?*Process = null;
 var process_list_head: ?*Process = null;
 var idle_process: *Process = undefined;
 

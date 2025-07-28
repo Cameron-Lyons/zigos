@@ -2,6 +2,10 @@ const std = @import("std");
 const vga = @import("vga.zig");
 const shell = @import("shell.zig");
 
+var char_buffer: [256]u8 = undefined;
+var buffer_start: usize = 0;
+var buffer_end: usize = 0;
+
 const KEYBOARD_DATA_PORT: u16 = 0x60;
 const KEYBOARD_STATUS_PORT: u16 = 0x64;
 
@@ -150,6 +154,9 @@ pub fn handleInterrupt() void {
                     }
                     
                     if (ch != 0) {
+                        // Add to buffer for syscalls
+                        put_char_buffer(ch);
+                        
                         if (keyboard_shell) |sh| {
                             sh.handleChar(ch);
                         } else {
@@ -182,4 +189,26 @@ pub fn init() void {
 
 pub fn setShell(sh: *shell.Shell) void {
     keyboard_shell = sh;
+}
+
+pub fn has_char() bool {
+    return buffer_start != buffer_end;
+}
+
+pub fn getchar() ?u8 {
+    if (buffer_start == buffer_end) {
+        return null;
+    }
+    
+    const ch = char_buffer[buffer_start];
+    buffer_start = (buffer_start + 1) % char_buffer.len;
+    return ch;
+}
+
+fn put_char_buffer(ch: u8) void {
+    const next_end = (buffer_end + 1) % char_buffer.len;
+    if (next_end != buffer_start) {
+        char_buffer[buffer_end] = ch;
+        buffer_end = next_end;
+    }
 }
