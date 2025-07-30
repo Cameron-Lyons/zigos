@@ -3,6 +3,7 @@ const vga = @import("vga.zig");
 const process = @import("process.zig");
 const timer = @import("timer.zig");
 const paging = @import("paging.zig");
+const test_memory = @import("test_memory.zig");
 
 const MAX_COMMAND_LENGTH = 256;
 const MAX_ARGS = 16;
@@ -111,6 +112,8 @@ pub const Shell = struct {
             self.cmdKill(args[1..arg_count]);
         } else if (streq(command, "shutdown")) {
             self.cmdShutdown();
+        } else if (streq(command, "memtest")) {
+            self.cmdMemTest();
         } else {
             vga.print("Unknown command: ");
             printString(command);
@@ -129,6 +132,7 @@ pub const Shell = struct {
         vga.print("  uptime   - Show system uptime\n");
         vga.print("  kill     - Terminate a process by PID\n");
         vga.print("  shutdown - Halt the system\n");
+        vga.print("  memtest  - Run memory allocator tests\n");
     }
 
     fn cmdClear(self: *const Shell) void {
@@ -236,6 +240,11 @@ pub const Shell = struct {
         while (true) {
             asm volatile ("hlt");
         }
+    }
+    
+    fn cmdMemTest(self: *const Shell) void {
+        _ = self;
+        test_memory.test_memory_allocator();
     }
 };
 

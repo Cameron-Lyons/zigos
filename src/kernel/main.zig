@@ -8,6 +8,7 @@ const process = @import("process.zig");
 const shell = @import("shell.zig");
 const syscall = @import("syscall.zig");
 const test_syscall = @import("test_syscall.zig");
+const memory = @import("memory.zig");
 
 fn test_process1() void {
     var i: u32 = 0;
@@ -45,6 +46,9 @@ export fn kernel_main() void {
     
     vga.print("Initializing paging...\n");
     paging.init();
+    
+    vga.print("Initializing memory allocator...\n");
+    memory.init();
     
     vga.print("Initializing process management...\n");
     process.init();
