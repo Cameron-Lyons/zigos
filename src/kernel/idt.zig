@@ -24,7 +24,6 @@ pub const InterruptFrame = struct {
 };
 
 pub const InterruptRegisters = packed struct {
-    // Pushed by interrupt handler
     edi: u32,
     esi: u32,
     ebp: u32,
@@ -33,12 +32,10 @@ pub const InterruptRegisters = packed struct {
     edx: u32,
     ecx: u32,
     eax: u32,
-    
-    // Interrupt number and error code
+
     int_no: u32,
     err_code: u32,
-    
-    // Pushed by CPU
+
     eip: u32,
     cs: u32,
     eflags: u32,
@@ -66,9 +63,9 @@ pub fn setGate(n: u8, handler: *const fn () callconv(.Naked) void, selector: u16
     };
 }
 
-pub var interrupt_handlers: [IDT_ENTRIES]?*const fn(*InterruptRegisters) callconv(.C) void = [_]?*const fn(*InterruptRegisters) callconv(.C) void{null} ** IDT_ENTRIES;
+pub var interrupt_handlers: [IDT_ENTRIES]?*const fn (*InterruptRegisters) callconv(.C) void = [_]?*const fn (*InterruptRegisters) callconv(.C) void{null} ** IDT_ENTRIES;
 
-pub fn register_interrupt_handler(n: u8, handler: *const fn(*InterruptRegisters) callconv(.C) void) void {
+pub fn register_interrupt_handler(n: u8, handler: *const fn (*InterruptRegisters) callconv(.C) void) void {
     interrupt_handlers[n] = handler;
 }
 
@@ -84,6 +81,7 @@ pub fn init() void {
 
     asm volatile ("lidt %[idtr]"
         :
-        : [idtr] "*m" (&idtr)
+        : [idtr] "*m" (&idtr),
     );
 }
+

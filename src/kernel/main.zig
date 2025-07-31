@@ -9,6 +9,13 @@ const shell = @import("shell.zig");
 const syscall = @import("syscall.zig");
 const test_syscall = @import("test_syscall.zig");
 const memory = @import("memory.zig");
+const panic_handler = @import("panic.zig");
+const error_handler = @import("error.zig");
+const device = @import("device.zig");
+const console_device = @import("console_device.zig");
+const vfs = @import("vfs.zig");
+const ata = @import("ata.zig");
+const fat32 = @import("fat32.zig");
 
 fn test_process1() void {
     var i: u32 = 0;
@@ -35,46 +42,72 @@ export fn kernel_main() void {
     vga.clear();
     vga.print("Welcome to ZigOS!\n");
     vga.print("A minimal operating system written in Zig\n");
-    
+
     vga.print("Initializing interrupts...\n");
     isr.init();
     vga.print("Interrupts enabled!\n");
-    
+
     vga.print("Initializing system calls...\n");
     syscall.init();
     vga.print("System calls ready!\n");
-    
+
     vga.print("Initializing paging...\n");
     paging.init();
-    
+
     vga.print("Initializing memory allocator...\n");
     memory.init();
-    
+
+    vga.print("Initializing device drivers...\n");
+    device.init();
+    console_device.init() catch |err| {
+        panic_handler.panic("Failed to initialize console device: {}", .{err});
+    };
+    ata.init();
+    vga.print("Device drivers ready!\n");
+
+    vga.print("Initializing Virtual File System...\n");
+    vfs.init();
+    vga.print("VFS ready!\n");
+
+    vga.print("Initializing FAT32 file system...\n");
+    fat32.init();
+    vga.print("FAT32 ready!\n");
+
+    if (ata.getPrimaryMaster()) |_| {
+        vga.print("Mounting primary master as FAT32...\n");
+        vfs.mount("ata0", "/mnt", "fat32", 0) catch |err| {
+            vga.print("Failed to mount: ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+        };
+    }
+
     vga.print("Initializing process management...\n");
     process.init();
-    
+
     vga.print("Initializing timer...\n");
     timer.init(100);
-    
+
     vga.print("Initializing keyboard...\n");
     keyboard.init();
     vga.print("Keyboard ready!\n");
-    
+
     vga.print("Creating test processes...\n");
     _ = process.create_process("test1", test_process1);
     _ = process.create_process("test2", test_process2);
     _ = process.create_process("syscall_test", test_syscall.test_syscall_process);
-    
+
     vga.print("Initializing shell...\n");
     var system_shell = shell.Shell.init();
     keyboard.setShell(&system_shell);
-    
+
     asm volatile ("sti");
-    
+
     vga.print("\nZigOS Shell Ready!\n");
     system_shell.printPrompt();
-    
+
     while (system_shell.running) {
         asm volatile ("hlt");
     }
 }
+

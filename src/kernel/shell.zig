@@ -4,6 +4,9 @@ const process = @import("process.zig");
 const timer = @import("timer.zig");
 const paging = @import("paging.zig");
 const test_memory = @import("test_memory.zig");
+const panic_handler = @import("panic.zig");
+const device = @import("device.zig");
+const vfs = @import("vfs.zig");
 
 const MAX_COMMAND_LENGTH = 256;
 const MAX_ARGS = 16;
@@ -58,19 +61,16 @@ pub const Shell = struct {
 
         vga.put_char('\n');
 
-        // Parse command and arguments
         var args: [MAX_ARGS][*:0]const u8 = undefined;
         var arg_count: usize = 0;
         var i: usize = 0;
         var arg_start: usize = 0;
 
-        // Skip leading whitespace
         while (i < self.buffer_pos and isWhitespace(self.command_buffer[i])) : (i += 1) {}
         arg_start = i;
 
         while (i < self.buffer_pos and arg_count < MAX_ARGS) {
             if (isWhitespace(self.command_buffer[i]) or i == self.buffer_pos - 1) {
-                // End of argument
                 var arg_end = i;
                 if (i == self.buffer_pos - 1 and !isWhitespace(self.command_buffer[i])) {
                     arg_end = i + 1;
@@ -82,7 +82,6 @@ pub const Shell = struct {
                     arg_count += 1;
                 }
 
-                // Skip whitespace
                 while (i < self.buffer_pos and isWhitespace(self.command_buffer[i])) : (i += 1) {}
                 arg_start = i;
             } else {
@@ -94,7 +93,6 @@ pub const Shell = struct {
             return;
         }
 
-        // Execute command
         const command = args[0];
         if (streq(command, "help")) {
             self.cmdHelp();
@@ -114,6 +112,16 @@ pub const Shell = struct {
             self.cmdShutdown();
         } else if (streq(command, "memtest")) {
             self.cmdMemTest();
+        } else if (streq(command, "panic")) {
+            self.cmdPanic();
+        } else if (streq(command, "lsdev")) {
+            self.cmdLsDev();
+        } else if (streq(command, "ls")) {
+            self.cmdLs(args[1..arg_count]);
+        } else if (streq(command, "cat")) {
+            self.cmdCat(args[1..arg_count]);
+        } else if (streq(command, "mount")) {
+            self.cmdMount(args[1..arg_count]);
         } else {
             vga.print("Unknown command: ");
             printString(command);
@@ -133,6 +141,11 @@ pub const Shell = struct {
         vga.print("  kill     - Terminate a process by PID\n");
         vga.print("  shutdown - Halt the system\n");
         vga.print("  memtest  - Run memory allocator tests\n");
+        vga.print("  panic    - Trigger a kernel panic (for testing)\n");
+        vga.print("  lsdev    - List available devices\n");
+        vga.print("  ls       - List directory contents\n");
+        vga.print("  cat      - Display file contents\n");
+        vga.print("  mount    - Mount a file system\n");
     }
 
     fn cmdClear(self: *const Shell) void {
@@ -153,22 +166,19 @@ pub const Shell = struct {
         _ = self;
         vga.print("PID  STATE     NAME\n");
         vga.print("---  --------  ----\n");
-        
+
         var proc = process.getProcessList();
         while (proc) |p| : (proc = p.next) {
-            // Print PID
             printNumber(p.pid);
             vga.print("   ");
-            
-            // Print state
+
             switch (p.state) {
                 .Running => vga.print("RUNNING   "),
                 .Ready => vga.print("READY     "),
                 .Blocked => vga.print("BLOCKED   "),
                 .Terminated => vga.print("TERMINATED"),
             }
-            
-            // Print name (convert to null-terminated string)
+
             var name_buffer: [65]u8 = undefined;
             @memcpy(name_buffer[0..64], &p.name);
             name_buffer[64] = 0;
@@ -180,7 +190,7 @@ pub const Shell = struct {
     fn cmdMemInfo(self: *const Shell) void {
         _ = self;
         const stats = paging.getMemoryStats();
-        
+
         vga.print("Memory Information:\n");
         vga.print("  Total: ");
         printNumber(stats.total_frames * 4096 / 1024);
@@ -199,7 +209,7 @@ pub const Shell = struct {
         const seconds = ticks / 100; // 100Hz timer
         const minutes = seconds / 60;
         const hours = minutes / 60;
-        
+
         vga.print("Uptime: ");
         printNumber(@as(usize, @intCast(hours)));
         vga.print("h ");
@@ -215,13 +225,13 @@ pub const Shell = struct {
             vga.print("Usage: kill <pid>\n");
             return;
         }
-        
+
         const pid = parseNumber(args[0]);
         if (pid == null) {
             vga.print("Invalid PID\n");
             return;
         }
-        
+
         if (process.terminateProcess(pid.?)) {
             vga.print("Process ");
             printNumber(pid.?);
@@ -236,15 +246,160 @@ pub const Shell = struct {
     fn cmdShutdown(self: *Shell) void {
         vga.print("Shutting down...\n");
         self.running = false;
-        // In a real OS, we'd do proper shutdown procedures here
         while (true) {
             asm volatile ("hlt");
         }
     }
-    
+
     fn cmdMemTest(self: *const Shell) void {
         _ = self;
         test_memory.test_memory_allocator();
+    }
+
+    fn cmdPanic(self: *const Shell) void {
+        _ = self;
+        panic_handler.panic("User triggered panic from shell", .{});
+    }
+
+    fn cmdLsDev(self: *const Shell) void {
+        _ = self;
+        vga.print("Device List:\n");
+        vga.print("MAJOR  MINOR  TYPE     NAME\n");
+        vga.print("-----  -----  -------  ----\n");
+
+        var dev = device.getDeviceList();
+        while (dev) |d| : (dev = d.next) {
+            printNumber(d.major);
+            vga.print("      ");
+
+            printNumber(d.minor);
+            vga.print("      ");
+
+            switch (d.device_type) {
+                .CharDevice => vga.print("char     "),
+                .BlockDevice => vga.print("block    "),
+                .NetworkDevice => vga.print("network  "),
+            }
+
+            var i: usize = 0;
+            while (i < 64 and d.name[i] != 0) : (i += 1) {
+                vga.put_char(d.name[i]);
+            }
+            vga.put_char('\n');
+        }
+    }
+
+    fn cmdLs(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        const path = if (args.len > 0) args[0] else "/mnt";
+
+        const fd = vfs.open(sliceFromCStr(path), vfs.O_RDONLY) catch |err| {
+            vga.print("ls: ");
+            printString(path);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+        defer vfs.close(fd) catch {};
+
+        var index: u64 = 0;
+        var dirent: vfs.DirEntry = undefined;
+
+        while (true) {
+            const has_more = vfs.readdir(fd, &dirent, index) catch |err| {
+                vga.print("readdir error: ");
+                vga.print(@errorName(err));
+                vga.print("\n");
+                break;
+            };
+
+            if (!has_more) break;
+
+            if (dirent.file_type == vfs.FileType.Directory) {
+                vga.print("[DIR] ");
+            } else {
+                vga.print("      ");
+            }
+
+            var i: usize = 0;
+            while (i < dirent.name_len and i < 256) : (i += 1) {
+                vga.put_char(dirent.name[i]);
+            }
+            vga.put_char('\n');
+
+            index += 1;
+        }
+    }
+
+    fn cmdCat(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            vga.print("Usage: cat <file>\n");
+            return;
+        }
+
+        const path = args[0];
+
+        const fd = vfs.open(sliceFromCStr(path), vfs.O_RDONLY) catch |err| {
+            vga.print("cat: ");
+            printString(path);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+        defer vfs.close(fd) catch {};
+
+        var buffer: [512]u8 = undefined;
+        while (true) {
+            const bytes_read = vfs.read(fd, &buffer) catch |err| {
+                vga.print("\nread error: ");
+                vga.print(@errorName(err));
+                vga.print("\n");
+                break;
+            };
+
+            if (bytes_read == 0) break;
+
+            for (buffer[0..bytes_read]) |byte| {
+                if (byte == '\r') continue; // Skip carriage returns
+                vga.put_char(byte);
+            }
+        }
+        vga.put_char('\n');
+    }
+
+    fn cmdMount(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len < 3) {
+            vga.print("Usage: mount <device> <path> <fstype>\n");
+            vga.print("Example: mount ata0 /mnt fat32\n");
+            return;
+        }
+
+        const device_str = sliceFromCStr(args[0]);
+        const path = sliceFromCStr(args[1]);
+        const fstype = sliceFromCStr(args[2]);
+
+        vfs.mount(device_str, path, fstype, 0) catch |err| {
+            vga.print("mount: failed to mount ");
+            printString(args[0]);
+            vga.print(" on ");
+            printString(args[1]);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+
+        vga.print("Mounted ");
+        printString(args[0]);
+        vga.print(" on ");
+        printString(args[1]);
+        vga.print(" as ");
+        printString(args[2]);
+        vga.print("\n");
     }
 };
 
@@ -270,25 +425,25 @@ fn printString(str: [*:0]const u8) void {
 fn parseNumber(str: [*:0]const u8) ?u32 {
     var result: u32 = 0;
     var i: usize = 0;
-    
+
     if (str[0] == 0) return null;
-    
+
     while (str[i] != 0) : (i += 1) {
         if (str[i] < '0' or str[i] > '9') {
             return null;
         }
-        
+
         const digit = str[i] - '0';
         const new_result = result *% 10 +% digit;
-        
+
         // Check for overflow
         if (new_result < result) {
             return null;
         }
-        
+
         result = new_result;
     }
-    
+
     return result;
 }
 
@@ -297,18 +452,25 @@ fn printNumber(num: usize) void {
         vga.put_char('0');
         return;
     }
-    
+
     var buffer: [20]u8 = undefined;
     var i: usize = 0;
     var n = num;
-    
+
     while (n > 0) : (i += 1) {
         buffer[i] = @as(u8, @intCast((n % 10) + '0'));
         n /= 10;
     }
-    
+
     while (i > 0) {
         i -= 1;
         vga.put_char(buffer[i]);
     }
 }
+
+fn sliceFromCStr(str: [*:0]const u8) []const u8 {
+    var len: usize = 0;
+    while (str[len] != 0) : (len += 1) {}
+    return str[0..len];
+}
+

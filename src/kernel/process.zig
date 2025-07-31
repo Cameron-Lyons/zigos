@@ -47,13 +47,12 @@ pub fn getProcessList() ?*Process {
 
 pub fn terminateProcess(pid: u32) bool {
     if (pid == 0) return false; // Can't kill idle process
-    
+
     var i: usize = 0;
     while (i < MAX_PROCESSES) : (i += 1) {
         if (process_table[i].pid == pid and process_table[i].state != .Terminated) {
             process_table[i].state = .Terminated;
-            
-            // Remove from linked list
+
             var prev: ?*Process = null;
             var curr = process_list_head;
             while (curr) |proc| {
@@ -68,12 +67,11 @@ pub fn terminateProcess(pid: u32) bool {
                 prev = proc;
                 curr = proc.next;
             }
-            
-            // If we killed the current process, switch to another
+
             if (current_process == &process_table[i]) {
                 yield();
             }
-            
+
             return true;
         }
     }
@@ -82,16 +80,16 @@ pub fn terminateProcess(pid: u32) bool {
 
 pub fn init() void {
     vga.print("Initializing process management...\n");
-    
+
     for (&process_table) |*proc| {
         proc.state = .Terminated;
         proc.pid = 0;
         proc.next = null;
     }
-    
+
     idle_process = create_process("idle", idle_task);
     current_process = idle_process;
-    
+
     vga.print("Process management initialized!\n");
 }
 
@@ -103,30 +101,30 @@ fn idle_task() void {
 
 pub fn create_process(name: []const u8, entry_point: *const fn () void) *Process {
     var process: ?*Process = null;
-    
+
     for (&process_table) |*proc| {
         if (proc.state == .Terminated) {
             process = proc;
             break;
         }
     }
-    
+
     if (process == null) {
         vga.print("Error: No free process slots!\n");
         while (true) {
             asm volatile ("hlt");
         }
     }
-    
+
     const proc = process.?;
     proc.pid = next_pid;
     next_pid += 1;
     proc.state = .Ready;
-    
+
     const stack_size = 4096;
     proc.stack_size = stack_size;
     proc.stack = @as([*]u8, @ptrFromInt(0x200000 + (proc.pid * stack_size)));
-    
+
     proc.context = Context{
         .eax = 0,
         .ebx = 0,
@@ -140,20 +138,20 @@ pub fn create_process(name: []const u8, entry_point: *const fn () void) *Process
         .eflags = 0x202,
         .cr3 = 0,
     };
-    
+
     @memset(&proc.name, 0);
     const copy_len = @min(name.len, proc.name.len - 1);
     @memcpy(proc.name[0..copy_len], name[0..copy_len]);
-    
+
     proc.next = process_list_head;
     process_list_head = proc;
-    
+
     vga.print("Created process: ");
     vga.print(name);
     vga.print(" (PID: ");
     print_number(proc.pid);
     vga.print(")\n");
-    
+
     return proc;
 }
 
@@ -161,12 +159,12 @@ pub fn schedule() ?*Process {
     if (current_process == null) {
         return idle_process;
     }
-    
+
     var next = current_process.?.next;
     if (next == null) {
         next = process_list_head;
     }
-    
+
     while (next != current_process) {
         if (next.?.state == .Ready) {
             return next;
@@ -176,11 +174,11 @@ pub fn schedule() ?*Process {
             next = process_list_head;
         }
     }
-    
+
     if (current_process.?.state == .Ready or current_process.?.state == .Running) {
         return current_process;
     }
-    
+
     return idle_process;
 }
 
@@ -227,18 +225,19 @@ fn print_number(num: u32) void {
         vga.put_char('0');
         return;
     }
-    
+
     var digits: [10]u8 = undefined;
     var i: usize = 0;
     var n = num;
-    
+
     while (n > 0) : (n /= 10) {
         digits[i] = @as(u8, @truncate(n % 10)) + '0';
         i += 1;
     }
-    
+
     while (i > 0) {
         i -= 1;
         vga.put_char(digits[i]);
     }
 }
+

@@ -51,6 +51,18 @@ pub fn clear() void {
     column = 0;
 }
 
+pub fn clearWithColor(new_color: u8) void {
+    for (0..VGA_HEIGHT) |y| {
+        for (0..VGA_WIDTH) |x| {
+            const index = y * VGA_WIDTH + x;
+            buffer[index] = vga_entry(' ', new_color);
+        }
+    }
+    row = 0;
+    column = 0;
+    color = new_color;
+}
+
 pub fn put_char(c: u8) void {
     if (c == '\n') {
         column = 0;
@@ -90,6 +102,15 @@ pub fn print(str: []const u8) void {
     for (str) |c| {
         put_char(c);
     }
+}
+
+pub fn printWithColor(str: []const u8, new_color: u8) void {
+    const old_color = color;
+    color = new_color;
+    for (str) |c| {
+        put_char(c);
+    }
+    color = old_color;
 }
 
 fn scroll() void {
