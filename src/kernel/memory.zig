@@ -209,3 +209,19 @@ pub fn getMemoryStats() struct { total: usize, used: usize, free: usize } {
         .free = free,
     };
 }
+
+pub fn allocPages(num_pages: usize) ?[*]u8 {
+    const page_size = 4096;
+    const size = num_pages * page_size;
+    
+    const ptr = kmalloc(size);
+    if (ptr) |p| {
+        return @as([*]u8, @ptrCast(p));
+    }
+    return null;
+}
+
+pub fn freePages(ptr: [*]u8, num_pages: usize) void {
+    _ = num_pages;
+    kfree(@as(*anyopaque, @ptrCast(ptr)));
+}

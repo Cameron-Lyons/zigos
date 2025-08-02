@@ -43,6 +43,11 @@ export fn kernel_main() void {
     vga.print("Welcome to ZigOS!\n");
     vga.print("A minimal operating system written in Zig\n");
 
+    vga.print("Initializing GDT...\n");
+    const gdt = @import("gdt.zig");
+    gdt.init();
+    vga.print("GDT initialized!\n");
+
     vga.print("Initializing interrupts...\n");
     isr.init();
     vga.print("Interrupts enabled!\n");
@@ -96,6 +101,10 @@ export fn kernel_main() void {
     _ = process.create_process("test1", test_process1);
     _ = process.create_process("test2", test_process2);
     _ = process.create_process("syscall_test", test_syscall.test_syscall_process);
+    
+    // Create a user space test process
+    const userspace = @import("userspace.zig");
+    userspace.createUserTestProcess();
 
     vga.print("Initializing shell...\n");
     var system_shell = shell.Shell.init();

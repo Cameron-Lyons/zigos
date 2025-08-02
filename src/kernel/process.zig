@@ -1,12 +1,19 @@
 const std = @import("std");
 const vga = @import("vga.zig");
 const paging = @import("paging.zig");
+const gdt = @import("gdt.zig");
+const memory = @import("memory.zig");
 
 pub const ProcessState = enum {
     Ready,
     Running,
     Blocked,
     Terminated,
+};
+
+pub const ProcessPrivilege = enum {
+    Kernel,
+    User,
 };
 
 pub const Context = struct {
@@ -21,17 +28,22 @@ pub const Context = struct {
     eip: u32,
     eflags: u32,
     cr3: u32,
+    cs: u32,
+    ss: u32,
 };
 
 pub const Process = struct {
     pid: u32,
     state: ProcessState,
+    privilege: ProcessPrivilege,
     context: Context,
-    stack: [*]u8,
+    kernel_stack: [*]u8,
+    user_stack: [*]u8,
     stack_size: u32,
     name: [64]u8,
     next: ?*Process,
     exit_code: i32 = 0,
+    page_directory: ?*paging.PageDirectory,
 };
 
 const MAX_PROCESSES = 256;
@@ -87,7 +99,7 @@ pub fn init() void {
         proc.next = null;
     }
 
-    idle_process = create_process("idle", idle_task);
+    idle_process = create_kernel_process("idle", idle_task);
     current_process = idle_process;
 
     vga.print("Process management initialized!\n");
@@ -100,6 +112,18 @@ fn idle_task() void {
 }
 
 pub fn create_process(name: []const u8, entry_point: *const fn () void) *Process {
+    return create_kernel_process(name, entry_point);
+}
+
+pub fn create_kernel_process(name: []const u8, entry_point: *const fn () void) *Process {
+    return create_process_internal(name, entry_point, .Kernel);
+}
+
+pub fn create_user_process(name: []const u8, entry_point: *const fn () void) *Process {
+    return create_process_internal(name, entry_point, .User);
+}
+
+fn create_process_internal(name: []const u8, entry_point: *const fn () void, privilege: ProcessPrivilege) *Process {
     var process: ?*Process = null;
 
     for (&process_table) |*proc| {
@@ -123,21 +147,71 @@ pub fn create_process(name: []const u8, entry_point: *const fn () void) *Process
 
     const stack_size = 4096;
     proc.stack_size = stack_size;
-    proc.stack = @as([*]u8, @ptrFromInt(0x200000 + (proc.pid * stack_size)));
-
-    proc.context = Context{
-        .eax = 0,
-        .ebx = 0,
-        .ecx = 0,
-        .edx = 0,
-        .esi = 0,
-        .edi = 0,
-        .ebp = @intFromPtr(proc.stack + stack_size),
-        .esp = @intFromPtr(proc.stack + stack_size - 8),
-        .eip = @intFromPtr(entry_point),
-        .eflags = 0x202,
-        .cr3 = 0,
+    proc.privilege = privilege;
+    
+    // Allocate kernel stack for all processes
+    proc.kernel_stack = memory.allocPages(1) orelse {
+        vga.print("Error: Failed to allocate kernel stack!\n");
+        while (true) {
+            asm volatile ("hlt");
+        }
     };
+    
+    // Allocate user stack for user processes
+    if (privilege == .User) {
+        proc.user_stack = memory.allocPages(1) orelse {
+            vga.print("Error: Failed to allocate user stack!\n");
+            while (true) {
+                asm volatile ("hlt");
+            }
+        };
+        
+        // Create a new page directory for user process
+        proc.page_directory = paging.createUserPageDirectory() catch {
+            vga.print("Error: Failed to create user page directory!\n");
+            while (true) {
+                asm volatile ("hlt");
+            }
+        };
+    } else {
+        proc.user_stack = proc.kernel_stack; // Kernel processes use kernel stack
+        proc.page_directory = null;
+    }
+
+    // Set up context based on privilege level
+    if (privilege == .User) {
+        proc.context = Context{
+            .eax = 0,
+            .ebx = 0,
+            .ecx = 0,
+            .edx = 0,
+            .esi = 0,
+            .edi = 0,
+            .ebp = @intFromPtr(proc.user_stack + stack_size),
+            .esp = @intFromPtr(proc.user_stack + stack_size - 8),
+            .eip = @intFromPtr(entry_point),
+            .eflags = 0x202,
+            .cr3 = @intFromPtr(proc.page_directory),
+            .cs = gdt.USER_CODE_SEG | 0x3,
+            .ss = gdt.USER_DATA_SEG | 0x3,
+        };
+    } else {
+        proc.context = Context{
+            .eax = 0,
+            .ebx = 0,
+            .ecx = 0,
+            .edx = 0,
+            .esi = 0,
+            .edi = 0,
+            .ebp = @intFromPtr(proc.kernel_stack + stack_size),
+            .esp = @intFromPtr(proc.kernel_stack + stack_size - 8),
+            .eip = @intFromPtr(entry_point),
+            .eflags = 0x202,
+            .cr3 = 0,
+            .cs = gdt.KERNEL_CODE_SEG,
+            .ss = gdt.KERNEL_DATA_SEG,
+        };
+    }
 
     @memset(&proc.name, 0);
     const copy_len = @min(name.len, proc.name.len - 1);
@@ -183,8 +257,10 @@ pub fn schedule() ?*Process {
 }
 
 pub fn switch_process(old: *Context, new: *Context) void {
+    // Save old context
     asm volatile (
         \\pushf
+        \\push %%cs
         \\push %%ebp
         \\push %%edi
         \\push %%esi
@@ -193,6 +269,18 @@ pub fn switch_process(old: *Context, new: *Context) void {
         \\push %%ebx
         \\push %%eax
         \\mov %%esp, (%[old])
+        :
+        : [old] "r" (&old.esp)
+        : "memory"
+    );
+    
+    // If switching to a user process, update TSS with kernel stack
+    if (current_process != null and current_process.?.privilege == .User) {
+        gdt.setKernelStack(@intFromPtr(current_process.?.kernel_stack + current_process.?.stack_size));
+    }
+    
+    // Load new context
+    asm volatile (
         \\mov %[new], %%esp
         \\pop %%eax
         \\pop %%ebx
@@ -201,10 +289,10 @@ pub fn switch_process(old: *Context, new: *Context) void {
         \\pop %%esi
         \\pop %%edi
         \\pop %%ebp
+        \\pop %%ecx  // CS
         \\popf
         :
-        : [old] "r" (&old.esp),
-          [new] "r" (new.esp),
+        : [new] "r" (new.esp)
         : "memory"
     );
 }

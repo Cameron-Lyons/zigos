@@ -1,4 +1,6 @@
 const vga = @import("vga.zig");
+const memory = @import("memory.zig");
+const std = @import("std");
 
 const PAGE_SIZE = 4096;
 const PAGES_PER_TABLE = 1024;
@@ -182,6 +184,26 @@ pub fn getMemoryStats() MemoryStats {
         .total_frames = total_frames,
         .used_frames = used_frames,
     };
+}
+
+pub fn createUserPageDirectory() !*PageDirectory {
+    // Allocate a page for the new page directory
+    const pd_phys = memory.allocPages(1) orelse return error.OutOfMemory;
+    const pd = @as(*PageDirectory, @ptrCast(@alignCast(pd_phys)));
+    
+    // Clear the page directory
+    for (pd) |*entry| {
+        entry.* = PageTableEntry{};
+    }
+    
+    // Map kernel space (0xC0000000 and above) to the user page directory
+    // This ensures kernel is accessible from user space (but protected by privilege level)
+    const kernel_start_idx = 0xC0000000 >> 22;
+    for (kernel_start_idx..TABLES_PER_DIRECTORY) |i| {
+        pd[i] = kernel_page_directory[i];
+    }
+    
+    return pd;
 }
 
 pub fn init() void {
