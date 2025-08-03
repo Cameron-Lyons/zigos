@@ -16,6 +16,9 @@ const console_device = @import("console_device.zig");
 const vfs = @import("vfs.zig");
 const ata = @import("ata.zig");
 const fat32 = @import("fat32.zig");
+const pci = @import("pci.zig");
+const rtl8139 = @import("rtl8139.zig");
+const network = @import("network.zig");
 
 fn test_process1() void {
     var i: u32 = 0;
@@ -69,6 +72,13 @@ export fn kernel_main() void {
     };
     ata.init();
     vga.print("Device drivers ready!\n");
+    
+    vga.print("Scanning PCI bus...\n");
+    pci.scanBus();
+    
+    vga.print("Initializing network...\n");
+    rtl8139.init();
+    network.init();
 
     vga.print("Initializing Virtual File System...\n");
     vfs.init();

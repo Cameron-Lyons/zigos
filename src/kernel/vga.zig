@@ -98,6 +98,10 @@ pub fn put_char(c: u8) void {
     }
 }
 
+pub fn printChar(c: u8) void {
+    put_char(c);
+}
+
 pub fn print(str: []const u8) void {
     for (str) |c| {
         put_char(c);

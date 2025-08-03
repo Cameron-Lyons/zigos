@@ -7,6 +7,7 @@ const test_memory = @import("test_memory.zig");
 const panic_handler = @import("panic.zig");
 const device = @import("device.zig");
 const vfs = @import("vfs.zig");
+const network = @import("network.zig");
 
 const MAX_COMMAND_LENGTH = 256;
 const MAX_ARGS = 16;
@@ -122,6 +123,8 @@ pub const Shell = struct {
             self.cmdCat(args[1..arg_count]);
         } else if (streq(command, "mount")) {
             self.cmdMount(args[1..arg_count]);
+        } else if (streq(command, "ping")) {
+            self.cmdPing(args[1..arg_count]);
         } else {
             vga.print("Unknown command: ");
             printString(command);
@@ -146,6 +149,7 @@ pub const Shell = struct {
         vga.print("  ls       - List directory contents\n");
         vga.print("  cat      - Display file contents\n");
         vga.print("  mount    - Mount a file system\n");
+        vga.print("  ping     - Ping an IP address\n");
     }
 
     fn cmdClear(self: *const Shell) void {
@@ -400,6 +404,28 @@ pub const Shell = struct {
         vga.print(" as ");
         printString(args[2]);
         vga.print("\n");
+    }
+    
+    fn cmdPing(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        
+        if (args.len == 0) {
+            vga.print("Usage: ping <ip_address>\n");
+            vga.print("Example: ping 192.168.1.1\n");
+            return;
+        }
+        
+        const ip_str = sliceFromCStr(args[0]);
+        if (network.parseIPv4(ip_str)) |ip| {
+            vga.print("Pinging ");
+            printString(args[0]);
+            vga.print("...\n");
+            network.ping(ip);
+        } else {
+            vga.print("Invalid IP address: ");
+            printString(args[0]);
+            vga.print("\n");
+        }
     }
 };
 
