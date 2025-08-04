@@ -6,6 +6,9 @@ const HEAP_SIZE: usize = 16 * 1024 * 1024;
 const MIN_BLOCK_SIZE: usize = 16;
 const BLOCK_ALIGNMENT: usize = 8;
 
+const PAGE_SIZE: usize = 4096;
+var next_physical_page: usize = 0x200000;
+
 const BlockHeader = struct {
     size: usize,
     is_free: bool,
@@ -224,4 +227,15 @@ pub fn allocPages(num_pages: usize) ?[*]u8 {
 pub fn freePages(ptr: [*]u8, num_pages: usize) void {
     _ = num_pages;
     kfree(@as(*anyopaque, @ptrCast(ptr)));
+}
+
+pub fn allocatePhysicalPage() ?u32 {
+    const page = next_physical_page;
+    next_physical_page += PAGE_SIZE;
+    
+    if (next_physical_page > 128 * 1024 * 1024) {
+        return null;
+    }
+    
+    return @as(u32, @intCast(page));
 }

@@ -6,9 +6,9 @@ const PAGE_SIZE = 4096;
 const PAGES_PER_TABLE = 1024;
 const TABLES_PER_DIRECTORY = 1024;
 
-const PAGE_PRESENT: u32 = 0x1;
-const PAGE_WRITABLE: u32 = 0x2;
-const PAGE_USER: u32 = 0x4;
+pub const PAGE_PRESENT: u32 = 0x1;
+pub const PAGE_WRITABLE: u32 = 0x2;
+pub const PAGE_USER: u32 = 0x4;
 const PAGE_SIZE_4MB: u32 = 0x80;
 
 pub const PageTableEntry = packed struct {
@@ -91,7 +91,7 @@ fn alloc_frame() u32 {
     return frame_addr;
 }
 
-fn map_page(virt_addr: u32, phys_addr: u32, flags: u32) void {
+pub fn mapPage(virt_addr: u32, phys_addr: u32, flags: u32) void {
     const page_dir_index = virt_addr >> 22;
     const page_table_index = (virt_addr >> 12) & 0x3FF;
 
@@ -150,7 +150,7 @@ pub fn unmap_page(virt_addr: u32) void {
 
 pub fn remap_page(virt_addr: u32, new_phys_addr: u32, flags: u32) void {
     unmap_page(virt_addr);
-    map_page(virt_addr, new_phys_addr, flags);
+    mapPage(virt_addr, new_phys_addr, flags);
 }
 
 pub fn get_physical_address(virt_addr: u32) ?u32 {
@@ -338,7 +338,7 @@ pub fn init_heap() void {
     var current_addr = heap_start;
     while (current_addr < heap_end) : (current_addr += PAGE_SIZE) {
         const frame = alloc_frame();
-        map_page(current_addr, frame, PAGE_PRESENT | PAGE_WRITABLE);
+        mapPage(current_addr, frame, PAGE_PRESENT | PAGE_WRITABLE);
     }
     
     const initial_block = @as(*BlockHeader, @ptrFromInt(heap_start));
@@ -386,7 +386,7 @@ fn expand_heap(size: u32) bool {
     const new_end = heap_end + new_size;
     while (current_addr < new_end) : (current_addr += PAGE_SIZE) {
         const frame = alloc_frame();
-        map_page(current_addr, frame, PAGE_PRESENT | PAGE_WRITABLE);
+        mapPage(current_addr, frame, PAGE_PRESENT | PAGE_WRITABLE);
     }
     
     const new_block = @as(*BlockHeader, @ptrFromInt(heap_end));
@@ -461,5 +461,20 @@ fn coalesce_free_blocks() void {
         if (next_addr >= heap_end) break;
         current = @as(*BlockHeader, @ptrFromInt(next_addr));
     }
+}
+
+var current_page_directory: *PageDirectory = &kernel_page_directory;
+
+pub fn getCurrentPageDirectory() *PageDirectory {
+    return current_page_directory;
+}
+
+pub fn switchPageDirectory(pd: *PageDirectory) void {
+    current_page_directory = pd;
+    asm volatile (
+        \\mov %[addr], %%cr3
+        :
+        : [addr] "r" (@intFromPtr(pd))
+    );
 }
 

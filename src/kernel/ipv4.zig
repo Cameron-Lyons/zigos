@@ -181,3 +181,23 @@ fn isLocalNetwork(ip: u32) bool {
     // Simple subnet check (255.255.255.0)
     return (ip & 0xFFFFFF00) == (our_ip & 0xFFFFFF00);
 }
+
+pub fn registerProtocolHandler(protocol: u8, handler: fn (src_ip: u32, dst_ip: u32, data: []const u8) void) void {
+    const handler_ptr = @as(*const fn (packet: *const IPv4Packet) void, @ptrCast(&struct {
+        fn wrapper(packet: *const IPv4Packet) void {
+            const src_ip = @byteSwap(packet.header.src_addr);
+            const dst_ip = @byteSwap(packet.header.dst_addr);
+            handler(src_ip, dst_ip, packet.data);
+        }
+    }.wrapper));
+    
+    if (protocol == @intFromEnum(Protocol.TCP)) {
+        rx_handlers[1] = handler_ptr;
+    } else if (protocol == @intFromEnum(Protocol.UDP)) {
+        rx_handlers[2] = handler_ptr;
+    }
+}
+
+pub fn getLocalIP() u32 {
+    return our_ip;
+}

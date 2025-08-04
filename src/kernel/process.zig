@@ -44,6 +44,7 @@ pub const Process = struct {
     next: ?*Process,
     exit_code: i32 = 0,
     page_directory: ?*paging.PageDirectory,
+    entry_point: *const fn () void,
 };
 
 const MAX_PROCESSES = 256;
@@ -148,6 +149,7 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
     const stack_size = 4096;
     proc.stack_size = stack_size;
     proc.privilege = privilege;
+    proc.entry_point = entry_point;
     
     // Allocate kernel stack for all processes
     proc.kernel_stack = memory.allocPages(1) orelse {
@@ -327,5 +329,32 @@ fn print_number(num: u32) void {
         i -= 1;
         vga.put_char(digits[i]);
     }
+}
+
+pub fn getCurrentProcess() ?*Process {
+    return current_process;
+}
+
+pub fn switchToProcess(proc: *Process) void {
+    if (current_process) |old_proc| {
+        old_proc.state = .Ready;
+    }
+    
+    current_process = proc;
+    proc.state = .Running;
+    
+    if (proc.page_directory) |pd| {
+        paging.switchPageDirectory(pd);
+    }
+    
+    asm volatile (
+        \\mov %[esp], %%esp
+        \\mov %[ebp], %%ebp
+        \\jmp *%[eip]
+        :
+        : [esp] "r" (proc.context.esp),
+          [ebp] "r" (proc.context.ebp),
+          [eip] "r" (proc.context.eip)
+    );
 }
 

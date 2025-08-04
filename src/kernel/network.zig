@@ -5,6 +5,8 @@ const ethernet = @import("ethernet.zig");
 const arp = @import("arp.zig");
 const ipv4 = @import("ipv4.zig");
 const icmp = @import("icmp.zig");
+const tcp = @import("tcp.zig");
+const udp = @import("udp.zig");
 
 pub fn init() void {
     vga.print("Initializing network stack...\n");
@@ -14,6 +16,8 @@ pub fn init() void {
     arp.init();
     ipv4.init();
     icmp.init();
+    tcp.init();
+    udp.init();
     
     vga.print("Network stack initialized!\n");
 }
