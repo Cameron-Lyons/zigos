@@ -22,6 +22,7 @@ pub fn build(b: *std.Build) void {
     kernel.addAssemblyFile(b.path("src/kernel/interrupt32.S"));
     kernel.addAssemblyFile(b.path("src/kernel/interrupts.s"));
     kernel.addAssemblyFile(b.path("src/kernel/gdt_flush.S"));
+    kernel.addAssemblyFile(b.path("src/kernel/context_switch.S"));
     kernel.setLinkerScript(b.path("src/arch/x86_64/linker.ld"));
 
     b.installArtifact(kernel);

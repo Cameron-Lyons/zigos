@@ -48,10 +48,10 @@ pub const Process = struct {
 };
 
 const MAX_PROCESSES = 256;
-var process_table: [MAX_PROCESSES]Process = undefined;
-var next_pid: u32 = 1;
+pub var process_table: [MAX_PROCESSES]Process = undefined;
+pub var next_pid: u32 = 1;
 pub var current_process: ?*Process = null;
-var process_list_head: ?*Process = null;
+pub var process_list_head: ?*Process = null;
 var idle_process: *Process = undefined;
 
 pub fn getProcessList() ?*Process {
@@ -258,45 +258,17 @@ pub fn schedule() ?*Process {
     return idle_process;
 }
 
+extern fn context_switch(old: *Context, new: *Context) void;
+extern fn switch_to_user_mode(entry_point: u32, user_stack: u32) void;
+
 pub fn switch_process(old: *Context, new: *Context) void {
-    // Save old context
-    asm volatile (
-        \\pushf
-        \\push %%cs
-        \\push %%ebp
-        \\push %%edi
-        \\push %%esi
-        \\push %%edx
-        \\push %%ecx
-        \\push %%ebx
-        \\push %%eax
-        \\mov %%esp, (%[old])
-        :
-        : [old] "r" (&old.esp)
-        : "memory"
-    );
-    
     // If switching to a user process, update TSS with kernel stack
     if (current_process != null and current_process.?.privilege == .User) {
-        gdt.setKernelStack(@intFromPtr(current_process.?.kernel_stack + current_process.?.stack_size));
+        const kernel_stack_top = @intFromPtr(current_process.?.kernel_stack) + current_process.?.stack_size;
+        gdt.setKernelStack(kernel_stack_top);
     }
     
-    // Load new context
-    asm volatile (
-        \\mov %[new], %%esp
-        \\pop %%eax
-        \\pop %%ebx
-        \\pop %%ecx
-        \\pop %%edx
-        \\pop %%esi
-        \\pop %%edi
-        \\pop %%ebp
-        \\pop %%ecx  // CS
-        \\popf
-        :
-        : [new] "r" (new.esp)
-        : "memory"
-    );
+    context_switch(old, new);
 }
 
 pub fn yield() void {
@@ -347,14 +319,24 @@ pub fn switchToProcess(proc: *Process) void {
         paging.switchPageDirectory(pd);
     }
     
-    asm volatile (
-        \\mov %[esp], %%esp
-        \\mov %[ebp], %%ebp
-        \\jmp *%[eip]
-        :
-        : [esp] "r" (proc.context.esp),
-          [ebp] "r" (proc.context.ebp),
-          [eip] "r" (proc.context.eip)
-    );
+    // Update TSS with kernel stack for this process
+    const kernel_stack_top = @intFromPtr(proc.kernel_stack) + proc.stack_size;
+    gdt.setKernelStack(kernel_stack_top);
+    
+    if (proc.privilege == .User) {
+        // Switch to user mode
+        switch_to_user_mode(proc.context.eip, proc.context.esp);
+    } else {
+        // Stay in kernel mode
+        asm volatile (
+            \\mov %[esp], %%esp
+            \\mov %[ebp], %%ebp
+            \\jmp *%[eip]
+            :
+            : [esp] "r" (proc.context.esp),
+              [ebp] "r" (proc.context.ebp),
+              [eip] "r" (proc.context.eip)
+        );
+    }
 }
 

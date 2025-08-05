@@ -57,7 +57,13 @@ const Elf32Header = packed struct {
     version: u8,
     osabi: u8,
     abiversion: u8,
-    padding: [7]u8,
+    pad0: u8,
+    pad1: u8,
+    pad2: u8,
+    pad3: u8,
+    pad4: u8,
+    pad5: u8,
+    pad6: u8,
     type: u16,
     machine: u16,
     version2: u32,
@@ -81,7 +87,7 @@ const Elf32ProgramHeader = packed struct {
     filesz: u32,
     memsz: u32,
     flags: u32,
-    align: u32,
+    alignment: u32,
 };
 
 const Elf32SectionHeader = packed struct {
@@ -168,7 +174,7 @@ pub fn loadElfFromFile(path: []const u8) !LoadedElf {
     while (i < header.phnum) : (i += 1) {
         var phdr: Elf32ProgramHeader = undefined;
         
-        vfs.lseek(file, @intCast(ph_offset), vfs.SEEK_SET) catch {
+        _ = vfs.lseek(file, @intCast(ph_offset), vfs.SEEK_SET) catch {
             return ElfLoadError.FileReadError;
         };
         
@@ -227,7 +233,7 @@ fn loadSegment(file: u32, phdr: *const Elf32ProgramHeader) bool {
     }
 
     if (phdr.filesz > 0) {
-        vfs.lseek(file, @intCast(phdr.offset), vfs.SEEK_SET) catch return false;
+        _ = vfs.lseek(file, @intCast(phdr.offset), vfs.SEEK_SET) catch return false;
         
         const dest = @as([*]u8, @ptrFromInt(phdr.vaddr));
         const bytes_read = vfs.read(file, dest[0..phdr.filesz]) catch return false;
@@ -249,7 +255,9 @@ fn loadSegment(file: u32, phdr: *const Elf32ProgramHeader) bool {
 
 pub fn loadElfIntoProcess(proc: *process.Process, path: []const u8) !LoadedElf {
     const old_page_dir = paging.getCurrentPageDirectory();
-    paging.switchPageDirectory(proc.page_directory);
+    if (proc.page_directory) |pd| {
+        paging.switchPageDirectory(pd);
+    }
     defer paging.switchPageDirectory(old_page_dir);
 
     const elf_info = try loadElfFromFile(path);

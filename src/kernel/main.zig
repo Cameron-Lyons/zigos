@@ -61,6 +61,10 @@ export fn kernel_main() void {
 
     vga.print("Initializing paging...\n");
     paging.init();
+    
+    vga.print("Enabling kernel memory protection...\n");
+    const protection = @import("protection.zig");
+    protection.protectKernelMemory();
 
     vga.print("Initializing memory allocator...\n");
     memory.init();
@@ -115,6 +119,10 @@ export fn kernel_main() void {
     // Create a user space test process
     const userspace = @import("userspace.zig");
     userspace.createUserTestProcess();
+    
+    // Test ring 3 transition
+    const ring3 = @import("ring3.zig");
+    ring3.createRing3TestProcess();
 
     vga.print("Initializing shell...\n");
     var system_shell = shell.Shell.init();
