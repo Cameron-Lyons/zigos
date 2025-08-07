@@ -150,16 +150,14 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
     proc.stack_size = stack_size;
     proc.privilege = privilege;
     proc.entry_point = entry_point;
-    
-    // Allocate kernel stack for all processes
+
     proc.kernel_stack = memory.allocPages(1) orelse {
         vga.print("Error: Failed to allocate kernel stack!\n");
         while (true) {
             asm volatile ("hlt");
         }
     };
-    
-    // Allocate user stack for user processes
+
     if (privilege == .User) {
         proc.user_stack = memory.allocPages(1) orelse {
             vga.print("Error: Failed to allocate user stack!\n");
@@ -167,8 +165,7 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
                 asm volatile ("hlt");
             }
         };
-        
-        // Create a new page directory for user process
+
         proc.page_directory = paging.createUserPageDirectory() catch {
             vga.print("Error: Failed to create user page directory!\n");
             while (true) {
@@ -180,7 +177,6 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
         proc.page_directory = null;
     }
 
-    // Set up context based on privilege level
     if (privilege == .User) {
         proc.context = Context{
             .eax = 0,
@@ -267,7 +263,7 @@ pub fn switch_process(old: *Context, new: *Context) void {
         const kernel_stack_top = @intFromPtr(current_process.?.kernel_stack) + current_process.?.stack_size;
         gdt.setKernelStack(kernel_stack_top);
     }
-    
+
     context_switch(old, new);
 }
 
@@ -311,23 +307,20 @@ pub fn switchToProcess(proc: *Process) void {
     if (current_process) |old_proc| {
         old_proc.state = .Ready;
     }
-    
+
     current_process = proc;
     proc.state = .Running;
-    
+
     if (proc.page_directory) |pd| {
         paging.switchPageDirectory(pd);
     }
-    
-    // Update TSS with kernel stack for this process
+
     const kernel_stack_top = @intFromPtr(proc.kernel_stack) + proc.stack_size;
     gdt.setKernelStack(kernel_stack_top);
-    
+
     if (proc.privilege == .User) {
-        // Switch to user mode
         switch_to_user_mode(proc.context.eip, proc.context.esp);
     } else {
-        // Stay in kernel mode
         asm volatile (
             \\mov %[esp], %%esp
             \\mov %[ebp], %%ebp
@@ -335,8 +328,7 @@ pub fn switchToProcess(proc: *Process) void {
             :
             : [esp] "r" (proc.context.esp),
               [ebp] "r" (proc.context.ebp),
-              [eip] "r" (proc.context.eip)
+              [eip] "r" (proc.context.eip),
         );
     }
 }
-

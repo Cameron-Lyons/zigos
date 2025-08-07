@@ -8,25 +8,20 @@ const elf = @import("elf.zig");
 const vfs = @import("vfs.zig");
 const gdt = @import("gdt.zig");
 
-// Process status codes
 pub const WEXITED = 1;
 pub const WSIGNALED = 2;
 pub const WSTOPPED = 4;
 pub const WCONTINUED = 8;
 
-// Wait options
 pub const WNOHANG = 1;
 pub const WUNTRACED = 2;
 
-// Fork - Create a copy of the current process
 pub fn fork() !i32 {
     const parent = process.getCurrentProcess() orelse return error.NoCurrentProcess;
-    
-    // Allocate a new process
+
     const child_name = "forked_process";
     var child: *process.Process = undefined;
-    
-    // Find a free process slot
+
     var i: usize = 0;
     while (i < 256) : (i += 1) {
         if (process.process_table[i].state == .Terminated) {
@@ -34,206 +29,273 @@ pub fn fork() !i32 {
             break;
         }
     }
-    
+
     if (i == 256) {
         return error.NoProcessSlots;
     }
-    
-    // Initialize child process
+
     child.pid = process.next_pid;
     process.next_pid += 1;
     child.state = .Ready;
     child.privilege = parent.privilege;
     child.stack_size = parent.stack_size;
     child.exit_code = 0;
-    
-    // Copy process name
+
     @memset(&child.name, 0);
     @memcpy(child.name[0..child_name.len], child_name);
-    
-    // Allocate kernel stack for child
+
     child.kernel_stack = memory.allocPages(1) orelse return error.OutOfMemory;
-    
-    // Create page directory for child
+
     child.page_directory = try paging.createUserPageDirectory();
-    
-    // Copy parent's memory space
+
     try copyAddressSpace(parent, child);
-    
-    // Copy parent's context
+
     child.context = parent.context;
-    
-    // Set return values
-    // Parent gets child PID, child gets 0
+
     if (process.current_process == parent) {
-        // We're in parent, return child PID
         child.context.eax = 0; // Child will get 0
-        
-        // Add child to process list
+
         child.next = process.process_list_head;
         process.process_list_head = child;
-        
+
         return @intCast(child.pid);
     }
-    
+
     return 0;
 }
 
-// Copy address space from parent to child
 fn copyAddressSpace(parent: *process.Process, child: *process.Process) !void {
     const old_page_dir = paging.getCurrentPageDirectory();
-    
-    // Switch to parent's page directory
+
     if (parent.page_directory) |pd| {
         paging.switchPageDirectory(pd);
     }
-    
+
     defer {
-        // Restore original page directory
         paging.switchPageDirectory(old_page_dir);
     }
-    
-    // Copy all user-space pages
+
     var addr: u32 = 0;
     while (addr < protection.USER_SPACE_END) : (addr += 0x1000) {
         if (paging.get_physical_address(addr)) |_| {
-            // Allocate new physical page for child
             const child_phys = memory.allocatePhysicalPage() orelse return error.OutOfMemory;
-            
-            // Map in child's page directory
+
             const temp_page_dir = paging.getCurrentPageDirectory();
             paging.switchPageDirectory(child.page_directory.?);
             paging.mapPage(addr, child_phys, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_USER);
             paging.switchPageDirectory(temp_page_dir);
-            
-            // Copy page contents
+
             const parent_page = @as([*]u8, @ptrFromInt(addr));
             const temp_addr = 0xFFC00000; // Temporary mapping address
-            
-            // Map child page temporarily
+
             paging.mapPage(temp_addr, child_phys, paging.PAGE_PRESENT | paging.PAGE_WRITABLE);
             const child_page = @as([*]u8, @ptrFromInt(temp_addr));
-            
-            // Copy data
+
             @memcpy(child_page[0..0x1000], parent_page[0..0x1000]);
-            
-            // Unmap temporary mapping
+
             paging.unmap_page(temp_addr);
         }
     }
 }
 
-// Exec - Replace current process with a new program
 pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const u8) !void {
-    _ = argv; // TODO: Pass arguments to new process
-    _ = envp; // TODO: Pass environment to new process
-    
     const current = process.getCurrentProcess() orelse return error.NoCurrentProcess;
-    
-    // Free current process memory (except kernel stack)
+
     freeUserMemory(current);
-    
-    // Load new executable
+
     const elf_info = try elf.loadElfIntoProcess(current, path);
-    
-    // Update entry point
+
     current.entry_point = @ptrFromInt(elf_info.entry_point);
     current.context.eip = elf_info.entry_point;
-    
-    // Set up new stack
+
     const stack_top = protection.USER_STACK_TOP;
     const stack_size = 0x10000; // 64KB stack
     const stack_bottom = stack_top - stack_size;
-    
-    // Allocate stack pages
+
     var page_addr: u32 = stack_bottom;
     while (page_addr < stack_top) : (page_addr += 0x1000) {
         const phys_addr = memory.allocatePhysicalPage() orelse return error.OutOfMemory;
         paging.mapPage(page_addr, phys_addr, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_USER);
     }
+
+    // Set up stack with argv and envp
+    var stack_ptr: u32 = stack_top;
     
-    // Set stack pointer
-    current.context.esp = stack_top - 16;
-    current.context.ebp = current.context.esp;
+    // Copy environment strings to stack
+    var envp_ptrs: [32]usize = undefined;
+    var envp_count: usize = 0;
+    for (envp) |env| {
+        if (envp_count >= 32) break;
+        stack_ptr -= env.len + 1;
+        stack_ptr &= ~@as(u32, 0x3); // Align to 4 bytes
+        const dest = @as([*]u8, @ptrFromInt(stack_ptr));
+        @memcpy(dest[0..env.len], env);
+        dest[env.len] = 0;
+        envp_ptrs[envp_count] = stack_ptr;
+        envp_count += 1;
+    }
     
-    // Set up segments for user mode
+    // Copy argument strings to stack
+    var argv_ptrs: [32]usize = undefined;
+    var argv_count: usize = 0;
+    for (argv) |arg| {
+        if (argv_count >= 32) break;
+        stack_ptr -= arg.len + 1;
+        stack_ptr &= ~@as(u32, 0x3); // Align to 4 bytes
+        const dest = @as([*]u8, @ptrFromInt(stack_ptr));
+        @memcpy(dest[0..arg.len], arg);
+        dest[arg.len] = 0;
+        argv_ptrs[argv_count] = stack_ptr;
+        argv_count += 1;
+    }
+    
+    // Align stack to 16 bytes
+    stack_ptr &= ~@as(u32, 0xF);
+    
+    // Push envp array (null-terminated)
+    stack_ptr -= @sizeOf(usize); // NULL terminator
+    @as(*usize, @ptrFromInt(stack_ptr)).* = 0;
+    var i = envp_count;
+    while (i > 0) {
+        i -= 1;
+        stack_ptr -= @sizeOf(usize);
+        @as(*usize, @ptrFromInt(stack_ptr)).* = envp_ptrs[i];
+    }
+    const envp_array_ptr = stack_ptr;
+    
+    // Push argv array (null-terminated)
+    stack_ptr -= @sizeOf(usize); // NULL terminator
+    @as(*usize, @ptrFromInt(stack_ptr)).* = 0;
+    i = argv_count;
+    while (i > 0) {
+        i -= 1;
+        stack_ptr -= @sizeOf(usize);
+        @as(*usize, @ptrFromInt(stack_ptr)).* = argv_ptrs[i];
+    }
+    const argv_array_ptr = stack_ptr;
+    
+    // Push argc, argv, envp according to System V ABI
+    stack_ptr -= @sizeOf(usize);
+    @as(*usize, @ptrFromInt(stack_ptr)).* = envp_array_ptr;
+    stack_ptr -= @sizeOf(usize);
+    @as(*usize, @ptrFromInt(stack_ptr)).* = argv_array_ptr;
+    stack_ptr -= @sizeOf(usize);
+    @as(*usize, @ptrFromInt(stack_ptr)).* = argv_count;
+    
+    current.context.esp = stack_ptr;
+    current.context.ebp = stack_ptr;
+
     current.context.cs = gdt.USER_CODE_SEG | 0x3;
     current.context.ss = gdt.USER_DATA_SEG | 0x3;
-    
-    // Jump to new program
+
     process.switchToProcess(current);
 }
 
-// Wait - Wait for child process to change state
+// Resource usage structure (simplified version)
+pub const RUsage = extern struct {
+    utime_sec: i32,     // User time seconds
+    utime_usec: i32,    // User time microseconds
+    stime_sec: i32,     // System time seconds
+    stime_usec: i32,    // System time microseconds
+    maxrss: i32,        // Maximum resident set size
+    ixrss: i32,         // Integral shared memory size
+    idrss: i32,         // Integral unshared data size
+    isrss: i32,         // Integral unshared stack size
+    minflt: i32,        // Page reclaims
+    majflt: i32,        // Page faults
+    nswap: i32,         // Swaps
+    inblock: i32,       // Block input operations
+    oublock: i32,       // Block output operations
+    msgsnd: i32,        // Messages sent
+    msgrcv: i32,        // Messages received
+    nsignals: i32,      // Signals received
+    nvcsw: i32,         // Voluntary context switches
+    nivcsw: i32,        // Involuntary context switches
+};
+
 pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
-    _ = rusage; // TODO: Resource usage statistics
-    
     const parent = process.getCurrentProcess() orelse return error.NoCurrentProcess;
-    
+
     while (true) {
-        // Search for matching child
         var found_child = false;
         var child_pid: i32 = -1;
         var child_status: i32 = 0;
-        
+        var child_rusage: RUsage = std.mem.zeroes(RUsage);
+
         var proc = process.getProcessList();
         while (proc) |p| : (proc = p.next) {
-            // Check if this is our child (simplified - should track parent-child relationships)
             if (pid == -1 or p.pid == pid) {
                 if (p.state == .Terminated) {
                     found_child = true;
                     child_pid = @intCast(p.pid);
                     child_status = p.exit_code;
-                    
-                    // Clean up child process
+
+                    // Collect resource usage statistics
+                    // For now, we'll provide minimal statistics
+                    // In a real implementation, these would be tracked during process execution
+                    child_rusage.utime_sec = 0;
+                    child_rusage.utime_usec = 0;
+                    child_rusage.stime_sec = 0;
+                    child_rusage.stime_usec = 0;
+                    child_rusage.maxrss = 0;
+                    child_rusage.nvcsw = 0;
+                    child_rusage.nivcsw = 0;
+
                     p.state = .Terminated;
                     if (p.page_directory) |pd| {
-                        // TODO: Free page directory
-                        _ = pd;
+                        // Free page directory
+                        // Note: In a complete implementation, we would iterate through
+                        // the page directory and free all page tables, but for now
+                        // we just free the page directory itself
+                        memory.freePages(@as([*]u8, @ptrFromInt(@intFromPtr(pd))), 1);
                     }
                     memory.freePages(p.kernel_stack, 1);
-                    
+
                     break;
                 }
             }
         }
-        
+
         if (found_child) {
             if (status) |s| {
                 protection.copyToUser(@intFromPtr(s), std.mem.asBytes(&child_status)) catch {
                     return error.InvalidPointer;
                 };
             }
+            
+            // Copy resource usage statistics to user space if requested
+            if (rusage) |ru| {
+                const ru_ptr = @intFromPtr(ru);
+                protection.copyToUser(ru_ptr, std.mem.asBytes(&child_rusage)) catch {
+                    return error.InvalidPointer;
+                };
+            }
+            
             return child_pid;
         }
-        
-        // No matching child found
+
         if (options & WNOHANG != 0) {
             return 0; // Don't block
         }
-        
-        // Block until a child terminates
+
         parent.state = .Blocked;
         process.yield();
     }
 }
 
-// Free user memory of a process
 fn freeUserMemory(proc: *process.Process) void {
     if (proc.page_directory == null) return;
-    
+
     const old_page_dir = paging.getCurrentPageDirectory();
     paging.switchPageDirectory(proc.page_directory.?);
     defer paging.switchPageDirectory(old_page_dir);
-    
-    // Free all user-space pages
+
     var addr: u32 = 0;
     while (addr < protection.USER_SPACE_END) : (addr += 0x1000) {
         paging.unmap_page(addr);
     }
 }
 
-// Helper functions for wait status
 pub fn WIFEXITED(status: i32) bool {
     return (status & 0x7F) == 0;
 }
@@ -249,3 +311,4 @@ pub fn WIFSIGNALED(status: i32) bool {
 pub fn WTERMSIG(status: i32) u8 {
     return @intCast(status & 0x7F);
 }
+

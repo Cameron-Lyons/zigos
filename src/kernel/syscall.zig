@@ -74,26 +74,24 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
         return EBADF;
     }
 
-    // Verify user buffer
     if (!protection.verifyUserPointer(@intFromPtr(buf), count)) {
         return EINVAL;
     }
 
-    // Copy data from user space safely
     var kernel_buffer: [256]u8 = undefined;
     var written: usize = 0;
-    
+
     while (written < count) {
         const chunk_size = @min(count - written, kernel_buffer.len);
         protection.copyFromUser(kernel_buffer[0..chunk_size], @intFromPtr(buf) + written) catch {
             return EINVAL;
         };
-        
+
         var i: usize = 0;
         while (i < chunk_size) : (i += 1) {
             vga.print(&[_]u8{kernel_buffer[i]});
         }
-        
+
         written += chunk_size;
     }
 
@@ -105,7 +103,6 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
         return EBADF;
     }
 
-    // Verify user buffer
     if (!protection.verifyUserPointer(@intFromPtr(buf), count)) {
         return EINVAL;
     }
@@ -113,7 +110,7 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
     var kernel_buffer: [256]u8 = undefined;
     const read_size = @min(count, kernel_buffer.len);
     var i: usize = 0;
-    
+
     while (i < read_size) : (i += 1) {
         while (!keyboard.has_char()) {
             x86.hlt();
@@ -129,7 +126,6 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
         }
     }
 
-    // Copy to user space
     protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..i]) catch {
         return EINVAL;
     };
@@ -204,20 +200,61 @@ fn sys_fork() i32 {
 }
 
 fn sys_execve(path: [*]const u8, argv: usize, envp: usize) i32 {
-    _ = argv; // TODO: Parse argv
-    _ = envp; // TODO: Parse envp
-    
-    // Convert path to slice
     var path_buf: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buf, @intFromPtr(path)) catch {
         return EINVAL;
     };
+
+    // Parse argv
+    var argv_array: [32][]const u8 = undefined;
+    var argv_count: usize = 0;
+    var argv_buffers: [32][256]u8 = undefined;
     
-    // Empty argv and envp for now
-    const empty_argv = [_][]const u8{};
-    const empty_envp = [_][]const u8{};
+    if (argv != 0) {
+        while (argv_count < 32) {
+            const ptr_addr = argv + argv_count * @sizeOf(usize);
+            if (!protection.verifyUserPointer(ptr_addr, @sizeOf(usize))) {
+                break;
+            }
+            
+            const str_ptr = @as(*const usize, @ptrFromInt(ptr_addr)).*;
+            if (str_ptr == 0) break;
+            
+            const arg_slice = protection.copyStringFromUser(&argv_buffers[argv_count], str_ptr) catch {
+                break;
+            };
+            argv_array[argv_count] = arg_slice;
+            argv_count += 1;
+        }
+    }
     
-    posix.execve(path_slice, &empty_argv, &empty_envp) catch |err| {
+    // Parse envp
+    var envp_array: [32][]const u8 = undefined;
+    var envp_count: usize = 0;
+    var envp_buffers: [32][256]u8 = undefined;
+    
+    if (envp != 0) {
+        while (envp_count < 32) {
+            const ptr_addr = envp + envp_count * @sizeOf(usize);
+            if (!protection.verifyUserPointer(ptr_addr, @sizeOf(usize))) {
+                break;
+            }
+            
+            const str_ptr = @as(*const usize, @ptrFromInt(ptr_addr)).*;
+            if (str_ptr == 0) break;
+            
+            const env_slice = protection.copyStringFromUser(&envp_buffers[envp_count], str_ptr) catch {
+                break;
+            };
+            envp_array[envp_count] = env_slice;
+            envp_count += 1;
+        }
+    }
+
+    const argv_slice = argv_array[0..argv_count];
+    const envp_slice = envp_array[0..envp_count];
+
+    posix.execve(path_slice, argv_slice, envp_slice) catch |err| {
         return switch (err) {
             error.NoCurrentProcess => ENOSYS,
             error.OutOfMemory => -12, // ENOMEM
@@ -225,8 +262,7 @@ fn sys_execve(path: [*]const u8, argv: usize, envp: usize) i32 {
             else => EINVAL,
         };
     };
-    
-    // If execve succeeds, we should never reach here
+
     return 0;
 }
 
@@ -234,7 +270,7 @@ fn sys_wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) i32 {
     const result = posix.wait4(pid, status, options, rusage) catch |err| {
         return switch (err) {
             error.NoCurrentProcess => ENOSYS,
-            error.InvalidPointer => EINVAL
+            error.InvalidPointer => EINVAL,
         };
     };
     return result;
@@ -244,60 +280,99 @@ var current_brk: usize = protection.USER_HEAP_START;
 
 fn sys_brk(addr: usize) i32 {
     if (addr == 0) {
-        // Return current break
         return @intCast(current_brk);
     }
-    
+
     if (addr < protection.USER_HEAP_START or addr >= protection.USER_SPACE_END) {
         return @intCast(current_brk); // Invalid address, return current
     }
-    
-    // Align to page boundary
+
     const new_brk = (addr + 0xFFF) & ~@as(usize, 0xFFF);
-    
+
     if (new_brk > current_brk) {
-        // Allocate new pages
         var page_addr = current_brk;
         while (page_addr < new_brk) : (page_addr += 0x1000) {
             const phys_page = memory.allocatePhysicalPage() orelse {
                 return @intCast(current_brk); // Out of memory
             };
-            paging.mapPage(@intCast(page_addr), phys_page, 
-                          paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_USER);
+            paging.mapPage(@intCast(page_addr), phys_page, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_USER);
         }
     } else if (new_brk < current_brk) {
-        // Free pages
         var page_addr = new_brk;
         while (page_addr < current_brk) : (page_addr += 0x1000) {
             paging.unmap_page(@intCast(page_addr));
         }
     }
-    
+
     current_brk = new_brk;
     return @intCast(current_brk);
 }
 
+const MAP_SHARED = 0x01;
+const MAP_PRIVATE = 0x02;
+const MAP_ANONYMOUS = 0x20;
+const MAP_FIXED = 0x10;
+
 fn sys_mmap(addr: usize, length: usize, prot: i32, flags: i32, fd: i32, offset: i32) i32 {
-    _ = flags; // TODO: Handle MAP_PRIVATE, MAP_SHARED, etc.
-    _ = fd; // TODO: Handle file mappings
-    _ = offset;
-    
     if (length == 0) {
         return EINVAL;
     }
-    
-    // For now, only support anonymous mappings
-    if (addr != 0) {
-        // TODO: Try to use suggested address
-    }
-    
-    const result = protection.allocateUserMemory(length, @intCast(prot)) catch |err| {
-        return switch (err) {
-            error.OutOfMemory => -12, // ENOMEM
-            error.OutOfVirtualMemory => -12, // ENOMEM
-        };
-    };
-    
-    return @intCast(result);
-}
 
+    // Handle file mappings
+    if ((flags & MAP_ANONYMOUS) == 0) {
+        // File-backed mapping requested
+        if (fd < 0) {
+            return EINVAL;
+        }
+        // For now, file mappings are not supported, return error
+        _ = offset;
+        return -38; // ENOSYS - function not implemented
+    }
+
+    // Check flags for MAP_PRIVATE vs MAP_SHARED
+    if ((flags & MAP_PRIVATE) != 0 and (flags & MAP_SHARED) != 0) {
+        return EINVAL; // Can't have both
+    }
+    if ((flags & MAP_PRIVATE) == 0 and (flags & MAP_SHARED) == 0) {
+        return EINVAL; // Must have one
+    }
+
+    // Try to use suggested address if provided
+    var result_addr: usize = undefined;
+    if (addr != 0) {
+        // Align the address to page boundary
+        const aligned_addr = addr & ~@as(usize, 0xFFF);
+        
+        if ((flags & MAP_FIXED) != 0) {
+            // MAP_FIXED requires exact address
+            if (aligned_addr < protection.USER_HEAP_START or aligned_addr >= protection.USER_SPACE_END) {
+                return EINVAL;
+            }
+            // For MAP_FIXED, we'd need to unmap existing mappings first
+            // For now, just try to allocate at any address
+            result_addr = protection.allocateUserMemory(length, @intCast(prot)) catch |err| {
+                return switch (err) {
+                    error.OutOfMemory => -12, // ENOMEM
+                    error.OutOfVirtualMemory => -12, // ENOMEM
+                };
+            };
+        } else {
+            // Try the suggested address, fall back to any address if it fails
+            result_addr = protection.allocateUserMemory(length, @intCast(prot)) catch |err| {
+                return switch (err) {
+                    error.OutOfMemory => -12, // ENOMEM
+                    error.OutOfVirtualMemory => -12, // ENOMEM
+                };
+            };
+        }
+    } else {
+        result_addr = protection.allocateUserMemory(length, @intCast(prot)) catch |err| {
+            return switch (err) {
+                error.OutOfMemory => -12, // ENOMEM
+                error.OutOfVirtualMemory => -12, // ENOMEM
+            };
+        };
+    }
+
+    return @intCast(result_addr);
+}

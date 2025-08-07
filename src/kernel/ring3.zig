@@ -3,7 +3,6 @@ const gdt = @import("gdt.zig");
 const process = @import("process.zig");
 const vga = @import("vga.zig");
 
-// Structure to hold the state when switching to ring 3
 pub const Ring3State = packed struct {
     eax: u32,
     ebx: u32,
@@ -19,13 +18,10 @@ pub const Ring3State = packed struct {
     ss: u32,
 };
 
-// Switch to ring 3 (user mode)
 pub fn switchToRing3(entry_point: u32, user_stack: u32) void {
-    // Set up the kernel stack in TSS for when we return to ring 0
     const kernel_stack = @intFromPtr(process.current_process.?.kernel_stack) + process.current_process.?.stack_size;
     gdt.setKernelStack(kernel_stack);
-    
-    // Prepare for iret to ring 3
+
     asm volatile (
         \\cli
         \\mov %[user_data_seg], %%ax
@@ -44,16 +40,14 @@ pub fn switchToRing3(entry_point: u32, user_stack: u32) void {
         : [user_data_seg] "i" (gdt.USER_DATA_SEG | 0x3),
           [user_stack] "r" (user_stack),
           [user_code_seg] "i" (gdt.USER_CODE_SEG | 0x3),
-          [entry_point] "r" (entry_point)
+          [entry_point] "r" (entry_point),
     );
 }
 
-// Enter ring 3 with a full context
 pub fn enterRing3(state: *const Ring3State) void {
-    // Set kernel stack for returns to ring 0
     const kernel_stack = @intFromPtr(process.current_process.?.kernel_stack) + process.current_process.?.stack_size;
     gdt.setKernelStack(kernel_stack);
-    
+
     asm volatile (
         \\cli
         \\mov %[eax], %%eax
@@ -83,14 +77,11 @@ pub fn enterRing3(state: *const Ring3State) void {
           [esp] "m" (state.esp),
           [eflags] "m" (state.eflags),
           [cs] "m" (state.cs),
-          [eip] "m" (state.eip)
+          [eip] "m" (state.eip),
     );
 }
 
-// Test function that runs in ring 3
 fn ring3TestFunction() void {
-    // This code runs in ring 3
-    // Try to make a system call
     asm volatile (
         \\mov $1, %%eax       # SYS_WRITE
         \\mov $1, %%ebx       # stdout
@@ -98,25 +89,22 @@ fn ring3TestFunction() void {
         \\mov $28, %%edx      # length
         \\int $0x80
         :
-        : [msg] "m" ("Hello from Ring 3 (user mode)!\n")
+        : [msg] "m" ("Hello from Ring 3 (user mode)!\n"),
         : "eax", "ebx", "ecx", "edx"
     );
-    
-    // Exit
+
     asm volatile (
         \\mov $0, %%eax       # SYS_EXIT
         \\xor %%ebx, %%ebx    # exit code 0
         \\int $0x80
-        ::: "eax", "ebx"
-    );
+        ::: "eax", "ebx");
 }
 
-// Create a test process in ring 3
 pub fn createRing3TestProcess() void {
     vga.print("Creating Ring 3 test process...\n");
-    
+
     const proc = process.create_user_process("ring3_test", ring3TestFunction);
-    
+
     vga.print("Ring 3 process created with PID: ");
     printNumber(proc.pid);
     vga.print("\n");
@@ -127,30 +115,29 @@ fn printNumber(num: u32) void {
         vga.put_char('0');
         return;
     }
-    
+
     var buffer: [20]u8 = undefined;
     var i: usize = 0;
     var n = num;
-    
+
     while (n > 0) : (i += 1) {
         buffer[i] = @as(u8, @intCast((n % 10) + '0'));
         n /= 10;
     }
-    
+
     while (i > 0) {
         i -= 1;
         vga.put_char(buffer[i]);
     }
 }
 
-// Validate that we're properly handling privilege levels
 pub fn validatePrivilegeLevels() bool {
     const cs = asm volatile ("mov %%cs, %[cs]"
-        : [cs] "=r" (-> u16)
+        : [cs] "=r" (-> u16),
     );
-    
+
     const current_ring = cs & 0x3;
-    
+
     if (current_ring == 0) {
         vga.print("Currently in Ring 0 (kernel mode)\n");
         return true;
@@ -164,3 +151,4 @@ pub fn validatePrivilegeLevels() bool {
         return false;
     }
 }
+
