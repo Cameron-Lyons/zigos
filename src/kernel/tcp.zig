@@ -53,7 +53,7 @@ const TCPHeader = packed struct {
     }
 };
 
-const TCPConnection = struct {
+const TCPConnectionStruct = struct {
     local_addr: u32,
     remote_addr: u32,
     local_port: u16,
@@ -72,7 +72,7 @@ const TCPConnection = struct {
 };
 
 const TCPSocket = struct {
-    connection: ?TCPConnection,
+    connection: ?TCPConnectionStruct,
     listening: bool,
     port: u16,
 };
@@ -80,7 +80,7 @@ const TCPSocket = struct {
 const MAX_TCP_CONNECTIONS = 32;
 const TCP_BUFFER_SIZE = 4096;
 
-var tcp_connections: [MAX_TCP_CONNECTIONS]?TCPConnection = [_]?TCPConnection{null} ** MAX_TCP_CONNECTIONS;
+var tcp_connections: [MAX_TCP_CONNECTIONS]?TCPConnectionStruct = [_]?TCPConnectionStruct{null} ** MAX_TCP_CONNECTIONS;
 var tcp_sockets: [MAX_TCP_CONNECTIONS]?TCPSocket = [_]?TCPSocket{null} ** MAX_TCP_CONNECTIONS;
 
 pub fn init() void {
@@ -119,7 +119,7 @@ fn calculateChecksum(src_ip: u32, dst_ip: u32, tcp_header: *const TCPHeader, dat
     return ~@as(u16, @intCast(sum));
 }
 
-fn sendTCPPacket(connection: *TCPConnection, flags: u8, data: []const u8) !void {
+fn sendTCPPacket(connection: *TCPConnectionStruct, flags: u8, data: []const u8) !void {
     const packet_size = @sizeOf(TCPHeader) + data.len;
     const packet_mem = memory.kmalloc(packet_size) orelse return error.OutOfMemory;
     defer memory.kfree(packet_mem);
@@ -178,7 +178,21 @@ fn findListeningSocket(port: u16) ?*TCPSocket {
     return null;
 }
 
-fn createConnection(local_addr: u32, remote_addr: u32, local_port: u16, remote_port: u16) !*TCPConnection {
+pub const TCPConnection = TCPConnectionStruct;
+
+pub fn createConnection(local_addr: ipv4.IPv4Address, local_port: u16, remote_addr: ipv4.IPv4Address, remote_port: u16) !*TCPConnection {
+    const local_addr_u32 = (@as(u32, local_addr.octets[0]) << 24) | 
+                           (@as(u32, local_addr.octets[1]) << 16) | 
+                           (@as(u32, local_addr.octets[2]) << 8) | 
+                           local_addr.octets[3];
+    const remote_addr_u32 = (@as(u32, remote_addr.octets[0]) << 24) | 
+                            (@as(u32, remote_addr.octets[1]) << 16) | 
+                            (@as(u32, remote_addr.octets[2]) << 8) | 
+                            remote_addr.octets[3];
+    return createConnectionInternal(local_addr_u32, remote_addr_u32, local_port, remote_port);
+}
+
+fn createConnectionInternal(local_addr: u32, remote_addr: u32, local_port: u16, remote_port: u16) !*TCPConnection {
     for (&tcp_connections) |*maybe_conn| {
         if (maybe_conn.* == null) {
             const recv_buf = memory.kmalloc(TCP_BUFFER_SIZE) orelse return error.OutOfMemory;
@@ -297,7 +311,9 @@ fn handleEstablishedConnection(conn: *TCPConnection, seq_num: u32, ack_num: u32,
 }
 
 fn handleIncomingSYN(src_ip: u32, dst_ip: u32, src_port: u16, dst_port: u16, seq_num: u32) void {
-    const conn = createConnection(dst_ip, src_ip, dst_port, src_port) catch {
+    const local_addr = ipv4.IPv4Address.fromU32(dst_ip);
+    const remote_addr = ipv4.IPv4Address.fromU32(src_ip);
+    const conn = createConnection(local_addr, dst_port, remote_addr, src_port) catch {
         sendRST(src_ip, dst_ip, src_port, dst_port, seq_num +% 1);
         return;
     };
@@ -410,4 +426,42 @@ pub fn close(socket_id: usize) !void {
     }
 
     tcp_sockets[socket_id] = null;
+}
+
+pub fn initiateConnection(conn: *TCPConnection) !void {
+    conn.state = .SYN_SENT;
+    try sendTCPPacket(conn, TCPFlags.SYN, &[_]u8{});
+}
+
+pub fn sendData(conn: *TCPConnection, data: []const u8) !usize {
+    if (conn.state != .ESTABLISHED) {
+        return error.NotConnected;
+    }
+    
+    const space_available = conn.send_buffer.len - conn.send_buffer_used;
+    const to_copy = @min(data.len, space_available);
+    
+    if (to_copy == 0) {
+        return error.NoBufferSpace;
+    }
+    
+    @memcpy(conn.send_buffer[conn.send_buffer_used..conn.send_buffer_used + to_copy], data[0..to_copy]);
+    conn.send_buffer_used += to_copy;
+    
+    try sendTCPPacket(conn, TCPFlags.PSH | TCPFlags.ACK, conn.send_buffer[0..conn.send_buffer_used]);
+    conn.send_seq +%= @intCast(conn.send_buffer_used);
+    conn.send_buffer_used = 0;
+    
+    return to_copy;
+}
+
+pub fn closeConnection(conn: *TCPConnection) void {
+    if (conn.state == .ESTABLISHED) {
+        conn.state = .FIN_WAIT_1;
+        sendTCPPacket(conn, TCPFlags.FIN | TCPFlags.ACK, &[_]u8{}) catch {};
+    }
+}
+
+pub fn registerListeningSocket(sock: *@import("socket.zig").Socket) void {
+    _ = sock;
 }

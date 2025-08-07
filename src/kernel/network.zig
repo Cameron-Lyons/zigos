@@ -27,6 +27,72 @@ pub fn handleRxPacket(packet: []u8) void {
     ethernet.handleRxPacket(packet);
 }
 
+// Network configuration
+var local_ip: u32 = 0x0A000002; // 10.0.0.2
+var gateway_ip: u32 = 0x0A000001; // 10.0.0.1
+var netmask: u32 = 0xFFFFFF00; // 255.255.255.0
+
+pub fn getLocalIP() u32 {
+    return local_ip;
+}
+
+pub fn getGatewayIP() u32 {
+    return gateway_ip;
+}
+
+pub fn getNetmask() u32 {
+    return netmask;
+}
+
+pub fn setLocalIP(ip: u32) void {
+    local_ip = ip;
+}
+
+pub fn setGatewayIP(ip: u32) void {
+    gateway_ip = ip;
+}
+
+pub fn setNetmask(mask: u32) void {
+    netmask = mask;
+}
+
+pub fn printIPv4(ip: u32) void {
+    const octet1 = (ip >> 24) & 0xFF;
+    const octet2 = (ip >> 16) & 0xFF;
+    const octet3 = (ip >> 8) & 0xFF;
+    const octet4 = ip & 0xFF;
+    
+    printNumber(octet1);
+    vga.put_char('.');
+    printNumber(octet2);
+    vga.put_char('.');
+    printNumber(octet3);
+    vga.put_char('.');
+    printNumber(octet4);
+}
+
+fn printNumber(num: u32) void {
+    if (num == 0) {
+        vga.put_char('0');
+        return;
+    }
+    
+    var digits: [10]u8 = undefined;
+    var count: usize = 0;
+    var n = num;
+    
+    while (n > 0) : (n /= 10) {
+        digits[count] = @intCast('0' + (n % 10));
+        count += 1;
+    }
+    
+    var i = count;
+    while (i > 0) {
+        i -= 1;
+        vga.put_char(digits[i]);
+    }
+}
+
 // Utility function to parse IP address string
 pub fn parseIPv4(str: []const u8) ?u32 {
     var ip: u32 = 0;

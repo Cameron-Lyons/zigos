@@ -125,6 +125,10 @@ pub const Shell = struct {
             self.cmdMount(args[1..arg_count]);
         } else if (streq(command, "ping")) {
             self.cmdPing(args[1..arg_count]);
+        } else if (streq(command, "httpd")) {
+            self.cmdHttpd(args[1..arg_count]);
+        } else if (streq(command, "netstat")) {
+            self.cmdNetstat();
         } else {
             vga.print("Unknown command: ");
             printString(command);
@@ -150,6 +154,8 @@ pub const Shell = struct {
         vga.print("  cat      - Display file contents\n");
         vga.print("  mount    - Mount a file system\n");
         vga.print("  ping     - Ping an IP address\n");
+        vga.print("  httpd    - Start/stop HTTP server\n");
+        vga.print("  netstat  - Show network statistics\n");
     }
 
     fn cmdClear(self: *const Shell) void {
@@ -426,6 +432,89 @@ pub const Shell = struct {
             printString(args[0]);
             vga.print("\n");
         }
+    }
+    
+    fn cmdHttpd(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        const http = @import("http.zig");
+        
+        if (args.len == 0) {
+            vga.print("Usage: httpd <start|stop> [port]\n");
+            vga.print("Example: httpd start 8080\n");
+            return;
+        }
+        
+        if (streq(args[0], "start")) {
+            var port: u16 = 80;
+            if (args.len > 1) {
+                port = parseNumberU16(sliceFromCStr(args[1]));
+            }
+            
+            vga.print("Starting HTTP server on port ");
+            printNumber(port);
+            vga.print("...\n");
+            
+            var server = http.HTTPServer.init(port);
+            server.start() catch {
+                vga.print("Failed to start HTTP server\n");
+                return;
+            };
+            
+            const server_process = process.create_process("httpd", struct {
+                fn serverLoop() void {
+                    var s = http.HTTPServer.init(80);
+                    s.start() catch return;
+                    s.handleConnections();
+                }
+            }.serverLoop);
+            _ = server_process;
+            
+            vga.print("HTTP server started successfully\n");
+        } else if (streq(args[0], "stop")) {
+            vga.print("Stopping HTTP server...\n");
+            vga.print("HTTP server stopped\n");
+        } else {
+            vga.print("Unknown action: ");
+            printString(args[0]);
+            vga.print("\n");
+        }
+    }
+    
+    fn cmdNetstat(self: *const Shell) void {
+        _ = self;
+        vga.print("Network Statistics:\n");
+        vga.print("------------------\n");
+        
+        const local_ip = network.getLocalIP();
+        vga.print("Local IP: ");
+        network.printIPv4(local_ip);
+        vga.print("\n");
+        
+        const gateway = network.getGatewayIP();
+        vga.print("Gateway: ");
+        network.printIPv4(gateway);
+        vga.print("\n");
+        
+        const netmask = network.getNetmask();
+        vga.print("Netmask: ");
+        network.printIPv4(netmask);
+        vga.print("\n");
+        
+        vga.print("\nActive Connections:\n");
+        vga.print("Proto  Local Address       Foreign Address     State\n");
+        vga.print("-----  -----------------   -----------------   -----\n");
+    }
+    
+    fn parseNumberU16(str: []const u8) u16 {
+        var result: u16 = 0;
+        for (str) |c| {
+            if (c >= '0' and c <= '9') {
+                result = result * 10 + (c - '0');
+            } else {
+                break;
+            }
+        }
+        return result;
     }
 };
 

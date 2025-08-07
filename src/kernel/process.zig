@@ -303,6 +303,13 @@ pub fn getCurrentProcess() ?*Process {
     return current_process;
 }
 
+pub fn getCurrentPID() u32 {
+    if (current_process) |proc| {
+        return proc.pid;
+    }
+    return 0;
+}
+
 pub fn switchToProcess(proc: *Process) void {
     if (current_process) |old_proc| {
         old_proc.state = .Ready;

@@ -83,6 +83,10 @@ export fn kernel_main() void {
     vga.print("Initializing network...\n");
     rtl8139.init();
     network.init();
+    
+    vga.print("Initializing socket API...\n");
+    const socket = @import("socket.zig");
+    socket.init();
 
     vga.print("Initializing Virtual File System...\n");
     vfs.init();

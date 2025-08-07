@@ -12,6 +12,28 @@ pub const Protocol = enum(u8) {
     UDP = 17,
 };
 
+pub const IPv4Address = struct {
+    octets: [4]u8,
+    
+    pub fn toU32(self: IPv4Address) u32 {
+        return (@as(u32, self.octets[0]) << 24) |
+               (@as(u32, self.octets[1]) << 16) |
+               (@as(u32, self.octets[2]) << 8) |
+               self.octets[3];
+    }
+    
+    pub fn fromU32(ip: u32) IPv4Address {
+        return IPv4Address{
+            .octets = .{
+                @intCast((ip >> 24) & 0xFF),
+                @intCast((ip >> 16) & 0xFF),
+                @intCast((ip >> 8) & 0xFF),
+                @intCast(ip & 0xFF),
+            },
+        };
+    }
+};
+
 pub const IPv4Header = packed struct {
     version_ihl: u8,
     tos: u8,
