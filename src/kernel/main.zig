@@ -87,6 +87,18 @@ export fn kernel_main() void {
     vga.print("Initializing socket API...\n");
     const socket = @import("socket.zig");
     socket.init();
+    
+    vga.print("Initializing DNS client...\n");
+    const dns = @import("dns.zig");
+    dns.init();
+    
+    vga.print("Initializing DHCP client...\n");
+    const dhcp = @import("dhcp.zig");
+    dhcp.init();
+    
+    vga.print("Initializing routing table...\n");
+    const routing = @import("routing.zig");
+    routing.init();
 
     vga.print("Initializing Virtual File System...\n");
     vfs.init();

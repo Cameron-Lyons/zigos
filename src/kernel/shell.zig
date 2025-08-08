@@ -129,6 +129,16 @@ pub const Shell = struct {
             self.cmdHttpd(args[1..arg_count]);
         } else if (streq(command, "netstat")) {
             self.cmdNetstat();
+        } else if (streq(command, "nslookup")) {
+            self.cmdNslookup(args[1..arg_count]);
+        } else if (streq(command, "dhcp")) {
+            self.cmdDhcp(args[1..arg_count]);
+        } else if (streq(command, "route")) {
+            self.cmdRoute(args[1..arg_count]);
+        } else if (streq(command, "arp")) {
+            self.cmdArp(args[1..arg_count]);
+        } else if (streq(command, "nettest")) {
+            self.cmdNetTest();
         } else {
             vga.print("Unknown command: ");
             printString(command);
@@ -156,6 +166,11 @@ pub const Shell = struct {
         vga.print("  ping     - Ping an IP address\n");
         vga.print("  httpd    - Start/stop HTTP server\n");
         vga.print("  netstat  - Show network statistics\n");
+        vga.print("  nslookup - Resolve domain names\n");
+        vga.print("  dhcp     - Request IP address via DHCP\n");
+        vga.print("  route    - Display/modify routing table\n");
+        vga.print("  arp      - Display/modify ARP cache\n");
+        vga.print("  nettest  - Run network stack tests\n");
     }
 
     fn cmdClear(self: *const Shell) void {
@@ -503,6 +518,95 @@ pub const Shell = struct {
         vga.print("\nActive Connections:\n");
         vga.print("Proto  Local Address       Foreign Address     State\n");
         vga.print("-----  -----------------   -----------------   -----\n");
+    }
+    
+    fn cmdNslookup(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        const dns = @import("dns.zig");
+        
+        if (args.len == 0) {
+            vga.print("Usage: nslookup <domain>\n");
+            vga.print("Example: nslookup example.com\n");
+            return;
+        }
+        
+        vga.print("Looking up ");
+        printString(args[0]);
+        vga.print("...\n");
+        
+        const domain_len = strlen(args[0]);
+        const domain = args[0][0..domain_len];
+        
+        const ip = dns.resolve(domain) catch |err| {
+            vga.print("Failed to resolve: ");
+            switch (err) {
+                error.NotInitialized => vga.print("DNS not initialized\n"),
+                error.InvalidResponse => vga.print("Invalid DNS response\n"),
+                error.NotResponse => vga.print("Not a DNS response\n"),
+                error.DNSError => vga.print("DNS server error\n"),
+                error.NoAnswer => vga.print("No answer from DNS server\n"),
+                error.NoARecord => vga.print("No A record found\n"),
+                else => vga.print("Unknown error\n"),
+            }
+            return;
+        };
+        
+        printString(args[0]);
+        vga.print(" -> ");
+        network.printIPv4(ip);
+        vga.print("\n");
+    }
+    
+    fn cmdDhcp(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        const dhcp = @import("dhcp.zig");
+        
+        if (args.len == 0) {
+            vga.print("Usage: dhcp <request|release>\n");
+            return;
+        }
+        
+        if (streq(args[0], "request")) {
+            vga.print("Requesting IP address via DHCP...\n");
+            dhcp.requestAddress() catch |err| {
+                vga.print("DHCP request failed: ");
+                switch (err) {
+                    error.NotInitialized => vga.print("DHCP not initialized\n"),
+                    else => vga.print("Unknown error\n"),
+                }
+            };
+        } else if (streq(args[0], "release")) {
+            vga.print("Releasing DHCP lease...\n");
+            vga.print("Not yet implemented\n");
+        } else {
+            vga.print("Unknown DHCP command: ");
+            printString(args[0]);
+            vga.print("\n");
+        }
+    }
+    
+    fn cmdRoute(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        _ = args;
+        const routing = @import("routing.zig");
+        
+        const table = routing.getRoutingTable();
+        table.printRoutes();
+    }
+    
+    fn cmdArp(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        _ = args;
+        const routing = @import("routing.zig");
+        
+        const table = routing.getRoutingTable();
+        table.printARPCache();
+    }
+    
+    fn cmdNetTest(self: *const Shell) void {
+        _ = self;
+        const net_test = @import("net_test.zig");
+        net_test.runNetworkTests();
     }
     
     fn parseNumberU16(str: []const u8) u16 {
