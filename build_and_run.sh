@@ -1,5 +1,3 @@
-#!/bin/bash
-
 mkdir -p build
 
 echo "Assembling boot code..."
@@ -13,4 +11,3 @@ ld -n -T src/arch/x86_64/linker.ld -o build/kernel.elf build/boot.o zig-out/bin/
 
 echo "Running OS in QEMU..."
 qemu-system-x86_64 -kernel build/kernel.elf -m 128M -no-reboot -no-shutdown
-

@@ -3,6 +3,7 @@ const vga = @import("vga.zig");
 const paging = @import("paging.zig");
 const gdt = @import("gdt.zig");
 const memory = @import("memory.zig");
+const scheduler = @import("scheduler.zig");
 
 pub const ProcessState = enum {
     Ready,
@@ -99,6 +100,8 @@ pub fn init() void {
         proc.pid = 0;
         proc.next = null;
     }
+
+    scheduler.init();
 
     idle_process = create_kernel_process("idle", idle_task);
     current_process = idle_process;
@@ -218,6 +221,9 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
     proc.next = process_list_head;
     process_list_head = proc;
 
+    const priority = if (privilege == .Kernel) scheduler.Priority.High else scheduler.Priority.Normal;
+    _ = scheduler.registerProcess(proc, priority);
+
     vga.print("Created process: ");
     vga.print(name);
     vga.print(" (PID: ");
@@ -228,34 +234,14 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
 }
 
 pub fn schedule() ?*Process {
-    if (current_process == null) {
-        return idle_process;
-    }
-
-    var next = current_process.?.next;
-    if (next == null) {
-        next = process_list_head;
-    }
-
-    while (next != current_process) {
-        if (next.?.state == .Ready) {
-            return next;
-        }
-        next = next.?.next;
-        if (next == null) {
-            next = process_list_head;
-        }
-    }
-
-    if (current_process.?.state == .Ready or current_process.?.state == .Running) {
-        return current_process;
-    }
-
-    return idle_process;
+    return scheduler.schedule();
 }
 
 extern fn context_switch(old: *Context, new: *Context) void;
 extern fn switch_to_user_mode(entry_point: u32, user_stack: u32) void;
+extern fn task_switch() void;
+extern fn save_process_state(ctx: *Context) void;
+extern fn restore_process_state(ctx: *Context) void;
 
 pub fn switch_process(old: *Context, new: *Context) void {
     // If switching to a user process, update TSS with kernel stack

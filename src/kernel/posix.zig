@@ -118,10 +118,8 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
         paging.mapPage(page_addr, phys_addr, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_USER);
     }
 
-    // Set up stack with argv and envp
     var stack_ptr: u32 = stack_top;
-    
-    // Copy environment strings to stack
+
     var envp_ptrs: [32]usize = undefined;
     var envp_count: usize = 0;
     for (envp) |env| {
@@ -134,8 +132,7 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
         envp_ptrs[envp_count] = stack_ptr;
         envp_count += 1;
     }
-    
-    // Copy argument strings to stack
+
     var argv_ptrs: [32]usize = undefined;
     var argv_count: usize = 0;
     for (argv) |arg| {
@@ -148,11 +145,9 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
         argv_ptrs[argv_count] = stack_ptr;
         argv_count += 1;
     }
-    
-    // Align stack to 16 bytes
+
     stack_ptr &= ~@as(u32, 0xF);
-    
-    // Push envp array (null-terminated)
+
     stack_ptr -= @sizeOf(usize); // NULL terminator
     @as(*usize, @ptrFromInt(stack_ptr)).* = 0;
     var i = envp_count;
@@ -162,8 +157,7 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
         @as(*usize, @ptrFromInt(stack_ptr)).* = envp_ptrs[i];
     }
     const envp_array_ptr = stack_ptr;
-    
-    // Push argv array (null-terminated)
+
     stack_ptr -= @sizeOf(usize); // NULL terminator
     @as(*usize, @ptrFromInt(stack_ptr)).* = 0;
     i = argv_count;
@@ -173,15 +167,14 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
         @as(*usize, @ptrFromInt(stack_ptr)).* = argv_ptrs[i];
     }
     const argv_array_ptr = stack_ptr;
-    
-    // Push argc, argv, envp according to System V ABI
+
     stack_ptr -= @sizeOf(usize);
     @as(*usize, @ptrFromInt(stack_ptr)).* = envp_array_ptr;
     stack_ptr -= @sizeOf(usize);
     @as(*usize, @ptrFromInt(stack_ptr)).* = argv_array_ptr;
     stack_ptr -= @sizeOf(usize);
     @as(*usize, @ptrFromInt(stack_ptr)).* = argv_count;
-    
+
     current.context.esp = stack_ptr;
     current.context.ebp = stack_ptr;
 
@@ -191,26 +184,25 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
     process.switchToProcess(current);
 }
 
-// Resource usage structure (simplified version)
 pub const RUsage = extern struct {
-    utime_sec: i32,     // User time seconds
-    utime_usec: i32,    // User time microseconds
-    stime_sec: i32,     // System time seconds
-    stime_usec: i32,    // System time microseconds
-    maxrss: i32,        // Maximum resident set size
-    ixrss: i32,         // Integral shared memory size
-    idrss: i32,         // Integral unshared data size
-    isrss: i32,         // Integral unshared stack size
-    minflt: i32,        // Page reclaims
-    majflt: i32,        // Page faults
-    nswap: i32,         // Swaps
-    inblock: i32,       // Block input operations
-    oublock: i32,       // Block output operations
-    msgsnd: i32,        // Messages sent
-    msgrcv: i32,        // Messages received
-    nsignals: i32,      // Signals received
-    nvcsw: i32,         // Voluntary context switches
-    nivcsw: i32,        // Involuntary context switches
+    utime_sec: i32, // User time seconds
+    utime_usec: i32, // User time microseconds
+    stime_sec: i32, // System time seconds
+    stime_usec: i32, // System time microseconds
+    maxrss: i32, // Maximum resident set size
+    ixrss: i32, // Integral shared memory size
+    idrss: i32, // Integral unshared data size
+    isrss: i32, // Integral unshared stack size
+    minflt: i32, // Page reclaims
+    majflt: i32, // Page faults
+    nswap: i32, // Swaps
+    inblock: i32, // Block input operations
+    oublock: i32, // Block output operations
+    msgsnd: i32, // Messages sent
+    msgrcv: i32, // Messages received
+    nsignals: i32, // Signals received
+    nvcsw: i32, // Voluntary context switches
+    nivcsw: i32, // Involuntary context switches
 };
 
 pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
@@ -230,9 +222,6 @@ pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
                     child_pid = @intCast(p.pid);
                     child_status = p.exit_code;
 
-                    // Collect resource usage statistics
-                    // For now, we'll provide minimal statistics
-                    // In a real implementation, these would be tracked during process execution
                     child_rusage.utime_sec = 0;
                     child_rusage.utime_usec = 0;
                     child_rusage.stime_sec = 0;
@@ -243,10 +232,6 @@ pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
 
                     p.state = .Terminated;
                     if (p.page_directory) |pd| {
-                        // Free page directory
-                        // Note: In a complete implementation, we would iterate through
-                        // the page directory and free all page tables, but for now
-                        // we just free the page directory itself
                         memory.freePages(@as([*]u8, @ptrFromInt(@intFromPtr(pd))), 1);
                     }
                     memory.freePages(p.kernel_stack, 1);
@@ -262,15 +247,14 @@ pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
                     return error.InvalidPointer;
                 };
             }
-            
-            // Copy resource usage statistics to user space if requested
+
             if (rusage) |ru| {
                 const ru_ptr = @intFromPtr(ru);
                 protection.copyToUser(ru_ptr, std.mem.asBytes(&child_rusage)) catch {
                     return error.InvalidPointer;
                 };
             }
-            
+
             return child_pid;
         }
 
@@ -311,4 +295,3 @@ pub fn WIFSIGNALED(status: i32) bool {
 pub fn WTERMSIG(status: i32) u8 {
     return @intCast(status & 0x7F);
 }
-

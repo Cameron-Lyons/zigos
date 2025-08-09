@@ -51,19 +51,17 @@ pub fn sendFrame(dst_mac: [6]u8, ethertype: EtherType, data: []const u8) !void {
     if (data.len > ETH_MTU) {
         return error.FrameTooLarge;
     }
-    
+
     var frame_buf: [ETH_HEADER_SIZE + ETH_MTU]u8 = undefined;
     var frame = @as(*EthernetHeader, @ptrCast(@alignCast(&frame_buf[0])));
-    
-    // Set destination MAC
+
     frame.dst_mac0 = dst_mac[0];
     frame.dst_mac1 = dst_mac[1];
     frame.dst_mac2 = dst_mac[2];
     frame.dst_mac3 = dst_mac[3];
     frame.dst_mac4 = dst_mac[4];
     frame.dst_mac5 = dst_mac[5];
-    
-    // Set source MAC
+
     if (rtl8139.getMACAddress()) |src_mac| {
         frame.src_mac0 = src_mac[0];
         frame.src_mac1 = src_mac[1];
@@ -74,31 +72,27 @@ pub fn sendFrame(dst_mac: [6]u8, ethertype: EtherType, data: []const u8) !void {
     } else {
         return error.NoMACAddress;
     }
-    
-    // Set EtherType (network byte order)
+
     frame.ethertype = @byteSwap(@intFromEnum(ethertype));
-    
-    // Copy data
-    @memcpy(frame_buf[ETH_HEADER_SIZE..ETH_HEADER_SIZE + data.len], data);
-    
-    // Send the frame
-    try rtl8139.sendPacket(frame_buf[0..ETH_HEADER_SIZE + data.len]);
+
+    @memcpy(frame_buf[ETH_HEADER_SIZE .. ETH_HEADER_SIZE + data.len], data);
+
+    try rtl8139.sendPacket(frame_buf[0 .. ETH_HEADER_SIZE + data.len]);
 }
 
 pub fn handleRxPacket(packet: []u8) void {
     if (packet.len < ETH_HEADER_SIZE) {
         return; // Packet too small
     }
-    
+
     const header = @as(*const EthernetHeader, @ptrCast(@alignCast(packet.ptr)));
     const ethertype = @byteSwap(header.ethertype);
-    
+
     const frame = EthernetFrame{
         .header = header.*,
         .data = packet[ETH_HEADER_SIZE..],
     };
-    
-    // Find and call the appropriate handler
+
     var handler_index: usize = undefined;
     if (ethertype == @intFromEnum(EtherType.IPv4)) {
         handler_index = 0;
@@ -109,10 +103,11 @@ pub fn handleRxPacket(packet: []u8) void {
     } else {
         return; // Unknown ethertype
     }
-    
+
     if (handler_index < rx_handlers.len) {
         if (rx_handlers[handler_index]) |handler| {
             handler(&frame);
         }
     }
 }
+

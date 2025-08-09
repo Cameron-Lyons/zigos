@@ -8,6 +8,8 @@ const panic_handler = @import("panic.zig");
 const device = @import("device.zig");
 const vfs = @import("vfs.zig");
 const network = @import("network.zig");
+const multitask_demo = @import("multitask_demo.zig");
+const scheduler = @import("scheduler.zig");
 
 const MAX_COMMAND_LENGTH = 256;
 const MAX_ARGS = 16;
@@ -117,6 +119,12 @@ pub const Shell = struct {
             self.cmdPanic();
         } else if (streq(command, "lsdev")) {
             self.cmdLsDev();
+        } else if (streq(command, "multitask")) {
+            self.cmdMultitask();
+        } else if (streq(command, "scheduler")) {
+            self.cmdScheduler(args[1..arg_count]);
+        } else if (streq(command, "schedstats")) {
+            self.cmdSchedStats();
         } else if (streq(command, "ls")) {
             self.cmdLs(args[1..arg_count]);
         } else if (streq(command, "cat")) {
@@ -167,6 +175,9 @@ pub const Shell = struct {
         vga.print("  httpd    - Start/stop HTTP server\n");
         vga.print("  netstat  - Show network statistics\n");
         vga.print("  nslookup - Resolve domain names\n");
+        vga.print("  multitask - Run multitasking demo\n");
+        vga.print("  scheduler - Change scheduler type (rr/priority/mlfq)\n");
+        vga.print("  schedstats - Show scheduler statistics\n");
         vga.print("  dhcp     - Request IP address via DHCP\n");
         vga.print("  route    - Display/modify routing table\n");
         vga.print("  arp      - Display/modify ARP cache\n");
@@ -274,6 +285,40 @@ pub const Shell = struct {
         while (true) {
             asm volatile ("hlt");
         }
+    }
+
+    fn cmdMultitask(self: *const Shell) void {
+        _ = self;
+        multitask_demo.runMultitaskingDemo();
+    }
+
+    fn cmdScheduler(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            vga.print("Usage: scheduler <rr|priority|mlfq>\n");
+            vga.print("  rr       - Round Robin\n");
+            vga.print("  priority - Priority Scheduling\n");
+            vga.print("  mlfq     - Multi-Level Feedback Queue\n");
+            return;
+        }
+
+        const sched_type = args[0];
+        if (streq(sched_type, "rr")) {
+            scheduler.setSchedulerType(.RoundRobin);
+        } else if (streq(sched_type, "priority")) {
+            scheduler.setSchedulerType(.Priority);
+        } else if (streq(sched_type, "mlfq")) {
+            scheduler.setSchedulerType(.MultiLevelFeedback);
+        } else {
+            vga.print("Unknown scheduler type: ");
+            printString(sched_type);
+            vga.print("\n");
+        }
+    }
+
+    fn cmdSchedStats(self: *const Shell) void {
+        _ = self;
+        multitask_demo.showSchedulerStats();
     }
 
     fn cmdMemTest(self: *const Shell) void {
@@ -534,7 +579,8 @@ pub const Shell = struct {
         printString(args[0]);
         vga.print("...\n");
         
-        const domain_len = strlen(args[0]);
+        var domain_len: usize = 0;
+        while (args[0][domain_len] != 0) : (domain_len += 1) {}
         const domain = args[0][0..domain_len];
         
         const ip = dns.resolve(domain) catch |err| {

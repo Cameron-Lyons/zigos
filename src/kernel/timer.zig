@@ -32,7 +32,11 @@ pub fn init(frequency_hz: u32) void {
 pub fn handleInterrupt() void {
     ticks += 1;
     
-    if (ticks % 20 == 0) {
+    const PREEMPTION_TICKS = 10;
+    if (ticks % PREEMPTION_TICKS == 0) {
+        const scheduler = @import("scheduler.zig");
+        scheduler.preempt();
+        
         const process = @import("process.zig");
         process.yield();
     }

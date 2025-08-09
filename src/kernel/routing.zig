@@ -287,7 +287,7 @@ pub fn getRoutingTable() *RoutingTable {
 }
 
 pub fn route(dest: ipv4.IPv4Address) ?ipv4.IPv4Address {
-    if (const route_entry = routing_table.findRoute(dest)) |entry| {
+    if (routing_table.findRoute(dest)) |entry| {
         if ((entry.flags & RouteFlags.GATEWAY) != 0) {
             return entry.gateway;
         }

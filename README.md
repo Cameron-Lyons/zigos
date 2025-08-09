@@ -1,22 +1,22 @@
 # ZigOS
 
-A minimal operating system written in Zig.
+A minimal operating system written in Zig with networking capabilities.
 
 ## Requirements
 
 - Zig compiler (0.11.0 or later)
 - NASM assembler
-- GRUB tools (grub-mkrescue)
 - QEMU for testing
-- xorriso (required by grub-mkrescue)
 
-## Building
+## Building and Running
 
 ```bash
+# Quick build and run
+./build_and_run.sh
+
+# Or use Zig build system
 zig build kernel
-
 zig build iso
-
 zig build run
 ```
 
@@ -25,23 +25,92 @@ zig build run
 ```
 zigos/
 ├── src/
-│   ├── boot/          # Bootloader and GRUB configuration
+│   ├── boot/          # Bootloader (multiboot-compliant)
 │   ├── kernel/        # Kernel source code
+│   │   ├── main.zig          # Kernel entry point
+│   │   ├── memory.zig        # Memory management
+│   │   ├── paging.zig        # Virtual memory paging
+│   │   ├── gdt.zig           # Global Descriptor Table
+│   │   ├── idt.zig           # Interrupt Descriptor Table
+│   │   ├── isr.zig           # Interrupt Service Routines
+│   │   ├── keyboard.zig      # Keyboard driver
+│   │   ├── timer.zig         # System timer
+│   │   ├── vga.zig           # VGA text mode driver
+│   │   ├── pci.zig           # PCI bus enumeration
+│   │   ├── rtl8139.zig       # RTL8139 network driver
+│   │   ├── network.zig       # Network stack core
+│   │   ├── ethernet.zig      # Ethernet layer
+│   │   ├── arp.zig           # ARP protocol
+│   │   ├── ipv4.zig          # IPv4 implementation
+│   │   ├── icmp.zig          # ICMP protocol
+│   │   ├── tcp.zig           # TCP protocol
+│   │   ├── udp.zig           # UDP protocol
+│   │   ├── dhcp.zig          # DHCP client
+│   │   ├── dns.zig           # DNS resolver
+│   │   ├── http.zig          # HTTP client
+│   │   ├── socket.zig        # Socket API
+│   │   ├── posix.zig         # POSIX compatibility layer
+│   │   ├── process.zig       # Process management
+│   │   ├── syscall.zig       # System calls
+│   │   ├── ring3.zig         # User mode support
+│   │   ├── userspace.zig     # Userspace utilities
+│   │   ├── elf.zig           # ELF executable loading
+│   │   ├── vfs.zig           # Virtual File System
+│   │   ├── fat32.zig         # FAT32 filesystem
+│   │   ├── ata.zig           # ATA disk driver
+│   │   └── device.zig        # Device management
 │   └── arch/          # Architecture-specific code
 │       └── x86_64/    # x86_64 specific files
 ├── build.zig          # Zig build configuration
+├── build_and_run.sh   # Quick build and run script
 └── README.md          # This file
 ```
 
 ## Current Features
 
-- Multiboot-compliant bootloader
-- Basic VGA text mode driver
-- Simple "Hello World" kernel
+### Core System
+- ✅ Multiboot-compliant bootloader
+- ✅ x86_64 long mode support
+- ✅ Global Descriptor Table (GDT)
+- ✅ Interrupt Descriptor Table (IDT)
+- ✅ Interrupt handling and ISRs
+- ✅ Memory management with paging
+- ✅ VGA text mode driver
+- ✅ Keyboard driver
+- ✅ System timer
 
-## Next Steps
+### Networking Stack
+- ✅ PCI bus enumeration
+- ✅ RTL8139 network card driver
+- ✅ Ethernet layer
+- ✅ ARP (Address Resolution Protocol)
+- ✅ IPv4 protocol
+- ✅ ICMP (ping support)
+- ✅ TCP protocol
+- ✅ UDP protocol
+- ✅ DHCP client
+- ✅ DNS resolver
+- ✅ HTTP client
+- ✅ Socket API with POSIX compatibility
 
-- Memory management (paging, allocation)
-- Interrupt handling
-- Keyboard driver
-- Basic shell
+### Process Management
+- ✅ Basic process structures
+- ✅ System call interface
+- ✅ Ring 3 (user mode) support
+- ✅ ELF executable loading
+- ✅ Userspace/kernel separation
+
+### File Systems
+- ✅ Virtual File System (VFS) layer
+- ✅ FAT32 filesystem support
+- ✅ ATA disk driver
+- ✅ Device management framework
+
+## Roadmap
+
+- [ ] Multitasking and scheduling
+- [ ] Virtual memory improvements
+- [ ] More network drivers (e1000, virtio-net)
+- [ ] File system write support
+- [ ] Shell and user programs
+- [ ] SMP (multicore) support

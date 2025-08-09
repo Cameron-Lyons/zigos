@@ -14,14 +14,14 @@ pub const Protocol = enum(u8) {
 
 pub const IPv4Address = struct {
     octets: [4]u8,
-    
+
     pub fn toU32(self: IPv4Address) u32 {
         return (@as(u32, self.octets[0]) << 24) |
-               (@as(u32, self.octets[1]) << 16) |
-               (@as(u32, self.octets[2]) << 8) |
-               self.octets[3];
+            (@as(u32, self.octets[1]) << 16) |
+            (@as(u32, self.octets[2]) << 8) |
+            self.octets[3];
     }
-    
+
     pub fn fromU32(ip: u32) IPv4Address {
         return IPv4Address{
             .octets = .{
@@ -54,7 +54,6 @@ pub const IPv4Packet = struct {
 
 var rx_handlers: [3]?*const fn (packet: *const IPv4Packet) void = [_]?*const fn (packet: *const IPv4Packet) void{null} ** 3;
 
-// Our IP address (hardcoded for now)
 pub const our_ip: u32 = 0xC0A80102; // 192.168.1.2
 pub const gateway_ip: u32 = 0xC0A80101; // 192.168.1.1
 
@@ -76,38 +75,33 @@ fn handleIPv4Packet(frame: *const ethernet.EthernetFrame) void {
     if (frame.data.len < IP_HEADER_MIN_SIZE) {
         return;
     }
-    
+
     const header = @as(*const IPv4Header, @ptrCast(@alignCast(frame.data.ptr)));
-    
-    // Check version
+
     const version = (header.version_ihl >> 4) & 0xF;
     if (version != IP_VERSION_4) {
         return;
     }
-    
-    // Get header length
+
     const ihl = (header.version_ihl & 0xF) * 4;
     if (ihl < IP_HEADER_MIN_SIZE or ihl > frame.data.len) {
         return;
     }
-    
-    // Verify checksum
+
     if (!verifyChecksum(header, ihl)) {
         return;
     }
-    
-    // Check if packet is for us
+
     const dst_ip = @byteSwap(header.dst_addr);
     if (dst_ip != our_ip and dst_ip != 0xFFFFFFFF) { // Not for us and not broadcast
         return;
     }
-    
+
     const packet = IPv4Packet{
         .header = header,
         .data = frame.data[ihl..],
     };
-    
-    // Find and call the appropriate handler
+
     var handler_index: usize = undefined;
     if (header.protocol == @intFromEnum(Protocol.ICMP)) {
         handler_index = 0;
@@ -118,7 +112,7 @@ fn handleIPv4Packet(frame: *const ethernet.EthernetFrame) void {
     } else {
         return; // Unknown protocol
     }
-    
+
     if (handler_index < rx_handlers.len) {
         if (rx_handlers[handler_index]) |handler| {
             handler(&packet);
@@ -128,7 +122,7 @@ fn handleIPv4Packet(frame: *const ethernet.EthernetFrame) void {
 
 pub fn sendPacket(dst_ip: u32, protocol: Protocol, data: []const u8) !void {
     var header: IPv4Header = undefined;
-    
+
     header.version_ihl = (IP_VERSION_4 << 4) | 5; // Version 4, header length 20 bytes
     header.tos = 0;
     header.total_length = @byteSwap(@as(u16, @intCast(IP_HEADER_MIN_SIZE + data.len)));
@@ -139,46 +133,40 @@ pub fn sendPacket(dst_ip: u32, protocol: Protocol, data: []const u8) !void {
     header.checksum = 0;
     header.src_addr = @byteSwap(our_ip);
     header.dst_addr = @byteSwap(dst_ip);
-    
-    // Calculate checksum
+
     header.checksum = calculateChecksum(&header, IP_HEADER_MIN_SIZE);
-    
-    // Determine next hop
+
     const next_hop = if (isLocalNetwork(dst_ip)) dst_ip else gateway_ip;
-    
-    // Get MAC address for next hop
+
     var dst_mac: [6]u8 = undefined;
     if (arp.resolve(next_hop)) |mac| {
         dst_mac = mac;
     } else {
-        // Send ARP request and fail for now
         try arp.sendARPRequest(next_hop);
         return error.ARPResolutionFailed;
     }
-    
-    // Prepare packet
+
     var packet_buf: [1500]u8 = undefined;
     @memcpy(packet_buf[0..IP_HEADER_MIN_SIZE], @as([*]const u8, @ptrCast(&header))[0..IP_HEADER_MIN_SIZE]);
-    @memcpy(packet_buf[IP_HEADER_MIN_SIZE..IP_HEADER_MIN_SIZE + data.len], data);
-    
-    // Send via Ethernet
-    try ethernet.sendFrame(dst_mac, .IPv4, packet_buf[0..IP_HEADER_MIN_SIZE + data.len]);
+    @memcpy(packet_buf[IP_HEADER_MIN_SIZE .. IP_HEADER_MIN_SIZE + data.len], data);
+
+    try ethernet.sendFrame(dst_mac, .IPv4, packet_buf[0 .. IP_HEADER_MIN_SIZE + data.len]);
 }
 
 fn calculateChecksum(header: *const IPv4Header, len: usize) u16 {
     var sum: u32 = 0;
     const data = @as([*]const u16, @ptrCast(@alignCast(header)));
     const word_count = len / 2;
-    
+
     var i: usize = 0;
     while (i < word_count) : (i += 1) {
         sum += data[i];
     }
-    
+
     while (sum >> 16 != 0) {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
-    
+
     return @as(u16, @intCast(~sum));
 }
 
@@ -186,21 +174,20 @@ fn verifyChecksum(header: *const IPv4Header, len: usize) bool {
     var sum: u32 = 0;
     const data = @as([*]const u16, @ptrCast(@alignCast(header)));
     const word_count = len / 2;
-    
+
     var i: usize = 0;
     while (i < word_count) : (i += 1) {
         sum += data[i];
     }
-    
+
     while (sum >> 16 != 0) {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
-    
+
     return sum == 0xFFFF;
 }
 
 fn isLocalNetwork(ip: u32) bool {
-    // Simple subnet check (255.255.255.0)
     return (ip & 0xFFFFFF00) == (our_ip & 0xFFFFFF00);
 }
 
@@ -212,7 +199,7 @@ pub fn registerProtocolHandler(protocol: u8, handler: fn (src_ip: u32, dst_ip: u
             handler(src_ip, dst_ip, packet.data);
         }
     }.wrapper));
-    
+
     if (protocol == @intFromEnum(Protocol.TCP)) {
         rx_handlers[1] = handler_ptr;
     } else if (protocol == @intFromEnum(Protocol.UDP)) {
@@ -223,3 +210,4 @@ pub fn registerProtocolHandler(protocol: u8, handler: fn (src_ip: u32, dst_ip: u
 pub fn getLocalIP() u32 {
     return our_ip;
 }
+

@@ -61,7 +61,7 @@ export fn kernel_main() void {
 
     vga.print("Initializing paging...\n");
     paging.init();
-    
+
     vga.print("Enabling kernel memory protection...\n");
     const protection = @import("protection.zig");
     protection.protectKernelMemory();
@@ -76,26 +76,26 @@ export fn kernel_main() void {
     };
     ata.init();
     vga.print("Device drivers ready!\n");
-    
+
     vga.print("Scanning PCI bus...\n");
     pci.scanBus();
-    
+
     vga.print("Initializing network...\n");
     rtl8139.init();
     network.init();
-    
+
     vga.print("Initializing socket API...\n");
     const socket = @import("socket.zig");
     socket.init();
-    
+
     vga.print("Initializing DNS client...\n");
     const dns = @import("dns.zig");
     dns.init();
-    
+
     vga.print("Initializing DHCP client...\n");
     const dhcp = @import("dhcp.zig");
     dhcp.init();
-    
+
     vga.print("Initializing routing table...\n");
     const routing = @import("routing.zig");
     routing.init();
@@ -131,12 +131,10 @@ export fn kernel_main() void {
     _ = process.create_process("test1", test_process1);
     _ = process.create_process("test2", test_process2);
     _ = process.create_process("syscall_test", test_syscall.test_syscall_process);
-    
-    // Create a user space test process
+
     const userspace = @import("userspace.zig");
     userspace.createUserTestProcess();
-    
-    // Test ring 3 transition
+
     const ring3 = @import("ring3.zig");
     ring3.createRing3TestProcess();
 
@@ -153,4 +151,3 @@ export fn kernel_main() void {
         asm volatile ("hlt");
     }
 }
-
