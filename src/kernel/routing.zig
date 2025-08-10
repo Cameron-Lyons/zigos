@@ -79,8 +79,8 @@ pub const RoutingTable = struct {
     pub fn deleteRoute(self: *RoutingTable, dest: ipv4.IPv4Address, mask: ipv4.IPv4Address) !void {
         var i: usize = 0;
         while (i < self.route_count) : (i += 1) {
-            const route = &self.routes[i];
-            if (ipEquals(route.destination, dest) and ipEquals(route.netmask, mask)) {
+            const rt = &self.routes[i];
+            if (ipEquals(rt.destination, dest) and ipEquals(rt.netmask, mask)) {
                 var j = i;
                 while (j < self.route_count - 1) : (j += 1) {
                     self.routes[j] = self.routes[j + 1];
@@ -98,24 +98,24 @@ pub const RoutingTable = struct {
         
         var i: usize = 0;
         while (i < self.route_count) : (i += 1) {
-            const route = &self.routes[i];
+            const rt = &self.routes[i];
             
-            if ((route.flags & RouteFlags.UP) == 0) {
+            if ((rt.flags & RouteFlags.UP) == 0) {
                 continue;
             }
             
-            if (isInNetwork(dest, route.destination, route.netmask)) {
-                const prefix_len = countPrefixBits(route.netmask);
+            if (isInNetwork(dest, rt.destination, rt.netmask)) {
+                const prefix_len = countPrefixBits(rt.netmask);
                 if (prefix_len > best_prefix_len) {
-                    best_match = route;
+                    best_match = rt;
                     best_prefix_len = prefix_len;
                 }
             }
         }
         
-        if (best_match) |route| {
-            route.use_count += 1;
-            return route;
+        if (best_match) |rt| {
+            rt.use_count += 1;
+            return rt;
         }
         
         if (!ipEquals(self.default_gateway, ipv4.IPv4Address{ .octets = .{ 0, 0, 0, 0 } })) {
@@ -174,34 +174,34 @@ pub const RoutingTable = struct {
         
         var i: usize = 0;
         while (i < self.route_count) : (i += 1) {
-            const route = &self.routes[i];
+            const rt = &self.routes[i];
             
-            network.printIPv4(route.destination);
+            network.printIPv4(rt.destination);
             vga.print(" ");
             
-            if ((route.flags & RouteFlags.GATEWAY) != 0) {
-                network.printIPv4(route.gateway);
+            if ((rt.flags & RouteFlags.GATEWAY) != 0) {
+                network.printIPv4(rt.gateway);
             } else {
                 vga.print("*              ");
             }
             vga.print(" ");
             
-            network.printIPv4(route.netmask);
+            network.printIPv4(rt.netmask);
             vga.print(" ");
             
-            if ((route.flags & RouteFlags.UP) != 0) vga.put_char('U');
-            if ((route.flags & RouteFlags.GATEWAY) != 0) vga.put_char('G');
-            if ((route.flags & RouteFlags.HOST) != 0) vga.put_char('H');
-            if ((route.flags & RouteFlags.DYNAMIC) != 0) vga.put_char('D');
+            if ((rt.flags & RouteFlags.UP) != 0) vga.put_char('U');
+            if ((rt.flags & RouteFlags.GATEWAY) != 0) vga.put_char('G');
+            if ((rt.flags & RouteFlags.HOST) != 0) vga.put_char('H');
+            if ((rt.flags & RouteFlags.DYNAMIC) != 0) vga.put_char('D');
             vga.print("   ");
             
-            printNumber(route.metric);
+            printNumber(rt.metric);
             vga.print("     ");
-            printNumber(route.ref_count);
+            printNumber(rt.ref_count);
             vga.print("   ");
-            printNumber(route.use_count);
+            printNumber(rt.use_count);
             vga.print(" ");
-            vga.print(route.interface);
+            vga.print(rt.interface);
             vga.print("\n");
         }
     }

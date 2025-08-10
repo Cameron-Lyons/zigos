@@ -177,7 +177,7 @@ fn addToReadyQueue(new_ext: *ProcessExtended) void {
     stats.ready_processes += 1;
 }
 
-pub fn schedule() ?*process.Process {
+pub export fn schedule() ?*process.Process {
     updateStatistics();
     
     const next = switch (scheduler_type) {

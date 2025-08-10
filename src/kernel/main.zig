@@ -117,6 +117,10 @@ export fn kernel_main() void {
         };
     }
 
+    vga.print("Running VM tests...\n");
+    const vm_test = @import("vm_test.zig");
+    vm_test.test_virtual_memory();
+    
     vga.print("Initializing process management...\n");
     process.init();
 

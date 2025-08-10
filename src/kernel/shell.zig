@@ -550,7 +550,7 @@ pub const Shell = struct {
         network.printIPv4(local_ip);
         vga.print("\n");
         
-        const gateway = network.getGatewayIP();
+        const gateway = network.getGateway();
         vga.print("Gateway: ");
         network.printIPv4(gateway);
         vga.print("\n");

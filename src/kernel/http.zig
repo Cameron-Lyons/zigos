@@ -19,26 +19,26 @@ const HTTPMethod = enum {
     UNKNOWN,
 };
 
-const HTTPRequest = struct {
+pub const HTTPRequest = struct {
     method: HTTPMethod,
     path: []const u8,
     version: []const u8,
     headers: []Header,
     body: []const u8,
     
-    const Header = struct {
+    pub const Header = struct {
         name: []const u8,
         value: []const u8,
     };
 };
 
-const HTTPResponse = struct {
+pub const HTTPResponse = struct {
     status_code: u16,
     status_text: []const u8,
     headers: []const Header,
     body: []const u8,
     
-    const Header = struct {
+    pub const Header = struct {
         name: []const u8,
         value: []const u8,
     };

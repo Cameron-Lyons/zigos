@@ -38,7 +38,7 @@ const DHCPOptionType = enum(u8) {
     END = 255,
 };
 
-const DHCPHeader = packed struct {
+const DHCPHeader = extern struct {
     op: u8,
     htype: u8,
     hlen: u8,
@@ -80,8 +80,7 @@ pub const DHCPClient = struct {
     
     pub fn init() DHCPClient {
         const rtl8139 = @import("rtl8139.zig");
-        var mac: [6]u8 = undefined;
-        rtl8139.getMACAddress(&mac);
+        const mac = rtl8139.getMACAddress() orelse [_]u8{0} ** 6;
         
         return DHCPClient{
             .state = .INIT,
@@ -120,8 +119,8 @@ pub const DHCPClient = struct {
         header.yiaddr = 0;
         header.siaddr = 0;
         header.giaddr = 0;
-        @memcpy(&header.chaddr[0..6], &self.mac_address);
-        header.magic = @byteSwap(DHCP_MAGIC_COOKIE);
+        @memcpy(header.chaddr[0..6], &self.mac_address);
+        header.magic = @byteSwap(@as(u32, DHCP_MAGIC_COOKIE));
         
         var options_offset: usize = 240;
         
@@ -182,8 +181,8 @@ pub const DHCPClient = struct {
         header.yiaddr = 0;
         header.siaddr = 0;
         header.giaddr = 0;
-        @memcpy(&header.chaddr[0..6], &self.mac_address);
-        header.magic = @byteSwap(DHCP_MAGIC_COOKIE);
+        @memcpy(header.chaddr[0..6], &self.mac_address);
+        header.magic = @byteSwap(@as(u32, DHCP_MAGIC_COOKIE));
         
         var options_offset: usize = 240;
         
@@ -340,8 +339,8 @@ pub const DHCPClient = struct {
         header.yiaddr = 0;
         header.siaddr = 0;
         header.giaddr = 0;
-        @memcpy(&header.chaddr[0..6], &self.mac_address);
-        header.magic = @byteSwap(DHCP_MAGIC_COOKIE);
+        @memcpy(header.chaddr[0..6], &self.mac_address);
+        header.magic = @byteSwap(@as(u32, DHCP_MAGIC_COOKIE));
         
         var options_offset: usize = 240;
         

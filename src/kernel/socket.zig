@@ -232,6 +232,50 @@ pub const Socket = struct {
         }
     }
 
+    pub fn sendTo(self: *Socket, data: []const u8, addr: ipv4.IPv4Address, port: u16) !void {
+        if (self.socket_type != .DGRAM) {
+            return SocketError.InvalidSocket;
+        }
+        
+        switch (self.protocol) {
+            .UDP => {
+                try udp.send(
+                    self.local_addr,
+                    self.local_port,
+                    addr,
+                    port,
+                    data
+                );
+            },
+            else => return SocketError.InvalidSocket,
+        }
+    }
+    
+    pub fn recvFrom(self: *Socket, buffer: []u8, src_addr: *ipv4.IPv4Address, src_port: *u16) !usize {
+        if (self.socket_type != .DGRAM) {
+            return SocketError.InvalidSocket;
+        }
+        
+        while (self.recv_head == self.recv_tail) {
+            if (!self.blocking) {
+                return 0;
+            }
+            process.yield();
+        }
+        
+        var bytes_read: usize = 0;
+        while (bytes_read < buffer.len and self.recv_head != self.recv_tail) {
+            buffer[bytes_read] = self.recv_buffer[self.recv_tail];
+            self.recv_tail = (self.recv_tail + 1) % RECV_BUFFER_SIZE;
+            bytes_read += 1;
+        }
+        
+        src_addr.* = self.remote_addr;
+        src_port.* = self.remote_port;
+        
+        return bytes_read;
+    }
+
     pub fn recv(self: *Socket, buffer: []u8) !usize {
         if (self.state != .CONNECTED and self.socket_type == .STREAM) {
             return SocketError.NotConnected;

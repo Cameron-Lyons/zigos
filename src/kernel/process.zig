@@ -285,7 +285,7 @@ fn print_number(num: u32) void {
     }
 }
 
-pub fn getCurrentProcess() ?*Process {
+pub export fn getCurrentProcess() ?*Process {
     return current_process;
 }
 
@@ -296,7 +296,7 @@ pub fn getCurrentPID() u32 {
     return 0;
 }
 
-pub fn switchToProcess(proc: *Process) void {
+pub export fn switchToProcess(proc: *Process) void {
     if (current_process) |old_proc| {
         old_proc.state = .Ready;
     }

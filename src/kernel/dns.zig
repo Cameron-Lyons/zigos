@@ -109,7 +109,7 @@ pub const DNSClient = struct {
         header.arcount = 0;
         offset += @sizeOf(DNSHeader);
         
-        offset += encodeDomainName(&buffer[offset], domain);
+        offset += encodeDomainName(buffer[offset..], domain);
         
         const qtype = @as(*u16, @ptrCast(@alignCast(&buffer[offset])));
         qtype.* = @byteSwap(@intFromEnum(DNSType.A));

@@ -47,13 +47,13 @@ pub fn send(local_addr: ipv4.IPv4Address, local_port: u16, remote_addr: ipv4.IPv
     
     @memcpy(packet[@sizeOf(UDPHeader)..packet_size], data);
     
-    const src_ip = network.getLocalIP();
     const dst_ip = (@as(u32, remote_addr.octets[0]) << 24) | 
                     (@as(u32, remote_addr.octets[1]) << 16) | 
                     (@as(u32, remote_addr.octets[2]) << 8) | 
                     remote_addr.octets[3];
     
-    udp_header.checksum = calculateChecksum(src_ip, dst_ip, udp_header, data);
+    const src_ip_u32 = network.getLocalIPRaw();
+    udp_header.checksum = calculateChecksum(src_ip_u32, dst_ip, udp_header, data);
     
     try ipv4.sendPacket(dst_ip, @enumFromInt(UDP_PROTOCOL), packet[0..packet_size]);
 }

@@ -3,7 +3,7 @@ const vga = @import("vga.zig");
 const rtl8139 = @import("rtl8139.zig");
 const ethernet = @import("ethernet.zig");
 const arp = @import("arp.zig");
-const ipv4 = @import("ipv4.zig");
+pub const ipv4 = @import("ipv4.zig");
 const icmp = @import("icmp.zig");
 const tcp = @import("tcp.zig");
 const udp = @import("udp.zig");
@@ -38,6 +38,10 @@ pub fn getLocalIP() ipv4.IPv4Address {
             @intCast(local_ip & 0xFF),
         },
     };
+}
+
+pub fn getLocalIPRaw() u32 {
+    return local_ip;
 }
 
 pub fn getGateway() ipv4.IPv4Address {
