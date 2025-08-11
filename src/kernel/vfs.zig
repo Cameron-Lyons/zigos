@@ -205,10 +205,41 @@ pub fn mount(device: []const u8, mount_path: []const u8, fs_name: []const u8, fl
 }
 
 pub fn open(path: []const u8, flags: u32) VFSError!u32 {
-    const vnode = try lookupPath(path);
+    const vnode = blk: {
+        if (lookupPath(path)) |v| {
+            break :blk v;
+        } else |err| {
+            if (err == VFSError.NotFound and (flags & O_CREAT) != 0) {
+                // File doesn't exist but O_CREAT is set, create it
+                const parent_path = getParentPath(path);
+                const name = getBaseName(path);
+                
+                const parent = try lookupPath(parent_path);
+                if (parent.file_type != FileType.Directory) {
+                    return VFSError.NotDirectory;
+                }
+                
+                const default_mode = FileMode{
+                    .owner_read = true,
+                    .owner_write = true,
+                    .group_read = true,
+                    .other_read = true,
+                };
+                
+                break :blk try parent.mount_point.?.fs_type.ops.create(parent, name, default_mode);
+            } else {
+                return err;
+            }
+        }
+    };
 
     if (vnode.file_type == FileType.Directory and (flags & O_RDWR) != 0) {
         return VFSError.IsDirectory;
+    }
+
+    if ((flags & O_TRUNC) != 0 and vnode.file_type == FileType.Regular) {
+        // Truncate the file
+        // This would need to be implemented in the file system
     }
 
     try vnode.ops.open(vnode, flags);
@@ -219,7 +250,7 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
             const fd = @as(*FileDescriptor, @ptrCast(@alignCast(fd_mem)));
 
             fd.vnode = vnode;
-            fd.offset = 0;
+            fd.offset = if ((flags & O_APPEND) != 0) vnode.size else 0;
             fd.flags = flags;
             fd.ref_count = 1;
 
@@ -316,6 +347,18 @@ pub fn mkdir(path: []const u8, mode: FileMode) VFSError!void {
     _ = try parent.mount_point.?.fs_type.ops.mkdir(parent, name, mode);
 }
 
+pub fn create(path: []const u8, mode: FileMode) VFSError!void {
+    const parent_path = getParentPath(path);
+    const name = getBaseName(path);
+
+    const parent = try lookupPath(parent_path);
+    if (parent.file_type != FileType.Directory) {
+        return VFSError.NotDirectory;
+    }
+
+    _ = try parent.mount_point.?.fs_type.ops.create(parent, name, mode);
+}
+
 pub fn unlink(path: []const u8) VFSError!void {
     const parent_path = getParentPath(path);
     const name = getBaseName(path);
@@ -326,6 +369,18 @@ pub fn unlink(path: []const u8) VFSError!void {
     }
 
     try parent.mount_point.?.fs_type.ops.unlink(parent, name);
+}
+
+pub fn rmdir(path: []const u8) VFSError!void {
+    const parent_path = getParentPath(path);
+    const name = getBaseName(path);
+
+    const parent = try lookupPath(parent_path);
+    if (parent.file_type != FileType.Directory) {
+        return VFSError.NotDirectory;
+    }
+
+    try parent.mount_point.?.fs_type.ops.rmdir(parent, name);
 }
 
 fn createVNode() VFSError!*VNode {
