@@ -239,3 +239,15 @@ pub fn allocatePhysicalPage() ?u32 {
     
     return @as(u32, @intCast(page));
 }
+
+pub fn alloc(comptime T: type) ?*T {
+    const size = @sizeOf(T);
+    
+    if (kmalloc(size)) |ptr| {
+        const typed_ptr = @as(*T, @ptrCast(@alignCast(ptr)));
+        typed_ptr.* = undefined;
+        return typed_ptr;
+    }
+    
+    return null;
+}

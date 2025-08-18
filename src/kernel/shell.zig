@@ -147,6 +147,14 @@ pub const Shell = struct {
             self.cmdArp(args[1..arg_count]);
         } else if (streq(command, "nettest")) {
             self.cmdNetTest();
+        } else if (streq(command, "synctest")) {
+            self.cmdSyncTest();
+        } else if (streq(command, "ipctest")) {
+            self.cmdIpcTest();
+        } else if (streq(command, "procmon")) {
+            self.cmdProcMon();
+        } else if (streq(command, "top")) {
+            self.cmdTop();
         } else {
             vga.print("Unknown command: ");
             printString(command);
@@ -182,6 +190,10 @@ pub const Shell = struct {
         vga.print("  route    - Display/modify routing table\n");
         vga.print("  arp      - Display/modify ARP cache\n");
         vga.print("  nettest  - Run network stack tests\n");
+        vga.print("  synctest - Run synchronization primitives tests\n");
+        vga.print("  ipctest  - Run IPC tests\n");
+        vga.print("  procmon  - Show detailed process statistics\n");
+        vga.print("  top      - Show CPU usage and process list\n");
     }
 
     fn cmdClear(self: *const Shell) void {
@@ -653,6 +665,44 @@ pub const Shell = struct {
         _ = self;
         const net_test = @import("net_test.zig");
         net_test.runNetworkTests();
+    }
+    
+    fn cmdSyncTest(self: *const Shell) void {
+        _ = self;
+        const sync = @import("sync.zig");
+        sync.runSynchronizationTests();
+    }
+    
+    fn cmdIpcTest(self: *const Shell) void {
+        _ = self;
+        const ipc = @import("ipc.zig");
+        ipc.runIPCTests();
+    }
+    
+    fn cmdProcMon(self: *const Shell) void {
+        _ = self;
+        const procmon = @import("procmon.zig");
+        procmon.printSystemStats();
+    }
+    
+    fn cmdTop(self: *const Shell) void {
+        _ = self;
+        const procmon = @import("procmon.zig");
+        
+        vga.clear();
+        procmon.printCPUGraph();
+        vga.print("\n");
+        
+        const cpu = procmon.getCPUUsage();
+        vga.print("CPU: User: ");
+        printNumber(cpu.user_percent);
+        vga.print("% System: ");
+        printNumber(cpu.system_percent);
+        vga.print("% Idle: ");
+        printNumber(cpu.idle_percent);
+        vga.print("%\n");
+        
+        procmon.printProcessList();
     }
     
     fn parseNumberU16(str: []const u8) u16 {

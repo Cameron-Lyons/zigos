@@ -124,6 +124,10 @@ export fn kernel_main() void {
     vga.print("Initializing process management...\n");
     process.init();
 
+    vga.print("Initializing process monitoring...\n");
+    const procmon = @import("procmon.zig");
+    procmon.init();
+
     vga.print("Initializing timer...\n");
     timer.init(100);
 
