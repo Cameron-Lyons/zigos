@@ -118,6 +118,9 @@ pub fn init() void {
         .ioctl = fat32Ioctl,
         .stat = fat32Stat,
         .readdir = fat32Readdir,
+        .truncate = fat32Truncate,
+        .chmod = fat32Chmod,
+        .chown = fat32Chown,
     };
 
     fat32_fs_ops = vfs.FileSystemOps{
@@ -859,11 +862,249 @@ fn fat32Rmdir(parent: *vfs.VNode, name: []const u8) vfs.VFSError!void {
 }
 
 fn fat32Rename(old_parent: *vfs.VNode, old_name: []const u8, new_parent: *vfs.VNode, new_name: []const u8) vfs.VFSError!void {
-    _ = old_parent;
-    _ = old_name;
-    _ = new_parent;
-    _ = new_name;
-    return vfs.VFSError.ReadOnly;
+    const old_parent_data = @as(*FAT32VNodeData, @ptrCast(@alignCast(old_parent.private_data.?)));
+    const new_parent_data = @as(*FAT32VNodeData, @ptrCast(@alignCast(new_parent.private_data.?)));
+    
+    if (!old_parent_data.is_directory or !new_parent_data.is_directory) {
+        return vfs.VFSError.NotDirectory;
+    }
+    
+    const mount_data = @as(*FAT32Data, @ptrCast(@alignCast(old_parent.mount_point.?.private_data.?)));
+    
+    // Check if destination already exists
+    if (fat32Lookup(new_parent, new_name)) |_| {
+        return vfs.VFSError.AlreadyExists;
+    } else |_| {}
+    
+    // Find the entry in old parent
+    var old_cluster = old_parent_data.cluster;
+    var sector_buf: [512]u8 align(4) = undefined;
+    var found_entry: ?DirEntry = null;
+    var found_sector: u32 = 0;
+    var found_offset: usize = 0;
+    
+    while (old_cluster < FAT32_EOC) {
+        const first_sector = clusterToLBA(mount_data, old_cluster);
+        
+        for (0..mount_data.sectors_per_cluster) |sector_offset| {
+            const current_sector = first_sector + sector_offset;
+            ata.readSectors(mount_data.device, current_sector, 1, &sector_buf) catch {
+                return vfs.VFSError.DeviceError;
+            };
+            
+            const entries = @as([*]DirEntry, @ptrCast(&sector_buf))[0..16];
+            for (entries, 0..) |*entry, i| {
+                if (entry.name[0] == 0x00) break;
+                if (entry.name[0] == 0xE5) continue;
+                if (entry.attributes == ATTR_LONG_NAME) continue;
+                if ((entry.attributes & ATTR_VOLUME_ID) != 0) continue;
+                
+                var entry_name: [13]u8 = undefined;
+                formatDosName(&entry.name, &entry.ext, &entry_name);
+                
+                if (std.mem.eql(u8, entry_name[0..strlen(&entry_name)], old_name)) {
+                    found_entry = entry.*;
+                    found_sector = current_sector;
+                    found_offset = i;
+                    
+                    // Mark as deleted in old location
+                    entries[i].name[0] = 0xE5;
+                    ata.writeSectors(mount_data.device, current_sector, 1, &sector_buf) catch {
+                        return vfs.VFSError.DeviceError;
+                    };
+                    break;
+                }
+            }
+            if (found_entry != null) break;
+        }
+        if (found_entry != null) break;
+        
+        old_cluster = getNextCluster(mount_data, old_cluster) catch return vfs.VFSError.DeviceError;
+    }
+    
+    if (found_entry == null) {
+        return vfs.VFSError.NotFound;
+    }
+    
+    // Update the name in the entry
+    var new_entry = found_entry.?;
+    formatNameTo83(new_name, &new_entry.name, &new_entry.ext);
+    
+    // Add to new parent
+    var new_cluster = new_parent_data.cluster;
+    var entry_added = false;
+    
+    while (new_cluster < FAT32_EOC) {
+        const first_sector = clusterToLBA(mount_data, new_cluster);
+        
+        for (0..mount_data.sectors_per_cluster) |sector_offset| {
+            ata.readSectors(mount_data.device, first_sector + sector_offset, 1, &sector_buf) catch {
+                return vfs.VFSError.DeviceError;
+            };
+            
+            const entries = @as([*]DirEntry, @ptrCast(&sector_buf))[0..16];
+            for (entries, 0..) |*entry, i| {
+                if (entry.name[0] == 0x00 or entry.name[0] == 0xE5) {
+                    entries[i] = new_entry;
+                    ata.writeSectors(mount_data.device, first_sector + sector_offset, 1, &sector_buf) catch {
+                        return vfs.VFSError.DeviceError;
+                    };
+                    entry_added = true;
+                    break;
+                }
+            }
+            if (entry_added) break;
+        }
+        if (entry_added) break;
+        
+        const next = getNextCluster(mount_data, new_cluster) catch return vfs.VFSError.DeviceError;
+        if (next >= FAT32_EOC) {
+            const new_dir_cluster = allocateCluster(mount_data) catch return vfs.VFSError.NoSpace;
+            setNextCluster(mount_data, new_cluster, new_dir_cluster) catch return vfs.VFSError.DeviceError;
+            new_cluster = new_dir_cluster;
+        } else {
+            new_cluster = next;
+        }
+    }
+    
+    if (!entry_added) {
+        // Restore the original entry if we couldn't add to new location
+        var restore_buf: [512]u8 align(4) = undefined;
+        ata.readSectors(mount_data.device, found_sector, 1, &restore_buf) catch {};
+        const restore_entries = @as([*]DirEntry, @ptrCast(&restore_buf))[0..16];
+        restore_entries[found_offset] = found_entry.?;
+        ata.writeSectors(mount_data.device, found_sector, 1, &restore_buf) catch {};
+        return vfs.VFSError.NoSpace;
+    }
+    
+    // Update .. entry if it's a directory being moved
+    if ((new_entry.attributes & ATTR_DIRECTORY) != 0) {
+        const dir_cluster = (@as(u32, new_entry.cluster_high) << 16) | new_entry.cluster_low;
+        var dir_buf: [512]u8 align(4) = undefined;
+        const dir_sector = clusterToLBA(mount_data, dir_cluster);
+        ata.readSectors(mount_data.device, dir_sector, 1, &dir_buf) catch return vfs.VFSError.DeviceError;
+        
+        const dir_entries = @as([*]DirEntry, @ptrCast(&dir_buf))[0..16];
+        if (dir_entries[1].name[0] == '.' and dir_entries[1].name[1] == '.') {
+            dir_entries[1].cluster_high = @as(u16, @intCast((new_parent_data.cluster >> 16) & 0xFFFF));
+            dir_entries[1].cluster_low = @as(u16, @intCast(new_parent_data.cluster & 0xFFFF));
+            ata.writeSectors(mount_data.device, dir_sector, 1, &dir_buf) catch return vfs.VFSError.DeviceError;
+        }
+    }
+}
+
+fn fat32Truncate(vnode: *vfs.VNode, size: u64) vfs.VFSError!void {
+    const vnode_data = @as(*FAT32VNodeData, @ptrCast(@alignCast(vnode.private_data.?)));
+    const mount_data = @as(*FAT32Data, @ptrCast(@alignCast(vnode.mount_point.?.private_data.?)));
+    
+    if (vnode_data.is_directory) {
+        return vfs.VFSError.IsDirectory;
+    }
+    
+    const current_size = vnode_data.size;
+    if (size == current_size) {
+        return; // Nothing to do
+    }
+    
+    if (size < current_size) {
+        // Truncating - free clusters beyond new size
+        const clusters_needed = (size + mount_data.bytes_per_cluster - 1) / mount_data.bytes_per_cluster;
+        var cluster_count: u32 = 0;
+        var current_cluster = vnode_data.cluster;
+        var prev_cluster: u32 = 0;
+        
+        while (current_cluster < FAT32_EOC and cluster_count < clusters_needed) {
+            prev_cluster = current_cluster;
+            current_cluster = getNextCluster(mount_data, current_cluster) catch return vfs.VFSError.DeviceError;
+            cluster_count += 1;
+        }
+        
+        if (current_cluster < FAT32_EOC) {
+            // Free the rest of the chain
+            try freeClusterChain(mount_data, current_cluster);
+            
+            // Mark the last cluster as end of chain
+            if (clusters_needed > 0) {
+                try setNextCluster(mount_data, prev_cluster, FAT32_EOC);
+            }
+        }
+        
+        // Clear the partial last cluster if needed
+        if (size % mount_data.bytes_per_cluster != 0 and clusters_needed > 0) {
+            const last_cluster_offset = size % mount_data.bytes_per_cluster;
+            const first_sector = clusterToLBA(mount_data, prev_cluster);
+            const sector_in_cluster = last_cluster_offset / 512;
+            const offset_in_sector = last_cluster_offset % 512;
+            
+            if (offset_in_sector != 0) {
+                var sector_buf: [512]u8 align(4) = undefined;
+                ata.readSectors(mount_data.device, first_sector + sector_in_cluster, 1, &sector_buf) catch {
+                    return vfs.VFSError.DeviceError;
+                };
+                const offset_start = @as(usize, @intCast(offset_in_sector));
+                @memset(sector_buf[offset_start..], 0);
+                ata.writeSectors(mount_data.device, first_sector + sector_in_cluster, 1, &sector_buf) catch {
+                    return vfs.VFSError.DeviceError;
+                };
+            }
+            
+            // Clear remaining sectors in the cluster
+            var zero_buf: [512]u8 align(4) = [_]u8{0} ** 512;
+            const start_sector = @as(usize, @intCast(sector_in_cluster + 1));
+            const end_sector = @as(usize, @intCast(mount_data.sectors_per_cluster));
+            if (start_sector < end_sector) {
+                for (start_sector..end_sector) |i| {
+                    ata.writeSectors(mount_data.device, first_sector + @as(u32, @intCast(i)), 1, &zero_buf) catch {};
+                }
+            }
+        }
+    } else {
+        // Extending - allocate more clusters if needed
+        const clusters_needed = (size + mount_data.bytes_per_cluster - 1) / mount_data.bytes_per_cluster;
+        const current_clusters = (current_size + mount_data.bytes_per_cluster - 1) / mount_data.bytes_per_cluster;
+        
+        if (clusters_needed > current_clusters) {
+            var current_cluster = vnode_data.cluster;
+            
+            // Find the last cluster
+            while (true) {
+                const next = getNextCluster(mount_data, current_cluster) catch return vfs.VFSError.DeviceError;
+                if (next >= FAT32_EOC) break;
+                current_cluster = next;
+            }
+            
+            // Allocate new clusters
+            var i = current_clusters;
+            while (i < clusters_needed) : (i += 1) {
+                const new_cluster = allocateCluster(mount_data) catch return vfs.VFSError.NoSpace;
+                try setNextCluster(mount_data, current_cluster, new_cluster);
+                current_cluster = new_cluster;
+            }
+        }
+    }
+    
+    vnode_data.size = @as(u32, @intCast(size));
+    vnode.size = size;
+    
+    // Update directory entry with new size
+    updateDirectoryEntry(mount_data, vnode_data.cluster, @as(u32, @intCast(size))) catch {};
+}
+
+fn fat32Chmod(vnode: *vfs.VNode, mode: vfs.FileMode) vfs.VFSError!void {
+    // FAT32 has limited permission support - only read-only attribute
+    // We'll update the vnode's mode for VFS consistency
+    vnode.mode = mode;
+    
+    // Could update the FAT32 read-only attribute based on write permissions
+    // but that would require finding and updating the directory entry
+}
+
+fn fat32Chown(vnode: *vfs.VNode, uid: u32, gid: u32) vfs.VFSError!void {
+    // FAT32 doesn't support ownership
+    // Just ignore for compatibility
+    _ = vnode;
+    _ = uid;
+    _ = gid;
 }
 
 fn clusterToLBA(data: *const FAT32Data, cluster: u32) u32 {

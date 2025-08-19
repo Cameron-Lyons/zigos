@@ -129,6 +129,14 @@ pub const Shell = struct {
             self.cmdLs(args[1..arg_count]);
         } else if (streq(command, "cat")) {
             self.cmdCat(args[1..arg_count]);
+        } else if (streq(command, "mkdir")) {
+            self.cmdMkdir(args[1..arg_count]);
+        } else if (streq(command, "rmdir")) {
+            self.cmdRmdir(args[1..arg_count]);
+        } else if (streq(command, "rm")) {
+            self.cmdRm(args[1..arg_count]);
+        } else if (streq(command, "mv")) {
+            self.cmdMv(args[1..arg_count]);
         } else if (streq(command, "mount")) {
             self.cmdMount(args[1..arg_count]);
         } else if (streq(command, "ping")) {
@@ -178,6 +186,10 @@ pub const Shell = struct {
         vga.print("  lsdev    - List available devices\n");
         vga.print("  ls       - List directory contents\n");
         vga.print("  cat      - Display file contents\n");
+        vga.print("  mkdir    - Create a directory\n");
+        vga.print("  rmdir    - Remove an empty directory\n");
+        vga.print("  rm       - Remove a file\n");
+        vga.print("  mv       - Move/rename a file or directory\n");
         vga.print("  mount    - Mount a file system\n");
         vga.print("  ping     - Ping an IP address\n");
         vga.print("  httpd    - Start/stop HTTP server\n");
@@ -450,6 +462,108 @@ pub const Shell = struct {
             }
         }
         vga.put_char('\n');
+    }
+
+    fn cmdMkdir(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            vga.print("Usage: mkdir <directory>\n");
+            return;
+        }
+        
+        const path = args[0];
+        const mode = vfs.FileMode{
+            .owner_read = true,
+            .owner_write = true,
+            .owner_exec = true,
+            .group_read = true,
+            .group_exec = true,
+            .other_read = true,
+            .other_exec = true,
+        };
+        
+        vfs.mkdir(sliceFromCStr(path), mode) catch |err| {
+            vga.print("mkdir: ");
+            printString(path);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+        
+        vga.print("Directory created: ");
+        printString(path);
+        vga.print("\n");
+    }
+    
+    fn cmdRmdir(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            vga.print("Usage: rmdir <directory>\n");
+            return;
+        }
+        
+        const path = args[0];
+        vfs.rmdir(sliceFromCStr(path)) catch |err| {
+            vga.print("rmdir: ");
+            printString(path);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+        
+        vga.print("Directory removed: ");
+        printString(path);
+        vga.print("\n");
+    }
+    
+    fn cmdRm(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            vga.print("Usage: rm <file>\n");
+            return;
+        }
+        
+        const path = args[0];
+        vfs.unlink(sliceFromCStr(path)) catch |err| {
+            vga.print("rm: ");
+            printString(path);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+        
+        vga.print("File removed: ");
+        printString(path);
+        vga.print("\n");
+    }
+    
+    fn cmdMv(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len < 2) {
+            vga.print("Usage: mv <source> <destination>\n");
+            return;
+        }
+        
+        const src = args[0];
+        const dst = args[1];
+        vfs.rename(sliceFromCStr(src), sliceFromCStr(dst)) catch |err| {
+            vga.print("mv: ");
+            printString(src);
+            vga.print(" -> ");
+            printString(dst);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+        
+        printString(src);
+        vga.print(" -> ");
+        printString(dst);
+        vga.print("\n");
     }
 
     fn cmdMount(self: *const Shell, args: []const [*:0]const u8) void {

@@ -8,6 +8,7 @@ const protection = @import("protection.zig");
 const posix = @import("posix.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
+const vfs = @import("vfs.zig");
 
 pub const SYS_EXIT = 1;
 pub const SYS_WRITE = 2;
@@ -21,6 +22,10 @@ pub const SYS_EXECVE = 9;
 pub const SYS_WAIT4 = 10;
 pub const SYS_BRK = 11;
 pub const SYS_MMAP = 12;
+pub const SYS_MKDIR = 13;
+pub const SYS_RMDIR = 14;
+pub const SYS_UNLINK = 15;
+pub const SYS_RENAME = 16;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -50,6 +55,10 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.C) void {
         SYS_WAIT4 => sys_wait4(@intCast(arg1), @as(?*i32, @ptrFromInt(arg2)), @intCast(arg3), @as(?*anyopaque, @ptrFromInt(arg4))),
         SYS_BRK => sys_brk(arg1),
         SYS_MMAP => sys_mmap(arg1, arg2, @intCast(arg3), @intCast(arg4), @intCast(arg5), @intCast(@as(i32, @intCast(regs.ebp)))),
+        SYS_MKDIR => sys_mkdir(@as([*]const u8, @ptrFromInt(arg1)), @intCast(arg2)),
+        SYS_RMDIR => sys_rmdir(@as([*]const u8, @ptrFromInt(arg1))),
+        SYS_UNLINK => sys_unlink(@as([*]const u8, @ptrFromInt(arg1))),
+        SYS_RENAME => sys_rename(@as([*]const u8, @ptrFromInt(arg1)), @as([*]const u8, @ptrFromInt(arg2))),
         else => ENOSYS,
     };
 
@@ -142,6 +151,70 @@ fn sys_getpid() i32 {
 
 fn sys_yield() i32 {
     process.yield();
+    return 0;
+}
+
+fn sys_mkdir(pathname: [*]const u8, mode: u32) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
+        return EINVAL;
+    }
+    
+    var kernel_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+    
+    const mode_struct = vfs.FileMode{
+        .owner_read = (mode & 0o400) != 0,
+        .owner_write = (mode & 0o200) != 0,
+        .owner_exec = (mode & 0o100) != 0,
+        .group_read = (mode & 0o040) != 0,
+        .group_write = (mode & 0o020) != 0,
+        .group_exec = (mode & 0o010) != 0,
+        .other_read = (mode & 0o004) != 0,
+        .other_write = (mode & 0o002) != 0,
+        .other_exec = (mode & 0o001) != 0,
+    };
+    
+    vfs.mkdir(path_slice, mode_struct) catch return -1;
+    return 0;
+}
+
+fn sys_rmdir(pathname: [*]const u8) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
+        return EINVAL;
+    }
+    
+    var kernel_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+    
+    vfs.rmdir(path_slice) catch return -1;
+    return 0;
+}
+
+fn sys_unlink(pathname: [*]const u8) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
+        return EINVAL;
+    }
+    
+    var kernel_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+    
+    vfs.unlink(path_slice) catch return -1;
+    return 0;
+}
+
+fn sys_rename(oldpath: [*]const u8, newpath: [*]const u8) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(oldpath), 256) or
+        !protection.verifyUserPointer(@intFromPtr(newpath), 256)) {
+        return EINVAL;
+    }
+    
+    var old_buffer: [256]u8 = undefined;
+    var new_buffer: [256]u8 = undefined;
+    
+    const old_slice = protection.copyStringFromUser(&old_buffer, @intFromPtr(oldpath)) catch return EINVAL;
+    const new_slice = protection.copyStringFromUser(&new_buffer, @intFromPtr(newpath)) catch return EINVAL;
+    
+    vfs.rename(old_slice, new_slice) catch return -1;
     return 0;
 }
 

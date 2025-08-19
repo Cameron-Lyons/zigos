@@ -75,16 +75,31 @@ zigos/
 - ✅ Interrupt Descriptor Table (IDT)
 - ✅ Interrupt handling and ISRs
 - ✅ Memory management with paging
+- ✅ Virtual memory management
 - ✅ VGA text mode driver
 - ✅ Keyboard driver
 - ✅ System timer
+- ✅ Console device support
+
+### Process Management
+- ✅ Multitasking and scheduling
+- ✅ Context switching
+- ✅ Process creation and management
+- ✅ Inter-process communication (IPC)
+- ✅ Process monitoring
+- ✅ Synchronization primitives
+- ✅ System call interface
+- ✅ Ring 3 (user mode) support
+- ✅ ELF executable loading
+- ✅ Userspace/kernel separation
+- ✅ Built-in shell
 
 ### Networking Stack
 - ✅ PCI bus enumeration
 - ✅ RTL8139 network card driver
 - ✅ Ethernet layer
 - ✅ ARP (Address Resolution Protocol)
-- ✅ IPv4 protocol
+- ✅ IPv4 protocol with routing
 - ✅ ICMP (ping support)
 - ✅ TCP protocol
 - ✅ UDP protocol
@@ -93,24 +108,18 @@ zigos/
 - ✅ HTTP client
 - ✅ Socket API with POSIX compatibility
 
-### Process Management
-- ✅ Basic process structures
-- ✅ System call interface
-- ✅ Ring 3 (user mode) support
-- ✅ ELF executable loading
-- ✅ Userspace/kernel separation
-
 ### File Systems
 - ✅ Virtual File System (VFS) layer
 - ✅ FAT32 filesystem support
+- ✅ File write support
 - ✅ ATA disk driver
 - ✅ Device management framework
 
 ## Roadmap
 
-- [ ] Multitasking and scheduling
-- [ ] Virtual memory improvements
 - [ ] More network drivers (e1000, virtio-net)
-- [ ] File system write support
-- [ ] Shell and user programs
+- [ ] Extended file system operations
+- [ ] Advanced memory management features
+- [ ] More user programs and utilities
 - [ ] SMP (multicore) support
+- [ ] Graphics mode support

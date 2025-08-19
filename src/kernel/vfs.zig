@@ -76,6 +76,9 @@ pub const FileOps = struct {
     ioctl: *const fn (*VNode, u32, usize) VFSError!i32,
     stat: *const fn (*VNode, *FileStat) VFSError!void,
     readdir: *const fn (*VNode, *DirEntry, u64) VFSError!bool,
+    truncate: *const fn (*VNode, u64) VFSError!void,
+    chmod: *const fn (*VNode, FileMode) VFSError!void,
+    chown: *const fn (*VNode, u32, u32) VFSError!void,
 };
 
 pub const VNode = struct {
@@ -381,6 +384,77 @@ pub fn rmdir(path: []const u8) VFSError!void {
     }
 
     try parent.mount_point.?.fs_type.ops.rmdir(parent, name);
+}
+
+pub fn truncate(path: []const u8, size: u64) VFSError!void {
+    const vnode = try lookupPath(path);
+    if (vnode.file_type == FileType.Directory) {
+        return VFSError.IsDirectory;
+    }
+    try vnode.ops.truncate(vnode, size);
+}
+
+pub fn ftruncate(fd: u32, size: u64) VFSError!void {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+
+    if (fd_table[fd]) |file_desc| {
+        if ((file_desc.flags & O_WRONLY) == 0 and (file_desc.flags & O_RDWR) == 0) {
+            return VFSError.PermissionDenied;
+        }
+        try file_desc.vnode.ops.truncate(file_desc.vnode, size);
+    } else {
+        return VFSError.InvalidOperation;
+    }
+}
+
+pub fn chmod(path: []const u8, mode: FileMode) VFSError!void {
+    const vnode = try lookupPath(path);
+    try vnode.ops.chmod(vnode, mode);
+}
+
+pub fn fchmod(fd: u32, mode: FileMode) VFSError!void {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+
+    if (fd_table[fd]) |file_desc| {
+        try file_desc.vnode.ops.chmod(file_desc.vnode, mode);
+    } else {
+        return VFSError.InvalidOperation;
+    }
+}
+
+pub fn chown(path: []const u8, uid: u32, gid: u32) VFSError!void {
+    const vnode = try lookupPath(path);
+    try vnode.ops.chown(vnode, uid, gid);
+}
+
+pub fn fchown(fd: u32, uid: u32, gid: u32) VFSError!void {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+
+    if (fd_table[fd]) |file_desc| {
+        try file_desc.vnode.ops.chown(file_desc.vnode, uid, gid);
+    } else {
+        return VFSError.InvalidOperation;
+    }
+}
+
+pub fn rename(old_path: []const u8, new_path: []const u8) VFSError!void {
+    const old_parent_path = getParentPath(old_path);
+    const old_name = getBaseName(old_path);
+    const new_parent_path = getParentPath(new_path);
+    const new_name = getBaseName(new_path);
+
+    const old_parent = try lookupPath(old_parent_path);
+    const new_parent = try lookupPath(new_parent_path);
+
+    if (old_parent.file_type != FileType.Directory or new_parent.file_type != FileType.Directory) {
+        return VFSError.NotDirectory;
+    }
+
+    if (old_parent.mount_point != new_parent.mount_point) {
+        return VFSError.InvalidOperation; // Cross-filesystem move not supported
+    }
+
+    try old_parent.mount_point.?.fs_type.ops.rename(old_parent, old_name, new_parent, new_name);
 }
 
 fn createVNode() VFSError!*VNode {
