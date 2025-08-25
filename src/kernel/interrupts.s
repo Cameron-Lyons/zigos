@@ -1,14 +1,6 @@
 .section .text
 .extern syscall_handler
 
-.global isr128
-.type isr128, @function
-isr128:
-    cli
-    pushl $0    # Dummy error code
-    pushl $128  # Interrupt number
-    jmp isr_common_stub
-
 .global isr_common_stub
 .type isr_common_stub, @function
 isr_common_stub:

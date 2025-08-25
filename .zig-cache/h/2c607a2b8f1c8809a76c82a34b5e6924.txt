@@ -1,2 +1,0 @@
-0
-390 416937 1752956050042894610 e0df7161eec37b85c6111d5d7afe10f1 0 /home/cameron/zigos/src/boot/boot32.S

@@ -1,12 +1,21 @@
 const std = @import("std");
 const vga = @import("vga.zig");
 const rtl8139 = @import("rtl8139.zig");
+const e1000 = @import("e1000.zig");
 const ethernet = @import("ethernet.zig");
 const arp = @import("arp.zig");
 pub const ipv4 = @import("ipv4.zig");
 const icmp = @import("icmp.zig");
 const tcp = @import("tcp.zig");
 const udp = @import("udp.zig");
+
+pub const NetworkDevice = struct {
+    send: *const fn (data: []const u8) void,
+    receive: *const fn () ?[]u8,
+    getMacAddress: *const fn () [6]u8,
+};
+
+var current_device: ?*const NetworkDevice = null;
 
 pub fn init() void {
     vga.print("Initializing network stack...\n");
@@ -181,5 +190,40 @@ pub fn ping(dst_ip: u32) void {
         vga.print(@errorName(err));
         vga.print("\n");
     };
+}
+
+pub fn setNetworkDevice(device: *const NetworkDevice) void {
+    current_device = device;
+}
+
+pub fn sendPacket(data: []const u8) void {
+    if (current_device) |dev| {
+        dev.send(data);
+    } else if (rtl8139.isInitialized()) {
+        rtl8139.send(data);
+    }
+}
+
+pub fn receivePacket() ?[]u8 {
+    if (current_device) |dev| {
+        return dev.receive();
+    } else if (rtl8139.isInitialized()) {
+        return rtl8139.receive();
+    }
+    return null;
+}
+
+pub fn getMacAddress() [6]u8 {
+    if (current_device) |dev| {
+        return dev.getMacAddress();
+    } else if (rtl8139.isInitialized()) {
+        return rtl8139.getMacAddress();
+    }
+    return [_]u8{0} ** 6;
+}
+
+pub fn processPacket(packet: []u8, mac: [6]u8) void {
+    _ = mac;
+    ethernet.handleRxPacket(packet);
 }
 

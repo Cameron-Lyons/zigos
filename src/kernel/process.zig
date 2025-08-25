@@ -46,6 +46,9 @@ pub const Process = struct {
     exit_code: i32 = 0,
     page_directory: ?*paging.PageDirectory,
     entry_point: *const fn () void,
+    priority: i8 = 0,  // Process priority (-20 to 19, lower value = higher priority)
+    nice_value: i8 = 0, // Nice value for priority adjustment
+    time_slice: u32 = 10, // Time slice for scheduling
 };
 
 const MAX_PROCESSES = 256;
@@ -90,6 +93,46 @@ pub fn terminateProcess(pid: u32) bool {
         }
     }
     return false;
+}
+
+pub fn setPriority(pid: u32, priority: i8) bool {
+    // Clamp priority to valid range (-20 to 19)
+    const clamped_priority = if (priority < -20) -20 else if (priority > 19) 19 else priority;
+    
+    var i: usize = 0;
+    while (i < MAX_PROCESSES) : (i += 1) {
+        if (process_table[i].pid == pid and process_table[i].state != .Terminated) {
+            process_table[i].priority = clamped_priority;
+            // Adjust time slice based on priority (higher priority = longer time slice)
+            process_table[i].time_slice = @intCast(20 - @as(i32, clamped_priority));
+            return true;
+        }
+    }
+    return false;
+}
+
+pub fn setNice(pid: u32, nice_value: i8) bool {
+    // Nice value adjusts the priority
+    var i: usize = 0;
+    while (i < MAX_PROCESSES) : (i += 1) {
+        if (process_table[i].pid == pid and process_table[i].state != .Terminated) {
+            process_table[i].nice_value = nice_value;
+            // Recalculate priority based on nice value
+            const new_priority = process_table[i].priority + nice_value;
+            return setPriority(pid, new_priority);
+        }
+    }
+    return false;
+}
+
+pub fn getProcessByPid(pid: u32) ?*Process {
+    var i: usize = 0;
+    while (i < MAX_PROCESSES) : (i += 1) {
+        if (process_table[i].pid == pid and process_table[i].state != .Terminated) {
+            return &process_table[i];
+        }
+    }
+    return null;
 }
 
 pub fn init() void {

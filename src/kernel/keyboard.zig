@@ -78,6 +78,10 @@ const KeyboardScancode = enum(u8) {
     f8 = 0x42,
     f9 = 0x43,
     f10 = 0x44,
+    up_arrow = 0x48,
+    down_arrow = 0x50,
+    left_arrow = 0x4B,
+    right_arrow = 0x4D,
     _,
 };
 
@@ -142,6 +146,31 @@ pub fn handleInterrupt() void {
             },
             @intFromEnum(KeyboardScancode.caps_lock) => {
                 caps_lock = !caps_lock;
+            },
+            @intFromEnum(KeyboardScancode.tab) => {
+                if (keyboard_shell) |sh| {
+                    sh.handleTabCompletion();
+                }
+            },
+            @intFromEnum(KeyboardScancode.up_arrow) => {
+                if (keyboard_shell) |sh| {
+                    sh.handleArrowKey(.Up);
+                }
+            },
+            @intFromEnum(KeyboardScancode.down_arrow) => {
+                if (keyboard_shell) |sh| {
+                    sh.handleArrowKey(.Down);
+                }
+            },
+            @intFromEnum(KeyboardScancode.left_arrow) => {
+                if (keyboard_shell) |sh| {
+                    sh.handleArrowKey(.Left);
+                }
+            },
+            @intFromEnum(KeyboardScancode.right_arrow) => {
+                if (keyboard_shell) |sh| {
+                    sh.handleArrowKey(.Right);
+                }
             },
             else => {
                 if (scancode < scancode_to_ascii.len) {

@@ -18,7 +18,17 @@ const ata = @import("ata.zig");
 const fat32 = @import("fat32.zig");
 const pci = @import("pci.zig");
 const rtl8139 = @import("rtl8139.zig");
+const e1000 = @import("e1000.zig");
+const virtio = @import("virtio.zig");
 const network = @import("network.zig");
+const usb = @import("usb.zig");
+const acpi = @import("acpi.zig");
+const ac97 = @import("ac97.zig");
+const ext2 = @import("ext2.zig");
+const signals = @import("signal.zig");
+const vt = @import("vt.zig");
+const mmap = @import("mmap.zig");
+const file_ops = @import("file_ops.zig");
 
 fn test_process1() void {
     var i: u32 = 0;
@@ -68,6 +78,10 @@ export fn kernel_main() void {
 
     vga.print("Initializing memory allocator...\n");
     memory.init();
+    
+    vga.print("Initializing environment variables...\n");
+    const environ = @import("environ.zig");
+    environ.init();
 
     vga.print("Initializing device drivers...\n");
     device.init();
@@ -79,9 +93,18 @@ export fn kernel_main() void {
 
     vga.print("Scanning PCI bus...\n");
     pci.scanBus();
+    
+    vga.print("Initializing ACPI...\n");
+    acpi.init();
 
     vga.print("Initializing network...\n");
-    rtl8139.init();
+    e1000.init();
+    if (!e1000.isInitialized()) {
+        virtio.init();
+        if (!virtio.isInitialized()) {
+            rtl8139.init();
+        }
+    }
     network.init();
 
     vga.print("Initializing socket API...\n");
@@ -103,10 +126,19 @@ export fn kernel_main() void {
     vga.print("Initializing Virtual File System...\n");
     vfs.init();
     vga.print("VFS ready!\n");
+    
+    vga.print("Initializing file operations...\n");
+    file_ops.init();
+    
+    vga.print("Initializing memory mapping...\n");
+    mmap.init();
 
     vga.print("Initializing FAT32 file system...\n");
     fat32.init();
     vga.print("FAT32 ready!\n");
+    
+    vga.print("Initializing ext2 file system...\n");
+    ext2.init();
 
     if (ata.getPrimaryMaster()) |_| {
         vga.print("Mounting primary master as FAT32...\n");
@@ -134,6 +166,15 @@ export fn kernel_main() void {
     vga.print("Initializing keyboard...\n");
     keyboard.init();
     vga.print("Keyboard ready!\n");
+    
+    vga.print("Initializing USB...\n");
+    usb.init();
+    
+    vga.print("Initializing audio...\n");
+    ac97.init();
+    
+    vga.print("Initializing virtual terminals...\n");
+    vt.init();
 
     vga.print("Creating test processes...\n");
     _ = process.create_process("test1", test_process1);

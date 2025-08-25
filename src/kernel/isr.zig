@@ -126,13 +126,25 @@ pub export fn isrHandler(regs: *Registers) void {
     }
 }
 
+pub const InterruptFrame = Registers;
+pub const InterruptHandler = *const fn (regs: *InterruptFrame) void;
+
+var custom_handlers: [256]?InterruptHandler = [_]?InterruptHandler{null} ** 256;
+
+pub fn registerHandler(vector: u8, handler: InterruptHandler) void {
+    custom_handlers[vector] = handler;
+}
+
 pub export fn irqHandler(regs: *Registers) void {
     if (regs.int_no >= 40) {
         outb(0xA0, 0x20);
     }
     outb(0x20, 0x20);
 
-    if (regs.int_no == 32) {
+    if (custom_handlers[regs.int_no]) |handler| {
+        const frame = @as(*InterruptFrame, @ptrCast(regs));
+        handler(frame);
+    } else if (regs.int_no == 32) {
         const timer = @import("timer.zig");
         timer.handleInterrupt();
     } else if (regs.int_no == 33) {

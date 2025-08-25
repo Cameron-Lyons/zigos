@@ -306,6 +306,30 @@ pub fn getMACAddress() ?[6]u8 {
     return null;
 }
 
+pub fn isInitialized() bool {
+    return rtl8139_device != null;
+}
+
+pub fn send(data: []const u8) void {
+    if (rtl8139_device) |*device| {
+        device.send(data) catch {};
+    }
+}
+
+pub fn receive() ?[]u8 {
+    if (rtl8139_device) |*device| {
+        return device.receive();
+    }
+    return null;
+}
+
+pub fn getMacAddress() [6]u8 {
+    if (rtl8139_device) |*device| {
+        return device.mac_address;
+    }
+    return [_]u8{0} ** 6;
+}
+
 pub fn sendPacket(data: []const u8) !void {
     if (rtl8139_device) |*rtl| {
         try rtl.send(data);
