@@ -1,14 +1,13 @@
-; Multiboot header
 section .multiboot
 align 4
-    dd 0x1BADB002              ; Magic number
-    dd 0x00                    ; Flags
-    dd -(0x1BADB002 + 0x00)   ; Checksum
+    dd 0x1BADB002
+    dd 0x00
+    dd -(0x1BADB002 + 0x00)
 
 section .bss
 align 16
 stack_bottom:
-    resb 16384                 ; 16KB stack
+    resb 16384
 stack_top:
 
 section .text

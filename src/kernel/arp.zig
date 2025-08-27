@@ -85,7 +85,7 @@ pub fn init() void {
         }
         arp_table_init = true;
     }
-    
+
     ethernet.registerHandler(.ARP, handleARPPacket);
     vga.print("ARP initialized\n");
 }
@@ -94,24 +94,21 @@ fn handleARPPacket(frame: *const ethernet.EthernetFrame) void {
     if (frame.data.len < @sizeOf(ARPHeader)) {
         return;
     }
-    
+
     const arp = @as(*const ARPHeader, @ptrCast(@alignCast(frame.data.ptr)));
-    
-    // Check if it's Ethernet and IPv4
+
     if (@byteSwap(arp.hardware_type) != ARP_HARDWARE_ETHERNET or
-        @byteSwap(arp.protocol_type) != ARP_PROTOCOL_IP) {
+        @byteSwap(arp.protocol_type) != ARP_PROTOCOL_IP)
+    {
         return;
     }
-    
+
     const opcode = @byteSwap(arp.opcode);
-    
-    // Add sender to ARP table
+
     const sender_mac = getMacFromArp(arp, .sender);
     addToTable(@byteSwap(arp.sender_ip), sender_mac);
-    
-    // Handle ARP request
+
     if (opcode == ARP_OPCODE_REQUEST) {
-        // Check if the request is for our IP
         if (isOurIP(@byteSwap(arp.target_ip))) {
             sendARPReply(arp);
         }
@@ -120,29 +117,24 @@ fn handleARPPacket(frame: *const ethernet.EthernetFrame) void {
 
 fn sendARPReply(request: *const ARPHeader) void {
     var reply: ARPHeader = undefined;
-    
+
     reply.hardware_type = @byteSwap(@as(u16, ARP_HARDWARE_ETHERNET));
     reply.protocol_type = @byteSwap(@as(u16, ARP_PROTOCOL_IP));
     reply.hardware_addr_len = 6;
     reply.protocol_addr_len = 4;
     reply.opcode = @byteSwap(@as(u16, ARP_OPCODE_REPLY));
-    
-    // Set our MAC as sender
+
     if (rtl8139.getMACAddress()) |mac| {
         setMacInArp(&reply, .sender, mac);
     } else {
         return;
     }
-    
-    // Set our IP as sender
-    reply.sender_ip = request.target_ip; // Already in network byte order
-    
-    // Set requester as target
+
+    reply.sender_ip = request.target_ip;
     const requester_mac = getMacFromArp(request, .sender);
     setMacInArp(&reply, .target, requester_mac);
     reply.target_ip = request.sender_ip;
-    
-    // Send the reply
+
     const reply_bytes = @as([*]const u8, @ptrCast(&reply))[0..@sizeOf(ARPHeader)];
     ethernet.sendFrame(requester_mac, .ARP, reply_bytes) catch {
         vga.print("Failed to send ARP reply\n");
@@ -151,29 +143,24 @@ fn sendARPReply(request: *const ARPHeader) void {
 
 pub fn sendARPRequest(target_ip: u32) !void {
     var request: ARPHeader = undefined;
-    
+
     request.hardware_type = @byteSwap(@as(u16, ARP_HARDWARE_ETHERNET));
     request.protocol_type = @byteSwap(@as(u16, ARP_PROTOCOL_IP));
     request.hardware_addr_len = 6;
     request.protocol_addr_len = 4;
     request.opcode = @byteSwap(@as(u16, ARP_OPCODE_REQUEST));
-    
-    // Set our MAC as sender
+
     if (rtl8139.getMACAddress()) |mac| {
         setMacInArp(&request, .sender, mac);
     } else {
         return error.NoMACAddress;
     }
-    
-    // Set our IP as sender (hardcoded for now)
-    request.sender_ip = @byteSwap(@as(u32, 0xC0A80102)); // 192.168.1.2
-    
-    // Set target MAC to broadcast
+
+    request.sender_ip = @byteSwap(@as(u32, 0xC0A80102));
     const broadcast_mac_local = [_]u8{0xFF} ** 6;
     setMacInArp(&request, .target, broadcast_mac_local);
     request.target_ip = @byteSwap(target_ip);
-    
-    // Send to broadcast MAC
+
     const broadcast_mac = [_]u8{0xFF} ** 6;
     const request_bytes = @as([*]const u8, @ptrCast(&request))[0..@sizeOf(ARPHeader)];
     try ethernet.sendFrame(broadcast_mac, .ARP, request_bytes);
@@ -189,15 +176,13 @@ pub fn resolve(ip: u32) ?[6]u8 {
 }
 
 fn addToTable(ip: u32, mac: [6]u8) void {
-    // First, check if it already exists
     for (&arp_table) |*entry| {
         if (entry.valid and entry.ip == ip) {
             @memcpy(&entry.mac, &mac);
             return;
         }
     }
-    
-    // Find an empty slot
+
     for (&arp_table) |*entry| {
         if (!entry.valid) {
             entry.ip = ip;
@@ -206,14 +191,13 @@ fn addToTable(ip: u32, mac: [6]u8) void {
             return;
         }
     }
-    
-    // Table full, overwrite the first entry
+
     arp_table[0].ip = ip;
     @memcpy(&arp_table[0].mac, &mac);
     arp_table[0].valid = true;
 }
 
 fn isOurIP(ip: u32) bool {
-    // Hardcoded for now
-    return ip == 0xC0A80102; // 192.168.1.2
+    return ip == 0xC0A80102;
 }
+
