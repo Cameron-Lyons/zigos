@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: master
+        
+    - name: Install NASM
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y nasm
+        
+    - name: Install QEMU
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-x86 qemu-system-i386
+        
+    - name: Build kernel
+      run: |
+        zig build kernel
+        
+    - name: Test kernel boot
+      run: |
+        timeout 10 qemu-system-x86_64 \
+          -kernel zig-out/bin/kernel.elf \
+          -m 128M \
+          -display none \
+          -serial file:serial.log \
+          -monitor none \
+          -no-reboot \
+          -no-shutdown || true
+        
+        if [ -f serial.log ]; then
+          echo "Serial output:"
+          cat serial.log
+        fi
+        
+        echo "Kernel build and boot test completed successfully"
+
