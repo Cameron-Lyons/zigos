@@ -1,8 +1,8 @@
 const std = @import("std");
 const kernel = @import("../kernel/main.zig");
-const vga = @import("../kernel/vga.zig");
-const isr = @import("../kernel/isr.zig");
-const idt = @import("../kernel/idt.zig");
+const vga = @import("../kernel/drivers/vga.zig");
+const isr = @import("../kernel/interrupts/isr.zig");
+const idt = @import("../kernel/interrupts/idt.zig");
 
 export fn _start() callconv(.Naked) noreturn {
     asm volatile (

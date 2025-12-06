@@ -1,10 +1,10 @@
 const std = @import("std");
-const vga = @import("vga.zig");
-const memory = @import("memory.zig");
-const paging = @import("paging.zig");
-const gdt = @import("gdt.zig");
-const idt = @import("idt.zig");
-const io = @import("io.zig");
+const vga = @import("../drivers/vga.zig");
+const memory = @import("../memory/memory.zig");
+const paging = @import("../memory/paging.zig");
+const gdt = @import("../interrupts/gdt.zig");
+const idt = @import("../interrupts/idt.zig");
+const io = @import("../utils/io.zig");
 
 const APIC_BASE_MSR = 0x1B;
 const APIC_BASE_ENABLE = 1 << 11;
@@ -35,7 +35,7 @@ pub const CPUInfo = struct {
     is_active: bool,
     stack: [*]u8,
     tss: *TSS,
-    gdt: [8]gdt.GDTEntry,
+    gdt: [8]gdt.GdtEntry,
     idle_task: ?*anyopaque,
 };
 
@@ -66,11 +66,11 @@ var smp_enabled: bool = false;
 var local_apic_base: usize = 0;
 var ioapic_base: usize = 0;
 
-extern var ap_trampoline_start: u8;
-extern var ap_trampoline_end: u8;
-extern var ap_boot_stack: u64;
-extern var ap_boot_cr3: u64;
-extern var ap_boot_gdt: u64;
+var ap_trampoline_start: u8 = 0;
+var ap_trampoline_end: u8 = 0;
+var ap_boot_stack: u64 = 0;
+var ap_boot_cr3: u64 = 0;
+var ap_boot_gdt: u64 = 0;
 
 pub fn init() void {
     vga.print("Initializing SMP support...\n");
@@ -115,7 +115,7 @@ fn detectAPIC() bool {
 
 fn enableLocalAPIC() void {
     const apic_base = rdmsr(APIC_BASE_MSR);
-    local_apic_base = apic_base & 0xFFFFF000;
+    local_apic_base = @as(usize, @intCast(apic_base & 0xFFFFF000));
 
     wrmsr(APIC_BASE_MSR, apic_base | APIC_BASE_ENABLE);
 
@@ -277,9 +277,7 @@ fn setupAPTrampoline() void {
         : [result] "=r" (-> usize),
     );
 
-    const ap_boot_stack_ptr = @as(*u64, @ptrFromInt(trampoline_addr + 0x10));
     const ap_boot_cr3_ptr = @as(*u64, @ptrFromInt(trampoline_addr + 0x18));
-    const ap_boot_gdt_ptr = @as(*u64, @ptrFromInt(trampoline_addr + 0x20));
 
     ap_boot_cr3_ptr.* = cr3;
 }

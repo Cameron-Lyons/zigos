@@ -1,34 +1,34 @@
-const vga = @import("vga.zig");
+const vga = @import("drivers/vga.zig");
 const boot = @import("../boot/boot.zig");
-const isr = @import("isr.zig");
-const keyboard = @import("keyboard.zig");
-const paging = @import("paging.zig");
-const timer = @import("timer.zig");
-const process = @import("process.zig");
-const shell = @import("shell.zig");
-const syscall = @import("syscall.zig");
-const test_syscall = @import("test_syscall.zig");
-const memory = @import("memory.zig");
-const panic_handler = @import("panic.zig");
-const error_handler = @import("error.zig");
-const device = @import("device.zig");
-const console_device = @import("console_device.zig");
-const vfs = @import("vfs.zig");
-const ata = @import("ata.zig");
-const fat32 = @import("fat32.zig");
-const pci = @import("pci.zig");
-const rtl8139 = @import("rtl8139.zig");
-const e1000 = @import("e1000.zig");
-const virtio = @import("virtio.zig");
-const network = @import("network.zig");
-const usb = @import("usb.zig");
-const acpi = @import("acpi.zig");
-const ac97 = @import("ac97.zig");
-const ext2 = @import("ext2.zig");
-const signals = @import("signal.zig");
-const vt = @import("vt.zig");
-const mmap = @import("mmap.zig");
-const file_ops = @import("file_ops.zig");
+const isr = @import("interrupts/isr.zig");
+const keyboard = @import("drivers/keyboard.zig");
+const paging = @import("memory/paging.zig");
+const timer = @import("timer/timer.zig");
+const process = @import("process/process.zig");
+const shell = @import("shell/shell.zig");
+const syscall = @import("process/syscall.zig");
+const test_syscall = @import("tests/test_syscall.zig");
+const memory = @import("memory/memory.zig");
+const panic_handler = @import("utils/panic.zig");
+const error_handler = @import("utils/error.zig");
+const device = @import("devices/device.zig");
+const console_device = @import("devices/console_device.zig");
+const vfs = @import("fs/vfs.zig");
+const ata = @import("drivers/ata.zig");
+const fat32 = @import("fs/fat32.zig");
+const pci = @import("drivers/pci.zig");
+const rtl8139 = @import("drivers/rtl8139.zig");
+const e1000 = @import("drivers/e1000.zig");
+const virtio = @import("drivers/virtio.zig");
+const network = @import("net/network.zig");
+const usb = @import("drivers/usb.zig");
+const acpi = @import("acpi/acpi.zig");
+const ac97 = @import("drivers/ac97.zig");
+const ext2 = @import("fs/ext2.zig");
+const signals = @import("process/signal.zig");
+const vt = @import("devices/vt.zig");
+const mmap = @import("memory/mmap.zig");
+const file_ops = @import("fs/file_ops.zig");
 
 fn test_process1() void {
     var i: u32 = 0;
@@ -57,7 +57,7 @@ export fn kernel_main() void {
     vga.print("A minimal operating system written in Zig\n");
 
     vga.print("Initializing GDT...\n");
-    const gdt = @import("gdt.zig");
+    const gdt = @import("interrupts/gdt.zig");
     gdt.init();
     vga.print("GDT initialized!\n");
 
@@ -73,18 +73,18 @@ export fn kernel_main() void {
     paging.init();
 
     vga.print("Enabling kernel memory protection...\n");
-    const protection = @import("protection.zig");
+    const protection = @import("memory/protection.zig");
     protection.protectKernelMemory();
 
     vga.print("Initializing memory allocator...\n");
     memory.init();
 
     vga.print("Initializing advanced memory management...\n");
-    const memory_pool = @import("memory_pool.zig");
+    const memory_pool = @import("memory/memory_pool.zig");
     memory_pool.init();
 
     vga.print("Initializing environment variables...\n");
-    const environ = @import("environ.zig");
+    const environ = @import("utils/environ.zig");
     environ.init();
 
     vga.print("Initializing device drivers...\n");
@@ -102,7 +102,7 @@ export fn kernel_main() void {
     acpi.init();
 
     vga.print("Initializing SMP (multicore) support...\n");
-    const smp = @import("smp.zig");
+    const smp = @import("smp/smp.zig");
     smp.init();
     if (smp.isSMPEnabled()) {
         vga.print("SMP enabled with ");
@@ -142,19 +142,19 @@ export fn kernel_main() void {
     network.init();
 
     vga.print("Initializing socket API...\n");
-    const socket = @import("socket.zig");
+    const socket = @import("net/socket.zig");
     socket.init();
 
     vga.print("Initializing DNS client...\n");
-    const dns = @import("dns.zig");
+    const dns = @import("net/dns.zig");
     dns.init();
 
     vga.print("Initializing DHCP client...\n");
-    const dhcp = @import("dhcp.zig");
+    const dhcp = @import("net/dhcp.zig");
     dhcp.init();
 
     vga.print("Initializing routing table...\n");
-    const routing = @import("routing.zig");
+    const routing = @import("net/routing.zig");
     routing.init();
 
     vga.print("Initializing Virtual File System...\n");
@@ -184,14 +184,14 @@ export fn kernel_main() void {
     }
 
     vga.print("Running VM tests...\n");
-    const vm_test = @import("vm_test.zig");
+    const vm_test = @import("tests/vm_test.zig");
     vm_test.test_virtual_memory();
 
     vga.print("Initializing process management...\n");
     process.init();
 
     vga.print("Initializing process monitoring...\n");
-    const procmon = @import("procmon.zig");
+    const procmon = @import("tests/procmon.zig");
     procmon.init();
 
     vga.print("Initializing timer...\n");
@@ -211,7 +211,7 @@ export fn kernel_main() void {
     vt.init();
 
     vga.print("Initializing graphics mode (framebuffer)...\n");
-    _ = @import("framebuffer.zig");
+    _ = @import("devices/framebuffer.zig");
     vga.print("Framebuffer support ready (requires multiboot framebuffer info)\n");
 
     vga.print("Creating test processes...\n");
@@ -219,14 +219,14 @@ export fn kernel_main() void {
     _ = process.create_process("test2", test_process2);
     _ = process.create_process("syscall_test", test_syscall.test_syscall_process);
 
-    const userspace = @import("userspace.zig");
+    const userspace = @import("process/userspace.zig");
     userspace.createUserTestProcess();
 
-    const ring3 = @import("ring3.zig");
+    const ring3 = @import("process/ring3.zig");
     ring3.createRing3TestProcess();
 
     vga.print("Initializing user programs...\n");
-    const user_programs = @import("user_programs.zig");
+    const user_programs = @import("process/user_programs.zig");
     user_programs.init();
 
     vga.print("Initializing shell...\n");
