@@ -1,6 +1,6 @@
 #!/bin/bash
 
-zig build
+zig build kernel
 
 qemu-system-i386 \
   -kernel zig-out/bin/kernel.elf \
