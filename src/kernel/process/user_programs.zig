@@ -74,7 +74,47 @@ pub fn whoami_main(args: [][]const u8) void {
 
 pub fn date_main(args: [][]const u8) void {
     _ = args;
-    vga.print("Date: Not implemented yet\n");
+    const timer = @import("../timer/timer.zig");
+    const ticks = timer.getTicks();
+    const seconds = ticks / 100;
+    const minutes = seconds / 60;
+    const hours = minutes / 60;
+    const days = hours / 24;
+
+    const day_of_week = days % 7;
+    const weekdays = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+    
+    vga.print(weekdays[day_of_week]);
+    vga.print(" Jan  1 00:00:00 UTC 1970 (uptime: ");
+    printNumber(@as(usize, @intCast(days)));
+    vga.print("d ");
+    printNumber(@as(usize, @intCast(hours % 24)));
+    vga.print("h ");
+    printNumber(@as(usize, @intCast(minutes % 60)));
+    vga.print("m ");
+    printNumber(@as(usize, @intCast(seconds % 60)));
+    vga.print("s)\n");
+}
+
+fn printNumber(n: usize) void {
+    if (n == 0) {
+        vga.printChar('0');
+        return;
+    }
+
+    var num = n;
+    var digits: [20]u8 = undefined;
+    var i: usize = 0;
+
+    while (num > 0) : (i += 1) {
+        digits[i] = @intCast((num % 10) + '0');
+        num /= 10;
+    }
+
+    while (i > 0) {
+        i -= 1;
+        vga.printChar(digits[i]);
+    }
 }
 
 pub fn uname_main(args: [][]const u8) void {
