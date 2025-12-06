@@ -9,6 +9,8 @@ const posix = @import("posix.zig");
 const memory = @import("memory.zig");
 const paging = @import("paging.zig");
 const vfs = @import("vfs.zig");
+const signal = @import("../process/signal.zig");
+const mmap_module = @import("../memory/mmap.zig");
 
 pub const SYS_EXIT = 1;
 pub const SYS_WRITE = 2;
@@ -26,6 +28,11 @@ pub const SYS_MKDIR = 13;
 pub const SYS_RMDIR = 14;
 pub const SYS_UNLINK = 15;
 pub const SYS_RENAME = 16;
+pub const SYS_KILL = 17;
+pub const SYS_SIGACTION = 18;
+pub const SYS_SIGPROCMASK = 19;
+pub const SYS_MUNMAP = 20;
+pub const SYS_MPROTECT = 21;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -59,6 +66,11 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_RMDIR => sys_rmdir(@as([*]const u8, @ptrFromInt(arg1))),
         SYS_UNLINK => sys_unlink(@as([*]const u8, @ptrFromInt(arg1))),
         SYS_RENAME => sys_rename(@as([*]const u8, @ptrFromInt(arg1)), @as([*]const u8, @ptrFromInt(arg2))),
+        SYS_KILL => sys_kill(@intCast(arg1), @intCast(arg2)),
+        SYS_SIGACTION => sys_sigaction(@intCast(arg1), @as(?*signal.SigAction, @ptrFromInt(arg2)), @as(?*signal.SigAction, @ptrFromInt(arg3))),
+        SYS_SIGPROCMASK => sys_sigprocmask(@intCast(arg1), @as(?*signal.SigSet, @ptrFromInt(arg2)), @as(?*signal.SigSet, @ptrFromInt(arg3))),
+        SYS_MUNMAP => sys_munmap(arg1, arg2),
+        SYS_MPROTECT => sys_mprotect(arg1, arg2, @intCast(arg3)),
         else => ENOSYS,
     };
 
@@ -439,4 +451,87 @@ fn sys_mmap(addr: usize, length: usize, prot: i32, flags: i32, fd: i32, offset: 
     }
 
     return @intCast(result_addr);
+}
+
+fn sys_kill(pid: i32, sig: i32) i32 {
+    signal.kill(pid, sig) catch |err| {
+        return switch (err) {
+            error.InvalidSignal => EINVAL,
+            error.NoSuchProcess => -3,
+        };
+    };
+    return 0;
+}
+
+fn sys_sigaction(signum: i32, act: ?*signal.SigAction, oldact: ?*signal.SigAction) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(act orelse @as(*signal.SigAction, @ptrFromInt(0))), @sizeOf(signal.SigAction)) and
+        act != null) {
+        return EINVAL;
+    }
+    if (!protection.verifyUserPointer(@intFromPtr(oldact orelse @as(*signal.SigAction, @ptrFromInt(0))), @sizeOf(signal.SigAction)) and
+        oldact != null) {
+        return EINVAL;
+    }
+
+    var kernel_act: ?signal.SigAction = null;
+    if (act) |user_act| {
+        protection.copyFromUser(@as([*]u8, @ptrCast(&kernel_act))[0..@sizeOf(signal.SigAction)], @intFromPtr(user_act)) catch {
+            return EINVAL;
+        };
+    }
+
+    signal.sigaction(signum, if (kernel_act) |*a| a else null, oldact) catch |err| {
+        return switch (err) {
+            error.InvalidSignal => EINVAL,
+        };
+    };
+    return 0;
+}
+
+fn sys_sigprocmask(how: i32, set: ?*signal.SigSet, oldset: ?*signal.SigSet) i32 {
+    if (set) |user_set| {
+        if (!protection.verifyUserPointer(@intFromPtr(user_set), @sizeOf(signal.SigSet))) {
+            return EINVAL;
+        }
+    }
+    if (oldset) |user_oldset| {
+        if (!protection.verifyUserPointer(@intFromPtr(user_oldset), @sizeOf(signal.SigSet))) {
+            return EINVAL;
+        }
+    }
+
+    var kernel_set: ?signal.SigSet = null;
+    if (set) |user_set| {
+        protection.copyFromUser(@as([*]u8, @ptrCast(&kernel_set))[0..@sizeOf(signal.SigSet)], @intFromPtr(user_set)) catch {
+            return EINVAL;
+        };
+    }
+
+    signal.sigprocmask(how, if (kernel_set) |*s| s else null, oldset) catch |err| {
+        return switch (err) {
+            error.InvalidArgument => EINVAL,
+        };
+    };
+    return 0;
+}
+
+fn sys_munmap(addr: usize, length: usize) i32 {
+    mmap_module.munmap(addr, length) catch |err| {
+        return switch (err) {
+            mmap_module.MMapError.InvalidLength => EINVAL,
+            else => -1,
+        };
+    };
+    return 0;
+}
+
+fn sys_mprotect(addr: usize, length: usize, prot: i32) i32 {
+    mmap_module.mprotect(addr, length, @intCast(prot)) catch |err| {
+        return switch (err) {
+            mmap_module.MMapError.InvalidLength => EINVAL,
+            mmap_module.MMapError.NoMemory => -12,
+            else => -1,
+        };
+    };
+    return 0;
 }

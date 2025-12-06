@@ -128,7 +128,7 @@ const Ext2DirEntry = extern struct {
 };
 
 const Ext2FileSystem = struct {
-    device: *ata.ATADevice,
+    device: *const ata.ATADevice,
     superblock: Ext2Superblock,
     block_size: u32,
     groups_count: u32,
@@ -204,24 +204,20 @@ const Ext2FileSystem = struct {
 
     fn readBlock(self: *Ext2FileSystem, block_num: u32, buffer: []u8) !void {
         const lba = block_num * (self.block_size / 512);
-        const sectors = self.block_size / 512;
+        const sectors = @as(u8, @intCast(self.block_size / 512));
 
-        for (0..sectors) |i| {
-            self.device.read(lba + @as(u32, @intCast(i)), buffer[i * 512..(i + 1) * 512]) catch {
-                return vfs.VFSError.DeviceError;
-            };
-        }
+        ata.readSectors(self.device, lba, sectors, buffer) catch {
+            return vfs.VFSError.DeviceError;
+        };
     }
 
     fn writeBlock(self: *Ext2FileSystem, block_num: u32, buffer: []const u8) !void {
         const lba = block_num * (self.block_size / 512);
-        const sectors = self.block_size / 512;
+        const sectors = @as(u8, @intCast(self.block_size / 512));
 
-        for (0..sectors) |i| {
-            self.device.write(lba + @as(u32, @intCast(i)), buffer[i * 512..(i + 1) * 512]) catch {
-                return vfs.VFSError.DeviceError;
-            };
-        }
+        ata.writeSectors(self.device, lba, sectors, buffer) catch {
+            return vfs.VFSError.DeviceError;
+        };
     }
 
     fn readInode(self: *Ext2FileSystem, inode_num: u32) !Ext2Inode {
@@ -332,21 +328,70 @@ const Ext2FileSystem = struct {
     }
 };
 
+const Ext2VNodeData = struct {
+    inode_num: u32,
+    inode: Ext2Inode,
+};
+
 var ext2_filesystems: [4]?Ext2FileSystem = [_]?Ext2FileSystem{null} ** 4;
 var num_ext2_fs: u8 = 0;
 
+var ext2_fs_type: vfs.FileSystemType = undefined;
+var ext2_fs_ops: vfs.FileSystemOps = undefined;
+var ext2_file_ops: vfs.FileOps = undefined;
+
 pub fn init() void {
     vga.print("Initializing ext2 filesystem support...\n");
+
+    ext2_file_ops = vfs.FileOps{
+        .read = ext2Read,
+        .write = ext2Write,
+        .open = ext2Open,
+        .close = ext2Close,
+        .seek = ext2Seek,
+        .ioctl = ext2Ioctl,
+        .stat = ext2Stat,
+        .readdir = ext2Readdir,
+        .truncate = ext2Truncate,
+        .chmod = ext2Chmod,
+        .chown = ext2Chown,
+    };
+
+    ext2_fs_ops = vfs.FileSystemOps{
+        .mount = ext2Mount,
+        .unmount = ext2Unmount,
+        .get_root = ext2GetRoot,
+        .lookup = ext2Lookup,
+        .create = ext2Create,
+        .mkdir = ext2Mkdir,
+        .unlink = ext2Unlink,
+        .rmdir = ext2Rmdir,
+        .rename = ext2Rename,
+        .symlink = null,
+        .link = null,
+        .readlink = null,
+    };
+
+    @memcpy(ext2_fs_type.name[0..4], "ext2");
+    ext2_fs_type.name[4] = 0;
+    ext2_fs_type.ops = &ext2_fs_ops;
+    ext2_fs_type.next = null;
+
+    vfs.registerFileSystem(&ext2_fs_type) catch |err| {
+        vga.print("Failed to register ext2: ");
+        vga.print(@errorName(err));
+        vga.print("\n");
+    };
 }
 
-pub fn mount(device: *ata.ATADevice) !*Ext2FileSystem {
+pub fn mount(device: *const ata.ATADevice) !*Ext2FileSystem {
     if (num_ext2_fs >= 4) {
         return vfs.VFSError.NoSpace;
     }
 
     var superblock_buffer: [1024]u8 = undefined;
-    device.read(2, superblock_buffer[0..512]) catch return vfs.VFSError.DeviceError;
-    device.read(3, superblock_buffer[512..]) catch return vfs.VFSError.DeviceError;
+    ata.readSectors(device, 2, 1, superblock_buffer[0..512]) catch return vfs.VFSError.DeviceError;
+    ata.readSectors(device, 3, 1, superblock_buffer[512..]) catch return vfs.VFSError.DeviceError;
 
     const superblock = @as(*const Ext2Superblock, @ptrCast(@alignCast(&superblock_buffer))).*;
 
@@ -373,7 +418,7 @@ pub fn mount(device: *ata.ATADevice) !*Ext2FileSystem {
 
     const fs = &ext2_filesystems[num_ext2_fs].?;
 
-    const gdt_block = if (block_size == 1024) 2 else 1;
+    const gdt_block: u32 = if (block_size == 1024) 2 else 1;
     for (0..group_desc_blocks) |i| {
         var buffer: [4096]u8 = undefined;
         try fs.readBlock(gdt_block + @as(u32, @intCast(i)), buffer[0..block_size]);
@@ -417,4 +462,315 @@ fn printNumber(num: u32) void {
         i -= 1;
         vga.printChar(digits[i]);
     }
+}
+
+fn ext2Mount(mount_point: *vfs.MountPoint) vfs.VFSError!void {
+    const device = ata.getPrimaryMaster() orelse return vfs.VFSError.NotFound;
+    const fs = try mount(device);
+    mount_point.private_data = fs;
+}
+
+fn ext2Unmount(mount_point: *vfs.MountPoint) vfs.VFSError!void {
+    if (mount_point.private_data) |fs_ptr| {
+        const fs = @as(*Ext2FileSystem, @ptrCast(@alignCast(fs_ptr)));
+        fs.cache.flush(fs) catch {};
+    }
+}
+
+fn ext2GetRoot(mount_point: *vfs.MountPoint) vfs.VFSError!*vfs.VNode {
+    const fs = @as(*Ext2FileSystem, @ptrCast(@alignCast(mount_point.private_data.?)));
+    const root_inode = try fs.readInode(EXT2_ROOT_INO);
+
+    const vnode_mem = memory.kmalloc(@sizeOf(vfs.VNode)) orelse return vfs.VFSError.OutOfMemory;
+    const vnode = @as(*vfs.VNode, @ptrCast(@alignCast(vnode_mem)));
+
+    const vnode_data_mem = memory.kmalloc(@sizeOf(Ext2VNodeData)) orelse {
+        memory.kfree(@as([*]u8, @ptrCast(vnode)));
+        return vfs.VFSError.OutOfMemory;
+    };
+    const vnode_data = @as(*Ext2VNodeData, @ptrCast(@alignCast(vnode_data_mem)));
+
+    vnode_data.inode_num = EXT2_ROOT_INO;
+    vnode_data.inode = root_inode;
+
+    const file_type = if ((root_inode.i_mode & EXT2_S_IFDIR) != 0)
+        vfs.FileType.Directory
+    else if ((root_inode.i_mode & EXT2_S_IFREG) != 0)
+        vfs.FileType.Regular
+    else
+        vfs.FileType.Regular;
+
+    vnode.* = vfs.VNode{
+        .name = [_]u8{0} ** 256,
+        .name_len = 1,
+        .inode = EXT2_ROOT_INO,
+        .file_type = file_type,
+        .mode = ext2ModeToVFSMode(root_inode.i_mode),
+        .size = root_inode.i_size,
+        .ref_count = 1,
+        .mount_point = mount_point,
+        .parent = null,
+        .children = null,
+        .next_sibling = null,
+        .ops = &ext2_file_ops,
+        .private_data = vnode_data,
+    };
+
+    vnode.name[0] = '/';
+    return vnode;
+}
+
+fn ext2Lookup(parent: *vfs.VNode, name: []const u8) vfs.VFSError!*vfs.VNode {
+    const parent_data = @as(*Ext2VNodeData, @ptrCast(@alignCast(parent.private_data.?)));
+    const fs = @as(*Ext2FileSystem, @ptrCast(@alignCast(parent.mount_point.?.private_data.?)));
+
+    const inode_num = try fs.findDirEntry(&parent_data.inode, name);
+    const inode = try fs.readInode(inode_num);
+
+    const vnode_mem = memory.kmalloc(@sizeOf(vfs.VNode)) orelse return vfs.VFSError.OutOfMemory;
+    const vnode = @as(*vfs.VNode, @ptrCast(@alignCast(vnode_mem)));
+
+    const vnode_data_mem = memory.kmalloc(@sizeOf(Ext2VNodeData)) orelse {
+        memory.kfree(@as([*]u8, @ptrCast(vnode)));
+        return vfs.VFSError.OutOfMemory;
+    };
+    const vnode_data = @as(*Ext2VNodeData, @ptrCast(@alignCast(vnode_data_mem)));
+
+    vnode_data.inode_num = inode_num;
+    vnode_data.inode = inode;
+
+    const file_type = if ((inode.i_mode & EXT2_S_IFDIR) != 0)
+        vfs.FileType.Directory
+    else if ((inode.i_mode & EXT2_S_IFREG) != 0)
+        vfs.FileType.Regular
+    else if ((inode.i_mode & EXT2_S_IFLNK) != 0)
+        vfs.FileType.SymLink
+    else
+        vfs.FileType.Regular;
+
+    const name_len = @min(name.len, 255);
+    @memcpy(vnode.name[0..name_len], name[0..name_len]);
+    vnode.name[name_len] = 0;
+    vnode.name_len = @as(u16, @intCast(name_len));
+
+    vnode.* = vfs.VNode{
+        .name = vnode.name,
+        .name_len = vnode.name_len,
+        .inode = inode_num,
+        .file_type = file_type,
+        .mode = ext2ModeToVFSMode(inode.i_mode),
+        .size = inode.i_size,
+        .ref_count = 1,
+        .mount_point = parent.mount_point,
+        .parent = parent,
+        .children = null,
+        .next_sibling = null,
+        .ops = &ext2_file_ops,
+        .private_data = vnode_data,
+    };
+
+    return vnode;
+}
+
+fn ext2Read(vnode: *vfs.VNode, buffer: []u8, offset: u64) vfs.VFSError!usize {
+    const vnode_data = @as(*Ext2VNodeData, @ptrCast(@alignCast(vnode.private_data.?)));
+    const fs = @as(*Ext2FileSystem, @ptrCast(@alignCast(vnode.mount_point.?.private_data.?)));
+
+    if (vnode.file_type == vfs.FileType.Directory) {
+        return vfs.VFSError.IsDirectory;
+    }
+
+    if (offset >= vnode_data.inode.i_size) {
+        return 0;
+    }
+
+    var bytes_to_read = buffer.len;
+    if (offset + bytes_to_read > vnode_data.inode.i_size) {
+        bytes_to_read = @as(usize, @intCast(vnode_data.inode.i_size - offset));
+    }
+
+    var bytes_read: usize = 0;
+    var current_offset = offset;
+    const block_size = fs.block_size;
+
+    while (bytes_read < bytes_to_read) {
+        const block_index = @as(u32, @intCast(current_offset / block_size));
+        const offset_in_block = @as(u32, @intCast(current_offset % block_size));
+
+        const block = try fs.readDataBlock(&vnode_data.inode, block_index);
+        if (block.len == 0) break;
+
+        const bytes_in_block = @min(block_size - offset_in_block, bytes_to_read - bytes_read);
+        const offset_start = @as(usize, @intCast(offset_in_block));
+        @memcpy(buffer[bytes_read..bytes_read + bytes_in_block], block[offset_start..offset_start + bytes_in_block]);
+
+        bytes_read += bytes_in_block;
+        current_offset += bytes_in_block;
+    }
+
+    return bytes_read;
+}
+
+fn ext2Write(vnode: *vfs.VNode, buffer: []const u8, offset: u64) vfs.VFSError!usize {
+    _ = vnode;
+    _ = buffer;
+    _ = offset;
+    return vfs.VFSError.ReadOnly;
+}
+
+fn ext2Open(vnode: *vfs.VNode, flags: u32) vfs.VFSError!void {
+    _ = vnode;
+    _ = flags;
+}
+
+fn ext2Close(vnode: *vfs.VNode) vfs.VFSError!void {
+    _ = vnode;
+}
+
+fn ext2Seek(vnode: *vfs.VNode, offset: i64, whence: u32) vfs.VFSError!u64 {
+    _ = vnode;
+    _ = offset;
+    _ = whence;
+    return 0;
+}
+
+fn ext2Ioctl(vnode: *vfs.VNode, request: u32, arg: usize) vfs.VFSError!i32 {
+    _ = vnode;
+    _ = request;
+    _ = arg;
+    return 0;
+}
+
+fn ext2Stat(vnode: *vfs.VNode, stat_buf: *vfs.FileStat) vfs.VFSError!void {
+    const vnode_data = @as(*Ext2VNodeData, @ptrCast(@alignCast(vnode.private_data.?)));
+
+    stat_buf.* = vfs.FileStat{
+        .inode = vnode.inode,
+        .mode = vnode.mode,
+        .file_type = vnode.file_type,
+        .size = vnode.size,
+        .blocks = vnode_data.inode.i_blocks,
+        .block_size = 512,
+        .uid = vnode_data.inode.i_uid,
+        .gid = vnode_data.inode.i_gid,
+        .atime = vnode_data.inode.i_atime,
+        .mtime = vnode_data.inode.i_mtime,
+        .ctime = vnode_data.inode.i_ctime,
+    };
+}
+
+fn ext2Readdir(vnode: *vfs.VNode, dirent: *vfs.DirEntry, index: u64) vfs.VFSError!bool {
+    const vnode_data = @as(*Ext2VNodeData, @ptrCast(@alignCast(vnode.private_data.?)));
+    const fs = @as(*Ext2FileSystem, @ptrCast(@alignCast(vnode.mount_point.?.private_data.?)));
+
+    if (vnode.file_type != vfs.FileType.Directory) {
+        return vfs.VFSError.NotDirectory;
+    }
+
+    const blocks_count = (vnode_data.inode.i_size + fs.block_size - 1) / fs.block_size;
+    var entry_index: u64 = 0;
+
+    for (0..blocks_count) |block_idx| {
+        const block = try fs.readDataBlock(&vnode_data.inode, @as(u32, @intCast(block_idx)));
+        var offset: u32 = 0;
+
+        while (offset < fs.block_size and offset < vnode_data.inode.i_size) {
+            const entry = @as(*const Ext2DirEntry, @ptrCast(@alignCast(&block[offset])));
+
+            if (entry.inode != 0) {
+                if (entry_index == index) {
+                    const entry_name = @as([*]const u8, @ptrCast(&block[offset + @sizeOf(Ext2DirEntry)]))[0..entry.name_len];
+                    const name_len = @min(entry.name_len, 255);
+                    @memcpy(dirent.name[0..name_len], entry_name[0..name_len]);
+                    dirent.name[name_len] = 0;
+                    dirent.name_len = @as(u16, @intCast(name_len));
+                    dirent.inode = entry.inode;
+
+                    const inode = fs.readInode(entry.inode) catch continue;
+                    dirent.file_type = if ((inode.i_mode & EXT2_S_IFDIR) != 0)
+                        vfs.FileType.Directory
+                    else if ((inode.i_mode & EXT2_S_IFREG) != 0)
+                        vfs.FileType.Regular
+                    else if ((inode.i_mode & EXT2_S_IFLNK) != 0)
+                        vfs.FileType.SymLink
+                    else
+                        vfs.FileType.Regular;
+
+                    return true;
+                }
+                entry_index += 1;
+            }
+
+            offset += entry.rec_len;
+        }
+    }
+
+    return false;
+}
+
+fn ext2Truncate(vnode: *vfs.VNode, size: u64) vfs.VFSError!void {
+    _ = vnode;
+    _ = size;
+    return vfs.VFSError.ReadOnly;
+}
+
+fn ext2Chmod(vnode: *vfs.VNode, mode: vfs.FileMode) vfs.VFSError!void {
+    _ = vnode;
+    _ = mode;
+    return vfs.VFSError.ReadOnly;
+}
+
+fn ext2Chown(vnode: *vfs.VNode, uid: u32, gid: u32) vfs.VFSError!void {
+    _ = vnode;
+    _ = uid;
+    _ = gid;
+    return vfs.VFSError.ReadOnly;
+}
+
+fn ext2Create(parent: *vfs.VNode, name: []const u8, mode: vfs.FileMode) vfs.VFSError!*vfs.VNode {
+    _ = parent;
+    _ = name;
+    _ = mode;
+    return vfs.VFSError.ReadOnly;
+}
+
+fn ext2Mkdir(parent: *vfs.VNode, name: []const u8, mode: vfs.FileMode) vfs.VFSError!*vfs.VNode {
+    _ = parent;
+    _ = name;
+    _ = mode;
+    return vfs.VFSError.ReadOnly;
+}
+
+fn ext2Unlink(parent: *vfs.VNode, name: []const u8) vfs.VFSError!void {
+    _ = parent;
+    _ = name;
+    return vfs.VFSError.ReadOnly;
+}
+
+fn ext2Rmdir(parent: *vfs.VNode, name: []const u8) vfs.VFSError!void {
+    _ = parent;
+    _ = name;
+    return vfs.VFSError.ReadOnly;
+}
+
+fn ext2Rename(old_parent: *vfs.VNode, old_name: []const u8, new_parent: *vfs.VNode, new_name: []const u8) vfs.VFSError!void {
+    _ = old_parent;
+    _ = old_name;
+    _ = new_parent;
+    _ = new_name;
+    return vfs.VFSError.ReadOnly;
+}
+
+fn ext2ModeToVFSMode(mode: u16) vfs.FileMode {
+    return vfs.FileMode{
+        .owner_read = (mode & EXT2_S_IRUSR) != 0,
+        .owner_write = (mode & EXT2_S_IWUSR) != 0,
+        .owner_exec = (mode & EXT2_S_IXUSR) != 0,
+        .group_read = (mode & EXT2_S_IRGRP) != 0,
+        .group_write = (mode & EXT2_S_IWGRP) != 0,
+        .group_exec = (mode & EXT2_S_IXGRP) != 0,
+        .other_read = (mode & EXT2_S_IROTH) != 0,
+        .other_write = (mode & EXT2_S_IWOTH) != 0,
+        .other_exec = (mode & EXT2_S_IXOTH) != 0,
+    };
 }

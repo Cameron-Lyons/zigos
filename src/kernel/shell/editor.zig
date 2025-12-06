@@ -43,7 +43,8 @@ pub const TextEditor = struct {
         for (self.lines) |line| {
             self.allocator.free(line);
         }
-        self.allocator.free(self.lines);
+        const lines_bytes = @as([*]u8, @ptrCast(self.lines.ptr))[0..(@sizeOf([]u8) * self.lines.len)];
+        self.allocator.free(lines_bytes);
     }
 
     pub fn loadFile(self: *TextEditor, filename: []const u8) !void {

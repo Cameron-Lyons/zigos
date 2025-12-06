@@ -11,6 +11,9 @@ const network = @import("../net/network.zig");
 const multitask_demo = @import("../tests/multitask_demo.zig");
 const scheduler = @import("../process/scheduler.zig");
 const environ = @import("../utils/environ.zig");
+const editor = @import("editor.zig");
+const memory = @import("../memory/memory.zig");
+const keyboard = @import("../drivers/keyboard.zig");
 
 const MAX_COMMAND_LENGTH = 256;
 const MAX_ARGS = 16;
@@ -986,13 +989,34 @@ pub const Shell = struct {
             return;
         }
 
-        vga.print("Opening editor for ");
-        printString(args[0]);
-        vga.print("...\n");
+        const filename = sliceFromCStr(args[0]);
+        const allocator = memory.getDefaultAllocator();
+        
+        var text_editor = editor.TextEditor.init(allocator) catch {
+            vga.print("Failed to initialize editor\n");
+            return;
+        };
+        defer text_editor.deinit();
 
+        text_editor.loadFile(filename) catch |err| {
+            vga.print("Warning: Could not load file: ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+        };
 
-        vga.print("Note: Editor is currently in demo mode\n");
-        vga.print("Full editor implementation coming soon!\n");
+        vga.clear();
+        text_editor.draw();
+
+        while (text_editor.running) {
+            if (keyboard.has_char()) {
+                if (keyboard.getchar()) |key| {
+                    text_editor.handleKey(key);
+                    text_editor.draw();
+                }
+            }
+        }
+
+        vga.clear();
     }
 
     fn cmdNice(self: *const Shell, args: []const [*:0]const u8) void {

@@ -171,11 +171,19 @@ zigos/
 ### File Systems
 - ✅ Virtual File System (VFS) layer
 - ✅ FAT32 filesystem support
+- ✅ ext2 filesystem support (read-only, VFS integrated)
 - ✅ File write support
 - ✅ Symlink support (extended operations)
 - ✅ Hardlink support (extended operations)
 - ✅ ATA disk driver
 - ✅ Device management framework
+
+### Additional Features
+- ✅ Text editor (integrated in shell)
+- ✅ Date command with uptime display
+- ✅ Memory mapping (mmap/munmap/mprotect) syscalls
+- ✅ Signal handling syscalls (kill, sigaction, sigprocmask)
+- ✅ Memory allocator interface for user programs
 
 ## Roadmap
 
@@ -185,3 +193,6 @@ zigos/
 - [x] More user programs and utilities - ✅ User program framework and utilities added
 - [x] SMP (multicore) support - ✅ SMP initialization and APIC support implemented
 - [x] Graphics mode support - ✅ Framebuffer driver implemented (requires multiboot framebuffer info)
+- [x] ext2 filesystem support - ✅ ext2 VFS integration implemented
+- [x] Text editor integration - ✅ Editor fully integrated in shell
+- [x] Additional syscalls - ✅ mmap, signal handling syscalls added
