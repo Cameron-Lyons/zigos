@@ -1,3 +1,4 @@
+const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const builtin = @import("builtin");
 
@@ -56,6 +57,4 @@ pub fn todo(comptime message: []const u8) noreturn {
 pub fn unreachable_panic(comptime message: []const u8) noreturn {
     panic("Unreachable code reached: {s}", .{message});
 }
-
-const std = @import("std");
 
