@@ -19,6 +19,9 @@ const MAX_COMMAND_LENGTH = 256;
 const MAX_ARGS = 16;
 const MAX_HISTORY = 50;
 
+var nice_command_path_storage: [256]u8 = undefined;
+var nice_command_path_len_storage: usize = 0;
+
 pub const ArrowKey = enum {
     Up,
     Down,
@@ -192,6 +195,8 @@ pub const Shell = struct {
             "nslookup", "multitask", "scheduler", "schedstats", "dhcp",
             "route", "arp", "nettest", "synctest", "ipctest", "procmon",
             "top", "cp", "touch", "write", "edit", "nice", "renice",
+            "head", "tail", "wc", "grep", "find", "stat", "uname",
+            "whoami", "pwd", "sort", "uniq", "ifconfig", "df",
         };
 
 
@@ -396,6 +401,32 @@ pub const Shell = struct {
             self.cmdUnset(args[1..arg_count]);
         } else if (streq(command, "env")) {
             self.cmdEnv();
+        } else if (streq(command, "head")) {
+            self.cmdHead(args[1..arg_count]);
+        } else if (streq(command, "tail")) {
+            self.cmdTail(args[1..arg_count]);
+        } else if (streq(command, "wc")) {
+            self.cmdWc(args[1..arg_count]);
+        } else if (streq(command, "grep")) {
+            self.cmdGrep(args[1..arg_count]);
+        } else if (streq(command, "find")) {
+            self.cmdFind(args[1..arg_count]);
+        } else if (streq(command, "stat")) {
+            self.cmdStat(args[1..arg_count]);
+        } else if (streq(command, "uname")) {
+            self.cmdUname(args[1..arg_count]);
+        } else if (streq(command, "whoami")) {
+            self.cmdWhoami();
+        } else if (streq(command, "pwd")) {
+            self.cmdPwd();
+        } else if (streq(command, "sort")) {
+            self.cmdSort(args[1..arg_count]);
+        } else if (streq(command, "uniq")) {
+            self.cmdUniq(args[1..arg_count]);
+        } else if (streq(command, "ifconfig")) {
+            self.cmdIfconfig(args[1..arg_count]);
+        } else if (streq(command, "df")) {
+            self.cmdDf(args[1..arg_count]);
         } else {
             vga.print("Unknown command: ");
             printString(command);
@@ -429,6 +460,19 @@ pub const Shell = struct {
         vga.print("  touch    - Create an empty file\n");
         vga.print("  write    - Write text to a file\n");
         vga.print("  edit     - Edit a text file\n");
+        vga.print("  head     - Display first lines of a file\n");
+        vga.print("  tail     - Display last lines of a file\n");
+        vga.print("  wc       - Count lines, words, and bytes in a file\n");
+        vga.print("  grep     - Search for text in files\n");
+        vga.print("  find     - Find files by name\n");
+        vga.print("  stat     - Display file statistics\n");
+        vga.print("  uname    - Display system information\n");
+        vga.print("  whoami   - Display current user\n");
+        vga.print("  pwd      - Print working directory\n");
+        vga.print("  sort     - Sort lines in a file\n");
+        vga.print("  uniq     - Remove duplicate consecutive lines\n");
+        vga.print("  ifconfig - Display network interface configuration\n");
+        vga.print("  df       - Display disk space usage\n");
         vga.print("  chmod    - Change file permissions\n");
         vga.print("  export   - Set environment variable\n");
         vga.print("  unset    - Unset environment variable\n");
@@ -1027,7 +1071,6 @@ pub const Shell = struct {
             return;
         }
 
-
         const priority_str = sliceFromCStr(args[0]);
         var priority: i8 = 0;
         var is_negative = false;
@@ -1050,17 +1093,173 @@ pub const Shell = struct {
             priority = -priority;
         }
 
-        vga.print("Would run command '");
-        printString(args[1]);
-        vga.print("' with priority ");
-        if (priority < 0) {
-            vga.put_char('-');
-            printNumber(@as(usize, @intCast(-priority)));
-        } else {
-            printNumber(@as(usize, @intCast(priority)));
+        if (priority < -20) priority = -20;
+        if (priority > 19) priority = 19;
+
+        const command_name = sliceFromCStr(args[1]);
+        
+        const is_builtin = streq(args[1], "help") or
+            streq(args[1], "clear") or
+            streq(args[1], "echo") or
+            streq(args[1], "ps") or
+            streq(args[1], "meminfo") or
+            streq(args[1], "uptime") or
+            streq(args[1], "kill") or
+            streq(args[1], "shutdown") or
+            streq(args[1], "memtest") or
+            streq(args[1], "panic") or
+            streq(args[1], "lsdev") or
+            streq(args[1], "multitask") or
+            streq(args[1], "scheduler") or
+            streq(args[1], "schedstats") or
+            streq(args[1], "ls") or
+            streq(args[1], "cat") or
+            streq(args[1], "mkdir") or
+            streq(args[1], "rmdir") or
+            streq(args[1], "rm") or
+            streq(args[1], "mv") or
+            streq(args[1], "mount") or
+            streq(args[1], "ping") or
+            streq(args[1], "httpd") or
+            streq(args[1], "netstat") or
+            streq(args[1], "nslookup") or
+            streq(args[1], "dhcp") or
+            streq(args[1], "route") or
+            streq(args[1], "arp") or
+            streq(args[1], "nettest") or
+            streq(args[1], "synctest") or
+            streq(args[1], "ipctest") or
+            streq(args[1], "procmon") or
+            streq(args[1], "top") or
+            streq(args[1], "cp") or
+            streq(args[1], "touch") or
+            streq(args[1], "write") or
+            streq(args[1], "edit") or
+            streq(args[1], "head") or
+            streq(args[1], "tail") or
+            streq(args[1], "wc") or
+            streq(args[1], "grep") or
+            streq(args[1], "find") or
+            streq(args[1], "stat") or
+            streq(args[1], "uname") or
+            streq(args[1], "whoami") or
+            streq(args[1], "pwd") or
+            streq(args[1], "sort") or
+            streq(args[1], "uniq") or
+            streq(args[1], "ifconfig") or
+            streq(args[1], "df") or
+            streq(args[1], "nice") or
+            streq(args[1], "renice") or
+            streq(args[1], "chmod") or
+            streq(args[1], "export") or
+            streq(args[1], "unset") or
+            streq(args[1], "env");
+
+        if (is_builtin) {
+            vga.print("nice: Priority adjustment for built-in commands is not supported.\n");
+            vga.print("Built-in commands run in the shell context and cannot have their priority changed.\n");
+            vga.print("To use priority adjustment, run an external program instead.\n");
+            return;
         }
-        vga.print("\n");
-        vga.print("Note: Command execution with priority not yet fully implemented\n");
+
+        var command_path: [256]u8 = undefined;
+        var path_len: usize = 0;
+        
+        if (command_name.len + 5 < command_path.len) {
+            @memcpy(command_path[0..4], "/bin");
+            command_path[4] = '/';
+            @memcpy(command_path[5..5+command_name.len], command_name);
+            command_path[5 + command_name.len] = 0;
+            path_len = 5 + command_name.len;
+        } else {
+            vga.print("nice: Command path too long\n");
+            return;
+        }
+        
+        var file_found = false;
+        if (vfs.open(command_path[0..path_len], vfs.O_RDONLY)) |fd| {
+            vfs.close(fd) catch {};
+            file_found = true;
+        } else |_| {
+            if (command_name.len < command_path.len) {
+                @memcpy(command_path[0..command_name.len], command_name);
+                command_path[command_name.len] = 0;
+                path_len = command_name.len;
+                
+                if (vfs.open(command_path[0..path_len], vfs.O_RDONLY)) |fd| {
+                    vfs.close(fd) catch {};
+                    file_found = true;
+                } else |_| {
+                    file_found = false;
+                }
+            }
+        }
+        
+        if (!file_found) {
+            vga.print("nice: Command not found: ");
+            printString(args[1]);
+            vga.print("\n");
+            return;
+        }
+
+        @memcpy(&nice_command_path_storage, &command_path);
+        nice_command_path_len_storage = path_len;
+        
+        const ExecWrapper = struct {
+            fn exec_wrapper() void {
+                const posix2 = @import("../utils/posix.zig");
+                
+                var path_buf: [256]u8 = undefined;
+                @memcpy(&path_buf, &nice_command_path_storage);
+                
+                var argv: [1][]const u8 = undefined;
+                argv[0] = path_buf[0..nice_command_path_len_storage];
+                
+                var envp: [0][]const u8 = undefined;
+                
+                posix2.execve(path_buf[0..nice_command_path_len_storage], &argv, &envp) catch |err| {
+                    const vga2 = @import("../drivers/vga.zig");
+                    vga2.print("nice: Failed to execute: ");
+                    vga2.print(@errorName(err));
+                    vga2.print("\n");
+                    process.terminateProcess(process.getCurrentPID());
+                };
+            }
+        };
+        
+        const user_proc = process.create_user_process(command_name, ExecWrapper.exec_wrapper);
+        
+        if (scheduler.setProcessNice(user_proc.pid, priority)) {
+            vga.print("Running '");
+            printString(args[1]);
+            vga.print("' with nice value ");
+            if (priority < 0) {
+                vga.put_char('-');
+                printNumber(@as(usize, @intCast(-priority)));
+            } else {
+                printNumber(@as(usize, @intCast(priority)));
+            }
+            vga.print(" (PID: ");
+            printNumber(user_proc.pid);
+            vga.print(")\n");
+        } else {
+            if (process.setNice(user_proc.pid, priority)) {
+                vga.print("Running '");
+                printString(args[1]);
+                vga.print("' with nice value ");
+                if (priority < 0) {
+                    vga.put_char('-');
+                    printNumber(@as(usize, @intCast(-priority)));
+                } else {
+                    printNumber(@as(usize, @intCast(priority)));
+                }
+                vga.print(" (PID: ");
+                printNumber(user_proc.pid);
+                vga.print(")\n");
+            } else {
+                vga.print("nice: Failed to set priority\n");
+            }
+        }
     }
 
     fn cmdRenice(self: *const Shell, args: []const [*:0]const u8) void {
@@ -1071,7 +1270,6 @@ pub const Shell = struct {
             return;
         }
 
-
         const priority_str = sliceFromCStr(args[0]);
         var priority: i8 = 0;
         var is_negative = false;
@@ -1094,12 +1292,29 @@ pub const Shell = struct {
             priority = -priority;
         }
 
+        if (priority < -20) priority = -20;
+        if (priority > 19) priority = 19;
 
         const pid = parseNumber(args[1]) orelse 0;
 
+        if (pid == 0) {
+            vga.print("renice: Invalid PID\n");
+            return;
+        }
 
-        if (process.setPriority(pid, priority)) {
-            vga.print("Changed priority of process ");
+        if (scheduler.setProcessNice(pid, priority)) {
+            vga.print("Changed nice value of process ");
+            printNumber(pid);
+            vga.print(" to ");
+            if (priority < 0) {
+                vga.put_char('-');
+                printNumber(@as(usize, @intCast(-priority)));
+            } else {
+                printNumber(@as(usize, @intCast(priority)));
+            }
+            vga.print("\n");
+        } else if (process.setNice(pid, priority)) {
+            vga.print("Changed nice value of process ");
             printNumber(pid);
             vga.print(" to ");
             if (priority < 0) {
@@ -1113,6 +1328,486 @@ pub const Shell = struct {
             vga.print("Failed to change priority: process ");
             printNumber(pid);
             vga.print(" not found\n");
+        }
+    }
+
+    fn cmdHead(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        var lines: u32 = 10;
+        var file_arg_idx: usize = 0;
+
+        if (args.len > 0 and sliceFromCStr(args[0]).len > 2 and args[0][0] == '-' and args[0][1] == 'n') {
+            const num_str = sliceFromCStr(args[0]);
+            if (num_str.len > 2) {
+                var num: u32 = 0;
+                var i: usize = 2;
+                while (i < num_str.len) : (i += 1) {
+                    if (num_str[i] >= '0' and num_str[i] <= '9') {
+                        num = num * 10 + (num_str[i] - '0');
+                    } else {
+                        break;
+                    }
+                }
+                if (num > 0) {
+                    lines = num;
+                }
+            }
+            file_arg_idx = 1;
+        }
+
+        if (args.len <= file_arg_idx) {
+            vga.print("Usage: head [-n <lines>] <file>\n");
+            return;
+        }
+
+        const path = args[file_arg_idx];
+        const fd = vfs.open(sliceFromCStr(path), vfs.O_RDONLY) catch |err| {
+            vga.print("head: ");
+            printString(path);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+        defer vfs.close(fd) catch {};
+
+        var buffer: [512]u8 = undefined;
+        var line_count: u32 = 0;
+        var in_line = false;
+
+        while (line_count < lines) {
+            const bytes_read = vfs.read(fd, &buffer) catch |err| {
+                vga.print("\nread error: ");
+                vga.print(@errorName(err));
+                vga.print("\n");
+                break;
+            };
+
+            if (bytes_read == 0) break;
+
+            for (buffer[0..bytes_read]) |byte| {
+                if (byte == '\r') continue;
+                
+                if (byte == '\n') {
+                    vga.put_char('\n');
+                    line_count += 1;
+                    in_line = false;
+                    if (line_count >= lines) break;
+                } else {
+                    vga.put_char(byte);
+                    in_line = true;
+                }
+            }
+        }
+
+        if (in_line) {
+            vga.put_char('\n');
+        }
+    }
+
+    fn cmdTail(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        var lines: u32 = 10;
+        var file_arg_idx: usize = 0;
+
+        if (args.len > 0 and sliceFromCStr(args[0]).len > 2 and args[0][0] == '-' and args[0][1] == 'n') {
+            const num_str = sliceFromCStr(args[0]);
+            if (num_str.len > 2) {
+                var num: u32 = 0;
+                var i: usize = 2;
+                while (i < num_str.len) : (i += 1) {
+                    if (num_str[i] >= '0' and num_str[i] <= '9') {
+                        num = num * 10 + (num_str[i] - '0');
+                    } else {
+                        break;
+                    }
+                }
+                if (num > 0) {
+                    lines = num;
+                }
+            }
+            file_arg_idx = 1;
+        }
+
+        if (args.len <= file_arg_idx) {
+            vga.print("Usage: tail [-n <lines>] <file>\n");
+            return;
+        }
+
+        const path = args[file_arg_idx];
+        const fd = vfs.open(sliceFromCStr(path), vfs.O_RDONLY) catch |err| {
+            vga.print("tail: ");
+            printString(path);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+        defer vfs.close(fd) catch {};
+
+        var file_buffer: [8192]u8 = undefined;
+        var total_read: usize = 0;
+
+        while (total_read < file_buffer.len) {
+            const bytes_read = vfs.read(fd, file_buffer[total_read..]) catch |err| {
+                if (err != error.EndOfFile) {
+                    vga.print("\nread error: ");
+                    vga.print(@errorName(err));
+                    vga.print("\n");
+                }
+                break;
+            };
+            if (bytes_read == 0) break;
+            total_read += bytes_read;
+        }
+
+        var line_count: u32 = 0;
+        var start_pos: usize = total_read;
+        
+        if (total_read > 0) {
+            var i = total_read;
+            while (i > 0 and line_count < lines) {
+                i -= 1;
+                if (file_buffer[i] == '\n') {
+                    line_count += 1;
+                    if (line_count == lines) {
+                        start_pos = i + 1;
+                        break;
+                    }
+                }
+            }
+        }
+
+        for (file_buffer[start_pos..total_read]) |byte| {
+            if (byte == '\r') continue;
+            vga.put_char(byte);
+        }
+    }
+
+    fn cmdWc(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            vga.print("Usage: wc <file>\n");
+            return;
+        }
+
+        const path = args[0];
+        const fd = vfs.open(sliceFromCStr(path), vfs.O_RDONLY) catch |err| {
+            vga.print("wc: ");
+            printString(path);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+        defer vfs.close(fd) catch {};
+
+        var buffer: [512]u8 = undefined;
+        var lines: u32 = 0;
+        var words: u32 = 0;
+        var bytes: u32 = 0;
+        var in_word = false;
+
+        while (true) {
+            const bytes_read = vfs.read(fd, &buffer) catch |err| {
+                if (err != error.EndOfFile) {
+                    vga.print("\nread error: ");
+                    vga.print(@errorName(err));
+                    vga.print("\n");
+                }
+                break;
+            };
+
+            if (bytes_read == 0) break;
+            bytes += @intCast(bytes_read);
+
+            for (buffer[0..bytes_read]) |byte| {
+                if (byte == '\r') continue;
+                
+                if (byte == '\n') {
+                    lines += 1;
+                    in_word = false;
+                } else if (byte == ' ' or byte == '\t') {
+                    in_word = false;
+                } else {
+                    if (!in_word) {
+                        words += 1;
+                        in_word = true;
+                    }
+                }
+            }
+        }
+
+        printNumber(lines);
+        vga.print(" ");
+        printNumber(words);
+        vga.print(" ");
+        printNumber(bytes);
+        vga.print(" ");
+        printString(path);
+        vga.print("\n");
+    }
+
+    fn cmdGrep(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len < 2) {
+            vga.print("Usage: grep <pattern> <file>\n");
+            return;
+        }
+
+        const pattern = sliceFromCStr(args[0]);
+        const path = args[1];
+        const fd = vfs.open(sliceFromCStr(path), vfs.O_RDONLY) catch |err| {
+            vga.print("grep: ");
+            printString(path);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+        defer vfs.close(fd) catch {};
+
+        var buffer: [512]u8 = undefined;
+        var line_buffer: [256]u8 = undefined;
+        var line_pos: usize = 0;
+        var line_num: u32 = 1;
+
+        while (true) {
+            const bytes_read = vfs.read(fd, &buffer) catch |err| {
+                if (err != error.EndOfFile) {
+                    vga.print("\nread error: ");
+                    vga.print(@errorName(err));
+                    vga.print("\n");
+                }
+                break;
+            };
+
+            if (bytes_read == 0) break;
+
+            for (buffer[0..bytes_read]) |byte| {
+                if (byte == '\r') continue;
+
+                if (byte == '\n') {
+                    line_buffer[line_pos] = 0;
+                    const line_slice = line_buffer[0..line_pos];
+                    
+                    var found = false;
+                    if (line_slice.len >= pattern.len) {
+                        var i: usize = 0;
+                        while (i <= line_slice.len - pattern.len) : (i += 1) {
+                            var match = true;
+                            var j: usize = 0;
+                            while (j < pattern.len) : (j += 1) {
+                                if (line_slice[i + j] != pattern[j]) {
+                                    match = false;
+                                    break;
+                                }
+                            }
+                            if (match) {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (found) {
+                        printNumber(line_num);
+                        vga.print(": ");
+                        for (line_slice) |c| {
+                            vga.put_char(c);
+                        }
+                        vga.put_char('\n');
+                    }
+
+                    line_pos = 0;
+                    line_num += 1;
+                } else {
+                    if (line_pos < line_buffer.len - 1) {
+                        line_buffer[line_pos] = byte;
+                        line_pos += 1;
+                    }
+                }
+            }
+        }
+
+        if (line_pos > 0) {
+            line_buffer[line_pos] = 0;
+            const line_slice = line_buffer[0..line_pos];
+            
+            var found = false;
+            if (line_slice.len >= pattern.len) {
+                var i: usize = 0;
+                while (i <= line_slice.len - pattern.len) : (i += 1) {
+                    var match = true;
+                    var j: usize = 0;
+                    while (j < pattern.len) : (j += 1) {
+                        if (line_slice[i + j] != pattern[j]) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if (found) {
+                printNumber(line_num);
+                vga.print(": ");
+                for (line_slice) |c| {
+                    vga.put_char(c);
+                }
+                vga.put_char('\n');
+            }
+        }
+    }
+
+    fn cmdFind(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len < 2) {
+            vga.print("Usage: find <directory> <name>\n");
+            return;
+        }
+
+        const dir_path = sliceFromCStr(args[0]);
+        const search_name = sliceFromCStr(args[1]);
+
+        const fd = vfs.open(dir_path, vfs.O_RDONLY) catch |err| {
+            vga.print("find: ");
+            printString(args[0]);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+        defer vfs.close(fd) catch {};
+
+        var index: u64 = 0;
+        var dirent: vfs.DirEntry = undefined;
+        var found_count: u32 = 0;
+
+        while (true) {
+            const has_more = vfs.readdir(fd, &dirent, index) catch |err| {
+                if (err != error.EndOfFile) {
+                    vga.print("readdir error: ");
+                    vga.print(@errorName(err));
+                    vga.print("\n");
+                }
+                break;
+            };
+
+            if (!has_more) break;
+
+            const entry_name = dirent.name[0..dirent.name_len];
+            
+            var matches = false;
+            if (entry_name.len >= search_name.len) {
+                var i: usize = 0;
+                while (i <= entry_name.len - search_name.len) : (i += 1) {
+                    var match = true;
+                    var j: usize = 0;
+                    while (j < search_name.len) : (j += 1) {
+                        if (entry_name[i + j] != search_name[j]) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match) {
+                        matches = true;
+                        break;
+                    }
+                }
+            }
+
+            if (matches) {
+                var path_buf: [512]u8 = undefined;
+                var path_len: usize = 0;
+                
+                if (dir_path[dir_path.len - 1] != '/') {
+                    @memcpy(path_buf[0..dir_path.len], dir_path);
+                    path_len = dir_path.len;
+                    path_buf[path_len] = '/';
+                    path_len += 1;
+                } else {
+                    @memcpy(path_buf[0..dir_path.len], dir_path);
+                    path_len = dir_path.len;
+                }
+                
+                @memcpy(path_buf[path_len..path_len + entry_name.len], entry_name);
+                path_len += entry_name.len;
+                
+                for (path_buf[0..path_len]) |c| {
+                    vga.put_char(c);
+                }
+                vga.put_char('\n');
+                found_count += 1;
+            }
+
+            index += 1;
+        }
+
+        if (found_count == 0) {
+            vga.print("No matches found\n");
+        }
+    }
+
+    fn cmdStat(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            vga.print("Usage: stat <file>\n");
+            return;
+        }
+
+        const path = sliceFromCStr(args[0]);
+        const fd = vfs.open(path, vfs.O_RDONLY) catch |err| {
+            vga.print("stat: ");
+            printString(args[0]);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+        defer vfs.close(fd) catch {};
+
+        var stat_info: vfs.FileStat = undefined;
+        const file_ops = @import("../fs/file_ops.zig");
+        if (file_ops.fstat(fd, &stat_info)) {
+            vga.print("File: ");
+            printString(args[0]);
+            vga.print("\n");
+            vga.print("Size: ");
+            printNumber(stat_info.size);
+            vga.print(" bytes\n");
+            
+            vga.print("Type: ");
+            switch (stat_info.file_type) {
+                .Regular => vga.print("Regular file\n"),
+                .Directory => vga.print("Directory\n"),
+                .Symlink => vga.print("Symbolic link\n"),
+                .BlockDevice => vga.print("Block device\n"),
+                .CharDevice => vga.print("Character device\n"),
+                .FIFO => vga.print("FIFO\n"),
+                .Socket => vga.print("Socket\n"),
+                else => vga.print("Unknown\n"),
+            }
+
+            vga.print("Mode: ");
+            if (stat_info.mode.owner_read) vga.put_char('r') else vga.put_char('-');
+            if (stat_info.mode.owner_write) vga.put_char('w') else vga.put_char('-');
+            if (stat_info.mode.owner_exec) vga.put_char('x') else vga.put_char('-');
+            if (stat_info.mode.group_read) vga.put_char('r') else vga.put_char('-');
+            if (stat_info.mode.group_write) vga.put_char('w') else vga.put_char('-');
+            if (stat_info.mode.group_exec) vga.put_char('x') else vga.put_char('-');
+            if (stat_info.mode.other_read) vga.put_char('r') else vga.put_char('-');
+            if (stat_info.mode.other_write) vga.put_char('w') else vga.put_char('-');
+            if (stat_info.mode.other_exec) vga.put_char('x') else vga.put_char('-');
+            vga.print("\n");
+        } else |err| {
+            vga.print("stat: Failed to get file info: ");
+            vga.print(@errorName(err));
+            vga.print("\n");
         }
     }
 
@@ -1166,6 +1861,401 @@ pub const Shell = struct {
         vga.print(" to ");
         printString(args[0]);
         vga.print("\n");
+    }
+
+    fn cmdUname(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        var show_all = false;
+        var show_sysname = false;
+        var show_nodename = false;
+        var show_release = false;
+        var show_version = false;
+        var show_machine = false;
+
+        if (args.len == 0) {
+            show_sysname = true;
+        } else {
+            for (args) |arg| {
+                const arg_str = sliceFromCStr(arg);
+                if (streq(arg, "-a") or streq(arg, "--all")) {
+                    show_all = true;
+                } else if (streq(arg, "-s") or streq(arg, "--kernel-name")) {
+                    show_sysname = true;
+                } else if (streq(arg, "-n") or streq(arg, "--nodename")) {
+                    show_nodename = true;
+                } else if (streq(arg, "-r") or streq(arg, "--kernel-release")) {
+                    show_release = true;
+                } else if (streq(arg, "-v") or streq(arg, "--kernel-version")) {
+                    show_version = true;
+                } else if (streq(arg, "-m") or streq(arg, "--machine")) {
+                    show_machine = true;
+                }
+            }
+        }
+
+        if (show_all) {
+            vga.print("ZigOS localhost 1.0.0 ");
+            vga.print("ZigOS ");
+            vga.print("x86_64\n");
+        } else {
+            var first = true;
+            if (show_sysname) {
+                vga.print("ZigOS");
+                first = false;
+            }
+            if (show_nodename) {
+                if (!first) vga.print(" ");
+                vga.print("localhost");
+                first = false;
+            }
+            if (show_release) {
+                if (!first) vga.print(" ");
+                vga.print("1.0.0");
+                first = false;
+            }
+            if (show_version) {
+                if (!first) vga.print(" ");
+                vga.print("ZigOS");
+                first = false;
+            }
+            if (show_machine) {
+                if (!first) vga.print(" ");
+                vga.print("x86_64");
+                first = false;
+            }
+            if (first) {
+                vga.print("ZigOS");
+            }
+            vga.print("\n");
+        }
+    }
+
+    fn cmdWhoami(self: *const Shell) void {
+        _ = self;
+        vga.print("root\n");
+    }
+
+    fn cmdPwd(self: *const Shell) void {
+        _ = self;
+        vga.print("/\n");
+    }
+
+    fn cmdSort(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            vga.print("Usage: sort <file>\n");
+            return;
+        }
+
+        const path = sliceFromCStr(args[0]);
+        const fd = vfs.open(path, vfs.O_RDONLY) catch |err| {
+            vga.print("sort: ");
+            printString(args[0]);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+        defer vfs.close(fd) catch {};
+
+        var lines: [256][]const u8 = undefined;
+        var line_count: usize = 0;
+        var file_buffer: [4096]u8 = undefined;
+        var total_read: usize = 0;
+
+        while (total_read < file_buffer.len) {
+            const bytes_read = vfs.read(fd, file_buffer[total_read..]) catch |err| {
+                if (err != error.EndOfFile) {
+                    vga.print("\nread error: ");
+                    vga.print(@errorName(err));
+                    vga.print("\n");
+                }
+                break;
+            };
+            if (bytes_read == 0) break;
+            total_read += bytes_read;
+        }
+
+        var line_starts: [256]usize = undefined;
+        var line_lens: [256]usize = undefined;
+        var current_line_start: usize = 0;
+        var i: usize = 0;
+
+        while (i < total_read and line_count < 256) {
+            if (file_buffer[i] == '\n' or file_buffer[i] == '\r') {
+                if (i > current_line_start) {
+                    line_starts[line_count] = current_line_start;
+                    line_lens[line_count] = i - current_line_start;
+                    line_count += 1;
+                }
+                if (file_buffer[i] == '\r' and i + 1 < total_read and file_buffer[i + 1] == '\n') {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                current_line_start = i;
+            } else {
+                i += 1;
+            }
+        }
+
+        if (current_line_start < total_read and line_count < 256) {
+            line_starts[line_count] = current_line_start;
+            line_lens[line_count] = total_read - current_line_start;
+            line_count += 1;
+        }
+
+        var swapped = true;
+        while (swapped) {
+            swapped = false;
+            var j: usize = 0;
+            while (j < line_count - 1) : (j += 1) {
+                const line1 = file_buffer[line_starts[j]..line_starts[j] + line_lens[j]];
+                const line2 = file_buffer[line_starts[j + 1]..line_starts[j + 1] + line_lens[j + 1]];
+                
+                var cmp: i32 = 0;
+                const min_len = @min(line1.len, line2.len);
+                var k: usize = 0;
+                while (k < min_len) : (k += 1) {
+                    if (line1[k] < line2[k]) {
+                        cmp = -1;
+                        break;
+                    } else if (line1[k] > line2[k]) {
+                        cmp = 1;
+                        break;
+                    }
+                }
+                if (cmp == 0) {
+                    if (line1.len < line2.len) {
+                        cmp = -1;
+                    } else if (line1.len > line2.len) {
+                        cmp = 1;
+                    }
+                }
+
+                if (cmp > 0) {
+                    const temp_start = line_starts[j];
+                    const temp_len = line_lens[j];
+                    line_starts[j] = line_starts[j + 1];
+                    line_lens[j] = line_lens[j + 1];
+                    line_starts[j + 1] = temp_start;
+                    line_lens[j + 1] = temp_len;
+                    swapped = true;
+                }
+            }
+        }
+
+        var j: usize = 0;
+        while (j < line_count) : (j += 1) {
+            const line = file_buffer[line_starts[j]..line_starts[j] + line_lens[j]];
+            for (line) |byte| {
+                vga.put_char(byte);
+            }
+            vga.put_char('\n');
+        }
+    }
+
+    fn cmdUniq(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            vga.print("Usage: uniq <file>\n");
+            return;
+        }
+
+        const path = sliceFromCStr(args[0]);
+        const fd = vfs.open(path, vfs.O_RDONLY) catch |err| {
+            vga.print("uniq: ");
+            printString(args[0]);
+            vga.print(": ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            return;
+        };
+        defer vfs.close(fd) catch {};
+
+        var buffer: [512]u8 = undefined;
+        var prev_line: [256]u8 = undefined;
+        var prev_line_len: usize = 0;
+        var current_line: [256]u8 = undefined;
+        var current_line_len: usize = 0;
+        var first_line = true;
+
+        while (true) {
+            const bytes_read = vfs.read(fd, &buffer) catch |err| {
+                if (err != error.EndOfFile) {
+                    vga.print("\nread error: ");
+                    vga.print(@errorName(err));
+                    vga.print("\n");
+                }
+                break;
+            };
+
+            if (bytes_read == 0) break;
+
+            for (buffer[0..bytes_read]) |byte| {
+                if (byte == '\r') continue;
+
+                if (byte == '\n') {
+                    current_line[current_line_len] = 0;
+                    const current_slice = current_line[0..current_line_len];
+
+                    if (first_line) {
+                        for (current_slice) |c| {
+                            vga.put_char(c);
+                        }
+                        vga.put_char('\n');
+                        @memcpy(&prev_line, &current_line);
+                        prev_line_len = current_line_len;
+                        first_line = false;
+                    } else {
+                        var different = false;
+                        if (current_line_len != prev_line_len) {
+                            different = true;
+                        } else {
+                            var i: usize = 0;
+                            while (i < current_line_len) : (i += 1) {
+                                if (current_slice[i] != prev_line[i]) {
+                                    different = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (different) {
+                            for (current_slice) |c| {
+                                vga.put_char(c);
+                            }
+                            vga.put_char('\n');
+                            @memcpy(&prev_line, &current_line);
+                            prev_line_len = current_line_len;
+                        }
+                    }
+
+                    current_line_len = 0;
+                } else {
+                    if (current_line_len < current_line.len - 1) {
+                        current_line[current_line_len] = byte;
+                        current_line_len += 1;
+                    }
+                }
+            }
+        }
+
+        if (current_line_len > 0) {
+            current_line[current_line_len] = 0;
+            const current_slice = current_line[0..current_line_len];
+
+            if (first_line) {
+                for (current_slice) |c| {
+                    vga.put_char(c);
+                }
+                vga.put_char('\n');
+            } else {
+                var different = false;
+                if (current_line_len != prev_line_len) {
+                    different = true;
+                } else {
+                    var i: usize = 0;
+                    while (i < current_line_len) : (i += 1) {
+                        if (current_slice[i] != prev_line[i]) {
+                            different = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (different) {
+                    for (current_slice) |c| {
+                        vga.put_char(c);
+                    }
+                    vga.put_char('\n');
+                }
+            }
+        }
+    }
+
+    fn cmdIfconfig(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        _ = args;
+        
+        const network = @import("../net/network.zig");
+        
+        const interface_name = "eth0";
+        const mac_addr = network.getMacAddress();
+        
+        vga.print(interface_name);
+        vga.print(": flags=4093<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500\n");
+        vga.print("        inet ");
+        network.printIPv4(network.getLocalIP());
+        vga.print("  netmask ");
+        network.printIPv4(network.getNetmask());
+        vga.print("  broadcast ");
+        
+        const local_ip = network.getLocalIP();
+        const netmask = network.getNetmask();
+        const ipv4_mod = network.ipv4;
+        const broadcast = ipv4_mod.IPv4Address{
+            .octets = .{
+                local_ip.octets[0] | (~netmask.octets[0] & 0xFF),
+                local_ip.octets[1] | (~netmask.octets[1] & 0xFF),
+                local_ip.octets[2] | (~netmask.octets[2] & 0xFF),
+                local_ip.octets[3] | (~netmask.octets[3] & 0xFF),
+            },
+        };
+        network.printIPv4(broadcast);
+        vga.print("\n");
+        
+        vga.print("        ether ");
+        var i: usize = 0;
+        while (i < 6) : (i += 1) {
+            const byte = mac_addr[i];
+            const high = (byte >> 4) & 0xF;
+            const low = byte & 0xF;
+            if (high < 10) {
+                vga.put_char(@as(u8, @intCast('0' + high)));
+            } else {
+                vga.put_char(@as(u8, @intCast('a' + high - 10)));
+            }
+            if (low < 10) {
+                vga.put_char(@as(u8, @intCast('0' + low)));
+            } else {
+                vga.put_char(@as(u8, @intCast('a' + low - 10)));
+            }
+            if (i < 5) vga.put_char(':');
+        }
+        vga.print("\n");
+        
+        const gateway = network.getGateway();
+        if (gateway.octets[0] != 0 or gateway.octets[1] != 0 or gateway.octets[2] != 0 or gateway.octets[3] != 0) {
+            vga.print("        gateway ");
+            network.printIPv4(gateway);
+            vga.print("\n");
+        }
+    }
+
+    fn cmdDf(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        _ = args;
+        
+        const paging = @import("../memory/paging.zig");
+        const stats = paging.getMemoryStats();
+        
+        vga.print("Filesystem     1K-blocks      Used Available Use% Mounted on\n");
+        
+        const total_kb = stats.total_frames * 4096 / 1024;
+        const used_kb = stats.used_frames * 4096 / 1024;
+        const free_kb = total_kb - used_kb;
+        const use_percent = if (total_kb > 0) (used_kb * 100) / total_kb else 0;
+        
+        vga.print("rootfs          ");
+        printNumber(total_kb);
+        vga.print("      ");
+        printNumber(used_kb);
+        vga.print("      ");
+        printNumber(free_kb);
+        vga.print("   ");
+        printNumber(use_percent);
+        vga.print("% /\n");
     }
 
     fn cmdExport(self: *const Shell, args: []const [*:0]const u8) void {
@@ -1369,7 +2459,13 @@ pub const Shell = struct {
             };
         } else if (streq(args[0], "release")) {
             vga.print("Releasing DHCP lease...\n");
-            vga.print("Not yet implemented\n");
+            dhcp.releaseAddress() catch |err| {
+                vga.print("DHCP release failed: ");
+                switch (err) {
+                    error.NotInitialized => vga.print("DHCP not initialized\n"),
+                    else => vga.print("Unknown error\n"),
+                }
+            };
         } else {
             vga.print("Unknown DHCP command: ");
             printString(args[0]);
