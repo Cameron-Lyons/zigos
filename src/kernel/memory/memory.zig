@@ -251,3 +251,25 @@ pub fn alloc(comptime T: type) ?*T {
 
     return null;
 }
+
+pub const Allocator = struct {
+    pub fn alloc(self: *Allocator, comptime T: type, n: usize) ![]T {
+        _ = self;
+        const size = @sizeOf(T) * n;
+        const ptr = kmalloc(size) orelse return error.OutOfMemory;
+        const slice = @as([*]T, @ptrCast(@alignCast(ptr)))[0..n];
+        @memset(@as([*]u8, @ptrCast(slice.ptr))[0..size], 0);
+        return slice;
+    }
+
+    pub fn free(self: *Allocator, memory: []u8) void {
+        _ = self;
+        kfree(@as(*anyopaque, @ptrCast(memory.ptr)));
+    }
+};
+
+var default_allocator = Allocator{};
+
+pub fn getDefaultAllocator() *Allocator {
+    return &default_allocator;
+}
