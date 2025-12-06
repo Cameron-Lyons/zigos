@@ -83,16 +83,16 @@ pub fn mmap(addr: ?usize, length: usize, prot: u32, flags: u32, fd: i32, offset:
         if (fd < 0) {
             return MMapError.InvalidFd;
         }
-        
+
         const file_ops = @import("file_ops.zig");
         const index = @as(usize, @intCast(fd));
         if (index >= file_ops.MAX_FDS) {
             return MMapError.InvalidFd;
         }
-        
+
         if (file_ops.file_descriptors[index]) |file_desc| {
             vnode = file_desc.vnode;
-            
+
             if ((prot & MMapProt.WRITE) != 0 and (flags & MMapFlags.SHARED) != 0) {
                 if ((file_desc.flags & 0x01) == 0) {
                     return MMapError.AccessDenied;
@@ -107,7 +107,7 @@ pub fn mmap(addr: ?usize, length: usize, prot: u32, flags: u32, fd: i32, offset:
     if (addr) |requested_addr| {
         if ((flags & MMapFlags.FIXED) != 0) {
             base_addr = requested_addr & ~@as(usize, 0xFFF);
-            
+
             var current = mapping_list;
             while (current) |mapping| : (current = mapping.next) {
                 if (overlaps(base_addr, page_aligned_length, mapping.start_addr, mapping.length)) {
@@ -115,11 +115,11 @@ pub fn mmap(addr: ?usize, length: usize, prot: u32, flags: u32, fd: i32, offset:
                 }
             }
         } else {
-            base_addr = findFreeRegion(requested_addr, page_aligned_length) orelse 
+            base_addr = findFreeRegion(requested_addr, page_aligned_length) orelse
                        return MMapError.NoMemory;
         }
     } else {
-        base_addr = findFreeRegion(0x400000, page_aligned_length) orelse 
+        base_addr = findFreeRegion(0x400000, page_aligned_length) orelse
                    return MMapError.NoMemory;
     }
 
@@ -128,7 +128,7 @@ pub fn mmap(addr: ?usize, length: usize, prot: u32, flags: u32, fd: i32, offset:
     while (i < num_pages) : (i += 1) {
         const virt_addr = base_addr + (i * 0x1000);
         const phys_page = memory.allocatePhysicalPage() orelse return MMapError.NoMemory;
-        
+
         var page_flags = paging.PAGE_PRESENT | paging.PAGE_USER;
         if ((prot & MMapProt.WRITE) != 0) {
             page_flags |= paging.PAGE_WRITABLE;
@@ -136,7 +136,7 @@ pub fn mmap(addr: ?usize, length: usize, prot: u32, flags: u32, fd: i32, offset:
         if ((prot & MMapProt.EXEC) == 0) {
             page_flags |= paging.PAGE_NO_EXECUTE;
         }
-        
+
         paging.mapPage(virt_addr, phys_page, page_flags) catch return MMapError.NoMemory;
     }
 
@@ -153,12 +153,12 @@ pub fn mmap(addr: ?usize, length: usize, prot: u32, flags: u32, fd: i32, offset:
         }
     }
 
-    if ((flags & MMapFlags.ANONYMOUS) != 0 or 
-        ((flags & MMapFlags.ANONYMOUS) == 0 and vnode != null and 
+    if ((flags & MMapFlags.ANONYMOUS) != 0 or
+        ((flags & MMapFlags.ANONYMOUS) == 0 and vnode != null and
          vnode.?.size -| offset < page_aligned_length)) {
-        const clear_start = if ((flags & MMapFlags.ANONYMOUS) != 0) 
-            0 
-        else 
+        const clear_start = if ((flags & MMapFlags.ANONYMOUS) != 0)
+            0
+        else
             vnode.?.size -| offset;
         const clear_size = page_aligned_length - clear_start;
         if (clear_size > 0) {
@@ -181,12 +181,12 @@ pub fn mmap(addr: ?usize, length: usize, prot: u32, flags: u32, fd: i32, offset:
                 .next = mapping_list,
                 .prev = null,
             };
-            
+
             if (mapping_list) |first| {
                 first.prev = &memory_mappings[mapping_index].?;
             }
             mapping_list = &memory_mappings[mapping_index].?;
-            
+
             return base_addr;
         }
     }
@@ -206,19 +206,19 @@ pub fn munmap(addr: usize, length: usize) MMapError!void {
     var current = mapping_list;
     while (current) |mapping| {
         const next = mapping.next;
-        
-        if (mapping.start_addr >= page_aligned_addr and 
+
+        if (mapping.start_addr >= page_aligned_addr and
             mapping.start_addr < page_aligned_addr + page_aligned_length) {
-            
-            if ((mapping.flags & MMapFlags.SHARED) != 0 and 
-                (mapping.prot & MMapProt.WRITE) != 0 and 
+
+            if ((mapping.flags & MMapFlags.SHARED) != 0 and
+                (mapping.prot & MMapProt.WRITE) != 0 and
                 mapping.vnode != null) {
                 msync(mapping.start_addr, mapping.length, 1) catch {};
             }
-            
+
             const num_pages = mapping.length / 0x1000;
             unmapPages(mapping.start_addr, num_pages);
-            
+
             if (mapping.prev) |prev| {
                 prev.next = mapping.next;
             } else {
@@ -227,7 +227,7 @@ pub fn munmap(addr: usize, length: usize) MMapError!void {
             if (mapping.next) |next_mapping| {
                 next_mapping.prev = mapping.prev;
             }
-            
+
             for (&memory_mappings, 0..) |*maybe_mapping, i| {
                 if (maybe_mapping.* != null and &maybe_mapping.*.? == mapping) {
                     memory_mappings[i] = null;
@@ -235,7 +235,7 @@ pub fn munmap(addr: usize, length: usize) MMapError!void {
                 }
             }
         }
-        
+
         current = next;
     }
 }
@@ -252,12 +252,12 @@ pub fn mprotect(addr: usize, length: usize, prot: u32) MMapError!void {
     while (current) |mapping| : (current = mapping.next) {
         if (overlaps(page_aligned_addr, page_aligned_length, mapping.start_addr, mapping.length)) {
             mapping.prot = prot;
-            
+
             const num_pages = mapping.length / 0x1000;
             var i: usize = 0;
             while (i < num_pages) : (i += 1) {
                 const virt_addr = mapping.start_addr + (i * 0x1000);
-                
+
                 var page_flags = paging.PAGE_PRESENT | paging.PAGE_USER;
                 if ((prot & MMapProt.WRITE) != 0) {
                     page_flags |= paging.PAGE_WRITABLE;
@@ -265,7 +265,7 @@ pub fn mprotect(addr: usize, length: usize, prot: u32) MMapError!void {
                 if ((prot & MMapProt.EXEC) == 0) {
                     page_flags |= paging.PAGE_NO_EXECUTE;
                 }
-                
+
                 paging.updatePageFlags(virt_addr, page_flags) catch return MMapError.NoMemory;
             }
         }
@@ -274,7 +274,7 @@ pub fn mprotect(addr: usize, length: usize, prot: u32) MMapError!void {
 
 pub fn msync(addr: usize, length: usize, flags: u32) MMapError!void {
     _ = flags;
-    
+
     if (length == 0) {
         return MMapError.InvalidLength;
     }
@@ -286,7 +286,7 @@ pub fn msync(addr: usize, length: usize, flags: u32) MMapError!void {
     while (current) |mapping| : (current = mapping.next) {
         if (overlaps(page_aligned_addr, page_aligned_length, mapping.start_addr, mapping.length)) {
             if (mapping.vnode) |vnode| {
-                if ((mapping.flags & MMapFlags.SHARED) != 0 and 
+                if ((mapping.flags & MMapFlags.SHARED) != 0 and
                     (mapping.prot & MMapProt.WRITE) != 0) {
                     const buffer = @as([*]u8, @ptrFromInt(mapping.start_addr))[0..mapping.length];
                     _ = vnode.ops.write(vnode, buffer, mapping.offset) catch |err| {
@@ -302,7 +302,7 @@ pub fn msync(addr: usize, length: usize, flags: u32) MMapError!void {
 
 pub fn madvise(addr: usize, length: usize, advice: u32) MMapError!void {
     _ = advice;
-    
+
     if (length == 0) {
         return MMapError.InvalidLength;
     }
@@ -316,14 +316,14 @@ pub fn madvise(addr: usize, length: usize, advice: u32) MMapError!void {
             return;
         }
     }
-    
+
     return MMapError.InvalidArgument;
 }
 
 fn findFreeRegion(hint: usize, size: usize) ?usize {
     var addr = if (hint > 0) hint & ~@as(usize, 0xFFF) else 0x400000;
     const max_addr = 0x80000000;
-    
+
     while (addr + size <= max_addr) : (addr += 0x1000) {
         var found_overlap = false;
         var current = mapping_list;
@@ -334,12 +334,12 @@ fn findFreeRegion(hint: usize, size: usize) ?usize {
                 break;
             }
         }
-        
+
         if (!found_overlap) {
             return addr;
         }
     }
-    
+
     return null;
 }
 
@@ -357,15 +357,15 @@ fn unmapPages(addr: usize, num_pages: usize) void {
 
 pub fn handlePageFault(fault_addr: usize, error_code: u32) bool {
     const page_aligned_addr = fault_addr & ~@as(usize, 0xFFF);
-    
+
     var current = mapping_list;
     while (current) |mapping| : (current = mapping.next) {
-        if (fault_addr >= mapping.start_addr and 
+        if (fault_addr >= mapping.start_addr and
             fault_addr < mapping.start_addr + mapping.length) {
-            
+
             if ((error_code & 0x01) == 0) {
                 const phys_page = memory.allocatePhysicalPage() orelse return false;
-                
+
                 var page_flags = paging.PAGE_PRESENT | paging.PAGE_USER;
                 if ((mapping.prot & MMapProt.WRITE) != 0) {
                     page_flags |= paging.PAGE_WRITABLE;
@@ -373,18 +373,18 @@ pub fn handlePageFault(fault_addr: usize, error_code: u32) bool {
                 if ((mapping.prot & MMapProt.EXEC) == 0) {
                     page_flags |= paging.PAGE_NO_EXECUTE;
                 }
-                
+
                 paging.mapPage(page_aligned_addr, phys_page, page_flags) catch return false;
-                
+
                 if (mapping.vnode) |vnode| {
                     const page_offset = page_aligned_addr - mapping.start_addr;
                     const file_offset = mapping.offset + page_offset;
-                    
+
                     if (file_offset < vnode.size) {
                         const read_size = @min(0x1000, vnode.size - file_offset);
                         const buffer = @as([*]u8, @ptrFromInt(page_aligned_addr))[0..read_size];
                         _ = vnode.ops.read(vnode, buffer, file_offset) catch {};
-                        
+
                         if (read_size < 0x1000) {
                             const clear_buffer = @as([*]u8, @ptrFromInt(page_aligned_addr + read_size))[0..(0x1000 - read_size)];
                             @memset(clear_buffer, 0);
@@ -394,30 +394,30 @@ pub fn handlePageFault(fault_addr: usize, error_code: u32) bool {
                     const buffer = @as([*]u8, @ptrFromInt(page_aligned_addr))[0..0x1000];
                     @memset(buffer, 0);
                 }
-                
+
                 return true;
             }
-            
+
             if ((error_code & 0x02) != 0 and (mapping.prot & MMapProt.WRITE) == 0) {
                 return false;
             }
-            
+
             if ((mapping.flags & MMapFlags.PRIVATE) != 0 and (error_code & 0x02) != 0) {
                 const phys_page = memory.allocatePhysicalPage() orelse return false;
                 const old_buffer = @as([*]u8, @ptrFromInt(page_aligned_addr))[0..0x1000];
                 const new_buffer = @as([*]u8, @ptrFromInt(phys_page))[0..0x1000];
                 @memcpy(new_buffer, old_buffer);
-                
+
                 var page_flags = paging.PAGE_PRESENT | paging.PAGE_USER | paging.PAGE_WRITABLE;
                 if ((mapping.prot & MMapProt.EXEC) == 0) {
                     page_flags |= paging.PAGE_NO_EXECUTE;
                 }
-                
+
                 paging.mapPage(page_aligned_addr, phys_page, page_flags) catch return false;
                 return true;
             }
         }
     }
-    
+
     return false;
 }

@@ -53,7 +53,7 @@ pub var idt: [IDT_ENTRIES]IdtEntry = [_]IdtEntry{IdtEntry{
     .offset_high = 0,
 }} ** IDT_ENTRIES;
 
-pub fn setGate(n: u8, handler: *const fn () callconv(.Naked) void, selector: u16, type_attr: u8) void {
+pub fn setGate(n: u8, handler: *const fn () callconv(.c) void, selector: u16, type_attr: u8) void {
     const addr = @intFromPtr(handler);
     idt[n] = IdtEntry{
         .offset_low = @truncate(addr & 0xFFFF),
@@ -63,9 +63,9 @@ pub fn setGate(n: u8, handler: *const fn () callconv(.Naked) void, selector: u16
     };
 }
 
-pub var interrupt_handlers: [IDT_ENTRIES]?*const fn (*InterruptRegisters) callconv(.C) void = [_]?*const fn (*InterruptRegisters) callconv(.C) void{null} ** IDT_ENTRIES;
+pub var interrupt_handlers: [IDT_ENTRIES]?*const fn (*InterruptRegisters) callconv(.c) void = [_]?*const fn (*InterruptRegisters) callconv(.c) void{null} ** IDT_ENTRIES;
 
-pub fn register_interrupt_handler(n: u8, handler: *const fn (*InterruptRegisters) callconv(.C) void) void {
+pub fn register_interrupt_handler(n: u8, handler: *const fn (*InterruptRegisters) callconv(.c) void) void {
     interrupt_handlers[n] = handler;
 }
 

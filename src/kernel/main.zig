@@ -78,7 +78,11 @@ export fn kernel_main() void {
 
     vga.print("Initializing memory allocator...\n");
     memory.init();
-    
+
+    vga.print("Initializing advanced memory management...\n");
+    const memory_pool = @import("memory_pool.zig");
+    memory_pool.init();
+
     vga.print("Initializing environment variables...\n");
     const environ = @import("environ.zig");
     environ.init();
@@ -93,9 +97,39 @@ export fn kernel_main() void {
 
     vga.print("Scanning PCI bus...\n");
     pci.scanBus();
-    
+
     vga.print("Initializing ACPI...\n");
     acpi.init();
+
+    vga.print("Initializing SMP (multicore) support...\n");
+    const smp = @import("smp.zig");
+    smp.init();
+    if (smp.isSMPEnabled()) {
+        vga.print("SMP enabled with ");
+        const num_cpus = smp.getNumCPUs();
+        var cpu_str: [10]u8 = undefined;
+        var cpu_count = num_cpus;
+        var idx: usize = 0;
+        if (cpu_count == 0) {
+            cpu_str[0] = '0';
+            idx = 1;
+        } else {
+            while (cpu_count > 0) : (idx += 1) {
+                cpu_str[idx] = @as(u8, @intCast('0' + (cpu_count % 10)));
+                cpu_count /= 10;
+            }
+            var i: usize = 0;
+            while (i < idx / 2) : (i += 1) {
+                const tmp = cpu_str[i];
+                cpu_str[i] = cpu_str[idx - 1 - i];
+                cpu_str[idx - 1 - i] = tmp;
+            }
+        }
+        vga.print(cpu_str[0..idx]);
+        vga.print(" CPUs\n");
+    } else {
+        vga.print("Single CPU mode\n");
+    }
 
     vga.print("Initializing network...\n");
     e1000.init();
@@ -126,17 +160,17 @@ export fn kernel_main() void {
     vga.print("Initializing Virtual File System...\n");
     vfs.init();
     vga.print("VFS ready!\n");
-    
+
     vga.print("Initializing file operations...\n");
     file_ops.init();
-    
+
     vga.print("Initializing memory mapping...\n");
     mmap.init();
 
     vga.print("Initializing FAT32 file system...\n");
     fat32.init();
     vga.print("FAT32 ready!\n");
-    
+
     vga.print("Initializing ext2 file system...\n");
     ext2.init();
 
@@ -152,7 +186,7 @@ export fn kernel_main() void {
     vga.print("Running VM tests...\n");
     const vm_test = @import("vm_test.zig");
     vm_test.test_virtual_memory();
-    
+
     vga.print("Initializing process management...\n");
     process.init();
 
@@ -166,15 +200,19 @@ export fn kernel_main() void {
     vga.print("Initializing keyboard...\n");
     keyboard.init();
     vga.print("Keyboard ready!\n");
-    
+
     vga.print("Initializing USB...\n");
     usb.init();
-    
+
     vga.print("Initializing audio...\n");
     ac97.init();
-    
+
     vga.print("Initializing virtual terminals...\n");
     vt.init();
+
+    vga.print("Initializing graphics mode (framebuffer)...\n");
+    _ = @import("framebuffer.zig");
+    vga.print("Framebuffer support ready (requires multiboot framebuffer info)\n");
 
     vga.print("Creating test processes...\n");
     _ = process.create_process("test1", test_process1);
@@ -186,6 +224,10 @@ export fn kernel_main() void {
 
     const ring3 = @import("ring3.zig");
     ring3.createRing3TestProcess();
+
+    vga.print("Initializing user programs...\n");
+    const user_programs = @import("user_programs.zig");
+    user_programs.init();
 
     vga.print("Initializing shell...\n");
     var system_shell = shell.Shell.init();

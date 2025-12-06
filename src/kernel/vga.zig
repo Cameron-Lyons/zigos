@@ -73,7 +73,7 @@ pub fn put_char(c: u8) void {
         }
         return;
     }
-    
+
     if (c == '\x08') {
         if (column > 0) {
             column -= 1;
@@ -86,7 +86,7 @@ pub fn put_char(c: u8) void {
 
     const index = row * VGA_WIDTH + column;
     buffer[index] = vga_entry(c, color);
-    
+
     column += 1;
     if (column == VGA_WIDTH) {
         column = 0;
@@ -125,7 +125,7 @@ fn scroll() void {
             buffer[dst_index] = buffer[src_index];
         }
     }
-    
+
     for (0..VGA_WIDTH) |x| {
         const index = (VGA_HEIGHT - 1) * VGA_WIDTH + x;
         buffer[index] = vga_entry(' ', color);

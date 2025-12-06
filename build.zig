@@ -11,11 +11,15 @@ pub fn build(b: *std.Build) void {
 
     const optimize = b.standardOptimizeOption(.{});
 
-    const kernel = b.addExecutable(.{
-        .name = "kernel.elf",
+    const kernel_module = b.addModule("kernel", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+    });
+    
+    const kernel = b.addExecutable(.{
+        .name = "kernel.elf",
+        .root_module = kernel_module,
     });
 
     kernel.addAssemblyFile(b.path("src/boot/boot64.S"));

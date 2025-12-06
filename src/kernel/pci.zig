@@ -90,7 +90,7 @@ pub fn findDevice(vendor_id: u16, device_id: u16) ?PCIDevice {
                     if (func == 0) {
                         const header_type = readConfig(@intCast(bus), device, 0, 0x0C);
                         if ((header_type & 0x80) == 0) {
-                            break; // Single function device
+                            break;
                         }
                     }
                 }
@@ -130,7 +130,7 @@ pub fn scanBus() void {
                     if (func == 0) {
                         const header_type = readConfig(@intCast(bus), device, 0, 0x0C) >> 16;
                         if ((header_type & 0x80) == 0) {
-                            break; // Single function device
+                            break;
                         }
                     }
                 }

@@ -19,7 +19,7 @@ var initialized: bool = false;
 
 pub fn init() void {
     if (initialized) return;
-    
+
     env_count = 0;
     for (&env_vars) |*var_entry| {
         var_entry.name = [_]u8{0} ** MAX_VAR_NAME_LEN;
@@ -27,29 +27,29 @@ pub fn init() void {
         var_entry.name_len = 0;
         var_entry.value_len = 0;
     }
-    
-    // Set default environment variables
+
+
     setVar("PATH", "/bin:/usr/bin") catch {};
     setVar("HOME", "/home/user") catch {};
     setVar("SHELL", "/bin/sh") catch {};
     setVar("USER", "root") catch {};
     setVar("TERM", "vga") catch {};
-    
+
     initialized = true;
 }
 
 pub fn setVar(name: []const u8, value: []const u8) !void {
     if (!initialized) init();
-    
+
     if (name.len == 0 or name.len >= MAX_VAR_NAME_LEN) {
         return error.InvalidName;
     }
-    
+
     if (value.len >= MAX_VAR_VALUE_LEN) {
         return error.ValueTooLong;
     }
-    
-    // Check if variable already exists
+
+
     var i: usize = 0;
     while (i < env_count) : (i += 1) {
         if (env_vars[i].name_len == name.len) {
@@ -62,7 +62,7 @@ pub fn setVar(name: []const u8, value: []const u8) !void {
                 }
             }
             if (match) {
-                // Update existing variable
+
                 @memcpy(env_vars[i].value[0..value.len], value);
                 env_vars[i].value_len = value.len;
                 env_vars[i].value[value.len] = 0;
@@ -70,26 +70,26 @@ pub fn setVar(name: []const u8, value: []const u8) !void {
             }
         }
     }
-    
-    // Add new variable
+
+
     if (env_count >= MAX_ENV_VARS) {
         return error.TooManyVars;
     }
-    
+
     @memcpy(env_vars[env_count].name[0..name.len], name);
     env_vars[env_count].name[name.len] = 0;
     env_vars[env_count].name_len = name.len;
-    
+
     @memcpy(env_vars[env_count].value[0..value.len], value);
     env_vars[env_count].value[value.len] = 0;
     env_vars[env_count].value_len = value.len;
-    
+
     env_count += 1;
 }
 
 pub fn getVar(name: []const u8) ?[]const u8 {
     if (!initialized) init();
-    
+
     var i: usize = 0;
     while (i < env_count) : (i += 1) {
         if (env_vars[i].name_len == name.len) {
@@ -106,13 +106,13 @@ pub fn getVar(name: []const u8) ?[]const u8 {
             }
         }
     }
-    
+
     return null;
 }
 
 pub fn unsetVar(name: []const u8) void {
     if (!initialized) return;
-    
+
     var i: usize = 0;
     while (i < env_count) : (i += 1) {
         if (env_vars[i].name_len == name.len) {
@@ -125,7 +125,7 @@ pub fn unsetVar(name: []const u8) void {
                 }
             }
             if (match) {
-                // Remove by shifting remaining vars
+
                 var k = i;
                 while (k < env_count - 1) : (k += 1) {
                     env_vars[k] = env_vars[k + 1];
@@ -139,7 +139,7 @@ pub fn unsetVar(name: []const u8) void {
 
 pub fn printAll() void {
     if (!initialized) init();
-    
+
     var i: usize = 0;
     while (i < env_count) : (i += 1) {
         var j: usize = 0;
@@ -157,22 +157,22 @@ pub fn printAll() void {
 
 pub fn expandVar(input: []const u8, output: []u8) usize {
     if (!initialized) init();
-    
+
     var in_idx: usize = 0;
     var out_idx: usize = 0;
-    
+
     while (in_idx < input.len and out_idx < output.len) {
         if (input[in_idx] == '$' and in_idx + 1 < input.len) {
-            // Look for variable name
+
             var var_start = in_idx + 1;
             var var_end = var_start;
-            
-            // Handle ${VAR} syntax
+
+
             if (input[var_start] == '{') {
                 var_start += 1;
                 var_end = var_start;
                 while (var_end < input.len and input[var_end] != '}') : (var_end += 1) {}
-                
+
                 if (var_end < input.len) {
                     const var_name = input[var_start..var_end];
                     if (getVar(var_name)) |value| {
@@ -183,17 +183,17 @@ pub fn expandVar(input: []const u8, output: []u8) usize {
                             }
                         }
                     }
-                    in_idx = var_end + 1; // Skip past '}'
+                    in_idx = var_end + 1;
                 } else {
-                    // No closing brace, copy as-is
+
                     output[out_idx] = input[in_idx];
                     out_idx += 1;
                     in_idx += 1;
                 }
             } else {
-                // Handle $VAR syntax
+
                 while (var_end < input.len and isVarChar(input[var_end])) : (var_end += 1) {}
-                
+
                 if (var_end > var_start) {
                     const var_name = input[var_start..var_end];
                     if (getVar(var_name)) |value| {
@@ -206,7 +206,7 @@ pub fn expandVar(input: []const u8, output: []u8) usize {
                     }
                     in_idx = var_end;
                 } else {
-                    // Just a lone '$'
+
                     output[out_idx] = input[in_idx];
                     out_idx += 1;
                     in_idx += 1;
@@ -218,13 +218,13 @@ pub fn expandVar(input: []const u8, output: []u8) usize {
             in_idx += 1;
         }
     }
-    
+
     return out_idx;
 }
 
 fn isVarChar(c: u8) bool {
-    return (c >= 'A' and c <= 'Z') or 
-           (c >= 'a' and c <= 'z') or 
-           (c >= '0' and c <= '9') or 
+    return (c >= 'A' and c <= 'Z') or
+           (c >= 'a' and c <= 'z') or
+           (c >= '0' and c <= '9') or
            c == '_';
 }
