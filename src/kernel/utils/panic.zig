@@ -1,5 +1,6 @@
 const std = @import("std");
 const vga = @import("../drivers/vga.zig");
+const console = @import("console.zig");
 const builtin = @import("builtin");
 
 var panic_occurred: bool = false;
@@ -16,28 +17,28 @@ pub fn panic(comptime format: []const u8, args: anytype) noreturn {
 
     vga.clearWithColor(0x4F);
 
-    vga.printWithColor("\n", 0x4F);
-    vga.printWithColor("============================ KERNEL PANIC ============================\n", 0x4F);
-    vga.printWithColor("\n", 0x4F);
+    console.printWithColor("\n", 0x4F);
+    console.printWithColor("============================ KERNEL PANIC ============================\n", 0x4F);
+    console.printWithColor("\n", 0x4F);
 
     var buf: [256]u8 = undefined;
     const message = std.fmt.bufPrint(&buf, format, args) catch "Failed to format panic message";
-    vga.printWithColor(message, 0x4F);
-    vga.printWithColor("\n\n", 0x4F);
+    console.printWithColor(message, 0x4F);
+    console.printWithColor("\n\n", 0x4F);
 
-    vga.printWithColor("Stack trace:\n", 0x4F);
+    console.printWithColor("Stack trace:\n", 0x4F);
     var it = std.debug.StackIterator.init(@returnAddress(), @frameAddress());
     var i: usize = 0;
     while (it.next()) |addr| : (i += 1) {
         var addr_buf: [32]u8 = undefined;
         const addr_str = std.fmt.bufPrint(&addr_buf, "  [{d}] 0x{x}\n", .{ i, addr }) catch break;
-        vga.printWithColor(addr_str, 0x4F);
+        console.printWithColor(addr_str, 0x4F);
         if (i >= 10) break;
     }
 
-    vga.printWithColor("\n", 0x4F);
-    vga.printWithColor("System halted. Please restart your computer.\n", 0x4F);
-    vga.printWithColor("======================================================================\n", 0x4F);
+    console.printWithColor("\n", 0x4F);
+    console.printWithColor("System halted. Please restart your computer.\n", 0x4F);
+    console.printWithColor("======================================================================\n", 0x4F);
 
     while (true) {
         asm volatile ("hlt");

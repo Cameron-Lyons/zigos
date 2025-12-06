@@ -1,4 +1,5 @@
 const vga = @import("drivers/vga.zig");
+const console = @import("utils/console.zig");
 const boot = @import("../boot/boot.zig");
 const isr = @import("interrupts/isr.zig");
 const keyboard = @import("drivers/keyboard.zig");
@@ -34,7 +35,7 @@ fn test_process1() void {
     var i: u32 = 0;
     while (true) : (i += 1) {
         if (i % 1000000 == 0) {
-            vga.print("A");
+            console.print("A");
         }
         process.yield();
     }
@@ -44,7 +45,7 @@ fn test_process2() void {
     var i: u32 = 0;
     while (true) : (i += 1) {
         if (i % 1000000 == 0) {
-            vga.print("B");
+            console.print("B");
         }
         process.yield();
     }
@@ -53,59 +54,60 @@ fn test_process2() void {
 export fn kernel_main() void {
     vga.init();
     vga.clear();
-    vga.print("Welcome to ZigOS!\n");
-    vga.print("A minimal operating system written in Zig\n");
+    console.init(); // Initialize serial port early
+    console.print("Welcome to ZigOS!\n");
+    console.print("A minimal operating system written in Zig\n");
 
-    vga.print("Initializing GDT...\n");
+    console.print("Initializing GDT...\n");
     const gdt = @import("interrupts/gdt.zig");
     gdt.init();
-    vga.print("GDT initialized!\n");
+    console.print("GDT initialized!\n");
 
-    vga.print("Initializing interrupts...\n");
+    console.print("Initializing interrupts...\n");
     isr.init();
-    vga.print("Interrupts enabled!\n");
+    console.print("Interrupts enabled!\n");
 
-    vga.print("Initializing system calls...\n");
+    console.print("Initializing system calls...\n");
     syscall.init();
-    vga.print("System calls ready!\n");
+    console.print("System calls ready!\n");
 
-    vga.print("Initializing paging...\n");
+    console.print("Initializing paging...\n");
     paging.init();
 
-    vga.print("Enabling kernel memory protection...\n");
+    console.print("Enabling kernel memory protection...\n");
     const protection = @import("memory/protection.zig");
     protection.protectKernelMemory();
 
-    vga.print("Initializing memory allocator...\n");
+    console.print("Initializing memory allocator...\n");
     memory.init();
 
-    vga.print("Initializing advanced memory management...\n");
+    console.print("Initializing advanced memory management...\n");
     const memory_pool = @import("memory/memory_pool.zig");
     memory_pool.init();
 
-    vga.print("Initializing environment variables...\n");
+    console.print("Initializing environment variables...\n");
     const environ = @import("utils/environ.zig");
     environ.init();
 
-    vga.print("Initializing device drivers...\n");
+    console.print("Initializing device drivers...\n");
     device.init();
     console_device.init() catch |err| {
         panic_handler.panic("Failed to initialize console device: {}", .{err});
     };
     ata.init();
-    vga.print("Device drivers ready!\n");
+    console.print("Device drivers ready!\n");
 
-    vga.print("Scanning PCI bus...\n");
+    console.print("Scanning PCI bus...\n");
     pci.scanBus();
 
-    vga.print("Initializing ACPI...\n");
+    console.print("Initializing ACPI...\n");
     acpi.init();
 
-    vga.print("Initializing SMP (multicore) support...\n");
+    console.print("Initializing SMP (multicore) support...\n");
     const smp = @import("smp/smp.zig");
     smp.init();
     if (smp.isSMPEnabled()) {
-        vga.print("SMP enabled with ");
+        console.print("SMP enabled with ");
         const num_cpus = smp.getNumCPUs();
         var cpu_str: [10]u8 = undefined;
         var cpu_count = num_cpus;
@@ -125,13 +127,13 @@ export fn kernel_main() void {
                 cpu_str[idx - 1 - i] = tmp;
             }
         }
-        vga.print(cpu_str[0..idx]);
-        vga.print(" CPUs\n");
+        console.print(cpu_str[0..idx]);
+        console.print(" CPUs\n");
     } else {
-        vga.print("Single CPU mode\n");
+        console.print("Single CPU mode\n");
     }
 
-    vga.print("Initializing network...\n");
+    console.print("Initializing network...\n");
     e1000.init();
     if (!e1000.isInitialized()) {
         virtio.init();
@@ -141,80 +143,80 @@ export fn kernel_main() void {
     }
     network.init();
 
-    vga.print("Initializing socket API...\n");
+    console.print("Initializing socket API...\n");
     const socket = @import("net/socket.zig");
     socket.init();
 
-    vga.print("Initializing DNS client...\n");
+    console.print("Initializing DNS client...\n");
     const dns = @import("net/dns.zig");
     dns.init();
 
-    vga.print("Initializing DHCP client...\n");
+    console.print("Initializing DHCP client...\n");
     const dhcp = @import("net/dhcp.zig");
     dhcp.init();
 
-    vga.print("Initializing routing table...\n");
+    console.print("Initializing routing table...\n");
     const routing = @import("net/routing.zig");
     routing.init();
 
-    vga.print("Initializing Virtual File System...\n");
+    console.print("Initializing Virtual File System...\n");
     vfs.init();
-    vga.print("VFS ready!\n");
+    console.print("VFS ready!\n");
 
-    vga.print("Initializing file operations...\n");
+    console.print("Initializing file operations...\n");
     file_ops.init();
 
-    vga.print("Initializing memory mapping...\n");
+    console.print("Initializing memory mapping...\n");
     mmap.init();
 
-    vga.print("Initializing FAT32 file system...\n");
+    console.print("Initializing FAT32 file system...\n");
     fat32.init();
-    vga.print("FAT32 ready!\n");
+    console.print("FAT32 ready!\n");
 
-    vga.print("Initializing ext2 file system...\n");
+    console.print("Initializing ext2 file system...\n");
     ext2.init();
 
     if (ata.getPrimaryMaster()) |_| {
-        vga.print("Mounting primary master as FAT32...\n");
+        console.print("Mounting primary master as FAT32...\n");
         vfs.mount("ata0", "/mnt", "fat32", 0) catch |err| {
-            vga.print("Failed to mount: ");
-            vga.print(@errorName(err));
-            vga.print("\n");
+            console.print("Failed to mount: ");
+            console.print(@errorName(err));
+            console.print("\n");
         };
     }
 
-    vga.print("Running VM tests...\n");
+    console.print("Running VM tests...\n");
     const vm_test = @import("tests/vm_test.zig");
     vm_test.test_virtual_memory();
 
-    vga.print("Initializing process management...\n");
+    console.print("Initializing process management...\n");
     process.init();
 
-    vga.print("Initializing process monitoring...\n");
+    console.print("Initializing process monitoring...\n");
     const procmon = @import("tests/procmon.zig");
     procmon.init();
 
-    vga.print("Initializing timer...\n");
+    console.print("Initializing timer...\n");
     timer.init(100);
 
-    vga.print("Initializing keyboard...\n");
+    console.print("Initializing keyboard...\n");
     keyboard.init();
-    vga.print("Keyboard ready!\n");
+    console.print("Keyboard ready!\n");
 
-    vga.print("Initializing USB...\n");
+    console.print("Initializing USB...\n");
     usb.init();
 
-    vga.print("Initializing audio...\n");
+    console.print("Initializing audio...\n");
     ac97.init();
 
-    vga.print("Initializing virtual terminals...\n");
+    console.print("Initializing virtual terminals...\n");
     vt.init();
 
-    vga.print("Initializing graphics mode (framebuffer)...\n");
+    console.print("Initializing graphics mode (framebuffer)...\n");
     _ = @import("devices/framebuffer.zig");
-    vga.print("Framebuffer support ready (requires multiboot framebuffer info)\n");
+    console.print("Framebuffer support ready (requires multiboot framebuffer info)\n");
 
-    vga.print("Creating test processes...\n");
+    console.print("Creating test processes...\n");
     _ = process.create_process("test1", test_process1);
     _ = process.create_process("test2", test_process2);
     _ = process.create_process("syscall_test", test_syscall.test_syscall_process);
@@ -225,17 +227,17 @@ export fn kernel_main() void {
     const ring3 = @import("process/ring3.zig");
     ring3.createRing3TestProcess();
 
-    vga.print("Initializing user programs...\n");
+    console.print("Initializing user programs...\n");
     const user_programs = @import("process/user_programs.zig");
     user_programs.init();
 
-    vga.print("Initializing shell...\n");
+    console.print("Initializing shell...\n");
     var system_shell = shell.Shell.init();
     keyboard.setShell(&system_shell);
 
     asm volatile ("sti");
 
-    vga.print("\nZigOS Shell Ready!\n");
+    console.print("\nZigOS Shell Ready!\n");
     system_shell.printPrompt();
 
     while (system_shell.running) {
