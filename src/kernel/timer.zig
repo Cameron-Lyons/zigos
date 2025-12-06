@@ -18,25 +18,25 @@ pub fn init(frequency_hz: u32) void {
     vga.print("Initializing PIT timer at ");
     print_number(frequency_hz);
     vga.print(" Hz...\n");
-    
+
     const divisor = PIT_FREQUENCY / frequency_hz;
-    
+
     outb(PIT_COMMAND, 0x36);
-    
+
     outb(PIT_CHANNEL0, @truncate(divisor & 0xFF));
     outb(PIT_CHANNEL0, @truncate((divisor >> 8) & 0xFF));
-    
+
     vga.print("Timer initialized!\n");
 }
 
 pub fn handleInterrupt() void {
     ticks += 1;
-    
+
     const PREEMPTION_TICKS = 10;
     if (ticks % PREEMPTION_TICKS == 0) {
         const scheduler = @import("scheduler.zig");
         scheduler.preempt();
-        
+
         const process = @import("process.zig");
         process.yield();
     }
@@ -59,16 +59,16 @@ fn print_number(num: u32) void {
         vga.put_char('0');
         return;
     }
-    
+
     var digits: [10]u8 = undefined;
     var i: usize = 0;
     var n = num;
-    
+
     while (n > 0) : (n /= 10) {
         digits[i] = @as(u8, @truncate(n % 10)) + '0';
         i += 1;
     }
-    
+
     while (i > 0) {
         i -= 1;
         vga.put_char(digits[i]);

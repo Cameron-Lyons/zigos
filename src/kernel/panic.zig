@@ -32,7 +32,7 @@ pub fn panic(comptime format: []const u8, args: anytype) noreturn {
         var addr_buf: [32]u8 = undefined;
         const addr_str = std.fmt.bufPrint(&addr_buf, "  [{d}] 0x{x}\n", .{ i, addr }) catch break;
         vga.printWithColor(addr_str, 0x4F);
-        if (i >= 10) break; // Limit stack trace depth
+        if (i >= 10) break;
     }
 
     vga.printWithColor("\n", 0x4F);

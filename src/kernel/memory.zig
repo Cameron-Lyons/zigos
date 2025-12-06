@@ -24,16 +24,16 @@ var is_initialized = false;
 pub fn init() void {
     heap_start = @as([*]u8, @ptrFromInt(HEAP_START));
     heap_end = heap_start + HEAP_SIZE;
-    
+
     const initial_block = @as(*BlockHeader, @ptrCast(@alignCast(heap_start)));
     initial_block.size = HEAP_SIZE - @sizeOf(BlockHeader);
     initial_block.is_free = true;
     initial_block.next = null;
     initial_block.prev = null;
-    
+
     free_list = initial_block;
     is_initialized = true;
-    
+
     vga.print("Memory allocator initialized!\n");
     vga.print("Heap start: 0x");
     printHex(@intFromPtr(heap_start));
@@ -47,17 +47,17 @@ fn printHex(value: usize) void {
     var buffer: [16]u8 = undefined;
     var i: usize = 0;
     var v = value;
-    
+
     if (v == 0) {
         vga.print("0");
         return;
     }
-    
+
     while (v > 0) : (i += 1) {
         buffer[i] = hex_chars[v & 0xF];
         v >>= 4;
     }
-    
+
     while (i > 0) {
         i -= 1;
         vga.put_char(buffer[i]);
@@ -68,17 +68,17 @@ fn printDec(value: usize) void {
     var buffer: [20]u8 = undefined;
     var i: usize = 0;
     var v = value;
-    
+
     if (v == 0) {
         vga.print("0");
         return;
     }
-    
+
     while (v > 0) : (i += 1) {
         buffer[i] = @as(u8, @intCast(v % 10)) + '0';
         v /= 10;
     }
-    
+
     while (i > 0) {
         i -= 1;
         vga.put_char(buffer[i]);
@@ -92,20 +92,20 @@ fn alignUp(addr: usize, alignment: usize) usize {
 fn splitBlock(block: *BlockHeader, size: usize) void {
     const total_size = block.size;
     const new_block_offset = @sizeOf(BlockHeader) + alignUp(size, BLOCK_ALIGNMENT);
-    
+
     if (total_size > new_block_offset + @sizeOf(BlockHeader) + MIN_BLOCK_SIZE) {
         const new_block_ptr = @as([*]u8, @ptrCast(block)) + new_block_offset;
         const new_block = @as(*BlockHeader, @ptrCast(@alignCast(new_block_ptr)));
-        
+
         new_block.size = total_size - new_block_offset;
         new_block.is_free = true;
         new_block.next = block.next;
         new_block.prev = block;
-        
+
         if (block.next) |next| {
             next.prev = new_block;
         }
-        
+
         block.size = size;
         block.next = new_block;
     }
@@ -121,7 +121,7 @@ fn coalesceBlocks(block: *BlockHeader) void {
             }
         }
     }
-    
+
     if (block.prev) |prev| {
         if (prev.is_free) {
             prev.size += @sizeOf(BlockHeader) + block.size;
@@ -135,35 +135,35 @@ fn coalesceBlocks(block: *BlockHeader) void {
 
 pub fn kmalloc(size: usize) ?*anyopaque {
     if (!is_initialized or size == 0) return null;
-    
+
     const aligned_size = alignUp(size, BLOCK_ALIGNMENT);
-    
+
     var current = free_list;
     while (current) |block| {
         if (block.is_free and block.size >= aligned_size) {
             splitBlock(block, aligned_size);
             block.is_free = false;
-            
+
             const data_ptr = @as([*]u8, @ptrCast(block)) + @sizeOf(BlockHeader);
             return @as(*anyopaque, @ptrCast(data_ptr));
         }
         current = block.next;
     }
-    
+
     return null;
 }
 
 pub fn kfree(ptr: ?*anyopaque) void {
     if (ptr == null or !is_initialized) return;
-    
+
     const block_ptr = @as([*]u8, @ptrCast(ptr.?)) - @sizeOf(BlockHeader);
     const block = @as(*BlockHeader, @ptrCast(@alignCast(block_ptr)));
-    
-    if (@intFromPtr(block) < @intFromPtr(heap_start) or 
+
+    if (@intFromPtr(block) < @intFromPtr(heap_start) or
         @intFromPtr(block) >= @intFromPtr(heap_end)) {
         return;
     }
-    
+
     block.is_free = true;
     coalesceBlocks(block);
 }
@@ -174,29 +174,29 @@ pub fn krealloc(ptr: ?*anyopaque, new_size: usize) ?*anyopaque {
         kfree(ptr);
         return null;
     }
-    
+
     const block_ptr = @as([*]u8, @ptrCast(ptr.?)) - @sizeOf(BlockHeader);
     const block = @as(*BlockHeader, @ptrCast(@alignCast(block_ptr)));
-    
+
     if (block.size >= new_size) {
         return ptr;
     }
-    
+
     const new_ptr = kmalloc(new_size);
     if (new_ptr) |new| {
         const copy_size = @min(block.size, new_size);
-        @memcpy(@as([*]u8, @ptrCast(new))[0..copy_size], 
+        @memcpy(@as([*]u8, @ptrCast(new))[0..copy_size],
                 @as([*]u8, @ptrCast(ptr.?))[0..copy_size]);
         kfree(ptr);
     }
-    
+
     return new_ptr;
 }
 
 pub fn getMemoryStats() struct { total: usize, used: usize, free: usize } {
     var total: usize = 0;
     var free: usize = 0;
-    
+
     var current = free_list;
     while (current) |block| {
         total += block.size + @sizeOf(BlockHeader);
@@ -205,7 +205,7 @@ pub fn getMemoryStats() struct { total: usize, used: usize, free: usize } {
         }
         current = block.next;
     }
-    
+
     return .{
         .total = total,
         .used = total - free,
@@ -216,7 +216,7 @@ pub fn getMemoryStats() struct { total: usize, used: usize, free: usize } {
 pub fn allocPages(num_pages: usize) ?[*]u8 {
     const page_size = 4096;
     const size = num_pages * page_size;
-    
+
     const ptr = kmalloc(size);
     if (ptr) |p| {
         return @as([*]u8, @ptrCast(p));
@@ -232,22 +232,22 @@ pub fn freePages(ptr: [*]u8, num_pages: usize) void {
 pub fn allocatePhysicalPage() ?u32 {
     const page = next_physical_page;
     next_physical_page += PAGE_SIZE;
-    
+
     if (next_physical_page > 128 * 1024 * 1024) {
         return null;
     }
-    
+
     return @as(u32, @intCast(page));
 }
 
 pub fn alloc(comptime T: type) ?*T {
     const size = @sizeOf(T);
-    
+
     if (kmalloc(size)) |ptr| {
         const typed_ptr = @as(*T, @ptrCast(@alignCast(ptr)));
         typed_ptr.* = undefined;
         return typed_ptr;
     }
-    
+
     return null;
 }

@@ -46,9 +46,9 @@ pub const Process = struct {
     exit_code: i32 = 0,
     page_directory: ?*paging.PageDirectory,
     entry_point: *const fn () void,
-    priority: i8 = 0,  // Process priority (-20 to 19, lower value = higher priority)
-    nice_value: i8 = 0, // Nice value for priority adjustment
-    time_slice: u32 = 10, // Time slice for scheduling
+    priority: i8 = 0,
+    nice_value: i8 = 0,
+    time_slice: u32 = 10,
 };
 
 const MAX_PROCESSES = 256;
@@ -63,7 +63,7 @@ pub fn getProcessList() ?*Process {
 }
 
 pub fn terminateProcess(pid: u32) bool {
-    if (pid == 0) return false; // Can't kill idle process
+    if (pid == 0) return false;
 
     var i: usize = 0;
     while (i < MAX_PROCESSES) : (i += 1) {
@@ -96,14 +96,14 @@ pub fn terminateProcess(pid: u32) bool {
 }
 
 pub fn setPriority(pid: u32, priority: i8) bool {
-    // Clamp priority to valid range (-20 to 19)
+
     const clamped_priority = if (priority < -20) -20 else if (priority > 19) 19 else priority;
-    
+
     var i: usize = 0;
     while (i < MAX_PROCESSES) : (i += 1) {
         if (process_table[i].pid == pid and process_table[i].state != .Terminated) {
             process_table[i].priority = clamped_priority;
-            // Adjust time slice based on priority (higher priority = longer time slice)
+
             process_table[i].time_slice = @intCast(20 - @as(i32, clamped_priority));
             return true;
         }
@@ -112,12 +112,12 @@ pub fn setPriority(pid: u32, priority: i8) bool {
 }
 
 pub fn setNice(pid: u32, nice_value: i8) bool {
-    // Nice value adjusts the priority
+
     var i: usize = 0;
     while (i < MAX_PROCESSES) : (i += 1) {
         if (process_table[i].pid == pid and process_table[i].state != .Terminated) {
             process_table[i].nice_value = nice_value;
-            // Recalculate priority based on nice value
+
             const new_priority = process_table[i].priority + nice_value;
             return setPriority(pid, new_priority);
         }
@@ -219,7 +219,7 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
             }
         };
     } else {
-        proc.user_stack = proc.kernel_stack; // Kernel processes use kernel stack
+        proc.user_stack = proc.kernel_stack;
         proc.page_directory = null;
     }
 
@@ -287,7 +287,7 @@ extern fn save_process_state(ctx: *Context) void;
 extern fn restore_process_state(ctx: *Context) void;
 
 pub fn switch_process(old: *Context, new: *Context) void {
-    // If switching to a user process, update TSS with kernel stack
+
     if (current_process != null and current_process.?.privilege == .User) {
         const kernel_stack_top = @intFromPtr(current_process.?.kernel_stack) + current_process.?.stack_size;
         gdt.setKernelStack(kernel_stack_top);

@@ -54,7 +54,7 @@ pub const Shell = struct {
                 self.history_index = self.history_count;
                 self.printPrompt();
             },
-            '\x08' => { // Backspace
+            '\x08' => {
                 if (self.buffer_pos > 0) {
                     self.buffer_pos -= 1;
                     self.command_buffer[self.buffer_pos] = 0;
@@ -73,8 +73,8 @@ pub const Shell = struct {
 
     fn addToHistory(self: *Shell) void {
         if (self.buffer_pos == 0) return;
-        
-        // Check if command is same as last history entry
+
+
         if (self.history_count > 0) {
             const last_idx = (self.history_count - 1) % MAX_HISTORY;
             var same = true;
@@ -86,16 +86,16 @@ pub const Shell = struct {
                 }
             }
             if (same and self.history[last_idx][self.buffer_pos] == 0) {
-                return; // Don't add duplicate
+                return;
             }
         }
-        
+
         const idx = self.history_count % MAX_HISTORY;
         @memcpy(self.history[idx][0..self.buffer_pos], self.command_buffer[0..self.buffer_pos]);
         self.history[idx][self.buffer_pos] = 0;
         self.history_count += 1;
     }
-    
+
     pub fn handleArrowKey(self: *Shell, key: ArrowKey) void {
         switch (key) {
             .Up => {
@@ -111,7 +111,7 @@ pub const Shell = struct {
                 if (self.history_index < self.history_count) {
                     self.history_index += 1;
                     if (self.history_index == self.history_count) {
-                        // Clear current command
+
                         self.clearLine();
                         self.command_buffer = [_]u8{0} ** MAX_COMMAND_LENGTH;
                         self.buffer_pos = 0;
@@ -121,36 +121,36 @@ pub const Shell = struct {
                 }
             },
             .Left => {
-                // TODO: Implement cursor movement
+
             },
             .Right => {
-                // TODO: Implement cursor movement
+
             },
         }
     }
-    
+
     fn loadHistoryEntry(self: *Shell) void {
         const idx = self.history_index % MAX_HISTORY;
-        
-        // Clear current line
+
+
         self.clearLine();
-        
-        // Load history entry
+
+
         var i: usize = 0;
         while (i < MAX_COMMAND_LENGTH and self.history[idx][i] != 0) : (i += 1) {
             self.command_buffer[i] = self.history[idx][i];
             vga.put_char(self.command_buffer[i]);
         }
         self.buffer_pos = i;
-        
-        // Clear rest of buffer
+
+
         while (i < MAX_COMMAND_LENGTH) : (i += 1) {
             self.command_buffer[i] = 0;
         }
     }
-    
+
     fn clearLine(self: *Shell) void {
-        // Move cursor to beginning of command
+
         while (self.buffer_pos > 0) {
             vga.put_char('\x08');
             vga.put_char(' ');
@@ -158,11 +158,11 @@ pub const Shell = struct {
             self.buffer_pos -= 1;
         }
     }
-    
+
     pub fn handleTabCompletion(self: *Shell) void {
         if (self.buffer_pos == 0) return;
-        
-        // Find the current word being typed
+
+
         var word_start: usize = 0;
         var i: usize = 0;
         while (i < self.buffer_pos) : (i += 1) {
@@ -170,17 +170,17 @@ pub const Shell = struct {
                 word_start = i + 1;
             }
         }
-        
-        // Check if we're completing a command or a file path
+
+
         if (word_start == 0) {
-            // Complete command
+
             self.completeCommand();
         } else {
-            // Complete file path
+
             self.completeFilePath(word_start);
         }
     }
-    
+
     fn completeCommand(self: *Shell) void {
         const commands = [_][]const u8{
             "help", "clear", "echo", "ps", "meminfo", "uptime", "kill",
@@ -190,15 +190,15 @@ pub const Shell = struct {
             "route", "arp", "nettest", "synctest", "ipctest", "procmon",
             "top", "cp", "touch", "write", "edit", "nice", "renice",
         };
-        
-        // Get current partial command
+
+
         var partial: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH;
         @memcpy(partial[0..self.buffer_pos], self.command_buffer[0..self.buffer_pos]);
-        
-        // Find matching commands
+
+
         var matches: [16][]const u8 = undefined;
         var match_count: usize = 0;
-        
+
         for (commands) |cmd| {
             if (self.buffer_pos <= cmd.len) {
                 var matching = true;
@@ -215,9 +215,9 @@ pub const Shell = struct {
                 }
             }
         }
-        
+
         if (match_count == 1) {
-            // Complete the command
+
             const cmd = matches[0];
             self.clearLine();
             for (cmd) |c| {
@@ -229,7 +229,7 @@ pub const Shell = struct {
             vga.put_char(' ');
             self.buffer_pos += 1;
         } else if (match_count > 1) {
-            // Show all matches
+
             vga.print("\n");
             for (matches[0..match_count]) |match| {
                 vga.print("  ");
@@ -239,16 +239,16 @@ pub const Shell = struct {
                 vga.print("\n");
             }
             self.printPrompt();
-            // Redraw current command
+
             var k: usize = 0;
             while (k < self.buffer_pos) : (k += 1) {
                 vga.put_char(self.command_buffer[k]);
             }
         }
     }
-    
+
     fn completeFilePath(self: *Shell, word_start: usize) void {
-        // Extract the partial path
+
         var partial_path: [256]u8 = [_]u8{0} ** 256;
         var partial_len: usize = 0;
         var k = word_start;
@@ -256,10 +256,10 @@ pub const Shell = struct {
             partial_path[partial_len] = self.command_buffer[k];
             partial_len += 1;
         }
-        
-        // For now, just beep or do nothing
-        // Full file path completion would require directory listing
-        // and pattern matching which is complex
+
+
+
+
     }
 
     pub fn printPrompt(self: *const Shell) void {
@@ -290,7 +290,7 @@ pub const Shell = struct {
                 }
 
                 if (arg_end > arg_start) {
-                    self.command_buffer[arg_end] = 0; // Null terminate
+                    self.command_buffer[arg_end] = 0;
                     args[arg_count] = @as([*:0]const u8, @ptrCast(&self.command_buffer[arg_start]));
                     arg_count += 1;
                 }
@@ -506,7 +506,7 @@ pub const Shell = struct {
     fn cmdUptime(self: *const Shell) void {
         _ = self;
         const ticks = timer.getTicks();
-        const seconds = ticks / 100; // 100Hz timer
+        const seconds = ticks / 100;
         const minutes = seconds / 60;
         const hours = minutes / 60;
 
@@ -697,7 +697,7 @@ pub const Shell = struct {
             if (bytes_read == 0) break;
 
             for (buffer[0..bytes_read]) |byte| {
-                if (byte == '\r') continue; // Skip carriage returns
+                if (byte == '\r') continue;
                 vga.put_char(byte);
             }
         }
@@ -710,7 +710,7 @@ pub const Shell = struct {
             vga.print("Usage: mkdir <directory>\n");
             return;
         }
-        
+
         const path = args[0];
         const mode = vfs.FileMode{
             .owner_read = true,
@@ -721,7 +721,7 @@ pub const Shell = struct {
             .other_read = true,
             .other_exec = true,
         };
-        
+
         vfs.mkdir(sliceFromCStr(path), mode) catch |err| {
             vga.print("mkdir: ");
             printString(path);
@@ -730,19 +730,19 @@ pub const Shell = struct {
             vga.print("\n");
             return;
         };
-        
+
         vga.print("Directory created: ");
         printString(path);
         vga.print("\n");
     }
-    
+
     fn cmdRmdir(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         if (args.len == 0) {
             vga.print("Usage: rmdir <directory>\n");
             return;
         }
-        
+
         const path = args[0];
         vfs.rmdir(sliceFromCStr(path)) catch |err| {
             vga.print("rmdir: ");
@@ -752,19 +752,19 @@ pub const Shell = struct {
             vga.print("\n");
             return;
         };
-        
+
         vga.print("Directory removed: ");
         printString(path);
         vga.print("\n");
     }
-    
+
     fn cmdRm(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         if (args.len == 0) {
             vga.print("Usage: rm <file>\n");
             return;
         }
-        
+
         const path = args[0];
         vfs.unlink(sliceFromCStr(path)) catch |err| {
             vga.print("rm: ");
@@ -774,19 +774,19 @@ pub const Shell = struct {
             vga.print("\n");
             return;
         };
-        
+
         vga.print("File removed: ");
         printString(path);
         vga.print("\n");
     }
-    
+
     fn cmdMv(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         if (args.len < 2) {
             vga.print("Usage: mv <source> <destination>\n");
             return;
         }
-        
+
         const src = args[0];
         const dst = args[1];
         vfs.rename(sliceFromCStr(src), sliceFromCStr(dst)) catch |err| {
@@ -799,7 +799,7 @@ pub const Shell = struct {
             vga.print("\n");
             return;
         };
-        
+
         printString(src);
         vga.print(" -> ");
         printString(dst);
@@ -837,18 +837,18 @@ pub const Shell = struct {
         printString(args[2]);
         vga.print("\n");
     }
-    
+
     fn cmdCp(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         if (args.len < 2) {
             vga.print("Usage: cp <source> <destination>\n");
             return;
         }
-        
+
         const src_path = sliceFromCStr(args[0]);
         const dst_path = sliceFromCStr(args[1]);
-        
-        // Open source file
+
+
         const src_fd = vfs.open(src_path, vfs.O_RDONLY) catch |err| {
             vga.print("cp: ");
             printString(args[0]);
@@ -858,11 +858,11 @@ pub const Shell = struct {
             return;
         };
         defer vfs.close(src_fd) catch {};
-        
-        // For now, just copy using a buffer without knowing the exact size
-        // We'll read until we get 0 bytes
-        
-        // Create destination file
+
+
+
+
+
         const dst_fd = vfs.open(dst_path, vfs.O_WRONLY | vfs.O_CREAT | vfs.O_TRUNC) catch |err| {
             vga.print("cp: ");
             printString(args[1]);
@@ -872,8 +872,8 @@ pub const Shell = struct {
             return;
         };
         defer vfs.close(dst_fd) catch {};
-        
-        // Copy data
+
+
         var buffer: [4096]u8 = undefined;
         var total_copied: usize = 0;
         while (true) {
@@ -883,19 +883,19 @@ pub const Shell = struct {
                 vga.print("\n");
                 return;
             };
-            
+
             if (bytes_read == 0) break;
-            
+
             _ = vfs.write(dst_fd, buffer[0..bytes_read]) catch |err| {
                 vga.print("cp: write error: ");
                 vga.print(@errorName(err));
                 vga.print("\n");
                 return;
             };
-            
+
             total_copied += bytes_read;
         }
-        
+
         vga.print("Copied ");
         printString(args[0]);
         vga.print(" to ");
@@ -904,17 +904,17 @@ pub const Shell = struct {
         printNumber(@intCast(total_copied));
         vga.print(" bytes)\n");
     }
-    
+
     fn cmdTouch(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         if (args.len == 0) {
             vga.print("Usage: touch <file>\n");
             return;
         }
-        
+
         const path = sliceFromCStr(args[0]);
-        
-        // Try to open file, create if it doesn't exist
+
+
         const fd = vfs.open(path, vfs.O_WRONLY | vfs.O_CREAT) catch |err| {
             vga.print("touch: ");
             printString(args[0]);
@@ -923,14 +923,14 @@ pub const Shell = struct {
             vga.print("\n");
             return;
         };
-        
+
         vfs.close(fd) catch {};
-        
+
         vga.print("Created/updated ");
         printString(args[0]);
         vga.print("\n");
     }
-    
+
     fn cmdWrite(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         if (args.len < 2) {
@@ -938,10 +938,10 @@ pub const Shell = struct {
             vga.print("Example: write test.txt \"Hello World\"\n");
             return;
         }
-        
+
         const path = sliceFromCStr(args[0]);
-        
-        // Open file for writing (create if doesn't exist, truncate if exists)
+
+
         const fd = vfs.open(path, vfs.O_WRONLY | vfs.O_CREAT | vfs.O_TRUNC) catch |err| {
             vga.print("write: ");
             printString(args[0]);
@@ -951,8 +951,8 @@ pub const Shell = struct {
             return;
         };
         defer vfs.close(fd) catch {};
-        
-        // Concatenate all remaining arguments as the text to write
+
+
         var total_written: usize = 0;
         var i: usize = 1;
         while (i < args.len) : (i += 1) {
@@ -964,37 +964,37 @@ pub const Shell = struct {
                 return;
             };
             total_written += bytes_written;
-            
-            // Add space between arguments (except last one)
+
+
             if (i < args.len - 1) {
                 _ = vfs.write(fd, " ") catch {};
                 total_written += 1;
             }
         }
-        
+
         vga.print("Wrote ");
         printNumber(@intCast(total_written));
         vga.print(" bytes to ");
         printString(args[0]);
         vga.print("\n");
     }
-    
+
     fn cmdEdit(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         if (args.len == 0) {
             vga.print("Usage: edit <file>\n");
             return;
         }
-        
+
         vga.print("Opening editor for ");
         printString(args[0]);
         vga.print("...\n");
-        
-        // Editor functionality temporarily disabled - needs proper memory allocator integration
+
+
         vga.print("Note: Editor is currently in demo mode\n");
         vga.print("Full editor implementation coming soon!\n");
     }
-    
+
     fn cmdNice(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         if (args.len < 2) {
@@ -1002,18 +1002,18 @@ pub const Shell = struct {
             vga.print("Priority range: -20 (highest) to 19 (lowest)\n");
             return;
         }
-        
-        // Parse priority value
+
+
         const priority_str = sliceFromCStr(args[0]);
         var priority: i8 = 0;
         var is_negative = false;
         var i: usize = 0;
-        
+
         if (priority_str[0] == '-') {
             is_negative = true;
             i = 1;
         }
-        
+
         while (i < priority_str.len) : (i += 1) {
             if (priority_str[i] >= '0' and priority_str[i] <= '9') {
                 priority = priority * 10 + @as(i8, @intCast(priority_str[i] - '0'));
@@ -1021,11 +1021,11 @@ pub const Shell = struct {
                 break;
             }
         }
-        
+
         if (is_negative) {
             priority = -priority;
         }
-        
+
         vga.print("Would run command '");
         printString(args[1]);
         vga.print("' with priority ");
@@ -1038,7 +1038,7 @@ pub const Shell = struct {
         vga.print("\n");
         vga.print("Note: Command execution with priority not yet fully implemented\n");
     }
-    
+
     fn cmdRenice(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         if (args.len < 2) {
@@ -1046,18 +1046,18 @@ pub const Shell = struct {
             vga.print("Priority range: -20 (highest) to 19 (lowest)\n");
             return;
         }
-        
-        // Parse priority value
+
+
         const priority_str = sliceFromCStr(args[0]);
         var priority: i8 = 0;
         var is_negative = false;
         var i: usize = 0;
-        
+
         if (priority_str[0] == '-') {
             is_negative = true;
             i = 1;
         }
-        
+
         while (i < priority_str.len) : (i += 1) {
             if (priority_str[i] >= '0' and priority_str[i] <= '9') {
                 priority = priority * 10 + @as(i8, @intCast(priority_str[i] - '0'));
@@ -1065,15 +1065,15 @@ pub const Shell = struct {
                 break;
             }
         }
-        
+
         if (is_negative) {
             priority = -priority;
         }
-        
-        // Parse PID
+
+
         const pid = parseNumber(args[1]) orelse 0;
-        
-        // Set the process priority
+
+
         if (process.setPriority(pid, priority)) {
             vga.print("Changed priority of process ");
             printNumber(pid);
@@ -1091,7 +1091,7 @@ pub const Shell = struct {
             vga.print(" not found\n");
         }
     }
-    
+
     fn cmdChmod(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         if (args.len < 2) {
@@ -1099,8 +1099,8 @@ pub const Shell = struct {
             vga.print("Example: chmod 755 file.txt\n");
             return;
         }
-        
-        // Parse octal mode
+
+
         const mode_str = sliceFromCStr(args[0]);
         var mode_value: u16 = 0;
         for (mode_str) |c| {
@@ -1113,8 +1113,8 @@ pub const Shell = struct {
                 return;
             }
         }
-        
-        // Convert octal to FileMode struct
+
+
         const mode = vfs.FileMode{
             .owner_read = (mode_value & 0o400) != 0,
             .owner_write = (mode_value & 0o200) != 0,
@@ -1126,7 +1126,7 @@ pub const Shell = struct {
             .other_write = (mode_value & 0o002) != 0,
             .other_exec = (mode_value & 0o001) != 0,
         };
-        
+
         const path = sliceFromCStr(args[1]);
         vfs.chmod(path, mode) catch |err| {
             vga.print("chmod: ");
@@ -1136,22 +1136,22 @@ pub const Shell = struct {
             vga.print("\n");
             return;
         };
-        
+
         vga.print("Changed permissions of ");
         printString(args[1]);
         vga.print(" to ");
         printString(args[0]);
         vga.print("\n");
     }
-    
+
     fn cmdExport(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         if (args.len == 0) {
             environ.printAll();
             return;
         }
-        
-        // Parse VAR=value format
+
+
         const arg = sliceFromCStr(args[0]);
         var eq_pos: ?usize = null;
         for (arg, 0..) |c, i| {
@@ -1160,7 +1160,7 @@ pub const Shell = struct {
                 break;
             }
         }
-        
+
         if (eq_pos) |pos| {
             const name = arg[0..pos];
             const value = arg[pos + 1..];
@@ -1177,32 +1177,32 @@ pub const Shell = struct {
             vga.print("Usage: export VAR=value\n");
         }
     }
-    
+
     fn cmdUnset(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         if (args.len == 0) {
             vga.print("Usage: unset VAR\n");
             return;
         }
-        
+
         const name = sliceFromCStr(args[0]);
         environ.unsetVar(name);
     }
-    
+
     fn cmdEnv(self: *const Shell) void {
         _ = self;
         environ.printAll();
     }
-    
+
     fn cmdPing(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
-        
+
         if (args.len == 0) {
             vga.print("Usage: ping <ip_address>\n");
             vga.print("Example: ping 192.168.1.1\n");
             return;
         }
-        
+
         const ip_str = sliceFromCStr(args[0]);
         if (network.parseIPv4(ip_str)) |ip| {
             vga.print("Pinging ");
@@ -1215,33 +1215,33 @@ pub const Shell = struct {
             vga.print("\n");
         }
     }
-    
+
     fn cmdHttpd(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         const http = @import("http.zig");
-        
+
         if (args.len == 0) {
             vga.print("Usage: httpd <start|stop> [port]\n");
             vga.print("Example: httpd start 8080\n");
             return;
         }
-        
+
         if (streq(args[0], "start")) {
             var port: u16 = 80;
             if (args.len > 1) {
                 port = parseNumberU16(sliceFromCStr(args[1]));
             }
-            
+
             vga.print("Starting HTTP server on port ");
             printNumber(port);
             vga.print("...\n");
-            
+
             var server = http.HTTPServer.init(port);
             server.start() catch {
                 vga.print("Failed to start HTTP server\n");
                 return;
             };
-            
+
             const server_process = process.create_process("httpd", struct {
                 fn serverLoop() void {
                     var s = http.HTTPServer.init(80);
@@ -1250,7 +1250,7 @@ pub const Shell = struct {
                 }
             }.serverLoop);
             _ = server_process;
-            
+
             vga.print("HTTP server started successfully\n");
         } else if (streq(args[0], "stop")) {
             vga.print("Stopping HTTP server...\n");
@@ -1261,50 +1261,50 @@ pub const Shell = struct {
             vga.print("\n");
         }
     }
-    
+
     fn cmdNetstat(self: *const Shell) void {
         _ = self;
         vga.print("Network Statistics:\n");
         vga.print("------------------\n");
-        
+
         const local_ip = network.getLocalIP();
         vga.print("Local IP: ");
         network.printIPv4(local_ip);
         vga.print("\n");
-        
+
         const gateway = network.getGateway();
         vga.print("Gateway: ");
         network.printIPv4(gateway);
         vga.print("\n");
-        
+
         const netmask = network.getNetmask();
         vga.print("Netmask: ");
         network.printIPv4(netmask);
         vga.print("\n");
-        
+
         vga.print("\nActive Connections:\n");
         vga.print("Proto  Local Address       Foreign Address     State\n");
         vga.print("-----  -----------------   -----------------   -----\n");
     }
-    
+
     fn cmdNslookup(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         const dns = @import("dns.zig");
-        
+
         if (args.len == 0) {
             vga.print("Usage: nslookup <domain>\n");
             vga.print("Example: nslookup example.com\n");
             return;
         }
-        
+
         vga.print("Looking up ");
         printString(args[0]);
         vga.print("...\n");
-        
+
         var domain_len: usize = 0;
         while (args[0][domain_len] != 0) : (domain_len += 1) {}
         const domain = args[0][0..domain_len];
-        
+
         const ip = dns.resolve(domain) catch |err| {
             vga.print("Failed to resolve: ");
             switch (err) {
@@ -1318,22 +1318,22 @@ pub const Shell = struct {
             }
             return;
         };
-        
+
         printString(args[0]);
         vga.print(" -> ");
         network.printIPv4(ip);
         vga.print("\n");
     }
-    
+
     fn cmdDhcp(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         const dhcp = @import("dhcp.zig");
-        
+
         if (args.len == 0) {
             vga.print("Usage: dhcp <request|release>\n");
             return;
         }
-        
+
         if (streq(args[0], "request")) {
             vga.print("Requesting IP address via DHCP...\n");
             dhcp.requestAddress() catch |err| {
@@ -1352,57 +1352,57 @@ pub const Shell = struct {
             vga.print("\n");
         }
     }
-    
+
     fn cmdRoute(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         _ = args;
         const routing = @import("routing.zig");
-        
+
         const table = routing.getRoutingTable();
         table.printRoutes();
     }
-    
+
     fn cmdArp(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         _ = args;
         const routing = @import("routing.zig");
-        
+
         const table = routing.getRoutingTable();
         table.printARPCache();
     }
-    
+
     fn cmdNetTest(self: *const Shell) void {
         _ = self;
         const net_test = @import("net_test.zig");
         net_test.runNetworkTests();
     }
-    
+
     fn cmdSyncTest(self: *const Shell) void {
         _ = self;
         const sync = @import("sync.zig");
         sync.runSynchronizationTests();
     }
-    
+
     fn cmdIpcTest(self: *const Shell) void {
         _ = self;
         const ipc = @import("ipc.zig");
         ipc.runIPCTests();
     }
-    
+
     fn cmdProcMon(self: *const Shell) void {
         _ = self;
         const procmon = @import("procmon.zig");
         procmon.printSystemStats();
     }
-    
+
     fn cmdTop(self: *const Shell) void {
         _ = self;
         const procmon = @import("procmon.zig");
-        
+
         vga.clear();
         procmon.printCPUGraph();
         vga.print("\n");
-        
+
         const cpu = procmon.getCPUUsage();
         vga.print("CPU: User: ");
         printNumber(cpu.user_percent);
@@ -1411,10 +1411,10 @@ pub const Shell = struct {
         vga.print("% Idle: ");
         printNumber(cpu.idle_percent);
         vga.print("%\n");
-        
+
         procmon.printProcessList();
     }
-    
+
     fn parseNumberU16(str: []const u8) u16 {
         var result: u16 = 0;
         for (str) |c| {
@@ -1461,7 +1461,7 @@ fn parseNumber(str: [*:0]const u8) ?u32 {
         const digit = str[i] - '0';
         const new_result = result *% 10 +% digit;
 
-        // Check for overflow
+
         if (new_result < result) {
             return null;
         }

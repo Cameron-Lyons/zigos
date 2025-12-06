@@ -4,9 +4,6 @@ const vga = @import("../kernel/vga.zig");
 const isr = @import("../kernel/isr.zig");
 const idt = @import("../kernel/idt.zig");
 
-pub usingnamespace kernel;
-pub usingnamespace isr;
-
 export fn _start() callconv(.Naked) noreturn {
     asm volatile (
         \\    lea stack_top, %%rsp

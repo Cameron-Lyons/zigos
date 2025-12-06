@@ -19,19 +19,19 @@ pub fn listDirectory(path: []const u8, options: ListDirOptions) vfs.VFSError!voi
     var entry: vfs.DirEntry = undefined;
 
     while (try vfs.readdir(fd, &entry, index)) : (index += 1) {
-        // Skip hidden files if not requested
+
         if (!options.show_hidden and entry.name[0] == '.') {
             continue;
         }
 
-        // Filter by type if specified
+
         if (options.filter_type) |filter| {
             if (entry.file_type != filter) {
                 continue;
             }
         }
 
-        // Pattern matching (simple substring for now)
+
         if (options.pattern) |pattern| {
             if (!contains(entry.name[0..entry.name_len], pattern)) {
                 continue;
@@ -39,7 +39,7 @@ pub fn listDirectory(path: []const u8, options: ListDirOptions) vfs.VFSError!voi
         }
 
         if (options.show_details) {
-            // Get detailed information
+
             var full_path: [512]u8 = undefined;
             const path_len = @min(path.len, 256);
             @memcpy(full_path[0..path_len], path[0..path_len]);
@@ -58,17 +58,17 @@ pub fn listDirectory(path: []const u8, options: ListDirOptions) vfs.VFSError!voi
         }
 
         if (options.recursive and entry.file_type == vfs.FileType.Directory) {
-            if (entry.name[0] != '.') { // Skip . and ..
+            if (entry.name[0] != '.') {
                 var sub_path: [512]u8 = undefined;
                 const path_len = @min(path.len, 256);
                 @memcpy(sub_path[0..path_len], path[0..path_len]);
                 sub_path[path_len] = '/';
                 @memcpy(sub_path[path_len + 1 .. path_len + 1 + entry.name_len], entry.name[0..entry.name_len]);
-                
+
                 vga.print("\n");
                 vga.print(sub_path[0 .. path_len + 1 + entry.name_len]);
                 vga.print(":\n");
-                
+
                 listDirectory(sub_path[0 .. path_len + 1 + entry.name_len], options) catch |err| {
                     vga.print("Error listing ");
                     vga.print(sub_path[0 .. path_len + 1 + entry.name_len]);
@@ -82,11 +82,11 @@ pub fn listDirectory(path: []const u8, options: ListDirOptions) vfs.VFSError!voi
 }
 
 pub fn copyFile(src_path: []const u8, dst_path: []const u8) vfs.VFSError!void {
-    // Open source file for reading
+
     const src_fd = try vfs.open(src_path, vfs.O_RDONLY);
     defer vfs.close(src_fd) catch {};
 
-    // Get source file size
+
     var stat_buf: vfs.FileStat = undefined;
     try vfs.stat(src_path, &stat_buf);
 
@@ -94,17 +94,17 @@ pub fn copyFile(src_path: []const u8, dst_path: []const u8) vfs.VFSError!void {
         return vfs.VFSError.IsDirectory;
     }
 
-    // Create destination file
+
     const dst_fd = try vfs.open(dst_path, vfs.O_WRONLY | vfs.O_CREAT | vfs.O_TRUNC);
     defer vfs.close(dst_fd) catch {};
 
-    // Allocate buffer for copying
+
     const buffer_size: usize = 4096;
     const buffer_mem = memory.kmalloc(buffer_size) orelse return vfs.VFSError.OutOfMemory;
     defer memory.kfree(@as([*]u8, @ptrCast(buffer_mem)));
     const buffer = @as([*]u8, @ptrCast(buffer_mem))[0..buffer_size];
 
-    // Copy data
+
     var total_copied: usize = 0;
     while (total_copied < stat_buf.size) {
         const to_read = @min(buffer_size, stat_buf.size - total_copied);
@@ -123,23 +123,23 @@ pub fn copyFile(src_path: []const u8, dst_path: []const u8) vfs.VFSError!void {
         total_copied += bytes_read;
     }
 
-    // Copy permissions
+
     vfs.chmod(dst_path, stat_buf.mode) catch {};
 }
 
 pub fn moveFile(src_path: []const u8, dst_path: []const u8) vfs.VFSError!void {
-    // Try rename first (efficient if same filesystem)
+
     if (vfs.rename(src_path, dst_path)) |_| {
         return;
     } else |_| {
-        // Fall back to copy and delete
+
         try copyFile(src_path, dst_path);
         try vfs.unlink(src_path);
     }
 }
 
 pub fn copyDirectory(src_path: []const u8, dst_path: []const u8) vfs.VFSError!void {
-    // Get source directory info
+
     var stat_buf: vfs.FileStat = undefined;
     try vfs.stat(src_path, &stat_buf);
 
@@ -147,10 +147,10 @@ pub fn copyDirectory(src_path: []const u8, dst_path: []const u8) vfs.VFSError!vo
         return vfs.VFSError.NotDirectory;
     }
 
-    // Create destination directory
+
     try vfs.mkdir(dst_path, stat_buf.mode);
 
-    // Copy contents
+
     const src_fd = try vfs.open(src_path, vfs.O_RDONLY);
     defer vfs.close(src_fd) catch {};
 
@@ -158,13 +158,13 @@ pub fn copyDirectory(src_path: []const u8, dst_path: []const u8) vfs.VFSError!vo
     var entry: vfs.DirEntry = undefined;
 
     while (try vfs.readdir(src_fd, &entry, index)) : (index += 1) {
-        // Skip . and ..
-        if (entry.name[0] == '.' and (entry.name_len == 1 or 
+
+        if (entry.name[0] == '.' and (entry.name_len == 1 or
             (entry.name_len == 2 and entry.name[1] == '.'))) {
             continue;
         }
 
-        // Build full paths
+
         var src_full: [512]u8 = undefined;
         var dst_full: [512]u8 = undefined;
 
@@ -179,7 +179,7 @@ pub fn copyDirectory(src_path: []const u8, dst_path: []const u8) vfs.VFSError!vo
         @memcpy(dst_full[dst_len + 1 .. dst_len + 1 + entry.name_len], entry.name[0..entry.name_len]);
 
         if (entry.file_type == vfs.FileType.Directory) {
-            // Recursively copy subdirectory
+
             copyDirectory(
                 src_full[0 .. src_len + 1 + entry.name_len],
                 dst_full[0 .. dst_len + 1 + entry.name_len]
@@ -189,7 +189,7 @@ pub fn copyDirectory(src_path: []const u8, dst_path: []const u8) vfs.VFSError!vo
                 vga.print("\n");
             };
         } else {
-            // Copy file
+
             copyFile(
                 src_full[0 .. src_len + 1 + entry.name_len],
                 dst_full[0 .. dst_len + 1 + entry.name_len]
@@ -244,8 +244,8 @@ pub fn makeDirectory(path: []const u8, create_parents: bool) vfs.VFSError!void {
         return;
     }
 
-    // Create parent directories if needed
-    var i: usize = 1; // Skip initial '/'
+
+    var i: usize = 1;
     while (i <= path.len) : (i += 1) {
         if (i == path.len or path[i] == '/') {
             const partial_path = path[0..i];
@@ -275,7 +275,7 @@ pub fn removeDirectory(path: []const u8, recursive: bool) vfs.VFSError!void {
         return;
     }
 
-    // Remove contents first
+
     const fd = try vfs.open(path, vfs.O_RDONLY);
     defer vfs.close(fd) catch {};
 
@@ -289,10 +289,10 @@ pub fn removeDirectory(path: []const u8, recursive: bool) vfs.VFSError!void {
     var index: u64 = 0;
     var entry: vfs.DirEntry = undefined;
 
-    // Collect entries first (to avoid modifying while iterating)
+
     while (try vfs.readdir(fd, &entry, index)) : (index += 1) {
-        // Skip . and ..
-        if (entry.name[0] == '.' and (entry.name_len == 1 or 
+
+        if (entry.name[0] == '.' and (entry.name_len == 1 or
             (entry.name_len == 2 and entry.name[1] == '.'))) {
             continue;
         }
@@ -305,7 +305,7 @@ pub fn removeDirectory(path: []const u8, recursive: bool) vfs.VFSError!void {
         entry_count += 1;
     }
 
-    // Remove collected entries
+
     for (entries_to_remove[0..entry_count]) |item| {
         var full_path: [512]u8 = undefined;
         const path_len = @min(path.len, 256);
@@ -328,32 +328,32 @@ pub fn removeDirectory(path: []const u8, recursive: bool) vfs.VFSError!void {
         }
     }
 
-    // Finally remove the directory itself
+
     try vfs.rmdir(path);
 }
 
 fn printFileName(entry: *const vfs.DirEntry) void {
     if (entry.file_type == vfs.FileType.Directory) {
-        vga.setColor(0x09); // Blue for directories
-    } else if (entry.file_type == vfs.FileType.CharDevice or 
+        vga.setColor(0x09);
+    } else if (entry.file_type == vfs.FileType.CharDevice or
                entry.file_type == vfs.FileType.BlockDevice) {
-        vga.setColor(0x0E); // Yellow for devices
+        vga.setColor(0x0E);
     } else {
-        vga.setColor(0x07); // White for regular files
+        vga.setColor(0x07);
     }
-    
+
     vga.print(entry.name[0..entry.name_len]);
-    
+
     if (entry.file_type == vfs.FileType.Directory) {
         vga.print("/");
     }
-    
-    vga.setColor(0x07); // Reset to white
+
+    vga.setColor(0x07);
     vga.print("  ");
 }
 
 fn printFileDetails(entry: *const vfs.DirEntry, stat: *const vfs.FileStat) void {
-    // Print type
+
     switch (stat.file_type) {
         .Directory => vga.print("d"),
         .Regular => vga.print("-"),
@@ -364,7 +364,7 @@ fn printFileDetails(entry: *const vfs.DirEntry, stat: *const vfs.FileStat) void 
         .Socket => vga.print("s"),
     }
 
-    // Print permissions
+
     vga.print(if (stat.mode.owner_read) "r" else "-");
     vga.print(if (stat.mode.owner_write) "w" else "-");
     vga.print(if (stat.mode.owner_exec) "x" else "-");
@@ -376,11 +376,11 @@ fn printFileDetails(entry: *const vfs.DirEntry, stat: *const vfs.FileStat) void 
     vga.print(if (stat.mode.other_exec) "x" else "-");
     vga.print(" ");
 
-    // Print size (right-aligned in 10 chars)
+
     printNumber(stat.size, 10);
     vga.print(" ");
 
-    // Print name
+
     printFileName(entry);
     vga.print("\n");
 }
@@ -400,14 +400,14 @@ fn printNumber(num: u64, width: usize) void {
         }
     }
 
-    // Print padding
+
     if (i < width) {
         for (0..width - i) |_| {
             vga.print(" ");
         }
     }
 
-    // Print number in reverse
+
     while (i > 0) {
         i -= 1;
         vga.printChar(buffer[i]);
@@ -416,12 +416,12 @@ fn printNumber(num: u64, width: usize) void {
 
 fn contains(haystack: []const u8, needle: []const u8) bool {
     if (needle.len > haystack.len) return false;
-    
+
     for (0..haystack.len - needle.len + 1) |i| {
         if (std.mem.eql(u8, haystack[i..i + needle.len], needle)) {
             return true;
         }
     }
-    
+
     return false;
 }

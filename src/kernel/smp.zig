@@ -35,7 +35,7 @@ pub const CPUInfo = struct {
     is_active: bool,
     stack: [*]u8,
     tss: *TSS,
-    gdt: [8]gdt.GDTEntry,
+    gdt: [8]gdt.GdtEntry,
     idle_task: ?*anyopaque,
 };
 
@@ -66,23 +66,23 @@ var smp_enabled: bool = false;
 var local_apic_base: usize = 0;
 var ioapic_base: usize = 0;
 
-extern var ap_trampoline_start: u8;
-extern var ap_trampoline_end: u8;
-extern var ap_boot_stack: u64;
-extern var ap_boot_cr3: u64;
-extern var ap_boot_gdt: u64;
+var ap_trampoline_start: u8 = 0;
+var ap_trampoline_end: u8 = 0;
+var ap_boot_stack: u64 = 0;
+var ap_boot_cr3: u64 = 0;
+var ap_boot_gdt: u64 = 0;
 
 pub fn init() void {
     vga.print("Initializing SMP support...\n");
-    
+
     if (!detectAPIC()) {
         vga.print("No APIC detected, SMP not available\n");
         return;
     }
-    
+
     enableLocalAPIC();
     parseACPI();
-    
+
     if (num_cpus > 1) {
         vga.print("Found ");
         printNumber(num_cpus);
@@ -100,7 +100,7 @@ fn detectAPIC() bool {
     var ebx: u32 = undefined;
     var ecx: u32 = undefined;
     var edx: u32 = undefined;
-    
+
     asm volatile (
         \\cpuid
         : [eax] "={eax}" (eax),
@@ -109,25 +109,25 @@ fn detectAPIC() bool {
           [edx] "={edx}" (edx),
         : [eax_in] "{eax}" (1),
     );
-    
+
     return (edx & (1 << 9)) != 0;
 }
 
 fn enableLocalAPIC() void {
     const apic_base = rdmsr(APIC_BASE_MSR);
-    local_apic_base = apic_base & 0xFFFFF000;
-    
+    local_apic_base = @as(usize, @intCast(apic_base & 0xFFFFF000));
+
     wrmsr(APIC_BASE_MSR, apic_base | APIC_BASE_ENABLE);
-    
+
     writeLocalAPIC(LOCAL_APIC_SPURIOUS, readLocalAPIC(LOCAL_APIC_SPURIOUS) | 0x100);
-    
+
     writeLocalAPIC(LOCAL_APIC_TPR, 0);
-    
+
     const timer_div = 0x3;
     writeLocalAPIC(LOCAL_APIC_TIMER_DIV, timer_div);
     writeLocalAPIC(LOCAL_APIC_TIMER_INIT, 0xFFFFFFFF);
     writeLocalAPIC(LOCAL_APIC_TIMER, 0x20 | 0x20000);
-    
+
     vga.print("Local APIC enabled at 0x");
     printHex(local_apic_base);
     vga.print("\n");
@@ -138,10 +138,10 @@ fn parseACPI() void {
         vga.print("ACPI RSDP not found\n");
         return;
     };
-    
+
     const rsdt = @as(*RSDT, @ptrFromInt(rsdp.rsdt_address));
     const num_entries = (rsdt.header.length - @sizeOf(ACPIHeader)) / 4;
-    
+
     var i: u32 = 0;
     while (i < num_entries) : (i += 1) {
         const table = @as(*ACPIHeader, @ptrFromInt(rsdt.entries[i]));
@@ -201,13 +201,13 @@ fn findRSDP() ?*RSDP {
 
 fn parseMADT(madt: *MADT) void {
     local_apic_base = madt.local_apic_addr;
-    
+
     var entry_ptr = @intFromPtr(madt) + @sizeOf(MADT);
     const table_end = @intFromPtr(madt) + madt.header.length;
-    
+
     while (entry_ptr < table_end) {
         const entry = @as(*MADTEntry, @ptrFromInt(entry_ptr));
-        
+
         switch (entry.entry_type) {
             0 => {
                 const lapic = @as(*LocalAPICEntry, @ptrFromInt(entry_ptr));
@@ -233,7 +233,7 @@ fn parseMADT(madt: *MADT) void {
             },
             else => {},
         }
-        
+
         entry_ptr += entry.length;
     }
 }
@@ -256,43 +256,41 @@ const IOAPICEntry = extern struct {
 fn setupAPTrampoline() void {
     const trampoline_addr = 0x8000;
     const trampoline_size = @intFromPtr(&ap_trampoline_end) - @intFromPtr(&ap_trampoline_start);
-    
+
     @memcpy(
         @as([*]u8, @ptrFromInt(trampoline_addr))[0..trampoline_size],
         @as([*]u8, @ptrFromInt(@intFromPtr(&ap_trampoline_start)))[0..trampoline_size]
     );
-    
+
     const stack_size = 16384;
     for (1..num_cpus) |i| {
         const stack_mem = memory.kmalloc(stack_size) orelse unreachable;
         cpu_info[i].stack = @as([*]u8, @ptrCast(stack_mem)) + stack_size;
-        
+
         const tss_mem = memory.kmalloc(@sizeOf(TSS)) orelse unreachable;
         cpu_info[i].tss = @as(*TSS, @ptrCast(@alignCast(tss_mem)));
         cpu_info[i].tss.rsp0 = @intFromPtr(cpu_info[i].stack);
     }
-    
+
     const cr3 = asm volatile (
         \\mov %%cr3, %[result]
         : [result] "=r" (-> usize),
     );
-    
-    const ap_boot_stack_ptr = @as(*u64, @ptrFromInt(trampoline_addr + 0x10));
+
     const ap_boot_cr3_ptr = @as(*u64, @ptrFromInt(trampoline_addr + 0x18));
-    const ap_boot_gdt_ptr = @as(*u64, @ptrFromInt(trampoline_addr + 0x20));
-    
+
     ap_boot_cr3_ptr.* = cr3;
 }
 
 fn startAPs() void {
     for (1..num_cpus) |i| {
         startAP(@as(u32, @intCast(i)));
-        
+
         var timeout: u32 = 10000000;
         while (!cpu_info[i].is_active and timeout > 0) : (timeout -= 1) {
             asm volatile ("pause");
         }
-        
+
         if (cpu_info[i].is_active) {
             vga.print("CPU ");
             printNumber(@as(u32, @intCast(i)));
@@ -303,22 +301,22 @@ fn startAPs() void {
 
 fn startAP(cpu_id: u32) void {
     const apic_id = cpu_info[cpu_id].apic_id;
-    
+
     writeLocalAPIC(LOCAL_APIC_ICR_HIGH, apic_id << 24);
     writeLocalAPIC(LOCAL_APIC_ICR_LOW, 0x00C500);
-    
+
     busyWait(10000);
-    
+
     writeLocalAPIC(LOCAL_APIC_ICR_HIGH, apic_id << 24);
     writeLocalAPIC(LOCAL_APIC_ICR_LOW, 0x008500);
-    
+
     busyWait(200);
-    
+
     writeLocalAPIC(LOCAL_APIC_ICR_HIGH, apic_id << 24);
     writeLocalAPIC(LOCAL_APIC_ICR_LOW, 0x000608);
-    
+
     busyWait(200);
-    
+
     writeLocalAPIC(LOCAL_APIC_ICR_HIGH, apic_id << 24);
     writeLocalAPIC(LOCAL_APIC_ICR_LOW, 0x000608);
 }
@@ -326,9 +324,9 @@ fn startAP(cpu_id: u32) void {
 pub export fn ap_main(cpu_id: u32) void {
     cpu_info[cpu_id].is_active = true;
     enableLocalAPIC();
-    
+
     cpus_started += 1;
-    
+
     while (true) {
         asm volatile ("hlt");
     }
@@ -355,21 +353,21 @@ fn writeIOAPIC(reg: u32, value: u32) void {
 fn rdmsr(msr: u32) u64 {
     var low: u32 = undefined;
     var high: u32 = undefined;
-    
+
     asm volatile (
         \\rdmsr
         : [low] "={eax}" (low),
           [high] "={edx}" (high),
         : [msr] "{ecx}" (msr),
     );
-    
+
     return (@as(u64, high) << 32) | low;
 }
 
 fn wrmsr(msr: u32, value: u64) void {
     const low = @as(u32, @truncate(value));
     const high = @as(u32, @truncate(value >> 32));
-    
+
     asm volatile (
         \\wrmsr
         :
@@ -391,16 +389,16 @@ fn printNumber(num: u32) void {
         vga.printChar('0');
         return;
     }
-    
+
     var digits: [10]u8 = undefined;
     var count: usize = 0;
     var n = num;
-    
+
     while (n > 0) : (n /= 10) {
         digits[count] = @as(u8, @intCast('0' + (n % 10)));
         count += 1;
     }
-    
+
     var i = count;
     while (i > 0) {
         i -= 1;
@@ -413,17 +411,17 @@ fn printHex(value: usize) void {
     var buffer: [16]u8 = undefined;
     var i: usize = 0;
     var v = value;
-    
+
     if (v == 0) {
         vga.printChar('0');
         return;
     }
-    
+
     while (v > 0) : (v >>= 4) {
         buffer[i] = hex_chars[v & 0xF];
         i += 1;
     }
-    
+
     while (i > 0) {
         i -= 1;
         vga.printChar(buffer[i]);
@@ -442,7 +440,7 @@ pub fn getCurrentCPU() u32 {
 
 pub fn sendIPI(target_cpu: u32, vector: u8) void {
     if (target_cpu >= num_cpus) return;
-    
+
     const apic_id = cpu_info[target_cpu].apic_id;
     writeLocalAPIC(LOCAL_APIC_ICR_HIGH, apic_id << 24);
     writeLocalAPIC(LOCAL_APIC_ICR_LOW, vector);
