@@ -384,6 +384,15 @@ pub fn init() void {
     };
 }
 
+pub fn flushFilesystem(mount_point: *vfs.MountPoint) vfs.VFSError!void {
+    if (mount_point.private_data) |fs_ptr| {
+        const fs = @as(*Ext2FileSystem, @ptrCast(@alignCast(fs_ptr)));
+        fs.cache.flush(fs) catch {
+            return vfs.VFSError.DeviceError;
+        };
+    }
+}
+
 pub fn mount(device: *const ata.ATADevice) !*Ext2FileSystem {
     if (num_ext2_fs >= 4) {
         return vfs.VFSError.NoSpace;

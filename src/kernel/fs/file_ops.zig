@@ -2,6 +2,7 @@ const std = @import("std");
 const vfs = @import("vfs.zig");
 const memory = @import("../memory/memory.zig");
 const vga = @import("../drivers/vga.zig");
+const ext2 = @import("ext2.zig");
 
 pub const SeekWhence = enum(u32) {
     SET = 0,
@@ -161,21 +162,7 @@ pub fn fstat(fd: i32, stat: *vfs.FileStat) !void {
     const index = @as(usize, @intCast(fd));
     const file_desc = file_descriptors[index] orelse return error.InvalidFileDescriptor;
 
-    if (file_desc.vnode.ops.stat) |stat_fn| {
-        try stat_fn(file_desc.vnode, stat);
-    } else {
-        stat.inode = file_desc.vnode.inode;
-        stat.mode = file_desc.vnode.mode;
-        stat.file_type = file_desc.vnode.file_type;
-        stat.size = file_desc.vnode.size;
-        stat.blocks = (file_desc.vnode.size + 511) / 512;
-        stat.block_size = 512;
-        stat.uid = 0;
-        stat.gid = 0;
-        stat.atime = 0;
-        stat.mtime = 0;
-        stat.ctime = 0;
-    }
+    try file_desc.vnode.ops.stat(file_desc.vnode, stat);
 }
 
 pub fn dup(old_fd: i32) !i32 {
@@ -261,7 +248,20 @@ pub fn fsync(fd: i32) !void {
     const index = @as(usize, @intCast(fd));
     const file_desc = file_descriptors[index] orelse return error.InvalidFileDescriptor;
 
-    _ = file_desc;
+    if (file_desc.vnode.mount_point) |mount_point| {
+        var fs_name_len: usize = 0;
+        while (fs_name_len < 32 and mount_point.fs_type.name[fs_name_len] != 0) : (fs_name_len += 1) {}
+        const fs_name = mount_point.fs_type.name[0..fs_name_len];
+        
+        if (std.mem.eql(u8, fs_name, "ext2")) {
+            ext2.flushFilesystem(mount_point) catch |err| {
+                return switch (err) {
+                    vfs.VFSError.DeviceError => error.DeviceError,
+                    else => error.SyncFailed,
+                };
+            };
+        }
+    }
 }
 
 pub fn fdatasync(fd: i32) !void {
