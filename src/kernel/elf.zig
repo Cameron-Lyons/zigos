@@ -5,7 +5,7 @@ const process = @import("process.zig");
 const vga = @import("vga.zig");
 const vfs = @import("vfs.zig");
 
-const ELF_MAGIC = 0x464C457F; // 0x7F, 'E', 'L', 'F'
+const ELF_MAGIC = 0x464C457F;
 
 const ElfClass = enum(u8) {
     None = 0,
@@ -173,15 +173,15 @@ pub fn loadElfFromFile(path: []const u8) !LoadedElf {
     var i: u16 = 0;
     while (i < header.phnum) : (i += 1) {
         var phdr: Elf32ProgramHeader = undefined;
-        
+
         _ = vfs.lseek(file, @intCast(ph_offset), vfs.SEEK_SET) catch {
             return ElfLoadError.FileReadError;
         };
-        
+
         const ph_read = vfs.read(file, @as([*]u8, @ptrCast(&phdr))[0..@sizeOf(Elf32ProgramHeader)]) catch {
             return ElfLoadError.FileReadError;
         };
-        
+
         if (ph_read != @sizeOf(Elf32ProgramHeader)) {
             return ElfLoadError.FileReadError;
         }
@@ -222,22 +222,22 @@ fn loadSegment(file: u32, phdr: *const Elf32ProgramHeader) bool {
     var i: u32 = 0;
     while (i < num_pages) : (i += 1) {
         const phys_addr = memory.allocatePhysicalPage() orelse return false;
-        
+
         var flags = paging.PAGE_PRESENT | paging.PAGE_USER;
         if (phdr.flags & ProgramFlags.WRITE != 0) {
             flags |= paging.PAGE_WRITABLE;
         }
-        
+
         paging.mapPage(page_addr, phys_addr, flags);
         page_addr += page_size;
     }
 
     if (phdr.filesz > 0) {
         _ = vfs.lseek(file, @intCast(phdr.offset), vfs.SEEK_SET) catch return false;
-        
+
         const dest = @as([*]u8, @ptrFromInt(phdr.vaddr));
         const bytes_read = vfs.read(file, dest[0..phdr.filesz]) catch return false;
-        
+
         if (bytes_read != phdr.filesz) {
             return false;
         }
@@ -261,9 +261,9 @@ pub fn loadElfIntoProcess(proc: *process.Process, path: []const u8) !LoadedElf {
     defer paging.switchPageDirectory(old_page_dir);
 
     const elf_info = try loadElfFromFile(path);
-    
+
     proc.entry_point = @ptrFromInt(elf_info.entry_point);
-    
+
     return elf_info;
 }
 
@@ -277,21 +277,21 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
     }
 
     const elf_info = try loadElfIntoProcess(current_proc.?, path);
-    
+
     current_proc.?.entry_point = @ptrFromInt(elf_info.entry_point);
-    
+
     const stack_top = 0xC0000000;
     const stack_size = 0x10000;
     const stack_bottom = stack_top - stack_size;
-    
+
     var page_addr = stack_bottom;
     while (page_addr < stack_top) : (page_addr += 0x1000) {
         const phys_addr = memory.allocatePhysicalPage() orelse return error.OutOfMemory;
         paging.mapPage(page_addr, phys_addr, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_USER);
     }
-    
+
     current_proc.?.context.esp = stack_top - 16;
     current_proc.?.context.eip = @intFromPtr(current_proc.?.entry_point);
-    
+
     process.switchToProcess(current_proc.?);
 }

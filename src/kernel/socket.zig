@@ -131,9 +131,9 @@ pub const Socket = struct {
         for (self.backlog) |*slot| {
             slot.* = null;
         }
-        
+
         self.state = .LISTENING;
-        
+
         if (self.protocol == .TCP) {
             tcp.registerListeningSocket(self);
         }
@@ -152,7 +152,7 @@ pub const Socket = struct {
         }
 
         const client_socket = self.backlog[0].?;
-        
+
         var i: usize = 0;
         while (i < self.backlog_count - 1) : (i += 1) {
             self.backlog[i] = self.backlog[i + 1];
@@ -170,7 +170,7 @@ pub const Socket = struct {
 
         self.remote_addr = addr;
         self.remote_port = port;
-        
+
         if (self.local_port == 0) {
             self.local_port = allocateEphemeralPort();
         }
@@ -185,16 +185,16 @@ pub const Socket = struct {
                     self.remote_addr,
                     self.remote_port
                 );
-                
+
                 try tcp.initiateConnection(self.tcp_connection.?);
-                
+
                 while (self.state == .CONNECTING) {
                     if (!self.blocking) {
                         return;
                     }
                     process.yield();
                 }
-                
+
                 if (self.state != .CONNECTED) {
                     return SocketError.ConnectionRefused;
                 }
@@ -236,7 +236,7 @@ pub const Socket = struct {
         if (self.socket_type != .DGRAM) {
             return SocketError.InvalidSocket;
         }
-        
+
         switch (self.protocol) {
             .UDP => {
                 try udp.send(
@@ -250,29 +250,29 @@ pub const Socket = struct {
             else => return SocketError.InvalidSocket,
         }
     }
-    
+
     pub fn recvFrom(self: *Socket, buffer: []u8, src_addr: *ipv4.IPv4Address, src_port: *u16) !usize {
         if (self.socket_type != .DGRAM) {
             return SocketError.InvalidSocket;
         }
-        
+
         while (self.recv_head == self.recv_tail) {
             if (!self.blocking) {
                 return 0;
             }
             process.yield();
         }
-        
+
         var bytes_read: usize = 0;
         while (bytes_read < buffer.len and self.recv_head != self.recv_tail) {
             buffer[bytes_read] = self.recv_buffer[self.recv_tail];
             self.recv_tail = (self.recv_tail + 1) % RECV_BUFFER_SIZE;
             bytes_read += 1;
         }
-        
+
         src_addr.* = self.remote_addr;
         src_port.* = self.remote_port;
-        
+
         return bytes_read;
     }
 
@@ -310,7 +310,7 @@ pub const Socket = struct {
 
         self.state = .CLOSED;
         self.in_use = false;
-        
+
         memory.kfree(self.recv_buffer.ptr);
         memory.kfree(self.send_buffer.ptr);
         if (self.backlog.len > 0) {
@@ -332,7 +332,7 @@ pub const Socket = struct {
         if (self.backlog_count >= self.backlog.len) {
             return SocketError.NoBufferSpace;
         }
-        
+
         self.backlog[self.backlog_count] = client;
         self.backlog_count += 1;
     }
@@ -370,14 +370,14 @@ fn isPortInUse(port: u16) bool {
 
 pub fn createSocket(socket_type: SocketType, protocol: Protocol) !*Socket {
     const sock = try Socket.init(socket_type, protocol);
-    
+
     for (&sockets) |*slot| {
         if (slot.* == null) {
             slot.* = sock;
             return sock;
         }
     }
-    
+
     return SocketError.NoBufferSpace;
 }
 

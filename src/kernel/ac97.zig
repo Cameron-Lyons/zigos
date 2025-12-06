@@ -125,14 +125,14 @@ const AC97Device = struct {
     is_playing: bool,
     volume: u16,
     sample_rate: u32,
-    
+
     fn reset(self: *AC97Device) void {
         io.outl(self.nabm_base + NABM_GLOB_CNT, GLOB_CNT_COLD_RESET);
         busyWait(100000);
-        
+
         io.outl(self.nabm_base + NABM_GLOB_CNT, 0);
         busyWait(100000);
-        
+
         var timeout: u32 = 1000;
         while (timeout > 0) : (timeout -= 1) {
             const status = io.inl(self.nabm_base + NABM_GLOB_STA);
@@ -141,19 +141,19 @@ const AC97Device = struct {
             }
             busyWait(1000);
         }
-        
+
         if (timeout == 0) {
             vga.print("AC97 codec not ready\n");
             return;
         }
-        
+
         io.outw(self.nam_base + NAM_RESET, 0);
         busyWait(100000);
-        
+
         io.outw(self.nam_base + NAM_MASTER_VOLUME, 0x0000);
         io.outw(self.nam_base + NAM_PCM_OUT_VOLUME, 0x0808);
         io.outw(self.nam_base + NAM_PC_BEEP, 0x0000);
-        
+
         if (self.sample_rate != 48000) {
             const ext_id = io.inw(self.nam_base + NAM_EXT_AUDIO_ID);
             if ((ext_id & 1) != 0) {
@@ -163,61 +163,61 @@ const AC97Device = struct {
             }
         }
     }
-    
+
     fn setupBuffers(self: *AC97Device) void {
         const bdl_mem = memory.kmalloc(@sizeOf(BufferDescriptor) * BDL_ENTRIES + 8) orelse return;
         self.bdl = @as([*]BufferDescriptor, @ptrCast(@alignCast(bdl_mem)));
-        
+
         const audio_mem = memory.kmalloc(BUFFER_SIZE * 2) orelse return;
         self.audio_buffer = @as([*]u8, @ptrCast(audio_mem));
-        
+
         for (0..BDL_ENTRIES) |i| {
             const buffer_offset = (i % 2) * BUFFER_SIZE;
             self.bdl[i].addr = @intFromPtr(&self.audio_buffer[buffer_offset]);
             self.bdl[i].samples = BUFFER_SIZE / 2;
             self.bdl[i].flags = if (i == BDL_ENTRIES - 1) 0x8000 else 0x0000;
         }
-        
+
         io.outl(self.nabm_base + PO_BDBAR, @intFromPtr(self.bdl));
-        
+
         io.outb(self.nabm_base + PO_LVI, BDL_ENTRIES - 1);
     }
-    
+
     pub fn play(self: *AC97Device, samples: []const i16) void {
         if (samples.len == 0) return;
-        
+
         const buffer_samples = BUFFER_SIZE / 2;
         const current_offset = @as(usize, self.current_buffer) * BUFFER_SIZE;
         const dest = @as([*]i16, @ptrCast(@alignCast(&self.audio_buffer[current_offset])));
-        
+
         const copy_count = @min(samples.len, buffer_samples);
         @memcpy(dest[0..copy_count], samples[0..copy_count]);
-        
+
         if (copy_count < buffer_samples) {
             @memset(dest[copy_count..buffer_samples], 0);
         }
-        
+
         if (!self.is_playing) {
             io.outb(self.nabm_base + PO_CR, CR_RPBM | CR_LVBIE | CR_IOCE);
             self.is_playing = true;
         }
-        
+
         self.current_buffer = (self.current_buffer + 1) % 2;
     }
-    
+
     pub fn stop(self: *AC97Device) void {
         io.outb(self.nabm_base + PO_CR, 0);
         io.outb(self.nabm_base + PO_CR, CR_RR);
         self.is_playing = false;
     }
-    
+
     pub fn setVolume(self: *AC97Device, left: u8, right: u8) void {
         const vol = (@as(u16, 63 - (left & 0x3F)) << 8) | (63 - (right & 0x3F));
         io.outw(self.nam_base + NAM_MASTER_VOLUME, vol);
         io.outw(self.nam_base + NAM_PCM_OUT_VOLUME, vol);
         self.volume = vol;
     }
-    
+
     pub fn getVolume(self: *AC97Device) struct { left: u8, right: u8 } {
         const vol = io.inw(self.nam_base + NAM_MASTER_VOLUME);
         return .{
@@ -233,15 +233,15 @@ fn ac97_interrupt_handler(frame: *isr.InterruptFrame) void {
     _ = frame;
     if (ac97_device) |*dev| {
         const status = io.inw(dev.nabm_base + PO_SR);
-        
+
         if ((status & SR_LVBCI) != 0) {
             io.outw(dev.nabm_base + PO_SR, SR_LVBCI);
         }
-        
+
         if ((status & SR_BCIS) != 0) {
             io.outw(dev.nabm_base + PO_SR, SR_BCIS);
         }
-        
+
         if ((status & SR_FIFOE) != 0) {
             io.outw(dev.nabm_base + PO_SR, SR_FIFOE);
         }
@@ -250,7 +250,7 @@ fn ac97_interrupt_handler(frame: *isr.InterruptFrame) void {
 
 pub fn init() void {
     vga.print("Initializing AC97 audio...\n");
-    
+
     var bus: u16 = 0;
     while (bus < 256) : (bus += 1) {
         var device: u8 = 0;
@@ -280,7 +280,7 @@ pub fn init() void {
             }
         }
     }
-    
+
     vga.print("No AC97 audio controller found\n");
 }
 
@@ -297,19 +297,19 @@ fn initDevice(pci_device: pci.PCIDevice) void {
         .volume = 0x0000,
         .sample_rate = SAMPLE_RATE,
     };
-    
+
     pci.writeConfigWord(pci_device.bus, pci_device.device, pci_device.function, 0x04,
         pci.readConfigWord(pci_device.bus, pci_device.device, pci_device.function, 0x04) | 0x05);
-    
+
     dev.reset();
     dev.setupBuffers();
-    
+
     isr.registerHandler(0x20 + dev.irq, ac97_interrupt_handler);
-    
+
     dev.setVolume(32, 32);
-    
+
     ac97_device = dev;
-    
+
     vga.print("AC97 audio initialized\n");
     playBeep();
 }
@@ -319,13 +319,13 @@ pub fn playBeep() void {
         var beep_samples: [4800]i16 = undefined;
         const frequency = 440.0;
         const amplitude = 0x2000;
-        
+
         for (&beep_samples, 0..) |*sample, i| {
             const t = @as(f32, @floatFromInt(i)) / @as(f32, SAMPLE_RATE);
             const value = @sin(2.0 * std.math.pi * frequency * t) * @as(f32, amplitude);
             sample.* = @as(i16, @intFromFloat(value));
         }
-        
+
         dev.play(&beep_samples);
     }
 }

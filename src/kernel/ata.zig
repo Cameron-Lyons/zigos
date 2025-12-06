@@ -24,23 +24,23 @@ const ATA_CMD_WRITE_SECTORS: u8 = 0x30;
 const ATA_CMD_IDENTIFY: u8 = 0xEC;
 const ATA_CMD_CACHE_FLUSH: u8 = 0xE7;
 
-const ATA_SR_BSY: u8 = 0x80; // Busy
-const ATA_SR_DRDY: u8 = 0x40; // Drive ready
-const ATA_SR_DF: u8 = 0x20; // Drive write fault
-const ATA_SR_DSC: u8 = 0x10; // Drive seek complete
-const ATA_SR_DRQ: u8 = 0x08; // Data request ready
-const ATA_SR_CORR: u8 = 0x04; // Corrected data
-const ATA_SR_IDX: u8 = 0x02; // Index
-const ATA_SR_ERR: u8 = 0x01; // Error
+const ATA_SR_BSY: u8 = 0x80;
+const ATA_SR_DRDY: u8 = 0x40;
+const ATA_SR_DF: u8 = 0x20;
+const ATA_SR_DSC: u8 = 0x10;
+const ATA_SR_DRQ: u8 = 0x08;
+const ATA_SR_CORR: u8 = 0x04;
+const ATA_SR_IDX: u8 = 0x02;
+const ATA_SR_ERR: u8 = 0x01;
 
-const ATA_ER_BBK: u8 = 0x80; // Bad block
-const ATA_ER_UNC: u8 = 0x40; // Uncorrectable data
-const ATA_ER_MC: u8 = 0x20; // Media changed
-const ATA_ER_IDNF: u8 = 0x10; // ID mark not found
-const ATA_ER_MCR: u8 = 0x08; // Media change request
-const ATA_ER_ABRT: u8 = 0x04; // Command aborted
-const ATA_ER_TK0NF: u8 = 0x02; // Track 0 not found
-const ATA_ER_AMNF: u8 = 0x01; // No address mark
+const ATA_ER_BBK: u8 = 0x80;
+const ATA_ER_UNC: u8 = 0x40;
+const ATA_ER_MC: u8 = 0x20;
+const ATA_ER_IDNF: u8 = 0x10;
+const ATA_ER_MCR: u8 = 0x08;
+const ATA_ER_ABRT: u8 = 0x04;
+const ATA_ER_TK0NF: u8 = 0x02;
+const ATA_ER_AMNF: u8 = 0x01;
 
 const ATA_MASTER: u8 = 0xA0;
 const ATA_SLAVE: u8 = 0xB0;
@@ -207,7 +207,7 @@ fn detectDrive(device: *ATADevice) void {
         device.model[model_idx] = @as(u8, @intCast(buffer[i] & 0xFF));
         model_idx += 1;
     }
-    device.model[40] = 0; // Null terminate
+    device.model[40] = 0;
 
     var serial_idx: usize = 0;
     for (10..20) |i| {
@@ -216,7 +216,7 @@ fn detectDrive(device: *ATADevice) void {
         device.serial[serial_idx] = @as(u8, @intCast(buffer[i] & 0xFF));
         serial_idx += 1;
     }
-    device.serial[20] = 0; // Null terminate
+    device.serial[20] = 0;
 }
 
 pub fn readSectors(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) ATAError!void {
@@ -336,7 +336,7 @@ fn waitDataReady(device: *const ATADevice) ATAError!void {
 }
 
 fn printDriveInfo(device: *const ATADevice) void {
-    // Print model
+
     var i: usize = 0;
     while (i < 40 and device.model[i] != 0) : (i += 1) {
         vga.put_char(device.model[i]);

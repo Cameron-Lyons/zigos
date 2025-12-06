@@ -155,7 +155,7 @@ pub fn protectKernelMemory() void {
             paging.mapPage(addr, phys, paging.PAGE_PRESENT | paging.PAGE_WRITABLE);
         }
 
-        if (addr == 0xFFFFF000) break; // Prevent overflow
+        if (addr == 0xFFFFF000) break;
     }
 
     vga.print("Kernel memory protected\n");

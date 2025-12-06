@@ -181,13 +181,13 @@ fn findListeningSocket(port: u16) ?*TCPSocket {
 pub const TCPConnection = TCPConnectionStruct;
 
 pub fn createConnection(local_addr: ipv4.IPv4Address, local_port: u16, remote_addr: ipv4.IPv4Address, remote_port: u16) !*TCPConnection {
-    const local_addr_u32 = (@as(u32, local_addr.octets[0]) << 24) | 
-                           (@as(u32, local_addr.octets[1]) << 16) | 
-                           (@as(u32, local_addr.octets[2]) << 8) | 
+    const local_addr_u32 = (@as(u32, local_addr.octets[0]) << 24) |
+                           (@as(u32, local_addr.octets[1]) << 16) |
+                           (@as(u32, local_addr.octets[2]) << 8) |
                            local_addr.octets[3];
-    const remote_addr_u32 = (@as(u32, remote_addr.octets[0]) << 24) | 
-                            (@as(u32, remote_addr.octets[1]) << 16) | 
-                            (@as(u32, remote_addr.octets[2]) << 8) | 
+    const remote_addr_u32 = (@as(u32, remote_addr.octets[0]) << 24) |
+                            (@as(u32, remote_addr.octets[1]) << 16) |
+                            (@as(u32, remote_addr.octets[2]) << 8) |
                             remote_addr.octets[3];
     return createConnectionInternal(local_addr_u32, remote_addr_u32, local_port, remote_port);
 }
@@ -437,21 +437,21 @@ pub fn sendData(conn: *TCPConnection, data: []const u8) !usize {
     if (conn.state != .ESTABLISHED) {
         return error.NotConnected;
     }
-    
+
     const space_available = conn.send_buffer.len - conn.send_buffer_used;
     const to_copy = @min(data.len, space_available);
-    
+
     if (to_copy == 0) {
         return error.NoBufferSpace;
     }
-    
+
     @memcpy(conn.send_buffer[conn.send_buffer_used..conn.send_buffer_used + to_copy], data[0..to_copy]);
     conn.send_buffer_used += to_copy;
-    
+
     try sendTCPPacket(conn, TCPFlags.PSH | TCPFlags.ACK, conn.send_buffer[0..conn.send_buffer_used]);
     conn.send_seq +%= @intCast(conn.send_buffer_used);
     conn.send_buffer_used = 0;
-    
+
     return to_copy;
 }
 

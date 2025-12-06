@@ -3,56 +3,56 @@ const vga = @import("vga.zig");
 const idt = @import("idt.zig");
 const keyboard = @import("keyboard.zig");
 
-extern fn isr0() callconv(.Naked) void;
-extern fn isr1() callconv(.Naked) void;
-extern fn isr2() callconv(.Naked) void;
-extern fn isr3() callconv(.Naked) void;
-extern fn isr4() callconv(.Naked) void;
-extern fn isr5() callconv(.Naked) void;
-extern fn isr6() callconv(.Naked) void;
-extern fn isr7() callconv(.Naked) void;
-extern fn isr8() callconv(.Naked) void;
-extern fn isr9() callconv(.Naked) void;
-extern fn isr10() callconv(.Naked) void;
-extern fn isr11() callconv(.Naked) void;
-extern fn isr12() callconv(.Naked) void;
-extern fn isr13() callconv(.Naked) void;
-extern fn isr14() callconv(.Naked) void;
-extern fn isr15() callconv(.Naked) void;
-extern fn isr16() callconv(.Naked) void;
-extern fn isr17() callconv(.Naked) void;
-extern fn isr18() callconv(.Naked) void;
-extern fn isr19() callconv(.Naked) void;
-extern fn isr20() callconv(.Naked) void;
-extern fn isr21() callconv(.Naked) void;
-extern fn isr22() callconv(.Naked) void;
-extern fn isr23() callconv(.Naked) void;
-extern fn isr24() callconv(.Naked) void;
-extern fn isr25() callconv(.Naked) void;
-extern fn isr26() callconv(.Naked) void;
-extern fn isr27() callconv(.Naked) void;
-extern fn isr28() callconv(.Naked) void;
-extern fn isr29() callconv(.Naked) void;
-extern fn isr30() callconv(.Naked) void;
-extern fn isr31() callconv(.Naked) void;
-extern fn isr128() callconv(.Naked) void;
+extern fn isr0() void;
+extern fn isr1() void;
+extern fn isr2() void;
+extern fn isr3() void;
+extern fn isr4() void;
+extern fn isr5() void;
+extern fn isr6() void;
+extern fn isr7() void;
+extern fn isr8() void;
+extern fn isr9() void;
+extern fn isr10() void;
+extern fn isr11() void;
+extern fn isr12() void;
+extern fn isr13() void;
+extern fn isr14() void;
+extern fn isr15() void;
+extern fn isr16() void;
+extern fn isr17() void;
+extern fn isr18() void;
+extern fn isr19() void;
+extern fn isr20() void;
+extern fn isr21() void;
+extern fn isr22() void;
+extern fn isr23() void;
+extern fn isr24() void;
+extern fn isr25() void;
+extern fn isr26() void;
+extern fn isr27() void;
+extern fn isr28() void;
+extern fn isr29() void;
+extern fn isr30() void;
+extern fn isr31() void;
+extern fn isr128() void;
 
-extern fn irq0() callconv(.Naked) void;
-extern fn irq1() callconv(.Naked) void;
-extern fn irq2() callconv(.Naked) void;
-extern fn irq3() callconv(.Naked) void;
-extern fn irq4() callconv(.Naked) void;
-extern fn irq5() callconv(.Naked) void;
-extern fn irq6() callconv(.Naked) void;
-extern fn irq7() callconv(.Naked) void;
-extern fn irq8() callconv(.Naked) void;
-extern fn irq9() callconv(.Naked) void;
-extern fn irq10() callconv(.Naked) void;
-extern fn irq11() callconv(.Naked) void;
-extern fn irq12() callconv(.Naked) void;
-extern fn irq13() callconv(.Naked) void;
-extern fn irq14() callconv(.Naked) void;
-extern fn irq15() callconv(.Naked) void;
+extern fn irq0() void;
+extern fn irq1() void;
+extern fn irq2() void;
+extern fn irq3() void;
+extern fn irq4() void;
+extern fn irq5() void;
+extern fn irq6() void;
+extern fn irq7() void;
+extern fn irq8() void;
+extern fn irq9() void;
+extern fn irq10() void;
+extern fn irq11() void;
+extern fn irq12() void;
+extern fn irq13() void;
+extern fn irq14() void;
+extern fn irq15() void;
 
 pub const Registers = struct {
     ds: u32,
@@ -114,7 +114,7 @@ pub export fn isrHandler(regs: *Registers) void {
         paging.page_fault_handler(regs);
         return;
     }
-    
+
     vga.print("Received interrupt: ");
     if (regs.int_no < 32) {
         vga.print(exception_messages[regs.int_no]);
@@ -212,9 +212,9 @@ pub fn init() void {
     idt.setGate(45, &irq13, 0x08, 0x8E);
     idt.setGate(46, &irq14, 0x08, 0x8E);
     idt.setGate(47, &irq15, 0x08, 0x8E);
-    
-    // System call interrupt (int 0x80)
-    idt.setGate(128, &isr128, 0x08, 0x8E | 0x60); // DPL=3 to allow userspace calls
+
+
+    idt.setGate(128, &isr128, 0x08, 0x8E | 0x60);
 
     idt.init();
 }

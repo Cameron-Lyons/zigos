@@ -54,8 +54,8 @@ pub const IPv4Packet = struct {
 
 var rx_handlers: [3]?*const fn (packet: *const IPv4Packet) void = [_]?*const fn (packet: *const IPv4Packet) void{null} ** 3;
 
-pub const our_ip: u32 = 0xC0A80102; // 192.168.1.2
-pub const gateway_ip: u32 = 0xC0A80101; // 192.168.1.1
+pub const our_ip: u32 = 0xC0A80102;
+pub const gateway_ip: u32 = 0xC0A80101;
 
 pub fn init() void {
     ethernet.registerHandler(.IPv4, handleIPv4Packet);
@@ -93,7 +93,7 @@ fn handleIPv4Packet(frame: *const ethernet.EthernetFrame) void {
     }
 
     const dst_ip = @byteSwap(header.dst_addr);
-    if (dst_ip != our_ip and dst_ip != 0xFFFFFFFF) { // Not for us and not broadcast
+    if (dst_ip != our_ip and dst_ip != 0xFFFFFFFF) {
         return;
     }
 
@@ -110,7 +110,7 @@ fn handleIPv4Packet(frame: *const ethernet.EthernetFrame) void {
     } else if (header.protocol == @intFromEnum(Protocol.UDP)) {
         handler_index = 2;
     } else {
-        return; // Unknown protocol
+        return;
     }
 
     if (handler_index < rx_handlers.len) {
@@ -123,11 +123,11 @@ fn handleIPv4Packet(frame: *const ethernet.EthernetFrame) void {
 pub fn sendPacket(dst_ip: u32, protocol: Protocol, data: []const u8) !void {
     var header: IPv4Header = undefined;
 
-    header.version_ihl = (IP_VERSION_4 << 4) | 5; // Version 4, header length 20 bytes
+    header.version_ihl = (IP_VERSION_4 << 4) | 5;
     header.tos = 0;
     header.total_length = @byteSwap(@as(u16, @intCast(IP_HEADER_MIN_SIZE + data.len)));
-    header.identification = @byteSwap(@as(u16, 0)); // Could use a counter
-    header.flags_fragment = @byteSwap(@as(u16, 0x4000)); // Don't fragment
+    header.identification = @byteSwap(@as(u16, 0));
+    header.flags_fragment = @byteSwap(@as(u16, 0x4000));
     header.ttl = 64;
     header.protocol = @intFromEnum(protocol);
     header.checksum = 0;

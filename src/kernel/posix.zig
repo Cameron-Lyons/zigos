@@ -53,7 +53,7 @@ pub fn fork() !i32 {
     child.context = parent.context;
 
     if (process.current_process == parent) {
-        child.context.eax = 0; // Child will get 0
+        child.context.eax = 0;
 
         child.next = process.process_list_head;
         process.process_list_head = child;
@@ -86,7 +86,7 @@ fn copyAddressSpace(parent: *process.Process, child: *process.Process) !void {
             paging.switchPageDirectory(temp_page_dir);
 
             const parent_page = @as([*]u8, @ptrFromInt(addr));
-            const temp_addr = 0xFFC00000; // Temporary mapping address
+            const temp_addr = 0xFFC00000;
 
             paging.mapPage(temp_addr, child_phys, paging.PAGE_PRESENT | paging.PAGE_WRITABLE);
             const child_page = @as([*]u8, @ptrFromInt(temp_addr));
@@ -109,7 +109,7 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
     current.context.eip = elf_info.entry_point;
 
     const stack_top = protection.USER_STACK_TOP;
-    const stack_size = 0x10000; // 64KB stack
+    const stack_size = 0x10000;
     const stack_bottom = stack_top - stack_size;
 
     var page_addr: u32 = stack_bottom;
@@ -125,7 +125,7 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
     for (envp) |env| {
         if (envp_count >= 32) break;
         stack_ptr -= env.len + 1;
-        stack_ptr &= ~@as(u32, 0x3); // Align to 4 bytes
+        stack_ptr &= ~@as(u32, 0x3);
         const dest = @as([*]u8, @ptrFromInt(stack_ptr));
         @memcpy(dest[0..env.len], env);
         dest[env.len] = 0;
@@ -138,7 +138,7 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
     for (argv) |arg| {
         if (argv_count >= 32) break;
         stack_ptr -= arg.len + 1;
-        stack_ptr &= ~@as(u32, 0x3); // Align to 4 bytes
+        stack_ptr &= ~@as(u32, 0x3);
         const dest = @as([*]u8, @ptrFromInt(stack_ptr));
         @memcpy(dest[0..arg.len], arg);
         dest[arg.len] = 0;
@@ -148,7 +148,7 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
 
     stack_ptr &= ~@as(u32, 0xF);
 
-    stack_ptr -= @sizeOf(usize); // NULL terminator
+    stack_ptr -= @sizeOf(usize);
     @as(*usize, @ptrFromInt(stack_ptr)).* = 0;
     var i = envp_count;
     while (i > 0) {
@@ -158,7 +158,7 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
     }
     const envp_array_ptr = stack_ptr;
 
-    stack_ptr -= @sizeOf(usize); // NULL terminator
+    stack_ptr -= @sizeOf(usize);
     @as(*usize, @ptrFromInt(stack_ptr)).* = 0;
     i = argv_count;
     while (i > 0) {
@@ -185,24 +185,24 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
 }
 
 pub const RUsage = extern struct {
-    utime_sec: i32, // User time seconds
-    utime_usec: i32, // User time microseconds
-    stime_sec: i32, // System time seconds
-    stime_usec: i32, // System time microseconds
-    maxrss: i32, // Maximum resident set size
-    ixrss: i32, // Integral shared memory size
-    idrss: i32, // Integral unshared data size
-    isrss: i32, // Integral unshared stack size
-    minflt: i32, // Page reclaims
-    majflt: i32, // Page faults
-    nswap: i32, // Swaps
-    inblock: i32, // Block input operations
-    oublock: i32, // Block output operations
-    msgsnd: i32, // Messages sent
-    msgrcv: i32, // Messages received
-    nsignals: i32, // Signals received
-    nvcsw: i32, // Voluntary context switches
-    nivcsw: i32, // Involuntary context switches
+    utime_sec: i32,
+    utime_usec: i32,
+    stime_sec: i32,
+    stime_usec: i32,
+    maxrss: i32,
+    ixrss: i32,
+    idrss: i32,
+    isrss: i32,
+    minflt: i32,
+    majflt: i32,
+    nswap: i32,
+    inblock: i32,
+    oublock: i32,
+    msgsnd: i32,
+    msgrcv: i32,
+    nsignals: i32,
+    nvcsw: i32,
+    nivcsw: i32,
 };
 
 pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
@@ -259,7 +259,7 @@ pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
         }
 
         if (options & WNOHANG != 0) {
-            return 0; // Don't block
+            return 0;
         }
 
         parent.state = .Blocked;

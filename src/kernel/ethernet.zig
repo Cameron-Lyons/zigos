@@ -82,7 +82,7 @@ pub fn sendFrame(dst_mac: [6]u8, ethertype: EtherType, data: []const u8) !void {
 
 pub fn handleRxPacket(packet: []u8) void {
     if (packet.len < ETH_HEADER_SIZE) {
-        return; // Packet too small
+        return;
     }
 
     const header = @as(*const EthernetHeader, @ptrCast(@alignCast(packet.ptr)));
@@ -101,7 +101,7 @@ pub fn handleRxPacket(packet: []u8) void {
     } else if (ethertype == @intFromEnum(EtherType.IPv6)) {
         handler_index = 2;
     } else {
-        return; // Unknown ethertype
+        return;
     }
 
     if (handler_index < rx_handlers.len) {

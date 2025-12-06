@@ -139,25 +139,25 @@ var is_enabled: bool = false;
 
 pub fn init() void {
     vga.print("Initializing ACPI power management...\n");
-    
+
     if (!findRSDP()) {
         vga.print("ACPI not available\n");
         return;
     }
-    
+
     if (!parseRSDT()) {
         vga.print("Failed to parse ACPI tables\n");
         return;
     }
-    
+
     if (!parseFADT()) {
         vga.print("Failed to parse FADT\n");
         return;
     }
-    
+
     parseDSDT();
     enableACPI();
-    
+
     vga.print("ACPI initialized successfully\n");
 }
 
@@ -175,7 +175,7 @@ fn findRSDP() bool {
             }
         }
     }
-    
+
     const ebda_addr = @as(*u16, @ptrFromInt(0x40E)).* * 16;
     addr = ebda_addr;
     const ebda_end = ebda_addr + 1024;
@@ -191,7 +191,7 @@ fn findRSDP() bool {
             }
         }
     }
-    
+
     return false;
 }
 
@@ -205,7 +205,7 @@ fn validateChecksum(data: [*]u8, length: usize) bool {
 
 fn parseRSDT() bool {
     const rsdp = rsdp_ptr orelse return false;
-    
+
     if (rsdp.revision >= 2 and rsdp.xsdt_address != 0) {
         xsdt_ptr = @as(*XSDT, @ptrFromInt(@as(usize, @intCast(rsdp.xsdt_address))));
         vga.print("Using XSDT\n");
@@ -213,7 +213,7 @@ fn parseRSDT() bool {
         rsdt_ptr = @as(*RSDT, @ptrFromInt(rsdp.rsdt_address));
         vga.print("Using RSDT\n");
     }
-    
+
     return true;
 }
 
@@ -237,82 +237,82 @@ fn parseFADT() bool {
             }
         }
     }
-    
+
     if (fadt_ptr) |fadt| {
         pm1a_control = fadt.pm1a_ctrl_blk;
         pm1b_control = fadt.pm1b_ctrl_blk;
         smi_cmd = fadt.smi_cmd;
         acpi_enable_cmd = fadt.acpi_enable;
         acpi_disable_cmd = fadt.acpi_disable;
-        
+
         vga.print("FADT found: PM1a=0x");
         printHex(pm1a_control);
         vga.print(" PM1b=0x");
         printHex(pm1b_control);
         vga.print("\n");
-        
+
         return true;
     }
-    
+
     return false;
 }
 
 fn parseDSDT() void {
     const fadt = fadt_ptr orelse return;
-    
-    const dsdt_addr = if (fadt.x_dsdt != 0) 
+
+    const dsdt_addr = if (fadt.x_dsdt != 0)
         @as(usize, @intCast(fadt.x_dsdt))
-    else 
+    else
         fadt.dsdt;
-    
+
     if (dsdt_addr == 0) return;
-    
+
     const dsdt = @as(*ACPIHeader, @ptrFromInt(dsdt_addr));
     if (!std.mem.eql(u8, &dsdt.signature, DSDT_SIGNATURE)) {
         return;
     }
-    
+
     vga.print("DSDT found at 0x");
     printHex(dsdt_addr);
     vga.print("\n");
-    
-    parseAML(@as([*]u8, @ptrFromInt(dsdt_addr + @sizeOf(ACPIHeader))), 
+
+    parseAML(@as([*]u8, @ptrFromInt(dsdt_addr + @sizeOf(ACPIHeader))),
              dsdt.length - @sizeOf(ACPIHeader));
 }
 
 fn parseAML(aml: [*]u8, length: u32) void {
     var offset: u32 = 0;
-    
+
     while (offset < length) {
         const opcode = aml[offset];
-        
+
         if (opcode == 0x08) {
             offset += 1;
             const name_offset = offset;
             offset += 4;
-            
+
             if (std.mem.eql(u8, aml[name_offset..name_offset + 4], "_S5_")) {
                 offset += 1;
-                
+
                 if (aml[offset] == 0x12) {
                     offset += 1;
                     const pkg_length = aml[offset];
                     offset += 1;
-                    
+
                     _ = pkg_length;
-                    
+
                     if (aml[offset] == 0x0A) {
                         offset += 1;
                         slp_typa[5] = aml[offset];
                         offset += 1;
                     }
-                    
+
                     if (aml[offset] == 0x0A) {
                         offset += 1;
                         slp_typb[5] = aml[offset];
                         offset += 1;
                     }
-                    
+
                     vga.print("Found S5 sleep type: ");
                     printHex(slp_typa[5]);
                     vga.print("/");
@@ -330,7 +330,7 @@ fn parseAML(aml: [*]u8, length: u32) void {
 
 fn getAMLObjectSize(aml: [*]u8, offset: u32) u32 {
     const opcode = aml[offset];
-    
+
     switch (opcode) {
         0x00 => return 1,
         0x01 => return 1,
@@ -351,35 +351,35 @@ fn getAMLObjectSize(aml: [*]u8, offset: u32) u32 {
 
 fn getPkgLength(aml: [*]u8, offset: u32) u32 {
     const lead_byte = aml[offset];
-    
+
     if ((lead_byte & 0xC0) == 0) {
         return lead_byte;
     } else if ((lead_byte & 0xC0) == 0x40) {
         return ((@as(u32, aml[offset + 1]) << 4) | (lead_byte & 0x0F));
     } else if ((lead_byte & 0xC0) == 0x80) {
-        return ((@as(u32, aml[offset + 2]) << 12) | 
-                (@as(u32, aml[offset + 1]) << 4) | 
+        return ((@as(u32, aml[offset + 2]) << 12) |
+                (@as(u32, aml[offset + 1]) << 4) |
                 (lead_byte & 0x0F));
     } else {
-        return ((@as(u32, aml[offset + 3]) << 20) | 
-                (@as(u32, aml[offset + 2]) << 12) | 
-                (@as(u32, aml[offset + 1]) << 4) | 
+        return ((@as(u32, aml[offset + 3]) << 20) |
+                (@as(u32, aml[offset + 2]) << 12) |
+                (@as(u32, aml[offset + 1]) << 4) |
                 (lead_byte & 0x0F));
     }
 }
 
 fn enableACPI() void {
     const fadt = fadt_ptr orelse return;
-    
+
     if ((fadt.boot_arch_flags & 1) != 0) {
         vga.print("ACPI already enabled by BIOS\n");
         is_enabled = true;
         return;
     }
-    
+
     if (smi_cmd != 0 and acpi_enable_cmd != 0) {
         io.outb(@as(u16, @intCast(smi_cmd)), acpi_enable_cmd);
-        
+
         var timeout: u32 = 100;
         while (timeout > 0) : (timeout -= 1) {
             if ((io.inw(@as(u16, @intCast(pm1a_control))) & 1) != 0) {
@@ -389,7 +389,7 @@ fn enableACPI() void {
             }
             busyWait(10000);
         }
-        
+
         vga.print("Failed to enable ACPI\n");
     }
 }
@@ -399,21 +399,21 @@ pub fn shutdown() void {
         vga.print("ACPI not enabled, cannot shutdown\n");
         return;
     }
-    
+
     vga.print("Shutting down...\n");
-    
+
     asm volatile ("cli");
-    
+
     if (pm1a_control != 0) {
         const slp_typ = @as(u16, @intCast(slp_typa[5])) << PM1_CTRL_SLP_TYP_SHIFT;
         io.outw(@as(u16, @intCast(pm1a_control)), slp_typ | PM1_CTRL_SLP_EN);
     }
-    
+
     if (pm1b_control != 0) {
         const slp_typ = @as(u16, @intCast(slp_typb[5])) << PM1_CTRL_SLP_TYP_SHIFT;
         io.outw(@as(u16, @intCast(pm1b_control)), slp_typ | PM1_CTRL_SLP_EN);
     }
-    
+
     while (true) {
         asm volatile ("hlt");
     }
@@ -421,40 +421,40 @@ pub fn shutdown() void {
 
 pub fn reboot() void {
     vga.print("Rebooting...\n");
-    
+
     asm volatile ("cli");
-    
+
     var tmp: u8 = io.inb(0x64);
     while ((tmp & 0x02) != 0) : (tmp = io.inb(0x64)) {}
     io.outb(0x64, 0xFE);
-    
+
     io.outb(0xCF9, 0x06);
-    
-    // Triple fault - fallback reboot method
-    
+
+
+
     while (true) {
         asm volatile ("hlt");
     }
 }
 
-// pub fn suspend() void {
-//     if (!is_enabled) {
-//         vga.print("ACPI not enabled, cannot suspend\n");
-//         return;
-//     }
-    
-//     vga.print("Entering suspend mode...\n");
-    
-//     if (pm1a_control != 0) {
-//         const slp_typ = @as(u16, @intCast(slp_typa[3])) << PM1_CTRL_SLP_TYP_SHIFT;
-//         io.outw(@as(u16, @intCast(pm1a_control)), slp_typ | PM1_CTRL_SLP_EN);
-//     }
-    
-//     if (pm1b_control != 0) {
-//         const slp_typ = @as(u16, @intCast(slp_typb[3])) << PM1_CTRL_SLP_TYP_SHIFT;
-//         io.outw(@as(u16, @intCast(pm1b_control)), slp_typ | PM1_CTRL_SLP_EN);
-//     }
-// }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 fn busyWait(microseconds: u32) void {
     var i: u32 = 0;
@@ -468,17 +468,17 @@ fn printHex(value: usize) void {
     var buffer: [16]u8 = undefined;
     var i: usize = 0;
     var v = value;
-    
+
     if (v == 0) {
         vga.printChar('0');
         return;
     }
-    
+
     while (v > 0) : (v >>= 4) {
         buffer[i] = hex_chars[v & 0xF];
         i += 1;
     }
-    
+
     while (i > 0) {
         i -= 1;
         vga.printChar(buffer[i]);

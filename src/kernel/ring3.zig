@@ -83,21 +83,21 @@ pub fn enterRing3(state: *const Ring3State) void {
 
 fn ring3TestFunction() void {
     asm volatile (
-        \\mov $1, %%eax       # SYS_WRITE
-        \\mov $1, %%ebx       # stdout
-        \\lea %[msg], %%ecx   # message
-        \\mov $28, %%edx      # length
+        \\mov $1, %%eax
+        \\mov $1, %%ebx
+        \\lea %[msg], %%ecx
+        \\mov $28, %%edx
         \\int $0x80
         :
         : [msg] "m" ("Hello from Ring 3 (user mode)!\n"),
-        : "eax", "ebx", "ecx", "edx"
+        : .{ .eax = true, .ebx = true, .ecx = true, .edx = true, .memory = true }
     );
 
     asm volatile (
-        \\mov $0, %%eax       # SYS_EXIT
-        \\xor %%ebx, %%ebx    # exit code 0
+        \\mov $0, %%eax
+        \\xor %%ebx, %%ebx
         \\int $0x80
-        ::: "eax", "ebx");
+        ::: .{ .eax = true, .ebx = true, .memory = true });
 }
 
 pub fn createRing3TestProcess() void {
@@ -151,4 +151,3 @@ pub fn validatePrivilegeLevels() bool {
         return false;
     }
 }
-

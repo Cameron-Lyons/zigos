@@ -55,9 +55,9 @@ pub const FileStat = struct {
     block_size: u32,
     uid: u32,
     gid: u32,
-    atime: u64, // Access time
-    mtime: u64, // Modification time
-    ctime: u64, // Change time
+    atime: u64,
+    mtime: u64,
+    ctime: u64,
 };
 
 pub const DirEntry = struct {
@@ -107,6 +107,9 @@ pub const FileSystemOps = struct {
     unlink: *const fn (*VNode, []const u8) VFSError!void,
     rmdir: *const fn (*VNode, []const u8) VFSError!void,
     rename: *const fn (*VNode, []const u8, *VNode, []const u8) VFSError!void,
+    symlink: ?*const fn (*VNode, []const u8, []const u8) VFSError!*VNode = null,
+    link: ?*const fn (*VNode, []const u8, *VNode) VFSError!void = null,
+    readlink: ?*const fn (*VNode, []u8) VFSError!usize = null,
 };
 
 pub const FileSystemType = struct {
@@ -213,22 +216,22 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
             break :blk v;
         } else |err| {
             if (err == VFSError.NotFound and (flags & O_CREAT) != 0) {
-                // File doesn't exist but O_CREAT is set, create it
+
                 const parent_path = getParentPath(path);
                 const name = getBaseName(path);
-                
+
                 const parent = try lookupPath(parent_path);
                 if (parent.file_type != FileType.Directory) {
                     return VFSError.NotDirectory;
                 }
-                
+
                 const default_mode = FileMode{
                     .owner_read = true,
                     .owner_write = true,
                     .group_read = true,
                     .other_read = true,
                 };
-                
+
                 break :blk try parent.mount_point.?.fs_type.ops.create(parent, name, default_mode);
             } else {
                 return err;
@@ -241,8 +244,8 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
     }
 
     if ((flags & O_TRUNC) != 0 and vnode.file_type == FileType.Regular) {
-        // Truncate the file
-        // This would need to be implemented in the file system
+
+
     }
 
     try vnode.ops.open(vnode, flags);
@@ -394,6 +397,64 @@ pub fn truncate(path: []const u8, size: u64) VFSError!void {
     try vnode.ops.truncate(vnode, size);
 }
 
+pub fn symlink(target: []const u8, linkpath: []const u8) VFSError!void {
+    const parent_path = getParentPath(linkpath);
+    const name = getBaseName(linkpath);
+
+    const parent = try lookupPath(parent_path);
+    if (parent.file_type != FileType.Directory) {
+        return VFSError.NotDirectory;
+    }
+
+    if (parent.mount_point) |mp| {
+        if (mp.fs_type.ops.symlink) |symlink_fn| {
+            _ = try symlink_fn(parent, name, target);
+            return;
+        }
+    }
+
+    return VFSError.InvalidOperation;
+}
+
+pub fn link(target_path: []const u8, linkpath: []const u8) VFSError!void {
+    const target = try lookupPath(target_path);
+    if (target.file_type == FileType.Directory) {
+        return VFSError.IsDirectory;
+    }
+
+    const parent_path = getParentPath(linkpath);
+    const name = getBaseName(linkpath);
+
+    const parent = try lookupPath(parent_path);
+    if (parent.file_type != FileType.Directory) {
+        return VFSError.NotDirectory;
+    }
+
+    if (parent.mount_point) |mp| {
+        if (mp.fs_type.ops.link) |link_fn| {
+            try link_fn(parent, name, target);
+            return;
+        }
+    }
+
+    return VFSError.InvalidOperation;
+}
+
+pub fn readlink(path: []const u8, buffer: []u8) VFSError!usize {
+    const vnode = try lookupPath(path);
+    if (vnode.file_type != FileType.SymLink) {
+        return VFSError.InvalidOperation;
+    }
+
+    if (vnode.mount_point) |mp| {
+        if (mp.fs_type.ops.readlink) |readlink_fn| {
+            return try readlink_fn(vnode, buffer);
+        }
+    }
+
+    return VFSError.InvalidOperation;
+}
+
 pub fn ftruncate(fd: u32, size: u64) VFSError!void {
     if (fd >= fd_table.len) return VFSError.InvalidOperation;
 
@@ -451,7 +512,7 @@ pub fn rename(old_path: []const u8, new_path: []const u8) VFSError!void {
     }
 
     if (old_parent.mount_point != new_parent.mount_point) {
-        return VFSError.InvalidOperation; // Cross-filesystem move not supported
+        return VFSError.InvalidOperation;
     }
 
     try old_parent.mount_point.?.fs_type.ops.rename(old_parent, old_name, new_parent, new_name);

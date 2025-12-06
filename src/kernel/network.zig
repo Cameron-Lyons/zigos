@@ -34,9 +34,9 @@ pub fn handleRxPacket(packet: []u8) void {
     ethernet.handleRxPacket(packet);
 }
 
-var local_ip: u32 = 0x0A000002; // 10.0.0.2
-var gateway_ip: u32 = 0x0A000001; // 10.0.0.1
-var netmask: u32 = 0xFFFFFF00; // 255.255.255.0
+var local_ip: u32 = 0x0A000002;
+var gateway_ip: u32 = 0x0A000001;
+var netmask: u32 = 0xFFFFFF00;
 
 pub fn getLocalIP() ipv4.IPv4Address {
     return ipv4.IPv4Address{

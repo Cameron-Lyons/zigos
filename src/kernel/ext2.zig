@@ -134,17 +134,17 @@ const Ext2FileSystem = struct {
     groups_count: u32,
     group_descs: [*]Ext2GroupDesc,
     cache: BlockCache,
-    
+
     const BlockCache = struct {
         blocks: [16]CacheEntry,
-        
+
         const CacheEntry = struct {
             block_num: u32,
             data: [4096]u8,
             dirty: bool,
             valid: bool,
         };
-        
+
         fn init() BlockCache {
             return BlockCache{
                 .blocks = [_]CacheEntry{CacheEntry{
@@ -155,14 +155,14 @@ const Ext2FileSystem = struct {
                 }} ** 16,
             };
         }
-        
+
         fn get(self: *BlockCache, fs: *Ext2FileSystem, block_num: u32) ![]u8 {
             for (&self.blocks) |*entry| {
                 if (entry.valid and entry.block_num == block_num) {
                     return entry.data[0..fs.block_size];
                 }
             }
-            
+
             var lru_idx: usize = 0;
             for (&self.blocks, 0..) |*entry, i| {
                 if (!entry.valid) {
@@ -170,19 +170,19 @@ const Ext2FileSystem = struct {
                     break;
                 }
             }
-            
+
             if (self.blocks[lru_idx].dirty) {
                 try fs.writeBlock(self.blocks[lru_idx].block_num, &self.blocks[lru_idx].data);
             }
-            
+
             try fs.readBlock(block_num, &self.blocks[lru_idx].data);
             self.blocks[lru_idx].block_num = block_num;
             self.blocks[lru_idx].valid = true;
             self.blocks[lru_idx].dirty = false;
-            
+
             return self.blocks[lru_idx].data[0..fs.block_size];
         }
-        
+
         fn markDirty(self: *BlockCache, block_num: u32) void {
             for (&self.blocks) |*entry| {
                 if (entry.valid and entry.block_num == block_num) {
@@ -191,7 +191,7 @@ const Ext2FileSystem = struct {
                 }
             }
         }
-        
+
         fn flush(self: *BlockCache, fs: *Ext2FileSystem) !void {
             for (&self.blocks) |*entry| {
                 if (entry.valid and entry.dirty) {
@@ -201,64 +201,64 @@ const Ext2FileSystem = struct {
             }
         }
     };
-    
+
     fn readBlock(self: *Ext2FileSystem, block_num: u32, buffer: []u8) !void {
         const lba = block_num * (self.block_size / 512);
         const sectors = self.block_size / 512;
-        
+
         for (0..sectors) |i| {
             self.device.read(lba + @as(u32, @intCast(i)), buffer[i * 512..(i + 1) * 512]) catch {
                 return vfs.VFSError.DeviceError;
             };
         }
     }
-    
+
     fn writeBlock(self: *Ext2FileSystem, block_num: u32, buffer: []const u8) !void {
         const lba = block_num * (self.block_size / 512);
         const sectors = self.block_size / 512;
-        
+
         for (0..sectors) |i| {
             self.device.write(lba + @as(u32, @intCast(i)), buffer[i * 512..(i + 1) * 512]) catch {
                 return vfs.VFSError.DeviceError;
             };
         }
     }
-    
+
     fn readInode(self: *Ext2FileSystem, inode_num: u32) !Ext2Inode {
         const group = (inode_num - 1) / self.superblock.s_inodes_per_group;
         const index = (inode_num - 1) % self.superblock.s_inodes_per_group;
-        
+
         const inode_size = if (self.superblock.s_rev_level == EXT2_GOOD_OLD_REV)
             EXT2_GOOD_OLD_INODE_SIZE
         else
             self.superblock.s_inode_size;
-        
-        const block_num = self.group_descs[group].bg_inode_table + 
+
+        const block_num = self.group_descs[group].bg_inode_table +
                          (index * inode_size) / self.block_size;
         const offset = (index * inode_size) % self.block_size;
-        
+
         const block = try self.cache.get(self, block_num);
         return @as(*const Ext2Inode, @ptrCast(@alignCast(&block[offset]))).*;
     }
-    
+
     fn writeInode(self: *Ext2FileSystem, inode_num: u32, inode: *const Ext2Inode) !void {
         const group = (inode_num - 1) / self.superblock.s_inodes_per_group;
         const index = (inode_num - 1) % self.superblock.s_inodes_per_group;
-        
+
         const inode_size = if (self.superblock.s_rev_level == EXT2_GOOD_OLD_REV)
             EXT2_GOOD_OLD_INODE_SIZE
         else
             self.superblock.s_inode_size;
-        
-        const block_num = self.group_descs[group].bg_inode_table + 
+
+        const block_num = self.group_descs[group].bg_inode_table +
                          (index * inode_size) / self.block_size;
         const offset = (index * inode_size) % self.block_size;
-        
+
         const block = try self.cache.get(self, block_num);
         @memcpy(block[offset..offset + @sizeOf(Ext2Inode)], std.mem.asBytes(inode));
         self.cache.markDirty(block_num);
     }
-    
+
     fn readDataBlock(self: *Ext2FileSystem, inode: *const Ext2Inode, block_index: u32) ![]u8 {
         const block_num = try self.getBlockNumber(inode, block_index);
         if (block_num == 0) {
@@ -266,68 +266,68 @@ const Ext2FileSystem = struct {
         }
         return try self.cache.get(self, block_num);
     }
-    
+
     fn getBlockNumber(self: *Ext2FileSystem, inode: *const Ext2Inode, block_index: u32) !u32 {
         const direct_blocks = 12;
         const indirect_per_block = self.block_size / 4;
         const double_indirect_per_block = indirect_per_block * indirect_per_block;
-        
+
         if (block_index < direct_blocks) {
             return inode.i_block[block_index];
         }
-        
+
         var index = block_index - direct_blocks;
-        
+
         if (index < indirect_per_block) {
             if (inode.i_block[12] == 0) return 0;
             const indirect_block = try self.cache.get(self, inode.i_block[12]);
             const block_nums = @as([*]const u32, @ptrCast(@alignCast(indirect_block.ptr)));
             return block_nums[index];
         }
-        
+
         index -= indirect_per_block;
-        
+
         if (index < double_indirect_per_block) {
             if (inode.i_block[13] == 0) return 0;
             const double_indirect = try self.cache.get(self, inode.i_block[13]);
             const first_level = @as([*]const u32, @ptrCast(@alignCast(double_indirect.ptr)));
             const first_index = index / indirect_per_block;
             const second_index = index % indirect_per_block;
-            
+
             if (first_level[first_index] == 0) return 0;
             const second_level = try self.cache.get(self, first_level[first_index]);
             const block_nums = @as([*]const u32, @ptrCast(@alignCast(second_level.ptr)));
             return block_nums[second_index];
         }
-        
+
         return vfs.VFSError.InvalidOperation;
     }
-    
+
     fn findDirEntry(self: *Ext2FileSystem, parent_inode: *const Ext2Inode, name: []const u8) !u32 {
         if ((parent_inode.i_mode & EXT2_S_IFDIR) == 0) {
             return vfs.VFSError.NotDirectory;
         }
-        
+
         const blocks_count = (parent_inode.i_size + self.block_size - 1) / self.block_size;
-        
+
         for (0..blocks_count) |block_idx| {
             const block = try self.readDataBlock(parent_inode, @as(u32, @intCast(block_idx)));
             var offset: u32 = 0;
-            
+
             while (offset < self.block_size and offset < parent_inode.i_size) {
                 const entry = @as(*const Ext2DirEntry, @ptrCast(@alignCast(&block[offset])));
-                
+
                 if (entry.inode != 0) {
                     const entry_name = @as([*]const u8, @ptrCast(&block[offset + @sizeOf(Ext2DirEntry)]))[0..entry.name_len];
                     if (std.mem.eql(u8, entry_name, name)) {
                         return entry.inode;
                     }
                 }
-                
+
                 offset += entry.rec_len;
             }
         }
-        
+
         return vfs.VFSError.NotFound;
     }
 };
@@ -343,25 +343,25 @@ pub fn mount(device: *ata.ATADevice) !*Ext2FileSystem {
     if (num_ext2_fs >= 4) {
         return vfs.VFSError.NoSpace;
     }
-    
+
     var superblock_buffer: [1024]u8 = undefined;
     device.read(2, superblock_buffer[0..512]) catch return vfs.VFSError.DeviceError;
     device.read(3, superblock_buffer[512..]) catch return vfs.VFSError.DeviceError;
-    
+
     const superblock = @as(*const Ext2Superblock, @ptrCast(@alignCast(&superblock_buffer))).*;
-    
+
     if (superblock.s_magic != EXT2_SUPER_MAGIC) {
         return vfs.VFSError.InvalidOperation;
     }
-    
+
     const block_size = @as(u32, 1024) << @as(u5, @intCast(superblock.s_log_block_size));
-    const groups_count = (superblock.s_blocks_count + superblock.s_blocks_per_group - 1) / 
+    const groups_count = (superblock.s_blocks_count + superblock.s_blocks_per_group - 1) /
                         superblock.s_blocks_per_group;
-    
+
     const group_desc_blocks = (groups_count * @sizeOf(Ext2GroupDesc) + block_size - 1) / block_size;
-    const group_desc_mem = memory.kmalloc(group_desc_blocks * block_size) orelse 
+    const group_desc_mem = memory.kmalloc(group_desc_blocks * block_size) orelse
                            return vfs.VFSError.OutOfMemory;
-    
+
     ext2_filesystems[num_ext2_fs] = Ext2FileSystem{
         .device = device,
         .superblock = superblock,
@@ -370,19 +370,19 @@ pub fn mount(device: *ata.ATADevice) !*Ext2FileSystem {
         .group_descs = @as([*]Ext2GroupDesc, @ptrCast(@alignCast(group_desc_mem))),
         .cache = Ext2FileSystem.BlockCache.init(),
     };
-    
+
     const fs = &ext2_filesystems[num_ext2_fs].?;
-    
+
     const gdt_block = if (block_size == 1024) 2 else 1;
     for (0..group_desc_blocks) |i| {
         var buffer: [4096]u8 = undefined;
         try fs.readBlock(gdt_block + @as(u32, @intCast(i)), buffer[0..block_size]);
-        @memcpy(@as([*]u8, @ptrCast(&fs.group_descs[i * block_size / @sizeOf(Ext2GroupDesc)]))[0..block_size], 
+        @memcpy(@as([*]u8, @ptrCast(&fs.group_descs[i * block_size / @sizeOf(Ext2GroupDesc)]))[0..block_size],
                 buffer[0..block_size]);
     }
-    
+
     num_ext2_fs += 1;
-    
+
     vga.print("ext2 filesystem mounted successfully\n");
     vga.print("  Block size: ");
     printNumber(block_size);
@@ -393,7 +393,7 @@ pub fn mount(device: *ata.ATADevice) !*Ext2FileSystem {
     vga.print("  Total inodes: ");
     printNumber(superblock.s_inodes_count);
     vga.print("\n");
-    
+
     return fs;
 }
 
@@ -402,16 +402,16 @@ fn printNumber(num: u32) void {
         vga.printChar('0');
         return;
     }
-    
+
     var digits: [10]u8 = undefined;
     var count: usize = 0;
     var n = num;
-    
+
     while (n > 0) : (n /= 10) {
         digits[count] = @as(u8, @intCast('0' + (n % 10)));
         count += 1;
     }
-    
+
     var i = count;
     while (i > 0) {
         i -= 1;

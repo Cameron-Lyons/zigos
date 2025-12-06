@@ -8,129 +8,129 @@ const io = @import("io.zig");
 
 const E1000_VENDOR_ID = 0x8086;
 const E1000_DEVICE_IDS = [_]u16{
-    0x1000, // 82542
-    0x1001, // 82543GC Fiber
-    0x1004, // 82543GC Copper
-    0x1008, // 82544EI Copper
-    0x1009, // 82544EI Fiber
-    0x100C, // 82544GC Copper
-    0x100D, // 82544GC LOM
-    0x100E, // 82540EM
-    0x100F, // 82545EM Copper
-    0x1010, // 82546EB Copper
-    0x1011, // 82545EM Fiber
-    0x1012, // 82546EB Fiber
-    0x1013, // 82541EI
-    0x1014, // 82541ER
-    0x1015, // 82540EM LOM
-    0x1016, // 82540EP
-    0x1017, // 82540EP LOM
-    0x1018, // 82541EI Mobile
-    0x1019, // 82547EI
-    0x101A, // 82547EI Mobile
-    0x101D, // 82546EB Copper Quad
-    0x101E, // 82540EP LP
-    0x1026, // 82545GM Copper
-    0x1027, // 82545GM Fiber
-    0x1028, // 82545GM SerDes
-    0x1049, // 82566MM
-    0x104A, // 82566DM
-    0x104B, // 82566DC
-    0x104C, // 82562V
-    0x104D, // 82566MC
-    0x105E, // 82571EB Copper
-    0x105F, // 82571EB Fiber
-    0x1060, // 82571EB SerDes
-    0x1075, // 82547GI
-    0x1076, // 82541GI
-    0x1077, // 82541GI Mobile
-    0x1078, // 82541ER
-    0x1079, // 82546GB Copper
-    0x107A, // 82546GB Fiber
-    0x107B, // 82546GB SerDes
-    0x107C, // 82541GI LF
-    0x107D, // 82572EI Copper
-    0x107E, // 82572EI Fiber
-    0x107F, // 82572EI SerDes
-    0x108A, // 82546GB PCIE
-    0x108B, // 82573E
-    0x108C, // 82573E IAMT
-    0x1096, // 80003ES2LAN Copper
-    0x1098, // 80003ES2LAN SerDes
-    0x1099, // 82546GB Copper Quad
-    0x109A, // 82573L
-    0x10A4, // 82571EB Copper Quad
-    0x10A7, // 82575EB Copper
-    0x10B9, // 82572EI
-    0x10BA, // 80003ES2LAN Copper
-    0x10BB, // 80003ES2LAN SerDes
-    0x10BC, // 82571EB Copper Quad LP
-    0x10BD, // 82566DM-2
-    0x10BF, // 82567LF
-    0x10C0, // 82562V-2
-    0x10C2, // 82562G-2
-    0x10C3, // 82562GT-2
-    0x10C4, // 82562GT
-    0x10C5, // 82562G
-    0x10C9, // 82576
-    0x10CB, // 82567V
-    0x10CC, // 82567LM-2
-    0x10CD, // 82567LF-2
-    0x10CE, // 82567V-2
-    0x10D3, // 82574L
-    0x10D5, // 82571PT Quad Copper
-    0x10D6, // 82575GB Copper
-    0x10D9, // 82571EB Dual Copper
-    0x10DA, // 82571EB Quad Copper LP
-    0x10DE, // 82567LM-3
-    0x10DF, // 82567LF-3
-    0x10E5, // 82567LM-4
-    0x10EA, // 82577LM
-    0x10EB, // 82577LC
-    0x10EF, // 82578DM
-    0x10F0, // 82578DC
-    0x10F5, // 82567LM
-    0x10F6, // 82574L
-    0x1501, // 82567V-3
-    0x1502, // 82579LM
-    0x1503, // 82579V
-    0x150C, // 82583V
-    0x150E, // 82580 Copper
-    0x150F, // 82580 Fiber
-    0x1510, // 82580 SerDes
-    0x1511, // 82580 SGMII
-    0x1516, // 82580 Copper Dual
-    0x1518, // 82576NS
-    0x1521, // I350 Copper
-    0x1522, // I350 Fiber
-    0x1523, // I350 SerDes
-    0x1524, // I350 SGMII
-    0x1533, // I210 Copper
-    0x1536, // I210 Fiber
-    0x1537, // I210 SerDes
-    0x1538, // I210 SGMII
-    0x1539, // I211 Copper
-    0x153A, // I217-LM
-    0x153B, // I217-V
-    0x1559, // I218-V
-    0x155A, // I218-LM
-    0x156F, // I219-LM
-    0x1570, // I219-V
-    0x15A0, // I218-LM2
-    0x15A1, // I218-V2
-    0x15A2, // I218-LM3
-    0x15A3, // I218-V3
-    0x15B7, // I219-LM2
-    0x15B8, // I219-V2
-    0x15B9, // I219-LM3
-    0x15BB, // I219-LM7
-    0x15BC, // I219-V7
-    0x15BD, // I219-LM6
-    0x15BE, // I219-V6
-    0x15D6, // I219-V5
-    0x15D7, // I219-LM4
-    0x15D8, // I219-V4
-    0x15E3, // I219-LM5
+    0x1000,
+    0x1001,
+    0x1004,
+    0x1008,
+    0x1009,
+    0x100C,
+    0x100D,
+    0x100E,
+    0x100F,
+    0x1010,
+    0x1011,
+    0x1012,
+    0x1013,
+    0x1014,
+    0x1015,
+    0x1016,
+    0x1017,
+    0x1018,
+    0x1019,
+    0x101A,
+    0x101D,
+    0x101E,
+    0x1026,
+    0x1027,
+    0x1028,
+    0x1049,
+    0x104A,
+    0x104B,
+    0x104C,
+    0x104D,
+    0x105E,
+    0x105F,
+    0x1060,
+    0x1075,
+    0x1076,
+    0x1077,
+    0x1078,
+    0x1079,
+    0x107A,
+    0x107B,
+    0x107C,
+    0x107D,
+    0x107E,
+    0x107F,
+    0x108A,
+    0x108B,
+    0x108C,
+    0x1096,
+    0x1098,
+    0x1099,
+    0x109A,
+    0x10A4,
+    0x10A7,
+    0x10B9,
+    0x10BA,
+    0x10BB,
+    0x10BC,
+    0x10BD,
+    0x10BF,
+    0x10C0,
+    0x10C2,
+    0x10C3,
+    0x10C4,
+    0x10C5,
+    0x10C9,
+    0x10CB,
+    0x10CC,
+    0x10CD,
+    0x10CE,
+    0x10D3,
+    0x10D5,
+    0x10D6,
+    0x10D9,
+    0x10DA,
+    0x10DE,
+    0x10DF,
+    0x10E5,
+    0x10EA,
+    0x10EB,
+    0x10EF,
+    0x10F0,
+    0x10F5,
+    0x10F6,
+    0x1501,
+    0x1502,
+    0x1503,
+    0x150C,
+    0x150E,
+    0x150F,
+    0x1510,
+    0x1511,
+    0x1516,
+    0x1518,
+    0x1521,
+    0x1522,
+    0x1523,
+    0x1524,
+    0x1533,
+    0x1536,
+    0x1537,
+    0x1538,
+    0x1539,
+    0x153A,
+    0x153B,
+    0x1559,
+    0x155A,
+    0x156F,
+    0x1570,
+    0x15A0,
+    0x15A1,
+    0x15A2,
+    0x15A3,
+    0x15B7,
+    0x15B8,
+    0x15B9,
+    0x15BB,
+    0x15BC,
+    0x15BD,
+    0x15BE,
+    0x15D6,
+    0x15D7,
+    0x15D8,
+    0x15E3,
 };
 
 const E1000_NUM_RX_DESC = 32;
@@ -456,7 +456,7 @@ const E1000Device = struct {
     pub fn send(self: *E1000Device, data: []const u8) void {
         const cur = self.tx_cur;
         const buf_addr = @intFromPtr(&self.tx_buffers[cur * TX_BUFFER_SIZE]);
-        
+
         const len = @min(data.len, TX_BUFFER_SIZE);
         @memcpy(@as([*]u8, @ptrFromInt(buf_addr))[0..len], data[0..len]);
 
@@ -466,7 +466,7 @@ const E1000Device = struct {
 
         const old_tail = self.readRegister(E1000Registers.TDT);
         self.writeRegister(E1000Registers.TDT, (old_tail + 1) % E1000_NUM_TX_DESC);
-        
+
         self.tx_cur = (self.tx_cur + 1) % E1000_NUM_TX_DESC;
 
         while ((self.tx_descs[cur].status & TXStatus.DD) == 0) {}
@@ -474,21 +474,21 @@ const E1000Device = struct {
 
     pub fn receive(self: *E1000Device) ?[]u8 {
         const cur = self.rx_cur;
-        
+
         if ((self.rx_descs[cur].status & RXStatus.DD) != 0) {
             if ((self.rx_descs[cur].status & RXStatus.EOP) != 0) {
                 const len = self.rx_descs[cur].length;
                 const buf_addr = @intFromPtr(&self.rx_buffers[cur * RX_BUFFER_SIZE]);
-                
+
                 self.rx_descs[cur].status = 0;
                 const old_tail = self.readRegister(E1000Registers.RDT);
                 self.writeRegister(E1000Registers.RDT, (old_tail + 1) % E1000_NUM_RX_DESC);
                 self.rx_cur = (self.rx_cur + 1) % E1000_NUM_RX_DESC;
-                
+
                 return @as([*]u8, @ptrFromInt(buf_addr))[0..len];
             }
         }
-        
+
         return null;
     }
 };
@@ -497,20 +497,20 @@ fn e1000_interrupt_handler(frame: *isr.InterruptFrame) void {
     _ = frame;
     if (e1000_device) |*dev| {
         const icr = dev.readRegister(E1000Registers.ICR);
-        
+
         if (icr & 0x80 != 0) {
             while (dev.receive()) |packet| {
                 network.processPacket(packet, dev.mac_addr);
             }
         }
-        
+
         dev.writeRegister(E1000Registers.ICR, icr);
     }
 }
 
 pub fn init() void {
     vga.print("Initializing E1000 network driver...\n");
-    
+
     var bus: u16 = 0;
     while (bus < 256) : (bus += 1) {
         var device: u8 = 0;
@@ -527,7 +527,7 @@ pub fn init() void {
                             }
                         }
                     }
-                    
+
                     if (func == 0) {
                         const header_type = pci.readConfig(@intCast(bus), device, 0, 0x0C) >> 16;
                         if ((header_type & 0x80) == 0) {
@@ -538,7 +538,7 @@ pub fn init() void {
             }
         }
     }
-    
+
     vga.print("No E1000 network card found.\n");
 }
 
@@ -568,7 +568,7 @@ fn initDevice(pci_device: pci.PCIDevice) void {
 
     dev.eeprom_exists = dev.detectEEPROM();
     dev.readMACAddress();
-    
+
     vga.print("E1000 MAC: ");
     for (dev.mac_addr, 0..) |byte, i| {
         const high = byte >> 4;
@@ -593,7 +593,7 @@ fn initDevice(pci_device: pci.PCIDevice) void {
 
     e1000_device = dev;
     network.setNetworkDevice(&e1000NetworkDevice);
-    
+
     vga.print("E1000 initialized successfully!\n");
 }
 

@@ -62,7 +62,7 @@ pub const DNSClient = struct {
     cache: [MAX_CACHE_ENTRIES]DNSCacheEntry,
     cache_count: usize,
     next_query_id: u16,
-    
+
     pub fn init(dns_server: ipv4.IPv4Address) DNSClient {
         return DNSClient{
             .dns_server = dns_server,
@@ -71,34 +71,34 @@ pub const DNSClient = struct {
             .next_query_id = 1,
         };
     }
-    
+
     pub fn resolve(self: *DNSClient, domain: []const u8) !ipv4.IPv4Address {
         if (self.lookupCache(domain)) |ip| {
             return ip;
         }
-        
+
         const sock = try socket.createSocket(.DGRAM, .UDP);
         defer sock.close();
-        
+
         var query_buffer: [DNS_BUFFER_SIZE]u8 = undefined;
         const query_len = self.buildQuery(&query_buffer, domain);
-        
+
         try sock.sendTo(query_buffer[0..query_len], self.dns_server, DNS_PORT);
-        
+
         var response_buffer: [DNS_BUFFER_SIZE]u8 = undefined;
         var src_addr: ipv4.IPv4Address = undefined;
         var src_port: u16 = undefined;
         const response_len = try sock.recvFrom(&response_buffer, &src_addr, &src_port);
-        
+
         const ip = try self.parseResponse(response_buffer[0..response_len], domain);
         self.addToCache(domain, ip, 3600);
-        
+
         return ip;
     }
-    
+
     fn buildQuery(self: *DNSClient, buffer: []u8, domain: []const u8) usize {
         var offset: usize = 0;
-        
+
         const header = @as(*DNSHeader, @ptrCast(@alignCast(&buffer[offset])));
         header.id = @byteSwap(self.next_query_id);
         self.next_query_id +%= 1;
@@ -108,71 +108,71 @@ pub const DNSClient = struct {
         header.nscount = 0;
         header.arcount = 0;
         offset += @sizeOf(DNSHeader);
-        
+
         offset += encodeDomainName(buffer[offset..], domain);
-        
+
         const qtype = @as(*u16, @ptrCast(@alignCast(&buffer[offset])));
         qtype.* = @byteSwap(@intFromEnum(DNSType.A));
         offset += 2;
-        
+
         const qclass = @as(*u16, @ptrCast(@alignCast(&buffer[offset])));
         qclass.* = @byteSwap(@intFromEnum(DNSClass.IN));
         offset += 2;
-        
+
         return offset;
     }
-    
+
     fn parseResponse(self: *DNSClient, data: []const u8, domain: []const u8) !ipv4.IPv4Address {
         _ = self;
         _ = domain;
-        
+
         if (data.len < @sizeOf(DNSHeader)) {
             return error.InvalidResponse;
         }
-        
+
         const header = @as(*const DNSHeader, @ptrCast(@alignCast(&data[0])));
         const flags = @byteSwap(header.flags);
-        
+
         if ((flags & DNSFlags.QR) == 0) {
             return error.NotResponse;
         }
-        
+
         if ((flags & DNSFlags.RCODE_MASK) != 0) {
             return error.DNSError;
         }
-        
+
         const ancount = @byteSwap(header.ancount);
         if (ancount == 0) {
             return error.NoAnswer;
         }
-        
+
         var offset: usize = @sizeOf(DNSHeader);
-        
+
         const qdcount = @byteSwap(header.qdcount);
         var i: u16 = 0;
         while (i < qdcount) : (i += 1) {
             offset = skipDomainName(data, offset);
             offset += 4;
         }
-        
+
         i = 0;
         while (i < ancount) : (i += 1) {
             offset = skipDomainName(data, offset);
-            
+
             const rtype = @as(*const u16, @ptrCast(@alignCast(&data[offset])));
             const rtype_val = @byteSwap(rtype.*);
             offset += 2;
-            
+
             const rclass = @as(*const u16, @ptrCast(@alignCast(&data[offset])));
             _ = rclass;
             offset += 2;
-            
+
             offset += 4;
-            
+
             const rdlength = @as(*const u16, @ptrCast(@alignCast(&data[offset])));
             const rdlength_val = @byteSwap(rdlength.*);
             offset += 2;
-            
+
             if (rtype_val == @intFromEnum(DNSType.A) and rdlength_val == 4) {
                 return ipv4.IPv4Address{
                     .octets = .{
@@ -183,18 +183,18 @@ pub const DNSClient = struct {
                     },
                 };
             }
-            
+
             offset += rdlength_val;
         }
-        
+
         return error.NoARecord;
     }
-    
+
     fn encodeDomainName(buffer: []u8, domain: []const u8) usize {
         var offset: usize = 0;
         var label_start: usize = 0;
         var i: usize = 0;
-        
+
         while (i <= domain.len) : (i += 1) {
             if (i == domain.len or domain[i] == '.') {
                 const label_len = i - label_start;
@@ -207,32 +207,32 @@ pub const DNSClient = struct {
                 label_start = i + 1;
             }
         }
-        
+
         buffer[offset] = 0;
         offset += 1;
-        
+
         return offset;
     }
-    
+
     fn skipDomainName(data: []const u8, start: usize) usize {
         var offset = start;
-        
+
         while (offset < data.len) {
             const len = data[offset];
             if (len == 0) {
                 return offset + 1;
             }
-            
+
             if ((len & 0xC0) == 0xC0) {
                 return offset + 2;
             }
-            
+
             offset += 1 + len;
         }
-        
+
         return offset;
     }
-    
+
     fn lookupCache(self: *DNSClient, domain: []const u8) ?ipv4.IPv4Address {
         var i: usize = 0;
         while (i < self.cache_count) : (i += 1) {
@@ -253,12 +253,12 @@ pub const DNSClient = struct {
         }
         return null;
     }
-    
+
     fn addToCache(self: *DNSClient, domain: []const u8, ip: ipv4.IPv4Address, ttl: u32) void {
         if (self.cache_count >= MAX_CACHE_ENTRIES) {
             self.cache_count = 0;
         }
-        
+
         const entry = &self.cache[self.cache_count];
         const copy_len = @min(domain.len, MAX_DOMAIN_LENGTH - 1);
         @memcpy(entry.domain[0..copy_len], domain[0..copy_len]);
@@ -266,7 +266,7 @@ pub const DNSClient = struct {
         entry.ip = ip;
         entry.ttl = ttl;
         entry.timestamp = 0;
-        
+
         self.cache_count += 1;
     }
 };

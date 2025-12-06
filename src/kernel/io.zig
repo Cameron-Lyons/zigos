@@ -44,7 +44,7 @@ pub inline fn inl(port: u16) u32 {
 }
 
 pub inline fn io_wait() void {
-    // Port 0x80 is used for 'checkpoints' during POST.
-    // The Linux kernel seems to think it is free for use.
+
+
     outb(0x80, 0);
 }

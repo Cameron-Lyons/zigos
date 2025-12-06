@@ -32,29 +32,29 @@ pub fn init() void {
 
 pub fn send(local_addr: ipv4.IPv4Address, local_port: u16, remote_addr: ipv4.IPv4Address, remote_port: u16, data: []const u8) !void {
     _ = local_addr;
-    
+
     const packet_size = @sizeOf(UDPHeader) + data.len;
     const packet_mem = memory.kmalloc(packet_size) orelse return error.OutOfMemory;
     defer memory.kfree(packet_mem);
-    
+
     const packet = @as([*]u8, @ptrCast(@alignCast(packet_mem)));
     const udp_header = @as(*UDPHeader, @ptrCast(@alignCast(packet)));
-    
+
     udp_header.src_port = @byteSwap(local_port);
     udp_header.dst_port = @byteSwap(remote_port);
     udp_header.length = @byteSwap(@as(u16, @intCast(packet_size)));
     udp_header.checksum = 0;
-    
+
     @memcpy(packet[@sizeOf(UDPHeader)..packet_size], data);
-    
-    const dst_ip = (@as(u32, remote_addr.octets[0]) << 24) | 
-                    (@as(u32, remote_addr.octets[1]) << 16) | 
-                    (@as(u32, remote_addr.octets[2]) << 8) | 
+
+    const dst_ip = (@as(u32, remote_addr.octets[0]) << 24) |
+                    (@as(u32, remote_addr.octets[1]) << 16) |
+                    (@as(u32, remote_addr.octets[2]) << 8) |
                     remote_addr.octets[3];
-    
+
     const src_ip_u32 = network.getLocalIPRaw();
     udp_header.checksum = calculateChecksum(src_ip_u32, dst_ip, udp_header, data);
-    
+
     try ipv4.sendPacket(dst_ip, @enumFromInt(UDP_PROTOCOL), packet[0..packet_size]);
 }
 

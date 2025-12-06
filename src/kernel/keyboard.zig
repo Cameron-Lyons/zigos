@@ -118,7 +118,7 @@ fn inb(port: u16) u8 {
 
 pub fn handleInterrupt() void {
     const scancode = inb(KEYBOARD_DATA_PORT);
-    
+
     if ((scancode & 0x80) != 0) {
         const key_release = scancode & 0x7F;
         switch (key_release) {
@@ -175,21 +175,19 @@ pub fn handleInterrupt() void {
             else => {
                 if (scancode < scancode_to_ascii.len) {
                     var ch: u8 = 0;
-                    
+
                     if (shift_pressed or (caps_lock and isAlpha(scancode_to_ascii[scancode]))) {
                         ch = scancode_to_ascii_shift[scancode];
                     } else {
                         ch = scancode_to_ascii[scancode];
                     }
-                    
+
                     if (ch != 0) {
-                        // Add to buffer for syscalls
                         put_char_buffer(ch);
-                        
+
                         if (keyboard_shell) |sh| {
                             sh.handleChar(ch);
                         } else {
-                            // Fallback to direct printing if no shell
                             if (ch == '\n') {
                                 vga.print("\n");
                             } else if (ch == '\x08') {
@@ -228,7 +226,7 @@ pub fn getchar() ?u8 {
     if (buffer_start == buffer_end) {
         return null;
     }
-    
+
     const ch = char_buffer[buffer_start];
     buffer_start = (buffer_start + 1) % char_buffer.len;
     return ch;

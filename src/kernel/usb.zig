@@ -159,83 +159,83 @@ const UHCIController = struct {
     td_pool: [*]UHCITransferDescriptor,
     root_ports: u8,
     devices: [128]?USBDevice,
-    
+
     fn reset(self: *UHCIController) void {
         io.outw(self.io_base + UHCI_CMD, UHCI_CMD_GRESET);
         busyWait(50000);
         io.outw(self.io_base + UHCI_CMD, 0);
         busyWait(10000);
-        
+
         io.outw(self.io_base + UHCI_CMD, UHCI_CMD_HCRESET);
         busyWait(10000);
-        
+
         var timeout: u32 = 100;
         while ((io.inw(self.io_base + UHCI_CMD) & UHCI_CMD_HCRESET) != 0 and timeout > 0) : (timeout -= 1) {
             busyWait(1000);
         }
     }
-    
+
     fn start(self: *UHCIController) void {
         io.outl(self.io_base + UHCI_FRBASEADD, @intFromPtr(self.frame_list));
-        
+
         io.outw(self.io_base + UHCI_FRNUM, 0);
-        
+
         io.outb(self.io_base + UHCI_SOFMOD, 64);
-        
+
         io.outw(self.io_base + UHCI_STS, 0xFFFF);
-        
+
         io.outw(self.io_base + UHCI_INTR, UHCI_STS_USBINT | UHCI_STS_ERROR | UHCI_STS_RD);
-        
+
         io.outw(self.io_base + UHCI_CMD, UHCI_CMD_RS | UHCI_CMD_CF | UHCI_CMD_MAXP);
     }
-    
+
     fn resetPort(self: *UHCIController, port: u8) void {
         const port_reg: u16 = if (port == 0) UHCI_PORTSC1 else UHCI_PORTSC2;
-        
+
         io.outw(self.io_base + port_reg, UHCI_PORTSC_PRES);
         busyWait(50000);
-        
+
         io.outw(self.io_base + port_reg, 0);
         busyWait(10000);
-        
+
         io.outw(self.io_base + port_reg, UHCI_PORTSC_PE);
         busyWait(10000);
     }
-    
+
     fn detectDevice(self: *UHCIController, port: u8) bool {
         const port_reg: u16 = if (port == 0) UHCI_PORTSC1 else UHCI_PORTSC2;
         const status = io.inw(self.io_base + port_reg);
-        
+
         if ((status & UHCI_PORTSC_CCS) != 0) {
             if ((status & UHCI_PORTSC_CSC) != 0) {
                 io.outw(self.io_base + port_reg, UHCI_PORTSC_CSC);
             }
             return true;
         }
-        
+
         return false;
     }
-    
+
     fn controlTransfer(self: *UHCIController, device: u8, setup: *const USBSetupPacket, data: ?[]u8) !void {
         const td_setup = &self.td_pool[0];
         const td_data = if (data != null) &self.td_pool[1] else null;
         const td_status = &self.td_pool[if (data != null) 2 else 1];
-        
-        td_setup.link = if (td_data != null) 
+
+        td_setup.link = if (td_data != null)
             @intFromPtr(td_data) | TD_CTRL_ACTIVE
-        else 
+        else
             @intFromPtr(td_status) | TD_CTRL_ACTIVE;
-        
+
         td_setup.ctrl_status = TD_CTRL_ACTIVE | (3 << TD_CTRL_CERR_SHIFT);
         td_setup.token = (@as(u32, @sizeOf(USBSetupPacket) - 1) << 21) |
                         (@as(u32, device) << 8) |
                         TD_TOKEN_PID_SETUP;
         td_setup.buffer = @intFromPtr(setup);
-        
+
         if (td_data) |td| {
             td.link = @intFromPtr(td_status) | TD_CTRL_ACTIVE;
             td.ctrl_status = TD_CTRL_ACTIVE | (3 << TD_CTRL_CERR_SHIFT);
-            
+
             const pid: u32 = if ((setup.bmRequestType & 0x80) != 0) TD_TOKEN_PID_IN else TD_TOKEN_PID_OUT;
             td.token = (@as(u32, @intCast(data.?.len - 1)) << 21) |
                       (@as(u32, 1) << 19) |
@@ -243,32 +243,32 @@ const UHCIController = struct {
                       pid;
             td.buffer = @intFromPtr(data.?.ptr);
         }
-        
+
         td_status.link = QH_PTR_TERMINATE;
         td_status.ctrl_status = TD_CTRL_ACTIVE | TD_CTRL_IOC | (3 << TD_CTRL_CERR_SHIFT);
-        
+
         const pid: u32 = if ((setup.bmRequestType & 0x80) != 0) TD_TOKEN_PID_OUT else TD_TOKEN_PID_IN;
         td_status.token = (0x7FF << 21) |
                          (@as(u32, 1) << 19) |
                          (@as(u32, device) << 8) |
                          pid;
         td_status.buffer = 0;
-        
+
         const qh = &self.qh_pool[0];
         qh.head_link = QH_PTR_TERMINATE;
         qh.element_link = @intFromPtr(td_setup);
-        
+
         self.frame_list[0] = @intFromPtr(qh) | QH_PTR_QH;
-        
+
         var timeout: u32 = 1000;
         while ((td_status.ctrl_status & TD_CTRL_ACTIVE) != 0 and timeout > 0) : (timeout -= 1) {
             busyWait(100);
         }
-        
+
         if (timeout == 0) {
             return error.Timeout;
         }
-        
+
         if ((td_status.ctrl_status & TD_CTRL_STALLED) != 0) {
             return error.Stalled;
         }
@@ -290,14 +290,14 @@ var num_controllers: u8 = 0;
 
 pub fn init() void {
     vga.print("Initializing USB support...\n");
-    
+
     scanForControllers();
-    
+
     if (num_controllers > 0) {
         vga.print("Found ");
         printNumber(num_controllers);
         vga.print(" USB controller(s)\n");
-        
+
         for (uhci_controllers[0..num_controllers]) |*maybe_controller| {
             if (maybe_controller.*) |*controller| {
                 initController(controller);
@@ -339,10 +339,10 @@ fn scanForControllers() void {
 fn addUHCIController(pci_device: pci.PCIDevice) void {
     const frame_list_mem = memory.kmalloc(4096 + 16) orelse return;
     const frame_list_addr = (@intFromPtr(frame_list_mem) + 4095) & ~@as(usize, 4095);
-    
+
     const qh_mem = memory.kmalloc(@sizeOf(UHCIQueueHead) * 64) orelse return;
     const td_mem = memory.kmalloc(@sizeOf(UHCITransferDescriptor) * 128) orelse return;
-    
+
     uhci_controllers[num_controllers] = UHCIController{
         .pci_device = pci_device,
         .io_base = @as(u16, @intCast(pci_device.bar4 & 0xFFFC)),
@@ -352,31 +352,31 @@ fn addUHCIController(pci_device: pci.PCIDevice) void {
         .root_ports = 2,
         .devices = [_]?USBDevice{null} ** 128,
     };
-    
+
     for (0..1024) |i| {
         uhci_controllers[num_controllers].?.frame_list[i] = QH_PTR_TERMINATE;
     }
-    
+
     num_controllers += 1;
 }
 
 fn initController(controller: *UHCIController) void {
-    pci.writeConfigWord(controller.pci_device.bus, controller.pci_device.device, 
+    pci.writeConfigWord(controller.pci_device.bus, controller.pci_device.device,
                         controller.pci_device.function, 0x04,
                         pci.readConfigWord(controller.pci_device.bus, controller.pci_device.device,
                                          controller.pci_device.function, 0x04) | 0x05);
-    
+
     controller.reset();
     controller.start();
-    
+
     busyWait(100000);
-    
+
     for (0..controller.root_ports) |port| {
         if (controller.detectDevice(@as(u8, @intCast(port)))) {
             vga.print("USB device detected on port ");
             printNumber(@as(u32, @intCast(port)));
             vga.print("\n");
-            
+
             controller.resetPort(@as(u8, @intCast(port)));
             enumerateDevice(controller, @as(u8, @intCast(port)));
         }
@@ -385,7 +385,7 @@ fn initController(controller: *UHCIController) void {
 
 fn enumerateDevice(controller: *UHCIController, port: u8) void {
     _ = port;
-    
+
     const setup = USBSetupPacket{
         .bmRequestType = 0x80,
         .bRequest = USB_REQ_GET_DESCRIPTOR,
@@ -393,13 +393,13 @@ fn enumerateDevice(controller: *UHCIController, port: u8) void {
         .wIndex = 0,
         .wLength = 8,
     };
-    
+
     var desc_buffer: [8]u8 = undefined;
     controller.controlTransfer(0, &setup, desc_buffer[0..]) catch {
         vga.print("Failed to get device descriptor\n");
         return;
     };
-    
+
     const max_packet_size = desc_buffer[7];
     vga.print("USB device max packet size: ");
     printNumber(max_packet_size);
@@ -418,16 +418,16 @@ fn printNumber(num: u32) void {
         vga.printChar('0');
         return;
     }
-    
+
     var digits: [10]u8 = undefined;
     var count: usize = 0;
     var n = num;
-    
+
     while (n > 0) : (n /= 10) {
         digits[count] = @as(u8, @intCast('0' + (n % 10)));
         count += 1;
     }
-    
+
     var i = count;
     while (i > 0) {
         i -= 1;

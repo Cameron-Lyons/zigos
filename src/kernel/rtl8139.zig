@@ -64,13 +64,13 @@ const InterruptStatus = struct {
 };
 
 const RxConfig = struct {
-    const AAP = 1 << 0; // Accept All Packets
-    const APM = 1 << 1; // Accept Physical Match
-    const AM = 1 << 2; // Accept Multicast
-    const AB = 1 << 3; // Accept Broadcast
-    const AR = 1 << 4; // Accept Runt
-    const AER = 1 << 5; // Accept Error
-    const WRAP = 1 << 7; // Wrap
+    const AAP = 1 << 0;
+    const APM = 1 << 1;
+    const AM = 1 << 2;
+    const AB = 1 << 3;
+    const AR = 1 << 4;
+    const AER = 1 << 5;
+    const WRAP = 1 << 7;
     const BUFFER_SIZE_8K = 0 << 11;
     const BUFFER_SIZE_16K = 1 << 11;
     const BUFFER_SIZE_32K = 2 << 11;
@@ -214,7 +214,7 @@ const RTL8139 = struct {
     pub fn receive(self: *RTL8139) ?[]u8 {
         const cmd = self.readReg8(.ChipCmd);
         if ((cmd & 0x01) == 0) {
-            return null; // Buffer empty
+            return null;
         }
 
         const header = @as(*align(1) const u16, @ptrCast(&self.rx_buffer[self.rx_offset])).*;
@@ -222,7 +222,7 @@ const RTL8139 = struct {
         const length = @as(*align(1) const u16, @ptrCast(&self.rx_buffer[self.rx_offset + 2])).*;
 
         if ((status & 0x01) == 0) {
-            return null; // Bad packet
+            return null;
         }
 
         const packet_start = self.rx_offset + 4;
@@ -292,7 +292,7 @@ pub fn init() void {
     }
 }
 
-fn rtl8139InterruptHandler(regs: *idt.InterruptRegisters) callconv(.C) void {
+fn rtl8139InterruptHandler(regs: *idt.InterruptRegisters) callconv(.c) void {
     _ = regs;
     if (rtl8139_device) |*rtl| {
         rtl.handleInterrupt();

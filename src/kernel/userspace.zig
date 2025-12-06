@@ -6,21 +6,21 @@ const panic_handler = @import("panic.zig");
 
 fn user_hello_world() void {
     asm volatile (
-        \\mov $1, %%eax    # syscall number for write
-        \\mov $1, %%ebx    # file descriptor (stdout)
-        \\lea %[msg], %%ecx # message pointer
-        \\mov $24, %%edx   # message length
-        \\int $0x80        # trigger system call
+        \\mov $1, %%eax
+        \\mov $1, %%ebx
+        \\lea %[msg], %%ecx
+        \\mov $24, %%edx
+        \\int $0x80
         :
         : [msg] "m" ("Hello from userspace!\n"),
-        : "eax", "ebx", "ecx", "edx"
+        : .{ .eax = true, .ebx = true, .ecx = true, .edx = true, .memory = true }
     );
 
     asm volatile (
-        \\mov $0, %%eax    # syscall number for exit
-        \\mov $0, %%ebx    # exit code
-        \\int $0x80        # trigger system call
-        ::: "eax", "ebx");
+        \\mov $0, %%eax
+        \\mov $0, %%ebx
+        \\int $0x80
+        ::: .{ .eax = true, .ebx = true, .memory = true });
 }
 
 pub fn createUserTestProcess() void {
@@ -53,4 +53,3 @@ fn printNumber(num: u32) void {
         vga.put_char(buffer[i]);
     }
 }
-
