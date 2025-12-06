@@ -374,6 +374,14 @@ pub fn requestAddress() !void {
     }
 }
 
+pub fn releaseAddress() !void {
+    if (dhcp_client) |*client| {
+        try client.release();
+    } else {
+        return error.NotInitialized;
+    }
+}
+
 pub fn handlePacket(data: []const u8) void {
     if (dhcp_client) |*client| {
         if (data.len < @sizeOf(DHCPHeader)) {
