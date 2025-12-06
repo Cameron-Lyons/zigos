@@ -1,7 +1,6 @@
 const vga = @import("../drivers/vga.zig");
 const builtin = @import("builtin");
 
-var panic_message: [256]u8 = undefined;
 var panic_occurred: bool = false;
 
 pub fn panic(comptime format: []const u8, args: anytype) noreturn {
