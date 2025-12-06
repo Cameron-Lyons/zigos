@@ -26,7 +26,7 @@ echo "The OS will output to serial port (captured in serial.log)"
 echo ""
 
 # Run QEMU with timeout
-if timeout 5 qemu-system-x86_64 \
+if timeout 10 qemu-system-x86_64 \
     -kernel zig-out/bin/kernel.elf \
     -m 128M \
     -display none \
@@ -38,7 +38,7 @@ if timeout 5 qemu-system-x86_64 \
 else
     EXIT_CODE=$?
     if [ $EXIT_CODE -eq 124 ]; then
-        echo -e "${YELLOW}QEMU timed out after 5 seconds (this is expected).${NC}"
+        echo -e "${YELLOW}QEMU timed out after 10 seconds (this is expected).${NC}"
     else
         echo -e "${YELLOW}QEMU exited with code $EXIT_CODE${NC}"
     fi
@@ -84,6 +84,17 @@ if [ -f serial.log ] && [ -s serial.log ]; then
         SUCCESS=$((SUCCESS + 1))
     else
         echo -e "${YELLOW}⚠ Shell not ready (may need more time)${NC}"
+    fi
+    
+    if grep -qi "panic\|KERNEL PANIC\|System Halted" serial.log; then
+        echo -e "${RED}✗ Kernel panic or crash detected!${NC}"
+        echo "Check serial.log for details"
+        SUCCESS=0
+    fi
+    
+    if grep -qi "Received interrupt:" serial.log; then
+        echo -e "${RED}✗ Unexpected interrupt received${NC}"
+        grep "Received interrupt:" serial.log | head -1
     fi
     
     echo ""

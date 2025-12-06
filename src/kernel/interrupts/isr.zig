@@ -115,11 +115,12 @@ pub export fn isrHandler(regs: *Registers) void {
         return;
     }
 
-    vga.print("Received interrupt: ");
+    const console = @import("../utils/console.zig");
+    console.print("Received interrupt: ");
     if (regs.int_no < 32) {
-        vga.print(exception_messages[regs.int_no]);
-        vga.print("\n");
-        vga.print("System Halted!\n");
+        console.print(exception_messages[regs.int_no]);
+        console.print("\n");
+        console.print("System Halted!\n");
         while (true) {
             asm volatile ("hlt");
         }

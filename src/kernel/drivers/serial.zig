@@ -76,6 +76,22 @@ pub fn putChar(c: u8) void {
     }
 
     outb(SERIAL_DATA, c);
+    
+    timeout = 10000;
+    while (!isTransmitEmpty() and timeout > 0) {
+        timeout -= 1;
+    }
+}
+
+pub fn flush() void {
+    if (!serial_initialized) {
+        return;
+    }
+    
+    var timeout: u32 = 10000;
+    while (!isTransmitEmpty() and timeout > 0) {
+        timeout -= 1;
+    }
 }
 
 pub fn print(str: []const u8) void {
