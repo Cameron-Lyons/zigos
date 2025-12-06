@@ -345,21 +345,22 @@ pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Register
         }
     }
 
-    vga.print("\n=== PAGE FAULT ===\n");
-    vga.print("Address: 0x");
-    print_hex(faulting_address);
-    vga.print("\n");
-    vga.print("EIP: 0x");
-    print_hex(regs.eip);
-    vga.print("\n");
+    const console = @import("../utils/console.zig");
+    console.print("\n=== PAGE FAULT ===\n");
+    console.print("Address: 0x");
+    print_hex_console(faulting_address, console);
+    console.print("\n");
+    console.print("EIP: 0x");
+    print_hex_console(regs.eip, console);
+    console.print("\n");
 
-    if (present) vga.print("  - Page not present\n");
-    if (write) vga.print("  - Write violation\n") else vga.print("  - Read violation\n");
-    if (user) vga.print("  - User mode\n") else vga.print("  - Kernel mode\n");
-    if (reserved) vga.print("  - Reserved bit violation\n");
-    if (instruction_fetch) vga.print("  - Instruction fetch\n");
+    if (present) console.print("  - Page not present\n");
+    if (write) console.print("  - Write violation\n") else console.print("  - Read violation\n");
+    if (user) console.print("  - User mode\n") else console.print("  - Kernel mode\n");
+    if (reserved) console.print("  - Reserved bit violation\n");
+    if (instruction_fetch) console.print("  - Instruction fetch\n");
 
-    vga.print("System halted.\n");
+    console.print("System halted.\n");
     asm volatile ("hlt");
 }
 
@@ -369,6 +370,16 @@ fn print_hex(value: u32) void {
     while (i >= 0) : (i -= 4) {
         const nibble = (value >> @truncate(i)) & 0xF;
         vga.put_char(hex_chars[nibble]);
+        if (i == 0) break;
+    }
+}
+
+fn print_hex_console(value: u32, console: anytype) void {
+    const hex_chars = "0123456789ABCDEF";
+    var i: u32 = 28;
+    while (i >= 0) : (i -= 4) {
+        const nibble = (value >> @truncate(i)) & 0xF;
+        console.printChar(hex_chars[nibble]);
         if (i == 0) break;
     }
 }
