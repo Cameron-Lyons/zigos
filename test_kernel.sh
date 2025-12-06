@@ -8,7 +8,7 @@ echo ""
 
 # Run QEMU for 5 seconds and capture any output
 timeout 5 qemu-system-i386 \
-    -kernel kernel.elf \
+    -kernel zig-out/bin/kernel.elf \
     -m 128M \
     -display none \
     -serial file:serial.log \
