@@ -6,8 +6,7 @@ echo "Starting QEMU with kernel.elf..."
 echo "The OS will run in VGA text mode (not visible in terminal)"
 echo ""
 
-# Run QEMU for 5 seconds and capture any output
-timeout 5 qemu-system-i386 \
+timeout 5 qemu-system-x86_64 \
     -kernel zig-out/bin/kernel.elf \
     -m 128M \
     -display none \
@@ -19,7 +18,6 @@ echo ""
 echo "Kernel test completed."
 echo ""
 
-# Check if serial log was created
 if [ -f serial.log ]; then
     echo "Serial output:"
     cat serial.log
