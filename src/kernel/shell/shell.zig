@@ -313,8 +313,8 @@ pub const Shell = struct {
             @memcpy(file_part[0..partial_len - dir_len], partial_path[dir_len..partial_len]);
             file_len = partial_len - dir_len;
         } else {
-            @memcpy(dir_path[0..1], "./");
-            dir_len = 1;
+            @memcpy(dir_path[0..2], "./");
+            dir_len = 2;
             @memcpy(file_part[0..partial_len], partial_path[0..partial_len]);
             file_len = partial_len;
         }
@@ -402,9 +402,9 @@ pub const Shell = struct {
             }
             self.printPrompt();
 
-            var k: usize = 0;
-            while (k < self.buffer_pos) : (k += 1) {
-                vga.put_char(self.command_buffer[k]);
+            var pos: usize = 0;
+            while (pos < self.buffer_pos) : (pos += 1) {
+                vga.put_char(self.command_buffer[pos]);
             }
         }
     }
