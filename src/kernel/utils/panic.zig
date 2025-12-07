@@ -26,16 +26,8 @@ pub fn panic(comptime format: []const u8, args: anytype) noreturn {
     console.printWithColor(message, 0x4F);
     console.printWithColor("\n\n", 0x4F);
 
-    console.printWithColor("Stack trace:\n", 0x4F);
-    var it = std.debug.StackIterator.init(@returnAddress(), @frameAddress());
-    var i: usize = 0;
-    while (it.next()) |addr| : (i += 1) {
-        var addr_buf: [32]u8 = undefined;
-        const addr_str = std.fmt.bufPrint(&addr_buf, "  [{d}] 0x{x}\n", .{ i, addr }) catch break;
-        console.printWithColor(addr_str, 0x4F);
-        if (i >= 10) break;
-    }
-
+    // Stack trace not available in freestanding environment
+    console.printWithColor("Stack trace: Not available in freestanding mode\n", 0x4F);
     console.printWithColor("\n", 0x4F);
     console.printWithColor("System halted. Please restart your computer.\n", 0x4F);
     console.printWithColor("======================================================================\n", 0x4F);
