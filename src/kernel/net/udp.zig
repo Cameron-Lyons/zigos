@@ -1,5 +1,6 @@
 const network = @import("network.zig");
 const ipv4 = @import("ipv4.zig");
+const ipv6 = @import("ipv6.zig");
 const memory = @import("../memory/memory.zig");
 const vga = @import("../drivers/vga.zig");
 
@@ -67,6 +68,32 @@ fn calculateChecksum(src_ip: u32, dst_ip: u32, udp_header: *const UDPHeader, dat
 
     sum += UDP_PROTOCOL;
     sum += @byteSwap(udp_header.length);
+
+    const header_bytes_ptr: [*]const u8 = @ptrCast(udp_header);
+    const header_bytes = header_bytes_ptr[0..@sizeOf(UDPHeader)];
+    var i: usize = 0;
+    while (i < header_bytes.len - 1) : (i += 2) {
+        sum += @as(u16, header_bytes[i]) << 8 | header_bytes[i + 1];
+    }
+
+    i = 0;
+    while (i < data.len - 1) : (i += 2) {
+        sum += @as(u16, data[i]) << 8 | data[i + 1];
+    }
+    if (data.len & 1 != 0) {
+        sum += @as(u16, data[data.len - 1]) << 8;
+    }
+
+    while (sum >> 16 != 0) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    const result: u16 = @intCast(sum);
+    return ~result;
+}
+
+pub fn calculateChecksumIPv6(src: *const ipv6.IPv6Address, dst: *const ipv6.IPv6Address, udp_header: *const UDPHeader, data: []const u8) u16 {
+    var sum: u32 = ipv6.calculatePseudoHeaderChecksum(src, dst, UDP_PROTOCOL, @byteSwap(udp_header.length));
 
     const header_bytes_ptr: [*]const u8 = @ptrCast(udp_header);
     const header_bytes = header_bytes_ptr[0..@sizeOf(UDPHeader)];

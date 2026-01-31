@@ -4,6 +4,7 @@ const gdt = @import("../interrupts/gdt.zig");
 const memory = @import("../memory/memory.zig");
 const scheduler = @import("scheduler.zig");
 const smp = @import("../smp/smp.zig");
+const credentials = @import("credentials.zig");
 
 pub const ProcessState = enum {
     Ready,
@@ -49,6 +50,7 @@ pub const Process = struct {
     priority: i8 = 0,
     nice_value: i8 = 0,
     time_slice: u32 = 10,
+    creds: credentials.Credentials = credentials.defaultKernelCredentials(),
 };
 
 const MAX_PROCESSES = 256;
@@ -277,6 +279,8 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
             .ss = gdt.KERNEL_DATA_SEG,
         };
     }
+
+    proc.creds = if (privilege == .Kernel) credentials.defaultKernelCredentials() else credentials.defaultUserCredentials();
 
     @memset(&proc.name, 0);
     const copy_len = @min(name.len, proc.name.len - 1);
