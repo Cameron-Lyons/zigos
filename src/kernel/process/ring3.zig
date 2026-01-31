@@ -89,14 +89,14 @@ fn ring3TestFunction() void {
         \\int $0x80
         :
         : [msg] "m" ("Hello from Ring 3 (user mode)!\n"),
-        : "eax", "ebx", "ecx", "edx", "memory"
+        : .{ .eax = true, .ebx = true, .ecx = true, .edx = true, .memory = true }
     );
 
     asm volatile (
         \\mov $0, %%eax
         \\xor %%ebx, %%ebx
         \\int $0x80
-        ::: "eax", "ebx", "memory");
+        ::: .{ .eax = true, .ebx = true, .memory = true });
 }
 
 pub fn createRing3TestProcess() void {

@@ -10,14 +10,14 @@ fn user_hello_world() void {
         \\int $0x80
         :
         : [msg] "m" ("Hello from userspace!\n"),
-        : "eax", "ebx", "ecx", "edx", "memory"
+        : .{ .eax = true, .ebx = true, .ecx = true, .edx = true, .memory = true }
     );
 
     asm volatile (
         \\mov $0, %%eax
         \\mov $0, %%ebx
         \\int $0x80
-        ::: "eax", "ebx", "memory");
+        ::: .{ .eax = true, .ebx = true, .memory = true });
 }
 
 pub fn createUserTestProcess() void {
