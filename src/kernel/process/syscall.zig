@@ -9,6 +9,7 @@ const posix = @import("../utils/posix.zig");
 const memory = @import("../memory/memory.zig");
 const paging = @import("../memory/paging.zig");
 const vfs = @import("../fs/vfs.zig");
+const credentials = @import("credentials.zig");
 
 pub const SYS_EXIT = 1;
 pub const SYS_WRITE = 2;
@@ -29,6 +30,11 @@ pub const SYS_RENAME = 16;
 pub const SYS_LSEEK = 17;
 pub const SYS_STAT = 18;
 pub const SYS_FSTAT = 19;
+pub const SYS_GETUID = 20;
+pub const SYS_GETGID = 21;
+pub const SYS_SETUID = 22;
+pub const SYS_SETGID = 23;
+pub const SYS_CHOWN = 24;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -69,6 +75,11 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_RENAME => sys_rename(@as([*]const u8, @ptrFromInt(arg1)), @as([*]const u8, @ptrFromInt(arg2))),
         SYS_LSEEK => sys_lseek(@intCast(arg1), @as(i64, @bitCast(@as(u64, arg2) | (@as(u64, arg3) << 32))), @intCast(arg4)),
         SYS_STAT => sys_stat(@as([*]const u8, @ptrFromInt(arg1)), arg2),
+        SYS_GETUID => sys_getuid(),
+        SYS_GETGID => sys_getgid(),
+        SYS_SETUID => sys_setuid(@intCast(arg1)),
+        SYS_SETGID => sys_setgid(@intCast(arg1)),
+        SYS_CHOWN => sys_chown(@as([*]const u8, @ptrFromInt(arg1)), @intCast(arg2), @intCast(arg3)),
         else => ENOSYS,
     };
 
@@ -365,6 +376,63 @@ pub fn syscall3(num: u32, arg1: usize, arg2: usize, arg3: usize) i32 {
         : "memory"
     );
     return result;
+}
+
+fn sys_getuid() i32 {
+    if (process.current_process) |proc| {
+        return @intCast(proc.creds.uid);
+    }
+    return 0;
+}
+
+fn sys_getgid() i32 {
+    if (process.current_process) |proc| {
+        return @intCast(proc.creds.gid);
+    }
+    return 0;
+}
+
+fn sys_setuid(uid: u16) i32 {
+    if (process.current_process) |proc| {
+        if (proc.creds.euid == 0 or proc.creds.uid == uid) {
+            proc.creds.uid = uid;
+            proc.creds.euid = uid;
+            return 0;
+        }
+        return -1;
+    }
+    return -1;
+}
+
+fn sys_setgid(gid: u16) i32 {
+    if (process.current_process) |proc| {
+        if (proc.creds.euid == 0 or proc.creds.gid == gid) {
+            proc.creds.gid = gid;
+            proc.creds.egid = gid;
+            return 0;
+        }
+        return -1;
+    }
+    return -1;
+}
+
+fn sys_chown(pathname: [*]const u8, uid: u16, gid: u16) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
+        return EINVAL;
+    }
+
+    // SAFETY: filled by the subsequent copyStringFromUser call
+    var kernel_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    if (process.current_process) |proc| {
+        if (!credentials.isRoot(&proc.creds)) {
+            return -1;
+        }
+    }
+
+    vfs.chown(path_slice, uid, gid) catch return -1;
+    return 0;
 }
 
 fn sys_fork() i32 {

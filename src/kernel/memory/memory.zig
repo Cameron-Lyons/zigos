@@ -1,4 +1,5 @@
 const vga = @import("../drivers/vga.zig");
+const swap = @import("swap.zig");
 
 const HEAP_START: usize = 0x100000;
 const HEAP_SIZE: usize = 16 * 1024 * 1024;
@@ -151,6 +152,20 @@ pub fn kmalloc(size: usize) ?*anyopaque {
             return @ptrCast(data_ptr + @sizeOf(BlockHeader));
         }
         current = block.next;
+    }
+
+    if (swap.tryFreeFrame()) {
+        var retry = free_list;
+        while (retry) |block| {
+            if (block.is_free and block.size >= aligned_size) {
+                splitBlock(block, aligned_size);
+                block.is_free = false;
+
+                const data_ptr: [*]u8 = @ptrCast(block);
+                return @ptrCast(data_ptr + @sizeOf(BlockHeader));
+            }
+            retry = block.next;
+        }
     }
 
     return null;

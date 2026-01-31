@@ -2,6 +2,7 @@ const pci = @import("pci.zig");
 const memory = @import("../memory/memory.zig");
 const vga = @import("vga.zig");
 const io = @import("../utils/io.zig");
+pub const uhci = @import("uhci.zig");
 
 pub const USBSpeed = enum {
     Low,

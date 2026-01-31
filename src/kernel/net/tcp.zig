@@ -1,11 +1,25 @@
 // zlint-disable suppressed-errors
 const ipv4 = @import("ipv4.zig");
+const ipv6 = @import("ipv6.zig");
 const memory = @import("../memory/memory.zig");
 const vga = @import("../drivers/vga.zig");
 const timer = @import("../timer/timer.zig");
 
 const TCP_PROTOCOL = 6;
 const TCP_MSS: u16 = 536;
+
+const TCP_OPT_END: u8 = 0;
+const TCP_OPT_NOP: u8 = 1;
+const TCP_OPT_MSS: u8 = 2;
+const TCP_OPT_WINDOW_SCALE: u8 = 3;
+const TCP_OPT_SACK_PERMITTED: u8 = 4;
+const TCP_OPT_SACK: u8 = 5;
+const TCP_OPT_TIMESTAMPS: u8 = 8;
+
+const SACKBlock = struct {
+    left_edge: u32,
+    right_edge: u32,
+};
 const TCP_INITIAL_CWND: u32 = TCP_MSS * 2;
 const TCP_INITIAL_SSTHRESH: u32 = 65535;
 const TCP_INITIAL_RTO: u32 = 100;
@@ -100,6 +114,14 @@ const TCPConnectionStruct = struct {
     retx_count: u8,
     time_wait_start: u64,
     retx_queue: [TCP_MAX_RETX_ENTRIES]RetxEntry,
+    window_scale_send: u8,
+    window_scale_recv: u8,
+    sack_permitted: bool,
+    sack_blocks: [4]SACKBlock,
+    ts_enabled: bool,
+    ts_val: u32,
+    ts_ecr: u32,
+    ts_recent: u32,
 };
 
 const TCPSocket = struct {
@@ -152,6 +174,32 @@ fn calculateChecksum(src_ip: u32, dst_ip: u32, tcp_header: *const TCPHeader, dat
     return ~result;
 }
 
+pub fn calculateChecksumIPv6(src: *const ipv6.IPv6Address, dst: *const ipv6.IPv6Address, tcp_header: *const TCPHeader, data: []const u8) u16 {
+    var sum: u32 = ipv6.calculatePseudoHeaderChecksum(src, dst, TCP_PROTOCOL, @intCast(@sizeOf(TCPHeader) + data.len));
+
+    const header_bytes_ptr: [*]const u8 = @ptrCast(tcp_header);
+    const header_bytes = header_bytes_ptr[0..@sizeOf(TCPHeader)];
+    var i: usize = 0;
+    while (i < header_bytes.len - 1) : (i += 2) {
+        sum += @as(u16, header_bytes[i]) << 8 | header_bytes[i + 1];
+    }
+
+    i = 0;
+    while (i < data.len - 1) : (i += 2) {
+        sum += @as(u16, data[i]) << 8 | data[i + 1];
+    }
+    if (data.len & 1 != 0) {
+        sum += @as(u16, data[data.len - 1]) << 8;
+    }
+
+    while (sum >> 16 != 0) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    const result: u16 = @intCast(sum);
+    return ~result;
+}
+
 fn sendTCPPacket(connection: *TCPConnectionStruct, flags: u8, data: []const u8) !void {
     const effective_window = @min(connection.recv_window, @as(u16, @intCast(@min(connection.cwnd, 0xFFFF))));
     if (data.len > 0 and connection.bytes_in_flight >= effective_window) {
@@ -170,7 +218,11 @@ fn sendTCPPacket(connection: *TCPConnectionStruct, flags: u8, data: []const u8) 
     tcp_header.seq_num = @byteSwap(connection.send_seq);
     tcp_header.ack_num = @byteSwap(connection.send_ack);
     tcp_header.setDataOffsetAndFlags(@sizeOf(TCPHeader), flags);
-    tcp_header.window_size = @byteSwap(connection.send_window);
+    const scaled_window: u16 = if (connection.window_scale_send > 0)
+        @intCast(@min(@as(u32, connection.send_window) >> @as(u5, @intCast(connection.window_scale_send)), 0xFFFF))
+    else
+        connection.send_window;
+    tcp_header.window_size = @byteSwap(scaled_window);
     tcp_header.checksum = 0;
     tcp_header.urgent_ptr = 0;
 
@@ -306,6 +358,14 @@ fn createConnectionInternal(local_addr: u32, remote_addr: u32, local_port: u16, 
                     .data = [_]u8{0} ** TCP_MSS,
                     .active = false,
                 }} ** TCP_MAX_RETX_ENTRIES,
+                .window_scale_send = 0,
+                .window_scale_recv = 0,
+                .sack_permitted = false,
+                .sack_blocks = [_]SACKBlock{SACKBlock{ .left_edge = 0, .right_edge = 0 }} ** 4,
+                .ts_enabled = false,
+                .ts_val = 0,
+                .ts_ecr = 0,
+                .ts_recent = 0,
             };
             return &maybe_conn.*.?;
         }
@@ -342,6 +402,13 @@ fn handleTCPPacket(src_ip: u32, dst_ip: u32, data: []const u8) void {
     const payload = data[header_len..];
 
     if (findConnection(dst_ip, src_ip, dst_port, src_port)) |conn| {
+        if (header_len > @sizeOf(TCPHeader)) {
+            const opt_start = @sizeOf(TCPHeader);
+            const opt_end = @min(header_len, data.len);
+            if (opt_end > opt_start) {
+                parseOptions(data[opt_start..opt_end], conn);
+            }
+        }
         handleEstablishedConnection(conn, seq_num, ack_num, flags, window_size, payload);
     } else if (flags & TCPFlags.SYN != 0) {
         if (findListeningSocket(dst_port)) |_| {
@@ -353,6 +420,8 @@ fn handleTCPPacket(src_ip: u32, dst_ip: u32, data: []const u8) void {
 }
 
 fn processAck(conn: *TCPConnection, ack_num: u32) void {
+    applySACKBlocks(conn);
+
     if (ack_num == conn.send_una) {
         conn.dup_ack_count += 1;
         if (conn.dup_ack_count == 3) {
@@ -422,7 +491,7 @@ fn retransmitFirst(conn: *TCPConnection) void {
 }
 
 fn handleEstablishedConnection(conn: *TCPConnection, seq_num: u32, ack_num: u32, flags: u8, window_size: u16, payload: []const u8) void {
-    conn.recv_window = window_size;
+    conn.recv_window = if (conn.window_scale_recv > 0) @intCast(@min(@as(u32, window_size) << @as(u5, @intCast(conn.window_scale_recv)), 0xFFFF)) else window_size;
 
     if (flags & TCPFlags.RST != 0) {
         conn.state = .CLOSED;
@@ -732,6 +801,165 @@ pub fn tick() void {
             }
         }
     }
+}
+
+fn parseOptions(data: []const u8, conn: *TCPConnectionStruct) void {
+    var i: usize = 0;
+    while (i < data.len) {
+        const kind = data[i];
+        if (kind == TCP_OPT_END) break;
+        if (kind == TCP_OPT_NOP) {
+            i += 1;
+            continue;
+        }
+
+        if (i + 1 >= data.len) break;
+        const opt_len = data[i + 1];
+        if (opt_len < 2 or i + opt_len > data.len) break;
+
+        switch (kind) {
+            TCP_OPT_MSS => {
+                if (opt_len == 4 and i + 3 < data.len) {
+                    conn.mss = @as(u16, data[i + 2]) << 8 | data[i + 3];
+                }
+            },
+            TCP_OPT_WINDOW_SCALE => {
+                if (opt_len == 3 and i + 2 < data.len) {
+                    conn.window_scale_recv = data[i + 2];
+                    if (conn.window_scale_recv > 14) conn.window_scale_recv = 14;
+                }
+            },
+            TCP_OPT_SACK_PERMITTED => {
+                if (opt_len == 2) {
+                    conn.sack_permitted = true;
+                }
+            },
+            TCP_OPT_SACK => {
+                const num_blocks = (opt_len - 2) / 8;
+                var b: usize = 0;
+                while (b < num_blocks and b < 4) : (b += 1) {
+                    const base = i + 2 + b * 8;
+                    if (base + 7 < data.len) {
+                        conn.sack_blocks[b] = SACKBlock{
+                            .left_edge = @as(u32, data[base]) << 24 | @as(u32, data[base + 1]) << 16 | @as(u32, data[base + 2]) << 8 | data[base + 3],
+                            .right_edge = @as(u32, data[base + 4]) << 24 | @as(u32, data[base + 5]) << 16 | @as(u32, data[base + 6]) << 8 | data[base + 7],
+                        };
+                    }
+                }
+            },
+            TCP_OPT_TIMESTAMPS => {
+                if (opt_len == 10 and i + 9 < data.len) {
+                    const tsval = @as(u32, data[i + 2]) << 24 | @as(u32, data[i + 3]) << 16 | @as(u32, data[i + 4]) << 8 | data[i + 5];
+                    const tsecr = @as(u32, data[i + 6]) << 24 | @as(u32, data[i + 7]) << 16 | @as(u32, data[i + 8]) << 8 | data[i + 9];
+                    conn.ts_enabled = true;
+                    updateTimestampValues(conn, tsval, tsecr);
+                }
+            },
+            else => {},
+        }
+
+        i += opt_len;
+    }
+}
+
+fn buildOptions(conn: *TCPConnectionStruct, buf: []u8, is_syn: bool) usize {
+    var offset: usize = 0;
+
+    if (is_syn) {
+        if (offset + 4 <= buf.len) {
+            buf[offset] = TCP_OPT_MSS;
+            buf[offset + 1] = 4;
+            buf[offset + 2] = @intCast((conn.mss >> 8) & 0xFF);
+            buf[offset + 3] = @intCast(conn.mss & 0xFF);
+            offset += 4;
+        }
+
+        if (offset + 3 <= buf.len) {
+            buf[offset] = TCP_OPT_WINDOW_SCALE;
+            buf[offset + 1] = 3;
+            buf[offset + 2] = conn.window_scale_send;
+            offset += 3;
+        }
+
+        if (offset + 2 <= buf.len) {
+            buf[offset] = TCP_OPT_SACK_PERMITTED;
+            buf[offset + 1] = 2;
+            offset += 2;
+        }
+
+        if (offset + 1 <= buf.len) {
+            buf[offset] = TCP_OPT_NOP;
+            offset += 1;
+        }
+    }
+
+    if (conn.ts_enabled) {
+        while (offset % 4 != 0 and offset < buf.len) {
+            buf[offset] = TCP_OPT_NOP;
+            offset += 1;
+        }
+
+        if (offset + 10 <= buf.len) {
+            buf[offset] = TCP_OPT_TIMESTAMPS;
+            buf[offset + 1] = 10;
+            const ts = conn.ts_val;
+            buf[offset + 2] = @intCast((ts >> 24) & 0xFF);
+            buf[offset + 3] = @intCast((ts >> 16) & 0xFF);
+            buf[offset + 4] = @intCast((ts >> 8) & 0xFF);
+            buf[offset + 5] = @intCast(ts & 0xFF);
+            const ecr = conn.ts_ecr;
+            buf[offset + 6] = @intCast((ecr >> 24) & 0xFF);
+            buf[offset + 7] = @intCast((ecr >> 16) & 0xFF);
+            buf[offset + 8] = @intCast((ecr >> 8) & 0xFF);
+            buf[offset + 9] = @intCast(ecr & 0xFF);
+            offset += 10;
+        }
+    }
+
+    while (offset % 4 != 0 and offset < buf.len) {
+        buf[offset] = TCP_OPT_NOP;
+        offset += 1;
+    }
+
+    return offset;
+}
+
+fn applySACKBlocks(conn: *TCPConnectionStruct) void {
+    if (!conn.sack_permitted) return;
+
+    for (&conn.sack_blocks) |*block| {
+        if (block.left_edge == 0 and block.right_edge == 0) continue;
+
+        for (&conn.retx_queue) |*entry| {
+            if (entry.active) {
+                const entry_end = entry.seq_num +% entry.data_len;
+                if (seqLessThanEq(block.left_edge, entry.seq_num) and
+                    seqLessThanEq(entry_end, block.right_edge))
+                {
+                    entry.active = false;
+                    conn.bytes_in_flight -|= entry.data_len;
+                }
+            }
+        }
+
+        block.left_edge = 0;
+        block.right_edge = 0;
+    }
+}
+
+fn updateTimestampValues(conn: *TCPConnectionStruct, tsval: u32, tsecr: u32) void {
+    conn.ts_recent = tsval;
+    conn.ts_ecr = tsval;
+
+    if (tsecr != 0 and conn.ts_enabled) {
+        const now: u32 = @intCast(timer.getTicks() & 0xFFFFFFFF);
+        const rtt = now -% tsecr;
+        if (rtt > 0 and rtt < 60000) {
+            updateRTT(conn, rtt);
+        }
+    }
+
+    conn.ts_val = @intCast(timer.getTicks() & 0xFFFFFFFF);
 }
 
 pub fn registerListeningSocket(sock: *@import("socket.zig").Socket) void {

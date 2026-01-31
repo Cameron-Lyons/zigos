@@ -27,6 +27,12 @@ const ext2 = @import("fs/ext2.zig");
 const vt = @import("devices/vt.zig");
 const mmap = @import("memory/mmap.zig");
 const file_ops = @import("fs/file_ops.zig");
+const swap = @import("memory/swap.zig");
+const credentials = @import("process/credentials.zig");
+const tmpfs = @import("fs/tmpfs.zig");
+const uhci = @import("drivers/uhci.zig");
+const ipv6 = @import("net/ipv6.zig");
+const icmpv6 = @import("net/icmpv6.zig");
 
 fn test_process1() void {
     var i: u32 = 0;
@@ -70,6 +76,9 @@ export fn kernel_main() void {
 
     console.print("Initializing paging...\n");
     paging.init();
+
+    console.print("Initializing swap...\n");
+    swap.init();
 
     console.print("Enabling kernel memory protection...\n");
     const protection = @import("memory/protection.zig");
@@ -153,6 +162,12 @@ export fn kernel_main() void {
     const dhcp = @import("net/dhcp.zig");
     dhcp.init();
 
+    console.print("Initializing IPv6...\n");
+    ipv6.init();
+
+    console.print("Initializing ICMPv6...\n");
+    icmpv6.init();
+
     console.print("Initializing routing table...\n");
     const routing = @import("net/routing.zig");
     routing.init();
@@ -160,6 +175,16 @@ export fn kernel_main() void {
     console.print("Initializing Virtual File System...\n");
     vfs.init();
     console.print("VFS ready!\n");
+
+    console.print("Initializing tmpfs...\n");
+    tmpfs.init();
+
+    console.print("Mounting tmpfs on /tmp...\n");
+    vfs.mount("none", "/tmp", "tmpfs", 0) catch |err| {
+        console.print("Failed to mount tmpfs: ");
+        console.print(@errorName(err));
+        console.print("\n");
+    };
 
     console.print("Initializing file operations...\n");
     file_ops.init();
@@ -187,6 +212,9 @@ export fn kernel_main() void {
     const vm_test = @import("tests/vm_test.zig");
     vm_test.test_virtual_memory();
 
+    console.print("Initializing credentials...\n");
+    credentials.init();
+
     console.print("Initializing process management...\n");
     process.init();
 
@@ -203,6 +231,9 @@ export fn kernel_main() void {
 
     console.print("Initializing USB...\n");
     usb.init();
+
+    console.print("Initializing UHCI...\n");
+    uhci.init();
 
     console.print("Initializing audio...\n");
     ac97.init();
