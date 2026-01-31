@@ -29,6 +29,15 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y qemu-system-x86 qemu-system-i386
         
+    - name: Install zlint
+      run: |
+        curl -fsSL https://github.com/DonIsaac/zlint/releases/download/v0.7.9/zlint-linux-x86_64 -o /usr/local/bin/zlint
+        chmod +x /usr/local/bin/zlint
+
+    - name: Lint
+      run: |
+        find src -name '*.zig' | zlint -S -f github --deny-warnings
+
     - name: Build kernel
       run: |
         zig build kernel
