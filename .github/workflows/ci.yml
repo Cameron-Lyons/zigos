@@ -36,7 +36,7 @@ jobs:
 
     - name: Lint
       run: |
-        find src -name '*.zig' | zlint -S -f github --deny-warnings
+        zlint -f github --deny-warnings src
 
     - name: Build kernel
       run: |
