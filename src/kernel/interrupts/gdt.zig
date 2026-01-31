@@ -1,5 +1,3 @@
-const std = @import("std");
-
 pub const GdtEntry = packed struct {
     limit_low: u16,
     base_low: u16,
@@ -51,20 +49,20 @@ pub const USER_DATA_SEG = 0x20;
 pub const TSS_SEG = 0x28;
 
 const PRESENT = 0x80;
-const DPL_KERNEL = 0x00;
 const DPL_USER = 0x60;
 const SEGMENT = 0x10;
 const EXECUTABLE = 0x08;
-const DC = 0x04;
 const RW = 0x02;
 const ACCESSED = 0x01;
 
 const GRANULARITY = 0x80;
 const SIZE_32 = 0x40;
-const LONG_MODE = 0x20;
 
+// SAFETY: fully initialized in init() via setGdtEntry calls
 var gdt: [6]GdtEntry align(8) = undefined;
+// SAFETY: fully initialized in init() before gdt_flush
 var gdt_ptr: GdtPtr = undefined;
+// SAFETY: fully initialized in init() before tss_flush
 var tss: Tss align(8) = undefined;
 
 extern fn gdt_flush(gdt_ptr: *const GdtPtr) void;

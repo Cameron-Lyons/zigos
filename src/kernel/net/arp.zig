@@ -1,4 +1,3 @@
-const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const ethernet = @import("ethernet.zig");
 const rtl8139 = @import("../drivers/rtl8139.zig");
@@ -37,6 +36,7 @@ const ARPEntry = struct {
 };
 
 fn getMacFromArp(arp: *const ARPHeader, which: enum { sender, target }) [6]u8 {
+    // SAFETY: all 6 bytes assigned in both branches of the if/else below
     var mac: [6]u8 = undefined;
     if (which == .sender) {
         mac[0] = arp.sender_mac0;
@@ -75,6 +75,7 @@ fn setMacInArp(arp: *ARPHeader, which: enum { sender, target }, mac: [6]u8) void
 }
 
 const ARP_TABLE_SIZE = 64;
+// SAFETY: each entry's valid flag set to false in init(); only valid entries are read
 var arp_table: [ARP_TABLE_SIZE]ARPEntry = undefined;
 var arp_table_init = false;
 
@@ -95,7 +96,7 @@ fn handleARPPacket(frame: *const ethernet.EthernetFrame) void {
         return;
     }
 
-    const arp = @as(*const ARPHeader, @ptrCast(@alignCast(frame.data.ptr)));
+    const arp: *const ARPHeader = @ptrCast(@alignCast(frame.data.ptr));
 
     if (@byteSwap(arp.hardware_type) != ARP_HARDWARE_ETHERNET or
         @byteSwap(arp.protocol_type) != ARP_PROTOCOL_IP)
@@ -116,6 +117,7 @@ fn handleARPPacket(frame: *const ethernet.EthernetFrame) void {
 }
 
 fn sendARPReply(request: *const ARPHeader) void {
+    // SAFETY: all fields assigned before the struct is used
     var reply: ARPHeader = undefined;
 
     reply.hardware_type = @byteSwap(@as(u16, ARP_HARDWARE_ETHERNET));
@@ -135,13 +137,15 @@ fn sendARPReply(request: *const ARPHeader) void {
     setMacInArp(&reply, .target, requester_mac);
     reply.target_ip = request.sender_ip;
 
-    const reply_bytes = @as([*]const u8, @ptrCast(&reply))[0..@sizeOf(ARPHeader)];
+    const reply_ptr: [*]const u8 = @ptrCast(&reply);
+    const reply_bytes = reply_ptr[0..@sizeOf(ARPHeader)];
     ethernet.sendFrame(requester_mac, .ARP, reply_bytes) catch {
         vga.print("Failed to send ARP reply\n");
     };
 }
 
 pub fn sendARPRequest(target_ip: u32) !void {
+    // SAFETY: all fields assigned before the struct is used
     var request: ARPHeader = undefined;
 
     request.hardware_type = @byteSwap(@as(u16, ARP_HARDWARE_ETHERNET));
@@ -162,7 +166,8 @@ pub fn sendARPRequest(target_ip: u32) !void {
     request.target_ip = @byteSwap(target_ip);
 
     const broadcast_mac = [_]u8{0xFF} ** 6;
-    const request_bytes = @as([*]const u8, @ptrCast(&request))[0..@sizeOf(ARPHeader)];
+    const request_ptr: [*]const u8 = @ptrCast(&request);
+    const request_bytes = request_ptr[0..@sizeOf(ARPHeader)];
     try ethernet.sendFrame(broadcast_mac, .ARP, request_bytes);
 }
 

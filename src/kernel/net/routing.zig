@@ -1,8 +1,7 @@
-const std = @import("std");
+// zlint-disable suppressed-errors
 const ipv4 = @import("ipv4.zig");
 const network = @import("network.zig");
 const vga = @import("../drivers/vga.zig");
-const memory = @import("../memory/memory.zig");
 
 const MAX_ROUTES = 32;
 const MAX_ARP_ENTRIES = 64;
@@ -49,8 +48,10 @@ pub const RoutingTable = struct {
 
     pub fn init() RoutingTable {
         return RoutingTable{
+            // SAFETY: entries written before read; route_count tracks valid entries
             .routes = undefined,
             .route_count = 0,
+            // SAFETY: entries written before read; arp_count tracks valid entries
             .arp_cache = undefined,
             .arp_count = 0,
             .default_gateway = ipv4.IPv4Address{ .octets = .{ 0, 0, 0, 0 } },
@@ -252,6 +253,7 @@ pub const RoutingTable = struct {
     }
 };
 
+// SAFETY: fully initialized via RoutingTable.init() in the init() function
 var routing_table: RoutingTable = undefined;
 
 pub fn init() void {
@@ -331,6 +333,7 @@ fn printNumber(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var count: usize = 0;
     var n = num;

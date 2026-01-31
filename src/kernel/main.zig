@@ -1,6 +1,5 @@
 const vga = @import("drivers/vga.zig");
 const console = @import("utils/console.zig");
-const boot = @import("../boot/boot.zig");
 const isr = @import("interrupts/isr.zig");
 const keyboard = @import("drivers/keyboard.zig");
 const paging = @import("memory/paging.zig");
@@ -11,7 +10,6 @@ const syscall = @import("process/syscall.zig");
 const test_syscall = @import("tests/test_syscall.zig");
 const memory = @import("memory/memory.zig");
 const panic_handler = @import("utils/panic.zig");
-const error_handler = @import("utils/error.zig");
 const device = @import("devices/device.zig");
 const console_device = @import("devices/console_device.zig");
 const vfs = @import("fs/vfs.zig");
@@ -26,7 +24,6 @@ const usb = @import("drivers/usb.zig");
 const acpi = @import("acpi/acpi.zig");
 const ac97 = @import("drivers/ac97.zig");
 const ext2 = @import("fs/ext2.zig");
-const signals = @import("process/signal.zig");
 const vt = @import("devices/vt.zig");
 const mmap = @import("memory/mmap.zig");
 const file_ops = @import("fs/file_ops.zig");
@@ -109,6 +106,7 @@ export fn kernel_main() void {
     if (smp.isSMPEnabled()) {
         console.print("SMP enabled with ");
         const num_cpus = smp.getNumCPUs();
+        // SAFETY: filled by the following digit extraction loop
         var cpu_str: [10]u8 = undefined;
         var cpu_count = num_cpus;
         var idx: usize = 0;

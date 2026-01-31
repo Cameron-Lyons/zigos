@@ -1,4 +1,3 @@
-const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const process = @import("../process/process.zig");
 const scheduler = @import("../process/scheduler.zig");
@@ -397,9 +396,13 @@ pub const ConditionVariable = struct {
     }
 };
 
+// SAFETY: initialized via .init() in runTests before use
 var test_mutex: Mutex = undefined;
+// SAFETY: initialized via .init() in runTests before use
 var test_semaphore: Semaphore = undefined;
+// SAFETY: initialized via .init() in runTests before use
 var test_rwlock: RWLock = undefined;
+// SAFETY: initialized via .init() in runTests before use
 var test_condvar: ConditionVariable = undefined;
 var shared_counter: u32 = 0;
 
@@ -528,6 +531,7 @@ fn print_number(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var i: usize = 0;
     var n = num;

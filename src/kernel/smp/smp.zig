@@ -1,17 +1,30 @@
 const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const memory = @import("../memory/memory.zig");
-const paging = @import("../memory/paging.zig");
 const gdt = @import("../interrupts/gdt.zig");
-const idt = @import("../interrupts/idt.zig");
-const io = @import("../utils/io.zig");
+
+pub const Spinlock = struct {
+    locked: u32 = 0,
+
+    pub fn acquire(self: *Spinlock) void {
+        while (@cmpxchgWeak(u32, &self.locked, 0, 1, .acquire, .monotonic) != null) {
+            while (@atomicLoad(u32, &self.locked, .monotonic) != 0) {
+                asm volatile ("pause");
+            }
+        }
+    }
+
+    pub fn release(self: *Spinlock) void {
+        @atomicStore(u32, &self.locked, 0, .release);
+    }
+};
+
+pub var scheduler_lock: Spinlock = .{};
 
 const APIC_BASE_MSR = 0x1B;
 const APIC_BASE_ENABLE = 1 << 11;
-const APIC_BASE_BSP = 1 << 8;
 
 const LOCAL_APIC_ID = 0x20;
-const LOCAL_APIC_VERSION = 0x30;
 const LOCAL_APIC_TPR = 0x80;
 const LOCAL_APIC_EOI = 0xB0;
 const LOCAL_APIC_SPURIOUS = 0xF0;
@@ -19,14 +32,10 @@ const LOCAL_APIC_ICR_LOW = 0x300;
 const LOCAL_APIC_ICR_HIGH = 0x310;
 const LOCAL_APIC_TIMER = 0x320;
 const LOCAL_APIC_TIMER_INIT = 0x380;
-const LOCAL_APIC_TIMER_CURRENT = 0x390;
 const LOCAL_APIC_TIMER_DIV = 0x3E0;
 
 const IOAPIC_REGSEL = 0x00;
 const IOAPIC_REGWIN = 0x10;
-const IOAPIC_ID = 0x00;
-const IOAPIC_VERSION = 0x01;
-const IOAPIC_REDTBL = 0x10;
 
 pub const CPUInfo = struct {
     id: u32,
@@ -58,6 +67,7 @@ const TSS = extern struct {
 };
 
 const MAX_CPUS = 16;
+// SAFETY: entries populated in parseACPI; num_cpus tracks valid entries
 var cpu_info: [MAX_CPUS]CPUInfo = undefined;
 var num_cpus: u32 = 0;
 var cpus_started: u32 = 0;
@@ -96,9 +106,13 @@ pub fn init() void {
 }
 
 fn detectAPIC() bool {
+    // SAFETY: populated by the subsequent cpuid instruction
     var eax: u32 = undefined;
+    // SAFETY: populated by the subsequent cpuid instruction
     var ebx: u32 = undefined;
+    // SAFETY: populated by the subsequent cpuid instruction
     var ecx: u32 = undefined;
+    // SAFETY: populated by the subsequent cpuid instruction
     var edx: u32 = undefined;
 
     asm volatile (
@@ -139,14 +153,15 @@ fn parseACPI() void {
         return;
     };
 
-    const rsdt = @as(*RSDT, @ptrFromInt(rsdp.rsdt_address));
+    const rsdt: *RSDT = @ptrFromInt(rsdp.rsdt_address);
     const num_entries = (rsdt.header.length - @sizeOf(ACPIHeader)) / 4;
 
     var i: u32 = 0;
     while (i < num_entries) : (i += 1) {
-        const table = @as(*ACPIHeader, @ptrFromInt(rsdt.entries[i]));
+        const table: *ACPIHeader = @ptrFromInt(rsdt.entries[i]);
         if (std.mem.eql(u8, &table.signature, "APIC")) {
-            parseMADT(@as(*MADT, @ptrFromInt(rsdt.entries[i])));
+            const madt_ptr: *MADT = @ptrFromInt(rsdt.entries[i]);
+            parseMADT(madt_ptr);
             break;
         }
     }
@@ -191,7 +206,7 @@ const MADTEntry = extern struct {
 fn findRSDP() ?*RSDP {
     var addr: usize = 0xE0000;
     while (addr < 0x100000) : (addr += 16) {
-        const rsdp = @as(*RSDP, @ptrFromInt(addr));
+        const rsdp: *RSDP = @ptrFromInt(addr);
         if (std.mem.eql(u8, &rsdp.signature, "RSD PTR ")) {
             return rsdp;
         }
@@ -206,11 +221,11 @@ fn parseMADT(madt: *MADT) void {
     const table_end = @intFromPtr(madt) + madt.header.length;
 
     while (entry_ptr < table_end) {
-        const entry = @as(*MADTEntry, @ptrFromInt(entry_ptr));
+        const entry: *MADTEntry = @ptrFromInt(entry_ptr);
 
         switch (entry.entry_type) {
             0 => {
-                const lapic = @as(*LocalAPICEntry, @ptrFromInt(entry_ptr));
+                const lapic: *LocalAPICEntry = @ptrFromInt(entry_ptr);
                 if ((lapic.flags & 1) != 0) {
                     if (num_cpus < MAX_CPUS) {
                         cpu_info[num_cpus] = CPUInfo{
@@ -218,8 +233,11 @@ fn parseMADT(madt: *MADT) void {
                             .apic_id = lapic.apic_id,
                             .is_bsp = (num_cpus == 0),
                             .is_active = false,
+                            // SAFETY: allocated in setupAPTrampoline before the AP starts
                             .stack = undefined,
+                            // SAFETY: configured in setupAPTrampoline before the AP starts
                             .tss = undefined,
+                            // SAFETY: configured in setupAPTrampoline before the AP starts
                             .gdt = undefined,
                             .idle_task = null,
                         };
@@ -228,7 +246,7 @@ fn parseMADT(madt: *MADT) void {
                 }
             },
             1 => {
-                const ioapic = @as(*IOAPICEntry, @ptrFromInt(entry_ptr));
+                const ioapic: *IOAPICEntry = @ptrFromInt(entry_ptr);
                 ioapic_base = ioapic.ioapic_addr;
             },
             else => {},
@@ -277,7 +295,7 @@ fn setupAPTrampoline() void {
         : [result] "=r" (-> usize),
     );
 
-    const ap_boot_cr3_ptr = @as(*u64, @ptrFromInt(trampoline_addr + 0x18));
+    const ap_boot_cr3_ptr: *u64 = @ptrFromInt(trampoline_addr + 0x18);
 
     ap_boot_cr3_ptr.* = cr3;
 }
@@ -327,6 +345,19 @@ pub export fn ap_main(cpu_id: u32) void {
 
     cpus_started += 1;
 
+    const process_mod = @import("../process/process.zig");
+
+    const idle_proc = process_mod.create_kernel_process("idle-ap", apIdleTask);
+    process_mod.setPerCPUCurrent(cpu_id, idle_proc);
+
+    asm volatile ("sti");
+
+    while (true) {
+        asm volatile ("hlt");
+    }
+}
+
+fn apIdleTask() void {
     while (true) {
         asm volatile ("hlt");
     }
@@ -351,7 +382,9 @@ fn writeIOAPIC(reg: u32, value: u32) void {
 }
 
 fn rdmsr(msr: u32) u64 {
+    // SAFETY: populated by the subsequent rdmsr instruction
     var low: u32 = undefined;
+    // SAFETY: populated by the subsequent rdmsr instruction
     var high: u32 = undefined;
 
     asm volatile (
@@ -365,8 +398,8 @@ fn rdmsr(msr: u32) u64 {
 }
 
 fn wrmsr(msr: u32, value: u64) void {
-    const low = @as(u32, @truncate(value));
-    const high = @as(u32, @truncate(value >> 32));
+    const low: u32 = @truncate(value);
+    const high: u32 = @truncate(value >> 32);
 
     asm volatile (
         \\wrmsr
@@ -390,6 +423,7 @@ fn printNumber(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var count: usize = 0;
     var n = num;
@@ -408,6 +442,7 @@ fn printNumber(num: u32) void {
 
 fn printHex(value: usize) void {
     const hex_chars = "0123456789ABCDEF";
+    // SAFETY: filled by the following hex digit extraction loop
     var buffer: [16]u8 = undefined;
     var i: usize = 0;
     var v = value;

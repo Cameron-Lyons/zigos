@@ -26,14 +26,20 @@ pub const SYS_MKDIR = 13;
 pub const SYS_RMDIR = 14;
 pub const SYS_UNLINK = 15;
 pub const SYS_RENAME = 16;
+pub const SYS_LSEEK = 17;
+pub const SYS_STAT = 18;
+pub const SYS_FSTAT = 19;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
 pub const STDERR = 2;
+const FD_OFFSET = 3;
 
 pub const EBADF = -1;
 pub const EINVAL = -2;
 pub const ENOSYS = -3;
+pub const ENOMEM = -12;
+pub const ENOENT = -2;
 
 export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
     const syscall_num = regs.eax;
@@ -48,6 +54,8 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_EXIT => sys_exit(@intCast(arg1)),
         SYS_WRITE => sys_write(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3),
         SYS_READ => sys_read(@intCast(arg1), @as([*]u8, @ptrFromInt(arg2)), arg3),
+        SYS_OPEN => sys_open(@as([*]const u8, @ptrFromInt(arg1)), @intCast(arg2)),
+        SYS_CLOSE => sys_close(@intCast(arg1)),
         SYS_GETPID => sys_getpid(),
         SYS_YIELD => sys_yield(),
         SYS_FORK => sys_fork(),
@@ -59,6 +67,8 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_RMDIR => sys_rmdir(@as([*]const u8, @ptrFromInt(arg1))),
         SYS_UNLINK => sys_unlink(@as([*]const u8, @ptrFromInt(arg1))),
         SYS_RENAME => sys_rename(@as([*]const u8, @ptrFromInt(arg1)), @as([*]const u8, @ptrFromInt(arg2))),
+        SYS_LSEEK => sys_lseek(@intCast(arg1), @as(i64, @bitCast(@as(u64, arg2) | (@as(u64, arg3) << 32))), @intCast(arg4)),
+        SYS_STAT => sys_stat(@as([*]const u8, @ptrFromInt(arg1)), arg2),
         else => ENOSYS,
     };
 
@@ -79,15 +89,37 @@ fn sys_exit(status: i32) i32 {
 }
 
 fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
-    if (fd != STDOUT and fd != STDERR) {
-        return EBADF;
-    }
-
     if (!protection.verifyUserPointer(@intFromPtr(buf), count)) {
         return EINVAL;
     }
 
-    var kernel_buffer: [256]u8 = undefined;
+    if (fd == STDOUT or fd == STDERR) {
+        // SAFETY: filled by the subsequent copyFromUser call
+        var kernel_buffer: [256]u8 = undefined;
+        var written: usize = 0;
+
+        while (written < count) {
+            const chunk_size = @min(count - written, kernel_buffer.len);
+            protection.copyFromUser(kernel_buffer[0..chunk_size], @intFromPtr(buf) + written) catch {
+                return EINVAL;
+            };
+
+            var i: usize = 0;
+            while (i < chunk_size) : (i += 1) {
+                vga.print(&[_]u8{kernel_buffer[i]});
+            }
+
+            written += chunk_size;
+        }
+
+        return @intCast(count);
+    }
+
+    if (fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+
+    // SAFETY: filled by the subsequent copyFromUser call
+    var kernel_buffer: [512]u8 = undefined;
     var written: usize = 0;
 
     while (written < count) {
@@ -96,50 +128,68 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
             return EINVAL;
         };
 
-        var i: usize = 0;
-        while (i < chunk_size) : (i += 1) {
-            vga.print(&[_]u8{kernel_buffer[i]});
-        }
-
-        written += chunk_size;
+        const bytes_written = vfs.write(vfs_fd, kernel_buffer[0..chunk_size]) catch return -1;
+        written += bytes_written;
+        if (bytes_written < chunk_size) break;
     }
 
-    return @intCast(count);
+    return @intCast(written);
 }
 
 fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
-    if (fd != STDIN) {
-        return EBADF;
-    }
-
     if (!protection.verifyUserPointer(@intFromPtr(buf), count)) {
         return EINVAL;
     }
 
-    var kernel_buffer: [256]u8 = undefined;
-    const read_size = @min(count, kernel_buffer.len);
-    var i: usize = 0;
+    if (fd == STDIN) {
+        // SAFETY: filled by the subsequent keyboard.getchar calls
+        var kernel_buffer: [256]u8 = undefined;
+        const read_size = @min(count, kernel_buffer.len);
+        var i: usize = 0;
 
-    while (i < read_size) : (i += 1) {
-        while (!keyboard.has_char()) {
-            x86.hlt();
-        }
+        while (i < read_size) : (i += 1) {
+            while (!keyboard.has_char()) {
+                x86.hlt();
+            }
 
-        if (keyboard.getchar()) |ch| {
-            kernel_buffer[i] = ch;
+            if (keyboard.getchar()) |ch| {
+                kernel_buffer[i] = ch;
 
-            if (ch == '\n') {
-                i += 1;
-                break;
+                if (ch == '\n') {
+                    i += 1;
+                    break;
+                }
             }
         }
+
+        protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..i]) catch {
+            return EINVAL;
+        };
+
+        return @intCast(i);
     }
 
-    protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..i]) catch {
-        return EINVAL;
-    };
+    if (fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
-    return @intCast(i);
+    // SAFETY: filled by the subsequent vfs.read call
+    var kernel_buffer: [512]u8 = undefined;
+    var total_read: usize = 0;
+
+    while (total_read < count) {
+        const chunk_size = @min(count - total_read, kernel_buffer.len);
+        const bytes_read = vfs.read(vfs_fd, kernel_buffer[0..chunk_size]) catch return -1;
+        if (bytes_read == 0) break;
+
+        protection.copyToUser(@intFromPtr(buf) + total_read, kernel_buffer[0..bytes_read]) catch {
+            return EINVAL;
+        };
+
+        total_read += bytes_read;
+        if (bytes_read < chunk_size) break;
+    }
+
+    return @intCast(total_read);
 }
 
 fn sys_getpid() i32 {
@@ -159,6 +209,7 @@ fn sys_mkdir(pathname: [*]const u8, mode: u32) i32 {
         return EINVAL;
     }
 
+    // SAFETY: filled by the subsequent copyStringFromUser call
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
 
@@ -183,6 +234,7 @@ fn sys_rmdir(pathname: [*]const u8) i32 {
         return EINVAL;
     }
 
+    // SAFETY: filled by the subsequent copyStringFromUser call
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
 
@@ -195,6 +247,7 @@ fn sys_unlink(pathname: [*]const u8) i32 {
         return EINVAL;
     }
 
+    // SAFETY: filled by the subsequent copyStringFromUser call
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
 
@@ -209,13 +262,62 @@ fn sys_rename(oldpath: [*]const u8, newpath: [*]const u8) i32 {
         return EINVAL;
     }
 
+    // SAFETY: filled by the subsequent copyStringFromUser call
     var old_buffer: [256]u8 = undefined;
+    // SAFETY: filled by the subsequent copyStringFromUser call
     var new_buffer: [256]u8 = undefined;
 
     const old_slice = protection.copyStringFromUser(&old_buffer, @intFromPtr(oldpath)) catch return EINVAL;
     const new_slice = protection.copyStringFromUser(&new_buffer, @intFromPtr(newpath)) catch return EINVAL;
 
     vfs.rename(old_slice, new_slice) catch return -1;
+    return 0;
+}
+
+fn sys_open(pathname: [*]const u8, flags: u32) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
+        return EINVAL;
+    }
+
+    // SAFETY: filled by the subsequent copyStringFromUser call
+    var kernel_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    const vfs_fd = vfs.open(path_slice, flags) catch return -1;
+    return @intCast(@as(i32, @intCast(vfs_fd)) + FD_OFFSET);
+}
+
+fn sys_close(fd: i32) i32 {
+    if (fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+    vfs.close(vfs_fd) catch return -1;
+    return 0;
+}
+
+fn sys_lseek(fd: i32, offset: i64, whence: u32) i32 {
+    if (fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+    const result = vfs.lseek(vfs_fd, offset, whence) catch return -1;
+    return @intCast(@as(i32, @intCast(result & 0x7FFFFFFF)));
+}
+
+fn sys_stat(pathname: [*]const u8, stat_buf_addr: usize) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
+        return EINVAL;
+    }
+    if (!protection.verifyUserPointer(stat_buf_addr, @sizeOf(vfs.FileStat))) {
+        return EINVAL;
+    }
+
+    // SAFETY: filled by the subsequent copyStringFromUser call
+    var kernel_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    // SAFETY: filled by the subsequent vfs.stat call
+    var stat_buf: vfs.FileStat = undefined;
+    vfs.stat(path_slice, &stat_buf) catch return -1;
+
+    protection.copyToUser(stat_buf_addr, std.mem.asBytes(&stat_buf)) catch return EINVAL;
     return 0;
 }
 
@@ -226,29 +328,32 @@ pub fn init() void {
 }
 
 pub fn syscall0(num: u32) i32 {
+    // SAFETY: populated by the subsequent inline assembly (int $0x80)
     var result: i32 = undefined;
     asm volatile (
         \\int $0x80
         : [result] "={eax}" (result),
         : [num] "{eax}" (num),
-        : .{ .memory = true }
+        : "memory"
     );
     return result;
 }
 
 pub fn syscall1(num: u32, arg1: usize) i32 {
+    // SAFETY: populated by the subsequent inline assembly (int $0x80)
     var result: i32 = undefined;
     asm volatile (
         \\int $0x80
         : [result] "={eax}" (result),
         : [num] "{eax}" (num),
           [arg1] "{ebx}" (arg1),
-        : .{ .memory = true }
+        : "memory"
     );
     return result;
 }
 
 pub fn syscall3(num: u32, arg1: usize, arg2: usize, arg3: usize) i32 {
+    // SAFETY: populated by the subsequent inline assembly (int $0x80)
     var result: i32 = undefined;
     asm volatile (
         \\int $0x80
@@ -257,7 +362,7 @@ pub fn syscall3(num: u32, arg1: usize, arg2: usize, arg3: usize) i32 {
           [arg1] "{ebx}" (arg1),
           [arg2] "{ecx}" (arg2),
           [arg3] "{edx}" (arg3),
-        : .{ .memory = true }
+        : "memory"
     );
     return result;
 }
@@ -274,13 +379,16 @@ fn sys_fork() i32 {
 }
 
 fn sys_execve(path: [*]const u8, argv: usize, envp: usize) i32 {
+    // SAFETY: filled by the subsequent copyStringFromUser call
     var path_buf: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buf, @intFromPtr(path)) catch {
         return EINVAL;
     };
 
+    // SAFETY: entries written before read; argv_count tracks valid entries
     var argv_array: [32][]const u8 = undefined;
     var argv_count: usize = 0;
+    // SAFETY: entries filled by subsequent copyStringFromUser calls
     var argv_buffers: [32][256]u8 = undefined;
 
     if (argv != 0) {
@@ -301,8 +409,10 @@ fn sys_execve(path: [*]const u8, argv: usize, envp: usize) i32 {
         }
     }
 
+    // SAFETY: entries written before read; envp_count tracks valid entries
     var envp_array: [32][]const u8 = undefined;
     var envp_count: usize = 0;
+    // SAFETY: entries filled by subsequent copyStringFromUser calls
     var envp_buffers: [32][256]u8 = undefined;
 
     if (envp != 0) {
@@ -406,6 +516,7 @@ fn sys_mmap(addr: usize, length: usize, prot: i32, flags: i32, fd: i32, offset: 
         return EINVAL;
     }
 
+    // SAFETY: assigned in every branch of the if/else below
     var result_addr: usize = undefined;
     if (addr != 0) {
         const aligned_addr = addr & ~@as(usize, 0xFFF);

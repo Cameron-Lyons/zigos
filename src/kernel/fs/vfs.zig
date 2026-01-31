@@ -186,7 +186,7 @@ pub fn mount(device: []const u8, mount_path: []const u8, fs_name: []const u8, fl
     while (fs_type) |fs| : (fs_type = fs.next) {
         if (std.mem.eql(u8, fs.name[0..strlen(&fs.name)], fs_name)) {
             const mp = memory.kmalloc(@sizeOf(MountPoint)) orelse return VFSError.OutOfMemory;
-            const mount_point = @as(*MountPoint, @ptrCast(@alignCast(mp)));
+            const mount_point: *MountPoint = @ptrCast(@alignCast(mp));
 
             @memcpy(mount_point.device[0..device.len], device);
             mount_point.device[device.len] = 0;
@@ -253,7 +253,7 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
     for (fd_table, 0..) |maybe_fd, i| {
         if (maybe_fd == null) {
             const fd_mem = memory.kmalloc(@sizeOf(FileDescriptor)) orelse return VFSError.OutOfMemory;
-            const fd = @as(*FileDescriptor, @ptrCast(@alignCast(fd_mem)));
+            const fd: *FileDescriptor = @ptrCast(@alignCast(fd_mem));
 
             fd.vnode = vnode;
             fd.offset = if ((flags & O_APPEND) != 0) vnode.size else 0;
@@ -520,7 +520,7 @@ pub fn rename(old_path: []const u8, new_path: []const u8) VFSError!void {
 
 fn createVNode() VFSError!*VNode {
     const vnode_mem = memory.kmalloc(@sizeOf(VNode)) orelse return VFSError.OutOfMemory;
-    const vnode = @as(*VNode, @ptrCast(@alignCast(vnode_mem)));
+    const vnode: *VNode = @ptrCast(@alignCast(vnode_mem));
 
     vnode.* = VNode{
         .name = [_]u8{0} ** 256,
@@ -534,6 +534,7 @@ fn createVNode() VFSError!*VNode {
         .parent = null,
         .children = null,
         .next_sibling = null,
+        // SAFETY: assigned by the filesystem driver before the vnode is used
         .ops = undefined,
         .private_data = null,
     };

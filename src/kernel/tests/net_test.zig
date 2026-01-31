@@ -1,12 +1,8 @@
-const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const network = @import("../net/network.zig");
 const socket = @import("../net/socket.zig");
-const dns = @import("../net/dns.zig");
 const http = @import("../net/http.zig");
-const tcp = @import("../net/tcp.zig");
 const process = @import("../process/process.zig");
-const timer = @import("../timer/timer.zig");
 
 pub fn runNetworkTests() void {
     vga.print("\n=== Network Stack Test Suite ===\n\n");
@@ -163,6 +159,7 @@ pub fn runEchoServer(port: u16) void {
 }
 
 fn handleEchoClient(client: *socket.Socket) void {
+    // SAFETY: filled by the subsequent client.recv call
     var buffer: [256]u8 = undefined;
 
     while (true) {
@@ -190,6 +187,7 @@ fn printNumber(num: u16) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var count: usize = 0;
     var n = num;

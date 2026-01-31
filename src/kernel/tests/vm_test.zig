@@ -1,4 +1,3 @@
-const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const paging = @import("../memory/paging.zig");
 
@@ -174,6 +173,7 @@ fn print_dec(value: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var buffer: [10]u8 = undefined;
     var i: usize = 0;
     var n = value;

@@ -1,6 +1,5 @@
-const std = @import("std");
+// zlint-disable suppressed-errors
 const vga = @import("../drivers/vga.zig");
-const memory = @import("../memory/memory.zig");
 
 const MAX_ENV_VARS = 64;
 const MAX_VAR_NAME_LEN = 64;
@@ -13,6 +12,7 @@ pub const EnvVar = struct {
     value_len: usize,
 };
 
+// SAFETY: entries are initialized on demand via setenv; env_count tracks valid entries
 var env_vars: [MAX_ENV_VARS]EnvVar = undefined;
 var env_count: usize = 0;
 var initialized: bool = false;

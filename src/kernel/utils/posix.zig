@@ -2,10 +2,8 @@ const std = @import("std");
 const process = @import("../process/process.zig");
 const memory = @import("../memory/memory.zig");
 const paging = @import("../memory/paging.zig");
-const vga = @import("../drivers/vga.zig");
 const protection = @import("../memory/protection.zig");
 const elf = @import("../elf/elf.zig");
-const vfs = @import("../fs/vfs.zig");
 const gdt = @import("../interrupts/gdt.zig");
 
 pub const WEXITED = 1;
@@ -20,6 +18,7 @@ pub fn fork() !i32 {
     const parent = process.getCurrentProcess() orelse return error.NoCurrentProcess;
 
     const child_name = "forked_process";
+    // SAFETY: assigned by scanning the process table in the loop below
     var child: *process.Process = undefined;
 
     var i: usize = 0;
@@ -85,11 +84,11 @@ fn copyAddressSpace(parent: *process.Process, child: *process.Process) !void {
             paging.mapPage(addr, child_phys, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_USER);
             paging.switchPageDirectory(temp_page_dir);
 
-            const parent_page = @as([*]u8, @ptrFromInt(addr));
+            const parent_page: [*]u8 = @ptrFromInt(addr);
             const temp_addr = 0xFFC00000;
 
             paging.mapPage(temp_addr, child_phys, paging.PAGE_PRESENT | paging.PAGE_WRITABLE);
-            const child_page = @as([*]u8, @ptrFromInt(temp_addr));
+            const child_page: [*]u8 = @ptrFromInt(temp_addr);
 
             @memcpy(child_page[0..0x1000], parent_page[0..0x1000]);
 
@@ -120,26 +119,28 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
 
     var stack_ptr: u32 = stack_top;
 
+    // SAFETY: filled by the following loop that copies environment strings to the stack
     var envp_ptrs: [32]usize = undefined;
     var envp_count: usize = 0;
     for (envp) |env| {
         if (envp_count >= 32) break;
         stack_ptr -= env.len + 1;
         stack_ptr &= ~@as(u32, 0x3);
-        const dest = @as([*]u8, @ptrFromInt(stack_ptr));
+        const dest: [*]u8 = @ptrFromInt(stack_ptr);
         @memcpy(dest[0..env.len], env);
         dest[env.len] = 0;
         envp_ptrs[envp_count] = stack_ptr;
         envp_count += 1;
     }
 
+    // SAFETY: filled by the following loop that copies argument strings to the stack
     var argv_ptrs: [32]usize = undefined;
     var argv_count: usize = 0;
     for (argv) |arg| {
         if (argv_count >= 32) break;
         stack_ptr -= arg.len + 1;
         stack_ptr &= ~@as(u32, 0x3);
-        const dest = @as([*]u8, @ptrFromInt(stack_ptr));
+        const dest: [*]u8 = @ptrFromInt(stack_ptr);
         @memcpy(dest[0..arg.len], arg);
         dest[arg.len] = 0;
         argv_ptrs[argv_count] = stack_ptr;

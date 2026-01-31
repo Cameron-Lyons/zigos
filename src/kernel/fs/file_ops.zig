@@ -1,6 +1,5 @@
 const std = @import("std");
 const vfs = @import("vfs.zig");
-const memory = @import("../memory/memory.zig");
 const vga = @import("../drivers/vga.zig");
 const ext2 = @import("ext2.zig");
 
@@ -64,7 +63,7 @@ pub fn close(fd: i32) !void {
         return error.InvalidFileDescriptor;
     }
 
-    const index = @as(usize, @intCast(fd));
+    const index: usize = @intCast(fd);
     const file_desc = file_descriptors[index] orelse return error.InvalidFileDescriptor;
 
     if (file_desc.ref_count > 1) {
@@ -85,7 +84,7 @@ pub fn read(fd: i32, buffer: []u8) !usize {
         return error.InvalidFileDescriptor;
     }
 
-    const index = @as(usize, @intCast(fd));
+    const index: usize = @intCast(fd);
     var file_desc = &(file_descriptors[index] orelse return error.InvalidFileDescriptor);
 
     const bytes_read = try file_desc.vnode.ops.read(file_desc.vnode, buffer, file_desc.offset);
@@ -98,7 +97,7 @@ pub fn write(fd: i32, buffer: []const u8) !usize {
         return error.InvalidFileDescriptor;
     }
 
-    const index = @as(usize, @intCast(fd));
+    const index: usize = @intCast(fd);
     var file_desc = &(file_descriptors[index] orelse return error.InvalidFileDescriptor);
 
     const bytes_written = try file_desc.vnode.ops.write(file_desc.vnode, buffer, file_desc.offset);
@@ -111,22 +110,22 @@ pub fn seek(fd: i32, offset: i64, whence: SeekWhence) !u64 {
         return error.InvalidFileDescriptor;
     }
 
-    const index = @as(usize, @intCast(fd));
+    const index: usize = @intCast(fd);
     var file_desc = &(file_descriptors[index] orelse return error.InvalidFileDescriptor);
 
-    const new_offset = switch (whence) {
-        .SET => if (offset < 0) return error.InvalidOffset else @as(u64, @intCast(offset)),
+    const new_offset: u64 = switch (whence) {
+        .SET => if (offset < 0) return error.InvalidOffset else @intCast(offset),
         .CUR => blk: {
-            const signed_current = @as(i64, @intCast(file_desc.offset));
+            const signed_current: i64 = @intCast(file_desc.offset);
             const new_pos = signed_current + offset;
             if (new_pos < 0) return error.InvalidOffset;
-            break :blk @as(u64, @intCast(new_pos));
+            break :blk @intCast(new_pos);
         },
         .END => blk: {
-            const signed_size = @as(i64, @intCast(file_desc.vnode.size));
+            const signed_size: i64 = @intCast(file_desc.vnode.size);
             const new_pos = signed_size + offset;
             if (new_pos < 0) return error.InvalidOffset;
-            break :blk @as(u64, @intCast(new_pos));
+            break :blk @intCast(new_pos);
         },
     };
 
@@ -144,7 +143,7 @@ pub fn truncate(fd: i32, size: u64) !void {
         return error.InvalidFileDescriptor;
     }
 
-    const index = @as(usize, @intCast(fd));
+    const index: usize = @intCast(fd);
     const file_desc = file_descriptors[index] orelse return error.InvalidFileDescriptor;
 
     if (file_desc.vnode.ops.truncate) |truncate_fn| {
@@ -159,7 +158,7 @@ pub fn fstat(fd: i32, stat: *vfs.FileStat) !void {
         return error.InvalidFileDescriptor;
     }
 
-    const index = @as(usize, @intCast(fd));
+    const index: usize = @intCast(fd);
     const file_desc = file_descriptors[index] orelse return error.InvalidFileDescriptor;
 
     try file_desc.vnode.ops.stat(file_desc.vnode, stat);
@@ -170,7 +169,7 @@ pub fn dup(old_fd: i32) !i32 {
         return error.InvalidFileDescriptor;
     }
 
-    const old_index = @as(usize, @intCast(old_fd));
+    const old_index: usize = @intCast(old_fd);
     const old_desc = file_descriptors[old_index] orelse return error.InvalidFileDescriptor;
 
     var new_fd: u32 = 0;
@@ -199,8 +198,8 @@ pub fn dup2(old_fd: i32, new_fd: i32) !i32 {
         return new_fd;
     }
 
-    const old_index = @as(usize, @intCast(old_fd));
-    const new_index = @as(usize, @intCast(new_fd));
+    const old_index: usize = @intCast(old_fd);
+    const new_index: usize = @intCast(new_fd);
     const old_desc = file_descriptors[old_index] orelse return error.InvalidFileDescriptor;
 
     if (file_descriptors[new_index]) |_| {
@@ -223,7 +222,7 @@ pub fn pread(fd: i32, buffer: []u8, offset: u64) !usize {
         return error.InvalidFileDescriptor;
     }
 
-    const index = @as(usize, @intCast(fd));
+    const index: usize = @intCast(fd);
     const file_desc = file_descriptors[index] orelse return error.InvalidFileDescriptor;
 
     return try file_desc.vnode.ops.read(file_desc.vnode, buffer, offset);
@@ -234,7 +233,7 @@ pub fn pwrite(fd: i32, buffer: []const u8, offset: u64) !usize {
         return error.InvalidFileDescriptor;
     }
 
-    const index = @as(usize, @intCast(fd));
+    const index: usize = @intCast(fd);
     const file_desc = file_descriptors[index] orelse return error.InvalidFileDescriptor;
 
     return try file_desc.vnode.ops.write(file_desc.vnode, buffer, offset);
@@ -245,7 +244,7 @@ pub fn fsync(fd: i32) !void {
         return error.InvalidFileDescriptor;
     }
 
-    const index = @as(usize, @intCast(fd));
+    const index: usize = @intCast(fd);
     const file_desc = file_descriptors[index] orelse return error.InvalidFileDescriptor;
 
     if (file_desc.vnode.mount_point) |mount_point| {
@@ -273,7 +272,7 @@ pub fn tell(fd: i32) !u64 {
         return error.InvalidFileDescriptor;
     }
 
-    const index = @as(usize, @intCast(fd));
+    const index: usize = @intCast(fd);
     const file_desc = file_descriptors[index] orelse return error.InvalidFileDescriptor;
 
     return file_desc.offset;
