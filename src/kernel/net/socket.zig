@@ -2,8 +2,14 @@ const memory = @import("../memory/memory.zig");
 const tcp = @import("tcp.zig");
 const udp = @import("udp.zig");
 const ipv4 = @import("ipv4.zig");
+const ipv6 = @import("ipv6.zig");
 const vga = @import("../drivers/vga.zig");
 const process = @import("../process/process.zig");
+
+pub const AddressFamily = enum {
+    AF_INET,
+    AF_INET6,
+};
 
 pub const SocketType = enum {
     STREAM,
@@ -66,6 +72,9 @@ pub const Socket = struct {
     tcp_connection: ?*tcp.TCPConnection,
     blocking: bool,
     in_use: bool,
+    address_family: AddressFamily,
+    remote_ipv6: ?ipv6.IPv6Address,
+    local_ipv6: ?ipv6.IPv6Address,
 
     pub fn init(socket_type: SocketType, protocol: Protocol) !*Socket {
         const sock_mem = memory.kmalloc(@sizeOf(Socket)) orelse return error.OutOfMemory;
@@ -99,6 +108,9 @@ pub const Socket = struct {
             .tcp_connection = null,
             .blocking = true,
             .in_use = true,
+            .address_family = .AF_INET,
+            .remote_ipv6 = null,
+            .local_ipv6 = null,
         };
         return sock;
     }

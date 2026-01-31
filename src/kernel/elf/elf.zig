@@ -3,6 +3,7 @@ const memory = @import("../memory/memory.zig");
 const paging = @import("../memory/paging.zig");
 const process = @import("../process/process.zig");
 const vfs = @import("../fs/vfs.zig");
+const dynamic = @import("dynamic.zig");
 
 const ELF_MAGIC = 0x464C457F;
 
@@ -120,7 +121,7 @@ fn validateElfHeader(header: *const Elf32Header) ElfLoadError!void {
         return ElfLoadError.InvalidEndianness;
     }
 
-    if (header.type != @intFromEnum(ElfType.Executable)) {
+    if (header.type != @intFromEnum(ElfType.Executable) and header.type != @intFromEnum(ElfType.SharedObject)) {
         return ElfLoadError.InvalidType;
     }
 
@@ -155,6 +156,8 @@ pub fn loadElfFromFile(path: []const u8) !LoadedElf {
 
     var lowest_vaddr: u32 = 0xFFFFFFFF;
     var highest_vaddr: u32 = 0;
+    var dynamic_vaddr: u32 = 0;
+    var has_dynamic: bool = false;
 
     var ph_offset = header.phoff;
     var i: u16 = 0;
@@ -185,6 +188,9 @@ pub fn loadElfFromFile(path: []const u8) !LoadedElf {
             if (!loadSegment(file, &phdr)) {
                 return ElfLoadError.OutOfMemory;
             }
+        } else if (phdr.type == @intFromEnum(ProgramType.Dynamic)) {
+            dynamic_vaddr = phdr.vaddr;
+            has_dynamic = true;
         }
 
         ph_offset += header.phentsize;
@@ -196,6 +202,11 @@ pub fn loadElfFromFile(path: []const u8) !LoadedElf {
 
     result.base_addr = lowest_vaddr;
     result.size = highest_vaddr - lowest_vaddr;
+
+    if (has_dynamic and dynamic_vaddr != 0) {
+        const dyn_ptr: [*]dynamic.Elf32Dyn = @ptrFromInt(dynamic_vaddr);
+        dynamic.linkExecutable(dyn_ptr, lowest_vaddr) catch {};
+    }
 
     return result;
 }

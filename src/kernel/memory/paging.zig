@@ -1,5 +1,14 @@
 const vga = @import("../drivers/vga.zig");
 const memory = @import("memory.zig");
+const swap = @import("swap.zig");
+
+fn isSwapped(vaddr: u32) bool {
+    return swap.isSwapped(vaddr);
+}
+
+fn swapIn(vaddr: u32) !void {
+    return swap.swapIn(vaddr);
+}
 
 const PAGE_SIZE = 4096;
 const PAGES_PER_TABLE = 1024;
@@ -343,6 +352,10 @@ pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Register
     const instruction_fetch = (regs.err_code & 0x10) != 0;
 
     if (present) {
+        if (isSwapped(faulting_address)) {
+            swapIn(faulting_address) catch {};
+            return;
+        }
         if (handle_demand_paging(faulting_address, write, user)) {
             return;
         }
@@ -631,7 +644,7 @@ fn lookup_tlb_cache(virt_addr: u32) ?u32 {
     return null;
 }
 
-fn invalidate_page(virt_addr: u32) void {
+pub fn invalidate_page(virt_addr: u32) void {
     asm volatile ("invlpg (%[addr])"
         :
         : [addr] "r" (virt_addr),
