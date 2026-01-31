@@ -1,5 +1,3 @@
-const std = @import("std");
-
 pub inline fn hlt() void {
     asm volatile ("hlt");
 }

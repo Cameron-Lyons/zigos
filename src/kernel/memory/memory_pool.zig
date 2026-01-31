@@ -1,4 +1,3 @@
-const std = @import("std");
 const memory = @import("memory.zig");
 const vga = @import("../drivers/vga.zig");
 
@@ -34,14 +33,15 @@ pub const MemoryPool = struct {
 
         const chunk_size = self.block_size * self.blocks_per_chunk;
         const chunk_mem = memory.kmalloc(chunk_size + @sizeOf(Chunk)) orelse return null;
-        const chunk = @as(*Chunk, @ptrCast(@alignCast(chunk_mem)));
-        chunk.data = @as([*]u8, @ptrCast(chunk_mem)) + @sizeOf(Chunk);
+        const chunk: *Chunk = @ptrCast(@alignCast(chunk_mem));
+        const chunk_bytes: [*]u8 = @ptrCast(chunk_mem);
+        chunk.data = chunk_bytes + @sizeOf(Chunk);
         chunk.next = self.chunks;
         self.chunks = chunk;
 
         var i: usize = 1;
         while (i < self.blocks_per_chunk) : (i += 1) {
-            const block = @as(*FreeBlock, @ptrCast(@alignCast(&chunk.data[i * self.block_size])));
+            const block: *FreeBlock = @ptrCast(@alignCast(&chunk.data[i * self.block_size]));
             block.next = self.free_list;
             self.free_list = block;
         }
@@ -50,7 +50,7 @@ pub const MemoryPool = struct {
     }
 
     pub fn free(self: *MemoryPool, ptr: [*]u8) void {
-        const block = @as(*FreeBlock, @ptrCast(@alignCast(ptr)));
+        const block: *FreeBlock = @ptrCast(@alignCast(ptr));
         block.next = self.free_list;
         self.free_list = block;
     }
@@ -100,7 +100,7 @@ pub const SlabAllocator = struct {
         const slab_size = @sizeOf(Slab) + (self.objects_per_slab * self.object_size) +
             ((self.objects_per_slab + 31) / 32) * @sizeOf(u32);
         const slab_mem = memory.kmalloc(slab_size) orelse return null;
-        const new_slab = @as(*Slab, @ptrCast(@alignCast(slab_mem)));
+        const new_slab: *Slab = @ptrCast(@alignCast(slab_mem));
 
         new_slab.objects = @as([*]u8, @ptrCast(slab_mem)) + @sizeOf(Slab);
         const bitmap_offset = @sizeOf(Slab) + (self.objects_per_slab * self.object_size);

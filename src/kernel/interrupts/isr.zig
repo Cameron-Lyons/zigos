@@ -1,5 +1,3 @@
-const std = @import("std");
-const vga = @import("../drivers/vga.zig");
 const idt = @import("idt.zig");
 const keyboard = @import("../drivers/keyboard.zig");
 
@@ -143,7 +141,7 @@ pub export fn irqHandler(regs: *Registers) void {
     outb(0x20, 0x20);
 
     if (custom_handlers[regs.int_no]) |handler| {
-        const frame = @as(*InterruptFrame, @ptrCast(regs));
+        const frame: *InterruptFrame = @ptrCast(regs);
         handler(frame);
     } else if (regs.int_no == 32) {
         const timer = @import("../timer/timer.zig");

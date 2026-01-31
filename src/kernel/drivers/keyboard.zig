@@ -1,7 +1,7 @@
-const std = @import("std");
 const vga = @import("vga.zig");
 const shell = @import("../shell/shell.zig");
 
+// SAFETY: used as a circular buffer; entries written before being read via buffer_start/buffer_end indices
 var char_buffer: [256]u8 = undefined;
 var buffer_start: usize = 0;
 var buffer_end: usize = 0;

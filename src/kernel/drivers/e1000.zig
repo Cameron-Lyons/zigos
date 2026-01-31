@@ -1,10 +1,8 @@
-const std = @import("std");
 const pci = @import("pci.zig");
 const network = @import("../net/network.zig");
 const memory = @import("../memory/memory.zig");
 const isr = @import("../interrupts/isr.zig");
 const vga = @import("vga.zig");
-const io = @import("../utils/io.zig");
 
 const E1000_VENDOR_ID = 0x8086;
 const E1000_DEVICE_IDS = [_]u16{
@@ -278,24 +276,6 @@ const TCTLBits = struct {
     const RTLC = 1 << 24;
 };
 
-const StatusBits = struct {
-    const FD = 1 << 0;
-    const LU = 1 << 1;
-    const FUNC_MASK = 3;
-    const FUNC_SHIFT = 2;
-    const TXOFF = 1 << 4;
-    const TBIMODE = 1 << 5;
-    const SPEED_MASK = 3;
-    const SPEED_SHIFT = 6;
-    const ASDV_MASK = 3;
-    const ASDV_SHIFT = 8;
-    const PCI66 = 1 << 11;
-    const BUS64 = 1 << 12;
-    const PCIX_MODE = 1 << 13;
-    const PCIXSPD_MASK = 3;
-    const PCIXSPD_SHIFT = 14;
-};
-
 const CTRLBits = struct {
     const FD = 1 << 0;
     const LRST = 1 << 3;
@@ -334,12 +314,12 @@ const E1000Device = struct {
     eeprom_exists: bool,
 
     fn readRegister(self: *E1000Device, reg: u32) u32 {
-        const ptr = @as(*volatile u32, @ptrFromInt(self.mmio_base + reg));
+        const ptr: *volatile u32 = @ptrFromInt(self.mmio_base + reg);
         return ptr.*;
     }
 
     fn writeRegister(self: *E1000Device, reg: u32, value: u32) void {
-        const ptr = @as(*volatile u32, @ptrFromInt(self.mmio_base + reg));
+        const ptr: *volatile u32 = @ptrFromInt(self.mmio_base + reg);
         ptr.* = value;
     }
 
@@ -546,10 +526,15 @@ fn initDevice(pci_device: pci.PCIDevice) void {
     var dev = E1000Device{
         .pci_device = pci_device,
         .mmio_base = 0,
+        // SAFETY: populated by readMACAddress call below
         .mac_addr = undefined,
+        // SAFETY: initialized in rxInit below
         .rx_descs = undefined,
+        // SAFETY: initialized in txInit below
         .tx_descs = undefined,
+        // SAFETY: allocated in rxInit below
         .rx_buffers = undefined,
+        // SAFETY: allocated in txInit below
         .tx_buffers = undefined,
         .rx_cur = 0,
         .tx_cur = 0,

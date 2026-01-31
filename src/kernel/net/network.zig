@@ -1,7 +1,6 @@
 const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const rtl8139 = @import("../drivers/rtl8139.zig");
-const e1000 = @import("../drivers/e1000.zig");
 const ethernet = @import("ethernet.zig");
 const arp = @import("arp.zig");
 pub const ipv4 = @import("ipv4.zig");
@@ -120,6 +119,7 @@ fn printNumber(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var count: usize = 0;
     var n = num;

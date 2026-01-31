@@ -1,8 +1,5 @@
-const std = @import("std");
 const vga = @import("../drivers/vga.zig");
-const keyboard = @import("../drivers/keyboard.zig");
 const framebuffer = @import("framebuffer.zig");
-const memory = @import("../memory/memory.zig");
 const process = @import("../process/process.zig");
 const signal = @import("../process/signal.zig");
 
@@ -93,7 +90,9 @@ pub const VirtualTerminal = struct {
         var vt = VirtualTerminal{
             .id = id,
             .active = false,
+            // SAFETY: filled by the clear() call at the end of init
             .buffer = undefined,
+            // SAFETY: written to before being read during scroll operations
             .scrollback = undefined,
             .scrollback_pos = 0,
             .cursor_x = 0,
@@ -110,6 +109,7 @@ pub const VirtualTerminal = struct {
                 .fg = .White,
                 .bg = .Black,
             },
+            // SAFETY: characters written before being read; input_pos tracks valid length
             .input_buffer = undefined,
             .input_pos = 0,
             .input_mode = InputMode{},
@@ -444,11 +444,11 @@ pub const VirtualTerminal = struct {
 
     fn renderVGA(self: *VirtualTerminal) void {
         for (self.buffer, 0..) |cell, i| {
-            const x = @as(u8, @intCast(i % SCREEN_WIDTH));
-            const y = @as(u8, @intCast(i / SCREEN_WIDTH));
+            const x: u8 = @intCast(i % SCREEN_WIDTH);
+            const y: u8 = @intCast(i / SCREEN_WIDTH);
 
-            const vga_attr = @as(u8, @intFromEnum(cell.attr.bg)) << 4 |
-                            @as(u8, @intFromEnum(cell.attr.fg));
+            const vga_attr: u8 = @as(u8, @intFromEnum(cell.attr.bg)) << 4 |
+                            @intFromEnum(cell.attr.fg);
 
             vga.putCharAt(x, y, cell.char, vga_attr);
         }
@@ -535,6 +535,7 @@ pub const VirtualTerminal = struct {
     }
 };
 
+// SAFETY: each element initialized via VirtualTerminal.init() in the init() function
 var virtual_terminals: [NUM_VIRTUAL_TERMINALS]VirtualTerminal = undefined;
 var current_vt: u8 = 0;
 

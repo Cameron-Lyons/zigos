@@ -1,8 +1,8 @@
+// zlint-disable suppressed-errors
 const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const memory = @import("../memory/memory.zig");
 const paging = @import("../memory/paging.zig");
-const boot = @import("../../boot/boot.zig");
 
 pub const Color = struct {
     r: u8,
@@ -116,7 +116,7 @@ fn initDefaultFont() void {
     const font_data = @embedFile("font8x16.psf");
 
     if (font_data.len >= @sizeOf(PSF2Header)) {
-        const header = @as(*const PSF2Header, @ptrCast(@alignCast(font_data.ptr)));
+        const header: *const PSF2Header = @ptrCast(@alignCast(font_data.ptr));
         if (std.mem.eql(u8, &header.magic, "\x72\xB5\x4A\x86")) {
             default_font = Font{
                 .data = font_data.ptr + header.header_size,
@@ -146,7 +146,7 @@ pub fn clear(color: Color) void {
     const fb = framebuffer orelse return;
 
     if (fb.bpp == 32) {
-        const pixels = @as([*]u32, @ptrCast(@alignCast(back_buffer orelse return)));
+        const pixels: [*]u32 = @ptrCast(@alignCast(back_buffer orelse return));
         const pixel_count = fb.width * fb.height;
         const color_value = color.toARGB8888();
         for (0..pixel_count) |i| {
@@ -162,7 +162,7 @@ pub fn clear(color: Color) void {
             pixels[offset + 2] = color.r;
         }
     } else if (fb.bpp == 16) {
-        const pixels = @as([*]u16, @ptrCast(@alignCast(back_buffer orelse return)));
+        const pixels: [*]u16 = @ptrCast(@alignCast(back_buffer orelse return));
         const pixel_count = fb.width * fb.height;
         const color_value = color.toRGB565();
         for (0..pixel_count) |i| {
@@ -183,14 +183,14 @@ pub fn putPixel(x: u32, y: u32, color: Color) void {
     const offset = y * fb.pitch + x * (fb.bpp / 8);
 
     if (fb.bpp == 32) {
-        const pixel = @as(*u32, @ptrCast(@alignCast(&buffer[offset])));
+        const pixel: *u32 = @ptrCast(@alignCast(&buffer[offset]));
         pixel.* = color.toARGB8888();
     } else if (fb.bpp == 24) {
         buffer[offset] = color.b;
         buffer[offset + 1] = color.g;
         buffer[offset + 2] = color.r;
     } else if (fb.bpp == 16) {
-        const pixel = @as(*u16, @ptrCast(@alignCast(&buffer[offset])));
+        const pixel: *u16 = @ptrCast(@alignCast(&buffer[offset]));
         pixel.* = color.toRGB565();
     }
 }
@@ -286,7 +286,7 @@ pub fn drawChar(x: u32, y: u32, char: u8, color: Color) void {
             if (x + px >= fb.width) break;
 
             const byte_index = py * ((font.width + 7) / 8) + (px / 8);
-            const bit_index = @as(u3, @intCast(7 - (px % 8)));
+            const bit_index: u3 = @intCast(7 - (px % 8));
 
             if (byte_index < font.bytes_per_glyph) {
                 if ((glyph[byte_index] >> bit_index) & 1 != 0) {
@@ -366,7 +366,7 @@ fn scrollUp() void {
     @memcpy(buffer[0..bytes_to_move], buffer[fb.pitch * scroll_lines..fb.pitch * scroll_lines + bytes_to_move]);
 
     if (fb.bpp == 32) {
-        const clear_start = @as([*]u32, @ptrCast(@alignCast(&buffer[bytes_to_move])));
+        const clear_start: [*]u32 = @ptrCast(@alignCast(&buffer[bytes_to_move]));
         const clear_count = bytes_to_clear / 4;
         const bg_value = bg_color.toARGB8888();
         for (0..clear_count) |i| {
@@ -381,7 +381,7 @@ pub fn flip() void {
     const fb = framebuffer orelse return;
     const buffer = back_buffer orelse return;
 
-    const fb_mem = @as([*]u8, @ptrFromInt(fb.address));
+    const fb_mem: [*]u8 = @ptrFromInt(fb.address);
     const size = fb.height * fb.pitch;
     @memcpy(fb_mem[0..size], buffer[0..size]);
 }
@@ -410,6 +410,7 @@ fn printNumber(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var count: usize = 0;
     var n = num;

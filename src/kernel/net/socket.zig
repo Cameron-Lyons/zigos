@@ -1,6 +1,4 @@
-const std = @import("std");
 const memory = @import("../memory/memory.zig");
-const network = @import("network.zig");
 const tcp = @import("tcp.zig");
 const udp = @import("udp.zig");
 const ipv4 = @import("ipv4.zig");
@@ -71,7 +69,7 @@ pub const Socket = struct {
 
     pub fn init(socket_type: SocketType, protocol: Protocol) !*Socket {
         const sock_mem = memory.kmalloc(@sizeOf(Socket)) orelse return error.OutOfMemory;
-        const sock = @as(*Socket, @ptrCast(@alignCast(sock_mem)));
+        const sock: *Socket = @ptrCast(@alignCast(sock_mem));
         sock.* = Socket{
             .id = generateSocketId(),
             .socket_type = socket_type,
@@ -84,13 +82,15 @@ pub const Socket = struct {
             .owner_pid = process.getCurrentPID(),
             .recv_buffer = blk: {
                 const buf = memory.kmalloc(RECV_BUFFER_SIZE) orelse return error.OutOfMemory;
-                break :blk @as([*]u8, @ptrCast(@alignCast(buf)))[0..RECV_BUFFER_SIZE];
+                const ptr: [*]u8 = @ptrCast(@alignCast(buf));
+                break :blk ptr[0..RECV_BUFFER_SIZE];
             },
             .recv_head = 0,
             .recv_tail = 0,
             .send_buffer = blk: {
                 const buf = memory.kmalloc(SEND_BUFFER_SIZE) orelse return error.OutOfMemory;
-                break :blk @as([*]u8, @ptrCast(@alignCast(buf)))[0..SEND_BUFFER_SIZE];
+                const ptr: [*]u8 = @ptrCast(@alignCast(buf));
+                break :blk ptr[0..SEND_BUFFER_SIZE];
             },
             .send_head = 0,
             .send_tail = 0,
@@ -127,7 +127,8 @@ pub const Socket = struct {
 
         const backlog_size = @min(backlog, MAX_BACKLOG);
         const backlog_mem = memory.kmalloc(backlog_size * @sizeOf(?*Socket)) orelse return error.OutOfMemory;
-        self.backlog = @as([*]?*Socket, @ptrCast(@alignCast(backlog_mem)))[0..backlog_size];
+        const backlog_ptr: [*]?*Socket = @ptrCast(@alignCast(backlog_mem));
+        self.backlog = backlog_ptr[0..backlog_size];
         for (self.backlog) |*slot| {
             slot.* = null;
         }

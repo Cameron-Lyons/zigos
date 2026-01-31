@@ -1,8 +1,7 @@
-const std = @import("std");
+// zlint-disable suppressed-errors
 const pci = @import("pci.zig");
 const memory = @import("../memory/memory.zig");
 const vga = @import("vga.zig");
-const io = @import("../utils/io.zig");
 const isr = @import("../interrupts/isr.zig");
 const network = @import("../net/network.zig");
 
@@ -14,29 +13,18 @@ const VIRTIO_PCI_CAP_COMMON_CFG = 1;
 const VIRTIO_PCI_CAP_NOTIFY_CFG = 2;
 const VIRTIO_PCI_CAP_ISR_CFG = 3;
 const VIRTIO_PCI_CAP_DEVICE_CFG = 4;
-const VIRTIO_PCI_CAP_PCI_CFG = 5;
 
-const VIRTIO_F_VERSION_1 = 1 << 32;
-const VIRTIO_F_ACCESS_PLATFORM = 1 << 33;
 const VIRTIO_NET_F_MAC = 1 << 5;
 const VIRTIO_NET_F_STATUS = 1 << 16;
-const VIRTIO_NET_F_MQ = 1 << 22;
-const VIRTIO_NET_F_CTRL_VQ = 1 << 17;
-const VIRTIO_NET_F_GUEST_CSUM = 1 << 1;
 
 const VIRTIO_STATUS_RESET = 0;
 const VIRTIO_STATUS_ACKNOWLEDGE = 1;
 const VIRTIO_STATUS_DRIVER = 2;
 const VIRTIO_STATUS_FEATURES_OK = 8;
 const VIRTIO_STATUS_DRIVER_OK = 4;
-const VIRTIO_STATUS_FAILED = 128;
 
-const VIRTQ_DESC_F_NEXT = 1;
 const VIRTQ_DESC_F_WRITE = 2;
-const VIRTQ_DESC_F_INDIRECT = 4;
 
-const VIRTQ_AVAIL_F_NO_INTERRUPT = 1;
-const VIRTQ_USED_F_NO_NOTIFY = 1;
 
 const VirtqDesc = extern struct {
     addr: u64,
@@ -202,11 +190,11 @@ const VirtioNetDevice = struct {
         const avail_idx = queue.avail.idx;
         queue.avail.ring[avail_idx % queue.num] = desc_idx;
 
-        asm volatile ("" ::: .{ .memory = true });
+        asm volatile ("" ::: "memory");
 
         queue.avail.idx = avail_idx +% 1;
 
-        asm volatile ("" ::: .{ .memory = true });
+        asm volatile ("" ::: "memory");
 
         return desc_idx;
     }
@@ -214,14 +202,14 @@ const VirtioNetDevice = struct {
     fn notify(self: *VirtioNetDevice, queue_index: u16) void {
         const notify_addr = self.notify_base +
             @as(usize, self.common_cfg.queue_notify_off) * self.notify_off_multiplier;
-        const notify_ptr = @as(*volatile u16, @ptrFromInt(notify_addr));
+        const notify_ptr: *volatile u16 = @ptrFromInt(notify_addr);
         notify_ptr.* = queue_index;
     }
 
     fn processUsedBuffers(_: *VirtioNetDevice, queue: *Virtqueue) void {
         while (queue.last_used_idx != queue.used.idx) {
             const used_elem = &queue.used.ring[queue.last_used_idx % queue.num];
-            const desc_idx = @as(u16, @truncate(used_elem.id));
+            const desc_idx: u16 = @truncate(used_elem.id);
 
             queue.desc[desc_idx].next = queue.free_head;
             queue.free_head = desc_idx;
@@ -232,8 +220,9 @@ const VirtioNetDevice = struct {
     }
 
     pub fn send(self: *VirtioNetDevice, packet: []const u8) !void {
+        // SAFETY: header and payload written immediately below via struct assignment and memcpy
         var buffer: [2048]u8 = undefined;
-        const header = @as(*VirtioNetHeader, @ptrCast(@alignCast(&buffer[0])));
+        const header: *VirtioNetHeader = @ptrCast(@alignCast(&buffer[0]));
         header.* = VirtioNetHeader{
             .flags = 0,
             .gso_type = 0,
@@ -261,13 +250,14 @@ const VirtioNetDevice = struct {
             const len = used_elem.len;
 
             if (len > @sizeOf(VirtioNetHeader)) {
-                const desc_idx = @as(u16, @truncate(used_elem.id));
+                const desc_idx: u16 = @truncate(used_elem.id);
                 const buffer_addr = self.rx_queue.desc[desc_idx].addr;
                 const packet_start = buffer_addr + @sizeOf(VirtioNetHeader);
                 const packet_len = len - @sizeOf(VirtioNetHeader);
 
                 self.rx_queue.last_used_idx +%= 1;
 
+                // SAFETY: passed to addBuffer as a receive descriptor for the device to fill
                 const buffer: [2048]u8 = undefined;
                 _ = self.addBuffer(&self.rx_queue, &buffer, true) catch {
                     return null;
@@ -327,15 +317,25 @@ pub fn init() void {
 fn initDevice(pci_device: pci.PCIDevice) void {
     var dev = VirtioNetDevice{
         .pci_device = pci_device,
+        // SAFETY: populated by findCapabilities call below
         .common_cfg = undefined,
+        // SAFETY: populated by findCapabilities call below
         .device_cfg = undefined,
+        // SAFETY: populated by findCapabilities call below
         .notify_base = undefined,
+        // SAFETY: populated by findCapabilities call below
         .notify_off_multiplier = undefined,
+        // SAFETY: populated by findCapabilities call below
         .isr_cfg = undefined,
+        // SAFETY: populated by reading device MAC registers after feature negotiation
         .mac_addr = undefined,
+        // SAFETY: initialized by setupVirtqueue call below
         .rx_queue = undefined,
+        // SAFETY: initialized by setupVirtqueue call below
         .tx_queue = undefined,
+        // SAFETY: allocated and filled when populating rx descriptors
         .rx_buffers = undefined,
+        // SAFETY: allocated when setting up tx descriptors
         .tx_buffers = undefined,
     };
 

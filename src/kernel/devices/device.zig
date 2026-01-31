@@ -1,4 +1,3 @@
-const std = @import("std");
 const error_handler = @import("../utils/error.zig");
 const memory = @import("../memory/memory.zig");
 
