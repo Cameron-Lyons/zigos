@@ -1,5 +1,3 @@
-const std = @import("std");
-
 pub const IDT_ENTRIES = 256;
 
 pub const IdtEntry = packed struct {
@@ -42,9 +40,6 @@ pub const InterruptRegisters = packed struct {
     useresp: u32,
     ss: u32,
 };
-
-const IDT_TYPE_INTERRUPT = 0x8E;
-const IDT_TYPE_TRAP = 0x8F;
 
 pub var idt: [IDT_ENTRIES]IdtEntry = [_]IdtEntry{IdtEntry{
     .offset_low = 0,

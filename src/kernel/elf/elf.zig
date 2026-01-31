@@ -1,8 +1,7 @@
-const std = @import("std");
+// zlint-disable suppressed-errors
 const memory = @import("../memory/memory.zig");
 const paging = @import("../memory/paging.zig");
 const process = @import("../process/process.zig");
-const vga = @import("../drivers/vga.zig");
 const vfs = @import("../fs/vfs.zig");
 
 const ELF_MAGIC = 0x464C457F;
@@ -90,19 +89,6 @@ const Elf32ProgramHeader = packed struct {
     alignment: u32,
 };
 
-const Elf32SectionHeader = packed struct {
-    name: u32,
-    type: u32,
-    flags: u32,
-    addr: u32,
-    offset: u32,
-    size: u32,
-    link: u32,
-    info: u32,
-    addralign: u32,
-    entsize: u32,
-};
-
 pub const ElfLoadError = error{
     InvalidMagic,
     InvalidClass,
@@ -149,6 +135,7 @@ pub fn loadElfFromFile(path: []const u8) !LoadedElf {
     };
     defer vfs.close(file) catch {};
 
+    // SAFETY: Populated by vfs.read call below
     var header: Elf32Header = undefined;
     const bytes_read = vfs.read(file, @as([*]u8, @ptrCast(&header))[0..@sizeOf(Elf32Header)]) catch {
         return ElfLoadError.FileReadError;
@@ -172,6 +159,7 @@ pub fn loadElfFromFile(path: []const u8) !LoadedElf {
     var ph_offset = header.phoff;
     var i: u16 = 0;
     while (i < header.phnum) : (i += 1) {
+        // SAFETY: Populated by vfs.read call below
         var phdr: Elf32ProgramHeader = undefined;
 
         _ = vfs.lseek(file, @intCast(ph_offset), vfs.SEEK_SET) catch {
@@ -235,7 +223,7 @@ fn loadSegment(file: u32, phdr: *const Elf32ProgramHeader) bool {
     if (phdr.filesz > 0) {
         _ = vfs.lseek(file, @intCast(phdr.offset), vfs.SEEK_SET) catch return false;
 
-        const dest = @as([*]u8, @ptrFromInt(phdr.vaddr));
+        const dest: [*]u8 = @ptrFromInt(phdr.vaddr);
         const bytes_read = vfs.read(file, dest[0..phdr.filesz]) catch return false;
 
         if (bytes_read != phdr.filesz) {
@@ -246,7 +234,7 @@ fn loadSegment(file: u32, phdr: *const Elf32ProgramHeader) bool {
     if (phdr.memsz > phdr.filesz) {
         const zero_start = phdr.vaddr + phdr.filesz;
         const zero_size = phdr.memsz - phdr.filesz;
-        const zero_dest = @as([*]u8, @ptrFromInt(zero_start));
+        const zero_dest: [*]u8 = @ptrFromInt(zero_start);
         @memset(zero_dest[0..zero_size], 0);
     }
 

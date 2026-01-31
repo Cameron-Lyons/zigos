@@ -1,7 +1,5 @@
-const std = @import("std");
 const x86 = @import("../../arch/x86.zig");
 const vga = @import("vga.zig");
-const error_handler = @import("../utils/error.zig");
 
 const ATA_PRIMARY_BASE: u16 = 0x1F0;
 const ATA_PRIMARY_CTRL: u16 = 0x3F6;
@@ -9,8 +7,6 @@ const ATA_SECONDARY_BASE: u16 = 0x170;
 const ATA_SECONDARY_CTRL: u16 = 0x376;
 
 const ATA_REG_DATA: u16 = 0;
-const ATA_REG_ERROR: u16 = 1;
-const ATA_REG_FEATURES: u16 = 1;
 const ATA_REG_SECCOUNT: u16 = 2;
 const ATA_REG_LBA0: u16 = 3;
 const ATA_REG_LBA1: u16 = 4;
@@ -27,20 +23,8 @@ const ATA_CMD_CACHE_FLUSH: u8 = 0xE7;
 const ATA_SR_BSY: u8 = 0x80;
 const ATA_SR_DRDY: u8 = 0x40;
 const ATA_SR_DF: u8 = 0x20;
-const ATA_SR_DSC: u8 = 0x10;
 const ATA_SR_DRQ: u8 = 0x08;
-const ATA_SR_CORR: u8 = 0x04;
-const ATA_SR_IDX: u8 = 0x02;
 const ATA_SR_ERR: u8 = 0x01;
-
-const ATA_ER_BBK: u8 = 0x80;
-const ATA_ER_UNC: u8 = 0x40;
-const ATA_ER_MC: u8 = 0x20;
-const ATA_ER_IDNF: u8 = 0x10;
-const ATA_ER_MCR: u8 = 0x08;
-const ATA_ER_ABRT: u8 = 0x04;
-const ATA_ER_TK0NF: u8 = 0x02;
-const ATA_ER_AMNF: u8 = 0x01;
 
 const ATA_MASTER: u8 = 0xA0;
 const ATA_SLAVE: u8 = 0xB0;
@@ -66,9 +50,13 @@ pub const ATADevice = struct {
     supports_lba48: bool,
 };
 
+// SAFETY: fully initialized in init() before use
 var primary_master: ATADevice = undefined;
+// SAFETY: fully initialized in init() before use
 var primary_slave: ATADevice = undefined;
+// SAFETY: fully initialized in init() before use
 var secondary_master: ATADevice = undefined;
+// SAFETY: fully initialized in init() before use
 var secondary_slave: ATADevice = undefined;
 
 pub fn init() void {
@@ -176,6 +164,7 @@ fn detectDrive(device: *ATADevice) void {
         }
     }
 
+    // SAFETY: filled by the subsequent port I/O reads in the loop
     var buffer: [256]u16 = undefined;
     for (&buffer) |*word| {
         word.* = x86.inw(device.base_port + ATA_REG_DATA);
@@ -369,6 +358,7 @@ fn printNumber(num: u64) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var buffer: [20]u8 = undefined;
     var i: usize = 0;
     var n = num;

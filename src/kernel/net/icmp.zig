@@ -1,4 +1,3 @@
-const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const ipv4 = @import("ipv4.zig");
 
@@ -23,7 +22,7 @@ fn handleICMPPacket(packet: *const ipv4.IPv4Packet) void {
         return;
     }
 
-    const header = @as(*const ICMPHeader, @ptrCast(@alignCast(packet.data.ptr)));
+    const header: *const ICMPHeader = @ptrCast(@alignCast(packet.data.ptr));
 
     if (!verifyChecksum(packet.data)) {
         return;
@@ -35,8 +34,9 @@ fn handleICMPPacket(packet: *const ipv4.IPv4Packet) void {
 }
 
 fn sendEchoReply(request_packet: *const ipv4.IPv4Packet, request_header: *const ICMPHeader) void {
+    // SAFETY: header and data portions filled before the buffer is sent
     var reply_buf: [1500]u8 = undefined;
-    var reply_header = @as(*ICMPHeader, @ptrCast(@alignCast(&reply_buf[0])));
+    var reply_header: *ICMPHeader = @ptrCast(@alignCast(&reply_buf[0]));
 
     reply_header.type = ICMP_TYPE_ECHO_REPLY;
     reply_header.code = 0;
@@ -59,8 +59,9 @@ fn sendEchoReply(request_packet: *const ipv4.IPv4Packet, request_header: *const 
 }
 
 pub fn sendEchoRequest(dst_ip: u32, identifier: u16, sequence: u16, data: []const u8) !void {
+    // SAFETY: header and data portions filled before the buffer is sent
     var request_buf: [1500]u8 = undefined;
-    var header = @as(*ICMPHeader, @ptrCast(@alignCast(&request_buf[0])));
+    var header: *ICMPHeader = @ptrCast(@alignCast(&request_buf[0]));
 
     header.type = ICMP_TYPE_ECHO_REQUEST;
     header.code = 0;
@@ -96,7 +97,8 @@ fn calculateChecksum(data: []u8) u16 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
 
-    return @as(u16, @intCast(~sum));
+    const result: u16 = @intCast(~sum);
+    return result;
 }
 
 fn verifyChecksum(data: []u8) bool {

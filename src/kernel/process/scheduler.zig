@@ -1,4 +1,3 @@
-const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const process = @import("process.zig");
 const timer = @import("../timer/timer.zig");
@@ -55,6 +54,7 @@ pub const ProcessExtended = struct {
 };
 
 const MAX_EXTENDED_PROCESSES = 256;
+// SAFETY: all entries initialized in init() before use
 var extended_processes: [MAX_EXTENDED_PROCESSES]ProcessExtended = undefined;
 var scheduler_type: SchedulerType = .RoundRobin;
 var stats: SchedulerStats = .{
@@ -298,7 +298,7 @@ fn scheduleMLFQ() ?*ProcessExtended {
             curr.time_used = 0;
 
             if (curr.priority != .Idle) {
-                const new_priority = @as(Priority, @enumFromInt(@intFromEnum(curr.priority) - 1));
+                const new_priority: Priority = @enumFromInt(@intFromEnum(curr.priority) - 1);
                 curr.priority = new_priority;
                 curr.time_quantum = getQuantumForPriority(new_priority);
             }
@@ -309,10 +309,10 @@ fn scheduleMLFQ() ?*ProcessExtended {
             if (ext.in_use and ext.base.state == .Ready) {
                 const wait_ticks = current_ticks - ext.wait_time;
                 if (wait_ticks > 100 and ext.priority != ext.original_priority) {
-                    const new_priority = @as(Priority, @enumFromInt(@min(
+                    const new_priority: Priority = @enumFromInt(@min(
                         @intFromEnum(ext.priority) + 1,
                         @intFromEnum(ext.original_priority)
-                    )));
+                    ));
                     ext.priority = new_priority;
                     ext.time_quantum = getQuantumForPriority(new_priority);
                 }

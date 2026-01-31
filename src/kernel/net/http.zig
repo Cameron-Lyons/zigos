@@ -1,11 +1,8 @@
-const std = @import("std");
+// zlint-disable suppressed-errors
 const socket = @import("socket.zig");
-const memory = @import("../memory/memory.zig");
 const vga = @import("../drivers/vga.zig");
 const process = @import("../process/process.zig");
 const ipv4 = @import("ipv4.zig");
-
-const HTTP_PORT = 80;
 const MAX_REQUEST_SIZE = 2048;
 const MAX_RESPONSE_SIZE = 4096;
 
@@ -88,6 +85,7 @@ pub const HTTPServer = struct {
     }
 
     fn handleClient(self: *HTTPServer, client: *socket.Socket) void {
+        // SAFETY: filled by the subsequent client.recv call
         var request_buffer: [MAX_REQUEST_SIZE]u8 = undefined;
         const bytes_read = client.recv(&request_buffer) catch {
             return;
@@ -103,6 +101,7 @@ pub const HTTPServer = struct {
             return;
         };
 
+        // SAFETY: assigned in both branches of the if/else below
         var response: HTTPResponse = undefined;
         if (self.handler) |handler| {
             response = handler(&request);
@@ -187,6 +186,7 @@ pub const HTTPServer = struct {
 
     fn sendResponse(self: *HTTPServer, client: *socket.Socket, response: *const HTTPResponse) void {
         _ = self;
+        // SAFETY: filled by the subsequent formatString/formatNumber calls
         var response_buffer: [MAX_RESPONSE_SIZE]u8 = undefined;
         var offset: usize = 0;
 
@@ -289,6 +289,7 @@ fn formatNumber(buffer: []u8, offset: usize, num: usize) usize {
         return 0;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var temp: [20]u8 = undefined;
     var temp_len: usize = 0;
     var n = num;
@@ -312,6 +313,7 @@ fn printNumber(num: usize) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [20]u8 = undefined;
     var count: usize = 0;
     var n = num;

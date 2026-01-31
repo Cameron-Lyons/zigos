@@ -1,4 +1,3 @@
-const std = @import("std");
 const gdt = @import("../interrupts/gdt.zig");
 const process = @import("process.zig");
 const vga = @import("../drivers/vga.zig");
@@ -90,14 +89,14 @@ fn ring3TestFunction() void {
         \\int $0x80
         :
         : [msg] "m" ("Hello from Ring 3 (user mode)!\n"),
-        : .{ .eax = true, .ebx = true, .ecx = true, .edx = true, .memory = true }
+        : "eax", "ebx", "ecx", "edx", "memory"
     );
 
     asm volatile (
         \\mov $0, %%eax
         \\xor %%ebx, %%ebx
         \\int $0x80
-        ::: .{ .eax = true, .ebx = true, .memory = true });
+        ::: "eax", "ebx", "memory");
 }
 
 pub fn createRing3TestProcess() void {
@@ -116,6 +115,7 @@ fn printNumber(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var buffer: [20]u8 = undefined;
     var i: usize = 0;
     var n = num;

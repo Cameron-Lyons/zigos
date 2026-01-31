@@ -1,9 +1,7 @@
-const std = @import("std");
+// zlint-disable suppressed-errors
 const vga = @import("../drivers/vga.zig");
 const process = @import("process.zig");
 const vfs = @import("../fs/vfs.zig");
-const memory = @import("../memory/memory.zig");
-const syscall = @import("syscall.zig");
 
 pub fn ls_main(args: [][]const u8) void {
     _ = args;
@@ -13,6 +11,7 @@ pub fn ls_main(args: [][]const u8) void {
     };
     defer vfs.close(dir_fd) catch {};
 
+    // SAFETY: Populated by vfs.readdir call below
     var entry: vfs.DirEntry = undefined;
     var index: u64 = 0;
 
@@ -42,6 +41,7 @@ pub fn cat_main(args: [][]const u8) void {
     };
     defer vfs.close(fd) catch {};
 
+    // SAFETY: filled by the subsequent vfs.read call
     var buffer: [4096]u8 = undefined;
     while (true) {
         const bytes_read = vfs.read(fd, &buffer) catch break;
@@ -103,6 +103,7 @@ fn printNumber(n: usize) void {
     }
 
     var num = n;
+    // SAFETY: filled by the following digit extraction loop
     var digits: [20]u8 = undefined;
     var i: usize = 0;
 

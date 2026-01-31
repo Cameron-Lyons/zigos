@@ -1,4 +1,3 @@
-const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 
 const HEAP_START: usize = 0x100000;
@@ -16,16 +15,18 @@ const BlockHeader = struct {
     prev: ?*BlockHeader,
 };
 
+// SAFETY: assigned in init() before any heap operations
 var heap_start: [*]u8 = undefined;
+// SAFETY: assigned in init() before any heap operations
 var heap_end: [*]u8 = undefined;
 var free_list: ?*BlockHeader = null;
 var is_initialized = false;
 
 pub fn init() void {
-    heap_start = @as([*]u8, @ptrFromInt(HEAP_START));
+    heap_start = @ptrFromInt(HEAP_START);
     heap_end = heap_start + HEAP_SIZE;
 
-    const initial_block = @as(*BlockHeader, @ptrCast(@alignCast(heap_start)));
+    const initial_block: *BlockHeader = @ptrCast(@alignCast(heap_start));
     initial_block.size = HEAP_SIZE - @sizeOf(BlockHeader);
     initial_block.is_free = true;
     initial_block.next = null;
@@ -44,6 +45,7 @@ pub fn init() void {
 
 fn printHex(value: usize) void {
     const hex_chars = "0123456789ABCDEF";
+    // SAFETY: filled by the following hex digit extraction loop
     var buffer: [16]u8 = undefined;
     var i: usize = 0;
     var v = value;
@@ -65,6 +67,7 @@ fn printHex(value: usize) void {
 }
 
 fn printDec(value: usize) void {
+    // SAFETY: filled by the following decimal digit extraction loop
     var buffer: [20]u8 = undefined;
     var i: usize = 0;
     var v = value;
@@ -94,8 +97,8 @@ fn splitBlock(block: *BlockHeader, size: usize) void {
     const new_block_offset = @sizeOf(BlockHeader) + alignUp(size, BLOCK_ALIGNMENT);
 
     if (total_size > new_block_offset + @sizeOf(BlockHeader) + MIN_BLOCK_SIZE) {
-        const new_block_ptr = @as([*]u8, @ptrCast(block)) + new_block_offset;
-        const new_block = @as(*BlockHeader, @ptrCast(@alignCast(new_block_ptr)));
+        const block_bytes: [*]u8 = @ptrCast(block);
+        const new_block: *BlockHeader = @ptrCast(@alignCast(block_bytes + new_block_offset));
 
         new_block.size = total_size - new_block_offset;
         new_block.is_free = true;
@@ -144,8 +147,8 @@ pub fn kmalloc(size: usize) ?*anyopaque {
             splitBlock(block, aligned_size);
             block.is_free = false;
 
-            const data_ptr = @as([*]u8, @ptrCast(block)) + @sizeOf(BlockHeader);
-            return @as(*anyopaque, @ptrCast(data_ptr));
+            const data_ptr: [*]u8 = @ptrCast(block);
+            return @ptrCast(data_ptr + @sizeOf(BlockHeader));
         }
         current = block.next;
     }
@@ -156,8 +159,8 @@ pub fn kmalloc(size: usize) ?*anyopaque {
 pub fn kfree(ptr: ?*anyopaque) void {
     if (ptr == null or !is_initialized) return;
 
-    const block_ptr = @as([*]u8, @ptrCast(ptr.?)) - @sizeOf(BlockHeader);
-    const block = @as(*BlockHeader, @ptrCast(@alignCast(block_ptr)));
+    const raw_ptr: [*]u8 = @ptrCast(ptr.?);
+    const block: *BlockHeader = @ptrCast(@alignCast(raw_ptr - @sizeOf(BlockHeader)));
 
     if (@intFromPtr(block) < @intFromPtr(heap_start) or
         @intFromPtr(block) >= @intFromPtr(heap_end)) {
@@ -175,8 +178,8 @@ pub fn krealloc(ptr: ?*anyopaque, new_size: usize) ?*anyopaque {
         return null;
     }
 
-    const block_ptr = @as([*]u8, @ptrCast(ptr.?)) - @sizeOf(BlockHeader);
-    const block = @as(*BlockHeader, @ptrCast(@alignCast(block_ptr)));
+    const raw_ptr: [*]u8 = @ptrCast(ptr.?);
+    const block: *BlockHeader = @ptrCast(@alignCast(raw_ptr - @sizeOf(BlockHeader)));
 
     if (block.size >= new_size) {
         return ptr;
@@ -244,7 +247,8 @@ pub fn alloc(comptime T: type) ?*T {
     const size = @sizeOf(T);
 
     if (kmalloc(size)) |ptr| {
-        const typed_ptr = @as(*T, @ptrCast(@alignCast(ptr)));
+        const typed_ptr: *T = @ptrCast(@alignCast(ptr));
+        // SAFETY: Immediately overwritten by caller
         typed_ptr.* = undefined;
         return typed_ptr;
     }

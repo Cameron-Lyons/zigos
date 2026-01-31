@@ -17,92 +17,32 @@ const AC97_DEVICE_ICH7 = 0x27DE;
 
 const NAM_RESET = 0x00;
 const NAM_MASTER_VOLUME = 0x02;
-const NAM_AUX_OUT_VOLUME = 0x04;
-const NAM_MONO_VOLUME = 0x06;
-const NAM_MASTER_TONE = 0x08;
 const NAM_PC_BEEP = 0x0A;
-const NAM_PHONE_VOLUME = 0x0C;
-const NAM_MIC_VOLUME = 0x0E;
-const NAM_LINE_IN_VOLUME = 0x10;
-const NAM_CD_VOLUME = 0x12;
-const NAM_VIDEO_VOLUME = 0x14;
-const NAM_AUX_IN_VOLUME = 0x16;
 const NAM_PCM_OUT_VOLUME = 0x18;
-const NAM_RECORD_SELECT = 0x1A;
-const NAM_RECORD_GAIN = 0x1C;
-const NAM_RECORD_GAIN_MIC = 0x1E;
-const NAM_GENERAL_PURPOSE = 0x20;
-const NAM_3D_CONTROL = 0x22;
-const NAM_AUDIO_INT_PAGING = 0x24;
-const NAM_POWERDOWN_CTRL = 0x26;
 const NAM_EXT_AUDIO_ID = 0x28;
 const NAM_EXT_AUDIO_CTRL = 0x2A;
 const NAM_PCM_FRONT_DAC_RATE = 0x2C;
-const NAM_PCM_SURR_DAC_RATE = 0x2E;
-const NAM_PCM_LFE_DAC_RATE = 0x30;
 const NAM_PCM_LR_ADC_RATE = 0x32;
-const NAM_MIC_ADC_RATE = 0x34;
-const NAM_VENDOR_ID1 = 0x7C;
-const NAM_VENDOR_ID2 = 0x7E;
 
 const NABM_GLOB_CNT = 0x2C;
 const NABM_GLOB_STA = 0x30;
 
-const NABM_CAS = 0x34;
-
 const PO_BDBAR = 0x10;
-const PO_CIV = 0x14;
 const PO_LVI = 0x15;
 const PO_SR = 0x16;
-const PO_PICB = 0x18;
-const PO_PIV = 0x1A;
 const PO_CR = 0x1B;
-
-const PI_BDBAR = 0x00;
-const PI_CIV = 0x04;
-const PI_LVI = 0x05;
-const PI_SR = 0x06;
-const PI_PICB = 0x08;
-const PI_PIV = 0x0A;
-const PI_CR = 0x0B;
-
-const MC_BDBAR = 0x20;
-const MC_CIV = 0x24;
-const MC_LVI = 0x25;
-const MC_SR = 0x26;
-const MC_PICB = 0x28;
-const MC_PIV = 0x2A;
-const MC_CR = 0x2B;
 
 const CR_RPBM = 1 << 0;
 const CR_RR = 1 << 1;
 const CR_LVBIE = 1 << 2;
-const CR_FEIE = 1 << 3;
 const CR_IOCE = 1 << 4;
 
-const SR_DCH = 1 << 0;
-const SR_CELV = 1 << 1;
 const SR_LVBCI = 1 << 2;
 const SR_BCIS = 1 << 3;
 const SR_FIFOE = 1 << 4;
 
 const GLOB_CNT_COLD_RESET = 1 << 1;
-const GLOB_CNT_WARM_RESET = 1 << 2;
-const GLOB_CNT_SHUT_DOWN = 1 << 3;
-
-const GLOB_STA_GSCI = 1 << 0;
-const GLOB_STA_MIINT = 1 << 1;
-const GLOB_STA_MOINT = 1 << 2;
-const GLOB_STA_PIINT = 1 << 5;
-const GLOB_STA_POINT = 1 << 6;
-const GLOB_STA_MINT = 1 << 7;
 const GLOB_STA_PCR = 1 << 8;
-const GLOB_STA_SCR = 1 << 9;
-const GLOB_STA_PRI = 1 << 10;
-const GLOB_STA_SRI = 1 << 11;
-const GLOB_STA_RCS = 1 << 15;
-const GLOB_STA_AD3 = 1 << 16;
-const GLOB_STA_MD3 = 1 << 17;
 
 const BDL_ENTRIES = 32;
 const BUFFER_SIZE = 0x10000;
@@ -188,7 +128,7 @@ const AC97Device = struct {
 
         const buffer_samples = BUFFER_SIZE / 2;
         const current_offset = @as(usize, self.current_buffer) * BUFFER_SIZE;
-        const dest = @as([*]i16, @ptrCast(@alignCast(&self.audio_buffer[current_offset])));
+        const dest: [*]i16 = @ptrCast(@alignCast(&self.audio_buffer[current_offset]));
 
         const copy_count = @min(samples.len, buffer_samples);
         @memcpy(dest[0..copy_count], samples[0..copy_count]);
@@ -290,7 +230,9 @@ fn initDevice(pci_device: pci.PCIDevice) void {
         .nam_base = @as(u16, @intCast(pci_device.bar0 & 0xFFFE)),
         .nabm_base = @as(u16, @intCast(pci_device.bar1 & 0xFFFE)),
         .irq = pci.readConfigByte(pci_device.bus, pci_device.device, pci_device.function, 0x3C),
+        // SAFETY: initialized by setupBuffers call below
         .bdl = undefined,
+        // SAFETY: initialized by setupBuffers call below
         .audio_buffer = undefined,
         .current_buffer = 0,
         .is_playing = false,
@@ -316,6 +258,7 @@ fn initDevice(pci_device: pci.PCIDevice) void {
 
 pub fn playBeep() void {
     if (ac97_device) |*dev| {
+        // SAFETY: filled by the following sine wave generation loop
         var beep_samples: [4800]i16 = undefined;
         const frequency = 440.0;
         const amplitude = 0x2000;

@@ -1,4 +1,3 @@
-const std = @import("std");
 const paging = @import("paging.zig");
 const vga = @import("../drivers/vga.zig");
 const memory = @import("memory.zig");
@@ -42,7 +41,7 @@ pub fn copyFromUser(kernel_dest: []u8, user_src: usize) !void {
     const flags = disableInterrupts();
     defer restoreInterrupts(flags);
 
-    const user_ptr = @as([*]const u8, @ptrFromInt(user_src));
+    const user_ptr: [*]const u8 = @ptrFromInt(user_src);
     @memcpy(kernel_dest, user_ptr[0..kernel_dest.len]);
 }
 
@@ -54,7 +53,7 @@ pub fn copyToUser(user_dest: usize, kernel_src: []const u8) !void {
     const flags = disableInterrupts();
     defer restoreInterrupts(flags);
 
-    const user_ptr = @as([*]u8, @ptrFromInt(user_dest));
+    const user_ptr: [*]u8 = @ptrFromInt(user_dest);
     @memcpy(user_ptr[0..kernel_src.len], kernel_src);
 }
 
@@ -129,6 +128,7 @@ pub fn freeUserMemory(addr: usize, size: usize) void {
 }
 
 fn disableInterrupts() u32 {
+    // SAFETY: populated by the subsequent inline assembly reading EFLAGS
     var flags: u32 = undefined;
     asm volatile (
         \\pushfl

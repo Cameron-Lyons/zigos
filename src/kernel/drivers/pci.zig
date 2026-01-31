@@ -1,4 +1,3 @@
-const std = @import("std");
 const io = @import("../utils/io.zig");
 const vga = @import("vga.zig");
 
@@ -46,13 +45,13 @@ pub fn writeConfig(bus: u8, device: u8, func: u8, offset: u8, value: u32) void {
 
 pub fn checkDevice(bus: u8, device: u8, func: u8) ?PCIDevice {
     const vendor_device = readConfig(bus, device, func, 0x00);
-    const vendor_id = @as(u16, @intCast(vendor_device & 0xFFFF));
+    const vendor_id: u16 = @intCast(vendor_device & 0xFFFF);
 
     if (vendor_id == 0xFFFF) {
         return null;
     }
 
-    const device_id = @as(u16, @intCast((vendor_device >> 16) & 0xFFFF));
+    const device_id: u16 = @intCast((vendor_device >> 16) & 0xFFFF);
     const class_info = readConfig(bus, device, func, 0x08);
 
     const pci_device = PCIDevice{
@@ -153,13 +152,13 @@ fn printHex16(value: u16) void {
 
 pub fn readConfigByte(bus: u8, device: u8, func: u8, offset: u8) u8 {
     const data = readConfig(bus, device, func, offset);
-    const shift = @as(u5, @intCast((offset & 3) * 8));
+    const shift: u5 = @intCast((offset & 3) * 8);
     return @as(u8, @truncate(data >> shift));
 }
 
 pub fn readConfigWord(bus: u8, device: u8, func: u8, offset: u8) u16 {
     const data = readConfig(bus, device, func, offset);
-    const shift = @as(u5, @intCast((offset & 2) * 8));
+    const shift: u5 = @intCast((offset & 2) * 8);
     return @as(u16, @truncate(data >> shift));
 }
 
@@ -177,7 +176,7 @@ pub fn writeConfigByte(bus: u8, device: u8, func: u8, offset: u8, value: u8) voi
 
 pub fn writeConfigWord(bus: u8, device: u8, func: u8, offset: u8, value: u16) void {
     const old_data = readConfig(bus, device, func, offset);
-    const shift = @as(u5, @intCast((offset & 2) * 8));
+    const shift: u5 = @intCast((offset & 2) * 8);
     const mask = ~(@as(u32, 0xFFFF) << shift);
     const new_data = (old_data & mask) | (@as(u32, value) << shift);
     writeConfig(bus, device, func, offset, new_data);

@@ -1,8 +1,5 @@
-const std = @import("std");
 const process = @import("process.zig");
 const vga = @import("../drivers/vga.zig");
-const memory = @import("../memory/memory.zig");
-const isr = @import("../interrupts/isr.zig");
 
 pub const SIGHUP = 1;
 pub const SIGINT = 2;
@@ -40,7 +37,7 @@ pub const SIGRTMAX = 64;
 
 pub const SIG_DFL = 0;
 pub const SIG_IGN = 1;
-pub const SIG_ERR = @as(usize, 0xFFFFFFFF);
+pub const SIG_ERR: usize = 0xFFFFFFFF;
 
 pub const SA_NOCLDSTOP = 1 << 0;
 pub const SA_NOCLDWAIT = 1 << 1;
@@ -75,22 +72,22 @@ pub const SigSet = struct {
 
     pub fn add(self: *SigSet, signum: i32) void {
         if (signum <= 0 or signum > 64) return;
-        const idx = @as(usize, @intCast((signum - 1) / 32));
-        const bit = @as(u5, @intCast((signum - 1) % 32));
+        const idx: usize = @intCast((signum - 1) / 32);
+        const bit: u5 = @intCast((signum - 1) % 32);
         self.sig[idx] |= @as(u32, 1) << bit;
     }
 
     pub fn del(self: *SigSet, signum: i32) void {
         if (signum <= 0 or signum > 64) return;
-        const idx = @as(usize, @intCast((signum - 1) / 32));
-        const bit = @as(u5, @intCast((signum - 1) % 32));
+        const idx: usize = @intCast((signum - 1) / 32);
+        const bit: u5 = @intCast((signum - 1) % 32);
         self.sig[idx] &= ~(@as(u32, 1) << bit);
     }
 
     pub fn ismember(self: *const SigSet, signum: i32) bool {
         if (signum <= 0 or signum > 64) return false;
-        const idx = @as(usize, @intCast((signum - 1) / 32));
-        const bit = @as(u5, @intCast((signum - 1) % 32));
+        const idx: usize = @intCast((signum - 1) / 32);
+        const bit: u5 = @intCast((signum - 1) % 32);
         return (self.sig[idx] & (@as(u32, 1) << bit)) != 0;
     }
 };
@@ -125,6 +122,7 @@ pub const SignalQueue = struct {
     pub fn init() SignalQueue {
         return SignalQueue{
             .pending = SigSet.empty(),
+            // SAFETY: Array elements set to defaults during init loop below
             .queue = undefined,
             .head = 0,
             .tail = 0,
@@ -175,6 +173,7 @@ pub const ProcessSignals = struct {
 
     pub fn init() ProcessSignals {
         var signals = ProcessSignals{
+            // SAFETY: Array elements set to defaults during init loop below
             .handlers = undefined,
             .blocked = SigSet.empty(),
             .pending = SignalQueue.init(),
@@ -427,6 +426,7 @@ fn printNumber(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var count: usize = 0;
     var n = num;

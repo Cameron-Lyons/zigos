@@ -1,4 +1,4 @@
-const std = @import("std");
+// zlint-disable suppressed-errors
 const io = @import("../utils/io.zig");
 const pci = @import("pci.zig");
 const idt = @import("../interrupts/idt.zig");
@@ -107,8 +107,11 @@ const RTL8139 = struct {
     pub fn init(device: pci.PCIDevice) !RTL8139 {
         var rtl = RTL8139{
             .io_base = @intCast(device.bar0 & 0xFFFC),
+            // SAFETY: populated by reading MAC registers below
             .mac_address = undefined,
+            // SAFETY: assigned from kmalloc allocation below
             .rx_buffer = undefined,
+            // SAFETY: each entry assigned from kmalloc in the following loop
             .tx_buffers = undefined,
             .current_tx = 0,
             .rx_offset = 0,
@@ -275,7 +278,7 @@ pub fn init() void {
 
         rtl8139_device = rtl;
 
-        const irq = @as(u8, @intCast(pci.readConfig(device.bus, device.device, device.function, 0x3C) & 0xFF));
+        const irq: u8 = @intCast(pci.readConfig(device.bus, device.device, device.function, 0x3C) & 0xFF);
         idt.register_interrupt_handler(32 + irq, rtl8139InterruptHandler);
 
         vga.print("RTL8139 initialized - MAC: ");

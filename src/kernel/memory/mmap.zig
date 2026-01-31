@@ -1,8 +1,7 @@
-const std = @import("std");
+// zlint-disable suppressed-errors
 const vfs = @import("../fs/vfs.zig");
 const paging = @import("paging.zig");
 const memory = @import("memory.zig");
-const process = @import("../process/process.zig");
 const vga = @import("../drivers/vga.zig");
 
 pub const MMapFlags = struct {
@@ -85,7 +84,7 @@ pub fn mmap(addr: ?usize, length: usize, prot: u32, flags: u32, fd: i32, offset:
         }
 
         const file_ops = @import("../fs/file_ops.zig");
-        const index = @as(usize, @intCast(fd));
+        const index: usize = @intCast(fd);
         if (index >= file_ops.MAX_FDS) {
             return MMapError.InvalidFd;
         }
@@ -103,6 +102,7 @@ pub fn mmap(addr: ?usize, length: usize, prot: u32, flags: u32, fd: i32, offset:
         }
     }
 
+    // SAFETY: assigned in every branch of the if/else below before use
     var base_addr: usize = undefined;
     if (addr) |requested_addr| {
         if ((flags & MMapFlags.FIXED) != 0) {

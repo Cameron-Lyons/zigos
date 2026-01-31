@@ -1,9 +1,7 @@
-const std = @import("std");
+// zlint-disable suppressed-errors
 const socket = @import("socket.zig");
-const udp = @import("udp.zig");
 const ipv4 = @import("ipv4.zig");
 const network = @import("network.zig");
-const memory = @import("../memory/memory.zig");
 const vga = @import("../drivers/vga.zig");
 const timer = @import("../timer/timer.zig");
 
@@ -104,23 +102,26 @@ pub const DHCPClient = struct {
         const zero_ip = ipv4.IPv4Address{ .octets = .{ 0, 0, 0, 0 } };
         try sock.bind(zero_ip, DHCP_CLIENT_PORT);
 
+        // SAFETY: zeroed by the subsequent @memset call
         var packet: [548]u8 = undefined;
         @memset(&packet, 0);
 
-        const header = @as(*DHCPHeader, @ptrCast(@alignCast(&packet[0])));
+        const header: *DHCPHeader = @ptrCast(@alignCast(&packet[0]));
         header.op = 1;
         header.htype = 1;
         header.hlen = 6;
         header.hops = 0;
         header.xid = @byteSwap(self.transaction_id);
         header.secs = 0;
-        header.flags = @byteSwap(@as(u16, 0x8000));
+        const discover_flags: u16 = 0x8000;
+        header.flags = @byteSwap(discover_flags);
         header.ciaddr = 0;
         header.yiaddr = 0;
         header.siaddr = 0;
         header.giaddr = 0;
         @memcpy(header.chaddr[0..6], &self.mac_address);
-        header.magic = @byteSwap(@as(u32, DHCP_MAGIC_COOKIE));
+        const discover_magic: u32 = DHCP_MAGIC_COOKIE;
+        header.magic = @byteSwap(discover_magic);
 
         var options_offset: usize = 240;
 
@@ -144,13 +145,13 @@ pub const DHCPClient = struct {
             return error.InvalidPacket;
         }
 
-        const header = @as(*const DHCPHeader, @ptrCast(@alignCast(&data[0])));
+        const header: *const DHCPHeader = @ptrCast(@alignCast(&data[0]));
 
         if (@byteSwap(header.xid) != self.transaction_id) {
             return error.InvalidTransaction;
         }
 
-        const yiaddr_bytes = @as([4]u8, @bitCast(header.yiaddr));
+        const yiaddr_bytes: [4]u8 = @bitCast(header.yiaddr);
         self.client_ip = ipv4.IPv4Address{ .octets = yiaddr_bytes };
 
         self.parseOptions(data[240..]);
@@ -166,32 +167,37 @@ pub const DHCPClient = struct {
         const zero_ip = ipv4.IPv4Address{ .octets = .{ 0, 0, 0, 0 } };
         try sock.bind(zero_ip, DHCP_CLIENT_PORT);
 
+        // SAFETY: zeroed by the subsequent @memset call
         var packet: [548]u8 = undefined;
         @memset(&packet, 0);
 
-        const header = @as(*DHCPHeader, @ptrCast(@alignCast(&packet[0])));
+        const header: *DHCPHeader = @ptrCast(@alignCast(&packet[0]));
         header.op = 1;
         header.htype = 1;
         header.hlen = 6;
         header.hops = 0;
         header.xid = @byteSwap(self.transaction_id);
         header.secs = 0;
-        header.flags = @byteSwap(@as(u16, 0x8000));
+        const request_flags: u16 = 0x8000;
+        header.flags = @byteSwap(request_flags);
         header.ciaddr = 0;
         header.yiaddr = 0;
         header.siaddr = 0;
         header.giaddr = 0;
         @memcpy(header.chaddr[0..6], &self.mac_address);
-        header.magic = @byteSwap(@as(u32, DHCP_MAGIC_COOKIE));
+        const request_magic: u32 = DHCP_MAGIC_COOKIE;
+        header.magic = @byteSwap(request_magic);
 
         var options_offset: usize = 240;
 
         options_offset = self.addOption(&packet, options_offset, .MESSAGE_TYPE, &[_]u8{@intFromEnum(DHCPMessageType.REQUEST)});
 
-        const requested_ip = @as([4]u8, @bitCast(@as(u32, @bitCast(self.client_ip.octets))));
+        const client_ip_u32: u32 = @bitCast(self.client_ip.octets);
+        const requested_ip: [4]u8 = @bitCast(client_ip_u32);
         options_offset = self.addOption(&packet, options_offset, .REQUESTED_IP, &requested_ip);
 
-        const server_id = @as([4]u8, @bitCast(@as(u32, @bitCast(self.server_ip.octets))));
+        const req_server_ip_u32: u32 = @bitCast(self.server_ip.octets);
+        const server_id: [4]u8 = @bitCast(req_server_ip_u32);
         options_offset = self.addOption(&packet, options_offset, .SERVER_ID, &server_id);
 
         packet[options_offset] = @intFromEnum(DHCPOptionType.END);
@@ -208,7 +214,7 @@ pub const DHCPClient = struct {
             return error.InvalidPacket;
         }
 
-        const header = @as(*const DHCPHeader, @ptrCast(@alignCast(&data[0])));
+        const header: *const DHCPHeader = @ptrCast(@alignCast(&data[0]));
 
         if (@byteSwap(header.xid) != self.transaction_id) {
             return error.InvalidTransaction;
@@ -260,7 +266,8 @@ pub const DHCPClient = struct {
 
             if (i + opt_len > options.len) break;
 
-            switch (@as(DHCPOptionType, @enumFromInt(opt_type))) {
+            const opt_type_enum: DHCPOptionType = @enumFromInt(opt_type);
+            switch (opt_type_enum) {
                 .SUBNET_MASK => {
                     if (opt_len == 4) {
                         self.subnet_mask = ipv4.IPv4Address{ .octets = .{
@@ -284,9 +291,12 @@ pub const DHCPClient = struct {
                 },
                 .LEASE_TIME => {
                     if (opt_len == 4) {
-                        self.lease_time = (@as(u32, options[i]) << 24) |
-                                         (@as(u32, options[i + 1]) << 16) |
-                                         (@as(u32, options[i + 2]) << 8) |
+                        const b0: u32 = options[i];
+                        const b1: u32 = options[i + 1];
+                        const b2: u32 = options[i + 2];
+                        self.lease_time = (b0 << 24) |
+                                         (b1 << 16) |
+                                         (b2 << 8) |
                                          options[i + 3];
                         self.renewal_time = self.lease_time / 2;
                         self.rebinding_time = (self.lease_time * 7) / 8;
@@ -324,10 +334,11 @@ pub const DHCPClient = struct {
 
         try sock.bind(self.client_ip, DHCP_CLIENT_PORT);
 
+        // SAFETY: zeroed by the subsequent @memset call
         var packet: [548]u8 = undefined;
         @memset(&packet, 0);
 
-        const header = @as(*DHCPHeader, @ptrCast(@alignCast(&packet[0])));
+        const header: *DHCPHeader = @ptrCast(@alignCast(&packet[0]));
         header.op = 1;
         header.htype = 1;
         header.hlen = 6;
@@ -340,13 +351,15 @@ pub const DHCPClient = struct {
         header.siaddr = 0;
         header.giaddr = 0;
         @memcpy(header.chaddr[0..6], &self.mac_address);
-        header.magic = @byteSwap(@as(u32, DHCP_MAGIC_COOKIE));
+        const release_magic: u32 = DHCP_MAGIC_COOKIE;
+        header.magic = @byteSwap(release_magic);
 
         var options_offset: usize = 240;
 
         options_offset = self.addOption(&packet, options_offset, .MESSAGE_TYPE, &[_]u8{@intFromEnum(DHCPMessageType.RELEASE)});
 
-        const server_id = @as([4]u8, @bitCast(@as(u32, @bitCast(self.server_ip.octets))));
+        const rel_server_ip_u32: u32 = @bitCast(self.server_ip.octets);
+        const server_id: [4]u8 = @bitCast(rel_server_ip_u32);
         options_offset = self.addOption(&packet, options_offset, .SERVER_ID, &server_id);
 
         packet[options_offset] = @intFromEnum(DHCPOptionType.END);
@@ -388,7 +401,7 @@ pub fn handlePacket(data: []const u8) void {
             return;
         }
 
-        const header = @as(*const DHCPHeader, @ptrCast(@alignCast(&data[0])));
+        const header: *const DHCPHeader = @ptrCast(@alignCast(&data[0]));
         if (header.op != 2) {
             return;
         }
@@ -449,6 +462,7 @@ fn printNumber(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var count: usize = 0;
     var n = num;

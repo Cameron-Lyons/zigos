@@ -1,9 +1,7 @@
-const std = @import("std");
 const pci = @import("pci.zig");
 const memory = @import("../memory/memory.zig");
 const vga = @import("vga.zig");
 const io = @import("../utils/io.zig");
-const isr = @import("../interrupts/isr.zig");
 
 pub const USBSpeed = enum {
     Low,
@@ -69,20 +67,9 @@ pub const USBSetupPacket = extern struct {
     wLength: u16,
 };
 
-const USB_REQ_GET_STATUS = 0x00;
-const USB_REQ_CLEAR_FEATURE = 0x01;
-const USB_REQ_SET_FEATURE = 0x03;
-const USB_REQ_SET_ADDRESS = 0x05;
 const USB_REQ_GET_DESCRIPTOR = 0x06;
-const USB_REQ_SET_DESCRIPTOR = 0x07;
-const USB_REQ_GET_CONFIGURATION = 0x08;
-const USB_REQ_SET_CONFIGURATION = 0x09;
 
 const USB_DESC_DEVICE = 0x01;
-const USB_DESC_CONFIG = 0x02;
-const USB_DESC_STRING = 0x03;
-const USB_DESC_INTERFACE = 0x04;
-const USB_DESC_ENDPOINT = 0x05;
 
 const UHCI_CMD = 0x00;
 const UHCI_STS = 0x02;
@@ -96,26 +83,16 @@ const UHCI_PORTSC2 = 0x12;
 const UHCI_CMD_RS = 1 << 0;
 const UHCI_CMD_HCRESET = 1 << 1;
 const UHCI_CMD_GRESET = 1 << 2;
-const UHCI_CMD_EGSM = 1 << 3;
-const UHCI_CMD_FGR = 1 << 4;
-const UHCI_CMD_SWDBG = 1 << 5;
 const UHCI_CMD_CF = 1 << 6;
 const UHCI_CMD_MAXP = 1 << 7;
 
 const UHCI_STS_USBINT = 1 << 0;
 const UHCI_STS_ERROR = 1 << 1;
 const UHCI_STS_RD = 1 << 2;
-const UHCI_STS_HSE = 1 << 3;
-const UHCI_STS_HCPE = 1 << 4;
-const UHCI_STS_HCH = 1 << 5;
 
 const UHCI_PORTSC_CCS = 1 << 0;
 const UHCI_PORTSC_CSC = 1 << 1;
 const UHCI_PORTSC_PE = 1 << 2;
-const UHCI_PORTSC_PEC = 1 << 3;
-const UHCI_PORTSC_LSDA = 1 << 8;
-const UHCI_PORTSC_RD = 1 << 9;
-const UHCI_PORTSC_LSDC = 1 << 10;
 const UHCI_PORTSC_PRES = 1 << 12;
 
 const TD_TOKEN_PID_SETUP = 0x2D;
@@ -124,17 +101,8 @@ const TD_TOKEN_PID_OUT = 0xE1;
 
 const TD_CTRL_ACTIVE = 1 << 23;
 const TD_CTRL_STALLED = 1 << 22;
-const TD_CTRL_DATABUFFER = 1 << 21;
-const TD_CTRL_BABBLE = 1 << 20;
-const TD_CTRL_NAK = 1 << 19;
-const TD_CTRL_CRCTIMEOUT = 1 << 18;
-const TD_CTRL_BITSTUFF = 1 << 17;
-const TD_CTRL_SPD = 1 << 29;
 const TD_CTRL_IOC = 1 << 24;
-const TD_CTRL_IOS = 1 << 25;
-const TD_CTRL_LS = 1 << 26;
 const TD_CTRL_CERR_SHIFT = 27;
-const TD_CTRL_CERR_MASK = 0x3;
 
 const QH_PTR_TERMINATE = 1 << 0;
 const QH_PTR_QH = 1 << 1;
@@ -394,6 +362,7 @@ fn enumerateDevice(controller: *UHCIController, port: u8) void {
         .wLength = 8,
     };
 
+    // SAFETY: filled by the subsequent controlTransfer call
     var desc_buffer: [8]u8 = undefined;
     controller.controlTransfer(0, &setup, desc_buffer[0..]) catch {
         vga.print("Failed to get device descriptor\n");
@@ -419,6 +388,7 @@ fn printNumber(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var count: usize = 0;
     var n = num;

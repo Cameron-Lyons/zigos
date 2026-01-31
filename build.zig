@@ -22,11 +22,11 @@ pub fn build(b: *std.Build) void {
         .root_module = kernel_module,
     });
 
-    kernel.addAssemblyFile(b.path("src/boot/boot64.S"));
-    kernel.addAssemblyFile(b.path("src/kernel/interrupts/interrupt32.S"));
-    kernel.addAssemblyFile(b.path("src/kernel/interrupts/interrupts.s"));
-    kernel.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush.S"));
-    kernel.addAssemblyFile(b.path("src/kernel/process/context_switch.S"));
+    kernel_module.addAssemblyFile(b.path("src/boot/boot64.S"));
+    kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt32.S"));
+    kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupts.s"));
+    kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush.S"));
+    kernel_module.addAssemblyFile(b.path("src/kernel/process/context_switch.S"));
     kernel.setLinkerScript(b.path("src/arch/x86_64/linker.ld"));
 
     b.installArtifact(kernel);

@@ -1,4 +1,3 @@
-const std = @import("std");
 const syscall = @import("../process/syscall.zig");
 
 pub fn test_syscall_process() void {
@@ -11,9 +10,10 @@ pub fn test_syscall_process() void {
     const pid_msg = "Process ID: ";
     _ = syscall.syscall3(syscall.SYS_WRITE, syscall.STDOUT, @intFromPtr(pid_msg.ptr), pid_msg.len);
 
+    // SAFETY: filled by the following digit extraction loop
     var buf: [16]u8 = undefined;
     var i: usize = 0;
-    var n = @as(u32, @intCast(pid));
+    var n: u32 = @intCast(pid);
 
     if (n == 0) {
         buf[0] = '0';

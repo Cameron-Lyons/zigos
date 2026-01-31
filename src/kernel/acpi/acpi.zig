@@ -1,13 +1,10 @@
 const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const io = @import("../utils/io.zig");
-const memory = @import("../memory/memory.zig");
 
 const RSDP_SIGNATURE = "RSD PTR ";
 const FADT_SIGNATURE = "FACP";
 const DSDT_SIGNATURE = "DSDT";
-const SSDT_SIGNATURE = "SSDT";
-const MADT_SIGNATURE = "APIC";
 
 pub const ACPIHeader = extern struct {
     signature: [4]u8,
@@ -110,11 +107,6 @@ pub const GenericAddress = extern struct {
 const PM1_CTRL_SLP_TYP_SHIFT = 10;
 const PM1_CTRL_SLP_EN = 1 << 13;
 
-const SLP_TYP_S0 = 0x00;
-const SLP_TYP_S1 = 0x01;
-const SLP_TYP_S3 = 0x05;
-const SLP_TYP_S4 = 0x06;
-const SLP_TYP_S5 = 0x07;
 
 pub const PowerState = enum {
     S0_Working,
@@ -164,7 +156,7 @@ pub fn init() void {
 fn findRSDP() bool {
     var addr: usize = 0x000E0000;
     while (addr < 0x00100000) : (addr += 16) {
-        const ptr = @as(*RSDP, @ptrFromInt(addr));
+        const ptr: *RSDP = @ptrFromInt(addr);
         if (std.mem.eql(u8, &ptr.signature, RSDP_SIGNATURE)) {
             if (validateChecksum(@as([*]u8, @ptrCast(ptr)), 20)) {
                 rsdp_ptr = ptr;
@@ -180,7 +172,7 @@ fn findRSDP() bool {
     addr = ebda_addr;
     const ebda_end = ebda_addr + 1024;
     while (addr < ebda_end) : (addr += 16) {
-        const ptr = @as(*RSDP, @ptrFromInt(addr));
+        const ptr: *RSDP = @ptrFromInt(addr);
         if (std.mem.eql(u8, &ptr.signature, RSDP_SIGNATURE)) {
             if (validateChecksum(@as([*]u8, @ptrCast(ptr)), 20)) {
                 rsdp_ptr = ptr;
@@ -221,18 +213,18 @@ fn parseFADT() bool {
     if (rsdt_ptr) |rsdt| {
         const num_entries = (rsdt.header.length - @sizeOf(ACPIHeader)) / 4;
         for (0..num_entries) |i| {
-            const table = @as(*ACPIHeader, @ptrFromInt(rsdt.entries[i]));
+            const table: *ACPIHeader = @ptrFromInt(rsdt.entries[i]);
             if (std.mem.eql(u8, &table.signature, FADT_SIGNATURE)) {
-                fadt_ptr = @as(*FADT, @ptrFromInt(rsdt.entries[i]));
+                fadt_ptr = @ptrFromInt(rsdt.entries[i]);
                 break;
             }
         }
     } else if (xsdt_ptr) |xsdt| {
         const num_entries = (xsdt.header.length - @sizeOf(ACPIHeader)) / 8;
         for (0..num_entries) |i| {
-            const table = @as(*ACPIHeader, @ptrFromInt(@as(usize, @intCast(xsdt.entries[i]))));
+            const table: *ACPIHeader = @ptrFromInt(@as(usize, @intCast(xsdt.entries[i])));
             if (std.mem.eql(u8, &table.signature, FADT_SIGNATURE)) {
-                fadt_ptr = @as(*FADT, @ptrFromInt(@as(usize, @intCast(xsdt.entries[i]))));
+                fadt_ptr = @ptrFromInt(@as(usize, @intCast(xsdt.entries[i])));
                 break;
             }
         }
@@ -267,7 +259,7 @@ fn parseDSDT() void {
 
     if (dsdt_addr == 0) return;
 
-    const dsdt = @as(*ACPIHeader, @ptrFromInt(dsdt_addr));
+    const dsdt: *ACPIHeader = @ptrFromInt(dsdt_addr);
     if (!std.mem.eql(u8, &dsdt.signature, DSDT_SIGNATURE)) {
         return;
     }
@@ -465,6 +457,7 @@ fn busyWait(microseconds: u32) void {
 
 fn printHex(value: usize) void {
     const hex_chars = "0123456789ABCDEF";
+    // SAFETY: filled by the following hex digit extraction loop
     var buffer: [16]u8 = undefined;
     var i: usize = 0;
     var v = value;

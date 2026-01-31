@@ -1,4 +1,3 @@
-const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const process = @import("process.zig");
 const scheduler = @import("scheduler.zig");
@@ -224,6 +223,7 @@ pub const Pipe = struct {
         return Pipe{
             .read_end = process.next_pid,
             .write_end = process.next_pid + 1,
+            // SAFETY: Buffer filled by write operations
             .buffer = undefined,
             .read_pos = 0,
             .write_pos = 0,
@@ -316,7 +316,6 @@ pub const Pipe = struct {
 };
 
 const MAX_MESSAGE_QUEUES = 64;
-const MAX_SHARED_MEMORY = 32;
 const MAX_PIPES = 128;
 
 var message_queues: [MAX_MESSAGE_QUEUES]?MessageQueue = [_]?MessageQueue{null} ** MAX_MESSAGE_QUEUES;
@@ -493,6 +492,7 @@ fn pipe_reader() void {
     timer.sleep(100);
 
     if (pipes[0]) |*pipe| {
+        // SAFETY: filled by the subsequent pipe.read call
         var buffer: [64]u8 = undefined;
         const bytes_read = pipe.read(&buffer) catch |err| {
             vga.print("[PIPE READER] Read failed: ");
@@ -553,6 +553,7 @@ fn shm_reader() void {
         shm.attach();
         defer shm.detach();
 
+        // SAFETY: filled by the subsequent shm.read call
         var buffer: [64]u8 = undefined;
         const bytes_read = shm.read(&buffer, 0) catch |err| {
             vga.print("[SHM READER] Read failed: ");
@@ -606,6 +607,7 @@ fn print_number(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var i: usize = 0;
     var n = num;

@@ -1,9 +1,9 @@
-const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const paging = @import("../memory/paging.zig");
 const gdt = @import("../interrupts/gdt.zig");
 const memory = @import("../memory/memory.zig");
 const scheduler = @import("scheduler.zig");
+const smp = @import("../smp/smp.zig");
 
 pub const ProcessState = enum {
     Ready,
@@ -52,11 +52,31 @@ pub const Process = struct {
 };
 
 const MAX_PROCESSES = 256;
+const SMP_MAX_CPUS = 16;
+// SAFETY: all entries initialized in init() before use
 pub var process_table: [MAX_PROCESSES]Process = undefined;
 pub var next_pid: u32 = 1;
 pub var current_process: ?*Process = null;
 pub var process_list_head: ?*Process = null;
+// SAFETY: Initialized in initScheduler() before use
 var idle_process: *Process = undefined;
+var per_cpu_current: [SMP_MAX_CPUS]?*Process = [_]?*Process{null} ** SMP_MAX_CPUS;
+
+pub fn setPerCPUCurrent(cpu_id: u32, proc: *Process) void {
+    if (cpu_id < SMP_MAX_CPUS) {
+        per_cpu_current[cpu_id] = proc;
+    }
+}
+
+pub fn getEffectiveCurrent() ?*Process {
+    if (smp.isSMPEnabled()) {
+        const cpu_id = smp.getCurrentCPU();
+        if (cpu_id < SMP_MAX_CPUS and per_cpu_current[cpu_id] != null) {
+            return per_cpu_current[cpu_id];
+        }
+    }
+    return current_process;
+}
 
 pub fn getProcessList() ?*Process {
     return process_list_head;
@@ -148,6 +168,7 @@ pub fn init() void {
 
     idle_process = create_kernel_process("idle", idle_task);
     current_process = idle_process;
+    per_cpu_current[0] = idle_process;
 
     vga.print("Process management initialized!\n");
 }
@@ -297,13 +318,27 @@ pub fn switch_process(old: *Context, new: *Context) void {
 }
 
 pub fn yield() void {
+    smp.scheduler_lock.acquire();
     const next = schedule();
-    if (next != null and next != current_process) {
-        const old_process = current_process.?;
-        current_process = next;
-        old_process.state = .Ready;
-        current_process.?.state = .Running;
-        switch_process(&old_process.context, &current_process.?.context);
+    const cpu_id = smp.getCurrentCPU();
+    const old_proc = if (smp.isSMPEnabled() and cpu_id < SMP_MAX_CPUS)
+        per_cpu_current[cpu_id] orelse current_process
+    else
+        current_process;
+
+    if (next != null and old_proc != null and next != old_proc) {
+        const old = old_proc.?;
+        const new = next.?;
+        if (smp.isSMPEnabled() and cpu_id < SMP_MAX_CPUS) {
+            per_cpu_current[cpu_id] = new;
+        }
+        current_process = new;
+        old.state = .Ready;
+        new.state = .Running;
+        smp.scheduler_lock.release();
+        switch_process(&old.context, &new.context);
+    } else {
+        smp.scheduler_lock.release();
     }
 }
 
@@ -313,6 +348,7 @@ fn print_number(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var i: usize = 0;
     var n = num;

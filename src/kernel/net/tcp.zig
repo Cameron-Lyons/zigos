@@ -1,10 +1,19 @@
-const std = @import("std");
-const network = @import("network.zig");
+// zlint-disable suppressed-errors
 const ipv4 = @import("ipv4.zig");
 const memory = @import("../memory/memory.zig");
 const vga = @import("../drivers/vga.zig");
+const timer = @import("../timer/timer.zig");
 
 const TCP_PROTOCOL = 6;
+const TCP_MSS: u16 = 536;
+const TCP_INITIAL_CWND: u32 = TCP_MSS * 2;
+const TCP_INITIAL_SSTHRESH: u32 = 65535;
+const TCP_INITIAL_RTO: u32 = 100;
+const TCP_MAX_RTO: u32 = 6000;
+const TCP_MIN_RTO: u32 = 20;
+const TCP_MAX_RETRIES: u8 = 10;
+const TCP_TIME_WAIT_TICKS: u64 = 12000;
+const TCP_MAX_RETX_ENTRIES = 8;
 
 const TCPFlags = struct {
     const FIN = 1 << 0;
@@ -53,6 +62,16 @@ const TCPHeader = packed struct {
     }
 };
 
+const RetxEntry = struct {
+    seq_num: u32,
+    data_len: u16,
+    send_time: u64,
+    retries: u8,
+    flags: u8,
+    data: [TCP_MSS]u8,
+    active: bool,
+};
+
 const TCPConnectionStruct = struct {
     local_addr: u32,
     remote_addr: u32,
@@ -63,12 +82,24 @@ const TCPConnectionStruct = struct {
     recv_seq: u32,
     send_ack: u32,
     recv_ack: u32,
+    send_una: u32,
     send_window: u16,
     recv_window: u16,
     recv_buffer: []u8,
     recv_buffer_used: usize,
     send_buffer: []u8,
     send_buffer_used: usize,
+    cwnd: u32,
+    ssthresh: u32,
+    mss: u16,
+    bytes_in_flight: u32,
+    rto: u32,
+    srtt: u32,
+    rttvar: u32,
+    dup_ack_count: u8,
+    retx_count: u8,
+    time_wait_start: u64,
+    retx_queue: [TCP_MAX_RETX_ENTRIES]RetxEntry,
 };
 
 const TCPSocket = struct {
@@ -98,7 +129,8 @@ fn calculateChecksum(src_ip: u32, dst_ip: u32, tcp_header: *const TCPHeader, dat
     sum += TCP_PROTOCOL;
     sum += @sizeOf(TCPHeader) + data.len;
 
-    const header_bytes = @as([*]const u8, @ptrCast(tcp_header))[0..@sizeOf(TCPHeader)];
+    const header_bytes_ptr: [*]const u8 = @ptrCast(tcp_header);
+    const header_bytes = header_bytes_ptr[0..@sizeOf(TCPHeader)];
     var i: usize = 0;
     while (i < header_bytes.len - 1) : (i += 2) {
         sum += @as(u16, header_bytes[i]) << 8 | header_bytes[i + 1];
@@ -116,16 +148,22 @@ fn calculateChecksum(src_ip: u32, dst_ip: u32, tcp_header: *const TCPHeader, dat
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
 
-    return ~@as(u16, @intCast(sum));
+    const result: u16 = @intCast(sum);
+    return ~result;
 }
 
 fn sendTCPPacket(connection: *TCPConnectionStruct, flags: u8, data: []const u8) !void {
+    const effective_window = @min(connection.recv_window, @as(u16, @intCast(@min(connection.cwnd, 0xFFFF))));
+    if (data.len > 0 and connection.bytes_in_flight >= effective_window) {
+        return error.WindowFull;
+    }
+
     const packet_size = @sizeOf(TCPHeader) + data.len;
     const packet_mem = memory.kmalloc(packet_size) orelse return error.OutOfMemory;
     defer memory.kfree(packet_mem);
 
-    const packet = @as([*]u8, @ptrCast(@alignCast(packet_mem)));
-    const tcp_header = @as(*TCPHeader, @ptrCast(@alignCast(packet)));
+    const packet: [*]u8 = @ptrCast(@alignCast(packet_mem));
+    const tcp_header: *TCPHeader = @ptrCast(@alignCast(packet));
 
     tcp_header.src_port = @byteSwap(connection.local_port);
     tcp_header.dst_port = @byteSwap(connection.remote_port);
@@ -144,11 +182,35 @@ fn sendTCPPacket(connection: *TCPConnectionStruct, flags: u8, data: []const u8) 
 
     try ipv4.sendPacket(connection.remote_addr, @enumFromInt(TCP_PROTOCOL), packet[0..packet_size]);
 
+    if (data.len > 0 or (flags & (TCPFlags.SYN | TCPFlags.FIN)) != 0) {
+        for (&connection.retx_queue) |*entry| {
+            if (!entry.active) {
+                entry.seq_num = connection.send_seq;
+                entry.data_len = @intCast(data.len);
+                entry.send_time = timer.getTicks();
+                entry.retries = 0;
+                entry.flags = flags;
+                entry.active = true;
+                if (data.len > 0) {
+                    const copy_len = @min(data.len, TCP_MSS);
+                    @memcpy(entry.data[0..copy_len], data[0..copy_len]);
+                }
+                break;
+            }
+        }
+    }
+
     if (flags & TCPFlags.SYN != 0) {
         connection.send_seq +%= 1;
+        connection.bytes_in_flight += 1;
+    }
+    if (flags & TCPFlags.FIN != 0) {
+        connection.send_seq +%= 1;
+        connection.bytes_in_flight += 1;
     }
     if (data.len > 0) {
         connection.send_seq +%= @intCast(data.len);
+        connection.bytes_in_flight += @intCast(data.len);
     }
 }
 
@@ -201,22 +263,49 @@ fn createConnectionInternal(local_addr: u32, remote_addr: u32, local_port: u16, 
                 return error.OutOfMemory;
             };
 
+            const initial_seq: u32 = @intCast(@mod(@as(u64, @intFromPtr(&maybe_conn)), 0x100000000));
             maybe_conn.* = TCPConnection{
                 .local_addr = local_addr,
                 .remote_addr = remote_addr,
                 .local_port = local_port,
                 .remote_port = remote_port,
                 .state = .CLOSED,
-                .send_seq = @intCast(@mod(@as(u64, @intFromPtr(&maybe_conn)), 0x100000000)),
+                .send_seq = initial_seq,
                 .recv_seq = 0,
                 .send_ack = 0,
                 .recv_ack = 0,
+                .send_una = initial_seq,
                 .send_window = TCP_BUFFER_SIZE,
                 .recv_window = TCP_BUFFER_SIZE,
-                .recv_buffer = @as([*]u8, @ptrCast(@alignCast(recv_buf)))[0..TCP_BUFFER_SIZE],
+                .recv_buffer = blk: {
+                    const ptr: [*]u8 = @ptrCast(@alignCast(recv_buf));
+                    break :blk ptr[0..TCP_BUFFER_SIZE];
+                },
                 .recv_buffer_used = 0,
-                .send_buffer = @as([*]u8, @ptrCast(@alignCast(send_buf)))[0..TCP_BUFFER_SIZE],
+                .send_buffer = blk: {
+                    const ptr: [*]u8 = @ptrCast(@alignCast(send_buf));
+                    break :blk ptr[0..TCP_BUFFER_SIZE];
+                },
                 .send_buffer_used = 0,
+                .cwnd = TCP_INITIAL_CWND,
+                .ssthresh = TCP_INITIAL_SSTHRESH,
+                .mss = TCP_MSS,
+                .bytes_in_flight = 0,
+                .rto = TCP_INITIAL_RTO,
+                .srtt = 0,
+                .rttvar = 0,
+                .dup_ack_count = 0,
+                .retx_count = 0,
+                .time_wait_start = 0,
+                .retx_queue = [_]RetxEntry{RetxEntry{
+                    .seq_num = 0,
+                    .data_len = 0,
+                    .send_time = 0,
+                    .retries = 0,
+                    .flags = 0,
+                    .data = [_]u8{0} ** TCP_MSS,
+                    .active = false,
+                }} ** TCP_MAX_RETX_ENTRIES,
             };
             return &maybe_conn.*.?;
         }
@@ -229,7 +318,7 @@ fn handleTCPPacket(src_ip: u32, dst_ip: u32, data: []const u8) void {
         return;
     }
 
-    const tcp_header = @as(*const TCPHeader, @ptrCast(@alignCast(data.ptr)));
+    const tcp_header: *const TCPHeader = @ptrCast(@alignCast(data.ptr));
     const header_len = tcp_header.getDataOffset();
     if (header_len < @sizeOf(TCPHeader) or header_len > data.len) {
         return;
@@ -263,8 +352,82 @@ fn handleTCPPacket(src_ip: u32, dst_ip: u32, data: []const u8) void {
     }
 }
 
+fn processAck(conn: *TCPConnection, ack_num: u32) void {
+    if (ack_num == conn.send_una) {
+        conn.dup_ack_count += 1;
+        if (conn.dup_ack_count == 3) {
+            conn.ssthresh = @max(conn.bytes_in_flight / 2, @as(u32, conn.mss) * 2);
+            conn.cwnd = conn.ssthresh + @as(u32, conn.mss) * 3;
+            retransmitFirst(conn);
+        }
+        return;
+    }
+
+    const bytes_acked = ack_num -% conn.send_una;
+    if (bytes_acked > 0 and seqLessThanEq(conn.send_una, ack_num)) {
+        conn.bytes_in_flight -|= bytes_acked;
+        conn.send_una = ack_num;
+        conn.dup_ack_count = 0;
+        conn.retx_count = 0;
+
+        for (&conn.retx_queue) |*entry| {
+            if (entry.active and seqLessThanEq(entry.seq_num +% entry.data_len, ack_num)) {
+                const rtt = timer.getTicks() - entry.send_time;
+                if (rtt > 0) updateRTT(conn, @intCast(rtt));
+                entry.active = false;
+            }
+        }
+
+        if (conn.cwnd < conn.ssthresh) {
+            conn.cwnd += conn.mss;
+        } else {
+            conn.cwnd += @max(1, (@as(u32, conn.mss) * @as(u32, conn.mss)) / conn.cwnd);
+        }
+    }
+}
+
+fn updateRTT(conn: *TCPConnection, rtt: u32) void {
+    if (conn.srtt == 0) {
+        conn.srtt = rtt * 8;
+        conn.rttvar = rtt * 4 / 2;
+    } else {
+        const diff = if (rtt * 8 > conn.srtt) rtt * 8 - conn.srtt else conn.srtt - rtt * 8;
+        conn.rttvar = conn.rttvar - conn.rttvar / 4 + diff / 4;
+        conn.srtt = conn.srtt - conn.srtt / 8 + rtt;
+    }
+    conn.rto = @min(TCP_MAX_RTO, @max(TCP_MIN_RTO, conn.srtt / 8 + conn.rttvar));
+}
+
+fn seqLessThan(a: u32, b: u32) bool {
+    const diff: i32 = @bitCast(a -% b);
+    return diff < 0;
+}
+
+fn seqLessThanEq(a: u32, b: u32) bool {
+    return a == b or seqLessThan(a, b);
+}
+
+fn retransmitFirst(conn: *TCPConnection) void {
+    for (&conn.retx_queue) |*entry| {
+        if (entry.active) {
+            const save_seq = conn.send_seq;
+            conn.send_seq = entry.seq_num;
+            sendTCPPacket(conn, entry.flags, entry.data[0..entry.data_len]) catch {};
+            conn.send_seq = save_seq;
+            entry.send_time = timer.getTicks();
+            entry.retries += 1;
+            break;
+        }
+    }
+}
+
 fn handleEstablishedConnection(conn: *TCPConnection, seq_num: u32, ack_num: u32, flags: u8, window_size: u16, payload: []const u8) void {
     conn.recv_window = window_size;
+
+    if (flags & TCPFlags.RST != 0) {
+        conn.state = .CLOSED;
+        return;
+    }
 
     switch (conn.state) {
         .SYN_SENT => {
@@ -272,42 +435,96 @@ fn handleEstablishedConnection(conn: *TCPConnection, seq_num: u32, ack_num: u32,
                 conn.recv_seq = seq_num +% 1;
                 conn.send_ack = conn.recv_seq;
                 conn.recv_ack = ack_num;
+                conn.send_una = ack_num;
+                conn.bytes_in_flight = 0;
                 conn.state = .ESTABLISHED;
+                clearRetxQueue(conn);
                 sendTCPPacket(conn, TCPFlags.ACK, &[_]u8{}) catch {};
                 vga.print("TCP: Connection established\n");
             }
         },
         .SYN_RECEIVED => {
             if (flags & TCPFlags.ACK != 0) {
+                conn.send_una = ack_num;
+                conn.bytes_in_flight = 0;
                 conn.state = .ESTABLISHED;
+                clearRetxQueue(conn);
                 vga.print("TCP: Connection accepted\n");
             }
         },
         .ESTABLISHED => {
+            if (flags & TCPFlags.ACK != 0) {
+                processAck(conn, ack_num);
+            }
+            if (payload.len > 0 and seq_num == conn.recv_seq) {
+                const space_available = conn.recv_buffer.len - conn.recv_buffer_used;
+                const to_copy = @min(payload.len, space_available);
+                if (to_copy > 0) {
+                    @memcpy(conn.recv_buffer[conn.recv_buffer_used .. conn.recv_buffer_used + to_copy], payload[0..to_copy]);
+                    conn.recv_buffer_used += to_copy;
+                    conn.recv_seq +%= @intCast(to_copy);
+                    conn.send_ack = conn.recv_seq;
+                }
+                sendTCPPacket(conn, TCPFlags.ACK, &[_]u8{}) catch {};
+            }
             if (flags & TCPFlags.FIN != 0) {
-                conn.recv_seq = seq_num +% 1;
+                conn.recv_seq = seq_num +% @as(u32, @intCast(payload.len)) +% 1;
                 conn.send_ack = conn.recv_seq;
                 conn.state = .CLOSE_WAIT;
                 sendTCPPacket(conn, TCPFlags.ACK, &[_]u8{}) catch {};
-            } else if (payload.len > 0) {
-                if (seq_num == conn.recv_seq) {
-                    const space_available = conn.recv_buffer.len - conn.recv_buffer_used;
-                    const to_copy = @min(payload.len, space_available);
-                    if (to_copy > 0) {
-                        @memcpy(conn.recv_buffer[conn.recv_buffer_used..conn.recv_buffer_used + to_copy], payload[0..to_copy]);
-                        conn.recv_buffer_used += to_copy;
-                        conn.recv_seq +%= @intCast(to_copy);
-                        conn.send_ack = conn.recv_seq;
-                    }
+            }
+        },
+        .FIN_WAIT_1 => {
+            if (flags & TCPFlags.ACK != 0) {
+                processAck(conn, ack_num);
+                if (flags & TCPFlags.FIN != 0) {
+                    conn.recv_seq = seq_num +% 1;
+                    conn.send_ack = conn.recv_seq;
+                    conn.state = .TIME_WAIT;
+                    conn.time_wait_start = timer.getTicks();
                     sendTCPPacket(conn, TCPFlags.ACK, &[_]u8{}) catch {};
+                } else if (seqLessThanEq(conn.send_seq, ack_num)) {
+                    conn.state = .FIN_WAIT_2;
+                    clearRetxQueue(conn);
                 }
             }
+        },
+        .FIN_WAIT_2 => {
+            if (flags & TCPFlags.FIN != 0) {
+                conn.recv_seq = seq_num +% 1;
+                conn.send_ack = conn.recv_seq;
+                conn.state = .TIME_WAIT;
+                conn.time_wait_start = timer.getTicks();
+                sendTCPPacket(conn, TCPFlags.ACK, &[_]u8{}) catch {};
+            }
+        },
+        .CLOSING => {
             if (flags & TCPFlags.ACK != 0) {
-                conn.recv_ack = ack_num;
+                conn.state = .TIME_WAIT;
+                conn.time_wait_start = timer.getTicks();
+            }
+        },
+        .LAST_ACK => {
+            if (flags & TCPFlags.ACK != 0) {
+                conn.state = .CLOSED;
+                clearRetxQueue(conn);
+            }
+        },
+        .TIME_WAIT => {},
+        .CLOSE_WAIT => {
+            if (flags & TCPFlags.ACK != 0) {
+                processAck(conn, ack_num);
             }
         },
         else => {},
     }
+}
+
+fn clearRetxQueue(conn: *TCPConnection) void {
+    for (&conn.retx_queue) |*entry| {
+        entry.active = false;
+    }
+    conn.bytes_in_flight = 0;
 }
 
 fn handleIncomingSYN(src_ip: u32, dst_ip: u32, src_port: u16, dst_port: u16, seq_num: u32) void {
@@ -332,8 +549,8 @@ fn sendRST(dst_ip: u32, src_ip: u32, dst_port: u16, src_port: u16, seq_num: u32)
     const packet_mem = memory.kmalloc(packet_size) orelse return;
     defer memory.kfree(packet_mem);
 
-    const packet = @as([*]u8, @ptrCast(@alignCast(packet_mem)));
-    const tcp_header = @as(*TCPHeader, @ptrCast(@alignCast(packet)));
+    const packet: [*]u8 = @ptrCast(@alignCast(packet_mem));
+    const tcp_header: *TCPHeader = @ptrCast(@alignCast(packet));
 
     tcp_header.src_port = @byteSwap(src_port);
     tcp_header.dst_port = @byteSwap(dst_port);
@@ -365,10 +582,10 @@ pub fn listen(port: u16) !usize {
 
 pub fn connect(socket_id: usize, remote_addr: u32, remote_port: u16) !void {
     if (socket_id >= tcp_sockets.len) return error.InvalidSocket;
-    const socket = &tcp_sockets[socket_id] orelse return error.InvalidSocket;
+    const socket = &(tcp_sockets[socket_id] orelse return error.InvalidSocket);
 
     const local_addr = ipv4.getLocalIP();
-    const local_port = @as(u16, @intCast(49152 + (socket_id & 0x3FFF)));
+    const local_port: u16 = @intCast(49152 + (socket_id & 0x3FFF));
 
     const conn = try createConnection(local_addr, remote_addr, local_port, remote_port);
     socket.connection = conn;
@@ -379,8 +596,8 @@ pub fn connect(socket_id: usize, remote_addr: u32, remote_port: u16) !void {
 
 pub fn send(socket_id: usize, data: []const u8) !usize {
     if (socket_id >= tcp_sockets.len) return error.InvalidSocket;
-    const socket = &tcp_sockets[socket_id] orelse return error.InvalidSocket;
-    const conn = &socket.connection orelse return error.NotConnected;
+    const socket = &(tcp_sockets[socket_id] orelse return error.InvalidSocket);
+    const conn = &(socket.connection orelse return error.NotConnected);
 
     if (conn.state != .ESTABLISHED) return error.NotConnected;
 
@@ -395,8 +612,8 @@ pub fn send(socket_id: usize, data: []const u8) !usize {
 
 pub fn receive(socket_id: usize, buffer: []u8) !usize {
     if (socket_id >= tcp_sockets.len) return error.InvalidSocket;
-    const socket = &tcp_sockets[socket_id] orelse return error.InvalidSocket;
-    const conn = &socket.connection orelse return error.NotConnected;
+    const socket = &(tcp_sockets[socket_id] orelse return error.InvalidSocket);
+    const conn = &(socket.connection orelse return error.NotConnected);
 
     if (conn.recv_buffer_used == 0) return 0;
 
@@ -414,7 +631,7 @@ pub fn receive(socket_id: usize, buffer: []u8) !usize {
 
 pub fn close(socket_id: usize) !void {
     if (socket_id >= tcp_sockets.len) return error.InvalidSocket;
-    const socket = &tcp_sockets[socket_id] orelse return error.InvalidSocket;
+    var socket = &(tcp_sockets[socket_id] orelse return error.InvalidSocket);
 
     if (socket.connection) |*conn| {
         if (conn.state == .ESTABLISHED) {
@@ -438,27 +655,82 @@ pub fn sendData(conn: *TCPConnection, data: []const u8) !usize {
         return error.NotConnected;
     }
 
+    const effective_window = @min(@as(u32, conn.recv_window), conn.cwnd);
+    const available_window = if (effective_window > conn.bytes_in_flight) effective_window - conn.bytes_in_flight else 0;
+    const max_send = @min(available_window, @as(u32, conn.mss));
+
     const space_available = conn.send_buffer.len - conn.send_buffer_used;
-    const to_copy = @min(data.len, space_available);
+    const to_copy = @min(@min(data.len, space_available), max_send);
 
     if (to_copy == 0) {
         return error.NoBufferSpace;
     }
 
-    @memcpy(conn.send_buffer[conn.send_buffer_used..conn.send_buffer_used + to_copy], data[0..to_copy]);
+    @memcpy(conn.send_buffer[conn.send_buffer_used .. conn.send_buffer_used + to_copy], data[0..to_copy]);
     conn.send_buffer_used += to_copy;
 
-    try sendTCPPacket(conn, TCPFlags.PSH | TCPFlags.ACK, conn.send_buffer[0..conn.send_buffer_used]);
-    conn.send_seq +%= @intCast(conn.send_buffer_used);
+    sendTCPPacket(conn, TCPFlags.PSH | TCPFlags.ACK, conn.send_buffer[0..conn.send_buffer_used]) catch |err| switch (err) {
+        error.WindowFull => return error.NoBufferSpace,
+        else => return err,
+    };
     conn.send_buffer_used = 0;
 
     return to_copy;
 }
 
 pub fn closeConnection(conn: *TCPConnection) void {
-    if (conn.state == .ESTABLISHED) {
-        conn.state = .FIN_WAIT_1;
-        sendTCPPacket(conn, TCPFlags.FIN | TCPFlags.ACK, &[_]u8{}) catch {};
+    switch (conn.state) {
+        .ESTABLISHED => {
+            conn.state = .FIN_WAIT_1;
+            sendTCPPacket(conn, TCPFlags.FIN | TCPFlags.ACK, &[_]u8{}) catch {};
+        },
+        .CLOSE_WAIT => {
+            conn.state = .LAST_ACK;
+            sendTCPPacket(conn, TCPFlags.FIN | TCPFlags.ACK, &[_]u8{}) catch {};
+        },
+        else => {},
+    }
+}
+
+pub fn tick() void {
+    const now = timer.getTicks();
+
+    for (&tcp_connections) |*maybe_conn| {
+        if (maybe_conn.*) |*conn| {
+            if (conn.state == .TIME_WAIT) {
+                if (now - conn.time_wait_start >= TCP_TIME_WAIT_TICKS) {
+                    conn.state = .CLOSED;
+                    clearRetxQueue(conn);
+                }
+                continue;
+            }
+
+            if (conn.state == .CLOSED) continue;
+
+            for (&conn.retx_queue) |*entry| {
+                if (entry.active and now - entry.send_time >= conn.rto) {
+                    if (entry.retries >= TCP_MAX_RETRIES) {
+                        conn.state = .CLOSED;
+                        clearRetxQueue(conn);
+                        vga.print("TCP: Connection timed out\n");
+                        break;
+                    }
+
+                    conn.ssthresh = @max(conn.bytes_in_flight / 2, @as(u32, conn.mss) * 2);
+                    conn.cwnd = conn.mss;
+
+                    const save_seq = conn.send_seq;
+                    conn.send_seq = entry.seq_num;
+                    sendTCPPacket(conn, entry.flags, entry.data[0..entry.data_len]) catch {};
+                    conn.send_seq = save_seq;
+
+                    entry.send_time = now;
+                    entry.retries += 1;
+                    conn.rto = @min(TCP_MAX_RTO, conn.rto * 2);
+                    conn.retx_count += 1;
+                }
+            }
+        }
     }
 }
 

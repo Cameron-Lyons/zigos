@@ -1,5 +1,3 @@
-const std = @import("std");
-
 pub const kernel = @import("kernel/main.zig");
 pub const isr = @import("kernel/interrupts/isr.zig");
 pub const panic = @import("kernel/utils/builtin.zig").panic;

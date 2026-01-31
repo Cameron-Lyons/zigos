@@ -1,10 +1,7 @@
-const std = @import("std");
 const socket = @import("socket.zig");
-const udp = @import("udp.zig");
 const ipv4 = @import("ipv4.zig");
-const memory = @import("../memory/memory.zig");
 const vga = @import("../drivers/vga.zig");
-const process = @import("../process/process.zig");
+
 
 const DNS_PORT = 53;
 const DNS_BUFFER_SIZE = 512;
@@ -66,6 +63,7 @@ pub const DNSClient = struct {
     pub fn init(dns_server: ipv4.IPv4Address) DNSClient {
         return DNSClient{
             .dns_server = dns_server,
+            // SAFETY: Initialized by init() before use
             .cache = undefined,
             .cache_count = 0,
             .next_query_id = 1,
@@ -80,13 +78,17 @@ pub const DNSClient = struct {
         const sock = try socket.createSocket(.DGRAM, .UDP);
         defer sock.close();
 
+        // SAFETY: filled by the subsequent buildQuery call
         var query_buffer: [DNS_BUFFER_SIZE]u8 = undefined;
         const query_len = self.buildQuery(&query_buffer, domain);
 
         try sock.sendTo(query_buffer[0..query_len], self.dns_server, DNS_PORT);
 
+        // SAFETY: filled by the subsequent recvFrom call
         var response_buffer: [DNS_BUFFER_SIZE]u8 = undefined;
+        // SAFETY: Populated by recvFrom call below
         var src_addr: ipv4.IPv4Address = undefined;
+        // SAFETY: Populated by recvFrom call below
         var src_port: u16 = undefined;
         const response_len = try sock.recvFrom(&response_buffer, &src_addr, &src_port);
 
@@ -99,7 +101,7 @@ pub const DNSClient = struct {
     fn buildQuery(self: *DNSClient, buffer: []u8, domain: []const u8) usize {
         var offset: usize = 0;
 
-        const header = @as(*DNSHeader, @ptrCast(@alignCast(&buffer[offset])));
+        const header: *DNSHeader = @ptrCast(@alignCast(&buffer[offset]));
         header.id = @byteSwap(self.next_query_id);
         self.next_query_id +%= 1;
         header.flags = @byteSwap(@as(u16, DNSFlags.RD));
@@ -111,11 +113,11 @@ pub const DNSClient = struct {
 
         offset += encodeDomainName(buffer[offset..], domain);
 
-        const qtype = @as(*u16, @ptrCast(@alignCast(&buffer[offset])));
+        const qtype: *u16 = @ptrCast(@alignCast(&buffer[offset]));
         qtype.* = @byteSwap(@intFromEnum(DNSType.A));
         offset += 2;
 
-        const qclass = @as(*u16, @ptrCast(@alignCast(&buffer[offset])));
+        const qclass: *u16 = @ptrCast(@alignCast(&buffer[offset]));
         qclass.* = @byteSwap(@intFromEnum(DNSClass.IN));
         offset += 2;
 
@@ -130,7 +132,7 @@ pub const DNSClient = struct {
             return error.InvalidResponse;
         }
 
-        const header = @as(*const DNSHeader, @ptrCast(@alignCast(&data[0])));
+        const header: *const DNSHeader = @ptrCast(@alignCast(&data[0]));
         const flags = @byteSwap(header.flags);
 
         if ((flags & DNSFlags.QR) == 0) {
@@ -159,17 +161,17 @@ pub const DNSClient = struct {
         while (i < ancount) : (i += 1) {
             offset = skipDomainName(data, offset);
 
-            const rtype = @as(*const u16, @ptrCast(@alignCast(&data[offset])));
+            const rtype: *const u16 = @ptrCast(@alignCast(&data[offset]));
             const rtype_val = @byteSwap(rtype.*);
             offset += 2;
 
-            const rclass = @as(*const u16, @ptrCast(@alignCast(&data[offset])));
+            const rclass: *const u16 = @ptrCast(@alignCast(&data[offset]));
             _ = rclass;
             offset += 2;
 
             offset += 4;
 
-            const rdlength = @as(*const u16, @ptrCast(@alignCast(&data[offset])));
+            const rdlength: *const u16 = @ptrCast(@alignCast(&data[offset]));
             const rdlength_val = @byteSwap(rdlength.*);
             offset += 2;
 

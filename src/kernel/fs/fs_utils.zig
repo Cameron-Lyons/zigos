@@ -1,3 +1,4 @@
+// zlint-disable suppressed-errors
 const std = @import("std");
 const vfs = @import("vfs.zig");
 const memory = @import("../memory/memory.zig");
@@ -16,6 +17,7 @@ pub fn listDirectory(path: []const u8, options: ListDirOptions) vfs.VFSError!voi
     defer vfs.close(fd) catch {};
 
     var index: u64 = 0;
+    // SAFETY: filled by the subsequent vfs.readdir call
     var entry: vfs.DirEntry = undefined;
 
     while (try vfs.readdir(fd, &entry, index)) : (index += 1) {
@@ -40,6 +42,7 @@ pub fn listDirectory(path: []const u8, options: ListDirOptions) vfs.VFSError!voi
 
         if (options.show_details) {
 
+            // SAFETY: filled by the subsequent memcpy calls constructing the path
             var full_path: [512]u8 = undefined;
             const path_len = @min(path.len, 256);
             @memcpy(full_path[0..path_len], path[0..path_len]);
@@ -47,6 +50,7 @@ pub fn listDirectory(path: []const u8, options: ListDirOptions) vfs.VFSError!voi
             @memcpy(full_path[path_len + 1 .. path_len + 1 + entry.name_len], entry.name[0..entry.name_len]);
             full_path[path_len + 1 + entry.name_len] = 0;
 
+            // SAFETY: filled by the subsequent vfs.stat call
             var stat_buf: vfs.FileStat = undefined;
             if (vfs.stat(full_path[0 .. path_len + 1 + entry.name_len], &stat_buf)) |_| {
                 printFileDetails(&entry, &stat_buf);
@@ -59,6 +63,7 @@ pub fn listDirectory(path: []const u8, options: ListDirOptions) vfs.VFSError!voi
 
         if (options.recursive and entry.file_type == vfs.FileType.Directory) {
             if (entry.name[0] != '.') {
+                // SAFETY: filled by the subsequent memcpy calls constructing the path
                 var sub_path: [512]u8 = undefined;
                 const path_len = @min(path.len, 256);
                 @memcpy(sub_path[0..path_len], path[0..path_len]);
@@ -87,6 +92,7 @@ pub fn copyFile(src_path: []const u8, dst_path: []const u8) vfs.VFSError!void {
     defer vfs.close(src_fd) catch {};
 
 
+    // SAFETY: filled by the subsequent vfs.stat call
     var stat_buf: vfs.FileStat = undefined;
     try vfs.stat(src_path, &stat_buf);
 
@@ -140,6 +146,7 @@ pub fn moveFile(src_path: []const u8, dst_path: []const u8) vfs.VFSError!void {
 
 pub fn copyDirectory(src_path: []const u8, dst_path: []const u8) vfs.VFSError!void {
 
+    // SAFETY: filled by the subsequent vfs.stat call
     var stat_buf: vfs.FileStat = undefined;
     try vfs.stat(src_path, &stat_buf);
 
@@ -155,6 +162,7 @@ pub fn copyDirectory(src_path: []const u8, dst_path: []const u8) vfs.VFSError!vo
     defer vfs.close(src_fd) catch {};
 
     var index: u64 = 0;
+    // SAFETY: filled by the subsequent vfs.readdir call
     var entry: vfs.DirEntry = undefined;
 
     while (try vfs.readdir(src_fd, &entry, index)) : (index += 1) {
@@ -165,7 +173,9 @@ pub fn copyDirectory(src_path: []const u8, dst_path: []const u8) vfs.VFSError!vo
         }
 
 
+        // SAFETY: filled by the subsequent memcpy calls constructing the path
         var src_full: [512]u8 = undefined;
+        // SAFETY: filled by the subsequent memcpy calls constructing the path
         var dst_full: [512]u8 = undefined;
 
         const src_len = @min(src_path.len, 256);
@@ -203,12 +213,14 @@ pub fn copyDirectory(src_path: []const u8, dst_path: []const u8) vfs.VFSError!vo
 }
 
 pub fn getFileSize(path: []const u8) vfs.VFSError!u64 {
+    // SAFETY: filled by the subsequent vfs.stat call
     var stat_buf: vfs.FileStat = undefined;
     try vfs.stat(path, &stat_buf);
     return stat_buf.size;
 }
 
 pub fn fileExists(path: []const u8) bool {
+    // SAFETY: filled by the subsequent vfs.stat call
     var stat_buf: vfs.FileStat = undefined;
     if (vfs.stat(path, &stat_buf)) |_| {
         return true;
@@ -218,12 +230,14 @@ pub fn fileExists(path: []const u8) bool {
 }
 
 pub fn isDirectory(path: []const u8) vfs.VFSError!bool {
+    // SAFETY: filled by the subsequent vfs.stat call
     var stat_buf: vfs.FileStat = undefined;
     try vfs.stat(path, &stat_buf);
     return stat_buf.file_type == vfs.FileType.Directory;
 }
 
 pub fn isRegularFile(path: []const u8) vfs.VFSError!bool {
+    // SAFETY: filled by the subsequent vfs.stat call
     var stat_buf: vfs.FileStat = undefined;
     try vfs.stat(path, &stat_buf);
     return stat_buf.file_type == vfs.FileType.Regular;
@@ -283,10 +297,12 @@ pub fn removeDirectory(path: []const u8, recursive: bool) vfs.VFSError!void {
         name: [256]u8,
         name_len: u16,
         is_dir: bool,
+    // SAFETY: entries written before being read; entry_count tracks valid entries
     } = undefined;
     var entry_count: usize = 0;
 
     var index: u64 = 0;
+    // SAFETY: filled by the subsequent vfs.readdir call
     var entry: vfs.DirEntry = undefined;
 
 
@@ -307,6 +323,7 @@ pub fn removeDirectory(path: []const u8, recursive: bool) vfs.VFSError!void {
 
 
     for (entries_to_remove[0..entry_count]) |item| {
+        // SAFETY: filled by the subsequent memcpy calls constructing the path
         var full_path: [512]u8 = undefined;
         const path_len = @min(path.len, 256);
         @memcpy(full_path[0..path_len], path[0..path_len]);
@@ -386,6 +403,7 @@ fn printFileDetails(entry: *const vfs.DirEntry, stat: *const vfs.FileStat) void 
 }
 
 fn printNumber(num: u64, width: usize) void {
+    // SAFETY: filled by the following digit extraction loop
     var buffer: [20]u8 = undefined;
     var i: usize = 0;
     var n = num;

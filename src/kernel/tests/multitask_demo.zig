@@ -205,6 +205,7 @@ fn print_number(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var i: usize = 0;
     var n = num;

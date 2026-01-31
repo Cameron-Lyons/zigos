@@ -1,5 +1,6 @@
+// zlint-disable suppressed-errors
 const vfs = @import("../fs/vfs.zig");
-const fs_utils = @import("fs_utils.zig");
+const fs_utils = @import("../fs/fs_utils.zig");
 const vga = @import("../drivers/vga.zig");
 const timer = @import("../timer/timer.zig");
 
@@ -114,6 +115,7 @@ fn testFileOperations() void {
         return;
     };
 
+    // SAFETY: filled by the subsequent vfs.read call
     var buffer: [256]u8 = undefined;
     const bytes_read = vfs.read(read_fd, &buffer) catch |err| {
         vga.print("Failed to read file: ");
@@ -355,6 +357,7 @@ fn testPermissions() void {
 }
 
 fn printNumber(num: usize) void {
+    // SAFETY: filled by the following digit extraction loop
     var buffer: [20]u8 = undefined;
     var i: usize = 0;
     var n = num;

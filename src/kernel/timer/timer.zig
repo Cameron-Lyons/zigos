@@ -32,6 +32,12 @@ pub fn init(frequency_hz: u32) void {
 pub fn handleInterrupt() void {
     ticks += 1;
 
+    const TCP_TICK_INTERVAL = 50;
+    if (ticks % TCP_TICK_INTERVAL == 0) {
+        const tcp = @import("../net/tcp.zig");
+        tcp.tick();
+    }
+
     const PREEMPTION_TICKS = 10;
     if (ticks % PREEMPTION_TICKS == 0) {
         const scheduler = @import("../process/scheduler.zig");
@@ -60,6 +66,7 @@ fn print_number(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var i: usize = 0;
     var n = num;

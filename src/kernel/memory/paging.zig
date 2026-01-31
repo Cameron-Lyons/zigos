@@ -1,6 +1,5 @@
 const vga = @import("../drivers/vga.zig");
 const memory = @import("memory.zig");
-const std = @import("std");
 
 const PAGE_SIZE = 4096;
 const PAGES_PER_TABLE = 1024;
@@ -13,7 +12,6 @@ pub const PAGE_WRITE_THROUGH: u32 = 0x8;
 pub const PAGE_CACHE_DISABLE: u32 = 0x10;
 pub const PAGE_ACCESSED: u32 = 0x20;
 pub const PAGE_DIRTY: u32 = 0x40;
-const PAGE_SIZE_4MB: u32 = 0x80;
 pub const PAGE_GLOBAL: u32 = 0x100;
 
 pub const PageTableEntry = packed struct {
@@ -33,7 +31,9 @@ pub const PageTableEntry = packed struct {
 pub const PageTable = [PAGES_PER_TABLE]PageTableEntry;
 pub const PageDirectory = [TABLES_PER_DIRECTORY]PageTableEntry;
 
+// SAFETY: fully initialized in init() which identity-maps the first 16MB
 var kernel_page_directory: PageDirectory align(PAGE_SIZE) = undefined;
+// SAFETY: fully initialized in init() which identity-maps the first 16MB
 var kernel_page_tables: [4]PageTable align(PAGE_SIZE) = undefined;
 
 var next_free_frame: u32 = 0x100000;
@@ -42,6 +42,7 @@ const MEMORY_SIZE = 128 * 1024 * 1024;
 const FRAME_COUNT = MEMORY_SIZE / PAGE_SIZE;
 const BITMAP_SIZE = FRAME_COUNT / 32;
 
+// SAFETY: zeroed and populated in init() before any frame allocation
 var frame_bitmap: [BITMAP_SIZE]u32 = undefined;
 var total_frames: u32 = FRAME_COUNT;
 var used_frames: u32 = 0;
@@ -55,6 +56,7 @@ const PageCache = struct {
 };
 
 const TLB_CACHE_SIZE = 64;
+// SAFETY: entries written before being read; tlb_cache_count tracks valid entries
 var tlb_cache: [TLB_CACHE_SIZE]PageCache = undefined;
 var tlb_cache_count: u32 = 0;
 var lru_counter: u32 = 0;
@@ -168,14 +170,14 @@ pub fn mapPage(virt_addr: u32, phys_addr: u32, flags: u32) void {
             .address = @truncate(table_phys_addr >> 12),
         };
 
-        const table = @as(*PageTable, @ptrFromInt(table_phys_addr));
+        const table: *PageTable = @ptrFromInt(table_phys_addr);
         for (table) |*entry| {
             entry.* = PageTableEntry{};
         }
     }
 
     const table_addr = @as(usize, page_dir_entry.address) << 12;
-    const table = @as(*PageTable, @ptrFromInt(table_addr));
+    const table: *PageTable = @ptrFromInt(table_addr);
 
     table[page_table_index] = PageTableEntry{
         .present = true,
@@ -200,7 +202,7 @@ pub fn unmap_page(virt_addr: u32) void {
     }
 
     const table_addr = @as(usize, page_dir_entry.address) << 12;
-    const table = @as(*PageTable, @ptrFromInt(table_addr));
+    const table: *PageTable = @ptrFromInt(table_addr);
 
     const page_entry = &table[page_table_index];
     if (page_entry.present) {
@@ -229,7 +231,7 @@ pub fn get_physical_address(virt_addr: u32) ?u32 {
     }
 
     const table_addr = @as(usize, page_dir_entry.address) << 12;
-    const table = @as(*const PageTable, @ptrFromInt(table_addr));
+    const table: *const PageTable = @ptrFromInt(table_addr);
 
     const page_entry = table[page_table_index];
     if (!page_entry.present) {
@@ -253,7 +255,7 @@ pub fn getMemoryStats() MemoryStats {
 
 pub fn createUserPageDirectory() !*PageDirectory {
     const pd_phys = memory.allocPages(1) orelse return error.OutOfMemory;
-    const pd = @as(*PageDirectory, @ptrCast(@alignCast(pd_phys)));
+    const pd: *PageDirectory = @ptrCast(@alignCast(pd_phys));
 
     for (pd) |*entry| {
         entry.* = PageTableEntry{};
@@ -323,11 +325,12 @@ fn enable_paging(page_dir_addr: u32) void {
         \\mov %%eax, %%cr0
         :
         : [addr] "r" (page_dir_addr),
-        : .{ .eax = true }
+        : "eax"
     );
 }
 
 pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Registers) void {
+    // SAFETY: populated by the subsequent inline assembly reading CR2
     var faulting_address: u32 = undefined;
     asm volatile ("mov %%cr2, %[addr]"
         : [addr] "=r" (faulting_address),
@@ -390,6 +393,7 @@ fn print_dec(value: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var buffer: [10]u8 = undefined;
     var i: usize = 0;
     var n = value;
@@ -428,7 +432,7 @@ pub fn init_heap() void {
         mapPage(current_addr, frame, PAGE_PRESENT | PAGE_WRITABLE);
     }
 
-    const initial_block = @as(*BlockHeader, @ptrFromInt(heap_start));
+    const initial_block: *BlockHeader = @ptrFromInt(heap_start);
     initial_block.* = BlockHeader{
         .size = HEAP_INITIAL_SIZE - @sizeOf(BlockHeader),
         .is_free = true,
@@ -442,7 +446,7 @@ pub fn init_heap() void {
 }
 
 fn find_best_fit(size: u32) ?*BlockHeader {
-    var current = @as(*BlockHeader, @ptrFromInt(heap_start));
+    var current: *BlockHeader = @ptrFromInt(heap_start);
     var best_fit: ?*BlockHeader = null;
     var best_size: u32 = 0xFFFFFFFF;
 
@@ -476,7 +480,7 @@ fn expand_heap(size: u32) bool {
         mapPage(current_addr, frame, PAGE_PRESENT | PAGE_WRITABLE);
     }
 
-    const new_block = @as(*BlockHeader, @ptrFromInt(heap_end));
+    const new_block: *BlockHeader = @ptrFromInt(heap_end);
     new_block.* = BlockHeader{
         .size = new_size - @sizeOf(BlockHeader),
         .is_free = true,
@@ -503,7 +507,7 @@ pub fn kmalloc(size: u32) ?*anyopaque {
     if (header.size > aligned_size + @sizeOf(BlockHeader) + 16) {
         const remaining_size = header.size - aligned_size - @sizeOf(BlockHeader);
         const new_block_addr = @intFromPtr(header) + @sizeOf(BlockHeader) + aligned_size;
-        const new_block = @as(*BlockHeader, @ptrFromInt(new_block_addr));
+        const new_block: *BlockHeader = @ptrFromInt(new_block_addr);
         new_block.* = BlockHeader{
             .size = remaining_size,
             .is_free = true,
@@ -517,7 +521,7 @@ pub fn kmalloc(size: u32) ?*anyopaque {
 
 pub fn kfree(ptr: *anyopaque) void {
     const header_addr = @intFromPtr(ptr) - @sizeOf(BlockHeader);
-    const header = @as(*BlockHeader, @ptrFromInt(header_addr));
+    const header: *BlockHeader = @ptrFromInt(header_addr);
 
     if (header.magic != 0x1234567) {
         vga.print("kfree: invalid magic number!\n");
@@ -530,13 +534,13 @@ pub fn kfree(ptr: *anyopaque) void {
 }
 
 fn coalesce_free_blocks() void {
-    var current = @as(*BlockHeader, @ptrFromInt(heap_start));
+    var current: *BlockHeader = @ptrFromInt(heap_start);
 
     while (@intFromPtr(current) < heap_end) {
         if (current.is_free) {
             const next_addr = @intFromPtr(current) + @sizeOf(BlockHeader) + current.size;
             if (next_addr < heap_end) {
-                const next = @as(*BlockHeader, @ptrFromInt(next_addr));
+                const next: *BlockHeader = @ptrFromInt(next_addr);
                 if (next.is_free) {
                     current.size += @sizeOf(BlockHeader) + next.size;
                     continue;
@@ -635,6 +639,7 @@ fn invalidate_page(virt_addr: u32) void {
 }
 
 fn flush_tlb() void {
+    // SAFETY: populated by the subsequent inline assembly reading CR3
     var cr3: u32 = undefined;
     asm volatile (
         \\mov %%cr3, %[cr3]
@@ -655,7 +660,7 @@ fn handle_demand_paging(addr: u32, _: bool, user: bool) bool {
 
         mapPage(aligned_addr, phys, flags);
 
-        const page_ptr = @as([*]u8, @ptrFromInt(aligned_addr));
+        const page_ptr: [*]u8 = @ptrFromInt(aligned_addr);
         @memset(page_ptr[0..PAGE_SIZE], 0);
 
         return true;
@@ -688,7 +693,7 @@ pub fn is_page_present(virt_addr: u32) bool {
     }
 
     const table_addr = @as(usize, page_dir_entry.address) << 12;
-    const table = @as(*const PageTable, @ptrFromInt(table_addr));
+    const table: *const PageTable = @ptrFromInt(table_addr);
 
     return table[page_table_index].present;
 }
@@ -703,7 +708,7 @@ pub fn set_page_flags(virt_addr: u32, flags: u32) void {
     }
 
     const table_addr = @as(usize, page_dir_entry.address) << 12;
-    const table = @as(*PageTable, @ptrFromInt(table_addr));
+    const table: *PageTable = @ptrFromInt(table_addr);
 
     const entry = &table[page_table_index];
     if (entry.present) {

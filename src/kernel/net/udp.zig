@@ -1,4 +1,3 @@
-const std = @import("std");
 const network = @import("network.zig");
 const ipv4 = @import("ipv4.zig");
 const memory = @import("../memory/memory.zig");
@@ -37,8 +36,8 @@ pub fn send(local_addr: ipv4.IPv4Address, local_port: u16, remote_addr: ipv4.IPv
     const packet_mem = memory.kmalloc(packet_size) orelse return error.OutOfMemory;
     defer memory.kfree(packet_mem);
 
-    const packet = @as([*]u8, @ptrCast(@alignCast(packet_mem)));
-    const udp_header = @as(*UDPHeader, @ptrCast(@alignCast(packet)));
+    const packet: [*]u8 = @ptrCast(@alignCast(packet_mem));
+    const udp_header: *UDPHeader = @ptrCast(@alignCast(packet));
 
     udp_header.src_port = @byteSwap(local_port);
     udp_header.dst_port = @byteSwap(remote_port);
@@ -69,7 +68,8 @@ fn calculateChecksum(src_ip: u32, dst_ip: u32, udp_header: *const UDPHeader, dat
     sum += UDP_PROTOCOL;
     sum += @byteSwap(udp_header.length);
 
-    const header_bytes = @as([*]const u8, @ptrCast(udp_header))[0..@sizeOf(UDPHeader)];
+    const header_bytes_ptr: [*]const u8 = @ptrCast(udp_header);
+    const header_bytes = header_bytes_ptr[0..@sizeOf(UDPHeader)];
     var i: usize = 0;
     while (i < header_bytes.len - 1) : (i += 2) {
         sum += @as(u16, header_bytes[i]) << 8 | header_bytes[i + 1];
@@ -87,7 +87,8 @@ fn calculateChecksum(src_ip: u32, dst_ip: u32, udp_header: *const UDPHeader, dat
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
 
-    return ~@as(u16, @intCast(sum));
+    const result: u16 = @intCast(sum);
+    return ~result;
 }
 
 fn findSocket(port: u16) ?*UDPSocket {
@@ -106,7 +107,7 @@ fn handleUDPPacket(src_ip: u32, dst_ip: u32, data: []const u8) void {
         return;
     }
 
-    const udp_header = @as(*const UDPHeader, @ptrCast(@alignCast(data.ptr)));
+    const udp_header: *const UDPHeader = @ptrCast(@alignCast(data.ptr));
     const length = @byteSwap(udp_header.length);
 
     if (length < @sizeOf(UDPHeader) or length > data.len) {
@@ -147,7 +148,10 @@ pub fn bind(port: u16) !usize {
 
             maybe_socket.* = UDPSocket{
                 .port = port,
-                .recv_buffer = @as([*]u8, @ptrCast(@alignCast(recv_buf)))[0..UDP_BUFFER_SIZE],
+                .recv_buffer = blk: {
+                    const ptr: [*]u8 = @ptrCast(@alignCast(recv_buf));
+                    break :blk ptr[0..UDP_BUFFER_SIZE];
+                },
                 .recv_buffer_used = 0,
                 .recv_addr = 0,
                 .recv_port = 0,
@@ -166,8 +170,8 @@ pub fn sendTo(socket_id: usize, dst_ip: u32, dst_port: u16, data: []const u8) !v
     const packet_mem = memory.kmalloc(packet_size) orelse return error.OutOfMemory;
     defer memory.kfree(packet_mem);
 
-    const packet = @as([*]u8, @ptrCast(@alignCast(packet_mem)));
-    const udp_header = @as(*UDPHeader, @ptrCast(@alignCast(packet)));
+    const packet: [*]u8 = @ptrCast(@alignCast(packet_mem));
+    const udp_header: *UDPHeader = @ptrCast(@alignCast(packet));
 
     udp_header.src_port = @byteSwap(socket.port);
     udp_header.dst_port = @byteSwap(dst_port);

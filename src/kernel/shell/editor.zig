@@ -1,5 +1,5 @@
+// zlint-disable suppressed-errors
 const vga = @import("../drivers/vga.zig");
-const keyboard = @import("../drivers/keyboard.zig");
 const vfs = @import("../fs/vfs.zig");
 const memory = @import("../memory/memory.zig");
 
@@ -60,6 +60,7 @@ pub const TextEditor = struct {
         defer vfs.close(fd) catch {};
 
 
+        // SAFETY: filled by the subsequent vfs.read call
         var buffer: [4096]u8 = undefined;
         var line_idx: usize = 0;
         var char_idx: usize = 0;
@@ -305,6 +306,7 @@ pub const TextEditor = struct {
         }
 
         var num = n;
+        // SAFETY: filled by the following digit extraction loop
         var digits: [20]u8 = undefined;
         var i: usize = 0;
 

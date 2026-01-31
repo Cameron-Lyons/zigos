@@ -1,8 +1,5 @@
-const std = @import("std");
 const process = @import("process.zig");
 const vga = @import("../drivers/vga.zig");
-const syscall = @import("syscall.zig");
-const panic_handler = @import("../utils/panic.zig");
 
 fn user_hello_world() void {
     asm volatile (
@@ -13,14 +10,14 @@ fn user_hello_world() void {
         \\int $0x80
         :
         : [msg] "m" ("Hello from userspace!\n"),
-        : .{ .eax = true, .ebx = true, .ecx = true, .edx = true, .memory = true }
+        : "eax", "ebx", "ecx", "edx", "memory"
     );
 
     asm volatile (
         \\mov $0, %%eax
         \\mov $0, %%ebx
         \\int $0x80
-        ::: .{ .eax = true, .ebx = true, .memory = true });
+        ::: "eax", "ebx", "memory");
 }
 
 pub fn createUserTestProcess() void {
@@ -39,6 +36,7 @@ fn printNumber(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var buffer: [20]u8 = undefined;
     var i: usize = 0;
     var n = num;

@@ -1,4 +1,3 @@
-const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const rtl8139 = @import("../drivers/rtl8139.zig");
 
@@ -52,8 +51,9 @@ pub fn sendFrame(dst_mac: [6]u8, ethertype: EtherType, data: []const u8) !void {
         return error.FrameTooLarge;
     }
 
+    // SAFETY: header and data portions filled before the buffer is sent
     var frame_buf: [ETH_HEADER_SIZE + ETH_MTU]u8 = undefined;
-    var frame = @as(*EthernetHeader, @ptrCast(@alignCast(&frame_buf[0])));
+    var frame: *EthernetHeader = @ptrCast(@alignCast(&frame_buf[0]));
 
     frame.dst_mac0 = dst_mac[0];
     frame.dst_mac1 = dst_mac[1];
@@ -85,7 +85,7 @@ pub fn handleRxPacket(packet: []u8) void {
         return;
     }
 
-    const header = @as(*const EthernetHeader, @ptrCast(@alignCast(packet.ptr)));
+    const header: *const EthernetHeader = @ptrCast(@alignCast(packet.ptr));
     const ethertype = @byteSwap(header.ethertype);
 
     const frame = EthernetFrame{
@@ -93,6 +93,7 @@ pub fn handleRxPacket(packet: []u8) void {
         .data = packet[ETH_HEADER_SIZE..],
     };
 
+    // SAFETY: assigned in every branch of the if/else chain below; function returns on else
     var handler_index: usize = undefined;
     if (ethertype == @intFromEnum(EtherType.IPv4)) {
         handler_index = 0;

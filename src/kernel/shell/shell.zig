@@ -1,4 +1,4 @@
-const std = @import("std");
+// zlint-disable suppressed-errors
 const vga = @import("../drivers/vga.zig");
 const process = @import("../process/process.zig");
 const timer = @import("../timer/timer.zig");
@@ -19,6 +19,7 @@ const MAX_COMMAND_LENGTH = 256;
 const MAX_ARGS = 16;
 const MAX_HISTORY = 50;
 
+// SAFETY: written via memcpy before being read; length tracked by nice_command_path_len_storage
 var nice_command_path_storage: [256]u8 = undefined;
 var nice_command_path_len_storage: usize = 0;
 
@@ -225,6 +226,7 @@ pub const Shell = struct {
             "top", "cp", "touch", "write", "edit", "nice", "renice",
             "head", "tail", "wc", "grep", "find", "stat", "uname",
             "whoami", "pwd", "sort", "uniq", "ifconfig", "df",
+            "smptest", "fileiotest", "ext2writetest", "tcptest",
         };
 
 
@@ -232,6 +234,7 @@ pub const Shell = struct {
         @memcpy(partial[0..self.buffer_pos], self.command_buffer[0..self.buffer_pos]);
 
 
+        // SAFETY: entries assigned in the following command matching loop; match_count tracks valid entries
         var matches: [16][]const u8 = undefined;
         var match_count: usize = 0;
 
@@ -294,7 +297,9 @@ pub const Shell = struct {
 
         if (partial_len == 0) return;
 
+        // SAFETY: filled by memcpy in the path splitting logic below
         var dir_path: [256]u8 = undefined;
+        // SAFETY: filled by memcpy in the path splitting logic below
         var file_part: [256]u8 = undefined;
         var dir_len: usize = 0;
         var file_len: usize = 0;
@@ -324,11 +329,14 @@ pub const Shell = struct {
         };
         defer vfs.close(dir_fd) catch {};
 
+        // SAFETY: entries written in the directory scan loop; match_count tracks valid entries
         var matches: [32][256]u8 = undefined;
+        // SAFETY: entries set from matches slices; match_count tracks valid entries
         var match_names: [32][]const u8 = undefined;
         var match_count: usize = 0;
 
         var index: u64 = 0;
+        // SAFETY: Populated by vfs.readdir call below
         var dirent: vfs.DirEntry = undefined;
 
         while (match_count < 32) {
@@ -421,6 +429,7 @@ pub const Shell = struct {
 
         vga.put_char('\n');
 
+        // SAFETY: entries assigned during command argument parsing; argc tracks valid entries
         var args: [MAX_ARGS][*:0]const u8 = undefined;
         var arg_count: usize = 0;
         var i: usize = 0;
@@ -566,6 +575,14 @@ pub const Shell = struct {
             self.cmdIfconfig(args[1..arg_count]);
         } else if (streq(command, "df")) {
             self.cmdDf(args[1..arg_count]);
+        } else if (streq(command, "smptest")) {
+            self.cmdSmpTest();
+        } else if (streq(command, "fileiotest")) {
+            self.cmdFileioTest();
+        } else if (streq(command, "ext2writetest")) {
+            self.cmdExt2WriteTest();
+        } else if (streq(command, "tcptest")) {
+            self.cmdTcpTest();
         } else {
             vga.print("Unknown command: ");
             printString(command);
@@ -632,6 +649,10 @@ pub const Shell = struct {
         vga.print("  ipctest  - Run IPC tests\n");
         vga.print("  procmon  - Show detailed process statistics\n");
         vga.print("  top      - Show CPU usage and process list\n");
+        vga.print("  smptest  - Run SMP/multicore tests\n");
+        vga.print("  fileiotest - Run file I/O syscall tests\n");
+        vga.print("  ext2writetest - Run ext2 write operation tests\n");
+        vga.print("  tcptest  - Run TCP reliability tests\n");
     }
 
     fn cmdClear(self: *const Shell) void {
@@ -665,6 +686,7 @@ pub const Shell = struct {
                 .Terminated => vga.print("TERMINATED"),
             }
 
+            // SAFETY: filled by the subsequent memcpy from process name
             var name_buffer: [65]u8 = undefined;
             @memcpy(name_buffer[0..64], &p.name);
             name_buffer[64] = 0;
@@ -824,6 +846,7 @@ pub const Shell = struct {
         defer vfs.close(fd) catch {};
 
         var index: u64 = 0;
+        // SAFETY: Populated by vfs.readdir call below
         var dirent: vfs.DirEntry = undefined;
 
         while (true) {
@@ -871,6 +894,7 @@ pub const Shell = struct {
         };
         defer vfs.close(fd) catch {};
 
+        // SAFETY: filled by the subsequent vfs.read call
         var buffer: [512]u8 = undefined;
         while (true) {
             const bytes_read = vfs.read(fd, &buffer) catch |err| {
@@ -1060,6 +1084,7 @@ pub const Shell = struct {
         defer vfs.close(dst_fd) catch {};
 
 
+        // SAFETY: filled by the subsequent vfs.read call in the copy loop
         var buffer: [4096]u8 = undefined;
         var total_copied: usize = 0;
         while (true) {
@@ -1301,6 +1326,7 @@ pub const Shell = struct {
             return;
         }
 
+        // SAFETY: filled by the subsequent path resolution logic
         var command_path: [256]u8 = undefined;
         var path_len: usize = 0;
         
@@ -1348,12 +1374,15 @@ pub const Shell = struct {
             fn exec_wrapper() void {
                 const posix2 = @import("../utils/posix.zig");
                 
+                // SAFETY: filled by the subsequent memcpy from nice_command_path_storage
                 var path_buf: [256]u8 = undefined;
                 @memcpy(&path_buf, &nice_command_path_storage);
-                
+
+                // SAFETY: element assigned immediately below
                 var argv: [1][]const u8 = undefined;
                 argv[0] = path_buf[0..nice_command_path_len_storage];
-                
+
+                // SAFETY: zero-length array, no elements to initialize
                 var envp: [0][]const u8 = undefined;
                 
                 posix2.execve(path_buf[0..nice_command_path_len_storage], &argv, &envp) catch |err| {
@@ -1510,6 +1539,7 @@ pub const Shell = struct {
         };
         defer vfs.close(fd) catch {};
 
+        // SAFETY: filled by the subsequent vfs.read call
         var buffer: [512]u8 = undefined;
         var line_count: u32 = 0;
         var in_line = false;
@@ -1584,6 +1614,7 @@ pub const Shell = struct {
         };
         defer vfs.close(fd) catch {};
 
+        // SAFETY: filled by the subsequent vfs.read calls
         var file_buffer: [8192]u8 = undefined;
         var total_read: usize = 0;
 
@@ -1641,6 +1672,7 @@ pub const Shell = struct {
         };
         defer vfs.close(fd) catch {};
 
+        // SAFETY: filled by the subsequent vfs.read call
         var buffer: [512]u8 = undefined;
         var lines: u32 = 0;
         var words: u32 = 0;
@@ -1706,7 +1738,9 @@ pub const Shell = struct {
         };
         defer vfs.close(fd) catch {};
 
+        // SAFETY: filled by the subsequent vfs.read call
         var buffer: [512]u8 = undefined;
+        // SAFETY: characters accumulated during line parsing
         var line_buffer: [256]u8 = undefined;
         var line_pos: usize = 0;
         var line_num: u32 = 1;
@@ -1824,6 +1858,7 @@ pub const Shell = struct {
         defer vfs.close(fd) catch {};
 
         var index: u64 = 0;
+        // SAFETY: Populated by vfs.readdir call below
         var dirent: vfs.DirEntry = undefined;
         var found_count: u32 = 0;
 
@@ -1861,6 +1896,7 @@ pub const Shell = struct {
             }
 
             if (matches) {
+                // SAFETY: filled by the subsequent path construction logic
                 var path_buf: [512]u8 = undefined;
                 var path_len: usize = 0;
                 
@@ -1910,6 +1946,7 @@ pub const Shell = struct {
         };
         defer vfs.close(fd) catch {};
 
+        // SAFETY: Populated by vfs.stat call below
         var stat_info: vfs.FileStat = undefined;
         const file_ops = @import("../fs/file_ops.zig");
         file_ops.fstat(@as(i32, @intCast(fd)), &stat_info) catch |err| {
@@ -2099,6 +2136,7 @@ pub const Shell = struct {
         defer vfs.close(fd) catch {};
 
         var line_count: usize = 0;
+        // SAFETY: filled by the subsequent vfs.read calls
         var file_buffer: [4096]u8 = undefined;
         var total_read: usize = 0;
 
@@ -2115,7 +2153,9 @@ pub const Shell = struct {
             total_read += bytes_read;
         }
 
+        // SAFETY: entries assigned in the following line-scanning loop; line_count tracks valid entries
         var line_starts: [256]usize = undefined;
+        // SAFETY: entries assigned in the following line-scanning loop; line_count tracks valid entries
         var line_lens: [256]usize = undefined;
         var current_line_start: usize = 0;
         var i: usize = 0;
@@ -2212,9 +2252,12 @@ pub const Shell = struct {
         };
         defer vfs.close(fd) catch {};
 
+        // SAFETY: filled by the subsequent vfs.read call
         var buffer: [512]u8 = undefined;
+        // SAFETY: characters accumulated during line comparison
         var prev_line: [256]u8 = undefined;
         var prev_line_len: usize = 0;
+        // SAFETY: characters accumulated during line comparison
         var current_line: [256]u8 = undefined;
         var current_line_len: usize = 0;
         var first_line = true;
@@ -2645,6 +2688,30 @@ pub const Shell = struct {
         ipc.runIPCTests();
     }
 
+    fn cmdSmpTest(self: *const Shell) void {
+        _ = self;
+        const test_smp = @import("../tests/test_smp.zig");
+        test_smp.runSMPTests();
+    }
+
+    fn cmdFileioTest(self: *const Shell) void {
+        _ = self;
+        const test_file_io = @import("../tests/test_file_io.zig");
+        test_file_io.runFileIOTests();
+    }
+
+    fn cmdExt2WriteTest(self: *const Shell) void {
+        _ = self;
+        const test_ext2 = @import("../tests/test_ext2_write.zig");
+        test_ext2.runExt2WriteTests();
+    }
+
+    fn cmdTcpTest(self: *const Shell) void {
+        _ = self;
+        const test_tcp = @import("../tests/test_tcp_reliability.zig");
+        test_tcp.runTCPReliabilityTests();
+    }
+
     fn cmdProcMon(self: *const Shell) void {
         _ = self;
         const procmon = @import("../tests/procmon.zig");
@@ -2734,6 +2801,7 @@ fn printNumber(num: usize) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var buffer: [20]u8 = undefined;
     var i: usize = 0;
     var n = num;

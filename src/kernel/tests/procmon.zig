@@ -1,9 +1,7 @@
-const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const process = @import("../process/process.zig");
 const scheduler = @import("../process/scheduler.zig");
 const timer = @import("../timer/timer.zig");
-const memory = @import("../memory/memory.zig");
 const paging = @import("../memory/paging.zig");
 
 pub const ProcessStats = struct {
@@ -47,13 +45,17 @@ pub const CPUUsage = struct {
 };
 
 const MAX_TRACKED_PROCESSES = 256;
+// SAFETY: entries populated in updateProcessStats; only accessed up to process count
 var process_stats: [MAX_TRACKED_PROCESSES]ProcessStats = undefined;
+// SAFETY: fully initialized in init() before use
 var system_stats: SystemStats = undefined;
+// SAFETY: fully initialized in init() before use
 var cpu_usage: CPUUsage = undefined;
 
 var last_update_time: u64 = 0;
 var update_interval: u64 = 100;
 
+// SAFETY: written before being read; sample_index tracks the current position
 var cpu_samples: [100]CPUUsage = undefined;
 var sample_index: usize = 0;
 
@@ -378,6 +380,7 @@ fn print_number(num: u32) void {
         return;
     }
 
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var i: usize = 0;
     var n = num;
@@ -394,6 +397,7 @@ fn print_number(num: u32) void {
 }
 
 fn print_number_width(num: u32, width: usize) void {
+    // SAFETY: filled by the following digit extraction loop
     var digits: [10]u8 = undefined;
     var digit_count: usize = 0;
     var n = num;

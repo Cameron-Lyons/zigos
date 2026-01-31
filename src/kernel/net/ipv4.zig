@@ -1,4 +1,3 @@
-const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const ethernet = @import("ethernet.zig");
 const arp = @import("arp.zig");
@@ -76,7 +75,7 @@ fn handleIPv4Packet(frame: *const ethernet.EthernetFrame) void {
         return;
     }
 
-    const header = @as(*const IPv4Header, @ptrCast(@alignCast(frame.data.ptr)));
+    const header: *const IPv4Header = @ptrCast(@alignCast(frame.data.ptr));
 
     const version = (header.version_ihl >> 4) & 0xF;
     if (version != IP_VERSION_4) {
@@ -102,6 +101,7 @@ fn handleIPv4Packet(frame: *const ethernet.EthernetFrame) void {
         .data = frame.data[ihl..],
     };
 
+    // SAFETY: assigned in every branch of the if/else chain below; function returns on else
     var handler_index: usize = undefined;
     if (header.protocol == @intFromEnum(Protocol.ICMP)) {
         handler_index = 0;
@@ -121,6 +121,7 @@ fn handleIPv4Packet(frame: *const ethernet.EthernetFrame) void {
 }
 
 pub fn sendPacket(dst_ip: u32, protocol: Protocol, data: []const u8) !void {
+    // SAFETY: all fields assigned before the struct is used
     var header: IPv4Header = undefined;
 
     header.version_ihl = (IP_VERSION_4 << 4) | 5;
@@ -138,6 +139,7 @@ pub fn sendPacket(dst_ip: u32, protocol: Protocol, data: []const u8) !void {
 
     const next_hop = if (isLocalNetwork(dst_ip)) dst_ip else gateway_ip;
 
+    // SAFETY: assigned from arp.resolve result or function returns on failure
     var dst_mac: [6]u8 = undefined;
     if (arp.resolve(next_hop)) |mac| {
         dst_mac = mac;
@@ -146,8 +148,10 @@ pub fn sendPacket(dst_ip: u32, protocol: Protocol, data: []const u8) !void {
         return error.ARPResolutionFailed;
     }
 
+    // SAFETY: filled by the subsequent memcpy calls for header and data
     var packet_buf: [1500]u8 = undefined;
-    @memcpy(packet_buf[0..IP_HEADER_MIN_SIZE], @as([*]const u8, @ptrCast(&header))[0..IP_HEADER_MIN_SIZE]);
+    const header_ptr: [*]const u8 = @ptrCast(&header);
+    @memcpy(packet_buf[0..IP_HEADER_MIN_SIZE], header_ptr[0..IP_HEADER_MIN_SIZE]);
     @memcpy(packet_buf[IP_HEADER_MIN_SIZE .. IP_HEADER_MIN_SIZE + data.len], data);
 
     try ethernet.sendFrame(dst_mac, .IPv4, packet_buf[0 .. IP_HEADER_MIN_SIZE + data.len]);
@@ -155,7 +159,7 @@ pub fn sendPacket(dst_ip: u32, protocol: Protocol, data: []const u8) !void {
 
 fn calculateChecksum(header: *const IPv4Header, len: usize) u16 {
     var sum: u32 = 0;
-    const data = @as([*]const u16, @ptrCast(@alignCast(header)));
+    const data: [*]const u16 = @ptrCast(@alignCast(header));
     const word_count = len / 2;
 
     var i: usize = 0;
@@ -167,12 +171,13 @@ fn calculateChecksum(header: *const IPv4Header, len: usize) u16 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
 
-    return @as(u16, @intCast(~sum));
+    const result: u16 = @intCast(~sum);
+    return result;
 }
 
 fn verifyChecksum(header: *const IPv4Header, len: usize) bool {
     var sum: u32 = 0;
-    const data = @as([*]const u16, @ptrCast(@alignCast(header)));
+    const data: [*]const u16 = @ptrCast(@alignCast(header));
     const word_count = len / 2;
 
     var i: usize = 0;
@@ -192,13 +197,13 @@ fn isLocalNetwork(ip: u32) bool {
 }
 
 pub fn registerProtocolHandler(protocol: u8, handler: fn (src_ip: u32, dst_ip: u32, data: []const u8) void) void {
-    const handler_ptr = @as(*const fn (packet: *const IPv4Packet) void, @ptrCast(&struct {
+    const handler_ptr: *const fn (packet: *const IPv4Packet) void = @ptrCast(&struct {
         fn wrapper(packet: *const IPv4Packet) void {
             const src_ip = @byteSwap(packet.header.src_addr);
             const dst_ip = @byteSwap(packet.header.dst_addr);
             handler(src_ip, dst_ip, packet.data);
         }
-    }.wrapper));
+    }.wrapper);
 
     if (protocol == @intFromEnum(Protocol.TCP)) {
         rx_handlers[1] = handler_ptr;

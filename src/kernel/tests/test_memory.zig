@@ -11,7 +11,7 @@ pub fn test_memory_allocator() void {
         printHex(@intFromPtr(p));
         vga.print("\n");
 
-        const bytes = @as([*]u8, @ptrCast(p));
+        const bytes: [*]u8 = @ptrCast(p);
         var i: usize = 0;
         while (i < 64) : (i += 1) {
             bytes[i] = @as(u8, @intCast(i & 0xFF));
@@ -59,14 +59,14 @@ pub fn test_memory_allocator() void {
     const ptr6 = memory.kmalloc(32);
     if (ptr6) |p| {
         vga.print("  Initial allocation: 32 bytes\n");
-        const bytes = @as([*]u8, @ptrCast(p));
+        const bytes: [*]u8 = @ptrCast(p);
         bytes[0] = 0xAB;
         bytes[1] = 0xCD;
 
         const ptr7 = memory.krealloc(p, 128);
         if (ptr7) |new_p| {
             vga.print("  Reallocated to 128 bytes\n");
-            const new_bytes = @as([*]u8, @ptrCast(new_p));
+            const new_bytes: [*]u8 = @ptrCast(new_p);
             if (new_bytes[0] == 0xAB and new_bytes[1] == 0xCD) {
                 vga.print("  Data preserved correctly\n");
             } else {
@@ -81,6 +81,7 @@ pub fn test_memory_allocator() void {
 
 fn printHex(value: usize) void {
     const hex_chars = "0123456789ABCDEF";
+    // SAFETY: filled by the following hex digit extraction loop
     var buffer: [16]u8 = undefined;
     var i: usize = 0;
     var v = value;
@@ -102,6 +103,7 @@ fn printHex(value: usize) void {
 }
 
 fn printDec(value: usize) void {
+    // SAFETY: filled by the following decimal digit extraction loop
     var buffer: [20]u8 = undefined;
     var i: usize = 0;
     var v = value;
