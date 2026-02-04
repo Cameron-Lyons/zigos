@@ -96,7 +96,30 @@ pub const EACCES = -13;
 pub const EFAULT = -14;
 pub const ENOTDIR = -20;
 pub const EINVAL = -22;
+pub const EEXIST = -17;
+pub const EISDIR = -21;
+pub const ENFILE = -23;
+pub const EMFILE = -24;
+pub const ENOSPC = -28;
+pub const EROFS = -30;
+pub const ENAMETOOLONG = -36;
 pub const ENOSYS = -38;
+
+fn vfsErrno(err: vfs.VFSError) i32 {
+    return switch (err) {
+        vfs.VFSError.NotFound => ENOENT,
+        vfs.VFSError.PermissionDenied => EACCES,
+        vfs.VFSError.IsDirectory => EISDIR,
+        vfs.VFSError.NotDirectory => ENOTDIR,
+        vfs.VFSError.AlreadyExists => EEXIST,
+        vfs.VFSError.NoSpace => ENOSPC,
+        vfs.VFSError.ReadOnly => EROFS,
+        vfs.VFSError.OutOfMemory => ENOMEM,
+        vfs.VFSError.InvalidPath => EINVAL,
+        vfs.VFSError.InvalidOperation => EINVAL,
+        vfs.VFSError.DeviceError => EINVAL,
+    };
+}
 
 export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
     const syscall_num = regs.eax;
@@ -241,7 +264,7 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
             return EINVAL;
         };
 
-        const bytes_written = vfs.write(vfs_fd, kernel_buffer[0..chunk_size]) catch return -1;
+        const bytes_written = vfs.write(vfs_fd, kernel_buffer[0..chunk_size]) catch |err| return vfsErrno(err);
         written += bytes_written;
         if (bytes_written < chunk_size) break;
     }
@@ -291,7 +314,7 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
 
     while (total_read < count) {
         const chunk_size = @min(count - total_read, kernel_buffer.len);
-        const bytes_read = vfs.read(vfs_fd, kernel_buffer[0..chunk_size]) catch return -1;
+        const bytes_read = vfs.read(vfs_fd, kernel_buffer[0..chunk_size]) catch |err| return vfsErrno(err);
         if (bytes_read == 0) break;
 
         protection.copyToUser(@intFromPtr(buf) + total_read, kernel_buffer[0..bytes_read]) catch {
@@ -338,7 +361,7 @@ fn sys_mkdir(pathname: [*]const u8, mode: u32) i32 {
         .other_exec = (mode & 0o001) != 0,
     };
 
-    vfs.mkdir(path_slice, mode_struct) catch return -1;
+    vfs.mkdir(path_slice, mode_struct) catch |err| return vfsErrno(err);
     return 0;
 }
 
@@ -351,7 +374,7 @@ fn sys_rmdir(pathname: [*]const u8) i32 {
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
 
-    vfs.rmdir(path_slice) catch return -1;
+    vfs.rmdir(path_slice) catch |err| return vfsErrno(err);
     return 0;
 }
 
@@ -364,7 +387,7 @@ fn sys_unlink(pathname: [*]const u8) i32 {
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
 
-    vfs.unlink(path_slice) catch return -1;
+    vfs.unlink(path_slice) catch |err| return vfsErrno(err);
     return 0;
 }
 
@@ -383,7 +406,7 @@ fn sys_rename(oldpath: [*]const u8, newpath: [*]const u8) i32 {
     const old_slice = protection.copyStringFromUser(&old_buffer, @intFromPtr(oldpath)) catch return EINVAL;
     const new_slice = protection.copyStringFromUser(&new_buffer, @intFromPtr(newpath)) catch return EINVAL;
 
-    vfs.rename(old_slice, new_slice) catch return -1;
+    vfs.rename(old_slice, new_slice) catch |err| return vfsErrno(err);
     return 0;
 }
 
@@ -408,21 +431,21 @@ fn sys_open(pathname: [*]const u8, flags: u32) i32 {
         } else |_| {}
     }
 
-    const vfs_fd = vfs.open(path_slice, flags) catch return -1;
+    const vfs_fd = vfs.open(path_slice, flags) catch |err| return vfsErrno(err);
     return @intCast(@as(i32, @intCast(vfs_fd)) + FD_OFFSET);
 }
 
 fn sys_close(fd: i32) i32 {
     if (fd < FD_OFFSET) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
-    vfs.close(vfs_fd) catch return -1;
+    vfs.close(vfs_fd) catch |err| return vfsErrno(err);
     return 0;
 }
 
 fn sys_lseek(fd: i32, offset: i64, whence: u32) i32 {
     if (fd < FD_OFFSET) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
-    const result = vfs.lseek(vfs_fd, offset, whence) catch return -1;
+    const result = vfs.lseek(vfs_fd, offset, whence) catch |err| return vfsErrno(err);
     return @intCast(@as(i32, @intCast(result & 0x7FFFFFFF)));
 }
 
@@ -440,7 +463,7 @@ fn sys_stat(pathname: [*]const u8, stat_buf_addr: usize) i32 {
 
     // SAFETY: filled by the subsequent vfs.stat call
     var stat_buf: vfs.FileStat = undefined;
-    vfs.stat(path_slice, &stat_buf) catch return -1;
+    vfs.stat(path_slice, &stat_buf) catch |err| return vfsErrno(err);
 
     protection.copyToUser(stat_buf_addr, std.mem.asBytes(&stat_buf)) catch return EINVAL;
     return 0;
@@ -513,9 +536,9 @@ fn sys_setuid(uid: u16) i32 {
             proc.creds.euid = uid;
             return 0;
         }
-        return -1;
+        return EPERM;
     }
-    return -1;
+    return ENOSYS;
 }
 
 fn sys_setgid(gid: u16) i32 {
@@ -525,9 +548,9 @@ fn sys_setgid(gid: u16) i32 {
             proc.creds.egid = gid;
             return 0;
         }
-        return -1;
+        return EPERM;
     }
-    return -1;
+    return ENOSYS;
 }
 
 fn sys_chown(pathname: [*]const u8, uid: u16, gid: u16) i32 {
@@ -541,11 +564,11 @@ fn sys_chown(pathname: [*]const u8, uid: u16, gid: u16) i32 {
 
     if (process.current_process) |proc| {
         if (!credentials.isRoot(&proc.creds)) {
-            return -1;
+            return EPERM;
         }
     }
 
-    vfs.chown(path_slice, uid, gid) catch return -1;
+    vfs.chown(path_slice, uid, gid) catch |err| return vfsErrno(err);
     return 0;
 }
 
@@ -806,7 +829,7 @@ fn sys_fstat(fd: i32, stat_buf_addr: usize) i32 {
 
     // SAFETY: filled by the subsequent vfs.fstat call
     var stat_buf: vfs.FileStat = undefined;
-    vfs.fstat(vfs_fd, &stat_buf) catch return -1;
+    vfs.fstat(vfs_fd, &stat_buf) catch |err| return vfsErrno(err);
 
     protection.copyToUser(stat_buf_addr, std.mem.asBytes(&stat_buf)) catch return EINVAL;
     return 0;
@@ -818,7 +841,7 @@ fn sys_pipe(pipefd: ?*[2]i32) i32 {
         return EINVAL;
     }
 
-    const result = vfs.createPipe() catch return -1;
+    const result = vfs.createPipe() catch |err| return vfsErrno(err);
     const fds = [2]i32{
         @as(i32, @intCast(result.read_fd)) + FD_OFFSET,
         @as(i32, @intCast(result.write_fd)) + FD_OFFSET,
@@ -833,7 +856,7 @@ fn sys_dup2(old_fd: i32, new_fd: i32) i32 {
     const old_vfs_fd: u32 = @intCast(old_fd - FD_OFFSET);
     const new_vfs_fd: u32 = @intCast(new_fd - FD_OFFSET);
 
-    const result = vfs.dup2(old_vfs_fd, new_vfs_fd) catch return -1;
+    const result = vfs.dup2(old_vfs_fd, new_vfs_fd) catch |err| return vfsErrno(err);
     return @as(i32, @intCast(result)) + FD_OFFSET;
 }
 
@@ -1073,7 +1096,7 @@ fn sys_ioctl(fd: i32, request: u32, arg: usize) i32 {
     if (fd < FD_OFFSET) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
-    const result = vfs.ioctl(vfs_fd, request, arg) catch return -1;
+    const result = vfs.ioctl(vfs_fd, request, arg) catch |err| return vfsErrno(err);
     return result;
 }
 
@@ -1217,7 +1240,7 @@ fn sys_chmod_syscall(pathname: [*]const u8, mode: u32) i32 {
         .other_exec = (mode & 0o001) != 0,
     };
 
-    vfs.chmod(path_slice, mode_struct) catch return -1;
+    vfs.chmod(path_slice, mode_struct) catch |err| return vfsErrno(err);
     return 0;
 }
 
@@ -1237,7 +1260,7 @@ fn sys_fchmod(fd: i32, mode: u32) i32 {
         .other_exec = (mode & 0o001) != 0,
     };
 
-    vfs.fchmod(vfs_fd, mode_struct) catch return -1;
+    vfs.fchmod(vfs_fd, mode_struct) catch |err| return vfsErrno(err);
     return 0;
 }
 
@@ -1245,7 +1268,7 @@ fn sys_ftruncate(fd: i32, length: usize) i32 {
     if (fd < FD_OFFSET) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
-    vfs.ftruncate(vfs_fd, length) catch return -1;
+    vfs.ftruncate(vfs_fd, length) catch |err| return vfsErrno(err);
     return 0;
 }
 
@@ -1267,7 +1290,7 @@ fn sys_getdents(fd: i32, buf_addr: usize, buf_size: usize) i32 {
     var index: u64 = 0;
 
     while (offset + @sizeOf(LinuxDirent) + 1 < buf_size) {
-        const has_entry = vfs.readdir(vfs_fd, &dirent, index) catch return -1;
+        const has_entry = vfs.readdir(vfs_fd, &dirent, index) catch |err| return vfsErrno(err);
         if (!has_entry) break;
 
         const name_len = dirent.name_len;
@@ -1304,7 +1327,7 @@ fn sys_symlink(target: [*]const u8, linkpath: [*]const u8) i32 {
     const target_slice = protection.copyStringFromUser(&target_buf, @intFromPtr(target)) catch return EINVAL;
     const link_slice = protection.copyStringFromUser(&link_buf, @intFromPtr(linkpath)) catch return EINVAL;
 
-    vfs.symlink(target_slice, link_slice) catch return -1;
+    vfs.symlink(target_slice, link_slice) catch |err| return vfsErrno(err);
     return 0;
 }
 
@@ -1319,7 +1342,7 @@ fn sys_link(oldpath: [*]const u8, newpath: [*]const u8) i32 {
     const old_slice = protection.copyStringFromUser(&old_buf, @intFromPtr(oldpath)) catch return EINVAL;
     const new_slice = protection.copyStringFromUser(&new_buf, @intFromPtr(newpath)) catch return EINVAL;
 
-    vfs.link(old_slice, new_slice) catch return -1;
+    vfs.link(old_slice, new_slice) catch |err| return vfsErrno(err);
     return 0;
 }
 
@@ -1334,7 +1357,7 @@ fn sys_readlink(pathname: [*]const u8, buf: [*]u8, buf_size: usize) i32 {
     // SAFETY: filled by the subsequent vfs.readlink call
     var kernel_buf: [256]u8 = undefined;
     const read_size = @min(buf_size, kernel_buf.len);
-    const link_len = vfs.readlink(path_slice, kernel_buf[0..read_size]) catch return -1;
+    const link_len = vfs.readlink(path_slice, kernel_buf[0..read_size]) catch |err| return vfsErrno(err);
 
     protection.copyToUser(@intFromPtr(buf), kernel_buf[0..link_len]) catch return EINVAL;
     return @intCast(link_len);
@@ -1429,8 +1452,14 @@ fn sys_fcntl(fd: i32, cmd: i32, arg: usize) i32 {
         },
         F_GETFD => return 0,
         F_SETFD => return 0,
-        F_GETFL => return 0,
-        F_SETFL => return 0,
+        F_GETFL => {
+            const flags = vfs.getFileFlags(vfs_fd) catch return EBADF;
+            return @intCast(flags);
+        },
+        F_SETFL => {
+            vfs.setFileFlags(vfs_fd, @intCast(arg)) catch return EBADF;
+            return 0;
+        },
         else => return EINVAL,
     }
 }
@@ -1556,6 +1585,6 @@ fn sys_truncate(pathname: [*]const u8, length: usize) i32 {
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
 
-    vfs.truncate(path_slice, length) catch return -1;
+    vfs.truncate(path_slice, length) catch |err| return vfsErrno(err);
     return 0;
 }
