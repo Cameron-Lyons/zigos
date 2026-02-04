@@ -215,6 +215,9 @@ pub fn mount(device: []const u8, mount_path: []const u8, fs_name: []const u8, fl
 pub fn open(path: []const u8, flags: u32) VFSError!u32 {
     const vnode = blk: {
         if (lookupPath(path)) |v| {
+            if ((flags & O_CREAT) != 0 and (flags & O_EXCL) != 0) {
+                return VFSError.AlreadyExists;
+            }
             break :blk v;
         } else |err| {
             if (err == VFSError.NotFound and (flags & O_CREAT) != 0) {
@@ -307,6 +310,10 @@ pub fn write(fd: u32, buffer: []const u8) VFSError!usize {
             return VFSError.PermissionDenied;
         }
 
+        if ((file_desc.flags & O_APPEND) != 0) {
+            file_desc.offset = file_desc.vnode.size;
+        }
+
         const bytes_written = try file_desc.vnode.ops.write(file_desc.vnode, buffer, file_desc.offset);
         file_desc.offset += bytes_written;
         return bytes_written;
@@ -340,6 +347,24 @@ pub fn lseek(fd: u32, offset: i64, whence: u32) VFSError!u64 {
         return new_offset;
     }
 
+    return VFSError.InvalidOperation;
+}
+
+pub fn getFileFlags(fd: u32) VFSError!u32 {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+    if (fd_table[fd]) |file_desc| {
+        return file_desc.flags;
+    }
+    return VFSError.InvalidOperation;
+}
+
+pub fn setFileFlags(fd: u32, flags: u32) VFSError!void {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+    if (fd_table[fd]) |file_desc| {
+        const changeable = O_APPEND;
+        file_desc.flags = (file_desc.flags & ~changeable) | (flags & changeable);
+        return;
+    }
     return VFSError.InvalidOperation;
 }
 
