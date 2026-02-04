@@ -82,6 +82,13 @@ pub const SYS_UNAME = 65;
 pub const SYS_TRUNCATE = 66;
 pub const SYS_PREAD = 67;
 pub const SYS_PWRITE = 68;
+pub const SYS_SENDTO = 69;
+pub const SYS_RECVFROM = 70;
+pub const SYS_GETSOCKNAME = 71;
+pub const SYS_GETPEERNAME = 72;
+pub const SYS_FCHOWN = 73;
+pub const SYS_FSYNC = 74;
+pub const SYS_FDATASYNC = 75;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -201,6 +208,13 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_TRUNCATE => sys_truncate(@as([*]const u8, @ptrFromInt(arg1)), arg2),
         SYS_PREAD => sys_pread(@intCast(arg1), @as([*]u8, @ptrFromInt(arg2)), arg3, @as(u64, arg4) | (@as(u64, arg5) << 32)),
         SYS_PWRITE => sys_pwrite(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3, @as(u64, arg4) | (@as(u64, arg5) << 32)),
+        SYS_SENDTO => sys_sendto(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3, arg4, @intCast(arg5)),
+        SYS_RECVFROM => sys_recvfrom(@intCast(arg1), @as([*]u8, @ptrFromInt(arg2)), arg3, arg4, arg5),
+        SYS_GETSOCKNAME => sys_getsockname(@intCast(arg1), arg2, arg3),
+        SYS_GETPEERNAME => sys_getpeername(@intCast(arg1), arg2, arg3),
+        SYS_FCHOWN => sys_fchown(@intCast(arg1), @intCast(arg2), @intCast(arg3)),
+        SYS_FSYNC => sys_fsync(@intCast(arg1)),
+        SYS_FDATASYNC => sys_fsync(@intCast(arg1)),
         else => ENOSYS,
     };
 
@@ -1631,4 +1645,124 @@ fn sys_pwrite(fd: i32, buf: [*]const u8, count: usize, offset: u64) i32 {
     }
 
     return @intCast(written);
+}
+
+fn parseSockAddr(addr_ptr: usize, addr_len: u32) ?struct { addr: @import("../net/ipv4.zig").IPv4Address, port: u16 } {
+    if (addr_len < @sizeOf(SockAddrIn)) return null;
+    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn))) return null;
+
+    var addr_buf: [@sizeOf(SockAddrIn)]u8 = undefined;
+    protection.copyFromUser(&addr_buf, addr_ptr) catch return null;
+    const addr: *const SockAddrIn = @ptrCast(@alignCast(&addr_buf));
+
+    return .{
+        .addr = @import("../net/ipv4.zig").IPv4Address{
+            .octets = .{
+                @intCast((addr.addr >> 0) & 0xFF),
+                @intCast((addr.addr >> 8) & 0xFF),
+                @intCast((addr.addr >> 16) & 0xFF),
+                @intCast((addr.addr >> 24) & 0xFF),
+            },
+        },
+        .port = @byteSwap(addr.port),
+    };
+}
+
+fn writeSockAddr(addr_ptr: usize, len_ptr: usize, ipv4_addr: @import("../net/ipv4.zig").IPv4Address, port: u16) i32 {
+    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn))) return EINVAL;
+
+    const addr = SockAddrIn{
+        .family = @intCast(AF_INET),
+        .port = @byteSwap(port),
+        .addr = @as(u32, ipv4_addr.octets[0]) |
+            (@as(u32, ipv4_addr.octets[1]) << 8) |
+            (@as(u32, ipv4_addr.octets[2]) << 16) |
+            (@as(u32, ipv4_addr.octets[3]) << 24),
+        .zero = [_]u8{0} ** 8,
+    };
+
+    protection.copyToUser(addr_ptr, std.mem.asBytes(&addr)) catch return EINVAL;
+    if (len_ptr != 0 and protection.verifyUserPointer(len_ptr, @sizeOf(u32))) {
+        var len: u32 = @sizeOf(SockAddrIn);
+        protection.copyToUser(len_ptr, std.mem.asBytes(&len)) catch {};
+    }
+    return 0;
+}
+
+fn sys_sendto(sockfd: i32, buf: [*]const u8, len: usize, dest_addr: usize, addr_len: u32) i32 {
+    if (sockfd < 0 or sockfd >= 64) return EBADF;
+    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+
+    if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
+
+    var kernel_buffer: [4096]u8 = undefined;
+    const to_send = @min(len, kernel_buffer.len);
+    protection.copyFromUser(kernel_buffer[0..to_send], @intFromPtr(buf)) catch return EINVAL;
+
+    if (dest_addr == 0) {
+        const sent = sock.send(kernel_buffer[0..to_send]) catch return -1;
+        return @intCast(sent);
+    }
+
+    const parsed = parseSockAddr(dest_addr, addr_len) orelse return EINVAL;
+    sock.sendTo(kernel_buffer[0..to_send], parsed.addr, parsed.port) catch return -1;
+    return @intCast(to_send);
+}
+
+fn sys_recvfrom(sockfd: i32, buf: [*]u8, len: usize, src_addr: usize, addr_len_ptr: usize) i32 {
+    if (sockfd < 0 or sockfd >= 64) return EBADF;
+    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+
+    if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
+
+    var kernel_buffer: [4096]u8 = undefined;
+    const to_recv = @min(len, kernel_buffer.len);
+
+    if (src_addr == 0) {
+        const received = sock.recv(kernel_buffer[0..to_recv]) catch return -1;
+        if (received == 0) return 0;
+        protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..received]) catch return EINVAL;
+        return @intCast(received);
+    }
+
+    var from_addr = @import("../net/ipv4.zig").IPv4Address{ .octets = .{ 0, 0, 0, 0 } };
+    var from_port: u16 = 0;
+    const received = sock.recvFrom(kernel_buffer[0..to_recv], &from_addr, &from_port) catch return -1;
+    if (received == 0) return 0;
+
+    protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..received]) catch return EINVAL;
+    _ = writeSockAddr(src_addr, addr_len_ptr, from_addr, from_port);
+    return @intCast(received);
+}
+
+fn sys_getsockname(sockfd: i32, addr_ptr: usize, addr_len_ptr: usize) i32 {
+    if (sockfd < 0 or sockfd >= 64) return EBADF;
+    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+    return writeSockAddr(addr_ptr, addr_len_ptr, sock.local_addr, sock.local_port);
+}
+
+fn sys_getpeername(sockfd: i32, addr_ptr: usize, addr_len_ptr: usize) i32 {
+    if (sockfd < 0 or sockfd >= 64) return EBADF;
+    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+    if (sock.state != .CONNECTED) return EINVAL;
+    return writeSockAddr(addr_ptr, addr_len_ptr, sock.remote_addr, sock.remote_port);
+}
+
+fn sys_fchown(fd: i32, uid: u16, gid: u16) i32 {
+    if (fd < FD_OFFSET) return EBADF;
+
+    if (process.current_process) |proc| {
+        if (!credentials.isRoot(&proc.creds)) {
+            return EPERM;
+        }
+    }
+
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+    vfs.fchown(vfs_fd, uid, gid) catch |err| return vfsErrno(err);
+    return 0;
+}
+
+fn sys_fsync(fd: i32) i32 {
+    if (fd < FD_OFFSET) return EBADF;
+    return 0;
 }
