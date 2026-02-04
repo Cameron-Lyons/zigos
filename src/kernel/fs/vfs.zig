@@ -244,7 +244,7 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
         }
     };
 
-    if (vnode.file_type == FileType.Directory and (flags & O_RDWR) != 0) {
+    if (vnode.file_type == FileType.Directory and ((flags & O_WRONLY) != 0 or (flags & O_RDWR) != 0)) {
         return VFSError.IsDirectory;
     }
 
@@ -280,6 +280,16 @@ pub fn close(fd: u32) VFSError!void {
     if (fd_table[fd]) |file_desc| {
         file_desc.ref_count -= 1;
         if (file_desc.ref_count == 0) {
+            if (file_desc.vnode.file_type == .Pipe) {
+                if (file_desc.vnode.private_data) |pd| {
+                    const pipe: *PipeData = @ptrCast(@alignCast(pd));
+                    if ((file_desc.flags & O_WRONLY) != 0) {
+                        if (pipe.writers > 0) pipe.writers -= 1;
+                    } else {
+                        if (pipe.readers > 0) pipe.readers -= 1;
+                    }
+                }
+            }
             try file_desc.vnode.ops.close(file_desc.vnode);
             file_desc.vnode.ref_count -= 1;
             memory.kfree(@as([*]u8, @ptrCast(file_desc)));
@@ -294,6 +304,10 @@ pub fn read(fd: u32, buffer: []u8) VFSError!usize {
     if (fd >= fd_table.len) return VFSError.InvalidOperation;
 
     if (fd_table[fd]) |file_desc| {
+        if ((file_desc.flags & O_WRONLY) != 0) {
+            return VFSError.PermissionDenied;
+        }
+
         const bytes_read = try file_desc.vnode.ops.read(file_desc.vnode, buffer, file_desc.offset);
         file_desc.offset += bytes_read;
         return bytes_read;
@@ -345,6 +359,32 @@ pub fn lseek(fd: u32, offset: i64, whence: u32) VFSError!u64 {
         const new_offset = try file_desc.vnode.ops.seek(file_desc.vnode, offset, whence);
         file_desc.offset = new_offset;
         return new_offset;
+    }
+
+    return VFSError.InvalidOperation;
+}
+
+pub fn pread(fd: u32, buffer: []u8, offset: u64) VFSError!usize {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+
+    if (fd_table[fd]) |file_desc| {
+        if ((file_desc.flags & O_WRONLY) != 0) {
+            return VFSError.PermissionDenied;
+        }
+        return try file_desc.vnode.ops.read(file_desc.vnode, buffer, offset);
+    }
+
+    return VFSError.InvalidOperation;
+}
+
+pub fn pwrite(fd: u32, buffer: []const u8, offset: u64) VFSError!usize {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+
+    if (fd_table[fd]) |file_desc| {
+        if ((file_desc.flags & O_WRONLY) == 0 and (file_desc.flags & O_RDWR) == 0) {
+            return VFSError.PermissionDenied;
+        }
+        return try file_desc.vnode.ops.write(file_desc.vnode, buffer, offset);
     }
 
     return VFSError.InvalidOperation;
@@ -563,7 +603,10 @@ const PipeData = struct {
 
 fn pipeRead(vnode: *VNode, buf: []u8, _: u64) VFSError!usize {
     const pipe: *PipeData = @ptrCast(@alignCast(vnode.private_data orelse return VFSError.InvalidOperation));
-    if (pipe.count == 0) return 0;
+    if (pipe.count == 0) {
+        if (pipe.writers == 0) return 0;
+        return 0;
+    }
 
     const to_read = @min(buf.len, pipe.count);
     var i: usize = 0;
@@ -577,6 +620,7 @@ fn pipeRead(vnode: *VNode, buf: []u8, _: u64) VFSError!usize {
 
 fn pipeWrite(vnode: *VNode, buf: []const u8, _: u64) VFSError!usize {
     const pipe: *PipeData = @ptrCast(@alignCast(vnode.private_data orelse return VFSError.InvalidOperation));
+    if (pipe.readers == 0) return VFSError.InvalidOperation;
     const available = PIPE_BUF_SIZE - pipe.count;
     if (available == 0) return VFSError.NoSpace;
 
