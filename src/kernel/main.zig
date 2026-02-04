@@ -33,6 +33,8 @@ const tmpfs = @import("fs/tmpfs.zig");
 const uhci = @import("drivers/uhci.zig");
 const ipv6 = @import("net/ipv6.zig");
 const icmpv6 = @import("net/icmpv6.zig");
+const icmp = @import("net/icmp.zig");
+const devfs = @import("fs/devfs.zig");
 
 fn test_process1() void {
     var i: u32 = 0;
@@ -150,6 +152,9 @@ export fn kernel_main() void {
     }
     network.init();
 
+    console.print("Initializing ICMP...\n");
+    icmp.init();
+
     console.print("Initializing socket API...\n");
     const socket = @import("net/socket.zig");
     socket.init();
@@ -183,6 +188,16 @@ export fn kernel_main() void {
     console.print("Mounting tmpfs on /tmp...\n");
     vfs.mount("none", "/tmp", "tmpfs", 0) catch |err| {
         console.print("Failed to mount tmpfs: ");
+        console.print(@errorName(err));
+        console.print("\n");
+    };
+
+    console.print("Initializing devfs...\n");
+    devfs.init();
+
+    console.print("Mounting devfs on /dev...\n");
+    vfs.mount("none", "/dev", "devfs", 0) catch |err| {
+        console.print("Failed to mount devfs: ");
         console.print(@errorName(err));
         console.print("\n");
     };
