@@ -35,8 +35,8 @@ pub const SIGSYS = 31;
 pub const SIGRTMIN = 32;
 pub const SIGRTMAX = 64;
 
-pub const SIG_DFL = 0;
-pub const SIG_IGN = 1;
+pub const SIG_DFL: usize = 1;
+pub const SIG_IGN: usize = 2;
 pub const SIG_ERR: usize = 0xFFFFFFFF;
 
 pub const SA_NOCLDSTOP = 1 << 0;
@@ -48,7 +48,7 @@ pub const SA_NODEFER = 1 << 5;
 pub const SA_RESETHAND = 1 << 6;
 
 pub const SignalHandler = *const fn (sig: i32) void;
-pub const SigInfoHandler = *const fn (sig: i32, info: *SigInfo, context: *anyopaque) void;
+pub const SigInfoHandler = *const fn (sig: i32, info: *SigInfo, context: ?*anyopaque) void;
 
 pub const SigAction = struct {
     handler: union {
@@ -72,22 +72,22 @@ pub const SigSet = struct {
 
     pub fn add(self: *SigSet, signum: i32) void {
         if (signum <= 0 or signum > 64) return;
-        const idx: usize = @intCast((signum - 1) / 32);
-        const bit: u5 = @intCast((signum - 1) % 32);
+        const idx: usize = @intCast(@divTrunc(signum - 1, 32));
+        const bit: u5 = @intCast(@mod(signum - 1, 32));
         self.sig[idx] |= @as(u32, 1) << bit;
     }
 
     pub fn del(self: *SigSet, signum: i32) void {
         if (signum <= 0 or signum > 64) return;
-        const idx: usize = @intCast((signum - 1) / 32);
-        const bit: u5 = @intCast((signum - 1) % 32);
+        const idx: usize = @intCast(@divTrunc(signum - 1, 32));
+        const bit: u5 = @intCast(@mod(signum - 1, 32));
         self.sig[idx] &= ~(@as(u32, 1) << bit);
     }
 
     pub fn ismember(self: *const SigSet, signum: i32) bool {
         if (signum <= 0 or signum > 64) return false;
-        const idx: usize = @intCast((signum - 1) / 32);
-        const bit: u5 = @intCast((signum - 1) % 32);
+        const idx: usize = @intCast(@divTrunc(signum - 1, 32));
+        const bit: u5 = @intCast(@mod(signum - 1, 32));
         return (self.sig[idx] & (@as(u32, 1) << bit)) != 0;
     }
 };
@@ -170,22 +170,26 @@ pub const ProcessSignals = struct {
     blocked: SigSet,
     pending: SignalQueue,
     alt_stack: ?SignalStack,
+    initialized: bool,
 
-    pub fn init() ProcessSignals {
-        var signals = ProcessSignals{
-            // SAFETY: Array elements set to defaults during init loop below
+    pub fn defaultValue() ProcessSignals {
+        return ProcessSignals{
+            // SAFETY: handlers initialized at runtime by ensureInit()
             .handlers = undefined,
             .blocked = SigSet.empty(),
             .pending = SignalQueue.init(),
             .alt_stack = null,
+            .initialized = false,
         };
+    }
 
-        for (&signals.handlers, 0..) |*handler, i| {
+    pub fn ensureInit(self: *ProcessSignals) void {
+        if (self.initialized) return;
+        for (&self.handlers, 0..) |*handler, i| {
             if (i == 0) continue;
             handler.* = getDefaultAction(@as(i32, @intCast(i)));
         }
-
-        return signals;
+        self.initialized = true;
     }
 };
 
@@ -221,7 +225,7 @@ pub fn kill(pid: i32, signum: i32) !void {
         return error.InvalidSignal;
     }
 
-    const target = process.getProcess(@as(u32, @intCast(pid))) orelse return error.NoSuchProcess;
+    const target = process.getProcessByPid(@as(u32, @intCast(pid))) orelse return error.NoSuchProcess;
 
     if (signum == 0) {
         return;
@@ -235,7 +239,7 @@ pub fn sigaction(signum: i32, act: ?*const SigAction, oldact: ?*SigAction) !void
         return error.InvalidSignal;
     }
 
-    const current = process.getCurrentProcess();
+    const current = process.getCurrentProcess().?;
 
     if (oldact) |old| {
         old.* = current.signals.handlers[@as(usize, @intCast(signum))];
@@ -247,7 +251,7 @@ pub fn sigaction(signum: i32, act: ?*const SigAction, oldact: ?*SigAction) !void
 }
 
 pub fn sigprocmask(how: i32, set: ?*const SigSet, oldset: ?*SigSet) !void {
-    const current = process.getCurrentProcess();
+    const current = process.getCurrentProcess().?;
 
     if (oldset) |old| {
         old.* = current.signals.blocked;
@@ -275,12 +279,12 @@ pub fn sigprocmask(how: i32, set: ?*const SigSet, oldset: ?*SigSet) !void {
 }
 
 pub fn sigpending(set: *SigSet) void {
-    const current = process.getCurrentProcess();
+    const current = process.getCurrentProcess().?;
     set.* = current.signals.pending.pending;
 }
 
 pub fn sigsuspend(mask: *const SigSet) !void {
-    const current = process.getCurrentProcess();
+    const current = process.getCurrentProcess().?;
     const old_mask = current.signals.blocked;
 
     current.signals.blocked = mask.*;
@@ -299,12 +303,13 @@ pub fn sigsuspend(mask: *const SigSet) !void {
 
 pub fn sendSignal(target: *process.Process, signum: i32) void {
     if (signum <= 0 or signum > 64) return;
+    target.signals.ensureInit();
 
     const info = SigInfo{
         .si_signo = signum,
         .si_errno = 0,
         .si_code = 0,
-        .si_pid = @as(i32, @intCast(process.getCurrentProcess().pid)),
+        .si_pid = if (process.getCurrentProcess()) |p| @as(i32, @intCast(p.pid)) else 0,
         .si_uid = 0,
         .si_addr = null,
         .si_status = 0,
@@ -313,13 +318,15 @@ pub fn sendSignal(target: *process.Process, signum: i32) void {
 
     target.signals.pending.add(signum, &info);
 
-    if (target.state == .WAITING) {
-        target.state = .READY;
+    if (target.state == .Waiting) {
+        target.state = .Ready;
     }
 }
 
 pub fn handlePendingSignals() void {
-    const current = process.getCurrentProcess();
+    const proc = process.getCurrentProcess() orelse return;
+    proc.signals.ensureInit();
+    const current = proc;
 
     while (current.signals.pending.get()) |queued| {
         const signum = queued.signum;
@@ -349,7 +356,7 @@ pub fn handlePendingSignals() void {
         }
 
         if ((action.sa_flags & SA_SIGINFO) != 0) {
-            action.handler.sa_sigaction(signum, @as(*SigInfo, @ptrCast(&queued.info)), null);
+            action.handler.sa_sigaction(signum, @as(*SigInfo, @ptrCast(@constCast(&queued.info))), null);
         } else {
             action.handler.sa_handler(signum);
         }
@@ -363,17 +370,17 @@ pub fn handlePendingSignals() void {
 }
 
 fn handleDefaultSignal(signum: i32) void {
-    const current = process.getCurrentProcess();
+    const current = process.getCurrentProcess() orelse return;
 
     switch (signum) {
         SIGCHLD, SIGURG, SIGWINCH => {},
         SIGCONT => {
-            if (current.state == .STOPPED) {
-                current.state = .READY;
+            if (current.state == .Stopped) {
+                current.state = .Ready;
             }
         },
         SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU => {
-            current.state = .STOPPED;
+            current.state = .Stopped;
             process.yield();
         },
         else => {
@@ -383,14 +390,14 @@ fn handleDefaultSignal(signum: i32) void {
             printNumber(@as(u32, @intCast(signum)));
             vga.print("\n");
 
-            current.state = .ZOMBIE;
+            current.state = .Zombie;
             process.yield();
         },
     }
 }
 
 pub fn alarm(seconds: u32) u32 {
-    const current = process.getCurrentProcess();
+    const current = process.getCurrentProcess().?;
     const old_alarm = current.alarm_time;
 
     if (seconds == 0) {
@@ -412,8 +419,8 @@ pub fn alarm(seconds: u32) u32 {
 pub fn checkAlarms() void {
     const now = process.getSystemTime();
 
-    for (process.processes) |*proc| {
-        if (proc.state != .ZOMBIE and proc.alarm_time != 0 and proc.alarm_time <= now) {
+    for (process.process_table) |*proc| {
+        if (proc.state != .Zombie and proc.alarm_time != 0 and proc.alarm_time <= now) {
             proc.alarm_time = 0;
             sendSignal(proc, SIGALRM);
         }
