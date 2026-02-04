@@ -77,6 +77,9 @@ pub const SYS_SIGSUSPEND = 60;
 pub const SYS_DUP = 61;
 pub const SYS_FCNTL = 62;
 pub const SYS_SELECT = 63;
+pub const SYS_UMASK = 64;
+pub const SYS_UNAME = 65;
+pub const SYS_TRUNCATE = 66;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -168,6 +171,9 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_DUP => sys_dup(@intCast(arg1)),
         SYS_FCNTL => sys_fcntl(@intCast(arg1), @intCast(arg2), arg3),
         SYS_SELECT => sys_select(@intCast(arg1), arg2, arg3, arg4),
+        SYS_UMASK => sys_umask(@intCast(arg1)),
+        SYS_UNAME => sys_uname(arg1),
+        SYS_TRUNCATE => sys_truncate(@as([*]const u8, @ptrFromInt(arg1)), arg2),
         else => ENOSYS,
     };
 
@@ -1485,4 +1491,71 @@ fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfds_ad
     }
 
     return count;
+}
+
+fn sys_umask(mask: u16) i32 {
+    const proc = process.current_process orelse return ENOSYS;
+    const old = proc.umask;
+    proc.umask = mask & 0o777;
+    return @intCast(old);
+}
+
+const UtsName = extern struct {
+    sysname: [65]u8,
+    nodename: [65]u8,
+    release: [65]u8,
+    version: [65]u8,
+    machine: [65]u8,
+};
+
+var system_hostname: [65]u8 = blk: {
+    var name = [_]u8{0} ** 65;
+    name[0] = 'z';
+    name[1] = 'i';
+    name[2] = 'g';
+    name[3] = 'o';
+    name[4] = 's';
+    break :blk name;
+};
+var hostname_len: usize = 5;
+
+pub fn getHostname() []const u8 {
+    return system_hostname[0..hostname_len];
+}
+
+pub fn setHostname(name: []const u8) void {
+    const len = @min(name.len, 64);
+    @memset(&system_hostname, 0);
+    @memcpy(system_hostname[0..len], name[0..len]);
+    hostname_len = len;
+}
+
+fn fillField(dest: *[65]u8, src: []const u8) void {
+    @memset(dest, 0);
+    const len = @min(src.len, 64);
+    @memcpy(dest[0..len], src[0..len]);
+}
+
+fn sys_uname(buf_addr: usize) i32 {
+    if (!protection.verifyUserPointer(buf_addr, @sizeOf(UtsName))) return EINVAL;
+
+    var buf: UtsName = undefined;
+    fillField(&buf.sysname, "ZigOS");
+    fillField(&buf.nodename, system_hostname[0..hostname_len]);
+    fillField(&buf.release, "0.1.0");
+    fillField(&buf.version, "ZigOS 0.1.0 (Zig 0.16.0-dev)");
+    fillField(&buf.machine, "i386");
+
+    protection.copyToUser(buf_addr, std.mem.asBytes(&buf)) catch return EINVAL;
+    return 0;
+}
+
+fn sys_truncate(pathname: [*]const u8, length: usize) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+
+    var kernel_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    vfs.truncate(path_slice, length) catch return -1;
+    return 0;
 }

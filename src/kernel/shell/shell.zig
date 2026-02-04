@@ -597,6 +597,14 @@ pub const Shell = struct {
             self.cmdLn(args[1..arg_count]);
         } else if (streq(command, "hostname")) {
             self.cmdHostname(args[1..arg_count]);
+        } else if (streq(command, "sleep")) {
+            self.cmdSleep(args[1..arg_count]);
+        } else if (streq(command, "umask")) {
+            self.cmdUmask(args[1..arg_count]);
+        } else if (streq(command, "chown")) {
+            self.cmdChown(args[1..arg_count]);
+        } else if (streq(command, "chgrp")) {
+            self.cmdChgrp(args[1..arg_count]);
         } else {
             vga.print("Unknown command: ");
             printString(command);
@@ -2060,6 +2068,7 @@ pub const Shell = struct {
 
     fn cmdUname(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
+        const syscall_mod = @import("../process/syscall.zig");
         var show_all = false;
         var show_sysname = false;
         var show_nodename = false;
@@ -2087,41 +2096,35 @@ pub const Shell = struct {
             }
         }
 
-        if (show_all) {
-            vga.print("ZigOS localhost 1.0.0 ");
-            vga.print("ZigOS ");
-            vga.print("x86_64\n");
-        } else {
-            var first = true;
-            if (show_sysname) {
-                vga.print("ZigOS");
-                first = false;
-            }
-            if (show_nodename) {
-                if (!first) vga.print(" ");
-                vga.print("localhost");
-                first = false;
-            }
-            if (show_release) {
-                if (!first) vga.print(" ");
-                vga.print("1.0.0");
-                first = false;
-            }
-            if (show_version) {
-                if (!first) vga.print(" ");
-                vga.print("ZigOS");
-                first = false;
-            }
-            if (show_machine) {
-                if (!first) vga.print(" ");
-                vga.print("x86_64");
-                first = false;
-            }
-            if (first) {
-                vga.print("ZigOS");
-            }
-            vga.print("\n");
+        var first = true;
+        if (show_all or show_sysname) {
+            vga.print("ZigOS");
+            first = false;
         }
+        if (show_all or show_nodename) {
+            if (!first) vga.print(" ");
+            vga.print(syscall_mod.getHostname());
+            first = false;
+        }
+        if (show_all or show_release) {
+            if (!first) vga.print(" ");
+            vga.print("0.1.0");
+            first = false;
+        }
+        if (show_all or show_version) {
+            if (!first) vga.print(" ");
+            vga.print("ZigOS 0.1.0");
+            first = false;
+        }
+        if (show_all or show_machine) {
+            if (!first) vga.print(" ");
+            vga.print("i386");
+            first = false;
+        }
+        if (first) {
+            vga.print("ZigOS");
+        }
+        vga.print("\n");
     }
 
     fn cmdWhoami(self: *const Shell) void {
@@ -2271,31 +2274,113 @@ pub const Shell = struct {
         }
     }
 
-    var system_hostname: [64]u8 = blk: {
-        var buf = [_]u8{0} ** 64;
-        buf[0] = 'z';
-        buf[1] = 'i';
-        buf[2] = 'g';
-        buf[3] = 'o';
-        buf[4] = 's';
-        break :blk buf;
-    };
-    var hostname_len: usize = 5;
-
     fn cmdHostname(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
+        const syscall_mod = @import("../process/syscall.zig");
         if (args.len == 0) {
-            vga.print(system_hostname[0..hostname_len]);
+            vga.print(syscall_mod.getHostname());
             vga.print("\n");
             return;
         }
 
-        var new_len: usize = 0;
-        while (new_len < 63 and args[0][new_len] != 0) : (new_len += 1) {
-            system_hostname[new_len] = args[0][new_len];
+        const name = sliceFromCStr(args[0]);
+        syscall_mod.setHostname(name);
+    }
+
+    fn cmdSleep(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            vga.print("Usage: sleep <seconds>\n");
+            return;
         }
-        system_hostname[new_len] = 0;
-        hostname_len = new_len;
+
+        const secs = parseNumber(args[0]) orelse {
+            vga.print("sleep: invalid number\n");
+            return;
+        };
+
+        const t = @import("../timer/timer.zig");
+        const start = t.getTicks();
+        const target = start + @as(u64, secs) * 100;
+        while (t.getTicks() < target) {
+            process.yield();
+        }
+    }
+
+    fn cmdUmask(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            if (process.current_process) |proc| {
+                const m = proc.umask;
+                vga.print("0");
+                vga.put_char('0' + @as(u8, @intCast((m >> 6) & 7)));
+                vga.put_char('0' + @as(u8, @intCast((m >> 3) & 7)));
+                vga.put_char('0' + @as(u8, @intCast(m & 7)));
+                vga.print("\n");
+            }
+            return;
+        }
+
+        const s = sliceFromCStr(args[0]);
+        var val: u16 = 0;
+        for (s) |c| {
+            if (c < '0' or c > '7') {
+                vga.print("umask: invalid octal number\n");
+                return;
+            }
+            val = val * 8 + @as(u16, c - '0');
+        }
+        if (process.current_process) |proc| {
+            proc.umask = val & 0o777;
+        }
+    }
+
+    fn cmdChown(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len < 2) {
+            vga.print("Usage: chown <uid> <file>\n");
+            return;
+        }
+
+        const uid = parseNumber(args[0]) orelse {
+            vga.print("chown: invalid uid\n");
+            return;
+        };
+
+        const path = sliceFromCStr(args[1]);
+        const vnode = vfs.lookupPath(path) catch {
+            vga.print("chown: file not found\n");
+            return;
+        };
+
+        vnode.ops.chown(vnode, @intCast(uid), vnode.gid) catch {
+            vga.print("chown: operation failed\n");
+            return;
+        };
+    }
+
+    fn cmdChgrp(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len < 2) {
+            vga.print("Usage: chgrp <gid> <file>\n");
+            return;
+        }
+
+        const gid = parseNumber(args[0]) orelse {
+            vga.print("chgrp: invalid gid\n");
+            return;
+        };
+
+        const path = sliceFromCStr(args[1]);
+        const vnode = vfs.lookupPath(path) catch {
+            vga.print("chgrp: file not found\n");
+            return;
+        };
+
+        vnode.ops.chown(vnode, vnode.uid, @intCast(gid)) catch {
+            vga.print("chgrp: operation failed\n");
+            return;
+        };
     }
 
     fn cmdSort(self: *const Shell, args: []const [*:0]const u8) void {
