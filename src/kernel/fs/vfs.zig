@@ -330,6 +330,12 @@ pub fn lseek(fd: u32, offset: i64, whence: u32) VFSError!u64 {
     if (fd >= fd_table.len) return VFSError.InvalidOperation;
 
     if (fd_table[fd]) |file_desc| {
+        if (whence == SEEK_CUR) {
+            const cur: i64 = @intCast(file_desc.offset);
+            const new_offset = try file_desc.vnode.ops.seek(file_desc.vnode, cur + offset, SEEK_SET);
+            file_desc.offset = new_offset;
+            return new_offset;
+        }
         const new_offset = try file_desc.vnode.ops.seek(file_desc.vnode, offset, whence);
         file_desc.offset = new_offset;
         return new_offset;
