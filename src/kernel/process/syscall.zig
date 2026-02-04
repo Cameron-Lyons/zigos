@@ -10,6 +10,7 @@ const memory = @import("../memory/memory.zig");
 const paging = @import("../memory/paging.zig");
 const vfs = @import("../fs/vfs.zig");
 const credentials = @import("credentials.zig");
+const socket = @import("../net/socket.zig");
 
 pub const SYS_EXIT = 1;
 pub const SYS_WRITE = 2;
@@ -37,6 +38,14 @@ pub const SYS_SETGID = 23;
 pub const SYS_CHOWN = 24;
 pub const SYS_PIPE = 25;
 pub const SYS_DUP2 = 26;
+pub const SYS_SOCKET = 27;
+pub const SYS_BIND = 28;
+pub const SYS_CONNECT = 29;
+pub const SYS_LISTEN = 30;
+pub const SYS_ACCEPT = 31;
+pub const SYS_SEND = 32;
+pub const SYS_RECV = 33;
+pub const SYS_SHUTDOWN = 34;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -85,6 +94,14 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_FSTAT => sys_fstat(@intCast(arg1), arg2),
         SYS_PIPE => sys_pipe(@as(?*[2]i32, @ptrFromInt(arg1))),
         SYS_DUP2 => sys_dup2(@intCast(arg1), @intCast(arg2)),
+        SYS_SOCKET => sys_socket(@intCast(arg1), @intCast(arg2), @intCast(arg3)),
+        SYS_BIND => sys_bind(@intCast(arg1), arg2, @intCast(arg3)),
+        SYS_CONNECT => sys_connect(@intCast(arg1), arg2, @intCast(arg3)),
+        SYS_LISTEN => sys_listen(@intCast(arg1), @intCast(arg2)),
+        SYS_ACCEPT => sys_accept(@intCast(arg1)),
+        SYS_SEND => sys_send(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3),
+        SYS_RECV => sys_recv(@intCast(arg1), @as([*]u8, @ptrFromInt(arg2)), arg3),
+        SYS_SHUTDOWN => sys_shutdown(@intCast(arg1)),
         else => ENOSYS,
     };
 
@@ -437,6 +454,162 @@ fn sys_chown(pathname: [*]const u8, uid: u16, gid: u16) i32 {
     }
 
     vfs.chown(path_slice, uid, gid) catch return -1;
+    return 0;
+}
+
+const AF_INET: u32 = 2;
+const SOCK_STREAM: u32 = 1;
+const SOCK_DGRAM: u32 = 2;
+
+const SockAddrIn = extern struct {
+    family: u16,
+    port: u16,
+    addr: u32,
+    zero: [8]u8,
+};
+
+var socket_table: [64]?*socket.Socket = [_]?*socket.Socket{null} ** 64;
+
+fn sys_socket(domain: u32, sock_type: u32, protocol: u32) i32 {
+    _ = protocol;
+    if (domain != AF_INET) return EINVAL;
+
+    const s_type: socket.SocketType = switch (sock_type) {
+        SOCK_STREAM => .STREAM,
+        SOCK_DGRAM => .DGRAM,
+        else => return EINVAL,
+    };
+
+    const s_proto: socket.Protocol = switch (sock_type) {
+        SOCK_STREAM => .TCP,
+        SOCK_DGRAM => .UDP,
+        else => return EINVAL,
+    };
+
+    const sock = socket.createSocket(s_type, s_proto) catch return ENOMEM;
+
+    for (&socket_table, 0..) |*slot, i| {
+        if (slot.* == null) {
+            slot.* = sock;
+            return @intCast(i);
+        }
+    }
+
+    sock.close();
+    return ENOMEM;
+}
+
+fn sys_bind(sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
+    if (sockfd < 0 or sockfd >= 64) return EBADF;
+    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+
+    if (addr_len < @sizeOf(SockAddrIn)) return EINVAL;
+    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn))) return EINVAL;
+
+    // SAFETY: filled by the subsequent copyFromUser call
+    var addr_buf: [@sizeOf(SockAddrIn)]u8 = undefined;
+    protection.copyFromUser(&addr_buf, addr_ptr) catch return EINVAL;
+    const addr: *const SockAddrIn = @ptrCast(@alignCast(&addr_buf));
+
+    const ipv4_addr = @import("../net/ipv4.zig").IPv4Address{
+        .octets = .{
+            @intCast((addr.addr >> 0) & 0xFF),
+            @intCast((addr.addr >> 8) & 0xFF),
+            @intCast((addr.addr >> 16) & 0xFF),
+            @intCast((addr.addr >> 24) & 0xFF),
+        },
+    };
+
+    sock.bind(ipv4_addr, @byteSwap(addr.port)) catch return -1;
+    return 0;
+}
+
+fn sys_connect(sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
+    if (sockfd < 0 or sockfd >= 64) return EBADF;
+    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+
+    if (addr_len < @sizeOf(SockAddrIn)) return EINVAL;
+    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn))) return EINVAL;
+
+    // SAFETY: filled by the subsequent copyFromUser call
+    var addr_buf: [@sizeOf(SockAddrIn)]u8 = undefined;
+    protection.copyFromUser(&addr_buf, addr_ptr) catch return EINVAL;
+    const addr: *const SockAddrIn = @ptrCast(@alignCast(&addr_buf));
+
+    const ipv4_addr = @import("../net/ipv4.zig").IPv4Address{
+        .octets = .{
+            @intCast((addr.addr >> 0) & 0xFF),
+            @intCast((addr.addr >> 8) & 0xFF),
+            @intCast((addr.addr >> 16) & 0xFF),
+            @intCast((addr.addr >> 24) & 0xFF),
+        },
+    };
+
+    sock.connect(ipv4_addr, @byteSwap(addr.port)) catch return -1;
+    return 0;
+}
+
+fn sys_listen(sockfd: i32, backlog: u32) i32 {
+    if (sockfd < 0 or sockfd >= 64) return EBADF;
+    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+    sock.listen(backlog) catch return -1;
+    return 0;
+}
+
+fn sys_accept(sockfd: i32) i32 {
+    if (sockfd < 0 or sockfd >= 64) return EBADF;
+    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+
+    const client = sock.accept() catch return -1;
+
+    for (&socket_table, 0..) |*slot, i| {
+        if (slot.* == null) {
+            slot.* = client;
+            return @intCast(i);
+        }
+    }
+
+    client.close();
+    return ENOMEM;
+}
+
+fn sys_send(sockfd: i32, buf: [*]const u8, len: usize) i32 {
+    if (sockfd < 0 or sockfd >= 64) return EBADF;
+    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+
+    if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
+
+    // SAFETY: filled by the subsequent copyFromUser call
+    var kernel_buffer: [4096]u8 = undefined;
+    const to_send = @min(len, kernel_buffer.len);
+    protection.copyFromUser(kernel_buffer[0..to_send], @intFromPtr(buf)) catch return EINVAL;
+
+    const sent = sock.send(kernel_buffer[0..to_send]) catch return -1;
+    return @intCast(sent);
+}
+
+fn sys_recv(sockfd: i32, buf: [*]u8, len: usize) i32 {
+    if (sockfd < 0 or sockfd >= 64) return EBADF;
+    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+
+    if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
+
+    // SAFETY: filled by the subsequent sock.recv call
+    var kernel_buffer: [4096]u8 = undefined;
+    const to_recv = @min(len, kernel_buffer.len);
+
+    const received = sock.recv(kernel_buffer[0..to_recv]) catch return -1;
+    if (received == 0) return 0;
+
+    protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..received]) catch return EINVAL;
+    return @intCast(received);
+}
+
+fn sys_shutdown(sockfd: i32) i32 {
+    if (sockfd < 0 or sockfd >= 64) return EBADF;
+    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+    sock.close();
+    socket_table[@intCast(sockfd)] = null;
     return 0;
 }
 
