@@ -197,7 +197,6 @@ fn tmpfsSeek(vnode: *vfs.VNode, offset: i64, whence: u32) vfs.VFSError!u64 {
 
     switch (whence) {
         vfs.SEEK_SET => new_offset = offset,
-        vfs.SEEK_CUR => new_offset = offset,
         vfs.SEEK_END => new_offset = @as(i64, @intCast(node.size)) + offset,
         else => return vfs.VFSError.InvalidOperation,
     }

@@ -452,10 +452,6 @@ fn fat32Seek(vnode: *vfs.VNode, offset: i64, whence: u32) vfs.VFSError!u64 {
     var new_offset: i64 = 0;
     switch (whence) {
         vfs.SEEK_SET => new_offset = offset,
-        vfs.SEEK_CUR => {
-            const cur_offset: i64 = @intCast(offset);
-            new_offset = cur_offset;
-        },
         vfs.SEEK_END => {
             const size_i64: i64 = @intCast(vnode_data.size);
             new_offset = size_i64 + offset;
