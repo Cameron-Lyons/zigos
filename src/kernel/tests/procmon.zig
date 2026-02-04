@@ -248,6 +248,9 @@ pub fn printProcessList() void {
             .Ready => vga.print("READY     "),
             .Blocked => vga.print("BLOCKED   "),
             .Terminated => vga.print("TERMINATED"),
+            .Zombie => vga.print("ZOMBIE    "),
+            .Stopped => vga.print("STOPPED   "),
+            .Waiting => vga.print("WAITING   "),
         }
         vga.print("  ");
 
