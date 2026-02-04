@@ -6,6 +6,7 @@ const scheduler = @import("scheduler.zig");
 const smp = @import("../smp/smp.zig");
 const credentials = @import("credentials.zig");
 const timer = @import("../timer/timer.zig");
+pub const signal = @import("signal.zig");
 
 pub const ProcessState = enum {
     Ready,
@@ -58,6 +59,7 @@ pub const Process = struct {
     parent_pid: u32 = 0,
     process_group: u32 = 0,
     alarm_time: u64 = 0,
+    signals: signal.ProcessSignals = signal.ProcessSignals.defaultValue(),
 };
 
 const MAX_PROCESSES = 256;
@@ -152,6 +154,10 @@ pub fn setNice(pid: u32, nice_value: i8) bool {
         }
     }
     return false;
+}
+
+pub fn getProcess(pid: u32) ?*Process {
+    return getProcessByPid(pid);
 }
 
 pub fn getProcessByPid(pid: u32) ?*Process {

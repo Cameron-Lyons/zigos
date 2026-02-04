@@ -721,7 +721,7 @@ fn createVNode() VFSError!*VNode {
     return vnode;
 }
 
-fn lookupPath(path: []const u8) VFSError!*VNode {
+pub fn lookupPath(path: []const u8) VFSError!*VNode {
     if (path.len == 0 or path[0] != '/') {
         return VFSError.InvalidPath;
     }
