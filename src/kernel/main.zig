@@ -167,6 +167,7 @@ export fn kernel_main() void {
 
     console.print("Initializing ICMPv6...\n");
     icmpv6.init();
+    icmpv6.sendRouterSolicitation();
 
     console.print("Initializing routing table...\n");
     const routing = @import("net/routing.zig");

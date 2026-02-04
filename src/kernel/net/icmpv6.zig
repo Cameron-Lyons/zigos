@@ -91,7 +91,9 @@ fn handlePacket(src: *const ipv6.IPv6Address, dst: *const ipv6.IPv6Address, data
                 handleNeighborAdvertisement(src, data);
             }
         },
-        ICMPv6Type.RouterAdvertisement => {},
+        ICMPv6Type.RouterAdvertisement => {
+            handleRouterAdvertisement(src, data);
+        },
         else => {},
     }
 }
@@ -256,6 +258,77 @@ pub fn resolveNeighbor(addr: *const ipv6.IPv6Address) ?[6]u8 {
 
     sendNeighborSolicitation(addr.*);
     return null;
+}
+
+pub fn sendRouterSolicitation() void {
+    const msg_size: usize = @sizeOf(ICMPv6Header) + 4 + 8;
+    var buf: [16]u8 = undefined;
+
+    buf[0] = ICMPv6Type.RouterSolicitation;
+    buf[1] = 0;
+    buf[2] = 0;
+    buf[3] = 0;
+
+    buf[4] = 0;
+    buf[5] = 0;
+    buf[6] = 0;
+    buf[7] = 0;
+
+    buf[8] = 1;
+    buf[9] = 1;
+
+    const src = ipv6.getLinkLocalAddress();
+    @memcpy(buf[10..16], src.octets[10..16]);
+
+    const checksum = calculateChecksum(&src, &ipv6.ALL_ROUTERS_MULTICAST, buf[0..msg_size]);
+    buf[2] = @intCast((checksum >> 8) & 0xFF);
+    buf[3] = @intCast(checksum & 0xFF);
+
+    ipv6.sendPacket(ipv6.ALL_ROUTERS_MULTICAST, ipv6.NEXT_HEADER_ICMPV6, buf[0..msg_size]);
+}
+
+fn handleRouterAdvertisement(src: *const ipv6.IPv6Address, data: []const u8) void {
+    if (data.len < @sizeOf(ICMPv6Header) + 12) return;
+
+    updateNeighborCache(src, resolveRouterMAC(src));
+
+    ipv6.setDefaultGateway(src.*);
+
+    var offset: usize = @sizeOf(ICMPv6Header) + 12;
+    while (offset + 2 <= data.len) {
+        const opt_type = data[offset];
+        const opt_len_units = data[offset + 1];
+        if (opt_len_units == 0) break;
+        const opt_len = @as(usize, opt_len_units) * 8;
+        if (offset + opt_len > data.len) break;
+
+        if (opt_type == 3 and opt_len >= 32) {
+            const prefix_len = data[offset + 2];
+            const flags = data[offset + 3];
+            const autonomous = (flags & 0x40) != 0;
+
+            if (autonomous and prefix_len == 64) {
+                var global = ipv6.IPv6Address{ .octets = [_]u8{0} ** 16 };
+                @memcpy(global.octets[0..8], data[offset + 16 .. offset + 24]);
+
+                const link_local = ipv6.getLinkLocalAddress();
+                @memcpy(global.octets[8..16], link_local.octets[8..16]);
+
+                ipv6.setGlobalAddress(global);
+            }
+        }
+
+        offset += opt_len;
+    }
+}
+
+fn resolveRouterMAC(addr: *const ipv6.IPv6Address) [6]u8 {
+    for (neighbor_cache) |entry| {
+        if (entry.valid and entry.ipv6_addr.eql(addr)) {
+            return entry.mac;
+        }
+    }
+    return .{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 }
 
 fn solicitedNodeMulticast(addr: *const ipv6.IPv6Address) ipv6.IPv6Address {
