@@ -567,6 +567,8 @@ pub const Shell = struct {
             self.cmdWhoami();
         } else if (streq(command, "pwd")) {
             self.cmdPwd();
+        } else if (streq(command, "cd")) {
+            self.cmdCd(args[1..arg_count]);
         } else if (streq(command, "sort")) {
             self.cmdSort(args[1..arg_count]);
         } else if (streq(command, "uniq")) {
@@ -2117,7 +2119,53 @@ pub const Shell = struct {
 
     fn cmdPwd(self: *const Shell) void {
         _ = self;
-        vga.print("/\n");
+        const syscall_mod = @import("../process/syscall.zig");
+        const cwd = syscall_mod.getCwd();
+        vga.print(cwd);
+        vga.print("\n");
+    }
+
+    fn cmdCd(self: *Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        const syscall_mod = @import("../process/syscall.zig");
+
+        if (args.len == 0) {
+            if (!syscall_mod.setCwd("/")) {
+                vga.print("cd: failed to change to /\n");
+            }
+            return;
+        }
+
+        var path_buf: [256]u8 = [_]u8{0} ** 256;
+        const arg = args[0];
+        var arg_len: usize = 0;
+        while (arg_len < 255 and arg[arg_len] != 0) : (arg_len += 1) {}
+        const arg_slice = arg[0..arg_len];
+
+        if (arg_slice[0] == '/') {
+            @memcpy(path_buf[0..arg_len], arg_slice);
+            if (!syscall_mod.setCwd(path_buf[0..arg_len])) {
+                vga.print("cd: no such directory: ");
+                printString(arg);
+                vga.print("\n");
+            }
+        } else {
+            const cwd = syscall_mod.getCwd();
+            var path_len: usize = 0;
+            @memcpy(path_buf[0..cwd.len], cwd);
+            path_len = cwd.len;
+            if (path_len > 1) {
+                path_buf[path_len] = '/';
+                path_len += 1;
+            }
+            @memcpy(path_buf[path_len .. path_len + arg_len], arg_slice);
+            path_len += arg_len;
+            if (!syscall_mod.setCwd(path_buf[0..path_len])) {
+                vga.print("cd: no such directory: ");
+                printString(arg);
+                vga.print("\n");
+            }
+        }
     }
 
     fn cmdSort(self: *const Shell, args: []const [*:0]const u8) void {

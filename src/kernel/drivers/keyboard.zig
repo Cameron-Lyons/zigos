@@ -176,7 +176,62 @@ pub fn handleInterrupt() void {
                 if (scancode < scancode_to_ascii.len) {
                     var ch: u8 = 0;
 
-                    if (shift_pressed or (caps_lock and isAlpha(scancode_to_ascii[scancode]))) {
+                    if (ctrl_pressed) {
+                        const base_ch = scancode_to_ascii[scancode];
+                        switch (base_ch) {
+                            'c' => {
+                                vga.print("^C\n");
+                                const sig = @import("../process/signal.zig");
+                                const proc = @import("../process/process.zig");
+                                if (proc.current_process) |p| {
+                                    if (p.state != .Terminated) {
+                                        sig.sendSignal(p, sig.SIGINT);
+                                    }
+                                }
+                                if (keyboard_shell) |sh| {
+                                    sh.buffer_pos = 0;
+                                    sh.cursor_pos = 0;
+                                    sh.command_buffer = [_]u8{0} ** 256;
+                                    sh.printPrompt();
+                                }
+                                return;
+                            },
+                            'z' => {
+                                vga.print("^Z\n");
+                                const sig = @import("../process/signal.zig");
+                                const proc = @import("../process/process.zig");
+                                if (proc.current_process) |p| {
+                                    if (p.state != .Terminated) {
+                                        sig.sendSignal(p, sig.SIGTSTP);
+                                    }
+                                }
+                                if (keyboard_shell) |sh| {
+                                    sh.printPrompt();
+                                }
+                                return;
+                            },
+                            'l' => {
+                                vga.clear();
+                                if (keyboard_shell) |sh| {
+                                    sh.printPrompt();
+                                    var j: usize = 0;
+                                    while (j < sh.buffer_pos) : (j += 1) {
+                                        vga.put_char(sh.command_buffer[j]);
+                                    }
+                                }
+                                return;
+                            },
+                            'd' => {
+                                put_char_buffer(4);
+                                return;
+                            },
+                            else => {
+                                if (base_ch >= 'a' and base_ch <= 'z') {
+                                    ch = base_ch - 'a' + 1;
+                                }
+                            },
+                        }
+                    } else if (shift_pressed or (caps_lock and isAlpha(scancode_to_ascii[scancode]))) {
                         ch = scancode_to_ascii_shift[scancode];
                     } else {
                         ch = scancode_to_ascii[scancode];
