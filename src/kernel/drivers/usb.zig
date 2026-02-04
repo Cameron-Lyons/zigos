@@ -69,8 +69,12 @@ pub const USBSetupPacket = extern struct {
 };
 
 const USB_REQ_GET_DESCRIPTOR = 0x06;
+const USB_REQ_SET_ADDRESS = 0x05;
+const USB_REQ_SET_CONFIGURATION = 0x09;
+const USB_REQ_GET_CONFIGURATION = 0x08;
 
 const USB_DESC_DEVICE = 0x01;
+const USB_DESC_CONFIG = 0x02;
 
 const UHCI_CMD = 0x00;
 const UHCI_STS = 0x02;
@@ -256,6 +260,7 @@ const USBDevice = struct {
 
 var uhci_controllers: [4]?UHCIController = [_]?UHCIController{null} ** 4;
 var num_controllers: u8 = 0;
+var next_device_address: u8 = 1;
 
 pub fn init() void {
     vga.print("Initializing USB support...\n");
@@ -355,7 +360,7 @@ fn initController(controller: *UHCIController) void {
 fn enumerateDevice(controller: *UHCIController, port: u8) void {
     _ = port;
 
-    const setup = USBSetupPacket{
+    const initial_setup = USBSetupPacket{
         .bmRequestType = 0x80,
         .bRequest = USB_REQ_GET_DESCRIPTOR,
         .wValue = (USB_DESC_DEVICE << 8) | 0,
@@ -364,15 +369,104 @@ fn enumerateDevice(controller: *UHCIController, port: u8) void {
     };
 
     // SAFETY: filled by the subsequent controlTransfer call
-    var desc_buffer: [8]u8 = undefined;
-    controller.controlTransfer(0, &setup, desc_buffer[0..]) catch {
-        vga.print("Failed to get device descriptor\n");
+    var initial_buf: [8]u8 = undefined;
+    controller.controlTransfer(0, &initial_setup, initial_buf[0..]) catch {
+        vga.print("Failed to get initial device descriptor\n");
         return;
     };
 
-    const max_packet_size = desc_buffer[7];
-    vga.print("USB device max packet size: ");
-    printNumber(max_packet_size);
+    const addr = next_device_address;
+    if (addr >= 128) {
+        vga.print("USB: No more device addresses\n");
+        return;
+    }
+    next_device_address += 1;
+
+    const addr_setup = USBSetupPacket{
+        .bmRequestType = 0x00,
+        .bRequest = USB_REQ_SET_ADDRESS,
+        .wValue = addr,
+        .wIndex = 0,
+        .wLength = 0,
+    };
+
+    controller.controlTransfer(0, &addr_setup, null) catch {
+        vga.print("Failed to set device address\n");
+        return;
+    };
+
+    busyWait(20000);
+
+    const desc_setup = USBSetupPacket{
+        .bmRequestType = 0x80,
+        .bRequest = USB_REQ_GET_DESCRIPTOR,
+        .wValue = (USB_DESC_DEVICE << 8) | 0,
+        .wIndex = 0,
+        .wLength = @sizeOf(USBDeviceDescriptor),
+    };
+
+    // SAFETY: filled by the subsequent controlTransfer call
+    var desc_buf: [@sizeOf(USBDeviceDescriptor)]u8 = undefined;
+    controller.controlTransfer(addr, &desc_setup, desc_buf[0..]) catch {
+        vga.print("Failed to get full device descriptor\n");
+        return;
+    };
+
+    const descriptor: *const USBDeviceDescriptor = @ptrCast(@alignCast(&desc_buf));
+
+    vga.print("USB device: vendor=0x");
+    printHex16(@byteSwap(descriptor.idVendor));
+    vga.print(" product=0x");
+    printHex16(@byteSwap(descriptor.idProduct));
+    vga.print(" class=");
+    printNumber(descriptor.bDeviceClass);
+    vga.print("\n");
+
+    var config_desc: USBConfigDescriptor = undefined;
+    if (descriptor.bNumConfigurations > 0) {
+        const config_setup = USBSetupPacket{
+            .bmRequestType = 0x80,
+            .bRequest = USB_REQ_GET_DESCRIPTOR,
+            .wValue = (USB_DESC_CONFIG << 8) | 0,
+            .wIndex = 0,
+            .wLength = @sizeOf(USBConfigDescriptor),
+        };
+
+        // SAFETY: filled by the subsequent controlTransfer call
+        var config_buf: [@sizeOf(USBConfigDescriptor)]u8 = undefined;
+        controller.controlTransfer(addr, &config_setup, config_buf[0..]) catch {
+            vga.print("Failed to get config descriptor\n");
+            return;
+        };
+
+        config_desc = @as(*const USBConfigDescriptor, @ptrCast(@alignCast(&config_buf))).*;
+
+        const set_config = USBSetupPacket{
+            .bmRequestType = 0x00,
+            .bRequest = USB_REQ_SET_CONFIGURATION,
+            .wValue = config_desc.bConfigurationValue,
+            .wIndex = 0,
+            .wLength = 0,
+        };
+
+        controller.controlTransfer(addr, &set_config, null) catch {
+            vga.print("Failed to set configuration\n");
+            return;
+        };
+    }
+
+    controller.devices[addr] = USBDevice{
+        .address = addr,
+        .speed = .Full,
+        .descriptor = descriptor.*,
+        .config = if (descriptor.bNumConfigurations > 0) config_desc else null,
+        .interfaces = [_]?USBInterfaceDescriptor{null} ** 16,
+        .endpoints = [_]?USBEndpointDescriptor{null} ** 32,
+        .driver = null,
+    };
+
+    vga.print("USB device configured at address ");
+    printNumber(addr);
     vga.print("\n");
 }
 
@@ -381,6 +475,14 @@ fn busyWait(microseconds: u32) void {
     while (i < microseconds * 10) : (i += 1) {
         asm volatile ("pause");
     }
+}
+
+fn printHex16(val: u16) void {
+    const hex_chars = "0123456789abcdef";
+    vga.printChar(hex_chars[(val >> 12) & 0xF]);
+    vga.printChar(hex_chars[(val >> 8) & 0xF]);
+    vga.printChar(hex_chars[(val >> 4) & 0xF]);
+    vga.printChar(hex_chars[val & 0xF]);
 }
 
 fn printNumber(num: u32) void {

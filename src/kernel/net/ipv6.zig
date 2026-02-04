@@ -1,4 +1,5 @@
 const ethernet = @import("ethernet.zig");
+const icmpv6 = @import("icmpv6.zig");
 const rtl8139 = @import("../drivers/rtl8139.zig");
 const vga = @import("../drivers/vga.zig");
 const memory = @import("../memory/memory.zig");
@@ -48,6 +49,10 @@ pub const ALL_NODES_MULTICAST = IPv6Address{ .octets = .{ 0xFF, 0x02, 0, 0, 0, 0
 pub const ALL_ROUTERS_MULTICAST = IPv6Address{ .octets = .{ 0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 } };
 
 var link_local_addr: IPv6Address = undefined;
+var global_addr: IPv6Address = .{ .octets = [_]u8{0} ** 16 };
+var has_global_addr: bool = false;
+var default_gateway: IPv6Address = .{ .octets = [_]u8{0} ** 16 };
+var has_default_gateway: bool = false;
 var initialized: bool = false;
 
 const ProtocolHandler = fn (src: *const IPv6Address, dst: *const IPv6Address, data: []const u8) void;
@@ -120,7 +125,8 @@ pub fn sendPacket(dst: IPv6Address, next_header: u8, payload: []const u8) void {
     header.payload_length = @byteSwap(@as(u16, @intCast(payload.len)));
     header.next_header = next_header;
     header.hop_limit = 64;
-    header.src = link_local_addr.octets;
+    const src_addr = getSourceAddress(&dst);
+    header.src = src_addr.octets;
     header.dst = dst.octets;
 
     @memcpy(packet_buf[@sizeOf(IPv6Header) .. @sizeOf(IPv6Header) + payload.len], payload);
@@ -132,6 +138,9 @@ pub fn sendPacket(dst: IPv6Address, next_header: u8, payload: []const u8) void {
 fn resolveIPv6ToMAC(addr: *const IPv6Address) [6]u8 {
     if (addr.isMulticast()) {
         return .{ 0x33, 0x33, addr.octets[12], addr.octets[13], addr.octets[14], addr.octets[15] };
+    }
+    if (icmpv6.resolveNeighbor(addr)) |mac| {
+        return mac;
     }
     return .{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 }
@@ -171,6 +180,29 @@ pub fn handlePacket(data: []const u8) void {
 }
 
 pub fn getLinkLocalAddress() IPv6Address {
+    return link_local_addr;
+}
+
+pub fn getGlobalAddress() ?IPv6Address {
+    if (has_global_addr) return global_addr;
+    return null;
+}
+
+pub fn setGlobalAddress(addr: IPv6Address) void {
+    global_addr = addr;
+    has_global_addr = true;
+    vga.print("IPv6 global address configured\n");
+}
+
+pub fn setDefaultGateway(addr: IPv6Address) void {
+    default_gateway = addr;
+    has_default_gateway = true;
+    vga.print("IPv6 default gateway configured\n");
+}
+
+pub fn getSourceAddress(dst: *const IPv6Address) IPv6Address {
+    if (dst.isLinkLocal()) return link_local_addr;
+    if (has_global_addr) return global_addr;
     return link_local_addr;
 }
 
