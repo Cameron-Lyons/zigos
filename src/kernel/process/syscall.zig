@@ -83,12 +83,17 @@ pub const STDOUT = 1;
 pub const STDERR = 2;
 const FD_OFFSET = 3;
 
-pub const EBADF = -1;
-pub const EINVAL = -2;
-pub const ENOSYS = -3;
-pub const ENOMEM = -12;
+pub const EPERM = -1;
 pub const ENOENT = -2;
+pub const EINTR = -4;
+pub const EBADF = -9;
+pub const EAGAIN = -11;
+pub const ENOMEM = -12;
 pub const EACCES = -13;
+pub const EFAULT = -14;
+pub const ENOTDIR = -20;
+pub const EINVAL = -22;
+pub const ENOSYS = -38;
 
 export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
     const syscall_num = regs.eax;
@@ -740,6 +745,20 @@ fn ensureCwdInit() void {
     }
 }
 
+pub fn getCwd() []const u8 {
+    ensureCwdInit();
+    return current_working_dir[0..cwd_len];
+}
+
+pub fn setCwd(path: []const u8) bool {
+    ensureCwdInit();
+    const node = vfs.lookupPath(path) catch return false;
+    if (node.file_type != .Directory) return false;
+    @memcpy(current_working_dir[0..path.len], path);
+    cwd_len = path.len;
+    return true;
+}
+
 fn sys_getcwd(buf: [*]u8, size: usize) i32 {
     ensureCwdInit();
     if (!protection.verifyUserPointer(@intFromPtr(buf), size)) return EINVAL;
@@ -763,7 +782,7 @@ fn sys_chdir(pathname: [*]const u8) i32 {
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
 
     const node = vfs.lookupPath(path_slice) catch return ENOENT;
-    if (node.file_type != .Directory) return -20;
+    if (node.file_type != .Directory) return ENOTDIR;
 
     @memcpy(current_working_dir[0..path_slice.len], path_slice);
     cwd_len = path_slice.len;
@@ -816,8 +835,8 @@ fn sys_fork() i32 {
     const result = posix.fork() catch |err| {
         return switch (err) {
             error.NoCurrentProcess => ENOSYS,
-            error.NoProcessSlots => -11,
-            error.OutOfMemory => -12,
+            error.NoProcessSlots => EAGAIN,
+            error.OutOfMemory => ENOMEM,
         };
     };
     return result;
@@ -884,8 +903,8 @@ fn sys_execve(path: [*]const u8, argv: usize, envp: usize) i32 {
     posix.execve(path_slice, argv_slice, envp_slice) catch |err| {
         return switch (err) {
             error.NoCurrentProcess => ENOSYS,
-            error.OutOfMemory => -12,
-            error.FileReadError => -2,
+            error.OutOfMemory => ENOMEM,
+            error.FileReadError => ENOENT,
             else => EINVAL,
         };
     };
@@ -951,7 +970,7 @@ fn sys_mmap(addr: usize, length: usize, prot: i32, flags: i32, fd: i32, offset: 
         }
 
         _ = offset;
-        return -38;
+        return ENOSYS;
     }
 
     if ((flags & MAP_PRIVATE) != 0 and (flags & MAP_SHARED) != 0) {
@@ -1364,10 +1383,10 @@ fn sys_sigsuspend(mask_addr: usize) i32 {
 
     signal.sigsuspend(&mask) catch |err| {
         return switch (err) {
-            error.Interrupted => -4,
+            error.Interrupted => EINTR,
         };
     };
-    return -4;
+    return EINTR;
 }
 
 fn sys_dup(fd: i32) i32 {

@@ -33,6 +33,48 @@ fn ttyWrite(_: *vfs.VNode, buf: []const u8, _: u64) vfs.VFSError!usize {
     return buf.len;
 }
 
+var rng_state: u32 = 0x12345678;
+
+fn xorshift32() u32 {
+    var x = rng_state;
+    if (x == 0) {
+        const timer = @import("../timer/timer.zig");
+        x = @truncate(timer.getTicks() | 1);
+    }
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    rng_state = x;
+    return x;
+}
+
+fn randomRead(_: *vfs.VNode, buf: []u8, _: u64) vfs.VFSError!usize {
+    var i: usize = 0;
+    while (i + 4 <= buf.len) : (i += 4) {
+        const val = xorshift32();
+        buf[i] = @truncate(val);
+        buf[i + 1] = @truncate(val >> 8);
+        buf[i + 2] = @truncate(val >> 16);
+        buf[i + 3] = @truncate(val >> 24);
+    }
+    if (i < buf.len) {
+        const val = xorshift32();
+        var j: u5 = 0;
+        while (i < buf.len) : (i += 1) {
+            buf[i] = @truncate(val >> (j * 8));
+            j +%= 1;
+        }
+    }
+    return buf.len;
+}
+
+fn randomWrite(_: *vfs.VNode, buf: []const u8, _: u64) vfs.VFSError!usize {
+    for (buf) |b| {
+        rng_state ^= @as(u32, b) << @truncate(rng_state & 0x1F);
+    }
+    return buf.len;
+}
+
 fn devOpen(_: *vfs.VNode, _: u32) vfs.VFSError!void {}
 fn devClose(_: *vfs.VNode) vfs.VFSError!void {}
 fn devSeek(_: *vfs.VNode, _: i64, _: u32) vfs.VFSError!u64 { return 0; }
@@ -107,6 +149,20 @@ const tty_ops = vfs.FileOps{
     .chown = devChown,
 };
 
+const random_ops = vfs.FileOps{
+    .read = randomRead,
+    .write = randomWrite,
+    .open = devOpen,
+    .close = devClose,
+    .seek = devSeek,
+    .ioctl = devIoctl,
+    .stat = devStat,
+    .readdir = devNoReaddir,
+    .truncate = devTruncate,
+    .chmod = devChmod,
+    .chown = devChown,
+};
+
 fn rootRead(_: *vfs.VNode, _: []u8, _: u64) vfs.VFSError!usize {
     return vfs.VFSError.IsDirectory;
 }
@@ -151,6 +207,8 @@ const device_table = [_]DeviceInfo{
     .{ .name = "null", .inode = 1, .ops = &null_ops },
     .{ .name = "zero", .inode = 2, .ops = &zero_ops },
     .{ .name = "tty", .inode = 3, .ops = &tty_ops },
+    .{ .name = "random", .inode = 4, .ops = &random_ops },
+    .{ .name = "urandom", .inode = 5, .ops = &random_ops },
 };
 
 fn createDevVNode(name: []const u8, inode: u64, file_type: vfs.FileType, ops: *const vfs.FileOps, mp: *vfs.MountPoint) vfs.VFSError!*vfs.VNode {
