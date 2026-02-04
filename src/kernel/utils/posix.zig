@@ -39,6 +39,8 @@ pub fn fork() !i32 {
     child.privilege = parent.privilege;
     child.stack_size = parent.stack_size;
     child.exit_code = 0;
+    child.parent_pid = parent.pid;
+    child.process_group = parent.process_group;
 
     @memset(&child.name, 0);
     @memcpy(child.name[0..child_name.len], child_name);
@@ -217,7 +219,8 @@ pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
 
         var proc = process.getProcessList();
         while (proc) |p| : (proc = p.next) {
-            if (pid == -1 or p.pid == pid) {
+            const target_match = if (pid == -1) true else if (pid > 0) (p.pid == @as(u32, @intCast(pid))) else false;
+            if (p.parent_pid == parent.pid and target_match) {
                 if (p.state == .Terminated) {
                     found_child = true;
                     child_pid = @intCast(p.pid);
@@ -263,7 +266,7 @@ pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
             return 0;
         }
 
-        parent.state = .Blocked;
+        parent.state = .Waiting;
         process.yield();
     }
 }

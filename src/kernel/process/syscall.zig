@@ -57,6 +57,16 @@ pub const SYS_MSGSND = 40;
 pub const SYS_MSGRCV = 41;
 pub const SYS_MUNMAP = 42;
 pub const SYS_IOCTL = 43;
+pub const SYS_GETPPID = 44;
+pub const SYS_GETPGID = 45;
+pub const SYS_SETPGID = 46;
+pub const SYS_SETSID = 47;
+pub const SYS_NANOSLEEP = 48;
+pub const SYS_CLOCK_GETTIME = 49;
+pub const SYS_ACCESS = 50;
+pub const SYS_CHMOD = 51;
+pub const SYS_FCHMOD = 52;
+pub const SYS_FTRUNCATE = 53;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -123,6 +133,16 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_MSGRCV => sys_msgrcv(@as([*]u8, @ptrFromInt(arg1)), arg2, @intCast(arg3)),
         SYS_MUNMAP => sys_munmap(arg1, arg2),
         SYS_IOCTL => sys_ioctl(@intCast(arg1), @intCast(arg2), arg3),
+        SYS_GETPPID => sys_getppid_syscall(),
+        SYS_GETPGID => sys_getpgid(@intCast(arg1)),
+        SYS_SETPGID => sys_setpgid(@intCast(arg1), @intCast(arg2)),
+        SYS_SETSID => sys_setsid(),
+        SYS_NANOSLEEP => sys_nanosleep(arg1, arg2),
+        SYS_CLOCK_GETTIME => sys_clock_gettime(@intCast(arg1), arg2),
+        SYS_ACCESS => sys_access(@as([*]const u8, @ptrFromInt(arg1)), @intCast(arg2)),
+        SYS_CHMOD => sys_chmod_syscall(@as([*]const u8, @ptrFromInt(arg1)), arg2),
+        SYS_FCHMOD => sys_fchmod(@intCast(arg1), arg2),
+        SYS_FTRUNCATE => sys_ftruncate(@intCast(arg1), arg2),
         else => ENOSYS,
     };
 
@@ -135,6 +155,12 @@ fn sys_exit(status: i32) i32 {
     if (process.current_process) |proc| {
         proc.state = .Terminated;
         proc.exit_code = status;
+
+        if (proc.parent_pid != 0) {
+            if (process.getProcessByPid(proc.parent_pid)) |parent| {
+                signal.sendSignal(parent, signal.SIGCHLD);
+            }
+        }
 
         _ = process.schedule();
 
@@ -1004,4 +1030,176 @@ fn sys_ioctl(fd: i32, request: u32, arg: usize) i32 {
 
     const result = vfs.ioctl(vfs_fd, request, arg) catch return -1;
     return result;
+}
+
+fn sys_getppid_syscall() i32 {
+    if (process.current_process) |proc| {
+        return @intCast(proc.parent_pid);
+    }
+    return 0;
+}
+
+fn sys_getpgid(pid: i32) i32 {
+    if (pid == 0) {
+        if (process.current_process) |proc| {
+            return @intCast(proc.process_group);
+        }
+        return 0;
+    }
+
+    if (pid > 0) {
+        if (process.getProcessByPid(@intCast(pid))) |proc| {
+            return @intCast(proc.process_group);
+        }
+    }
+    return -1;
+}
+
+fn sys_setpgid(pid: i32, pgid: i32) i32 {
+    const target = blk: {
+        if (pid == 0) {
+            break :blk process.current_process orelse return -1;
+        }
+        if (pid > 0) {
+            break :blk process.getProcessByPid(@as(u32, @intCast(pid))) orelse return -1;
+        }
+        return EINVAL;
+    };
+
+    if (pgid == 0) {
+        target.process_group = target.pid;
+    } else if (pgid > 0) {
+        target.process_group = @intCast(pgid);
+    } else {
+        return EINVAL;
+    }
+
+    return 0;
+}
+
+fn sys_setsid() i32 {
+    const proc = process.current_process orelse return -1;
+    proc.process_group = proc.pid;
+    return @intCast(proc.pid);
+}
+
+const TimeSpec = extern struct {
+    tv_sec: i32,
+    tv_nsec: i32,
+};
+
+fn sys_nanosleep(req_addr: usize, rem_addr: usize) i32 {
+    if (!protection.verifyUserPointer(req_addr, @sizeOf(TimeSpec))) return EINVAL;
+
+    // SAFETY: filled by the subsequent copyFromUser call
+    var req: TimeSpec = undefined;
+    protection.copyFromUser(std.mem.asBytes(&req), req_addr) catch return EINVAL;
+
+    if (req.tv_sec < 0 or req.tv_nsec < 0 or req.tv_nsec >= 1_000_000_000) return EINVAL;
+
+    const total_ms: u64 = @as(u64, @intCast(req.tv_sec)) * 1000 + @as(u64, @intCast(req.tv_nsec)) / 1_000_000;
+    const ticks_to_wait = total_ms / 10;
+
+    const start = process.getSystemTime();
+    while (process.getSystemTime() - start < ticks_to_wait) {
+        process.yield();
+    }
+
+    if (rem_addr != 0 and protection.verifyUserPointer(rem_addr, @sizeOf(TimeSpec))) {
+        var zero = TimeSpec{ .tv_sec = 0, .tv_nsec = 0 };
+        protection.copyToUser(rem_addr, std.mem.asBytes(&zero)) catch {};
+    }
+
+    return 0;
+}
+
+fn sys_clock_gettime(clock_id: i32, tp_addr: usize) i32 {
+    _ = clock_id;
+    if (!protection.verifyUserPointer(tp_addr, @sizeOf(TimeSpec))) return EINVAL;
+
+    const ticks = process.getSystemTime();
+    const total_ms = ticks * 10;
+
+    const tp = TimeSpec{
+        .tv_sec = @intCast(total_ms / 1000),
+        .tv_nsec = @intCast((total_ms % 1000) * 1_000_000),
+    };
+
+    protection.copyToUser(tp_addr, std.mem.asBytes(&tp)) catch return EINVAL;
+    return 0;
+}
+
+fn sys_access(pathname: [*]const u8, mode: u32) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+
+    // SAFETY: filled by the subsequent copyStringFromUser call
+    var kernel_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    const vnode = vfs.lookupPath(path_slice) catch return ENOENT;
+
+    if (mode == 0) return 0;
+
+    if (process.current_process) |proc| {
+        var access_bits: u3 = 0;
+        if (mode & 4 != 0) access_bits |= 4;
+        if (mode & 2 != 0) access_bits |= 2;
+        if (mode & 1 != 0) access_bits |= 1;
+        if (!credentials.checkPermission(&proc.creds, vnode.mode, vnode.uid, vnode.gid, access_bits)) {
+            return EACCES;
+        }
+    }
+
+    return 0;
+}
+
+fn sys_chmod_syscall(pathname: [*]const u8, mode: u32) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+
+    // SAFETY: filled by the subsequent copyStringFromUser call
+    var kernel_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    const mode_struct = vfs.FileMode{
+        .owner_read = (mode & 0o400) != 0,
+        .owner_write = (mode & 0o200) != 0,
+        .owner_exec = (mode & 0o100) != 0,
+        .group_read = (mode & 0o040) != 0,
+        .group_write = (mode & 0o020) != 0,
+        .group_exec = (mode & 0o010) != 0,
+        .other_read = (mode & 0o004) != 0,
+        .other_write = (mode & 0o002) != 0,
+        .other_exec = (mode & 0o001) != 0,
+    };
+
+    vfs.chmod(path_slice, mode_struct) catch return -1;
+    return 0;
+}
+
+fn sys_fchmod(fd: i32, mode: u32) i32 {
+    if (fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+
+    const mode_struct = vfs.FileMode{
+        .owner_read = (mode & 0o400) != 0,
+        .owner_write = (mode & 0o200) != 0,
+        .owner_exec = (mode & 0o100) != 0,
+        .group_read = (mode & 0o040) != 0,
+        .group_write = (mode & 0o020) != 0,
+        .group_exec = (mode & 0o010) != 0,
+        .other_read = (mode & 0o004) != 0,
+        .other_write = (mode & 0o002) != 0,
+        .other_exec = (mode & 0o001) != 0,
+    };
+
+    vfs.fchmod(vfs_fd, mode_struct) catch return -1;
+    return 0;
+}
+
+fn sys_ftruncate(fd: i32, length: usize) i32 {
+    if (fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+
+    vfs.ftruncate(vfs_fd, length) catch return -1;
+    return 0;
 }
