@@ -35,6 +35,8 @@ pub const SYS_GETGID = 21;
 pub const SYS_SETUID = 22;
 pub const SYS_SETGID = 23;
 pub const SYS_CHOWN = 24;
+pub const SYS_PIPE = 25;
+pub const SYS_DUP2 = 26;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -80,6 +82,9 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_SETUID => sys_setuid(@intCast(arg1)),
         SYS_SETGID => sys_setgid(@intCast(arg1)),
         SYS_CHOWN => sys_chown(@as([*]const u8, @ptrFromInt(arg1)), @intCast(arg2), @intCast(arg3)),
+        SYS_FSTAT => sys_fstat(@intCast(arg1), arg2),
+        SYS_PIPE => sys_pipe(@as(?*[2]i32, @ptrFromInt(arg1))),
+        SYS_DUP2 => sys_dup2(@intCast(arg1), @intCast(arg2)),
         else => ENOSYS,
     };
 
@@ -433,6 +438,47 @@ fn sys_chown(pathname: [*]const u8, uid: u16, gid: u16) i32 {
 
     vfs.chown(path_slice, uid, gid) catch return -1;
     return 0;
+}
+
+fn sys_fstat(fd: i32, stat_buf_addr: usize) i32 {
+    if (!protection.verifyUserPointer(stat_buf_addr, @sizeOf(vfs.FileStat))) {
+        return EINVAL;
+    }
+
+    if (fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+
+    // SAFETY: filled by the subsequent vfs.fstat call
+    var stat_buf: vfs.FileStat = undefined;
+    vfs.fstat(vfs_fd, &stat_buf) catch return -1;
+
+    protection.copyToUser(stat_buf_addr, std.mem.asBytes(&stat_buf)) catch return EINVAL;
+    return 0;
+}
+
+fn sys_pipe(pipefd: ?*[2]i32) i32 {
+    if (pipefd == null) return EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(pipefd), @sizeOf([2]i32))) {
+        return EINVAL;
+    }
+
+    const result = vfs.createPipe() catch return -1;
+    const fds = [2]i32{
+        @as(i32, @intCast(result.read_fd)) + FD_OFFSET,
+        @as(i32, @intCast(result.write_fd)) + FD_OFFSET,
+    };
+
+    protection.copyToUser(@intFromPtr(pipefd), std.mem.asBytes(&fds)) catch return EINVAL;
+    return 0;
+}
+
+fn sys_dup2(old_fd: i32, new_fd: i32) i32 {
+    if (old_fd < FD_OFFSET or new_fd < FD_OFFSET) return EBADF;
+    const old_vfs_fd: u32 = @intCast(old_fd - FD_OFFSET);
+    const new_vfs_fd: u32 = @intCast(new_fd - FD_OFFSET);
+
+    const result = vfs.dup2(old_vfs_fd, new_vfs_fd) catch return -1;
+    return @as(i32, @intCast(result)) + FD_OFFSET;
 }
 
 fn sys_fork() i32 {

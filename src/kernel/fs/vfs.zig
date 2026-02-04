@@ -333,6 +333,16 @@ pub fn stat(path: []const u8, stat_buf: *FileStat) VFSError!void {
     try vnode.ops.stat(vnode, stat_buf);
 }
 
+pub fn fstat(fd: u32, stat_buf: *FileStat) VFSError!void {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+
+    if (fd_table[fd]) |file_desc| {
+        try file_desc.vnode.ops.stat(file_desc.vnode, stat_buf);
+    } else {
+        return VFSError.InvalidOperation;
+    }
+}
+
 pub fn readdir(fd: u32, dirent: *DirEntry, index: u64) VFSError!bool {
     if (fd >= fd_table.len) return VFSError.InvalidOperation;
 
@@ -498,6 +508,171 @@ pub fn fchown(fd: u32, uid: u32, gid: u32) VFSError!void {
     } else {
         return VFSError.InvalidOperation;
     }
+}
+
+const PIPE_BUF_SIZE = 4096;
+
+const PipeData = struct {
+    buffer: [PIPE_BUF_SIZE]u8,
+    read_pos: usize,
+    write_pos: usize,
+    count: usize,
+    readers: u32,
+    writers: u32,
+};
+
+fn pipeRead(vnode: *VNode, buf: []u8, _: u64) VFSError!usize {
+    const pipe: *PipeData = @ptrCast(@alignCast(vnode.private_data orelse return VFSError.InvalidOperation));
+    if (pipe.count == 0) return 0;
+
+    const to_read = @min(buf.len, pipe.count);
+    var i: usize = 0;
+    while (i < to_read) : (i += 1) {
+        buf[i] = pipe.buffer[pipe.read_pos];
+        pipe.read_pos = (pipe.read_pos + 1) % PIPE_BUF_SIZE;
+    }
+    pipe.count -= to_read;
+    return to_read;
+}
+
+fn pipeWrite(vnode: *VNode, buf: []const u8, _: u64) VFSError!usize {
+    const pipe: *PipeData = @ptrCast(@alignCast(vnode.private_data orelse return VFSError.InvalidOperation));
+    const available = PIPE_BUF_SIZE - pipe.count;
+    if (available == 0) return VFSError.NoSpace;
+
+    const to_write = @min(buf.len, available);
+    var i: usize = 0;
+    while (i < to_write) : (i += 1) {
+        pipe.buffer[pipe.write_pos] = buf[i];
+        pipe.write_pos = (pipe.write_pos + 1) % PIPE_BUF_SIZE;
+    }
+    pipe.count += to_write;
+    return to_write;
+}
+
+fn pipeNoOp(_: *VNode, _: u32) VFSError!void {}
+fn pipeClose(_: *VNode) VFSError!void {}
+fn pipeSeek(_: *VNode, _: i64, _: u32) VFSError!u64 { return VFSError.InvalidOperation; }
+fn pipeIoctl(_: *VNode, _: u32, _: usize) VFSError!i32 { return VFSError.InvalidOperation; }
+fn pipeStat(vnode: *VNode, stat_buf: *FileStat) VFSError!void {
+    const pipe: *PipeData = @ptrCast(@alignCast(vnode.private_data orelse return VFSError.InvalidOperation));
+    stat_buf.* = FileStat{
+        .inode = 0,
+        .mode = vnode.mode,
+        .file_type = .Pipe,
+        .size = pipe.count,
+        .blocks = 0,
+        .block_size = PIPE_BUF_SIZE,
+        .uid = 0,
+        .gid = 0,
+        .atime = 0,
+        .mtime = 0,
+        .ctime = 0,
+    };
+}
+fn pipeReaddir(_: *VNode, _: *DirEntry, _: u64) VFSError!bool { return VFSError.InvalidOperation; }
+fn pipeTruncate(_: *VNode, _: u64) VFSError!void { return VFSError.InvalidOperation; }
+fn pipeChmod(_: *VNode, _: FileMode) VFSError!void { return VFSError.InvalidOperation; }
+fn pipeChown(_: *VNode, _: u32, _: u32) VFSError!void { return VFSError.InvalidOperation; }
+
+const pipe_ops = FileOps{
+    .read = pipeRead,
+    .write = pipeWrite,
+    .open = pipeNoOp,
+    .close = pipeClose,
+    .seek = pipeSeek,
+    .ioctl = pipeIoctl,
+    .stat = pipeStat,
+    .readdir = pipeReaddir,
+    .truncate = pipeTruncate,
+    .chmod = pipeChmod,
+    .chown = pipeChown,
+};
+
+pub fn createPipe() VFSError!struct { read_fd: u32, write_fd: u32 } {
+    const pipe_mem = memory.kmalloc(@sizeOf(PipeData)) orelse return VFSError.OutOfMemory;
+    const pipe: *PipeData = @ptrCast(@alignCast(pipe_mem));
+    pipe.* = PipeData{
+        .buffer = [_]u8{0} ** PIPE_BUF_SIZE,
+        .read_pos = 0,
+        .write_pos = 0,
+        .count = 0,
+        .readers = 1,
+        .writers = 1,
+    };
+
+    const vnode = try createVNode();
+    vnode.file_type = .Pipe;
+    vnode.mode = FileMode{
+        .owner_read = true,
+        .owner_write = true,
+    };
+    vnode.ops = &pipe_ops;
+    vnode.private_data = pipe_mem;
+
+    var read_fd: u32 = 0;
+    var write_fd: u32 = 0;
+    var found_read = false;
+    var found_write = false;
+
+    for (fd_table, 0..) |maybe_fd, i| {
+        if (maybe_fd == null) {
+            if (!found_read) {
+                const fd_m = memory.kmalloc(@sizeOf(FileDescriptor)) orelse return VFSError.OutOfMemory;
+                const fd: *FileDescriptor = @ptrCast(@alignCast(fd_m));
+                fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_RDONLY, .ref_count = 1 };
+                fd_table[i] = fd;
+                read_fd = @intCast(i);
+                found_read = true;
+                vnode.ref_count += 1;
+            } else if (!found_write) {
+                const fd_m = memory.kmalloc(@sizeOf(FileDescriptor)) orelse return VFSError.OutOfMemory;
+                const fd: *FileDescriptor = @ptrCast(@alignCast(fd_m));
+                fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_WRONLY, .ref_count = 1 };
+                fd_table[i] = fd;
+                write_fd = @intCast(i);
+                found_write = true;
+                vnode.ref_count += 1;
+                break;
+            }
+        }
+    }
+
+    if (!found_read or !found_write) {
+        return VFSError.NoSpace;
+    }
+
+    return .{ .read_fd = read_fd, .write_fd = write_fd };
+}
+
+pub fn dup2(old_fd: u32, new_fd: u32) VFSError!u32 {
+    if (old_fd >= fd_table.len or new_fd >= fd_table.len) return VFSError.InvalidOperation;
+    const old_desc = fd_table[old_fd] orelse return VFSError.InvalidOperation;
+
+    if (old_fd == new_fd) return new_fd;
+
+    if (fd_table[new_fd]) |existing| {
+        existing.ref_count -= 1;
+        if (existing.ref_count == 0) {
+            existing.vnode.ops.close(existing.vnode) catch {};
+            existing.vnode.ref_count -= 1;
+            memory.kfree(@as([*]u8, @ptrCast(existing)));
+        }
+        fd_table[new_fd] = null;
+    }
+
+    const fd_m = memory.kmalloc(@sizeOf(FileDescriptor)) orelse return VFSError.OutOfMemory;
+    const new_desc: *FileDescriptor = @ptrCast(@alignCast(fd_m));
+    new_desc.* = FileDescriptor{
+        .vnode = old_desc.vnode,
+        .offset = old_desc.offset,
+        .flags = old_desc.flags,
+        .ref_count = 1,
+    };
+    fd_table[new_fd] = new_desc;
+    old_desc.vnode.ref_count += 1;
+
+    return new_fd;
 }
 
 pub fn rename(old_path: []const u8, new_path: []const u8) VFSError!void {
