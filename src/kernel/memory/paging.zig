@@ -136,7 +136,15 @@ fn alloc_frame() u32 {
     }
     defer @atomicStore(bool, &frame_lock, false, .seq_cst);
 
-    const frame_addr = find_free_frame() orelse {
+    const frame_addr = find_free_frame() orelse blk: {
+        if (swap.tryFreeFrame()) {
+            break :blk find_free_frame() orelse {
+                vga.print("Out of memory!\n");
+                while (true) {
+                    asm volatile ("hlt");
+                }
+            };
+        }
         vga.print("Out of memory!\n");
         while (true) {
             asm volatile ("hlt");
@@ -152,7 +160,14 @@ pub fn alloc_frames(count: u32) ?u32 {
     }
     defer @atomicStore(bool, &frame_lock, false, .seq_cst);
 
-    const start_addr = find_contiguous_frames(count);
+    var start_addr = find_contiguous_frames(count);
+    if (start_addr == null) {
+        var freed: u32 = 0;
+        while (freed < count) : (freed += 1) {
+            if (!swap.tryFreeFrame()) break;
+        }
+        start_addr = find_contiguous_frames(count);
+    }
     if (start_addr) |addr| {
         var i: u32 = 0;
         while (i < count) : (i += 1) {
