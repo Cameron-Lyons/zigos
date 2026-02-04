@@ -316,6 +316,16 @@ pub fn write(fd: u32, buffer: []const u8) VFSError!usize {
     return VFSError.InvalidOperation;
 }
 
+pub fn ioctl(fd: u32, request: u32, arg: usize) VFSError!i32 {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+
+    if (fd_table[fd]) |file_desc| {
+        return file_desc.vnode.ops.ioctl(file_desc.vnode, request, arg);
+    }
+
+    return VFSError.InvalidOperation;
+}
+
 pub fn lseek(fd: u32, offset: i64, whence: u32) VFSError!u64 {
     if (fd >= fd_table.len) return VFSError.InvalidOperation;
 

@@ -419,7 +419,7 @@ pub fn alarm(seconds: u32) u32 {
 pub fn checkAlarms() void {
     const now = process.getSystemTime();
 
-    for (process.process_table) |*proc| {
+    for (&process.process_table) |*proc| {
         if (proc.state != .Zombie and proc.alarm_time != 0 and proc.alarm_time <= now) {
             proc.alarm_time = 0;
             sendSignal(proc, SIGALRM);
