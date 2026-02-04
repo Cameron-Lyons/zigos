@@ -28,6 +28,39 @@ var udp_sockets: [MAX_UDP_SOCKETS]?UDPSocket = [_]?UDPSocket{null} ** MAX_UDP_SO
 
 pub fn init() void {
     ipv4.registerProtocolHandler(UDP_PROTOCOL, handleUDPPacket);
+    ipv6.registerProtocolHandler(NEXT_HEADER_UDP, handleUDPPacketIPv6);
+}
+
+const NEXT_HEADER_UDP: u8 = 17;
+
+fn handleUDPPacketIPv6(src: *const ipv6.IPv6Address, dst: *const ipv6.IPv6Address, data: []const u8) void {
+    if (data.len < @sizeOf(UDPHeader)) return;
+
+    const udp_header: *const UDPHeader = @ptrCast(@alignCast(data.ptr));
+    const length = @byteSwap(udp_header.length);
+
+    if (length < @sizeOf(UDPHeader) or length > data.len) return;
+
+    if (udp_header.checksum != 0) {
+        var temp_header = udp_header.*;
+        temp_header.checksum = 0;
+        const calculated = calculateChecksumIPv6(src, dst, &temp_header, data[@sizeOf(UDPHeader)..length]);
+        if (udp_header.checksum != calculated) return;
+    }
+
+    const dst_port = @byteSwap(udp_header.dst_port);
+    const payload = data[@sizeOf(UDPHeader)..length];
+
+    if (findSocket(dst_port)) |socket| {
+        const space_available = socket.recv_buffer.len - socket.recv_buffer_used;
+        const to_copy = @min(payload.len, space_available);
+        if (to_copy > 0) {
+            @memcpy(socket.recv_buffer[socket.recv_buffer_used .. socket.recv_buffer_used + to_copy], payload[0..to_copy]);
+            socket.recv_buffer_used = to_copy;
+            socket.recv_addr = 0;
+            socket.recv_port = @byteSwap(udp_header.src_port);
+        }
+    }
 }
 
 pub fn send(local_addr: ipv4.IPv4Address, local_port: u16, remote_addr: ipv4.IPv4Address, remote_port: u16, data: []const u8) !void {

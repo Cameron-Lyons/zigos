@@ -138,6 +138,54 @@ var tcp_sockets: [MAX_TCP_CONNECTIONS]?TCPSocket = [_]?TCPSocket{null} ** MAX_TC
 
 pub fn init() void {
     ipv4.registerProtocolHandler(TCP_PROTOCOL, handleTCPPacket);
+    ipv6.registerProtocolHandler(NEXT_HEADER_TCP, handleTCPPacketIPv6);
+}
+
+const NEXT_HEADER_TCP: u8 = 6;
+
+fn handleTCPPacketIPv6(src: *const ipv6.IPv6Address, dst: *const ipv6.IPv6Address, data: []const u8) void {
+    if (data.len < @sizeOf(TCPHeader)) return;
+
+    const tcp_header: *const TCPHeader = @ptrCast(@alignCast(data.ptr));
+    const header_len = tcp_header.getDataOffset();
+    if (header_len < @sizeOf(TCPHeader) or header_len > data.len) return;
+
+    var temp_header = tcp_header.*;
+    temp_header.checksum = 0;
+    const calculated = calculateChecksumIPv6(src, dst, &temp_header, data[header_len..]);
+    if (tcp_header.checksum != calculated) return;
+
+    const flags = tcp_header.getFlags();
+    const dst_port = @byteSwap(tcp_header.dst_port);
+
+    if (flags & TCPFlags.SYN != 0) {
+        if (findListeningSocket(dst_port) == null) {
+            const src_port = @byteSwap(tcp_header.src_port);
+            const ack = @byteSwap(tcp_header.seq_num) +% 1;
+            sendRSTv6(src, dst, src_port, dst_port, ack);
+        }
+    }
+}
+
+fn sendRSTv6(dst: *const ipv6.IPv6Address, src: *const ipv6.IPv6Address, dst_port: u16, src_port: u16, seq_num: u32) void {
+    const packet_size = @sizeOf(TCPHeader);
+    const packet_mem = memory.kmalloc(packet_size) orelse return;
+    defer memory.kfree(packet_mem);
+
+    const packet: [*]u8 = @ptrCast(@alignCast(packet_mem));
+    const tcp_header: *TCPHeader = @ptrCast(@alignCast(packet));
+
+    tcp_header.src_port = @byteSwap(src_port);
+    tcp_header.dst_port = @byteSwap(dst_port);
+    tcp_header.seq_num = @byteSwap(seq_num);
+    tcp_header.ack_num = 0;
+    tcp_header.setDataOffsetAndFlags(@sizeOf(TCPHeader), TCPFlags.RST);
+    tcp_header.window_size = 0;
+    tcp_header.checksum = 0;
+    tcp_header.urgent_ptr = 0;
+
+    tcp_header.checksum = calculateChecksumIPv6(src, dst, tcp_header, &[_]u8{});
+    ipv6.sendPacket(dst.*, ipv6.NEXT_HEADER_TCP, packet[0..packet_size]);
 }
 
 fn calculateChecksum(src_ip: u32, dst_ip: u32, tcp_header: *const TCPHeader, data: []const u8) u16 {
