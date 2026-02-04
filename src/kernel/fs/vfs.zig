@@ -14,6 +14,7 @@ pub const VFSError = error{
     InvalidOperation,
     OutOfMemory,
     DeviceError,
+    BrokenPipe,
 };
 
 pub const FileType = enum(u8) {
@@ -620,7 +621,7 @@ fn pipeRead(vnode: *VNode, buf: []u8, _: u64) VFSError!usize {
 
 fn pipeWrite(vnode: *VNode, buf: []const u8, _: u64) VFSError!usize {
     const pipe: *PipeData = @ptrCast(@alignCast(vnode.private_data orelse return VFSError.InvalidOperation));
-    if (pipe.readers == 0) return VFSError.InvalidOperation;
+    if (pipe.readers == 0) return VFSError.BrokenPipe;
     const available = PIPE_BUF_SIZE - pipe.count;
     if (available == 0) return VFSError.NoSpace;
 

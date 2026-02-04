@@ -89,6 +89,7 @@ pub const SYS_GETPEERNAME = 72;
 pub const SYS_FCHOWN = 73;
 pub const SYS_FSYNC = 74;
 pub const SYS_FDATASYNC = 75;
+pub const SYS_POLL = 76;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -97,6 +98,7 @@ const FD_OFFSET = 3;
 
 pub const EPERM = -1;
 pub const ENOENT = -2;
+pub const ESRCH = -3;
 pub const EINTR = -4;
 pub const EBADF = -9;
 pub const EAGAIN = -11;
@@ -111,8 +113,17 @@ pub const ENFILE = -23;
 pub const EMFILE = -24;
 pub const ENOSPC = -28;
 pub const EROFS = -30;
+pub const EPIPE = -32;
 pub const ENAMETOOLONG = -36;
 pub const ENOSYS = -38;
+pub const EOVERFLOW = -75;
+pub const EADDRINUSE = -98;
+pub const ECONNRESET = -104;
+pub const ENOBUFS = -105;
+pub const EISCONN = -106;
+pub const ENOTCONN = -107;
+pub const ETIMEDOUT = -110;
+pub const ECONNREFUSED = -111;
 
 fn vfsErrno(err: vfs.VFSError) i32 {
     return switch (err) {
@@ -127,7 +138,23 @@ fn vfsErrno(err: vfs.VFSError) i32 {
         vfs.VFSError.InvalidPath => EINVAL,
         vfs.VFSError.InvalidOperation => EINVAL,
         vfs.VFSError.DeviceError => EINVAL,
+        vfs.VFSError.BrokenPipe => EPIPE,
     };
+}
+
+fn socketErrno(err: anyerror) i32 {
+    if (err == socket.SocketError.InvalidSocket) return EBADF;
+    if (err == socket.SocketError.InvalidAddress) return EINVAL;
+    if (err == socket.SocketError.AlreadyConnected) return EISCONN;
+    if (err == socket.SocketError.NotConnected) return ENOTCONN;
+    if (err == socket.SocketError.ConnectionRefused) return ECONNREFUSED;
+    if (err == socket.SocketError.ConnectionReset) return ECONNRESET;
+    if (err == socket.SocketError.NoBufferSpace) return ENOBUFS;
+    if (err == socket.SocketError.Timeout) return ETIMEDOUT;
+    if (err == socket.SocketError.AddressInUse) return EADDRINUSE;
+    if (err == socket.SocketError.NotListening) return EINVAL;
+    if (err == error.OutOfMemory) return ENOMEM;
+    return EINVAL;
 }
 
 export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
@@ -215,6 +242,7 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_FCHOWN => sys_fchown(@intCast(arg1), @intCast(arg2), @intCast(arg3)),
         SYS_FSYNC => sys_fsync(@intCast(arg1)),
         SYS_FDATASYNC => sys_fsync(@intCast(arg1)),
+        SYS_POLL => sys_poll(arg1, @intCast(arg2), @intCast(@as(i32, @bitCast(arg3)))),
         else => ENOSYS,
     };
 
@@ -464,7 +492,8 @@ fn sys_lseek(fd: i32, offset: i64, whence: u32) i32 {
     if (fd < FD_OFFSET) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
     const result = vfs.lseek(vfs_fd, offset, whence) catch |err| return vfsErrno(err);
-    return @intCast(@as(i32, @intCast(result & 0x7FFFFFFF)));
+    if (result > 0x7FFFFFFF) return EOVERFLOW;
+    return @intCast(result);
 }
 
 fn sys_stat(pathname: [*]const u8, stat_buf_addr: usize) i32 {
@@ -653,7 +682,7 @@ fn sys_bind(sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
         },
     };
 
-    sock.bind(ipv4_addr, @byteSwap(addr.port)) catch return -1;
+    sock.bind(ipv4_addr, @byteSwap(addr.port)) catch |err| return socketErrno(err);
     return 0;
 }
 
@@ -678,14 +707,14 @@ fn sys_connect(sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
         },
     };
 
-    sock.connect(ipv4_addr, @byteSwap(addr.port)) catch return -1;
+    sock.connect(ipv4_addr, @byteSwap(addr.port)) catch |err| return socketErrno(err);
     return 0;
 }
 
 fn sys_listen(sockfd: i32, backlog: u32) i32 {
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
-    sock.listen(backlog) catch return -1;
+    sock.listen(backlog) catch |err| return socketErrno(err);
     return 0;
 }
 
@@ -693,7 +722,7 @@ fn sys_accept(sockfd: i32) i32 {
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
 
-    const client = sock.accept() catch return -1;
+    const client = sock.accept() catch |err| return socketErrno(err);
 
     for (&socket_table, 0..) |*slot, i| {
         if (slot.* == null) {
@@ -717,7 +746,7 @@ fn sys_send(sockfd: i32, buf: [*]const u8, len: usize) i32 {
     const to_send = @min(len, kernel_buffer.len);
     protection.copyFromUser(kernel_buffer[0..to_send], @intFromPtr(buf)) catch return EINVAL;
 
-    const sent = sock.send(kernel_buffer[0..to_send]) catch return -1;
+    const sent = sock.send(kernel_buffer[0..to_send]) catch |err| return socketErrno(err);
     return @intCast(sent);
 }
 
@@ -731,7 +760,7 @@ fn sys_recv(sockfd: i32, buf: [*]u8, len: usize) i32 {
     var kernel_buffer: [4096]u8 = undefined;
     const to_recv = @min(len, kernel_buffer.len);
 
-    const received = sock.recv(kernel_buffer[0..to_recv]) catch return -1;
+    const received = sock.recv(kernel_buffer[0..to_recv]) catch |err| return socketErrno(err);
     if (received == 0) return 0;
 
     protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..received]) catch return EINVAL;
@@ -747,7 +776,12 @@ fn sys_shutdown(sockfd: i32) i32 {
 }
 
 fn sys_kill(pid: i32, signum: i32) i32 {
-    signal.kill(pid, signum) catch return -1;
+    signal.kill(pid, signum) catch |err| {
+        return switch (err) {
+            error.InvalidSignal => EINVAL,
+            error.NoSuchProcess => ESRCH,
+        };
+    };
     return 0;
 }
 
@@ -1037,26 +1071,17 @@ fn sys_mmap(addr: usize, length: usize, prot: i32, flags: i32, fd: i32, offset: 
                 return EINVAL;
             }
 
-            result_addr = protection.allocateUserMemory(length, @intCast(prot)) catch |err| {
-                return switch (err) {
-                    error.OutOfMemory => -12,
-                    error.OutOfVirtualMemory => -12,
-                };
+            result_addr = protection.allocateUserMemory(length, @intCast(prot)) catch {
+                return ENOMEM;
             };
         } else {
-            result_addr = protection.allocateUserMemory(length, @intCast(prot)) catch |err| {
-                return switch (err) {
-                    error.OutOfMemory => -12,
-                    error.OutOfVirtualMemory => -12,
-                };
+            result_addr = protection.allocateUserMemory(length, @intCast(prot)) catch {
+                return ENOMEM;
             };
         }
     } else {
-        result_addr = protection.allocateUserMemory(length, @intCast(prot)) catch |err| {
-            return switch (err) {
-                error.OutOfMemory => -12,
-                error.OutOfVirtualMemory => -12,
-            };
+        result_addr = protection.allocateUserMemory(length, @intCast(prot)) catch {
+            return ENOMEM;
         };
     }
 
@@ -1700,12 +1725,12 @@ fn sys_sendto(sockfd: i32, buf: [*]const u8, len: usize, dest_addr: usize, addr_
     protection.copyFromUser(kernel_buffer[0..to_send], @intFromPtr(buf)) catch return EINVAL;
 
     if (dest_addr == 0) {
-        const sent = sock.send(kernel_buffer[0..to_send]) catch return -1;
+        const sent = sock.send(kernel_buffer[0..to_send]) catch |err| return socketErrno(err);
         return @intCast(sent);
     }
 
     const parsed = parseSockAddr(dest_addr, addr_len) orelse return EINVAL;
-    sock.sendTo(kernel_buffer[0..to_send], parsed.addr, parsed.port) catch return -1;
+    sock.sendTo(kernel_buffer[0..to_send], parsed.addr, parsed.port) catch |err| return socketErrno(err);
     return @intCast(to_send);
 }
 
@@ -1719,7 +1744,7 @@ fn sys_recvfrom(sockfd: i32, buf: [*]u8, len: usize, src_addr: usize, addr_len_p
     const to_recv = @min(len, kernel_buffer.len);
 
     if (src_addr == 0) {
-        const received = sock.recv(kernel_buffer[0..to_recv]) catch return -1;
+        const received = sock.recv(kernel_buffer[0..to_recv]) catch |err| return socketErrno(err);
         if (received == 0) return 0;
         protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..received]) catch return EINVAL;
         return @intCast(received);
@@ -1727,7 +1752,7 @@ fn sys_recvfrom(sockfd: i32, buf: [*]u8, len: usize, src_addr: usize, addr_len_p
 
     var from_addr = @import("../net/ipv4.zig").IPv4Address{ .octets = .{ 0, 0, 0, 0 } };
     var from_port: u16 = 0;
-    const received = sock.recvFrom(kernel_buffer[0..to_recv], &from_addr, &from_port) catch return -1;
+    const received = sock.recvFrom(kernel_buffer[0..to_recv], &from_addr, &from_port) catch |err| return socketErrno(err);
     if (received == 0) return 0;
 
     protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..received]) catch return EINVAL;
@@ -1765,4 +1790,67 @@ fn sys_fchown(fd: i32, uid: u16, gid: u16) i32 {
 fn sys_fsync(fd: i32) i32 {
     if (fd < FD_OFFSET) return EBADF;
     return 0;
+}
+
+const PollFd = extern struct {
+    fd: i32,
+    events: i16,
+    revents: i16,
+};
+
+const POLLIN: i16 = 0x001;
+const POLLOUT: i16 = 0x004;
+const POLLERR: i16 = 0x008;
+const POLLHUP: i16 = 0x010;
+const POLLNVAL: i16 = 0x020;
+
+fn sys_poll(fds_addr: usize, nfds: u32, timeout: i32) i32 {
+    _ = timeout;
+    if (nfds == 0) return 0;
+    if (nfds > 256) return EINVAL;
+
+    const copy_size = nfds * @sizeOf(PollFd);
+    if (!protection.verifyUserPointer(fds_addr, copy_size)) return EINVAL;
+
+    var kernel_fds: [256]PollFd = undefined;
+    protection.copyFromUser(std.mem.asBytes(&kernel_fds)[0..copy_size], fds_addr) catch return EINVAL;
+
+    var count: i32 = 0;
+    var i: u32 = 0;
+    while (i < nfds) : (i += 1) {
+        kernel_fds[i].revents = 0;
+        const fd = kernel_fds[i].fd;
+
+        if (fd < 0) continue;
+
+        if (fd < FD_OFFSET) {
+            if (fd == STDIN and (kernel_fds[i].events & POLLIN) != 0) {
+                kernel_fds[i].revents |= POLLIN;
+                count += 1;
+            }
+            if ((fd == STDOUT or fd == STDERR) and (kernel_fds[i].events & POLLOUT) != 0) {
+                kernel_fds[i].revents |= POLLOUT;
+                count += 1;
+            }
+            continue;
+        }
+
+        const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+        if (vfs.getFileFlags(vfs_fd)) |flags| {
+            const access_mode = flags & 0x3;
+            if ((kernel_fds[i].events & POLLIN) != 0 and (access_mode == 0 or access_mode == 2)) {
+                kernel_fds[i].revents |= POLLIN;
+            }
+            if ((kernel_fds[i].events & POLLOUT) != 0 and (access_mode == 1 or access_mode == 2)) {
+                kernel_fds[i].revents |= POLLOUT;
+            }
+            if (kernel_fds[i].revents != 0) count += 1;
+        } else |_| {
+            kernel_fds[i].revents = POLLNVAL;
+            count += 1;
+        }
+    }
+
+    protection.copyToUser(fds_addr, std.mem.asBytes(&kernel_fds)[0..copy_size]) catch return EINVAL;
+    return count;
 }
