@@ -10,6 +10,7 @@ const memory = @import("../memory/memory.zig");
 const paging = @import("../memory/paging.zig");
 const vfs = @import("../fs/vfs.zig");
 const credentials = @import("credentials.zig");
+const signal = @import("signal.zig");
 const socket = @import("../net/socket.zig");
 
 pub const SYS_EXIT = 1;
@@ -46,6 +47,10 @@ pub const SYS_ACCEPT = 31;
 pub const SYS_SEND = 32;
 pub const SYS_RECV = 33;
 pub const SYS_SHUTDOWN = 34;
+pub const SYS_KILL = 35;
+pub const SYS_SIGACTION = 36;
+pub const SYS_GETCWD = 37;
+pub const SYS_CHDIR = 38;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -102,10 +107,16 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_SEND => sys_send(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3),
         SYS_RECV => sys_recv(@intCast(arg1), @as([*]u8, @ptrFromInt(arg2)), arg3),
         SYS_SHUTDOWN => sys_shutdown(@intCast(arg1)),
+        SYS_KILL => sys_kill(@intCast(arg1), @intCast(arg2)),
+        SYS_SIGACTION => sys_sigaction(@intCast(arg1), arg2, arg3),
+        SYS_GETCWD => sys_getcwd(@as([*]u8, @ptrFromInt(arg1)), arg2),
+        SYS_CHDIR => sys_chdir(@as([*]const u8, @ptrFromInt(arg1))),
         else => ENOSYS,
     };
 
     regs.eax = @intCast(@as(i32, result));
+
+    signal.handlePendingSignals();
 }
 
 fn sys_exit(status: i32) i32 {
@@ -610,6 +621,83 @@ fn sys_shutdown(sockfd: i32) i32 {
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
     sock.close();
     socket_table[@intCast(sockfd)] = null;
+    return 0;
+}
+
+fn sys_kill(pid: i32, signum: i32) i32 {
+    signal.kill(pid, signum) catch return -1;
+    return 0;
+}
+
+fn sys_sigaction(signum: i32, act_addr: usize, oldact_addr: usize) i32 {
+    var act: ?*const signal.SigAction = null;
+    var oldact: ?*signal.SigAction = null;
+
+    // SAFETY: filled by the subsequent copyFromUser call
+    var act_buf: [@sizeOf(signal.SigAction)]u8 = undefined;
+    // SAFETY: filled by the subsequent sigaction call
+    var oldact_buf: signal.SigAction = undefined;
+
+    if (act_addr != 0) {
+        if (!protection.verifyUserPointer(act_addr, @sizeOf(signal.SigAction))) return EINVAL;
+        protection.copyFromUser(&act_buf, act_addr) catch return EINVAL;
+        act = @ptrCast(@alignCast(&act_buf));
+    }
+
+    if (oldact_addr != 0) {
+        if (!protection.verifyUserPointer(oldact_addr, @sizeOf(signal.SigAction))) return EINVAL;
+        oldact = &oldact_buf;
+    }
+
+    signal.sigaction(signum, act, oldact) catch return EINVAL;
+
+    if (oldact_addr != 0) {
+        protection.copyToUser(oldact_addr, std.mem.asBytes(&oldact_buf)) catch return EINVAL;
+    }
+
+    return 0;
+}
+
+var current_working_dir: [256]u8 = [_]u8{0} ** 256;
+var cwd_len: usize = 1;
+var cwd_initialized: bool = false;
+
+fn ensureCwdInit() void {
+    if (!cwd_initialized) {
+        current_working_dir[0] = '/';
+        cwd_len = 1;
+        cwd_initialized = true;
+    }
+}
+
+fn sys_getcwd(buf: [*]u8, size: usize) i32 {
+    ensureCwdInit();
+    if (!protection.verifyUserPointer(@intFromPtr(buf), size)) return EINVAL;
+    if (size < cwd_len + 1) return EINVAL;
+
+    // SAFETY: cwd_len bytes + null terminator written before copy
+    var kernel_buf: [257]u8 = undefined;
+    @memcpy(kernel_buf[0..cwd_len], current_working_dir[0..cwd_len]);
+    kernel_buf[cwd_len] = 0;
+
+    protection.copyToUser(@intFromPtr(buf), kernel_buf[0 .. cwd_len + 1]) catch return EINVAL;
+    return @intCast(cwd_len);
+}
+
+fn sys_chdir(pathname: [*]const u8) i32 {
+    ensureCwdInit();
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+
+    // SAFETY: filled by the subsequent copyStringFromUser call
+    var kernel_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    const node = vfs.lookupPath(path_slice) catch return ENOENT;
+    if (node.file_type != .Directory) return -20;
+
+    @memcpy(current_working_dir[0..path_slice.len], path_slice);
+    cwd_len = path_slice.len;
+
     return 0;
 }
 
