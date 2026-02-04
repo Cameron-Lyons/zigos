@@ -12,6 +12,7 @@ const vfs = @import("../fs/vfs.zig");
 const credentials = @import("credentials.zig");
 const signal = @import("signal.zig");
 const socket = @import("../net/socket.zig");
+const ipc = @import("ipc.zig");
 
 pub const SYS_EXIT = 1;
 pub const SYS_WRITE = 2;
@@ -51,6 +52,9 @@ pub const SYS_KILL = 35;
 pub const SYS_SIGACTION = 36;
 pub const SYS_GETCWD = 37;
 pub const SYS_CHDIR = 38;
+pub const SYS_MSGGET = 39;
+pub const SYS_MSGSND = 40;
+pub const SYS_MSGRCV = 41;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -62,6 +66,7 @@ pub const EINVAL = -2;
 pub const ENOSYS = -3;
 pub const ENOMEM = -12;
 pub const ENOENT = -2;
+pub const EACCES = -13;
 
 export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
     const syscall_num = regs.eax;
@@ -111,6 +116,9 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_SIGACTION => sys_sigaction(@intCast(arg1), arg2, arg3),
         SYS_GETCWD => sys_getcwd(@as([*]u8, @ptrFromInt(arg1)), arg2),
         SYS_CHDIR => sys_chdir(@as([*]const u8, @ptrFromInt(arg1))),
+        SYS_MSGGET => sys_msgget(@intCast(arg1)),
+        SYS_MSGSND => sys_msgsnd(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3),
+        SYS_MSGRCV => sys_msgrcv(@as([*]u8, @ptrFromInt(arg1)), arg2, @intCast(arg3)),
         else => ENOSYS,
     };
 
@@ -326,6 +334,18 @@ fn sys_open(pathname: [*]const u8, flags: u32) i32 {
     // SAFETY: filled by the subsequent copyStringFromUser call
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    if (process.current_process) |proc| {
+        if (vfs.lookupPath(path_slice)) |vnode| {
+            const access_mode = flags & 0x3;
+            var access: u3 = 0;
+            if (access_mode == 0 or access_mode == 2) access |= 4;
+            if (access_mode == 1 or access_mode == 2) access |= 2;
+            if (!credentials.checkPermission(&proc.creds, vnode.mode, vnode.uid, vnode.gid, access)) {
+                return EACCES;
+            }
+        } else |_| {}
+    }
 
     const vfs_fd = vfs.open(path_slice, flags) catch return -1;
     return @intCast(@as(i32, @intCast(vfs_fd)) + FD_OFFSET);
@@ -925,4 +945,42 @@ fn sys_mmap(addr: usize, length: usize, prot: i32, flags: i32, fd: i32, offset: 
     }
 
     return @intCast(result_addr);
+}
+
+fn sys_msgget(max_messages: u32) i32 {
+    const pid = if (process.current_process) |proc| proc.pid else return ENOSYS;
+    const clamped = if (max_messages == 0) @as(u32, 16) else @min(max_messages, 256);
+
+    if (ipc.getMessageQueue(pid) != null) return 0;
+
+    _ = ipc.createMessageQueue(pid, clamped) catch return ENOMEM;
+    return 0;
+}
+
+fn sys_msgsnd(receiver_pid: u32, buf: [*]const u8, len: usize) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
+    const sender_pid = if (process.current_process) |proc| proc.pid else return ENOSYS;
+
+    const msg_len = @min(len, 256);
+    // SAFETY: filled by the subsequent copyFromUser call
+    var kernel_buffer: [256]u8 = undefined;
+    protection.copyFromUser(kernel_buffer[0..msg_len], @intFromPtr(buf)) catch return EINVAL;
+
+    ipc.sendMessage(sender_pid, receiver_pid, .Data, kernel_buffer[0..msg_len]) catch return -1;
+    return 0;
+}
+
+fn sys_msgrcv(buf: [*]u8, size: usize, flags: i32) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(buf), size)) return EINVAL;
+    const pid = if (process.current_process) |proc| proc.pid else return ENOSYS;
+
+    const queue = ipc.getMessageQueue(pid) orelse return -1;
+
+    const msg = if (flags != 0) queue.tryReceive() else queue.receive();
+    if (msg == null) return 0;
+
+    const m = msg.?;
+    const copy_len = @min(m.data_len, @as(u32, @intCast(size)));
+    protection.copyToUser(@intFromPtr(buf), m.data[0..copy_len]) catch return EINVAL;
+    return @intCast(copy_len);
 }
