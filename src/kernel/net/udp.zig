@@ -189,6 +189,11 @@ fn handleUDPPacket(src_ip: u32, dst_ip: u32, data: []const u8) void {
     const dst_port = @byteSwap(udp_header.dst_port);
     const payload = data[@sizeOf(UDPHeader)..length];
 
+    if (dst_port == 68) {
+        const dhcp = @import("dhcp.zig");
+        dhcp.handlePacket(payload);
+    }
+
     if (findSocket(dst_port)) |socket| {
         const space_available = socket.recv_buffer.len - socket.recv_buffer_used;
         const to_copy = @min(payload.len, space_available);

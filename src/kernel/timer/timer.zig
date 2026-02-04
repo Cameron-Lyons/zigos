@@ -46,6 +46,12 @@ pub fn handleInterrupt() void {
         const process = @import("../process/process.zig");
         process.yield();
     }
+
+    const ALARM_CHECK_INTERVAL = 100;
+    if (ticks % ALARM_CHECK_INTERVAL == 0) {
+        const signal = @import("../process/signal.zig");
+        signal.checkAlarms();
+    }
 }
 
 pub fn getTicks() u64 {
