@@ -419,7 +419,11 @@ pub const Shell = struct {
 
     pub fn printPrompt(self: *const Shell) void {
         _ = self;
-        vga.print("zigos> ");
+        const syscall_mod = @import("../process/syscall.zig");
+        const cwd = syscall_mod.getCwd();
+        vga.print("zigos:");
+        vga.print(cwd);
+        vga.print("> ");
     }
 
     fn executeCommand(self: *Shell) void {
@@ -585,6 +589,14 @@ pub const Shell = struct {
             self.cmdExt2WriteTest();
         } else if (streq(command, "tcptest")) {
             self.cmdTcpTest();
+        } else if (streq(command, "id")) {
+            self.cmdId();
+        } else if (streq(command, "date")) {
+            self.cmdDate();
+        } else if (streq(command, "ln")) {
+            self.cmdLn(args[1..arg_count]);
+        } else if (streq(command, "hostname")) {
+            self.cmdHostname(args[1..arg_count]);
         } else {
             vga.print("Unknown command: ");
             printString(command);
@@ -2166,6 +2178,124 @@ pub const Shell = struct {
                 vga.print("\n");
             }
         }
+    }
+
+    fn cmdId(self: *const Shell) void {
+        _ = self;
+        const proc = @import("../process/process.zig");
+        if (proc.current_process) |p| {
+            vga.print("uid=");
+            printNumber(@as(usize, p.creds.uid));
+            vga.print("(");
+            if (p.creds.uid == 0) vga.print("root") else vga.print("user");
+            vga.print(") gid=");
+            printNumber(@as(usize, p.creds.gid));
+            vga.print("(");
+            if (p.creds.gid == 0) vga.print("root") else vga.print("users");
+            vga.print(") euid=");
+            printNumber(@as(usize, p.creds.euid));
+            vga.print(" egid=");
+            printNumber(@as(usize, p.creds.egid));
+            vga.print("\n");
+        }
+    }
+
+    fn cmdDate(self: *const Shell) void {
+        _ = self;
+        const t = @import("../timer/timer.zig");
+        const ticks = t.getTicks();
+        const total_secs = ticks / 100;
+        const hours = total_secs / 3600;
+        const mins = (total_secs % 3600) / 60;
+        const secs = total_secs % 60;
+        vga.print("System uptime: ");
+        if (hours > 0) {
+            printNumber(@intCast(hours));
+            vga.print("h ");
+        }
+        printNumber(@intCast(mins));
+        vga.print("m ");
+        printNumber(@intCast(secs));
+        vga.print("s (");
+        printNumber(@intCast(ticks));
+        vga.print(" ticks)\n");
+    }
+
+    fn cmdLn(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len < 2) {
+            vga.print("Usage: ln [-s] <target> <linkname>\n");
+            return;
+        }
+
+        var symlink_mode = false;
+        var target_idx: usize = 0;
+        var link_idx: usize = 1;
+
+        if (streq(args[0], "-s")) {
+            symlink_mode = true;
+            if (args.len < 3) {
+                vga.print("Usage: ln -s <target> <linkname>\n");
+                return;
+            }
+            target_idx = 1;
+            link_idx = 2;
+        }
+
+        var target_buf: [256]u8 = [_]u8{0} ** 256;
+        var link_buf: [256]u8 = [_]u8{0} ** 256;
+        var target_len: usize = 0;
+        var link_len: usize = 0;
+
+        while (target_len < 255 and args[target_idx][target_len] != 0) : (target_len += 1) {
+            target_buf[target_len] = args[target_idx][target_len];
+        }
+        while (link_len < 255 and args[link_idx][link_len] != 0) : (link_len += 1) {
+            link_buf[link_len] = args[link_idx][link_len];
+        }
+
+        if (symlink_mode) {
+            vfs.symlink(target_buf[0..target_len], link_buf[0..link_len]) catch |err| {
+                vga.print("ln: failed to create symlink: ");
+                vga.print(@errorName(err));
+                vga.print("\n");
+                return;
+            };
+        } else {
+            vfs.link(target_buf[0..target_len], link_buf[0..link_len]) catch |err| {
+                vga.print("ln: failed to create link: ");
+                vga.print(@errorName(err));
+                vga.print("\n");
+                return;
+            };
+        }
+    }
+
+    var system_hostname: [64]u8 = blk: {
+        var buf = [_]u8{0} ** 64;
+        buf[0] = 'z';
+        buf[1] = 'i';
+        buf[2] = 'g';
+        buf[3] = 'o';
+        buf[4] = 's';
+        break :blk buf;
+    };
+    var hostname_len: usize = 5;
+
+    fn cmdHostname(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            vga.print(system_hostname[0..hostname_len]);
+            vga.print("\n");
+            return;
+        }
+
+        var new_len: usize = 0;
+        while (new_len < 63 and args[0][new_len] != 0) : (new_len += 1) {
+            system_hostname[new_len] = args[0][new_len];
+        }
+        system_hostname[new_len] = 0;
+        hostname_len = new_len;
     }
 
     fn cmdSort(self: *const Shell, args: []const [*:0]const u8) void {
