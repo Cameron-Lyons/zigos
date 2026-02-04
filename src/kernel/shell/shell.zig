@@ -684,6 +684,9 @@ pub const Shell = struct {
                 .Ready => vga.print("READY     "),
                 .Blocked => vga.print("BLOCKED   "),
                 .Terminated => vga.print("TERMINATED"),
+                .Zombie => vga.print("ZOMBIE    "),
+                .Stopped => vga.print("STOPPED   "),
+                .Waiting => vga.print("WAITING   "),
             }
 
             // SAFETY: filled by the subsequent memcpy from process name

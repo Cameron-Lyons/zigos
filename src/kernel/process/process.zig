@@ -5,12 +5,16 @@ const memory = @import("../memory/memory.zig");
 const scheduler = @import("scheduler.zig");
 const smp = @import("../smp/smp.zig");
 const credentials = @import("credentials.zig");
+const timer = @import("../timer/timer.zig");
 
 pub const ProcessState = enum {
     Ready,
     Running,
     Blocked,
     Terminated,
+    Zombie,
+    Stopped,
+    Waiting,
 };
 
 pub const ProcessPrivilege = enum {
@@ -51,6 +55,9 @@ pub const Process = struct {
     nice_value: i8 = 0,
     time_slice: u32 = 10,
     creds: credentials.Credentials = credentials.defaultKernelCredentials(),
+    parent_pid: u32 = 0,
+    process_group: u32 = 0,
+    alarm_time: u64 = 0,
 };
 
 const MAX_PROCESSES = 256;
@@ -377,6 +384,10 @@ pub fn getCurrentPID() u32 {
         return proc.pid;
     }
     return 0;
+}
+
+pub fn getSystemTime() u64 {
+    return timer.getTicks();
 }
 
 pub export fn switchToProcess(proc: *Process) void {

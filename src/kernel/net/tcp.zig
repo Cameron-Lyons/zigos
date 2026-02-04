@@ -206,7 +206,16 @@ fn sendTCPPacket(connection: *TCPConnectionStruct, flags: u8, data: []const u8) 
         return error.WindowFull;
     }
 
-    const packet_size = @sizeOf(TCPHeader) + data.len;
+    const is_syn = (flags & TCPFlags.SYN) != 0;
+    // SAFETY: filled by buildOptions when is_syn or ts_enabled
+    var options_buf: [40]u8 = undefined;
+    const options_len = if (is_syn or connection.ts_enabled)
+        buildOptions(connection, &options_buf, is_syn)
+    else
+        0;
+
+    const header_len = @sizeOf(TCPHeader) + options_len;
+    const packet_size = header_len + data.len;
     const packet_mem = memory.kmalloc(packet_size) orelse return error.OutOfMemory;
     defer memory.kfree(packet_mem);
 
@@ -217,7 +226,7 @@ fn sendTCPPacket(connection: *TCPConnectionStruct, flags: u8, data: []const u8) 
     tcp_header.dst_port = @byteSwap(connection.remote_port);
     tcp_header.seq_num = @byteSwap(connection.send_seq);
     tcp_header.ack_num = @byteSwap(connection.send_ack);
-    tcp_header.setDataOffsetAndFlags(@sizeOf(TCPHeader), flags);
+    tcp_header.setDataOffsetAndFlags(@intCast(header_len), flags);
     const scaled_window: u16 = if (connection.window_scale_send > 0)
         @intCast(@min(@as(u32, connection.send_window) >> @as(u5, @intCast(connection.window_scale_send)), 0xFFFF))
     else
@@ -226,11 +235,16 @@ fn sendTCPPacket(connection: *TCPConnectionStruct, flags: u8, data: []const u8) 
     tcp_header.checksum = 0;
     tcp_header.urgent_ptr = 0;
 
-    if (data.len > 0) {
-        @memcpy(packet[@sizeOf(TCPHeader)..packet_size], data);
+    if (options_len > 0) {
+        @memcpy(packet[@sizeOf(TCPHeader) .. @sizeOf(TCPHeader) + options_len], options_buf[0..options_len]);
     }
 
-    tcp_header.checksum = calculateChecksum(connection.local_addr, connection.remote_addr, tcp_header, data);
+    if (data.len > 0) {
+        @memcpy(packet[header_len..packet_size], data);
+    }
+
+    const payload_with_options = packet[@sizeOf(TCPHeader)..packet_size];
+    tcp_header.checksum = calculateChecksum(connection.local_addr, connection.remote_addr, tcp_header, payload_with_options);
 
     try ipv4.sendPacket(connection.remote_addr, @enumFromInt(TCP_PROTOCOL), packet[0..packet_size]);
 
@@ -963,5 +977,14 @@ fn updateTimestampValues(conn: *TCPConnectionStruct, tsval: u32, tsecr: u32) voi
 }
 
 pub fn registerListeningSocket(sock: *@import("socket.zig").Socket) void {
-    _ = sock;
+    for (&tcp_sockets) |*maybe_socket| {
+        if (maybe_socket.* == null) {
+            maybe_socket.* = TCPSocket{
+                .connection = null,
+                .listening = true,
+                .port = sock.local_port,
+            };
+            return;
+        }
+    }
 }
