@@ -59,6 +59,7 @@ pub const Process = struct {
     parent_pid: u32 = 0,
     process_group: u32 = 0,
     alarm_time: u64 = 0,
+    umask: u16 = 0o022,
     signals: signal.ProcessSignals = signal.ProcessSignals.defaultValue(),
 };
 

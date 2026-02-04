@@ -246,8 +246,7 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
     }
 
     if ((flags & O_TRUNC) != 0 and vnode.file_type == FileType.Regular) {
-
-
+        vnode.ops.truncate(vnode, 0) catch {};
     }
 
     try vnode.ops.open(vnode, flags);
