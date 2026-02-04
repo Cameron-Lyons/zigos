@@ -55,6 +55,8 @@ pub const SYS_CHDIR = 38;
 pub const SYS_MSGGET = 39;
 pub const SYS_MSGSND = 40;
 pub const SYS_MSGRCV = 41;
+pub const SYS_MUNMAP = 42;
+pub const SYS_IOCTL = 43;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -119,6 +121,8 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_MSGGET => sys_msgget(@intCast(arg1)),
         SYS_MSGSND => sys_msgsnd(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3),
         SYS_MSGRCV => sys_msgrcv(@as([*]u8, @ptrFromInt(arg1)), arg2, @intCast(arg3)),
+        SYS_MUNMAP => sys_munmap(arg1, arg2),
+        SYS_IOCTL => sys_ioctl(@intCast(arg1), @intCast(arg2), arg3),
         else => ENOSYS,
     };
 
@@ -983,4 +987,21 @@ fn sys_msgrcv(buf: [*]u8, size: usize, flags: i32) i32 {
     const copy_len = @min(m.data_len, @as(u32, @intCast(size)));
     protection.copyToUser(@intFromPtr(buf), m.data[0..copy_len]) catch return EINVAL;
     return @intCast(copy_len);
+}
+
+fn sys_munmap(addr: usize, length: usize) i32 {
+    if (addr == 0 or length == 0) return EINVAL;
+    if (addr & 0xFFF != 0) return EINVAL;
+    if (addr < protection.USER_HEAP_START or addr >= protection.USER_SPACE_END) return EINVAL;
+
+    protection.freeUserMemory(addr, length);
+    return 0;
+}
+
+fn sys_ioctl(fd: i32, request: u32, arg: usize) i32 {
+    if (fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+
+    const result = vfs.ioctl(vfs_fd, request, arg) catch return -1;
+    return result;
 }
