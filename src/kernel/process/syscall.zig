@@ -67,6 +67,16 @@ pub const SYS_ACCESS = 50;
 pub const SYS_CHMOD = 51;
 pub const SYS_FCHMOD = 52;
 pub const SYS_FTRUNCATE = 53;
+pub const SYS_GETDENTS = 54;
+pub const SYS_SYMLINK = 55;
+pub const SYS_LINK = 56;
+pub const SYS_READLINK = 57;
+pub const SYS_SIGPROCMASK = 58;
+pub const SYS_SIGPENDING = 59;
+pub const SYS_SIGSUSPEND = 60;
+pub const SYS_DUP = 61;
+pub const SYS_FCNTL = 62;
+pub const SYS_SELECT = 63;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -143,6 +153,16 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_CHMOD => sys_chmod_syscall(@as([*]const u8, @ptrFromInt(arg1)), arg2),
         SYS_FCHMOD => sys_fchmod(@intCast(arg1), arg2),
         SYS_FTRUNCATE => sys_ftruncate(@intCast(arg1), arg2),
+        SYS_GETDENTS => sys_getdents(@intCast(arg1), arg2, arg3),
+        SYS_SYMLINK => sys_symlink(@as([*]const u8, @ptrFromInt(arg1)), @as([*]const u8, @ptrFromInt(arg2))),
+        SYS_LINK => sys_link(@as([*]const u8, @ptrFromInt(arg1)), @as([*]const u8, @ptrFromInt(arg2))),
+        SYS_READLINK => sys_readlink(@as([*]const u8, @ptrFromInt(arg1)), @as([*]u8, @ptrFromInt(arg2)), arg3),
+        SYS_SIGPROCMASK => sys_sigprocmask(@intCast(arg1), arg2, arg3),
+        SYS_SIGPENDING => sys_sigpending(arg1),
+        SYS_SIGSUSPEND => sys_sigsuspend(arg1),
+        SYS_DUP => sys_dup(@intCast(arg1)),
+        SYS_FCNTL => sys_fcntl(@intCast(arg1), @intCast(arg2), arg3),
+        SYS_SELECT => sys_select(@intCast(arg1), arg2, arg3, arg4),
         else => ENOSYS,
     };
 
@@ -1202,4 +1222,248 @@ fn sys_ftruncate(fd: i32, length: usize) i32 {
 
     vfs.ftruncate(vfs_fd, length) catch return -1;
     return 0;
+}
+
+const LinuxDirent = extern struct {
+    d_ino: u32,
+    d_off: u32,
+    d_reclen: u16,
+    d_type: u8,
+};
+
+fn sys_getdents(fd: i32, buf_addr: usize, buf_size: usize) i32 {
+    if (fd < FD_OFFSET) return EBADF;
+    if (!protection.verifyUserPointer(buf_addr, buf_size)) return EINVAL;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+
+    // SAFETY: filled by the subsequent vfs.readdir calls
+    var dirent: vfs.DirEntry = undefined;
+    var offset: usize = 0;
+    var index: u64 = 0;
+
+    while (offset + @sizeOf(LinuxDirent) + 1 < buf_size) {
+        const has_entry = vfs.readdir(vfs_fd, &dirent, index) catch return -1;
+        if (!has_entry) break;
+
+        const name_len = dirent.name_len;
+        const reclen: u16 = @intCast(@sizeOf(LinuxDirent) + name_len + 1);
+        if (offset + reclen > buf_size) break;
+
+        var kernel_entry: LinuxDirent = .{
+            .d_ino = @intCast(dirent.inode & 0xFFFFFFFF),
+            .d_off = @intCast(index + 1),
+            .d_reclen = reclen,
+            .d_type = @intFromEnum(dirent.file_type),
+        };
+
+        protection.copyToUser(buf_addr + offset, std.mem.asBytes(&kernel_entry)) catch return EINVAL;
+        protection.copyToUser(buf_addr + offset + @sizeOf(LinuxDirent), dirent.name[0..name_len]) catch return EINVAL;
+        const null_byte = [_]u8{0};
+        protection.copyToUser(buf_addr + offset + @sizeOf(LinuxDirent) + name_len, &null_byte) catch return EINVAL;
+
+        offset += reclen;
+        index += 1;
+    }
+
+    return @intCast(offset);
+}
+
+fn sys_symlink(target: [*]const u8, linkpath: [*]const u8) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(target), 256)) return EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(linkpath), 256)) return EINVAL;
+
+    // SAFETY: filled by the subsequent copyStringFromUser calls
+    var target_buf: [256]u8 = undefined;
+    var link_buf: [256]u8 = undefined;
+
+    const target_slice = protection.copyStringFromUser(&target_buf, @intFromPtr(target)) catch return EINVAL;
+    const link_slice = protection.copyStringFromUser(&link_buf, @intFromPtr(linkpath)) catch return EINVAL;
+
+    vfs.symlink(target_slice, link_slice) catch return -1;
+    return 0;
+}
+
+fn sys_link(oldpath: [*]const u8, newpath: [*]const u8) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(oldpath), 256)) return EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(newpath), 256)) return EINVAL;
+
+    // SAFETY: filled by the subsequent copyStringFromUser calls
+    var old_buf: [256]u8 = undefined;
+    var new_buf: [256]u8 = undefined;
+
+    const old_slice = protection.copyStringFromUser(&old_buf, @intFromPtr(oldpath)) catch return EINVAL;
+    const new_slice = protection.copyStringFromUser(&new_buf, @intFromPtr(newpath)) catch return EINVAL;
+
+    vfs.link(old_slice, new_slice) catch return -1;
+    return 0;
+}
+
+fn sys_readlink(pathname: [*]const u8, buf: [*]u8, buf_size: usize) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(buf), buf_size)) return EINVAL;
+
+    // SAFETY: filled by the subsequent copyStringFromUser call
+    var path_buf: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buf, @intFromPtr(pathname)) catch return EINVAL;
+
+    // SAFETY: filled by the subsequent vfs.readlink call
+    var kernel_buf: [256]u8 = undefined;
+    const read_size = @min(buf_size, kernel_buf.len);
+    const link_len = vfs.readlink(path_slice, kernel_buf[0..read_size]) catch return -1;
+
+    protection.copyToUser(@intFromPtr(buf), kernel_buf[0..link_len]) catch return EINVAL;
+    return @intCast(link_len);
+}
+
+fn sys_sigprocmask(how: i32, set_addr: usize, oldset_addr: usize) i32 {
+    var set_ptr: ?*const signal.SigSet = null;
+    var oldset_ptr: ?*signal.SigSet = null;
+
+    // SAFETY: filled by the subsequent copyFromUser call
+    var set_buf: signal.SigSet = undefined;
+    // SAFETY: filled by the subsequent sigprocmask call
+    var oldset_buf: signal.SigSet = undefined;
+
+    if (set_addr != 0) {
+        if (!protection.verifyUserPointer(set_addr, @sizeOf(signal.SigSet))) return EINVAL;
+        protection.copyFromUser(std.mem.asBytes(&set_buf), set_addr) catch return EINVAL;
+        set_ptr = &set_buf;
+    }
+
+    if (oldset_addr != 0) {
+        if (!protection.verifyUserPointer(oldset_addr, @sizeOf(signal.SigSet))) return EINVAL;
+        oldset_ptr = &oldset_buf;
+    }
+
+    signal.sigprocmask(how, set_ptr, oldset_ptr) catch return EINVAL;
+
+    if (oldset_addr != 0) {
+        protection.copyToUser(oldset_addr, std.mem.asBytes(&oldset_buf)) catch return EINVAL;
+    }
+
+    return 0;
+}
+
+fn sys_sigpending(set_addr: usize) i32 {
+    if (!protection.verifyUserPointer(set_addr, @sizeOf(signal.SigSet))) return EINVAL;
+
+    // SAFETY: filled by the subsequent sigpending call
+    var set: signal.SigSet = undefined;
+    signal.sigpending(&set);
+
+    protection.copyToUser(set_addr, std.mem.asBytes(&set)) catch return EINVAL;
+    return 0;
+}
+
+fn sys_sigsuspend(mask_addr: usize) i32 {
+    if (!protection.verifyUserPointer(mask_addr, @sizeOf(signal.SigSet))) return EINVAL;
+
+    // SAFETY: filled by the subsequent copyFromUser call
+    var mask: signal.SigSet = undefined;
+    protection.copyFromUser(std.mem.asBytes(&mask), mask_addr) catch return EINVAL;
+
+    signal.sigsuspend(&mask) catch |err| {
+        return switch (err) {
+            error.Interrupted => -4,
+        };
+    };
+    return -4;
+}
+
+fn sys_dup(fd: i32) i32 {
+    if (fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+
+    var new_fd: u32 = 0;
+    while (new_fd < 256) : (new_fd += 1) {
+        const result = vfs.dup2(vfs_fd, new_fd) catch continue;
+        return @as(i32, @intCast(result)) + FD_OFFSET;
+    }
+    return ENOMEM;
+}
+
+const F_DUPFD = 0;
+const F_GETFD = 1;
+const F_SETFD = 2;
+const F_GETFL = 3;
+const F_SETFL = 4;
+
+fn sys_fcntl(fd: i32, cmd: i32, arg: usize) i32 {
+    if (fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+
+    switch (cmd) {
+        F_DUPFD => {
+            const min_fd = if (arg >= FD_OFFSET) @as(u32, @intCast(arg - FD_OFFSET)) else 0;
+            var new_fd = min_fd;
+            while (new_fd < 256) : (new_fd += 1) {
+                const result = vfs.dup2(vfs_fd, new_fd) catch continue;
+                return @as(i32, @intCast(result)) + FD_OFFSET;
+            }
+            return ENOMEM;
+        },
+        F_GETFD => return 0,
+        F_SETFD => return 0,
+        F_GETFL => return 0,
+        F_SETFL => return 0,
+        else => return EINVAL,
+    }
+}
+
+const FdSet = extern struct {
+    fds_bits: [8]u32,
+};
+
+fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfds_addr: usize) i32 {
+    if (nfds < 0 or nfds > 256) return EINVAL;
+
+    // SAFETY: filled by the subsequent copyFromUser calls
+    var readfds: FdSet = std.mem.zeroes(FdSet);
+    // SAFETY: filled by the subsequent copyFromUser calls
+    var writefds: FdSet = std.mem.zeroes(FdSet);
+    var result_readfds: FdSet = std.mem.zeroes(FdSet);
+    var result_writefds: FdSet = std.mem.zeroes(FdSet);
+
+    if (readfds_addr != 0) {
+        if (!protection.verifyUserPointer(readfds_addr, @sizeOf(FdSet))) return EINVAL;
+        protection.copyFromUser(std.mem.asBytes(&readfds), readfds_addr) catch return EINVAL;
+    }
+
+    if (writefds_addr != 0) {
+        if (!protection.verifyUserPointer(writefds_addr, @sizeOf(FdSet))) return EINVAL;
+        protection.copyFromUser(std.mem.asBytes(&writefds), writefds_addr) catch return EINVAL;
+    }
+
+    _ = exceptfds_addr;
+
+    var count: i32 = 0;
+    var i: u32 = 0;
+    while (i < @as(u32, @intCast(nfds))) : (i += 1) {
+        const word_idx = i / 32;
+        const bit_idx: u5 = @intCast(i % 32);
+        const mask = @as(u32, 1) << bit_idx;
+
+        if (readfds.fds_bits[word_idx] & mask != 0) {
+            if (i >= FD_OFFSET) {
+                result_readfds.fds_bits[word_idx] |= mask;
+                count += 1;
+            }
+        }
+
+        if (writefds.fds_bits[word_idx] & mask != 0) {
+            if (i >= FD_OFFSET) {
+                result_writefds.fds_bits[word_idx] |= mask;
+                count += 1;
+            }
+        }
+    }
+
+    if (readfds_addr != 0) {
+        protection.copyToUser(readfds_addr, std.mem.asBytes(&result_readfds)) catch return EINVAL;
+    }
+    if (writefds_addr != 0) {
+        protection.copyToUser(writefds_addr, std.mem.asBytes(&result_writefds)) catch return EINVAL;
+    }
+
+    return count;
 }
