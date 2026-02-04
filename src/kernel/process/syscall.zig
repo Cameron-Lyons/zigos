@@ -80,6 +80,8 @@ pub const SYS_SELECT = 63;
 pub const SYS_UMASK = 64;
 pub const SYS_UNAME = 65;
 pub const SYS_TRUNCATE = 66;
+pub const SYS_PREAD = 67;
+pub const SYS_PWRITE = 68;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -197,6 +199,8 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_UMASK => sys_umask(@intCast(arg1)),
         SYS_UNAME => sys_uname(arg1),
         SYS_TRUNCATE => sys_truncate(@as([*]const u8, @ptrFromInt(arg1)), arg2),
+        SYS_PREAD => sys_pread(@intCast(arg1), @as([*]u8, @ptrFromInt(arg2)), arg3, @as(u64, arg4) | (@as(u64, arg5) << 32)),
+        SYS_PWRITE => sys_pwrite(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3, @as(u64, arg4) | (@as(u64, arg5) << 32)),
         else => ENOSYS,
     };
 
@@ -1587,4 +1591,44 @@ fn sys_truncate(pathname: [*]const u8, length: usize) i32 {
 
     vfs.truncate(path_slice, length) catch |err| return vfsErrno(err);
     return 0;
+}
+
+fn sys_pread(fd: i32, buf: [*]u8, count: usize, offset: u64) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(buf), count)) return EINVAL;
+    if (fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+
+    var kernel_buffer: [512]u8 = undefined;
+    var total_read: usize = 0;
+
+    while (total_read < count) {
+        const chunk_size = @min(count - total_read, kernel_buffer.len);
+        const bytes_read = vfs.pread(vfs_fd, kernel_buffer[0..chunk_size], offset + total_read) catch |err| return vfsErrno(err);
+        if (bytes_read == 0) break;
+
+        protection.copyToUser(@intFromPtr(buf) + total_read, kernel_buffer[0..bytes_read]) catch return EINVAL;
+        total_read += bytes_read;
+        if (bytes_read < chunk_size) break;
+    }
+
+    return @intCast(total_read);
+}
+
+fn sys_pwrite(fd: i32, buf: [*]const u8, count: usize, offset: u64) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(buf), count)) return EINVAL;
+    if (fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+
+    var kernel_buffer: [512]u8 = undefined;
+    var written: usize = 0;
+
+    while (written < count) {
+        const chunk_size = @min(count - written, kernel_buffer.len);
+        protection.copyFromUser(kernel_buffer[0..chunk_size], @intFromPtr(buf) + written) catch return EINVAL;
+        const bytes_written = vfs.pwrite(vfs_fd, kernel_buffer[0..chunk_size], offset + written) catch |err| return vfsErrno(err);
+        written += bytes_written;
+        if (bytes_written < chunk_size) break;
+    }
+
+    return @intCast(written);
 }
