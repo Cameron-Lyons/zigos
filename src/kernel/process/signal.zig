@@ -113,6 +113,7 @@ pub const SignalQueue = struct {
     queue: [32]QueuedSignal,
     head: u8,
     tail: u8,
+    sig_counts: [65]u8,
 
     const QueuedSignal = struct {
         signum: i32,
@@ -126,6 +127,7 @@ pub const SignalQueue = struct {
             .queue = undefined,
             .head = 0,
             .tail = 0,
+            .sig_counts = [_]u8{0} ** 65,
         };
     }
 
@@ -139,6 +141,9 @@ pub const SignalQueue = struct {
                 .info = info.*,
             };
             self.tail = @as(u8, @intCast(next_tail));
+            if (signum >= 0 and signum < 65) {
+                self.sig_counts[@intCast(signum)] += 1;
+            }
         }
     }
 
@@ -148,17 +153,14 @@ pub const SignalQueue = struct {
         const signal = self.queue[self.head];
         self.head = @as(u8, @intCast((self.head + 1) % self.queue.len));
 
-        var has_more = false;
-        var i = self.head;
-        while (i != self.tail) : (i = @as(u8, @intCast((i + 1) % self.queue.len))) {
-            if (self.queue[i].signum == signal.signum) {
-                has_more = true;
-                break;
+        if (signal.signum >= 0 and signal.signum < 65) {
+            const idx: usize = @intCast(signal.signum);
+            if (self.sig_counts[idx] > 0) {
+                self.sig_counts[idx] -= 1;
             }
-        }
-
-        if (!has_more) {
-            self.pending.del(signal.signum);
+            if (self.sig_counts[idx] == 0) {
+                self.pending.del(signal.signum);
+            }
         }
 
         return signal;
