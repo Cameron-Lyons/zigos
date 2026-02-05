@@ -338,11 +338,19 @@ pub const Socket = struct {
             port_lookup[self.local_port % PORT_LOOKUP_SIZE] = null;
         }
 
+        for (&sockets) |*slot| {
+            if (slot.* == self) {
+                slot.* = null;
+                break;
+            }
+        }
+
         memory.kfree(self.recv_buffer.ptr);
         memory.kfree(self.send_buffer.ptr);
         if (self.backlog.len > 0) {
             memory.kfree(@as(*anyopaque, @ptrCast(self.backlog.ptr)));
         }
+        memory.kfree(@as([*]u8, @ptrCast(self)));
     }
 
     pub fn addToRecvBuffer(self: *Socket, data: []const u8) void {
