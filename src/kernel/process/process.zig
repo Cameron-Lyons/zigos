@@ -142,10 +142,6 @@ pub fn setNice(pid: u32, nice_value: i8) bool {
     return setPriority(pid, new_priority);
 }
 
-pub fn getProcess(pid: u32) ?*Process {
-    return getProcessByPid(pid);
-}
-
 pub fn getProcessByPid(pid: u32) ?*Process {
     if (pid == 0) return null;
     const slot = pid % MAX_PROCESSES;
