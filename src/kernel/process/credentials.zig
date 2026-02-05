@@ -104,16 +104,6 @@ pub fn lookupUser(uid: u16) ?*UserEntry {
     return null;
 }
 
-pub fn addUser(name: []const u8, uid: u16, gid: u16) !void {
-    for (user_table) |entry| {
-        if (entry.active and entry.uid == uid) {
-            return error.UserExists;
-        }
-    }
-
-    addUserInternal(name, uid, gid, "/home");
-}
-
 pub fn defaultKernelCredentials() Credentials {
     return Credentials{
         .uid = 0,

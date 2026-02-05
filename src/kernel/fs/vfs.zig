@@ -984,14 +984,6 @@ fn splitPath(path: []const u8) PathParts {
     };
 }
 
-fn getParentPath(path: []const u8) []const u8 {
-    return splitPath(path).parent;
-}
-
-fn getBaseName(path: []const u8) []const u8 {
-    return splitPath(path).name;
-}
-
 fn strlen(str: []const u8) usize {
     var i: usize = 0;
     while (i < str.len and str[i] != 0) : (i += 1) {}
