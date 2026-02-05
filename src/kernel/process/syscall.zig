@@ -4985,7 +4985,14 @@ fn sys_socketpair(domain: i32, sock_type: i32, protocol: i32, sv: usize) i32 {
         }
     }
 
-    if (fd1 == -1 or fd2 == -1) return EMFILE;
+    if (fd1 == -1 or fd2 == -1) {
+        if (fd1 != -1) {
+            const idx: usize = @intCast(fd1 - 1000);
+            unix_sockets[idx].in_use = false;
+            unix_sockets[idx].connected = false;
+        }
+        return EMFILE;
+    }
 
     _ = sock_type;
     const fds = [2]i32{ fd1, fd2 };
