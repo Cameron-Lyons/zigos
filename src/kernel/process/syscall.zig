@@ -95,6 +95,8 @@ pub const SYS_GETSOCKOPT = 78;
 pub const SYS_SETSOCKOPT = 79;
 pub const SYS_READV = 80;
 pub const SYS_WRITEV = 81;
+pub const SYS_GETEUID = 82;
+pub const SYS_GETEGID = 83;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -144,6 +146,7 @@ fn vfsErrno(err: vfs.VFSError) i32 {
         vfs.VFSError.InvalidOperation => EINVAL,
         vfs.VFSError.DeviceError => EINVAL,
         vfs.VFSError.BrokenPipe => EPIPE,
+        vfs.VFSError.TooManyOpenFiles => EMFILE,
     };
 }
 
@@ -253,6 +256,8 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_SETSOCKOPT => sys_setsockopt(@intCast(arg1), @intCast(arg2), @intCast(arg3), arg4, arg5),
         SYS_READV => sys_readv(@intCast(arg1), arg2, @intCast(arg3)),
         SYS_WRITEV => sys_writev(@intCast(arg1), arg2, @intCast(arg3)),
+        SYS_GETEUID => sys_geteuid(),
+        SYS_GETEGID => sys_getegid(),
         else => ENOSYS,
     };
 
@@ -1495,7 +1500,7 @@ fn sys_dup(fd: i32) i32 {
         const result = vfs.dup2(vfs_fd, new_fd) catch continue;
         return @as(i32, @intCast(result)) + FD_OFFSET;
     }
-    return ENOMEM;
+    return EMFILE;
 }
 
 const F_DUPFD = 0;
@@ -1503,6 +1508,7 @@ const F_GETFD = 1;
 const F_SETFD = 2;
 const F_GETFL = 3;
 const F_SETFL = 4;
+const FD_CLOEXEC: u32 = 1;
 
 fn sys_fcntl(fd: i32, cmd: i32, arg: usize) i32 {
     if (fd < FD_OFFSET) return EBADF;
@@ -1516,10 +1522,16 @@ fn sys_fcntl(fd: i32, cmd: i32, arg: usize) i32 {
                 const result = vfs.dup2(vfs_fd, new_fd) catch continue;
                 return @as(i32, @intCast(result)) + FD_OFFSET;
             }
-            return ENOMEM;
+            return EMFILE;
         },
-        F_GETFD => return 0,
-        F_SETFD => return 0,
+        F_GETFD => {
+            const fd_flags = vfs.getFdFlags(vfs_fd) catch return EBADF;
+            return @intCast(fd_flags);
+        },
+        F_SETFD => {
+            vfs.setFdFlags(vfs_fd, @intCast(arg & FD_CLOEXEC)) catch return EBADF;
+            return 0;
+        },
         F_GETFL => {
             const flags = vfs.getFileFlags(vfs_fd) catch return EBADF;
             return @intCast(flags);
@@ -2014,4 +2026,18 @@ fn sys_writev(fd: i32, iov_addr: usize, iovcnt: i32) i32 {
     }
 
     return @intCast(total);
+}
+
+fn sys_geteuid() i32 {
+    if (process.current_process) |proc| {
+        return @intCast(proc.creds.euid);
+    }
+    return 0;
+}
+
+fn sys_getegid() i32 {
+    if (process.current_process) |proc| {
+        return @intCast(proc.creds.egid);
+    }
+    return 0;
 }
