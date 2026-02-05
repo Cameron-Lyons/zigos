@@ -227,6 +227,7 @@ pub const Shell = struct {
             "head", "tail", "wc", "grep", "find", "stat", "uname",
             "whoami", "pwd", "sort", "uniq", "ifconfig", "df",
             "smptest", "fileiotest", "ext2writetest", "tcptest",
+            "true", "false", "test",
         };
 
 
@@ -605,6 +606,12 @@ pub const Shell = struct {
             self.cmdChown(args[1..arg_count]);
         } else if (streq(command, "chgrp")) {
             self.cmdChgrp(args[1..arg_count]);
+        } else if (streq(command, "true")) {
+            self.cmdTrue();
+        } else if (streq(command, "false")) {
+            self.cmdFalse();
+        } else if (streq(command, "test")) {
+            self.cmdTest(args[1..arg_count]);
         } else {
             vga.print("Unknown command: ");
             printString(command);
@@ -2381,6 +2388,102 @@ pub const Shell = struct {
             vga.print("chgrp: operation failed\n");
             return;
         };
+    }
+
+    fn cmdTrue(self: *const Shell) void {
+        _ = self;
+    }
+
+    fn cmdFalse(self: *const Shell) void {
+        _ = self;
+        vga.print("");
+    }
+
+    fn cmdTest(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            vga.print("false\n");
+            return;
+        }
+
+        const arg = sliceFromCStr(args[0]);
+
+        if (args.len == 1) {
+            if (arg.len > 0) {
+                vga.print("true\n");
+            } else {
+                vga.print("false\n");
+            }
+            return;
+        }
+
+        if (args.len == 2) {
+            const op = sliceFromCStr(args[0]);
+            const operand = sliceFromCStr(args[1]);
+
+            if (strEqlSlice(op, "-n")) {
+                if (operand.len > 0) {
+                    vga.print("true\n");
+                } else {
+                    vga.print("false\n");
+                }
+                return;
+            } else if (strEqlSlice(op, "-z")) {
+                if (operand.len == 0) {
+                    vga.print("true\n");
+                } else {
+                    vga.print("false\n");
+                }
+                return;
+            } else if (strEqlSlice(op, "-e") or strEqlSlice(op, "-f") or strEqlSlice(op, "-d")) {
+                if (vfs.lookupPath(operand)) |vnode| {
+                    if (strEqlSlice(op, "-d")) {
+                        if (vnode.file_type == .Directory) {
+                            vga.print("true\n");
+                        } else {
+                            vga.print("false\n");
+                        }
+                    } else {
+                        vga.print("true\n");
+                    }
+                } else |_| {
+                    vga.print("false\n");
+                }
+                return;
+            }
+        }
+
+        if (args.len == 3) {
+            const left = sliceFromCStr(args[0]);
+            const op = sliceFromCStr(args[1]);
+            const right = sliceFromCStr(args[2]);
+
+            if (strEqlSlice(op, "=") or strEqlSlice(op, "==")) {
+                if (strEqlSlice(left, right)) {
+                    vga.print("true\n");
+                } else {
+                    vga.print("false\n");
+                }
+                return;
+            } else if (strEqlSlice(op, "!=")) {
+                if (!strEqlSlice(left, right)) {
+                    vga.print("true\n");
+                } else {
+                    vga.print("false\n");
+                }
+                return;
+            }
+        }
+
+        vga.print("test: invalid expression\n");
+    }
+
+    fn strEqlSlice(a: []const u8, b: []const u8) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |ac, bc| {
+            if (ac != bc) return false;
+        }
+        return true;
     }
 
     fn cmdSort(self: *const Shell, args: []const [*:0]const u8) void {

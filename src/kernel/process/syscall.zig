@@ -127,7 +127,14 @@ pub const EPIPE = -32;
 pub const ENAMETOOLONG = -36;
 pub const ENOSYS = -38;
 pub const EOVERFLOW = -75;
+pub const ENODEV = -19;
+pub const EOPNOTSUPP = -95;
+pub const EAFNOSUPPORT = -97;
 pub const EADDRINUSE = -98;
+pub const EADDRNOTAVAIL = -99;
+pub const ENETDOWN = -100;
+pub const ENETUNREACH = -101;
+pub const ECONNABORTED = -103;
 pub const ECONNRESET = -104;
 pub const ENOBUFS = -105;
 pub const EISCONN = -106;
@@ -679,7 +686,7 @@ fn sys_socket(domain: u32, sock_type: u32, protocol: u32) i32 {
     }
 
     sock.close();
-    return ENOMEM;
+    return EMFILE;
 }
 
 fn sys_bind(sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
@@ -753,7 +760,7 @@ fn sys_accept(sockfd: i32) i32 {
     }
 
     client.close();
-    return ENOMEM;
+    return EMFILE;
 }
 
 fn sys_send(sockfd: i32, buf: [*]const u8, len: usize) i32 {
