@@ -179,6 +179,22 @@ pub const SYS_GETRLIMIT = 162;
 pub const SYS_SETRLIMIT = 163;
 pub const SYS_PRLIMIT64 = 164;
 pub const SYS_MPROTECT = 165;
+pub const SYS_SOCKETPAIR = 166;
+pub const SYS_SYSINFO = 167;
+pub const SYS_CLOCK_SETTIME = 168;
+pub const SYS_CLOCK_GETRES = 169;
+pub const SYS_CLOCK_NANOSLEEP = 170;
+pub const SYS_TIMER_CREATE = 171;
+pub const SYS_TIMER_DELETE = 172;
+pub const SYS_TIMER_SETTIME = 173;
+pub const SYS_TIMER_GETTIME = 174;
+pub const SYS_TIMER_GETOVERRUN = 175;
+pub const SYS_CHROOT = 176;
+pub const SYS_MOUNT = 177;
+pub const SYS_UMOUNT2 = 178;
+pub const SYS_SWAPON = 179;
+pub const SYS_SWAPOFF = 180;
+pub const SYS_REBOOT = 181;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -408,6 +424,24 @@ pub const PROT_READ: u32 = 0x1;
 pub const PROT_WRITE: u32 = 0x2;
 pub const PROT_EXEC: u32 = 0x4;
 
+pub const CLOCK_MONOTONIC_RAW: u32 = 4;
+pub const CLOCK_REALTIME_COARSE: u32 = 5;
+pub const CLOCK_MONOTONIC_COARSE: u32 = 6;
+pub const CLOCK_BOOTTIME: u32 = 7;
+
+pub const TIMER_ABSTIME: u32 = 1;
+
+pub const MNT_FORCE: u32 = 1;
+pub const MNT_DETACH: u32 = 2;
+pub const MNT_EXPIRE: u32 = 4;
+pub const UMOUNT_NOFOLLOW: u32 = 8;
+
+pub const LINUX_REBOOT_MAGIC1: u32 = 0xfee1dead;
+pub const LINUX_REBOOT_MAGIC2: u32 = 0x28121969;
+pub const LINUX_REBOOT_CMD_RESTART: u32 = 0x01234567;
+pub const LINUX_REBOOT_CMD_HALT: u32 = 0xcdef0123;
+pub const LINUX_REBOOT_CMD_POWER_OFF: u32 = 0x4321fedc;
+
 fn vfsErrno(err: vfs.VFSError) i32 {
     return switch (err) {
         vfs.VFSError.NotFound => ENOENT,
@@ -616,6 +650,22 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_SETRLIMIT => sys_setrlimit(@intCast(arg1), arg2),
         SYS_PRLIMIT64 => sys_prlimit64(@intCast(arg1), @intCast(arg2), arg3, arg4),
         SYS_MPROTECT => sys_mprotect(arg1, arg2, @intCast(arg3)),
+        SYS_SOCKETPAIR => sys_socketpair(@intCast(arg1), @intCast(arg2), @intCast(arg3), arg4),
+        SYS_SYSINFO => sys_sysinfo(arg1),
+        SYS_CLOCK_SETTIME => sys_clock_settime(@intCast(arg1), arg2),
+        SYS_CLOCK_GETRES => sys_clock_getres(@intCast(arg1), arg2),
+        SYS_CLOCK_NANOSLEEP => sys_clock_nanosleep(@intCast(arg1), @intCast(arg2), arg3, arg4),
+        SYS_TIMER_CREATE => sys_timer_create(@intCast(arg1), arg2, arg3),
+        SYS_TIMER_DELETE => sys_timer_delete(@intCast(arg1)),
+        SYS_TIMER_SETTIME => sys_timer_settime(@intCast(arg1), @intCast(arg2), arg3, arg4),
+        SYS_TIMER_GETTIME => sys_timer_gettime(@intCast(arg1), arg2),
+        SYS_TIMER_GETOVERRUN => sys_timer_getoverrun(@intCast(arg1)),
+        SYS_CHROOT => sys_chroot(@as([*]const u8, @ptrFromInt(arg1))),
+        SYS_MOUNT => sys_mount(arg1, arg2, arg3, arg4, arg5),
+        SYS_UMOUNT2 => sys_umount2(@as([*]const u8, @ptrFromInt(arg1)), @intCast(arg2)),
+        SYS_SWAPON => sys_swapon(@as([*]const u8, @ptrFromInt(arg1)), @intCast(arg2)),
+        SYS_SWAPOFF => sys_swapoff(@as([*]const u8, @ptrFromInt(arg1))),
+        SYS_REBOOT => sys_reboot(@intCast(arg1), @intCast(arg2), @intCast(arg3), arg4),
         else => ENOSYS,
     };
 
@@ -4831,4 +4881,271 @@ fn sys_mprotect(addr: usize, len: usize, prot: u32) i32 {
     _ = len;
     _ = prot;
     return 0;
+}
+
+fn sys_socketpair(domain: i32, sock_type: i32, protocol: i32, sv: usize) i32 {
+    _ = protocol;
+
+    if (!protection.verifyUserPointer(sv, @sizeOf([2]i32))) return EFAULT;
+
+    if (domain != 1) return EAFNOSUPPORT;
+
+    var fd1: i32 = -1;
+    var fd2: i32 = -1;
+
+    for (&unix_sockets, 0..) |*usock, i| {
+        if (!usock.in_use) {
+            if (fd1 == -1) {
+                usock.in_use = true;
+                usock.connected = true;
+                fd1 = @intCast(@as(i32, @intCast(i)) + 1000);
+            } else {
+                usock.in_use = true;
+                usock.connected = true;
+                fd2 = @intCast(@as(i32, @intCast(i)) + 1000);
+
+                const idx1: usize = @intCast(fd1 - 1000);
+                unix_sockets[idx1].peer = usock;
+                usock.peer = &unix_sockets[idx1];
+                break;
+            }
+        }
+    }
+
+    if (fd1 == -1 or fd2 == -1) return EMFILE;
+
+    _ = sock_type;
+    const fds = [2]i32{ fd1, fd2 };
+    protection.copyToUser(sv, std.mem.asBytes(&fds)) catch return EFAULT;
+    return 0;
+}
+
+const Sysinfo = extern struct {
+    uptime: i32,
+    loads: [3]u32,
+    totalram: u32,
+    freeram: u32,
+    sharedram: u32,
+    bufferram: u32,
+    totalswap: u32,
+    freeswap: u32,
+    procs: u16,
+    pad: u16,
+    totalhigh: u32,
+    freehigh: u32,
+    mem_unit: u32,
+    _padding: [8]u8,
+};
+
+fn sys_sysinfo(info_ptr: usize) i32 {
+    if (!protection.verifyUserPointer(info_ptr, @sizeOf(Sysinfo))) return EFAULT;
+
+    const timer = @import("../timer/timer.zig");
+    const ticks = timer.getTicks();
+
+    const info = Sysinfo{
+        .uptime = @intCast(ticks / 100),
+        .loads = [3]u32{ 0, 0, 0 },
+        .totalram = 16 * 1024 * 1024,
+        .freeram = 8 * 1024 * 1024,
+        .sharedram = 0,
+        .bufferram = 0,
+        .totalswap = 0,
+        .freeswap = 0,
+        .procs = 1,
+        .pad = 0,
+        .totalhigh = 0,
+        .freehigh = 0,
+        .mem_unit = 1,
+        ._padding = [_]u8{0} ** 8,
+    };
+
+    protection.copyToUser(info_ptr, std.mem.asBytes(&info)) catch return EFAULT;
+    return 0;
+}
+
+fn sys_clock_settime(clock_id: u32, tp: usize) i32 {
+    _ = clock_id;
+    if (!protection.verifyUserPointer(tp, @sizeOf(Timespec))) return EFAULT;
+    return EPERM;
+}
+
+fn sys_clock_getres(clock_id: u32, res: usize) i32 {
+    if (res == 0) return 0;
+    if (!protection.verifyUserPointer(res, @sizeOf(Timespec))) return EFAULT;
+
+    _ = clock_id;
+
+    const resolution = Timespec{
+        .tv_sec = 0,
+        .tv_nsec = 10000000,
+    };
+
+    protection.copyToUser(res, std.mem.asBytes(&resolution)) catch return EFAULT;
+    return 0;
+}
+
+fn sys_clock_nanosleep(clock_id: u32, flags: u32, request: usize, remain: usize) i32 {
+    _ = clock_id;
+    _ = flags;
+    _ = remain;
+
+    if (!protection.verifyUserPointer(request, @sizeOf(Timespec))) return EFAULT;
+
+    var req: Timespec = undefined;
+    protection.copyFromUser(std.mem.asBytes(&req), request) catch return EFAULT;
+
+    const timer = @import("../timer/timer.zig");
+    const ticks_to_sleep: u64 = @intCast(@max(0, req.tv_sec) * 100 + @divTrunc(@max(0, req.tv_nsec), 10000000));
+    const start_ticks = timer.getTicks();
+
+    while (timer.getTicks() - start_ticks < ticks_to_sleep) {
+        x86.hlt();
+    }
+
+    return 0;
+}
+
+const PosixTimer = struct {
+    clock_id: u32,
+    interval: ItimerSpec,
+    in_use: bool,
+};
+
+var posix_timers: [32]PosixTimer = [_]PosixTimer{.{
+    .clock_id = 0,
+    .interval = .{
+        .it_interval_sec = 0,
+        .it_interval_nsec = 0,
+        .it_value_sec = 0,
+        .it_value_nsec = 0,
+    },
+    .in_use = false,
+}} ** 32;
+
+fn sys_timer_create(clock_id: u32, sevp: usize, timerid: usize) i32 {
+    _ = sevp;
+
+    if (!protection.verifyUserPointer(timerid, @sizeOf(i32))) return EFAULT;
+
+    for (&posix_timers, 0..) |*timer, i| {
+        if (!timer.in_use) {
+            timer.in_use = true;
+            timer.clock_id = clock_id;
+            const id: i32 = @intCast(i);
+            protection.copyToUser(timerid, std.mem.asBytes(&id)) catch return EFAULT;
+            return 0;
+        }
+    }
+    return EAGAIN;
+}
+
+fn sys_timer_delete(timerid: i32) i32 {
+    if (timerid < 0 or timerid >= 32) return EINVAL;
+    const idx: usize = @intCast(timerid);
+    if (!posix_timers[idx].in_use) return EINVAL;
+    posix_timers[idx].in_use = false;
+    return 0;
+}
+
+fn sys_timer_settime(timerid: i32, flags: u32, new_value: usize, old_value: usize) i32 {
+    _ = flags;
+
+    if (timerid < 0 or timerid >= 32) return EINVAL;
+    const idx: usize = @intCast(timerid);
+    if (!posix_timers[idx].in_use) return EINVAL;
+
+    if (!protection.verifyUserPointer(new_value, @sizeOf(ItimerSpec))) return EFAULT;
+
+    if (old_value != 0) {
+        if (!protection.verifyUserPointer(old_value, @sizeOf(ItimerSpec))) return EFAULT;
+        protection.copyToUser(old_value, std.mem.asBytes(&posix_timers[idx].interval)) catch return EFAULT;
+    }
+
+    var new_interval: ItimerSpec = undefined;
+    protection.copyFromUser(std.mem.asBytes(&new_interval), new_value) catch return EFAULT;
+    posix_timers[idx].interval = new_interval;
+
+    return 0;
+}
+
+fn sys_timer_gettime(timerid: i32, curr_value: usize) i32 {
+    if (timerid < 0 or timerid >= 32) return EINVAL;
+    const idx: usize = @intCast(timerid);
+    if (!posix_timers[idx].in_use) return EINVAL;
+
+    if (!protection.verifyUserPointer(curr_value, @sizeOf(ItimerSpec))) return EFAULT;
+
+    protection.copyToUser(curr_value, std.mem.asBytes(&posix_timers[idx].interval)) catch return EFAULT;
+    return 0;
+}
+
+fn sys_timer_getoverrun(timerid: i32) i32 {
+    if (timerid < 0 or timerid >= 32) return EINVAL;
+    const idx: usize = @intCast(timerid);
+    if (!posix_timers[idx].in_use) return EINVAL;
+    return 0;
+}
+
+var chroot_path: [256]u8 = [_]u8{0} ** 256;
+var chroot_len: usize = 0;
+
+fn sys_chroot(path: [*]const u8) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(path), 256)) return EFAULT;
+
+    var path_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(path)) catch return EFAULT;
+
+    const vnode = vfs.lookupPath(path_slice) catch |err| return vfsErrno(err);
+    if (vnode.file_type != .Directory) return ENOTDIR;
+
+    @memset(&chroot_path, 0);
+    @memcpy(chroot_path[0..path_slice.len], path_slice);
+    chroot_len = path_slice.len;
+
+    return 0;
+}
+
+fn sys_mount(source: usize, target: usize, fstype: usize, mountflags: usize, data: usize) i32 {
+    _ = source;
+    _ = target;
+    _ = fstype;
+    _ = mountflags;
+    _ = data;
+    return EPERM;
+}
+
+fn sys_umount2(target: [*]const u8, flags: u32) i32 {
+    _ = target;
+    _ = flags;
+    return EPERM;
+}
+
+fn sys_swapon(path: [*]const u8, swapflags: u32) i32 {
+    _ = path;
+    _ = swapflags;
+    return EPERM;
+}
+
+fn sys_swapoff(path: [*]const u8) i32 {
+    _ = path;
+    return EPERM;
+}
+
+fn sys_reboot(magic1: u32, magic2: u32, cmd: u32, arg: usize) i32 {
+    _ = arg;
+
+    if (magic1 != LINUX_REBOOT_MAGIC1) return EINVAL;
+    if (magic2 != LINUX_REBOOT_MAGIC2 and magic2 != 0x85072010 and magic2 != 0x5121996 and magic2 != 0x16041998) return EINVAL;
+
+    switch (cmd) {
+        LINUX_REBOOT_CMD_RESTART, LINUX_REBOOT_CMD_HALT, LINUX_REBOOT_CMD_POWER_OFF => {
+            vga.print("\nSystem halting...\n");
+            x86.hlt();
+            while (true) {
+                x86.hlt();
+            }
+        },
+        else => return EINVAL,
+    }
 }
