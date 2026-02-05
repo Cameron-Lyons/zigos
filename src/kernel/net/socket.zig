@@ -326,6 +326,7 @@ pub const Socket = struct {
 
         self.state = .CLOSED;
         self.in_use = false;
+        socket_id_lookup[self.id % MAX_SOCKETS] = null;
 
         memory.kfree(self.recv_buffer.ptr);
         memory.kfree(self.send_buffer.ptr);
@@ -355,6 +356,7 @@ pub const Socket = struct {
 };
 
 var sockets: [MAX_SOCKETS]?*Socket = [_]?*Socket{null} ** MAX_SOCKETS;
+var socket_id_lookup: [MAX_SOCKETS]?*Socket = [_]?*Socket{null} ** MAX_SOCKETS;
 var next_socket_id: u32 = 1;
 var next_ephemeral_port: u16 = 49152;
 
@@ -390,6 +392,7 @@ pub fn createSocket(socket_type: SocketType, protocol: Protocol) !*Socket {
     for (&sockets) |*slot| {
         if (slot.* == null) {
             slot.* = sock;
+            socket_id_lookup[sock.id % MAX_SOCKETS] = sock;
             return sock;
         }
     }
@@ -398,11 +401,10 @@ pub fn createSocket(socket_type: SocketType, protocol: Protocol) !*Socket {
 }
 
 pub fn findSocket(id: u32) ?*Socket {
-    for (sockets) |maybe_sock| {
-        if (maybe_sock) |sock| {
-            if (sock.id == id and sock.in_use) {
-                return sock;
-            }
+    const slot = id % MAX_SOCKETS;
+    if (socket_id_lookup[slot]) |sock| {
+        if (sock.id == id and sock.in_use) {
+            return sock;
         }
     }
     return null;
