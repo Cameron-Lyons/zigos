@@ -143,6 +143,17 @@ pub const SYS_PPOLL = 126;
 pub const SYS_PSELECT6 = 127;
 pub const SYS_FACCESSAT = 128;
 pub const SYS_FACCESSAT2 = 129;
+pub const SYS_STATX = 130;
+pub const SYS_MEMBARRIER = 131;
+pub const SYS_COPY_FILE_RANGE = 132;
+pub const SYS_FADVISE64 = 133;
+pub const SYS_READAHEAD = 134;
+pub const SYS_SYNC_FILE_RANGE = 135;
+pub const SYS_SYNCFS = 136;
+pub const SYS_GETPRIORITY = 137;
+pub const SYS_SETPRIORITY = 138;
+pub const SYS_SCHED_GETAFFINITY = 139;
+pub const SYS_SCHED_SETAFFINITY = 140;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -281,6 +292,41 @@ pub const SFD_NONBLOCK: u32 = 0x800;
 
 pub const AT_EACCESS: u32 = 0x200;
 pub const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+
+pub const STATX_TYPE: u32 = 0x0001;
+pub const STATX_MODE: u32 = 0x0002;
+pub const STATX_NLINK: u32 = 0x0004;
+pub const STATX_UID: u32 = 0x0008;
+pub const STATX_GID: u32 = 0x0010;
+pub const STATX_ATIME: u32 = 0x0020;
+pub const STATX_MTIME: u32 = 0x0040;
+pub const STATX_CTIME: u32 = 0x0080;
+pub const STATX_INO: u32 = 0x0100;
+pub const STATX_SIZE: u32 = 0x0200;
+pub const STATX_BLOCKS: u32 = 0x0400;
+pub const STATX_BASIC_STATS: u32 = 0x07ff;
+
+pub const MEMBARRIER_CMD_QUERY: u32 = 0;
+pub const MEMBARRIER_CMD_GLOBAL: u32 = 1;
+pub const MEMBARRIER_CMD_GLOBAL_EXPEDITED: u32 = 2;
+pub const MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED: u32 = 4;
+pub const MEMBARRIER_CMD_PRIVATE_EXPEDITED: u32 = 8;
+pub const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: u32 = 16;
+
+pub const POSIX_FADV_NORMAL: u32 = 0;
+pub const POSIX_FADV_RANDOM: u32 = 1;
+pub const POSIX_FADV_SEQUENTIAL: u32 = 2;
+pub const POSIX_FADV_WILLNEED: u32 = 3;
+pub const POSIX_FADV_DONTNEED: u32 = 4;
+pub const POSIX_FADV_NOREUSE: u32 = 5;
+
+pub const SYNC_FILE_RANGE_WAIT_BEFORE: u32 = 1;
+pub const SYNC_FILE_RANGE_WRITE: u32 = 2;
+pub const SYNC_FILE_RANGE_WAIT_AFTER: u32 = 4;
+
+pub const PRIO_PROCESS: u32 = 0;
+pub const PRIO_PGRP: u32 = 1;
+pub const PRIO_USER: u32 = 2;
 
 fn vfsErrno(err: vfs.VFSError) i32 {
     return switch (err) {
@@ -454,6 +500,17 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_PSELECT6 => sys_pselect6(@intCast(arg1), arg2, arg3, arg4, arg5, @as(usize, @bitCast(@as(i32, @intCast(regs.ebp))))),
         SYS_FACCESSAT => sys_faccessat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), 0),
         SYS_FACCESSAT2 => sys_faccessat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), @intCast(arg4)),
+        SYS_STATX => sys_statx(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), @intCast(arg4), arg5),
+        SYS_MEMBARRIER => sys_membarrier(@intCast(arg1), @intCast(arg2)),
+        SYS_COPY_FILE_RANGE => sys_copy_file_range(@intCast(arg1), arg2, @intCast(arg3), arg4, arg5),
+        SYS_FADVISE64 => sys_fadvise64(@intCast(arg1), @as(i64, @bitCast(@as(u64, arg2) | (@as(u64, arg3) << 32))), arg4, @intCast(arg5)),
+        SYS_READAHEAD => sys_readahead(@intCast(arg1), @as(i64, @bitCast(@as(u64, arg2) | (@as(u64, arg3) << 32))), arg4),
+        SYS_SYNC_FILE_RANGE => sys_sync_file_range(@intCast(arg1), @as(i64, @bitCast(@as(u64, arg2) | (@as(u64, arg3) << 32))), @as(i64, @bitCast(@as(u64, arg4) | (@as(u64, arg5) << 32))), @intCast(@as(i32, @bitCast(regs.ebp)))),
+        SYS_SYNCFS => sys_syncfs(@intCast(arg1)),
+        SYS_GETPRIORITY => sys_getpriority(@intCast(arg1), @intCast(arg2)),
+        SYS_SETPRIORITY => sys_setpriority(@intCast(arg1), @intCast(arg2), @intCast(arg3)),
+        SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(@intCast(arg1), arg2, arg3),
+        SYS_SCHED_SETAFFINITY => sys_sched_setaffinity(@intCast(arg1), arg2, arg3),
         else => ENOSYS,
     };
 
@@ -3962,5 +4019,285 @@ fn sys_faccessat(dirfd: i32, pathname: [*]const u8, mode: u32, flags: u32) i32 {
     _ = vnode;
     _ = mode;
 
+    return 0;
+}
+
+const StatxTimestamp = extern struct {
+    tv_sec: i64,
+    tv_nsec: u32,
+    __reserved: i32,
+};
+
+const Statx = extern struct {
+    stx_mask: u32,
+    stx_blksize: u32,
+    stx_attributes: u64,
+    stx_nlink: u32,
+    stx_uid: u32,
+    stx_gid: u32,
+    stx_mode: u16,
+    __spare0: u16,
+    stx_ino: u64,
+    stx_size: u64,
+    stx_blocks: u64,
+    stx_attributes_mask: u64,
+    stx_atime: StatxTimestamp,
+    stx_btime: StatxTimestamp,
+    stx_ctime: StatxTimestamp,
+    stx_mtime: StatxTimestamp,
+    stx_rdev_major: u32,
+    stx_rdev_minor: u32,
+    stx_dev_major: u32,
+    stx_dev_minor: u32,
+    stx_mnt_id: u64,
+    __spare2: u64,
+    __spare3: [12]u64,
+};
+
+fn sys_statx(dirfd: i32, pathname: [*]const u8, flags: u32, mask: u32, statxbuf: usize) i32 {
+    _ = flags;
+    _ = mask;
+
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EFAULT;
+    if (!protection.verifyUserPointer(statxbuf, @sizeOf(Statx))) return EFAULT;
+
+    var path_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EFAULT;
+
+    var full_path_buf: [512]u8 = undefined;
+    const full_path = if (path_slice.len > 0 and path_slice[0] == '/') blk: {
+        break :blk path_slice;
+    } else blk: {
+        if (dirfd == AT_FDCWD) {
+            ensureCwdInit();
+            const cwd = current_working_dir[0..cwd_len];
+            const cwdlen = cwd.len;
+            @memcpy(full_path_buf[0..cwdlen], cwd);
+            if (cwdlen > 0 and cwd[cwdlen - 1] != '/') {
+                full_path_buf[cwdlen] = '/';
+                @memcpy(full_path_buf[cwdlen + 1 .. cwdlen + 1 + path_slice.len], path_slice);
+                break :blk full_path_buf[0 .. cwdlen + 1 + path_slice.len];
+            } else {
+                @memcpy(full_path_buf[cwdlen .. cwdlen + path_slice.len], path_slice);
+                break :blk full_path_buf[0 .. cwdlen + path_slice.len];
+            }
+        }
+        return EBADF;
+    };
+
+    const vnode = vfs.lookupPath(full_path) catch |err| return vfsErrno(err);
+
+    var stat_buf: vfs.FileStat = undefined;
+    vnode.ops.stat(vnode, &stat_buf) catch |err| return vfsErrno(err);
+
+    const mode_bits: u16 = @as(u16, if (stat_buf.mode.owner_read) 0o400 else 0) |
+        @as(u16, if (stat_buf.mode.owner_write) 0o200 else 0) |
+        @as(u16, if (stat_buf.mode.owner_exec) 0o100 else 0) |
+        @as(u16, if (stat_buf.mode.group_read) 0o040 else 0) |
+        @as(u16, if (stat_buf.mode.group_write) 0o020 else 0) |
+        @as(u16, if (stat_buf.mode.group_exec) 0o010 else 0) |
+        @as(u16, if (stat_buf.mode.other_read) 0o004 else 0) |
+        @as(u16, if (stat_buf.mode.other_write) 0o002 else 0) |
+        @as(u16, if (stat_buf.mode.other_exec) 0o001 else 0);
+
+    const type_bits: u16 = switch (stat_buf.file_type) {
+        .Regular => 0o100000,
+        .Directory => 0o040000,
+        .SymLink => 0o120000,
+        .CharDevice => 0o020000,
+        .BlockDevice => 0o060000,
+        .Pipe => 0o010000,
+        .Socket => 0o140000,
+    };
+
+    var result = Statx{
+        .stx_mask = STATX_BASIC_STATS,
+        .stx_blksize = stat_buf.block_size,
+        .stx_attributes = 0,
+        .stx_nlink = 1,
+        .stx_uid = stat_buf.uid,
+        .stx_gid = stat_buf.gid,
+        .stx_mode = mode_bits | type_bits,
+        .__spare0 = 0,
+        .stx_ino = stat_buf.inode,
+        .stx_size = stat_buf.size,
+        .stx_blocks = stat_buf.blocks,
+        .stx_attributes_mask = 0,
+        .stx_atime = .{ .tv_sec = @intCast(stat_buf.atime), .tv_nsec = 0, .__reserved = 0 },
+        .stx_btime = .{ .tv_sec = 0, .tv_nsec = 0, .__reserved = 0 },
+        .stx_ctime = .{ .tv_sec = @intCast(stat_buf.ctime), .tv_nsec = 0, .__reserved = 0 },
+        .stx_mtime = .{ .tv_sec = @intCast(stat_buf.mtime), .tv_nsec = 0, .__reserved = 0 },
+        .stx_rdev_major = 0,
+        .stx_rdev_minor = 0,
+        .stx_dev_major = 0,
+        .stx_dev_minor = 0,
+        .stx_mnt_id = 0,
+        .__spare2 = 0,
+        .__spare3 = [_]u64{0} ** 12,
+    };
+
+    protection.copyToUser(statxbuf, std.mem.asBytes(&result)) catch return EFAULT;
+    return 0;
+}
+
+fn sys_membarrier(cmd: u32, flags: u32) i32 {
+    _ = flags;
+
+    switch (cmd) {
+        MEMBARRIER_CMD_QUERY => {
+            return @intCast(MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_GLOBAL_EXPEDITED | MEMBARRIER_CMD_PRIVATE_EXPEDITED);
+        },
+        MEMBARRIER_CMD_GLOBAL, MEMBARRIER_CMD_GLOBAL_EXPEDITED, MEMBARRIER_CMD_PRIVATE_EXPEDITED => {
+            return 0;
+        },
+        MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED => {
+            return 0;
+        },
+        else => return EINVAL,
+    }
+}
+
+fn sys_copy_file_range(fd_in: i32, off_in_ptr: usize, fd_out: i32, off_out_ptr: usize, len: usize) i32 {
+    if (fd_in < FD_OFFSET or fd_out < FD_OFFSET) return EBADF;
+
+    const vfs_fd_in: u32 = @intCast(fd_in - FD_OFFSET);
+    const vfs_fd_out: u32 = @intCast(fd_out - FD_OFFSET);
+
+    var off_in: i64 = -1;
+    var off_out: i64 = -1;
+
+    if (off_in_ptr != 0) {
+        if (!protection.verifyUserPointer(off_in_ptr, @sizeOf(i64))) return EFAULT;
+        protection.copyFromUser(std.mem.asBytes(&off_in), off_in_ptr) catch return EFAULT;
+    }
+
+    if (off_out_ptr != 0) {
+        if (!protection.verifyUserPointer(off_out_ptr, @sizeOf(i64))) return EFAULT;
+        protection.copyFromUser(std.mem.asBytes(&off_out), off_out_ptr) catch return EFAULT;
+    }
+
+    var buffer: [512]u8 = undefined;
+    var total_copied: usize = 0;
+    var remaining = len;
+
+    while (remaining > 0) {
+        const chunk = @min(remaining, buffer.len);
+
+        const bytes_read = if (off_in >= 0) blk: {
+            const r = vfs.pread(vfs_fd_in, buffer[0..chunk], @intCast(off_in)) catch |err| return vfsErrno(err);
+            off_in += @intCast(r);
+            break :blk r;
+        } else blk: {
+            break :blk vfs.read(vfs_fd_in, buffer[0..chunk]) catch |err| return vfsErrno(err);
+        };
+
+        if (bytes_read == 0) break;
+
+        const bytes_written = if (off_out >= 0) blk: {
+            const w = vfs.pwrite(vfs_fd_out, buffer[0..bytes_read], @intCast(off_out)) catch |err| return vfsErrno(err);
+            off_out += @intCast(w);
+            break :blk w;
+        } else blk: {
+            break :blk vfs.write(vfs_fd_out, buffer[0..bytes_read]) catch |err| return vfsErrno(err);
+        };
+
+        total_copied += bytes_written;
+        remaining -= bytes_written;
+
+        if (bytes_written < bytes_read) break;
+    }
+
+    if (off_in_ptr != 0) {
+        protection.copyToUser(off_in_ptr, std.mem.asBytes(&off_in)) catch return EFAULT;
+    }
+    if (off_out_ptr != 0) {
+        protection.copyToUser(off_out_ptr, std.mem.asBytes(&off_out)) catch return EFAULT;
+    }
+
+    return @intCast(total_copied);
+}
+
+fn sys_fadvise64(fd: i32, offset: i64, len: usize, advice: u32) i32 {
+    if (fd < FD_OFFSET) return EBADF;
+    _ = offset;
+    _ = len;
+    _ = advice;
+    return 0;
+}
+
+fn sys_readahead(fd: i32, offset: i64, count: usize) i32 {
+    if (fd < FD_OFFSET) return EBADF;
+    _ = offset;
+    _ = count;
+    return 0;
+}
+
+fn sys_sync_file_range(fd: i32, offset: i64, nbytes: i64, flags: u32) i32 {
+    if (fd < FD_OFFSET) return EBADF;
+    _ = offset;
+    _ = nbytes;
+    _ = flags;
+    return 0;
+}
+
+fn sys_syncfs(fd: i32) i32 {
+    if (fd < FD_OFFSET) return EBADF;
+    return 0;
+}
+
+var process_priorities: [256]i32 = [_]i32{0} ** 256;
+
+fn sys_getpriority(which: u32, who: i32) i32 {
+    switch (which) {
+        PRIO_PROCESS => {
+            const pid: usize = if (who == 0) blk: {
+                const proc = process.current_process orelse return ESRCH;
+                break :blk @intCast(proc.pid);
+            } else @intCast(who);
+            if (pid >= 256) return ESRCH;
+            return 20 - process_priorities[pid];
+        },
+        PRIO_PGRP, PRIO_USER => {
+            return 20;
+        },
+        else => return EINVAL,
+    }
+}
+
+fn sys_setpriority(which: u32, who: i32, prio: i32) i32 {
+    const nice = @max(-20, @min(19, prio));
+
+    switch (which) {
+        PRIO_PROCESS => {
+            const pid: usize = if (who == 0) blk: {
+                const proc = process.current_process orelse return ESRCH;
+                break :blk @intCast(proc.pid);
+            } else @intCast(who);
+            if (pid >= 256) return ESRCH;
+            process_priorities[pid] = nice;
+            return 0;
+        },
+        PRIO_PGRP, PRIO_USER => {
+            return 0;
+        },
+        else => return EINVAL,
+    }
+}
+
+fn sys_sched_getaffinity(pid: i32, cpusetsize: usize, mask_ptr: usize) i32 {
+    _ = pid;
+    if (!protection.verifyUserPointer(mask_ptr, cpusetsize)) return EFAULT;
+
+    var mask: [128]u8 = [_]u8{0} ** 128;
+    mask[0] = 1;
+
+    const copy_size = @min(cpusetsize, 128);
+    protection.copyToUser(mask_ptr, mask[0..copy_size]) catch return EFAULT;
+    return @intCast(copy_size);
+}
+
+fn sys_sched_setaffinity(pid: i32, cpusetsize: usize, mask_ptr: usize) i32 {
+    _ = pid;
+    if (!protection.verifyUserPointer(mask_ptr, cpusetsize)) return EFAULT;
     return 0;
 }
