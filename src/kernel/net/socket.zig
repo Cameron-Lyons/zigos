@@ -9,6 +9,7 @@ const process = @import("../process/process.zig");
 pub const AddressFamily = enum {
     AF_INET,
     AF_INET6,
+    AF_UNIX,
 };
 
 pub const SocketType = enum {
@@ -22,6 +23,8 @@ pub const Protocol = enum {
     UDP,
     ICMP,
     RAW,
+    UNIX_STREAM,
+    UNIX_DGRAM,
 };
 
 pub const SocketState = enum {
