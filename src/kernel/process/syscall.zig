@@ -165,6 +165,20 @@ pub const SYS_GET_ROBUST_LIST = 148;
 pub const SYS_SET_ROBUST_LIST = 149;
 pub const SYS_TGKILL = 150;
 pub const SYS_TKILL = 151;
+pub const SYS_INOTIFY_INIT = 152;
+pub const SYS_INOTIFY_INIT1 = 153;
+pub const SYS_INOTIFY_ADD_WATCH = 154;
+pub const SYS_INOTIFY_RM_WATCH = 155;
+pub const SYS_MLOCK = 156;
+pub const SYS_MUNLOCK = 157;
+pub const SYS_MLOCKALL = 158;
+pub const SYS_MUNLOCKALL = 159;
+pub const SYS_MADVISE = 160;
+pub const SYS_MINCORE = 161;
+pub const SYS_GETRLIMIT = 162;
+pub const SYS_SETRLIMIT = 163;
+pub const SYS_PRLIMIT64 = 164;
+pub const SYS_MPROTECT = 165;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -352,6 +366,47 @@ pub const WCONTINUED: u32 = 0x08;
 pub const WNOWAIT: u32 = 0x01000000;
 
 pub const ECHILD = -10;
+
+pub const IN_ACCESS: u32 = 0x00000001;
+pub const IN_MODIFY: u32 = 0x00000002;
+pub const IN_ATTRIB: u32 = 0x00000004;
+pub const IN_CLOSE_WRITE: u32 = 0x00000008;
+pub const IN_CLOSE_NOWRITE: u32 = 0x00000010;
+pub const IN_OPEN: u32 = 0x00000020;
+pub const IN_MOVED_FROM: u32 = 0x00000040;
+pub const IN_MOVED_TO: u32 = 0x00000080;
+pub const IN_CREATE: u32 = 0x00000100;
+pub const IN_DELETE: u32 = 0x00000200;
+pub const IN_DELETE_SELF: u32 = 0x00000400;
+pub const IN_MOVE_SELF: u32 = 0x00000800;
+pub const IN_NONBLOCK: u32 = 0x00000800;
+pub const IN_CLOEXEC: u32 = 0x00080000;
+
+pub const MCL_CURRENT: u32 = 1;
+pub const MCL_FUTURE: u32 = 2;
+
+pub const MADV_NORMAL: u32 = 0;
+pub const MADV_RANDOM: u32 = 1;
+pub const MADV_SEQUENTIAL: u32 = 2;
+pub const MADV_WILLNEED: u32 = 3;
+pub const MADV_DONTNEED: u32 = 4;
+
+pub const RLIMIT_CPU: u32 = 0;
+pub const RLIMIT_FSIZE: u32 = 1;
+pub const RLIMIT_DATA: u32 = 2;
+pub const RLIMIT_STACK: u32 = 3;
+pub const RLIMIT_CORE: u32 = 4;
+pub const RLIMIT_RSS: u32 = 5;
+pub const RLIMIT_NPROC: u32 = 6;
+pub const RLIMIT_NOFILE: u32 = 7;
+pub const RLIMIT_MEMLOCK: u32 = 8;
+pub const RLIMIT_AS: u32 = 9;
+pub const RLIM_INFINITY: u64 = 0xffffffffffffffff;
+
+pub const PROT_NONE: u32 = 0x0;
+pub const PROT_READ: u32 = 0x1;
+pub const PROT_WRITE: u32 = 0x2;
+pub const PROT_EXEC: u32 = 0x4;
 
 fn vfsErrno(err: vfs.VFSError) i32 {
     return switch (err) {
@@ -547,6 +602,20 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_SET_ROBUST_LIST => sys_set_robust_list(arg1, arg2),
         SYS_TGKILL => sys_tgkill(@intCast(arg1), @intCast(arg2), @intCast(arg3)),
         SYS_TKILL => sys_tkill(@intCast(arg1), @intCast(arg2)),
+        SYS_INOTIFY_INIT => sys_inotify_init(),
+        SYS_INOTIFY_INIT1 => sys_inotify_init1(@intCast(arg1)),
+        SYS_INOTIFY_ADD_WATCH => sys_inotify_add_watch(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3)),
+        SYS_INOTIFY_RM_WATCH => sys_inotify_rm_watch(@intCast(arg1), @intCast(arg2)),
+        SYS_MLOCK => sys_mlock(arg1, arg2),
+        SYS_MUNLOCK => sys_munlock(arg1, arg2),
+        SYS_MLOCKALL => sys_mlockall(@intCast(arg1)),
+        SYS_MUNLOCKALL => sys_munlockall(),
+        SYS_MADVISE => sys_madvise(arg1, arg2, @intCast(arg3)),
+        SYS_MINCORE => sys_mincore(arg1, arg2, arg3),
+        SYS_GETRLIMIT => sys_getrlimit(@intCast(arg1), arg2),
+        SYS_SETRLIMIT => sys_setrlimit(@intCast(arg1), arg2),
+        SYS_PRLIMIT64 => sys_prlimit64(@intCast(arg1), @intCast(arg2), arg3, arg4),
+        SYS_MPROTECT => sys_mprotect(arg1, arg2, @intCast(arg3)),
         else => ENOSYS,
     };
 
@@ -4561,5 +4630,205 @@ fn sys_tkill(tid: i32, sig: i32) i32 {
     if (sig == 0) return 0;
 
     signal.sendSignal(proc, @intCast(sig));
+    return 0;
+}
+
+const InotifyWatch = struct {
+    wd: i32,
+    pathname: [256]u8,
+    path_len: usize,
+    mask: u32,
+    in_use: bool,
+};
+
+const InotifyInstance = struct {
+    watches: [16]InotifyWatch,
+    flags: u32,
+    in_use: bool,
+};
+
+var inotify_instances: [32]InotifyInstance = [_]InotifyInstance{.{
+    .watches = [_]InotifyWatch{.{
+        .wd = -1,
+        .pathname = [_]u8{0} ** 256,
+        .path_len = 0,
+        .mask = 0,
+        .in_use = false,
+    }} ** 16,
+    .flags = 0,
+    .in_use = false,
+}} ** 32;
+
+var next_inotify_wd: i32 = 1;
+
+fn sys_inotify_init() i32 {
+    return sys_inotify_init1(0);
+}
+
+fn sys_inotify_init1(flags: u32) i32 {
+    for (&inotify_instances, 0..) |*inst, i| {
+        if (!inst.in_use) {
+            inst.in_use = true;
+            inst.flags = flags;
+            for (&inst.watches) |*w| {
+                w.in_use = false;
+                w.wd = -1;
+            }
+            return @intCast(@as(i32, @intCast(i)) + 4000);
+        }
+    }
+    return EMFILE;
+}
+
+fn sys_inotify_add_watch(fd: i32, pathname: [*]const u8, mask: u32) i32 {
+    if (fd < 4000 or fd >= 4032) return EBADF;
+    const idx: usize = @intCast(fd - 4000);
+    if (!inotify_instances[idx].in_use) return EBADF;
+
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EFAULT;
+
+    var path_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EFAULT;
+
+    for (&inotify_instances[idx].watches) |*w| {
+        if (!w.in_use) {
+            w.in_use = true;
+            w.wd = next_inotify_wd;
+            next_inotify_wd += 1;
+            @memset(&w.pathname, 0);
+            @memcpy(w.pathname[0..path_slice.len], path_slice);
+            w.path_len = path_slice.len;
+            w.mask = mask;
+            return w.wd;
+        }
+    }
+    return ENOSPC;
+}
+
+fn sys_inotify_rm_watch(fd: i32, wd: i32) i32 {
+    if (fd < 4000 or fd >= 4032) return EBADF;
+    const idx: usize = @intCast(fd - 4000);
+    if (!inotify_instances[idx].in_use) return EBADF;
+
+    for (&inotify_instances[idx].watches) |*w| {
+        if (w.in_use and w.wd == wd) {
+            w.in_use = false;
+            w.wd = -1;
+            return 0;
+        }
+    }
+    return EINVAL;
+}
+
+fn sys_mlock(addr: usize, len: usize) i32 {
+    _ = addr;
+    _ = len;
+    return 0;
+}
+
+fn sys_munlock(addr: usize, len: usize) i32 {
+    _ = addr;
+    _ = len;
+    return 0;
+}
+
+fn sys_mlockall(flags: u32) i32 {
+    _ = flags;
+    return 0;
+}
+
+fn sys_munlockall() i32 {
+    return 0;
+}
+
+fn sys_madvise(addr: usize, length: usize, advice: u32) i32 {
+    _ = addr;
+    _ = length;
+    _ = advice;
+    return 0;
+}
+
+fn sys_mincore(addr: usize, length: usize, vec: usize) i32 {
+    if (!protection.verifyUserPointer(vec, (length + 4095) / 4096)) return EFAULT;
+    _ = addr;
+
+    const pages = (length + 4095) / 4096;
+    var i: usize = 0;
+    while (i < pages) : (i += 1) {
+        const byte: u8 = 1;
+        protection.copyToUser(vec + i, &[_]u8{byte}) catch return EFAULT;
+    }
+    return 0;
+}
+
+const Rlimit = extern struct {
+    rlim_cur: u64,
+    rlim_max: u64,
+};
+
+var process_rlimits: [256][10]Rlimit = [_][10]Rlimit{[_]Rlimit{.{
+    .rlim_cur = RLIM_INFINITY,
+    .rlim_max = RLIM_INFINITY,
+}} ** 10} ** 256;
+
+fn sys_getrlimit(resource: u32, rlim_ptr: usize) i32 {
+    if (resource >= 10) return EINVAL;
+    if (!protection.verifyUserPointer(rlim_ptr, @sizeOf(Rlimit))) return EFAULT;
+
+    const proc = process.current_process orelse return ESRCH;
+    const pid_idx: usize = @intCast(proc.pid);
+
+    const rlim = process_rlimits[pid_idx][resource];
+    protection.copyToUser(rlim_ptr, std.mem.asBytes(&rlim)) catch return EFAULT;
+    return 0;
+}
+
+fn sys_setrlimit(resource: u32, rlim_ptr: usize) i32 {
+    if (resource >= 10) return EINVAL;
+    if (!protection.verifyUserPointer(rlim_ptr, @sizeOf(Rlimit))) return EFAULT;
+
+    const proc = process.current_process orelse return ESRCH;
+    const pid_idx: usize = @intCast(proc.pid);
+
+    var rlim: Rlimit = undefined;
+    protection.copyFromUser(std.mem.asBytes(&rlim), rlim_ptr) catch return EFAULT;
+
+    process_rlimits[pid_idx][resource] = rlim;
+    return 0;
+}
+
+fn sys_prlimit64(pid: i32, resource: u32, new_limit: usize, old_limit: usize) i32 {
+    if (resource >= 10) return EINVAL;
+
+    const pid_idx: usize = if (pid == 0) blk: {
+        const proc = process.current_process orelse return ESRCH;
+        break :blk @intCast(proc.pid);
+    } else blk: {
+        if (pid < 0) return EINVAL;
+        break :blk @intCast(pid);
+    };
+
+    if (pid_idx >= 256) return ESRCH;
+
+    if (old_limit != 0) {
+        if (!protection.verifyUserPointer(old_limit, @sizeOf(Rlimit))) return EFAULT;
+        const rlim = process_rlimits[pid_idx][resource];
+        protection.copyToUser(old_limit, std.mem.asBytes(&rlim)) catch return EFAULT;
+    }
+
+    if (new_limit != 0) {
+        if (!protection.verifyUserPointer(new_limit, @sizeOf(Rlimit))) return EFAULT;
+        var rlim: Rlimit = undefined;
+        protection.copyFromUser(std.mem.asBytes(&rlim), new_limit) catch return EFAULT;
+        process_rlimits[pid_idx][resource] = rlim;
+    }
+
+    return 0;
+}
+
+fn sys_mprotect(addr: usize, len: usize, prot: u32) i32 {
+    _ = addr;
+    _ = len;
+    _ = prot;
     return 0;
 }
