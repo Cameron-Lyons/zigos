@@ -241,8 +241,10 @@ pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
                     child_rusage.nivcsw = 0;
 
                     p.state = .Terminated;
+                    freeUserMemory(p);
                     if (p.page_directory) |pd| {
                         memory.freePages(@as([*]u8, @ptrFromInt(@intFromPtr(pd))), 1);
+                        p.page_directory = null;
                     }
                     memory.freePages(p.kernel_stack, 1);
 
