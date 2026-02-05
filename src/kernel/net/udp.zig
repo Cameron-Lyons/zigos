@@ -56,7 +56,7 @@ fn handleUDPPacketIPv6(src: *const ipv6.IPv6Address, dst: *const ipv6.IPv6Addres
         const to_copy = @min(payload.len, space_available);
         if (to_copy > 0) {
             @memcpy(socket.recv_buffer[socket.recv_buffer_used .. socket.recv_buffer_used + to_copy], payload[0..to_copy]);
-            socket.recv_buffer_used = to_copy;
+            socket.recv_buffer_used += to_copy;
             socket.recv_addr = 0;
             socket.recv_port = @byteSwap(udp_header.src_port);
         }
@@ -199,7 +199,7 @@ fn handleUDPPacket(src_ip: u32, dst_ip: u32, data: []const u8) void {
         const to_copy = @min(payload.len, space_available);
         if (to_copy > 0) {
             @memcpy(socket.recv_buffer[socket.recv_buffer_used..socket.recv_buffer_used + to_copy], payload[0..to_copy]);
-            socket.recv_buffer_used = to_copy;
+            socket.recv_buffer_used += to_copy;
             socket.recv_addr = src_ip;
             socket.recv_port = src_port;
         }
