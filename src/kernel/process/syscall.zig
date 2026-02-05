@@ -114,6 +114,22 @@ pub const SYS_SETGROUPS = 97;
 pub const SYS_GETITIMER = 98;
 pub const SYS_SETITIMER = 99;
 pub const SYS_MKFIFO = 100;
+pub const SYS_EPOLL_CREATE = 101;
+pub const SYS_EPOLL_CTL = 102;
+pub const SYS_EPOLL_WAIT = 103;
+pub const SYS_TIMERFD_CREATE = 104;
+pub const SYS_TIMERFD_SETTIME = 105;
+pub const SYS_TIMERFD_GETTIME = 106;
+pub const SYS_SHMGET = 107;
+pub const SYS_SHMAT = 108;
+pub const SYS_SHMDT = 109;
+pub const SYS_SHMCTL = 110;
+pub const SYS_SEMGET = 111;
+pub const SYS_SEMOP = 112;
+pub const SYS_SEMCTL = 113;
+pub const SYS_TIMES = 114;
+pub const SYS_GETRUSAGE = 115;
+pub const SYS_MKNOD = 116;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -171,6 +187,60 @@ pub const AT_REMOVEDIR: u32 = 0x200;
 pub const ITIMER_REAL: u32 = 0;
 pub const ITIMER_VIRTUAL: u32 = 1;
 pub const ITIMER_PROF: u32 = 2;
+
+pub const EPOLL_CTL_ADD: u32 = 1;
+pub const EPOLL_CTL_DEL: u32 = 2;
+pub const EPOLL_CTL_MOD: u32 = 3;
+
+pub const EPOLLIN: u32 = 0x001;
+pub const EPOLLOUT: u32 = 0x004;
+pub const EPOLLERR: u32 = 0x008;
+pub const EPOLLHUP: u32 = 0x010;
+pub const EPOLLRDHUP: u32 = 0x2000;
+pub const EPOLLET: u32 = 0x80000000;
+
+pub const TFD_CLOEXEC: u32 = 0x80000;
+pub const TFD_NONBLOCK: u32 = 0x800;
+
+pub const IPC_CREAT: u32 = 0o1000;
+pub const IPC_EXCL: u32 = 0o2000;
+pub const IPC_NOWAIT: u32 = 0o4000;
+pub const IPC_RMID: u32 = 0;
+pub const IPC_SET: u32 = 1;
+pub const IPC_STAT: u32 = 2;
+
+pub const SHM_RDONLY: u32 = 0o10000;
+pub const SHM_RND: u32 = 0o20000;
+
+pub const GETVAL: u32 = 12;
+pub const SETVAL: u32 = 16;
+pub const GETALL: u32 = 13;
+pub const SETALL: u32 = 17;
+
+pub const F_GETLK: u32 = 5;
+pub const F_SETLK: u32 = 6;
+pub const F_SETLKW: u32 = 7;
+
+pub const F_RDLCK: i16 = 0;
+pub const F_WRLCK: i16 = 1;
+pub const F_UNLCK: i16 = 2;
+
+pub const S_IFMT: u32 = 0o170000;
+pub const S_IFREG: u32 = 0o100000;
+pub const S_IFDIR: u32 = 0o040000;
+pub const S_IFCHR: u32 = 0o020000;
+pub const S_IFBLK: u32 = 0o060000;
+pub const S_IFIFO: u32 = 0o010000;
+pub const S_IFLNK: u32 = 0o120000;
+pub const S_IFSOCK: u32 = 0o140000;
+
+pub const RUSAGE_SELF: i32 = 0;
+pub const RUSAGE_CHILDREN: i32 = -1;
+
+pub const EIDRM = -43;
+pub const ENOMSG = -42;
+pub const EDEADLK = -35;
+pub const ENOLCK = -37;
 
 fn vfsErrno(err: vfs.VFSError) i32 {
     return switch (err) {
@@ -315,6 +385,22 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_GETITIMER => sys_getitimer(@intCast(arg1), arg2),
         SYS_SETITIMER => sys_setitimer(@intCast(arg1), arg2, arg3),
         SYS_MKFIFO => sys_mkfifo(@as([*]const u8, @ptrFromInt(arg1)), @intCast(arg2)),
+        SYS_EPOLL_CREATE => sys_epoll_create(@intCast(arg1)),
+        SYS_EPOLL_CTL => sys_epoll_ctl(@intCast(arg1), @intCast(arg2), @intCast(arg3), arg4),
+        SYS_EPOLL_WAIT => sys_epoll_wait(@intCast(arg1), arg2, @intCast(arg3), @intCast(arg4)),
+        SYS_TIMERFD_CREATE => sys_timerfd_create(@intCast(arg1), @intCast(arg2)),
+        SYS_TIMERFD_SETTIME => sys_timerfd_settime(@intCast(arg1), @intCast(arg2), arg3, arg4),
+        SYS_TIMERFD_GETTIME => sys_timerfd_gettime(@intCast(arg1), arg2),
+        SYS_SHMGET => sys_shmget(@intCast(arg1), arg2, @intCast(arg3)),
+        SYS_SHMAT => sys_shmat(@intCast(arg1), arg2, @intCast(arg3)),
+        SYS_SHMDT => sys_shmdt(arg1),
+        SYS_SHMCTL => sys_shmctl(@intCast(arg1), @intCast(arg2), arg3),
+        SYS_SEMGET => sys_semget(@intCast(arg1), @intCast(arg2), @intCast(arg3)),
+        SYS_SEMOP => sys_semop(@intCast(arg1), arg2, @intCast(arg3)),
+        SYS_SEMCTL => sys_semctl(@intCast(arg1), @intCast(arg2), @intCast(arg3), arg4),
+        SYS_TIMES => sys_times(arg1),
+        SYS_GETRUSAGE => sys_getrusage(@intCast(arg1), arg2),
+        SYS_MKNOD => sys_mknod(@as([*]const u8, @ptrFromInt(arg1)), @intCast(arg2), @intCast(arg3)),
         else => ENOSYS,
     };
 
@@ -687,6 +773,7 @@ fn sys_chown(pathname: [*]const u8, uid: u16, gid: u16) i32 {
     return 0;
 }
 
+const AF_UNIX: u32 = 1;
 const AF_INET: u32 = 2;
 const AF_INET6: u32 = 10;
 const SOCK_STREAM: u32 = 1;
@@ -707,10 +794,59 @@ const SockAddrIn6 = extern struct {
     scope_id: u32,
 };
 
+const SockAddrUn = extern struct {
+    family: u16,
+    path: [108]u8,
+};
+
+const UnixSocket = struct {
+    path: [108]u8,
+    path_len: usize,
+    peer: ?*UnixSocket,
+    recv_buffer: [4096]u8,
+    recv_head: usize,
+    recv_tail: usize,
+    recv_count: usize,
+    listening: bool,
+    connected: bool,
+    in_use: bool,
+};
+
+var unix_sockets: [64]UnixSocket = [_]UnixSocket{.{
+    .path = [_]u8{0} ** 108,
+    .path_len = 0,
+    .peer = null,
+    .recv_buffer = [_]u8{0} ** 4096,
+    .recv_head = 0,
+    .recv_tail = 0,
+    .recv_count = 0,
+    .listening = false,
+    .connected = false,
+    .in_use = false,
+}} ** 64;
+
 var socket_table: [64]?*socket.Socket = [_]?*socket.Socket{null} ** 64;
 
 fn sys_socket(domain: u32, sock_type: u32, protocol: u32) i32 {
     _ = protocol;
+
+    if (domain == AF_UNIX) {
+        for (&unix_sockets, 0..) |*usock, i| {
+            if (!usock.in_use) {
+                usock.in_use = true;
+                usock.path_len = 0;
+                usock.peer = null;
+                usock.recv_head = 0;
+                usock.recv_tail = 0;
+                usock.recv_count = 0;
+                usock.listening = false;
+                usock.connected = false;
+                return @intCast(@as(i32, @intCast(i)) + 1000);
+            }
+        }
+        return EMFILE;
+    }
+
     const addr_family: socket.AddressFamily = switch (domain) {
         AF_INET => .AF_INET,
         AF_INET6 => .AF_INET6,
@@ -744,6 +880,25 @@ fn sys_socket(domain: u32, sock_type: u32, protocol: u32) i32 {
 }
 
 fn sys_bind(sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
+    if (sockfd >= 1000 and sockfd < 1064) {
+        const idx: usize = @intCast(sockfd - 1000);
+        const usock = &unix_sockets[idx];
+        if (!usock.in_use) return EBADF;
+
+        if (addr_len < 3) return EINVAL;
+        if (!protection.verifyUserPointer(addr_ptr, @min(addr_len, @sizeOf(SockAddrUn)))) return EINVAL;
+
+        var addr_buf: [@sizeOf(SockAddrUn)]u8 = undefined;
+        const copy_len = @min(addr_len, @sizeOf(SockAddrUn));
+        protection.copyFromUser(addr_buf[0..copy_len], addr_ptr) catch return EINVAL;
+        const addr: *const SockAddrUn = @ptrCast(@alignCast(&addr_buf));
+
+        const path_end = std.mem.indexOfScalar(u8, &addr.path, 0) orelse addr.path.len;
+        @memcpy(usock.path[0..path_end], addr.path[0..path_end]);
+        usock.path_len = path_end;
+        return 0;
+    }
+
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
 
@@ -781,6 +936,33 @@ fn sys_bind(sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
 }
 
 fn sys_connect(sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
+    if (sockfd >= 1000 and sockfd < 1064) {
+        const idx: usize = @intCast(sockfd - 1000);
+        const usock = &unix_sockets[idx];
+        if (!usock.in_use) return EBADF;
+
+        if (addr_len < 3) return EINVAL;
+        if (!protection.verifyUserPointer(addr_ptr, @min(addr_len, @sizeOf(SockAddrUn)))) return EINVAL;
+
+        var addr_buf: [@sizeOf(SockAddrUn)]u8 = undefined;
+        const copy_len = @min(addr_len, @sizeOf(SockAddrUn));
+        protection.copyFromUser(addr_buf[0..copy_len], addr_ptr) catch return EINVAL;
+        const addr: *const SockAddrUn = @ptrCast(@alignCast(&addr_buf));
+
+        const path_end = std.mem.indexOfScalar(u8, &addr.path, 0) orelse addr.path.len;
+
+        for (&unix_sockets) |*peer| {
+            if (peer.in_use and peer.listening and peer.path_len == path_end) {
+                if (std.mem.eql(u8, peer.path[0..path_end], addr.path[0..path_end])) {
+                    usock.peer = peer;
+                    usock.connected = true;
+                    return 0;
+                }
+            }
+        }
+        return ECONNREFUSED;
+    }
+
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
 
@@ -819,13 +1001,45 @@ fn sys_connect(sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
 }
 
 fn sys_listen(sockfd: i32, backlog: u32) i32 {
+    _ = backlog;
+    if (sockfd >= 1000 and sockfd < 1064) {
+        const idx: usize = @intCast(sockfd - 1000);
+        const usock = &unix_sockets[idx];
+        if (!usock.in_use) return EBADF;
+        usock.listening = true;
+        return 0;
+    }
+
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
-    sock.listen(backlog) catch |err| return socketErrno(err);
+    sock.listen(5) catch |err| return socketErrno(err);
     return 0;
 }
 
 fn sys_accept(sockfd: i32) i32 {
+    if (sockfd >= 1000 and sockfd < 1064) {
+        const idx: usize = @intCast(sockfd - 1000);
+        const usock = &unix_sockets[idx];
+        if (!usock.in_use or !usock.listening) return EBADF;
+
+        for (&unix_sockets, 0..) |*peer, i| {
+            if (peer.in_use and peer.connected and peer.peer == usock) {
+                for (&unix_sockets, 0..) |*new_sock, j| {
+                    if (!new_sock.in_use) {
+                        new_sock.in_use = true;
+                        new_sock.connected = true;
+                        new_sock.peer = peer;
+                        peer.peer = new_sock;
+                        _ = i;
+                        return @intCast(@as(i32, @intCast(j)) + 1000);
+                    }
+                }
+                return EMFILE;
+            }
+        }
+        return EAGAIN;
+    }
+
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
 
@@ -843,12 +1057,35 @@ fn sys_accept(sockfd: i32) i32 {
 }
 
 fn sys_send(sockfd: i32, buf: [*]const u8, len: usize) i32 {
+    if (sockfd >= 1000 and sockfd < 1064) {
+        const idx: usize = @intCast(sockfd - 1000);
+        const usock = &unix_sockets[idx];
+        if (!usock.in_use or !usock.connected) return EBADF;
+
+        const peer = usock.peer orelse return ENOTCONN;
+        if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
+
+        var kernel_buffer: [4096]u8 = undefined;
+        const to_send = @min(len, kernel_buffer.len);
+        protection.copyFromUser(kernel_buffer[0..to_send], @intFromPtr(buf)) catch return EINVAL;
+
+        const available = peer.recv_buffer.len - peer.recv_count;
+        const copy_len = @min(to_send, available);
+        if (copy_len == 0) return EAGAIN;
+
+        for (0..copy_len) |i| {
+            peer.recv_buffer[peer.recv_tail] = kernel_buffer[i];
+            peer.recv_tail = (peer.recv_tail + 1) % peer.recv_buffer.len;
+        }
+        peer.recv_count += copy_len;
+        return @intCast(copy_len);
+    }
+
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
 
     if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
 
-    // SAFETY: filled by the subsequent copyFromUser call
     var kernel_buffer: [4096]u8 = undefined;
     const to_send = @min(len, kernel_buffer.len);
     protection.copyFromUser(kernel_buffer[0..to_send], @intFromPtr(buf)) catch return EINVAL;
@@ -858,12 +1095,33 @@ fn sys_send(sockfd: i32, buf: [*]const u8, len: usize) i32 {
 }
 
 fn sys_recv(sockfd: i32, buf: [*]u8, len: usize) i32 {
+    if (sockfd >= 1000 and sockfd < 1064) {
+        const idx: usize = @intCast(sockfd - 1000);
+        const usock = &unix_sockets[idx];
+        if (!usock.in_use) return EBADF;
+
+        if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
+
+        if (usock.recv_count == 0) return 0;
+
+        var kernel_buffer: [4096]u8 = undefined;
+        const to_recv = @min(len, @min(usock.recv_count, kernel_buffer.len));
+
+        for (0..to_recv) |i| {
+            kernel_buffer[i] = usock.recv_buffer[usock.recv_head];
+            usock.recv_head = (usock.recv_head + 1) % usock.recv_buffer.len;
+        }
+        usock.recv_count -= to_recv;
+
+        protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..to_recv]) catch return EINVAL;
+        return @intCast(to_recv);
+    }
+
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
 
     if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
 
-    // SAFETY: filled by the subsequent sock.recv call
     var kernel_buffer: [4096]u8 = undefined;
     const to_recv = @min(len, kernel_buffer.len);
 
@@ -1602,11 +1860,38 @@ const F_GETFL = 3;
 const F_SETFL = 4;
 const FD_CLOEXEC: u32 = 1;
 
+const Flock = extern struct {
+    l_type: i16,
+    l_whence: i16,
+    l_start: i64,
+    l_len: i64,
+    l_pid: i32,
+};
+
+const FileLock = struct {
+    fd: u32,
+    l_type: i16,
+    l_start: i64,
+    l_len: i64,
+    l_pid: i32,
+    in_use: bool,
+};
+
+var file_locks: [256]FileLock = [_]FileLock{.{
+    .fd = 0,
+    .l_type = F_UNLCK,
+    .l_start = 0,
+    .l_len = 0,
+    .l_pid = 0,
+    .in_use = false,
+}} ** 256;
+
 fn sys_fcntl(fd: i32, cmd: i32, arg: usize) i32 {
     if (fd < FD_OFFSET) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
-    switch (cmd) {
+    const ucmd: u32 = @bitCast(cmd);
+    switch (ucmd) {
         F_DUPFD => {
             const min_fd = if (arg >= FD_OFFSET) @as(u32, @intCast(arg - FD_OFFSET)) else 0;
             var new_fd = min_fd;
@@ -1632,8 +1917,80 @@ fn sys_fcntl(fd: i32, cmd: i32, arg: usize) i32 {
             vfs.setFileFlags(vfs_fd, @intCast(arg)) catch return EBADF;
             return 0;
         },
+        F_GETLK => {
+            if (!protection.verifyUserPointer(arg, @sizeOf(Flock))) return EINVAL;
+            var flock: Flock = undefined;
+            protection.copyFromUser(std.mem.asBytes(&flock), arg) catch return EINVAL;
+
+            for (file_locks) |lock| {
+                if (lock.in_use and lock.fd == vfs_fd) {
+                    if (locksOverlap(flock.l_start, flock.l_len, lock.l_start, lock.l_len)) {
+                        if (lock.l_type == F_WRLCK or flock.l_type == F_WRLCK) {
+                            flock.l_type = lock.l_type;
+                            flock.l_start = lock.l_start;
+                            flock.l_len = lock.l_len;
+                            flock.l_pid = lock.l_pid;
+                            protection.copyToUser(arg, std.mem.asBytes(&flock)) catch return EINVAL;
+                            return 0;
+                        }
+                    }
+                }
+            }
+            flock.l_type = F_UNLCK;
+            protection.copyToUser(arg, std.mem.asBytes(&flock)) catch return EINVAL;
+            return 0;
+        },
+        F_SETLK, F_SETLKW => {
+            if (!protection.verifyUserPointer(arg, @sizeOf(Flock))) return EINVAL;
+            var flock: Flock = undefined;
+            protection.copyFromUser(std.mem.asBytes(&flock), arg) catch return EINVAL;
+
+            const pid: i32 = if (process.current_process) |p| @intCast(p.pid) else 0;
+
+            if (flock.l_type == F_UNLCK) {
+                for (&file_locks) |*lock| {
+                    if (lock.in_use and lock.fd == vfs_fd and lock.l_pid == pid) {
+                        if (locksOverlap(flock.l_start, flock.l_len, lock.l_start, lock.l_len)) {
+                            lock.in_use = false;
+                        }
+                    }
+                }
+                return 0;
+            }
+
+            for (file_locks) |lock| {
+                if (lock.in_use and lock.fd == vfs_fd and lock.l_pid != pid) {
+                    if (locksOverlap(flock.l_start, flock.l_len, lock.l_start, lock.l_len)) {
+                        if (lock.l_type == F_WRLCK or flock.l_type == F_WRLCK) {
+                            return EAGAIN;
+                        }
+                    }
+                }
+            }
+
+            for (&file_locks) |*lock| {
+                if (!lock.in_use) {
+                    lock.* = FileLock{
+                        .fd = vfs_fd,
+                        .l_type = flock.l_type,
+                        .l_start = flock.l_start,
+                        .l_len = flock.l_len,
+                        .l_pid = pid,
+                        .in_use = true,
+                    };
+                    return 0;
+                }
+            }
+            return ENOLCK;
+        },
         else => return EINVAL,
     }
+}
+
+fn locksOverlap(start1: i64, len1: i64, start2: i64, len2: i64) bool {
+    const end1 = if (len1 == 0) std.math.maxInt(i64) else start1 + len1;
+    const end2 = if (len2 == 0) std.math.maxInt(i64) else start2 + len2;
+    return start1 < end2 and start2 < end1;
 }
 
 const FdSet = extern struct {
@@ -2695,4 +3052,536 @@ fn sys_mkfifo(pathname: [*]const u8, mode: u32) i32 {
 
     vfs.mkfifo(path_slice, mode_struct) catch |err| return vfsErrno(err);
     return 0;
+}
+
+const EpollEvent = extern struct {
+    events: u32,
+    data: u64,
+};
+
+const EpollEntry = struct {
+    fd: i32,
+    events: u32,
+    data: u64,
+};
+
+const EpollInstance = struct {
+    entries: [64]?EpollEntry,
+    count: usize,
+    in_use: bool,
+};
+
+var epoll_instances: [64]EpollInstance = [_]EpollInstance{.{
+    .entries = [_]?EpollEntry{null} ** 64,
+    .count = 0,
+    .in_use = false,
+}} ** 64;
+
+fn sys_epoll_create(_: i32) i32 {
+    for (&epoll_instances, 0..) |*inst, i| {
+        if (!inst.in_use) {
+            inst.in_use = true;
+            inst.count = 0;
+            for (&inst.entries) |*e| {
+                e.* = null;
+            }
+            return @intCast(@as(i32, @intCast(i)) + FD_OFFSET + 200);
+        }
+    }
+    return EMFILE;
+}
+
+fn sys_epoll_ctl(epfd: i32, op: u32, fd: i32, event_addr: usize) i32 {
+    const idx = epfd - FD_OFFSET - 200;
+    if (idx < 0 or idx >= 64) return EBADF;
+    const inst = &epoll_instances[@intCast(idx)];
+    if (!inst.in_use) return EBADF;
+
+    switch (op) {
+        EPOLL_CTL_ADD => {
+            if (event_addr == 0) return EINVAL;
+            if (!protection.verifyUserPointer(event_addr, @sizeOf(EpollEvent))) return EINVAL;
+            var ev: EpollEvent = undefined;
+            protection.copyFromUser(std.mem.asBytes(&ev), event_addr) catch return EINVAL;
+
+            for (&inst.entries) |*e| {
+                if (e.* == null) {
+                    e.* = EpollEntry{ .fd = fd, .events = ev.events, .data = ev.data };
+                    inst.count += 1;
+                    return 0;
+                }
+            }
+            return ENOSPC;
+        },
+        EPOLL_CTL_DEL => {
+            for (&inst.entries) |*e| {
+                if (e.*) |entry| {
+                    if (entry.fd == fd) {
+                        e.* = null;
+                        inst.count -= 1;
+                        return 0;
+                    }
+                }
+            }
+            return ENOENT;
+        },
+        EPOLL_CTL_MOD => {
+            if (event_addr == 0) return EINVAL;
+            if (!protection.verifyUserPointer(event_addr, @sizeOf(EpollEvent))) return EINVAL;
+            var ev: EpollEvent = undefined;
+            protection.copyFromUser(std.mem.asBytes(&ev), event_addr) catch return EINVAL;
+
+            for (&inst.entries) |*e| {
+                if (e.*) |*entry| {
+                    if (entry.fd == fd) {
+                        entry.events = ev.events;
+                        entry.data = ev.data;
+                        return 0;
+                    }
+                }
+            }
+            return ENOENT;
+        },
+        else => return EINVAL,
+    }
+}
+
+fn sys_epoll_wait(epfd: i32, events_addr: usize, maxevents: i32, _: i32) i32 {
+    const idx = epfd - FD_OFFSET - 200;
+    if (idx < 0 or idx >= 64) return EBADF;
+    const inst = &epoll_instances[@intCast(idx)];
+    if (!inst.in_use) return EBADF;
+
+    if (maxevents <= 0) return EINVAL;
+    const max: usize = @intCast(maxevents);
+    if (!protection.verifyUserPointer(events_addr, max * @sizeOf(EpollEvent))) return EINVAL;
+
+    var count: usize = 0;
+    var events: [64]EpollEvent = undefined;
+
+    for (inst.entries) |maybe_entry| {
+        if (maybe_entry) |entry| {
+            if (count >= max) break;
+            var ready: u32 = 0;
+
+            if (entry.fd >= FD_OFFSET) {
+                const vfs_fd: u32 = @intCast(entry.fd - FD_OFFSET);
+                if (vfs.getFileFlags(vfs_fd)) |_| {
+                    if (entry.events & EPOLLIN != 0) ready |= EPOLLIN;
+                    if (entry.events & EPOLLOUT != 0) ready |= EPOLLOUT;
+                } else |_| {
+                    ready |= EPOLLERR;
+                }
+            }
+
+            if (ready != 0) {
+                events[count] = EpollEvent{ .events = ready, .data = entry.data };
+                count += 1;
+            }
+        }
+    }
+
+    if (count > 0) {
+        protection.copyToUser(events_addr, std.mem.sliceAsBytes(events[0..count])) catch return EINVAL;
+    }
+    return @intCast(count);
+}
+
+const ItimerSpec = extern struct {
+    it_interval_sec: u32,
+    it_interval_nsec: u32,
+    it_value_sec: u32,
+    it_value_nsec: u32,
+};
+
+const TimerFd = struct {
+    clockid: u32,
+    flags: u32,
+    spec: ItimerSpec,
+    in_use: bool,
+};
+
+var timerfd_table: [64]TimerFd = [_]TimerFd{.{
+    .clockid = 0,
+    .flags = 0,
+    .spec = .{ .it_interval_sec = 0, .it_interval_nsec = 0, .it_value_sec = 0, .it_value_nsec = 0 },
+    .in_use = false,
+}} ** 64;
+
+fn sys_timerfd_create(clockid: u32, flags: u32) i32 {
+    if (clockid != CLOCK_REALTIME and clockid != CLOCK_MONOTONIC) return EINVAL;
+
+    for (&timerfd_table, 0..) |*tfd, i| {
+        if (!tfd.in_use) {
+            tfd.in_use = true;
+            tfd.clockid = clockid;
+            tfd.flags = flags;
+            tfd.spec = .{ .it_interval_sec = 0, .it_interval_nsec = 0, .it_value_sec = 0, .it_value_nsec = 0 };
+            return @intCast(@as(i32, @intCast(i)) + FD_OFFSET + 300);
+        }
+    }
+    return EMFILE;
+}
+
+fn sys_timerfd_settime(fd: i32, _: u32, new_value_addr: usize, old_value_addr: usize) i32 {
+    const idx = fd - FD_OFFSET - 300;
+    if (idx < 0 or idx >= 64) return EBADF;
+    const tfd = &timerfd_table[@intCast(idx)];
+    if (!tfd.in_use) return EBADF;
+
+    if (!protection.verifyUserPointer(new_value_addr, @sizeOf(ItimerSpec))) return EINVAL;
+
+    if (old_value_addr != 0) {
+        if (!protection.verifyUserPointer(old_value_addr, @sizeOf(ItimerSpec))) return EINVAL;
+        protection.copyToUser(old_value_addr, std.mem.asBytes(&tfd.spec)) catch return EINVAL;
+    }
+
+    protection.copyFromUser(std.mem.asBytes(&tfd.spec), new_value_addr) catch return EINVAL;
+    return 0;
+}
+
+fn sys_timerfd_gettime(fd: i32, value_addr: usize) i32 {
+    const idx = fd - FD_OFFSET - 300;
+    if (idx < 0 or idx >= 64) return EBADF;
+    const tfd = &timerfd_table[@intCast(idx)];
+    if (!tfd.in_use) return EBADF;
+
+    if (!protection.verifyUserPointer(value_addr, @sizeOf(ItimerSpec))) return EINVAL;
+    protection.copyToUser(value_addr, std.mem.asBytes(&tfd.spec)) catch return EINVAL;
+    return 0;
+}
+
+const ShmSegment = struct {
+    key: i32,
+    size: usize,
+    addr: ?[*]u8,
+    mode: u32,
+    nattch: u32,
+    in_use: bool,
+};
+
+var shm_segments: [64]ShmSegment = [_]ShmSegment{.{
+    .key = 0,
+    .size = 0,
+    .addr = null,
+    .mode = 0,
+    .nattch = 0,
+    .in_use = false,
+}} ** 64;
+
+fn sys_shmget(key: i32, size: usize, shmflg: u32) i32 {
+    if (key != 0) {
+        for (shm_segments, 0..) |seg, i| {
+            if (seg.in_use and seg.key == key) {
+                if (shmflg & IPC_CREAT != 0 and shmflg & IPC_EXCL != 0) {
+                    return EEXIST;
+                }
+                return @intCast(i);
+            }
+        }
+    }
+
+    if (shmflg & IPC_CREAT == 0 and key != 0) return ENOENT;
+
+    for (&shm_segments, 0..) |*seg, i| {
+        if (!seg.in_use) {
+            const mem = memory.kmalloc(size) orelse return ENOMEM;
+            seg.in_use = true;
+            seg.key = key;
+            seg.size = size;
+            seg.addr = @ptrCast(@alignCast(mem));
+            seg.mode = shmflg & 0o777;
+            seg.nattch = 0;
+            return @intCast(i);
+        }
+    }
+    return ENOSPC;
+}
+
+fn sys_shmat(shmid: i32, _: usize, _: u32) i32 {
+    if (shmid < 0 or shmid >= 64) return EINVAL;
+    const seg = &shm_segments[@intCast(shmid)];
+    if (!seg.in_use) return EINVAL;
+
+    seg.nattch += 1;
+    if (seg.addr) |addr| {
+        return @intCast(@intFromPtr(addr));
+    }
+    return EINVAL;
+}
+
+fn sys_shmdt(addr: usize) i32 {
+    for (&shm_segments) |*seg| {
+        if (seg.in_use) {
+            if (seg.addr) |a| {
+                if (@intFromPtr(a) == addr) {
+                    if (seg.nattch > 0) seg.nattch -= 1;
+                    return 0;
+                }
+            }
+        }
+    }
+    return EINVAL;
+}
+
+const ShmidDs = extern struct {
+    shm_perm_mode: u32,
+    shm_segsz: u32,
+    shm_atime: u32,
+    shm_dtime: u32,
+    shm_ctime: u32,
+    shm_cpid: u32,
+    shm_lpid: u32,
+    shm_nattch: u32,
+};
+
+fn sys_shmctl(shmid: i32, cmd: u32, buf_addr: usize) i32 {
+    if (shmid < 0 or shmid >= 64) return EINVAL;
+    const seg = &shm_segments[@intCast(shmid)];
+    if (!seg.in_use) return EINVAL;
+
+    switch (cmd) {
+        IPC_STAT => {
+            if (!protection.verifyUserPointer(buf_addr, @sizeOf(ShmidDs))) return EINVAL;
+            const ds = ShmidDs{
+                .shm_perm_mode = seg.mode,
+                .shm_segsz = @intCast(seg.size),
+                .shm_atime = 0,
+                .shm_dtime = 0,
+                .shm_ctime = 0,
+                .shm_cpid = 0,
+                .shm_lpid = 0,
+                .shm_nattch = seg.nattch,
+            };
+            protection.copyToUser(buf_addr, std.mem.asBytes(&ds)) catch return EINVAL;
+            return 0;
+        },
+        IPC_RMID => {
+            if (seg.nattch == 0) {
+                if (seg.addr) |addr| {
+                    memory.kfree(@ptrCast(addr));
+                }
+                seg.in_use = false;
+                seg.addr = null;
+            }
+            return 0;
+        },
+        else => return EINVAL,
+    }
+}
+
+const Semaphore = struct {
+    value: i16,
+};
+
+const SemSet = struct {
+    key: i32,
+    sems: [32]Semaphore,
+    nsems: u32,
+    mode: u32,
+    in_use: bool,
+};
+
+var sem_sets: [64]SemSet = [_]SemSet{.{
+    .key = 0,
+    .sems = [_]Semaphore{.{ .value = 0 }} ** 32,
+    .nsems = 0,
+    .mode = 0,
+    .in_use = false,
+}} ** 64;
+
+fn sys_semget(key: i32, nsems: u32, semflg: u32) i32 {
+    if (nsems > 32) return EINVAL;
+
+    if (key != 0) {
+        for (sem_sets, 0..) |set, i| {
+            if (set.in_use and set.key == key) {
+                if (semflg & IPC_CREAT != 0 and semflg & IPC_EXCL != 0) {
+                    return EEXIST;
+                }
+                return @intCast(i);
+            }
+        }
+    }
+
+    if (semflg & IPC_CREAT == 0 and key != 0) return ENOENT;
+
+    for (&sem_sets, 0..) |*set, i| {
+        if (!set.in_use) {
+            set.in_use = true;
+            set.key = key;
+            set.nsems = nsems;
+            set.mode = semflg & 0o777;
+            for (&set.sems) |*s| {
+                s.value = 0;
+            }
+            return @intCast(i);
+        }
+    }
+    return ENOSPC;
+}
+
+const Sembuf = extern struct {
+    sem_num: u16,
+    sem_op: i16,
+    sem_flg: i16,
+};
+
+fn sys_semop(semid: i32, sops_addr: usize, nsops: u32) i32 {
+    if (semid < 0 or semid >= 64) return EINVAL;
+    const set = &sem_sets[@intCast(semid)];
+    if (!set.in_use) return EINVAL;
+    if (nsops == 0 or nsops > 32) return EINVAL;
+
+    if (!protection.verifyUserPointer(sops_addr, nsops * @sizeOf(Sembuf))) return EINVAL;
+
+    var sops: [32]Sembuf = undefined;
+    protection.copyFromUser(std.mem.sliceAsBytes(sops[0..nsops]), sops_addr) catch return EINVAL;
+
+    for (sops[0..nsops]) |op| {
+        if (op.sem_num >= set.nsems) return EINVAL;
+    }
+
+    for (sops[0..nsops]) |op| {
+        const sem = &set.sems[op.sem_num];
+        if (op.sem_op > 0) {
+            sem.value += op.sem_op;
+        } else if (op.sem_op < 0) {
+            if (sem.value < -op.sem_op) {
+                return EAGAIN;
+            }
+            sem.value += op.sem_op;
+        }
+    }
+
+    return 0;
+}
+
+fn sys_semctl(semid: i32, semnum: u32, cmd: u32, arg: usize) i32 {
+    if (semid < 0 or semid >= 64) return EINVAL;
+    const set = &sem_sets[@intCast(semid)];
+    if (!set.in_use) return EINVAL;
+
+    switch (cmd) {
+        GETVAL => {
+            if (semnum >= set.nsems) return EINVAL;
+            return set.sems[semnum].value;
+        },
+        SETVAL => {
+            if (semnum >= set.nsems) return EINVAL;
+            set.sems[semnum].value = @intCast(arg & 0xFFFF);
+            return 0;
+        },
+        IPC_RMID => {
+            set.in_use = false;
+            return 0;
+        },
+        else => return EINVAL,
+    }
+}
+
+const Tms = extern struct {
+    tms_utime: u32,
+    tms_stime: u32,
+    tms_cutime: u32,
+    tms_cstime: u32,
+};
+
+fn sys_times(buf_addr: usize) i32 {
+    if (buf_addr != 0) {
+        if (!protection.verifyUserPointer(buf_addr, @sizeOf(Tms))) return EINVAL;
+        const tms = Tms{
+            .tms_utime = 0,
+            .tms_stime = 0,
+            .tms_cutime = 0,
+            .tms_cstime = 0,
+        };
+        protection.copyToUser(buf_addr, std.mem.asBytes(&tms)) catch return EINVAL;
+    }
+    return 0;
+}
+
+const Rusage = extern struct {
+    ru_utime_sec: u32,
+    ru_utime_usec: u32,
+    ru_stime_sec: u32,
+    ru_stime_usec: u32,
+    ru_maxrss: u32,
+    ru_ixrss: u32,
+    ru_idrss: u32,
+    ru_isrss: u32,
+    ru_minflt: u32,
+    ru_majflt: u32,
+    ru_nswap: u32,
+    ru_inblock: u32,
+    ru_oublock: u32,
+    ru_msgsnd: u32,
+    ru_msgrcv: u32,
+    ru_nsignals: u32,
+    ru_nvcsw: u32,
+    ru_nivcsw: u32,
+};
+
+fn sys_getrusage(who: i32, usage_addr: usize) i32 {
+    if (who != RUSAGE_SELF and who != RUSAGE_CHILDREN) return EINVAL;
+    if (!protection.verifyUserPointer(usage_addr, @sizeOf(Rusage))) return EINVAL;
+
+    const usage = Rusage{
+        .ru_utime_sec = 0,
+        .ru_utime_usec = 0,
+        .ru_stime_sec = 0,
+        .ru_stime_usec = 0,
+        .ru_maxrss = 0,
+        .ru_ixrss = 0,
+        .ru_idrss = 0,
+        .ru_isrss = 0,
+        .ru_minflt = 0,
+        .ru_majflt = 0,
+        .ru_nswap = 0,
+        .ru_inblock = 0,
+        .ru_oublock = 0,
+        .ru_msgsnd = 0,
+        .ru_msgrcv = 0,
+        .ru_nsignals = 0,
+        .ru_nvcsw = 0,
+        .ru_nivcsw = 0,
+    };
+
+    protection.copyToUser(usage_addr, std.mem.asBytes(&usage)) catch return EINVAL;
+    return 0;
+}
+
+fn sys_mknod(pathname: [*]const u8, mode: u32, dev: u32) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+
+    var path_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    const file_type = mode & S_IFMT;
+    const perms = mode & 0o777;
+
+    const mode_struct = vfs.FileMode{
+        .owner_read = (perms & 0o400) != 0,
+        .owner_write = (perms & 0o200) != 0,
+        .owner_exec = (perms & 0o100) != 0,
+        .group_read = (perms & 0o040) != 0,
+        .group_write = (perms & 0o020) != 0,
+        .group_exec = (perms & 0o010) != 0,
+        .other_read = (perms & 0o004) != 0,
+        .other_write = (perms & 0o002) != 0,
+        .other_exec = (perms & 0o001) != 0,
+    };
+
+    if (file_type == S_IFIFO) {
+        vfs.mkfifo(path_slice, mode_struct) catch |err| return vfsErrno(err);
+        return 0;
+    }
+
+    if (file_type == S_IFREG) {
+        vfs.create(path_slice, mode_struct) catch |err| return vfsErrno(err);
+        return 0;
+    }
+
+    _ = dev;
+    return EINVAL;
 }
