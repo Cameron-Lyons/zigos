@@ -154,6 +154,17 @@ pub const SYS_GETPRIORITY = 137;
 pub const SYS_SETPRIORITY = 138;
 pub const SYS_SCHED_GETAFFINITY = 139;
 pub const SYS_SCHED_SETAFFINITY = 140;
+pub const SYS_UTIMENSAT = 141;
+pub const SYS_FUTIMESAT = 142;
+pub const SYS_FSTATAT = 143;
+pub const SYS_SYMLINKAT = 144;
+pub const SYS_READLINKAT = 145;
+pub const SYS_WAITID = 146;
+pub const SYS_SET_TID_ADDRESS = 147;
+pub const SYS_GET_ROBUST_LIST = 148;
+pub const SYS_SET_ROBUST_LIST = 149;
+pub const SYS_TGKILL = 150;
+pub const SYS_TKILL = 151;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -327,6 +338,20 @@ pub const SYNC_FILE_RANGE_WAIT_AFTER: u32 = 4;
 pub const PRIO_PROCESS: u32 = 0;
 pub const PRIO_PGRP: u32 = 1;
 pub const PRIO_USER: u32 = 2;
+
+pub const UTIME_NOW: i32 = 0x3fffffff;
+pub const UTIME_OMIT: i32 = 0x3ffffffe;
+
+pub const P_ALL: u32 = 0;
+pub const P_PID: u32 = 1;
+pub const P_PGID: u32 = 2;
+
+pub const WEXITED: u32 = 0x04;
+pub const WSTOPPED: u32 = 0x02;
+pub const WCONTINUED: u32 = 0x08;
+pub const WNOWAIT: u32 = 0x01000000;
+
+pub const ECHILD = -10;
 
 fn vfsErrno(err: vfs.VFSError) i32 {
     return switch (err) {
@@ -511,6 +536,17 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_SETPRIORITY => sys_setpriority(@intCast(arg1), @intCast(arg2), @intCast(arg3)),
         SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(@intCast(arg1), arg2, arg3),
         SYS_SCHED_SETAFFINITY => sys_sched_setaffinity(@intCast(arg1), arg2, arg3),
+        SYS_UTIMENSAT => sys_utimensat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3, @intCast(arg4)),
+        SYS_FUTIMESAT => sys_futimesat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3),
+        SYS_FSTATAT => sys_fstatat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3, @intCast(arg4)),
+        SYS_SYMLINKAT => sys_symlinkat(@as([*]const u8, @ptrFromInt(arg1)), @intCast(arg2), @as([*]const u8, @ptrFromInt(arg3))),
+        SYS_READLINKAT => sys_readlinkat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @as([*]u8, @ptrFromInt(arg3)), arg4),
+        SYS_WAITID => sys_waitid(@intCast(arg1), @intCast(arg2), arg3, @intCast(arg4)),
+        SYS_SET_TID_ADDRESS => sys_set_tid_address(arg1),
+        SYS_GET_ROBUST_LIST => sys_get_robust_list(@intCast(arg1), arg2, arg3),
+        SYS_SET_ROBUST_LIST => sys_set_robust_list(arg1, arg2),
+        SYS_TGKILL => sys_tgkill(@intCast(arg1), @intCast(arg2), @intCast(arg3)),
+        SYS_TKILL => sys_tkill(@intCast(arg1), @intCast(arg2)),
         else => ENOSYS,
     };
 
@@ -4299,5 +4335,231 @@ fn sys_sched_getaffinity(pid: i32, cpusetsize: usize, mask_ptr: usize) i32 {
 fn sys_sched_setaffinity(pid: i32, cpusetsize: usize, mask_ptr: usize) i32 {
     _ = pid;
     if (!protection.verifyUserPointer(mask_ptr, cpusetsize)) return EFAULT;
+    return 0;
+}
+
+const UtimensatTimespec = extern struct {
+    tv_sec: i32,
+    tv_nsec: i32,
+};
+
+fn sys_utimensat(dirfd: i32, pathname: [*]const u8, times_ptr: usize, flags: u32) i32 {
+    _ = dirfd;
+    _ = flags;
+
+    if (@intFromPtr(pathname) != 0) {
+        if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EFAULT;
+    }
+
+    if (times_ptr != 0) {
+        if (!protection.verifyUserPointer(times_ptr, @sizeOf(UtimensatTimespec) * 2)) return EFAULT;
+    }
+
+    return 0;
+}
+
+fn sys_futimesat(dirfd: i32, pathname: [*]const u8, times_ptr: usize) i32 {
+    _ = dirfd;
+
+    if (@intFromPtr(pathname) != 0) {
+        if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EFAULT;
+    }
+
+    if (times_ptr != 0) {
+        if (!protection.verifyUserPointer(times_ptr, 16)) return EFAULT;
+    }
+
+    return 0;
+}
+
+fn sys_fstatat(dirfd: i32, pathname: [*]const u8, statbuf: usize, flags: u32) i32 {
+    _ = flags;
+
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EFAULT;
+    if (!protection.verifyUserPointer(statbuf, @sizeOf(vfs.FileStat))) return EFAULT;
+
+    var path_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EFAULT;
+
+    var full_path_buf: [512]u8 = undefined;
+    const full_path = if (path_slice.len > 0 and path_slice[0] == '/') blk: {
+        break :blk path_slice;
+    } else blk: {
+        if (dirfd == AT_FDCWD) {
+            ensureCwdInit();
+            const cwd = current_working_dir[0..cwd_len];
+            const cwdlen = cwd.len;
+            @memcpy(full_path_buf[0..cwdlen], cwd);
+            if (cwdlen > 0 and cwd[cwdlen - 1] != '/') {
+                full_path_buf[cwdlen] = '/';
+                @memcpy(full_path_buf[cwdlen + 1 .. cwdlen + 1 + path_slice.len], path_slice);
+                break :blk full_path_buf[0 .. cwdlen + 1 + path_slice.len];
+            } else {
+                @memcpy(full_path_buf[cwdlen .. cwdlen + path_slice.len], path_slice);
+                break :blk full_path_buf[0 .. cwdlen + path_slice.len];
+            }
+        }
+        return EBADF;
+    };
+
+    var stat_buf: vfs.FileStat = undefined;
+    vfs.stat(full_path, &stat_buf) catch |err| return vfsErrno(err);
+
+    protection.copyToUser(statbuf, std.mem.asBytes(&stat_buf)) catch return EFAULT;
+    return 0;
+}
+
+fn sys_symlinkat(target: [*]const u8, newdirfd: i32, linkpath: [*]const u8) i32 {
+    _ = newdirfd;
+
+    if (!protection.verifyUserPointer(@intFromPtr(target), 256)) return EFAULT;
+    if (!protection.verifyUserPointer(@intFromPtr(linkpath), 256)) return EFAULT;
+
+    var target_buffer: [256]u8 = undefined;
+    const target_slice = protection.copyStringFromUser(&target_buffer, @intFromPtr(target)) catch return EFAULT;
+
+    var link_buffer: [256]u8 = undefined;
+    const link_slice = protection.copyStringFromUser(&link_buffer, @intFromPtr(linkpath)) catch return EFAULT;
+
+    vfs.symlink(target_slice, link_slice) catch |err| return vfsErrno(err);
+    return 0;
+}
+
+fn sys_readlinkat(dirfd: i32, pathname: [*]const u8, buf: [*]u8, bufsiz: usize) i32 {
+    _ = dirfd;
+
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EFAULT;
+    if (!protection.verifyUserPointer(@intFromPtr(buf), bufsiz)) return EFAULT;
+
+    var path_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EFAULT;
+
+    var link_target: [256]u8 = undefined;
+    const len = vfs.readlink(path_slice, &link_target) catch |err| return vfsErrno(err);
+
+    const copy_len = @min(len, bufsiz);
+    protection.copyToUser(@intFromPtr(buf), link_target[0..copy_len]) catch return EFAULT;
+    return @intCast(copy_len);
+}
+
+const SigInfo = extern struct {
+    si_signo: i32,
+    si_errno: i32,
+    si_code: i32,
+    si_pid: i32,
+    si_uid: u32,
+    si_status: i32,
+    _pad: [26]i32,
+};
+
+fn sys_waitid(idtype: u32, id: i32, infop: usize, options: u32) i32 {
+    _ = options;
+
+    if (infop != 0) {
+        if (!protection.verifyUserPointer(infop, @sizeOf(SigInfo))) return EFAULT;
+    }
+
+    switch (idtype) {
+        P_ALL => {
+            for (&process.process_table) |*proc| {
+                if (proc.pid != 0 and (proc.state == .Zombie or proc.state == .Terminated)) {
+                    if (infop != 0) {
+                        var info = SigInfo{
+                            .si_signo = signal.SIGCHLD,
+                            .si_errno = 0,
+                            .si_code = 1,
+                            .si_pid = @intCast(proc.pid),
+                            .si_uid = 0,
+                            .si_status = proc.exit_code,
+                            ._pad = [_]i32{0} ** 26,
+                        };
+                        protection.copyToUser(infop, std.mem.asBytes(&info)) catch return EFAULT;
+                    }
+                    return 0;
+                }
+            }
+            return ECHILD;
+        },
+        P_PID => {
+            if (id < 0) return EINVAL;
+            const proc = process.getProcessByPid(@intCast(id)) orelse return ECHILD;
+            if (proc.state == .Zombie or proc.state == .Terminated) {
+                if (infop != 0) {
+                    var info = SigInfo{
+                        .si_signo = signal.SIGCHLD,
+                        .si_errno = 0,
+                        .si_code = 1,
+                        .si_pid = @intCast(proc.pid),
+                        .si_uid = 0,
+                        .si_status = proc.exit_code,
+                        ._pad = [_]i32{0} ** 26,
+                    };
+                    protection.copyToUser(infop, std.mem.asBytes(&info)) catch return EFAULT;
+                }
+                return 0;
+            }
+            return ECHILD;
+        },
+        P_PGID => {
+            return ECHILD;
+        },
+        else => return EINVAL,
+    }
+}
+
+var tid_addresses: [256]usize = [_]usize{0} ** 256;
+
+fn sys_set_tid_address(tidptr: usize) i32 {
+    const proc = process.current_process orelse return ESRCH;
+    const pid_idx: usize = @intCast(proc.pid);
+    tid_addresses[pid_idx] = tidptr;
+    return @intCast(proc.pid);
+}
+
+var robust_list_heads: [256]usize = [_]usize{0} ** 256;
+var robust_list_lens: [256]usize = [_]usize{0} ** 256;
+
+fn sys_get_robust_list(pid: i32, head_ptr: usize, len_ptr: usize) i32 {
+    if (!protection.verifyUserPointer(head_ptr, @sizeOf(usize))) return EFAULT;
+    if (!protection.verifyUserPointer(len_ptr, @sizeOf(usize))) return EFAULT;
+
+    const pid_idx: usize = if (pid == 0) blk: {
+        const proc = process.current_process orelse return ESRCH;
+        break :blk @intCast(proc.pid);
+    } else @intCast(pid);
+
+    if (pid_idx >= 256) return ESRCH;
+
+    const head = robust_list_heads[pid_idx];
+    const len = robust_list_lens[pid_idx];
+
+    protection.copyToUser(head_ptr, std.mem.asBytes(&head)) catch return EFAULT;
+    protection.copyToUser(len_ptr, std.mem.asBytes(&len)) catch return EFAULT;
+    return 0;
+}
+
+fn sys_set_robust_list(head: usize, len: usize) i32 {
+    const proc = process.current_process orelse return ESRCH;
+    const pid_idx: usize = @intCast(proc.pid);
+
+    robust_list_heads[pid_idx] = head;
+    robust_list_lens[pid_idx] = len;
+    return 0;
+}
+
+fn sys_tgkill(tgid: i32, tid: i32, sig: i32) i32 {
+    _ = tgid;
+    return sys_tkill(tid, sig);
+}
+
+fn sys_tkill(tid: i32, sig: i32) i32 {
+    if (sig < 0 or sig > 64) return EINVAL;
+    if (tid < 0) return EINVAL;
+
+    const proc = process.getProcessByPid(@intCast(tid)) orelse return ESRCH;
+
+    if (sig == 0) return 0;
+
+    signal.sendSignal(proc, @intCast(sig));
     return 0;
 }
