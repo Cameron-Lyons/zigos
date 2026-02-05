@@ -47,9 +47,15 @@ pub fn fork() !i32 {
 
     child.kernel_stack = memory.allocPages(1) orelse return error.OutOfMemory;
 
-    child.page_directory = try paging.createUserPageDirectory();
+    child.page_directory = paging.createUserPageDirectory() catch |err| {
+        memory.freePages(child.kernel_stack, 1);
+        return err;
+    };
 
-    try copyAddressSpace(parent, child);
+    copyAddressSpace(parent, child) catch |err| {
+        memory.freePages(child.kernel_stack, 1);
+        return err;
+    };
 
     child.context = parent.context;
 
