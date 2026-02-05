@@ -227,7 +227,7 @@ pub const Shell = struct {
             "head", "tail", "wc", "grep", "find", "stat", "uname",
             "whoami", "pwd", "sort", "uniq", "ifconfig", "df",
             "smptest", "fileiotest", "ext2writetest", "tcptest",
-            "true", "false", "test",
+            "true", "false", "test", "hexdump", "which",
         };
 
 
@@ -612,6 +612,10 @@ pub const Shell = struct {
             self.cmdFalse();
         } else if (streq(command, "test")) {
             self.cmdTest(args[1..arg_count]);
+        } else if (streq(command, "hexdump")) {
+            self.cmdHexdump(args[1..arg_count]);
+        } else if (streq(command, "which")) {
+            self.cmdWhich(args[1..arg_count]);
         } else {
             vga.print("Unknown command: ");
             printString(command);
@@ -2484,6 +2488,119 @@ pub const Shell = struct {
             if (ac != bc) return false;
         }
         return true;
+    }
+
+    fn cmdHexdump(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            vga.print("Usage: hexdump <file>\n");
+            return;
+        }
+
+        const path = sliceFromCStr(args[0]);
+        const vnode = vfs.lookupPath(path) catch {
+            vga.print("hexdump: file not found\n");
+            return;
+        };
+
+        var buf: [256]u8 = undefined;
+        var offset: u64 = 0;
+
+        while (true) {
+            const bytes_read = vnode.ops.read(vnode, &buf, offset) catch {
+                vga.print("hexdump: read error\n");
+                return;
+            };
+            if (bytes_read == 0) break;
+
+            var i: usize = 0;
+            while (i < bytes_read) {
+                if (i % 16 == 0) {
+                    printHex32(@intCast(offset + i));
+                    vga.print("  ");
+                }
+
+                printHex8(buf[i]);
+                vga.print(" ");
+
+                if (i % 16 == 15 or i == bytes_read - 1) {
+                    var pad = (15 - (i % 16)) * 3;
+                    while (pad > 0) : (pad -= 1) {
+                        vga.put_char(' ');
+                    }
+                    vga.print(" |");
+                    const line_start = i - (i % 16);
+                    var j: usize = line_start;
+                    while (j <= i) : (j += 1) {
+                        const c = buf[j];
+                        if (c >= 0x20 and c < 0x7f) {
+                            vga.put_char(c);
+                        } else {
+                            vga.put_char('.');
+                        }
+                    }
+                    vga.print("|\n");
+                }
+                i += 1;
+            }
+            offset += bytes_read;
+            if (bytes_read < buf.len) break;
+        }
+    }
+
+    fn printHex32(val: u32) void {
+        const hex = "0123456789abcdef";
+        var buf: [8]u8 = undefined;
+        var v = val;
+        var i: usize = 8;
+        while (i > 0) {
+            i -= 1;
+            buf[i] = hex[v & 0xf];
+            v >>= 4;
+        }
+        vga.print(&buf);
+    }
+
+    fn printHex8(val: u8) void {
+        const hex = "0123456789abcdef";
+        var buf: [2]u8 = undefined;
+        buf[0] = hex[(val >> 4) & 0xf];
+        buf[1] = hex[val & 0xf];
+        vga.print(&buf);
+    }
+
+    fn cmdWhich(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
+        if (args.len == 0) {
+            vga.print("Usage: which <command>\n");
+            return;
+        }
+
+        const cmd = sliceFromCStr(args[0]);
+        const builtins = [_][]const u8{
+            "help", "clear", "echo", "ps", "meminfo", "uptime", "kill",
+            "shutdown", "memtest", "panic", "lsdev", "ls", "cat", "mkdir",
+            "rmdir", "rm", "mv", "mount", "ping", "httpd", "netstat",
+            "nslookup", "multitask", "scheduler", "schedstats", "dhcp",
+            "route", "arp", "nettest", "synctest", "ipctest", "procmon",
+            "top", "cp", "touch", "write", "edit", "nice", "renice",
+            "head", "tail", "wc", "grep", "find", "stat", "uname",
+            "whoami", "pwd", "sort", "uniq", "ifconfig", "df", "cd",
+            "smptest", "fileiotest", "ext2writetest", "tcptest", "id",
+            "date", "ln", "hostname", "sleep", "umask", "chown", "chgrp",
+            "true", "false", "test", "hexdump", "which",
+        };
+
+        for (builtins) |builtin| {
+            if (strEqlSlice(cmd, builtin)) {
+                vga.print(builtin);
+                vga.print(": shell built-in command\n");
+                return;
+            }
+        }
+
+        vga.print(cmd);
+        vga.print(" not found\n");
     }
 
     fn cmdSort(self: *const Shell, args: []const [*:0]const u8) void {

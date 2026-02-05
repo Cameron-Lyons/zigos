@@ -618,27 +618,23 @@ fn sys_getgid() i32 {
 }
 
 fn sys_setuid(uid: u16) i32 {
-    if (process.current_process) |proc| {
-        if (proc.creds.euid == 0 or proc.creds.uid == uid) {
-            proc.creds.uid = uid;
-            proc.creds.euid = uid;
-            return 0;
-        }
-        return EPERM;
+    const proc = process.current_process orelse return ESRCH;
+    if (proc.creds.euid == 0 or proc.creds.uid == uid) {
+        proc.creds.uid = uid;
+        proc.creds.euid = uid;
+        return 0;
     }
-    return ENOSYS;
+    return EPERM;
 }
 
 fn sys_setgid(gid: u16) i32 {
-    if (process.current_process) |proc| {
-        if (proc.creds.euid == 0 or proc.creds.gid == gid) {
-            proc.creds.gid = gid;
-            proc.creds.egid = gid;
-            return 0;
-        }
-        return EPERM;
+    const proc = process.current_process orelse return ESRCH;
+    if (proc.creds.euid == 0 or proc.creds.gid == gid) {
+        proc.creds.gid = gid;
+        proc.creds.egid = gid;
+        return 0;
     }
-    return ENOSYS;
+    return EPERM;
 }
 
 fn sys_chown(pathname: [*]const u8, uid: u16, gid: u16) i32 {
@@ -1747,7 +1743,7 @@ fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfds_ad
 }
 
 fn sys_umask(mask: u16) i32 {
-    const proc = process.current_process orelse return ENOSYS;
+    const proc = process.current_process orelse return ESRCH;
     const old = proc.umask;
     proc.umask = mask & 0o777;
     return @intCast(old);
