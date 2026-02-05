@@ -5,7 +5,7 @@ const process = @import("../process/process.zig");
 const vfs = @import("../fs/vfs.zig");
 const dynamic = @import("dynamic.zig");
 
-const ELF_MAGIC = 0x464C457F;
+pub const ELF_MAGIC = 0x464C457F;
 
 const ElfClass = enum(u8) {
     None = 0,
