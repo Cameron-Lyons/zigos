@@ -292,6 +292,9 @@ fn schedulePriority() ?*ProcessExtended {
     return null;
 }
 
+var mlfq_boost_counter: u32 = 0;
+const MLFQ_BOOST_INTERVAL: u32 = 50;
+
 fn scheduleMLFQ() ?*ProcessExtended {
     if (current_extended) |curr| {
         curr.time_used += 1;
@@ -306,17 +309,21 @@ fn scheduleMLFQ() ?*ProcessExtended {
             }
         }
 
-        const current_ticks = timer.getTicks();
-        for (&extended_processes) |*ext| {
-            if (ext.in_use and ext.base.state == .Ready) {
-                const wait_ticks = current_ticks - ext.wait_time;
-                if (wait_ticks > 100 and ext.priority != ext.original_priority) {
-                    const new_priority: Priority = @enumFromInt(@min(
-                        @intFromEnum(ext.priority) + 1,
-                        @intFromEnum(ext.original_priority)
-                    ));
-                    ext.priority = new_priority;
-                    ext.time_quantum = getQuantumForPriority(new_priority);
+        mlfq_boost_counter += 1;
+        if (mlfq_boost_counter >= MLFQ_BOOST_INTERVAL) {
+            mlfq_boost_counter = 0;
+            const current_ticks = timer.getTicks();
+            for (&extended_processes) |*ext| {
+                if (ext.in_use and ext.base.state == .Ready) {
+                    const wait_ticks = current_ticks - ext.wait_time;
+                    if (wait_ticks > 100 and ext.priority != ext.original_priority) {
+                        const new_priority: Priority = @enumFromInt(@min(
+                            @intFromEnum(ext.priority) + 1,
+                            @intFromEnum(ext.original_priority)
+                        ));
+                        ext.priority = new_priority;
+                        ext.time_quantum = getQuantumForPriority(new_priority);
+                    }
                 }
             }
         }
