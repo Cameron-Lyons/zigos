@@ -141,6 +141,14 @@ pub const EISCONN = -106;
 pub const ENOTCONN = -107;
 pub const ETIMEDOUT = -110;
 pub const ECONNREFUSED = -111;
+pub const EHOSTUNREACH = -113;
+pub const ENXIO = -6;
+pub const ENOEXEC = -8;
+pub const EXDEV = -18;
+pub const ENOTTY = -25;
+pub const ETXTBSY = -26;
+pub const ELOOP = -40;
+pub const EMSGSIZE = -90;
 
 fn vfsErrno(err: vfs.VFSError) i32 {
     return switch (err) {
@@ -648,6 +656,7 @@ fn sys_chown(pathname: [*]const u8, uid: u16, gid: u16) i32 {
 }
 
 const AF_INET: u32 = 2;
+const AF_INET6: u32 = 10;
 const SOCK_STREAM: u32 = 1;
 const SOCK_DGRAM: u32 = 2;
 
@@ -658,11 +667,23 @@ const SockAddrIn = extern struct {
     zero: [8]u8,
 };
 
+const SockAddrIn6 = extern struct {
+    family: u16,
+    port: u16,
+    flowinfo: u32,
+    addr: [16]u8,
+    scope_id: u32,
+};
+
 var socket_table: [64]?*socket.Socket = [_]?*socket.Socket{null} ** 64;
 
 fn sys_socket(domain: u32, sock_type: u32, protocol: u32) i32 {
     _ = protocol;
-    if (domain != AF_INET) return EINVAL;
+    const addr_family: socket.AddressFamily = switch (domain) {
+        AF_INET => .AF_INET,
+        AF_INET6 => .AF_INET6,
+        else => return EAFNOSUPPORT,
+    };
 
     const s_type: socket.SocketType = switch (sock_type) {
         SOCK_STREAM => .STREAM,
@@ -677,6 +698,7 @@ fn sys_socket(domain: u32, sock_type: u32, protocol: u32) i32 {
     };
 
     const sock = socket.createSocket(s_type, s_proto) catch return ENOMEM;
+    sock.address_family = addr_family;
 
     for (&socket_table, 0..) |*slot, i| {
         if (slot.* == null) {
@@ -693,10 +715,22 @@ fn sys_bind(sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
 
+    if (sock.address_family == .AF_INET6) {
+        if (addr_len < @sizeOf(SockAddrIn6)) return EINVAL;
+        if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn6))) return EINVAL;
+
+        var addr_buf: [@sizeOf(SockAddrIn6)]u8 = undefined;
+        protection.copyFromUser(&addr_buf, addr_ptr) catch return EINVAL;
+        const addr: *const SockAddrIn6 = @ptrCast(@alignCast(&addr_buf));
+
+        sock.local_ipv6 = @import("../net/ipv6.zig").IPv6Address{ .octets = addr.addr };
+        sock.local_port = @byteSwap(addr.port);
+        return 0;
+    }
+
     if (addr_len < @sizeOf(SockAddrIn)) return EINVAL;
     if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn))) return EINVAL;
 
-    // SAFETY: filled by the subsequent copyFromUser call
     var addr_buf: [@sizeOf(SockAddrIn)]u8 = undefined;
     protection.copyFromUser(&addr_buf, addr_ptr) catch return EINVAL;
     const addr: *const SockAddrIn = @ptrCast(@alignCast(&addr_buf));
@@ -718,10 +752,23 @@ fn sys_connect(sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
 
+    if (sock.address_family == .AF_INET6) {
+        if (addr_len < @sizeOf(SockAddrIn6)) return EINVAL;
+        if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn6))) return EINVAL;
+
+        var addr_buf: [@sizeOf(SockAddrIn6)]u8 = undefined;
+        protection.copyFromUser(&addr_buf, addr_ptr) catch return EINVAL;
+        const addr: *const SockAddrIn6 = @ptrCast(@alignCast(&addr_buf));
+
+        sock.remote_ipv6 = @import("../net/ipv6.zig").IPv6Address{ .octets = addr.addr };
+        sock.remote_port = @byteSwap(addr.port);
+        sock.state = .CONNECTED;
+        return 0;
+    }
+
     if (addr_len < @sizeOf(SockAddrIn)) return EINVAL;
     if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn))) return EINVAL;
 
-    // SAFETY: filled by the subsequent copyFromUser call
     var addr_buf: [@sizeOf(SockAddrIn)]u8 = undefined;
     protection.copyFromUser(&addr_buf, addr_ptr) catch return EINVAL;
     const addr: *const SockAddrIn = @ptrCast(@alignCast(&addr_buf));
@@ -1780,6 +1827,25 @@ fn writeSockAddr(addr_ptr: usize, len_ptr: usize, ipv4_addr: @import("../net/ipv
     return 0;
 }
 
+fn writeSockAddr6(addr_ptr: usize, len_ptr: usize, ipv6_addr: @import("../net/ipv6.zig").IPv6Address, port: u16) i32 {
+    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn6))) return EINVAL;
+
+    const addr = SockAddrIn6{
+        .family = @intCast(AF_INET6),
+        .port = @byteSwap(port),
+        .flowinfo = 0,
+        .addr = ipv6_addr.octets,
+        .scope_id = 0,
+    };
+
+    protection.copyToUser(addr_ptr, std.mem.asBytes(&addr)) catch return EINVAL;
+    if (len_ptr != 0 and protection.verifyUserPointer(len_ptr, @sizeOf(u32))) {
+        var len: u32 = @sizeOf(SockAddrIn6);
+        protection.copyToUser(len_ptr, std.mem.asBytes(&len)) catch {};
+    }
+    return 0;
+}
+
 fn sys_sendto(sockfd: i32, buf: [*]const u8, len: usize, dest_addr: usize, addr_len: u32) i32 {
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
@@ -1791,8 +1857,28 @@ fn sys_sendto(sockfd: i32, buf: [*]const u8, len: usize, dest_addr: usize, addr_
     protection.copyFromUser(kernel_buffer[0..to_send], @intFromPtr(buf)) catch return EINVAL;
 
     if (dest_addr == 0) {
+        if (sock.address_family == .AF_INET6) {
+            if (sock.remote_ipv6) |dst| {
+                @import("../net/ipv6.zig").sendPacket(dst, @import("../net/ipv6.zig").NEXT_HEADER_UDP, kernel_buffer[0..to_send]);
+                return @intCast(to_send);
+            }
+            return ENOTCONN;
+        }
         const sent = sock.send(kernel_buffer[0..to_send]) catch |err| return socketErrno(err);
         return @intCast(sent);
+    }
+
+    if (sock.address_family == .AF_INET6) {
+        if (addr_len < @sizeOf(SockAddrIn6)) return EINVAL;
+        if (!protection.verifyUserPointer(dest_addr, @sizeOf(SockAddrIn6))) return EINVAL;
+
+        var addr_buf: [@sizeOf(SockAddrIn6)]u8 = undefined;
+        protection.copyFromUser(&addr_buf, dest_addr) catch return EINVAL;
+        const addr: *const SockAddrIn6 = @ptrCast(@alignCast(&addr_buf));
+
+        const dst = @import("../net/ipv6.zig").IPv6Address{ .octets = addr.addr };
+        @import("../net/ipv6.zig").sendPacket(dst, @import("../net/ipv6.zig").NEXT_HEADER_UDP, kernel_buffer[0..to_send]);
+        return @intCast(to_send);
     }
 
     const parsed = parseSockAddr(dest_addr, addr_len) orelse return EINVAL;
@@ -1816,6 +1902,16 @@ fn sys_recvfrom(sockfd: i32, buf: [*]u8, len: usize, src_addr: usize, addr_len_p
         return @intCast(received);
     }
 
+    if (sock.address_family == .AF_INET6) {
+        const received = sock.recv(kernel_buffer[0..to_recv]) catch |err| return socketErrno(err);
+        if (received == 0) return 0;
+        protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..received]) catch return EINVAL;
+        if (sock.remote_ipv6) |from_ipv6| {
+            _ = writeSockAddr6(src_addr, addr_len_ptr, from_ipv6, sock.remote_port);
+        }
+        return @intCast(received);
+    }
+
     var from_addr = @import("../net/ipv4.zig").IPv4Address{ .octets = .{ 0, 0, 0, 0 } };
     var from_port: u16 = 0;
     const received = sock.recvFrom(kernel_buffer[0..to_recv], &from_addr, &from_port) catch |err| return socketErrno(err);
@@ -1829,6 +1925,10 @@ fn sys_recvfrom(sockfd: i32, buf: [*]u8, len: usize, src_addr: usize, addr_len_p
 fn sys_getsockname(sockfd: i32, addr_ptr: usize, addr_len_ptr: usize) i32 {
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+    if (sock.address_family == .AF_INET6) {
+        const local = sock.local_ipv6 orelse @import("../net/ipv6.zig").UNSPECIFIED;
+        return writeSockAddr6(addr_ptr, addr_len_ptr, local, sock.local_port);
+    }
     return writeSockAddr(addr_ptr, addr_len_ptr, sock.local_addr, sock.local_port);
 }
 
@@ -1836,6 +1936,10 @@ fn sys_getpeername(sockfd: i32, addr_ptr: usize, addr_len_ptr: usize) i32 {
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
     if (sock.state != .CONNECTED) return ENOTCONN;
+    if (sock.address_family == .AF_INET6) {
+        const remote = sock.remote_ipv6 orelse @import("../net/ipv6.zig").UNSPECIFIED;
+        return writeSockAddr6(addr_ptr, addr_len_ptr, remote, sock.remote_port);
+    }
     return writeSockAddr(addr_ptr, addr_len_ptr, sock.remote_addr, sock.remote_port);
 }
 
