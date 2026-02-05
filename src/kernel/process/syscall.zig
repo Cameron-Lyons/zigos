@@ -909,6 +909,71 @@ fn sys_open(pathname: [*]const u8, flags: u32) i32 {
 }
 
 fn sys_close(fd: i32) i32 {
+    if (fd >= 0 and fd < 64) {
+        if (socket_table[@intCast(fd)]) |sock| {
+            sock.close();
+            socket_table[@intCast(fd)] = null;
+            return 0;
+        }
+    }
+
+    if (fd >= 1000 and fd < 1064) {
+        const idx: usize = @intCast(fd - 1000);
+        var usock = &unix_sockets[idx];
+        if (!usock.in_use) return EBADF;
+        usock.in_use = false;
+        usock.peer = null;
+        usock.path_len = 0;
+        usock.listening = false;
+        usock.connected = false;
+        return 0;
+    }
+
+    if (fd >= 2000 and fd < 2064) {
+        const idx: usize = @intCast(fd - 2000);
+        var efd = &eventfd_table[idx];
+        if (!efd.in_use) return EBADF;
+        efd.in_use = false;
+        return 0;
+    }
+
+    if (fd >= 3000 and fd < 3064) {
+        const idx: usize = @intCast(fd - 3000);
+        var sfd = &signalfd_table[idx];
+        if (!sfd.in_use) return EBADF;
+        sfd.in_use = false;
+        return 0;
+    }
+
+    if (fd >= 4000 and fd < 4032) {
+        const idx: usize = @intCast(fd - 4000);
+        var inst = &inotify_instances[idx];
+        if (!inst.in_use) return EBADF;
+        inst.in_use = false;
+        for (&inst.watches) |*w| {
+            w.in_use = false;
+            w.wd = -1;
+        }
+        return 0;
+    }
+
+    if (fd >= FD_OFFSET + 200 and fd < FD_OFFSET + 264) {
+        const idx: usize = @intCast(fd - FD_OFFSET - 200);
+        var inst = &epoll_instances[idx];
+        if (!inst.in_use) return EBADF;
+        inst.in_use = false;
+        inst.count = 0;
+        return 0;
+    }
+
+    if (fd >= FD_OFFSET + 300 and fd < FD_OFFSET + 364) {
+        const idx: usize = @intCast(fd - FD_OFFSET - 300);
+        var tfd = &timerfd_table[idx];
+        if (!tfd.in_use) return EBADF;
+        tfd.in_use = false;
+        return 0;
+    }
+
     if (fd < FD_OFFSET) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
     vfs.close(vfs_fd) catch |err| return vfsErrno(err);
