@@ -430,6 +430,58 @@ pub fn setFdFlags(fd: u32, flags: u32) VFSError!void {
     return VFSError.InvalidOperation;
 }
 
+pub fn getVNodeFromFd(fd: u32) VFSError!*VNode {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+    if (fd_table[fd]) |file_desc| {
+        return file_desc.vnode;
+    }
+    return VFSError.InvalidOperation;
+}
+
+var path_buffer: [512]u8 = undefined;
+
+pub fn getNodePath(vnode: *VNode) VFSError![]const u8 {
+    var components: [32]*VNode = undefined;
+    var depth: usize = 0;
+
+    var current: ?*VNode = vnode;
+    while (current) |node| : (current = node.parent) {
+        if (depth >= components.len) return VFSError.InvalidPath;
+        components[depth] = node;
+        depth += 1;
+    }
+
+    if (depth == 0) return VFSError.InvalidPath;
+
+    var pos: usize = 0;
+
+    if (depth == 1 and components[0].name_len == 1 and components[0].name[0] == '/') {
+        path_buffer[0] = '/';
+        return path_buffer[0..1];
+    }
+
+    var i: usize = depth;
+    while (i > 0) {
+        i -= 1;
+        const node = components[i];
+        if (node.name_len > 0 and !(node.name_len == 1 and node.name[0] == '/')) {
+            path_buffer[pos] = '/';
+            pos += 1;
+            const name_len = node.name_len;
+            if (pos + name_len > path_buffer.len) return VFSError.InvalidPath;
+            @memcpy(path_buffer[pos .. pos + name_len], node.name[0..name_len]);
+            pos += name_len;
+        }
+    }
+
+    if (pos == 0) {
+        path_buffer[0] = '/';
+        return path_buffer[0..1];
+    }
+
+    return path_buffer[0..pos];
+}
+
 pub fn stat(path: []const u8, stat_buf: *FileStat) VFSError!void {
     const vnode = try lookupPath(path);
     try vnode.ops.stat(vnode, stat_buf);
@@ -501,6 +553,49 @@ pub fn rmdir(path: []const u8) VFSError!void {
     }
 
     try parent.mount_point.?.fs_type.ops.rmdir(parent, name);
+}
+
+pub fn mkfifo(path: []const u8, mode: FileMode) VFSError!void {
+    const parent_path = getParentPath(path);
+    const name = getBaseName(path);
+
+    const parent = try lookupPath(parent_path);
+    if (parent.file_type != FileType.Directory) {
+        return VFSError.NotDirectory;
+    }
+
+    _ = parent.mount_point.?.fs_type.ops.lookup(parent, name) catch |err| {
+        if (err != VFSError.NotFound) return err;
+
+        const vnode = try createVNode();
+        const name_len = @min(name.len, vnode.name.len - 1);
+        @memcpy(vnode.name[0..name_len], name[0..name_len]);
+        vnode.name[name_len] = 0;
+        vnode.name_len = @intCast(name_len);
+        vnode.file_type = .Pipe;
+        vnode.mode = mode;
+        vnode.ops = &pipe_ops;
+        vnode.parent = parent;
+        vnode.mount_point = parent.mount_point;
+
+        const pipe_mem = memory.kmalloc(@sizeOf(PipeData)) orelse return VFSError.OutOfMemory;
+        const pipe_data: *PipeData = @ptrCast(@alignCast(pipe_mem));
+        pipe_data.* = PipeData{
+            .buffer = [_]u8{0} ** PIPE_BUF_SIZE,
+            .read_pos = 0,
+            .write_pos = 0,
+            .count = 0,
+            .readers = 0,
+            .writers = 0,
+        };
+        vnode.private_data = pipe_mem;
+
+        vnode.next_sibling = parent.children;
+        parent.children = vnode;
+        return;
+    };
+
+    return VFSError.AlreadyExists;
 }
 
 pub fn truncate(path: []const u8, size: u64) VFSError!void {
