@@ -136,6 +136,13 @@ pub const SYS_DUP3 = 119;
 pub const SYS_ACCEPT4 = 120;
 pub const SYS_EVENTFD = 121;
 pub const SYS_EVENTFD2 = 122;
+pub const SYS_PRCTL = 123;
+pub const SYS_SIGNALFD = 124;
+pub const SYS_SIGNALFD4 = 125;
+pub const SYS_PPOLL = 126;
+pub const SYS_PSELECT6 = 127;
+pub const SYS_FACCESSAT = 128;
+pub const SYS_FACCESSAT2 = 129;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -259,6 +266,21 @@ pub const EFD_NONBLOCK: u32 = 0x00800;
 
 pub const SOCK_CLOEXEC: u32 = 0x80000;
 pub const SOCK_NONBLOCK: u32 = 0x800;
+
+pub const PR_SET_NAME: u32 = 15;
+pub const PR_GET_NAME: u32 = 16;
+pub const PR_SET_DUMPABLE: u32 = 4;
+pub const PR_GET_DUMPABLE: u32 = 3;
+pub const PR_SET_KEEPCAPS: u32 = 8;
+pub const PR_GET_KEEPCAPS: u32 = 7;
+pub const PR_SET_PDEATHSIG: u32 = 1;
+pub const PR_GET_PDEATHSIG: u32 = 2;
+
+pub const SFD_CLOEXEC: u32 = 0x80000;
+pub const SFD_NONBLOCK: u32 = 0x800;
+
+pub const AT_EACCESS: u32 = 0x200;
+pub const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
 
 fn vfsErrno(err: vfs.VFSError) i32 {
     return switch (err) {
@@ -425,6 +447,13 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_ACCEPT4 => sys_accept4(@intCast(arg1), arg2, arg3, @intCast(arg4)),
         SYS_EVENTFD => sys_eventfd(@intCast(arg1)),
         SYS_EVENTFD2 => sys_eventfd2(@intCast(arg1), @intCast(arg2)),
+        SYS_PRCTL => sys_prctl(@intCast(arg1), arg2, arg3, arg4, arg5),
+        SYS_SIGNALFD => sys_signalfd(@intCast(arg1), arg2, @intCast(arg3)),
+        SYS_SIGNALFD4 => sys_signalfd4(@intCast(arg1), arg2, @intCast(arg3), @intCast(arg4)),
+        SYS_PPOLL => sys_ppoll(arg1, @intCast(arg2), arg3, arg4),
+        SYS_PSELECT6 => sys_pselect6(@intCast(arg1), arg2, arg3, arg4, arg5, @as(usize, @bitCast(@as(i32, @intCast(regs.ebp))))),
+        SYS_FACCESSAT => sys_faccessat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), 0),
+        SYS_FACCESSAT2 => sys_faccessat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), @intCast(arg4)),
         else => ENOSYS,
     };
 
@@ -3760,4 +3789,178 @@ fn sys_eventfd2(initval: u32, flags: u32) i32 {
         }
     }
     return EMFILE;
+}
+
+var process_names: [256][16]u8 = [_][16]u8{[_]u8{0} ** 16} ** 256;
+var process_dumpable: [256]u32 = [_]u32{1} ** 256;
+var process_keepcaps: [256]u32 = [_]u32{0} ** 256;
+var process_pdeathsig: [256]u32 = [_]u32{0} ** 256;
+
+fn sys_prctl(option: u32, arg2: usize, arg3: usize, arg4: usize, arg5: usize) i32 {
+    _ = arg4;
+    _ = arg5;
+
+    const proc = process.current_process orelse return ESRCH;
+    const pid_idx: usize = @intCast(proc.pid);
+
+    switch (option) {
+        PR_SET_NAME => {
+            if (!protection.verifyUserPointer(arg2, 16)) return EFAULT;
+            var name_buf: [16]u8 = [_]u8{0} ** 16;
+            protection.copyFromUser(&name_buf, arg2) catch return EFAULT;
+            process_names[pid_idx] = name_buf;
+            return 0;
+        },
+        PR_GET_NAME => {
+            if (!protection.verifyUserPointer(arg2, 16)) return EFAULT;
+            protection.copyToUser(arg2, &process_names[pid_idx]) catch return EFAULT;
+            return 0;
+        },
+        PR_SET_DUMPABLE => {
+            if (arg2 > 2) return EINVAL;
+            process_dumpable[pid_idx] = @intCast(arg2);
+            return 0;
+        },
+        PR_GET_DUMPABLE => {
+            return @intCast(process_dumpable[pid_idx]);
+        },
+        PR_SET_KEEPCAPS => {
+            process_keepcaps[pid_idx] = if (arg2 != 0) 1 else 0;
+            return 0;
+        },
+        PR_GET_KEEPCAPS => {
+            return @intCast(process_keepcaps[pid_idx]);
+        },
+        PR_SET_PDEATHSIG => {
+            if (arg2 > 64) return EINVAL;
+            process_pdeathsig[pid_idx] = @intCast(arg2);
+            return 0;
+        },
+        PR_GET_PDEATHSIG => {
+            if (!protection.verifyUserPointer(arg2, @sizeOf(i32))) return EFAULT;
+            const sig: i32 = @intCast(process_pdeathsig[pid_idx]);
+            protection.copyToUser(arg2, std.mem.asBytes(&sig)) catch return EFAULT;
+            return 0;
+        },
+        else => return EINVAL,
+    }
+    _ = arg3;
+}
+
+const SignalFD = struct {
+    mask: u64,
+    flags: u32,
+    in_use: bool,
+};
+
+var signalfd_table: [64]SignalFD = [_]SignalFD{.{ .mask = 0, .flags = 0, .in_use = false }} ** 64;
+
+fn sys_signalfd(fd: i32, mask_ptr: usize, sizemask: usize) i32 {
+    return sys_signalfd4(fd, mask_ptr, sizemask, 0);
+}
+
+fn sys_signalfd4(fd: i32, mask_ptr: usize, sizemask: usize, flags: u32) i32 {
+    _ = sizemask;
+
+    if (!protection.verifyUserPointer(mask_ptr, @sizeOf(u64))) return EFAULT;
+
+    var mask: u64 = 0;
+    protection.copyFromUser(std.mem.asBytes(&mask), mask_ptr) catch return EFAULT;
+
+    if (fd == -1) {
+        for (&signalfd_table, 0..) |*sfd, i| {
+            if (!sfd.in_use) {
+                sfd.in_use = true;
+                sfd.mask = mask;
+                sfd.flags = flags;
+                return @intCast(@as(i32, @intCast(i)) + 3000);
+            }
+        }
+        return EMFILE;
+    }
+
+    if (fd >= 3000 and fd < 3064) {
+        const idx: usize = @intCast(fd - 3000);
+        if (!signalfd_table[idx].in_use) return EBADF;
+        signalfd_table[idx].mask = mask;
+        return fd;
+    }
+
+    return EBADF;
+}
+
+const Timespec = extern struct {
+    tv_sec: i32,
+    tv_nsec: i32,
+};
+
+fn sys_ppoll(fds_ptr: usize, nfds: u32, timeout_ptr: usize, sigmask_ptr: usize) i32 {
+    _ = sigmask_ptr;
+
+    var timeout_ms: i32 = -1;
+    if (timeout_ptr != 0) {
+        if (!protection.verifyUserPointer(timeout_ptr, @sizeOf(Timespec))) return EFAULT;
+        var ts: Timespec = undefined;
+        protection.copyFromUser(std.mem.asBytes(&ts), timeout_ptr) catch return EFAULT;
+        timeout_ms = ts.tv_sec * 1000 + @divTrunc(ts.tv_nsec, 1000000);
+    }
+
+    return sys_poll(fds_ptr, nfds, timeout_ms);
+}
+
+fn sys_pselect6(nfds: i32, readfds: usize, writefds: usize, exceptfds: usize, timeout_ptr: usize, sigmask_ptr: usize) i32 {
+    _ = sigmask_ptr;
+
+    var timeout_arg: usize = 0;
+    var timeval_buf: [8]u8 = undefined;
+
+    if (timeout_ptr != 0) {
+        if (!protection.verifyUserPointer(timeout_ptr, @sizeOf(Timespec))) return EFAULT;
+        var ts: Timespec = undefined;
+        protection.copyFromUser(std.mem.asBytes(&ts), timeout_ptr) catch return EFAULT;
+
+        const tv_sec: u32 = @intCast(ts.tv_sec);
+        const tv_usec: u32 = @intCast(@divTrunc(ts.tv_nsec, 1000));
+        @memcpy(timeval_buf[0..4], std.mem.asBytes(&tv_sec));
+        @memcpy(timeval_buf[4..8], std.mem.asBytes(&tv_usec));
+        timeout_arg = @intFromPtr(&timeval_buf);
+    }
+
+    return sys_select(nfds, readfds, writefds, exceptfds, timeout_arg);
+}
+
+fn sys_faccessat(dirfd: i32, pathname: [*]const u8, mode: u32, flags: u32) i32 {
+    _ = flags;
+
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EFAULT;
+
+    var path_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EFAULT;
+
+    var full_path_buf: [512]u8 = undefined;
+    const full_path = if (path_slice.len > 0 and path_slice[0] == '/') blk: {
+        break :blk path_slice;
+    } else blk: {
+        if (dirfd == AT_FDCWD) {
+            ensureCwdInit();
+            const cwd = current_working_dir[0..cwd_len];
+            const cwdlen = cwd.len;
+            @memcpy(full_path_buf[0..cwdlen], cwd);
+            if (cwdlen > 0 and cwd[cwdlen - 1] != '/') {
+                full_path_buf[cwdlen] = '/';
+                @memcpy(full_path_buf[cwdlen + 1 .. cwdlen + 1 + path_slice.len], path_slice);
+                break :blk full_path_buf[0 .. cwdlen + 1 + path_slice.len];
+            } else {
+                @memcpy(full_path_buf[cwdlen .. cwdlen + path_slice.len], path_slice);
+                break :blk full_path_buf[0 .. cwdlen + path_slice.len];
+            }
+        }
+        return EBADF;
+    };
+
+    const vnode = vfs.lookupPath(full_path) catch |err| return vfsErrno(err);
+    _ = vnode;
+    _ = mode;
+
+    return 0;
 }
