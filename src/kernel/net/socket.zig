@@ -324,6 +324,8 @@ pub const Socket = struct {
             .TCP => {
                 if (self.tcp_connection) |conn| {
                     tcp.closeConnection(conn);
+                    memory.kfree(conn.recv_buffer.ptr);
+                    memory.kfree(conn.send_buffer.ptr);
                 }
             },
             else => {},
