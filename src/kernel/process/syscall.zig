@@ -255,7 +255,7 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_SIGSUSPEND => sys_sigsuspend(arg1),
         SYS_DUP => sys_dup(@intCast(arg1)),
         SYS_FCNTL => sys_fcntl(@intCast(arg1), @intCast(arg2), arg3),
-        SYS_SELECT => sys_select(@intCast(arg1), arg2, arg3, arg4),
+        SYS_SELECT => sys_select(@intCast(arg1), arg2, arg3, arg4, arg5),
         SYS_UMASK => sys_umask(@intCast(arg1)),
         SYS_UNAME => sys_uname(arg1),
         SYS_TRUNCATE => sys_truncate(@as([*]const u8, @ptrFromInt(arg1)), arg2),
@@ -1608,31 +1608,19 @@ const FdSet = extern struct {
     fds_bits: [8]u32,
 };
 
-fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfds_addr: usize) i32 {
-    if (nfds < 0 or nfds > 256) return EINVAL;
+const Timeval = extern struct {
+    tv_sec: i32,
+    tv_usec: i32,
+};
 
-    // SAFETY: filled by the subsequent copyFromUser calls
-    var readfds: FdSet = std.mem.zeroes(FdSet);
-    // SAFETY: filled by the subsequent copyFromUser calls
-    var writefds: FdSet = std.mem.zeroes(FdSet);
-    var result_readfds: FdSet = std.mem.zeroes(FdSet);
-    var result_writefds: FdSet = std.mem.zeroes(FdSet);
-
-    if (readfds_addr != 0) {
-        if (!protection.verifyUserPointer(readfds_addr, @sizeOf(FdSet))) return EINVAL;
-        protection.copyFromUser(std.mem.asBytes(&readfds), readfds_addr) catch return EINVAL;
-    }
-
-    if (writefds_addr != 0) {
-        if (!protection.verifyUserPointer(writefds_addr, @sizeOf(FdSet))) return EINVAL;
-        protection.copyFromUser(std.mem.asBytes(&writefds), writefds_addr) catch return EINVAL;
-    }
-
-    _ = exceptfds_addr;
+fn selectCheckFds(nfds: u32, readfds: *const FdSet, writefds: *const FdSet, exceptfds: *const FdSet, result_readfds: *FdSet, result_writefds: *FdSet, result_exceptfds: *FdSet) i32 {
+    result_readfds.* = std.mem.zeroes(FdSet);
+    result_writefds.* = std.mem.zeroes(FdSet);
+    result_exceptfds.* = std.mem.zeroes(FdSet);
 
     var count: i32 = 0;
     var i: u32 = 0;
-    while (i < @as(u32, @intCast(nfds))) : (i += 1) {
+    while (i < nfds) : (i += 1) {
         const word_idx = i / 32;
         const bit_idx: u5 = @intCast(i % 32);
         const mask = @as(u32, 1) << bit_idx;
@@ -1666,6 +1654,78 @@ fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfds_ad
                 } else |_| {}
             }
         }
+
+        if (exceptfds.fds_bits[word_idx] & mask != 0) {
+            if (i >= FD_OFFSET) {
+                const vfs_fd: u32 = i - FD_OFFSET;
+                if (vfs.getFileFlags(vfs_fd)) |_| {} else |_| {
+                    result_exceptfds.fds_bits[word_idx] |= mask;
+                    count += 1;
+                }
+            }
+        }
+    }
+    return count;
+}
+
+fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfds_addr: usize, timeout_addr: usize) i32 {
+    if (nfds < 0 or nfds > 256) return EINVAL;
+
+    var readfds: FdSet = std.mem.zeroes(FdSet);
+    var writefds: FdSet = std.mem.zeroes(FdSet);
+    var exceptfds: FdSet = std.mem.zeroes(FdSet);
+    var result_readfds: FdSet = std.mem.zeroes(FdSet);
+    var result_writefds: FdSet = std.mem.zeroes(FdSet);
+    var result_exceptfds: FdSet = std.mem.zeroes(FdSet);
+
+    if (readfds_addr != 0) {
+        if (!protection.verifyUserPointer(readfds_addr, @sizeOf(FdSet))) return EINVAL;
+        protection.copyFromUser(std.mem.asBytes(&readfds), readfds_addr) catch return EINVAL;
+    }
+
+    if (writefds_addr != 0) {
+        if (!protection.verifyUserPointer(writefds_addr, @sizeOf(FdSet))) return EINVAL;
+        protection.copyFromUser(std.mem.asBytes(&writefds), writefds_addr) catch return EINVAL;
+    }
+
+    if (exceptfds_addr != 0) {
+        if (!protection.verifyUserPointer(exceptfds_addr, @sizeOf(FdSet))) return EINVAL;
+        protection.copyFromUser(std.mem.asBytes(&exceptfds), exceptfds_addr) catch return EINVAL;
+    }
+
+    var timeout_ms: i64 = -1;
+    if (timeout_addr != 0) {
+        if (!protection.verifyUserPointer(timeout_addr, @sizeOf(Timeval))) return EINVAL;
+        var tv: Timeval = undefined;
+        protection.copyFromUser(std.mem.asBytes(&tv), timeout_addr) catch return EINVAL;
+        timeout_ms = @as(i64, tv.tv_sec) * 1000 + @divTrunc(tv.tv_usec, 1000);
+    }
+
+    var count = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds);
+
+    if (timeout_ms == 0 or count > 0) {
+        if (readfds_addr != 0) {
+            protection.copyToUser(readfds_addr, std.mem.asBytes(&result_readfds)) catch return EINVAL;
+        }
+        if (writefds_addr != 0) {
+            protection.copyToUser(writefds_addr, std.mem.asBytes(&result_writefds)) catch return EINVAL;
+        }
+        if (exceptfds_addr != 0) {
+            protection.copyToUser(exceptfds_addr, std.mem.asBytes(&result_exceptfds)) catch return EINVAL;
+        }
+        return count;
+    }
+
+    const timer = @import("../timer/timer.zig");
+    const start_ticks = timer.getTicks();
+    const timeout_ticks: u64 = if (timeout_ms < 0) std.math.maxInt(u64) else @as(u64, @intCast(timeout_ms)) / 10;
+
+    while (count == 0) {
+        const elapsed = timer.getTicks() - start_ticks;
+        if (timeout_ms >= 0 and elapsed >= timeout_ticks) break;
+
+        process.yield();
+        count = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds);
     }
 
     if (readfds_addr != 0) {
@@ -1673,6 +1733,9 @@ fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfds_ad
     }
     if (writefds_addr != 0) {
         protection.copyToUser(writefds_addr, std.mem.asBytes(&result_writefds)) catch return EINVAL;
+    }
+    if (exceptfds_addr != 0) {
+        protection.copyToUser(exceptfds_addr, std.mem.asBytes(&result_exceptfds)) catch return EINVAL;
     }
 
     return count;
@@ -1974,17 +2037,7 @@ const POLLERR: i16 = 0x008;
 const POLLHUP: i16 = 0x010;
 const POLLNVAL: i16 = 0x020;
 
-fn sys_poll(fds_addr: usize, nfds: u32, timeout: i32) i32 {
-    _ = timeout;
-    if (nfds == 0) return 0;
-    if (nfds > 256) return EINVAL;
-
-    const copy_size = nfds * @sizeOf(PollFd);
-    if (!protection.verifyUserPointer(fds_addr, copy_size)) return EINVAL;
-
-    var kernel_fds: [256]PollFd = undefined;
-    protection.copyFromUser(std.mem.asBytes(&kernel_fds)[0..copy_size], fds_addr) catch return EINVAL;
-
+fn pollCheckFds(kernel_fds: []PollFd, nfds: u32) i32 {
     var count: i32 = 0;
     var i: u32 = 0;
     while (i < nfds) : (i += 1) {
@@ -2019,6 +2072,37 @@ fn sys_poll(fds_addr: usize, nfds: u32, timeout: i32) i32 {
             kernel_fds[i].revents = POLLNVAL;
             count += 1;
         }
+    }
+    return count;
+}
+
+fn sys_poll(fds_addr: usize, nfds: u32, timeout: i32) i32 {
+    if (nfds == 0) return 0;
+    if (nfds > 256) return EINVAL;
+
+    const copy_size = nfds * @sizeOf(PollFd);
+    if (!protection.verifyUserPointer(fds_addr, copy_size)) return EINVAL;
+
+    var kernel_fds: [256]PollFd = undefined;
+    protection.copyFromUser(std.mem.asBytes(&kernel_fds)[0..copy_size], fds_addr) catch return EINVAL;
+
+    var count = pollCheckFds(kernel_fds[0..nfds], nfds);
+
+    if (timeout == 0 or count > 0) {
+        protection.copyToUser(fds_addr, std.mem.asBytes(&kernel_fds)[0..copy_size]) catch return EINVAL;
+        return count;
+    }
+
+    const timer = @import("../timer/timer.zig");
+    const start_ticks = timer.getTicks();
+    const timeout_ticks: u64 = if (timeout < 0) std.math.maxInt(u64) else @as(u64, @intCast(timeout)) / 10;
+
+    while (count == 0) {
+        const elapsed = timer.getTicks() - start_ticks;
+        if (timeout >= 0 and elapsed >= timeout_ticks) break;
+
+        process.yield();
+        count = pollCheckFds(kernel_fds[0..nfds], nfds);
     }
 
     protection.copyToUser(fds_addr, std.mem.asBytes(&kernel_fds)[0..copy_size]) catch return EINVAL;
