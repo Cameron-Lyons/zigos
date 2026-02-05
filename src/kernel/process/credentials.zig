@@ -27,6 +27,8 @@ var user_table: [MAX_USERS]UserEntry = [_]UserEntry{UserEntry{
     .active = false,
 }} ** MAX_USERS;
 
+var uid_lookup: [MAX_USERS]?*UserEntry = [_]?*UserEntry{null} ** MAX_USERS;
+
 var initialized: bool = false;
 
 pub fn init() void {
@@ -50,6 +52,8 @@ fn addUserInternal(name: []const u8, uid: u16, gid: u16, home: []const u8) void 
             @memset(&entry.home, 0);
             const home_len = @min(home.len, entry.home.len - 1);
             @memcpy(entry.home[0..home_len], home[0..home_len]);
+
+            uid_lookup[uid % MAX_USERS] = entry;
             return;
         }
     }
@@ -91,7 +95,8 @@ pub fn isRoot(creds: *const Credentials) bool {
 }
 
 pub fn lookupUser(uid: u16) ?*UserEntry {
-    for (&user_table) |*entry| {
+    const slot = uid % MAX_USERS;
+    if (uid_lookup[slot]) |entry| {
         if (entry.active and entry.uid == uid) {
             return entry;
         }

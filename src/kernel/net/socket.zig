@@ -131,6 +131,7 @@ pub const Socket = struct {
 
         self.local_addr = addr;
         self.local_port = port;
+        port_lookup[port % PORT_LOOKUP_SIZE] = self;
     }
 
     pub fn listen(self: *Socket, backlog: usize) !void {
@@ -329,6 +330,9 @@ pub const Socket = struct {
         self.state = .CLOSED;
         self.in_use = false;
         socket_id_lookup[self.id % MAX_SOCKETS] = null;
+        if (self.local_port != 0) {
+            port_lookup[self.local_port % PORT_LOOKUP_SIZE] = null;
+        }
 
         memory.kfree(self.recv_buffer.ptr);
         memory.kfree(self.send_buffer.ptr);
@@ -359,6 +363,8 @@ pub const Socket = struct {
 
 var sockets: [MAX_SOCKETS]?*Socket = [_]?*Socket{null} ** MAX_SOCKETS;
 var socket_id_lookup: [MAX_SOCKETS]?*Socket = [_]?*Socket{null} ** MAX_SOCKETS;
+const PORT_LOOKUP_SIZE = 1024;
+var port_lookup: [PORT_LOOKUP_SIZE]?*Socket = [_]?*Socket{null} ** PORT_LOOKUP_SIZE;
 var next_socket_id: u32 = 1;
 var next_ephemeral_port: u16 = 49152;
 
@@ -378,11 +384,10 @@ fn allocateEphemeralPort() u16 {
 }
 
 fn isPortInUse(port: u16) bool {
-    for (sockets) |maybe_sock| {
-        if (maybe_sock) |sock| {
-            if (sock.in_use and sock.local_port == port) {
-                return true;
-            }
+    const slot = port % PORT_LOOKUP_SIZE;
+    if (port_lookup[slot]) |sock| {
+        if (sock.in_use and sock.local_port == port) {
+            return true;
         }
     }
     return false;
@@ -413,11 +418,10 @@ pub fn findSocket(id: u32) ?*Socket {
 }
 
 pub fn findListeningSocket(port: u16) ?*Socket {
-    for (sockets) |maybe_sock| {
-        if (maybe_sock) |sock| {
-            if (sock.in_use and sock.local_port == port and sock.state == .LISTENING) {
-                return sock;
-            }
+    const slot = port % PORT_LOOKUP_SIZE;
+    if (port_lookup[slot]) |sock| {
+        if (sock.in_use and sock.local_port == port and sock.state == .LISTENING) {
+            return sock;
         }
     }
     return null;
