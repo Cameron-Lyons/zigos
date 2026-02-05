@@ -1762,7 +1762,11 @@ fn sys_msgrcv(buf: [*]u8, size: usize, flags: i32) i32 {
 
     const m = msg.?;
     const copy_len = @min(m.data_len, @as(u32, @intCast(size)));
-    protection.copyToUser(@intFromPtr(buf), m.data[0..copy_len]) catch return EINVAL;
+    protection.copyToUser(@intFromPtr(buf), m.data[0..copy_len]) catch {
+        ipc.freeMessage(m);
+        return EINVAL;
+    };
+    ipc.freeMessage(m);
     return @intCast(copy_len);
 }
 

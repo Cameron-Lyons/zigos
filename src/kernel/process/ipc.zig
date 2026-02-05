@@ -351,10 +351,35 @@ pub fn getMessageQueue(pid: u32) ?*MessageQueue {
     return null;
 }
 
+pub fn destroyMessageQueue(pid: u32) void {
+    ipc_mutex.lock();
+    defer ipc_mutex.unlock();
+
+    for (&message_queues) |*queue| {
+        if (queue.* != null and queue.*.?.pid == pid) {
+            var q = &queue.*.?;
+            var current = q.messages;
+            while (current) |msg| {
+                const next = msg.next;
+                memory.kfree(@ptrCast(msg));
+                current = next;
+            }
+            queue.* = null;
+            return;
+        }
+    }
+}
+
+pub fn freeMessage(msg: *Message) void {
+    memory.kfree(@ptrCast(msg));
+}
+
 pub fn sendMessage(sender_pid: u32, receiver_pid: u32, msg_type: MessageType, data: []const u8) !void {
     const timer = @import("../timer/timer.zig");
 
     const msg = memory.alloc(Message) orelse return error.OutOfMemory;
+    errdefer memory.kfree(@ptrCast(msg));
+
     msg.sender_pid = sender_pid;
     msg.receiver_pid = receiver_pid;
     msg.msg_type = msg_type;
@@ -372,6 +397,8 @@ pub fn createSharedMemory(owner_pid: u32, size: usize, permissions: u8) !*Shared
     defer ipc_mutex.unlock();
 
     const shm = memory.alloc(SharedMemory) orelse return error.OutOfMemory;
+    errdefer memory.kfree(@ptrCast(shm));
+
     shm.* = try SharedMemory.init(next_shm_id, owner_pid, size, permissions);
     next_shm_id += 1;
 
@@ -459,6 +486,7 @@ fn ipc_test_receiver() void {
             vga.put_char(msg.data[i]);
         }
         vga.print("\n");
+        freeMessage(msg);
     } else {
         vga.print("[RECEIVER] No message received\n");
     }
