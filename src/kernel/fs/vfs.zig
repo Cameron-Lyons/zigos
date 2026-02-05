@@ -241,6 +241,29 @@ pub fn mount(device: []const u8, mount_path: []const u8, fs_name: []const u8, fl
     return VFSError.InvalidOperation;
 }
 
+pub fn unmount(mount_path: []const u8) VFSError!void {
+    var prev: ?*MountPoint = null;
+    var current = mount_list;
+
+    while (current) |mp| {
+        const mp_path = mp.mount_path[0..strlen(&mp.mount_path)];
+        if (std.mem.eql(u8, mp_path, mount_path)) {
+            mp.fs_type.ops.unmount(mp) catch {};
+
+            if (prev) |p| {
+                p.next = mp.next;
+            } else {
+                mount_list = mp.next;
+            }
+            return;
+        }
+        prev = mp;
+        current = mp.next;
+    }
+
+    return VFSError.NotFound;
+}
+
 pub fn open(path: []const u8, flags: u32) VFSError!u32 {
     const vnode = blk: {
         if (lookupPath(path)) |v| {
