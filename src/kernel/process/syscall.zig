@@ -100,6 +100,8 @@ pub const SYS_GETEGID = 83;
 pub const SYS_ISATTY = 84;
 pub const SYS_STATFS = 85;
 pub const SYS_FSTATFS = 86;
+pub const SYS_GETHOSTNAME = 87;
+pub const SYS_SETHOSTNAME = 88;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -149,6 +151,7 @@ pub const ENOTTY = -25;
 pub const ETXTBSY = -26;
 pub const ELOOP = -40;
 pub const EMSGSIZE = -90;
+pub const ENOPROTOOPT = -92;
 
 fn vfsErrno(err: vfs.VFSError) i32 {
     return switch (err) {
@@ -279,6 +282,8 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_ISATTY => sys_isatty(@intCast(arg1)),
         SYS_STATFS => sys_statfs(@as([*]const u8, @ptrFromInt(arg1)), arg2),
         SYS_FSTATFS => sys_fstatfs(@intCast(arg1), arg2),
+        SYS_GETHOSTNAME => sys_gethostname(arg1, arg2),
+        SYS_SETHOSTNAME => sys_sethostname(arg1, arg2),
         else => ENOSYS,
     };
 
@@ -1778,6 +1783,36 @@ pub fn setHostname(name: []const u8) void {
     hostname_len = len;
 }
 
+fn sys_gethostname(name_addr: usize, len: usize) i32 {
+    if (len == 0) return EINVAL;
+    if (!protection.verifyUserPointer(name_addr, len)) return EINVAL;
+
+    const copy_len = @min(len - 1, hostname_len);
+    var buf: [65]u8 = undefined;
+    @memcpy(buf[0..copy_len], system_hostname[0..copy_len]);
+    buf[copy_len] = 0;
+
+    protection.copyToUser(name_addr, buf[0 .. copy_len + 1]) catch return EINVAL;
+    return 0;
+}
+
+fn sys_sethostname(name_addr: usize, len: usize) i32 {
+    if (process.current_process) |proc| {
+        if (!credentials.isRoot(&proc.creds)) {
+            return EPERM;
+        }
+    }
+
+    if (len > 64) return EINVAL;
+    if (!protection.verifyUserPointer(name_addr, len)) return EINVAL;
+
+    var buf: [64]u8 = undefined;
+    protection.copyFromUser(buf[0..len], name_addr) catch return EINVAL;
+
+    setHostname(buf[0..len]);
+    return 0;
+}
+
 fn fillField(dest: *[65]u8, src: []const u8) void {
     @memset(dest, 0);
     const len = @min(src.len, 64);
@@ -2124,28 +2159,49 @@ fn sys_lstat(pathname: [*]const u8, stat_buf_addr: usize) i32 {
 }
 
 const SOL_SOCKET: i32 = 1;
+const IPPROTO_TCP: i32 = 6;
 const SO_REUSEADDR: i32 = 2;
 const SO_TYPE: i32 = 3;
 const SO_ERROR: i32 = 4;
+const SO_BROADCAST: i32 = 6;
+const SO_SNDBUF: i32 = 7;
+const SO_RCVBUF: i32 = 8;
 const SO_KEEPALIVE: i32 = 9;
+const SO_LINGER: i32 = 13;
+const SO_RCVTIMEO: i32 = 20;
+const SO_SNDTIMEO: i32 = 21;
+const TCP_NODELAY: i32 = 1;
 
 fn sys_getsockopt(sockfd: i32, level: i32, optname: i32, optval_addr: usize, optlen_addr: usize) i32 {
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
 
-    if (level != SOL_SOCKET) return EINVAL;
     if (!protection.verifyUserPointer(optval_addr, @sizeOf(i32))) return EINVAL;
 
     var val: i32 = 0;
-    switch (optname) {
-        SO_TYPE => val = switch (sock.socket_type) {
-            .STREAM => SOCK_STREAM,
-            .DGRAM => SOCK_DGRAM,
-            else => 0,
-        },
-        SO_ERROR => val = 0,
-        SO_REUSEADDR, SO_KEEPALIVE => val = 0,
-        else => return EINVAL,
+
+    if (level == SOL_SOCKET) {
+        switch (optname) {
+            SO_TYPE => val = switch (sock.socket_type) {
+                .STREAM => @intCast(SOCK_STREAM),
+                .DGRAM => @intCast(SOCK_DGRAM),
+                else => 0,
+            },
+            SO_ERROR => val = 0,
+            SO_REUSEADDR, SO_KEEPALIVE, SO_BROADCAST => val = 0,
+            SO_SNDBUF => val = 4096,
+            SO_RCVBUF => val = 4096,
+            SO_LINGER => val = 0,
+            SO_RCVTIMEO, SO_SNDTIMEO => val = 0,
+            else => return ENOPROTOOPT,
+        }
+    } else if (level == IPPROTO_TCP) {
+        switch (optname) {
+            TCP_NODELAY => val = 1,
+            else => return ENOPROTOOPT,
+        }
+    } else {
+        return ENOPROTOOPT;
     }
 
     protection.copyToUser(optval_addr, std.mem.asBytes(&val)) catch return EINVAL;
@@ -2160,13 +2216,24 @@ fn sys_setsockopt(sockfd: i32, level: i32, optname: i32, optval_addr: usize, opt
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     _ = socket_table[@intCast(sockfd)] orelse return EBADF;
 
-    if (level != SOL_SOCKET) return EINVAL;
     if (optlen < @sizeOf(i32)) return EINVAL;
     if (!protection.verifyUserPointer(optval_addr, @sizeOf(i32))) return EINVAL;
 
-    switch (optname) {
-        SO_REUSEADDR, SO_KEEPALIVE => return 0,
-        else => return EINVAL,
+    if (level == SOL_SOCKET) {
+        switch (optname) {
+            SO_REUSEADDR, SO_KEEPALIVE, SO_BROADCAST => return 0,
+            SO_SNDBUF, SO_RCVBUF => return 0,
+            SO_LINGER => return 0,
+            SO_RCVTIMEO, SO_SNDTIMEO => return 0,
+            else => return ENOPROTOOPT,
+        }
+    } else if (level == IPPROTO_TCP) {
+        switch (optname) {
+            TCP_NODELAY => return 0,
+            else => return ENOPROTOOPT,
+        }
+    } else {
+        return ENOPROTOOPT;
     }
 }
 
