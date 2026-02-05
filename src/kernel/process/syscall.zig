@@ -1117,7 +1117,13 @@ fn sys_msgsnd(receiver_pid: u32, buf: [*]const u8, len: usize) i32 {
     var kernel_buffer: [256]u8 = undefined;
     protection.copyFromUser(kernel_buffer[0..msg_len], @intFromPtr(buf)) catch return EINVAL;
 
-    ipc.sendMessage(sender_pid, receiver_pid, .Data, kernel_buffer[0..msg_len]) catch return -1;
+    ipc.sendMessage(sender_pid, receiver_pid, .Data, kernel_buffer[0..msg_len]) catch |err| {
+        return switch (err) {
+            error.OutOfMemory => ENOMEM,
+            error.ReceiverNotFound => ESRCH,
+            error.QueueFull => EAGAIN,
+        };
+    };
     return 0;
 }
 
@@ -1125,7 +1131,7 @@ fn sys_msgrcv(buf: [*]u8, size: usize, flags: i32) i32 {
     if (!protection.verifyUserPointer(@intFromPtr(buf), size)) return EINVAL;
     const pid = if (process.current_process) |proc| proc.pid else return ENOSYS;
 
-    const queue = ipc.getMessageQueue(pid) orelse return -1;
+    const queue = ipc.getMessageQueue(pid) orelse return ENOENT;
 
     const msg = if (flags != 0) queue.tryReceive() else queue.receive();
     if (msg == null) return 0;
@@ -1165,7 +1171,7 @@ fn sys_getpgid(pid: i32) i32 {
         if (process.current_process) |proc| {
             return @intCast(proc.process_group);
         }
-        return 0;
+        return ESRCH;
     }
 
     if (pid > 0) {
@@ -1173,16 +1179,16 @@ fn sys_getpgid(pid: i32) i32 {
             return @intCast(proc.process_group);
         }
     }
-    return -1;
+    return ESRCH;
 }
 
 fn sys_setpgid(pid: i32, pgid: i32) i32 {
     const target = blk: {
         if (pid == 0) {
-            break :blk process.current_process orelse return -1;
+            break :blk process.current_process orelse return ESRCH;
         }
         if (pid > 0) {
-            break :blk process.getProcessByPid(@as(u32, @intCast(pid))) orelse return -1;
+            break :blk process.getProcessByPid(@as(u32, @intCast(pid))) orelse return ESRCH;
         }
         return EINVAL;
     };
@@ -1199,7 +1205,7 @@ fn sys_setpgid(pid: i32, pgid: i32) i32 {
 }
 
 fn sys_setsid() i32 {
-    const proc = process.current_process orelse return -1;
+    const proc = process.current_process orelse return EPERM;
     proc.process_group = proc.pid;
     return @intCast(proc.pid);
 }
@@ -1234,9 +1240,18 @@ fn sys_nanosleep(req_addr: usize, rem_addr: usize) i32 {
     return 0;
 }
 
+const CLOCK_REALTIME: i32 = 0;
+const CLOCK_MONOTONIC: i32 = 1;
+const CLOCK_PROCESS_CPUTIME_ID: i32 = 2;
+const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
+
 fn sys_clock_gettime(clock_id: i32, tp_addr: usize) i32 {
-    _ = clock_id;
     if (!protection.verifyUserPointer(tp_addr, @sizeOf(TimeSpec))) return EINVAL;
+
+    switch (clock_id) {
+        CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID => {},
+        else => return EINVAL,
+    }
 
     const ticks = process.getSystemTime();
     const total_ms = ticks * 10;
@@ -1551,16 +1566,32 @@ fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfds_ad
         const mask = @as(u32, 1) << bit_idx;
 
         if (readfds.fds_bits[word_idx] & mask != 0) {
-            if (i >= FD_OFFSET) {
-                result_readfds.fds_bits[word_idx] |= mask;
-                count += 1;
+            if (i < FD_OFFSET) {
+                if (i == STDIN) {
+                    result_readfds.fds_bits[word_idx] |= mask;
+                    count += 1;
+                }
+            } else {
+                const vfs_fd: u32 = i - FD_OFFSET;
+                if (vfs.getFileFlags(vfs_fd)) |_| {
+                    result_readfds.fds_bits[word_idx] |= mask;
+                    count += 1;
+                } else |_| {}
             }
         }
 
         if (writefds.fds_bits[word_idx] & mask != 0) {
-            if (i >= FD_OFFSET) {
-                result_writefds.fds_bits[word_idx] |= mask;
-                count += 1;
+            if (i < FD_OFFSET) {
+                if (i == STDOUT or i == STDERR) {
+                    result_writefds.fds_bits[word_idx] |= mask;
+                    count += 1;
+                }
+            } else {
+                const vfs_fd: u32 = i - FD_OFFSET;
+                if (vfs.getFileFlags(vfs_fd)) |_| {
+                    result_writefds.fds_bits[word_idx] |= mask;
+                    count += 1;
+                } else |_| {}
             }
         }
     }
