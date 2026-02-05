@@ -159,7 +159,32 @@ var fs_type_list: ?*FileSystemType = null;
 var vnode_cache: [1024]?*VNode = [_]?*VNode{null} ** 1024;
 var fd_table: [256]?*FileDescriptor = [_]?*FileDescriptor{null} ** 256;
 
+const FD_TABLE_SIZE = 256;
+var fd_freelist: [FD_TABLE_SIZE]u8 = undefined;
+var fd_freelist_top: usize = 0;
+
+fn initFdFreelist() void {
+    for (0..FD_TABLE_SIZE) |i| {
+        fd_freelist[i] = @intCast(FD_TABLE_SIZE - 1 - i);
+    }
+    fd_freelist_top = FD_TABLE_SIZE;
+}
+
+fn allocFd() ?u32 {
+    if (fd_freelist_top == 0) return null;
+    fd_freelist_top -= 1;
+    return fd_freelist[fd_freelist_top];
+}
+
+fn freeFd(fd: u32) void {
+    if (fd >= FD_TABLE_SIZE) return;
+    if (fd_freelist_top >= FD_TABLE_SIZE) return;
+    fd_freelist[fd_freelist_top] = @intCast(fd);
+    fd_freelist_top += 1;
+}
+
 pub fn init() void {
+    initFdFreelist();
     root_vnode = createVNode() catch |err| {
         error_handler.handleError(err, "Failed to create root vnode");
         return;
@@ -255,25 +280,20 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
 
     try vnode.ops.open(vnode, flags);
 
-    for (fd_table, 0..) |maybe_fd, i| {
-        if (maybe_fd == null) {
-            const fd_mem = memory.kmalloc(@sizeOf(FileDescriptor)) orelse return VFSError.OutOfMemory;
-            const fd: *FileDescriptor = @ptrCast(@alignCast(fd_mem));
+    const i = allocFd() orelse return VFSError.TooManyOpenFiles;
+    const fd_mem = memory.kmalloc(@sizeOf(FileDescriptor)) orelse return VFSError.OutOfMemory;
+    const fd: *FileDescriptor = @ptrCast(@alignCast(fd_mem));
 
-            fd.vnode = vnode;
-            fd.offset = if ((flags & O_APPEND) != 0) vnode.size else 0;
-            fd.flags = flags;
-            fd.fd_flags = 0;
-            fd.ref_count = 1;
+    fd.vnode = vnode;
+    fd.offset = if ((flags & O_APPEND) != 0) vnode.size else 0;
+    fd.flags = flags;
+    fd.fd_flags = 0;
+    fd.ref_count = 1;
 
-            fd_table[i] = fd;
-            vnode.ref_count += 1;
+    fd_table[i] = fd;
+    vnode.ref_count += 1;
 
-            return @as(u32, @intCast(i));
-        }
-    }
-
-    return VFSError.TooManyOpenFiles;
+    return i;
 }
 
 pub fn close(fd: u32) VFSError!void {
@@ -296,6 +316,7 @@ pub fn close(fd: u32) VFSError!void {
             file_desc.vnode.ref_count -= 1;
             memory.kfree(@as([*]u8, @ptrCast(file_desc)));
             fd_table[fd] = null;
+            freeFd(fd);
         }
     } else {
         return VFSError.InvalidOperation;
@@ -791,39 +812,35 @@ pub fn createPipe() VFSError!struct { read_fd: u32, write_fd: u32 } {
     vnode.ops = &pipe_ops;
     vnode.private_data = pipe_mem;
 
-    var read_fd: u32 = 0;
-    var write_fd: u32 = 0;
-    var found_read = false;
-    var found_write = false;
-
-    for (fd_table, 0..) |maybe_fd, i| {
-        if (maybe_fd == null) {
-            if (!found_read) {
-                const fd_m = memory.kmalloc(@sizeOf(FileDescriptor)) orelse return VFSError.OutOfMemory;
-                const fd: *FileDescriptor = @ptrCast(@alignCast(fd_m));
-                fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_RDONLY, .fd_flags = 0, .ref_count = 1 };
-                fd_table[i] = fd;
-                read_fd = @intCast(i);
-                found_read = true;
-                vnode.ref_count += 1;
-            } else if (!found_write) {
-                const fd_m = memory.kmalloc(@sizeOf(FileDescriptor)) orelse return VFSError.OutOfMemory;
-                const fd: *FileDescriptor = @ptrCast(@alignCast(fd_m));
-                fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_WRONLY, .fd_flags = 0, .ref_count = 1 };
-                fd_table[i] = fd;
-                write_fd = @intCast(i);
-                found_write = true;
-                vnode.ref_count += 1;
-                break;
-            }
-        }
-    }
-
-    if (!found_read or !found_write) {
+    const read_fd_idx = allocFd() orelse return VFSError.TooManyOpenFiles;
+    const write_fd_idx = allocFd() orelse {
+        freeFd(read_fd_idx);
         return VFSError.TooManyOpenFiles;
-    }
+    };
 
-    return .{ .read_fd = read_fd, .write_fd = write_fd };
+    const read_fd_mem = memory.kmalloc(@sizeOf(FileDescriptor)) orelse {
+        freeFd(read_fd_idx);
+        freeFd(write_fd_idx);
+        return VFSError.OutOfMemory;
+    };
+    const read_fd: *FileDescriptor = @ptrCast(@alignCast(read_fd_mem));
+    read_fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_RDONLY, .fd_flags = 0, .ref_count = 1 };
+    fd_table[read_fd_idx] = read_fd;
+    vnode.ref_count += 1;
+
+    const write_fd_mem = memory.kmalloc(@sizeOf(FileDescriptor)) orelse {
+        fd_table[read_fd_idx] = null;
+        freeFd(read_fd_idx);
+        freeFd(write_fd_idx);
+        memory.kfree(@as([*]u8, @ptrCast(read_fd)));
+        return VFSError.OutOfMemory;
+    };
+    const write_fd: *FileDescriptor = @ptrCast(@alignCast(write_fd_mem));
+    write_fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_WRONLY, .fd_flags = 0, .ref_count = 1 };
+    fd_table[write_fd_idx] = write_fd;
+    vnode.ref_count += 1;
+
+    return .{ .read_fd = read_fd_idx, .write_fd = write_fd_idx };
 }
 
 pub fn dup2(old_fd: u32, new_fd: u32) VFSError!u32 {

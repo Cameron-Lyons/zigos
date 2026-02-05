@@ -336,19 +336,6 @@ fn findExtendedProcess(base: *process.Process) ?*ProcessExtended {
 }
 
 fn updateStatistics() void {
-    stats.ready_processes = 0;
-    stats.blocked_processes = 0;
-
-    for (&extended_processes) |*ext| {
-        if (ext.in_use) {
-            switch (ext.base.state) {
-                .Ready => stats.ready_processes += 1,
-                .Blocked => stats.blocked_processes += 1,
-                else => {},
-            }
-        }
-    }
-
     const total_time = idle_time + busy_time;
     if (total_time > 0) {
         stats.cpu_usage_percent = @truncate((busy_time * 100) / total_time);
@@ -360,35 +347,29 @@ pub fn getStatistics() SchedulerStats {
 }
 
 pub fn setProcessPriority(pid: u32, priority: Priority) bool {
-    for (&extended_processes) |*ext| {
-        if (ext.in_use and ext.base.pid == pid) {
-            ext.priority = priority;
-            ext.original_priority = priority;
-            ext.time_quantum = getQuantumForPriority(priority);
-            return true;
-        }
-    }
-    return false;
+    const proc = process.getProcessByPid(pid) orelse return false;
+    const ext = findExtendedProcess(proc) orelse return false;
+    ext.priority = priority;
+    ext.original_priority = priority;
+    ext.time_quantum = getQuantumForPriority(priority);
+    return true;
 }
 
 pub fn setProcessNice(pid: u32, nice: i8) bool {
-    for (&extended_processes) |*ext| {
-        if (ext.in_use and ext.base.pid == pid) {
-            ext.nice_value = nice;
+    const proc = process.getProcessByPid(pid) orelse return false;
+    const ext = findExtendedProcess(proc) orelse return false;
+    ext.nice_value = nice;
 
-            var adjusted_priority = @intFromEnum(ext.original_priority);
-            if (nice > 0) {
-                adjusted_priority = @max(0, adjusted_priority - 1);
-            } else if (nice < 0) {
-                adjusted_priority = @min(4, adjusted_priority + 1);
-            }
-
-            ext.priority = @as(Priority, @enumFromInt(adjusted_priority));
-            ext.time_quantum = getQuantumForPriority(ext.priority);
-            return true;
-        }
+    var adjusted_priority = @intFromEnum(ext.original_priority);
+    if (nice > 0) {
+        adjusted_priority = @max(0, adjusted_priority - 1);
+    } else if (nice < 0) {
+        adjusted_priority = @min(4, adjusted_priority + 1);
     }
-    return false;
+
+    ext.priority = @as(Priority, @enumFromInt(adjusted_priority));
+    ext.time_quantum = getQuantumForPriority(ext.priority);
+    return true;
 }
 
 pub fn preempt() void {
