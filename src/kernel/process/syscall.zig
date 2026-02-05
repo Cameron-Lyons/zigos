@@ -5107,18 +5107,40 @@ fn sys_chroot(path: [*]const u8) i32 {
 }
 
 fn sys_mount(source: usize, target: usize, fstype: usize, mountflags: usize, data: usize) i32 {
-    _ = source;
-    _ = target;
-    _ = fstype;
-    _ = mountflags;
     _ = data;
-    return EPERM;
+
+    const proc = process.current_process orelse return ESRCH;
+    if (proc.creds.euid != 0) return EPERM;
+
+    if (!protection.verifyUserPointer(source, 256)) return EFAULT;
+    if (!protection.verifyUserPointer(target, 256)) return EFAULT;
+    if (!protection.verifyUserPointer(fstype, 32)) return EFAULT;
+
+    var source_buf: [256]u8 = undefined;
+    var target_buf: [256]u8 = undefined;
+    var fstype_buf: [32]u8 = undefined;
+
+    const source_path = protection.copyStringFromUser(&source_buf, source) catch return EFAULT;
+    const target_path = protection.copyStringFromUser(&target_buf, target) catch return EFAULT;
+    const fstype_str = protection.copyStringFromUser(&fstype_buf, fstype) catch return EFAULT;
+
+    vfs.mount(source_path, target_path, fstype_str, @truncate(mountflags)) catch |err| return vfsErrno(err);
+    return 0;
 }
 
 fn sys_umount2(target: [*]const u8, flags: u32) i32 {
-    _ = target;
     _ = flags;
-    return EPERM;
+
+    const proc = process.current_process orelse return ESRCH;
+    if (proc.creds.euid != 0) return EPERM;
+
+    if (!protection.verifyUserPointer(@intFromPtr(target), 256)) return EFAULT;
+
+    var target_buf: [256]u8 = undefined;
+    const target_path = protection.copyStringFromUser(&target_buf, @intFromPtr(target)) catch return EFAULT;
+
+    vfs.unmount(target_path) catch |err| return vfsErrno(err);
+    return 0;
 }
 
 fn sys_swapon(path: [*]const u8, swapflags: u32) i32 {
