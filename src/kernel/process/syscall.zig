@@ -130,6 +130,12 @@ pub const SYS_SEMCTL = 113;
 pub const SYS_TIMES = 114;
 pub const SYS_GETRUSAGE = 115;
 pub const SYS_MKNOD = 116;
+pub const SYS_GETRANDOM = 117;
+pub const SYS_PIPE2 = 118;
+pub const SYS_DUP3 = 119;
+pub const SYS_ACCEPT4 = 120;
+pub const SYS_EVENTFD = 121;
+pub const SYS_EVENTFD2 = 122;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -241,6 +247,18 @@ pub const EIDRM = -43;
 pub const ENOMSG = -42;
 pub const EDEADLK = -35;
 pub const ENOLCK = -37;
+
+pub const O_CLOEXEC: u32 = 0x80000;
+
+pub const GRND_NONBLOCK: u32 = 0x0001;
+pub const GRND_RANDOM: u32 = 0x0002;
+
+pub const EFD_SEMAPHORE: u32 = 0x00001;
+pub const EFD_CLOEXEC: u32 = 0x80000;
+pub const EFD_NONBLOCK: u32 = 0x00800;
+
+pub const SOCK_CLOEXEC: u32 = 0x80000;
+pub const SOCK_NONBLOCK: u32 = 0x800;
 
 fn vfsErrno(err: vfs.VFSError) i32 {
     return switch (err) {
@@ -401,6 +419,12 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_TIMES => sys_times(arg1),
         SYS_GETRUSAGE => sys_getrusage(@intCast(arg1), arg2),
         SYS_MKNOD => sys_mknod(@as([*]const u8, @ptrFromInt(arg1)), @intCast(arg2), @intCast(arg3)),
+        SYS_GETRANDOM => sys_getrandom(@as([*]u8, @ptrFromInt(arg1)), arg2, @intCast(arg3)),
+        SYS_PIPE2 => sys_pipe2(@as(?*[2]i32, @ptrFromInt(arg1)), @intCast(arg2)),
+        SYS_DUP3 => sys_dup3(@intCast(arg1), @intCast(arg2), @intCast(arg3)),
+        SYS_ACCEPT4 => sys_accept4(@intCast(arg1), arg2, arg3, @intCast(arg4)),
+        SYS_EVENTFD => sys_eventfd(@intCast(arg1)),
+        SYS_EVENTFD2 => sys_eventfd2(@intCast(arg1), @intCast(arg2)),
         else => ENOSYS,
     };
 
@@ -3584,4 +3608,156 @@ fn sys_mknod(pathname: [*]const u8, mode: u32, dev: u32) i32 {
 
     _ = dev;
     return EINVAL;
+}
+
+var getrandom_state: u32 = 0xDEADBEEF;
+
+fn getrandomXorshift() u32 {
+    var x = getrandom_state;
+    if (x == 0) {
+        const timer = @import("../timer/timer.zig");
+        x = @truncate(timer.getTicks() | 1);
+    }
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    getrandom_state = x;
+    return x;
+}
+
+fn sys_getrandom(buf: [*]u8, buflen: usize, flags: u32) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(buf), buflen)) return EFAULT;
+    _ = flags;
+
+    var kernel_buffer: [256]u8 = undefined;
+    var written: usize = 0;
+
+    while (written < buflen) {
+        const chunk_size = @min(buflen - written, kernel_buffer.len);
+        var i: usize = 0;
+        while (i + 4 <= chunk_size) : (i += 4) {
+            const val = getrandomXorshift();
+            kernel_buffer[i] = @truncate(val);
+            kernel_buffer[i + 1] = @truncate(val >> 8);
+            kernel_buffer[i + 2] = @truncate(val >> 16);
+            kernel_buffer[i + 3] = @truncate(val >> 24);
+        }
+        while (i < chunk_size) : (i += 1) {
+            kernel_buffer[i] = @truncate(getrandomXorshift());
+        }
+
+        protection.copyToUser(@intFromPtr(buf) + written, kernel_buffer[0..chunk_size]) catch return EFAULT;
+        written += chunk_size;
+    }
+
+    return @intCast(written);
+}
+
+fn sys_pipe2(pipefd: ?*[2]i32, flags: u32) i32 {
+    if (pipefd == null) return EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(pipefd), @sizeOf([2]i32))) {
+        return EINVAL;
+    }
+
+    const result = vfs.createPipe() catch |err| return vfsErrno(err);
+    const fds = [2]i32{
+        @as(i32, @intCast(result.read_fd)) + FD_OFFSET,
+        @as(i32, @intCast(result.write_fd)) + FD_OFFSET,
+    };
+
+    if ((flags & O_CLOEXEC) != 0) {
+        vfs.setFdFlags(result.read_fd, FD_CLOEXEC) catch {};
+        vfs.setFdFlags(result.write_fd, FD_CLOEXEC) catch {};
+    }
+
+    if ((flags & vfs.O_NONBLOCK) != 0) {
+        vfs.setFileFlags(result.read_fd, vfs.O_NONBLOCK) catch {};
+        vfs.setFileFlags(result.write_fd, vfs.O_NONBLOCK) catch {};
+    }
+
+    protection.copyToUser(@intFromPtr(pipefd), std.mem.asBytes(&fds)) catch return EINVAL;
+    return 0;
+}
+
+fn sys_dup3(old_fd: i32, new_fd: i32, flags: u32) i32 {
+    if (old_fd < FD_OFFSET or new_fd < FD_OFFSET) return EBADF;
+    if (old_fd == new_fd) return EINVAL;
+
+    const old_vfs_fd: u32 = @intCast(old_fd - FD_OFFSET);
+    const new_vfs_fd: u32 = @intCast(new_fd - FD_OFFSET);
+
+    const result = vfs.dup2(old_vfs_fd, new_vfs_fd) catch |err| return vfsErrno(err);
+
+    if ((flags & O_CLOEXEC) != 0) {
+        vfs.setFdFlags(new_vfs_fd, FD_CLOEXEC) catch {};
+    }
+
+    return @as(i32, @intCast(result)) + FD_OFFSET;
+}
+
+fn sys_accept4(sockfd: i32, addr: usize, addrlen: usize, flags: u32) i32 {
+    _ = addr;
+    _ = addrlen;
+
+    if (sockfd >= 1000 and sockfd < 1064) {
+        const idx: usize = @intCast(sockfd - 1000);
+        const usock = &unix_sockets[idx];
+        if (!usock.in_use or !usock.listening) return EBADF;
+
+        for (&unix_sockets) |*peer| {
+            if (peer.in_use and peer.connected and peer.peer == usock) {
+                for (&unix_sockets, 0..) |*new_sock, j| {
+                    if (!new_sock.in_use) {
+                        new_sock.in_use = true;
+                        new_sock.connected = true;
+                        new_sock.peer = peer;
+                        peer.peer = new_sock;
+                        const new_fd: i32 = @intCast(@as(i32, @intCast(j)) + 1000);
+                        _ = flags;
+                        return new_fd;
+                    }
+                }
+                return EMFILE;
+            }
+        }
+        return EAGAIN;
+    }
+
+    if (sockfd < 0 or sockfd >= 64) return EBADF;
+    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+
+    const client = sock.accept() catch |err| return socketErrno(err);
+
+    for (&socket_table, 0..) |*slot, i| {
+        if (slot.* == null) {
+            slot.* = client;
+            return @intCast(i);
+        }
+    }
+
+    return EMFILE;
+}
+
+const EventFD = struct {
+    counter: u64,
+    flags: u32,
+    in_use: bool,
+};
+
+var eventfd_table: [64]EventFD = [_]EventFD{.{ .counter = 0, .flags = 0, .in_use = false }} ** 64;
+
+fn sys_eventfd(initval: u32) i32 {
+    return sys_eventfd2(initval, 0);
+}
+
+fn sys_eventfd2(initval: u32, flags: u32) i32 {
+    for (&eventfd_table, 0..) |*efd, i| {
+        if (!efd.in_use) {
+            efd.in_use = true;
+            efd.counter = initval;
+            efd.flags = flags;
+            return @intCast(@as(i32, @intCast(i)) + 2000);
+        }
+    }
+    return EMFILE;
 }
