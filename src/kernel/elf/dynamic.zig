@@ -2,6 +2,7 @@ const memory = @import("../memory/memory.zig");
 const paging = @import("../memory/paging.zig");
 const vfs = @import("../fs/vfs.zig");
 const vga = @import("../drivers/vga.zig");
+const elf = @import("elf.zig");
 
 const DT_NULL: i32 = 0;
 const DT_NEEDED: i32 = 1;
@@ -94,7 +95,6 @@ var loaded_objects: [MAX_LOADED_OBJECTS]SharedObject = [_]SharedObject{SharedObj
 
 var num_loaded: u8 = 0;
 
-const ELF_MAGIC = 0x464C457F;
 const ET_DYN: u16 = 3;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
@@ -150,7 +150,7 @@ pub fn loadSharedObject(path: []const u8, base: u32) !*SharedObject {
     const bytes_read = vfs.read(file, @as([*]u8, @ptrCast(&header))[0..@sizeOf(Elf32Header)]) catch return error.ReadError;
     if (bytes_read != @sizeOf(Elf32Header)) return error.ReadError;
 
-    if (header.magic != ELF_MAGIC) return error.InvalidELF;
+    if (header.magic != elf.ELF_MAGIC) return error.InvalidELF;
     if (header.elf_type != ET_DYN and header.elf_type != 2) return error.NotSharedObject;
 
     var dynamic_phdr: ?Elf32ProgramHeader = null;
