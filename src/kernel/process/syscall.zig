@@ -97,6 +97,9 @@ pub const SYS_READV = 80;
 pub const SYS_WRITEV = 81;
 pub const SYS_GETEUID = 82;
 pub const SYS_GETEGID = 83;
+pub const SYS_ISATTY = 84;
+pub const SYS_STATFS = 85;
+pub const SYS_FSTATFS = 86;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -258,6 +261,9 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_WRITEV => sys_writev(@intCast(arg1), arg2, @intCast(arg3)),
         SYS_GETEUID => sys_geteuid(),
         SYS_GETEGID => sys_getegid(),
+        SYS_ISATTY => sys_isatty(@intCast(arg1)),
+        SYS_STATFS => sys_statfs(@as([*]const u8, @ptrFromInt(arg1)), arg2),
+        SYS_FSTATFS => sys_fstatfs(@intCast(arg1), arg2),
         else => ENOSYS,
     };
 
@@ -2039,5 +2045,87 @@ fn sys_getegid() i32 {
     if (process.current_process) |proc| {
         return @intCast(proc.creds.egid);
     }
+    return 0;
+}
+
+fn sys_isatty(fd: i32) i32 {
+    if (fd == STDIN or fd == STDOUT or fd == STDERR) {
+        return 1;
+    }
+    if (fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+    if (vfs.getFileFlags(vfs_fd)) |_| {
+        return 0;
+    } else |_| {
+        return EBADF;
+    }
+}
+
+const StatFs = extern struct {
+    f_type: u32,
+    f_bsize: u32,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_fsid: [2]u32,
+    f_namelen: u32,
+    f_frsize: u32,
+    f_flags: u32,
+    f_spare: [4]u32,
+};
+
+fn sys_statfs(pathname: [*]const u8, buf_addr: usize) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+    if (!protection.verifyUserPointer(buf_addr, @sizeOf(StatFs))) return EINVAL;
+
+    var kernel_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    _ = vfs.lookupPath(path_slice) catch |err| return vfsErrno(err);
+
+    const buf = StatFs{
+        .f_type = 0x858458f6,
+        .f_bsize = 4096,
+        .f_blocks = 1024 * 1024,
+        .f_bfree = 512 * 1024,
+        .f_bavail = 512 * 1024,
+        .f_files = 65536,
+        .f_ffree = 32768,
+        .f_fsid = .{ 0, 0 },
+        .f_namelen = 255,
+        .f_frsize = 4096,
+        .f_flags = 0,
+        .f_spare = .{ 0, 0, 0, 0 },
+    };
+
+    protection.copyToUser(buf_addr, std.mem.asBytes(&buf)) catch return EINVAL;
+    return 0;
+}
+
+fn sys_fstatfs(fd: i32, buf_addr: usize) i32 {
+    if (!protection.verifyUserPointer(buf_addr, @sizeOf(StatFs))) return EINVAL;
+    if (fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+
+    _ = vfs.getFileFlags(vfs_fd) catch return EBADF;
+
+    const buf = StatFs{
+        .f_type = 0x858458f6,
+        .f_bsize = 4096,
+        .f_blocks = 1024 * 1024,
+        .f_bfree = 512 * 1024,
+        .f_bavail = 512 * 1024,
+        .f_files = 65536,
+        .f_ffree = 32768,
+        .f_fsid = .{ 0, 0 },
+        .f_namelen = 255,
+        .f_frsize = 4096,
+        .f_flags = 0,
+        .f_spare = .{ 0, 0, 0, 0 },
+    };
+
+    protection.copyToUser(buf_addr, std.mem.asBytes(&buf)) catch return EINVAL;
     return 0;
 }
