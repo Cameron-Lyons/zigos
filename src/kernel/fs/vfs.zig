@@ -217,6 +217,8 @@ pub fn mount(device: []const u8, mount_path: []const u8, fs_name: []const u8, fl
     while (fs_type) |fs| : (fs_type = fs.next) {
         if (std.mem.eql(u8, fs.name[0..strlen(&fs.name)], fs_name)) {
             const mp = memory.kmalloc(@sizeOf(MountPoint)) orelse return VFSError.OutOfMemory;
+            errdefer memory.kfree(@as([*]u8, @ptrCast(mp)));
+
             const mount_point: *MountPoint = @ptrCast(@alignCast(mp));
 
             @memcpy(mount_point.device[0..device.len], device);
