@@ -83,6 +83,16 @@ pub const Socket = struct {
 
     pub fn init(socket_type: SocketType, protocol: Protocol) !*Socket {
         const sock_mem = memory.kmalloc(@sizeOf(Socket)) orelse return error.OutOfMemory;
+        errdefer memory.kfree(@as([*]u8, @ptrCast(sock_mem)));
+
+        const recv_buf = memory.kmalloc(RECV_BUFFER_SIZE) orelse return error.OutOfMemory;
+        errdefer memory.kfree(@as([*]u8, @ptrCast(recv_buf)));
+
+        const send_buf = memory.kmalloc(SEND_BUFFER_SIZE) orelse return error.OutOfMemory;
+
+        const recv_ptr: [*]u8 = @ptrCast(@alignCast(recv_buf));
+        const send_ptr: [*]u8 = @ptrCast(@alignCast(send_buf));
+
         const sock: *Socket = @ptrCast(@alignCast(sock_mem));
         sock.* = Socket{
             .id = generateSocketId(),
@@ -94,18 +104,10 @@ pub const Socket = struct {
             .remote_addr = ipv4.IPv4Address{ .octets = .{ 0, 0, 0, 0 } },
             .remote_port = 0,
             .owner_pid = process.getCurrentPID(),
-            .recv_buffer = blk: {
-                const buf = memory.kmalloc(RECV_BUFFER_SIZE) orelse return error.OutOfMemory;
-                const ptr: [*]u8 = @ptrCast(@alignCast(buf));
-                break :blk ptr[0..RECV_BUFFER_SIZE];
-            },
+            .recv_buffer = recv_ptr[0..RECV_BUFFER_SIZE],
             .recv_head = 0,
             .recv_tail = 0,
-            .send_buffer = blk: {
-                const buf = memory.kmalloc(SEND_BUFFER_SIZE) orelse return error.OutOfMemory;
-                const ptr: [*]u8 = @ptrCast(@alignCast(buf));
-                break :blk ptr[0..SEND_BUFFER_SIZE];
-            },
+            .send_buffer = send_ptr[0..SEND_BUFFER_SIZE],
             .send_head = 0,
             .send_tail = 0,
             .backlog = &[_]?*Socket{},
