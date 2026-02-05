@@ -335,10 +335,18 @@ pub fn close(fd: u32) VFSError!void {
                     } else {
                         if (pipe.readers > 0) pipe.readers -= 1;
                     }
+                    if (pipe.readers == 0 and pipe.writers == 0) {
+                        memory.kfree(@as([*]u8, @ptrCast(@alignCast(pd))));
+                        file_desc.vnode.private_data = null;
+                    }
                 }
             }
-            try file_desc.vnode.ops.close(file_desc.vnode);
-            file_desc.vnode.ref_count -= 1;
+            const vnode = file_desc.vnode;
+            try vnode.ops.close(vnode);
+            vnode.ref_count -= 1;
+            if (vnode.ref_count == 0 and vnode.file_type == .Pipe) {
+                memory.kfree(@as([*]u8, @ptrCast(@alignCast(vnode))));
+            }
             memory.kfree(@as([*]u8, @ptrCast(file_desc)));
             fd_table[fd] = null;
             freeFd(fd);
