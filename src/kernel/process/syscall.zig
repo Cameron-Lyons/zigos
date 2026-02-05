@@ -90,6 +90,11 @@ pub const SYS_FCHOWN = 73;
 pub const SYS_FSYNC = 74;
 pub const SYS_FDATASYNC = 75;
 pub const SYS_POLL = 76;
+pub const SYS_LSTAT = 77;
+pub const SYS_GETSOCKOPT = 78;
+pub const SYS_SETSOCKOPT = 79;
+pub const SYS_READV = 80;
+pub const SYS_WRITEV = 81;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -243,6 +248,11 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_FSYNC => sys_fsync(@intCast(arg1)),
         SYS_FDATASYNC => sys_fsync(@intCast(arg1)),
         SYS_POLL => sys_poll(arg1, @intCast(arg2), @intCast(@as(i32, @bitCast(arg3)))),
+        SYS_LSTAT => sys_lstat(@as([*]const u8, @ptrFromInt(arg1)), arg2),
+        SYS_GETSOCKOPT => sys_getsockopt(@intCast(arg1), @intCast(arg2), @intCast(arg3), arg4, arg5),
+        SYS_SETSOCKOPT => sys_setsockopt(@intCast(arg1), @intCast(arg2), @intCast(arg3), arg4, arg5),
+        SYS_READV => sys_readv(@intCast(arg1), arg2, @intCast(arg3)),
+        SYS_WRITEV => sys_writev(@intCast(arg1), arg2, @intCast(arg3)),
         else => ENOSYS,
     };
 
@@ -1769,7 +1779,7 @@ fn sys_getsockname(sockfd: i32, addr_ptr: usize, addr_len_ptr: usize) i32 {
 fn sys_getpeername(sockfd: i32, addr_ptr: usize, addr_len_ptr: usize) i32 {
     if (sockfd < 0 or sockfd >= 64) return EBADF;
     const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
-    if (sock.state != .CONNECTED) return EINVAL;
+    if (sock.state != .CONNECTED) return ENOTCONN;
     return writeSockAddr(addr_ptr, addr_len_ptr, sock.remote_addr, sock.remote_port);
 }
 
@@ -1853,4 +1863,124 @@ fn sys_poll(fds_addr: usize, nfds: u32, timeout: i32) i32 {
 
     protection.copyToUser(fds_addr, std.mem.asBytes(&kernel_fds)[0..copy_size]) catch return EINVAL;
     return count;
+}
+
+fn sys_lstat(pathname: [*]const u8, stat_buf_addr: usize) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+    if (!protection.verifyUserPointer(stat_buf_addr, @sizeOf(vfs.FileStat))) return EINVAL;
+
+    var kernel_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    var stat_buf: vfs.FileStat = undefined;
+    vfs.stat(path_slice, &stat_buf) catch |err| return vfsErrno(err);
+
+    protection.copyToUser(stat_buf_addr, std.mem.asBytes(&stat_buf)) catch return EINVAL;
+    return 0;
+}
+
+const SOL_SOCKET: i32 = 1;
+const SO_REUSEADDR: i32 = 2;
+const SO_TYPE: i32 = 3;
+const SO_ERROR: i32 = 4;
+const SO_KEEPALIVE: i32 = 9;
+
+fn sys_getsockopt(sockfd: i32, level: i32, optname: i32, optval_addr: usize, optlen_addr: usize) i32 {
+    if (sockfd < 0 or sockfd >= 64) return EBADF;
+    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+
+    if (level != SOL_SOCKET) return EINVAL;
+    if (!protection.verifyUserPointer(optval_addr, @sizeOf(i32))) return EINVAL;
+
+    var val: i32 = 0;
+    switch (optname) {
+        SO_TYPE => val = switch (sock.socket_type) {
+            .STREAM => SOCK_STREAM,
+            .DGRAM => SOCK_DGRAM,
+            else => 0,
+        },
+        SO_ERROR => val = 0,
+        SO_REUSEADDR, SO_KEEPALIVE => val = 0,
+        else => return EINVAL,
+    }
+
+    protection.copyToUser(optval_addr, std.mem.asBytes(&val)) catch return EINVAL;
+    if (optlen_addr != 0 and protection.verifyUserPointer(optlen_addr, @sizeOf(u32))) {
+        var len: u32 = @sizeOf(i32);
+        protection.copyToUser(optlen_addr, std.mem.asBytes(&len)) catch {};
+    }
+    return 0;
+}
+
+fn sys_setsockopt(sockfd: i32, level: i32, optname: i32, optval_addr: usize, optlen: u32) i32 {
+    if (sockfd < 0 or sockfd >= 64) return EBADF;
+    _ = socket_table[@intCast(sockfd)] orelse return EBADF;
+
+    if (level != SOL_SOCKET) return EINVAL;
+    if (optlen < @sizeOf(i32)) return EINVAL;
+    if (!protection.verifyUserPointer(optval_addr, @sizeOf(i32))) return EINVAL;
+
+    switch (optname) {
+        SO_REUSEADDR, SO_KEEPALIVE => return 0,
+        else => return EINVAL,
+    }
+}
+
+const IoVec = extern struct {
+    iov_base: usize,
+    iov_len: usize,
+};
+
+fn sys_readv(fd: i32, iov_addr: usize, iovcnt: i32) i32 {
+    if (iovcnt <= 0 or iovcnt > 16) return EINVAL;
+    const cnt: u32 = @intCast(iovcnt);
+    const iov_size = cnt * @sizeOf(IoVec);
+    if (!protection.verifyUserPointer(iov_addr, iov_size)) return EINVAL;
+
+    var iov: [16]IoVec = undefined;
+    protection.copyFromUser(std.mem.asBytes(&iov)[0..iov_size], iov_addr) catch return EINVAL;
+
+    var total: usize = 0;
+    var i: u32 = 0;
+    while (i < cnt) : (i += 1) {
+        if (iov[i].iov_len == 0) continue;
+        if (!protection.verifyUserPointer(iov[i].iov_base, iov[i].iov_len)) return EINVAL;
+
+        const result = sys_read(fd, @ptrFromInt(iov[i].iov_base), iov[i].iov_len);
+        if (result < 0) {
+            if (total > 0) return @intCast(total);
+            return result;
+        }
+        total += @intCast(result);
+        if (@as(usize, @intCast(result)) < iov[i].iov_len) break;
+    }
+
+    return @intCast(total);
+}
+
+fn sys_writev(fd: i32, iov_addr: usize, iovcnt: i32) i32 {
+    if (iovcnt <= 0 or iovcnt > 16) return EINVAL;
+    const cnt: u32 = @intCast(iovcnt);
+    const iov_size = cnt * @sizeOf(IoVec);
+    if (!protection.verifyUserPointer(iov_addr, iov_size)) return EINVAL;
+
+    var iov: [16]IoVec = undefined;
+    protection.copyFromUser(std.mem.asBytes(&iov)[0..iov_size], iov_addr) catch return EINVAL;
+
+    var total: usize = 0;
+    var i: u32 = 0;
+    while (i < cnt) : (i += 1) {
+        if (iov[i].iov_len == 0) continue;
+        if (!protection.verifyUserPointer(iov[i].iov_base, iov[i].iov_len)) return EINVAL;
+
+        const result = sys_write(fd, @ptrFromInt(iov[i].iov_base), iov[i].iov_len);
+        if (result < 0) {
+            if (total > 0) return @intCast(total);
+            return result;
+        }
+        total += @intCast(result);
+        if (@as(usize, @intCast(result)) < iov[i].iov_len) break;
+    }
+
+    return @intCast(total);
 }

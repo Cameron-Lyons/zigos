@@ -145,6 +145,7 @@ pub const O_CREAT: u32 = 0x0040;
 pub const O_EXCL: u32 = 0x0080;
 pub const O_TRUNC: u32 = 0x0200;
 pub const O_APPEND: u32 = 0x0400;
+pub const O_NONBLOCK: u32 = 0x0800;
 
 pub const SEEK_SET: u32 = 0;
 pub const SEEK_CUR: u32 = 1;
@@ -402,7 +403,7 @@ pub fn getFileFlags(fd: u32) VFSError!u32 {
 pub fn setFileFlags(fd: u32, flags: u32) VFSError!void {
     if (fd >= fd_table.len) return VFSError.InvalidOperation;
     if (fd_table[fd]) |file_desc| {
-        const changeable = O_APPEND;
+        const changeable = O_APPEND | O_NONBLOCK;
         file_desc.flags = (file_desc.flags & ~changeable) | (flags & changeable);
         return;
     }
