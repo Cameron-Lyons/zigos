@@ -15,6 +15,7 @@ pub const VFSError = error{
     OutOfMemory,
     DeviceError,
     BrokenPipe,
+    TooManyOpenFiles,
 };
 
 pub const FileType = enum(u8) {
@@ -135,6 +136,7 @@ pub const FileDescriptor = struct {
     vnode: *VNode,
     offset: u64,
     flags: u32,
+    fd_flags: u32,
     ref_count: u32,
 };
 
@@ -264,6 +266,7 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
             fd.vnode = vnode;
             fd.offset = if ((flags & O_APPEND) != 0) vnode.size else 0;
             fd.flags = flags;
+            fd.fd_flags = 0;
             fd.ref_count = 1;
 
             fd_table[i] = fd;
@@ -273,7 +276,7 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
         }
     }
 
-    return VFSError.NoSpace;
+    return VFSError.TooManyOpenFiles;
 }
 
 pub fn close(fd: u32) VFSError!void {
@@ -405,6 +408,23 @@ pub fn setFileFlags(fd: u32, flags: u32) VFSError!void {
     if (fd_table[fd]) |file_desc| {
         const changeable = O_APPEND | O_NONBLOCK;
         file_desc.flags = (file_desc.flags & ~changeable) | (flags & changeable);
+        return;
+    }
+    return VFSError.InvalidOperation;
+}
+
+pub fn getFdFlags(fd: u32) VFSError!u32 {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+    if (fd_table[fd]) |file_desc| {
+        return file_desc.fd_flags;
+    }
+    return VFSError.InvalidOperation;
+}
+
+pub fn setFdFlags(fd: u32, flags: u32) VFSError!void {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+    if (fd_table[fd]) |file_desc| {
+        file_desc.fd_flags = flags;
         return;
     }
     return VFSError.InvalidOperation;
@@ -706,7 +726,7 @@ pub fn createPipe() VFSError!struct { read_fd: u32, write_fd: u32 } {
             if (!found_read) {
                 const fd_m = memory.kmalloc(@sizeOf(FileDescriptor)) orelse return VFSError.OutOfMemory;
                 const fd: *FileDescriptor = @ptrCast(@alignCast(fd_m));
-                fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_RDONLY, .ref_count = 1 };
+                fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_RDONLY, .fd_flags = 0, .ref_count = 1 };
                 fd_table[i] = fd;
                 read_fd = @intCast(i);
                 found_read = true;
@@ -714,7 +734,7 @@ pub fn createPipe() VFSError!struct { read_fd: u32, write_fd: u32 } {
             } else if (!found_write) {
                 const fd_m = memory.kmalloc(@sizeOf(FileDescriptor)) orelse return VFSError.OutOfMemory;
                 const fd: *FileDescriptor = @ptrCast(@alignCast(fd_m));
-                fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_WRONLY, .ref_count = 1 };
+                fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_WRONLY, .fd_flags = 0, .ref_count = 1 };
                 fd_table[i] = fd;
                 write_fd = @intCast(i);
                 found_write = true;
@@ -725,7 +745,7 @@ pub fn createPipe() VFSError!struct { read_fd: u32, write_fd: u32 } {
     }
 
     if (!found_read or !found_write) {
-        return VFSError.NoSpace;
+        return VFSError.TooManyOpenFiles;
     }
 
     return .{ .read_fd = read_fd, .write_fd = write_fd };
@@ -753,6 +773,7 @@ pub fn dup2(old_fd: u32, new_fd: u32) VFSError!u32 {
         .vnode = old_desc.vnode,
         .offset = old_desc.offset,
         .flags = old_desc.flags,
+        .fd_flags = 0,
         .ref_count = 1,
     };
     fd_table[new_fd] = new_desc;
