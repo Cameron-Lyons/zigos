@@ -104,7 +104,7 @@ pub fn setSchedulerType(sched_type: SchedulerType) void {
 }
 
 pub fn registerProcess(proc: *process.Process, priority: Priority) *ProcessExtended {
-    for (&extended_processes) |*ext| {
+    for (&extended_processes, 0..) |*ext, idx| {
         if (!ext.in_use) {
             ext.base = proc;
             ext.priority = priority;
@@ -118,6 +118,8 @@ pub fn registerProcess(proc: *process.Process, priority: Priority) *ProcessExten
             ext.response_time = 0;
             ext.turnaround_time = 0;
             ext.in_use = true;
+
+            proc.extended_idx = @intCast(idx);
 
             addToReadyQueue(ext);
             stats.total_processes += 1;
@@ -324,7 +326,8 @@ fn scheduleMLFQ() ?*ProcessExtended {
 }
 
 fn findExtendedProcess(base: *process.Process) ?*ProcessExtended {
-    for (&extended_processes) |*ext| {
+    if (base.extended_idx) |idx| {
+        const ext = &extended_processes[idx];
         if (ext.in_use and ext.base == base) {
             return ext;
         }

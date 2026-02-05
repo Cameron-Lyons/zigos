@@ -61,12 +61,14 @@ pub const Process = struct {
     alarm_time: u64 = 0,
     umask: u16 = 0o022,
     signals: signal.ProcessSignals = signal.ProcessSignals.defaultValue(),
+    extended_idx: ?u8 = null,
 };
 
 const MAX_PROCESSES = 256;
 const SMP_MAX_CPUS = 16;
 // SAFETY: all entries initialized in init() before use
 pub var process_table: [MAX_PROCESSES]Process = undefined;
+pub var pid_lookup: [MAX_PROCESSES]?*Process = [_]?*Process{null} ** MAX_PROCESSES;
 pub var next_pid: u32 = 1;
 pub var current_process: ?*Process = null;
 pub var process_list_head: ?*Process = null;
@@ -97,64 +99,47 @@ pub fn getProcessList() ?*Process {
 pub fn terminateProcess(pid: u32) bool {
     if (pid == 0) return false;
 
-    var i: usize = 0;
-    while (i < MAX_PROCESSES) : (i += 1) {
-        if (process_table[i].pid == pid and process_table[i].state != .Terminated) {
-            process_table[i].state = .Terminated;
+    const proc = getProcessByPid(pid) orelse return false;
 
-            var prev: ?*Process = null;
-            var curr = process_list_head;
-            while (curr) |proc| {
-                if (proc == &process_table[i]) {
-                    if (prev) |p| {
-                        p.next = proc.next;
-                    } else {
-                        process_list_head = proc.next;
-                    }
-                    break;
-                }
-                prev = proc;
-                curr = proc.next;
+    proc.state = .Terminated;
+    pid_lookup[pid % MAX_PROCESSES] = null;
+
+    var prev: ?*Process = null;
+    var curr = process_list_head;
+    while (curr) |p| {
+        if (p == proc) {
+            if (prev) |pr| {
+                pr.next = p.next;
+            } else {
+                process_list_head = p.next;
             }
-
-            if (current_process == &process_table[i]) {
-                yield();
-            }
-
-            return true;
+            break;
         }
+        prev = p;
+        curr = p.next;
     }
-    return false;
+
+    if (current_process == proc) {
+        yield();
+    }
+
+    return true;
 }
 
 pub fn setPriority(pid: u32, priority: i8) bool {
-
     const clamped_priority = if (priority < -20) -20 else if (priority > 19) 19 else priority;
 
-    var i: usize = 0;
-    while (i < MAX_PROCESSES) : (i += 1) {
-        if (process_table[i].pid == pid and process_table[i].state != .Terminated) {
-            process_table[i].priority = clamped_priority;
-
-            process_table[i].time_slice = @intCast(20 - @as(i32, clamped_priority));
-            return true;
-        }
-    }
-    return false;
+    const proc = getProcessByPid(pid) orelse return false;
+    proc.priority = clamped_priority;
+    proc.time_slice = @intCast(20 - @as(i32, clamped_priority));
+    return true;
 }
 
 pub fn setNice(pid: u32, nice_value: i8) bool {
-
-    var i: usize = 0;
-    while (i < MAX_PROCESSES) : (i += 1) {
-        if (process_table[i].pid == pid and process_table[i].state != .Terminated) {
-            process_table[i].nice_value = nice_value;
-
-            const new_priority = process_table[i].priority + nice_value;
-            return setPriority(pid, new_priority);
-        }
-    }
-    return false;
+    const proc = getProcessByPid(pid) orelse return false;
+    proc.nice_value = nice_value;
+    const new_priority = proc.priority + nice_value;
+    return setPriority(pid, new_priority);
 }
 
 pub fn getProcess(pid: u32) ?*Process {
@@ -162,10 +147,11 @@ pub fn getProcess(pid: u32) ?*Process {
 }
 
 pub fn getProcessByPid(pid: u32) ?*Process {
-    var i: usize = 0;
-    while (i < MAX_PROCESSES) : (i += 1) {
-        if (process_table[i].pid == pid and process_table[i].state != .Terminated) {
-            return &process_table[i];
+    if (pid == 0) return null;
+    const slot = pid % MAX_PROCESSES;
+    if (pid_lookup[slot]) |proc| {
+        if (proc.pid == pid and proc.state != .Terminated) {
+            return proc;
         }
     }
     return null;
@@ -226,6 +212,7 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
 
     const proc = process.?;
     proc.pid = next_pid;
+    pid_lookup[next_pid % MAX_PROCESSES] = proc;
     next_pid += 1;
     proc.state = .Ready;
 
