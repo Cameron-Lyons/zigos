@@ -225,11 +225,8 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
             break :blk v;
         } else |err| {
             if (err == VFSError.NotFound and (flags & O_CREAT) != 0) {
-
-                const parent_path = getParentPath(path);
-                const name = getBaseName(path);
-
-                const parent = try lookupPath(parent_path);
+                const parts = splitPath(path);
+                const parent = try lookupPath(parts.parent);
                 if (parent.file_type != FileType.Directory) {
                     return VFSError.NotDirectory;
                 }
@@ -241,7 +238,7 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
                     .other_read = true,
                 };
 
-                break :blk try parent.mount_point.?.fs_type.ops.create(parent, name, default_mode);
+                break :blk try parent.mount_point.?.fs_type.ops.create(parent, parts.name, default_mode);
             } else {
                 return err;
             }
@@ -508,68 +505,55 @@ pub fn readdir(fd: u32, dirent: *DirEntry, index: u64) VFSError!bool {
 }
 
 pub fn mkdir(path: []const u8, mode: FileMode) VFSError!void {
-    const parent_path = getParentPath(path);
-    const name = getBaseName(path);
-
-    const parent = try lookupPath(parent_path);
+    const parts = splitPath(path);
+    const parent = try lookupPath(parts.parent);
     if (parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
     }
-
-    _ = try parent.mount_point.?.fs_type.ops.mkdir(parent, name, mode);
+    _ = try parent.mount_point.?.fs_type.ops.mkdir(parent, parts.name, mode);
 }
 
 pub fn create(path: []const u8, mode: FileMode) VFSError!void {
-    const parent_path = getParentPath(path);
-    const name = getBaseName(path);
-
-    const parent = try lookupPath(parent_path);
+    const parts = splitPath(path);
+    const parent = try lookupPath(parts.parent);
     if (parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
     }
-
-    _ = try parent.mount_point.?.fs_type.ops.create(parent, name, mode);
+    _ = try parent.mount_point.?.fs_type.ops.create(parent, parts.name, mode);
 }
 
 pub fn unlink(path: []const u8) VFSError!void {
-    const parent_path = getParentPath(path);
-    const name = getBaseName(path);
-
-    const parent = try lookupPath(parent_path);
+    const parts = splitPath(path);
+    const parent = try lookupPath(parts.parent);
     if (parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
     }
-
-    try parent.mount_point.?.fs_type.ops.unlink(parent, name);
+    try parent.mount_point.?.fs_type.ops.unlink(parent, parts.name);
 }
 
 pub fn rmdir(path: []const u8) VFSError!void {
-    const parent_path = getParentPath(path);
-    const name = getBaseName(path);
-
-    const parent = try lookupPath(parent_path);
+    const parts = splitPath(path);
+    const parent = try lookupPath(parts.parent);
     if (parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
     }
-
-    try parent.mount_point.?.fs_type.ops.rmdir(parent, name);
+    try parent.mount_point.?.fs_type.ops.rmdir(parent, parts.name);
 }
 
 pub fn mkfifo(path: []const u8, mode: FileMode) VFSError!void {
-    const parent_path = getParentPath(path);
-    const name = getBaseName(path);
+    const parts = splitPath(path);
 
-    const parent = try lookupPath(parent_path);
+    const parent = try lookupPath(parts.parent);
     if (parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
     }
 
-    _ = parent.mount_point.?.fs_type.ops.lookup(parent, name) catch |err| {
+    _ = parent.mount_point.?.fs_type.ops.lookup(parent, parts.name) catch |err| {
         if (err != VFSError.NotFound) return err;
 
         const vnode = try createVNode();
-        const name_len = @min(name.len, vnode.name.len - 1);
-        @memcpy(vnode.name[0..name_len], name[0..name_len]);
+        const name_len = @min(parts.name.len, vnode.name.len - 1);
+        @memcpy(vnode.name[0..name_len], parts.name[0..name_len]);
         vnode.name[name_len] = 0;
         vnode.name_len = @intCast(name_len);
         vnode.file_type = .Pipe;
@@ -607,17 +591,15 @@ pub fn truncate(path: []const u8, size: u64) VFSError!void {
 }
 
 pub fn symlink(target: []const u8, linkpath: []const u8) VFSError!void {
-    const parent_path = getParentPath(linkpath);
-    const name = getBaseName(linkpath);
-
-    const parent = try lookupPath(parent_path);
+    const parts = splitPath(linkpath);
+    const parent = try lookupPath(parts.parent);
     if (parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
     }
 
     if (parent.mount_point) |mp| {
         if (mp.fs_type.ops.symlink) |symlink_fn| {
-            _ = try symlink_fn(parent, name, target);
+            _ = try symlink_fn(parent, parts.name, target);
             return;
         }
     }
@@ -631,17 +613,15 @@ pub fn link(target_path: []const u8, linkpath: []const u8) VFSError!void {
         return VFSError.IsDirectory;
     }
 
-    const parent_path = getParentPath(linkpath);
-    const name = getBaseName(linkpath);
-
-    const parent = try lookupPath(parent_path);
+    const parts = splitPath(linkpath);
+    const parent = try lookupPath(parts.parent);
     if (parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
     }
 
     if (parent.mount_point) |mp| {
         if (mp.fs_type.ops.link) |link_fn| {
-            try link_fn(parent, name, target);
+            try link_fn(parent, parts.name, target);
             return;
         }
     }
@@ -878,13 +858,11 @@ pub fn dup2(old_fd: u32, new_fd: u32) VFSError!u32 {
 }
 
 pub fn rename(old_path: []const u8, new_path: []const u8) VFSError!void {
-    const old_parent_path = getParentPath(old_path);
-    const old_name = getBaseName(old_path);
-    const new_parent_path = getParentPath(new_path);
-    const new_name = getBaseName(new_path);
+    const old_parts = splitPath(old_path);
+    const new_parts = splitPath(new_path);
 
-    const old_parent = try lookupPath(old_parent_path);
-    const new_parent = try lookupPath(new_parent_path);
+    const old_parent = try lookupPath(old_parts.parent);
+    const new_parent = try lookupPath(new_parts.parent);
 
     if (old_parent.file_type != FileType.Directory or new_parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
@@ -894,7 +872,7 @@ pub fn rename(old_path: []const u8, new_path: []const u8) VFSError!void {
         return VFSError.InvalidOperation;
     }
 
-    try old_parent.mount_point.?.fs_type.ops.rename(old_parent, old_name, new_parent, new_name);
+    try old_parent.mount_point.?.fs_type.ops.rename(old_parent, old_parts.name, new_parent, new_parts.name);
 }
 
 fn createVNode() VFSError!*VNode {
@@ -970,30 +948,30 @@ pub fn lookupPath(path: []const u8) VFSError!*VNode {
     return current;
 }
 
-fn getParentPath(path: []const u8) []const u8 {
+const PathParts = struct {
+    parent: []const u8,
+    name: []const u8,
+};
+
+fn splitPath(path: []const u8) PathParts {
     var last_slash: usize = 0;
     for (path, 0..) |c, i| {
         if (c == '/') {
             last_slash = i;
         }
     }
+    return .{
+        .parent = if (last_slash == 0) "/" else path[0..last_slash],
+        .name = path[last_slash + 1 ..],
+    };
+}
 
-    if (last_slash == 0) {
-        return "/";
-    }
-
-    return path[0..last_slash];
+fn getParentPath(path: []const u8) []const u8 {
+    return splitPath(path).parent;
 }
 
 fn getBaseName(path: []const u8) []const u8 {
-    var last_slash: usize = 0;
-    for (path, 0..) |c, i| {
-        if (c == '/') {
-            last_slash = i;
-        }
-    }
-
-    return path[last_slash + 1 ..];
+    return splitPath(path).name;
 }
 
 fn strlen(str: []const u8) usize {
