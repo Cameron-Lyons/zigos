@@ -709,6 +709,7 @@ pub fn fchown(fd: u32, uid: u32, gid: u32) VFSError!void {
 }
 
 const PIPE_BUF_SIZE = 4096;
+const PIPE_BUF_MASK = PIPE_BUF_SIZE - 1;
 
 const PipeData = struct {
     buffer: [PIPE_BUF_SIZE]u8,
@@ -730,7 +731,7 @@ fn pipeRead(vnode: *VNode, buf: []u8, _: u64) VFSError!usize {
     var i: usize = 0;
     while (i < to_read) : (i += 1) {
         buf[i] = pipe.buffer[pipe.read_pos];
-        pipe.read_pos = (pipe.read_pos + 1) % PIPE_BUF_SIZE;
+        pipe.read_pos = (pipe.read_pos + 1) & PIPE_BUF_MASK;
     }
     pipe.count -= to_read;
     return to_read;
@@ -746,7 +747,7 @@ fn pipeWrite(vnode: *VNode, buf: []const u8, _: u64) VFSError!usize {
     var i: usize = 0;
     while (i < to_write) : (i += 1) {
         pipe.buffer[pipe.write_pos] = buf[i];
-        pipe.write_pos = (pipe.write_pos + 1) % PIPE_BUF_SIZE;
+        pipe.write_pos = (pipe.write_pos + 1) & PIPE_BUF_MASK;
     }
     pipe.count += to_write;
     return to_write;

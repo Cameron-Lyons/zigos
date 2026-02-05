@@ -52,7 +52,9 @@ pub const SocketError = error{
 const MAX_SOCKETS = 128;
 const MAX_BACKLOG = 16;
 const RECV_BUFFER_SIZE = 4096;
+const RECV_BUFFER_MASK = RECV_BUFFER_SIZE - 1;
 const SEND_BUFFER_SIZE = 4096;
+const SEND_BUFFER_MASK = SEND_BUFFER_SIZE - 1;
 
 pub const Socket = struct {
     id: u32,
@@ -282,7 +284,7 @@ pub const Socket = struct {
         var bytes_read: usize = 0;
         while (bytes_read < buffer.len and self.recv_head != self.recv_tail) {
             buffer[bytes_read] = self.recv_buffer[self.recv_tail];
-            self.recv_tail = (self.recv_tail + 1) % RECV_BUFFER_SIZE;
+            self.recv_tail = (self.recv_tail + 1) & RECV_BUFFER_MASK;
             bytes_read += 1;
         }
 
@@ -307,7 +309,7 @@ pub const Socket = struct {
         var bytes_read: usize = 0;
         while (bytes_read < buffer.len and self.recv_head != self.recv_tail) {
             buffer[bytes_read] = self.recv_buffer[self.recv_tail];
-            self.recv_tail = (self.recv_tail + 1) % RECV_BUFFER_SIZE;
+            self.recv_tail = (self.recv_tail + 1) & RECV_BUFFER_MASK;
             bytes_read += 1;
         }
 
@@ -337,7 +339,7 @@ pub const Socket = struct {
 
     pub fn addToRecvBuffer(self: *Socket, data: []const u8) void {
         for (data) |byte| {
-            const next_head = (self.recv_head + 1) % RECV_BUFFER_SIZE;
+            const next_head = (self.recv_head + 1) & RECV_BUFFER_MASK;
             if (next_head != self.recv_tail) {
                 self.recv_buffer[self.recv_head] = byte;
                 self.recv_head = next_head;
