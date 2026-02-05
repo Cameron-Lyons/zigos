@@ -102,6 +102,18 @@ pub const SYS_STATFS = 85;
 pub const SYS_FSTATFS = 86;
 pub const SYS_GETHOSTNAME = 87;
 pub const SYS_SETHOSTNAME = 88;
+pub const SYS_OPENAT = 89;
+pub const SYS_MKDIRAT = 90;
+pub const SYS_UNLINKAT = 91;
+pub const SYS_LINKAT = 92;
+pub const SYS_FCHMODAT = 93;
+pub const SYS_FCHOWNAT = 94;
+pub const SYS_RENAMEAT = 95;
+pub const SYS_GETGROUPS = 96;
+pub const SYS_SETGROUPS = 97;
+pub const SYS_GETITIMER = 98;
+pub const SYS_SETITIMER = 99;
+pub const SYS_MKFIFO = 100;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -152,6 +164,13 @@ pub const ETXTBSY = -26;
 pub const ELOOP = -40;
 pub const EMSGSIZE = -90;
 pub const ENOPROTOOPT = -92;
+
+pub const AT_FDCWD: i32 = -100;
+pub const AT_REMOVEDIR: u32 = 0x200;
+
+pub const ITIMER_REAL: u32 = 0;
+pub const ITIMER_VIRTUAL: u32 = 1;
+pub const ITIMER_PROF: u32 = 2;
 
 fn vfsErrno(err: vfs.VFSError) i32 {
     return switch (err) {
@@ -284,6 +303,18 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_FSTATFS => sys_fstatfs(@intCast(arg1), arg2),
         SYS_GETHOSTNAME => sys_gethostname(arg1, arg2),
         SYS_SETHOSTNAME => sys_sethostname(arg1, arg2),
+        SYS_OPENAT => sys_openat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3)),
+        SYS_MKDIRAT => sys_mkdirat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3)),
+        SYS_UNLINKAT => sys_unlinkat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3)),
+        SYS_LINKAT => sys_linkat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), @as([*]const u8, @ptrFromInt(arg4)), @intCast(arg5)),
+        SYS_FCHMODAT => sys_fchmodat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3)),
+        SYS_FCHOWNAT => sys_fchownat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), @intCast(arg4)),
+        SYS_RENAMEAT => sys_renameat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), @as([*]const u8, @ptrFromInt(arg4))),
+        SYS_GETGROUPS => sys_getgroups(@intCast(arg1), arg2),
+        SYS_SETGROUPS => sys_setgroups(@intCast(arg1), arg2),
+        SYS_GETITIMER => sys_getitimer(@intCast(arg1), arg2),
+        SYS_SETITIMER => sys_setitimer(@intCast(arg1), arg2, arg3),
+        SYS_MKFIFO => sys_mkfifo(@as([*]const u8, @ptrFromInt(arg1)), @intCast(arg2)),
         else => ENOSYS,
     };
 
@@ -2385,5 +2416,283 @@ fn sys_fstatfs(fd: i32, buf_addr: usize) i32 {
     };
 
     protection.copyToUser(buf_addr, std.mem.asBytes(&buf)) catch return EINVAL;
+    return 0;
+}
+
+fn resolveDirFd(dirfd: i32, path: []const u8, buf: *[512]u8) ?[]const u8 {
+    if (path.len > 0 and path[0] == '/') {
+        return path;
+    }
+
+    var base_path: []const u8 = undefined;
+    if (dirfd == AT_FDCWD) {
+        ensureCwdInit();
+        base_path = current_working_dir[0..cwd_len];
+    } else {
+        if (dirfd < FD_OFFSET) return null;
+        const vfs_fd: u32 = @intCast(dirfd - FD_OFFSET);
+        const vnode = vfs.getVNodeFromFd(vfs_fd) catch return null;
+        if (vnode.file_type != .Directory) return null;
+        base_path = vfs.getNodePath(vnode) catch return null;
+    }
+
+    if (base_path.len + 1 + path.len >= buf.len) return null;
+
+    @memcpy(buf[0..base_path.len], base_path);
+    var pos = base_path.len;
+    if (pos > 0 and buf[pos - 1] != '/') {
+        buf[pos] = '/';
+        pos += 1;
+    }
+    @memcpy(buf[pos .. pos + path.len], path);
+    pos += path.len;
+
+    return buf[0..pos];
+}
+
+fn sys_openat(dirfd: i32, pathname: [*]const u8, flags: i32) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+
+    var path_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return EBADF;
+
+    const fd = vfs.open(resolved, @intCast(flags)) catch |err| return vfsErrno(err);
+    return @intCast(@as(i32, @intCast(fd)) + FD_OFFSET);
+}
+
+fn sys_mkdirat(dirfd: i32, pathname: [*]const u8, mode: u32) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+
+    var path_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return EBADF;
+
+    const mode_struct = vfs.FileMode{
+        .owner_read = (mode & 0o400) != 0,
+        .owner_write = (mode & 0o200) != 0,
+        .owner_exec = (mode & 0o100) != 0,
+        .group_read = (mode & 0o040) != 0,
+        .group_write = (mode & 0o020) != 0,
+        .group_exec = (mode & 0o010) != 0,
+        .other_read = (mode & 0o004) != 0,
+        .other_write = (mode & 0o002) != 0,
+        .other_exec = (mode & 0o001) != 0,
+    };
+
+    vfs.mkdir(resolved, mode_struct) catch |err| return vfsErrno(err);
+    return 0;
+}
+
+fn sys_unlinkat(dirfd: i32, pathname: [*]const u8, flags: u32) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+
+    var path_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return EBADF;
+
+    if (flags & AT_REMOVEDIR != 0) {
+        vfs.rmdir(resolved) catch |err| return vfsErrno(err);
+    } else {
+        vfs.unlink(resolved) catch |err| return vfsErrno(err);
+    }
+    return 0;
+}
+
+fn sys_linkat(olddirfd: i32, oldpath: [*]const u8, newdirfd: i32, newpath: [*]const u8, _: u32) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(oldpath), 256)) return EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(newpath), 256)) return EINVAL;
+
+    var old_buffer: [256]u8 = undefined;
+    var new_buffer: [256]u8 = undefined;
+
+    const old_slice = protection.copyStringFromUser(&old_buffer, @intFromPtr(oldpath)) catch return EINVAL;
+    const new_slice = protection.copyStringFromUser(&new_buffer, @intFromPtr(newpath)) catch return EINVAL;
+
+    var resolved_old_buf: [512]u8 = undefined;
+    var resolved_new_buf: [512]u8 = undefined;
+
+    const resolved_old = resolveDirFd(olddirfd, old_slice, &resolved_old_buf) orelse return EBADF;
+    const resolved_new = resolveDirFd(newdirfd, new_slice, &resolved_new_buf) orelse return EBADF;
+
+    vfs.link(resolved_old, resolved_new) catch |err| return vfsErrno(err);
+    return 0;
+}
+
+fn sys_fchmodat(dirfd: i32, pathname: [*]const u8, mode: u32) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+
+    var path_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return EBADF;
+
+    const mode_struct = vfs.FileMode{
+        .owner_read = (mode & 0o400) != 0,
+        .owner_write = (mode & 0o200) != 0,
+        .owner_exec = (mode & 0o100) != 0,
+        .group_read = (mode & 0o040) != 0,
+        .group_write = (mode & 0o020) != 0,
+        .group_exec = (mode & 0o010) != 0,
+        .other_read = (mode & 0o004) != 0,
+        .other_write = (mode & 0o002) != 0,
+        .other_exec = (mode & 0o001) != 0,
+    };
+
+    vfs.chmod(resolved, mode_struct) catch |err| return vfsErrno(err);
+    return 0;
+}
+
+fn sys_fchownat(dirfd: i32, pathname: [*]const u8, owner: i32, group: i32) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+
+    var path_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return EBADF;
+
+    const uid: u32 = if (owner < 0) 0xFFFFFFFF else @intCast(owner);
+    const gid: u32 = if (group < 0) 0xFFFFFFFF else @intCast(group);
+
+    vfs.chown(resolved, uid, gid) catch |err| return vfsErrno(err);
+    return 0;
+}
+
+fn sys_renameat(olddirfd: i32, oldpath: [*]const u8, newdirfd: i32, newpath: [*]const u8) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(oldpath), 256)) return EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(newpath), 256)) return EINVAL;
+
+    var old_buffer: [256]u8 = undefined;
+    var new_buffer: [256]u8 = undefined;
+
+    const old_slice = protection.copyStringFromUser(&old_buffer, @intFromPtr(oldpath)) catch return EINVAL;
+    const new_slice = protection.copyStringFromUser(&new_buffer, @intFromPtr(newpath)) catch return EINVAL;
+
+    var resolved_old_buf: [512]u8 = undefined;
+    var resolved_new_buf: [512]u8 = undefined;
+
+    const resolved_old = resolveDirFd(olddirfd, old_slice, &resolved_old_buf) orelse return EBADF;
+    const resolved_new = resolveDirFd(newdirfd, new_slice, &resolved_new_buf) orelse return EBADF;
+
+    vfs.rename(resolved_old, resolved_new) catch |err| return vfsErrno(err);
+    return 0;
+}
+
+fn sys_getgroups(size: i32, list_addr: usize) i32 {
+    const proc = process.current_process orelse return ESRCH;
+
+    if (size == 0) {
+        return @intCast(proc.creds.ngroups);
+    }
+
+    if (size < 0) return EINVAL;
+    const usize_size: usize = @intCast(size);
+    if (!protection.verifyUserPointer(list_addr, usize_size * @sizeOf(u32))) return EINVAL;
+
+    const count: usize = @min(usize_size, proc.creds.ngroups);
+    var groups: [16]u32 = undefined;
+    for (0..count) |i| {
+        groups[i] = proc.creds.groups[i];
+    }
+
+    protection.copyToUser(list_addr, std.mem.sliceAsBytes(groups[0..count])) catch return EINVAL;
+    return @intCast(count);
+}
+
+fn sys_setgroups(size: i32, list_addr: usize) i32 {
+    const proc = process.current_process orelse return ESRCH;
+    if (!credentials.isRoot(&proc.creds)) return EPERM;
+
+    if (size < 0 or size > 16) return EINVAL;
+    const usize_size: usize = @intCast(size);
+
+    if (usize_size > 0) {
+        if (!protection.verifyUserPointer(list_addr, usize_size * @sizeOf(u32))) return EINVAL;
+    }
+
+    var groups: [16]u32 = undefined;
+    if (usize_size > 0) {
+        protection.copyFromUser(std.mem.sliceAsBytes(groups[0..usize_size]), list_addr) catch return EINVAL;
+    }
+
+    for (0..usize_size) |i| {
+        proc.creds.groups[i] = @intCast(groups[i]);
+    }
+    proc.creds.ngroups = @intCast(usize_size);
+
+    return 0;
+}
+
+const Itimerval = extern struct {
+    it_interval_sec: u32,
+    it_interval_usec: u32,
+    it_value_sec: u32,
+    it_value_usec: u32,
+};
+
+var process_itimers: [256][3]Itimerval = [_][3]Itimerval{[_]Itimerval{.{
+    .it_interval_sec = 0,
+    .it_interval_usec = 0,
+    .it_value_sec = 0,
+    .it_value_usec = 0,
+}} ** 3} ** 256;
+
+fn sys_getitimer(which: u32, value_addr: usize) i32 {
+    if (which > ITIMER_PROF) return EINVAL;
+    if (!protection.verifyUserPointer(value_addr, @sizeOf(Itimerval))) return EINVAL;
+
+    const proc = process.current_process orelse return ESRCH;
+    const timer = process_itimers[proc.pid][which];
+
+    protection.copyToUser(value_addr, std.mem.asBytes(&timer)) catch return EINVAL;
+    return 0;
+}
+
+fn sys_setitimer(which: u32, new_value_addr: usize, old_value_addr: usize) i32 {
+    if (which > ITIMER_PROF) return EINVAL;
+    if (!protection.verifyUserPointer(new_value_addr, @sizeOf(Itimerval))) return EINVAL;
+    if (old_value_addr != 0 and !protection.verifyUserPointer(old_value_addr, @sizeOf(Itimerval))) return EINVAL;
+
+    const proc = process.current_process orelse return ESRCH;
+
+    if (old_value_addr != 0) {
+        const old_timer = process_itimers[proc.pid][which];
+        protection.copyToUser(old_value_addr, std.mem.asBytes(&old_timer)) catch return EINVAL;
+    }
+
+    var new_timer: Itimerval = undefined;
+    protection.copyFromUser(std.mem.asBytes(&new_timer), new_value_addr) catch return EINVAL;
+    process_itimers[proc.pid][which] = new_timer;
+
+    return 0;
+}
+
+fn sys_mkfifo(pathname: [*]const u8, mode: u32) i32 {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+
+    var path_buffer: [256]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EINVAL;
+
+    const mode_struct = vfs.FileMode{
+        .owner_read = (mode & 0o400) != 0,
+        .owner_write = (mode & 0o200) != 0,
+        .owner_exec = (mode & 0o100) != 0,
+        .group_read = (mode & 0o040) != 0,
+        .group_write = (mode & 0o020) != 0,
+        .group_exec = (mode & 0o010) != 0,
+        .other_read = (mode & 0o004) != 0,
+        .other_write = (mode & 0o002) != 0,
+        .other_exec = (mode & 0o001) != 0,
+    };
+
+    vfs.mkfifo(path_slice, mode_struct) catch |err| return vfsErrno(err);
     return 0;
 }
