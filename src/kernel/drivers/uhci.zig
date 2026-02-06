@@ -129,10 +129,17 @@ fn initController(pci_dev: pci.PCIDevice) void {
         frame_list[i] = QH_PTR_TERMINATE;
     }
 
-    const td_mem = memory.kmalloc(@sizeOf(TransferDescriptor) * TD_POOL_SIZE) orelse return;
+    const td_mem = memory.kmalloc(@sizeOf(TransferDescriptor) * TD_POOL_SIZE) orelse {
+        memory.kfree(frame_list_mem);
+        return;
+    };
     const td_pool: [*]TransferDescriptor = @ptrCast(@alignCast(td_mem));
 
-    const qh_mem = memory.kmalloc(@sizeOf(QueueHead) * QH_POOL_SIZE) orelse return;
+    const qh_mem = memory.kmalloc(@sizeOf(QueueHead) * QH_POOL_SIZE) orelse {
+        memory.kfree(td_mem);
+        memory.kfree(frame_list_mem);
+        return;
+    };
     const qh_pool: [*]QueueHead = @ptrCast(@alignCast(qh_mem));
 
     controllers[num_controllers] = UHCIController{
