@@ -314,8 +314,15 @@ fn addUHCIController(pci_device: pci.PCIDevice) void {
     const frame_list_mem = memory.kmalloc(4096 + 16) orelse return;
     const frame_list_addr = (@intFromPtr(frame_list_mem) + 4095) & ~@as(usize, 4095);
 
-    const qh_mem = memory.kmalloc(@sizeOf(UHCIQueueHead) * 64) orelse return;
-    const td_mem = memory.kmalloc(@sizeOf(UHCITransferDescriptor) * 128) orelse return;
+    const qh_mem = memory.kmalloc(@sizeOf(UHCIQueueHead) * 64) orelse {
+        memory.kfree(frame_list_mem);
+        return;
+    };
+    const td_mem = memory.kmalloc(@sizeOf(UHCITransferDescriptor) * 128) orelse {
+        memory.kfree(qh_mem);
+        memory.kfree(frame_list_mem);
+        return;
+    };
 
     uhci_controllers[num_controllers] = UHCIController{
         .pci_device = pci_device,
