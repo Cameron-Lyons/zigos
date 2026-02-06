@@ -118,11 +118,18 @@ const RTL8139 = struct {
         };
 
         const rx_mem = memory.kmalloc(RX_BUFFER_SIZE) orelse return error.OutOfMemory;
+        errdefer memory.kfree(rx_mem);
         rtl.rx_buffer = @ptrCast(@alignCast(rx_mem));
 
         var i: u8 = 0;
         while (i < NUM_TX_DESCRIPTORS) : (i += 1) {
-            const tx_mem = memory.kmalloc(TX_BUFFER_SIZE) orelse return error.OutOfMemory;
+            const tx_mem = memory.kmalloc(TX_BUFFER_SIZE) orelse {
+                var j: u8 = 0;
+                while (j < i) : (j += 1) {
+                    memory.kfree(@as(*anyopaque, @ptrCast(rtl.tx_buffers[j])));
+                }
+                return error.OutOfMemory;
+            };
             rtl.tx_buffers[i] = @ptrCast(@alignCast(tx_mem));
         }
 
