@@ -809,6 +809,15 @@ fn ext2Unmount(mount_point: *vfs.MountPoint) vfs.VFSError!void {
     if (mount_point.private_data) |fs_ptr| {
         const fs: *Ext2FileSystem = @ptrCast(@alignCast(fs_ptr));
         fs.cache.flush(fs) catch {};
+        memory.kfree(@as([*]u8, @ptrCast(fs.group_descs)));
+        for (&ext2_filesystems) |*slot| {
+            if (slot.*) |*s| {
+                if (s == fs) {
+                    slot.* = null;
+                    break;
+                }
+            }
+        }
     }
 }
 
