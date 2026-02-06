@@ -257,6 +257,7 @@ pub fn unmount(mount_path: []const u8) VFSError!void {
             } else {
                 mount_list = mp.next;
             }
+            memory.kfree(@as([*]u8, @ptrCast(mp)));
             return;
         }
         prev = mp;
