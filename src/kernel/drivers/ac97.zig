@@ -108,7 +108,10 @@ const AC97Device = struct {
         const bdl_mem = memory.kmalloc(@sizeOf(BufferDescriptor) * BDL_ENTRIES + 8) orelse return;
         self.bdl = @as([*]BufferDescriptor, @ptrCast(@alignCast(bdl_mem)));
 
-        const audio_mem = memory.kmalloc(BUFFER_SIZE * 2) orelse return;
+        const audio_mem = memory.kmalloc(BUFFER_SIZE * 2) orelse {
+            memory.kfree(bdl_mem);
+            return;
+        };
         self.audio_buffer = @as([*]u8, @ptrCast(audio_mem));
 
         for (0..BDL_ENTRIES) |i| {

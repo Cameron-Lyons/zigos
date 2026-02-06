@@ -769,6 +769,7 @@ pub fn close(socket_id: usize) !void {
             conn.state = .FIN_WAIT_1;
             try sendTCPPacket(conn, TCPFlags.FIN | TCPFlags.ACK, &[_]u8{});
         }
+        clearRetxQueue(conn);
         memory.kfree(conn.recv_buffer.ptr);
         memory.kfree(conn.send_buffer.ptr);
     }
@@ -823,6 +824,20 @@ pub fn closeConnection(conn: *TCPConnection) void {
     }
 }
 
+pub fn releaseConnection(conn: *TCPConnection) void {
+    clearRetxQueue(conn);
+    memory.kfree(conn.recv_buffer.ptr);
+    memory.kfree(conn.send_buffer.ptr);
+    for (&tcp_connections) |*maybe_conn| {
+        if (maybe_conn.*) |*c| {
+            if (c == conn) {
+                maybe_conn.* = null;
+                break;
+            }
+        }
+    }
+}
+
 pub fn tick() void {
     const now = timer.getTicks();
 
@@ -830,13 +845,20 @@ pub fn tick() void {
         if (maybe_conn.*) |*conn| {
             if (conn.state == .TIME_WAIT) {
                 if (now - conn.time_wait_start >= TCP_TIME_WAIT_TICKS) {
-                    conn.state = .CLOSED;
                     clearRetxQueue(conn);
+                    memory.kfree(conn.recv_buffer.ptr);
+                    memory.kfree(conn.send_buffer.ptr);
+                    maybe_conn.* = null;
                 }
                 continue;
             }
 
-            if (conn.state == .CLOSED) continue;
+            if (conn.state == .CLOSED) {
+                memory.kfree(conn.recv_buffer.ptr);
+                memory.kfree(conn.send_buffer.ptr);
+                maybe_conn.* = null;
+                continue;
+            }
 
             for (&conn.retx_queue) |*entry| {
                 if (entry.active and now - entry.send_time >= conn.rto) {
