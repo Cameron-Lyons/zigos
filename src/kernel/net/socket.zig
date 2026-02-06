@@ -89,6 +89,7 @@ pub const Socket = struct {
         errdefer memory.kfree(@as([*]u8, @ptrCast(recv_buf)));
 
         const send_buf = memory.kmalloc(SEND_BUFFER_SIZE) orelse return error.OutOfMemory;
+        errdefer memory.kfree(@as([*]u8, @ptrCast(send_buf)));
 
         const recv_ptr: [*]u8 = @ptrCast(@alignCast(recv_buf));
         const send_ptr: [*]u8 = @ptrCast(@alignCast(send_buf));
@@ -324,8 +325,7 @@ pub const Socket = struct {
             .TCP => {
                 if (self.tcp_connection) |conn| {
                     tcp.closeConnection(conn);
-                    memory.kfree(conn.recv_buffer.ptr);
-                    memory.kfree(conn.send_buffer.ptr);
+                    tcp.releaseConnection(conn);
                 }
             },
             else => {},
