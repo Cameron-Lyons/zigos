@@ -4115,7 +4115,7 @@ fn sys_prctl(option: u32, arg2: usize, arg3: usize, arg4: usize, arg5: usize) i3
     _ = arg5;
 
     const proc = process.current_process orelse return ESRCH;
-    const pid_idx: usize = @intCast(proc.pid);
+    const pid_idx: usize = proc.pid % 256;
 
     switch (option) {
         PR_SET_NAME => {
@@ -4735,7 +4735,7 @@ var tid_addresses: [256]usize = [_]usize{0} ** 256;
 
 fn sys_set_tid_address(tidptr: usize) i32 {
     const proc = process.current_process orelse return ESRCH;
-    const pid_idx: usize = @intCast(proc.pid);
+    const pid_idx: usize = proc.pid % 256;
     tid_addresses[pid_idx] = tidptr;
     return @intCast(proc.pid);
 }
@@ -4764,7 +4764,7 @@ fn sys_get_robust_list(pid: i32, head_ptr: usize, len_ptr: usize) i32 {
 
 fn sys_set_robust_list(head: usize, len: usize) i32 {
     const proc = process.current_process orelse return ESRCH;
-    const pid_idx: usize = @intCast(proc.pid);
+    const pid_idx: usize = proc.pid % 256;
 
     robust_list_heads[pid_idx] = head;
     robust_list_lens[pid_idx] = len;
@@ -4931,7 +4931,7 @@ fn sys_getrlimit(resource: u32, rlim_ptr: usize) i32 {
     if (!protection.verifyUserPointer(rlim_ptr, @sizeOf(Rlimit))) return EFAULT;
 
     const proc = process.current_process orelse return ESRCH;
-    const pid_idx: usize = @intCast(proc.pid);
+    const pid_idx: usize = proc.pid % 256;
 
     const rlim = process_rlimits[pid_idx][resource];
     protection.copyToUser(rlim_ptr, std.mem.asBytes(&rlim)) catch return EFAULT;
@@ -4943,7 +4943,7 @@ fn sys_setrlimit(resource: u32, rlim_ptr: usize) i32 {
     if (!protection.verifyUserPointer(rlim_ptr, @sizeOf(Rlimit))) return EFAULT;
 
     const proc = process.current_process orelse return ESRCH;
-    const pid_idx: usize = @intCast(proc.pid);
+    const pid_idx: usize = proc.pid % 256;
 
     var rlim: Rlimit = undefined;
     protection.copyFromUser(std.mem.asBytes(&rlim), rlim_ptr) catch return EFAULT;
