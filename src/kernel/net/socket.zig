@@ -146,6 +146,10 @@ pub const Socket = struct {
             return SocketError.InvalidAddress;
         }
 
+        if (self.backlog.len > 0) {
+            memory.kfree(@as(*anyopaque, @ptrCast(self.backlog.ptr)));
+        }
+
         const backlog_size = @min(backlog, MAX_BACKLOG);
         const backlog_mem = memory.kmalloc(backlog_size * @sizeOf(?*Socket)) orelse return error.OutOfMemory;
         const backlog_ptr: [*]?*Socket = @ptrCast(@alignCast(backlog_mem));
@@ -351,6 +355,11 @@ pub const Socket = struct {
         memory.kfree(self.recv_buffer.ptr);
         memory.kfree(self.send_buffer.ptr);
         if (self.backlog.len > 0) {
+            for (self.backlog[0..self.backlog_count]) |maybe_client| {
+                if (maybe_client) |client| {
+                    client.close();
+                }
+            }
             memory.kfree(@as(*anyopaque, @ptrCast(self.backlog.ptr)));
         }
         memory.kfree(@as([*]u8, @ptrCast(self)));
