@@ -671,7 +671,7 @@ fn handleIncomingSYN(src_ip: u32, dst_ip: u32, src_port: u16, dst_port: u16, seq
     conn.state = .SYN_RECEIVED;
 
     sendTCPPacket(conn, TCPFlags.SYN | TCPFlags.ACK, &[_]u8{}) catch {
-        conn.state = .CLOSED;
+        releaseConnection(conn);
     };
 }
 
@@ -1048,6 +1048,14 @@ fn updateTimestampValues(conn: *TCPConnectionStruct, tsval: u32, tsecr: u32) voi
 
 pub fn registerListeningSocket(sock: *@import("socket.zig").Socket) void {
     for (&tcp_sockets) |*maybe_socket| {
+        if (maybe_socket.*) |s| {
+            if (s.listening and s.port == sock.local_port) {
+                return;
+            }
+        }
+    }
+
+    for (&tcp_sockets) |*maybe_socket| {
         if (maybe_socket.* == null) {
             maybe_socket.* = TCPSocket{
                 .connection = null,
@@ -1055,6 +1063,17 @@ pub fn registerListeningSocket(sock: *@import("socket.zig").Socket) void {
                 .port = sock.local_port,
             };
             return;
+        }
+    }
+}
+
+pub fn unregisterListeningSocket(port: u16) void {
+    for (&tcp_sockets) |*maybe_socket| {
+        if (maybe_socket.*) |s| {
+            if (s.listening and s.port == port) {
+                maybe_socket.* = null;
+                return;
+            }
         }
     }
 }

@@ -327,6 +327,9 @@ pub const Socket = struct {
                     tcp.closeConnection(conn);
                     tcp.releaseConnection(conn);
                 }
+                if (self.state == .LISTENING and self.local_port != 0) {
+                    tcp.unregisterListeningSocket(self.local_port);
+                }
             },
             else => {},
         }
