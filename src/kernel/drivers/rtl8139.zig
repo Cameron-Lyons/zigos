@@ -236,6 +236,7 @@ const RTL8139 = struct {
         }
 
         const packet_start = self.rx_offset + 4;
+        if (packet_start + length > RX_BUFFER_SIZE) return null;
         const packet_data = self.rx_buffer[packet_start .. packet_start + length];
 
         self.rx_offset = (self.rx_offset + length + 4 + 3) & ~@as(u16, 3);
