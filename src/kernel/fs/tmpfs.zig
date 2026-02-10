@@ -175,6 +175,9 @@ fn tmpfsWrite(vnode: *vfs.VNode, buffer: []const u8, offset: u64) vfs.VFSError!u
     }
 
     if (node.data) |d| {
+        if (off > node.size) {
+            @memset(d[node.size..off], 0);
+        }
         @memcpy(d[off .. off + buffer.len], buffer);
     }
 
@@ -425,6 +428,11 @@ fn tmpfsRename(old_parent_vnode: *vfs.VNode, old_name: []const u8, new_parent_vn
     const old_parent = getNodeFromVNode(old_parent_vnode) orelse return vfs.VFSError.InvalidOperation;
     const new_parent = getNodeFromVNode(new_parent_vnode) orelse return vfs.VFSError.InvalidOperation;
     const node = findChild(old_parent, old_name) orelse return vfs.VFSError.NotFound;
+
+    if (findChild(new_parent, new_name)) |existing| {
+        removeChild(new_parent, existing);
+        freeNode(existing);
+    }
 
     removeChild(old_parent, node);
 
