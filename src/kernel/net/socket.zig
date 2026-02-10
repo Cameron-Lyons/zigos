@@ -428,6 +428,9 @@ pub fn createSocket(socket_type: SocketType, protocol: Protocol) !*Socket {
         }
     }
 
+    memory.kfree(sock.recv_buffer.ptr);
+    memory.kfree(sock.send_buffer.ptr);
+    memory.kfree(@as([*]u8, @ptrCast(sock)));
     return SocketError.NoBufferSpace;
 }
 
