@@ -5,6 +5,7 @@ const paging = @import("../memory/paging.zig");
 const protection = @import("../memory/protection.zig");
 const elf = @import("../elf/elf.zig");
 const gdt = @import("../interrupts/gdt.zig");
+const scheduler = @import("../process/scheduler.zig");
 
 pub const WEXITED = 1;
 pub const WSIGNALED = 2;
@@ -34,6 +35,7 @@ pub fn fork() !i32 {
     }
 
     child.pid = process.next_pid;
+    process.pid_lookup[process.next_pid % 256] = child;
     process.next_pid += 1;
     child.state = .Ready;
     child.privilege = parent.privilege;
@@ -65,6 +67,9 @@ pub fn fork() !i32 {
 
         child.next = process.process_list_head;
         process.process_list_head = child;
+
+        const priority = if (parent.privilege == .Kernel) scheduler.Priority.High else scheduler.Priority.Normal;
+        _ = scheduler.registerProcess(child, priority);
 
         return @intCast(child.pid);
     }
@@ -242,6 +247,7 @@ pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
                     child_rusage.nivcsw = 0;
 
                     p.state = .Terminated;
+                    process.pid_lookup[p.pid % 256] = null;
                     freeUserMemory(p);
                     if (p.page_directory) |pd| {
                         memory.freePages(@as([*]u8, @ptrFromInt(@intFromPtr(pd))), 1);
