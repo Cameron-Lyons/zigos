@@ -3357,7 +3357,7 @@ fn sys_getitimer(which: u32, value_addr: usize) i32 {
     if (!protection.verifyUserPointer(value_addr, @sizeOf(Itimerval))) return EINVAL;
 
     const proc = process.current_process orelse return ESRCH;
-    const timer = process_itimers[proc.pid][which];
+    const timer = process_itimers[proc.pid % 256][which];
 
     protection.copyToUser(value_addr, std.mem.asBytes(&timer)) catch return EINVAL;
     return 0;
@@ -3371,13 +3371,13 @@ fn sys_setitimer(which: u32, new_value_addr: usize, old_value_addr: usize) i32 {
     const proc = process.current_process orelse return ESRCH;
 
     if (old_value_addr != 0) {
-        const old_timer = process_itimers[proc.pid][which];
+        const old_timer = process_itimers[proc.pid % 256][which];
         protection.copyToUser(old_value_addr, std.mem.asBytes(&old_timer)) catch return EINVAL;
     }
 
     var new_timer: Itimerval = undefined;
     protection.copyFromUser(std.mem.asBytes(&new_timer), new_value_addr) catch return EINVAL;
-    process_itimers[proc.pid][which] = new_timer;
+    process_itimers[proc.pid % 256][which] = new_timer;
 
     return 0;
 }
