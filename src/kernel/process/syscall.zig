@@ -4216,7 +4216,9 @@ fn sys_ppoll(fds_ptr: usize, nfds: u32, timeout_ptr: usize, sigmask_ptr: usize) 
         if (!protection.verifyUserPointer(timeout_ptr, @sizeOf(Timespec))) return EFAULT;
         var ts: Timespec = undefined;
         protection.copyFromUser(std.mem.asBytes(&ts), timeout_ptr) catch return EFAULT;
-        timeout_ms = ts.tv_sec * 1000 + @divTrunc(ts.tv_nsec, 1000000);
+        if (ts.tv_sec < 0) return EINVAL;
+        const ms: u64 = @as(u64, @intCast(ts.tv_sec)) * 1000 + @as(u64, @intCast(@max(0, ts.tv_nsec))) / 1000000;
+        timeout_ms = @intCast(@min(ms, 0x7FFFFFFF));
     }
 
     return sys_poll(fds_ptr, nfds, timeout_ms);
@@ -4232,9 +4234,10 @@ fn sys_pselect6(nfds: i32, readfds: usize, writefds: usize, exceptfds: usize, ti
         if (!protection.verifyUserPointer(timeout_ptr, @sizeOf(Timespec))) return EFAULT;
         var ts: Timespec = undefined;
         protection.copyFromUser(std.mem.asBytes(&ts), timeout_ptr) catch return EFAULT;
+        if (ts.tv_sec < 0) return EINVAL;
 
         const tv_sec: u32 = @intCast(ts.tv_sec);
-        const tv_usec: u32 = @intCast(@divTrunc(ts.tv_nsec, 1000));
+        const tv_usec: u32 = @intCast(@max(0, @divTrunc(ts.tv_nsec, 1000)));
         @memcpy(timeval_buf[0..4], std.mem.asBytes(&tv_sec));
         @memcpy(timeval_buf[4..8], std.mem.asBytes(&tv_usec));
         timeout_arg = @intFromPtr(&timeval_buf);
@@ -5115,7 +5118,7 @@ fn sys_clock_nanosleep(clock_id: u32, flags: u32, request: usize, remain: usize)
     protection.copyFromUser(std.mem.asBytes(&req), request) catch return EFAULT;
 
     const timer = @import("../timer/timer.zig");
-    const ticks_to_sleep: u64 = @intCast(@max(0, req.tv_sec) * 100 + @divTrunc(@max(0, req.tv_nsec), 10000000));
+    const ticks_to_sleep: u64 = @as(u64, @intCast(@max(0, req.tv_sec))) * 100 + @as(u64, @intCast(@max(0, req.tv_nsec))) / 10000000;
     const start_ticks = timer.getTicks();
 
     while (timer.getTicks() - start_ticks < ticks_to_sleep) {
