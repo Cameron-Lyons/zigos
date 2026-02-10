@@ -102,6 +102,7 @@ pub fn terminateProcess(pid: u32) bool {
     const proc = getProcessByPid(pid) orelse return false;
 
     proc.state = .Terminated;
+    scheduler.unregisterProcess(proc);
     pid_lookup[pid % MAX_PROCESSES] = null;
 
     var prev: ?*Process = null;

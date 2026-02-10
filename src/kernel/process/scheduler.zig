@@ -332,6 +332,34 @@ fn scheduleMLFQ() ?*ProcessExtended {
     return schedulePriority();
 }
 
+pub fn unregisterProcess(proc: *process.Process) void {
+    if (proc.extended_idx) |idx| {
+        if (idx < MAX_EXTENDED_PROCESSES) {
+            var ext = &extended_processes[idx];
+            if (ext.in_use and ext.base == proc) {
+                ext.in_use = false;
+
+                if (current_extended == ext) {
+                    current_extended = null;
+                }
+
+                const priority_index = @intFromEnum(ext.priority);
+                if (ready_queues[priority_index] == ext) {
+                    ready_queues[priority_index] = null;
+                }
+                if (run_queue_head == ext) {
+                    run_queue_head = null;
+                }
+
+                if (stats.ready_processes > 0) {
+                    stats.ready_processes -= 1;
+                }
+            }
+        }
+        proc.extended_idx = null;
+    }
+}
+
 fn findExtendedProcess(base: *process.Process) ?*ProcessExtended {
     if (base.extended_idx) |idx| {
         const ext = &extended_processes[idx];
