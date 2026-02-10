@@ -725,6 +725,9 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
     }
 
     if (fd < FD_OFFSET) return EBADF;
+    if ((fd >= FD_OFFSET + 200 and fd < FD_OFFSET + 264) or
+        (fd >= FD_OFFSET + 300 and fd < FD_OFFSET + 364) or
+        fd >= 1000) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
     // SAFETY: filled by the subsequent copyFromUser call
@@ -779,6 +782,9 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
     }
 
     if (fd < FD_OFFSET) return EBADF;
+    if ((fd >= FD_OFFSET + 200 and fd < FD_OFFSET + 264) or
+        (fd >= FD_OFFSET + 300 and fd < FD_OFFSET + 364) or
+        fd >= 1000) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
     // SAFETY: filled by the subsequent vfs.read call
