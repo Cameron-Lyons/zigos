@@ -1727,6 +1727,10 @@ fn sys_brk(addr: usize) i32 {
         var page_addr = current_brk;
         while (page_addr < new_brk) : (page_addr += 0x1000) {
             const phys_page = memory.allocatePhysicalPage() orelse {
+                var cleanup_addr = current_brk;
+                while (cleanup_addr < page_addr) : (cleanup_addr += 0x1000) {
+                    paging.unmap_page(@intCast(cleanup_addr));
+                }
                 return @intCast(current_brk);
             };
             paging.mapPage(@intCast(page_addr), phys_page, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_USER);
