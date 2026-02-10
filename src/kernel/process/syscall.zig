@@ -1602,7 +1602,11 @@ fn sys_pipe(pipefd: ?*[2]i32) i32 {
         @as(i32, @intCast(result.write_fd)) + FD_OFFSET,
     };
 
-    protection.copyToUser(@intFromPtr(pipefd), std.mem.asBytes(&fds)) catch return EINVAL;
+    protection.copyToUser(@intFromPtr(pipefd), std.mem.asBytes(&fds)) catch {
+        vfs.close(result.read_fd) catch {};
+        vfs.close(result.write_fd) catch {};
+        return EINVAL;
+    };
     return 0;
 }
 
@@ -4005,7 +4009,11 @@ fn sys_pipe2(pipefd: ?*[2]i32, flags: u32) i32 {
         vfs.setFileFlags(result.write_fd, vfs.O_NONBLOCK) catch {};
     }
 
-    protection.copyToUser(@intFromPtr(pipefd), std.mem.asBytes(&fds)) catch return EINVAL;
+    protection.copyToUser(@intFromPtr(pipefd), std.mem.asBytes(&fds)) catch {
+        vfs.close(result.read_fd) catch {};
+        vfs.close(result.write_fd) catch {};
+        return EINVAL;
+    };
     return 0;
 }
 
@@ -4065,6 +4073,7 @@ fn sys_accept4(sockfd: i32, addr: usize, addrlen: usize, flags: u32) i32 {
         }
     }
 
+    client.close();
     return EMFILE;
 }
 
@@ -5012,7 +5021,17 @@ fn sys_socketpair(domain: i32, sock_type: i32, protocol: i32, sv: usize) i32 {
 
     _ = sock_type;
     const fds = [2]i32{ fd1, fd2 };
-    protection.copyToUser(sv, std.mem.asBytes(&fds)) catch return EFAULT;
+    protection.copyToUser(sv, std.mem.asBytes(&fds)) catch {
+        const idx1: usize = @intCast(fd1 - 1000);
+        const idx2: usize = @intCast(fd2 - 1000);
+        unix_sockets[idx1].in_use = false;
+        unix_sockets[idx1].connected = false;
+        unix_sockets[idx1].peer = null;
+        unix_sockets[idx2].in_use = false;
+        unix_sockets[idx2].connected = false;
+        unix_sockets[idx2].peer = null;
+        return EFAULT;
+    };
     return 0;
 }
 
