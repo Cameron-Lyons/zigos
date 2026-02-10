@@ -493,7 +493,9 @@ fn find_best_fit(size: u32) ?*BlockHeader {
 }
 
 fn expand_heap(size: u32) bool {
-    const required_size = size + @sizeOf(BlockHeader);
+    const header_size: u32 = @sizeOf(BlockHeader);
+    if (size > 0xFFFFFFFF - header_size) return false;
+    const required_size = size + header_size;
     const new_pages = (required_size + PAGE_SIZE - 1) / PAGE_SIZE;
     const new_size = new_pages * PAGE_SIZE;
 
