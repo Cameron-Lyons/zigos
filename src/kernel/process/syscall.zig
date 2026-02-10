@@ -4971,13 +4971,11 @@ fn sys_prlimit64(pid: i32, resource: u32, new_limit: usize, old_limit: usize) i3
 
     const pid_idx: usize = if (pid == 0) blk: {
         const proc = process.current_process orelse return ESRCH;
-        break :blk @intCast(proc.pid);
+        break :blk proc.pid % 256;
     } else blk: {
         if (pid < 0) return EINVAL;
-        break :blk @intCast(pid);
+        break :blk @as(usize, @intCast(pid)) % 256;
     };
-
-    if (pid_idx >= 256) return ESRCH;
 
     if (old_limit != 0) {
         if (!protection.verifyUserPointer(old_limit, @sizeOf(Rlimit))) return EFAULT;

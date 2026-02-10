@@ -2178,11 +2178,19 @@ pub const Shell = struct {
         } else {
             const cwd = syscall_mod.getCwd();
             var path_len: usize = 0;
+            if (cwd.len >= path_buf.len) {
+                vga.print("cd: path too long\n");
+                return;
+            }
             @memcpy(path_buf[0..cwd.len], cwd);
             path_len = cwd.len;
             if (path_len > 1) {
                 path_buf[path_len] = '/';
                 path_len += 1;
+            }
+            if (path_len + arg_len > path_buf.len) {
+                vga.print("cd: path too long\n");
+                return;
             }
             @memcpy(path_buf[path_len .. path_len + arg_len], arg_slice);
             path_len += arg_len;
