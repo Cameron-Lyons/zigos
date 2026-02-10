@@ -725,9 +725,7 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
     }
 
     if (fd < FD_OFFSET) return EBADF;
-    if ((fd >= FD_OFFSET + 200 and fd < FD_OFFSET + 264) or
-        (fd >= FD_OFFSET + 300 and fd < FD_OFFSET + 364) or
-        fd >= 1000) return EBADF;
+    if (isSpecialFd(fd)) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
     // SAFETY: filled by the subsequent copyFromUser call
@@ -782,9 +780,7 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
     }
 
     if (fd < FD_OFFSET) return EBADF;
-    if ((fd >= FD_OFFSET + 200 and fd < FD_OFFSET + 264) or
-        (fd >= FD_OFFSET + 300 and fd < FD_OFFSET + 364) or
-        fd >= 1000) return EBADF;
+    if (isSpecialFd(fd)) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
     // SAFETY: filled by the subsequent vfs.read call
@@ -2586,6 +2582,7 @@ fn sys_truncate(pathname: [*]const u8, length: usize) i32 {
 fn sys_pread(fd: i32, buf: [*]u8, count: usize, offset: u64) i32 {
     if (!protection.verifyUserPointer(@intFromPtr(buf), count)) return EINVAL;
     if (fd < FD_OFFSET) return EBADF;
+    if (isSpecialFd(fd)) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
     var kernel_buffer: [512]u8 = undefined;
@@ -2607,6 +2604,7 @@ fn sys_pread(fd: i32, buf: [*]u8, count: usize, offset: u64) i32 {
 fn sys_pwrite(fd: i32, buf: [*]const u8, count: usize, offset: u64) i32 {
     if (!protection.verifyUserPointer(@intFromPtr(buf), count)) return EINVAL;
     if (fd < FD_OFFSET) return EBADF;
+    if (isSpecialFd(fd)) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
     var kernel_buffer: [512]u8 = undefined;
@@ -4431,8 +4429,15 @@ fn sys_membarrier(cmd: u32, flags: u32) i32 {
     }
 }
 
+fn isSpecialFd(fd: i32) bool {
+    return (fd >= FD_OFFSET + 200 and fd < FD_OFFSET + 264) or
+        (fd >= FD_OFFSET + 300 and fd < FD_OFFSET + 364) or
+        fd >= 1000;
+}
+
 fn sys_copy_file_range(fd_in: i32, off_in_ptr: usize, fd_out: i32, off_out_ptr: usize, len: usize) i32 {
     if (fd_in < FD_OFFSET or fd_out < FD_OFFSET) return EBADF;
+    if (isSpecialFd(fd_in) or isSpecialFd(fd_out)) return EBADF;
 
     const vfs_fd_in: u32 = @intCast(fd_in - FD_OFFSET);
     const vfs_fd_out: u32 = @intCast(fd_out - FD_OFFSET);
