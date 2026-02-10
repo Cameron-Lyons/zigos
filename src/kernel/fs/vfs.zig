@@ -221,6 +221,7 @@ pub fn mount(device: []const u8, mount_path: []const u8, fs_name: []const u8, fl
 
             const mount_point: *MountPoint = @ptrCast(@alignCast(mp));
 
+            if (device.len >= 256 or mount_path.len >= 256) return VFSError.InvalidPath;
             @memcpy(mount_point.device[0..device.len], device);
             mount_point.device[device.len] = 0;
             @memcpy(mount_point.mount_path[0..mount_path.len], mount_path);
@@ -911,6 +912,8 @@ pub fn dup2(old_fd: u32, new_fd: u32) VFSError!u32 {
 }
 
 pub fn rename(old_path: []const u8, new_path: []const u8) VFSError!void {
+    if (std.mem.eql(u8, old_path, new_path)) return;
+
     const old_parts = splitPath(old_path);
     const new_parts = splitPath(new_path);
 
