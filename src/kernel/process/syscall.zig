@@ -921,6 +921,10 @@ fn sys_close(fd: i32) i32 {
         const idx: usize = @intCast(fd - 1000);
         var usock = &unix_sockets[idx];
         if (!usock.in_use) return EBADF;
+        if (usock.peer) |peer| {
+            peer.peer = null;
+            peer.connected = false;
+        }
         usock.in_use = false;
         usock.peer = null;
         usock.path_len = 0;
@@ -3596,6 +3600,7 @@ const ShmSegment = struct {
     mode: u32,
     nattch: u32,
     in_use: bool,
+    marked_for_deletion: bool,
 };
 
 var shm_segments: [64]ShmSegment = [_]ShmSegment{.{
@@ -3605,6 +3610,7 @@ var shm_segments: [64]ShmSegment = [_]ShmSegment{.{
     .mode = 0,
     .nattch = 0,
     .in_use = false,
+    .marked_for_deletion = false,
 }} ** 64;
 
 fn sys_shmget(key: i32, size: usize, shmflg: u32) i32 {
@@ -3630,6 +3636,7 @@ fn sys_shmget(key: i32, size: usize, shmflg: u32) i32 {
             seg.addr = @ptrCast(@alignCast(mem));
             seg.mode = shmflg & 0o777;
             seg.nattch = 0;
+            seg.marked_for_deletion = false;
             return @intCast(i);
         }
     }
@@ -3640,6 +3647,7 @@ fn sys_shmat(shmid: i32, _: usize, _: u32) i32 {
     if (shmid < 0 or shmid >= 64) return EINVAL;
     const seg = &shm_segments[@intCast(shmid)];
     if (!seg.in_use) return EINVAL;
+    if (seg.marked_for_deletion) return EINVAL;
 
     seg.nattch += 1;
     if (seg.addr) |addr| {
@@ -3654,6 +3662,12 @@ fn sys_shmdt(addr: usize) i32 {
             if (seg.addr) |a| {
                 if (@intFromPtr(a) == addr) {
                     if (seg.nattch > 0) seg.nattch -= 1;
+                    if (seg.marked_for_deletion and seg.nattch == 0) {
+                        memory.kfree(@ptrCast(a));
+                        seg.in_use = false;
+                        seg.addr = null;
+                        seg.marked_for_deletion = false;
+                    }
                     return 0;
                 }
             }
@@ -3701,6 +3715,8 @@ fn sys_shmctl(shmid: i32, cmd: u32, buf_addr: usize) i32 {
                 }
                 seg.in_use = false;
                 seg.addr = null;
+            } else {
+                seg.marked_for_deletion = true;
             }
             return 0;
         },
