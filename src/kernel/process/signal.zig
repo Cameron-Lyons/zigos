@@ -132,8 +132,6 @@ pub const SignalQueue = struct {
     }
 
     pub fn add(self: *SignalQueue, signum: i32, info: *const SigInfo) void {
-        self.pending.add(signum);
-
         const next_tail = (self.tail + 1) % self.queue.len;
         if (next_tail != self.head) {
             self.queue[self.tail] = QueuedSignal{
@@ -144,6 +142,7 @@ pub const SignalQueue = struct {
             if (signum >= 0 and signum < 65) {
                 self.sig_counts[@intCast(signum)] += 1;
             }
+            self.pending.add(signum);
         }
     }
 

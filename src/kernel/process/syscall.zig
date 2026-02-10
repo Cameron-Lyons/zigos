@@ -3454,6 +3454,12 @@ fn sys_epoll_ctl(epfd: i32, op: u32, fd: i32, event_addr: usize) i32 {
             var ev: EpollEvent = undefined;
             protection.copyFromUser(std.mem.asBytes(&ev), event_addr) catch return EINVAL;
 
+            for (inst.entries) |maybe_entry| {
+                if (maybe_entry) |entry| {
+                    if (entry.fd == fd) return EEXIST;
+                }
+            }
+
             for (&inst.entries) |*e| {
                 if (e.* == null) {
                     e.* = EpollEntry{ .fd = fd, .events = ev.events, .data = ev.data };
@@ -3813,6 +3819,8 @@ fn sys_semop(semid: i32, sops_addr: usize, nsops: u32) i32 {
                 return EAGAIN;
             }
             sem.value += op.sem_op;
+        } else {
+            if (sem.value != 0) return EAGAIN;
         }
     }
 
