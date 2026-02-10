@@ -78,6 +78,7 @@ const ARP_TABLE_SIZE = 64;
 // SAFETY: each entry's valid flag set to false in init(); only valid entries are read
 var arp_table: [ARP_TABLE_SIZE]ARPEntry = undefined;
 var arp_table_init = false;
+var arp_evict_index: usize = 0;
 
 pub fn init() void {
     if (!arp_table_init) {
@@ -197,9 +198,10 @@ fn addToTable(ip: u32, mac: [6]u8) void {
         }
     }
 
-    arp_table[0].ip = ip;
-    @memcpy(&arp_table[0].mac, &mac);
-    arp_table[0].valid = true;
+    arp_table[arp_evict_index].ip = ip;
+    @memcpy(&arp_table[arp_evict_index].mac, &mac);
+    arp_table[arp_evict_index].valid = true;
+    arp_evict_index = (arp_evict_index + 1) % ARP_TABLE_SIZE;
 }
 
 fn isOurIP(ip: u32) bool {

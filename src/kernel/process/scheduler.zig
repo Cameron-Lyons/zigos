@@ -270,10 +270,11 @@ fn scheduleRoundRobin() ?*ProcessExtended {
 }
 
 fn schedulePriority() ?*ProcessExtended {
-    var priority_index: usize = @intFromEnum(Priority.RealTime);
+    var priority_level: usize = @intFromEnum(Priority.RealTime) + 1;
 
-    while (priority_index > 0) : (priority_index -= 1) {
-        if (ready_queues[priority_index]) |queue_head| {
+    while (priority_level > 0) {
+        priority_level -= 1;
+        if (ready_queues[priority_level]) |queue_head| {
             var current = queue_head;
             while (current.base.state != .Ready) {
                 if (current.base.next) |next_base| {
