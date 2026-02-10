@@ -80,6 +80,7 @@ pub fn copyStringFromUser(buffer: []u8, user_str: usize) ![]u8 {
 }
 
 pub fn allocateUserMemory(size: usize, prot: u32) !usize {
+    if (size == 0 or size > USER_SPACE_END - USER_HEAP_START) return error.OutOfVirtualMemory;
     const page_count = (size + 0xFFF) / 0x1000;
 
     var virt_addr: u32 = USER_HEAP_START;
