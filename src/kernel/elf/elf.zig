@@ -159,6 +159,9 @@ pub fn loadElfFromFile(path: []const u8) !LoadedElf {
     var dynamic_vaddr: u32 = 0;
     var has_dynamic: bool = false;
 
+    var loaded_low: u32 = 0xFFFFFFFF;
+    var loaded_high: u32 = 0;
+
     var ph_offset = header.phoff;
     var i: u16 = 0;
     while (i < header.phnum) : (i += 1) {
@@ -166,14 +169,17 @@ pub fn loadElfFromFile(path: []const u8) !LoadedElf {
         var phdr: Elf32ProgramHeader = undefined;
 
         _ = vfs.lseek(file, @intCast(ph_offset), vfs.SEEK_SET) catch {
+            unmapLoadedRange(loaded_low, loaded_high);
             return ElfLoadError.FileReadError;
         };
 
         const ph_read = vfs.read(file, @as([*]u8, @ptrCast(&phdr))[0..@sizeOf(Elf32ProgramHeader)]) catch {
+            unmapLoadedRange(loaded_low, loaded_high);
             return ElfLoadError.FileReadError;
         };
 
         if (ph_read != @sizeOf(Elf32ProgramHeader)) {
+            unmapLoadedRange(loaded_low, loaded_high);
             return ElfLoadError.FileReadError;
         }
 
@@ -186,8 +192,14 @@ pub fn loadElfFromFile(path: []const u8) !LoadedElf {
             }
 
             if (!loadSegment(file, &phdr)) {
+                unmapLoadedRange(loaded_low, loaded_high);
                 return ElfLoadError.OutOfMemory;
             }
+
+            const seg_start = phdr.vaddr & ~@as(u32, 0xFFF);
+            const seg_end = (phdr.vaddr + phdr.memsz + 0xFFF) & ~@as(u32, 0xFFF);
+            if (seg_start < loaded_low) loaded_low = seg_start;
+            if (seg_end > loaded_high) loaded_high = seg_end;
         } else if (phdr.type == @intFromEnum(ProgramType.Dynamic)) {
             dynamic_vaddr = phdr.vaddr;
             has_dynamic = true;
@@ -211,6 +223,23 @@ pub fn loadElfFromFile(path: []const u8) !LoadedElf {
     return result;
 }
 
+fn unmapLoadedRange(low: u32, high: u32) void {
+    if (low >= high) return;
+    var addr = low;
+    while (addr < high) : (addr += 0x1000) {
+        paging.unmap_page(addr);
+    }
+}
+
+fn unmapSegmentPages(start: u32, count: u32) void {
+    var addr = start;
+    var j: u32 = 0;
+    while (j < count) : (j += 1) {
+        paging.unmap_page(addr);
+        addr += 0x1000;
+    }
+}
+
 fn loadSegment(file: u32, phdr: *const Elf32ProgramHeader) bool {
     const page_size = 0x1000;
     const start_page = phdr.vaddr & ~@as(u32, page_size - 1);
@@ -220,7 +249,10 @@ fn loadSegment(file: u32, phdr: *const Elf32ProgramHeader) bool {
     var page_addr = start_page;
     var i: u32 = 0;
     while (i < num_pages) : (i += 1) {
-        const phys_addr = memory.allocatePhysicalPage() orelse return false;
+        const phys_addr = memory.allocatePhysicalPage() orelse {
+            unmapSegmentPages(start_page, i);
+            return false;
+        };
 
         var flags = paging.PAGE_PRESENT | paging.PAGE_USER;
         if (phdr.flags & ProgramFlags.WRITE != 0) {
@@ -232,12 +264,19 @@ fn loadSegment(file: u32, phdr: *const Elf32ProgramHeader) bool {
     }
 
     if (phdr.filesz > 0) {
-        _ = vfs.lseek(file, @intCast(phdr.offset), vfs.SEEK_SET) catch return false;
+        _ = vfs.lseek(file, @intCast(phdr.offset), vfs.SEEK_SET) catch {
+            unmapSegmentPages(start_page, num_pages);
+            return false;
+        };
 
         const dest: [*]u8 = @ptrFromInt(phdr.vaddr);
-        const bytes_read = vfs.read(file, dest[0..phdr.filesz]) catch return false;
+        const bytes_read = vfs.read(file, dest[0..phdr.filesz]) catch {
+            unmapSegmentPages(start_page, num_pages);
+            return false;
+        };
 
         if (bytes_read != phdr.filesz) {
+            unmapSegmentPages(start_page, num_pages);
             return false;
         }
     }
