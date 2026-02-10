@@ -53,6 +53,7 @@ pub fn fork() !i32 {
     };
 
     copyAddressSpace(parent, child) catch |err| {
+        memory.freePages(@as([*]u8, @ptrFromInt(@intFromPtr(child.page_directory.?))), 1);
         memory.freePages(child.kernel_stack, 1);
         return err;
     };
