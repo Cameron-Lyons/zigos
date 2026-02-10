@@ -400,8 +400,8 @@ fn generateSocketId() u32 {
 
 fn allocateEphemeralPort() u16 {
     const port = next_ephemeral_port;
-    next_ephemeral_port += 1;
-    if (next_ephemeral_port > 65535) {
+    next_ephemeral_port +%= 1;
+    if (next_ephemeral_port < 49152) {
         next_ephemeral_port = 49152;
     }
     return port;
