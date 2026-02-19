@@ -21,7 +21,7 @@ jobs:
         
     - name: Install build dependencies
       run: |
-        sudo ./scripts/setup-deps.sh
+        ./scripts/setup-deps.sh
         
     - name: Install zlint
       run: |
