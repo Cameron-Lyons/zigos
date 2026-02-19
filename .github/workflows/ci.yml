@@ -42,25 +42,6 @@ jobs:
       run: |
         zig build kernel
 
-    - name: Build ISO
+    - name: Build ISO and boot test
       run: |
-        zig build iso
-        
-    - name: Test kernel boot
-      run: |
-        timeout 10 qemu-system-x86_64 \
-          -kernel zig-out/bin/kernel.elf \
-          -m 128M \
-          -display none \
-          -serial file:serial.log \
-          -monitor none \
-          -no-reboot \
-          -no-shutdown || true
-        
-        if [ -f serial.log ]; then
-          echo "Serial output:"
-          cat serial.log
-        fi
-        
-        echo "Kernel build and boot test completed successfully"
-
+        zig build boot-test
