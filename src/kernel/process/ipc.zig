@@ -183,7 +183,7 @@ pub const SharedMemory = struct {
         defer self.rwlock.readUnlock();
 
         const read_size = @min(buffer.len, self.size - offset);
-        @memcpy(buffer[0..read_size], self.data[offset..offset + read_size]);
+        @memcpy(buffer[0..read_size], self.data[offset .. offset + read_size]);
 
         return read_size;
     }
@@ -201,7 +201,7 @@ pub const SharedMemory = struct {
         defer self.rwlock.writeUnlock();
 
         const write_size = @min(data.len, self.size - offset);
-        @memcpy(self.data[offset..offset + write_size], data[0..write_size]);
+        @memcpy(self.data[offset .. offset + write_size], data[0..write_size]);
 
         return write_size;
     }
@@ -357,7 +357,7 @@ pub fn destroyMessageQueue(pid: u32) void {
 
     for (&message_queues) |*queue| {
         if (queue.* != null and queue.*.?.pid == pid) {
-            var q = &queue.*.?;
+            const q = &queue.*.?;
             var current = q.messages;
             while (current) |msg| {
                 const next = msg.next;

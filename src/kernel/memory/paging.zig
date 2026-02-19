@@ -349,7 +349,7 @@ fn enable_paging(page_dir_addr: u32) void {
         \\mov %%eax, %%cr0
         :
         : [addr] "r" (page_dir_addr),
-        : "eax"
+        : .{ .eax = true }
     );
 }
 

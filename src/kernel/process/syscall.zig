@@ -1027,7 +1027,7 @@ pub fn syscall0(num: u32) i32 {
         \\int $0x80
         : [result] "={eax}" (result),
         : [num] "{eax}" (num),
-        : "memory"
+        : .{ .memory = true }
     );
     return result;
 }
@@ -1040,7 +1040,7 @@ pub fn syscall1(num: u32, arg1: usize) i32 {
         : [result] "={eax}" (result),
         : [num] "{eax}" (num),
           [arg1] "{ebx}" (arg1),
-        : "memory"
+        : .{ .memory = true }
     );
     return result;
 }
@@ -1055,7 +1055,7 @@ pub fn syscall3(num: u32, arg1: usize, arg2: usize, arg3: usize) i32 {
           [arg1] "{ebx}" (arg1),
           [arg2] "{ecx}" (arg2),
           [arg3] "{edx}" (arg3),
-        : "memory"
+        : .{ .memory = true }
     );
     return result;
 }
