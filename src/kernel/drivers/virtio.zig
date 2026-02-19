@@ -25,7 +25,6 @@ const VIRTIO_STATUS_DRIVER_OK = 4;
 
 const VIRTQ_DESC_F_WRITE = 2;
 
-
 const VirtqDesc = extern struct {
     addr: u64,
     len: u32,
@@ -190,11 +189,11 @@ const VirtioNetDevice = struct {
         const avail_idx = queue.avail.idx;
         queue.avail.ring[avail_idx % queue.num] = desc_idx;
 
-        asm volatile ("" ::: "memory");
+        asm volatile ("" ::: .{ .memory = true });
 
         queue.avail.idx = avail_idx +% 1;
 
-        asm volatile ("" ::: "memory");
+        asm volatile ("" ::: .{ .memory = true });
 
         return desc_idx;
     }
