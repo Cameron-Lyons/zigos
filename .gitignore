@@ -6,4 +6,5 @@ build/
 *.elf
 *.bin
 *.iso
+qemu*.log
 .DS_Store

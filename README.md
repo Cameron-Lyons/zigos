@@ -8,9 +8,16 @@ Filesystem support includes both FAT32 and ext2 filesystems through a virtual fi
 
 ## Requirements
 
-- Zig compiler (0.11.0 or later)
+- Zig compiler (0.15.2 or later)
 - NASM assembler
 - QEMU for testing
+- For ISO builds: GRUB `mkrescue`, `xorriso`, and `mtools`
+
+### macOS (Homebrew)
+
+```bash
+brew install zig nasm qemu xorriso mtools i686-elf-grub
+```
 
 ## Building and Running
 
@@ -22,4 +29,11 @@ Filesystem support includes both FAT32 and ext2 filesystems through a virtual fi
 zig build kernel
 zig build iso
 zig build run
+```
+
+`zig build iso` auto-detects `grub-mkrescue`, `i686-elf-grub-mkrescue`, or
+`x86_64-elf-grub-mkrescue`. You can override detection with:
+
+```bash
+GRUB_MKRESCUE=/path/to/grub-mkrescue zig build iso
 ```
