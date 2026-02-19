@@ -19,13 +19,35 @@ Filesystem support includes both FAT32 and ext2 filesystems through a virtual fi
 brew install zig nasm qemu xorriso mtools i686-elf-grub
 ```
 
+### Linux Packages
+
+Ubuntu/Debian:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y zig nasm qemu-system-x86 qemu-system-i386 grub-common grub-pc-bin xorriso mtools
+```
+
+Fedora:
+
+```bash
+sudo dnf install -y zig nasm qemu-system-x86 grub2-tools grub2-tools-extra xorriso mtools
+```
+
+Arch Linux:
+
+```bash
+sudo pacman -Sy --noconfirm zig nasm grub xorriso mtools qemu-full
+```
+
 ### One-Command Setup
 
 ```bash
 ./scripts/setup-deps.sh
 ```
 
-The script supports macOS (Homebrew) and Ubuntu (apt-based) systems.
+The script supports macOS (Homebrew) and Linux systems with `apt`, `dnf`, or
+`pacman`.
 
 ## Building and Running
 

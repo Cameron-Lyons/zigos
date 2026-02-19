@@ -19,15 +19,9 @@ jobs:
       with:
         version: 0.15.2
         
-    - name: Install NASM
+    - name: Install build dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y nasm
-        
-    - name: Install QEMU and ISO tools
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y qemu-system-x86 qemu-system-i386 grub-common grub-pc-bin xorriso mtools
+        sudo ./scripts/setup-deps.sh
         
     - name: Install zlint
       run: |
