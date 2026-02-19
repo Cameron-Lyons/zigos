@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    
+
     const kernel = b.addExecutable(.{
         .name = "kernel.elf",
         .root_module = kernel_module,
@@ -83,4 +83,60 @@ pub fn build(b: *std.Build) void {
 
     const iso_step = b.step("iso", "Build bootable ISO (requires GRUB mkrescue, xorriso, and mtools)");
     iso_step.dependOn(&iso_cmd.step);
+
+    const boot_test_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -eu
+        \\QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
+        \\BOOT_TEST_SECONDS="${BOOT_TEST_SECONDS:-12}"
+        \\if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
+        \\  echo "QEMU binary '$QEMU_BIN' not found. Set QEMU_BIN or install QEMU." >&2
+        \\  exit 1
+        \\fi
+        \\mkdir -p build
+        \\LOG_PATH="build/boot-test-serial.log"
+        \\rm -f "$LOG_PATH"
+        \\"$QEMU_BIN" \
+        \\  -cdrom build/os.iso \
+        \\  -boot d \
+        \\  -m 256M \
+        \\  -display none \
+        \\  -serial file:"$LOG_PATH" \
+        \\  -monitor none \
+        \\  -no-reboot \
+        \\  -no-shutdown \
+        \\  >/dev/null 2>&1 &
+        \\QEMU_PID=$!
+        \\sleep "$BOOT_TEST_SECONDS"
+        \\if kill -0 "$QEMU_PID" >/dev/null 2>&1; then
+        \\  kill -TERM "$QEMU_PID" >/dev/null 2>&1 || true
+        \\  sleep 1
+        \\  kill -KILL "$QEMU_PID" >/dev/null 2>&1 || true
+        \\fi
+        \\wait "$QEMU_PID" >/dev/null 2>&1 || true
+        \\if [ ! -s "$LOG_PATH" ]; then
+        \\  echo "Boot test failed: no serial output at $LOG_PATH" >&2
+        \\  exit 1
+        \\fi
+        \\if ! grep -q "Welcome to ZigOS" "$LOG_PATH"; then
+        \\  echo "Boot test failed: missing marker 'Welcome to ZigOS'" >&2
+        \\  cat "$LOG_PATH" >&2
+        \\  exit 1
+        \\fi
+        \\if ! grep -q "Initializing GDT" "$LOG_PATH"; then
+        \\  echo "Boot test failed: missing marker 'Initializing GDT'" >&2
+        \\  cat "$LOG_PATH" >&2
+        \\  exit 1
+        \\fi
+        \\if grep -Eqi "panic|KERNEL PANIC|System Halted" "$LOG_PATH"; then
+        \\  echo "Boot test failed: panic marker found in boot log" >&2
+        \\  cat "$LOG_PATH" >&2
+        \\  exit 1
+        \\fi
+        \\echo "Boot test passed. Log: $LOG_PATH"
+    });
+    boot_test_cmd.step.dependOn(&iso_cmd.step);
+
+    const boot_test_step = b.step("boot-test", "Build ISO and verify headless boot markers in QEMU");
+    boot_test_step.dependOn(&boot_test_cmd.step);
 }
