@@ -52,14 +52,35 @@ pub fn build(b: *std.Build) void {
 
     const iso_cmd = b.addSystemCommand(&.{
         "sh", "-c",
-        \\mkdir -p build/iso/boot/grub &&
-        \\cp zig-out/bin/kernel.elf build/iso/boot/ &&
-        \\cp src/boot/grub.cfg build/iso/boot/grub/ &&
-        \\grub-mkrescue -o build/os.iso build/iso
+        \\set -eu
+        \\GRUB_MKRESCUE="${GRUB_MKRESCUE:-}"
+        \\if [ -z "$GRUB_MKRESCUE" ]; then
+        \\  for cmd in grub-mkrescue i686-elf-grub-mkrescue x86_64-elf-grub-mkrescue; do
+        \\    if command -v "$cmd" >/dev/null 2>&1; then
+        \\      GRUB_MKRESCUE="$cmd"
+        \\      break
+        \\    fi
+        \\  done
+        \\fi
+        \\if [ -z "$GRUB_MKRESCUE" ]; then
+        \\  echo "No GRUB mkrescue command found. Set GRUB_MKRESCUE or install GRUB tools." >&2
+        \\  exit 1
+        \\fi
+        \\if ! command -v xorriso >/dev/null 2>&1; then
+        \\  echo "xorriso not found. Install xorriso." >&2
+        \\  exit 1
+        \\fi
+        \\if ! command -v mformat >/dev/null 2>&1; then
+        \\  echo "mformat not found. Install mtools." >&2
+        \\  exit 1
+        \\fi
+        \\mkdir -p build/iso/boot/grub
+        \\cp zig-out/bin/kernel.elf build/iso/boot/
+        \\cp src/boot/grub.cfg build/iso/boot/grub/
+        \\"$GRUB_MKRESCUE" -o build/os.iso build/iso
     });
     iso_cmd.step.dependOn(b.getInstallStep());
 
-    const iso_step = b.step("iso", "Build bootable ISO (requires grub-mkrescue)");
+    const iso_step = b.step("iso", "Build bootable ISO (requires GRUB mkrescue, xorriso, and mtools)");
     iso_step.dependOn(&iso_cmd.step);
 }
-
