@@ -28,6 +28,7 @@ brew install zig nasm qemu xorriso mtools i686-elf-grub
 # Or use Zig build system
 zig build kernel
 zig build iso
+zig build boot-test
 zig build run
 ```
 
@@ -36,4 +37,11 @@ zig build run
 
 ```bash
 GRUB_MKRESCUE=/path/to/grub-mkrescue zig build iso
+```
+
+`zig build boot-test` builds the ISO, boots it headlessly in QEMU, and verifies
+required boot markers. Optional overrides:
+
+```bash
+QEMU_BIN=qemu-system-x86_64 BOOT_TEST_SECONDS=15 zig build boot-test
 ```
