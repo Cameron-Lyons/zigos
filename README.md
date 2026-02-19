@@ -19,6 +19,14 @@ Filesystem support includes both FAT32 and ext2 filesystems through a virtual fi
 brew install zig nasm qemu xorriso mtools i686-elf-grub
 ```
 
+### One-Command Setup
+
+```bash
+./scripts/setup-deps.sh
+```
+
+The script supports macOS (Homebrew) and Ubuntu (apt-based) systems.
+
 ## Building and Running
 
 ```bash

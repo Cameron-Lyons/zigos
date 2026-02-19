@@ -45,3 +45,14 @@ jobs:
     - name: Build ISO and boot test
       run: |
         zig build boot-test
+
+    - name: Upload boot-test artifacts on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: boot-test-debug-${{ github.run_id }}
+        retention-days: 7
+        if-no-files-found: warn
+        path: |
+          build/boot-test-serial.log
+          build/os.iso

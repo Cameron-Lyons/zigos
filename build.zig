@@ -123,8 +123,21 @@ pub fn build(b: *std.Build) void {
         \\  cat "$LOG_PATH" >&2
         \\  exit 1
         \\fi
+        \\if ! grep -q "A minimal operating system written in Zig" "$LOG_PATH"; then
+        \\  echo "Boot test failed: missing marker 'A minimal operating system written in Zig'" >&2
+        \\  cat "$LOG_PATH" >&2
+        \\  exit 1
+        \\fi
         \\if ! grep -q "Initializing GDT" "$LOG_PATH"; then
         \\  echo "Boot test failed: missing marker 'Initializing GDT'" >&2
+        \\  cat "$LOG_PATH" >&2
+        \\  exit 1
+        \\fi
+        \\WELCOME_LINE="$(grep -n "Welcome to ZigOS" "$LOG_PATH" | head -n1 | cut -d: -f1)"
+        \\MINIMAL_LINE="$(grep -n "A minimal operating system written in Zig" "$LOG_PATH" | head -n1 | cut -d: -f1)"
+        \\GDT_LINE="$(grep -n "Initializing GDT" "$LOG_PATH" | head -n1 | cut -d: -f1)"
+        \\if [ "$MINIMAL_LINE" -le "$WELCOME_LINE" ] || [ "$GDT_LINE" -le "$MINIMAL_LINE" ]; then
+        \\  echo "Boot test failed: boot markers are out of order" >&2
         \\  cat "$LOG_PATH" >&2
         \\  exit 1
         \\fi
