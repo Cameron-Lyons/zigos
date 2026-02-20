@@ -83,7 +83,7 @@ pub fn date_main(args: [][]const u8) void {
 
     const day_of_week = days % 7;
     const weekdays = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
-    
+
     vga.print(weekdays[day_of_week]);
     vga.print(" Jan  1 00:00:00 UTC 1970 (uptime: ");
     printNumber(@as(usize, @intCast(days)));
@@ -128,18 +128,6 @@ pub fn test_main(args: [][]const u8) void {
     vga.print("Test program executed successfully!\n");
 }
 
-fn ls_wrapper() void {
-    ls_main(&[_][]const u8{"ls"});
-}
-
-fn cat_wrapper() void {
-    cat_main(&[_][]const u8{"cat", "test.txt"});
-}
-
-fn echo_wrapper() void {
-    echo_main(&[_][]const u8{"echo", "Hello from user program!"});
-}
-
 pub fn createUserProgram(name: []const u8, entry: *const fn () void) void {
     const user_proc = process.create_user_process(name, entry);
     _ = user_proc;
@@ -148,4 +136,3 @@ pub fn createUserProgram(name: []const u8, entry: *const fn () void) void {
 pub fn init() void {
     vga.print("User programs module initialized\n");
 }
-
