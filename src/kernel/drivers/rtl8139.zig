@@ -335,10 +335,7 @@ pub fn receive() ?[]u8 {
 }
 
 pub fn getMacAddress() [6]u8 {
-    if (rtl8139_device) |*device| {
-        return device.mac_address;
-    }
-    return [_]u8{0} ** 6;
+    return getMACAddress() orelse [_]u8{0} ** 6;
 }
 
 pub fn sendPacket(data: []const u8) !void {
@@ -348,4 +345,3 @@ pub fn sendPacket(data: []const u8) !void {
         return error.NoDevice;
     }
 }
-
