@@ -275,10 +275,7 @@ fn setupAPTrampoline() void {
     const trampoline_addr = 0x8000;
     const trampoline_size = @intFromPtr(&ap_trampoline_end) - @intFromPtr(&ap_trampoline_start);
 
-    @memcpy(
-        @as([*]u8, @ptrFromInt(trampoline_addr))[0..trampoline_size],
-        @as([*]u8, @ptrFromInt(@intFromPtr(&ap_trampoline_start)))[0..trampoline_size]
-    );
+    @memcpy(@as([*]u8, @ptrFromInt(trampoline_addr))[0..trampoline_size], @as([*]u8, @ptrFromInt(@intFromPtr(&ap_trampoline_start)))[0..trampoline_size]);
 
     const stack_size = 16384;
     for (1..num_cpus) |i| {
@@ -369,16 +366,6 @@ fn readLocalAPIC(reg: u32) u32 {
 
 fn writeLocalAPIC(reg: u32, value: u32) void {
     @as(*volatile u32, @ptrFromInt(local_apic_base + reg)).* = value;
-}
-
-fn readIOAPIC(reg: u32) u32 {
-    @as(*volatile u32, @ptrFromInt(ioapic_base + IOAPIC_REGSEL)).* = reg;
-    return @as(*volatile u32, @ptrFromInt(ioapic_base + IOAPIC_REGWIN)).*;
-}
-
-fn writeIOAPIC(reg: u32, value: u32) void {
-    @as(*volatile u32, @ptrFromInt(ioapic_base + IOAPIC_REGSEL)).* = reg;
-    @as(*volatile u32, @ptrFromInt(ioapic_base + IOAPIC_REGWIN)).* = value;
 }
 
 fn rdmsr(msr: u32) u64 {

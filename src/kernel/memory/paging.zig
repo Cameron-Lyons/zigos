@@ -349,8 +349,7 @@ fn enable_paging(page_dir_addr: u32) void {
         \\mov %%eax, %%cr0
         :
         : [addr] "r" (page_dir_addr),
-        : .{ .eax = true }
-    );
+        : .{ .eax = true });
 }
 
 pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Registers) void {
@@ -645,20 +644,6 @@ fn remove_from_tlb_cache(virt_addr: u32) void {
             break;
         }
     }
-}
-
-fn lookup_tlb_cache(virt_addr: u32) ?u32 {
-    const aligned_addr = virt_addr & ~@as(u32, 0xFFF);
-
-    var i: u32 = 0;
-    while (i < tlb_cache_count) : (i += 1) {
-        if (tlb_cache[i].virtual_addr == aligned_addr) {
-            tlb_cache[i].lru_counter = lru_counter;
-            lru_counter += 1;
-            return tlb_cache[i].physical_addr | (virt_addr & 0xFFF);
-        }
-    }
-    return null;
 }
 
 pub fn invalidate_page(virt_addr: u32) void {
