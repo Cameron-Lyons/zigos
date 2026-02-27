@@ -1,5 +1,6 @@
 const vga = @import("../drivers/vga.zig");
 const swap = @import("swap.zig");
+const numfmt = @import("../utils/numfmt.zig");
 
 const HEAP_START: usize = 0x100000;
 const HEAP_SIZE: usize = 16 * 1024 * 1024;
@@ -38,55 +39,10 @@ pub fn init() void {
 
     vga.print("Memory allocator initialized!\n");
     vga.print("Heap start: 0x");
-    printHex(@intFromPtr(heap_start));
+    numfmt.printHex(@intFromPtr(heap_start));
     vga.print("\nHeap size: ");
-    printDec(HEAP_SIZE / 1024 / 1024);
+    numfmt.printDec(HEAP_SIZE / 1024 / 1024);
     vga.print(" MB\n");
-}
-
-fn printHex(value: usize) void {
-    const hex_chars = "0123456789ABCDEF";
-    // SAFETY: filled by the following hex digit extraction loop
-    var buffer: [16]u8 = undefined;
-    var i: usize = 0;
-    var v = value;
-
-    if (v == 0) {
-        vga.print("0");
-        return;
-    }
-
-    while (v > 0) : (i += 1) {
-        buffer[i] = hex_chars[v & 0xF];
-        v >>= 4;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.put_char(buffer[i]);
-    }
-}
-
-fn printDec(value: usize) void {
-    // SAFETY: filled by the following decimal digit extraction loop
-    var buffer: [20]u8 = undefined;
-    var i: usize = 0;
-    var v = value;
-
-    if (v == 0) {
-        vga.print("0");
-        return;
-    }
-
-    while (v > 0) : (i += 1) {
-        buffer[i] = @as(u8, @intCast(v % 10)) + '0';
-        v /= 10;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.put_char(buffer[i]);
-    }
 }
 
 fn alignUp(addr: usize, alignment: usize) usize {

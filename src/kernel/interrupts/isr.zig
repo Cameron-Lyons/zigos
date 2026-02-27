@@ -1,5 +1,6 @@
 const idt = @import("idt.zig");
 const keyboard = @import("../drivers/keyboard.zig");
+const io = @import("../utils/io.zig");
 
 extern fn isr0() void;
 extern fn isr1() void;
@@ -136,9 +137,9 @@ pub fn registerHandler(vector: u8, handler: InterruptHandler) void {
 
 pub export fn irqHandler(regs: *Registers) void {
     if (regs.int_no >= 40) {
-        outb(0xA0, 0x20);
+        io.outb(0xA0, 0x20);
     }
-    outb(0x20, 0x20);
+    io.outb(0x20, 0x20);
 
     if (custom_handlers[regs.int_no]) |handler| {
         const frame: *InterruptFrame = @ptrCast(regs);
@@ -149,14 +150,6 @@ pub export fn irqHandler(regs: *Registers) void {
     } else if (regs.int_no == 33) {
         keyboard.handleInterrupt();
     }
-}
-
-fn outb(port: u16, value: u8) void {
-    asm volatile ("outb %[value], %[port]"
-        :
-        : [value] "{al}" (value),
-          [port] "N{dx}" (port),
-    );
 }
 
 pub fn init() void {
@@ -219,14 +212,14 @@ pub fn init() void {
 }
 
 fn remapPIC() void {
-    outb(0x20, 0x11);
-    outb(0xA0, 0x11);
-    outb(0x21, 0x20);
-    outb(0xA1, 0x28);
-    outb(0x21, 0x04);
-    outb(0xA1, 0x02);
-    outb(0x21, 0x01);
-    outb(0xA1, 0x01);
-    outb(0x21, 0x0);
-    outb(0xA1, 0x0);
+    io.outb(0x20, 0x11);
+    io.outb(0xA0, 0x11);
+    io.outb(0x21, 0x20);
+    io.outb(0xA1, 0x28);
+    io.outb(0x21, 0x04);
+    io.outb(0xA1, 0x02);
+    io.outb(0x21, 0x01);
+    io.outb(0xA1, 0x01);
+    io.outb(0x21, 0x0);
+    io.outb(0xA1, 0x0);
 }

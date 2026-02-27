@@ -1,18 +1,11 @@
 const vga = @import("../drivers/vga.zig");
+const io = @import("../utils/io.zig");
 
 const PIT_CHANNEL0 = 0x40;
 const PIT_COMMAND = 0x43;
 const PIT_FREQUENCY = 1193180;
 
 var ticks: u64 = 0;
-
-fn outb(port: u16, value: u8) void {
-    asm volatile ("outb %[value], %[port]"
-        :
-        : [value] "{al}" (value),
-          [port] "N{dx}" (port),
-    );
-}
 
 pub fn init(frequency_hz: u32) void {
     vga.print("Initializing PIT timer at ");
@@ -21,10 +14,10 @@ pub fn init(frequency_hz: u32) void {
 
     const divisor = PIT_FREQUENCY / frequency_hz;
 
-    outb(PIT_COMMAND, 0x36);
+    io.outb(PIT_COMMAND, 0x36);
 
-    outb(PIT_CHANNEL0, @truncate(divisor & 0xFF));
-    outb(PIT_CHANNEL0, @truncate((divisor >> 8) & 0xFF));
+    io.outb(PIT_CHANNEL0, @truncate(divisor & 0xFF));
+    io.outb(PIT_CHANNEL0, @truncate((divisor >> 8) & 0xFF));
 
     vga.print("Timer initialized!\n");
 }

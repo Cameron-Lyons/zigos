@@ -30,6 +30,7 @@ var swap_bitmap: [SWAP_SLOT_COUNT / 32]u32 = [_]u32{0} ** (SWAP_SLOT_COUNT / 32)
 var used_swap_slots: u32 = 0;
 var clock_hand: u32 = 0;
 var initialized: bool = false;
+var swap_search_word_hint: u32 = 0;
 
 pub fn init() void {
     for (&swap_table) |*entry| {
@@ -43,6 +44,7 @@ pub fn init() void {
 
     used_swap_slots = 0;
     clock_hand = 0;
+    swap_search_word_hint = 0;
     initialized = true;
 
     vga.print("Swap initialized: ");
@@ -52,30 +54,42 @@ pub fn init() void {
     vga.print(" MB)\n");
 }
 
-fn allocSwapSlot() ?u32 {
-    var i: u32 = 0;
-    while (i < SWAP_SLOT_COUNT / 32) : (i += 1) {
-        if (swap_bitmap[i] != 0xFFFFFFFF) {
-            var j: u5 = 0;
-            while (true) : (j += 1) {
-                const mask = @as(u32, 1) << j;
-                if ((swap_bitmap[i] & mask) == 0) {
-                    swap_bitmap[i] |= mask;
-                    used_swap_slots += 1;
-                    return i * 32 + j;
-                }
-                if (j == 31) break;
-            }
+fn allocSwapSlotRange(start_word: u32, end_word: u32) ?u32 {
+    var i = start_word;
+    while (i < end_word) : (i += 1) {
+        const free_mask = ~swap_bitmap[i];
+        if (free_mask != 0) {
+            const bit: u32 = @intCast(@ctz(free_mask));
+            const mask = @as(u32, 1) << @truncate(bit);
+            swap_bitmap[i] |= mask;
+            used_swap_slots += 1;
+            swap_search_word_hint = i;
+            return i * 32 + bit;
         }
     }
     return null;
 }
 
+fn allocSwapSlot() ?u32 {
+    const bitmap_words = SWAP_SLOT_COUNT / 32;
+    if (swap_search_word_hint >= bitmap_words) {
+        swap_search_word_hint = 0;
+    }
+    return allocSwapSlotRange(swap_search_word_hint, bitmap_words) orelse
+        allocSwapSlotRange(0, swap_search_word_hint);
+}
+
 fn freeSwapSlot(slot: u32) void {
     const idx = slot / 32;
     const offset: u5 = @truncate(slot % 32);
-    swap_bitmap[idx] &= ~(@as(u32, 1) << offset);
-    used_swap_slots -= 1;
+    const mask = @as(u32, 1) << offset;
+    if ((swap_bitmap[idx] & mask) != 0) {
+        swap_bitmap[idx] &= ~mask;
+        used_swap_slots -= 1;
+        if (idx < swap_search_word_hint) {
+            swap_search_word_hint = idx;
+        }
+    }
 }
 
 fn writePageToDisk(slot: u32, page_data: [*]const u8) bool {

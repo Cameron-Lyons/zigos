@@ -1,5 +1,6 @@
 const vga = @import("vga.zig");
 const shell = @import("../shell/shell.zig");
+const io = @import("../utils/io.zig");
 
 // SAFETY: used as a circular buffer; entries written before being read via buffer_start/buffer_end indices
 var char_buffer: [256]u8 = undefined;
@@ -109,15 +110,8 @@ var alt_pressed: bool = false;
 var caps_lock: bool = false;
 var keyboard_shell: ?*shell.Shell = null;
 
-fn inb(port: u16) u8 {
-    return asm volatile ("inb %[port], %[result]"
-        : [result] "={al}" (-> u8),
-        : [port] "N{dx}" (port),
-    );
-}
-
 pub fn handleInterrupt() void {
-    const scancode = inb(KEYBOARD_DATA_PORT);
+    const scancode = io.inb(KEYBOARD_DATA_PORT);
 
     if ((scancode & 0x80) != 0) {
         const key_release = scancode & 0x7F;
@@ -264,8 +258,8 @@ fn isAlpha(ch: u8) bool {
 }
 
 pub fn init() void {
-    while (inb(KEYBOARD_STATUS_PORT) & 0x01 != 0) {
-        _ = inb(KEYBOARD_DATA_PORT);
+    while (io.inb(KEYBOARD_STATUS_PORT) & 0x01 != 0) {
+        _ = io.inb(KEYBOARD_DATA_PORT);
     }
 }
 
