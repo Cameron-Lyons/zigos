@@ -74,6 +74,8 @@ pub const Socket = struct {
     send_tail: usize,
     backlog: []?*Socket,
     backlog_count: usize,
+    backlog_head: usize,
+    backlog_tail: usize,
     tcp_connection: ?*tcp.TCPConnection,
     blocking: bool,
     in_use: bool,
@@ -113,6 +115,8 @@ pub const Socket = struct {
             .send_tail = 0,
             .backlog = &[_]?*Socket{},
             .backlog_count = 0,
+            .backlog_head = 0,
+            .backlog_tail = 0,
             .tcp_connection = null,
             .blocking = true,
             .in_use = true,
@@ -150,13 +154,16 @@ pub const Socket = struct {
             memory.kfree(@as(*anyopaque, @ptrCast(self.backlog.ptr)));
         }
 
-        const backlog_size = @min(backlog, MAX_BACKLOG);
+        const backlog_size = @max(@as(usize, 1), @min(backlog, MAX_BACKLOG));
         const backlog_mem = memory.kmalloc(backlog_size * @sizeOf(?*Socket)) orelse return error.OutOfMemory;
         const backlog_ptr: [*]?*Socket = @ptrCast(@alignCast(backlog_mem));
         self.backlog = backlog_ptr[0..backlog_size];
         for (self.backlog) |*slot| {
             slot.* = null;
         }
+        self.backlog_count = 0;
+        self.backlog_head = 0;
+        self.backlog_tail = 0;
 
         self.state = .LISTENING;
 
@@ -177,13 +184,9 @@ pub const Socket = struct {
             process.yield();
         }
 
-        const client_socket = self.backlog[0].?;
-
-        var i: usize = 0;
-        while (i < self.backlog_count - 1) : (i += 1) {
-            self.backlog[i] = self.backlog[i + 1];
-        }
-        self.backlog[self.backlog_count - 1] = null;
+        const client_socket = self.backlog[self.backlog_head].?;
+        self.backlog[self.backlog_head] = null;
+        self.backlog_head = (self.backlog_head + 1) % self.backlog.len;
         self.backlog_count -= 1;
 
         return client_socket;
@@ -355,10 +358,15 @@ pub const Socket = struct {
         memory.kfree(self.recv_buffer.ptr);
         memory.kfree(self.send_buffer.ptr);
         if (self.backlog.len > 0) {
-            for (self.backlog[0..self.backlog_count]) |maybe_client| {
+            var i: usize = 0;
+            var idx = self.backlog_head;
+            while (i < self.backlog_count) : (i += 1) {
+                const maybe_client = self.backlog[idx];
+                self.backlog[idx] = null;
                 if (maybe_client) |client| {
                     client.close();
                 }
+                idx = (idx + 1) % self.backlog.len;
             }
             memory.kfree(@as(*anyopaque, @ptrCast(self.backlog.ptr)));
         }
@@ -380,7 +388,8 @@ pub const Socket = struct {
             return SocketError.NoBufferSpace;
         }
 
-        self.backlog[self.backlog_count] = client;
+        self.backlog[self.backlog_tail] = client;
+        self.backlog_tail = (self.backlog_tail + 1) % self.backlog.len;
         self.backlog_count += 1;
     }
 };

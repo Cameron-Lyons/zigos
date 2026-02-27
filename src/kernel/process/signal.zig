@@ -1,5 +1,6 @@
 const process = @import("process.zig");
 const vga = @import("../drivers/vga.zig");
+const numfmt = @import("../utils/numfmt.zig");
 
 pub const SIGHUP = 1;
 pub const SIGINT = 2;
@@ -386,9 +387,9 @@ fn handleDefaultSignal(signum: i32) void {
         },
         else => {
             vga.print("Process ");
-            printNumber(current.pid);
+            numfmt.printDec(current.pid);
             vga.print(" terminated by signal ");
-            printNumber(@as(u32, @intCast(signum)));
+            numfmt.printDec(@as(u32, @intCast(signum)));
             vga.print("\n");
 
             current.state = .Zombie;
@@ -425,28 +426,5 @@ pub fn checkAlarms() void {
             proc.alarm_time = 0;
             sendSignal(proc, SIGALRM);
         }
-    }
-}
-
-fn printNumber(num: u32) void {
-    if (num == 0) {
-        vga.printChar('0');
-        return;
-    }
-
-    // SAFETY: filled by the following digit extraction loop
-    var digits: [10]u8 = undefined;
-    var count: usize = 0;
-    var n = num;
-
-    while (n > 0) : (n /= 10) {
-        digits[count] = @as(u8, @intCast('0' + (n % 10)));
-        count += 1;
-    }
-
-    var i = count;
-    while (i > 0) {
-        i -= 1;
-        vga.printChar(digits[i]);
     }
 }

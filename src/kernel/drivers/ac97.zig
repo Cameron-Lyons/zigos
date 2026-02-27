@@ -3,6 +3,7 @@ const pci = @import("pci.zig");
 const memory = @import("../memory/memory.zig");
 const vga = @import("vga.zig");
 const io = @import("../utils/io.zig");
+const delay = @import("../utils/delay.zig");
 const isr = @import("../interrupts/isr.zig");
 
 const AC97_VENDOR_INTEL = 0x8086;
@@ -68,10 +69,10 @@ const AC97Device = struct {
 
     fn reset(self: *AC97Device) void {
         io.outl(self.nabm_base + NABM_GLOB_CNT, GLOB_CNT_COLD_RESET);
-        busyWait(100000);
+        delay.busyWait(100000);
 
         io.outl(self.nabm_base + NABM_GLOB_CNT, 0);
-        busyWait(100000);
+        delay.busyWait(100000);
 
         var timeout: u32 = 1000;
         while (timeout > 0) : (timeout -= 1) {
@@ -79,7 +80,7 @@ const AC97Device = struct {
             if ((status & GLOB_STA_PCR) != 0) {
                 break;
             }
-            busyWait(1000);
+            delay.busyWait(1000);
         }
 
         if (timeout == 0) {
@@ -88,7 +89,7 @@ const AC97Device = struct {
         }
 
         io.outw(self.nam_base + NAM_RESET, 0);
-        busyWait(100000);
+        delay.busyWait(100000);
 
         io.outw(self.nam_base + NAM_MASTER_VOLUME, 0x0000);
         io.outw(self.nam_base + NAM_PCM_OUT_VOLUME, 0x0808);
@@ -291,13 +292,6 @@ pub fn stopPlayback() void {
 pub fn setMasterVolume(left: u8, right: u8) void {
     if (ac97_device) |*dev| {
         dev.setVolume(left, right);
-    }
-}
-
-fn busyWait(microseconds: u32) void {
-    var i: u32 = 0;
-    while (i < microseconds * 10) : (i += 1) {
-        asm volatile ("pause");
     }
 }
 

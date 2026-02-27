@@ -3,6 +3,7 @@ const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const memory = @import("../memory/memory.zig");
 const paging = @import("../memory/paging.zig");
+const numfmt = @import("../utils/numfmt.zig");
 
 pub const Color = struct {
     r: u8,
@@ -104,11 +105,11 @@ pub fn init(fb_info: FramebufferInfo) void {
     clear(Color.BLACK);
 
     vga.print("Framebuffer initialized: ");
-    printNumber(fb_info.width);
+    numfmt.printDec(fb_info.width);
     vga.print("x");
-    printNumber(fb_info.height);
+    numfmt.printDec(fb_info.height);
     vga.print("x");
-    printNumber(fb_info.bpp);
+    numfmt.printDec(fb_info.bpp);
     vga.print("bpp\n");
 }
 
@@ -402,29 +403,6 @@ pub fn getWidth() u32 {
 pub fn getHeight() u32 {
     const fb = framebuffer orelse return 0;
     return fb.height;
-}
-
-fn printNumber(num: u32) void {
-    if (num == 0) {
-        vga.printChar('0');
-        return;
-    }
-
-    // SAFETY: filled by the following digit extraction loop
-    var digits: [10]u8 = undefined;
-    var count: usize = 0;
-    var n = num;
-
-    while (n > 0) : (n /= 10) {
-        digits[count] = @as(u8, @intCast('0' + (n % 10)));
-        count += 1;
-    }
-
-    var i = count;
-    while (i > 0) {
-        i -= 1;
-        vga.printChar(digits[i]);
-    }
 }
 
 pub fn drawBitmap(x: u32, y: u32, width: u32, height: u32, data: []const u8) void {

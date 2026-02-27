@@ -2,6 +2,8 @@ const pci = @import("pci.zig");
 const memory = @import("../memory/memory.zig");
 const vga = @import("vga.zig");
 const io = @import("../utils/io.zig");
+const delay = @import("../utils/delay.zig");
+const numfmt = @import("../utils/numfmt.zig");
 const isr = @import("../interrupts/isr.zig");
 
 const UHCI_CMD: u16 = 0x00;
@@ -106,7 +108,7 @@ pub fn init() void {
 
     if (num_controllers > 0) {
         vga.print("UHCI: Initialized ");
-        printNumber(num_controllers);
+        numfmt.printDec(num_controllers);
         vga.print(" controller(s)\n");
     }
 }
@@ -168,16 +170,16 @@ fn initController(pci_dev: pci.PCIDevice) void {
 
 fn resetController(ctrl: *UHCIController) void {
     io.outw(ctrl.io_base + UHCI_CMD, UHCI_CMD_GRESET);
-    busyWait(50000);
+    delay.busyWait(50000);
     io.outw(ctrl.io_base + UHCI_CMD, 0);
-    busyWait(10000);
+    delay.busyWait(10000);
 
     io.outw(ctrl.io_base + UHCI_CMD, UHCI_CMD_HCRESET);
-    busyWait(10000);
+    delay.busyWait(10000);
 
     var timeout: u32 = 100;
     while ((io.inw(ctrl.io_base + UHCI_CMD) & UHCI_CMD_HCRESET) != 0 and timeout > 0) : (timeout -= 1) {
-        busyWait(1000);
+        delay.busyWait(1000);
     }
 }
 
@@ -295,7 +297,7 @@ pub fn controlTransfer(ctrl: *UHCIController, device_addr: u8, setup: *const @im
 
     var timeout: u32 = 1000;
     while ((td_status.ctrl_status & TD_CTRL_ACTIVE) != 0 and timeout > 0) : (timeout -= 1) {
-        busyWait(100);
+        delay.busyWait(100);
     }
 
     if (timeout == 0) return error.Timeout;
@@ -330,7 +332,7 @@ pub fn bulkTransfer(ctrl: *UHCIController, device_addr: u8, endpoint: u8, data: 
 
     var timeout: u32 = 1000;
     while ((td.ctrl_status & TD_CTRL_ACTIVE) != 0 and timeout > 0) : (timeout -= 1) {
-        busyWait(100);
+        delay.busyWait(100);
     }
 
     if (timeout == 0) return error.Timeout;
@@ -341,7 +343,7 @@ pub fn bulkTransfer(ctrl: *UHCIController, device_addr: u8, endpoint: u8, data: 
 
 pub fn enumerateDevice(ctrl: *UHCIController, port: u8) ?USBDeviceInfo {
     resetPort(ctrl, port);
-    busyWait(100000);
+    delay.busyWait(100000);
 
     const setup = @import("usb.zig").USBSetupPacket{
         .bmRequestType = 0x80,
@@ -381,14 +383,14 @@ fn pollPorts(ctrl: *UHCIController) void {
             }
 
             vga.print("UHCI: Device on port ");
-            printNumber(@intCast(port));
+            numfmt.printDec(@as(u32, @intCast(port)));
             vga.print("\n");
 
             if (enumerateDevice(ctrl, @intCast(port))) |dev| {
                 vga.print("UHCI: Enumerated device addr=");
-                printNumber(dev.address);
+                numfmt.printDec(dev.address);
                 vga.print(" maxpkt=");
-                printNumber(dev.max_packet_size);
+                numfmt.printDec(dev.max_packet_size);
                 vga.print("\n");
             }
         }
@@ -398,11 +400,11 @@ fn pollPorts(ctrl: *UHCIController) void {
 fn resetPort(ctrl: *UHCIController, port: u8) void {
     const port_reg: u16 = if (port == 0) UHCI_PORTSC1 else UHCI_PORTSC2;
     io.outw(ctrl.io_base + port_reg, UHCI_PORTSC_PRES);
-    busyWait(50000);
+    delay.busyWait(50000);
     io.outw(ctrl.io_base + port_reg, 0);
-    busyWait(10000);
+    delay.busyWait(10000);
     io.outw(ctrl.io_base + port_reg, UHCI_PORTSC_PE);
-    busyWait(10000);
+    delay.busyWait(10000);
 }
 
 pub fn handleInterrupt() void {
@@ -428,34 +430,4 @@ pub fn getController(index: u8) ?*UHCIController {
 
 pub fn getNumControllers() u8 {
     return num_controllers;
-}
-
-fn busyWait(microseconds: u32) void {
-    var i: u32 = 0;
-    while (i < microseconds * 10) : (i += 1) {
-        asm volatile ("pause");
-    }
-}
-
-fn printNumber(num: u32) void {
-    if (num == 0) {
-        vga.printChar('0');
-        return;
-    }
-
-    // SAFETY: filled by the following digit extraction loop
-    var digits: [10]u8 = undefined;
-    var count: usize = 0;
-    var n = num;
-
-    while (n > 0) : (n /= 10) {
-        digits[count] = @as(u8, @intCast('0' + (n % 10)));
-        count += 1;
-    }
-
-    var i = count;
-    while (i > 0) {
-        i -= 1;
-        vga.printChar(digits[i]);
-    }
 }
