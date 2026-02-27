@@ -1,6 +1,7 @@
 const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const io = @import("../utils/io.zig");
+const delay = @import("../utils/delay.zig");
 
 const RSDP_SIGNATURE = "RSD PTR ";
 const FADT_SIGNATURE = "FACP";
@@ -379,7 +380,7 @@ fn enableACPI() void {
                 vga.print("ACPI enabled\n");
                 return;
             }
-            busyWait(10000);
+            delay.busyWait(10000);
         }
 
         vga.print("Failed to enable ACPI\n");
@@ -447,13 +448,6 @@ pub fn reboot() void {
 
 
 
-
-fn busyWait(microseconds: u32) void {
-    var i: u32 = 0;
-    while (i < microseconds * 10) : (i += 1) {
-        asm volatile ("pause");
-    }
-}
 
 fn printHex(value: usize) void {
     const hex_chars = "0123456789ABCDEF";

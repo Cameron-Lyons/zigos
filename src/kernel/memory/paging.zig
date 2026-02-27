@@ -45,8 +45,6 @@ var kernel_page_directory: PageDirectory align(PAGE_SIZE) = undefined;
 // SAFETY: fully initialized in init() which identity-maps the first 16MB
 var kernel_page_tables: [4]PageTable align(PAGE_SIZE) = undefined;
 
-var next_free_frame: u32 = 0x100000;
-
 const MEMORY_SIZE = 128 * 1024 * 1024;
 const FRAME_COUNT = MEMORY_SIZE / PAGE_SIZE;
 const BITMAP_SIZE = FRAME_COUNT / 32;
@@ -56,6 +54,7 @@ var frame_bitmap: [BITMAP_SIZE]u32 = undefined;
 var total_frames: u32 = FRAME_COUNT;
 var used_frames: u32 = 0;
 var frame_lock: bool = false;
+var frame_search_word_hint: u32 = 0;
 
 const PageCache = struct {
     virtual_addr: u32,
@@ -74,16 +73,25 @@ fn set_frame(frame_addr: u32) void {
     const frame = frame_addr / PAGE_SIZE;
     const idx = frame / 32;
     const offset = frame % 32;
-    frame_bitmap[idx] |= (@as(u32, 1) << @truncate(offset));
-    used_frames += 1;
+    const mask = @as(u32, 1) << @truncate(offset);
+    if ((frame_bitmap[idx] & mask) == 0) {
+        frame_bitmap[idx] |= mask;
+        used_frames += 1;
+    }
 }
 
 fn clear_frame(frame_addr: u32) void {
     const frame = frame_addr / PAGE_SIZE;
     const idx = frame / 32;
     const offset = frame % 32;
-    frame_bitmap[idx] &= ~(@as(u32, 1) << @truncate(offset));
-    used_frames -= 1;
+    const mask = @as(u32, 1) << @truncate(offset);
+    if ((frame_bitmap[idx] & mask) != 0) {
+        frame_bitmap[idx] &= ~mask;
+        used_frames -= 1;
+        if (idx < frame_search_word_hint) {
+            frame_search_word_hint = idx;
+        }
+    }
 }
 
 fn test_frame(frame_addr: u32) bool {
@@ -93,20 +101,24 @@ fn test_frame(frame_addr: u32) bool {
     return (frame_bitmap[idx] & (@as(u32, 1) << @truncate(offset))) != 0;
 }
 
-fn find_free_frame() ?u32 {
-    var i: u32 = 0;
-    while (i < BITMAP_SIZE) : (i += 1) {
-        if (frame_bitmap[i] != 0xFFFFFFFF) {
-            var j: u32 = 0;
-            while (j < 32) : (j += 1) {
-                const mask = @as(u32, 1) << @truncate(j);
-                if ((frame_bitmap[i] & mask) == 0) {
-                    return (i * 32 + j) * PAGE_SIZE;
-                }
-            }
+fn find_free_frame_range(start_word: u32, end_word: u32) ?u32 {
+    var i = start_word;
+    while (i < end_word) : (i += 1) {
+        const free_mask = ~frame_bitmap[i];
+        if (free_mask != 0) {
+            const bit: u32 = @intCast(@ctz(free_mask));
+            return (i * 32 + bit) * PAGE_SIZE;
         }
     }
     return null;
+}
+
+fn find_free_frame() ?u32 {
+    if (frame_search_word_hint >= BITMAP_SIZE) {
+        frame_search_word_hint = 0;
+    }
+    return find_free_frame_range(frame_search_word_hint, BITMAP_SIZE) orelse
+        find_free_frame_range(0, frame_search_word_hint);
 }
 
 fn find_contiguous_frames(count: u32) ?u32 {
@@ -151,10 +163,13 @@ fn alloc_frame() u32 {
         }
     };
     set_frame(frame_addr);
+    frame_search_word_hint = (frame_addr / PAGE_SIZE) / 32;
     return frame_addr;
 }
 
 pub fn alloc_frames(count: u32) ?u32 {
+    if (count == 0) return null;
+
     while (@atomicRmw(bool, &frame_lock, .Xchg, true, .seq_cst)) {
         asm volatile ("pause");
     }
@@ -173,6 +188,7 @@ pub fn alloc_frames(count: u32) ?u32 {
         while (i < count) : (i += 1) {
             set_frame(addr + i * PAGE_SIZE);
         }
+        frame_search_word_hint = ((addr / PAGE_SIZE) + (count - 1)) / 32;
     }
     return start_addr;
 }
@@ -329,6 +345,7 @@ pub fn init() void {
     while (i < kernel_end) : (i += PAGE_SIZE) {
         set_frame(i);
     }
+    frame_search_word_hint = (kernel_end / PAGE_SIZE) / 32;
 
     enable_paging(@intFromPtr(&kernel_page_directory));
     vga.print("Paging enabled!\n");

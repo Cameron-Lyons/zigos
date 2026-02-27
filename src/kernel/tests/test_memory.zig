@@ -1,5 +1,6 @@
 const vga = @import("../drivers/vga.zig");
 const memory = @import("../memory/memory.zig");
+const numfmt = @import("../utils/numfmt.zig");
 
 pub fn test_memory_allocator() void {
     vga.print("\n=== Testing Memory Allocator ===\n");
@@ -8,7 +9,7 @@ pub fn test_memory_allocator() void {
     const ptr1 = memory.kmalloc(64);
     if (ptr1) |p| {
         vga.print("  Allocated 64 bytes at: 0x");
-        printHex(@intFromPtr(p));
+        numfmt.printHex(@intFromPtr(p));
         vga.print("\n");
 
         const bytes: [*]u8 = @ptrCast(p);
@@ -48,11 +49,11 @@ pub fn test_memory_allocator() void {
     vga.print("\nTest 3: Memory statistics\n");
     const stats = memory.getMemoryStats();
     vga.print("  Total: ");
-    printDec(stats.total / 1024);
+    numfmt.printDec(stats.total / 1024);
     vga.print(" KB\n  Used: ");
-    printDec(stats.used / 1024);
+    numfmt.printDec(stats.used / 1024);
     vga.print(" KB\n  Free: ");
-    printDec(stats.free / 1024);
+    numfmt.printDec(stats.free / 1024);
     vga.print(" KB\n");
 
     vga.print("\nTest 4: Realloc test\n");
@@ -77,49 +78,4 @@ pub fn test_memory_allocator() void {
     }
 
     vga.print("\n=== Memory Tests Complete ===\n");
-}
-
-fn printHex(value: usize) void {
-    const hex_chars = "0123456789ABCDEF";
-    // SAFETY: filled by the following hex digit extraction loop
-    var buffer: [16]u8 = undefined;
-    var i: usize = 0;
-    var v = value;
-
-    if (v == 0) {
-        vga.print("0");
-        return;
-    }
-
-    while (v > 0) : (i += 1) {
-        buffer[i] = hex_chars[v & 0xF];
-        v >>= 4;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.put_char(buffer[i]);
-    }
-}
-
-fn printDec(value: usize) void {
-    // SAFETY: filled by the following decimal digit extraction loop
-    var buffer: [20]u8 = undefined;
-    var i: usize = 0;
-    var v = value;
-
-    if (v == 0) {
-        vga.print("0");
-        return;
-    }
-
-    while (v > 0) : (i += 1) {
-        buffer[i] = @as(u8, @intCast(v % 10)) + '0';
-        v /= 10;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.put_char(buffer[i]);
-    }
 }

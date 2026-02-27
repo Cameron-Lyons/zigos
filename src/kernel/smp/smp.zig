@@ -2,6 +2,7 @@ const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const memory = @import("../memory/memory.zig");
 const gdt = @import("../interrupts/gdt.zig");
+const numfmt = @import("../utils/numfmt.zig");
 
 pub const Spinlock = struct {
     locked: u32 = 0,
@@ -95,7 +96,7 @@ pub fn init() void {
 
     if (num_cpus > 1) {
         vga.print("Found ");
-        printNumber(num_cpus);
+        numfmt.printDec(num_cpus);
         vga.print(" CPUs\n");
         setupAPTrampoline();
         startAPs();
@@ -143,7 +144,7 @@ fn enableLocalAPIC() void {
     writeLocalAPIC(LOCAL_APIC_TIMER, 0x20 | 0x20000);
 
     vga.print("Local APIC enabled at 0x");
-    printHex(local_apic_base);
+    numfmt.printHex(local_apic_base);
     vga.print("\n");
 }
 
@@ -308,7 +309,7 @@ fn startAPs() void {
 
         if (cpu_info[i].is_active) {
             vga.print("CPU ");
-            printNumber(@as(u32, @intCast(i)));
+            numfmt.printDec(@as(u32, @intCast(i)));
             vga.print(" started\n");
         }
     }
@@ -401,52 +402,6 @@ fn busyWait(microseconds: u32) void {
     var i: u32 = 0;
     while (i < microseconds * 1000) : (i += 1) {
         asm volatile ("pause");
-    }
-}
-
-fn printNumber(num: u32) void {
-    if (num == 0) {
-        vga.printChar('0');
-        return;
-    }
-
-    // SAFETY: filled by the following digit extraction loop
-    var digits: [10]u8 = undefined;
-    var count: usize = 0;
-    var n = num;
-
-    while (n > 0) : (n /= 10) {
-        digits[count] = @as(u8, @intCast('0' + (n % 10)));
-        count += 1;
-    }
-
-    var i = count;
-    while (i > 0) {
-        i -= 1;
-        vga.printChar(digits[i]);
-    }
-}
-
-fn printHex(value: usize) void {
-    const hex_chars = "0123456789ABCDEF";
-    // SAFETY: filled by the following hex digit extraction loop
-    var buffer: [16]u8 = undefined;
-    var i: usize = 0;
-    var v = value;
-
-    if (v == 0) {
-        vga.printChar('0');
-        return;
-    }
-
-    while (v > 0) : (v >>= 4) {
-        buffer[i] = hex_chars[v & 0xF];
-        i += 1;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.printChar(buffer[i]);
     }
 }
 
