@@ -37,6 +37,10 @@ const QUANTUM_TABLE = [_]TimeQuantum{
     .{ .priority = .RealTime, .ticks = 20 },
 };
 
+const MAX_EXTENDED_PROCESSES = 256;
+const RUN_QUEUE_INDEX: i8 = 5;
+const NO_QUEUE_INDEX: i8 = -1;
+
 pub const ProcessExtended = struct {
     base: *process.Process,
     priority: Priority,
@@ -51,9 +55,16 @@ pub const ProcessExtended = struct {
     response_time: u64,
     turnaround_time: u64,
     in_use: bool,
+    ready_next: ?*ProcessExtended,
+    ready_prev: ?*ProcessExtended,
+    queue_index: i8,
 };
 
-const MAX_EXTENDED_PROCESSES = 256;
+const ReadyQueue = struct {
+    head: ?*ProcessExtended = null,
+    tail: ?*ProcessExtended = null,
+};
+
 // SAFETY: all entries initialized in init() before use
 var extended_processes: [MAX_EXTENDED_PROCESSES]ProcessExtended = undefined;
 var scheduler_type: SchedulerType = .RoundRobin;
@@ -66,10 +77,176 @@ var stats: SchedulerStats = .{
 };
 
 var current_extended: ?*ProcessExtended = null;
-var ready_queues: [5]?*ProcessExtended = .{ null, null, null, null, null };
-var run_queue_head: ?*ProcessExtended = null;
+var ready_queues: [5]ReadyQueue = [_]ReadyQueue{ .{}, .{}, .{}, .{}, .{} };
+var run_queue: ReadyQueue = .{};
 var idle_time: u64 = 0;
 var busy_time: u64 = 0;
+
+var mlfq_boost_counter: u32 = 0;
+const MLFQ_BOOST_INTERVAL: u32 = 50;
+
+fn getQuantumForPriority(priority: Priority) u32 {
+    for (QUANTUM_TABLE) |quantum| {
+        if (quantum.priority == priority) {
+            return quantum.ticks;
+        }
+    }
+    return 10;
+}
+
+fn queueForIndex(queue_index: i8) ?*ReadyQueue {
+    if (queue_index == RUN_QUEUE_INDEX) {
+        return &run_queue;
+    }
+
+    if (queue_index >= 0) {
+        const idx: usize = @intCast(queue_index);
+        if (idx < ready_queues.len) {
+            return &ready_queues[idx];
+        }
+    }
+
+    return null;
+}
+
+fn enqueueInQueue(queue: *ReadyQueue, ext: *ProcessExtended, queue_index: i8) void {
+    if (ext.queue_index != NO_QUEUE_INDEX) {
+        dequeueFromQueue(ext);
+    }
+
+    ext.ready_prev = queue.tail;
+    ext.ready_next = null;
+
+    if (queue.tail) |tail| {
+        tail.ready_next = ext;
+    } else {
+        queue.head = ext;
+    }
+
+    queue.tail = ext;
+    ext.queue_index = queue_index;
+}
+
+fn dequeueFromQueue(ext: *ProcessExtended) void {
+    const queue = queueForIndex(ext.queue_index) orelse {
+        ext.ready_next = null;
+        ext.ready_prev = null;
+        ext.queue_index = NO_QUEUE_INDEX;
+        return;
+    };
+
+    const is_member = (queue.head == ext) or (queue.tail == ext) or (ext.ready_prev != null) or (ext.ready_next != null);
+    if (!is_member) {
+        ext.ready_next = null;
+        ext.ready_prev = null;
+        ext.queue_index = NO_QUEUE_INDEX;
+        return;
+    }
+
+    if (ext.ready_prev) |prev| {
+        prev.ready_next = ext.ready_next;
+    } else {
+        queue.head = ext.ready_next;
+    }
+
+    if (ext.ready_next) |next| {
+        next.ready_prev = ext.ready_prev;
+    } else {
+        queue.tail = ext.ready_prev;
+    }
+
+    ext.ready_next = null;
+    ext.ready_prev = null;
+    ext.queue_index = NO_QUEUE_INDEX;
+}
+
+fn targetQueueIndex(ext: *const ProcessExtended) i8 {
+    return switch (scheduler_type) {
+        .RoundRobin => RUN_QUEUE_INDEX,
+        .Priority, .MultiLevelFeedback => @as(i8, @intCast(@intFromEnum(ext.priority))),
+    };
+}
+
+fn rebuildQueues() void {
+    run_queue = .{};
+    for (&ready_queues) |*queue| {
+        queue.* = .{};
+    }
+
+    for (&extended_processes) |*ext| {
+        ext.ready_next = null;
+        ext.ready_prev = null;
+        ext.queue_index = NO_QUEUE_INDEX;
+    }
+
+    for (&extended_processes) |*ext| {
+        if (!ext.in_use or ext.base.state == .Terminated) {
+            continue;
+        }
+
+        const queue_index = targetQueueIndex(ext);
+        if (queueForIndex(queue_index)) |queue| {
+            enqueueInQueue(queue, ext, queue_index);
+        }
+    }
+}
+
+fn addToReadyQueue(new_ext: *ProcessExtended) void {
+    new_ext.base.state = .Ready;
+
+    const queue_index = targetQueueIndex(new_ext);
+    if (queueForIndex(queue_index)) |queue| {
+        enqueueInQueue(queue, new_ext, queue_index);
+    }
+
+    stats.ready_processes += 1;
+}
+
+fn isRunnable(ext: *const ProcessExtended) bool {
+    return ext.base.state == .Ready or ext.base.state == .Running;
+}
+
+fn findRunnableFrom(start: ?*ProcessExtended) ?*ProcessExtended {
+    var current = start;
+    while (current) |ext| {
+        if (isRunnable(ext)) {
+            return ext;
+        }
+        current = ext.ready_next;
+    }
+    return null;
+}
+
+fn findRunnableFallback() ?*process.Process {
+    if (process.process_list_head) |head| {
+        var current = head;
+        while (current.state != .Ready and current.state != .Running) {
+            if (current.next) |next_proc| {
+                current = next_proc;
+            } else {
+                break;
+            }
+        }
+        if (current.state == .Ready or current.state == .Running) {
+            return current;
+        }
+    }
+    return null;
+}
+
+fn moveProcessForPriorityChange(ext: *ProcessExtended, old_priority: Priority, new_priority: Priority) void {
+    if (old_priority == new_priority) return;
+    if (scheduler_type == .RoundRobin) return;
+    if (ext.queue_index == NO_QUEUE_INDEX) return;
+
+    const new_queue_index: i8 = @intCast(@intFromEnum(new_priority));
+    if (ext.queue_index == new_queue_index) return;
+
+    dequeueFromQueue(ext);
+    if (queueForIndex(new_queue_index)) |queue| {
+        enqueueInQueue(queue, ext, new_queue_index);
+    }
+}
 
 pub fn init() void {
     vga.print("Initializing advanced scheduler...\n");
@@ -86,14 +263,36 @@ pub fn init() void {
         ext.wait_time = 0;
         ext.response_time = 0;
         ext.turnaround_time = 0;
+        ext.ready_next = null;
+        ext.ready_prev = null;
+        ext.queue_index = NO_QUEUE_INDEX;
     }
 
     scheduler_type = .RoundRobin;
+    run_queue = .{};
+    for (&ready_queues) |*queue| {
+        queue.* = .{};
+    }
+
+    current_extended = null;
+    idle_time = 0;
+    busy_time = 0;
+    mlfq_boost_counter = 0;
+    stats = .{
+        .context_switches = 0,
+        .total_processes = 0,
+        .ready_processes = 0,
+        .blocked_processes = 0,
+        .cpu_usage_percent = 0,
+    };
+
     vga.print("Scheduler initialized with Round Robin algorithm\n");
 }
 
 pub fn setSchedulerType(sched_type: SchedulerType) void {
     scheduler_type = sched_type;
+    rebuildQueues();
+
     vga.print("Scheduler changed to: ");
     switch (sched_type) {
         .RoundRobin => vga.print("Round Robin"),
@@ -117,6 +316,9 @@ pub fn registerProcess(proc: *process.Process, priority: Priority) *ProcessExten
             ext.wait_time = 0;
             ext.response_time = 0;
             ext.turnaround_time = 0;
+            ext.ready_next = null;
+            ext.ready_prev = null;
+            ext.queue_index = NO_QUEUE_INDEX;
             ext.in_use = true;
 
             proc.extended_idx = @intCast(idx);
@@ -132,56 +334,7 @@ pub fn registerProcess(proc: *process.Process, priority: Priority) *ProcessExten
     return &extended_processes[0];
 }
 
-fn getQuantumForPriority(priority: Priority) u32 {
-    for (QUANTUM_TABLE) |quantum| {
-        if (quantum.priority == priority) {
-            return quantum.ticks;
-        }
-    }
-    return 10;
-}
-
-fn addToReadyQueue(new_ext: *ProcessExtended) void {
-    const priority_index = @intFromEnum(new_ext.priority);
-    new_ext.base.state = .Ready;
-
-    if (scheduler_type == .Priority or scheduler_type == .MultiLevelFeedback) {
-        var current = ready_queues[priority_index];
-        if (current == null) {
-            ready_queues[priority_index] = new_ext;
-        } else {
-            while (current.?.base.next != null) {
-                const next_proc = current.?.base.next.?;
-                current = findExtendedProcess(next_proc);
-                if (current == null) break;
-            }
-            if (current != null) {
-                current.?.base.next = new_ext.base;
-            }
-        }
-    } else {
-        if (run_queue_head == null) {
-            run_queue_head = new_ext;
-            new_ext.base.next = null;
-        } else {
-            var current = run_queue_head;
-            while (current.?.base.next != null) {
-                const next_proc = current.?.base.next.?;
-                current = findExtendedProcess(next_proc);
-                if (current == null) break;
-            }
-            if (current != null) {
-                current.?.base.next = new_ext.base;
-            }
-        }
-    }
-
-    stats.ready_processes += 1;
-}
-
 pub export fn schedule() ?*process.Process {
-    updateStatistics();
-
     const next = switch (scheduler_type) {
         .RoundRobin => scheduleRoundRobin(),
         .Priority => schedulePriority(),
@@ -189,6 +342,9 @@ pub export fn schedule() ?*process.Process {
     };
 
     if (next) |ext| {
+        busy_time += 1;
+        ext.total_runtime += 1;
+
         if (current_extended != ext) {
             stats.context_switches += 1;
 
@@ -205,23 +361,18 @@ pub export fn schedule() ?*process.Process {
             current_extended = ext;
         }
 
+        updateStatistics();
         return ext.base;
     }
 
-    idle_time += 1;
-    if (process.process_list_head) |head| {
-        var current = head;
-        while (current.state != .Ready and current.state != .Running) {
-            if (current.next) |next_proc| {
-                current = next_proc;
-            } else {
-                break;
-            }
-        }
-        if (current.state == .Ready or current.state == .Running) {
-            return current;
-        }
+    if (findRunnableFallback()) |fallback| {
+        busy_time += 1;
+        updateStatistics();
+        return fallback;
     }
+
+    idle_time += 1;
+    updateStatistics();
     return null;
 }
 
@@ -232,69 +383,39 @@ fn scheduleRoundRobin() ?*ProcessExtended {
         if (curr.time_used >= curr.time_quantum) {
             curr.time_used = 0;
 
-            if (curr.base.next) |next_base| {
-                const next_ext = findExtendedProcess(next_base);
-                if (next_ext != null and next_ext.?.base.state == .Ready) {
-                    return next_ext;
-                }
+            if (findRunnableFrom(curr.ready_next)) |next| {
+                return next;
             }
 
-            if (run_queue_head) |head| {
-                if (head.base.state == .Ready) {
-                    return head;
+            if (run_queue.head) |head| {
+                if (head != curr) {
+                    if (findRunnableFrom(head)) |next| {
+                        return next;
+                    }
                 }
             }
         }
 
-        if (curr.base.state == .Ready or curr.base.state == .Running) {
+        if (isRunnable(curr)) {
             return curr;
         }
     }
 
-    if (run_queue_head) |head| {
-        var current = head;
-        while (current.base.state != .Ready) {
-            if (current.base.next) |next_base| {
-                current = findExtendedProcess(next_base) orelse return null;
-            } else {
-                break;
-            }
-        }
-
-        if (current.base.state == .Ready) {
-            return current;
-        }
-    }
-
-    return null;
+    return findRunnableFrom(run_queue.head);
 }
 
 fn schedulePriority() ?*ProcessExtended {
-    var priority_level: usize = @intFromEnum(Priority.RealTime) + 1;
+    var priority_level: usize = ready_queues.len;
 
     while (priority_level > 0) {
         priority_level -= 1;
-        if (ready_queues[priority_level]) |queue_head| {
-            var current = queue_head;
-            while (current.base.state != .Ready) {
-                if (current.base.next) |next_base| {
-                    current = findExtendedProcess(next_base) orelse break;
-                } else {
-                    break;
-                }
-            }
-
-            if (current.base.state == .Ready) {
-                return current;
-            }
+        if (findRunnableFrom(ready_queues[priority_level].head)) |next| {
+            return next;
         }
     }
 
     return null;
 }
-
-var mlfq_boost_counter: u32 = 0;
-const MLFQ_BOOST_INTERVAL: u32 = 50;
 
 fn scheduleMLFQ() ?*ProcessExtended {
     if (current_extended) |curr| {
@@ -304,9 +425,11 @@ fn scheduleMLFQ() ?*ProcessExtended {
             curr.time_used = 0;
 
             if (curr.priority != .Idle) {
+                const old_priority = curr.priority;
                 const new_priority: Priority = @enumFromInt(@intFromEnum(curr.priority) - 1);
                 curr.priority = new_priority;
                 curr.time_quantum = getQuantumForPriority(new_priority);
+                moveProcessForPriorityChange(curr, old_priority, new_priority);
             }
         }
 
@@ -318,12 +441,14 @@ fn scheduleMLFQ() ?*ProcessExtended {
                 if (ext.in_use and ext.base.state == .Ready) {
                     const wait_ticks = current_ticks - ext.wait_time;
                     if (wait_ticks > 100 and ext.priority != ext.original_priority) {
+                        const old_priority = ext.priority;
                         const new_priority: Priority = @enumFromInt(@min(
                             @intFromEnum(ext.priority) + 1,
-                            @intFromEnum(ext.original_priority)
+                            @intFromEnum(ext.original_priority),
                         ));
                         ext.priority = new_priority;
                         ext.time_quantum = getQuantumForPriority(new_priority);
+                        moveProcessForPriorityChange(ext, old_priority, new_priority);
                     }
                 }
             }
@@ -338,22 +463,21 @@ pub fn unregisterProcess(proc: *process.Process) void {
         if (idx < MAX_EXTENDED_PROCESSES) {
             var ext = &extended_processes[idx];
             if (ext.in_use and ext.base == proc) {
+                if (ext.queue_index != NO_QUEUE_INDEX) {
+                    dequeueFromQueue(ext);
+                }
+
                 ext.in_use = false;
 
                 if (current_extended == ext) {
                     current_extended = null;
                 }
 
-                const priority_index = @intFromEnum(ext.priority);
-                if (ready_queues[priority_index] == ext) {
-                    ready_queues[priority_index] = null;
-                }
-                if (run_queue_head == ext) {
-                    run_queue_head = null;
-                }
-
                 if (stats.ready_processes > 0) {
                     stats.ready_processes -= 1;
+                }
+                if (stats.total_processes > 0) {
+                    stats.total_processes -= 1;
                 }
             }
         }
@@ -385,9 +509,12 @@ pub fn getStatistics() SchedulerStats {
 pub fn setProcessPriority(pid: u32, priority: Priority) bool {
     const proc = process.getProcessByPid(pid) orelse return false;
     const ext = findExtendedProcess(proc) orelse return false;
+
+    const old_priority = ext.priority;
     ext.priority = priority;
     ext.original_priority = priority;
     ext.time_quantum = getQuantumForPriority(priority);
+    moveProcessForPriorityChange(ext, old_priority, priority);
     return true;
 }
 
@@ -403,8 +530,11 @@ pub fn setProcessNice(pid: u32, nice: i8) bool {
         adjusted_priority = @min(4, adjusted_priority + 1);
     }
 
-    ext.priority = @as(Priority, @enumFromInt(adjusted_priority));
-    ext.time_quantum = getQuantumForPriority(ext.priority);
+    const old_priority = ext.priority;
+    const new_priority = @as(Priority, @enumFromInt(adjusted_priority));
+    ext.priority = new_priority;
+    ext.time_quantum = getQuantumForPriority(new_priority);
+    moveProcessForPriorityChange(ext, old_priority, new_priority);
     return true;
 }
 
@@ -415,9 +545,15 @@ pub fn preempt() void {
 }
 
 pub fn blockProcess(proc: *process.Process) void {
+    const already_blocked = proc.state == .Blocked;
     proc.state = .Blocked;
-    stats.blocked_processes += 1;
-    stats.ready_processes -= 1;
+
+    if (!already_blocked) {
+        stats.blocked_processes += 1;
+        if (stats.ready_processes > 0) {
+            stats.ready_processes -= 1;
+        }
+    }
 
     if (current_extended != null and current_extended.?.base == proc) {
         preempt();
@@ -425,11 +561,23 @@ pub fn blockProcess(proc: *process.Process) void {
 }
 
 pub fn unblockProcess(proc: *process.Process) void {
+    const was_blocked = proc.state == .Blocked;
     proc.state = .Ready;
-    stats.blocked_processes -= 1;
-    stats.ready_processes += 1;
+
+    if (was_blocked) {
+        if (stats.blocked_processes > 0) {
+            stats.blocked_processes -= 1;
+        }
+        stats.ready_processes += 1;
+    }
 
     if (findExtendedProcess(proc)) |ext| {
+        if (ext.queue_index == NO_QUEUE_INDEX and ext.in_use) {
+            const queue_index = targetQueueIndex(ext);
+            if (queueForIndex(queue_index)) |queue| {
+                enqueueInQueue(queue, ext, queue_index);
+            }
+        }
         ext.wait_time = timer.getTicks();
     }
 }
