@@ -255,7 +255,7 @@ const RTL8139 = struct {
         if (status & InterruptStatus.RX_OK != 0) {
             while (self.receive()) |packet| {
                 const network = @import("../net/network.zig");
-                network.handleRxPacket(packet);
+                network.enqueueRxPacket(packet, self.mac_address);
             }
         }
 

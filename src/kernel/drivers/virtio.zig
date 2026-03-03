@@ -280,7 +280,7 @@ fn virtio_interrupt_handler(frame: *isr.InterruptFrame) void {
 
         if (isr_status & 1 != 0) {
             while (dev.receive()) |packet| {
-                network.processPacket(packet, dev.mac_addr);
+                network.enqueueRxPacket(packet, dev.mac_addr);
             }
         }
     }
