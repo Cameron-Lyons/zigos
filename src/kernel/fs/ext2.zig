@@ -196,7 +196,7 @@ const Ext2FileSystem = struct {
         const lba = block_num * (self.block_size / 512);
         const sectors: u8 = @intCast(self.block_size / 512);
 
-        ata.readSectors(self.device, lba, sectors, buffer) catch {
+        ata.readSectorsAsync(self.device, lba, sectors, buffer) catch {
             return vfs.VFSError.DeviceError;
         };
     }
@@ -205,7 +205,7 @@ const Ext2FileSystem = struct {
         const lba = block_num * (self.block_size / 512);
         const sectors: u8 = @intCast(self.block_size / 512);
 
-        ata.writeSectors(self.device, lba, sectors, buffer) catch {
+        ata.writeSectorsAsync(self.device, lba, sectors, buffer) catch {
             return vfs.VFSError.DeviceError;
         };
     }
@@ -656,6 +656,19 @@ var ext2_fs_type: vfs.FileSystemType = undefined;
 var ext2_fs_ops: vfs.FileSystemOps = undefined;
 // SAFETY: fully initialized in init() before use
 var ext2_file_ops: vfs.FileOps = undefined;
+var ext2_lock: u32 = 0;
+
+fn lockExt2() void {
+    while (@cmpxchgWeak(u32, &ext2_lock, 0, 1, .acquire, .monotonic) != null) {
+        while (@atomicLoad(u32, &ext2_lock, .monotonic) != 0) {
+            asm volatile ("pause");
+        }
+    }
+}
+
+fn unlockExt2() void {
+    @atomicStore(u32, &ext2_lock, 0, .release);
+}
 
 pub fn init() void {
     vga.print("Initializing ext2 filesystem support...\n");
@@ -702,6 +715,9 @@ pub fn init() void {
 }
 
 pub fn flushFilesystem(mount_point: *vfs.MountPoint) vfs.VFSError!void {
+    lockExt2();
+    defer unlockExt2();
+
     if (mount_point.private_data) |fs_ptr| {
         const fs: *Ext2FileSystem = @ptrCast(@alignCast(fs_ptr));
         fs.cache.flush(fs) catch {
@@ -711,6 +727,9 @@ pub fn flushFilesystem(mount_point: *vfs.MountPoint) vfs.VFSError!void {
 }
 
 pub fn mount(device: *const ata.ATADevice) !*Ext2FileSystem {
+    lockExt2();
+    defer unlockExt2();
+
     if (num_ext2_fs >= 4) {
         return vfs.VFSError.NoSpace;
     }
@@ -806,6 +825,9 @@ fn ext2Mount(mount_point: *vfs.MountPoint) vfs.VFSError!void {
 }
 
 fn ext2Unmount(mount_point: *vfs.MountPoint) vfs.VFSError!void {
+    lockExt2();
+    defer unlockExt2();
+
     if (mount_point.private_data) |fs_ptr| {
         const fs: *Ext2FileSystem = @ptrCast(@alignCast(fs_ptr));
         fs.cache.flush(fs) catch {};
@@ -822,6 +844,9 @@ fn ext2Unmount(mount_point: *vfs.MountPoint) vfs.VFSError!void {
 }
 
 fn ext2GetRoot(mount_point: *vfs.MountPoint) vfs.VFSError!*vfs.VNode {
+    lockExt2();
+    defer unlockExt2();
+
     const fs: *Ext2FileSystem = @ptrCast(@alignCast(mount_point.private_data.?));
     const root_inode = try fs.readInode(EXT2_ROOT_INO);
 
@@ -866,6 +891,9 @@ fn ext2GetRoot(mount_point: *vfs.MountPoint) vfs.VFSError!*vfs.VNode {
 }
 
 fn ext2Lookup(parent: *vfs.VNode, name: []const u8) vfs.VFSError!*vfs.VNode {
+    lockExt2();
+    defer unlockExt2();
+
     const parent_data: *Ext2VNodeData = @ptrCast(@alignCast(parent.private_data.?));
     const fs: *Ext2FileSystem = @ptrCast(@alignCast(parent.mount_point.?.private_data.?));
 
@@ -920,6 +948,9 @@ fn ext2Lookup(parent: *vfs.VNode, name: []const u8) vfs.VFSError!*vfs.VNode {
 }
 
 fn ext2Read(vnode: *vfs.VNode, buffer: []u8, offset: u64) vfs.VFSError!usize {
+    lockExt2();
+    defer unlockExt2();
+
     const vnode_data: *Ext2VNodeData = @ptrCast(@alignCast(vnode.private_data.?));
     const fs: *Ext2FileSystem = @ptrCast(@alignCast(vnode.mount_point.?.private_data.?));
 
@@ -960,6 +991,9 @@ fn ext2Read(vnode: *vfs.VNode, buffer: []u8, offset: u64) vfs.VFSError!usize {
 }
 
 fn ext2Write(vnode: *vfs.VNode, buffer: []const u8, offset: u64) vfs.VFSError!usize {
+    lockExt2();
+    defer unlockExt2();
+
     const vnode_data: *Ext2VNodeData = @ptrCast(@alignCast(vnode.private_data.?));
     const fs: *Ext2FileSystem = @ptrCast(@alignCast(vnode.mount_point.?.private_data.?));
 
@@ -1026,6 +1060,9 @@ fn ext2Ioctl(vnode: *vfs.VNode, request: u32, arg: usize) vfs.VFSError!i32 {
 }
 
 fn ext2Stat(vnode: *vfs.VNode, stat_buf: *vfs.FileStat) vfs.VFSError!void {
+    lockExt2();
+    defer unlockExt2();
+
     const vnode_data: *Ext2VNodeData = @ptrCast(@alignCast(vnode.private_data.?));
 
     stat_buf.* = vfs.FileStat{
@@ -1044,6 +1081,9 @@ fn ext2Stat(vnode: *vfs.VNode, stat_buf: *vfs.FileStat) vfs.VFSError!void {
 }
 
 fn ext2Readdir(vnode: *vfs.VNode, dirent: *vfs.DirEntry, index: u64) vfs.VFSError!bool {
+    lockExt2();
+    defer unlockExt2();
+
     const vnode_data: *Ext2VNodeData = @ptrCast(@alignCast(vnode.private_data.?));
     const fs: *Ext2FileSystem = @ptrCast(@alignCast(vnode.mount_point.?.private_data.?));
 
@@ -1096,6 +1136,9 @@ fn ext2Readdir(vnode: *vfs.VNode, dirent: *vfs.DirEntry, index: u64) vfs.VFSErro
 }
 
 fn ext2Truncate(vnode: *vfs.VNode, size: u64) vfs.VFSError!void {
+    lockExt2();
+    defer unlockExt2();
+
     const vnode_data: *Ext2VNodeData = @ptrCast(@alignCast(vnode.private_data.?));
     const fs: *Ext2FileSystem = @ptrCast(@alignCast(vnode.mount_point.?.private_data.?));
 
@@ -1123,6 +1166,9 @@ fn ext2Truncate(vnode: *vfs.VNode, size: u64) vfs.VFSError!void {
 }
 
 fn ext2Chmod(vnode: *vfs.VNode, mode: vfs.FileMode) vfs.VFSError!void {
+    lockExt2();
+    defer unlockExt2();
+
     const vnode_data: *Ext2VNodeData = @ptrCast(@alignCast(vnode.private_data.?));
     const fs: *Ext2FileSystem = @ptrCast(@alignCast(vnode.mount_point.?.private_data.?));
 
@@ -1143,6 +1189,9 @@ fn ext2Chmod(vnode: *vfs.VNode, mode: vfs.FileMode) vfs.VFSError!void {
 }
 
 fn ext2Chown(vnode: *vfs.VNode, uid: u32, gid: u32) vfs.VFSError!void {
+    lockExt2();
+    defer unlockExt2();
+
     const vnode_data: *Ext2VNodeData = @ptrCast(@alignCast(vnode.private_data.?));
     const fs: *Ext2FileSystem = @ptrCast(@alignCast(vnode.mount_point.?.private_data.?));
 
@@ -1152,6 +1201,9 @@ fn ext2Chown(vnode: *vfs.VNode, uid: u32, gid: u32) vfs.VFSError!void {
 }
 
 fn ext2Create(parent: *vfs.VNode, name: []const u8, mode: vfs.FileMode) vfs.VFSError!*vfs.VNode {
+    lockExt2();
+    defer unlockExt2();
+
     const parent_data: *Ext2VNodeData = @ptrCast(@alignCast(parent.private_data.?));
     const fs: *Ext2FileSystem = @ptrCast(@alignCast(parent.mount_point.?.private_data.?));
 
@@ -1199,6 +1251,9 @@ fn ext2Create(parent: *vfs.VNode, name: []const u8, mode: vfs.FileMode) vfs.VFSE
 }
 
 fn ext2Mkdir(parent: *vfs.VNode, name: []const u8, mode: vfs.FileMode) vfs.VFSError!*vfs.VNode {
+    lockExt2();
+    defer unlockExt2();
+
     const parent_data: *Ext2VNodeData = @ptrCast(@alignCast(parent.private_data.?));
     const fs: *Ext2FileSystem = @ptrCast(@alignCast(parent.mount_point.?.private_data.?));
 
@@ -1274,6 +1329,9 @@ fn ext2Mkdir(parent: *vfs.VNode, name: []const u8, mode: vfs.FileMode) vfs.VFSEr
 }
 
 fn ext2Unlink(parent: *vfs.VNode, name: []const u8) vfs.VFSError!void {
+    lockExt2();
+    defer unlockExt2();
+
     const parent_data: *Ext2VNodeData = @ptrCast(@alignCast(parent.private_data.?));
     const fs: *Ext2FileSystem = @ptrCast(@alignCast(parent.mount_point.?.private_data.?));
 
@@ -1295,6 +1353,9 @@ fn ext2Unlink(parent: *vfs.VNode, name: []const u8) vfs.VFSError!void {
 }
 
 fn ext2Rmdir(parent: *vfs.VNode, name: []const u8) vfs.VFSError!void {
+    lockExt2();
+    defer unlockExt2();
+
     const parent_data: *Ext2VNodeData = @ptrCast(@alignCast(parent.private_data.?));
     const fs: *Ext2FileSystem = @ptrCast(@alignCast(parent.mount_point.?.private_data.?));
 
@@ -1326,6 +1387,9 @@ fn ext2Rmdir(parent: *vfs.VNode, name: []const u8) vfs.VFSError!void {
 }
 
 fn ext2Rename(old_parent: *vfs.VNode, old_name: []const u8, new_parent: *vfs.VNode, new_name: []const u8) vfs.VFSError!void {
+    lockExt2();
+    defer unlockExt2();
+
     const old_parent_data: *Ext2VNodeData = @ptrCast(@alignCast(old_parent.private_data.?));
     const new_parent_data: *Ext2VNodeData = @ptrCast(@alignCast(new_parent.private_data.?));
     const fs: *Ext2FileSystem = @ptrCast(@alignCast(old_parent.mount_point.?.private_data.?));

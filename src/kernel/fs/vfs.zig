@@ -158,10 +158,23 @@ var mount_list: ?*MountPoint = null;
 var fs_type_list: ?*FileSystemType = null;
 var vnode_cache: [1024]?*VNode = [_]?*VNode{null} ** 1024;
 var fd_table: [256]?*FileDescriptor = [_]?*FileDescriptor{null} ** 256;
+var vfs_meta_lock: u32 = 0;
 
 const FD_TABLE_SIZE = 256;
 var fd_freelist: [FD_TABLE_SIZE]u8 = undefined;
 var fd_freelist_top: usize = 0;
+
+fn lockMeta() void {
+    while (@cmpxchgWeak(u32, &vfs_meta_lock, 0, 1, .acquire, .monotonic) != null) {
+        while (@atomicLoad(u32, &vfs_meta_lock, .monotonic) != 0) {
+            asm volatile ("pause");
+        }
+    }
+}
+
+fn unlockMeta() void {
+    @atomicStore(u32, &vfs_meta_lock, 0, .release);
+}
 
 fn initFdFreelist() void {
     for (0..FD_TABLE_SIZE) |i| {
@@ -171,12 +184,16 @@ fn initFdFreelist() void {
 }
 
 fn allocFd() ?u32 {
+    lockMeta();
+    defer unlockMeta();
     if (fd_freelist_top == 0) return null;
     fd_freelist_top -= 1;
     return fd_freelist[fd_freelist_top];
 }
 
 fn freeFd(fd: u32) void {
+    lockMeta();
+    defer unlockMeta();
     if (fd >= FD_TABLE_SIZE) return;
     if (fd_freelist_top >= FD_TABLE_SIZE) return;
     fd_freelist[fd_freelist_top] = @intCast(fd);
@@ -184,6 +201,9 @@ fn freeFd(fd: u32) void {
 }
 
 pub fn init() void {
+    lockMeta();
+    defer unlockMeta();
+
     initFdFreelist();
     root_vnode = createVNode() catch |err| {
         error_handler.handleError(err, "Failed to create root vnode");
@@ -208,14 +228,18 @@ pub fn init() void {
 }
 
 pub fn registerFileSystem(fs_type: *FileSystemType) VFSError!void {
+    lockMeta();
+    defer unlockMeta();
     fs_type.next = fs_type_list;
     fs_type_list = fs_type;
 }
 
 pub fn mount(device: []const u8, mount_path: []const u8, fs_name: []const u8, flags: u32) VFSError!void {
+    lockMeta();
     var fs_type = fs_type_list;
     while (fs_type) |fs| : (fs_type = fs.next) {
         if (std.mem.eql(u8, fs.name[0..strlen(&fs.name)], fs_name)) {
+            unlockMeta();
             const mp = memory.kmalloc(@sizeOf(MountPoint)) orelse return VFSError.OutOfMemory;
             errdefer memory.kfree(@as([*]u8, @ptrCast(mp)));
 
@@ -234,36 +258,42 @@ pub fn mount(device: []const u8, mount_path: []const u8, fs_name: []const u8, fl
 
             mount_point.root = try fs.ops.get_root(mount_point);
 
+            lockMeta();
             mount_point.next = mount_list;
             mount_list = mount_point;
+            unlockMeta();
 
             return;
         }
     }
+    unlockMeta();
 
     return VFSError.InvalidOperation;
 }
 
 pub fn unmount(mount_path: []const u8) VFSError!void {
+    lockMeta();
     var prev: ?*MountPoint = null;
     var current = mount_list;
 
     while (current) |mp| {
         const mp_path = mp.mount_path[0..strlen(&mp.mount_path)];
         if (std.mem.eql(u8, mp_path, mount_path)) {
-            mp.fs_type.ops.unmount(mp) catch {};
-
             if (prev) |p| {
                 p.next = mp.next;
             } else {
                 mount_list = mp.next;
             }
+            unlockMeta();
+
+            mp.fs_type.ops.unmount(mp) catch {};
             memory.kfree(@as([*]u8, @ptrCast(mp)));
             return;
         }
         prev = mp;
         current = mp.next;
     }
+    unlockMeta();
 
     return VFSError.NotFound;
 }
@@ -320,8 +350,10 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
     fd.fd_flags = 0;
     fd.ref_count = 1;
 
+    lockMeta();
     fd_table[i] = fd;
     vnode.ref_count += 1;
+    unlockMeta();
 
     return i;
 }
@@ -329,36 +361,45 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
 pub fn close(fd: u32) VFSError!void {
     if (fd >= fd_table.len) return VFSError.InvalidOperation;
 
-    if (fd_table[fd]) |file_desc| {
-        file_desc.ref_count -= 1;
-        if (file_desc.ref_count == 0) {
-            if (file_desc.vnode.file_type == .Pipe) {
-                if (file_desc.vnode.private_data) |pd| {
-                    const pipe: *PipeData = @ptrCast(@alignCast(pd));
-                    if ((file_desc.flags & O_WRONLY) != 0) {
-                        if (pipe.writers > 0) pipe.writers -= 1;
-                    } else {
-                        if (pipe.readers > 0) pipe.readers -= 1;
-                    }
-                    if (pipe.readers == 0 and pipe.writers == 0) {
-                        memory.kfree(@as([*]u8, @ptrCast(@alignCast(pd))));
-                        file_desc.vnode.private_data = null;
-                    }
-                }
-            }
-            const vnode = file_desc.vnode;
-            try vnode.ops.close(vnode);
-            vnode.ref_count -= 1;
-            if (vnode.ref_count == 0 and vnode.file_type == .Pipe) {
-                memory.kfree(@as([*]u8, @ptrCast(@alignCast(vnode))));
-            }
-            memory.kfree(@as([*]u8, @ptrCast(file_desc)));
-            fd_table[fd] = null;
-            freeFd(fd);
-        }
-    } else {
+    lockMeta();
+    const file_desc = fd_table[fd] orelse {
+        unlockMeta();
         return VFSError.InvalidOperation;
+    };
+    file_desc.ref_count -= 1;
+    if (file_desc.ref_count > 0) {
+        unlockMeta();
+        return;
     }
+    fd_table[fd] = null;
+    unlockMeta();
+
+    if (file_desc.vnode.file_type == .Pipe) {
+        if (file_desc.vnode.private_data) |pd| {
+            const pipe: *PipeData = @ptrCast(@alignCast(pd));
+            if ((file_desc.flags & O_WRONLY) != 0) {
+                if (pipe.writers > 0) pipe.writers -= 1;
+            } else {
+                if (pipe.readers > 0) pipe.readers -= 1;
+            }
+            if (pipe.readers == 0 and pipe.writers == 0) {
+                memory.kfree(@as([*]u8, @ptrCast(@alignCast(pd))));
+                file_desc.vnode.private_data = null;
+            }
+        }
+    }
+    const vnode = file_desc.vnode;
+    try vnode.ops.close(vnode);
+    lockMeta();
+    vnode.ref_count -= 1;
+    const free_pipe_vnode = vnode.ref_count == 0 and vnode.file_type == .Pipe;
+    unlockMeta();
+
+    if (free_pipe_vnode) {
+        memory.kfree(@as([*]u8, @ptrCast(@alignCast(vnode))));
+    }
+    memory.kfree(@as([*]u8, @ptrCast(file_desc)));
+    freeFd(fd);
 }
 
 pub fn read(fd: u32, buffer: []u8) VFSError!usize {
@@ -1027,4 +1068,3 @@ fn strlen(str: []const u8) usize {
     while (i < str.len and str[i] != 0) : (i += 1) {}
     return i;
 }
-
