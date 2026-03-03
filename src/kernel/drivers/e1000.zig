@@ -480,7 +480,7 @@ fn e1000_interrupt_handler(frame: *isr.InterruptFrame) void {
 
         if (icr & 0x80 != 0) {
             while (dev.receive()) |packet| {
-                network.processPacket(packet, dev.mac_addr);
+                network.enqueueRxPacket(packet, dev.mac_addr);
             }
         }
 

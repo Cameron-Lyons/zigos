@@ -120,7 +120,7 @@ pub fn terminateProcess(pid: u32) bool {
         curr = p.next;
     }
 
-    if (current_process == proc) {
+    if (getEffectiveCurrent() == proc) {
         yield();
     }
 
@@ -300,7 +300,7 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
 }
 
 pub fn schedule() ?*Process {
-    return scheduler.schedule();
+    return scheduler.scheduleForCPU(smp.getCurrentCPU());
 }
 
 extern fn context_switch(old: *Context, new: *Context) void;
@@ -310,31 +310,35 @@ extern fn save_process_state(ctx: *Context) void;
 extern fn restore_process_state(ctx: *Context) void;
 
 pub fn switch_process(old: *Context, new: *Context) void {
-
-    if (current_process != null and current_process.?.privilege == .User) {
-        const kernel_stack_top = @intFromPtr(current_process.?.kernel_stack) + current_process.?.stack_size;
-        gdt.setKernelStack(kernel_stack_top);
+    if (getEffectiveCurrent()) |curr| {
+        if (curr.privilege == .User) {
+            const kernel_stack_top = @intFromPtr(curr.kernel_stack) + curr.stack_size;
+            gdt.setKernelStack(kernel_stack_top);
+        }
     }
 
     context_switch(old, new);
 }
 
 pub fn yield() void {
-    smp.scheduler_lock.acquire();
-    const next = schedule();
     const cpu_id = smp.getCurrentCPU();
-    const old_proc = if (smp.isSMPEnabled() and cpu_id < SMP_MAX_CPUS)
-        per_cpu_current[cpu_id] orelse current_process
+    smp.scheduler_lock.acquire();
+    const next = scheduler.scheduleForCPU(cpu_id);
+    const cpu_idx = @as(usize, @intCast(@min(cpu_id, SMP_MAX_CPUS - 1)));
+    const old_proc = if (smp.isSMPEnabled() and cpu_idx < SMP_MAX_CPUS)
+        per_cpu_current[cpu_idx] orelse current_process
     else
         current_process;
 
     if (next != null and old_proc != null and next != old_proc) {
         const old = old_proc.?;
         const new = next.?;
-        if (smp.isSMPEnabled() and cpu_id < SMP_MAX_CPUS) {
-            per_cpu_current[cpu_id] = new;
+        if (smp.isSMPEnabled() and cpu_idx < SMP_MAX_CPUS) {
+            per_cpu_current[cpu_idx] = new;
         }
-        current_process = new;
+        if (cpu_idx == 0 or !smp.isSMPEnabled()) {
+            current_process = new;
+        }
         old.state = .Ready;
         new.state = .Running;
         smp.scheduler_lock.release();
@@ -367,11 +371,11 @@ fn print_number(num: u32) void {
 }
 
 pub export fn getCurrentProcess() ?*Process {
-    return current_process;
+    return getEffectiveCurrent();
 }
 
 pub fn getCurrentPID() u32 {
-    if (current_process) |proc| {
+    if (getEffectiveCurrent()) |proc| {
         return proc.pid;
     }
     return 0;
@@ -382,11 +386,16 @@ pub fn getSystemTime() u64 {
 }
 
 pub export fn switchToProcess(proc: *Process) void {
-    if (current_process) |old_proc| {
+    if (getEffectiveCurrent()) |old_proc| {
         old_proc.state = .Ready;
     }
 
-    current_process = proc;
+    const cpu_id = smp.getCurrentCPU();
+    const cpu_idx = @as(usize, @intCast(@min(cpu_id, SMP_MAX_CPUS - 1)));
+    per_cpu_current[cpu_idx] = proc;
+    if (cpu_idx == 0 or !smp.isSMPEnabled()) {
+        current_process = proc;
+    }
     proc.state = .Running;
 
     if (proc.page_directory) |pd| {

@@ -351,6 +351,7 @@ pub export fn ap_main(cpu_id: u32) void {
     asm volatile ("sti");
 
     while (true) {
+        process_mod.yield();
         asm volatile ("hlt");
     }
 }

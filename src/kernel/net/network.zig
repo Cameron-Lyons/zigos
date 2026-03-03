@@ -1,6 +1,8 @@
 const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const rtl8139 = @import("../drivers/rtl8139.zig");
+const process = @import("../process/process.zig");
+const smp = @import("../smp/smp.zig");
 const ethernet = @import("ethernet.zig");
 const arp = @import("arp.zig");
 pub const ipv4 = @import("ipv4.zig");
@@ -16,6 +18,49 @@ pub const NetworkDevice = struct {
 
 var current_device: ?*const NetworkDevice = null;
 
+const RX_QUEUE_DEPTH = 128;
+const TX_QUEUE_DEPTH = 128;
+const MAX_PACKET_SIZE = 2048;
+
+const Spinlock = struct {
+    locked: u32 = 0,
+
+    fn acquire(self: *Spinlock) void {
+        while (@cmpxchgWeak(u32, &self.locked, 0, 1, .acquire, .monotonic) != null) {
+            while (@atomicLoad(u32, &self.locked, .monotonic) != 0) {
+                asm volatile ("pause");
+            }
+        }
+    }
+
+    fn release(self: *Spinlock) void {
+        @atomicStore(u32, &self.locked, 0, .release);
+    }
+};
+
+const RxEntry = struct {
+    len: usize = 0,
+    mac: [6]u8 = [_]u8{0} ** 6,
+    data: [MAX_PACKET_SIZE]u8 = [_]u8{0} ** MAX_PACKET_SIZE,
+};
+
+const TxEntry = struct {
+    len: usize = 0,
+    data: [MAX_PACKET_SIZE]u8 = [_]u8{0} ** MAX_PACKET_SIZE,
+};
+
+var rx_lock: Spinlock = .{};
+var tx_lock: Spinlock = .{};
+var rx_queue: [RX_QUEUE_DEPTH]RxEntry = [_]RxEntry{.{}} ** RX_QUEUE_DEPTH;
+var tx_queue: [TX_QUEUE_DEPTH]TxEntry = [_]TxEntry{.{}} ** TX_QUEUE_DEPTH;
+var rx_head: usize = 0;
+var rx_tail: usize = 0;
+var rx_count: usize = 0;
+var tx_head: usize = 0;
+var tx_tail: usize = 0;
+var tx_count: usize = 0;
+var workers_started: bool = false;
+
 pub fn init() void {
     vga.print("Initializing network stack...\n");
 
@@ -30,7 +75,106 @@ pub fn init() void {
 }
 
 pub fn handleRxPacket(packet: []u8) void {
-    ethernet.handleRxPacket(packet);
+    enqueueRxPacket(packet, getMacAddress());
+}
+
+pub fn startWorkers() void {
+    if (workers_started) return;
+    workers_started = true;
+
+    _ = process.create_kernel_process("net-rx-worker", netRxWorker);
+    _ = process.create_kernel_process("net-tx-worker", netTxWorker);
+
+    if (smp.isSMPEnabled() and smp.getNumCPUs() > 2) {
+        _ = process.create_kernel_process("net-rx-worker-2", netRxWorker);
+    }
+}
+
+pub fn enqueueRxPacket(packet: []const u8, mac: [6]u8) void {
+    if (!workers_started) {
+        processPacket(@constCast(packet), mac);
+        return;
+    }
+
+    const copy_len = @min(packet.len, MAX_PACKET_SIZE);
+    rx_lock.acquire();
+    defer rx_lock.release();
+
+    if (rx_count >= RX_QUEUE_DEPTH) {
+        return;
+    }
+
+    rx_queue[rx_head].len = copy_len;
+    rx_queue[rx_head].mac = mac;
+    @memcpy(rx_queue[rx_head].data[0..copy_len], packet[0..copy_len]);
+
+    rx_head = (rx_head + 1) % RX_QUEUE_DEPTH;
+    rx_count += 1;
+}
+
+pub fn enqueueTxPacket(packet: []const u8) void {
+    if (!workers_started) {
+        sendPacketNow(packet);
+        return;
+    }
+
+    const copy_len = @min(packet.len, MAX_PACKET_SIZE);
+    tx_lock.acquire();
+    defer tx_lock.release();
+
+    if (tx_count >= TX_QUEUE_DEPTH) {
+        return;
+    }
+
+    tx_queue[tx_head].len = copy_len;
+    @memcpy(tx_queue[tx_head].data[0..copy_len], packet[0..copy_len]);
+
+    tx_head = (tx_head + 1) % TX_QUEUE_DEPTH;
+    tx_count += 1;
+}
+
+fn popRx() ?RxEntry {
+    rx_lock.acquire();
+    defer rx_lock.release();
+
+    if (rx_count == 0) return null;
+
+    const entry = rx_queue[rx_tail];
+    rx_tail = (rx_tail + 1) % RX_QUEUE_DEPTH;
+    rx_count -= 1;
+    return entry;
+}
+
+fn popTx() ?TxEntry {
+    tx_lock.acquire();
+    defer tx_lock.release();
+
+    if (tx_count == 0) return null;
+
+    const entry = tx_queue[tx_tail];
+    tx_tail = (tx_tail + 1) % TX_QUEUE_DEPTH;
+    tx_count -= 1;
+    return entry;
+}
+
+fn netRxWorker() void {
+    while (true) {
+        if (popRx()) |entry| {
+            processPacket(entry.data[0..entry.len], entry.mac);
+        } else {
+            process.yield();
+        }
+    }
+}
+
+fn netTxWorker() void {
+    while (true) {
+        if (popTx()) |entry| {
+            sendPacketNow(entry.data[0..entry.len]);
+        } else {
+            process.yield();
+        }
+    }
 }
 
 var local_ip: u32 = 0x0A000002;
@@ -197,6 +341,10 @@ pub fn setNetworkDevice(device: *const NetworkDevice) void {
 }
 
 pub fn sendPacket(data: []const u8) void {
+    enqueueTxPacket(data);
+}
+
+pub fn sendPacketNow(data: []const u8) void {
     if (current_device) |dev| {
         dev.send(data);
     } else if (rtl8139.isInitialized()) {
@@ -222,8 +370,7 @@ pub fn getMacAddress() [6]u8 {
     return [_]u8{0} ** 6;
 }
 
-pub fn processPacket(packet: []u8, mac: [6]u8) void {
+pub fn processPacket(packet: []const u8, mac: [6]u8) void {
     _ = mac;
-    ethernet.handleRxPacket(packet);
+    ethernet.handleRxPacket(@constCast(packet));
 }
-

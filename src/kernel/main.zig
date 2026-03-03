@@ -111,37 +111,6 @@ export fn kernel_main() void {
     console.print("Initializing ACPI...\n");
     acpi.init();
 
-    console.print("Initializing SMP (multicore) support...\n");
-    const smp = @import("smp/smp.zig");
-    smp.init();
-    if (smp.isSMPEnabled()) {
-        console.print("SMP enabled with ");
-        const num_cpus = smp.getNumCPUs();
-        // SAFETY: filled by the following digit extraction loop
-        var cpu_str: [10]u8 = undefined;
-        var cpu_count = num_cpus;
-        var idx: usize = 0;
-        if (cpu_count == 0) {
-            cpu_str[0] = '0';
-            idx = 1;
-        } else {
-            while (cpu_count > 0) : (idx += 1) {
-                cpu_str[idx] = @as(u8, @intCast('0' + (cpu_count % 10)));
-                cpu_count /= 10;
-            }
-            var i: usize = 0;
-            while (i < idx / 2) : (i += 1) {
-                const tmp = cpu_str[i];
-                cpu_str[i] = cpu_str[idx - 1 - i];
-                cpu_str[idx - 1 - i] = tmp;
-            }
-        }
-        console.print(cpu_str[0..idx]);
-        console.print(" CPUs\n");
-    } else {
-        console.print("Single CPU mode\n");
-    }
-
     console.print("Initializing network...\n");
     e1000.init();
     if (!e1000.isInitialized()) {
@@ -233,6 +202,41 @@ export fn kernel_main() void {
 
     console.print("Initializing process management...\n");
     process.init();
+
+    console.print("Initializing SMP (multicore) support...\n");
+    const smp = @import("smp/smp.zig");
+    smp.init();
+    if (smp.isSMPEnabled()) {
+        console.print("SMP enabled with ");
+        const num_cpus = smp.getNumCPUs();
+        // SAFETY: filled by the following digit extraction loop
+        var cpu_str: [10]u8 = undefined;
+        var cpu_count = num_cpus;
+        var idx: usize = 0;
+        if (cpu_count == 0) {
+            cpu_str[0] = '0';
+            idx = 1;
+        } else {
+            while (cpu_count > 0) : (idx += 1) {
+                cpu_str[idx] = @as(u8, @intCast('0' + (cpu_count % 10)));
+                cpu_count /= 10;
+            }
+            var i: usize = 0;
+            while (i < idx / 2) : (i += 1) {
+                const tmp = cpu_str[i];
+                cpu_str[i] = cpu_str[idx - 1 - i];
+                cpu_str[idx - 1 - i] = tmp;
+            }
+        }
+        console.print(cpu_str[0..idx]);
+        console.print(" CPUs\n");
+    } else {
+        console.print("Single CPU mode\n");
+    }
+
+    console.print("Starting async IO workers...\n");
+    ata.startAsyncWorker();
+    network.startWorkers();
 
     console.print("Initializing process monitoring...\n");
     const procmon = @import("tests/procmon.zig");

@@ -1,5 +1,6 @@
 const x86 = @import("../../arch/x86.zig");
 const vga = @import("vga.zig");
+const process = @import("../process/process.zig");
 
 const ATA_PRIMARY_BASE: u16 = 0x1F0;
 const ATA_PRIMARY_CTRL: u16 = 0x3F6;
@@ -58,6 +59,50 @@ var primary_slave: ATADevice = undefined;
 var secondary_master: ATADevice = undefined;
 // SAFETY: fully initialized in init() before use
 var secondary_slave: ATADevice = undefined;
+
+const Spinlock = struct {
+    locked: u32 = 0,
+
+    fn acquire(self: *Spinlock) void {
+        while (@cmpxchgWeak(u32, &self.locked, 0, 1, .acquire, .monotonic) != null) {
+            while (@atomicLoad(u32, &self.locked, .monotonic) != 0) {
+                asm volatile ("pause");
+            }
+        }
+    }
+
+    fn release(self: *Spinlock) void {
+        @atomicStore(u32, &self.locked, 0, .release);
+    }
+};
+
+const AsyncOp = enum {
+    Read,
+    Write,
+};
+
+const ASYNC_REQUESTS = 32;
+
+const AsyncRequest = struct {
+    in_use: bool = false,
+    queued: bool = false,
+    done: bool = false,
+    op: AsyncOp = .Read,
+    device: *const ATADevice = undefined,
+    lba: u64 = 0,
+    count: u8 = 0,
+    buffer: [*]u8 = undefined,
+    buffer_len: usize = 0,
+    result_code: u8 = 0,
+};
+
+var async_lock: Spinlock = .{};
+var async_requests: [ASYNC_REQUESTS]AsyncRequest = [_]AsyncRequest{.{}} ** ASYNC_REQUESTS;
+var async_ring: [ASYNC_REQUESTS]u8 = [_]u8{0} ** ASYNC_REQUESTS;
+var async_head: usize = 0;
+var async_tail: usize = 0;
+var async_count: usize = 0;
+var async_worker_started: bool = false;
 
 pub fn init() void {
     vga.print("  - Detecting ATA drives...\n");
@@ -129,6 +174,132 @@ pub fn init() void {
     if (secondary_slave.present) {
         vga.print("    Secondary Slave: ");
         printDriveInfo(&secondary_slave);
+    }
+}
+
+pub fn startAsyncWorker() void {
+    if (async_worker_started) return;
+    async_worker_started = true;
+    _ = process.create_kernel_process("ata-io-worker", ataAsyncWorkerTask);
+}
+
+fn encodeError(err: ATAError) u8 {
+    return switch (err) {
+        ATAError.Timeout => 1,
+        ATAError.DriveError => 2,
+        ATAError.NotFound => 3,
+        ATAError.InvalidParameter => 4,
+        ATAError.ReadError => 5,
+        ATAError.WriteError => 6,
+    };
+}
+
+fn decodeError(code: u8) ATAError {
+    return switch (code) {
+        1 => ATAError.Timeout,
+        2 => ATAError.DriveError,
+        3 => ATAError.NotFound,
+        4 => ATAError.InvalidParameter,
+        5 => ATAError.ReadError,
+        6 => ATAError.WriteError,
+        else => ATAError.DriveError,
+    };
+}
+
+fn queueAsyncRequest(op: AsyncOp, device: *const ATADevice, lba: u64, count: u8, buffer: []u8) ATAError!usize {
+    async_lock.acquire();
+    defer async_lock.release();
+
+    if (async_count >= ASYNC_REQUESTS) return ATAError.Timeout;
+
+    var request_idx: ?u8 = null;
+    for (&async_requests, 0..) |*req, idx| {
+        if (!req.in_use and !req.queued and !req.done) {
+            req.in_use = true;
+            req.queued = true;
+            req.done = false;
+            req.op = op;
+            req.device = device;
+            req.lba = lba;
+            req.count = count;
+            req.buffer = buffer.ptr;
+            req.buffer_len = buffer.len;
+            req.result_code = 0;
+            request_idx = @intCast(idx);
+            break;
+        }
+    }
+
+    const idx = request_idx orelse return ATAError.Timeout;
+    async_ring[async_head] = idx;
+    async_head = (async_head + 1) % ASYNC_REQUESTS;
+    async_count += 1;
+    return idx;
+}
+
+fn waitAsyncRequest(op: AsyncOp, device: *const ATADevice, lba: u64, count: u8, buffer: []u8) ATAError!void {
+    const req_idx = try queueAsyncRequest(op, device, lba, count, buffer);
+
+    while (true) {
+        async_lock.acquire();
+        const req = &async_requests[req_idx];
+        const done = req.done;
+        const result_code = req.result_code;
+        if (done) {
+            req.in_use = false;
+            req.queued = false;
+            req.done = false;
+        }
+        async_lock.release();
+
+        if (done) {
+            if (result_code != 0) return decodeError(result_code);
+            return;
+        }
+
+        process.yield();
+    }
+}
+
+fn popAsyncRequest() ?*AsyncRequest {
+    async_lock.acquire();
+    defer async_lock.release();
+
+    if (async_count == 0) return null;
+    const idx = async_ring[async_tail];
+    async_tail = (async_tail + 1) % ASYNC_REQUESTS;
+    async_count -= 1;
+
+    const req = &async_requests[idx];
+    req.queued = false;
+    return req;
+}
+
+fn ataAsyncWorkerTask() void {
+    while (true) {
+        if (popAsyncRequest()) |req| {
+            const result_code: u8 = switch (req.op) {
+                .Read => blk: {
+                    readSectorsSync(req.device, req.lba, req.count, req.buffer[0..req.buffer_len]) catch |err| {
+                        break :blk encodeError(err);
+                    };
+                    break :blk 0;
+                },
+                .Write => blk: {
+                    writeSectorsSync(req.device, req.lba, req.count, req.buffer[0..req.buffer_len]) catch |err| {
+                        break :blk encodeError(err);
+                    };
+                    break :blk 0;
+                },
+            };
+
+            async_lock.acquire();
+            req.result_code = result_code;
+            req.done = true;
+            async_lock.release();
+        } else {
+            process.yield();
+        }
     }
 }
 
@@ -208,7 +379,7 @@ fn detectDrive(device: *ATADevice) void {
     device.serial[20] = 0;
 }
 
-pub fn readSectors(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) ATAError!void {
+fn readSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) ATAError!void {
     if (!device.present) {
         return ATAError.NotFound;
     }
@@ -247,7 +418,7 @@ pub fn readSectors(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) 
     }
 }
 
-pub fn writeSectors(device: *const ATADevice, lba: u64, count: u8, buffer: []const u8) ATAError!void {
+fn writeSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []const u8) ATAError!void {
     if (!device.present) {
         return ATAError.NotFound;
     }
@@ -287,6 +458,30 @@ pub fn writeSectors(device: *const ATADevice, lba: u64, count: u8, buffer: []con
 
     x86.outb(device.base_port + ATA_REG_COMMAND, ATA_CMD_CACHE_FLUSH);
     try waitDriveReady(device);
+}
+
+pub fn readSectors(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) ATAError!void {
+    try readSectorsSync(device, lba, count, buffer);
+}
+
+pub fn writeSectors(device: *const ATADevice, lba: u64, count: u8, buffer: []const u8) ATAError!void {
+    try writeSectorsSync(device, lba, count, buffer);
+}
+
+pub fn readSectorsAsync(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) ATAError!void {
+    if (!async_worker_started) {
+        try readSectorsSync(device, lba, count, buffer);
+        return;
+    }
+    try waitAsyncRequest(.Read, device, lba, count, buffer);
+}
+
+pub fn writeSectorsAsync(device: *const ATADevice, lba: u64, count: u8, buffer: []const u8) ATAError!void {
+    if (!async_worker_started) {
+        try writeSectorsSync(device, lba, count, buffer);
+        return;
+    }
+    try waitAsyncRequest(.Write, device, lba, count, @constCast(buffer));
 }
 
 pub fn getPrimaryMaster() ?*const ATADevice {
@@ -373,4 +568,3 @@ fn printNumber(num: u64) void {
         vga.put_char(buffer[i]);
     }
 }
-

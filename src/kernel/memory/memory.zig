@@ -23,6 +23,19 @@ var heap_start: [*]u8 = undefined;
 var heap_end: [*]u8 = undefined;
 var free_list: ?*BlockHeader = null;
 var is_initialized = false;
+var allocator_lock: u32 = 0;
+
+fn lockAllocator() void {
+    while (@cmpxchgWeak(u32, &allocator_lock, 0, 1, .acquire, .monotonic) != null) {
+        while (@atomicLoad(u32, &allocator_lock, .monotonic) != 0) {
+            asm volatile ("pause");
+        }
+    }
+}
+
+fn unlockAllocator() void {
+    @atomicStore(u32, &allocator_lock, 0, .release);
+}
 
 pub fn init() void {
     heap_start = @ptrFromInt(HEAP_START);
@@ -95,6 +108,8 @@ fn coalesceBlocks(block: *BlockHeader) void {
 
 pub fn kmalloc(size: usize) ?*anyopaque {
     if (!is_initialized or size == 0) return null;
+    lockAllocator();
+    defer unlockAllocator();
 
     const aligned_size = alignUp(size, BLOCK_ALIGNMENT);
 
@@ -129,6 +144,8 @@ pub fn kmalloc(size: usize) ?*anyopaque {
 
 pub fn kfree(ptr: ?*anyopaque) void {
     if (ptr == null or !is_initialized) return;
+    lockAllocator();
+    defer unlockAllocator();
 
     const raw_ptr: [*]u8 = @ptrCast(ptr.?);
     const block: *BlockHeader = @ptrCast(@alignCast(raw_ptr - @sizeOf(BlockHeader)));
@@ -168,6 +185,9 @@ pub fn krealloc(ptr: ?*anyopaque, new_size: usize) ?*anyopaque {
 }
 
 pub fn getMemoryStats() struct { total: usize, used: usize, free: usize } {
+    lockAllocator();
+    defer unlockAllocator();
+
     var total: usize = 0;
     var free: usize = 0;
 
@@ -204,6 +224,9 @@ pub fn freePages(ptr: [*]u8, num_pages: usize) void {
 }
 
 pub fn allocatePhysicalPage() ?u32 {
+    lockAllocator();
+    defer unlockAllocator();
+
     const page = next_physical_page;
     next_physical_page += PAGE_SIZE;
 
