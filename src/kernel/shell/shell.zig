@@ -599,64 +599,7 @@ pub const Shell = struct {
 
         const command_name = sliceFromCStr(args[1]);
 
-        const is_builtin = streq(args[1], "help") or
-            streq(args[1], "clear") or
-            streq(args[1], "echo") or
-            streq(args[1], "ps") or
-            streq(args[1], "meminfo") or
-            streq(args[1], "uptime") or
-            streq(args[1], "kill") or
-            streq(args[1], "shutdown") or
-            streq(args[1], "memtest") or
-            streq(args[1], "panic") or
-            streq(args[1], "lsdev") or
-            streq(args[1], "multitask") or
-            streq(args[1], "scheduler") or
-            streq(args[1], "schedstats") or
-            streq(args[1], "ls") or
-            streq(args[1], "cat") or
-            streq(args[1], "mkdir") or
-            streq(args[1], "rmdir") or
-            streq(args[1], "rm") or
-            streq(args[1], "mv") or
-            streq(args[1], "mount") or
-            streq(args[1], "ping") or
-            streq(args[1], "httpd") or
-            streq(args[1], "netstat") or
-            streq(args[1], "nslookup") or
-            streq(args[1], "dhcp") or
-            streq(args[1], "route") or
-            streq(args[1], "arp") or
-            streq(args[1], "nettest") or
-            streq(args[1], "synctest") or
-            streq(args[1], "ipctest") or
-            streq(args[1], "procmon") or
-            streq(args[1], "top") or
-            streq(args[1], "cp") or
-            streq(args[1], "touch") or
-            streq(args[1], "write") or
-            streq(args[1], "edit") or
-            streq(args[1], "head") or
-            streq(args[1], "tail") or
-            streq(args[1], "wc") or
-            streq(args[1], "grep") or
-            streq(args[1], "find") or
-            streq(args[1], "stat") or
-            streq(args[1], "uname") or
-            streq(args[1], "whoami") or
-            streq(args[1], "pwd") or
-            streq(args[1], "sort") or
-            streq(args[1], "uniq") or
-            streq(args[1], "ifconfig") or
-            streq(args[1], "df") or
-            streq(args[1], "nice") or
-            streq(args[1], "renice") or
-            streq(args[1], "chmod") or
-            streq(args[1], "export") or
-            streq(args[1], "unset") or
-            streq(args[1], "env");
-
-        if (is_builtin) {
+        if (registry.lookup(command_name) != null) {
             vga.print("nice: Priority adjustment for built-in commands is not supported.\n");
             vga.print("Built-in commands run in the shell context and cannot have their priority changed.\n");
             vga.print("To use priority adjustment, run an external program instead.\n");
@@ -982,6 +925,38 @@ pub const Shell = struct {
         return true;
     }
 
+    const LineSpan = struct {
+        start: usize,
+        len: usize,
+    };
+
+    fn lineLessThan(file_buffer: []const u8, lhs: LineSpan, rhs: LineSpan) bool {
+        const left = file_buffer[lhs.start .. lhs.start + lhs.len];
+        const right = file_buffer[rhs.start .. rhs.start + rhs.len];
+        const min_len = @min(left.len, right.len);
+
+        var i: usize = 0;
+        while (i < min_len) : (i += 1) {
+            if (left[i] != right[i]) {
+                return left[i] < right[i];
+            }
+        }
+
+        return left.len < right.len;
+    }
+
+    fn sortLines(file_buffer: []const u8, lines: []LineSpan) void {
+        var i: usize = 1;
+        while (i < lines.len) : (i += 1) {
+            const current = lines[i];
+            var j = i;
+            while (j > 0 and lineLessThan(file_buffer, current, lines[j - 1])) : (j -= 1) {
+                lines[j] = lines[j - 1];
+            }
+            lines[j] = current;
+        }
+    }
+
     fn cmdSort(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         if (args.len == 0) {
@@ -1018,18 +993,17 @@ pub const Shell = struct {
             total_read += bytes_read;
         }
 
-        // SAFETY: entries assigned in the following line-scanning loop; line_count tracks valid entries
-        var line_starts: [256]usize = undefined;
-        // SAFETY: entries assigned in the following line-scanning loop; line_count tracks valid entries
-        var line_lens: [256]usize = undefined;
+        var lines: [256]LineSpan = undefined;
         var current_line_start: usize = 0;
         var i: usize = 0;
 
         while (i < total_read and line_count < 256) {
             if (file_buffer[i] == '\n' or file_buffer[i] == '\r') {
                 if (i > current_line_start) {
-                    line_starts[line_count] = current_line_start;
-                    line_lens[line_count] = i - current_line_start;
+                    lines[line_count] = .{
+                        .start = current_line_start,
+                        .len = i - current_line_start,
+                    };
                     line_count += 1;
                 }
                 if (file_buffer[i] == '\r' and i + 1 < total_read and file_buffer[i + 1] == '\n') {
@@ -1044,54 +1018,18 @@ pub const Shell = struct {
         }
 
         if (current_line_start < total_read and line_count < 256) {
-            line_starts[line_count] = current_line_start;
-            line_lens[line_count] = total_read - current_line_start;
+            lines[line_count] = .{
+                .start = current_line_start,
+                .len = total_read - current_line_start,
+            };
             line_count += 1;
         }
 
-        var swapped = true;
-        while (swapped) {
-            swapped = false;
-            var j: usize = 0;
-            while (j < line_count - 1) : (j += 1) {
-                const line1 = file_buffer[line_starts[j] .. line_starts[j] + line_lens[j]];
-                const line2 = file_buffer[line_starts[j + 1] .. line_starts[j + 1] + line_lens[j + 1]];
-
-                var cmp: i32 = 0;
-                const min_len = @min(line1.len, line2.len);
-                var k: usize = 0;
-                while (k < min_len) : (k += 1) {
-                    if (line1[k] < line2[k]) {
-                        cmp = -1;
-                        break;
-                    } else if (line1[k] > line2[k]) {
-                        cmp = 1;
-                        break;
-                    }
-                }
-                if (cmp == 0) {
-                    if (line1.len < line2.len) {
-                        cmp = -1;
-                    } else if (line1.len > line2.len) {
-                        cmp = 1;
-                    }
-                }
-
-                if (cmp > 0) {
-                    const temp_start = line_starts[j];
-                    const temp_len = line_lens[j];
-                    line_starts[j] = line_starts[j + 1];
-                    line_lens[j] = line_lens[j + 1];
-                    line_starts[j + 1] = temp_start;
-                    line_lens[j + 1] = temp_len;
-                    swapped = true;
-                }
-            }
-        }
+        sortLines(file_buffer[0..total_read], lines[0..line_count]);
 
         var j: usize = 0;
         while (j < line_count) : (j += 1) {
-            const line = file_buffer[line_starts[j] .. line_starts[j] + line_lens[j]];
+            const line = file_buffer[lines[j].start .. lines[j].start + lines[j].len];
             for (line) |byte| {
                 vga.put_char(byte);
             }
