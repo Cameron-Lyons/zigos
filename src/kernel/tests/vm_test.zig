@@ -1,8 +1,33 @@
+const std = @import("std");
 const vga = @import("../drivers/vga.zig");
+const process = @import("../process/process.zig");
+const socket = @import("../net/socket.zig");
+const tcp = @import("../net/tcp.zig");
+const ipv4 = @import("../net/ipv4.zig");
 const paging = @import("../memory/paging.zig");
 
 var pass_count: u32 = 0;
 var fail_count: u32 = 0;
+
+const TCP_TEST_PORT: u16 = 32001;
+const TCP_TEST_REMOTE_PORT: u16 = 42001;
+const TCP_TEST_PAYLOAD = "wake-path";
+const TEST_WAIT_YIELDS: usize = 4096;
+
+const TcpWakeTestState = struct {
+    listener: ?*socket.Socket = null,
+    accepted: ?*socket.Socket = null,
+    accept_done: bool = false,
+    accept_ok: bool = false,
+    recv_done: bool = false,
+    recv_ok: bool = false,
+    accept_waiter_pid: u32 = 0,
+    accept_feeder_pid: u32 = 0,
+    recv_waiter_pid: u32 = 0,
+    recv_feeder_pid: u32 = 0,
+};
+
+var tcp_wake_test: TcpWakeTestState = .{};
 
 pub fn test_virtual_memory() bool {
     pass_count = 0;
@@ -15,6 +40,7 @@ pub fn test_virtual_memory() bool {
     test_memory_stats();
     test_page_flags();
     test_range_operations();
+    test_tcp_accept_recv_wakeup();
 
     vga.print("=== VM Test Results: ");
     print_dec(pass_count);
@@ -210,6 +236,203 @@ fn test_range_operations() void {
     } else {
         vga.print("  [FAIL] Not all pages in range are unmapped\n");
         fail_count += 1;
+    }
+}
+
+fn test_tcp_accept_recv_wakeup() void {
+    vga.print("Testing TCP accept/recv wakeups...\n");
+
+    resetTcpWakeTest();
+    defer cleanupTcpWakeTest();
+
+    const local = ipv4.IPv4Address{ .octets = .{ 10, 0, 2, 15 } };
+
+    const listener = socket.createSocket(.STREAM, .TCP) catch {
+        vga.print("  [FAIL] Could not create listening socket\n");
+        fail_count += 1;
+        return;
+    };
+    tcp_wake_test.listener = listener;
+
+    listener.bind(local, TCP_TEST_PORT) catch {
+        vga.print("  [FAIL] Could not bind listening socket\n");
+        fail_count += 1;
+        return;
+    };
+
+    listener.listen(1) catch {
+        vga.print("  [FAIL] Could not listen on test socket\n");
+        fail_count += 1;
+        return;
+    };
+
+    const accept_waiter = process.create_process("tcp-accept-wait", tcpAcceptWaitTask);
+    tcp_wake_test.accept_waiter_pid = accept_waiter.pid;
+    const accept_feeder = process.create_process("tcp-accept-feed", tcpAcceptFeedTask);
+    tcp_wake_test.accept_feeder_pid = accept_feeder.pid;
+
+    if (!waitForFlag(&tcp_wake_test.accept_done)) {
+        vga.print("  [FAIL] Timed out waiting for accept wakeup\n");
+        fail_count += 1;
+        return;
+    }
+
+    if (!tcp_wake_test.accept_ok or tcp_wake_test.accepted == null) {
+        vga.print("  [FAIL] accept did not receive queued client\n");
+        fail_count += 1;
+        return;
+    }
+
+    vga.print("  [OK] accept woke and returned queued client\n");
+    pass_count += 1;
+
+    const recv_waiter = process.create_process("tcp-recv-wait", tcpRecvWaitTask);
+    tcp_wake_test.recv_waiter_pid = recv_waiter.pid;
+    const recv_feeder = process.create_process("tcp-recv-feed", tcpRecvFeedTask);
+    tcp_wake_test.recv_feeder_pid = recv_feeder.pid;
+
+    if (!waitForFlag(&tcp_wake_test.recv_done)) {
+        vga.print("  [FAIL] Timed out waiting for recv wakeup\n");
+        fail_count += 1;
+        return;
+    }
+
+    if (!tcp_wake_test.recv_ok) {
+        vga.print("  [FAIL] recv did not return expected payload\n");
+        fail_count += 1;
+        return;
+    }
+
+    vga.print("  [OK] recv woke and returned queued payload\n");
+    pass_count += 1;
+}
+
+fn resetTcpWakeTest() void {
+    tcp_wake_test = .{};
+}
+
+fn cleanupTcpWakeTest() void {
+    terminateTestProcess(tcp_wake_test.recv_waiter_pid);
+    terminateTestProcess(tcp_wake_test.recv_feeder_pid);
+    terminateTestProcess(tcp_wake_test.accept_waiter_pid);
+    terminateTestProcess(tcp_wake_test.accept_feeder_pid);
+
+    if (tcp_wake_test.accepted) |client| {
+        if (client.in_use) {
+            client.close();
+        }
+    }
+
+    if (tcp_wake_test.listener) |listener| {
+        if (listener.in_use) {
+            listener.close();
+        }
+    }
+
+    tcp_wake_test = .{};
+}
+
+fn terminateTestProcess(pid: u32) void {
+    if (pid == 0) return;
+    _ = process.terminateProcess(pid);
+}
+
+fn waitForFlag(flag: *const bool) bool {
+    var remaining = TEST_WAIT_YIELDS;
+    while (remaining > 0) : (remaining -= 1) {
+        if (flag.*) return true;
+        process.yield();
+    }
+    return flag.*;
+}
+
+fn tcpAcceptWaitTask() void {
+    const listener = tcp_wake_test.listener orelse {
+        tcp_wake_test.accept_done = true;
+        finishTestTask();
+    };
+
+    const client = listener.accept() catch {
+        tcp_wake_test.accept_done = true;
+        finishTestTask();
+    };
+
+    tcp_wake_test.accepted = client;
+    tcp_wake_test.accept_ok = client.state == .CONNECTED and client.tcp_connection != null;
+    tcp_wake_test.accept_done = true;
+    finishTestTask();
+}
+
+fn tcpAcceptFeedTask() void {
+    process.yield();
+
+    const listener = tcp_wake_test.listener orelse {
+        tcp_wake_test.accept_done = true;
+        finishTestTask();
+    };
+
+    const remote = ipv4.IPv4Address{ .octets = .{ 10, 0, 2, 99 } };
+    const conn = tcp.createConnection(listener.local_addr, listener.local_port, remote, TCP_TEST_REMOTE_PORT) catch {
+        tcp_wake_test.accept_done = true;
+        finishTestTask();
+    };
+    conn.state = .ESTABLISHED;
+
+    const client = socket.createAcceptedTcpSocket(conn, listener.local_addr, listener.local_port, remote, TCP_TEST_REMOTE_PORT) catch {
+        tcp.releaseConnection(conn);
+        tcp_wake_test.accept_done = true;
+        finishTestTask();
+    };
+
+    listener.addToBacklog(client) catch {
+        client.close();
+        tcp_wake_test.accept_done = true;
+        finishTestTask();
+    };
+
+    finishTestTask();
+}
+
+fn tcpRecvWaitTask() void {
+    const client = tcp_wake_test.accepted orelse {
+        tcp_wake_test.recv_done = true;
+        finishTestTask();
+    };
+
+    var buffer: [32]u8 = undefined;
+    const bytes_read = client.recv(&buffer) catch {
+        tcp_wake_test.recv_done = true;
+        finishTestTask();
+    };
+
+    tcp_wake_test.recv_ok = bytes_read == TCP_TEST_PAYLOAD.len and std.mem.eql(u8, buffer[0..bytes_read], TCP_TEST_PAYLOAD);
+    tcp_wake_test.recv_done = true;
+    finishTestTask();
+}
+
+fn tcpRecvFeedTask() void {
+    process.yield();
+
+    const client = tcp_wake_test.accepted orelse {
+        tcp_wake_test.recv_done = true;
+        finishTestTask();
+    };
+
+    const conn = client.tcp_connection orelse {
+        tcp_wake_test.recv_done = true;
+        finishTestTask();
+    };
+
+    @memcpy(conn.recv_buffer[0..TCP_TEST_PAYLOAD.len], TCP_TEST_PAYLOAD);
+    conn.recv_buffer_used = TCP_TEST_PAYLOAD.len;
+    conn.ready.signal();
+    finishTestTask();
+}
+
+fn finishTestTask() noreturn {
+    _ = process.terminateProcess(process.getCurrentPID());
+    while (true) {
+        process.yield();
     }
 }
 
