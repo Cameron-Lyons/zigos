@@ -1,131 +1,78 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-set -e  # Exit on error
+set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+readonly serial_log="serial.log"
+readonly qemu_success=33
+readonly qemu_failure=35
 
-echo "Testing ZigOS kernel boot..."
-echo ""
+required_markers=(
+    "BOOT:START"
+    "BOOT:PROFILE:ci_smoke"
+    "BOOT:CORE_READY"
+    "BOOT:SHELL_READY"
+    "BOOT:PASS"
+)
 
-# Check if kernel exists
-if [ ! -f "zig-out/bin/kernel.elf" ]; then
-    echo -e "${RED}Error: kernel.elf not found. Please build the kernel first.${NC}"
-    echo "Run: zig build kernel"
+echo "Building CI smoke kernel..."
+zig build kernel-ci-smoke
+
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    echo "Smoke boot failed: qemu-system-x86_64 is not installed"
     exit 1
 fi
 
-# Clean up old serial log
-rm -f serial.log
+rm -f "$serial_log"
 
-echo "Starting QEMU with kernel.elf..."
-echo "The OS will output to serial port (captured in serial.log)"
-echo ""
-
-# Run QEMU with timeout
-if timeout 10 qemu-system-x86_64 \
-    -kernel zig-out/bin/kernel.elf \
+echo "Running QEMU smoke boot..."
+set +e
+timeout 20 qemu-system-x86_64 \
+    -kernel zig-out/bin/kernel-ci-smoke.elf \
     -m 128M \
     -display none \
-    -serial file:serial.log \
+    -serial "file:$serial_log" \
     -monitor none \
     -no-reboot \
-    > /dev/null 2>&1; then
-    echo -e "${GREEN}QEMU execution completed.${NC}"
-else
-    EXIT_CODE=$?
-    if [ $EXIT_CODE -eq 124 ]; then
-        echo -e "${YELLOW}QEMU timed out after 10 seconds (this is expected).${NC}"
-    else
-        echo -e "${YELLOW}QEMU exited with code $EXIT_CODE${NC}"
-    fi
-fi
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04
+qemu_exit_code=$?
+set -e
 
-echo ""
-echo "Kernel test completed."
-echo ""
-
-# Check for serial output
-if [ -f serial.log ] && [ -s serial.log ]; then
-    echo -e "${GREEN}Serial output captured:${NC}"
-    echo "----------------------------------------"
-    cat serial.log
-    echo "----------------------------------------"
-    echo ""
-    
-    # Verify key messages
-    SUCCESS=0
-    if grep -q "Welcome to ZigOS" serial.log; then
-        echo -e "${GREEN}✓ Welcome message found${NC}"
-        SUCCESS=$((SUCCESS + 1))
-    else
-        echo -e "${RED}✗ Welcome message not found${NC}"
-    fi
-    
-    if grep -q "GDT initialized" serial.log; then
-        echo -e "${GREEN}✓ GDT initialization confirmed${NC}"
-        SUCCESS=$((SUCCESS + 1))
-    else
-        echo -e "${RED}✗ GDT initialization not confirmed${NC}"
-    fi
-    
-    if grep -q "Interrupts enabled" serial.log; then
-        echo -e "${GREEN}✓ Interrupts enabled${NC}"
-        SUCCESS=$((SUCCESS + 1))
-    else
-        echo -e "${RED}✗ Interrupts not confirmed${NC}"
-    fi
-    
-    if grep -q "ZigOS Shell Ready" serial.log; then
-        echo -e "${GREEN}✓ Shell initialization confirmed${NC}"
-        SUCCESS=$((SUCCESS + 1))
-    else
-        echo -e "${YELLOW}⚠ Shell not ready (may need more time)${NC}"
-    fi
-    
-    if grep -qi "panic\|KERNEL PANIC\|System Halted" serial.log; then
-        echo -e "${RED}✗ Kernel panic or crash detected!${NC}"
-        echo "Check serial.log for details"
-        SUCCESS=0
-    fi
-    
-    if grep -qi "Received interrupt:" serial.log; then
-        echo -e "${RED}✗ Unexpected interrupt received${NC}"
-        grep "Received interrupt:" serial.log | head -1
-    fi
-    
-    echo ""
-    if [ $SUCCESS -ge 3 ]; then
-        echo -e "${GREEN}Kernel boot test: PASSED${NC}"
-        echo "The kernel successfully initialized core systems."
-    else
-        echo -e "${YELLOW}Kernel boot test: PARTIAL${NC}"
-        echo "Some initialization steps may not have completed."
-    fi
-else
-    echo -e "${RED}No serial output captured!${NC}"
-    echo "Possible issues:"
-    echo "  - Serial port driver not working"
-    echo "  - Kernel crashed before initialization"
-    echo "  - QEMU serial redirection failed"
+if [ ! -s "$serial_log" ]; then
+    echo "Smoke boot failed: no serial output captured"
     exit 1
 fi
 
-echo ""
-echo "The kernel has been successfully built and loads in QEMU!"
-echo "With a proper display (VGA/VNC), you would see:"
-echo "  - 'Welcome to ZigOS!' message"
-echo "  - System initialization messages"
-echo "  - Shell prompt with multitasking commands"
-echo ""
-echo "Available shell commands:"
-echo "  help      - Show all commands"
-echo "  multitask - Run multitasking demo"
-echo "  scheduler - Change scheduling algorithm"
-echo "  synctest  - Test synchronization primitives"
-echo "  ipctest   - Test IPC mechanisms"
-echo "  procmon   - Show process statistics"
-echo "  top       - Live process monitoring"
+echo "Serial output:"
+cat "$serial_log"
+
+if grep -Eqi "KERNEL PANIC|panic|System halted" "$serial_log"; then
+    echo "Smoke boot failed: panic marker found"
+    exit 1
+fi
+
+for marker in "${required_markers[@]}"; do
+    if ! grep -Fq "$marker" "$serial_log"; then
+        echo "Smoke boot failed: missing marker '$marker'"
+        exit 1
+    fi
+done
+
+case "$qemu_exit_code" in
+    0)
+        echo "Smoke boot passed"
+        ;;
+    "$qemu_success")
+        echo "Smoke boot passed"
+        ;;
+    "$qemu_failure")
+        echo "Smoke boot failed: kernel reported failure"
+        exit 1
+        ;;
+    124)
+        echo "Smoke boot failed: QEMU timed out"
+        exit 1
+        ;;
+    *)
+        echo "Smoke boot passed with QEMU exit code $qemu_exit_code"
+        ;;
+esac

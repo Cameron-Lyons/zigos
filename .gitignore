@@ -2,9 +2,11 @@ zig-cache/
 .zig-cache/
 zig-out/
 build/
+serial.log
+qemu.log
+qemu*.log
 *.o
 *.elf
 *.bin
 *.iso
-qemu*.log
 .DS_Store

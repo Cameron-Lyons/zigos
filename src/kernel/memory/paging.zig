@@ -40,12 +40,14 @@ pub const PageTableEntry = packed struct {
 pub const PageTable = [PAGES_PER_TABLE]PageTableEntry;
 pub const PageDirectory = [TABLES_PER_DIRECTORY]PageTableEntry;
 
-// SAFETY: fully initialized in init() which identity-maps the first 16MB
-var kernel_page_directory: PageDirectory align(PAGE_SIZE) = undefined;
-// SAFETY: fully initialized in init() which identity-maps the first 16MB
-var kernel_page_tables: [4]PageTable align(PAGE_SIZE) = undefined;
-
 const MEMORY_SIZE = 128 * 1024 * 1024;
+const IDENTITY_MAPPED_TABLES = MEMORY_SIZE / (PAGE_SIZE * PAGES_PER_TABLE);
+
+// SAFETY: fully initialized in init() which identity-maps the first 128MB
+var kernel_page_directory: PageDirectory align(PAGE_SIZE) = undefined;
+// SAFETY: fully initialized in init() which identity-maps the first 128MB
+var kernel_page_tables: [IDENTITY_MAPPED_TABLES]PageTable align(PAGE_SIZE) = undefined;
+
 const FRAME_COUNT = MEMORY_SIZE / PAGE_SIZE;
 const BITMAP_SIZE = FRAME_COUNT / 32;
 
@@ -322,14 +324,13 @@ pub fn init() void {
 
     var addr: u32 = 0;
     var table_idx: usize = 0;
-    while (table_idx < 4) : (table_idx += 1) {
+    while (table_idx < kernel_page_tables.len) : (table_idx += 1) {
         for (&kernel_page_tables[table_idx]) |*entry| {
             entry.* = PageTableEntry{
                 .present = true,
                 .writable = true,
                 .address = @truncate(addr >> 12),
             };
-            set_frame(addr);
             addr += PAGE_SIZE;
         }
 

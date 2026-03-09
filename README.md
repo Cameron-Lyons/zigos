@@ -46,32 +46,66 @@ sudo pacman -Sy --noconfirm zig nasm grub xorriso mtools qemu-full
 ./scripts/setup-deps.sh
 ```
 
-The script supports macOS (Homebrew) and Linux systems with `apt`, `dnf`, or
-`pacman`.
+The script supports macOS (Homebrew) and Linux systems with `apt`, `dnf`, or `pacman`.
 
 ## Building and Running
 
 ```bash
-# Quick build and run
-./build_and_run.sh
-
-# Or use Zig build system
+# Build the development kernel
 zig build kernel
-zig build iso
-zig build boot-test
+
+# Run the development profile in QEMU
 zig build run
+
+# Build the CI smoke-test profile
+zig build kernel-ci-smoke
+
+# Build the VM-test profile
+zig build kernel-test-vm
+
+# Build a bootable ISO from the development profile
+zig build iso
+
+# Run the ISO boot smoke test
+zig build boot-test
+
+# Run the CI smoke profile directly in QEMU
+zig build run-ci-smoke
+
+# Run the VM test profile directly in QEMU
+zig build run-test-vm
 ```
 
-`zig build iso` auto-detects `grub-mkrescue`, `i686-elf-grub-mkrescue`, or
-`x86_64-elf-grub-mkrescue`. You can override detection with:
+`zig build iso` auto-detects `grub-mkrescue`, `i686-elf-grub-mkrescue`, or `x86_64-elf-grub-mkrescue`. You can override detection with:
 
 ```bash
 GRUB_MKRESCUE=/path/to/grub-mkrescue zig build iso
 ```
 
-`zig build boot-test` builds the ISO, boots it headlessly in QEMU, and verifies
-required boot markers. Optional overrides:
+`zig build boot-test` builds the ISO, boots it headlessly in QEMU, and verifies required boot markers. Optional overrides:
 
 ```bash
 QEMU_BIN=qemu-system-x86_64 BOOT_TEST_SECONDS=15 zig build boot-test
 ```
+
+## Boot Profiles
+
+- `dev`: starts the interactive shell and demo processes
+- `ci_smoke`: boots core services, initializes the shell, emits serial markers, and exits through QEMU debug-exit
+- `test_vm`: runs the virtual memory test suite and exits through QEMU debug-exit
+
+## Smoke Boot Verification
+
+Use the smoke-test wrapper to build the `ci_smoke` profile, run QEMU headlessly, and verify the expected serial markers.
+
+```bash
+./test_kernel.sh
+```
+
+Successful smoke boots emit these serial markers:
+
+- `BOOT:START`
+- `BOOT:PROFILE:ci_smoke`
+- `BOOT:CORE_READY`
+- `BOOT:SHELL_READY`
+- `BOOT:PASS`
