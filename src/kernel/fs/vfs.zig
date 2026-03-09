@@ -621,6 +621,48 @@ pub fn getNodePath(vnode: *VNode) VFSError![]const u8 {
     return path_buffer[0..pos];
 }
 
+pub fn openVNode(vnode: *VNode, flags: u32) VFSError!void {
+    if ((flags & O_TRUNC) != 0 and vnode.file_type == FileType.Regular) {
+        try truncateVNode(vnode, 0);
+    }
+    try vnode.ops.open(vnode, flags);
+    notifyVNodeEvent(vnode, abi.IN_OPEN, abi.IN_OPEN);
+}
+
+pub fn closeVNode(vnode: *VNode, flags: u32) VFSError!void {
+    try vnode.ops.close(vnode);
+    const writable = (flags & O_WRONLY) != 0 or (flags & O_RDWR) != 0;
+    const mask = if (writable) abi.IN_CLOSE_WRITE else abi.IN_CLOSE_NOWRITE;
+    notifyVNodeEvent(vnode, mask, mask);
+}
+
+pub fn readVNode(vnode: *VNode, buffer: []u8, offset: u64) VFSError!usize {
+    const bytes_read = try vnode.ops.read(vnode, buffer, offset);
+    if (bytes_read > 0) notifyVNodeEvent(vnode, abi.IN_ACCESS, abi.IN_ACCESS);
+    return bytes_read;
+}
+
+pub fn writeVNode(vnode: *VNode, buffer: []const u8, offset: u64) VFSError!usize {
+    const bytes_written = try vnode.ops.write(vnode, buffer, offset);
+    if (bytes_written > 0) notifyVNodeEvent(vnode, abi.IN_MODIFY, abi.IN_MODIFY);
+    return bytes_written;
+}
+
+pub fn truncateVNode(vnode: *VNode, size: u64) VFSError!void {
+    try vnode.ops.truncate(vnode, size);
+    notifyVNodeEvent(vnode, abi.IN_MODIFY, abi.IN_MODIFY);
+}
+
+pub fn chmodVNode(vnode: *VNode, mode: FileMode) VFSError!void {
+    try vnode.ops.chmod(vnode, mode);
+    notifyVNodeEvent(vnode, abi.IN_ATTRIB, abi.IN_ATTRIB);
+}
+
+pub fn chownVNode(vnode: *VNode, uid: u32, gid: u32) VFSError!void {
+    try vnode.ops.chown(vnode, uid, gid);
+    notifyVNodeEvent(vnode, abi.IN_ATTRIB, abi.IN_ATTRIB);
+}
+
 pub fn stat(path: []const u8, stat_buf: *FileStat) VFSError!void {
     const vnode = try lookupPath(path);
     try vnode.ops.stat(vnode, stat_buf);
@@ -1043,6 +1085,11 @@ pub fn dup2(old_fd: u32, new_fd: u32) VFSError!u32 {
 fn notifyPathEvent(path: []const u8, exact_mask: u32, parent_mask: u32) void {
     const callback = inotify_notifier orelse return;
     callback(path, exact_mask, parent_mask);
+}
+
+fn notifyVNodeEvent(vnode: *VNode, exact_mask: u32, parent_mask: u32) void {
+    const path = getNodePath(vnode) catch return;
+    notifyPathEvent(path, exact_mask, parent_mask);
 }
 
 fn notifyDescriptorEvent(file_desc: *const FileDescriptor, exact_mask: u32, parent_mask: u32) void {
