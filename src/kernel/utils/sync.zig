@@ -2,6 +2,28 @@ const vga = @import("../drivers/vga.zig");
 const process = @import("../process/process.zig");
 const scheduler = @import("../process/scheduler.zig");
 
+fn enqueueWaiter(wait_queue: *?*process.Process, waiter: *process.Process) void {
+    waiter.wait_next = null;
+
+    if (wait_queue.* == null) {
+        wait_queue.* = waiter;
+        return;
+    }
+
+    var tail = wait_queue.*;
+    while (tail.?.wait_next != null) {
+        tail = tail.?.wait_next;
+    }
+    tail.?.wait_next = waiter;
+}
+
+fn dequeueWaiter(wait_queue: *?*process.Process) ?*process.Process {
+    const waiter = wait_queue.* orelse return null;
+    wait_queue.* = waiter.wait_next;
+    waiter.wait_next = null;
+    return waiter;
+}
+
 pub const SpinLock = struct {
     locked: bool,
     owner: ?u32,
@@ -70,19 +92,7 @@ pub const Mutex = struct {
         while (self.locked) {
             if (process.getEffectiveCurrent()) |current| {
                 current.state = .Blocked;
-
-                if (self.wait_queue == null) {
-                    self.wait_queue = current;
-                    current.next = null;
-                } else {
-                    var tail = self.wait_queue;
-                    while (tail.?.next != null) {
-                        tail = tail.?.next;
-                    }
-                    tail.?.next = current;
-                    current.next = null;
-                }
-
+                enqueueWaiter(&self.wait_queue, current);
                 scheduler.blockProcess(current);
                 self.spin.release();
                 process.yield();
@@ -105,8 +115,7 @@ pub const Mutex = struct {
         self.locked = false;
         self.owner = null;
 
-        if (self.wait_queue) |waiting| {
-            self.wait_queue = waiting.next;
+        if (dequeueWaiter(&self.wait_queue)) |waiting| {
             waiting.state = .Ready;
             scheduler.unblockProcess(waiting);
         }
@@ -152,19 +161,7 @@ pub const Semaphore = struct {
         if (self.count < 0) {
             if (process.getEffectiveCurrent()) |current| {
                 current.state = .Blocked;
-
-                if (self.wait_queue == null) {
-                    self.wait_queue = current;
-                    current.next = null;
-                } else {
-                    var tail = self.wait_queue;
-                    while (tail.?.next != null) {
-                        tail = tail.?.next;
-                    }
-                    tail.?.next = current;
-                    current.next = null;
-                }
-
+                enqueueWaiter(&self.wait_queue, current);
                 scheduler.blockProcess(current);
                 self.spin.release();
                 process.yield();
@@ -180,8 +177,7 @@ pub const Semaphore = struct {
         self.count += 1;
 
         if (self.count <= 0) {
-            if (self.wait_queue) |waiting| {
-                self.wait_queue = waiting.next;
+            if (dequeueWaiter(&self.wait_queue)) |waiting| {
                 waiting.state = .Ready;
                 scheduler.unblockProcess(waiting);
             }
@@ -233,19 +229,7 @@ pub const RWLock = struct {
         while (self.writer or self.writer_waiting) {
             if (process.getEffectiveCurrent()) |current| {
                 current.state = .Blocked;
-
-                if (self.read_queue == null) {
-                    self.read_queue = current;
-                    current.next = null;
-                } else {
-                    var tail = self.read_queue;
-                    while (tail.?.next != null) {
-                        tail = tail.?.next;
-                    }
-                    tail.?.next = current;
-                    current.next = null;
-                }
-
+                enqueueWaiter(&self.read_queue, current);
                 scheduler.blockProcess(current);
                 self.spin.release();
                 process.yield();
@@ -263,8 +247,7 @@ pub const RWLock = struct {
         self.readers -= 1;
 
         if (self.readers == 0 and self.write_queue != null) {
-            const waiting = self.write_queue.?;
-            self.write_queue = waiting.next;
+            const waiting = dequeueWaiter(&self.write_queue).?;
             waiting.state = .Ready;
             scheduler.unblockProcess(waiting);
         }
@@ -281,19 +264,7 @@ pub const RWLock = struct {
         while (self.writer or self.readers > 0) {
             if (process.getEffectiveCurrent()) |current| {
                 current.state = .Blocked;
-
-                if (self.write_queue == null) {
-                    self.write_queue = current;
-                    current.next = null;
-                } else {
-                    var tail = self.write_queue;
-                    while (tail.?.next != null) {
-                        tail = tail.?.next;
-                    }
-                    tail.?.next = current;
-                    current.next = null;
-                }
-
+                enqueueWaiter(&self.write_queue, current);
                 scheduler.blockProcess(current);
                 self.spin.release();
                 process.yield();
@@ -318,15 +289,13 @@ pub const RWLock = struct {
         self.writer_pid = null;
 
         while (self.read_queue != null) {
-            const waiting = self.read_queue.?;
-            self.read_queue = waiting.next;
+            const waiting = dequeueWaiter(&self.read_queue).?;
             waiting.state = .Ready;
             scheduler.unblockProcess(waiting);
         }
 
         if (self.read_queue == null and self.write_queue != null) {
-            const waiting = self.write_queue.?;
-            self.write_queue = waiting.next;
+            const waiting = dequeueWaiter(&self.write_queue).?;
             waiting.state = .Ready;
             scheduler.unblockProcess(waiting);
         }
@@ -349,19 +318,7 @@ pub const ConditionVariable = struct {
 
         if (process.getEffectiveCurrent()) |current| {
             current.state = .Blocked;
-
-            if (self.wait_queue == null) {
-                self.wait_queue = current;
-                current.next = null;
-            } else {
-                var tail = self.wait_queue;
-                while (tail.?.next != null) {
-                    tail = tail.?.next;
-                }
-                tail.?.next = current;
-                current.next = null;
-            }
-
+            enqueueWaiter(&self.wait_queue, current);
             scheduler.blockProcess(current);
             mutex.unlock();
             self.spin.release();
@@ -376,8 +333,7 @@ pub const ConditionVariable = struct {
         self.spin.acquire();
         defer self.spin.release();
 
-        if (self.wait_queue) |waiting| {
-            self.wait_queue = waiting.next;
+        if (dequeueWaiter(&self.wait_queue)) |waiting| {
             waiting.state = .Ready;
             scheduler.unblockProcess(waiting);
         }
@@ -388,8 +344,7 @@ pub const ConditionVariable = struct {
         defer self.spin.release();
 
         while (self.wait_queue != null) {
-            const waiting = self.wait_queue.?;
-            self.wait_queue = waiting.next;
+            const waiting = dequeueWaiter(&self.wait_queue).?;
             waiting.state = .Ready;
             scheduler.unblockProcess(waiting);
         }

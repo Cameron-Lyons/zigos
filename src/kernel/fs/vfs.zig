@@ -1,5 +1,6 @@
 const std = @import("std");
 const memory = @import("../memory/memory.zig");
+const readiness = @import("../process/syscall/readiness.zig");
 const error_handler = @import("../utils/error.zig");
 
 pub const VFSError = error{
@@ -148,6 +149,9 @@ pub const O_EXCL: u32 = 0x0080;
 pub const O_TRUNC: u32 = 0x0200;
 pub const O_APPEND: u32 = 0x0400;
 pub const O_NONBLOCK: u32 = 0x0800;
+
+const POLLIN: u16 = 0x001;
+const POLLOUT: u16 = 0x004;
 
 pub const SEEK_SET: u32 = 0;
 pub const SEEK_CUR: u32 = 1;
@@ -400,6 +404,7 @@ pub fn close(fd: u32) VFSError!void {
     }
     memory.kfree(@as([*]u8, @ptrCast(file_desc)));
     freeFd(fd);
+    readiness.notifyAll();
 }
 
 pub fn read(fd: u32, buffer: []u8) VFSError!usize {
@@ -497,6 +502,16 @@ pub fn getFileFlags(fd: u32) VFSError!u32 {
     if (fd_table[fd]) |file_desc| {
         return file_desc.flags;
     }
+    return VFSError.InvalidOperation;
+}
+
+pub fn pollFd(fd: u32, requested_events: u16) VFSError!u16 {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+
+    if (fd_table[fd]) |file_desc| {
+        return pollDescriptor(file_desc, requested_events);
+    }
+
     return VFSError.InvalidOperation;
 }
 
@@ -792,6 +807,33 @@ pub fn fchown(fd: u32, uid: u32, gid: u32) VFSError!void {
 const PIPE_BUF_SIZE = 4096;
 const PIPE_BUF_MASK = PIPE_BUF_SIZE - 1;
 
+fn pollDescriptor(file_desc: *const FileDescriptor, requested_events: u16) u16 {
+    var ready: u16 = 0;
+
+    if (file_desc.vnode.file_type == .Pipe) {
+        const pipe: *const PipeData = @ptrCast(@alignCast(file_desc.vnode.private_data orelse return 0));
+
+        if ((requested_events & POLLIN) != 0 and (pipe.count > 0 or pipe.writers == 0)) {
+            ready |= POLLIN;
+        }
+
+        if ((requested_events & POLLOUT) != 0 and pipe.readers != 0 and pipe.count < PIPE_BUF_SIZE) {
+            ready |= POLLOUT;
+        }
+
+        return ready;
+    }
+
+    const access_mode = file_desc.flags & 0x3;
+    if ((requested_events & POLLIN) != 0 and (access_mode == O_RDONLY or access_mode == O_RDWR)) {
+        ready |= POLLIN;
+    }
+    if ((requested_events & POLLOUT) != 0 and (access_mode == O_WRONLY or access_mode == O_RDWR)) {
+        ready |= POLLOUT;
+    }
+    return ready;
+}
+
 const PipeData = struct {
     buffer: [PIPE_BUF_SIZE]u8,
     read_pos: usize,
@@ -815,6 +857,7 @@ fn pipeRead(vnode: *VNode, buf: []u8, _: u64) VFSError!usize {
         pipe.read_pos = (pipe.read_pos + 1) & PIPE_BUF_MASK;
     }
     pipe.count -= to_read;
+    readiness.notifyAll();
     return to_read;
 }
 
@@ -831,13 +874,18 @@ fn pipeWrite(vnode: *VNode, buf: []const u8, _: u64) VFSError!usize {
         pipe.write_pos = (pipe.write_pos + 1) & PIPE_BUF_MASK;
     }
     pipe.count += to_write;
+    readiness.notifyAll();
     return to_write;
 }
 
 fn pipeNoOp(_: *VNode, _: u32) VFSError!void {}
 fn pipeClose(_: *VNode) VFSError!void {}
-fn pipeSeek(_: *VNode, _: i64, _: u32) VFSError!u64 { return VFSError.InvalidOperation; }
-fn pipeIoctl(_: *VNode, _: u32, _: usize) VFSError!i32 { return VFSError.InvalidOperation; }
+fn pipeSeek(_: *VNode, _: i64, _: u32) VFSError!u64 {
+    return VFSError.InvalidOperation;
+}
+fn pipeIoctl(_: *VNode, _: u32, _: usize) VFSError!i32 {
+    return VFSError.InvalidOperation;
+}
 fn pipeStat(vnode: *VNode, stat_buf: *FileStat) VFSError!void {
     const pipe: *PipeData = @ptrCast(@alignCast(vnode.private_data orelse return VFSError.InvalidOperation));
     stat_buf.* = FileStat{
@@ -854,10 +902,18 @@ fn pipeStat(vnode: *VNode, stat_buf: *FileStat) VFSError!void {
         .ctime = 0,
     };
 }
-fn pipeReaddir(_: *VNode, _: *DirEntry, _: u64) VFSError!bool { return VFSError.InvalidOperation; }
-fn pipeTruncate(_: *VNode, _: u64) VFSError!void { return VFSError.InvalidOperation; }
-fn pipeChmod(_: *VNode, _: FileMode) VFSError!void { return VFSError.InvalidOperation; }
-fn pipeChown(_: *VNode, _: u32, _: u32) VFSError!void { return VFSError.InvalidOperation; }
+fn pipeReaddir(_: *VNode, _: *DirEntry, _: u64) VFSError!bool {
+    return VFSError.InvalidOperation;
+}
+fn pipeTruncate(_: *VNode, _: u64) VFSError!void {
+    return VFSError.InvalidOperation;
+}
+fn pipeChmod(_: *VNode, _: FileMode) VFSError!void {
+    return VFSError.InvalidOperation;
+}
+fn pipeChown(_: *VNode, _: u32, _: u32) VFSError!void {
+    return VFSError.InvalidOperation;
+}
 
 const pipe_ops = FileOps{
     .read = pipeRead,
