@@ -202,7 +202,7 @@ pub fn sys_connect(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, s
 
         sock.remote_ipv6 = ipv6.IPv6Address{ .octets = addr.addr };
         sock.remote_port = @byteSwap(addr.port);
-        sock.state = .CONNECTED;
+        sock.setState(.CONNECTED);
         return 0;
     }
 

@@ -320,6 +320,14 @@ pub fn switch_process(old: *Context, new: *Context) void {
     context_switch(old, new);
 }
 
+fn markScheduledProcesses(old_proc: *Process, new_proc: *Process) void {
+    if (old_proc != new_proc and old_proc.state == .Running) {
+        old_proc.state = .Ready;
+    }
+
+    new_proc.state = .Running;
+}
+
 pub fn yield() void {
     const cpu_id = smp.getCurrentCPU();
     smp.scheduler_lock.acquire();
@@ -339,8 +347,7 @@ pub fn yield() void {
         if (cpu_idx == 0 or !smp.isSMPEnabled()) {
             current_process = new;
         }
-        old.state = .Ready;
-        new.state = .Running;
+        markScheduledProcesses(old, new);
         smp.scheduler_lock.release();
         switch_process(&old.context, &new.context);
     } else {
@@ -387,7 +394,9 @@ pub fn getSystemTime() u64 {
 
 pub export fn switchToProcess(proc: *Process) void {
     if (getEffectiveCurrent()) |old_proc| {
-        old_proc.state = .Ready;
+        markScheduledProcesses(old_proc, proc);
+    } else {
+        proc.state = .Running;
     }
 
     const cpu_id = smp.getCurrentCPU();
@@ -396,7 +405,6 @@ pub export fn switchToProcess(proc: *Process) void {
     if (cpu_idx == 0 or !smp.isSMPEnabled()) {
         current_process = proc;
     }
-    proc.state = .Running;
 
     if (proc.page_directory) |pd| {
         paging.switchPageDirectory(pd);

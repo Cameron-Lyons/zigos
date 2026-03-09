@@ -1,7 +1,6 @@
 const std = @import("std");
 const abi = @import("abi.zig");
 const syscall_time = @import("time.zig");
-const process_mod = @import("../process.zig");
 const protection = @import("../../memory/protection.zig");
 const timer = @import("../../timer/timer.zig");
 const vfs = @import("../../fs/vfs.zig");
@@ -196,7 +195,9 @@ pub fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfd
         const elapsed = timer.getTicks() - start_ticks;
         if (timeout_ms >= 0 and elapsed >= timeout_ticks) break;
 
-        process_mod.yield();
+        if (!waitForNextReadinessCheck(start_ticks, timeout_ticks, timeout_ms < 0)) {
+            break;
+        }
         count = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds);
     }
 
@@ -237,7 +238,9 @@ pub fn sys_poll(fds_addr: usize, nfds: u32, timeout: i32) i32 {
         const elapsed = timer.getTicks() - start_ticks;
         if (timeout >= 0 and elapsed >= timeout_ticks) break;
 
-        process_mod.yield();
+        if (!waitForNextReadinessCheck(start_ticks, timeout_ticks, timeout < 0)) {
+            break;
+        }
         count = pollCheckFds(kernel_fds[0..nfds], nfds);
     }
 
@@ -323,8 +326,6 @@ pub fn sys_epoll_ctl(epfd: i32, op: u32, fd: i32, event_addr: usize) i32 {
 }
 
 pub fn sys_epoll_wait(epfd: i32, events_addr: usize, maxevents: i32, timeout: i32) i32 {
-    _ = timeout;
-
     const idx = epfd - EPOLL_BASE;
     if (idx < 0 or idx >= 64) return abi.EBADF;
     const inst = &epoll_instances[@intCast(idx)];
@@ -334,28 +335,18 @@ pub fn sys_epoll_wait(epfd: i32, events_addr: usize, maxevents: i32, timeout: i3
     const max: usize = @intCast(maxevents);
     if (!protection.verifyUserPointer(events_addr, max * @sizeOf(EpollEvent))) return abi.EINVAL;
 
-    var count: usize = 0;
     var events: [64]EpollEvent = undefined;
 
-    for (inst.entries) |maybe_entry| {
-        if (maybe_entry) |entry| {
-            if (count >= max) break;
-            var ready: u32 = 0;
+    var count = collectEpollEvents(inst, max, &events);
+    if (timeout != 0 and count == 0) {
+        const start_ticks = timer.getTicks();
+        const timeout_ticks: u64 = if (timeout < 0) std.math.maxInt(u64) else @as(u64, @intCast(timeout)) / 10;
 
-            if (entry.fd >= abi.FD_OFFSET) {
-                const vfs_fd: u32 = @intCast(entry.fd - abi.FD_OFFSET);
-                if (vfs.getFileFlags(vfs_fd)) |_| {
-                    if (entry.events & abi.EPOLLIN != 0) ready |= abi.EPOLLIN;
-                    if (entry.events & abi.EPOLLOUT != 0) ready |= abi.EPOLLOUT;
-                } else |_| {
-                    ready |= abi.EPOLLERR;
-                }
+        while (count == 0) {
+            if (!waitForNextReadinessCheck(start_ticks, timeout_ticks, timeout < 0)) {
+                break;
             }
-
-            if (ready != 0) {
-                events[count] = EpollEvent{ .events = ready, .data = entry.data };
-                count += 1;
-            }
+            count = collectEpollEvents(inst, max, &events);
         }
     }
 
@@ -530,6 +521,43 @@ fn resetInotifyInstance(inst: *InotifyInstance) void {
         watch.in_use = false;
         watch.wd = -1;
     }
+}
+
+fn waitForNextReadinessCheck(start_ticks: u64, timeout_ticks: u64, infinite: bool) bool {
+    if (!infinite and timer.getTicks() - start_ticks >= timeout_ticks) {
+        return false;
+    }
+
+    timer.sleepCurrentTicks(1);
+    return true;
+}
+
+fn collectEpollEvents(inst: *const EpollInstance, max: usize, events: *[64]EpollEvent) usize {
+    var count: usize = 0;
+
+    for (inst.entries) |maybe_entry| {
+        if (maybe_entry) |entry| {
+            if (count >= max) break;
+            var ready: u32 = 0;
+
+            if (entry.fd >= abi.FD_OFFSET) {
+                const vfs_fd: u32 = @intCast(entry.fd - abi.FD_OFFSET);
+                if (vfs.getFileFlags(vfs_fd)) |_| {
+                    if (entry.events & abi.EPOLLIN != 0) ready |= abi.EPOLLIN;
+                    if (entry.events & abi.EPOLLOUT != 0) ready |= abi.EPOLLOUT;
+                } else |_| {
+                    ready |= abi.EPOLLERR;
+                }
+            }
+
+            if (ready != 0) {
+                events[count] = EpollEvent{ .events = ready, .data = entry.data };
+                count += 1;
+            }
+        }
+    }
+
+    return count;
 }
 
 fn selectCheckFds(nfds: u32, readfds: *const FdSet, writefds: *const FdSet, exceptfds: *const FdSet, result_readfds: *FdSet, result_writefds: *FdSet, result_exceptfds: *FdSet) i32 {
