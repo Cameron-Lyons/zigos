@@ -1,10 +1,5 @@
-mkdir -p build
+#!/usr/bin/env bash
 
-echo "Building kernel..."
-zig build kernel
+set -euo pipefail
 
-echo "Copying kernel..."
-cp zig-out/bin/kernel.elf build/kernel.elf
-
-echo "Running OS in QEMU..."
-qemu-system-x86_64 -kernel build/kernel.elf -m 512M -no-reboot -no-shutdown -device e1000,netdev=net0 -netdev user,id=net0
+zig build run
