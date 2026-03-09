@@ -13,471 +13,453 @@ const credentials = @import("credentials.zig");
 const signal = @import("signal.zig");
 const socket = @import("../net/socket.zig");
 const ipc = @import("ipc.zig");
+const abi = @import("syscall/abi.zig");
+const syscall_at = @import("syscall/at.zig");
+const syscall_cwd = @import("syscall/cwd.zig");
+const errno = @import("syscall/errno.zig");
+const syscall_event = @import("syscall/event.zig");
+const syscall_fd = @import("syscall/fd.zig");
+const syscall_fs = @import("syscall/fs.zig");
+const syscall_net = @import("syscall/net.zig");
+const syscall_process = @import("syscall/process_ops.zig");
+const syscall_signal = @import("syscall/signal.zig");
+const syscall_system = @import("syscall/system.zig");
+const syscall_time = @import("syscall/time.zig");
 
-pub const SYS_EXIT = 1;
-pub const SYS_WRITE = 2;
-pub const SYS_READ = 3;
-pub const SYS_OPEN = 4;
-pub const SYS_CLOSE = 5;
-pub const SYS_GETPID = 6;
-pub const SYS_YIELD = 7;
-pub const SYS_FORK = 8;
-pub const SYS_EXECVE = 9;
-pub const SYS_WAIT4 = 10;
-pub const SYS_BRK = 11;
-pub const SYS_MMAP = 12;
-pub const SYS_MKDIR = 13;
-pub const SYS_RMDIR = 14;
-pub const SYS_UNLINK = 15;
-pub const SYS_RENAME = 16;
-pub const SYS_LSEEK = 17;
-pub const SYS_STAT = 18;
-pub const SYS_FSTAT = 19;
-pub const SYS_GETUID = 20;
-pub const SYS_GETGID = 21;
-pub const SYS_SETUID = 22;
-pub const SYS_SETGID = 23;
-pub const SYS_CHOWN = 24;
-pub const SYS_PIPE = 25;
-pub const SYS_DUP2 = 26;
-pub const SYS_SOCKET = 27;
-pub const SYS_BIND = 28;
-pub const SYS_CONNECT = 29;
-pub const SYS_LISTEN = 30;
-pub const SYS_ACCEPT = 31;
-pub const SYS_SEND = 32;
-pub const SYS_RECV = 33;
-pub const SYS_SHUTDOWN = 34;
-pub const SYS_KILL = 35;
-pub const SYS_SIGACTION = 36;
-pub const SYS_GETCWD = 37;
-pub const SYS_CHDIR = 38;
-pub const SYS_MSGGET = 39;
-pub const SYS_MSGSND = 40;
-pub const SYS_MSGRCV = 41;
-pub const SYS_MUNMAP = 42;
-pub const SYS_IOCTL = 43;
-pub const SYS_GETPPID = 44;
-pub const SYS_GETPGID = 45;
-pub const SYS_SETPGID = 46;
-pub const SYS_SETSID = 47;
-pub const SYS_NANOSLEEP = 48;
-pub const SYS_CLOCK_GETTIME = 49;
-pub const SYS_ACCESS = 50;
-pub const SYS_CHMOD = 51;
-pub const SYS_FCHMOD = 52;
-pub const SYS_FTRUNCATE = 53;
-pub const SYS_GETDENTS = 54;
-pub const SYS_SYMLINK = 55;
-pub const SYS_LINK = 56;
-pub const SYS_READLINK = 57;
-pub const SYS_SIGPROCMASK = 58;
-pub const SYS_SIGPENDING = 59;
-pub const SYS_SIGSUSPEND = 60;
-pub const SYS_DUP = 61;
-pub const SYS_FCNTL = 62;
-pub const SYS_SELECT = 63;
-pub const SYS_UMASK = 64;
-pub const SYS_UNAME = 65;
-pub const SYS_TRUNCATE = 66;
-pub const SYS_PREAD = 67;
-pub const SYS_PWRITE = 68;
-pub const SYS_SENDTO = 69;
-pub const SYS_RECVFROM = 70;
-pub const SYS_GETSOCKNAME = 71;
-pub const SYS_GETPEERNAME = 72;
-pub const SYS_FCHOWN = 73;
-pub const SYS_FSYNC = 74;
-pub const SYS_FDATASYNC = 75;
-pub const SYS_POLL = 76;
-pub const SYS_LSTAT = 77;
-pub const SYS_GETSOCKOPT = 78;
-pub const SYS_SETSOCKOPT = 79;
-pub const SYS_READV = 80;
-pub const SYS_WRITEV = 81;
-pub const SYS_GETEUID = 82;
-pub const SYS_GETEGID = 83;
-pub const SYS_ISATTY = 84;
-pub const SYS_STATFS = 85;
-pub const SYS_FSTATFS = 86;
-pub const SYS_GETHOSTNAME = 87;
-pub const SYS_SETHOSTNAME = 88;
-pub const SYS_OPENAT = 89;
-pub const SYS_MKDIRAT = 90;
-pub const SYS_UNLINKAT = 91;
-pub const SYS_LINKAT = 92;
-pub const SYS_FCHMODAT = 93;
-pub const SYS_FCHOWNAT = 94;
-pub const SYS_RENAMEAT = 95;
-pub const SYS_GETGROUPS = 96;
-pub const SYS_SETGROUPS = 97;
-pub const SYS_GETITIMER = 98;
-pub const SYS_SETITIMER = 99;
-pub const SYS_MKFIFO = 100;
-pub const SYS_EPOLL_CREATE = 101;
-pub const SYS_EPOLL_CTL = 102;
-pub const SYS_EPOLL_WAIT = 103;
-pub const SYS_TIMERFD_CREATE = 104;
-pub const SYS_TIMERFD_SETTIME = 105;
-pub const SYS_TIMERFD_GETTIME = 106;
-pub const SYS_SHMGET = 107;
-pub const SYS_SHMAT = 108;
-pub const SYS_SHMDT = 109;
-pub const SYS_SHMCTL = 110;
-pub const SYS_SEMGET = 111;
-pub const SYS_SEMOP = 112;
-pub const SYS_SEMCTL = 113;
-pub const SYS_TIMES = 114;
-pub const SYS_GETRUSAGE = 115;
-pub const SYS_MKNOD = 116;
-pub const SYS_GETRANDOM = 117;
-pub const SYS_PIPE2 = 118;
-pub const SYS_DUP3 = 119;
-pub const SYS_ACCEPT4 = 120;
-pub const SYS_EVENTFD = 121;
-pub const SYS_EVENTFD2 = 122;
-pub const SYS_PRCTL = 123;
-pub const SYS_SIGNALFD = 124;
-pub const SYS_SIGNALFD4 = 125;
-pub const SYS_PPOLL = 126;
-pub const SYS_PSELECT6 = 127;
-pub const SYS_FACCESSAT = 128;
-pub const SYS_FACCESSAT2 = 129;
-pub const SYS_STATX = 130;
-pub const SYS_MEMBARRIER = 131;
-pub const SYS_COPY_FILE_RANGE = 132;
-pub const SYS_FADVISE64 = 133;
-pub const SYS_READAHEAD = 134;
-pub const SYS_SYNC_FILE_RANGE = 135;
-pub const SYS_SYNCFS = 136;
-pub const SYS_GETPRIORITY = 137;
-pub const SYS_SETPRIORITY = 138;
-pub const SYS_SCHED_GETAFFINITY = 139;
-pub const SYS_SCHED_SETAFFINITY = 140;
-pub const SYS_UTIMENSAT = 141;
-pub const SYS_FUTIMESAT = 142;
-pub const SYS_FSTATAT = 143;
-pub const SYS_SYMLINKAT = 144;
-pub const SYS_READLINKAT = 145;
-pub const SYS_WAITID = 146;
-pub const SYS_SET_TID_ADDRESS = 147;
-pub const SYS_GET_ROBUST_LIST = 148;
-pub const SYS_SET_ROBUST_LIST = 149;
-pub const SYS_TGKILL = 150;
-pub const SYS_TKILL = 151;
-pub const SYS_INOTIFY_INIT = 152;
-pub const SYS_INOTIFY_INIT1 = 153;
-pub const SYS_INOTIFY_ADD_WATCH = 154;
-pub const SYS_INOTIFY_RM_WATCH = 155;
-pub const SYS_MLOCK = 156;
-pub const SYS_MUNLOCK = 157;
-pub const SYS_MLOCKALL = 158;
-pub const SYS_MUNLOCKALL = 159;
-pub const SYS_MADVISE = 160;
-pub const SYS_MINCORE = 161;
-pub const SYS_GETRLIMIT = 162;
-pub const SYS_SETRLIMIT = 163;
-pub const SYS_PRLIMIT64 = 164;
-pub const SYS_MPROTECT = 165;
-pub const SYS_SOCKETPAIR = 166;
-pub const SYS_SYSINFO = 167;
-pub const SYS_CLOCK_SETTIME = 168;
-pub const SYS_CLOCK_GETRES = 169;
-pub const SYS_CLOCK_NANOSLEEP = 170;
-pub const SYS_TIMER_CREATE = 171;
-pub const SYS_TIMER_DELETE = 172;
-pub const SYS_TIMER_SETTIME = 173;
-pub const SYS_TIMER_GETTIME = 174;
-pub const SYS_TIMER_GETOVERRUN = 175;
-pub const SYS_CHROOT = 176;
-pub const SYS_MOUNT = 177;
-pub const SYS_UMOUNT2 = 178;
-pub const SYS_SWAPON = 179;
-pub const SYS_SWAPOFF = 180;
-pub const SYS_REBOOT = 181;
+pub const SYS_EXIT = abi.SYS_EXIT;
+pub const SYS_WRITE = abi.SYS_WRITE;
+pub const SYS_READ = abi.SYS_READ;
+pub const SYS_OPEN = abi.SYS_OPEN;
+pub const SYS_CLOSE = abi.SYS_CLOSE;
+pub const SYS_GETPID = abi.SYS_GETPID;
+pub const SYS_YIELD = abi.SYS_YIELD;
+pub const SYS_FORK = abi.SYS_FORK;
+pub const SYS_EXECVE = abi.SYS_EXECVE;
+pub const SYS_WAIT4 = abi.SYS_WAIT4;
+pub const SYS_BRK = abi.SYS_BRK;
+pub const SYS_MMAP = abi.SYS_MMAP;
+pub const SYS_MKDIR = abi.SYS_MKDIR;
+pub const SYS_RMDIR = abi.SYS_RMDIR;
+pub const SYS_UNLINK = abi.SYS_UNLINK;
+pub const SYS_RENAME = abi.SYS_RENAME;
+pub const SYS_LSEEK = abi.SYS_LSEEK;
+pub const SYS_STAT = abi.SYS_STAT;
+pub const SYS_FSTAT = abi.SYS_FSTAT;
+pub const SYS_GETUID = abi.SYS_GETUID;
+pub const SYS_GETGID = abi.SYS_GETGID;
+pub const SYS_SETUID = abi.SYS_SETUID;
+pub const SYS_SETGID = abi.SYS_SETGID;
+pub const SYS_CHOWN = abi.SYS_CHOWN;
+pub const SYS_PIPE = abi.SYS_PIPE;
+pub const SYS_DUP2 = abi.SYS_DUP2;
+pub const SYS_SOCKET = abi.SYS_SOCKET;
+pub const SYS_BIND = abi.SYS_BIND;
+pub const SYS_CONNECT = abi.SYS_CONNECT;
+pub const SYS_LISTEN = abi.SYS_LISTEN;
+pub const SYS_ACCEPT = abi.SYS_ACCEPT;
+pub const SYS_SEND = abi.SYS_SEND;
+pub const SYS_RECV = abi.SYS_RECV;
+pub const SYS_SHUTDOWN = abi.SYS_SHUTDOWN;
+pub const SYS_KILL = abi.SYS_KILL;
+pub const SYS_SIGACTION = abi.SYS_SIGACTION;
+pub const SYS_GETCWD = abi.SYS_GETCWD;
+pub const SYS_CHDIR = abi.SYS_CHDIR;
+pub const SYS_MSGGET = abi.SYS_MSGGET;
+pub const SYS_MSGSND = abi.SYS_MSGSND;
+pub const SYS_MSGRCV = abi.SYS_MSGRCV;
+pub const SYS_MUNMAP = abi.SYS_MUNMAP;
+pub const SYS_IOCTL = abi.SYS_IOCTL;
+pub const SYS_GETPPID = abi.SYS_GETPPID;
+pub const SYS_GETPGID = abi.SYS_GETPGID;
+pub const SYS_SETPGID = abi.SYS_SETPGID;
+pub const SYS_SETSID = abi.SYS_SETSID;
+pub const SYS_NANOSLEEP = abi.SYS_NANOSLEEP;
+pub const SYS_CLOCK_GETTIME = abi.SYS_CLOCK_GETTIME;
+pub const SYS_ACCESS = abi.SYS_ACCESS;
+pub const SYS_CHMOD = abi.SYS_CHMOD;
+pub const SYS_FCHMOD = abi.SYS_FCHMOD;
+pub const SYS_FTRUNCATE = abi.SYS_FTRUNCATE;
+pub const SYS_GETDENTS = abi.SYS_GETDENTS;
+pub const SYS_SYMLINK = abi.SYS_SYMLINK;
+pub const SYS_LINK = abi.SYS_LINK;
+pub const SYS_READLINK = abi.SYS_READLINK;
+pub const SYS_SIGPROCMASK = abi.SYS_SIGPROCMASK;
+pub const SYS_SIGPENDING = abi.SYS_SIGPENDING;
+pub const SYS_SIGSUSPEND = abi.SYS_SIGSUSPEND;
+pub const SYS_DUP = abi.SYS_DUP;
+pub const SYS_FCNTL = abi.SYS_FCNTL;
+pub const SYS_SELECT = abi.SYS_SELECT;
+pub const SYS_UMASK = abi.SYS_UMASK;
+pub const SYS_UNAME = abi.SYS_UNAME;
+pub const SYS_TRUNCATE = abi.SYS_TRUNCATE;
+pub const SYS_PREAD = abi.SYS_PREAD;
+pub const SYS_PWRITE = abi.SYS_PWRITE;
+pub const SYS_SENDTO = abi.SYS_SENDTO;
+pub const SYS_RECVFROM = abi.SYS_RECVFROM;
+pub const SYS_GETSOCKNAME = abi.SYS_GETSOCKNAME;
+pub const SYS_GETPEERNAME = abi.SYS_GETPEERNAME;
+pub const SYS_FCHOWN = abi.SYS_FCHOWN;
+pub const SYS_FSYNC = abi.SYS_FSYNC;
+pub const SYS_FDATASYNC = abi.SYS_FDATASYNC;
+pub const SYS_POLL = abi.SYS_POLL;
+pub const SYS_LSTAT = abi.SYS_LSTAT;
+pub const SYS_GETSOCKOPT = abi.SYS_GETSOCKOPT;
+pub const SYS_SETSOCKOPT = abi.SYS_SETSOCKOPT;
+pub const SYS_READV = abi.SYS_READV;
+pub const SYS_WRITEV = abi.SYS_WRITEV;
+pub const SYS_GETEUID = abi.SYS_GETEUID;
+pub const SYS_GETEGID = abi.SYS_GETEGID;
+pub const SYS_ISATTY = abi.SYS_ISATTY;
+pub const SYS_STATFS = abi.SYS_STATFS;
+pub const SYS_FSTATFS = abi.SYS_FSTATFS;
+pub const SYS_GETHOSTNAME = abi.SYS_GETHOSTNAME;
+pub const SYS_SETHOSTNAME = abi.SYS_SETHOSTNAME;
+pub const SYS_OPENAT = abi.SYS_OPENAT;
+pub const SYS_MKDIRAT = abi.SYS_MKDIRAT;
+pub const SYS_UNLINKAT = abi.SYS_UNLINKAT;
+pub const SYS_LINKAT = abi.SYS_LINKAT;
+pub const SYS_FCHMODAT = abi.SYS_FCHMODAT;
+pub const SYS_FCHOWNAT = abi.SYS_FCHOWNAT;
+pub const SYS_RENAMEAT = abi.SYS_RENAMEAT;
+pub const SYS_GETGROUPS = abi.SYS_GETGROUPS;
+pub const SYS_SETGROUPS = abi.SYS_SETGROUPS;
+pub const SYS_GETITIMER = abi.SYS_GETITIMER;
+pub const SYS_SETITIMER = abi.SYS_SETITIMER;
+pub const SYS_MKFIFO = abi.SYS_MKFIFO;
+pub const SYS_EPOLL_CREATE = abi.SYS_EPOLL_CREATE;
+pub const SYS_EPOLL_CTL = abi.SYS_EPOLL_CTL;
+pub const SYS_EPOLL_WAIT = abi.SYS_EPOLL_WAIT;
+pub const SYS_TIMERFD_CREATE = abi.SYS_TIMERFD_CREATE;
+pub const SYS_TIMERFD_SETTIME = abi.SYS_TIMERFD_SETTIME;
+pub const SYS_TIMERFD_GETTIME = abi.SYS_TIMERFD_GETTIME;
+pub const SYS_SHMGET = abi.SYS_SHMGET;
+pub const SYS_SHMAT = abi.SYS_SHMAT;
+pub const SYS_SHMDT = abi.SYS_SHMDT;
+pub const SYS_SHMCTL = abi.SYS_SHMCTL;
+pub const SYS_SEMGET = abi.SYS_SEMGET;
+pub const SYS_SEMOP = abi.SYS_SEMOP;
+pub const SYS_SEMCTL = abi.SYS_SEMCTL;
+pub const SYS_TIMES = abi.SYS_TIMES;
+pub const SYS_GETRUSAGE = abi.SYS_GETRUSAGE;
+pub const SYS_MKNOD = abi.SYS_MKNOD;
+pub const SYS_GETRANDOM = abi.SYS_GETRANDOM;
+pub const SYS_PIPE2 = abi.SYS_PIPE2;
+pub const SYS_DUP3 = abi.SYS_DUP3;
+pub const SYS_ACCEPT4 = abi.SYS_ACCEPT4;
+pub const SYS_EVENTFD = abi.SYS_EVENTFD;
+pub const SYS_EVENTFD2 = abi.SYS_EVENTFD2;
+pub const SYS_PRCTL = abi.SYS_PRCTL;
+pub const SYS_SIGNALFD = abi.SYS_SIGNALFD;
+pub const SYS_SIGNALFD4 = abi.SYS_SIGNALFD4;
+pub const SYS_PPOLL = abi.SYS_PPOLL;
+pub const SYS_PSELECT6 = abi.SYS_PSELECT6;
+pub const SYS_FACCESSAT = abi.SYS_FACCESSAT;
+pub const SYS_FACCESSAT2 = abi.SYS_FACCESSAT2;
+pub const SYS_STATX = abi.SYS_STATX;
+pub const SYS_MEMBARRIER = abi.SYS_MEMBARRIER;
+pub const SYS_COPY_FILE_RANGE = abi.SYS_COPY_FILE_RANGE;
+pub const SYS_FADVISE64 = abi.SYS_FADVISE64;
+pub const SYS_READAHEAD = abi.SYS_READAHEAD;
+pub const SYS_SYNC_FILE_RANGE = abi.SYS_SYNC_FILE_RANGE;
+pub const SYS_SYNCFS = abi.SYS_SYNCFS;
+pub const SYS_GETPRIORITY = abi.SYS_GETPRIORITY;
+pub const SYS_SETPRIORITY = abi.SYS_SETPRIORITY;
+pub const SYS_SCHED_GETAFFINITY = abi.SYS_SCHED_GETAFFINITY;
+pub const SYS_SCHED_SETAFFINITY = abi.SYS_SCHED_SETAFFINITY;
+pub const SYS_UTIMENSAT = abi.SYS_UTIMENSAT;
+pub const SYS_FUTIMESAT = abi.SYS_FUTIMESAT;
+pub const SYS_FSTATAT = abi.SYS_FSTATAT;
+pub const SYS_SYMLINKAT = abi.SYS_SYMLINKAT;
+pub const SYS_READLINKAT = abi.SYS_READLINKAT;
+pub const SYS_WAITID = abi.SYS_WAITID;
+pub const SYS_SET_TID_ADDRESS = abi.SYS_SET_TID_ADDRESS;
+pub const SYS_GET_ROBUST_LIST = abi.SYS_GET_ROBUST_LIST;
+pub const SYS_SET_ROBUST_LIST = abi.SYS_SET_ROBUST_LIST;
+pub const SYS_TGKILL = abi.SYS_TGKILL;
+pub const SYS_TKILL = abi.SYS_TKILL;
+pub const SYS_INOTIFY_INIT = abi.SYS_INOTIFY_INIT;
+pub const SYS_INOTIFY_INIT1 = abi.SYS_INOTIFY_INIT1;
+pub const SYS_INOTIFY_ADD_WATCH = abi.SYS_INOTIFY_ADD_WATCH;
+pub const SYS_INOTIFY_RM_WATCH = abi.SYS_INOTIFY_RM_WATCH;
+pub const SYS_MLOCK = abi.SYS_MLOCK;
+pub const SYS_MUNLOCK = abi.SYS_MUNLOCK;
+pub const SYS_MLOCKALL = abi.SYS_MLOCKALL;
+pub const SYS_MUNLOCKALL = abi.SYS_MUNLOCKALL;
+pub const SYS_MADVISE = abi.SYS_MADVISE;
+pub const SYS_MINCORE = abi.SYS_MINCORE;
+pub const SYS_GETRLIMIT = abi.SYS_GETRLIMIT;
+pub const SYS_SETRLIMIT = abi.SYS_SETRLIMIT;
+pub const SYS_PRLIMIT64 = abi.SYS_PRLIMIT64;
+pub const SYS_MPROTECT = abi.SYS_MPROTECT;
+pub const SYS_SOCKETPAIR = abi.SYS_SOCKETPAIR;
+pub const SYS_SYSINFO = abi.SYS_SYSINFO;
+pub const SYS_CLOCK_SETTIME = abi.SYS_CLOCK_SETTIME;
+pub const SYS_CLOCK_GETRES = abi.SYS_CLOCK_GETRES;
+pub const SYS_CLOCK_NANOSLEEP = abi.SYS_CLOCK_NANOSLEEP;
+pub const SYS_TIMER_CREATE = abi.SYS_TIMER_CREATE;
+pub const SYS_TIMER_DELETE = abi.SYS_TIMER_DELETE;
+pub const SYS_TIMER_SETTIME = abi.SYS_TIMER_SETTIME;
+pub const SYS_TIMER_GETTIME = abi.SYS_TIMER_GETTIME;
+pub const SYS_TIMER_GETOVERRUN = abi.SYS_TIMER_GETOVERRUN;
+pub const SYS_CHROOT = abi.SYS_CHROOT;
+pub const SYS_MOUNT = abi.SYS_MOUNT;
+pub const SYS_UMOUNT2 = abi.SYS_UMOUNT2;
+pub const SYS_SWAPON = abi.SYS_SWAPON;
+pub const SYS_SWAPOFF = abi.SYS_SWAPOFF;
+pub const SYS_REBOOT = abi.SYS_REBOOT;
 
-pub const STDIN = 0;
-pub const STDOUT = 1;
-pub const STDERR = 2;
-const FD_OFFSET = 3;
+pub const STDIN = abi.STDIN;
+pub const STDOUT = abi.STDOUT;
+pub const STDERR = abi.STDERR;
+const FD_OFFSET = abi.FD_OFFSET;
 
-pub const EPERM = -1;
-pub const ENOENT = -2;
-pub const ESRCH = -3;
-pub const EINTR = -4;
-pub const EIO = -5;
-pub const E2BIG = -7;
-pub const EBADF = -9;
-pub const EAGAIN = -11;
-pub const EWOULDBLOCK = EAGAIN;
-pub const ENOMEM = -12;
-pub const EACCES = -13;
-pub const EFAULT = -14;
-pub const ENOTDIR = -20;
-pub const EINVAL = -22;
-pub const EBUSY = -16;
-pub const EEXIST = -17;
-pub const EISDIR = -21;
-pub const ENFILE = -23;
-pub const EMFILE = -24;
-pub const ENOSPC = -28;
-pub const EROFS = -30;
-pub const EPIPE = -32;
-pub const ENAMETOOLONG = -36;
-pub const ENOSYS = -38;
-pub const EOVERFLOW = -75;
-pub const ENODEV = -19;
-pub const EOPNOTSUPP = -95;
-pub const EAFNOSUPPORT = -97;
-pub const EADDRINUSE = -98;
-pub const EADDRNOTAVAIL = -99;
-pub const ENETDOWN = -100;
-pub const ENETUNREACH = -101;
-pub const ECONNABORTED = -103;
-pub const ECONNRESET = -104;
-pub const ENOBUFS = -105;
-pub const EISCONN = -106;
-pub const ENOTCONN = -107;
-pub const ETIMEDOUT = -110;
-pub const ECONNREFUSED = -111;
-pub const EHOSTUNREACH = -113;
-pub const ENXIO = -6;
-pub const ENOEXEC = -8;
-pub const EXDEV = -18;
-pub const ENOTTY = -25;
-pub const ETXTBSY = -26;
-pub const ELOOP = -40;
-pub const EMSGSIZE = -90;
-pub const ENOPROTOOPT = -92;
+pub const EPERM = abi.EPERM;
+pub const ENOENT = abi.ENOENT;
+pub const ESRCH = abi.ESRCH;
+pub const EINTR = abi.EINTR;
+pub const EIO = abi.EIO;
+pub const E2BIG = abi.E2BIG;
+pub const EBADF = abi.EBADF;
+pub const EAGAIN = abi.EAGAIN;
+pub const EWOULDBLOCK = abi.EWOULDBLOCK;
+pub const ENOMEM = abi.ENOMEM;
+pub const EACCES = abi.EACCES;
+pub const EFAULT = abi.EFAULT;
+pub const ENOTDIR = abi.ENOTDIR;
+pub const EINVAL = abi.EINVAL;
+pub const EBUSY = abi.EBUSY;
+pub const EEXIST = abi.EEXIST;
+pub const EISDIR = abi.EISDIR;
+pub const ENFILE = abi.ENFILE;
+pub const EMFILE = abi.EMFILE;
+pub const ENOSPC = abi.ENOSPC;
+pub const EROFS = abi.EROFS;
+pub const EPIPE = abi.EPIPE;
+pub const ENAMETOOLONG = abi.ENAMETOOLONG;
+pub const ENOSYS = abi.ENOSYS;
+pub const EOVERFLOW = abi.EOVERFLOW;
+pub const ENODEV = abi.ENODEV;
+pub const EOPNOTSUPP = abi.EOPNOTSUPP;
+pub const EAFNOSUPPORT = abi.EAFNOSUPPORT;
+pub const EADDRINUSE = abi.EADDRINUSE;
+pub const EADDRNOTAVAIL = abi.EADDRNOTAVAIL;
+pub const ENETDOWN = abi.ENETDOWN;
+pub const ENETUNREACH = abi.ENETUNREACH;
+pub const ECONNABORTED = abi.ECONNABORTED;
+pub const ECONNRESET = abi.ECONNRESET;
+pub const ENOBUFS = abi.ENOBUFS;
+pub const EISCONN = abi.EISCONN;
+pub const ENOTCONN = abi.ENOTCONN;
+pub const ETIMEDOUT = abi.ETIMEDOUT;
+pub const ECONNREFUSED = abi.ECONNREFUSED;
+pub const EHOSTUNREACH = abi.EHOSTUNREACH;
+pub const ENXIO = abi.ENXIO;
+pub const ENOEXEC = abi.ENOEXEC;
+pub const EXDEV = abi.EXDEV;
+pub const ENOTTY = abi.ENOTTY;
+pub const ETXTBSY = abi.ETXTBSY;
+pub const ELOOP = abi.ELOOP;
+pub const EMSGSIZE = abi.EMSGSIZE;
+pub const ENOPROTOOPT = abi.ENOPROTOOPT;
 
-pub const AT_FDCWD: i32 = -100;
-pub const AT_REMOVEDIR: u32 = 0x200;
+pub const AT_FDCWD = abi.AT_FDCWD;
+pub const AT_REMOVEDIR = abi.AT_REMOVEDIR;
 
-pub const ITIMER_REAL: u32 = 0;
-pub const ITIMER_VIRTUAL: u32 = 1;
-pub const ITIMER_PROF: u32 = 2;
+pub const ITIMER_REAL = abi.ITIMER_REAL;
+pub const ITIMER_VIRTUAL = abi.ITIMER_VIRTUAL;
+pub const ITIMER_PROF = abi.ITIMER_PROF;
 
-pub const EPOLL_CTL_ADD: u32 = 1;
-pub const EPOLL_CTL_DEL: u32 = 2;
-pub const EPOLL_CTL_MOD: u32 = 3;
+pub const EPOLL_CTL_ADD = abi.EPOLL_CTL_ADD;
+pub const EPOLL_CTL_DEL = abi.EPOLL_CTL_DEL;
+pub const EPOLL_CTL_MOD = abi.EPOLL_CTL_MOD;
 
-pub const EPOLLIN: u32 = 0x001;
-pub const EPOLLOUT: u32 = 0x004;
-pub const EPOLLERR: u32 = 0x008;
-pub const EPOLLHUP: u32 = 0x010;
-pub const EPOLLRDHUP: u32 = 0x2000;
-pub const EPOLLET: u32 = 0x80000000;
+pub const EPOLLIN = abi.EPOLLIN;
+pub const EPOLLOUT = abi.EPOLLOUT;
+pub const EPOLLERR = abi.EPOLLERR;
+pub const EPOLLHUP = abi.EPOLLHUP;
+pub const EPOLLRDHUP = abi.EPOLLRDHUP;
+pub const EPOLLET = abi.EPOLLET;
 
-pub const TFD_CLOEXEC: u32 = 0x80000;
-pub const TFD_NONBLOCK: u32 = 0x800;
+pub const TFD_CLOEXEC = abi.TFD_CLOEXEC;
+pub const TFD_NONBLOCK = abi.TFD_NONBLOCK;
 
-pub const IPC_CREAT: u32 = 0o1000;
-pub const IPC_EXCL: u32 = 0o2000;
-pub const IPC_NOWAIT: u32 = 0o4000;
-pub const IPC_RMID: u32 = 0;
-pub const IPC_SET: u32 = 1;
-pub const IPC_STAT: u32 = 2;
+pub const IPC_CREAT = abi.IPC_CREAT;
+pub const IPC_EXCL = abi.IPC_EXCL;
+pub const IPC_NOWAIT = abi.IPC_NOWAIT;
+pub const IPC_RMID = abi.IPC_RMID;
+pub const IPC_SET = abi.IPC_SET;
+pub const IPC_STAT = abi.IPC_STAT;
 
-pub const SHM_RDONLY: u32 = 0o10000;
-pub const SHM_RND: u32 = 0o20000;
+pub const SHM_RDONLY = abi.SHM_RDONLY;
+pub const SHM_RND = abi.SHM_RND;
 
-pub const GETVAL: u32 = 12;
-pub const SETVAL: u32 = 16;
-pub const GETALL: u32 = 13;
-pub const SETALL: u32 = 17;
+pub const GETVAL = abi.GETVAL;
+pub const SETVAL = abi.SETVAL;
+pub const GETALL = abi.GETALL;
+pub const SETALL = abi.SETALL;
 
-pub const F_GETLK: u32 = 5;
-pub const F_SETLK: u32 = 6;
-pub const F_SETLKW: u32 = 7;
+pub const F_GETLK = abi.F_GETLK;
+pub const F_SETLK = abi.F_SETLK;
+pub const F_SETLKW = abi.F_SETLKW;
 
-pub const F_RDLCK: i16 = 0;
-pub const F_WRLCK: i16 = 1;
-pub const F_UNLCK: i16 = 2;
+pub const F_RDLCK = abi.F_RDLCK;
+pub const F_WRLCK = abi.F_WRLCK;
+pub const F_UNLCK = abi.F_UNLCK;
 
-pub const S_IFMT: u32 = 0o170000;
-pub const S_IFREG: u32 = 0o100000;
-pub const S_IFDIR: u32 = 0o040000;
-pub const S_IFCHR: u32 = 0o020000;
-pub const S_IFBLK: u32 = 0o060000;
-pub const S_IFIFO: u32 = 0o010000;
-pub const S_IFLNK: u32 = 0o120000;
-pub const S_IFSOCK: u32 = 0o140000;
+pub const S_IFMT = abi.S_IFMT;
+pub const S_IFREG = abi.S_IFREG;
+pub const S_IFDIR = abi.S_IFDIR;
+pub const S_IFCHR = abi.S_IFCHR;
+pub const S_IFBLK = abi.S_IFBLK;
+pub const S_IFIFO = abi.S_IFIFO;
+pub const S_IFLNK = abi.S_IFLNK;
+pub const S_IFSOCK = abi.S_IFSOCK;
 
-pub const RUSAGE_SELF: i32 = 0;
-pub const RUSAGE_CHILDREN: i32 = -1;
+pub const RUSAGE_SELF = abi.RUSAGE_SELF;
+pub const RUSAGE_CHILDREN = abi.RUSAGE_CHILDREN;
 
-pub const EIDRM = -43;
-pub const ENOMSG = -42;
-pub const EDEADLK = -35;
-pub const ENOLCK = -37;
+pub const EIDRM = abi.EIDRM;
+pub const ENOMSG = abi.ENOMSG;
+pub const EDEADLK = abi.EDEADLK;
+pub const ENOLCK = abi.ENOLCK;
 
-pub const O_CLOEXEC: u32 = 0x80000;
+pub const O_CLOEXEC = abi.O_CLOEXEC;
 
-pub const GRND_NONBLOCK: u32 = 0x0001;
-pub const GRND_RANDOM: u32 = 0x0002;
+pub const GRND_NONBLOCK = abi.GRND_NONBLOCK;
+pub const GRND_RANDOM = abi.GRND_RANDOM;
 
-pub const EFD_SEMAPHORE: u32 = 0x00001;
-pub const EFD_CLOEXEC: u32 = 0x80000;
-pub const EFD_NONBLOCK: u32 = 0x00800;
+pub const EFD_SEMAPHORE = abi.EFD_SEMAPHORE;
+pub const EFD_CLOEXEC = abi.EFD_CLOEXEC;
+pub const EFD_NONBLOCK = abi.EFD_NONBLOCK;
 
-pub const SOCK_CLOEXEC: u32 = 0x80000;
-pub const SOCK_NONBLOCK: u32 = 0x800;
+pub const SOCK_CLOEXEC = abi.SOCK_CLOEXEC;
+pub const SOCK_NONBLOCK = abi.SOCK_NONBLOCK;
 
-pub const PR_SET_NAME: u32 = 15;
-pub const PR_GET_NAME: u32 = 16;
-pub const PR_SET_DUMPABLE: u32 = 4;
-pub const PR_GET_DUMPABLE: u32 = 3;
-pub const PR_SET_KEEPCAPS: u32 = 8;
-pub const PR_GET_KEEPCAPS: u32 = 7;
-pub const PR_SET_PDEATHSIG: u32 = 1;
-pub const PR_GET_PDEATHSIG: u32 = 2;
+pub const PR_SET_NAME = abi.PR_SET_NAME;
+pub const PR_GET_NAME = abi.PR_GET_NAME;
+pub const PR_SET_DUMPABLE = abi.PR_SET_DUMPABLE;
+pub const PR_GET_DUMPABLE = abi.PR_GET_DUMPABLE;
+pub const PR_SET_KEEPCAPS = abi.PR_SET_KEEPCAPS;
+pub const PR_GET_KEEPCAPS = abi.PR_GET_KEEPCAPS;
+pub const PR_SET_PDEATHSIG = abi.PR_SET_PDEATHSIG;
+pub const PR_GET_PDEATHSIG = abi.PR_GET_PDEATHSIG;
 
-pub const SFD_CLOEXEC: u32 = 0x80000;
-pub const SFD_NONBLOCK: u32 = 0x800;
+pub const SFD_CLOEXEC = abi.SFD_CLOEXEC;
+pub const SFD_NONBLOCK = abi.SFD_NONBLOCK;
 
-pub const AT_EACCESS: u32 = 0x200;
-pub const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+pub const AT_EACCESS = abi.AT_EACCESS;
+pub const AT_SYMLINK_NOFOLLOW = abi.AT_SYMLINK_NOFOLLOW;
 
-pub const STATX_TYPE: u32 = 0x0001;
-pub const STATX_MODE: u32 = 0x0002;
-pub const STATX_NLINK: u32 = 0x0004;
-pub const STATX_UID: u32 = 0x0008;
-pub const STATX_GID: u32 = 0x0010;
-pub const STATX_ATIME: u32 = 0x0020;
-pub const STATX_MTIME: u32 = 0x0040;
-pub const STATX_CTIME: u32 = 0x0080;
-pub const STATX_INO: u32 = 0x0100;
-pub const STATX_SIZE: u32 = 0x0200;
-pub const STATX_BLOCKS: u32 = 0x0400;
-pub const STATX_BASIC_STATS: u32 = 0x07ff;
+pub const STATX_TYPE = abi.STATX_TYPE;
+pub const STATX_MODE = abi.STATX_MODE;
+pub const STATX_NLINK = abi.STATX_NLINK;
+pub const STATX_UID = abi.STATX_UID;
+pub const STATX_GID = abi.STATX_GID;
+pub const STATX_ATIME = abi.STATX_ATIME;
+pub const STATX_MTIME = abi.STATX_MTIME;
+pub const STATX_CTIME = abi.STATX_CTIME;
+pub const STATX_INO = abi.STATX_INO;
+pub const STATX_SIZE = abi.STATX_SIZE;
+pub const STATX_BLOCKS = abi.STATX_BLOCKS;
+pub const STATX_BASIC_STATS = abi.STATX_BASIC_STATS;
 
-pub const MEMBARRIER_CMD_QUERY: u32 = 0;
-pub const MEMBARRIER_CMD_GLOBAL: u32 = 1;
-pub const MEMBARRIER_CMD_GLOBAL_EXPEDITED: u32 = 2;
-pub const MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED: u32 = 4;
-pub const MEMBARRIER_CMD_PRIVATE_EXPEDITED: u32 = 8;
-pub const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: u32 = 16;
+pub const MEMBARRIER_CMD_QUERY = abi.MEMBARRIER_CMD_QUERY;
+pub const MEMBARRIER_CMD_GLOBAL = abi.MEMBARRIER_CMD_GLOBAL;
+pub const MEMBARRIER_CMD_GLOBAL_EXPEDITED = abi.MEMBARRIER_CMD_GLOBAL_EXPEDITED;
+pub const MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED = abi.MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED;
+pub const MEMBARRIER_CMD_PRIVATE_EXPEDITED = abi.MEMBARRIER_CMD_PRIVATE_EXPEDITED;
+pub const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED = abi.MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED;
 
-pub const POSIX_FADV_NORMAL: u32 = 0;
-pub const POSIX_FADV_RANDOM: u32 = 1;
-pub const POSIX_FADV_SEQUENTIAL: u32 = 2;
-pub const POSIX_FADV_WILLNEED: u32 = 3;
-pub const POSIX_FADV_DONTNEED: u32 = 4;
-pub const POSIX_FADV_NOREUSE: u32 = 5;
+pub const POSIX_FADV_NORMAL = abi.POSIX_FADV_NORMAL;
+pub const POSIX_FADV_RANDOM = abi.POSIX_FADV_RANDOM;
+pub const POSIX_FADV_SEQUENTIAL = abi.POSIX_FADV_SEQUENTIAL;
+pub const POSIX_FADV_WILLNEED = abi.POSIX_FADV_WILLNEED;
+pub const POSIX_FADV_DONTNEED = abi.POSIX_FADV_DONTNEED;
+pub const POSIX_FADV_NOREUSE = abi.POSIX_FADV_NOREUSE;
 
-pub const SYNC_FILE_RANGE_WAIT_BEFORE: u32 = 1;
-pub const SYNC_FILE_RANGE_WRITE: u32 = 2;
-pub const SYNC_FILE_RANGE_WAIT_AFTER: u32 = 4;
+pub const SYNC_FILE_RANGE_WAIT_BEFORE = abi.SYNC_FILE_RANGE_WAIT_BEFORE;
+pub const SYNC_FILE_RANGE_WRITE = abi.SYNC_FILE_RANGE_WRITE;
+pub const SYNC_FILE_RANGE_WAIT_AFTER = abi.SYNC_FILE_RANGE_WAIT_AFTER;
 
-pub const PRIO_PROCESS: u32 = 0;
-pub const PRIO_PGRP: u32 = 1;
-pub const PRIO_USER: u32 = 2;
+pub const PRIO_PROCESS = abi.PRIO_PROCESS;
+pub const PRIO_PGRP = abi.PRIO_PGRP;
+pub const PRIO_USER = abi.PRIO_USER;
 
-pub const UTIME_NOW: i32 = 0x3fffffff;
-pub const UTIME_OMIT: i32 = 0x3ffffffe;
+pub const UTIME_NOW = abi.UTIME_NOW;
+pub const UTIME_OMIT = abi.UTIME_OMIT;
 
-pub const P_ALL: u32 = 0;
-pub const P_PID: u32 = 1;
-pub const P_PGID: u32 = 2;
+pub const P_ALL = abi.P_ALL;
+pub const P_PID = abi.P_PID;
+pub const P_PGID = abi.P_PGID;
 
-pub const WEXITED: u32 = 0x04;
-pub const WSTOPPED: u32 = 0x02;
-pub const WCONTINUED: u32 = 0x08;
-pub const WNOWAIT: u32 = 0x01000000;
+pub const WEXITED = abi.WEXITED;
+pub const WSTOPPED = abi.WSTOPPED;
+pub const WCONTINUED = abi.WCONTINUED;
+pub const WNOWAIT = abi.WNOWAIT;
 
-pub const ECHILD = -10;
+pub const ECHILD = abi.ECHILD;
 
-pub const IN_ACCESS: u32 = 0x00000001;
-pub const IN_MODIFY: u32 = 0x00000002;
-pub const IN_ATTRIB: u32 = 0x00000004;
-pub const IN_CLOSE_WRITE: u32 = 0x00000008;
-pub const IN_CLOSE_NOWRITE: u32 = 0x00000010;
-pub const IN_OPEN: u32 = 0x00000020;
-pub const IN_MOVED_FROM: u32 = 0x00000040;
-pub const IN_MOVED_TO: u32 = 0x00000080;
-pub const IN_CREATE: u32 = 0x00000100;
-pub const IN_DELETE: u32 = 0x00000200;
-pub const IN_DELETE_SELF: u32 = 0x00000400;
-pub const IN_MOVE_SELF: u32 = 0x00000800;
-pub const IN_NONBLOCK: u32 = 0x00000800;
-pub const IN_CLOEXEC: u32 = 0x00080000;
+pub const IN_ACCESS = abi.IN_ACCESS;
+pub const IN_MODIFY = abi.IN_MODIFY;
+pub const IN_ATTRIB = abi.IN_ATTRIB;
+pub const IN_CLOSE_WRITE = abi.IN_CLOSE_WRITE;
+pub const IN_CLOSE_NOWRITE = abi.IN_CLOSE_NOWRITE;
+pub const IN_OPEN = abi.IN_OPEN;
+pub const IN_MOVED_FROM = abi.IN_MOVED_FROM;
+pub const IN_MOVED_TO = abi.IN_MOVED_TO;
+pub const IN_CREATE = abi.IN_CREATE;
+pub const IN_DELETE = abi.IN_DELETE;
+pub const IN_DELETE_SELF = abi.IN_DELETE_SELF;
+pub const IN_MOVE_SELF = abi.IN_MOVE_SELF;
+pub const IN_NONBLOCK = abi.IN_NONBLOCK;
+pub const IN_CLOEXEC = abi.IN_CLOEXEC;
 
-pub const MCL_CURRENT: u32 = 1;
-pub const MCL_FUTURE: u32 = 2;
+pub const MCL_CURRENT = abi.MCL_CURRENT;
+pub const MCL_FUTURE = abi.MCL_FUTURE;
 
-pub const MADV_NORMAL: u32 = 0;
-pub const MADV_RANDOM: u32 = 1;
-pub const MADV_SEQUENTIAL: u32 = 2;
-pub const MADV_WILLNEED: u32 = 3;
-pub const MADV_DONTNEED: u32 = 4;
+pub const MADV_NORMAL = abi.MADV_NORMAL;
+pub const MADV_RANDOM = abi.MADV_RANDOM;
+pub const MADV_SEQUENTIAL = abi.MADV_SEQUENTIAL;
+pub const MADV_WILLNEED = abi.MADV_WILLNEED;
+pub const MADV_DONTNEED = abi.MADV_DONTNEED;
 
-pub const RLIMIT_CPU: u32 = 0;
-pub const RLIMIT_FSIZE: u32 = 1;
-pub const RLIMIT_DATA: u32 = 2;
-pub const RLIMIT_STACK: u32 = 3;
-pub const RLIMIT_CORE: u32 = 4;
-pub const RLIMIT_RSS: u32 = 5;
-pub const RLIMIT_NPROC: u32 = 6;
-pub const RLIMIT_NOFILE: u32 = 7;
-pub const RLIMIT_MEMLOCK: u32 = 8;
-pub const RLIMIT_AS: u32 = 9;
-pub const RLIM_INFINITY: u64 = 0xffffffffffffffff;
+pub const RLIMIT_CPU = abi.RLIMIT_CPU;
+pub const RLIMIT_FSIZE = abi.RLIMIT_FSIZE;
+pub const RLIMIT_DATA = abi.RLIMIT_DATA;
+pub const RLIMIT_STACK = abi.RLIMIT_STACK;
+pub const RLIMIT_CORE = abi.RLIMIT_CORE;
+pub const RLIMIT_RSS = abi.RLIMIT_RSS;
+pub const RLIMIT_NPROC = abi.RLIMIT_NPROC;
+pub const RLIMIT_NOFILE = abi.RLIMIT_NOFILE;
+pub const RLIMIT_MEMLOCK = abi.RLIMIT_MEMLOCK;
+pub const RLIMIT_AS = abi.RLIMIT_AS;
+pub const RLIM_INFINITY = abi.RLIM_INFINITY;
 
-pub const PROT_NONE: u32 = 0x0;
-pub const PROT_READ: u32 = 0x1;
-pub const PROT_WRITE: u32 = 0x2;
-pub const PROT_EXEC: u32 = 0x4;
+pub const PROT_NONE = abi.PROT_NONE;
+pub const PROT_READ = abi.PROT_READ;
+pub const PROT_WRITE = abi.PROT_WRITE;
+pub const PROT_EXEC = abi.PROT_EXEC;
 
-pub const CLOCK_MONOTONIC_RAW: u32 = 4;
-pub const CLOCK_REALTIME_COARSE: u32 = 5;
-pub const CLOCK_MONOTONIC_COARSE: u32 = 6;
-pub const CLOCK_BOOTTIME: u32 = 7;
+pub const CLOCK_MONOTONIC_RAW = abi.CLOCK_MONOTONIC_RAW;
+pub const CLOCK_REALTIME_COARSE = abi.CLOCK_REALTIME_COARSE;
+pub const CLOCK_MONOTONIC_COARSE = abi.CLOCK_MONOTONIC_COARSE;
+pub const CLOCK_BOOTTIME = abi.CLOCK_BOOTTIME;
 
-pub const TIMER_ABSTIME: u32 = 1;
+pub const TIMER_ABSTIME = abi.TIMER_ABSTIME;
 
-pub const MNT_FORCE: u32 = 1;
-pub const MNT_DETACH: u32 = 2;
-pub const MNT_EXPIRE: u32 = 4;
-pub const UMOUNT_NOFOLLOW: u32 = 8;
+pub const MNT_FORCE = abi.MNT_FORCE;
+pub const MNT_DETACH = abi.MNT_DETACH;
+pub const MNT_EXPIRE = abi.MNT_EXPIRE;
+pub const UMOUNT_NOFOLLOW = abi.UMOUNT_NOFOLLOW;
 
-pub const LINUX_REBOOT_MAGIC1: u32 = 0xfee1dead;
-pub const LINUX_REBOOT_MAGIC2: u32 = 0x28121969;
-pub const LINUX_REBOOT_CMD_RESTART: u32 = 0x01234567;
-pub const LINUX_REBOOT_CMD_HALT: u32 = 0xcdef0123;
-pub const LINUX_REBOOT_CMD_POWER_OFF: u32 = 0x4321fedc;
+pub const LINUX_REBOOT_MAGIC1 = abi.LINUX_REBOOT_MAGIC1;
+pub const LINUX_REBOOT_MAGIC2 = abi.LINUX_REBOOT_MAGIC2;
+pub const LINUX_REBOOT_CMD_RESTART = abi.LINUX_REBOOT_CMD_RESTART;
+pub const LINUX_REBOOT_CMD_HALT = abi.LINUX_REBOOT_CMD_HALT;
+pub const LINUX_REBOOT_CMD_POWER_OFF = abi.LINUX_REBOOT_CMD_POWER_OFF;
 
-fn vfsErrno(err: vfs.VFSError) i32 {
-    return switch (err) {
-        vfs.VFSError.NotFound => ENOENT,
-        vfs.VFSError.PermissionDenied => EACCES,
-        vfs.VFSError.IsDirectory => EISDIR,
-        vfs.VFSError.NotDirectory => ENOTDIR,
-        vfs.VFSError.AlreadyExists => EEXIST,
-        vfs.VFSError.NoSpace => ENOSPC,
-        vfs.VFSError.ReadOnly => EROFS,
-        vfs.VFSError.OutOfMemory => ENOMEM,
-        vfs.VFSError.InvalidPath => EINVAL,
-        vfs.VFSError.InvalidOperation => EINVAL,
-        vfs.VFSError.DeviceError => EINVAL,
-        vfs.VFSError.BrokenPipe => EPIPE,
-        vfs.VFSError.TooManyOpenFiles => EMFILE,
-    };
-}
-
-fn socketErrno(err: anyerror) i32 {
-    if (err == socket.SocketError.InvalidSocket) return EBADF;
-    if (err == socket.SocketError.InvalidAddress) return EINVAL;
-    if (err == socket.SocketError.AlreadyConnected) return EISCONN;
-    if (err == socket.SocketError.NotConnected) return ENOTCONN;
-    if (err == socket.SocketError.ConnectionRefused) return ECONNREFUSED;
-    if (err == socket.SocketError.ConnectionReset) return ECONNRESET;
-    if (err == socket.SocketError.NoBufferSpace) return ENOBUFS;
-    if (err == socket.SocketError.Timeout) return ETIMEDOUT;
-    if (err == socket.SocketError.AddressInUse) return EADDRINUSE;
-    if (err == socket.SocketError.NotListening) return EINVAL;
-    if (err == error.OutOfMemory) return ENOMEM;
-    return EINVAL;
-}
+const vfsErrno = errno.vfsErrno;
+const socketErrno = errno.socketErrno;
 
 export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
     const syscall_num = regs.eax;
@@ -725,7 +707,7 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
     }
 
     if (fd < FD_OFFSET) return EBADF;
-    if (isSpecialFd(fd)) return EBADF;
+    if (syscall_fd.isSpecialFd(fd)) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
     // SAFETY: filled by the subsequent copyFromUser call
@@ -780,7 +762,7 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
     }
 
     if (fd < FD_OFFSET) return EBADF;
-    if (isSpecialFd(fd)) return EBADF;
+    if (syscall_fd.isSpecialFd(fd)) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
     // SAFETY: filled by the subsequent vfs.read call
@@ -804,194 +786,39 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
 }
 
 fn sys_getpid() i32 {
-    if (process.current_process) |proc| {
-        return @intCast(proc.pid);
-    }
-    return 0;
+    return syscall_process.sys_getpid();
 }
 
 fn sys_yield() i32 {
-    process.yield();
-    return 0;
+    return syscall_process.sys_yield();
 }
 
 fn sys_mkdir(pathname: [*]const u8, mode: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
-        return EINVAL;
-    }
-
-    // SAFETY: filled by the subsequent copyStringFromUser call
-    var kernel_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
-
-    const mode_struct = vfs.FileMode{
-        .owner_read = (mode & 0o400) != 0,
-        .owner_write = (mode & 0o200) != 0,
-        .owner_exec = (mode & 0o100) != 0,
-        .group_read = (mode & 0o040) != 0,
-        .group_write = (mode & 0o020) != 0,
-        .group_exec = (mode & 0o010) != 0,
-        .other_read = (mode & 0o004) != 0,
-        .other_write = (mode & 0o002) != 0,
-        .other_exec = (mode & 0o001) != 0,
-    };
-
-    vfs.mkdir(path_slice, mode_struct) catch |err| return vfsErrno(err);
-    return 0;
+    return syscall_fs.sys_mkdir(pathname, mode);
 }
 
 fn sys_rmdir(pathname: [*]const u8) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
-        return EINVAL;
-    }
-
-    // SAFETY: filled by the subsequent copyStringFromUser call
-    var kernel_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
-
-    vfs.rmdir(path_slice) catch |err| return vfsErrno(err);
-    return 0;
+    return syscall_fs.sys_rmdir(pathname);
 }
 
 fn sys_unlink(pathname: [*]const u8) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
-        return EINVAL;
-    }
-
-    // SAFETY: filled by the subsequent copyStringFromUser call
-    var kernel_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
-
-    vfs.unlink(path_slice) catch |err| return vfsErrno(err);
-    return 0;
+    return syscall_fs.sys_unlink(pathname);
 }
 
 fn sys_rename(oldpath: [*]const u8, newpath: [*]const u8) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(oldpath), 256) or
-        !protection.verifyUserPointer(@intFromPtr(newpath), 256))
-    {
-        return EINVAL;
-    }
-
-    // SAFETY: filled by the subsequent copyStringFromUser call
-    var old_buffer: [256]u8 = undefined;
-    // SAFETY: filled by the subsequent copyStringFromUser call
-    var new_buffer: [256]u8 = undefined;
-
-    const old_slice = protection.copyStringFromUser(&old_buffer, @intFromPtr(oldpath)) catch return EINVAL;
-    const new_slice = protection.copyStringFromUser(&new_buffer, @intFromPtr(newpath)) catch return EINVAL;
-
-    vfs.rename(old_slice, new_slice) catch |err| return vfsErrno(err);
-    return 0;
+    return syscall_fs.sys_rename(oldpath, newpath);
 }
 
 fn sys_open(pathname: [*]const u8, flags: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
-        return EINVAL;
-    }
-
-    // SAFETY: filled by the subsequent copyStringFromUser call
-    var kernel_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
-
-    if (process.current_process) |proc| {
-        if (vfs.lookupPath(path_slice)) |vnode| {
-            const access_mode = flags & 0x3;
-            var access: u3 = 0;
-            if (access_mode == 0 or access_mode == 2) access |= 4;
-            if (access_mode == 1 or access_mode == 2) access |= 2;
-            if (!credentials.checkPermission(&proc.creds, vnode.mode, vnode.uid, vnode.gid, access)) {
-                return EACCES;
-            }
-        } else |_| {}
-    }
-
-    const vfs_fd = vfs.open(path_slice, flags) catch |err| return vfsErrno(err);
-    return @intCast(@as(i32, @intCast(vfs_fd)) + FD_OFFSET);
+    return syscall_fs.sys_open(pathname, flags);
 }
 
 fn sys_close(fd: i32) i32 {
-    if (fd >= 0 and fd < 64) {
-        if (socket_table[@intCast(fd)]) |sock| {
-            sock.close();
-            socket_table[@intCast(fd)] = null;
-            return 0;
-        }
-    }
-
-    if (fd >= 1000 and fd < 1064) {
-        const idx: usize = @intCast(fd - 1000);
-        var usock = &unix_sockets[idx];
-        if (!usock.in_use) return EBADF;
-        if (usock.peer) |peer| {
-            peer.peer = null;
-            peer.connected = false;
-        }
-        usock.in_use = false;
-        usock.peer = null;
-        usock.path_len = 0;
-        usock.listening = false;
-        usock.connected = false;
-        return 0;
-    }
-
-    if (fd >= 2000 and fd < 2064) {
-        const idx: usize = @intCast(fd - 2000);
-        var efd = &eventfd_table[idx];
-        if (!efd.in_use) return EBADF;
-        efd.in_use = false;
-        return 0;
-    }
-
-    if (fd >= 3000 and fd < 3064) {
-        const idx: usize = @intCast(fd - 3000);
-        var sfd = &signalfd_table[idx];
-        if (!sfd.in_use) return EBADF;
-        sfd.in_use = false;
-        return 0;
-    }
-
-    if (fd >= 4000 and fd < 4032) {
-        const idx: usize = @intCast(fd - 4000);
-        var inst = &inotify_instances[idx];
-        if (!inst.in_use) return EBADF;
-        inst.in_use = false;
-        for (&inst.watches) |*w| {
-            w.in_use = false;
-            w.wd = -1;
-        }
-        return 0;
-    }
-
-    if (fd >= FD_OFFSET + 200 and fd < FD_OFFSET + 264) {
-        const idx: usize = @intCast(fd - FD_OFFSET - 200);
-        var inst = &epoll_instances[idx];
-        if (!inst.in_use) return EBADF;
-        inst.in_use = false;
-        inst.count = 0;
-        return 0;
-    }
-
-    if (fd >= FD_OFFSET + 300 and fd < FD_OFFSET + 364) {
-        const idx: usize = @intCast(fd - FD_OFFSET - 300);
-        var tfd = &timerfd_table[idx];
-        if (!tfd.in_use) return EBADF;
-        tfd.in_use = false;
-        return 0;
-    }
-
-    if (fd < FD_OFFSET) return EBADF;
-    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
-    vfs.close(vfs_fd) catch |err| return vfsErrno(err);
-    return 0;
+    return syscall_fd.sys_close(&unix_sockets, &socket_table, fd);
 }
 
 fn sys_lseek(fd: i32, offset: i64, whence: u32) i32 {
-    if (fd < FD_OFFSET) return EBADF;
-    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
-    const result = vfs.lseek(vfs_fd, offset, whence) catch |err| return vfsErrno(err);
-    if (result > 0x7FFFFFFF) return EOVERFLOW;
-    return @intCast(result);
+    return syscall_fd.sys_lseek(fd, offset, whence);
 }
 
 fn sys_stat(pathname: [*]const u8, stat_buf_addr: usize) i32 {
@@ -1113,44 +940,16 @@ fn sys_chown(pathname: [*]const u8, uid: u16, gid: u16) i32 {
     return 0;
 }
 
-const AF_UNIX: u32 = 1;
-const AF_INET: u32 = 2;
-const AF_INET6: u32 = 10;
-const SOCK_STREAM: u32 = 1;
-const SOCK_DGRAM: u32 = 2;
+const AF_UNIX = syscall_net.AF_UNIX;
+const AF_INET = syscall_net.AF_INET;
+const AF_INET6 = syscall_net.AF_INET6;
+const SOCK_STREAM = syscall_net.SOCK_STREAM;
+const SOCK_DGRAM = syscall_net.SOCK_DGRAM;
 
-const SockAddrIn = extern struct {
-    family: u16,
-    port: u16,
-    addr: u32,
-    zero: [8]u8,
-};
-
-const SockAddrIn6 = extern struct {
-    family: u16,
-    port: u16,
-    flowinfo: u32,
-    addr: [16]u8,
-    scope_id: u32,
-};
-
-const SockAddrUn = extern struct {
-    family: u16,
-    path: [108]u8,
-};
-
-const UnixSocket = struct {
-    path: [108]u8,
-    path_len: usize,
-    peer: ?*UnixSocket,
-    recv_buffer: [4096]u8,
-    recv_head: usize,
-    recv_tail: usize,
-    recv_count: usize,
-    listening: bool,
-    connected: bool,
-    in_use: bool,
-};
+const SockAddrIn = syscall_net.SockAddrIn;
+const SockAddrIn6 = syscall_net.SockAddrIn6;
+const SockAddrUn = syscall_net.SockAddrUn;
+const UnixSocket = syscall_net.UnixSocket;
 
 var unix_sockets: [64]UnixSocket = [_]UnixSocket{.{
     .path = [_]u8{0} ** 108,
@@ -1168,412 +967,59 @@ var unix_sockets: [64]UnixSocket = [_]UnixSocket{.{
 var socket_table: [64]?*socket.Socket = [_]?*socket.Socket{null} ** 64;
 
 fn sys_socket(domain: u32, sock_type: u32, protocol: u32) i32 {
-    _ = protocol;
-
-    if (domain == AF_UNIX) {
-        for (&unix_sockets, 0..) |*usock, i| {
-            if (!usock.in_use) {
-                usock.in_use = true;
-                usock.path_len = 0;
-                usock.peer = null;
-                usock.recv_head = 0;
-                usock.recv_tail = 0;
-                usock.recv_count = 0;
-                usock.listening = false;
-                usock.connected = false;
-                return @intCast(@as(i32, @intCast(i)) + 1000);
-            }
-        }
-        return EMFILE;
-    }
-
-    const addr_family: socket.AddressFamily = switch (domain) {
-        AF_INET => .AF_INET,
-        AF_INET6 => .AF_INET6,
-        else => return EAFNOSUPPORT,
-    };
-
-    const s_type: socket.SocketType = switch (sock_type) {
-        SOCK_STREAM => .STREAM,
-        SOCK_DGRAM => .DGRAM,
-        else => return EINVAL,
-    };
-
-    const s_proto: socket.Protocol = switch (sock_type) {
-        SOCK_STREAM => .TCP,
-        SOCK_DGRAM => .UDP,
-        else => return EINVAL,
-    };
-
-    const sock = socket.createSocket(s_type, s_proto) catch return ENOMEM;
-    sock.address_family = addr_family;
-
-    for (&socket_table, 0..) |*slot, i| {
-        if (slot.* == null) {
-            slot.* = sock;
-            return @intCast(i);
-        }
-    }
-
-    sock.close();
-    return EMFILE;
+    return syscall_net.sys_socket(&unix_sockets, &socket_table, domain, sock_type, protocol);
 }
 
 fn sys_bind(sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
-    if (sockfd >= 1000 and sockfd < 1064) {
-        const idx: usize = @intCast(sockfd - 1000);
-        const usock = &unix_sockets[idx];
-        if (!usock.in_use) return EBADF;
-
-        if (addr_len < 3) return EINVAL;
-        if (!protection.verifyUserPointer(addr_ptr, @min(addr_len, @sizeOf(SockAddrUn)))) return EINVAL;
-
-        var addr_buf: [@sizeOf(SockAddrUn)]u8 = undefined;
-        const copy_len = @min(addr_len, @sizeOf(SockAddrUn));
-        protection.copyFromUser(addr_buf[0..copy_len], addr_ptr) catch return EINVAL;
-        const addr: *const SockAddrUn = @ptrCast(@alignCast(&addr_buf));
-
-        const path_end = std.mem.indexOfScalar(u8, &addr.path, 0) orelse addr.path.len;
-        @memcpy(usock.path[0..path_end], addr.path[0..path_end]);
-        usock.path_len = path_end;
-        return 0;
-    }
-
-    if (sockfd < 0 or sockfd >= 64) return EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
-
-    if (sock.address_family == .AF_INET6) {
-        if (addr_len < @sizeOf(SockAddrIn6)) return EINVAL;
-        if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn6))) return EINVAL;
-
-        var addr_buf: [@sizeOf(SockAddrIn6)]u8 = undefined;
-        protection.copyFromUser(&addr_buf, addr_ptr) catch return EINVAL;
-        const addr: *const SockAddrIn6 = @ptrCast(@alignCast(&addr_buf));
-
-        sock.local_ipv6 = @import("../net/ipv6.zig").IPv6Address{ .octets = addr.addr };
-        sock.local_port = @byteSwap(addr.port);
-        return 0;
-    }
-
-    if (addr_len < @sizeOf(SockAddrIn)) return EINVAL;
-    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn))) return EINVAL;
-
-    var addr_buf: [@sizeOf(SockAddrIn)]u8 = undefined;
-    protection.copyFromUser(&addr_buf, addr_ptr) catch return EINVAL;
-    const addr: *const SockAddrIn = @ptrCast(@alignCast(&addr_buf));
-
-    const ipv4_addr = @import("../net/ipv4.zig").IPv4Address{
-        .octets = .{
-            @intCast((addr.addr >> 0) & 0xFF),
-            @intCast((addr.addr >> 8) & 0xFF),
-            @intCast((addr.addr >> 16) & 0xFF),
-            @intCast((addr.addr >> 24) & 0xFF),
-        },
-    };
-
-    sock.bind(ipv4_addr, @byteSwap(addr.port)) catch |err| return socketErrno(err);
-    return 0;
+    return syscall_net.sys_bind(&unix_sockets, &socket_table, sockfd, addr_ptr, addr_len);
 }
 
 fn sys_connect(sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
-    if (sockfd >= 1000 and sockfd < 1064) {
-        const idx: usize = @intCast(sockfd - 1000);
-        const usock = &unix_sockets[idx];
-        if (!usock.in_use) return EBADF;
-
-        if (addr_len < 3) return EINVAL;
-        if (!protection.verifyUserPointer(addr_ptr, @min(addr_len, @sizeOf(SockAddrUn)))) return EINVAL;
-
-        var addr_buf: [@sizeOf(SockAddrUn)]u8 = undefined;
-        const copy_len = @min(addr_len, @sizeOf(SockAddrUn));
-        protection.copyFromUser(addr_buf[0..copy_len], addr_ptr) catch return EINVAL;
-        const addr: *const SockAddrUn = @ptrCast(@alignCast(&addr_buf));
-
-        const path_end = std.mem.indexOfScalar(u8, &addr.path, 0) orelse addr.path.len;
-
-        for (&unix_sockets) |*peer| {
-            if (peer.in_use and peer.listening and peer.path_len == path_end) {
-                if (std.mem.eql(u8, peer.path[0..path_end], addr.path[0..path_end])) {
-                    usock.peer = peer;
-                    usock.connected = true;
-                    return 0;
-                }
-            }
-        }
-        return ECONNREFUSED;
-    }
-
-    if (sockfd < 0 or sockfd >= 64) return EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
-
-    if (sock.address_family == .AF_INET6) {
-        if (addr_len < @sizeOf(SockAddrIn6)) return EINVAL;
-        if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn6))) return EINVAL;
-
-        var addr_buf: [@sizeOf(SockAddrIn6)]u8 = undefined;
-        protection.copyFromUser(&addr_buf, addr_ptr) catch return EINVAL;
-        const addr: *const SockAddrIn6 = @ptrCast(@alignCast(&addr_buf));
-
-        sock.remote_ipv6 = @import("../net/ipv6.zig").IPv6Address{ .octets = addr.addr };
-        sock.remote_port = @byteSwap(addr.port);
-        sock.state = .CONNECTED;
-        return 0;
-    }
-
-    if (addr_len < @sizeOf(SockAddrIn)) return EINVAL;
-    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn))) return EINVAL;
-
-    var addr_buf: [@sizeOf(SockAddrIn)]u8 = undefined;
-    protection.copyFromUser(&addr_buf, addr_ptr) catch return EINVAL;
-    const addr: *const SockAddrIn = @ptrCast(@alignCast(&addr_buf));
-
-    const ipv4_addr = @import("../net/ipv4.zig").IPv4Address{
-        .octets = .{
-            @intCast((addr.addr >> 0) & 0xFF),
-            @intCast((addr.addr >> 8) & 0xFF),
-            @intCast((addr.addr >> 16) & 0xFF),
-            @intCast((addr.addr >> 24) & 0xFF),
-        },
-    };
-
-    sock.connect(ipv4_addr, @byteSwap(addr.port)) catch |err| return socketErrno(err);
-    return 0;
+    return syscall_net.sys_connect(&unix_sockets, &socket_table, sockfd, addr_ptr, addr_len);
 }
 
 fn sys_listen(sockfd: i32, backlog: u32) i32 {
-    _ = backlog;
-    if (sockfd >= 1000 and sockfd < 1064) {
-        const idx: usize = @intCast(sockfd - 1000);
-        const usock = &unix_sockets[idx];
-        if (!usock.in_use) return EBADF;
-        usock.listening = true;
-        return 0;
-    }
-
-    if (sockfd < 0 or sockfd >= 64) return EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
-    sock.listen(5) catch |err| return socketErrno(err);
-    return 0;
+    return syscall_net.sys_listen(&unix_sockets, &socket_table, sockfd, backlog);
 }
 
 fn sys_accept(sockfd: i32) i32 {
-    if (sockfd >= 1000 and sockfd < 1064) {
-        const idx: usize = @intCast(sockfd - 1000);
-        const usock = &unix_sockets[idx];
-        if (!usock.in_use or !usock.listening) return EBADF;
-
-        for (&unix_sockets, 0..) |*peer, i| {
-            if (peer.in_use and peer.connected and peer.peer == usock) {
-                for (&unix_sockets, 0..) |*new_sock, j| {
-                    if (!new_sock.in_use) {
-                        new_sock.in_use = true;
-                        new_sock.connected = true;
-                        new_sock.peer = peer;
-                        peer.peer = new_sock;
-                        _ = i;
-                        return @intCast(@as(i32, @intCast(j)) + 1000);
-                    }
-                }
-                return EMFILE;
-            }
-        }
-        return EAGAIN;
-    }
-
-    if (sockfd < 0 or sockfd >= 64) return EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
-
-    const client = sock.accept() catch |err| return socketErrno(err);
-
-    for (&socket_table, 0..) |*slot, i| {
-        if (slot.* == null) {
-            slot.* = client;
-            return @intCast(i);
-        }
-    }
-
-    client.close();
-    return EMFILE;
+    return syscall_net.sys_accept(&unix_sockets, &socket_table, sockfd);
 }
 
 fn sys_send(sockfd: i32, buf: [*]const u8, len: usize) i32 {
-    if (sockfd >= 1000 and sockfd < 1064) {
-        const idx: usize = @intCast(sockfd - 1000);
-        const usock = &unix_sockets[idx];
-        if (!usock.in_use or !usock.connected) return EBADF;
-
-        const peer = usock.peer orelse return ENOTCONN;
-        if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
-
-        var kernel_buffer: [4096]u8 = undefined;
-        const to_send = @min(len, kernel_buffer.len);
-        protection.copyFromUser(kernel_buffer[0..to_send], @intFromPtr(buf)) catch return EINVAL;
-
-        const available = peer.recv_buffer.len - peer.recv_count;
-        const copy_len = @min(to_send, available);
-        if (copy_len == 0) return EAGAIN;
-
-        for (0..copy_len) |i| {
-            peer.recv_buffer[peer.recv_tail] = kernel_buffer[i];
-            peer.recv_tail = (peer.recv_tail + 1) % peer.recv_buffer.len;
-        }
-        peer.recv_count += copy_len;
-        return @intCast(copy_len);
-    }
-
-    if (sockfd < 0 or sockfd >= 64) return EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
-
-    if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
-
-    var kernel_buffer: [4096]u8 = undefined;
-    const to_send = @min(len, kernel_buffer.len);
-    protection.copyFromUser(kernel_buffer[0..to_send], @intFromPtr(buf)) catch return EINVAL;
-
-    const sent = sock.send(kernel_buffer[0..to_send]) catch |err| return socketErrno(err);
-    return @intCast(sent);
+    return syscall_net.sys_send(&unix_sockets, &socket_table, sockfd, buf, len);
 }
 
 fn sys_recv(sockfd: i32, buf: [*]u8, len: usize) i32 {
-    if (sockfd >= 1000 and sockfd < 1064) {
-        const idx: usize = @intCast(sockfd - 1000);
-        const usock = &unix_sockets[idx];
-        if (!usock.in_use) return EBADF;
-
-        if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
-
-        if (usock.recv_count == 0) return 0;
-
-        var kernel_buffer: [4096]u8 = undefined;
-        const to_recv = @min(len, @min(usock.recv_count, kernel_buffer.len));
-
-        for (0..to_recv) |i| {
-            kernel_buffer[i] = usock.recv_buffer[usock.recv_head];
-            usock.recv_head = (usock.recv_head + 1) % usock.recv_buffer.len;
-        }
-        usock.recv_count -= to_recv;
-
-        protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..to_recv]) catch return EINVAL;
-        return @intCast(to_recv);
-    }
-
-    if (sockfd < 0 or sockfd >= 64) return EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
-
-    if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
-
-    var kernel_buffer: [4096]u8 = undefined;
-    const to_recv = @min(len, kernel_buffer.len);
-
-    const received = sock.recv(kernel_buffer[0..to_recv]) catch |err| return socketErrno(err);
-    if (received == 0) return 0;
-
-    protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..received]) catch return EINVAL;
-    return @intCast(received);
+    return syscall_net.sys_recv(&unix_sockets, &socket_table, sockfd, buf, len);
 }
 
 fn sys_shutdown(sockfd: i32) i32 {
-    if (sockfd < 0 or sockfd >= 64) return EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
-    sock.close();
-    socket_table[@intCast(sockfd)] = null;
-    return 0;
+    return syscall_net.sys_shutdown(&socket_table, sockfd);
 }
 
 fn sys_kill(pid: i32, signum: i32) i32 {
-    signal.kill(pid, signum) catch |err| {
-        return switch (err) {
-            error.InvalidSignal => EINVAL,
-            error.NoSuchProcess => ESRCH,
-        };
-    };
-    return 0;
+    return syscall_signal.sys_kill(pid, signum);
 }
 
 fn sys_sigaction(signum: i32, act_addr: usize, oldact_addr: usize) i32 {
-    var act: ?*const signal.SigAction = null;
-    var oldact: ?*signal.SigAction = null;
-
-    // SAFETY: filled by the subsequent copyFromUser call
-    var act_buf: [@sizeOf(signal.SigAction)]u8 = undefined;
-    // SAFETY: filled by the subsequent sigaction call
-    var oldact_buf: signal.SigAction = undefined;
-
-    if (act_addr != 0) {
-        if (!protection.verifyUserPointer(act_addr, @sizeOf(signal.SigAction))) return EINVAL;
-        protection.copyFromUser(&act_buf, act_addr) catch return EINVAL;
-        act = @ptrCast(@alignCast(&act_buf));
-    }
-
-    if (oldact_addr != 0) {
-        if (!protection.verifyUserPointer(oldact_addr, @sizeOf(signal.SigAction))) return EINVAL;
-        oldact = &oldact_buf;
-    }
-
-    signal.sigaction(signum, act, oldact) catch return EINVAL;
-
-    if (oldact_addr != 0) {
-        protection.copyToUser(oldact_addr, std.mem.asBytes(&oldact_buf)) catch return EINVAL;
-    }
-
-    return 0;
-}
-
-var current_working_dir: [256]u8 = [_]u8{0} ** 256;
-var cwd_len: usize = 1;
-var cwd_initialized: bool = false;
-
-fn ensureCwdInit() void {
-    if (!cwd_initialized) {
-        current_working_dir[0] = '/';
-        cwd_len = 1;
-        cwd_initialized = true;
-    }
+    return syscall_signal.sys_sigaction(signum, act_addr, oldact_addr);
 }
 
 pub fn getCwd() []const u8 {
-    ensureCwdInit();
-    return current_working_dir[0..cwd_len];
+    return syscall_cwd.getCwd();
 }
 
 pub fn setCwd(path: []const u8) bool {
-    ensureCwdInit();
-    const node = vfs.lookupPath(path) catch return false;
-    if (node.file_type != .Directory) return false;
-    @memcpy(current_working_dir[0..path.len], path);
-    cwd_len = path.len;
-    return true;
+    return syscall_cwd.setCwd(path);
 }
 
 fn sys_getcwd(buf: [*]u8, size: usize) i32 {
-    ensureCwdInit();
-    if (!protection.verifyUserPointer(@intFromPtr(buf), size)) return EINVAL;
-    if (size < cwd_len + 1) return EINVAL;
-
-    // SAFETY: cwd_len bytes + null terminator written before copy
-    var kernel_buf: [257]u8 = undefined;
-    @memcpy(kernel_buf[0..cwd_len], current_working_dir[0..cwd_len]);
-    kernel_buf[cwd_len] = 0;
-
-    protection.copyToUser(@intFromPtr(buf), kernel_buf[0 .. cwd_len + 1]) catch return EINVAL;
-    return @intCast(cwd_len);
+    return syscall_cwd.sys_getcwd(buf, size);
 }
 
 fn sys_chdir(pathname: [*]const u8) i32 {
-    ensureCwdInit();
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
-
-    // SAFETY: filled by the subsequent copyStringFromUser call
-    var kernel_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
-
-    const node = vfs.lookupPath(path_slice) catch return ENOENT;
-    if (node.file_type != .Directory) return ENOTDIR;
-
-    @memcpy(current_working_dir[0..path_slice.len], path_slice);
-    cwd_len = path_slice.len;
-
-    return 0;
+    return syscall_cwd.sys_chdir(pathname);
 }
 
 fn sys_fstat(fd: i32, stat_buf_addr: usize) i32 {
@@ -1593,159 +1039,27 @@ fn sys_fstat(fd: i32, stat_buf_addr: usize) i32 {
 }
 
 fn sys_pipe(pipefd: ?*[2]i32) i32 {
-    if (pipefd == null) return EINVAL;
-    if (!protection.verifyUserPointer(@intFromPtr(pipefd), @sizeOf([2]i32))) {
-        return EINVAL;
-    }
-
-    const result = vfs.createPipe() catch |err| return vfsErrno(err);
-    const fds = [2]i32{
-        @as(i32, @intCast(result.read_fd)) + FD_OFFSET,
-        @as(i32, @intCast(result.write_fd)) + FD_OFFSET,
-    };
-
-    protection.copyToUser(@intFromPtr(pipefd), std.mem.asBytes(&fds)) catch {
-        vfs.close(result.read_fd) catch {};
-        vfs.close(result.write_fd) catch {};
-        return EINVAL;
-    };
-    return 0;
+    return syscall_fs.sys_pipe(pipefd);
 }
 
 fn sys_dup2(old_fd: i32, new_fd: i32) i32 {
-    if (old_fd < FD_OFFSET or new_fd < FD_OFFSET) return EBADF;
-    const old_vfs_fd: u32 = @intCast(old_fd - FD_OFFSET);
-    const new_vfs_fd: u32 = @intCast(new_fd - FD_OFFSET);
-
-    const result = vfs.dup2(old_vfs_fd, new_vfs_fd) catch |err| return vfsErrno(err);
-    return @as(i32, @intCast(result)) + FD_OFFSET;
+    return syscall_fs.sys_dup2(old_fd, new_fd);
 }
 
 fn sys_fork() i32 {
-    const result = posix.fork() catch |err| {
-        return switch (err) {
-            error.NoCurrentProcess => ENOSYS,
-            error.NoProcessSlots => EAGAIN,
-            error.OutOfMemory => ENOMEM,
-        };
-    };
-    return result;
+    return syscall_process.sys_fork();
 }
 
 fn sys_execve(path: [*]const u8, argv: usize, envp: usize) i32 {
-    // SAFETY: filled by the subsequent copyStringFromUser call
-    var path_buf: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buf, @intFromPtr(path)) catch {
-        return EINVAL;
-    };
-
-    // SAFETY: entries written before read; argv_count tracks valid entries
-    var argv_array: [32][]const u8 = undefined;
-    var argv_count: usize = 0;
-    // SAFETY: entries filled by subsequent copyStringFromUser calls
-    var argv_buffers: [32][256]u8 = undefined;
-
-    if (argv != 0) {
-        while (argv_count < 32) {
-            const ptr_addr = argv + argv_count * @sizeOf(usize);
-            if (!protection.verifyUserPointer(ptr_addr, @sizeOf(usize))) {
-                break;
-            }
-
-            const str_ptr = @as(*const usize, @ptrFromInt(ptr_addr)).*;
-            if (str_ptr == 0) break;
-
-            const arg_slice = protection.copyStringFromUser(&argv_buffers[argv_count], str_ptr) catch {
-                break;
-            };
-            argv_array[argv_count] = arg_slice;
-            argv_count += 1;
-        }
-    }
-
-    // SAFETY: entries written before read; envp_count tracks valid entries
-    var envp_array: [32][]const u8 = undefined;
-    var envp_count: usize = 0;
-    // SAFETY: entries filled by subsequent copyStringFromUser calls
-    var envp_buffers: [32][256]u8 = undefined;
-
-    if (envp != 0) {
-        while (envp_count < 32) {
-            const ptr_addr = envp + envp_count * @sizeOf(usize);
-            if (!protection.verifyUserPointer(ptr_addr, @sizeOf(usize))) {
-                break;
-            }
-
-            const str_ptr = @as(*const usize, @ptrFromInt(ptr_addr)).*;
-            if (str_ptr == 0) break;
-
-            const env_slice = protection.copyStringFromUser(&envp_buffers[envp_count], str_ptr) catch {
-                break;
-            };
-            envp_array[envp_count] = env_slice;
-            envp_count += 1;
-        }
-    }
-
-    const argv_slice = argv_array[0..argv_count];
-    const envp_slice = envp_array[0..envp_count];
-
-    posix.execve(path_slice, argv_slice, envp_slice) catch |err| {
-        return switch (err) {
-            error.NoCurrentProcess => ENOSYS,
-            error.OutOfMemory => ENOMEM,
-            error.FileReadError => ENOENT,
-            else => EINVAL,
-        };
-    };
-
-    return 0;
+    return syscall_process.sys_execve(path, argv, envp);
 }
 
 fn sys_wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) i32 {
-    const result = posix.wait4(pid, status, options, rusage) catch |err| {
-        return switch (err) {
-            error.NoCurrentProcess => ENOSYS,
-            error.InvalidPointer => EINVAL,
-        };
-    };
-    return result;
+    return syscall_process.sys_wait4(pid, status, options, rusage);
 }
 
-var current_brk: usize = protection.USER_HEAP_START;
-
 fn sys_brk(addr: usize) i32 {
-    if (addr == 0) {
-        return @intCast(current_brk);
-    }
-
-    if (addr < protection.USER_HEAP_START or addr >= protection.USER_SPACE_END) {
-        return @intCast(current_brk);
-    }
-
-    const new_brk = (addr + 0xFFF) & ~@as(usize, 0xFFF);
-
-    if (new_brk > current_brk) {
-        var page_addr = current_brk;
-        while (page_addr < new_brk) : (page_addr += 0x1000) {
-            const phys_page = memory.allocatePhysicalPage() orelse {
-                var cleanup_addr = current_brk;
-                while (cleanup_addr < page_addr) : (cleanup_addr += 0x1000) {
-                    paging.unmap_page(@intCast(cleanup_addr));
-                }
-                return @intCast(current_brk);
-            };
-            paging.mapPage(@intCast(page_addr), phys_page, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_USER);
-        }
-    } else if (new_brk < current_brk) {
-        var page_addr = new_brk;
-        while (page_addr < current_brk) : (page_addr += 0x1000) {
-            paging.unmap_page(@intCast(page_addr));
-        }
-    }
-
-    current_brk = new_brk;
-    return @intCast(current_brk);
+    return syscall_process.sys_brk(addr);
 }
 
 const MAP_SHARED = 0x01;
@@ -1859,11 +1173,7 @@ fn sys_munmap(addr: usize, length: usize) i32 {
 }
 
 fn sys_ioctl(fd: i32, request: u32, arg: usize) i32 {
-    if (fd < FD_OFFSET) return EBADF;
-    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
-
-    const result = vfs.ioctl(vfs_fd, request, arg) catch |err| return vfsErrno(err);
-    return result;
+    return syscall_fd.sys_ioctl(fd, request, arg);
 }
 
 fn sys_getppid_syscall() i32 {
@@ -1917,59 +1227,12 @@ fn sys_setsid() i32 {
     return @intCast(proc.pid);
 }
 
-const TimeSpec = extern struct {
-    tv_sec: i32,
-    tv_nsec: i32,
-};
-
 fn sys_nanosleep(req_addr: usize, rem_addr: usize) i32 {
-    if (!protection.verifyUserPointer(req_addr, @sizeOf(TimeSpec))) return EINVAL;
-
-    // SAFETY: filled by the subsequent copyFromUser call
-    var req: TimeSpec = undefined;
-    protection.copyFromUser(std.mem.asBytes(&req), req_addr) catch return EINVAL;
-
-    if (req.tv_sec < 0 or req.tv_nsec < 0 or req.tv_nsec >= 1_000_000_000) return EINVAL;
-
-    const total_ms: u64 = @as(u64, @intCast(req.tv_sec)) * 1000 + @as(u64, @intCast(req.tv_nsec)) / 1_000_000;
-    const ticks_to_wait = total_ms / 10;
-
-    const start = process.getSystemTime();
-    while (process.getSystemTime() - start < ticks_to_wait) {
-        process.yield();
-    }
-
-    if (rem_addr != 0 and protection.verifyUserPointer(rem_addr, @sizeOf(TimeSpec))) {
-        var zero = TimeSpec{ .tv_sec = 0, .tv_nsec = 0 };
-        protection.copyToUser(rem_addr, std.mem.asBytes(&zero)) catch {};
-    }
-
-    return 0;
+    return syscall_time.sys_nanosleep(req_addr, rem_addr);
 }
 
-const CLOCK_REALTIME: i32 = 0;
-const CLOCK_MONOTONIC: i32 = 1;
-const CLOCK_PROCESS_CPUTIME_ID: i32 = 2;
-const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
-
 fn sys_clock_gettime(clock_id: i32, tp_addr: usize) i32 {
-    if (!protection.verifyUserPointer(tp_addr, @sizeOf(TimeSpec))) return EINVAL;
-
-    switch (clock_id) {
-        CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID => {},
-        else => return EINVAL,
-    }
-
-    const ticks = process.getSystemTime();
-    const total_ms = ticks * 10;
-
-    const tp = TimeSpec{
-        .tv_sec = @intCast(total_ms / 1000),
-        .tv_nsec = @intCast((total_ms % 1000) * 1_000_000),
-    };
-
-    protection.copyToUser(tp_addr, std.mem.asBytes(&tp)) catch return EINVAL;
-    return 0;
+    return syscall_time.sys_clock_gettime(clock_id, tp_addr);
 }
 
 fn sys_access(pathname: [*]const u8, mode: u32) i32 {
@@ -2139,347 +1402,27 @@ fn sys_readlink(pathname: [*]const u8, buf: [*]u8, buf_size: usize) i32 {
 }
 
 fn sys_sigprocmask(how: i32, set_addr: usize, oldset_addr: usize) i32 {
-    var set_ptr: ?*const signal.SigSet = null;
-    var oldset_ptr: ?*signal.SigSet = null;
-
-    // SAFETY: filled by the subsequent copyFromUser call
-    var set_buf: signal.SigSet = undefined;
-    // SAFETY: filled by the subsequent sigprocmask call
-    var oldset_buf: signal.SigSet = undefined;
-
-    if (set_addr != 0) {
-        if (!protection.verifyUserPointer(set_addr, @sizeOf(signal.SigSet))) return EINVAL;
-        protection.copyFromUser(std.mem.asBytes(&set_buf), set_addr) catch return EINVAL;
-        set_ptr = &set_buf;
-    }
-
-    if (oldset_addr != 0) {
-        if (!protection.verifyUserPointer(oldset_addr, @sizeOf(signal.SigSet))) return EINVAL;
-        oldset_ptr = &oldset_buf;
-    }
-
-    signal.sigprocmask(how, set_ptr, oldset_ptr) catch return EINVAL;
-
-    if (oldset_addr != 0) {
-        protection.copyToUser(oldset_addr, std.mem.asBytes(&oldset_buf)) catch return EINVAL;
-    }
-
-    return 0;
+    return syscall_signal.sys_sigprocmask(how, set_addr, oldset_addr);
 }
 
 fn sys_sigpending(set_addr: usize) i32 {
-    if (!protection.verifyUserPointer(set_addr, @sizeOf(signal.SigSet))) return EINVAL;
-
-    // SAFETY: filled by the subsequent sigpending call
-    var set: signal.SigSet = undefined;
-    signal.sigpending(&set);
-
-    protection.copyToUser(set_addr, std.mem.asBytes(&set)) catch return EINVAL;
-    return 0;
+    return syscall_signal.sys_sigpending(set_addr);
 }
 
 fn sys_sigsuspend(mask_addr: usize) i32 {
-    if (!protection.verifyUserPointer(mask_addr, @sizeOf(signal.SigSet))) return EINVAL;
-
-    // SAFETY: filled by the subsequent copyFromUser call
-    var mask: signal.SigSet = undefined;
-    protection.copyFromUser(std.mem.asBytes(&mask), mask_addr) catch return EINVAL;
-
-    signal.sigsuspend(&mask) catch |err| {
-        return switch (err) {
-            error.Interrupted => EINTR,
-        };
-    };
-    return EINTR;
+    return syscall_signal.sys_sigsuspend(mask_addr);
 }
 
 fn sys_dup(fd: i32) i32 {
-    if (fd < FD_OFFSET) return EBADF;
-    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
-
-    var new_fd: u32 = 0;
-    while (new_fd < 256) : (new_fd += 1) {
-        const result = vfs.dup2(vfs_fd, new_fd) catch continue;
-        return @as(i32, @intCast(result)) + FD_OFFSET;
-    }
-    return EMFILE;
+    return syscall_fd.sys_dup(fd);
 }
-
-const F_DUPFD = 0;
-const F_GETFD = 1;
-const F_SETFD = 2;
-const F_GETFL = 3;
-const F_SETFL = 4;
-const FD_CLOEXEC: u32 = 1;
-
-const Flock = extern struct {
-    l_type: i16,
-    l_whence: i16,
-    l_start: i64,
-    l_len: i64,
-    l_pid: i32,
-};
-
-const FileLock = struct {
-    fd: u32,
-    l_type: i16,
-    l_start: i64,
-    l_len: i64,
-    l_pid: i32,
-    in_use: bool,
-};
-
-var file_locks: [256]FileLock = [_]FileLock{.{
-    .fd = 0,
-    .l_type = F_UNLCK,
-    .l_start = 0,
-    .l_len = 0,
-    .l_pid = 0,
-    .in_use = false,
-}} ** 256;
 
 fn sys_fcntl(fd: i32, cmd: i32, arg: usize) i32 {
-    if (fd < FD_OFFSET) return EBADF;
-    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
-
-    const ucmd: u32 = @bitCast(cmd);
-    switch (ucmd) {
-        F_DUPFD => {
-            const min_fd = if (arg >= FD_OFFSET) @as(u32, @intCast(arg - FD_OFFSET)) else 0;
-            var new_fd = min_fd;
-            while (new_fd < 256) : (new_fd += 1) {
-                const result = vfs.dup2(vfs_fd, new_fd) catch continue;
-                return @as(i32, @intCast(result)) + FD_OFFSET;
-            }
-            return EMFILE;
-        },
-        F_GETFD => {
-            const fd_flags = vfs.getFdFlags(vfs_fd) catch return EBADF;
-            return @intCast(fd_flags);
-        },
-        F_SETFD => {
-            vfs.setFdFlags(vfs_fd, @intCast(arg & FD_CLOEXEC)) catch return EBADF;
-            return 0;
-        },
-        F_GETFL => {
-            const flags = vfs.getFileFlags(vfs_fd) catch return EBADF;
-            return @intCast(flags);
-        },
-        F_SETFL => {
-            vfs.setFileFlags(vfs_fd, @intCast(arg)) catch return EBADF;
-            return 0;
-        },
-        F_GETLK => {
-            if (!protection.verifyUserPointer(arg, @sizeOf(Flock))) return EINVAL;
-            var flock: Flock = undefined;
-            protection.copyFromUser(std.mem.asBytes(&flock), arg) catch return EINVAL;
-
-            for (file_locks) |lock| {
-                if (lock.in_use and lock.fd == vfs_fd) {
-                    if (locksOverlap(flock.l_start, flock.l_len, lock.l_start, lock.l_len)) {
-                        if (lock.l_type == F_WRLCK or flock.l_type == F_WRLCK) {
-                            flock.l_type = lock.l_type;
-                            flock.l_start = lock.l_start;
-                            flock.l_len = lock.l_len;
-                            flock.l_pid = lock.l_pid;
-                            protection.copyToUser(arg, std.mem.asBytes(&flock)) catch return EINVAL;
-                            return 0;
-                        }
-                    }
-                }
-            }
-            flock.l_type = F_UNLCK;
-            protection.copyToUser(arg, std.mem.asBytes(&flock)) catch return EINVAL;
-            return 0;
-        },
-        F_SETLK, F_SETLKW => {
-            if (!protection.verifyUserPointer(arg, @sizeOf(Flock))) return EINVAL;
-            var flock: Flock = undefined;
-            protection.copyFromUser(std.mem.asBytes(&flock), arg) catch return EINVAL;
-
-            const pid: i32 = if (process.current_process) |p| @intCast(p.pid) else 0;
-
-            if (flock.l_type == F_UNLCK) {
-                for (&file_locks) |*lock| {
-                    if (lock.in_use and lock.fd == vfs_fd and lock.l_pid == pid) {
-                        if (locksOverlap(flock.l_start, flock.l_len, lock.l_start, lock.l_len)) {
-                            lock.in_use = false;
-                        }
-                    }
-                }
-                return 0;
-            }
-
-            for (file_locks) |lock| {
-                if (lock.in_use and lock.fd == vfs_fd and lock.l_pid != pid) {
-                    if (locksOverlap(flock.l_start, flock.l_len, lock.l_start, lock.l_len)) {
-                        if (lock.l_type == F_WRLCK or flock.l_type == F_WRLCK) {
-                            return EAGAIN;
-                        }
-                    }
-                }
-            }
-
-            for (&file_locks) |*lock| {
-                if (!lock.in_use) {
-                    lock.* = FileLock{
-                        .fd = vfs_fd,
-                        .l_type = flock.l_type,
-                        .l_start = flock.l_start,
-                        .l_len = flock.l_len,
-                        .l_pid = pid,
-                        .in_use = true,
-                    };
-                    return 0;
-                }
-            }
-            return ENOLCK;
-        },
-        else => return EINVAL,
-    }
-}
-
-fn locksOverlap(start1: i64, len1: i64, start2: i64, len2: i64) bool {
-    const end1 = if (len1 == 0) std.math.maxInt(i64) else start1 + len1;
-    const end2 = if (len2 == 0) std.math.maxInt(i64) else start2 + len2;
-    return start1 < end2 and start2 < end1;
-}
-
-const FdSet = extern struct {
-    fds_bits: [8]u32,
-};
-
-const Timeval = extern struct {
-    tv_sec: i32,
-    tv_usec: i32,
-};
-
-fn selectCheckFds(nfds: u32, readfds: *const FdSet, writefds: *const FdSet, exceptfds: *const FdSet, result_readfds: *FdSet, result_writefds: *FdSet, result_exceptfds: *FdSet) i32 {
-    result_readfds.* = std.mem.zeroes(FdSet);
-    result_writefds.* = std.mem.zeroes(FdSet);
-    result_exceptfds.* = std.mem.zeroes(FdSet);
-
-    var count: i32 = 0;
-    var i: u32 = 0;
-    while (i < nfds) : (i += 1) {
-        const word_idx = i / 32;
-        const bit_idx: u5 = @intCast(i % 32);
-        const mask = @as(u32, 1) << bit_idx;
-
-        if (readfds.fds_bits[word_idx] & mask != 0) {
-            if (i < FD_OFFSET) {
-                if (i == STDIN) {
-                    result_readfds.fds_bits[word_idx] |= mask;
-                    count += 1;
-                }
-            } else {
-                const vfs_fd: u32 = i - FD_OFFSET;
-                if (vfs.getFileFlags(vfs_fd)) |_| {
-                    result_readfds.fds_bits[word_idx] |= mask;
-                    count += 1;
-                } else |_| {}
-            }
-        }
-
-        if (writefds.fds_bits[word_idx] & mask != 0) {
-            if (i < FD_OFFSET) {
-                if (i == STDOUT or i == STDERR) {
-                    result_writefds.fds_bits[word_idx] |= mask;
-                    count += 1;
-                }
-            } else {
-                const vfs_fd: u32 = i - FD_OFFSET;
-                if (vfs.getFileFlags(vfs_fd)) |_| {
-                    result_writefds.fds_bits[word_idx] |= mask;
-                    count += 1;
-                } else |_| {}
-            }
-        }
-
-        if (exceptfds.fds_bits[word_idx] & mask != 0) {
-            if (i >= FD_OFFSET) {
-                const vfs_fd: u32 = i - FD_OFFSET;
-                if (vfs.getFileFlags(vfs_fd)) |_| {} else |_| {
-                    result_exceptfds.fds_bits[word_idx] |= mask;
-                    count += 1;
-                }
-            }
-        }
-    }
-    return count;
+    return syscall_fd.sys_fcntl(fd, cmd, arg);
 }
 
 fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfds_addr: usize, timeout_addr: usize) i32 {
-    if (nfds < 0 or nfds > 256) return EINVAL;
-
-    var readfds: FdSet = std.mem.zeroes(FdSet);
-    var writefds: FdSet = std.mem.zeroes(FdSet);
-    var exceptfds: FdSet = std.mem.zeroes(FdSet);
-    var result_readfds: FdSet = std.mem.zeroes(FdSet);
-    var result_writefds: FdSet = std.mem.zeroes(FdSet);
-    var result_exceptfds: FdSet = std.mem.zeroes(FdSet);
-
-    if (readfds_addr != 0) {
-        if (!protection.verifyUserPointer(readfds_addr, @sizeOf(FdSet))) return EINVAL;
-        protection.copyFromUser(std.mem.asBytes(&readfds), readfds_addr) catch return EINVAL;
-    }
-
-    if (writefds_addr != 0) {
-        if (!protection.verifyUserPointer(writefds_addr, @sizeOf(FdSet))) return EINVAL;
-        protection.copyFromUser(std.mem.asBytes(&writefds), writefds_addr) catch return EINVAL;
-    }
-
-    if (exceptfds_addr != 0) {
-        if (!protection.verifyUserPointer(exceptfds_addr, @sizeOf(FdSet))) return EINVAL;
-        protection.copyFromUser(std.mem.asBytes(&exceptfds), exceptfds_addr) catch return EINVAL;
-    }
-
-    var timeout_ms: i64 = -1;
-    if (timeout_addr != 0) {
-        if (!protection.verifyUserPointer(timeout_addr, @sizeOf(Timeval))) return EINVAL;
-        var tv: Timeval = undefined;
-        protection.copyFromUser(std.mem.asBytes(&tv), timeout_addr) catch return EINVAL;
-        timeout_ms = @as(i64, tv.tv_sec) * 1000 + @divTrunc(tv.tv_usec, 1000);
-    }
-
-    var count = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds);
-
-    if (timeout_ms == 0 or count > 0) {
-        if (readfds_addr != 0) {
-            protection.copyToUser(readfds_addr, std.mem.asBytes(&result_readfds)) catch return EINVAL;
-        }
-        if (writefds_addr != 0) {
-            protection.copyToUser(writefds_addr, std.mem.asBytes(&result_writefds)) catch return EINVAL;
-        }
-        if (exceptfds_addr != 0) {
-            protection.copyToUser(exceptfds_addr, std.mem.asBytes(&result_exceptfds)) catch return EINVAL;
-        }
-        return count;
-    }
-
-    const timer = @import("../timer/timer.zig");
-    const start_ticks = timer.getTicks();
-    const timeout_ticks: u64 = if (timeout_ms < 0) std.math.maxInt(u64) else @as(u64, @intCast(timeout_ms)) / 10;
-
-    while (count == 0) {
-        const elapsed = timer.getTicks() - start_ticks;
-        if (timeout_ms >= 0 and elapsed >= timeout_ticks) break;
-
-        process.yield();
-        count = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds);
-    }
-
-    if (readfds_addr != 0) {
-        protection.copyToUser(readfds_addr, std.mem.asBytes(&result_readfds)) catch return EINVAL;
-    }
-    if (writefds_addr != 0) {
-        protection.copyToUser(writefds_addr, std.mem.asBytes(&result_writefds)) catch return EINVAL;
-    }
-    if (exceptfds_addr != 0) {
-        protection.copyToUser(exceptfds_addr, std.mem.asBytes(&result_exceptfds)) catch return EINVAL;
-    }
-
-    return count;
+    return syscall_event.sys_select(nfds, readfds_addr, writefds_addr, exceptfds_addr, timeout_addr);
 }
 
 fn sys_umask(mask: u16) i32 {
@@ -2489,84 +1432,24 @@ fn sys_umask(mask: u16) i32 {
     return @intCast(old);
 }
 
-const UtsName = extern struct {
-    sysname: [65]u8,
-    nodename: [65]u8,
-    release: [65]u8,
-    version: [65]u8,
-    machine: [65]u8,
-};
-
-var system_hostname: [65]u8 = blk: {
-    var name = [_]u8{0} ** 65;
-    name[0] = 'z';
-    name[1] = 'i';
-    name[2] = 'g';
-    name[3] = 'o';
-    name[4] = 's';
-    break :blk name;
-};
-var hostname_len: usize = 5;
-
 pub fn getHostname() []const u8 {
-    return system_hostname[0..hostname_len];
+    return syscall_system.getHostname();
 }
 
 pub fn setHostname(name: []const u8) void {
-    const len = @min(name.len, 64);
-    @memset(&system_hostname, 0);
-    @memcpy(system_hostname[0..len], name[0..len]);
-    hostname_len = len;
+    syscall_system.setHostname(name);
 }
 
 fn sys_gethostname(name_addr: usize, len: usize) i32 {
-    if (len == 0) return EINVAL;
-    if (!protection.verifyUserPointer(name_addr, len)) return EINVAL;
-
-    const copy_len = @min(len - 1, hostname_len);
-    var buf: [65]u8 = undefined;
-    @memcpy(buf[0..copy_len], system_hostname[0..copy_len]);
-    buf[copy_len] = 0;
-
-    protection.copyToUser(name_addr, buf[0 .. copy_len + 1]) catch return EINVAL;
-    return 0;
+    return syscall_system.sys_gethostname(name_addr, len);
 }
 
 fn sys_sethostname(name_addr: usize, len: usize) i32 {
-    if (process.current_process) |proc| {
-        if (!credentials.isRoot(&proc.creds)) {
-            return EPERM;
-        }
-    }
-
-    if (len > 64) return EINVAL;
-    if (!protection.verifyUserPointer(name_addr, len)) return EINVAL;
-
-    var buf: [64]u8 = undefined;
-    protection.copyFromUser(buf[0..len], name_addr) catch return EINVAL;
-
-    setHostname(buf[0..len]);
-    return 0;
-}
-
-fn fillField(dest: *[65]u8, src: []const u8) void {
-    @memset(dest, 0);
-    const len = @min(src.len, 64);
-    @memcpy(dest[0..len], src[0..len]);
+    return syscall_system.sys_sethostname(name_addr, len);
 }
 
 fn sys_uname(buf_addr: usize) i32 {
-    if (!protection.verifyUserPointer(buf_addr, @sizeOf(UtsName))) return EINVAL;
-
-    var buf: UtsName = undefined;
-    fillField(&buf.sysname, "ZigOS");
-    fillField(&buf.nodename, system_hostname[0..hostname_len]);
-    fillField(&buf.release, "0.1.0");
-    fillField(&buf.version, "ZigOS 0.1.0 (Zig 0.16.0-dev)");
-    fillField(&buf.machine, "i386");
-
-    protection.copyToUser(buf_addr, std.mem.asBytes(&buf)) catch return EINVAL;
-    return 0;
+    return syscall_system.sys_uname(buf_addr);
 }
 
 fn sys_truncate(pathname: [*]const u8, length: usize) i32 {
@@ -2582,7 +1465,7 @@ fn sys_truncate(pathname: [*]const u8, length: usize) i32 {
 fn sys_pread(fd: i32, buf: [*]u8, count: usize, offset: u64) i32 {
     if (!protection.verifyUserPointer(@intFromPtr(buf), count)) return EINVAL;
     if (fd < FD_OFFSET) return EBADF;
-    if (isSpecialFd(fd)) return EBADF;
+    if (syscall_fd.isSpecialFd(fd)) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
     var kernel_buffer: [512]u8 = undefined;
@@ -2604,7 +1487,7 @@ fn sys_pread(fd: i32, buf: [*]u8, count: usize, offset: u64) i32 {
 fn sys_pwrite(fd: i32, buf: [*]const u8, count: usize, offset: u64) i32 {
     if (!protection.verifyUserPointer(@intFromPtr(buf), count)) return EINVAL;
     if (fd < FD_OFFSET) return EBADF;
-    if (isSpecialFd(fd)) return EBADF;
+    if (syscall_fd.isSpecialFd(fd)) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
     var kernel_buffer: [512]u8 = undefined;
@@ -2794,92 +1677,11 @@ fn sys_fchown(fd: i32, uid: u16, gid: u16) i32 {
 }
 
 fn sys_fsync(fd: i32) i32 {
-    if (fd < FD_OFFSET) return EBADF;
-    return 0;
-}
-
-const PollFd = extern struct {
-    fd: i32,
-    events: i16,
-    revents: i16,
-};
-
-const POLLIN: i16 = 0x001;
-const POLLOUT: i16 = 0x004;
-const POLLERR: i16 = 0x008;
-const POLLHUP: i16 = 0x010;
-const POLLNVAL: i16 = 0x020;
-
-fn pollCheckFds(kernel_fds: []PollFd, nfds: u32) i32 {
-    var count: i32 = 0;
-    var i: u32 = 0;
-    while (i < nfds) : (i += 1) {
-        kernel_fds[i].revents = 0;
-        const fd = kernel_fds[i].fd;
-
-        if (fd < 0) continue;
-
-        if (fd < FD_OFFSET) {
-            if (fd == STDIN and (kernel_fds[i].events & POLLIN) != 0) {
-                kernel_fds[i].revents |= POLLIN;
-                count += 1;
-            }
-            if ((fd == STDOUT or fd == STDERR) and (kernel_fds[i].events & POLLOUT) != 0) {
-                kernel_fds[i].revents |= POLLOUT;
-                count += 1;
-            }
-            continue;
-        }
-
-        const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
-        if (vfs.getFileFlags(vfs_fd)) |flags| {
-            const access_mode = flags & 0x3;
-            if ((kernel_fds[i].events & POLLIN) != 0 and (access_mode == 0 or access_mode == 2)) {
-                kernel_fds[i].revents |= POLLIN;
-            }
-            if ((kernel_fds[i].events & POLLOUT) != 0 and (access_mode == 1 or access_mode == 2)) {
-                kernel_fds[i].revents |= POLLOUT;
-            }
-            if (kernel_fds[i].revents != 0) count += 1;
-        } else |_| {
-            kernel_fds[i].revents = POLLNVAL;
-            count += 1;
-        }
-    }
-    return count;
+    return syscall_fd.sys_fsync(fd);
 }
 
 fn sys_poll(fds_addr: usize, nfds: u32, timeout: i32) i32 {
-    if (nfds == 0) return 0;
-    if (nfds > 256) return EINVAL;
-
-    const copy_size = nfds * @sizeOf(PollFd);
-    if (!protection.verifyUserPointer(fds_addr, copy_size)) return EINVAL;
-
-    var kernel_fds: [256]PollFd = undefined;
-    protection.copyFromUser(std.mem.asBytes(&kernel_fds)[0..copy_size], fds_addr) catch return EINVAL;
-
-    var count = pollCheckFds(kernel_fds[0..nfds], nfds);
-
-    if (timeout == 0 or count > 0) {
-        protection.copyToUser(fds_addr, std.mem.asBytes(&kernel_fds)[0..copy_size]) catch return EINVAL;
-        return count;
-    }
-
-    const timer = @import("../timer/timer.zig");
-    const start_ticks = timer.getTicks();
-    const timeout_ticks: u64 = if (timeout < 0) std.math.maxInt(u64) else @as(u64, @intCast(timeout)) / 10;
-
-    while (count == 0) {
-        const elapsed = timer.getTicks() - start_ticks;
-        if (timeout >= 0 and elapsed >= timeout_ticks) break;
-
-        process.yield();
-        count = pollCheckFds(kernel_fds[0..nfds], nfds);
-    }
-
-    protection.copyToUser(fds_addr, std.mem.asBytes(&kernel_fds)[0..copy_size]) catch return EINVAL;
-    return count;
+    return syscall_event.sys_poll(fds_addr, nfds, timeout);
 }
 
 fn sys_lstat(pathname: [*]const u8, stat_buf_addr: usize) i32 {
@@ -3130,171 +1932,32 @@ fn sys_fstatfs(fd: i32, buf_addr: usize) i32 {
     return 0;
 }
 
-fn resolveDirFd(dirfd: i32, path: []const u8, buf: *[512]u8) ?[]const u8 {
-    if (path.len > 0 and path[0] == '/') {
-        return path;
-    }
-
-    var base_path: []const u8 = undefined;
-    if (dirfd == AT_FDCWD) {
-        ensureCwdInit();
-        base_path = current_working_dir[0..cwd_len];
-    } else {
-        if (dirfd < FD_OFFSET) return null;
-        const vfs_fd: u32 = @intCast(dirfd - FD_OFFSET);
-        const vnode = vfs.getVNodeFromFd(vfs_fd) catch return null;
-        if (vnode.file_type != .Directory) return null;
-        base_path = vfs.getNodePath(vnode) catch return null;
-    }
-
-    if (base_path.len + 1 + path.len >= buf.len) return null;
-
-    @memcpy(buf[0..base_path.len], base_path);
-    var pos = base_path.len;
-    if (pos > 0 and buf[pos - 1] != '/') {
-        buf[pos] = '/';
-        pos += 1;
-    }
-    @memcpy(buf[pos .. pos + path.len], path);
-    pos += path.len;
-
-    return buf[0..pos];
-}
-
 fn sys_openat(dirfd: i32, pathname: [*]const u8, flags: i32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
-
-    var path_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EINVAL;
-
-    var resolved_buf: [512]u8 = undefined;
-    const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return EBADF;
-
-    const fd = vfs.open(resolved, @intCast(flags)) catch |err| return vfsErrno(err);
-    return @intCast(@as(i32, @intCast(fd)) + FD_OFFSET);
+    return syscall_at.sys_openat(dirfd, pathname, flags);
 }
 
 fn sys_mkdirat(dirfd: i32, pathname: [*]const u8, mode: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
-
-    var path_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EINVAL;
-
-    var resolved_buf: [512]u8 = undefined;
-    const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return EBADF;
-
-    const mode_struct = vfs.FileMode{
-        .owner_read = (mode & 0o400) != 0,
-        .owner_write = (mode & 0o200) != 0,
-        .owner_exec = (mode & 0o100) != 0,
-        .group_read = (mode & 0o040) != 0,
-        .group_write = (mode & 0o020) != 0,
-        .group_exec = (mode & 0o010) != 0,
-        .other_read = (mode & 0o004) != 0,
-        .other_write = (mode & 0o002) != 0,
-        .other_exec = (mode & 0o001) != 0,
-    };
-
-    vfs.mkdir(resolved, mode_struct) catch |err| return vfsErrno(err);
-    return 0;
+    return syscall_at.sys_mkdirat(dirfd, pathname, mode);
 }
 
 fn sys_unlinkat(dirfd: i32, pathname: [*]const u8, flags: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
-
-    var path_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EINVAL;
-
-    var resolved_buf: [512]u8 = undefined;
-    const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return EBADF;
-
-    if (flags & AT_REMOVEDIR != 0) {
-        vfs.rmdir(resolved) catch |err| return vfsErrno(err);
-    } else {
-        vfs.unlink(resolved) catch |err| return vfsErrno(err);
-    }
-    return 0;
+    return syscall_at.sys_unlinkat(dirfd, pathname, flags);
 }
 
-fn sys_linkat(olddirfd: i32, oldpath: [*]const u8, newdirfd: i32, newpath: [*]const u8, _: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(oldpath), 256)) return EINVAL;
-    if (!protection.verifyUserPointer(@intFromPtr(newpath), 256)) return EINVAL;
-
-    var old_buffer: [256]u8 = undefined;
-    var new_buffer: [256]u8 = undefined;
-
-    const old_slice = protection.copyStringFromUser(&old_buffer, @intFromPtr(oldpath)) catch return EINVAL;
-    const new_slice = protection.copyStringFromUser(&new_buffer, @intFromPtr(newpath)) catch return EINVAL;
-
-    var resolved_old_buf: [512]u8 = undefined;
-    var resolved_new_buf: [512]u8 = undefined;
-
-    const resolved_old = resolveDirFd(olddirfd, old_slice, &resolved_old_buf) orelse return EBADF;
-    const resolved_new = resolveDirFd(newdirfd, new_slice, &resolved_new_buf) orelse return EBADF;
-
-    vfs.link(resolved_old, resolved_new) catch |err| return vfsErrno(err);
-    return 0;
+fn sys_linkat(olddirfd: i32, oldpath: [*]const u8, newdirfd: i32, newpath: [*]const u8, flags: u32) i32 {
+    return syscall_at.sys_linkat(olddirfd, oldpath, newdirfd, newpath, flags);
 }
 
 fn sys_fchmodat(dirfd: i32, pathname: [*]const u8, mode: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
-
-    var path_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EINVAL;
-
-    var resolved_buf: [512]u8 = undefined;
-    const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return EBADF;
-
-    const mode_struct = vfs.FileMode{
-        .owner_read = (mode & 0o400) != 0,
-        .owner_write = (mode & 0o200) != 0,
-        .owner_exec = (mode & 0o100) != 0,
-        .group_read = (mode & 0o040) != 0,
-        .group_write = (mode & 0o020) != 0,
-        .group_exec = (mode & 0o010) != 0,
-        .other_read = (mode & 0o004) != 0,
-        .other_write = (mode & 0o002) != 0,
-        .other_exec = (mode & 0o001) != 0,
-    };
-
-    vfs.chmod(resolved, mode_struct) catch |err| return vfsErrno(err);
-    return 0;
+    return syscall_at.sys_fchmodat(dirfd, pathname, mode);
 }
 
 fn sys_fchownat(dirfd: i32, pathname: [*]const u8, owner: i32, group: i32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
-
-    var path_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EINVAL;
-
-    var resolved_buf: [512]u8 = undefined;
-    const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return EBADF;
-
-    const uid: u32 = if (owner < 0) 0xFFFFFFFF else @intCast(owner);
-    const gid: u32 = if (group < 0) 0xFFFFFFFF else @intCast(group);
-
-    vfs.chown(resolved, uid, gid) catch |err| return vfsErrno(err);
-    return 0;
+    return syscall_at.sys_fchownat(dirfd, pathname, owner, group);
 }
 
 fn sys_renameat(olddirfd: i32, oldpath: [*]const u8, newdirfd: i32, newpath: [*]const u8) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(oldpath), 256)) return EINVAL;
-    if (!protection.verifyUserPointer(@intFromPtr(newpath), 256)) return EINVAL;
-
-    var old_buffer: [256]u8 = undefined;
-    var new_buffer: [256]u8 = undefined;
-
-    const old_slice = protection.copyStringFromUser(&old_buffer, @intFromPtr(oldpath)) catch return EINVAL;
-    const new_slice = protection.copyStringFromUser(&new_buffer, @intFromPtr(newpath)) catch return EINVAL;
-
-    var resolved_old_buf: [512]u8 = undefined;
-    var resolved_new_buf: [512]u8 = undefined;
-
-    const resolved_old = resolveDirFd(olddirfd, old_slice, &resolved_old_buf) orelse return EBADF;
-    const resolved_new = resolveDirFd(newdirfd, new_slice, &resolved_new_buf) orelse return EBADF;
-
-    vfs.rename(resolved_old, resolved_new) catch |err| return vfsErrno(err);
-    return 0;
+    return syscall_at.sys_renameat(olddirfd, oldpath, newdirfd, newpath);
 }
 
 fn sys_getgroups(size: i32, list_addr: usize) i32 {
@@ -3342,48 +2005,12 @@ fn sys_setgroups(size: i32, list_addr: usize) i32 {
     return 0;
 }
 
-const Itimerval = extern struct {
-    it_interval_sec: u32,
-    it_interval_usec: u32,
-    it_value_sec: u32,
-    it_value_usec: u32,
-};
-
-var process_itimers: [256][3]Itimerval = [_][3]Itimerval{[_]Itimerval{.{
-    .it_interval_sec = 0,
-    .it_interval_usec = 0,
-    .it_value_sec = 0,
-    .it_value_usec = 0,
-}} ** 3} ** 256;
-
 fn sys_getitimer(which: u32, value_addr: usize) i32 {
-    if (which > ITIMER_PROF) return EINVAL;
-    if (!protection.verifyUserPointer(value_addr, @sizeOf(Itimerval))) return EINVAL;
-
-    const proc = process.current_process orelse return ESRCH;
-    const timer = process_itimers[proc.pid % 256][which];
-
-    protection.copyToUser(value_addr, std.mem.asBytes(&timer)) catch return EINVAL;
-    return 0;
+    return syscall_time.sys_getitimer(which, value_addr);
 }
 
 fn sys_setitimer(which: u32, new_value_addr: usize, old_value_addr: usize) i32 {
-    if (which > ITIMER_PROF) return EINVAL;
-    if (!protection.verifyUserPointer(new_value_addr, @sizeOf(Itimerval))) return EINVAL;
-    if (old_value_addr != 0 and !protection.verifyUserPointer(old_value_addr, @sizeOf(Itimerval))) return EINVAL;
-
-    const proc = process.current_process orelse return ESRCH;
-
-    if (old_value_addr != 0) {
-        const old_timer = process_itimers[proc.pid % 256][which];
-        protection.copyToUser(old_value_addr, std.mem.asBytes(&old_timer)) catch return EINVAL;
-    }
-
-    var new_timer: Itimerval = undefined;
-    protection.copyFromUser(std.mem.asBytes(&new_timer), new_value_addr) catch return EINVAL;
-    process_itimers[proc.pid % 256][which] = new_timer;
-
-    return 0;
+    return syscall_time.sys_setitimer(which, new_value_addr, old_value_addr);
 }
 
 fn sys_mkfifo(pathname: [*]const u8, mode: u32) i32 {
@@ -3408,207 +2035,28 @@ fn sys_mkfifo(pathname: [*]const u8, mode: u32) i32 {
     return 0;
 }
 
-const EpollEvent = extern struct {
-    events: u32,
-    data: u64,
-};
-
-const EpollEntry = struct {
-    fd: i32,
-    events: u32,
-    data: u64,
-};
-
-const EpollInstance = struct {
-    entries: [64]?EpollEntry,
-    count: usize,
-    in_use: bool,
-};
-
-var epoll_instances: [64]EpollInstance = [_]EpollInstance{.{
-    .entries = [_]?EpollEntry{null} ** 64,
-    .count = 0,
-    .in_use = false,
-}} ** 64;
-
-fn sys_epoll_create(_: i32) i32 {
-    for (&epoll_instances, 0..) |*inst, i| {
-        if (!inst.in_use) {
-            inst.in_use = true;
-            inst.count = 0;
-            for (&inst.entries) |*e| {
-                e.* = null;
-            }
-            return @intCast(@as(i32, @intCast(i)) + FD_OFFSET + 200);
-        }
-    }
-    return EMFILE;
+fn sys_epoll_create(size: i32) i32 {
+    return syscall_event.sys_epoll_create(size);
 }
 
 fn sys_epoll_ctl(epfd: i32, op: u32, fd: i32, event_addr: usize) i32 {
-    const idx = epfd - FD_OFFSET - 200;
-    if (idx < 0 or idx >= 64) return EBADF;
-    const inst = &epoll_instances[@intCast(idx)];
-    if (!inst.in_use) return EBADF;
-
-    switch (op) {
-        EPOLL_CTL_ADD => {
-            if (event_addr == 0) return EINVAL;
-            if (!protection.verifyUserPointer(event_addr, @sizeOf(EpollEvent))) return EINVAL;
-            var ev: EpollEvent = undefined;
-            protection.copyFromUser(std.mem.asBytes(&ev), event_addr) catch return EINVAL;
-
-            for (inst.entries) |maybe_entry| {
-                if (maybe_entry) |entry| {
-                    if (entry.fd == fd) return EEXIST;
-                }
-            }
-
-            for (&inst.entries) |*e| {
-                if (e.* == null) {
-                    e.* = EpollEntry{ .fd = fd, .events = ev.events, .data = ev.data };
-                    inst.count += 1;
-                    return 0;
-                }
-            }
-            return ENOSPC;
-        },
-        EPOLL_CTL_DEL => {
-            for (&inst.entries) |*e| {
-                if (e.*) |entry| {
-                    if (entry.fd == fd) {
-                        e.* = null;
-                        inst.count -= 1;
-                        return 0;
-                    }
-                }
-            }
-            return ENOENT;
-        },
-        EPOLL_CTL_MOD => {
-            if (event_addr == 0) return EINVAL;
-            if (!protection.verifyUserPointer(event_addr, @sizeOf(EpollEvent))) return EINVAL;
-            var ev: EpollEvent = undefined;
-            protection.copyFromUser(std.mem.asBytes(&ev), event_addr) catch return EINVAL;
-
-            for (&inst.entries) |*e| {
-                if (e.*) |*entry| {
-                    if (entry.fd == fd) {
-                        entry.events = ev.events;
-                        entry.data = ev.data;
-                        return 0;
-                    }
-                }
-            }
-            return ENOENT;
-        },
-        else => return EINVAL,
-    }
+    return syscall_event.sys_epoll_ctl(epfd, op, fd, event_addr);
 }
 
-fn sys_epoll_wait(epfd: i32, events_addr: usize, maxevents: i32, _: i32) i32 {
-    const idx = epfd - FD_OFFSET - 200;
-    if (idx < 0 or idx >= 64) return EBADF;
-    const inst = &epoll_instances[@intCast(idx)];
-    if (!inst.in_use) return EBADF;
-
-    if (maxevents <= 0) return EINVAL;
-    const max: usize = @intCast(maxevents);
-    if (!protection.verifyUserPointer(events_addr, max * @sizeOf(EpollEvent))) return EINVAL;
-
-    var count: usize = 0;
-    var events: [64]EpollEvent = undefined;
-
-    for (inst.entries) |maybe_entry| {
-        if (maybe_entry) |entry| {
-            if (count >= max) break;
-            var ready: u32 = 0;
-
-            if (entry.fd >= FD_OFFSET) {
-                const vfs_fd: u32 = @intCast(entry.fd - FD_OFFSET);
-                if (vfs.getFileFlags(vfs_fd)) |_| {
-                    if (entry.events & EPOLLIN != 0) ready |= EPOLLIN;
-                    if (entry.events & EPOLLOUT != 0) ready |= EPOLLOUT;
-                } else |_| {
-                    ready |= EPOLLERR;
-                }
-            }
-
-            if (ready != 0) {
-                events[count] = EpollEvent{ .events = ready, .data = entry.data };
-                count += 1;
-            }
-        }
-    }
-
-    if (count > 0) {
-        protection.copyToUser(events_addr, std.mem.sliceAsBytes(events[0..count])) catch return EINVAL;
-    }
-    return @intCast(count);
+fn sys_epoll_wait(epfd: i32, events_addr: usize, maxevents: i32, timeout: i32) i32 {
+    return syscall_event.sys_epoll_wait(epfd, events_addr, maxevents, timeout);
 }
-
-const ItimerSpec = extern struct {
-    it_interval_sec: u32,
-    it_interval_nsec: u32,
-    it_value_sec: u32,
-    it_value_nsec: u32,
-};
-
-const TimerFd = struct {
-    clockid: u32,
-    flags: u32,
-    spec: ItimerSpec,
-    in_use: bool,
-};
-
-var timerfd_table: [64]TimerFd = [_]TimerFd{.{
-    .clockid = 0,
-    .flags = 0,
-    .spec = .{ .it_interval_sec = 0, .it_interval_nsec = 0, .it_value_sec = 0, .it_value_nsec = 0 },
-    .in_use = false,
-}} ** 64;
 
 fn sys_timerfd_create(clockid: u32, flags: u32) i32 {
-    if (clockid != CLOCK_REALTIME and clockid != CLOCK_MONOTONIC) return EINVAL;
-
-    for (&timerfd_table, 0..) |*tfd, i| {
-        if (!tfd.in_use) {
-            tfd.in_use = true;
-            tfd.clockid = clockid;
-            tfd.flags = flags;
-            tfd.spec = .{ .it_interval_sec = 0, .it_interval_nsec = 0, .it_value_sec = 0, .it_value_nsec = 0 };
-            return @intCast(@as(i32, @intCast(i)) + FD_OFFSET + 300);
-        }
-    }
-    return EMFILE;
+    return syscall_time.sys_timerfd_create(clockid, flags);
 }
 
-fn sys_timerfd_settime(fd: i32, _: u32, new_value_addr: usize, old_value_addr: usize) i32 {
-    const idx = fd - FD_OFFSET - 300;
-    if (idx < 0 or idx >= 64) return EBADF;
-    const tfd = &timerfd_table[@intCast(idx)];
-    if (!tfd.in_use) return EBADF;
-
-    if (!protection.verifyUserPointer(new_value_addr, @sizeOf(ItimerSpec))) return EINVAL;
-
-    if (old_value_addr != 0) {
-        if (!protection.verifyUserPointer(old_value_addr, @sizeOf(ItimerSpec))) return EINVAL;
-        protection.copyToUser(old_value_addr, std.mem.asBytes(&tfd.spec)) catch return EINVAL;
-    }
-
-    protection.copyFromUser(std.mem.asBytes(&tfd.spec), new_value_addr) catch return EINVAL;
-    return 0;
+fn sys_timerfd_settime(fd: i32, flags: u32, new_value_addr: usize, old_value_addr: usize) i32 {
+    return syscall_time.sys_timerfd_settime(fd, flags, new_value_addr, old_value_addr);
 }
 
 fn sys_timerfd_gettime(fd: i32, value_addr: usize) i32 {
-    const idx = fd - FD_OFFSET - 300;
-    if (idx < 0 or idx >= 64) return EBADF;
-    const tfd = &timerfd_table[@intCast(idx)];
-    if (!tfd.in_use) return EBADF;
-
-    if (!protection.verifyUserPointer(value_addr, @sizeOf(ItimerSpec))) return EINVAL;
-    protection.copyToUser(value_addr, std.mem.asBytes(&tfd.spec)) catch return EINVAL;
-    return 0;
+    return syscall_time.sys_timerfd_gettime(fd, value_addr);
 }
 
 const ShmSegment = struct {
@@ -3854,75 +2302,12 @@ fn sys_semctl(semid: i32, semnum: u32, cmd: u32, arg: usize) i32 {
     }
 }
 
-const Tms = extern struct {
-    tms_utime: u32,
-    tms_stime: u32,
-    tms_cutime: u32,
-    tms_cstime: u32,
-};
-
 fn sys_times(buf_addr: usize) i32 {
-    if (buf_addr != 0) {
-        if (!protection.verifyUserPointer(buf_addr, @sizeOf(Tms))) return EINVAL;
-        const tms = Tms{
-            .tms_utime = 0,
-            .tms_stime = 0,
-            .tms_cutime = 0,
-            .tms_cstime = 0,
-        };
-        protection.copyToUser(buf_addr, std.mem.asBytes(&tms)) catch return EINVAL;
-    }
-    return 0;
+    return syscall_time.sys_times(buf_addr);
 }
 
-const Rusage = extern struct {
-    ru_utime_sec: u32,
-    ru_utime_usec: u32,
-    ru_stime_sec: u32,
-    ru_stime_usec: u32,
-    ru_maxrss: u32,
-    ru_ixrss: u32,
-    ru_idrss: u32,
-    ru_isrss: u32,
-    ru_minflt: u32,
-    ru_majflt: u32,
-    ru_nswap: u32,
-    ru_inblock: u32,
-    ru_oublock: u32,
-    ru_msgsnd: u32,
-    ru_msgrcv: u32,
-    ru_nsignals: u32,
-    ru_nvcsw: u32,
-    ru_nivcsw: u32,
-};
-
 fn sys_getrusage(who: i32, usage_addr: usize) i32 {
-    if (who != RUSAGE_SELF and who != RUSAGE_CHILDREN) return EINVAL;
-    if (!protection.verifyUserPointer(usage_addr, @sizeOf(Rusage))) return EINVAL;
-
-    const usage = Rusage{
-        .ru_utime_sec = 0,
-        .ru_utime_usec = 0,
-        .ru_stime_sec = 0,
-        .ru_stime_usec = 0,
-        .ru_maxrss = 0,
-        .ru_ixrss = 0,
-        .ru_idrss = 0,
-        .ru_isrss = 0,
-        .ru_minflt = 0,
-        .ru_majflt = 0,
-        .ru_nswap = 0,
-        .ru_inblock = 0,
-        .ru_oublock = 0,
-        .ru_msgsnd = 0,
-        .ru_msgrcv = 0,
-        .ru_nsignals = 0,
-        .ru_nvcsw = 0,
-        .ru_nivcsw = 0,
-    };
-
-    protection.copyToUser(usage_addr, std.mem.asBytes(&usage)) catch return EINVAL;
-    return 0;
+    return syscall_time.sys_getrusage(who, usage_addr);
 }
 
 fn sys_mknod(pathname: [*]const u8, mode: u32, dev: u32) i32 {
@@ -4004,49 +2389,11 @@ fn sys_getrandom(buf: [*]u8, buflen: usize, flags: u32) i32 {
 }
 
 fn sys_pipe2(pipefd: ?*[2]i32, flags: u32) i32 {
-    if (pipefd == null) return EINVAL;
-    if (!protection.verifyUserPointer(@intFromPtr(pipefd), @sizeOf([2]i32))) {
-        return EINVAL;
-    }
-
-    const result = vfs.createPipe() catch |err| return vfsErrno(err);
-    const fds = [2]i32{
-        @as(i32, @intCast(result.read_fd)) + FD_OFFSET,
-        @as(i32, @intCast(result.write_fd)) + FD_OFFSET,
-    };
-
-    if ((flags & O_CLOEXEC) != 0) {
-        vfs.setFdFlags(result.read_fd, FD_CLOEXEC) catch {};
-        vfs.setFdFlags(result.write_fd, FD_CLOEXEC) catch {};
-    }
-
-    if ((flags & vfs.O_NONBLOCK) != 0) {
-        vfs.setFileFlags(result.read_fd, vfs.O_NONBLOCK) catch {};
-        vfs.setFileFlags(result.write_fd, vfs.O_NONBLOCK) catch {};
-    }
-
-    protection.copyToUser(@intFromPtr(pipefd), std.mem.asBytes(&fds)) catch {
-        vfs.close(result.read_fd) catch {};
-        vfs.close(result.write_fd) catch {};
-        return EINVAL;
-    };
-    return 0;
+    return syscall_fd.sys_pipe2(pipefd, flags);
 }
 
 fn sys_dup3(old_fd: i32, new_fd: i32, flags: u32) i32 {
-    if (old_fd < FD_OFFSET or new_fd < FD_OFFSET) return EBADF;
-    if (old_fd == new_fd) return EINVAL;
-
-    const old_vfs_fd: u32 = @intCast(old_fd - FD_OFFSET);
-    const new_vfs_fd: u32 = @intCast(new_fd - FD_OFFSET);
-
-    const result = vfs.dup2(old_vfs_fd, new_vfs_fd) catch |err| return vfsErrno(err);
-
-    if ((flags & O_CLOEXEC) != 0) {
-        vfs.setFdFlags(new_vfs_fd, FD_CLOEXEC) catch {};
-    }
-
-    return @as(i32, @intCast(result)) + FD_OFFSET;
+    return syscall_fd.sys_dup3(old_fd, new_fd, flags);
 }
 
 fn sys_accept4(sockfd: i32, addr: usize, addrlen: usize, flags: u32) i32 {
@@ -4093,28 +2440,12 @@ fn sys_accept4(sockfd: i32, addr: usize, addrlen: usize, flags: u32) i32 {
     return EMFILE;
 }
 
-const EventFD = struct {
-    counter: u64,
-    flags: u32,
-    in_use: bool,
-};
-
-var eventfd_table: [64]EventFD = [_]EventFD{.{ .counter = 0, .flags = 0, .in_use = false }} ** 64;
-
 fn sys_eventfd(initval: u32) i32 {
-    return sys_eventfd2(initval, 0);
+    return syscall_event.sys_eventfd(initval);
 }
 
 fn sys_eventfd2(initval: u32, flags: u32) i32 {
-    for (&eventfd_table, 0..) |*efd, i| {
-        if (!efd.in_use) {
-            efd.in_use = true;
-            efd.counter = initval;
-            efd.flags = flags;
-            return @intCast(@as(i32, @intCast(i)) + 2000);
-        }
-    }
-    return EMFILE;
+    return syscall_event.sys_eventfd2(initval, flags);
 }
 
 var process_names: [256][16]u8 = [_][16]u8{[_]u8{0} ** 16} ** 256;
@@ -4173,243 +2504,28 @@ fn sys_prctl(option: u32, arg2: usize, arg3: usize, arg4: usize, arg5: usize) i3
     _ = arg3;
 }
 
-const SignalFD = struct {
-    mask: u64,
-    flags: u32,
-    in_use: bool,
-};
-
-var signalfd_table: [64]SignalFD = [_]SignalFD{.{ .mask = 0, .flags = 0, .in_use = false }} ** 64;
-
 fn sys_signalfd(fd: i32, mask_ptr: usize, sizemask: usize) i32 {
-    return sys_signalfd4(fd, mask_ptr, sizemask, 0);
+    return syscall_event.sys_signalfd(fd, mask_ptr, sizemask);
 }
 
 fn sys_signalfd4(fd: i32, mask_ptr: usize, sizemask: usize, flags: u32) i32 {
-    _ = sizemask;
-
-    if (!protection.verifyUserPointer(mask_ptr, @sizeOf(u64))) return EFAULT;
-
-    var mask: u64 = 0;
-    protection.copyFromUser(std.mem.asBytes(&mask), mask_ptr) catch return EFAULT;
-
-    if (fd == -1) {
-        for (&signalfd_table, 0..) |*sfd, i| {
-            if (!sfd.in_use) {
-                sfd.in_use = true;
-                sfd.mask = mask;
-                sfd.flags = flags;
-                return @intCast(@as(i32, @intCast(i)) + 3000);
-            }
-        }
-        return EMFILE;
-    }
-
-    if (fd >= 3000 and fd < 3064) {
-        const idx: usize = @intCast(fd - 3000);
-        if (!signalfd_table[idx].in_use) return EBADF;
-        signalfd_table[idx].mask = mask;
-        return fd;
-    }
-
-    return EBADF;
+    return syscall_event.sys_signalfd4(fd, mask_ptr, sizemask, flags);
 }
 
-const Timespec = extern struct {
-    tv_sec: i32,
-    tv_nsec: i32,
-};
-
 fn sys_ppoll(fds_ptr: usize, nfds: u32, timeout_ptr: usize, sigmask_ptr: usize) i32 {
-    _ = sigmask_ptr;
-
-    var timeout_ms: i32 = -1;
-    if (timeout_ptr != 0) {
-        if (!protection.verifyUserPointer(timeout_ptr, @sizeOf(Timespec))) return EFAULT;
-        var ts: Timespec = undefined;
-        protection.copyFromUser(std.mem.asBytes(&ts), timeout_ptr) catch return EFAULT;
-        if (ts.tv_sec < 0) return EINVAL;
-        const ms: u64 = @as(u64, @intCast(ts.tv_sec)) * 1000 + @as(u64, @intCast(@max(0, ts.tv_nsec))) / 1000000;
-        timeout_ms = @intCast(@min(ms, 0x7FFFFFFF));
-    }
-
-    return sys_poll(fds_ptr, nfds, timeout_ms);
+    return syscall_event.sys_ppoll(fds_ptr, nfds, timeout_ptr, sigmask_ptr);
 }
 
 fn sys_pselect6(nfds: i32, readfds: usize, writefds: usize, exceptfds: usize, timeout_ptr: usize, sigmask_ptr: usize) i32 {
-    _ = sigmask_ptr;
-
-    var timeout_arg: usize = 0;
-    var timeval_buf: [8]u8 = undefined;
-
-    if (timeout_ptr != 0) {
-        if (!protection.verifyUserPointer(timeout_ptr, @sizeOf(Timespec))) return EFAULT;
-        var ts: Timespec = undefined;
-        protection.copyFromUser(std.mem.asBytes(&ts), timeout_ptr) catch return EFAULT;
-        if (ts.tv_sec < 0) return EINVAL;
-
-        const tv_sec: u32 = @intCast(ts.tv_sec);
-        const tv_usec: u32 = @intCast(@max(0, @divTrunc(ts.tv_nsec, 1000)));
-        @memcpy(timeval_buf[0..4], std.mem.asBytes(&tv_sec));
-        @memcpy(timeval_buf[4..8], std.mem.asBytes(&tv_usec));
-        timeout_arg = @intFromPtr(&timeval_buf);
-    }
-
-    return sys_select(nfds, readfds, writefds, exceptfds, timeout_arg);
+    return syscall_event.sys_pselect6(nfds, readfds, writefds, exceptfds, timeout_ptr, sigmask_ptr);
 }
 
 fn sys_faccessat(dirfd: i32, pathname: [*]const u8, mode: u32, flags: u32) i32 {
-    _ = flags;
-
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EFAULT;
-
-    var path_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EFAULT;
-
-    var full_path_buf: [512]u8 = undefined;
-    const full_path = if (path_slice.len > 0 and path_slice[0] == '/') blk: {
-        break :blk path_slice;
-    } else blk: {
-        if (dirfd == AT_FDCWD) {
-            ensureCwdInit();
-            const cwd = current_working_dir[0..cwd_len];
-            const cwdlen = cwd.len;
-            @memcpy(full_path_buf[0..cwdlen], cwd);
-            if (cwdlen > 0 and cwd[cwdlen - 1] != '/') {
-                full_path_buf[cwdlen] = '/';
-                @memcpy(full_path_buf[cwdlen + 1 .. cwdlen + 1 + path_slice.len], path_slice);
-                break :blk full_path_buf[0 .. cwdlen + 1 + path_slice.len];
-            } else {
-                @memcpy(full_path_buf[cwdlen .. cwdlen + path_slice.len], path_slice);
-                break :blk full_path_buf[0 .. cwdlen + path_slice.len];
-            }
-        }
-        return EBADF;
-    };
-
-    const vnode = vfs.lookupPath(full_path) catch |err| return vfsErrno(err);
-    _ = vnode;
-    _ = mode;
-
-    return 0;
+    return syscall_at.sys_faccessat(dirfd, pathname, mode, flags);
 }
 
-const StatxTimestamp = extern struct {
-    tv_sec: i64,
-    tv_nsec: u32,
-    __reserved: i32,
-};
-
-const Statx = extern struct {
-    stx_mask: u32,
-    stx_blksize: u32,
-    stx_attributes: u64,
-    stx_nlink: u32,
-    stx_uid: u32,
-    stx_gid: u32,
-    stx_mode: u16,
-    __spare0: u16,
-    stx_ino: u64,
-    stx_size: u64,
-    stx_blocks: u64,
-    stx_attributes_mask: u64,
-    stx_atime: StatxTimestamp,
-    stx_btime: StatxTimestamp,
-    stx_ctime: StatxTimestamp,
-    stx_mtime: StatxTimestamp,
-    stx_rdev_major: u32,
-    stx_rdev_minor: u32,
-    stx_dev_major: u32,
-    stx_dev_minor: u32,
-    stx_mnt_id: u64,
-    __spare2: u64,
-    __spare3: [12]u64,
-};
-
 fn sys_statx(dirfd: i32, pathname: [*]const u8, flags: u32, mask: u32, statxbuf: usize) i32 {
-    _ = flags;
-    _ = mask;
-
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EFAULT;
-    if (!protection.verifyUserPointer(statxbuf, @sizeOf(Statx))) return EFAULT;
-
-    var path_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EFAULT;
-
-    var full_path_buf: [512]u8 = undefined;
-    const full_path = if (path_slice.len > 0 and path_slice[0] == '/') blk: {
-        break :blk path_slice;
-    } else blk: {
-        if (dirfd == AT_FDCWD) {
-            ensureCwdInit();
-            const cwd = current_working_dir[0..cwd_len];
-            const cwdlen = cwd.len;
-            @memcpy(full_path_buf[0..cwdlen], cwd);
-            if (cwdlen > 0 and cwd[cwdlen - 1] != '/') {
-                full_path_buf[cwdlen] = '/';
-                @memcpy(full_path_buf[cwdlen + 1 .. cwdlen + 1 + path_slice.len], path_slice);
-                break :blk full_path_buf[0 .. cwdlen + 1 + path_slice.len];
-            } else {
-                @memcpy(full_path_buf[cwdlen .. cwdlen + path_slice.len], path_slice);
-                break :blk full_path_buf[0 .. cwdlen + path_slice.len];
-            }
-        }
-        return EBADF;
-    };
-
-    const vnode = vfs.lookupPath(full_path) catch |err| return vfsErrno(err);
-
-    var stat_buf: vfs.FileStat = undefined;
-    vnode.ops.stat(vnode, &stat_buf) catch |err| return vfsErrno(err);
-
-    const mode_bits: u16 = @as(u16, if (stat_buf.mode.owner_read) 0o400 else 0) |
-        @as(u16, if (stat_buf.mode.owner_write) 0o200 else 0) |
-        @as(u16, if (stat_buf.mode.owner_exec) 0o100 else 0) |
-        @as(u16, if (stat_buf.mode.group_read) 0o040 else 0) |
-        @as(u16, if (stat_buf.mode.group_write) 0o020 else 0) |
-        @as(u16, if (stat_buf.mode.group_exec) 0o010 else 0) |
-        @as(u16, if (stat_buf.mode.other_read) 0o004 else 0) |
-        @as(u16, if (stat_buf.mode.other_write) 0o002 else 0) |
-        @as(u16, if (stat_buf.mode.other_exec) 0o001 else 0);
-
-    const type_bits: u16 = switch (stat_buf.file_type) {
-        .Regular => 0o100000,
-        .Directory => 0o040000,
-        .SymLink => 0o120000,
-        .CharDevice => 0o020000,
-        .BlockDevice => 0o060000,
-        .Pipe => 0o010000,
-        .Socket => 0o140000,
-    };
-
-    var result = Statx{
-        .stx_mask = STATX_BASIC_STATS,
-        .stx_blksize = stat_buf.block_size,
-        .stx_attributes = 0,
-        .stx_nlink = 1,
-        .stx_uid = stat_buf.uid,
-        .stx_gid = stat_buf.gid,
-        .stx_mode = mode_bits | type_bits,
-        .__spare0 = 0,
-        .stx_ino = stat_buf.inode,
-        .stx_size = stat_buf.size,
-        .stx_blocks = stat_buf.blocks,
-        .stx_attributes_mask = 0,
-        .stx_atime = .{ .tv_sec = @intCast(stat_buf.atime), .tv_nsec = 0, .__reserved = 0 },
-        .stx_btime = .{ .tv_sec = 0, .tv_nsec = 0, .__reserved = 0 },
-        .stx_ctime = .{ .tv_sec = @intCast(stat_buf.ctime), .tv_nsec = 0, .__reserved = 0 },
-        .stx_mtime = .{ .tv_sec = @intCast(stat_buf.mtime), .tv_nsec = 0, .__reserved = 0 },
-        .stx_rdev_major = 0,
-        .stx_rdev_minor = 0,
-        .stx_dev_major = 0,
-        .stx_dev_minor = 0,
-        .stx_mnt_id = 0,
-        .__spare2 = 0,
-        .__spare3 = [_]u64{0} ** 12,
-    };
-
-    protection.copyToUser(statxbuf, std.mem.asBytes(&result)) catch return EFAULT;
-    return 0;
+    return syscall_at.sys_statx(dirfd, pathname, flags, mask, statxbuf);
 }
 
 fn sys_membarrier(cmd: u32, flags: u32) i32 {
@@ -4429,99 +2545,24 @@ fn sys_membarrier(cmd: u32, flags: u32) i32 {
     }
 }
 
-fn isSpecialFd(fd: i32) bool {
-    return (fd >= FD_OFFSET + 200 and fd < FD_OFFSET + 264) or
-        (fd >= FD_OFFSET + 300 and fd < FD_OFFSET + 364) or
-        fd >= 1000;
-}
-
 fn sys_copy_file_range(fd_in: i32, off_in_ptr: usize, fd_out: i32, off_out_ptr: usize, len: usize) i32 {
-    if (fd_in < FD_OFFSET or fd_out < FD_OFFSET) return EBADF;
-    if (isSpecialFd(fd_in) or isSpecialFd(fd_out)) return EBADF;
-
-    const vfs_fd_in: u32 = @intCast(fd_in - FD_OFFSET);
-    const vfs_fd_out: u32 = @intCast(fd_out - FD_OFFSET);
-
-    var off_in: i64 = -1;
-    var off_out: i64 = -1;
-
-    if (off_in_ptr != 0) {
-        if (!protection.verifyUserPointer(off_in_ptr, @sizeOf(i64))) return EFAULT;
-        protection.copyFromUser(std.mem.asBytes(&off_in), off_in_ptr) catch return EFAULT;
-    }
-
-    if (off_out_ptr != 0) {
-        if (!protection.verifyUserPointer(off_out_ptr, @sizeOf(i64))) return EFAULT;
-        protection.copyFromUser(std.mem.asBytes(&off_out), off_out_ptr) catch return EFAULT;
-    }
-
-    var buffer: [512]u8 = undefined;
-    var total_copied: usize = 0;
-    var remaining = len;
-
-    while (remaining > 0) {
-        const chunk = @min(remaining, buffer.len);
-
-        const bytes_read = if (off_in >= 0) blk: {
-            const r = vfs.pread(vfs_fd_in, buffer[0..chunk], @intCast(off_in)) catch |err| return vfsErrno(err);
-            off_in += @intCast(r);
-            break :blk r;
-        } else blk: {
-            break :blk vfs.read(vfs_fd_in, buffer[0..chunk]) catch |err| return vfsErrno(err);
-        };
-
-        if (bytes_read == 0) break;
-
-        const bytes_written = if (off_out >= 0) blk: {
-            const w = vfs.pwrite(vfs_fd_out, buffer[0..bytes_read], @intCast(off_out)) catch |err| return vfsErrno(err);
-            off_out += @intCast(w);
-            break :blk w;
-        } else blk: {
-            break :blk vfs.write(vfs_fd_out, buffer[0..bytes_read]) catch |err| return vfsErrno(err);
-        };
-
-        total_copied += bytes_written;
-        remaining -= bytes_written;
-
-        if (bytes_written < bytes_read) break;
-    }
-
-    if (off_in_ptr != 0) {
-        protection.copyToUser(off_in_ptr, std.mem.asBytes(&off_in)) catch return EFAULT;
-    }
-    if (off_out_ptr != 0) {
-        protection.copyToUser(off_out_ptr, std.mem.asBytes(&off_out)) catch return EFAULT;
-    }
-
-    return @intCast(total_copied);
+    return syscall_fd.sys_copy_file_range(fd_in, off_in_ptr, fd_out, off_out_ptr, len);
 }
 
 fn sys_fadvise64(fd: i32, offset: i64, len: usize, advice: u32) i32 {
-    if (fd < FD_OFFSET) return EBADF;
-    _ = offset;
-    _ = len;
-    _ = advice;
-    return 0;
+    return syscall_fd.sys_fadvise64(fd, offset, len, advice);
 }
 
 fn sys_readahead(fd: i32, offset: i64, count: usize) i32 {
-    if (fd < FD_OFFSET) return EBADF;
-    _ = offset;
-    _ = count;
-    return 0;
+    return syscall_fd.sys_readahead(fd, offset, count);
 }
 
 fn sys_sync_file_range(fd: i32, offset: i64, nbytes: i64, flags: u32) i32 {
-    if (fd < FD_OFFSET) return EBADF;
-    _ = offset;
-    _ = nbytes;
-    _ = flags;
-    return 0;
+    return syscall_fd.sys_sync_file_range(fd, offset, nbytes, flags);
 }
 
 fn sys_syncfs(fd: i32) i32 {
-    if (fd < FD_OFFSET) return EBADF;
-    return 0;
+    return syscall_fd.sys_syncfs(fd);
 }
 
 var process_priorities: [256]i32 = [_]i32{0} ** 256;
@@ -4581,108 +2622,24 @@ fn sys_sched_setaffinity(pid: i32, cpusetsize: usize, mask_ptr: usize) i32 {
     return 0;
 }
 
-const UtimensatTimespec = extern struct {
-    tv_sec: i32,
-    tv_nsec: i32,
-};
-
 fn sys_utimensat(dirfd: i32, pathname: [*]const u8, times_ptr: usize, flags: u32) i32 {
-    _ = dirfd;
-    _ = flags;
-
-    if (@intFromPtr(pathname) != 0) {
-        if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EFAULT;
-    }
-
-    if (times_ptr != 0) {
-        if (!protection.verifyUserPointer(times_ptr, @sizeOf(UtimensatTimespec) * 2)) return EFAULT;
-    }
-
-    return 0;
+    return syscall_at.sys_utimensat(dirfd, pathname, times_ptr, flags);
 }
 
 fn sys_futimesat(dirfd: i32, pathname: [*]const u8, times_ptr: usize) i32 {
-    _ = dirfd;
-
-    if (@intFromPtr(pathname) != 0) {
-        if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EFAULT;
-    }
-
-    if (times_ptr != 0) {
-        if (!protection.verifyUserPointer(times_ptr, 16)) return EFAULT;
-    }
-
-    return 0;
+    return syscall_at.sys_futimesat(dirfd, pathname, times_ptr);
 }
 
 fn sys_fstatat(dirfd: i32, pathname: [*]const u8, statbuf: usize, flags: u32) i32 {
-    _ = flags;
-
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EFAULT;
-    if (!protection.verifyUserPointer(statbuf, @sizeOf(vfs.FileStat))) return EFAULT;
-
-    var path_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EFAULT;
-
-    var full_path_buf: [512]u8 = undefined;
-    const full_path = if (path_slice.len > 0 and path_slice[0] == '/') blk: {
-        break :blk path_slice;
-    } else blk: {
-        if (dirfd == AT_FDCWD) {
-            ensureCwdInit();
-            const cwd = current_working_dir[0..cwd_len];
-            const cwdlen = cwd.len;
-            @memcpy(full_path_buf[0..cwdlen], cwd);
-            if (cwdlen > 0 and cwd[cwdlen - 1] != '/') {
-                full_path_buf[cwdlen] = '/';
-                @memcpy(full_path_buf[cwdlen + 1 .. cwdlen + 1 + path_slice.len], path_slice);
-                break :blk full_path_buf[0 .. cwdlen + 1 + path_slice.len];
-            } else {
-                @memcpy(full_path_buf[cwdlen .. cwdlen + path_slice.len], path_slice);
-                break :blk full_path_buf[0 .. cwdlen + path_slice.len];
-            }
-        }
-        return EBADF;
-    };
-
-    var stat_buf: vfs.FileStat = undefined;
-    vfs.stat(full_path, &stat_buf) catch |err| return vfsErrno(err);
-
-    protection.copyToUser(statbuf, std.mem.asBytes(&stat_buf)) catch return EFAULT;
-    return 0;
+    return syscall_at.sys_fstatat(dirfd, pathname, statbuf, flags);
 }
 
 fn sys_symlinkat(target: [*]const u8, newdirfd: i32, linkpath: [*]const u8) i32 {
-    _ = newdirfd;
-
-    if (!protection.verifyUserPointer(@intFromPtr(target), 256)) return EFAULT;
-    if (!protection.verifyUserPointer(@intFromPtr(linkpath), 256)) return EFAULT;
-
-    var target_buffer: [256]u8 = undefined;
-    const target_slice = protection.copyStringFromUser(&target_buffer, @intFromPtr(target)) catch return EFAULT;
-
-    var link_buffer: [256]u8 = undefined;
-    const link_slice = protection.copyStringFromUser(&link_buffer, @intFromPtr(linkpath)) catch return EFAULT;
-
-    vfs.symlink(target_slice, link_slice) catch |err| return vfsErrno(err);
-    return 0;
+    return syscall_at.sys_symlinkat(target, newdirfd, linkpath);
 }
 
 fn sys_readlinkat(dirfd: i32, pathname: [*]const u8, buf: [*]u8, bufsiz: usize) i32 {
-    _ = dirfd;
-
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EFAULT;
-    if (!protection.verifyUserPointer(@intFromPtr(buf), bufsiz)) return EFAULT;
-
-    var path_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EFAULT;
-
-    var link_target: [256]u8 = undefined;
-    const len = vfs.readlink(path_slice, &link_target) catch |err| return vfsErrno(err);
-
-    const copy_len = @min(len, bufsiz);
-    protection.copyToUser(@intFromPtr(buf), link_target[0..copy_len]) catch return EFAULT;
-    return @intCast(copy_len);
+    return syscall_at.sys_readlinkat(dirfd, pathname, buf, bufsiz);
 }
 
 const SigInfo = extern struct {
@@ -4807,91 +2764,20 @@ fn sys_tkill(tid: i32, sig: i32) i32 {
     return 0;
 }
 
-const InotifyWatch = struct {
-    wd: i32,
-    pathname: [256]u8,
-    path_len: usize,
-    mask: u32,
-    in_use: bool,
-};
-
-const InotifyInstance = struct {
-    watches: [16]InotifyWatch,
-    flags: u32,
-    in_use: bool,
-};
-
-var inotify_instances: [32]InotifyInstance = [_]InotifyInstance{.{
-    .watches = [_]InotifyWatch{.{
-        .wd = -1,
-        .pathname = [_]u8{0} ** 256,
-        .path_len = 0,
-        .mask = 0,
-        .in_use = false,
-    }} ** 16,
-    .flags = 0,
-    .in_use = false,
-}} ** 32;
-
-var next_inotify_wd: i32 = 1;
-
 fn sys_inotify_init() i32 {
-    return sys_inotify_init1(0);
+    return syscall_event.sys_inotify_init();
 }
 
 fn sys_inotify_init1(flags: u32) i32 {
-    for (&inotify_instances, 0..) |*inst, i| {
-        if (!inst.in_use) {
-            inst.in_use = true;
-            inst.flags = flags;
-            for (&inst.watches) |*w| {
-                w.in_use = false;
-                w.wd = -1;
-            }
-            return @intCast(@as(i32, @intCast(i)) + 4000);
-        }
-    }
-    return EMFILE;
+    return syscall_event.sys_inotify_init1(flags);
 }
 
 fn sys_inotify_add_watch(fd: i32, pathname: [*]const u8, mask: u32) i32 {
-    if (fd < 4000 or fd >= 4032) return EBADF;
-    const idx: usize = @intCast(fd - 4000);
-    if (!inotify_instances[idx].in_use) return EBADF;
-
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EFAULT;
-
-    var path_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EFAULT;
-
-    for (&inotify_instances[idx].watches) |*w| {
-        if (!w.in_use) {
-            w.in_use = true;
-            w.wd = next_inotify_wd;
-            next_inotify_wd += 1;
-            @memset(&w.pathname, 0);
-            @memcpy(w.pathname[0..path_slice.len], path_slice);
-            w.path_len = path_slice.len;
-            w.mask = mask;
-            return w.wd;
-        }
-    }
-    return ENOSPC;
+    return syscall_event.sys_inotify_add_watch(fd, pathname, mask);
 }
 
 fn sys_inotify_rm_watch(fd: i32, wd: i32) i32 {
-    if (fd < 4000 or fd >= 4032) return EBADF;
-    const idx: usize = @intCast(fd - 4000);
-    if (!inotify_instances[idx].in_use) return EBADF;
-
-    for (&inotify_instances[idx].watches) |*w| {
-        if (w.in_use and w.wd == wd) {
-            w.in_use = false;
-            w.wd = -1;
-            return 0;
-        }
-    }
-    return EINVAL;
+    return syscall_event.sys_inotify_rm_watch(fd, wd);
 }
 
 fn sys_mlock(addr: usize, len: usize) i32 {
@@ -5104,126 +2990,35 @@ fn sys_sysinfo(info_ptr: usize) i32 {
 }
 
 fn sys_clock_settime(clock_id: u32, tp: usize) i32 {
-    _ = clock_id;
-    if (!protection.verifyUserPointer(tp, @sizeOf(Timespec))) return EFAULT;
-    return EPERM;
+    return syscall_time.sys_clock_settime(clock_id, tp);
 }
 
 fn sys_clock_getres(clock_id: u32, res: usize) i32 {
-    if (res == 0) return 0;
-    if (!protection.verifyUserPointer(res, @sizeOf(Timespec))) return EFAULT;
-
-    _ = clock_id;
-
-    const resolution = Timespec{
-        .tv_sec = 0,
-        .tv_nsec = 10000000,
-    };
-
-    protection.copyToUser(res, std.mem.asBytes(&resolution)) catch return EFAULT;
-    return 0;
+    return syscall_time.sys_clock_getres(clock_id, res);
 }
 
 fn sys_clock_nanosleep(clock_id: u32, flags: u32, request: usize, remain: usize) i32 {
-    _ = clock_id;
-    _ = flags;
-    _ = remain;
-
-    if (!protection.verifyUserPointer(request, @sizeOf(Timespec))) return EFAULT;
-
-    var req: Timespec = undefined;
-    protection.copyFromUser(std.mem.asBytes(&req), request) catch return EFAULT;
-
-    const timer = @import("../timer/timer.zig");
-    const ticks_to_sleep: u64 = @as(u64, @intCast(@max(0, req.tv_sec))) * 100 + @as(u64, @intCast(@max(0, req.tv_nsec))) / 10000000;
-    const start_ticks = timer.getTicks();
-
-    while (timer.getTicks() - start_ticks < ticks_to_sleep) {
-        x86.hlt();
-    }
-
-    return 0;
+    return syscall_time.sys_clock_nanosleep(clock_id, flags, request, remain);
 }
 
-const PosixTimer = struct {
-    clock_id: u32,
-    interval: ItimerSpec,
-    in_use: bool,
-};
-
-var posix_timers: [32]PosixTimer = [_]PosixTimer{.{
-    .clock_id = 0,
-    .interval = .{
-        .it_interval_sec = 0,
-        .it_interval_nsec = 0,
-        .it_value_sec = 0,
-        .it_value_nsec = 0,
-    },
-    .in_use = false,
-}} ** 32;
-
 fn sys_timer_create(clock_id: u32, sevp: usize, timerid: usize) i32 {
-    _ = sevp;
-
-    if (!protection.verifyUserPointer(timerid, @sizeOf(i32))) return EFAULT;
-
-    for (&posix_timers, 0..) |*timer, i| {
-        if (!timer.in_use) {
-            timer.in_use = true;
-            timer.clock_id = clock_id;
-            const id: i32 = @intCast(i);
-            protection.copyToUser(timerid, std.mem.asBytes(&id)) catch return EFAULT;
-            return 0;
-        }
-    }
-    return EAGAIN;
+    return syscall_time.sys_timer_create(clock_id, sevp, timerid);
 }
 
 fn sys_timer_delete(timerid: i32) i32 {
-    if (timerid < 0 or timerid >= 32) return EINVAL;
-    const idx: usize = @intCast(timerid);
-    if (!posix_timers[idx].in_use) return EINVAL;
-    posix_timers[idx].in_use = false;
-    return 0;
+    return syscall_time.sys_timer_delete(timerid);
 }
 
 fn sys_timer_settime(timerid: i32, flags: u32, new_value: usize, old_value: usize) i32 {
-    _ = flags;
-
-    if (timerid < 0 or timerid >= 32) return EINVAL;
-    const idx: usize = @intCast(timerid);
-    if (!posix_timers[idx].in_use) return EINVAL;
-
-    if (!protection.verifyUserPointer(new_value, @sizeOf(ItimerSpec))) return EFAULT;
-
-    if (old_value != 0) {
-        if (!protection.verifyUserPointer(old_value, @sizeOf(ItimerSpec))) return EFAULT;
-        protection.copyToUser(old_value, std.mem.asBytes(&posix_timers[idx].interval)) catch return EFAULT;
-    }
-
-    var new_interval: ItimerSpec = undefined;
-    protection.copyFromUser(std.mem.asBytes(&new_interval), new_value) catch return EFAULT;
-    posix_timers[idx].interval = new_interval;
-
-    return 0;
+    return syscall_time.sys_timer_settime(timerid, flags, new_value, old_value);
 }
 
 fn sys_timer_gettime(timerid: i32, curr_value: usize) i32 {
-    if (timerid < 0 or timerid >= 32) return EINVAL;
-    const idx: usize = @intCast(timerid);
-    if (!posix_timers[idx].in_use) return EINVAL;
-
-    if (!protection.verifyUserPointer(curr_value, @sizeOf(ItimerSpec))) return EFAULT;
-
-    protection.copyToUser(curr_value, std.mem.asBytes(&posix_timers[idx].interval)) catch return EFAULT;
-    return 0;
+    return syscall_time.sys_timer_gettime(timerid, curr_value);
 }
 
 fn sys_timer_getoverrun(timerid: i32) i32 {
-    if (timerid < 0 or timerid >= 32) return EINVAL;
-    const idx: usize = @intCast(timerid);
-    if (!posix_timers[idx].in_use) return EINVAL;
-    return 0;
+    return syscall_time.sys_timer_getoverrun(timerid);
 }
 
 var chroot_path: [256]u8 = [_]u8{0} ** 256;

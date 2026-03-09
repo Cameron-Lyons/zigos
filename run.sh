@@ -1,14 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-zig build kernel
+set -euo pipefail
 
-qemu-system-x86_64 \
-  -kernel zig-out/bin/kernel.elf \
-  -m 128M \
-  -cpu max \
-  -enable-kvm 2>/dev/null ||
-  qemu-system-x86_64 \
-    -kernel zig-out/bin/kernel.elf \
-    -m 128M \
-    -cpu max
-
+zig build run
