@@ -4,6 +4,7 @@ const ipv6 = @import("ipv6.zig");
 const memory = @import("../memory/memory.zig");
 const vga = @import("../drivers/vga.zig");
 const timer = @import("../timer/timer.zig");
+const sync = @import("../utils/sync.zig");
 
 const TCP_PROTOCOL = 6;
 const TCP_MSS: u16 = 536;
@@ -122,10 +123,12 @@ const TCPConnectionStruct = struct {
     ts_val: u32,
     ts_ecr: u32,
     ts_recent: u32,
+    ready: sync.Semaphore,
 };
 
 const TCPSocket = struct {
-    connection: ?TCPConnectionStruct,
+    connection: ?*TCPConnectionStruct,
+    listener: ?*anyopaque,
     listening: bool,
     port: u16,
 };
@@ -139,6 +142,45 @@ var tcp_sockets: [MAX_TCP_CONNECTIONS]?TCPSocket = [_]?TCPSocket{null} ** MAX_TC
 pub fn init() void {
     ipv4.registerProtocolHandler(TCP_PROTOCOL, handleTCPPacket);
     ipv6.registerProtocolHandler(NEXT_HEADER_TCP, handleTCPPacketIPv6);
+}
+
+fn notifyConnectionActivity(conn: *TCPConnectionStruct) void {
+    conn.ready.signal();
+}
+
+pub fn waitForActivity(conn: *TCPConnection) void {
+    conn.ready.wait();
+}
+
+pub fn isConnecting(conn: *const TCPConnection) bool {
+    return conn.state == .SYN_SENT or conn.state == .SYN_RECEIVED;
+}
+
+pub fn isEstablished(conn: *const TCPConnection) bool {
+    return conn.state == .ESTABLISHED;
+}
+
+pub fn isReadableClosed(conn: *const TCPConnection) bool {
+    return conn.state == .CLOSED or conn.state == .CLOSE_WAIT or conn.state == .LAST_ACK or conn.state == .TIME_WAIT;
+}
+
+pub fn hasReadableData(conn: *const TCPConnection) bool {
+    return conn.recv_buffer_used != 0;
+}
+
+pub fn receiveData(conn: *TCPConnection, buffer: []u8) usize {
+    if (conn.recv_buffer_used == 0) return 0;
+
+    const to_copy = @min(buffer.len, conn.recv_buffer_used);
+    @memcpy(buffer[0..to_copy], conn.recv_buffer[0..to_copy]);
+
+    if (to_copy < conn.recv_buffer_used) {
+        const remaining = conn.recv_buffer_used - to_copy;
+        @memcpy(conn.recv_buffer[0..remaining], conn.recv_buffer[to_copy..conn.recv_buffer_used]);
+    }
+    conn.recv_buffer_used -= to_copy;
+
+    return to_copy;
 }
 
 const NEXT_HEADER_TCP: u8 = 6;
@@ -358,13 +400,13 @@ pub const TCPConnection = TCPConnectionStruct;
 
 pub fn createConnection(local_addr: ipv4.IPv4Address, local_port: u16, remote_addr: ipv4.IPv4Address, remote_port: u16) !*TCPConnection {
     const local_addr_u32 = (@as(u32, local_addr.octets[0]) << 24) |
-                           (@as(u32, local_addr.octets[1]) << 16) |
-                           (@as(u32, local_addr.octets[2]) << 8) |
-                           local_addr.octets[3];
+        (@as(u32, local_addr.octets[1]) << 16) |
+        (@as(u32, local_addr.octets[2]) << 8) |
+        local_addr.octets[3];
     const remote_addr_u32 = (@as(u32, remote_addr.octets[0]) << 24) |
-                            (@as(u32, remote_addr.octets[1]) << 16) |
-                            (@as(u32, remote_addr.octets[2]) << 8) |
-                            remote_addr.octets[3];
+        (@as(u32, remote_addr.octets[1]) << 16) |
+        (@as(u32, remote_addr.octets[2]) << 8) |
+        remote_addr.octets[3];
     return createConnectionInternal(local_addr_u32, remote_addr_u32, local_port, remote_port);
 }
 
@@ -428,6 +470,7 @@ fn createConnectionInternal(local_addr: u32, remote_addr: u32, local_port: u16, 
                 .ts_val = 0,
                 .ts_ecr = 0,
                 .ts_recent = 0,
+                .ready = sync.Semaphore.init(0),
             };
             return &maybe_conn.*.?;
         }
@@ -557,6 +600,7 @@ fn handleEstablishedConnection(conn: *TCPConnection, seq_num: u32, ack_num: u32,
 
     if (flags & TCPFlags.RST != 0) {
         conn.state = .CLOSED;
+        notifyConnectionActivity(conn);
         return;
     }
 
@@ -572,6 +616,7 @@ fn handleEstablishedConnection(conn: *TCPConnection, seq_num: u32, ack_num: u32,
                 clearRetxQueue(conn);
                 sendTCPPacket(conn, TCPFlags.ACK, &[_]u8{}) catch {};
                 vga.print("TCP: Connection established\n");
+                notifyConnectionActivity(conn);
             }
         },
         .SYN_RECEIVED => {
@@ -581,6 +626,7 @@ fn handleEstablishedConnection(conn: *TCPConnection, seq_num: u32, ack_num: u32,
                 conn.state = .ESTABLISHED;
                 clearRetxQueue(conn);
                 vga.print("TCP: Connection accepted\n");
+                queueAcceptedConnection(conn);
             }
         },
         .ESTABLISHED => {
@@ -595,6 +641,7 @@ fn handleEstablishedConnection(conn: *TCPConnection, seq_num: u32, ack_num: u32,
                     conn.recv_buffer_used += to_copy;
                     conn.recv_seq +%= @intCast(to_copy);
                     conn.send_ack = conn.recv_seq;
+                    notifyConnectionActivity(conn);
                 }
                 sendTCPPacket(conn, TCPFlags.ACK, &[_]u8{}) catch {};
             }
@@ -603,6 +650,7 @@ fn handleEstablishedConnection(conn: *TCPConnection, seq_num: u32, ack_num: u32,
                 conn.send_ack = conn.recv_seq;
                 conn.state = .CLOSE_WAIT;
                 sendTCPPacket(conn, TCPFlags.ACK, &[_]u8{}) catch {};
+                notifyConnectionActivity(conn);
             }
         },
         .FIN_WAIT_1 => {
@@ -614,9 +662,11 @@ fn handleEstablishedConnection(conn: *TCPConnection, seq_num: u32, ack_num: u32,
                     conn.state = .TIME_WAIT;
                     conn.time_wait_start = timer.getTicks();
                     sendTCPPacket(conn, TCPFlags.ACK, &[_]u8{}) catch {};
+                    notifyConnectionActivity(conn);
                 } else if (seqLessThanEq(conn.send_seq, ack_num)) {
                     conn.state = .FIN_WAIT_2;
                     clearRetxQueue(conn);
+                    notifyConnectionActivity(conn);
                 }
             }
         },
@@ -627,18 +677,21 @@ fn handleEstablishedConnection(conn: *TCPConnection, seq_num: u32, ack_num: u32,
                 conn.state = .TIME_WAIT;
                 conn.time_wait_start = timer.getTicks();
                 sendTCPPacket(conn, TCPFlags.ACK, &[_]u8{}) catch {};
+                notifyConnectionActivity(conn);
             }
         },
         .CLOSING => {
             if (flags & TCPFlags.ACK != 0) {
                 conn.state = .TIME_WAIT;
                 conn.time_wait_start = timer.getTicks();
+                notifyConnectionActivity(conn);
             }
         },
         .LAST_ACK => {
             if (flags & TCPFlags.ACK != 0) {
                 conn.state = .CLOSED;
                 clearRetxQueue(conn);
+                notifyConnectionActivity(conn);
             }
         },
         .TIME_WAIT => {},
@@ -675,6 +728,41 @@ fn handleIncomingSYN(src_ip: u32, dst_ip: u32, src_port: u16, dst_port: u16, seq
     };
 }
 
+fn queueAcceptedConnection(conn: *TCPConnectionStruct) void {
+    const listener = findListeningSocket(conn.local_port) orelse {
+        conn.state = .CLOSED;
+        notifyConnectionActivity(conn);
+        return;
+    };
+
+    const raw_listener = listener.listener orelse {
+        conn.state = .CLOSED;
+        notifyConnectionActivity(conn);
+        return;
+    };
+
+    const socket_mod = @import("socket.zig");
+    const listener_socket: *socket_mod.Socket = @ptrCast(@alignCast(raw_listener));
+    const client = socket_mod.createAcceptedTcpSocket(
+        conn,
+        ipv4.IPv4Address.fromU32(conn.local_addr),
+        conn.local_port,
+        ipv4.IPv4Address.fromU32(conn.remote_addr),
+        conn.remote_port,
+    ) catch {
+        conn.state = .CLOSED;
+        notifyConnectionActivity(conn);
+        return;
+    };
+
+    listener_socket.addToBacklog(client) catch {
+        client.close();
+        return;
+    };
+
+    notifyConnectionActivity(conn);
+}
+
 fn sendRST(dst_ip: u32, src_ip: u32, dst_port: u16, src_port: u16, seq_num: u32) void {
     const packet_size = @sizeOf(TCPHeader);
     const packet_mem = memory.kmalloc(packet_size) orelse return;
@@ -702,6 +790,7 @@ pub fn listen(port: u16) !usize {
         if (maybe_socket.* == null) {
             maybe_socket.* = TCPSocket{
                 .connection = null,
+                .listener = null,
                 .listening = true,
                 .port = port,
             };
@@ -728,7 +817,7 @@ pub fn connect(socket_id: usize, remote_addr: u32, remote_port: u16) !void {
 pub fn send(socket_id: usize, data: []const u8) !usize {
     if (socket_id >= tcp_sockets.len) return error.InvalidSocket;
     const socket = &(tcp_sockets[socket_id] orelse return error.InvalidSocket);
-    const conn = &(socket.connection orelse return error.NotConnected);
+    const conn = socket.connection orelse return error.NotConnected;
 
     if (conn.state != .ESTABLISHED) return error.NotConnected;
 
@@ -744,27 +833,15 @@ pub fn send(socket_id: usize, data: []const u8) !usize {
 pub fn receive(socket_id: usize, buffer: []u8) !usize {
     if (socket_id >= tcp_sockets.len) return error.InvalidSocket;
     const socket = &(tcp_sockets[socket_id] orelse return error.InvalidSocket);
-    const conn = &(socket.connection orelse return error.NotConnected);
-
-    if (conn.recv_buffer_used == 0) return 0;
-
-    const to_copy = @min(buffer.len, conn.recv_buffer_used);
-    @memcpy(buffer[0..to_copy], conn.recv_buffer[0..to_copy]);
-
-    if (to_copy < conn.recv_buffer_used) {
-        const remaining = conn.recv_buffer_used - to_copy;
-        @memcpy(conn.recv_buffer[0..remaining], conn.recv_buffer[to_copy..conn.recv_buffer_used]);
-    }
-    conn.recv_buffer_used -= to_copy;
-
-    return to_copy;
+    const conn = socket.connection orelse return error.NotConnected;
+    return receiveData(conn, buffer);
 }
 
 pub fn close(socket_id: usize) !void {
     if (socket_id >= tcp_sockets.len) return error.InvalidSocket;
     var socket = &(tcp_sockets[socket_id] orelse return error.InvalidSocket);
 
-    if (socket.connection) |*conn| {
+    if (socket.connection) |conn| {
         if (conn.state == .ESTABLISHED) {
             conn.state = .FIN_WAIT_1;
             try sendTCPPacket(conn, TCPFlags.FIN | TCPFlags.ACK, &[_]u8{});
@@ -772,6 +849,7 @@ pub fn close(socket_id: usize) !void {
         clearRetxQueue(conn);
         memory.kfree(conn.recv_buffer.ptr);
         memory.kfree(conn.send_buffer.ptr);
+        notifyConnectionActivity(conn);
     }
 
     tcp_sockets[socket_id] = null;
@@ -815,10 +893,12 @@ pub fn closeConnection(conn: *TCPConnection) void {
         .ESTABLISHED => {
             conn.state = .FIN_WAIT_1;
             sendTCPPacket(conn, TCPFlags.FIN | TCPFlags.ACK, &[_]u8{}) catch {};
+            notifyConnectionActivity(conn);
         },
         .CLOSE_WAIT => {
             conn.state = .LAST_ACK;
             sendTCPPacket(conn, TCPFlags.FIN | TCPFlags.ACK, &[_]u8{}) catch {};
+            notifyConnectionActivity(conn);
         },
         else => {},
     }
@@ -866,6 +946,7 @@ pub fn tick() void {
                         conn.state = .CLOSED;
                         clearRetxQueue(conn);
                         vga.print("TCP: Connection timed out\n");
+                        notifyConnectionActivity(conn);
                         break;
                     }
 
@@ -1048,8 +1129,9 @@ fn updateTimestampValues(conn: *TCPConnectionStruct, tsval: u32, tsecr: u32) voi
 
 pub fn registerListeningSocket(sock: *@import("socket.zig").Socket) void {
     for (&tcp_sockets) |*maybe_socket| {
-        if (maybe_socket.*) |s| {
+        if (maybe_socket.*) |*s| {
             if (s.listening and s.port == sock.local_port) {
+                s.listener = sock;
                 return;
             }
         }
@@ -1059,6 +1141,7 @@ pub fn registerListeningSocket(sock: *@import("socket.zig").Socket) void {
         if (maybe_socket.* == null) {
             maybe_socket.* = TCPSocket{
                 .connection = null,
+                .listener = sock,
                 .listening = true,
                 .port = sock.local_port,
             };

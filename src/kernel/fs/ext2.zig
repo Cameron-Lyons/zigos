@@ -127,6 +127,7 @@ const Ext2FileSystem = struct {
 
     const BlockCache = struct {
         blocks: [16]CacheEntry,
+        next_victim: usize,
 
         const CacheEntry = struct {
             block_num: u32,
@@ -143,6 +144,7 @@ const Ext2FileSystem = struct {
                     .dirty = false,
                     .valid = false,
                 }} ** 16,
+                .next_victim = 0,
             };
         }
 
@@ -153,24 +155,25 @@ const Ext2FileSystem = struct {
                 }
             }
 
-            var lru_idx: usize = 0;
+            var replace_idx = self.next_victim;
             for (&self.blocks, 0..) |*entry, i| {
                 if (!entry.valid) {
-                    lru_idx = i;
+                    replace_idx = i;
                     break;
                 }
             }
 
-            if (self.blocks[lru_idx].dirty) {
-                try fs.writeBlock(self.blocks[lru_idx].block_num, &self.blocks[lru_idx].data);
+            if (self.blocks[replace_idx].dirty) {
+                try fs.writeBlock(self.blocks[replace_idx].block_num, &self.blocks[replace_idx].data);
             }
 
-            try fs.readBlock(block_num, &self.blocks[lru_idx].data);
-            self.blocks[lru_idx].block_num = block_num;
-            self.blocks[lru_idx].valid = true;
-            self.blocks[lru_idx].dirty = false;
+            try fs.readBlock(block_num, &self.blocks[replace_idx].data);
+            self.blocks[replace_idx].block_num = block_num;
+            self.blocks[replace_idx].valid = true;
+            self.blocks[replace_idx].dirty = false;
+            self.next_victim = (replace_idx + 1) % self.blocks.len;
 
-            return self.blocks[lru_idx].data[0..fs.block_size];
+            return self.blocks[replace_idx].data[0..fs.block_size];
         }
 
         fn markDirty(self: *BlockCache, block_num: u32) void {
@@ -220,7 +223,7 @@ const Ext2FileSystem = struct {
             self.superblock.s_inode_size;
 
         const block_num = self.group_descs[group].bg_inode_table +
-                         (index * inode_size) / self.block_size;
+            (index * inode_size) / self.block_size;
         const offset = (index * inode_size) % self.block_size;
 
         const block = try self.cache.get(self, block_num);
@@ -238,11 +241,11 @@ const Ext2FileSystem = struct {
             self.superblock.s_inode_size;
 
         const block_num = self.group_descs[group].bg_inode_table +
-                         (index * inode_size) / self.block_size;
+            (index * inode_size) / self.block_size;
         const offset = (index * inode_size) % self.block_size;
 
         const block = try self.cache.get(self, block_num);
-        @memcpy(block[offset..offset + @sizeOf(Ext2Inode)], std.mem.asBytes(inode));
+        @memcpy(block[offset .. offset + @sizeOf(Ext2Inode)], std.mem.asBytes(inode));
         self.cache.markDirty(block_num);
     }
 
@@ -750,11 +753,11 @@ pub fn mount(device: *const ata.ATADevice) !*Ext2FileSystem {
     const base: u32 = 1024;
     const block_size: u32 = base << log_shift;
     const groups_count = (superblock.s_blocks_count + superblock.s_blocks_per_group - 1) /
-                        superblock.s_blocks_per_group;
+        superblock.s_blocks_per_group;
 
     const group_desc_blocks = (groups_count * @sizeOf(Ext2GroupDesc) + block_size - 1) / block_size;
     const group_desc_mem = memory.kmalloc(group_desc_blocks * block_size) orelse
-                           return vfs.VFSError.OutOfMemory;
+        return vfs.VFSError.OutOfMemory;
 
     ext2_filesystems[num_ext2_fs] = Ext2FileSystem{
         .device = device,
@@ -774,8 +777,7 @@ pub fn mount(device: *const ata.ATADevice) !*Ext2FileSystem {
         const i_u32: u32 = @intCast(i);
         try fs.readBlock(gdt_block + i_u32, buffer[0..block_size]);
         const gd_ptr: [*]u8 = @ptrCast(&fs.group_descs[i * block_size / @sizeOf(Ext2GroupDesc)]);
-        @memcpy(gd_ptr[0..block_size],
-                buffer[0..block_size]);
+        @memcpy(gd_ptr[0..block_size], buffer[0..block_size]);
     }
 
     num_ext2_fs += 1;
@@ -981,7 +983,7 @@ fn ext2Read(vnode: *vfs.VNode, buffer: []u8, offset: u64) vfs.VFSError!usize {
 
         const bytes_in_block = @min(block_size - offset_in_block, bytes_to_read - bytes_read);
         const offset_start: usize = @intCast(offset_in_block);
-        @memcpy(buffer[bytes_read..bytes_read + bytes_in_block], block[offset_start..offset_start + bytes_in_block]);
+        @memcpy(buffer[bytes_read .. bytes_read + bytes_in_block], block[offset_start .. offset_start + bytes_in_block]);
 
         bytes_read += bytes_in_block;
         current_offset += bytes_in_block;

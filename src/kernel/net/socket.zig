@@ -5,6 +5,7 @@ const ipv4 = @import("ipv4.zig");
 const ipv6 = @import("ipv6.zig");
 const vga = @import("../drivers/vga.zig");
 const process = @import("../process/process.zig");
+const sync = @import("../utils/sync.zig");
 
 pub const AddressFamily = enum {
     AF_INET,
@@ -82,6 +83,9 @@ pub const Socket = struct {
     address_family: AddressFamily,
     remote_ipv6: ?ipv6.IPv6Address,
     local_ipv6: ?ipv6.IPv6Address,
+    recv_ready: sync.Semaphore,
+    accept_ready: sync.Semaphore,
+    state_ready: sync.Semaphore,
 
     pub fn init(socket_type: SocketType, protocol: Protocol) !*Socket {
         const sock_mem = memory.kmalloc(@sizeOf(Socket)) orelse return error.OutOfMemory;
@@ -123,8 +127,16 @@ pub const Socket = struct {
             .address_family = .AF_INET,
             .remote_ipv6 = null,
             .local_ipv6 = null,
+            .recv_ready = sync.Semaphore.init(0),
+            .accept_ready = sync.Semaphore.init(0),
+            .state_ready = sync.Semaphore.init(0),
         };
         return sock;
+    }
+
+    pub fn setState(self: *Socket, state: SocketState) void {
+        self.state = state;
+        self.state_ready.signal();
     }
 
     pub fn bind(self: *Socket, addr: ipv4.IPv4Address, port: u16) !void {
@@ -178,10 +190,13 @@ pub const Socket = struct {
         }
 
         while (self.backlog_count == 0) {
+            if (self.state != .LISTENING) {
+                return SocketError.NotListening;
+            }
             if (!self.blocking) {
                 return SocketError.NoBufferSpace;
             }
-            process.yield();
+            self.accept_ready.wait();
         }
 
         const client_socket = self.backlog[self.backlog_head].?;
@@ -208,25 +223,22 @@ pub const Socket = struct {
 
         switch (self.protocol) {
             .TCP => {
-                self.tcp_connection = try tcp.createConnection(
-                    self.local_addr,
-                    self.local_port,
-                    self.remote_addr,
-                    self.remote_port
-                );
+                self.tcp_connection = try tcp.createConnection(self.local_addr, self.local_port, self.remote_addr, self.remote_port);
 
                 try tcp.initiateConnection(self.tcp_connection.?);
 
-                while (self.state == .CONNECTING) {
+                while (tcp.isConnecting(self.tcp_connection.?)) {
                     if (!self.blocking) {
                         return;
                     }
-                    process.yield();
+                    tcp.waitForActivity(self.tcp_connection.?);
                 }
 
-                if (self.state != .CONNECTED) {
+                if (!tcp.isEstablished(self.tcp_connection.?)) {
+                    self.state = .CLOSED;
                     return SocketError.ConnectionRefused;
                 }
+                self.state = .CONNECTED;
             },
             .UDP => {
                 self.state = .CONNECTED;
@@ -248,13 +260,7 @@ pub const Socket = struct {
                 return 0;
             },
             .UDP => {
-                try udp.send(
-                    self.local_addr,
-                    self.local_port,
-                    self.remote_addr,
-                    self.remote_port,
-                    data
-                );
+                try udp.send(self.local_addr, self.local_port, self.remote_addr, self.remote_port, data);
                 return data.len;
             },
             else => return 0,
@@ -268,13 +274,7 @@ pub const Socket = struct {
 
         switch (self.protocol) {
             .UDP => {
-                try udp.send(
-                    self.local_addr,
-                    self.local_port,
-                    addr,
-                    port,
-                    data
-                );
+                try udp.send(self.local_addr, self.local_port, addr, port, data);
             },
             else => return SocketError.InvalidSocket,
         }
@@ -286,10 +286,13 @@ pub const Socket = struct {
         }
 
         while (self.recv_head == self.recv_tail) {
+            if (self.state == .CLOSED) {
+                return 0;
+            }
             if (!self.blocking) {
                 return 0;
             }
-            process.yield();
+            self.recv_ready.wait();
         }
 
         var bytes_read: usize = 0;
@@ -310,11 +313,30 @@ pub const Socket = struct {
             return SocketError.NotConnected;
         }
 
+        if (self.protocol == .TCP) {
+            const conn = self.tcp_connection orelse return SocketError.NotConnected;
+
+            while (!tcp.hasReadableData(conn)) {
+                if (tcp.isReadableClosed(conn)) {
+                    return 0;
+                }
+                if (!self.blocking) {
+                    return 0;
+                }
+                tcp.waitForActivity(conn);
+            }
+
+            return tcp.receiveData(conn, buffer);
+        }
+
         while (self.recv_head == self.recv_tail) {
+            if (self.state == .CLOSED) {
+                return 0;
+            }
             if (!self.blocking) {
                 return 0;
             }
-            process.yield();
+            self.recv_ready.wait();
         }
 
         var bytes_read: usize = 0;
@@ -342,6 +364,9 @@ pub const Socket = struct {
         }
 
         self.state = .CLOSED;
+        self.recv_ready.signal();
+        self.accept_ready.signal();
+        self.state_ready.signal();
         self.in_use = false;
         socket_id_lookup[self.id % MAX_SOCKETS] = null;
         if (self.local_port != 0) {
@@ -381,6 +406,7 @@ pub const Socket = struct {
                 self.recv_head = next_head;
             }
         }
+        self.recv_ready.signal();
     }
 
     pub fn addToBacklog(self: *Socket, client: *Socket) !void {
@@ -391,6 +417,7 @@ pub const Socket = struct {
         self.backlog[self.backlog_tail] = client;
         self.backlog_tail = (self.backlog_tail + 1) % self.backlog.len;
         self.backlog_count += 1;
+        self.accept_ready.signal();
     }
 };
 
@@ -441,6 +468,23 @@ pub fn createSocket(socket_type: SocketType, protocol: Protocol) !*Socket {
     memory.kfree(sock.send_buffer.ptr);
     memory.kfree(@as([*]u8, @ptrCast(sock)));
     return SocketError.NoBufferSpace;
+}
+
+pub fn createAcceptedTcpSocket(
+    conn: *tcp.TCPConnection,
+    local_addr: ipv4.IPv4Address,
+    local_port: u16,
+    remote_addr: ipv4.IPv4Address,
+    remote_port: u16,
+) !*Socket {
+    const sock = try createSocket(.STREAM, .TCP);
+    sock.local_addr = local_addr;
+    sock.local_port = local_port;
+    sock.remote_addr = remote_addr;
+    sock.remote_port = remote_port;
+    sock.tcp_connection = conn;
+    sock.state = .CONNECTED;
+    return sock;
 }
 
 pub fn findSocket(id: u32) ?*Socket {

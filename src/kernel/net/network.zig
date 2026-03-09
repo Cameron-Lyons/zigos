@@ -3,6 +3,7 @@ const vga = @import("../drivers/vga.zig");
 const rtl8139 = @import("../drivers/rtl8139.zig");
 const process = @import("../process/process.zig");
 const smp = @import("../smp/smp.zig");
+const sync = @import("../utils/sync.zig");
 const ethernet = @import("ethernet.zig");
 const arp = @import("arp.zig");
 pub const ipv4 = @import("ipv4.zig");
@@ -60,9 +61,21 @@ var tx_head: usize = 0;
 var tx_tail: usize = 0;
 var tx_count: usize = 0;
 var workers_started: bool = false;
+var rx_ready: sync.Semaphore = undefined;
+var tx_ready: sync.Semaphore = undefined;
 
 pub fn init() void {
     vga.print("Initializing network stack...\n");
+
+    rx_head = 0;
+    rx_tail = 0;
+    rx_count = 0;
+    tx_head = 0;
+    tx_tail = 0;
+    tx_count = 0;
+    workers_started = false;
+    rx_ready = sync.Semaphore.init(0);
+    tx_ready = sync.Semaphore.init(0);
 
     ethernet.init();
     arp.init();
@@ -98,9 +111,9 @@ pub fn enqueueRxPacket(packet: []const u8, mac: [6]u8) void {
 
     const copy_len = @min(packet.len, MAX_PACKET_SIZE);
     rx_lock.acquire();
-    defer rx_lock.release();
 
     if (rx_count >= RX_QUEUE_DEPTH) {
+        rx_lock.release();
         return;
     }
 
@@ -110,6 +123,8 @@ pub fn enqueueRxPacket(packet: []const u8, mac: [6]u8) void {
 
     rx_head = (rx_head + 1) % RX_QUEUE_DEPTH;
     rx_count += 1;
+    rx_lock.release();
+    rx_ready.signal();
 }
 
 pub fn enqueueTxPacket(packet: []const u8) void {
@@ -120,9 +135,9 @@ pub fn enqueueTxPacket(packet: []const u8) void {
 
     const copy_len = @min(packet.len, MAX_PACKET_SIZE);
     tx_lock.acquire();
-    defer tx_lock.release();
 
     if (tx_count >= TX_QUEUE_DEPTH) {
+        tx_lock.release();
         return;
     }
 
@@ -131,6 +146,8 @@ pub fn enqueueTxPacket(packet: []const u8) void {
 
     tx_head = (tx_head + 1) % TX_QUEUE_DEPTH;
     tx_count += 1;
+    tx_lock.release();
+    tx_ready.signal();
 }
 
 fn popRx() ?RxEntry {
@@ -159,20 +176,18 @@ fn popTx() ?TxEntry {
 
 fn netRxWorker() void {
     while (true) {
+        rx_ready.wait();
         if (popRx()) |entry| {
             processPacket(entry.data[0..entry.len], entry.mac);
-        } else {
-            process.yield();
         }
     }
 }
 
 fn netTxWorker() void {
     while (true) {
+        tx_ready.wait();
         if (popTx()) |entry| {
             sendPacketNow(entry.data[0..entry.len]);
-        } else {
-            process.yield();
         }
     }
 }

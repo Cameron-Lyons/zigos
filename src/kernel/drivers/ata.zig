@@ -1,6 +1,7 @@
 const x86 = @import("../../arch/x86.zig");
 const vga = @import("vga.zig");
 const process = @import("../process/process.zig");
+const sync = @import("../utils/sync.zig");
 
 const ATA_PRIMARY_BASE: u16 = 0x1F0;
 const ATA_PRIMARY_CTRL: u16 = 0x3F6;
@@ -94,6 +95,7 @@ const AsyncRequest = struct {
     buffer: [*]u8 = undefined,
     buffer_len: usize = 0,
     result_code: u8 = 0,
+    completion: sync.Semaphore = undefined,
 };
 
 var async_lock: Spinlock = .{};
@@ -103,9 +105,20 @@ var async_head: usize = 0;
 var async_tail: usize = 0;
 var async_count: usize = 0;
 var async_worker_started: bool = false;
+var async_ready: sync.Semaphore = undefined;
 
 pub fn init() void {
     vga.print("  - Detecting ATA drives...\n");
+
+    async_head = 0;
+    async_tail = 0;
+    async_count = 0;
+    async_worker_started = false;
+    async_ready = sync.Semaphore.init(0);
+    for (&async_requests) |*req| {
+        req.* = .{ .completion = sync.Semaphore.init(0) };
+    }
+    @memset(async_ring[0..], 0);
 
     primary_master = ATADevice{
         .present = false,
@@ -208,9 +221,11 @@ fn decodeError(code: u8) ATAError {
 
 fn queueAsyncRequest(op: AsyncOp, device: *const ATADevice, lba: u64, count: u8, buffer: []u8) ATAError!usize {
     async_lock.acquire();
-    defer async_lock.release();
 
-    if (async_count >= ASYNC_REQUESTS) return ATAError.Timeout;
+    if (async_count >= ASYNC_REQUESTS) {
+        async_lock.release();
+        return ATAError.Timeout;
+    }
 
     var request_idx: ?u8 = null;
     for (&async_requests, 0..) |*req, idx| {
@@ -225,40 +240,38 @@ fn queueAsyncRequest(op: AsyncOp, device: *const ATADevice, lba: u64, count: u8,
             req.buffer = buffer.ptr;
             req.buffer_len = buffer.len;
             req.result_code = 0;
+            req.completion = sync.Semaphore.init(0);
             request_idx = @intCast(idx);
             break;
         }
     }
 
-    const idx = request_idx orelse return ATAError.Timeout;
+    const idx = request_idx orelse {
+        async_lock.release();
+        return ATAError.Timeout;
+    };
     async_ring[async_head] = idx;
     async_head = (async_head + 1) % ASYNC_REQUESTS;
     async_count += 1;
+    async_lock.release();
+    async_ready.signal();
     return idx;
 }
 
 fn waitAsyncRequest(op: AsyncOp, device: *const ATADevice, lba: u64, count: u8, buffer: []u8) ATAError!void {
     const req_idx = try queueAsyncRequest(op, device, lba, count, buffer);
+    const req = &async_requests[req_idx];
 
-    while (true) {
-        async_lock.acquire();
-        const req = &async_requests[req_idx];
-        const done = req.done;
-        const result_code = req.result_code;
-        if (done) {
-            req.in_use = false;
-            req.queued = false;
-            req.done = false;
-        }
-        async_lock.release();
+    req.completion.wait();
 
-        if (done) {
-            if (result_code != 0) return decodeError(result_code);
-            return;
-        }
+    async_lock.acquire();
+    const result_code = req.result_code;
+    req.in_use = false;
+    req.queued = false;
+    req.done = false;
+    async_lock.release();
 
-        process.yield();
-    }
+    if (result_code != 0) return decodeError(result_code);
 }
 
 fn popAsyncRequest() ?*AsyncRequest {
@@ -277,6 +290,7 @@ fn popAsyncRequest() ?*AsyncRequest {
 
 fn ataAsyncWorkerTask() void {
     while (true) {
+        async_ready.wait();
         if (popAsyncRequest()) |req| {
             const result_code: u8 = switch (req.op) {
                 .Read => blk: {
@@ -297,8 +311,7 @@ fn ataAsyncWorkerTask() void {
             req.result_code = result_code;
             req.done = true;
             async_lock.release();
-        } else {
-            process.yield();
+            req.completion.signal();
         }
     }
 }
@@ -520,7 +533,6 @@ fn waitDataReady(device: *const ATADevice) ATAError!void {
 }
 
 fn printDriveInfo(device: *const ATADevice) void {
-
     var i: usize = 0;
     while (i < 40 and device.model[i] != 0) : (i += 1) {
         vga.put_char(device.model[i]);
