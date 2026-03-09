@@ -68,7 +68,7 @@ pub const Mutex = struct {
         }
 
         while (self.locked) {
-            if (process.current_process) |current| {
+            if (process.getEffectiveCurrent()) |current| {
                 current.state = .Blocked;
 
                 if (self.wait_queue == null) {
@@ -150,7 +150,7 @@ pub const Semaphore = struct {
         self.count -= 1;
 
         if (self.count < 0) {
-            if (process.current_process) |current| {
+            if (process.getEffectiveCurrent()) |current| {
                 current.state = .Blocked;
 
                 if (self.wait_queue == null) {
@@ -231,7 +231,7 @@ pub const RWLock = struct {
         defer self.spin.release();
 
         while (self.writer or self.writer_waiting) {
-            if (process.current_process) |current| {
+            if (process.getEffectiveCurrent()) |current| {
                 current.state = .Blocked;
 
                 if (self.read_queue == null) {
@@ -279,7 +279,7 @@ pub const RWLock = struct {
         self.writer_waiting = true;
 
         while (self.writer or self.readers > 0) {
-            if (process.current_process) |current| {
+            if (process.getEffectiveCurrent()) |current| {
                 current.state = .Blocked;
 
                 if (self.write_queue == null) {
@@ -347,7 +347,7 @@ pub const ConditionVariable = struct {
     pub fn wait(self: *ConditionVariable, mutex: *Mutex) void {
         self.spin.acquire();
 
-        if (process.current_process) |current| {
+        if (process.getEffectiveCurrent()) |current| {
             current.state = .Blocked;
 
             if (self.wait_queue == null) {
