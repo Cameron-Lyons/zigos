@@ -28,14 +28,13 @@ pub fn init() void {
         var_entry.value_len = 0;
     }
 
+    initialized = true;
 
     setVar("PATH", "/bin:/usr/bin") catch {};
     setVar("HOME", "/home/user") catch {};
     setVar("SHELL", "/bin/sh") catch {};
     setVar("USER", "root") catch {};
     setVar("TERM", "vga") catch {};
-
-    initialized = true;
 }
 
 pub fn setVar(name: []const u8, value: []const u8) !void {
@@ -49,7 +48,6 @@ pub fn setVar(name: []const u8, value: []const u8) !void {
         return error.ValueTooLong;
     }
 
-
     var i: usize = 0;
     while (i < env_count) : (i += 1) {
         if (env_vars[i].name_len == name.len) {
@@ -62,7 +60,6 @@ pub fn setVar(name: []const u8, value: []const u8) !void {
                 }
             }
             if (match) {
-
                 @memcpy(env_vars[i].value[0..value.len], value);
                 env_vars[i].value_len = value.len;
                 env_vars[i].value[value.len] = 0;
@@ -70,7 +67,6 @@ pub fn setVar(name: []const u8, value: []const u8) !void {
             }
         }
     }
-
 
     if (env_count >= MAX_ENV_VARS) {
         return error.TooManyVars;
@@ -125,7 +121,6 @@ pub fn unsetVar(name: []const u8) void {
                 }
             }
             if (match) {
-
                 var k = i;
                 while (k < env_count - 1) : (k += 1) {
                     env_vars[k] = env_vars[k + 1];
@@ -163,10 +158,8 @@ pub fn expandVar(input: []const u8, output: []u8) usize {
 
     while (in_idx < input.len and out_idx < output.len) {
         if (input[in_idx] == '$' and in_idx + 1 < input.len) {
-
             var var_start = in_idx + 1;
             var var_end = var_start;
-
 
             if (input[var_start] == '{') {
                 var_start += 1;
@@ -185,13 +178,11 @@ pub fn expandVar(input: []const u8, output: []u8) usize {
                     }
                     in_idx = var_end + 1;
                 } else {
-
                     output[out_idx] = input[in_idx];
                     out_idx += 1;
                     in_idx += 1;
                 }
             } else {
-
                 while (var_end < input.len and isVarChar(input[var_end])) : (var_end += 1) {}
 
                 if (var_end > var_start) {
@@ -206,7 +197,6 @@ pub fn expandVar(input: []const u8, output: []u8) usize {
                     }
                     in_idx = var_end;
                 } else {
-
                     output[out_idx] = input[in_idx];
                     out_idx += 1;
                     in_idx += 1;
@@ -224,7 +214,7 @@ pub fn expandVar(input: []const u8, output: []u8) usize {
 
 fn isVarChar(c: u8) bool {
     return (c >= 'A' and c <= 'Z') or
-           (c >= 'a' and c <= 'z') or
-           (c >= '0' and c <= '9') or
-           c == '_';
+        (c >= 'a' and c <= 'z') or
+        (c >= '0' and c <= '9') or
+        c == '_';
 }

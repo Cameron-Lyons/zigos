@@ -1,5 +1,7 @@
 const vga = @import("drivers/vga.zig");
+const x86 = @import("../arch/x86.zig");
 const console = @import("utils/console.zig");
+const config = @import("config.zig");
 const isr = @import("interrupts/isr.zig");
 const keyboard = @import("drivers/keyboard.zig");
 const paging = @import("memory/paging.zig");
@@ -10,6 +12,7 @@ const syscall = @import("process/syscall.zig");
 const test_syscall = @import("tests/test_syscall.zig");
 const memory = @import("memory/memory.zig");
 const panic_handler = @import("utils/panic.zig");
+const qemu_exit = @import("utils/qemu_exit.zig");
 const device = @import("devices/device.zig");
 const console_device = @import("devices/console_device.zig");
 const vfs = @import("fs/vfs.zig");
@@ -56,13 +59,18 @@ fn test_process2() void {
     }
 }
 
-export fn kernel_main() void {
-    vga.init();
-    vga.clear();
-    console.init(); // Initialize serial port early
-    console.print("Welcome to ZigOS!\n");
-    console.print("A minimal operating system written in Zig\n");
+fn printBootMarker(marker: []const u8) void {
+    console.print(marker);
+    console.print("\n");
+}
 
+fn printBootProfile() void {
+    console.print("BOOT:PROFILE:");
+    console.print(config.name());
+    console.print("\n");
+}
+
+fn initCore() void {
     console.print("Initializing GDT...\n");
     const gdt = @import("interrupts/gdt.zig");
     gdt.init();
@@ -96,7 +104,9 @@ export fn kernel_main() void {
     console.print("Initializing environment variables...\n");
     const environ = @import("utils/environ.zig");
     environ.init();
+}
 
+fn initDevices() void {
     console.print("Initializing device drivers...\n");
     device.init();
     console_device.init() catch |err| {
@@ -108,45 +118,80 @@ export fn kernel_main() void {
     console.print("Scanning PCI bus...\n");
     pci.scanBus();
 
-    console.print("Initializing ACPI...\n");
-    acpi.init();
+    if (config.shouldInitAcpi()) {
+        console.print("Initializing ACPI...\n");
+        acpi.init();
+    }
 
-    console.print("Initializing network...\n");
-    e1000.init();
-    if (!e1000.isInitialized()) {
-        virtio.init();
-        if (!virtio.isInitialized()) {
-            rtl8139.init();
+    if (config.shouldInitSmp()) {
+        console.print("Initializing SMP (multicore) support...
+");
+        const smp = @import("smp/smp.zig");
+        smp.init();
+        if (smp.isSMPEnabled()) {
+            console.print("SMP enabled with ");
+            const num_cpus = smp.getNumCPUs();
+            var cpu_str: [10]u8 = undefined;
+            var cpu_count = num_cpus;
+            var idx: usize = 0;
+            if (cpu_count == 0) {
+                cpu_str[0] = '0';
+                idx = 1;
+            } else {
+                while (cpu_count > 0) : (idx += 1) {
+                    cpu_str[idx] = @as(u8, @intCast('0' + (cpu_count % 10)));
+                    cpu_count /= 10;
+                }
+                var i: usize = 0;
+                while (i < idx / 2) : (i += 1) {
+                    const tmp = cpu_str[i];
+                    cpu_str[i] = cpu_str[idx - 1 - i];
+                    cpu_str[idx - 1 - i] = tmp;
+                }
+            }
+            console.print(cpu_str[0..idx]);
+            console.print(" CPUs
+");
+        } else {
+            console.print("Single CPU mode
+");
         }
     }
-    network.init();
+}
 
-    console.print("Initializing ICMP...\n");
-    icmp.init();
+fn initNetworkStack() void {
+        }
+        network.init();
 
-    console.print("Initializing socket API...\n");
-    const socket = @import("net/socket.zig");
-    socket.init();
+        console.print("Initializing ICMP...\n");
+        icmp.init();
 
-    console.print("Initializing DNS client...\n");
-    const dns = @import("net/dns.zig");
-    dns.init();
+        console.print("Initializing socket API...\n");
+        const socket = @import("net/socket.zig");
+        socket.init();
 
-    console.print("Initializing DHCP client...\n");
-    const dhcp = @import("net/dhcp.zig");
-    dhcp.init();
+        console.print("Initializing DNS client...\n");
+        const dns = @import("net/dns.zig");
+        dns.init();
 
-    console.print("Initializing IPv6...\n");
-    ipv6.init();
+        console.print("Initializing DHCP client...\n");
+        const dhcp = @import("net/dhcp.zig");
+        dhcp.init();
 
-    console.print("Initializing ICMPv6...\n");
-    icmpv6.init();
-    icmpv6.sendRouterSolicitation();
+        console.print("Initializing IPv6...\n");
+        ipv6.init();
 
-    console.print("Initializing routing table...\n");
-    const routing = @import("net/routing.zig");
-    routing.init();
+        console.print("Initializing ICMPv6...\n");
+        icmpv6.init();
+        icmpv6.sendRouterSolicitation();
 
+        console.print("Initializing routing table...\n");
+        const routing = @import("net/routing.zig");
+        routing.init();
+    }
+}
+
+fn initFileSystems() void {
     console.print("Initializing Virtual File System...\n");
     vfs.init();
     console.print("VFS ready!\n");
@@ -192,55 +237,26 @@ export fn kernel_main() void {
             console.print("\n");
         };
     }
+}
 
-    console.print("Running VM tests...\n");
-    const vm_test = @import("tests/vm_test.zig");
-    vm_test.test_virtual_memory();
-
+fn initRuntime() void {
     console.print("Initializing credentials...\n");
     credentials.init();
 
     console.print("Initializing process management...\n");
     process.init();
 
-    console.print("Initializing SMP (multicore) support...\n");
-    const smp = @import("smp/smp.zig");
-    smp.init();
-    if (smp.isSMPEnabled()) {
-        console.print("SMP enabled with ");
-        const num_cpus = smp.getNumCPUs();
-        // SAFETY: filled by the following digit extraction loop
-        var cpu_str: [10]u8 = undefined;
-        var cpu_count = num_cpus;
-        var idx: usize = 0;
-        if (cpu_count == 0) {
-            cpu_str[0] = '0';
-            idx = 1;
-        } else {
-            while (cpu_count > 0) : (idx += 1) {
-                cpu_str[idx] = @as(u8, @intCast('0' + (cpu_count % 10)));
-                cpu_count /= 10;
-            }
-            var i: usize = 0;
-            while (i < idx / 2) : (i += 1) {
-                const tmp = cpu_str[i];
-                cpu_str[i] = cpu_str[idx - 1 - i];
-                cpu_str[idx - 1 - i] = tmp;
-            }
-        }
-        console.print(cpu_str[0..idx]);
-        console.print(" CPUs\n");
-    } else {
-        console.print("Single CPU mode\n");
+    if (config.shouldInitRuntimeExtras()) {
+        console.print("Starting async IO workers...
+");
+        ata.startAsyncWorker();
+        network.startWorkers();
+
+        console.print("Initializing process monitoring...
+");
+        const procmon = @import("tests/procmon.zig");
+        procmon.init();
     }
-
-    console.print("Starting async IO workers...\n");
-    ata.startAsyncWorker();
-    network.startWorkers();
-
-    console.print("Initializing process monitoring...\n");
-    const procmon = @import("tests/procmon.zig");
-    procmon.init();
 
     console.print("Initializing timer...\n");
     timer.init(100);
@@ -249,22 +265,26 @@ export fn kernel_main() void {
     keyboard.init();
     console.print("Keyboard ready!\n");
 
-    console.print("Initializing USB...\n");
-    usb.init();
+    if (config.shouldInitRuntimeExtras()) {
+        console.print("Initializing USB...\n");
+        usb.init();
 
-    console.print("Initializing UHCI...\n");
-    uhci.init();
+        console.print("Initializing UHCI...\n");
+        uhci.init();
 
-    console.print("Initializing audio...\n");
-    ac97.init();
+        console.print("Initializing audio...\n");
+        ac97.init();
 
-    console.print("Initializing virtual terminals...\n");
-    vt.init();
+        console.print("Initializing virtual terminals...\n");
+        vt.init();
 
-    console.print("Initializing graphics mode (framebuffer)...\n");
-    _ = @import("devices/framebuffer.zig");
-    console.print("Framebuffer support ready (requires multiboot framebuffer info)\n");
+        console.print("Initializing graphics mode (framebuffer)...\n");
+        _ = @import("devices/framebuffer.zig");
+        console.print("Framebuffer support ready (requires multiboot framebuffer info)\n");
+    }
+}
 
+fn createDemoProcesses() void {
     console.print("Creating test processes...\n");
     _ = process.create_process("test1", test_process1);
     _ = process.create_process("test2", test_process2);
@@ -279,17 +299,69 @@ export fn kernel_main() void {
     console.print("Initializing user programs...\n");
     const user_programs = @import("process/user_programs.zig");
     user_programs.init();
+}
 
+fn initializeShell(shell_instance: *shell.Shell) void {
     console.print("Initializing shell...\n");
-    var system_shell = shell.Shell.init();
-    keyboard.setShell(&system_shell);
+    shell_instance.* = shell.Shell.init();
+    keyboard.setShell(shell_instance);
+    printBootMarker("BOOT:SHELL_READY");
+}
 
-    asm volatile ("sti");
+fn runVmProfile() noreturn {
+    console.print("Running VM tests...\n");
 
-    console.print("\nZigOS Shell Ready!\n");
-    system_shell.printPrompt();
+    const vm_test = @import("tests/vm_test.zig");
+    if (vm_test.test_virtual_memory()) {
+        printBootMarker("TEST:VM:PASS");
+        qemu_exit.success();
+    }
 
-    while (system_shell.running) {
-        asm volatile ("hlt");
+    printBootMarker("TEST:VM:FAIL");
+    qemu_exit.failure();
+}
+
+export fn kernel_main() void {
+    x86.enableSse();
+    vga.init();
+    vga.clear();
+    console.init();
+    printBootMarker("BOOT:START");
+    printBootProfile();
+    console.print("Welcome to ZigOS!\n");
+    console.print("A minimal operating system written in Zig\n");
+
+    initCore();
+    initDevices();
+    initNetworkStack();
+    initFileSystems();
+    initRuntime();
+
+    printBootMarker("BOOT:CORE_READY");
+
+    switch (config.bootProfile()) {
+        .dev => {
+            var system_shell: shell.Shell = undefined;
+
+            createDemoProcesses();
+            initializeShell(&system_shell);
+
+            asm volatile ("sti");
+
+            console.print("\nZigOS Shell Ready!\n");
+            system_shell.printPrompt();
+
+            while (system_shell.running) {
+                asm volatile ("hlt");
+            }
+        },
+        .ci_smoke => {
+            var system_shell: shell.Shell = undefined;
+
+            initializeShell(&system_shell);
+            printBootMarker("BOOT:PASS");
+            qemu_exit.success();
+        },
+        .test_vm => runVmProfile(),
     }
 }

@@ -1,6 +1,8 @@
 const std = @import("std");
 const vga = @import("../drivers/vga.zig");
+const config = @import("../config.zig");
 const console = @import("console.zig");
+const qemu_exit = @import("qemu_exit.zig");
 
 var panic_occurred: bool = false;
 
@@ -32,6 +34,10 @@ pub fn panic(comptime format: []const u8, args: anytype) noreturn {
     console.printWithColor("System halted. Please restart your computer.\n", 0x4F);
     console.printWithColor("======================================================================\n", 0x4F);
 
+    if (config.shouldExitOnPanic()) {
+        qemu_exit.failure();
+    }
+
     while (true) {
         asm volatile ("hlt");
     }
@@ -50,4 +56,3 @@ pub fn todo(comptime message: []const u8) noreturn {
 pub fn unreachable_panic(comptime message: []const u8) noreturn {
     panic("Unreachable code reached: {s}", .{message});
 }
-
