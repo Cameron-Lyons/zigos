@@ -1003,6 +1003,7 @@ fn sys_chown(pathname: [*]const u8, uid: u16, gid: u16) i32 {
     }
 
     vfs.chown(path_slice, uid, gid) catch |err| return vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(path_slice, abi.IN_ATTRIB, 0);
     return 0;
 }
 

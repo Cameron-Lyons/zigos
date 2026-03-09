@@ -5,6 +5,7 @@ const protection = @import("../memory/protection.zig");
 const socket = @import("../net/socket.zig");
 const tcp = @import("../net/tcp.zig");
 const ipv4 = @import("../net/ipv4.zig");
+const vfs = @import("../fs/vfs.zig");
 const paging = @import("../memory/paging.zig");
 const kernel_signal = @import("../process/signal.zig");
 const syscall = @import("../process/syscall.zig");
@@ -29,6 +30,9 @@ const EVENTFD_WRITE_VALUE: u64 = 7;
 const TIMERFD_INTERVAL_TICKS: u32 = 2;
 const SIGNALFD_TEST_SIGNAL: i32 = kernel_signal.SIGUSR1;
 const INOTIFY_TEST_PATH = "/inotify-smoke";
+const INOTIFY_FD_TEST_PATH = "/inotify-fd-smoke";
+const INOTIFY_FD_PAYLOAD = "fd-write";
+const INOTIFY_FD_MASK = abi.IN_OPEN | abi.IN_MODIFY | abi.IN_ACCESS | abi.IN_ATTRIB | abi.IN_CLOSE_WRITE;
 const TEST_WAIT_YIELDS: usize = 4096;
 
 const FdSet = extern struct {
@@ -99,6 +103,15 @@ const InotifyTestState = struct {
     ok: bool = false,
 };
 
+const InotifyFdTestState = struct {
+    fd: i32 = -1,
+    wd: i32 = -1,
+    waiter_pid: u32 = 0,
+    feeder_pid: u32 = 0,
+    done: bool = false,
+    ok: bool = false,
+};
+
 const TcpWakeTestState = struct {
     listener: ?*socket.Socket = null,
     accepted: ?*socket.Socket = null,
@@ -120,6 +133,7 @@ var eventfd_test: EventFdTestState = .{};
 var timerfd_test: TimerFdTestState = .{};
 var signalfd_test: SignalFdTestState = .{};
 var inotify_test: InotifyTestState = .{};
+var inotify_fd_test: InotifyFdTestState = .{};
 
 pub fn test_virtual_memory() bool {
     pass_count = 0;
@@ -141,6 +155,7 @@ pub fn test_virtual_memory() bool {
     test_timerfd_poll_dispatch();
     test_signalfd_poll_dispatch();
     test_inotify_poll_dispatch();
+    test_inotify_fd_event_dispatch();
 
     vga.print("=== VM Test Results: ");
     print_dec(pass_count);
@@ -761,6 +776,65 @@ fn test_inotify_poll_dispatch() void {
     pass_count += 1;
 }
 
+fn test_inotify_fd_event_dispatch() void {
+    vga.print("Testing inotify fd-based open/write/close events...\n");
+
+    resetInotifyFdTest();
+    defer cleanupInotifyFdTest();
+
+    const path_mem = allocUserBytes(INOTIFY_FD_TEST_PATH.len + 1) orelse {
+        vga.print("  [FAIL] Could not allocate inotify file path buffer\n");
+        fail_count += 1;
+        return;
+    };
+    defer freeUserBytes(path_mem);
+    writeCString(path_mem, INOTIFY_FD_TEST_PATH);
+
+    const create_fd = syscall.syscall2(syscall.SYS_OPEN, @intFromPtr(path_mem.ptr), vfs.O_CREAT | vfs.O_WRONLY | vfs.O_TRUNC);
+    if (create_fd < abi.FD_OFFSET) {
+        vga.print("  [FAIL] Could not create watched file\n");
+        fail_count += 1;
+        return;
+    }
+    closeSysFd(create_fd);
+
+    const fd = syscall.syscall1(syscall.SYS_INOTIFY_INIT1, 0);
+    if (fd < 0) {
+        vga.print("  [FAIL] inotify_init1 syscall failed for fd events\n");
+        fail_count += 1;
+        return;
+    }
+    inotify_fd_test.fd = fd;
+
+    const wd = syscall.syscall3(syscall.SYS_INOTIFY_ADD_WATCH, @as(usize, @intCast(fd)), @intFromPtr(path_mem.ptr), INOTIFY_FD_MASK);
+    if (wd < 0) {
+        vga.print("  [FAIL] inotify_add_watch failed for file events\n");
+        fail_count += 1;
+        return;
+    }
+    inotify_fd_test.wd = wd;
+
+    const waiter = process.create_process("inotify-fd-wait", inotifyFdEventWaitTask);
+    inotify_fd_test.waiter_pid = waiter.pid;
+    const feeder = process.create_process("inotify-fd-feed", inotifyFdEventFeedTask);
+    inotify_fd_test.feeder_pid = feeder.pid;
+
+    if (!waitForFlag(&inotify_fd_test.done)) {
+        vga.print("  [FAIL] Timed out waiting for fd-based inotify events\n");
+        fail_count += 1;
+        return;
+    }
+
+    if (!inotify_fd_test.ok) {
+        vga.print("  [FAIL] missing inotify fd access/attrib events\n");
+        fail_count += 1;
+        return;
+    }
+
+    vga.print("  [OK] inotify reported fd open/write/read/attrib/close events\n");
+    pass_count += 1;
+}
+
 fn resetTcpSelectTest() void {
     tcp_select_test = .{};
 }
@@ -801,6 +875,10 @@ fn resetSignalFdTest() void {
 
 fn resetInotifyTest() void {
     inotify_test = .{};
+}
+
+fn resetInotifyFdTest() void {
+    inotify_fd_test = .{};
 }
 
 fn cleanupUnixSelectTest() void {
@@ -845,6 +923,21 @@ fn cleanupInotifyTest() void {
     path_mem[INOTIFY_TEST_PATH.len] = 0;
     _ = syscall.syscall1(syscall.SYS_RMDIR, @intFromPtr(path_mem.ptr));
     inotify_test = .{};
+}
+
+fn cleanupInotifyFdTest() void {
+    terminateTestProcess(inotify_fd_test.waiter_pid);
+    terminateTestProcess(inotify_fd_test.feeder_pid);
+    closeSysFd(inotify_fd_test.fd);
+
+    const path_mem = allocUserBytes(INOTIFY_FD_TEST_PATH.len + 1) orelse {
+        inotify_fd_test = .{};
+        return;
+    };
+    defer freeUserBytes(path_mem);
+    writeCString(path_mem, INOTIFY_FD_TEST_PATH);
+    _ = syscall.syscall1(syscall.SYS_UNLINK, @intFromPtr(path_mem.ptr));
+    inotify_fd_test = .{};
 }
 
 fn tcpSelectWaitTask() void {
@@ -1196,6 +1289,91 @@ fn inotifyPollFeedTask() void {
     finishTestTask();
 }
 
+fn inotifyFdEventWaitTask() void {
+    const fd = inotify_fd_test.fd;
+    if (fd < 0) {
+        inotify_fd_test.done = true;
+        finishTestTask();
+    }
+
+    var seen_mask: u32 = 0;
+    var attempts: usize = 0;
+
+    while (attempts < 12 and seen_mask != INOTIFY_FD_MASK) : (attempts += 1) {
+        const poll_mem = allocUserBytes(@sizeOf(PollFd)) orelse {
+            inotify_fd_test.done = true;
+            finishTestTask();
+        };
+        defer freeUserBytes(poll_mem);
+
+        const poll_fd: *PollFd = @ptrCast(@alignCast(poll_mem.ptr));
+        poll_fd.* = .{ .fd = fd, .events = POLLIN, .revents = 0 };
+        const timeout_arg: usize = if (attempts == 0) @as(u32, @bitCast(@as(i32, -1))) else 0;
+
+        const ready = syscall.syscall3(syscall.SYS_POLL, @intFromPtr(poll_fd), 1, timeout_arg);
+        if (ready == 1 and (poll_fd.revents & POLLIN) != 0) {
+            const event_mem = allocUserBytes(@sizeOf(syscall_event.InotifyEventHeader) + 16) orelse {
+                inotify_fd_test.done = true;
+                finishTestTask();
+            };
+            defer freeUserBytes(event_mem);
+
+            const read = syscall.syscall3(syscall.SYS_READ, @as(usize, @intCast(fd)), @intFromPtr(event_mem.ptr), event_mem.len);
+            if (read >= @sizeOf(syscall_event.InotifyEventHeader)) {
+                const event: *syscall_event.InotifyEventHeader = @ptrCast(@alignCast(event_mem.ptr));
+                if (event.wd == inotify_fd_test.wd) {
+                    seen_mask |= event.mask & INOTIFY_FD_MASK;
+                }
+            }
+        } else {
+            process.yield();
+        }
+    }
+
+    inotify_fd_test.ok = seen_mask == INOTIFY_FD_MASK;
+    inotify_fd_test.done = true;
+    finishTestTask();
+}
+
+fn inotifyFdEventFeedTask() void {
+    process.yield();
+
+    const path_mem = allocUserBytes(INOTIFY_FD_TEST_PATH.len + 1) orelse {
+        finishTestTask();
+    };
+    defer freeUserBytes(path_mem);
+    writeCString(path_mem, INOTIFY_FD_TEST_PATH);
+
+    const fd = syscall.syscall2(syscall.SYS_OPEN, @intFromPtr(path_mem.ptr), vfs.O_RDWR);
+    if (fd < abi.FD_OFFSET) {
+        finishTestTask();
+    }
+    defer closeSysFd(fd);
+
+    const data_mem = allocUserBytes(INOTIFY_FD_PAYLOAD.len) orelse {
+        finishTestTask();
+    };
+    defer freeUserBytes(data_mem);
+    @memcpy(data_mem, INOTIFY_FD_PAYLOAD);
+
+    _ = syscall.syscall3(syscall.SYS_WRITE, @as(usize, @intCast(fd)), @intFromPtr(data_mem.ptr), data_mem.len);
+
+    const mode: usize = 0o640;
+    _ = syscall.syscall2(syscall.SYS_FCHMOD, @as(usize, @intCast(fd)), mode);
+    _ = syscall.syscall3(syscall.SYS_FCHOWN, @as(usize, @intCast(fd)), 0, 0);
+
+    const rewind_result = syscall.syscall3(syscall.SYS_LSEEK, @as(usize, @intCast(fd)), 0, vfs.SEEK_SET);
+    if (rewind_result >= 0) {
+        const read_mem = allocUserBytes(INOTIFY_FD_PAYLOAD.len) orelse {
+            finishTestTask();
+        };
+        defer freeUserBytes(read_mem);
+        _ = syscall.syscall3(syscall.SYS_READ, @as(usize, @intCast(fd)), @intFromPtr(read_mem.ptr), read_mem.len);
+    }
+
+    finishTestTask();
+}
+
 fn createInetSocket(sock_type: u32, addr: ipv4.IPv4Address, port: u16, listen: bool) ?i32 {
     const fd = syscall.syscall3(syscall.SYS_SOCKET, syscall_net.AF_INET, sock_type, 0);
     if (fd < syscall_net.socket_fd_base) return null;
@@ -1242,6 +1420,11 @@ fn allocUserBytes(size: usize) ?[]u8 {
 
 fn freeUserBytes(bytes: []u8) void {
     protection.freeUserMemory(@intFromPtr(bytes.ptr), bytes.len);
+}
+
+fn writeCString(bytes: []u8, value: []const u8) void {
+    @memset(bytes, 0);
+    @memcpy(bytes[0..value.len], value);
 }
 
 fn setFd(fdset: *FdSet, fd: i32) void {

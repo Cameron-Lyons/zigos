@@ -575,6 +575,8 @@ pub fn sys_inotify_init() i32 {
 }
 
 pub fn sys_inotify_init1(flags: u32) i32 {
+    vfs.registerInotifyNotifier(notifyInotifyPathEvent);
+
     for (&inotify_instances, 0..) |*inst, i| {
         if (!inst.in_use) {
             inst.in_use = true;

@@ -139,6 +139,7 @@ pub fn sys_fchownat(dirfd: i32, pathname: [*]const u8, owner: i32, group: i32) i
     const gid: u32 = if (group < 0) 0xFFFFFFFF else @intCast(group);
 
     vfs.chown(resolved, uid, gid) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(resolved, abi.IN_ATTRIB, 0);
     return 0;
 }
 
