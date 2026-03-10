@@ -82,19 +82,7 @@ pub fn sleepCurrentTicks(ticks_to_wait: u64) void {
     const flags = disableInterrupts();
     const wake_tick = ticks + ticks_to_wait;
 
-    lockSleep();
-
-    var inserted = false;
-    for (&sleep_entries) |*entry| {
-        if (!entry.active) {
-            entry.pid = current.pid;
-            entry.wake_tick = wake_tick;
-            entry.active = true;
-            inserted = true;
-            break;
-        }
-    }
-    unlockSleep();
+    const inserted = scheduleWake(current.pid, wake_tick);
 
     if (!inserted) {
         restoreInterrupts(flags);
@@ -109,6 +97,44 @@ pub fn sleepCurrentTicks(ticks_to_wait: u64) void {
     scheduler.blockProcess(current);
     restoreInterrupts(flags);
     process.yield();
+}
+
+pub fn scheduleWake(pid: u32, wake_tick: u64) bool {
+    if (pid == 0) return false;
+
+    lockSleep();
+    defer unlockSleep();
+
+    for (&sleep_entries) |*entry| {
+        if (entry.active and entry.pid == pid) {
+            entry.wake_tick = wake_tick;
+            return true;
+        }
+    }
+
+    for (&sleep_entries) |*entry| {
+        if (!entry.active) {
+            entry.pid = pid;
+            entry.wake_tick = wake_tick;
+            entry.active = true;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+pub fn cancelWake(pid: u32) void {
+    if (pid == 0) return;
+
+    lockSleep();
+    defer unlockSleep();
+
+    for (&sleep_entries) |*entry| {
+        if (entry.active and entry.pid == pid) {
+            entry.active = false;
+        }
+    }
 }
 
 pub fn sleep(milliseconds: u32) void {

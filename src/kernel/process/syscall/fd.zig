@@ -1,9 +1,8 @@
 const std = @import("std");
 const abi = @import("abi.zig");
+const descriptor = @import("descriptor.zig");
 const errno = @import("errno.zig");
-const syscall_event = @import("event.zig");
 const syscall_net = @import("net.zig");
-const syscall_time = @import("time.zig");
 const process_mod = @import("../process.zig");
 const protection = @import("../../memory/protection.zig");
 const vfs = @import("../../fs/vfs.zig");
@@ -42,42 +41,12 @@ var file_locks: [256]FileLock = [_]FileLock{.{
 }} ** 256;
 
 pub fn isSpecialFd(fd: i32) bool {
-    return syscall_event.isEpollFd(fd) or
-        syscall_time.isTimerFd(fd) or
-        fd >= syscall_net.unix_socket_fd_base;
+    return descriptor.isSpecial(fd);
 }
 
 pub fn sys_close(unix_sockets: *syscall_net.UnixSocketTable, socket_table: *syscall_net.SocketTable, fd: i32) i32 {
-    if (fd >= 0 and fd < socket_table.len) {
-        if (socket_table[@intCast(fd)]) |sock| {
-            sock.close();
-            socket_table[@intCast(fd)] = null;
-            return 0;
-        }
-    }
-
-    if (fd >= syscall_net.unix_socket_fd_base and fd < syscall_net.unix_socket_fd_base + syscall_net.unix_socket_count) {
-        const idx: usize = @intCast(fd - syscall_net.unix_socket_fd_base);
-        var usock = &unix_sockets[idx];
-        if (!usock.in_use) return abi.EBADF;
-        if (usock.peer) |peer| {
-            peer.peer = null;
-            peer.connected = false;
-        }
-        usock.in_use = false;
-        usock.peer = null;
-        usock.path_len = 0;
-        usock.listening = false;
-        usock.connected = false;
-        return 0;
-    }
-
-    if (syscall_event.closePseudoFd(fd)) |result| {
+    if (descriptor.close(unix_sockets, socket_table, fd)) |result| {
         return result;
-    }
-
-    if (syscall_time.isTimerFd(fd)) {
-        return syscall_time.closeTimerFd(fd);
     }
 
     if (fd < abi.FD_OFFSET) return abi.EBADF;

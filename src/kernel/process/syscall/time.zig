@@ -4,6 +4,7 @@ const timer = @import("../../timer/timer.zig");
 const abi = @import("abi.zig");
 const process_mod = @import("../process.zig");
 const protection = @import("../../memory/protection.zig");
+const readiness = @import("readiness.zig");
 
 pub const TimeSpec = extern struct {
     tv_sec: i32,
@@ -64,6 +65,9 @@ const TimerFd = struct {
     clockid: u32,
     flags: u32,
     spec: ItimerSpec,
+    next_expiration_tick: u64,
+    interval_ticks: u64,
+    armed: bool,
     in_use: bool,
 };
 
@@ -84,6 +88,9 @@ var timerfd_table: [64]TimerFd = [_]TimerFd{.{
     .clockid = 0,
     .flags = 0,
     .spec = .{ .it_interval_sec = 0, .it_interval_nsec = 0, .it_value_sec = 0, .it_value_nsec = 0 },
+    .next_expiration_tick = 0,
+    .interval_ticks = 0,
+    .armed = false,
     .in_use = false,
 }} ** 64;
 
@@ -182,7 +189,43 @@ pub fn closeTimerFd(fd: i32) i32 {
     var tfd = &timerfd_table[idx];
     if (!tfd.in_use) return abi.EBADF;
     tfd.in_use = false;
+    tfd.armed = false;
+    readiness.notifyAll();
     return 0;
+}
+
+pub fn pollTimerFd(fd: i32, requested_events: u16) ?error{BadFd}!u16 {
+    const idx = timerFdIndex(fd) orelse return error.BadFd;
+    const tfd = &timerfd_table[idx];
+    if (!tfd.in_use) return error.BadFd;
+
+    var ready: u16 = 0;
+    if ((requested_events & 0x001) != 0 and timerFdExpirations(tfd) != 0) {
+        ready |= 0x001;
+    }
+    return ready;
+}
+
+pub fn readTimerFd(fd: i32, buffer: []u8) ?i32 {
+    const idx = timerFdIndex(fd) orelse return abi.EBADF;
+    const tfd = &timerfd_table[idx];
+    if (!tfd.in_use) return abi.EBADF;
+    if (buffer.len < @sizeOf(u64)) return abi.EINVAL;
+
+    var expirations = consumeTimerFdExpirations(tfd);
+    if (expirations == 0) return abi.EAGAIN;
+
+    @memcpy(buffer[0..@sizeOf(u64)], std.mem.asBytes(&expirations));
+    readiness.notifyAll();
+    return @sizeOf(u64);
+}
+
+pub fn nextTimerFdDeadline(fd: i32) ?u64 {
+    const idx = timerFdIndex(fd) orelse return null;
+    const tfd = &timerfd_table[idx];
+    if (!tfd.in_use or !tfd.armed) return null;
+    if (timerFdExpirations(tfd) != 0) return null;
+    return tfd.next_expiration_tick;
 }
 
 pub fn sys_timerfd_create(clockid: u32, flags: u32) i32 {
@@ -194,6 +237,10 @@ pub fn sys_timerfd_create(clockid: u32, flags: u32) i32 {
             tfd.clockid = clockid;
             tfd.flags = flags;
             tfd.spec = .{ .it_interval_sec = 0, .it_interval_nsec = 0, .it_value_sec = 0, .it_value_nsec = 0 };
+            tfd.next_expiration_tick = 0;
+            tfd.interval_ticks = 0;
+            tfd.armed = false;
+            readiness.notifyAll();
             return @as(i32, @intCast(i)) + TIMERFD_BASE;
         }
     }
@@ -201,8 +248,6 @@ pub fn sys_timerfd_create(clockid: u32, flags: u32) i32 {
 }
 
 pub fn sys_timerfd_settime(fd: i32, flags: u32, new_value_addr: usize, old_value_addr: usize) i32 {
-    _ = flags;
-
     const idx = timerFdIndex(fd) orelse return abi.EBADF;
     const tfd = &timerfd_table[idx];
     if (!tfd.in_use) return abi.EBADF;
@@ -211,10 +256,13 @@ pub fn sys_timerfd_settime(fd: i32, flags: u32, new_value_addr: usize, old_value
 
     if (old_value_addr != 0) {
         if (!protection.verifyUserPointer(old_value_addr, @sizeOf(ItimerSpec))) return abi.EINVAL;
-        protection.copyToUser(old_value_addr, std.mem.asBytes(&tfd.spec)) catch return abi.EINVAL;
+        var current_spec = timerFdCurrentSpec(tfd);
+        protection.copyToUser(old_value_addr, std.mem.asBytes(&current_spec)) catch return abi.EINVAL;
     }
 
     protection.copyFromUser(std.mem.asBytes(&tfd.spec), new_value_addr) catch return abi.EINVAL;
+    applyTimerFdSpec(tfd, flags);
+    readiness.notifyAll();
     return 0;
 }
 
@@ -224,7 +272,8 @@ pub fn sys_timerfd_gettime(fd: i32, value_addr: usize) i32 {
     if (!tfd.in_use) return abi.EBADF;
 
     if (!protection.verifyUserPointer(value_addr, @sizeOf(ItimerSpec))) return abi.EINVAL;
-    protection.copyToUser(value_addr, std.mem.asBytes(&tfd.spec)) catch return abi.EINVAL;
+    var current_spec = timerFdCurrentSpec(tfd);
+    protection.copyToUser(value_addr, std.mem.asBytes(&current_spec)) catch return abi.EINVAL;
     return 0;
 }
 
@@ -377,4 +426,79 @@ pub fn sys_timer_getoverrun(timerid: i32) i32 {
 fn timerFdIndex(fd: i32) ?usize {
     if (!isTimerFd(fd)) return null;
     return @intCast(fd - TIMERFD_BASE);
+}
+
+fn applyTimerFdSpec(tfd: *TimerFd, flags: u32) void {
+    tfd.interval_ticks = durationToTicks(tfd.spec.it_interval_sec, tfd.spec.it_interval_nsec);
+
+    const initial_ticks = durationToTicks(tfd.spec.it_value_sec, tfd.spec.it_value_nsec);
+    if (initial_ticks == 0) {
+        tfd.armed = false;
+        tfd.next_expiration_tick = 0;
+        return;
+    }
+
+    const now = timer.getTicks();
+    tfd.armed = true;
+    if ((flags & abi.TIMER_ABSTIME) != 0) {
+        tfd.next_expiration_tick = initial_ticks;
+    } else {
+        tfd.next_expiration_tick = now + initial_ticks;
+    }
+}
+
+fn timerFdCurrentSpec(tfd: *const TimerFd) ItimerSpec {
+    var current = tfd.spec;
+    if (!tfd.armed) {
+        current.it_value_sec = 0;
+        current.it_value_nsec = 0;
+        return current;
+    }
+
+    const now = timer.getTicks();
+    const remaining_ticks = if (now >= tfd.next_expiration_tick) 0 else tfd.next_expiration_tick - now;
+    const remaining = ticksToSpec(remaining_ticks);
+    current.it_value_sec = remaining.it_value_sec;
+    current.it_value_nsec = remaining.it_value_nsec;
+    return current;
+}
+
+fn timerFdExpirations(tfd: *const TimerFd) u64 {
+    if (!tfd.in_use or !tfd.armed) return 0;
+
+    const now = timer.getTicks();
+    if (now < tfd.next_expiration_tick) return 0;
+    if (tfd.interval_ticks == 0) return 1;
+    return 1 + @divTrunc(now - tfd.next_expiration_tick, tfd.interval_ticks);
+}
+
+fn consumeTimerFdExpirations(tfd: *TimerFd) u64 {
+    const expirations = timerFdExpirations(tfd);
+    if (expirations == 0) return 0;
+
+    if (tfd.interval_ticks == 0) {
+        tfd.armed = false;
+        tfd.next_expiration_tick = 0;
+    } else {
+        tfd.next_expiration_tick += expirations * tfd.interval_ticks;
+    }
+
+    return expirations;
+}
+
+fn durationToTicks(seconds: u32, nanoseconds: u32) u64 {
+    const tick_nsec: u64 = 10_000_000;
+    const total_nsec = @as(u64, seconds) * 1_000_000_000 + nanoseconds;
+    if (total_nsec == 0) return 0;
+    return @max(@as(u64, 1), @divTrunc(total_nsec + tick_nsec - 1, tick_nsec));
+}
+
+fn ticksToSpec(ticks: u64) ItimerSpec {
+    const total_nsec = ticks * 10_000_000;
+    return .{
+        .it_interval_sec = 0,
+        .it_interval_nsec = 0,
+        .it_value_sec = @intCast(total_nsec / 1_000_000_000),
+        .it_value_nsec = @intCast(total_nsec % 1_000_000_000),
+    };
 }

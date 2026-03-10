@@ -4,6 +4,7 @@ const errno = @import("errno.zig");
 const ipv4 = @import("../../net/ipv4.zig");
 const ipv6 = @import("../../net/ipv6.zig");
 const protection = @import("../../memory/protection.zig");
+const readiness = @import("readiness.zig");
 const socket = @import("../../net/socket.zig");
 
 pub const AF_UNIX: u32 = 1;
@@ -12,8 +13,13 @@ pub const AF_INET6: u32 = 10;
 pub const SOCK_STREAM: u32 = 1;
 pub const SOCK_DGRAM: u32 = 2;
 
-pub const unix_socket_fd_base: i32 = 1000;
+pub const socket_fd_base: i32 = 500;
+pub const unix_socket_fd_base: i32 = 700;
+pub const socket_count: usize = 64;
 pub const unix_socket_count: usize = 64;
+
+const POLLIN: u16 = 0x001;
+const POLLOUT: u16 = 0x004;
 
 pub const SockAddrIn = extern struct {
     family: u16,
@@ -50,6 +56,186 @@ pub const UnixSocket = struct {
 
 pub const SocketTable = [64]?*socket.Socket;
 pub const UnixSocketTable = [unix_socket_count]UnixSocket;
+
+var attached_unix_sockets: ?*UnixSocketTable = null;
+var attached_socket_table: ?*SocketTable = null;
+
+pub fn attachTables(unix_sockets: *UnixSocketTable, socket_table: *SocketTable) void {
+    attached_unix_sockets = unix_sockets;
+    attached_socket_table = socket_table;
+}
+
+pub fn isInetSocketFd(fd: i32) bool {
+    return fd >= socket_fd_base and fd < socket_fd_base + @as(i32, @intCast(socket_count));
+}
+
+pub fn isUnixSocketFd(fd: i32) bool {
+    return fd >= unix_socket_fd_base and fd < unix_socket_fd_base + @as(i32, @intCast(unix_socket_count));
+}
+
+pub fn isSocketFd(fd: i32) bool {
+    return isInetSocketFd(fd) or isUnixSocketFd(fd);
+}
+
+pub fn getInetSocket(fd: i32) ?*socket.Socket {
+    const idx = inetSocketIndex(fd) orelse return null;
+    const socket_table = attached_socket_table orelse return null;
+    return socket_table[idx];
+}
+
+pub fn getUnixSocket(fd: i32) ?*UnixSocket {
+    const idx = unixSocketIndex(fd) orelse return null;
+    const unix_sockets = attached_unix_sockets orelse return null;
+    const usock = &unix_sockets[idx];
+    if (!usock.in_use) return null;
+    return usock;
+}
+
+pub fn pollSocketFd(fd: i32, requested_events: u16) error{BadFd}!u16 {
+    if (getInetSocket(fd)) |sock| {
+        return sock.pollEvents(requested_events);
+    }
+
+    if (getUnixSocket(fd)) |usock| {
+        return pollUnixSocket(usock, requested_events);
+    }
+
+    return error.BadFd;
+}
+
+pub fn writeSocketFd(fd: i32, buffer: []const u8) ?i32 {
+    if (getInetSocket(fd)) |sock| {
+        const sent = sock.send(buffer) catch |err| return errno.socketErrno(err);
+        return @intCast(sent);
+    }
+
+    if (getUnixSocket(fd)) |usock| {
+        return writeUnixSocket(usock, buffer);
+    }
+
+    return null;
+}
+
+pub fn readSocketFd(fd: i32, buffer: []u8) ?i32 {
+    if (getInetSocket(fd)) |sock| {
+        const received = sock.recv(buffer) catch |err| return errno.socketErrno(err);
+        return @intCast(received);
+    }
+
+    if (getUnixSocket(fd)) |usock| {
+        return readUnixSocket(usock, buffer);
+    }
+
+    return null;
+}
+
+pub fn closeSocketFd(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, fd: i32) ?i32 {
+    if (inetSocketIndex(fd)) |idx| {
+        if (socket_table[idx]) |sock| {
+            sock.close();
+            socket_table[idx] = null;
+            readiness.notifyAll();
+            return 0;
+        }
+        return abi.EBADF;
+    }
+
+    if (unixSocketIndex(fd)) |idx| {
+        var usock = &unix_sockets[idx];
+        if (!usock.in_use) return abi.EBADF;
+        if (usock.peer) |peer| {
+            peer.peer = null;
+            peer.connected = false;
+        }
+        usock.in_use = false;
+        usock.peer = null;
+        usock.path_len = 0;
+        usock.listening = false;
+        usock.connected = false;
+        usock.recv_head = 0;
+        usock.recv_tail = 0;
+        usock.recv_count = 0;
+        readiness.notifyAll();
+        return 0;
+    }
+
+    return null;
+}
+
+fn inetSocketIndex(fd: i32) ?usize {
+    if (!isInetSocketFd(fd)) return null;
+    return @intCast(fd - socket_fd_base);
+}
+
+fn unixSocketIndex(fd: i32) ?usize {
+    if (!isUnixSocketFd(fd)) return null;
+    return @intCast(fd - unix_socket_fd_base);
+}
+
+fn pollUnixSocket(usock: *const UnixSocket, requested_events: u16) u16 {
+    var ready: u16 = 0;
+
+    if ((requested_events & POLLIN) != 0) {
+        if (usock.listening) {
+            if (hasPendingUnixConnection(usock)) {
+                ready |= POLLIN;
+            }
+        } else if (usock.recv_count > 0 or (usock.connected and usock.peer == null)) {
+            ready |= POLLIN;
+        }
+    }
+
+    if ((requested_events & POLLOUT) != 0 and usock.connected) {
+        if (usock.peer) |peer| {
+            if (peer.recv_count < peer.recv_buffer.len) {
+                ready |= POLLOUT;
+            }
+        }
+    }
+
+    return ready;
+}
+
+fn hasPendingUnixConnection(listener: *const UnixSocket) bool {
+    const unix_sockets = attached_unix_sockets orelse return false;
+    for (unix_sockets.*) |peer| {
+        if (peer.in_use and peer.connected and peer.peer == listener) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn writeUnixSocket(usock: *UnixSocket, buffer: []const u8) i32 {
+    if (!usock.in_use or !usock.connected) return abi.EBADF;
+
+    const peer = usock.peer orelse return abi.ENOTCONN;
+    const available = peer.recv_buffer.len - peer.recv_count;
+    const copy_len = @min(buffer.len, available);
+    if (copy_len == 0) return abi.EAGAIN;
+
+    for (0..copy_len) |i| {
+        peer.recv_buffer[peer.recv_tail] = buffer[i];
+        peer.recv_tail = (peer.recv_tail + 1) % peer.recv_buffer.len;
+    }
+    peer.recv_count += copy_len;
+    readiness.notifyAll();
+    return @intCast(copy_len);
+}
+
+fn readUnixSocket(usock: *UnixSocket, buffer: []u8) i32 {
+    if (!usock.in_use) return abi.EBADF;
+    if (usock.recv_count == 0) return 0;
+
+    const to_recv = @min(buffer.len, usock.recv_count);
+    for (0..to_recv) |i| {
+        buffer[i] = usock.recv_buffer[usock.recv_head];
+        usock.recv_head = (usock.recv_head + 1) % usock.recv_buffer.len;
+    }
+    usock.recv_count -= to_recv;
+    readiness.notifyAll();
+    return @intCast(to_recv);
+}
 
 pub fn sys_socket(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, domain: u32, sock_type: u32, protocol: u32) i32 {
     _ = protocol;
@@ -96,7 +282,7 @@ pub fn sys_socket(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, do
     for (0..socket_table.len) |i| {
         if (socket_table[i] == null) {
             socket_table[i] = sock;
-            return @intCast(i);
+            return @intCast(@as(i32, @intCast(i)) + socket_fd_base);
         }
     }
 
@@ -105,7 +291,7 @@ pub fn sys_socket(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, do
 }
 
 pub fn sys_bind(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
-    if (sockfd >= unix_socket_fd_base and sockfd < unix_socket_fd_base + unix_socket_count) {
+    if (sockfd >= unix_socket_fd_base and sockfd < unix_socket_fd_base + @as(i32, @intCast(unix_socket_count))) {
         const idx: usize = @intCast(sockfd - unix_socket_fd_base);
         const usock = &unix_sockets[idx];
         if (!usock.in_use) return abi.EBADF;
@@ -124,8 +310,8 @@ pub fn sys_bind(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, sock
         return 0;
     }
 
-    if (sockfd < 0 or sockfd >= socket_table.len) return abi.EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return abi.EBADF;
+    const sock_idx = inetSocketIndex(sockfd) orelse return abi.EBADF;
+    const sock = socket_table[sock_idx] orelse return abi.EBADF;
 
     if (sock.address_family == .AF_INET6) {
         if (addr_len < @sizeOf(SockAddrIn6)) return abi.EINVAL;
@@ -161,7 +347,7 @@ pub fn sys_bind(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, sock
 }
 
 pub fn sys_connect(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, sockfd: i32, addr_ptr: usize, addr_len: u32) i32 {
-    if (sockfd >= unix_socket_fd_base and sockfd < unix_socket_fd_base + unix_socket_count) {
+    if (sockfd >= unix_socket_fd_base and sockfd < unix_socket_fd_base + @as(i32, @intCast(unix_socket_count))) {
         const idx: usize = @intCast(sockfd - unix_socket_fd_base);
         const usock = &unix_sockets[idx];
         if (!usock.in_use) return abi.EBADF;
@@ -182,6 +368,7 @@ pub fn sys_connect(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, s
                 if (std.mem.eql(u8, peer.path[0..path_end], addr.path[0..path_end])) {
                     usock.peer = peer;
                     usock.connected = true;
+                    readiness.notifyAll();
                     return 0;
                 }
             }
@@ -189,8 +376,8 @@ pub fn sys_connect(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, s
         return abi.ECONNREFUSED;
     }
 
-    if (sockfd < 0 or sockfd >= socket_table.len) return abi.EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return abi.EBADF;
+    const sock_idx = inetSocketIndex(sockfd) orelse return abi.EBADF;
+    const sock = socket_table[sock_idx] orelse return abi.EBADF;
 
     if (sock.address_family == .AF_INET6) {
         if (addr_len < @sizeOf(SockAddrIn6)) return abi.EINVAL;
@@ -228,22 +415,23 @@ pub fn sys_connect(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, s
 
 pub fn sys_listen(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, sockfd: i32, backlog: u32) i32 {
     _ = backlog;
-    if (sockfd >= unix_socket_fd_base and sockfd < unix_socket_fd_base + unix_socket_count) {
+    if (sockfd >= unix_socket_fd_base and sockfd < unix_socket_fd_base + @as(i32, @intCast(unix_socket_count))) {
         const idx: usize = @intCast(sockfd - unix_socket_fd_base);
         const usock = &unix_sockets[idx];
         if (!usock.in_use) return abi.EBADF;
         usock.listening = true;
+        readiness.notifyAll();
         return 0;
     }
 
-    if (sockfd < 0 or sockfd >= socket_table.len) return abi.EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return abi.EBADF;
+    const sock_idx = inetSocketIndex(sockfd) orelse return abi.EBADF;
+    const sock = socket_table[sock_idx] orelse return abi.EBADF;
     sock.listen(5) catch |err| return errno.socketErrno(err);
     return 0;
 }
 
 pub fn sys_accept(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, sockfd: i32) i32 {
-    if (sockfd >= unix_socket_fd_base and sockfd < unix_socket_fd_base + unix_socket_count) {
+    if (sockfd >= unix_socket_fd_base and sockfd < unix_socket_fd_base + @as(i32, @intCast(unix_socket_count))) {
         const idx: usize = @intCast(sockfd - unix_socket_fd_base);
         const usock = &unix_sockets[idx];
         if (!usock.in_use or !usock.listening) return abi.EBADF;
@@ -258,6 +446,7 @@ pub fn sys_accept(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, so
                         new_sock.connected = true;
                         new_sock.peer = peer;
                         peer.peer = new_sock;
+                        readiness.notifyAll();
                         return @intCast(@as(i32, @intCast(j)) + unix_socket_fd_base);
                     }
                 }
@@ -267,15 +456,16 @@ pub fn sys_accept(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, so
         return abi.EAGAIN;
     }
 
-    if (sockfd < 0 or sockfd >= socket_table.len) return abi.EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return abi.EBADF;
+    const sock_idx = inetSocketIndex(sockfd) orelse return abi.EBADF;
+    const sock = socket_table[sock_idx] orelse return abi.EBADF;
 
     const client = sock.accept() catch |err| return errno.socketErrno(err);
 
     for (0..socket_table.len) |i| {
         if (socket_table[i] == null) {
             socket_table[i] = client;
-            return @intCast(i);
+            readiness.notifyAll();
+            return @intCast(@as(i32, @intCast(i)) + socket_fd_base);
         }
     }
 
@@ -284,32 +474,8 @@ pub fn sys_accept(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, so
 }
 
 pub fn sys_send(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, sockfd: i32, buf: [*]const u8, len: usize) i32 {
-    if (sockfd >= unix_socket_fd_base and sockfd < unix_socket_fd_base + unix_socket_count) {
-        const idx: usize = @intCast(sockfd - unix_socket_fd_base);
-        const usock = &unix_sockets[idx];
-        if (!usock.in_use or !usock.connected) return abi.EBADF;
-
-        const peer = usock.peer orelse return abi.ENOTCONN;
-        if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return abi.EINVAL;
-
-        var kernel_buffer: [4096]u8 = undefined;
-        const to_send = @min(len, kernel_buffer.len);
-        protection.copyFromUser(kernel_buffer[0..to_send], @intFromPtr(buf)) catch return abi.EINVAL;
-
-        const available = peer.recv_buffer.len - peer.recv_count;
-        const copy_len = @min(to_send, available);
-        if (copy_len == 0) return abi.EAGAIN;
-
-        for (0..copy_len) |i| {
-            peer.recv_buffer[peer.recv_tail] = kernel_buffer[i];
-            peer.recv_tail = (peer.recv_tail + 1) % peer.recv_buffer.len;
-        }
-        peer.recv_count += copy_len;
-        return @intCast(copy_len);
-    }
-
-    if (sockfd < 0 or sockfd >= socket_table.len) return abi.EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return abi.EBADF;
+    _ = unix_sockets;
+    _ = socket_table;
 
     if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return abi.EINVAL;
 
@@ -317,51 +483,31 @@ pub fn sys_send(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, sock
     const to_send = @min(len, kernel_buffer.len);
     protection.copyFromUser(kernel_buffer[0..to_send], @intFromPtr(buf)) catch return abi.EINVAL;
 
-    const sent = sock.send(kernel_buffer[0..to_send]) catch |err| return errno.socketErrno(err);
-    return @intCast(sent);
+    return writeSocketFd(sockfd, kernel_buffer[0..to_send]) orelse abi.EBADF;
 }
 
 pub fn sys_recv(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, sockfd: i32, buf: [*]u8, len: usize) i32 {
-    if (sockfd >= unix_socket_fd_base and sockfd < unix_socket_fd_base + unix_socket_count) {
-        const idx: usize = @intCast(sockfd - unix_socket_fd_base);
-        const usock = &unix_sockets[idx];
-        if (!usock.in_use) return abi.EBADF;
-
-        if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return abi.EINVAL;
-        if (usock.recv_count == 0) return 0;
-
-        var kernel_buffer: [4096]u8 = undefined;
-        const to_recv = @min(len, @min(usock.recv_count, kernel_buffer.len));
-
-        for (0..to_recv) |i| {
-            kernel_buffer[i] = usock.recv_buffer[usock.recv_head];
-            usock.recv_head = (usock.recv_head + 1) % usock.recv_buffer.len;
-        }
-        usock.recv_count -= to_recv;
-
-        protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..to_recv]) catch return abi.EINVAL;
-        return @intCast(to_recv);
-    }
-
-    if (sockfd < 0 or sockfd >= socket_table.len) return abi.EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return abi.EBADF;
+    _ = unix_sockets;
+    _ = socket_table;
 
     if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return abi.EINVAL;
 
     var kernel_buffer: [4096]u8 = undefined;
     const to_recv = @min(len, kernel_buffer.len);
 
-    const received = sock.recv(kernel_buffer[0..to_recv]) catch |err| return errno.socketErrno(err);
+    const received = readSocketFd(sockfd, kernel_buffer[0..to_recv]) orelse return abi.EBADF;
     if (received == 0) return 0;
+    if (received < 0) return received;
 
-    protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..received]) catch return abi.EINVAL;
-    return @intCast(received);
+    protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..@intCast(received)]) catch return abi.EINVAL;
+    return received;
 }
 
 pub fn sys_shutdown(socket_table: *SocketTable, sockfd: i32) i32 {
-    if (sockfd < 0 or sockfd >= socket_table.len) return abi.EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return abi.EBADF;
+    const sock_idx = inetSocketIndex(sockfd) orelse return abi.EBADF;
+    const sock = socket_table[sock_idx] orelse return abi.EBADF;
     sock.close();
-    socket_table[@intCast(sockfd)] = null;
+    socket_table[sock_idx] = null;
+    readiness.notifyAll();
     return 0;
 }

@@ -1,5 +1,7 @@
 const std = @import("std");
 const memory = @import("../memory/memory.zig");
+const abi = @import("../process/syscall/abi.zig");
+const readiness = @import("../process/syscall/readiness.zig");
 const error_handler = @import("../utils/error.zig");
 
 pub const VFSError = error{
@@ -138,6 +140,8 @@ pub const FileDescriptor = struct {
     flags: u32,
     fd_flags: u32,
     ref_count: u32,
+    path_len: u16,
+    path: [512]u8,
 };
 
 pub const O_RDONLY: u32 = 0x0000;
@@ -149,6 +153,9 @@ pub const O_TRUNC: u32 = 0x0200;
 pub const O_APPEND: u32 = 0x0400;
 pub const O_NONBLOCK: u32 = 0x0800;
 
+const POLLIN: u16 = 0x001;
+const POLLOUT: u16 = 0x004;
+
 pub const SEEK_SET: u32 = 0;
 pub const SEEK_CUR: u32 = 1;
 pub const SEEK_END: u32 = 2;
@@ -159,6 +166,7 @@ var fs_type_list: ?*FileSystemType = null;
 var vnode_cache: [1024]?*VNode = [_]?*VNode{null} ** 1024;
 var fd_table: [256]?*FileDescriptor = [_]?*FileDescriptor{null} ** 256;
 var vfs_meta_lock: u32 = 0;
+var inotify_notifier: ?*const fn ([]const u8, u32, u32) void = null;
 
 const FD_TABLE_SIZE = 256;
 var fd_freelist: [FD_TABLE_SIZE]u8 = undefined;
@@ -225,6 +233,10 @@ pub fn init() void {
             .other_exec = true,
         };
     }
+}
+
+pub fn registerInotifyNotifier(callback: *const fn ([]const u8, u32, u32) void) void {
+    inotify_notifier = callback;
 }
 
 pub fn registerFileSystem(fs_type: *FileSystemType) VFSError!void {
@@ -299,6 +311,7 @@ pub fn unmount(mount_path: []const u8) VFSError!void {
 }
 
 pub fn open(path: []const u8, flags: u32) VFSError!u32 {
+    var created = false;
     const vnode = blk: {
         if (lookupPath(path)) |v| {
             if ((flags & O_CREAT) != 0 and (flags & O_EXCL) != 0) {
@@ -320,6 +333,7 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
                     .other_read = true,
                 };
 
+                created = true;
                 break :blk try parent.mount_point.?.fs_type.ops.create(parent, parts.name, default_mode);
             } else {
                 return err;
@@ -331,8 +345,11 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
         return VFSError.IsDirectory;
     }
 
+    var truncated = false;
     if ((flags & O_TRUNC) != 0 and vnode.file_type == FileType.Regular) {
-        vnode.ops.truncate(vnode, 0) catch {};
+        if (vnode.ops.truncate(vnode, 0)) |_| {
+            truncated = true;
+        } else |_| {}
     }
 
     try vnode.ops.open(vnode, flags);
@@ -349,11 +366,18 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
     fd.flags = flags;
     fd.fd_flags = 0;
     fd.ref_count = 1;
+    fd.path_len = @intCast(@min(path.len, fd.path.len));
+    @memset(&fd.path, 0);
+    @memcpy(fd.path[0..fd.path_len], path[0..fd.path_len]);
 
     lockMeta();
     fd_table[i] = fd;
     vnode.ref_count += 1;
     unlockMeta();
+
+    if (created) notifyPathEvent(path, abi.IN_CREATE, abi.IN_CREATE);
+    if (truncated) notifyPathEvent(path, abi.IN_MODIFY, abi.IN_MODIFY);
+    notifyPathEvent(path, abi.IN_OPEN, abi.IN_OPEN);
 
     return i;
 }
@@ -398,8 +422,10 @@ pub fn close(fd: u32) VFSError!void {
     if (free_pipe_vnode) {
         memory.kfree(@as([*]u8, @ptrCast(@alignCast(vnode))));
     }
+    notifyCloseEvent(file_desc);
     memory.kfree(@as([*]u8, @ptrCast(file_desc)));
     freeFd(fd);
+    readiness.notifyAll();
 }
 
 pub fn read(fd: u32, buffer: []u8) VFSError!usize {
@@ -412,6 +438,7 @@ pub fn read(fd: u32, buffer: []u8) VFSError!usize {
 
         const bytes_read = try file_desc.vnode.ops.read(file_desc.vnode, buffer, file_desc.offset);
         file_desc.offset += bytes_read;
+        if (bytes_read > 0) notifyDescriptorEvent(file_desc, abi.IN_ACCESS, abi.IN_ACCESS);
         return bytes_read;
     }
 
@@ -432,6 +459,7 @@ pub fn write(fd: u32, buffer: []const u8) VFSError!usize {
 
         const bytes_written = try file_desc.vnode.ops.write(file_desc.vnode, buffer, file_desc.offset);
         file_desc.offset += bytes_written;
+        if (bytes_written > 0) notifyDescriptorEvent(file_desc, abi.IN_MODIFY, abi.IN_MODIFY);
         return bytes_written;
     }
 
@@ -473,7 +501,9 @@ pub fn pread(fd: u32, buffer: []u8, offset: u64) VFSError!usize {
         if ((file_desc.flags & O_WRONLY) != 0) {
             return VFSError.PermissionDenied;
         }
-        return try file_desc.vnode.ops.read(file_desc.vnode, buffer, offset);
+        const bytes_read = try file_desc.vnode.ops.read(file_desc.vnode, buffer, offset);
+        if (bytes_read > 0) notifyDescriptorEvent(file_desc, abi.IN_ACCESS, abi.IN_ACCESS);
+        return bytes_read;
     }
 
     return VFSError.InvalidOperation;
@@ -486,7 +516,9 @@ pub fn pwrite(fd: u32, buffer: []const u8, offset: u64) VFSError!usize {
         if ((file_desc.flags & O_WRONLY) == 0 and (file_desc.flags & O_RDWR) == 0) {
             return VFSError.PermissionDenied;
         }
-        return try file_desc.vnode.ops.write(file_desc.vnode, buffer, offset);
+        const bytes_written = try file_desc.vnode.ops.write(file_desc.vnode, buffer, offset);
+        if (bytes_written > 0) notifyDescriptorEvent(file_desc, abi.IN_MODIFY, abi.IN_MODIFY);
+        return bytes_written;
     }
 
     return VFSError.InvalidOperation;
@@ -497,6 +529,16 @@ pub fn getFileFlags(fd: u32) VFSError!u32 {
     if (fd_table[fd]) |file_desc| {
         return file_desc.flags;
     }
+    return VFSError.InvalidOperation;
+}
+
+pub fn pollFd(fd: u32, requested_events: u16) VFSError!u16 {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+
+    if (fd_table[fd]) |file_desc| {
+        return pollDescriptor(file_desc, requested_events);
+    }
+
     return VFSError.InvalidOperation;
 }
 
@@ -577,6 +619,48 @@ pub fn getNodePath(vnode: *VNode) VFSError![]const u8 {
     }
 
     return path_buffer[0..pos];
+}
+
+pub fn openVNode(vnode: *VNode, flags: u32) VFSError!void {
+    if ((flags & O_TRUNC) != 0 and vnode.file_type == FileType.Regular) {
+        try truncateVNode(vnode, 0);
+    }
+    try vnode.ops.open(vnode, flags);
+    notifyVNodeEvent(vnode, abi.IN_OPEN, abi.IN_OPEN);
+}
+
+pub fn closeVNode(vnode: *VNode, flags: u32) VFSError!void {
+    try vnode.ops.close(vnode);
+    const writable = (flags & O_WRONLY) != 0 or (flags & O_RDWR) != 0;
+    const mask = if (writable) abi.IN_CLOSE_WRITE else abi.IN_CLOSE_NOWRITE;
+    notifyVNodeEvent(vnode, mask, mask);
+}
+
+pub fn readVNode(vnode: *VNode, buffer: []u8, offset: u64) VFSError!usize {
+    const bytes_read = try vnode.ops.read(vnode, buffer, offset);
+    if (bytes_read > 0) notifyVNodeEvent(vnode, abi.IN_ACCESS, abi.IN_ACCESS);
+    return bytes_read;
+}
+
+pub fn writeVNode(vnode: *VNode, buffer: []const u8, offset: u64) VFSError!usize {
+    const bytes_written = try vnode.ops.write(vnode, buffer, offset);
+    if (bytes_written > 0) notifyVNodeEvent(vnode, abi.IN_MODIFY, abi.IN_MODIFY);
+    return bytes_written;
+}
+
+pub fn truncateVNode(vnode: *VNode, size: u64) VFSError!void {
+    try vnode.ops.truncate(vnode, size);
+    notifyVNodeEvent(vnode, abi.IN_MODIFY, abi.IN_MODIFY);
+}
+
+pub fn chmodVNode(vnode: *VNode, mode: FileMode) VFSError!void {
+    try vnode.ops.chmod(vnode, mode);
+    notifyVNodeEvent(vnode, abi.IN_ATTRIB, abi.IN_ATTRIB);
+}
+
+pub fn chownVNode(vnode: *VNode, uid: u32, gid: u32) VFSError!void {
+    try vnode.ops.chown(vnode, uid, gid);
+    notifyVNodeEvent(vnode, abi.IN_ATTRIB, abi.IN_ATTRIB);
 }
 
 pub fn stat(path: []const u8, stat_buf: *FileStat) VFSError!void {
@@ -754,6 +838,7 @@ pub fn ftruncate(fd: u32, size: u64) VFSError!void {
             return VFSError.PermissionDenied;
         }
         try file_desc.vnode.ops.truncate(file_desc.vnode, size);
+        notifyDescriptorEvent(file_desc, abi.IN_MODIFY, abi.IN_MODIFY);
     } else {
         return VFSError.InvalidOperation;
     }
@@ -769,6 +854,7 @@ pub fn fchmod(fd: u32, mode: FileMode) VFSError!void {
 
     if (fd_table[fd]) |file_desc| {
         try file_desc.vnode.ops.chmod(file_desc.vnode, mode);
+        notifyDescriptorEvent(file_desc, abi.IN_ATTRIB, abi.IN_ATTRIB);
     } else {
         return VFSError.InvalidOperation;
     }
@@ -784,6 +870,7 @@ pub fn fchown(fd: u32, uid: u32, gid: u32) VFSError!void {
 
     if (fd_table[fd]) |file_desc| {
         try file_desc.vnode.ops.chown(file_desc.vnode, uid, gid);
+        notifyDescriptorEvent(file_desc, abi.IN_ATTRIB, abi.IN_ATTRIB);
     } else {
         return VFSError.InvalidOperation;
     }
@@ -791,6 +878,33 @@ pub fn fchown(fd: u32, uid: u32, gid: u32) VFSError!void {
 
 const PIPE_BUF_SIZE = 4096;
 const PIPE_BUF_MASK = PIPE_BUF_SIZE - 1;
+
+fn pollDescriptor(file_desc: *const FileDescriptor, requested_events: u16) u16 {
+    var ready: u16 = 0;
+
+    if (file_desc.vnode.file_type == .Pipe) {
+        const pipe: *const PipeData = @ptrCast(@alignCast(file_desc.vnode.private_data orelse return 0));
+
+        if ((requested_events & POLLIN) != 0 and (pipe.count > 0 or pipe.writers == 0)) {
+            ready |= POLLIN;
+        }
+
+        if ((requested_events & POLLOUT) != 0 and pipe.readers != 0 and pipe.count < PIPE_BUF_SIZE) {
+            ready |= POLLOUT;
+        }
+
+        return ready;
+    }
+
+    const access_mode = file_desc.flags & 0x3;
+    if ((requested_events & POLLIN) != 0 and (access_mode == O_RDONLY or access_mode == O_RDWR)) {
+        ready |= POLLIN;
+    }
+    if ((requested_events & POLLOUT) != 0 and (access_mode == O_WRONLY or access_mode == O_RDWR)) {
+        ready |= POLLOUT;
+    }
+    return ready;
+}
 
 const PipeData = struct {
     buffer: [PIPE_BUF_SIZE]u8,
@@ -815,6 +929,7 @@ fn pipeRead(vnode: *VNode, buf: []u8, _: u64) VFSError!usize {
         pipe.read_pos = (pipe.read_pos + 1) & PIPE_BUF_MASK;
     }
     pipe.count -= to_read;
+    readiness.notifyAll();
     return to_read;
 }
 
@@ -831,13 +946,18 @@ fn pipeWrite(vnode: *VNode, buf: []const u8, _: u64) VFSError!usize {
         pipe.write_pos = (pipe.write_pos + 1) & PIPE_BUF_MASK;
     }
     pipe.count += to_write;
+    readiness.notifyAll();
     return to_write;
 }
 
 fn pipeNoOp(_: *VNode, _: u32) VFSError!void {}
 fn pipeClose(_: *VNode) VFSError!void {}
-fn pipeSeek(_: *VNode, _: i64, _: u32) VFSError!u64 { return VFSError.InvalidOperation; }
-fn pipeIoctl(_: *VNode, _: u32, _: usize) VFSError!i32 { return VFSError.InvalidOperation; }
+fn pipeSeek(_: *VNode, _: i64, _: u32) VFSError!u64 {
+    return VFSError.InvalidOperation;
+}
+fn pipeIoctl(_: *VNode, _: u32, _: usize) VFSError!i32 {
+    return VFSError.InvalidOperation;
+}
 fn pipeStat(vnode: *VNode, stat_buf: *FileStat) VFSError!void {
     const pipe: *PipeData = @ptrCast(@alignCast(vnode.private_data orelse return VFSError.InvalidOperation));
     stat_buf.* = FileStat{
@@ -854,10 +974,18 @@ fn pipeStat(vnode: *VNode, stat_buf: *FileStat) VFSError!void {
         .ctime = 0,
     };
 }
-fn pipeReaddir(_: *VNode, _: *DirEntry, _: u64) VFSError!bool { return VFSError.InvalidOperation; }
-fn pipeTruncate(_: *VNode, _: u64) VFSError!void { return VFSError.InvalidOperation; }
-fn pipeChmod(_: *VNode, _: FileMode) VFSError!void { return VFSError.InvalidOperation; }
-fn pipeChown(_: *VNode, _: u32, _: u32) VFSError!void { return VFSError.InvalidOperation; }
+fn pipeReaddir(_: *VNode, _: *DirEntry, _: u64) VFSError!bool {
+    return VFSError.InvalidOperation;
+}
+fn pipeTruncate(_: *VNode, _: u64) VFSError!void {
+    return VFSError.InvalidOperation;
+}
+fn pipeChmod(_: *VNode, _: FileMode) VFSError!void {
+    return VFSError.InvalidOperation;
+}
+fn pipeChown(_: *VNode, _: u32, _: u32) VFSError!void {
+    return VFSError.InvalidOperation;
+}
 
 const pipe_ops = FileOps{
     .read = pipeRead,
@@ -908,11 +1036,11 @@ pub fn createPipe() VFSError!struct { read_fd: u32, write_fd: u32 } {
     errdefer memory.kfree(@as([*]u8, @ptrCast(read_fd_mem)));
 
     const read_fd: *FileDescriptor = @ptrCast(@alignCast(read_fd_mem));
-    read_fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_RDONLY, .fd_flags = 0, .ref_count = 1 };
+    read_fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_RDONLY, .fd_flags = 0, .ref_count = 1, .path_len = 0, .path = [_]u8{0} ** 512 };
 
     const write_fd_mem = memory.kmalloc(@sizeOf(FileDescriptor)) orelse return VFSError.OutOfMemory;
     const write_fd: *FileDescriptor = @ptrCast(@alignCast(write_fd_mem));
-    write_fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_WRONLY, .fd_flags = 0, .ref_count = 1 };
+    write_fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_WRONLY, .fd_flags = 0, .ref_count = 1, .path_len = 0, .path = [_]u8{0} ** 512 };
 
     fd_table[read_fd_idx] = read_fd;
     fd_table[write_fd_idx] = write_fd;
@@ -945,11 +1073,34 @@ pub fn dup2(old_fd: u32, new_fd: u32) VFSError!u32 {
         .flags = old_desc.flags,
         .fd_flags = 0,
         .ref_count = 1,
+        .path_len = old_desc.path_len,
+        .path = old_desc.path,
     };
     fd_table[new_fd] = new_desc;
     old_desc.vnode.ref_count += 1;
 
     return new_fd;
+}
+
+fn notifyPathEvent(path: []const u8, exact_mask: u32, parent_mask: u32) void {
+    const callback = inotify_notifier orelse return;
+    callback(path, exact_mask, parent_mask);
+}
+
+fn notifyVNodeEvent(vnode: *VNode, exact_mask: u32, parent_mask: u32) void {
+    const path = getNodePath(vnode) catch return;
+    notifyPathEvent(path, exact_mask, parent_mask);
+}
+
+fn notifyDescriptorEvent(file_desc: *const FileDescriptor, exact_mask: u32, parent_mask: u32) void {
+    if (file_desc.path_len == 0) return;
+    notifyPathEvent(file_desc.path[0..file_desc.path_len], exact_mask, parent_mask);
+}
+
+fn notifyCloseEvent(file_desc: *const FileDescriptor) void {
+    const writable = (file_desc.flags & O_WRONLY) != 0 or (file_desc.flags & O_RDWR) != 0;
+    const mask = if (writable) abi.IN_CLOSE_WRITE else abi.IN_CLOSE_NOWRITE;
+    notifyDescriptorEvent(file_desc, mask, mask);
 }
 
 pub fn rename(old_path: []const u8, new_path: []const u8) VFSError!void {

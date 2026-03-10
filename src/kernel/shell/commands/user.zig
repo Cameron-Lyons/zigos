@@ -282,7 +282,7 @@ pub fn chown(args: []const [*:0]const u8) void {
         return;
     };
 
-    vnode.ops.chown(vnode, @intCast(uid), vnode.gid) catch {
+    vfs.chownVNode(vnode, @intCast(uid), vnode.gid) catch {
         vga.print("chown: operation failed\n");
     };
 }
@@ -303,7 +303,7 @@ pub fn chgrp(args: []const [*:0]const u8) void {
         return;
     };
 
-    vnode.ops.chown(vnode, vnode.uid, @intCast(gid)) catch {
+    vfs.chownVNode(vnode, vnode.uid, @intCast(gid)) catch {
         vga.print("chgrp: operation failed\n");
     };
 }

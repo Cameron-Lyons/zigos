@@ -49,6 +49,7 @@ pub const Process = struct {
     stack_size: u32,
     name: [64]u8,
     next: ?*Process,
+    wait_next: ?*Process,
     exit_code: i32 = 0,
     page_directory: ?*paging.PageDirectory,
     entry_point: *const fn () void,
@@ -161,6 +162,7 @@ pub fn init() void {
         proc.state = .Terminated;
         proc.pid = 0;
         proc.next = null;
+        proc.wait_next = null;
     }
 
     scheduler.init();
@@ -285,6 +287,7 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
     @memcpy(proc.name[0..copy_len], name[0..copy_len]);
 
     proc.next = process_list_head;
+    proc.wait_next = null;
     process_list_head = proc;
 
     const priority = if (privilege == .Kernel) scheduler.Priority.High else scheduler.Priority.Normal;

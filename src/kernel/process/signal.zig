@@ -1,4 +1,5 @@
 const process = @import("process.zig");
+const readiness = @import("syscall/readiness.zig");
 const vga = @import("../drivers/vga.zig");
 const numfmt = @import("../utils/numfmt.zig");
 
@@ -91,6 +92,10 @@ pub const SigSet = struct {
         const bit: u5 = @intCast(@mod(signum - 1, 32));
         return (self.sig[idx] & (@as(u32, 1) << bit)) != 0;
     }
+
+    pub fn intersects(self: *const SigSet, other: *const SigSet) bool {
+        return (self.sig[0] & other.sig[0]) != 0 or (self.sig[1] & other.sig[1]) != 0;
+    }
 };
 
 pub const SigInfo = struct {
@@ -164,6 +169,39 @@ pub const SignalQueue = struct {
         }
 
         return signal;
+    }
+
+    pub fn hasMasked(self: *const SignalQueue, mask: *const SigSet) bool {
+        return self.pending.intersects(mask);
+    }
+
+    pub fn count(self: *const SignalQueue) usize {
+        if (self.tail >= self.head) {
+            return self.tail - self.head;
+        }
+        return self.queue.len - self.head + self.tail;
+    }
+
+    pub fn takeMasked(self: *SignalQueue, mask: *const SigSet) ?QueuedSignal {
+        var retained: [32]QueuedSignal = undefined;
+        var retained_count: usize = 0;
+        var selected: ?QueuedSignal = null;
+
+        while (self.get()) |queued| {
+            if (selected == null and mask.ismember(queued.signum)) {
+                selected = queued;
+            } else {
+                retained[retained_count] = queued;
+                retained_count += 1;
+            }
+        }
+
+        var i: usize = 0;
+        while (i < retained_count) : (i += 1) {
+            self.add(retained[i].signum, &retained[i].info);
+        }
+
+        return selected;
     }
 };
 
@@ -285,6 +323,19 @@ pub fn sigpending(set: *SigSet) void {
     set.* = current.signals.pending.pending;
 }
 
+pub fn hasPendingMasked(mask: *const SigSet) bool {
+    const current = process.getCurrentProcess() orelse return false;
+    current.signals.ensureInit();
+    return current.signals.pending.hasMasked(mask);
+}
+
+pub fn takePendingMasked(mask: *const SigSet) ?SigInfo {
+    const current = process.getCurrentProcess() orelse return null;
+    current.signals.ensureInit();
+    const queued = current.signals.pending.takeMasked(mask) orelse return null;
+    return queued.info;
+}
+
 pub fn sigsuspend(mask: *const SigSet) !void {
     const current = process.getCurrentProcess().?;
     const old_mask = current.signals.blocked;
@@ -298,7 +349,8 @@ pub fn sigsuspend(mask: *const SigSet) !void {
     current.signals.blocked = old_mask;
 
     if (current.signals.pending.pending.sig[0] != 0 or
-        current.signals.pending.pending.sig[1] != 0) {
+        current.signals.pending.pending.sig[1] != 0)
+    {
         return error.Interrupted;
     }
 }
@@ -319,6 +371,7 @@ pub fn sendSignal(target: *process.Process, signum: i32) void {
     };
 
     target.signals.pending.add(signum, &info);
+    readiness.notifyAll();
 
     if (target.state == .Waiting) {
         target.state = .Ready;
@@ -330,7 +383,9 @@ pub fn handlePendingSignals() void {
     proc.signals.ensureInit();
     const current = proc;
 
-    while (current.signals.pending.get()) |queued| {
+    var remaining = current.signals.pending.count();
+    while (remaining > 0) : (remaining -= 1) {
+        const queued = current.signals.pending.get() orelse break;
         const signum = queued.signum;
 
         if (current.signals.blocked.ismember(signum)) {

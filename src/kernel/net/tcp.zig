@@ -3,6 +3,7 @@ const ipv4 = @import("ipv4.zig");
 const ipv6 = @import("ipv6.zig");
 const memory = @import("../memory/memory.zig");
 const vga = @import("../drivers/vga.zig");
+const readiness = @import("../process/syscall/readiness.zig");
 const timer = @import("../timer/timer.zig");
 const sync = @import("../utils/sync.zig");
 
@@ -146,6 +147,7 @@ pub fn init() void {
 
 fn notifyConnectionActivity(conn: *TCPConnectionStruct) void {
     conn.ready.signal();
+    readiness.notifyAll();
 }
 
 pub fn waitForActivity(conn: *TCPConnection) void {
@@ -179,6 +181,7 @@ pub fn receiveData(conn: *TCPConnection, buffer: []u8) usize {
         @memcpy(conn.recv_buffer[0..remaining], conn.recv_buffer[to_copy..conn.recv_buffer_used]);
     }
     conn.recv_buffer_used -= to_copy;
+    readiness.notifyAll();
 
     return to_copy;
 }
