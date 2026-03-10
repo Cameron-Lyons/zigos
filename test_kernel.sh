@@ -3,8 +3,6 @@
 set -euo pipefail
 
 readonly serial_log="serial.log"
-readonly qemu_success=33
-readonly qemu_failure=35
 
 required_markers=(
     "BOOT:START"
@@ -26,14 +24,10 @@ rm -f "$serial_log"
 
 echo "Running QEMU smoke boot..."
 set +e
-timeout 20 qemu-system-x86_64 \
-    -kernel zig-out/bin/kernel-ci-smoke.elf \
-    -m 128M \
-    -display none \
-    -serial "file:$serial_log" \
-    -monitor none \
-    -no-reboot \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04
+timeout 20 bash scripts/run-headless-qemu.sh \
+    zig-out/bin/kernel-ci-smoke.elf \
+    128M \
+    "file:$serial_log"
 qemu_exit_code=$?
 set -e
 
@@ -61,18 +55,12 @@ case "$qemu_exit_code" in
     0)
         echo "Smoke boot passed"
         ;;
-    "$qemu_success")
-        echo "Smoke boot passed"
-        ;;
-    "$qemu_failure")
-        echo "Smoke boot failed: kernel reported failure"
-        exit 1
-        ;;
     124)
         echo "Smoke boot failed: QEMU timed out"
         exit 1
         ;;
     *)
-        echo "Smoke boot passed with QEMU exit code $qemu_exit_code"
+        echo "Smoke boot failed: QEMU exited with code $qemu_exit_code"
+        exit 1
         ;;
 esac

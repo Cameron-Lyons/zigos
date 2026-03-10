@@ -454,9 +454,11 @@ fn print_dec(value: u32) void {
     }
 }
 
-const HEAP_START: u32 = 0x10000000;
+pub const KERNEL_HEAP_START: u32 = 0x10000000;
+const HEAP_START: u32 = KERNEL_HEAP_START;
 const HEAP_INITIAL_SIZE: u32 = 1024 * 1024;
-const HEAP_MAX_SIZE: u32 = 16 * 1024 * 1024;
+pub const KERNEL_HEAP_MAX_SIZE: u32 = 16 * 1024 * 1024;
+const HEAP_MAX_SIZE: u32 = KERNEL_HEAP_MAX_SIZE;
 
 const BlockHeader = packed struct {
     size: u32,

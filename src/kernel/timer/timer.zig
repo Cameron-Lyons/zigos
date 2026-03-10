@@ -6,6 +6,11 @@ const PIT_COMMAND = 0x43;
 const PIT_FREQUENCY = 1193180;
 const MAX_SLEEPERS = 128;
 
+pub const TICKS_PER_SECOND: u64 = 100;
+pub const DEFAULT_FREQUENCY_HZ: u32 = @intCast(TICKS_PER_SECOND);
+pub const MILLISECONDS_PER_TICK: u64 = 1000 / TICKS_PER_SECOND;
+pub const NANOSECONDS_PER_TICK: u64 = 1_000_000_000 / TICKS_PER_SECOND;
+
 const SleepEntry = struct {
     pid: u32 = 0,
     wake_tick: u64 = 0,
@@ -54,7 +59,7 @@ pub fn handleInterrupt() void {
         process.yield();
     }
 
-    const ALARM_CHECK_INTERVAL = 100;
+    const ALARM_CHECK_INTERVAL = TICKS_PER_SECOND;
     if (ticks % ALARM_CHECK_INTERVAL == 0) {
         const signal = @import("../process/signal.zig");
         signal.checkAlarms();
@@ -139,7 +144,7 @@ pub fn cancelWake(pid: u32) void {
 
 pub fn sleep(milliseconds: u32) void {
     const start_ticks = ticks;
-    const ticks_to_wait = milliseconds / 10;
+    const ticks_to_wait = @as(u64, milliseconds) / MILLISECONDS_PER_TICK;
     while (ticks - start_ticks < ticks_to_wait) {
         asm volatile ("hlt");
     }

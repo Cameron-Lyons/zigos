@@ -97,10 +97,6 @@ fn initCore() void {
     console.print("Initializing memory allocator...\n");
     memory.init();
 
-    console.print("Initializing advanced memory management...\n");
-    const memory_pool = @import("memory/memory_pool.zig");
-    memory_pool.init();
-
     console.print("Initializing environment variables...\n");
     const environ = @import("utils/environ.zig");
     environ.init();
@@ -252,7 +248,7 @@ fn initRuntime() void {
     }
 
     console.print("Initializing timer...\n");
-    timer.init(100);
+    timer.init(timer.DEFAULT_FREQUENCY_HZ);
 
     console.print("Initializing keyboard...\n");
     keyboard.init();
@@ -288,10 +284,6 @@ fn createDemoProcesses() void {
 
     const ring3 = @import("process/ring3.zig");
     ring3.createRing3TestProcess();
-
-    console.print("Initializing user programs...\n");
-    const user_programs = @import("process/user_programs.zig");
-    user_programs.init();
 }
 
 fn initializeShell(shell_instance: *shell.Shell) void {

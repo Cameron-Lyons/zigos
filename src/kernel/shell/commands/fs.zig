@@ -1,5 +1,6 @@
 const vfs = @import("../../fs/vfs.zig");
 const vga = @import("../../drivers/vga.zig");
+const numfmt = @import("../../utils/numfmt.zig");
 
 pub fn ls(args: []const [*:0]const u8) void {
     const path = if (args.len > 0) args[0] else "/mnt";
@@ -265,7 +266,7 @@ pub fn cp(args: []const [*:0]const u8) void {
     vga.print(" to ");
     printString(args[1]);
     vga.print(" (");
-    printNumber(total_copied);
+    numfmt.printDec(total_copied);
     vga.print(" bytes)\n");
 }
 
@@ -331,7 +332,7 @@ pub fn write(args: []const [*:0]const u8) void {
     }
 
     vga.print("Wrote ");
-    printNumber(total_written);
+    numfmt.printDec(total_written);
     vga.print(" bytes to ");
     printString(args[0]);
     vga.print("\n");
@@ -341,27 +342,6 @@ fn printString(str: [*:0]const u8) void {
     var i: usize = 0;
     while (str[i] != 0) : (i += 1) {
         vga.put_char(str[i]);
-    }
-}
-
-fn printNumber(num: usize) void {
-    if (num == 0) {
-        vga.put_char('0');
-        return;
-    }
-
-    var buffer: [20]u8 = undefined;
-    var i: usize = 0;
-    var n = num;
-
-    while (n > 0) : (i += 1) {
-        buffer[i] = @as(u8, @intCast((n % 10) + '0'));
-        n /= 10;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.put_char(buffer[i]);
     }
 }
 

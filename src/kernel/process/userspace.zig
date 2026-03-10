@@ -1,5 +1,6 @@
 const process = @import("process.zig");
 const vga = @import("../drivers/vga.zig");
+const numfmt = @import("../utils/numfmt.zig");
 
 fn user_hello_world() void {
     asm volatile (
@@ -10,8 +11,7 @@ fn user_hello_world() void {
         \\int $0x80
         :
         : [msg] "m" ("Hello from userspace!\n"),
-        : .{ .eax = true, .ebx = true, .ecx = true, .edx = true, .memory = true }
-    );
+        : .{ .eax = true, .ebx = true, .ecx = true, .edx = true, .memory = true });
 
     asm volatile (
         \\mov $0, %%eax
@@ -26,28 +26,6 @@ pub fn createUserTestProcess() void {
     const user_proc = process.create_user_process("user_hello", user_hello_world);
 
     vga.print("User process created with PID: ");
-    printNumber(user_proc.pid);
+    numfmt.printDec(user_proc.pid);
     vga.print("\n");
-}
-
-fn printNumber(num: u32) void {
-    if (num == 0) {
-        vga.put_char('0');
-        return;
-    }
-
-    // SAFETY: filled by the following digit extraction loop
-    var buffer: [20]u8 = undefined;
-    var i: usize = 0;
-    var n = num;
-
-    while (n > 0) : (i += 1) {
-        buffer[i] = @as(u8, @intCast((n % 10) + '0'));
-        n /= 10;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.put_char(buffer[i]);
-    }
 }

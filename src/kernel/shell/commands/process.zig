@@ -2,6 +2,7 @@ const paging = @import("../../memory/paging.zig");
 const process = @import("../../process/process.zig");
 const timer = @import("../../timer/timer.zig");
 const vga = @import("../../drivers/vga.zig");
+const numfmt = @import("../../utils/numfmt.zig");
 
 pub fn ps() void {
     vga.print("PID  STATE     NAME\n");
@@ -9,7 +10,7 @@ pub fn ps() void {
 
     var proc = process.getProcessList();
     while (proc) |p| : (proc = p.next) {
-        printNumber(p.pid);
+        numfmt.printDec(p.pid);
         vga.print("   ");
 
         switch (p.state) {
@@ -35,28 +36,28 @@ pub fn memInfo() void {
 
     vga.print("Memory Information:\n");
     vga.print("  Total: ");
-    printNumber(stats.total_frames * 4096 / 1024);
+    numfmt.printDec(stats.total_frames * 4096 / 1024);
     vga.print(" KB\n");
     vga.print("  Used:  ");
-    printNumber(stats.used_frames * 4096 / 1024);
+    numfmt.printDec(stats.used_frames * 4096 / 1024);
     vga.print(" KB\n");
     vga.print("  Free:  ");
-    printNumber((stats.total_frames - stats.used_frames) * 4096 / 1024);
+    numfmt.printDec((stats.total_frames - stats.used_frames) * 4096 / 1024);
     vga.print(" KB\n");
 }
 
 pub fn uptime() void {
     const ticks = timer.getTicks();
-    const seconds = ticks / 100;
+    const seconds = ticks / timer.TICKS_PER_SECOND;
     const minutes = seconds / 60;
     const hours = minutes / 60;
 
     vga.print("Uptime: ");
-    printNumber(@as(usize, @intCast(hours)));
+    numfmt.printDec(hours);
     vga.print("h ");
-    printNumber(@as(usize, @intCast(minutes % 60)));
+    numfmt.printDec(minutes % 60);
     vga.print("m ");
-    printNumber(@as(usize, @intCast(seconds % 60)));
+    numfmt.printDec(seconds % 60);
     vga.print("s\n");
 }
 
@@ -74,11 +75,11 @@ pub fn kill(args: []const [*:0]const u8) void {
 
     if (process.terminateProcess(pid.?)) {
         vga.print("Process ");
-        printNumber(pid.?);
+        numfmt.printDec(pid.?);
         vga.print(" terminated\n");
     } else {
         vga.print("Failed to terminate process ");
-        printNumber(pid.?);
+        numfmt.printDec(pid.?);
         vga.print("\n");
     }
 }
@@ -110,26 +111,5 @@ fn printString(str: [*:0]const u8) void {
     var i: usize = 0;
     while (str[i] != 0) : (i += 1) {
         vga.put_char(str[i]);
-    }
-}
-
-fn printNumber(num: usize) void {
-    if (num == 0) {
-        vga.put_char('0');
-        return;
-    }
-
-    var buffer: [20]u8 = undefined;
-    var i: usize = 0;
-    var n = num;
-
-    while (n > 0) : (i += 1) {
-        buffer[i] = @as(u8, @intCast((n % 10) + '0'));
-        n /= 10;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.put_char(buffer[i]);
     }
 }

@@ -2,6 +2,7 @@ const std = @import("std");
 const device = @import("../../devices/device.zig");
 const multitask_demo = @import("../../tests/multitask_demo.zig");
 const panic_handler = @import("../../utils/panic.zig");
+const numfmt = @import("../../utils/numfmt.zig");
 const scheduler = @import("../../process/scheduler.zig");
 const test_memory = @import("../../tests/test_memory.zig");
 const vga = @import("../../drivers/vga.zig");
@@ -52,10 +53,10 @@ pub fn lsDev() void {
 
     var dev = device.getDeviceList();
     while (dev) |d| : (dev = d.next) {
-        printNumber(d.major);
+        numfmt.printDec(d.major);
         vga.print("      ");
 
-        printNumber(d.minor);
+        numfmt.printDec(d.minor);
         vga.print("      ");
 
         switch (d.device_type) {
@@ -76,27 +77,6 @@ fn printString(str: [*:0]const u8) void {
     var i: usize = 0;
     while (str[i] != 0) : (i += 1) {
         vga.put_char(str[i]);
-    }
-}
-
-fn printNumber(num: usize) void {
-    if (num == 0) {
-        vga.put_char('0');
-        return;
-    }
-
-    var buffer: [20]u8 = undefined;
-    var i: usize = 0;
-    var n = num;
-
-    while (n > 0) : (i += 1) {
-        buffer[i] = @as(u8, @intCast((n % 10) + '0'));
-        n /= 10;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.put_char(buffer[i]);
     }
 }
 
