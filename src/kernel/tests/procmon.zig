@@ -53,7 +53,7 @@ var system_stats: SystemStats = undefined;
 var cpu_usage: CPUUsage = undefined;
 
 var last_update_time: u64 = 0;
-var update_interval: u64 = 100;
+var update_interval: u64 = timer.TICKS_PER_SECOND;
 
 // SAFETY: written before being read; sample_index tracks the current position
 var cpu_samples: [100]CPUUsage = undefined;
@@ -304,7 +304,7 @@ pub fn printSystemStats() void {
     print_number(@truncate(system_stats.system_calls));
     vga.print("\n\n");
 
-    const uptime_seconds = system_stats.uptime_ticks / 100;
+    const uptime_seconds = system_stats.uptime_ticks / timer.TICKS_PER_SECOND;
     const hours = uptime_seconds / 3600;
     const minutes = (uptime_seconds % 3600) / 60;
     const seconds = uptime_seconds % 60;

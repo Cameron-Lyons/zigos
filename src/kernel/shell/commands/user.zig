@@ -3,6 +3,7 @@ const timer = @import("../../timer/timer.zig");
 const vfs = @import("../../fs/vfs.zig");
 const vga = @import("../../drivers/vga.zig");
 const environ = @import("../../utils/environ.zig");
+const numfmt = @import("../../utils/numfmt.zig");
 const syscall_mod = @import("../../process/syscall.zig");
 
 pub fn uname(args: []const [*:0]const u8) void {
@@ -128,37 +129,37 @@ pub fn cd(args: []const [*:0]const u8) void {
 pub fn id() void {
     if (process.current_process) |proc| {
         vga.print("uid=");
-        printNumber(@as(usize, proc.creds.uid));
+        numfmt.printDec(proc.creds.uid);
         vga.print("(");
         if (proc.creds.uid == 0) vga.print("root") else vga.print("user");
         vga.print(") gid=");
-        printNumber(@as(usize, proc.creds.gid));
+        numfmt.printDec(proc.creds.gid);
         vga.print("(");
         if (proc.creds.gid == 0) vga.print("root") else vga.print("users");
         vga.print(") euid=");
-        printNumber(@as(usize, proc.creds.euid));
+        numfmt.printDec(proc.creds.euid);
         vga.print(" egid=");
-        printNumber(@as(usize, proc.creds.egid));
+        numfmt.printDec(proc.creds.egid);
         vga.print("\n");
     }
 }
 
 pub fn date() void {
     const ticks = timer.getTicks();
-    const total_secs = ticks / 100;
+    const total_secs = ticks / timer.TICKS_PER_SECOND;
     const hours = total_secs / 3600;
     const mins = (total_secs % 3600) / 60;
     const secs = total_secs % 60;
     vga.print("System uptime: ");
     if (hours > 0) {
-        printNumber(@intCast(hours));
+        numfmt.printDec(hours);
         vga.print("h ");
     }
-    printNumber(@intCast(mins));
+    numfmt.printDec(mins);
     vga.print("m ");
-    printNumber(@intCast(secs));
+    numfmt.printDec(secs);
     vga.print("s (");
-    printNumber(@intCast(ticks));
+    numfmt.printDec(ticks);
     vga.print(" ticks)\n");
 }
 
@@ -233,7 +234,7 @@ pub fn sleep(args: []const [*:0]const u8) void {
     };
 
     const start = timer.getTicks();
-    const target = start + @as(u64, secs) * 100;
+    const target = start + @as(u64, secs) * timer.TICKS_PER_SECOND;
     while (timer.getTicks() < target) {
         process.yield();
     }
@@ -380,27 +381,6 @@ fn parseNumber(str: [*:0]const u8) ?u32 {
     }
 
     return result;
-}
-
-fn printNumber(num: usize) void {
-    if (num == 0) {
-        vga.put_char('0');
-        return;
-    }
-
-    var buffer: [20]u8 = undefined;
-    var i: usize = 0;
-    var n = num;
-
-    while (n > 0) : (i += 1) {
-        buffer[i] = @as(u8, @intCast((n % 10) + '0'));
-        n /= 10;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.put_char(buffer[i]);
-    }
 }
 
 fn sliceFromCStr(str: [*:0]const u8) []const u8 {
