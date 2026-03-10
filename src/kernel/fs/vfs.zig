@@ -688,6 +688,20 @@ pub fn readdir(fd: u32, dirent: *DirEntry, index: u64) VFSError!bool {
     return VFSError.InvalidOperation;
 }
 
+pub fn readdirNext(fd: u32, dirent: *DirEntry) VFSError!bool {
+    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+
+    if (fd_table[fd]) |file_desc| {
+        const has_entry = try file_desc.vnode.ops.readdir(file_desc.vnode, dirent, file_desc.offset);
+        if (has_entry) {
+            file_desc.offset += 1;
+        }
+        return has_entry;
+    }
+
+    return VFSError.InvalidOperation;
+}
+
 pub fn mkdir(path: []const u8, mode: FileMode) VFSError!void {
     const parts = splitPath(path);
     const parent = try lookupPath(parts.parent);

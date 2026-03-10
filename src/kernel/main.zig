@@ -317,45 +317,26 @@ fn runVmProfile() noreturn {
 
 fn userlandSmokeRunner() callconv(.c) void {
     var smoke_shell = shell.Shell.init();
+    const commands = [_]struct {
+        command: []const u8,
+        marker: []const u8,
+    }{
+        .{ .command = "/bin/hello", .marker = "USERLAND:HELLO" },
+        .{ .command = "/bin/echo USERLAND:ECHO", .marker = "USERLAND:ECHO" },
+        .{ .command = "/bin/uname", .marker = "USERLAND:UNAME" },
+        .{ .command = "/bin/ls /bin", .marker = "USERLAND:LS" },
+        .{ .command = "/bin/cat /etc/motd", .marker = "USERLAND:CAT" },
+    };
 
     printBootMarker("USERLAND:START");
 
-    if (!smoke_shell.runCommandLine("/bin/hello")) {
-        printBootMarker("USERLAND:FAIL");
-        qemu_exit.failure();
+    for (commands) |step| {
+        if (!smoke_shell.runCommandLine(step.command)) {
+            printBootMarker("USERLAND:FAIL");
+            qemu_exit.failure();
+        }
+        printBootMarker(step.marker);
     }
-
-    if (!smoke_shell.runCommandLine("/bin/echo USERLAND:ECHO")) {
-        printBootMarker("USERLAND:FAIL");
-        qemu_exit.failure();
-    }
-
-    if (!smoke_shell.runCommandLine("/bin/uname")) {
-        printBootMarker("USERLAND:FAIL");
-        qemu_exit.failure();
-    }
-    printBootMarker("USERLAND:UNAME");
-
-    printBootMarker("USERLAND:PASS");
-    qemu_exit.success();
-}
-
-fn userlandFsSmokeRunner() callconv(.c) void {
-    var smoke_shell = shell.Shell.init();
-
-    printBootMarker("USERLAND:START");
-
-    if (!smoke_shell.runCommandLine("/bin/ls /bin")) {
-        printBootMarker("USERLAND:FAIL");
-        qemu_exit.failure();
-    }
-    printBootMarker("USERLAND:LS");
-
-    if (!smoke_shell.runCommandLine("/bin/cat /etc/motd")) {
-        printBootMarker("USERLAND:FAIL");
-        qemu_exit.failure();
-    }
-    printBootMarker("USERLAND:CAT");
 
     printBootMarker("USERLAND:PASS");
     qemu_exit.success();
@@ -368,16 +349,6 @@ fn runUserlandSmokeProfile() noreturn {
     const runner = process.create_kernel_process("userland_smoke_runner", idle_task_placeholder);
     process.adoptAsCurrent(runner);
     userlandSmokeRunner();
-    unreachable;
-}
-
-fn runUserlandFsSmokeProfile() noreturn {
-    var shell_instance: shell.Shell = undefined;
-    initializeShell(&shell_instance);
-
-    const runner = process.create_kernel_process("userland_fs_smoke_runner", idle_task_placeholder);
-    process.adoptAsCurrent(runner);
-    userlandFsSmokeRunner();
     unreachable;
 }
 
@@ -428,6 +399,5 @@ export fn kernel_main() void {
         },
         .test_vm => runVmProfile(),
         .userland_smoke => runUserlandSmokeProfile(),
-        .userland_fs_smoke => runUserlandFsSmokeProfile(),
     }
 }
