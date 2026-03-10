@@ -5,7 +5,6 @@ pub const BootProfile = enum {
     ci_smoke,
     test_vm,
     userland_smoke,
-    userland_fs_smoke,
 };
 
 const KernelArtifact = struct {
@@ -45,7 +44,6 @@ pub fn build(b: *std.Build) void {
     const ci_smoke_kernel = addKernelArtifact(b, target, optimize, "kernel-ci-smoke.elf", .ci_smoke, user_assets_module);
     const vm_test_kernel = addKernelArtifact(b, target, optimize, "kernel-test-vm.elf", .test_vm, user_assets_module);
     const userland_smoke_kernel = addKernelArtifact(b, target, optimize, "kernel-userland-smoke.elf", .userland_smoke, user_assets_module);
-    const userland_fs_smoke_kernel = addKernelArtifact(b, target, optimize, "kernel-userland-fs-smoke.elf", .userland_fs_smoke, user_assets_module);
 
     const kernel_userland_dependencies = [_]*std.Build.Step{
         hello_program.install_step,
@@ -55,7 +53,7 @@ pub fn build(b: *std.Build) void {
         ls_program.install_step,
     };
 
-    inline for (&.{ dev_kernel, ci_smoke_kernel, vm_test_kernel, userland_smoke_kernel, userland_fs_smoke_kernel }) |artifact| {
+    inline for (&.{ dev_kernel, ci_smoke_kernel, vm_test_kernel, userland_smoke_kernel }) |artifact| {
         for (kernel_userland_dependencies) |dependency| {
             artifact.compile_step.step.dependOn(dependency);
         }
@@ -72,9 +70,6 @@ pub fn build(b: *std.Build) void {
 
     const userland_smoke_kernel_step = b.step("kernel-userland-smoke", "Build the userland smoke-test kernel");
     userland_smoke_kernel_step.dependOn(userland_smoke_kernel.install_step);
-
-    const userland_fs_smoke_kernel_step = b.step("kernel-userland-fs-smoke", "Build the userland fs smoke-test kernel");
-    userland_fs_smoke_kernel_step.dependOn(userland_fs_smoke_kernel.install_step);
 
     const userland_step = b.step("userland", "Build the staged user programs");
     userland_step.dependOn(hello_program.install_step);
@@ -214,28 +209,15 @@ pub fn build(b: *std.Build) void {
         \\mkdir -p build
         \\rm -f "$LOG_PATH"
         \\USERLAND_SMOKE_SECONDS="${USERLAND_SMOKE_SECONDS:-10}"
-        \\PHASE1_LOG="build/userland-smoke-phase1.log"
-        \\PHASE2_LOG="build/userland-smoke-phase2.log"
-        \\rm -f "$PHASE1_LOG" "$PHASE2_LOG"
-        \\$QEMU_BIN -kernel "zig-out/bin/kernel-userland-smoke.elf" -m 128M -display none -serial file:"$PHASE1_LOG" -monitor none -no-reboot -no-shutdown -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file="build/disk.img",if=ide,format=raw,id=disk0 >/dev/null 2>&1 &
-        \\PHASE1_PID=$!
+        \\$QEMU_BIN -kernel "zig-out/bin/kernel-userland-smoke.elf" -m 128M -display none -serial file:"$LOG_PATH" -monitor none -no-reboot -no-shutdown -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file="build/disk.img",if=ide,format=raw,id=disk0 >/dev/null 2>&1 &
+        \\QEMU_PID=$!
         \\sleep "$USERLAND_SMOKE_SECONDS"
-        \\if kill -0 "$PHASE1_PID" >/dev/null 2>&1; then
-        \\  kill -TERM "$PHASE1_PID" >/dev/null 2>&1 || true
+        \\if kill -0 "$QEMU_PID" >/dev/null 2>&1; then
+        \\  kill -TERM "$QEMU_PID" >/dev/null 2>&1 || true
         \\  sleep 1
-        \\  kill -KILL "$PHASE1_PID" >/dev/null 2>&1 || true
+        \\  kill -KILL "$QEMU_PID" >/dev/null 2>&1 || true
         \\fi
-        \\wait "$PHASE1_PID" >/dev/null 2>&1 || true
-        \\$QEMU_BIN -kernel "zig-out/bin/kernel-userland-fs-smoke.elf" -m 128M -display none -serial file:"$PHASE2_LOG" -monitor none -no-reboot -no-shutdown -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file="build/disk.img",if=ide,format=raw,id=disk0 >/dev/null 2>&1 &
-        \\PHASE2_PID=$!
-        \\sleep "$USERLAND_SMOKE_SECONDS"
-        \\if kill -0 "$PHASE2_PID" >/dev/null 2>&1; then
-        \\  kill -TERM "$PHASE2_PID" >/dev/null 2>&1 || true
-        \\  sleep 1
-        \\  kill -KILL "$PHASE2_PID" >/dev/null 2>&1 || true
-        \\fi
-        \\wait "$PHASE2_PID" >/dev/null 2>&1 || true
-        \\cat "$PHASE1_LOG" "$PHASE2_LOG" > "$LOG_PATH"
+        \\wait "$QEMU_PID" >/dev/null 2>&1 || true
         \\if [ ! -s "$LOG_PATH" ]; then
         \\  echo "Userland smoke test failed: no serial output captured" >&2
         \\  exit 1

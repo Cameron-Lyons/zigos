@@ -66,11 +66,8 @@ zig build run
 # Build the CI smoke-test profile
 zig build kernel-ci-smoke
 
-# Build the core userland smoke-test profile
+# Build the userland smoke-test profile
 zig build kernel-userland-smoke
-
-# Build the filesystem userland smoke-test profile
-zig build kernel-userland-fs-smoke
 
 # Build the VM-test profile
 zig build kernel-test-vm
@@ -108,8 +105,7 @@ QEMU_BIN=qemu-system-x86_64 BOOT_TEST_SECONDS=15 zig build boot-test
 - `dev`: starts the interactive shell and demo processes
 - `ci_smoke`: boots core services, initializes the shell, emits serial markers, and exits through QEMU debug-exit
 - `test_vm`: runs the virtual memory test suite and exits through QEMU debug-exit
-- `userland_smoke`: runs the core external userland commands (`hello`, `echo`, `uname`) and exits through QEMU debug-exit
-- `userland_fs_smoke`: runs the filesystem-oriented external userland commands (`ls`, `cat`) and exits through QEMU debug-exit
+- `userland_smoke`: runs the external userland smoke commands (`hello`, `echo`, `uname`, `ls`, `cat`) and exits through QEMU debug-exit
 
 The current bootstrap exposes external commands directly under `/bin` from an embedded root filesystem. The staged FAT image still mirrors those programs for disk-based workflows.
 
