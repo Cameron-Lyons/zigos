@@ -409,6 +409,9 @@ fn readSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) 
 
     const drive_select: u8 = if (device.is_master) 0xE0 else 0xF0;
     x86.outb(device.base_port + ATA_REG_DRIVE, drive_select | @as(u8, @intCast((lba >> 24) & 0x0F)));
+    for (0..4) |_| {
+        _ = x86.inb(device.ctrl_port);
+    }
 
     x86.outb(device.base_port + ATA_REG_SECCOUNT, count);
 
@@ -448,6 +451,9 @@ fn writeSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []con
 
     const drive_select: u8 = if (device.is_master) 0xE0 else 0xF0;
     x86.outb(device.base_port + ATA_REG_DRIVE, drive_select | @as(u8, @intCast((lba >> 24) & 0x0F)));
+    for (0..4) |_| {
+        _ = x86.inb(device.ctrl_port);
+    }
 
     x86.outb(device.base_port + ATA_REG_SECCOUNT, count);
 
@@ -500,6 +506,27 @@ pub fn writeSectorsAsync(device: *const ATADevice, lba: u64, count: u8, buffer: 
 pub fn getPrimaryMaster() ?*const ATADevice {
     if (primary_master.present) {
         return &primary_master;
+    }
+    return null;
+}
+
+pub fn getPrimarySlave() ?*const ATADevice {
+    if (primary_slave.present) {
+        return &primary_slave;
+    }
+    return null;
+}
+
+pub fn getSecondaryMaster() ?*const ATADevice {
+    if (secondary_master.present) {
+        return &secondary_master;
+    }
+    return null;
+}
+
+pub fn getSecondarySlave() ?*const ATADevice {
+    if (secondary_slave.present) {
+        return &secondary_slave;
     }
     return null;
 }

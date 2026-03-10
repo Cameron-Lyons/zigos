@@ -30,7 +30,7 @@ pub fn init() void {
 
     initialized = true;
 
-    setVar("PATH", "/bin:/usr/bin") catch {};
+    setVar("PATH", "/bin:/usr/bin:/mnt/bin") catch {};
     setVar("HOME", "/home/user") catch {};
     setVar("SHELL", "/bin/sh") catch {};
     setVar("USER", "root") catch {};

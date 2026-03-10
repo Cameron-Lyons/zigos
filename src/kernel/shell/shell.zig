@@ -1,5 +1,6 @@
 // zlint-disable suppressed-errors
 const vga = @import("../drivers/vga.zig");
+const console = @import("../utils/console.zig");
 const process = @import("../process/process.zig");
 const paging = @import("../memory/paging.zig");
 const vfs = @import("../fs/vfs.zig");
@@ -16,14 +17,35 @@ const registry = @import("registry.zig");
 const memory = @import("../memory/memory.zig");
 const keyboard = @import("../drivers/keyboard.zig");
 const numfmt = @import("../utils/numfmt.zig");
+const posix = @import("../utils/posix.zig");
 
 const MAX_COMMAND_LENGTH = 256;
 const MAX_ARGS = 16;
 const MAX_HISTORY = 50;
+const MAX_EXTERNAL_LAUNCHES = 8;
 
-// SAFETY: written via memcpy before being read; length tracked by nice_command_path_len_storage
-var nice_command_path_storage: [256]u8 = undefined;
-var nice_command_path_len_storage: usize = 0;
+const ExternalLaunchError = error{
+    CommandNotFound,
+    CommandPathTooLong,
+    ArgumentTooLong,
+    CommandReadFailed,
+    CommandTooLarge,
+    TooManyLaunches,
+};
+
+const ExternalCommandLaunch = struct {
+    in_use: bool = false,
+    pid: u32 = 0,
+    path_len: usize = 0,
+    argc: usize = 0,
+    path: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH,
+    argv_len: [MAX_ARGS]usize = [_]usize{0} ** MAX_ARGS,
+    argv_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS,
+    file_len: usize = 0,
+    file_storage: [32768]u8 = [_]u8{0} ** 32768,
+};
+
+var external_command_launches: [MAX_EXTERNAL_LAUNCHES]ExternalCommandLaunch = [_]ExternalCommandLaunch{ExternalCommandLaunch{}} ** MAX_EXTERNAL_LAUNCHES;
 
 pub const ArrowKey = enum {
     Up,
@@ -59,7 +81,7 @@ pub const Shell = struct {
                 if (self.buffer_pos > 0) {
                     self.addToHistory();
                 }
-                self.executeCommand();
+                _ = self.executeCommand(false);
                 self.buffer_pos = 0;
                 self.cursor_pos = 0;
                 self.command_buffer = [_]u8{0} ** MAX_COMMAND_LENGTH;
@@ -389,9 +411,21 @@ pub const Shell = struct {
         vga.print("> ");
     }
 
-    fn executeCommand(self: *Shell) void {
+    pub fn runCommandLine(self: *Shell, line: []const u8) bool {
+        if (line.len == 0 or line.len >= MAX_COMMAND_LENGTH) {
+            return false;
+        }
+
+        self.command_buffer = [_]u8{0} ** MAX_COMMAND_LENGTH;
+        @memcpy(self.command_buffer[0..line.len], line);
+        self.buffer_pos = line.len;
+        self.cursor_pos = line.len;
+        return self.executeCommand(true);
+    }
+
+    fn executeCommand(self: *Shell, wait_for_external: bool) bool {
         if (self.buffer_pos == 0) {
-            return;
+            return true;
         }
 
         vga.put_char('\n');
@@ -418,6 +452,7 @@ pub const Shell = struct {
                     arg_count += 1;
                 }
 
+                i = if (arg_end < self.buffer_pos) arg_end + 1 else arg_end;
                 while (i < self.buffer_pos and isWhitespace(self.command_buffer[i])) : (i += 1) {}
                 arg_start = i;
             } else {
@@ -426,19 +461,65 @@ pub const Shell = struct {
         }
 
         if (arg_count == 0) {
-            return;
+            return true;
         }
 
         const command = args[0];
         const command_name = sliceFromCStr(command);
-        const command_meta = registry.lookup(command_name) orelse {
-            vga.print("Unknown command: ");
-            printString(command);
-            vga.print("\nType 'help' for available commands.\n");
-            return;
+        if (registry.lookup(command_name)) |command_meta| {
+            self.dispatchCommand(command_meta.id, args[1..arg_count]);
+            return true;
+        }
+
+        const pid = self.launchExternalCommand(args[0..arg_count], null) catch |err| {
+            printExternalCommandError(command, err);
+            return false;
         };
 
-        self.dispatchCommand(command_meta.id, args[1..arg_count]);
+        if (!wait_for_external) {
+            return true;
+        }
+
+        return waitForExternalCommand(pid);
+    }
+
+    fn launchExternalCommand(self: *const Shell, command_args: []const [*:0]const u8, nice_value: ?i8) ExternalLaunchError!u32 {
+        _ = self;
+        if (command_args.len == 0) {
+            return error.CommandNotFound;
+        }
+
+        var resolved_path_buffer: [MAX_COMMAND_LENGTH]u8 = undefined;
+        const resolved_path = try resolveExternalCommandPath(sliceFromCStr(command_args[0]), &resolved_path_buffer);
+        const launch = try allocateExternalCommandLaunch();
+        errdefer releaseExternalCommandLaunch(launch);
+
+        launch.path_len = resolved_path.len;
+        @memcpy(launch.path[0..resolved_path.len], resolved_path);
+        launch.argc = command_args.len;
+        launch.file_len = try readExternalCommandBytes(resolved_path, &launch.file_storage);
+
+        var i: usize = 0;
+        while (i < command_args.len) : (i += 1) {
+            const arg = sliceFromCStr(command_args[i]);
+            if (arg.len > launch.argv_storage[i].len) {
+                return error.ArgumentTooLong;
+            }
+            @memcpy(launch.argv_storage[i][0..arg.len], arg);
+            launch.argv_len[i] = arg.len;
+        }
+
+        const process_name = sliceFromCStr(command_args[0]);
+        const user_proc = process.create_exec_process(process_name);
+        launch.pid = user_proc.pid;
+
+        if (nice_value) |nice| {
+            if (!scheduler.setProcessNice(user_proc.pid, nice)) {
+                _ = process.setNice(user_proc.pid, nice);
+            }
+        }
+
+        return user_proc.pid;
     }
 
     fn dispatchCommand(self: *Shell, command_id: registry.CommandId, args: []const [*:0]const u8) void {
@@ -566,7 +647,6 @@ pub const Shell = struct {
     }
 
     fn cmdNice(self: *const Shell, args: []const [*:0]const u8) void {
-        _ = self;
         if (args.len < 2) {
             vga.print("Usage: nice <priority> <command> [args...]\n");
             vga.print("Priority range: -20 (highest) to 19 (lowest)\n");
@@ -607,108 +687,34 @@ pub const Shell = struct {
             return;
         }
 
-        // SAFETY: filled by the subsequent path resolution logic
-        var command_path: [256]u8 = undefined;
-        var path_len: usize = 0;
-
-        if (command_name.len + 5 < command_path.len) {
-            @memcpy(command_path[0..4], "/bin");
-            command_path[4] = '/';
-            @memcpy(command_path[5 .. 5 + command_name.len], command_name);
-            command_path[5 + command_name.len] = 0;
-            path_len = 5 + command_name.len;
-        } else {
-            vga.print("nice: Command path too long\n");
-            return;
-        }
-
-        var file_found = false;
-        if (vfs.open(command_path[0..path_len], vfs.O_RDONLY)) |fd| {
-            vfs.close(fd) catch {};
-            file_found = true;
-        } else |_| {
-            if (command_name.len < command_path.len) {
-                @memcpy(command_path[0..command_name.len], command_name);
-                command_path[command_name.len] = 0;
-                path_len = command_name.len;
-
-                if (vfs.open(command_path[0..path_len], vfs.O_RDONLY)) |fd| {
-                    vfs.close(fd) catch {};
-                    file_found = true;
-                } else |_| {
-                    file_found = false;
-                }
+        const pid = self.launchExternalCommand(args[1..], priority) catch |err| {
+            switch (err) {
+                error.CommandNotFound => {
+                    vga.print("nice: Command not found: ");
+                    printString(args[1]);
+                    vga.print("\n");
+                },
+                error.CommandPathTooLong => vga.print("nice: Command path too long\n"),
+                error.ArgumentTooLong => vga.print("nice: Argument too long\n"),
+                error.CommandReadFailed => vga.print("nice: Failed to read command file\n"),
+                error.CommandTooLarge => vga.print("nice: Command file too large\n"),
+                error.TooManyLaunches => vga.print("nice: Too many commands are pending launch\n"),
             }
-        }
-
-        if (!file_found) {
-            vga.print("nice: Command not found: ");
-            printString(args[1]);
-            vga.print("\n");
             return;
-        }
-
-        @memcpy(&nice_command_path_storage, &command_path);
-        nice_command_path_len_storage = path_len;
-
-        const ExecWrapper = struct {
-            fn exec_wrapper() void {
-                const posix2 = @import("../utils/posix.zig");
-
-                // SAFETY: filled by the subsequent memcpy from nice_command_path_storage
-                var path_buf: [256]u8 = undefined;
-                @memcpy(&path_buf, &nice_command_path_storage);
-
-                // SAFETY: element assigned immediately below
-                var argv: [1][]const u8 = undefined;
-                argv[0] = path_buf[0..nice_command_path_len_storage];
-
-                // SAFETY: zero-length array, no elements to initialize
-                var envp: [0][]const u8 = undefined;
-
-                posix2.execve(path_buf[0..nice_command_path_len_storage], &argv, &envp) catch |err| {
-                    const vga2 = @import("../drivers/vga.zig");
-                    vga2.print("nice: Failed to execute: ");
-                    vga2.print(@errorName(err));
-                    vga2.print("\n");
-                    _ = process.terminateProcess(process.getCurrentPID());
-                };
-            }
         };
 
-        const user_proc = process.create_user_process(command_name, ExecWrapper.exec_wrapper);
-
-        if (scheduler.setProcessNice(user_proc.pid, priority)) {
-            vga.print("Running '");
-            printString(args[1]);
-            vga.print("' with nice value ");
-            if (priority < 0) {
-                vga.put_char('-');
-                numfmt.printDec(@as(usize, @intCast(-priority)));
-            } else {
-                numfmt.printDec(@as(usize, @intCast(priority)));
-            }
-            vga.print(" (PID: ");
-            numfmt.printDec(user_proc.pid);
-            vga.print(")\n");
+        vga.print("Running '");
+        printString(args[1]);
+        vga.print("' with nice value ");
+        if (priority < 0) {
+            vga.put_char('-');
+            numfmt.printDec(@as(usize, @intCast(-priority)));
         } else {
-            if (process.setNice(user_proc.pid, priority)) {
-                vga.print("Running '");
-                printString(args[1]);
-                vga.print("' with nice value ");
-                if (priority < 0) {
-                    vga.put_char('-');
-                    numfmt.printDec(@as(usize, @intCast(-priority)));
-                } else {
-                    numfmt.printDec(@as(usize, @intCast(priority)));
-                }
-                vga.print(" (PID: ");
-                numfmt.printDec(user_proc.pid);
-                vga.print(")\n");
-            } else {
-                vga.print("nice: Failed to set priority\n");
-            }
+            numfmt.printDec(@as(usize, @intCast(priority)));
         }
+        vga.print(" (PID: ");
+        numfmt.printDec(pid);
+        vga.print(")\n");
     }
 
     fn cmdRenice(self: *const Shell, args: []const [*:0]const u8) void {
@@ -1504,6 +1510,177 @@ pub const Shell = struct {
         return result;
     }
 };
+
+fn allocateExternalCommandLaunch() ExternalLaunchError!*ExternalCommandLaunch {
+    for (&external_command_launches) |*launch| {
+        if (!launch.in_use) {
+            launch.* = ExternalCommandLaunch{ .in_use = true };
+            return launch;
+        }
+    }
+    return error.TooManyLaunches;
+}
+
+fn releaseExternalCommandLaunch(launch: *ExternalCommandLaunch) void {
+    launch.* = ExternalCommandLaunch{};
+}
+
+fn findExternalCommandLaunch(pid: u32) ?*ExternalCommandLaunch {
+    for (&external_command_launches) |*launch| {
+        if (launch.in_use and launch.pid == pid) {
+            return launch;
+        }
+    }
+    return null;
+}
+
+pub export fn external_command_entry_c() callconv(.c) void {
+    const pid = process.getCurrentPID();
+    const launch = findExternalCommandLaunch(pid) orelse {
+        vga.print("exec: missing launch context\n");
+        _ = process.terminateProcess(pid);
+        return;
+    };
+
+    var path_buffer: [MAX_COMMAND_LENGTH]u8 = undefined;
+    const path_len = launch.path_len;
+    @memcpy(path_buffer[0..path_len], launch.path[0..path_len]);
+
+    var argv_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = undefined;
+    var argv: [MAX_ARGS][]const u8 = undefined;
+    const argc = launch.argc;
+
+    var i: usize = 0;
+    while (i < argc) : (i += 1) {
+        const arg_len = launch.argv_len[i];
+        @memcpy(argv_storage[i][0..arg_len], launch.argv_storage[i][0..arg_len]);
+        argv[i] = argv_storage[i][0..arg_len];
+    }
+
+    var envp: [0][]const u8 = undefined;
+    posix.execveFromData(launch.file_storage[0..launch.file_len], argv[0..argc], &envp) catch |err| {
+        console.print("Failed to execute ");
+        console.print(path_buffer[0..path_len]);
+        console.print(": ");
+        console.print(@errorName(err));
+        console.print("\n");
+        _ = process.terminateProcess(pid);
+    };
+}
+
+fn waitForExternalCommand(pid: u32) bool {
+    const exit_code = posix.waitForProcess(pid) catch |err| {
+        if (findExternalCommandLaunch(pid)) |launch| {
+            releaseExternalCommandLaunch(launch);
+        }
+        vga.print("Failed to wait for command: ");
+        vga.print(@errorName(err));
+        vga.print("\n");
+        return false;
+    };
+
+    if (findExternalCommandLaunch(pid)) |launch| {
+        releaseExternalCommandLaunch(launch);
+    }
+
+    if (exit_code != 0) {
+        vga.print("Command exited with status ");
+        numfmt.printDec(@as(usize, @intCast(if (exit_code < 0) -exit_code else exit_code)));
+        vga.print("\n");
+        return false;
+    }
+
+    return true;
+}
+
+fn readExternalCommandBytes(path: []const u8, buffer: []u8) ExternalLaunchError!usize {
+    const fd = vfs.open(path, vfs.O_RDONLY) catch return error.CommandReadFailed;
+    defer vfs.close(fd) catch {};
+
+    var stat_buf: vfs.FileStat = undefined;
+    vfs.fstat(fd, &stat_buf) catch return error.CommandReadFailed;
+    const size: usize = @intCast(stat_buf.size);
+    if (size > buffer.len) return error.CommandTooLarge;
+
+    const bytes_read = vfs.read(fd, buffer[0..size]) catch return error.CommandReadFailed;
+    if (bytes_read != size) return error.CommandReadFailed;
+    return size;
+}
+
+fn resolveExternalCommandPath(command_name: []const u8, buffer: *[MAX_COMMAND_LENGTH]u8) ExternalLaunchError![]const u8 {
+    if (command_name.len == 0) {
+        return error.CommandNotFound;
+    }
+
+    if (isExplicitCommandPath(command_name)) {
+        if (command_name.len > buffer.len) {
+            return error.CommandPathTooLong;
+        }
+
+        @memcpy(buffer[0..command_name.len], command_name);
+        const direct_path = buffer[0..command_name.len];
+        if (externalCommandPathExists(direct_path)) {
+            return direct_path;
+        }
+        return error.CommandNotFound;
+    }
+
+    const search_prefixes = [_][]const u8{ "/bin/", "/usr/bin/", "/mnt/bin/" };
+    var path_too_long = true;
+
+    for (search_prefixes) |prefix| {
+        if (prefix.len + command_name.len > buffer.len) {
+            continue;
+        }
+
+        path_too_long = false;
+        @memcpy(buffer[0..prefix.len], prefix);
+        @memcpy(buffer[prefix.len .. prefix.len + command_name.len], command_name);
+
+        const candidate = buffer[0 .. prefix.len + command_name.len];
+        if (externalCommandPathExists(candidate)) {
+            return candidate;
+        }
+    }
+
+    if (path_too_long) {
+        return error.CommandPathTooLong;
+    }
+
+    return error.CommandNotFound;
+}
+
+fn externalCommandPathExists(path: []const u8) bool {
+    const fd = vfs.open(path, vfs.O_RDONLY) catch return false;
+    vfs.close(fd) catch {};
+    return true;
+}
+
+fn isExplicitCommandPath(path: []const u8) bool {
+    if (path.len == 0) return false;
+    if (path[0] == '/') return true;
+
+    for (path) |char| {
+        if (char == '/') return true;
+    }
+
+    return false;
+}
+
+fn printExternalCommandError(command: [*:0]const u8, err: ExternalLaunchError) void {
+    switch (err) {
+        error.CommandNotFound => {
+            vga.print("Unknown command: ");
+            printString(command);
+            vga.print("\nType 'help' for available commands.\n");
+        },
+        error.CommandPathTooLong => vga.print("Command path too long\n"),
+        error.ArgumentTooLong => vga.print("Command argument too long\n"),
+        error.CommandReadFailed => vga.print("Failed to read command file\n"),
+        error.CommandTooLarge => vga.print("Command file too large\n"),
+        error.TooManyLaunches => vga.print("Too many commands are pending launch\n"),
+    }
+}
 
 fn isWhitespace(char: u8) bool {
     return char == ' ' or char == '\t';

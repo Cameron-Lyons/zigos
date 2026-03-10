@@ -4,14 +4,23 @@ pub const BootProfile = enum {
     dev,
     ci_smoke,
     test_vm,
+    userland_smoke,
+    userland_fs_smoke,
 };
 
 const KernelArtifact = struct {
+    compile_step: *std.Build.Step.Compile,
+    install_step: *std.Build.Step,
+    output_path: []const u8,
+};
+
+const UserProgramArtifact = struct {
     install_step: *std.Build.Step,
     output_path: []const u8,
 };
 
 const headless_qemu_runner = "scripts/run-headless-qemu.sh";
+const rootfs_image_path = "build/disk.img";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{
@@ -24,9 +33,33 @@ pub fn build(b: *std.Build) void {
 
     const optimize = b.standardOptimizeOption(.{});
 
-    const dev_kernel = addKernelArtifact(b, target, optimize, "kernel.elf", .dev);
-    const ci_smoke_kernel = addKernelArtifact(b, target, optimize, "kernel-ci-smoke.elf", .ci_smoke);
-    const vm_test_kernel = addKernelArtifact(b, target, optimize, "kernel-test-vm.elf", .test_vm);
+    const hello_program = addUserProgram(b, target, optimize, "hello", "user/bin/hello.zig");
+    const echo_program = addUserProgram(b, target, optimize, "echo", "user/bin/echo.zig");
+    const uname_program = addUserProgram(b, target, optimize, "uname", "user/bin/uname.zig");
+    const cat_program = addUserProgram(b, target, optimize, "cat", "user/bin/cat.zig");
+    const ls_program = addUserProgram(b, target, optimize, "ls", "user/bin/ls.zig");
+    const motd_install = b.addInstallFileWithDir(b.path("user/rootfs/etc/motd"), .{ .custom = "user/rootfs/etc" }, "motd");
+    const user_assets_module = createUserAssetsModule(b, target, optimize, hello_program, echo_program, uname_program, cat_program, ls_program);
+
+    const dev_kernel = addKernelArtifact(b, target, optimize, "kernel.elf", .dev, user_assets_module);
+    const ci_smoke_kernel = addKernelArtifact(b, target, optimize, "kernel-ci-smoke.elf", .ci_smoke, user_assets_module);
+    const vm_test_kernel = addKernelArtifact(b, target, optimize, "kernel-test-vm.elf", .test_vm, user_assets_module);
+    const userland_smoke_kernel = addKernelArtifact(b, target, optimize, "kernel-userland-smoke.elf", .userland_smoke, user_assets_module);
+    const userland_fs_smoke_kernel = addKernelArtifact(b, target, optimize, "kernel-userland-fs-smoke.elf", .userland_fs_smoke, user_assets_module);
+
+    const kernel_userland_dependencies = [_]*std.Build.Step{
+        hello_program.install_step,
+        echo_program.install_step,
+        uname_program.install_step,
+        cat_program.install_step,
+        ls_program.install_step,
+    };
+
+    inline for (&.{ dev_kernel, ci_smoke_kernel, vm_test_kernel, userland_smoke_kernel, userland_fs_smoke_kernel }) |artifact| {
+        for (kernel_userland_dependencies) |dependency| {
+            artifact.compile_step.step.dependOn(dependency);
+        }
+    }
 
     const kernel_step = b.step("kernel", "Build the development kernel");
     kernel_step.dependOn(dev_kernel.install_step);
@@ -36,6 +69,62 @@ pub fn build(b: *std.Build) void {
 
     const vm_kernel_step = b.step("kernel-test-vm", "Build the VM test kernel");
     vm_kernel_step.dependOn(vm_test_kernel.install_step);
+
+    const userland_smoke_kernel_step = b.step("kernel-userland-smoke", "Build the userland smoke-test kernel");
+    userland_smoke_kernel_step.dependOn(userland_smoke_kernel.install_step);
+
+    const userland_fs_smoke_kernel_step = b.step("kernel-userland-fs-smoke", "Build the userland fs smoke-test kernel");
+    userland_fs_smoke_kernel_step.dependOn(userland_fs_smoke_kernel.install_step);
+
+    const userland_step = b.step("userland", "Build the staged user programs");
+    userland_step.dependOn(hello_program.install_step);
+    userland_step.dependOn(echo_program.install_step);
+    userland_step.dependOn(uname_program.install_step);
+    userland_step.dependOn(cat_program.install_step);
+    userland_step.dependOn(ls_program.install_step);
+    userland_step.dependOn(&motd_install.step);
+
+    const rootfs_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -eu
+        \\if ! command -v mkfs.fat >/dev/null 2>&1; then
+        \\  echo "mkfs.fat not found. Install dosfstools." >&2
+        \\  exit 1
+        \\fi
+        \\if ! command -v mmd >/dev/null 2>&1; then
+        \\  echo "mmd not found. Install mtools." >&2
+        \\  exit 1
+        \\fi
+        \\if ! command -v mcopy >/dev/null 2>&1; then
+        \\  echo "mcopy not found. Install mtools." >&2
+        \\  exit 1
+        \\fi
+        \\mkdir -p build
+        \\rm -f "build/disk.img"
+        \\truncate -s 64M "build/disk.img"
+        \\mkfs.fat -F 32 "build/disk.img" >/dev/null
+        \\mmd -i "build/disk.img" ::/etc
+        \\mmd -i "build/disk.img" ::/bin
+        \\mmd -i "build/disk.img" ::/tmp
+        \\mmd -i "build/disk.img" ::/dev
+        \\mmd -i "build/disk.img" ::/usr
+        \\mmd -i "build/disk.img" ::/usr/bin
+        \\mcopy -i "build/disk.img" "zig-out/user/bin/hello" ::/bin/hello
+        \\mcopy -i "build/disk.img" "zig-out/user/bin/echo" ::/bin/echo
+        \\mcopy -i "build/disk.img" "zig-out/user/bin/uname" ::/bin/uname
+        \\mcopy -i "build/disk.img" "zig-out/user/bin/cat" ::/bin/cat
+        \\mcopy -i "build/disk.img" "zig-out/user/bin/ls" ::/bin/ls
+        \\mcopy -i "build/disk.img" "zig-out/user/rootfs/etc/motd" ::/etc/motd
+    });
+    rootfs_cmd.step.dependOn(hello_program.install_step);
+    rootfs_cmd.step.dependOn(echo_program.install_step);
+    rootfs_cmd.step.dependOn(uname_program.install_step);
+    rootfs_cmd.step.dependOn(cat_program.install_step);
+    rootfs_cmd.step.dependOn(ls_program.install_step);
+    rootfs_cmd.step.dependOn(&motd_install.step);
+
+    const rootfs_step = b.step("rootfs", "Build the FAT disk image for user programs");
+    rootfs_step.dependOn(&rootfs_cmd.step);
 
     const qemu_cmd = b.addSystemCommand(&.{
         "qemu-system-x86_64",
@@ -56,9 +145,10 @@ pub fn build(b: *std.Build) void {
         "-device",
         "AC97",
         "-drive",
-        "file=disk.img,if=ide,format=raw,id=disk0",
+        "file=" ++ rootfs_image_path ++ ",if=ide,format=raw,id=disk0",
     });
     qemu_cmd.step.dependOn(dev_kernel.install_step);
+    qemu_cmd.step.dependOn(&rootfs_cmd.step);
 
     const run_step = b.step("run", "Run the development kernel in QEMU");
     run_step.dependOn(&qemu_cmd.step);
@@ -86,6 +176,89 @@ pub fn build(b: *std.Build) void {
 
     const run_vm_step = b.step("run-test-vm", "Run the VM test kernel in QEMU");
     run_vm_step.dependOn(&vm_qemu_cmd.step);
+
+    const run_userland_smoke_cmd = b.addSystemCommand(&.{
+        "qemu-system-x86_64",
+        "-kernel",
+        userland_smoke_kernel.output_path,
+        "-m",
+        "128M",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-monitor",
+        "none",
+        "-no-reboot",
+        "-no-shutdown",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-drive",
+        "file=" ++ rootfs_image_path ++ ",if=ide,format=raw,id=disk0",
+    });
+    run_userland_smoke_cmd.step.dependOn(userland_smoke_kernel.install_step);
+    run_userland_smoke_cmd.step.dependOn(&rootfs_cmd.step);
+
+    const run_userland_smoke_step = b.step("run-userland-smoke", "Run the userland smoke kernel in QEMU");
+    run_userland_smoke_step.dependOn(&run_userland_smoke_cmd.step);
+
+    const userland_smoke_test_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -eu
+        \\QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
+        \\LOG_PATH="build/userland-smoke.log"
+        \\if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
+        \\  echo "QEMU binary '$QEMU_BIN' not found. Set QEMU_BIN or install QEMU." >&2
+        \\  exit 1
+        \\fi
+        \\mkdir -p build
+        \\rm -f "$LOG_PATH"
+        \\USERLAND_SMOKE_SECONDS="${USERLAND_SMOKE_SECONDS:-10}"
+        \\PHASE1_LOG="build/userland-smoke-phase1.log"
+        \\PHASE2_LOG="build/userland-smoke-phase2.log"
+        \\rm -f "$PHASE1_LOG" "$PHASE2_LOG"
+        \\$QEMU_BIN -kernel "zig-out/bin/kernel-userland-smoke.elf" -m 128M -display none -serial file:"$PHASE1_LOG" -monitor none -no-reboot -no-shutdown -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file="build/disk.img",if=ide,format=raw,id=disk0 >/dev/null 2>&1 &
+        \\PHASE1_PID=$!
+        \\sleep "$USERLAND_SMOKE_SECONDS"
+        \\if kill -0 "$PHASE1_PID" >/dev/null 2>&1; then
+        \\  kill -TERM "$PHASE1_PID" >/dev/null 2>&1 || true
+        \\  sleep 1
+        \\  kill -KILL "$PHASE1_PID" >/dev/null 2>&1 || true
+        \\fi
+        \\wait "$PHASE1_PID" >/dev/null 2>&1 || true
+        \\$QEMU_BIN -kernel "zig-out/bin/kernel-userland-fs-smoke.elf" -m 128M -display none -serial file:"$PHASE2_LOG" -monitor none -no-reboot -no-shutdown -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file="build/disk.img",if=ide,format=raw,id=disk0 >/dev/null 2>&1 &
+        \\PHASE2_PID=$!
+        \\sleep "$USERLAND_SMOKE_SECONDS"
+        \\if kill -0 "$PHASE2_PID" >/dev/null 2>&1; then
+        \\  kill -TERM "$PHASE2_PID" >/dev/null 2>&1 || true
+        \\  sleep 1
+        \\  kill -KILL "$PHASE2_PID" >/dev/null 2>&1 || true
+        \\fi
+        \\wait "$PHASE2_PID" >/dev/null 2>&1 || true
+        \\cat "$PHASE1_LOG" "$PHASE2_LOG" > "$LOG_PATH"
+        \\if [ ! -s "$LOG_PATH" ]; then
+        \\  echo "Userland smoke test failed: no serial output captured" >&2
+        \\  exit 1
+        \\fi
+        \\for marker in "BOOT:START" "BOOT:PROFILE:userland_smoke" "BOOT:SHELL_READY" "USERLAND:HELLO" "USERLAND:ECHO" "USERLAND:UNAME" "USERLAND:CAT" "USERLAND:LS" "Welcome to ZigOS userspace smoke test." "USERLAND:PASS"; do
+        \\  if ! grep -Fq "$marker" "$LOG_PATH"; then
+        \\    echo "Userland smoke test failed: missing marker '$marker'" >&2
+        \\    cat "$LOG_PATH" >&2
+        \\    exit 1
+        \\  fi
+        \\done
+        \\if grep -Eqi "panic|KERNEL PANIC|System Halted|USERLAND:FAIL" "$LOG_PATH"; then
+        \\  echo "Userland smoke test failed: panic or failure marker found" >&2
+        \\  cat "$LOG_PATH" >&2
+        \\  exit 1
+        \\fi
+        \\echo "Userland smoke test passed. Log: $LOG_PATH"
+    });
+    userland_smoke_test_cmd.step.dependOn(userland_smoke_kernel.install_step);
+    userland_smoke_test_cmd.step.dependOn(&rootfs_cmd.step);
+
+    const userland_smoke_test_step = b.step("userland-smoke-test", "Run the automated userland smoke test");
+    userland_smoke_test_step.dependOn(&userland_smoke_test_cmd.step);
 
     const iso_cmd = b.addSystemCommand(&.{
         "sh", "-c",
@@ -197,6 +370,7 @@ fn addKernelArtifact(
     optimize: std.builtin.OptimizeMode,
     name: []const u8,
     boot_profile: BootProfile,
+    user_assets_module: *std.Build.Module,
 ) KernelArtifact {
     const options = b.addOptions();
     options.addOption(BootProfile, "boot_profile", boot_profile);
@@ -208,6 +382,7 @@ fn addKernelArtifact(
     });
 
     kernel_module.addOptions("build_options", options);
+    kernel_module.addImport("user_assets", user_assets_module);
     kernel_module.addAssemblyFile(b.path("src/boot/boot64.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt32.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupts.s"));
@@ -222,7 +397,113 @@ fn addKernelArtifact(
 
     const install = b.addInstallArtifact(kernel, .{});
     return .{
+        .compile_step = kernel,
         .install_step = &install.step,
         .output_path = b.fmt("zig-out/bin/{s}", .{name}),
+    };
+}
+
+fn createUserAssetsModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    hello_program: UserProgramArtifact,
+    echo_program: UserProgramArtifact,
+    uname_program: UserProgramArtifact,
+    cat_program: UserProgramArtifact,
+    ls_program: UserProgramArtifact,
+) *std.Build.Module {
+    const write_files = b.addWriteFiles();
+    _ = write_files.addCopyFile(b.path(hello_program.output_path), "assets/hello");
+    _ = write_files.addCopyFile(b.path(echo_program.output_path), "assets/echo");
+    _ = write_files.addCopyFile(b.path(uname_program.output_path), "assets/uname");
+    _ = write_files.addCopyFile(b.path(cat_program.output_path), "assets/cat");
+    _ = write_files.addCopyFile(b.path(ls_program.output_path), "assets/ls");
+    _ = write_files.addCopyFile(b.path("user/rootfs/etc/motd"), "assets/motd");
+    const assets_source = write_files.add("user_assets.zig", b.fmt(
+        \\pub const hello = @embedFile("assets/hello");
+        \\pub const echo = @embedFile("assets/echo");
+        \\pub const uname = @embedFile("assets/uname");
+        \\pub const cat = @embedFile("assets/cat");
+        \\pub const ls = @embedFile("assets/ls");
+        \\pub const motd = @embedFile("assets/motd");
+    , .{}));
+
+    return b.createModule(.{
+        .root_source_file = assets_source,
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+fn addUserProgram(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    name: []const u8,
+    root_source: []const u8,
+) UserProgramArtifact {
+    _ = optimize;
+    const user_optimize: std.builtin.OptimizeMode = .ReleaseSmall;
+
+    const abi_module = b.createModule(.{
+        .root_source_file = b.path("src/abi/syscall.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+
+    const syscall_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/syscall.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+    syscall_module.addImport("abi", abi_module);
+
+    const runtime_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/runtime.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+    runtime_module.addImport("syscall", syscall_module);
+
+    const cstr_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/cstr.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+
+    const stdio_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/stdio.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+    stdio_module.addImport("syscall", syscall_module);
+
+    const user_module = b.addModule(b.fmt("user-{s}", .{name}), .{
+        .root_source_file = b.path(root_source),
+        .target = target,
+        .optimize = user_optimize,
+    });
+    user_module.addImport("cstr", cstr_module);
+    user_module.addImport("runtime", runtime_module);
+    user_module.addImport("syscall", syscall_module);
+    user_module.addImport("stdio", stdio_module);
+
+    user_module.addAssemblyFile(b.path("user/crt0.S"));
+
+    const program = b.addExecutable(.{
+        .name = name,
+        .root_module = user_module,
+    });
+    program.setLinkerScript(b.path("user/linker.ld"));
+
+    const install = b.addInstallArtifact(program, .{
+        .dest_dir = .{ .override = .{ .custom = "user/bin" } },
+        .dest_sub_path = name,
+    });
+
+    return .{
+        .install_step = &install.step,
+        .output_path = b.fmt("zig-out/user/bin/{s}", .{name}),
     };
 }

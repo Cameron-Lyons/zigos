@@ -3,6 +3,7 @@ const x86 = @import("../../arch/x86.zig");
 const idt = @import("../interrupts/idt.zig");
 const process = @import("process.zig");
 const vga = @import("../drivers/vga.zig");
+const console = @import("../utils/console.zig");
 const keyboard = @import("../drivers/keyboard.zig");
 const protection = @import("../memory/protection.zig");
 const posix = @import("../utils/posix.zig");
@@ -662,19 +663,21 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
 }
 
 fn sys_exit(status: i32) i32 {
-    if (process.current_process) |proc| {
+    if (process.getEffectiveCurrent()) |proc| {
         proc.state = .Terminated;
         proc.exit_code = status;
 
         if (proc.parent_pid != 0) {
             if (process.getProcessByPid(proc.parent_pid)) |parent| {
                 signal.sendSignal(parent, signal.SIGCHLD);
+                process.switchToProcess(parent);
             }
         }
 
-        _ = process.schedule();
-
-        x86.hlt();
+        while (true) {
+            process.yield();
+            x86.hlt();
+        }
     }
 
     return 0;
@@ -696,10 +699,7 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
                 return EINVAL;
             };
 
-            var i: usize = 0;
-            while (i < chunk_size) : (i += 1) {
-                vga.print(&[_]u8{kernel_buffer[i]});
-            }
+            console.print(kernel_buffer[0..chunk_size]);
 
             written += chunk_size;
         }

@@ -291,17 +291,157 @@ fn loadSegment(file: u32, phdr: *const Elf32ProgramHeader) bool {
     return true;
 }
 
+fn loadSegmentFromData(data: []const u8, phdr: *const Elf32ProgramHeader) bool {
+    const page_size = 0x1000;
+    const start_page = phdr.vaddr & ~@as(u32, page_size - 1);
+    const end_page = (phdr.vaddr + phdr.memsz + page_size - 1) & ~@as(u32, page_size - 1);
+    const num_pages = (end_page - start_page) / page_size;
+
+    var page_addr = start_page;
+    var i: u32 = 0;
+    while (i < num_pages) : (i += 1) {
+        const phys_addr = memory.allocatePhysicalPage() orelse {
+            unmapSegmentPages(start_page, i);
+            return false;
+        };
+
+        var flags = paging.PAGE_PRESENT | paging.PAGE_USER;
+        if (phdr.flags & ProgramFlags.WRITE != 0) {
+            flags |= paging.PAGE_WRITABLE;
+        }
+
+        paging.mapPage(page_addr, phys_addr, flags);
+        page_addr += page_size;
+    }
+
+    if (phdr.filesz > 0) {
+        const file_start: usize = @intCast(phdr.offset);
+        const file_end = file_start + phdr.filesz;
+        if (file_end > data.len) {
+            unmapSegmentPages(start_page, num_pages);
+            return false;
+        }
+
+        const dest: [*]u8 = @ptrFromInt(phdr.vaddr);
+        @memcpy(dest[0..phdr.filesz], data[file_start..file_end]);
+    }
+
+    if (phdr.memsz > phdr.filesz) {
+        const zero_start = phdr.vaddr + phdr.filesz;
+        const zero_size = phdr.memsz - phdr.filesz;
+        const zero_dest: [*]u8 = @ptrFromInt(zero_start);
+        @memset(zero_dest[0..zero_size], 0);
+    }
+
+    return true;
+}
+
+fn loadElfFromData(data: []const u8) !LoadedElf {
+    if (data.len < @sizeOf(Elf32Header)) {
+        return ElfLoadError.FileReadError;
+    }
+
+    var header: Elf32Header = undefined;
+    @memcpy(@as([*]u8, @ptrCast(&header))[0..@sizeOf(Elf32Header)], data[0..@sizeOf(Elf32Header)]);
+    try validateElfHeader(&header);
+
+    var result = LoadedElf{
+        .entry_point = header.entry,
+        .base_addr = 0xFFFFFFFF,
+        .size = 0,
+    };
+
+    var lowest_vaddr: u32 = 0xFFFFFFFF;
+    var highest_vaddr: u32 = 0;
+    var dynamic_vaddr: u32 = 0;
+    var has_dynamic = false;
+    var loaded_low: u32 = 0xFFFFFFFF;
+    var loaded_high: u32 = 0;
+
+    var i: u16 = 0;
+    while (i < header.phnum) : (i += 1) {
+        const ph_offset: usize = @intCast(header.phoff + @as(u32, i) * header.phentsize);
+        const ph_end = ph_offset + @sizeOf(Elf32ProgramHeader);
+        if (ph_end > data.len) {
+            unmapLoadedRange(loaded_low, loaded_high);
+            return ElfLoadError.FileReadError;
+        }
+
+        var phdr: Elf32ProgramHeader = undefined;
+        @memcpy(@as([*]u8, @ptrCast(&phdr))[0..@sizeOf(Elf32ProgramHeader)], data[ph_offset..ph_end]);
+
+        if (phdr.type == @intFromEnum(ProgramType.Load)) {
+            if (phdr.vaddr < lowest_vaddr) lowest_vaddr = phdr.vaddr;
+            if (phdr.vaddr + phdr.memsz > highest_vaddr) highest_vaddr = phdr.vaddr + phdr.memsz;
+
+            if (!loadSegmentFromData(data, &phdr)) {
+                unmapLoadedRange(loaded_low, loaded_high);
+                return ElfLoadError.OutOfMemory;
+            }
+
+            const seg_start = phdr.vaddr & ~@as(u32, 0xFFF);
+            const seg_end = (phdr.vaddr + phdr.memsz + 0xFFF) & ~@as(u32, 0xFFF);
+            if (seg_start < loaded_low) loaded_low = seg_start;
+            if (seg_end > loaded_high) loaded_high = seg_end;
+        } else if (phdr.type == @intFromEnum(ProgramType.Dynamic)) {
+            dynamic_vaddr = phdr.vaddr;
+            has_dynamic = true;
+        }
+    }
+
+    if (lowest_vaddr == 0xFFFFFFFF) {
+        return ElfLoadError.NoLoadableSegments;
+    }
+
+    result.base_addr = lowest_vaddr;
+    result.size = highest_vaddr - lowest_vaddr;
+
+    if (has_dynamic and dynamic_vaddr != 0) {
+        const dyn_ptr: [*]dynamic.Elf32Dyn = @ptrFromInt(dynamic_vaddr);
+        dynamic.linkExecutable(dyn_ptr, lowest_vaddr) catch {};
+    }
+
+    return result;
+}
+
 pub fn loadElfIntoProcess(proc: *process.Process, path: []const u8) !LoadedElf {
+    const file = vfs.open(path, vfs.O_RDONLY) catch {
+        return ElfLoadError.FileReadError;
+    };
+    defer vfs.close(file) catch {};
+
+    var stat_buf: vfs.FileStat = undefined;
+    vfs.fstat(file, &stat_buf) catch return ElfLoadError.FileReadError;
+    const file_size: usize = @intCast(stat_buf.size);
+    const file_mem = memory.kmalloc(file_size) orelse return ElfLoadError.OutOfMemory;
+    defer memory.kfree(file_mem);
+    const file_bytes = @as([*]u8, @ptrCast(file_mem))[0..file_size];
+
+    const bytes_read = vfs.read(file, file_bytes) catch return ElfLoadError.FileReadError;
+    if (bytes_read != file_size) return ElfLoadError.FileReadError;
+
     const old_page_dir = paging.getCurrentPageDirectory();
     if (proc.page_directory) |pd| {
         paging.switchPageDirectory(pd);
     }
     defer paging.switchPageDirectory(old_page_dir);
 
-    const elf_info = try loadElfFromFile(path);
+    const elf_info = try loadElfFromData(file_bytes);
 
-    proc.entry_point = @ptrFromInt(elf_info.entry_point);
+    proc.entry_point = elf_info.entry_point;
 
+    return elf_info;
+}
+
+pub fn loadElfDataIntoProcess(proc: *process.Process, data: []const u8) !LoadedElf {
+    const old_page_dir = paging.getCurrentPageDirectory();
+    if (proc.page_directory) |pd| {
+        paging.switchPageDirectory(pd);
+    }
+    defer paging.switchPageDirectory(old_page_dir);
+
+    const elf_info = try loadElfFromData(data);
+    proc.entry_point = elf_info.entry_point;
     return elf_info;
 }
 
@@ -316,7 +456,7 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
 
     const elf_info = try loadElfIntoProcess(current_proc.?, path);
 
-    current_proc.?.entry_point = @ptrFromInt(elf_info.entry_point);
+    current_proc.?.entry_point = elf_info.entry_point;
 
     const stack_top = 0xC0000000;
     const stack_size = 0x10000;
@@ -329,7 +469,7 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
     }
 
     current_proc.?.context.esp = stack_top - 16;
-    current_proc.?.context.eip = @intFromPtr(current_proc.?.entry_point);
+    current_proc.?.context.eip = @intCast(current_proc.?.entry_point);
 
     process.switchToProcess(current_proc.?);
 }

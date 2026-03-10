@@ -38,6 +38,7 @@ const ipv6 = @import("net/ipv6.zig");
 const icmpv6 = @import("net/icmpv6.zig");
 const icmp = @import("net/icmp.zig");
 const devfs = @import("fs/devfs.zig");
+const embedfs = @import("fs/embedfs.zig");
 
 fn test_process1() void {
     var i: u32 = 0;
@@ -187,6 +188,30 @@ fn initFileSystems() void {
     vfs.init();
     console.print("VFS ready!\n");
 
+    console.print("Initializing embedded root filesystem...\n");
+    embedfs.init();
+
+    console.print("Mounting embedded root filesystem...\n");
+    vfs.mount("none", "/", "embedfs", 0) catch |err| {
+        console.print("Failed to mount embedded root filesystem: ");
+        console.print(@errorName(err));
+        console.print("\n");
+    };
+
+    console.print("Initializing FAT32 file system...\n");
+    fat32.init();
+    console.print("FAT32 ready!\n");
+
+    console.print("Initializing ext2 file system...\n");
+    ext2.init();
+
+    console.print("Mounting FAT32 disk on /mnt...\n");
+    vfs.mount("ata0", "/mnt", "fat32", 0) catch |err| {
+        console.print("Disk mount unavailable: ");
+        console.print(@errorName(err));
+        console.print("\n");
+    };
+
     console.print("Initializing tmpfs...\n");
     tmpfs.init();
 
@@ -212,22 +237,6 @@ fn initFileSystems() void {
 
     console.print("Initializing memory mapping...\n");
     mmap.init();
-
-    console.print("Initializing FAT32 file system...\n");
-    fat32.init();
-    console.print("FAT32 ready!\n");
-
-    console.print("Initializing ext2 file system...\n");
-    ext2.init();
-
-    if (ata.getPrimaryMaster()) |_| {
-        console.print("Mounting primary master as FAT32...\n");
-        vfs.mount("ata0", "/mnt", "fat32", 0) catch |err| {
-            console.print("Failed to mount: ");
-            console.print(@errorName(err));
-            console.print("\n");
-        };
-    }
 }
 
 fn initRuntime() void {
@@ -306,6 +315,74 @@ fn runVmProfile() noreturn {
     qemu_exit.failure();
 }
 
+fn userlandSmokeRunner() callconv(.c) void {
+    var smoke_shell = shell.Shell.init();
+
+    printBootMarker("USERLAND:START");
+
+    if (!smoke_shell.runCommandLine("/bin/hello")) {
+        printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    }
+
+    if (!smoke_shell.runCommandLine("/bin/echo USERLAND:ECHO")) {
+        printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    }
+
+    if (!smoke_shell.runCommandLine("/bin/uname")) {
+        printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    }
+    printBootMarker("USERLAND:UNAME");
+
+    printBootMarker("USERLAND:PASS");
+    qemu_exit.success();
+}
+
+fn userlandFsSmokeRunner() callconv(.c) void {
+    var smoke_shell = shell.Shell.init();
+
+    printBootMarker("USERLAND:START");
+
+    if (!smoke_shell.runCommandLine("/bin/ls /bin")) {
+        printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    }
+    printBootMarker("USERLAND:LS");
+
+    if (!smoke_shell.runCommandLine("/bin/cat /etc/motd")) {
+        printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    }
+    printBootMarker("USERLAND:CAT");
+
+    printBootMarker("USERLAND:PASS");
+    qemu_exit.success();
+}
+
+fn runUserlandSmokeProfile() noreturn {
+    var shell_instance: shell.Shell = undefined;
+    initializeShell(&shell_instance);
+
+    const runner = process.create_kernel_process("userland_smoke_runner", idle_task_placeholder);
+    process.adoptAsCurrent(runner);
+    userlandSmokeRunner();
+    unreachable;
+}
+
+fn runUserlandFsSmokeProfile() noreturn {
+    var shell_instance: shell.Shell = undefined;
+    initializeShell(&shell_instance);
+
+    const runner = process.create_kernel_process("userland_fs_smoke_runner", idle_task_placeholder);
+    process.adoptAsCurrent(runner);
+    userlandFsSmokeRunner();
+    unreachable;
+}
+
+fn idle_task_placeholder() void {}
+
 export fn kernel_main() void {
     x86.enableSse();
     vga.init();
@@ -350,5 +427,7 @@ export fn kernel_main() void {
             qemu_exit.success();
         },
         .test_vm => runVmProfile(),
+        .userland_smoke => runUserlandSmokeProfile(),
+        .userland_fs_smoke => runUserlandFsSmokeProfile(),
     }
 }
