@@ -22,6 +22,10 @@ pub fn shouldInitSmp() bool {
     return bootProfile() == .dev;
 }
 
+pub fn shouldInitNetworkStack() bool {
+    return bootProfile() == .dev;
+}
+
 pub fn shouldInitRuntimeExtras() bool {
     return bootProfile() == .dev;
 }

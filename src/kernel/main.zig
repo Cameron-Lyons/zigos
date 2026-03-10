@@ -318,7 +318,9 @@ export fn kernel_main() void {
 
     initCore();
     initDevices();
-    initNetworkStack();
+    if (config.shouldInitNetworkStack()) {
+        initNetworkStack();
+    }
     initFileSystems();
     initRuntime();
 
