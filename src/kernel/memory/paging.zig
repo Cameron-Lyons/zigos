@@ -199,7 +199,8 @@ pub fn mapPage(virt_addr: u32, phys_addr: u32, flags: u32) void {
     const page_dir_index = virt_addr >> 22;
     const page_table_index = (virt_addr >> 12) & 0x3FF;
 
-    const page_dir_entry = &kernel_page_directory[page_dir_index];
+    const page_directory = getCurrentPageDirectory();
+    const page_dir_entry = &page_directory[page_dir_index];
 
     if (!page_dir_entry.present) {
         const table_phys_addr = alloc_frame();
@@ -238,7 +239,8 @@ pub fn unmap_page(virt_addr: u32) void {
     const page_dir_index = virt_addr >> 22;
     const page_table_index = (virt_addr >> 12) & 0x3FF;
 
-    const page_dir_entry = &kernel_page_directory[page_dir_index];
+    const page_directory = getCurrentPageDirectory();
+    const page_dir_entry = &page_directory[page_dir_index];
     if (!page_dir_entry.present) {
         return;
     }
@@ -248,8 +250,6 @@ pub fn unmap_page(virt_addr: u32) void {
 
     const page_entry = &table[page_table_index];
     if (page_entry.present) {
-        const phys_addr = @as(u32, page_entry.address) << 12;
-        clear_frame(phys_addr);
         page_entry.* = PageTableEntry{};
 
         invalidate_page(virt_addr);
@@ -267,7 +267,7 @@ pub fn get_physical_address(virt_addr: u32) ?u32 {
     const page_table_index = (virt_addr >> 12) & 0x3FF;
     const offset = virt_addr & 0xFFF;
 
-    const page_dir_entry = kernel_page_directory[page_dir_index];
+    const page_dir_entry = getCurrentPageDirectory()[page_dir_index];
     if (!page_dir_entry.present) {
         return null;
     }
@@ -296,16 +296,17 @@ pub fn getMemoryStats() MemoryStats {
 }
 
 pub fn createUserPageDirectory() !*PageDirectory {
-    const pd_phys = memory.allocPages(1) orelse return error.OutOfMemory;
-    const pd: *PageDirectory = @ptrCast(@alignCast(pd_phys));
+    const pd_phys = memory.allocatePhysicalPage() orelse return error.OutOfMemory;
+    const pd: *PageDirectory = @ptrCast(@alignCast(@as([*]u8, @ptrFromInt(pd_phys))));
 
     for (pd) |*entry| {
         entry.* = PageTableEntry{};
     }
 
-    const kernel_start_idx = 0xC0000000 >> 22;
-    for (kernel_start_idx..TABLES_PER_DIRECTORY) |i| {
-        pd[i] = kernel_page_directory[i];
+    for (0..TABLES_PER_DIRECTORY) |i| {
+        if (kernel_page_directory[i].present) {
+            pd[i] = kernel_page_directory[i];
+        }
     }
 
     return pd;
@@ -341,7 +342,7 @@ pub fn init() void {
         };
     }
 
-    const kernel_end = 16 * 1024 * 1024;
+    const kernel_end = memory.getReservedMemoryEnd();
     var i: u32 = 0;
     while (i < kernel_end) : (i += PAGE_SIZE) {
         set_frame(i);
@@ -607,6 +608,10 @@ var current_page_directory: *PageDirectory = &kernel_page_directory;
 
 pub fn getCurrentPageDirectory() *PageDirectory {
     return current_page_directory;
+}
+
+pub fn getKernelPageDirectory() *PageDirectory {
+    return &kernel_page_directory;
 }
 
 pub fn switchPageDirectory(pd: *PageDirectory) void {

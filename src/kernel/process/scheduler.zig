@@ -630,6 +630,35 @@ pub fn setProcessNice(pid: u32, nice: i8) bool {
     return true;
 }
 
+pub fn adoptCurrentProcess(proc: *process.Process) void {
+    const ext = findExtendedProcess(proc) orelse return;
+    const cpu_id = smp.getCurrentCPU();
+    const cpu_idx = clampCPU(cpu_id);
+    if (ext.queue_index != NO_QUEUE_INDEX) {
+        dequeueFromQueue(ext);
+    }
+    ext.assigned_cpu = cpu_id;
+    ext.time_used = 0;
+    const queue_index = targetQueueIndex(ext);
+    if (queueForIndex(queue_index, cpu_id)) |queue| {
+        enqueueInQueue(queue, ext, queue_index);
+    }
+    current_extended[cpu_idx] = ext;
+    proc.state = .Running;
+}
+
+pub fn assignProcessToCPU(proc: *process.Process, cpu_id: u32) void {
+    const ext = findExtendedProcess(proc) orelse return;
+    if (ext.queue_index != NO_QUEUE_INDEX) {
+        dequeueFromQueue(ext);
+    }
+    ext.assigned_cpu = cpu_id;
+    const queue_index = targetQueueIndex(ext);
+    if (queueForIndex(queue_index, cpu_id)) |queue| {
+        enqueueInQueue(queue, ext, queue_index);
+    }
+}
+
 pub fn preempt() void {
     const cpu_id = smp.getCurrentCPU();
     if (current_extended[clampCPU(cpu_id)]) |curr| {

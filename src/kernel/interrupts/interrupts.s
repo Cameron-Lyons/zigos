@@ -17,7 +17,7 @@ isr_common_stub:
     
     push %esp
     
-    mov 44(%esp), %eax  # Get interrupt number
+    mov 40(%esp), %eax  # Get interrupt number
     cmp $128, %eax
     je handle_syscall
     
@@ -25,7 +25,11 @@ isr_common_stub:
     jmp isr_exit
     
 handle_syscall:
+    mov (%esp), %eax
+    add $4, %eax
+    push %eax
     call syscall_handler
+    add $4, %esp
     
 isr_exit:
     add $4, %esp
