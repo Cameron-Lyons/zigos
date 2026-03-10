@@ -1393,10 +1393,8 @@ fn sys_getdents(fd: i32, buf_addr: usize, buf_size: usize) i32 {
     // SAFETY: filled by the subsequent vfs.readdir calls
     var dirent: vfs.DirEntry = undefined;
     var offset: usize = 0;
-    var index: u64 = 0;
-
     while (offset + @sizeOf(LinuxDirent) + 1 < buf_size) {
-        const has_entry = vfs.readdir(vfs_fd, &dirent, index) catch |err| return vfsErrno(err);
+        const has_entry = vfs.readdirNext(vfs_fd, &dirent) catch |err| return vfsErrno(err);
         if (!has_entry) break;
 
         const name_len = dirent.name_len;
@@ -1405,7 +1403,7 @@ fn sys_getdents(fd: i32, buf_addr: usize, buf_size: usize) i32 {
 
         var kernel_entry: LinuxDirent = .{
             .d_ino = @intCast(dirent.inode & 0xFFFFFFFF),
-            .d_off = @intCast(index + 1),
+            .d_off = @intCast(offset + reclen),
             .d_reclen = reclen,
             .d_type = @intFromEnum(dirent.file_type),
         };
@@ -1416,7 +1414,6 @@ fn sys_getdents(fd: i32, buf_addr: usize, buf_size: usize) i32 {
         protection.copyToUser(buf_addr + offset + @sizeOf(LinuxDirent) + name_len, &null_byte) catch return EINVAL;
 
         offset += reclen;
-        index += 1;
     }
 
     return @intCast(offset);
