@@ -842,7 +842,7 @@ pub fn receive(socket_id: usize, buffer: []u8) !usize {
 
 pub fn close(socket_id: usize) !void {
     if (socket_id >= tcp_sockets.len) return error.InvalidSocket;
-    var socket = &(tcp_sockets[socket_id] orelse return error.InvalidSocket);
+    const socket = &(tcp_sockets[socket_id] orelse return error.InvalidSocket);
 
     if (socket.connection) |conn| {
         if (conn.state == .ESTABLISHED) {
