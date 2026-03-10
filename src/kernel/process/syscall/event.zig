@@ -165,7 +165,7 @@ pub fn closePseudoFd(fd: i32) ?i32 {
 
     if (isInotifyFd(fd)) {
         const idx: usize = @intCast(fd - INOTIFY_BASE);
-        var inst = &inotify_instances[idx];
+        const inst = &inotify_instances[idx];
         if (!inst.in_use) return abi.EBADF;
         resetInotifyInstance(inst);
         readiness.notifyAll();
