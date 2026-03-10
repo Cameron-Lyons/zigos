@@ -2,6 +2,7 @@ const file_ops = @import("../../fs/file_ops.zig");
 const registry = @import("../registry.zig");
 const vfs = @import("../../fs/vfs.zig");
 const vga = @import("../../drivers/vga.zig");
+const numfmt = @import("../../utils/numfmt.zig");
 
 pub fn head(args: []const [*:0]const u8) void {
     var lines: u32 = 10;
@@ -205,11 +206,11 @@ pub fn wc(args: []const [*:0]const u8) void {
         }
     }
 
-    printNumber(lines);
+    numfmt.printDec(lines);
     vga.print(" ");
-    printNumber(words);
+    numfmt.printDec(words);
     vga.print(" ");
-    printNumber(bytes);
+    numfmt.printDec(bytes);
     vga.print(" ");
     printString(path);
     vga.print("\n");
@@ -256,7 +257,7 @@ pub fn grep(args: []const [*:0]const u8) void {
             if (byte == '\n') {
                 const line_slice = line_buffer[0..line_pos];
                 if (contains(line_slice, pattern)) {
-                    printNumber(line_num);
+                    numfmt.printDec(line_num);
                     vga.print(": ");
                     for (line_slice) |c| {
                         vga.put_char(c);
@@ -275,7 +276,7 @@ pub fn grep(args: []const [*:0]const u8) void {
     if (line_pos > 0) {
         const line_slice = line_buffer[0..line_pos];
         if (contains(line_slice, pattern)) {
-            printNumber(line_num);
+            numfmt.printDec(line_num);
             vga.print(": ");
             for (line_slice) |c| {
                 vga.put_char(c);
@@ -384,7 +385,7 @@ pub fn stat(args: []const [*:0]const u8) void {
     printString(args[0]);
     vga.print("\n");
     vga.print("Size: ");
-    printNumber(@as(usize, @intCast(stat_info.size)));
+    numfmt.printDec(stat_info.size);
     vga.print(" bytes\n");
 
     vga.print("Type: ");
@@ -525,27 +526,6 @@ fn printString(str: [*:0]const u8) void {
     var i: usize = 0;
     while (str[i] != 0) : (i += 1) {
         vga.put_char(str[i]);
-    }
-}
-
-fn printNumber(num: usize) void {
-    if (num == 0) {
-        vga.put_char('0');
-        return;
-    }
-
-    var buffer: [20]u8 = undefined;
-    var i: usize = 0;
-    var n = num;
-
-    while (n > 0) : (i += 1) {
-        buffer[i] = @as(u8, @intCast((n % 10) + '0'));
-        n /= 10;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.put_char(buffer[i]);
     }
 }
 

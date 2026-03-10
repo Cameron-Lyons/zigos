@@ -112,9 +112,13 @@ fn readPageFromDisk(slot: u32, page_data: [*]u8) bool {
     return true;
 }
 
+fn heapTableIndex(aligned_addr: u32) u32 {
+    return (aligned_addr - paging.KERNEL_HEAP_START) / PAGE_SIZE;
+}
+
 pub fn clockAlgorithm() ?u32 {
-    const heap_start: u32 = 0x10000000;
-    const heap_max: u32 = heap_start + 16 * 1024 * 1024;
+    const heap_start = paging.KERNEL_HEAP_START;
+    const heap_max = paging.KERNEL_HEAP_START + paging.KERNEL_HEAP_MAX_SIZE;
     const total_pages = (heap_max - heap_start) / PAGE_SIZE;
 
     var scanned: u32 = 0;
@@ -160,7 +164,7 @@ pub fn swapOut(vaddr: u32) !void {
         return error.DiskWriteError;
     }
 
-    const table_index = (aligned_addr - 0x10000000) / PAGE_SIZE;
+    const table_index = heapTableIndex(aligned_addr);
     if (table_index < SWAP_SLOT_COUNT) {
         swap_table[table_index] = SwapEntry{
             .slot = slot,
@@ -175,7 +179,7 @@ pub fn swapIn(vaddr: u32) !void {
     if (!initialized) return error.NotInitialized;
 
     const aligned_addr = vaddr & ~@as(u32, PAGE_SIZE - 1);
-    const table_index = (aligned_addr - 0x10000000) / PAGE_SIZE;
+    const table_index = heapTableIndex(aligned_addr);
 
     if (table_index >= SWAP_SLOT_COUNT) return error.InvalidAddress;
 
@@ -201,9 +205,9 @@ pub fn swapIn(vaddr: u32) !void {
 
 pub fn isSwapped(vaddr: u32) bool {
     const aligned_addr = vaddr & ~@as(u32, PAGE_SIZE - 1);
-    if (aligned_addr < 0x10000000) return false;
+    if (aligned_addr < paging.KERNEL_HEAP_START) return false;
 
-    const table_index = (aligned_addr - 0x10000000) / PAGE_SIZE;
+    const table_index = heapTableIndex(aligned_addr);
     if (table_index >= SWAP_SLOT_COUNT) return false;
 
     return swap_table[table_index].flags & SwapFlags.SWAPPED != 0;

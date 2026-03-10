@@ -22,7 +22,6 @@ pub const Device = struct {
     minor: u16,
     ops: DeviceOps,
     private_data: ?*anyopaque,
-    ref_count: u32,
     next: ?*Device,
 };
 
@@ -49,7 +48,6 @@ pub fn registerDevice(name: []const u8, device_type: DeviceType, ops: DeviceOps,
         .minor = 0,
         .ops = ops,
         .private_data = private_data,
-        .ref_count = 0,
         .next = device_list,
     };
 
@@ -93,44 +91,6 @@ pub fn findDevice(name: []const u8) ?*Device {
     return null;
 }
 
-pub fn openDevice(device: *Device) error_handler.Error!void {
-    device.ref_count += 1;
-    if (device.ops.open) |open_fn| {
-        try open_fn(device);
-    }
-}
-
-pub fn closeDevice(device: *Device) void {
-    if (device.ref_count > 0) {
-        device.ref_count -= 1;
-        if (device.ops.close) |close_fn| {
-            close_fn(device);
-        }
-    }
-}
-
-pub fn readDevice(device: *Device, buffer: []u8, offset: usize) error_handler.Error!usize {
-    if (device.ops.read) |read_fn| {
-        return try read_fn(device, buffer, offset);
-    }
-    return error_handler.Error.NotImplemented;
-}
-
-pub fn writeDevice(device: *Device, buffer: []const u8, offset: usize) error_handler.Error!usize {
-    if (device.ops.write) |write_fn| {
-        return try write_fn(device, buffer, offset);
-    }
-    return error_handler.Error.NotImplemented;
-}
-
-pub fn ioctlDevice(device: *Device, request: u32, arg: usize) error_handler.Error!i32 {
-    if (device.ops.ioctl) |ioctl_fn| {
-        return try ioctl_fn(device, request, arg);
-    }
-    return error_handler.Error.NotImplemented;
-}
-
 pub fn getDeviceList() ?*Device {
     return device_list;
 }
-

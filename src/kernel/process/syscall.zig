@@ -3033,7 +3033,7 @@ fn sys_sysinfo(info_ptr: usize) i32 {
     const ticks = timer.getTicks();
 
     const info = Sysinfo{
-        .uptime = @intCast(ticks / 100),
+        .uptime = @intCast(ticks / timer.TICKS_PER_SECOND),
         .loads = [3]u32{ 0, 0, 0 },
         .totalram = 16 * 1024 * 1024,
         .freeram = 8 * 1024 * 1024,

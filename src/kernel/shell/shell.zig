@@ -15,6 +15,7 @@ const editor = @import("editor.zig");
 const registry = @import("registry.zig");
 const memory = @import("../memory/memory.zig");
 const keyboard = @import("../drivers/keyboard.zig");
+const numfmt = @import("../utils/numfmt.zig");
 
 const MAX_COMMAND_LENGTH = 256;
 const MAX_ARGS = 16;
@@ -683,12 +684,12 @@ pub const Shell = struct {
             vga.print("' with nice value ");
             if (priority < 0) {
                 vga.put_char('-');
-                printNumber(@as(usize, @intCast(-priority)));
+                numfmt.printDec(@as(usize, @intCast(-priority)));
             } else {
-                printNumber(@as(usize, @intCast(priority)));
+                numfmt.printDec(@as(usize, @intCast(priority)));
             }
             vga.print(" (PID: ");
-            printNumber(user_proc.pid);
+            numfmt.printDec(user_proc.pid);
             vga.print(")\n");
         } else {
             if (process.setNice(user_proc.pid, priority)) {
@@ -697,12 +698,12 @@ pub const Shell = struct {
                 vga.print("' with nice value ");
                 if (priority < 0) {
                     vga.put_char('-');
-                    printNumber(@as(usize, @intCast(-priority)));
+                    numfmt.printDec(@as(usize, @intCast(-priority)));
                 } else {
-                    printNumber(@as(usize, @intCast(priority)));
+                    numfmt.printDec(@as(usize, @intCast(priority)));
                 }
                 vga.print(" (PID: ");
-                printNumber(user_proc.pid);
+                numfmt.printDec(user_proc.pid);
                 vga.print(")\n");
             } else {
                 vga.print("nice: Failed to set priority\n");
@@ -752,29 +753,29 @@ pub const Shell = struct {
 
         if (scheduler.setProcessNice(pid, priority)) {
             vga.print("Changed nice value of process ");
-            printNumber(pid);
+            numfmt.printDec(pid);
             vga.print(" to ");
             if (priority < 0) {
                 vga.put_char('-');
-                printNumber(@as(usize, @intCast(-priority)));
+                numfmt.printDec(@as(usize, @intCast(-priority)));
             } else {
-                printNumber(@as(usize, @intCast(priority)));
+                numfmt.printDec(@as(usize, @intCast(priority)));
             }
             vga.print("\n");
         } else if (process.setNice(pid, priority)) {
             vga.print("Changed nice value of process ");
-            printNumber(pid);
+            numfmt.printDec(pid);
             vga.print(" to ");
             if (priority < 0) {
                 vga.put_char('-');
-                printNumber(@as(usize, @intCast(-priority)));
+                numfmt.printDec(@as(usize, @intCast(-priority)));
             } else {
-                printNumber(@as(usize, @intCast(priority)));
+                numfmt.printDec(@as(usize, @intCast(priority)));
             }
             vga.print("\n");
         } else {
             vga.print("Failed to change priority: process ");
-            printNumber(pid);
+            numfmt.printDec(pid);
             vga.print(" not found\n");
         }
     }
@@ -1230,13 +1231,13 @@ pub const Shell = struct {
         const use_percent = if (total_kb > 0) (used_kb * 100) / total_kb else 0;
 
         vga.print("rootfs          ");
-        printNumber(total_kb);
+        numfmt.printDec(total_kb);
         vga.print("      ");
-        printNumber(used_kb);
+        numfmt.printDec(used_kb);
         vga.print("      ");
-        printNumber(free_kb);
+        numfmt.printDec(free_kb);
         vga.print("   ");
-        printNumber(use_percent);
+        numfmt.printDec(use_percent);
         vga.print("% /\n");
     }
 
@@ -1279,7 +1280,7 @@ pub const Shell = struct {
             }
 
             vga.print("Starting HTTP server on port ");
-            printNumber(port);
+            numfmt.printDec(port);
             vga.print("...\n");
 
             var server = http.HTTPServer.init(port);
@@ -1481,11 +1482,11 @@ pub const Shell = struct {
 
         const cpu = procmon.getCPUUsage();
         vga.print("CPU: User: ");
-        printNumber(cpu.user_percent);
+        numfmt.printDec(cpu.user_percent);
         vga.print("% System: ");
-        printNumber(cpu.system_percent);
+        numfmt.printDec(cpu.system_percent);
         vga.print("% Idle: ");
-        printNumber(cpu.idle_percent);
+        numfmt.printDec(cpu.idle_percent);
         vga.print("%\n");
 
         procmon.printProcessList();
@@ -1545,28 +1546,6 @@ fn parseNumber(str: [*:0]const u8) ?u32 {
     }
 
     return result;
-}
-
-fn printNumber(num: usize) void {
-    if (num == 0) {
-        vga.put_char('0');
-        return;
-    }
-
-    // SAFETY: filled by the following digit extraction loop
-    var buffer: [20]u8 = undefined;
-    var i: usize = 0;
-    var n = num;
-
-    while (n > 0) : (i += 1) {
-        buffer[i] = @as(u8, @intCast((n % 10) + '0'));
-        n /= 10;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.put_char(buffer[i]);
-    }
 }
 
 fn sliceFromCStr(str: [*:0]const u8) []const u8 {

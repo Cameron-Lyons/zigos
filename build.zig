@@ -11,6 +11,8 @@ const KernelArtifact = struct {
     output_path: []const u8,
 };
 
+const headless_qemu_runner = "scripts/run-headless-qemu.sh";
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{
         .default_target = .{
@@ -62,45 +64,25 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&qemu_cmd.step);
 
     const ci_qemu_cmd = b.addSystemCommand(&.{
-        "qemu-system-x86_64",
-        "-kernel",
+        "bash",
+        headless_qemu_runner,
         ci_smoke_kernel.output_path,
-        "-m",
         "128M",
-        "-display",
-        "none",
-        "-serial",
         "stdio",
-        "-monitor",
-        "none",
-        "-no-reboot",
-        "-device",
-        "isa-debug-exit,iobase=0xf4,iosize=0x04",
     });
     ci_qemu_cmd.step.dependOn(ci_smoke_kernel.install_step);
-    ci_qemu_cmd.expectExitCode(33);
 
     const run_ci_step = b.step("run-ci-smoke", "Run the CI smoke kernel in QEMU");
     run_ci_step.dependOn(&ci_qemu_cmd.step);
 
     const vm_qemu_cmd = b.addSystemCommand(&.{
-        "qemu-system-x86_64",
-        "-kernel",
+        "bash",
+        headless_qemu_runner,
         vm_test_kernel.output_path,
-        "-m",
         "128M",
-        "-display",
-        "none",
-        "-serial",
         "stdio",
-        "-monitor",
-        "none",
-        "-no-reboot",
-        "-device",
-        "isa-debug-exit,iobase=0xf4,iosize=0x04",
     });
     vm_qemu_cmd.step.dependOn(vm_test_kernel.install_step);
-    vm_qemu_cmd.expectExitCode(33);
 
     const run_vm_step = b.step("run-test-vm", "Run the VM test kernel in QEMU");
     run_vm_step.dependOn(&vm_qemu_cmd.step);

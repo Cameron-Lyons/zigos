@@ -334,7 +334,7 @@ pub fn sys_clock_getres(clock_id: u32, res: usize) i32 {
 
     const resolution = TimeSpec{
         .tv_sec = 0,
-        .tv_nsec = 10000000,
+        .tv_nsec = @intCast(timer.NANOSECONDS_PER_TICK),
     };
 
     protection.copyToUser(res, std.mem.asBytes(&resolution)) catch return abi.EFAULT;
@@ -351,7 +351,7 @@ pub fn sys_clock_nanosleep(clock_id: u32, flags: u32, request: usize, remain: us
     var req: TimeSpec = undefined;
     protection.copyFromUser(std.mem.asBytes(&req), request) catch return abi.EFAULT;
 
-    const ticks_to_sleep: u64 = @as(u64, @intCast(@max(0, req.tv_sec))) * 100 + @as(u64, @intCast(@max(0, req.tv_nsec))) / 10000000;
+    const ticks_to_sleep: u64 = @as(u64, @intCast(@max(0, req.tv_sec))) * timer.TICKS_PER_SECOND + @as(u64, @intCast(@max(0, req.tv_nsec))) / timer.NANOSECONDS_PER_TICK;
     const start_ticks = timer.getTicks();
 
     while (timer.getTicks() - start_ticks < ticks_to_sleep) {
