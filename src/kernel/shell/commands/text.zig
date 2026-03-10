@@ -427,7 +427,7 @@ pub fn hexdump(args: []const [*:0]const u8) void {
     var offset: u64 = 0;
 
     while (true) {
-        const bytes_read = vnode.ops.read(vnode, &buf, offset) catch {
+        const bytes_read = vfs.readVNode(vnode, &buf, offset) catch {
             vga.print("hexdump: read error\n");
             return;
         };

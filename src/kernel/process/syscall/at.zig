@@ -2,6 +2,7 @@ const std = @import("std");
 const abi = @import("abi.zig");
 const cwd_mod = @import("cwd.zig");
 const errno = @import("errno.zig");
+const syscall_event = @import("event.zig");
 const protection = @import("../../memory/protection.zig");
 const vfs = @import("../../fs/vfs.zig");
 
@@ -65,6 +66,7 @@ pub fn sys_mkdirat(dirfd: i32, pathname: [*]const u8, mode: u32) i32 {
     const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return abi.EBADF;
 
     vfs.mkdir(resolved, fileModeFromBits(mode)) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(resolved, abi.IN_CREATE, abi.IN_CREATE);
     return 0;
 }
 
@@ -79,8 +81,10 @@ pub fn sys_unlinkat(dirfd: i32, pathname: [*]const u8, flags: u32) i32 {
 
     if (flags & abi.AT_REMOVEDIR != 0) {
         vfs.rmdir(resolved) catch |err| return errno.vfsErrno(err);
+        syscall_event.notifyInotifyPathEvent(resolved, abi.IN_DELETE_SELF, abi.IN_DELETE);
     } else {
         vfs.unlink(resolved) catch |err| return errno.vfsErrno(err);
+        syscall_event.notifyInotifyPathEvent(resolved, abi.IN_DELETE_SELF, abi.IN_DELETE);
     }
     return 0;
 }
@@ -104,6 +108,7 @@ pub fn sys_linkat(olddirfd: i32, oldpath: [*]const u8, newdirfd: i32, newpath: [
     const resolved_new = resolveDirFd(newdirfd, new_slice, &resolved_new_buf) orelse return abi.EBADF;
 
     vfs.link(resolved_old, resolved_new) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(resolved_new, abi.IN_CREATE, abi.IN_CREATE);
     return 0;
 }
 
@@ -117,6 +122,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: [*]const u8, mode: u32) i32 {
     const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return abi.EBADF;
 
     vfs.chmod(resolved, fileModeFromBits(mode)) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(resolved, abi.IN_ATTRIB, 0);
     return 0;
 }
 
@@ -133,6 +139,7 @@ pub fn sys_fchownat(dirfd: i32, pathname: [*]const u8, owner: i32, group: i32) i
     const gid: u32 = if (group < 0) 0xFFFFFFFF else @intCast(group);
 
     vfs.chown(resolved, uid, gid) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(resolved, abi.IN_ATTRIB, 0);
     return 0;
 }
 
@@ -153,6 +160,7 @@ pub fn sys_renameat(olddirfd: i32, oldpath: [*]const u8, newdirfd: i32, newpath:
     const resolved_new = resolveDirFd(newdirfd, new_slice, &resolved_new_buf) orelse return abi.EBADF;
 
     vfs.rename(resolved_old, resolved_new) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyRename(resolved_old, resolved_new);
     return 0;
 }
 
@@ -302,6 +310,7 @@ pub fn sys_symlinkat(target: [*]const u8, newdirfd: i32, linkpath: [*]const u8) 
     const link_slice = protection.copyStringFromUser(&link_buffer, @intFromPtr(linkpath)) catch return abi.EFAULT;
 
     vfs.symlink(target_slice, link_slice) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(link_slice, abi.IN_CREATE, abi.IN_CREATE);
     return 0;
 }
 

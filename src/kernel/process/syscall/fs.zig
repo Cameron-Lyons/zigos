@@ -1,6 +1,7 @@
 const std = @import("std");
 const abi = @import("abi.zig");
 const errno = @import("errno.zig");
+const syscall_event = @import("event.zig");
 const credentials = @import("../credentials.zig");
 const process_mod = @import("../process.zig");
 const protection = @import("../../memory/protection.zig");
@@ -27,6 +28,7 @@ pub fn sys_mkdir(pathname: [*]const u8, mode: u32) i32 {
     };
 
     vfs.mkdir(path_slice, mode_struct) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(path_slice, abi.IN_CREATE, abi.IN_CREATE);
     return 0;
 }
 
@@ -39,6 +41,7 @@ pub fn sys_rmdir(pathname: [*]const u8) i32 {
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
 
     vfs.rmdir(path_slice) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(path_slice, abi.IN_DELETE_SELF, abi.IN_DELETE);
     return 0;
 }
 
@@ -51,6 +54,7 @@ pub fn sys_unlink(pathname: [*]const u8) i32 {
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
 
     vfs.unlink(path_slice) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(path_slice, abi.IN_DELETE_SELF, abi.IN_DELETE);
     return 0;
 }
 
@@ -68,6 +72,7 @@ pub fn sys_rename(oldpath: [*]const u8, newpath: [*]const u8) i32 {
     const new_slice = protection.copyStringFromUser(&new_buffer, @intFromPtr(newpath)) catch return abi.EINVAL;
 
     vfs.rename(old_slice, new_slice) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyRename(old_slice, new_slice);
     return 0;
 }
 

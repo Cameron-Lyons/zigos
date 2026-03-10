@@ -116,11 +116,11 @@ pub fn mmap(addr: ?usize, length: usize, prot: u32, flags: u32, fd: i32, offset:
             }
         } else {
             base_addr = findFreeRegion(requested_addr, page_aligned_length) orelse
-                       return MMapError.NoMemory;
+                return MMapError.NoMemory;
         }
     } else {
         base_addr = findFreeRegion(0x400000, page_aligned_length) orelse
-                   return MMapError.NoMemory;
+            return MMapError.NoMemory;
     }
 
     const num_pages = page_aligned_length / 0x1000;
@@ -144,7 +144,7 @@ pub fn mmap(addr: ?usize, length: usize, prot: u32, flags: u32, fd: i32, offset:
         const read_size = @min(page_aligned_length, vnode.?.size -| offset);
         if (read_size > 0) {
             const buffer = @as([*]u8, @ptrFromInt(base_addr))[0..read_size];
-            _ = vnode.?.ops.read(vnode.?, buffer, offset) catch |err| {
+            _ = vfs.readVNode(vnode.?, buffer, offset) catch |err| {
                 unmapPages(base_addr, num_pages);
                 return switch (err) {
                     else => MMapError.NoDevice,
@@ -155,7 +155,8 @@ pub fn mmap(addr: ?usize, length: usize, prot: u32, flags: u32, fd: i32, offset:
 
     if ((flags & MMapFlags.ANONYMOUS) != 0 or
         ((flags & MMapFlags.ANONYMOUS) == 0 and vnode != null and
-         vnode.?.size -| offset < page_aligned_length)) {
+            vnode.?.size -| offset < page_aligned_length))
+    {
         const clear_start = if ((flags & MMapFlags.ANONYMOUS) != 0)
             0
         else
@@ -208,11 +209,12 @@ pub fn munmap(addr: usize, length: usize) MMapError!void {
         const next = mapping.next;
 
         if (mapping.start_addr >= page_aligned_addr and
-            mapping.start_addr < page_aligned_addr + page_aligned_length) {
-
+            mapping.start_addr < page_aligned_addr + page_aligned_length)
+        {
             if ((mapping.flags & MMapFlags.SHARED) != 0 and
                 (mapping.prot & MMapProt.WRITE) != 0 and
-                mapping.vnode != null) {
+                mapping.vnode != null)
+            {
                 msync(mapping.start_addr, mapping.length, 1) catch {};
             }
 
@@ -287,9 +289,10 @@ pub fn msync(addr: usize, length: usize, flags: u32) MMapError!void {
         if (overlaps(page_aligned_addr, page_aligned_length, mapping.start_addr, mapping.length)) {
             if (mapping.vnode) |vnode| {
                 if ((mapping.flags & MMapFlags.SHARED) != 0 and
-                    (mapping.prot & MMapProt.WRITE) != 0) {
+                    (mapping.prot & MMapProt.WRITE) != 0)
+                {
                     const buffer = @as([*]u8, @ptrFromInt(mapping.start_addr))[0..mapping.length];
-                    _ = vnode.ops.write(vnode, buffer, mapping.offset) catch |err| {
+                    _ = vfs.writeVNode(vnode, buffer, mapping.offset) catch |err| {
                         return switch (err) {
                             else => MMapError.NoDevice,
                         };
@@ -361,8 +364,8 @@ pub fn handlePageFault(fault_addr: usize, error_code: u32) bool {
     var current = mapping_list;
     while (current) |mapping| : (current = mapping.next) {
         if (fault_addr >= mapping.start_addr and
-            fault_addr < mapping.start_addr + mapping.length) {
-
+            fault_addr < mapping.start_addr + mapping.length)
+        {
             if ((error_code & 0x01) == 0) {
                 const phys_page = memory.allocatePhysicalPage() orelse return false;
 
@@ -383,7 +386,7 @@ pub fn handlePageFault(fault_addr: usize, error_code: u32) bool {
                     if (file_offset < vnode.size) {
                         const read_size = @min(0x1000, vnode.size - file_offset);
                         const buffer = @as([*]u8, @ptrFromInt(page_aligned_addr))[0..read_size];
-                        _ = vnode.ops.read(vnode, buffer, file_offset) catch {};
+                        _ = vfs.readVNode(vnode, buffer, file_offset) catch {};
 
                         if (read_size < 0x1000) {
                             const clear_buffer = @as([*]u8, @ptrFromInt(page_aligned_addr + read_size))[0..(0x1000 - read_size)];

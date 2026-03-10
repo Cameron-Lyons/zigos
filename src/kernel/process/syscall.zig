@@ -17,6 +17,7 @@ const abi = @import("syscall/abi.zig");
 const syscall_at = @import("syscall/at.zig");
 const syscall_cwd = @import("syscall/cwd.zig");
 const errno = @import("syscall/errno.zig");
+const syscall_descriptor = @import("syscall/descriptor.zig");
 const syscall_event = @import("syscall/event.zig");
 const syscall_fd = @import("syscall/fd.zig");
 const syscall_fs = @import("syscall/fs.zig");
@@ -706,9 +707,7 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
         return @intCast(count);
     }
 
-    if (fd < FD_OFFSET) return EBADF;
-    if (syscall_fd.isSpecialFd(fd)) return EBADF;
-    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+    if (count == 0) return 0;
 
     // SAFETY: filled by the subsequent copyFromUser call
     var kernel_buffer: [512]u8 = undefined;
@@ -719,6 +718,18 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
         protection.copyFromUser(kernel_buffer[0..chunk_size], @intFromPtr(buf) + written) catch {
             return EINVAL;
         };
+
+        if (syscall_descriptor.write(fd, kernel_buffer[0..chunk_size])) |result| {
+            if (result < 0) return result;
+
+            const bytes_written: usize = @intCast(result);
+            written += bytes_written;
+            if (bytes_written < chunk_size) break;
+            continue;
+        }
+
+        if (fd < FD_OFFSET) return EBADF;
+        const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
         const bytes_written = vfs.write(vfs_fd, kernel_buffer[0..chunk_size]) catch |err| return vfsErrno(err);
         written += bytes_written;
@@ -761,16 +772,32 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
         return @intCast(i);
     }
 
-    if (fd < FD_OFFSET) return EBADF;
-    if (syscall_fd.isSpecialFd(fd)) return EBADF;
-    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+    if (count == 0) return 0;
 
-    // SAFETY: filled by the subsequent vfs.read call
+    // SAFETY: filled by the subsequent special-fd or vfs read call
     var kernel_buffer: [512]u8 = undefined;
     var total_read: usize = 0;
 
     while (total_read < count) {
         const chunk_size = @min(count - total_read, kernel_buffer.len);
+
+        if (syscall_descriptor.read(fd, kernel_buffer[0..chunk_size])) |result| {
+            if (result < 0) return result;
+            if (result == 0) break;
+
+            const bytes_read: usize = @intCast(result);
+            protection.copyToUser(@intFromPtr(buf) + total_read, kernel_buffer[0..bytes_read]) catch {
+                return EINVAL;
+            };
+
+            total_read += bytes_read;
+            if (bytes_read < chunk_size) break;
+            continue;
+        }
+
+        if (fd < FD_OFFSET) return EBADF;
+        const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+
         const bytes_read = vfs.read(vfs_fd, kernel_buffer[0..chunk_size]) catch |err| return vfsErrno(err);
         if (bytes_read == 0) break;
 
@@ -842,6 +869,7 @@ fn sys_stat(pathname: [*]const u8, stat_buf_addr: usize) i32 {
 }
 
 pub fn init() void {
+    syscall_net.attachTables(&unix_sockets, &socket_table);
     idt.register_interrupt_handler(0x80, syscall_handler);
 
     idt.set_gate_flags(0x80, 0x8E | 0x60);
@@ -854,8 +882,7 @@ pub fn syscall0(num: u32) i32 {
         \\int $0x80
         : [result] "={eax}" (result),
         : [num] "{eax}" (num),
-        : .{ .memory = true }
-    );
+        : .{ .memory = true });
     return result;
 }
 
@@ -867,8 +894,19 @@ pub fn syscall1(num: u32, arg1: usize) i32 {
         : [result] "={eax}" (result),
         : [num] "{eax}" (num),
           [arg1] "{ebx}" (arg1),
-        : .{ .memory = true }
-    );
+        : .{ .memory = true });
+    return result;
+}
+
+pub fn syscall2(num: u32, arg1: usize, arg2: usize) i32 {
+    var result: i32 = undefined;
+    asm volatile (
+        \\int $0x80
+        : [result] "={eax}" (result),
+        : [num] "{eax}" (num),
+          [arg1] "{ebx}" (arg1),
+          [arg2] "{ecx}" (arg2),
+        : .{ .memory = true });
     return result;
 }
 
@@ -882,8 +920,36 @@ pub fn syscall3(num: u32, arg1: usize, arg2: usize, arg3: usize) i32 {
           [arg1] "{ebx}" (arg1),
           [arg2] "{ecx}" (arg2),
           [arg3] "{edx}" (arg3),
-        : .{ .memory = true }
-    );
+        : .{ .memory = true });
+    return result;
+}
+
+pub fn syscall4(num: u32, arg1: usize, arg2: usize, arg3: usize, arg4: usize) i32 {
+    var result: i32 = undefined;
+    asm volatile (
+        \\int $0x80
+        : [result] "={eax}" (result),
+        : [num] "{eax}" (num),
+          [arg1] "{ebx}" (arg1),
+          [arg2] "{ecx}" (arg2),
+          [arg3] "{edx}" (arg3),
+          [arg4] "{esi}" (arg4),
+        : .{ .memory = true });
+    return result;
+}
+
+pub fn syscall5(num: u32, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) i32 {
+    var result: i32 = undefined;
+    asm volatile (
+        \\int $0x80
+        : [result] "={eax}" (result),
+        : [num] "{eax}" (num),
+          [arg1] "{ebx}" (arg1),
+          [arg2] "{ecx}" (arg2),
+          [arg3] "{edx}" (arg3),
+          [arg4] "{esi}" (arg4),
+          [arg5] "{edi}" (arg5),
+        : .{ .memory = true });
     return result;
 }
 
@@ -937,6 +1003,7 @@ fn sys_chown(pathname: [*]const u8, uid: u16, gid: u16) i32 {
     }
 
     vfs.chown(path_slice, uid, gid) catch |err| return vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(path_slice, abi.IN_ATTRIB, 0);
     return 0;
 }
 
@@ -1279,6 +1346,7 @@ fn sys_chmod_syscall(pathname: [*]const u8, mode: u32) i32 {
     };
 
     vfs.chmod(path_slice, mode_struct) catch |err| return vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(path_slice, abi.IN_ATTRIB, 0);
     return 0;
 }
 
@@ -1366,6 +1434,7 @@ fn sys_symlink(target: [*]const u8, linkpath: [*]const u8) i32 {
     const link_slice = protection.copyStringFromUser(&link_buf, @intFromPtr(linkpath)) catch return EINVAL;
 
     vfs.symlink(target_slice, link_slice) catch |err| return vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(link_slice, abi.IN_CREATE, abi.IN_CREATE);
     return 0;
 }
 
@@ -1381,6 +1450,7 @@ fn sys_link(oldpath: [*]const u8, newpath: [*]const u8) i32 {
     const new_slice = protection.copyStringFromUser(&new_buf, @intFromPtr(newpath)) catch return EINVAL;
 
     vfs.link(old_slice, new_slice) catch |err| return vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(new_slice, abi.IN_CREATE, abi.IN_CREATE);
     return 0;
 }
 
@@ -1459,6 +1529,7 @@ fn sys_truncate(pathname: [*]const u8, length: usize) i32 {
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
 
     vfs.truncate(path_slice, length) catch |err| return vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(path_slice, abi.IN_MODIFY, 0);
     return 0;
 }
 
@@ -1566,8 +1637,7 @@ fn writeSockAddr6(addr_ptr: usize, len_ptr: usize, ipv6_addr: @import("../net/ip
 }
 
 fn sys_sendto(sockfd: i32, buf: [*]const u8, len: usize, dest_addr: usize, addr_len: u32) i32 {
-    if (sockfd < 0 or sockfd >= 64) return EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+    const sock = syscall_net.getInetSocket(sockfd) orelse return EBADF;
 
     if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
 
@@ -1606,8 +1676,7 @@ fn sys_sendto(sockfd: i32, buf: [*]const u8, len: usize, dest_addr: usize, addr_
 }
 
 fn sys_recvfrom(sockfd: i32, buf: [*]u8, len: usize, src_addr: usize, addr_len_ptr: usize) i32 {
-    if (sockfd < 0 or sockfd >= 64) return EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+    const sock = syscall_net.getInetSocket(sockfd) orelse return EBADF;
 
     if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
 
@@ -1642,8 +1711,7 @@ fn sys_recvfrom(sockfd: i32, buf: [*]u8, len: usize, src_addr: usize, addr_len_p
 }
 
 fn sys_getsockname(sockfd: i32, addr_ptr: usize, addr_len_ptr: usize) i32 {
-    if (sockfd < 0 or sockfd >= 64) return EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+    const sock = syscall_net.getInetSocket(sockfd) orelse return EBADF;
     if (sock.address_family == .AF_INET6) {
         const local = sock.local_ipv6 orelse @import("../net/ipv6.zig").UNSPECIFIED;
         return writeSockAddr6(addr_ptr, addr_len_ptr, local, sock.local_port);
@@ -1652,8 +1720,7 @@ fn sys_getsockname(sockfd: i32, addr_ptr: usize, addr_len_ptr: usize) i32 {
 }
 
 fn sys_getpeername(sockfd: i32, addr_ptr: usize, addr_len_ptr: usize) i32 {
-    if (sockfd < 0 or sockfd >= 64) return EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+    const sock = syscall_net.getInetSocket(sockfd) orelse return EBADF;
     if (sock.state != .CONNECTED) return ENOTCONN;
     if (sock.address_family == .AF_INET6) {
         const remote = sock.remote_ipv6 orelse @import("../net/ipv6.zig").UNSPECIFIED;
@@ -1713,8 +1780,7 @@ const SO_SNDTIMEO: i32 = 21;
 const TCP_NODELAY: i32 = 1;
 
 fn sys_getsockopt(sockfd: i32, level: i32, optname: i32, optval_addr: usize, optlen_addr: usize) i32 {
-    if (sockfd < 0 or sockfd >= 64) return EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+    const sock = syscall_net.getInetSocket(sockfd) orelse return EBADF;
 
     if (!protection.verifyUserPointer(optval_addr, @sizeOf(i32))) return EINVAL;
 
@@ -1753,8 +1819,7 @@ fn sys_getsockopt(sockfd: i32, level: i32, optname: i32, optval_addr: usize, opt
 }
 
 fn sys_setsockopt(sockfd: i32, level: i32, optname: i32, optval_addr: usize, optlen: u32) i32 {
-    if (sockfd < 0 or sockfd >= 64) return EBADF;
-    _ = socket_table[@intCast(sockfd)] orelse return EBADF;
+    _ = syscall_net.getInetSocket(sockfd) orelse return EBADF;
 
     if (optlen < @sizeOf(i32)) return EINVAL;
     if (!protection.verifyUserPointer(optval_addr, @sizeOf(i32))) return EINVAL;
@@ -2400,8 +2465,8 @@ fn sys_accept4(sockfd: i32, addr: usize, addrlen: usize, flags: u32) i32 {
     _ = addr;
     _ = addrlen;
 
-    if (sockfd >= 1000 and sockfd < 1064) {
-        const idx: usize = @intCast(sockfd - 1000);
+    if (sockfd >= syscall_net.unix_socket_fd_base and sockfd < syscall_net.unix_socket_fd_base + @as(i32, @intCast(syscall_net.unix_socket_count))) {
+        const idx: usize = @intCast(sockfd - syscall_net.unix_socket_fd_base);
         const usock = &unix_sockets[idx];
         if (!usock.in_use or !usock.listening) return EBADF;
 
@@ -2413,7 +2478,7 @@ fn sys_accept4(sockfd: i32, addr: usize, addrlen: usize, flags: u32) i32 {
                         new_sock.connected = true;
                         new_sock.peer = peer;
                         peer.peer = new_sock;
-                        const new_fd: i32 = @intCast(@as(i32, @intCast(j)) + 1000);
+                        const new_fd: i32 = @intCast(@as(i32, @intCast(j)) + syscall_net.unix_socket_fd_base);
                         _ = flags;
                         return new_fd;
                     }
@@ -2424,15 +2489,14 @@ fn sys_accept4(sockfd: i32, addr: usize, addrlen: usize, flags: u32) i32 {
         return EAGAIN;
     }
 
-    if (sockfd < 0 or sockfd >= 64) return EBADF;
-    const sock = socket_table[@intCast(sockfd)] orelse return EBADF;
+    const sock = syscall_net.getInetSocket(sockfd) orelse return EBADF;
 
     const client = sock.accept() catch |err| return socketErrno(err);
 
     for (&socket_table, 0..) |*slot, i| {
         if (slot.* == null) {
             slot.* = client;
-            return @intCast(i);
+            return @intCast(@as(i32, @intCast(i)) + syscall_net.socket_fd_base);
         }
     }
 
@@ -2906,13 +2970,13 @@ fn sys_socketpair(domain: i32, sock_type: i32, protocol: i32, sv: usize) i32 {
             if (fd1 == -1) {
                 usock.in_use = true;
                 usock.connected = true;
-                fd1 = @intCast(@as(i32, @intCast(i)) + 1000);
+                fd1 = @intCast(@as(i32, @intCast(i)) + syscall_net.unix_socket_fd_base);
             } else {
                 usock.in_use = true;
                 usock.connected = true;
-                fd2 = @intCast(@as(i32, @intCast(i)) + 1000);
+                fd2 = @intCast(@as(i32, @intCast(i)) + syscall_net.unix_socket_fd_base);
 
-                const idx1: usize = @intCast(fd1 - 1000);
+                const idx1: usize = @intCast(fd1 - syscall_net.unix_socket_fd_base);
                 unix_sockets[idx1].peer = usock;
                 usock.peer = &unix_sockets[idx1];
                 break;
@@ -2922,7 +2986,7 @@ fn sys_socketpair(domain: i32, sock_type: i32, protocol: i32, sv: usize) i32 {
 
     if (fd1 == -1 or fd2 == -1) {
         if (fd1 != -1) {
-            const idx: usize = @intCast(fd1 - 1000);
+            const idx: usize = @intCast(fd1 - syscall_net.unix_socket_fd_base);
             unix_sockets[idx].in_use = false;
             unix_sockets[idx].connected = false;
         }
@@ -2932,8 +2996,8 @@ fn sys_socketpair(domain: i32, sock_type: i32, protocol: i32, sv: usize) i32 {
     _ = sock_type;
     const fds = [2]i32{ fd1, fd2 };
     protection.copyToUser(sv, std.mem.asBytes(&fds)) catch {
-        const idx1: usize = @intCast(fd1 - 1000);
-        const idx2: usize = @intCast(fd2 - 1000);
+        const idx1: usize = @intCast(fd1 - syscall_net.unix_socket_fd_base);
+        const idx2: usize = @intCast(fd2 - syscall_net.unix_socket_fd_base);
         unix_sockets[idx1].in_use = false;
         unix_sockets[idx1].connected = false;
         unix_sockets[idx1].peer = null;

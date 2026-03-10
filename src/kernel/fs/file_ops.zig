@@ -37,9 +37,7 @@ pub fn open(path: []const u8, flags: u32) !i32 {
         };
     };
 
-    if (vnode.ops.open) |open_fn| {
-        try open_fn(vnode, flags);
-    }
+    try vfs.openVNode(vnode, flags);
 
     var fd_index: u32 = 0;
     while (fd_index < MAX_FDS) : (fd_index += 1) {
@@ -71,9 +69,7 @@ pub fn close(fd: i32) !void {
         return;
     }
 
-    if (file_desc.vnode.ops.close) |close_fn| {
-        try close_fn(file_desc.vnode);
-    }
+    try vfs.closeVNode(file_desc.vnode, file_desc.flags);
 
     file_desc.vnode.ref_count -= 1;
     file_descriptors[index] = null;
@@ -87,7 +83,7 @@ pub fn read(fd: i32, buffer: []u8) !usize {
     const index: usize = @intCast(fd);
     var file_desc = &(file_descriptors[index] orelse return error.InvalidFileDescriptor);
 
-    const bytes_read = try file_desc.vnode.ops.read(file_desc.vnode, buffer, file_desc.offset);
+    const bytes_read = try vfs.readVNode(file_desc.vnode, buffer, file_desc.offset);
     file_desc.offset += bytes_read;
     return bytes_read;
 }
@@ -100,7 +96,7 @@ pub fn write(fd: i32, buffer: []const u8) !usize {
     const index: usize = @intCast(fd);
     var file_desc = &(file_descriptors[index] orelse return error.InvalidFileDescriptor);
 
-    const bytes_written = try file_desc.vnode.ops.write(file_desc.vnode, buffer, file_desc.offset);
+    const bytes_written = try vfs.writeVNode(file_desc.vnode, buffer, file_desc.offset);
     file_desc.offset += bytes_written;
     return bytes_written;
 }
@@ -146,11 +142,7 @@ pub fn truncate(fd: i32, size: u64) !void {
     const index: usize = @intCast(fd);
     const file_desc = file_descriptors[index] orelse return error.InvalidFileDescriptor;
 
-    if (file_desc.vnode.ops.truncate) |truncate_fn| {
-        try truncate_fn(file_desc.vnode, size);
-    } else {
-        return error.OperationNotSupported;
-    }
+    try vfs.truncateVNode(file_desc.vnode, size);
 }
 
 pub fn fstat(fd: i32, stat: *vfs.FileStat) !void {
@@ -225,7 +217,7 @@ pub fn pread(fd: i32, buffer: []u8, offset: u64) !usize {
     const index: usize = @intCast(fd);
     const file_desc = file_descriptors[index] orelse return error.InvalidFileDescriptor;
 
-    return try file_desc.vnode.ops.read(file_desc.vnode, buffer, offset);
+    return try vfs.readVNode(file_desc.vnode, buffer, offset);
 }
 
 pub fn pwrite(fd: i32, buffer: []const u8, offset: u64) !usize {
@@ -236,7 +228,7 @@ pub fn pwrite(fd: i32, buffer: []const u8, offset: u64) !usize {
     const index: usize = @intCast(fd);
     const file_desc = file_descriptors[index] orelse return error.InvalidFileDescriptor;
 
-    return try file_desc.vnode.ops.write(file_desc.vnode, buffer, offset);
+    return try vfs.writeVNode(file_desc.vnode, buffer, offset);
 }
 
 pub fn fsync(fd: i32) !void {
@@ -251,7 +243,7 @@ pub fn fsync(fd: i32) !void {
         var fs_name_len: usize = 0;
         while (fs_name_len < 32 and mount_point.fs_type.name[fs_name_len] != 0) : (fs_name_len += 1) {}
         const fs_name = mount_point.fs_type.name[0..fs_name_len];
-        
+
         if (std.mem.eql(u8, fs_name, "ext2")) {
             ext2.flushFilesystem(mount_point) catch |err| {
                 return switch (err) {

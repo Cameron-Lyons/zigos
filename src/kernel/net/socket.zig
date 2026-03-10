@@ -5,6 +5,7 @@ const ipv4 = @import("ipv4.zig");
 const ipv6 = @import("ipv6.zig");
 const vga = @import("../drivers/vga.zig");
 const process = @import("../process/process.zig");
+const readiness = @import("../process/syscall/readiness.zig");
 const sync = @import("../utils/sync.zig");
 
 pub const AddressFamily = enum {
@@ -56,6 +57,9 @@ const RECV_BUFFER_SIZE = 4096;
 const RECV_BUFFER_MASK = RECV_BUFFER_SIZE - 1;
 const SEND_BUFFER_SIZE = 4096;
 const SEND_BUFFER_MASK = SEND_BUFFER_SIZE - 1;
+
+pub const POLLIN: u16 = 0x001;
+pub const POLLOUT: u16 = 0x004;
 
 pub const Socket = struct {
     id: u32,
@@ -137,6 +141,52 @@ pub const Socket = struct {
     pub fn setState(self: *Socket, state: SocketState) void {
         self.state = state;
         self.state_ready.signal();
+        readiness.notifyAll();
+    }
+
+    pub fn pollEvents(self: *const Socket, requested_events: u16) u16 {
+        var ready: u16 = 0;
+
+        if ((requested_events & POLLIN) != 0) {
+            if (self.state == .LISTENING) {
+                if (self.backlog_count > 0) {
+                    ready |= POLLIN;
+                }
+            } else if (self.protocol == .TCP) {
+                if (self.tcp_connection) |conn| {
+                    if (tcp.hasReadableData(conn) or tcp.isReadableClosed(conn)) {
+                        ready |= POLLIN;
+                    }
+                } else if (self.state == .CLOSED) {
+                    ready |= POLLIN;
+                }
+            } else if (self.recv_head != self.recv_tail or self.state == .CLOSED) {
+                ready |= POLLIN;
+            }
+        }
+
+        if ((requested_events & POLLOUT) != 0) {
+            switch (self.protocol) {
+                .TCP => {
+                    if (self.state == .CONNECTED) {
+                        ready |= POLLOUT;
+                    } else if (self.state == .CONNECTING) {
+                        if (self.tcp_connection) |conn| {
+                            if (!tcp.isConnecting(conn)) {
+                                ready |= POLLOUT;
+                            }
+                        }
+                    }
+                },
+                else => {
+                    if (self.state != .CLOSED and self.state != .LISTENING) {
+                        ready |= POLLOUT;
+                    }
+                },
+            }
+        }
+
+        return ready;
     }
 
     pub fn bind(self: *Socket, addr: ipv4.IPv4Address, port: u16) !void {
@@ -177,7 +227,7 @@ pub const Socket = struct {
         self.backlog_head = 0;
         self.backlog_tail = 0;
 
-        self.state = .LISTENING;
+        self.setState(.LISTENING);
 
         if (self.protocol == .TCP) {
             tcp.registerListeningSocket(self);
@@ -219,7 +269,7 @@ pub const Socket = struct {
             self.local_port = allocateEphemeralPort();
         }
 
-        self.state = .CONNECTING;
+        self.setState(.CONNECTING);
 
         switch (self.protocol) {
             .TCP => {
@@ -235,13 +285,13 @@ pub const Socket = struct {
                 }
 
                 if (!tcp.isEstablished(self.tcp_connection.?)) {
-                    self.state = .CLOSED;
+                    self.setState(.CLOSED);
                     return SocketError.ConnectionRefused;
                 }
-                self.state = .CONNECTED;
+                self.setState(.CONNECTED);
             },
             .UDP => {
-                self.state = .CONNECTED;
+                self.setState(.CONNECTED);
             },
             else => return SocketError.InvalidSocket,
         }
@@ -363,7 +413,7 @@ pub const Socket = struct {
             else => {},
         }
 
-        self.state = .CLOSED;
+        self.setState(.CLOSED);
         self.recv_ready.signal();
         self.accept_ready.signal();
         self.state_ready.signal();
@@ -407,6 +457,7 @@ pub const Socket = struct {
             }
         }
         self.recv_ready.signal();
+        readiness.notifyAll();
     }
 
     pub fn addToBacklog(self: *Socket, client: *Socket) !void {
@@ -418,6 +469,7 @@ pub const Socket = struct {
         self.backlog_tail = (self.backlog_tail + 1) % self.backlog.len;
         self.backlog_count += 1;
         self.accept_ready.signal();
+        readiness.notifyAll();
     }
 };
 
