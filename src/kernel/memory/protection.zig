@@ -3,8 +3,10 @@ const vga = @import("../drivers/vga.zig");
 const memory = @import("memory.zig");
 
 pub const KERNEL_BASE = 0xC0000000;
+pub const USER_PROGRAM_START = 0x08000000;
 pub const USER_SPACE_END = 0xC0000000;
 pub const USER_STACK_TOP = 0xBFFFF000;
+pub const USER_STARTUP_PAGE = USER_STACK_TOP;
 pub const USER_HEAP_START = 0x40000000;
 
 pub const PROT_READ = 0x1;
@@ -161,4 +163,3 @@ pub fn protectKernelMemory() void {
 
     vga.print("Kernel memory protected\n");
 }
-

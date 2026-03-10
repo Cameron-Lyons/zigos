@@ -4,7 +4,7 @@ const vga = @import("../drivers/vga.zig");
 const std = @import("std");
 
 const NODE_POOL_SIZE = 512;
-const DEFAULT_CAPACITY = 4096;
+const DEFAULT_CAPACITY = 16384;
 
 const TmpfsNode = struct {
     data: ?[*]u8,
@@ -150,7 +150,7 @@ fn tmpfsRead(vnode: *vfs.VNode, buffer: []u8, offset: u64) vfs.VFSError!usize {
     const to_read = @min(buffer.len, available);
 
     if (node.data) |d| {
-        @memcpy(buffer[0..to_read], d[@intCast(offset)..@as(usize, @intCast(offset)) + to_read]);
+        @memcpy(buffer[0..to_read], d[@intCast(offset) .. @as(usize, @intCast(offset)) + to_read]);
     }
 
     return to_read;
@@ -178,7 +178,7 @@ fn tmpfsWrite(vnode: *vfs.VNode, buffer: []const u8, offset: u64) vfs.VFSError!u
         if (off > node.size) {
             @memset(d[node.size..off], 0);
         }
-        @memcpy(d[off .. off + buffer.len], buffer);
+        std.mem.copyForwards(u8, d[off .. off + buffer.len], buffer);
     }
 
     if (needed > node.size) {

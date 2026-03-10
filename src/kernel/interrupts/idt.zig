@@ -74,9 +74,8 @@ pub fn init() void {
         .base = @intFromPtr(&idt),
     };
 
-    asm volatile ("lidt %[idtr]"
+    asm volatile ("lidt (%[idtr])"
         :
-        : [idtr] "*m" (&idtr),
-    );
+        : [idtr] "r" (&idtr),
+        : .{ .memory = true });
 }
-

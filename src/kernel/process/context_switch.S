@@ -1,48 +1,79 @@
 .global context_switch
 .type context_switch, @function
 
+.global resume_process
+.type resume_process, @function
+
+.global start_external_exec_process
+.type start_external_exec_process, @function
+
+.global jump_to_context_struct
+.type jump_to_context_struct, @function
+
 context_switch:
-    pushl %ebp
-    movl %esp, %ebp
-    
+    pushfl
+    pushl %eax
     pushl %ebx
+    pushl %ecx
+    pushl %edx
     pushl %esi
     pushl %edi
-    
-    movl 8(%ebp), %eax    # old_context pointer
-    movl 12(%ebp), %edx   # new_context pointer
-    
-    movl %ebx, 4(%eax)    # ebx
-    movl %ecx, 8(%eax)    # ecx  
-    movl %edx, 12(%eax)   # edx
-    movl %esi, 16(%eax)   # esi
-    movl %edi, 20(%eax)   # edi
-    movl %ebp, 24(%eax)   # ebp
+    pushl %ebp
+
+    movl 36(%esp), %eax   # old_context pointer
+    movl 24(%esp), %ecx   # eax
+    movl %ecx, 0(%eax)
+    movl 20(%esp), %ecx   # ebx
+    movl %ecx, 4(%eax)
+    movl 16(%esp), %ecx   # ecx
+    movl %ecx, 8(%eax)
+    movl 12(%esp), %ecx   # edx
+    movl %ecx, 12(%eax)
+    movl 8(%esp), %ecx    # esi
+    movl %ecx, 16(%eax)
+    movl 4(%esp), %ecx    # edi
+    movl %ecx, 20(%eax)
+    movl 0(%esp), %ecx    # ebp
+    movl %ecx, 24(%eax)
     movl %esp, 28(%eax)   # esp
-    
-    movl 4(%esp), %ecx
-    movl %ecx, 32(%eax)   # eip
-    
-    pushfl
+    movl $resume_process, 32(%eax)
+    movl 28(%esp), %ecx   # eflags
+    movl %ecx, 36(%eax)
+
+    movl 40(%esp), %esi   # new_context pointer
+    movl 40(%esi), %ecx   # cr3
+    testl %ecx, %ecx
+    jz .skip_cr3
+    movl %ecx, %cr3
+.skip_cr3:
+    movl 28(%esi), %esp   # esp
+    jmp *32(%esi)
+
+resume_process:
+    popl %ebp
+    popl %edi
+    popl %esi
+    popl %edx
     popl %ecx
-    movl %ecx, 36(%eax)   # eflags
-    
-    movl 12(%ebp), %edx   # new_context pointer (reload)
-    
-    movl 36(%edx), %eax
-    pushl %eax
+    popl %ebx
+    popl %eax
     popfl
-    
-    movl 4(%edx), %ebx    # ebx
-    movl 8(%edx), %ecx    # ecx
-    movl 16(%edx), %esi   # esi
-    movl 20(%edx), %edi   # edi
-    movl 24(%edx), %ebp   # ebp
-    movl 28(%edx), %esp   # esp
-    
-    movl 32(%edx), %eax   # eip
-    movl 12(%edx), %edx   # edx (restore last)
-    
+    popl %eax
+    jmp *%eax
+
+start_external_exec_process:
+    subl $12, %esp
+    call external_command_entry_c
+    addl $12, %esp
+    ret
+
+jump_to_context_struct:
+    movl 4(%esp), %eax
+    movl 28(%eax), %edx
+    movl 24(%eax), %ecx
+    movl 32(%eax), %eax
+    movl %edx, %esp
+    movl %ecx, %ebp
     jmp *%eax
 
 .global switch_to_user_mode
@@ -62,7 +93,7 @@ switch_to_user_mode:
     
     pushl $0x23           # User SS
     pushl %edx            # User ESP
-    pushl $0x202          # EFLAGS (interrupts enabled)
+    pushl $0x2            # EFLAGS
     pushl $0x1B           # User CS (GDT index 3, RPL 3)
     pushl %eax            # User EIP
     

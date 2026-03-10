@@ -11,6 +11,8 @@ pub fn name() []const u8 {
         .dev => "dev",
         .ci_smoke => "ci_smoke",
         .test_vm => "test_vm",
+        .userland_smoke => "userland_smoke",
+        .userland_fs_smoke => "userland_fs_smoke",
     };
 }
 

@@ -482,8 +482,42 @@ pub fn which(args: []const [*:0]const u8) void {
         return;
     }
 
+    var path_buf: [256]u8 = undefined;
+
+    if (tryExternalPath(cmd, "/bin/", &path_buf)) |path| {
+        vga.print(path);
+        vga.print("\n");
+        return;
+    }
+
+    if (tryExternalPath(cmd, "/usr/bin/", &path_buf)) |path| {
+        vga.print(path);
+        vga.print("\n");
+        return;
+    }
+
+    if (tryExternalPath(cmd, "/mnt/bin/", &path_buf)) |path| {
+        vga.print(path);
+        vga.print("\n");
+        return;
+    }
+
     vga.print(cmd);
     vga.print(" not found\n");
+}
+
+fn tryExternalPath(cmd: []const u8, prefix: []const u8, path_buf: *[256]u8) ?[]const u8 {
+    if (prefix.len + cmd.len > path_buf.len) {
+        return null;
+    }
+
+    @memcpy(path_buf[0..prefix.len], prefix);
+    @memcpy(path_buf[prefix.len .. prefix.len + cmd.len], cmd);
+    const path = path_buf[0 .. prefix.len + cmd.len];
+
+    const fd = vfs.open(path, vfs.O_RDONLY) catch return null;
+    vfs.close(fd) catch {};
+    return path;
 }
 
 fn contains(haystack: []const u8, needle: []const u8) bool {

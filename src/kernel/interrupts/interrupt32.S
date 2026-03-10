@@ -1,6 +1,7 @@
 .section .text
 .extern isrHandler
 .extern irqHandler
+.extern syscall_handler
 
 .macro ISR_NOERRCODE num
 .global isr\num
@@ -89,7 +90,21 @@ isr_common_stub:
     mov %ax, %gs
     
     push %esp
+    mov 40(%esp), %eax
+    cmp $128, %eax
+    je handle_syscall
+
     call isrHandler
+    jmp isr_exit
+
+handle_syscall:
+    mov (%esp), %eax
+    add $4, %eax
+    push %eax
+    call syscall_handler
+    add $4, %esp
+
+isr_exit:
     add $4, %esp
     
     pop %eax

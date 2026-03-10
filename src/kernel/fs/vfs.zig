@@ -1154,13 +1154,23 @@ pub fn lookupPath(path: []const u8) VFSError!*VNode {
         return VFSError.InvalidPath;
     }
 
-    var current = root_vnode orelse return VFSError.NotFound;
+    var current: *VNode = undefined;
+    var i: usize = 1;
 
-    if (path.len == 1) {
-        return current;
+    if (findBestMountPoint(path)) |mp| {
+        current = mp.root orelse return VFSError.NotFound;
+        const mount_path = mp.mount_path[0..strlen(&mp.mount_path)];
+        if (path.len == mount_path.len or (mount_path.len == 1 and path.len == 1)) {
+            return current;
+        }
+        i = if (mount_path.len == 1) 1 else mount_path.len;
+    } else {
+        current = root_vnode orelse return VFSError.NotFound;
+        if (path.len == 1) {
+            return current;
+        }
     }
 
-    var i: usize = 1;
     while (i < path.len) {
         while (i < path.len and path[i] == '/') : (i += 1) {}
 
@@ -1194,6 +1204,33 @@ pub fn lookupPath(path: []const u8) VFSError!*VNode {
     }
 
     return current;
+}
+
+fn findBestMountPoint(path: []const u8) ?*MountPoint {
+    var best: ?*MountPoint = null;
+    var best_len: usize = 0;
+    var current = mount_list;
+
+    while (current) |mp| : (current = mp.next) {
+        const mount_path = mp.mount_path[0..strlen(&mp.mount_path)];
+        if (!mountPathMatches(path, mount_path)) continue;
+        if (mount_path.len >= best_len) {
+            best = mp;
+            best_len = mount_path.len;
+        }
+    }
+
+    return best;
+}
+
+fn mountPathMatches(path: []const u8, mount_path: []const u8) bool {
+    if (mount_path.len == 1 and mount_path[0] == '/') {
+        return true;
+    }
+
+    if (path.len < mount_path.len) return false;
+    if (!std.mem.eql(u8, path[0..mount_path.len], mount_path)) return false;
+    return path.len == mount_path.len or path[mount_path.len] == '/';
 }
 
 const PathParts = struct {

@@ -2,13 +2,22 @@ const vga = @import("../drivers/vga.zig");
 const swap = @import("swap.zig");
 const numfmt = @import("../utils/numfmt.zig");
 
-const HEAP_START: usize = 0x100000;
 const HEAP_SIZE: usize = 16 * 1024 * 1024;
 const MIN_BLOCK_SIZE: usize = 16;
-const BLOCK_ALIGNMENT: usize = 8;
+const BLOCK_ALIGNMENT: usize = 16;
 
 const PAGE_SIZE: usize = 4096;
-var next_physical_page: usize = 0x200000;
+extern var __kernel_end: u8;
+
+fn alignUp(addr: usize, alignment: usize) usize {
+    return (addr + alignment - 1) & ~(alignment - 1);
+}
+
+fn heapStartAddress() usize {
+    return alignUp(@intFromPtr(&__kernel_end), PAGE_SIZE);
+}
+
+var next_physical_page: usize = 0;
 
 const BlockHeader = struct {
     size: usize,
@@ -38,8 +47,10 @@ fn unlockAllocator() void {
 }
 
 pub fn init() void {
-    heap_start = @ptrFromInt(HEAP_START);
+    const heap_start_addr = heapStartAddress();
+    heap_start = @ptrFromInt(heap_start_addr);
     heap_end = heap_start + HEAP_SIZE;
+    next_physical_page = @intFromPtr(heap_end);
 
     const initial_block: *BlockHeader = @ptrCast(@alignCast(heap_start));
     initial_block.size = HEAP_SIZE - @sizeOf(BlockHeader);
@@ -58,8 +69,8 @@ pub fn init() void {
     vga.print(" MB\n");
 }
 
-fn alignUp(addr: usize, alignment: usize) usize {
-    return (addr + alignment - 1) & ~(alignment - 1);
+pub fn getReservedMemoryEnd() usize {
+    return heapStartAddress() + HEAP_SIZE;
 }
 
 fn splitBlock(block: *BlockHeader, size: usize) void {
@@ -151,7 +162,8 @@ pub fn kfree(ptr: ?*anyopaque) void {
     const block: *BlockHeader = @ptrCast(@alignCast(raw_ptr - @sizeOf(BlockHeader)));
 
     if (@intFromPtr(block) < @intFromPtr(heap_start) or
-        @intFromPtr(block) >= @intFromPtr(heap_end)) {
+        @intFromPtr(block) >= @intFromPtr(heap_end))
+    {
         return;
     }
 
@@ -176,8 +188,7 @@ pub fn krealloc(ptr: ?*anyopaque, new_size: usize) ?*anyopaque {
     const new_ptr = kmalloc(new_size);
     if (new_ptr) |new| {
         const copy_size = @min(block.size, new_size);
-        @memcpy(@as([*]u8, @ptrCast(new))[0..copy_size],
-                @as([*]u8, @ptrCast(ptr.?))[0..copy_size]);
+        @memcpy(@as([*]u8, @ptrCast(new))[0..copy_size], @as([*]u8, @ptrCast(ptr.?))[0..copy_size]);
         kfree(ptr);
     }
 

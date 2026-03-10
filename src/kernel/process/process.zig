@@ -52,7 +52,7 @@ pub const Process = struct {
     wait_next: ?*Process,
     exit_code: i32 = 0,
     page_directory: ?*paging.PageDirectory,
-    entry_point: *const fn () void,
+    entry_point: usize,
     priority: i8 = 0,
     nice_value: i8 = 0,
     time_slice: u32 = 10,
@@ -64,6 +64,19 @@ pub const Process = struct {
     signals: signal.ProcessSignals = signal.ProcessSignals.defaultValue(),
     extended_idx: ?u8 = null,
 };
+
+pub export fn kernel_process_exit() callconv(.c) noreturn {
+    const proc = getEffectiveCurrent() orelse {
+        while (true) {
+            asm volatile ("hlt");
+        }
+    };
+
+    _ = terminateProcess(proc.pid);
+    while (true) {
+        asm volatile ("hlt");
+    }
+}
 
 const MAX_PROCESSES = 256;
 const SMP_MAX_CPUS = 16;
@@ -103,23 +116,7 @@ pub fn terminateProcess(pid: u32) bool {
     const proc = getProcessByPid(pid) orelse return false;
 
     proc.state = .Terminated;
-    scheduler.unregisterProcess(proc);
-    pid_lookup[pid % MAX_PROCESSES] = null;
-
-    var prev: ?*Process = null;
-    var curr = process_list_head;
-    while (curr) |p| {
-        if (p == proc) {
-            if (prev) |pr| {
-                pr.next = p.next;
-            } else {
-                process_list_head = p.next;
-            }
-            break;
-        }
-        prev = p;
-        curr = p.next;
-    }
+    unregisterAndRemoveProcess(proc);
 
     if (getEffectiveCurrent() == proc) {
         yield();
@@ -155,6 +152,36 @@ pub fn getProcessByPid(pid: u32) ?*Process {
     return null;
 }
 
+pub fn unregisterAndRemoveProcess(proc: *Process) void {
+    scheduler.unregisterProcess(proc);
+    pid_lookup[proc.pid % MAX_PROCESSES] = null;
+
+    var prev: ?*Process = null;
+    var curr = process_list_head;
+    while (curr) |p| {
+        if (p == proc) {
+            if (prev) |pr| {
+                pr.next = p.next;
+            } else {
+                process_list_head = p.next;
+            }
+            break;
+        }
+        prev = p;
+        curr = p.next;
+    }
+}
+
+pub fn adoptAsCurrent(proc: *Process) void {
+    const cpu_id = smp.getCurrentCPU();
+    const cpu_idx = @as(usize, @intCast(@min(cpu_id, SMP_MAX_CPUS - 1)));
+    per_cpu_current[cpu_idx] = proc;
+    if (cpu_idx == 0 or !smp.isSMPEnabled()) {
+        current_process = proc;
+    }
+    scheduler.adoptCurrentProcess(proc);
+}
+
 pub fn init() void {
     vga.print("Initializing process management...\n");
 
@@ -185,14 +212,26 @@ pub fn create_process(name: []const u8, entry_point: *const fn () void) *Process
 }
 
 pub fn create_kernel_process(name: []const u8, entry_point: *const fn () void) *Process {
-    return create_process_internal(name, entry_point, .Kernel);
+    return create_process_internal(name, @intFromPtr(entry_point), .Kernel, .direct);
+}
+
+pub fn create_exec_process(name: []const u8) *Process {
+    const proc = create_process_internal(name, @intFromPtr(&start_external_exec_process), .Kernel, .trampoline);
+    proc.privilege = .User;
+    proc.creds = credentials.defaultUserCredentials();
+    return proc;
 }
 
 pub fn create_user_process(name: []const u8, entry_point: *const fn () void) *Process {
-    return create_process_internal(name, entry_point, .User);
+    return create_process_internal(name, @intFromPtr(entry_point), .User, .direct);
 }
 
-fn create_process_internal(name: []const u8, entry_point: *const fn () void, privilege: ProcessPrivilege) *Process {
+const KernelEntryMode = enum {
+    direct,
+    trampoline,
+};
+
+fn create_process_internal(name: []const u8, entry_point_addr: usize, privilege: ProcessPrivilege, _: KernelEntryMode) *Process {
     var process: ?*Process = null;
 
     for (&process_table) |*proc| {
@@ -210,17 +249,19 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
     }
 
     const proc = process.?;
+    const parent = getEffectiveCurrent();
     proc.pid = next_pid;
     pid_lookup[next_pid % MAX_PROCESSES] = proc;
     next_pid += 1;
     proc.state = .Ready;
 
-    const stack_size = 4096;
+    const stack_size = 16 * 1024;
+    const stack_pages = stack_size / 4096;
     proc.stack_size = stack_size;
     proc.privilege = privilege;
-    proc.entry_point = entry_point;
+    proc.entry_point = entry_point_addr;
 
-    proc.kernel_stack = memory.allocPages(1) orelse {
+    proc.kernel_stack = memory.allocPages(stack_pages) orelse {
         vga.print("Error: Failed to allocate kernel stack!\n");
         while (true) {
             asm volatile ("hlt");
@@ -228,7 +269,7 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
     };
 
     if (privilege == .User) {
-        proc.user_stack = memory.allocPages(1) orelse {
+        proc.user_stack = memory.allocPages(stack_pages) orelse {
             vga.print("Error: Failed to allocate user stack!\n");
             while (true) {
                 asm volatile ("hlt");
@@ -256,13 +297,35 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
             .edi = 0,
             .ebp = @intFromPtr(proc.user_stack + stack_size),
             .esp = @intFromPtr(proc.user_stack + stack_size - 8),
-            .eip = @intFromPtr(entry_point),
+            .eip = @intCast(entry_point_addr),
             .eflags = 0x202,
             .cr3 = @intFromPtr(proc.page_directory),
             .cs = gdt.USER_CODE_SEG | 0x3,
             .ss = gdt.USER_DATA_SEG | 0x3,
         };
     } else {
+        const kernel_stack_top = @intFromPtr(proc.kernel_stack + stack_size);
+        var frame = kernel_stack_top;
+        frame -= @sizeOf(usize);
+        @as(*usize, @ptrFromInt(frame)).* = @intFromPtr(&kernel_process_exit);
+        frame -= @sizeOf(usize);
+        @as(*usize, @ptrFromInt(frame)).* = entry_point_addr;
+        frame -= @sizeOf(usize);
+        @as(*usize, @ptrFromInt(frame)).* = 0x2;
+        frame -= @sizeOf(usize);
+        @as(*usize, @ptrFromInt(frame)).* = 0;
+        frame -= @sizeOf(usize);
+        @as(*usize, @ptrFromInt(frame)).* = 0;
+        frame -= @sizeOf(usize);
+        @as(*usize, @ptrFromInt(frame)).* = 0;
+        frame -= @sizeOf(usize);
+        @as(*usize, @ptrFromInt(frame)).* = 0;
+        frame -= @sizeOf(usize);
+        @as(*usize, @ptrFromInt(frame)).* = 0;
+        frame -= @sizeOf(usize);
+        @as(*usize, @ptrFromInt(frame)).* = 0;
+        frame -= @sizeOf(usize);
+        @as(*usize, @ptrFromInt(frame)).* = 0;
         proc.context = Context{
             .eax = 0,
             .ebx = 0,
@@ -270,9 +333,9 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
             .edx = 0,
             .esi = 0,
             .edi = 0,
-            .ebp = @intFromPtr(proc.kernel_stack + stack_size),
-            .esp = @intFromPtr(proc.kernel_stack + stack_size - 8),
-            .eip = @intFromPtr(entry_point),
+            .ebp = 0,
+            .esp = frame,
+            .eip = @intFromPtr(&resume_process),
             .eflags = 0x202,
             .cr3 = 0,
             .cs = gdt.KERNEL_CODE_SEG,
@@ -281,6 +344,11 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
     }
 
     proc.creds = if (privilege == .Kernel) credentials.defaultKernelCredentials() else credentials.defaultUserCredentials();
+    proc.parent_pid = if (parent) |p| p.pid else 0;
+    proc.process_group = if (parent) |p|
+        if (p.process_group != 0) p.process_group else p.pid
+    else
+        proc.pid;
 
     @memset(&proc.name, 0);
     const copy_len = @min(name.len, proc.name.len - 1);
@@ -292,6 +360,9 @@ fn create_process_internal(name: []const u8, entry_point: *const fn () void, pri
 
     const priority = if (privilege == .Kernel) scheduler.Priority.High else scheduler.Priority.Normal;
     _ = scheduler.registerProcess(proc, priority);
+    if (parent != null) {
+        scheduler.assignProcessToCPU(proc, smp.getCurrentCPU());
+    }
 
     vga.print("Created process: ");
     vga.print(name);
@@ -307,6 +378,9 @@ pub fn schedule() ?*Process {
 }
 
 extern fn context_switch(old: *Context, new: *Context) void;
+extern fn resume_process() noreturn;
+extern fn start_external_exec_process() void;
+extern fn jump_to_context_struct(ctx: *Context) noreturn;
 extern fn switch_to_user_mode(entry_point: u32, user_stack: u32) void;
 extern fn task_switch() void;
 extern fn save_process_state(ctx: *Context) void;
@@ -314,7 +388,7 @@ extern fn restore_process_state(ctx: *Context) void;
 
 pub fn switch_process(old: *Context, new: *Context) void {
     if (getEffectiveCurrent()) |curr| {
-        if (curr.privilege == .User) {
+        if ((curr.context.cs & 0x3) == 0x3) {
             const kernel_stack_top = @intFromPtr(curr.kernel_stack) + curr.stack_size;
             gdt.setKernelStack(kernel_stack_top);
         }
@@ -334,6 +408,7 @@ fn markScheduledProcesses(old_proc: *Process, new_proc: *Process) void {
 pub fn yield() void {
     const cpu_id = smp.getCurrentCPU();
     smp.scheduler_lock.acquire();
+    scheduler.preempt();
     const next = scheduler.scheduleForCPU(cpu_id);
     const cpu_idx = @as(usize, @intCast(@min(cpu_id, SMP_MAX_CPUS - 1)));
     const old_proc = if (smp.isSMPEnabled() and cpu_idx < SMP_MAX_CPUS)
@@ -395,7 +470,7 @@ pub fn getSystemTime() u64 {
     return timer.getTicks();
 }
 
-pub export fn switchToProcess(proc: *Process) void {
+pub export fn switchToProcess(proc: *Process) noreturn {
     if (getEffectiveCurrent()) |old_proc| {
         markScheduledProcesses(old_proc, proc);
     } else {
@@ -408,25 +483,22 @@ pub export fn switchToProcess(proc: *Process) void {
     if (cpu_idx == 0 or !smp.isSMPEnabled()) {
         current_process = proc;
     }
+    scheduler.adoptCurrentProcess(proc);
 
     if (proc.page_directory) |pd| {
         paging.switchPageDirectory(pd);
+    } else {
+        paging.switchPageDirectory(paging.getKernelPageDirectory());
     }
 
     const kernel_stack_top = @intFromPtr(proc.kernel_stack) + proc.stack_size;
     gdt.setKernelStack(kernel_stack_top);
 
-    if (proc.privilege == .User) {
+    if ((proc.context.cs & 0x3) == 0x3) {
         switch_to_user_mode(proc.context.eip, proc.context.esp);
     } else {
-        asm volatile (
-            \\mov %[esp], %%esp
-            \\mov %[ebp], %%ebp
-            \\jmp *%[eip]
-            :
-            : [esp] "r" (proc.context.esp),
-              [ebp] "r" (proc.context.ebp),
-              [eip] "r" (proc.context.eip),
-        );
+        jump_to_context_struct(&proc.context);
     }
+
+    unreachable;
 }

@@ -3,7 +3,7 @@ const vga = @import("../../drivers/vga.zig");
 const numfmt = @import("../../utils/numfmt.zig");
 
 pub fn ls(args: []const [*:0]const u8) void {
-    const path = if (args.len > 0) args[0] else "/mnt";
+    const path = if (args.len > 0) args[0] else "/";
 
     const fd = vfs.open(sliceFromCStr(path), vfs.O_RDONLY) catch |err| {
         vga.print("ls: ");

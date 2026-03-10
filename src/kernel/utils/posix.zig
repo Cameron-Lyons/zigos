@@ -1,4 +1,5 @@
 const std = @import("std");
+const console = @import("console.zig");
 const process = @import("../process/process.zig");
 const memory = @import("../memory/memory.zig");
 const paging = @import("../memory/paging.zig");
@@ -14,6 +15,12 @@ pub const WCONTINUED = 8;
 
 pub const WNOHANG = 1;
 pub const WUNTRACED = 2;
+
+const StartupInfo = extern struct {
+    argc: usize,
+    argv: usize,
+    envp: usize,
+};
 
 pub fn fork() !i32 {
     const parent = process.getCurrentProcess() orelse return error.NoCurrentProcess;
@@ -55,7 +62,6 @@ pub fn fork() !i32 {
     };
 
     copyAddressSpace(parent, child) catch |err| {
-        memory.freePages(@as([*]u8, @ptrFromInt(@intFromPtr(child.page_directory.?))), 1);
         memory.freePages(child.kernel_stack, 1);
         return err;
     };
@@ -88,7 +94,7 @@ fn copyAddressSpace(parent: *process.Process, child: *process.Process) !void {
         paging.switchPageDirectory(old_page_dir);
     }
 
-    var addr: u32 = 0;
+    var addr: u32 = protection.USER_PROGRAM_START;
     while (addr < protection.USER_SPACE_END) : (addr += 0x1000) {
         if (paging.get_physical_address(addr)) |_| {
             const child_phys = memory.allocatePhysicalPage() orelse return error.OutOfMemory;
@@ -116,14 +122,50 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
 
     freeUserMemory(current);
 
+    if (current.page_directory == null) {
+        current.page_directory = try paging.createUserPageDirectory();
+    }
+
     const elf_info = try elf.loadElfIntoProcess(current, path);
 
-    current.entry_point = @ptrFromInt(elf_info.entry_point);
-    current.context.eip = elf_info.entry_point;
+    const old_page_dir = paging.getCurrentPageDirectory();
+    paging.switchPageDirectory(current.page_directory.?);
+    defer paging.switchPageDirectory(old_page_dir);
+
+    try prepareUserExecution(current, elf_info.entry_point, argv, envp);
+
+    process.switchToProcess(current);
+}
+
+pub fn execveFromData(data: []const u8, argv: []const []const u8, envp: []const []const u8) !void {
+    const current = process.getCurrentProcess() orelse return error.NoCurrentProcess;
+
+    freeUserMemory(current);
+
+    if (current.page_directory == null) {
+        current.page_directory = try paging.createUserPageDirectory();
+    }
+
+    const elf_info = try elf.loadElfDataIntoProcess(current, data);
+
+    const old_page_dir = paging.getCurrentPageDirectory();
+    paging.switchPageDirectory(current.page_directory.?);
+    defer paging.switchPageDirectory(old_page_dir);
+
+    try prepareUserExecution(current, elf_info.entry_point, argv, envp);
+
+    @import("../interrupts/idt.zig").init();
+    process.switchToProcess(current);
+}
+
+fn prepareUserExecution(current: *process.Process, entry_point: u32, argv: []const []const u8, envp: []const []const u8) !void {
+    current.entry_point = entry_point;
+    current.context.eip = entry_point;
 
     const stack_top = protection.USER_STACK_TOP;
     const stack_size = 0x10000;
     const stack_bottom = stack_top - stack_size;
+    const startup_page = protection.USER_STARTUP_PAGE;
 
     var page_addr: u32 = stack_bottom;
     while (page_addr < stack_top) : (page_addr += 0x1000) {
@@ -131,72 +173,58 @@ pub fn execve(path: []const u8, argv: []const []const u8, envp: []const []const 
         paging.mapPage(page_addr, phys_addr, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_USER);
     }
 
-    var stack_ptr: u32 = stack_top;
+    const startup_phys = memory.allocatePhysicalPage() orelse return error.OutOfMemory;
+    paging.mapPage(startup_page, startup_phys, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_USER);
 
-    // SAFETY: filled by the following loop that copies environment strings to the stack
-    var envp_ptrs: [32]usize = undefined;
-    var envp_count: usize = 0;
-    for (envp) |env| {
-        if (envp_count >= 32) break;
-        stack_ptr -= env.len + 1;
-        stack_ptr &= ~@as(u32, 0x3);
-        const dest: [*]u8 = @ptrFromInt(stack_ptr);
-        @memcpy(dest[0..env.len], env);
-        dest[env.len] = 0;
-        envp_ptrs[envp_count] = stack_ptr;
-        envp_count += 1;
-    }
+    const startup_base: usize = startup_page;
+    const startup_limit: usize = startup_base + 0x1000;
+    const startup_info: *StartupInfo = @ptrFromInt(startup_base);
+    var cursor = startup_base + @sizeOf(StartupInfo);
 
-    // SAFETY: filled by the following loop that copies argument strings to the stack
-    var argv_ptrs: [32]usize = undefined;
-    var argv_count: usize = 0;
-    for (argv) |arg| {
-        if (argv_count >= 32) break;
-        stack_ptr -= arg.len + 1;
-        stack_ptr &= ~@as(u32, 0x3);
-        const dest: [*]u8 = @ptrFromInt(stack_ptr);
+    const argv_array_addr = cursor;
+    cursor += (argv.len + 1) * @sizeOf(usize);
+    const envp_array_addr = cursor;
+    cursor += (envp.len + 1) * @sizeOf(usize);
+
+    if (cursor > startup_limit) return error.OutOfMemory;
+
+    const argv_array: [*]usize = @ptrFromInt(argv_array_addr);
+    const envp_array: [*]usize = @ptrFromInt(envp_array_addr);
+
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (cursor + arg.len + 1 > startup_limit) return error.OutOfMemory;
+        argv_array[i] = cursor;
+        const dest: [*]u8 = @ptrFromInt(cursor);
         @memcpy(dest[0..arg.len], arg);
         dest[arg.len] = 0;
-        argv_ptrs[argv_count] = stack_ptr;
-        argv_count += 1;
+        cursor += arg.len + 1;
     }
+    argv_array[argv.len] = 0;
 
-    stack_ptr &= ~@as(u32, 0xF);
-
-    stack_ptr -= @sizeOf(usize);
-    @as(*usize, @ptrFromInt(stack_ptr)).* = 0;
-    var i = envp_count;
-    while (i > 0) {
-        i -= 1;
-        stack_ptr -= @sizeOf(usize);
-        @as(*usize, @ptrFromInt(stack_ptr)).* = envp_ptrs[i];
+    i = 0;
+    while (i < envp.len) : (i += 1) {
+        const env = envp[i];
+        if (cursor + env.len + 1 > startup_limit) return error.OutOfMemory;
+        envp_array[i] = cursor;
+        const dest: [*]u8 = @ptrFromInt(cursor);
+        @memcpy(dest[0..env.len], env);
+        dest[env.len] = 0;
+        cursor += env.len + 1;
     }
-    const envp_array_ptr = stack_ptr;
+    envp_array[envp.len] = 0;
 
-    stack_ptr -= @sizeOf(usize);
-    @as(*usize, @ptrFromInt(stack_ptr)).* = 0;
-    i = argv_count;
-    while (i > 0) {
-        i -= 1;
-        stack_ptr -= @sizeOf(usize);
-        @as(*usize, @ptrFromInt(stack_ptr)).* = argv_ptrs[i];
-    }
-    const argv_array_ptr = stack_ptr;
+    startup_info.* = .{
+        .argc = argv.len,
+        .argv = argv_array_addr,
+        .envp = envp_array_addr,
+    };
 
-    stack_ptr -= @sizeOf(usize);
-    @as(*usize, @ptrFromInt(stack_ptr)).* = envp_array_ptr;
-    stack_ptr -= @sizeOf(usize);
-    @as(*usize, @ptrFromInt(stack_ptr)).* = argv_array_ptr;
-    stack_ptr -= @sizeOf(usize);
-    @as(*usize, @ptrFromInt(stack_ptr)).* = argv_count;
-
-    current.context.esp = stack_ptr;
-    current.context.ebp = stack_ptr;
-
+    current.context.esp = stack_top;
+    current.context.ebp = stack_top;
     current.context.cs = gdt.USER_CODE_SEG | 0x3;
     current.context.ss = gdt.USER_DATA_SEG | 0x3;
-
-    process.switchToProcess(current);
 }
 
 pub const RUsage = extern struct {
@@ -227,7 +255,7 @@ pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
         var found_child = false;
         var child_pid: i32 = -1;
         var child_status: i32 = 0;
-        var child_rusage: RUsage = std.mem.zeroes(RUsage);
+        var child_rusage = emptyRUsage();
 
         var proc = process.getProcessList();
         while (proc) |p| : (proc = p.next) {
@@ -237,23 +265,7 @@ pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
                     found_child = true;
                     child_pid = @intCast(p.pid);
                     child_status = p.exit_code;
-
-                    child_rusage.utime_sec = 0;
-                    child_rusage.utime_usec = 0;
-                    child_rusage.stime_sec = 0;
-                    child_rusage.stime_usec = 0;
-                    child_rusage.maxrss = 0;
-                    child_rusage.nvcsw = 0;
-                    child_rusage.nivcsw = 0;
-
-                    p.state = .Terminated;
-                    process.pid_lookup[p.pid % 256] = null;
-                    freeUserMemory(p);
-                    if (p.page_directory) |pd| {
-                        memory.freePages(@as([*]u8, @ptrFromInt(@intFromPtr(pd))), 1);
-                        p.page_directory = null;
-                    }
-                    memory.freePages(p.kernel_stack, 1);
+                    reapExitedProcess(p);
 
                     break;
                 }
@@ -286,6 +298,40 @@ pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
     }
 }
 
+pub fn waitForProcess(pid: u32) !i32 {
+    while (true) {
+        var proc = process.getProcessList();
+        var found = false;
+        while (proc) |current| : (proc = current.next) {
+            if (current.pid != pid) continue;
+            found = true;
+            if (current.state == .Terminated) {
+                const exit_code = current.exit_code;
+                reapExitedProcess(current);
+                return exit_code;
+            }
+            break;
+        }
+
+        if (!found) return error.ProcessNotFound;
+        process.yield();
+    }
+}
+
+fn reapExitedProcess(proc: *process.Process) void {
+    proc.state = .Terminated;
+    process.unregisterAndRemoveProcess(proc);
+    freeUserMemory(proc);
+    if (proc.page_directory) |pd| {
+        _ = pd;
+        proc.page_directory = null;
+    }
+}
+
+fn emptyRUsage() RUsage {
+    return std.mem.zeroes(RUsage);
+}
+
 fn freeUserMemory(proc: *process.Process) void {
     if (proc.page_directory == null) return;
 
@@ -293,7 +339,7 @@ fn freeUserMemory(proc: *process.Process) void {
     paging.switchPageDirectory(proc.page_directory.?);
     defer paging.switchPageDirectory(old_page_dir);
 
-    var addr: u32 = 0;
+    var addr: u32 = protection.USER_PROGRAM_START;
     while (addr < protection.USER_SPACE_END) : (addr += 0x1000) {
         paging.unmap_page(addr);
     }
