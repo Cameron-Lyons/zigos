@@ -19,6 +19,7 @@ const memory = @import("../memory/memory.zig");
 const keyboard = @import("../drivers/keyboard.zig");
 const numfmt = @import("../utils/numfmt.zig");
 const posix = @import("../utils/posix.zig");
+const cwd_mod = @import("../process/syscall/cwd.zig");
 
 const MAX_COMMAND_LENGTH = 256;
 const MAX_ARGS = 16;
@@ -2071,27 +2072,7 @@ fn resolveGlobMatches(pattern: []const u8, out_matches: *[MAX_ARGS][MAX_COMMAND_
 }
 
 fn makeAbsolutePath(path: []const u8, buffer: *[MAX_COMMAND_LENGTH]u8) PipelineConfigError![]const u8 {
-    if (path.len >= buffer.len) return error.ArgumentTooLong;
-    @memset(buffer, 0);
-
-    if (path.len > 0 and path[0] == '/') {
-        @memcpy(buffer[0..path.len], path);
-        return buffer[0..path.len];
-    }
-
-    const cwd = @import("../process/syscall.zig").getCwd();
-    if (cwd.len == 1 and cwd[0] == '/') {
-        if (path.len + 1 >= buffer.len) return error.ArgumentTooLong;
-        buffer[0] = '/';
-        @memcpy(buffer[1 .. 1 + path.len], path);
-        return buffer[0 .. 1 + path.len];
-    }
-
-    if (cwd.len + 1 + path.len >= buffer.len) return error.ArgumentTooLong;
-    @memcpy(buffer[0..cwd.len], cwd);
-    buffer[cwd.len] = '/';
-    @memcpy(buffer[cwd.len + 1 .. cwd.len + 1 + path.len], path);
-    return buffer[0 .. cwd.len + 1 + path.len];
+    return cwd_mod.resolvePath(path, buffer) orelse error.ArgumentTooLong;
 }
 
 fn joinPath(base: []const u8, component: []const u8, out: *[MAX_COMMAND_LENGTH]u8) PipelineConfigError![]const u8 {
@@ -2170,7 +2151,9 @@ fn wildcardMatch(pattern: []const u8, text: []const u8) bool {
 }
 
 fn openRedirectFd(path: [*:0]const u8, flags: u32) PipelineConfigError!i32 {
-    const raw_fd = vfs.open(sliceFromCStr(path), flags) catch return error.OpenFailed;
+    var resolved_path_buf: [MAX_COMMAND_LENGTH]u8 = undefined;
+    const resolved_path = cwd_mod.resolvePath(sliceFromCStr(path), &resolved_path_buf) orelse return error.OpenFailed;
+    const raw_fd = vfs.open(resolved_path, flags) catch return error.OpenFailed;
     errdefer vfs.close(raw_fd) catch {};
     const child_fd = vfs.dup(raw_fd) catch return error.DupFailed;
     vfs.close(raw_fd) catch return error.CloseFailed;
@@ -2274,12 +2257,7 @@ fn resolveExternalCommandPath(command_name: []const u8, buffer: *[MAX_COMMAND_LE
     }
 
     if (isExplicitCommandPath(command_name)) {
-        if (command_name.len > buffer.len) {
-            return error.CommandPathTooLong;
-        }
-
-        @memcpy(buffer[0..command_name.len], command_name);
-        const direct_path = buffer[0..command_name.len];
+        const direct_path = cwd_mod.resolvePath(command_name, buffer) orelse return error.CommandPathTooLong;
         if (externalCommandPathExists(direct_path)) {
             return direct_path;
         }

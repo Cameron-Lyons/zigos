@@ -4,8 +4,13 @@ const errno = @import("errno.zig");
 const syscall_event = @import("event.zig");
 const credentials = @import("../credentials.zig");
 const process_mod = @import("../process.zig");
+const cwd_mod = @import("cwd.zig");
 const protection = @import("../../memory/protection.zig");
 const vfs = @import("../../fs/vfs.zig");
+
+fn resolvePath(path: []const u8, buffer: *[512]u8) ?[]const u8 {
+    return cwd_mod.resolvePath(path, buffer);
+}
 
 pub fn sys_mkdir(pathname: [*]const u8, mode: u32) i32 {
     if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
@@ -14,6 +19,8 @@ pub fn sys_mkdir(pathname: [*]const u8, mode: u32) i32 {
 
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolvePath(path_slice, &resolved_buf) orelse return abi.ENAMETOOLONG;
 
     const mode_struct = vfs.FileMode{
         .owner_read = (mode & 0o400) != 0,
@@ -27,8 +34,8 @@ pub fn sys_mkdir(pathname: [*]const u8, mode: u32) i32 {
         .other_exec = (mode & 0o001) != 0,
     };
 
-    vfs.mkdir(path_slice, mode_struct) catch |err| return errno.vfsErrno(err);
-    syscall_event.notifyInotifyPathEvent(path_slice, abi.IN_CREATE, abi.IN_CREATE);
+    vfs.mkdir(resolved, mode_struct) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(resolved, abi.IN_CREATE, abi.IN_CREATE);
     return 0;
 }
 
@@ -39,9 +46,11 @@ pub fn sys_rmdir(pathname: [*]const u8) i32 {
 
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolvePath(path_slice, &resolved_buf) orelse return abi.ENAMETOOLONG;
 
-    vfs.rmdir(path_slice) catch |err| return errno.vfsErrno(err);
-    syscall_event.notifyInotifyPathEvent(path_slice, abi.IN_DELETE_SELF, abi.IN_DELETE);
+    vfs.rmdir(resolved) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(resolved, abi.IN_DELETE_SELF, abi.IN_DELETE);
     return 0;
 }
 
@@ -52,9 +61,11 @@ pub fn sys_unlink(pathname: [*]const u8) i32 {
 
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolvePath(path_slice, &resolved_buf) orelse return abi.ENAMETOOLONG;
 
-    vfs.unlink(path_slice) catch |err| return errno.vfsErrno(err);
-    syscall_event.notifyInotifyPathEvent(path_slice, abi.IN_DELETE_SELF, abi.IN_DELETE);
+    vfs.unlink(resolved) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(resolved, abi.IN_DELETE_SELF, abi.IN_DELETE);
     return 0;
 }
 
@@ -70,9 +81,13 @@ pub fn sys_rename(oldpath: [*]const u8, newpath: [*]const u8) i32 {
 
     const old_slice = protection.copyStringFromUser(&old_buffer, @intFromPtr(oldpath)) catch return abi.EINVAL;
     const new_slice = protection.copyStringFromUser(&new_buffer, @intFromPtr(newpath)) catch return abi.EINVAL;
+    var resolved_old_buf: [512]u8 = undefined;
+    var resolved_new_buf: [512]u8 = undefined;
+    const resolved_old = resolvePath(old_slice, &resolved_old_buf) orelse return abi.ENAMETOOLONG;
+    const resolved_new = resolvePath(new_slice, &resolved_new_buf) orelse return abi.ENAMETOOLONG;
 
-    vfs.rename(old_slice, new_slice) catch |err| return errno.vfsErrno(err);
-    syscall_event.notifyInotifyRename(old_slice, new_slice);
+    vfs.rename(resolved_old, resolved_new) catch |err| return errno.vfsErrno(err);
+    syscall_event.notifyInotifyRename(resolved_old, resolved_new);
     return 0;
 }
 
@@ -83,9 +98,11 @@ pub fn sys_open(pathname: [*]const u8, flags: u32) i32 {
 
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolvePath(path_slice, &resolved_buf) orelse return abi.ENAMETOOLONG;
 
     if (process_mod.current_process) |proc| {
-        if (vfs.lookupPath(path_slice)) |vnode| {
+        if (vfs.lookupPath(resolved)) |vnode| {
             const access_mode = flags & 0x3;
             var access: u3 = 0;
             if (access_mode == 0 or access_mode == 2) access |= 4;
@@ -96,7 +113,7 @@ pub fn sys_open(pathname: [*]const u8, flags: u32) i32 {
         } else |_| {}
     }
 
-    const vfs_fd = vfs.open(path_slice, flags) catch |err| return errno.vfsErrno(err);
+    const vfs_fd = vfs.open(resolved, flags) catch |err| return errno.vfsErrno(err);
     return @intCast(@as(i32, @intCast(vfs_fd)) + abi.FD_OFFSET);
 }
 

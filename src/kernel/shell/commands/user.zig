@@ -82,44 +82,13 @@ pub fn cd(args: []const [*:0]const u8) void {
         return;
     }
 
-    var path_buf: [256]u8 = [_]u8{0} ** 256;
     const arg = args[0];
     var arg_len: usize = 0;
     while (arg_len < 255 and arg[arg_len] != 0) : (arg_len += 1) {}
     const arg_slice = arg[0..arg_len];
     if (arg_slice.len == 0) return;
 
-    if (arg_slice[0] == '/') {
-        @memcpy(path_buf[0..arg_len], arg_slice);
-        if (!syscall_mod.setCwd(path_buf[0..arg_len])) {
-            vga.print("cd: no such directory: ");
-            printString(arg);
-            vga.print("\n");
-        }
-        return;
-    }
-
-    const cwd = syscall_mod.getCwd();
-    var path_len: usize = 0;
-    if (cwd.len >= path_buf.len) {
-        vga.print("cd: path too long\n");
-        return;
-    }
-
-    @memcpy(path_buf[0..cwd.len], cwd);
-    path_len = cwd.len;
-    if (path_len > 1) {
-        path_buf[path_len] = '/';
-        path_len += 1;
-    }
-    if (path_len + arg_len > path_buf.len) {
-        vga.print("cd: path too long\n");
-        return;
-    }
-
-    @memcpy(path_buf[path_len .. path_len + arg_len], arg_slice);
-    path_len += arg_len;
-    if (!syscall_mod.setCwd(path_buf[0..path_len])) {
+    if (!syscall_mod.setCwd(arg_slice)) {
         vga.print("cd: no such directory: ");
         printString(arg);
         vga.print("\n");
