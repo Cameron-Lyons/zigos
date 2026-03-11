@@ -339,6 +339,8 @@ fn userlandSmokeRunner() callconv(.c) void {
     }{
         .{ .command = "/bin/hello", .marker = "USERLAND:HELLO" },
         .{ .command = "/bin/echo USERLAND:ECHO", .marker = "USERLAND:ECHO" },
+        .{ .command = "/bin/echo user:$USER home:${HOME}", .marker = "USERLAND:ENV" },
+        .{ .command = "/bin/echo shell-$(/bin/uname)", .marker = "USERLAND:CMDSUB" },
         .{ .command = "/bin/echo \"USERLAND QUOTED\"", .marker = "USERLAND:QUOTED" },
         .{ .command = "/bin/echo USERLAND\\ ESCAPED", .marker = "USERLAND:ESCAPED" },
         .{ .command = "/bin/echo /bin/c* /bin/l?", .marker = "USERLAND:GLOB" },
