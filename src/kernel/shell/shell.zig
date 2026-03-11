@@ -25,6 +25,29 @@ const MAX_ARGS = 16;
 const MAX_HISTORY = 50;
 const MAX_EXTERNAL_LAUNCHES = 8;
 const MAX_PIPE_STAGES = 8;
+const MAX_TOKENS = 32;
+
+const TokenizationError = error{
+    UnterminatedQuote,
+    TrailingEscape,
+    TooManyTokens,
+    TokenTooLong,
+};
+
+const TokenKind = enum {
+    word,
+    pipe,
+    stdin_redirect,
+    stdout_redirect,
+    append_stdout_redirect,
+};
+
+const CommandToken = struct {
+    text: [*:0]const u8,
+    len: usize,
+    kind: TokenKind,
+    has_glob: bool,
+};
 
 const ExternalLaunchError = error{
     CommandNotFound,
@@ -49,9 +72,15 @@ const ExternalCommandLaunch = struct {
 
 const ParsedStage = struct {
     args: [MAX_ARGS][*:0]const u8 = undefined,
+    arg_glob: [MAX_ARGS]bool = [_]bool{false} ** MAX_ARGS,
+    arg_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS,
     arg_count: usize = 0,
     stdin_path: ?[*:0]const u8 = null,
+    stdin_glob: bool = false,
+    stdin_path_storage: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH,
     stdout_path: ?[*:0]const u8 = null,
+    stdout_glob: bool = false,
+    stdout_path_storage: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH,
     append_stdout: bool = false,
 };
 
@@ -67,6 +96,7 @@ const PipelineConfigError = error{
     ArgumentTooLong,
     UnsupportedBuiltin,
     UnsupportedRedirection,
+    AmbiguousRedirect,
     OpenFailed,
     PipeFailed,
     DupFailed,
@@ -458,43 +488,27 @@ pub const Shell = struct {
 
         vga.put_char('\n');
 
-        // SAFETY: entries assigned during command argument parsing; argc tracks valid entries
-        var args: [MAX_ARGS][*:0]const u8 = undefined;
-        var arg_count: usize = 0;
-        var i: usize = 0;
-        var arg_start: usize = 0;
+        var token_storage: [MAX_TOKENS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_TOKENS;
+        var tokens: [MAX_TOKENS]CommandToken = undefined;
+        const token_count = tokenizeCommandLine(self.command_buffer[0..self.buffer_pos], &token_storage, &tokens) catch |err| {
+            printTokenizationError(err);
+            return false;
+        };
 
-        while (i < self.buffer_pos and isWhitespace(self.command_buffer[i])) : (i += 1) {}
-        arg_start = i;
-
-        while (i < self.buffer_pos and arg_count < MAX_ARGS) {
-            if (isWhitespace(self.command_buffer[i]) or i == self.buffer_pos - 1) {
-                var arg_end = i;
-                if (i == self.buffer_pos - 1 and !isWhitespace(self.command_buffer[i])) {
-                    arg_end = i + 1;
-                }
-
-                if (arg_end > arg_start) {
-                    self.command_buffer[arg_end] = 0;
-                    args[arg_count] = @as([*:0]const u8, @ptrCast(&self.command_buffer[arg_start]));
-                    arg_count += 1;
-                }
-
-                i = if (arg_end < self.buffer_pos) arg_end + 1 else arg_end;
-                while (i < self.buffer_pos and isWhitespace(self.command_buffer[i])) : (i += 1) {}
-                arg_start = i;
-            } else {
-                i += 1;
-            }
-        }
-
-        if (arg_count == 0) {
+        if (token_count == 0) {
             return true;
         }
 
-        if (containsShellOperators(args[0..arg_count])) {
-            return self.executePipeline(args[0..arg_count]);
+        if (containsShellOperators(tokens[0..token_count])) {
+            return self.executePipeline(tokens[0..token_count]);
         }
+
+        var args_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
+        var args: [MAX_ARGS][*:0]const u8 = undefined;
+        const arg_count = expandSimpleCommandTokens(tokens[0..token_count], &args_storage, &args) catch |err| {
+            printPipelineConfigError(err);
+            return false;
+        };
 
         const command = args[0];
         const command_name = sliceFromCStr(command);
@@ -515,7 +529,7 @@ pub const Shell = struct {
         return waitForExternalCommand(pid);
     }
 
-    fn executePipeline(self: *Shell, tokens: []const [*:0]const u8) bool {
+    fn executePipeline(self: *Shell, tokens: []const CommandToken) bool {
         var pipeline = parsePipeline(tokens) catch |err| {
             printPipelineConfigError(err);
             return false;
@@ -524,6 +538,11 @@ pub const Shell = struct {
         if (!validatePipelineStages(&pipeline)) {
             return false;
         }
+
+        expandPipelineGlobs(&pipeline) catch |err| {
+            printPipelineConfigError(err);
+            return false;
+        };
 
         var temp_paths: [MAX_PIPE_STAGES - 1][64]u8 = [_][64]u8{[_]u8{0} ** 64} ** (MAX_PIPE_STAGES - 1);
         var temp_path_lens: [MAX_PIPE_STAGES - 1]usize = [_]usize{0} ** (MAX_PIPE_STAGES - 1);
@@ -1692,17 +1711,156 @@ fn waitForExternalCommand(pid: u32) bool {
     return true;
 }
 
-fn containsShellOperators(tokens: []const [*:0]const u8) bool {
-    for (tokens) |token| {
-        const slice = sliceFromCStr(token);
-        if (std.mem.eql(u8, slice, "|") or std.mem.eql(u8, slice, "<") or std.mem.eql(u8, slice, ">") or std.mem.eql(u8, slice, ">>")) {
-            return true;
+fn tokenizeCommandLine(input: []const u8, storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, out_tokens: *[MAX_TOKENS]CommandToken) TokenizationError!usize {
+    var token_count: usize = 0;
+    var token_len: usize = 0;
+    var token_active = false;
+    var token_has_glob = false;
+    var in_single_quote = false;
+    var in_double_quote = false;
+    var escaping = false;
+
+    var idx: usize = 0;
+    while (idx < input.len) : (idx += 1) {
+        const char = input[idx];
+
+        if (escaping) {
+            try appendTokenChar(storage, token_count, &token_len, char);
+            token_active = true;
+            escaping = false;
+            continue;
         }
+
+        if (in_single_quote) {
+            if (char == '\'') {
+                in_single_quote = false;
+            } else {
+                try appendTokenChar(storage, token_count, &token_len, char);
+            }
+            token_active = true;
+            continue;
+        }
+
+        if (in_double_quote) {
+            if (char == '"') {
+                in_double_quote = false;
+            } else if (char == '\\') {
+                escaping = true;
+            } else {
+                try appendTokenChar(storage, token_count, &token_len, char);
+            }
+            token_active = true;
+            continue;
+        }
+
+        if (isWhitespace(char)) {
+            if (token_active) {
+                try finishWordToken(storage, out_tokens, &token_count, &token_len, &token_active, &token_has_glob);
+            }
+            continue;
+        }
+
+        switch (char) {
+            '\'' => {
+                in_single_quote = true;
+                token_active = true;
+            },
+            '"' => {
+                in_double_quote = true;
+                token_active = true;
+            },
+            '\\' => {
+                escaping = true;
+                token_active = true;
+            },
+            '|', '<', '>' => {
+                if (token_active) {
+                    try finishWordToken(storage, out_tokens, &token_count, &token_len, &token_active, &token_has_glob);
+                }
+
+                const operator_len: usize = if (char == '>' and idx + 1 < input.len and input[idx + 1] == '>') 2 else 1;
+                try addOperatorToken(storage, out_tokens, &token_count, if (operator_len == 2) .append_stdout_redirect else switch (char) {
+                    '|' => .pipe,
+                    '<' => .stdin_redirect,
+                    '>' => .stdout_redirect,
+                    else => unreachable,
+                }, if (operator_len == 2) ">>" else input[idx .. idx + 1]);
+                if (operator_len == 2) idx += 1;
+            },
+            '*', '?' => {
+                try appendTokenChar(storage, token_count, &token_len, char);
+                token_active = true;
+                token_has_glob = true;
+            },
+            else => {
+                try appendTokenChar(storage, token_count, &token_len, char);
+                token_active = true;
+            },
+        }
+    }
+
+    if (escaping) return error.TrailingEscape;
+    if (in_single_quote or in_double_quote) return error.UnterminatedQuote;
+    if (token_active) {
+        try finishWordToken(storage, out_tokens, &token_count, &token_len, &token_active, &token_has_glob);
+    }
+
+    return token_count;
+}
+
+fn appendTokenChar(storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, token_index: usize, token_len: *usize, char: u8) TokenizationError!void {
+    if (token_index >= MAX_TOKENS) return error.TooManyTokens;
+    if (token_len.* + 1 >= MAX_COMMAND_LENGTH) return error.TokenTooLong;
+    storage[token_index][token_len.*] = char;
+    token_len.* += 1;
+}
+
+fn finishWordToken(storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, out_tokens: *[MAX_TOKENS]CommandToken, token_count: *usize, token_len: *usize, token_active: *bool, token_has_glob: *bool) TokenizationError!void {
+    if (token_count.* >= MAX_TOKENS) return error.TooManyTokens;
+    storage[token_count.*][token_len.*] = 0;
+    out_tokens[token_count.*] = .{
+        .text = @ptrCast(&storage[token_count.*][0]),
+        .len = token_len.*,
+        .kind = .word,
+        .has_glob = token_has_glob.*,
+    };
+    token_count.* += 1;
+    token_len.* = 0;
+    token_active.* = false;
+    token_has_glob.* = false;
+}
+
+fn addOperatorToken(storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, out_tokens: *[MAX_TOKENS]CommandToken, token_count: *usize, kind: TokenKind, text: []const u8) TokenizationError!void {
+    if (token_count.* >= MAX_TOKENS) return error.TooManyTokens;
+    if (text.len + 1 >= MAX_COMMAND_LENGTH) return error.TokenTooLong;
+    @memcpy(storage[token_count.*][0..text.len], text);
+    storage[token_count.*][text.len] = 0;
+    out_tokens[token_count.*] = .{
+        .text = @ptrCast(&storage[token_count.*][0]),
+        .len = text.len,
+        .kind = kind,
+        .has_glob = false,
+    };
+    token_count.* += 1;
+}
+
+fn containsShellOperators(tokens: []const CommandToken) bool {
+    for (tokens) |token| {
+        if (token.kind != .word) return true;
     }
     return false;
 }
 
-fn parsePipeline(tokens: []const [*:0]const u8) PipelineConfigError!ParsedPipeline {
+fn expandSimpleCommandTokens(tokens: []const CommandToken, args_storage: *[MAX_ARGS][MAX_COMMAND_LENGTH]u8, out_args: *[MAX_ARGS][*:0]const u8) PipelineConfigError!usize {
+    var arg_count: usize = 0;
+    for (tokens) |token| {
+        if (token.kind != .word) return error.UnsupportedRedirection;
+        try appendExpandedToken(token.text, token.has_glob, args_storage, out_args, &arg_count);
+    }
+    return arg_count;
+}
+
+fn parsePipeline(tokens: []const CommandToken) PipelineConfigError!ParsedPipeline {
     var result = ParsedPipeline{};
     result.stage_count = 1;
 
@@ -1710,37 +1868,42 @@ fn parsePipeline(tokens: []const [*:0]const u8) PipelineConfigError!ParsedPipeli
     var token_idx: usize = 0;
     while (token_idx < tokens.len) : (token_idx += 1) {
         const token = tokens[token_idx];
-        const token_slice = sliceFromCStr(token);
         var stage = &result.stages[stage_idx];
 
-        if (std.mem.eql(u8, token_slice, "|")) {
-            if (stage.arg_count == 0) return error.EmptyStage;
-            if (stage_idx + 1 >= MAX_PIPE_STAGES) return error.TooManyStages;
-            stage_idx += 1;
-            result.stage_count = stage_idx + 1;
-            continue;
+        switch (token.kind) {
+            .pipe => {
+                if (stage.arg_count == 0) return error.EmptyStage;
+                if (stage_idx + 1 >= MAX_PIPE_STAGES) return error.TooManyStages;
+                stage_idx += 1;
+                result.stage_count = stage_idx + 1;
+            },
+            .stdin_redirect => {
+                if (token_idx + 1 >= tokens.len or tokens[token_idx + 1].kind != .word) return error.MissingPath;
+                if (stage_idx != 0 or stage.stdin_path != null) return error.UnsupportedRedirection;
+                token_idx += 1;
+                const path_token = tokens[token_idx];
+                try copyIntoStageBuffer(&stage.stdin_path_storage, sliceFromCStr(path_token.text));
+                stage.stdin_path = @ptrCast(&stage.stdin_path_storage[0]);
+                stage.stdin_glob = path_token.has_glob;
+            },
+            .stdout_redirect, .append_stdout_redirect => {
+                if (token_idx + 1 >= tokens.len or tokens[token_idx + 1].kind != .word) return error.MissingPath;
+                if (stage.stdout_path != null) return error.UnsupportedRedirection;
+                token_idx += 1;
+                const path_token = tokens[token_idx];
+                try copyIntoStageBuffer(&stage.stdout_path_storage, sliceFromCStr(path_token.text));
+                stage.stdout_path = @ptrCast(&stage.stdout_path_storage[0]);
+                stage.stdout_glob = path_token.has_glob;
+                stage.append_stdout = token.kind == .append_stdout_redirect;
+            },
+            .word => {
+                if (stage.arg_count >= MAX_ARGS) return error.ArgumentTooLong;
+                try copyIntoStageBuffer(&stage.arg_storage[stage.arg_count], sliceFromCStr(token.text));
+                stage.args[stage.arg_count] = @ptrCast(&stage.arg_storage[stage.arg_count][0]);
+                stage.arg_glob[stage.arg_count] = token.has_glob;
+                stage.arg_count += 1;
+            },
         }
-
-        if (std.mem.eql(u8, token_slice, "<")) {
-            if (token_idx + 1 >= tokens.len) return error.MissingPath;
-            if (stage_idx != 0 or stage.stdin_path != null) return error.UnsupportedRedirection;
-            token_idx += 1;
-            stage.stdin_path = tokens[token_idx];
-            continue;
-        }
-
-        if (std.mem.eql(u8, token_slice, ">") or std.mem.eql(u8, token_slice, ">>")) {
-            if (token_idx + 1 >= tokens.len) return error.MissingPath;
-            if (stage.stdout_path != null) return error.UnsupportedRedirection;
-            token_idx += 1;
-            stage.stdout_path = tokens[token_idx];
-            stage.append_stdout = std.mem.eql(u8, token_slice, ">>");
-            continue;
-        }
-
-        if (stage.arg_count >= MAX_ARGS) return error.ArgumentTooLong;
-        stage.args[stage.arg_count] = token;
-        stage.arg_count += 1;
     }
 
     for (result.stages[0..result.stage_count]) |stage| {
@@ -1760,6 +1923,12 @@ fn parsePipeline(tokens: []const [*:0]const u8) PipelineConfigError!ParsedPipeli
     return result;
 }
 
+fn copyIntoStageBuffer(buffer: *[MAX_COMMAND_LENGTH]u8, text: []const u8) PipelineConfigError!void {
+    if (text.len >= buffer.len) return error.ArgumentTooLong;
+    @memset(buffer, 0);
+    @memcpy(buffer[0..text.len], text);
+}
+
 fn validatePipelineStages(pipeline: *const ParsedPipeline) bool {
     for (pipeline.stages[0..pipeline.stage_count]) |stage| {
         const command_name = sliceFromCStr(stage.args[0]);
@@ -1771,6 +1940,233 @@ fn validatePipelineStages(pipeline: *const ParsedPipeline) bool {
         }
     }
     return true;
+}
+
+fn expandPipelineGlobs(pipeline: *ParsedPipeline) PipelineConfigError!void {
+    for (pipeline.stages[0..pipeline.stage_count]) |*stage| {
+        try expandStageArgs(stage);
+        try expandStageRedirect(stage, true);
+        try expandStageRedirect(stage, false);
+    }
+}
+
+fn expandStageArgs(stage: *ParsedStage) PipelineConfigError!void {
+    var expanded_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
+    var expanded_args: [MAX_ARGS][*:0]const u8 = undefined;
+    var expanded_count: usize = 0;
+
+    var i: usize = 0;
+    while (i < stage.arg_count) : (i += 1) {
+        try appendExpandedToken(stage.args[i], stage.arg_glob[i], &expanded_storage, &expanded_args, &expanded_count);
+    }
+
+    stage.arg_storage = expanded_storage;
+    stage.arg_count = expanded_count;
+    i = 0;
+    while (i < expanded_count) : (i += 1) {
+        stage.args[i] = @ptrCast(&stage.arg_storage[i][0]);
+        stage.arg_glob[i] = false;
+    }
+}
+
+fn expandStageRedirect(stage: *ParsedStage, is_input: bool) PipelineConfigError!void {
+    const raw_path = if (is_input) stage.stdin_path else stage.stdout_path;
+    if (raw_path == null) return;
+    const has_glob = if (is_input) stage.stdin_glob else stage.stdout_glob;
+    if (!has_glob) return;
+
+    var match_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
+    const matches = try resolveGlobMatches(sliceFromCStr(raw_path.?), &match_storage);
+    if (matches == 0) return;
+    if (matches > 1) return error.AmbiguousRedirect;
+
+    if (is_input) {
+        stage.stdin_path_storage = match_storage[0];
+        stage.stdin_path = @ptrCast(&stage.stdin_path_storage[0]);
+        stage.stdin_glob = false;
+    } else {
+        stage.stdout_path_storage = match_storage[0];
+        stage.stdout_path = @ptrCast(&stage.stdout_path_storage[0]);
+        stage.stdout_glob = false;
+    }
+}
+
+fn appendExpandedToken(token: [*:0]const u8, has_glob: bool, storage: *[MAX_ARGS][MAX_COMMAND_LENGTH]u8, out_args: *[MAX_ARGS][*:0]const u8, arg_count: *usize) PipelineConfigError!void {
+    const token_slice = sliceFromCStr(token);
+    if (!has_glob) {
+        if (arg_count.* >= MAX_ARGS) return error.ArgumentTooLong;
+        try copyIntoStageBuffer(&storage[arg_count.*], token_slice);
+        out_args[arg_count.*] = @ptrCast(&storage[arg_count.*][0]);
+        arg_count.* += 1;
+        return;
+    }
+
+    var match_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
+    const match_count = try resolveGlobMatches(token_slice, &match_storage);
+
+    if (match_count == 0) {
+        if (arg_count.* >= MAX_ARGS) return error.ArgumentTooLong;
+        try copyIntoStageBuffer(&storage[arg_count.*], token_slice);
+        out_args[arg_count.*] = @ptrCast(&storage[arg_count.*][0]);
+        arg_count.* += 1;
+        return;
+    }
+
+    var match_idx: usize = 0;
+    while (match_idx < match_count) : (match_idx += 1) {
+        if (arg_count.* >= MAX_ARGS) return error.ArgumentTooLong;
+        storage[arg_count.*] = match_storage[match_idx];
+        out_args[arg_count.*] = @ptrCast(&storage[arg_count.*][0]);
+        arg_count.* += 1;
+    }
+}
+
+fn resolveGlobMatches(pattern: []const u8, out_matches: *[MAX_ARGS][MAX_COMMAND_LENGTH]u8) PipelineConfigError!usize {
+    if (!containsWildcardChars(pattern)) return 0;
+
+    var absolute_pattern_storage: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH;
+    const absolute_pattern = try makeAbsolutePath(pattern, &absolute_pattern_storage);
+
+    var current_paths: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
+    var next_paths: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
+    current_paths[0][0] = '/';
+    current_paths[0][1] = 0;
+    var current_count: usize = 1;
+
+    var component_start: usize = 0;
+    while (component_start < absolute_pattern.len and absolute_pattern[component_start] == '/') : (component_start += 1) {}
+
+    while (component_start < absolute_pattern.len) {
+        var component_end = component_start;
+        while (component_end < absolute_pattern.len and absolute_pattern[component_end] != '/') : (component_end += 1) {}
+        const component = absolute_pattern[component_start..component_end];
+        const wildcard_component = containsWildcardChars(component);
+
+        var next_count: usize = 0;
+        var current_idx: usize = 0;
+        while (current_idx < current_count) : (current_idx += 1) {
+            const base_path = sliceFromCStr(@ptrCast(&current_paths[current_idx][0]));
+            if (wildcard_component) {
+                try collectGlobMatches(base_path, component, &next_paths, &next_count);
+            } else {
+                if (next_count >= MAX_ARGS) return error.ArgumentTooLong;
+                const joined = try joinPath(base_path, component, &next_paths[next_count]);
+                if (pathExists(joined)) {
+                    next_count += 1;
+                }
+            }
+        }
+
+        current_paths = next_paths;
+        next_paths = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
+        current_count = next_count;
+        if (current_count == 0) return 0;
+
+        component_start = component_end;
+        while (component_start < absolute_pattern.len and absolute_pattern[component_start] == '/') : (component_start += 1) {}
+    }
+
+    out_matches.* = current_paths;
+    return current_count;
+}
+
+fn makeAbsolutePath(path: []const u8, buffer: *[MAX_COMMAND_LENGTH]u8) PipelineConfigError![]const u8 {
+    if (path.len >= buffer.len) return error.ArgumentTooLong;
+    @memset(buffer, 0);
+
+    if (path.len > 0 and path[0] == '/') {
+        @memcpy(buffer[0..path.len], path);
+        return buffer[0..path.len];
+    }
+
+    const cwd = @import("../process/syscall.zig").getCwd();
+    if (cwd.len == 1 and cwd[0] == '/') {
+        if (path.len + 1 >= buffer.len) return error.ArgumentTooLong;
+        buffer[0] = '/';
+        @memcpy(buffer[1 .. 1 + path.len], path);
+        return buffer[0 .. 1 + path.len];
+    }
+
+    if (cwd.len + 1 + path.len >= buffer.len) return error.ArgumentTooLong;
+    @memcpy(buffer[0..cwd.len], cwd);
+    buffer[cwd.len] = '/';
+    @memcpy(buffer[cwd.len + 1 .. cwd.len + 1 + path.len], path);
+    return buffer[0 .. cwd.len + 1 + path.len];
+}
+
+fn joinPath(base: []const u8, component: []const u8, out: *[MAX_COMMAND_LENGTH]u8) PipelineConfigError![]const u8 {
+    @memset(out, 0);
+    if (base.len == 1 and base[0] == '/') {
+        if (component.len + 1 >= out.len) return error.ArgumentTooLong;
+        out[0] = '/';
+        @memcpy(out[1 .. 1 + component.len], component);
+        return out[0 .. 1 + component.len];
+    }
+
+    if (base.len + 1 + component.len >= out.len) return error.ArgumentTooLong;
+    @memcpy(out[0..base.len], base);
+    out[base.len] = '/';
+    @memcpy(out[base.len + 1 .. base.len + 1 + component.len], component);
+    return out[0 .. base.len + 1 + component.len];
+}
+
+fn collectGlobMatches(base_path: []const u8, pattern: []const u8, out_paths: *[MAX_ARGS][MAX_COMMAND_LENGTH]u8, out_count: *usize) PipelineConfigError!void {
+    const fd = vfs.open(base_path, vfs.O_RDONLY) catch return;
+    defer vfs.close(fd) catch {};
+
+    var dirent: vfs.DirEntry = undefined;
+    while (true) {
+        const has_entry = vfs.readdirNext(fd, &dirent) catch return;
+        if (!has_entry) break;
+
+        const entry_name = dirent.name[0..dirent.name_len];
+        if (entry_name.len == 0) continue;
+        if (std.mem.eql(u8, entry_name, ".") or std.mem.eql(u8, entry_name, "..")) continue;
+        if (entry_name[0] == '.' and (pattern.len == 0 or pattern[0] != '.')) continue;
+        if (!wildcardMatch(pattern, entry_name)) continue;
+        if (out_count.* >= MAX_ARGS) return error.ArgumentTooLong;
+        _ = try joinPath(base_path, entry_name, &out_paths[out_count.*]);
+        out_count.* += 1;
+    }
+}
+
+fn pathExists(path: []const u8) bool {
+    _ = vfs.lookupPath(path) catch return false;
+    return true;
+}
+
+fn containsWildcardChars(text: []const u8) bool {
+    for (text) |char| {
+        if (char == '*' or char == '?') return true;
+    }
+    return false;
+}
+
+fn wildcardMatch(pattern: []const u8, text: []const u8) bool {
+    var pattern_idx: usize = 0;
+    var text_idx: usize = 0;
+    var star_idx: ?usize = null;
+    var match_after_star: usize = 0;
+
+    while (text_idx < text.len) {
+        if (pattern_idx < pattern.len and (pattern[pattern_idx] == '?' or pattern[pattern_idx] == text[text_idx])) {
+            pattern_idx += 1;
+            text_idx += 1;
+        } else if (pattern_idx < pattern.len and pattern[pattern_idx] == '*') {
+            star_idx = pattern_idx;
+            pattern_idx += 1;
+            match_after_star = text_idx;
+        } else if (star_idx) |star| {
+            pattern_idx = star + 1;
+            match_after_star += 1;
+            text_idx = match_after_star;
+        } else {
+            return false;
+        }
+    }
+
+    while (pattern_idx < pattern.len and pattern[pattern_idx] == '*') : (pattern_idx += 1) {}
+    return pattern_idx == pattern.len;
 }
 
 fn openRedirectFd(path: [*:0]const u8, flags: u32) PipelineConfigError!i32 {
@@ -1836,11 +2232,21 @@ fn printPipelineConfigError(err: PipelineConfigError) void {
         error.TooManyStages => vga.print("Too many pipeline stages\n"),
         error.UnsupportedBuiltin => vga.print("Pipelines and redirection require external commands\n"),
         error.UnsupportedRedirection => vga.print("Unsupported redirection layout\n"),
+        error.AmbiguousRedirect => vga.print("Redirection target expands to multiple paths\n"),
         error.OpenFailed => vga.print("Failed to open redirection target\n"),
         error.PipeFailed => vga.print("Failed to create pipe\n"),
         error.DupFailed => vga.print("Failed to duplicate file descriptor\n"),
         error.CloseFailed => vga.print("Failed to close temporary file descriptor\n"),
         error.ArgumentTooLong => vga.print("Too many arguments in pipeline stage\n"),
+    }
+}
+
+fn printTokenizationError(err: TokenizationError) void {
+    switch (err) {
+        error.UnterminatedQuote => vga.print("Unterminated quoted string\n"),
+        error.TrailingEscape => vga.print("Trailing escape in command line\n"),
+        error.TooManyTokens => vga.print("Too many shell tokens\n"),
+        error.TokenTooLong => vga.print("Shell token too long\n"),
     }
 }
 

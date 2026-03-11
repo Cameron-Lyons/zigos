@@ -222,7 +222,7 @@ pub fn build(b: *std.Build) void {
         \\  echo "Userland smoke test failed: no serial output captured" >&2
         \\  exit 1
         \\fi
-        \\for marker in "BOOT:START" "BOOT:PROFILE:userland_smoke" "Disk root mounted at /" "BOOT:SHELL_READY" "USERLAND:HELLO" "USERLAND:ECHO" "USERLAND:UNAME" "USERLAND:LS" "USERLAND:CAT" "USERLAND:PIPE_OK" "USERLAND:REDIRECT_WRITE" "USERLAND:REDIRECT_READ" "Welcome to ZigOS userspace smoke test." "USERLAND:PIPE" "USERLAND:REDIRECT" "USERLAND:PASS"; do
+        \\for marker in "BOOT:START" "BOOT:PROFILE:userland_smoke" "Disk root mounted at /" "BOOT:SHELL_READY" "USERLAND:HELLO" "USERLAND:ECHO" "USERLAND:QUOTED" "USERLAND:ESCAPED" "USERLAND:GLOB" "USERLAND:UNAME" "USERLAND:LS" "USERLAND:CAT" "USERLAND:PIPE_OK" "USERLAND:REDIRECT_WRITE" "USERLAND:REDIRECT_READ" "USERLAND QUOTED" "USERLAND ESCAPED" "/bin/cat /bin/ls" "Welcome to ZigOS userspace smoke test." "USERLAND:PIPE" "USERLAND:REDIRECT" "USERLAND:PASS"; do
         \\  if ! grep -Fq "$marker" "$LOG_PATH"; then
         \\    echo "Userland smoke test failed: missing marker '$marker'" >&2
         \\    cat "$LOG_PATH" >&2
