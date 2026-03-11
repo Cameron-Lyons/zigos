@@ -353,8 +353,6 @@ fn userlandSmokeRunner() callconv(.c) void {
         .{ .command = "/bin/echo USERLAND:PIPE | /bin/cat", .marker = "USERLAND:PIPE_OK" },
         .{ .command = "/bin/echo USERLAND:REDIRECT > /tmp/redir.txt", .marker = "USERLAND:REDIRECT_WRITE" },
         .{ .command = "/bin/cat < /tmp/redir.txt", .marker = "USERLAND:REDIRECT_READ" },
-        .{ .command = "/bin/cat &", .marker = "USERLAND:BG_START" },
-        .{ .command = "jobs", .marker = "USERLAND:JOBS" },
     };
 
     printBootMarker("USERLAND:START");
@@ -366,6 +364,48 @@ fn userlandSmokeRunner() callconv(.c) void {
         }
         printBootMarker(step.marker);
     }
+
+    if (!smoke_shell.runCommandLine("/bin/sleep 3 &")) {
+        printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    }
+    printBootMarker("USERLAND:BG_START");
+
+    if (!smoke_shell.runCommandLine("jobs")) {
+        printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    }
+    printBootMarker("USERLAND:JOBS_RUNNING");
+
+    const bg_pid = smoke_shell.latestBackgroundPid() orelse {
+        printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    };
+
+    if (process.getProcessByPid(bg_pid)) |bg_proc| {
+        bg_proc.state = .Stopped;
+    } else {
+        printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    }
+
+    if (!smoke_shell.runCommandLine("jobs")) {
+        printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    }
+    printBootMarker("USERLAND:JOBS_STOPPED");
+
+    if (!smoke_shell.runCommandLine("bg")) {
+        printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    }
+    printBootMarker("USERLAND:BG_RESUME");
+
+    if (!smoke_shell.runCommandLine("jobs")) {
+        printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    }
+    printBootMarker("USERLAND:JOBS_RESUMED");
 
     printBootMarker("USERLAND:PASS");
     qemu_exit.success();

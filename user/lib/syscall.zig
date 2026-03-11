@@ -14,6 +14,11 @@ pub const LinuxDirent = extern struct {
     d_type: u8,
 };
 
+pub const TimeSpec = extern struct {
+    tv_sec: i32,
+    tv_nsec: i32,
+};
+
 pub inline fn syscall0(number: u32) i32 {
     const raw: u32 = asm volatile ("int $0x80"
         : [ret] "={eax}" (-> u32),
@@ -104,6 +109,10 @@ pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) i32 {
 
 pub fn getdents(fd: i32, buffer: []u8) i32 {
     return syscall3(abi.SYS_GETDENTS, @bitCast(@as(u32, @bitCast(fd))), @intFromPtr(buffer.ptr), buffer.len);
+}
+
+pub fn nanosleep(req: *const TimeSpec, rem: ?*TimeSpec) i32 {
+    return syscall2(abi.SYS_NANOSLEEP, @intFromPtr(req), if (rem) |value| @intFromPtr(value) else 0);
 }
 
 pub fn exit(status: i32) noreturn {

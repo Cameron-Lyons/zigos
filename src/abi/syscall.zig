@@ -7,6 +7,7 @@ pub const SYS_GETPID = 6;
 pub const SYS_FORK = 8;
 pub const SYS_EXECVE = 9;
 pub const SYS_WAIT4 = 10;
+pub const SYS_NANOSLEEP = 48;
 pub const SYS_GETDENTS = 54;
 
 pub const STDIN = 0;
