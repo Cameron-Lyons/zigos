@@ -85,7 +85,7 @@ fn calculateChecksum(data: []u8) u16 {
     var sum: u32 = 0;
     var i: usize = 0;
 
-    while (i < data.len - 1) : (i += 2) {
+    while (i + 1 < data.len) : (i += 2) {
         sum += (@as(u16, data[i]) << 8) | data[i + 1];
     }
 
@@ -97,7 +97,7 @@ fn calculateChecksum(data: []u8) u16 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
 
-    const result: u16 = @intCast(~sum);
+    const result: u16 = @truncate(~sum);
     return result;
 }
 
@@ -105,7 +105,7 @@ fn verifyChecksum(data: []u8) bool {
     var sum: u32 = 0;
     var i: usize = 0;
 
-    while (i < data.len - 1) : (i += 2) {
+    while (i + 1 < data.len) : (i += 2) {
         sum += (@as(u16, data[i]) << 8) | data[i + 1];
     }
 
@@ -119,4 +119,3 @@ fn verifyChecksum(data: []u8) bool {
 
     return sum == 0xFFFF;
 }
-

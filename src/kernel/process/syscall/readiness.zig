@@ -59,7 +59,6 @@ pub fn waitForChange(observed_generation: u64, deadline_tick: ?u64) bool {
         wait_lock.release();
         return true;
     }
-
     const waiter = reserveWaiter(current, observed_generation) orelse {
         wait_lock.release();
         return fallbackWait(deadline_tick);

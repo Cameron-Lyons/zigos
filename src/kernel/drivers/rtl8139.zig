@@ -244,7 +244,7 @@ const RTL8139 = struct {
             self.rx_offset = self.rx_offset % RX_BUFFER_SIZE;
         }
 
-        self.writeReg16(.RxBufPtr, self.rx_offset - 0x10);
+        self.writeReg16(.RxBufPtr, self.rx_offset -% 0x10);
 
         return packet_data;
     }
