@@ -353,6 +353,8 @@ fn userlandSmokeRunner() callconv(.c) void {
         .{ .command = "/bin/echo USERLAND:PIPE | /bin/cat", .marker = "USERLAND:PIPE_OK" },
         .{ .command = "/bin/echo USERLAND:REDIRECT > /tmp/redir.txt", .marker = "USERLAND:REDIRECT_WRITE" },
         .{ .command = "/bin/cat < /tmp/redir.txt", .marker = "USERLAND:REDIRECT_READ" },
+        .{ .command = "/bin/cat &", .marker = "USERLAND:BG_START" },
+        .{ .command = "jobs", .marker = "USERLAND:JOBS" },
     };
 
     printBootMarker("USERLAND:START");
