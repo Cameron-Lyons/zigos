@@ -24,6 +24,7 @@ pub const Message = struct {
 pub const MessageQueue = struct {
     pid: u32,
     messages: ?*Message,
+    tail: ?*Message,
     message_count: u32,
     max_messages: u32,
     mutex: sync.Mutex,
@@ -35,6 +36,7 @@ pub const MessageQueue = struct {
         return MessageQueue{
             .pid = pid,
             .messages = null,
+            .tail = null,
             .message_count = 0,
             .max_messages = max_messages,
             .mutex = sync.Mutex.init(),
@@ -56,15 +58,12 @@ pub const MessageQueue = struct {
 
         msg.next = null;
 
-        if (self.messages == null) {
-            self.messages = msg;
+        if (self.tail) |tail| {
+            tail.next = msg;
         } else {
-            var tail = self.messages;
-            while (tail.?.next != null) {
-                tail = tail.?.next;
-            }
-            tail.?.next = msg;
+            self.messages = msg;
         }
+        self.tail = msg;
 
         self.message_count += 1;
         self.not_empty.signal();
@@ -88,6 +87,9 @@ pub const MessageQueue = struct {
 
         const msg = self.messages.?;
         self.messages = msg.next;
+        if (self.messages == null) {
+            self.tail = null;
+        }
         self.message_count -= 1;
 
         self.not_full.signal();
@@ -110,6 +112,9 @@ pub const MessageQueue = struct {
 
         const msg = self.messages.?;
         self.messages = msg.next;
+        if (self.messages == null) {
+            self.tail = null;
+        }
         self.message_count -= 1;
 
         self.not_full.signal();

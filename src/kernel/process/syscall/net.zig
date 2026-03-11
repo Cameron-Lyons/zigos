@@ -17,6 +17,8 @@ pub const socket_fd_base: i32 = 500;
 pub const unix_socket_fd_base: i32 = 700;
 pub const socket_count: usize = 64;
 pub const unix_socket_count: usize = 64;
+const UNIX_SOCKET_BUFFER_SIZE: usize = 4096;
+const UNIX_SOCKET_BUFFER_MASK: usize = UNIX_SOCKET_BUFFER_SIZE - 1;
 
 const POLLIN: u16 = 0x001;
 const POLLOUT: u16 = 0x004;
@@ -45,7 +47,7 @@ pub const UnixSocket = struct {
     path: [108]u8,
     path_len: usize,
     peer: ?*UnixSocket,
-    recv_buffer: [4096]u8,
+    recv_buffer: [UNIX_SOCKET_BUFFER_SIZE]u8,
     recv_head: usize,
     recv_tail: usize,
     recv_count: usize,
@@ -214,10 +216,15 @@ fn writeUnixSocket(usock: *UnixSocket, buffer: []const u8) i32 {
     const copy_len = @min(buffer.len, available);
     if (copy_len == 0) return abi.EAGAIN;
 
-    for (0..copy_len) |i| {
-        peer.recv_buffer[peer.recv_tail] = buffer[i];
-        peer.recv_tail = (peer.recv_tail + 1) % peer.recv_buffer.len;
+    const first_chunk = @min(copy_len, peer.recv_buffer.len - peer.recv_tail);
+    @memcpy(peer.recv_buffer[peer.recv_tail .. peer.recv_tail + first_chunk], buffer[0..first_chunk]);
+
+    const second_chunk = copy_len - first_chunk;
+    if (second_chunk != 0) {
+        @memcpy(peer.recv_buffer[0..second_chunk], buffer[first_chunk..copy_len]);
     }
+
+    peer.recv_tail = (peer.recv_tail + copy_len) & UNIX_SOCKET_BUFFER_MASK;
     peer.recv_count += copy_len;
     readiness.notifyAll();
     return @intCast(copy_len);
@@ -228,10 +235,15 @@ fn readUnixSocket(usock: *UnixSocket, buffer: []u8) i32 {
     if (usock.recv_count == 0) return 0;
 
     const to_recv = @min(buffer.len, usock.recv_count);
-    for (0..to_recv) |i| {
-        buffer[i] = usock.recv_buffer[usock.recv_head];
-        usock.recv_head = (usock.recv_head + 1) % usock.recv_buffer.len;
+    const first_chunk = @min(to_recv, usock.recv_buffer.len - usock.recv_head);
+    @memcpy(buffer[0..first_chunk], usock.recv_buffer[usock.recv_head .. usock.recv_head + first_chunk]);
+
+    const second_chunk = to_recv - first_chunk;
+    if (second_chunk != 0) {
+        @memcpy(buffer[first_chunk..to_recv], usock.recv_buffer[0..second_chunk]);
     }
+
+    usock.recv_head = (usock.recv_head + to_recv) & UNIX_SOCKET_BUFFER_MASK;
     usock.recv_count -= to_recv;
     readiness.notifyAll();
     return @intCast(to_recv);
