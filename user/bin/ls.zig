@@ -4,6 +4,7 @@ const stdio = @import("stdio");
 const syscall = @import("syscall");
 
 pub const panic = runtime.panic;
+const dirent_buffer_size = 512;
 
 pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[*:0]const u8) callconv(.c) i32 {
     _ = envp;
@@ -20,7 +21,7 @@ fn listDirectory(path: [*:0]const u8) bool {
     }
     defer _ = syscall.close(fd);
 
-    var buffer: [512]u8 = undefined;
+    var buffer: [dirent_buffer_size]u8 = undefined;
     while (true) {
         const rc = syscall.getdents(fd, &buffer);
         if (rc == 0) return true;

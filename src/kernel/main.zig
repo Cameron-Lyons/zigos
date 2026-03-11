@@ -40,24 +40,24 @@ const icmp = @import("net/icmp.zig");
 const devfs = @import("fs/devfs.zig");
 const embedfs = @import("fs/embedfs.zig");
 
-fn test_process1() void {
+const test_process_log_interval: u32 = 1_000_000;
+
+fn runTestProcess(marker: []const u8) void {
     var i: u32 = 0;
     while (true) : (i += 1) {
-        if (i % 1000000 == 0) {
-            console.print("A");
+        if (i % test_process_log_interval == 0) {
+            console.print(marker);
         }
         process.yield();
     }
 }
 
+fn test_process1() void {
+    runTestProcess("A");
+}
+
 fn test_process2() void {
-    var i: u32 = 0;
-    while (true) : (i += 1) {
-        if (i % 1000000 == 0) {
-            console.print("B");
-        }
-        process.yield();
-    }
+    runTestProcess("B");
 }
 
 fn printBootMarker(marker: []const u8) void {
