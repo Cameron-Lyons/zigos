@@ -105,9 +105,9 @@ QEMU_BIN=qemu-system-x86_64 BOOT_TEST_SECONDS=15 zig build boot-test
 - `dev`: starts the interactive shell and demo processes
 - `ci_smoke`: boots core services, initializes the shell, emits serial markers, and exits through QEMU debug-exit
 - `test_vm`: runs the virtual memory test suite and exits through QEMU debug-exit
-- `userland_smoke`: runs the external userland smoke commands (`hello`, `echo`, `uname`, `ls`, `cat`) and exits through QEMU debug-exit
+- `userland_smoke`: boots from the disk-backed rootfs when available, falls back to the embedded rootfs otherwise, runs the external userland smoke commands (`hello`, `echo`, `uname`, `ls`, `cat`), and exits through QEMU debug-exit
 
-The current bootstrap exposes external commands directly under `/bin` from an embedded root filesystem. The staged FAT image still mirrors those programs for disk-based workflows.
+The current bootstrap prefers the staged FAT disk image as `/`, with the embedded root filesystem kept as a fallback. The staged image still mirrors the bootstrap `/bin` and `/etc` content for disk-based workflows.
 
 ## Smoke Boot Verification
 

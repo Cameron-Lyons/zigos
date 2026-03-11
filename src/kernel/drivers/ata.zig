@@ -60,6 +60,14 @@ var primary_slave: ATADevice = undefined;
 var secondary_master: ATADevice = undefined;
 // SAFETY: fully initialized in init() before use
 var secondary_slave: ATADevice = undefined;
+// SAFETY: fully initialized in init() before use
+var probe_primary_master: ATADevice = undefined;
+// SAFETY: fully initialized in init() before use
+var probe_primary_slave: ATADevice = undefined;
+// SAFETY: fully initialized in init() before use
+var probe_secondary_master: ATADevice = undefined;
+// SAFETY: fully initialized in init() before use
+var probe_secondary_slave: ATADevice = undefined;
 
 const Spinlock = struct {
     locked: u32 = 0,
@@ -131,10 +139,32 @@ pub fn init() void {
         .supports_lba = false,
         .supports_lba48 = false,
     };
+    probe_primary_master = ATADevice{
+        .present = true,
+        .base_port = ATA_PRIMARY_BASE,
+        .ctrl_port = ATA_PRIMARY_CTRL,
+        .is_master = true,
+        .sectors = 0,
+        .model = [_]u8{0} ** 41,
+        .serial = [_]u8{0} ** 21,
+        .supports_lba = false,
+        .supports_lba48 = false,
+    };
     detectDrive(&primary_master);
 
     primary_slave = ATADevice{
         .present = false,
+        .base_port = ATA_PRIMARY_BASE,
+        .ctrl_port = ATA_PRIMARY_CTRL,
+        .is_master = false,
+        .sectors = 0,
+        .model = [_]u8{0} ** 41,
+        .serial = [_]u8{0} ** 21,
+        .supports_lba = false,
+        .supports_lba48 = false,
+    };
+    probe_primary_slave = ATADevice{
+        .present = true,
         .base_port = ATA_PRIMARY_BASE,
         .ctrl_port = ATA_PRIMARY_CTRL,
         .is_master = false,
@@ -157,10 +187,32 @@ pub fn init() void {
         .supports_lba = false,
         .supports_lba48 = false,
     };
+    probe_secondary_master = ATADevice{
+        .present = true,
+        .base_port = ATA_SECONDARY_BASE,
+        .ctrl_port = ATA_SECONDARY_CTRL,
+        .is_master = true,
+        .sectors = 0,
+        .model = [_]u8{0} ** 41,
+        .serial = [_]u8{0} ** 21,
+        .supports_lba = false,
+        .supports_lba48 = false,
+    };
     detectDrive(&secondary_master);
 
     secondary_slave = ATADevice{
         .present = false,
+        .base_port = ATA_SECONDARY_BASE,
+        .ctrl_port = ATA_SECONDARY_CTRL,
+        .is_master = false,
+        .sectors = 0,
+        .model = [_]u8{0} ** 41,
+        .serial = [_]u8{0} ** 21,
+        .supports_lba = false,
+        .supports_lba48 = false,
+    };
+    probe_secondary_slave = ATADevice{
+        .present = true,
         .base_port = ATA_SECONDARY_BASE,
         .ctrl_port = ATA_SECONDARY_CTRL,
         .is_master = false,
@@ -531,11 +583,20 @@ pub fn getSecondarySlave() ?*const ATADevice {
     return null;
 }
 
+pub fn getProbeCandidates() [4]*const ATADevice {
+    return .{
+        if (primary_master.present) &primary_master else &probe_primary_master,
+        if (primary_slave.present) &primary_slave else &probe_primary_slave,
+        if (secondary_master.present) &secondary_master else &probe_secondary_master,
+        if (secondary_slave.present) &secondary_slave else &probe_secondary_slave,
+    };
+}
+
 fn waitDriveReady(device: *const ATADevice) ATAError!void {
     var timeout: u32 = 100000;
     while (timeout > 0) : (timeout -= 1) {
         const status = x86.inb(device.base_port + ATA_REG_STATUS);
-        if ((status & ATA_SR_BSY) == 0 and (status & ATA_SR_DRDY) != 0) {
+        if ((status & ATA_SR_BSY) == 0) {
             return;
         }
         if ((status & ATA_SR_ERR) != 0 or (status & ATA_SR_DF) != 0) {
