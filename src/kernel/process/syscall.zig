@@ -225,6 +225,10 @@ fn resolveIoFd(fd: i32) i32 {
     };
 }
 
+fn resolveUserPath(path: []const u8, buffer: *[512]u8) ?[]const u8 {
+    return syscall_cwd.resolvePath(path, buffer);
+}
+
 pub const EPERM = abi.EPERM;
 pub const ENOENT = abi.ENOENT;
 pub const ESRCH = abi.ESRCH;
@@ -874,10 +878,12 @@ fn sys_stat(pathname: [*]const u8, stat_buf_addr: usize) i32 {
     // SAFETY: filled by the subsequent copyStringFromUser call
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolveUserPath(path_slice, &resolved_buf) orelse return ENAMETOOLONG;
 
     // SAFETY: filled by the subsequent vfs.stat call
     var stat_buf: vfs.FileStat = undefined;
-    vfs.stat(path_slice, &stat_buf) catch |err| return vfsErrno(err);
+    vfs.stat(resolved, &stat_buf) catch |err| return vfsErrno(err);
 
     protection.copyToUser(stat_buf_addr, std.mem.asBytes(&stat_buf)) catch return EINVAL;
     return 0;
@@ -1323,8 +1329,10 @@ fn sys_access(pathname: [*]const u8, mode: u32) i32 {
     // SAFETY: filled by the subsequent copyStringFromUser call
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolveUserPath(path_slice, &resolved_buf) orelse return ENAMETOOLONG;
 
-    const vnode = vfs.lookupPath(path_slice) catch return ENOENT;
+    const vnode = vfs.lookupPath(resolved) catch return ENOENT;
 
     if (mode == 0) return 0;
 
@@ -1347,6 +1355,8 @@ fn sys_chmod_syscall(pathname: [*]const u8, mode: u32) i32 {
     // SAFETY: filled by the subsequent copyStringFromUser call
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolveUserPath(path_slice, &resolved_buf) orelse return ENAMETOOLONG;
 
     const mode_struct = vfs.FileMode{
         .owner_read = (mode & 0o400) != 0,
@@ -1360,8 +1370,8 @@ fn sys_chmod_syscall(pathname: [*]const u8, mode: u32) i32 {
         .other_exec = (mode & 0o001) != 0,
     };
 
-    vfs.chmod(path_slice, mode_struct) catch |err| return vfsErrno(err);
-    syscall_event.notifyInotifyPathEvent(path_slice, abi.IN_ATTRIB, 0);
+    vfs.chmod(resolved, mode_struct) catch |err| return vfsErrno(err);
+    syscall_event.notifyInotifyPathEvent(resolved, abi.IN_ATTRIB, 0);
     return 0;
 }
 
@@ -1473,11 +1483,13 @@ fn sys_readlink(pathname: [*]const u8, buf: [*]u8, buf_size: usize) i32 {
     // SAFETY: filled by the subsequent copyStringFromUser call
     var path_buf: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buf, @intFromPtr(pathname)) catch return EINVAL;
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolveUserPath(path_slice, &resolved_buf) orelse return ENAMETOOLONG;
 
     // SAFETY: filled by the subsequent vfs.readlink call
     var kernel_buf: [256]u8 = undefined;
     const read_size = @min(buf_size, kernel_buf.len);
-    const link_len = vfs.readlink(path_slice, kernel_buf[0..read_size]) catch |err| return vfsErrno(err);
+    const link_len = vfs.readlink(resolved, kernel_buf[0..read_size]) catch |err| return vfsErrno(err);
 
     protection.copyToUser(@intFromPtr(buf), kernel_buf[0..link_len]) catch return EINVAL;
     return @intCast(link_len);
@@ -1769,9 +1781,11 @@ fn sys_lstat(pathname: [*]const u8, stat_buf_addr: usize) i32 {
 
     var kernel_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolveUserPath(path_slice, &resolved_buf) orelse return ENAMETOOLONG;
 
     var stat_buf: vfs.FileStat = undefined;
-    vfs.stat(path_slice, &stat_buf) catch |err| return vfsErrno(err);
+    vfs.stat(resolved, &stat_buf) catch |err| return vfsErrno(err);
 
     protection.copyToUser(stat_buf_addr, std.mem.asBytes(&stat_buf)) catch return EINVAL;
     return 0;
