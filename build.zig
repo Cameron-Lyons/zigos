@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) void {
     const uname_program = addUserProgram(b, target, optimize, "uname", "user/bin/uname.zig");
     const cat_program = addUserProgram(b, target, optimize, "cat", "user/bin/cat.zig");
     const ls_program = addUserProgram(b, target, optimize, "ls", "user/bin/ls.zig");
+    const sleep_program = addUserProgram(b, target, optimize, "sleep", "user/bin/sleep.zig");
     const motd_install = b.addInstallFileWithDir(b.path("user/rootfs/etc/motd"), .{ .custom = "user/rootfs/etc" }, "motd");
     const user_assets_module = createUserAssetsModule(b, target, optimize, hello_program, echo_program, uname_program, cat_program, ls_program);
 
@@ -51,6 +52,7 @@ pub fn build(b: *std.Build) void {
         uname_program.install_step,
         cat_program.install_step,
         ls_program.install_step,
+        sleep_program.install_step,
     };
 
     inline for (&.{ dev_kernel, ci_smoke_kernel, vm_test_kernel, userland_smoke_kernel }) |artifact| {
@@ -77,6 +79,7 @@ pub fn build(b: *std.Build) void {
     userland_step.dependOn(uname_program.install_step);
     userland_step.dependOn(cat_program.install_step);
     userland_step.dependOn(ls_program.install_step);
+    userland_step.dependOn(sleep_program.install_step);
     userland_step.dependOn(&motd_install.step);
 
     const rootfs_cmd = b.addSystemCommand(&.{
@@ -109,6 +112,7 @@ pub fn build(b: *std.Build) void {
         \\mcopy -i "build/disk.img" "zig-out/user/bin/uname" ::/bin/uname
         \\mcopy -i "build/disk.img" "zig-out/user/bin/cat" ::/bin/cat
         \\mcopy -i "build/disk.img" "zig-out/user/bin/ls" ::/bin/ls
+        \\mcopy -i "build/disk.img" "zig-out/user/bin/sleep" ::/bin/sleep
         \\mcopy -i "build/disk.img" "zig-out/user/rootfs/etc/motd" ::/etc/motd
     });
     rootfs_cmd.step.dependOn(hello_program.install_step);
@@ -116,6 +120,7 @@ pub fn build(b: *std.Build) void {
     rootfs_cmd.step.dependOn(uname_program.install_step);
     rootfs_cmd.step.dependOn(cat_program.install_step);
     rootfs_cmd.step.dependOn(ls_program.install_step);
+    rootfs_cmd.step.dependOn(sleep_program.install_step);
     rootfs_cmd.step.dependOn(&motd_install.step);
 
     const rootfs_step = b.step("rootfs", "Build the FAT disk image for user programs");
@@ -222,7 +227,7 @@ pub fn build(b: *std.Build) void {
         \\  echo "Userland smoke test failed: no serial output captured" >&2
         \\  exit 1
         \\fi
-        \\for marker in "BOOT:START" "BOOT:PROFILE:userland_smoke" "Disk root mounted at /" "BOOT:SHELL_READY" "USERLAND:HELLO" "USERLAND:ECHO" "USERLAND:QUOTED" "USERLAND:ESCAPED" "USERLAND:GLOB" "USERLAND:UNAME" "USERLAND:LS" "USERLAND:CAT" "USERLAND:CD_BIN" "USERLAND:RELATIVE_CMD" "USERLAND:CD_ETC" "USERLAND:RELATIVE_ARG" "USERLAND:CD_ROOT" "USERLAND:PIPE_OK" "USERLAND:REDIRECT_WRITE" "USERLAND:REDIRECT_READ" "USERLAND:BG_START" "USERLAND:JOBS" "USERLAND QUOTED" "USERLAND ESCAPED" "/bin/cat /bin/ls" "USERLAND:RELATIVE" "Welcome to ZigOS userspace smoke test." "USERLAND:PIPE" "USERLAND:REDIRECT" "[1] Running /bin/cat" "USERLAND:PASS"; do
+        \\for marker in "BOOT:START" "BOOT:PROFILE:userland_smoke" "Disk root mounted at /" "BOOT:SHELL_READY" "USERLAND:HELLO" "USERLAND:ECHO" "USERLAND:QUOTED" "USERLAND:ESCAPED" "USERLAND:GLOB" "USERLAND:UNAME" "USERLAND:LS" "USERLAND:CAT" "USERLAND:CD_BIN" "USERLAND:RELATIVE_CMD" "USERLAND:CD_ETC" "USERLAND:RELATIVE_ARG" "USERLAND:CD_ROOT" "USERLAND:PIPE_OK" "USERLAND:REDIRECT_WRITE" "USERLAND:REDIRECT_READ" "USERLAND:BG_START" "USERLAND:JOBS_RUNNING" "USERLAND:JOBS_STOPPED" "USERLAND:BG_RESUME" "USERLAND:JOBS_RESUMED" "USERLAND QUOTED" "USERLAND ESCAPED" "/bin/cat /bin/ls" "USERLAND:RELATIVE" "Welcome to ZigOS userspace smoke test." "USERLAND:PIPE" "USERLAND:REDIRECT" "[1] Running /bin/sleep 3" "[1] Stopped /bin/sleep 3" "USERLAND:PASS"; do
         \\  if ! grep -Fq "$marker" "$LOG_PATH"; then
         \\    echo "Userland smoke test failed: missing marker '$marker'" >&2
         \\    cat "$LOG_PATH" >&2
