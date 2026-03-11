@@ -318,6 +318,20 @@ pub fn waitForProcess(pid: u32) !i32 {
     }
 }
 
+pub fn pollProcessExit(pid: u32) !?i32 {
+    var proc = process.getProcessList();
+    while (proc) |current| : (proc = current.next) {
+        if (current.pid != pid) continue;
+        if (current.state == .Terminated) {
+            const exit_code = current.exit_code;
+            reapExitedProcess(current);
+            return exit_code;
+        }
+        return null;
+    }
+    return error.ProcessNotFound;
+}
+
 fn reapExitedProcess(proc: *process.Process) void {
     proc.state = .Terminated;
     process.unregisterAndRemoveProcess(proc);

@@ -27,6 +27,7 @@ const MAX_HISTORY = 50;
 const MAX_EXTERNAL_LAUNCHES = 8;
 const MAX_PIPE_STAGES = 8;
 const MAX_TOKENS = 32;
+const MAX_BACKGROUND_JOBS = 8;
 
 const TokenizationError = error{
     UnterminatedQuote,
@@ -41,6 +42,7 @@ const TokenKind = enum {
     stdin_redirect,
     stdout_redirect,
     append_stdout_redirect,
+    background,
 };
 
 const CommandToken = struct {
@@ -90,6 +92,14 @@ const ParsedPipeline = struct {
     stage_count: usize = 0,
 };
 
+const BackgroundJob = struct {
+    active: bool = false,
+    id: u32 = 0,
+    pid: u32 = 0,
+    command_len: usize = 0,
+    command: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH,
+};
+
 const PipelineConfigError = error{
     EmptyStage,
     MissingPath,
@@ -98,6 +108,7 @@ const PipelineConfigError = error{
     UnsupportedBuiltin,
     UnsupportedRedirection,
     AmbiguousRedirect,
+    UnsupportedBackground,
     OpenFailed,
     PipeFailed,
     DupFailed,
@@ -121,6 +132,8 @@ pub const Shell = struct {
     history: [MAX_HISTORY][MAX_COMMAND_LENGTH]u8,
     history_count: usize,
     history_index: usize,
+    background_jobs: [MAX_BACKGROUND_JOBS]BackgroundJob,
+    next_job_id: u32,
 
     pub fn init() Shell {
         return Shell{
@@ -131,6 +144,8 @@ pub const Shell = struct {
             .history = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_HISTORY,
             .history_count = 0,
             .history_index = 0,
+            .background_jobs = [_]BackgroundJob{BackgroundJob{}} ** MAX_BACKGROUND_JOBS,
+            .next_job_id = 1,
         };
     }
 
@@ -141,6 +156,7 @@ pub const Shell = struct {
                     self.addToHistory();
                 }
                 _ = self.executeCommand(false);
+                pollBackgroundJobs(self, true);
                 self.buffer_pos = 0;
                 self.cursor_pos = 0;
                 self.command_buffer = [_]u8{0} ** MAX_COMMAND_LENGTH;
@@ -500,13 +516,24 @@ pub const Shell = struct {
             return true;
         }
 
-        if (containsShellOperators(tokens[0..token_count])) {
-            return self.executePipeline(tokens[0..token_count]);
+        const background_requested = isBackgroundRequest(tokens[0..token_count]);
+        const effective_token_count = if (background_requested) token_count - 1 else token_count;
+        if (!isValidBackgroundPlacement(tokens[0..token_count])) {
+            vga.print("Invalid background job placement\n");
+            return false;
+        }
+
+        if (effective_token_count == 0) {
+            return true;
+        }
+
+        if (containsShellOperators(tokens[0..effective_token_count])) {
+            return self.executePipeline(tokens[0..effective_token_count], background_requested);
         }
 
         var args_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
         var args: [MAX_ARGS][*:0]const u8 = undefined;
-        const arg_count = expandSimpleCommandTokens(tokens[0..token_count], &args_storage, &args) catch |err| {
+        const arg_count = expandSimpleCommandTokens(tokens[0..effective_token_count], &args_storage, &args) catch |err| {
             printPipelineConfigError(err);
             return false;
         };
@@ -514,6 +541,10 @@ pub const Shell = struct {
         const command = args[0];
         const command_name = sliceFromCStr(command);
         if (registry.lookup(command_name)) |command_meta| {
+            if (background_requested) {
+                vga.print("Background execution requires an external command\n");
+                return false;
+            }
             self.dispatchCommand(command_meta.id, args[1..arg_count]);
             return true;
         }
@@ -523,18 +554,26 @@ pub const Shell = struct {
             return false;
         };
 
-        if (!wait_for_external) {
+        if (background_requested or !wait_for_external) {
+            if (background_requested) {
+                registerBackgroundJob(self, pid, tokens[0..effective_token_count]);
+            }
             return true;
         }
 
         return waitForExternalCommand(pid);
     }
 
-    fn executePipeline(self: *Shell, tokens: []const CommandToken) bool {
+    fn executePipeline(self: *Shell, tokens: []const CommandToken, background_requested: bool) bool {
         var pipeline = parsePipeline(tokens) catch |err| {
             printPipelineConfigError(err);
             return false;
         };
+
+        if (background_requested) {
+            printPipelineConfigError(error.UnsupportedBackground);
+            return false;
+        }
 
         if (!validatePipelineStages(&pipeline)) {
             return false;
@@ -649,6 +688,7 @@ pub const Shell = struct {
             .ps => process_commands.ps(),
             .meminfo => process_commands.memInfo(),
             .uptime => process_commands.uptime(),
+            .jobs => self.cmdJobs(),
             .kill => process_commands.kill(args),
             .shutdown => self.cmdShutdown(),
             .memtest => system_commands.memTest(),
@@ -763,6 +803,25 @@ pub const Shell = struct {
         }
 
         vga.clear();
+    }
+
+    fn cmdJobs(self: *Shell) void {
+        pollBackgroundJobs(self, false);
+
+        var found = false;
+        for (&self.background_jobs) |*job| {
+            if (!job.active) continue;
+            found = true;
+            var line_buf: [32]u8 = undefined;
+            const prefix = std.fmt.bufPrint(&line_buf, "[{d}] Running ", .{job.id}) catch "[?] Running ";
+            console.print(prefix);
+            console.print(job.command[0..job.command_len]);
+            console.print("\n");
+        }
+
+        if (!found) {
+            console.print("No background jobs\n");
+        }
     }
 
     fn cmdNice(self: *const Shell, args: []const [*:0]const u8) void {
@@ -1712,6 +1771,68 @@ fn waitForExternalCommand(pid: u32) bool {
     return true;
 }
 
+fn registerBackgroundJob(self: *Shell, pid: u32, tokens: []const CommandToken) void {
+    for (&self.background_jobs) |*job| {
+        if (job.active) continue;
+        job.* = BackgroundJob{
+            .active = true,
+            .id = self.next_job_id,
+            .pid = pid,
+        };
+        self.next_job_id += 1;
+        job.command_len = buildCommandText(tokens, &job.command) catch 0;
+
+        var line_buf: [32]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, "[{d}] {d}\n", .{ job.id, pid }) catch "[?]\n";
+        console.print(line);
+        return;
+    }
+
+    console.print("Too many background jobs\n");
+}
+
+fn pollBackgroundJobs(self: *Shell, notify: bool) void {
+    for (&self.background_jobs) |*job| {
+        if (!job.active) continue;
+        const exit_code = posix.pollProcessExit(job.pid) catch {
+            job.active = false;
+            continue;
+        } orelse continue;
+
+        if (notify) {
+            var line_buf: [48]u8 = undefined;
+            const prefix = std.fmt.bufPrint(&line_buf, "[{d}] Done ", .{job.id}) catch "[?] Done ";
+            console.print(prefix);
+            console.print(job.command[0..job.command_len]);
+            if (exit_code != 0) {
+                var status_buf: [24]u8 = undefined;
+                const status_line = std.fmt.bufPrint(&status_buf, " (exit {d})", .{@as(usize, @intCast(if (exit_code < 0) -exit_code else exit_code))}) catch "";
+                console.print(status_line);
+            }
+            console.print("\n");
+        }
+
+        job.active = false;
+    }
+}
+
+fn buildCommandText(tokens: []const CommandToken, buffer: *[MAX_COMMAND_LENGTH]u8) error{NoSpaceLeft}!usize {
+    @memset(buffer, 0);
+    var len: usize = 0;
+    for (tokens, 0..) |token, idx| {
+        if (idx != 0) {
+            if (len + 1 >= buffer.len) return error.NoSpaceLeft;
+            buffer[len] = ' ';
+            len += 1;
+        }
+        if (len + token.len >= buffer.len) return error.NoSpaceLeft;
+        const token_text = sliceFromCStr(token.text);
+        @memcpy(buffer[len .. len + token_text.len], token_text);
+        len += token_text.len;
+    }
+    return len;
+}
+
 fn tokenizeCommandLine(input: []const u8, storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, out_tokens: *[MAX_TOKENS]CommandToken) TokenizationError!usize {
     var token_count: usize = 0;
     var token_len: usize = 0;
@@ -1774,7 +1895,7 @@ fn tokenizeCommandLine(input: []const u8, storage: *[MAX_TOKENS][MAX_COMMAND_LEN
                 escaping = true;
                 token_active = true;
             },
-            '|', '<', '>' => {
+            '|', '<', '>', '&' => {
                 if (token_active) {
                     try finishWordToken(storage, out_tokens, &token_count, &token_len, &token_active, &token_has_glob);
                 }
@@ -1784,6 +1905,7 @@ fn tokenizeCommandLine(input: []const u8, storage: *[MAX_TOKENS][MAX_COMMAND_LEN
                     '|' => .pipe,
                     '<' => .stdin_redirect,
                     '>' => .stdout_redirect,
+                    '&' => .background,
                     else => unreachable,
                 }, if (operator_len == 2) ">>" else input[idx .. idx + 1]);
                 if (operator_len == 2) idx += 1;
@@ -1852,6 +1974,20 @@ fn containsShellOperators(tokens: []const CommandToken) bool {
     return false;
 }
 
+fn isBackgroundRequest(tokens: []const CommandToken) bool {
+    return tokens.len > 0 and tokens[tokens.len - 1].kind == .background;
+}
+
+fn isValidBackgroundPlacement(tokens: []const CommandToken) bool {
+    var idx: usize = 0;
+    while (idx < tokens.len) : (idx += 1) {
+        if (tokens[idx].kind == .background and idx != tokens.len - 1) {
+            return false;
+        }
+    }
+    return true;
+}
+
 fn expandSimpleCommandTokens(tokens: []const CommandToken, args_storage: *[MAX_ARGS][MAX_COMMAND_LENGTH]u8, out_args: *[MAX_ARGS][*:0]const u8) PipelineConfigError!usize {
     var arg_count: usize = 0;
     for (tokens) |token| {
@@ -1904,6 +2040,7 @@ fn parsePipeline(tokens: []const CommandToken) PipelineConfigError!ParsedPipelin
                 stage.arg_glob[stage.arg_count] = token.has_glob;
                 stage.arg_count += 1;
             },
+            .background => return error.UnsupportedBackground,
         }
     }
 
@@ -2216,6 +2353,7 @@ fn printPipelineConfigError(err: PipelineConfigError) void {
         error.UnsupportedBuiltin => vga.print("Pipelines and redirection require external commands\n"),
         error.UnsupportedRedirection => vga.print("Unsupported redirection layout\n"),
         error.AmbiguousRedirect => vga.print("Redirection target expands to multiple paths\n"),
+        error.UnsupportedBackground => vga.print("Background execution for this command form is not supported\n"),
         error.OpenFailed => vga.print("Failed to open redirection target\n"),
         error.PipeFailed => vga.print("Failed to create pipe\n"),
         error.DupFailed => vga.print("Failed to duplicate file descriptor\n"),
