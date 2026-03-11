@@ -247,12 +247,12 @@ fn calculateChecksum(src_ip: u32, dst_ip: u32, tcp_header: *const TCPHeader, dat
     const header_bytes_ptr: [*]const u8 = @ptrCast(tcp_header);
     const header_bytes = header_bytes_ptr[0..@sizeOf(TCPHeader)];
     var i: usize = 0;
-    while (i < header_bytes.len - 1) : (i += 2) {
+    while (i + 1 < header_bytes.len) : (i += 2) {
         sum += @as(u16, header_bytes[i]) << 8 | header_bytes[i + 1];
     }
 
     i = 0;
-    while (i < data.len - 1) : (i += 2) {
+    while (i + 1 < data.len) : (i += 2) {
         sum += @as(u16, data[i]) << 8 | data[i + 1];
     }
     if (data.len & 1 != 0) {
@@ -273,12 +273,12 @@ pub fn calculateChecksumIPv6(src: *const ipv6.IPv6Address, dst: *const ipv6.IPv6
     const header_bytes_ptr: [*]const u8 = @ptrCast(tcp_header);
     const header_bytes = header_bytes_ptr[0..@sizeOf(TCPHeader)];
     var i: usize = 0;
-    while (i < header_bytes.len - 1) : (i += 2) {
+    while (i + 1 < header_bytes.len) : (i += 2) {
         sum += @as(u16, header_bytes[i]) << 8 | header_bytes[i + 1];
     }
 
     i = 0;
-    while (i < data.len - 1) : (i += 2) {
+    while (i + 1 < data.len) : (i += 2) {
         sum += @as(u16, data[i]) << 8 | data[i + 1];
     }
     if (data.len & 1 != 0) {

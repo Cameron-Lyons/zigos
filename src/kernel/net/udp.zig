@@ -81,9 +81,9 @@ pub fn send(local_addr: ipv4.IPv4Address, local_port: u16, remote_addr: ipv4.IPv
     @memcpy(packet[@sizeOf(UDPHeader)..packet_size], data);
 
     const dst_ip = (@as(u32, remote_addr.octets[0]) << 24) |
-                    (@as(u32, remote_addr.octets[1]) << 16) |
-                    (@as(u32, remote_addr.octets[2]) << 8) |
-                    remote_addr.octets[3];
+        (@as(u32, remote_addr.octets[1]) << 16) |
+        (@as(u32, remote_addr.octets[2]) << 8) |
+        remote_addr.octets[3];
 
     const src_ip_u32 = network.getLocalIPRaw();
     udp_header.checksum = calculateChecksum(src_ip_u32, dst_ip, udp_header, data);
@@ -105,12 +105,12 @@ fn calculateChecksum(src_ip: u32, dst_ip: u32, udp_header: *const UDPHeader, dat
     const header_bytes_ptr: [*]const u8 = @ptrCast(udp_header);
     const header_bytes = header_bytes_ptr[0..@sizeOf(UDPHeader)];
     var i: usize = 0;
-    while (i < header_bytes.len - 1) : (i += 2) {
+    while (i + 1 < header_bytes.len) : (i += 2) {
         sum += @as(u16, header_bytes[i]) << 8 | header_bytes[i + 1];
     }
 
     i = 0;
-    while (i < data.len - 1) : (i += 2) {
+    while (i + 1 < data.len) : (i += 2) {
         sum += @as(u16, data[i]) << 8 | data[i + 1];
     }
     if (data.len & 1 != 0) {
@@ -131,12 +131,12 @@ pub fn calculateChecksumIPv6(src: *const ipv6.IPv6Address, dst: *const ipv6.IPv6
     const header_bytes_ptr: [*]const u8 = @ptrCast(udp_header);
     const header_bytes = header_bytes_ptr[0..@sizeOf(UDPHeader)];
     var i: usize = 0;
-    while (i < header_bytes.len - 1) : (i += 2) {
+    while (i + 1 < header_bytes.len) : (i += 2) {
         sum += @as(u16, header_bytes[i]) << 8 | header_bytes[i + 1];
     }
 
     i = 0;
-    while (i < data.len - 1) : (i += 2) {
+    while (i + 1 < data.len) : (i += 2) {
         sum += @as(u16, data[i]) << 8 | data[i + 1];
     }
     if (data.len & 1 != 0) {
@@ -198,7 +198,7 @@ fn handleUDPPacket(src_ip: u32, dst_ip: u32, data: []const u8) void {
         const space_available = socket.recv_buffer.len - socket.recv_buffer_used;
         const to_copy = @min(payload.len, space_available);
         if (to_copy > 0) {
-            @memcpy(socket.recv_buffer[socket.recv_buffer_used..socket.recv_buffer_used + to_copy], payload[0..to_copy]);
+            @memcpy(socket.recv_buffer[socket.recv_buffer_used .. socket.recv_buffer_used + to_copy], payload[0..to_copy]);
             socket.recv_buffer_used += to_copy;
             socket.recv_addr = src_ip;
             socket.recv_port = src_port;

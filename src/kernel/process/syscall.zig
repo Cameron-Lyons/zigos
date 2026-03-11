@@ -477,6 +477,14 @@ pub const LINUX_REBOOT_CMD_POWER_OFF = abi.LINUX_REBOOT_CMD_POWER_OFF;
 const vfsErrno = errno.vfsErrno;
 const socketErrno = errno.socketErrno;
 
+fn rawArgI32(arg: usize) i32 {
+    return @as(i32, @bitCast(@as(u32, @truncate(arg))));
+}
+
+fn rawResultU32(result: i32) u32 {
+    return @bitCast(result);
+}
+
 export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
     const syscall_num = regs.eax;
 
@@ -610,8 +618,8 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_EVENTFD => sys_eventfd(@intCast(arg1)),
         SYS_EVENTFD2 => sys_eventfd2(@intCast(arg1), @intCast(arg2)),
         SYS_PRCTL => sys_prctl(@intCast(arg1), arg2, arg3, arg4, arg5),
-        SYS_SIGNALFD => sys_signalfd(@intCast(arg1), arg2, @intCast(arg3)),
-        SYS_SIGNALFD4 => sys_signalfd4(@intCast(arg1), arg2, @intCast(arg3), @intCast(arg4)),
+        SYS_SIGNALFD => sys_signalfd(rawArgI32(arg1), arg2, @intCast(arg3)),
+        SYS_SIGNALFD4 => sys_signalfd4(rawArgI32(arg1), arg2, @intCast(arg3), @intCast(arg4)),
         SYS_PPOLL => sys_ppoll(arg1, @intCast(arg2), arg3, arg4),
         SYS_PSELECT6 => sys_pselect6(@intCast(arg1), arg2, arg3, arg4, arg5, @as(usize, @bitCast(@as(i32, @intCast(regs.ebp))))),
         SYS_FACCESSAT => sys_faccessat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), 0),
@@ -671,7 +679,7 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         else => ENOSYS,
     };
 
-    regs.eax = @intCast(@as(i32, result));
+    regs.eax = rawResultU32(result);
 
     signal.handlePendingSignals();
 }

@@ -171,7 +171,7 @@ fn calculateChecksum(header: *const IPv4Header, len: usize) u16 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
 
-    const result: u16 = @intCast(~sum);
+    const result: u16 = @truncate(~sum);
     return result;
 }
 
@@ -215,4 +215,3 @@ pub fn registerProtocolHandler(protocol: u8, handler: fn (src_ip: u32, dst_ip: u
 pub fn getLocalIP() u32 {
     return our_ip;
 }
-

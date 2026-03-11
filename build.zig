@@ -14,7 +14,9 @@ const KernelArtifact = struct {
 };
 
 const UserProgramArtifact = struct {
+    compile_step: *std.Build.Step.Compile,
     install_step: *std.Build.Step,
+    emitted_bin: std.Build.LazyPath,
     output_path: []const u8,
 };
 
@@ -401,11 +403,11 @@ fn createUserAssetsModule(
     ls_program: UserProgramArtifact,
 ) *std.Build.Module {
     const write_files = b.addWriteFiles();
-    _ = write_files.addCopyFile(b.path(hello_program.output_path), "assets/hello");
-    _ = write_files.addCopyFile(b.path(echo_program.output_path), "assets/echo");
-    _ = write_files.addCopyFile(b.path(uname_program.output_path), "assets/uname");
-    _ = write_files.addCopyFile(b.path(cat_program.output_path), "assets/cat");
-    _ = write_files.addCopyFile(b.path(ls_program.output_path), "assets/ls");
+    _ = write_files.addCopyFile(hello_program.emitted_bin, "assets/hello");
+    _ = write_files.addCopyFile(echo_program.emitted_bin, "assets/echo");
+    _ = write_files.addCopyFile(uname_program.emitted_bin, "assets/uname");
+    _ = write_files.addCopyFile(cat_program.emitted_bin, "assets/cat");
+    _ = write_files.addCopyFile(ls_program.emitted_bin, "assets/ls");
     _ = write_files.addCopyFile(b.path("user/rootfs/etc/motd"), "assets/motd");
     const assets_source = write_files.add("user_assets.zig", b.fmt(
         \\pub const hello = @embedFile("assets/hello");
@@ -490,7 +492,9 @@ fn addUserProgram(
     });
 
     return .{
+        .compile_step = program,
         .install_step = &install.step,
+        .emitted_bin = program.getEmittedBin(),
         .output_path = b.fmt("zig-out/user/bin/{s}", .{name}),
     };
 }
