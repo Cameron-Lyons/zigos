@@ -21,6 +21,7 @@ const keyboard = @import("../drivers/keyboard.zig");
 const numfmt = @import("../utils/numfmt.zig");
 const posix = @import("../utils/posix.zig");
 const cwd_mod = @import("../process/syscall/cwd.zig");
+const environ = @import("../utils/environ.zig");
 
 const MAX_COMMAND_LENGTH = 256;
 const MAX_ARGS = 16;
@@ -32,9 +33,11 @@ const MAX_BACKGROUND_JOBS = 8;
 
 const TokenizationError = error{
     UnterminatedQuote,
+    UnterminatedSubstitution,
     TrailingEscape,
     TooManyTokens,
     TokenTooLong,
+    CommandSubstitutionFailed,
 };
 
 const TokenKind = enum {
@@ -137,6 +140,7 @@ pub const Shell = struct {
     background_jobs: [MAX_BACKGROUND_JOBS]BackgroundJob,
     next_job_id: u32,
     foreground_pid: ?u32,
+    next_capture_id: u32,
 
     pub fn init() Shell {
         return Shell{
@@ -150,6 +154,7 @@ pub const Shell = struct {
             .background_jobs = [_]BackgroundJob{BackgroundJob{}} ** MAX_BACKGROUND_JOBS,
             .next_job_id = 1,
             .foreground_pid = null,
+            .next_capture_id = 1,
         };
     }
 
@@ -520,7 +525,7 @@ pub const Shell = struct {
 
         var token_storage: [MAX_TOKENS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_TOKENS;
         var tokens: [MAX_TOKENS]CommandToken = undefined;
-        const token_count = tokenizeCommandLine(self.command_buffer[0..self.buffer_pos], &token_storage, &tokens) catch |err| {
+        const token_count = tokenizeCommandLine(self, self.command_buffer[0..self.buffer_pos], &token_storage, &tokens, true) catch |err| {
             printTokenizationError(err);
             return false;
         };
@@ -2000,7 +2005,7 @@ fn buildCommandText(tokens: []const CommandToken, buffer: *[MAX_COMMAND_LENGTH]u
     return len;
 }
 
-fn tokenizeCommandLine(input: []const u8, storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, out_tokens: *[MAX_TOKENS]CommandToken) TokenizationError!usize {
+fn tokenizeCommandLine(self: *Shell, input: []const u8, storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, out_tokens: *[MAX_TOKENS]CommandToken, allow_command_substitution: bool) TokenizationError!usize {
     var token_count: usize = 0;
     var token_len: usize = 0;
     var token_active = false;
@@ -2035,6 +2040,8 @@ fn tokenizeCommandLine(input: []const u8, storage: *[MAX_TOKENS][MAX_COMMAND_LEN
                 in_double_quote = false;
             } else if (char == '\\') {
                 escaping = true;
+            } else if (char == '$') {
+                try expandShellSubstitution(self, input, &idx, storage, token_count, &token_len, &token_has_glob, allow_command_substitution, true);
             } else {
                 try appendTokenChar(storage, token_count, &token_len, char);
             }
@@ -2060,6 +2067,10 @@ fn tokenizeCommandLine(input: []const u8, storage: *[MAX_TOKENS][MAX_COMMAND_LEN
             },
             '\\' => {
                 escaping = true;
+                token_active = true;
+            },
+            '$' => {
+                try expandShellSubstitution(self, input, &idx, storage, token_count, &token_len, &token_has_glob, allow_command_substitution, false);
                 token_active = true;
             },
             '|', '<', '>', '&' => {
@@ -2103,6 +2114,167 @@ fn appendTokenChar(storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, token_index: us
     if (token_len.* + 1 >= MAX_COMMAND_LENGTH) return error.TokenTooLong;
     storage[token_index][token_len.*] = char;
     token_len.* += 1;
+}
+
+fn appendTokenText(storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, token_index: usize, token_len: *usize, text: []const u8) TokenizationError!void {
+    for (text) |char| {
+        try appendTokenChar(storage, token_index, token_len, char);
+    }
+}
+
+fn expandShellSubstitution(self: *Shell, input: []const u8, idx: *usize, storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, token_index: usize, token_len: *usize, token_has_glob: *bool, allow_command_substitution: bool, quoted: bool) TokenizationError!void {
+    if (idx.* + 1 >= input.len) {
+        try appendTokenChar(storage, token_index, token_len, '$');
+        return;
+    }
+
+    if (input[idx.* + 1] == '(') {
+        if (!allow_command_substitution) return error.CommandSubstitutionFailed;
+
+        const sub_slice = parseCommandSubstitution(input, idx) catch return error.UnterminatedSubstitution;
+        var output_buffer: [MAX_COMMAND_LENGTH]u8 = undefined;
+        const output_len = captureCommandSubstitution(self, sub_slice, &output_buffer) catch return error.CommandSubstitutionFailed;
+        try appendTokenText(storage, token_index, token_len, output_buffer[0..output_len]);
+        if (!quoted and containsWildcardChars(output_buffer[0..output_len])) {
+            token_has_glob.* = true;
+        }
+        return;
+    }
+
+    const maybe_var = parseVariableReference(input, idx);
+    if (maybe_var == null) {
+        try appendTokenChar(storage, token_index, token_len, '$');
+        return;
+    }
+
+    if (environ.getVar(maybe_var.?)) |value| {
+        try appendTokenText(storage, token_index, token_len, value);
+        if (!quoted and containsWildcardChars(value)) {
+            token_has_glob.* = true;
+        }
+    }
+}
+
+fn parseVariableReference(input: []const u8, idx: *usize) ?[]const u8 {
+    const next = idx.* + 1;
+    if (next >= input.len) return null;
+
+    if (input[next] == '{') {
+        var end = next + 1;
+        while (end < input.len and input[end] != '}') : (end += 1) {}
+        if (end >= input.len) return null;
+        idx.* = end;
+        return input[next + 1 .. end];
+    }
+
+    var end = next;
+    while (end < input.len and isVarChar(input[end])) : (end += 1) {}
+    if (end == next) return null;
+    idx.* = end - 1;
+    return input[next..end];
+}
+
+fn parseCommandSubstitution(input: []const u8, idx: *usize) error{Unterminated}![]const u8 {
+    var depth: usize = 1;
+    var cursor = idx.* + 2;
+    var in_single_quote = false;
+    var in_double_quote = false;
+    var escaping = false;
+
+    while (cursor < input.len) : (cursor += 1) {
+        const char = input[cursor];
+
+        if (escaping) {
+            escaping = false;
+            continue;
+        }
+
+        if (in_single_quote) {
+            if (char == '\'') in_single_quote = false;
+            continue;
+        }
+
+        if (in_double_quote) {
+            if (char == '"') {
+                in_double_quote = false;
+            } else if (char == '\\') {
+                escaping = true;
+            }
+            continue;
+        }
+
+        switch (char) {
+            '\'' => in_single_quote = true,
+            '"' => in_double_quote = true,
+            '\\' => escaping = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) {
+                    const sub = input[idx.* + 2 .. cursor];
+                    idx.* = cursor;
+                    return sub;
+                }
+            },
+            else => {},
+        }
+    }
+
+    return error.Unterminated;
+}
+
+fn captureCommandSubstitution(self: *Shell, line: []const u8, output: []u8) error{ CommandFailed, NoSpaceLeft }!usize {
+    var token_storage: [MAX_TOKENS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_TOKENS;
+    var tokens: [MAX_TOKENS]CommandToken = undefined;
+    const token_count = tokenizeCommandLine(self, line, &token_storage, &tokens, false) catch return error.CommandFailed;
+    if (token_count == 0) return 0;
+    if (containsShellOperators(tokens[0..token_count])) return error.CommandFailed;
+
+    var args_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
+    var args: [MAX_ARGS][*:0]const u8 = undefined;
+    const arg_count = expandSimpleCommandTokens(tokens[0..token_count], &args_storage, &args) catch return error.CommandFailed;
+    if (arg_count == 0) return 0;
+
+    const command_name = sliceFromCStr(args[0]);
+    if (registry.lookup(command_name) != null) return error.CommandFailed;
+
+    var temp_path: [64]u8 = undefined;
+    const temp_len = makeCommandCapturePath(self, &temp_path) catch return error.NoSpaceLeft;
+    const temp_path_z: [*:0]const u8 = @ptrCast(&temp_path[0]);
+    const stdout_fd = openRedirectFd(temp_path_z, vfs.O_WRONLY | vfs.O_CREAT | vfs.O_TRUNC) catch return error.CommandFailed;
+    defer closeRedirectFd(stdout_fd);
+    defer vfs.unlink(temp_path[0..temp_len]) catch {};
+
+    const pid = self.launchExternalCommandWithRedirects(args[0..arg_count], null, null, stdout_fd) catch return error.CommandFailed;
+    if (!waitForForegroundCommand(self, pid)) return error.CommandFailed;
+
+    const fd = vfs.open(temp_path[0..temp_len], vfs.O_RDONLY) catch return error.CommandFailed;
+    defer vfs.close(fd) catch {};
+    const bytes_read = vfs.read(fd, output) catch return error.CommandFailed;
+
+    return trimCommandSubstitution(output[0..bytes_read]);
+}
+
+fn trimCommandSubstitution(output: []u8) usize {
+    var len = output.len;
+    while (len > 0 and (output[len - 1] == '\n' or output[len - 1] == '\r')) : (len -= 1) {}
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        if (output[i] == '\n' or output[i] == '\r') {
+            output[i] = ' ';
+        }
+    }
+    return len;
+}
+
+fn makeCommandCapturePath(self: *Shell, buffer: *[64]u8) error{NoSpaceLeft}!usize {
+    const current_pid = process.getCurrentPID();
+    const capture_id = self.next_capture_id;
+    self.next_capture_id += 1;
+    const rendered = std.fmt.bufPrint(buffer, "/tmp/.cmdsub-{d}-{d}", .{ current_pid, capture_id }) catch return error.NoSpaceLeft;
+    if (rendered.len >= buffer.len) return error.NoSpaceLeft;
+    buffer[rendered.len] = 0;
+    return rendered.len;
 }
 
 fn finishWordToken(storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, out_tokens: *[MAX_TOKENS]CommandToken, token_count: *usize, token_len: *usize, token_active: *bool, token_has_glob: *bool) TokenizationError!void {
@@ -2427,6 +2599,13 @@ fn containsWildcardChars(text: []const u8) bool {
     return false;
 }
 
+fn isVarChar(char: u8) bool {
+    return (char >= 'A' and char <= 'Z') or
+        (char >= 'a' and char <= 'z') or
+        (char >= '0' and char <= '9') or
+        char == '_';
+}
+
 fn wildcardMatch(pattern: []const u8, text: []const u8) bool {
     var pattern_idx: usize = 0;
     var text_idx: usize = 0;
@@ -2532,9 +2711,11 @@ fn printPipelineConfigError(err: PipelineConfigError) void {
 fn printTokenizationError(err: TokenizationError) void {
     switch (err) {
         error.UnterminatedQuote => vga.print("Unterminated quoted string\n"),
+        error.UnterminatedSubstitution => vga.print("Unterminated command substitution\n"),
         error.TrailingEscape => vga.print("Trailing escape in command line\n"),
         error.TooManyTokens => vga.print("Too many shell tokens\n"),
         error.TokenTooLong => vga.print("Shell token too long\n"),
+        error.CommandSubstitutionFailed => vga.print("Command substitution failed\n"),
     }
 }
 
