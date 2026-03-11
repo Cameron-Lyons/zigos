@@ -594,11 +594,6 @@ pub fn getNodePath(vnode: *VNode) VFSError![]const u8 {
 
     var pos: usize = 0;
 
-    if (depth == 1 and components[0].name_len == 1 and components[0].name[0] == '/') {
-        path_buffer[0] = '/';
-        return path_buffer[0..1];
-    }
-
     var i: usize = depth;
     while (i > 0) {
         i -= 1;
@@ -615,10 +610,30 @@ pub fn getNodePath(vnode: *VNode) VFSError![]const u8 {
 
     if (pos == 0) {
         path_buffer[0] = '/';
-        return path_buffer[0..1];
+        pos = 1;
     }
 
-    return path_buffer[0..pos];
+    const mount_point = vnode.mount_point orelse return path_buffer[0..pos];
+    const mount_path = mount_point.mount_path[0..strlen(&mount_point.mount_path)];
+    if (mount_path.len == 0 or (mount_path.len == 1 and mount_path[0] == '/')) {
+        return path_buffer[0..pos];
+    }
+
+    if (pos == 1 and path_buffer[0] == '/') {
+        if (mount_path.len > path_buffer.len) return VFSError.InvalidPath;
+        @memcpy(path_buffer[0..mount_path.len], mount_path);
+        return path_buffer[0..mount_path.len];
+    }
+
+    var relative_path: [512]u8 = undefined;
+    if (pos > relative_path.len or mount_path.len + pos > path_buffer.len) {
+        return VFSError.InvalidPath;
+    }
+
+    @memcpy(relative_path[0..pos], path_buffer[0..pos]);
+    @memcpy(path_buffer[0..mount_path.len], mount_path);
+    @memcpy(path_buffer[mount_path.len .. mount_path.len + pos], relative_path[0..pos]);
+    return path_buffer[0 .. mount_path.len + pos];
 }
 
 pub fn openVNode(vnode: *VNode, flags: u32) VFSError!void {

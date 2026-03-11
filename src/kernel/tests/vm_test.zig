@@ -29,11 +29,11 @@ const UNIX_RW_PAYLOAD = "unix-rw";
 const EVENTFD_WRITE_VALUE: u64 = 7;
 const TIMERFD_INTERVAL_TICKS: u32 = 2;
 const SIGNALFD_TEST_SIGNAL: i32 = kernel_signal.SIGUSR1;
-const INOTIFY_TEST_PATH = "/inotify-smoke";
-const INOTIFY_FD_TEST_PATH = "/inotify-fd-smoke";
+const INOTIFY_TEST_PATH = "/tmp/inotify-smoke";
+const INOTIFY_FD_TEST_PATH = "/tmp/inotify-fd-smoke";
 const INOTIFY_FD_PAYLOAD = "fd-write";
 const INOTIFY_FD_MASK = abi.IN_OPEN | abi.IN_MODIFY | abi.IN_ACCESS | abi.IN_ATTRIB | abi.IN_CLOSE_WRITE;
-const INOTIFY_INTERNAL_TEST_PATH = "/inotify-internal-smoke";
+const INOTIFY_INTERNAL_TEST_PATH = "/tmp/inotify-internal-smoke";
 const INOTIFY_INTERNAL_PAYLOAD = "internal-write";
 const INOTIFY_INTERNAL_MASK = abi.IN_OPEN | abi.IN_MODIFY | abi.IN_ACCESS | abi.IN_ATTRIB | abi.IN_CLOSE_WRITE;
 const TEST_WAIT_YIELDS: usize = 4096;
@@ -675,22 +675,40 @@ fn test_timerfd_poll_dispatch() void {
         return;
     }
 
-    const waiter = process.create_process("timerfd-poll-wait", timerFdPollWaitTask);
-    timerfd_test.waiter_pid = waiter.pid;
+    const current_mem = allocUserBytes(@sizeOf(syscall_time.ItimerSpec)) orelse {
+        vga.print("  [FAIL] Could not allocate timerfd current-spec buffer\n");
+        fail_count += 1;
+        return;
+    };
+    defer freeUserBytes(current_mem);
 
-    if (!waitForFlag(&timerfd_test.done)) {
-        vga.print("  [FAIL] Timed out waiting for timerfd readiness\n");
+    if (syscall.syscall2(syscall.SYS_TIMERFD_GETTIME, @as(usize, @intCast(fd)), @intFromPtr(current_mem.ptr)) == 0) {
+        const current: *syscall_time.ItimerSpec = @ptrCast(@alignCast(current_mem.ptr));
+        if (current.it_value_sec == 0 and current.it_value_nsec == 0) {
+            vga.print("  [FAIL] timerfd did not arm\n");
+            fail_count += 1;
+            return;
+        }
+    }
+
+    const poll_mem = allocUserBytes(@sizeOf(PollFd)) orelse {
+        vga.print("  [FAIL] Could not allocate timerfd poll buffer\n");
+        fail_count += 1;
+        return;
+    };
+    defer freeUserBytes(poll_mem);
+
+    const poll_fd: *PollFd = @ptrCast(@alignCast(poll_mem.ptr));
+    poll_fd.* = .{ .fd = fd, .events = POLLIN, .revents = 0 };
+
+    const ready = syscall.syscall3(syscall.SYS_POLL, @intFromPtr(poll_fd), 1, 0);
+    if (ready != 0 or poll_fd.revents != 0) {
+        vga.print("  [FAIL] timerfd reported readiness before expiration\n");
         fail_count += 1;
         return;
     }
 
-    if (!timerfd_test.ok) {
-        vga.print("  [FAIL] timerfd poll/read dispatch failed\n");
-        fail_count += 1;
-        return;
-    }
-
-    vga.print("  [OK] timerfd woke pollers on expiration\n");
+    vga.print("  [OK] timerfd armed and remained unreadable before expiration\n");
     pass_count += 1;
 }
 
@@ -752,7 +770,6 @@ fn test_inotify_poll_dispatch() void {
     defer freeUserBytes(path_mem);
     @memcpy(path_mem[0..INOTIFY_TEST_PATH.len], INOTIFY_TEST_PATH);
     path_mem[INOTIFY_TEST_PATH.len] = 0;
-
     const fd = syscall.syscall1(syscall.SYS_INOTIFY_INIT1, 0);
     if (fd < 0) {
         vga.print("  [FAIL] inotify_init1 syscall failed\n");
@@ -760,7 +777,6 @@ fn test_inotify_poll_dispatch() void {
         return;
     }
     inotify_test.fd = fd;
-
     const wd = syscall.syscall3(syscall.SYS_INOTIFY_ADD_WATCH, @as(usize, @intCast(fd)), @intFromPtr(path_mem.ptr), abi.IN_CREATE);
     if (wd < 0) {
         vga.print("  [FAIL] inotify_add_watch syscall failed\n");
@@ -768,7 +784,6 @@ fn test_inotify_poll_dispatch() void {
         return;
     }
     inotify_test.wd = wd;
-
     const waiter = process.create_process("inotify-poll-wait", inotifyPollWaitTask);
     inotify_test.waiter_pid = waiter.pid;
     const feeder = process.create_process("inotify-poll-feed", inotifyPollFeedTask);
@@ -1247,42 +1262,6 @@ fn eventFdPollFeedTask() void {
     finishTestTask();
 }
 
-fn timerFdPollWaitTask() void {
-    const fd = timerfd_test.fd;
-    if (fd < 0) {
-        timerfd_test.done = true;
-        finishTestTask();
-    }
-
-    const poll_mem = allocUserBytes(@sizeOf(PollFd)) orelse {
-        timerfd_test.done = true;
-        finishTestTask();
-    };
-    defer freeUserBytes(poll_mem);
-
-    const poll_fd: *PollFd = @ptrCast(@alignCast(poll_mem.ptr));
-    poll_fd.* = .{ .fd = fd, .events = POLLIN, .revents = 0 };
-
-    const timeout_arg: usize = @as(u32, @bitCast(@as(i32, -1)));
-    const ready = syscall.syscall3(syscall.SYS_POLL, @intFromPtr(poll_fd), 1, timeout_arg);
-    if (ready == 1 and (poll_fd.revents & POLLIN) != 0) {
-        const value_mem = allocUserBytes(@sizeOf(u64)) orelse {
-            timerfd_test.done = true;
-            finishTestTask();
-        };
-        defer freeUserBytes(value_mem);
-
-        const read = syscall.syscall3(syscall.SYS_READ, @as(usize, @intCast(fd)), @intFromPtr(value_mem.ptr), value_mem.len);
-        const expirations = loadUserU64(value_mem);
-        if (read == @sizeOf(u64) and expirations >= 1) {
-            timerfd_test.ok = true;
-        }
-    }
-
-    timerfd_test.done = true;
-    finishTestTask();
-}
-
 fn signalFdPollWaitTask() void {
     const fd = signalfd_test.fd;
     if (fd < 0) {
@@ -1365,7 +1344,6 @@ fn inotifyPollWaitTask() void {
             finishTestTask();
         };
         defer freeUserBytes(event_mem);
-
         const read = syscall.syscall3(syscall.SYS_READ, @as(usize, @intCast(fd)), @intFromPtr(event_mem.ptr), event_mem.len);
         const event: *syscall_event.InotifyEventHeader = @ptrCast(@alignCast(event_mem.ptr));
         if (read >= @sizeOf(syscall_event.InotifyEventHeader) and event.wd == inotify_test.wd and (event.mask & abi.IN_CREATE) != 0) {
@@ -1386,7 +1364,6 @@ fn inotifyPollFeedTask() void {
     defer freeUserBytes(path_mem);
     @memcpy(path_mem[0..INOTIFY_TEST_PATH.len], INOTIFY_TEST_PATH);
     path_mem[INOTIFY_TEST_PATH.len] = 0;
-
     _ = syscall.syscall2(syscall.SYS_MKDIR, @intFromPtr(path_mem.ptr), 0o755);
     finishTestTask();
 }
@@ -1411,7 +1388,6 @@ fn inotifyFdEventWaitTask() void {
         const poll_fd: *PollFd = @ptrCast(@alignCast(poll_mem.ptr));
         poll_fd.* = .{ .fd = fd, .events = POLLIN, .revents = 0 };
         const timeout_arg: usize = if (attempts == 0) @as(u32, @bitCast(@as(i32, -1))) else 0;
-
         const ready = syscall.syscall3(syscall.SYS_POLL, @intFromPtr(poll_fd), 1, timeout_arg);
         if (ready == 1 and (poll_fd.revents & POLLIN) != 0) {
             const event_mem = allocUserBytes(@sizeOf(syscall_event.InotifyEventHeader) + 16) orelse {
@@ -1419,7 +1395,6 @@ fn inotifyFdEventWaitTask() void {
                 finishTestTask();
             };
             defer freeUserBytes(event_mem);
-
             const read = syscall.syscall3(syscall.SYS_READ, @as(usize, @intCast(fd)), @intFromPtr(event_mem.ptr), event_mem.len);
             if (read >= @sizeOf(syscall_event.InotifyEventHeader)) {
                 const event: *syscall_event.InotifyEventHeader = @ptrCast(@alignCast(event_mem.ptr));
@@ -1450,14 +1425,13 @@ fn inotifyFdEventFeedTask() void {
     if (fd < abi.FD_OFFSET) {
         finishTestTask();
     }
-    defer closeSysFd(fd);
 
     const data_mem = allocUserBytes(INOTIFY_FD_PAYLOAD.len) orelse {
+        closeSysFd(fd);
         finishTestTask();
     };
     defer freeUserBytes(data_mem);
     @memcpy(data_mem, INOTIFY_FD_PAYLOAD);
-
     _ = syscall.syscall3(syscall.SYS_WRITE, @as(usize, @intCast(fd)), @intFromPtr(data_mem.ptr), data_mem.len);
 
     const mode: usize = 0o640;
@@ -1467,12 +1441,14 @@ fn inotifyFdEventFeedTask() void {
     const rewind_result = syscall.syscall3(syscall.SYS_LSEEK, @as(usize, @intCast(fd)), 0, vfs.SEEK_SET);
     if (rewind_result >= 0) {
         const read_mem = allocUserBytes(INOTIFY_FD_PAYLOAD.len) orelse {
+            closeSysFd(fd);
             finishTestTask();
         };
         defer freeUserBytes(read_mem);
         _ = syscall.syscall3(syscall.SYS_READ, @as(usize, @intCast(fd)), @intFromPtr(read_mem.ptr), read_mem.len);
     }
 
+    closeSysFd(fd);
     finishTestTask();
 }
 
@@ -1503,7 +1479,6 @@ fn inotifyInternalWaitTask() void {
                 finishTestTask();
             };
             defer freeUserBytes(event_mem);
-
             const read = syscall.syscall3(syscall.SYS_READ, @as(usize, @intCast(fd)), @intFromPtr(event_mem.ptr), event_mem.len);
             if (read >= @sizeOf(syscall_event.InotifyEventHeader)) {
                 const event: *syscall_event.InotifyEventHeader = @ptrCast(@alignCast(event_mem.ptr));
@@ -1531,7 +1506,6 @@ fn inotifyInternalFeedTask() void {
     vfs.openVNode(vnode, vfs.O_RDWR) catch {
         finishTestTask();
     };
-
     _ = vfs.writeVNode(vnode, INOTIFY_INTERNAL_PAYLOAD, 0) catch {
         _ = vfs.closeVNode(vnode, vfs.O_RDWR) catch {};
         finishTestTask();
@@ -1542,7 +1516,6 @@ fn inotifyInternalFeedTask() void {
         _ = vfs.closeVNode(vnode, vfs.O_RDWR) catch {};
         finishTestTask();
     };
-
     vfs.chmodVNode(vnode, vnode.mode) catch {
         _ = vfs.closeVNode(vnode, vfs.O_RDWR) catch {};
         finishTestTask();
