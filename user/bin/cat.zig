@@ -9,8 +9,7 @@ pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[
     _ = envp;
 
     if (argc < 2) {
-        stdio.eputs("Usage: cat <file>\n");
-        return 1;
+        return if (catStdin()) 0 else 1;
     }
 
     var exit_code: i32 = 0;
@@ -23,6 +22,19 @@ pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[
     }
 
     return exit_code;
+}
+
+fn catStdin() bool {
+    var buffer: [512]u8 = undefined;
+    while (true) {
+        const rc = syscall.read(syscall.STDIN, &buffer);
+        if (rc == 0) return true;
+        if (syscall.isError(rc)) {
+            stdio.eputs("cat: failed to read stdin\n");
+            return false;
+        }
+        stdio.writeAll(syscall.STDOUT, buffer[0..@intCast(rc)]);
+    }
 }
 
 fn catFile(path: [*:0]const u8) bool {

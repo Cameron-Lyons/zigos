@@ -5,7 +5,9 @@ const memory = @import("../memory/memory.zig");
 const scheduler = @import("scheduler.zig");
 const smp = @import("../smp/smp.zig");
 const credentials = @import("credentials.zig");
+const abi = @import("syscall/abi.zig");
 const timer = @import("../timer/timer.zig");
+const vfs = @import("../fs/vfs.zig");
 pub const signal = @import("signal.zig");
 
 pub const ProcessState = enum {
@@ -62,6 +64,9 @@ pub const Process = struct {
     alarm_time: u64 = 0,
     umask: u16 = 0o022,
     signals: signal.ProcessSignals = signal.ProcessSignals.defaultValue(),
+    stdin_redirect: ?i32 = null,
+    stdout_redirect: ?i32 = null,
+    stderr_redirect: ?i32 = null,
     extended_idx: ?u8 = null,
 };
 
@@ -115,6 +120,7 @@ pub fn terminateProcess(pid: u32) bool {
 
     const proc = getProcessByPid(pid) orelse return false;
 
+    cleanupStdioRedirects(proc);
     proc.state = .Terminated;
     unregisterAndRemoveProcess(proc);
 
@@ -169,6 +175,19 @@ pub fn unregisterAndRemoveProcess(proc: *Process) void {
         }
         prev = p;
         curr = p.next;
+    }
+}
+
+pub fn cleanupStdioRedirects(proc: *Process) void {
+    const redirected = [_]*?i32{ &proc.stdin_redirect, &proc.stdout_redirect, &proc.stderr_redirect };
+    for (redirected) |slot| {
+        if (slot.*) |fd| {
+            if (fd >= abi.FD_OFFSET) {
+                const vfs_fd: u32 = @intCast(fd - abi.FD_OFFSET);
+                vfs.close(vfs_fd) catch {};
+            }
+            slot.* = null;
+        }
     }
 }
 

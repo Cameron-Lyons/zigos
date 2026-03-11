@@ -1,4 +1,5 @@
 // zlint-disable suppressed-errors
+const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const console = @import("../utils/console.zig");
 const process = @import("../process/process.zig");
@@ -23,6 +24,7 @@ const MAX_COMMAND_LENGTH = 256;
 const MAX_ARGS = 16;
 const MAX_HISTORY = 50;
 const MAX_EXTERNAL_LAUNCHES = 8;
+const MAX_PIPE_STAGES = 8;
 
 const ExternalLaunchError = error{
     CommandNotFound,
@@ -43,6 +45,32 @@ const ExternalCommandLaunch = struct {
     argv_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS,
     file_len: usize = 0,
     file_storage: [32768]u8 = [_]u8{0} ** 32768,
+};
+
+const ParsedStage = struct {
+    args: [MAX_ARGS][*:0]const u8 = undefined,
+    arg_count: usize = 0,
+    stdin_path: ?[*:0]const u8 = null,
+    stdout_path: ?[*:0]const u8 = null,
+    append_stdout: bool = false,
+};
+
+const ParsedPipeline = struct {
+    stages: [MAX_PIPE_STAGES]ParsedStage = [_]ParsedStage{ParsedStage{}} ** MAX_PIPE_STAGES,
+    stage_count: usize = 0,
+};
+
+const PipelineConfigError = error{
+    EmptyStage,
+    MissingPath,
+    TooManyStages,
+    ArgumentTooLong,
+    UnsupportedBuiltin,
+    UnsupportedRedirection,
+    OpenFailed,
+    PipeFailed,
+    DupFailed,
+    CloseFailed,
 };
 
 var external_command_launches: [MAX_EXTERNAL_LAUNCHES]ExternalCommandLaunch = [_]ExternalCommandLaunch{ExternalCommandLaunch{}} ** MAX_EXTERNAL_LAUNCHES;
@@ -464,6 +492,10 @@ pub const Shell = struct {
             return true;
         }
 
+        if (containsShellOperators(args[0..arg_count])) {
+            return self.executePipeline(args[0..arg_count]);
+        }
+
         const command = args[0];
         const command_name = sliceFromCStr(command);
         if (registry.lookup(command_name)) |command_meta| {
@@ -483,7 +515,72 @@ pub const Shell = struct {
         return waitForExternalCommand(pid);
     }
 
+    fn executePipeline(self: *Shell, tokens: []const [*:0]const u8) bool {
+        var pipeline = parsePipeline(tokens) catch |err| {
+            printPipelineConfigError(err);
+            return false;
+        };
+
+        if (!validatePipelineStages(&pipeline)) {
+            return false;
+        }
+
+        var temp_paths: [MAX_PIPE_STAGES - 1][64]u8 = [_][64]u8{[_]u8{0} ** 64} ** (MAX_PIPE_STAGES - 1);
+        var temp_path_lens: [MAX_PIPE_STAGES - 1]usize = [_]usize{0} ** (MAX_PIPE_STAGES - 1);
+        if (pipeline.stage_count > 1) {
+            var temp_idx: usize = 0;
+            while (temp_idx + 1 < pipeline.stage_count) : (temp_idx += 1) {
+                temp_path_lens[temp_idx] = makePipelineTempPath(&temp_paths[temp_idx], temp_idx) catch {
+                    printPipelineConfigError(error.OpenFailed);
+                    return false;
+                };
+            }
+        }
+        defer cleanupPipelineTempFiles(&temp_paths, &temp_path_lens, pipeline.stage_count);
+
+        var success = true;
+        var stage_idx: usize = 0;
+        while (stage_idx < pipeline.stage_count) : (stage_idx += 1) {
+            const stage = &pipeline.stages[stage_idx];
+            const stdin_fd = openStageInput(stage, &temp_paths, &temp_path_lens, stage_idx) catch |err| {
+                printPipelineConfigError(err);
+                return false;
+            };
+            const stdout_fd = openStageOutput(stage, &temp_paths, &temp_path_lens, pipeline.stage_count, stage_idx) catch |err| {
+                closeRedirectFd(stdin_fd);
+                printPipelineConfigError(err);
+                return false;
+            };
+            const pid = self.launchExternalCommandWithRedirects(
+                stage.args[0..stage.arg_count],
+                null,
+                stdin_fd,
+                stdout_fd,
+            ) catch |err| {
+                closeRedirectFd(stdin_fd);
+                closeRedirectFd(stdout_fd);
+                if (stage.arg_count > 0) {
+                    printExternalCommandError(stage.args[0], err);
+                } else {
+                    printPipelineConfigError(error.EmptyStage);
+                }
+                return false;
+            };
+
+            if (!waitForExternalCommand(pid)) {
+                success = false;
+                break;
+            }
+        }
+
+        return success;
+    }
+
     fn launchExternalCommand(self: *const Shell, command_args: []const [*:0]const u8, nice_value: ?i8) ExternalLaunchError!u32 {
+        return self.launchExternalCommandWithRedirects(command_args, nice_value, null, null);
+    }
+
+    fn launchExternalCommandWithRedirects(self: *const Shell, command_args: []const [*:0]const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32) ExternalLaunchError!u32 {
         _ = self;
         if (command_args.len == 0) {
             return error.CommandNotFound;
@@ -511,6 +608,8 @@ pub const Shell = struct {
 
         const process_name = sliceFromCStr(command_args[0]);
         const user_proc = process.create_exec_process(process_name);
+        user_proc.stdin_redirect = stdin_fd;
+        user_proc.stdout_redirect = stdout_fd;
         launch.pid = user_proc.pid;
 
         if (nice_value) |nice| {
@@ -1591,6 +1690,162 @@ fn waitForExternalCommand(pid: u32) bool {
     }
 
     return true;
+}
+
+fn containsShellOperators(tokens: []const [*:0]const u8) bool {
+    for (tokens) |token| {
+        const slice = sliceFromCStr(token);
+        if (std.mem.eql(u8, slice, "|") or std.mem.eql(u8, slice, "<") or std.mem.eql(u8, slice, ">") or std.mem.eql(u8, slice, ">>")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn parsePipeline(tokens: []const [*:0]const u8) PipelineConfigError!ParsedPipeline {
+    var result = ParsedPipeline{};
+    result.stage_count = 1;
+
+    var stage_idx: usize = 0;
+    var token_idx: usize = 0;
+    while (token_idx < tokens.len) : (token_idx += 1) {
+        const token = tokens[token_idx];
+        const token_slice = sliceFromCStr(token);
+        var stage = &result.stages[stage_idx];
+
+        if (std.mem.eql(u8, token_slice, "|")) {
+            if (stage.arg_count == 0) return error.EmptyStage;
+            if (stage_idx + 1 >= MAX_PIPE_STAGES) return error.TooManyStages;
+            stage_idx += 1;
+            result.stage_count = stage_idx + 1;
+            continue;
+        }
+
+        if (std.mem.eql(u8, token_slice, "<")) {
+            if (token_idx + 1 >= tokens.len) return error.MissingPath;
+            if (stage_idx != 0 or stage.stdin_path != null) return error.UnsupportedRedirection;
+            token_idx += 1;
+            stage.stdin_path = tokens[token_idx];
+            continue;
+        }
+
+        if (std.mem.eql(u8, token_slice, ">") or std.mem.eql(u8, token_slice, ">>")) {
+            if (token_idx + 1 >= tokens.len) return error.MissingPath;
+            if (stage.stdout_path != null) return error.UnsupportedRedirection;
+            token_idx += 1;
+            stage.stdout_path = tokens[token_idx];
+            stage.append_stdout = std.mem.eql(u8, token_slice, ">>");
+            continue;
+        }
+
+        if (stage.arg_count >= MAX_ARGS) return error.ArgumentTooLong;
+        stage.args[stage.arg_count] = token;
+        stage.arg_count += 1;
+    }
+
+    for (result.stages[0..result.stage_count]) |stage| {
+        if (stage.arg_count == 0) return error.EmptyStage;
+    }
+
+    if (result.stage_count > 1) {
+        if (result.stages[0].stdout_path != null) return error.UnsupportedRedirection;
+        var idx: usize = 1;
+        while (idx < result.stage_count) : (idx += 1) {
+            const stage = result.stages[idx];
+            if (idx < result.stage_count - 1 and stage.stdout_path != null) return error.UnsupportedRedirection;
+            if (stage.stdin_path != null) return error.UnsupportedRedirection;
+        }
+    }
+
+    return result;
+}
+
+fn validatePipelineStages(pipeline: *const ParsedPipeline) bool {
+    for (pipeline.stages[0..pipeline.stage_count]) |stage| {
+        const command_name = sliceFromCStr(stage.args[0]);
+        if (registry.lookup(command_name) != null) {
+            vga.print("Pipelines and redirection currently require external commands: ");
+            printString(stage.args[0]);
+            vga.print("\n");
+            return false;
+        }
+    }
+    return true;
+}
+
+fn openRedirectFd(path: [*:0]const u8, flags: u32) PipelineConfigError!i32 {
+    const raw_fd = vfs.open(sliceFromCStr(path), flags) catch return error.OpenFailed;
+    errdefer vfs.close(raw_fd) catch {};
+    const child_fd = vfs.dup(raw_fd) catch return error.DupFailed;
+    vfs.close(raw_fd) catch return error.CloseFailed;
+    return @as(i32, @intCast(child_fd)) + @as(i32, @intCast(vfsAbiFdOffset()));
+}
+
+fn openStageInput(stage: *const ParsedStage, temp_paths: *const [MAX_PIPE_STAGES - 1][64]u8, temp_path_lens: *const [MAX_PIPE_STAGES - 1]usize, stage_idx: usize) PipelineConfigError!?i32 {
+    if (stage.stdin_path) |path| {
+        return try openRedirectFd(path, vfs.O_RDONLY);
+    }
+    if (stage_idx == 0) return null;
+
+    const temp_path = temp_paths[stage_idx - 1][0..temp_path_lens[stage_idx - 1]];
+    return try openRedirectFd(@ptrCast(temp_path.ptr), vfs.O_RDONLY);
+}
+
+fn openStageOutput(stage: *const ParsedStage, temp_paths: *const [MAX_PIPE_STAGES - 1][64]u8, temp_path_lens: *const [MAX_PIPE_STAGES - 1]usize, stage_count: usize, stage_idx: usize) PipelineConfigError!?i32 {
+    if (stage.stdout_path) |path| {
+        const flags = vfs.O_WRONLY | vfs.O_CREAT | if (stage.append_stdout) vfs.O_APPEND else vfs.O_TRUNC;
+        return try openRedirectFd(path, flags);
+    }
+    if (stage_idx + 1 >= stage_count) return null;
+
+    const temp_path = temp_paths[stage_idx][0..temp_path_lens[stage_idx]];
+    return try openRedirectFd(@ptrCast(temp_path.ptr), vfs.O_WRONLY | vfs.O_CREAT | vfs.O_TRUNC);
+}
+
+fn closeRedirectFd(fd: ?i32) void {
+    if (fd) |value| {
+        if (value >= @as(i32, @intCast(vfsAbiFdOffset()))) {
+            const vfs_fd: u32 = @intCast(value - @as(i32, @intCast(vfsAbiFdOffset())));
+            vfs.close(vfs_fd) catch {};
+        }
+    }
+}
+
+fn makePipelineTempPath(buffer: *[64]u8, stage_idx: usize) error{NoSpaceLeft}!usize {
+    const current_pid = process.getCurrentPID();
+    const rendered = std.fmt.bufPrint(buffer, "/tmp/.pipe-{d}-{d}", .{ current_pid, stage_idx }) catch return error.NoSpaceLeft;
+    if (rendered.len >= buffer.len) return error.NoSpaceLeft;
+    buffer[rendered.len] = 0;
+    return rendered.len;
+}
+
+fn cleanupPipelineTempFiles(temp_paths: *const [MAX_PIPE_STAGES - 1][64]u8, temp_path_lens: *const [MAX_PIPE_STAGES - 1]usize, stage_count: usize) void {
+    if (stage_count < 2) return;
+    var i: usize = 0;
+    while (i + 1 < stage_count) : (i += 1) {
+        if (temp_path_lens[i] == 0) continue;
+        const temp_path = temp_paths[i][0..temp_path_lens[i]];
+        vfs.unlink(temp_path) catch {};
+    }
+}
+
+fn printPipelineConfigError(err: PipelineConfigError) void {
+    switch (err) {
+        error.EmptyStage => vga.print("Invalid pipeline: empty command stage\n"),
+        error.MissingPath => vga.print("Invalid redirection: missing path\n"),
+        error.TooManyStages => vga.print("Too many pipeline stages\n"),
+        error.UnsupportedBuiltin => vga.print("Pipelines and redirection require external commands\n"),
+        error.UnsupportedRedirection => vga.print("Unsupported redirection layout\n"),
+        error.OpenFailed => vga.print("Failed to open redirection target\n"),
+        error.PipeFailed => vga.print("Failed to create pipe\n"),
+        error.DupFailed => vga.print("Failed to duplicate file descriptor\n"),
+        error.CloseFailed => vga.print("Failed to close temporary file descriptor\n"),
+        error.ArgumentTooLong => vga.print("Too many arguments in pipeline stage\n"),
+    }
+}
+
+fn vfsAbiFdOffset() u32 {
+    return @import("../process/syscall/abi.zig").FD_OFFSET;
 }
 
 fn readExternalCommandBytes(path: []const u8, buffer: []u8) ExternalLaunchError!usize {
