@@ -13,6 +13,7 @@ const system_commands = @import("commands/system.zig");
 const text_commands = @import("commands/text.zig");
 const user_commands = @import("commands/user.zig");
 const scheduler = @import("../process/scheduler.zig");
+const signal = @import("../process/signal.zig");
 const editor = @import("editor.zig");
 const registry = @import("registry.zig");
 const memory = @import("../memory/memory.zig");
@@ -96,6 +97,7 @@ const BackgroundJob = struct {
     active: bool = false,
     id: u32 = 0,
     pid: u32 = 0,
+    stopped: bool = false,
     command_len: usize = 0,
     command: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH,
 };
@@ -134,6 +136,7 @@ pub const Shell = struct {
     history_index: usize,
     background_jobs: [MAX_BACKGROUND_JOBS]BackgroundJob,
     next_job_id: u32,
+    foreground_pid: ?u32,
 
     pub fn init() Shell {
         return Shell{
@@ -146,10 +149,20 @@ pub const Shell = struct {
             .history_index = 0,
             .background_jobs = [_]BackgroundJob{BackgroundJob{}} ** MAX_BACKGROUND_JOBS,
             .next_job_id = 1,
+            .foreground_pid = null,
         };
     }
 
+    pub fn latestBackgroundPid(self: *Shell) ?u32 {
+        const job = findCurrentJob(self) orelse return null;
+        return job.pid;
+    }
+
     pub fn handleChar(self: *Shell, char: u8) void {
+        if (foregroundPidSignal(self, char)) {
+            return;
+        }
+
         switch (char) {
             '\n' => {
                 if (self.buffer_pos > 0) {
@@ -561,7 +574,7 @@ pub const Shell = struct {
             return true;
         }
 
-        return waitForExternalCommand(pid);
+        return waitForForegroundCommand(self, pid);
     }
 
     fn executePipeline(self: *Shell, tokens: []const CommandToken, background_requested: bool) bool {
@@ -626,7 +639,7 @@ pub const Shell = struct {
                 return false;
             };
 
-            if (!waitForExternalCommand(pid)) {
+            if (!waitForForegroundCommand(self, pid)) {
                 success = false;
                 break;
             }
@@ -689,6 +702,8 @@ pub const Shell = struct {
             .meminfo => process_commands.memInfo(),
             .uptime => process_commands.uptime(),
             .jobs => self.cmdJobs(),
+            .fg => self.cmdFg(args),
+            .bg => self.cmdBg(args),
             .kill => process_commands.kill(args),
             .shutdown => self.cmdShutdown(),
             .memtest => system_commands.memTest(),
@@ -813,7 +828,7 @@ pub const Shell = struct {
             if (!job.active) continue;
             found = true;
             var line_buf: [32]u8 = undefined;
-            const prefix = std.fmt.bufPrint(&line_buf, "[{d}] Running ", .{job.id}) catch "[?] Running ";
+            const prefix = std.fmt.bufPrint(&line_buf, "[{d}] {s} ", .{ job.id, if (job.stopped) "Stopped" else "Running" }) catch "[?] Running ";
             console.print(prefix);
             console.print(job.command[0..job.command_len]);
             console.print("\n");
@@ -822,6 +837,53 @@ pub const Shell = struct {
         if (!found) {
             console.print("No background jobs\n");
         }
+    }
+
+    fn cmdFg(self: *Shell, args: []const [*:0]const u8) void {
+        pollBackgroundJobs(self, false);
+        const job = findSelectedJob(self, args) orelse {
+            vga.print("fg: no such job\n");
+            return;
+        };
+
+        if (job.stopped) {
+            signal.kill(@intCast(job.pid), signal.SIGCONT) catch {
+                vga.print("fg: failed to continue job\n");
+                return;
+            };
+            job.stopped = false;
+        }
+
+        console.print(job.command[0..job.command_len]);
+        console.print("\n");
+
+        const keep_job = !waitForForegroundCommand(self, job.pid);
+        if (!keep_job or !job.stopped) {
+            job.active = false;
+        }
+    }
+
+    fn cmdBg(self: *Shell, args: []const [*:0]const u8) void {
+        pollBackgroundJobs(self, false);
+        const job = findSelectedJob(self, args) orelse {
+            vga.print("bg: no such job\n");
+            return;
+        };
+
+        if (!job.stopped) {
+            vga.print("bg: job already running\n");
+            return;
+        }
+
+        signal.kill(@intCast(job.pid), signal.SIGCONT) catch {
+            vga.print("bg: failed to continue job\n");
+            return;
+        };
+        job.stopped = false;
+
+        var line_buf: [32]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, "[{d}] {d}\n", .{ job.id, job.pid }) catch "[?]\n";
+        console.print(line);
     }
 
     fn cmdNice(self: *const Shell, args: []const [*:0]const u8) void {
@@ -1778,6 +1840,7 @@ fn registerBackgroundJob(self: *Shell, pid: u32, tokens: []const CommandToken) v
             .active = true,
             .id = self.next_job_id,
             .pid = pid,
+            .stopped = false,
         };
         self.next_job_id += 1;
         job.command_len = buildCommandText(tokens, &job.command) catch 0;
@@ -1791,9 +1854,46 @@ fn registerBackgroundJob(self: *Shell, pid: u32, tokens: []const CommandToken) v
     console.print("Too many background jobs\n");
 }
 
+fn waitForForegroundCommand(self: *Shell, pid: u32) bool {
+    self.foreground_pid = pid;
+    defer self.foreground_pid = null;
+
+    const result = posix.waitForProcessEvent(pid) catch |err| {
+        if (findExternalCommandLaunch(pid)) |launch| {
+            releaseExternalCommandLaunch(launch);
+        }
+        vga.print("Failed to wait for command: ");
+        vga.print(@errorName(err));
+        vga.print("\n");
+        return false;
+    };
+
+    switch (result) {
+        .exited => |exit_code| {
+            if (findExternalCommandLaunch(pid)) |launch| {
+                releaseExternalCommandLaunch(launch);
+            }
+            if (exit_code != 0) {
+                vga.print("Command exited with status ");
+                numfmt.printDec(@as(usize, @intCast(if (exit_code < 0) -exit_code else exit_code)));
+                vga.print("\n");
+                return false;
+            }
+            return true;
+        },
+        .stopped => {
+            markJobStopped(self, pid);
+            return false;
+        },
+    }
+}
+
 fn pollBackgroundJobs(self: *Shell, notify: bool) void {
     for (&self.background_jobs) |*job| {
         if (!job.active) continue;
+        if (process.getProcessByPid(job.pid)) |proc| {
+            job.stopped = proc.state == .Stopped;
+        }
         const exit_code = posix.pollProcessExit(job.pid) catch {
             job.active = false;
             continue;
@@ -1814,6 +1914,73 @@ fn pollBackgroundJobs(self: *Shell, notify: bool) void {
 
         job.active = false;
     }
+}
+
+fn markJobStopped(self: *Shell, pid: u32) void {
+    for (&self.background_jobs) |*job| {
+        if (!job.active or job.pid != pid) continue;
+        job.stopped = true;
+        var line_buf: [40]u8 = undefined;
+        const prefix = std.fmt.bufPrint(&line_buf, "[{d}] Stopped ", .{job.id}) catch "[?] Stopped ";
+        console.print(prefix);
+        console.print(job.command[0..job.command_len]);
+        console.print("\n");
+        return;
+    }
+}
+
+fn findSelectedJob(self: *Shell, args: []const [*:0]const u8) ?*BackgroundJob {
+    if (args.len == 0) return findCurrentJob(self);
+    const job_id = parseJobId(args[0]) orelse return null;
+    return findJobById(self, job_id);
+}
+
+fn findCurrentJob(self: *Shell) ?*BackgroundJob {
+    var best: ?*BackgroundJob = null;
+    for (&self.background_jobs) |*job| {
+        if (!job.active) continue;
+        if (best == null or job.id > best.?.id) {
+            best = job;
+        }
+    }
+    return best;
+}
+
+fn findJobById(self: *Shell, job_id: u32) ?*BackgroundJob {
+    for (&self.background_jobs) |*job| {
+        if (job.active and job.id == job_id) return job;
+    }
+    return null;
+}
+
+fn parseJobId(spec: [*:0]const u8) ?u32 {
+    const slice = sliceFromCStr(spec);
+    const digits = if (slice.len > 0 and slice[0] == '%') slice[1..] else slice;
+    if (digits.len == 0) return null;
+
+    var result: u32 = 0;
+    for (digits) |char| {
+        if (char < '0' or char > '9') return null;
+        result = result * 10 + (char - '0');
+    }
+    return result;
+}
+
+fn foregroundPidSignal(self: *Shell, char: u8) bool {
+    const pid = self.foreground_pid orelse return false;
+    const signum: i32 = switch (char) {
+        3 => signal.SIGINT,
+        26 => signal.SIGTSTP,
+        else => return false,
+    };
+
+    signal.kill(@intCast(pid), signum) catch {};
+    if (char == 3) {
+        console.print("^C\n");
+    } else if (char == 26) {
+        console.print("^Z\n");
+    }
+    return true;
 }
 
 fn buildCommandText(tokens: []const CommandToken, buffer: *[MAX_COMMAND_LENGTH]u8) error{NoSpaceLeft}!usize {

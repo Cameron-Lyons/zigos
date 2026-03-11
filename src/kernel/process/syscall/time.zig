@@ -3,6 +3,7 @@ const x86 = @import("../../../arch/x86.zig");
 const timer = @import("../../timer/timer.zig");
 const abi = @import("abi.zig");
 const process_mod = @import("../process.zig");
+const signal = @import("../signal.zig");
 const protection = @import("../../memory/protection.zig");
 const readiness = @import("readiness.zig");
 
@@ -118,6 +119,7 @@ pub fn sys_nanosleep(req_addr: usize, rem_addr: usize) i32 {
 
     const start = process_mod.getSystemTime();
     while (process_mod.getSystemTime() - start < ticks_to_wait) {
+        signal.handlePendingSignals();
         process_mod.yield();
     }
 
