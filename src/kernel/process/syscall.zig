@@ -215,6 +215,16 @@ pub const STDOUT = abi.STDOUT;
 pub const STDERR = abi.STDERR;
 const FD_OFFSET = abi.FD_OFFSET;
 
+fn resolveIoFd(fd: i32) i32 {
+    const proc = process.getEffectiveCurrent() orelse return fd;
+    return switch (fd) {
+        STDIN => proc.stdin_redirect orelse fd,
+        STDOUT => proc.stdout_redirect orelse fd,
+        STDERR => proc.stderr_redirect orelse fd,
+        else => fd,
+    };
+}
+
 pub const EPERM = abi.EPERM;
 pub const ENOENT = abi.ENOENT;
 pub const ESRCH = abi.ESRCH;
@@ -664,6 +674,7 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
 
 fn sys_exit(status: i32) i32 {
     if (process.getEffectiveCurrent()) |proc| {
+        process.cleanupStdioRedirects(proc);
         proc.state = .Terminated;
         proc.exit_code = status;
 
@@ -688,7 +699,9 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
         return EINVAL;
     }
 
-    if (fd == STDOUT or fd == STDERR) {
+    const effective_fd = resolveIoFd(fd);
+
+    if (effective_fd == STDOUT or effective_fd == STDERR) {
         // SAFETY: filled by the subsequent copyFromUser call
         var kernel_buffer: [256]u8 = undefined;
         var written: usize = 0;
@@ -719,7 +732,7 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
             return EINVAL;
         };
 
-        if (syscall_descriptor.write(fd, kernel_buffer[0..chunk_size])) |result| {
+        if (syscall_descriptor.write(effective_fd, kernel_buffer[0..chunk_size])) |result| {
             if (result < 0) return result;
 
             const bytes_written: usize = @intCast(result);
@@ -728,8 +741,8 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
             continue;
         }
 
-        if (fd < FD_OFFSET) return EBADF;
-        const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+        if (effective_fd < FD_OFFSET) return EBADF;
+        const vfs_fd: u32 = @intCast(effective_fd - FD_OFFSET);
 
         const bytes_written = vfs.write(vfs_fd, kernel_buffer[0..chunk_size]) catch |err| return vfsErrno(err);
         written += bytes_written;
@@ -744,7 +757,9 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
         return EINVAL;
     }
 
-    if (fd == STDIN) {
+    const effective_fd = resolveIoFd(fd);
+
+    if (effective_fd == STDIN) {
         // SAFETY: filled by the subsequent keyboard.getchar calls
         var kernel_buffer: [256]u8 = undefined;
         const read_size = @min(count, kernel_buffer.len);
@@ -781,7 +796,7 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
     while (total_read < count) {
         const chunk_size = @min(count - total_read, kernel_buffer.len);
 
-        if (syscall_descriptor.read(fd, kernel_buffer[0..chunk_size])) |result| {
+        if (syscall_descriptor.read(effective_fd, kernel_buffer[0..chunk_size])) |result| {
             if (result < 0) return result;
             if (result == 0) break;
 
@@ -795,8 +810,8 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
             continue;
         }
 
-        if (fd < FD_OFFSET) return EBADF;
-        const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+        if (effective_fd < FD_OFFSET) return EBADF;
+        const vfs_fd: u32 = @intCast(effective_fd - FD_OFFSET);
 
         const bytes_read = vfs.read(vfs_fd, kernel_buffer[0..chunk_size]) catch |err| return vfsErrno(err);
         if (bytes_read == 0) break;

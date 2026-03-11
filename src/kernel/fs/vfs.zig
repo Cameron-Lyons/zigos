@@ -1096,6 +1096,30 @@ pub fn dup2(old_fd: u32, new_fd: u32) VFSError!u32 {
     return new_fd;
 }
 
+pub fn dup(old_fd: u32) VFSError!u32 {
+    if (old_fd >= fd_table.len) return VFSError.InvalidOperation;
+    const old_desc = fd_table[old_fd] orelse return VFSError.InvalidOperation;
+
+    const new_fd = allocFd() orelse return VFSError.TooManyOpenFiles;
+    errdefer freeFd(new_fd);
+
+    const fd_m = memory.kmalloc(@sizeOf(FileDescriptor)) orelse return VFSError.OutOfMemory;
+    const new_desc: *FileDescriptor = @ptrCast(@alignCast(fd_m));
+    new_desc.* = FileDescriptor{
+        .vnode = old_desc.vnode,
+        .offset = old_desc.offset,
+        .flags = old_desc.flags,
+        .fd_flags = old_desc.fd_flags,
+        .ref_count = 1,
+        .path_len = old_desc.path_len,
+        .path = old_desc.path,
+    };
+    fd_table[new_fd] = new_desc;
+    old_desc.vnode.ref_count += 1;
+
+    return new_fd;
+}
+
 fn notifyPathEvent(path: []const u8, exact_mask: u32, parent_mask: u32) void {
     const callback = inotify_notifier orelse return;
     callback(path, exact_mask, parent_mask);
