@@ -188,16 +188,6 @@ fn initFileSystems() void {
     vfs.init();
     console.print("VFS ready!\n");
 
-    console.print("Initializing embedded root filesystem...\n");
-    embedfs.init();
-
-    console.print("Mounting embedded root filesystem...\n");
-    vfs.mount("none", "/", "embedfs", 0) catch |err| {
-        console.print("Failed to mount embedded root filesystem: ");
-        console.print(@errorName(err));
-        console.print("\n");
-    };
-
     console.print("Initializing FAT32 file system...\n");
     fat32.init();
     console.print("FAT32 ready!\n");
@@ -205,12 +195,38 @@ fn initFileSystems() void {
     console.print("Initializing ext2 file system...\n");
     ext2.init();
 
-    console.print("Mounting FAT32 disk on /mnt...\n");
-    vfs.mount("ata0", "/mnt", "fat32", 0) catch |err| {
-        console.print("Disk mount unavailable: ");
-        console.print(@errorName(err));
-        console.print("\n");
+    console.print("Initializing embedded root filesystem...\n");
+    embedfs.init();
+
+    console.print("Mounting FAT32 disk as root...\n");
+    const disk_root_ready = blk: {
+        vfs.mount("ata0", "/", "fat32", 0) catch |err| {
+            console.print("Disk root unavailable: ");
+            console.print(@errorName(err));
+            console.print("\n");
+            break :blk false;
+        };
+        console.print("Disk root mounted at /\n");
+        break :blk true;
     };
+
+    if (!disk_root_ready) {
+        console.print("Mounting embedded root filesystem fallback...\n");
+        vfs.mount("none", "/", "embedfs", 0) catch |err| {
+            console.print("Failed to mount embedded root filesystem: ");
+            console.print(@errorName(err));
+            console.print("\n");
+        };
+    }
+
+    if (!disk_root_ready) {
+        console.print("Mounting FAT32 disk on /mnt...\n");
+        vfs.mount("ata0", "/mnt", "fat32", 0) catch |err| {
+            console.print("Disk mount unavailable: ");
+            console.print(@errorName(err));
+            console.print("\n");
+        };
+    }
 
     console.print("Initializing tmpfs...\n");
     tmpfs.init();
