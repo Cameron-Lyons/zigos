@@ -8,42 +8,42 @@ const vga = @import("../drivers/vga.zig");
 const BootSector = extern struct {
     jump: [3]u8,
     oem_name: [8]u8,
-    bytes_per_sector: u16,
+    bytes_per_sector: u16 align(1),
     sectors_per_cluster: u8,
-    reserved_sectors: u16,
+    reserved_sectors: u16 align(1),
     fat_count: u8,
-    root_entries: u16,
-    total_sectors_16: u16,
+    root_entries: u16 align(1),
+    total_sectors_16: u16 align(1),
     media_descriptor: u8,
-    sectors_per_fat_16: u16,
-    sectors_per_track: u16,
-    heads: u16,
-    hidden_sectors: u32,
-    total_sectors_32: u32,
+    sectors_per_fat_16: u16 align(1),
+    sectors_per_track: u16 align(1),
+    heads: u16 align(1),
+    hidden_sectors: u32 align(1),
+    total_sectors_32: u32 align(1),
 
-    sectors_per_fat_32: u32,
-    ext_flags: u16,
-    fs_version: u16,
-    root_cluster: u32,
-    fs_info_sector: u16,
-    backup_boot_sector: u16,
+    sectors_per_fat_32: u32 align(1),
+    ext_flags: u16 align(1),
+    fs_version: u16 align(1),
+    root_cluster: u32 align(1),
+    fs_info_sector: u16 align(1),
+    backup_boot_sector: u16 align(1),
     reserved: [12]u8,
     drive_number: u8,
     reserved1: u8,
     boot_signature: u8,
-    volume_id: u32,
+    volume_id: u32 align(1),
     volume_label: [11]u8,
     fs_type: [8]u8,
 };
 
 const FSInfo = extern struct {
-    signature1: u32,
+    signature1: u32 align(1),
     reserved1: [480]u8,
-    signature2: u32,
-    free_clusters: u32,
-    next_free_cluster: u32,
+    signature2: u32 align(1),
+    free_clusters: u32 align(1),
+    next_free_cluster: u32 align(1),
     reserved2: [12]u8,
-    signature3: u32,
+    signature3: u32 align(1),
 };
 
 const DirEntry = extern struct {
@@ -52,14 +52,14 @@ const DirEntry = extern struct {
     attributes: u8,
     reserved: u8,
     create_time_tenth: u8,
-    create_time: u16,
-    create_date: u16,
-    access_date: u16,
-    cluster_high: u16,
-    modify_time: u16,
-    modify_date: u16,
-    cluster_low: u16,
-    size: u32,
+    create_time: u16 align(1),
+    create_date: u16 align(1),
+    access_date: u16 align(1),
+    cluster_high: u16 align(1),
+    modify_time: u16 align(1),
+    modify_date: u16 align(1),
+    cluster_low: u16 align(1),
+    size: u32 align(1),
 };
 
 const ATTR_READ_ONLY: u8 = 0x01;
@@ -143,12 +143,7 @@ pub fn init() void {
 }
 
 fn fat32Mount(mount_point: *vfs.MountPoint) vfs.VFSError!void {
-    const devices = [_]?*const ata.ATADevice{
-        ata.getPrimaryMaster(),
-        ata.getPrimarySlave(),
-        ata.getSecondaryMaster(),
-        ata.getSecondarySlave(),
-    };
+    const devices = ata.getProbeCandidates();
 
     const data_mem = memory.kmalloc(@sizeOf(FAT32Data)) orelse return vfs.VFSError.OutOfMemory;
     const data: *FAT32Data = @ptrCast(@alignCast(data_mem));
@@ -161,9 +156,9 @@ fn fat32Mount(mount_point: *vfs.MountPoint) vfs.VFSError!void {
     var boot_sector_buf: [512]u8 align(4) = undefined;
 
     var mounted = false;
-    for (devices) |candidate| {
-        const device = candidate orelse continue;
+    for (devices) |device| {
         ata.readSectors(device, 0, 1, &boot_sector_buf) catch continue;
+        if (!looksLikeFat32BootSector(&boot_sector_buf)) continue;
         data.device = device;
         mounted = true;
         break;
@@ -210,6 +205,21 @@ fn fat32Mount(mount_point: *vfs.MountPoint) vfs.VFSError!void {
     data.fat_buffer = fat_buf_ptr[0..512];
 
     mount_point.private_data = data;
+}
+
+fn looksLikeFat32BootSector(sector: *const [512]u8) bool {
+    if (sector[510] != 0x55 or sector[511] != 0xAA) return false;
+
+    var boot_sector: BootSector = undefined;
+    @memcpy(std.mem.asBytes(&boot_sector), sector[0..@sizeOf(BootSector)]);
+    if (boot_sector.bytes_per_sector != 512) return false;
+    if (boot_sector.sectors_per_cluster == 0) return false;
+    if (boot_sector.reserved_sectors == 0) return false;
+    if (boot_sector.fat_count == 0) return false;
+    if (boot_sector.sectors_per_fat_32 == 0) return false;
+    if (boot_sector.root_cluster < 2) return false;
+
+    return true;
 }
 
 fn fat32Unmount(mount_point: *vfs.MountPoint) vfs.VFSError!void {
@@ -1362,7 +1372,7 @@ fn updateFSInfo(data: *FAT32Data) !void {
     var fs_info_buf: [512]u8 align(4) = undefined;
     ata.readSectors(data.device, data.boot_sector.fs_info_sector, 1, &fs_info_buf) catch return error.DeviceError;
 
-    const fs_info: *FSInfo = @ptrCast(@alignCast(&fs_info_buf));
+    const fs_info: *FSInfo = @ptrCast(&fs_info_buf);
     fs_info.free_clusters = data.fs_info.free_clusters;
     fs_info.next_free_cluster = data.fs_info.next_free_cluster;
 
