@@ -5,6 +5,12 @@ const console = @import("console.zig");
 const qemu_exit = @import("qemu_exit.zig");
 
 var panic_occurred: bool = false;
+const panic_color: u8 = 0x4F;
+const panic_message_buffer_size = 256;
+
+fn printPanic(text: []const u8) void {
+    console.printWithColor(text, panic_color);
+}
 
 pub fn panic(comptime format: []const u8, args: anytype) noreturn {
     asm volatile ("cli");
@@ -16,23 +22,23 @@ pub fn panic(comptime format: []const u8, args: anytype) noreturn {
     }
     panic_occurred = true;
 
-    vga.clearWithColor(0x4F);
+    vga.clearWithColor(panic_color);
 
-    console.printWithColor("\n", 0x4F);
-    console.printWithColor("============================ KERNEL PANIC ============================\n", 0x4F);
-    console.printWithColor("\n", 0x4F);
+    printPanic("\n");
+    printPanic("============================ KERNEL PANIC ============================\n");
+    printPanic("\n");
 
     // SAFETY: filled by the subsequent std.fmt.bufPrint call
-    var buf: [256]u8 = undefined;
+    var buf: [panic_message_buffer_size]u8 = undefined;
     const message = std.fmt.bufPrint(&buf, format, args) catch "Failed to format panic message";
-    console.printWithColor(message, 0x4F);
-    console.printWithColor("\n\n", 0x4F);
+    printPanic(message);
+    printPanic("\n\n");
 
     // Stack trace not available in freestanding environment
-    console.printWithColor("Stack trace: Not available in freestanding mode\n", 0x4F);
-    console.printWithColor("\n", 0x4F);
-    console.printWithColor("System halted. Please restart your computer.\n", 0x4F);
-    console.printWithColor("======================================================================\n", 0x4F);
+    printPanic("Stack trace: Not available in freestanding mode\n");
+    printPanic("\n");
+    printPanic("System halted. Please restart your computer.\n");
+    printPanic("======================================================================\n");
 
     if (config.shouldExitOnPanic()) {
         qemu_exit.failure();

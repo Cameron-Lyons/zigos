@@ -1,6 +1,8 @@
 const std = @import("std");
 const syscall = @import("syscall");
 
+const format_buffer_size = 256;
+
 pub fn writeAll(fd: i32, buffer: []const u8) void {
     var offset: usize = 0;
     while (offset < buffer.len) {
@@ -18,14 +20,16 @@ pub fn eputs(text: []const u8) void {
     writeAll(syscall.STDERR, text);
 }
 
-pub fn print(comptime format: []const u8, args: anytype) void {
-    var buffer: [256]u8 = undefined;
+fn writeFormatted(fd: i32, comptime format: []const u8, args: anytype) void {
+    var buffer: [format_buffer_size]u8 = undefined;
     const rendered = std.fmt.bufPrint(&buffer, format, args) catch return;
-    puts(rendered);
+    writeAll(fd, rendered);
+}
+
+pub fn print(comptime format: []const u8, args: anytype) void {
+    writeFormatted(syscall.STDOUT, format, args);
 }
 
 pub fn eprint(comptime format: []const u8, args: anytype) void {
-    var buffer: [256]u8 = undefined;
-    const rendered = std.fmt.bufPrint(&buffer, format, args) catch return;
-    eputs(rendered);
+    writeFormatted(syscall.STDERR, format, args);
 }

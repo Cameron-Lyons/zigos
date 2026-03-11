@@ -4,6 +4,8 @@ const stdio = @import("stdio");
 const syscall = @import("syscall");
 
 pub const panic = runtime.panic;
+const io_buffer_size = 512;
+const CatError = error{ReadFailed};
 
 pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[*:0]const u8) callconv(.c) i32 {
     _ = envp;
@@ -24,17 +26,22 @@ pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[
     return exit_code;
 }
 
-fn catStdin() bool {
-    var buffer: [512]u8 = undefined;
+fn copyFdToStdout(fd: i32) CatError!void {
+    var buffer: [io_buffer_size]u8 = undefined;
     while (true) {
-        const rc = syscall.read(syscall.STDIN, &buffer);
-        if (rc == 0) return true;
-        if (syscall.isError(rc)) {
-            stdio.eputs("cat: failed to read stdin\n");
-            return false;
-        }
+        const rc = syscall.read(fd, &buffer);
+        if (rc == 0) return;
+        if (syscall.isError(rc)) return error.ReadFailed;
         stdio.writeAll(syscall.STDOUT, buffer[0..@intCast(rc)]);
     }
+}
+
+fn catStdin() bool {
+    copyFdToStdout(syscall.STDIN) catch {
+        stdio.eputs("cat: failed to read stdin\n");
+        return false;
+    };
+    return true;
 }
 
 fn catFile(path: [*:0]const u8) bool {
@@ -45,14 +52,9 @@ fn catFile(path: [*:0]const u8) bool {
     }
     defer _ = syscall.close(fd);
 
-    var buffer: [512]u8 = undefined;
-    while (true) {
-        const rc = syscall.read(fd, &buffer);
-        if (rc == 0) return true;
-        if (syscall.isError(rc)) {
-            stdio.eprint("cat: failed to read {s}\n", .{cstr.slice(path)});
-            return false;
-        }
-        stdio.writeAll(syscall.STDOUT, buffer[0..@intCast(rc)]);
-    }
+    copyFdToStdout(fd) catch {
+        stdio.eprint("cat: failed to read {s}\n", .{cstr.slice(path)});
+        return false;
+    };
+    return true;
 }
