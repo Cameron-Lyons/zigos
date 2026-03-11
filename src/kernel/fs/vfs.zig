@@ -952,11 +952,17 @@ fn pipeRead(vnode: *VNode, buf: []u8, _: u64) VFSError!usize {
     }
 
     const to_read = @min(buf.len, pipe.count);
-    var i: usize = 0;
-    while (i < to_read) : (i += 1) {
-        buf[i] = pipe.buffer[pipe.read_pos];
-        pipe.read_pos = (pipe.read_pos + 1) & PIPE_BUF_MASK;
+    if (to_read == 0) return 0;
+
+    const first_chunk = @min(to_read, PIPE_BUF_SIZE - pipe.read_pos);
+    @memcpy(buf[0..first_chunk], pipe.buffer[pipe.read_pos .. pipe.read_pos + first_chunk]);
+
+    const second_chunk = to_read - first_chunk;
+    if (second_chunk != 0) {
+        @memcpy(buf[first_chunk..to_read], pipe.buffer[0..second_chunk]);
     }
+
+    pipe.read_pos = (pipe.read_pos + to_read) & PIPE_BUF_MASK;
     pipe.count -= to_read;
     readiness.notifyAll();
     return to_read;
@@ -969,11 +975,17 @@ fn pipeWrite(vnode: *VNode, buf: []const u8, _: u64) VFSError!usize {
     if (available == 0) return VFSError.NoSpace;
 
     const to_write = @min(buf.len, available);
-    var i: usize = 0;
-    while (i < to_write) : (i += 1) {
-        pipe.buffer[pipe.write_pos] = buf[i];
-        pipe.write_pos = (pipe.write_pos + 1) & PIPE_BUF_MASK;
+    if (to_write == 0) return 0;
+
+    const first_chunk = @min(to_write, PIPE_BUF_SIZE - pipe.write_pos);
+    @memcpy(pipe.buffer[pipe.write_pos .. pipe.write_pos + first_chunk], buf[0..first_chunk]);
+
+    const second_chunk = to_write - first_chunk;
+    if (second_chunk != 0) {
+        @memcpy(pipe.buffer[0..second_chunk], buf[first_chunk..to_write]);
     }
+
+    pipe.write_pos = (pipe.write_pos + to_write) & PIPE_BUF_MASK;
     pipe.count += to_write;
     readiness.notifyAll();
     return to_write;

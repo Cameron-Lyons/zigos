@@ -144,6 +144,22 @@ var inotify_instances: [32]InotifyInstance = [_]InotifyInstance{.{
 var next_inotify_wd: i32 = 1;
 var next_inotify_cookie: u32 = 1;
 
+const ReadyScan = struct {
+    count: i32,
+    earliest_deadline: ?u64,
+};
+
+const EpollScan = struct {
+    count: usize,
+    earliest_deadline: ?u64,
+};
+
+const FdObservation = struct {
+    revents: u16,
+    invalid: bool,
+    deadline: ?u64,
+};
+
 pub fn closePseudoFd(fd: i32) ?i32 {
     if (isEventFd(fd)) {
         const idx: usize = @intCast(fd - EVENTFD_BASE);
@@ -274,7 +290,8 @@ pub fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfd
         timeout_ms = @as(i64, tv.tv_sec) * 1000 + @divTrunc(tv.tv_usec, 1000);
     }
 
-    var count = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds);
+    var select_scan = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds, false);
+    var count = select_scan.count;
 
     if (timeout_ms == 0 or count > 0) {
         if (readfds_addr != 0) {
@@ -295,17 +312,20 @@ pub fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfd
         if (deadlineReached(deadline_tick)) break;
 
         const observed_generation = readiness.snapshot();
-        count = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds);
+        select_scan = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds, true);
+        count = select_scan.count;
         if (count > 0) break;
 
-        const wait_deadline = earliestDeadline(deadline_tick, nextSelectDeadline(@intCast(nfds), &readfds, &writefds, &exceptfds));
+        const wait_deadline = earliestDeadline(deadline_tick, select_scan.earliest_deadline);
         if (!readiness.waitForChange(observed_generation, wait_deadline)) {
-            count = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds);
+            select_scan = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds, true);
+            count = select_scan.count;
             if (count > 0) break;
             if (deadlineReached(deadline_tick)) break;
             continue;
         }
-        count = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds);
+        select_scan = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds, true);
+        count = select_scan.count;
     }
 
     if (readfds_addr != 0) {
@@ -331,7 +351,8 @@ pub fn sys_poll(fds_addr: usize, nfds: u32, timeout: i32) i32 {
     var kernel_fds: [256]PollFd = undefined;
     protection.copyFromUser(std.mem.asBytes(&kernel_fds)[0..copy_size], fds_addr) catch return abi.EINVAL;
 
-    var count = pollCheckFds(kernel_fds[0..nfds], nfds);
+    var poll_scan = pollCheckFds(kernel_fds[0..nfds], false);
+    var count = poll_scan.count;
 
     if (timeout == 0 or count > 0) {
         protection.copyToUser(fds_addr, std.mem.asBytes(&kernel_fds)[0..copy_size]) catch return abi.EINVAL;
@@ -344,17 +365,20 @@ pub fn sys_poll(fds_addr: usize, nfds: u32, timeout: i32) i32 {
         if (deadlineReached(deadline_tick)) break;
 
         const observed_generation = readiness.snapshot();
-        count = pollCheckFds(kernel_fds[0..nfds], nfds);
+        poll_scan = pollCheckFds(kernel_fds[0..nfds], true);
+        count = poll_scan.count;
         if (count > 0) break;
 
-        const wait_deadline = earliestDeadline(deadline_tick, nextPollDeadline(kernel_fds[0..nfds], nfds));
+        const wait_deadline = earliestDeadline(deadline_tick, poll_scan.earliest_deadline);
         if (!readiness.waitForChange(observed_generation, wait_deadline)) {
-            count = pollCheckFds(kernel_fds[0..nfds], nfds);
+            poll_scan = pollCheckFds(kernel_fds[0..nfds], true);
+            count = poll_scan.count;
             if (count > 0) break;
             if (deadlineReached(deadline_tick)) break;
             continue;
         }
-        count = pollCheckFds(kernel_fds[0..nfds], nfds);
+        poll_scan = pollCheckFds(kernel_fds[0..nfds], true);
+        count = poll_scan.count;
     }
 
     protection.copyToUser(fds_addr, std.mem.asBytes(&kernel_fds)[0..copy_size]) catch return abi.EINVAL;
@@ -450,7 +474,8 @@ pub fn sys_epoll_wait(epfd: i32, events_addr: usize, maxevents: i32, timeout: i3
 
     var events: [64]EpollEvent = undefined;
 
-    var count = collectEpollEvents(inst, max, &events);
+    var epoll_scan = collectEpollEvents(inst, max, &events, false);
+    var count = epoll_scan.count;
     if (timeout != 0 and count == 0) {
         const deadline_tick = timeoutDeadline(timeout);
 
@@ -458,17 +483,20 @@ pub fn sys_epoll_wait(epfd: i32, events_addr: usize, maxevents: i32, timeout: i3
             if (deadlineReached(deadline_tick)) break;
 
             const observed_generation = readiness.snapshot();
-            count = collectEpollEvents(inst, max, &events);
+            epoll_scan = collectEpollEvents(inst, max, &events, true);
+            count = epoll_scan.count;
             if (count > 0) break;
 
-            const wait_deadline = earliestDeadline(deadline_tick, nextEpollDeadline(inst));
+            const wait_deadline = earliestDeadline(deadline_tick, epoll_scan.earliest_deadline);
             if (!readiness.waitForChange(observed_generation, wait_deadline)) {
-                count = collectEpollEvents(inst, max, &events);
+                epoll_scan = collectEpollEvents(inst, max, &events, true);
+                count = epoll_scan.count;
                 if (count > 0) break;
                 if (deadlineReached(deadline_tick)) break;
                 continue;
             }
-            count = collectEpollEvents(inst, max, &events);
+            epoll_scan = collectEpollEvents(inst, max, &events, true);
+            count = epoll_scan.count;
         }
     }
 
@@ -932,46 +960,34 @@ fn earliestDeadline(lhs: ?u64, rhs: ?u64) ?u64 {
     return @min(lhs.?, rhs.?);
 }
 
-fn nextSelectDeadline(nfds: u32, readfds: *const FdSet, writefds: *const FdSet, exceptfds: *const FdSet) ?u64 {
-    var earliest: ?u64 = null;
-    var i: u32 = 0;
-    while (i < nfds) : (i += 1) {
-        const word_idx = i / 32;
-        const bit_idx: u5 = @intCast(i % 32);
-        const mask = @as(u32, 1) << bit_idx;
-
-        if (readfds.fds_bits[word_idx] & mask == 0 and writefds.fds_bits[word_idx] & mask == 0 and exceptfds.fds_bits[word_idx] & mask == 0) {
-            continue;
-        }
-
-        earliest = earliestDeadline(earliest, descriptor.waitDeadline(@intCast(i)));
+fn observeKernelFd(fd: i32, requested_events: u16, track_deadline: bool) FdObservation {
+    if (descriptor.observe(fd, requested_events, track_deadline)) |observation| {
+        return .{
+            .revents = observation.revents,
+            .invalid = observation.invalid,
+            .deadline = observation.deadline,
+        };
     }
-    return earliest;
+
+    const vfs_fd: u32 = @intCast(fd - abi.FD_OFFSET);
+    const revents = vfs.pollFd(vfs_fd, requested_events) catch {
+        return .{
+            .revents = 0,
+            .invalid = true,
+            .deadline = null,
+        };
+    };
+
+    return .{
+        .revents = revents,
+        .invalid = false,
+        .deadline = null,
+    };
 }
 
-fn nextPollDeadline(kernel_fds: []const PollFd, nfds: u32) ?u64 {
-    var earliest: ?u64 = null;
-    var i: u32 = 0;
-    while (i < nfds) : (i += 1) {
-        if ((kernel_fds[i].events & POLLIN) == 0) continue;
-        if (kernel_fds[i].fd < 0) continue;
-        earliest = earliestDeadline(earliest, descriptor.waitDeadline(kernel_fds[i].fd));
-    }
-    return earliest;
-}
-
-fn nextEpollDeadline(inst: *const EpollInstance) ?u64 {
-    var earliest: ?u64 = null;
-    for (inst.entries) |maybe_entry| {
-        const entry = maybe_entry orelse continue;
-        if ((entry.events & abi.EPOLLIN) == 0) continue;
-        earliest = earliestDeadline(earliest, descriptor.waitDeadline(entry.fd));
-    }
-    return earliest;
-}
-
-fn collectEpollEvents(inst: *const EpollInstance, max: usize, events: *[64]EpollEvent) usize {
+fn collectEpollEvents(inst: *const EpollInstance, max: usize, events: *[64]EpollEvent, track_deadline: bool) EpollScan {
     var count: usize = 0;
+    var earliest: ?u64 = null;
 
     for (inst.entries) |maybe_entry| {
         if (maybe_entry) |entry| {
@@ -980,21 +996,14 @@ fn collectEpollEvents(inst: *const EpollInstance, max: usize, events: *[64]Epoll
 
             if (entry.fd >= abi.FD_OFFSET) {
                 const requested: u16 = @truncate(entry.events & (abi.EPOLLIN | abi.EPOLLOUT));
-                if (descriptor.poll(entry.fd, requested)) |special_poll| {
-                    if (special_poll) |revents| {
-                        if ((revents & VFS_POLLIN) != 0 and (entry.events & abi.EPOLLIN) != 0) ready |= abi.EPOLLIN;
-                        if ((revents & VFS_POLLOUT) != 0 and (entry.events & abi.EPOLLOUT) != 0) ready |= abi.EPOLLOUT;
-                    } else |_| {
-                        ready |= abi.EPOLLERR;
-                    }
+                const observation = observeKernelFd(entry.fd, requested, track_deadline and (entry.events & abi.EPOLLIN) != 0);
+                earliest = earliestDeadline(earliest, observation.deadline);
+
+                if (observation.invalid) {
+                    ready |= abi.EPOLLERR;
                 } else {
-                    const vfs_fd: u32 = @intCast(entry.fd - abi.FD_OFFSET);
-                    if (vfs.pollFd(vfs_fd, requested)) |revents| {
-                        if ((revents & VFS_POLLIN) != 0 and (entry.events & abi.EPOLLIN) != 0) ready |= abi.EPOLLIN;
-                        if ((revents & VFS_POLLOUT) != 0 and (entry.events & abi.EPOLLOUT) != 0) ready |= abi.EPOLLOUT;
-                    } else |_| {
-                        ready |= abi.EPOLLERR;
-                    }
+                    if ((observation.revents & VFS_POLLIN) != 0 and (entry.events & abi.EPOLLIN) != 0) ready |= abi.EPOLLIN;
+                    if ((observation.revents & VFS_POLLOUT) != 0 and (entry.events & abi.EPOLLOUT) != 0) ready |= abi.EPOLLOUT;
                 }
             }
 
@@ -1005,97 +1014,81 @@ fn collectEpollEvents(inst: *const EpollInstance, max: usize, events: *[64]Epoll
         }
     }
 
-    return count;
+    return .{
+        .count = count,
+        .earliest_deadline = earliest,
+    };
 }
 
-fn selectCheckFds(nfds: u32, readfds: *const FdSet, writefds: *const FdSet, exceptfds: *const FdSet, result_readfds: *FdSet, result_writefds: *FdSet, result_exceptfds: *FdSet) i32 {
+fn selectCheckFds(nfds: u32, readfds: *const FdSet, writefds: *const FdSet, exceptfds: *const FdSet, result_readfds: *FdSet, result_writefds: *FdSet, result_exceptfds: *FdSet, track_deadline: bool) ReadyScan {
     result_readfds.* = std.mem.zeroes(FdSet);
     result_writefds.* = std.mem.zeroes(FdSet);
     result_exceptfds.* = std.mem.zeroes(FdSet);
 
     var count: i32 = 0;
+    var earliest: ?u64 = null;
     var i: u32 = 0;
     while (i < nfds) : (i += 1) {
         const word_idx = i / 32;
         const bit_idx: u5 = @intCast(i % 32);
         const mask = @as(u32, 1) << bit_idx;
 
-        if (readfds.fds_bits[word_idx] & mask != 0) {
-            if (i < abi.FD_OFFSET) {
-                if (i == abi.STDIN) {
-                    result_readfds.fds_bits[word_idx] |= mask;
-                    count += 1;
-                }
-            } else {
-                if (descriptor.poll(@intCast(i), VFS_POLLIN)) |special_poll| {
-                    if (special_poll) |revents| {
-                        if ((revents & VFS_POLLIN) != 0) {
-                            result_readfds.fds_bits[word_idx] |= mask;
-                            count += 1;
-                        }
-                    } else |_| {}
-                } else {
-                    const vfs_fd: u32 = i - abi.FD_OFFSET;
-                    if (vfs.pollFd(vfs_fd, VFS_POLLIN)) |revents| {
-                        if ((revents & VFS_POLLIN) != 0) {
-                            result_readfds.fds_bits[word_idx] |= mask;
-                            count += 1;
-                        }
-                    } else |_| {}
-                }
+        const wants_read = (readfds.fds_bits[word_idx] & mask) != 0;
+        const wants_write = (writefds.fds_bits[word_idx] & mask) != 0;
+        const wants_except = (exceptfds.fds_bits[word_idx] & mask) != 0;
+        if (!wants_read and !wants_write and !wants_except) continue;
+
+        if (i < abi.FD_OFFSET) {
+            if (wants_read and i == abi.STDIN) {
+                result_readfds.fds_bits[word_idx] |= mask;
+                count += 1;
             }
+
+            if (wants_write and (i == abi.STDOUT or i == abi.STDERR)) {
+                result_writefds.fds_bits[word_idx] |= mask;
+                count += 1;
+            }
+
+            continue;
         }
 
-        if (writefds.fds_bits[word_idx] & mask != 0) {
-            if (i < abi.FD_OFFSET) {
-                if (i == abi.STDOUT or i == abi.STDERR) {
-                    result_writefds.fds_bits[word_idx] |= mask;
-                    count += 1;
-                }
-            } else {
-                if (descriptor.poll(@intCast(i), VFS_POLLOUT)) |special_poll| {
-                    if (special_poll) |revents| {
-                        if ((revents & VFS_POLLOUT) != 0) {
-                            result_writefds.fds_bits[word_idx] |= mask;
-                            count += 1;
-                        }
-                    } else |_| {}
-                } else {
-                    const vfs_fd: u32 = i - abi.FD_OFFSET;
-                    if (vfs.pollFd(vfs_fd, VFS_POLLOUT)) |revents| {
-                        if ((revents & VFS_POLLOUT) != 0) {
-                            result_writefds.fds_bits[word_idx] |= mask;
-                            count += 1;
-                        }
-                    } else |_| {}
-                }
+        var requested: u16 = 0;
+        if (wants_read) requested |= VFS_POLLIN;
+        if (wants_write) requested |= VFS_POLLOUT;
+
+        const observation = observeKernelFd(@intCast(i), requested, track_deadline);
+        earliest = earliestDeadline(earliest, observation.deadline);
+
+        if (observation.invalid) {
+            if (wants_except) {
+                result_exceptfds.fds_bits[word_idx] |= mask;
+                count += 1;
             }
+            continue;
         }
 
-        if (exceptfds.fds_bits[word_idx] & mask != 0) {
-            if (i >= abi.FD_OFFSET) {
-                if (descriptor.poll(@intCast(i), 0)) |special_poll| {
-                    if (special_poll) |_| {} else |_| {
-                        result_exceptfds.fds_bits[word_idx] |= mask;
-                        count += 1;
-                    }
-                } else {
-                    const vfs_fd: u32 = i - abi.FD_OFFSET;
-                    if (vfs.pollFd(vfs_fd, 0)) |_| {} else |_| {
-                        result_exceptfds.fds_bits[word_idx] |= mask;
-                        count += 1;
-                    }
-                }
-            }
+        if (wants_read and (observation.revents & VFS_POLLIN) != 0) {
+            result_readfds.fds_bits[word_idx] |= mask;
+            count += 1;
+        }
+
+        if (wants_write and (observation.revents & VFS_POLLOUT) != 0) {
+            result_writefds.fds_bits[word_idx] |= mask;
+            count += 1;
         }
     }
-    return count;
+
+    return .{
+        .count = count,
+        .earliest_deadline = earliest,
+    };
 }
 
-fn pollCheckFds(kernel_fds: []PollFd, nfds: u32) i32 {
+fn pollCheckFds(kernel_fds: []PollFd, track_deadline: bool) ReadyScan {
     var count: i32 = 0;
-    var i: u32 = 0;
-    while (i < nfds) : (i += 1) {
+    var earliest: ?u64 = null;
+    var i: usize = 0;
+    while (i < kernel_fds.len) : (i += 1) {
         kernel_fds[i].revents = 0;
         const fd = kernel_fds[i].fd;
 
@@ -1114,24 +1107,20 @@ fn pollCheckFds(kernel_fds: []PollFd, nfds: u32) i32 {
         }
 
         const requested: u16 = @intCast(kernel_fds[i].events & (POLLIN | POLLOUT));
-        if (descriptor.poll(fd, requested)) |special_poll| {
-            if (special_poll) |revents| {
-                kernel_fds[i].revents = @intCast(revents);
-                if (kernel_fds[i].revents != 0) count += 1;
-            } else |_| {
-                kernel_fds[i].revents = POLLNVAL;
-                count += 1;
-            }
+        const observation = observeKernelFd(fd, requested, track_deadline and (requested & VFS_POLLIN) != 0);
+        earliest = earliestDeadline(earliest, observation.deadline);
+
+        if (observation.invalid) {
+            kernel_fds[i].revents = POLLNVAL;
+            count += 1;
         } else {
-            const vfs_fd: u32 = @intCast(fd - abi.FD_OFFSET);
-            if (vfs.pollFd(vfs_fd, requested)) |revents| {
-                kernel_fds[i].revents = @intCast(revents);
-                if (kernel_fds[i].revents != 0) count += 1;
-            } else |_| {
-                kernel_fds[i].revents = POLLNVAL;
-                count += 1;
-            }
+            kernel_fds[i].revents = @intCast(observation.revents);
+            if (kernel_fds[i].revents != 0) count += 1;
         }
     }
-    return count;
+
+    return .{
+        .count = count,
+        .earliest_deadline = earliest,
+    };
 }
