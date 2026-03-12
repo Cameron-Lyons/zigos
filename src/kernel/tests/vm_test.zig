@@ -5,6 +5,7 @@ const protection = @import("../memory/protection.zig");
 const socket = @import("../net/socket.zig");
 const tcp = @import("../net/tcp.zig");
 const ipv4 = @import("../net/ipv4.zig");
+const kernel_tty = @import("../fs/tty.zig");
 const vfs = @import("../fs/vfs.zig");
 const paging = @import("../memory/paging.zig");
 const kernel_signal = @import("../process/signal.zig");
@@ -36,6 +37,17 @@ const INOTIFY_FD_MASK = abi.IN_OPEN | abi.IN_MODIFY | abi.IN_ACCESS | abi.IN_ATT
 const INOTIFY_INTERNAL_TEST_PATH = "/tmp/inotify-internal-smoke";
 const INOTIFY_INTERNAL_PAYLOAD = "internal-write";
 const INOTIFY_INTERNAL_MASK = abi.IN_OPEN | abi.IN_MODIFY | abi.IN_ACCESS | abi.IN_ATTRIB | abi.IN_CLOSE_WRITE;
+const PROCESS_STATE_TEST_ROOT = "/tmp/process-state-root";
+const PROCESS_STATE_TEST_INSIDE = "/tmp/process-state-root/inside";
+const PROCESS_STATE_TEST_AT_INSIDE = "/tmp/process-state-root/inside-at";
+const PROCESS_STATE_TEST_CHILD_DIR = "/inside";
+const PROCESS_STATE_TEST_AT_CHILD_DIR = "/inside-at";
+const PROCESS_STATE_TEST_LIMIT: u64 = 64;
+const PROCESS_STATE_TEST_CHILD_LIMIT: u64 = 32;
+const MMAP_TEST_PATH = "/tmp/mmap-shared";
+const MMAP_TEST_INITIAL = "mapped-seed";
+const MMAP_TEST_MUTATED = "mapped-sync";
+const TTY_PATH = "/dev/tty";
 const TEST_WAIT_YIELDS: usize = 4096;
 
 const FdSet = extern struct {
@@ -124,6 +136,16 @@ const InotifyInternalTestState = struct {
     ok: bool = false,
 };
 
+const ProcessStateTestState = struct {
+    child_pid: u32 = 0,
+    done: bool = false,
+    inherited_cwd_ok: bool = false,
+    inherited_rlimit_ok: bool = false,
+    chroot_ok: bool = false,
+    mkdir_ok: bool = false,
+    mkdirat_ok: bool = false,
+};
+
 const TcpWakeTestState = struct {
     listener: ?*socket.Socket = null,
     accepted: ?*socket.Socket = null,
@@ -147,6 +169,7 @@ var signalfd_test: SignalFdTestState = .{};
 var inotify_test: InotifyTestState = .{};
 var inotify_fd_test: InotifyFdTestState = .{};
 var inotify_internal_test: InotifyInternalTestState = .{};
+var process_state_test: ProcessStateTestState = .{};
 
 pub fn test_virtual_memory() bool {
     pass_count = 0;
@@ -159,6 +182,9 @@ pub fn test_virtual_memory() bool {
     test_memory_stats();
     test_page_flags();
     test_range_operations();
+    test_process_local_state();
+    test_file_backed_mmap();
+    test_tty_surface();
     test_tcp_accept_recv_wakeup();
     test_tcp_select_readiness();
     test_udp_poll_readiness();
@@ -366,6 +392,288 @@ fn test_range_operations() void {
         vga.print("  [FAIL] Not all pages in range are unmapped\n");
         fail_count += 1;
     }
+}
+
+fn test_process_local_state() void {
+    vga.print("Testing process-local cwd/chroot/resource state...\n");
+
+    resetProcessStateTest();
+    defer cleanupProcessStateTest();
+
+    const parent = process.getEffectiveCurrent() orelse {
+        vga.print("  [FAIL] No current process for state isolation test\n");
+        fail_count += 1;
+        return;
+    };
+
+    var original_cwd_buf: [process.PATH_BUFFER_LEN]u8 = undefined;
+    const original_cwd = syscall.getCwd();
+    @memcpy(original_cwd_buf[0..original_cwd.len], original_cwd);
+    const original_cwd_len = original_cwd.len;
+    const original_rlimit = parent.rlimits[syscall.RLIMIT_NOFILE];
+
+    defer {
+        parent.rlimits[syscall.RLIMIT_NOFILE] = original_rlimit;
+        _ = syscall.setCwd(original_cwd_buf[0..original_cwd_len]);
+    }
+
+    cleanupProcessStateArtifacts();
+
+    vfs.mkdir(PROCESS_STATE_TEST_ROOT, dirMode(0o755)) catch |err| switch (err) {
+        error.AlreadyExists => {},
+        else => {
+            vga.print("  [FAIL] Could not create process-state test root\n");
+            fail_count += 1;
+            return;
+        },
+    };
+
+    if (!syscall.setCwd("/tmp")) {
+        vga.print("  [FAIL] Could not set parent cwd to /tmp\n");
+        fail_count += 1;
+        return;
+    }
+
+    if (!setRlimit(syscall.RLIMIT_NOFILE, .{
+        .rlim_cur = PROCESS_STATE_TEST_LIMIT,
+        .rlim_max = PROCESS_STATE_TEST_LIMIT,
+    })) {
+        vga.print("  [FAIL] Could not seed parent RLIMIT_NOFILE\n");
+        fail_count += 1;
+        return;
+    }
+
+    const child = process.create_process("proc-state-test", processStateIsolationTask);
+    process_state_test.child_pid = child.pid;
+
+    if (!waitForFlag(&process_state_test.done)) {
+        vga.print("  [FAIL] Timed out waiting for process-state child\n");
+        fail_count += 1;
+        return;
+    }
+
+    if (!process_state_test.inherited_cwd_ok or !process_state_test.inherited_rlimit_ok) {
+        vga.print("  [FAIL] Child did not inherit cwd and RLIMIT_NOFILE\n");
+        fail_count += 1;
+        return;
+    }
+
+    if (!std.mem.eql(u8, syscall.getCwd(), "/tmp")) {
+        vga.print("  [FAIL] Child cwd change leaked into parent\n");
+        fail_count += 1;
+        return;
+    }
+
+    const parent_limit = getRlimit(syscall.RLIMIT_NOFILE) orelse {
+        vga.print("  [FAIL] Could not read parent RLIMIT_NOFILE after child exit\n");
+        fail_count += 1;
+        return;
+    };
+    if (parent_limit.rlim_cur != PROCESS_STATE_TEST_LIMIT or parent_limit.rlim_max != PROCESS_STATE_TEST_LIMIT) {
+        vga.print("  [FAIL] Child RLIMIT_NOFILE change leaked into parent\n");
+        fail_count += 1;
+        return;
+    }
+
+    if (!process_state_test.chroot_ok or !process_state_test.mkdir_ok or !process_state_test.mkdirat_ok) {
+        vga.print("  [FAIL] Child chroot path resolution did not stay under test root\n");
+        fail_count += 1;
+        return;
+    }
+
+    _ = vfs.lookupPath(PROCESS_STATE_TEST_INSIDE) catch {
+        vga.print("  [FAIL] chrooted mkdir did not create host-visible directory\n");
+        fail_count += 1;
+        return;
+    };
+
+    _ = vfs.lookupPath(PROCESS_STATE_TEST_AT_INSIDE) catch {
+        vga.print("  [FAIL] chrooted mkdirat did not create host-visible directory\n");
+        fail_count += 1;
+        return;
+    };
+
+    vga.print("  [OK] cwd, chroot, and RLIMIT_NOFILE stayed process-local\n");
+    pass_count += 1;
+}
+
+fn test_file_backed_mmap() void {
+    vga.print("Testing file-backed mmap and mprotect...\n");
+
+    const path_mem = allocUserBytes(MMAP_TEST_PATH.len + 1) orelse {
+        vga.print("  [FAIL] Could not allocate mmap test path buffer\n");
+        fail_count += 1;
+        return;
+    };
+    defer freeUserBytes(path_mem);
+    writeCString(path_mem, MMAP_TEST_PATH);
+
+    const fd = syscall.syscall2(syscall.SYS_OPEN, @intFromPtr(path_mem.ptr), vfs.O_RDWR | vfs.O_CREAT | vfs.O_TRUNC);
+    if (fd < abi.FD_OFFSET) {
+        vga.print("  [FAIL] Could not open mmap test file\n");
+        fail_count += 1;
+        return;
+    }
+    defer closeSysFd(fd);
+
+    const write_mem = allocUserBytes(MMAP_TEST_INITIAL.len) orelse {
+        vga.print("  [FAIL] Could not allocate mmap write buffer\n");
+        fail_count += 1;
+        return;
+    };
+    defer freeUserBytes(write_mem);
+    @memcpy(write_mem, MMAP_TEST_INITIAL);
+
+    if (syscall.syscall3(syscall.SYS_WRITE, @as(usize, @intCast(fd)), @intFromPtr(write_mem.ptr), write_mem.len) != MMAP_TEST_INITIAL.len) {
+        vga.print("  [FAIL] Could not seed mmap test file\n");
+        fail_count += 1;
+        return;
+    }
+
+    const map_len = alignToPage(MMAP_TEST_INITIAL.len);
+    const mapped_addr = syscall.syscall6(
+        syscall.SYS_MMAP,
+        0,
+        map_len,
+        syscall.PROT_READ | syscall.PROT_WRITE,
+        syscall.MAP_SHARED,
+        @as(usize, @intCast(fd)),
+        0,
+    );
+    if (mapped_addr < 0) {
+        vga.print("  [FAIL] mmap returned an error\n");
+        fail_count += 1;
+        return;
+    }
+
+    const mapped: [*]u8 = @ptrFromInt(@as(u32, @bitCast(mapped_addr)));
+    if (!std.mem.eql(u8, mapped[0..MMAP_TEST_INITIAL.len], MMAP_TEST_INITIAL)) {
+        vga.print("  [FAIL] mmap contents did not match file contents\n");
+        fail_count += 1;
+        _ = syscall.syscall2(syscall.SYS_MUNMAP, @as(usize, @intCast(mapped_addr)), map_len);
+        return;
+    }
+
+    @memcpy(mapped[0..MMAP_TEST_MUTATED.len], MMAP_TEST_MUTATED);
+    const pre_flags = paging.get_page_flags(@intCast(@as(u32, @bitCast(mapped_addr)))) orelse 0;
+    if ((pre_flags & paging.PAGE_WRITABLE) == 0) {
+        vga.print("  [FAIL] mmap pages were not writable before mprotect\n");
+        fail_count += 1;
+        _ = syscall.syscall2(syscall.SYS_MUNMAP, @as(usize, @intCast(mapped_addr)), map_len);
+        return;
+    }
+
+    if (syscall.syscall3(syscall.SYS_MPROTECT, @as(usize, @intCast(mapped_addr)), map_len, syscall.PROT_READ) != 0) {
+        vga.print("  [FAIL] mprotect returned an error\n");
+        fail_count += 1;
+        _ = syscall.syscall2(syscall.SYS_MUNMAP, @as(usize, @intCast(mapped_addr)), map_len);
+        return;
+    }
+
+    const post_flags = paging.get_page_flags(@intCast(@as(u32, @bitCast(mapped_addr)))) orelse 0;
+    if ((post_flags & paging.PAGE_WRITABLE) != 0) {
+        vga.print("  [FAIL] mprotect did not clear the writable bit\n");
+        fail_count += 1;
+        _ = syscall.syscall2(syscall.SYS_MUNMAP, @as(usize, @intCast(mapped_addr)), map_len);
+        return;
+    }
+
+    if (syscall.syscall2(syscall.SYS_MUNMAP, @as(usize, @intCast(mapped_addr)), map_len) != 0) {
+        vga.print("  [FAIL] munmap returned an error\n");
+        fail_count += 1;
+        return;
+    }
+
+    if (syscall.syscall3(syscall.SYS_LSEEK, @as(usize, @intCast(fd)), 0, vfs.SEEK_SET) < 0) {
+        vga.print("  [FAIL] Could not rewind mmap test file\n");
+        fail_count += 1;
+        return;
+    }
+
+    const read_mem = allocUserBytes(MMAP_TEST_MUTATED.len) orelse {
+        vga.print("  [FAIL] Could not allocate mmap read buffer\n");
+        fail_count += 1;
+        return;
+    };
+    defer freeUserBytes(read_mem);
+
+    const read_len = syscall.syscall3(syscall.SYS_READ, @as(usize, @intCast(fd)), @intFromPtr(read_mem.ptr), read_mem.len);
+    if (read_len != MMAP_TEST_MUTATED.len or !std.mem.eql(u8, read_mem[0..MMAP_TEST_MUTATED.len], MMAP_TEST_MUTATED)) {
+        vga.print("  [FAIL] munmap did not flush shared file changes\n");
+        fail_count += 1;
+        return;
+    }
+
+    vga.print("  [OK] Shared mmap populated, protected, and flushed correctly\n");
+    pass_count += 1;
+}
+
+fn test_tty_surface() void {
+    vga.print("Testing tty detection and ioctl surface...\n");
+
+    if (syscall.syscall1(syscall.SYS_ISATTY, abi.STDIN) != 1) {
+        vga.print("  [FAIL] stdin was not reported as a tty\n");
+        fail_count += 1;
+        return;
+    }
+
+    const winsize_mem = allocUserBytes(@sizeOf(kernel_tty.WinSize)) orelse {
+        vga.print("  [FAIL] Could not allocate tty winsize buffer\n");
+        fail_count += 1;
+        return;
+    };
+    defer freeUserBytes(winsize_mem);
+
+    if (syscall.syscall3(syscall.SYS_IOCTL, abi.STDOUT, syscall.TIOCGWINSZ, @intFromPtr(winsize_mem.ptr)) != 0) {
+        vga.print("  [FAIL] ioctl(TIOCGWINSZ) failed on stdout\n");
+        fail_count += 1;
+        return;
+    }
+
+    const winsize: *kernel_tty.WinSize = @ptrCast(@alignCast(winsize_mem.ptr));
+    if (winsize.ws_col != 80 or winsize.ws_row != 25) {
+        vga.print("  [FAIL] tty winsize did not match the console geometry\n");
+        fail_count += 1;
+        return;
+    }
+
+    const path_mem = allocUserBytes(TTY_PATH.len + 1) orelse {
+        vga.print("  [FAIL] Could not allocate tty path buffer\n");
+        fail_count += 1;
+        return;
+    };
+    defer freeUserBytes(path_mem);
+    writeCString(path_mem, TTY_PATH);
+
+    const tty_fd = syscall.syscall2(syscall.SYS_OPEN, @intFromPtr(path_mem.ptr), vfs.O_RDONLY);
+    if (tty_fd < abi.FD_OFFSET) {
+        vga.print("  [FAIL] Could not open /dev/tty\n");
+        fail_count += 1;
+        return;
+    }
+    defer closeSysFd(tty_fd);
+
+    if (syscall.syscall1(syscall.SYS_ISATTY, @as(usize, @intCast(tty_fd))) != 1) {
+        vga.print("  [FAIL] /dev/tty was not reported as a tty\n");
+        fail_count += 1;
+        return;
+    }
+
+    const termios_mem = allocUserBytes(@sizeOf(kernel_tty.Termios)) orelse {
+        vga.print("  [FAIL] Could not allocate termios buffer\n");
+        fail_count += 1;
+        return;
+    };
+    defer freeUserBytes(termios_mem);
+
+    if (syscall.syscall3(syscall.SYS_IOCTL, @as(usize, @intCast(tty_fd)), syscall.TCGETS, @intFromPtr(termios_mem.ptr)) != 0) {
+        vga.print("  [FAIL] ioctl(TCGETS) failed on /dev/tty\n");
+        fail_count += 1;
+        return;
+    }
+
+    vga.print("  [OK] tty detection and ioctls work for stdio and /dev/tty\n");
+    pass_count += 1;
 }
 
 fn test_tcp_accept_recv_wakeup() void {
@@ -983,6 +1291,10 @@ fn resetInotifyInternalTest() void {
     inotify_internal_test = .{};
 }
 
+fn resetProcessStateTest() void {
+    process_state_test = .{};
+}
+
 fn cleanupUnixSelectTest() void {
     terminateTestProcess(unix_select_test.waiter_pid);
     terminateTestProcess(unix_select_test.feeder_pid);
@@ -1055,6 +1367,114 @@ fn cleanupInotifyInternalTest() void {
     writeCString(path_mem, INOTIFY_INTERNAL_TEST_PATH);
     _ = syscall.syscall1(syscall.SYS_UNLINK, @intFromPtr(path_mem.ptr));
     inotify_internal_test = .{};
+}
+
+fn cleanupProcessStateTest() void {
+    terminateTestProcess(process_state_test.child_pid);
+    cleanupProcessStateArtifacts();
+    process_state_test = .{};
+}
+
+fn cleanupProcessStateArtifacts() void {
+    vfs.rmdir(PROCESS_STATE_TEST_AT_INSIDE) catch {};
+    vfs.rmdir(PROCESS_STATE_TEST_INSIDE) catch {};
+    vfs.rmdir(PROCESS_STATE_TEST_ROOT) catch {};
+}
+
+fn dirMode(bits: u32) vfs.FileMode {
+    return .{
+        .owner_read = (bits & 0o400) != 0,
+        .owner_write = (bits & 0o200) != 0,
+        .owner_exec = (bits & 0o100) != 0,
+        .group_read = (bits & 0o040) != 0,
+        .group_write = (bits & 0o020) != 0,
+        .group_exec = (bits & 0o010) != 0,
+        .other_read = (bits & 0o004) != 0,
+        .other_write = (bits & 0o002) != 0,
+        .other_exec = (bits & 0o001) != 0,
+    };
+}
+
+fn setRlimit(resource: u32, limit: process.Rlimit) bool {
+    const mem = allocUserBytes(@sizeOf(process.Rlimit)) orelse return false;
+    defer freeUserBytes(mem);
+
+    const limit_ptr: *process.Rlimit = @ptrCast(@alignCast(mem.ptr));
+    limit_ptr.* = limit;
+    return syscall.syscall2(syscall.SYS_SETRLIMIT, resource, @intFromPtr(limit_ptr)) == 0;
+}
+
+fn getRlimit(resource: u32) ?process.Rlimit {
+    const mem = allocUserBytes(@sizeOf(process.Rlimit)) orelse return null;
+    defer freeUserBytes(mem);
+
+    const limit_ptr: *process.Rlimit = @ptrCast(@alignCast(mem.ptr));
+    if (syscall.syscall2(syscall.SYS_GETRLIMIT, resource, @intFromPtr(limit_ptr)) != 0) {
+        return null;
+    }
+    return limit_ptr.*;
+}
+
+fn processStateIsolationTask() void {
+    process_state_test.inherited_cwd_ok = std.mem.eql(u8, syscall.getCwd(), "/tmp");
+
+    if (getRlimit(syscall.RLIMIT_NOFILE)) |limit| {
+        process_state_test.inherited_rlimit_ok = limit.rlim_cur == PROCESS_STATE_TEST_LIMIT and
+            limit.rlim_max == PROCESS_STATE_TEST_LIMIT;
+    }
+
+    if (!syscall.setCwd("/")) {
+        process_state_test.done = true;
+        finishTestTask();
+    }
+
+    if (!setRlimit(syscall.RLIMIT_NOFILE, .{
+        .rlim_cur = PROCESS_STATE_TEST_CHILD_LIMIT,
+        .rlim_max = PROCESS_STATE_TEST_CHILD_LIMIT,
+    })) {
+        process_state_test.done = true;
+        finishTestTask();
+    }
+
+    const root_path_mem = allocUserBytes(PROCESS_STATE_TEST_ROOT.len + 1) orelse {
+        process_state_test.done = true;
+        finishTestTask();
+    };
+    defer freeUserBytes(root_path_mem);
+    writeCString(root_path_mem, PROCESS_STATE_TEST_ROOT);
+
+    if (syscall.syscall1(syscall.SYS_CHROOT, @intFromPtr(root_path_mem.ptr)) != 0) {
+        process_state_test.done = true;
+        finishTestTask();
+    }
+
+    process_state_test.chroot_ok = std.mem.eql(u8, syscall.getCwd(), "/");
+
+    const child_dir_mem = allocUserBytes(PROCESS_STATE_TEST_CHILD_DIR.len + 1) orelse {
+        process_state_test.done = true;
+        finishTestTask();
+    };
+    defer freeUserBytes(child_dir_mem);
+    writeCString(child_dir_mem, PROCESS_STATE_TEST_CHILD_DIR);
+    process_state_test.mkdir_ok = syscall.syscall2(syscall.SYS_MKDIR, @intFromPtr(child_dir_mem.ptr), 0o755) == 0;
+
+    const child_at_dir_mem = allocUserBytes(PROCESS_STATE_TEST_AT_CHILD_DIR.len + 1) orelse {
+        process_state_test.done = true;
+        finishTestTask();
+    };
+    defer freeUserBytes(child_at_dir_mem);
+    writeCString(child_at_dir_mem, PROCESS_STATE_TEST_AT_CHILD_DIR);
+
+    const at_cwd_arg: usize = @as(u32, @bitCast(syscall.AT_FDCWD));
+    process_state_test.mkdirat_ok = syscall.syscall3(
+        syscall.SYS_MKDIRAT,
+        at_cwd_arg,
+        @intFromPtr(child_at_dir_mem.ptr),
+        0o755,
+    ) == 0;
+
+    process_state_test.done = true;
+    finishTestTask();
 }
 
 fn tcpSelectWaitTask() void {
@@ -1597,6 +2017,10 @@ fn closeSysFd(fd: i32) void {
     if (fd >= 0) {
         _ = syscall.syscall1(syscall.SYS_CLOSE, @as(usize, @intCast(fd)));
     }
+}
+
+fn alignToPage(value: usize) usize {
+    return (value + 0xFFF) & ~@as(usize, 0xFFF);
 }
 
 fn storeUserU64(bytes: []u8, value: u64) void {

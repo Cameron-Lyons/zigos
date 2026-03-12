@@ -1,10 +1,11 @@
 const std = @import("std");
 const x86 = @import("../../arch/x86.zig");
 const idt = @import("../interrupts/idt.zig");
+const tty = @import("../fs/tty.zig");
+const mmap = @import("../memory/mmap.zig");
 const process = @import("process.zig");
 const vga = @import("../drivers/vga.zig");
 const console = @import("../utils/console.zig");
-const keyboard = @import("../drivers/keyboard.zig");
 const protection = @import("../memory/protection.zig");
 const posix = @import("../utils/posix.zig");
 const memory = @import("../memory/memory.zig");
@@ -455,6 +456,15 @@ pub const PROT_NONE = abi.PROT_NONE;
 pub const PROT_READ = abi.PROT_READ;
 pub const PROT_WRITE = abi.PROT_WRITE;
 pub const PROT_EXEC = abi.PROT_EXEC;
+pub const MAP_SHARED = abi.MAP_SHARED;
+pub const MAP_PRIVATE = abi.MAP_PRIVATE;
+pub const MAP_FIXED = abi.MAP_FIXED;
+pub const MAP_ANONYMOUS = abi.MAP_ANONYMOUS;
+pub const TCGETS = abi.TCGETS;
+pub const TCSETS = abi.TCSETS;
+pub const TCSETSW = abi.TCSETSW;
+pub const TCSETSF = abi.TCSETSF;
+pub const TIOCGWINSZ = abi.TIOCGWINSZ;
 
 pub const CLOCK_MONOTONIC_RAW = abi.CLOCK_MONOTONIC_RAW;
 pub const CLOCK_REALTIME_COARSE = abi.CLOCK_REALTIME_COARSE;
@@ -583,13 +593,13 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_FSTATFS => sys_fstatfs(@intCast(arg1), arg2),
         SYS_GETHOSTNAME => sys_gethostname(arg1, arg2),
         SYS_SETHOSTNAME => sys_sethostname(arg1, arg2),
-        SYS_OPENAT => sys_openat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3)),
-        SYS_MKDIRAT => sys_mkdirat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3)),
-        SYS_UNLINKAT => sys_unlinkat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3)),
-        SYS_LINKAT => sys_linkat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), @as([*]const u8, @ptrFromInt(arg4)), @intCast(arg5)),
-        SYS_FCHMODAT => sys_fchmodat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3)),
-        SYS_FCHOWNAT => sys_fchownat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), @intCast(arg4)),
-        SYS_RENAMEAT => sys_renameat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), @as([*]const u8, @ptrFromInt(arg4))),
+        SYS_OPENAT => sys_openat(rawArgI32(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3)),
+        SYS_MKDIRAT => sys_mkdirat(rawArgI32(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3)),
+        SYS_UNLINKAT => sys_unlinkat(rawArgI32(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3)),
+        SYS_LINKAT => sys_linkat(rawArgI32(arg1), @as([*]const u8, @ptrFromInt(arg2)), rawArgI32(arg3), @as([*]const u8, @ptrFromInt(arg4)), @intCast(arg5)),
+        SYS_FCHMODAT => sys_fchmodat(rawArgI32(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3)),
+        SYS_FCHOWNAT => sys_fchownat(rawArgI32(arg1), @as([*]const u8, @ptrFromInt(arg2)), rawArgI32(arg3), rawArgI32(arg4)),
+        SYS_RENAMEAT => sys_renameat(rawArgI32(arg1), @as([*]const u8, @ptrFromInt(arg2)), rawArgI32(arg3), @as([*]const u8, @ptrFromInt(arg4))),
         SYS_GETGROUPS => sys_getgroups(@intCast(arg1), arg2),
         SYS_SETGROUPS => sys_setgroups(@intCast(arg1), arg2),
         SYS_GETITIMER => sys_getitimer(@intCast(arg1), arg2),
@@ -622,9 +632,9 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_SIGNALFD4 => sys_signalfd4(rawArgI32(arg1), arg2, @intCast(arg3), @intCast(arg4)),
         SYS_PPOLL => sys_ppoll(arg1, @intCast(arg2), arg3, arg4),
         SYS_PSELECT6 => sys_pselect6(@intCast(arg1), arg2, arg3, arg4, arg5, @as(usize, @bitCast(@as(i32, @intCast(regs.ebp))))),
-        SYS_FACCESSAT => sys_faccessat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), 0),
-        SYS_FACCESSAT2 => sys_faccessat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), @intCast(arg4)),
-        SYS_STATX => sys_statx(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), @intCast(arg4), arg5),
+        SYS_FACCESSAT => sys_faccessat(rawArgI32(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), 0),
+        SYS_FACCESSAT2 => sys_faccessat(rawArgI32(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), @intCast(arg4)),
+        SYS_STATX => sys_statx(rawArgI32(arg1), @as([*]const u8, @ptrFromInt(arg2)), @intCast(arg3), @intCast(arg4), arg5),
         SYS_MEMBARRIER => sys_membarrier(@intCast(arg1), @intCast(arg2)),
         SYS_COPY_FILE_RANGE => sys_copy_file_range(@intCast(arg1), arg2, @intCast(arg3), arg4, arg5),
         SYS_FADVISE64 => sys_fadvise64(@intCast(arg1), @as(i64, @bitCast(@as(u64, arg2) | (@as(u64, arg3) << 32))), arg4, @intCast(arg5)),
@@ -635,11 +645,11 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_SETPRIORITY => sys_setpriority(@intCast(arg1), @intCast(arg2), @intCast(arg3)),
         SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(@intCast(arg1), arg2, arg3),
         SYS_SCHED_SETAFFINITY => sys_sched_setaffinity(@intCast(arg1), arg2, arg3),
-        SYS_UTIMENSAT => sys_utimensat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3, @intCast(arg4)),
-        SYS_FUTIMESAT => sys_futimesat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3),
-        SYS_FSTATAT => sys_fstatat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3, @intCast(arg4)),
-        SYS_SYMLINKAT => sys_symlinkat(@as([*]const u8, @ptrFromInt(arg1)), @intCast(arg2), @as([*]const u8, @ptrFromInt(arg3))),
-        SYS_READLINKAT => sys_readlinkat(@intCast(arg1), @as([*]const u8, @ptrFromInt(arg2)), @as([*]u8, @ptrFromInt(arg3)), arg4),
+        SYS_UTIMENSAT => sys_utimensat(rawArgI32(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3, @intCast(arg4)),
+        SYS_FUTIMESAT => sys_futimesat(rawArgI32(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3),
+        SYS_FSTATAT => sys_fstatat(rawArgI32(arg1), @as([*]const u8, @ptrFromInt(arg2)), arg3, @intCast(arg4)),
+        SYS_SYMLINKAT => sys_symlinkat(@as([*]const u8, @ptrFromInt(arg1)), rawArgI32(arg2), @as([*]const u8, @ptrFromInt(arg3))),
+        SYS_READLINKAT => sys_readlinkat(rawArgI32(arg1), @as([*]const u8, @ptrFromInt(arg2)), @as([*]u8, @ptrFromInt(arg3)), arg4),
         SYS_WAITID => sys_waitid(@intCast(arg1), @intCast(arg2), arg3, @intCast(arg4)),
         SYS_SET_TID_ADDRESS => sys_set_tid_address(arg1),
         SYS_GET_ROBUST_LIST => sys_get_robust_list(@intCast(arg1), arg2, arg3),
@@ -724,8 +734,7 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
                 return EINVAL;
             };
 
-            console.print(kernel_buffer[0..chunk_size]);
-
+            tty.write(kernel_buffer[0..chunk_size]);
             written += chunk_size;
         }
 
@@ -772,31 +781,14 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
     const effective_fd = resolveIoFd(fd);
 
     if (effective_fd == STDIN) {
-        // SAFETY: filled by the subsequent keyboard.getchar calls
         var kernel_buffer: [256]u8 = undefined;
-        const read_size = @min(count, kernel_buffer.len);
-        var i: usize = 0;
+        const read_size = tty.read(kernel_buffer[0..@min(count, kernel_buffer.len)]);
 
-        while (i < read_size) : (i += 1) {
-            while (!keyboard.has_char()) {
-                x86.hlt();
-            }
-
-            if (keyboard.getchar()) |ch| {
-                kernel_buffer[i] = ch;
-
-                if (ch == '\n') {
-                    i += 1;
-                    break;
-                }
-            }
-        }
-
-        protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..i]) catch {
+        protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..read_size]) catch {
             return EINVAL;
         };
 
-        return @intCast(i);
+        return @intCast(read_size);
     }
 
     if (count == 0) return 0;
@@ -982,6 +974,12 @@ pub fn syscall5(num: u32, arg1: usize, arg2: usize, arg3: usize, arg4: usize, ar
     return result;
 }
 
+extern fn syscall6_asm(num: u32, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) callconv(.c) i32;
+
+pub fn syscall6(num: u32, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) i32 {
+    return syscall6_asm(num, arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
 fn sys_getuid() i32 {
     if (process.current_process) |proc| {
         return @intCast(proc.creds.uid);
@@ -1158,55 +1156,61 @@ fn sys_brk(addr: usize) i32 {
     return syscall_process.sys_brk(addr);
 }
 
-const MAP_SHARED = 0x01;
-const MAP_PRIVATE = 0x02;
-const MAP_ANONYMOUS = 0x20;
-const MAP_FIXED = 0x10;
-
 fn sys_mmap(addr: usize, length: usize, prot: i32, flags: i32, fd: i32, offset: i32) i32 {
     if (length == 0) {
         return EINVAL;
     }
 
-    if ((flags & MAP_ANONYMOUS) == 0) {
-        if (fd < 0) {
+    const proc = process.getCurrentProcess() orelse return ENOSYS;
+    const map_prot: u32 = @bitCast(prot);
+    const map_flags: u32 = @bitCast(flags);
+
+    var vnode: ?*vfs.VNode = null;
+    var open_flags: u32 = vfs.O_RDONLY;
+    var file_offset: u64 = 0;
+    var file_bytes: usize = 0;
+
+    if ((map_flags & MAP_ANONYMOUS) == 0) {
+        if (fd < FD_OFFSET or offset < 0 or (@as(u32, @bitCast(offset)) & 0xFFF) != 0) {
             return EINVAL;
         }
 
-        _ = offset;
-        return ENOSYS;
-    }
+        const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
+        open_flags = vfs.getFileFlags(vfs_fd) catch return EBADF;
+        vnode = vfs.getVNodeFromFd(vfs_fd) catch return EBADF;
 
-    if ((flags & MAP_PRIVATE) != 0 and (flags & MAP_SHARED) != 0) {
-        return EINVAL;
-    }
-    if ((flags & MAP_PRIVATE) == 0 and (flags & MAP_SHARED) == 0) {
-        return EINVAL;
-    }
-
-    // SAFETY: assigned in every branch of the if/else below
-    var result_addr: usize = undefined;
-    if (addr != 0) {
-        const aligned_addr = addr & ~@as(usize, 0xFFF);
-
-        if ((flags & MAP_FIXED) != 0) {
-            if (aligned_addr < protection.USER_HEAP_START or aligned_addr >= protection.USER_SPACE_END) {
-                return EINVAL;
-            }
-
-            result_addr = protection.allocateUserMemory(length, @intCast(prot)) catch {
-                return ENOMEM;
-            };
-        } else {
-            result_addr = protection.allocateUserMemory(length, @intCast(prot)) catch {
-                return ENOMEM;
-            };
+        if (vnode.?.file_type != .Regular) {
+            return ENODEV;
         }
-    } else {
-        result_addr = protection.allocateUserMemory(length, @intCast(prot)) catch {
-            return ENOMEM;
-        };
+
+        const access_mode = open_flags & 0x3;
+        if ((map_prot & PROT_READ) != 0 and access_mode == vfs.O_WRONLY) {
+            return EACCES;
+        }
+        if ((map_flags & MAP_SHARED) != 0 and (map_prot & PROT_WRITE) != 0 and access_mode == vfs.O_RDONLY) {
+            return EACCES;
+        }
+
+        file_offset = @intCast(offset);
+        if (file_offset > vnode.?.size) {
+            file_bytes = 0;
+        } else {
+            file_bytes = @intCast(@min(@as(u64, @intCast(length)), vnode.?.size - file_offset));
+        }
+    } else if (offset != 0) {
+        return EINVAL;
     }
+
+    const result_addr = mmap.mmap(proc, addr, length, map_prot, map_flags, vnode, open_flags & 0x3, file_offset, file_bytes) catch |err| {
+        return switch (err) {
+            error.InvalidArgument => EINVAL,
+            error.NoMemory => ENOMEM,
+            error.AccessDenied => EACCES,
+            error.InvalidFd => EBADF,
+            error.NotMapped => EINVAL,
+            error.TooManyMappings => ENOMEM,
+        };
+    };
 
     return @intCast(result_addr);
 }
@@ -1260,16 +1264,26 @@ fn sys_msgrcv(buf: [*]u8, size: usize, flags: i32) i32 {
 }
 
 fn sys_munmap(addr: usize, length: usize) i32 {
-    if (addr == 0 or length == 0) return EINVAL;
-    if (addr & 0xFFF != 0) return EINVAL;
-    if (addr < protection.USER_HEAP_START or addr >= protection.USER_SPACE_END) return EINVAL;
-
-    protection.freeUserMemory(addr, length);
+    const proc = process.getCurrentProcess() orelse return ENOSYS;
+    mmap.munmap(proc, addr, length) catch |err| {
+        return switch (err) {
+            error.InvalidArgument => EINVAL,
+            error.NoMemory => ENOMEM,
+            error.AccessDenied => EACCES,
+            error.InvalidFd => EBADF,
+            error.NotMapped => EINVAL,
+            error.TooManyMappings => ENOMEM,
+        };
+    };
     return 0;
 }
 
 fn sys_ioctl(fd: i32, request: u32, arg: usize) i32 {
-    return syscall_fd.sys_ioctl(fd, request, arg);
+    const effective_fd = resolveIoFd(fd);
+    if (effective_fd == STDIN or effective_fd == STDOUT or effective_fd == STDERR) {
+        return tty.ioctl(request, arg);
+    }
+    return syscall_fd.sys_ioctl(effective_fd, request, arg);
 }
 
 fn sys_getppid_syscall() i32 {
@@ -1950,16 +1964,15 @@ fn sys_getegid() i32 {
 }
 
 fn sys_isatty(fd: i32) i32 {
-    if (fd == STDIN or fd == STDOUT or fd == STDERR) {
+    const effective_fd = resolveIoFd(fd);
+    if (effective_fd == STDIN or effective_fd == STDOUT or effective_fd == STDERR) {
         return 1;
     }
-    if (fd < FD_OFFSET) return EBADF;
-    const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
-    if (vfs.getFileFlags(vfs_fd)) |_| {
-        return 0;
-    } else |_| {
-        return EBADF;
-    }
+    if (syscall_descriptor.lookup(effective_fd) != null) return 0;
+    if (effective_fd < FD_OFFSET) return EBADF;
+    const vfs_fd: u32 = @intCast(effective_fd - FD_OFFSET);
+    const vnode = vfs.getVNodeFromFd(vfs_fd) catch return EBADF;
+    return if (tty.isTtyVNode(vnode)) 1 else 0;
 }
 
 const StatFs = extern struct {
@@ -2919,24 +2932,14 @@ fn sys_mincore(addr: usize, length: usize, vec: usize) i32 {
     return 0;
 }
 
-const Rlimit = extern struct {
-    rlim_cur: u64,
-    rlim_max: u64,
-};
-
-var process_rlimits: [256][10]Rlimit = [_][10]Rlimit{[_]Rlimit{.{
-    .rlim_cur = RLIM_INFINITY,
-    .rlim_max = RLIM_INFINITY,
-}} ** 10} ** 256;
+const Rlimit = process.Rlimit;
 
 fn sys_getrlimit(resource: u32, rlim_ptr: usize) i32 {
     if (resource >= 10) return EINVAL;
     if (!protection.verifyUserPointer(rlim_ptr, @sizeOf(Rlimit))) return EFAULT;
 
-    const proc = process.current_process orelse return ESRCH;
-    const pid_idx: usize = proc.pid % 256;
-
-    const rlim = process_rlimits[pid_idx][resource];
+    const proc = process.getEffectiveCurrent() orelse return ESRCH;
+    const rlim = proc.rlimits[resource];
     protection.copyToUser(rlim_ptr, std.mem.asBytes(&rlim)) catch return EFAULT;
     return 0;
 }
@@ -2945,30 +2948,28 @@ fn sys_setrlimit(resource: u32, rlim_ptr: usize) i32 {
     if (resource >= 10) return EINVAL;
     if (!protection.verifyUserPointer(rlim_ptr, @sizeOf(Rlimit))) return EFAULT;
 
-    const proc = process.current_process orelse return ESRCH;
-    const pid_idx: usize = proc.pid % 256;
+    const proc = process.getEffectiveCurrent() orelse return ESRCH;
 
     var rlim: Rlimit = undefined;
     protection.copyFromUser(std.mem.asBytes(&rlim), rlim_ptr) catch return EFAULT;
 
-    process_rlimits[pid_idx][resource] = rlim;
+    proc.rlimits[resource] = rlim;
     return 0;
 }
 
 fn sys_prlimit64(pid: i32, resource: u32, new_limit: usize, old_limit: usize) i32 {
     if (resource >= 10) return EINVAL;
 
-    const pid_idx: usize = if (pid == 0) blk: {
-        const proc = process.current_process orelse return ESRCH;
-        break :blk proc.pid % 256;
-    } else blk: {
+    const target_proc = if (pid == 0)
+        process.getEffectiveCurrent() orelse return ESRCH
+    else blk: {
         if (pid < 0) return EINVAL;
-        break :blk @as(usize, @intCast(pid)) % 256;
+        break :blk process.getProcessByPid(@intCast(pid)) orelse return ESRCH;
     };
 
     if (old_limit != 0) {
         if (!protection.verifyUserPointer(old_limit, @sizeOf(Rlimit))) return EFAULT;
-        const rlim = process_rlimits[pid_idx][resource];
+        const rlim = target_proc.rlimits[resource];
         protection.copyToUser(old_limit, std.mem.asBytes(&rlim)) catch return EFAULT;
     }
 
@@ -2976,16 +2977,24 @@ fn sys_prlimit64(pid: i32, resource: u32, new_limit: usize, old_limit: usize) i3
         if (!protection.verifyUserPointer(new_limit, @sizeOf(Rlimit))) return EFAULT;
         var rlim: Rlimit = undefined;
         protection.copyFromUser(std.mem.asBytes(&rlim), new_limit) catch return EFAULT;
-        process_rlimits[pid_idx][resource] = rlim;
+        target_proc.rlimits[resource] = rlim;
     }
 
     return 0;
 }
 
 fn sys_mprotect(addr: usize, len: usize, prot: u32) i32 {
-    _ = addr;
-    _ = len;
-    _ = prot;
+    const proc = process.getCurrentProcess() orelse return ENOSYS;
+    mmap.mprotect(proc, addr, len, prot) catch |err| {
+        return switch (err) {
+            error.InvalidArgument => EINVAL,
+            error.NoMemory => ENOMEM,
+            error.AccessDenied => EACCES,
+            error.InvalidFd => EBADF,
+            error.NotMapped => EINVAL,
+            error.TooManyMappings => ENOMEM,
+        };
+    };
     return 0;
 }
 
@@ -3119,21 +3128,22 @@ fn sys_timer_getoverrun(timerid: i32) i32 {
     return syscall_time.sys_timer_getoverrun(timerid);
 }
 
-var chroot_path: [256]u8 = [_]u8{0} ** 256;
-var chroot_len: usize = 0;
-
 fn sys_chroot(path: [*]const u8) i32 {
     if (!protection.verifyUserPointer(@intFromPtr(path), 256)) return EFAULT;
+
+    const proc = process.getEffectiveCurrent() orelse return ESRCH;
+    if (proc.creds.euid != 0) return EPERM;
 
     var path_buffer: [256]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(path)) catch return EFAULT;
 
-    const vnode = vfs.lookupPath(path_slice) catch |err| return vfsErrno(err);
+    var resolved_buf: [512]u8 = undefined;
+    const resolved = resolveUserPath(path_slice, &resolved_buf) orelse return ENAMETOOLONG;
+
+    const vnode = vfs.lookupPath(resolved) catch |err| return vfsErrno(err);
     if (vnode.file_type != .Directory) return ENOTDIR;
 
-    @memset(&chroot_path, 0);
-    @memcpy(chroot_path[0..path_slice.len], path_slice);
-    chroot_len = path_slice.len;
+    if (!syscall_cwd.setChroot(resolved)) return ENAMETOOLONG;
 
     return 0;
 }
