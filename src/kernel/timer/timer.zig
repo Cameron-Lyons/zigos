@@ -143,11 +143,13 @@ pub fn cancelWake(pid: u32) void {
 }
 
 pub fn sleep(milliseconds: u32) void {
-    const start_ticks = ticks;
-    const ticks_to_wait = @as(u64, milliseconds) / MILLISECONDS_PER_TICK;
-    while (ticks - start_ticks < ticks_to_wait) {
-        asm volatile ("hlt");
-    }
+    if (milliseconds == 0) return;
+
+    const ticks_to_wait = @max(@as(u64, 1), @divFloor(
+        @as(u64, milliseconds) + MILLISECONDS_PER_TICK - 1,
+        MILLISECONDS_PER_TICK,
+    ));
+    sleepCurrentTicks(ticks_to_wait);
 }
 
 fn print_number(num: u32) void {

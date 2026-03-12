@@ -106,7 +106,7 @@ fn clampCPU(cpu_id: u32) usize {
 
 fn activeCPUCount() u32 {
     if (!smp.isSMPEnabled()) return 1;
-    const n = smp.getNumCPUs();
+    const n = smp.getActiveCPUCount();
     if (n == 0) return 1;
     return @min(n, MAX_SCHED_CPUS);
 }

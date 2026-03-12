@@ -120,7 +120,7 @@ pub fn sendPacket(dst: IPv6Address, next_header: u8, payload: []const u8) void {
     // SAFETY: header and payload portions filled before the buffer is sent
     var packet_buf: [ethernet.ETH_MTU]u8 = undefined;
 
-    const header: *IPv6Header = @ptrCast(@alignCast(&packet_buf[0]));
+    const header: *align(1) IPv6Header = @ptrCast(&packet_buf[0]);
     header.version_tc_flow = @byteSwap(@as(u32, 0x60000000));
     header.payload_length = @byteSwap(@as(u16, @intCast(payload.len)));
     header.next_header = next_header;
@@ -152,7 +152,7 @@ fn handleEthernetFrame(frame: *const ethernet.EthernetFrame) void {
 pub fn handlePacket(data: []const u8) void {
     if (data.len < @sizeOf(IPv6Header)) return;
 
-    const header: *const IPv6Header = @ptrCast(@alignCast(data.ptr));
+    const header: *align(1) const IPv6Header = @ptrCast(data.ptr);
 
     const version_tc_flow = @byteSwap(header.version_tc_flow);
     const version = (version_tc_flow >> 28) & 0xF;

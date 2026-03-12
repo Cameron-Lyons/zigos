@@ -53,7 +53,7 @@ pub fn sendFrame(dst_mac: [6]u8, ethertype: EtherType, data: []const u8) !void {
 
     // SAFETY: header and data portions filled before the buffer is sent
     var frame_buf: [ETH_HEADER_SIZE + ETH_MTU]u8 = undefined;
-    var frame: *EthernetHeader = @ptrCast(@alignCast(&frame_buf[0]));
+    var frame: *align(1) EthernetHeader = @ptrCast(&frame_buf[0]);
 
     frame.dst_mac0 = dst_mac[0];
     frame.dst_mac1 = dst_mac[1];
@@ -85,7 +85,7 @@ pub fn handleRxPacket(packet: []u8) void {
         return;
     }
 
-    const header: *const EthernetHeader = @ptrCast(@alignCast(packet.ptr));
+    const header: *align(1) const EthernetHeader = @ptrCast(packet.ptr);
     const ethertype = @byteSwap(header.ethertype);
 
     const frame = EthernetFrame{
@@ -111,4 +111,3 @@ pub fn handleRxPacket(packet: []u8) void {
         }
     }
 }
-
