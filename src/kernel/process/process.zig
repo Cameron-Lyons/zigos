@@ -231,18 +231,22 @@ pub fn create_process(name: []const u8, entry_point: *const fn () void) *Process
 }
 
 pub fn create_kernel_process(name: []const u8, entry_point: *const fn () void) *Process {
-    return create_process_internal(name, @intFromPtr(entry_point), .Kernel, .direct);
+    return create_process_internal(name, @intFromPtr(entry_point), .Kernel, .direct, .inherit_current_cpu);
+}
+
+pub fn create_kernel_process_any_cpu(name: []const u8, entry_point: *const fn () void) *Process {
+    return create_process_internal(name, @intFromPtr(entry_point), .Kernel, .direct, .any_cpu);
 }
 
 pub fn create_exec_process(name: []const u8) *Process {
-    const proc = create_process_internal(name, @intFromPtr(&start_external_exec_process), .Kernel, .trampoline);
+    const proc = create_process_internal(name, @intFromPtr(&start_external_exec_process), .Kernel, .trampoline, .inherit_current_cpu);
     proc.privilege = .User;
     proc.creds = credentials.defaultUserCredentials();
     return proc;
 }
 
 pub fn create_user_process(name: []const u8, entry_point: *const fn () void) *Process {
-    return create_process_internal(name, @intFromPtr(entry_point), .User, .direct);
+    return create_process_internal(name, @intFromPtr(entry_point), .User, .direct, .inherit_current_cpu);
 }
 
 const KernelEntryMode = enum {
@@ -250,7 +254,12 @@ const KernelEntryMode = enum {
     trampoline,
 };
 
-fn create_process_internal(name: []const u8, entry_point_addr: usize, privilege: ProcessPrivilege, _: KernelEntryMode) *Process {
+const ProcessPlacement = enum {
+    inherit_current_cpu,
+    any_cpu,
+};
+
+fn create_process_internal(name: []const u8, entry_point_addr: usize, privilege: ProcessPrivilege, _: KernelEntryMode, placement: ProcessPlacement) *Process {
     var process: ?*Process = null;
 
     for (&process_table) |*proc| {
@@ -379,7 +388,7 @@ fn create_process_internal(name: []const u8, entry_point_addr: usize, privilege:
 
     const priority = if (privilege == .Kernel) scheduler.Priority.High else scheduler.Priority.Normal;
     _ = scheduler.registerProcess(proc, priority);
-    if (parent != null) {
+    if (placement == .inherit_current_cpu and parent != null) {
         scheduler.assignProcessToCPU(proc, smp.getCurrentCPU());
     }
 

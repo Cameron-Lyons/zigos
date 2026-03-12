@@ -95,11 +95,11 @@ pub fn startWorkers() void {
     if (workers_started) return;
     workers_started = true;
 
-    _ = process.create_kernel_process("net-rx-worker", netRxWorker);
-    _ = process.create_kernel_process("net-tx-worker", netTxWorker);
+    _ = process.create_kernel_process_any_cpu("net-rx-worker", netRxWorker);
+    _ = process.create_kernel_process_any_cpu("net-tx-worker", netTxWorker);
 
     if (smp.isSMPEnabled() and smp.getNumCPUs() > 2) {
-        _ = process.create_kernel_process("net-rx-worker-2", netRxWorker);
+        _ = process.create_kernel_process_any_cpu("net-rx-worker-2", netRxWorker);
     }
 }
 

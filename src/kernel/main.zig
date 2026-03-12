@@ -7,6 +7,7 @@ const keyboard = @import("drivers/keyboard.zig");
 const paging = @import("memory/paging.zig");
 const timer = @import("timer/timer.zig");
 const process = @import("process/process.zig");
+const scheduler = @import("process/scheduler.zig");
 const shell = @import("shell/shell.zig");
 const syscall = @import("process/syscall.zig");
 const test_syscall = @import("tests/test_syscall.zig");
@@ -71,6 +72,30 @@ fn printBootProfile() void {
     console.print("\n");
 }
 
+fn printCpuCount(count: u32) void {
+    var cpu_str: [10]u8 = undefined;
+    var cpu_count = count;
+    var idx: usize = 0;
+
+    if (cpu_count == 0) {
+        cpu_str[0] = '0';
+        idx = 1;
+    } else {
+        while (cpu_count > 0) : (idx += 1) {
+            cpu_str[idx] = @as(u8, @intCast('0' + (cpu_count % 10)));
+            cpu_count /= 10;
+        }
+        var i: usize = 0;
+        while (i < idx / 2) : (i += 1) {
+            const tmp = cpu_str[i];
+            cpu_str[i] = cpu_str[idx - 1 - i];
+            cpu_str[idx - 1 - i] = tmp;
+        }
+    }
+
+    console.print(cpu_str[0..idx]);
+}
+
 fn initCore() void {
     console.print("Initializing GDT...\n");
     const gdt = @import("interrupts/gdt.zig");
@@ -112,6 +137,30 @@ fn initDevices() void {
     ata.init();
     console.print("Device drivers ready!\n");
 
+    if (config.shouldInitRuntimeExtras() or config.shouldInitAcpi()) {
+        console.print("Deferring PCI inventory scan and optional device init...\n");
+    } else {
+        console.print("Scanning PCI bus...\n");
+        pci.scanBus();
+    }
+
+    if (config.shouldInitSmp()) {
+        console.print("Initializing SMP (multicore) support...\n");
+        const smp = @import("smp/smp.zig");
+        smp.init();
+        if (smp.getNumCPUs() > 1) {
+            console.print("SMP discovered ");
+            printCpuCount(smp.getNumCPUs());
+            console.print(" CPUs; runtime startup deferred\n");
+        } else {
+            console.print("Single CPU mode\n");
+        }
+    }
+}
+
+fn deferredRuntimeInitTask() void {
+    console.print("Deferred runtime initialization starting...\n");
+
     console.print("Scanning PCI bus...\n");
     pci.scanBus();
 
@@ -120,37 +169,33 @@ fn initDevices() void {
         acpi.init();
     }
 
-    if (config.shouldInitSmp()) {
-        console.print("Initializing SMP (multicore) support...\n");
-        const smp = @import("smp/smp.zig");
-        smp.init();
-        if (smp.isSMPEnabled()) {
-            console.print("SMP enabled with ");
-            const num_cpus = smp.getNumCPUs();
-            var cpu_str: [10]u8 = undefined;
-            var cpu_count = num_cpus;
-            var idx: usize = 0;
-            if (cpu_count == 0) {
-                cpu_str[0] = '0';
-                idx = 1;
-            } else {
-                while (cpu_count > 0) : (idx += 1) {
-                    cpu_str[idx] = @as(u8, @intCast('0' + (cpu_count % 10)));
-                    cpu_count /= 10;
-                }
-                var i: usize = 0;
-                while (i < idx / 2) : (i += 1) {
-                    const tmp = cpu_str[i];
-                    cpu_str[i] = cpu_str[idx - 1 - i];
-                    cpu_str[idx - 1 - i] = tmp;
-                }
-            }
-            console.print(cpu_str[0..idx]);
-            console.print(" CPUs\n");
-        } else {
-            console.print("Single CPU mode\n");
-        }
+    if (config.shouldInitRuntimeExtras()) {
+        console.print("Initializing USB...\n");
+        usb.init();
+
+        console.print("Initializing UHCI...\n");
+        uhci.init();
+
+        console.print("Initializing audio...\n");
+        ac97.init();
+
+        console.print("Initializing virtual terminals...\n");
+        vt.init();
+
+        console.print("Initializing graphics mode (framebuffer)...\n");
+        _ = @import("devices/framebuffer.zig");
+        console.print("Framebuffer support ready (requires multiboot framebuffer info)\n");
     }
+
+    console.print("Deferred runtime initialization complete\n");
+}
+
+fn startDeferredRuntimeInit() void {
+    if (!config.shouldInitRuntimeExtras() and !config.shouldInitAcpi()) return;
+
+    console.print("Scheduling deferred runtime initialization...\n");
+    const init_proc = process.create_kernel_process_any_cpu("runtime-init", deferredRuntimeInitTask);
+    _ = scheduler.setProcessPriority(init_proc.pid, .Low);
 }
 
 fn initNetworkStack() void {
@@ -262,6 +307,18 @@ fn initRuntime() void {
     console.print("Initializing process management...\n");
     process.init();
 
+    if (config.shouldInitSmp()) {
+        const smp = @import("smp/smp.zig");
+        smp.startSecondaryCPUs();
+        if (smp.isSMPEnabled()) {
+            console.print("SMP enabled with ");
+            printCpuCount(smp.getActiveCPUCount());
+            console.print(" CPUs\n");
+        } else if (smp.getNumCPUs() > 1) {
+            console.print("SMP startup unavailable, continuing on BSP only\n");
+        }
+    }
+
     if (config.shouldInitRuntimeExtras()) {
         console.print("Starting async IO workers...\n");
         ata.startAsyncWorker();
@@ -279,23 +336,7 @@ fn initRuntime() void {
     keyboard.init();
     console.print("Keyboard ready!\n");
 
-    if (config.shouldInitRuntimeExtras()) {
-        console.print("Initializing USB...\n");
-        usb.init();
-
-        console.print("Initializing UHCI...\n");
-        uhci.init();
-
-        console.print("Initializing audio...\n");
-        ac97.init();
-
-        console.print("Initializing virtual terminals...\n");
-        vt.init();
-
-        console.print("Initializing graphics mode (framebuffer)...\n");
-        _ = @import("devices/framebuffer.zig");
-        console.print("Framebuffer support ready (requires multiboot framebuffer info)\n");
-    }
+    startDeferredRuntimeInit();
 }
 
 fn createDemoProcesses() void {

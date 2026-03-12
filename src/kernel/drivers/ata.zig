@@ -245,7 +245,7 @@ pub fn init() void {
 pub fn startAsyncWorker() void {
     if (async_worker_started) return;
     async_worker_started = true;
-    _ = process.create_kernel_process("ata-io-worker", ataAsyncWorkerTask);
+    _ = process.create_kernel_process_any_cpu("ata-io-worker", ataAsyncWorkerTask);
 }
 
 fn encodeError(err: ATAError) u8 {
