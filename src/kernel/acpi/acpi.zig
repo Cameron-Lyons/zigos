@@ -152,37 +152,40 @@ pub fn init() void {
 }
 
 fn findRSDP() bool {
-    var addr: usize = 0x000E0000;
-    while (addr < 0x00100000) : (addr += 16) {
-        const ptr: *align(1) const RSDP = @ptrFromInt(addr);
-        if (std.mem.eql(u8, &ptr.signature, RSDP_SIGNATURE)) {
-            if (validateChecksum(@as([*]const u8, @ptrCast(ptr)), 20)) {
-                rsdp_ptr = ptr;
-                vga.print("Found RSDP at 0x");
-                printHex(addr);
-                vga.print("\n");
-                return true;
-            }
-        }
-    }
-
-    const ebda_addr = @as(*align(1) const u16, @ptrFromInt(0x40E)).* * 16;
-    addr = ebda_addr;
+    const ebda_addr = @as(usize, @as(*align(1) const u16, @ptrFromInt(0x40E)).*) * 16;
+    var addr: usize = ebda_addr;
     const ebda_end = ebda_addr + 1024;
     while (addr < ebda_end) : (addr += 16) {
         const ptr: *align(1) const RSDP = @ptrFromInt(addr);
-        if (std.mem.eql(u8, &ptr.signature, RSDP_SIGNATURE)) {
-            if (validateChecksum(@as([*]const u8, @ptrCast(ptr)), 20)) {
-                rsdp_ptr = ptr;
-                vga.print("Found RSDP in EBDA at 0x");
-                printHex(addr);
-                vga.print("\n");
-                return true;
-            }
+        if (isValidRSDP(ptr)) {
+            rsdp_ptr = ptr;
+            vga.print("Found RSDP in EBDA at 0x");
+            printHex(addr);
+            vga.print("\n");
+            return true;
+        }
+    }
+
+    addr = 0x000E0000;
+    while (addr < 0x00100000) : (addr += 16) {
+        const ptr: *align(1) const RSDP = @ptrFromInt(addr);
+        if (isValidRSDP(ptr)) {
+            rsdp_ptr = ptr;
+            vga.print("Found RSDP at 0x");
+            printHex(addr);
+            vga.print("\n");
+            return true;
         }
     }
 
     return false;
+}
+
+fn isValidRSDP(ptr: *align(1) const RSDP) bool {
+    if (!std.mem.eql(u8, &ptr.signature, RSDP_SIGNATURE)) return false;
+    if (!validateChecksum(@as([*]const u8, @ptrCast(ptr)), 20)) return false;
+    if (ptr.rsdt_address == 0 or (ptr.rsdt_address & 0x3) != 0) return false;
+    return true;
 }
 
 fn validateChecksum(data: [*]const u8, length: usize) bool {
