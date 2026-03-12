@@ -39,9 +39,28 @@ pub fn build(b: *std.Build) void {
     const uname_program = addUserProgram(b, target, optimize, "uname", "user/bin/uname.zig");
     const cat_program = addUserProgram(b, target, optimize, "cat", "user/bin/cat.zig");
     const ls_program = addUserProgram(b, target, optimize, "ls", "user/bin/ls.zig");
+    const pwd_program = addUserProgram(b, target, optimize, "pwd", "user/bin/pwd.zig");
+    const mkdir_program = addUserProgram(b, target, optimize, "mkdir", "user/bin/mkdir.zig");
+    const rm_program = addUserProgram(b, target, optimize, "rm", "user/bin/rm.zig");
     const sleep_program = addUserProgram(b, target, optimize, "sleep", "user/bin/sleep.zig");
+    const touch_program = addUserProgram(b, target, optimize, "touch", "user/bin/touch.zig");
+    const tty_program = addUserProgram(b, target, optimize, "tty", "user/bin/tty.zig");
     const motd_install = b.addInstallFileWithDir(b.path("user/rootfs/etc/motd"), .{ .custom = "user/rootfs/etc" }, "motd");
-    const user_assets_module = createUserAssetsModule(b, target, optimize, hello_program, echo_program, uname_program, cat_program, ls_program);
+    const user_assets_module = createUserAssetsModule(
+        b,
+        target,
+        optimize,
+        hello_program,
+        echo_program,
+        uname_program,
+        cat_program,
+        ls_program,
+        pwd_program,
+        mkdir_program,
+        rm_program,
+        touch_program,
+        tty_program,
+    );
 
     const dev_kernel = addKernelArtifact(b, target, optimize, "kernel.elf", .dev, user_assets_module);
     const ci_smoke_kernel = addKernelArtifact(b, target, optimize, "kernel-ci-smoke.elf", .ci_smoke, user_assets_module);
@@ -54,7 +73,12 @@ pub fn build(b: *std.Build) void {
         uname_program.install_step,
         cat_program.install_step,
         ls_program.install_step,
+        pwd_program.install_step,
+        mkdir_program.install_step,
+        rm_program.install_step,
         sleep_program.install_step,
+        touch_program.install_step,
+        tty_program.install_step,
     };
 
     inline for (&.{ dev_kernel, ci_smoke_kernel, vm_test_kernel, userland_smoke_kernel }) |artifact| {
@@ -81,7 +105,12 @@ pub fn build(b: *std.Build) void {
     userland_step.dependOn(uname_program.install_step);
     userland_step.dependOn(cat_program.install_step);
     userland_step.dependOn(ls_program.install_step);
+    userland_step.dependOn(pwd_program.install_step);
+    userland_step.dependOn(mkdir_program.install_step);
+    userland_step.dependOn(rm_program.install_step);
     userland_step.dependOn(sleep_program.install_step);
+    userland_step.dependOn(touch_program.install_step);
+    userland_step.dependOn(tty_program.install_step);
     userland_step.dependOn(&motd_install.step);
 
     const rootfs_cmd = b.addSystemCommand(&.{
@@ -114,7 +143,12 @@ pub fn build(b: *std.Build) void {
         \\mcopy -i "build/disk.img" "zig-out/user/bin/uname" ::/bin/uname
         \\mcopy -i "build/disk.img" "zig-out/user/bin/cat" ::/bin/cat
         \\mcopy -i "build/disk.img" "zig-out/user/bin/ls" ::/bin/ls
+        \\mcopy -i "build/disk.img" "zig-out/user/bin/pwd" ::/bin/pwd
+        \\mcopy -i "build/disk.img" "zig-out/user/bin/mkdir" ::/bin/mkdir
+        \\mcopy -i "build/disk.img" "zig-out/user/bin/rm" ::/bin/rm
         \\mcopy -i "build/disk.img" "zig-out/user/bin/sleep" ::/bin/sleep
+        \\mcopy -i "build/disk.img" "zig-out/user/bin/touch" ::/bin/touch
+        \\mcopy -i "build/disk.img" "zig-out/user/bin/tty" ::/bin/tty
         \\mcopy -i "build/disk.img" "zig-out/user/rootfs/etc/motd" ::/etc/motd
     });
     rootfs_cmd.step.dependOn(hello_program.install_step);
@@ -122,7 +156,12 @@ pub fn build(b: *std.Build) void {
     rootfs_cmd.step.dependOn(uname_program.install_step);
     rootfs_cmd.step.dependOn(cat_program.install_step);
     rootfs_cmd.step.dependOn(ls_program.install_step);
+    rootfs_cmd.step.dependOn(pwd_program.install_step);
+    rootfs_cmd.step.dependOn(mkdir_program.install_step);
+    rootfs_cmd.step.dependOn(rm_program.install_step);
     rootfs_cmd.step.dependOn(sleep_program.install_step);
+    rootfs_cmd.step.dependOn(touch_program.install_step);
+    rootfs_cmd.step.dependOn(tty_program.install_step);
     rootfs_cmd.step.dependOn(&motd_install.step);
 
     const rootfs_step = b.step("rootfs", "Build the FAT disk image for user programs");
@@ -373,6 +412,7 @@ fn addKernelArtifact(
     kernel_module.addOptions("build_options", options);
     kernel_module.addImport("user_assets", user_assets_module);
     kernel_module.addAssemblyFile(b.path("src/boot/boot64.S"));
+    kernel_module.addAssemblyFile(b.path("src/arch/x86/syscall6.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt32.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupts.s"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush.S"));
@@ -402,6 +442,11 @@ fn createUserAssetsModule(
     uname_program: UserProgramArtifact,
     cat_program: UserProgramArtifact,
     ls_program: UserProgramArtifact,
+    pwd_program: UserProgramArtifact,
+    mkdir_program: UserProgramArtifact,
+    rm_program: UserProgramArtifact,
+    touch_program: UserProgramArtifact,
+    tty_program: UserProgramArtifact,
 ) *std.Build.Module {
     const write_files = b.addWriteFiles();
     _ = write_files.addCopyFile(hello_program.emitted_bin, "assets/hello");
@@ -409,6 +454,11 @@ fn createUserAssetsModule(
     _ = write_files.addCopyFile(uname_program.emitted_bin, "assets/uname");
     _ = write_files.addCopyFile(cat_program.emitted_bin, "assets/cat");
     _ = write_files.addCopyFile(ls_program.emitted_bin, "assets/ls");
+    _ = write_files.addCopyFile(pwd_program.emitted_bin, "assets/pwd");
+    _ = write_files.addCopyFile(mkdir_program.emitted_bin, "assets/mkdir");
+    _ = write_files.addCopyFile(rm_program.emitted_bin, "assets/rm");
+    _ = write_files.addCopyFile(touch_program.emitted_bin, "assets/touch");
+    _ = write_files.addCopyFile(tty_program.emitted_bin, "assets/tty");
     _ = write_files.addCopyFile(b.path("user/rootfs/etc/motd"), "assets/motd");
     const assets_source = write_files.add("user_assets.zig", b.fmt(
         \\pub const hello = @embedFile("assets/hello");
@@ -416,6 +466,11 @@ fn createUserAssetsModule(
         \\pub const uname = @embedFile("assets/uname");
         \\pub const cat = @embedFile("assets/cat");
         \\pub const ls = @embedFile("assets/ls");
+        \\pub const pwd = @embedFile("assets/pwd");
+        \\pub const mkdir = @embedFile("assets/mkdir");
+        \\pub const rm = @embedFile("assets/rm");
+        \\pub const touch = @embedFile("assets/touch");
+        \\pub const tty = @embedFile("assets/tty");
         \\pub const motd = @embedFile("assets/motd");
     , .{}));
 
@@ -480,6 +535,7 @@ fn addUserProgram(
     user_module.addImport("stdio", stdio_module);
 
     user_module.addAssemblyFile(b.path("user/crt0.S"));
+    user_module.addAssemblyFile(b.path("src/arch/x86/syscall6.S"));
 
     const program = b.addExecutable(.{
         .name = name,

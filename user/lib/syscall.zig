@@ -3,9 +3,29 @@ const abi = @import("abi");
 pub const STDIN = abi.STDIN;
 pub const STDOUT = abi.STDOUT;
 pub const STDERR = abi.STDERR;
-pub const O_RDONLY: u32 = 0;
-pub const DT_REG: u8 = 1;
-pub const DT_DIR: u8 = 2;
+pub const O_RDONLY = abi.O_RDONLY;
+pub const O_WRONLY = abi.O_WRONLY;
+pub const O_RDWR = abi.O_RDWR;
+pub const O_CREAT = abi.O_CREAT;
+pub const O_TRUNC = abi.O_TRUNC;
+pub const DT_REG = abi.DT_REG;
+pub const DT_DIR = abi.DT_DIR;
+pub const PROT_NONE = abi.PROT_NONE;
+pub const PROT_READ = abi.PROT_READ;
+pub const PROT_WRITE = abi.PROT_WRITE;
+pub const PROT_EXEC = abi.PROT_EXEC;
+pub const MAP_SHARED = abi.MAP_SHARED;
+pub const MAP_PRIVATE = abi.MAP_PRIVATE;
+pub const MAP_FIXED = abi.MAP_FIXED;
+pub const MAP_ANONYMOUS = abi.MAP_ANONYMOUS;
+pub const TCGETS = abi.TCGETS;
+pub const TCSETS = abi.TCSETS;
+pub const TCSETSW = abi.TCSETSW;
+pub const TCSETSF = abi.TCSETSF;
+pub const TIOCGWINSZ = abi.TIOCGWINSZ;
+pub const TTY_LFLAG_ISIG = abi.TTY_LFLAG_ISIG;
+pub const TTY_LFLAG_ICANON = abi.TTY_LFLAG_ICANON;
+pub const TTY_LFLAG_ECHO = abi.TTY_LFLAG_ECHO;
 
 pub const LinuxDirent = extern struct {
     d_ino: u32,
@@ -17,6 +37,22 @@ pub const LinuxDirent = extern struct {
 pub const TimeSpec = extern struct {
     tv_sec: i32,
     tv_nsec: i32,
+};
+
+pub const Termios = extern struct {
+    c_iflag: u32,
+    c_oflag: u32,
+    c_cflag: u32,
+    c_lflag: u32,
+    c_line: u8,
+    c_cc: [19]u8,
+};
+
+pub const WinSize = extern struct {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
 };
 
 pub inline fn syscall0(number: u32) i32 {
@@ -69,6 +105,25 @@ pub inline fn syscall4(number: u32, arg1: usize, arg2: usize, arg3: usize, arg4:
     return @bitCast(raw);
 }
 
+pub inline fn syscall5(number: u32, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) i32 {
+    const raw: u32 = asm volatile ("int $0x80"
+        : [ret] "={eax}" (-> u32),
+        : [num] "{eax}" (number),
+          [arg1] "{ebx}" (@as(u32, @intCast(arg1))),
+          [arg2] "{ecx}" (@as(u32, @intCast(arg2))),
+          [arg3] "{edx}" (@as(u32, @intCast(arg3))),
+          [arg4] "{esi}" (@as(u32, @intCast(arg4))),
+          [arg5] "{edi}" (@as(u32, @intCast(arg5))),
+        : .{ .memory = true });
+    return @bitCast(raw);
+}
+
+extern fn syscall6_asm(number: u32, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) callconv(.c) i32;
+
+pub inline fn syscall6(number: u32, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) i32 {
+    return syscall6_asm(number, arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
 pub fn read(fd: i32, buffer: []u8) i32 {
     return syscall3(abi.SYS_READ, @bitCast(@as(u32, @bitCast(fd))), @intFromPtr(buffer.ptr), buffer.len);
 }
@@ -109,6 +164,50 @@ pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) i32 {
 
 pub fn getdents(fd: i32, buffer: []u8) i32 {
     return syscall3(abi.SYS_GETDENTS, @bitCast(@as(u32, @bitCast(fd))), @intFromPtr(buffer.ptr), buffer.len);
+}
+
+pub fn mkdir(path: [*:0]const u8, mode: u32) i32 {
+    return syscall2(abi.SYS_MKDIR, @intFromPtr(path), mode);
+}
+
+pub fn unlink(path: [*:0]const u8) i32 {
+    return syscall1(abi.SYS_UNLINK, @intFromPtr(path));
+}
+
+pub fn getcwd(buffer: []u8) i32 {
+    return syscall2(abi.SYS_GETCWD, @intFromPtr(buffer.ptr), buffer.len);
+}
+
+pub fn chdir(path: [*:0]const u8) i32 {
+    return syscall1(abi.SYS_CHDIR, @intFromPtr(path));
+}
+
+pub fn munmap(addr: usize, length: usize) i32 {
+    return syscall2(abi.SYS_MUNMAP, addr, length);
+}
+
+pub fn ioctl(fd: i32, request: u32, arg: usize) i32 {
+    return syscall3(abi.SYS_IOCTL, @bitCast(@as(u32, @bitCast(fd))), request, arg);
+}
+
+pub fn isatty(fd: i32) i32 {
+    return syscall1(abi.SYS_ISATTY, @bitCast(@as(u32, @bitCast(fd))));
+}
+
+pub fn mprotect(addr: usize, length: usize, prot: u32) i32 {
+    return syscall3(abi.SYS_MPROTECT, addr, length, prot);
+}
+
+pub fn mmap(addr: usize, length: usize, prot: u32, flags: u32, fd: i32, offset: usize) i32 {
+    return syscall6(
+        abi.SYS_MMAP,
+        addr,
+        length,
+        prot,
+        flags,
+        @bitCast(@as(u32, @bitCast(fd))),
+        offset,
+    );
 }
 
 pub fn nanosleep(req: *const TimeSpec, rem: ?*TimeSpec) i32 {

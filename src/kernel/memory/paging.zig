@@ -724,40 +724,59 @@ pub fn unmap_range(virt_start: u32, size: u32) void {
 }
 
 pub fn is_page_present(virt_addr: u32) bool {
-    const page_dir_index = virt_addr >> 22;
-    const page_table_index = (virt_addr >> 12) & 0x3FF;
-
-    const page_dir_entry = kernel_page_directory[page_dir_index];
-    if (!page_dir_entry.present) {
-        return false;
-    }
-
-    const table_addr = @as(usize, page_dir_entry.address) << 12;
-    const table: *const PageTable = @ptrFromInt(table_addr);
-
-    return table[page_table_index].present;
+    return getPageEntry(&kernel_page_directory, virt_addr) != null;
 }
 
-pub fn set_page_flags(virt_addr: u32, flags: u32) void {
+fn getPageEntry(page_directory: *PageDirectory, virt_addr: u32) ?*PageTableEntry {
     const page_dir_index = virt_addr >> 22;
     const page_table_index = (virt_addr >> 12) & 0x3FF;
 
-    const page_dir_entry = &kernel_page_directory[page_dir_index];
+    const page_dir_entry = page_directory[page_dir_index];
     if (!page_dir_entry.present) {
-        return;
+        return null;
     }
 
     const table_addr = @as(usize, page_dir_entry.address) << 12;
     const table: *PageTable = @ptrFromInt(table_addr);
 
     const entry = &table[page_table_index];
-    if (entry.present) {
-        entry.writable = (flags & PAGE_WRITABLE) != 0;
-        entry.user = (flags & PAGE_USER) != 0;
-        entry.write_through = (flags & PAGE_WRITE_THROUGH) != 0;
-        entry.cache_disabled = (flags & PAGE_CACHE_DISABLE) != 0;
-        entry.global = (flags & PAGE_GLOBAL) != 0;
+    if (!entry.present) {
+        return null;
+    }
+    return entry;
+}
 
+fn updatePageEntryFlags(entry: *PageTableEntry, flags: u32) void {
+    entry.writable = (flags & PAGE_WRITABLE) != 0;
+    entry.user = (flags & PAGE_USER) != 0;
+    entry.write_through = (flags & PAGE_WRITE_THROUGH) != 0;
+    entry.cache_disabled = (flags & PAGE_CACHE_DISABLE) != 0;
+    entry.global = (flags & PAGE_GLOBAL) != 0;
+}
+
+pub fn set_page_flags(virt_addr: u32, flags: u32) void {
+    if (getPageEntry(&kernel_page_directory, virt_addr)) |entry| {
+        updatePageEntryFlags(entry, flags);
         invalidate_page(virt_addr);
     }
+}
+
+pub fn set_current_page_flags(virt_addr: u32, flags: u32) void {
+    if (getPageEntry(getCurrentPageDirectory(), virt_addr)) |entry| {
+        updatePageEntryFlags(entry, flags);
+        invalidate_page(virt_addr);
+    }
+}
+
+pub fn get_page_flags(virt_addr: u32) ?u32 {
+    const entry = getPageEntry(getCurrentPageDirectory(), virt_addr) orelse return null;
+
+    var flags: u32 = 0;
+    if (entry.present) flags |= PAGE_PRESENT;
+    if (entry.writable) flags |= PAGE_WRITABLE;
+    if (entry.user) flags |= PAGE_USER;
+    if (entry.write_through) flags |= PAGE_WRITE_THROUGH;
+    if (entry.cache_disabled) flags |= PAGE_CACHE_DISABLE;
+    if (entry.global) flags |= PAGE_GLOBAL;
+    return flags;
 }

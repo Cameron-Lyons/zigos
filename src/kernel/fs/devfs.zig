@@ -1,4 +1,5 @@
 const std = @import("std");
+const tty = @import("tty.zig");
 const vfs = @import("vfs.zig");
 const vga = @import("../drivers/vga.zig");
 const memory = @import("../memory/memory.zig");
@@ -22,14 +23,12 @@ fn zeroWrite(_: *vfs.VNode, buf: []const u8, _: u64) vfs.VFSError!usize {
     return buf.len;
 }
 
-fn ttyRead(_: *vfs.VNode, _: []u8, _: u64) vfs.VFSError!usize {
-    return 0;
+fn ttyRead(_: *vfs.VNode, buf: []u8, _: u64) vfs.VFSError!usize {
+    return tty.read(buf);
 }
 
 fn ttyWrite(_: *vfs.VNode, buf: []const u8, _: u64) vfs.VFSError!usize {
-    for (buf) |c| {
-        vga.print(&[_]u8{c});
-    }
+    tty.write(buf);
     return buf.len;
 }
 
@@ -77,8 +76,15 @@ fn randomWrite(_: *vfs.VNode, buf: []const u8, _: u64) vfs.VFSError!usize {
 
 fn devOpen(_: *vfs.VNode, _: u32) vfs.VFSError!void {}
 fn devClose(_: *vfs.VNode) vfs.VFSError!void {}
-fn devSeek(_: *vfs.VNode, _: i64, _: u32) vfs.VFSError!u64 { return 0; }
-fn devIoctl(_: *vfs.VNode, _: u32, _: usize) vfs.VFSError!i32 { return 0; }
+fn devSeek(_: *vfs.VNode, _: i64, _: u32) vfs.VFSError!u64 {
+    return 0;
+}
+fn devIoctl(_: *vfs.VNode, _: u32, _: usize) vfs.VFSError!i32 {
+    return 0;
+}
+fn ttyIoctl(_: *vfs.VNode, request: u32, arg: usize) vfs.VFSError!i32 {
+    return tty.ioctl(request, arg);
+}
 
 fn devStat(vnode: *vfs.VNode, stat_buf: *vfs.FileStat) vfs.VFSError!void {
     stat_buf.* = vfs.FileStat{
@@ -141,7 +147,7 @@ const tty_ops = vfs.FileOps{
     .open = devOpen,
     .close = devClose,
     .seek = devSeek,
-    .ioctl = devIoctl,
+    .ioctl = ttyIoctl,
     .stat = devStat,
     .readdir = devNoReaddir,
     .truncate = devTruncate,

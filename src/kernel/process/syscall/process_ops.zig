@@ -5,8 +5,6 @@ const posix = @import("../../utils/posix.zig");
 const process_mod = @import("../process.zig");
 const protection = @import("../../memory/protection.zig");
 
-var current_brk: usize = protection.USER_HEAP_START;
-
 pub fn sys_getpid() i32 {
     if (process_mod.current_process) |proc| {
         return @intCast(proc.pid);
@@ -106,6 +104,9 @@ pub fn sys_wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) i32
 }
 
 pub fn sys_brk(addr: usize) i32 {
+    const proc = process_mod.getCurrentProcess() orelse return @intCast(protection.USER_HEAP_START);
+    const current_brk = proc.current_brk;
+
     if (addr == 0) {
         return @intCast(current_brk);
     }
@@ -135,6 +136,6 @@ pub fn sys_brk(addr: usize) i32 {
         }
     }
 
-    current_brk = new_brk;
-    return @intCast(current_brk);
+    proc.current_brk = new_brk;
+    return @intCast(proc.current_brk);
 }
