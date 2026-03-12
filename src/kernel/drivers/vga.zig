@@ -102,6 +102,16 @@ pub fn printChar(c: u8) void {
     put_char(c);
 }
 
+pub fn putCharAt(x: u8, y: u8, c: u8, entry_color: u8) void {
+    const index = @as(usize, y) * VGA_WIDTH + x;
+    buffer[index] = vga_entry(c, entry_color);
+}
+
+pub fn setCursor(x: u8, y: u8) void {
+    column = @min(@as(usize, x), VGA_WIDTH - 1);
+    row = @min(@as(usize, y), VGA_HEIGHT - 1);
+}
+
 pub fn print(str: []const u8) void {
     for (str) |c| {
         put_char(c);

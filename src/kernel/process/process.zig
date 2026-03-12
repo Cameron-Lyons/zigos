@@ -1,7 +1,9 @@
+const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const paging = @import("../memory/paging.zig");
 const gdt = @import("../interrupts/gdt.zig");
 const memory = @import("../memory/memory.zig");
+const protection = @import("../memory/protection.zig");
 const scheduler = @import("scheduler.zig");
 const smp = @import("../smp/smp.zig");
 const credentials = @import("credentials.zig");
@@ -41,6 +43,35 @@ pub const Context = struct {
     ss: u32,
 };
 
+pub const PATH_BUFFER_LEN = 256;
+pub const RLIMIT_COUNT = 10;
+pub const ITIMER_COUNT = 3;
+pub const MAX_MEMORY_MAPPINGS = 16;
+
+pub const Rlimit = extern struct {
+    rlim_cur: u64,
+    rlim_max: u64,
+};
+
+pub const Itimer = extern struct {
+    it_interval_sec: u32,
+    it_interval_usec: u32,
+    it_value_sec: u32,
+    it_value_usec: u32,
+};
+
+pub const MemoryMapping = struct {
+    in_use: bool = false,
+    start_addr: usize = 0,
+    length: usize = 0,
+    prot: u32 = 0,
+    flags: u32 = 0,
+    open_flags: u32 = vfs.O_RDONLY,
+    vnode: ?*vfs.VNode = null,
+    file_offset: u64 = 0,
+    file_bytes: usize = 0,
+};
+
 pub const Process = struct {
     pid: u32,
     state: ProcessState,
@@ -63,12 +94,60 @@ pub const Process = struct {
     process_group: u32 = 0,
     alarm_time: u64 = 0,
     umask: u16 = 0o022,
+    cwd_path: [PATH_BUFFER_LEN]u8 = [_]u8{0} ** PATH_BUFFER_LEN,
+    cwd_len: usize = 1,
+    chroot_path: [PATH_BUFFER_LEN]u8 = [_]u8{0} ** PATH_BUFFER_LEN,
+    chroot_len: usize = 0,
+    current_brk: usize = protection.USER_HEAP_START,
+    rlimits: [RLIMIT_COUNT]Rlimit = defaultRlimits(),
+    itimers: [ITIMER_COUNT]Itimer = defaultItimers(),
+    memory_mappings: [MAX_MEMORY_MAPPINGS]MemoryMapping = defaultMemoryMappings(),
     signals: signal.ProcessSignals = signal.ProcessSignals.defaultValue(),
     stdin_redirect: ?i32 = null,
     stdout_redirect: ?i32 = null,
     stderr_redirect: ?i32 = null,
     extended_idx: ?u8 = null,
 };
+
+fn defaultRlimits() [RLIMIT_COUNT]Rlimit {
+    return [_]Rlimit{.{
+        .rlim_cur = abi.RLIM_INFINITY,
+        .rlim_max = abi.RLIM_INFINITY,
+    }} ** RLIMIT_COUNT;
+}
+
+fn defaultItimers() [ITIMER_COUNT]Itimer {
+    return [_]Itimer{.{
+        .it_interval_sec = 0,
+        .it_interval_usec = 0,
+        .it_value_sec = 0,
+        .it_value_usec = 0,
+    }} ** ITIMER_COUNT;
+}
+
+fn defaultMemoryMappings() [MAX_MEMORY_MAPPINGS]MemoryMapping {
+    return [_]MemoryMapping{.{}} ** MAX_MEMORY_MAPPINGS;
+}
+
+fn setPathState(buffer: *[PATH_BUFFER_LEN]u8, len: *usize, value: []const u8) void {
+    @memset(buffer, 0);
+    @memcpy(buffer[0..value.len], value);
+    len.* = value.len;
+}
+
+fn inheritPathState(proc: *Process, parent: ?*Process) void {
+    if (parent) |p| {
+        proc.cwd_path = p.cwd_path;
+        proc.cwd_len = p.cwd_len;
+        proc.chroot_path = p.chroot_path;
+        proc.chroot_len = p.chroot_len;
+        return;
+    }
+
+    setPathState(&proc.cwd_path, &proc.cwd_len, "/");
+    @memset(&proc.chroot_path, 0);
+    proc.chroot_len = 0;
+}
 
 pub export fn kernel_process_exit() callconv(.c) noreturn {
     const proc = getEffectiveCurrent() orelse {
@@ -259,7 +338,13 @@ const ProcessPlacement = enum {
     any_cpu,
 };
 
-fn create_process_internal(name: []const u8, entry_point_addr: usize, privilege: ProcessPrivilege, _: KernelEntryMode, placement: ProcessPlacement) *Process {
+fn create_process_internal(
+    name: []const u8,
+    entry_point_addr: usize,
+    privilege: ProcessPrivilege,
+    _: KernelEntryMode,
+    placement: ProcessPlacement,
+) *Process {
     var process: ?*Process = null;
 
     for (&process_table) |*proc| {
@@ -278,16 +363,59 @@ fn create_process_internal(name: []const u8, entry_point_addr: usize, privilege:
 
     const proc = process.?;
     const parent = getEffectiveCurrent();
+    const inherited_umask = if (parent) |p| p.umask else @as(u16, 0o022);
+    const inherited_process_group = if (parent) |p|
+        if (p.process_group != 0) p.process_group else p.pid
+    else
+        next_pid;
+    const stack_size = 16 * 1024;
     proc.pid = next_pid;
     pid_lookup[next_pid % MAX_PROCESSES] = proc;
     next_pid += 1;
-    proc.state = .Ready;
+    proc.* = .{
+        .pid = proc.pid,
+        .state = .Ready,
+        .privilege = privilege,
+        .context = std.mem.zeroes(Context),
+        .kernel_stack = undefined,
+        .user_stack = undefined,
+        .stack_size = stack_size,
+        .name = [_]u8{0} ** 64,
+        .next = process_list_head,
+        .wait_next = null,
+        .exit_code = 0,
+        .page_directory = null,
+        .entry_point = entry_point_addr,
+        .priority = 0,
+        .nice_value = 0,
+        .time_slice = 10,
+        .creds = if (privilege == .Kernel) credentials.defaultKernelCredentials() else credentials.defaultUserCredentials(),
+        .parent_pid = if (parent) |p| p.pid else 0,
+        .process_group = inherited_process_group,
+        .alarm_time = 0,
+        .umask = inherited_umask,
+        .cwd_path = [_]u8{0} ** PATH_BUFFER_LEN,
+        .cwd_len = 1,
+        .chroot_path = [_]u8{0} ** PATH_BUFFER_LEN,
+        .chroot_len = 0,
+        .current_brk = protection.USER_HEAP_START,
+        .rlimits = defaultRlimits(),
+        .itimers = defaultItimers(),
+        .memory_mappings = defaultMemoryMappings(),
+        .signals = signal.ProcessSignals.defaultValue(),
+        .stdin_redirect = null,
+        .stdout_redirect = null,
+        .stderr_redirect = null,
+        .extended_idx = null,
+    };
+    inheritPathState(proc, parent);
+    if (parent) |p| {
+        proc.rlimits = p.rlimits;
+        proc.itimers = p.itimers;
+        proc.memory_mappings = defaultMemoryMappings();
+    }
 
-    const stack_size = 16 * 1024;
     const stack_pages = stack_size / 4096;
-    proc.stack_size = stack_size;
-    proc.privilege = privilege;
-    proc.entry_point = entry_point_addr;
 
     proc.kernel_stack = memory.allocPages(stack_pages) orelse {
         vga.print("Error: Failed to allocate kernel stack!\n");
@@ -371,19 +499,9 @@ fn create_process_internal(name: []const u8, entry_point_addr: usize, privilege:
         };
     }
 
-    proc.creds = if (privilege == .Kernel) credentials.defaultKernelCredentials() else credentials.defaultUserCredentials();
-    proc.parent_pid = if (parent) |p| p.pid else 0;
-    proc.process_group = if (parent) |p|
-        if (p.process_group != 0) p.process_group else p.pid
-    else
-        proc.pid;
-
-    @memset(&proc.name, 0);
     const copy_len = @min(name.len, proc.name.len - 1);
     @memcpy(proc.name[0..copy_len], name[0..copy_len]);
 
-    proc.next = process_list_head;
-    proc.wait_next = null;
     process_list_head = proc;
 
     const priority = if (privilege == .Kernel) scheduler.Priority.High else scheduler.Priority.Normal;
