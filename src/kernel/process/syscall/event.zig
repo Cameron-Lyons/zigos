@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("abi.zig");
+const common = @import("common.zig");
 const descriptor = @import("descriptor.zig");
 const kernel_signal = @import("../signal.zig");
 const readiness = @import("readiness.zig");
@@ -8,11 +9,28 @@ const protection = @import("../../memory/protection.zig");
 const timer = @import("../../timer/timer.zig");
 const vfs = @import("../../fs/vfs.zig");
 
-const FdSet = extern struct {
-    fds_bits: [32]u32,
-};
-
 const MAX_SELECT_FDS = 1024;
+const FD_SET_WORD_BITS = @bitSizeOf(u32);
+const FD_SET_WORD_COUNT: usize = MAX_SELECT_FDS / FD_SET_WORD_BITS;
+const MAX_POLL_FDS: usize = 256;
+const EPOLL_INSTANCE_COUNT: usize = 64;
+const EPOLL_ENTRY_CAPACITY: usize = 64;
+const EVENTFD_COUNT: usize = 64;
+const SIGNALFD_COUNT: usize = 64;
+const SIGNALFD_MASK_WORD_BITS = @bitSizeOf(u32);
+const INOTIFY_NAME_BUFFER_SIZE: usize = 128;
+const INOTIFY_NAME_ALIGNMENT: usize = @sizeOf(u32);
+const INOTIFY_WATCH_CAPACITY: usize = 16;
+const INOTIFY_QUEUE_CAPACITY: usize = 32;
+const INOTIFY_INSTANCE_COUNT: usize = 32;
+const MILLISECONDS_PER_SECOND: u64 = 1000;
+const NANOSECONDS_PER_MILLISECOND: u64 = 1_000_000;
+const NANOSECONDS_PER_MICROSECOND: i32 = 1_000;
+const MAX_TIMEOUT_MS: u64 = std.math.maxInt(i32);
+
+const FdSet = extern struct {
+    fds_bits: [FD_SET_WORD_COUNT]u32,
+};
 
 const Timeval = extern struct {
     tv_sec: i32,
@@ -37,7 +55,7 @@ const EpollEntry = struct {
 };
 
 const EpollInstance = struct {
-    entries: [64]?EpollEntry,
+    entries: [EPOLL_ENTRY_CAPACITY]?EpollEntry,
     count: usize,
     in_use: bool,
 };
@@ -75,20 +93,20 @@ const InotifyQueuedEvent = struct {
     mask: u32,
     cookie: u32,
     name_len: usize,
-    name: [128]u8,
+    name: [INOTIFY_NAME_BUFFER_SIZE]u8,
 };
 
 const InotifyWatch = struct {
     wd: i32,
-    pathname: [256]u8,
+    pathname: [common.USER_PATH_BUFFER_SIZE]u8,
     path_len: usize,
     mask: u32,
     in_use: bool,
 };
 
 const InotifyInstance = struct {
-    watches: [16]InotifyWatch,
-    queue: [32]InotifyQueuedEvent,
+    watches: [INOTIFY_WATCH_CAPACITY]InotifyWatch,
+    queue: [INOTIFY_QUEUE_CAPACITY]InotifyQueuedEvent,
     head: u8,
     tail: u8,
     flags: u32,
@@ -103,43 +121,43 @@ const VFS_POLLOUT: u16 = 0x004;
 const EVENTFD_MAX_COUNTER = std.math.maxInt(u64) - 1;
 
 const EPOLL_BASE: i32 = abi.FD_OFFSET + 200;
-const EPOLL_LIMIT: i32 = EPOLL_BASE + 64;
+const EPOLL_LIMIT: i32 = EPOLL_BASE + @as(i32, @intCast(EPOLL_INSTANCE_COUNT));
 const EVENTFD_BASE: i32 = 2000;
-const EVENTFD_LIMIT: i32 = EVENTFD_BASE + 64;
+const EVENTFD_LIMIT: i32 = EVENTFD_BASE + @as(i32, @intCast(EVENTFD_COUNT));
 const SIGNALFD_BASE: i32 = 3000;
-const SIGNALFD_LIMIT: i32 = SIGNALFD_BASE + 64;
+const SIGNALFD_LIMIT: i32 = SIGNALFD_BASE + @as(i32, @intCast(SIGNALFD_COUNT));
 const INOTIFY_BASE: i32 = 4000;
-const INOTIFY_LIMIT: i32 = INOTIFY_BASE + 32;
+const INOTIFY_LIMIT: i32 = INOTIFY_BASE + @as(i32, @intCast(INOTIFY_INSTANCE_COUNT));
 
-var epoll_instances: [64]EpollInstance = [_]EpollInstance{.{
-    .entries = [_]?EpollEntry{null} ** 64,
+var epoll_instances: [EPOLL_INSTANCE_COUNT]EpollInstance = [_]EpollInstance{.{
+    .entries = [_]?EpollEntry{null} ** EPOLL_ENTRY_CAPACITY,
     .count = 0,
     .in_use = false,
-}} ** 64;
+}} ** EPOLL_INSTANCE_COUNT;
 
-var eventfd_table: [64]EventFd = [_]EventFd{.{ .counter = 0, .flags = 0, .in_use = false }} ** 64;
-var signalfd_table: [64]SignalFd = [_]SignalFd{.{ .mask = 0, .flags = 0, .in_use = false }} ** 64;
+var eventfd_table: [EVENTFD_COUNT]EventFd = [_]EventFd{.{ .counter = 0, .flags = 0, .in_use = false }} ** EVENTFD_COUNT;
+var signalfd_table: [SIGNALFD_COUNT]SignalFd = [_]SignalFd{.{ .mask = 0, .flags = 0, .in_use = false }} ** SIGNALFD_COUNT;
 
-var inotify_instances: [32]InotifyInstance = [_]InotifyInstance{.{
+var inotify_instances: [INOTIFY_INSTANCE_COUNT]InotifyInstance = [_]InotifyInstance{.{
     .watches = [_]InotifyWatch{.{
         .wd = -1,
-        .pathname = [_]u8{0} ** 256,
+        .pathname = [_]u8{0} ** common.USER_PATH_BUFFER_SIZE,
         .path_len = 0,
         .mask = 0,
         .in_use = false,
-    }} ** 16,
+    }} ** INOTIFY_WATCH_CAPACITY,
     .queue = [_]InotifyQueuedEvent{.{
         .wd = -1,
         .mask = 0,
         .cookie = 0,
         .name_len = 0,
-        .name = [_]u8{0} ** 128,
-    }} ** 32,
+        .name = [_]u8{0} ** INOTIFY_NAME_BUFFER_SIZE,
+    }} ** INOTIFY_QUEUE_CAPACITY,
     .head = 0,
     .tail = 0,
     .flags = 0,
     .in_use = false,
-}} ** 32;
+}} ** INOTIFY_INSTANCE_COUNT;
 
 var next_inotify_wd: i32 = 1;
 var next_inotify_cookie: u32 = 1;
@@ -343,15 +361,16 @@ pub fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfd
 
 pub fn sys_poll(fds_addr: usize, nfds: u32, timeout: i32) i32 {
     if (nfds == 0) return 0;
-    if (nfds > 256) return abi.EINVAL;
+    if (nfds > @as(u32, @intCast(MAX_POLL_FDS))) return abi.EINVAL;
 
-    const copy_size = nfds * @sizeOf(PollFd);
+    const poll_fd_count: usize = @intCast(nfds);
+    const copy_size = poll_fd_count * @sizeOf(PollFd);
     if (!protection.verifyUserPointer(fds_addr, copy_size)) return abi.EINVAL;
 
-    var kernel_fds: [256]PollFd = undefined;
+    var kernel_fds: [MAX_POLL_FDS]PollFd = undefined;
     protection.copyFromUser(std.mem.asBytes(&kernel_fds)[0..copy_size], fds_addr) catch return abi.EINVAL;
 
-    var poll_scan = pollCheckFds(kernel_fds[0..nfds], false);
+    var poll_scan = pollCheckFds(kernel_fds[0..poll_fd_count], false);
     var count = poll_scan.count;
 
     if (timeout == 0 or count > 0) {
@@ -365,19 +384,19 @@ pub fn sys_poll(fds_addr: usize, nfds: u32, timeout: i32) i32 {
         if (deadlineReached(deadline_tick)) break;
 
         const observed_generation = readiness.snapshot();
-        poll_scan = pollCheckFds(kernel_fds[0..nfds], true);
+        poll_scan = pollCheckFds(kernel_fds[0..poll_fd_count], true);
         count = poll_scan.count;
         if (count > 0) break;
 
         const wait_deadline = earliestDeadline(deadline_tick, poll_scan.earliest_deadline);
         if (!readiness.waitForChange(observed_generation, wait_deadline)) {
-            poll_scan = pollCheckFds(kernel_fds[0..nfds], true);
+            poll_scan = pollCheckFds(kernel_fds[0..poll_fd_count], true);
             count = poll_scan.count;
             if (count > 0) break;
             if (deadlineReached(deadline_tick)) break;
             continue;
         }
-        poll_scan = pollCheckFds(kernel_fds[0..nfds], true);
+        poll_scan = pollCheckFds(kernel_fds[0..poll_fd_count], true);
         count = poll_scan.count;
     }
 
@@ -403,7 +422,7 @@ pub fn sys_epoll_create(size: i32) i32 {
 
 pub fn sys_epoll_ctl(epfd: i32, op: u32, fd: i32, event_addr: usize) i32 {
     const idx = epfd - EPOLL_BASE;
-    if (idx < 0 or idx >= 64) return abi.EBADF;
+    if (idx < 0 or idx >= @as(i32, @intCast(EPOLL_INSTANCE_COUNT))) return abi.EBADF;
     const inst = &epoll_instances[@intCast(idx)];
     if (!inst.in_use) return abi.EBADF;
 
@@ -464,7 +483,7 @@ pub fn sys_epoll_ctl(epfd: i32, op: u32, fd: i32, event_addr: usize) i32 {
 
 pub fn sys_epoll_wait(epfd: i32, events_addr: usize, maxevents: i32, timeout: i32) i32 {
     const idx = epfd - EPOLL_BASE;
-    if (idx < 0 or idx >= 64) return abi.EBADF;
+    if (idx < 0 or idx >= @as(i32, @intCast(EPOLL_INSTANCE_COUNT))) return abi.EBADF;
     const inst = &epoll_instances[@intCast(idx)];
     if (!inst.in_use) return abi.EBADF;
 
@@ -472,7 +491,7 @@ pub fn sys_epoll_wait(epfd: i32, events_addr: usize, maxevents: i32, timeout: i3
     const max: usize = @intCast(maxevents);
     if (!protection.verifyUserPointer(events_addr, max * @sizeOf(EpollEvent))) return abi.EINVAL;
 
-    var events: [64]EpollEvent = undefined;
+    var events: [EPOLL_ENTRY_CAPACITY]EpollEvent = undefined;
 
     var epoll_scan = collectEpollEvents(inst, max, &events, false);
     var count = epoll_scan.count;
@@ -569,8 +588,7 @@ pub fn sys_ppoll(fds_ptr: usize, nfds: u32, timeout_ptr: usize, sigmask_ptr: usi
         var ts: syscall_time.TimeSpec = undefined;
         protection.copyFromUser(std.mem.asBytes(&ts), timeout_ptr) catch return abi.EFAULT;
         if (ts.tv_sec < 0) return abi.EINVAL;
-        const ms: u64 = @as(u64, @intCast(ts.tv_sec)) * 1000 + @as(u64, @intCast(@max(0, ts.tv_nsec))) / 1000000;
-        timeout_ms = @intCast(@min(ms, 0x7FFFFFFF));
+        timeout_ms = timeSpecToTimeoutMilliseconds(ts);
     }
 
     return sys_poll(fds_ptr, nfds, timeout_ms);
@@ -580,7 +598,7 @@ pub fn sys_pselect6(nfds: i32, readfds: usize, writefds: usize, exceptfds: usize
     _ = sigmask_ptr;
 
     var timeout_arg: usize = 0;
-    var timeval_buf: [8]u8 = undefined;
+    var timeout_timeval: Timeval = undefined;
 
     if (timeout_ptr != 0) {
         if (!protection.verifyUserPointer(timeout_ptr, @sizeOf(syscall_time.TimeSpec))) return abi.EFAULT;
@@ -588,11 +606,8 @@ pub fn sys_pselect6(nfds: i32, readfds: usize, writefds: usize, exceptfds: usize
         protection.copyFromUser(std.mem.asBytes(&ts), timeout_ptr) catch return abi.EFAULT;
         if (ts.tv_sec < 0) return abi.EINVAL;
 
-        const tv_sec: u32 = @intCast(ts.tv_sec);
-        const tv_usec: u32 = @intCast(@max(0, @divTrunc(ts.tv_nsec, 1000)));
-        @memcpy(timeval_buf[0..4], std.mem.asBytes(&tv_sec));
-        @memcpy(timeval_buf[4..8], std.mem.asBytes(&tv_usec));
-        timeout_arg = @intFromPtr(&timeval_buf);
+        timeout_timeval = timeSpecToTimeval(ts);
+        timeout_arg = @intFromPtr(&timeout_timeval);
     }
 
     return sys_select(nfds, readfds, writefds, exceptfds, timeout_arg);
@@ -627,9 +642,9 @@ pub fn sys_inotify_add_watch(fd: i32, pathname: [*]const u8, mask: u32) i32 {
     const idx: usize = @intCast(fd - INOTIFY_BASE);
     if (!inotify_instances[idx].in_use) return abi.EBADF;
 
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return abi.EFAULT;
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) return abi.EFAULT;
 
-    var path_buffer: [256]u8 = undefined;
+    var path_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return abi.EFAULT;
 
     for (&inotify_instances[idx].watches) |*watch| {
@@ -819,8 +834,8 @@ fn getInotifyInstance(fd: i32) ?*InotifyInstance {
 fn signalFdMask(sfd: *const SignalFd) kernel_signal.SigSet {
     return .{
         .sig = .{
-            @truncate(sfd.mask & 0xFFFF_FFFF),
-            @truncate(sfd.mask >> 32),
+            @truncate(sfd.mask),
+            @truncate(sfd.mask >> SIGNALFD_MASK_WORD_BITS),
         },
     };
 }
@@ -914,7 +929,22 @@ fn popInotifyEvent(inst: *InotifyInstance) ?InotifyQueuedEvent {
 
 fn alignedNameLength(name_len: usize) usize {
     if (name_len == 0) return 0;
-    return (name_len + 1 + 3) & ~@as(usize, 3);
+
+    const terminated_name_len = name_len + 1;
+    return (terminated_name_len + INOTIFY_NAME_ALIGNMENT - 1) & ~(INOTIFY_NAME_ALIGNMENT - 1);
+}
+
+fn timeSpecToTimeoutMilliseconds(ts: syscall_time.TimeSpec) i32 {
+    const milliseconds = @as(u64, @intCast(ts.tv_sec)) * MILLISECONDS_PER_SECOND +
+        @as(u64, @intCast(@max(0, ts.tv_nsec))) / NANOSECONDS_PER_MILLISECOND;
+    return @intCast(@min(milliseconds, MAX_TIMEOUT_MS));
+}
+
+fn timeSpecToTimeval(ts: syscall_time.TimeSpec) Timeval {
+    return .{
+        .tv_sec = ts.tv_sec,
+        .tv_usec = @intCast(@max(0, @divTrunc(ts.tv_nsec, NANOSECONDS_PER_MICROSECOND))),
+    };
 }
 
 fn parentMatches(parent: []const u8, path: []const u8) bool {
@@ -944,7 +974,7 @@ fn nextInotifyCookie() u32 {
 
 fn timeoutDeadline(timeout_ms: i64) ?u64 {
     if (timeout_ms < 0) return null;
-    return timer.getTicks() + @as(u64, @intCast(timeout_ms)) / 10;
+    return timer.getTicks() + timer.millisecondsToTicksCeil(@intCast(timeout_ms));
 }
 
 fn deadlineReached(deadline_tick: ?u64) bool {
@@ -985,7 +1015,7 @@ fn observeKernelFd(fd: i32, requested_events: u16, track_deadline: bool) FdObser
     };
 }
 
-fn collectEpollEvents(inst: *const EpollInstance, max: usize, events: *[64]EpollEvent, track_deadline: bool) EpollScan {
+fn collectEpollEvents(inst: *const EpollInstance, max: usize, events: *[EPOLL_ENTRY_CAPACITY]EpollEvent, track_deadline: bool) EpollScan {
     var count: usize = 0;
     var earliest: ?u64 = null;
 
@@ -1029,8 +1059,8 @@ fn selectCheckFds(nfds: u32, readfds: *const FdSet, writefds: *const FdSet, exce
     var earliest: ?u64 = null;
     var i: u32 = 0;
     while (i < nfds) : (i += 1) {
-        const word_idx = i / 32;
-        const bit_idx: u5 = @intCast(i % 32);
+        const word_idx = i / FD_SET_WORD_BITS;
+        const bit_idx: u5 = @intCast(i % FD_SET_WORD_BITS);
         const mask = @as(u32, 1) << bit_idx;
 
         const wants_read = (readfds.fds_bits[word_idx] & mask) != 0;

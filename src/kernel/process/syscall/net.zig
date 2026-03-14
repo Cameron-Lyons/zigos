@@ -17,7 +17,8 @@ pub const socket_fd_base: i32 = 500;
 pub const unix_socket_fd_base: i32 = 700;
 pub const socket_count: usize = 64;
 pub const unix_socket_count: usize = 64;
-const UNIX_SOCKET_BUFFER_SIZE: usize = 4096;
+pub const SOCKET_TRANSFER_BUFFER_SIZE: usize = 4096;
+pub const UNIX_SOCKET_BUFFER_SIZE: usize = SOCKET_TRANSFER_BUFFER_SIZE;
 const UNIX_SOCKET_BUFFER_MASK: usize = UNIX_SOCKET_BUFFER_SIZE - 1;
 
 const POLLIN: u16 = 0x001;
@@ -41,6 +42,16 @@ pub const SockAddrIn6 = extern struct {
 pub const SockAddrUn = extern struct {
     family: u16,
     path: [108]u8,
+};
+
+pub const IPv4Endpoint = struct {
+    addr: ipv4.IPv4Address,
+    port: u16,
+};
+
+pub const IPv6Endpoint = struct {
+    addr: ipv6.IPv6Address,
+    port: u16,
 };
 
 pub const UnixSocket = struct {
@@ -93,6 +104,75 @@ pub fn getUnixSocket(fd: i32) ?*UnixSocket {
     return usock;
 }
 
+pub fn parseSockAddrIn(addr_ptr: usize, addr_len: u32) ?IPv4Endpoint {
+    if (addr_len < @sizeOf(SockAddrIn)) return null;
+    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn))) return null;
+
+    var addr_buf: [@sizeOf(SockAddrIn)]u8 = undefined;
+    protection.copyFromUser(&addr_buf, addr_ptr) catch return null;
+    const addr: *const SockAddrIn = @ptrCast(@alignCast(&addr_buf));
+
+    return .{
+        .addr = .{
+            .octets = .{
+                @intCast((addr.addr >> 0) & 0xFF),
+                @intCast((addr.addr >> 8) & 0xFF),
+                @intCast((addr.addr >> 16) & 0xFF),
+                @intCast((addr.addr >> 24) & 0xFF),
+            },
+        },
+        .port = @byteSwap(addr.port),
+    };
+}
+
+pub fn parseSockAddrIn6(addr_ptr: usize, addr_len: u32) ?IPv6Endpoint {
+    if (addr_len < @sizeOf(SockAddrIn6)) return null;
+    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn6))) return null;
+
+    var addr_buf: [@sizeOf(SockAddrIn6)]u8 = undefined;
+    protection.copyFromUser(&addr_buf, addr_ptr) catch return null;
+    const addr: *const SockAddrIn6 = @ptrCast(@alignCast(&addr_buf));
+
+    return .{
+        .addr = .{ .octets = addr.addr },
+        .port = @byteSwap(addr.port),
+    };
+}
+
+pub fn writeSockAddrIn(addr_ptr: usize, len_ptr: usize, endpoint: IPv4Endpoint) i32 {
+    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn))) return abi.EINVAL;
+
+    const addr = SockAddrIn{
+        .family = @intCast(AF_INET),
+        .port = @byteSwap(endpoint.port),
+        .addr = @as(u32, endpoint.addr.octets[0]) |
+            (@as(u32, endpoint.addr.octets[1]) << 8) |
+            (@as(u32, endpoint.addr.octets[2]) << 16) |
+            (@as(u32, endpoint.addr.octets[3]) << 24),
+        .zero = [_]u8{0} ** 8,
+    };
+
+    protection.copyToUser(addr_ptr, std.mem.asBytes(&addr)) catch return abi.EINVAL;
+    writeSockAddrLen(len_ptr, @sizeOf(SockAddrIn));
+    return 0;
+}
+
+pub fn writeSockAddrIn6(addr_ptr: usize, len_ptr: usize, endpoint: IPv6Endpoint) i32 {
+    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn6))) return abi.EINVAL;
+
+    const addr = SockAddrIn6{
+        .family = @intCast(AF_INET6),
+        .port = @byteSwap(endpoint.port),
+        .flowinfo = 0,
+        .addr = endpoint.addr.octets,
+        .scope_id = 0,
+    };
+
+    protection.copyToUser(addr_ptr, std.mem.asBytes(&addr)) catch return abi.EINVAL;
+    writeSockAddrLen(len_ptr, @sizeOf(SockAddrIn6));
+    return 0;
+}
+
 pub fn pollSocketFd(fd: i32, requested_events: u16) error{BadFd}!u16 {
     if (getInetSocket(fd)) |sock| {
         return sock.pollEvents(requested_events);
@@ -116,6 +196,13 @@ pub fn writeSocketFd(fd: i32, buffer: []const u8) ?i32 {
     }
 
     return null;
+}
+
+fn writeSockAddrLen(len_ptr: usize, len: u32) void {
+    if (len_ptr != 0 and protection.verifyUserPointer(len_ptr, @sizeOf(u32))) {
+        var value = len;
+        protection.copyToUser(len_ptr, std.mem.asBytes(&value)) catch {};
+    }
 }
 
 pub fn readSocketFd(fd: i32, buffer: []u8) ?i32 {
@@ -326,35 +413,14 @@ pub fn sys_bind(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, sock
     const sock = socket_table[sock_idx] orelse return abi.EBADF;
 
     if (sock.address_family == .AF_INET6) {
-        if (addr_len < @sizeOf(SockAddrIn6)) return abi.EINVAL;
-        if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn6))) return abi.EINVAL;
-
-        var addr_buf: [@sizeOf(SockAddrIn6)]u8 = undefined;
-        protection.copyFromUser(&addr_buf, addr_ptr) catch return abi.EINVAL;
-        const addr: *const SockAddrIn6 = @ptrCast(@alignCast(&addr_buf));
-
-        sock.local_ipv6 = ipv6.IPv6Address{ .octets = addr.addr };
-        sock.local_port = @byteSwap(addr.port);
+        const endpoint = parseSockAddrIn6(addr_ptr, addr_len) orelse return abi.EINVAL;
+        sock.local_ipv6 = endpoint.addr;
+        sock.local_port = endpoint.port;
         return 0;
     }
 
-    if (addr_len < @sizeOf(SockAddrIn)) return abi.EINVAL;
-    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn))) return abi.EINVAL;
-
-    var addr_buf: [@sizeOf(SockAddrIn)]u8 = undefined;
-    protection.copyFromUser(&addr_buf, addr_ptr) catch return abi.EINVAL;
-    const addr: *const SockAddrIn = @ptrCast(@alignCast(&addr_buf));
-
-    const ipv4_addr = ipv4.IPv4Address{
-        .octets = .{
-            @intCast((addr.addr >> 0) & 0xFF),
-            @intCast((addr.addr >> 8) & 0xFF),
-            @intCast((addr.addr >> 16) & 0xFF),
-            @intCast((addr.addr >> 24) & 0xFF),
-        },
-    };
-
-    sock.bind(ipv4_addr, @byteSwap(addr.port)) catch |err| return errno.socketErrno(err);
+    const endpoint = parseSockAddrIn(addr_ptr, addr_len) orelse return abi.EINVAL;
+    sock.bind(endpoint.addr, endpoint.port) catch |err| return errno.socketErrno(err);
     return 0;
 }
 
@@ -392,36 +458,15 @@ pub fn sys_connect(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, s
     const sock = socket_table[sock_idx] orelse return abi.EBADF;
 
     if (sock.address_family == .AF_INET6) {
-        if (addr_len < @sizeOf(SockAddrIn6)) return abi.EINVAL;
-        if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn6))) return abi.EINVAL;
-
-        var addr_buf: [@sizeOf(SockAddrIn6)]u8 = undefined;
-        protection.copyFromUser(&addr_buf, addr_ptr) catch return abi.EINVAL;
-        const addr: *const SockAddrIn6 = @ptrCast(@alignCast(&addr_buf));
-
-        sock.remote_ipv6 = ipv6.IPv6Address{ .octets = addr.addr };
-        sock.remote_port = @byteSwap(addr.port);
+        const endpoint = parseSockAddrIn6(addr_ptr, addr_len) orelse return abi.EINVAL;
+        sock.remote_ipv6 = endpoint.addr;
+        sock.remote_port = endpoint.port;
         sock.setState(.CONNECTED);
         return 0;
     }
 
-    if (addr_len < @sizeOf(SockAddrIn)) return abi.EINVAL;
-    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn))) return abi.EINVAL;
-
-    var addr_buf: [@sizeOf(SockAddrIn)]u8 = undefined;
-    protection.copyFromUser(&addr_buf, addr_ptr) catch return abi.EINVAL;
-    const addr: *const SockAddrIn = @ptrCast(@alignCast(&addr_buf));
-
-    const ipv4_addr = ipv4.IPv4Address{
-        .octets = .{
-            @intCast((addr.addr >> 0) & 0xFF),
-            @intCast((addr.addr >> 8) & 0xFF),
-            @intCast((addr.addr >> 16) & 0xFF),
-            @intCast((addr.addr >> 24) & 0xFF),
-        },
-    };
-
-    sock.connect(ipv4_addr, @byteSwap(addr.port)) catch |err| return errno.socketErrno(err);
+    const endpoint = parseSockAddrIn(addr_ptr, addr_len) orelse return abi.EINVAL;
+    sock.connect(endpoint.addr, endpoint.port) catch |err| return errno.socketErrno(err);
     return 0;
 }
 
@@ -491,7 +536,7 @@ pub fn sys_send(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, sock
 
     if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return abi.EINVAL;
 
-    var kernel_buffer: [4096]u8 = undefined;
+    var kernel_buffer: [SOCKET_TRANSFER_BUFFER_SIZE]u8 = undefined;
     const to_send = @min(len, kernel_buffer.len);
     protection.copyFromUser(kernel_buffer[0..to_send], @intFromPtr(buf)) catch return abi.EINVAL;
 
@@ -504,7 +549,7 @@ pub fn sys_recv(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, sock
 
     if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return abi.EINVAL;
 
-    var kernel_buffer: [4096]u8 = undefined;
+    var kernel_buffer: [SOCKET_TRANSFER_BUFFER_SIZE]u8 = undefined;
     const to_recv = @min(len, kernel_buffer.len);
 
     const received = readSocketFd(sockfd, kernel_buffer[0..to_recv]) orelse return abi.EBADF;

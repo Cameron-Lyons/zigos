@@ -1,9 +1,14 @@
 const abi = @import("abi.zig");
+const common = @import("common.zig");
 const memory = @import("../../memory/memory.zig");
 const paging = @import("../../memory/paging.zig");
 const posix = @import("../../utils/posix.zig");
 const process_mod = @import("../process.zig");
 const protection = @import("../../memory/protection.zig");
+
+const MAX_EXECVE_ARGS: usize = 32;
+const MAX_EXECVE_ENV: usize = 32;
+const EXECVE_STRING_BUFFER_SIZE: usize = common.USER_PATH_BUFFER_SIZE;
 
 pub fn sys_getpid() i32 {
     if (process_mod.current_process) |proc| {
@@ -29,17 +34,17 @@ pub fn sys_fork() i32 {
 }
 
 pub fn sys_execve(path: [*]const u8, argv: usize, envp: usize) i32 {
-    var path_buf: [256]u8 = undefined;
+    var path_buf: [EXECVE_STRING_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buf, @intFromPtr(path)) catch {
         return abi.EINVAL;
     };
 
-    var argv_array: [32][]const u8 = undefined;
+    var argv_array: [MAX_EXECVE_ARGS][]const u8 = undefined;
     var argv_count: usize = 0;
-    var argv_buffers: [32][256]u8 = undefined;
+    var argv_buffers: [MAX_EXECVE_ARGS][EXECVE_STRING_BUFFER_SIZE]u8 = undefined;
 
     if (argv != 0) {
-        while (argv_count < 32) {
+        while (argv_count < argv_array.len) {
             const ptr_addr = argv + argv_count * @sizeOf(usize);
             if (!protection.verifyUserPointer(ptr_addr, @sizeOf(usize))) {
                 break;
@@ -56,12 +61,12 @@ pub fn sys_execve(path: [*]const u8, argv: usize, envp: usize) i32 {
         }
     }
 
-    var envp_array: [32][]const u8 = undefined;
+    var envp_array: [MAX_EXECVE_ENV][]const u8 = undefined;
     var envp_count: usize = 0;
-    var envp_buffers: [32][256]u8 = undefined;
+    var envp_buffers: [MAX_EXECVE_ENV][EXECVE_STRING_BUFFER_SIZE]u8 = undefined;
 
     if (envp != 0) {
-        while (envp_count < 32) {
+        while (envp_count < envp_array.len) {
             const ptr_addr = envp + envp_count * @sizeOf(usize);
             if (!protection.verifyUserPointer(ptr_addr, @sizeOf(usize))) {
                 break;

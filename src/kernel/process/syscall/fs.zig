@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("abi.zig");
+const common = @import("common.zig");
 const errno = @import("errno.zig");
 const syscall_event = @import("event.zig");
 const credentials = @import("../credentials.zig");
@@ -8,45 +9,33 @@ const cwd_mod = @import("cwd.zig");
 const protection = @import("../../memory/protection.zig");
 const vfs = @import("../../fs/vfs.zig");
 
-fn resolvePath(path: []const u8, buffer: *[512]u8) ?[]const u8 {
+fn resolvePath(path: []const u8, buffer: *[common.RESOLVED_PATH_BUFFER_SIZE]u8) ?[]const u8 {
     return cwd_mod.resolvePath(path, buffer);
 }
 
 pub fn sys_mkdir(pathname: [*]const u8, mode: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) {
         return abi.EINVAL;
     }
 
-    var kernel_buffer: [256]u8 = undefined;
+    var kernel_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
-    var resolved_buf: [512]u8 = undefined;
+    var resolved_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const resolved = resolvePath(path_slice, &resolved_buf) orelse return abi.ENAMETOOLONG;
 
-    const mode_struct = vfs.FileMode{
-        .owner_read = (mode & 0o400) != 0,
-        .owner_write = (mode & 0o200) != 0,
-        .owner_exec = (mode & 0o100) != 0,
-        .group_read = (mode & 0o040) != 0,
-        .group_write = (mode & 0o020) != 0,
-        .group_exec = (mode & 0o010) != 0,
-        .other_read = (mode & 0o004) != 0,
-        .other_write = (mode & 0o002) != 0,
-        .other_exec = (mode & 0o001) != 0,
-    };
-
-    vfs.mkdir(resolved, mode_struct) catch |err| return errno.vfsErrno(err);
+    vfs.mkdir(resolved, common.fileModeFromBits(mode)) catch |err| return errno.vfsErrno(err);
     syscall_event.notifyInotifyPathEvent(resolved, abi.IN_CREATE, abi.IN_CREATE);
     return 0;
 }
 
 pub fn sys_rmdir(pathname: [*]const u8) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) {
         return abi.EINVAL;
     }
 
-    var kernel_buffer: [256]u8 = undefined;
+    var kernel_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
-    var resolved_buf: [512]u8 = undefined;
+    var resolved_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const resolved = resolvePath(path_slice, &resolved_buf) orelse return abi.ENAMETOOLONG;
 
     vfs.rmdir(resolved) catch |err| return errno.vfsErrno(err);
@@ -55,13 +44,13 @@ pub fn sys_rmdir(pathname: [*]const u8) i32 {
 }
 
 pub fn sys_unlink(pathname: [*]const u8) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) {
         return abi.EINVAL;
     }
 
-    var kernel_buffer: [256]u8 = undefined;
+    var kernel_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
-    var resolved_buf: [512]u8 = undefined;
+    var resolved_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const resolved = resolvePath(path_slice, &resolved_buf) orelse return abi.ENAMETOOLONG;
 
     vfs.unlink(resolved) catch |err| return errno.vfsErrno(err);
@@ -70,19 +59,19 @@ pub fn sys_unlink(pathname: [*]const u8) i32 {
 }
 
 pub fn sys_rename(oldpath: [*]const u8, newpath: [*]const u8) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(oldpath), 256) or
-        !protection.verifyUserPointer(@intFromPtr(newpath), 256))
+    if (!protection.verifyUserPointer(@intFromPtr(oldpath), common.USER_PATH_BUFFER_SIZE) or
+        !protection.verifyUserPointer(@intFromPtr(newpath), common.USER_PATH_BUFFER_SIZE))
     {
         return abi.EINVAL;
     }
 
-    var old_buffer: [256]u8 = undefined;
-    var new_buffer: [256]u8 = undefined;
+    var old_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var new_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
 
     const old_slice = protection.copyStringFromUser(&old_buffer, @intFromPtr(oldpath)) catch return abi.EINVAL;
     const new_slice = protection.copyStringFromUser(&new_buffer, @intFromPtr(newpath)) catch return abi.EINVAL;
-    var resolved_old_buf: [512]u8 = undefined;
-    var resolved_new_buf: [512]u8 = undefined;
+    var resolved_old_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
+    var resolved_new_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const resolved_old = resolvePath(old_slice, &resolved_old_buf) orelse return abi.ENAMETOOLONG;
     const resolved_new = resolvePath(new_slice, &resolved_new_buf) orelse return abi.ENAMETOOLONG;
 
@@ -92,13 +81,13 @@ pub fn sys_rename(oldpath: [*]const u8, newpath: [*]const u8) i32 {
 }
 
 pub fn sys_open(pathname: [*]const u8, flags: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) {
         return abi.EINVAL;
     }
 
-    var kernel_buffer: [256]u8 = undefined;
+    var kernel_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
-    var resolved_buf: [512]u8 = undefined;
+    var resolved_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const resolved = resolvePath(path_slice, &resolved_buf) orelse return abi.ENAMETOOLONG;
 
     if (process_mod.current_process) |proc| {
