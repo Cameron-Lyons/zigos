@@ -376,14 +376,15 @@ pub export fn schedule() ?*process.Process {
     return scheduleForCPU(smp.getCurrentCPU());
 }
 
-pub fn scheduleForCPU(cpu_id_in: u32) ?*process.Process {
-    const cpu_id = @as(u32, @intCast(clampCPU(cpu_id_in)));
-    const next = switch (scheduler_type) {
+fn chooseNextExtendedForCPU(cpu_id: u32, allow_steal: bool) ?*ProcessExtended {
+    return switch (scheduler_type) {
         .RoundRobin => scheduleRoundRobin(cpu_id),
         .Priority => schedulePriority(cpu_id),
         .MultiLevelFeedback => scheduleMLFQ(cpu_id),
-    } orelse stealRunnable(cpu_id);
+    } orelse if (allow_steal) stealRunnable(cpu_id) else null;
+}
 
+fn finalizeScheduleForCPU(cpu_id: u32, next: ?*ProcessExtended, allow_fallback: bool) ?*process.Process {
     if (next) |ext| {
         const cpu_idx = clampCPU(cpu_id);
         busy_time[cpu_idx] += 1;
@@ -409,6 +410,8 @@ pub fn scheduleForCPU(cpu_id_in: u32) ?*process.Process {
         return ext.base;
     }
 
+    if (!allow_fallback) return null;
+
     if (findRunnableFallback()) |fallback| {
         busy_time[clampCPU(cpu_id)] += 1;
         updateStatistics(cpu_id);
@@ -418,6 +421,16 @@ pub fn scheduleForCPU(cpu_id_in: u32) ?*process.Process {
     idle_time[clampCPU(cpu_id)] += 1;
     updateStatistics(cpu_id);
     return null;
+}
+
+pub fn tryScheduleLocalForCPU(cpu_id_in: u32) ?*process.Process {
+    const cpu_id = @as(u32, @intCast(clampCPU(cpu_id_in)));
+    return finalizeScheduleForCPU(cpu_id, chooseNextExtendedForCPU(cpu_id, false), false);
+}
+
+pub fn scheduleForCPU(cpu_id_in: u32) ?*process.Process {
+    const cpu_id = @as(u32, @intCast(clampCPU(cpu_id_in)));
+    return finalizeScheduleForCPU(cpu_id, chooseNextExtendedForCPU(cpu_id, true), true);
 }
 
 fn scheduleRoundRobin(cpu_id: u32) ?*ProcessExtended {

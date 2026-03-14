@@ -553,9 +553,18 @@ fn markScheduledProcesses(old_proc: *Process, new_proc: *Process) void {
 
 pub fn yield() void {
     const cpu_id = smp.getCurrentCPU();
-    smp.scheduler_lock.acquire();
+    const scheduler_lock = smp.schedulerLockForCPU(cpu_id);
+    scheduler_lock.acquire();
     scheduler.preempt();
-    const next = scheduler.scheduleForCPU(cpu_id);
+    var next = scheduler.tryScheduleLocalForCPU(cpu_id);
+    if (next == null) {
+        scheduler_lock.release();
+        smp.scheduler_lock.acquire();
+        next = scheduler.scheduleForCPU(cpu_id);
+        smp.scheduler_lock.release();
+    } else {
+        scheduler_lock.release();
+    }
     const cpu_idx = @as(usize, @intCast(@min(cpu_id, SMP_MAX_CPUS - 1)));
     const old_proc = if (smp.isSMPEnabled() and cpu_idx < SMP_MAX_CPUS)
         per_cpu_current[cpu_idx] orelse current_process
@@ -572,10 +581,7 @@ pub fn yield() void {
             current_process = new;
         }
         markScheduledProcesses(old, new);
-        smp.scheduler_lock.release();
         switch_process(&old.context, &new.context);
-    } else {
-        smp.scheduler_lock.release();
     }
 }
 

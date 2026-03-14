@@ -229,7 +229,7 @@ fn resolveIoFd(fd: i32) i32 {
 
 const ResolvedUserPathError = error{ InvalidUserPointer, NameTooLong };
 const TERMINAL_IO_BUFFER_SIZE: usize = 256;
-const FILE_IO_BUFFER_SIZE: usize = 512;
+const FILE_IO_BUFFER_SIZE: usize = 4096;
 const RANDOM_FILL_BUFFER_SIZE: usize = 256;
 const PROCESS_SLOT_COUNT: usize = process.process_table.len;
 const PRCTL_NAME_SIZE: usize = 16;
