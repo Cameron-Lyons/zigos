@@ -35,18 +35,34 @@ const Node = struct {
     children: []const *const Node = &.{},
 };
 
-const hello_node: Node align(@alignOf(Node)) = .{ .name = "hello", .file_type = .Regular, .mode = file_mode, .data = user_assets.hello };
-const echo_node: Node align(@alignOf(Node)) = .{ .name = "echo", .file_type = .Regular, .mode = file_mode, .data = user_assets.echo };
-const uname_node: Node align(@alignOf(Node)) = .{ .name = "uname", .file_type = .Regular, .mode = file_mode, .data = user_assets.uname };
-const cat_node: Node align(@alignOf(Node)) = .{ .name = "cat", .file_type = .Regular, .mode = file_mode, .data = user_assets.cat };
-const ls_node: Node align(@alignOf(Node)) = .{ .name = "ls", .file_type = .Regular, .mode = file_mode, .data = user_assets.ls };
+const program_nodes = blk: {
+    var nodes: [user_assets.programs.len]Node = undefined;
+    for (user_assets.programs, 0..) |program, i| {
+        nodes[i] = .{
+            .name = program.name,
+            .file_type = .Regular,
+            .mode = file_mode,
+            .data = program.data,
+        };
+    }
+    break :blk nodes;
+};
+
 const motd_node: Node align(@alignOf(Node)) = .{ .name = "motd", .file_type = .Regular, .mode = text_mode, .data = user_assets.motd };
 
 const usr_bin_children = [_]*const Node{};
 const usr_bin_node: Node align(@alignOf(Node)) = .{ .name = "bin", .file_type = .Directory, .mode = dir_mode, .children = usr_bin_children[0..] };
 const usr_children = [_]*const Node{&usr_bin_node};
 const usr_node: Node align(@alignOf(Node)) = .{ .name = "usr", .file_type = .Directory, .mode = dir_mode, .children = usr_children[0..] };
-const bin_children = [_]*const Node{ &hello_node, &echo_node, &uname_node, &cat_node, &ls_node };
+
+const bin_children = blk: {
+    var children: [program_nodes.len]*const Node = undefined;
+    for (&program_nodes, 0..) |*node, i| {
+        children[i] = node;
+    }
+    break :blk children;
+};
+
 const bin_node: Node align(@alignOf(Node)) = .{ .name = "bin", .file_type = .Directory, .mode = dir_mode, .children = bin_children[0..] };
 const etc_children = [_]*const Node{&motd_node};
 const etc_node: Node align(@alignOf(Node)) = .{ .name = "etc", .file_type = .Directory, .mode = dir_mode, .children = etc_children[0..] };

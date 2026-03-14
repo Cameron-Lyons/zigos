@@ -898,30 +898,10 @@ pub const Shell = struct {
             return;
         }
 
-        const priority_str = sliceFromCStr(args[0]);
-        var priority: i8 = 0;
-        var is_negative = false;
-        var i: usize = 0;
-
-        if (priority_str[0] == '-') {
-            is_negative = true;
-            i = 1;
-        }
-
-        while (i < priority_str.len) : (i += 1) {
-            if (priority_str[i] >= '0' and priority_str[i] <= '9') {
-                priority = priority * 10 + @as(i8, @intCast(priority_str[i] - '0'));
-            } else {
-                break;
-            }
-        }
-
-        if (is_negative) {
-            priority = -priority;
-        }
-
-        if (priority < -20) priority = -20;
-        if (priority > 19) priority = 19;
+        const priority = parseClampedPriority(args[0]) orelse {
+            vga.print("nice: Invalid priority\n");
+            return;
+        };
 
         const command_name = sliceFromCStr(args[1]);
 
@@ -951,12 +931,7 @@ pub const Shell = struct {
         vga.print("Running '");
         printString(args[1]);
         vga.print("' with nice value ");
-        if (priority < 0) {
-            vga.put_char('-');
-            numfmt.printDec(@as(usize, @intCast(-priority)));
-        } else {
-            numfmt.printDec(@as(usize, @intCast(priority)));
-        }
+        printSignedPriority(priority);
         vga.print(" (PID: ");
         numfmt.printDec(pid);
         vga.print(")\n");
@@ -970,30 +945,10 @@ pub const Shell = struct {
             return;
         }
 
-        const priority_str = sliceFromCStr(args[0]);
-        var priority: i8 = 0;
-        var is_negative = false;
-        var i: usize = 0;
-
-        if (priority_str[0] == '-') {
-            is_negative = true;
-            i = 1;
-        }
-
-        while (i < priority_str.len) : (i += 1) {
-            if (priority_str[i] >= '0' and priority_str[i] <= '9') {
-                priority = priority * 10 + @as(i8, @intCast(priority_str[i] - '0'));
-            } else {
-                break;
-            }
-        }
-
-        if (is_negative) {
-            priority = -priority;
-        }
-
-        if (priority < -20) priority = -20;
-        if (priority > 19) priority = 19;
+        const priority = parseClampedPriority(args[0]) orelse {
+            vga.print("renice: Invalid priority\n");
+            return;
+        };
 
         const pid = parseNumber(args[1]) orelse 0;
 
@@ -1006,23 +961,13 @@ pub const Shell = struct {
             vga.print("Changed nice value of process ");
             numfmt.printDec(pid);
             vga.print(" to ");
-            if (priority < 0) {
-                vga.put_char('-');
-                numfmt.printDec(@as(usize, @intCast(-priority)));
-            } else {
-                numfmt.printDec(@as(usize, @intCast(priority)));
-            }
+            printSignedPriority(priority);
             vga.print("\n");
         } else if (process.setNice(pid, priority)) {
             vga.print("Changed nice value of process ");
             numfmt.printDec(pid);
             vga.print(" to ");
-            if (priority < 0) {
-                vga.put_char('-');
-                numfmt.printDec(@as(usize, @intCast(-priority)));
-            } else {
-                numfmt.printDec(@as(usize, @intCast(priority)));
-            }
+            printSignedPriority(priority);
             vga.print("\n");
         } else {
             vga.print("Failed to change priority: process ");
@@ -2824,6 +2769,41 @@ fn printString(str: [*:0]const u8) void {
     while (str[i] != 0) : (i += 1) {
         vga.put_char(str[i]);
     }
+}
+
+fn parseClampedPriority(str: [*:0]const u8) ?i8 {
+    const slice = sliceFromCStr(str);
+    if (slice.len == 0) return null;
+
+    var start: usize = 0;
+    var sign: i32 = 1;
+    if (slice[0] == '-') {
+        sign = -1;
+        start = 1;
+    } else if (slice[0] == '+') {
+        start = 1;
+    }
+    if (start == slice.len) return null;
+
+    var value: i32 = 0;
+    for (slice[start..]) |char| {
+        if (char < '0' or char > '9') return null;
+        value = value * 10 + @as(i32, char - '0');
+    }
+
+    const signed_value = sign * value;
+    const clamped = @min(@max(signed_value, -20), 19);
+    return @intCast(clamped);
+}
+
+fn printSignedPriority(value: i8) void {
+    if (value < 0) {
+        vga.put_char('-');
+        numfmt.printDec(@as(usize, @intCast(-value)));
+        return;
+    }
+
+    numfmt.printDec(@as(usize, @intCast(value)));
 }
 
 fn parseNumber(str: [*:0]const u8) ?u32 {

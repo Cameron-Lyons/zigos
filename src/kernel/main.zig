@@ -181,10 +181,6 @@ fn deferredRuntimeInitTask() void {
 
         console.print("Initializing virtual terminals...\n");
         vt.init();
-
-        console.print("Initializing graphics mode (framebuffer)...\n");
-        _ = @import("devices/framebuffer.zig");
-        console.print("Framebuffer support ready (requires multiboot framebuffer info)\n");
     }
 
     console.print("Deferred runtime initialization complete\n");

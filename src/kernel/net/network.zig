@@ -192,74 +192,40 @@ fn netTxWorker() void {
     }
 }
 
-var local_ip: u32 = 0x0A000002;
-var gateway_ip: u32 = 0x0A000001;
-var netmask: u32 = 0xFFFFFF00;
-
 pub fn getLocalIP() ipv4.IPv4Address {
-    return ipv4.IPv4Address{
-        .octets = .{
-            @intCast((local_ip >> 24) & 0xFF),
-            @intCast((local_ip >> 16) & 0xFF),
-            @intCast((local_ip >> 8) & 0xFF),
-            @intCast(local_ip & 0xFF),
-        },
-    };
+    return ipv4.getLocalAddress();
 }
 
 pub fn getLocalIPRaw() u32 {
-    return local_ip;
+    return ipv4.getLocalIP();
 }
 
 pub fn getGateway() ipv4.IPv4Address {
-    return ipv4.IPv4Address{
-        .octets = .{
-            @intCast((gateway_ip >> 24) & 0xFF),
-            @intCast((gateway_ip >> 16) & 0xFF),
-            @intCast((gateway_ip >> 8) & 0xFF),
-            @intCast(gateway_ip & 0xFF),
-        },
-    };
+    return ipv4.getGatewayAddress();
 }
 
 pub fn getGatewayIP() u32 {
-    return gateway_ip;
+    return ipv4.getGatewayIP();
 }
 
 pub fn getNetmask() ipv4.IPv4Address {
-    return ipv4.IPv4Address{
-        .octets = .{
-            @intCast((netmask >> 24) & 0xFF),
-            @intCast((netmask >> 16) & 0xFF),
-            @intCast((netmask >> 8) & 0xFF),
-            @intCast(netmask & 0xFF),
-        },
-    };
+    return ipv4.getNetmaskAddress();
 }
 
 pub fn setLocalIP(ip: ipv4.IPv4Address) void {
-    local_ip = (@as(u32, ip.octets[0]) << 24) |
-        (@as(u32, ip.octets[1]) << 16) |
-        (@as(u32, ip.octets[2]) << 8) |
-        ip.octets[3];
+    ipv4.setLocalAddress(ip);
 }
 
 pub fn setGateway(ip: ipv4.IPv4Address) void {
-    gateway_ip = (@as(u32, ip.octets[0]) << 24) |
-        (@as(u32, ip.octets[1]) << 16) |
-        (@as(u32, ip.octets[2]) << 8) |
-        ip.octets[3];
+    ipv4.setGatewayAddress(ip);
 }
 
 pub fn setGatewayIP(ip: u32) void {
-    gateway_ip = ip;
+    ipv4.setGatewayIP(ip);
 }
 
 pub fn setNetmask(mask: ipv4.IPv4Address) void {
-    netmask = (@as(u32, mask.octets[0]) << 24) |
-        (@as(u32, mask.octets[1]) << 16) |
-        (@as(u32, mask.octets[2]) << 8) |
-        mask.octets[3];
+    ipv4.setNetmaskAddress(mask);
 }
 
 pub fn printIPv4(ip: ipv4.IPv4Address) void {
