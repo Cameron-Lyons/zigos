@@ -165,11 +165,13 @@ var next_inotify_cookie: u32 = 1;
 const ReadyScan = struct {
     count: i32,
     earliest_deadline: ?u64,
+    wait_mask: u32,
 };
 
 const EpollScan = struct {
     count: usize,
     earliest_deadline: ?u64,
+    wait_mask: u32,
 };
 
 const FdObservation = struct {
@@ -184,7 +186,7 @@ pub fn closePseudoFd(fd: i32) ?i32 {
         var efd = &eventfd_table[idx];
         if (!efd.in_use) return abi.EBADF;
         efd.in_use = false;
-        readiness.notifyAll();
+        readiness.notifyPseudo();
         return 0;
     }
 
@@ -193,7 +195,7 @@ pub fn closePseudoFd(fd: i32) ?i32 {
         var sfd = &signalfd_table[idx];
         if (!sfd.in_use) return abi.EBADF;
         sfd.in_use = false;
-        readiness.notifyAll();
+        readiness.notifyPseudo();
         return 0;
     }
 
@@ -202,7 +204,7 @@ pub fn closePseudoFd(fd: i32) ?i32 {
         const inst = &inotify_instances[idx];
         if (!inst.in_use) return abi.EBADF;
         resetInotifyInstance(inst);
-        readiness.notifyAll();
+        readiness.notifyPseudo();
         return 0;
     }
 
@@ -212,7 +214,7 @@ pub fn closePseudoFd(fd: i32) ?i32 {
         if (!inst.in_use) return abi.EBADF;
         inst.in_use = false;
         inst.count = 0;
-        readiness.notifyAll();
+        readiness.notifyPseudo();
         return 0;
     }
 
@@ -335,7 +337,7 @@ pub fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfd
         if (deadlineReached(deadline_tick)) break;
 
         const wait_deadline = earliestDeadline(deadline_tick, select_scan.earliest_deadline);
-        _ = readiness.waitForChange(observed_generation, wait_deadline);
+        _ = readiness.waitForChange(observed_generation, select_scan.wait_mask, wait_deadline);
     }
 
     if (readfds_addr != 0) {
@@ -381,7 +383,7 @@ pub fn sys_poll(fds_addr: usize, nfds: u32, timeout: i32) i32 {
         if (deadlineReached(deadline_tick)) break;
 
         const wait_deadline = earliestDeadline(deadline_tick, poll_scan.earliest_deadline);
-        _ = readiness.waitForChange(observed_generation, wait_deadline);
+        _ = readiness.waitForChange(observed_generation, poll_scan.wait_mask, wait_deadline);
     }
 
     protection.copyToUser(fds_addr, std.mem.asBytes(&kernel_fds)[0..copy_size]) catch return abi.EINVAL;
@@ -491,7 +493,7 @@ pub fn sys_epoll_wait(epfd: i32, events_addr: usize, maxevents: i32, timeout: i3
             if (deadlineReached(deadline_tick)) break;
 
             const wait_deadline = earliestDeadline(deadline_tick, epoll_scan.earliest_deadline);
-            _ = readiness.waitForChange(observed_generation, wait_deadline);
+            _ = readiness.waitForChange(observed_generation, epoll_scan.wait_mask, wait_deadline);
         }
     }
 
@@ -511,7 +513,7 @@ pub fn sys_eventfd2(initval: u32, flags: u32) i32 {
             efd.in_use = true;
             efd.counter = initval;
             efd.flags = flags;
-            readiness.notifyAll();
+            readiness.notifyPseudo();
             return @intCast(@as(i32, @intCast(i)) + EVENTFD_BASE);
         }
     }
@@ -536,7 +538,7 @@ pub fn sys_signalfd4(fd: i32, mask_ptr: usize, sizemask: usize, flags: u32) i32 
                 sfd.in_use = true;
                 sfd.mask = mask;
                 sfd.flags = flags;
-                readiness.notifyAll();
+                readiness.notifyPseudo();
                 return @intCast(@as(i32, @intCast(i)) + SIGNALFD_BASE);
             }
         }
@@ -548,7 +550,7 @@ pub fn sys_signalfd4(fd: i32, mask_ptr: usize, sizemask: usize, flags: u32) i32 
         if (!signalfd_table[idx].in_use) return abi.EBADF;
         signalfd_table[idx].mask = mask;
         signalfd_table[idx].flags = flags;
-        readiness.notifyAll();
+        readiness.notifyPseudo();
         return fd;
     }
 
@@ -606,7 +608,7 @@ pub fn sys_inotify_init1(flags: u32) i32 {
             }
             inst.head = 0;
             inst.tail = 0;
-            readiness.notifyAll();
+            readiness.notifyPseudo();
             return @intCast(@as(i32, @intCast(i)) + INOTIFY_BASE);
         }
     }
@@ -715,7 +717,7 @@ fn readEventFd(fd: i32, buffer: []u8) i32 {
     }
 
     @memcpy(buffer[0..@sizeOf(u64)], std.mem.asBytes(&value));
-    readiness.notifyAll();
+    readiness.notifyPseudo();
     return @sizeOf(u64);
 }
 
@@ -735,7 +737,7 @@ fn readSignalFd(fd: i32, buffer: []u8) i32 {
     };
 
     @memcpy(buffer[0..@sizeOf(SignalFdInfo)], std.mem.asBytes(&signal_info));
-    readiness.notifyAll();
+    readiness.notifyPseudo();
     return @sizeOf(SignalFdInfo);
 }
 
@@ -764,7 +766,7 @@ fn readInotifyFd(fd: i32, buffer: []u8) i32 {
     }
 
     _ = popInotifyEvent(inst);
-    readiness.notifyAll();
+    readiness.notifyPseudo();
     return @intCast(required);
 }
 
@@ -779,7 +781,7 @@ fn writeEventFd(fd: i32, buffer: []const u8) i32 {
     if (efd.counter > EVENTFD_MAX_COUNTER - value) return abi.EAGAIN;
 
     efd.counter += value;
-    readiness.notifyAll();
+    readiness.notifyPseudo();
     return @sizeOf(u64);
 }
 
@@ -888,7 +890,7 @@ fn enqueueInotifyEvent(inst: *InotifyInstance, wd: i32, mask: u32, cookie: u32, 
     @memset(&event.name, 0);
     @memcpy(event.name[0..copy_len], name[0..copy_len]);
     inst.tail = @intCast(next_tail);
-    readiness.notifyAll();
+    readiness.notifyPseudo();
 }
 
 fn peekInotifyEvent(inst: *const InotifyInstance) ?*const InotifyQueuedEvent {
@@ -991,9 +993,21 @@ fn observeKernelFd(fd: i32, requested_events: u16, track_deadline: bool) FdObser
     };
 }
 
+fn waitMaskForFd(fd: i32) u32 {
+    if (descriptor.lookup(fd)) |known| {
+        return switch (known.kind) {
+            .inet_socket, .unix_socket => readiness.SOCKET_EVENT_MASK,
+            .epoll, .eventfd, .signalfd, .inotify, .timerfd => readiness.PSEUDO_EVENT_MASK,
+        };
+    }
+
+    return readiness.VFS_EVENT_MASK;
+}
+
 fn collectEpollEvents(inst: *const EpollInstance, max: usize, events: *[EPOLL_ENTRY_CAPACITY]EpollEvent, track_deadline: bool) EpollScan {
     var count: usize = 0;
     var earliest: ?u64 = null;
+    var wait_mask: u32 = 0;
 
     for (inst.entries) |maybe_entry| {
         if (maybe_entry) |entry| {
@@ -1001,6 +1015,7 @@ fn collectEpollEvents(inst: *const EpollInstance, max: usize, events: *[EPOLL_EN
             var ready: u32 = 0;
 
             if (entry.fd >= abi.FD_OFFSET) {
+                wait_mask |= waitMaskForFd(entry.fd);
                 const requested: u16 = @truncate(entry.events & (abi.EPOLLIN | abi.EPOLLOUT));
                 const observation = observeKernelFd(entry.fd, requested, track_deadline and (entry.events & abi.EPOLLIN) != 0);
                 earliest = earliestDeadline(earliest, observation.deadline);
@@ -1023,6 +1038,7 @@ fn collectEpollEvents(inst: *const EpollInstance, max: usize, events: *[EPOLL_EN
     return .{
         .count = count,
         .earliest_deadline = earliest,
+        .wait_mask = wait_mask,
     };
 }
 
@@ -1033,6 +1049,7 @@ fn selectCheckFds(nfds: u32, readfds: *const FdSet, writefds: *const FdSet, exce
 
     var count: i32 = 0;
     var earliest: ?u64 = null;
+    var wait_mask: u32 = 0;
     var i: u32 = 0;
     while (i < nfds) : (i += 1) {
         const word_idx = i / FD_SET_WORD_BITS;
@@ -1058,6 +1075,7 @@ fn selectCheckFds(nfds: u32, readfds: *const FdSet, writefds: *const FdSet, exce
             continue;
         }
 
+        wait_mask |= waitMaskForFd(@intCast(i));
         var requested: u16 = 0;
         if (wants_read) requested |= VFS_POLLIN;
         if (wants_write) requested |= VFS_POLLOUT;
@@ -1087,12 +1105,14 @@ fn selectCheckFds(nfds: u32, readfds: *const FdSet, writefds: *const FdSet, exce
     return .{
         .count = count,
         .earliest_deadline = earliest,
+        .wait_mask = wait_mask,
     };
 }
 
 fn pollCheckFds(kernel_fds: []PollFd, track_deadline: bool) ReadyScan {
     var count: i32 = 0;
     var earliest: ?u64 = null;
+    var wait_mask: u32 = 0;
     var i: usize = 0;
     while (i < kernel_fds.len) : (i += 1) {
         kernel_fds[i].revents = 0;
@@ -1112,6 +1132,7 @@ fn pollCheckFds(kernel_fds: []PollFd, track_deadline: bool) ReadyScan {
             continue;
         }
 
+        wait_mask |= waitMaskForFd(fd);
         const requested: u16 = @intCast(kernel_fds[i].events & (POLLIN | POLLOUT));
         const observation = observeKernelFd(fd, requested, track_deadline and (requested & VFS_POLLIN) != 0);
         earliest = earliestDeadline(earliest, observation.deadline);
@@ -1128,5 +1149,6 @@ fn pollCheckFds(kernel_fds: []PollFd, track_deadline: bool) ReadyScan {
     return .{
         .count = count,
         .earliest_deadline = earliest,
+        .wait_mask = wait_mask,
     };
 }

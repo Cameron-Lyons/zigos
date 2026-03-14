@@ -4,6 +4,7 @@ const memory = @import("../memory/memory.zig");
 const vga = @import("vga.zig");
 const isr = @import("../interrupts/isr.zig");
 const network = @import("../net/network.zig");
+const sync = @import("../utils/sync.zig");
 
 const VIRTIO_VENDOR_ID = 0x1AF4;
 const VIRTIO_NET_DEVICE_ID = 0x1000;
@@ -24,6 +25,8 @@ const VIRTIO_STATUS_FEATURES_OK = 8;
 const VIRTIO_STATUS_DRIVER_OK = 4;
 
 const VIRTQ_DESC_F_WRITE = 2;
+const VIRTQUEUE_SIZE: u16 = 256;
+const VIRTIO_BUFFER_SIZE: usize = 2048;
 
 const VirtqDesc = extern struct {
     addr: u64,
@@ -118,6 +121,8 @@ const VirtioNetDevice = struct {
     tx_queue: Virtqueue,
     rx_buffers: [*]u8,
     tx_buffers: [*]u8,
+    rx_lock: sync.SpinLock,
+    rx_poll_buffer: [VIRTIO_BUFFER_SIZE]u8,
 
     fn readFeatures(self: *VirtioNetDevice) u64 {
         self.common_cfg.device_feature_select = 0;
@@ -242,32 +247,71 @@ const VirtioNetDevice = struct {
     }
 
     pub fn receive(self: *VirtioNetDevice) ?[]u8 {
-        self.processUsedBuffers(&self.rx_queue);
+        const packet = self.claimReceive() orelse return null;
+        const copy_len = @min(packet.data.len, self.rx_poll_buffer.len);
+        @memcpy(self.rx_poll_buffer[0..copy_len], packet.data[0..copy_len]);
+        self.releaseReceived(packet.handle);
+        return self.rx_poll_buffer[0..copy_len];
+    }
 
-        if (self.rx_queue.last_used_idx != self.rx_queue.used.idx) {
+    pub fn claimReceive(self: *VirtioNetDevice) ?network.OwnedRxPacket {
+        self.rx_lock.acquire();
+        defer self.rx_lock.release();
+
+        while (self.rx_queue.last_used_idx != self.rx_queue.used.idx) {
             const used_elem = &self.rx_queue.used.ring[self.rx_queue.last_used_idx % self.rx_queue.num];
+            const desc_idx: u16 = @truncate(used_elem.id);
             const len = used_elem.len;
+            self.rx_queue.last_used_idx +%= 1;
 
-            if (len > @sizeOf(VirtioNetHeader)) {
-                const desc_idx: u16 = @truncate(used_elem.id);
-                const buffer_addr = self.rx_queue.desc[desc_idx].addr;
-                const packet_start = buffer_addr + @sizeOf(VirtioNetHeader);
-                const packet_len = len - @sizeOf(VirtioNetHeader);
-
-                self.rx_queue.last_used_idx +%= 1;
-
-                // SAFETY: passed to addBuffer as a receive descriptor for the device to fill
-                const buffer: [2048]u8 = undefined;
-                _ = self.addBuffer(&self.rx_queue, &buffer, true) catch {
-                    return null;
-                };
+            if (len <= @sizeOf(VirtioNetHeader)) {
+                self.recycleRxDescriptor(desc_idx);
                 self.notify(0);
-
-                return @as([*]u8, @ptrFromInt(@as(usize, @intCast(packet_start))))[0..packet_len];
+                continue;
             }
+
+            const buffer_addr = self.rx_queue.desc[desc_idx].addr;
+            const packet_start = buffer_addr + @sizeOf(VirtioNetHeader);
+            const packet_len = @min(len - @sizeOf(VirtioNetHeader), VIRTIO_BUFFER_SIZE - @sizeOf(VirtioNetHeader));
+
+            return .{
+                .data = @as([*]u8, @ptrFromInt(@as(usize, @intCast(packet_start))))[0..packet_len],
+                .mac = self.mac_addr,
+                .handle = desc_idx,
+                .release = releaseClaimedPacket,
+            };
         }
 
         return null;
+    }
+
+    pub fn releaseReceived(self: *VirtioNetDevice, handle: usize) void {
+        if (handle >= self.rx_queue.num) return;
+
+        self.rx_lock.acquire();
+        self.recycleRxDescriptor(@intCast(handle));
+        self.notify(0);
+        self.rx_lock.release();
+    }
+
+    fn recycleRxDescriptor(self: *VirtioNetDevice, desc_idx: u16) void {
+        const buffer_addr = @as(usize, @intCast(self.rx_queue.desc[desc_idx].addr));
+        const buffer = @as([*]u8, @ptrFromInt(buffer_addr))[0..VIRTIO_BUFFER_SIZE];
+
+        self.rx_queue.desc[desc_idx].addr = @intFromPtr(buffer.ptr);
+        self.rx_queue.desc[desc_idx].len = @intCast(buffer.len);
+        self.rx_queue.desc[desc_idx].flags = VIRTQ_DESC_F_WRITE;
+        self.rx_queue.desc_state[desc_idx] = .{
+            .data = @as(*anyopaque, @ptrCast(buffer.ptr)),
+            .len = @intCast(buffer.len),
+            .next = 0,
+        };
+
+        const avail_idx = self.rx_queue.avail.idx;
+        self.rx_queue.avail.ring[avail_idx % self.rx_queue.num] = desc_idx;
+        asm volatile ("" ::: .{ .memory = true });
+        self.rx_queue.avail.idx = avail_idx +% 1;
+        asm volatile ("" ::: .{ .memory = true });
     }
 };
 
@@ -279,8 +323,8 @@ fn virtio_interrupt_handler(frame: *isr.InterruptFrame) void {
         const isr_status = dev.isr_cfg.*;
 
         if (isr_status & 1 != 0) {
-            while (dev.receive()) |packet| {
-                network.enqueueRxPacket(packet, dev.mac_addr);
+            while (dev.claimReceive()) |packet| {
+                _ = network.enqueueBorrowedRx(packet);
             }
         }
     }
@@ -336,6 +380,8 @@ fn initDevice(pci_device: pci.PCIDevice) void {
         .rx_buffers = undefined,
         // SAFETY: allocated when setting up tx descriptors
         .tx_buffers = undefined,
+        .rx_lock = sync.SpinLock.init(),
+        .rx_poll_buffer = undefined,
     };
 
     if (!findCapabilities(&dev)) {
@@ -370,25 +416,25 @@ fn initDevice(pci_device: pci.PCIDevice) void {
     }
     vga.print("\n");
 
-    dev.setupQueue(&dev.rx_queue, 0, 256) catch {
+    dev.setupQueue(&dev.rx_queue, 0, VIRTQUEUE_SIZE) catch {
         vga.print("Failed to setup RX queue\n");
         return;
     };
 
-    dev.setupQueue(&dev.tx_queue, 1, 256) catch {
+    dev.setupQueue(&dev.tx_queue, 1, VIRTQUEUE_SIZE) catch {
         vga.print("Failed to setup TX queue\n");
         return;
     };
 
-    const rx_buffer_size = 2048 * 256;
+    const rx_buffer_size = VIRTIO_BUFFER_SIZE * VIRTQUEUE_SIZE;
     const rx_mem = memory.kmalloc(rx_buffer_size) orelse {
         vga.print("Failed to allocate RX buffers\n");
         return;
     };
     dev.rx_buffers = @as([*]u8, @ptrCast(rx_mem));
 
-    for (0..256) |i| {
-        const buffer = dev.rx_buffers[i * 2048 .. (i + 1) * 2048];
+    for (0..VIRTQUEUE_SIZE) |i| {
+        const buffer = dev.rx_buffers[i * VIRTIO_BUFFER_SIZE .. (i + 1) * VIRTIO_BUFFER_SIZE];
         _ = dev.addBuffer(&dev.rx_queue, buffer, true) catch break;
     }
     dev.notify(0);
@@ -484,6 +530,12 @@ fn virtioReceive() ?[]u8 {
         return dev.receive();
     }
     return null;
+}
+
+fn releaseClaimedPacket(handle: usize) void {
+    if (virtio_net) |*dev| {
+        dev.releaseReceived(handle);
+    }
 }
 
 fn virtioGetMacAddress() [6]u8 {

@@ -17,11 +17,28 @@ pub const NetworkDevice = struct {
     getMacAddress: *const fn () [6]u8,
 };
 
+pub const OwnedRxPacket = struct {
+    data: []const u8,
+    mac: [6]u8,
+    handle: usize,
+    release: *const fn (handle: usize) void,
+};
+
 var current_device: ?*const NetworkDevice = null;
 
 const RX_QUEUE_DEPTH = 128;
 const TX_QUEUE_DEPTH = 128;
 const MAX_PACKET_SIZE = 2048;
+const RX_QUEUE_MASK = RX_QUEUE_DEPTH - 1;
+const TX_QUEUE_MASK = TX_QUEUE_DEPTH - 1;
+const QueueIndex = u8;
+
+comptime {
+    if ((RX_QUEUE_DEPTH & RX_QUEUE_MASK) != 0) @compileError("RX_QUEUE_DEPTH must be a power of two");
+    if ((TX_QUEUE_DEPTH & TX_QUEUE_MASK) != 0) @compileError("TX_QUEUE_DEPTH must be a power of two");
+    if (RX_QUEUE_DEPTH > std.math.maxInt(QueueIndex) + 1) @compileError("RX_QUEUE_DEPTH exceeds QueueIndex capacity");
+    if (TX_QUEUE_DEPTH > std.math.maxInt(QueueIndex) + 1) @compileError("TX_QUEUE_DEPTH exceeds QueueIndex capacity");
+}
 
 const Spinlock = struct {
     locked: u32 = 0,
@@ -42,6 +59,9 @@ const Spinlock = struct {
 const RxEntry = struct {
     len: usize = 0,
     mac: [6]u8 = [_]u8{0} ** 6,
+    borrowed_ptr: ?[*]const u8 = null,
+    borrowed_handle: usize = 0,
+    borrowed_release: ?*const fn (handle: usize) void = null,
     data: [MAX_PACKET_SIZE]u8 = [_]u8{0} ** MAX_PACKET_SIZE,
 };
 
@@ -50,16 +70,32 @@ const TxEntry = struct {
     data: [MAX_PACKET_SIZE]u8 = [_]u8{0} ** MAX_PACKET_SIZE,
 };
 
+const RxClaim = struct {
+    index: QueueIndex,
+    entry: *RxEntry,
+};
+
+const TxClaim = struct {
+    index: QueueIndex,
+    entry: *TxEntry,
+};
+
 var rx_lock: Spinlock = .{};
 var tx_lock: Spinlock = .{};
-var rx_queue: [RX_QUEUE_DEPTH]RxEntry = [_]RxEntry{.{}} ** RX_QUEUE_DEPTH;
-var tx_queue: [TX_QUEUE_DEPTH]TxEntry = [_]TxEntry{.{}} ** TX_QUEUE_DEPTH;
+var rx_pool: [RX_QUEUE_DEPTH]RxEntry = [_]RxEntry{.{}} ** RX_QUEUE_DEPTH;
+var tx_pool: [TX_QUEUE_DEPTH]TxEntry = [_]TxEntry{.{}} ** TX_QUEUE_DEPTH;
+var rx_queue: [RX_QUEUE_DEPTH]QueueIndex = [_]QueueIndex{0} ** RX_QUEUE_DEPTH;
+var tx_queue: [TX_QUEUE_DEPTH]QueueIndex = [_]QueueIndex{0} ** TX_QUEUE_DEPTH;
+var rx_free_stack: [RX_QUEUE_DEPTH]QueueIndex = undefined;
+var tx_free_stack: [TX_QUEUE_DEPTH]QueueIndex = undefined;
 var rx_head: usize = 0;
 var rx_tail: usize = 0;
 var rx_count: usize = 0;
+var rx_free_count: usize = 0;
 var tx_head: usize = 0;
 var tx_tail: usize = 0;
 var tx_count: usize = 0;
+var tx_free_count: usize = 0;
 var workers_started: bool = false;
 var rx_ready: sync.Semaphore = undefined;
 var tx_ready: sync.Semaphore = undefined;
@@ -70,9 +106,13 @@ pub fn init() void {
     rx_head = 0;
     rx_tail = 0;
     rx_count = 0;
+    initFreeStack(&rx_free_stack);
+    rx_free_count = rx_free_stack.len;
     tx_head = 0;
     tx_tail = 0;
     tx_count = 0;
+    initFreeStack(&tx_free_stack);
+    tx_free_count = tx_free_stack.len;
     workers_started = false;
     rx_ready = sync.Semaphore.init(0);
     tx_ready = sync.Semaphore.init(0);
@@ -112,19 +152,58 @@ pub fn enqueueRxPacket(packet: []const u8, mac: [6]u8) void {
     const copy_len = @min(packet.len, MAX_PACKET_SIZE);
     rx_lock.acquire();
 
-    if (rx_count >= RX_QUEUE_DEPTH) {
+    if (rx_free_count == 0) {
         rx_lock.release();
         return;
     }
 
-    rx_queue[rx_head].len = copy_len;
-    rx_queue[rx_head].mac = mac;
-    @memcpy(rx_queue[rx_head].data[0..copy_len], packet[0..copy_len]);
+    rx_free_count -= 1;
+    const entry_index = rx_free_stack[rx_free_count];
+    const entry = &rx_pool[entry_index];
+    entry.len = copy_len;
+    entry.mac = mac;
+    entry.borrowed_ptr = null;
+    entry.borrowed_handle = 0;
+    entry.borrowed_release = null;
+    @memcpy(entry.data[0..copy_len], packet[0..copy_len]);
 
-    rx_head = (rx_head + 1) % RX_QUEUE_DEPTH;
+    rx_queue[rx_head] = entry_index;
+    rx_head = (rx_head + 1) & RX_QUEUE_MASK;
     rx_count += 1;
     rx_lock.release();
     rx_ready.signal();
+}
+
+pub fn enqueueBorrowedRx(packet: OwnedRxPacket) bool {
+    if (!workers_started) {
+        processPacket(packet.data, packet.mac);
+        packet.release(packet.handle);
+        return true;
+    }
+
+    rx_lock.acquire();
+
+    if (rx_free_count == 0) {
+        rx_lock.release();
+        packet.release(packet.handle);
+        return false;
+    }
+
+    rx_free_count -= 1;
+    const entry_index = rx_free_stack[rx_free_count];
+    const entry = &rx_pool[entry_index];
+    entry.len = packet.data.len;
+    entry.mac = packet.mac;
+    entry.borrowed_ptr = packet.data.ptr;
+    entry.borrowed_handle = packet.handle;
+    entry.borrowed_release = packet.release;
+
+    rx_queue[rx_head] = entry_index;
+    rx_head = (rx_head + 1) & RX_QUEUE_MASK;
+    rx_count += 1;
+    rx_lock.release();
+    rx_ready.signal();
+    return true;
 }
 
 pub fn enqueueTxPacket(packet: []const u8) void {
@@ -136,49 +215,84 @@ pub fn enqueueTxPacket(packet: []const u8) void {
     const copy_len = @min(packet.len, MAX_PACKET_SIZE);
     tx_lock.acquire();
 
-    if (tx_count >= TX_QUEUE_DEPTH) {
+    if (tx_free_count == 0) {
         tx_lock.release();
         return;
     }
 
-    tx_queue[tx_head].len = copy_len;
-    @memcpy(tx_queue[tx_head].data[0..copy_len], packet[0..copy_len]);
+    tx_free_count -= 1;
+    const entry_index = tx_free_stack[tx_free_count];
+    const entry = &tx_pool[entry_index];
+    entry.len = copy_len;
+    @memcpy(entry.data[0..copy_len], packet[0..copy_len]);
 
-    tx_head = (tx_head + 1) % TX_QUEUE_DEPTH;
+    tx_queue[tx_head] = entry_index;
+    tx_head = (tx_head + 1) & TX_QUEUE_MASK;
     tx_count += 1;
     tx_lock.release();
     tx_ready.signal();
 }
 
-fn popRx() ?RxEntry {
+fn claimRx() ?RxClaim {
     rx_lock.acquire();
     defer rx_lock.release();
 
     if (rx_count == 0) return null;
 
-    const entry = rx_queue[rx_tail];
-    rx_tail = (rx_tail + 1) % RX_QUEUE_DEPTH;
+    const entry_index = rx_queue[rx_tail];
+    rx_tail = (rx_tail + 1) & RX_QUEUE_MASK;
     rx_count -= 1;
-    return entry;
+    return .{
+        .index = entry_index,
+        .entry = &rx_pool[entry_index],
+    };
 }
 
-fn popTx() ?TxEntry {
+fn claimTx() ?TxClaim {
     tx_lock.acquire();
     defer tx_lock.release();
 
     if (tx_count == 0) return null;
 
-    const entry = tx_queue[tx_tail];
-    tx_tail = (tx_tail + 1) % TX_QUEUE_DEPTH;
+    const entry_index = tx_queue[tx_tail];
+    tx_tail = (tx_tail + 1) & TX_QUEUE_MASK;
     tx_count -= 1;
-    return entry;
+    return .{
+        .index = entry_index,
+        .entry = &tx_pool[entry_index],
+    };
+}
+
+fn releaseRx(index: QueueIndex) void {
+    rx_lock.acquire();
+    rx_pool[index].borrowed_ptr = null;
+    rx_pool[index].borrowed_handle = 0;
+    rx_pool[index].borrowed_release = null;
+    rx_free_stack[rx_free_count] = index;
+    rx_free_count += 1;
+    rx_lock.release();
+}
+
+fn releaseTx(index: QueueIndex) void {
+    tx_lock.acquire();
+    tx_free_stack[tx_free_count] = index;
+    tx_free_count += 1;
+    tx_lock.release();
 }
 
 fn netRxWorker() void {
     while (true) {
         rx_ready.wait();
-        if (popRx()) |entry| {
-            processPacket(entry.data[0..entry.len], entry.mac);
+        if (claimRx()) |claim| {
+            const packet = if (claim.entry.borrowed_ptr) |ptr|
+                ptr[0..claim.entry.len]
+            else
+                claim.entry.data[0..claim.entry.len];
+            processPacket(packet, claim.entry.mac);
+            if (claim.entry.borrowed_release) |release| {
+                release(claim.entry.borrowed_handle);
+            }
+            releaseRx(claim.index);
         }
     }
 }
@@ -186,9 +300,17 @@ fn netRxWorker() void {
 fn netTxWorker() void {
     while (true) {
         tx_ready.wait();
-        if (popTx()) |entry| {
-            sendPacketNow(entry.data[0..entry.len]);
+        if (claimTx()) |claim| {
+            sendPacketNow(claim.entry.data[0..claim.entry.len]);
+            releaseTx(claim.index);
         }
+    }
+}
+
+fn initFreeStack(stack: []QueueIndex) void {
+    var i: usize = 0;
+    while (i < stack.len) : (i += 1) {
+        stack[i] = @intCast(stack.len - 1 - i);
     }
 }
 
