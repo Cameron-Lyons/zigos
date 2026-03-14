@@ -1,11 +1,13 @@
 const std = @import("std");
 const console = @import("console.zig");
+const mmap = @import("../memory/mmap.zig");
 const process = @import("../process/process.zig");
 const memory = @import("../memory/memory.zig");
 const paging = @import("../memory/paging.zig");
 const protection = @import("../memory/protection.zig");
 const elf = @import("../elf/elf.zig");
 const gdt = @import("../interrupts/gdt.zig");
+const signal = @import("../process/signal.zig");
 const scheduler = @import("../process/scheduler.zig");
 
 pub const WEXITED = 1;
@@ -41,37 +43,67 @@ pub fn fork() !i32 {
         return error.NoProcessSlots;
     }
 
-    child.pid = process.next_pid;
-    process.pid_lookup[process.next_pid % 256] = child;
+    const child_pid = process.next_pid;
+    const stack_pages = parent.stack_size / 4096;
+    child.pid = child_pid;
+    process.pid_lookup[child_pid % 256] = child;
     process.next_pid += 1;
-    child.state = .Ready;
-    child.privilege = parent.privilege;
-    child.stack_size = parent.stack_size;
-    child.exit_code = 0;
-    child.parent_pid = parent.pid;
-    child.process_group = parent.process_group;
-
-    @memset(&child.name, 0);
+    child.* = .{
+        .pid = child_pid,
+        .state = .Ready,
+        .privilege = parent.privilege,
+        .context = parent.context,
+        .kernel_stack = undefined,
+        .user_stack = parent.user_stack,
+        .stack_size = parent.stack_size,
+        .name = [_]u8{0} ** 64,
+        .next = process.process_list_head,
+        .wait_next = null,
+        .exit_code = 0,
+        .page_directory = null,
+        .entry_point = parent.entry_point,
+        .priority = parent.priority,
+        .nice_value = parent.nice_value,
+        .time_slice = parent.time_slice,
+        .creds = parent.creds,
+        .parent_pid = parent.pid,
+        .process_group = if (parent.process_group != 0) parent.process_group else parent.pid,
+        .alarm_time = 0,
+        .umask = parent.umask,
+        .cwd_path = parent.cwd_path,
+        .cwd_len = parent.cwd_len,
+        .chroot_path = parent.chroot_path,
+        .chroot_len = parent.chroot_len,
+        .current_brk = parent.current_brk,
+        .rlimits = parent.rlimits,
+        .itimers = parent.itimers,
+        .memory_mappings = parent.memory_mappings,
+        .signals = parent.signals,
+        .stdin_redirect = parent.stdin_redirect,
+        .stdout_redirect = parent.stdout_redirect,
+        .stderr_redirect = parent.stderr_redirect,
+        .extended_idx = parent.extended_idx,
+    };
+    child.signals.pending = signal.SignalQueue.init();
     @memcpy(child.name[0..child_name.len], child_name);
 
-    child.kernel_stack = memory.allocPages(1) orelse return error.OutOfMemory;
+    child.kernel_stack = memory.allocPages(stack_pages) orelse return error.OutOfMemory;
 
     child.page_directory = paging.createUserPageDirectory() catch |err| {
-        memory.freePages(child.kernel_stack, 1);
+        memory.freePages(child.kernel_stack, stack_pages);
         return err;
     };
 
     copyAddressSpace(parent, child) catch |err| {
-        memory.freePages(child.kernel_stack, 1);
+        memory.freePages(child.kernel_stack, stack_pages);
         return err;
     };
+    mmap.cloneMappings(parent, child);
 
-    child.context = parent.context;
+    child.context.cr3 = @intFromPtr(child.page_directory);
 
     if (process.current_process == parent) {
         child.context.eax = 0;
-
-        child.next = process.process_list_head;
         process.process_list_head = child;
 
         const priority = if (parent.privilege == .Kernel) scheduler.Priority.High else scheduler.Priority.Normal;
@@ -160,6 +192,7 @@ pub fn execveFromData(data: []const u8, argv: []const []const u8, envp: []const 
 
 fn prepareUserExecution(current: *process.Process, entry_point: u32, argv: []const []const u8, envp: []const []const u8) !void {
     current.entry_point = entry_point;
+    current.current_brk = protection.USER_HEAP_START;
     current.context.eip = entry_point;
 
     const stack_top = protection.USER_STACK_TOP;
@@ -380,6 +413,8 @@ fn freeUserMemory(proc: *process.Process) void {
     const old_page_dir = paging.getCurrentPageDirectory();
     paging.switchPageDirectory(proc.page_directory.?);
     defer paging.switchPageDirectory(old_page_dir);
+
+    mmap.releaseProcessMappings(proc);
 
     var addr: u32 = protection.USER_PROGRAM_START;
     while (addr < protection.USER_SPACE_END) : (addr += 0x1000) {

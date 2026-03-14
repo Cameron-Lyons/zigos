@@ -332,44 +332,21 @@ pub fn sys_readlinkat(dirfd: i32, pathname: [*]const u8, buf: [*]u8, bufsiz: usi
 }
 
 fn resolveDirFd(dirfd: i32, path: []const u8, buf: *[512]u8) ?[]const u8 {
-    if (path.len > 0 and path[0] == '/') {
-        return path;
-    }
-
-    var base_path: []const u8 = undefined;
     if (dirfd == abi.AT_FDCWD) {
-        base_path = cwd_mod.getCwd();
-    } else {
-        if (dirfd < abi.FD_OFFSET) return null;
-        const vfs_fd: u32 = @intCast(dirfd - abi.FD_OFFSET);
-        const vnode = vfs.getVNodeFromFd(vfs_fd) catch return null;
-        if (vnode.file_type != .Directory) return null;
-        base_path = vfs.getNodePath(vnode) catch return null;
+        return cwd_mod.resolvePath(path, buf);
     }
 
-    return joinPath(base_path, path, buf);
+    if (dirfd < abi.FD_OFFSET) return null;
+    const vfs_fd: u32 = @intCast(dirfd - abi.FD_OFFSET);
+    const vnode = vfs.getVNodeFromFd(vfs_fd) catch return null;
+    if (vnode.file_type != .Directory) return null;
+
+    const base_path = vfs.getNodePath(vnode) catch return null;
+    return cwd_mod.resolvePathFromDir(base_path, path, buf);
 }
 
 fn resolveCwdPathOnly(dirfd: i32, path: []const u8, buf: *[512]u8) ?[]const u8 {
-    if (path.len > 0 and path[0] == '/') {
-        return path;
-    }
-    if (dirfd != abi.AT_FDCWD) return null;
-    return joinPath(cwd_mod.getCwd(), path, buf);
-}
-
-fn joinPath(base_path: []const u8, path: []const u8, buf: *[512]u8) ?[]const u8 {
-    if (base_path.len + 1 + path.len >= buf.len) return null;
-
-    @memcpy(buf[0..base_path.len], base_path);
-    var pos = base_path.len;
-    if (pos > 0 and buf[pos - 1] != '/') {
-        buf[pos] = '/';
-        pos += 1;
-    }
-    @memcpy(buf[pos .. pos + path.len], path);
-    pos += path.len;
-    return buf[0..pos];
+    return resolveDirFd(dirfd, path, buf);
 }
 
 fn fileModeFromBits(mode: u32) vfs.FileMode {

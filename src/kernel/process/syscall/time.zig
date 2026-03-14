@@ -19,12 +19,7 @@ pub const ItimerSpec = extern struct {
     it_value_nsec: u32,
 };
 
-const Itimerval = extern struct {
-    it_interval_sec: u32,
-    it_interval_usec: u32,
-    it_value_sec: u32,
-    it_value_usec: u32,
-};
+const Itimerval = process_mod.Itimer;
 
 const Tms = extern struct {
     tms_utime: u32,
@@ -77,13 +72,6 @@ const PosixTimer = struct {
     interval: ItimerSpec,
     in_use: bool,
 };
-
-var process_itimers: [256][3]Itimerval = [_][3]Itimerval{[_]Itimerval{.{
-    .it_interval_sec = 0,
-    .it_interval_usec = 0,
-    .it_value_sec = 0,
-    .it_value_usec = 0,
-}} ** 3} ** 256;
 
 var timerfd_table: [64]TimerFd = [_]TimerFd{.{
     .clockid = 0,
@@ -155,9 +143,9 @@ pub fn sys_getitimer(which: u32, value_addr: usize) i32 {
     if (which > abi.ITIMER_PROF) return abi.EINVAL;
     if (!protection.verifyUserPointer(value_addr, @sizeOf(Itimerval))) return abi.EINVAL;
 
-    const proc = process_mod.current_process orelse return abi.ESRCH;
+    const proc = process_mod.getEffectiveCurrent() orelse return abi.ESRCH;
     const which_idx: usize = @intCast(which);
-    const timer_value = process_itimers[proc.pid % 256][which_idx];
+    const timer_value = proc.itimers[which_idx];
 
     protection.copyToUser(value_addr, std.mem.asBytes(&timer_value)) catch return abi.EINVAL;
     return 0;
@@ -168,17 +156,17 @@ pub fn sys_setitimer(which: u32, new_value_addr: usize, old_value_addr: usize) i
     if (!protection.verifyUserPointer(new_value_addr, @sizeOf(Itimerval))) return abi.EINVAL;
     if (old_value_addr != 0 and !protection.verifyUserPointer(old_value_addr, @sizeOf(Itimerval))) return abi.EINVAL;
 
-    const proc = process_mod.current_process orelse return abi.ESRCH;
+    const proc = process_mod.getEffectiveCurrent() orelse return abi.ESRCH;
     const which_idx: usize = @intCast(which);
 
     if (old_value_addr != 0) {
-        const old_timer = process_itimers[proc.pid % 256][which_idx];
+        const old_timer = proc.itimers[which_idx];
         protection.copyToUser(old_value_addr, std.mem.asBytes(&old_timer)) catch return abi.EINVAL;
     }
 
     var new_timer: Itimerval = undefined;
     protection.copyFromUser(std.mem.asBytes(&new_timer), new_value_addr) catch return abi.EINVAL;
-    process_itimers[proc.pid % 256][which_idx] = new_timer;
+    proc.itimers[which_idx] = new_timer;
     return 0;
 }
 
