@@ -25,6 +25,14 @@ pub const Spinlock = struct {
 
 pub var scheduler_lock: Spinlock = .{};
 
+const MAX_SCHEDULER_LOCKS: usize = 16;
+pub var per_cpu_scheduler_locks: [MAX_SCHEDULER_LOCKS]Spinlock = [_]Spinlock{.{}} ** MAX_SCHEDULER_LOCKS;
+
+pub fn schedulerLockForCPU(cpu_id: u32) *Spinlock {
+    const cpu_idx = @min(@as(usize, @intCast(cpu_id)), MAX_SCHEDULER_LOCKS - 1);
+    return &per_cpu_scheduler_locks[cpu_idx];
+}
+
 const APIC_BASE_MSR = 0x1B;
 const APIC_BASE_ENABLE = 1 << 11;
 

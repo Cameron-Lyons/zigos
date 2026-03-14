@@ -327,23 +327,15 @@ pub fn sys_select(nfds: i32, readfds_addr: usize, writefds_addr: usize, exceptfd
     const deadline_tick = timeoutDeadline(timeout_ms);
 
     while (count == 0) {
-        if (deadlineReached(deadline_tick)) break;
-
         const observed_generation = readiness.snapshot();
         select_scan = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds, true);
         count = select_scan.count;
         if (count > 0) break;
 
+        if (deadlineReached(deadline_tick)) break;
+
         const wait_deadline = earliestDeadline(deadline_tick, select_scan.earliest_deadline);
-        if (!readiness.waitForChange(observed_generation, wait_deadline)) {
-            select_scan = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds, true);
-            count = select_scan.count;
-            if (count > 0) break;
-            if (deadlineReached(deadline_tick)) break;
-            continue;
-        }
-        select_scan = selectCheckFds(@intCast(nfds), &readfds, &writefds, &exceptfds, &result_readfds, &result_writefds, &result_exceptfds, true);
-        count = select_scan.count;
+        _ = readiness.waitForChange(observed_generation, wait_deadline);
     }
 
     if (readfds_addr != 0) {
@@ -381,23 +373,15 @@ pub fn sys_poll(fds_addr: usize, nfds: u32, timeout: i32) i32 {
     const deadline_tick = timeoutDeadline(timeout);
 
     while (count == 0) {
-        if (deadlineReached(deadline_tick)) break;
-
         const observed_generation = readiness.snapshot();
         poll_scan = pollCheckFds(kernel_fds[0..poll_fd_count], true);
         count = poll_scan.count;
         if (count > 0) break;
 
+        if (deadlineReached(deadline_tick)) break;
+
         const wait_deadline = earliestDeadline(deadline_tick, poll_scan.earliest_deadline);
-        if (!readiness.waitForChange(observed_generation, wait_deadline)) {
-            poll_scan = pollCheckFds(kernel_fds[0..poll_fd_count], true);
-            count = poll_scan.count;
-            if (count > 0) break;
-            if (deadlineReached(deadline_tick)) break;
-            continue;
-        }
-        poll_scan = pollCheckFds(kernel_fds[0..poll_fd_count], true);
-        count = poll_scan.count;
+        _ = readiness.waitForChange(observed_generation, wait_deadline);
     }
 
     protection.copyToUser(fds_addr, std.mem.asBytes(&kernel_fds)[0..copy_size]) catch return abi.EINVAL;
@@ -499,23 +483,15 @@ pub fn sys_epoll_wait(epfd: i32, events_addr: usize, maxevents: i32, timeout: i3
         const deadline_tick = timeoutDeadline(timeout);
 
         while (count == 0) {
-            if (deadlineReached(deadline_tick)) break;
-
             const observed_generation = readiness.snapshot();
             epoll_scan = collectEpollEvents(inst, max, &events, true);
             count = epoll_scan.count;
             if (count > 0) break;
 
+            if (deadlineReached(deadline_tick)) break;
+
             const wait_deadline = earliestDeadline(deadline_tick, epoll_scan.earliest_deadline);
-            if (!readiness.waitForChange(observed_generation, wait_deadline)) {
-                epoll_scan = collectEpollEvents(inst, max, &events, true);
-                count = epoll_scan.count;
-                if (count > 0) break;
-                if (deadlineReached(deadline_tick)) break;
-                continue;
-            }
-            epoll_scan = collectEpollEvents(inst, max, &events, true);
-            count = epoll_scan.count;
+            _ = readiness.waitForChange(observed_generation, wait_deadline);
         }
     }
 
