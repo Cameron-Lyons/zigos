@@ -70,6 +70,19 @@ pub fn getTicks() u64 {
     return ticks;
 }
 
+pub fn millisecondsToTicksCeil(milliseconds: u64) u64 {
+    if (milliseconds == 0) return 0;
+
+    return @max(@as(u64, 1), @divFloor(
+        milliseconds + MILLISECONDS_PER_TICK - 1,
+        MILLISECONDS_PER_TICK,
+    ));
+}
+
+pub fn ticksToMilliseconds(tick_count: u64) u64 {
+    return tick_count * MILLISECONDS_PER_TICK;
+}
+
 pub fn sleepCurrentTicks(ticks_to_wait: u64) void {
     if (ticks_to_wait == 0) return;
 
@@ -145,10 +158,7 @@ pub fn cancelWake(pid: u32) void {
 pub fn sleep(milliseconds: u32) void {
     if (milliseconds == 0) return;
 
-    const ticks_to_wait = @max(@as(u64, 1), @divFloor(
-        @as(u64, milliseconds) + MILLISECONDS_PER_TICK - 1,
-        MILLISECONDS_PER_TICK,
-    ));
+    const ticks_to_wait = millisecondsToTicksCeil(milliseconds);
     sleepCurrentTicks(ticks_to_wait);
 }
 

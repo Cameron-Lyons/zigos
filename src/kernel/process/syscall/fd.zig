@@ -13,6 +13,10 @@ const F_SETFD: u32 = 2;
 const F_GETFL: u32 = 3;
 const F_SETFL: u32 = 4;
 const FD_CLOEXEC: u32 = 1;
+const MAX_FILE_LOCKS: usize = 256;
+const MAX_VFS_FDS: u32 = 256;
+const COPY_FILE_RANGE_BUFFER_SIZE: usize = 512;
+const MAX_LSEEK_RESULT: u64 = std.math.maxInt(i32);
 
 const Flock = extern struct {
     l_type: i16,
@@ -31,14 +35,14 @@ const FileLock = struct {
     in_use: bool,
 };
 
-var file_locks: [256]FileLock = [_]FileLock{.{
+var file_locks: [MAX_FILE_LOCKS]FileLock = [_]FileLock{.{
     .fd = 0,
     .l_type = abi.F_UNLCK,
     .l_start = 0,
     .l_len = 0,
     .l_pid = 0,
     .in_use = false,
-}} ** 256;
+}} ** MAX_FILE_LOCKS;
 
 pub fn isSpecialFd(fd: i32) bool {
     return descriptor.isSpecial(fd);
@@ -59,7 +63,7 @@ pub fn sys_lseek(fd: i32, offset: i64, whence: u32) i32 {
     if (fd < abi.FD_OFFSET) return abi.EBADF;
     const vfs_fd: u32 = @intCast(fd - abi.FD_OFFSET);
     const result = vfs.lseek(vfs_fd, offset, whence) catch |err| return errno.vfsErrno(err);
-    if (result > 0x7FFFFFFF) return abi.EOVERFLOW;
+    if (result > MAX_LSEEK_RESULT) return abi.EOVERFLOW;
     return @intCast(result);
 }
 
@@ -76,7 +80,7 @@ pub fn sys_dup(fd: i32) i32 {
     const vfs_fd: u32 = @intCast(fd - abi.FD_OFFSET);
 
     var new_fd: u32 = 0;
-    while (new_fd < 256) : (new_fd += 1) {
+    while (new_fd < MAX_VFS_FDS) : (new_fd += 1) {
         const result = vfs.dup2(vfs_fd, new_fd) catch continue;
         return @as(i32, @intCast(result)) + abi.FD_OFFSET;
     }
@@ -92,7 +96,7 @@ pub fn sys_fcntl(fd: i32, cmd: i32, arg: usize) i32 {
         F_DUPFD => {
             const min_fd = if (arg >= abi.FD_OFFSET) @as(u32, @intCast(arg - abi.FD_OFFSET)) else 0;
             var new_fd = min_fd;
-            while (new_fd < 256) : (new_fd += 1) {
+            while (new_fd < MAX_VFS_FDS) : (new_fd += 1) {
                 const result = vfs.dup2(vfs_fd, new_fd) catch continue;
                 return @as(i32, @intCast(result)) + abi.FD_OFFSET;
             }
@@ -253,7 +257,7 @@ pub fn sys_copy_file_range(fd_in: i32, off_in_ptr: usize, fd_out: i32, off_out_p
         protection.copyFromUser(std.mem.asBytes(&off_out), off_out_ptr) catch return abi.EFAULT;
     }
 
-    var buffer: [512]u8 = undefined;
+    var buffer: [COPY_FILE_RANGE_BUFFER_SIZE]u8 = undefined;
     var total_copied: usize = 0;
     var remaining = len;
 

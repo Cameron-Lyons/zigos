@@ -14,14 +14,32 @@ const KernelArtifact = struct {
 };
 
 const UserProgramArtifact = struct {
-    compile_step: *std.Build.Step.Compile,
     install_step: *std.Build.Step,
     emitted_bin: std.Build.LazyPath,
     output_path: []const u8,
 };
 
+const UserProgramSpec = struct {
+    name: []const u8,
+    root_source: []const u8,
+};
+
 const headless_qemu_runner = "scripts/run-headless-qemu.sh";
 const rootfs_image_path = "build/disk.img";
+
+const user_program_specs = [_]UserProgramSpec{
+    .{ .name = "hello", .root_source = "user/bin/hello.zig" },
+    .{ .name = "echo", .root_source = "user/bin/echo.zig" },
+    .{ .name = "uname", .root_source = "user/bin/uname.zig" },
+    .{ .name = "cat", .root_source = "user/bin/cat.zig" },
+    .{ .name = "ls", .root_source = "user/bin/ls.zig" },
+    .{ .name = "pwd", .root_source = "user/bin/pwd.zig" },
+    .{ .name = "mkdir", .root_source = "user/bin/mkdir.zig" },
+    .{ .name = "rm", .root_source = "user/bin/rm.zig" },
+    .{ .name = "sleep", .root_source = "user/bin/sleep.zig" },
+    .{ .name = "touch", .root_source = "user/bin/touch.zig" },
+    .{ .name = "tty", .root_source = "user/bin/tty.zig" },
+};
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{
@@ -34,57 +52,20 @@ pub fn build(b: *std.Build) void {
 
     const optimize = b.standardOptimizeOption(.{});
 
-    const hello_program = addUserProgram(b, target, optimize, "hello", "user/bin/hello.zig");
-    const echo_program = addUserProgram(b, target, optimize, "echo", "user/bin/echo.zig");
-    const uname_program = addUserProgram(b, target, optimize, "uname", "user/bin/uname.zig");
-    const cat_program = addUserProgram(b, target, optimize, "cat", "user/bin/cat.zig");
-    const ls_program = addUserProgram(b, target, optimize, "ls", "user/bin/ls.zig");
-    const pwd_program = addUserProgram(b, target, optimize, "pwd", "user/bin/pwd.zig");
-    const mkdir_program = addUserProgram(b, target, optimize, "mkdir", "user/bin/mkdir.zig");
-    const rm_program = addUserProgram(b, target, optimize, "rm", "user/bin/rm.zig");
-    const sleep_program = addUserProgram(b, target, optimize, "sleep", "user/bin/sleep.zig");
-    const touch_program = addUserProgram(b, target, optimize, "touch", "user/bin/touch.zig");
-    const tty_program = addUserProgram(b, target, optimize, "tty", "user/bin/tty.zig");
+    var user_programs: [user_program_specs.len]UserProgramArtifact = undefined;
+    inline for (user_program_specs, 0..) |spec, i| {
+        user_programs[i] = addUserProgram(b, target, optimize, spec.name, spec.root_source);
+    }
     const motd_install = b.addInstallFileWithDir(b.path("user/rootfs/etc/motd"), .{ .custom = "user/rootfs/etc" }, "motd");
-    const user_assets_module = createUserAssetsModule(
-        b,
-        target,
-        optimize,
-        hello_program,
-        echo_program,
-        uname_program,
-        cat_program,
-        ls_program,
-        pwd_program,
-        mkdir_program,
-        rm_program,
-        touch_program,
-        tty_program,
-    );
+    const user_assets_module = createUserAssetsModule(b, target, optimize, user_program_specs[0..], user_programs[0..]);
 
     const dev_kernel = addKernelArtifact(b, target, optimize, "kernel.elf", .dev, user_assets_module);
     const ci_smoke_kernel = addKernelArtifact(b, target, optimize, "kernel-ci-smoke.elf", .ci_smoke, user_assets_module);
     const vm_test_kernel = addKernelArtifact(b, target, optimize, "kernel-test-vm.elf", .test_vm, user_assets_module);
     const userland_smoke_kernel = addKernelArtifact(b, target, optimize, "kernel-userland-smoke.elf", .userland_smoke, user_assets_module);
 
-    const kernel_userland_dependencies = [_]*std.Build.Step{
-        hello_program.install_step,
-        echo_program.install_step,
-        uname_program.install_step,
-        cat_program.install_step,
-        ls_program.install_step,
-        pwd_program.install_step,
-        mkdir_program.install_step,
-        rm_program.install_step,
-        sleep_program.install_step,
-        touch_program.install_step,
-        tty_program.install_step,
-    };
-
     inline for (&.{ dev_kernel, ci_smoke_kernel, vm_test_kernel, userland_smoke_kernel }) |artifact| {
-        for (kernel_userland_dependencies) |dependency| {
-            artifact.compile_step.step.dependOn(dependency);
-        }
+        dependOnUserPrograms(&artifact.compile_step.step, user_programs[0..], &motd_install.step);
     }
 
     const kernel_step = b.step("kernel", "Build the development kernel");
@@ -100,69 +81,13 @@ pub fn build(b: *std.Build) void {
     userland_smoke_kernel_step.dependOn(userland_smoke_kernel.install_step);
 
     const userland_step = b.step("userland", "Build the staged user programs");
-    userland_step.dependOn(hello_program.install_step);
-    userland_step.dependOn(echo_program.install_step);
-    userland_step.dependOn(uname_program.install_step);
-    userland_step.dependOn(cat_program.install_step);
-    userland_step.dependOn(ls_program.install_step);
-    userland_step.dependOn(pwd_program.install_step);
-    userland_step.dependOn(mkdir_program.install_step);
-    userland_step.dependOn(rm_program.install_step);
-    userland_step.dependOn(sleep_program.install_step);
-    userland_step.dependOn(touch_program.install_step);
-    userland_step.dependOn(tty_program.install_step);
-    userland_step.dependOn(&motd_install.step);
+    dependOnUserPrograms(userland_step, user_programs[0..], &motd_install.step);
 
     const rootfs_cmd = b.addSystemCommand(&.{
-        "sh", "-c",
-        \\set -eu
-        \\if ! command -v mkfs.fat >/dev/null 2>&1; then
-        \\  echo "mkfs.fat not found. Install dosfstools." >&2
-        \\  exit 1
-        \\fi
-        \\if ! command -v mmd >/dev/null 2>&1; then
-        \\  echo "mmd not found. Install mtools." >&2
-        \\  exit 1
-        \\fi
-        \\if ! command -v mcopy >/dev/null 2>&1; then
-        \\  echo "mcopy not found. Install mtools." >&2
-        \\  exit 1
-        \\fi
-        \\mkdir -p build
-        \\rm -f "build/disk.img"
-        \\truncate -s 64M "build/disk.img"
-        \\mkfs.fat -F 32 "build/disk.img" >/dev/null
-        \\mmd -i "build/disk.img" ::/etc
-        \\mmd -i "build/disk.img" ::/bin
-        \\mmd -i "build/disk.img" ::/tmp
-        \\mmd -i "build/disk.img" ::/dev
-        \\mmd -i "build/disk.img" ::/usr
-        \\mmd -i "build/disk.img" ::/usr/bin
-        \\mcopy -i "build/disk.img" "zig-out/user/bin/hello" ::/bin/hello
-        \\mcopy -i "build/disk.img" "zig-out/user/bin/echo" ::/bin/echo
-        \\mcopy -i "build/disk.img" "zig-out/user/bin/uname" ::/bin/uname
-        \\mcopy -i "build/disk.img" "zig-out/user/bin/cat" ::/bin/cat
-        \\mcopy -i "build/disk.img" "zig-out/user/bin/ls" ::/bin/ls
-        \\mcopy -i "build/disk.img" "zig-out/user/bin/pwd" ::/bin/pwd
-        \\mcopy -i "build/disk.img" "zig-out/user/bin/mkdir" ::/bin/mkdir
-        \\mcopy -i "build/disk.img" "zig-out/user/bin/rm" ::/bin/rm
-        \\mcopy -i "build/disk.img" "zig-out/user/bin/sleep" ::/bin/sleep
-        \\mcopy -i "build/disk.img" "zig-out/user/bin/touch" ::/bin/touch
-        \\mcopy -i "build/disk.img" "zig-out/user/bin/tty" ::/bin/tty
-        \\mcopy -i "build/disk.img" "zig-out/user/rootfs/etc/motd" ::/etc/motd
+        "sh",                                                              "-c",
+        buildRootfsScript(b, user_program_specs[0..], user_programs[0..]),
     });
-    rootfs_cmd.step.dependOn(hello_program.install_step);
-    rootfs_cmd.step.dependOn(echo_program.install_step);
-    rootfs_cmd.step.dependOn(uname_program.install_step);
-    rootfs_cmd.step.dependOn(cat_program.install_step);
-    rootfs_cmd.step.dependOn(ls_program.install_step);
-    rootfs_cmd.step.dependOn(pwd_program.install_step);
-    rootfs_cmd.step.dependOn(mkdir_program.install_step);
-    rootfs_cmd.step.dependOn(rm_program.install_step);
-    rootfs_cmd.step.dependOn(sleep_program.install_step);
-    rootfs_cmd.step.dependOn(touch_program.install_step);
-    rootfs_cmd.step.dependOn(tty_program.install_step);
-    rootfs_cmd.step.dependOn(&motd_install.step);
+    dependOnUserPrograms(&rootfs_cmd.step, user_programs[0..], &motd_install.step);
 
     const rootfs_step = b.step("rootfs", "Build the FAT disk image for user programs");
     rootfs_step.dependOn(&rootfs_cmd.step);
@@ -315,7 +240,7 @@ pub fn build(b: *std.Build) void {
         \\mkdir -p build/iso/boot/grub
         \\cp zig-out/bin/kernel.elf build/iso/boot/
         \\cp src/boot/grub.cfg build/iso/boot/grub/
-        \\\"$GRUB_MKRESCUE" -o build/os.iso build/iso
+        \\"$GRUB_MKRESCUE" -o build/os.iso build/iso
     });
     iso_cmd.step.dependOn(dev_kernel.install_step);
 
@@ -334,15 +259,15 @@ pub fn build(b: *std.Build) void {
         \\mkdir -p build
         \\LOG_PATH="build/boot-test-serial.log"
         \\rm -f "$LOG_PATH"
-        \\\"$QEMU_BIN" \\
-        \\  -cdrom build/os.iso \\
-        \\  -boot d \\
-        \\  -m 256M \\
-        \\  -display none \\
-        \\  -serial file:"$LOG_PATH" \\
-        \\  -monitor none \\
-        \\  -no-reboot \\
-        \\  -no-shutdown \\
+        \\"$QEMU_BIN" \
+        \\  -cdrom build/os.iso \
+        \\  -boot d \
+        \\  -m 256M \
+        \\  -display none \
+        \\  -serial file:"$LOG_PATH" \
+        \\  -monitor none \
+        \\  -no-reboot \
+        \\  -no-shutdown \
         \\  >/dev/null 2>&1 &
         \\QEMU_PID=$!
         \\sleep "$BOOT_TEST_SECONDS"
@@ -412,10 +337,10 @@ fn addKernelArtifact(
     kernel_module.addOptions("build_options", options);
     kernel_module.addImport("user_assets", user_assets_module);
     kernel_module.addAssemblyFile(b.path("src/boot/boot64.S"));
-    kernel_module.addAssemblyFile(b.path("src/arch/x86/syscall6.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt32.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupts.s"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush.S"));
+    kernel_module.addAssemblyFile(b.path("src/arch/x86/syscall6.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/process/context_switch.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/smp/ap_trampoline.S"));
 
@@ -433,46 +358,98 @@ fn addKernelArtifact(
     };
 }
 
+fn dependOnUserPrograms(step: *std.Build.Step, programs: []const UserProgramArtifact, motd_step: *std.Build.Step) void {
+    for (programs) |program| {
+        step.dependOn(program.install_step);
+    }
+    step.dependOn(motd_step);
+}
+
+fn buildRootfsScript(b: *std.Build, specs: []const UserProgramSpec, programs: []const UserProgramArtifact) []const u8 {
+    std.debug.assert(specs.len == programs.len);
+
+    var script = std.ArrayList(u8).empty;
+    script.appendSlice(b.allocator,
+        \\set -eu
+        \\if ! command -v mkfs.fat >/dev/null 2>&1; then
+        \\  echo "mkfs.fat not found. Install dosfstools." >&2
+        \\  exit 1
+        \\fi
+        \\if ! command -v mmd >/dev/null 2>&1; then
+        \\  echo "mmd not found. Install mtools." >&2
+        \\  exit 1
+        \\fi
+        \\if ! command -v mcopy >/dev/null 2>&1; then
+        \\  echo "mcopy not found. Install mtools." >&2
+        \\  exit 1
+        \\fi
+        \\mkdir -p build
+        \\rm -f "build/disk.img"
+        \\truncate -s 64M "build/disk.img"
+        \\mkfs.fat -F 32 "build/disk.img" >/dev/null
+        \\mmd -i "build/disk.img" ::/etc
+        \\mmd -i "build/disk.img" ::/bin
+        \\mmd -i "build/disk.img" ::/tmp
+        \\mmd -i "build/disk.img" ::/dev
+        \\mmd -i "build/disk.img" ::/usr
+        \\mmd -i "build/disk.img" ::/usr/bin
+        \\
+    ) catch @panic("failed to build rootfs script");
+
+    for (specs, 0..) |spec, i| {
+        script.print(b.allocator, "mcopy -i \"{s}\" \"{s}\" ::/bin/{s}\n", .{
+            rootfs_image_path,
+            programs[i].output_path,
+            spec.name,
+        }) catch @panic("failed to append rootfs copy command");
+    }
+
+    script.appendSlice(b.allocator,
+        \\mcopy -i "build/disk.img" "zig-out/user/rootfs/etc/motd" ::/etc/motd
+    ) catch @panic("failed to finish rootfs script");
+
+    return script.toOwnedSlice(b.allocator) catch @panic("failed to allocate rootfs script");
+}
+
 fn createUserAssetsModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    hello_program: UserProgramArtifact,
-    echo_program: UserProgramArtifact,
-    uname_program: UserProgramArtifact,
-    cat_program: UserProgramArtifact,
-    ls_program: UserProgramArtifact,
-    pwd_program: UserProgramArtifact,
-    mkdir_program: UserProgramArtifact,
-    rm_program: UserProgramArtifact,
-    touch_program: UserProgramArtifact,
-    tty_program: UserProgramArtifact,
+    specs: []const UserProgramSpec,
+    programs: []const UserProgramArtifact,
 ) *std.Build.Module {
+    std.debug.assert(specs.len == programs.len);
+
     const write_files = b.addWriteFiles();
-    _ = write_files.addCopyFile(hello_program.emitted_bin, "assets/hello");
-    _ = write_files.addCopyFile(echo_program.emitted_bin, "assets/echo");
-    _ = write_files.addCopyFile(uname_program.emitted_bin, "assets/uname");
-    _ = write_files.addCopyFile(cat_program.emitted_bin, "assets/cat");
-    _ = write_files.addCopyFile(ls_program.emitted_bin, "assets/ls");
-    _ = write_files.addCopyFile(pwd_program.emitted_bin, "assets/pwd");
-    _ = write_files.addCopyFile(mkdir_program.emitted_bin, "assets/mkdir");
-    _ = write_files.addCopyFile(rm_program.emitted_bin, "assets/rm");
-    _ = write_files.addCopyFile(touch_program.emitted_bin, "assets/touch");
-    _ = write_files.addCopyFile(tty_program.emitted_bin, "assets/tty");
+    for (specs, 0..) |spec, i| {
+        _ = write_files.addCopyFile(programs[i].emitted_bin, b.fmt("assets/{s}", .{spec.name}));
+    }
     _ = write_files.addCopyFile(b.path("user/rootfs/etc/motd"), "assets/motd");
-    const assets_source = write_files.add("user_assets.zig", b.fmt(
-        \\pub const hello = @embedFile("assets/hello");
-        \\pub const echo = @embedFile("assets/echo");
-        \\pub const uname = @embedFile("assets/uname");
-        \\pub const cat = @embedFile("assets/cat");
-        \\pub const ls = @embedFile("assets/ls");
-        \\pub const pwd = @embedFile("assets/pwd");
-        \\pub const mkdir = @embedFile("assets/mkdir");
-        \\pub const rm = @embedFile("assets/rm");
-        \\pub const touch = @embedFile("assets/touch");
-        \\pub const tty = @embedFile("assets/tty");
+
+    var source = std.ArrayList(u8).empty;
+    source.appendSlice(b.allocator,
+        \\pub const ProgramAsset = struct {
+        \\    name: []const u8,
+        \\    data: []const u8,
+        \\};
+        \\
+        \\pub const programs = [_]ProgramAsset{
+    ) catch @panic("failed to start user assets source");
+
+    for (specs) |spec| {
+        source.print(b.allocator, "    .{{ .name = \"{s}\", .data = @embedFile(\"assets/{s}\") }},\n", .{
+            spec.name,
+            spec.name,
+        }) catch @panic("failed to append user asset");
+    }
+
+    source.appendSlice(b.allocator,
+        \\};
+        \\
         \\pub const motd = @embedFile("assets/motd");
-    , .{}));
+    ) catch @panic("failed to finish user assets source");
+
+    const assets_source = write_files.add("user_assets.zig", source.toOwnedSlice(b.allocator) catch @panic("failed to allocate user assets source"));
 
     return b.createModule(.{
         .root_source_file = assets_source,
@@ -524,18 +501,25 @@ fn addUserProgram(
     });
     stdio_module.addImport("syscall", syscall_module);
 
+    const cli_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/cli.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+    cli_module.addImport("stdio", stdio_module);
+
     const user_module = b.addModule(b.fmt("user-{s}", .{name}), .{
         .root_source_file = b.path(root_source),
         .target = target,
         .optimize = user_optimize,
     });
     user_module.addImport("cstr", cstr_module);
+    user_module.addImport("cli", cli_module);
     user_module.addImport("runtime", runtime_module);
     user_module.addImport("syscall", syscall_module);
     user_module.addImport("stdio", stdio_module);
 
     user_module.addAssemblyFile(b.path("user/crt0.S"));
-    user_module.addAssemblyFile(b.path("src/arch/x86/syscall6.S"));
 
     const program = b.addExecutable(.{
         .name = name,
@@ -549,7 +533,6 @@ fn addUserProgram(
     });
 
     return .{
-        .compile_step = program,
         .install_step = &install.step,
         .emitted_bin = program.getEmittedBin(),
         .output_path = b.fmt("zig-out/user/bin/{s}", .{name}),

@@ -21,8 +21,6 @@ const ata = @import("drivers/ata.zig");
 const fat32 = @import("fs/fat32.zig");
 const pci = @import("drivers/pci.zig");
 const rtl8139 = @import("drivers/rtl8139.zig");
-const e1000 = @import("drivers/e1000.zig");
-const virtio = @import("drivers/virtio.zig");
 const network = @import("net/network.zig");
 const usb = @import("drivers/usb.zig");
 const acpi = @import("acpi/acpi.zig");
@@ -181,10 +179,6 @@ fn deferredRuntimeInitTask() void {
 
         console.print("Initializing virtual terminals...\n");
         vt.init();
-
-        console.print("Initializing graphics mode (framebuffer)...\n");
-        _ = @import("devices/framebuffer.zig");
-        console.print("Framebuffer support ready (requires multiboot framebuffer info)\n");
     }
 
     console.print("Deferred runtime initialization complete\n");
