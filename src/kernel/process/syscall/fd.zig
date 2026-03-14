@@ -15,7 +15,7 @@ const F_SETFL: u32 = 4;
 const FD_CLOEXEC: u32 = 1;
 const MAX_FILE_LOCKS: usize = 256;
 const MAX_VFS_FDS: u32 = 256;
-const COPY_FILE_RANGE_BUFFER_SIZE: usize = 512;
+const COPY_FILE_RANGE_BUFFER_SIZE: usize = 4096;
 const MAX_LSEEK_RESULT: u64 = std.math.maxInt(i32);
 
 const Flock = extern struct {
