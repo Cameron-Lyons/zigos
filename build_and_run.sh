@@ -2,4 +2,4 @@
 
 set -euo pipefail
 
-zig build run
+exec "$(dirname "$0")/run.sh" "$@"

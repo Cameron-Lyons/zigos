@@ -53,8 +53,13 @@ pub const IPv4Packet = struct {
 
 var rx_handlers: [3]?*const fn (packet: *const IPv4Packet) void = [_]?*const fn (packet: *const IPv4Packet) void{null} ** 3;
 
-pub const our_ip: u32 = 0xC0A80102;
-pub const gateway_ip: u32 = 0xC0A80101;
+const DEFAULT_LOCAL_IP: u32 = 0x0A000002;
+const DEFAULT_GATEWAY_IP: u32 = 0x0A000001;
+const DEFAULT_NETMASK: u32 = 0xFFFFFF00;
+
+var local_ip: u32 = DEFAULT_LOCAL_IP;
+var gateway_ip: u32 = DEFAULT_GATEWAY_IP;
+var netmask: u32 = DEFAULT_NETMASK;
 
 pub fn init() void {
     ethernet.registerHandler(.IPv4, handleIPv4Packet);
@@ -92,7 +97,7 @@ fn handleIPv4Packet(frame: *const ethernet.EthernetFrame) void {
     }
 
     const dst_ip = @byteSwap(header.dst_addr);
-    if (dst_ip != our_ip and dst_ip != 0xFFFFFFFF) {
+    if (dst_ip != local_ip and dst_ip != 0xFFFFFFFF) {
         return;
     }
 
@@ -132,7 +137,7 @@ pub fn sendPacket(dst_ip: u32, protocol: Protocol, data: []const u8) !void {
     header.ttl = 64;
     header.protocol = @intFromEnum(protocol);
     header.checksum = 0;
-    header.src_addr = @byteSwap(our_ip);
+    header.src_addr = @byteSwap(local_ip);
     header.dst_addr = @byteSwap(dst_ip);
 
     header.checksum = calculateChecksum(&header, IP_HEADER_MIN_SIZE);
@@ -193,7 +198,7 @@ fn verifyChecksum(header: *const IPv4Header, len: usize) bool {
 }
 
 fn isLocalNetwork(ip: u32) bool {
-    return (ip & 0xFFFFFF00) == (our_ip & 0xFFFFFF00);
+    return (ip & netmask) == (local_ip & netmask);
 }
 
 pub fn registerProtocolHandler(protocol: u8, handler: fn (src_ip: u32, dst_ip: u32, data: []const u8) void) void {
@@ -213,5 +218,49 @@ pub fn registerProtocolHandler(protocol: u8, handler: fn (src_ip: u32, dst_ip: u
 }
 
 pub fn getLocalIP() u32 {
-    return our_ip;
+    return local_ip;
+}
+
+pub fn getLocalAddress() IPv4Address {
+    return IPv4Address.fromU32(local_ip);
+}
+
+pub fn setLocalIP(ip: u32) void {
+    local_ip = ip;
+}
+
+pub fn setLocalAddress(ip: IPv4Address) void {
+    local_ip = ip.toU32();
+}
+
+pub fn getGatewayIP() u32 {
+    return gateway_ip;
+}
+
+pub fn getGatewayAddress() IPv4Address {
+    return IPv4Address.fromU32(gateway_ip);
+}
+
+pub fn setGatewayIP(ip: u32) void {
+    gateway_ip = ip;
+}
+
+pub fn setGatewayAddress(ip: IPv4Address) void {
+    gateway_ip = ip.toU32();
+}
+
+pub fn getNetmask() u32 {
+    return netmask;
+}
+
+pub fn getNetmaskAddress() IPv4Address {
+    return IPv4Address.fromU32(netmask);
+}
+
+pub fn setNetmask(mask: u32) void {
+    netmask = mask;
+}
+
+pub fn setNetmaskAddress(mask: IPv4Address) void {
+    netmask = mask.toU32();
 }
