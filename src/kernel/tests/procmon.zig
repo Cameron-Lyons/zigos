@@ -170,53 +170,8 @@ fn updateCPUUsage() void {
     sample_index = (sample_index + 1) % cpu_samples.len;
 }
 
-pub fn getProcessStats(pid: u32) ?ProcessStats {
-    for (process_stats) |stat| {
-        if (stat.pid == pid) {
-            return stat;
-        }
-    }
-    return null;
-}
-
-pub fn getSystemStats() SystemStats {
-    updateStats();
-    return system_stats;
-}
-
 pub fn getCPUUsage() CPUUsage {
     return cpu_usage;
-}
-
-pub fn getAverageCPUUsage() CPUUsage {
-    var avg = CPUUsage{
-        .user_percent = 0,
-        .system_percent = 0,
-        .idle_percent = 0,
-        .iowait_percent = 0,
-    };
-
-    var count: u32 = 0;
-    for (cpu_samples) |sample| {
-        if (sample.user_percent > 0 or sample.system_percent > 0 or sample.idle_percent > 0) {
-            avg.user_percent += sample.user_percent;
-            avg.system_percent += sample.system_percent;
-            avg.idle_percent += sample.idle_percent;
-            avg.iowait_percent += sample.iowait_percent;
-            count += 1;
-        }
-    }
-
-    if (count > 0) {
-        avg.user_percent /= count;
-        avg.system_percent /= count;
-        avg.idle_percent /= count;
-        avg.iowait_percent /= count;
-    } else {
-        avg.idle_percent = 100;
-    }
-
-    return avg;
 }
 
 pub fn printProcessList() void {

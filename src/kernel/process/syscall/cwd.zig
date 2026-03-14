@@ -1,4 +1,5 @@
 const abi = @import("abi.zig");
+const common = @import("common.zig");
 const process_mod = @import("../process.zig");
 const protection = @import("../../memory/protection.zig");
 const vfs = @import("../../fs/vfs.zig");
@@ -86,7 +87,7 @@ fn resolveVisibleIntoActual(proc: ?*process_mod.Process, visible_path: []const u
 }
 
 pub fn resolvePath(path: []const u8, out: []u8) ?[]const u8 {
-    var visible_buf: [512]u8 = undefined;
+    var visible_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const visible_path = resolveVisiblePath(path, &visible_buf) orelse return null;
     return resolveVisibleIntoActual(currentProcess(), visible_path, out);
 }
@@ -110,11 +111,11 @@ pub fn getCwd() []const u8 {
 pub fn setCwd(path: []const u8) bool {
     const proc = currentProcess() orelse return false;
 
-    var resolved_visible_buf: [512]u8 = undefined;
+    var resolved_visible_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const resolved_visible = resolveVisiblePath(path, &resolved_visible_buf) orelse return false;
     if (resolved_visible.len >= process_mod.PATH_BUFFER_LEN) return false;
 
-    var resolved_actual_buf: [512]u8 = undefined;
+    var resolved_actual_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const resolved_actual = resolveVisibleIntoActual(proc, resolved_visible, &resolved_actual_buf) orelse return false;
     const node = vfs.lookupPath(resolved_actual) catch return false;
     if (node.file_type != .Directory) return false;

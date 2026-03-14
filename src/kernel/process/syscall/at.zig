@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("abi.zig");
+const common = @import("common.zig");
 const cwd_mod = @import("cwd.zig");
 const errno = @import("errno.zig");
 const syscall_event = @import("event.zig");
@@ -44,12 +45,12 @@ const UtimensatTimespec = extern struct {
 };
 
 pub fn sys_openat(dirfd: i32, pathname: [*]const u8, flags: i32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return abi.EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) return abi.EINVAL;
 
-    var path_buffer: [256]u8 = undefined;
+    var path_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
 
-    var resolved_buf: [512]u8 = undefined;
+    var resolved_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return abi.EBADF;
 
     const fd = vfs.open(resolved, @intCast(flags)) catch |err| return errno.vfsErrno(err);
@@ -57,26 +58,26 @@ pub fn sys_openat(dirfd: i32, pathname: [*]const u8, flags: i32) i32 {
 }
 
 pub fn sys_mkdirat(dirfd: i32, pathname: [*]const u8, mode: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return abi.EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) return abi.EINVAL;
 
-    var path_buffer: [256]u8 = undefined;
+    var path_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
 
-    var resolved_buf: [512]u8 = undefined;
+    var resolved_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return abi.EBADF;
 
-    vfs.mkdir(resolved, fileModeFromBits(mode)) catch |err| return errno.vfsErrno(err);
+    vfs.mkdir(resolved, common.fileModeFromBits(mode)) catch |err| return errno.vfsErrno(err);
     syscall_event.notifyInotifyPathEvent(resolved, abi.IN_CREATE, abi.IN_CREATE);
     return 0;
 }
 
 pub fn sys_unlinkat(dirfd: i32, pathname: [*]const u8, flags: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return abi.EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) return abi.EINVAL;
 
-    var path_buffer: [256]u8 = undefined;
+    var path_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
 
-    var resolved_buf: [512]u8 = undefined;
+    var resolved_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return abi.EBADF;
 
     if (flags & abi.AT_REMOVEDIR != 0) {
@@ -92,17 +93,17 @@ pub fn sys_unlinkat(dirfd: i32, pathname: [*]const u8, flags: u32) i32 {
 pub fn sys_linkat(olddirfd: i32, oldpath: [*]const u8, newdirfd: i32, newpath: [*]const u8, flags: u32) i32 {
     _ = flags;
 
-    if (!protection.verifyUserPointer(@intFromPtr(oldpath), 256)) return abi.EINVAL;
-    if (!protection.verifyUserPointer(@intFromPtr(newpath), 256)) return abi.EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(oldpath), common.USER_PATH_BUFFER_SIZE)) return abi.EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(newpath), common.USER_PATH_BUFFER_SIZE)) return abi.EINVAL;
 
-    var old_buffer: [256]u8 = undefined;
-    var new_buffer: [256]u8 = undefined;
+    var old_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var new_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
 
     const old_slice = protection.copyStringFromUser(&old_buffer, @intFromPtr(oldpath)) catch return abi.EINVAL;
     const new_slice = protection.copyStringFromUser(&new_buffer, @intFromPtr(newpath)) catch return abi.EINVAL;
 
-    var resolved_old_buf: [512]u8 = undefined;
-    var resolved_new_buf: [512]u8 = undefined;
+    var resolved_old_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
+    var resolved_new_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
 
     const resolved_old = resolveDirFd(olddirfd, old_slice, &resolved_old_buf) orelse return abi.EBADF;
     const resolved_new = resolveDirFd(newdirfd, new_slice, &resolved_new_buf) orelse return abi.EBADF;
@@ -113,26 +114,26 @@ pub fn sys_linkat(olddirfd: i32, oldpath: [*]const u8, newdirfd: i32, newpath: [
 }
 
 pub fn sys_fchmodat(dirfd: i32, pathname: [*]const u8, mode: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return abi.EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) return abi.EINVAL;
 
-    var path_buffer: [256]u8 = undefined;
+    var path_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
 
-    var resolved_buf: [512]u8 = undefined;
+    var resolved_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return abi.EBADF;
 
-    vfs.chmod(resolved, fileModeFromBits(mode)) catch |err| return errno.vfsErrno(err);
+    vfs.chmod(resolved, common.fileModeFromBits(mode)) catch |err| return errno.vfsErrno(err);
     syscall_event.notifyInotifyPathEvent(resolved, abi.IN_ATTRIB, 0);
     return 0;
 }
 
 pub fn sys_fchownat(dirfd: i32, pathname: [*]const u8, owner: i32, group: i32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return abi.EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) return abi.EINVAL;
 
-    var path_buffer: [256]u8 = undefined;
+    var path_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return abi.EINVAL;
 
-    var resolved_buf: [512]u8 = undefined;
+    var resolved_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return abi.EBADF;
 
     const uid: u32 = if (owner < 0) 0xFFFFFFFF else @intCast(owner);
@@ -144,17 +145,17 @@ pub fn sys_fchownat(dirfd: i32, pathname: [*]const u8, owner: i32, group: i32) i
 }
 
 pub fn sys_renameat(olddirfd: i32, oldpath: [*]const u8, newdirfd: i32, newpath: [*]const u8) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(oldpath), 256)) return abi.EINVAL;
-    if (!protection.verifyUserPointer(@intFromPtr(newpath), 256)) return abi.EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(oldpath), common.USER_PATH_BUFFER_SIZE)) return abi.EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(newpath), common.USER_PATH_BUFFER_SIZE)) return abi.EINVAL;
 
-    var old_buffer: [256]u8 = undefined;
-    var new_buffer: [256]u8 = undefined;
+    var old_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var new_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
 
     const old_slice = protection.copyStringFromUser(&old_buffer, @intFromPtr(oldpath)) catch return abi.EINVAL;
     const new_slice = protection.copyStringFromUser(&new_buffer, @intFromPtr(newpath)) catch return abi.EINVAL;
 
-    var resolved_old_buf: [512]u8 = undefined;
-    var resolved_new_buf: [512]u8 = undefined;
+    var resolved_old_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
+    var resolved_new_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
 
     const resolved_old = resolveDirFd(olddirfd, old_slice, &resolved_old_buf) orelse return abi.EBADF;
     const resolved_new = resolveDirFd(newdirfd, new_slice, &resolved_new_buf) orelse return abi.EBADF;
@@ -167,12 +168,12 @@ pub fn sys_renameat(olddirfd: i32, oldpath: [*]const u8, newdirfd: i32, newpath:
 pub fn sys_faccessat(dirfd: i32, pathname: [*]const u8, mode: u32, flags: u32) i32 {
     _ = flags;
 
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return abi.EFAULT;
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) return abi.EFAULT;
 
-    var path_buffer: [256]u8 = undefined;
+    var path_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return abi.EFAULT;
 
-    var full_path_buf: [512]u8 = undefined;
+    var full_path_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const full_path = resolveCwdPathOnly(dirfd, path_slice, &full_path_buf) orelse return abi.EBADF;
 
     const vnode = vfs.lookupPath(full_path) catch |err| return errno.vfsErrno(err);
@@ -185,13 +186,13 @@ pub fn sys_statx(dirfd: i32, pathname: [*]const u8, flags: u32, mask: u32, statx
     _ = flags;
     _ = mask;
 
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return abi.EFAULT;
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) return abi.EFAULT;
     if (!protection.verifyUserPointer(statxbuf, @sizeOf(Statx))) return abi.EFAULT;
 
-    var path_buffer: [256]u8 = undefined;
+    var path_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return abi.EFAULT;
 
-    var full_path_buf: [512]u8 = undefined;
+    var full_path_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const full_path = resolveCwdPathOnly(dirfd, path_slice, &full_path_buf) orelse return abi.EBADF;
 
     const vnode = vfs.lookupPath(full_path) catch |err| return errno.vfsErrno(err);
@@ -254,7 +255,7 @@ pub fn sys_utimensat(dirfd: i32, pathname: [*]const u8, times_ptr: usize, flags:
     _ = flags;
 
     if (@intFromPtr(pathname) != 0) {
-        if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return abi.EFAULT;
+        if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) return abi.EFAULT;
     }
 
     if (times_ptr != 0) {
@@ -268,7 +269,7 @@ pub fn sys_futimesat(dirfd: i32, pathname: [*]const u8, times_ptr: usize) i32 {
     _ = dirfd;
 
     if (@intFromPtr(pathname) != 0) {
-        if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return abi.EFAULT;
+        if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) return abi.EFAULT;
     }
 
     if (times_ptr != 0) {
@@ -281,13 +282,13 @@ pub fn sys_futimesat(dirfd: i32, pathname: [*]const u8, times_ptr: usize) i32 {
 pub fn sys_fstatat(dirfd: i32, pathname: [*]const u8, statbuf: usize, flags: u32) i32 {
     _ = flags;
 
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return abi.EFAULT;
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) return abi.EFAULT;
     if (!protection.verifyUserPointer(statbuf, @sizeOf(vfs.FileStat))) return abi.EFAULT;
 
-    var path_buffer: [256]u8 = undefined;
+    var path_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return abi.EFAULT;
 
-    var full_path_buf: [512]u8 = undefined;
+    var full_path_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const full_path = resolveCwdPathOnly(dirfd, path_slice, &full_path_buf) orelse return abi.EBADF;
 
     var stat_buf: vfs.FileStat = undefined;
@@ -300,13 +301,13 @@ pub fn sys_fstatat(dirfd: i32, pathname: [*]const u8, statbuf: usize, flags: u32
 pub fn sys_symlinkat(target: [*]const u8, newdirfd: i32, linkpath: [*]const u8) i32 {
     _ = newdirfd;
 
-    if (!protection.verifyUserPointer(@intFromPtr(target), 256)) return abi.EFAULT;
-    if (!protection.verifyUserPointer(@intFromPtr(linkpath), 256)) return abi.EFAULT;
+    if (!protection.verifyUserPointer(@intFromPtr(target), common.USER_PATH_BUFFER_SIZE)) return abi.EFAULT;
+    if (!protection.verifyUserPointer(@intFromPtr(linkpath), common.USER_PATH_BUFFER_SIZE)) return abi.EFAULT;
 
-    var target_buffer: [256]u8 = undefined;
+    var target_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const target_slice = protection.copyStringFromUser(&target_buffer, @intFromPtr(target)) catch return abi.EFAULT;
 
-    var link_buffer: [256]u8 = undefined;
+    var link_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const link_slice = protection.copyStringFromUser(&link_buffer, @intFromPtr(linkpath)) catch return abi.EFAULT;
 
     vfs.symlink(target_slice, link_slice) catch |err| return errno.vfsErrno(err);
@@ -317,13 +318,13 @@ pub fn sys_symlinkat(target: [*]const u8, newdirfd: i32, linkpath: [*]const u8) 
 pub fn sys_readlinkat(dirfd: i32, pathname: [*]const u8, buf: [*]u8, bufsiz: usize) i32 {
     _ = dirfd;
 
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return abi.EFAULT;
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) return abi.EFAULT;
     if (!protection.verifyUserPointer(@intFromPtr(buf), bufsiz)) return abi.EFAULT;
 
-    var path_buffer: [256]u8 = undefined;
+    var path_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return abi.EFAULT;
 
-    var link_target: [256]u8 = undefined;
+    var link_target: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const len = vfs.readlink(path_slice, &link_target) catch |err| return errno.vfsErrno(err);
 
     const copy_len = @min(len, bufsiz);
@@ -331,7 +332,7 @@ pub fn sys_readlinkat(dirfd: i32, pathname: [*]const u8, buf: [*]u8, bufsiz: usi
     return @intCast(copy_len);
 }
 
-fn resolveDirFd(dirfd: i32, path: []const u8, buf: *[512]u8) ?[]const u8 {
+fn resolveDirFd(dirfd: i32, path: []const u8, buf: *[common.RESOLVED_PATH_BUFFER_SIZE]u8) ?[]const u8 {
     if (dirfd == abi.AT_FDCWD) {
         return cwd_mod.resolvePath(path, buf);
     }
@@ -345,20 +346,6 @@ fn resolveDirFd(dirfd: i32, path: []const u8, buf: *[512]u8) ?[]const u8 {
     return cwd_mod.resolvePathFromDir(base_path, path, buf);
 }
 
-fn resolveCwdPathOnly(dirfd: i32, path: []const u8, buf: *[512]u8) ?[]const u8 {
+fn resolveCwdPathOnly(dirfd: i32, path: []const u8, buf: *[common.RESOLVED_PATH_BUFFER_SIZE]u8) ?[]const u8 {
     return resolveDirFd(dirfd, path, buf);
-}
-
-fn fileModeFromBits(mode: u32) vfs.FileMode {
-    return .{
-        .owner_read = (mode & 0o400) != 0,
-        .owner_write = (mode & 0o200) != 0,
-        .owner_exec = (mode & 0o100) != 0,
-        .group_read = (mode & 0o040) != 0,
-        .group_write = (mode & 0o020) != 0,
-        .group_exec = (mode & 0o010) != 0,
-        .other_read = (mode & 0o004) != 0,
-        .other_write = (mode & 0o002) != 0,
-        .other_exec = (mode & 0o001) != 0,
-    };
 }

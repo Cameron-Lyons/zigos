@@ -84,7 +84,7 @@ pub fn build(b: *std.Build) void {
     dependOnUserPrograms(userland_step, user_programs[0..], &motd_install.step);
 
     const rootfs_cmd = b.addSystemCommand(&.{
-        "sh", "-c",
+        "sh",                                                              "-c",
         buildRootfsScript(b, user_program_specs[0..], user_programs[0..]),
     });
     dependOnUserPrograms(&rootfs_cmd.step, user_programs[0..], &motd_install.step);
@@ -501,12 +501,20 @@ fn addUserProgram(
     });
     stdio_module.addImport("syscall", syscall_module);
 
+    const cli_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/cli.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+    cli_module.addImport("stdio", stdio_module);
+
     const user_module = b.addModule(b.fmt("user-{s}", .{name}), .{
         .root_source_file = b.path(root_source),
         .target = target,
         .optimize = user_optimize,
     });
     user_module.addImport("cstr", cstr_module);
+    user_module.addImport("cli", cli_module);
     user_module.addImport("runtime", runtime_module);
     user_module.addImport("syscall", syscall_module);
     user_module.addImport("stdio", stdio_module);

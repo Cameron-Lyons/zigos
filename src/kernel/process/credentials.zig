@@ -1,12 +1,14 @@
 const vga = @import("../drivers/vga.zig");
 const vfs = @import("../fs/vfs.zig");
 
+pub const MAX_GROUPS: usize = 16;
+
 pub const Credentials = struct {
     uid: u16,
     gid: u16,
     euid: u16,
     egid: u16,
-    groups: [16]u16,
+    groups: [MAX_GROUPS]u16,
     ngroups: u8,
 };
 
@@ -110,7 +112,7 @@ pub fn defaultKernelCredentials() Credentials {
         .gid = 0,
         .euid = 0,
         .egid = 0,
-        .groups = [_]u16{0} ** 16,
+        .groups = [_]u16{0} ** MAX_GROUPS,
         .ngroups = 1,
     };
 }
@@ -121,7 +123,7 @@ pub fn defaultUserCredentials() Credentials {
         .gid = 1000,
         .euid = 1000,
         .egid = 1000,
-        .groups = [_]u16{0} ** 16,
+        .groups = [_]u16{0} ** MAX_GROUPS,
         .ngroups = 1,
     };
 }
