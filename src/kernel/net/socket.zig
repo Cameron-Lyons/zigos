@@ -141,7 +141,7 @@ pub const Socket = struct {
     pub fn setState(self: *Socket, state: SocketState) void {
         self.state = state;
         self.state_ready.signal();
-        readiness.notifyAll();
+        readiness.notifySocket();
     }
 
     pub fn pollEvents(self: *const Socket, requested_events: u16) u16 {
@@ -457,7 +457,7 @@ pub const Socket = struct {
             }
         }
         self.recv_ready.signal();
-        readiness.notifyAll();
+        readiness.notifySocket();
     }
 
     pub fn addToBacklog(self: *Socket, client: *Socket) !void {
@@ -469,7 +469,7 @@ pub const Socket = struct {
         self.backlog_tail = (self.backlog_tail + 1) % self.backlog.len;
         self.backlog_count += 1;
         self.accept_ready.signal();
-        readiness.notifyAll();
+        readiness.notifySocket();
     }
 };
 

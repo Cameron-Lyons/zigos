@@ -223,7 +223,7 @@ pub fn closeSocketFd(unix_sockets: *UnixSocketTable, socket_table: *SocketTable,
         if (socket_table[idx]) |sock| {
             sock.close();
             socket_table[idx] = null;
-            readiness.notifyAll();
+            readiness.notifySocket();
             return 0;
         }
         return abi.EBADF;
@@ -244,7 +244,7 @@ pub fn closeSocketFd(unix_sockets: *UnixSocketTable, socket_table: *SocketTable,
         usock.recv_head = 0;
         usock.recv_tail = 0;
         usock.recv_count = 0;
-        readiness.notifyAll();
+        readiness.notifySocket();
         return 0;
     }
 
@@ -313,7 +313,7 @@ fn writeUnixSocket(usock: *UnixSocket, buffer: []const u8) i32 {
 
     peer.recv_tail = (peer.recv_tail + copy_len) & UNIX_SOCKET_BUFFER_MASK;
     peer.recv_count += copy_len;
-    readiness.notifyAll();
+    readiness.notifySocket();
     return @intCast(copy_len);
 }
 
@@ -332,7 +332,7 @@ fn readUnixSocket(usock: *UnixSocket, buffer: []u8) i32 {
 
     usock.recv_head = (usock.recv_head + to_recv) & UNIX_SOCKET_BUFFER_MASK;
     usock.recv_count -= to_recv;
-    readiness.notifyAll();
+    readiness.notifySocket();
     return @intCast(to_recv);
 }
 
@@ -446,7 +446,7 @@ pub fn sys_connect(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, s
                 if (std.mem.eql(u8, peer.path[0..path_end], addr.path[0..path_end])) {
                     usock.peer = peer;
                     usock.connected = true;
-                    readiness.notifyAll();
+                    readiness.notifySocket();
                     return 0;
                 }
             }
@@ -477,7 +477,7 @@ pub fn sys_listen(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, so
         const usock = &unix_sockets[idx];
         if (!usock.in_use) return abi.EBADF;
         usock.listening = true;
-        readiness.notifyAll();
+        readiness.notifySocket();
         return 0;
     }
 
@@ -503,7 +503,7 @@ pub fn sys_accept(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, so
                         new_sock.connected = true;
                         new_sock.peer = peer;
                         peer.peer = new_sock;
-                        readiness.notifyAll();
+                        readiness.notifySocket();
                         return @intCast(@as(i32, @intCast(j)) + unix_socket_fd_base);
                     }
                 }
@@ -521,7 +521,7 @@ pub fn sys_accept(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, so
     for (0..socket_table.len) |i| {
         if (socket_table[i] == null) {
             socket_table[i] = client;
-            readiness.notifyAll();
+            readiness.notifySocket();
             return @intCast(@as(i32, @intCast(i)) + socket_fd_base);
         }
     }
@@ -565,6 +565,6 @@ pub fn sys_shutdown(socket_table: *SocketTable, sockfd: i32) i32 {
     const sock = socket_table[sock_idx] orelse return abi.EBADF;
     sock.close();
     socket_table[sock_idx] = null;
-    readiness.notifyAll();
+    readiness.notifySocket();
     return 0;
 }
