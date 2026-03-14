@@ -14,6 +14,9 @@ pub const PROT_WRITE = 0x2;
 pub const PROT_EXEC = 0x4;
 pub const PROT_USER = 0x8;
 
+const PAGE_SIZE: usize = 0x1000;
+const PAGE_MASK: usize = PAGE_SIZE - 1;
+
 pub fn verifyUserPointer(ptr: usize, size: usize) bool {
     if (ptr > 0xFFFFFFFF - size) {
         return false;
@@ -23,10 +26,10 @@ pub fn verifyUserPointer(ptr: usize, size: usize) bool {
         return false;
     }
 
-    var addr = ptr & ~@as(usize, 0xFFF);
-    const end_addr = (ptr + size + 0xFFF) & ~@as(usize, 0xFFF);
+    var addr = ptr & ~PAGE_MASK;
+    const end_addr = (ptr + size + PAGE_MASK) & ~PAGE_MASK;
 
-    while (addr < end_addr) : (addr += 0x1000) {
+    while (addr < end_addr) : (addr += PAGE_SIZE) {
         if (paging.get_physical_address(@intCast(addr)) == null) {
             return false;
         }
@@ -64,13 +67,21 @@ pub fn copyStringFromUser(buffer: []u8, user_str: usize) ![]u8 {
         return error.InvalidUserPointer;
     }
 
+    var current_addr = user_str;
+    var next_page = (current_addr & ~PAGE_MASK) + PAGE_SIZE;
     var i: usize = 0;
-    while (i < buffer.len) : (i += 1) {
-        if (!verifyUserPointer(user_str + i, 1)) {
-            return error.InvalidUserPointer;
+    while (i < buffer.len) : ({
+        i += 1;
+        current_addr += 1;
+    }) {
+        if (current_addr >= next_page) {
+            if (!verifyUserPointer(current_addr, 1)) {
+                return error.InvalidUserPointer;
+            }
+            next_page = (current_addr & ~PAGE_MASK) + PAGE_SIZE;
         }
 
-        const byte = @as(*const u8, @ptrFromInt(user_str + i)).*;
+        const byte = @as(*const u8, @ptrFromInt(current_addr)).*;
         buffer[i] = byte;
 
         if (byte == 0) {
@@ -83,14 +94,14 @@ pub fn copyStringFromUser(buffer: []u8, user_str: usize) ![]u8 {
 
 pub fn allocateUserMemory(size: usize, prot: u32) !usize {
     if (size == 0 or size > USER_SPACE_END - USER_HEAP_START) return error.OutOfVirtualMemory;
-    const page_count = (size + 0xFFF) / 0x1000;
+    const page_count = (size + PAGE_MASK) / PAGE_SIZE;
 
     var virt_addr: u32 = USER_HEAP_START;
-    while (virt_addr + (page_count * 0x1000) < USER_SPACE_END) : (virt_addr += 0x1000) {
+    while (virt_addr + (page_count * PAGE_SIZE) < USER_SPACE_END) : (virt_addr += PAGE_SIZE) {
         var found = true;
         var i: u32 = 0;
         while (i < page_count) : (i += 1) {
-            if (paging.get_physical_address(virt_addr + i * 0x1000) != null) {
+            if (paging.get_physical_address(virt_addr + i * PAGE_SIZE) != null) {
                 found = false;
                 break;
             }
@@ -102,7 +113,7 @@ pub fn allocateUserMemory(size: usize, prot: u32) !usize {
                 const phys_page = memory.allocatePhysicalPage() orelse {
                     var j: u32 = 0;
                     while (j < i) : (j += 1) {
-                        paging.unmap_page(virt_addr + j * 0x1000);
+                        paging.unmap_page(virt_addr + j * PAGE_SIZE);
                     }
                     return error.OutOfMemory;
                 };
@@ -112,7 +123,7 @@ pub fn allocateUserMemory(size: usize, prot: u32) !usize {
                     flags |= paging.PAGE_WRITABLE;
                 }
 
-                paging.mapPage(virt_addr + i * 0x1000, phys_page, flags);
+                paging.mapPage(virt_addr + i * PAGE_SIZE, phys_page, flags);
             }
 
             return virt_addr;
@@ -123,10 +134,10 @@ pub fn allocateUserMemory(size: usize, prot: u32) !usize {
 }
 
 pub fn freeUserMemory(addr: usize, size: usize) void {
-    const page_count = (size + 0xFFF) / 0x1000;
+    const page_count = (size + PAGE_MASK) / PAGE_SIZE;
     var i: u32 = 0;
     while (i < page_count) : (i += 1) {
-        paging.unmap_page(@intCast(addr + i * 0x1000));
+        paging.unmap_page(@intCast(addr + i * PAGE_SIZE));
     }
 }
 
