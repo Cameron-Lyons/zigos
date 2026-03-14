@@ -33,7 +33,12 @@ const user_program_specs = [_]UserProgramSpec{
     .{ .name = "uname", .root_source = "user/bin/uname.zig" },
     .{ .name = "cat", .root_source = "user/bin/cat.zig" },
     .{ .name = "ls", .root_source = "user/bin/ls.zig" },
+    .{ .name = "pwd", .root_source = "user/bin/pwd.zig" },
+    .{ .name = "mkdir", .root_source = "user/bin/mkdir.zig" },
+    .{ .name = "rm", .root_source = "user/bin/rm.zig" },
     .{ .name = "sleep", .root_source = "user/bin/sleep.zig" },
+    .{ .name = "touch", .root_source = "user/bin/touch.zig" },
+    .{ .name = "tty", .root_source = "user/bin/tty.zig" },
 };
 
 pub fn build(b: *std.Build) void {
@@ -335,6 +340,7 @@ fn addKernelArtifact(
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt32.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupts.s"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush.S"));
+    kernel_module.addAssemblyFile(b.path("src/arch/x86/syscall6.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/process/context_switch.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/smp/ap_trampoline.S"));
 

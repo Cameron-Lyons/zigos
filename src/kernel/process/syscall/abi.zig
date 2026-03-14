@@ -411,6 +411,19 @@ pub const PROT_NONE: u32 = 0x0;
 pub const PROT_READ: u32 = 0x1;
 pub const PROT_WRITE: u32 = 0x2;
 pub const PROT_EXEC: u32 = 0x4;
+pub const MAP_SHARED: u32 = 0x01;
+pub const MAP_PRIVATE: u32 = 0x02;
+pub const MAP_FIXED: u32 = 0x10;
+pub const MAP_ANONYMOUS: u32 = 0x20;
+
+pub const TCGETS: u32 = 0x5401;
+pub const TCSETS: u32 = 0x5402;
+pub const TCSETSW: u32 = 0x5403;
+pub const TCSETSF: u32 = 0x5404;
+pub const TIOCGWINSZ: u32 = 0x5413;
+pub const TTY_LFLAG_ISIG: u32 = 0x0001;
+pub const TTY_LFLAG_ICANON: u32 = 0x0002;
+pub const TTY_LFLAG_ECHO: u32 = 0x0008;
 
 pub const CLOCK_MONOTONIC_RAW: u32 = 4;
 pub const CLOCK_REALTIME_COARSE: u32 = 5;

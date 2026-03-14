@@ -363,8 +363,7 @@ pub const VirtualTerminal = struct {
         @memcpy(&self.scrollback[self.scrollback_pos], self.buffer[0..SCREEN_WIDTH]);
         self.scrollback_pos = (self.scrollback_pos + 1) % SCROLLBACK_SIZE;
 
-        @memcpy(self.buffer[0..(BUFFER_SIZE - SCREEN_WIDTH)],
-                self.buffer[SCREEN_WIDTH..BUFFER_SIZE]);
+        @memcpy(self.buffer[0..(BUFFER_SIZE - SCREEN_WIDTH)], self.buffer[SCREEN_WIDTH..BUFFER_SIZE]);
 
         const last_line_start = (SCREEN_HEIGHT - 1) * SCREEN_WIDTH;
         for (self.buffer[last_line_start..]) |*cell| {
@@ -376,8 +375,7 @@ pub const VirtualTerminal = struct {
     }
 
     fn scrollDown(self: *VirtualTerminal) void {
-        @memcpy(self.buffer[SCREEN_WIDTH..BUFFER_SIZE],
-                self.buffer[0..(BUFFER_SIZE - SCREEN_WIDTH)]);
+        @memcpy(self.buffer[SCREEN_WIDTH..BUFFER_SIZE], self.buffer[0..(BUFFER_SIZE - SCREEN_WIDTH)]);
 
         for (self.buffer[0..SCREEN_WIDTH]) |*cell| {
             cell.* = Cell{
@@ -448,7 +446,7 @@ pub const VirtualTerminal = struct {
             const y: u8 = @intCast(i / SCREEN_WIDTH);
 
             const vga_attr: u8 = @as(u8, @intFromEnum(cell.attr.bg)) << 4 |
-                            @intFromEnum(cell.attr.fg);
+                @intFromEnum(cell.attr.fg);
 
             vga.putCharAt(x, y, cell.char, vga_attr);
         }
@@ -520,8 +518,7 @@ pub const VirtualTerminal = struct {
             @memcpy(buffer[0..read_count], self.input_buffer[0..read_count]);
 
             if (read_count < self.input_pos) {
-                @memcpy(self.input_buffer[0..self.input_pos - read_count],
-                       self.input_buffer[read_count..self.input_pos]);
+                @memcpy(self.input_buffer[0 .. self.input_pos - read_count], self.input_buffer[read_count..self.input_pos]);
             }
             self.input_pos -= @as(u16, @intCast(read_count));
         }
@@ -538,6 +535,7 @@ pub const VirtualTerminal = struct {
 // SAFETY: each element initialized via VirtualTerminal.init() in the init() function
 var virtual_terminals: [NUM_VIRTUAL_TERMINALS]VirtualTerminal = undefined;
 var current_vt: u8 = 0;
+var initialized = false;
 
 pub fn init() void {
     for (&virtual_terminals, 0..) |*vt, i| {
@@ -546,6 +544,7 @@ pub fn init() void {
 
     virtual_terminals[0].active = true;
     current_vt = 0;
+    initialized = true;
 
     vga.print("Virtual terminal support initialized\n");
 }
@@ -566,4 +565,8 @@ pub fn getCurrentTerminal() *VirtualTerminal {
 pub fn getTerminal(vt_num: u8) ?*VirtualTerminal {
     if (vt_num >= NUM_VIRTUAL_TERMINALS) return null;
     return &virtual_terminals[vt_num];
+}
+
+pub fn isInitialized() bool {
+    return initialized;
 }
