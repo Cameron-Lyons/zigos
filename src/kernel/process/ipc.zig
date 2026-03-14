@@ -11,11 +11,17 @@ pub const MessageType = enum {
     Response,
 };
 
+pub const DEFAULT_MESSAGE_QUEUE_CAPACITY: u32 = 16;
+pub const MAX_MESSAGE_QUEUE_CAPACITY: u32 = 256;
+pub const MESSAGE_DATA_SIZE: usize = 256;
+pub const PIPE_BUFFER_SIZE: usize = 4096;
+const SHARED_MEMORY_PAGE_SIZE: usize = 4096;
+
 pub const Message = struct {
     sender_pid: u32,
     receiver_pid: u32,
     msg_type: MessageType,
-    data: [256]u8,
+    data: [MESSAGE_DATA_SIZE]u8,
     data_len: u32,
     timestamp: u64,
     next: ?*Message,
@@ -152,7 +158,7 @@ pub const SharedMemory = struct {
     pub const PERM_EXEC = 0x01;
 
     pub fn init(id: u32, owner_pid: u32, size: usize, permissions: u8) !SharedMemory {
-        const pages_needed = (size + 4095) / 4096;
+        const pages_needed = (size + SHARED_MEMORY_PAGE_SIZE - 1) / SHARED_MEMORY_PAGE_SIZE;
         const data = memory.allocPages(pages_needed) orelse return error.OutOfMemory;
 
         return SharedMemory{
@@ -215,7 +221,7 @@ pub const SharedMemory = struct {
 pub const Pipe = struct {
     read_end: u32,
     write_end: u32,
-    buffer: [4096]u8,
+    buffer: [PIPE_BUFFER_SIZE]u8,
     read_pos: usize,
     write_pos: usize,
     size: usize,
@@ -236,7 +242,7 @@ pub const Pipe = struct {
             .closed = false,
             .mutex = sync.Mutex.init(),
             .not_empty = sync.Semaphore.init(0),
-            .not_full = sync.Semaphore.init(4096),
+            .not_full = sync.Semaphore.init(PIPE_BUFFER_SIZE),
         };
     }
 

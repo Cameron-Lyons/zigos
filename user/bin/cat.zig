@@ -1,4 +1,5 @@
 const cstr = @import("cstr");
+const cli = @import("cli");
 const runtime = @import("runtime");
 const stdio = @import("stdio");
 const syscall = @import("syscall");
@@ -14,16 +15,7 @@ pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[
         return if (catStdin()) 0 else 1;
     }
 
-    var exit_code: i32 = 0;
-    var i: usize = 1;
-    while (i < argc) : (i += 1) {
-        const path = argv[i] orelse continue;
-        if (!catFile(path)) {
-            exit_code = 1;
-        }
-    }
-
-    return exit_code;
+    return cli.forEachOperand(argc, argv, catFile);
 }
 
 fn copyFdToStdout(fd: i32) CatError!void {

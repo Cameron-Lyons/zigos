@@ -16,6 +16,7 @@ const signal = @import("signal.zig");
 const socket = @import("../net/socket.zig");
 const ipc = @import("ipc.zig");
 const abi = @import("syscall/abi.zig");
+const syscall_common = @import("syscall/common.zig");
 const syscall_at = @import("syscall/at.zig");
 const syscall_cwd = @import("syscall/cwd.zig");
 const errno = @import("syscall/errno.zig");
@@ -226,8 +227,61 @@ fn resolveIoFd(fd: i32) i32 {
     };
 }
 
-fn resolveUserPath(path: []const u8, buffer: *[512]u8) ?[]const u8 {
+const ResolvedUserPathError = error{ InvalidUserPointer, NameTooLong };
+const TERMINAL_IO_BUFFER_SIZE: usize = 256;
+const FILE_IO_BUFFER_SIZE: usize = 512;
+const RANDOM_FILL_BUFFER_SIZE: usize = 256;
+const PROCESS_SLOT_COUNT: usize = process.process_table.len;
+const PRCTL_NAME_SIZE: usize = 16;
+const MAX_SIGNAL_NUMBER: usize = 64;
+const SYNTHETIC_STATFS_MAGIC: u32 = 0x8584_58F6;
+const SYNTHETIC_STATFS_BLOCK_SIZE: u32 = 4096;
+const SYNTHETIC_STATFS_TOTAL_BLOCKS: u64 = 1_024 * 1_024;
+const SYNTHETIC_STATFS_FREE_BLOCKS: u64 = 512 * 1_024;
+const SYNTHETIC_STATFS_TOTAL_FILES: u64 = 65_536;
+const SYNTHETIC_STATFS_FREE_FILES: u64 = 32_768;
+const SYNTHETIC_STATFS_NAME_LENGTH: u32 = 255;
+const SYNTHETIC_SYSINFO_TOTAL_RAM: u32 = 16 * 1024 * 1024;
+const SYNTHETIC_SYSINFO_FREE_RAM: u32 = SYNTHETIC_SYSINFO_TOTAL_RAM / 2;
+
+fn resolveUserPath(path: []const u8, buffer: *[syscall_common.RESOLVED_PATH_BUFFER_SIZE]u8) ?[]const u8 {
     return syscall_cwd.resolvePath(path, buffer);
+}
+
+fn processMetadataSlot(pid: u32) usize {
+    return @intCast(pid % @as(u32, @intCast(PROCESS_SLOT_COUNT)));
+}
+
+fn processSlotFromPid(pid: usize) ?usize {
+    if (pid >= PROCESS_SLOT_COUNT) return null;
+    return pid;
+}
+
+fn copyUserPathFromAddress(path_addr: usize, kernel_buffer: *[syscall_common.USER_PATH_BUFFER_SIZE]u8) error{InvalidUserPointer}![]const u8 {
+    if (!protection.verifyUserPointer(path_addr, syscall_common.USER_PATH_BUFFER_SIZE)) {
+        return error.InvalidUserPointer;
+    }
+
+    return protection.copyStringFromUser(kernel_buffer, path_addr) catch error.InvalidUserPointer;
+}
+
+fn copyUserPathFromPointer(pathname: [*]const u8, kernel_buffer: *[syscall_common.USER_PATH_BUFFER_SIZE]u8) error{InvalidUserPointer}![]const u8 {
+    return copyUserPathFromAddress(@intFromPtr(pathname), kernel_buffer);
+}
+
+fn resolveUserPathFromPointer(pathname: [*]const u8, kernel_buffer: *[syscall_common.USER_PATH_BUFFER_SIZE]u8, resolved_buf: *[syscall_common.RESOLVED_PATH_BUFFER_SIZE]u8) ResolvedUserPathError![]const u8 {
+    const path_slice = copyUserPathFromPointer(pathname, kernel_buffer) catch {
+        return error.InvalidUserPointer;
+    };
+
+    return resolveUserPath(path_slice, resolved_buf) orelse error.NameTooLong;
+}
+
+fn errnoFromResolvedUserPathError(err: ResolvedUserPathError, invalid_errno: i32) i32 {
+    return switch (err) {
+        error.InvalidUserPointer => invalid_errno,
+        error.NameTooLong => ENAMETOOLONG,
+    };
 }
 
 pub const EPERM = abi.EPERM;
@@ -724,8 +778,7 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
     const effective_fd = resolveIoFd(fd);
 
     if (effective_fd == STDOUT or effective_fd == STDERR) {
-        // SAFETY: filled by the subsequent copyFromUser call
-        var kernel_buffer: [256]u8 = undefined;
+        var kernel_buffer: [TERMINAL_IO_BUFFER_SIZE]u8 = undefined;
         var written: usize = 0;
 
         while (written < count) {
@@ -743,8 +796,7 @@ fn sys_write(fd: i32, buf: [*]const u8, count: usize) i32 {
 
     if (count == 0) return 0;
 
-    // SAFETY: filled by the subsequent copyFromUser call
-    var kernel_buffer: [512]u8 = undefined;
+    var kernel_buffer: [FILE_IO_BUFFER_SIZE]u8 = undefined;
     var written: usize = 0;
 
     while (written < count) {
@@ -781,7 +833,7 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
     const effective_fd = resolveIoFd(fd);
 
     if (effective_fd == STDIN) {
-        var kernel_buffer: [256]u8 = undefined;
+        var kernel_buffer: [TERMINAL_IO_BUFFER_SIZE]u8 = undefined;
         const read_size = tty.read(kernel_buffer[0..@min(count, kernel_buffer.len)]);
 
         protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..read_size]) catch {
@@ -793,8 +845,7 @@ fn sys_read(fd: i32, buf: [*]u8, count: usize) i32 {
 
     if (count == 0) return 0;
 
-    // SAFETY: filled by the subsequent special-fd or vfs read call
-    var kernel_buffer: [512]u8 = undefined;
+    var kernel_buffer: [FILE_IO_BUFFER_SIZE]u8 = undefined;
     var total_read: usize = 0;
 
     while (total_read < count) {
@@ -868,18 +919,15 @@ fn sys_lseek(fd: i32, offset: i64, whence: u32) i32 {
 }
 
 fn sys_stat(pathname: [*]const u8, stat_buf_addr: usize) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
-        return EINVAL;
-    }
     if (!protection.verifyUserPointer(stat_buf_addr, @sizeOf(vfs.FileStat))) {
         return EINVAL;
     }
 
-    // SAFETY: filled by the subsequent copyStringFromUser call
-    var kernel_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
-    var resolved_buf: [512]u8 = undefined;
-    const resolved = resolveUserPath(path_slice, &resolved_buf) orelse return ENAMETOOLONG;
+    var kernel_buffer: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var resolved_buf: [syscall_common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
+    const resolved = resolveUserPathFromPointer(pathname, &kernel_buffer, &resolved_buf) catch |err| {
+        return errnoFromResolvedUserPathError(err, EINVAL);
+    };
 
     // SAFETY: filled by the subsequent vfs.stat call
     var stat_buf: vfs.FileStat = undefined;
@@ -1015,12 +1063,12 @@ fn sys_setgid(gid: u16) i32 {
 }
 
 fn sys_chown(pathname: [*]const u8, uid: u16, gid: u16) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) {
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), syscall_common.USER_PATH_BUFFER_SIZE)) {
         return EINVAL;
     }
 
     // SAFETY: filled by the subsequent copyStringFromUser call
-    var kernel_buffer: [256]u8 = undefined;
+    var kernel_buffer: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
 
     if (process.current_process) |proc| {
@@ -1034,22 +1082,15 @@ fn sys_chown(pathname: [*]const u8, uid: u16, gid: u16) i32 {
     return 0;
 }
 
-const AF_UNIX = syscall_net.AF_UNIX;
-const AF_INET = syscall_net.AF_INET;
-const AF_INET6 = syscall_net.AF_INET6;
 const SOCK_STREAM = syscall_net.SOCK_STREAM;
 const SOCK_DGRAM = syscall_net.SOCK_DGRAM;
-
-const SockAddrIn = syscall_net.SockAddrIn;
-const SockAddrIn6 = syscall_net.SockAddrIn6;
-const SockAddrUn = syscall_net.SockAddrUn;
 const UnixSocket = syscall_net.UnixSocket;
 
 var unix_sockets: [64]UnixSocket = [_]UnixSocket{.{
     .path = [_]u8{0} ** 108,
     .path_len = 0,
     .peer = null,
-    .recv_buffer = [_]u8{0} ** 4096,
+    .recv_buffer = [_]u8{0} ** syscall_net.UNIX_SOCKET_BUFFER_SIZE,
     .recv_head = 0,
     .recv_tail = 0,
     .recv_count = 0,
@@ -1217,7 +1258,10 @@ fn sys_mmap(addr: usize, length: usize, prot: i32, flags: i32, fd: i32, offset: 
 
 fn sys_msgget(max_messages: u32) i32 {
     const pid = if (process.current_process) |proc| proc.pid else return ENOSYS;
-    const clamped = if (max_messages == 0) @as(u32, 16) else @min(max_messages, 256);
+    const clamped = if (max_messages == 0)
+        ipc.DEFAULT_MESSAGE_QUEUE_CAPACITY
+    else
+        @min(max_messages, ipc.MAX_MESSAGE_QUEUE_CAPACITY);
 
     if (ipc.getMessageQueue(pid) != null) return 0;
 
@@ -1229,9 +1273,8 @@ fn sys_msgsnd(receiver_pid: u32, buf: [*]const u8, len: usize) i32 {
     if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
     const sender_pid = if (process.current_process) |proc| proc.pid else return ENOSYS;
 
-    const msg_len = @min(len, 256);
-    // SAFETY: filled by the subsequent copyFromUser call
-    var kernel_buffer: [256]u8 = undefined;
+    const msg_len = @min(len, ipc.MESSAGE_DATA_SIZE);
+    var kernel_buffer: [ipc.MESSAGE_DATA_SIZE]u8 = undefined;
     protection.copyFromUser(kernel_buffer[0..msg_len], @intFromPtr(buf)) catch return EINVAL;
 
     ipc.sendMessage(sender_pid, receiver_pid, .Data, kernel_buffer[0..msg_len]) catch |err| {
@@ -1346,13 +1389,11 @@ fn sys_clock_gettime(clock_id: i32, tp_addr: usize) i32 {
 }
 
 fn sys_access(pathname: [*]const u8, mode: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
-
-    // SAFETY: filled by the subsequent copyStringFromUser call
-    var kernel_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
-    var resolved_buf: [512]u8 = undefined;
-    const resolved = resolveUserPath(path_slice, &resolved_buf) orelse return ENAMETOOLONG;
+    var kernel_buffer: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var resolved_buf: [syscall_common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
+    const resolved = resolveUserPathFromPointer(pathname, &kernel_buffer, &resolved_buf) catch |err| {
+        return errnoFromResolvedUserPathError(err, EINVAL);
+    };
 
     const vnode = vfs.lookupPath(resolved) catch return ENOENT;
 
@@ -1372,27 +1413,13 @@ fn sys_access(pathname: [*]const u8, mode: u32) i32 {
 }
 
 fn sys_chmod_syscall(pathname: [*]const u8, mode: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
-
-    // SAFETY: filled by the subsequent copyStringFromUser call
-    var kernel_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
-    var resolved_buf: [512]u8 = undefined;
-    const resolved = resolveUserPath(path_slice, &resolved_buf) orelse return ENAMETOOLONG;
-
-    const mode_struct = vfs.FileMode{
-        .owner_read = (mode & 0o400) != 0,
-        .owner_write = (mode & 0o200) != 0,
-        .owner_exec = (mode & 0o100) != 0,
-        .group_read = (mode & 0o040) != 0,
-        .group_write = (mode & 0o020) != 0,
-        .group_exec = (mode & 0o010) != 0,
-        .other_read = (mode & 0o004) != 0,
-        .other_write = (mode & 0o002) != 0,
-        .other_exec = (mode & 0o001) != 0,
+    var kernel_buffer: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var resolved_buf: [syscall_common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
+    const resolved = resolveUserPathFromPointer(pathname, &kernel_buffer, &resolved_buf) catch |err| {
+        return errnoFromResolvedUserPathError(err, EINVAL);
     };
 
-    vfs.chmod(resolved, mode_struct) catch |err| return vfsErrno(err);
+    vfs.chmod(resolved, syscall_common.fileModeFromBits(mode)) catch |err| return vfsErrno(err);
     syscall_event.notifyInotifyPathEvent(resolved, abi.IN_ATTRIB, 0);
     return 0;
 }
@@ -1401,19 +1428,7 @@ fn sys_fchmod(fd: i32, mode: u32) i32 {
     if (fd < FD_OFFSET) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
-    const mode_struct = vfs.FileMode{
-        .owner_read = (mode & 0o400) != 0,
-        .owner_write = (mode & 0o200) != 0,
-        .owner_exec = (mode & 0o100) != 0,
-        .group_read = (mode & 0o040) != 0,
-        .group_write = (mode & 0o020) != 0,
-        .group_exec = (mode & 0o010) != 0,
-        .other_read = (mode & 0o004) != 0,
-        .other_write = (mode & 0o002) != 0,
-        .other_exec = (mode & 0o001) != 0,
-    };
-
-    vfs.fchmod(vfs_fd, mode_struct) catch |err| return vfsErrno(err);
+    vfs.fchmod(vfs_fd, syscall_common.fileModeFromBits(mode)) catch |err| return vfsErrno(err);
     return 0;
 }
 
@@ -1467,15 +1482,11 @@ fn sys_getdents(fd: i32, buf_addr: usize, buf_size: usize) i32 {
 }
 
 fn sys_symlink(target: [*]const u8, linkpath: [*]const u8) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(target), 256)) return EINVAL;
-    if (!protection.verifyUserPointer(@intFromPtr(linkpath), 256)) return EINVAL;
+    var target_buf: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var link_buf: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
 
-    // SAFETY: filled by the subsequent copyStringFromUser calls
-    var target_buf: [256]u8 = undefined;
-    var link_buf: [256]u8 = undefined;
-
-    const target_slice = protection.copyStringFromUser(&target_buf, @intFromPtr(target)) catch return EINVAL;
-    const link_slice = protection.copyStringFromUser(&link_buf, @intFromPtr(linkpath)) catch return EINVAL;
+    const target_slice = copyUserPathFromPointer(target, &target_buf) catch return EINVAL;
+    const link_slice = copyUserPathFromPointer(linkpath, &link_buf) catch return EINVAL;
 
     vfs.symlink(target_slice, link_slice) catch |err| return vfsErrno(err);
     syscall_event.notifyInotifyPathEvent(link_slice, abi.IN_CREATE, abi.IN_CREATE);
@@ -1483,15 +1494,11 @@ fn sys_symlink(target: [*]const u8, linkpath: [*]const u8) i32 {
 }
 
 fn sys_link(oldpath: [*]const u8, newpath: [*]const u8) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(oldpath), 256)) return EINVAL;
-    if (!protection.verifyUserPointer(@intFromPtr(newpath), 256)) return EINVAL;
+    var old_buf: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var new_buf: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
 
-    // SAFETY: filled by the subsequent copyStringFromUser calls
-    var old_buf: [256]u8 = undefined;
-    var new_buf: [256]u8 = undefined;
-
-    const old_slice = protection.copyStringFromUser(&old_buf, @intFromPtr(oldpath)) catch return EINVAL;
-    const new_slice = protection.copyStringFromUser(&new_buf, @intFromPtr(newpath)) catch return EINVAL;
+    const old_slice = copyUserPathFromPointer(oldpath, &old_buf) catch return EINVAL;
+    const new_slice = copyUserPathFromPointer(newpath, &new_buf) catch return EINVAL;
 
     vfs.link(old_slice, new_slice) catch |err| return vfsErrno(err);
     syscall_event.notifyInotifyPathEvent(new_slice, abi.IN_CREATE, abi.IN_CREATE);
@@ -1499,17 +1506,15 @@ fn sys_link(oldpath: [*]const u8, newpath: [*]const u8) i32 {
 }
 
 fn sys_readlink(pathname: [*]const u8, buf: [*]u8, buf_size: usize) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
     if (!protection.verifyUserPointer(@intFromPtr(buf), buf_size)) return EINVAL;
 
-    // SAFETY: filled by the subsequent copyStringFromUser call
-    var path_buf: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buf, @intFromPtr(pathname)) catch return EINVAL;
-    var resolved_buf: [512]u8 = undefined;
-    const resolved = resolveUserPath(path_slice, &resolved_buf) orelse return ENAMETOOLONG;
+    var path_buf: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var resolved_buf: [syscall_common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
+    const resolved = resolveUserPathFromPointer(pathname, &path_buf, &resolved_buf) catch |err| {
+        return errnoFromResolvedUserPathError(err, EINVAL);
+    };
 
-    // SAFETY: filled by the subsequent vfs.readlink call
-    var kernel_buf: [256]u8 = undefined;
+    var kernel_buf: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const read_size = @min(buf_size, kernel_buf.len);
     const link_len = vfs.readlink(resolved, kernel_buf[0..read_size]) catch |err| return vfsErrno(err);
 
@@ -1569,10 +1574,8 @@ fn sys_uname(buf_addr: usize) i32 {
 }
 
 fn sys_truncate(pathname: [*]const u8, length: usize) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
-
-    var kernel_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
+    var kernel_buffer: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    const path_slice = copyUserPathFromPointer(pathname, &kernel_buffer) catch return EINVAL;
 
     vfs.truncate(path_slice, length) catch |err| return vfsErrno(err);
     syscall_event.notifyInotifyPathEvent(path_slice, abi.IN_MODIFY, 0);
@@ -1585,7 +1588,7 @@ fn sys_pread(fd: i32, buf: [*]u8, count: usize, offset: u64) i32 {
     if (syscall_fd.isSpecialFd(fd)) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
-    var kernel_buffer: [512]u8 = undefined;
+    var kernel_buffer: [FILE_IO_BUFFER_SIZE]u8 = undefined;
     var total_read: usize = 0;
 
     while (total_read < count) {
@@ -1607,7 +1610,7 @@ fn sys_pwrite(fd: i32, buf: [*]const u8, count: usize, offset: u64) i32 {
     if (syscall_fd.isSpecialFd(fd)) return EBADF;
     const vfs_fd: u32 = @intCast(fd - FD_OFFSET);
 
-    var kernel_buffer: [512]u8 = undefined;
+    var kernel_buffer: [FILE_IO_BUFFER_SIZE]u8 = undefined;
     var written: usize = 0;
 
     while (written < count) {
@@ -1621,73 +1624,12 @@ fn sys_pwrite(fd: i32, buf: [*]const u8, count: usize, offset: u64) i32 {
     return @intCast(written);
 }
 
-fn parseSockAddr(addr_ptr: usize, addr_len: u32) ?struct { addr: @import("../net/ipv4.zig").IPv4Address, port: u16 } {
-    if (addr_len < @sizeOf(SockAddrIn)) return null;
-    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn))) return null;
-
-    var addr_buf: [@sizeOf(SockAddrIn)]u8 = undefined;
-    protection.copyFromUser(&addr_buf, addr_ptr) catch return null;
-    const addr: *const SockAddrIn = @ptrCast(@alignCast(&addr_buf));
-
-    return .{
-        .addr = @import("../net/ipv4.zig").IPv4Address{
-            .octets = .{
-                @intCast((addr.addr >> 0) & 0xFF),
-                @intCast((addr.addr >> 8) & 0xFF),
-                @intCast((addr.addr >> 16) & 0xFF),
-                @intCast((addr.addr >> 24) & 0xFF),
-            },
-        },
-        .port = @byteSwap(addr.port),
-    };
-}
-
-fn writeSockAddr(addr_ptr: usize, len_ptr: usize, ipv4_addr: @import("../net/ipv4.zig").IPv4Address, port: u16) i32 {
-    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn))) return EINVAL;
-
-    const addr = SockAddrIn{
-        .family = @intCast(AF_INET),
-        .port = @byteSwap(port),
-        .addr = @as(u32, ipv4_addr.octets[0]) |
-            (@as(u32, ipv4_addr.octets[1]) << 8) |
-            (@as(u32, ipv4_addr.octets[2]) << 16) |
-            (@as(u32, ipv4_addr.octets[3]) << 24),
-        .zero = [_]u8{0} ** 8,
-    };
-
-    protection.copyToUser(addr_ptr, std.mem.asBytes(&addr)) catch return EINVAL;
-    if (len_ptr != 0 and protection.verifyUserPointer(len_ptr, @sizeOf(u32))) {
-        var len: u32 = @sizeOf(SockAddrIn);
-        protection.copyToUser(len_ptr, std.mem.asBytes(&len)) catch {};
-    }
-    return 0;
-}
-
-fn writeSockAddr6(addr_ptr: usize, len_ptr: usize, ipv6_addr: @import("../net/ipv6.zig").IPv6Address, port: u16) i32 {
-    if (!protection.verifyUserPointer(addr_ptr, @sizeOf(SockAddrIn6))) return EINVAL;
-
-    const addr = SockAddrIn6{
-        .family = @intCast(AF_INET6),
-        .port = @byteSwap(port),
-        .flowinfo = 0,
-        .addr = ipv6_addr.octets,
-        .scope_id = 0,
-    };
-
-    protection.copyToUser(addr_ptr, std.mem.asBytes(&addr)) catch return EINVAL;
-    if (len_ptr != 0 and protection.verifyUserPointer(len_ptr, @sizeOf(u32))) {
-        var len: u32 = @sizeOf(SockAddrIn6);
-        protection.copyToUser(len_ptr, std.mem.asBytes(&len)) catch {};
-    }
-    return 0;
-}
-
 fn sys_sendto(sockfd: i32, buf: [*]const u8, len: usize, dest_addr: usize, addr_len: u32) i32 {
     const sock = syscall_net.getInetSocket(sockfd) orelse return EBADF;
 
     if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
 
-    var kernel_buffer: [4096]u8 = undefined;
+    var kernel_buffer: [syscall_net.SOCKET_TRANSFER_BUFFER_SIZE]u8 = undefined;
     const to_send = @min(len, kernel_buffer.len);
     protection.copyFromUser(kernel_buffer[0..to_send], @intFromPtr(buf)) catch return EINVAL;
 
@@ -1704,20 +1646,13 @@ fn sys_sendto(sockfd: i32, buf: [*]const u8, len: usize, dest_addr: usize, addr_
     }
 
     if (sock.address_family == .AF_INET6) {
-        if (addr_len < @sizeOf(SockAddrIn6)) return EINVAL;
-        if (!protection.verifyUserPointer(dest_addr, @sizeOf(SockAddrIn6))) return EINVAL;
-
-        var addr_buf: [@sizeOf(SockAddrIn6)]u8 = undefined;
-        protection.copyFromUser(&addr_buf, dest_addr) catch return EINVAL;
-        const addr: *const SockAddrIn6 = @ptrCast(@alignCast(&addr_buf));
-
-        const dst = @import("../net/ipv6.zig").IPv6Address{ .octets = addr.addr };
-        @import("../net/ipv6.zig").sendPacket(dst, @import("../net/ipv6.zig").NEXT_HEADER_UDP, kernel_buffer[0..to_send]);
+        const endpoint = syscall_net.parseSockAddrIn6(dest_addr, addr_len) orelse return EINVAL;
+        @import("../net/ipv6.zig").sendPacket(endpoint.addr, @import("../net/ipv6.zig").NEXT_HEADER_UDP, kernel_buffer[0..to_send]);
         return @intCast(to_send);
     }
 
-    const parsed = parseSockAddr(dest_addr, addr_len) orelse return EINVAL;
-    sock.sendTo(kernel_buffer[0..to_send], parsed.addr, parsed.port) catch |err| return socketErrno(err);
+    const endpoint = syscall_net.parseSockAddrIn(dest_addr, addr_len) orelse return EINVAL;
+    sock.sendTo(kernel_buffer[0..to_send], endpoint.addr, endpoint.port) catch |err| return socketErrno(err);
     return @intCast(to_send);
 }
 
@@ -1726,7 +1661,7 @@ fn sys_recvfrom(sockfd: i32, buf: [*]u8, len: usize, src_addr: usize, addr_len_p
 
     if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return EINVAL;
 
-    var kernel_buffer: [4096]u8 = undefined;
+    var kernel_buffer: [syscall_net.SOCKET_TRANSFER_BUFFER_SIZE]u8 = undefined;
     const to_recv = @min(len, kernel_buffer.len);
 
     if (src_addr == 0) {
@@ -1741,7 +1676,7 @@ fn sys_recvfrom(sockfd: i32, buf: [*]u8, len: usize, src_addr: usize, addr_len_p
         if (received == 0) return 0;
         protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..received]) catch return EINVAL;
         if (sock.remote_ipv6) |from_ipv6| {
-            _ = writeSockAddr6(src_addr, addr_len_ptr, from_ipv6, sock.remote_port);
+            _ = syscall_net.writeSockAddrIn6(src_addr, addr_len_ptr, .{ .addr = from_ipv6, .port = sock.remote_port });
         }
         return @intCast(received);
     }
@@ -1752,7 +1687,7 @@ fn sys_recvfrom(sockfd: i32, buf: [*]u8, len: usize, src_addr: usize, addr_len_p
     if (received == 0) return 0;
 
     protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..received]) catch return EINVAL;
-    _ = writeSockAddr(src_addr, addr_len_ptr, from_addr, from_port);
+    _ = syscall_net.writeSockAddrIn(src_addr, addr_len_ptr, .{ .addr = from_addr, .port = from_port });
     return @intCast(received);
 }
 
@@ -1760,9 +1695,9 @@ fn sys_getsockname(sockfd: i32, addr_ptr: usize, addr_len_ptr: usize) i32 {
     const sock = syscall_net.getInetSocket(sockfd) orelse return EBADF;
     if (sock.address_family == .AF_INET6) {
         const local = sock.local_ipv6 orelse @import("../net/ipv6.zig").UNSPECIFIED;
-        return writeSockAddr6(addr_ptr, addr_len_ptr, local, sock.local_port);
+        return syscall_net.writeSockAddrIn6(addr_ptr, addr_len_ptr, .{ .addr = local, .port = sock.local_port });
     }
-    return writeSockAddr(addr_ptr, addr_len_ptr, sock.local_addr, sock.local_port);
+    return syscall_net.writeSockAddrIn(addr_ptr, addr_len_ptr, .{ .addr = sock.local_addr, .port = sock.local_port });
 }
 
 fn sys_getpeername(sockfd: i32, addr_ptr: usize, addr_len_ptr: usize) i32 {
@@ -1770,9 +1705,9 @@ fn sys_getpeername(sockfd: i32, addr_ptr: usize, addr_len_ptr: usize) i32 {
     if (sock.state != .CONNECTED) return ENOTCONN;
     if (sock.address_family == .AF_INET6) {
         const remote = sock.remote_ipv6 orelse @import("../net/ipv6.zig").UNSPECIFIED;
-        return writeSockAddr6(addr_ptr, addr_len_ptr, remote, sock.remote_port);
+        return syscall_net.writeSockAddrIn6(addr_ptr, addr_len_ptr, .{ .addr = remote, .port = sock.remote_port });
     }
-    return writeSockAddr(addr_ptr, addr_len_ptr, sock.remote_addr, sock.remote_port);
+    return syscall_net.writeSockAddrIn(addr_ptr, addr_len_ptr, .{ .addr = sock.remote_addr, .port = sock.remote_port });
 }
 
 fn sys_fchown(fd: i32, uid: u16, gid: u16) i32 {
@@ -1798,13 +1733,13 @@ fn sys_poll(fds_addr: usize, nfds: u32, timeout: i32) i32 {
 }
 
 fn sys_lstat(pathname: [*]const u8, stat_buf_addr: usize) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
     if (!protection.verifyUserPointer(stat_buf_addr, @sizeOf(vfs.FileStat))) return EINVAL;
 
-    var kernel_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
-    var resolved_buf: [512]u8 = undefined;
-    const resolved = resolveUserPath(path_slice, &resolved_buf) orelse return ENAMETOOLONG;
+    var kernel_buffer: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var resolved_buf: [syscall_common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
+    const resolved = resolveUserPathFromPointer(pathname, &kernel_buffer, &resolved_buf) catch |err| {
+        return errnoFromResolvedUserPathError(err, EINVAL);
+    };
 
     var stat_buf: vfs.FileStat = undefined;
     vfs.stat(resolved, &stat_buf) catch |err| return vfsErrno(err);
@@ -1843,8 +1778,8 @@ fn sys_getsockopt(sockfd: i32, level: i32, optname: i32, optval_addr: usize, opt
             },
             SO_ERROR => val = 0,
             SO_REUSEADDR, SO_KEEPALIVE, SO_BROADCAST => val = 0,
-            SO_SNDBUF => val = 4096,
-            SO_RCVBUF => val = 4096,
+            SO_SNDBUF => val = @intCast(syscall_net.SOCKET_TRANSFER_BUFFER_SIZE),
+            SO_RCVBUF => val = @intCast(syscall_net.SOCKET_TRANSFER_BUFFER_SIZE),
             SO_LINGER => val = 0,
             SO_RCVTIMEO, SO_SNDTIMEO => val = 0,
             else => return ENOPROTOOPT,
@@ -1895,13 +1830,15 @@ const IoVec = extern struct {
     iov_len: usize,
 };
 
+const MAX_IOV_COUNT: usize = 16;
+
 fn sys_readv(fd: i32, iov_addr: usize, iovcnt: i32) i32 {
-    if (iovcnt <= 0 or iovcnt > 16) return EINVAL;
+    if (iovcnt <= 0 or iovcnt > @as(i32, @intCast(MAX_IOV_COUNT))) return EINVAL;
     const cnt: u32 = @intCast(iovcnt);
     const iov_size = cnt * @sizeOf(IoVec);
     if (!protection.verifyUserPointer(iov_addr, iov_size)) return EINVAL;
 
-    var iov: [16]IoVec = undefined;
+    var iov: [MAX_IOV_COUNT]IoVec = undefined;
     protection.copyFromUser(std.mem.asBytes(&iov)[0..iov_size], iov_addr) catch return EINVAL;
 
     var total: usize = 0;
@@ -1923,12 +1860,12 @@ fn sys_readv(fd: i32, iov_addr: usize, iovcnt: i32) i32 {
 }
 
 fn sys_writev(fd: i32, iov_addr: usize, iovcnt: i32) i32 {
-    if (iovcnt <= 0 or iovcnt > 16) return EINVAL;
+    if (iovcnt <= 0 or iovcnt > @as(i32, @intCast(MAX_IOV_COUNT))) return EINVAL;
     const cnt: u32 = @intCast(iovcnt);
     const iov_size = cnt * @sizeOf(IoVec);
     if (!protection.verifyUserPointer(iov_addr, iov_size)) return EINVAL;
 
-    var iov: [16]IoVec = undefined;
+    var iov: [MAX_IOV_COUNT]IoVec = undefined;
     protection.copyFromUser(std.mem.asBytes(&iov)[0..iov_size], iov_addr) catch return EINVAL;
 
     var total: usize = 0;
@@ -1990,29 +1927,32 @@ const StatFs = extern struct {
     f_spare: [4]u32,
 };
 
-fn sys_statfs(pathname: [*]const u8, buf_addr: usize) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
-    if (!protection.verifyUserPointer(buf_addr, @sizeOf(StatFs))) return EINVAL;
-
-    var kernel_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&kernel_buffer, @intFromPtr(pathname)) catch return EINVAL;
-
-    _ = vfs.lookupPath(path_slice) catch |err| return vfsErrno(err);
-
-    const buf = StatFs{
-        .f_type = 0x858458f6,
-        .f_bsize = 4096,
-        .f_blocks = 1024 * 1024,
-        .f_bfree = 512 * 1024,
-        .f_bavail = 512 * 1024,
-        .f_files = 65536,
-        .f_ffree = 32768,
+fn syntheticStatFs() StatFs {
+    return .{
+        .f_type = SYNTHETIC_STATFS_MAGIC,
+        .f_bsize = SYNTHETIC_STATFS_BLOCK_SIZE,
+        .f_blocks = SYNTHETIC_STATFS_TOTAL_BLOCKS,
+        .f_bfree = SYNTHETIC_STATFS_FREE_BLOCKS,
+        .f_bavail = SYNTHETIC_STATFS_FREE_BLOCKS,
+        .f_files = SYNTHETIC_STATFS_TOTAL_FILES,
+        .f_ffree = SYNTHETIC_STATFS_FREE_FILES,
         .f_fsid = .{ 0, 0 },
-        .f_namelen = 255,
-        .f_frsize = 4096,
+        .f_namelen = SYNTHETIC_STATFS_NAME_LENGTH,
+        .f_frsize = SYNTHETIC_STATFS_BLOCK_SIZE,
         .f_flags = 0,
         .f_spare = .{ 0, 0, 0, 0 },
     };
+}
+
+fn sys_statfs(pathname: [*]const u8, buf_addr: usize) i32 {
+    if (!protection.verifyUserPointer(buf_addr, @sizeOf(StatFs))) return EINVAL;
+
+    var kernel_buffer: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    const path_slice = copyUserPathFromPointer(pathname, &kernel_buffer) catch return EINVAL;
+
+    _ = vfs.lookupPath(path_slice) catch |err| return vfsErrno(err);
+
+    const buf = syntheticStatFs();
 
     protection.copyToUser(buf_addr, std.mem.asBytes(&buf)) catch return EINVAL;
     return 0;
@@ -2025,20 +1965,7 @@ fn sys_fstatfs(fd: i32, buf_addr: usize) i32 {
 
     _ = vfs.getFileFlags(vfs_fd) catch return EBADF;
 
-    const buf = StatFs{
-        .f_type = 0x858458f6,
-        .f_bsize = 4096,
-        .f_blocks = 1024 * 1024,
-        .f_bfree = 512 * 1024,
-        .f_bavail = 512 * 1024,
-        .f_files = 65536,
-        .f_ffree = 32768,
-        .f_fsid = .{ 0, 0 },
-        .f_namelen = 255,
-        .f_frsize = 4096,
-        .f_flags = 0,
-        .f_spare = .{ 0, 0, 0, 0 },
-    };
+    const buf = syntheticStatFs();
 
     protection.copyToUser(buf_addr, std.mem.asBytes(&buf)) catch return EINVAL;
     return 0;
@@ -2084,7 +2011,7 @@ fn sys_getgroups(size: i32, list_addr: usize) i32 {
     if (!protection.verifyUserPointer(list_addr, usize_size * @sizeOf(u32))) return EINVAL;
 
     const count: usize = @min(usize_size, proc.creds.ngroups);
-    var groups: [16]u32 = undefined;
+    var groups: [credentials.MAX_GROUPS]u32 = undefined;
     for (0..count) |i| {
         groups[i] = proc.creds.groups[i];
     }
@@ -2097,14 +2024,14 @@ fn sys_setgroups(size: i32, list_addr: usize) i32 {
     const proc = process.current_process orelse return ESRCH;
     if (!credentials.isRoot(&proc.creds)) return EPERM;
 
-    if (size < 0 or size > 16) return EINVAL;
+    if (size < 0 or size > @as(i32, @intCast(credentials.MAX_GROUPS))) return EINVAL;
     const usize_size: usize = @intCast(size);
 
     if (usize_size > 0) {
         if (!protection.verifyUserPointer(list_addr, usize_size * @sizeOf(u32))) return EINVAL;
     }
 
-    var groups: [16]u32 = undefined;
+    var groups: [credentials.MAX_GROUPS]u32 = undefined;
     if (usize_size > 0) {
         protection.copyFromUser(std.mem.sliceAsBytes(groups[0..usize_size]), list_addr) catch return EINVAL;
     }
@@ -2126,24 +2053,12 @@ fn sys_setitimer(which: u32, new_value_addr: usize, old_value_addr: usize) i32 {
 }
 
 fn sys_mkfifo(pathname: [*]const u8, mode: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
+    if (!protection.verifyUserPointer(@intFromPtr(pathname), syscall_common.USER_PATH_BUFFER_SIZE)) return EINVAL;
 
-    var path_buffer: [256]u8 = undefined;
+    var path_buffer: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EINVAL;
 
-    const mode_struct = vfs.FileMode{
-        .owner_read = (mode & 0o400) != 0,
-        .owner_write = (mode & 0o200) != 0,
-        .owner_exec = (mode & 0o100) != 0,
-        .group_read = (mode & 0o040) != 0,
-        .group_write = (mode & 0o020) != 0,
-        .group_exec = (mode & 0o010) != 0,
-        .other_read = (mode & 0o004) != 0,
-        .other_write = (mode & 0o002) != 0,
-        .other_exec = (mode & 0o001) != 0,
-    };
-
-    vfs.mkfifo(path_slice, mode_struct) catch |err| return vfsErrno(err);
+    vfs.mkfifo(path_slice, syscall_common.fileModeFromBits(mode)) catch |err| return vfsErrno(err);
     return 0;
 }
 
@@ -2423,25 +2338,12 @@ fn sys_getrusage(who: i32, usage_addr: usize) i32 {
 }
 
 fn sys_mknod(pathname: [*]const u8, mode: u32, dev: u32) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(pathname), 256)) return EINVAL;
-
-    var path_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return EINVAL;
+    var path_buffer: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    const path_slice = copyUserPathFromPointer(pathname, &path_buffer) catch return EINVAL;
 
     const file_type = mode & S_IFMT;
     const perms = mode & 0o777;
-
-    const mode_struct = vfs.FileMode{
-        .owner_read = (perms & 0o400) != 0,
-        .owner_write = (perms & 0o200) != 0,
-        .owner_exec = (perms & 0o100) != 0,
-        .group_read = (perms & 0o040) != 0,
-        .group_write = (perms & 0o020) != 0,
-        .group_exec = (perms & 0o010) != 0,
-        .other_read = (perms & 0o004) != 0,
-        .other_write = (perms & 0o002) != 0,
-        .other_exec = (perms & 0o001) != 0,
-    };
+    const mode_struct = syscall_common.fileModeFromBits(perms);
 
     if (file_type == S_IFIFO) {
         vfs.mkfifo(path_slice, mode_struct) catch |err| return vfsErrno(err);
@@ -2476,7 +2378,7 @@ fn sys_getrandom(buf: [*]u8, buflen: usize, flags: u32) i32 {
     if (!protection.verifyUserPointer(@intFromPtr(buf), buflen)) return EFAULT;
     _ = flags;
 
-    var kernel_buffer: [256]u8 = undefined;
+    var kernel_buffer: [RANDOM_FILL_BUFFER_SIZE]u8 = undefined;
     var written: usize = 0;
 
     while (written < buflen) {
@@ -2559,28 +2461,28 @@ fn sys_eventfd2(initval: u32, flags: u32) i32 {
     return syscall_event.sys_eventfd2(initval, flags);
 }
 
-var process_names: [256][16]u8 = [_][16]u8{[_]u8{0} ** 16} ** 256;
-var process_dumpable: [256]u32 = [_]u32{1} ** 256;
-var process_keepcaps: [256]u32 = [_]u32{0} ** 256;
-var process_pdeathsig: [256]u32 = [_]u32{0} ** 256;
+var process_names: [PROCESS_SLOT_COUNT][PRCTL_NAME_SIZE]u8 = [_][PRCTL_NAME_SIZE]u8{[_]u8{0} ** PRCTL_NAME_SIZE} ** PROCESS_SLOT_COUNT;
+var process_dumpable: [PROCESS_SLOT_COUNT]u32 = [_]u32{1} ** PROCESS_SLOT_COUNT;
+var process_keepcaps: [PROCESS_SLOT_COUNT]u32 = [_]u32{0} ** PROCESS_SLOT_COUNT;
+var process_pdeathsig: [PROCESS_SLOT_COUNT]u32 = [_]u32{0} ** PROCESS_SLOT_COUNT;
 
 fn sys_prctl(option: u32, arg2: usize, arg3: usize, arg4: usize, arg5: usize) i32 {
     _ = arg4;
     _ = arg5;
 
     const proc = process.current_process orelse return ESRCH;
-    const pid_idx: usize = proc.pid % 256;
+    const pid_idx = processMetadataSlot(proc.pid);
 
     switch (option) {
         PR_SET_NAME => {
-            if (!protection.verifyUserPointer(arg2, 16)) return EFAULT;
-            var name_buf: [16]u8 = [_]u8{0} ** 16;
+            if (!protection.verifyUserPointer(arg2, PRCTL_NAME_SIZE)) return EFAULT;
+            var name_buf: [PRCTL_NAME_SIZE]u8 = [_]u8{0} ** PRCTL_NAME_SIZE;
             protection.copyFromUser(&name_buf, arg2) catch return EFAULT;
             process_names[pid_idx] = name_buf;
             return 0;
         },
         PR_GET_NAME => {
-            if (!protection.verifyUserPointer(arg2, 16)) return EFAULT;
+            if (!protection.verifyUserPointer(arg2, PRCTL_NAME_SIZE)) return EFAULT;
             protection.copyToUser(arg2, &process_names[pid_idx]) catch return EFAULT;
             return 0;
         },
@@ -2600,7 +2502,7 @@ fn sys_prctl(option: u32, arg2: usize, arg3: usize, arg4: usize, arg5: usize) i3
             return @intCast(process_keepcaps[pid_idx]);
         },
         PR_SET_PDEATHSIG => {
-            if (arg2 > 64) return EINVAL;
+            if (arg2 > MAX_SIGNAL_NUMBER) return EINVAL;
             process_pdeathsig[pid_idx] = @intCast(arg2);
             return 0;
         },
@@ -2676,7 +2578,7 @@ fn sys_syncfs(fd: i32) i32 {
     return syscall_fd.sys_syncfs(fd);
 }
 
-var process_priorities: [256]i32 = [_]i32{0} ** 256;
+var process_priorities: [PROCESS_SLOT_COUNT]i32 = [_]i32{0} ** PROCESS_SLOT_COUNT;
 
 fn sys_getpriority(which: u32, who: i32) i32 {
     switch (which) {
@@ -2685,8 +2587,8 @@ fn sys_getpriority(which: u32, who: i32) i32 {
                 const proc = process.current_process orelse return ESRCH;
                 break :blk @intCast(proc.pid);
             } else @intCast(who);
-            if (pid >= 256) return ESRCH;
-            return 20 - process_priorities[pid];
+            const pid_idx = processSlotFromPid(pid) orelse return ESRCH;
+            return 20 - process_priorities[pid_idx];
         },
         PRIO_PGRP, PRIO_USER => {
             return 20;
@@ -2704,8 +2606,8 @@ fn sys_setpriority(which: u32, who: i32, prio: i32) i32 {
                 const proc = process.current_process orelse return ESRCH;
                 break :blk @intCast(proc.pid);
             } else @intCast(who);
-            if (pid >= 256) return ESRCH;
-            process_priorities[pid] = nice;
+            const pid_idx = processSlotFromPid(pid) orelse return ESRCH;
+            process_priorities[pid_idx] = nice;
             return 0;
         },
         PRIO_PGRP, PRIO_USER => {
@@ -2818,17 +2720,17 @@ fn sys_waitid(idtype: u32, id: i32, infop: usize, options: u32) i32 {
     }
 }
 
-var tid_addresses: [256]usize = [_]usize{0} ** 256;
+var tid_addresses: [PROCESS_SLOT_COUNT]usize = [_]usize{0} ** PROCESS_SLOT_COUNT;
 
 fn sys_set_tid_address(tidptr: usize) i32 {
     const proc = process.current_process orelse return ESRCH;
-    const pid_idx: usize = proc.pid % 256;
+    const pid_idx = processMetadataSlot(proc.pid);
     tid_addresses[pid_idx] = tidptr;
     return @intCast(proc.pid);
 }
 
-var robust_list_heads: [256]usize = [_]usize{0} ** 256;
-var robust_list_lens: [256]usize = [_]usize{0} ** 256;
+var robust_list_heads: [PROCESS_SLOT_COUNT]usize = [_]usize{0} ** PROCESS_SLOT_COUNT;
+var robust_list_lens: [PROCESS_SLOT_COUNT]usize = [_]usize{0} ** PROCESS_SLOT_COUNT;
 
 fn sys_get_robust_list(pid: i32, head_ptr: usize, len_ptr: usize) i32 {
     if (!protection.verifyUserPointer(head_ptr, @sizeOf(usize))) return EFAULT;
@@ -2839,10 +2741,10 @@ fn sys_get_robust_list(pid: i32, head_ptr: usize, len_ptr: usize) i32 {
         break :blk @intCast(proc.pid);
     } else @intCast(pid);
 
-    if (pid_idx >= 256) return ESRCH;
+    const slot = processSlotFromPid(pid_idx) orelse return ESRCH;
 
-    const head = robust_list_heads[pid_idx];
-    const len = robust_list_lens[pid_idx];
+    const head = robust_list_heads[slot];
+    const len = robust_list_lens[slot];
 
     protection.copyToUser(head_ptr, std.mem.asBytes(&head)) catch return EFAULT;
     protection.copyToUser(len_ptr, std.mem.asBytes(&len)) catch return EFAULT;
@@ -2851,7 +2753,7 @@ fn sys_get_robust_list(pid: i32, head_ptr: usize, len_ptr: usize) i32 {
 
 fn sys_set_robust_list(head: usize, len: usize) i32 {
     const proc = process.current_process orelse return ESRCH;
-    const pid_idx: usize = proc.pid % 256;
+    const pid_idx = processMetadataSlot(proc.pid);
 
     robust_list_heads[pid_idx] = head;
     robust_list_lens[pid_idx] = len;
@@ -2864,7 +2766,7 @@ fn sys_tgkill(tgid: i32, tid: i32, sig: i32) i32 {
 }
 
 fn sys_tkill(tid: i32, sig: i32) i32 {
-    if (sig < 0 or sig > 64) return EINVAL;
+    if (sig < 0 or sig > @as(i32, @intCast(MAX_SIGNAL_NUMBER))) return EINVAL;
     if (tid < 0) return EINVAL;
 
     const proc = process.getProcessByPid(@intCast(tid)) orelse return ESRCH;
@@ -3078,8 +2980,8 @@ fn sys_sysinfo(info_ptr: usize) i32 {
     const info = Sysinfo{
         .uptime = @intCast(ticks / timer.TICKS_PER_SECOND),
         .loads = [3]u32{ 0, 0, 0 },
-        .totalram = 16 * 1024 * 1024,
-        .freeram = 8 * 1024 * 1024,
+        .totalram = SYNTHETIC_SYSINFO_TOTAL_RAM,
+        .freeram = SYNTHETIC_SYSINFO_FREE_RAM,
         .sharedram = 0,
         .bufferram = 0,
         .totalswap = 0,
@@ -3129,16 +3031,14 @@ fn sys_timer_getoverrun(timerid: i32) i32 {
 }
 
 fn sys_chroot(path: [*]const u8) i32 {
-    if (!protection.verifyUserPointer(@intFromPtr(path), 256)) return EFAULT;
-
     const proc = process.getEffectiveCurrent() orelse return ESRCH;
     if (proc.creds.euid != 0) return EPERM;
 
-    var path_buffer: [256]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(path)) catch return EFAULT;
-
-    var resolved_buf: [512]u8 = undefined;
-    const resolved = resolveUserPath(path_slice, &resolved_buf) orelse return ENAMETOOLONG;
+    var path_buffer: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var resolved_buf: [syscall_common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
+    const resolved = resolveUserPathFromPointer(path, &path_buffer, &resolved_buf) catch |err| {
+        return errnoFromResolvedUserPathError(err, EFAULT);
+    };
 
     const vnode = vfs.lookupPath(resolved) catch |err| return vfsErrno(err);
     if (vnode.file_type != .Directory) return ENOTDIR;
@@ -3154,16 +3054,14 @@ fn sys_mount(source: usize, target: usize, fstype: usize, mountflags: usize, dat
     const proc = process.current_process orelse return ESRCH;
     if (proc.creds.euid != 0) return EPERM;
 
-    if (!protection.verifyUserPointer(source, 256)) return EFAULT;
-    if (!protection.verifyUserPointer(target, 256)) return EFAULT;
     if (!protection.verifyUserPointer(fstype, 32)) return EFAULT;
 
-    var source_buf: [256]u8 = undefined;
-    var target_buf: [256]u8 = undefined;
+    var source_buf: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var target_buf: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     var fstype_buf: [32]u8 = undefined;
 
-    const source_path = protection.copyStringFromUser(&source_buf, source) catch return EFAULT;
-    const target_path = protection.copyStringFromUser(&target_buf, target) catch return EFAULT;
+    const source_path = copyUserPathFromAddress(source, &source_buf) catch return EFAULT;
+    const target_path = copyUserPathFromAddress(target, &target_buf) catch return EFAULT;
     const fstype_str = protection.copyStringFromUser(&fstype_buf, fstype) catch return EFAULT;
 
     vfs.mount(source_path, target_path, fstype_str, @truncate(mountflags)) catch |err| return vfsErrno(err);
@@ -3176,10 +3074,8 @@ fn sys_umount2(target: [*]const u8, flags: u32) i32 {
     const proc = process.current_process orelse return ESRCH;
     if (proc.creds.euid != 0) return EPERM;
 
-    if (!protection.verifyUserPointer(@intFromPtr(target), 256)) return EFAULT;
-
-    var target_buf: [256]u8 = undefined;
-    const target_path = protection.copyStringFromUser(&target_buf, @intFromPtr(target)) catch return EFAULT;
+    var target_buf: [syscall_common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    const target_path = copyUserPathFromPointer(target, &target_buf) catch return EFAULT;
 
     vfs.unmount(target_path) catch |err| return vfsErrno(err);
     return 0;

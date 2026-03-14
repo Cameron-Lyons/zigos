@@ -7,6 +7,10 @@ const signal = @import("../signal.zig");
 const protection = @import("../../memory/protection.zig");
 const readiness = @import("readiness.zig");
 
+const MAX_TIMER_FDS: usize = 64;
+const MAX_POSIX_TIMERS: usize = 32;
+const TIMERFD_POLLIN: u16 = 0x001;
+
 pub const TimeSpec = extern struct {
     tv_sec: i32,
     tv_nsec: i32,
@@ -55,7 +59,7 @@ pub const CLOCK_PROCESS_CPUTIME_ID: i32 = 2;
 pub const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
 
 const TIMERFD_BASE: i32 = abi.FD_OFFSET + 300;
-const TIMERFD_LIMIT: i32 = TIMERFD_BASE + 64;
+const TIMERFD_LIMIT: i32 = TIMERFD_BASE + @as(i32, @intCast(MAX_TIMER_FDS));
 
 const TimerFd = struct {
     clockid: u32,
@@ -73,7 +77,7 @@ const PosixTimer = struct {
     in_use: bool,
 };
 
-var timerfd_table: [64]TimerFd = [_]TimerFd{.{
+var timerfd_table: [MAX_TIMER_FDS]TimerFd = [_]TimerFd{.{
     .clockid = 0,
     .flags = 0,
     .spec = .{ .it_interval_sec = 0, .it_interval_nsec = 0, .it_value_sec = 0, .it_value_nsec = 0 },
@@ -81,9 +85,9 @@ var timerfd_table: [64]TimerFd = [_]TimerFd{.{
     .interval_ticks = 0,
     .armed = false,
     .in_use = false,
-}} ** 64;
+}} ** MAX_TIMER_FDS;
 
-var posix_timers: [32]PosixTimer = [_]PosixTimer{.{
+var posix_timers: [MAX_POSIX_TIMERS]PosixTimer = [_]PosixTimer{.{
     .clock_id = 0,
     .interval = .{
         .it_interval_sec = 0,
@@ -92,7 +96,7 @@ var posix_timers: [32]PosixTimer = [_]PosixTimer{.{
         .it_value_nsec = 0,
     },
     .in_use = false,
-}} ** 32;
+}} ** MAX_POSIX_TIMERS;
 
 pub fn sys_nanosleep(req_addr: usize, rem_addr: usize) i32 {
     if (!protection.verifyUserPointer(req_addr, @sizeOf(TimeSpec))) return abi.EINVAL;
@@ -103,7 +107,7 @@ pub fn sys_nanosleep(req_addr: usize, rem_addr: usize) i32 {
     if (req.tv_sec < 0 or req.tv_nsec < 0 or req.tv_nsec >= 1_000_000_000) return abi.EINVAL;
 
     const total_ms: u64 = @as(u64, @intCast(req.tv_sec)) * 1000 + @as(u64, @intCast(req.tv_nsec)) / 1_000_000;
-    const ticks_to_wait = total_ms / 10;
+    const ticks_to_wait = timer.millisecondsToTicksCeil(total_ms);
 
     const start = process_mod.getSystemTime();
     while (process_mod.getSystemTime() - start < ticks_to_wait) {
@@ -128,7 +132,7 @@ pub fn sys_clock_gettime(clock_id: i32, tp_addr: usize) i32 {
     }
 
     const ticks = process_mod.getSystemTime();
-    const total_ms = ticks * 10;
+    const total_ms = timer.ticksToMilliseconds(ticks);
 
     const tp = TimeSpec{
         .tv_sec = @intCast(total_ms / 1000),
@@ -190,8 +194,8 @@ pub fn pollTimerFd(fd: i32, requested_events: u16) ?error{BadFd}!u16 {
     if (!tfd.in_use) return error.BadFd;
 
     var ready: u16 = 0;
-    if ((requested_events & 0x001) != 0 and timerFdExpirations(tfd) != 0) {
-        ready |= 0x001;
+    if ((requested_events & TIMERFD_POLLIN) != 0 and timerFdExpirations(tfd) != 0) {
+        ready |= TIMERFD_POLLIN;
     }
     return ready;
 }
@@ -369,7 +373,7 @@ pub fn sys_timer_create(clock_id: u32, sevp: usize, timerid: usize) i32 {
 }
 
 pub fn sys_timer_delete(timerid: i32) i32 {
-    if (timerid < 0 or timerid >= 32) return abi.EINVAL;
+    if (timerid < 0 or timerid >= @as(i32, @intCast(posix_timers.len))) return abi.EINVAL;
     const idx: usize = @intCast(timerid);
     if (!posix_timers[idx].in_use) return abi.EINVAL;
     posix_timers[idx].in_use = false;
@@ -379,7 +383,7 @@ pub fn sys_timer_delete(timerid: i32) i32 {
 pub fn sys_timer_settime(timerid: i32, flags: u32, new_value: usize, old_value: usize) i32 {
     _ = flags;
 
-    if (timerid < 0 or timerid >= 32) return abi.EINVAL;
+    if (timerid < 0 or timerid >= @as(i32, @intCast(posix_timers.len))) return abi.EINVAL;
     const idx: usize = @intCast(timerid);
     if (!posix_timers[idx].in_use) return abi.EINVAL;
 
@@ -397,7 +401,7 @@ pub fn sys_timer_settime(timerid: i32, flags: u32, new_value: usize, old_value: 
 }
 
 pub fn sys_timer_gettime(timerid: i32, curr_value: usize) i32 {
-    if (timerid < 0 or timerid >= 32) return abi.EINVAL;
+    if (timerid < 0 or timerid >= @as(i32, @intCast(posix_timers.len))) return abi.EINVAL;
     const idx: usize = @intCast(timerid);
     if (!posix_timers[idx].in_use) return abi.EINVAL;
 
@@ -407,7 +411,7 @@ pub fn sys_timer_gettime(timerid: i32, curr_value: usize) i32 {
 }
 
 pub fn sys_timer_getoverrun(timerid: i32) i32 {
-    if (timerid < 0 or timerid >= 32) return abi.EINVAL;
+    if (timerid < 0 or timerid >= @as(i32, @intCast(posix_timers.len))) return abi.EINVAL;
     const idx: usize = @intCast(timerid);
     if (!posix_timers[idx].in_use) return abi.EINVAL;
     return 0;
@@ -477,14 +481,14 @@ fn consumeTimerFdExpirations(tfd: *TimerFd) u64 {
 }
 
 fn durationToTicks(seconds: u32, nanoseconds: u32) u64 {
-    const tick_nsec: u64 = 10_000_000;
+    const tick_nsec = timer.NANOSECONDS_PER_TICK;
     const total_nsec = @as(u64, seconds) * 1_000_000_000 + nanoseconds;
     if (total_nsec == 0) return 0;
     return @max(@as(u64, 1), @divTrunc(total_nsec + tick_nsec - 1, tick_nsec));
 }
 
 fn ticksToSpec(ticks: u64) ItimerSpec {
-    const total_nsec = ticks * 10_000_000;
+    const total_nsec = ticks * timer.NANOSECONDS_PER_TICK;
     return .{
         .it_interval_sec = 0,
         .it_interval_nsec = 0,
