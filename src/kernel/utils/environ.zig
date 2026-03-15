@@ -5,6 +5,9 @@ const MAX_ENV_VARS = 64;
 const MAX_VAR_NAME_LEN = 64;
 const MAX_VAR_VALUE_LEN = 256;
 
+pub const MAX_EXPORT_ENTRIES = MAX_ENV_VARS;
+pub const MAX_EXPORT_ENTRY_LEN = MAX_VAR_NAME_LEN + 1 + MAX_VAR_VALUE_LEN;
+
 pub const EnvVar = struct {
     name: [MAX_VAR_NAME_LEN]u8,
     value: [MAX_VAR_VALUE_LEN]u8,
@@ -148,6 +151,24 @@ pub fn printAll() void {
         }
         vga.put_char('\n');
     }
+}
+
+pub fn exportEntries(storage: *[MAX_EXPORT_ENTRIES][MAX_EXPORT_ENTRY_LEN]u8, lengths: *[MAX_EXPORT_ENTRIES]usize) usize {
+    if (!initialized) init();
+
+    var count: usize = 0;
+    while (count < env_count and count < storage.len) : (count += 1) {
+        @memset(&storage[count], 0);
+        @memcpy(storage[count][0..env_vars[count].name_len], env_vars[count].name[0..env_vars[count].name_len]);
+        storage[count][env_vars[count].name_len] = '=';
+        @memcpy(
+            storage[count][env_vars[count].name_len + 1 .. env_vars[count].name_len + 1 + env_vars[count].value_len],
+            env_vars[count].value[0..env_vars[count].value_len],
+        );
+        lengths[count] = env_vars[count].name_len + 1 + env_vars[count].value_len;
+    }
+
+    return count;
 }
 
 pub fn expandVar(input: []const u8, output: []u8) usize {

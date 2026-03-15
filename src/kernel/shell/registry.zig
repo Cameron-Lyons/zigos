@@ -179,6 +179,32 @@ pub fn lookup(name: []const u8) ?*const Command {
     return null;
 }
 
+pub fn hasExternalProgram(id: CommandId) bool {
+    return switch (id) {
+        .echo,
+        .ps,
+        .ping,
+        .uname,
+        .cat,
+        .env,
+        .head,
+        .wc,
+        .which,
+        .ls,
+        .pwd,
+        .mkdir,
+        .rm,
+        .mv,
+        .cp,
+        .touch,
+        .grep,
+        .sleep,
+        .kill,
+        => true,
+        else => false,
+    };
+}
+
 pub fn complete(prefix: []const u8, matches: [][]const u8) usize {
     var count: usize = 0;
     for (commands) |command| {

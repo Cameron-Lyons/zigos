@@ -10,6 +10,12 @@ pub const O_CREAT = abi.O_CREAT;
 pub const O_TRUNC = abi.O_TRUNC;
 pub const DT_REG = abi.DT_REG;
 pub const DT_DIR = abi.DT_DIR;
+pub const SIGINT = abi.SIGINT;
+pub const SIGKILL = abi.SIGKILL;
+pub const SIGTERM = abi.SIGTERM;
+pub const SIGCONT = abi.SIGCONT;
+pub const SIGSTOP = abi.SIGSTOP;
+pub const SIGTSTP = abi.SIGTSTP;
 pub const PROT_NONE = abi.PROT_NONE;
 pub const PROT_READ = abi.PROT_READ;
 pub const PROT_WRITE = abi.PROT_WRITE;
@@ -38,6 +44,8 @@ pub const TimeSpec = extern struct {
     tv_sec: i32,
     tv_nsec: i32,
 };
+
+pub const ProcInfo = abi.ProcInfo;
 
 pub const Termios = extern struct {
     c_iflag: u32,
@@ -172,6 +180,26 @@ pub fn mkdir(path: [*:0]const u8, mode: u32) i32 {
 
 pub fn unlink(path: [*:0]const u8) i32 {
     return syscall1(abi.SYS_UNLINK, @intFromPtr(path));
+}
+
+pub fn rename(old_path: [*:0]const u8, new_path: [*:0]const u8) i32 {
+    return syscall2(abi.SYS_RENAME, @intFromPtr(old_path), @intFromPtr(new_path));
+}
+
+pub fn kill(pid: i32, signum: i32) i32 {
+    return syscall2(
+        abi.SYS_KILL,
+        @bitCast(@as(u32, @bitCast(pid))),
+        @bitCast(@as(u32, @bitCast(signum))),
+    );
+}
+
+pub fn getprocs(buffer: []ProcInfo) i32 {
+    return syscall2(abi.SYS_GETPROCS, @intFromPtr(buffer.ptr), buffer.len);
+}
+
+pub fn ping(ipv4_addr: u32) i32 {
+    return syscall1(abi.SYS_PING, ipv4_addr);
 }
 
 pub fn getcwd(buffer: []u8) i32 {
