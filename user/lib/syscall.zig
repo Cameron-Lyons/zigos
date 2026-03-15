@@ -16,6 +16,8 @@ pub const SIGTERM = abi.SIGTERM;
 pub const SIGCONT = abi.SIGCONT;
 pub const SIGSTOP = abi.SIGSTOP;
 pub const SIGTSTP = abi.SIGTSTP;
+pub const CLOCK_REALTIME = abi.CLOCK_REALTIME;
+pub const CLOCK_MONOTONIC = abi.CLOCK_MONOTONIC;
 pub const PROT_NONE = abi.PROT_NONE;
 pub const PROT_READ = abi.PROT_READ;
 pub const PROT_WRITE = abi.PROT_WRITE;
@@ -152,6 +154,22 @@ pub fn getpid() i32 {
     return syscall0(abi.SYS_GETPID);
 }
 
+pub fn getuid() i32 {
+    return syscall0(abi.SYS_GETUID);
+}
+
+pub fn getgid() i32 {
+    return syscall0(abi.SYS_GETGID);
+}
+
+pub fn geteuid() i32 {
+    return syscall0(abi.SYS_GETEUID);
+}
+
+pub fn getegid() i32 {
+    return syscall0(abi.SYS_GETEGID);
+}
+
 pub fn fork() i32 {
     return syscall0(abi.SYS_FORK);
 }
@@ -202,6 +220,14 @@ pub fn ping(ipv4_addr: u32) i32 {
     return syscall1(abi.SYS_PING, ipv4_addr);
 }
 
+pub fn gethostname(buffer: []u8) i32 {
+    return syscall2(abi.SYS_GETHOSTNAME, @intFromPtr(buffer.ptr), buffer.len);
+}
+
+pub fn sethostname(name: []const u8) i32 {
+    return syscall2(abi.SYS_SETHOSTNAME, @intFromPtr(name.ptr), name.len);
+}
+
 pub fn getcwd(buffer: []u8) i32 {
     return syscall2(abi.SYS_GETCWD, @intFromPtr(buffer.ptr), buffer.len);
 }
@@ -240,6 +266,10 @@ pub fn mmap(addr: usize, length: usize, prot: u32, flags: u32, fd: i32, offset: 
 
 pub fn nanosleep(req: *const TimeSpec, rem: ?*TimeSpec) i32 {
     return syscall2(abi.SYS_NANOSLEEP, @intFromPtr(req), if (rem) |value| @intFromPtr(value) else 0);
+}
+
+pub fn clock_gettime(clock_id: i32, tp: *TimeSpec) i32 {
+    return syscall2(abi.SYS_CLOCK_GETTIME, @bitCast(@as(u32, @bitCast(clock_id))), @intFromPtr(tp));
 }
 
 pub fn exit(status: i32) noreturn {

@@ -12,14 +12,21 @@ pub const SYS_MMAP = 12;
 pub const SYS_MKDIR = 13;
 pub const SYS_UNLINK = 15;
 pub const SYS_RENAME = 16;
+pub const SYS_GETUID = 20;
+pub const SYS_GETGID = 21;
 pub const SYS_KILL = 35;
 pub const SYS_GETCWD = 37;
 pub const SYS_CHDIR = 38;
 pub const SYS_MUNMAP = 42;
 pub const SYS_IOCTL = 43;
 pub const SYS_NANOSLEEP = 48;
+pub const SYS_CLOCK_GETTIME = 49;
 pub const SYS_GETDENTS = 54;
+pub const SYS_GETEUID = 82;
+pub const SYS_GETEGID = 83;
 pub const SYS_ISATTY = 84;
+pub const SYS_GETHOSTNAME = 87;
+pub const SYS_SETHOSTNAME = 88;
 pub const SYS_MPROTECT = 165;
 pub const SYS_GETPROCS = 182;
 pub const SYS_PING = 183;
@@ -62,6 +69,9 @@ pub const SIGTERM = 15;
 pub const SIGCONT = 18;
 pub const SIGSTOP = 19;
 pub const SIGTSTP = 20;
+
+pub const CLOCK_REALTIME = 0;
+pub const CLOCK_MONOTONIC = 1;
 
 pub const ProcInfo = extern struct {
     pid: u32,
