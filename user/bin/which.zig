@@ -1,12 +1,18 @@
 const cstr = @import("cstr");
 const envutil = @import("envutil");
 const runtime = @import("runtime");
+const registry = @import("shell_registry");
 const stdio = @import("stdio");
 const syscall = @import("syscall");
 
 pub const panic = runtime.panic;
 
 const path_buffer_size = 256;
+
+const Resolution = union(enum) {
+    builtin,
+    path: []const u8,
+};
 
 pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[*:0]const u8) callconv(.c) i32 {
     if (argc < 2) {
@@ -20,9 +26,16 @@ pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[
     while (i < argc) : (i += 1) {
         const command = argv[i] orelse continue;
         var resolved_buffer: [path_buffer_size]u8 = undefined;
-        if (locateCommand(command, search_path, &resolved_buffer)) |resolved| {
-            stdio.puts(resolved);
-            stdio.puts("\n");
+        if (resolveCommand(command, search_path, &resolved_buffer)) |resolved| {
+            switch (resolved) {
+                .builtin => {
+                    stdio.print("{s}: shell built-in command\n", .{cstr.slice(command)});
+                },
+                .path => |path| {
+                    stdio.puts(path);
+                    stdio.puts("\n");
+                },
+            }
         } else {
             stdio.eprint("which: no {s} in PATH\n", .{cstr.slice(command)});
             exit_code = 1;
@@ -32,10 +45,16 @@ pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[
     return exit_code;
 }
 
-fn locateCommand(command: [*:0]const u8, search_path: []const u8, result_buffer: *[path_buffer_size]u8) ?[]const u8 {
+fn resolveCommand(command: [*:0]const u8, search_path: []const u8, result_buffer: *[path_buffer_size]u8) ?Resolution {
     const command_slice = cstr.slice(command);
     if (containsSlash(command_slice)) {
-        return if (pathExists(command)) command_slice else null;
+        return if (pathExists(command)) .{ .path = command_slice } else null;
+    }
+
+    if (registry.lookup(command_slice)) |command_meta| {
+        if (!command_meta.prefer_external_program) {
+            return .builtin;
+        }
     }
 
     var path_start: usize = 0;
@@ -45,7 +64,7 @@ fn locateCommand(command: [*:0]const u8, search_path: []const u8, result_buffer:
 
         const dir = search_path[path_start..path_end];
         if (joinPath(result_buffer, dir, command_slice)) |candidate| {
-            if (pathExists(@ptrCast(candidate.ptr))) return candidate;
+            if (pathExists(@ptrCast(candidate.ptr))) return .{ .path = candidate };
         }
 
         if (path_end == search_path.len) break;
