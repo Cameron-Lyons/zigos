@@ -6,6 +6,7 @@ const process = @import("../process/process.zig");
 const paging = @import("../memory/paging.zig");
 const vfs = @import("../fs/vfs.zig");
 const network = @import("../net/network.zig");
+const http = @import("../net/http.zig");
 const core_commands = @import("commands/core.zig");
 const fs_commands = @import("commands/fs.zig");
 const process_commands = @import("commands/process.zig");
@@ -22,6 +23,10 @@ const numfmt = @import("../utils/numfmt.zig");
 const posix = @import("../utils/posix.zig");
 const cwd_mod = @import("../process/syscall/cwd.zig");
 const environ = @import("../utils/environ.zig");
+const common = @import("common.zig");
+
+const printString = common.printString;
+const sliceFromCStr = common.sliceFromCStr;
 
 const MAX_COMMAND_LENGTH = 256;
 const MAX_ARGS = 16;
@@ -134,6 +139,24 @@ const PipelineConfigError = error{
 
 var external_command_launches: [MAX_EXTERNAL_LAUNCHES]ExternalCommandLaunch = [_]ExternalCommandLaunch{ExternalCommandLaunch{}} ** MAX_EXTERNAL_LAUNCHES;
 var external_command_launch_lookup: [EXTERNAL_LAUNCH_LOOKUP_SIZE]?*ExternalCommandLaunch = [_]?*ExternalCommandLaunch{null} ** EXTERNAL_LAUNCH_LOOKUP_SIZE;
+var http_server = http.HTTPServer.init(80);
+var http_server_pid: ?u32 = null;
+
+fn httpServerEntry() void {
+    const current_pid = if (process.getEffectiveCurrent()) |proc| proc.pid else 0;
+    http_server.start() catch {
+        vga.print("Failed to start HTTP server\n");
+        if (http_server_pid != null and http_server_pid.? == current_pid) {
+            http_server_pid = null;
+        }
+        return;
+    };
+
+    http_server.handleConnections();
+    if (http_server_pid != null and http_server_pid.? == current_pid) {
+        http_server_pid = null;
+    }
+}
 
 pub const ArrowKey = enum {
     Up,
@@ -573,11 +596,11 @@ pub const Shell = struct {
         const command_name = sliceFromCStr(command);
         if (registry.lookup(command_name)) |command_meta| {
             if (background_requested) {
-                if (!registry.hasExternalProgram(command_meta.id)) {
+                if (!command_meta.has_external_program) {
                     vga.print("Background execution requires an external command\n");
                     return false;
                 }
-            } else {
+            } else if (dispatchesInShell(command_meta)) {
                 self.dispatchCommand(command_meta.id, args[1..arg_count]);
                 return true;
             }
@@ -724,14 +747,11 @@ pub const Shell = struct {
         switch (command_id) {
             .help => core_commands.help(),
             .clear => core_commands.clear(),
-            .echo => core_commands.echo(args),
-            .ps => process_commands.ps(),
             .meminfo => process_commands.memInfo(),
             .uptime => process_commands.uptime(),
             .jobs => self.cmdJobs(),
             .fg => self.cmdFg(args),
             .bg => self.cmdBg(args),
-            .kill => process_commands.kill(args),
             .shutdown => self.cmdShutdown(),
             .memtest => system_commands.memTest(),
             .panic => system_commands.panicCmd(),
@@ -739,14 +759,8 @@ pub const Shell = struct {
             .multitask => system_commands.multitask(),
             .scheduler => system_commands.schedulerCommand(args),
             .schedstats => system_commands.schedStats(),
-            .ls => fs_commands.ls(args),
-            .cat => fs_commands.cat(args),
-            .mkdir => fs_commands.mkdir(args),
             .rmdir => fs_commands.rmdir(args),
-            .rm => fs_commands.rm(args),
-            .mv => fs_commands.mv(args),
             .mount => fs_commands.mount(args),
-            .ping => self.cmdPing(args),
             .httpd => self.cmdHttpd(args),
             .netstat => self.cmdNetstat(),
             .nslookup => self.cmdNslookup(args),
@@ -758,8 +772,6 @@ pub const Shell = struct {
             .ipctest => self.cmdIpcTest(),
             .procmon => self.cmdProcMon(),
             .top => self.cmdTop(),
-            .cp => fs_commands.cp(args),
-            .touch => fs_commands.touch(args),
             .write => fs_commands.write(args),
             .edit => self.cmdEdit(args),
             .nice => self.cmdNice(args),
@@ -767,38 +779,20 @@ pub const Shell = struct {
             .chmod => self.cmdChmod(args),
             .export_var => user_commands.exportVar(args),
             .unset => user_commands.unset(args),
-            .env => user_commands.env(),
-            .head => text_commands.head(args),
-            .tail => text_commands.tail(args),
-            .wc => text_commands.wc(args),
-            .grep => text_commands.grep(args),
             .find => text_commands.find(args),
             .stat => text_commands.stat(args),
-            .uname => user_commands.uname(args),
-            .whoami => user_commands.whoami(),
-            .pwd => user_commands.pwd(),
             .cd => user_commands.cd(args),
-            .sort => self.cmdSort(args),
-            .uniq => self.cmdUniq(args),
             .ifconfig => self.cmdIfconfig(args),
             .df => self.cmdDf(args),
             .smptest => self.cmdSmpTest(),
             .fileiotest => self.cmdFileioTest(),
             .ext2writetest => self.cmdExt2WriteTest(),
             .tcptest => self.cmdTcpTest(),
-            .id => user_commands.id(),
-            .date => user_commands.date(),
             .ln => user_commands.ln(args),
-            .hostname => user_commands.hostname(args),
-            .sleep => user_commands.sleep(args),
             .umask => user_commands.umask(args),
             .chown => user_commands.chown(args),
             .chgrp => user_commands.chgrp(args),
-            .true_cmd => core_commands.trueCmd(),
-            .false_cmd => core_commands.falseCmd(),
-            .test_cmd => self.cmdTest(args),
-            .hexdump => text_commands.hexdump(args),
-            .which => text_commands.which(args),
+            else => unreachable,
         }
     }
 
@@ -927,11 +921,13 @@ pub const Shell = struct {
 
         const command_name = sliceFromCStr(args[1]);
 
-        if (registry.lookup(command_name) != null) {
-            vga.print("nice: Priority adjustment for built-in commands is not supported.\n");
-            vga.print("Built-in commands run in the shell context and cannot have their priority changed.\n");
-            vga.print("To use priority adjustment, run an external program instead.\n");
-            return;
+        if (registry.lookup(command_name)) |command_meta| {
+            if (dispatchesInShell(command_meta)) {
+                vga.print("nice: Priority adjustment for built-in commands is not supported.\n");
+                vga.print("Built-in commands run in the shell context and cannot have their priority changed.\n");
+                vga.print("To use priority adjustment, run an external program instead.\n");
+                return;
+            }
         }
 
         const pid = self.launchExternalCommand(args[1..], priority) catch |err| {
@@ -1049,336 +1045,6 @@ pub const Shell = struct {
         vga.print("\n");
     }
 
-    fn cmdTrue(self: *const Shell) void {
-        _ = self;
-    }
-
-    fn cmdFalse(self: *const Shell) void {
-        _ = self;
-        vga.print("");
-    }
-
-    fn cmdTest(self: *const Shell, args: []const [*:0]const u8) void {
-        _ = self;
-        if (args.len == 0) {
-            vga.print("false\n");
-            return;
-        }
-
-        const arg = sliceFromCStr(args[0]);
-
-        if (args.len == 1) {
-            if (arg.len > 0) {
-                vga.print("true\n");
-            } else {
-                vga.print("false\n");
-            }
-            return;
-        }
-
-        if (args.len == 2) {
-            const op = sliceFromCStr(args[0]);
-            const operand = sliceFromCStr(args[1]);
-
-            if (strEqlSlice(op, "-n")) {
-                if (operand.len > 0) {
-                    vga.print("true\n");
-                } else {
-                    vga.print("false\n");
-                }
-                return;
-            } else if (strEqlSlice(op, "-z")) {
-                if (operand.len == 0) {
-                    vga.print("true\n");
-                } else {
-                    vga.print("false\n");
-                }
-                return;
-            } else if (strEqlSlice(op, "-e") or strEqlSlice(op, "-f") or strEqlSlice(op, "-d")) {
-                if (vfs.lookupPath(operand)) |vnode| {
-                    if (strEqlSlice(op, "-d")) {
-                        if (vnode.file_type == .Directory) {
-                            vga.print("true\n");
-                        } else {
-                            vga.print("false\n");
-                        }
-                    } else {
-                        vga.print("true\n");
-                    }
-                } else |_| {
-                    vga.print("false\n");
-                }
-                return;
-            }
-        }
-
-        if (args.len == 3) {
-            const left = sliceFromCStr(args[0]);
-            const op = sliceFromCStr(args[1]);
-            const right = sliceFromCStr(args[2]);
-
-            if (strEqlSlice(op, "=") or strEqlSlice(op, "==")) {
-                if (strEqlSlice(left, right)) {
-                    vga.print("true\n");
-                } else {
-                    vga.print("false\n");
-                }
-                return;
-            } else if (strEqlSlice(op, "!=")) {
-                if (!strEqlSlice(left, right)) {
-                    vga.print("true\n");
-                } else {
-                    vga.print("false\n");
-                }
-                return;
-            }
-        }
-
-        vga.print("test: invalid expression\n");
-    }
-
-    fn strEqlSlice(a: []const u8, b: []const u8) bool {
-        if (a.len != b.len) return false;
-        for (a, b) |ac, bc| {
-            if (ac != bc) return false;
-        }
-        return true;
-    }
-
-    const LineSpan = struct {
-        start: usize,
-        len: usize,
-    };
-
-    fn lineLessThan(file_buffer: []const u8, lhs: LineSpan, rhs: LineSpan) bool {
-        const left = file_buffer[lhs.start .. lhs.start + lhs.len];
-        const right = file_buffer[rhs.start .. rhs.start + rhs.len];
-        const min_len = @min(left.len, right.len);
-
-        var i: usize = 0;
-        while (i < min_len) : (i += 1) {
-            if (left[i] != right[i]) {
-                return left[i] < right[i];
-            }
-        }
-
-        return left.len < right.len;
-    }
-
-    fn sortLines(file_buffer: []const u8, lines: []LineSpan) void {
-        var i: usize = 1;
-        while (i < lines.len) : (i += 1) {
-            const current = lines[i];
-            var j = i;
-            while (j > 0 and lineLessThan(file_buffer, current, lines[j - 1])) : (j -= 1) {
-                lines[j] = lines[j - 1];
-            }
-            lines[j] = current;
-        }
-    }
-
-    fn cmdSort(self: *const Shell, args: []const [*:0]const u8) void {
-        _ = self;
-        if (args.len == 0) {
-            vga.print("Usage: sort <file>\n");
-            return;
-        }
-
-        const path = sliceFromCStr(args[0]);
-        const fd = vfs.open(path, vfs.O_RDONLY) catch |err| {
-            vga.print("sort: ");
-            printString(args[0]);
-            vga.print(": ");
-            vga.print(@errorName(err));
-            vga.print("\n");
-            return;
-        };
-        defer vfs.close(fd) catch {};
-
-        var line_count: usize = 0;
-        // SAFETY: filled by the subsequent vfs.read calls
-        var file_buffer: [4096]u8 = undefined;
-        var total_read: usize = 0;
-
-        while (total_read < file_buffer.len) {
-            const bytes_read = vfs.read(fd, file_buffer[total_read..]) catch |err| {
-                if (err != error.EndOfFile) {
-                    vga.print("\nread error: ");
-                    vga.print(@errorName(err));
-                    vga.print("\n");
-                }
-                break;
-            };
-            if (bytes_read == 0) break;
-            total_read += bytes_read;
-        }
-
-        var lines: [256]LineSpan = undefined;
-        var current_line_start: usize = 0;
-        var i: usize = 0;
-
-        while (i < total_read and line_count < 256) {
-            if (file_buffer[i] == '\n' or file_buffer[i] == '\r') {
-                if (i > current_line_start) {
-                    lines[line_count] = .{
-                        .start = current_line_start,
-                        .len = i - current_line_start,
-                    };
-                    line_count += 1;
-                }
-                if (file_buffer[i] == '\r' and i + 1 < total_read and file_buffer[i + 1] == '\n') {
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-                current_line_start = i;
-            } else {
-                i += 1;
-            }
-        }
-
-        if (current_line_start < total_read and line_count < 256) {
-            lines[line_count] = .{
-                .start = current_line_start,
-                .len = total_read - current_line_start,
-            };
-            line_count += 1;
-        }
-
-        sortLines(file_buffer[0..total_read], lines[0..line_count]);
-
-        var j: usize = 0;
-        while (j < line_count) : (j += 1) {
-            const line = file_buffer[lines[j].start .. lines[j].start + lines[j].len];
-            for (line) |byte| {
-                vga.put_char(byte);
-            }
-            vga.put_char('\n');
-        }
-    }
-
-    fn cmdUniq(self: *const Shell, args: []const [*:0]const u8) void {
-        _ = self;
-        if (args.len == 0) {
-            vga.print("Usage: uniq <file>\n");
-            return;
-        }
-
-        const path = sliceFromCStr(args[0]);
-        const fd = vfs.open(path, vfs.O_RDONLY) catch |err| {
-            vga.print("uniq: ");
-            printString(args[0]);
-            vga.print(": ");
-            vga.print(@errorName(err));
-            vga.print("\n");
-            return;
-        };
-        defer vfs.close(fd) catch {};
-
-        // SAFETY: filled by the subsequent vfs.read call
-        var buffer: [512]u8 = undefined;
-        // SAFETY: characters accumulated during line comparison
-        var prev_line: [256]u8 = undefined;
-        var prev_line_len: usize = 0;
-        // SAFETY: characters accumulated during line comparison
-        var current_line: [256]u8 = undefined;
-        var current_line_len: usize = 0;
-        var first_line = true;
-
-        while (true) {
-            const bytes_read = vfs.read(fd, &buffer) catch |err| {
-                if (err != error.EndOfFile) {
-                    vga.print("\nread error: ");
-                    vga.print(@errorName(err));
-                    vga.print("\n");
-                }
-                break;
-            };
-
-            if (bytes_read == 0) break;
-
-            for (buffer[0..bytes_read]) |byte| {
-                if (byte == '\r') continue;
-
-                if (byte == '\n') {
-                    current_line[current_line_len] = 0;
-                    const current_slice = current_line[0..current_line_len];
-
-                    if (first_line) {
-                        for (current_slice) |c| {
-                            vga.put_char(c);
-                        }
-                        vga.put_char('\n');
-                        @memcpy(&prev_line, &current_line);
-                        prev_line_len = current_line_len;
-                        first_line = false;
-                    } else {
-                        var different = false;
-                        if (current_line_len != prev_line_len) {
-                            different = true;
-                        } else {
-                            var i: usize = 0;
-                            while (i < current_line_len) : (i += 1) {
-                                if (current_slice[i] != prev_line[i]) {
-                                    different = true;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (different) {
-                            for (current_slice) |c| {
-                                vga.put_char(c);
-                            }
-                            vga.put_char('\n');
-                            @memcpy(&prev_line, &current_line);
-                            prev_line_len = current_line_len;
-                        }
-                    }
-
-                    current_line_len = 0;
-                } else {
-                    if (current_line_len < current_line.len - 1) {
-                        current_line[current_line_len] = byte;
-                        current_line_len += 1;
-                    }
-                }
-            }
-        }
-
-        if (current_line_len > 0) {
-            current_line[current_line_len] = 0;
-            const current_slice = current_line[0..current_line_len];
-
-            if (first_line) {
-                for (current_slice) |c| {
-                    vga.put_char(c);
-                }
-                vga.put_char('\n');
-            } else {
-                var different = false;
-                if (current_line_len != prev_line_len) {
-                    different = true;
-                } else {
-                    var i: usize = 0;
-                    while (i < current_line_len) : (i += 1) {
-                        if (current_slice[i] != prev_line[i]) {
-                            different = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (different) {
-                    for (current_slice) |c| {
-                        vga.put_char(c);
-                    }
-                    vga.put_char('\n');
-                }
-            }
-        }
-    }
-
     fn cmdIfconfig(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
         _ = args;
@@ -1460,31 +1126,8 @@ pub const Shell = struct {
         vga.print("% /\n");
     }
 
-    fn cmdPing(self: *const Shell, args: []const [*:0]const u8) void {
-        _ = self;
-
-        if (args.len == 0) {
-            vga.print("Usage: ping <ip_address>\n");
-            vga.print("Example: ping 192.168.1.1\n");
-            return;
-        }
-
-        const ip_str = sliceFromCStr(args[0]);
-        if (network.parseIPv4(ip_str)) |ip| {
-            vga.print("Pinging ");
-            printString(args[0]);
-            vga.print("...\n");
-            network.ping(ip);
-        } else {
-            vga.print("Invalid IP address: ");
-            printString(args[0]);
-            vga.print("\n");
-        }
-    }
-
     fn cmdHttpd(self: *const Shell, args: []const [*:0]const u8) void {
         _ = self;
-        const http = @import("../net/http.zig");
 
         if (args.len == 0) {
             vga.print("Usage: httpd <start|stop> [port]\n");
@@ -1493,33 +1136,38 @@ pub const Shell = struct {
         }
 
         if (streq(args[0], "start")) {
+            if (http_server_pid != null) {
+                vga.print("HTTP server is already running\n");
+                return;
+            }
+
             var port: u16 = 80;
             if (args.len > 1) {
                 port = parseNumberU16(sliceFromCStr(args[1]));
             }
 
+            http_server = http.HTTPServer.init(port);
+
+            const server_process = process.create_process("httpd", httpServerEntry);
+            http_server_pid = server_process.pid;
+
             vga.print("Starting HTTP server on port ");
             numfmt.printDec(port);
-            vga.print("...\n");
-
-            var server = http.HTTPServer.init(port);
-            server.start() catch {
-                vga.print("Failed to start HTTP server\n");
+            vga.print(" (pid ");
+            numfmt.printDec(server_process.pid);
+            vga.print(")\n");
+        } else if (streq(args[0], "stop")) {
+            const pid = http_server_pid orelse {
+                vga.print("HTTP server is not running\n");
                 return;
             };
 
-            const server_process = process.create_process("httpd", struct {
-                fn serverLoop() void {
-                    var s = http.HTTPServer.init(80);
-                    s.start() catch return;
-                    s.handleConnections();
-                }
-            }.serverLoop);
-            _ = server_process;
-
-            vga.print("HTTP server started successfully\n");
-        } else if (streq(args[0], "stop")) {
             vga.print("Stopping HTTP server...\n");
+            http_server.stop();
+            _ = process.terminateProcess(pid);
+            if (http_server_pid != null and http_server_pid.? == pid) {
+                http_server_pid = null;
+            }
             vga.print("HTTP server stopped\n");
         } else {
             vga.print("Unknown action: ");
@@ -1887,13 +1535,7 @@ fn waitForForegroundCommand(self: *Shell, pid: u32) bool {
             if (findExternalCommandLaunch(pid)) |launch| {
                 releaseExternalCommandLaunch(launch);
             }
-            if (exit_code != 0) {
-                vga.print("Command exited with status ");
-                numfmt.printDec(@as(usize, @intCast(if (exit_code < 0) -exit_code else exit_code)));
-                vga.print("\n");
-                return false;
-            }
-            return true;
+            return exit_code == 0;
         },
         .stopped => {
             markJobStopped(self, pid);
@@ -2245,7 +1887,9 @@ fn captureCommandSubstitution(self: *Shell, line: []const u8, output: []u8) erro
     if (arg_count == 0) return 0;
 
     const command_name = sliceFromCStr(args[0]);
-    if (registry.lookup(command_name) != null) return error.CommandFailed;
+    if (registry.lookup(command_name)) |command_meta| {
+        if (dispatchesInShell(command_meta)) return error.CommandFailed;
+    }
 
     var temp_path: [64]u8 = undefined;
     const temp_len = makeCommandCapturePath(self, &temp_path) catch return error.NoSpaceLeft;
@@ -2419,7 +2063,7 @@ fn validatePipelineStages(pipeline: *const ParsedPipeline) bool {
     for (pipeline.stages[0..pipeline.stage_count]) |stage| {
         const command_name = sliceFromCStr(stage.args[0]);
         if (registry.lookup(command_name)) |command_meta| {
-            if (registry.hasExternalProgram(command_meta.id)) continue;
+            if (command_meta.has_external_program) continue;
             vga.print("Pipelines and redirection currently require external commands: ");
             printString(stage.args[0]);
             vga.print("\n");
@@ -2427,6 +2071,10 @@ fn validatePipelineStages(pipeline: *const ParsedPipeline) bool {
         }
     }
     return true;
+}
+
+fn dispatchesInShell(command_meta: *const registry.Command) bool {
+    return !command_meta.prefer_external_program;
 }
 
 fn expandPipelineGlobs(pipeline: *ParsedPipeline) PipelineConfigError!void {
@@ -2839,13 +2487,6 @@ fn streq(a: [*:0]const u8, b: [*:0]const u8) bool {
     return a[i] == b[i];
 }
 
-fn printString(str: [*:0]const u8) void {
-    var i: usize = 0;
-    while (str[i] != 0) : (i += 1) {
-        vga.put_char(str[i]);
-    }
-}
-
 fn parseClampedPriority(str: [*:0]const u8) ?i8 {
     const slice = sliceFromCStr(str);
     if (slice.len == 0) return null;
@@ -2903,10 +2544,4 @@ fn parseNumber(str: [*:0]const u8) ?u32 {
     }
 
     return result;
-}
-
-fn sliceFromCStr(str: [*:0]const u8) []const u8 {
-    var len: usize = 0;
-    while (str[len] != 0) : (len += 1) {}
-    return str[0..len];
 }
