@@ -425,7 +425,7 @@ pub fn close(fd: u32) VFSError!void {
     notifyCloseEvent(file_desc);
     memory.kfree(@as([*]u8, @ptrCast(file_desc)));
     freeFd(fd);
-    readiness.notifyAll();
+    readiness.notifyVfs();
 }
 
 pub fn read(fd: u32, buffer: []u8) VFSError!usize {
@@ -964,7 +964,7 @@ fn pipeRead(vnode: *VNode, buf: []u8, _: u64) VFSError!usize {
 
     pipe.read_pos = (pipe.read_pos + to_read) & PIPE_BUF_MASK;
     pipe.count -= to_read;
-    readiness.notifyAll();
+    readiness.notifyVfs();
     return to_read;
 }
 
@@ -987,7 +987,7 @@ fn pipeWrite(vnode: *VNode, buf: []const u8, _: u64) VFSError!usize {
 
     pipe.write_pos = (pipe.write_pos + to_write) & PIPE_BUF_MASK;
     pipe.count += to_write;
-    readiness.notifyAll();
+    readiness.notifyVfs();
     return to_write;
 }
 

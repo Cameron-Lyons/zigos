@@ -2,6 +2,7 @@ const pci = @import("pci.zig");
 const network = @import("../net/network.zig");
 const memory = @import("../memory/memory.zig");
 const isr = @import("../interrupts/isr.zig");
+const sync = @import("../utils/sync.zig");
 const vga = @import("vga.zig");
 
 const E1000_VENDOR_ID = 0x8086;
@@ -309,7 +310,10 @@ const E1000Device = struct {
     tx_descs: [*]align(16) TXDescriptor,
     rx_buffers: [*]u8,
     tx_buffers: [*]u8,
+    rx_lock: sync.SpinLock,
     rx_cur: u16,
+    rx_release_cur: u16,
+    rx_release_ready: [E1000_NUM_RX_DESC]bool,
     tx_cur: u16,
     eeprom_exists: bool,
 
@@ -392,6 +396,8 @@ const E1000Device = struct {
         self.writeRegister(E1000Registers.RDT, E1000_NUM_RX_DESC - 1);
 
         self.rx_cur = 0;
+        self.rx_release_cur = 0;
+        @memset(self.rx_release_ready[0..], false);
 
         self.writeRegister(E1000Registers.RCTL, RCTLBits.EN | RCTLBits.SBP | RCTLBits.UPE | RCTLBits.MPE | RCTLBits.LBM_NONE | RCTLBits.RDMTS_HALF | RCTLBits.BAM | RCTLBits.SECRC | RCTLBits.BSIZE_2048);
     }
@@ -471,6 +477,43 @@ const E1000Device = struct {
 
         return null;
     }
+
+    pub fn claimReceive(self: *E1000Device) ?network.OwnedRxPacket {
+        self.rx_lock.acquire();
+        defer self.rx_lock.release();
+
+        const cur = self.rx_cur;
+
+        if ((self.rx_descs[cur].status & RXStatus.DD) == 0) return null;
+        if ((self.rx_descs[cur].status & RXStatus.EOP) == 0) return null;
+
+        const len = self.rx_descs[cur].length;
+        const buf_addr = @intFromPtr(&self.rx_buffers[cur * RX_BUFFER_SIZE]);
+        self.rx_cur = (self.rx_cur + 1) % E1000_NUM_RX_DESC;
+
+        return .{
+            .data = @as([*]u8, @ptrFromInt(buf_addr))[0..len],
+            .mac = self.mac_addr,
+            .handle = cur,
+            .release = releaseClaimedPacket,
+        };
+    }
+
+    pub fn releaseReceived(self: *E1000Device, handle: usize) void {
+        if (handle >= E1000_NUM_RX_DESC) return;
+
+        self.rx_lock.acquire();
+        defer self.rx_lock.release();
+
+        self.rx_release_ready[handle] = true;
+        while (self.rx_release_ready[self.rx_release_cur]) {
+            const cur = self.rx_release_cur;
+            self.rx_release_ready[cur] = false;
+            self.rx_descs[cur].status = 0;
+            self.writeRegister(E1000Registers.RDT, cur);
+            self.rx_release_cur = (self.rx_release_cur + 1) % E1000_NUM_RX_DESC;
+        }
+    }
 };
 
 fn e1000_interrupt_handler(frame: *isr.InterruptFrame) void {
@@ -479,8 +522,8 @@ fn e1000_interrupt_handler(frame: *isr.InterruptFrame) void {
         const icr = dev.readRegister(E1000Registers.ICR);
 
         if (icr & 0x80 != 0) {
-            while (dev.receive()) |packet| {
-                network.enqueueRxPacket(packet, dev.mac_addr);
+            while (dev.claimReceive()) |packet| {
+                _ = network.enqueueBorrowedRx(packet);
             }
         }
 
@@ -536,7 +579,10 @@ fn initDevice(pci_device: pci.PCIDevice) void {
         .rx_buffers = undefined,
         // SAFETY: allocated in txInit below
         .tx_buffers = undefined,
+        .rx_lock = sync.SpinLock.init(),
         .rx_cur = 0,
+        .rx_release_cur = 0,
+        .rx_release_ready = [_]bool{false} ** E1000_NUM_RX_DESC,
         .tx_cur = 0,
         .eeprom_exists = false,
     };
@@ -599,6 +645,12 @@ fn e1000Receive() ?[]u8 {
         return dev.receive();
     }
     return null;
+}
+
+fn releaseClaimedPacket(handle: usize) void {
+    if (e1000_device) |*dev| {
+        dev.releaseReceived(handle);
+    }
 }
 
 fn e1000GetMacAddress() [6]u8 {

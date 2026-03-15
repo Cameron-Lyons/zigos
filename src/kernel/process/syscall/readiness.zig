@@ -4,36 +4,47 @@ const timer = @import("../../timer/timer.zig");
 const sync = @import("../../utils/sync.zig");
 
 const MAX_WAITERS = 256;
+const EVENT_CLASS_COUNT: usize = 3;
+
+pub const VFS_EVENT_MASK: u32 = 1 << 0;
+pub const SOCKET_EVENT_MASK: u32 = 1 << 1;
+pub const PSEUDO_EVENT_MASK: u32 = 1 << 2;
+pub const ALL_EVENT_MASKS: u32 = VFS_EVENT_MASK | SOCKET_EVENT_MASK | PSEUDO_EVENT_MASK;
+
+pub const GenerationSnapshot = struct {
+    generations: [EVENT_CLASS_COUNT]u64 = [_]u64{0} ** EVENT_CLASS_COUNT,
+};
 
 const Waiter = struct {
     proc: ?*process.Process = null,
-    generation: u64 = 0,
+    mask: u32 = 0,
     armed: bool = false,
     woken: bool = false,
 };
 
 var waiters: [MAX_WAITERS]Waiter = [_]Waiter{.{}} ** MAX_WAITERS;
 var wait_lock = sync.SpinLock.init();
-var event_generation: u64 = 1;
+var event_generations: [EVENT_CLASS_COUNT]u64 = [_]u64{1} ** EVENT_CLASS_COUNT;
+var next_waiter_hint: usize = 0;
 
-pub fn snapshot() u64 {
+pub fn snapshot() GenerationSnapshot {
     wait_lock.acquire();
     defer wait_lock.release();
-    return event_generation;
+    return .{ .generations = event_generations };
 }
 
-pub fn notifyAll() void {
+pub fn notify(mask: u32) void {
+    if (mask == 0) return;
+
     var ready: [MAX_WAITERS]*process.Process = undefined;
     var ready_count: usize = 0;
 
     wait_lock.acquire();
-    event_generation +%= 1;
-    if (event_generation == 0) {
-        event_generation = 1;
-    }
+    advanceGenerations(mask);
 
     for (&waiters) |*waiter| {
         if (!waiter.armed) continue;
+        if ((waiter.mask & mask) == 0) continue;
         const proc = waiter.proc orelse continue;
         waiter.armed = false;
         waiter.woken = true;
@@ -47,7 +58,23 @@ pub fn notifyAll() void {
     }
 }
 
-pub fn waitForChange(observed_generation: u64, deadline_tick: ?u64) bool {
+pub fn notifyVfs() void {
+    notify(VFS_EVENT_MASK);
+}
+
+pub fn notifySocket() void {
+    notify(SOCKET_EVENT_MASK);
+}
+
+pub fn notifyPseudo() void {
+    notify(PSEUDO_EVENT_MASK);
+}
+
+pub fn notifyAll() void {
+    notify(ALL_EVENT_MASKS);
+}
+
+pub fn waitForChange(observed_snapshot: GenerationSnapshot, mask: u32, deadline_tick: ?u64) bool {
     if (!hasRemainingTime(deadline_tick)) {
         return false;
     }
@@ -55,11 +82,11 @@ pub fn waitForChange(observed_generation: u64, deadline_tick: ?u64) bool {
     const current = process.getEffectiveCurrent() orelse return fallbackWait(deadline_tick);
 
     wait_lock.acquire();
-    if (event_generation != observed_generation) {
+    if (hasGenerationChanged(observed_snapshot, mask)) {
         wait_lock.release();
         return true;
     }
-    const waiter = reserveWaiter(current, observed_generation) orelse {
+    const waiter = reserveWaiter(current, mask) orelse {
         wait_lock.release();
         return fallbackWait(deadline_tick);
     };
@@ -81,25 +108,61 @@ pub fn waitForChange(observed_generation: u64, deadline_tick: ?u64) bool {
     }
 
     wait_lock.acquire();
-    const changed = waiter.woken or event_generation != observed_generation;
+    const changed = waiter.woken or hasGenerationChanged(observed_snapshot, mask);
     waiter.* = .{};
     wait_lock.release();
     return changed;
 }
 
-fn reserveWaiter(current: *process.Process, observed_generation: u64) ?*Waiter {
-    for (&waiters) |*waiter| {
+fn reserveWaiter(current: *process.Process, mask: u32) ?*Waiter {
+    var attempts: usize = 0;
+    var idx = next_waiter_hint;
+
+    while (attempts < waiters.len) : (attempts += 1) {
+        const waiter = &waiters[idx];
         if (waiter.proc == null) {
             waiter.* = .{
                 .proc = current,
-                .generation = observed_generation,
+                .mask = mask,
                 .armed = true,
                 .woken = false,
             };
+            next_waiter_hint = (idx + 1) % waiters.len;
             return waiter;
         }
+
+        idx = (idx + 1) % waiters.len;
     }
+
     return null;
+}
+
+fn advanceGenerations(mask: u32) void {
+    var idx: usize = 0;
+    while (idx < EVENT_CLASS_COUNT) : (idx += 1) {
+        const event_mask = @as(u32, 1) << @intCast(idx);
+        if ((mask & event_mask) == 0) continue;
+
+        event_generations[idx] +%= 1;
+        if (event_generations[idx] == 0) {
+            event_generations[idx] = 1;
+        }
+    }
+}
+
+fn hasGenerationChanged(observed_snapshot: GenerationSnapshot, mask: u32) bool {
+    if (mask == 0) return false;
+
+    var idx: usize = 0;
+    while (idx < EVENT_CLASS_COUNT) : (idx += 1) {
+        const event_mask = @as(u32, 1) << @intCast(idx);
+        if ((mask & event_mask) == 0) continue;
+        if (event_generations[idx] != observed_snapshot.generations[idx]) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 fn hasRemainingTime(deadline_tick: ?u64) bool {
