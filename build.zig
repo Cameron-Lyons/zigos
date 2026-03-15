@@ -33,9 +33,20 @@ const user_program_specs = [_]UserProgramSpec{
     .{ .name = "env", .root_source = "user/bin/env.zig" },
     .{ .name = "which", .root_source = "user/bin/which.zig" },
     .{ .name = "head", .root_source = "user/bin/head.zig" },
+    .{ .name = "tail", .root_source = "user/bin/tail.zig" },
+    .{ .name = "sort", .root_source = "user/bin/sort.zig" },
+    .{ .name = "uniq", .root_source = "user/bin/uniq.zig" },
+    .{ .name = "true", .root_source = "user/bin/true.zig" },
+    .{ .name = "false", .root_source = "user/bin/false.zig" },
+    .{ .name = "test", .root_source = "user/bin/test.zig" },
+    .{ .name = "hexdump", .root_source = "user/bin/hexdump.zig" },
     .{ .name = "wc", .root_source = "user/bin/wc.zig" },
     .{ .name = "ps", .root_source = "user/bin/ps.zig" },
     .{ .name = "ping", .root_source = "user/bin/ping.zig" },
+    .{ .name = "whoami", .root_source = "user/bin/whoami.zig" },
+    .{ .name = "id", .root_source = "user/bin/id.zig" },
+    .{ .name = "date", .root_source = "user/bin/date.zig" },
+    .{ .name = "hostname", .root_source = "user/bin/hostname.zig" },
     .{ .name = "uname", .root_source = "user/bin/uname.zig" },
     .{ .name = "cat", .root_source = "user/bin/cat.zig" },
     .{ .name = "cp", .root_source = "user/bin/cp.zig" },
@@ -203,7 +214,7 @@ pub fn build(b: *std.Build) void {
         \\  echo "Userland smoke test failed: no serial output captured" >&2
         \\  exit 1
         \\fi
-        \\for marker in "BOOT:START" "BOOT:PROFILE:userland_smoke" "Disk root mounted at /" "BOOT:SHELL_READY" "USERLAND:HELLO" "USERLAND:ECHO" "USERLAND:ENV" "USERLAND:CMDSUB" "USERLAND:QUOTED" "USERLAND:ESCAPED" "USERLAND:GLOB" "USERLAND:UNAME" "USERLAND:LS" "USERLAND:CAT" "USERLAND:ENV_STANDALONE" "USERLAND:ENV_BIN" "USERLAND:WHICH" "USERLAND:HEAD" "USERLAND:WC" "USERLAND:CP" "USERLAND:MV" "USERLAND:GREP" "USERLAND:PS" "USERLAND:PING" "USERLAND:PIPE_OK" "USERLAND:REDIRECT_WRITE" "USERLAND:REDIRECT_READ" "USERLAND:BG_START" "USERLAND:JOBS_RUNNING" "USERLAND:JOBS_STOPPED" "USERLAND:BG_RESUME" "USERLAND:JOBS_RESUMED" "user:root home:/home/user" "shell-ZigOS" "USERLAND QUOTED" "USERLAND ESCAPED" "/bin/cat /bin/cp /bin/ls" "Welcome to ZigOS userspace smoke test." "PATH=/bin:/usr/bin:/mnt/bin" "USERLAND:PIPE" "USERLAND:REDIRECT" "[1] Running /bin/sleep 3" "[1] Stopped /bin/sleep 3" "USERLAND:PASS"; do
+        \\for marker in "BOOT:START" "BOOT:PROFILE:userland_smoke" "Disk root mounted at /" "BOOT:SHELL_READY" "USERLAND:HELLO" "USERLAND:ECHO" "USERLAND:ENV" "USERLAND:CMDSUB" "USERLAND:QUOTED" "USERLAND:ESCAPED" "USERLAND:GLOB" "USERLAND:UNAME" "USERLAND:LS" "USERLAND:CAT" "USERLAND:ENV_STANDALONE" "USERLAND:ENV_BIN" "USERLAND:WHICH" "USERLAND:HEAD" "USERLAND:TAIL" "USERLAND:WC" "USERLAND:SORT" "USERLAND:UNIQ" "USERLAND:HEXDUMP" "USERLAND:TEST" "USERLAND:TRUE" "USERLAND:CP" "USERLAND:MV" "USERLAND:GREP" "USERLAND:PS" "USERLAND:PING" "USERLAND:WHOAMI" "USERLAND:ID" "USERLAND:DATE" "USERLAND:HOSTNAME" "USERLAND:PIPE_OK" "USERLAND:REDIRECT_WRITE" "USERLAND:REDIRECT_READ" "USERLAND:BG_START" "USERLAND:JOBS_RUNNING" "USERLAND:JOBS_STOPPED" "USERLAND:BG_RESUME" "USERLAND:JOBS_RESUMED" "user:root home:/home/user" "shell-ZigOS" "USERLAND QUOTED" "USERLAND ESCAPED" "/bin/cat /bin/cp /bin/ls" "Welcome to ZigOS userspace smoke test." "PATH=/bin:/usr/bin:/mnt/bin" "00000000" "uid=1000(user) gid=1000(users) euid=1000 egid=1000" "zigos" "USERLAND:PIPE" "USERLAND:REDIRECT" "[1] Running /bin/sleep 3" "[1] Stopped /bin/sleep 3" "USERLAND:PASS"; do
         \\  if ! grep -Fq "$marker" "$LOG_PATH"; then
         \\    echo "Userland smoke test failed: missing marker '$marker'" >&2
         \\    cat "$LOG_PATH" >&2
