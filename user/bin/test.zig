@@ -32,6 +32,8 @@ fn eval(args: []const ?[*:0]const u8) error{InvalidUsage}!i32 {
         if (std.mem.eql(u8, op, "-n")) return if (slice.len != 0) 0 else 1;
         if (std.mem.eql(u8, op, "-z")) return if (slice.len == 0) 0 else 1;
         if (std.mem.eql(u8, op, "-e")) return if (pathExists(value)) 0 else 1;
+        if (std.mem.eql(u8, op, "-d")) return if (pathKind(value) == .directory) 0 else 1;
+        if (std.mem.eql(u8, op, "-f")) return if (pathKind(value) == .file) 0 else 1;
         return error.InvalidUsage;
     }
 
@@ -40,6 +42,7 @@ fn eval(args: []const ?[*:0]const u8) error{InvalidUsage}!i32 {
         const op = cstr.slice(args[1] orelse return error.InvalidUsage);
         const right = cstr.slice(args[2] orelse return error.InvalidUsage);
         if (std.mem.eql(u8, op, "=")) return if (std.mem.eql(u8, left, right)) 0 else 1;
+        if (std.mem.eql(u8, op, "==")) return if (std.mem.eql(u8, left, right)) 0 else 1;
         if (std.mem.eql(u8, op, "!=")) return if (!std.mem.eql(u8, left, right)) 0 else 1;
         return error.InvalidUsage;
     }
@@ -52,4 +55,20 @@ fn pathExists(path: [*:0]const u8) bool {
     if (syscall.isError(fd)) return false;
     _ = syscall.close(fd);
     return true;
+}
+
+const PathKind = enum {
+    file,
+    directory,
+};
+
+fn pathKind(path: [*:0]const u8) ?PathKind {
+    const fd = syscall.open(path, syscall.O_RDONLY);
+    if (syscall.isError(fd)) return null;
+    defer _ = syscall.close(fd);
+
+    var buffer: [32]u8 = undefined;
+    const rc = syscall.getdents(fd, &buffer);
+    if (syscall.isError(rc)) return .file;
+    return .directory;
 }

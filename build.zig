@@ -551,6 +551,12 @@ fn addUserProgram(
     });
     envutil_module.addImport("cstr", cstr_module);
 
+    const shell_registry_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/shell/registry.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+
     const user_module = b.addModule(b.fmt("user-{s}", .{name}), .{
         .root_source_file = b.path(root_source),
         .target = target,
@@ -562,6 +568,7 @@ fn addUserProgram(
     user_module.addImport("fsutil", fsutil_module);
     user_module.addImport("processutil", processutil_module);
     user_module.addImport("runtime", runtime_module);
+    user_module.addImport("shell_registry", shell_registry_module);
     user_module.addImport("syscall", syscall_module);
     user_module.addImport("stdio", stdio_module);
 
