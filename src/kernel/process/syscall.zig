@@ -13,6 +13,7 @@ const paging = @import("../memory/paging.zig");
 const vfs = @import("../fs/vfs.zig");
 const credentials = @import("credentials.zig");
 const signal = @import("signal.zig");
+const network = @import("../net/network.zig");
 const socket = @import("../net/socket.zig");
 const ipc = @import("ipc.zig");
 const abi = @import("syscall/abi.zig");
@@ -211,6 +212,8 @@ pub const SYS_UMOUNT2 = abi.SYS_UMOUNT2;
 pub const SYS_SWAPON = abi.SYS_SWAPON;
 pub const SYS_SWAPOFF = abi.SYS_SWAPOFF;
 pub const SYS_REBOOT = abi.SYS_REBOOT;
+pub const SYS_GETPROCS = abi.SYS_GETPROCS;
+pub const SYS_PING = abi.SYS_PING;
 
 pub const STDIN = abi.STDIN;
 pub const STDOUT = abi.STDOUT;
@@ -740,6 +743,8 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_SWAPON => sys_swapon(@as([*]const u8, @ptrFromInt(arg1)), @intCast(arg2)),
         SYS_SWAPOFF => sys_swapoff(@as([*]const u8, @ptrFromInt(arg1))),
         SYS_REBOOT => sys_reboot(@intCast(arg1), @intCast(arg2), @intCast(arg3), arg4),
+        SYS_GETPROCS => sys_getprocs(arg1, arg2),
+        SYS_PING => sys_ping(@intCast(arg1)),
         else => ENOSYS,
     };
 
@@ -2995,6 +3000,36 @@ fn sys_sysinfo(info_ptr: usize) i32 {
     };
 
     protection.copyToUser(info_ptr, std.mem.asBytes(&info)) catch return EFAULT;
+    return 0;
+}
+
+fn sys_getprocs(buffer_ptr: usize, capacity: usize) i32 {
+    if (capacity == 0) return 0;
+    if (!protection.verifyUserPointer(buffer_ptr, capacity * @sizeOf(abi.ProcInfo))) return EFAULT;
+
+    var proc = process.getProcessList();
+    var index: usize = 0;
+    while (proc) |current| : (proc = current.next) {
+        if (index >= capacity) break;
+
+        var info = abi.ProcInfo{
+            .pid = current.pid,
+            .parent_pid = current.parent_pid,
+            .state = @intFromEnum(current.state),
+            ._padding = .{ 0, 0, 0 },
+            .name = [_]u8{0} ** 64,
+        };
+        @memcpy(&info.name, &current.name);
+
+        protection.copyToUser(buffer_ptr + index * @sizeOf(abi.ProcInfo), std.mem.asBytes(&info)) catch return EFAULT;
+        index += 1;
+    }
+
+    return @intCast(index);
+}
+
+fn sys_ping(ipv4_addr: u32) i32 {
+    network.ping(ipv4_addr);
     return 0;
 }
 

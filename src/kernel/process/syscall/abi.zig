@@ -179,6 +179,8 @@ pub const SYS_UMOUNT2 = 178;
 pub const SYS_SWAPON = 179;
 pub const SYS_SWAPOFF = 180;
 pub const SYS_REBOOT = 181;
+pub const SYS_GETPROCS = 182;
+pub const SYS_PING = 183;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -442,3 +444,11 @@ pub const LINUX_REBOOT_MAGIC2: u32 = 0x28121969;
 pub const LINUX_REBOOT_CMD_RESTART: u32 = 0x01234567;
 pub const LINUX_REBOOT_CMD_HALT: u32 = 0xcdef0123;
 pub const LINUX_REBOOT_CMD_POWER_OFF: u32 = 0x4321fedc;
+
+pub const ProcInfo = extern struct {
+    pid: u32,
+    parent_pid: u32,
+    state: u8,
+    _padding: [3]u8,
+    name: [64]u8,
+};
