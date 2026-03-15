@@ -1,78 +1,12 @@
 const process = @import("../../process/process.zig");
-const timer = @import("../../timer/timer.zig");
 const vfs = @import("../../fs/vfs.zig");
 const vga = @import("../../drivers/vga.zig");
 const environ = @import("../../utils/environ.zig");
-const numfmt = @import("../../utils/numfmt.zig");
 const syscall_mod = @import("../../process/syscall.zig");
+const common = @import("../common.zig");
 
-pub fn uname(args: []const [*:0]const u8) void {
-    var show_all = false;
-    var show_sysname = false;
-    var show_nodename = false;
-    var show_release = false;
-    var show_version = false;
-    var show_machine = false;
-
-    if (args.len == 0) {
-        show_sysname = true;
-    } else {
-        for (args) |arg| {
-            if (streq(arg, "-a") or streq(arg, "--all")) {
-                show_all = true;
-            } else if (streq(arg, "-s") or streq(arg, "--kernel-name")) {
-                show_sysname = true;
-            } else if (streq(arg, "-n") or streq(arg, "--nodename")) {
-                show_nodename = true;
-            } else if (streq(arg, "-r") or streq(arg, "--kernel-release")) {
-                show_release = true;
-            } else if (streq(arg, "-v") or streq(arg, "--kernel-version")) {
-                show_version = true;
-            } else if (streq(arg, "-m") or streq(arg, "--machine")) {
-                show_machine = true;
-            }
-        }
-    }
-
-    var first = true;
-    if (show_all or show_sysname) {
-        vga.print("ZigOS");
-        first = false;
-    }
-    if (show_all or show_nodename) {
-        if (!first) vga.print(" ");
-        vga.print(syscall_mod.getHostname());
-        first = false;
-    }
-    if (show_all or show_release) {
-        if (!first) vga.print(" ");
-        vga.print("0.1.0");
-        first = false;
-    }
-    if (show_all or show_version) {
-        if (!first) vga.print(" ");
-        vga.print("ZigOS 0.1.0");
-        first = false;
-    }
-    if (show_all or show_machine) {
-        if (!first) vga.print(" ");
-        vga.print("i386");
-        first = false;
-    }
-    if (first) {
-        vga.print("ZigOS");
-    }
-    vga.print("\n");
-}
-
-pub fn whoami() void {
-    vga.print("root\n");
-}
-
-pub fn pwd() void {
-    vga.print(syscall_mod.getCwd());
-    vga.print("\n");
-}
+const printString = common.printString;
+const sliceFromCStr = common.sliceFromCStr;
 
 pub fn cd(args: []const [*:0]const u8) void {
     if (args.len == 0) {
@@ -93,43 +27,6 @@ pub fn cd(args: []const [*:0]const u8) void {
         printString(arg);
         vga.print("\n");
     }
-}
-
-pub fn id() void {
-    if (process.current_process) |proc| {
-        vga.print("uid=");
-        numfmt.printDec(proc.creds.uid);
-        vga.print("(");
-        if (proc.creds.uid == 0) vga.print("root") else vga.print("user");
-        vga.print(") gid=");
-        numfmt.printDec(proc.creds.gid);
-        vga.print("(");
-        if (proc.creds.gid == 0) vga.print("root") else vga.print("users");
-        vga.print(") euid=");
-        numfmt.printDec(proc.creds.euid);
-        vga.print(" egid=");
-        numfmt.printDec(proc.creds.egid);
-        vga.print("\n");
-    }
-}
-
-pub fn date() void {
-    const ticks = timer.getTicks();
-    const total_secs = ticks / timer.TICKS_PER_SECOND;
-    const hours = total_secs / 3600;
-    const mins = (total_secs % 3600) / 60;
-    const secs = total_secs % 60;
-    vga.print("System uptime: ");
-    if (hours > 0) {
-        numfmt.printDec(hours);
-        vga.print("h ");
-    }
-    numfmt.printDec(mins);
-    vga.print("m ");
-    numfmt.printDec(secs);
-    vga.print("s (");
-    numfmt.printDec(ticks);
-    vga.print(" ticks)\n");
 }
 
 pub fn ln(args: []const [*:0]const u8) void {
@@ -178,34 +75,6 @@ pub fn ln(args: []const [*:0]const u8) void {
             vga.print("\n");
             return;
         };
-    }
-}
-
-pub fn hostname(args: []const [*:0]const u8) void {
-    if (args.len == 0) {
-        vga.print(syscall_mod.getHostname());
-        vga.print("\n");
-        return;
-    }
-
-    syscall_mod.setHostname(sliceFromCStr(args[0]));
-}
-
-pub fn sleep(args: []const [*:0]const u8) void {
-    if (args.len == 0) {
-        vga.print("Usage: sleep <seconds>\n");
-        return;
-    }
-
-    const secs = parseNumber(args[0]) orelse {
-        vga.print("sleep: invalid number\n");
-        return;
-    };
-
-    const start = timer.getTicks();
-    const target = start + @as(u64, secs) * timer.TICKS_PER_SECOND;
-    while (timer.getTicks() < target) {
-        process.yield();
     }
 }
 
@@ -319,23 +188,12 @@ pub fn unset(args: []const [*:0]const u8) void {
     environ.unsetVar(sliceFromCStr(args[0]));
 }
 
-pub fn env() void {
-    environ.printAll();
-}
-
 fn streq(a: [*:0]const u8, b: [*:0]const u8) bool {
     var i: usize = 0;
     while (a[i] != 0 and b[i] != 0) : (i += 1) {
         if (a[i] != b[i]) return false;
     }
     return a[i] == 0 and b[i] == 0;
-}
-
-fn printString(str: [*:0]const u8) void {
-    var i: usize = 0;
-    while (str[i] != 0) : (i += 1) {
-        vga.put_char(str[i]);
-    }
 }
 
 fn parseNumber(str: [*:0]const u8) ?u32 {
@@ -350,10 +208,4 @@ fn parseNumber(str: [*:0]const u8) ?u32 {
     }
 
     return result;
-}
-
-fn sliceFromCStr(str: [*:0]const u8) []const u8 {
-    var len: usize = 0;
-    while (str[len] != 0) : (len += 1) {}
-    return str[0..len];
 }

@@ -6,6 +6,10 @@ const numfmt = @import("../../utils/numfmt.zig");
 const scheduler = @import("../../process/scheduler.zig");
 const test_memory = @import("../../tests/test_memory.zig");
 const vga = @import("../../drivers/vga.zig");
+const common = @import("../common.zig");
+
+const printString = common.printString;
+const sliceFromCStr = common.sliceFromCStr;
 
 pub fn multitask() void {
     multitask_demo.runMultitaskingDemo();
@@ -71,17 +75,4 @@ pub fn lsDev() void {
         }
         vga.put_char('\n');
     }
-}
-
-fn printString(str: [*:0]const u8) void {
-    var i: usize = 0;
-    while (str[i] != 0) : (i += 1) {
-        vga.put_char(str[i]);
-    }
-}
-
-fn sliceFromCStr(str: [*:0]const u8) []const u8 {
-    var len: usize = 0;
-    while (str[len] != 0) : (len += 1) {}
-    return str[0..len];
 }

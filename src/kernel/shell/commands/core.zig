@@ -22,22 +22,3 @@ pub fn help() void {
 pub fn clear() void {
     vga.clear();
 }
-
-pub fn echo(args: []const [*:0]const u8) void {
-    for (args, 0..) |arg, i| {
-        if (i > 0) vga.put_char(' ');
-        printString(arg);
-    }
-    vga.put_char('\n');
-}
-
-pub fn trueCmd() void {}
-
-pub fn falseCmd() void {}
-
-fn printString(str: [*:0]const u8) void {
-    var i: usize = 0;
-    while (str[i] != 0) : (i += 1) {
-        vga.put_char(str[i]);
-    }
-}
