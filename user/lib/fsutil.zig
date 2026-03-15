@@ -1,6 +1,7 @@
 const syscall = @import("syscall");
 
 pub const CopyError = error{ ReadFailed, WriteFailed };
+pub const ReadAllError = error{ ReadFailed, BufferTooSmall };
 
 const copy_buffer_size = 1024;
 
@@ -22,5 +23,17 @@ pub fn copyFd(source_fd: i32, destination_fd: i32) CopyError!void {
         if (syscall.isError(rc)) return error.ReadFailed;
 
         try writeAll(destination_fd, buffer[0..@intCast(rc)]);
+    }
+}
+
+pub fn readAll(fd: i32, buffer: []u8) ReadAllError![]u8 {
+    var used: usize = 0;
+    while (true) {
+        if (used >= buffer.len) return error.BufferTooSmall;
+
+        const rc = syscall.read(fd, buffer[used..]);
+        if (rc == 0) return buffer[0..used];
+        if (syscall.isError(rc)) return error.ReadFailed;
+        used += @intCast(rc);
     }
 }
