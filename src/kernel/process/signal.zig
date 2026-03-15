@@ -371,7 +371,7 @@ pub fn sendSignal(target: *process.Process, signum: i32) void {
     };
 
     target.signals.pending.add(signum, &info);
-    readiness.notifyAll();
+    readiness.notifyPseudo();
 
     if (target.state == .Waiting or (signum == SIGCONT and target.state == .Stopped)) {
         target.state = .Ready;

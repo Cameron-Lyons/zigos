@@ -184,7 +184,7 @@ pub fn closeTimerFd(fd: i32) i32 {
     if (!tfd.in_use) return abi.EBADF;
     tfd.in_use = false;
     tfd.armed = false;
-    readiness.notifyAll();
+    readiness.notifyPseudo();
     return 0;
 }
 
@@ -210,7 +210,7 @@ pub fn readTimerFd(fd: i32, buffer: []u8) ?i32 {
     if (expirations == 0) return abi.EAGAIN;
 
     @memcpy(buffer[0..@sizeOf(u64)], std.mem.asBytes(&expirations));
-    readiness.notifyAll();
+    readiness.notifyPseudo();
     return @sizeOf(u64);
 }
 
@@ -234,7 +234,7 @@ pub fn sys_timerfd_create(clockid: u32, flags: u32) i32 {
             tfd.next_expiration_tick = 0;
             tfd.interval_ticks = 0;
             tfd.armed = false;
-            readiness.notifyAll();
+            readiness.notifyPseudo();
             return @as(i32, @intCast(i)) + TIMERFD_BASE;
         }
     }
@@ -256,7 +256,7 @@ pub fn sys_timerfd_settime(fd: i32, flags: u32, new_value_addr: usize, old_value
 
     protection.copyFromUser(std.mem.asBytes(&tfd.spec), new_value_addr) catch return abi.EINVAL;
     applyTimerFdSpec(tfd, flags);
-    readiness.notifyAll();
+    readiness.notifyPseudo();
     return 0;
 }
 

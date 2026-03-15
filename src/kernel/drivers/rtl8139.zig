@@ -4,6 +4,8 @@ const pci = @import("pci.zig");
 const idt = @import("../interrupts/idt.zig");
 const vga = @import("vga.zig");
 const memory = @import("../memory/memory.zig");
+const network = @import("../net/network.zig");
+const sync = @import("../utils/sync.zig");
 
 const RTL8139_VENDOR_ID = 0x10EC;
 const RTL8139_DEVICE_ID = 0x8139;
@@ -11,6 +13,8 @@ const RTL8139_DEVICE_ID = 0x8139;
 const RX_BUFFER_SIZE = 8192 + 16 + 1500;
 const TX_BUFFER_SIZE = 1536;
 const NUM_TX_DESCRIPTORS = 4;
+const RX_POLL_BUFFER_SIZE = 2048;
+const PENDING_RX_CAPACITY = 128;
 
 const Register = enum(u16) {
     MAC0 = 0x00,
@@ -96,13 +100,27 @@ const TxStatus = struct {
 
 var rtl8139_device: ?RTL8139 = null;
 
+const PendingRx = struct {
+    release_offset: u16 = 0,
+    ready: bool = false,
+};
+
 const RTL8139 = struct {
     io_base: u16,
     mac_address: [6]u8,
     rx_buffer: [*]u8,
     tx_buffers: [NUM_TX_DESCRIPTORS][*]u8,
+    rx_lock: sync.SpinLock,
+    rx_poll_buffer: [RX_POLL_BUFFER_SIZE]u8,
     current_tx: u8,
     rx_offset: u16,
+    pending_rx: [PENDING_RX_CAPACITY]PendingRx,
+    pending_queue: [PENDING_RX_CAPACITY]u8,
+    pending_free_stack: [PENDING_RX_CAPACITY]u8,
+    pending_head: usize,
+    pending_tail: usize,
+    pending_count: usize,
+    pending_free_count: usize,
 
     pub fn init(device: pci.PCIDevice) !RTL8139 {
         var rtl = RTL8139{
@@ -113,9 +131,21 @@ const RTL8139 = struct {
             .rx_buffer = undefined,
             // SAFETY: each entry assigned from kmalloc in the following loop
             .tx_buffers = undefined,
+            .rx_lock = sync.SpinLock.init(),
+            .rx_poll_buffer = undefined,
             .current_tx = 0,
             .rx_offset = 0,
+            .pending_rx = [_]PendingRx{.{}} ** PENDING_RX_CAPACITY,
+            .pending_queue = [_]u8{0} ** PENDING_RX_CAPACITY,
+            .pending_free_stack = undefined,
+            .pending_head = 0,
+            .pending_tail = 0,
+            .pending_count = 0,
+            .pending_free_count = 0,
         };
+
+        initPendingFreeStack(&rtl.pending_free_stack);
+        rtl.pending_free_count = rtl.pending_free_stack.len;
 
         const rx_mem = memory.kmalloc(RX_BUFFER_SIZE) orelse return error.OutOfMemory;
         errdefer memory.kfree(rx_mem);
@@ -222,6 +252,19 @@ const RTL8139 = struct {
     }
 
     pub fn receive(self: *RTL8139) ?[]u8 {
+        const packet = self.claimReceive() orelse return null;
+        const copy_len = @min(packet.data.len, self.rx_poll_buffer.len);
+        @memcpy(self.rx_poll_buffer[0..copy_len], packet.data[0..copy_len]);
+        self.releaseReceived(packet.handle);
+        return self.rx_poll_buffer[0..copy_len];
+    }
+
+    pub fn claimReceive(self: *RTL8139) ?network.OwnedRxPacket {
+        self.rx_lock.acquire();
+        defer self.rx_lock.release();
+
+        if (self.pending_free_count == 0) return null;
+
         const cmd = self.readReg8(.ChipCmd);
         if ((cmd & 0x01) == 0) {
             return null;
@@ -239,23 +282,54 @@ const RTL8139 = struct {
         if (packet_start + length > RX_BUFFER_SIZE) return null;
         const packet_data = self.rx_buffer[packet_start .. packet_start + length];
 
-        self.rx_offset = (self.rx_offset + length + 4 + 3) & ~@as(u16, 3);
-        if (self.rx_offset > RX_BUFFER_SIZE) {
-            self.rx_offset = self.rx_offset % RX_BUFFER_SIZE;
+        var next_offset = (self.rx_offset + length + 4 + 3) & ~@as(u16, 3);
+        if (next_offset > RX_BUFFER_SIZE) {
+            next_offset = next_offset % RX_BUFFER_SIZE;
         }
 
-        self.writeReg16(.RxBufPtr, self.rx_offset -% 0x10);
+        self.pending_free_count -= 1;
+        const handle = self.pending_free_stack[self.pending_free_count];
+        self.pending_rx[handle] = .{ .release_offset = next_offset, .ready = false };
+        self.pending_queue[self.pending_tail] = handle;
+        self.pending_tail = (self.pending_tail + 1) % self.pending_queue.len;
+        self.pending_count += 1;
+        self.rx_offset = next_offset;
 
-        return packet_data;
+        return .{
+            .data = packet_data,
+            .mac = self.mac_address,
+            .handle = handle,
+            .release = releaseClaimedPacket,
+        };
+    }
+
+    pub fn releaseReceived(self: *RTL8139, handle: usize) void {
+        if (handle >= self.pending_rx.len) return;
+
+        self.rx_lock.acquire();
+        defer self.rx_lock.release();
+
+        self.pending_rx[handle].ready = true;
+        while (self.pending_count != 0) {
+            const next_handle = self.pending_queue[self.pending_head];
+            const pending = &self.pending_rx[next_handle];
+            if (!pending.ready) break;
+
+            self.writeReg16(.RxBufPtr, pending.release_offset -% 0x10);
+            pending.* = .{};
+            self.pending_head = (self.pending_head + 1) % self.pending_queue.len;
+            self.pending_count -= 1;
+            self.pending_free_stack[self.pending_free_count] = next_handle;
+            self.pending_free_count += 1;
+        }
     }
 
     pub fn handleInterrupt(self: *RTL8139) void {
         const status = self.readReg16(.IntrStatus);
 
         if (status & InterruptStatus.RX_OK != 0) {
-            while (self.receive()) |packet| {
-                const network = @import("../net/network.zig");
-                network.enqueueRxPacket(packet, self.mac_address);
+            while (self.claimReceive()) |packet| {
+                _ = network.enqueueBorrowedRx(packet);
             }
         }
 
@@ -272,6 +346,19 @@ const RTL8139 = struct {
         self.writeReg16(.IntrStatus, status);
     }
 };
+
+fn initPendingFreeStack(stack: []u8) void {
+    var i: usize = 0;
+    while (i < stack.len) : (i += 1) {
+        stack[i] = @intCast(stack.len - 1 - i);
+    }
+}
+
+fn releaseClaimedPacket(handle: usize) void {
+    if (rtl8139_device) |*rtl| {
+        rtl.releaseReceived(handle);
+    }
+}
 
 pub fn init() void {
     if (pci.findDevice(RTL8139_VENDOR_ID, RTL8139_DEVICE_ID)) |device| {

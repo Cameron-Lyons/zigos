@@ -27,9 +27,17 @@ const MAX_COMMAND_LENGTH = 256;
 const MAX_ARGS = 16;
 const MAX_HISTORY = 50;
 const MAX_EXTERNAL_LAUNCHES = 8;
+const EXTERNAL_LAUNCH_LOOKUP_SIZE = 16;
 const MAX_PIPE_STAGES = 8;
 const MAX_TOKENS = 32;
 const MAX_BACKGROUND_JOBS = 8;
+const EXTERNAL_COMMAND_FILE_STORAGE_SIZE = 32768;
+
+comptime {
+    if ((EXTERNAL_LAUNCH_LOOKUP_SIZE & (EXTERNAL_LAUNCH_LOOKUP_SIZE - 1)) != 0) {
+        @compileError("EXTERNAL_LAUNCH_LOOKUP_SIZE must be a power of two");
+    }
+}
 
 const TokenizationError = error{
     UnterminatedQuote,
@@ -74,7 +82,7 @@ const ExternalCommandLaunch = struct {
     argv_len: [MAX_ARGS]usize = [_]usize{0} ** MAX_ARGS,
     argv_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS,
     file_len: usize = 0,
-    file_storage: [32768]u8 = [_]u8{0} ** 32768,
+    file_storage: [EXTERNAL_COMMAND_FILE_STORAGE_SIZE]u8 = [_]u8{0} ** EXTERNAL_COMMAND_FILE_STORAGE_SIZE,
 };
 
 const ParsedStage = struct {
@@ -121,6 +129,7 @@ const PipelineConfigError = error{
 };
 
 var external_command_launches: [MAX_EXTERNAL_LAUNCHES]ExternalCommandLaunch = [_]ExternalCommandLaunch{ExternalCommandLaunch{}} ** MAX_EXTERNAL_LAUNCHES;
+var external_command_launch_lookup: [EXTERNAL_LAUNCH_LOOKUP_SIZE]?*ExternalCommandLaunch = [_]?*ExternalCommandLaunch{null} ** EXTERNAL_LAUNCH_LOOKUP_SIZE;
 
 pub const ArrowKey = enum {
     Up,
@@ -695,7 +704,7 @@ pub const Shell = struct {
         const user_proc = process.create_exec_process(process_name);
         user_proc.stdin_redirect = stdin_fd;
         user_proc.stdout_redirect = stdout_fd;
-        launch.pid = user_proc.pid;
+        setExternalCommandLaunchPid(launch, user_proc.pid);
 
         if (nice_value) |nice| {
             if (!scheduler.setProcessNice(user_proc.pid, nice)) {
@@ -1712,7 +1721,11 @@ pub const Shell = struct {
 fn allocateExternalCommandLaunch() ExternalLaunchError!*ExternalCommandLaunch {
     for (&external_command_launches) |*launch| {
         if (!launch.in_use) {
-            launch.* = ExternalCommandLaunch{ .in_use = true };
+            launch.in_use = true;
+            launch.pid = 0;
+            launch.path_len = 0;
+            launch.argc = 0;
+            launch.file_len = 0;
             return launch;
         }
     }
@@ -1720,16 +1733,51 @@ fn allocateExternalCommandLaunch() ExternalLaunchError!*ExternalCommandLaunch {
 }
 
 fn releaseExternalCommandLaunch(launch: *ExternalCommandLaunch) void {
-    launch.* = ExternalCommandLaunch{};
+    launch.in_use = false;
+    launch.pid = 0;
+    launch.path_len = 0;
+    launch.argc = 0;
+    launch.file_len = 0;
+    rebuildExternalCommandLaunchLookup();
 }
 
 fn findExternalCommandLaunch(pid: u32) ?*ExternalCommandLaunch {
-    for (&external_command_launches) |*launch| {
-        if (launch.in_use and launch.pid == pid) {
-            return launch;
-        }
+    if (pid == 0) return null;
+
+    var idx = externalLaunchLookupIndex(pid);
+    var attempts: usize = 0;
+    while (attempts < external_command_launch_lookup.len) : (attempts += 1) {
+        const launch = external_command_launch_lookup[idx] orelse return null;
+        if (launch.in_use and launch.pid == pid) return launch;
+        idx = (idx + 1) & (external_command_launch_lookup.len - 1);
     }
+
     return null;
+}
+
+fn setExternalCommandLaunchPid(launch: *ExternalCommandLaunch, pid: u32) void {
+    launch.pid = pid;
+    rebuildExternalCommandLaunchLookup();
+}
+
+fn rebuildExternalCommandLaunchLookup() void {
+    @memset(&external_command_launch_lookup, null);
+    for (&external_command_launches) |*launch| {
+        if (!launch.in_use or launch.pid == 0) continue;
+        insertExternalCommandLaunchLookup(launch);
+    }
+}
+
+fn insertExternalCommandLaunchLookup(launch: *ExternalCommandLaunch) void {
+    var idx = externalLaunchLookupIndex(launch.pid);
+    while (external_command_launch_lookup[idx] != null) {
+        idx = (idx + 1) & (external_command_launch_lookup.len - 1);
+    }
+    external_command_launch_lookup[idx] = launch;
+}
+
+fn externalLaunchLookupIndex(pid: u32) usize {
+    return @intCast(pid & @as(u32, @intCast(external_command_launch_lookup.len - 1)));
 }
 
 pub export fn external_command_entry_c() callconv(.c) void {
@@ -1740,25 +1788,20 @@ pub export fn external_command_entry_c() callconv(.c) void {
         return;
     };
 
-    var path_buffer: [MAX_COMMAND_LENGTH]u8 = undefined;
-    const path_len = launch.path_len;
-    @memcpy(path_buffer[0..path_len], launch.path[0..path_len]);
-
-    var argv_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = undefined;
+    const path = launch.path[0..launch.path_len];
     var argv: [MAX_ARGS][]const u8 = undefined;
     const argc = launch.argc;
 
     var i: usize = 0;
     while (i < argc) : (i += 1) {
         const arg_len = launch.argv_len[i];
-        @memcpy(argv_storage[i][0..arg_len], launch.argv_storage[i][0..arg_len]);
-        argv[i] = argv_storage[i][0..arg_len];
+        argv[i] = launch.argv_storage[i][0..arg_len];
     }
 
     var envp: [0][]const u8 = undefined;
     posix.execveFromData(launch.file_storage[0..launch.file_len], argv[0..argc], &envp) catch |err| {
         console.print("Failed to execute ");
-        console.print(path_buffer[0..path_len]);
+        console.print(path);
         console.print(": ");
         console.print(@errorName(err));
         console.print("\n");
