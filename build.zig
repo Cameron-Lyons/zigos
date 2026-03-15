@@ -30,8 +30,18 @@ const rootfs_image_path = "build/disk.img";
 const user_program_specs = [_]UserProgramSpec{
     .{ .name = "hello", .root_source = "user/bin/hello.zig" },
     .{ .name = "echo", .root_source = "user/bin/echo.zig" },
+    .{ .name = "env", .root_source = "user/bin/env.zig" },
+    .{ .name = "which", .root_source = "user/bin/which.zig" },
+    .{ .name = "head", .root_source = "user/bin/head.zig" },
+    .{ .name = "wc", .root_source = "user/bin/wc.zig" },
+    .{ .name = "ps", .root_source = "user/bin/ps.zig" },
+    .{ .name = "ping", .root_source = "user/bin/ping.zig" },
     .{ .name = "uname", .root_source = "user/bin/uname.zig" },
     .{ .name = "cat", .root_source = "user/bin/cat.zig" },
+    .{ .name = "cp", .root_source = "user/bin/cp.zig" },
+    .{ .name = "mv", .root_source = "user/bin/mv.zig" },
+    .{ .name = "grep", .root_source = "user/bin/grep.zig" },
+    .{ .name = "kill", .root_source = "user/bin/kill.zig" },
     .{ .name = "ls", .root_source = "user/bin/ls.zig" },
     .{ .name = "pwd", .root_source = "user/bin/pwd.zig" },
     .{ .name = "mkdir", .root_source = "user/bin/mkdir.zig" },
@@ -193,7 +203,7 @@ pub fn build(b: *std.Build) void {
         \\  echo "Userland smoke test failed: no serial output captured" >&2
         \\  exit 1
         \\fi
-        \\for marker in "BOOT:START" "BOOT:PROFILE:userland_smoke" "Disk root mounted at /" "BOOT:SHELL_READY" "USERLAND:HELLO" "USERLAND:ECHO" "USERLAND:ENV" "USERLAND:CMDSUB" "USERLAND:QUOTED" "USERLAND:ESCAPED" "USERLAND:GLOB" "USERLAND:UNAME" "USERLAND:LS" "USERLAND:CAT" "USERLAND:CD_BIN" "USERLAND:RELATIVE_CMD" "USERLAND:CD_ETC" "USERLAND:RELATIVE_ARG" "USERLAND:CD_ROOT" "USERLAND:PIPE_OK" "USERLAND:REDIRECT_WRITE" "USERLAND:REDIRECT_READ" "USERLAND:BG_START" "USERLAND:JOBS_RUNNING" "USERLAND:JOBS_STOPPED" "USERLAND:BG_RESUME" "USERLAND:JOBS_RESUMED" "user:root home:/home/user" "shell-ZigOS" "USERLAND QUOTED" "USERLAND ESCAPED" "/bin/cat /bin/ls" "USERLAND:RELATIVE" "Welcome to ZigOS userspace smoke test." "USERLAND:PIPE" "USERLAND:REDIRECT" "[1] Running /bin/sleep 3" "[1] Stopped /bin/sleep 3" "USERLAND:PASS"; do
+        \\for marker in "BOOT:START" "BOOT:PROFILE:userland_smoke" "Disk root mounted at /" "BOOT:SHELL_READY" "USERLAND:HELLO" "USERLAND:ECHO" "USERLAND:ENV" "USERLAND:CMDSUB" "USERLAND:QUOTED" "USERLAND:ESCAPED" "USERLAND:GLOB" "USERLAND:UNAME" "USERLAND:LS" "USERLAND:CAT" "USERLAND:ENV_STANDALONE" "USERLAND:ENV_BIN" "USERLAND:WHICH" "USERLAND:HEAD" "USERLAND:WC" "USERLAND:CP" "USERLAND:MV" "USERLAND:GREP" "USERLAND:PS" "USERLAND:PING" "USERLAND:PIPE_OK" "USERLAND:REDIRECT_WRITE" "USERLAND:REDIRECT_READ" "USERLAND:BG_START" "USERLAND:JOBS_RUNNING" "USERLAND:JOBS_STOPPED" "USERLAND:BG_RESUME" "USERLAND:JOBS_RESUMED" "user:root home:/home/user" "shell-ZigOS" "USERLAND QUOTED" "USERLAND ESCAPED" "/bin/cat /bin/cp /bin/ls" "Welcome to ZigOS userspace smoke test." "PATH=/bin:/usr/bin:/mnt/bin" "USERLAND:PIPE" "USERLAND:REDIRECT" "[1] Running /bin/sleep 3" "[1] Stopped /bin/sleep 3" "USERLAND:PASS"; do
         \\  if ! grep -Fq "$marker" "$LOG_PATH"; then
         \\    echo "Userland smoke test failed: missing marker '$marker'" >&2
         \\    cat "$LOG_PATH" >&2
@@ -508,6 +518,28 @@ fn addUserProgram(
     });
     cli_module.addImport("stdio", stdio_module);
 
+    const fsutil_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/fsutil.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+    fsutil_module.addImport("syscall", syscall_module);
+
+    const processutil_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/processutil.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+    processutil_module.addImport("cstr", cstr_module);
+    processutil_module.addImport("syscall", syscall_module);
+
+    const envutil_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/envutil.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+    envutil_module.addImport("cstr", cstr_module);
+
     const user_module = b.addModule(b.fmt("user-{s}", .{name}), .{
         .root_source_file = b.path(root_source),
         .target = target,
@@ -515,6 +547,9 @@ fn addUserProgram(
     });
     user_module.addImport("cstr", cstr_module);
     user_module.addImport("cli", cli_module);
+    user_module.addImport("envutil", envutil_module);
+    user_module.addImport("fsutil", fsutil_module);
+    user_module.addImport("processutil", processutil_module);
     user_module.addImport("runtime", runtime_module);
     user_module.addImport("syscall", syscall_module);
     user_module.addImport("stdio", stdio_module);

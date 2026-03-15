@@ -1119,6 +1119,7 @@ pub fn dup2(old_fd: u32, new_fd: u32) VFSError!u32 {
     };
     fd_table[new_fd] = new_desc;
     old_desc.vnode.ref_count += 1;
+    retainPipeEndpoint(new_desc);
 
     return new_fd;
 }
@@ -1143,8 +1144,19 @@ pub fn dup(old_fd: u32) VFSError!u32 {
     };
     fd_table[new_fd] = new_desc;
     old_desc.vnode.ref_count += 1;
+    retainPipeEndpoint(new_desc);
 
     return new_fd;
+}
+
+fn retainPipeEndpoint(file_desc: *const FileDescriptor) void {
+    if (file_desc.vnode.file_type != .Pipe) return;
+    const pipe: *PipeData = @ptrCast(@alignCast(file_desc.vnode.private_data orelse return));
+    if ((file_desc.flags & O_WRONLY) != 0) {
+        pipe.writers += 1;
+    } else {
+        pipe.readers += 1;
+    }
 }
 
 fn notifyPathEvent(path: []const u8, exact_mask: u32, parent_mask: u32) void {

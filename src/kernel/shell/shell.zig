@@ -70,6 +70,7 @@ const ExternalLaunchError = error{
     ArgumentTooLong,
     CommandReadFailed,
     CommandTooLarge,
+    RedirectDupFailed,
     TooManyLaunches,
 };
 
@@ -81,6 +82,9 @@ const ExternalCommandLaunch = struct {
     path: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH,
     argv_len: [MAX_ARGS]usize = [_]usize{0} ** MAX_ARGS,
     argv_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS,
+    envc: usize = 0,
+    env_len: [environ.MAX_EXPORT_ENTRIES]usize = [_]usize{0} ** environ.MAX_EXPORT_ENTRIES,
+    env_storage: [environ.MAX_EXPORT_ENTRIES][environ.MAX_EXPORT_ENTRY_LEN]u8 = [_][environ.MAX_EXPORT_ENTRY_LEN]u8{[_]u8{0} ** environ.MAX_EXPORT_ENTRY_LEN} ** environ.MAX_EXPORT_ENTRIES,
     file_len: usize = 0,
     file_storage: [EXTERNAL_COMMAND_FILE_STORAGE_SIZE]u8 = [_]u8{0} ** EXTERNAL_COMMAND_FILE_STORAGE_SIZE,
 };
@@ -569,11 +573,14 @@ pub const Shell = struct {
         const command_name = sliceFromCStr(command);
         if (registry.lookup(command_name)) |command_meta| {
             if (background_requested) {
-                vga.print("Background execution requires an external command\n");
-                return false;
+                if (!registry.hasExternalProgram(command_meta.id)) {
+                    vga.print("Background execution requires an external command\n");
+                    return false;
+                }
+            } else {
+                self.dispatchCommand(command_meta.id, args[1..arg_count]);
+                return true;
             }
-            self.dispatchCommand(command_meta.id, args[1..arg_count]);
-            return true;
         }
 
         const pid = self.launchExternalCommand(args[0..arg_count], null) catch |err| {
@@ -611,38 +618,33 @@ pub const Shell = struct {
             return false;
         };
 
-        var stage_pids: [MAX_PIPE_STAGES]u32 = undefined;
-        var launched_count: usize = 0;
-        var pending_pipe_read: ?i32 = null;
+        var temp_paths: [MAX_PIPE_STAGES - 1][64]u8 = [_][64]u8{[_]u8{0} ** 64} ** (MAX_PIPE_STAGES - 1);
+        var temp_path_lens: [MAX_PIPE_STAGES - 1]usize = [_]usize{0} ** (MAX_PIPE_STAGES - 1);
+        if (pipeline.stage_count > 1) {
+            var temp_idx: usize = 0;
+            while (temp_idx + 1 < pipeline.stage_count) : (temp_idx += 1) {
+                temp_path_lens[temp_idx] = makePipelineTempPath(&temp_paths[temp_idx], temp_idx) catch {
+                    printPipelineConfigError(error.OpenFailed);
+                    return false;
+                };
+            }
+        }
+        defer cleanupPipelineTempFiles(&temp_paths, &temp_path_lens, pipeline.stage_count);
 
+        var success = true;
         var stage_idx: usize = 0;
         while (stage_idx < pipeline.stage_count) : (stage_idx += 1) {
             const stage = &pipeline.stages[stage_idx];
-            const stdin_fd = openStageInput(stage, pending_pipe_read) catch |err| {
-                closeRedirectFd(pending_pipe_read);
+            const stdin_fd = openStageInput(stage, &temp_paths, &temp_path_lens, stage_idx) catch |err| {
                 printPipelineConfigError(err);
-                _ = waitForPipelineStages(self, stage_pids[0..launched_count]);
                 return false;
             };
 
-            var next_pipe_read: ?i32 = null;
-            var stdout_fd = openStageOutput(stage) catch |err| {
+            const stdout_fd = openStageOutput(stage, &temp_paths, &temp_path_lens, pipeline.stage_count, stage_idx) catch |err| {
                 closeRedirectFd(stdin_fd);
                 printPipelineConfigError(err);
-                _ = waitForPipelineStages(self, stage_pids[0..launched_count]);
                 return false;
             };
-
-            if (stdout_fd == null and stage_idx + 1 < pipeline.stage_count) {
-                const pipe_fds = createPipelinePipe() catch |err| {
-                    closeRedirectFd(stdin_fd);
-                    printPipelineConfigError(err);
-                    _ = waitForPipelineStages(self, stage_pids[0..launched_count]);
-                    return false;
-                };
-                next_pipe_read = pipe_fds[0];
-                stdout_fd = pipe_fds[1];
-            }
 
             const pid = self.launchExternalCommandWithRedirects(
                 stage.args[0..stage.arg_count],
@@ -652,22 +654,23 @@ pub const Shell = struct {
             ) catch |err| {
                 closeRedirectFd(stdin_fd);
                 closeRedirectFd(stdout_fd);
-                closeRedirectFd(next_pipe_read);
                 if (stage.arg_count > 0) {
                     printExternalCommandError(stage.args[0], err);
                 } else {
                     printPipelineConfigError(error.EmptyStage);
                 }
-                _ = waitForPipelineStages(self, stage_pids[0..launched_count]);
                 return false;
             };
+            closeRedirectFd(stdin_fd);
+            closeRedirectFd(stdout_fd);
 
-            stage_pids[launched_count] = pid;
-            launched_count += 1;
-            pending_pipe_read = next_pipe_read;
+            if (!waitForForegroundCommand(self, pid)) {
+                success = false;
+                break;
+            }
         }
 
-        return waitForPipelineStages(self, stage_pids[0..launched_count]);
+        return success;
     }
 
     fn launchExternalCommand(self: *const Shell, command_args: []const [*:0]const u8, nice_value: ?i8) ExternalLaunchError!u32 {
@@ -688,6 +691,7 @@ pub const Shell = struct {
         launch.path_len = resolved_path.len;
         @memcpy(launch.path[0..resolved_path.len], resolved_path);
         launch.argc = command_args.len;
+        launch.envc = environ.exportEntries(&launch.env_storage, &launch.env_len);
         launch.file_len = try readExternalCommandBytes(resolved_path, &launch.file_storage);
 
         var i: usize = 0;
@@ -702,8 +706,9 @@ pub const Shell = struct {
 
         const process_name = sliceFromCStr(command_args[0]);
         const user_proc = process.create_exec_process(process_name);
-        user_proc.stdin_redirect = stdin_fd;
-        user_proc.stdout_redirect = stdout_fd;
+        user_proc.stdin_redirect = duplicateRedirectFd(stdin_fd) catch return error.RedirectDupFailed;
+        errdefer process.cleanupStdioRedirects(user_proc);
+        user_proc.stdout_redirect = duplicateRedirectFd(stdout_fd) catch return error.RedirectDupFailed;
         setExternalCommandLaunchPid(launch, user_proc.pid);
 
         if (nice_value) |nice| {
@@ -940,6 +945,7 @@ pub const Shell = struct {
                 error.ArgumentTooLong => vga.print("nice: Argument too long\n"),
                 error.CommandReadFailed => vga.print("nice: Failed to read command file\n"),
                 error.CommandTooLarge => vga.print("nice: Command file too large\n"),
+                error.RedirectDupFailed => vga.print("nice: Failed to duplicate redirected file descriptor\n"),
                 error.TooManyLaunches => vga.print("nice: Too many commands are pending launch\n"),
             }
             return;
@@ -1725,6 +1731,7 @@ fn allocateExternalCommandLaunch() ExternalLaunchError!*ExternalCommandLaunch {
             launch.pid = 0;
             launch.path_len = 0;
             launch.argc = 0;
+            launch.envc = 0;
             launch.file_len = 0;
             return launch;
         }
@@ -1737,6 +1744,7 @@ fn releaseExternalCommandLaunch(launch: *ExternalCommandLaunch) void {
     launch.pid = 0;
     launch.path_len = 0;
     launch.argc = 0;
+    launch.envc = 0;
     launch.file_len = 0;
     rebuildExternalCommandLaunchLookup();
 }
@@ -1790,6 +1798,7 @@ pub export fn external_command_entry_c() callconv(.c) void {
 
     const path = launch.path[0..launch.path_len];
     var argv: [MAX_ARGS][]const u8 = undefined;
+    var envp_values: [environ.MAX_EXPORT_ENTRIES][]const u8 = undefined;
     const argc = launch.argc;
 
     var i: usize = 0;
@@ -1798,8 +1807,12 @@ pub export fn external_command_entry_c() callconv(.c) void {
         argv[i] = launch.argv_storage[i][0..arg_len];
     }
 
-    var envp: [0][]const u8 = undefined;
-    posix.execveFromData(launch.file_storage[0..launch.file_len], argv[0..argc], &envp) catch |err| {
+    i = 0;
+    while (i < launch.envc) : (i += 1) {
+        envp_values[i] = launch.env_storage[i][0..launch.env_len[i]];
+    }
+
+    posix.execveFromData(launch.file_storage[0..launch.file_len], argv[0..argc], envp_values[0..launch.envc]) catch |err| {
         console.print("Failed to execute ");
         console.print(path);
         console.print(": ");
@@ -2405,7 +2418,8 @@ fn copyIntoStageBuffer(buffer: *[MAX_COMMAND_LENGTH]u8, text: []const u8) Pipeli
 fn validatePipelineStages(pipeline: *const ParsedPipeline) bool {
     for (pipeline.stages[0..pipeline.stage_count]) |stage| {
         const command_name = sliceFromCStr(stage.args[0]);
-        if (registry.lookup(command_name) != null) {
+        if (registry.lookup(command_name)) |command_meta| {
+            if (registry.hasExternalProgram(command_meta.id)) continue;
             vga.print("Pipelines and redirection currently require external commands: ");
             printString(stage.args[0]);
             vga.print("\n");
@@ -2639,21 +2653,6 @@ fn openRedirectFd(path: [*:0]const u8, flags: u32) PipelineConfigError!i32 {
     return @as(i32, @intCast(child_fd)) + @as(i32, @intCast(vfsAbiFdOffset()));
 }
 
-fn openStageInput(stage: *const ParsedStage, pipe_read_fd: ?i32) PipelineConfigError!?i32 {
-    if (stage.stdin_path) |path| {
-        return try openRedirectFd(path, vfs.O_RDONLY);
-    }
-    return pipe_read_fd;
-}
-
-fn openStageOutput(stage: *const ParsedStage) PipelineConfigError!?i32 {
-    if (stage.stdout_path) |path| {
-        const flags = vfs.O_WRONLY | vfs.O_CREAT | if (stage.append_stdout) vfs.O_APPEND else vfs.O_TRUNC;
-        return try openRedirectFd(path, flags);
-    }
-    return null;
-}
-
 fn closeRedirectFd(fd: ?i32) void {
     if (fd) |value| {
         if (value >= @as(i32, @intCast(vfsAbiFdOffset()))) {
@@ -2663,22 +2662,52 @@ fn closeRedirectFd(fd: ?i32) void {
     }
 }
 
-fn createPipelinePipe() PipelineConfigError![2]i32 {
-    const pipe = vfs.createPipe() catch return error.PipeFailed;
-    return .{
-        @as(i32, @intCast(pipe.read_fd)) + @as(i32, @intCast(vfsAbiFdOffset())),
-        @as(i32, @intCast(pipe.write_fd)) + @as(i32, @intCast(vfsAbiFdOffset())),
-    };
+fn duplicateRedirectFd(fd: ?i32) error{DupFailed}!?i32 {
+    const value = fd orelse return null;
+    if (value < @as(i32, @intCast(vfsAbiFdOffset()))) return value;
+
+    const vfs_fd: u32 = @intCast(value - @as(i32, @intCast(vfsAbiFdOffset())));
+    const duped = vfs.dup(vfs_fd) catch return error.DupFailed;
+    return @as(i32, @intCast(duped)) + @as(i32, @intCast(vfsAbiFdOffset()));
 }
 
-fn waitForPipelineStages(self: *Shell, pids: []const u32) bool {
-    var success = true;
-    for (pids) |pid| {
-        if (!waitForForegroundCommand(self, pid)) {
-            success = false;
-        }
+fn openStageInput(stage: *const ParsedStage, temp_paths: *const [MAX_PIPE_STAGES - 1][64]u8, temp_path_lens: *const [MAX_PIPE_STAGES - 1]usize, stage_idx: usize) PipelineConfigError!?i32 {
+    if (stage.stdin_path) |path| {
+        return try openRedirectFd(path, vfs.O_RDONLY);
     }
-    return success;
+    if (stage_idx == 0) return null;
+
+    const temp_path = temp_paths[stage_idx - 1][0..temp_path_lens[stage_idx - 1]];
+    return try openRedirectFd(@ptrCast(temp_path.ptr), vfs.O_RDONLY);
+}
+
+fn openStageOutput(stage: *const ParsedStage, temp_paths: *const [MAX_PIPE_STAGES - 1][64]u8, temp_path_lens: *const [MAX_PIPE_STAGES - 1]usize, stage_count: usize, stage_idx: usize) PipelineConfigError!?i32 {
+    if (stage.stdout_path) |path| {
+        const flags = vfs.O_WRONLY | vfs.O_CREAT | if (stage.append_stdout) vfs.O_APPEND else vfs.O_TRUNC;
+        return try openRedirectFd(path, flags);
+    }
+    if (stage_idx + 1 >= stage_count) return null;
+
+    const temp_path = temp_paths[stage_idx][0..temp_path_lens[stage_idx]];
+    return try openRedirectFd(@ptrCast(temp_path.ptr), vfs.O_WRONLY | vfs.O_CREAT | vfs.O_TRUNC);
+}
+
+fn makePipelineTempPath(buffer: *[64]u8, stage_idx: usize) error{NoSpaceLeft}!usize {
+    const current_pid = process.getCurrentPID();
+    const rendered = std.fmt.bufPrint(buffer, "/tmp/.pipe-{d}-{d}", .{ current_pid, stage_idx }) catch return error.NoSpaceLeft;
+    if (rendered.len >= buffer.len) return error.NoSpaceLeft;
+    buffer[rendered.len] = 0;
+    return rendered.len;
+}
+
+fn cleanupPipelineTempFiles(temp_paths: *const [MAX_PIPE_STAGES - 1][64]u8, temp_path_lens: *const [MAX_PIPE_STAGES - 1]usize, stage_count: usize) void {
+    if (stage_count < 2) return;
+    var i: usize = 0;
+    while (i + 1 < stage_count) : (i += 1) {
+        if (temp_path_lens[i] == 0) continue;
+        const temp_path = temp_paths[i][0..temp_path_lens[i]];
+        vfs.unlink(temp_path) catch {};
+    }
 }
 
 fn printPipelineConfigError(err: PipelineConfigError) void {
@@ -2793,6 +2822,7 @@ fn printExternalCommandError(command: [*:0]const u8, err: ExternalLaunchError) v
         error.ArgumentTooLong => vga.print("Command argument too long\n"),
         error.CommandReadFailed => vga.print("Failed to read command file\n"),
         error.CommandTooLarge => vga.print("Command file too large\n"),
+        error.RedirectDupFailed => vga.print("Failed to duplicate redirected file descriptor\n"),
         error.TooManyLaunches => vga.print("Too many commands are pending launch\n"),
     }
 }
