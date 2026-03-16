@@ -1,4 +1,3 @@
-// zlint-disable suppressed-errors
 const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const console = @import("../utils/console.zig");
@@ -6,7 +5,6 @@ const process = @import("../process/process.zig");
 const paging = @import("../memory/paging.zig");
 const vfs = @import("../fs/vfs.zig");
 const network = @import("../net/network.zig");
-const http = @import("../net/http.zig");
 const core_commands = @import("commands/core.zig");
 const fs_commands = @import("commands/fs.zig");
 const process_commands = @import("commands/process.zig");
@@ -24,139 +22,24 @@ const posix = @import("../utils/posix.zig");
 const cwd_mod = @import("../process/syscall/cwd.zig");
 const environ = @import("../utils/environ.zig");
 const common = @import("common.zig");
+const parser = @import("parser.zig");
+const jobctl = @import("jobs.zig");
+const glob = @import("glob.zig");
+const execution = @import("execution.zig");
+const shell_external = @import("external.zig");
+const httpd_runtime = @import("httpd.zig");
 
 const printString = common.printString;
 const sliceFromCStr = common.sliceFromCStr;
 
-const MAX_COMMAND_LENGTH = 256;
-const MAX_ARGS = 16;
+const MAX_COMMAND_LENGTH = parser.MAX_COMMAND_LENGTH;
+const MAX_ARGS = parser.MAX_ARGS;
 const MAX_HISTORY = 50;
-const MAX_EXTERNAL_LAUNCHES = 8;
-const EXTERNAL_LAUNCH_LOOKUP_SIZE = 16;
-const MAX_PIPE_STAGES = 8;
-const MAX_TOKENS = 32;
-const MAX_BACKGROUND_JOBS = 8;
-const EXTERNAL_COMMAND_FILE_STORAGE_SIZE = 32768;
+const MAX_TOKENS = parser.MAX_TOKENS;
 
-comptime {
-    if ((EXTERNAL_LAUNCH_LOOKUP_SIZE & (EXTERNAL_LAUNCH_LOOKUP_SIZE - 1)) != 0) {
-        @compileError("EXTERNAL_LAUNCH_LOOKUP_SIZE must be a power of two");
-    }
-}
-
-const TokenizationError = error{
-    UnterminatedQuote,
-    UnterminatedSubstitution,
-    TrailingEscape,
-    TooManyTokens,
-    TokenTooLong,
-    CommandSubstitutionFailed,
-};
-
-const TokenKind = enum {
-    word,
-    pipe,
-    stdin_redirect,
-    stdout_redirect,
-    append_stdout_redirect,
-    background,
-};
-
-const CommandToken = struct {
-    text: [*:0]const u8,
-    len: usize,
-    kind: TokenKind,
-    has_glob: bool,
-};
-
-const ExternalLaunchError = error{
-    CommandNotFound,
-    CommandPathTooLong,
-    ArgumentTooLong,
-    CommandReadFailed,
-    CommandTooLarge,
-    RedirectDupFailed,
-    TooManyLaunches,
-};
-
-const ExternalCommandLaunch = struct {
-    in_use: bool = false,
-    pid: u32 = 0,
-    path_len: usize = 0,
-    argc: usize = 0,
-    path: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH,
-    argv_len: [MAX_ARGS]usize = [_]usize{0} ** MAX_ARGS,
-    argv_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS,
-    envc: usize = 0,
-    env_len: [environ.MAX_EXPORT_ENTRIES]usize = [_]usize{0} ** environ.MAX_EXPORT_ENTRIES,
-    env_storage: [environ.MAX_EXPORT_ENTRIES][environ.MAX_EXPORT_ENTRY_LEN]u8 = [_][environ.MAX_EXPORT_ENTRY_LEN]u8{[_]u8{0} ** environ.MAX_EXPORT_ENTRY_LEN} ** environ.MAX_EXPORT_ENTRIES,
-    file_len: usize = 0,
-    file_storage: [EXTERNAL_COMMAND_FILE_STORAGE_SIZE]u8 = [_]u8{0} ** EXTERNAL_COMMAND_FILE_STORAGE_SIZE,
-};
-
-const ParsedStage = struct {
-    args: [MAX_ARGS][*:0]const u8 = undefined,
-    arg_glob: [MAX_ARGS]bool = [_]bool{false} ** MAX_ARGS,
-    arg_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS,
-    arg_count: usize = 0,
-    stdin_path: ?[*:0]const u8 = null,
-    stdin_glob: bool = false,
-    stdin_path_storage: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH,
-    stdout_path: ?[*:0]const u8 = null,
-    stdout_glob: bool = false,
-    stdout_path_storage: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH,
-    append_stdout: bool = false,
-};
-
-const ParsedPipeline = struct {
-    stages: [MAX_PIPE_STAGES]ParsedStage = [_]ParsedStage{ParsedStage{}} ** MAX_PIPE_STAGES,
-    stage_count: usize = 0,
-};
-
-const BackgroundJob = struct {
-    active: bool = false,
-    id: u32 = 0,
-    pid: u32 = 0,
-    stopped: bool = false,
-    command_len: usize = 0,
-    command: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH,
-};
-
-const PipelineConfigError = error{
-    EmptyStage,
-    MissingPath,
-    TooManyStages,
-    ArgumentTooLong,
-    UnsupportedBuiltin,
-    UnsupportedRedirection,
-    AmbiguousRedirect,
-    UnsupportedBackground,
-    OpenFailed,
-    PipeFailed,
-    DupFailed,
-    CloseFailed,
-};
-
-var external_command_launches: [MAX_EXTERNAL_LAUNCHES]ExternalCommandLaunch = [_]ExternalCommandLaunch{ExternalCommandLaunch{}} ** MAX_EXTERNAL_LAUNCHES;
-var external_command_launch_lookup: [EXTERNAL_LAUNCH_LOOKUP_SIZE]?*ExternalCommandLaunch = [_]?*ExternalCommandLaunch{null} ** EXTERNAL_LAUNCH_LOOKUP_SIZE;
-var http_server = http.HTTPServer.init(80);
-var http_server_pid: ?u32 = null;
-
-fn httpServerEntry() void {
-    const current_pid = if (process.getEffectiveCurrent()) |proc| proc.pid else 0;
-    http_server.start() catch {
-        vga.print("Failed to start HTTP server\n");
-        if (http_server_pid != null and http_server_pid.? == current_pid) {
-            http_server_pid = null;
-        }
-        return;
-    };
-
-    http_server.handleConnections();
-    if (http_server_pid != null and http_server_pid.? == current_pid) {
-        http_server_pid = null;
-    }
-}
+const TokenKind = parser.TokenKind;
+const CommandToken = parser.CommandToken;
+const BackgroundJob = jobctl.BackgroundJob;
 
 pub const ArrowKey = enum {
     Up,
@@ -173,9 +56,7 @@ pub const Shell = struct {
     history: [MAX_HISTORY][MAX_COMMAND_LENGTH]u8,
     history_count: usize,
     history_index: usize,
-    background_jobs: [MAX_BACKGROUND_JOBS]BackgroundJob,
-    next_job_id: u32,
-    foreground_pid: ?u32,
+    job_table: jobctl.JobTable,
     next_capture_id: u32,
 
     pub fn init() Shell {
@@ -187,16 +68,13 @@ pub const Shell = struct {
             .history = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_HISTORY,
             .history_count = 0,
             .history_index = 0,
-            .background_jobs = [_]BackgroundJob{BackgroundJob{}} ** MAX_BACKGROUND_JOBS,
-            .next_job_id = 1,
-            .foreground_pid = null,
+            .job_table = .{},
             .next_capture_id = 1,
         };
     }
 
     pub fn latestBackgroundPid(self: *Shell) ?u32 {
-        const job = findCurrentJob(self) orelse return null;
-        return job.pid;
+        return self.job_table.latestPid();
     }
 
     pub fn handleChar(self: *Shell, char: u8) void {
@@ -553,194 +431,8 @@ pub const Shell = struct {
     }
 
     fn executeCommand(self: *Shell, wait_for_external: bool) bool {
-        if (self.buffer_pos == 0) {
-            return true;
-        }
-
-        vga.put_char('\n');
-
-        var token_storage: [MAX_TOKENS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_TOKENS;
-        var tokens: [MAX_TOKENS]CommandToken = undefined;
-        const token_count = tokenizeCommandLine(self, self.command_buffer[0..self.buffer_pos], &token_storage, &tokens, true) catch |err| {
-            printTokenizationError(err);
-            return false;
-        };
-
-        if (token_count == 0) {
-            return true;
-        }
-
-        const background_requested = isBackgroundRequest(tokens[0..token_count]);
-        const effective_token_count = if (background_requested) token_count - 1 else token_count;
-        if (!isValidBackgroundPlacement(tokens[0..token_count])) {
-            vga.print("Invalid background job placement\n");
-            return false;
-        }
-
-        if (effective_token_count == 0) {
-            return true;
-        }
-
-        if (containsShellOperators(tokens[0..effective_token_count])) {
-            return self.executePipeline(tokens[0..effective_token_count], background_requested);
-        }
-
-        var args_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
-        var args: [MAX_ARGS][*:0]const u8 = undefined;
-        const arg_count = expandSimpleCommandTokens(tokens[0..effective_token_count], &args_storage, &args) catch |err| {
-            printPipelineConfigError(err);
-            return false;
-        };
-
-        const command = args[0];
-        const command_name = sliceFromCStr(command);
-        if (registry.lookup(command_name)) |command_meta| {
-            if (background_requested) {
-                if (!command_meta.has_external_program) {
-                    vga.print("Background execution requires an external command\n");
-                    return false;
-                }
-            } else if (dispatchesInShell(command_meta)) {
-                self.dispatchCommand(command_meta.id, args[1..arg_count]);
-                return true;
-            }
-        }
-
-        const pid = self.launchExternalCommand(args[0..arg_count], null) catch |err| {
-            printExternalCommandError(command, err);
-            return false;
-        };
-
-        if (background_requested or !wait_for_external) {
-            if (background_requested) {
-                registerBackgroundJob(self, pid, tokens[0..effective_token_count]);
-            }
-            return true;
-        }
-
-        return waitForForegroundCommand(self, pid);
-    }
-
-    fn executePipeline(self: *Shell, tokens: []const CommandToken, background_requested: bool) bool {
-        var pipeline = parsePipeline(tokens) catch |err| {
-            printPipelineConfigError(err);
-            return false;
-        };
-
-        if (background_requested) {
-            printPipelineConfigError(error.UnsupportedBackground);
-            return false;
-        }
-
-        if (!validatePipelineStages(&pipeline)) {
-            return false;
-        }
-
-        expandPipelineGlobs(&pipeline) catch |err| {
-            printPipelineConfigError(err);
-            return false;
-        };
-
-        var temp_paths: [MAX_PIPE_STAGES - 1][64]u8 = [_][64]u8{[_]u8{0} ** 64} ** (MAX_PIPE_STAGES - 1);
-        var temp_path_lens: [MAX_PIPE_STAGES - 1]usize = [_]usize{0} ** (MAX_PIPE_STAGES - 1);
-        if (pipeline.stage_count > 1) {
-            var temp_idx: usize = 0;
-            while (temp_idx + 1 < pipeline.stage_count) : (temp_idx += 1) {
-                temp_path_lens[temp_idx] = makePipelineTempPath(&temp_paths[temp_idx], temp_idx) catch {
-                    printPipelineConfigError(error.OpenFailed);
-                    return false;
-                };
-            }
-        }
-        defer cleanupPipelineTempFiles(&temp_paths, &temp_path_lens, pipeline.stage_count);
-
-        var success = true;
-        var stage_idx: usize = 0;
-        while (stage_idx < pipeline.stage_count) : (stage_idx += 1) {
-            const stage = &pipeline.stages[stage_idx];
-            const stdin_fd = openStageInput(stage, &temp_paths, &temp_path_lens, stage_idx) catch |err| {
-                printPipelineConfigError(err);
-                return false;
-            };
-
-            const stdout_fd = openStageOutput(stage, &temp_paths, &temp_path_lens, pipeline.stage_count, stage_idx) catch |err| {
-                closeRedirectFd(stdin_fd);
-                printPipelineConfigError(err);
-                return false;
-            };
-
-            const pid = self.launchExternalCommandWithRedirects(
-                stage.args[0..stage.arg_count],
-                null,
-                stdin_fd,
-                stdout_fd,
-            ) catch |err| {
-                closeRedirectFd(stdin_fd);
-                closeRedirectFd(stdout_fd);
-                if (stage.arg_count > 0) {
-                    printExternalCommandError(stage.args[0], err);
-                } else {
-                    printPipelineConfigError(error.EmptyStage);
-                }
-                return false;
-            };
-            closeRedirectFd(stdin_fd);
-            closeRedirectFd(stdout_fd);
-
-            if (!waitForForegroundCommand(self, pid)) {
-                success = false;
-                break;
-            }
-        }
-
-        return success;
-    }
-
-    fn launchExternalCommand(self: *const Shell, command_args: []const [*:0]const u8, nice_value: ?i8) ExternalLaunchError!u32 {
-        return self.launchExternalCommandWithRedirects(command_args, nice_value, null, null);
-    }
-
-    fn launchExternalCommandWithRedirects(self: *const Shell, command_args: []const [*:0]const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32) ExternalLaunchError!u32 {
-        _ = self;
-        if (command_args.len == 0) {
-            return error.CommandNotFound;
-        }
-
-        var resolved_path_buffer: [MAX_COMMAND_LENGTH]u8 = undefined;
-        const resolved_path = try resolveExternalCommandPath(sliceFromCStr(command_args[0]), &resolved_path_buffer);
-        const launch = try allocateExternalCommandLaunch();
-        errdefer releaseExternalCommandLaunch(launch);
-
-        launch.path_len = resolved_path.len;
-        @memcpy(launch.path[0..resolved_path.len], resolved_path);
-        launch.argc = command_args.len;
-        launch.envc = environ.exportEntries(&launch.env_storage, &launch.env_len);
-        launch.file_len = try readExternalCommandBytes(resolved_path, &launch.file_storage);
-
-        var i: usize = 0;
-        while (i < command_args.len) : (i += 1) {
-            const arg = sliceFromCStr(command_args[i]);
-            if (arg.len > launch.argv_storage[i].len) {
-                return error.ArgumentTooLong;
-            }
-            @memcpy(launch.argv_storage[i][0..arg.len], arg);
-            launch.argv_len[i] = arg.len;
-        }
-
-        const process_name = sliceFromCStr(command_args[0]);
-        const user_proc = process.create_exec_process(process_name);
-        user_proc.stdin_redirect = duplicateRedirectFd(stdin_fd) catch return error.RedirectDupFailed;
-        errdefer process.cleanupStdioRedirects(user_proc);
-        user_proc.stdout_redirect = duplicateRedirectFd(stdout_fd) catch return error.RedirectDupFailed;
-        setExternalCommandLaunchPid(launch, user_proc.pid);
-
-        if (nice_value) |nice| {
-            if (!scheduler.setProcessNice(user_proc.pid, nice)) {
-                _ = process.setNice(user_proc.pid, nice);
-            }
-        }
-
-        return user_proc.pid;
+        const runtime = makeExecutionRuntime(self);
+        return execution.executeLine(&runtime, self.command_buffer[0..self.buffer_pos], wait_for_external);
     }
 
     fn dispatchCommand(self: *Shell, command_id: registry.CommandId, args: []const [*:0]const u8) void {
@@ -845,13 +537,13 @@ pub const Shell = struct {
         pollBackgroundJobs(self, false);
 
         var found = false;
-        for (&self.background_jobs) |*job| {
+        for (&self.job_table.jobs) |*job| {
             if (!job.active) continue;
             found = true;
             var line_buf: [32]u8 = undefined;
             const prefix = std.fmt.bufPrint(&line_buf, "[{d}] {s} ", .{ job.id, if (job.stopped) "Stopped" else "Running" }) catch "[?] Running ";
             console.print(prefix);
-            console.print(job.command[0..job.command_len]);
+            console.print(job.commandSlice());
             console.print("\n");
         }
 
@@ -875,7 +567,7 @@ pub const Shell = struct {
             job.stopped = false;
         }
 
-        console.print(job.command[0..job.command_len]);
+        console.print(job.commandSlice());
         console.print("\n");
 
         const keep_job = !waitForForegroundCommand(self, job.pid);
@@ -908,6 +600,7 @@ pub const Shell = struct {
     }
 
     fn cmdNice(self: *const Shell, args: []const [*:0]const u8) void {
+        _ = self;
         if (args.len < 2) {
             vga.print("Usage: nice <priority> <command> [args...]\n");
             vga.print("Priority range: -20 (highest) to 19 (lowest)\n");
@@ -922,7 +615,7 @@ pub const Shell = struct {
         const command_name = sliceFromCStr(args[1]);
 
         if (registry.lookup(command_name)) |command_meta| {
-            if (dispatchesInShell(command_meta)) {
+            if (execution.dispatchesInShell(command_meta)) {
                 vga.print("nice: Priority adjustment for built-in commands is not supported.\n");
                 vga.print("Built-in commands run in the shell context and cannot have their priority changed.\n");
                 vga.print("To use priority adjustment, run an external program instead.\n");
@@ -930,7 +623,7 @@ pub const Shell = struct {
             }
         }
 
-        const pid = self.launchExternalCommand(args[1..], priority) catch |err| {
+        const pid = shell_external.launchExternalCommand(args[1..], priority, null, null) catch |err| {
             switch (err) {
                 error.CommandNotFound => {
                     vga.print("nice: Command not found: ");
@@ -1136,7 +829,7 @@ pub const Shell = struct {
         }
 
         if (streq(args[0], "start")) {
-            if (http_server_pid != null) {
+            if (httpd_runtime.running()) {
                 vga.print("HTTP server is already running\n");
                 return;
             }
@@ -1146,28 +839,20 @@ pub const Shell = struct {
                 port = parseNumberU16(sliceFromCStr(args[1]));
             }
 
-            http_server = http.HTTPServer.init(port);
-
-            const server_process = process.create_process("httpd", httpServerEntry);
-            http_server_pid = server_process.pid;
+            const server_pid = httpd_runtime.start(port);
 
             vga.print("Starting HTTP server on port ");
             numfmt.printDec(port);
             vga.print(" (pid ");
-            numfmt.printDec(server_process.pid);
+            numfmt.printDec(server_pid);
             vga.print(")\n");
         } else if (streq(args[0], "stop")) {
-            const pid = http_server_pid orelse {
+            _ = httpd_runtime.stop() orelse {
                 vga.print("HTTP server is not running\n");
                 return;
             };
 
             vga.print("Stopping HTTP server...\n");
-            http_server.stop();
-            _ = process.terminateProcess(pid);
-            if (http_server_pid != null and http_server_pid.? == pid) {
-                http_server_pid = null;
-            }
             vga.print("HTTP server stopped\n");
         } else {
             vga.print("Unknown action: ");
@@ -1372,158 +1057,25 @@ pub const Shell = struct {
     }
 };
 
-fn allocateExternalCommandLaunch() ExternalLaunchError!*ExternalCommandLaunch {
-    for (&external_command_launches) |*launch| {
-        if (!launch.in_use) {
-            launch.in_use = true;
-            launch.pid = 0;
-            launch.path_len = 0;
-            launch.argc = 0;
-            launch.envc = 0;
-            launch.file_len = 0;
-            return launch;
-        }
-    }
-    return error.TooManyLaunches;
-}
-
-fn releaseExternalCommandLaunch(launch: *ExternalCommandLaunch) void {
-    launch.in_use = false;
-    launch.pid = 0;
-    launch.path_len = 0;
-    launch.argc = 0;
-    launch.envc = 0;
-    launch.file_len = 0;
-    rebuildExternalCommandLaunchLookup();
-}
-
-fn findExternalCommandLaunch(pid: u32) ?*ExternalCommandLaunch {
-    if (pid == 0) return null;
-
-    var idx = externalLaunchLookupIndex(pid);
-    var attempts: usize = 0;
-    while (attempts < external_command_launch_lookup.len) : (attempts += 1) {
-        const launch = external_command_launch_lookup[idx] orelse return null;
-        if (launch.in_use and launch.pid == pid) return launch;
-        idx = (idx + 1) & (external_command_launch_lookup.len - 1);
-    }
-
-    return null;
-}
-
-fn setExternalCommandLaunchPid(launch: *ExternalCommandLaunch, pid: u32) void {
-    launch.pid = pid;
-    rebuildExternalCommandLaunchLookup();
-}
-
-fn rebuildExternalCommandLaunchLookup() void {
-    @memset(&external_command_launch_lookup, null);
-    for (&external_command_launches) |*launch| {
-        if (!launch.in_use or launch.pid == 0) continue;
-        insertExternalCommandLaunchLookup(launch);
-    }
-}
-
-fn insertExternalCommandLaunchLookup(launch: *ExternalCommandLaunch) void {
-    var idx = externalLaunchLookupIndex(launch.pid);
-    while (external_command_launch_lookup[idx] != null) {
-        idx = (idx + 1) & (external_command_launch_lookup.len - 1);
-    }
-    external_command_launch_lookup[idx] = launch;
-}
-
-fn externalLaunchLookupIndex(pid: u32) usize {
-    return @intCast(pid & @as(u32, @intCast(external_command_launch_lookup.len - 1)));
-}
-
-pub export fn external_command_entry_c() callconv(.c) void {
-    const pid = process.getCurrentPID();
-    const launch = findExternalCommandLaunch(pid) orelse {
-        vga.print("exec: missing launch context\n");
-        _ = process.terminateProcess(pid);
-        return;
-    };
-
-    const path = launch.path[0..launch.path_len];
-    var argv: [MAX_ARGS][]const u8 = undefined;
-    var envp_values: [environ.MAX_EXPORT_ENTRIES][]const u8 = undefined;
-    const argc = launch.argc;
-
-    var i: usize = 0;
-    while (i < argc) : (i += 1) {
-        const arg_len = launch.argv_len[i];
-        argv[i] = launch.argv_storage[i][0..arg_len];
-    }
-
-    i = 0;
-    while (i < launch.envc) : (i += 1) {
-        envp_values[i] = launch.env_storage[i][0..launch.env_len[i]];
-    }
-
-    posix.execveFromData(launch.file_storage[0..launch.file_len], argv[0..argc], envp_values[0..launch.envc]) catch |err| {
-        console.print("Failed to execute ");
-        console.print(path);
-        console.print(": ");
-        console.print(@errorName(err));
-        console.print("\n");
-        _ = process.terminateProcess(pid);
-    };
-}
-
-fn waitForExternalCommand(pid: u32) bool {
-    const exit_code = posix.waitForProcess(pid) catch |err| {
-        if (findExternalCommandLaunch(pid)) |launch| {
-            releaseExternalCommandLaunch(launch);
-        }
-        vga.print("Failed to wait for command: ");
-        vga.print(@errorName(err));
-        vga.print("\n");
-        return false;
-    };
-
-    if (findExternalCommandLaunch(pid)) |launch| {
-        releaseExternalCommandLaunch(launch);
-    }
-
-    if (exit_code != 0) {
-        vga.print("Command exited with status ");
-        numfmt.printDec(@as(usize, @intCast(if (exit_code < 0) -exit_code else exit_code)));
-        vga.print("\n");
-        return false;
-    }
-
-    return true;
-}
-
 fn registerBackgroundJob(self: *Shell, pid: u32, tokens: []const CommandToken) void {
-    for (&self.background_jobs) |*job| {
-        if (job.active) continue;
-        job.* = BackgroundJob{
-            .active = true,
-            .id = self.next_job_id,
-            .pid = pid,
-            .stopped = false,
-        };
-        self.next_job_id += 1;
-        job.command_len = buildCommandText(tokens, &job.command) catch 0;
-
-        var line_buf: [32]u8 = undefined;
-        const line = std.fmt.bufPrint(&line_buf, "[{d}] {d}\n", .{ job.id, pid }) catch "[?]\n";
-        console.print(line);
+    var command_buffer: [MAX_COMMAND_LENGTH]u8 = undefined;
+    const command_len = buildCommandText(tokens, &command_buffer) catch 0;
+    const job = self.job_table.register(pid, command_buffer[0..command_len]) catch {
+        console.print("Too many background jobs\n");
         return;
-    }
+    };
 
-    console.print("Too many background jobs\n");
+    var line_buf: [32]u8 = undefined;
+    const line = std.fmt.bufPrint(&line_buf, "[{d}] {d}\n", .{ job.id, pid }) catch "[?]\n";
+    console.print(line);
 }
 
 fn waitForForegroundCommand(self: *Shell, pid: u32) bool {
-    self.foreground_pid = pid;
-    defer self.foreground_pid = null;
+    self.job_table.foreground_pid = pid;
+    defer self.job_table.foreground_pid = null;
 
     const result = posix.waitForProcessEvent(pid) catch |err| {
-        if (findExternalCommandLaunch(pid)) |launch| {
-            releaseExternalCommandLaunch(launch);
-        }
+        shell_external.releaseIfPresent(pid);
         vga.print("Failed to wait for command: ");
         vga.print(@errorName(err));
         vga.print("\n");
@@ -1532,9 +1084,7 @@ fn waitForForegroundCommand(self: *Shell, pid: u32) bool {
 
     switch (result) {
         .exited => |exit_code| {
-            if (findExternalCommandLaunch(pid)) |launch| {
-                releaseExternalCommandLaunch(launch);
-            }
+            shell_external.releaseIfPresent(pid);
             return exit_code == 0;
         },
         .stopped => {
@@ -1545,12 +1095,13 @@ fn waitForForegroundCommand(self: *Shell, pid: u32) bool {
 }
 
 fn pollBackgroundJobs(self: *Shell, notify: bool) void {
-    for (&self.background_jobs) |*job| {
+    for (&self.job_table.jobs) |*job| {
         if (!job.active) continue;
         if (process.getProcessByPid(job.pid)) |proc| {
             job.stopped = proc.state == .Stopped;
         }
         const exit_code = posix.pollProcessExit(job.pid) catch {
+            shell_external.releaseIfPresent(job.pid);
             job.active = false;
             continue;
         } orelse continue;
@@ -1559,7 +1110,7 @@ fn pollBackgroundJobs(self: *Shell, notify: bool) void {
             var line_buf: [48]u8 = undefined;
             const prefix = std.fmt.bufPrint(&line_buf, "[{d}] Done ", .{job.id}) catch "[?] Done ";
             console.print(prefix);
-            console.print(job.command[0..job.command_len]);
+            console.print(job.commandSlice());
             if (exit_code != 0) {
                 var status_buf: [24]u8 = undefined;
                 const status_line = std.fmt.bufPrint(&status_buf, " (exit {d})", .{@as(usize, @intCast(if (exit_code < 0) -exit_code else exit_code))}) catch "";
@@ -1568,62 +1119,28 @@ fn pollBackgroundJobs(self: *Shell, notify: bool) void {
             console.print("\n");
         }
 
+        shell_external.releaseIfPresent(job.pid);
         job.active = false;
     }
 }
 
 fn markJobStopped(self: *Shell, pid: u32) void {
-    for (&self.background_jobs) |*job| {
-        if (!job.active or job.pid != pid) continue;
-        job.stopped = true;
-        var line_buf: [40]u8 = undefined;
-        const prefix = std.fmt.bufPrint(&line_buf, "[{d}] Stopped ", .{job.id}) catch "[?] Stopped ";
-        console.print(prefix);
-        console.print(job.command[0..job.command_len]);
-        console.print("\n");
-        return;
-    }
+    const job = self.job_table.findByPid(pid) orelse return;
+    job.stopped = true;
+    var line_buf: [40]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&line_buf, "[{d}] Stopped ", .{job.id}) catch "[?] Stopped ";
+    console.print(prefix);
+    console.print(job.commandSlice());
+    console.print("\n");
 }
 
 fn findSelectedJob(self: *Shell, args: []const [*:0]const u8) ?*BackgroundJob {
-    if (args.len == 0) return findCurrentJob(self);
-    const job_id = parseJobId(args[0]) orelse return null;
-    return findJobById(self, job_id);
-}
-
-fn findCurrentJob(self: *Shell) ?*BackgroundJob {
-    var best: ?*BackgroundJob = null;
-    for (&self.background_jobs) |*job| {
-        if (!job.active) continue;
-        if (best == null or job.id > best.?.id) {
-            best = job;
-        }
-    }
-    return best;
-}
-
-fn findJobById(self: *Shell, job_id: u32) ?*BackgroundJob {
-    for (&self.background_jobs) |*job| {
-        if (job.active and job.id == job_id) return job;
-    }
-    return null;
-}
-
-fn parseJobId(spec: [*:0]const u8) ?u32 {
-    const slice = sliceFromCStr(spec);
-    const digits = if (slice.len > 0 and slice[0] == '%') slice[1..] else slice;
-    if (digits.len == 0) return null;
-
-    var result: u32 = 0;
-    for (digits) |char| {
-        if (char < '0' or char > '9') return null;
-        result = result * 10 + (char - '0');
-    }
-    return result;
+    const spec = if (args.len == 0) null else sliceFromCStr(args[0]);
+    return self.job_table.select(spec);
 }
 
 fn foregroundPidSignal(self: *Shell, char: u8) bool {
-    const pid = self.foreground_pid orelse return false;
+    const pid = self.job_table.foreground_pid orelse return false;
     const signum: i32 = switch (char) {
         3 => signal.SIGINT,
         26 => signal.SIGTSTP,
@@ -1637,6 +1154,47 @@ fn foregroundPidSignal(self: *Shell, char: u8) bool {
         console.print("^Z\n");
     }
     return true;
+}
+
+fn makeExecutionRuntime(self: *Shell) execution.Runtime {
+    return .{
+        .context = self,
+        .nextCaptureIdFn = executionNextCaptureId,
+        .dispatchBuiltinFn = executionDispatchBuiltin,
+        .registerBackgroundJobFn = executionRegisterBackgroundJob,
+        .waitForForegroundFn = executionWaitForForegroundCommand,
+        .launchExternalFn = executionLaunchExternal,
+    };
+}
+
+fn shellFromExecutionContext(context: ?*anyopaque) *Shell {
+    return @ptrCast(@alignCast(context orelse unreachable));
+}
+
+fn executionNextCaptureId(context: ?*anyopaque) u32 {
+    const self = shellFromExecutionContext(context);
+    const capture_id = self.next_capture_id;
+    self.next_capture_id += 1;
+    return capture_id;
+}
+
+fn executionDispatchBuiltin(context: ?*anyopaque, command_id: registry.CommandId, args: []const [*:0]const u8) void {
+    const self = shellFromExecutionContext(context);
+    self.dispatchCommand(command_id, args);
+}
+
+fn executionRegisterBackgroundJob(context: ?*anyopaque, pid: u32, tokens: []const CommandToken) void {
+    const self = shellFromExecutionContext(context);
+    registerBackgroundJob(self, pid, tokens);
+}
+
+fn executionWaitForForegroundCommand(context: ?*anyopaque, pid: u32) bool {
+    const self = shellFromExecutionContext(context);
+    return waitForForegroundCommand(self, pid);
+}
+
+fn executionLaunchExternal(_: ?*anyopaque, command_args: []const [*:0]const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32) execution.ExternalLaunchError!u32 {
+    return shell_external.launchExternalCommand(command_args, nice_value, stdin_fd, stdout_fd);
 }
 
 fn buildCommandText(tokens: []const CommandToken, buffer: *[MAX_COMMAND_LENGTH]u8) error{NoSpaceLeft}!usize {
@@ -1654,829 +1212,6 @@ fn buildCommandText(tokens: []const CommandToken, buffer: *[MAX_COMMAND_LENGTH]u
         len += token_text.len;
     }
     return len;
-}
-
-fn tokenizeCommandLine(self: *Shell, input: []const u8, storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, out_tokens: *[MAX_TOKENS]CommandToken, allow_command_substitution: bool) TokenizationError!usize {
-    var token_count: usize = 0;
-    var token_len: usize = 0;
-    var token_active = false;
-    var token_has_glob = false;
-    var in_single_quote = false;
-    var in_double_quote = false;
-    var escaping = false;
-
-    var idx: usize = 0;
-    while (idx < input.len) : (idx += 1) {
-        const char = input[idx];
-
-        if (escaping) {
-            try appendTokenChar(storage, token_count, &token_len, char);
-            token_active = true;
-            escaping = false;
-            continue;
-        }
-
-        if (in_single_quote) {
-            if (char == '\'') {
-                in_single_quote = false;
-            } else {
-                try appendTokenChar(storage, token_count, &token_len, char);
-            }
-            token_active = true;
-            continue;
-        }
-
-        if (in_double_quote) {
-            if (char == '"') {
-                in_double_quote = false;
-            } else if (char == '\\') {
-                escaping = true;
-            } else if (char == '$') {
-                try expandShellSubstitution(self, input, &idx, storage, token_count, &token_len, &token_has_glob, allow_command_substitution, true);
-            } else {
-                try appendTokenChar(storage, token_count, &token_len, char);
-            }
-            token_active = true;
-            continue;
-        }
-
-        if (isWhitespace(char)) {
-            if (token_active) {
-                try finishWordToken(storage, out_tokens, &token_count, &token_len, &token_active, &token_has_glob);
-            }
-            continue;
-        }
-
-        switch (char) {
-            '\'' => {
-                in_single_quote = true;
-                token_active = true;
-            },
-            '"' => {
-                in_double_quote = true;
-                token_active = true;
-            },
-            '\\' => {
-                escaping = true;
-                token_active = true;
-            },
-            '$' => {
-                try expandShellSubstitution(self, input, &idx, storage, token_count, &token_len, &token_has_glob, allow_command_substitution, false);
-                token_active = true;
-            },
-            '|', '<', '>', '&' => {
-                if (token_active) {
-                    try finishWordToken(storage, out_tokens, &token_count, &token_len, &token_active, &token_has_glob);
-                }
-
-                const operator_len: usize = if (char == '>' and idx + 1 < input.len and input[idx + 1] == '>') 2 else 1;
-                try addOperatorToken(storage, out_tokens, &token_count, if (operator_len == 2) .append_stdout_redirect else switch (char) {
-                    '|' => .pipe,
-                    '<' => .stdin_redirect,
-                    '>' => .stdout_redirect,
-                    '&' => .background,
-                    else => unreachable,
-                }, if (operator_len == 2) ">>" else input[idx .. idx + 1]);
-                if (operator_len == 2) idx += 1;
-            },
-            '*', '?' => {
-                try appendTokenChar(storage, token_count, &token_len, char);
-                token_active = true;
-                token_has_glob = true;
-            },
-            else => {
-                try appendTokenChar(storage, token_count, &token_len, char);
-                token_active = true;
-            },
-        }
-    }
-
-    if (escaping) return error.TrailingEscape;
-    if (in_single_quote or in_double_quote) return error.UnterminatedQuote;
-    if (token_active) {
-        try finishWordToken(storage, out_tokens, &token_count, &token_len, &token_active, &token_has_glob);
-    }
-
-    return token_count;
-}
-
-fn appendTokenChar(storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, token_index: usize, token_len: *usize, char: u8) TokenizationError!void {
-    if (token_index >= MAX_TOKENS) return error.TooManyTokens;
-    if (token_len.* + 1 >= MAX_COMMAND_LENGTH) return error.TokenTooLong;
-    storage[token_index][token_len.*] = char;
-    token_len.* += 1;
-}
-
-fn appendTokenText(storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, token_index: usize, token_len: *usize, text: []const u8) TokenizationError!void {
-    for (text) |char| {
-        try appendTokenChar(storage, token_index, token_len, char);
-    }
-}
-
-fn expandShellSubstitution(self: *Shell, input: []const u8, idx: *usize, storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, token_index: usize, token_len: *usize, token_has_glob: *bool, allow_command_substitution: bool, quoted: bool) TokenizationError!void {
-    if (idx.* + 1 >= input.len) {
-        try appendTokenChar(storage, token_index, token_len, '$');
-        return;
-    }
-
-    if (input[idx.* + 1] == '(') {
-        if (!allow_command_substitution) return error.CommandSubstitutionFailed;
-
-        const sub_slice = parseCommandSubstitution(input, idx) catch return error.UnterminatedSubstitution;
-        var output_buffer: [MAX_COMMAND_LENGTH]u8 = undefined;
-        const output_len = captureCommandSubstitution(self, sub_slice, &output_buffer) catch return error.CommandSubstitutionFailed;
-        try appendTokenText(storage, token_index, token_len, output_buffer[0..output_len]);
-        if (!quoted and containsWildcardChars(output_buffer[0..output_len])) {
-            token_has_glob.* = true;
-        }
-        return;
-    }
-
-    const maybe_var = parseVariableReference(input, idx);
-    if (maybe_var == null) {
-        try appendTokenChar(storage, token_index, token_len, '$');
-        return;
-    }
-
-    if (environ.getVar(maybe_var.?)) |value| {
-        try appendTokenText(storage, token_index, token_len, value);
-        if (!quoted and containsWildcardChars(value)) {
-            token_has_glob.* = true;
-        }
-    }
-}
-
-fn parseVariableReference(input: []const u8, idx: *usize) ?[]const u8 {
-    const next = idx.* + 1;
-    if (next >= input.len) return null;
-
-    if (input[next] == '{') {
-        var end = next + 1;
-        while (end < input.len and input[end] != '}') : (end += 1) {}
-        if (end >= input.len) return null;
-        idx.* = end;
-        return input[next + 1 .. end];
-    }
-
-    var end = next;
-    while (end < input.len and isVarChar(input[end])) : (end += 1) {}
-    if (end == next) return null;
-    idx.* = end - 1;
-    return input[next..end];
-}
-
-fn parseCommandSubstitution(input: []const u8, idx: *usize) error{Unterminated}![]const u8 {
-    var depth: usize = 1;
-    var cursor = idx.* + 2;
-    var in_single_quote = false;
-    var in_double_quote = false;
-    var escaping = false;
-
-    while (cursor < input.len) : (cursor += 1) {
-        const char = input[cursor];
-
-        if (escaping) {
-            escaping = false;
-            continue;
-        }
-
-        if (in_single_quote) {
-            if (char == '\'') in_single_quote = false;
-            continue;
-        }
-
-        if (in_double_quote) {
-            if (char == '"') {
-                in_double_quote = false;
-            } else if (char == '\\') {
-                escaping = true;
-            }
-            continue;
-        }
-
-        switch (char) {
-            '\'' => in_single_quote = true,
-            '"' => in_double_quote = true,
-            '\\' => escaping = true,
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if (depth == 0) {
-                    const sub = input[idx.* + 2 .. cursor];
-                    idx.* = cursor;
-                    return sub;
-                }
-            },
-            else => {},
-        }
-    }
-
-    return error.Unterminated;
-}
-
-fn captureCommandSubstitution(self: *Shell, line: []const u8, output: []u8) error{ CommandFailed, NoSpaceLeft }!usize {
-    var token_storage: [MAX_TOKENS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_TOKENS;
-    var tokens: [MAX_TOKENS]CommandToken = undefined;
-    const token_count = tokenizeCommandLine(self, line, &token_storage, &tokens, false) catch return error.CommandFailed;
-    if (token_count == 0) return 0;
-    if (containsShellOperators(tokens[0..token_count])) return error.CommandFailed;
-
-    var args_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
-    var args: [MAX_ARGS][*:0]const u8 = undefined;
-    const arg_count = expandSimpleCommandTokens(tokens[0..token_count], &args_storage, &args) catch return error.CommandFailed;
-    if (arg_count == 0) return 0;
-
-    const command_name = sliceFromCStr(args[0]);
-    if (registry.lookup(command_name)) |command_meta| {
-        if (dispatchesInShell(command_meta)) return error.CommandFailed;
-    }
-
-    var temp_path: [64]u8 = undefined;
-    const temp_len = makeCommandCapturePath(self, &temp_path) catch return error.NoSpaceLeft;
-    const temp_path_z: [*:0]const u8 = @ptrCast(&temp_path[0]);
-    const stdout_fd = openRedirectFd(temp_path_z, vfs.O_WRONLY | vfs.O_CREAT | vfs.O_TRUNC) catch return error.CommandFailed;
-    defer closeRedirectFd(stdout_fd);
-    defer vfs.unlink(temp_path[0..temp_len]) catch {};
-
-    const pid = self.launchExternalCommandWithRedirects(args[0..arg_count], null, null, stdout_fd) catch return error.CommandFailed;
-    if (!waitForForegroundCommand(self, pid)) return error.CommandFailed;
-
-    const fd = vfs.open(temp_path[0..temp_len], vfs.O_RDONLY) catch return error.CommandFailed;
-    defer vfs.close(fd) catch {};
-    const bytes_read = vfs.read(fd, output) catch return error.CommandFailed;
-
-    return trimCommandSubstitution(output[0..bytes_read]);
-}
-
-fn trimCommandSubstitution(output: []u8) usize {
-    var len = output.len;
-    while (len > 0 and (output[len - 1] == '\n' or output[len - 1] == '\r')) : (len -= 1) {}
-    var i: usize = 0;
-    while (i < len) : (i += 1) {
-        if (output[i] == '\n' or output[i] == '\r') {
-            output[i] = ' ';
-        }
-    }
-    return len;
-}
-
-fn makeCommandCapturePath(self: *Shell, buffer: *[64]u8) error{NoSpaceLeft}!usize {
-    const current_pid = process.getCurrentPID();
-    const capture_id = self.next_capture_id;
-    self.next_capture_id += 1;
-    const rendered = std.fmt.bufPrint(buffer, "/tmp/.cmdsub-{d}-{d}", .{ current_pid, capture_id }) catch return error.NoSpaceLeft;
-    if (rendered.len >= buffer.len) return error.NoSpaceLeft;
-    buffer[rendered.len] = 0;
-    return rendered.len;
-}
-
-fn finishWordToken(storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, out_tokens: *[MAX_TOKENS]CommandToken, token_count: *usize, token_len: *usize, token_active: *bool, token_has_glob: *bool) TokenizationError!void {
-    if (token_count.* >= MAX_TOKENS) return error.TooManyTokens;
-    storage[token_count.*][token_len.*] = 0;
-    out_tokens[token_count.*] = .{
-        .text = @ptrCast(&storage[token_count.*][0]),
-        .len = token_len.*,
-        .kind = .word,
-        .has_glob = token_has_glob.*,
-    };
-    token_count.* += 1;
-    token_len.* = 0;
-    token_active.* = false;
-    token_has_glob.* = false;
-}
-
-fn addOperatorToken(storage: *[MAX_TOKENS][MAX_COMMAND_LENGTH]u8, out_tokens: *[MAX_TOKENS]CommandToken, token_count: *usize, kind: TokenKind, text: []const u8) TokenizationError!void {
-    if (token_count.* >= MAX_TOKENS) return error.TooManyTokens;
-    if (text.len + 1 >= MAX_COMMAND_LENGTH) return error.TokenTooLong;
-    @memcpy(storage[token_count.*][0..text.len], text);
-    storage[token_count.*][text.len] = 0;
-    out_tokens[token_count.*] = .{
-        .text = @ptrCast(&storage[token_count.*][0]),
-        .len = text.len,
-        .kind = kind,
-        .has_glob = false,
-    };
-    token_count.* += 1;
-}
-
-fn containsShellOperators(tokens: []const CommandToken) bool {
-    for (tokens) |token| {
-        if (token.kind != .word) return true;
-    }
-    return false;
-}
-
-fn isBackgroundRequest(tokens: []const CommandToken) bool {
-    return tokens.len > 0 and tokens[tokens.len - 1].kind == .background;
-}
-
-fn isValidBackgroundPlacement(tokens: []const CommandToken) bool {
-    var idx: usize = 0;
-    while (idx < tokens.len) : (idx += 1) {
-        if (tokens[idx].kind == .background and idx != tokens.len - 1) {
-            return false;
-        }
-    }
-    return true;
-}
-
-fn expandSimpleCommandTokens(tokens: []const CommandToken, args_storage: *[MAX_ARGS][MAX_COMMAND_LENGTH]u8, out_args: *[MAX_ARGS][*:0]const u8) PipelineConfigError!usize {
-    var arg_count: usize = 0;
-    for (tokens) |token| {
-        if (token.kind != .word) return error.UnsupportedRedirection;
-        try appendExpandedToken(token.text, token.has_glob, args_storage, out_args, &arg_count);
-    }
-    return arg_count;
-}
-
-fn parsePipeline(tokens: []const CommandToken) PipelineConfigError!ParsedPipeline {
-    var result = ParsedPipeline{};
-    result.stage_count = 1;
-
-    var stage_idx: usize = 0;
-    var token_idx: usize = 0;
-    while (token_idx < tokens.len) : (token_idx += 1) {
-        const token = tokens[token_idx];
-        var stage = &result.stages[stage_idx];
-
-        switch (token.kind) {
-            .pipe => {
-                if (stage.arg_count == 0) return error.EmptyStage;
-                if (stage_idx + 1 >= MAX_PIPE_STAGES) return error.TooManyStages;
-                stage_idx += 1;
-                result.stage_count = stage_idx + 1;
-            },
-            .stdin_redirect => {
-                if (token_idx + 1 >= tokens.len or tokens[token_idx + 1].kind != .word) return error.MissingPath;
-                if (stage_idx != 0 or stage.stdin_path != null) return error.UnsupportedRedirection;
-                token_idx += 1;
-                const path_token = tokens[token_idx];
-                try copyIntoStageBuffer(&stage.stdin_path_storage, sliceFromCStr(path_token.text));
-                stage.stdin_path = @ptrCast(&stage.stdin_path_storage[0]);
-                stage.stdin_glob = path_token.has_glob;
-            },
-            .stdout_redirect, .append_stdout_redirect => {
-                if (token_idx + 1 >= tokens.len or tokens[token_idx + 1].kind != .word) return error.MissingPath;
-                if (stage.stdout_path != null) return error.UnsupportedRedirection;
-                token_idx += 1;
-                const path_token = tokens[token_idx];
-                try copyIntoStageBuffer(&stage.stdout_path_storage, sliceFromCStr(path_token.text));
-                stage.stdout_path = @ptrCast(&stage.stdout_path_storage[0]);
-                stage.stdout_glob = path_token.has_glob;
-                stage.append_stdout = token.kind == .append_stdout_redirect;
-            },
-            .word => {
-                if (stage.arg_count >= MAX_ARGS) return error.ArgumentTooLong;
-                try copyIntoStageBuffer(&stage.arg_storage[stage.arg_count], sliceFromCStr(token.text));
-                stage.args[stage.arg_count] = @ptrCast(&stage.arg_storage[stage.arg_count][0]);
-                stage.arg_glob[stage.arg_count] = token.has_glob;
-                stage.arg_count += 1;
-            },
-            .background => return error.UnsupportedBackground,
-        }
-    }
-
-    for (result.stages[0..result.stage_count]) |stage| {
-        if (stage.arg_count == 0) return error.EmptyStage;
-    }
-
-    if (result.stage_count > 1) {
-        if (result.stages[0].stdout_path != null) return error.UnsupportedRedirection;
-        var idx: usize = 1;
-        while (idx < result.stage_count) : (idx += 1) {
-            const stage = result.stages[idx];
-            if (idx < result.stage_count - 1 and stage.stdout_path != null) return error.UnsupportedRedirection;
-            if (stage.stdin_path != null) return error.UnsupportedRedirection;
-        }
-    }
-
-    return result;
-}
-
-fn copyIntoStageBuffer(buffer: *[MAX_COMMAND_LENGTH]u8, text: []const u8) PipelineConfigError!void {
-    if (text.len >= buffer.len) return error.ArgumentTooLong;
-    @memset(buffer, 0);
-    @memcpy(buffer[0..text.len], text);
-}
-
-fn validatePipelineStages(pipeline: *const ParsedPipeline) bool {
-    for (pipeline.stages[0..pipeline.stage_count]) |stage| {
-        const command_name = sliceFromCStr(stage.args[0]);
-        if (registry.lookup(command_name)) |command_meta| {
-            if (command_meta.has_external_program) continue;
-            vga.print("Pipelines and redirection currently require external commands: ");
-            printString(stage.args[0]);
-            vga.print("\n");
-            return false;
-        }
-    }
-    return true;
-}
-
-fn dispatchesInShell(command_meta: *const registry.Command) bool {
-    return !command_meta.prefer_external_program;
-}
-
-fn expandPipelineGlobs(pipeline: *ParsedPipeline) PipelineConfigError!void {
-    for (pipeline.stages[0..pipeline.stage_count]) |*stage| {
-        try expandStageArgs(stage);
-        try expandStageRedirect(stage, true);
-        try expandStageRedirect(stage, false);
-    }
-}
-
-fn expandStageArgs(stage: *ParsedStage) PipelineConfigError!void {
-    var expanded_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
-    var expanded_args: [MAX_ARGS][*:0]const u8 = undefined;
-    var expanded_count: usize = 0;
-
-    var i: usize = 0;
-    while (i < stage.arg_count) : (i += 1) {
-        try appendExpandedToken(stage.args[i], stage.arg_glob[i], &expanded_storage, &expanded_args, &expanded_count);
-    }
-
-    stage.arg_storage = expanded_storage;
-    stage.arg_count = expanded_count;
-    i = 0;
-    while (i < expanded_count) : (i += 1) {
-        stage.args[i] = @ptrCast(&stage.arg_storage[i][0]);
-        stage.arg_glob[i] = false;
-    }
-}
-
-fn expandStageRedirect(stage: *ParsedStage, is_input: bool) PipelineConfigError!void {
-    const raw_path = if (is_input) stage.stdin_path else stage.stdout_path;
-    if (raw_path == null) return;
-    const has_glob = if (is_input) stage.stdin_glob else stage.stdout_glob;
-    if (!has_glob) return;
-
-    var match_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
-    const matches = try resolveGlobMatches(sliceFromCStr(raw_path.?), &match_storage);
-    if (matches == 0) return;
-    if (matches > 1) return error.AmbiguousRedirect;
-
-    if (is_input) {
-        stage.stdin_path_storage = match_storage[0];
-        stage.stdin_path = @ptrCast(&stage.stdin_path_storage[0]);
-        stage.stdin_glob = false;
-    } else {
-        stage.stdout_path_storage = match_storage[0];
-        stage.stdout_path = @ptrCast(&stage.stdout_path_storage[0]);
-        stage.stdout_glob = false;
-    }
-}
-
-fn appendExpandedToken(token: [*:0]const u8, has_glob: bool, storage: *[MAX_ARGS][MAX_COMMAND_LENGTH]u8, out_args: *[MAX_ARGS][*:0]const u8, arg_count: *usize) PipelineConfigError!void {
-    const token_slice = sliceFromCStr(token);
-    if (!has_glob) {
-        if (arg_count.* >= MAX_ARGS) return error.ArgumentTooLong;
-        try copyIntoStageBuffer(&storage[arg_count.*], token_slice);
-        out_args[arg_count.*] = @ptrCast(&storage[arg_count.*][0]);
-        arg_count.* += 1;
-        return;
-    }
-
-    var match_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
-    const match_count = try resolveGlobMatches(token_slice, &match_storage);
-
-    if (match_count == 0) {
-        if (arg_count.* >= MAX_ARGS) return error.ArgumentTooLong;
-        try copyIntoStageBuffer(&storage[arg_count.*], token_slice);
-        out_args[arg_count.*] = @ptrCast(&storage[arg_count.*][0]);
-        arg_count.* += 1;
-        return;
-    }
-
-    var match_idx: usize = 0;
-    while (match_idx < match_count) : (match_idx += 1) {
-        if (arg_count.* >= MAX_ARGS) return error.ArgumentTooLong;
-        storage[arg_count.*] = match_storage[match_idx];
-        out_args[arg_count.*] = @ptrCast(&storage[arg_count.*][0]);
-        arg_count.* += 1;
-    }
-}
-
-fn resolveGlobMatches(pattern: []const u8, out_matches: *[MAX_ARGS][MAX_COMMAND_LENGTH]u8) PipelineConfigError!usize {
-    if (!containsWildcardChars(pattern)) return 0;
-
-    var absolute_pattern_storage: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH;
-    const absolute_pattern = try makeAbsolutePath(pattern, &absolute_pattern_storage);
-
-    var current_paths: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
-    var next_paths: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
-    current_paths[0][0] = '/';
-    current_paths[0][1] = 0;
-    var current_count: usize = 1;
-
-    var component_start: usize = 0;
-    while (component_start < absolute_pattern.len and absolute_pattern[component_start] == '/') : (component_start += 1) {}
-
-    while (component_start < absolute_pattern.len) {
-        var component_end = component_start;
-        while (component_end < absolute_pattern.len and absolute_pattern[component_end] != '/') : (component_end += 1) {}
-        const component = absolute_pattern[component_start..component_end];
-        const wildcard_component = containsWildcardChars(component);
-
-        var next_count: usize = 0;
-        var current_idx: usize = 0;
-        while (current_idx < current_count) : (current_idx += 1) {
-            const base_path = sliceFromCStr(@ptrCast(&current_paths[current_idx][0]));
-            if (wildcard_component) {
-                try collectGlobMatches(base_path, component, &next_paths, &next_count);
-            } else {
-                if (next_count >= MAX_ARGS) return error.ArgumentTooLong;
-                const joined = try joinPath(base_path, component, &next_paths[next_count]);
-                if (pathExists(joined)) {
-                    next_count += 1;
-                }
-            }
-        }
-
-        current_paths = next_paths;
-        next_paths = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
-        current_count = next_count;
-        if (current_count == 0) return 0;
-
-        component_start = component_end;
-        while (component_start < absolute_pattern.len and absolute_pattern[component_start] == '/') : (component_start += 1) {}
-    }
-
-    out_matches.* = current_paths;
-    return current_count;
-}
-
-fn makeAbsolutePath(path: []const u8, buffer: *[MAX_COMMAND_LENGTH]u8) PipelineConfigError![]const u8 {
-    return cwd_mod.resolvePath(path, buffer) orelse error.ArgumentTooLong;
-}
-
-fn joinPath(base: []const u8, component: []const u8, out: *[MAX_COMMAND_LENGTH]u8) PipelineConfigError![]const u8 {
-    @memset(out, 0);
-    if (base.len == 1 and base[0] == '/') {
-        if (component.len + 1 >= out.len) return error.ArgumentTooLong;
-        out[0] = '/';
-        @memcpy(out[1 .. 1 + component.len], component);
-        return out[0 .. 1 + component.len];
-    }
-
-    if (base.len + 1 + component.len >= out.len) return error.ArgumentTooLong;
-    @memcpy(out[0..base.len], base);
-    out[base.len] = '/';
-    @memcpy(out[base.len + 1 .. base.len + 1 + component.len], component);
-    return out[0 .. base.len + 1 + component.len];
-}
-
-fn collectGlobMatches(base_path: []const u8, pattern: []const u8, out_paths: *[MAX_ARGS][MAX_COMMAND_LENGTH]u8, out_count: *usize) PipelineConfigError!void {
-    const fd = vfs.open(base_path, vfs.O_RDONLY) catch return;
-    defer vfs.close(fd) catch {};
-
-    var dirent: vfs.DirEntry = undefined;
-    while (true) {
-        const has_entry = vfs.readdirNext(fd, &dirent) catch return;
-        if (!has_entry) break;
-
-        const entry_name = dirent.name[0..dirent.name_len];
-        if (entry_name.len == 0) continue;
-        if (std.mem.eql(u8, entry_name, ".") or std.mem.eql(u8, entry_name, "..")) continue;
-        if (entry_name[0] == '.' and (pattern.len == 0 or pattern[0] != '.')) continue;
-        if (!wildcardMatch(pattern, entry_name)) continue;
-        if (out_count.* >= MAX_ARGS) return error.ArgumentTooLong;
-        _ = try joinPath(base_path, entry_name, &out_paths[out_count.*]);
-        out_count.* += 1;
-    }
-}
-
-fn pathExists(path: []const u8) bool {
-    _ = vfs.lookupPath(path) catch return false;
-    return true;
-}
-
-fn containsWildcardChars(text: []const u8) bool {
-    for (text) |char| {
-        if (char == '*' or char == '?') return true;
-    }
-    return false;
-}
-
-fn isVarChar(char: u8) bool {
-    return (char >= 'A' and char <= 'Z') or
-        (char >= 'a' and char <= 'z') or
-        (char >= '0' and char <= '9') or
-        char == '_';
-}
-
-fn wildcardMatch(pattern: []const u8, text: []const u8) bool {
-    var pattern_idx: usize = 0;
-    var text_idx: usize = 0;
-    var star_idx: ?usize = null;
-    var match_after_star: usize = 0;
-
-    while (text_idx < text.len) {
-        if (pattern_idx < pattern.len and (pattern[pattern_idx] == '?' or pattern[pattern_idx] == text[text_idx])) {
-            pattern_idx += 1;
-            text_idx += 1;
-        } else if (pattern_idx < pattern.len and pattern[pattern_idx] == '*') {
-            star_idx = pattern_idx;
-            pattern_idx += 1;
-            match_after_star = text_idx;
-        } else if (star_idx) |star| {
-            pattern_idx = star + 1;
-            match_after_star += 1;
-            text_idx = match_after_star;
-        } else {
-            return false;
-        }
-    }
-
-    while (pattern_idx < pattern.len and pattern[pattern_idx] == '*') : (pattern_idx += 1) {}
-    return pattern_idx == pattern.len;
-}
-
-fn openRedirectFd(path: [*:0]const u8, flags: u32) PipelineConfigError!i32 {
-    var resolved_path_buf: [MAX_COMMAND_LENGTH]u8 = undefined;
-    const resolved_path = cwd_mod.resolvePath(sliceFromCStr(path), &resolved_path_buf) orelse return error.OpenFailed;
-    const raw_fd = vfs.open(resolved_path, flags) catch return error.OpenFailed;
-    errdefer vfs.close(raw_fd) catch {};
-    const child_fd = vfs.dup(raw_fd) catch return error.DupFailed;
-    vfs.close(raw_fd) catch return error.CloseFailed;
-    return @as(i32, @intCast(child_fd)) + @as(i32, @intCast(vfsAbiFdOffset()));
-}
-
-fn closeRedirectFd(fd: ?i32) void {
-    if (fd) |value| {
-        if (value >= @as(i32, @intCast(vfsAbiFdOffset()))) {
-            const vfs_fd: u32 = @intCast(value - @as(i32, @intCast(vfsAbiFdOffset())));
-            vfs.close(vfs_fd) catch {};
-        }
-    }
-}
-
-fn duplicateRedirectFd(fd: ?i32) error{DupFailed}!?i32 {
-    const value = fd orelse return null;
-    if (value < @as(i32, @intCast(vfsAbiFdOffset()))) return value;
-
-    const vfs_fd: u32 = @intCast(value - @as(i32, @intCast(vfsAbiFdOffset())));
-    const duped = vfs.dup(vfs_fd) catch return error.DupFailed;
-    return @as(i32, @intCast(duped)) + @as(i32, @intCast(vfsAbiFdOffset()));
-}
-
-fn openStageInput(stage: *const ParsedStage, temp_paths: *const [MAX_PIPE_STAGES - 1][64]u8, temp_path_lens: *const [MAX_PIPE_STAGES - 1]usize, stage_idx: usize) PipelineConfigError!?i32 {
-    if (stage.stdin_path) |path| {
-        return try openRedirectFd(path, vfs.O_RDONLY);
-    }
-    if (stage_idx == 0) return null;
-
-    const temp_path = temp_paths[stage_idx - 1][0..temp_path_lens[stage_idx - 1]];
-    return try openRedirectFd(@ptrCast(temp_path.ptr), vfs.O_RDONLY);
-}
-
-fn openStageOutput(stage: *const ParsedStage, temp_paths: *const [MAX_PIPE_STAGES - 1][64]u8, temp_path_lens: *const [MAX_PIPE_STAGES - 1]usize, stage_count: usize, stage_idx: usize) PipelineConfigError!?i32 {
-    if (stage.stdout_path) |path| {
-        const flags = vfs.O_WRONLY | vfs.O_CREAT | if (stage.append_stdout) vfs.O_APPEND else vfs.O_TRUNC;
-        return try openRedirectFd(path, flags);
-    }
-    if (stage_idx + 1 >= stage_count) return null;
-
-    const temp_path = temp_paths[stage_idx][0..temp_path_lens[stage_idx]];
-    return try openRedirectFd(@ptrCast(temp_path.ptr), vfs.O_WRONLY | vfs.O_CREAT | vfs.O_TRUNC);
-}
-
-fn makePipelineTempPath(buffer: *[64]u8, stage_idx: usize) error{NoSpaceLeft}!usize {
-    const current_pid = process.getCurrentPID();
-    const rendered = std.fmt.bufPrint(buffer, "/tmp/.pipe-{d}-{d}", .{ current_pid, stage_idx }) catch return error.NoSpaceLeft;
-    if (rendered.len >= buffer.len) return error.NoSpaceLeft;
-    buffer[rendered.len] = 0;
-    return rendered.len;
-}
-
-fn cleanupPipelineTempFiles(temp_paths: *const [MAX_PIPE_STAGES - 1][64]u8, temp_path_lens: *const [MAX_PIPE_STAGES - 1]usize, stage_count: usize) void {
-    if (stage_count < 2) return;
-    var i: usize = 0;
-    while (i + 1 < stage_count) : (i += 1) {
-        if (temp_path_lens[i] == 0) continue;
-        const temp_path = temp_paths[i][0..temp_path_lens[i]];
-        vfs.unlink(temp_path) catch {};
-    }
-}
-
-fn printPipelineConfigError(err: PipelineConfigError) void {
-    switch (err) {
-        error.EmptyStage => vga.print("Invalid pipeline: empty command stage\n"),
-        error.MissingPath => vga.print("Invalid redirection: missing path\n"),
-        error.TooManyStages => vga.print("Too many pipeline stages\n"),
-        error.UnsupportedBuiltin => vga.print("Pipelines and redirection require external commands\n"),
-        error.UnsupportedRedirection => vga.print("Unsupported redirection layout\n"),
-        error.AmbiguousRedirect => vga.print("Redirection target expands to multiple paths\n"),
-        error.UnsupportedBackground => vga.print("Background execution for this command form is not supported\n"),
-        error.OpenFailed => vga.print("Failed to open redirection target\n"),
-        error.PipeFailed => vga.print("Failed to create pipe\n"),
-        error.DupFailed => vga.print("Failed to duplicate file descriptor\n"),
-        error.CloseFailed => vga.print("Failed to close temporary file descriptor\n"),
-        error.ArgumentTooLong => vga.print("Too many arguments in pipeline stage\n"),
-    }
-}
-
-fn printTokenizationError(err: TokenizationError) void {
-    switch (err) {
-        error.UnterminatedQuote => vga.print("Unterminated quoted string\n"),
-        error.UnterminatedSubstitution => vga.print("Unterminated command substitution\n"),
-        error.TrailingEscape => vga.print("Trailing escape in command line\n"),
-        error.TooManyTokens => vga.print("Too many shell tokens\n"),
-        error.TokenTooLong => vga.print("Shell token too long\n"),
-        error.CommandSubstitutionFailed => vga.print("Command substitution failed\n"),
-    }
-}
-
-fn vfsAbiFdOffset() u32 {
-    return @import("../process/syscall/abi.zig").FD_OFFSET;
-}
-
-fn readExternalCommandBytes(path: []const u8, buffer: []u8) ExternalLaunchError!usize {
-    const fd = vfs.open(path, vfs.O_RDONLY) catch return error.CommandReadFailed;
-    defer vfs.close(fd) catch {};
-
-    var stat_buf: vfs.FileStat = undefined;
-    vfs.fstat(fd, &stat_buf) catch return error.CommandReadFailed;
-    const size: usize = @intCast(stat_buf.size);
-    if (size > buffer.len) return error.CommandTooLarge;
-
-    const bytes_read = vfs.read(fd, buffer[0..size]) catch return error.CommandReadFailed;
-    if (bytes_read != size) return error.CommandReadFailed;
-    return size;
-}
-
-fn resolveExternalCommandPath(command_name: []const u8, buffer: *[MAX_COMMAND_LENGTH]u8) ExternalLaunchError![]const u8 {
-    if (command_name.len == 0) {
-        return error.CommandNotFound;
-    }
-
-    if (isExplicitCommandPath(command_name)) {
-        const direct_path = cwd_mod.resolvePath(command_name, buffer) orelse return error.CommandPathTooLong;
-        if (externalCommandPathExists(direct_path)) {
-            return direct_path;
-        }
-        return error.CommandNotFound;
-    }
-
-    const search_prefixes = [_][]const u8{ "/bin/", "/usr/bin/", "/mnt/bin/" };
-    var path_too_long = true;
-
-    for (search_prefixes) |prefix| {
-        if (prefix.len + command_name.len > buffer.len) {
-            continue;
-        }
-
-        path_too_long = false;
-        @memcpy(buffer[0..prefix.len], prefix);
-        @memcpy(buffer[prefix.len .. prefix.len + command_name.len], command_name);
-
-        const candidate = buffer[0 .. prefix.len + command_name.len];
-        if (externalCommandPathExists(candidate)) {
-            return candidate;
-        }
-    }
-
-    if (path_too_long) {
-        return error.CommandPathTooLong;
-    }
-
-    return error.CommandNotFound;
-}
-
-fn externalCommandPathExists(path: []const u8) bool {
-    const fd = vfs.open(path, vfs.O_RDONLY) catch return false;
-    vfs.close(fd) catch {};
-    return true;
-}
-
-fn isExplicitCommandPath(path: []const u8) bool {
-    if (path.len == 0) return false;
-    if (path[0] == '/') return true;
-
-    for (path) |char| {
-        if (char == '/') return true;
-    }
-
-    return false;
-}
-
-fn printExternalCommandError(command: [*:0]const u8, err: ExternalLaunchError) void {
-    switch (err) {
-        error.CommandNotFound => {
-            vga.print("Unknown command: ");
-            printString(command);
-            vga.print("\nType 'help' for available commands.\n");
-        },
-        error.CommandPathTooLong => vga.print("Command path too long\n"),
-        error.ArgumentTooLong => vga.print("Command argument too long\n"),
-        error.CommandReadFailed => vga.print("Failed to read command file\n"),
-        error.CommandTooLarge => vga.print("Command file too large\n"),
-        error.RedirectDupFailed => vga.print("Failed to duplicate redirected file descriptor\n"),
-        error.TooManyLaunches => vga.print("Too many commands are pending launch\n"),
-    }
-}
-
-fn isWhitespace(char: u8) bool {
-    return char == ' ' or char == '\t';
 }
 
 fn streq(a: [*:0]const u8, b: [*:0]const u8) bool {

@@ -116,10 +116,11 @@ pub fn chown(args: []const [*:0]const u8) void {
         return;
     };
 
-    const vnode = vfs.lookupPath(sliceFromCStr(args[1])) catch {
+    const vnode = vfs.lookupPathRetained(sliceFromCStr(args[1])) catch {
         vga.print("chown: file not found\n");
         return;
     };
+    defer vfs.releaseLookupVNode(vnode);
 
     vfs.chownVNode(vnode, @intCast(uid), vnode.gid) catch {
         vga.print("chown: operation failed\n");
@@ -137,10 +138,11 @@ pub fn chgrp(args: []const [*:0]const u8) void {
         return;
     };
 
-    const vnode = vfs.lookupPath(sliceFromCStr(args[1])) catch {
+    const vnode = vfs.lookupPathRetained(sliceFromCStr(args[1])) catch {
         vga.print("chgrp: file not found\n");
         return;
     };
+    defer vfs.releaseLookupVNode(vnode);
 
     vfs.chownVNode(vnode, vnode.uid, @intCast(gid)) catch {
         vga.print("chgrp: operation failed\n");

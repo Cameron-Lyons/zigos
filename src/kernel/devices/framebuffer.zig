@@ -1,4 +1,3 @@
-// zlint-disable suppressed-errors
 const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const memory = @import("../memory/memory.zig");

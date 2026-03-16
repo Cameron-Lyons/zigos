@@ -28,7 +28,6 @@ const ac97 = @import("drivers/ac97.zig");
 const ext2 = @import("fs/ext2.zig");
 const vt = @import("devices/vt.zig");
 const mmap = @import("memory/mmap.zig");
-const file_ops = @import("fs/file_ops.zig");
 const swap = @import("memory/swap.zig");
 const credentials = @import("process/credentials.zig");
 const tmpfs = @import("fs/tmpfs.zig");
@@ -286,9 +285,6 @@ fn initFileSystems() void {
         console.print(@errorName(err));
         console.print("\n");
     };
-
-    console.print("Initializing file operations...\n");
-    file_ops.init();
 
     console.print("Initializing memory mapping...\n");
     mmap.init();

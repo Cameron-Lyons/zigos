@@ -11,12 +11,13 @@ Filesystem support includes both FAT32 and ext2 filesystems through a virtual fi
 - Zig compiler (0.15.2 or later)
 - NASM assembler
 - QEMU for testing
+- For disk-backed rootfs builds: `dosfstools` and `mtools`
 - For ISO builds: GRUB `mkrescue`, `xorriso`, and `mtools`
 
 ### macOS (Homebrew)
 
 ```bash
-brew install zig nasm qemu xorriso mtools i686-elf-grub
+brew install zig nasm qemu dosfstools xorriso mtools i686-elf-grub
 ```
 
 ### Linux Packages
@@ -25,19 +26,19 @@ Ubuntu/Debian:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y zig nasm qemu-system-x86 qemu-system-i386 grub-common grub-pc-bin xorriso mtools
+sudo apt-get install -y zig nasm qemu-system-x86 qemu-system-i386 grub-common grub-pc-bin dosfstools xorriso mtools
 ```
 
 Fedora:
 
 ```bash
-sudo dnf install -y zig nasm qemu-system-x86 grub2-tools grub2-tools-extra xorriso mtools
+sudo dnf install -y zig nasm qemu-system-x86 grub2-tools grub2-tools-extra dosfstools xorriso mtools
 ```
 
 Arch Linux:
 
 ```bash
-sudo pacman -Sy --noconfirm zig nasm grub xorriso mtools qemu-full
+sudo pacman -Sy --noconfirm zig nasm grub dosfstools xorriso mtools qemu-full
 ```
 
 ### One-Command Setup
@@ -59,6 +60,9 @@ zig build userland
 
 # Build the FAT disk image with staged user programs
 zig build rootfs
+
+# Run host-side unit tests for extracted shell/TCP/IPC logic
+zig build host-tests
 
 # Run the development profile in QEMU
 zig build run

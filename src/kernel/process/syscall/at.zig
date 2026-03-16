@@ -195,7 +195,8 @@ pub fn sys_statx(dirfd: i32, pathname: [*]const u8, flags: u32, mask: u32, statx
     var full_path_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const full_path = resolveCwdPathOnly(dirfd, path_slice, &full_path_buf) orelse return abi.EBADF;
 
-    const vnode = vfs.lookupPath(full_path) catch |err| return errno.vfsErrno(err);
+    const vnode = vfs.lookupPathRetained(full_path) catch |err| return errno.vfsErrno(err);
+    defer vfs.releaseLookupVNode(vnode);
 
     var stat_buf: vfs.FileStat = undefined;
     vnode.ops.stat(vnode, &stat_buf) catch |err| return errno.vfsErrno(err);
@@ -340,6 +341,7 @@ fn resolveDirFd(dirfd: i32, path: []const u8, buf: *[common.RESOLVED_PATH_BUFFER
     if (dirfd < abi.FD_OFFSET) return null;
     const vfs_fd: u32 = @intCast(dirfd - abi.FD_OFFSET);
     const vnode = vfs.getVNodeFromFd(vfs_fd) catch return null;
+    defer vfs.releaseVNode(vnode);
     if (vnode.file_type != .Directory) return null;
 
     const base_path = vfs.getNodePath(vnode) catch return null;

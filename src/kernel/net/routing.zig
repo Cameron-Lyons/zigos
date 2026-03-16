@@ -1,4 +1,3 @@
-// zlint-disable suppressed-errors
 const ipv4 = @import("ipv4.zig");
 const network = @import("network.zig");
 const vga = @import("../drivers/vga.zig");
