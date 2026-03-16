@@ -117,7 +117,8 @@ pub fn setCwd(path: []const u8) bool {
 
     var resolved_actual_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const resolved_actual = resolveVisibleIntoActual(proc, resolved_visible, &resolved_actual_buf) orelse return false;
-    const node = vfs.lookupPath(resolved_actual) catch return false;
+    const node = vfs.lookupPathRetained(resolved_actual) catch return false;
+    defer vfs.releaseLookupVNode(node);
     if (node.file_type != .Directory) return false;
 
     @memset(&proc.cwd_path, 0);

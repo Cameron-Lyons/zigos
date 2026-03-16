@@ -1,8 +1,15 @@
 const std = @import("std");
 const abi = @import("abi.zig");
+const common = @import("common.zig");
+const cwd = @import("cwd.zig");
+const errno = @import("errno.zig");
 const credentials = @import("../credentials.zig");
 const process = @import("../process.zig");
 const protection = @import("../../memory/protection.zig");
+const support = @import("support.zig");
+const vfs = @import("../../fs/vfs.zig");
+const vga = @import("../../drivers/vga.zig");
+const x86 = @import("../../../arch/x86.zig");
 
 const UtsName = extern struct {
     sysname: [65]u8,
@@ -82,4 +89,85 @@ fn fillField(dest: *[65]u8, src: []const u8) void {
     @memset(dest, 0);
     const len = @min(src.len, 64);
     @memcpy(dest[0..len], src[0..len]);
+}
+
+pub fn sys_chroot(path: [*]const u8) i32 {
+    const proc = process.getEffectiveCurrent() orelse return abi.ESRCH;
+    if (proc.creds.euid != 0) return abi.EPERM;
+
+    var path_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var resolved_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
+    const resolved = support.resolveUserPathFromPointer(path, &path_buffer, &resolved_buf) catch |err| {
+        return support.errnoFromResolvedUserPathError(err, abi.EFAULT);
+    };
+
+    const vnode = vfs.lookupPathRetained(resolved) catch |err| return errno.vfsErrno(err);
+    defer vfs.releaseLookupVNode(vnode);
+    if (vnode.file_type != .Directory) return abi.ENOTDIR;
+
+    if (!cwd.setChroot(resolved)) return abi.ENAMETOOLONG;
+
+    return 0;
+}
+
+pub fn sys_mount(source: usize, target: usize, fstype: usize, mountflags: usize, data: usize) i32 {
+    _ = data;
+
+    const proc = process.current_process orelse return abi.ESRCH;
+    if (proc.creds.euid != 0) return abi.EPERM;
+
+    if (!protection.verifyUserPointer(fstype, 32)) return abi.EFAULT;
+
+    var source_buf: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var target_buf: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    var fstype_buf: [32]u8 = undefined;
+
+    const source_path = support.copyUserPathFromAddress(source, &source_buf) catch return abi.EFAULT;
+    const target_path = support.copyUserPathFromAddress(target, &target_buf) catch return abi.EFAULT;
+    const fstype_str = protection.copyStringFromUser(&fstype_buf, fstype) catch return abi.EFAULT;
+
+    vfs.mount(source_path, target_path, fstype_str, @truncate(mountflags)) catch |err| return errno.vfsErrno(err);
+    return 0;
+}
+
+pub fn sys_umount2(target: [*]const u8, flags: u32) i32 {
+    _ = flags;
+
+    const proc = process.current_process orelse return abi.ESRCH;
+    if (proc.creds.euid != 0) return abi.EPERM;
+
+    var target_buf: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
+    const target_path = support.copyUserPathFromPointer(target, &target_buf) catch return abi.EFAULT;
+
+    vfs.unmount(target_path) catch |err| return errno.vfsErrno(err);
+    return 0;
+}
+
+pub fn sys_swapon(path: [*]const u8, swapflags: u32) i32 {
+    _ = path;
+    _ = swapflags;
+    return abi.EPERM;
+}
+
+pub fn sys_swapoff(path: [*]const u8) i32 {
+    _ = path;
+    return abi.EPERM;
+}
+
+pub fn sys_reboot(magic1: u32, magic2: u32, cmd: u32, arg: usize) i32 {
+    _ = arg;
+
+    if (magic1 != abi.LINUX_REBOOT_MAGIC1) return abi.EINVAL;
+    if (magic2 != abi.LINUX_REBOOT_MAGIC2 and magic2 != 0x85072010 and magic2 != 0x5121996 and magic2 != 0x16041998) return abi.EINVAL;
+
+    switch (cmd) {
+        abi.LINUX_REBOOT_CMD_RESTART, abi.LINUX_REBOOT_CMD_HALT, abi.LINUX_REBOOT_CMD_POWER_OFF => {
+            vga.print("\nSystem halting...\n");
+            x86.hlt();
+            while (true) {
+                x86.hlt();
+            }
+        },
+        else => return abi.EINVAL,
+    }
 }

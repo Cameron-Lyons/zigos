@@ -1,4 +1,3 @@
-// zlint-disable suppressed-errors
 const socket = @import("socket.zig");
 const vga = @import("../drivers/vga.zig");
 const process = @import("../process/process.zig");

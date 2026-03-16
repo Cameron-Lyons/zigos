@@ -234,6 +234,25 @@ pub fn build(b: *std.Build) void {
     const userland_smoke_test_step = b.step("userland-smoke-test", "Run the automated userland smoke test");
     userland_smoke_test_step.dependOn(&userland_smoke_test_cmd.step);
 
+    const host_tests_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -eu
+        \\mkdir -p build/zig-cache-tests build/zig-global-cache-tests
+        \\export ZIG_LOCAL_CACHE_DIR="build/zig-cache-tests"
+        \\export ZIG_GLOBAL_CACHE_DIR="build/zig-global-cache-tests"
+        \\for test_file in \
+        \\  src/kernel/shell/parser.zig \
+        \\  src/kernel/shell/glob.zig \
+        \\  src/kernel/shell/jobs.zig \
+        \\  src/kernel/net/tcp/protocol.zig \
+        \\  src/kernel/process/syscall/ipc_semantics.zig
+        \\do
+        \\  zig test "$test_file"
+        \\done
+    });
+    const host_tests_step = b.step("host-tests", "Run host-side unit tests for extracted pure logic");
+    host_tests_step.dependOn(&host_tests_cmd.step);
+
     const iso_cmd = b.addSystemCommand(&.{
         "sh", "-c",
         \\set -eu
@@ -268,6 +287,38 @@ pub fn build(b: *std.Build) void {
     const iso_step = b.step("iso", "Build bootable ISO (requires GRUB mkrescue, xorriso, and mtools)");
     iso_step.dependOn(&iso_cmd.step);
 
+    const boot_test_iso_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -eu
+        \\GRUB_MKRESCUE="${GRUB_MKRESCUE:-}"
+        \\if [ -z "$GRUB_MKRESCUE" ]; then
+        \\  for cmd in grub-mkrescue i686-elf-grub-mkrescue x86_64-elf-grub-mkrescue; do
+        \\    if command -v "$cmd" >/dev/null 2>&1; then
+        \\      GRUB_MKRESCUE="$cmd"
+        \\      break
+        \\    fi
+        \\  done
+        \\fi
+        \\if [ -z "$GRUB_MKRESCUE" ]; then
+        \\  echo "No GRUB mkrescue command found. Set GRUB_MKRESCUE or install GRUB tools." >&2
+        \\  exit 1
+        \\fi
+        \\if ! command -v xorriso >/dev/null 2>&1; then
+        \\  echo "xorriso not found. Install xorriso." >&2
+        \\  exit 1
+        \\fi
+        \\if ! command -v mformat >/dev/null 2>&1; then
+        \\  echo "mformat not found. Install mtools." >&2
+        \\  exit 1
+        \\fi
+        \\rm -rf build/boot-test-iso
+        \\mkdir -p build/boot-test-iso/boot/grub
+        \\cp zig-out/bin/kernel-ci-smoke.elf build/boot-test-iso/boot/kernel.elf
+        \\cp src/boot/grub.cfg build/boot-test-iso/boot/grub/
+        \\"$GRUB_MKRESCUE" -o build/boot-test.iso build/boot-test-iso
+    });
+    boot_test_iso_cmd.step.dependOn(ci_smoke_kernel.install_step);
+
     const boot_test_cmd = b.addSystemCommand(&.{
         "sh", "-c",
         \\set -eu
@@ -281,7 +332,7 @@ pub fn build(b: *std.Build) void {
         \\LOG_PATH="build/boot-test-serial.log"
         \\rm -f "$LOG_PATH"
         \\"$QEMU_BIN" \
-        \\  -cdrom build/os.iso \
+        \\  -cdrom build/boot-test.iso \
         \\  -boot d \
         \\  -m 256M \
         \\  -display none \
@@ -332,9 +383,9 @@ pub fn build(b: *std.Build) void {
         \\fi
         \\echo "Boot test passed. Log: $LOG_PATH"
     });
-    boot_test_cmd.step.dependOn(&iso_cmd.step);
+    boot_test_cmd.step.dependOn(&boot_test_iso_cmd.step);
 
-    const boot_test_step = b.step("boot-test", "Build ISO and verify headless boot markers in QEMU");
+    const boot_test_step = b.step("boot-test", "Build a CI-smoke ISO and verify headless boot markers in QEMU");
     boot_test_step.dependOn(&boot_test_cmd.step);
 }
 
@@ -490,7 +541,7 @@ fn addUserProgram(
     const user_optimize: std.builtin.OptimizeMode = .ReleaseSmall;
 
     const abi_module = b.createModule(.{
-        .root_source_file = b.path("src/abi/syscall.zig"),
+        .root_source_file = b.path("src/kernel/process/syscall/abi.zig"),
         .target = target,
         .optimize = user_optimize,
     });

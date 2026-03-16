@@ -187,6 +187,15 @@ pub const STDOUT = 1;
 pub const STDERR = 2;
 pub const FD_OFFSET = 3;
 
+pub const O_RDONLY: u32 = 0x0000;
+pub const O_WRONLY: u32 = 0x0001;
+pub const O_RDWR: u32 = 0x0002;
+pub const O_CREAT: u32 = 0x0040;
+pub const O_TRUNC: u32 = 0x0200;
+
+pub const DT_REG: u8 = 1;
+pub const DT_DIR: u8 = 2;
+
 pub const EPERM = -1;
 pub const ENOENT = -2;
 pub const ESRCH = -3;
@@ -427,6 +436,15 @@ pub const TTY_LFLAG_ISIG: u32 = 0x0001;
 pub const TTY_LFLAG_ICANON: u32 = 0x0002;
 pub const TTY_LFLAG_ECHO: u32 = 0x0008;
 
+pub const SIGINT = 2;
+pub const SIGKILL = 9;
+pub const SIGTERM = 15;
+pub const SIGCONT = 18;
+pub const SIGSTOP = 19;
+pub const SIGTSTP = 20;
+
+pub const CLOCK_REALTIME: u32 = 0;
+pub const CLOCK_MONOTONIC: u32 = 1;
 pub const CLOCK_MONOTONIC_RAW: u32 = 4;
 pub const CLOCK_REALTIME_COARSE: u32 = 5;
 pub const CLOCK_MONOTONIC_COARSE: u32 = 6;
