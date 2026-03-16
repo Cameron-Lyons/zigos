@@ -1,4 +1,3 @@
-const file_ops = @import("../../fs/file_ops.zig");
 const vfs = @import("../../fs/vfs.zig");
 const vga = @import("../../drivers/vga.zig");
 const numfmt = @import("../../utils/numfmt.zig");
@@ -93,7 +92,7 @@ pub fn stat(args: []const [*:0]const u8) void {
     defer vfs.close(fd) catch {};
 
     var stat_info: vfs.FileStat = undefined;
-    file_ops.fstat(@as(i32, @intCast(fd)), &stat_info) catch |err| {
+    vfs.fstat(fd, &stat_info) catch |err| {
         vga.print("stat: ");
         printString(args[0]);
         vga.print(": ");

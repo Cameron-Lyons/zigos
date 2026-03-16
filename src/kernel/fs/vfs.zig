@@ -18,6 +18,7 @@ pub const VFSError = error{
     DeviceError,
     BrokenPipe,
     TooManyOpenFiles,
+    Busy,
 };
 
 pub const FileType = enum(u8) {
@@ -130,6 +131,7 @@ pub const MountPoint = struct {
     fs_type: *FileSystemType,
     root: ?*VNode,
     flags: u32,
+    ref_count: u32,
     private_data: ?*anyopaque,
     next: ?*MountPoint,
 };
@@ -165,54 +167,237 @@ var mount_list: ?*MountPoint = null;
 var fs_type_list: ?*FileSystemType = null;
 var vnode_cache: [1024]?*VNode = [_]?*VNode{null} ** 1024;
 var fd_table: [256]?*FileDescriptor = [_]?*FileDescriptor{null} ** 256;
-var vfs_meta_lock: u32 = 0;
+var mount_state_lock: u32 = 0;
+var vnode_ref_lock: u32 = 0;
+var fd_state_lock: u32 = 0;
+var path_buffer_lock: u32 = 0;
 var inotify_notifier: ?*const fn ([]const u8, u32, u32) void = null;
 
 const FD_TABLE_SIZE = 256;
 var fd_freelist: [FD_TABLE_SIZE]u8 = undefined;
 var fd_freelist_top: usize = 0;
 
-fn lockMeta() void {
-    while (@cmpxchgWeak(u32, &vfs_meta_lock, 0, 1, .acquire, .monotonic) != null) {
-        while (@atomicLoad(u32, &vfs_meta_lock, .monotonic) != 0) {
+fn lockSpin(lock: *u32) void {
+    while (@cmpxchgWeak(u32, lock, 0, 1, .acquire, .monotonic) != null) {
+        while (@atomicLoad(u32, lock, .monotonic) != 0) {
             asm volatile ("pause");
         }
     }
 }
 
-fn unlockMeta() void {
-    @atomicStore(u32, &vfs_meta_lock, 0, .release);
+fn unlockSpin(lock: *u32) void {
+    @atomicStore(u32, lock, 0, .release);
 }
 
-fn initFdFreelist() void {
+fn lockMountState() void {
+    lockSpin(&mount_state_lock);
+}
+
+fn unlockMountState() void {
+    unlockSpin(&mount_state_lock);
+}
+
+fn lockVNodeRefs() void {
+    lockSpin(&vnode_ref_lock);
+}
+
+fn unlockVNodeRefs() void {
+    unlockSpin(&vnode_ref_lock);
+}
+
+fn lockFdState() void {
+    lockSpin(&fd_state_lock);
+}
+
+fn unlockFdState() void {
+    unlockSpin(&fd_state_lock);
+}
+
+fn lockPathBuffer() void {
+    lockSpin(&path_buffer_lock);
+}
+
+fn unlockPathBuffer() void {
+    unlockSpin(&path_buffer_lock);
+}
+
+fn retainMountPoint(mp: *MountPoint) void {
+    lockMountState();
+    mp.ref_count += 1;
+    unlockMountState();
+}
+
+fn releaseMountPoint(mp: *MountPoint) void {
+    lockMountState();
+    if (mp.ref_count > 0) {
+        mp.ref_count -= 1;
+    }
+    unlockMountState();
+}
+
+pub fn retainLookupVNode(vnode: *VNode) void {
+    if (vnode.mount_point) |mp| {
+        retainMountPoint(mp);
+    }
+}
+
+pub fn releaseLookupVNode(vnode: *VNode) void {
+    if (vnode.mount_point) |mp| {
+        releaseMountPoint(mp);
+    }
+}
+
+fn initFdFreelistLocked() void {
     for (0..FD_TABLE_SIZE) |i| {
         fd_freelist[i] = @intCast(FD_TABLE_SIZE - 1 - i);
     }
     fd_freelist_top = FD_TABLE_SIZE;
 }
 
-fn allocFd() ?u32 {
-    lockMeta();
-    defer unlockMeta();
+fn allocFdLocked() ?u32 {
     if (fd_freelist_top == 0) return null;
     fd_freelist_top -= 1;
     return fd_freelist[fd_freelist_top];
 }
 
-fn freeFd(fd: u32) void {
-    lockMeta();
-    defer unlockMeta();
+fn allocFd() ?u32 {
+    lockFdState();
+    defer unlockFdState();
+    return allocFdLocked();
+}
+
+fn freeFdLocked(fd: u32) void {
     if (fd >= FD_TABLE_SIZE) return;
     if (fd_freelist_top >= FD_TABLE_SIZE) return;
     fd_freelist[fd_freelist_top] = @intCast(fd);
     fd_freelist_top += 1;
 }
 
-pub fn init() void {
-    lockMeta();
-    defer unlockMeta();
+fn freeFd(fd: u32) void {
+    lockFdState();
+    defer unlockFdState();
+    freeFdLocked(fd);
+}
 
-    initFdFreelist();
+fn reserveFdLocked(fd: u32) bool {
+    if (fd >= FD_TABLE_SIZE) return false;
+
+    var i: usize = 0;
+    while (i < fd_freelist_top) : (i += 1) {
+        if (fd_freelist[i] != @as(u8, @intCast(fd))) continue;
+        fd_freelist_top -= 1;
+        fd_freelist[i] = fd_freelist[fd_freelist_top];
+        return true;
+    }
+
+    return false;
+}
+
+fn installDescriptor(fd: u32, file_desc: *FileDescriptor) VFSError!void {
+    if (fd >= FD_TABLE_SIZE) return VFSError.InvalidOperation;
+    lockFdState();
+    defer unlockFdState();
+    fd_table[fd] = file_desc;
+}
+
+fn replaceDescriptor(fd: u32, file_desc: *FileDescriptor) VFSError!?*FileDescriptor {
+    if (fd >= FD_TABLE_SIZE) return VFSError.InvalidOperation;
+
+    lockFdState();
+    defer unlockFdState();
+
+    const existing = fd_table[fd];
+    if (existing == null and !reserveFdLocked(fd)) {
+        return VFSError.InvalidOperation;
+    }
+    fd_table[fd] = file_desc;
+    return existing;
+}
+
+fn retainDescriptor(fd: u32) VFSError!*FileDescriptor {
+    if (fd >= FD_TABLE_SIZE) return VFSError.InvalidOperation;
+
+    lockFdState();
+    defer unlockFdState();
+
+    const file_desc = fd_table[fd] orelse return VFSError.InvalidOperation;
+    file_desc.ref_count += 1;
+    return file_desc;
+}
+
+fn takeDescriptor(fd: u32) VFSError!*FileDescriptor {
+    if (fd >= FD_TABLE_SIZE) return VFSError.InvalidOperation;
+
+    lockFdState();
+    defer unlockFdState();
+
+    const file_desc = fd_table[fd] orelse return VFSError.InvalidOperation;
+    fd_table[fd] = null;
+    freeFdLocked(fd);
+    return file_desc;
+}
+
+fn releaseDescriptor(file_desc: *FileDescriptor) void {
+    lockFdState();
+    if (file_desc.ref_count == 0) {
+        unlockFdState();
+        return;
+    }
+    file_desc.ref_count -= 1;
+    const should_destroy = file_desc.ref_count == 0;
+    unlockFdState();
+
+    if (should_destroy) {
+        destroyDescriptor(file_desc);
+    }
+}
+
+fn destroyDescriptor(file_desc: *FileDescriptor) void {
+    const mount_point = file_desc.vnode.mount_point;
+    if (file_desc.vnode.file_type == .Pipe) {
+        if (file_desc.vnode.private_data) |pd| {
+            const pipe: *PipeData = @ptrCast(@alignCast(pd));
+            if ((file_desc.flags & O_WRONLY) != 0) {
+                if (pipe.writers > 0) pipe.writers -= 1;
+            } else {
+                if (pipe.readers > 0) pipe.readers -= 1;
+            }
+            if (pipe.readers == 0 and pipe.writers == 0) {
+                memory.kfree(@as([*]u8, @ptrCast(@alignCast(pd))));
+                file_desc.vnode.private_data = null;
+            }
+        }
+    }
+
+    const vnode = file_desc.vnode;
+    vnode.ops.close(vnode) catch {};
+
+    lockVNodeRefs();
+    if (vnode.ref_count > 0) {
+        vnode.ref_count -= 1;
+    }
+    const free_pipe_vnode = vnode.ref_count == 0 and vnode.file_type == .Pipe;
+    unlockVNodeRefs();
+
+    if (free_pipe_vnode) {
+        memory.kfree(@as([*]u8, @ptrCast(@alignCast(vnode))));
+    }
+
+    notifyCloseEvent(file_desc);
+    if (mount_point) |mp| {
+        releaseMountPoint(mp);
+    }
+    memory.kfree(@as([*]u8, @ptrCast(file_desc)));
+}
+
+pub fn init() void {
+    lockFdState();
+    initFdFreelistLocked();
+    unlockFdState();
+
+    lockMountState();
+    defer unlockMountState();
+
     root_vnode = createVNode() catch |err| {
         error_handler.handleError(err, "Failed to create root vnode");
         return;
@@ -236,22 +421,24 @@ pub fn init() void {
 }
 
 pub fn registerInotifyNotifier(callback: *const fn ([]const u8, u32, u32) void) void {
+    lockMountState();
+    defer unlockMountState();
     inotify_notifier = callback;
 }
 
 pub fn registerFileSystem(fs_type: *FileSystemType) VFSError!void {
-    lockMeta();
-    defer unlockMeta();
+    lockMountState();
+    defer unlockMountState();
     fs_type.next = fs_type_list;
     fs_type_list = fs_type;
 }
 
 pub fn mount(device: []const u8, mount_path: []const u8, fs_name: []const u8, flags: u32) VFSError!void {
-    lockMeta();
+    lockMountState();
     var fs_type = fs_type_list;
     while (fs_type) |fs| : (fs_type = fs.next) {
         if (std.mem.eql(u8, fs.name[0..strlen(&fs.name)], fs_name)) {
-            unlockMeta();
+            unlockMountState();
             const mp = memory.kmalloc(@sizeOf(MountPoint)) orelse return VFSError.OutOfMemory;
             errdefer memory.kfree(@as([*]u8, @ptrCast(mp)));
 
@@ -264,39 +451,45 @@ pub fn mount(device: []const u8, mount_path: []const u8, fs_name: []const u8, fl
             mount_point.mount_path[mount_path.len] = 0;
             mount_point.fs_type = fs;
             mount_point.flags = flags;
+            mount_point.ref_count = 1;
             mount_point.private_data = null;
+            mount_point.next = null;
 
             try fs.ops.mount(mount_point);
 
             mount_point.root = try fs.ops.get_root(mount_point);
 
-            lockMeta();
+            lockMountState();
             mount_point.next = mount_list;
             mount_list = mount_point;
-            unlockMeta();
+            unlockMountState();
 
             return;
         }
     }
-    unlockMeta();
+    unlockMountState();
 
     return VFSError.InvalidOperation;
 }
 
 pub fn unmount(mount_path: []const u8) VFSError!void {
-    lockMeta();
+    lockMountState();
     var prev: ?*MountPoint = null;
     var current = mount_list;
 
     while (current) |mp| {
         const mp_path = mp.mount_path[0..strlen(&mp.mount_path)];
         if (std.mem.eql(u8, mp_path, mount_path)) {
+            if (mp.ref_count != 1) {
+                unlockMountState();
+                return VFSError.Busy;
+            }
             if (prev) |p| {
                 p.next = mp.next;
             } else {
                 mount_list = mp.next;
             }
-            unlockMeta();
+            unlockMountState();
 
             mp.fs_type.ops.unmount(mp) catch {};
             memory.kfree(@as([*]u8, @ptrCast(mp)));
@@ -305,23 +498,28 @@ pub fn unmount(mount_path: []const u8) VFSError!void {
         prev = mp;
         current = mp.next;
     }
-    unlockMeta();
+    unlockMountState();
 
     return VFSError.NotFound;
 }
 
 pub fn open(path: []const u8, flags: u32) VFSError!u32 {
     var created = false;
+    var held_parent: ?*VNode = null;
+    defer if (held_parent) |parent| releaseLookupVNode(parent);
+
     const vnode = blk: {
-        if (lookupPath(path)) |v| {
+        if (lookupPathRetained(path)) |v| {
             if ((flags & O_CREAT) != 0 and (flags & O_EXCL) != 0) {
+                releaseLookupVNode(v);
                 return VFSError.AlreadyExists;
             }
             break :blk v;
         } else |err| {
             if (err == VFSError.NotFound and (flags & O_CREAT) != 0) {
                 const parts = splitPath(path);
-                const parent = try lookupPath(parts.parent);
+                const parent = try lookupPathRetained(parts.parent);
+                held_parent = parent;
                 if (parent.file_type != FileType.Directory) {
                     return VFSError.NotDirectory;
                 }
@@ -334,12 +532,15 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
                 };
 
                 created = true;
-                break :blk try parent.mount_point.?.fs_type.ops.create(parent, parts.name, default_mode);
+                const child = try parent.mount_point.?.fs_type.ops.create(parent, parts.name, default_mode);
+                retainLookupVNode(child);
+                break :blk child;
             } else {
                 return err;
             }
         }
     };
+    defer releaseLookupVNode(vnode);
 
     if (vnode.file_type == FileType.Directory and ((flags & O_WRONLY) != 0 or (flags & O_RDWR) != 0)) {
         return VFSError.IsDirectory;
@@ -370,10 +571,11 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
     @memset(&fd.path, 0);
     @memcpy(fd.path[0..fd.path_len], path[0..fd.path_len]);
 
-    lockMeta();
-    fd_table[i] = fd;
+    try installDescriptor(i, fd);
+    retainLookupVNode(vnode);
+    lockVNodeRefs();
     vnode.ref_count += 1;
-    unlockMeta();
+    unlockVNodeRefs();
 
     if (created) notifyPathEvent(path, abi.IN_CREATE, abi.IN_CREATE);
     if (truncated) notifyPathEvent(path, abi.IN_MODIFY, abi.IN_MODIFY);
@@ -383,203 +585,158 @@ pub fn open(path: []const u8, flags: u32) VFSError!u32 {
 }
 
 pub fn close(fd: u32) VFSError!void {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
-
-    lockMeta();
-    const file_desc = fd_table[fd] orelse {
-        unlockMeta();
-        return VFSError.InvalidOperation;
-    };
-    file_desc.ref_count -= 1;
-    if (file_desc.ref_count > 0) {
-        unlockMeta();
-        return;
-    }
-    fd_table[fd] = null;
-    unlockMeta();
-
-    if (file_desc.vnode.file_type == .Pipe) {
-        if (file_desc.vnode.private_data) |pd| {
-            const pipe: *PipeData = @ptrCast(@alignCast(pd));
-            if ((file_desc.flags & O_WRONLY) != 0) {
-                if (pipe.writers > 0) pipe.writers -= 1;
-            } else {
-                if (pipe.readers > 0) pipe.readers -= 1;
-            }
-            if (pipe.readers == 0 and pipe.writers == 0) {
-                memory.kfree(@as([*]u8, @ptrCast(@alignCast(pd))));
-                file_desc.vnode.private_data = null;
-            }
-        }
-    }
-    const vnode = file_desc.vnode;
-    try vnode.ops.close(vnode);
-    lockMeta();
-    vnode.ref_count -= 1;
-    const free_pipe_vnode = vnode.ref_count == 0 and vnode.file_type == .Pipe;
-    unlockMeta();
-
-    if (free_pipe_vnode) {
-        memory.kfree(@as([*]u8, @ptrCast(@alignCast(vnode))));
-    }
-    notifyCloseEvent(file_desc);
-    memory.kfree(@as([*]u8, @ptrCast(file_desc)));
-    freeFd(fd);
+    const file_desc = try takeDescriptor(fd);
+    releaseDescriptor(file_desc);
     readiness.notifyVfs();
 }
 
 pub fn read(fd: u32, buffer: []u8) VFSError!usize {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
 
-    if (fd_table[fd]) |file_desc| {
-        if ((file_desc.flags & O_WRONLY) != 0) {
-            return VFSError.PermissionDenied;
-        }
-
-        const bytes_read = try file_desc.vnode.ops.read(file_desc.vnode, buffer, file_desc.offset);
-        file_desc.offset += bytes_read;
-        if (bytes_read > 0) notifyDescriptorEvent(file_desc, abi.IN_ACCESS, abi.IN_ACCESS);
-        return bytes_read;
+    if ((file_desc.flags & O_WRONLY) != 0) {
+        return VFSError.PermissionDenied;
     }
 
-    return VFSError.InvalidOperation;
+    const bytes_read = try file_desc.vnode.ops.read(file_desc.vnode, buffer, file_desc.offset);
+    file_desc.offset += bytes_read;
+    if (bytes_read > 0) notifyDescriptorEvent(file_desc, abi.IN_ACCESS, abi.IN_ACCESS);
+    return bytes_read;
 }
 
 pub fn write(fd: u32, buffer: []const u8) VFSError!usize {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
 
-    if (fd_table[fd]) |file_desc| {
-        if ((file_desc.flags & O_WRONLY) == 0 and (file_desc.flags & O_RDWR) == 0) {
-            return VFSError.PermissionDenied;
-        }
-
-        if ((file_desc.flags & O_APPEND) != 0) {
-            file_desc.offset = file_desc.vnode.size;
-        }
-
-        const bytes_written = try file_desc.vnode.ops.write(file_desc.vnode, buffer, file_desc.offset);
-        file_desc.offset += bytes_written;
-        if (bytes_written > 0) notifyDescriptorEvent(file_desc, abi.IN_MODIFY, abi.IN_MODIFY);
-        return bytes_written;
+    if ((file_desc.flags & O_WRONLY) == 0 and (file_desc.flags & O_RDWR) == 0) {
+        return VFSError.PermissionDenied;
     }
 
-    return VFSError.InvalidOperation;
+    if ((file_desc.flags & O_APPEND) != 0) {
+        file_desc.offset = file_desc.vnode.size;
+    }
+
+    const bytes_written = try file_desc.vnode.ops.write(file_desc.vnode, buffer, file_desc.offset);
+    file_desc.offset += bytes_written;
+    if (bytes_written > 0) notifyDescriptorEvent(file_desc, abi.IN_MODIFY, abi.IN_MODIFY);
+    return bytes_written;
 }
 
 pub fn ioctl(fd: u32, request: u32, arg: usize) VFSError!i32 {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
-
-    if (fd_table[fd]) |file_desc| {
-        return file_desc.vnode.ops.ioctl(file_desc.vnode, request, arg);
-    }
-
-    return VFSError.InvalidOperation;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
+    return file_desc.vnode.ops.ioctl(file_desc.vnode, request, arg);
 }
 
 pub fn lseek(fd: u32, offset: i64, whence: u32) VFSError!u64 {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
 
-    if (fd_table[fd]) |file_desc| {
-        if (whence == SEEK_CUR) {
-            const cur: i64 = @intCast(file_desc.offset);
-            const new_offset = try file_desc.vnode.ops.seek(file_desc.vnode, cur + offset, SEEK_SET);
-            file_desc.offset = new_offset;
-            return new_offset;
-        }
-        const new_offset = try file_desc.vnode.ops.seek(file_desc.vnode, offset, whence);
+    if (whence == SEEK_CUR) {
+        const cur: i64 = @intCast(file_desc.offset);
+        const new_offset = try file_desc.vnode.ops.seek(file_desc.vnode, cur + offset, SEEK_SET);
         file_desc.offset = new_offset;
         return new_offset;
     }
-
-    return VFSError.InvalidOperation;
+    const new_offset = try file_desc.vnode.ops.seek(file_desc.vnode, offset, whence);
+    file_desc.offset = new_offset;
+    return new_offset;
 }
 
 pub fn pread(fd: u32, buffer: []u8, offset: u64) VFSError!usize {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
 
-    if (fd_table[fd]) |file_desc| {
-        if ((file_desc.flags & O_WRONLY) != 0) {
-            return VFSError.PermissionDenied;
-        }
-        const bytes_read = try file_desc.vnode.ops.read(file_desc.vnode, buffer, offset);
-        if (bytes_read > 0) notifyDescriptorEvent(file_desc, abi.IN_ACCESS, abi.IN_ACCESS);
-        return bytes_read;
+    if ((file_desc.flags & O_WRONLY) != 0) {
+        return VFSError.PermissionDenied;
     }
 
-    return VFSError.InvalidOperation;
+    const bytes_read = try file_desc.vnode.ops.read(file_desc.vnode, buffer, offset);
+    if (bytes_read > 0) notifyDescriptorEvent(file_desc, abi.IN_ACCESS, abi.IN_ACCESS);
+    return bytes_read;
 }
 
 pub fn pwrite(fd: u32, buffer: []const u8, offset: u64) VFSError!usize {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
 
-    if (fd_table[fd]) |file_desc| {
-        if ((file_desc.flags & O_WRONLY) == 0 and (file_desc.flags & O_RDWR) == 0) {
-            return VFSError.PermissionDenied;
-        }
-        const bytes_written = try file_desc.vnode.ops.write(file_desc.vnode, buffer, offset);
-        if (bytes_written > 0) notifyDescriptorEvent(file_desc, abi.IN_MODIFY, abi.IN_MODIFY);
-        return bytes_written;
+    if ((file_desc.flags & O_WRONLY) == 0 and (file_desc.flags & O_RDWR) == 0) {
+        return VFSError.PermissionDenied;
     }
 
-    return VFSError.InvalidOperation;
+    const bytes_written = try file_desc.vnode.ops.write(file_desc.vnode, buffer, offset);
+    if (bytes_written > 0) notifyDescriptorEvent(file_desc, abi.IN_MODIFY, abi.IN_MODIFY);
+    return bytes_written;
 }
 
 pub fn getFileFlags(fd: u32) VFSError!u32 {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
-    if (fd_table[fd]) |file_desc| {
-        return file_desc.flags;
-    }
-    return VFSError.InvalidOperation;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
+    return file_desc.flags;
 }
 
 pub fn pollFd(fd: u32, requested_events: u16) VFSError!u16 {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
-
-    if (fd_table[fd]) |file_desc| {
-        return pollDescriptor(file_desc, requested_events);
-    }
-
-    return VFSError.InvalidOperation;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
+    return pollDescriptor(file_desc, requested_events);
 }
 
 pub fn setFileFlags(fd: u32, flags: u32) VFSError!void {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
-    if (fd_table[fd]) |file_desc| {
-        const changeable = O_APPEND | O_NONBLOCK;
-        file_desc.flags = (file_desc.flags & ~changeable) | (flags & changeable);
-        return;
-    }
-    return VFSError.InvalidOperation;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
+    const changeable = O_APPEND | O_NONBLOCK;
+    file_desc.flags = (file_desc.flags & ~changeable) | (flags & changeable);
 }
 
 pub fn getFdFlags(fd: u32) VFSError!u32 {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
-    if (fd_table[fd]) |file_desc| {
-        return file_desc.fd_flags;
-    }
-    return VFSError.InvalidOperation;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
+    return file_desc.fd_flags;
 }
 
 pub fn setFdFlags(fd: u32, flags: u32) VFSError!void {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
-    if (fd_table[fd]) |file_desc| {
-        file_desc.fd_flags = flags;
-        return;
-    }
-    return VFSError.InvalidOperation;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
+    file_desc.fd_flags = flags;
 }
 
 pub fn getVNodeFromFd(fd: u32) VFSError!*VNode {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
-    if (fd_table[fd]) |file_desc| {
-        return file_desc.vnode;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
+
+    retainLookupVNode(file_desc.vnode);
+    lockVNodeRefs();
+    file_desc.vnode.ref_count += 1;
+    unlockVNodeRefs();
+
+    return file_desc.vnode;
+}
+
+pub fn releaseVNode(vnode: *VNode) void {
+    const mount_point = vnode.mount_point;
+    lockVNodeRefs();
+    if (vnode.ref_count > 0) {
+        vnode.ref_count -= 1;
     }
-    return VFSError.InvalidOperation;
+    const free_pipe_vnode = vnode.ref_count == 0 and vnode.file_type == .Pipe;
+    unlockVNodeRefs();
+
+    if (free_pipe_vnode) {
+        memory.kfree(@as([*]u8, @ptrCast(@alignCast(vnode))));
+    }
+    if (mount_point) |mp| {
+        releaseMountPoint(mp);
+    }
 }
 
 var path_buffer: [512]u8 = undefined;
 
 pub fn getNodePath(vnode: *VNode) VFSError![]const u8 {
+    lockMountState();
+    defer unlockMountState();
+    lockPathBuffer();
+    defer unlockPathBuffer();
+
     var components: [32]*VNode = undefined;
     var depth: usize = 0;
 
@@ -679,47 +836,38 @@ pub fn chownVNode(vnode: *VNode, uid: u32, gid: u32) VFSError!void {
 }
 
 pub fn stat(path: []const u8, stat_buf: *FileStat) VFSError!void {
-    const vnode = try lookupPath(path);
+    const vnode = try lookupPathRetained(path);
+    defer releaseLookupVNode(vnode);
     try vnode.ops.stat(vnode, stat_buf);
 }
 
 pub fn fstat(fd: u32, stat_buf: *FileStat) VFSError!void {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
-
-    if (fd_table[fd]) |file_desc| {
-        try file_desc.vnode.ops.stat(file_desc.vnode, stat_buf);
-    } else {
-        return VFSError.InvalidOperation;
-    }
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
+    try file_desc.vnode.ops.stat(file_desc.vnode, stat_buf);
 }
 
 pub fn readdir(fd: u32, dirent: *DirEntry, index: u64) VFSError!bool {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
-
-    if (fd_table[fd]) |file_desc| {
-        return file_desc.vnode.ops.readdir(file_desc.vnode, dirent, index);
-    }
-
-    return VFSError.InvalidOperation;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
+    return file_desc.vnode.ops.readdir(file_desc.vnode, dirent, index);
 }
 
 pub fn readdirNext(fd: u32, dirent: *DirEntry) VFSError!bool {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
 
-    if (fd_table[fd]) |file_desc| {
-        const has_entry = try file_desc.vnode.ops.readdir(file_desc.vnode, dirent, file_desc.offset);
-        if (has_entry) {
-            file_desc.offset += 1;
-        }
-        return has_entry;
+    const has_entry = try file_desc.vnode.ops.readdir(file_desc.vnode, dirent, file_desc.offset);
+    if (has_entry) {
+        file_desc.offset += 1;
     }
-
-    return VFSError.InvalidOperation;
+    return has_entry;
 }
 
 pub fn mkdir(path: []const u8, mode: FileMode) VFSError!void {
     const parts = splitPath(path);
-    const parent = try lookupPath(parts.parent);
+    const parent = try lookupPathRetained(parts.parent);
+    defer releaseLookupVNode(parent);
     if (parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
     }
@@ -728,7 +876,8 @@ pub fn mkdir(path: []const u8, mode: FileMode) VFSError!void {
 
 pub fn create(path: []const u8, mode: FileMode) VFSError!void {
     const parts = splitPath(path);
-    const parent = try lookupPath(parts.parent);
+    const parent = try lookupPathRetained(parts.parent);
+    defer releaseLookupVNode(parent);
     if (parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
     }
@@ -737,7 +886,8 @@ pub fn create(path: []const u8, mode: FileMode) VFSError!void {
 
 pub fn unlink(path: []const u8) VFSError!void {
     const parts = splitPath(path);
-    const parent = try lookupPath(parts.parent);
+    const parent = try lookupPathRetained(parts.parent);
+    defer releaseLookupVNode(parent);
     if (parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
     }
@@ -746,7 +896,8 @@ pub fn unlink(path: []const u8) VFSError!void {
 
 pub fn rmdir(path: []const u8) VFSError!void {
     const parts = splitPath(path);
-    const parent = try lookupPath(parts.parent);
+    const parent = try lookupPathRetained(parts.parent);
+    defer releaseLookupVNode(parent);
     if (parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
     }
@@ -756,7 +907,8 @@ pub fn rmdir(path: []const u8) VFSError!void {
 pub fn mkfifo(path: []const u8, mode: FileMode) VFSError!void {
     const parts = splitPath(path);
 
-    const parent = try lookupPath(parts.parent);
+    const parent = try lookupPathRetained(parts.parent);
+    defer releaseLookupVNode(parent);
     if (parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
     }
@@ -798,7 +950,8 @@ pub fn mkfifo(path: []const u8, mode: FileMode) VFSError!void {
 }
 
 pub fn truncate(path: []const u8, size: u64) VFSError!void {
-    const vnode = try lookupPath(path);
+    const vnode = try lookupPathRetained(path);
+    defer releaseLookupVNode(vnode);
     if (vnode.file_type == FileType.Directory) {
         return VFSError.IsDirectory;
     }
@@ -807,7 +960,8 @@ pub fn truncate(path: []const u8, size: u64) VFSError!void {
 
 pub fn symlink(target: []const u8, linkpath: []const u8) VFSError!void {
     const parts = splitPath(linkpath);
-    const parent = try lookupPath(parts.parent);
+    const parent = try lookupPathRetained(parts.parent);
+    defer releaseLookupVNode(parent);
     if (parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
     }
@@ -823,13 +977,15 @@ pub fn symlink(target: []const u8, linkpath: []const u8) VFSError!void {
 }
 
 pub fn link(target_path: []const u8, linkpath: []const u8) VFSError!void {
-    const target = try lookupPath(target_path);
+    const target = try lookupPathRetained(target_path);
+    defer releaseLookupVNode(target);
     if (target.file_type == FileType.Directory) {
         return VFSError.IsDirectory;
     }
 
     const parts = splitPath(linkpath);
-    const parent = try lookupPath(parts.parent);
+    const parent = try lookupPathRetained(parts.parent);
+    defer releaseLookupVNode(parent);
     if (parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
     }
@@ -845,7 +1001,8 @@ pub fn link(target_path: []const u8, linkpath: []const u8) VFSError!void {
 }
 
 pub fn readlink(path: []const u8, buffer: []u8) VFSError!usize {
-    const vnode = try lookupPath(path);
+    const vnode = try lookupPathRetained(path);
+    defer releaseLookupVNode(vnode);
     if (vnode.file_type != FileType.SymLink) {
         return VFSError.InvalidOperation;
     }
@@ -860,49 +1017,40 @@ pub fn readlink(path: []const u8, buffer: []u8) VFSError!usize {
 }
 
 pub fn ftruncate(fd: u32, size: u64) VFSError!void {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
 
-    if (fd_table[fd]) |file_desc| {
-        if ((file_desc.flags & O_WRONLY) == 0 and (file_desc.flags & O_RDWR) == 0) {
-            return VFSError.PermissionDenied;
-        }
-        try file_desc.vnode.ops.truncate(file_desc.vnode, size);
-        notifyDescriptorEvent(file_desc, abi.IN_MODIFY, abi.IN_MODIFY);
-    } else {
-        return VFSError.InvalidOperation;
+    if ((file_desc.flags & O_WRONLY) == 0 and (file_desc.flags & O_RDWR) == 0) {
+        return VFSError.PermissionDenied;
     }
+    try file_desc.vnode.ops.truncate(file_desc.vnode, size);
+    notifyDescriptorEvent(file_desc, abi.IN_MODIFY, abi.IN_MODIFY);
 }
 
 pub fn chmod(path: []const u8, mode: FileMode) VFSError!void {
-    const vnode = try lookupPath(path);
+    const vnode = try lookupPathRetained(path);
+    defer releaseLookupVNode(vnode);
     try vnode.ops.chmod(vnode, mode);
 }
 
 pub fn fchmod(fd: u32, mode: FileMode) VFSError!void {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
-
-    if (fd_table[fd]) |file_desc| {
-        try file_desc.vnode.ops.chmod(file_desc.vnode, mode);
-        notifyDescriptorEvent(file_desc, abi.IN_ATTRIB, abi.IN_ATTRIB);
-    } else {
-        return VFSError.InvalidOperation;
-    }
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
+    try file_desc.vnode.ops.chmod(file_desc.vnode, mode);
+    notifyDescriptorEvent(file_desc, abi.IN_ATTRIB, abi.IN_ATTRIB);
 }
 
 pub fn chown(path: []const u8, uid: u32, gid: u32) VFSError!void {
-    const vnode = try lookupPath(path);
+    const vnode = try lookupPathRetained(path);
+    defer releaseLookupVNode(vnode);
     try vnode.ops.chown(vnode, uid, gid);
 }
 
 pub fn fchown(fd: u32, uid: u32, gid: u32) VFSError!void {
-    if (fd >= fd_table.len) return VFSError.InvalidOperation;
-
-    if (fd_table[fd]) |file_desc| {
-        try file_desc.vnode.ops.chown(file_desc.vnode, uid, gid);
-        notifyDescriptorEvent(file_desc, abi.IN_ATTRIB, abi.IN_ATTRIB);
-    } else {
-        return VFSError.InvalidOperation;
-    }
+    const file_desc = try retainDescriptor(fd);
+    defer releaseDescriptor(file_desc);
+    try file_desc.vnode.ops.chown(file_desc.vnode, uid, gid);
+    notifyDescriptorEvent(file_desc, abi.IN_ATTRIB, abi.IN_ATTRIB);
 }
 
 const PIPE_BUF_SIZE = 4096;
@@ -1083,30 +1231,24 @@ pub fn createPipe() VFSError!struct { read_fd: u32, write_fd: u32 } {
     const write_fd: *FileDescriptor = @ptrCast(@alignCast(write_fd_mem));
     write_fd.* = FileDescriptor{ .vnode = vnode, .offset = 0, .flags = O_WRONLY, .fd_flags = 0, .ref_count = 1, .path_len = 0, .path = [_]u8{0} ** 512 };
 
-    fd_table[read_fd_idx] = read_fd;
-    fd_table[write_fd_idx] = write_fd;
+    try installDescriptor(read_fd_idx, read_fd);
+    try installDescriptor(write_fd_idx, write_fd);
+    lockVNodeRefs();
     vnode.ref_count += 2;
+    unlockVNodeRefs();
 
     return .{ .read_fd = read_fd_idx, .write_fd = write_fd_idx };
 }
 
 pub fn dup2(old_fd: u32, new_fd: u32) VFSError!u32 {
-    if (old_fd >= fd_table.len or new_fd >= fd_table.len) return VFSError.InvalidOperation;
-    const old_desc = fd_table[old_fd] orelse return VFSError.InvalidOperation;
+    const old_desc = try retainDescriptor(old_fd);
+    defer releaseDescriptor(old_desc);
 
     if (old_fd == new_fd) return new_fd;
 
-    if (fd_table[new_fd]) |existing| {
-        existing.ref_count -= 1;
-        if (existing.ref_count == 0) {
-            existing.vnode.ops.close(existing.vnode) catch {};
-            existing.vnode.ref_count -= 1;
-            memory.kfree(@as([*]u8, @ptrCast(existing)));
-        }
-        fd_table[new_fd] = null;
-    }
-
     const fd_m = memory.kmalloc(@sizeOf(FileDescriptor)) orelse return VFSError.OutOfMemory;
+    errdefer memory.kfree(@as([*]u8, @ptrCast(fd_m)));
+
     const new_desc: *FileDescriptor = @ptrCast(@alignCast(fd_m));
     new_desc.* = FileDescriptor{
         .vnode = old_desc.vnode,
@@ -1117,21 +1259,29 @@ pub fn dup2(old_fd: u32, new_fd: u32) VFSError!u32 {
         .path_len = old_desc.path_len,
         .path = old_desc.path,
     };
-    fd_table[new_fd] = new_desc;
+    const existing = try replaceDescriptor(new_fd, new_desc);
+    retainLookupVNode(new_desc.vnode);
+    lockVNodeRefs();
     old_desc.vnode.ref_count += 1;
+    unlockVNodeRefs();
     retainPipeEndpoint(new_desc);
+    if (existing) |replaced| {
+        releaseDescriptor(replaced);
+    }
 
     return new_fd;
 }
 
 pub fn dup(old_fd: u32) VFSError!u32 {
-    if (old_fd >= fd_table.len) return VFSError.InvalidOperation;
-    const old_desc = fd_table[old_fd] orelse return VFSError.InvalidOperation;
+    const old_desc = try retainDescriptor(old_fd);
+    defer releaseDescriptor(old_desc);
 
     const new_fd = allocFd() orelse return VFSError.TooManyOpenFiles;
     errdefer freeFd(new_fd);
 
     const fd_m = memory.kmalloc(@sizeOf(FileDescriptor)) orelse return VFSError.OutOfMemory;
+    errdefer memory.kfree(@as([*]u8, @ptrCast(fd_m)));
+
     const new_desc: *FileDescriptor = @ptrCast(@alignCast(fd_m));
     new_desc.* = FileDescriptor{
         .vnode = old_desc.vnode,
@@ -1142,8 +1292,11 @@ pub fn dup(old_fd: u32) VFSError!u32 {
         .path_len = old_desc.path_len,
         .path = old_desc.path,
     };
-    fd_table[new_fd] = new_desc;
+    try installDescriptor(new_fd, new_desc);
+    retainLookupVNode(new_desc.vnode);
+    lockVNodeRefs();
     old_desc.vnode.ref_count += 1;
+    unlockVNodeRefs();
     retainPipeEndpoint(new_desc);
 
     return new_fd;
@@ -1159,8 +1312,14 @@ fn retainPipeEndpoint(file_desc: *const FileDescriptor) void {
     }
 }
 
+fn loadInotifyNotifier() ?*const fn ([]const u8, u32, u32) void {
+    lockMountState();
+    defer unlockMountState();
+    return inotify_notifier;
+}
+
 fn notifyPathEvent(path: []const u8, exact_mask: u32, parent_mask: u32) void {
-    const callback = inotify_notifier orelse return;
+    const callback = loadInotifyNotifier() orelse return;
     callback(path, exact_mask, parent_mask);
 }
 
@@ -1186,8 +1345,10 @@ pub fn rename(old_path: []const u8, new_path: []const u8) VFSError!void {
     const old_parts = splitPath(old_path);
     const new_parts = splitPath(new_path);
 
-    const old_parent = try lookupPath(old_parts.parent);
-    const new_parent = try lookupPath(new_parts.parent);
+    const old_parent = try lookupPathRetained(old_parts.parent);
+    defer releaseLookupVNode(old_parent);
+    const new_parent = try lookupPathRetained(new_parts.parent);
+    defer releaseLookupVNode(new_parent);
 
     if (old_parent.file_type != FileType.Directory or new_parent.file_type != FileType.Directory) {
         return VFSError.NotDirectory;
@@ -1227,6 +1388,23 @@ fn createVNode() VFSError!*VNode {
 }
 
 pub fn lookupPath(path: []const u8) VFSError!*VNode {
+    lockMountState();
+    defer unlockMountState();
+    return lookupPathLocked(path);
+}
+
+pub fn lookupPathRetained(path: []const u8) VFSError!*VNode {
+    lockMountState();
+    defer unlockMountState();
+
+    const vnode = try lookupPathLocked(path);
+    if (vnode.mount_point) |mp| {
+        mp.ref_count += 1;
+    }
+    return vnode;
+}
+
+fn lookupPathLocked(path: []const u8) VFSError!*VNode {
     if (path.len == 0 or path[0] != '/') {
         return VFSError.InvalidPath;
     }
@@ -1234,7 +1412,7 @@ pub fn lookupPath(path: []const u8) VFSError!*VNode {
     var current: *VNode = undefined;
     var i: usize = 1;
 
-    if (findBestMountPoint(path)) |mp| {
+    if (findBestMountPointLocked(path)) |mp| {
         current = mp.root orelse return VFSError.NotFound;
         const mount_path = mp.mount_path[0..strlen(&mp.mount_path)];
         if (path.len == mount_path.len or (mount_path.len == 1 and path.len == 1)) {
@@ -1283,7 +1461,7 @@ pub fn lookupPath(path: []const u8) VFSError!*VNode {
     return current;
 }
 
-fn findBestMountPoint(path: []const u8) ?*MountPoint {
+fn findBestMountPointLocked(path: []const u8) ?*MountPoint {
     var best: ?*MountPoint = null;
     var best_len: usize = 0;
     var current = mount_list;

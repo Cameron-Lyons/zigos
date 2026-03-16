@@ -1,4 +1,3 @@
-// zlint-disable suppressed-errors
 const vga = @import("../drivers/vga.zig");
 const vfs = @import("../fs/vfs.zig");
 

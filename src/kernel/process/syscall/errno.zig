@@ -17,6 +17,7 @@ pub fn vfsErrno(err: vfs.VFSError) i32 {
         vfs.VFSError.DeviceError => abi.EINVAL,
         vfs.VFSError.BrokenPipe => abi.EPIPE,
         vfs.VFSError.TooManyOpenFiles => abi.EMFILE,
+        vfs.VFSError.Busy => abi.EBUSY,
     };
 }
 

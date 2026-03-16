@@ -1919,9 +1919,10 @@ fn inotifyInternalWaitTask() void {
 fn inotifyInternalFeedTask() void {
     process.yield();
 
-    const vnode = vfs.lookupPath(INOTIFY_INTERNAL_TEST_PATH) catch {
+    const vnode = vfs.lookupPathRetained(INOTIFY_INTERNAL_TEST_PATH) catch {
         finishTestTask();
     };
+    defer vfs.releaseLookupVNode(vnode);
 
     vfs.openVNode(vnode, vfs.O_RDWR) catch {
         finishTestTask();

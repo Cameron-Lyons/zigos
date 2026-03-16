@@ -91,7 +91,8 @@ pub fn sys_open(pathname: [*]const u8, flags: u32) i32 {
     const resolved = resolvePath(path_slice, &resolved_buf) orelse return abi.ENAMETOOLONG;
 
     if (process_mod.current_process) |proc| {
-        if (vfs.lookupPath(resolved)) |vnode| {
+        if (vfs.lookupPathRetained(resolved)) |vnode| {
+            defer vfs.releaseLookupVNode(vnode);
             const access_mode = flags & 0x3;
             var access: u3 = 0;
             if (access_mode == 0 or access_mode == 2) access |= 4;

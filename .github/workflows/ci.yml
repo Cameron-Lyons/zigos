@@ -32,6 +32,26 @@ jobs:
       run: |
         zlint -f github --deny-warnings src
 
+  host-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: 0.15.2
+
+    - name: Install build dependencies
+      run: |
+        ./scripts/setup-deps.sh
+
+    - name: Run host-side unit tests
+      run: |
+        zig build host-tests
+
   build-kernel:
     runs-on: ubuntu-latest
 
@@ -53,6 +73,9 @@ jobs:
         zig build kernel
         zig build kernel-ci-smoke
         zig build kernel-test-vm
+        zig build kernel-userland-smoke
+        zig build userland
+        zig build rootfs
 
   smoke-boot:
     runs-on: ubuntu-latest
@@ -95,3 +118,45 @@ jobs:
     - name: Run VM test profile
       run: |
         zig build run-test-vm
+
+  userland-smoke:
+    runs-on: ubuntu-latest
+    needs: [build-kernel]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: 0.15.2
+
+    - name: Install build dependencies
+      run: |
+        ./scripts/setup-deps.sh
+
+    - name: Run userland smoke profile
+      run: |
+        zig build userland-smoke-test
+
+  boot-iso:
+    runs-on: ubuntu-latest
+    needs: [build-kernel]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: 0.15.2
+
+    - name: Install build dependencies
+      run: |
+        ./scripts/setup-deps.sh
+
+    - name: Run ISO boot test
+      run: |
+        zig build boot-test
