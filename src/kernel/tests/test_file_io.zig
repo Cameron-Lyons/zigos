@@ -1,4 +1,3 @@
-// zlint-disable suppressed-errors
 const vga = @import("../drivers/vga.zig");
 const vfs = @import("../fs/vfs.zig");
 
@@ -19,6 +18,8 @@ pub fn runFileIOTests() void {
     testVFSOpenCreat();
     testVFSReadOnly();
     testVFSMultipleFDs();
+    testVFSDup2ReservesTargetFd();
+    testVFSUnmountBusyWhileFileOpen();
 
     vga.print("\n--- Results: ");
     printDec(pass_count);
@@ -313,6 +314,118 @@ fn testVFSMultipleFDs() void {
         vga.print("  [FAIL] Duplicate fd values returned\n");
         fail_count += 1;
     }
+}
+
+fn testVFSDup2ReservesTargetFd() void {
+    vga.print("Test 9: dup2 reserves a previously free target fd\n");
+
+    const source_fd = vfs.open("/", vfs.O_RDONLY) catch |err| {
+        vga.print("  [FAIL] Could not open source fd: ");
+        vga.print(@errorName(err));
+        vga.print("\n");
+        fail_count += 1;
+        return;
+    };
+    defer vfs.close(source_fd) catch {};
+
+    var target_fd: ?u32 = null;
+    var candidate = source_fd + 1;
+    while (candidate < 256) : (candidate += 1) {
+        _ = vfs.getFileFlags(candidate) catch |err| switch (err) {
+            error.InvalidOperation => {
+                target_fd = candidate;
+                break;
+            },
+            else => {},
+        };
+    }
+
+    const resolved_target_fd = target_fd orelse {
+        vga.print("  [FAIL] No suitable dup2 target fd available\n");
+        fail_count += 1;
+        return;
+    };
+
+    const duplicated_fd = vfs.dup2(source_fd, resolved_target_fd) catch |err| {
+        vga.print("  [FAIL] dup2 failed: ");
+        vga.print(@errorName(err));
+        vga.print("\n");
+        fail_count += 1;
+        return;
+    };
+    defer vfs.close(duplicated_fd) catch {};
+
+    const extra_fd = vfs.open("/", vfs.O_RDONLY) catch |err| {
+        vga.print("  [FAIL] Could not open follow-up fd: ");
+        vga.print(@errorName(err));
+        vga.print("\n");
+        fail_count += 1;
+        return;
+    };
+    defer vfs.close(extra_fd) catch {};
+
+    if (extra_fd != resolved_target_fd) {
+        vga.print("  [OK] dup2 target remained reserved for the duplicated descriptor\n");
+        pass_count += 1;
+    } else {
+        vga.print("  [FAIL] open reused dup2 target fd while it was still active\n");
+        fail_count += 1;
+    }
+}
+
+fn testVFSUnmountBusyWhileFileOpen() void {
+    vga.print("Test 10: unmount rejects busy mounted filesystems\n");
+
+    vfs.mount("", "/busytest", "tmpfs", 0) catch |err| {
+        vga.print("  [FAIL] Could not mount tmpfs test filesystem: ");
+        vga.print(@errorName(err));
+        vga.print("\n");
+        fail_count += 1;
+        return;
+    };
+    defer vfs.unmount("/busytest") catch {};
+
+    const fd = vfs.open("/busytest/held.txt", vfs.O_WRONLY | vfs.O_CREAT | vfs.O_TRUNC) catch |err| {
+        vga.print("  [FAIL] Could not open file on mounted tmpfs: ");
+        vga.print(@errorName(err));
+        vga.print("\n");
+        fail_count += 1;
+        return;
+    };
+
+    vfs.unmount("/busytest") catch |err| switch (err) {
+        error.Busy => {
+            vga.print("  [OK] Busy mount rejected while file descriptor remained open\n");
+            pass_count += 1;
+        },
+        else => {
+            vga.print("  [FAIL] Unexpected unmount error while file open: ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+            vfs.close(fd) catch {};
+            fail_count += 1;
+            return;
+        },
+    };
+
+    vfs.close(fd) catch |err| {
+        vga.print("  [FAIL] Could not close busy-test file: ");
+        vga.print(@errorName(err));
+        vga.print("\n");
+        fail_count += 1;
+        return;
+    };
+
+    vfs.unmount("/busytest") catch |err| {
+        vga.print("  [FAIL] Unmount still failed after close: ");
+        vga.print(@errorName(err));
+        vga.print("\n");
+        fail_count += 1;
+        return;
+    };
+
+    vga.print("  [OK] Unmount succeeded after the last open file closed\n");
+    pass_count += 1;
 }
 
 fn printDec(value: u32) void {

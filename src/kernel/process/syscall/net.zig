@@ -23,6 +23,19 @@ const UNIX_SOCKET_BUFFER_MASK: usize = UNIX_SOCKET_BUFFER_SIZE - 1;
 
 const POLLIN: u16 = 0x001;
 const POLLOUT: u16 = 0x004;
+const SOL_SOCKET: i32 = 1;
+const IPPROTO_TCP: i32 = 6;
+const SO_REUSEADDR: i32 = 2;
+const SO_TYPE: i32 = 3;
+const SO_ERROR: i32 = 4;
+const SO_BROADCAST: i32 = 6;
+const SO_SNDBUF: i32 = 7;
+const SO_RCVBUF: i32 = 8;
+const SO_KEEPALIVE: i32 = 9;
+const SO_LINGER: i32 = 13;
+const SO_RCVTIMEO: i32 = 20;
+const SO_SNDTIMEO: i32 = 21;
+const TCP_NODELAY: i32 = 1;
 
 pub const SockAddrIn = extern struct {
     family: u16,
@@ -566,5 +579,253 @@ pub fn sys_shutdown(socket_table: *SocketTable, sockfd: i32) i32 {
     sock.close();
     socket_table[sock_idx] = null;
     readiness.notifySocket();
+    return 0;
+}
+
+pub fn sys_sendto(sockfd: i32, buf: [*]const u8, len: usize, dest_addr: usize, addr_len: u32) i32 {
+    const sock = getInetSocket(sockfd) orelse return abi.EBADF;
+
+    if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return abi.EINVAL;
+
+    var kernel_buffer: [SOCKET_TRANSFER_BUFFER_SIZE]u8 = undefined;
+    const to_send = @min(len, kernel_buffer.len);
+    protection.copyFromUser(kernel_buffer[0..to_send], @intFromPtr(buf)) catch return abi.EINVAL;
+
+    if (dest_addr == 0) {
+        if (sock.address_family == .AF_INET6) {
+            if (sock.remote_ipv6) |dst| {
+                ipv6.sendPacket(dst, ipv6.NEXT_HEADER_UDP, kernel_buffer[0..to_send]);
+                return @intCast(to_send);
+            }
+            return abi.ENOTCONN;
+        }
+        const sent = sock.send(kernel_buffer[0..to_send]) catch |err| return errno.socketErrno(err);
+        return @intCast(sent);
+    }
+
+    if (sock.address_family == .AF_INET6) {
+        const endpoint = parseSockAddrIn6(dest_addr, addr_len) orelse return abi.EINVAL;
+        ipv6.sendPacket(endpoint.addr, ipv6.NEXT_HEADER_UDP, kernel_buffer[0..to_send]);
+        return @intCast(to_send);
+    }
+
+    const endpoint = parseSockAddrIn(dest_addr, addr_len) orelse return abi.EINVAL;
+    sock.sendTo(kernel_buffer[0..to_send], endpoint.addr, endpoint.port) catch |err| return errno.socketErrno(err);
+    return @intCast(to_send);
+}
+
+pub fn sys_recvfrom(sockfd: i32, buf: [*]u8, len: usize, src_addr: usize, addr_len_ptr: usize) i32 {
+    const sock = getInetSocket(sockfd) orelse return abi.EBADF;
+
+    if (!protection.verifyUserPointer(@intFromPtr(buf), len)) return abi.EINVAL;
+
+    var kernel_buffer: [SOCKET_TRANSFER_BUFFER_SIZE]u8 = undefined;
+    const to_recv = @min(len, kernel_buffer.len);
+
+    if (src_addr == 0) {
+        const received = sock.recv(kernel_buffer[0..to_recv]) catch |err| return errno.socketErrno(err);
+        if (received == 0) return 0;
+        protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..received]) catch return abi.EINVAL;
+        return @intCast(received);
+    }
+
+    if (sock.address_family == .AF_INET6) {
+        const received = sock.recv(kernel_buffer[0..to_recv]) catch |err| return errno.socketErrno(err);
+        if (received == 0) return 0;
+        protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..received]) catch return abi.EINVAL;
+        if (sock.remote_ipv6) |from_ipv6| {
+            _ = writeSockAddrIn6(src_addr, addr_len_ptr, .{ .addr = from_ipv6, .port = sock.remote_port });
+        }
+        return @intCast(received);
+    }
+
+    var from_addr = ipv4.IPv4Address{ .octets = .{ 0, 0, 0, 0 } };
+    var from_port: u16 = 0;
+    const received = sock.recvFrom(kernel_buffer[0..to_recv], &from_addr, &from_port) catch |err| return errno.socketErrno(err);
+    if (received == 0) return 0;
+
+    protection.copyToUser(@intFromPtr(buf), kernel_buffer[0..received]) catch return abi.EINVAL;
+    _ = writeSockAddrIn(src_addr, addr_len_ptr, .{ .addr = from_addr, .port = from_port });
+    return @intCast(received);
+}
+
+pub fn sys_getsockname(sockfd: i32, addr_ptr: usize, addr_len_ptr: usize) i32 {
+    const sock = getInetSocket(sockfd) orelse return abi.EBADF;
+    if (sock.address_family == .AF_INET6) {
+        const local = sock.local_ipv6 orelse ipv6.UNSPECIFIED;
+        return writeSockAddrIn6(addr_ptr, addr_len_ptr, .{ .addr = local, .port = sock.local_port });
+    }
+    return writeSockAddrIn(addr_ptr, addr_len_ptr, .{ .addr = sock.local_addr, .port = sock.local_port });
+}
+
+pub fn sys_getpeername(sockfd: i32, addr_ptr: usize, addr_len_ptr: usize) i32 {
+    const sock = getInetSocket(sockfd) orelse return abi.EBADF;
+    if (sock.state != .CONNECTED) return abi.ENOTCONN;
+    if (sock.address_family == .AF_INET6) {
+        const remote = sock.remote_ipv6 orelse ipv6.UNSPECIFIED;
+        return writeSockAddrIn6(addr_ptr, addr_len_ptr, .{ .addr = remote, .port = sock.remote_port });
+    }
+    return writeSockAddrIn(addr_ptr, addr_len_ptr, .{ .addr = sock.remote_addr, .port = sock.remote_port });
+}
+
+pub fn sys_getsockopt(sockfd: i32, level: i32, optname: i32, optval_addr: usize, optlen_addr: usize) i32 {
+    const sock = getInetSocket(sockfd) orelse return abi.EBADF;
+
+    if (!protection.verifyUserPointer(optval_addr, @sizeOf(i32))) return abi.EINVAL;
+
+    var val: i32 = 0;
+
+    if (level == SOL_SOCKET) {
+        switch (optname) {
+            SO_TYPE => val = switch (sock.socket_type) {
+                .STREAM => @intCast(SOCK_STREAM),
+                .DGRAM => @intCast(SOCK_DGRAM),
+                else => 0,
+            },
+            SO_ERROR => val = 0,
+            SO_REUSEADDR, SO_KEEPALIVE, SO_BROADCAST => val = 0,
+            SO_SNDBUF => val = @intCast(SOCKET_TRANSFER_BUFFER_SIZE),
+            SO_RCVBUF => val = @intCast(SOCKET_TRANSFER_BUFFER_SIZE),
+            SO_LINGER => val = 0,
+            SO_RCVTIMEO, SO_SNDTIMEO => val = 0,
+            else => return abi.ENOPROTOOPT,
+        }
+    } else if (level == IPPROTO_TCP) {
+        switch (optname) {
+            TCP_NODELAY => val = 1,
+            else => return abi.ENOPROTOOPT,
+        }
+    } else {
+        return abi.ENOPROTOOPT;
+    }
+
+    protection.copyToUser(optval_addr, std.mem.asBytes(&val)) catch return abi.EINVAL;
+    if (optlen_addr != 0 and protection.verifyUserPointer(optlen_addr, @sizeOf(u32))) {
+        var len: u32 = @sizeOf(i32);
+        protection.copyToUser(optlen_addr, std.mem.asBytes(&len)) catch {};
+    }
+    return 0;
+}
+
+pub fn sys_setsockopt(sockfd: i32, level: i32, optname: i32, optval_addr: usize, optlen: u32) i32 {
+    _ = getInetSocket(sockfd) orelse return abi.EBADF;
+
+    if (optlen < @sizeOf(i32)) return abi.EINVAL;
+    if (!protection.verifyUserPointer(optval_addr, @sizeOf(i32))) return abi.EINVAL;
+
+    if (level == SOL_SOCKET) {
+        switch (optname) {
+            SO_REUSEADDR, SO_KEEPALIVE, SO_BROADCAST => return 0,
+            SO_SNDBUF, SO_RCVBUF => return 0,
+            SO_LINGER => return 0,
+            SO_RCVTIMEO, SO_SNDTIMEO => return 0,
+            else => return abi.ENOPROTOOPT,
+        }
+    } else if (level == IPPROTO_TCP) {
+        switch (optname) {
+            TCP_NODELAY => return 0,
+            else => return abi.ENOPROTOOPT,
+        }
+    } else {
+        return abi.ENOPROTOOPT;
+    }
+}
+
+pub fn sys_accept4(unix_sockets: *UnixSocketTable, socket_table: *SocketTable, sockfd: i32, addr: usize, addrlen: usize, flags: u32) i32 {
+    _ = addr;
+    _ = addrlen;
+
+    if (sockfd >= unix_socket_fd_base and sockfd < unix_socket_fd_base + @as(i32, @intCast(unix_socket_count))) {
+        const idx: usize = @intCast(sockfd - unix_socket_fd_base);
+        const usock = &unix_sockets[idx];
+        if (!usock.in_use or !usock.listening) return abi.EBADF;
+
+        for (0..unix_socket_count) |i| {
+            const peer = &unix_sockets[i];
+            if (peer.in_use and peer.connected and peer.peer == usock) {
+                for (0..unix_socket_count) |j| {
+                    const new_sock = &unix_sockets[j];
+                    if (!new_sock.in_use) {
+                        new_sock.in_use = true;
+                        new_sock.connected = true;
+                        new_sock.peer = peer;
+                        peer.peer = new_sock;
+                        const new_fd: i32 = @intCast(@as(i32, @intCast(j)) + unix_socket_fd_base);
+                        _ = flags;
+                        return new_fd;
+                    }
+                }
+                return abi.EMFILE;
+            }
+        }
+        return abi.EAGAIN;
+    }
+
+    const sock_idx = inetSocketIndex(sockfd) orelse return abi.EBADF;
+    const sock = socket_table[sock_idx] orelse return abi.EBADF;
+    const client = sock.accept() catch |err| return errno.socketErrno(err);
+
+    for (0..socket_table.len) |i| {
+        if (socket_table[i] == null) {
+            socket_table[i] = client;
+            return @intCast(@as(i32, @intCast(i)) + socket_fd_base);
+        }
+    }
+
+    client.close();
+    return abi.EMFILE;
+}
+
+pub fn sys_socketpair(unix_sockets: *UnixSocketTable, domain: i32, sock_type: i32, protocol: i32, sv: usize) i32 {
+    _ = protocol;
+    _ = sock_type;
+
+    if (!protection.verifyUserPointer(sv, @sizeOf([2]i32))) return abi.EFAULT;
+    if (domain != @as(i32, @intCast(AF_UNIX))) return abi.EAFNOSUPPORT;
+
+    var fd1: i32 = -1;
+    var fd2: i32 = -1;
+
+    for (0..unix_socket_count) |i| {
+        const usock = &unix_sockets[i];
+        if (!usock.in_use) {
+            if (fd1 == -1) {
+                usock.in_use = true;
+                usock.connected = true;
+                fd1 = @intCast(@as(i32, @intCast(i)) + unix_socket_fd_base);
+            } else {
+                usock.in_use = true;
+                usock.connected = true;
+                fd2 = @intCast(@as(i32, @intCast(i)) + unix_socket_fd_base);
+
+                const idx1: usize = @intCast(fd1 - unix_socket_fd_base);
+                unix_sockets[idx1].peer = usock;
+                usock.peer = &unix_sockets[idx1];
+                break;
+            }
+        }
+    }
+
+    if (fd1 == -1 or fd2 == -1) {
+        if (fd1 != -1) {
+            const idx: usize = @intCast(fd1 - unix_socket_fd_base);
+            unix_sockets[idx].in_use = false;
+            unix_sockets[idx].connected = false;
+        }
+        return abi.EMFILE;
+    }
+
+    const fds = [2]i32{ fd1, fd2 };
+    protection.copyToUser(sv, std.mem.asBytes(&fds)) catch {
+        const idx1: usize = @intCast(fd1 - unix_socket_fd_base);
+        const idx2: usize = @intCast(fd2 - unix_socket_fd_base);
+        unix_sockets[idx1].in_use = false;
+        unix_sockets[idx1].connected = false;
+        unix_sockets[idx1].peer = null;
+        unix_sockets[idx2].in_use = false;
+        unix_sockets[idx2].connected = false;
+        unix_sockets[idx2].peer = null;
+        return abi.EFAULT;
+    };
     return 0;
 }
