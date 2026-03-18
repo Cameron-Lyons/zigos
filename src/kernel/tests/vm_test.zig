@@ -481,17 +481,19 @@ fn test_process_local_state() void {
         return;
     }
 
-    _ = vfs.lookupPath(PROCESS_STATE_TEST_INSIDE) catch {
+    const inside_vnode = vfs.lookupPath(PROCESS_STATE_TEST_INSIDE) catch {
         vga.print("  [FAIL] chrooted mkdir did not create host-visible directory\n");
         fail_count += 1;
         return;
     };
+    vfs.releaseLookupVNode(inside_vnode);
 
-    _ = vfs.lookupPath(PROCESS_STATE_TEST_AT_INSIDE) catch {
+    const at_inside_vnode = vfs.lookupPath(PROCESS_STATE_TEST_AT_INSIDE) catch {
         vga.print("  [FAIL] chrooted mkdirat did not create host-visible directory\n");
         fail_count += 1;
         return;
     };
+    vfs.releaseLookupVNode(at_inside_vnode);
 
     vga.print("  [OK] cwd, chroot, and RLIMIT_NOFILE stayed process-local\n");
     pass_count += 1;
