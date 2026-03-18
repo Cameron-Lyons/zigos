@@ -57,6 +57,59 @@ pub fn joinPath(base: []const u8, component: []const u8, out: *[MAX_COMMAND_LENG
     return out[0 .. base.len + 1 + component.len];
 }
 
+const TestRng = struct {
+    state: u64,
+
+    fn next(self: *TestRng) u64 {
+        self.state = self.state *% 2862933555777941757 +% 3037000493;
+        return self.state;
+    }
+
+    fn choose(self: *TestRng, limit: usize) usize {
+        if (limit == 0) return 0;
+        return @intCast(self.next() % limit);
+    }
+};
+
+fn randomGlobText(rng: *TestRng, buffer: []u8, allow_wildcards: bool) []const u8 {
+    const alphabet = if (allow_wildcards)
+        "abcdefghijklmnopqrstuvwxyz0123456789*?.-_/"
+    else
+        "abcdefghijklmnopqrstuvwxyz0123456789.-_/";
+    const len = rng.choose(buffer.len + 1);
+    for (buffer[0..len]) |*byte| {
+        byte.* = alphabet[rng.choose(alphabet.len)];
+    }
+    return buffer[0..len];
+}
+
+fn referenceWildcardMatch(pattern: []const u8, text: []const u8) bool {
+    var dp: [17][17]bool = [_][17]bool{[_]bool{false} ** 17} ** 17;
+    dp[0][0] = true;
+
+    var pattern_idx: usize = 1;
+    while (pattern_idx <= pattern.len) : (pattern_idx += 1) {
+        if (pattern[pattern_idx - 1] == '*') {
+            dp[pattern_idx][0] = dp[pattern_idx - 1][0];
+        }
+    }
+
+    pattern_idx = 1;
+    while (pattern_idx <= pattern.len) : (pattern_idx += 1) {
+        var text_idx: usize = 1;
+        while (text_idx <= text.len) : (text_idx += 1) {
+            const token = pattern[pattern_idx - 1];
+            if (token == '*') {
+                dp[pattern_idx][text_idx] = dp[pattern_idx - 1][text_idx] or dp[pattern_idx][text_idx - 1];
+            } else if (token == '?' or token == text[text_idx - 1]) {
+                dp[pattern_idx][text_idx] = dp[pattern_idx - 1][text_idx - 1];
+            }
+        }
+    }
+
+    return dp[pattern.len][text.len];
+}
+
 test "containsWildcardChars spots glob tokens" {
     try std.testing.expect(!containsWildcardChars("plain"));
     try std.testing.expect(containsWildcardChars("*.zig"));
@@ -81,4 +134,16 @@ test "joinPath rejects oversized output" {
     var buffer: [MAX_COMMAND_LENGTH]u8 = undefined;
     var component = [_]u8{'x'} ** (MAX_COMMAND_LENGTH - 1);
     try std.testing.expectError(error.ArgumentTooLong, joinPath("/", component[0..], &buffer));
+}
+
+test "wildcardMatch agrees with reference matcher on randomized corpus" {
+    var rng = TestRng{ .state = 0xCAFEBABE12345678 };
+    var pattern_buf: [16]u8 = undefined;
+    var text_buf: [16]u8 = undefined;
+
+    for (0..2048) |_| {
+        const pattern = randomGlobText(&rng, &pattern_buf, true);
+        const text = randomGlobText(&rng, &text_buf, false);
+        try std.testing.expectEqual(referenceWildcardMatch(pattern, text), wildcardMatch(pattern, text));
+    }
 }

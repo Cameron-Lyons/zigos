@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("abi.zig");
+const semantics = @import("syscall_semantics.zig");
 const mmap = @import("../../memory/mmap.zig");
 const process = @import("../process.zig");
 const protection = @import("../../memory/protection.zig");
@@ -129,9 +130,9 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: u32) i32 {
 }
 
 fn isValidResource(resource: u32) bool {
-    return resource < process.RLIMIT_COUNT;
+    return semantics.isValidIndexedResource(resource, process.RLIMIT_COUNT);
 }
 
 fn pageCount(length: usize) usize {
-    return (length + 4095) / 4096;
+    return semantics.pageCount(length, 4096);
 }

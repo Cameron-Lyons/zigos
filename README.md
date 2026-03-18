@@ -64,6 +64,27 @@ zig build rootfs
 # Run host-side unit tests for extracted shell/TCP/IPC logic
 zig build host-tests
 
+# Run host-side benchmarks for extracted shell/TCP/IPC logic
+zig build bench
+
+# Build the kernel benchmark profile
+zig build kernel-bench
+
+# Build the scheduler stress profile
+zig build kernel-smp-stress
+
+# Run the kernel benchmark profile in headless QEMU
+zig build run-kernel-bench
+
+# Run the scheduler stress profile in headless QEMU
+zig build run-smp-stress
+
+# Capture and verify kernel benchmark markers/results/thresholds
+zig build kernel-bench-test
+
+# Run the scheduler stress smoke/regression profile
+zig build smp-stress-test
+
 # Run the development profile in QEMU
 zig build run
 
@@ -104,11 +125,38 @@ GRUB_MKRESCUE=/path/to/grub-mkrescue zig build iso
 QEMU_BIN=qemu-system-x86_64 BOOT_TEST_SECONDS=15 zig build boot-test
 ```
 
+## Benchmarking
+
+The benchmark runner exercises host-safe subsystems such as shell parsing, glob expansion, TCP helpers, and semaphore semantics without booting QEMU.
+
+```bash
+# List benchmark cases
+zig build bench -- --list
+
+# Run only TCP benchmarks for longer samples
+zig build bench -- --filter tcp --duration-ms 1000 --warmup-ms 100
+```
+
+For freestanding measurements inside QEMU, use the kernel benchmark profile. It emits `BENCH:*` markers over serial and reports cycles per operation for representative shell, TCP, and IPC workloads.
+
+```bash
+# Stream kernel benchmark output to the terminal
+zig build run-kernel-bench
+
+# Capture output to build/kernel-benchmark.log and verify markers, thresholds, and baseline regressions
+zig build kernel-bench-test
+
+# Capture output to build/smp-stress.log and verify scheduler stress markers
+zig build smp-stress-test
+```
+
 ## Boot Profiles
 
 - `dev`: starts the interactive shell and demo processes
 - `ci_smoke`: boots core services, initializes the shell, emits serial markers, and exits through QEMU debug-exit
 - `test_vm`: runs the virtual memory test suite and exits through QEMU debug-exit
+- `benchmark`: boots the kernel, runs serial-reported microbenchmarks in QEMU, and exits through QEMU debug-exit
+- `smp_stress`: boots the kernel, runs a headless scheduler stress workload, emits serial markers and scheduler stats, and exits through QEMU debug-exit
 - `userland_smoke`: boots from the disk-backed rootfs when available, falls back to the embedded rootfs otherwise, runs the external userland smoke commands (`hello`, `echo`, `uname`, `ls`, `cat`), and exits through QEMU debug-exit
 
 The current bootstrap prefers the staged FAT disk image as `/`, with the embedded root filesystem kept as a fallback. The staged image still mirrors the bootstrap `/bin` and `/etc` content for disk-based workflows.

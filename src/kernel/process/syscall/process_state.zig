@@ -4,6 +4,7 @@ const credentials = @import("../credentials.zig");
 const process = @import("../process.zig");
 const protection = @import("../../memory/protection.zig");
 const signal = @import("../signal.zig");
+const semantics = @import("syscall_semantics.zig");
 const support = @import("support.zig");
 
 var process_names: [support.PROCESS_SLOT_COUNT][support.PRCTL_NAME_SIZE]u8 =
@@ -126,7 +127,7 @@ pub fn sys_getpriority(which: u32, who: i32) i32 {
                 break :blk @intCast(proc.pid);
             } else @intCast(who);
             const pid_idx = support.processSlotFromPid(pid) orelse return abi.ESRCH;
-            return 20 - process_priorities[pid_idx];
+            return semantics.userPriorityFromNice(process_priorities[pid_idx]);
         },
         abi.PRIO_PGRP, abi.PRIO_USER => return 20,
         else => return abi.EINVAL,
@@ -134,7 +135,7 @@ pub fn sys_getpriority(which: u32, who: i32) i32 {
 }
 
 pub fn sys_setpriority(which: u32, who: i32, prio: i32) i32 {
-    const nice = @max(-20, @min(19, prio));
+    const nice = semantics.clampNice(prio);
 
     switch (which) {
         abi.PRIO_PROCESS => {
