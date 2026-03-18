@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("abi.zig");
+const at_semantics = @import("at_semantics.zig");
 const common = @import("common.zig");
 const cwd_mod = @import("cwd.zig");
 const errno = @import("errno.zig");
@@ -335,7 +336,8 @@ pub fn sys_readlinkat(dirfd: i32, pathname: [*]const u8, buf: [*]u8, bufsiz: usi
 
 fn resolveDirFd(dirfd: i32, path: []const u8, buf: *[common.RESOLVED_PATH_BUFFER_SIZE]u8) ?[]const u8 {
     if (dirfd == abi.AT_FDCWD) {
-        return cwd_mod.resolvePath(path, buf);
+        var visible_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
+        return at_semantics.resolveAtPath(cwd_mod.getActualRoot(), cwd_mod.getCwd(), null, path, &visible_buf, buf) catch null;
     }
 
     if (dirfd < abi.FD_OFFSET) return null;
@@ -345,7 +347,8 @@ fn resolveDirFd(dirfd: i32, path: []const u8, buf: *[common.RESOLVED_PATH_BUFFER
     if (vnode.file_type != .Directory) return null;
 
     const base_path = vfs.getNodePath(vnode) catch return null;
-    return cwd_mod.resolvePathFromDir(base_path, path, buf);
+    var visible_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
+    return at_semantics.resolveAtPath(cwd_mod.getActualRoot(), cwd_mod.getCwd(), base_path, path, &visible_buf, buf) catch null;
 }
 
 fn resolveCwdPathOnly(dirfd: i32, path: []const u8, buf: *[common.RESOLVED_PATH_BUFFER_SIZE]u8) ?[]const u8 {

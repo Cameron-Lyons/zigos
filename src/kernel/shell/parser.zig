@@ -531,6 +531,29 @@ const TestHooks = struct {
     }
 };
 
+const TestRng = struct {
+    state: u64,
+
+    fn next(self: *TestRng) u64 {
+        self.state = self.state *% 6364136223846793005 +% 1;
+        return self.state;
+    }
+
+    fn choose(self: *TestRng, limit: usize) usize {
+        if (limit == 0) return 0;
+        return @intCast(self.next() % limit);
+    }
+};
+
+fn randomCommand(rng: *TestRng, buffer: []u8) []const u8 {
+    const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \t'\"\\$()|<>*&?._/-";
+    const len = rng.choose(buffer.len + 1);
+    for (buffer[0..len]) |*byte| {
+        byte.* = alphabet[rng.choose(alphabet.len)];
+    }
+    return buffer[0..len];
+}
+
 test "tokenize handles quotes variables and substitutions" {
     var storage: [MAX_TOKENS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_TOKENS;
     var tokens: [MAX_TOKENS]CommandToken = undefined;
@@ -599,4 +622,31 @@ test "parsePipeline tracks redirects and rejects invalid intermediate redirects"
 
     const invalid_count = try tokenizeCommandLine("cat | grep zig > tmp | wc", &storage, &tokens, .{}, true);
     try std.testing.expectError(error.UnsupportedRedirection, parsePipeline(tokens[0..invalid_count]));
+}
+
+test "tokenize randomized command corpus stays within parser invariants" {
+    var rng = TestRng{ .state = 0x1234_5678_9ABC_DEF0 };
+    var input_buf: [MAX_COMMAND_LENGTH]u8 = undefined;
+    var storage: [MAX_TOKENS][MAX_COMMAND_LENGTH]u8 = undefined;
+    var tokens: [MAX_TOKENS]CommandToken = undefined;
+
+    const hooks = ExpansionHooks{
+        .getVarFn = TestHooks.getVar,
+        .captureCommandFn = TestHooks.captureCommand,
+    };
+
+    for (0..1024) |_| {
+        const input = randomCommand(&rng, &input_buf);
+        const token_count = tokenizeCommandLine(input, &storage, &tokens, hooks, true) catch continue;
+
+        try std.testing.expect(token_count <= MAX_TOKENS);
+        for (tokens[0..token_count]) |token| {
+            try std.testing.expect(token.len < MAX_COMMAND_LENGTH);
+            try std.testing.expect(token.text[token.len] == 0);
+        }
+
+        if (parsePipeline(tokens[0..token_count])) |pipeline| {
+            try std.testing.expect(pipeline.stage_count <= MAX_PIPE_STAGES);
+        } else |_| {}
+    }
 }

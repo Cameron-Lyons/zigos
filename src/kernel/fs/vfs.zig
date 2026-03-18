@@ -1,4 +1,5 @@
 const std = @import("std");
+const fd_freelist_mod = @import("fd_freelist.zig");
 const memory = @import("../memory/memory.zig");
 const abi = @import("../process/syscall/abi.zig");
 const readiness = @import("../process/syscall/readiness.zig");
@@ -248,16 +249,11 @@ pub fn releaseLookupVNode(vnode: *VNode) void {
 }
 
 fn initFdFreelistLocked() void {
-    for (0..FD_TABLE_SIZE) |i| {
-        fd_freelist[i] = @intCast(FD_TABLE_SIZE - 1 - i);
-    }
-    fd_freelist_top = FD_TABLE_SIZE;
+    fd_freelist_mod.initFreelist(&fd_freelist, &fd_freelist_top);
 }
 
 fn allocFdLocked() ?u32 {
-    if (fd_freelist_top == 0) return null;
-    fd_freelist_top -= 1;
-    return fd_freelist[fd_freelist_top];
+    return fd_freelist_mod.allocFd(&fd_freelist, &fd_freelist_top);
 }
 
 fn allocFd() ?u32 {
@@ -267,10 +263,7 @@ fn allocFd() ?u32 {
 }
 
 fn freeFdLocked(fd: u32) void {
-    if (fd >= FD_TABLE_SIZE) return;
-    if (fd_freelist_top >= FD_TABLE_SIZE) return;
-    fd_freelist[fd_freelist_top] = @intCast(fd);
-    fd_freelist_top += 1;
+    fd_freelist_mod.freeFd(&fd_freelist, &fd_freelist_top, fd);
 }
 
 fn freeFd(fd: u32) void {
@@ -280,17 +273,7 @@ fn freeFd(fd: u32) void {
 }
 
 fn reserveFdLocked(fd: u32) bool {
-    if (fd >= FD_TABLE_SIZE) return false;
-
-    var i: usize = 0;
-    while (i < fd_freelist_top) : (i += 1) {
-        if (fd_freelist[i] != @as(u8, @intCast(fd))) continue;
-        fd_freelist_top -= 1;
-        fd_freelist[i] = fd_freelist[fd_freelist_top];
-        return true;
-    }
-
-    return false;
+    return fd_freelist_mod.reserveFd(&fd_freelist, &fd_freelist_top, fd);
 }
 
 fn installDescriptor(fd: u32, file_desc: *FileDescriptor) VFSError!void {

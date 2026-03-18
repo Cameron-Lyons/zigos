@@ -1,21 +1,11 @@
 const vga = @import("../drivers/vga.zig");
 const process = @import("process.zig");
+const policy = @import("scheduler_policy.zig");
 const timer = @import("../timer/timer.zig");
 const smp = @import("../smp/smp.zig");
 
-pub const SchedulerType = enum {
-    RoundRobin,
-    Priority,
-    MultiLevelFeedback,
-};
-
-pub const Priority = enum(u8) {
-    Idle = 0,
-    Low = 1,
-    Normal = 2,
-    High = 3,
-    RealTime = 4,
-};
+pub const SchedulerType = policy.SchedulerType;
+pub const Priority = policy.Priority;
 
 pub const SchedulerStats = struct {
     context_switches: u64,
@@ -25,23 +15,10 @@ pub const SchedulerStats = struct {
     cpu_usage_percent: u32,
 };
 
-const TimeQuantum = struct {
-    priority: Priority,
-    ticks: u32,
-};
-
-const QUANTUM_TABLE = [_]TimeQuantum{
-    .{ .priority = .Idle, .ticks = 1 },
-    .{ .priority = .Low, .ticks = 5 },
-    .{ .priority = .Normal, .ticks = 10 },
-    .{ .priority = .High, .ticks = 15 },
-    .{ .priority = .RealTime, .ticks = 20 },
-};
-
 const MAX_EXTENDED_PROCESSES = 256;
 const MAX_SCHED_CPUS = 16;
-const RUN_QUEUE_INDEX: i8 = 5;
-const NO_QUEUE_INDEX: i8 = -1;
+const RUN_QUEUE_INDEX: i8 = policy.RUN_QUEUE_INDEX;
+const NO_QUEUE_INDEX: i8 = policy.NO_QUEUE_INDEX;
 
 pub const ProcessExtended = struct {
     base: *process.Process,
@@ -89,15 +66,10 @@ var busy_time: [MAX_SCHED_CPUS]u64 = [_]u64{0} ** MAX_SCHED_CPUS;
 
 var mlfq_boost_counter: [MAX_SCHED_CPUS]u32 = [_]u32{0} ** MAX_SCHED_CPUS;
 var next_cpu_rr: u32 = 0;
-const MLFQ_BOOST_INTERVAL: u32 = 50;
+const MLFQ_BOOST_INTERVAL: u32 = policy.MLFQ_BOOST_INTERVAL;
 
 fn getQuantumForPriority(priority: Priority) u32 {
-    for (QUANTUM_TABLE) |quantum| {
-        if (quantum.priority == priority) {
-            return quantum.ticks;
-        }
-    }
-    return 10;
+    return policy.getQuantumForPriority(priority);
 }
 
 fn clampCPU(cpu_id: u32) usize {
@@ -112,10 +84,7 @@ fn activeCPUCount() u32 {
 }
 
 fn chooseCPUForNewProcess() u32 {
-    const cpu_count = activeCPUCount();
-    const target = next_cpu_rr % cpu_count;
-    next_cpu_rr = (next_cpu_rr + 1) % cpu_count;
-    return target;
+    return policy.chooseCPUForNewProcess(&next_cpu_rr, activeCPUCount());
 }
 
 fn queueForIndex(queue_index: i8, cpu_id: u32) ?*ReadyQueue {
@@ -186,10 +155,7 @@ fn dequeueFromQueue(ext: *ProcessExtended) void {
 }
 
 fn targetQueueIndex(ext: *const ProcessExtended) i8 {
-    return switch (scheduler_type) {
-        .RoundRobin => RUN_QUEUE_INDEX,
-        .Priority, .MultiLevelFeedback => @as(i8, @intCast(@intFromEnum(ext.priority))),
-    };
+    return policy.targetQueueIndex(scheduler_type, ext.priority);
 }
 
 fn rebuildQueues() void {

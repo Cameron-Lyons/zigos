@@ -10,6 +10,11 @@ readonly qemu_success_exit=$(((qemu_success_status << 1) | 1))
 kernel_path="${1:?kernel path required}"
 memory_size="${2:-128M}"
 serial_target="${3:-stdio}"
+extra_args=()
+
+if [ -n "${QEMU_EXTRA_ARGS:-}" ]; then
+    read -r -a extra_args <<< "${QEMU_EXTRA_ARGS}"
+fi
 
 set +e
 "$qemu_binary" \
@@ -19,7 +24,8 @@ set +e
     -serial "$serial_target" \
     -monitor none \
     -no-reboot \
-    -device "$qemu_debug_exit_device"
+    -device "$qemu_debug_exit_device" \
+    "${extra_args[@]}"
 qemu_exit_code=$?
 set -e
 
