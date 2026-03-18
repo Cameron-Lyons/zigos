@@ -178,7 +178,7 @@ pub fn sys_faccessat(dirfd: i32, pathname: [*]const u8, mode: u32, flags: u32) i
     const full_path = resolveCwdPathOnly(dirfd, path_slice, &full_path_buf) orelse return abi.EBADF;
 
     const vnode = vfs.lookupPath(full_path) catch |err| return errno.vfsErrno(err);
-    vfs.releaseLookupVNode(vnode);
+    vfs.discardLookupVNode(vnode);
     _ = mode;
     return 0;
 }
