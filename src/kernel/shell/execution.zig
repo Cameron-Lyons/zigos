@@ -1,4 +1,5 @@
 const std = @import("std");
+const console = @import("../utils/console.zig");
 const vga = @import("../drivers/vga.zig");
 const process = @import("../process/process.zig");
 const vfs = @import("../fs/vfs.zig");
@@ -295,7 +296,7 @@ fn logCommandSubstitutionFailure(stage: []const u8, line: []const u8, reason: []
     const display_line = if (line.len > 96) line[0..96] else line;
     var line_buf: [192]u8 = undefined;
     const rendered = std.fmt.bufPrint(&line_buf, "cmdsub[{s}] {s}: {s}\n", .{ stage, reason, display_line }) catch "cmdsub failure\n";
-    vga.print(rendered);
+    console.print(rendered);
 }
 
 fn trimCommandSubstitution(output: []u8) usize {
