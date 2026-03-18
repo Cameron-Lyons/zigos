@@ -252,10 +252,14 @@ fn resolveExternalCommandPath(command_name: []const u8, buffer: *[MAX_COMMAND_LE
 
     if (isExplicitCommandPath(command_name)) {
         const direct_path = cwd_mod.resolvePath(command_name, buffer) orelse return error.CommandPathTooLong;
-        if (externalCommandPathExists(direct_path)) {
-            return direct_path;
+        switch (probeExternalCommandPath(direct_path)) {
+            .exists => return direct_path,
+            .missing => return error.CommandNotFound,
+            .failed => |err| {
+                logExternalPathProbeFailure(direct_path, err);
+                return error.CommandNotFound;
+            },
         }
-        return error.CommandNotFound;
     }
 
     const search_prefixes = [_][]const u8{ "/bin/", "/usr/bin/", "/mnt/bin/" };
@@ -271,8 +275,13 @@ fn resolveExternalCommandPath(command_name: []const u8, buffer: *[MAX_COMMAND_LE
         @memcpy(buffer[prefix.len .. prefix.len + command_name.len], command_name);
 
         const candidate = buffer[0 .. prefix.len + command_name.len];
-        if (externalCommandPathExists(candidate)) {
-            return candidate;
+        switch (probeExternalCommandPath(candidate)) {
+            .exists => return candidate,
+            .missing => {},
+            .failed => |err| {
+                logExternalPathProbeFailure(candidate, err);
+                return error.CommandNotFound;
+            },
         }
     }
 
@@ -283,10 +292,24 @@ fn resolveExternalCommandPath(command_name: []const u8, buffer: *[MAX_COMMAND_LE
     return error.CommandNotFound;
 }
 
-fn externalCommandPathExists(path: []const u8) bool {
-    const fd = vfs.open(path, vfs.O_RDONLY) catch return false;
-    vfs.close(fd) catch {};
-    return true;
+const CommandPathProbe = union(enum) {
+    exists,
+    missing,
+    failed: vfs.VFSError,
+};
+
+fn probeExternalCommandPath(path: []const u8) CommandPathProbe {
+    const fd = vfs.open(path, vfs.O_RDONLY) catch |err| {
+        return if (err == vfs.VFSError.NotFound) .missing else .{ .failed = err };
+    };
+    vfs.close(fd) catch |err| return .{ .failed = err };
+    return .exists;
+}
+
+fn logExternalPathProbeFailure(path: []const u8, err: vfs.VFSError) void {
+    var line_buf: [192]u8 = undefined;
+    const line = std.fmt.bufPrint(&line_buf, "command-path {s}: {s}\n", .{ @errorName(err), path }) catch "command-path failure\n";
+    console.print(line);
 }
 
 fn isExplicitCommandPath(path: []const u8) bool {
