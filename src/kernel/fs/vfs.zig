@@ -246,6 +246,29 @@ pub fn releaseLookupVNode(vnode: *VNode) void {
     if (vnode.mount_point) |mp| {
         releaseMountPoint(mp);
     }
+
+    if (isPersistentVNode(vnode)) return;
+
+    lockVNodeRefs();
+    if (vnode.ref_count > 0) {
+        vnode.ref_count -= 1;
+    }
+    const should_free = vnode.ref_count == 0;
+    unlockVNodeRefs();
+
+    if (should_free) {
+        memory.kfree(@as([*]u8, @ptrCast(@alignCast(vnode))));
+    }
+}
+
+fn isPersistentVNode(vnode: *VNode) bool {
+    if (root_vnode) |root| {
+        if (vnode == root) return true;
+    }
+    if (vnode.mount_point) |mp| {
+        return mp.root == vnode;
+    }
+    return false;
 }
 
 fn initFdFreelistLocked() void {
@@ -359,10 +382,10 @@ fn destroyDescriptor(file_desc: *FileDescriptor) void {
     if (vnode.ref_count > 0) {
         vnode.ref_count -= 1;
     }
-    const free_pipe_vnode = vnode.ref_count == 0 and vnode.file_type == .Pipe;
+    const free_vnode = vnode.ref_count == 0 and !isPersistentVNode(vnode);
     unlockVNodeRefs();
 
-    if (free_pipe_vnode) {
+    if (free_vnode) {
         memory.kfree(@as([*]u8, @ptrCast(@alignCast(vnode))));
     }
 
