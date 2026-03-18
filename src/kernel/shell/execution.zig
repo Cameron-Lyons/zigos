@@ -508,12 +508,31 @@ fn pathExists(path: []const u8) bool {
 
 fn openRedirectFd(path: [*:0]const u8, flags: u32) PipelineConfigError!i32 {
     var resolved_path_buf: [MAX_COMMAND_LENGTH]u8 = undefined;
-    const resolved_path = cwd_mod.resolvePath(sliceFromCStr(path), &resolved_path_buf) orelse return error.OpenFailed;
-    const raw_fd = vfs.open(resolved_path, flags) catch return error.OpenFailed;
+    const input_path = sliceFromCStr(path);
+    const resolved_path = cwd_mod.resolvePath(input_path, &resolved_path_buf) orelse {
+        logRedirectFailure("resolve", input_path, "ResolveFailed");
+        return error.OpenFailed;
+    };
+    const raw_fd = vfs.open(resolved_path, flags) catch |err| {
+        logRedirectFailure("open", resolved_path, @errorName(err));
+        return error.OpenFailed;
+    };
     errdefer vfs.close(raw_fd) catch {};
-    const child_fd = vfs.dup(raw_fd) catch return error.DupFailed;
-    vfs.close(raw_fd) catch return error.CloseFailed;
+    const child_fd = vfs.dup(raw_fd) catch |err| {
+        logRedirectFailure("dup", resolved_path, @errorName(err));
+        return error.DupFailed;
+    };
+    vfs.close(raw_fd) catch |err| {
+        logRedirectFailure("close", resolved_path, @errorName(err));
+        return error.CloseFailed;
+    };
     return @as(i32, @intCast(child_fd)) + @as(i32, @intCast(abi.FD_OFFSET));
+}
+
+fn logRedirectFailure(stage: []const u8, path: []const u8, reason: []const u8) void {
+    var line_buf: [192]u8 = undefined;
+    const rendered = std.fmt.bufPrint(&line_buf, "redirect[{s}] {s}: {s}\n", .{ stage, reason, path }) catch "redirect failure\n";
+    console.print(rendered);
 }
 
 fn closeRedirectFd(fd: ?i32) void {
