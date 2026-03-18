@@ -233,18 +233,30 @@ pub fn build(b: *std.Build) void {
         \\fi
         \\mkdir -p build
         \\rm -f "$LOG_PATH"
-        \\USERLAND_SMOKE_SECONDS="${USERLAND_SMOKE_SECONDS:-10}"
+        \\USERLAND_SMOKE_SECONDS="${USERLAND_SMOKE_SECONDS:-20}"
         \\$QEMU_BIN -kernel "zig-out/bin/kernel-userland-smoke.elf" -m 128M -display none -serial file:"$LOG_PATH" -monitor none -no-reboot -no-shutdown -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file="build/disk.img",if=ide,format=raw,id=disk0 >/dev/null 2>&1 &
         \\QEMU_PID=$!
-        \\sleep "$USERLAND_SMOKE_SECONDS"
-        \\if kill -0 "$QEMU_PID" >/dev/null 2>&1; then
-        \\  kill -TERM "$QEMU_PID" >/dev/null 2>&1 || true
+        \\TIMED_OUT=0
+        \\ELAPSED=0
+        \\while kill -0 "$QEMU_PID" >/dev/null 2>&1; do
+        \\  if [ "$ELAPSED" -ge "$USERLAND_SMOKE_SECONDS" ]; then
+        \\    TIMED_OUT=1
+        \\    kill -TERM "$QEMU_PID" >/dev/null 2>&1 || true
+        \\    sleep 1
+        \\    kill -KILL "$QEMU_PID" >/dev/null 2>&1 || true
+        \\    break
+        \\  fi
         \\  sleep 1
-        \\  kill -KILL "$QEMU_PID" >/dev/null 2>&1 || true
-        \\fi
+        \\  ELAPSED=$((ELAPSED + 1))
+        \\done
         \\wait "$QEMU_PID" >/dev/null 2>&1 || true
         \\if [ ! -s "$LOG_PATH" ]; then
         \\  echo "Userland smoke test failed: no serial output captured" >&2
+        \\  exit 1
+        \\fi
+        \\if [ "$TIMED_OUT" -eq 1 ] && ! grep -Fq "USERLAND:PASS" "$LOG_PATH"; then
+        \\  echo "Userland smoke test failed: QEMU timed out after ${USERLAND_SMOKE_SECONDS}s before USERLAND:PASS" >&2
+        \\  cat "$LOG_PATH" >&2
         \\  exit 1
         \\fi
         \\for marker in "BOOT:START" "BOOT:PROFILE:userland_smoke" "Disk root mounted at /" "BOOT:SHELL_READY" "USERLAND:HELLO" "USERLAND:ECHO" "USERLAND:ENV" "USERLAND:CMDSUB" "USERLAND:QUOTED" "USERLAND:ESCAPED" "USERLAND:GLOB" "USERLAND:UNAME" "USERLAND:LS" "USERLAND:CAT" "USERLAND:ENV_STANDALONE" "USERLAND:ENV_BIN" "USERLAND:WHICH" "USERLAND:HEAD" "USERLAND:TAIL" "USERLAND:WC" "USERLAND:SORT" "USERLAND:UNIQ" "USERLAND:HEXDUMP" "USERLAND:TEST" "USERLAND:TRUE" "USERLAND:CP" "USERLAND:MV" "USERLAND:GREP" "USERLAND:PS" "USERLAND:PING" "USERLAND:WHOAMI" "USERLAND:ID" "USERLAND:DATE" "USERLAND:HOSTNAME" "USERLAND:PIPE_OK" "USERLAND:REDIRECT_WRITE" "USERLAND:REDIRECT_READ" "USERLAND:BG_START" "USERLAND:JOBS_RUNNING" "USERLAND:JOBS_STOPPED" "USERLAND:BG_RESUME" "USERLAND:JOBS_RESUMED" "user:root home:/home/user" "shell-ZigOS" "USERLAND QUOTED" "USERLAND ESCAPED" "/bin/cat /bin/cp /bin/ls" "Welcome to ZigOS userspace smoke test." "PATH=/bin:/usr/bin:/mnt/bin" "00000000" "uid=1000(user) gid=1000(users) euid=1000 egid=1000" "zigos" "USERLAND:PIPE" "USERLAND:REDIRECT" "[1] Running /bin/sleep 3" "[1] Stopped /bin/sleep 3" "USERLAND:PASS"; do

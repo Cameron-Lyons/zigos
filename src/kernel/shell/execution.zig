@@ -212,7 +212,7 @@ fn executePipeline(runtime: *const Runtime, tokens: []const CommandToken, backgr
 
 fn makeParserHooks(runtime: *const Runtime) parser.ExpansionHooks {
     return .{
-        .context = @constCast(@ptrCast(runtime)),
+        .context = @ptrCast(@constCast(runtime)),
         .getVarFn = parserGetVar,
         .captureCommandFn = parserCaptureCommand,
     };
@@ -230,35 +230,72 @@ fn parserCaptureCommand(context: ?*anyopaque, line: []const u8, output: []u8) Co
 fn captureCommandSubstitution(runtime: *const Runtime, line: []const u8, output: []u8) error{ CommandFailed, NoSpaceLeft }!usize {
     var token_storage: [MAX_TOKENS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_TOKENS;
     var tokens: [MAX_TOKENS]CommandToken = undefined;
-    const token_count = parser.tokenizeCommandLine(line, &token_storage, &tokens, makeParserHooks(runtime), false) catch return error.CommandFailed;
+    const token_count = parser.tokenizeCommandLine(line, &token_storage, &tokens, makeParserHooks(runtime), false) catch |err| {
+        logCommandSubstitutionFailure("tokenize", line, @errorName(err));
+        return error.CommandFailed;
+    };
     if (token_count == 0) return 0;
-    if (parser.containsShellOperators(tokens[0..token_count])) return error.CommandFailed;
+    if (parser.containsShellOperators(tokens[0..token_count])) {
+        logCommandSubstitutionFailure("tokenize", line, "shell-operator");
+        return error.CommandFailed;
+    }
 
     var args_storage: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
     var args: [MAX_ARGS][*:0]const u8 = undefined;
-    const arg_count = expandSimpleCommandTokens(tokens[0..token_count], &args_storage, &args) catch return error.CommandFailed;
+    const arg_count = expandSimpleCommandTokens(tokens[0..token_count], &args_storage, &args) catch |err| {
+        logCommandSubstitutionFailure("expand", line, @errorName(err));
+        return error.CommandFailed;
+    };
     if (arg_count == 0) return 0;
 
     const command_name = sliceFromCStr(args[0]);
     if (registry.lookup(command_name)) |command_meta| {
-        if (dispatchesInShell(command_meta)) return error.CommandFailed;
+        if (dispatchesInShell(command_meta)) {
+            logCommandSubstitutionFailure("dispatch", line, "builtin-only");
+            return error.CommandFailed;
+        }
     }
 
     var temp_path: [64]u8 = undefined;
-    const temp_len = makeCommandCapturePath(runtime, &temp_path) catch return error.NoSpaceLeft;
+    const temp_len = makeCommandCapturePath(runtime, &temp_path) catch |err| {
+        logCommandSubstitutionFailure("temp-path", line, @errorName(err));
+        return err;
+    };
     const temp_path_z: [*:0]const u8 = @ptrCast(&temp_path[0]);
-    const stdout_fd = openRedirectFd(temp_path_z, vfs.O_WRONLY | vfs.O_CREAT | vfs.O_TRUNC) catch return error.CommandFailed;
+    const stdout_fd = openRedirectFd(temp_path_z, vfs.O_WRONLY | vfs.O_CREAT | vfs.O_TRUNC) catch |err| {
+        logCommandSubstitutionFailure("redirect", line, @errorName(err));
+        return error.CommandFailed;
+    };
     defer closeRedirectFd(stdout_fd);
     defer vfs.unlink(temp_path[0..temp_len]) catch {};
 
-    const pid = runtime.launchExternal(args[0..arg_count], null, null, stdout_fd) catch return error.CommandFailed;
-    if (!runtime.waitForForegroundCommand(pid)) return error.CommandFailed;
+    const pid = runtime.launchExternal(args[0..arg_count], null, null, stdout_fd) catch |err| {
+        logCommandSubstitutionFailure("launch", line, @errorName(err));
+        return error.CommandFailed;
+    };
+    if (!runtime.waitForForegroundCommand(pid)) {
+        logCommandSubstitutionFailure("wait", line, "non-zero-exit");
+        return error.CommandFailed;
+    }
 
-    const fd = vfs.open(temp_path[0..temp_len], vfs.O_RDONLY) catch return error.CommandFailed;
+    const fd = vfs.open(temp_path[0..temp_len], vfs.O_RDONLY) catch |err| {
+        logCommandSubstitutionFailure("open", line, @errorName(err));
+        return error.CommandFailed;
+    };
     defer vfs.close(fd) catch {};
-    const bytes_read = vfs.read(fd, output) catch return error.CommandFailed;
+    const bytes_read = vfs.read(fd, output) catch |err| {
+        logCommandSubstitutionFailure("read", line, @errorName(err));
+        return error.CommandFailed;
+    };
 
     return trimCommandSubstitution(output[0..bytes_read]);
+}
+
+fn logCommandSubstitutionFailure(stage: []const u8, line: []const u8, reason: []const u8) void {
+    const display_line = if (line.len > 96) line[0..96] else line;
+    var line_buf: [192]u8 = undefined;
+    const rendered = std.fmt.bufPrint(&line_buf, "cmdsub[{s}] {s}: {s}\n", .{ stage, reason, display_line }) catch "cmdsub failure\n";
+    vga.print(rendered);
 }
 
 fn trimCommandSubstitution(output: []u8) usize {
