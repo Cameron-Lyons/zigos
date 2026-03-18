@@ -55,6 +55,16 @@ pub inline fn inl(port: u16) u32 {
     );
 }
 
+pub inline fn rdtsc() u64 {
+    var low: u32 = undefined;
+    var high: u32 = undefined;
+    asm volatile ("rdtsc"
+        : [low] "={eax}" (low),
+          [high] "={edx}" (high),
+    );
+    return (@as(u64, high) << 32) | low;
+}
+
 pub fn enableSse() void {
     var cr0: u32 = asm volatile ("mov %%cr0, %[value]"
         : [value] "=r" (-> u32),

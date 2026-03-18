@@ -4,6 +4,8 @@ pub const BootProfile = enum {
     dev,
     ci_smoke,
     test_vm,
+    benchmark,
+    smp_stress,
     userland_smoke,
 };
 
@@ -72,6 +74,8 @@ pub fn build(b: *std.Build) void {
     });
 
     const optimize = b.standardOptimizeOption(.{});
+    const host_target = b.resolveTargetQuery(.{});
+    const benchmark_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseFast else optimize;
 
     var user_programs: [user_program_specs.len]UserProgramArtifact = undefined;
     inline for (user_program_specs, 0..) |spec, i| {
@@ -83,9 +87,11 @@ pub fn build(b: *std.Build) void {
     const dev_kernel = addKernelArtifact(b, target, optimize, "kernel.elf", .dev, user_assets_module);
     const ci_smoke_kernel = addKernelArtifact(b, target, optimize, "kernel-ci-smoke.elf", .ci_smoke, user_assets_module);
     const vm_test_kernel = addKernelArtifact(b, target, optimize, "kernel-test-vm.elf", .test_vm, user_assets_module);
+    const benchmark_kernel = addKernelArtifact(b, target, optimize, "kernel-benchmark.elf", .benchmark, user_assets_module);
+    const smp_stress_kernel = addKernelArtifact(b, target, optimize, "kernel-smp-stress.elf", .smp_stress, user_assets_module);
     const userland_smoke_kernel = addKernelArtifact(b, target, optimize, "kernel-userland-smoke.elf", .userland_smoke, user_assets_module);
 
-    inline for (&.{ dev_kernel, ci_smoke_kernel, vm_test_kernel, userland_smoke_kernel }) |artifact| {
+    inline for (&.{ dev_kernel, ci_smoke_kernel, vm_test_kernel, benchmark_kernel, smp_stress_kernel, userland_smoke_kernel }) |artifact| {
         dependOnUserPrograms(&artifact.compile_step.step, user_programs[0..], &motd_install.step);
     }
 
@@ -97,6 +103,12 @@ pub fn build(b: *std.Build) void {
 
     const vm_kernel_step = b.step("kernel-test-vm", "Build the VM test kernel");
     vm_kernel_step.dependOn(vm_test_kernel.install_step);
+
+    const benchmark_kernel_step = b.step("kernel-bench", "Build the kernel benchmark profile");
+    benchmark_kernel_step.dependOn(benchmark_kernel.install_step);
+
+    const smp_stress_kernel_step = b.step("kernel-smp-stress", "Build the SMP stress kernel profile");
+    smp_stress_kernel_step.dependOn(smp_stress_kernel.install_step);
 
     const userland_smoke_kernel_step = b.step("kernel-userland-smoke", "Build the userland smoke-test kernel");
     userland_smoke_kernel_step.dependOn(userland_smoke_kernel.install_step);
@@ -163,6 +175,27 @@ pub fn build(b: *std.Build) void {
 
     const run_vm_step = b.step("run-test-vm", "Run the VM test kernel in QEMU");
     run_vm_step.dependOn(&vm_qemu_cmd.step);
+
+    const benchmark_qemu_cmd = b.addSystemCommand(&.{
+        "bash",
+        headless_qemu_runner,
+        benchmark_kernel.output_path,
+        "128M",
+        "stdio",
+    });
+    benchmark_qemu_cmd.step.dependOn(benchmark_kernel.install_step);
+
+    const run_benchmark_step = b.step("run-kernel-bench", "Run the kernel benchmark profile in QEMU");
+    run_benchmark_step.dependOn(&benchmark_qemu_cmd.step);
+
+    const run_smp_stress_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\QEMU_EXTRA_ARGS="-cpu qemu64 -smp 2" bash scripts/run-headless-qemu.sh "zig-out/bin/kernel-smp-stress.elf" "256M" "stdio"
+    });
+    run_smp_stress_cmd.step.dependOn(smp_stress_kernel.install_step);
+
+    const run_smp_stress_step = b.step("run-smp-stress", "Run the SMP stress kernel profile in QEMU");
+    run_smp_stress_step.dependOn(&run_smp_stress_cmd.step);
 
     const run_userland_smoke_cmd = b.addSystemCommand(&.{
         "qemu-system-x86_64",
@@ -234,6 +267,89 @@ pub fn build(b: *std.Build) void {
     const userland_smoke_test_step = b.step("userland-smoke-test", "Run the automated userland smoke test");
     userland_smoke_test_step.dependOn(&userland_smoke_test_cmd.step);
 
+    const kernel_benchmark_test_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -eu
+        \\QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
+        \\LOG_PATH="build/kernel-benchmark.log"
+        \\if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
+        \\  echo "QEMU binary '$QEMU_BIN' not found. Set QEMU_BIN or install QEMU." >&2
+        \\  exit 1
+        \\fi
+        \\mkdir -p build
+        \\rm -f "$LOG_PATH"
+        \\QEMU_BIN="$QEMU_BIN" bash scripts/run-headless-qemu.sh "zig-out/bin/kernel-benchmark.elf" "128M" "file:$LOG_PATH"
+        \\if [ ! -s "$LOG_PATH" ]; then
+        \\  echo "Kernel benchmark test failed: no serial output captured" >&2
+        \\  exit 1
+        \\fi
+        \\for marker in "BOOT:START" "BOOT:PROFILE:benchmark" "BOOT:CORE_READY" "BENCH:START" "BENCH:RESULT:shell.tokenize.expansions" "BENCH:RESULT:shell.pipeline.commandline" "BENCH:RESULT:shell.glob.match_matrix" "BENCH:RESULT:syscall.at.resolve_matrix" "BENCH:RESULT:vfs.fd.freelist_churn" "BENCH:RESULT:tcp.checksum.dual_stack" "BENCH:RESULT:tcp.options.roundtrip" "BENCH:RESULT:ipc.semops.batch" "BENCH:SUMMARY" "BENCH:PASS"; do
+        \\  if ! grep -Fq "$marker" "$LOG_PATH"; then
+        \\    echo "Kernel benchmark test failed: missing marker '$marker'" >&2
+        \\    cat "$LOG_PATH" >&2
+        \\    exit 1
+        \\  fi
+        \\done
+        \\if grep -Eqi "panic|KERNEL PANIC|System Halted|BENCH:FAIL" "$LOG_PATH"; then
+        \\  echo "Kernel benchmark test failed: panic or benchmark failure marker found" >&2
+        \\  cat "$LOG_PATH" >&2
+        \\  exit 1
+        \\fi
+        \\bash scripts/check-kernel-benchmark-thresholds.sh "$LOG_PATH"
+        \\bash scripts/check-kernel-benchmark-baseline.sh "$LOG_PATH"
+        \\echo "Kernel benchmark run passed. Log: $LOG_PATH"
+    });
+    kernel_benchmark_test_cmd.step.dependOn(benchmark_kernel.install_step);
+
+    const kernel_benchmark_test_step = b.step("kernel-bench-test", "Run the automated kernel benchmark profile in QEMU");
+    kernel_benchmark_test_step.dependOn(&kernel_benchmark_test_cmd.step);
+
+    const smp_stress_test_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -eu
+        \\QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
+        \\LOG_PATH="build/smp-stress.log"
+        \\if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
+        \\  echo "QEMU binary '$QEMU_BIN' not found. Set QEMU_BIN or install QEMU." >&2
+        \\  exit 1
+        \\fi
+        \\mkdir -p build
+        \\rm -f "$LOG_PATH"
+        \\SMP_STRESS_SECONDS="${SMP_STRESS_SECONDS:-15}"
+        \\QEMU_BIN="$QEMU_BIN" QEMU_EXTRA_ARGS="-cpu qemu64 -smp 2" bash scripts/run-headless-qemu.sh "zig-out/bin/kernel-smp-stress.elf" "256M" "file:$LOG_PATH" >/dev/null 2>&1 &
+        \\QEMU_PID=$!
+        \\sleep "$SMP_STRESS_SECONDS"
+        \\if kill -0 "$QEMU_PID" >/dev/null 2>&1; then
+        \\  kill -TERM "$QEMU_PID" >/dev/null 2>&1 || true
+        \\  sleep 1
+        \\  kill -KILL "$QEMU_PID" >/dev/null 2>&1 || true
+        \\  echo "SMP stress test failed: QEMU timed out" >&2
+        \\  exit 1
+        \\fi
+        \\wait "$QEMU_PID"
+        \\if [ ! -s "$LOG_PATH" ]; then
+        \\  echo "SMP stress test failed: no serial output captured" >&2
+        \\  exit 1
+        \\fi
+        \\for marker in "BOOT:START" "BOOT:PROFILE:smp_stress" "BOOT:CORE_READY" "SMP:START" "SMP:ACTIVE_CPUS:" "SMP:TASKS_CREATED" "SMP:TASKS_DONE" "SMP:STATS:" "SMP:PASS"; do
+        \\  if ! grep -Fq "$marker" "$LOG_PATH"; then
+        \\    echo "SMP stress test failed: missing marker '$marker'" >&2
+        \\    cat "$LOG_PATH" >&2
+        \\    exit 1
+        \\  fi
+        \\done
+        \\if grep -Eqi "panic|KERNEL PANIC|System Halted|SMP:FAIL|SMP:TIMEOUT" "$LOG_PATH"; then
+        \\  echo "SMP stress test failed: panic or failure marker found" >&2
+        \\  cat "$LOG_PATH" >&2
+        \\  exit 1
+        \\fi
+        \\echo "SMP stress test passed. Log: $LOG_PATH"
+    });
+    smp_stress_test_cmd.step.dependOn(smp_stress_kernel.install_step);
+
+    const smp_stress_test_step = b.step("smp-stress-test", "Run the automated SMP scheduler stress profile in QEMU");
+    smp_stress_test_step.dependOn(&smp_stress_test_cmd.step);
+
     const host_tests_cmd = b.addSystemCommand(&.{
         "sh", "-c",
         \\set -eu
@@ -241,9 +357,14 @@ pub fn build(b: *std.Build) void {
         \\export ZIG_LOCAL_CACHE_DIR="build/zig-cache-tests"
         \\export ZIG_GLOBAL_CACHE_DIR="build/zig-global-cache-tests"
         \\for test_file in \
+        \\  src/kernel/process/syscall/at_semantics.zig \
+        \\  src/kernel/process/syscall/syscall_semantics.zig \
+        \\  src/kernel/process/syscall/path_semantics.zig \
+        \\  src/kernel/fs/fd_freelist.zig \
         \\  src/kernel/shell/parser.zig \
         \\  src/kernel/shell/glob.zig \
         \\  src/kernel/shell/jobs.zig \
+        \\  src/kernel/process/scheduler_policy.zig \
         \\  src/kernel/net/tcp/protocol.zig \
         \\  src/kernel/process/syscall/ipc_semantics.zig
         \\do
@@ -252,6 +373,25 @@ pub fn build(b: *std.Build) void {
     });
     const host_tests_step = b.step("host-tests", "Run host-side unit tests for extracted pure logic");
     host_tests_step.dependOn(&host_tests_cmd.step);
+
+    const benchmark_module = createHostModule(b, host_target, benchmark_optimize, "src/benchmarks/main.zig");
+    benchmark_module.addImport("at_semantics", createHostModule(b, host_target, benchmark_optimize, "src/kernel/process/syscall/at_semantics.zig"));
+    benchmark_module.addImport("fd_freelist", createHostModule(b, host_target, benchmark_optimize, "src/kernel/fs/fd_freelist.zig"));
+    benchmark_module.addImport("ipc_semantics", createHostModule(b, host_target, benchmark_optimize, "src/kernel/process/syscall/ipc_semantics.zig"));
+    benchmark_module.addImport("shell_support", createHostModule(b, host_target, benchmark_optimize, "src/kernel/shell/bench_support.zig"));
+    benchmark_module.addImport("tcp_protocol", createHostModule(b, host_target, benchmark_optimize, "src/kernel/net/tcp/protocol.zig"));
+
+    const benchmark_exe = b.addExecutable(.{
+        .name = "host-benchmarks",
+        .root_module = benchmark_module,
+    });
+    const benchmark_run = b.addRunArtifact(benchmark_exe);
+    if (b.args) |args| {
+        benchmark_run.addArgs(args);
+    }
+
+    const benchmark_step = b.step("bench", "Run host-side benchmarks for extracted kernel logic");
+    benchmark_step.dependOn(&benchmark_run.step);
 
     const iso_cmd = b.addSystemCommand(&.{
         "sh", "-c",
@@ -428,6 +568,19 @@ fn addKernelArtifact(
         .install_step = &install.step,
         .output_path = b.fmt("zig-out/bin/{s}", .{name}),
     };
+}
+
+fn createHostModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    root_source: []const u8,
+) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path(root_source),
+        .target = target,
+        .optimize = optimize,
+    });
 }
 
 fn dependOnUserPrograms(step: *std.Build.Step, programs: []const UserProgramArtifact, motd_step: *std.Build.Step) void {

@@ -1,3 +1,4 @@
+const std = @import("std");
 const vga = @import("drivers/vga.zig");
 const x86 = @import("../arch/x86.zig");
 const console = @import("utils/console.zig");
@@ -37,8 +38,12 @@ const icmpv6 = @import("net/icmpv6.zig");
 const icmp = @import("net/icmp.zig");
 const devfs = @import("fs/devfs.zig");
 const embedfs = @import("fs/embedfs.zig");
+const benchmark_suite = @import("benchmarks/suite.zig");
+const smp = @import("smp/smp.zig");
 
 const test_process_log_interval: u32 = 1_000_000;
+const smp_stress_task_count: usize = 6;
+const smp_stress_rounds: usize = 256;
 
 fn runTestProcess(marker: []const u8) void {
     var i: u32 = 0;
@@ -143,7 +148,6 @@ fn initDevices() void {
 
     if (config.shouldInitSmp()) {
         console.print("Initializing SMP (multicore) support...\n");
-        const smp = @import("smp/smp.zig");
         smp.init();
         if (smp.getNumCPUs() > 1) {
             console.print("SMP discovered ");
@@ -298,7 +302,6 @@ fn initRuntime() void {
     process.init();
 
     if (config.shouldInitSmp()) {
-        const smp = @import("smp/smp.zig");
         smp.startSecondaryCPUs();
         if (smp.isSMPEnabled()) {
             console.print("SMP enabled with ");
@@ -360,6 +363,88 @@ fn runVmProfile() noreturn {
 
     printBootMarker("TEST:VM:FAIL");
     qemu_exit.failure();
+}
+
+fn runBenchmarkProfile() noreturn {
+    console.print("Running kernel benchmarks...\n");
+    if (benchmark_suite.run()) {
+        qemu_exit.success();
+    }
+    qemu_exit.failure();
+}
+
+fn printSmpStats() void {
+    const stats = scheduler.getStatistics();
+    var line_buf: [192]u8 = undefined;
+    const line = std.fmt.bufPrint(
+        &line_buf,
+        "SMP:STATS:context_switches={d}:ready={d}:blocked={d}:cpu_usage={d}\n",
+        .{ stats.context_switches, stats.ready_processes, stats.blocked_processes, stats.cpu_usage_percent },
+    ) catch "SMP:STATS\n";
+    console.print(line);
+}
+
+fn runSmpStressProfile() noreturn {
+    const task_entries = [_]struct {
+        name: []const u8,
+        priority: scheduler.Priority,
+    }{
+        .{ .name = "smp-stress-0", .priority = .High },
+        .{ .name = "smp-stress-1", .priority = .Normal },
+        .{ .name = "smp-stress-2", .priority = .Low },
+        .{ .name = "smp-stress-3", .priority = .High },
+        .{ .name = "smp-stress-4", .priority = .Normal },
+        .{ .name = "smp-stress-5", .priority = .Low },
+    };
+    var stress_processes: [smp_stress_task_count]*process.Process = undefined;
+    var sink: u32 = 0;
+
+    const runner = process.create_kernel_process("smp_stress_runner", idle_task_placeholder);
+    process.adoptAsCurrent(runner);
+
+    console.print("Running SMP scheduler stress...\n");
+    printBootMarker("SMP:START");
+    console.print("SMP:ACTIVE_CPUS:");
+    printCpuCount(smp.getActiveCPUCount());
+    console.print("\n");
+
+    scheduler.setSchedulerType(.MultiLevelFeedback);
+
+    for (task_entries, 0..) |task, idx| {
+        const proc = process.create_kernel_process_any_cpu(task.name, idle_task_placeholder);
+        _ = scheduler.setProcessPriority(proc.pid, task.priority);
+        stress_processes[idx] = proc;
+    }
+    printBootMarker("SMP:TASKS_CREATED");
+
+    for (0..smp_stress_rounds) |round| {
+        const proc = stress_processes[round % stress_processes.len];
+        const next_priority = task_entries[(round + 1) % task_entries.len].priority;
+        _ = scheduler.setProcessPriority(proc.pid, next_priority);
+        _ = scheduler.setProcessNice(proc.pid, @intCast(@as(i32, @intCast(round % 3)) - 1));
+
+        if ((round & 1) == 0) {
+            scheduler.blockProcess(proc);
+            scheduler.unblockProcess(proc);
+        }
+
+        if (scheduler.tryScheduleLocalForCPU(0)) |selected| {
+            sink +%= selected.pid;
+        }
+    }
+
+    std.mem.doNotOptimizeAway(&sink);
+
+    printBootMarker("SMP:TASKS_DONE");
+    printSmpStats();
+
+    if (scheduler.getStatistics().context_switches < 16) {
+        printBootMarker("SMP:FAIL");
+        qemu_exit.failure();
+    }
+
+    printBootMarker("SMP:PASS");
+    qemu_exit.success();
 }
 
 fn userlandSmokeRunner() callconv(.c) void {
@@ -515,6 +600,8 @@ export fn kernel_main() void {
             qemu_exit.success();
         },
         .test_vm => runVmProfile(),
+        .benchmark => runBenchmarkProfile(),
+        .smp_stress => runSmpStressProfile(),
         .userland_smoke => runUserlandSmokeProfile(),
     }
 }

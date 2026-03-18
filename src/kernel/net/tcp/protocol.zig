@@ -71,7 +71,7 @@ pub fn calculateChecksumIPv4(src_ip: u32, dst_ip: u32, tcp_header: *const Header
     sum += (dst_ip >> 16) & 0xFFFF;
     sum += dst_ip & 0xFFFF;
     sum += PROTOCOL_NUMBER;
-    sum += @sizeOf(Header) + data.len;
+    sum += @as(u32, @intCast(@sizeOf(Header) + data.len));
 
     addBytesToChecksum(&sum, headerBytes(tcp_header));
     addBytesToChecksum(&sum, data);
@@ -346,11 +346,11 @@ test "buildOptions emits SYN and timestamp options on aligned boundaries" {
 test "parseOptions updates option state and reports timestamp RTT" {
     var conn = FakeConn{};
     const options = [_]u8{
-        OPT_MSS, 4, 0x12, 0x34,
-        OPT_WINDOW_SCALE, 3, 20,
-        OPT_SACK_PERMITTED, 2,
-        OPT_NOP,
-        OPT_TIMESTAMPS, 10, 0, 0, 0, 5, 0, 0, 0, 90,
+        OPT_MSS,          4,       0x12,           0x34,
+        OPT_WINDOW_SCALE, 3,       20,             OPT_SACK_PERMITTED,
+        2,                OPT_NOP, OPT_TIMESTAMPS, 10,
+        0,                0,       0,              5,
+        0,                0,       0,              90,
     };
 
     const rtt = parseOptions(&options, &conn, 100);
