@@ -171,16 +171,16 @@ pub fn launchExternalCommand(command_args: []const [*:0]const u8, nice_value: ?i
 pub fn printExternalCommandError(command: [*:0]const u8, err: ExternalLaunchError) void {
     switch (err) {
         error.CommandNotFound => {
-            vga.print("Unknown command: ");
+            console.print("Unknown command: ");
             printString(command);
-            vga.print("\nType 'help' for available commands.\n");
+            console.print("\nType 'help' for available commands.\n");
         },
-        error.CommandPathTooLong => vga.print("Command path too long\n"),
-        error.ArgumentTooLong => vga.print("Command argument too long\n"),
-        error.CommandReadFailed => vga.print("Failed to read command file\n"),
-        error.CommandTooLarge => vga.print("Command file too large\n"),
-        error.RedirectDupFailed => vga.print("Failed to duplicate redirected file descriptor\n"),
-        error.TooManyLaunches => vga.print("Too many commands are pending launch\n"),
+        error.CommandPathTooLong => console.print("Command path too long\n"),
+        error.ArgumentTooLong => console.print("Command argument too long\n"),
+        error.CommandReadFailed => console.print("Failed to read command file\n"),
+        error.CommandTooLarge => console.print("Command file too large\n"),
+        error.RedirectDupFailed => console.print("Failed to duplicate redirected file descriptor\n"),
+        error.TooManyLaunches => console.print("Too many commands are pending launch\n"),
     }
 }
 
