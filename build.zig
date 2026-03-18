@@ -231,8 +231,13 @@ pub fn build(b: *std.Build) void {
         \\  echo "QEMU binary '$QEMU_BIN' not found. Set QEMU_BIN or install QEMU." >&2
         \\  exit 1
         \\fi
+        \\if ! command -v mdir >/dev/null 2>&1; then
+        \\  echo "mdir not found. Install mtools." >&2
+        \\  exit 1
+        \\fi
         \\mkdir -p build
         \\rm -f "$LOG_PATH"
+        \\mdir -i "build/disk.img" ::/bin > "build/userland-smoke-rootfs.txt"
         \\USERLAND_SMOKE_SECONDS="${USERLAND_SMOKE_SECONDS:-20}"
         \\$QEMU_BIN -kernel "zig-out/bin/kernel-userland-smoke.elf" -m 128M -display none -serial file:"$LOG_PATH" -monitor none -no-reboot -no-shutdown -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file="build/disk.img",if=ide,format=raw,id=disk0 >/dev/null 2>&1 &
         \\QEMU_PID=$!
@@ -252,6 +257,11 @@ pub fn build(b: *std.Build) void {
         \\wait "$QEMU_PID" >/dev/null 2>&1 || true
         \\if [ ! -s "$LOG_PATH" ]; then
         \\  echo "Userland smoke test failed: no serial output captured" >&2
+        \\  exit 1
+        \\fi
+        \\if ! grep -Fq "echo" "build/userland-smoke-rootfs.txt"; then
+        \\  echo "Userland smoke test failed: rootfs image is missing /bin/echo" >&2
+        \\  cat "build/userland-smoke-rootfs.txt" >&2
         \\  exit 1
         \\fi
         \\if [ "$TIMED_OUT" -eq 1 ] && ! grep -Fq "USERLAND:PASS" "$LOG_PATH"; then
