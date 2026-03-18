@@ -502,7 +502,8 @@ fn collectGlobMatches(base_path: []const u8, pattern: []const u8, out_paths: *[M
 }
 
 fn pathExists(path: []const u8) bool {
-    _ = vfs.lookupPath(path) catch return false;
+    const vnode = vfs.lookupPath(path) catch return false;
+    vfs.releaseLookupVNode(vnode);
     return true;
 }
 
