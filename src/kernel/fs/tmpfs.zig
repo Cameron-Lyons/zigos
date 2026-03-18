@@ -4,8 +4,6 @@ const vga = @import("../drivers/vga.zig");
 const std = @import("std");
 
 const NODE_POOL_SIZE = 512;
-const DEFAULT_CAPACITY = 16384;
-
 const TmpfsNode = struct {
     data: ?[*]u8,
     size: usize,
@@ -363,13 +361,6 @@ fn tmpfsCreate(parent_vnode: *vfs.VNode, name: []const u8, mode: vfs.FileMode) v
     const len = @min(name.len, node.name.len - 1);
     @memcpy(node.name[0..len], name[0..len]);
     node.name_len = @intCast(len);
-
-    const initial_buf = memory.kmalloc(DEFAULT_CAPACITY) orelse {
-        freeNode(node);
-        return vfs.VFSError.OutOfMemory;
-    };
-    node.data = @as([*]u8, @ptrCast(@alignCast(initial_buf)));
-    node.capacity = DEFAULT_CAPACITY;
 
     addChild(parent_node, node);
     return nodeToVNode(node, parent_vnode.mount_point.?);
