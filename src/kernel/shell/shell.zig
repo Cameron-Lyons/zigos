@@ -1076,19 +1076,27 @@ fn waitForForegroundCommand(self: *Shell, pid: u32) bool {
 
     const result = posix.waitForProcessEvent(pid) catch |err| {
         shell_external.releaseIfPresent(pid);
-        vga.print("Failed to wait for command: ");
-        vga.print(@errorName(err));
-        vga.print("\n");
+        console.print("Failed to wait for command: ");
+        console.print(@errorName(err));
+        console.print("\n");
         return false;
     };
 
     switch (result) {
         .exited => |exit_code| {
             shell_external.releaseIfPresent(pid);
+            if (exit_code != 0) {
+                var line_buf: [64]u8 = undefined;
+                const line = std.fmt.bufPrint(&line_buf, "Foreground command {d} exited with {d}\n", .{ pid, exit_code }) catch "Foreground command failed\n";
+                console.print(line);
+            }
             return exit_code == 0;
         },
         .stopped => {
             markJobStopped(self, pid);
+            var line_buf: [64]u8 = undefined;
+            const line = std.fmt.bufPrint(&line_buf, "Foreground command {d} stopped\n", .{pid}) catch "Foreground command stopped\n";
+            console.print(line);
             return false;
         },
     }
