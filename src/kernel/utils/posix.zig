@@ -394,9 +394,19 @@ pub fn waitForProcessEvent(pid: u32) !ProcessWaitResult {
 }
 
 fn reapExitedProcess(proc: *process.Process) void {
+    const stack_pages = proc.stack_size / 4096;
+    const kernel_stack = proc.kernel_stack;
+    const user_stack = proc.user_stack;
+
     proc.state = .Terminated;
     process.unregisterAndRemoveProcess(proc);
     freeUserMemory(proc);
+    if (stack_pages > 0) {
+        memory.freePages(kernel_stack, stack_pages);
+        if (user_stack != kernel_stack) {
+            memory.freePages(user_stack, stack_pages);
+        }
+    }
     if (proc.page_directory) |pd| {
         _ = pd;
         proc.page_directory = null;
