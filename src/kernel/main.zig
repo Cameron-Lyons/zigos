@@ -384,6 +384,22 @@ fn printSmpStats() void {
     console.print(line);
 }
 
+fn printUserlandStepEvent(marker: []const u8, phase: []const u8) void {
+    var line_buf: [96]u8 = undefined;
+    const line = std.fmt.bufPrint(&line_buf, "USERLAND:STEP:{s}:{s}\n", .{ phase, marker }) catch "USERLAND:STEP\n";
+    console.print(line);
+}
+
+fn runUserlandSmokeStep(smoke_shell: *shell.Shell, command: []const u8, marker: []const u8) bool {
+    printUserlandStepEvent(marker, "START");
+    if (!smoke_shell.runCommandLine(command)) {
+        printUserlandStepEvent(marker, "FAIL");
+        return false;
+    }
+    printBootMarker(marker);
+    return true;
+}
+
 fn runSmpStressProfile() noreturn {
     const task_entries = [_]struct {
         name: []const u8,
@@ -491,11 +507,10 @@ fn userlandSmokeRunner() callconv(.c) void {
     printBootMarker("USERLAND:START");
 
     for (commands) |step| {
-        if (!smoke_shell.runCommandLine(step.command)) {
+        if (!runUserlandSmokeStep(&smoke_shell, step.command, step.marker)) {
             printBootMarker("USERLAND:FAIL");
             qemu_exit.failure();
         }
-        printBootMarker(step.marker);
     }
 
     if (!smoke_shell.runCommandLine("/bin/sleep 3 &")) {
