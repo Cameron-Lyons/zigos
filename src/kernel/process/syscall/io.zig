@@ -326,7 +326,7 @@ pub fn sys_statfs(pathname: [*]const u8, buf_addr: usize) i32 {
     const path_slice = support.copyUserPathFromPointer(pathname, &kernel_buffer) catch return abi.EINVAL;
 
     const vnode = vfs.lookupPath(path_slice) catch |err| return errno.vfsErrno(err);
-    vfs.releaseLookupVNode(vnode);
+    vfs.discardLookupVNode(vnode);
 
     const buf = support.syntheticStatFs();
 

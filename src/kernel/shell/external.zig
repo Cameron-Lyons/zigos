@@ -172,7 +172,7 @@ pub fn printExternalCommandError(command: [*:0]const u8, err: ExternalLaunchErro
     switch (err) {
         error.CommandNotFound => {
             console.print("Unknown command: ");
-            printString(command);
+            console.print(sliceFromCStr(command));
             console.print("\nType 'help' for available commands.\n");
         },
         error.CommandPathTooLong => console.print("Command path too long\n"),
