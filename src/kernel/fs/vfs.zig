@@ -250,13 +250,7 @@ pub fn releaseLookupVNode(vnode: *VNode) void {
     releaseTransientLookupVNode(vnode);
 }
 
-fn releaseLookupVNodeLocked(vnode: *VNode) void {
-    if (vnode.mount_point) |mp| {
-        if (mp.ref_count > 0) {
-            mp.ref_count -= 1;
-        }
-    }
-
+pub fn discardLookupVNode(vnode: *VNode) void {
     releaseTransientLookupVNode(vnode);
 }
 
@@ -1460,12 +1454,12 @@ fn lookupPathLocked(path: []const u8) VFSError!*VNode {
             const prev = current;
             current = mp.fs_type.ops.lookup(prev, component) catch {
                 if (!isPersistentVNode(prev)) {
-                    releaseLookupVNodeLocked(prev);
+                    releaseTransientLookupVNode(prev);
                 }
                 return VFSError.NotFound;
             };
             if (!isPersistentVNode(prev)) {
-                releaseLookupVNodeLocked(prev);
+                releaseTransientLookupVNode(prev);
             }
         } else {
             var child = current.children;
