@@ -269,6 +269,7 @@ pub fn discardLookupVNode(vnode: *VNode) void {
 fn releaseTransientLookupVNode(vnode: *VNode) void {
     if (isPersistentVNode(vnode)) return;
 
+    const parent = vnode.parent;
     lockVNodeRefs();
     if (vnode.ref_count > 0) {
         vnode.ref_count -= 1;
@@ -278,6 +279,11 @@ fn releaseTransientLookupVNode(vnode: *VNode) void {
 
     if (should_free) {
         memory.kfree(@as([*]u8, @ptrCast(@alignCast(vnode))));
+        if (parent) |lookup_parent| {
+            if (!isPersistentVNode(lookup_parent)) {
+                releaseTransientLookupVNode(lookup_parent);
+            }
+        }
     }
 }
 
@@ -1580,7 +1586,9 @@ fn lookupPathLocked(path: []const u8, follow_final_symlink: bool) VFSError!*VNod
 
 fn lookupChildLocked(current: *VNode, component: []const u8) VFSError!*VNode {
     if (current.mount_point) |mp| {
-        return mp.fs_type.ops.lookup(current, component);
+        const child = try mp.fs_type.ops.lookup(current, component);
+        attachLookupParent(child, current);
+        return child;
     }
 
     var child = current.children;
@@ -1590,6 +1598,17 @@ fn lookupChildLocked(current: *VNode, component: []const u8) VFSError!*VNode {
         }
     }
     return VFSError.NotFound;
+}
+
+fn attachLookupParent(child: *VNode, parent: *VNode) void {
+    if (child == parent or child.parent != null) return;
+
+    child.parent = parent;
+    if (isPersistentVNode(parent)) return;
+
+    lockVNodeRefs();
+    parent.ref_count += 1;
+    unlockVNodeRefs();
 }
 
 fn hasRemainingComponents(path: []const u8, index: usize) bool {

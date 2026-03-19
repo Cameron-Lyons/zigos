@@ -82,12 +82,8 @@ const ExternalLaunchRegistry = struct {
     fn find(self: *ExternalLaunchRegistry, pid: u32) ?*ExternalCommandLaunch {
         if (pid == 0) return null;
 
-        var idx = self.lookupIndex(pid);
-        var attempts: usize = 0;
-        while (attempts < self.lookup.len) : (attempts += 1) {
-            const launch = self.lookup[idx] orelse return null;
+        for (&self.launches) |*launch| {
             if (launch.in_use and launch.pid == pid) return launch;
-            idx = (idx + 1) & (self.lookup.len - 1);
         }
 
         return null;
@@ -162,8 +158,8 @@ pub fn launchExternalCommandWithEnv(command_args: []const [*:0]const u8, env_ent
 
     const process_name = sliceFromCStr(command_args[0]);
     const irq_flags = disableInterrupts();
+    errdefer restoreInterrupts(irq_flags);
     const user_proc = process.create_exec_process(process_name);
-    restoreInterrupts(irq_flags);
     if (process.getEffectiveCurrent()) |parent| {
         user_proc.creds = parent.creds;
     }
@@ -171,6 +167,7 @@ pub fn launchExternalCommandWithEnv(command_args: []const [*:0]const u8, env_ent
     errdefer process.cleanupStdioRedirects(user_proc);
     user_proc.stdout_redirect = duplicateRedirectFd(stdout_fd) catch return error.RedirectDupFailed;
     external_launch_registry.setPid(launch, user_proc.pid);
+    restoreInterrupts(irq_flags);
 
     if (nice_value) |nice| {
         if (!scheduler.setProcessNice(user_proc.pid, nice)) {
@@ -217,7 +214,7 @@ pub fn printExternalCommandError(command: [*:0]const u8, err: ExternalLaunchErro
 pub export fn external_command_entry_c() callconv(.c) void {
     const pid = process.getCurrentPID();
     const launch = external_launch_registry.find(pid) orelse {
-        vga.print("exec: missing launch context\n");
+        console.print("exec: missing launch context\n");
         _ = process.terminateProcess(pid);
         return;
     };

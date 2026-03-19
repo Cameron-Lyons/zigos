@@ -162,6 +162,50 @@ var inotify_instances: [INOTIFY_INSTANCE_COUNT]InotifyInstance = [_]InotifyInsta
 var next_inotify_wd: i32 = 1;
 var next_inotify_cookie: u32 = 1;
 
+pub fn init() void {
+    for (&epoll_instances) |*inst| {
+        inst.* = .{
+            .entries = [_]?EpollEntry{null} ** EPOLL_ENTRY_CAPACITY,
+            .count = 0,
+            .in_use = false,
+        };
+    }
+
+    for (&eventfd_table) |*efd| {
+        efd.* = .{ .counter = 0, .flags = 0, .in_use = false };
+    }
+
+    for (&signalfd_table) |*sfd| {
+        sfd.* = .{ .mask = 0, .flags = 0, .in_use = false };
+    }
+
+    for (&inotify_instances) |*inst| {
+        inst.* = .{
+            .watches = [_]InotifyWatch{.{
+                .wd = -1,
+                .pathname = [_]u8{0} ** common.USER_PATH_BUFFER_SIZE,
+                .path_len = 0,
+                .mask = 0,
+                .in_use = false,
+            }} ** INOTIFY_WATCH_CAPACITY,
+            .queue = [_]InotifyQueuedEvent{.{
+                .wd = -1,
+                .mask = 0,
+                .cookie = 0,
+                .name_len = 0,
+                .name = [_]u8{0} ** INOTIFY_NAME_BUFFER_SIZE,
+            }} ** INOTIFY_QUEUE_CAPACITY,
+            .head = 0,
+            .tail = 0,
+            .flags = 0,
+            .in_use = false,
+        };
+    }
+
+    next_inotify_wd = 1;
+    next_inotify_cookie = 1;
+}
+
 const ReadyScan = struct {
     count: i32,
     earliest_deadline: ?u64,
