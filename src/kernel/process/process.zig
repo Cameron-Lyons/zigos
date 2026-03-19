@@ -47,6 +47,8 @@ pub const PATH_BUFFER_LEN = 256;
 pub const RLIMIT_COUNT = 10;
 pub const ITIMER_COUNT = 3;
 pub const MAX_MEMORY_MAPPINGS = 16;
+pub const PROCESS_STACK_SIZE = 16 * 1024;
+const PROCESS_STACK_POOL_SLOTS = 256;
 
 pub const Rlimit = extern struct {
     rlim_cur: u64,
@@ -173,6 +175,48 @@ pub var process_list_head: ?*Process = null;
 // SAFETY: Initialized in initScheduler() before use
 var idle_process: *Process = undefined;
 var per_cpu_current: [SMP_MAX_CPUS]?*Process = [_]?*Process{null} ** SMP_MAX_CPUS;
+var process_stack_pool: [PROCESS_STACK_POOL_SLOTS][PROCESS_STACK_SIZE]u8 align(4096) = undefined;
+var process_stack_in_use: [PROCESS_STACK_POOL_SLOTS]bool = [_]bool{false} ** PROCESS_STACK_POOL_SLOTS;
+var process_stack_lock: u32 = 0;
+
+fn lockProcessStacks() void {
+    while (@cmpxchgWeak(u32, &process_stack_lock, 0, 1, .acquire, .monotonic) != null) {
+        while (@atomicLoad(u32, &process_stack_lock, .monotonic) != 0) {
+            asm volatile ("pause");
+        }
+    }
+}
+
+fn unlockProcessStacks() void {
+    @atomicStore(u32, &process_stack_lock, 0, .release);
+}
+
+pub fn allocateProcessStack() ?[*]u8 {
+    lockProcessStacks();
+    defer unlockProcessStacks();
+
+    var i: usize = 0;
+    while (i < process_stack_in_use.len) : (i += 1) {
+        if (process_stack_in_use[i]) continue;
+        process_stack_in_use[i] = true;
+        return @ptrCast(&process_stack_pool[i][0]);
+    }
+
+    return null;
+}
+
+pub fn releaseProcessStack(ptr: [*]u8) void {
+    lockProcessStacks();
+    defer unlockProcessStacks();
+
+    const target = @intFromPtr(ptr);
+    var i: usize = 0;
+    while (i < process_stack_in_use.len) : (i += 1) {
+        if (@intFromPtr(&process_stack_pool[i][0]) != target) continue;
+        process_stack_in_use[i] = false;
+        return;
+    }
+}
 
 pub fn setPerCPUCurrent(cpu_id: u32, proc: *Process) void {
     if (cpu_id < SMP_MAX_CPUS) {
@@ -368,7 +412,7 @@ fn create_process_internal(
         if (p.process_group != 0) p.process_group else p.pid
     else
         next_pid;
-    const stack_size = 16 * 1024;
+    const stack_size = PROCESS_STACK_SIZE;
     proc.pid = next_pid;
     pid_lookup[next_pid % MAX_PROCESSES] = proc;
     next_pid += 1;
@@ -415,9 +459,7 @@ fn create_process_internal(
         proc.memory_mappings = defaultMemoryMappings();
     }
 
-    const stack_pages = stack_size / 4096;
-
-    proc.kernel_stack = memory.allocPages(stack_pages) orelse {
+    proc.kernel_stack = allocateProcessStack() orelse {
         vga.print("Error: Failed to allocate kernel stack!\n");
         while (true) {
             asm volatile ("hlt");
@@ -425,7 +467,7 @@ fn create_process_internal(
     };
 
     if (privilege == .User) {
-        proc.user_stack = memory.allocPages(stack_pages) orelse {
+        proc.user_stack = allocateProcessStack() orelse {
             vga.print("Error: Failed to allocate user stack!\n");
             while (true) {
                 asm volatile ("hlt");

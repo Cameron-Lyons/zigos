@@ -58,6 +58,27 @@ pub fn mount(args: []const [*:0]const u8) void {
     vga.print("\n");
 }
 
+pub fn umount(args: []const [*:0]const u8) void {
+    if (args.len == 0) {
+        vga.print("Usage: umount <path>\n");
+        return;
+    }
+
+    const path = sliceFromCStr(args[0]);
+    vfs.unmount(path) catch |err| {
+        vga.print("umount: failed to unmount ");
+        printString(args[0]);
+        vga.print(": ");
+        vga.print(@errorName(err));
+        vga.print("\n");
+        return;
+    };
+
+    vga.print("Unmounted ");
+    printString(args[0]);
+    vga.print("\n");
+}
+
 pub fn write(args: []const [*:0]const u8) void {
     if (args.len < 2) {
         vga.print("Usage: write <file> <text>\n");

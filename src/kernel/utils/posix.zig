@@ -44,7 +44,6 @@ pub fn fork() !i32 {
     }
 
     const child_pid = process.next_pid;
-    const stack_pages = parent.stack_size / 4096;
     child.pid = child_pid;
     process.pid_lookup[child_pid % 256] = child;
     process.next_pid += 1;
@@ -87,15 +86,15 @@ pub fn fork() !i32 {
     child.signals.pending = signal.SignalQueue.init();
     @memcpy(child.name[0..child_name.len], child_name);
 
-    child.kernel_stack = memory.allocPages(stack_pages) orelse return error.OutOfMemory;
+    child.kernel_stack = process.allocateProcessStack() orelse return error.OutOfMemory;
 
     child.page_directory = paging.createUserPageDirectory() catch |err| {
-        memory.freePages(child.kernel_stack, stack_pages);
+        process.releaseProcessStack(child.kernel_stack);
         return err;
     };
 
     copyAddressSpace(parent, child) catch |err| {
-        memory.freePages(child.kernel_stack, stack_pages);
+        process.releaseProcessStack(child.kernel_stack);
         return err;
     };
     mmap.cloneMappings(parent, child);
@@ -402,9 +401,9 @@ fn reapExitedProcess(proc: *process.Process) void {
     process.unregisterAndRemoveProcess(proc);
     freeUserMemory(proc);
     if (stack_pages > 0) {
-        memory.freePages(kernel_stack, stack_pages);
+        process.releaseProcessStack(kernel_stack);
         if (user_stack != kernel_stack) {
-            memory.freePages(user_stack, stack_pages);
+            process.releaseProcessStack(user_stack);
         }
     }
     if (proc.page_directory) |pd| {

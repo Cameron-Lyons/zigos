@@ -9,10 +9,13 @@ const paging = @import("../../memory/paging.zig");
 const posix = @import("../../utils/posix.zig");
 const process_mod = @import("../process.zig");
 const protection = @import("../../memory/protection.zig");
+const external = @import("../../shell/external.zig");
 const vfs = @import("../../fs/vfs.zig");
 
-const MAX_EXECVE_ARGS: usize = 32;
-const MAX_EXECVE_ENV: usize = 32;
+// Keep syscall-side argv/env scratch space within the small kernel stacks used by
+// trampoline-backed user processes.
+const MAX_EXECVE_ARGS: usize = 8;
+const MAX_EXECVE_ENV: usize = 8;
 const EXECVE_STRING_BUFFER_SIZE: usize = common.USER_PATH_BUFFER_SIZE;
 
 pub fn sys_getpid() i32 {
@@ -123,6 +126,81 @@ pub fn sys_execve(path: [*]const u8, argv: usize, envp: usize) i32 {
     };
 
     return 0;
+}
+
+pub fn sys_spawn(path: [*]const u8, argv: usize, envp: usize) i32 {
+    var path_buf: [EXECVE_STRING_BUFFER_SIZE]u8 = undefined;
+    const path_slice = protection.copyStringFromUser(&path_buf, @intFromPtr(path)) catch {
+        return abi.EINVAL;
+    };
+
+    var argv_ptrs: [MAX_EXECVE_ARGS][*:0]const u8 = undefined;
+    var argv_count: usize = 0;
+    var argv_buffers: [MAX_EXECVE_ARGS][EXECVE_STRING_BUFFER_SIZE]u8 = undefined;
+
+    if (argv != 0) {
+        while (argv_count < argv_ptrs.len) {
+            const ptr_addr = argv + argv_count * @sizeOf(usize);
+            if (!protection.verifyUserPointer(ptr_addr, @sizeOf(usize))) {
+                break;
+            }
+
+            const str_ptr = @as(*const usize, @ptrFromInt(ptr_addr)).*;
+            if (str_ptr == 0) break;
+
+            const arg_slice = protection.copyStringFromUser(&argv_buffers[argv_count], str_ptr) catch {
+                break;
+            };
+            argv_buffers[argv_count][arg_slice.len] = 0;
+            argv_ptrs[argv_count] = @ptrCast(argv_buffers[argv_count][0..].ptr);
+            argv_count += 1;
+        }
+    }
+
+    if (argv_count == 0) {
+        if (path_slice.len + 1 > argv_buffers[0].len) return abi.E2BIG;
+        @memcpy(argv_buffers[0][0..path_slice.len], path_slice);
+        argv_buffers[0][path_slice.len] = 0;
+        argv_ptrs[0] = @ptrCast(argv_buffers[0][0..].ptr);
+        argv_count = 1;
+    }
+
+    var env_entries: [MAX_EXECVE_ENV][]const u8 = undefined;
+    var env_count: usize = 0;
+    var env_buffers: [MAX_EXECVE_ENV][EXECVE_STRING_BUFFER_SIZE]u8 = undefined;
+
+    if (envp != 0) {
+        while (env_count < env_entries.len) {
+            const ptr_addr = envp + env_count * @sizeOf(usize);
+            if (!protection.verifyUserPointer(ptr_addr, @sizeOf(usize))) {
+                break;
+            }
+
+            const str_ptr = @as(*const usize, @ptrFromInt(ptr_addr)).*;
+            if (str_ptr == 0) break;
+
+            const env_slice = protection.copyStringFromUser(&env_buffers[env_count], str_ptr) catch {
+                break;
+            };
+            env_entries[env_count] = env_buffers[env_count][0..env_slice.len];
+            env_count += 1;
+        }
+    }
+
+    const pid = external.launchExternalCommandWithEnv(argv_ptrs[0..argv_count], env_entries[0..env_count], null, null, null) catch |err| {
+        return switch (err) {
+            error.CommandNotFound => abi.ENOENT,
+            error.CommandReadFailed, error.RedirectDupFailed => abi.EIO,
+            error.CommandPathTooLong,
+            error.ArgumentTooLong,
+            error.CommandTooLarge,
+            error.EnvironmentTooLarge,
+            => abi.E2BIG,
+            error.TooManyLaunches => abi.EAGAIN,
+        };
+    };
+
+    return @intCast(pid);
 }
 
 pub fn sys_wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) i32 {

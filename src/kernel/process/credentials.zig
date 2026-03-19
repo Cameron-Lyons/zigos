@@ -1,7 +1,9 @@
+const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const vfs = @import("../fs/vfs.zig");
 
 pub const MAX_GROUPS: usize = 16;
+const PASSWD_BUFFER_SIZE = 2048;
 
 pub const Credentials = struct {
     uid: u16,
@@ -34,10 +36,32 @@ var uid_lookup: [MAX_USERS]?*UserEntry = [_]?*UserEntry{null} ** MAX_USERS;
 var initialized: bool = false;
 
 pub fn init() void {
-    addUserInternal("root", 0, 0, "/root");
-    addUserInternal("user", 1000, 1000, "/home/user");
+    if (initialized) return;
+
+    resetUserTable();
+    if (loadUsersFromPasswd() == 0) {
+        addUserInternal("root", 0, 0, "/root");
+        addUserInternal("user", 1000, 1000, "/home/user");
+    } else {
+        ensureDefaultUser("root", 0, 0, "/root");
+        ensureDefaultUser("user", 1000, 1000, "/home/user");
+    }
+
     initialized = true;
     vga.print("Credentials system initialized\n");
+}
+
+fn resetUserTable() void {
+    for (&user_table) |*entry| {
+        entry.* = .{
+            .uid = 0,
+            .gid = 0,
+            .name = [_]u8{0} ** 32,
+            .home = [_]u8{0} ** 64,
+            .active = false,
+        };
+    }
+    uid_lookup = [_]?*UserEntry{null} ** MAX_USERS;
 }
 
 fn addUserInternal(name: []const u8, uid: u16, gid: u16, home: []const u8) void {
@@ -59,6 +83,100 @@ fn addUserInternal(name: []const u8, uid: u16, gid: u16, home: []const u8) void 
             return;
         }
     }
+}
+
+fn ensureDefaultUser(name: []const u8, uid: u16, gid: u16, home: []const u8) void {
+    if (lookupUser(uid) == null) {
+        addUserInternal(name, uid, gid, home);
+    }
+}
+
+fn loadUsersFromPasswd() usize {
+    const fd = vfs.open("/etc/passwd", vfs.O_RDONLY) catch return 0;
+    defer vfs.close(fd) catch {};
+
+    var buffer: [PASSWD_BUFFER_SIZE]u8 = undefined;
+    const bytes_read = vfs.read(fd, buffer[0..]) catch return 0;
+    if (bytes_read == 0) return 0;
+
+    var loaded: usize = 0;
+    var line_start: usize = 0;
+    while (line_start < bytes_read) {
+        var line_end = line_start;
+        while (line_end < bytes_read and buffer[line_end] != '\n') : (line_end += 1) {}
+
+        const line = trimLine(buffer[line_start..line_end]);
+        if (parsePasswdLine(line)) |entry| {
+            addUserInternal(entry.name, entry.uid, entry.gid, entry.home);
+            loaded += 1;
+        }
+
+        line_start = line_end + 1;
+    }
+
+    return loaded;
+}
+
+const ParsedPasswdEntry = struct {
+    name: []const u8,
+    uid: u16,
+    gid: u16,
+    home: []const u8,
+};
+
+fn parsePasswdLine(line: []const u8) ?ParsedPasswdEntry {
+    if (line.len == 0 or line[0] == '#') return null;
+
+    var cursor: usize = 0;
+    const name = nextField(line, &cursor) orelse return null;
+    _ = nextField(line, &cursor) orelse return null;
+    const uid_field = nextField(line, &cursor) orelse return null;
+    const gid_field = nextField(line, &cursor) orelse return null;
+    _ = nextField(line, &cursor) orelse return null;
+    const home = nextField(line, &cursor) orelse return null;
+
+    if (name.len == 0 or home.len == 0) return null;
+
+    return .{
+        .name = name,
+        .uid = parseDecimalU16(uid_field) orelse return null,
+        .gid = parseDecimalU16(gid_field) orelse return null,
+        .home = home,
+    };
+}
+
+fn nextField(line: []const u8, cursor: *usize) ?[]const u8 {
+    if (cursor.* > line.len) return null;
+
+    const start = cursor.*;
+    while (cursor.* < line.len and line[cursor.*] != ':') : (cursor.* += 1) {}
+    const end = cursor.*;
+
+    if (cursor.* < line.len and line[cursor.*] == ':') {
+        cursor.* += 1;
+    }
+
+    return line[start..end];
+}
+
+fn trimLine(line: []const u8) []const u8 {
+    if (line.len > 0 and line[line.len - 1] == '\r') {
+        return line[0 .. line.len - 1];
+    }
+    return line;
+}
+
+fn parseDecimalU16(slice: []const u8) ?u16 {
+    if (slice.len == 0) return null;
+
+    var value: u32 = 0;
+    for (slice) |char| {
+        if (char < '0' or char > '9') return null;
+        value = value * 10 + (char - '0');
+        if (value > std.math.maxInt(u16)) return null;
+    }
+
+    return @intCast(value);
 }
 
 pub fn checkPermission(creds: *const Credentials, mode: vfs.FileMode, file_uid: u16, file_gid: u16, access: u3) bool {

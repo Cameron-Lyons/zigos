@@ -109,6 +109,7 @@ var ctrl_pressed: bool = false;
 var alt_pressed: bool = false;
 var caps_lock: bool = false;
 var keyboard_shell: ?*shell.Shell = null;
+var input_echo_enabled: bool = true;
 
 pub fn handleInterrupt() void {
     const scancode = io.inb(KEYBOARD_DATA_PORT);
@@ -237,13 +238,15 @@ pub fn handleInterrupt() void {
                         if (keyboard_shell) |sh| {
                             sh.handleChar(ch);
                         } else {
-                            if (ch == '\n') {
-                                vga.print("\n");
-                            } else if (ch == '\x08') {
-                                vga.print("\x08 \x08");
-                            } else {
-                                var buf: [2]u8 = .{ ch, 0 };
-                                vga.print(&buf);
+                            if (input_echo_enabled) {
+                                if (ch == '\n') {
+                                    vga.print("\n");
+                                } else if (ch == '\x08') {
+                                    vga.print("\x08 \x08");
+                                } else {
+                                    var buf: [2]u8 = .{ ch, 0 };
+                                    vga.print(&buf);
+                                }
                             }
                         }
                     }
@@ -265,6 +268,10 @@ pub fn init() void {
 
 pub fn setShell(sh: *shell.Shell) void {
     keyboard_shell = sh;
+}
+
+pub fn setInputEchoEnabled(enabled: bool) void {
+    input_echo_enabled = enabled;
 }
 
 pub fn has_char() bool {

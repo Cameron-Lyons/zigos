@@ -2,6 +2,7 @@ const std = @import("std");
 const fd_freelist_mod = @import("fd_freelist.zig");
 const memory = @import("../memory/memory.zig");
 const abi = @import("../process/syscall/abi.zig");
+const path_semantics = @import("../process/syscall/path_semantics.zig");
 const readiness = @import("../process/syscall/readiness.zig");
 const error_handler = @import("../utils/error.zig");
 
@@ -147,6 +148,16 @@ pub const FileDescriptor = struct {
     path: [512]u8,
 };
 
+pub const MountInfo = struct {
+    device: [256]u8 = [_]u8{0} ** 256,
+    device_len: u16 = 0,
+    mount_path: [256]u8 = [_]u8{0} ** 256,
+    mount_path_len: u16 = 0,
+    fs_name: [32]u8 = [_]u8{0} ** 32,
+    fs_name_len: u8 = 0,
+    flags: u32 = 0,
+};
+
 pub const O_RDONLY: u32 = 0x0000;
 pub const O_WRONLY: u32 = 0x0001;
 pub const O_RDWR: u32 = 0x0002;
@@ -175,6 +186,7 @@ var path_buffer_lock: u32 = 0;
 var inotify_notifier: ?*const fn ([]const u8, u32, u32) void = null;
 
 const FD_TABLE_SIZE = 256;
+const MAX_SYMLINK_DEPTH: usize = 8;
 var fd_freelist: [FD_TABLE_SIZE]u8 = undefined;
 var fd_freelist_top: usize = 0;
 
@@ -517,6 +529,32 @@ pub fn unmount(mount_path: []const u8) VFSError!void {
     return VFSError.NotFound;
 }
 
+pub fn snapshotMounts(buffer: []MountInfo) usize {
+    lockMountState();
+    defer unlockMountState();
+
+    var count: usize = 0;
+    var current = mount_list;
+    while (current) |mp| : (current = mp.next) {
+        if (count >= buffer.len) break;
+
+        var info = MountInfo{};
+        info.device_len = @intCast(strlen(&mp.device));
+        info.mount_path_len = @intCast(strlen(&mp.mount_path));
+        info.fs_name_len = @intCast(strlen(&mp.fs_type.name));
+        info.flags = mp.flags;
+
+        @memcpy(info.device[0..info.device_len], mp.device[0..info.device_len]);
+        @memcpy(info.mount_path[0..info.mount_path_len], mp.mount_path[0..info.mount_path_len]);
+        @memcpy(info.fs_name[0..info.fs_name_len], mp.fs_type.name[0..info.fs_name_len]);
+
+        buffer[count] = info;
+        count += 1;
+    }
+
+    return count;
+}
+
 pub fn open(path: []const u8, flags: u32) VFSError!u32 {
     var created = false;
     var held_parent: ?*VNode = null;
@@ -855,6 +893,12 @@ pub fn stat(path: []const u8, stat_buf: *FileStat) VFSError!void {
     try vnode.ops.stat(vnode, stat_buf);
 }
 
+pub fn lstat(path: []const u8, stat_buf: *FileStat) VFSError!void {
+    const vnode = try lookupPathNoFollowRetained(path);
+    defer releaseLookupVNode(vnode);
+    try vnode.ops.stat(vnode, stat_buf);
+}
+
 pub fn fstat(fd: u32, stat_buf: *FileStat) VFSError!void {
     const file_desc = try retainDescriptor(fd);
     defer releaseDescriptor(file_desc);
@@ -1015,19 +1059,9 @@ pub fn link(target_path: []const u8, linkpath: []const u8) VFSError!void {
 }
 
 pub fn readlink(path: []const u8, buffer: []u8) VFSError!usize {
-    const vnode = try lookupPathRetained(path);
+    const vnode = try lookupPathNoFollowRetained(path);
     defer releaseLookupVNode(vnode);
-    if (vnode.file_type != FileType.SymLink) {
-        return VFSError.InvalidOperation;
-    }
-
-    if (vnode.mount_point) |mp| {
-        if (mp.fs_type.ops.readlink) |readlink_fn| {
-            return try readlink_fn(vnode, buffer);
-        }
-    }
-
-    return VFSError.InvalidOperation;
+    return readlinkVNode(vnode, buffer);
 }
 
 pub fn ftruncate(fd: u32, size: u64) VFSError!void {
@@ -1404,55 +1438,75 @@ fn createVNode() VFSError!*VNode {
 pub fn lookupPath(path: []const u8) VFSError!*VNode {
     lockMountState();
     defer unlockMountState();
-    return lookupPathLocked(path);
+    return lookupPathLocked(path, true);
+}
+
+pub fn lookupPathNoFollow(path: []const u8) VFSError!*VNode {
+    lockMountState();
+    defer unlockMountState();
+    return lookupPathLocked(path, false);
 }
 
 pub fn lookupPathRetained(path: []const u8) VFSError!*VNode {
     lockMountState();
     defer unlockMountState();
 
-    const vnode = try lookupPathLocked(path);
+    const vnode = try lookupPathLocked(path, true);
     if (vnode.mount_point) |mp| {
         mp.ref_count += 1;
     }
     return vnode;
 }
 
-fn lookupPathLocked(path: []const u8) VFSError!*VNode {
-    if (path.len == 0 or path[0] != '/') {
-        return VFSError.InvalidPath;
+pub fn lookupPathNoFollowRetained(path: []const u8) VFSError!*VNode {
+    lockMountState();
+    defer unlockMountState();
+
+    const vnode = try lookupPathLocked(path, false);
+    if (vnode.mount_point) |mp| {
+        mp.ref_count += 1;
     }
+    return vnode;
+}
 
-    var current: *VNode = undefined;
-    var i: usize = 1;
+fn lookupPathLocked(path: []const u8, follow_final_symlink: bool) VFSError!*VNode {
+    if (path.len == 0 or path[0] != '/') return VFSError.InvalidPath;
+    if (path.len >= 512) return VFSError.InvalidPath;
 
-    if (findBestMountPointLocked(path)) |mp| {
-        current = mp.root orelse return VFSError.NotFound;
-        const mount_path = mp.mount_path[0..strlen(&mp.mount_path)];
-        if (path.len == mount_path.len or (mount_path.len == 1 and path.len == 1)) {
-            return current;
+    var resolved_path_storage: [512]u8 = undefined;
+    @memcpy(resolved_path_storage[0..path.len], path);
+    var resolved_path = resolved_path_storage[0..path.len];
+
+    var symlink_depth: usize = 0;
+    restart: while (true) {
+        var current: *VNode = undefined;
+        var i: usize = 1;
+
+        if (findBestMountPointLocked(resolved_path)) |mp| {
+            current = mp.root orelse return VFSError.NotFound;
+            const mount_path = mp.mount_path[0..strlen(&mp.mount_path)];
+            if (resolved_path.len == mount_path.len or (mount_path.len == 1 and resolved_path.len == 1)) {
+                return current;
+            }
+            i = if (mount_path.len == 1) 1 else mount_path.len;
+        } else {
+            current = root_vnode orelse return VFSError.NotFound;
+            if (resolved_path.len == 1) {
+                return current;
+            }
         }
-        i = if (mount_path.len == 1) 1 else mount_path.len;
-    } else {
-        current = root_vnode orelse return VFSError.NotFound;
-        if (path.len == 1) {
-            return current;
-        }
-    }
 
-    while (i < path.len) {
-        while (i < path.len and path[i] == '/') : (i += 1) {}
+        while (i < resolved_path.len) {
+            while (i < resolved_path.len and resolved_path[i] == '/') : (i += 1) {}
+            if (i >= resolved_path.len) break;
 
-        if (i >= path.len) break;
+            const component_start = i;
+            while (i < resolved_path.len and resolved_path[i] != '/') : (i += 1) {}
+            const component_end = i;
+            const component = resolved_path[component_start..component_end];
 
-        const start = i;
-        while (i < path.len and path[i] != '/') : (i += 1) {}
-
-        const component = path[start..i];
-
-        if (current.mount_point) |mp| {
             const prev = current;
-            current = mp.fs_type.ops.lookup(prev, component) catch {
+            current = lookupChildLocked(prev, component) catch {
                 if (!isPersistentVNode(prev)) {
                     releaseTransientLookupVNode(prev);
                 }
@@ -1461,25 +1515,99 @@ fn lookupPathLocked(path: []const u8) VFSError!*VNode {
             if (!isPersistentVNode(prev)) {
                 releaseTransientLookupVNode(prev);
             }
-        } else {
-            var child = current.children;
-            var found = false;
 
-            while (child) |c| : (child = c.next_sibling) {
-                if (std.mem.eql(u8, c.name[0..c.name_len], component)) {
-                    current = c;
-                    found = true;
-                    break;
+            const should_follow = current.file_type == .SymLink and
+                (follow_final_symlink or hasRemainingComponents(resolved_path, component_end));
+            if (!should_follow) continue;
+
+            if (symlink_depth >= MAX_SYMLINK_DEPTH) {
+                if (!isPersistentVNode(current)) {
+                    releaseTransientLookupVNode(current);
                 }
+                return VFSError.InvalidPath;
             }
 
-            if (!found) {
-                return VFSError.NotFound;
+            var link_target_storage: [512]u8 = undefined;
+            const link_len = readlinkVNode(current, &link_target_storage) catch |err| {
+                if (!isPersistentVNode(current)) {
+                    releaseTransientLookupVNode(current);
+                }
+                return err;
+            };
+            const link_target = link_target_storage[0..link_len];
+
+            var normalized_target_storage: [512]u8 = undefined;
+            const parent_path = if (component_start <= 1) "/" else resolved_path[0 .. component_start - 1];
+            const normalized_target = if (link_target.len > 0 and link_target[0] == '/')
+                path_semantics.resolveActualPath("/", link_target, &normalized_target_storage) catch {
+                    if (!isPersistentVNode(current)) {
+                        releaseTransientLookupVNode(current);
+                    }
+                    return VFSError.InvalidPath;
+                }
+            else
+                path_semantics.resolvePathFromDir("/", parent_path, link_target, &normalized_target_storage) catch {
+                    if (!isPersistentVNode(current)) {
+                        releaseTransientLookupVNode(current);
+                    }
+                    return VFSError.InvalidPath;
+                };
+
+            const remainder = resolved_path[component_end..];
+            const required_len = normalized_target.len + remainder.len;
+            if (required_len == 0 or required_len >= resolved_path_storage.len) {
+                if (!isPersistentVNode(current)) {
+                    releaseTransientLookupVNode(current);
+                }
+                return VFSError.InvalidPath;
             }
+
+            @memcpy(resolved_path_storage[0..normalized_target.len], normalized_target);
+            @memcpy(resolved_path_storage[normalized_target.len..required_len], remainder);
+            resolved_path = resolved_path_storage[0..required_len];
+
+            if (!isPersistentVNode(current)) {
+                releaseTransientLookupVNode(current);
+            }
+
+            symlink_depth += 1;
+            continue :restart;
         }
+
+        return current;
+    }
+}
+
+fn lookupChildLocked(current: *VNode, component: []const u8) VFSError!*VNode {
+    if (current.mount_point) |mp| {
+        return mp.fs_type.ops.lookup(current, component);
     }
 
-    return current;
+    var child = current.children;
+    while (child) |c| : (child = c.next_sibling) {
+        if (std.mem.eql(u8, c.name[0..c.name_len], component)) {
+            return c;
+        }
+    }
+    return VFSError.NotFound;
+}
+
+fn hasRemainingComponents(path: []const u8, index: usize) bool {
+    var i = index;
+    while (i < path.len and path[i] == '/') : (i += 1) {}
+    return i < path.len;
+}
+
+fn readlinkVNode(vnode: *VNode, buffer: []u8) VFSError!usize {
+    if (vnode.file_type != FileType.SymLink) {
+        return VFSError.InvalidOperation;
+    }
+    if (vnode.mount_point) |mp| {
+        if (mp.fs_type.ops.readlink) |readlink_fn| {
+            return try readlink_fn(vnode, buffer);
+        }
+    }
+    return VFSError.InvalidOperation;
 }
 
 fn findBestMountPointLocked(path: []const u8) ?*MountPoint {
