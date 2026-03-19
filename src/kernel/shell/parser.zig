@@ -240,8 +240,8 @@ pub fn isValidBackgroundPlacement(tokens: []const CommandToken) bool {
     return true;
 }
 
-pub fn parsePipeline(tokens: []const CommandToken) PipelineConfigError!ParsedPipeline {
-    var result = ParsedPipeline{};
+pub fn parsePipelineInto(tokens: []const CommandToken, result: *ParsedPipeline) PipelineConfigError!void {
+    result.* = ParsedPipeline{};
     result.stage_count = 1;
 
     var stage_idx: usize = 0;
@@ -300,7 +300,11 @@ pub fn parsePipeline(tokens: []const CommandToken) PipelineConfigError!ParsedPip
             if (stage.stdin_path != null) return error.UnsupportedRedirection;
         }
     }
+}
 
+pub fn parsePipeline(tokens: []const CommandToken) PipelineConfigError!ParsedPipeline {
+    var result = ParsedPipeline{};
+    try parsePipelineInto(tokens, &result);
     return result;
 }
 

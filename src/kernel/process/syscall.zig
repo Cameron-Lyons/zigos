@@ -13,6 +13,7 @@ const syscall_misc = @import("syscall/misc.zig");
 const syscall_net = @import("syscall/net.zig");
 const syscall_process = @import("syscall/process_ops.zig");
 const syscall_process_state = @import("syscall/process_state.zig");
+const syscall_readiness = @import("syscall/readiness.zig");
 const syscall_resource = @import("syscall/resource.zig");
 const runtime = @import("syscall/runtime.zig");
 const syscall_signal = @import("syscall/signal.zig");
@@ -1017,7 +1018,10 @@ fn sys_stat(pathname: [*]const u8, stat_buf_addr: usize) i32 {
 }
 
 pub fn init() void {
+    syscall_readiness.init();
+    syscall_system.init();
     syscall_net.attachTables(&unix_sockets, &socket_table);
+    syscall_event.init();
     idt.register_interrupt_handler(0x80, syscall_handler);
 
     idt.set_gate_flags(0x80, 0x8E | 0x60);

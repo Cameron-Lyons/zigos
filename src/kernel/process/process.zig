@@ -47,7 +47,7 @@ pub const PATH_BUFFER_LEN = 256;
 pub const RLIMIT_COUNT = 10;
 pub const ITIMER_COUNT = 3;
 pub const MAX_MEMORY_MAPPINGS = 16;
-pub const PROCESS_STACK_SIZE = 16 * 1024;
+pub const PROCESS_STACK_SIZE = 64 * 1024;
 const PROCESS_STACK_POOL_SLOTS = 256;
 
 pub const Rlimit = extern struct {

@@ -30,6 +30,16 @@ var system_hostname: [65]u8 = blk: {
 };
 var hostname_len: usize = 5;
 
+pub fn init() void {
+    system_hostname = [_]u8{0} ** system_hostname.len;
+    system_hostname[0] = 'z';
+    system_hostname[1] = 'i';
+    system_hostname[2] = 'g';
+    system_hostname[3] = 'o';
+    system_hostname[4] = 's';
+    hostname_len = 5;
+}
+
 pub fn getHostname() []const u8 {
     return system_hostname[0..hostname_len];
 }
