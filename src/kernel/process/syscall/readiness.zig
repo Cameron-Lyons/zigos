@@ -27,6 +27,15 @@ var wait_lock = sync.SpinLock.init();
 var event_generations: [EVENT_CLASS_COUNT]u64 = [_]u64{1} ** EVENT_CLASS_COUNT;
 var next_waiter_hint: usize = 0;
 
+pub fn init() void {
+    for (&waiters) |*waiter| {
+        waiter.* = .{};
+    }
+    wait_lock = sync.SpinLock.init();
+    event_generations = [_]u64{1} ** EVENT_CLASS_COUNT;
+    next_waiter_hint = 0;
+}
+
 pub fn snapshot() GenerationSnapshot {
     wait_lock.acquire();
     defer wait_lock.release();

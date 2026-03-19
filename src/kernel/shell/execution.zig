@@ -1,6 +1,7 @@
 const std = @import("std");
 const console = @import("../utils/console.zig");
 const vga = @import("../drivers/vga.zig");
+const memory = @import("../memory/memory.zig");
 const process = @import("../process/process.zig");
 const vfs = @import("../fs/vfs.zig");
 const abi = @import("../process/syscall/abi.zig");
@@ -137,7 +138,14 @@ pub fn executeLine(runtime: *const Runtime, line: []const u8, wait_for_external:
 }
 
 fn executePipeline(runtime: *const Runtime, tokens: []const CommandToken, background_requested: bool) bool {
-    var pipeline = parser.parsePipeline(tokens) catch |err| {
+    const pipeline_mem = memory.kmalloc(@sizeOf(ParsedPipeline)) orelse {
+        printPipelineConfigError(error.ArgumentTooLong);
+        return false;
+    };
+    defer memory.kfree(pipeline_mem);
+    const pipeline: *ParsedPipeline = @ptrCast(@alignCast(pipeline_mem));
+
+    parser.parsePipelineInto(tokens, pipeline) catch |err| {
         printPipelineConfigError(err);
         return false;
     };
@@ -147,11 +155,11 @@ fn executePipeline(runtime: *const Runtime, tokens: []const CommandToken, backgr
         return false;
     }
 
-    if (!validatePipelineStages(&pipeline)) {
+    if (!validatePipelineStages(pipeline)) {
         return false;
     }
 
-    expandPipelineGlobs(&pipeline) catch |err| {
+    expandPipelineGlobs(pipeline) catch |err| {
         printPipelineConfigError(err);
         return false;
     };

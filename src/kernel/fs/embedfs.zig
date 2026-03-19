@@ -270,7 +270,7 @@ fn embedfsRename(_: *vfs.VNode, _: []const u8, _: *vfs.VNode, _: []const u8) vfs
     return vfs.VFSError.ReadOnly;
 }
 
-var embedfs_fs_ops = vfs.FileSystemOps{
+const embedfs_fs_ops = vfs.FileSystemOps{
     .mount = embedfsMount,
     .unmount = embedfsUnmount,
     .get_root = embedfsGetRoot,
