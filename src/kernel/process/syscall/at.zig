@@ -5,6 +5,8 @@ const common = @import("common.zig");
 const cwd_mod = @import("cwd.zig");
 const errno = @import("errno.zig");
 const syscall_event = @import("event.zig");
+const credentials = @import("../credentials.zig");
+const process_mod = @import("../process.zig");
 const protection = @import("../../memory/protection.zig");
 const vfs = @import("../../fs/vfs.zig");
 
@@ -137,10 +139,19 @@ pub fn sys_fchownat(dirfd: i32, pathname: [*]const u8, owner: i32, group: i32) i
     var resolved_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
     const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return abi.EBADF;
 
-    const uid: u32 = if (owner < 0) 0xFFFFFFFF else @intCast(owner);
-    const gid: u32 = if (group < 0) 0xFFFFFFFF else @intCast(group);
+    if (process_mod.current_process) |proc| {
+        if (!credentials.isRoot(&proc.creds)) {
+            return abi.EPERM;
+        }
+    }
 
-    vfs.chown(resolved, uid, gid) catch |err| return errno.vfsErrno(err);
+    const vnode = vfs.lookupPathRetained(resolved) catch |err| return errno.vfsErrno(err);
+    defer vfs.releaseLookupVNode(vnode);
+
+    const uid: u32 = if (owner < 0) vnode.uid else @intCast(owner);
+    const gid: u32 = if (group < 0) vnode.gid else @intCast(group);
+
+    vnode.ops.chown(vnode, uid, gid) catch |err| return errno.vfsErrno(err);
     syscall_event.notifyInotifyPathEvent(resolved, abi.IN_ATTRIB, 0);
     return 0;
 }
@@ -318,16 +329,17 @@ pub fn sys_symlinkat(target: [*]const u8, newdirfd: i32, linkpath: [*]const u8) 
 }
 
 pub fn sys_readlinkat(dirfd: i32, pathname: [*]const u8, buf: [*]u8, bufsiz: usize) i32 {
-    _ = dirfd;
-
     if (!protection.verifyUserPointer(@intFromPtr(pathname), common.USER_PATH_BUFFER_SIZE)) return abi.EFAULT;
     if (!protection.verifyUserPointer(@intFromPtr(buf), bufsiz)) return abi.EFAULT;
 
     var path_buffer: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
     const path_slice = protection.copyStringFromUser(&path_buffer, @intFromPtr(pathname)) catch return abi.EFAULT;
 
+    var resolved_buf: [common.RESOLVED_PATH_BUFFER_SIZE]u8 = undefined;
+    const resolved = resolveDirFd(dirfd, path_slice, &resolved_buf) orelse return abi.EBADF;
+
     var link_target: [common.USER_PATH_BUFFER_SIZE]u8 = undefined;
-    const len = vfs.readlink(path_slice, &link_target) catch |err| return errno.vfsErrno(err);
+    const len = vfs.readlink(resolved, &link_target) catch |err| return errno.vfsErrno(err);
 
     const copy_len = @min(len, bufsiz);
     protection.copyToUser(@intFromPtr(buf), link_target[0..copy_len]) catch return abi.EFAULT;

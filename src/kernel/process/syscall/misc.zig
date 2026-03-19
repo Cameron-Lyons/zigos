@@ -206,7 +206,7 @@ pub fn sys_lstat(pathname: [*]const u8, stat_buf_addr: usize) i32 {
     };
 
     var stat_buf: vfs.FileStat = undefined;
-    vfs.stat(resolved, &stat_buf) catch |err| return vfsErrno(err);
+    vfs.lstat(resolved, &stat_buf) catch |err| return vfsErrno(err);
 
     protection.copyToUser(stat_buf_addr, std.mem.asBytes(&stat_buf)) catch return abi.EINVAL;
     return 0;

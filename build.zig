@@ -33,6 +33,7 @@ const user_program_specs = [_]UserProgramSpec{
     .{ .name = "hello", .root_source = "user/bin/hello.zig" },
     .{ .name = "echo", .root_source = "user/bin/echo.zig" },
     .{ .name = "env", .root_source = "user/bin/env.zig" },
+    .{ .name = "sh", .root_source = "user/bin/sh.zig" },
     .{ .name = "which", .root_source = "user/bin/which.zig" },
     .{ .name = "head", .root_source = "user/bin/head.zig" },
     .{ .name = "tail", .root_source = "user/bin/tail.zig" },
@@ -53,8 +54,11 @@ const user_program_specs = [_]UserProgramSpec{
     .{ .name = "cat", .root_source = "user/bin/cat.zig" },
     .{ .name = "cp", .root_source = "user/bin/cp.zig" },
     .{ .name = "mv", .root_source = "user/bin/mv.zig" },
+    .{ .name = "chmod", .root_source = "user/bin/chmod.zig" },
+    .{ .name = "chown", .root_source = "user/bin/chown.zig" },
     .{ .name = "grep", .root_source = "user/bin/grep.zig" },
     .{ .name = "kill", .root_source = "user/bin/kill.zig" },
+    .{ .name = "ln", .root_source = "user/bin/ln.zig" },
     .{ .name = "ls", .root_source = "user/bin/ls.zig" },
     .{ .name = "pwd", .root_source = "user/bin/pwd.zig" },
     .{ .name = "mkdir", .root_source = "user/bin/mkdir.zig" },
@@ -62,6 +66,11 @@ const user_program_specs = [_]UserProgramSpec{
     .{ .name = "sleep", .root_source = "user/bin/sleep.zig" },
     .{ .name = "touch", .root_source = "user/bin/touch.zig" },
     .{ .name = "tty", .root_source = "user/bin/tty.zig" },
+    .{ .name = "mount", .root_source = "user/bin/mount.zig" },
+    .{ .name = "umount", .root_source = "user/bin/umount.zig" },
+    .{ .name = "login", .root_source = "user/bin/login.zig" },
+    .{ .name = "getty", .root_source = "user/bin/getty.zig" },
+    .{ .name = "init", .root_source = "user/bin/init.zig" },
 };
 
 pub fn build(b: *std.Build) void {
@@ -82,6 +91,7 @@ pub fn build(b: *std.Build) void {
         user_programs[i] = addUserProgram(b, target, optimize, spec.name, spec.root_source);
     }
     const motd_install = b.addInstallFileWithDir(b.path("user/rootfs/etc/motd"), .{ .custom = "user/rootfs/etc" }, "motd");
+    const passwd_install = b.addInstallFileWithDir(b.path("user/rootfs/etc/passwd"), .{ .custom = "user/rootfs/etc" }, "passwd");
     const user_assets_module = createUserAssetsModule(b, target, optimize, user_program_specs[0..], user_programs[0..]);
 
     const dev_kernel = addKernelArtifact(b, target, optimize, "kernel.elf", .dev, user_assets_module);
@@ -92,7 +102,7 @@ pub fn build(b: *std.Build) void {
     const userland_smoke_kernel = addKernelArtifact(b, target, optimize, "kernel-userland-smoke.elf", .userland_smoke, user_assets_module);
 
     inline for (&.{ dev_kernel, ci_smoke_kernel, vm_test_kernel, benchmark_kernel, smp_stress_kernel, userland_smoke_kernel }) |artifact| {
-        dependOnUserPrograms(&artifact.compile_step.step, user_programs[0..], &motd_install.step);
+        dependOnUserPrograms(&artifact.compile_step.step, user_programs[0..], &.{ &motd_install.step, &passwd_install.step });
     }
 
     const kernel_step = b.step("kernel", "Build the development kernel");
@@ -114,13 +124,13 @@ pub fn build(b: *std.Build) void {
     userland_smoke_kernel_step.dependOn(userland_smoke_kernel.install_step);
 
     const userland_step = b.step("userland", "Build the staged user programs");
-    dependOnUserPrograms(userland_step, user_programs[0..], &motd_install.step);
+    dependOnUserPrograms(userland_step, user_programs[0..], &.{ &motd_install.step, &passwd_install.step });
 
     const rootfs_cmd = b.addSystemCommand(&.{
         "sh",                                                              "-c",
         buildRootfsScript(b, user_program_specs[0..], user_programs[0..]),
     });
-    dependOnUserPrograms(&rootfs_cmd.step, user_programs[0..], &motd_install.step);
+    dependOnUserPrograms(&rootfs_cmd.step, user_programs[0..], &.{ &motd_install.step, &passwd_install.step });
 
     const rootfs_step = b.step("rootfs", "Build the FAT disk image for user programs");
     rootfs_step.dependOn(&rootfs_cmd.step);
@@ -269,7 +279,7 @@ pub fn build(b: *std.Build) void {
         \\  cat "$LOG_PATH" >&2
         \\  exit 1
         \\fi
-        \\for marker in "BOOT:START" "BOOT:PROFILE:userland_smoke" "Disk root mounted at /" "BOOT:SHELL_READY" "USERLAND:HELLO" "USERLAND:ECHO" "USERLAND:ENV" "USERLAND:CMDSUB" "USERLAND:QUOTED" "USERLAND:ESCAPED" "USERLAND:GLOB" "USERLAND:UNAME" "USERLAND:LS" "USERLAND:CAT" "USERLAND:ENV_STANDALONE" "USERLAND:ENV_BIN" "USERLAND:WHICH" "USERLAND:HEAD" "USERLAND:TAIL" "USERLAND:WC" "USERLAND:SORT" "USERLAND:UNIQ" "USERLAND:HEXDUMP" "USERLAND:TEST" "USERLAND:TRUE" "USERLAND:CP" "USERLAND:MV" "USERLAND:GREP" "USERLAND:PS" "USERLAND:PING" "USERLAND:WHOAMI" "USERLAND:ID" "USERLAND:DATE" "USERLAND:HOSTNAME" "USERLAND:PIPE_OK" "USERLAND:REDIRECT_WRITE" "USERLAND:REDIRECT_READ" "USERLAND:BG_START" "USERLAND:JOBS_RUNNING" "USERLAND:JOBS_STOPPED" "USERLAND:BG_RESUME" "USERLAND:JOBS_RESUMED" "user:root home:/home/user" "shell-ZigOS" "USERLAND QUOTED" "USERLAND ESCAPED" "/bin/cat /bin/cp /bin/ls" "Welcome to ZigOS userspace smoke test." "PATH=/bin:/usr/bin:/mnt/bin" "00000000" "uid=1000(user) gid=1000(users) euid=1000 egid=1000" "zigos" "USERLAND:PIPE" "USERLAND:REDIRECT" "[1] Running /bin/sleep 3" "[1] Stopped /bin/sleep 3" "USERLAND:PASS"; do
+        \\for marker in "BOOT:START" "BOOT:PROFILE:userland_smoke" "Disk root mounted at /" "BOOT:SHELL_READY" "USERLAND:HELLO" "USERLAND:ECHO" "USERLAND:ENV" "USERLAND:CMDSUB" "USERLAND:QUOTED" "USERLAND:ESCAPED" "USERLAND:GLOB" "USERLAND:UNAME" "USERLAND:LS" "USERLAND:CAT" "USERLAND:ENV_STANDALONE" "USERLAND:ENV_BIN" "USERLAND:WHICH" "USERLAND:HEAD" "USERLAND:TAIL" "USERLAND:WC" "USERLAND:SORT" "USERLAND:UNIQ" "USERLAND:HEXDUMP" "USERLAND:TEST" "USERLAND:TRUE" "USERLAND:CP" "USERLAND:MV" "USERLAND:GREP" "USERLAND:CHMOD" "USERLAND:CHOWN" "USERLAND:LN" "USERLAND:CAT_HARD" "USERLAND:CAT_HARD_CI" "USERLAND:LNS" "USERLAND:CAT_LINK" "USERLAND:CAT_LINK_CI" "USERLAND:PS" "USERLAND:PING" "USERLAND:WHOAMI" "USERLAND:ID" "USERLAND:DATE" "USERLAND:HOSTNAME" "USERLAND:PROC_VERSION" "USERLAND:PROC_MOUNTS" "USERLAND:SYS_HOSTNAME" "USERLAND:PIPE_OK" "USERLAND:REDIRECT_WRITE" "USERLAND:REDIRECT_READ" "USERLAND:BG_START" "USERLAND:JOBS_RUNNING" "USERLAND:JOBS_STOPPED" "USERLAND:BG_RESUME" "USERLAND:JOBS_RESUMED" "user:root home:/home/user" "shell-ZigOS" "USERLAND QUOTED" "USERLAND ESCAPED" "/bin/cat /bin/cp /bin/chmod /bin/chown /bin/ln /bin/ls" "Welcome to ZigOS userspace smoke test." "PATH=/bin:/usr/bin:/mnt/bin" "00000000" "uid=0(root) gid=0(root) euid=0(root) egid=0(root)" "zigos" "USERLAND:PIPE" "USERLAND:REDIRECT" "[1] Running /bin/sleep 3" "[1] Stopped /bin/sleep 3" "USERLAND:PASS"; do
         \\  if ! grep -Fq "$marker" "$LOG_PATH"; then
         \\    echo "Userland smoke test failed: missing marker '$marker'" >&2
         \\    cat "$LOG_PATH" >&2
@@ -605,11 +615,13 @@ fn createHostModule(
     });
 }
 
-fn dependOnUserPrograms(step: *std.Build.Step, programs: []const UserProgramArtifact, motd_step: *std.Build.Step) void {
+fn dependOnUserPrograms(step: *std.Build.Step, programs: []const UserProgramArtifact, extra_steps: []const *std.Build.Step) void {
     for (programs) |program| {
         step.dependOn(program.install_step);
     }
-    step.dependOn(motd_step);
+    for (extra_steps) |extra_step| {
+        step.dependOn(extra_step);
+    }
 }
 
 fn buildRootfsScript(b: *std.Build, specs: []const UserProgramSpec, programs: []const UserProgramArtifact) []const u8 {
@@ -638,6 +650,11 @@ fn buildRootfsScript(b: *std.Build, specs: []const UserProgramSpec, programs: []
         \\mmd -i "build/disk.img" ::/bin
         \\mmd -i "build/disk.img" ::/tmp
         \\mmd -i "build/disk.img" ::/dev
+        \\mmd -i "build/disk.img" ::/home
+        \\mmd -i "build/disk.img" ::/home/user
+        \\mmd -i "build/disk.img" ::/proc
+        \\mmd -i "build/disk.img" ::/root
+        \\mmd -i "build/disk.img" ::/sys
         \\mmd -i "build/disk.img" ::/usr
         \\mmd -i "build/disk.img" ::/usr/bin
         \\
@@ -653,6 +670,7 @@ fn buildRootfsScript(b: *std.Build, specs: []const UserProgramSpec, programs: []
 
     script.appendSlice(b.allocator,
         \\mcopy -i "build/disk.img" "zig-out/user/rootfs/etc/motd" ::/etc/motd
+        \\mcopy -i "build/disk.img" "zig-out/user/rootfs/etc/passwd" ::/etc/passwd
     ) catch @panic("failed to finish rootfs script");
 
     return script.toOwnedSlice(b.allocator) catch @panic("failed to allocate rootfs script");
@@ -672,6 +690,7 @@ fn createUserAssetsModule(
         _ = write_files.addCopyFile(programs[i].emitted_bin, b.fmt("assets/{s}", .{spec.name}));
     }
     _ = write_files.addCopyFile(b.path("user/rootfs/etc/motd"), "assets/motd");
+    _ = write_files.addCopyFile(b.path("user/rootfs/etc/passwd"), "assets/passwd");
 
     var source = std.ArrayList(u8).empty;
     source.appendSlice(b.allocator,
@@ -694,6 +713,7 @@ fn createUserAssetsModule(
         \\};
         \\
         \\pub const motd = @embedFile("assets/motd");
+        \\pub const passwd = @embedFile("assets/passwd");
     ) catch @panic("failed to finish user assets source");
 
     const assets_source = write_files.add("user_assets.zig", source.toOwnedSlice(b.allocator) catch @panic("failed to allocate user assets source"));
@@ -777,6 +797,14 @@ fn addUserProgram(
     });
     envutil_module.addImport("cstr", cstr_module);
 
+    const account_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/account.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+    account_module.addImport("stdio", stdio_module);
+    account_module.addImport("syscall", syscall_module);
+
     const shell_registry_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/shell/registry.zig"),
         .target = target,
@@ -788,6 +816,7 @@ fn addUserProgram(
         .target = target,
         .optimize = user_optimize,
     });
+    user_module.addImport("account", account_module);
     user_module.addImport("cstr", cstr_module);
     user_module.addImport("cli", cli_module);
     user_module.addImport("envutil", envutil_module);

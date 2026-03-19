@@ -49,6 +49,7 @@ const program_nodes = blk: {
 };
 
 const motd_node: Node align(@alignOf(Node)) = .{ .name = "motd", .file_type = .Regular, .mode = text_mode, .data = user_assets.motd };
+const passwd_node: Node align(@alignOf(Node)) = .{ .name = "passwd", .file_type = .Regular, .mode = text_mode, .data = user_assets.passwd };
 
 const usr_bin_children = [_]*const Node{};
 const usr_bin_node: Node align(@alignOf(Node)) = .{ .name = "bin", .file_type = .Directory, .mode = dir_mode, .children = usr_bin_children[0..] };
@@ -64,15 +65,25 @@ const bin_children = blk: {
 };
 
 const bin_node: Node align(@alignOf(Node)) = .{ .name = "bin", .file_type = .Directory, .mode = dir_mode, .children = bin_children[0..] };
-const etc_children = [_]*const Node{&motd_node};
+const etc_children = [_]*const Node{ &motd_node, &passwd_node };
 const etc_node: Node align(@alignOf(Node)) = .{ .name = "etc", .file_type = .Directory, .mode = dir_mode, .children = etc_children[0..] };
+const user_home_children = [_]*const Node{};
+const user_home_node: Node align(@alignOf(Node)) = .{ .name = "user", .file_type = .Directory, .mode = dir_mode, .children = user_home_children[0..] };
+const home_children = [_]*const Node{&user_home_node};
+const home_node: Node align(@alignOf(Node)) = .{ .name = "home", .file_type = .Directory, .mode = dir_mode, .children = home_children[0..] };
 const tmp_children = [_]*const Node{};
 const tmp_node: Node align(@alignOf(Node)) = .{ .name = "tmp", .file_type = .Directory, .mode = dir_mode, .children = tmp_children[0..] };
 const mnt_children = [_]*const Node{};
 const mnt_node: Node align(@alignOf(Node)) = .{ .name = "mnt", .file_type = .Directory, .mode = dir_mode, .children = mnt_children[0..] };
 const dev_children = [_]*const Node{};
 const dev_node: Node align(@alignOf(Node)) = .{ .name = "dev", .file_type = .Directory, .mode = dir_mode, .children = dev_children[0..] };
-const root_children = [_]*const Node{ &bin_node, &dev_node, &etc_node, &mnt_node, &tmp_node, &usr_node };
+const proc_children = [_]*const Node{};
+const proc_node: Node align(@alignOf(Node)) = .{ .name = "proc", .file_type = .Directory, .mode = dir_mode, .children = proc_children[0..] };
+const root_home_children = [_]*const Node{};
+const root_home_node: Node align(@alignOf(Node)) = .{ .name = "root", .file_type = .Directory, .mode = dir_mode, .children = root_home_children[0..] };
+const sys_children = [_]*const Node{};
+const sys_node: Node align(@alignOf(Node)) = .{ .name = "sys", .file_type = .Directory, .mode = dir_mode, .children = sys_children[0..] };
+const root_children = [_]*const Node{ &bin_node, &dev_node, &etc_node, &home_node, &mnt_node, &proc_node, &root_home_node, &sys_node, &tmp_node, &usr_node };
 const root_node: Node align(@alignOf(Node)) = .{ .name = "/", .file_type = .Directory, .mode = dir_mode, .children = root_children[0..] };
 
 fn getNode(vnode: *vfs.VNode) *const Node {

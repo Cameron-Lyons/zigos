@@ -30,6 +30,7 @@ pub const ExternalLaunchError = error{
     ArgumentTooLong,
     CommandReadFailed,
     CommandTooLarge,
+    EnvironmentTooLarge,
     RedirectDupFailed,
     TooManyLaunches,
 };
@@ -127,6 +128,10 @@ pub fn releaseIfPresent(pid: u32) void {
 }
 
 pub fn launchExternalCommand(command_args: []const [*:0]const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32) ExternalLaunchError!u32 {
+    return launchExternalCommandWithEnv(command_args, null, nice_value, stdin_fd, stdout_fd);
+}
+
+pub fn launchExternalCommandWithEnv(command_args: []const [*:0]const u8, env_entries: ?[]const []const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32) ExternalLaunchError!u32 {
     if (command_args.len == 0) {
         return error.CommandNotFound;
     }
@@ -139,7 +144,10 @@ pub fn launchExternalCommand(command_args: []const [*:0]const u8, nice_value: ?i
     launch.path_len = resolved_path.len;
     @memcpy(launch.path[0..resolved_path.len], resolved_path);
     launch.argc = command_args.len;
-    launch.envc = environ.exportEntries(&launch.env_storage, &launch.env_len);
+    launch.envc = if (env_entries) |entries|
+        try copyProvidedEnv(launch, entries)
+    else
+        environ.exportEntries(&launch.env_storage, &launch.env_len);
     launch.file_len = try readExternalCommandBytes(resolved_path, &launch.file_storage);
 
     var i: usize = 0;
@@ -153,7 +161,12 @@ pub fn launchExternalCommand(command_args: []const [*:0]const u8, nice_value: ?i
     }
 
     const process_name = sliceFromCStr(command_args[0]);
+    const irq_flags = disableInterrupts();
     const user_proc = process.create_exec_process(process_name);
+    restoreInterrupts(irq_flags);
+    if (process.getEffectiveCurrent()) |parent| {
+        user_proc.creds = parent.creds;
+    }
     user_proc.stdin_redirect = duplicateRedirectFd(stdin_fd) catch return error.RedirectDupFailed;
     errdefer process.cleanupStdioRedirects(user_proc);
     user_proc.stdout_redirect = duplicateRedirectFd(stdout_fd) catch return error.RedirectDupFailed;
@@ -168,6 +181,22 @@ pub fn launchExternalCommand(command_args: []const [*:0]const u8, nice_value: ?i
     return user_proc.pid;
 }
 
+fn copyProvidedEnv(launch: *ExternalCommandLaunch, entries: []const []const u8) ExternalLaunchError!usize {
+    if (entries.len > launch.env_storage.len) return error.EnvironmentTooLarge;
+
+    var count: usize = 0;
+    while (count < entries.len) : (count += 1) {
+        const entry = entries[count];
+        if (entry.len > launch.env_storage[count].len) return error.EnvironmentTooLarge;
+
+        @memset(&launch.env_storage[count], 0);
+        @memcpy(launch.env_storage[count][0..entry.len], entry);
+        launch.env_len[count] = entry.len;
+    }
+
+    return entries.len;
+}
+
 pub fn printExternalCommandError(command: [*:0]const u8, err: ExternalLaunchError) void {
     switch (err) {
         error.CommandNotFound => {
@@ -179,6 +208,7 @@ pub fn printExternalCommandError(command: [*:0]const u8, err: ExternalLaunchErro
         error.ArgumentTooLong => console.print("Command argument too long\n"),
         error.CommandReadFailed => console.print("Failed to read command file\n"),
         error.CommandTooLarge => console.print("Command file too large\n"),
+        error.EnvironmentTooLarge => console.print("Environment is too large for command launch\n"),
         error.RedirectDupFailed => console.print("Failed to duplicate redirected file descriptor\n"),
         error.TooManyLaunches => console.print("Too many commands are pending launch\n"),
     }
@@ -229,6 +259,26 @@ fn duplicateRedirectFd(fd: ?i32) error{DupFailed}!?i32 {
 
 fn vfsAbiFdOffset() u32 {
     return @import("../process/syscall/abi.zig").FD_OFFSET;
+}
+
+fn disableInterrupts() u32 {
+    var flags: u32 = undefined;
+    asm volatile (
+        \\pushfl
+        \\popl %[flags]
+        \\cli
+        : [flags] "=r" (flags),
+    );
+    return flags;
+}
+
+fn restoreInterrupts(flags: u32) void {
+    asm volatile (
+        \\pushl %[flags]
+        \\popfl
+        :
+        : [flags] "r" (flags),
+    );
 }
 
 fn readExternalCommandBytes(path: []const u8, buffer: []u8) ExternalLaunchError!usize {

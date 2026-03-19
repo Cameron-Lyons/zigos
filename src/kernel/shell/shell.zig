@@ -453,6 +453,7 @@ pub const Shell = struct {
             .schedstats => system_commands.schedStats(),
             .rmdir => fs_commands.rmdir(args),
             .mount => fs_commands.mount(args),
+            .umount => fs_commands.umount(args),
             .httpd => self.cmdHttpd(args),
             .netstat => self.cmdNetstat(),
             .nslookup => self.cmdNslookup(args),
@@ -634,6 +635,7 @@ pub const Shell = struct {
                 error.ArgumentTooLong => vga.print("nice: Argument too long\n"),
                 error.CommandReadFailed => vga.print("nice: Failed to read command file\n"),
                 error.CommandTooLarge => vga.print("nice: Command file too large\n"),
+                error.EnvironmentTooLarge => vga.print("nice: Environment is too large\n"),
                 error.RedirectDupFailed => vga.print("nice: Failed to duplicate redirected file descriptor\n"),
                 error.TooManyLaunches => vga.print("nice: Too many commands are pending launch\n"),
             }
