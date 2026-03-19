@@ -34,6 +34,7 @@ pub const TIOCGWINSZ = abi.TIOCGWINSZ;
 pub const TTY_LFLAG_ISIG = abi.TTY_LFLAG_ISIG;
 pub const TTY_LFLAG_ICANON = abi.TTY_LFLAG_ICANON;
 pub const TTY_LFLAG_ECHO = abi.TTY_LFLAG_ECHO;
+pub const AT_FDCWD = abi.AT_FDCWD;
 
 pub const LinuxDirent = extern struct {
     d_ino: u32,
@@ -162,6 +163,14 @@ pub fn getgid() i32 {
     return syscall0(abi.SYS_GETGID);
 }
 
+pub fn setuid(uid: u16) i32 {
+    return syscall1(abi.SYS_SETUID, uid);
+}
+
+pub fn setgid(gid: u16) i32 {
+    return syscall1(abi.SYS_SETGID, gid);
+}
+
 pub fn geteuid() i32 {
     return syscall0(abi.SYS_GETEUID);
 }
@@ -176,6 +185,10 @@ pub fn fork() i32 {
 
 pub fn execve(path: [*:0]const u8, argv: [*]const ?[*:0]const u8, envp: [*]const ?[*:0]const u8) i32 {
     return syscall3(abi.SYS_EXECVE, @intFromPtr(path), @intFromPtr(argv), @intFromPtr(envp));
+}
+
+pub fn spawnve(path: [*:0]const u8, argv: [*]const ?[*:0]const u8, envp: [*]const ?[*:0]const u8) i32 {
+    return syscall3(abi.SYS_SPAWN, @intFromPtr(path), @intFromPtr(argv), @intFromPtr(envp));
 }
 
 pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) i32 {
@@ -194,6 +207,32 @@ pub fn getdents(fd: i32, buffer: []u8) i32 {
 
 pub fn mkdir(path: [*:0]const u8, mode: u32) i32 {
     return syscall2(abi.SYS_MKDIR, @intFromPtr(path), mode);
+}
+
+pub fn chmod(path: [*:0]const u8, mode: u32) i32 {
+    return syscall2(abi.SYS_CHMOD, @intFromPtr(path), mode);
+}
+
+pub fn chown(path: [*:0]const u8, uid: u16, gid: u16) i32 {
+    return syscall3(abi.SYS_CHOWN, @intFromPtr(path), uid, gid);
+}
+
+pub fn fchownat(dirfd: i32, pathname: [*:0]const u8, owner: i32, group: i32) i32 {
+    return syscall4(
+        abi.SYS_FCHOWNAT,
+        @bitCast(@as(u32, @bitCast(dirfd))),
+        @intFromPtr(pathname),
+        @bitCast(@as(u32, @bitCast(owner))),
+        @bitCast(@as(u32, @bitCast(group))),
+    );
+}
+
+pub fn symlink(target: [*:0]const u8, linkpath: [*:0]const u8) i32 {
+    return syscall2(abi.SYS_SYMLINK, @intFromPtr(target), @intFromPtr(linkpath));
+}
+
+pub fn link(oldpath: [*:0]const u8, newpath: [*:0]const u8) i32 {
+    return syscall2(abi.SYS_LINK, @intFromPtr(oldpath), @intFromPtr(newpath));
 }
 
 pub fn unlink(path: [*:0]const u8) i32 {
@@ -234,6 +273,18 @@ pub fn getcwd(buffer: []u8) i32 {
 
 pub fn chdir(path: [*:0]const u8) i32 {
     return syscall1(abi.SYS_CHDIR, @intFromPtr(path));
+}
+
+pub fn mount(source: [*:0]const u8, target: [*:0]const u8, fstype: [*:0]const u8, flags: u32) i32 {
+    return syscall5(abi.SYS_MOUNT, @intFromPtr(source), @intFromPtr(target), @intFromPtr(fstype), flags, 0);
+}
+
+pub fn umount2(target: [*:0]const u8, flags: u32) i32 {
+    return syscall2(abi.SYS_UMOUNT2, @intFromPtr(target), flags);
+}
+
+pub fn umount(target: [*:0]const u8) i32 {
+    return umount2(target, 0);
 }
 
 pub fn munmap(addr: usize, length: usize) i32 {

@@ -181,6 +181,7 @@ pub const SYS_SWAPOFF = 180;
 pub const SYS_REBOOT = 181;
 pub const SYS_GETPROCS = 182;
 pub const SYS_PING = 183;
+pub const SYS_SPAWN = 184;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;

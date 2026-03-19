@@ -29,6 +29,10 @@ pub const WinSize = extern struct {
 
 var active_termios = Termios{};
 
+fn syncKeyboardEcho() void {
+    keyboard.setInputEchoEnabled((active_termios.c_lflag & abi.TTY_LFLAG_ECHO) != 0);
+}
+
 fn winSize() WinSize {
     return .{
         .ws_row = SCREEN_ROWS,
@@ -85,6 +89,7 @@ pub fn ioctl(request: u32, arg: usize) i32 {
         abi.TCSETS, abi.TCSETSW, abi.TCSETSF => {
             if (!protection.verifyUserPointer(arg, @sizeOf(Termios))) return abi.EFAULT;
             protection.copyFromUser(std.mem.asBytes(&active_termios), arg) catch return abi.EFAULT;
+            syncKeyboardEcho();
             return 0;
         },
         abi.TIOCGWINSZ => {

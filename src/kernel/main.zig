@@ -10,6 +10,7 @@ const timer = @import("timer/timer.zig");
 const process = @import("process/process.zig");
 const scheduler = @import("process/scheduler.zig");
 const shell = @import("shell/shell.zig");
+const external = @import("shell/external.zig");
 const syscall = @import("process/syscall.zig");
 const test_syscall = @import("tests/test_syscall.zig");
 const memory = @import("memory/memory.zig");
@@ -32,6 +33,8 @@ const mmap = @import("memory/mmap.zig");
 const swap = @import("memory/swap.zig");
 const credentials = @import("process/credentials.zig");
 const tmpfs = @import("fs/tmpfs.zig");
+const procfs = @import("fs/procfs.zig");
+const sysfs = @import("fs/sysfs.zig");
 const uhci = @import("drivers/uhci.zig");
 const ipv6 = @import("net/ipv6.zig");
 const icmpv6 = @import("net/icmpv6.zig");
@@ -290,6 +293,26 @@ fn initFileSystems() void {
         console.print("\n");
     };
 
+    console.print("Initializing procfs...\n");
+    procfs.init();
+
+    console.print("Mounting procfs on /proc...\n");
+    vfs.mount("none", "/proc", "procfs", 0) catch |err| {
+        console.print("Failed to mount procfs: ");
+        console.print(@errorName(err));
+        console.print("\n");
+    };
+
+    console.print("Initializing sysfs...\n");
+    sysfs.init();
+
+    console.print("Mounting sysfs on /sys...\n");
+    vfs.mount("none", "/sys", "sysfs", 0) catch |err| {
+        console.print("Failed to mount sysfs: ");
+        console.print(@errorName(err));
+        console.print("\n");
+    };
+
     console.print("Initializing memory mapping...\n");
     mmap.init();
 }
@@ -350,6 +373,49 @@ fn initializeShell(shell_instance: *shell.Shell) void {
     shell_instance.* = shell.Shell.init();
     keyboard.setShell(shell_instance);
     printBootMarker("BOOT:SHELL_READY");
+}
+
+fn launchInitProcess() ?*process.Process {
+    const init_command = [_][*:0]const u8{"/bin/init"};
+    const pid = external.launchExternalCommand(init_command[0..], null, null, null) catch |err| {
+        console.print("Failed to launch /bin/init: ");
+        console.print(@errorName(err));
+        console.print("\n");
+        return null;
+    };
+
+    console.print("Init process launched\n");
+    return process.getProcessByPid(pid);
+}
+
+fn enterIdleLoop() noreturn {
+    asm volatile ("sti");
+    while (true) {
+        asm volatile ("hlt");
+    }
+}
+
+fn runDevProfile() noreturn {
+    if (launchInitProcess()) |init_proc| {
+        console.print("\nZigOS Init Ready!\n");
+        process.switchToProcess(init_proc);
+    }
+
+    var system_shell: shell.Shell = undefined;
+    createDemoProcesses();
+    initializeShell(&system_shell);
+
+    console.print("\nFalling back to kernel shell.\n");
+    console.print("ZigOS Shell Ready!\n");
+    system_shell.printPrompt();
+
+    asm volatile ("sti");
+
+    while (system_shell.running) {
+        asm volatile ("hlt");
+    }
+
+    enterIdleLoop();
 }
 
 fn runVmProfile() noreturn {
@@ -493,12 +559,23 @@ fn userlandSmokeRunner() callconv(.c) void {
         .{ .command = "/bin/cp /etc/motd /tmp/motd.copy", .marker = "USERLAND:CP" },
         .{ .command = "/bin/mv /tmp/motd.copy /tmp/motd.moved", .marker = "USERLAND:MV" },
         .{ .command = "/bin/grep ZigOS /tmp/motd.moved", .marker = "USERLAND:GREP" },
+        .{ .command = "/bin/chmod 600 /tmp/motd.moved", .marker = "USERLAND:CHMOD" },
+        .{ .command = "/bin/chown user /tmp/motd.moved", .marker = "USERLAND:CHOWN" },
+        .{ .command = "/bin/ln /etc/motd /motd-caf\xC3\xA9-r\xC3\xA9sum\xC3\xA9-hardlink.txt", .marker = "USERLAND:LN" },
+        .{ .command = "/bin/cat /motd-caf\xC3\xA9-r\xC3\xA9sum\xC3\xA9-hardlink.txt", .marker = "USERLAND:CAT_HARD" },
+        .{ .command = "/bin/cat /MOTD-CAFE\xCC\x81-RE\xCC\x81SUME\xCC\x81-HARDLINK.TXT", .marker = "USERLAND:CAT_HARD_CI" },
+        .{ .command = "/bin/ln -s /etc/motd /motd-caf\xC3\xA9-stra\xC3\x9Fe-symbolic-link.txt", .marker = "USERLAND:LNS" },
+        .{ .command = "/bin/cat /motd-caf\xC3\xA9-stra\xC3\x9Fe-symbolic-link.txt", .marker = "USERLAND:CAT_LINK" },
+        .{ .command = "/bin/cat /MOTD-CAFE\xCC\x81-STRASSE-SYMBOLIC-LINK.TXT", .marker = "USERLAND:CAT_LINK_CI" },
         .{ .command = "/bin/ps", .marker = "USERLAND:PS" },
         .{ .command = "/bin/ping 1.1.1.1", .marker = "USERLAND:PING" },
         .{ .command = "/bin/whoami", .marker = "USERLAND:WHOAMI" },
         .{ .command = "/bin/id", .marker = "USERLAND:ID" },
         .{ .command = "/bin/date", .marker = "USERLAND:DATE" },
         .{ .command = "/bin/hostname", .marker = "USERLAND:HOSTNAME" },
+        .{ .command = "/bin/cat /proc/version", .marker = "USERLAND:PROC_VERSION" },
+        .{ .command = "/bin/cat /proc/mounts", .marker = "USERLAND:PROC_MOUNTS" },
+        .{ .command = "/bin/cat /sys/kernel/hostname", .marker = "USERLAND:SYS_HOSTNAME" },
         .{ .command = "/bin/echo USERLAND:PIPE | /bin/cat", .marker = "USERLAND:PIPE_OK" },
         .{ .command = "/bin/echo USERLAND:REDIRECT > /tmp/redir.txt", .marker = "USERLAND:REDIRECT_WRITE" },
         .{ .command = "/bin/cat < /tmp/redir.txt", .marker = "USERLAND:REDIRECT_READ" },
@@ -592,21 +669,7 @@ export fn kernel_main() void {
     printBootMarker("BOOT:CORE_READY");
 
     switch (config.bootProfile()) {
-        .dev => {
-            var system_shell: shell.Shell = undefined;
-
-            createDemoProcesses();
-            initializeShell(&system_shell);
-
-            asm volatile ("sti");
-
-            console.print("\nZigOS Shell Ready!\n");
-            system_shell.printPrompt();
-
-            while (system_shell.running) {
-                asm volatile ("hlt");
-            }
-        },
+        .dev => runDevProfile(),
         .ci_smoke => {
             var system_shell: shell.Shell = undefined;
 

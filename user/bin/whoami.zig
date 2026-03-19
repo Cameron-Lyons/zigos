@@ -1,3 +1,4 @@
+const account = @import("account");
 const runtime = @import("runtime");
 const stdio = @import("stdio");
 const syscall = @import("syscall");
@@ -9,11 +10,15 @@ pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[
     _ = argv;
     _ = envp;
 
-    stdio.puts(userName(syscall.geteuid()));
+    var passwd_buffer: [account.MAX_FILE]u8 = undefined;
+    const passwd_data = account.loadPasswd(&passwd_buffer) orelse {
+        account.printLookupError("whoami");
+        return 1;
+    };
+
+    const uid: u16 = @intCast(syscall.geteuid());
+    const user_name = if (account.findByUid(passwd_data, uid)) |entry| entry.name else "unknown";
+    stdio.puts(user_name);
     stdio.puts("\n");
     return 0;
-}
-
-fn userName(uid: i32) []const u8 {
-    return if (uid == 0) "root" else "user";
 }
