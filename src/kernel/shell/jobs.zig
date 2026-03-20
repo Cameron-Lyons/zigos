@@ -1,5 +1,5 @@
 const std = @import("std");
-const parser = @import("parser.zig");
+const parser = @import("parser/pipeline.zig");
 
 pub const MAX_BACKGROUND_JOBS = 8;
 pub const MAX_COMMAND_LENGTH = parser.MAX_COMMAND_LENGTH;
