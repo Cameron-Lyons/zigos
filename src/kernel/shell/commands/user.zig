@@ -2,7 +2,7 @@ const process = @import("../../process/process.zig");
 const vfs = @import("../../fs/vfs.zig");
 const vga = @import("../../drivers/vga.zig");
 const environ = @import("../../utils/environ.zig");
-const syscall_mod = @import("../../process/syscall.zig");
+const syscall_mod = @import("../../process/syscall/exports.zig");
 const common = @import("../common.zig");
 
 const printString = common.printString;

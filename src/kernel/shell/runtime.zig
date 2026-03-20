@@ -8,10 +8,10 @@ const abi = @import("../process/syscall/abi.zig");
 const cwd_mod = @import("../process/syscall/cwd.zig");
 const environ = @import("../utils/environ.zig");
 const common = @import("common.zig");
-const parser = @import("parser.zig");
+const parser = @import("parser/pipeline.zig");
 const glob = @import("glob.zig");
 const registry = @import("registry.zig");
-const shell_external = @import("external.zig");
+const shell_external = @import("launcher.zig");
 
 const sliceFromCStr = common.sliceFromCStr;
 

@@ -22,11 +22,11 @@ const posix = @import("../utils/posix.zig");
 const cwd_mod = @import("../process/syscall/cwd.zig");
 const environ = @import("../utils/environ.zig");
 const common = @import("common.zig");
-const parser = @import("parser.zig");
+const parser = @import("parser/pipeline.zig");
 const jobctl = @import("jobs.zig");
 const glob = @import("glob.zig");
-const execution = @import("execution.zig");
-const shell_external = @import("external.zig");
+const execution = @import("runtime.zig");
+const shell_external = @import("launcher.zig");
 const httpd_runtime = @import("httpd.zig");
 
 const printString = common.printString;
@@ -411,7 +411,7 @@ pub const Shell = struct {
 
     pub fn printPrompt(self: *const Shell) void {
         _ = self;
-        const syscall_mod = @import("../process/syscall.zig");
+        const syscall_mod = @import("../process/syscall/exports.zig");
         const cwd = syscall_mod.getCwd();
         vga.print("zigos:");
         vga.print(cwd);

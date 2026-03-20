@@ -1,4 +1,4 @@
-const syscall = @import("../process/syscall.zig");
+const syscall = @import("../process/syscall/dispatch.zig");
 
 pub fn test_syscall_process() void {
     const message = "Hello from syscall!\n";
@@ -51,4 +51,3 @@ pub fn test_syscall_process() void {
 
     while (true) {}
 }
-

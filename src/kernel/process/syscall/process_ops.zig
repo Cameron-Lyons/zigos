@@ -9,7 +9,7 @@ const paging = @import("../../memory/paging.zig");
 const posix = @import("../../utils/posix.zig");
 const process_mod = @import("../process.zig");
 const protection = @import("../../memory/protection.zig");
-const external = @import("../../shell/external.zig");
+const external = @import("../../shell/launcher.zig");
 const vfs = @import("../../fs/vfs.zig");
 
 // Keep syscall-side argv/env scratch space within the small kernel stacks used by

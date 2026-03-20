@@ -1,178 +1,45 @@
 const std = @import("std");
 const fd_freelist_mod = @import("fd_freelist.zig");
+const vfs_types = @import("vfs/types.zig");
+const vfs_path = @import("vfs/path.zig");
 const memory = @import("../memory/memory.zig");
 const abi = @import("../process/syscall/abi.zig");
 const path_semantics = @import("../process/syscall/path_semantics.zig");
 const readiness = @import("../process/syscall/readiness.zig");
 const error_handler = @import("../utils/error.zig");
 
-pub const VFSError = error{
-    NotFound,
-    PermissionDenied,
-    IsDirectory,
-    NotDirectory,
-    InvalidPath,
-    AlreadyExists,
-    NoSpace,
-    ReadOnly,
-    InvalidOperation,
-    OutOfMemory,
-    DeviceError,
-    BrokenPipe,
-    TooManyOpenFiles,
-    Busy,
-};
-
-pub const FileType = enum(u8) {
-    Regular = 1,
-    Directory = 2,
-    CharDevice = 3,
-    BlockDevice = 4,
-    Pipe = 5,
-    SymLink = 6,
-    Socket = 7,
-};
-
-pub const FileMode = packed struct {
-    owner_read: bool = false,
-    owner_write: bool = false,
-    owner_exec: bool = false,
-
-    group_read: bool = false,
-    group_write: bool = false,
-    group_exec: bool = false,
-
-    other_read: bool = false,
-    other_write: bool = false,
-    other_exec: bool = false,
-
-    set_uid: bool = false,
-    set_gid: bool = false,
-    sticky: bool = false,
-
-    _padding: u4 = 0,
-};
-
-pub const FileStat = struct {
-    inode: u64,
-    mode: FileMode,
-    file_type: FileType,
-    size: u64,
-    blocks: u64,
-    block_size: u32,
-    uid: u32,
-    gid: u32,
-    atime: u64,
-    mtime: u64,
-    ctime: u64,
-};
-
-pub const DirEntry = struct {
-    name: [256]u8,
-    name_len: u16,
-    inode: u64,
-    file_type: FileType,
-};
-
-pub const FileOps = struct {
-    read: *const fn (*VNode, []u8, u64) VFSError!usize,
-    write: *const fn (*VNode, []const u8, u64) VFSError!usize,
-    open: *const fn (*VNode, u32) VFSError!void,
-    close: *const fn (*VNode) VFSError!void,
-    seek: *const fn (*VNode, i64, u32) VFSError!u64,
-    ioctl: *const fn (*VNode, u32, usize) VFSError!i32,
-    stat: *const fn (*VNode, *FileStat) VFSError!void,
-    readdir: *const fn (*VNode, *DirEntry, u64) VFSError!bool,
-    truncate: *const fn (*VNode, u64) VFSError!void,
-    chmod: *const fn (*VNode, FileMode) VFSError!void,
-    chown: *const fn (*VNode, u32, u32) VFSError!void,
-};
-
-pub const VNode = struct {
-    name: [256]u8,
-    name_len: u16,
-    inode: u64,
-    file_type: FileType,
-    mode: FileMode,
-    size: u64,
-    uid: u16 = 0,
-    gid: u16 = 0,
-    ref_count: u32,
-    mount_point: ?*MountPoint,
-    parent: ?*VNode,
-    children: ?*VNode,
-    next_sibling: ?*VNode,
-    ops: *const FileOps,
-    private_data: ?*anyopaque,
-};
-
-pub const FileSystemOps = struct {
-    mount: *const fn (*MountPoint) VFSError!void,
-    unmount: *const fn (*MountPoint) VFSError!void,
-    get_root: *const fn (*MountPoint) VFSError!*VNode,
-    lookup: *const fn (*VNode, []const u8) VFSError!*VNode,
-    create: *const fn (*VNode, []const u8, FileMode) VFSError!*VNode,
-    mkdir: *const fn (*VNode, []const u8, FileMode) VFSError!*VNode,
-    unlink: *const fn (*VNode, []const u8) VFSError!void,
-    rmdir: *const fn (*VNode, []const u8) VFSError!void,
-    rename: *const fn (*VNode, []const u8, *VNode, []const u8) VFSError!void,
-    symlink: ?*const fn (*VNode, []const u8, []const u8) VFSError!*VNode = null,
-    link: ?*const fn (*VNode, []const u8, *VNode) VFSError!void = null,
-    readlink: ?*const fn (*VNode, []u8) VFSError!usize = null,
-};
-
-pub const FileSystemType = struct {
-    name: [32]u8,
-    ops: *const FileSystemOps,
-    next: ?*FileSystemType,
-};
-
-pub const MountPoint = struct {
-    device: [256]u8,
-    mount_path: [256]u8,
-    fs_type: *FileSystemType,
-    root: ?*VNode,
-    flags: u32,
-    ref_count: u32,
-    private_data: ?*anyopaque,
-    next: ?*MountPoint,
-};
-
-pub const FileDescriptor = struct {
-    vnode: *VNode,
-    offset: u64,
-    flags: u32,
-    fd_flags: u32,
-    ref_count: u32,
-    path_len: u16,
-    path: [512]u8,
-};
-
-pub const MountInfo = struct {
-    device: [256]u8 = [_]u8{0} ** 256,
-    device_len: u16 = 0,
-    mount_path: [256]u8 = [_]u8{0} ** 256,
-    mount_path_len: u16 = 0,
-    fs_name: [32]u8 = [_]u8{0} ** 32,
-    fs_name_len: u8 = 0,
-    flags: u32 = 0,
-};
-
-pub const O_RDONLY: u32 = 0x0000;
-pub const O_WRONLY: u32 = 0x0001;
-pub const O_RDWR: u32 = 0x0002;
-pub const O_CREAT: u32 = 0x0040;
-pub const O_EXCL: u32 = 0x0080;
-pub const O_TRUNC: u32 = 0x0200;
-pub const O_APPEND: u32 = 0x0400;
-pub const O_NONBLOCK: u32 = 0x0800;
+pub const VFSError = vfs_types.VFSError;
+pub const FileType = vfs_types.FileType;
+pub const FileMode = vfs_types.FileMode;
+pub const FileStat = vfs_types.FileStat;
+pub const DirEntry = vfs_types.DirEntry;
+pub const FileOps = vfs_types.FileOps;
+pub const VNode = vfs_types.VNode;
+pub const FileSystemOps = vfs_types.FileSystemOps;
+pub const FileSystemType = vfs_types.FileSystemType;
+pub const MountPoint = vfs_types.MountPoint;
+pub const FileDescriptor = vfs_types.FileDescriptor;
+pub const MountInfo = vfs_types.MountInfo;
+pub const O_RDONLY: u32 = vfs_types.O_RDONLY;
+pub const O_WRONLY: u32 = vfs_types.O_WRONLY;
+pub const O_RDWR: u32 = vfs_types.O_RDWR;
+pub const O_CREAT: u32 = vfs_types.O_CREAT;
+pub const O_EXCL: u32 = vfs_types.O_EXCL;
+pub const O_TRUNC: u32 = vfs_types.O_TRUNC;
+pub const O_APPEND: u32 = vfs_types.O_APPEND;
+pub const O_NONBLOCK: u32 = vfs_types.O_NONBLOCK;
 
 const POLLIN: u16 = 0x001;
 const POLLOUT: u16 = 0x004;
 
-pub const SEEK_SET: u32 = 0;
-pub const SEEK_CUR: u32 = 1;
-pub const SEEK_END: u32 = 2;
+pub const SEEK_SET: u32 = vfs_types.SEEK_SET;
+pub const SEEK_CUR: u32 = vfs_types.SEEK_CUR;
+pub const SEEK_END: u32 = vfs_types.SEEK_END;
+
+const PathParts = vfs_path.PathParts;
+const splitPath = vfs_path.splitPath;
+const mountPathMatches = vfs_path.mountPathMatches;
+const hasRemainingComponents = vfs_path.hasRemainingComponents;
 
 var root_vnode: ?*VNode = null;
 var mount_list: ?*MountPoint = null;
@@ -1611,12 +1478,6 @@ fn attachLookupParent(child: *VNode, parent: *VNode) void {
     unlockVNodeRefs();
 }
 
-fn hasRemainingComponents(path: []const u8, index: usize) bool {
-    var i = index;
-    while (i < path.len and path[i] == '/') : (i += 1) {}
-    return i < path.len;
-}
-
 fn readlinkVNode(vnode: *VNode, buffer: []u8) VFSError!usize {
     if (vnode.file_type != FileType.SymLink) {
         return VFSError.InvalidOperation;
@@ -1644,34 +1505,6 @@ fn findBestMountPointLocked(path: []const u8) ?*MountPoint {
     }
 
     return best;
-}
-
-fn mountPathMatches(path: []const u8, mount_path: []const u8) bool {
-    if (mount_path.len == 1 and mount_path[0] == '/') {
-        return true;
-    }
-
-    if (path.len < mount_path.len) return false;
-    if (!std.mem.eql(u8, path[0..mount_path.len], mount_path)) return false;
-    return path.len == mount_path.len or path[mount_path.len] == '/';
-}
-
-const PathParts = struct {
-    parent: []const u8,
-    name: []const u8,
-};
-
-fn splitPath(path: []const u8) PathParts {
-    var last_slash: usize = 0;
-    for (path, 0..) |c, i| {
-        if (c == '/') {
-            last_slash = i;
-        }
-    }
-    return .{
-        .parent = if (last_slash == 0) "/" else path[0..last_slash],
-        .name = path[last_slash + 1 ..],
-    };
 }
 
 fn strlen(str: []const u8) usize {

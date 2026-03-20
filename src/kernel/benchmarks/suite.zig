@@ -1,11 +1,12 @@
 const std = @import("std");
+const workload = @import("../../benchmarks/shared.zig");
 const x86 = @import("../../arch/x86.zig");
 const console = @import("../utils/console.zig");
 const fd_freelist = @import("../fs/fd_freelist.zig");
 const ipc = @import("../process/syscall/ipc_semantics.zig");
 const at_semantics = @import("../process/syscall/at_semantics.zig");
 const path_semantics = @import("../process/syscall/path_semantics.zig");
-const parser = @import("../shell/parser.zig");
+const parser = @import("../shell/parser/pipeline.zig");
 const shell_glob = @import("../shell/glob.zig");
 const tcp = @import("../net/tcp/protocol.zig");
 
@@ -13,109 +14,23 @@ const BenchmarkError = parser.TokenizationError || parser.PipelineConfigError ||
 const BenchmarkFn = *const fn (iterations: usize) BenchmarkError!u64;
 
 const Benchmark = struct {
-    name: []const u8,
-    iterations: usize,
+    meta: workload.BenchmarkMetadata,
     run: BenchmarkFn,
 };
 
-const tokenize_input_a = "echo \"$USER\" $(printf hi) '*.txt' $GLOB /var/log/zigos/*.log";
-const tokenize_input_b = "echo \"$USER\" $(printf ok) '*.cfg' $ALTGLOB /var/log/zigos/*.txt";
-const pipeline_input_a = "cat < /var/log/kernel.log | grep zig | sort | uniq > /tmp/out.txt";
-const pipeline_input_b = "cat < /var/log/serial.log | grep tcp | sort | uniq > /tmp/tcp.txt";
-
-const glob_patterns = [_][]const u8{
-    "*.zig",
-    "src/kernel/shell/*.zig",
-    "src/*/tests/test_*.zig",
-    "user/bin/??",
-    "kernel-*.elf",
-    "*.log",
-};
-
-const glob_candidates = [_][]const u8{
-    "src/kernel/shell/parser.zig",
-    "src/kernel/tests/test_memory.zig",
-    "src/kernel/tests/test_tcp_reliability.zig",
-    "user/bin/ls",
-    "user/bin/cp",
-    "user/bin/echo",
-    "kernel-ci-smoke.elf",
-    "serial.log",
-};
-
-const at_cases = [_]struct {
-    root: []const u8,
-    cwd: []const u8,
-    dir_path: ?[]const u8,
-    path: []const u8,
-}{
-    .{ .root = "/srv/jail", .cwd = "/usr/bin", .dir_path = null, .path = "../share/man" },
-    .{ .root = "/srv/jail", .cwd = "/var/log", .dir_path = "/srv/jail/etc/init.d", .path = "./rc" },
-    .{ .root = "/srv/jail", .cwd = "/home/user", .dir_path = "/srv/jail/tmp/cache", .path = "../../var/tmp/out.log" },
-    .{ .root = "/srv/jail", .cwd = "/", .dir_path = "/srv/jail/usr/lib", .path = "/etc/hosts" },
-};
-
-const tcp_ipv4_src: u32 = 0x0a00020f;
-const tcp_ipv4_dst: u32 = 0x0a00020a;
-const tcp_ipv6_src = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
-const tcp_ipv6_dst = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 };
-
-const sem_ops = [_]ipc.Sembuf{
-    .{ .sem_num = 0, .sem_op = 3, .sem_flg = 0 },
-    .{ .sem_num = 1, .sem_op = 2, .sem_flg = 0 },
-    .{ .sem_num = 0, .sem_op = -1, .sem_flg = 0 },
-    .{ .sem_num = 1, .sem_op = -1, .sem_flg = 0 },
-    .{ .sem_num = 2, .sem_op = 1, .sem_flg = 0 },
-    .{ .sem_num = 3, .sem_op = 0, .sem_flg = 0 },
-};
+const sem_ops = workload.makeSemOps(ipc);
+const expansion_hooks = workload.makeExpansionHooks(parser);
+const TcpBenchConn = workload.TcpBenchConn(tcp);
 
 const benchmarks = [_]Benchmark{
-    .{ .name = "shell.tokenize.expansions", .iterations = 50_000, .run = benchShellTokenizeExpansions },
-    .{ .name = "shell.pipeline.commandline", .iterations = 8_000, .run = benchShellPipelineCommandline },
-    .{ .name = "shell.glob.match_matrix", .iterations = 10_000, .run = benchShellGlobMatchMatrix },
-    .{ .name = "syscall.at.resolve_matrix", .iterations = 30_000, .run = benchSyscallAtResolveMatrix },
-    .{ .name = "vfs.fd.freelist_churn", .iterations = 120_000, .run = benchVfsFdFreelistChurn },
-    .{ .name = "tcp.checksum.dual_stack", .iterations = 60_000, .run = benchTcpChecksumDualStack },
-    .{ .name = "tcp.options.roundtrip", .iterations = 150_000, .run = benchTcpOptionsRoundtrip },
-    .{ .name = "ipc.semops.batch", .iterations = 150_000, .run = benchIpcSemOpsBatch },
-};
-
-const BenchHooks = struct {
-    fn getVar(_: ?*anyopaque, name: []const u8) ?[]const u8 {
-        if (std.mem.eql(u8, name, "USER")) return "root";
-        if (std.mem.eql(u8, name, "GLOB")) return "*.zig";
-        if (std.mem.eql(u8, name, "ALTGLOB")) return "*.txt";
-        return null;
-    }
-
-    fn captureCommand(_: ?*anyopaque, line: []const u8, output: []u8) parser.CommandCaptureError!usize {
-        if (std.mem.eql(u8, line, "printf hi")) {
-            @memcpy(output[0..2], "hi");
-            return 2;
-        }
-        if (std.mem.eql(u8, line, "printf ok")) {
-            @memcpy(output[0..2], "ok");
-            return 2;
-        }
-        return error.CommandFailed;
-    }
-};
-
-const expansion_hooks = parser.ExpansionHooks{
-    .getVarFn = BenchHooks.getVar,
-    .captureCommandFn = BenchHooks.captureCommand,
-};
-
-const TcpBenchConn = struct {
-    mss: u16 = tcp.MSS,
-    window_scale_send: u8 = 0,
-    window_scale_recv: u8 = 0,
-    sack_permitted: bool = false,
-    sack_blocks: [4]tcp.SACKBlock = [_]tcp.SACKBlock{.{ .left_edge = 0, .right_edge = 0 }} ** 4,
-    ts_enabled: bool = true,
-    ts_val: u32 = 0,
-    ts_ecr: u32 = 0,
-    ts_recent: u32 = 0,
+    .{ .meta = workload.shell_tokenize_expansions, .run = benchShellTokenizeExpansions },
+    .{ .meta = workload.shell_pipeline_commandline, .run = benchShellPipelineCommandline },
+    .{ .meta = workload.shell_glob_match_matrix, .run = benchShellGlobMatchMatrix },
+    .{ .meta = workload.syscall_at_resolve_matrix, .run = benchSyscallAtResolveMatrix },
+    .{ .meta = workload.vfs_fd_freelist_churn, .run = benchVfsFdFreelistChurn },
+    .{ .meta = workload.tcpChecksumDualStack(@sizeOf(tcp.Header)), .run = benchTcpChecksumDualStack },
+    .{ .meta = workload.tcp_options_roundtrip, .run = benchTcpOptionsRoundtrip },
+    .{ .meta = workload.ipc_semops_batch, .run = benchIpcSemOpsBatch },
 };
 
 pub fn run() bool {
@@ -125,15 +40,15 @@ pub fn run() bool {
 
     var completed: usize = 0;
     for (benchmarks) |benchmark| {
-        const warmup_iterations = @max(@as(usize, 64), benchmark.iterations / 10);
+        const warmup_iterations = @max(@as(usize, 64), benchmark.meta.default_iterations / 10);
         _ = @call(.never_inline, benchmark.run, .{warmup_iterations}) catch |err| {
-            printFailure(benchmark.name, err);
+            printFailure(benchmark.meta.name, err);
             return false;
         };
 
         const start_cycles = x86.rdtsc();
-        const checksum = @call(.never_inline, benchmark.run, .{benchmark.iterations}) catch |err| {
-            printFailure(benchmark.name, err);
+        const checksum = @call(.never_inline, benchmark.run, .{benchmark.meta.default_iterations}) catch |err| {
+            printFailure(benchmark.meta.name, err);
             return false;
         };
         const elapsed_cycles = x86.rdtsc() - start_cycles;
@@ -161,13 +76,13 @@ fn printFailure(name: []const u8, err: BenchmarkError) void {
 
 fn printResult(benchmark: Benchmark, cycles: u64, checksum: u64) void {
     var ratio_buf: [32]u8 = undefined;
-    const ratio = formatRatioFixed2(&ratio_buf, cycles, benchmark.iterations);
+    const ratio = formatRatioFixed2(&ratio_buf, cycles, benchmark.meta.default_iterations);
 
     var line_buf: [256]u8 = undefined;
     const line = std.fmt.bufPrint(
         &line_buf,
         "BENCH:RESULT:{s}:iterations={d}:cycles={d}:cycles_per_op={s}:checksum={d}\n",
-        .{ benchmark.name, benchmark.iterations, cycles, ratio, checksum },
+        .{ benchmark.meta.name, benchmark.meta.default_iterations, cycles, ratio, checksum },
     ) catch "BENCH:RESULT\n";
     console.print(line);
 }
@@ -196,14 +111,6 @@ fn formatRatioFixed2(buffer: []u8, numerator: u64, denominator: usize) []const u
     return std.fmt.bufPrint(buffer, "{d}.{d:0>2}", .{ whole, frac }) catch "0.00";
 }
 
-fn makeTcpPayload() [1460]u8 {
-    var payload: [1460]u8 = undefined;
-    for (&payload, 0..) |*byte, idx| {
-        byte.* = @intCast((idx * 31 + 17) % 251);
-    }
-    return payload;
-}
-
 fn makeTcpHeader() tcp.Header {
     var header = tcp.Header{
         .src_port = 8080,
@@ -219,35 +126,11 @@ fn makeTcpHeader() tcp.Header {
     return header;
 }
 
-fn makeTcpConn(seed: u32) TcpBenchConn {
-    return .{
-        .mss = tcp.MSS,
-        .window_scale_send = @intCast((seed % 8) + 1),
-        .window_scale_recv = 0,
-        .sack_permitted = false,
-        .sack_blocks = [_]tcp.SACKBlock{.{ .left_edge = 0, .right_edge = 0 }} ** 4,
-        .ts_enabled = true,
-        .ts_val = 0x10000000 +% seed,
-        .ts_ecr = 0x01020300 +% seed,
-        .ts_recent = 0,
-    };
-}
-
-fn makeSemSet() ipc.SemSet {
-    return .{
-        .key = 1,
-        .sems = [_]ipc.Semaphore{.{ .value = 0 }} ** ipc.MAX_SEMAPHORES,
-        .nsems = 4,
-        .mode = 0,
-        .in_use = true,
-    };
-}
-
 fn benchShellTokenizeExpansions(iterations: usize) BenchmarkError!u64 {
     var sink: u64 = 0;
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        const input = if ((sink & 1) == 0) tokenize_input_a else tokenize_input_b;
+        const input = if ((sink & 1) == 0) workload.tokenize_input_a else workload.tokenize_input_b;
         var storage: [parser.MAX_TOKENS][parser.MAX_COMMAND_LENGTH]u8 = undefined;
         var tokens: [parser.MAX_TOKENS]parser.CommandToken = undefined;
 
@@ -264,7 +147,7 @@ fn benchShellPipelineCommandline(iterations: usize) BenchmarkError!u64 {
     var sink: u64 = 0;
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        const input = if ((sink & 1) == 0) pipeline_input_a else pipeline_input_b;
+        const input = if ((sink & 1) == 0) workload.pipeline_input_a else workload.pipeline_input_b;
         var storage: [parser.MAX_TOKENS][parser.MAX_COMMAND_LENGTH]u8 = undefined;
         var tokens: [parser.MAX_TOKENS]parser.CommandToken = undefined;
 
@@ -283,16 +166,16 @@ fn benchShellGlobMatchMatrix(iterations: usize) BenchmarkError!u64 {
     var offset: usize = 0;
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        for (glob_patterns, 0..) |pattern, pattern_idx| {
+        for (workload.glob_patterns, 0..) |pattern, pattern_idx| {
             var candidate_idx = pattern_idx + offset;
             var count: usize = 0;
-            while (count < glob_candidates.len) : (count += 1) {
-                const candidate = glob_candidates[candidate_idx % glob_candidates.len];
+            while (count < workload.glob_candidates.len) : (count += 1) {
+                const candidate = workload.glob_candidates[candidate_idx % workload.glob_candidates.len];
                 if (shell_glob.wildcardMatch(pattern, candidate)) sink +%= 1;
                 candidate_idx += 1;
             }
         }
-        offset = (offset + 1 + @as(usize, @intCast(sink & 3))) % glob_candidates.len;
+        offset = (offset + 1 + @as(usize, @intCast(sink & 3))) % workload.glob_candidates.len;
     }
     std.mem.doNotOptimizeAway(&sink);
     return sink;
@@ -302,7 +185,7 @@ fn benchSyscallAtResolveMatrix(iterations: usize) BenchmarkError!u64 {
     var sink: u64 = 0;
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        for (at_cases) |case| {
+        for (workload.at_cases) |case| {
             var visible_buf: [512]u8 = undefined;
             var actual_buf: [512]u8 = undefined;
             const resolved = try at_semantics.resolveAtPath(case.root, case.cwd, case.dir_path, case.path, &visible_buf, &actual_buf);
@@ -340,7 +223,7 @@ fn benchVfsFdFreelistChurn(iterations: usize) BenchmarkError!u64 {
 
 fn benchTcpChecksumDualStack(iterations: usize) BenchmarkError!u64 {
     var sink: u64 = 0;
-    var payload = makeTcpPayload();
+    var payload = workload.makeTcpPayload();
     var header = makeTcpHeader();
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
@@ -348,8 +231,8 @@ fn benchTcpChecksumDualStack(iterations: usize) BenchmarkError!u64 {
         const payload_idx = (@as(usize, @intCast(header.seq_num)) + @as(usize, @intCast(sink & 0xff))) % payload.len;
         payload[payload_idx] +%= @truncate(header.seq_num);
 
-        sink +%= tcp.calculateChecksumIPv4(tcp_ipv4_src, tcp_ipv4_dst, &header, payload[0..]);
-        sink +%= tcp.calculateChecksumIPv6(&tcp_ipv6_src, &tcp_ipv6_dst, &header, payload[0..]);
+        sink +%= tcp.calculateChecksumIPv4(workload.tcp_ipv4_src, workload.tcp_ipv4_dst, &header, payload[0..]);
+        sink +%= tcp.calculateChecksumIPv6(&workload.tcp_ipv6_src, &workload.tcp_ipv6_dst, &header, payload[0..]);
         std.mem.doNotOptimizeAway(&header);
     }
     std.mem.doNotOptimizeAway(&payload);
@@ -362,7 +245,7 @@ fn benchTcpOptionsRoundtrip(iterations: usize) BenchmarkError!u64 {
     var buffer: [40]u8 = undefined;
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        var conn = makeTcpConn(@intCast(i + @as(usize, @intCast(sink & 0xffff))));
+        var conn = workload.makeTcpConn(tcp, @intCast(i + @as(usize, @intCast(sink & 0xffff))));
         const options_len = tcp.buildOptions(&conn, &buffer, true);
         const measured_rtt = tcp.parseOptions(buffer[0..options_len], &conn, conn.ts_ecr +% 17);
 
@@ -381,7 +264,7 @@ fn benchIpcSemOpsBatch(iterations: usize) BenchmarkError!u64 {
     var sink: u64 = 0;
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        var set = makeSemSet();
+        var set = workload.makeSemSet(ipc);
         set.sems[0].value = @intCast(4 + (i & 1));
         set.sems[1].value = @intCast(2 + (i & 1));
         set.sems[2].value = @intCast(i & 3);
