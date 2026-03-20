@@ -1,5 +1,5 @@
 const vga = @import("vga.zig");
-const shell = @import("../shell/shell.zig");
+const shell = @import("../shell/repl.zig");
 const io = @import("../utils/io.zig");
 
 // SAFETY: used as a circular buffer; entries written before being read via buffer_start/buffer_end indices

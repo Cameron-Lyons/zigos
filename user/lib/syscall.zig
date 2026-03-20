@@ -1,4 +1,5 @@
 const abi = @import("abi");
+const trap = @import("syscall_trap").user;
 
 pub const STDIN = abi.STDIN;
 pub const STDOUT = abi.STDOUT;
@@ -66,74 +67,13 @@ pub const WinSize = extern struct {
     ws_ypixel: u16,
 };
 
-pub inline fn syscall0(number: u32) i32 {
-    const raw: u32 = asm volatile ("int $0x80"
-        : [ret] "={eax}" (-> u32),
-        : [num] "{eax}" (number),
-        : .{ .memory = true });
-    return @bitCast(raw);
-}
-
-pub inline fn syscall1(number: u32, arg1: usize) i32 {
-    const raw: u32 = asm volatile ("int $0x80"
-        : [ret] "={eax}" (-> u32),
-        : [num] "{eax}" (number),
-          [arg1] "{ebx}" (@as(u32, @intCast(arg1))),
-        : .{ .memory = true });
-    return @bitCast(raw);
-}
-
-pub inline fn syscall2(number: u32, arg1: usize, arg2: usize) i32 {
-    const raw: u32 = asm volatile ("int $0x80"
-        : [ret] "={eax}" (-> u32),
-        : [num] "{eax}" (number),
-          [arg1] "{ebx}" (@as(u32, @intCast(arg1))),
-          [arg2] "{ecx}" (@as(u32, @intCast(arg2))),
-        : .{ .memory = true });
-    return @bitCast(raw);
-}
-
-pub inline fn syscall3(number: u32, arg1: usize, arg2: usize, arg3: usize) i32 {
-    const raw: u32 = asm volatile ("int $0x80"
-        : [ret] "={eax}" (-> u32),
-        : [num] "{eax}" (number),
-          [arg1] "{ebx}" (@as(u32, @intCast(arg1))),
-          [arg2] "{ecx}" (@as(u32, @intCast(arg2))),
-          [arg3] "{edx}" (@as(u32, @intCast(arg3))),
-        : .{ .memory = true });
-    return @bitCast(raw);
-}
-
-pub inline fn syscall4(number: u32, arg1: usize, arg2: usize, arg3: usize, arg4: usize) i32 {
-    const raw: u32 = asm volatile ("int $0x80"
-        : [ret] "={eax}" (-> u32),
-        : [num] "{eax}" (number),
-          [arg1] "{ebx}" (@as(u32, @intCast(arg1))),
-          [arg2] "{ecx}" (@as(u32, @intCast(arg2))),
-          [arg3] "{edx}" (@as(u32, @intCast(arg3))),
-          [arg4] "{esi}" (@as(u32, @intCast(arg4))),
-        : .{ .memory = true });
-    return @bitCast(raw);
-}
-
-pub inline fn syscall5(number: u32, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) i32 {
-    const raw: u32 = asm volatile ("int $0x80"
-        : [ret] "={eax}" (-> u32),
-        : [num] "{eax}" (number),
-          [arg1] "{ebx}" (@as(u32, @intCast(arg1))),
-          [arg2] "{ecx}" (@as(u32, @intCast(arg2))),
-          [arg3] "{edx}" (@as(u32, @intCast(arg3))),
-          [arg4] "{esi}" (@as(u32, @intCast(arg4))),
-          [arg5] "{edi}" (@as(u32, @intCast(arg5))),
-        : .{ .memory = true });
-    return @bitCast(raw);
-}
-
-extern fn syscall6_asm(number: u32, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) callconv(.c) i32;
-
-pub inline fn syscall6(number: u32, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) i32 {
-    return syscall6_asm(number, arg1, arg2, arg3, arg4, arg5, arg6);
-}
+pub const syscall0 = trap.syscall0;
+pub const syscall1 = trap.syscall1;
+pub const syscall2 = trap.syscall2;
+pub const syscall3 = trap.syscall3;
+pub const syscall4 = trap.syscall4;
+pub const syscall5 = trap.syscall5;
+pub const syscall6 = trap.syscall6;
 
 pub fn read(fd: i32, buffer: []u8) i32 {
     return syscall3(abi.SYS_READ, @bitCast(@as(u32, @bitCast(fd))), @intFromPtr(buffer.ptr), buffer.len);
