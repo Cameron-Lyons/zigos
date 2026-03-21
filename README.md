@@ -1,5 +1,7 @@
 # ZigOS
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A minimal operating system written in Zig with networking capabilities. ZigOS is a hobby operating system that implements core kernel functionality including process management, memory management, filesystem support, and a complete networking stack.
 
 The kernel supports multitasking with preemptive scheduling, virtual memory management with paging, and system calls for user programs. It includes drivers for common hardware including VGA text mode, keyboard, ATA disks, and multiple network cards (RTL8139, E1000, and VirtIO). The networking stack implements Ethernet, ARP, IPv4, ICMP, TCP, UDP, DHCP, DNS, and HTTP protocols, allowing the system to connect to networks and make HTTP requests.
@@ -176,3 +178,7 @@ Successful smoke boots emit these serial markers:
 - `BOOT:CORE_READY`
 - `BOOT:SHELL_READY`
 - `BOOT:PASS`
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
