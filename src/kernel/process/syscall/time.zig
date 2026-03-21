@@ -109,11 +109,8 @@ pub fn sys_nanosleep(req_addr: usize, rem_addr: usize) i32 {
     const total_ms: u64 = @as(u64, @intCast(req.tv_sec)) * 1000 + @as(u64, @intCast(req.tv_nsec)) / 1_000_000;
     const ticks_to_wait = timer.millisecondsToTicksCeil(total_ms);
 
-    const start = process_mod.getSystemTime();
-    while (process_mod.getSystemTime() - start < ticks_to_wait) {
-        signal.handlePendingSignals();
-        process_mod.yield();
-    }
+    signal.handlePendingSignals();
+    timer.sleepCurrentTicks(ticks_to_wait);
 
     if (rem_addr != 0 and protection.verifyUserPointer(rem_addr, @sizeOf(TimeSpec))) {
         var zero = TimeSpec{ .tv_sec = 0, .tv_nsec = 0 };

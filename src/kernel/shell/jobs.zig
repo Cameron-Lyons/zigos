@@ -8,6 +8,7 @@ pub const BackgroundJob = struct {
     active: bool = false,
     id: u32 = 0,
     pid: u32 = 0,
+    pgid: u32 = 0,
     stopped: bool = false,
     command_len: usize = 0,
     command: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH,
@@ -26,13 +27,14 @@ pub const JobTable = struct {
     jobs: [MAX_BACKGROUND_JOBS]BackgroundJob = [_]BackgroundJob{BackgroundJob{}} ** MAX_BACKGROUND_JOBS,
     next_job_id: u32 = 1,
     foreground_pid: ?u32 = null,
+    foreground_pgid: ?u32 = null,
 
     pub fn latestPid(self: *JobTable) ?u32 {
         const job = self.current() orelse return null;
         return job.pid;
     }
 
-    pub fn register(self: *JobTable, pid: u32, command: []const u8) RegisterError!*BackgroundJob {
+    pub fn register(self: *JobTable, pid: u32, pgid: u32, command: []const u8) RegisterError!*BackgroundJob {
         if (command.len >= MAX_COMMAND_LENGTH) return error.CommandTooLong;
 
         for (&self.jobs) |*job| {
@@ -41,6 +43,7 @@ pub const JobTable = struct {
                 .active = true,
                 .id = self.next_job_id,
                 .pid = pid,
+                .pgid = pgid,
                 .stopped = false,
                 .command_len = command.len,
             };
@@ -57,6 +60,13 @@ pub const JobTable = struct {
     pub fn findByPid(self: *JobTable, pid: u32) ?*BackgroundJob {
         for (&self.jobs) |*job| {
             if (job.active and job.pid == pid) return job;
+        }
+        return null;
+    }
+
+    pub fn findByProcessGroup(self: *JobTable, pgid: u32) ?*BackgroundJob {
+        for (&self.jobs) |*job| {
+            if (job.active and job.pgid == pgid) return job;
         }
         return null;
     }
@@ -108,13 +118,14 @@ test "parseJobId accepts numeric and percent-prefixed ids" {
 
 test "job table selects current and explicit jobs" {
     var table = JobTable{};
-    const job1 = try table.register(11, "sleep 1");
-    const job2 = try table.register(22, "sleep 2");
+    const job1 = try table.register(11, 11, "sleep 1");
+    const job2 = try table.register(22, 44, "sleep 2");
 
     try std.testing.expectEqual(@as(u32, 22), table.latestPid().?);
     try std.testing.expect(table.select(null) == job2);
     try std.testing.expect(table.select("%1") == job1);
     try std.testing.expect(table.select("2") == job2);
+    try std.testing.expect(table.findByProcessGroup(44) == job2);
 
     job2.active = false;
     try std.testing.expect(table.select(null) == job1);
@@ -124,5 +135,5 @@ test "job table selects current and explicit jobs" {
 test "job table rejects commands that exceed storage" {
     var table = JobTable{};
     var oversized = [_]u8{'x'} ** MAX_COMMAND_LENGTH;
-    try std.testing.expectError(error.CommandTooLong, table.register(1, oversized[0..]));
+    try std.testing.expectError(error.CommandTooLong, table.register(1, 1, oversized[0..]));
 }

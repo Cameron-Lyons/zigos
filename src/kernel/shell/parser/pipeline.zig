@@ -14,6 +14,79 @@ pub const TokenizationError = error{
     CommandSubstitutionFailed,
 };
 
+const TokenCharClass = enum(u4) {
+    other,
+    whitespace,
+    single_quote,
+    double_quote,
+    backslash,
+    dollar,
+    pipe,
+    stdin_redirect,
+    stdout_redirect,
+    background,
+    glob,
+};
+
+const CharFlag = struct {
+    const var_char: u8 = 1 << 0;
+    const wildcard: u8 = 1 << 1;
+};
+
+const token_char_classes = initTokenCharClasses();
+const char_flags = initCharFlags();
+
+fn initTokenCharClasses() [256]TokenCharClass {
+    var table = [_]TokenCharClass{.other} ** 256;
+    table[' '] = .whitespace;
+    table['\t'] = .whitespace;
+    table['\n'] = .whitespace;
+    table['\r'] = .whitespace;
+    table['\''] = .single_quote;
+    table['"'] = .double_quote;
+    table['\\'] = .backslash;
+    table['$'] = .dollar;
+    table['|'] = .pipe;
+    table['<'] = .stdin_redirect;
+    table['>'] = .stdout_redirect;
+    table['&'] = .background;
+    table['*'] = .glob;
+    table['?'] = .glob;
+    return table;
+}
+
+fn initCharFlags() [256]u8 {
+    var table = [_]u8{0} ** 256;
+
+    var ch: u16 = '0';
+    while (ch <= '9') : (ch += 1) {
+        table[@as(usize, ch)] |= CharFlag.var_char;
+    }
+
+    ch = 'A';
+    while (ch <= 'Z') : (ch += 1) {
+        table[@as(usize, ch)] |= CharFlag.var_char;
+    }
+
+    ch = 'a';
+    while (ch <= 'z') : (ch += 1) {
+        table[@as(usize, ch)] |= CharFlag.var_char;
+    }
+
+    table['_'] |= CharFlag.var_char;
+    table['*'] |= CharFlag.wildcard;
+    table['?'] |= CharFlag.wildcard;
+    return table;
+}
+
+fn tokenCharClass(char: u8) TokenCharClass {
+    return token_char_classes[@as(usize, char)];
+}
+
+fn charHasFlag(char: u8, flag: u8) bool {
+    return (char_flags[@as(usize, char)] & flag) != 0;
+}
+
 pub const TokenKind = enum {
     word,
     pipe,
@@ -97,6 +170,7 @@ pub fn tokenizeCommandLine(
     var idx: usize = 0;
     while (idx < input.len) : (idx += 1) {
         const char = input[idx];
+        const char_class = tokenCharClass(char);
 
         if (escaping) {
             try appendTokenChar(storage, token_count, &token_len, char);
@@ -106,7 +180,7 @@ pub fn tokenizeCommandLine(
         }
 
         if (in_single_quote) {
-            if (char == '\'') {
+            if (char_class == .single_quote) {
                 in_single_quote = false;
             } else {
                 try appendTokenChar(storage, token_count, &token_len, char);
@@ -116,50 +190,55 @@ pub fn tokenizeCommandLine(
         }
 
         if (in_double_quote) {
-            if (char == '"') {
-                in_double_quote = false;
-            } else if (char == '\\') {
-                escaping = true;
-            } else if (char == '$') {
-                try expandShellSubstitution(
-                    input,
-                    &idx,
-                    storage,
-                    token_count,
-                    &token_len,
-                    &token_has_glob,
-                    hooks,
-                    allow_command_substitution,
-                    true,
-                );
-            } else {
-                try appendTokenChar(storage, token_count, &token_len, char);
+            switch (char_class) {
+                .double_quote => {
+                    in_double_quote = false;
+                },
+                .backslash => {
+                    escaping = true;
+                },
+                .dollar => {
+                    try expandShellSubstitution(
+                        input,
+                        &idx,
+                        storage,
+                        token_count,
+                        &token_len,
+                        &token_has_glob,
+                        hooks,
+                        allow_command_substitution,
+                        true,
+                    );
+                },
+                else => {
+                    try appendTokenChar(storage, token_count, &token_len, char);
+                },
             }
             token_active = true;
             continue;
         }
 
-        if (isWhitespace(char)) {
+        if (char_class == .whitespace) {
             if (token_active) {
                 try finishWordToken(storage, out_tokens, &token_count, &token_len, &token_active, &token_has_glob);
             }
             continue;
         }
 
-        switch (char) {
-            '\'' => {
+        switch (char_class) {
+            .single_quote => {
                 in_single_quote = true;
                 token_active = true;
             },
-            '"' => {
+            .double_quote => {
                 in_double_quote = true;
                 token_active = true;
             },
-            '\\' => {
+            .backslash => {
                 escaping = true;
                 token_active = true;
             },
-            '$' => {
+            .dollar => {
                 try expandShellSubstitution(
                     input,
                     &idx,
@@ -173,28 +252,28 @@ pub fn tokenizeCommandLine(
                 );
                 token_active = true;
             },
-            '|', '<', '>', '&' => {
+            .pipe, .stdin_redirect, .stdout_redirect, .background => {
                 if (token_active) {
                     try finishWordToken(storage, out_tokens, &token_count, &token_len, &token_active, &token_has_glob);
                 }
 
-                const operator_len: usize = if (char == '>' and idx + 1 < input.len and input[idx + 1] == '>') 2 else 1;
+                const operator_len: usize = if (char_class == .stdout_redirect and idx + 1 < input.len and input[idx + 1] == '>') 2 else 1;
                 try addOperatorToken(
                     storage,
                     out_tokens,
                     &token_count,
-                    if (operator_len == 2) .append_stdout_redirect else switch (char) {
-                        '|' => .pipe,
-                        '<' => .stdin_redirect,
-                        '>' => .stdout_redirect,
-                        '&' => .background,
+                    if (operator_len == 2) .append_stdout_redirect else switch (char_class) {
+                        .pipe => .pipe,
+                        .stdin_redirect => .stdin_redirect,
+                        .stdout_redirect => .stdout_redirect,
+                        .background => .background,
                         else => unreachable,
                     },
                     if (operator_len == 2) ">>" else input[idx .. idx + 1],
                 );
                 if (operator_len == 2) idx += 1;
             },
-            '*', '?' => {
+            .glob => {
                 try appendTokenChar(storage, token_count, &token_len, char);
                 token_active = true;
                 token_has_glob = true;
@@ -403,6 +482,7 @@ fn parseCommandSubstitution(input: []const u8, idx: *usize) error{Unterminated}!
 
     while (cursor < input.len) : (cursor += 1) {
         const char = input[cursor];
+        const char_class = tokenCharClass(char);
 
         if (escaping) {
             escaping = false;
@@ -410,33 +490,35 @@ fn parseCommandSubstitution(input: []const u8, idx: *usize) error{Unterminated}!
         }
 
         if (in_single_quote) {
-            if (char == '\'') in_single_quote = false;
+            if (char_class == .single_quote) in_single_quote = false;
             continue;
         }
 
         if (in_double_quote) {
-            if (char == '"') {
-                in_double_quote = false;
-            } else if (char == '\\') {
-                escaping = true;
+            switch (char_class) {
+                .double_quote => in_double_quote = false,
+                .backslash => escaping = true,
+                else => {},
             }
             continue;
         }
 
-        switch (char) {
-            '\'' => in_single_quote = true,
-            '"' => in_double_quote = true,
-            '\\' => escaping = true,
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if (depth == 0) {
-                    const sub = input[idx.* + 2 .. cursor];
-                    idx.* = cursor;
-                    return sub;
-                }
+        switch (char_class) {
+            .single_quote => in_single_quote = true,
+            .double_quote => in_double_quote = true,
+            .backslash => escaping = true,
+            else => switch (char) {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if (depth == 0) {
+                        const sub = input[idx.* + 2 .. cursor];
+                        idx.* = cursor;
+                        return sub;
+                    }
+                },
+                else => {},
             },
-            else => {},
         }
     }
 
@@ -499,20 +581,17 @@ fn sliceFromCStr(str: [*:0]const u8) []const u8 {
 
 fn containsWildcardChars(text: []const u8) bool {
     for (text) |char| {
-        if (char == '*' or char == '?') return true;
+        if (charHasFlag(char, CharFlag.wildcard)) return true;
     }
     return false;
 }
 
 fn isVarChar(char: u8) bool {
-    return (char >= 'A' and char <= 'Z') or
-        (char >= 'a' and char <= 'z') or
-        (char >= '0' and char <= '9') or
-        char == '_';
+    return charHasFlag(char, CharFlag.var_char);
 }
 
 fn isWhitespace(char: u8) bool {
-    return char == ' ' or char == '\t' or char == '\n' or char == '\r';
+    return tokenCharClass(char) == .whitespace;
 }
 
 const TestHooks = struct {

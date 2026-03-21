@@ -561,7 +561,7 @@ pub const Shell = struct {
         };
 
         if (job.stopped) {
-            signal.kill(@intCast(job.pid), signal.SIGCONT) catch {
+            signal.killProcessGroup(job.pgid, signal.SIGCONT) catch {
                 vga.print("fg: failed to continue job\n");
                 return;
             };
@@ -589,7 +589,7 @@ pub const Shell = struct {
             return;
         }
 
-        signal.kill(@intCast(job.pid), signal.SIGCONT) catch {
+        signal.killProcessGroup(job.pgid, signal.SIGCONT) catch {
             vga.print("bg: failed to continue job\n");
             return;
         };
@@ -1062,7 +1062,8 @@ pub const Shell = struct {
 fn registerBackgroundJob(self: *Shell, pid: u32, tokens: []const CommandToken) void {
     var command_buffer: [MAX_COMMAND_LENGTH]u8 = undefined;
     const command_len = buildCommandText(tokens, &command_buffer) catch 0;
-    const job = self.job_table.register(pid, command_buffer[0..command_len]) catch {
+    const pgid = processGroupForPid(pid);
+    const job = self.job_table.register(pid, pgid, command_buffer[0..command_len]) catch {
         console.print("Too many background jobs\n");
         return;
     };
@@ -1073,8 +1074,17 @@ fn registerBackgroundJob(self: *Shell, pid: u32, tokens: []const CommandToken) v
 }
 
 fn waitForForegroundCommand(self: *Shell, pid: u32) bool {
+    const inherited_pgid = self.job_table.foreground_pgid;
     self.job_table.foreground_pid = pid;
-    defer self.job_table.foreground_pid = null;
+    if (inherited_pgid == null) {
+        self.job_table.foreground_pgid = processGroupForPid(pid);
+    }
+    defer {
+        self.job_table.foreground_pid = null;
+        if (inherited_pgid == null) {
+            self.job_table.foreground_pgid = null;
+        }
+    }
 
     const result = posix.waitForProcessEvent(pid) catch |err| {
         shell_external.releaseIfPresent(pid);
@@ -1135,7 +1145,8 @@ fn pollBackgroundJobs(self: *Shell, notify: bool) void {
 }
 
 fn markJobStopped(self: *Shell, pid: u32) void {
-    const job = self.job_table.findByPid(pid) orelse return;
+    const pgid = processGroupForPid(pid);
+    const job = self.job_table.findByProcessGroup(pgid) orelse self.job_table.findByPid(pid) orelse return;
     job.stopped = true;
     var line_buf: [40]u8 = undefined;
     const prefix = std.fmt.bufPrint(&line_buf, "[{d}] Stopped ", .{job.id}) catch "[?] Stopped ";
@@ -1150,14 +1161,19 @@ fn findSelectedJob(self: *Shell, args: []const [*:0]const u8) ?*BackgroundJob {
 }
 
 fn foregroundPidSignal(self: *Shell, char: u8) bool {
-    const pid = self.job_table.foreground_pid orelse return false;
     const signum: i32 = switch (char) {
         3 => signal.SIGINT,
         26 => signal.SIGTSTP,
         else => return false,
     };
 
-    signal.kill(@intCast(pid), signum) catch {};
+    if (self.job_table.foreground_pgid) |pgid| {
+        signal.killProcessGroup(pgid, signum) catch {};
+    } else if (self.job_table.foreground_pid) |pid| {
+        signal.kill(@intCast(pid), signum) catch {};
+    } else {
+        return false;
+    }
     if (char == 3) {
         console.print("^C\n");
     } else if (char == 26) {
@@ -1173,8 +1189,16 @@ fn makeExecutionRuntime(self: *Shell) execution.Runtime {
         .dispatchBuiltinFn = executionDispatchBuiltin,
         .registerBackgroundJobFn = executionRegisterBackgroundJob,
         .waitForForegroundFn = executionWaitForForegroundCommand,
+        .setForegroundProcessGroupFn = executionSetForegroundProcessGroup,
         .launchExternalFn = executionLaunchExternal,
     };
+}
+
+fn processGroupForPid(pid: u32) u32 {
+    if (process.getProcessByPid(pid)) |proc| {
+        return if (proc.process_group != 0) proc.process_group else proc.pid;
+    }
+    return pid;
 }
 
 fn shellFromExecutionContext(context: ?*anyopaque) *Shell {
@@ -1203,8 +1227,17 @@ fn executionWaitForForegroundCommand(context: ?*anyopaque, pid: u32) bool {
     return waitForForegroundCommand(self, pid);
 }
 
-fn executionLaunchExternal(_: ?*anyopaque, command_args: []const [*:0]const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32) execution.ExternalLaunchError!u32 {
-    return shell_external.launchExternalCommand(command_args, nice_value, stdin_fd, stdout_fd);
+fn executionSetForegroundProcessGroup(context: ?*anyopaque, pgid: ?u32) void {
+    const self = shellFromExecutionContext(context);
+    self.job_table.foreground_pgid = pgid;
+}
+
+fn executionLaunchExternal(_: ?*anyopaque, command_args: []const [*:0]const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32, process_group: ?u32) execution.ExternalLaunchError!u32 {
+    const target: shell_external.ProcessGroupTarget = if (process_group) |pgid|
+        .{ .existing = pgid }
+    else
+        .own;
+    return shell_external.launchExternalCommandInGroup(command_args, nice_value, stdin_fd, stdout_fd, target);
 }
 
 fn buildCommandText(tokens: []const CommandToken, buffer: *[MAX_COMMAND_LENGTH]u8) error{NoSpaceLeft}!usize {

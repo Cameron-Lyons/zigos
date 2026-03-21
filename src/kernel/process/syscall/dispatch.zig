@@ -205,6 +205,7 @@ pub const SYS_REBOOT = abi.SYS_REBOOT;
 pub const SYS_GETPROCS = abi.SYS_GETPROCS;
 pub const SYS_PING = abi.SYS_PING;
 pub const SYS_SPAWN = abi.SYS_SPAWN;
+pub const SYS_SPAWN_WITH_FDS = abi.SYS_SPAWN_WITH_FDS;
 pub const STDIN = abi.STDIN;
 pub const STDOUT = abi.STDOUT;
 pub const STDERR = abi.STDERR;
@@ -531,6 +532,10 @@ fn sys_spawn(path: [*]const u8, argv: usize, envp: usize) i32 {
     return syscall_process.sys_spawn(path, argv, envp);
 }
 
+fn sys_spawn_with_fds(path: [*]const u8, argv: usize, envp: usize, stdio_addr: usize) i32 {
+    return syscall_process.sys_spawn_with_fds(path, argv, envp, stdio_addr);
+}
+
 fn sys_wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) i32 {
     return syscall_process.sys_wait4(pid, status, options, rusage);
 }
@@ -815,6 +820,7 @@ export fn syscall_handler(regs: *idt.InterruptRegisters) callconv(.c) void {
         SYS_FORK => sys_fork(),
         SYS_EXECVE => sys_execve(@as([*]const u8, @ptrFromInt(arg1)), arg2, arg3),
         SYS_SPAWN => sys_spawn(@as([*]const u8, @ptrFromInt(arg1)), arg2, arg3),
+        SYS_SPAWN_WITH_FDS => sys_spawn_with_fds(@as([*]const u8, @ptrFromInt(arg1)), arg2, arg3, arg4),
         SYS_WAIT4 => sys_wait4(@intCast(arg1), @as(?*i32, @ptrFromInt(arg2)), @intCast(arg3), @as(?*anyopaque, @ptrFromInt(arg4))),
         SYS_BRK => sys_brk(arg1),
         SYS_MMAP => sys_mmap(arg1, arg2, @intCast(arg3), @intCast(arg4), @intCast(arg5), @intCast(@as(i32, @intCast(regs.ebp)))),

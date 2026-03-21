@@ -170,12 +170,59 @@ const commands = [_]Command{
     .{ .id = .which, .name = "which", .summary = "Locate a command", .has_external_program = true, .prefer_external_program = true },
 };
 
+const BucketRange = struct {
+    start: usize,
+    len: usize,
+};
+
+const CommandIndex = struct {
+    order: [commands.len]u8,
+    ranges: [256]BucketRange,
+};
+
+const command_index = initCommandIndex();
+
+fn initCommandIndex() CommandIndex {
+    var counts = [_]usize{0} ** 256;
+    for (commands) |command| {
+        counts[command.name[0]] += 1;
+    }
+
+    var ranges: [256]BucketRange = undefined;
+    var start: usize = 0;
+    for (counts, 0..) |count, idx| {
+        ranges[idx] = .{ .start = start, .len = count };
+        start += count;
+    }
+
+    var next = [_]usize{0} ** 256;
+    for (ranges, 0..) |range, idx| {
+        next[idx] = range.start;
+    }
+
+    var order: [commands.len]u8 = undefined;
+    for (commands, 0..) |command, idx| {
+        const bucket = command.name[0];
+        order[next[bucket]] = @intCast(idx);
+        next[bucket] += 1;
+    }
+
+    return .{ .order = order, .ranges = ranges };
+}
+
+fn lookupBucket(name: []const u8) []const u8 {
+    if (name.len == 0) return &.{};
+    const range = command_index.ranges[name[0]];
+    return command_index.order[range.start .. range.start + range.len];
+}
+
 pub fn all() []const Command {
     return commands[0..];
 }
 
 pub fn lookup(name: []const u8) ?*const Command {
-    for (&commands) |*command| {
+    for (lookupBucket(name)) |command_idx| {
+        const command = &commands[@as(usize, command_idx)];
         if (std.mem.eql(u8, command.name, name)) {
             return command;
         }
@@ -185,7 +232,18 @@ pub fn lookup(name: []const u8) ?*const Command {
 
 pub fn complete(prefix: []const u8, matches: [][]const u8) usize {
     var count: usize = 0;
-    for (commands) |command| {
+
+    if (prefix.len == 0) {
+        for (commands) |command| {
+            if (count >= matches.len) break;
+            matches[count] = command.name;
+            count += 1;
+        }
+        return count;
+    }
+
+    for (lookupBucket(prefix)) |command_idx| {
+        const command = commands[@as(usize, command_idx)];
         if (std.mem.startsWith(u8, command.name, prefix)) {
             if (count >= matches.len) break;
             matches[count] = command.name;
@@ -193,4 +251,26 @@ pub fn complete(prefix: []const u8, matches: [][]const u8) usize {
         }
     }
     return count;
+}
+
+test "lookup finds commands by exact name" {
+    try std.testing.expectEqual(CommandId.help, lookup("help").?.id);
+    try std.testing.expectEqual(CommandId.export_var, lookup("export").?.id);
+    try std.testing.expectEqual(@as(?*const Command, null), lookup("missing"));
+    try std.testing.expectEqual(@as(?*const Command, null), lookup(""));
+}
+
+test "complete matches prefixes in declaration order" {
+    var matches: [8][]const u8 = undefined;
+
+    const ch_count = complete("ch", matches[0..]);
+    try std.testing.expectEqual(@as(usize, 3), ch_count);
+    try std.testing.expectEqualStrings("chmod", matches[0]);
+    try std.testing.expectEqualStrings("chown", matches[1]);
+    try std.testing.expectEqualStrings("chgrp", matches[2]);
+
+    const empty_count = complete("", matches[0..]);
+    try std.testing.expectEqual(@as(usize, matches.len), empty_count);
+    try std.testing.expectEqualStrings("help", matches[0]);
+    try std.testing.expectEqualStrings("clear", matches[1]);
 }

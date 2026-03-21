@@ -182,6 +182,7 @@ pub const SYS_REBOOT = 181;
 pub const SYS_GETPROCS = 182;
 pub const SYS_PING = 183;
 pub const SYS_SPAWN = 184;
+pub const SYS_SPAWN_WITH_FDS = 185;
 
 pub const STDIN = 0;
 pub const STDOUT = 1;
@@ -193,6 +194,7 @@ pub const O_WRONLY: u32 = 0x0001;
 pub const O_RDWR: u32 = 0x0002;
 pub const O_CREAT: u32 = 0x0040;
 pub const O_TRUNC: u32 = 0x0200;
+pub const O_APPEND: u32 = 0x0400;
 
 pub const DT_REG: u8 = 1;
 pub const DT_DIR: u8 = 2;
@@ -376,6 +378,7 @@ pub const P_ALL: u32 = 0;
 pub const P_PID: u32 = 1;
 pub const P_PGID: u32 = 2;
 
+pub const WNOHANG: u32 = 0x01;
 pub const WEXITED: u32 = 0x04;
 pub const WSTOPPED: u32 = 0x02;
 pub const WCONTINUED: u32 = 0x08;
