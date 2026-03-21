@@ -9,6 +9,7 @@ pub const O_WRONLY = abi.O_WRONLY;
 pub const O_RDWR = abi.O_RDWR;
 pub const O_CREAT = abi.O_CREAT;
 pub const O_TRUNC = abi.O_TRUNC;
+pub const O_APPEND = abi.O_APPEND;
 pub const DT_REG = abi.DT_REG;
 pub const DT_DIR = abi.DT_DIR;
 pub const SIGINT = abi.SIGINT;
@@ -36,6 +37,7 @@ pub const TTY_LFLAG_ISIG = abi.TTY_LFLAG_ISIG;
 pub const TTY_LFLAG_ICANON = abi.TTY_LFLAG_ICANON;
 pub const TTY_LFLAG_ECHO = abi.TTY_LFLAG_ECHO;
 pub const AT_FDCWD = abi.AT_FDCWD;
+pub const WNOHANG = abi.WNOHANG;
 
 pub const LinuxDirent = extern struct {
     d_ino: u32,
@@ -67,6 +69,12 @@ pub const WinSize = extern struct {
     ws_ypixel: u16,
 };
 
+pub const SpawnStdio = extern struct {
+    stdin_fd: i32,
+    stdout_fd: i32,
+    stderr_fd: i32,
+};
+
 pub const syscall0 = trap.syscall0;
 pub const syscall1 = trap.syscall1;
 pub const syscall2 = trap.syscall2;
@@ -87,12 +95,20 @@ pub fn open(path: [*:0]const u8, flags: u32) i32 {
     return syscall2(abi.SYS_OPEN, @intFromPtr(path), flags);
 }
 
+pub fn pipe(pipefd: *[2]i32) i32 {
+    return syscall1(abi.SYS_PIPE, @intFromPtr(pipefd));
+}
+
 pub fn close(fd: i32) i32 {
     return syscall1(abi.SYS_CLOSE, @bitCast(@as(u32, @bitCast(fd))));
 }
 
 pub fn getpid() i32 {
     return syscall0(abi.SYS_GETPID);
+}
+
+pub fn schedYield() i32 {
+    return syscall0(abi.SYS_YIELD);
 }
 
 pub fn getuid() i32 {
@@ -129,6 +145,16 @@ pub fn execve(path: [*:0]const u8, argv: [*]const ?[*:0]const u8, envp: [*]const
 
 pub fn spawnve(path: [*:0]const u8, argv: [*]const ?[*:0]const u8, envp: [*]const ?[*:0]const u8) i32 {
     return syscall3(abi.SYS_SPAWN, @intFromPtr(path), @intFromPtr(argv), @intFromPtr(envp));
+}
+
+pub fn spawnveWithStdio(path: [*:0]const u8, argv: [*]const ?[*:0]const u8, envp: [*]const ?[*:0]const u8, stdio: ?*const SpawnStdio) i32 {
+    return syscall4(
+        abi.SYS_SPAWN_WITH_FDS,
+        @intFromPtr(path),
+        @intFromPtr(argv),
+        @intFromPtr(envp),
+        if (stdio) |value| @intFromPtr(value) else 0,
+    );
 }
 
 pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) i32 {

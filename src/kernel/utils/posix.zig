@@ -325,19 +325,20 @@ pub fn wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) !i32 {
             return 0;
         }
 
-        parent.state = .Waiting;
+        scheduler.blockProcess(parent);
         process.yield();
     }
 }
 
 pub fn waitForProcess(pid: u32) !i32 {
+    const parent = process.getCurrentProcess() orelse return error.NoCurrentProcess;
     while (true) {
         var proc = process.getProcessList();
         var found = false;
         while (proc) |current| : (proc = current.next) {
             if (current.pid != pid) continue;
             found = true;
-            if (current.state == .Terminated) {
+            if (current.state == .Terminated or current.state == .Zombie) {
                 const exit_code = current.exit_code;
                 reapExitedProcess(current);
                 return exit_code;
@@ -346,6 +347,7 @@ pub fn waitForProcess(pid: u32) !i32 {
         }
 
         if (!found) return error.ProcessNotFound;
+        scheduler.blockProcess(parent);
         process.yield();
     }
 }
@@ -354,7 +356,7 @@ pub fn pollProcessExit(pid: u32) !?i32 {
     var proc = process.getProcessList();
     while (proc) |current| : (proc = current.next) {
         if (current.pid != pid) continue;
-        if (current.state == .Terminated) {
+        if (current.state == .Terminated or current.state == .Zombie) {
             const exit_code = current.exit_code;
             reapExitedProcess(current);
             return exit_code;
@@ -370,13 +372,14 @@ pub const ProcessWaitResult = union(enum) {
 };
 
 pub fn waitForProcessEvent(pid: u32) !ProcessWaitResult {
+    const parent = process.getCurrentProcess() orelse return error.NoCurrentProcess;
     while (true) {
         var proc = process.getProcessList();
         var found = false;
         while (proc) |current| : (proc = current.next) {
             if (current.pid != pid) continue;
             found = true;
-            if (current.state == .Terminated) {
+            if (current.state == .Terminated or current.state == .Zombie) {
                 const exit_code = current.exit_code;
                 reapExitedProcess(current);
                 return .{ .exited = exit_code };
@@ -388,6 +391,7 @@ pub fn waitForProcessEvent(pid: u32) !ProcessWaitResult {
         }
 
         if (!found) return error.ProcessNotFound;
+        scheduler.blockProcess(parent);
         process.yield();
     }
 }

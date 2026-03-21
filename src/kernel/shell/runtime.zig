@@ -35,7 +35,8 @@ pub const Runtime = struct {
     dispatchBuiltinFn: *const fn (?*anyopaque, registry.CommandId, []const [*:0]const u8) void,
     registerBackgroundJobFn: *const fn (?*anyopaque, u32, []const CommandToken) void,
     waitForForegroundFn: *const fn (?*anyopaque, u32) bool,
-    launchExternalFn: *const fn (?*anyopaque, []const [*:0]const u8, ?i8, ?i32, ?i32) ExternalLaunchError!u32,
+    setForegroundProcessGroupFn: *const fn (?*anyopaque, ?u32) void,
+    launchExternalFn: *const fn (?*anyopaque, []const [*:0]const u8, ?i8, ?i32, ?i32, ?u32) ExternalLaunchError!u32,
 
     fn nextCaptureId(self: *const Runtime) u32 {
         return self.nextCaptureIdFn(self.context);
@@ -53,8 +54,12 @@ pub const Runtime = struct {
         return self.waitForForegroundFn(self.context, pid);
     }
 
-    fn launchExternal(self: *const Runtime, command_args: []const [*:0]const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32) ExternalLaunchError!u32 {
-        return self.launchExternalFn(self.context, command_args, nice_value, stdin_fd, stdout_fd);
+    fn setForegroundProcessGroup(self: *const Runtime, pgid: ?u32) void {
+        self.setForegroundProcessGroupFn(self.context, pgid);
+    }
+
+    fn launchExternal(self: *const Runtime, command_args: []const [*:0]const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32, process_group: ?u32) ExternalLaunchError!u32 {
+        return self.launchExternalFn(self.context, command_args, nice_value, stdin_fd, stdout_fd, process_group);
     }
 };
 
@@ -122,7 +127,7 @@ pub fn executeLine(runtime: *const Runtime, line: []const u8, wait_for_external:
         }
     }
 
-    const pid = runtime.launchExternal(args[0..arg_count], null, null, null) catch |err| {
+    const pid = runtime.launchExternal(args[0..arg_count], null, null, null, null) catch |err| {
         shell_external.printExternalCommandError(command, err);
         return false;
     };
@@ -197,6 +202,7 @@ fn executePipeline(runtime: *const Runtime, tokens: []const CommandToken, backgr
             null,
             stdin_fd,
             stdout_fd,
+            null,
         ) catch |err| {
             closeRedirectFd(stdin_fd);
             closeRedirectFd(stdout_fd);
@@ -278,7 +284,7 @@ fn captureCommandSubstitution(runtime: *const Runtime, line: []const u8, output:
     defer closeRedirectFd(stdout_fd);
     defer vfs.unlink(temp_path[0..temp_len]) catch {};
 
-    const pid = runtime.launchExternal(args[0..arg_count], null, null, stdout_fd) catch |err| {
+    const pid = runtime.launchExternal(args[0..arg_count], null, null, stdout_fd, null) catch |err| {
         logCommandSubstitutionFailure("launch", line, @errorName(err));
         return error.CommandFailed;
     };
@@ -441,6 +447,7 @@ fn resolveGlobMatches(pattern: []const u8, out_matches: *[MAX_ARGS][MAX_COMMAND_
 
     var absolute_pattern_storage: [MAX_COMMAND_LENGTH]u8 = [_]u8{0} ** MAX_COMMAND_LENGTH;
     const absolute_pattern = try makeAbsolutePath(pattern, &absolute_pattern_storage);
+    var pattern_cache = glob.PatternCache(MAX_ARGS){};
 
     var current_paths: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
     var next_paths: [MAX_ARGS][MAX_COMMAND_LENGTH]u8 = [_][MAX_COMMAND_LENGTH]u8{[_]u8{0} ** MAX_COMMAND_LENGTH} ** MAX_ARGS;
@@ -462,7 +469,8 @@ fn resolveGlobMatches(pattern: []const u8, out_matches: *[MAX_ARGS][MAX_COMMAND_
         while (current_idx < current_count) : (current_idx += 1) {
             const base_path = sliceFromCStr(@ptrCast(&current_paths[current_idx][0]));
             if (wildcard_component) {
-                try collectGlobMatches(base_path, component, &next_paths, &next_count);
+                const compiled_pattern = try pattern_cache.getOrCompile(component);
+                try collectGlobMatches(base_path, compiled_pattern, &next_paths, &next_count);
             } else {
                 if (next_count >= MAX_ARGS) return error.ArgumentTooLong;
                 const joined = try glob.joinPath(base_path, component, &next_paths[next_count]);
@@ -489,10 +497,11 @@ fn makeAbsolutePath(path: []const u8, buffer: *[MAX_COMMAND_LENGTH]u8) PipelineC
     return cwd_mod.resolvePath(path, buffer) orelse error.ArgumentTooLong;
 }
 
-fn collectGlobMatches(base_path: []const u8, pattern: []const u8, out_paths: *[MAX_ARGS][MAX_COMMAND_LENGTH]u8, out_count: *usize) PipelineConfigError!void {
+fn collectGlobMatches(base_path: []const u8, compiled_pattern: *const glob.CompiledPattern, out_paths: *[MAX_ARGS][MAX_COMMAND_LENGTH]u8, out_count: *usize) PipelineConfigError!void {
     const fd = vfs.open(base_path, vfs.O_RDONLY) catch return;
     defer vfs.close(fd) catch {};
 
+    const pattern = compiled_pattern.slice();
     var dirent: vfs.DirEntry = undefined;
     while (true) {
         const has_entry = vfs.readdirNext(fd, &dirent) catch return;
@@ -502,7 +511,7 @@ fn collectGlobMatches(base_path: []const u8, pattern: []const u8, out_paths: *[M
         if (entry_name.len == 0) continue;
         if (std.mem.eql(u8, entry_name, ".") or std.mem.eql(u8, entry_name, "..")) continue;
         if (entry_name[0] == '.' and (pattern.len == 0 or pattern[0] != '.')) continue;
-        if (!glob.wildcardMatch(pattern, entry_name)) continue;
+        if (!compiled_pattern.matches(entry_name)) continue;
         if (out_count.* >= MAX_ARGS) return error.ArgumentTooLong;
         _ = try glob.joinPath(base_path, entry_name, &out_paths[out_count.*]);
         out_count.* += 1;

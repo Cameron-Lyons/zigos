@@ -1,3 +1,4 @@
+const std = @import("std");
 const abi = @import("abi.zig");
 const common = @import("common.zig");
 const x86 = @import("../../../arch/x86.zig");
@@ -17,6 +18,12 @@ const vfs = @import("../../fs/vfs.zig");
 const MAX_EXECVE_ARGS: usize = 8;
 const MAX_EXECVE_ENV: usize = 8;
 const EXECVE_STRING_BUFFER_SIZE: usize = common.USER_PATH_BUFFER_SIZE;
+
+const SpawnStdio = extern struct {
+    stdin_fd: i32,
+    stdout_fd: i32,
+    stderr_fd: i32,
+};
 
 pub fn sys_getpid() i32 {
     if (process_mod.current_process) |proc| {
@@ -39,7 +46,9 @@ pub fn sys_exit(status: i32) i32 {
         if (proc.parent_pid != 0) {
             if (process_mod.getProcessByPid(proc.parent_pid)) |parent| {
                 kernel_signal.sendSignal(parent, kernel_signal.SIGCHLD);
-                process_mod.switchToProcess(parent);
+                if (parent.privilege == .Kernel) {
+                    process_mod.switchToProcess(parent);
+                }
             }
         }
 
@@ -130,64 +139,15 @@ pub fn sys_execve(path: [*]const u8, argv: usize, envp: usize) i32 {
 
 pub fn sys_spawn(path: [*]const u8, argv: usize, envp: usize) i32 {
     var path_buf: [EXECVE_STRING_BUFFER_SIZE]u8 = undefined;
-    const path_slice = protection.copyStringFromUser(&path_buf, @intFromPtr(path)) catch {
-        return abi.EINVAL;
-    };
-
     var argv_ptrs: [MAX_EXECVE_ARGS][*:0]const u8 = undefined;
-    var argv_count: usize = 0;
     var argv_buffers: [MAX_EXECVE_ARGS][EXECVE_STRING_BUFFER_SIZE]u8 = undefined;
-
-    if (argv != 0) {
-        while (argv_count < argv_ptrs.len) {
-            const ptr_addr = argv + argv_count * @sizeOf(usize);
-            if (!protection.verifyUserPointer(ptr_addr, @sizeOf(usize))) {
-                break;
-            }
-
-            const str_ptr = @as(*const usize, @ptrFromInt(ptr_addr)).*;
-            if (str_ptr == 0) break;
-
-            const arg_slice = protection.copyStringFromUser(&argv_buffers[argv_count], str_ptr) catch {
-                break;
-            };
-            argv_buffers[argv_count][arg_slice.len] = 0;
-            argv_ptrs[argv_count] = @ptrCast(argv_buffers[argv_count][0..].ptr);
-            argv_count += 1;
-        }
-    }
-
-    if (argv_count == 0) {
-        if (path_slice.len + 1 > argv_buffers[0].len) return abi.E2BIG;
-        @memcpy(argv_buffers[0][0..path_slice.len], path_slice);
-        argv_buffers[0][path_slice.len] = 0;
-        argv_ptrs[0] = @ptrCast(argv_buffers[0][0..].ptr);
-        argv_count = 1;
-    }
-
     var env_entries: [MAX_EXECVE_ENV][]const u8 = undefined;
-    var env_count: usize = 0;
     var env_buffers: [MAX_EXECVE_ENV][EXECVE_STRING_BUFFER_SIZE]u8 = undefined;
+    const path_slice = readSpawnPath(path, &path_buf) orelse return abi.EINVAL;
+    const argv_count = readSpawnArgv(path_slice, argv, &argv_ptrs, &argv_buffers) orelse return abi.E2BIG;
+    const env_count = readSpawnEnv(envp, &env_entries, &env_buffers);
 
-    if (envp != 0) {
-        while (env_count < env_entries.len) {
-            const ptr_addr = envp + env_count * @sizeOf(usize);
-            if (!protection.verifyUserPointer(ptr_addr, @sizeOf(usize))) {
-                break;
-            }
-
-            const str_ptr = @as(*const usize, @ptrFromInt(ptr_addr)).*;
-            if (str_ptr == 0) break;
-
-            const env_slice = protection.copyStringFromUser(&env_buffers[env_count], str_ptr) catch {
-                break;
-            };
-            env_entries[env_count] = env_buffers[env_count][0..env_slice.len];
-            env_count += 1;
-        }
-    }
-
-    const pid = external.launchExternalCommandWithEnv(argv_ptrs[0..argv_count], env_entries[0..env_count], null, null, null) catch |err| {
+    const pid = external.launchExternalCommandWithEnv(argv_ptrs[0..argv_count], env_entries[0..env_count], null, null, null, null) catch |err| {
         return switch (err) {
             error.CommandNotFound => abi.ENOENT,
             error.CommandReadFailed, error.RedirectDupFailed => abi.EIO,
@@ -201,6 +161,111 @@ pub fn sys_spawn(path: [*]const u8, argv: usize, envp: usize) i32 {
     };
 
     return @intCast(pid);
+}
+
+pub fn sys_spawn_with_fds(path: [*]const u8, argv: usize, envp: usize, stdio_addr: usize) i32 {
+    var path_buf: [EXECVE_STRING_BUFFER_SIZE]u8 = undefined;
+    var argv_ptrs: [MAX_EXECVE_ARGS][*:0]const u8 = undefined;
+    var argv_buffers: [MAX_EXECVE_ARGS][EXECVE_STRING_BUFFER_SIZE]u8 = undefined;
+    var env_entries: [MAX_EXECVE_ENV][]const u8 = undefined;
+    var env_buffers: [MAX_EXECVE_ENV][EXECVE_STRING_BUFFER_SIZE]u8 = undefined;
+    const path_slice = readSpawnPath(path, &path_buf) orelse return abi.EINVAL;
+    const argv_count = readSpawnArgv(path_slice, argv, &argv_ptrs, &argv_buffers) orelse return abi.E2BIG;
+    const env_count = readSpawnEnv(envp, &env_entries, &env_buffers);
+
+    var stdio = SpawnStdio{ .stdin_fd = -1, .stdout_fd = -1, .stderr_fd = -1 };
+    if (stdio_addr != 0) {
+        if (!protection.verifyUserPointer(stdio_addr, @sizeOf(SpawnStdio))) return abi.EINVAL;
+        protection.copyFromUser(std.mem.asBytes(&stdio), stdio_addr) catch return abi.EINVAL;
+    }
+
+    const pid = external.launchExternalCommandWithEnv(
+        argv_ptrs[0..argv_count],
+        env_entries[0..env_count],
+        null,
+        normalizeSpawnFd(stdio.stdin_fd),
+        normalizeSpawnFd(stdio.stdout_fd),
+        normalizeSpawnFd(stdio.stderr_fd),
+    ) catch |err| {
+        return switch (err) {
+            error.CommandNotFound => abi.ENOENT,
+            error.CommandReadFailed, error.RedirectDupFailed => abi.EIO,
+            error.CommandPathTooLong,
+            error.ArgumentTooLong,
+            error.CommandTooLarge,
+            error.EnvironmentTooLarge,
+            => abi.E2BIG,
+            error.TooManyLaunches => abi.EAGAIN,
+        };
+    };
+
+    return @intCast(pid);
+}
+
+fn readSpawnPath(path: [*]const u8, path_buf: *[EXECVE_STRING_BUFFER_SIZE]u8) ?[]const u8 {
+    return protection.copyStringFromUser(path_buf, @intFromPtr(path)) catch null;
+}
+
+fn readSpawnArgv(
+    path_slice: []const u8,
+    argv: usize,
+    argv_ptrs: *[MAX_EXECVE_ARGS][*:0]const u8,
+    argv_buffers: *[MAX_EXECVE_ARGS][EXECVE_STRING_BUFFER_SIZE]u8,
+) ?usize {
+    var argv_count: usize = 0;
+
+    if (argv != 0) {
+        while (argv_count < argv_ptrs.len) {
+            const ptr_addr = argv + argv_count * @sizeOf(usize);
+            if (!protection.verifyUserPointer(ptr_addr, @sizeOf(usize))) break;
+
+            const str_ptr = @as(*const usize, @ptrFromInt(ptr_addr)).*;
+            if (str_ptr == 0) break;
+
+            const arg_slice = protection.copyStringFromUser(&argv_buffers[argv_count], str_ptr) catch break;
+            argv_buffers[argv_count][arg_slice.len] = 0;
+            argv_ptrs[argv_count] = @ptrCast(argv_buffers[argv_count][0..].ptr);
+            argv_count += 1;
+        }
+    }
+
+    if (argv_count == 0) {
+        if (path_slice.len + 1 > argv_buffers[0].len) return null;
+        @memcpy(argv_buffers[0][0..path_slice.len], path_slice);
+        argv_buffers[0][path_slice.len] = 0;
+        argv_ptrs[0] = @ptrCast(argv_buffers[0][0..].ptr);
+        argv_count = 1;
+    }
+
+    return argv_count;
+}
+
+fn readSpawnEnv(
+    envp: usize,
+    env_entries: *[MAX_EXECVE_ENV][]const u8,
+    env_buffers: *[MAX_EXECVE_ENV][EXECVE_STRING_BUFFER_SIZE]u8,
+) usize {
+    var env_count: usize = 0;
+
+    if (envp != 0) {
+        while (env_count < env_entries.len) {
+            const ptr_addr = envp + env_count * @sizeOf(usize);
+            if (!protection.verifyUserPointer(ptr_addr, @sizeOf(usize))) break;
+
+            const str_ptr = @as(*const usize, @ptrFromInt(ptr_addr)).*;
+            if (str_ptr == 0) break;
+
+            const env_slice = protection.copyStringFromUser(&env_buffers[env_count], str_ptr) catch break;
+            env_entries[env_count] = env_buffers[env_count][0..env_slice.len];
+            env_count += 1;
+        }
+    }
+
+    return env_count;
+}
+
+fn normalizeSpawnFd(fd: i32) ?i32 {
+    return if (fd < 0) null else fd;
 }
 
 pub fn sys_wait4(pid: i32, status: ?*i32, options: i32, rusage: ?*anyopaque) i32 {

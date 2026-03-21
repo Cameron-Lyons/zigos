@@ -1,4 +1,5 @@
 const process = @import("process.zig");
+const scheduler = @import("scheduler.zig");
 const readiness = @import("syscall/readiness.zig");
 const vga = @import("../drivers/vga.zig");
 const numfmt = @import("../utils/numfmt.zig");
@@ -274,6 +275,30 @@ pub fn kill(pid: i32, signum: i32) !void {
     sendSignal(target, signum);
 }
 
+pub fn killProcessGroup(pgid: u32, signum: i32) !void {
+    if (signum < 0 or signum > 64) {
+        return error.InvalidSignal;
+    }
+    if (pgid == 0) {
+        return error.NoSuchProcess;
+    }
+
+    var proc = process.getProcessList();
+    var matched = false;
+    while (proc) |current| : (proc = current.next) {
+        if (current.state == .Terminated) continue;
+        if (current.process_group != pgid) continue;
+        matched = true;
+        if (signum != 0) {
+            sendSignal(current, signum);
+        }
+    }
+
+    if (!matched) {
+        return error.NoSuchProcess;
+    }
+}
+
 pub fn sigaction(signum: i32, act: ?*const SigAction, oldact: ?*SigAction) !void {
     if (signum <= 0 or signum > 64 or signum == SIGKILL or signum == SIGSTOP) {
         return error.InvalidSignal;
@@ -373,7 +398,9 @@ pub fn sendSignal(target: *process.Process, signum: i32) void {
     target.signals.pending.add(signum, &info);
     readiness.notifyPseudo();
 
-    if (target.state == .Waiting or (signum == SIGCONT and target.state == .Stopped)) {
+    if (target.state == .Blocked or target.state == .Waiting) {
+        scheduler.unblockProcess(target);
+    } else if (signum == SIGCONT and target.state == .Stopped) {
         target.state = .Ready;
     }
 }

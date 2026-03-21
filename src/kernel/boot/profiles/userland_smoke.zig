@@ -69,6 +69,8 @@ fn userlandSmokeRunner() callconv(.c) void {
         .{ .command = "/bin/cat /proc/mounts", .marker = "USERLAND:PROC_MOUNTS" },
         .{ .command = "/bin/cat /sys/kernel/hostname", .marker = "USERLAND:SYS_HOSTNAME" },
         .{ .command = "/bin/echo USERLAND:PIPE | /bin/cat", .marker = "USERLAND:PIPE_OK" },
+        .{ .command = "/bin/cat /etc/motd | /bin/grep ZigOS | /bin/uniq > /tmp/pipe-chain.txt", .marker = "USERLAND:PIPE_CHAIN_WRITE" },
+        .{ .command = "/bin/cat /tmp/pipe-chain.txt", .marker = "USERLAND:PIPE_CHAIN_READ" },
         .{ .command = "/bin/echo USERLAND:REDIRECT > /tmp/redir.txt", .marker = "USERLAND:REDIRECT_WRITE" },
         .{ .command = "/bin/cat < /tmp/redir.txt", .marker = "USERLAND:REDIRECT_READ" },
     };
