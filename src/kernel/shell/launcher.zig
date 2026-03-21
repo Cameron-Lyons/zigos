@@ -35,6 +35,12 @@ pub const ExternalLaunchError = error{
     TooManyLaunches,
 };
 
+pub const ProcessGroupTarget = union(enum) {
+    inherit,
+    own,
+    existing: u32,
+};
+
 const ExternalCommandLaunch = struct {
     in_use: bool = false,
     pid: u32 = 0,
@@ -124,10 +130,18 @@ pub fn releaseIfPresent(pid: u32) void {
 }
 
 pub fn launchExternalCommand(command_args: []const [*:0]const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32) ExternalLaunchError!u32 {
-    return launchExternalCommandWithEnv(command_args, null, nice_value, stdin_fd, stdout_fd);
+    return launchExternalCommandWithEnvInGroup(command_args, null, nice_value, stdin_fd, stdout_fd, null, .own);
 }
 
-pub fn launchExternalCommandWithEnv(command_args: []const [*:0]const u8, env_entries: ?[]const []const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32) ExternalLaunchError!u32 {
+pub fn launchExternalCommandWithEnv(command_args: []const [*:0]const u8, env_entries: ?[]const []const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32, stderr_fd: ?i32) ExternalLaunchError!u32 {
+    return launchExternalCommandWithEnvInGroup(command_args, env_entries, nice_value, stdin_fd, stdout_fd, stderr_fd, .inherit);
+}
+
+pub fn launchExternalCommandInGroup(command_args: []const [*:0]const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32, process_group: ProcessGroupTarget) ExternalLaunchError!u32 {
+    return launchExternalCommandWithEnvInGroup(command_args, null, nice_value, stdin_fd, stdout_fd, null, process_group);
+}
+
+pub fn launchExternalCommandWithEnvInGroup(command_args: []const [*:0]const u8, env_entries: ?[]const []const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32, stderr_fd: ?i32, process_group: ProcessGroupTarget) ExternalLaunchError!u32 {
     if (command_args.len == 0) {
         return error.CommandNotFound;
     }
@@ -163,9 +177,15 @@ pub fn launchExternalCommandWithEnv(command_args: []const [*:0]const u8, env_ent
     if (process.getEffectiveCurrent()) |parent| {
         user_proc.creds = parent.creds;
     }
+    switch (process_group) {
+        .inherit => {},
+        .own => user_proc.process_group = user_proc.pid,
+        .existing => |pgid| user_proc.process_group = pgid,
+    }
     user_proc.stdin_redirect = duplicateRedirectFd(stdin_fd) catch return error.RedirectDupFailed;
     errdefer process.cleanupStdioRedirects(user_proc);
     user_proc.stdout_redirect = duplicateRedirectFd(stdout_fd) catch return error.RedirectDupFailed;
+    user_proc.stderr_redirect = duplicateRedirectFd(stderr_fd) catch return error.RedirectDupFailed;
     external_launch_registry.setPid(launch, user_proc.pid);
     restoreInterrupts(irq_flags);
 

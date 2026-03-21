@@ -114,6 +114,8 @@ for marker in \
   "USERLAND:PROC_MOUNTS" \
   "USERLAND:SYS_HOSTNAME" \
   "USERLAND:PIPE_OK" \
+  "USERLAND:PIPE_CHAIN_WRITE" \
+  "USERLAND:PIPE_CHAIN_READ" \
   "USERLAND:REDIRECT_WRITE" \
   "USERLAND:REDIRECT_READ" \
   "USERLAND:BG_START" \
@@ -131,6 +133,7 @@ for marker in \
   "uid=0(root) gid=0(root) euid=0(root) egid=0(root)" \
   "zigos" \
   "USERLAND:PIPE" \
+  "Welcome to ZigOS userspace smoke test." \
   "USERLAND:REDIRECT" \
   "[1] Running /bin/sleep 3" \
   "[1] Stopped /bin/sleep 3" \

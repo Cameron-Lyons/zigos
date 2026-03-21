@@ -66,11 +66,18 @@ pub const shell_pipeline_commandline = BenchmarkMetadata{
     .bytes_per_iteration = pipeline_input_a.len,
 };
 
+pub const shell_glob_compile_matrix = BenchmarkMetadata{
+    .name = "shell.glob.compile_matrix",
+    .description = "compile realistic shell globs into reusable matcher state",
+    .default_iterations = 40_000,
+    .bytes_per_iteration = globPatternBytes(),
+};
+
 pub const shell_glob_match_matrix = BenchmarkMetadata{
     .name = "shell.glob.match_matrix",
-    .description = "match realistic shell globs against a rotating file matrix",
+    .description = "match cached shell globs against a rotating file matrix",
     .default_iterations = 10_000,
-    .bytes_per_iteration = globWorkloadBytes(),
+    .bytes_per_iteration = globMatchWorkloadBytes(),
 };
 
 pub const syscall_at_resolve_matrix = BenchmarkMetadata{
@@ -108,7 +115,15 @@ pub const ipc_semops_batch = BenchmarkMetadata{
     .default_iterations = 150_000,
 };
 
-pub fn globWorkloadBytes() usize {
+pub fn globPatternBytes() usize {
+    var total: usize = 0;
+    for (glob_patterns) |pattern| {
+        total += pattern.len;
+    }
+    return total;
+}
+
+pub fn globMatchWorkloadBytes() usize {
     var total: usize = 0;
     for (glob_patterns) |pattern| {
         for (glob_candidates) |candidate| {

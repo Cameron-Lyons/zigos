@@ -25,6 +25,7 @@ const TcpBenchConn = workload.TcpBenchConn(tcp);
 const benchmarks = [_]Benchmark{
     .{ .meta = workload.shell_tokenize_expansions, .run = benchShellTokenizeExpansions },
     .{ .meta = workload.shell_pipeline_commandline, .run = benchShellPipelineCommandline },
+    .{ .meta = workload.shell_glob_compile_matrix, .run = benchShellGlobCompileMatrix },
     .{ .meta = workload.shell_glob_match_matrix, .run = benchShellGlobMatchMatrix },
     .{ .meta = workload.syscall_at_resolve_matrix, .run = benchSyscallAtResolveMatrix },
     .{ .meta = workload.vfs_fd_freelist_churn, .run = benchVfsFdFreelistChurn },
@@ -164,18 +165,40 @@ fn benchShellPipelineCommandline(iterations: usize) BenchmarkError!u64 {
 fn benchShellGlobMatchMatrix(iterations: usize) BenchmarkError!u64 {
     var sink: u64 = 0;
     var offset: usize = 0;
+    var cache = shell_glob.PatternCache(workload.glob_patterns.len){};
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
         for (workload.glob_patterns, 0..) |pattern, pattern_idx| {
+            const compiled = cache.getOrCompile(pattern) catch unreachable;
             var candidate_idx = pattern_idx + offset;
             var count: usize = 0;
             while (count < workload.glob_candidates.len) : (count += 1) {
                 const candidate = workload.glob_candidates[candidate_idx % workload.glob_candidates.len];
-                if (shell_glob.wildcardMatch(pattern, candidate)) sink +%= 1;
+                if (compiled.matches(candidate)) sink +%= 1;
                 candidate_idx += 1;
             }
         }
         offset = (offset + 1 + @as(usize, @intCast(sink & 3))) % workload.glob_candidates.len;
+    }
+    std.mem.doNotOptimizeAway(&sink);
+    return sink;
+}
+
+fn benchShellGlobCompileMatrix(iterations: usize) BenchmarkError!u64 {
+    var sink: u64 = 0;
+    var offset: usize = 0;
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        for (workload.glob_patterns, 0..) |_, pattern_idx| {
+            const pattern = workload.glob_patterns[(pattern_idx + offset) % workload.glob_patterns.len];
+            const compiled = shell_glob.CompiledPattern.init(pattern) catch unreachable;
+            sink +%= compiled.len;
+            sink +%= compiled.literal_prefix_len;
+            sink +%= compiled.literal_suffix_len;
+            sink +%= @intFromBool(compiled.has_wildcards);
+            std.mem.doNotOptimizeAway(&compiled);
+        }
+        offset = (offset + 1 + @as(usize, @intCast(sink & 1))) % workload.glob_patterns.len;
     }
     std.mem.doNotOptimizeAway(&sink);
     return sink;
