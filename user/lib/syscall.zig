@@ -38,6 +38,9 @@ pub const TTY_LFLAG_ICANON = abi.TTY_LFLAG_ICANON;
 pub const TTY_LFLAG_ECHO = abi.TTY_LFLAG_ECHO;
 pub const AT_FDCWD = abi.AT_FDCWD;
 pub const WNOHANG = abi.WNOHANG;
+pub const PROC_STATE_TERMINATED = abi.PROC_STATE_TERMINATED;
+pub const HOSTNAME_MAX_LEN = abi.HOSTNAME_MAX_LEN;
+pub const HOSTNAME_BUFFER_LEN = abi.HOSTNAME_BUFFER_LEN;
 
 pub const LinuxDirent = extern struct {
     d_ino: u32,

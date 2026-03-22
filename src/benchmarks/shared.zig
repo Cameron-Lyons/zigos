@@ -47,6 +47,10 @@ pub const at_cases = [_]AtCase{
 };
 
 pub const tcp_payload_len: usize = 1460;
+pub const tcp_bench_src_port: u16 = 8080;
+pub const tcp_bench_dst_port: u16 = 443;
+pub const tcp_bench_ack_num: u32 = 0x01020304;
+pub const tcp_bench_window_size: u16 = 4096;
 pub const tcp_ipv4_src: u32 = 0x0a00020f;
 pub const tcp_ipv4_dst: u32 = 0x0a00020a;
 pub const tcp_ipv6_src = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
@@ -183,6 +187,21 @@ pub fn makeTcpPayload() [tcp_payload_len]u8 {
         byte.* = @intCast((idx * 31 + 17) % 251);
     }
     return payload;
+}
+
+pub fn makeTcpHeader(comptime Tcp: type) Tcp.Header {
+    var header = Tcp.Header{
+        .src_port = tcp_bench_src_port,
+        .dst_port = tcp_bench_dst_port,
+        .seq_num = 0,
+        .ack_num = tcp_bench_ack_num,
+        .data_offset_and_flags = 0,
+        .window_size = tcp_bench_window_size,
+        .checksum = 0,
+        .urgent_ptr = 0,
+    };
+    header.setDataOffsetAndFlags(@intCast(@sizeOf(Tcp.Header)), Tcp.Flags.ACK | Tcp.Flags.PSH);
+    return header;
 }
 
 pub fn TcpBenchConn(comptime Tcp: type) type {
