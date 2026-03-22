@@ -12,15 +12,15 @@ const vga = @import("../../drivers/vga.zig");
 const x86 = @import("../../../arch/x86.zig");
 
 const UtsName = extern struct {
-    sysname: [65]u8,
-    nodename: [65]u8,
-    release: [65]u8,
-    version: [65]u8,
-    machine: [65]u8,
+    sysname: [abi.HOSTNAME_BUFFER_LEN]u8,
+    nodename: [abi.HOSTNAME_BUFFER_LEN]u8,
+    release: [abi.HOSTNAME_BUFFER_LEN]u8,
+    version: [abi.HOSTNAME_BUFFER_LEN]u8,
+    machine: [abi.HOSTNAME_BUFFER_LEN]u8,
 };
 
-var system_hostname: [65]u8 = blk: {
-    var name = [_]u8{0} ** 65;
+var system_hostname: [abi.HOSTNAME_BUFFER_LEN]u8 = blk: {
+    var name = [_]u8{0} ** abi.HOSTNAME_BUFFER_LEN;
     name[0] = 'z';
     name[1] = 'i';
     name[2] = 'g';
@@ -45,7 +45,7 @@ pub fn getHostname() []const u8 {
 }
 
 pub fn setHostname(name: []const u8) void {
-    const len = @min(name.len, 64);
+    const len = @min(name.len, abi.HOSTNAME_MAX_LEN);
     @memset(&system_hostname, 0);
     @memcpy(system_hostname[0..len], name[0..len]);
     hostname_len = len;
@@ -56,7 +56,7 @@ pub fn sys_gethostname(name_addr: usize, len: usize) i32 {
     if (!protection.verifyUserPointer(name_addr, len)) return abi.EINVAL;
 
     const copy_len = @min(len - 1, hostname_len);
-    var buf: [65]u8 = undefined;
+    var buf: [abi.HOSTNAME_BUFFER_LEN]u8 = undefined;
     @memcpy(buf[0..copy_len], system_hostname[0..copy_len]);
     buf[copy_len] = 0;
 
@@ -71,10 +71,10 @@ pub fn sys_sethostname(name_addr: usize, len: usize) i32 {
         }
     }
 
-    if (len > 64) return abi.EINVAL;
+    if (len > abi.HOSTNAME_MAX_LEN) return abi.EINVAL;
     if (!protection.verifyUserPointer(name_addr, len)) return abi.EINVAL;
 
-    var buf: [64]u8 = undefined;
+    var buf: [abi.HOSTNAME_MAX_LEN]u8 = undefined;
     protection.copyFromUser(buf[0..len], name_addr) catch return abi.EINVAL;
 
     setHostname(buf[0..len]);
@@ -95,9 +95,9 @@ pub fn sys_uname(buf_addr: usize) i32 {
     return 0;
 }
 
-fn fillField(dest: *[65]u8, src: []const u8) void {
+fn fillField(dest: *[abi.HOSTNAME_BUFFER_LEN]u8, src: []const u8) void {
     @memset(dest, 0);
-    const len = @min(src.len, 64);
+    const len = @min(src.len, abi.HOSTNAME_MAX_LEN);
     @memcpy(dest[0..len], src[0..len]);
 }
 

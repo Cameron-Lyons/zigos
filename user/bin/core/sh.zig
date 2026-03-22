@@ -13,7 +13,6 @@ const MAX_STAGES = 8;
 const MAX_PATH = 256;
 const MAX_TEMP_PATH = 64;
 const MAX_PROC_INFO = 64;
-const PROCESS_STATE_TERMINATED: u8 = 3;
 
 const ParseError = error{
     UnterminatedQuote,
@@ -494,7 +493,7 @@ fn waitForChild(pid: i32) i32 {
         while (idx < @as(usize, @intCast(count))) : (idx += 1) {
             if (proc_info[idx].pid != @as(u32, @intCast(pid))) continue;
             found = true;
-            terminated = proc_info[idx].state == PROCESS_STATE_TERMINATED;
+            terminated = proc_info[idx].state == syscall.PROC_STATE_TERMINATED;
             break;
         }
 

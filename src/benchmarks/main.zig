@@ -37,7 +37,6 @@ const RunStats = struct {
 
 const sem_ops = workload.makeSemOps(ipc);
 const expansion_hooks = workload.makeExpansionHooks(parser);
-const TcpBenchConn = workload.TcpBenchConn(tcp);
 
 const registry_lookup_inputs = [_][]const u8{
     "help",
@@ -274,21 +273,6 @@ fn nsToMs(value: u64) f64 {
     return @as(f64, @floatFromInt(value)) / @as(f64, @floatFromInt(std.time.ns_per_ms));
 }
 
-fn makeTcpHeader() tcp.Header {
-    var header = tcp.Header{
-        .src_port = 8080,
-        .dst_port = 443,
-        .seq_num = 0,
-        .ack_num = 0x01020304,
-        .data_offset_and_flags = 0,
-        .window_size = 4096,
-        .checksum = 0,
-        .urgent_ptr = 0,
-    };
-    header.setDataOffsetAndFlags(@intCast(@sizeOf(tcp.Header)), tcp.Flags.ACK | tcp.Flags.PSH);
-    return header;
-}
-
 fn benchShellTokenizeExpansions(iterations: usize) void {
     var sink: usize = 0;
     var i: usize = 0;
@@ -418,7 +402,7 @@ fn benchVfsFdFreelistChurn(iterations: usize) void {
 fn benchTcpChecksumDualStack(iterations: usize) void {
     var sink: usize = 0;
     var payload = workload.makeTcpPayload();
-    var header = makeTcpHeader();
+    var header = workload.makeTcpHeader(tcp);
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
         header.seq_num +%= @intCast(i + 1);
