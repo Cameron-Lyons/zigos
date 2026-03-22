@@ -7,6 +7,7 @@ pub const BootProfile = enum {
     benchmark,
     smp_stress,
     userland_smoke,
+    userland_sh_smoke,
 };
 
 pub const KernelArtifact = struct {

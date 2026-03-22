@@ -6,11 +6,13 @@ const fd_freelist = @import("../fs/fd_freelist.zig");
 const ipc = @import("../process/syscall/ipc_semantics.zig");
 const at_semantics = @import("../process/syscall/at_semantics.zig");
 const path_semantics = @import("../process/syscall/path_semantics.zig");
+const posix = @import("../utils/posix.zig");
 const parser = @import("../shell/parser/pipeline.zig");
+const shell_launcher = @import("../shell/launcher.zig");
 const shell_glob = @import("../shell/glob.zig");
 const tcp = @import("../net/tcp/protocol.zig");
 
-const BenchmarkError = parser.TokenizationError || parser.PipelineConfigError || path_semantics.Error || error{SemOpFailed};
+const BenchmarkError = parser.TokenizationError || parser.PipelineConfigError || path_semantics.Error || error{ SemOpFailed, SpawnWaitFailed };
 const BenchmarkFn = *const fn (iterations: usize) BenchmarkError!u64;
 
 const Benchmark = struct {
@@ -21,12 +23,14 @@ const Benchmark = struct {
 const sem_ops = workload.makeSemOps(ipc);
 const expansion_hooks = workload.makeExpansionHooks(parser);
 const TcpBenchConn = workload.TcpBenchConn(tcp);
+const true_command = [_][*:0]const u8{"/bin/true"};
 
 const benchmarks = [_]Benchmark{
     .{ .meta = workload.shell_tokenize_expansions, .run = benchShellTokenizeExpansions },
     .{ .meta = workload.shell_pipeline_commandline, .run = benchShellPipelineCommandline },
     .{ .meta = workload.shell_glob_compile_matrix, .run = benchShellGlobCompileMatrix },
     .{ .meta = workload.shell_glob_match_matrix, .run = benchShellGlobMatchMatrix },
+    .{ .meta = workload.shell_user_spawn_wait, .run = benchShellUserSpawnWait },
     .{ .meta = workload.syscall_at_resolve_matrix, .run = benchSyscallAtResolveMatrix },
     .{ .meta = workload.vfs_fd_freelist_churn, .run = benchVfsFdFreelistChurn },
     .{ .meta = workload.tcpChecksumDualStack(@sizeOf(tcp.Header)), .run = benchTcpChecksumDualStack },
@@ -199,6 +203,21 @@ fn benchShellGlobCompileMatrix(iterations: usize) BenchmarkError!u64 {
             std.mem.doNotOptimizeAway(&compiled);
         }
         offset = (offset + 1 + @as(usize, @intCast(sink & 1))) % workload.glob_patterns.len;
+    }
+    std.mem.doNotOptimizeAway(&sink);
+    return sink;
+}
+
+fn benchShellUserSpawnWait(iterations: usize) BenchmarkError!u64 {
+    var sink: u64 = 0;
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        const pid = shell_launcher.launchExternalCommand(true_command[0..], null, null, null) catch return error.SpawnWaitFailed;
+        var status: i32 = 0;
+        const waited = posix.wait4(@intCast(pid), &status, 0, null) catch return error.SpawnWaitFailed;
+        shell_launcher.releaseIfPresent(pid);
+        if (waited != @as(i32, @intCast(pid)) or status != 0) return error.SpawnWaitFailed;
+        sink +%= @as(u64, @intCast(pid));
     }
     std.mem.doNotOptimizeAway(&sink);
     return sink;

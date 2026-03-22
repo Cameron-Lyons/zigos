@@ -80,6 +80,13 @@ pub const shell_glob_match_matrix = BenchmarkMetadata{
     .bytes_per_iteration = globMatchWorkloadBytes(),
 };
 
+pub const shell_user_spawn_wait = BenchmarkMetadata{
+    .name = "shell.user.spawn_wait",
+    .description = "spawn a tiny user program and wait for it to exit",
+    .default_iterations = 128,
+    .bytes_per_iteration = "/bin/true".len,
+};
+
 pub const syscall_at_resolve_matrix = BenchmarkMetadata{
     .name = "syscall.at.resolve_matrix",
     .description = "resolve cwd and dirfd-relative paths inside chroot roots",

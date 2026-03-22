@@ -65,6 +65,14 @@ fn settings() ProfileSettings {
             .init_runtime_extras = false,
             .exit_on_completion = true,
         },
+        .userland_sh_smoke => .{
+            .name = "userland_sh_smoke",
+            .init_acpi = false,
+            .init_smp = false,
+            .init_network_stack = false,
+            .init_runtime_extras = false,
+            .exit_on_completion = true,
+        },
     };
 }
 
