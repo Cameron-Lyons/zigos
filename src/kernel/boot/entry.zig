@@ -14,6 +14,7 @@ const test_vm_profile = @import("profiles/test_vm.zig");
 const benchmark_profile = @import("profiles/benchmark.zig");
 const smp_stress_profile = @import("profiles/smp_stress.zig");
 const userland_smoke_profile = @import("profiles/userland_smoke.zig");
+const userland_sh_smoke_profile = @import("profiles/userland_sh_smoke.zig");
 
 pub fn kernelMain() void {
     x86.enableSse();
@@ -42,5 +43,6 @@ pub fn kernelMain() void {
         .benchmark => benchmark_profile.run(),
         .smp_stress => smp_stress_profile.run(),
         .userland_smoke => userland_smoke_profile.run(),
+        .userland_sh_smoke => userland_sh_smoke_profile.run(),
     }
 }
