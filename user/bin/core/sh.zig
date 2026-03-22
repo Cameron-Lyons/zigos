@@ -57,7 +57,7 @@ pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[
 
         @memcpy(command_buffer[0..command.len], command);
         command_buffer[command.len] = 0;
-        return runCommand(command_buffer[0 .. command.len + 1], envp);
+        return runCommand(command_buffer[0 .. command.len + 1], envp, true);
     }
 
     return runInteractive(envp);
@@ -73,11 +73,11 @@ fn runInteractive(envp: [*]const ?[*:0]const u8) i32 {
             return 0;
         };
 
-        _ = runCommand(line_buffer[0 .. maybe_len + 1], envp);
+        _ = runCommand(line_buffer[0 .. maybe_len + 1], envp, false);
     }
 }
 
-fn runCommand(line: []u8, envp: [*]const ?[*:0]const u8) i32 {
+fn runCommand(line: []u8, envp: [*]const ?[*:0]const u8, exec_simple_external: bool) i32 {
     var pipeline = Pipeline{};
     parsePipeline(line, &pipeline) catch |err| {
         printParseError(err);
@@ -89,6 +89,10 @@ fn runCommand(line: []u8, envp: [*]const ?[*:0]const u8) i32 {
     if (pipeline.stage_count == 1 and !stageHasRedirection(first_stage)) {
         if (tryBuiltin(first_stage, envp)) |code| {
             return code;
+        }
+
+        if (exec_simple_external) {
+            return execSimpleStage(first_stage, envp);
         }
 
         return spawnStage(first_stage, envp);
@@ -383,6 +387,15 @@ fn spawnStage(stage: *const Stage, envp: [*]const ?[*:0]const u8) i32 {
     return waitForChild(pid);
 }
 
+fn execSimpleStage(stage: *const Stage, envp: [*]const ?[*:0]const u8) i32 {
+    const rc = syscall.execve(stage.argv[0].?, @ptrCast(&stage.argv[0]), envp);
+    if (syscall.isError(rc)) {
+        stdio.eprint("sh: failed to exec {s}\n", .{cstr.optionalSlice(stage.argv[0])});
+        return 1;
+    }
+    return 1;
+}
+
 fn runPipeline(pipeline: *const Pipeline, envp: [*]const ?[*:0]const u8) i32 {
     var temp_paths: [MAX_STAGES - 1][MAX_TEMP_PATH]u8 = [_][MAX_TEMP_PATH]u8{[_]u8{0} ** MAX_TEMP_PATH} ** (MAX_STAGES - 1);
     var temp_lens: [MAX_STAGES - 1]usize = [_]usize{0} ** (MAX_STAGES - 1);
@@ -499,7 +512,11 @@ fn waitForChild(pid: i32) i32 {
                 stdio.eputs("sh: child vanished\n");
                 return 1;
             }
+            _ = syscall.schedYield();
+            continue;
         }
+
+        _ = syscall.schedYield();
     }
 }
 

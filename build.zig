@@ -36,8 +36,9 @@ pub fn build(b: *std.Build) void {
     const benchmark_kernel = kernel_build.addKernelArtifact(b, target, optimize, "kernel-benchmark.elf", .benchmark, user_assets_module);
     const smp_stress_kernel = kernel_build.addKernelArtifact(b, target, optimize, "kernel-smp-stress.elf", .smp_stress, user_assets_module);
     const userland_smoke_kernel = kernel_build.addKernelArtifact(b, target, optimize, "kernel-userland-smoke.elf", .userland_smoke, user_assets_module);
+    const userland_sh_smoke_kernel = kernel_build.addKernelArtifact(b, target, optimize, "kernel-userland-sh-smoke.elf", .userland_sh_smoke, user_assets_module);
 
-    inline for (&.{ dev_kernel, ci_smoke_kernel, vm_test_kernel, benchmark_kernel, smp_stress_kernel, userland_smoke_kernel }) |artifact| {
+    inline for (&.{ dev_kernel, ci_smoke_kernel, vm_test_kernel, benchmark_kernel, smp_stress_kernel, userland_smoke_kernel, userland_sh_smoke_kernel }) |artifact| {
         userland_build.dependOnUserPrograms(&artifact.compile_step.step, user_programs[0..], &.{ &motd_install.step, &passwd_install.step });
     }
 
@@ -58,6 +59,9 @@ pub fn build(b: *std.Build) void {
 
     const userland_smoke_kernel_step = b.step("kernel-userland-smoke", "Build the userland smoke-test kernel");
     userland_smoke_kernel_step.dependOn(userland_smoke_kernel.install_step);
+
+    const userland_sh_smoke_kernel_step = b.step("kernel-userland-sh-smoke", "Build the userland sh smoke-test kernel");
+    userland_sh_smoke_kernel_step.dependOn(userland_sh_smoke_kernel.install_step);
 
     const userland_step = b.step("userland", "Build the staged user programs");
     userland_build.dependOnUserPrograms(userland_step, user_programs[0..], &.{ &motd_install.step, &passwd_install.step });
@@ -148,6 +152,31 @@ pub fn build(b: *std.Build) void {
     const run_userland_smoke_step = b.step("run-userland-smoke", "Run the userland smoke kernel in QEMU");
     run_userland_smoke_step.dependOn(&run_userland_smoke_cmd.step);
 
+    const run_userland_sh_smoke_cmd = b.addSystemCommand(&.{
+        "qemu-system-x86_64",
+        "-kernel",
+        userland_sh_smoke_kernel.output_path,
+        "-m",
+        "128M",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-monitor",
+        "none",
+        "-no-reboot",
+        "-no-shutdown",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-drive",
+        "file=" ++ shared.rootfs_image_path ++ ",if=ide,format=raw,id=disk0",
+    });
+    run_userland_sh_smoke_cmd.step.dependOn(userland_sh_smoke_kernel.install_step);
+    run_userland_sh_smoke_cmd.step.dependOn(&rootfs_cmd.step);
+
+    const run_userland_sh_smoke_step = b.step("run-userland-sh-smoke", "Run the focused /bin/sh smoke kernel in QEMU");
+    run_userland_sh_smoke_step.dependOn(&run_userland_sh_smoke_cmd.step);
+
     const userland_smoke_test_cmd = b.addSystemCommand(&.{
         "bash",
         "scripts/run-userland-smoke.sh",
@@ -161,6 +190,20 @@ pub fn build(b: *std.Build) void {
 
     const userland_smoke_test_step = b.step("userland-smoke-test", "Run the automated userland smoke test");
     userland_smoke_test_step.dependOn(&userland_smoke_test_cmd.step);
+
+    const userland_sh_smoke_test_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-userland-sh-smoke.sh",
+        userland_sh_smoke_kernel.output_path,
+        shared.rootfs_image_path,
+        "build/userland-sh-smoke.log",
+        "build/userland-sh-smoke-rootfs.txt",
+    });
+    userland_sh_smoke_test_cmd.step.dependOn(userland_sh_smoke_kernel.install_step);
+    userland_sh_smoke_test_cmd.step.dependOn(&rootfs_cmd.step);
+
+    const userland_sh_smoke_test_step = b.step("userland-sh-smoke-test", "Run the focused /bin/sh smoke test");
+    userland_sh_smoke_test_step.dependOn(&userland_sh_smoke_test_cmd.step);
 
     const kernel_benchmark_test_cmd = b.addSystemCommand(&.{
         "bash",
