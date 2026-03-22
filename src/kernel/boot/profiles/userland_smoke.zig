@@ -1,25 +1,9 @@
-const std = @import("std");
 const process = @import("../../process/process.zig");
 const shell = @import("../../shell/repl.zig");
 const qemu_exit = @import("../../utils/qemu_exit.zig");
 const common = @import("../common.zig");
+const smoke_common = @import("smoke_common.zig");
 const support = @import("support.zig");
-
-fn printUserlandStepEvent(marker: []const u8, phase: []const u8) void {
-    var line_buf: [96]u8 = undefined;
-    const line = std.fmt.bufPrint(&line_buf, "USERLAND:STEP:{s}:{s}\n", .{ phase, marker }) catch "USERLAND:STEP\n";
-    @import("../../utils/console.zig").print(line);
-}
-
-fn runUserlandSmokeStep(smoke_shell: *shell.Shell, command: []const u8, marker: []const u8) bool {
-    printUserlandStepEvent(marker, "START");
-    if (!smoke_shell.runCommandLine(command)) {
-        printUserlandStepEvent(marker, "FAIL");
-        return false;
-    }
-    common.printBootMarker(marker);
-    return true;
-}
 
 fn userlandSmokeRunner() callconv(.c) void {
     var smoke_shell = shell.Shell.init();
@@ -78,7 +62,7 @@ fn userlandSmokeRunner() callconv(.c) void {
     common.printBootMarker("USERLAND:START");
 
     for (commands) |step| {
-        if (!runUserlandSmokeStep(&smoke_shell, step.command, step.marker)) {
+        if (!smoke_common.runStep("USERLAND", &smoke_shell, step.command, step.marker)) {
             common.printBootMarker("USERLAND:FAIL");
             qemu_exit.failure();
         }

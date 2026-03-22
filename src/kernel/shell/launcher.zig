@@ -15,14 +15,7 @@ const printString = common.printString;
 const MAX_COMMAND_LENGTH = parser.MAX_COMMAND_LENGTH;
 const MAX_ARGS = parser.MAX_ARGS;
 const MAX_EXTERNAL_LAUNCHES = 8;
-const EXTERNAL_LAUNCH_LOOKUP_SIZE = 16;
 const EXTERNAL_COMMAND_FILE_STORAGE_SIZE = 32768;
-
-comptime {
-    if ((EXTERNAL_LAUNCH_LOOKUP_SIZE & (EXTERNAL_LAUNCH_LOOKUP_SIZE - 1)) != 0) {
-        @compileError("EXTERNAL_LAUNCH_LOOKUP_SIZE must be a power of two");
-    }
-}
 
 pub const ExternalLaunchError = error{
     CommandNotFound,
@@ -58,7 +51,6 @@ const ExternalCommandLaunch = struct {
 
 const ExternalLaunchRegistry = struct {
     launches: [MAX_EXTERNAL_LAUNCHES]ExternalCommandLaunch = [_]ExternalCommandLaunch{ExternalCommandLaunch{}} ** MAX_EXTERNAL_LAUNCHES,
-    lookup: [EXTERNAL_LAUNCH_LOOKUP_SIZE]?*ExternalCommandLaunch = [_]?*ExternalCommandLaunch{null} ** EXTERNAL_LAUNCH_LOOKUP_SIZE,
 
     fn allocate(self: *ExternalLaunchRegistry) ExternalLaunchError!*ExternalCommandLaunch {
         for (&self.launches) |*launch| {
@@ -75,14 +67,13 @@ const ExternalLaunchRegistry = struct {
         return error.TooManyLaunches;
     }
 
-    fn release(self: *ExternalLaunchRegistry, launch: *ExternalCommandLaunch) void {
+    fn release(_: *ExternalLaunchRegistry, launch: *ExternalCommandLaunch) void {
         launch.in_use = false;
         launch.pid = 0;
         launch.path_len = 0;
         launch.argc = 0;
         launch.envc = 0;
         launch.file_len = 0;
-        self.rebuildLookup();
     }
 
     fn find(self: *ExternalLaunchRegistry, pid: u32) ?*ExternalCommandLaunch {
@@ -95,29 +86,8 @@ const ExternalLaunchRegistry = struct {
         return null;
     }
 
-    fn setPid(self: *ExternalLaunchRegistry, launch: *ExternalCommandLaunch, pid: u32) void {
+    fn setPid(_: *ExternalLaunchRegistry, launch: *ExternalCommandLaunch, pid: u32) void {
         launch.pid = pid;
-        self.rebuildLookup();
-    }
-
-    fn rebuildLookup(self: *ExternalLaunchRegistry) void {
-        @memset(&self.lookup, null);
-        for (&self.launches) |*launch| {
-            if (!launch.in_use or launch.pid == 0) continue;
-            self.insertLookup(launch);
-        }
-    }
-
-    fn insertLookup(self: *ExternalLaunchRegistry, launch: *ExternalCommandLaunch) void {
-        var idx = self.lookupIndex(launch.pid);
-        while (self.lookup[idx] != null) {
-            idx = (idx + 1) & (self.lookup.len - 1);
-        }
-        self.lookup[idx] = launch;
-    }
-
-    fn lookupIndex(self: *const ExternalLaunchRegistry, pid: u32) usize {
-        return @intCast(pid & @as(u32, @intCast(self.lookup.len - 1)));
     }
 };
 

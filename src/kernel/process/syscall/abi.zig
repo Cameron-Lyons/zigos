@@ -188,6 +188,9 @@ pub const STDIN = 0;
 pub const STDOUT = 1;
 pub const STDERR = 2;
 pub const FD_OFFSET = 3;
+pub const PROC_STATE_TERMINATED: u8 = 3;
+pub const HOSTNAME_MAX_LEN: usize = 64;
+pub const HOSTNAME_BUFFER_LEN: usize = HOSTNAME_MAX_LEN + 1;
 
 pub const O_RDONLY: u32 = 0x0000;
 pub const O_WRONLY: u32 = 0x0001;

@@ -4,7 +4,7 @@ const syscall = @import("syscall");
 
 pub const panic = runtime.panic;
 
-const buffer_size = 65;
+const buffer_size = syscall.HOSTNAME_BUFFER_LEN;
 
 pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[*:0]const u8) callconv(.c) i32 {
     _ = envp;

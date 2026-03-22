@@ -22,7 +22,6 @@ const Benchmark = struct {
 
 const sem_ops = workload.makeSemOps(ipc);
 const expansion_hooks = workload.makeExpansionHooks(parser);
-const TcpBenchConn = workload.TcpBenchConn(tcp);
 const true_command = [_][*:0]const u8{"/bin/true"};
 
 const benchmarks = [_]Benchmark{
@@ -114,21 +113,6 @@ fn formatRatioFixed2(buffer: []u8, numerator: u64, denominator: usize) []const u
     }
 
     return std.fmt.bufPrint(buffer, "{d}.{d:0>2}", .{ whole, frac }) catch "0.00";
-}
-
-fn makeTcpHeader() tcp.Header {
-    var header = tcp.Header{
-        .src_port = 8080,
-        .dst_port = 443,
-        .seq_num = 0,
-        .ack_num = 0x01020304,
-        .data_offset_and_flags = 0,
-        .window_size = 4096,
-        .checksum = 0,
-        .urgent_ptr = 0,
-    };
-    header.setDataOffsetAndFlags(@intCast(@sizeOf(tcp.Header)), tcp.Flags.ACK | tcp.Flags.PSH);
-    return header;
 }
 
 fn benchShellTokenizeExpansions(iterations: usize) BenchmarkError!u64 {
@@ -266,7 +250,7 @@ fn benchVfsFdFreelistChurn(iterations: usize) BenchmarkError!u64 {
 fn benchTcpChecksumDualStack(iterations: usize) BenchmarkError!u64 {
     var sink: u64 = 0;
     var payload = workload.makeTcpPayload();
-    var header = makeTcpHeader();
+    var header = workload.makeTcpHeader(tcp);
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
         header.seq_num +%= @intCast(i + 1);
