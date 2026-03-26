@@ -75,7 +75,7 @@ fn handlePacket(src: *const ipv6.IPv6Address, dst: *const ipv6.IPv6Address, data
 
     if (data.len < @sizeOf(ICMPv6Header)) return;
 
-    const header: *const ICMPv6Header = @ptrCast(@alignCast(data.ptr));
+    const header: *align(1) const ICMPv6Header = @ptrCast(data.ptr);
 
     switch (header.icmp_type) {
         ICMPv6Type.EchoRequest => {

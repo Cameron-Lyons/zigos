@@ -32,6 +32,9 @@ pub const EthernetFrame = struct {
 };
 
 var rx_handlers: [3]?*const fn (frame: *const EthernetFrame) void = [_]?*const fn (frame: *const EthernetFrame) void{null} ** 3;
+var tx_hook: ?*const fn (frame: []const u8) void = null;
+var tx_sender: ?*const fn (frame: []const u8) void = null;
+var mac_provider: ?*const fn () [6]u8 = null;
 
 pub fn init() void {
     vga.print("Ethernet layer initialized\n");
@@ -44,6 +47,28 @@ pub fn registerHandler(ethertype: EtherType, handler: *const fn (frame: *const E
         .IPv6 => 2,
     };
     rx_handlers[index] = handler;
+}
+
+pub fn setTxHook(hook: ?*const fn (frame: []const u8) void) void {
+    tx_hook = hook;
+}
+
+pub fn setTxSender(sender: ?*const fn (frame: []const u8) void) void {
+    tx_sender = sender;
+}
+
+pub fn setMacProvider(provider: ?*const fn () [6]u8) void {
+    mac_provider = provider;
+}
+
+pub fn getSourceMac() ?[6]u8 {
+    return rtl8139.getMACAddress() orelse
+        if (mac_provider) |provider|
+            provider()
+        else if (tx_hook != null)
+            [_]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 }
+        else
+            null;
 }
 
 pub fn sendFrame(dst_mac: [6]u8, ethertype: EtherType, data: []const u8) !void {
@@ -62,20 +87,27 @@ pub fn sendFrame(dst_mac: [6]u8, ethertype: EtherType, data: []const u8) !void {
     frame.dst_mac4 = dst_mac[4];
     frame.dst_mac5 = dst_mac[5];
 
-    if (rtl8139.getMACAddress()) |src_mac| {
-        frame.src_mac0 = src_mac[0];
-        frame.src_mac1 = src_mac[1];
-        frame.src_mac2 = src_mac[2];
-        frame.src_mac3 = src_mac[3];
-        frame.src_mac4 = src_mac[4];
-        frame.src_mac5 = src_mac[5];
-    } else {
-        return error.NoMACAddress;
-    }
+    const src_mac = getSourceMac() orelse return error.NoMACAddress;
+    frame.src_mac0 = src_mac[0];
+    frame.src_mac1 = src_mac[1];
+    frame.src_mac2 = src_mac[2];
+    frame.src_mac3 = src_mac[3];
+    frame.src_mac4 = src_mac[4];
+    frame.src_mac5 = src_mac[5];
 
     frame.ethertype = @byteSwap(@intFromEnum(ethertype));
 
     @memcpy(frame_buf[ETH_HEADER_SIZE .. ETH_HEADER_SIZE + data.len], data);
+
+    if (tx_hook) |hook| {
+        hook(frame_buf[0 .. ETH_HEADER_SIZE + data.len]);
+        return;
+    }
+
+    if (tx_sender) |sender| {
+        sender(frame_buf[0 .. ETH_HEADER_SIZE + data.len]);
+        return;
+    }
 
     try rtl8139.sendPacket(frame_buf[0 .. ETH_HEADER_SIZE + data.len]);
 }
