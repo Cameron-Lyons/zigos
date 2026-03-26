@@ -14,14 +14,8 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Install Zig
-      uses: goto-bus-stop/setup-zig@v2
-      with:
-        version: 0.15.2
-
-    - name: Install build dependencies
-      run: |
-        ./scripts/setup-deps.sh
+    - name: Set up ZigOS CI
+      uses: ./.github/actions/setup-zigos-ci
 
     - name: Install zlint
       run: |
@@ -43,190 +37,108 @@ jobs:
         actionlint
 
   host-tests:
-    runs-on: ubuntu-latest
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: Host Tests
+      command: zig build host-tests
 
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install Zig
-      uses: goto-bus-stop/setup-zig@v2
-      with:
-        version: 0.15.2
-
-    - name: Install build dependencies
-      run: |
-        ./scripts/setup-deps.sh
-
-    - name: Run host-side unit tests
-      run: |
-        zig build host-tests
-
-  build-kernel:
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install Zig
-      uses: goto-bus-stop/setup-zig@v2
-      with:
-        version: 0.15.2
-
-    - name: Install build dependencies
-      run: |
-        ./scripts/setup-deps.sh
-
-    - name: Build kernel profiles
-      run: |
-        zig build kernel
-        zig build kernel-ci-smoke
-        zig build kernel-test-vm
-        zig build kernel-bench
-        zig build kernel-smp-stress
-        zig build kernel-userland-smoke
-        zig build userland
-        zig build rootfs
+  host-benchmarks:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: Host Benchmarks
+      command: zig build bench-ci
 
   smoke-boot:
-    runs-on: ubuntu-latest
-    needs: [build-kernel]
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: Smoke Boot
+      command: ./test_kernel.sh
 
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+  vm-memory-regression:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: VM Memory Regression
+      command: zig build vm-memory-regression-test
 
-    - name: Install Zig
-      uses: goto-bus-stop/setup-zig@v2
-      with:
-        version: 0.15.2
+  vm-state-regression:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: VM State Regression
+      command: zig build vm-state-regression-test
 
-    - name: Install build dependencies
-      run: |
-        ./scripts/setup-deps.sh
+  vm-tty-regression:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: VM TTY Regression
+      command: zig build vm-tty-regression-test
 
-    - name: Smoke boot kernel
-      run: |
-        ./test_kernel.sh
+  vm-socket-regression:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: VM Socket Regression
+      command: zig build vm-socket-regression-test
 
-  vm-test:
-    runs-on: ubuntu-latest
-    needs: [build-kernel]
+  vm-event-regression:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: VM Event Regression
+      command: zig build vm-event-regression-test
 
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install Zig
-      uses: goto-bus-stop/setup-zig@v2
-      with:
-        version: 0.15.2
-
-    - name: Install build dependencies
-      run: |
-        ./scripts/setup-deps.sh
-
-    - name: Run VM test profile
-      run: |
-        zig build run-test-vm
+  vm-inotify-regression:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: VM Inotify Regression
+      command: zig build vm-inotify-regression-test
 
   userland-smoke:
-    runs-on: ubuntu-latest
-    needs: [build-kernel]
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: Userland Smoke
+      command: zig build userland-smoke-test
 
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+  userland-sh-smoke:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: Userland Sh Smoke
+      command: zig build userland-sh-smoke-test
 
-    - name: Install Zig
-      uses: goto-bus-stop/setup-zig@v2
-      with:
-        version: 0.15.2
+  manual-regression:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: Manual Regression
+      command: zig build manual-regression-test
 
-    - name: Install build dependencies
-      run: |
-        ./scripts/setup-deps.sh
+  smp-regression:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: SMP Regression
+      command: zig build smp-regression-test
 
-    - name: Run userland smoke profile
-      run: |
-        zig build userland-smoke-test
+  ext2-regression:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: Ext2 Regression
+      command: zig build ext2-regression-test
 
   kernel-bench:
-    runs-on: ubuntu-latest
-    needs: [build-kernel]
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install Zig
-      uses: goto-bus-stop/setup-zig@v2
-      with:
-        version: 0.15.2
-
-    - name: Install build dependencies
-      run: |
-        ./scripts/setup-deps.sh
-
-    - name: Run kernel benchmark profile
-      run: |
-        zig build kernel-bench-test
-
-    - name: Render kernel benchmark summary
-      if: always()
-      run: |
-        mkdir -p build
-        bash scripts/render-kernel-benchmark-summary.sh build/kernel-benchmark.log > build/kernel-benchmark-summary.md
-        cat build/kernel-benchmark-summary.md >> "$GITHUB_STEP_SUMMARY"
-
-    - name: Upload kernel benchmark log
-      if: always()
-      uses: actions/upload-artifact@v7.0.0
-      with:
-        name: kernel-benchmark-log
-        path: |
-          build/kernel-benchmark.log
-          build/kernel-benchmark-summary.md
-        if-no-files-found: warn
+    uses: ./.github/workflows/run-zig-summary-command.yml
+    with:
+      job-name: Kernel Bench
+      command: zig build kernel-bench-test
+      log-path: build/kernel-benchmark.log
+      summary-script: scripts/render-kernel-benchmark-summary.sh
+      summary-path: build/kernel-benchmark-summary.md
+      artifact-name: kernel-benchmark-log
 
   smp-stress:
-    runs-on: ubuntu-latest
-    needs: [build-kernel]
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install Zig
-      uses: goto-bus-stop/setup-zig@v2
-      with:
-        version: 0.15.2
-
-    - name: Install build dependencies
-      run: |
-        ./scripts/setup-deps.sh
-
-    - name: Run SMP stress profile
-      run: |
-        zig build smp-stress-test
-
-    - name: Render SMP stress summary
-      if: always()
-      run: |
-        mkdir -p build
-        bash scripts/render-smp-stress-summary.sh build/smp-stress.log > build/smp-stress-summary.md
-        cat build/smp-stress-summary.md >> "$GITHUB_STEP_SUMMARY"
-
-    - name: Upload SMP stress log
-      if: always()
-      uses: actions/upload-artifact@v7.0.0
-      with:
-        name: smp-stress-log
-        path: |
-          build/smp-stress.log
-          build/smp-stress-summary.md
-        if-no-files-found: warn
+    uses: ./.github/workflows/run-zig-summary-command.yml
+    with:
+      job-name: SMP Stress
+      command: zig build smp-stress-test
+      log-path: build/smp-stress.log
+      summary-script: scripts/render-smp-stress-summary.sh
+      summary-path: build/smp-stress-summary.md
+      artifact-name: smp-stress-log
 
   pr-ci-summary:
     runs-on: ubuntu-latest
@@ -356,22 +268,7 @@ jobs:
           })
 
   boot-iso:
-    runs-on: ubuntu-latest
-    needs: [build-kernel]
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install Zig
-      uses: goto-bus-stop/setup-zig@v2
-      with:
-        version: 0.15.2
-
-    - name: Install build dependencies
-      run: |
-        ./scripts/setup-deps.sh
-
-    - name: Run ISO boot test
-      run: |
-        zig build boot-test
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: ISO Boot
+      command: zig build boot-test

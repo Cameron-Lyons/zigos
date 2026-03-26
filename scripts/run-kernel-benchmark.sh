@@ -27,7 +27,9 @@ for marker in \
   "BENCH:START" \
   "BENCH:RESULT:shell.tokenize.expansions" \
   "BENCH:RESULT:shell.pipeline.commandline" \
+  "BENCH:RESULT:shell.glob.compile_matrix" \
   "BENCH:RESULT:shell.glob.match_matrix" \
+  "BENCH:RESULT:shell.user.spawn_wait" \
   "BENCH:RESULT:syscall.at.resolve_matrix" \
   "BENCH:RESULT:vfs.fd.freelist_churn" \
   "BENCH:RESULT:tcp.checksum.dual_stack" \
