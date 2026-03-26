@@ -29,6 +29,11 @@ pub fn runTCPReliabilityTests() void {
     vga.print("=== TCP Reliability Tests Complete ===\n");
 }
 
+pub fn runTCPReliabilityTestsChecked() bool {
+    runTCPReliabilityTests();
+    return fail_count == 0;
+}
+
 fn testListenSocket() void {
     vga.print("Test 1: Create listening socket\n");
     const sock_id = tcp.listen(8080) catch |err| {

@@ -13,13 +13,13 @@ Filesystem support includes both FAT32 and ext2 filesystems through a virtual fi
 - Zig compiler (0.15.2 or later)
 - NASM assembler
 - QEMU for testing
-- For disk-backed rootfs builds: `dosfstools` and `mtools`
+- For disk-backed rootfs and ext2 test images: `dosfstools`, `e2fsprogs`, and `mtools`
 - For ISO builds: GRUB `mkrescue`, `xorriso`, and `mtools`
 
 ### macOS (Homebrew)
 
 ```bash
-brew install zig nasm qemu dosfstools xorriso mtools i686-elf-grub
+brew install zig nasm qemu dosfstools e2fsprogs xorriso mtools i686-elf-grub
 ```
 
 ### Linux Packages
@@ -28,19 +28,19 @@ Ubuntu/Debian:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y zig nasm qemu-system-x86 qemu-system-i386 grub-common grub-pc-bin dosfstools xorriso mtools
+sudo apt-get install -y zig nasm qemu-system-x86 qemu-system-i386 grub-common grub-pc-bin dosfstools e2fsprogs xorriso mtools
 ```
 
 Fedora:
 
 ```bash
-sudo dnf install -y zig nasm qemu-system-x86 grub2-tools grub2-tools-extra dosfstools xorriso mtools
+sudo dnf install -y zig nasm qemu-system-x86 grub2-tools grub2-tools-extra dosfstools e2fsprogs xorriso mtools
 ```
 
 Arch Linux:
 
 ```bash
-sudo pacman -Sy --noconfirm zig nasm grub dosfstools xorriso mtools qemu-full
+sudo pacman -Sy --noconfirm zig nasm grub dosfstools e2fsprogs xorriso mtools qemu-full
 ```
 
 ### One-Command Setup
@@ -75,6 +75,15 @@ zig build kernel-bench
 # Build the scheduler stress profile
 zig build kernel-smp-stress
 
+# Build the SMP regression profile
+zig build kernel-smp-regression
+
+# Build the manual regression profile
+zig build kernel-manual-regression
+
+# Build the ext2 regression profile
+zig build kernel-ext2-regression
+
 # Run the kernel benchmark profile in headless QEMU
 zig build run-kernel-bench
 
@@ -86,6 +95,15 @@ zig build kernel-bench-test
 
 # Run the scheduler stress smoke/regression profile
 zig build smp-stress-test
+
+# Run the SMP regression profile
+zig build smp-regression-test
+
+# Run the manual regression profile for file I/O, TCP, sync, and IPC suites
+zig build manual-regression-test
+
+# Run the ext2 regression profile against a dedicated ext2 disk image
+zig build ext2-regression-test
 
 # Run the development profile in QEMU
 zig build run
@@ -99,6 +117,22 @@ zig build kernel-userland-smoke
 # Build the VM-test profile
 zig build kernel-test-vm
 
+# Build the VM core regression profile
+zig build kernel-vm-core-regression
+
+# Build the VM readiness regression profile
+zig build kernel-vm-readiness-regression
+
+# Build the VM memory, state, and tty regression profiles
+zig build kernel-vm-memory-regression
+zig build kernel-vm-state-regression
+zig build kernel-vm-tty-regression
+
+# Build the VM socket, event, and inotify regression profiles
+zig build kernel-vm-socket-regression
+zig build kernel-vm-event-regression
+zig build kernel-vm-inotify-regression
+
 # Build a bootable ISO from the development profile
 zig build iso
 
@@ -111,9 +145,21 @@ zig build run-ci-smoke
 # Run the VM test profile directly in QEMU
 zig build run-test-vm
 
+# Run the smaller VM regression profiles
+zig build vm-core-regression-test
+zig build vm-readiness-regression-test
+zig build vm-memory-regression-test
+zig build vm-state-regression-test
+zig build vm-tty-regression-test
+zig build vm-socket-regression-test
+zig build vm-event-regression-test
+zig build vm-inotify-regression-test
+
 # Run the automated userland smoke test
 zig build userland-smoke-test
 ```
+
+The VM regression logs emit per-case serial markers such as `VMMEM:CASE:PASS:page_mapping`, `VMSTATE:CASE:PASS:file_backed_mmap`, `VMSOCK:CASE:PASS:tcp_select_readiness`, and `VMINOTIFY:CASE:PASS:inotify_internal_vnode_dispatch`, so CI failures point to the exact subtest path. The aggregate `run-test-vm`, `vm-core-regression-test`, and `vm-readiness-regression-test` commands remain available for local use, but CI now relies on the split subgroup profiles and runs them directly without a separate aggregate pre-build job.
 
 `zig build iso` auto-detects `grub-mkrescue`, `i686-elf-grub-mkrescue`, or `x86_64-elf-grub-mkrescue`. You can override detection with:
 
@@ -150,6 +196,15 @@ zig build kernel-bench-test
 
 # Capture output to build/smp-stress.log and verify scheduler stress markers
 zig build smp-stress-test
+
+# Run the SMP regression suite with serial pass/fail markers
+zig build smp-regression-test
+
+# Run the broader kernel regression suite for file I/O, TCP, sync, and IPC
+zig build manual-regression-test
+
+# Run ext2 write coverage against a dedicated ext2 image attached beside the rootfs disk
+zig build ext2-regression-test
 ```
 
 ## Boot Profiles
@@ -157,8 +212,19 @@ zig build smp-stress-test
 - `dev`: starts the interactive shell and demo processes
 - `ci_smoke`: boots core services, initializes the shell, emits serial markers, and exits through QEMU debug-exit
 - `test_vm`: runs the virtual memory test suite and exits through QEMU debug-exit
+- `vm_core_regression`: runs the VM memory, process-state, mmap, and tty subset with dedicated serial pass/fail markers
+- `vm_readiness_regression`: runs the VM readiness, poll/select, eventfd, timerfd, signalfd, and inotify subset with dedicated serial pass/fail markers
+- `vm_memory_regression`: runs the VM allocation, mapping, stats, flags, and range-operation subset with dedicated serial pass/fail markers
+- `vm_state_regression`: runs the VM process-local-state and file-backed-mmap subset with dedicated serial pass/fail markers
+- `vm_tty_regression`: runs the VM tty surface subset with dedicated serial pass/fail markers
+- `vm_socket_regression`: runs the TCP, UDP, and Unix socket readiness subset with dedicated serial pass/fail markers
+- `vm_event_regression`: runs the eventfd, timerfd, and signalfd subset with dedicated serial pass/fail markers
+- `vm_inotify_regression`: runs the inotify readiness and dispatch subset with dedicated serial pass/fail markers
 - `benchmark`: boots the kernel, runs serial-reported microbenchmarks in QEMU, and exits through QEMU debug-exit
 - `smp_stress`: boots the kernel, runs a headless scheduler stress workload, emits serial markers and scheduler stats, and exits through QEMU debug-exit
+- `smp_regression`: boots the kernel with SMP startup enabled, runs the SMP validation suite, emits serial pass/fail markers, and exits through QEMU debug-exit
+- `manual_regression`: boots the kernel from the disk-backed rootfs, runs automated file I/O, TCP, synchronization, and IPC suites, emits serial pass/fail markers, and exits through QEMU debug-exit
+- `ext2_regression`: boots the kernel from the disk-backed rootfs, mounts a dedicated ext2 disk on `/mnt`, runs ext2 write coverage, emits serial pass/fail markers, and exits through QEMU debug-exit
 - `userland_smoke`: boots from the disk-backed rootfs when available, falls back to the embedded rootfs otherwise, runs the external userland smoke commands (`hello`, `echo`, `uname`, `ls`, `cat`), and exits through QEMU debug-exit
 
 The current bootstrap prefers the staged FAT disk image as `/`, with the embedded root filesystem kept as a fallback. The staged image still mirrors the bootstrap `/bin` and `/etc` content for disk-based workflows.

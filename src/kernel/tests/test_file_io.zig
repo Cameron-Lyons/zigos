@@ -29,6 +29,11 @@ pub fn runFileIOTests() void {
     vga.print("=== File I/O Tests Complete ===\n");
 }
 
+pub fn runFileIOTestsChecked() bool {
+    runFileIOTests();
+    return fail_count == 0;
+}
+
 fn testVFSOpen() void {
     vga.print("Test 1: VFS open existing path\n");
     const fd = vfs.open("/", vfs.O_RDONLY) catch |err| {
