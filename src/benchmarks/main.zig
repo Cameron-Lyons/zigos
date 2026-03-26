@@ -35,6 +35,25 @@ const RunStats = struct {
     elapsed_ns: u64 = 0,
 };
 
+const has_process_init = @hasDecl(std.process, "Init");
+
+pub const main = if (has_process_init)
+    struct {
+        fn entry(init: std.process.Init) !void {
+            const args = try init.minimal.args.toSlice(init.arena.allocator());
+            return runMain(args);
+        }
+    }.entry
+else
+    struct {
+        fn entry() !void {
+            const allocator = std.heap.page_allocator;
+            const args = try std.process.argsAlloc(allocator);
+            defer std.process.argsFree(allocator, args);
+            return runMain(args);
+        }
+    }.entry;
+
 const sem_ops = workload.makeSemOps(ipc);
 const expansion_hooks = workload.makeExpansionHooks(parser);
 
@@ -69,9 +88,7 @@ const benchmarks = [_]Benchmark{
     .{ .meta = workload.ipc_semops_batch, .run = benchIpcSemOpsBatch },
 };
 
-pub fn main(init: std.process.Init) !void {
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
-
+fn runMain(args: []const [:0]const u8) !void {
     const config = parseArgs(args[1..]) catch |err| {
         printUsage();
         return err;
