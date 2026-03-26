@@ -1,4 +1,5 @@
 const std = @import("std");
+const config = @import("../config.zig");
 const vga = @import("../drivers/vga.zig");
 const memory = @import("../memory/memory.zig");
 const paging = @import("../memory/paging.zig");
@@ -233,8 +234,12 @@ pub fn init() void {
     }
 
     enableLocalAPIC();
-    parseACPI();
-    parseMPTables();
+    if (config.shouldInitAcpi()) {
+        parseACPI();
+        parseMPTables();
+    } else {
+        vga.print("Skipping firmware CPU table scan; using CPUID fallback\n");
+    }
     fallbackEnumerateFromCPUID();
     ensureBSPEntry();
     normalizeCPUOrdering();
@@ -411,15 +416,18 @@ fn tryParseMADT(table_addr: usize) bool {
 
 fn findRSDP() ?*align(1) const RSDP {
     const ebda_segment: *align(1) const u16 = @ptrFromInt(0x40E);
-    const ebda_addr = @as(usize, ebda_segment.*) << 4;
-    var scan_addr = ebda_addr;
-    const ebda_end = ebda_addr + 1024;
-    while (scan_addr < ebda_end) : (scan_addr += 16) {
-        const rsdp: *align(1) const RSDP = @ptrFromInt(scan_addr);
-        if (isValidRSDP(rsdp)) return rsdp;
+    const ebda_addr = (@as(usize, ebda_segment.*) << 4) & ~@as(usize, 0xF);
+
+    if (ebda_addr >= 0x80000 and ebda_addr < 0xA0000 and ebda_addr + 1024 <= 0xA0000) {
+        var scan_addr = ebda_addr;
+        const ebda_end = ebda_addr + 1024;
+        while (scan_addr < ebda_end) : (scan_addr += 16) {
+            const rsdp: *align(1) const RSDP = @ptrFromInt(scan_addr);
+            if (isValidRSDP(rsdp)) return rsdp;
+        }
     }
 
-    scan_addr = 0xE0000;
+    var scan_addr: usize = 0xE0000;
     while (scan_addr < 0x100000) : (scan_addr += 16) {
         const rsdp: *align(1) const RSDP = @ptrFromInt(scan_addr);
         if (isValidRSDP(rsdp)) return rsdp;
@@ -555,16 +563,16 @@ fn parseMPTables() void {
     const mp = findMPFloatingPointer() orelse return;
     if (mp.config_table_addr == 0 or (mp.config_table_addr & 0x3) != 0) return;
 
-    const config: *align(1) const MPConfigHeader = @ptrFromInt(mp.config_table_addr);
-    if (!std.mem.eql(u8, &config.signature, "PCMP")) return;
-    if (!validateChecksum(@ptrCast(config), config.base_table_length)) return;
+    const mp_config: *align(1) const MPConfigHeader = @ptrFromInt(mp.config_table_addr);
+    if (!std.mem.eql(u8, &mp_config.signature, "PCMP")) return;
+    if (!validateChecksum(@ptrCast(mp_config), mp_config.base_table_length)) return;
 
     num_cpus = 0;
-    local_apic_base = config.local_apic_addr;
+    local_apic_base = mp_config.local_apic_addr;
     mapApicMmio(local_apic_base);
 
-    var entry_ptr = @intFromPtr(config) + @sizeOf(MPConfigHeader);
-    var remaining_entries = config.entry_count;
+    var entry_ptr = @intFromPtr(mp_config) + @sizeOf(MPConfigHeader);
+    var remaining_entries = mp_config.entry_count;
     while (remaining_entries > 0) : (remaining_entries -= 1) {
         const entry_type = @as(*align(1) const u8, @ptrFromInt(entry_ptr)).*;
         switch (entry_type) {
@@ -605,8 +613,10 @@ fn parseMPTables() void {
 
 fn findMPFloatingPointer() ?*align(1) const MPFloatingPointer {
     const ebda_segment: *align(1) const u16 = @ptrFromInt(0x40E);
-    const ebda_addr = @as(usize, ebda_segment.*) << 4;
-    if (scanMPRange(ebda_addr, ebda_addr + 1024)) |mp| return mp;
+    const ebda_addr = (@as(usize, ebda_segment.*) << 4) & ~@as(usize, 0xF);
+    if (ebda_addr >= 0x80000 and ebda_addr < 0xA0000 and ebda_addr + 1024 <= 0xA0000) {
+        if (scanMPRange(ebda_addr, ebda_addr + 1024)) |mp| return mp;
+    }
 
     const base_kb: *align(1) const u16 = @ptrFromInt(0x413);
     const base_mem_end = @as(usize, base_kb.*) * 1024;

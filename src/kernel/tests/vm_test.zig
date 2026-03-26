@@ -1,4 +1,5 @@
 const std = @import("std");
+const console = @import("../utils/console.zig");
 const vga = @import("../drivers/vga.zig");
 const process = @import("../process/process.zig");
 const protection = @import("../memory/protection.zig");
@@ -172,44 +173,154 @@ var inotify_internal_test: InotifyInternalTestState = .{};
 var process_state_test: ProcessStateTestState = .{};
 
 pub fn test_virtual_memory() bool {
+    beginVmSuite("Virtual Memory Test Suite");
+    runVmCoreTests("VM");
+    runVmReadinessTests("VM");
+    return finishVmSuite("VM");
+}
+
+pub fn runVmCoreTestsChecked() bool {
+    beginVmSuite("VM Core Regression Suite");
+    runVmCoreTests("VMCORE");
+    return finishVmSuite("VM Core");
+}
+
+pub fn runVmReadinessTestsChecked() bool {
+    beginVmSuite("VM Readiness Regression Suite");
+    runVmReadinessTests("VMREADY");
+    return finishVmSuite("VM Readiness");
+}
+
+pub fn runVmMemoryTestsChecked() bool {
+    beginVmSuite("VM Memory Regression Suite");
+    runVmMemoryTests("VMMEM");
+    return finishVmSuite("VM Memory");
+}
+
+pub fn runVmStateTestsChecked() bool {
+    beginVmSuite("VM State Regression Suite");
+    runVmStateTests("VMSTATE");
+    return finishVmSuite("VM State");
+}
+
+pub fn runVmTtyTestsChecked() bool {
+    beginVmSuite("VM TTY Regression Suite");
+    runVmTtyTests("VMTTY");
+    return finishVmSuite("VM TTY");
+}
+
+pub fn runVmSocketTestsChecked() bool {
+    beginVmSuite("VM Socket Regression Suite");
+    runVmSocketTests("VMSOCK");
+    return finishVmSuite("VM Socket");
+}
+
+pub fn runVmEventTestsChecked() bool {
+    beginVmSuite("VM Event Regression Suite");
+    runVmEventTests("VMEVT");
+    return finishVmSuite("VM Event");
+}
+
+pub fn runVmInotifyTestsChecked() bool {
+    beginVmSuite("VM Inotify Regression Suite");
+    runVmInotifyTests("VMINOTIFY");
+    return finishVmSuite("VM Inotify");
+}
+
+fn beginVmSuite(title: []const u8) void {
     pass_count = 0;
     fail_count = 0;
+    vga.print("\n=== ");
+    vga.print(title);
+    vga.print(" ===\n");
+}
 
-    vga.print("\n=== Virtual Memory Test Suite ===\n");
-
-    test_memory_allocation();
-    test_page_mapping();
-    test_memory_stats();
-    test_page_flags();
-    test_range_operations();
-    test_process_local_state();
-    test_file_backed_mmap();
-    test_tty_surface();
-    test_tcp_accept_recv_wakeup();
-    test_tcp_select_readiness();
-    test_udp_poll_readiness();
-    test_unix_select_readiness();
-    test_unix_read_write_dispatch();
-    test_eventfd_poll_dispatch();
-    test_timerfd_poll_dispatch();
-    test_signalfd_poll_dispatch();
-    test_inotify_poll_dispatch();
-    test_inotify_fd_event_dispatch();
-    test_inotify_internal_vnode_dispatch();
-
-    vga.print("=== VM Test Results: ");
+fn finishVmSuite(label: []const u8) bool {
+    vga.print("=== ");
+    vga.print(label);
+    vga.print(" Results: ");
     print_dec(pass_count);
     vga.print(" passed, ");
     print_dec(fail_count);
     vga.print(" failed ===\n");
 
     if (fail_count == 0) {
-        vga.print("=== All VM Tests Passed ===\n\n");
+        vga.print("=== ");
+        vga.print(label);
+        vga.print(" Passed ===\n\n");
     } else {
-        vga.print("=== VM Tests Failed ===\n\n");
+        vga.print("=== ");
+        vga.print(label);
+        vga.print(" Failed ===\n\n");
     }
 
     return fail_count == 0;
+}
+
+fn runVmCoreTests(comptime suite_prefix: []const u8) void {
+    runVmMemoryTests(suite_prefix);
+    runVmStateTests(suite_prefix);
+    runVmTtyTests(suite_prefix);
+}
+
+fn runVmMemoryTests(comptime suite_prefix: []const u8) void {
+    runVmCase(suite_prefix, "memory_allocation", test_memory_allocation);
+    runVmCase(suite_prefix, "page_mapping", test_page_mapping);
+    runVmCase(suite_prefix, "memory_stats", test_memory_stats);
+    runVmCase(suite_prefix, "page_flags", test_page_flags);
+    runVmCase(suite_prefix, "range_operations", test_range_operations);
+}
+
+fn runVmStateTests(comptime suite_prefix: []const u8) void {
+    runVmCase(suite_prefix, "process_local_state", test_process_local_state);
+    runVmCase(suite_prefix, "file_backed_mmap", test_file_backed_mmap);
+}
+
+fn runVmTtyTests(comptime suite_prefix: []const u8) void {
+    runVmCase(suite_prefix, "tty_surface", test_tty_surface);
+}
+
+fn runVmReadinessTests(comptime suite_prefix: []const u8) void {
+    runVmSocketTests(suite_prefix);
+    runVmEventTests(suite_prefix);
+    runVmInotifyTests(suite_prefix);
+}
+
+fn runVmSocketTests(comptime suite_prefix: []const u8) void {
+    runVmCase(suite_prefix, "tcp_accept_recv_wakeup", test_tcp_accept_recv_wakeup);
+    runVmCase(suite_prefix, "tcp_select_readiness", test_tcp_select_readiness);
+    runVmCase(suite_prefix, "udp_poll_readiness", test_udp_poll_readiness);
+    runVmCase(suite_prefix, "unix_select_readiness", test_unix_select_readiness);
+    runVmCase(suite_prefix, "unix_read_write_dispatch", test_unix_read_write_dispatch);
+}
+
+fn runVmEventTests(comptime suite_prefix: []const u8) void {
+    runVmCase(suite_prefix, "eventfd_poll_dispatch", test_eventfd_poll_dispatch);
+    runVmCase(suite_prefix, "timerfd_poll_dispatch", test_timerfd_poll_dispatch);
+    runVmCase(suite_prefix, "signalfd_poll_dispatch", test_signalfd_poll_dispatch);
+}
+
+fn runVmInotifyTests(comptime suite_prefix: []const u8) void {
+    runVmCase(suite_prefix, "inotify_poll_dispatch", test_inotify_poll_dispatch);
+    runVmCase(suite_prefix, "inotify_fd_event_dispatch", test_inotify_fd_event_dispatch);
+    runVmCase(suite_prefix, "inotify_internal_vnode_dispatch", test_inotify_internal_vnode_dispatch);
+}
+
+fn runVmCase(comptime suite_prefix: []const u8, comptime case_name: []const u8, comptime case_fn: fn () void) void {
+    printVmCaseMarker(suite_prefix, "START", case_name);
+    const fail_before = fail_count;
+    case_fn();
+    if (fail_count == fail_before) {
+        printVmCaseMarker(suite_prefix, "PASS", case_name);
+    } else {
+        printVmCaseMarker(suite_prefix, "FAIL", case_name);
+    }
+}
+
+fn printVmCaseMarker(comptime suite_prefix: []const u8, phase: []const u8, case_name: []const u8) void {
+    var buffer: [128]u8 = undefined;
+    const line = std.fmt.bufPrint(&buffer, "{s}:CASE:{s}:{s}\n", .{ suite_prefix, phase, case_name }) catch return;
+    console.print(line);
 }
 
 fn test_memory_allocation() void {

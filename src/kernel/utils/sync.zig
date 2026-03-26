@@ -480,6 +480,34 @@ pub fn runSynchronizationTests() void {
     vga.print("\n\nSynchronization tests completed!\n");
 }
 
+pub fn runSynchronizationTestsChecked() bool {
+    var mutex = Mutex.init();
+    if (!mutex.tryLock()) return false;
+    if (mutex.tryLock()) return false;
+    mutex.unlock();
+    if (!mutex.tryLock()) return false;
+    mutex.unlock();
+
+    var semaphore = Semaphore.init(2);
+    if (!semaphore.tryWait()) return false;
+    if (!semaphore.tryWait()) return false;
+    if (semaphore.tryWait()) return false;
+    semaphore.signal();
+    if (!semaphore.tryWait()) return false;
+    if (semaphore.getValue() != 0) return false;
+
+    var rwlock = RWLock.init();
+    rwlock.readLock();
+    if (rwlock.readers != 1 or rwlock.writer) return false;
+    rwlock.readUnlock();
+    if (rwlock.readers != 0 or rwlock.writer) return false;
+
+    rwlock.writeLock();
+    if (!rwlock.writer or rwlock.writer_pid != process.getCurrentPID()) return false;
+    rwlock.writeUnlock();
+    return !rwlock.writer and rwlock.writer_pid == null and rwlock.readers == 0;
+}
+
 fn print_number(num: u32) void {
     if (num == 0) {
         vga.put_char('0');
