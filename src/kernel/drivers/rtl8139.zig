@@ -1,10 +1,14 @@
 // zlint-disable suppressed-errors
+const std = @import("std");
 const io = @import("../utils/io.zig");
 const pci = @import("pci.zig");
 const idt = @import("../interrupts/idt.zig");
+const console = @import("../utils/console.zig");
 const vga = @import("vga.zig");
 const memory = @import("../memory/memory.zig");
 const network = @import("../net/network.zig");
+const ethernet = @import("../net/ethernet.zig");
+const arp = @import("../net/arp.zig");
 const sync = @import("../utils/sync.zig");
 
 const RTL8139_VENDOR_ID = 0x10EC;
@@ -22,7 +26,13 @@ const Register = enum(u16) {
     MAR0 = 0x08,
     MAR4 = 0x0C,
     TxStatus0 = 0x10,
+    TxStatus1 = 0x14,
+    TxStatus2 = 0x18,
+    TxStatus3 = 0x1C,
     TxAddr0 = 0x20,
+    TxAddr1 = 0x24,
+    TxAddr2 = 0x28,
+    TxAddr3 = 0x2C,
     RxBuf = 0x30,
     ChipCmd = 0x37,
     RxBufPtr = 0x38,
@@ -121,6 +131,10 @@ const RTL8139 = struct {
     pending_tail: usize,
     pending_count: usize,
     pending_free_count: usize,
+    testing: bool,
+    test_chip_cmd: u8,
+    test_intr_status: u16,
+    test_rx_buf_ptr: u16,
 
     pub fn init(device: pci.PCIDevice) !RTL8139 {
         var rtl = RTL8139{
@@ -142,6 +156,10 @@ const RTL8139 = struct {
             .pending_tail = 0,
             .pending_count = 0,
             .pending_free_count = 0,
+            .testing = false,
+            .test_chip_cmd = 0,
+            .test_intr_status = 0,
+            .test_rx_buf_ptr = 0,
         };
 
         initPendingFreeStack(&rtl.pending_free_stack);
@@ -164,7 +182,7 @@ const RTL8139 = struct {
         }
 
         const command_reg = pci.readConfig(device.bus, device.device, device.function, 0x04);
-        pci.writeConfig(device.bus, device.device, device.function, 0x04, command_reg | 0x04);
+        pci.writeConfig(device.bus, device.device, device.function, 0x04, command_reg | 0x05);
 
         rtl.writeReg8(.Config1, 0x00);
 
@@ -208,10 +226,23 @@ const RTL8139 = struct {
     }
 
     fn readReg8(self: *RTL8139, reg: Register) u8 {
+        if (self.testing) {
+            return switch (reg) {
+                .ChipCmd => self.test_chip_cmd,
+                else => 0,
+            };
+        }
         return io.inb(self.io_base + @intFromEnum(reg));
     }
 
     fn readReg16(self: *RTL8139, reg: Register) u16 {
+        if (self.testing) {
+            return switch (reg) {
+                .IntrStatus => self.test_intr_status,
+                .RxBufPtr => self.test_rx_buf_ptr,
+                else => 0,
+            };
+        }
         return io.inw(self.io_base + @intFromEnum(reg));
     }
 
@@ -220,10 +251,25 @@ const RTL8139 = struct {
     }
 
     fn writeReg8(self: *RTL8139, reg: Register, value: u8) void {
+        if (self.testing) {
+            switch (reg) {
+                .ChipCmd => self.test_chip_cmd = value,
+                else => {},
+            }
+            return;
+        }
         io.outb(self.io_base + @intFromEnum(reg), value);
     }
 
     fn writeReg16(self: *RTL8139, reg: Register, value: u16) void {
+        if (self.testing) {
+            switch (reg) {
+                .IntrStatus => self.test_intr_status &= ~value,
+                .RxBufPtr => self.test_rx_buf_ptr = value,
+                else => {},
+            }
+            return;
+        }
         io.outw(self.io_base + @intFromEnum(reg), value);
     }
 
@@ -264,11 +310,6 @@ const RTL8139 = struct {
         defer self.rx_lock.release();
 
         if (self.pending_free_count == 0) return null;
-
-        const cmd = self.readReg8(.ChipCmd);
-        if ((cmd & 0x01) == 0) {
-            return null;
-        }
 
         const header = @as(*align(1) const u16, @ptrCast(&self.rx_buffer[self.rx_offset])).*;
         const status = header;
@@ -360,6 +401,111 @@ fn releaseClaimedPacket(handle: usize) void {
     }
 }
 
+pub fn runInterruptSelfTestChecked() bool {
+    const rx_mem = memory.kmalloc(RX_BUFFER_SIZE) orelse return false;
+    @memset(@as([*]u8, @ptrCast(rx_mem))[0..RX_BUFFER_SIZE], 0);
+
+    var fake = RTL8139{
+        .io_base = 0,
+        .mac_address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 },
+        .rx_buffer = @ptrCast(@alignCast(rx_mem)),
+        .tx_buffers = [_][*]u8{@ptrCast(@alignCast(rx_mem))} ** NUM_TX_DESCRIPTORS,
+        .rx_lock = sync.SpinLock.init(),
+        .rx_poll_buffer = undefined,
+        .current_tx = 0,
+        .rx_offset = 0,
+        .pending_rx = [_]PendingRx{.{}} ** PENDING_RX_CAPACITY,
+        .pending_queue = [_]u8{0} ** PENDING_RX_CAPACITY,
+        .pending_free_stack = undefined,
+        .pending_head = 0,
+        .pending_tail = 0,
+        .pending_count = 0,
+        .pending_free_count = PENDING_RX_CAPACITY,
+        .testing = true,
+        .test_chip_cmd = 0x00,
+        .test_intr_status = InterruptStatus.RX_OK,
+        .test_rx_buf_ptr = 0,
+    };
+    initPendingFreeStack(&fake.pending_free_stack);
+
+    const sender_ip = 0xC0A801F0;
+    const target_ip = 0xC0A80102;
+    const sender_mac = [6]u8{ 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
+    const target_mac = fake.mac_address;
+
+    var frame: [ethernet.ETH_HEADER_SIZE + @sizeOf(arp.ARPHeader)]u8 = undefined;
+    writeSyntheticArpReply(&frame, sender_ip, target_ip, sender_mac, target_mac);
+
+    const packet_len: u16 = @intCast(frame.len);
+    @as(*align(1) u16, @ptrCast(&fake.rx_buffer[0])).* = 0x0001;
+    @as(*align(1) u16, @ptrCast(&fake.rx_buffer[2])).* = packet_len;
+    @memcpy(fake.rx_buffer[4 .. 4 + frame.len], frame[0..]);
+
+    const previous = rtl8139_device;
+    rtl8139_device = fake;
+    defer rtl8139_device = previous;
+    defer if (rtl8139_device) |*dev| {
+        memory.kfree(@as(*anyopaque, @ptrCast(dev.rx_buffer)));
+    };
+
+    if (rtl8139_device) |*dev| {
+        dev.handleInterrupt();
+
+        const resolved = arp.resolve(sender_ip) orelse return false;
+        if (!macEquals(resolved, sender_mac)) return false;
+
+        const expected_release = (((@as(u16, packet_len) + 4 + 3) & ~@as(u16, 3)) -% 0x10);
+        return dev.pending_count == 0 and
+            dev.pending_free_count == PENDING_RX_CAPACITY and
+            dev.test_intr_status == 0 and
+            dev.test_rx_buf_ptr == expected_release;
+    }
+
+    return false;
+}
+
+fn writeSyntheticArpReply(frame: []u8, sender_ip: u32, target_ip: u32, sender_mac: [6]u8, target_mac: [6]u8) void {
+    const eth_header: *align(1) ethernet.EthernetHeader = @ptrCast(frame.ptr);
+    eth_header.dst_mac0 = target_mac[0];
+    eth_header.dst_mac1 = target_mac[1];
+    eth_header.dst_mac2 = target_mac[2];
+    eth_header.dst_mac3 = target_mac[3];
+    eth_header.dst_mac4 = target_mac[4];
+    eth_header.dst_mac5 = target_mac[5];
+    eth_header.src_mac0 = sender_mac[0];
+    eth_header.src_mac1 = sender_mac[1];
+    eth_header.src_mac2 = sender_mac[2];
+    eth_header.src_mac3 = sender_mac[3];
+    eth_header.src_mac4 = sender_mac[4];
+    eth_header.src_mac5 = sender_mac[5];
+    eth_header.ethertype = @byteSwap(@intFromEnum(ethernet.EtherType.ARP));
+
+    const arp_header: *align(1) arp.ARPHeader = @ptrCast(frame[ethernet.ETH_HEADER_SIZE..].ptr);
+    arp_header.hardware_type = @byteSwap(@as(u16, 1));
+    arp_header.protocol_type = @byteSwap(@as(u16, 0x0800));
+    arp_header.hardware_addr_len = 6;
+    arp_header.protocol_addr_len = 4;
+    arp_header.opcode = @byteSwap(@as(u16, 2));
+    arp_header.sender_mac0 = sender_mac[0];
+    arp_header.sender_mac1 = sender_mac[1];
+    arp_header.sender_mac2 = sender_mac[2];
+    arp_header.sender_mac3 = sender_mac[3];
+    arp_header.sender_mac4 = sender_mac[4];
+    arp_header.sender_mac5 = sender_mac[5];
+    arp_header.sender_ip = @byteSwap(sender_ip);
+    arp_header.target_mac0 = target_mac[0];
+    arp_header.target_mac1 = target_mac[1];
+    arp_header.target_mac2 = target_mac[2];
+    arp_header.target_mac3 = target_mac[3];
+    arp_header.target_mac4 = target_mac[4];
+    arp_header.target_mac5 = target_mac[5];
+    arp_header.target_ip = @byteSwap(target_ip);
+}
+
+fn macEquals(a: [6]u8, b: [6]u8) bool {
+    return a[0] == b[0] and a[1] == b[1] and a[2] == b[2] and a[3] == b[3] and a[4] == b[4] and a[5] == b[5];
+}
+
 pub fn init() void {
     if (pci.findDevice(RTL8139_VENDOR_ID, RTL8139_DEVICE_ID)) |device| {
         vga.print("Found RTL8139 network card\n");
@@ -430,5 +576,22 @@ pub fn sendPacket(data: []const u8) !void {
         try rtl.send(data);
     } else {
         return error.NoDevice;
+    }
+}
+
+pub fn debugPrintState(prefix: []const u8) void {
+    if (rtl8139_device) |*rtl| {
+        const header = @as(*align(1) const u16, @ptrCast(&rtl.rx_buffer[rtl.rx_offset])).*;
+        const length = @as(*align(1) const u16, @ptrCast(&rtl.rx_buffer[rtl.rx_offset + 2])).*;
+        var line_buf: [192]u8 = undefined;
+        const line = std.fmt.bufPrint(
+            &line_buf,
+            "{s} cmd=0x{x} intr=0x{x} rx_offset=0x{x} hdr=0x{x} len=0x{x} pending={d}/{d}\n",
+            .{ prefix, rtl.readReg8(.ChipCmd), rtl.readReg16(.IntrStatus), rtl.rx_offset, header, length, rtl.pending_count, rtl.pending_free_count },
+        ) catch return;
+        console.print(line);
+    } else {
+        console.print(prefix);
+        console.print(" device=none\n");
     }
 }

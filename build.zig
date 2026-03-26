@@ -46,10 +46,15 @@ pub fn build(b: *std.Build) void {
     const smp_regression_kernel = kernel_build.addKernelArtifact(b, target, optimize, "kernel-smp-regression.elf", .smp_regression, user_assets_module);
     const manual_regression_kernel = kernel_build.addKernelArtifact(b, target, optimize, "kernel-manual-regression.elf", .manual_regression, user_assets_module);
     const ext2_regression_kernel = kernel_build.addKernelArtifact(b, target, optimize, "kernel-ext2-regression.elf", .ext2_regression, user_assets_module);
+    const service_regression_kernel = kernel_build.addKernelArtifact(b, target, optimize, "kernel-service-regression.elf", .service_regression, user_assets_module);
+    const scheduler_regression_kernel = kernel_build.addKernelArtifact(b, target, optimize, "kernel-scheduler-regression.elf", .scheduler_regression, user_assets_module);
+    const nic_ingress_kernel = kernel_build.addKernelArtifact(b, target, optimize, "kernel-nic-ingress.elf", .nic_ingress, user_assets_module);
+    const e1000_ingress_kernel = kernel_build.addKernelArtifact(b, target, optimize, "kernel-e1000-ingress.elf", .e1000_ingress, user_assets_module);
+    const virtio_ingress_kernel = kernel_build.addKernelArtifact(b, target, optimize, "kernel-virtio-ingress.elf", .virtio_ingress, user_assets_module);
     const userland_smoke_kernel = kernel_build.addKernelArtifact(b, target, optimize, "kernel-userland-smoke.elf", .userland_smoke, user_assets_module);
     const userland_sh_smoke_kernel = kernel_build.addKernelArtifact(b, target, optimize, "kernel-userland-sh-smoke.elf", .userland_sh_smoke, user_assets_module);
 
-    inline for (&.{ dev_kernel, ci_smoke_kernel, vm_test_kernel, vm_core_regression_kernel, vm_readiness_regression_kernel, vm_memory_regression_kernel, vm_state_regression_kernel, vm_tty_regression_kernel, vm_socket_regression_kernel, vm_event_regression_kernel, vm_inotify_regression_kernel, benchmark_kernel, smp_stress_kernel, smp_regression_kernel, manual_regression_kernel, ext2_regression_kernel, userland_smoke_kernel, userland_sh_smoke_kernel }) |artifact| {
+    inline for (&.{ dev_kernel, ci_smoke_kernel, vm_test_kernel, vm_core_regression_kernel, vm_readiness_regression_kernel, vm_memory_regression_kernel, vm_state_regression_kernel, vm_tty_regression_kernel, vm_socket_regression_kernel, vm_event_regression_kernel, vm_inotify_regression_kernel, benchmark_kernel, smp_stress_kernel, smp_regression_kernel, manual_regression_kernel, ext2_regression_kernel, service_regression_kernel, scheduler_regression_kernel, nic_ingress_kernel, e1000_ingress_kernel, virtio_ingress_kernel, userland_smoke_kernel, userland_sh_smoke_kernel }) |artifact| {
         userland_build.dependOnUserPrograms(&artifact.compile_step.step, user_programs[0..], &.{ &motd_install.step, &passwd_install.step });
     }
 
@@ -100,6 +105,21 @@ pub fn build(b: *std.Build) void {
 
     const ext2_regression_kernel_step = b.step("kernel-ext2-regression", "Build the ext2 regression kernel profile");
     ext2_regression_kernel_step.dependOn(ext2_regression_kernel.install_step);
+
+    const service_regression_kernel_step = b.step("kernel-service-regression", "Build the service regression kernel profile");
+    service_regression_kernel_step.dependOn(service_regression_kernel.install_step);
+
+    const scheduler_regression_kernel_step = b.step("kernel-scheduler-regression", "Build the scheduler regression kernel profile");
+    scheduler_regression_kernel_step.dependOn(scheduler_regression_kernel.install_step);
+
+    const nic_ingress_kernel_step = b.step("kernel-nic-ingress", "Build the NIC ingress regression kernel profile");
+    nic_ingress_kernel_step.dependOn(nic_ingress_kernel.install_step);
+
+    const e1000_ingress_kernel_step = b.step("kernel-e1000-ingress", "Build the E1000 ingress regression kernel profile");
+    e1000_ingress_kernel_step.dependOn(e1000_ingress_kernel.install_step);
+
+    const virtio_ingress_kernel_step = b.step("kernel-virtio-ingress", "Build the VirtIO ingress regression kernel profile");
+    virtio_ingress_kernel_step.dependOn(virtio_ingress_kernel.install_step);
 
     const userland_smoke_kernel_step = b.step("kernel-userland-smoke", "Build the userland smoke-test kernel");
     userland_smoke_kernel_step.dependOn(userland_smoke_kernel.install_step);
@@ -423,28 +443,64 @@ pub fn build(b: *std.Build) void {
     const ext2_regression_test_step = b.step("ext2-regression-test", "Run the automated ext2 regression profile in QEMU");
     ext2_regression_test_step.dependOn(&ext2_regression_test_cmd.step);
 
+    const service_regression_test_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-service-regression.sh",
+        service_regression_kernel.output_path,
+        "build/service-regression.log",
+    });
+    service_regression_test_cmd.step.dependOn(service_regression_kernel.install_step);
+
+    const service_regression_test_step = b.step("service-regression-test", "Run the automated service regression kernel profile in QEMU");
+    service_regression_test_step.dependOn(&service_regression_test_cmd.step);
+
+    const scheduler_regression_test_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-scheduler-regression.sh",
+        scheduler_regression_kernel.output_path,
+        "build/scheduler-regression.log",
+    });
+    scheduler_regression_test_cmd.step.dependOn(scheduler_regression_kernel.install_step);
+
+    const scheduler_regression_test_step = b.step("scheduler-regression-test", "Run the automated scheduler regression kernel profile in QEMU");
+    scheduler_regression_test_step.dependOn(&scheduler_regression_test_cmd.step);
+
+    const nic_ingress_test_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-nic-ingress-regression.sh",
+        nic_ingress_kernel.output_path,
+        "build/nic-ingress.log",
+    });
+    nic_ingress_test_cmd.step.dependOn(nic_ingress_kernel.install_step);
+
+    const nic_ingress_test_step = b.step("nic-ingress-test", "Run the NIC ingress regression profile in QEMU");
+    nic_ingress_test_step.dependOn(&nic_ingress_test_cmd.step);
+
+    const e1000_ingress_test_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-e1000-live-ingress.sh",
+        e1000_ingress_kernel.output_path,
+        "build/e1000-live-ingress.log",
+    });
+    e1000_ingress_test_cmd.step.dependOn(e1000_ingress_kernel.install_step);
+
+    const e1000_ingress_test_step = b.step("e1000-ingress-test", "Run the E1000 live ingress regression profile in QEMU");
+    e1000_ingress_test_step.dependOn(&e1000_ingress_test_cmd.step);
+
+    const virtio_ingress_test_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-virtio-live-ingress.sh",
+        virtio_ingress_kernel.output_path,
+        "build/virtio-live-ingress.log",
+    });
+    virtio_ingress_test_cmd.step.dependOn(virtio_ingress_kernel.install_step);
+
+    const virtio_ingress_test_step = b.step("virtio-ingress-test", "Run the VirtIO live ingress regression profile in QEMU");
+    virtio_ingress_test_step.dependOn(&virtio_ingress_test_cmd.step);
+
     const host_tests_cmd = b.addSystemCommand(&.{
-        "sh",
-        "-c",
-        \\set -eu
-        \\mkdir -p build/zig-cache-tests build/zig-global-cache-tests
-        \\export ZIG_LOCAL_CACHE_DIR="build/zig-cache-tests"
-        \\export ZIG_GLOBAL_CACHE_DIR="build/zig-global-cache-tests"
-        \\for test_file in \
-        \\  src/kernel/process/syscall/at_semantics.zig \
-        \\  src/kernel/process/syscall/syscall_semantics.zig \
-        \\  src/kernel/process/syscall/path_semantics.zig \
-        \\  src/kernel/fs/fd_freelist.zig \
-        \\  src/kernel/shell/parser/pipeline.zig \
-        \\  src/kernel/shell/glob.zig \
-        \\  src/kernel/shell/jobs.zig \
-        \\  src/kernel/shell/registry.zig \
-        \\  src/kernel/process/scheduler_policy.zig \
-        \\  src/kernel/net/tcp/protocol.zig \
-        \\  src/kernel/process/syscall/ipc_semantics.zig
-        \\do
-        \\  zig test "$test_file"
-        \\done
+        "bash",
+        "scripts/run-host-tests.sh",
     });
     const host_tests_step = b.step("host-tests", "Run host-side unit tests for extracted pure logic");
     host_tests_step.dependOn(&host_tests_cmd.step);

@@ -1,5 +1,8 @@
+const std = @import("std");
 const process = @import("../../process/process.zig");
+const launcher = @import("../../shell/launcher.zig");
 const shell = @import("../../shell/repl.zig");
+const posix = @import("../../utils/posix.zig");
 const qemu_exit = @import("../../utils/qemu_exit.zig");
 const common = @import("../common.zig");
 const smoke_common = @import("smoke_common.zig");
@@ -53,6 +56,13 @@ fn userlandSmokeRunner() callconv(.c) void {
         .{ .command = "/bin/id", .marker = "USERLAND:ID" },
         .{ .command = "/bin/date", .marker = "USERLAND:DATE" },
         .{ .command = "/bin/hostname", .marker = "USERLAND:HOSTNAME" },
+        .{ .command = "/bin/tty", .marker = "USERLAND:TTY" },
+        .{ .command = "/bin/mkdir /tmp/userland-mount", .marker = "USERLAND:MOUNT_DIR" },
+        .{ .command = "/bin/mount none /tmp/userland-mount tmpfs", .marker = "USERLAND:MOUNT" },
+        .{ .command = "/bin/touch /tmp/userland-mount/from-mount.txt", .marker = "USERLAND:MOUNT_TOUCH" },
+        .{ .command = "/bin/umount /tmp/userland-mount", .marker = "USERLAND:UMOUNT" },
+        .{ .command = "/bin/echo user | /bin/login user", .marker = "USERLAND:LOGIN" },
+        .{ .command = "/bin/echo user | /bin/getty user", .marker = "USERLAND:GETTY" },
         .{ .command = "/bin/cat /proc/version", .marker = "USERLAND:PROC_VERSION" },
         .{ .command = "/bin/cat /proc/mounts", .marker = "USERLAND:PROC_MOUNTS" },
         .{ .command = "/bin/cat /sys/kernel/hostname", .marker = "USERLAND:SYS_HOSTNAME" },
@@ -71,6 +81,37 @@ fn userlandSmokeRunner() callconv(.c) void {
             qemu_exit.failure();
         }
     }
+
+    const false_args = [_][*:0]const u8{"/bin/false"};
+    const false_pid = launcher.launchExternalCommand(false_args[0..], null, null, null) catch {
+        common.printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    };
+    switch (posix.waitForProcessEvent(false_pid) catch {
+        common.printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    }) {
+        .exited => |exit_code| if (exit_code != 1) {
+            common.printBootMarker("USERLAND:FAIL");
+            qemu_exit.failure();
+        },
+        .stopped => {
+            common.printBootMarker("USERLAND:FAIL");
+            qemu_exit.failure();
+        },
+    }
+    common.printBootMarker("USERLAND:FALSE_OK");
+
+    const init_args = [_][*:0]const u8{"/bin/init"};
+    const init_pid = launcher.launchExternalCommand(init_args[0..], null, null, null) catch {
+        common.printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    };
+    common.printBootMarker("USERLAND:INIT_START");
+
+    _ = process.terminateProcess(init_pid);
+    terminateProcessGroup(init_pid);
+    common.printBootMarker("USERLAND:INIT_KILL");
 
     if (!smoke_shell.runCommandLine("/bin/sleep 3 &")) {
         common.printBootMarker("USERLAND:FAIL");
@@ -114,8 +155,32 @@ fn userlandSmokeRunner() callconv(.c) void {
     }
     common.printBootMarker("USERLAND:JOBS_RESUMED");
 
+    if (!smoke_shell.runCommandLine("/bin/kill &")) {
+        common.printBootMarker("USERLAND:FAIL");
+        qemu_exit.failure();
+    }
+    common.printBootMarker("USERLAND:KILL_BG");
+
     common.printBootMarker("USERLAND:PASS");
     qemu_exit.success();
+}
+
+fn terminateProcessGroup(root_pid: u32) void {
+    var pids: [16]u32 = undefined;
+    var count: usize = 0;
+    var current = process.getProcessList();
+    while (current) |proc| : (current = proc.next) {
+        if (proc.pid == root_pid or proc.parent_pid == root_pid or proc.process_group == root_pid) {
+            if (count < pids.len) {
+                pids[count] = proc.pid;
+                count += 1;
+            }
+        }
+    }
+
+    for (pids[0..count]) |pid| {
+        _ = process.terminateProcess(pid);
+    }
 }
 
 pub fn run() noreturn {

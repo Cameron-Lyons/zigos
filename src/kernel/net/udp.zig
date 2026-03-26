@@ -36,7 +36,7 @@ const NEXT_HEADER_UDP: u8 = 17;
 fn handleUDPPacketIPv6(src: *const ipv6.IPv6Address, dst: *const ipv6.IPv6Address, data: []const u8) void {
     if (data.len < @sizeOf(UDPHeader)) return;
 
-    const udp_header: *const UDPHeader = @ptrCast(@alignCast(data.ptr));
+    const udp_header: *align(1) const UDPHeader = @ptrCast(data.ptr);
     const length = @byteSwap(udp_header.length);
 
     if (length < @sizeOf(UDPHeader) or length > data.len) return;
@@ -167,7 +167,7 @@ fn handleUDPPacket(src_ip: u32, dst_ip: u32, data: []const u8) void {
         return;
     }
 
-    const udp_header: *const UDPHeader = @ptrCast(@alignCast(data.ptr));
+    const udp_header: *align(1) const UDPHeader = @ptrCast(data.ptr);
     const length = @byteSwap(udp_header.length);
 
     if (length < @sizeOf(UDPHeader) or length > data.len) {

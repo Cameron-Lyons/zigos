@@ -136,22 +136,23 @@ const NEXT_HEADER_TCP: u8 = 6;
 fn handleTCPPacketIPv6(src: *const ipv6.IPv6Address, dst: *const ipv6.IPv6Address, data: []const u8) void {
     if (data.len < @sizeOf(TCPHeader)) return;
 
-    const tcp_header: *const TCPHeader = @ptrCast(@alignCast(data.ptr));
-    const header_len = tcp_header.getDataOffset();
+    const tcp_header: *align(1) const TCPHeader = @ptrCast(data.ptr);
+    const header = tcp_header.*;
+    const header_len = (&header).getDataOffset();
     if (header_len < @sizeOf(TCPHeader) or header_len > data.len) return;
 
-    var temp_header = tcp_header.*;
+    var temp_header = header;
     temp_header.checksum = 0;
-    const calculated = calculateChecksumIPv6(src, dst, &temp_header, data[header_len..]);
-    if (tcp_header.checksum != calculated) return;
+    const calculated = calculateChecksumIPv6(src, dst, &temp_header, data[@sizeOf(TCPHeader)..]);
+    if (header.checksum != calculated) return;
 
-    const flags = tcp_header.getFlags();
-    const dst_port = @byteSwap(tcp_header.dst_port);
+    const flags = (&header).getFlags();
+    const dst_port = @byteSwap(header.dst_port);
 
     if (flags & TCPFlags.SYN != 0) {
         if (findListeningSocket(dst_port) == null) {
-            const src_port = @byteSwap(tcp_header.src_port);
-            const ack = @byteSwap(tcp_header.seq_num) +% 1;
+            const src_port = @byteSwap(header.src_port);
+            const ack = @byteSwap(header.seq_num) +% 1;
             sendRSTv6(src, dst, src_port, dst_port, ack);
         }
     }
@@ -377,27 +378,28 @@ fn handleTCPPacket(src_ip: u32, dst_ip: u32, data: []const u8) void {
         return;
     }
 
-    const tcp_header: *const TCPHeader = @ptrCast(@alignCast(data.ptr));
-    const header_len = tcp_header.getDataOffset();
+    const tcp_header: *align(1) const TCPHeader = @ptrCast(data.ptr);
+    const header = tcp_header.*;
+    const header_len = (&header).getDataOffset();
     if (header_len < @sizeOf(TCPHeader) or header_len > data.len) {
         return;
     }
 
-    const checksum = tcp_header.checksum;
-    var temp_header = tcp_header.*;
+    const checksum = header.checksum;
+    var temp_header = header;
     temp_header.checksum = 0;
-    const calculated_checksum = calculateChecksum(src_ip, dst_ip, &temp_header, data[header_len..]);
+    const calculated_checksum = calculateChecksum(src_ip, dst_ip, &temp_header, data[@sizeOf(TCPHeader)..]);
     if (checksum != calculated_checksum) {
         vga.print("TCP: Invalid checksum\n");
         return;
     }
 
-    const src_port = @byteSwap(tcp_header.src_port);
-    const dst_port = @byteSwap(tcp_header.dst_port);
-    const seq_num = @byteSwap(tcp_header.seq_num);
-    const ack_num = @byteSwap(tcp_header.ack_num);
-    const flags = tcp_header.getFlags();
-    const window_size = @byteSwap(tcp_header.window_size);
+    const src_port = @byteSwap(header.src_port);
+    const dst_port = @byteSwap(header.dst_port);
+    const seq_num = @byteSwap(header.seq_num);
+    const ack_num = @byteSwap(header.ack_num);
+    const flags = (&header).getFlags();
+    const window_size = @byteSwap(header.window_size);
     const payload = data[header_len..];
 
     if (findConnection(dst_ip, src_ip, dst_port, src_port)) |conn| {

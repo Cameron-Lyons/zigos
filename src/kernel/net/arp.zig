@@ -1,6 +1,5 @@
 const vga = @import("../drivers/vga.zig");
 const ethernet = @import("ethernet.zig");
-const rtl8139 = @import("../drivers/rtl8139.zig");
 
 const ARP_HARDWARE_ETHERNET = 1;
 const ARP_PROTOCOL_IP = 0x0800;
@@ -35,7 +34,7 @@ const ARPEntry = struct {
     valid: bool,
 };
 
-fn getMacFromArp(arp: *const ARPHeader, which: enum { sender, target }) [6]u8 {
+fn getMacFromArp(arp: *align(1) const ARPHeader, which: enum { sender, target }) [6]u8 {
     // SAFETY: all 6 bytes assigned in both branches of the if/else below
     var mac: [6]u8 = undefined;
     if (which == .sender) {
@@ -97,7 +96,7 @@ fn handleARPPacket(frame: *const ethernet.EthernetFrame) void {
         return;
     }
 
-    const arp: *const ARPHeader = @ptrCast(@alignCast(frame.data.ptr));
+    const arp: *align(1) const ARPHeader = @ptrCast(frame.data.ptr);
 
     if (@byteSwap(arp.hardware_type) != ARP_HARDWARE_ETHERNET or
         @byteSwap(arp.protocol_type) != ARP_PROTOCOL_IP)
@@ -117,7 +116,7 @@ fn handleARPPacket(frame: *const ethernet.EthernetFrame) void {
     }
 }
 
-fn sendARPReply(request: *const ARPHeader) void {
+fn sendARPReply(request: *align(1) const ARPHeader) void {
     // SAFETY: all fields assigned before the struct is used
     var reply: ARPHeader = undefined;
 
@@ -127,7 +126,7 @@ fn sendARPReply(request: *const ARPHeader) void {
     reply.protocol_addr_len = 4;
     reply.opcode = @byteSwap(@as(u16, ARP_OPCODE_REPLY));
 
-    if (rtl8139.getMACAddress()) |mac| {
+    if (ethernet.getSourceMac()) |mac| {
         setMacInArp(&reply, .sender, mac);
     } else {
         return;
@@ -155,7 +154,7 @@ pub fn sendARPRequest(target_ip: u32) !void {
     request.protocol_addr_len = 4;
     request.opcode = @byteSwap(@as(u16, ARP_OPCODE_REQUEST));
 
-    if (rtl8139.getMACAddress()) |mac| {
+    if (ethernet.getSourceMac()) |mac| {
         setMacInArp(&request, .sender, mac);
     } else {
         return error.NoMACAddress;
@@ -207,4 +206,3 @@ fn addToTable(ip: u32, mac: [6]u8) void {
 fn isOurIP(ip: u32) bool {
     return ip == 0xC0A80102;
 }
-

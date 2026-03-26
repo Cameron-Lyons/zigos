@@ -94,6 +94,7 @@ for marker in \
   "USERLAND:HEXDUMP" \
   "USERLAND:TEST" \
   "USERLAND:TRUE" \
+  "USERLAND:FALSE_OK" \
   "USERLAND:CP" \
   "USERLAND:MV" \
   "USERLAND:MKDIR" \
@@ -114,6 +115,13 @@ for marker in \
   "USERLAND:ID" \
   "USERLAND:DATE" \
   "USERLAND:HOSTNAME" \
+  "USERLAND:TTY" \
+  "USERLAND:MOUNT_DIR" \
+  "USERLAND:MOUNT" \
+  "USERLAND:MOUNT_TOUCH" \
+  "USERLAND:UMOUNT" \
+  "USERLAND:LOGIN" \
+  "USERLAND:GETTY" \
   "USERLAND:PROC_VERSION" \
   "USERLAND:PROC_MOUNTS" \
   "USERLAND:SYS_HOSTNAME" \
@@ -122,11 +130,14 @@ for marker in \
   "USERLAND:PIPE_CHAIN_READ" \
   "USERLAND:REDIRECT_WRITE" \
   "USERLAND:REDIRECT_READ" \
+  "USERLAND:INIT_START" \
+  "USERLAND:INIT_KILL" \
   "USERLAND:BG_START" \
   "USERLAND:JOBS_RUNNING" \
   "USERLAND:JOBS_STOPPED" \
   "USERLAND:BG_RESUME" \
   "USERLAND:JOBS_RESUMED" \
+  "USERLAND:KILL_BG" \
   "user:root home:/home/user" \
   "shell-ZigOS" \
   "USERLAND QUOTED" \
@@ -136,6 +147,9 @@ for marker in \
   "00000000" \
   "uid=0(root) gid=0(root) euid=0(root) egid=0(root)" \
   "zigos" \
+  "/dev/tty" \
+  "Welcome user" \
+  "ZigOS console login" \
   "USERLAND:PIPE" \
   "Welcome to ZigOS userspace smoke test." \
   "USERLAND:REDIRECT" \

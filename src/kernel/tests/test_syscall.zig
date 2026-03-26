@@ -1,4 +1,16 @@
 const syscall = @import("../process/syscall/dispatch.zig");
+const process = @import("../process/process.zig");
+
+pub fn runSyscallTestsChecked() bool {
+    const message = "syscall smoke\n";
+    const written = syscall.syscall3(syscall.SYS_WRITE, syscall.STDOUT, @intFromPtr(message.ptr), message.len);
+    if (written != message.len) return false;
+
+    const pid = syscall.syscall0(syscall.SYS_GETPID);
+    if (pid != process.getCurrentPID()) return false;
+
+    return true;
+}
 
 pub fn test_syscall_process() void {
     const message = "Hello from syscall!\n";

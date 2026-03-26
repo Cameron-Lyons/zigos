@@ -24,6 +24,11 @@ const smp_stress_profile = @import("profiles/smp_stress.zig");
 const smp_regression_profile = @import("profiles/smp_regression.zig");
 const manual_regression_profile = @import("profiles/manual_regression.zig");
 const ext2_regression_profile = @import("profiles/ext2_regression.zig");
+const service_regression_profile = @import("profiles/service_regression.zig");
+const scheduler_regression_profile = @import("profiles/scheduler_regression.zig");
+const nic_ingress_profile = @import("profiles/nic_ingress.zig");
+const e1000_ingress_profile = @import("profiles/e1000_ingress.zig");
+const virtio_ingress_profile = @import("profiles/virtio_ingress.zig");
 const userland_smoke_profile = @import("profiles/userland_smoke.zig");
 const userland_sh_smoke_profile = @import("profiles/userland_sh_smoke.zig");
 
@@ -64,6 +69,11 @@ pub fn kernelMain() void {
         .smp_regression => smp_regression_profile.run(),
         .manual_regression => manual_regression_profile.run(),
         .ext2_regression => ext2_regression_profile.run(),
+        .service_regression => service_regression_profile.run(),
+        .scheduler_regression => scheduler_regression_profile.run(),
+        .nic_ingress => nic_ingress_profile.run(),
+        .e1000_ingress => e1000_ingress_profile.run(),
+        .virtio_ingress => virtio_ingress_profile.run(),
         .userland_smoke => userland_smoke_profile.run(),
         .userland_sh_smoke => userland_sh_smoke_profile.run(),
     }

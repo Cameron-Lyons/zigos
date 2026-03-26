@@ -2,6 +2,14 @@ const vga = @import("../drivers/vga.zig");
 const memory = @import("../memory/memory.zig");
 const numfmt = @import("../utils/numfmt.zig");
 
+var fail_count: usize = 0;
+
+pub fn runMemoryTestsChecked() bool {
+    fail_count = 0;
+    test_memory_allocator();
+    return fail_count == 0;
+}
+
 pub fn test_memory_allocator() void {
     vga.print("\n=== Testing Memory Allocator ===\n");
 
@@ -22,6 +30,7 @@ pub fn test_memory_allocator() void {
         vga.print("  Freed successfully\n");
     } else {
         vga.print("  FAILED: Could not allocate\n");
+        fail_count += 1;
     }
 
     vga.print("\nTest 2: Multiple allocations\n");
@@ -44,6 +53,10 @@ pub fn test_memory_allocator() void {
         memory.kfree(ptr4);
     } else {
         vga.print("  FAILED: Some allocations failed\n");
+        fail_count += 1;
+        if (ptr2) |p| memory.kfree(p);
+        if (ptr3) |p| memory.kfree(p);
+        if (ptr4) |p| memory.kfree(p);
     }
 
     vga.print("\nTest 3: Memory statistics\n");
@@ -72,9 +85,17 @@ pub fn test_memory_allocator() void {
                 vga.print("  Data preserved correctly\n");
             } else {
                 vga.print("  FAILED: Data not preserved\n");
+                fail_count += 1;
             }
             memory.kfree(new_p);
+        } else {
+            vga.print("  FAILED: Realloc returned null\n");
+            fail_count += 1;
+            memory.kfree(p);
         }
+    } else {
+        vga.print("  FAILED: Could not allocate initial block\n");
+        fail_count += 1;
     }
 
     vga.print("\n=== Memory Tests Complete ===\n");

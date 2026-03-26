@@ -441,6 +441,8 @@ pub fn ping(dst_ip: u32) void {
 
 pub fn setNetworkDevice(device: *const NetworkDevice) void {
     current_device = device;
+    ethernet.setTxSender(device.send);
+    ethernet.setMacProvider(device.getMacAddress);
 }
 
 pub fn sendPacket(data: []const u8) void {

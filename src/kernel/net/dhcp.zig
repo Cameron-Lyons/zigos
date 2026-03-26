@@ -76,8 +76,7 @@ pub const DHCPClient = struct {
     mac_address: [6]u8,
 
     pub fn init() DHCPClient {
-        const rtl8139 = @import("../drivers/rtl8139.zig");
-        const mac = rtl8139.getMACAddress() orelse [_]u8{0} ** 6;
+        const mac = network.getMacAddress();
 
         return DHCPClient{
             .state = .INIT,
@@ -144,7 +143,7 @@ pub const DHCPClient = struct {
             return error.InvalidPacket;
         }
 
-        const header: *const DHCPHeader = @ptrCast(@alignCast(&data[0]));
+        const header: *align(1) const DHCPHeader = @ptrCast(&data[0]);
 
         if (@byteSwap(header.xid) != self.transaction_id) {
             return error.InvalidTransaction;
@@ -213,7 +212,7 @@ pub const DHCPClient = struct {
             return error.InvalidPacket;
         }
 
-        const header: *const DHCPHeader = @ptrCast(@alignCast(&data[0]));
+        const header: *align(1) const DHCPHeader = @ptrCast(&data[0]);
 
         if (@byteSwap(header.xid) != self.transaction_id) {
             return error.InvalidTransaction;
@@ -269,23 +268,17 @@ pub const DHCPClient = struct {
             switch (opt_type_enum) {
                 .SUBNET_MASK => {
                     if (opt_len == 4) {
-                        self.subnet_mask = ipv4.IPv4Address{ .octets = .{
-                            options[i], options[i + 1], options[i + 2], options[i + 3]
-                        } };
+                        self.subnet_mask = ipv4.IPv4Address{ .octets = .{ options[i], options[i + 1], options[i + 2], options[i + 3] } };
                     }
                 },
                 .ROUTER => {
                     if (opt_len >= 4) {
-                        self.gateway_ip = ipv4.IPv4Address{ .octets = .{
-                            options[i], options[i + 1], options[i + 2], options[i + 3]
-                        } };
+                        self.gateway_ip = ipv4.IPv4Address{ .octets = .{ options[i], options[i + 1], options[i + 2], options[i + 3] } };
                     }
                 },
                 .DNS_SERVER => {
                     if (opt_len >= 4) {
-                        self.dns_server = ipv4.IPv4Address{ .octets = .{
-                            options[i], options[i + 1], options[i + 2], options[i + 3]
-                        } };
+                        self.dns_server = ipv4.IPv4Address{ .octets = .{ options[i], options[i + 1], options[i + 2], options[i + 3] } };
                     }
                 },
                 .LEASE_TIME => {
@@ -294,18 +287,16 @@ pub const DHCPClient = struct {
                         const b1: u32 = options[i + 1];
                         const b2: u32 = options[i + 2];
                         self.lease_time = (b0 << 24) |
-                                         (b1 << 16) |
-                                         (b2 << 8) |
-                                         options[i + 3];
+                            (b1 << 16) |
+                            (b2 << 8) |
+                            options[i + 3];
                         self.renewal_time = self.lease_time / 2;
                         self.rebinding_time = (self.lease_time * 7) / 8;
                     }
                 },
                 .SERVER_ID => {
                     if (opt_len == 4) {
-                        self.server_ip = ipv4.IPv4Address{ .octets = .{
-                            options[i], options[i + 1], options[i + 2], options[i + 3]
-                        } };
+                        self.server_ip = ipv4.IPv4Address{ .octets = .{ options[i], options[i + 1], options[i + 2], options[i + 3] } };
                     }
                 },
                 else => {},
@@ -319,7 +310,7 @@ pub const DHCPClient = struct {
         _ = self;
         packet[offset] = @intFromEnum(opt_type);
         packet[offset + 1] = @intCast(data.len);
-        @memcpy(packet[offset + 2..offset + 2 + data.len], data);
+        @memcpy(packet[offset + 2 .. offset + 2 + data.len], data);
         return offset + 2 + data.len;
     }
 
@@ -400,7 +391,7 @@ pub fn handlePacket(data: []const u8) void {
             return;
         }
 
-        const header: *const DHCPHeader = @ptrCast(@alignCast(&data[0]));
+        const header: *align(1) const DHCPHeader = @ptrCast(&data[0]);
         if (header.op != 2) {
             return;
         }
