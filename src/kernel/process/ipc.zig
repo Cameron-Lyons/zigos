@@ -1,3 +1,4 @@
+const std = @import("std");
 const vga = @import("../drivers/vga.zig");
 const process = @import("process.zig");
 const scheduler = @import("scheduler.zig");
@@ -448,6 +449,42 @@ pub fn createPipe() !*Pipe {
     return error.NoFreePipes;
 }
 
+pub fn destroySharedMemory(id: u32) void {
+    ipc_mutex.lock();
+    defer ipc_mutex.unlock();
+
+    var prev: ?*SharedMemory = null;
+    var current = shared_memory_list;
+    while (current) |shm| {
+        if (shm.id == id) {
+            if (prev) |prev_shm| {
+                prev_shm.next = shm.next;
+            } else {
+                shared_memory_list = shm.next;
+            }
+            memory.freePages(shm.data, (shm.size + SHARED_MEMORY_PAGE_SIZE - 1) / SHARED_MEMORY_PAGE_SIZE);
+            memory.kfree(@ptrCast(shm));
+            return;
+        }
+        prev = shm;
+        current = shm.next;
+    }
+}
+
+pub fn destroyPipe(target: *Pipe) void {
+    ipc_mutex.lock();
+    defer ipc_mutex.unlock();
+
+    for (&pipes) |*pipe| {
+        if (pipe.*) |*candidate| {
+            if (candidate == target) {
+                pipe.* = null;
+                return;
+            }
+        }
+    }
+}
+
 fn ipc_test_sender() void {
     const pid = process.getCurrentPID();
     vga.print("\n[SENDER] Starting (PID: ");
@@ -638,6 +675,48 @@ pub fn runIPCTests() void {
     timer.sleep(500);
 
     vga.print("\n\nIPC tests completed!\n");
+}
+
+pub fn runIPCTestsChecked() bool {
+    const receiver_pid: u32 = 9001;
+    const sender_pid: u32 = 9000;
+    const queue_payload = "Hello from sender!";
+    const pipe_payload = "Data through pipe!";
+    const shm_payload = "Shared memory test data";
+
+    destroyMessageQueue(receiver_pid);
+    const queue = createMessageQueue(receiver_pid, 4) catch return false;
+    defer destroyMessageQueue(receiver_pid);
+
+    sendMessage(sender_pid, receiver_pid, .Data, queue_payload) catch return false;
+    const msg = queue.receive() orelse return false;
+    defer freeMessage(msg);
+
+    if (msg.sender_pid != sender_pid or msg.receiver_pid != receiver_pid or msg.msg_type != .Data) return false;
+    if (!std.mem.eql(u8, msg.data[0..msg.data_len], queue_payload)) return false;
+
+    const pipe = createPipe() catch return false;
+    defer destroyPipe(pipe);
+    if ((pipe.write(pipe_payload) catch return false) != pipe_payload.len) return false;
+
+    var pipe_buffer: [64]u8 = undefined;
+    const pipe_read = pipe.read(pipe_buffer[0..pipe_payload.len]) catch return false;
+    pipe.close();
+    if (pipe_read != pipe_payload.len) return false;
+    if (!std.mem.eql(u8, pipe_buffer[0..pipe_read], pipe_payload)) return false;
+
+    const shm = createSharedMemory(sender_pid, 64, SharedMemory.PERM_READ | SharedMemory.PERM_WRITE) catch return false;
+    defer destroySharedMemory(shm.id);
+    if ((shm.write(shm_payload, 0) catch return false) != shm_payload.len) return false;
+
+    const attached = getSharedMemory(shm.id) orelse return false;
+    attached.attach();
+    defer attached.detach();
+
+    var shm_buffer: [64]u8 = undefined;
+    const shm_read = attached.read(shm_buffer[0..shm_payload.len], 0) catch return false;
+    if (shm_read != shm_payload.len) return false;
+    return std.mem.eql(u8, shm_buffer[0..shm_read], shm_payload);
 }
 
 fn print_number(num: u32) void {

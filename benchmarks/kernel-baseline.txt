@@ -1,6 +1,8 @@
 shell.tokenize.expansions 25142.75 200
 shell.pipeline.commandline 359488.57 200
+shell.glob.compile_matrix 27705.58 200
 shell.glob.match_matrix 79131.79 200
+shell.user.spawn_wait 139396656.91 200
 syscall.at.resolve_matrix 17366.38 200
 vfs.fd.freelist_churn 19975.88 200
 tcp.checksum.dual_stack 141665.70 200

@@ -31,6 +31,11 @@ pub fn runExt2WriteTests() void {
     vga.print("=== ext2 Write Tests Complete ===\n");
 }
 
+pub fn runExt2WriteTestsChecked() bool {
+    runExt2WriteTests();
+    return fail_count == 0;
+}
+
 fn testCreateFile() void {
     vga.print("Test 1: Create file via VFS\n");
     const path = "/mnt/ext2_test_file.txt";

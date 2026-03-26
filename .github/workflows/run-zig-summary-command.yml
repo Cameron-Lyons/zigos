@@ -1,0 +1,62 @@
+name: Run Zig Command With Summary
+
+on:
+  workflow_call:
+    inputs:
+      job-name:
+        required: true
+        type: string
+      command:
+        required: true
+        type: string
+      log-path:
+        required: true
+        type: string
+      summary-script:
+        required: true
+        type: string
+      summary-path:
+        required: true
+        type: string
+      artifact-name:
+        required: true
+        type: string
+      timeout-minutes:
+        required: false
+        type: number
+        default: 30
+
+jobs:
+  run:
+    name: ${{ inputs.job-name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up ZigOS CI
+      uses: ./.github/actions/setup-zigos-ci
+
+    - name: Run command
+      shell: bash
+      run: ${{ inputs.command }}
+
+    - name: Render summary
+      if: always()
+      shell: bash
+      run: |
+        mkdir -p build
+        bash ${{ inputs.summary-script }} ${{ inputs.log-path }} > ${{ inputs.summary-path }}
+        cat ${{ inputs.summary-path }} >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload summary artifact
+      if: always()
+      uses: actions/upload-artifact@v7.0.0
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ inputs.log-path }}
+          ${{ inputs.summary-path }}
+        if-no-files-found: warn

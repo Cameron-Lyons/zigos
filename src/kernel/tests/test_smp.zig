@@ -27,6 +27,11 @@ pub fn runSMPTests() void {
     vga.print("=== SMP Tests Complete ===\n");
 }
 
+pub fn runSMPTestsChecked() bool {
+    runSMPTests();
+    return fail_count == 0;
+}
+
 fn testAPICDetection() void {
     vga.print("Test 1: APIC detection\n");
     const num_cpus = smp.getNumCPUs();

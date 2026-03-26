@@ -21,7 +21,7 @@ rm -f "$IMAGE_PATH"
 truncate -s 64M "$IMAGE_PATH"
 mkfs.fat -F 32 "$IMAGE_PATH" >/dev/null
 
-for dir in etc bin tmp dev home home/user proc root sys usr usr/bin; do
+for dir in etc bin mnt tmp dev home home/user proc root sys usr usr/bin; do
   mmd -i "$IMAGE_PATH" "::/$dir"
 done
 

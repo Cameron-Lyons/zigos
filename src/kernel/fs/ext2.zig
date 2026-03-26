@@ -821,9 +821,18 @@ fn printNumber(num: u32) void {
 }
 
 fn ext2Mount(mount_point: *vfs.MountPoint) vfs.VFSError!void {
-    const device = ata.getPrimaryMaster() orelse return vfs.VFSError.NotFound;
+    const device_name = std.mem.sliceTo(&mount_point.device, 0);
+    const device = resolveAtaDevice(device_name) orelse return vfs.VFSError.NotFound;
     const fs = try mount(device);
     mount_point.private_data = fs;
+}
+
+fn resolveAtaDevice(device_name: []const u8) ?*const ata.ATADevice {
+    if (device_name.len == 0 or std.mem.eql(u8, device_name, "ata0")) return ata.getPrimaryMaster();
+    if (std.mem.eql(u8, device_name, "ata1")) return ata.getPrimarySlave();
+    if (std.mem.eql(u8, device_name, "ata2")) return ata.getSecondaryMaster();
+    if (std.mem.eql(u8, device_name, "ata3")) return ata.getSecondarySlave();
+    return null;
 }
 
 fn ext2Unmount(mount_point: *vfs.MountPoint) vfs.VFSError!void {

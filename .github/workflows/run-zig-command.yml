@@ -1,0 +1,32 @@
+name: Run Zig Command
+
+on:
+  workflow_call:
+    inputs:
+      job-name:
+        required: true
+        type: string
+      command:
+        required: true
+        type: string
+      timeout-minutes:
+        required: false
+        type: number
+        default: 30
+
+jobs:
+  run:
+    name: ${{ inputs.job-name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up ZigOS CI
+      uses: ./.github/actions/setup-zigos-ci
+
+    - name: Run command
+      shell: bash
+      run: ${{ inputs.command }}
