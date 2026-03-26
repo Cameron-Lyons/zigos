@@ -47,7 +47,7 @@ pub const IPv4Header = packed struct {
 };
 
 pub const IPv4Packet = struct {
-    header: *const IPv4Header,
+    header: *align(1) const IPv4Header,
     data: []u8,
 };
 
@@ -80,7 +80,7 @@ fn handleIPv4Packet(frame: *const ethernet.EthernetFrame) void {
         return;
     }
 
-    const header: *const IPv4Header = @ptrCast(@alignCast(frame.data.ptr));
+    const header: *align(1) const IPv4Header = @ptrCast(frame.data.ptr);
 
     const version = (header.version_ihl >> 4) & 0xF;
     if (version != IP_VERSION_4) {
@@ -128,6 +128,7 @@ fn handleIPv4Packet(frame: *const ethernet.EthernetFrame) void {
 pub fn sendPacket(dst_ip: u32, protocol: Protocol, data: []const u8) !void {
     // SAFETY: all fields assigned before the struct is used
     var header: IPv4Header = undefined;
+    const src_ip = if (isLoopbackAddress(dst_ip)) dst_ip else local_ip;
 
     header.version_ihl = (IP_VERSION_4 << 4) | 5;
     header.tos = 0;
@@ -137,10 +138,24 @@ pub fn sendPacket(dst_ip: u32, protocol: Protocol, data: []const u8) !void {
     header.ttl = 64;
     header.protocol = @intFromEnum(protocol);
     header.checksum = 0;
-    header.src_addr = @byteSwap(local_ip);
+    header.src_addr = @byteSwap(src_ip);
     header.dst_addr = @byteSwap(dst_ip);
 
     header.checksum = calculateChecksum(&header, IP_HEADER_MIN_SIZE);
+
+    if (isLoopbackAddress(dst_ip)) {
+        dispatchLocalPacket(protocol, &header, data);
+        return;
+    }
+
+    if (dst_ip == 0xFFFFFFFF) {
+        var packet_buf: [1500]u8 = undefined;
+        const header_ptr: [*]const u8 = @ptrCast(&header);
+        @memcpy(packet_buf[0..IP_HEADER_MIN_SIZE], header_ptr[0..IP_HEADER_MIN_SIZE]);
+        @memcpy(packet_buf[IP_HEADER_MIN_SIZE .. IP_HEADER_MIN_SIZE + data.len], data);
+        try ethernet.sendFrame([_]u8{0xFF} ** 6, .IPv4, packet_buf[0 .. IP_HEADER_MIN_SIZE + data.len]);
+        return;
+    }
 
     const next_hop = if (isLocalNetwork(dst_ip)) dst_ip else gateway_ip;
 
@@ -162,6 +177,22 @@ pub fn sendPacket(dst_ip: u32, protocol: Protocol, data: []const u8) !void {
     try ethernet.sendFrame(dst_mac, .IPv4, packet_buf[0 .. IP_HEADER_MIN_SIZE + data.len]);
 }
 
+fn dispatchLocalPacket(protocol: Protocol, header: *const IPv4Header, data: []const u8) void {
+    const packet = IPv4Packet{
+        .header = header,
+        .data = @constCast(data),
+    };
+
+    const handler_index: usize = switch (protocol) {
+        .ICMP => 0,
+        .TCP => 1,
+        .UDP => 2,
+    };
+    if (rx_handlers[handler_index]) |handler| {
+        handler(&packet);
+    }
+}
+
 fn calculateChecksum(header: *const IPv4Header, len: usize) u16 {
     var sum: u32 = 0;
     const data: [*]const u16 = @ptrCast(@alignCast(header));
@@ -180,7 +211,7 @@ fn calculateChecksum(header: *const IPv4Header, len: usize) u16 {
     return result;
 }
 
-fn verifyChecksum(header: *const IPv4Header, len: usize) bool {
+fn verifyChecksum(header: *align(1) const IPv4Header, len: usize) bool {
     var sum: u32 = 0;
     const data: [*]const u16 = @ptrCast(@alignCast(header));
     const word_count = len / 2;
@@ -199,6 +230,10 @@ fn verifyChecksum(header: *const IPv4Header, len: usize) bool {
 
 fn isLocalNetwork(ip: u32) bool {
     return (ip & netmask) == (local_ip & netmask);
+}
+
+fn isLoopbackAddress(ip: u32) bool {
+    return (ip & 0xFF000000) == 0x7F000000;
 }
 
 pub fn registerProtocolHandler(protocol: u8, handler: fn (src_ip: u32, dst_ip: u32, data: []const u8) void) void {

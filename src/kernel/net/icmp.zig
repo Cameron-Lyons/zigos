@@ -22,7 +22,7 @@ fn handleICMPPacket(packet: *const ipv4.IPv4Packet) void {
         return;
     }
 
-    const header: *const ICMPHeader = @ptrCast(@alignCast(packet.data.ptr));
+    const header: *align(1) const ICMPHeader = @ptrCast(packet.data.ptr);
 
     if (!verifyChecksum(packet.data)) {
         return;
@@ -33,7 +33,7 @@ fn handleICMPPacket(packet: *const ipv4.IPv4Packet) void {
     }
 }
 
-fn sendEchoReply(request_packet: *const ipv4.IPv4Packet, request_header: *const ICMPHeader) void {
+fn sendEchoReply(request_packet: *const ipv4.IPv4Packet, request_header: *align(1) const ICMPHeader) void {
     // SAFETY: header and data portions filled before the buffer is sent
     var reply_buf: [1500]u8 = undefined;
     var reply_header: *ICMPHeader = @ptrCast(@alignCast(&reply_buf[0]));

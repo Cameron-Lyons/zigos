@@ -1,8 +1,12 @@
 // zlint-disable suppressed-errors
+const std = @import("std");
 const pci = @import("pci.zig");
 const memory = @import("../memory/memory.zig");
+const paging = @import("../memory/paging.zig");
 const vga = @import("vga.zig");
 const isr = @import("../interrupts/isr.zig");
+const ethernet = @import("../net/ethernet.zig");
+const arp = @import("../net/arp.zig");
 const network = @import("../net/network.zig");
 const sync = @import("../utils/sync.zig");
 
@@ -27,6 +31,7 @@ const VIRTIO_STATUS_DRIVER_OK = 4;
 const VIRTQ_DESC_F_WRITE = 2;
 const VIRTQUEUE_SIZE: u16 = 256;
 const VIRTIO_BUFFER_SIZE: usize = 2048;
+const VIRTIO_NET_HEADER_SIZE: usize = 10;
 
 const VirtqDesc = extern struct {
     addr: u64,
@@ -59,6 +64,7 @@ const Virtqueue = struct {
     desc: [*]VirtqDesc,
     avail: *VirtqAvail,
     used: *VirtqUsed,
+    notify_off: u16,
     last_used_idx: u16,
     free_head: u16,
     num_free: u16,
@@ -111,11 +117,11 @@ const VirtioCommonCfg = extern struct {
 
 const VirtioNetDevice = struct {
     pci_device: pci.PCIDevice,
-    common_cfg: *volatile VirtioCommonCfg,
-    device_cfg: *VirtioNetConfig,
+    common_cfg: *align(1) volatile VirtioCommonCfg,
+    device_cfg: *align(1) VirtioNetConfig,
     notify_base: usize,
     notify_off_multiplier: u32,
-    isr_cfg: *volatile u8,
+    isr_cfg: *align(1) volatile u8,
     mac_addr: [6]u8,
     rx_queue: Virtqueue,
     tx_queue: Virtqueue,
@@ -124,35 +130,44 @@ const VirtioNetDevice = struct {
     rx_lock: sync.SpinLock,
     rx_poll_buffer: [VIRTIO_BUFFER_SIZE]u8,
 
+    fn commonFieldPtr(self: *VirtioNetDevice, comptime T: type, comptime field: []const u8) *align(1) volatile T {
+        return @ptrFromInt(@intFromPtr(self.common_cfg) + @offsetOf(VirtioCommonCfg, field));
+    }
+
+    fn deviceFieldPtr(self: *VirtioNetDevice, comptime T: type, comptime field: []const u8) *align(1) T {
+        return @ptrFromInt(@intFromPtr(self.device_cfg) + @offsetOf(VirtioNetConfig, field));
+    }
+
     fn readFeatures(self: *VirtioNetDevice) u64 {
-        self.common_cfg.device_feature_select = 0;
-        const low = self.common_cfg.device_feature;
-        self.common_cfg.device_feature_select = 1;
-        const high = self.common_cfg.device_feature;
+        self.commonFieldPtr(u32, "device_feature_select").* = 0;
+        const low = self.commonFieldPtr(u32, "device_feature").*;
+        self.commonFieldPtr(u32, "device_feature_select").* = 1;
+        const high = self.commonFieldPtr(u32, "device_feature").*;
         return (@as(u64, high) << 32) | low;
     }
 
     fn writeFeatures(self: *VirtioNetDevice, features: u64) void {
-        self.common_cfg.driver_feature_select = 0;
-        self.common_cfg.driver_feature = @as(u32, @truncate(features));
-        self.common_cfg.driver_feature_select = 1;
-        self.common_cfg.driver_feature = @as(u32, @truncate(features >> 32));
+        self.commonFieldPtr(u32, "driver_feature_select").* = 0;
+        self.commonFieldPtr(u32, "driver_feature").* = @as(u32, @truncate(features));
+        self.commonFieldPtr(u32, "driver_feature_select").* = 1;
+        self.commonFieldPtr(u32, "driver_feature").* = @as(u32, @truncate(features >> 32));
     }
 
     fn setupQueue(self: *VirtioNetDevice, queue: *Virtqueue, index: u16, size: u16) !void {
         queue.num = size;
 
         const desc_size = @sizeOf(VirtqDesc) * size;
-        const avail_size = @sizeOf(VirtqAvail) + @sizeOf(u16) * size;
-        const used_size = @sizeOf(VirtqUsed) + @sizeOf(VirtqUsedElem) * size;
-        const total_size = desc_size + avail_size + used_size;
+        const avail_size = @sizeOf(VirtqAvail);
+        const used_size = @sizeOf(VirtqUsed);
+        const used_offset = std.mem.alignForward(usize, desc_size + avail_size, @alignOf(VirtqUsed));
+        const total_size = used_offset + used_size;
 
         const queue_mem = memory.kmalloc(total_size + 4096) orelse return error.OutOfMemory;
         const queue_addr = (@intFromPtr(queue_mem) + 4095) & ~@as(usize, 4095);
 
         queue.desc = @as([*]VirtqDesc, @ptrFromInt(queue_addr));
         queue.avail = @as(*VirtqAvail, @ptrFromInt(queue_addr + desc_size));
-        queue.used = @as(*VirtqUsed, @ptrFromInt(queue_addr + desc_size + avail_size));
+        queue.used = @as(*VirtqUsed, @ptrFromInt(queue_addr + used_offset));
 
         @memset(@as([*]u8, @ptrFromInt(queue_addr))[0..total_size], 0);
 
@@ -164,12 +179,13 @@ const VirtioNetDevice = struct {
         queue.num_free = size;
         queue.last_used_idx = 0;
 
-        self.common_cfg.queue_select = index;
-        self.common_cfg.queue_size = size;
-        self.common_cfg.queue_desc = queue_addr;
-        self.common_cfg.queue_driver = queue_addr + desc_size;
-        self.common_cfg.queue_device = queue_addr + desc_size + avail_size;
-        self.common_cfg.queue_enable = 1;
+        self.commonFieldPtr(u16, "queue_select").* = index;
+        queue.notify_off = self.commonFieldPtr(u16, "queue_notify_off").*;
+        self.commonFieldPtr(u16, "queue_size").* = size;
+        self.commonFieldPtr(u64, "queue_desc").* = queue_addr;
+        self.commonFieldPtr(u64, "queue_driver").* = queue_addr + desc_size;
+        self.commonFieldPtr(u64, "queue_device").* = queue_addr + used_offset;
+        self.commonFieldPtr(u16, "queue_enable").* = 1;
     }
 
     fn addBuffer(_: *VirtioNetDevice, queue: *Virtqueue, data: []const u8, writable: bool) !u16 {
@@ -203,10 +219,10 @@ const VirtioNetDevice = struct {
         return desc_idx;
     }
 
-    fn notify(self: *VirtioNetDevice, queue_index: u16) void {
+    fn notify(self: *VirtioNetDevice, queue: *Virtqueue, queue_index: u16) void {
         const notify_addr = self.notify_base +
-            @as(usize, self.common_cfg.queue_notify_off) * self.notify_off_multiplier;
-        const notify_ptr: *volatile u16 = @ptrFromInt(notify_addr);
+            @as(usize, queue.notify_off) * self.notify_off_multiplier;
+        const notify_ptr: *align(1) volatile u16 = @ptrFromInt(notify_addr);
         notify_ptr.* = queue_index;
     }
 
@@ -237,11 +253,11 @@ const VirtioNetDevice = struct {
             .num_buffers = 1,
         };
 
-        const header_size = @sizeOf(VirtioNetHeader);
+        const header_size = VIRTIO_NET_HEADER_SIZE;
         @memcpy(buffer[header_size .. header_size + packet.len], packet);
 
         _ = try self.addBuffer(&self.tx_queue, buffer[0 .. header_size + packet.len], false);
-        self.notify(1);
+        self.notify(&self.tx_queue, 1);
 
         self.processUsedBuffers(&self.tx_queue);
     }
@@ -264,15 +280,15 @@ const VirtioNetDevice = struct {
             const len = used_elem.len;
             self.rx_queue.last_used_idx +%= 1;
 
-            if (len <= @sizeOf(VirtioNetHeader)) {
+            if (len <= VIRTIO_NET_HEADER_SIZE) {
                 self.recycleRxDescriptor(desc_idx);
-                self.notify(0);
+                self.notify(&self.rx_queue, 0);
                 continue;
             }
 
             const buffer_addr = self.rx_queue.desc[desc_idx].addr;
-            const packet_start = buffer_addr + @sizeOf(VirtioNetHeader);
-            const packet_len = @min(len - @sizeOf(VirtioNetHeader), VIRTIO_BUFFER_SIZE - @sizeOf(VirtioNetHeader));
+            const packet_start = buffer_addr + VIRTIO_NET_HEADER_SIZE;
+            const packet_len = @min(len - VIRTIO_NET_HEADER_SIZE, VIRTIO_BUFFER_SIZE - VIRTIO_NET_HEADER_SIZE);
 
             return .{
                 .data = @as([*]u8, @ptrFromInt(@as(usize, @intCast(packet_start))))[0..packet_len],
@@ -290,7 +306,7 @@ const VirtioNetDevice = struct {
 
         self.rx_lock.acquire();
         self.recycleRxDescriptor(@intCast(handle));
-        self.notify(0);
+        self.notify(&self.rx_queue, 0);
         self.rx_lock.release();
     }
 
@@ -317,17 +333,143 @@ const VirtioNetDevice = struct {
 
 var virtio_net: ?VirtioNetDevice = null;
 
+fn processInterrupt(dev: *VirtioNetDevice) void {
+    const isr_status = dev.isr_cfg.*;
+
+    if (isr_status & 1 != 0) {
+        while (dev.claimReceive()) |packet| {
+            _ = network.enqueueBorrowedRx(packet);
+        }
+    }
+}
+
 fn virtio_interrupt_handler(frame: *isr.InterruptFrame) void {
     _ = frame;
     if (virtio_net) |*dev| {
-        const isr_status = dev.isr_cfg.*;
-
-        if (isr_status & 1 != 0) {
-            while (dev.claimReceive()) |packet| {
-                _ = network.enqueueBorrowedRx(packet);
-            }
-        }
+        processInterrupt(dev);
     }
+}
+
+pub fn runInterruptSelfTestChecked() bool {
+    var common_cfg: VirtioCommonCfg = std.mem.zeroes(VirtioCommonCfg);
+    var device_cfg: VirtioNetConfig = std.mem.zeroes(VirtioNetConfig);
+    var isr_status: u8 = 1;
+    var notify_slot: u16 = 0xFFFF;
+    var rx_desc = [_]VirtqDesc{std.mem.zeroes(VirtqDesc)} ** 256;
+    var tx_desc = [_]VirtqDesc{std.mem.zeroes(VirtqDesc)} ** 256;
+    var rx_avail: VirtqAvail = std.mem.zeroes(VirtqAvail);
+    var tx_avail: VirtqAvail = std.mem.zeroes(VirtqAvail);
+    var rx_used: VirtqUsed = std.mem.zeroes(VirtqUsed);
+    var tx_used: VirtqUsed = std.mem.zeroes(VirtqUsed);
+    const rx_buffer_mem = memory.kmalloc(VIRTIO_BUFFER_SIZE) orelse return false;
+    defer memory.kfree(rx_buffer_mem);
+
+    const rx_buffer: [*]u8 = @ptrCast(rx_buffer_mem);
+    const sender_ip: u32 = 0xC0A801F2;
+    const target_ip: u32 = 0xC0A80102;
+    const sender_mac = [6]u8{ 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x03 };
+    const target_mac = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x03 };
+    const header_size = VIRTIO_NET_HEADER_SIZE;
+    var frame: [ethernet.ETH_HEADER_SIZE + @sizeOf(arp.ARPHeader)]u8 = undefined;
+    writeSyntheticArpReply(&frame, sender_ip, target_ip, sender_mac, target_mac);
+    @memset(rx_buffer[0..VIRTIO_BUFFER_SIZE], 0);
+    @memcpy(rx_buffer[header_size .. header_size + frame.len], frame[0..]);
+
+    rx_desc[0].addr = @intFromPtr(rx_buffer);
+    rx_desc[0].len = @intCast(VIRTIO_BUFFER_SIZE);
+    rx_desc[0].flags = VIRTQ_DESC_F_WRITE;
+
+    var fake = VirtioNetDevice{
+        .pci_device = .{ .bus = 0, .device = 0, .function = 0, .vendor_id = 0, .device_id = 0, .class_code = 0, .subclass = 0, .prog_if = 0, .bar0 = 0, .bar1 = 0, .bar2 = 0, .bar3 = 0, .bar4 = 0, .bar5 = 0 },
+        .common_cfg = &common_cfg,
+        .device_cfg = &device_cfg,
+        .notify_base = @intFromPtr(&notify_slot),
+        .notify_off_multiplier = 0,
+        .isr_cfg = @ptrCast(&isr_status),
+        .mac_addr = target_mac,
+        .rx_queue = .{
+            .num = VIRTQUEUE_SIZE,
+            .desc = &rx_desc,
+            .avail = &rx_avail,
+            .used = &rx_used,
+            .notify_off = 0,
+            .last_used_idx = 0,
+            .free_head = 1,
+            .num_free = VIRTQUEUE_SIZE - 1,
+            .desc_state = [_]Virtqueue.DescState{.{ .data = null, .len = 0, .next = 0 }} ** 256,
+        },
+        .tx_queue = .{
+            .num = VIRTQUEUE_SIZE,
+            .desc = &tx_desc,
+            .avail = &tx_avail,
+            .used = &tx_used,
+            .notify_off = 0,
+            .last_used_idx = 0,
+            .free_head = 0,
+            .num_free = VIRTQUEUE_SIZE,
+            .desc_state = [_]Virtqueue.DescState{.{ .data = null, .len = 0, .next = 0 }} ** 256,
+        },
+        .rx_buffers = rx_buffer,
+        .tx_buffers = rx_buffer,
+        .rx_lock = sync.SpinLock.init(),
+        .rx_poll_buffer = undefined,
+    };
+    fake.rx_queue.used.idx = 1;
+    fake.rx_queue.used.ring[0] = .{ .id = 0, .len = @intCast(header_size + frame.len) };
+
+    const previous = virtio_net;
+    virtio_net = fake;
+    defer virtio_net = previous;
+
+    if (virtio_net) |*dev| {
+        processInterrupt(dev);
+        const resolved = arp.resolve(sender_ip) orelse return false;
+        return macEquals(resolved, sender_mac) and dev.rx_queue.avail.idx == 1 and notify_slot == 0;
+    }
+
+    return false;
+}
+
+fn writeSyntheticArpReply(frame: []u8, sender_ip: u32, target_ip: u32, sender_mac: [6]u8, target_mac: [6]u8) void {
+    const eth_header: *align(1) ethernet.EthernetHeader = @ptrCast(frame.ptr);
+    eth_header.dst_mac0 = target_mac[0];
+    eth_header.dst_mac1 = target_mac[1];
+    eth_header.dst_mac2 = target_mac[2];
+    eth_header.dst_mac3 = target_mac[3];
+    eth_header.dst_mac4 = target_mac[4];
+    eth_header.dst_mac5 = target_mac[5];
+    eth_header.src_mac0 = sender_mac[0];
+    eth_header.src_mac1 = sender_mac[1];
+    eth_header.src_mac2 = sender_mac[2];
+    eth_header.src_mac3 = sender_mac[3];
+    eth_header.src_mac4 = sender_mac[4];
+    eth_header.src_mac5 = sender_mac[5];
+    eth_header.ethertype = @byteSwap(@intFromEnum(ethernet.EtherType.ARP));
+
+    const arp_header: *align(1) arp.ARPHeader = @ptrCast(frame[ethernet.ETH_HEADER_SIZE..].ptr);
+    arp_header.hardware_type = @byteSwap(@as(u16, 1));
+    arp_header.protocol_type = @byteSwap(@as(u16, 0x0800));
+    arp_header.hardware_addr_len = 6;
+    arp_header.protocol_addr_len = 4;
+    arp_header.opcode = @byteSwap(@as(u16, 2));
+    arp_header.sender_mac0 = sender_mac[0];
+    arp_header.sender_mac1 = sender_mac[1];
+    arp_header.sender_mac2 = sender_mac[2];
+    arp_header.sender_mac3 = sender_mac[3];
+    arp_header.sender_mac4 = sender_mac[4];
+    arp_header.sender_mac5 = sender_mac[5];
+    arp_header.sender_ip = @byteSwap(sender_ip);
+    arp_header.target_mac0 = target_mac[0];
+    arp_header.target_mac1 = target_mac[1];
+    arp_header.target_mac2 = target_mac[2];
+    arp_header.target_mac3 = target_mac[3];
+    arp_header.target_mac4 = target_mac[4];
+    arp_header.target_mac5 = target_mac[5];
+    arp_header.target_ip = @byteSwap(target_ip);
+}
+
+fn macEquals(a: [6]u8, b: [6]u8) bool {
+    return a[0] == b[0] and a[1] == b[1] and a[2] == b[2] and a[3] == b[3] and a[4] == b[4] and a[5] == b[5];
 }
 
 pub fn init() void {
@@ -389,22 +531,22 @@ fn initDevice(pci_device: pci.PCIDevice) void {
         return;
     }
 
-    dev.common_cfg.device_status = VIRTIO_STATUS_RESET;
-    dev.common_cfg.device_status = VIRTIO_STATUS_ACKNOWLEDGE;
-    dev.common_cfg.device_status |= VIRTIO_STATUS_DRIVER;
+    dev.commonFieldPtr(u8, "device_status").* = VIRTIO_STATUS_RESET;
+    dev.commonFieldPtr(u8, "device_status").* = VIRTIO_STATUS_ACKNOWLEDGE;
+    dev.commonFieldPtr(u8, "device_status").* |= VIRTIO_STATUS_DRIVER;
 
     var features = dev.readFeatures();
     features &= (VIRTIO_NET_F_MAC | VIRTIO_NET_F_STATUS);
     dev.writeFeatures(features);
 
-    dev.common_cfg.device_status |= VIRTIO_STATUS_FEATURES_OK;
+    dev.commonFieldPtr(u8, "device_status").* |= VIRTIO_STATUS_FEATURES_OK;
 
-    if ((dev.common_cfg.device_status & VIRTIO_STATUS_FEATURES_OK) == 0) {
+    if ((dev.commonFieldPtr(u8, "device_status").* & VIRTIO_STATUS_FEATURES_OK) == 0) {
         vga.print("VirtIO feature negotiation failed\n");
         return;
     }
 
-    @memcpy(&dev.mac_addr, &dev.device_cfg.mac);
+    dev.mac_addr = dev.deviceFieldPtr([6]u8, "mac").*;
 
     vga.print("VirtIO MAC: ");
     for (dev.mac_addr, 0..) |byte, i| {
@@ -437,14 +579,14 @@ fn initDevice(pci_device: pci.PCIDevice) void {
         const buffer = dev.rx_buffers[i * VIRTIO_BUFFER_SIZE .. (i + 1) * VIRTIO_BUFFER_SIZE];
         _ = dev.addBuffer(&dev.rx_queue, buffer, true) catch break;
     }
-    dev.notify(0);
+    dev.notify(&dev.rx_queue, 0);
 
     const irq_line = pci.readConfigByte(pci_device.bus, pci_device.device, pci_device.function, 0x3C);
     isr.registerHandler(0x20 + irq_line, virtio_interrupt_handler);
 
     pci.writeConfigWord(pci_device.bus, pci_device.device, pci_device.function, 0x04, pci.readConfigWord(pci_device.bus, pci_device.device, pci_device.function, 0x04) | 0x06);
 
-    dev.common_cfg.device_status |= VIRTIO_STATUS_DRIVER_OK;
+    dev.commonFieldPtr(u8, "device_status").* |= VIRTIO_STATUS_DRIVER_OK;
 
     virtio_net = dev;
     network.setNetworkDevice(&virtio_network_device);
@@ -467,8 +609,6 @@ fn findCapabilities(dev: *VirtioNetDevice) bool {
                 const offset = pci.readConfigDword(dev.pci_device.bus, dev.pci_device.device, dev.pci_device.function, cap_offset + 8);
                 const length = pci.readConfigDword(dev.pci_device.bus, dev.pci_device.device, dev.pci_device.function, cap_offset + 12);
 
-                _ = length;
-
                 const bar_addr = switch (bar) {
                     0 => dev.pci_device.bar0,
                     1 => dev.pci_device.bar1,
@@ -481,10 +621,15 @@ fn findCapabilities(dev: *VirtioNetDevice) bool {
 
                 if (bar_addr != 0) {
                     const base_addr = (bar_addr & 0xFFFFFFF0) + offset;
+                    const aligned_base = base_addr & ~@as(u32, 0xFFF);
+                    const end_addr = (base_addr + length + 0xFFF) & ~@as(u32, 0xFFF);
+                    if (end_addr > aligned_base) {
+                        paging.map_range(aligned_base, aligned_base, end_addr - aligned_base, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE);
+                    }
 
                     switch (cfg_type) {
                         VIRTIO_PCI_CAP_COMMON_CFG => {
-                            dev.common_cfg = @as(*volatile VirtioCommonCfg, @ptrFromInt(base_addr));
+                            dev.common_cfg = @as(*align(1) volatile VirtioCommonCfg, @ptrFromInt(base_addr));
                         },
                         VIRTIO_PCI_CAP_NOTIFY_CFG => {
                             dev.notify_base = base_addr;
@@ -493,10 +638,10 @@ fn findCapabilities(dev: *VirtioNetDevice) bool {
                             }
                         },
                         VIRTIO_PCI_CAP_ISR_CFG => {
-                            dev.isr_cfg = @as(*volatile u8, @ptrFromInt(base_addr));
+                            dev.isr_cfg = @as(*align(1) volatile u8, @ptrFromInt(base_addr));
                         },
                         VIRTIO_PCI_CAP_DEVICE_CFG => {
-                            dev.device_cfg = @as(*VirtioNetConfig, @ptrFromInt(base_addr));
+                            dev.device_cfg = @as(*align(1) VirtioNetConfig, @ptrFromInt(base_addr));
                         },
                         else => {},
                     }

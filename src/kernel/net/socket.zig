@@ -1,3 +1,4 @@
+const std = @import("std");
 const memory = @import("../memory/memory.zig");
 const tcp = @import("tcp.zig");
 const udp = @import("udp.zig");
@@ -82,6 +83,7 @@ pub const Socket = struct {
     backlog_head: usize,
     backlog_tail: usize,
     tcp_connection: ?*tcp.TCPConnection,
+    loopback_peer: ?*Socket,
     blocking: bool,
     in_use: bool,
     address_family: AddressFamily,
@@ -126,6 +128,7 @@ pub const Socket = struct {
             .backlog_head = 0,
             .backlog_tail = 0,
             .tcp_connection = null,
+            .loopback_peer = null,
             .blocking = true,
             .in_use = true,
             .address_family = .AF_INET,
@@ -146,6 +149,16 @@ pub const Socket = struct {
 
     pub fn pollEvents(self: *const Socket, requested_events: u16) u16 {
         var ready: u16 = 0;
+
+        if (self.loopback_peer != null) {
+            if ((requested_events & POLLIN) != 0 and (self.recv_head != self.recv_tail or self.state == .CLOSED)) {
+                ready |= POLLIN;
+            }
+            if ((requested_events & POLLOUT) != 0 and self.state != .CLOSED) {
+                ready |= POLLOUT;
+            }
+            return ready;
+        }
 
         if ((requested_events & POLLIN) != 0) {
             if (self.state == .LISTENING) {
@@ -217,7 +230,8 @@ pub const Socket = struct {
         }
 
         const backlog_size = @max(@as(usize, 1), @min(backlog, MAX_BACKLOG));
-        const backlog_mem = memory.kmalloc(backlog_size * @sizeOf(?*Socket)) orelse return error.OutOfMemory;
+        const backlog_bytes = std.math.mul(usize, backlog_size, @sizeOf(*Socket)) catch return error.OutOfMemory;
+        const backlog_mem = memory.kmalloc(backlog_bytes) orelse return error.OutOfMemory;
         const backlog_ptr: [*]?*Socket = @ptrCast(@alignCast(backlog_mem));
         self.backlog = backlog_ptr[0..backlog_size];
         for (self.backlog) |*slot| {
@@ -269,6 +283,29 @@ pub const Socket = struct {
             self.local_port = allocateEphemeralPort();
         }
 
+        if (std.mem.eql(u8, &self.local_addr.octets, &[_]u8{ 0, 0, 0, 0 }) and isLoopbackAddress(addr)) {
+            self.local_addr = addr;
+        }
+
+        if (self.protocol == .TCP and isLoopbackAddress(addr)) {
+            const listener = findListeningSocket(port) orelse return SocketError.ConnectionRefused;
+            const accepted = createSocket(.STREAM, .TCP) catch return error.OutOfMemory;
+            errdefer accepted.close();
+
+            accepted.local_addr = listener.local_addr;
+            accepted.local_port = listener.local_port;
+            accepted.remote_addr = self.local_addr;
+            accepted.remote_port = self.local_port;
+            accepted.state = .CONNECTED;
+
+            listener.addToBacklog(accepted) catch return SocketError.NoBufferSpace;
+
+            self.loopback_peer = accepted;
+            accepted.loopback_peer = self;
+            self.setState(.CONNECTED);
+            return;
+        }
+
         self.setState(.CONNECTING);
 
         switch (self.protocol) {
@@ -300,6 +337,14 @@ pub const Socket = struct {
     pub fn send(self: *Socket, data: []const u8) !usize {
         if (self.state != .CONNECTED and self.socket_type == .STREAM) {
             return SocketError.NotConnected;
+        }
+
+        if (self.loopback_peer) |peer| {
+            if (peer.state == .CLOSED) {
+                return SocketError.NotConnected;
+            }
+            peer.addToRecvBuffer(data);
+            return data.len;
         }
 
         switch (self.protocol) {
@@ -363,6 +408,27 @@ pub const Socket = struct {
             return SocketError.NotConnected;
         }
 
+        if (self.loopback_peer != null) {
+            while (self.recv_head == self.recv_tail) {
+                if (self.state == .CLOSED) {
+                    return 0;
+                }
+                if (!self.blocking) {
+                    return 0;
+                }
+                self.recv_ready.wait();
+            }
+
+            var bytes_read: usize = 0;
+            while (bytes_read < buffer.len and self.recv_head != self.recv_tail) {
+                buffer[bytes_read] = self.recv_buffer[self.recv_tail];
+                self.recv_tail = (self.recv_tail + 1) & RECV_BUFFER_MASK;
+                bytes_read += 1;
+            }
+
+            return bytes_read;
+        }
+
         if (self.protocol == .TCP) {
             const conn = self.tcp_connection orelse return SocketError.NotConnected;
 
@@ -400,6 +466,15 @@ pub const Socket = struct {
     }
 
     pub fn close(self: *Socket) void {
+        if (self.loopback_peer) |peer| {
+            peer.loopback_peer = null;
+            peer.state = .CLOSED;
+            peer.recv_ready.signal();
+            peer.accept_ready.signal();
+            peer.state_ready.signal();
+            self.loopback_peer = null;
+        }
+
         switch (self.protocol) {
             .TCP => {
                 if (self.tcp_connection) |conn| {
@@ -495,6 +570,10 @@ fn allocateEphemeralPort() u16 {
     return port;
 }
 
+fn isLoopbackAddress(addr: ipv4.IPv4Address) bool {
+    return addr.octets[0] == 127;
+}
+
 fn isPortInUse(port: u16) bool {
     const slot = port % PORT_LOOKUP_SIZE;
     if (port_lookup[slot]) |sock| {
@@ -535,6 +614,7 @@ pub fn createAcceptedTcpSocket(
     sock.remote_addr = remote_addr;
     sock.remote_port = remote_port;
     sock.tcp_connection = conn;
+    sock.loopback_peer = null;
     sock.state = .CONNECTED;
     return sock;
 }

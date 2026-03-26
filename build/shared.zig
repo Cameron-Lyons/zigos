@@ -17,6 +17,11 @@ pub const BootProfile = enum {
     smp_regression,
     manual_regression,
     ext2_regression,
+    service_regression,
+    scheduler_regression,
+    nic_ingress,
+    e1000_ingress,
+    virtio_ingress,
     userland_smoke,
     userland_sh_smoke,
 };

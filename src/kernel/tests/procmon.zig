@@ -174,6 +174,23 @@ pub fn getCPUUsage() CPUUsage {
     return cpu_usage;
 }
 
+pub fn runMonitoringChecksChecked() bool {
+    init();
+    update_interval = 0;
+    last_update_time = 0;
+    updateStats();
+
+    const sched_stats = scheduler.getStatistics();
+    return system_stats.total_processes >= 1 and
+        system_stats.memory_total > 0 and
+        system_stats.memory_total >= system_stats.memory_used and
+        sched_stats.total_processes >= 1 and
+        cpu_usage.user_percent <= 100 and
+        cpu_usage.system_percent <= 100 and
+        cpu_usage.idle_percent <= 100 and
+        cpu_usage.iowait_percent <= 100;
+}
+
 pub fn printProcessList() void {
     updateStats();
 

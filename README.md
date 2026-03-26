@@ -84,6 +84,21 @@ zig build kernel-manual-regression
 # Build the ext2 regression profile
 zig build kernel-ext2-regression
 
+# Build the service regression profile
+zig build kernel-service-regression
+
+# Build the scheduler regression profile
+zig build kernel-scheduler-regression
+
+# Build the NIC ingress regression profile
+zig build kernel-nic-ingress
+
+# Build the E1000 ingress regression profile
+zig build kernel-e1000-ingress
+
+# Build the VirtIO ingress regression profile
+zig build kernel-virtio-ingress
+
 # Run the kernel benchmark profile in headless QEMU
 zig build run-kernel-bench
 
@@ -104,6 +119,21 @@ zig build manual-regression-test
 
 # Run the ext2 regression profile against a dedicated ext2 disk image
 zig build ext2-regression-test
+
+# Run the service regression profile for memory, syscall, network, and driver RX self-tests
+zig build service-regression-test
+
+# Run the scheduler/process-monitoring regression profile
+zig build scheduler-regression-test
+
+# Run the true QEMU NIC ingress regression profile
+zig build nic-ingress-test
+
+# Run the true QEMU E1000 ingress regression profile
+zig build e1000-ingress-test
+
+# Run the true QEMU VirtIO ingress regression profile
+zig build virtio-ingress-test
 
 # Run the development profile in QEMU
 zig build run
@@ -205,6 +235,21 @@ zig build manual-regression-test
 
 # Run ext2 write coverage against a dedicated ext2 image attached beside the rootfs disk
 zig build ext2-regression-test
+
+# Run memory allocator, syscall, and network stack smoke/regression coverage
+zig build service-regression-test
+
+# Run scheduler and process-monitoring smoke/regression coverage
+zig build scheduler-regression-test
+
+# Run a real QEMU NIC ingress smoke/regression path with injected Ethernet frames
+zig build nic-ingress-test
+
+# Run a real QEMU E1000 ingress smoke/regression path with UDP host forwarding
+zig build e1000-ingress-test
+
+# Run a real QEMU VirtIO ingress smoke/regression path with injected Ethernet frames
+zig build virtio-ingress-test
 ```
 
 ## Boot Profiles
@@ -225,6 +270,11 @@ zig build ext2-regression-test
 - `smp_regression`: boots the kernel with SMP startup enabled, runs the SMP validation suite, emits serial pass/fail markers, and exits through QEMU debug-exit
 - `manual_regression`: boots the kernel from the disk-backed rootfs, runs automated file I/O, TCP, synchronization, and IPC suites, emits serial pass/fail markers, and exits through QEMU debug-exit
 - `ext2_regression`: boots the kernel from the disk-backed rootfs, mounts a dedicated ext2 disk on `/mnt`, runs ext2 write coverage, emits serial pass/fail markers, and exits through QEMU debug-exit
+- `service_regression`: boots the kernel with the network stack enabled, runs memory allocator, syscall, deeper network packet-path smoke suites, plus RTL8139, E1000, and VirtIO interrupt/RX self-tests, emits serial pass/fail markers, and exits through QEMU debug-exit
+- `scheduler_regression`: boots the kernel, runs scheduler/demo and process-monitoring smoke suites, emits serial pass/fail markers, and exits through QEMU debug-exit
+- `nic_ingress`: boots the kernel with the network stack enabled, initializes a real QEMU NIC, accepts injected Ethernet ingress frames through the emulated device, and exits through QEMU debug-exit once the ARP path succeeds
+- `e1000_ingress`: boots the kernel with the network stack enabled, initializes a real QEMU e1000 NIC, observes a live host-forwarded packet reaching the guest network stack, and exits through QEMU debug-exit once ingress succeeds
+- `virtio_ingress`: boots the kernel with the network stack enabled, initializes a real QEMU VirtIO NIC, accepts injected Ethernet ingress frames through the emulated device, and exits through QEMU debug-exit once the ARP path succeeds
 - `userland_smoke`: boots from the disk-backed rootfs when available, falls back to the embedded rootfs otherwise, runs the external userland smoke commands (`hello`, `echo`, `uname`, `ls`, `cat`), and exits through QEMU debug-exit
 
 The current bootstrap prefers the staged FAT disk image as `/`, with the embedded root filesystem kept as a fallback. The staged image still mirrors the bootstrap `/bin` and `/etc` content for disk-based workflows.

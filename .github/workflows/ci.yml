@@ -120,6 +120,36 @@ jobs:
       job-name: Ext2 Regression
       command: zig build ext2-regression-test
 
+  service-regression:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: Service Regression
+      command: zig build service-regression-test
+
+  scheduler-regression:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: Scheduler Regression
+      command: zig build scheduler-regression-test
+
+  nic-ingress:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: NIC Ingress
+      command: zig build nic-ingress-test
+
+  e1000-ingress:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: E1000 Ingress
+      command: zig build e1000-ingress-test
+
+  virtio-ingress:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: VirtIO Ingress
+      command: zig build virtio-ingress-test
+
   kernel-bench:
     uses: ./.github/workflows/run-zig-summary-command.yml
     with:

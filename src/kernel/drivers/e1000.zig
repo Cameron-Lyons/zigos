@@ -1,4 +1,7 @@
 const pci = @import("pci.zig");
+const paging = @import("../memory/paging.zig");
+const ethernet = @import("../net/ethernet.zig");
+const arp = @import("../net/arp.zig");
 const network = @import("../net/network.zig");
 const memory = @import("../memory/memory.zig");
 const isr = @import("../interrupts/isr.zig");
@@ -136,6 +139,7 @@ const E1000_NUM_RX_DESC = 32;
 const E1000_NUM_TX_DESC = 32;
 const RX_BUFFER_SIZE = 2048;
 const TX_BUFFER_SIZE = 2048;
+const E1000_MMIO_MAP_SIZE: u32 = 0x6000;
 
 const E1000Registers = struct {
     const CTRL = 0x0000;
@@ -516,19 +520,130 @@ const E1000Device = struct {
     }
 };
 
+fn processInterrupt(dev: *E1000Device) void {
+    const icr = dev.readRegister(E1000Registers.ICR);
+
+    if (icr & 0x80 != 0) {
+        while (dev.claimReceive()) |packet| {
+            _ = network.enqueueBorrowedRx(packet);
+        }
+    }
+
+    dev.writeRegister(E1000Registers.ICR, icr);
+}
+
 fn e1000_interrupt_handler(frame: *isr.InterruptFrame) void {
     _ = frame;
     if (e1000_device) |*dev| {
-        const icr = dev.readRegister(E1000Registers.ICR);
-
-        if (icr & 0x80 != 0) {
-            while (dev.claimReceive()) |packet| {
-                _ = network.enqueueBorrowedRx(packet);
-            }
-        }
-
-        dev.writeRegister(E1000Registers.ICR, icr);
+        processInterrupt(dev);
     }
+}
+
+pub fn runInterruptSelfTestChecked() bool {
+    const mmio_mem = memory.kmalloc(0x6000) orelse return false;
+    const rx_desc_mem = memory.kmalloc(@sizeOf(RXDescriptor) * E1000_NUM_RX_DESC) orelse {
+        memory.kfree(mmio_mem);
+        return false;
+    };
+    const rx_buf_mem = memory.kmalloc(RX_BUFFER_SIZE * E1000_NUM_RX_DESC) orelse {
+        memory.kfree(rx_desc_mem);
+        memory.kfree(mmio_mem);
+        return false;
+    };
+
+    @memset(@as([*]u8, @ptrCast(mmio_mem))[0..0x6000], 0);
+    @memset(@as([*]u8, @ptrCast(rx_desc_mem))[0 .. @sizeOf(RXDescriptor) * E1000_NUM_RX_DESC], 0);
+    @memset(@as([*]u8, @ptrCast(rx_buf_mem))[0 .. RX_BUFFER_SIZE * E1000_NUM_RX_DESC], 0);
+
+    var fake = E1000Device{
+        .pci_device = .{ .bus = 0, .device = 0, .function = 0, .vendor_id = 0, .device_id = 0, .class_code = 0, .subclass = 0, .prog_if = 0, .bar0 = 0, .bar1 = 0, .bar2 = 0, .bar3 = 0, .bar4 = 0, .bar5 = 0 },
+        .mmio_base = @truncate(@intFromPtr(mmio_mem)),
+        .mac_addr = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 },
+        .rx_descs = @ptrCast(@alignCast(rx_desc_mem)),
+        .tx_descs = @ptrCast(@alignCast(rx_desc_mem)),
+        .rx_buffers = @ptrCast(rx_buf_mem),
+        .tx_buffers = @ptrCast(rx_buf_mem),
+        .rx_lock = sync.SpinLock.init(),
+        .rx_cur = 0,
+        .rx_release_cur = 0,
+        .rx_release_ready = [_]bool{false} ** E1000_NUM_RX_DESC,
+        .tx_cur = 0,
+        .eeprom_exists = false,
+    };
+
+    const sender_ip: u32 = 0xC0A801F1;
+    const target_ip: u32 = 0xC0A80102;
+    const sender_mac = [6]u8{ 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02 };
+    var frame: [ethernet.ETH_HEADER_SIZE + @sizeOf(arp.ARPHeader)]u8 = undefined;
+    writeSyntheticArpReply(&frame, sender_ip, target_ip, sender_mac, fake.mac_addr);
+
+    fake.rx_descs[0].addr = @intFromPtr(fake.rx_buffers);
+    fake.rx_descs[0].length = @intCast(frame.len);
+    fake.rx_descs[0].status = RXStatus.DD | RXStatus.EOP;
+    @memcpy(fake.rx_buffers[0..frame.len], frame[0..]);
+    fake.writeRegister(E1000Registers.ICR, 0x80);
+
+    const previous = e1000_device;
+    e1000_device = fake;
+    defer {
+        e1000_device = previous;
+        memory.kfree(rx_buf_mem);
+        memory.kfree(rx_desc_mem);
+        memory.kfree(mmio_mem);
+    }
+
+    if (e1000_device) |*dev| {
+        processInterrupt(dev);
+        const resolved = arp.resolve(sender_ip) orelse return false;
+        return macEquals(resolved, sender_mac) and
+            dev.rx_release_cur == 1 and
+            !dev.rx_release_ready[0] and
+            dev.readRegister(E1000Registers.RDT) == 0;
+    }
+
+    return false;
+}
+
+fn writeSyntheticArpReply(frame: []u8, sender_ip: u32, target_ip: u32, sender_mac: [6]u8, target_mac: [6]u8) void {
+    const eth_header: *align(1) ethernet.EthernetHeader = @ptrCast(frame.ptr);
+    eth_header.dst_mac0 = target_mac[0];
+    eth_header.dst_mac1 = target_mac[1];
+    eth_header.dst_mac2 = target_mac[2];
+    eth_header.dst_mac3 = target_mac[3];
+    eth_header.dst_mac4 = target_mac[4];
+    eth_header.dst_mac5 = target_mac[5];
+    eth_header.src_mac0 = sender_mac[0];
+    eth_header.src_mac1 = sender_mac[1];
+    eth_header.src_mac2 = sender_mac[2];
+    eth_header.src_mac3 = sender_mac[3];
+    eth_header.src_mac4 = sender_mac[4];
+    eth_header.src_mac5 = sender_mac[5];
+    eth_header.ethertype = @byteSwap(@intFromEnum(ethernet.EtherType.ARP));
+
+    const arp_header: *align(1) arp.ARPHeader = @ptrCast(frame[ethernet.ETH_HEADER_SIZE..].ptr);
+    arp_header.hardware_type = @byteSwap(@as(u16, 1));
+    arp_header.protocol_type = @byteSwap(@as(u16, 0x0800));
+    arp_header.hardware_addr_len = 6;
+    arp_header.protocol_addr_len = 4;
+    arp_header.opcode = @byteSwap(@as(u16, 2));
+    arp_header.sender_mac0 = sender_mac[0];
+    arp_header.sender_mac1 = sender_mac[1];
+    arp_header.sender_mac2 = sender_mac[2];
+    arp_header.sender_mac3 = sender_mac[3];
+    arp_header.sender_mac4 = sender_mac[4];
+    arp_header.sender_mac5 = sender_mac[5];
+    arp_header.sender_ip = @byteSwap(sender_ip);
+    arp_header.target_mac0 = target_mac[0];
+    arp_header.target_mac1 = target_mac[1];
+    arp_header.target_mac2 = target_mac[2];
+    arp_header.target_mac3 = target_mac[3];
+    arp_header.target_mac4 = target_mac[4];
+    arp_header.target_mac5 = target_mac[5];
+    arp_header.target_ip = @byteSwap(target_ip);
+}
+
+fn macEquals(a: [6]u8, b: [6]u8) bool {
+    return a[0] == b[0] and a[1] == b[1] and a[2] == b[2] and a[3] == b[3] and a[4] == b[4] and a[5] == b[5];
 }
 
 pub fn init() void {
@@ -590,6 +705,9 @@ fn initDevice(pci_device: pci.PCIDevice) void {
     const bar0 = pci.readConfigDword(pci_device.bus, pci_device.device, pci_device.function, 0x10);
     if (bar0 & 1 == 0) {
         dev.mmio_base = bar0 & 0xFFFFFFF0;
+        const aligned_base = dev.mmio_base & ~@as(u32, 0xFFF);
+        const map_size = (E1000_MMIO_MAP_SIZE + 0xFFF) & ~@as(u32, 0xFFF);
+        paging.map_range(aligned_base, aligned_base, map_size, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE);
     } else {
         vga.print("E1000: BAR0 is I/O space, not supported\n");
         return;

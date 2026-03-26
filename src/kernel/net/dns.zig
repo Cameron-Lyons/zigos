@@ -2,7 +2,6 @@ const socket = @import("socket.zig");
 const ipv4 = @import("ipv4.zig");
 const vga = @import("../drivers/vga.zig");
 
-
 const DNS_PORT = 53;
 const DNS_BUFFER_SIZE = 512;
 const MAX_DOMAIN_LENGTH = 255;
@@ -132,7 +131,7 @@ pub const DNSClient = struct {
             return error.InvalidResponse;
         }
 
-        const header: *const DNSHeader = @ptrCast(@alignCast(&data[0]));
+        const header: *align(1) const DNSHeader = @ptrCast(&data[0]);
         const flags = @byteSwap(header.flags);
 
         if ((flags & DNSFlags.QR) == 0) {
@@ -203,7 +202,7 @@ pub const DNSClient = struct {
                 if (label_len > 0) {
                     buffer[offset] = @intCast(label_len);
                     offset += 1;
-                    @memcpy(buffer[offset..offset + label_len], domain[label_start..i]);
+                    @memcpy(buffer[offset .. offset + label_len], domain[label_start..i]);
                     offset += label_len;
                 }
                 label_start = i + 1;
