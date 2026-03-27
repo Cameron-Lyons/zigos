@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 set -eu
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
+
 mkdir -p build/zig-cache-tests build/zig-global-cache-tests
 export ZIG_LOCAL_CACHE_DIR="build/zig-cache-tests"
 export ZIG_GLOBAL_CACHE_DIR="build/zig-global-cache-tests"
+export ROOT_DIR
 
 python3 - <<'INNER' > build/host-test-targets.txt
+import os
 from pathlib import Path
 
-root = Path('/home/cameronl/zigos')
+root = Path(os.environ['ROOT_DIR'])
 search_roots = [
     root / 'src/kernel/process/syscall',
     root / 'src/kernel/fs',
