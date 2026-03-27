@@ -1,15 +1,11 @@
 const std = @import("std");
+const fsutil = @import("fsutil");
 const syscall = @import("syscall");
 
 const format_buffer_size = 256;
 
 pub fn writeAll(fd: i32, buffer: []const u8) void {
-    var offset: usize = 0;
-    while (offset < buffer.len) {
-        const rc = syscall.write(fd, buffer[offset..]);
-        if (rc <= 0) return;
-        offset += @intCast(rc);
-    }
+    fsutil.writeAll(fd, buffer) catch {};
 }
 
 pub fn puts(text: []const u8) void {

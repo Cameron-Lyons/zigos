@@ -2,6 +2,7 @@ const pci = @import("pci.zig");
 const paging = @import("../memory/paging.zig");
 const ethernet = @import("../net/ethernet.zig");
 const arp = @import("../net/arp.zig");
+const driver_helpers = @import("../net/driver_helpers.zig");
 const network = @import("../net/network.zig");
 const memory = @import("../memory/memory.zig");
 const isr = @import("../interrupts/isr.zig");
@@ -499,7 +500,8 @@ const E1000Device = struct {
             .data = @as([*]u8, @ptrFromInt(buf_addr))[0..len],
             .mac = self.mac_addr,
             .handle = cur,
-            .release = releaseClaimedPacket,
+            .release_context = @ptrCast(self),
+            .release = network.makeRxReleaseAdapter(E1000Device),
         };
     }
 
@@ -575,7 +577,7 @@ pub fn runInterruptSelfTestChecked() bool {
     const target_ip: u32 = 0xC0A80102;
     const sender_mac = [6]u8{ 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02 };
     var frame: [ethernet.ETH_HEADER_SIZE + @sizeOf(arp.ARPHeader)]u8 = undefined;
-    writeSyntheticArpReply(&frame, sender_ip, target_ip, sender_mac, fake.mac_addr);
+    driver_helpers.writeSyntheticArpReply(&frame, sender_ip, target_ip, sender_mac, fake.mac_addr);
 
     fake.rx_descs[0].addr = @intFromPtr(fake.rx_buffers);
     fake.rx_descs[0].length = @intCast(frame.len);
@@ -595,55 +597,13 @@ pub fn runInterruptSelfTestChecked() bool {
     if (e1000_device) |*dev| {
         processInterrupt(dev);
         const resolved = arp.resolve(sender_ip) orelse return false;
-        return macEquals(resolved, sender_mac) and
+        return driver_helpers.macEquals(resolved, sender_mac) and
             dev.rx_release_cur == 1 and
             !dev.rx_release_ready[0] and
             dev.readRegister(E1000Registers.RDT) == 0;
     }
 
     return false;
-}
-
-fn writeSyntheticArpReply(frame: []u8, sender_ip: u32, target_ip: u32, sender_mac: [6]u8, target_mac: [6]u8) void {
-    const eth_header: *align(1) ethernet.EthernetHeader = @ptrCast(frame.ptr);
-    eth_header.dst_mac0 = target_mac[0];
-    eth_header.dst_mac1 = target_mac[1];
-    eth_header.dst_mac2 = target_mac[2];
-    eth_header.dst_mac3 = target_mac[3];
-    eth_header.dst_mac4 = target_mac[4];
-    eth_header.dst_mac5 = target_mac[5];
-    eth_header.src_mac0 = sender_mac[0];
-    eth_header.src_mac1 = sender_mac[1];
-    eth_header.src_mac2 = sender_mac[2];
-    eth_header.src_mac3 = sender_mac[3];
-    eth_header.src_mac4 = sender_mac[4];
-    eth_header.src_mac5 = sender_mac[5];
-    eth_header.ethertype = @byteSwap(@intFromEnum(ethernet.EtherType.ARP));
-
-    const arp_header: *align(1) arp.ARPHeader = @ptrCast(frame[ethernet.ETH_HEADER_SIZE..].ptr);
-    arp_header.hardware_type = @byteSwap(@as(u16, 1));
-    arp_header.protocol_type = @byteSwap(@as(u16, 0x0800));
-    arp_header.hardware_addr_len = 6;
-    arp_header.protocol_addr_len = 4;
-    arp_header.opcode = @byteSwap(@as(u16, 2));
-    arp_header.sender_mac0 = sender_mac[0];
-    arp_header.sender_mac1 = sender_mac[1];
-    arp_header.sender_mac2 = sender_mac[2];
-    arp_header.sender_mac3 = sender_mac[3];
-    arp_header.sender_mac4 = sender_mac[4];
-    arp_header.sender_mac5 = sender_mac[5];
-    arp_header.sender_ip = @byteSwap(sender_ip);
-    arp_header.target_mac0 = target_mac[0];
-    arp_header.target_mac1 = target_mac[1];
-    arp_header.target_mac2 = target_mac[2];
-    arp_header.target_mac3 = target_mac[3];
-    arp_header.target_mac4 = target_mac[4];
-    arp_header.target_mac5 = target_mac[5];
-    arp_header.target_ip = @byteSwap(target_ip);
-}
-
-fn macEquals(a: [6]u8, b: [6]u8) bool {
-    return a[0] == b[0] and a[1] == b[1] and a[2] == b[2] and a[3] == b[3] and a[4] == b[4] and a[5] == b[5];
 }
 
 pub fn init() void {
@@ -763,12 +723,6 @@ fn e1000Receive() ?[]u8 {
         return dev.receive();
     }
     return null;
-}
-
-fn releaseClaimedPacket(handle: usize) void {
-    if (e1000_device) |*dev| {
-        dev.releaseReceived(handle);
-    }
 }
 
 fn e1000GetMacAddress() [6]u8 {

@@ -36,8 +36,6 @@ var node_pool: [NODE_POOL_SIZE]TmpfsNode = [_]TmpfsNode{TmpfsNode{
     .in_use = false,
 }} ** NODE_POOL_SIZE;
 
-var tmpfs_root: ?*TmpfsNode = null;
-
 fn allocNode() ?*TmpfsNode {
     for (&node_pool) |*node| {
         if (!node.in_use) {
@@ -318,7 +316,6 @@ fn tmpfsMount(mp: *vfs.MountPoint) vfs.VFSError!void {
     root.name[0] = '/';
     root.name_len = 1;
 
-    tmpfs_root = root;
     mp.private_data = @as(*anyopaque, @ptrCast(root));
 }
 

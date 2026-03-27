@@ -1,43 +1,14 @@
 const std = @import("std");
+const tables = @import("tables.zig");
 const vga = @import("../drivers/vga.zig");
 const io = @import("../utils/io.zig");
 const delay = @import("../utils/delay.zig");
 
-const RSDP_SIGNATURE = "RSD PTR ";
 const FADT_SIGNATURE = "FACP";
 const DSDT_SIGNATURE = "DSDT";
 
-pub const ACPIHeader = extern struct {
-    signature: [4]u8,
-    length: u32,
-    revision: u8,
-    checksum: u8,
-    oem_id: [6]u8,
-    oem_table_id: [8]u8,
-    oem_revision: u32,
-    creator_id: u32,
-    creator_revision: u32,
-};
-
-pub const RSDP = extern struct {
-    signature: [8]u8,
-    checksum: u8,
-    oem_id: [6]u8,
-    revision: u8,
-    rsdt_address: u32,
-    length: u32,
-    xsdt_address: u64,
-    extended_checksum: u8,
-    reserved: [3]u8,
-};
-
-pub const RSDT = extern struct {
-    header: ACPIHeader,
-};
-
-pub const XSDT = extern struct {
-    header: ACPIHeader,
-};
+const ACPIHeader = tables.ACPIHeader;
+const RootTable = tables.RootTable;
 
 pub const FADT = extern struct {
     header: ACPIHeader,
@@ -114,9 +85,8 @@ pub const PowerState = enum {
     S5_Shutdown,
 };
 
-var rsdp_ptr: ?*align(1) const RSDP = null;
-var rsdt_ptr: ?*align(1) const RSDT = null;
-var xsdt_ptr: ?*align(1) const XSDT = null;
+var rsdp_ptr: ?*align(1) const tables.RSDP = null;
+var root_table: ?RootTable = null;
 var fadt_ptr: ?*align(1) const FADT = null;
 var pm1a_control: u32 = 0;
 var pm1b_control: u32 = 0;
@@ -124,7 +94,6 @@ var slp_typa: [6]u16 = [_]u16{0} ** 6;
 var slp_typb: [6]u16 = [_]u16{0} ** 6;
 var smi_cmd: u32 = 0;
 var acpi_enable_cmd: u8 = 0;
-var acpi_disable_cmd: u8 = 0;
 var is_enabled: bool = false;
 
 pub fn init() void {
@@ -152,85 +121,34 @@ pub fn init() void {
 }
 
 fn findRSDP() bool {
-    const ebda_addr = @as(usize, @as(*align(1) const u16, @ptrFromInt(0x40E)).*) * 16;
-    var addr: usize = ebda_addr;
-    const ebda_end = ebda_addr + 1024;
-    while (addr < ebda_end) : (addr += 16) {
-        const ptr: *align(1) const RSDP = @ptrFromInt(addr);
-        if (isValidRSDP(ptr)) {
-            rsdp_ptr = ptr;
-            vga.print("Found RSDP in EBDA at 0x");
-            printHex(addr);
-            vga.print("\n");
-            return true;
-        }
-    }
-
-    addr = 0x000E0000;
-    while (addr < 0x00100000) : (addr += 16) {
-        const ptr: *align(1) const RSDP = @ptrFromInt(addr);
-        if (isValidRSDP(ptr)) {
-            rsdp_ptr = ptr;
-            vga.print("Found RSDP at 0x");
-            printHex(addr);
-            vga.print("\n");
-            return true;
-        }
-    }
-
-    return false;
-}
-
-fn isValidRSDP(ptr: *align(1) const RSDP) bool {
-    if (!std.mem.eql(u8, &ptr.signature, RSDP_SIGNATURE)) return false;
-    if (!validateChecksum(@as([*]const u8, @ptrCast(ptr)), 20)) return false;
-    if (ptr.rsdt_address == 0 or (ptr.rsdt_address & 0x3) != 0) return false;
+    const rsdp = tables.findRSDP() orelse return false;
+    rsdp_ptr = rsdp;
+    vga.print("Found RSDP at 0x");
+    printHex(@intFromPtr(rsdp));
+    vga.print("\n");
     return true;
-}
-
-fn validateChecksum(data: [*]const u8, length: usize) bool {
-    var sum: u8 = 0;
-    for (0..length) |i| {
-        sum +%= data[i];
-    }
-    return sum == 0;
 }
 
 fn parseRSDT() bool {
     const rsdp = rsdp_ptr orelse return false;
-
-    const xsdt_addr = std.math.cast(usize, rsdp.xsdt_address);
-    if (rsdp.revision >= 2 and xsdt_addr != null and rsdp.xsdt_address != 0) {
-        xsdt_ptr = @as(*align(1) const XSDT, @ptrFromInt(xsdt_addr.?));
-        vga.print("Using XSDT\n");
-    } else {
-        rsdt_ptr = @as(*align(1) const RSDT, @ptrFromInt(rsdp.rsdt_address));
-        vga.print("Using RSDT\n");
-    }
-
+    root_table = tables.selectRootTable(rsdp) orelse return false;
+    vga.print(switch (root_table.?) {
+        .xsdt => "Using XSDT\n",
+        .rsdt => "Using RSDT\n",
+    });
     return true;
 }
 
 fn parseFADT() bool {
-    if (rsdt_ptr) |rsdt| {
-        const num_entries = (rsdt.header.length - @sizeOf(ACPIHeader)) / 4;
-        for (0..num_entries) |i| {
-            const table_addr = readRsdtEntry(rsdt, i);
-            const table: *align(1) const ACPIHeader = @ptrFromInt(table_addr);
-            if (std.mem.eql(u8, &table.signature, FADT_SIGNATURE)) {
-                fadt_ptr = @ptrFromInt(table_addr);
-                break;
-            }
-        }
-    } else if (xsdt_ptr) |xsdt| {
-        const num_entries = (xsdt.header.length - @sizeOf(ACPIHeader)) / 8;
-        for (0..num_entries) |i| {
-            const table_addr = readXsdtEntry(xsdt, i);
-            const table: *align(1) const ACPIHeader = @ptrFromInt(table_addr);
-            if (std.mem.eql(u8, &table.signature, FADT_SIGNATURE)) {
-                fadt_ptr = @ptrFromInt(table_addr);
-                break;
-            }
+    const root = root_table orelse return false;
+    for (0..tables.entryCount(root)) |i| {
+        const table_addr = tables.readEntry(root, i);
+        if (table_addr == 0) continue;
+
+        const table: *align(1) const ACPIHeader = @ptrFromInt(table_addr);
+        if (std.mem.eql(u8, &table.signature, FADT_SIGNATURE)) {
+            fadt_ptr = @ptrFromInt(table_addr);
+            break;
         }
     }
 
@@ -239,7 +157,6 @@ fn parseFADT() bool {
         pm1b_control = fadt.pm1b_ctrl_blk;
         smi_cmd = fadt.smi_cmd;
         acpi_enable_cmd = fadt.acpi_enable;
-        acpi_disable_cmd = fadt.acpi_disable;
 
         vga.print("FADT found: PM1a=0x");
         printHex(pm1a_control);
@@ -293,10 +210,7 @@ fn parseAML(aml: [*]u8, length: u32) void {
 
                 if (aml[offset] == 0x12) {
                     offset += 1;
-                    const pkg_length = aml[offset];
                     offset += 1;
-
-                    _ = pkg_length;
 
                     if (aml[offset] == 0x0A) {
                         offset += 1;
@@ -432,12 +346,6 @@ pub fn reboot() void {
     }
 }
 
-fn busyWait(microseconds: u32) void {
-    var i: u32 = 0;
-    while (i < microseconds * 10) : (i += 1) {
-        asm volatile ("pause");
-    }
-}
 fn printHex(value: usize) void {
     const hex_chars = "0123456789ABCDEF";
     // SAFETY: filled by the following hex digit extraction loop
@@ -459,18 +367,4 @@ fn printHex(value: usize) void {
         i -= 1;
         vga.printChar(buffer[i]);
     }
-}
-
-fn readRsdtEntry(rsdt: *align(1) const RSDT, index: usize) u32 {
-    const entries_base: [*]align(1) const u8 = @ptrCast(@as([*]align(1) const u8, @ptrCast(rsdt)) + @sizeOf(ACPIHeader));
-    const offset = index * @sizeOf(u32);
-    const bytes: *align(1) const [@sizeOf(u32)]u8 = @ptrCast(entries_base + offset);
-    return std.mem.readInt(u32, bytes, .little);
-}
-
-fn readXsdtEntry(xsdt: *align(1) const XSDT, index: usize) usize {
-    const entries_base: [*]align(1) const u8 = @ptrCast(@as([*]align(1) const u8, @ptrCast(xsdt)) + @sizeOf(ACPIHeader));
-    const offset = index * @sizeOf(u64);
-    const bytes: *align(1) const [@sizeOf(u64)]u8 = @ptrCast(entries_base + offset);
-    return std.math.cast(usize, std.mem.readInt(u64, bytes, .little)) orelse 0;
 }

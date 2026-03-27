@@ -14,6 +14,13 @@ pub fn writeAll(fd: i32, buffer: []const u8) CopyError!void {
     }
 }
 
+pub fn readFile(path: [*:0]const u8, buffer: []u8) ReadAllError![]u8 {
+    const fd = syscall.open(path, syscall.O_RDONLY);
+    if (syscall.isError(fd)) return error.ReadFailed;
+    defer _ = syscall.close(fd);
+    return readAll(fd, buffer);
+}
+
 pub fn copyFd(source_fd: i32, destination_fd: i32) CopyError!void {
     var buffer: [copy_buffer_size]u8 = undefined;
 

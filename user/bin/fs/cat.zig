@@ -3,6 +3,7 @@ const cli = @import("cli");
 const runtime = @import("runtime");
 const stdio = @import("stdio");
 const syscall = @import("syscall");
+const textutil = @import("textutil");
 
 pub const panic = runtime.panic;
 const io_buffer_size = 512;
@@ -30,7 +31,7 @@ fn copyFdToStdout(fd: i32) CatError!void {
 
 fn catStdin() bool {
     copyFdToStdout(syscall.STDIN) catch {
-        stdio.eputs("cat: failed to read stdin\n");
+        textutil.printReadError("cat", null);
         return false;
     };
     return true;
@@ -45,7 +46,7 @@ fn catFile(path: [*:0]const u8) bool {
     defer _ = syscall.close(fd);
 
     copyFdToStdout(fd) catch {
-        stdio.eprint("cat: failed to read {s}\n", .{cstr.slice(path)});
+        textutil.printReadError("cat", path);
         return false;
     };
     return true;

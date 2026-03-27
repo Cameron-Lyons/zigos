@@ -4,6 +4,7 @@ const rtl8139 = @import("../drivers/rtl8139.zig");
 const process = @import("../process/process.zig");
 const smp = @import("../smp/smp.zig");
 const sync = @import("../utils/sync.zig");
+const ipv4_text = @import("../../shared/ipv4_text.zig");
 const ethernet = @import("ethernet.zig");
 const arp = @import("arp.zig");
 pub const ipv4 = @import("ipv4.zig");
@@ -17,11 +18,14 @@ pub const NetworkDevice = struct {
     getMacAddress: *const fn () [6]u8,
 };
 
+pub const OwnedRxReleaseFn = *const fn (?*anyopaque, handle: usize) void;
+
 pub const OwnedRxPacket = struct {
     data: []const u8,
     mac: [6]u8,
     handle: usize,
-    release: *const fn (handle: usize) void,
+    release_context: ?*anyopaque,
+    release: OwnedRxReleaseFn,
 };
 
 var current_device: ?*const NetworkDevice = null;
@@ -61,7 +65,8 @@ const RxEntry = struct {
     mac: [6]u8 = [_]u8{0} ** 6,
     borrowed_ptr: ?[*]const u8 = null,
     borrowed_handle: usize = 0,
-    borrowed_release: ?*const fn (handle: usize) void = null,
+    borrowed_release_context: ?*anyopaque = null,
+    borrowed_release: ?OwnedRxReleaseFn = null,
     data: [MAX_PACKET_SIZE]u8 = [_]u8{0} ** MAX_PACKET_SIZE,
 };
 
@@ -164,6 +169,7 @@ pub fn enqueueRxPacket(packet: []const u8, mac: [6]u8) void {
     entry.mac = mac;
     entry.borrowed_ptr = null;
     entry.borrowed_handle = 0;
+    entry.borrowed_release_context = null;
     entry.borrowed_release = null;
     @memcpy(entry.data[0..copy_len], packet[0..copy_len]);
 
@@ -177,7 +183,7 @@ pub fn enqueueRxPacket(packet: []const u8, mac: [6]u8) void {
 pub fn enqueueBorrowedRx(packet: OwnedRxPacket) bool {
     if (!workers_started) {
         processPacket(packet.data, packet.mac);
-        packet.release(packet.handle);
+        packet.release(packet.release_context, packet.handle);
         return true;
     }
 
@@ -185,7 +191,7 @@ pub fn enqueueBorrowedRx(packet: OwnedRxPacket) bool {
 
     if (rx_free_count == 0) {
         rx_lock.release();
-        packet.release(packet.handle);
+        packet.release(packet.release_context, packet.handle);
         return false;
     }
 
@@ -196,6 +202,7 @@ pub fn enqueueBorrowedRx(packet: OwnedRxPacket) bool {
     entry.mac = packet.mac;
     entry.borrowed_ptr = packet.data.ptr;
     entry.borrowed_handle = packet.handle;
+    entry.borrowed_release_context = packet.release_context;
     entry.borrowed_release = packet.release;
 
     rx_queue[rx_head] = entry_index;
@@ -267,6 +274,7 @@ fn releaseRx(index: QueueIndex) void {
     rx_lock.acquire();
     rx_pool[index].borrowed_ptr = null;
     rx_pool[index].borrowed_handle = 0;
+    rx_pool[index].borrowed_release_context = null;
     rx_pool[index].borrowed_release = null;
     rx_free_stack[rx_free_count] = index;
     rx_free_count += 1;
@@ -290,7 +298,7 @@ fn netRxWorker() void {
                 claim.entry.data[0..claim.entry.len];
             processPacket(packet, claim.entry.mac);
             if (claim.entry.borrowed_release) |release| {
-                release(claim.entry.borrowed_handle);
+                release(claim.entry.borrowed_release_context, claim.entry.borrowed_handle);
             }
             releaseRx(claim.index);
         }
@@ -328,6 +336,15 @@ pub fn getGateway() ipv4.IPv4Address {
 
 pub fn getGatewayIP() u32 {
     return ipv4.getGatewayIP();
+}
+
+pub fn makeRxReleaseAdapter(comptime T: type) OwnedRxReleaseFn {
+    return struct {
+        fn release(context: ?*anyopaque, handle: usize) void {
+            const self: *T = @ptrCast(@alignCast(context orelse return));
+            self.releaseReceived(handle);
+        }
+    }.release;
 }
 
 pub fn getNetmask() ipv4.IPv4Address {
@@ -384,33 +401,7 @@ fn printNumber(num: u32) void {
 }
 
 pub fn parseIPv4(str: []const u8) ?u32 {
-    var ip: u32 = 0;
-    var octet: u32 = 0;
-    var octet_count: u8 = 0;
-
-    for (str) |c| {
-        if (c == '.') {
-            if (octet > 255 or octet_count >= 3) {
-                return null;
-            }
-            ip = (ip << 8) | octet;
-            octet = 0;
-            octet_count += 1;
-        } else if (c >= '0' and c <= '9') {
-            octet = octet * 10 + (c - '0');
-            if (octet > 255) {
-                return null;
-            }
-        } else {
-            return null;
-        }
-    }
-
-    if (octet_count != 3 or octet > 255) {
-        return null;
-    }
-
-    return (ip << 8) | octet;
+    return ipv4_text.parseIPv4(str);
 }
 
 pub fn formatIPv4(ip: u32, buf: []u8) []u8 {

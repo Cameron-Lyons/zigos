@@ -3,6 +3,7 @@ const runtime = @import("runtime");
 const stdio = @import("stdio");
 const syscall = @import("syscall");
 const fsutil = @import("fsutil");
+const textutil = @import("textutil");
 
 pub const panic = runtime.panic;
 
@@ -30,11 +31,7 @@ fn dumpFd(fd: i32, path: ?[*:0]const u8) bool {
         const rc = syscall.read(fd, &buffer);
         if (rc == 0) return true;
         if (syscall.isError(rc)) {
-            if (path) |value| {
-                stdio.eprint("hexdump: failed to read {s}\n", .{cstr.slice(value)});
-            } else {
-                stdio.eputs("hexdump: failed to read stdin\n");
-            }
+            textutil.printReadError("hexdump", path);
             return false;
         }
 

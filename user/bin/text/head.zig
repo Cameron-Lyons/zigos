@@ -3,6 +3,7 @@ const runtime = @import("runtime");
 const stdio = @import("stdio");
 const syscall = @import("syscall");
 const fsutil = @import("fsutil");
+const textutil = @import("textutil");
 
 pub const panic = runtime.panic;
 
@@ -17,7 +18,7 @@ pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[
     if (argc > 2) {
         const first = argv[1] orelse return 1;
         if (first[0] == '-' and first[1] == 'n') {
-            lines = parseCount(first + 2) orelse lines;
+            lines = textutil.parseCount(first + 2) orelse lines;
             path_index = 2;
         }
     }
@@ -45,11 +46,7 @@ fn writeHead(fd: i32, max_lines: usize, path: ?[*:0]const u8) bool {
         const rc = syscall.read(fd, &buffer);
         if (rc == 0) return true;
         if (syscall.isError(rc)) {
-            if (path) |value| {
-                stdio.eprint("head: failed to read {s}\n", .{cstr.slice(value)});
-            } else {
-                stdio.eputs("head: failed to read stdin\n");
-            }
+            textutil.printReadError("head", path);
             return false;
         }
 
@@ -75,16 +72,4 @@ fn writeHead(fd: i32, max_lines: usize, path: ?[*:0]const u8) bool {
     }
 
     return true;
-}
-
-fn parseCount(value: [*:0]const u8) ?usize {
-    const slice = cstr.slice(value);
-    if (slice.len == 0) return null;
-
-    var result: usize = 0;
-    for (slice) |char| {
-        if (char < '0' or char > '9') return null;
-        result = result * 10 + (char - '0');
-    }
-    return result;
 }

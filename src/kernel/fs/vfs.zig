@@ -44,7 +44,6 @@ const hasRemainingComponents = vfs_path.hasRemainingComponents;
 var root_vnode: ?*VNode = null;
 var mount_list: ?*MountPoint = null;
 var fs_type_list: ?*FileSystemType = null;
-var vnode_cache: [1024]?*VNode = [_]?*VNode{null} ** 1024;
 var fd_table: [256]?*FileDescriptor = [_]?*FileDescriptor{null} ** 256;
 var mount_state_lock: u32 = 0;
 var vnode_ref_lock: u32 = 0;

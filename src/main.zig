@@ -7,6 +7,5 @@ export fn kernel_main() void {
 }
 
 comptime {
-    _ = kernel;
     _ = isr;
 }

@@ -1416,44 +1416,6 @@ fn findDirectoryEntry(data: *FAT32Data, dir_cluster: u32, target_name: []const u
     return error.NotFound;
 }
 
-fn insertDirectoryEntry(data: *FAT32Data, parent_cluster: u32, new_entry: DirEntry) !void {
-    var cluster = parent_cluster;
-    var sector_buf: [512]u8 align(4) = undefined;
-
-    while (cluster < FAT32_EOC) {
-        const first_sector = clusterToLBA(data, cluster);
-
-        for (0..data.sectors_per_cluster) |sector_offset| {
-            ata.readSectors(data.device, first_sector + sector_offset, 1, &sector_buf) catch {
-                return error.DeviceError;
-            };
-
-            const entries_ptr: [*]DirEntry = @ptrCast(&sector_buf);
-            const entries = entries_ptr[0..16];
-            for (entries, 0..) |*entry, i| {
-                if (entry.name[0] == 0x00 or entry.name[0] == 0xE5) {
-                    entries[i] = new_entry;
-                    ata.writeSectors(data.device, first_sector + sector_offset, 1, &sector_buf) catch {
-                        return error.DeviceError;
-                    };
-                    return;
-                }
-            }
-        }
-
-        const next = getNextCluster(data, cluster) catch return error.DeviceError;
-        if (next >= FAT32_EOC) {
-            const new_dir_cluster = allocateCluster(data) catch return error.NoSpace;
-            setNextCluster(data, cluster, new_dir_cluster) catch return error.DeviceError;
-            cluster = new_dir_cluster;
-        } else {
-            cluster = next;
-        }
-    }
-
-    return error.NoSpace;
-}
-
 fn countLinksForCluster(data: *FAT32Data, target_cluster: u32) !u32 {
     if (target_cluster == 0 or target_cluster >= FAT32_EOC) return 0;
     return countLinksInDirectory(data, data.root_dir_cluster, target_cluster);
