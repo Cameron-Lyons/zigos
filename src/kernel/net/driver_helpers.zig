@@ -1,5 +1,26 @@
 const ethernet = @import("ethernet.zig");
-const arp = @import("arp.zig");
+
+pub const ArpReplyHeader = packed struct {
+    hardware_type: u16,
+    protocol_type: u16,
+    hardware_addr_len: u8,
+    protocol_addr_len: u8,
+    opcode: u16,
+    sender_mac0: u8,
+    sender_mac1: u8,
+    sender_mac2: u8,
+    sender_mac3: u8,
+    sender_mac4: u8,
+    sender_mac5: u8,
+    sender_ip: u32,
+    target_mac0: u8,
+    target_mac1: u8,
+    target_mac2: u8,
+    target_mac3: u8,
+    target_mac4: u8,
+    target_mac5: u8,
+    target_ip: u32,
+};
 
 pub fn writeSyntheticArpReply(frame: []u8, sender_ip: u32, target_ip: u32, sender_mac: [6]u8, target_mac: [6]u8) void {
     const eth_header: *align(1) ethernet.EthernetHeader = @ptrCast(frame.ptr);
@@ -17,7 +38,7 @@ pub fn writeSyntheticArpReply(frame: []u8, sender_ip: u32, target_ip: u32, sende
     eth_header.src_mac5 = sender_mac[5];
     eth_header.ethertype = @byteSwap(@intFromEnum(ethernet.EtherType.ARP));
 
-    const arp_header: *align(1) arp.ARPHeader = @ptrCast(frame[ethernet.ETH_HEADER_SIZE..].ptr);
+    const arp_header: *align(1) ArpReplyHeader = @ptrCast(frame[ethernet.ETH_HEADER_SIZE..].ptr);
     arp_header.hardware_type = @byteSwap(@as(u16, 1));
     arp_header.protocol_type = @byteSwap(@as(u16, 0x0800));
     arp_header.hardware_addr_len = 6;

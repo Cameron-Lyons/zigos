@@ -7,7 +7,6 @@ pub fn addKernelArtifact(
     optimize: std.builtin.OptimizeMode,
     name: []const u8,
     boot_profile: shared.BootProfile,
-    user_assets_module: *std.Build.Module,
 ) shared.KernelArtifact {
     const options = b.addOptions();
     options.addOption(shared.BootProfile, "boot_profile", boot_profile);
@@ -19,14 +18,10 @@ pub fn addKernelArtifact(
     });
 
     kernel_module.addOptions("build_options", options);
-    kernel_module.addImport("user_assets", user_assets_module);
     kernel_module.addAssemblyFile(b.path("src/boot/boot64.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt32.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupts.s"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush.S"));
-    kernel_module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
-    kernel_module.addAssemblyFile(b.path("src/kernel/process/context_switch.S"));
-    kernel_module.addAssemblyFile(b.path("src/kernel/smp/ap_trampoline.S"));
 
     const kernel = b.addExecutable(.{
         .name = name,

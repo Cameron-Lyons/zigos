@@ -39,7 +39,7 @@ if [ ! -s "$LOG_PATH" ]; then
   exit 1
 fi
 
-for marker in "Welcome to ZigOS" "A minimal operating system written in Zig" "Initializing GDT"; do
+for marker in "Welcome to Zigos" "A minimal operating system written in Zig" "Initializing GDT"; do
   if ! grep -Fq "$marker" "$LOG_PATH"; then
     echo "Boot test failed: missing marker '$marker'" >&2
     cat "$LOG_PATH" >&2
@@ -47,7 +47,7 @@ for marker in "Welcome to ZigOS" "A minimal operating system written in Zig" "In
   fi
 done
 
-WELCOME_LINE="$(grep -n "Welcome to ZigOS" "$LOG_PATH" | head -n1 | cut -d: -f1)"
+WELCOME_LINE="$(grep -n "Welcome to Zigos" "$LOG_PATH" | head -n1 | cut -d: -f1)"
 MINIMAL_LINE="$(grep -n "A minimal operating system written in Zig" "$LOG_PATH" | head -n1 | cut -d: -f1)"
 GDT_LINE="$(grep -n "Initializing GDT" "$LOG_PATH" | head -n1 | cut -d: -f1)"
 if [ "$MINIMAL_LINE" -le "$WELCOME_LINE" ] || [ "$GDT_LINE" -le "$MINIMAL_LINE" ]; then
