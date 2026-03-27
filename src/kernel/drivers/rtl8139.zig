@@ -6,10 +6,9 @@ const idt = @import("../interrupts/idt.zig");
 const console = @import("../utils/console.zig");
 const vga = @import("vga.zig");
 const memory = @import("../memory/memory.zig");
-const network = @import("../net/network.zig");
+const link_port = @import("../net/link_port.zig");
 const driver_helpers = @import("../net/driver_helpers.zig");
 const ethernet = @import("../net/ethernet.zig");
-const arp = @import("../net/arp.zig");
 const sync = @import("../utils/sync.zig");
 
 const RTL8139_VENDOR_ID = 0x10EC;
@@ -306,7 +305,7 @@ const RTL8139 = struct {
         return self.rx_poll_buffer[0..copy_len];
     }
 
-    pub fn claimReceive(self: *RTL8139) ?network.OwnedRxPacket {
+    pub fn claimReceive(self: *RTL8139) ?link_port.OwnedRxPacket {
         self.rx_lock.acquire();
         defer self.rx_lock.release();
 
@@ -342,7 +341,7 @@ const RTL8139 = struct {
             .mac = self.mac_address,
             .handle = handle,
             .release_context = @ptrCast(self),
-            .release = network.makeRxReleaseAdapter(RTL8139),
+            .release = link_port.makeRxReleaseAdapter(RTL8139),
         };
     }
 
@@ -372,7 +371,7 @@ const RTL8139 = struct {
 
         if (status & InterruptStatus.RX_OK != 0) {
             while (self.claimReceive()) |packet| {
-                _ = network.enqueueBorrowedRx(packet);
+                _ = link_port.enqueueBorrowedRx(packet);
             }
         }
 
@@ -429,7 +428,7 @@ pub fn runInterruptSelfTestChecked() bool {
     const sender_mac = [6]u8{ 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
     const target_mac = fake.mac_address;
 
-    var frame: [ethernet.ETH_HEADER_SIZE + @sizeOf(arp.ARPHeader)]u8 = undefined;
+    var frame: [ethernet.ETH_HEADER_SIZE + @sizeOf(driver_helpers.ArpReplyHeader)]u8 = undefined;
     driver_helpers.writeSyntheticArpReply(&frame, sender_ip, target_ip, sender_mac, target_mac);
 
     const packet_len: u16 = @intCast(frame.len);
@@ -446,9 +445,6 @@ pub fn runInterruptSelfTestChecked() bool {
 
     if (rtl8139_device) |*dev| {
         dev.handleInterrupt();
-
-        const resolved = arp.resolve(sender_ip) orelse return false;
-        if (!driver_helpers.macEquals(resolved, sender_mac)) return false;
 
         const expected_release = (((@as(u16, packet_len) + 4 + 3) & ~@as(u16, 3)) -% 0x10);
         return dev.pending_count == 0 and
@@ -472,6 +468,7 @@ pub fn init() void {
         };
 
         rtl8139_device = rtl;
+        link_port.setNetworkDevice(&rtl8139_network_device);
 
         const irq: u8 = @intCast(pci.readConfig(device.bus, device.device, device.function, 0x3C) & 0xFF);
         idt.register_interrupt_handler(32 + irq, rtl8139InterruptHandler);
@@ -524,6 +521,12 @@ pub fn receive() ?[]u8 {
 pub fn getMacAddress() [6]u8 {
     return getMACAddress() orelse [_]u8{0} ** 6;
 }
+
+const rtl8139_network_device = link_port.NetworkDevice{
+    .send = send,
+    .receive = receive,
+    .getMacAddress = getMacAddress,
+};
 
 pub fn sendPacket(data: []const u8) !void {
     if (rtl8139_device) |*rtl| {

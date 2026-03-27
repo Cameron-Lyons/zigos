@@ -1,37 +1,41 @@
 # Architecture
 
-The repository is organized around stable subsystem boundaries rather than large catch-all files.
+Zigos is organized around a native-only kernel/service split.
 
-## Layout
+## Core Layout
 
-- `build/`: build graph helpers split by concern.
-- `scripts/`: shell entrypoints used by `zig build` for rootfs creation, QEMU-backed tests, and ISO generation.
-- `src/kernel/boot/`: boot entrypoint, staged initialization, and boot-profile runners.
-- `src/kernel/process/syscall/`: syscall ABI, init, dispatch, and per-domain handlers.
-- `src/kernel/shell/`: REPL/session/runtime/launcher code plus parser modules and builtins.
-- `src/kernel/fs/vfs/` and `src/kernel/fs/fat32/`: extracted support code for the VFS and FAT32 implementations.
-- `user/bin/`: userspace programs grouped by source category and still installed flat into `/bin`.
+- `src/main.zig`: thin kernel entry/export surface
+- `src/kernel/boot/entry.zig`: native boot sequencing
+- `src/kernel/boot/profiles/zigos_native.zig`: only boot profile
+- `src/kernel/process/native/`: native principals, capabilities, task runtime, mediation, services, storage, sync, recovery, and UX
+- `src/kernel/net/link_port.zig`: low-level packet/device transport kept below higher-level native networking policy
+- `build.zig`: native-only build graph
+- `scripts/run-zigos-native-smoke.sh`: native cold-reboot smoke harness
 
-## Boundaries
+## Native Boundaries
 
-- `src/main.zig` should stay a thin top-level export surface.
-- `src/kernel/boot/entry.zig` owns boot sequencing and profile selection.
-- `src/kernel/boot/init/*.zig` should only contain staged initialization, not profile-specific behavior.
-- `src/kernel/boot/profiles/*.zig` should orchestrate a boot mode, not redefine shared initialization.
-- `src/kernel/process/syscall/dispatch.zig` is the syscall entry surface; per-domain syscall files own behavior.
-- `src/kernel/shell/parser/` owns tokenization, expansion, and pipeline parsing. Shell runtime code should consume parser APIs rather than duplicate parsing logic.
-- `src/kernel/fs/vfs.zig` and `src/kernel/fs/fat32.zig` should keep delegating helper logic into their subdirectories as the split continues.
+- Kernel TCB: scheduling, virtual memory, IPC transport, capability enforcement, interrupts/timekeeping, secure-boot handoff hooks, IOMMU/DMA isolation hooks
+- Native task runtime: task ownership, component attachment, budgets, audit trail, zero-ambient-authority launch state
+- Native mediation: manifest validation, permission review, policy grants, denials, lease enforcement
+- Native services: network policy, storage/object authority, package/update, compositor/session, indexing/search, sync/replication, media/print helpers
+- Native data model: immutable object versions plus transactional workspaces, snapshots, restore, delete recovery, export/import
 
-## Userland Source Groups
+## Key Modules
 
-- `user/bin/core/`: simple core utilities and shell-facing commands.
-- `user/bin/fs/`: filesystem and mount-management tools.
-- `user/bin/session/`: init, login, getty, and terminal-session utilities.
-- `user/bin/system/`: process, host, and network-oriented tools.
-- `user/bin/text/`: text-processing utilities.
+- `src/kernel/process/native/contract.zig`: kernel/service boundary catalog
+- `src/kernel/process/native/service_contract.zig`: ordered native service contracts
+- `src/kernel/process/native/native_kernel.zig`: task/capability/endpoint/shared-memory/service operations
+- `src/kernel/process/native/component_port.zig`: typed component bridge used during bootstrap
+- `src/kernel/process/native/storage_service.zig`: authoritative object/workspace service
+- `src/kernel/process/native/file_bridge.zig`: derived, non-authoritative file-style view over workspace state
+- `src/kernel/process/native/device_graph.zig`: user/device trust graph
+- `src/kernel/process/native/network_policy.zig`: explicit egress policy objects
+- `src/kernel/process/native/supervisor.zig`: crash/restart tracking for restartable services
 
-## Import Rules
+## Verification
 
-- Prefer importing the extracted module directly instead of a deprecated compatibility wrapper.
-- Keep build-time paths in `build/programs.zig` and benchmark source-path strings aligned with the actual tree.
-- When splitting a large file, leave a facade only long enough to migrate imports, then delete it.
+- `zig build kernel`: native kernel builds
+- `zig build host-tests`: native subsystem tests pass
+- `zig build zigos-native-smoke-test`: native bootstrap reaches the expected boot markers across two QEMU boots
+
+The repository no longer treats shell-first execution, POSIX-like syscalls, VFS-rooted userland, or compatibility environments as part of the supported platform.

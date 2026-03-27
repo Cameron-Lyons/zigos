@@ -1,6 +1,22 @@
 const vga = @import("vga.zig");
-const shell = @import("../shell/repl.zig");
 const io = @import("../utils/io.zig");
+
+pub const ArrowKey = enum(u8) {
+    up,
+    down,
+    left,
+    right,
+};
+
+pub const LineDiscipline = struct {
+    context: *anyopaque,
+    handle_char: *const fn (context: *anyopaque, ch: u8) void,
+    handle_arrow: *const fn (context: *anyopaque, key: ArrowKey) void,
+    handle_tab: *const fn (context: *anyopaque) void,
+    abort_line: *const fn (context: *anyopaque) void,
+    resume_prompt: *const fn (context: *anyopaque) void,
+    refresh_line: *const fn (context: *anyopaque) void,
+};
 
 // SAFETY: used as a circular buffer; entries written before being read via buffer_start/buffer_end indices
 var char_buffer: [256]u8 = undefined;
@@ -87,28 +103,28 @@ const KeyboardScancode = enum(u8) {
 };
 
 const scancode_to_ascii = [_]u8{
-    0,    27,   '1',  '2',  '3',  '4',  '5',  '6',  '7',  '8',  '9',  '0',  '-',  '=',  '\x08', '\t',
-    'q',  'w',  'e',  'r',  't',  'y',  'u',  'i',  'o',  'p',  '[',  ']',  '\n', 0,    'a',  's',
-    'd',  'f',  'g',  'h',  'j',  'k',  'l',  ';',  '\'', '`',  0,    '\\', 'z',  'x',  'c',  'v',
-    'b',  'n',  'm',  ',',  '.',  '/',  0,    '*',  0,    ' ',  0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    '-',  0,    0,    0,    '+',  0,
-    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+    0,   27,  '1', '2', '3', '4', '5', '6', '7',  '8', '9', '0',  '-',  '=', '\x08', '\t',
+    'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o',  'p', '[', ']',  '\n', 0,   'a',    's',
+    'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0,   '\\', 'z',  'x', 'c',    'v',
+    'b', 'n', 'm', ',', '.', '/', 0,   '*', 0,    ' ', 0,   0,    0,    0,   0,      0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   '-', 0,    0,    0,   '+',    0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,    0,
 };
 
 const scancode_to_ascii_shift = [_]u8{
-    0,    27,   '!',  '@',  '#',  '$',  '%',  '^',  '&',  '*',  '(',  ')',  '_',  '+',  '\x08', '\t',
-    'Q',  'W',  'E',  'R',  'T',  'Y',  'U',  'I',  'O',  'P',  '{',  '}',  '\n', 0,    'A',  'S',
-    'D',  'F',  'G',  'H',  'J',  'K',  'L',  ':',  '"',  '~',  0,    '|',  'Z',  'X',  'C',  'V',
-    'B',  'N',  'M',  '<',  '>',  '?',  0,    '*',  0,    ' ',  0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    '-',  0,    0,    0,    '+',  0,
-    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+    0,   27,  '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_',  '+', '\x08', '\t',
+    'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0,   'A',    'S',
+    'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0,   '|', 'Z',  'X', 'C',    'V',
+    'B', 'N', 'M', '<', '>', '?', 0,   '*', 0,   ' ', 0,   0,   0,    0,   0,      0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   '-', 0,   0,    0,   '+',    0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
 };
 
 var shift_pressed: bool = false;
 var ctrl_pressed: bool = false;
 var alt_pressed: bool = false;
 var caps_lock: bool = false;
-var keyboard_shell: ?*shell.Shell = null;
+var keyboard_line_discipline: ?LineDiscipline = null;
 var input_echo_enabled: bool = true;
 
 pub fn handleInterrupt() void {
@@ -143,29 +159,19 @@ pub fn handleInterrupt() void {
                 caps_lock = !caps_lock;
             },
             @intFromEnum(KeyboardScancode.tab) => {
-                if (keyboard_shell) |sh| {
-                    sh.handleTabCompletion();
-                }
+                if (keyboard_line_discipline) |line| line.handle_tab(line.context);
             },
             @intFromEnum(KeyboardScancode.up_arrow) => {
-                if (keyboard_shell) |sh| {
-                    sh.handleArrowKey(.Up);
-                }
+                if (keyboard_line_discipline) |line| line.handle_arrow(line.context, .up);
             },
             @intFromEnum(KeyboardScancode.down_arrow) => {
-                if (keyboard_shell) |sh| {
-                    sh.handleArrowKey(.Down);
-                }
+                if (keyboard_line_discipline) |line| line.handle_arrow(line.context, .down);
             },
             @intFromEnum(KeyboardScancode.left_arrow) => {
-                if (keyboard_shell) |sh| {
-                    sh.handleArrowKey(.Left);
-                }
+                if (keyboard_line_discipline) |line| line.handle_arrow(line.context, .left);
             },
             @intFromEnum(KeyboardScancode.right_arrow) => {
-                if (keyboard_shell) |sh| {
-                    sh.handleArrowKey(.Right);
-                }
+                if (keyboard_line_discipline) |line| line.handle_arrow(line.context, .right);
             },
             else => {
                 if (scancode < scancode_to_ascii.len) {
@@ -176,44 +182,17 @@ pub fn handleInterrupt() void {
                         switch (base_ch) {
                             'c' => {
                                 vga.print("^C\n");
-                                const sig = @import("../process/signal.zig");
-                                const proc = @import("../process/process.zig");
-                                if (proc.current_process) |p| {
-                                    if (p.state != .Terminated) {
-                                        sig.sendSignal(p, sig.SIGINT);
-                                    }
-                                }
-                                if (keyboard_shell) |sh| {
-                                    sh.buffer_pos = 0;
-                                    sh.cursor_pos = 0;
-                                    sh.command_buffer = [_]u8{0} ** 256;
-                                    sh.printPrompt();
-                                }
+                                if (keyboard_line_discipline) |line| line.abort_line(line.context);
                                 return;
                             },
                             'z' => {
                                 vga.print("^Z\n");
-                                const sig = @import("../process/signal.zig");
-                                const proc = @import("../process/process.zig");
-                                if (proc.current_process) |p| {
-                                    if (p.state != .Terminated) {
-                                        sig.sendSignal(p, sig.SIGTSTP);
-                                    }
-                                }
-                                if (keyboard_shell) |sh| {
-                                    sh.printPrompt();
-                                }
+                                if (keyboard_line_discipline) |line| line.resume_prompt(line.context);
                                 return;
                             },
                             'l' => {
                                 vga.clear();
-                                if (keyboard_shell) |sh| {
-                                    sh.printPrompt();
-                                    var j: usize = 0;
-                                    while (j < sh.buffer_pos) : (j += 1) {
-                                        vga.put_char(sh.command_buffer[j]);
-                                    }
-                                }
+                                if (keyboard_line_discipline) |line| line.refresh_line(line.context);
                                 return;
                             },
                             'd' => {
@@ -235,8 +214,8 @@ pub fn handleInterrupt() void {
                     if (ch != 0) {
                         put_char_buffer(ch);
 
-                        if (keyboard_shell) |sh| {
-                            sh.handleChar(ch);
+                        if (keyboard_line_discipline) |line| {
+                            line.handle_char(line.context, ch);
                         } else {
                             if (input_echo_enabled) {
                                 if (ch == '\n') {
@@ -266,8 +245,8 @@ pub fn init() void {
     }
 }
 
-pub fn setShell(sh: *shell.Shell) void {
-    keyboard_shell = sh;
+pub fn setLineDiscipline(line_discipline: LineDiscipline) void {
+    keyboard_line_discipline = line_discipline;
 }
 
 pub fn setInputEchoEnabled(enabled: bool) void {

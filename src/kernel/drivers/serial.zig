@@ -7,6 +7,7 @@ const SERIAL_FIFO_CONTROL = COM1_BASE + 2;
 const SERIAL_LINE_CONTROL = COM1_BASE + 3;
 const SERIAL_MODEM_CONTROL = COM1_BASE + 4;
 const SERIAL_LINE_STATUS = COM1_BASE + 5;
+const LINE_STATUS_DATA_READY = 0x01;
 const LINE_STATUS_TRANSMIT_HOLD_EMPTY = 0x20;
 
 var serial_initialized: bool = false;
@@ -41,6 +42,10 @@ fn isTransmitEmpty() bool {
     return (io.inb(SERIAL_LINE_STATUS) & LINE_STATUS_TRANSMIT_HOLD_EMPTY) != 0;
 }
 
+fn isDataReady() bool {
+    return (io.inb(SERIAL_LINE_STATUS) & LINE_STATUS_DATA_READY) != 0;
+}
+
 pub fn putChar(c: u8) void {
     if (!serial_initialized) {
         return;
@@ -52,7 +57,7 @@ pub fn putChar(c: u8) void {
     }
 
     io.outb(SERIAL_DATA, c);
-    
+
     timeout = 10000;
     while (!isTransmitEmpty() and timeout > 0) {
         timeout -= 1;
@@ -63,11 +68,22 @@ pub fn flush() void {
     if (!serial_initialized) {
         return;
     }
-    
+
     var timeout: u32 = 10000;
     while (!isTransmitEmpty() and timeout > 0) {
         timeout -= 1;
     }
+}
+
+pub fn hasChar() bool {
+    return serial_initialized and isDataReady();
+}
+
+pub fn getchar() ?u8 {
+    if (!hasChar()) {
+        return null;
+    }
+    return io.inb(SERIAL_DATA);
 }
 
 pub fn print(str: []const u8) void {

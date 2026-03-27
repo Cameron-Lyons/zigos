@@ -609,16 +609,7 @@ fn patchTrampolineU32(trampoline_start: usize, symbol_addr: usize, value: u32) v
 }
 
 fn prepareAPIdleProcesses() void {
-    const process_mod = @import("../process/process.zig");
-    const scheduler = @import("../process/scheduler.zig");
-
-    for (1..num_cpus) |i| {
-        if (cpu_info[i].idle_task != null) continue;
-
-        const idle_proc = process_mod.create_kernel_process("idle-ap", apIdleTask);
-        scheduler.assignProcessToCPU(idle_proc, @intCast(i));
-        cpu_info[i].idle_task = @ptrCast(idle_proc);
-    }
+    _ = num_cpus;
 }
 
 fn startAPs() bool {
@@ -705,18 +696,9 @@ pub export fn ap_main(cpu_id: u32) void {
         }
     }
 
-    const process_mod = @import("../process/process.zig");
-    const idle_proc = cpu_info[cpu_id].idle_task orelse {
-        while (true) {
-            asm volatile ("hlt");
-        }
-    };
-
-    process_mod.setPerCPUCurrent(cpu_id, @ptrCast(@alignCast(idle_proc)));
     asm volatile ("sti");
 
     while (true) {
-        process_mod.yield();
         asm volatile ("hlt");
     }
 }

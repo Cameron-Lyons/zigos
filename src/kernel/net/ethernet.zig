@@ -1,5 +1,4 @@
 const vga = @import("../drivers/vga.zig");
-const rtl8139 = @import("../drivers/rtl8139.zig");
 
 pub const ETH_HEADER_SIZE = 14;
 pub const ETH_MTU = 1500;
@@ -62,13 +61,12 @@ pub fn setMacProvider(provider: ?*const fn () [6]u8) void {
 }
 
 pub fn getSourceMac() ?[6]u8 {
-    return rtl8139.getMACAddress() orelse
-        if (mac_provider) |provider|
-            provider()
-        else if (tx_hook != null)
-            [_]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 }
-        else
-            null;
+    return if (mac_provider) |provider|
+        provider()
+    else if (tx_hook != null)
+        [_]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 }
+    else
+        null;
 }
 
 pub fn sendFrame(dst_mac: [6]u8, ethertype: EtherType, data: []const u8) !void {
@@ -109,7 +107,7 @@ pub fn sendFrame(dst_mac: [6]u8, ethertype: EtherType, data: []const u8) !void {
         return;
     }
 
-    try rtl8139.sendPacket(frame_buf[0 .. ETH_HEADER_SIZE + data.len]);
+    return error.NoTransmitter;
 }
 
 pub fn handleRxPacket(packet: []u8) void {
