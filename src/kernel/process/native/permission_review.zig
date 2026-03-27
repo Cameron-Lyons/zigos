@@ -233,6 +233,10 @@ fn permissionLabel(kind: manifest.PermissionKind) []const u8 {
         .camera => "Camera",
         .mic => "Microphone",
         .sensor => "Sensor",
+        .location => "Location",
+        .contacts => "Contacts",
+        .screen_capture => "Screen capture",
+        .notification_post => "Notification posting",
         .background_execution => "Background execution",
         .peer_ipc => "Peer IPC",
     };
@@ -256,6 +260,10 @@ fn rightsSummary(rights: capability.CapabilityRights, buffer: *[160]u8) []const 
     appendRight(buffer, &used, &first, rights.network_local, "network_local") catch return "rights_error";
     appendRight(buffer, &used, &first, rights.network_remote, "network_remote") catch return "rights_error";
     appendRight(buffer, &used, &first, rights.ipc_peer, "ipc_peer") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.location_read, "location_read") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.contacts_read, "contacts_read") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.screen_capture, "screen_capture") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.notification_post, "notification_post") catch return "rights_error";
 
     if (first) {
         return "none";
@@ -405,4 +413,53 @@ test "renderRequestToBuffer marks undecided requests as pending" {
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Network egress") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "decision: pending") != null);
+}
+
+test "renderToBuffer labels expanded location contacts screen capture and notification rights" {
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .location,
+            .resource = "location.current",
+            .rights = .{ .location_read = true },
+            .required = false,
+        },
+        .{
+            .kind = .contacts,
+            .resource = "contacts://personal",
+            .rights = .{ .contacts_read = true },
+        },
+        .{
+            .kind = .screen_capture,
+            .resource = "display:main",
+            .rights = .{ .screen_capture = true },
+            .required = false,
+        },
+        .{
+            .kind = .notification_post,
+            .resource = "notifications://task",
+            .rights = .{ .notification_post = true },
+            .required = false,
+        },
+    };
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "app.organizer",
+        .display_name = "Organizer",
+        .publisher = "zigos.dev",
+        .requested_permissions = &permissions,
+    };
+    const decisions = [_]ReviewDecision{
+        .{ .kind = .location, .resource = "location.current", .allow = true },
+    };
+    const session = initSession(44, bundle, &decisions);
+    var buffer: [1024]u8 = undefined;
+    const rendered = try renderToBuffer(&buffer, &session, bundle);
+
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Location") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Contacts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Screen capture") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Notification posting") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "location_read") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "contacts_read") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "screen_capture") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "notification_post") != null);
 }

@@ -1,18 +1,27 @@
 const std = @import("std");
 const abi = @import("kernel/process/native/abi.zig");
+const accelerator_scheduler = @import("kernel/process/native/accelerator_scheduler.zig");
+const attestation_service = @import("kernel/process/native/attestation_service.zig");
 const capability = @import("kernel/process/native/capability.zig");
 const contract = @import("kernel/process/native/contract.zig");
 const driver_service = @import("kernel/process/native/driver_service.zig");
+const event_ledger = @import("kernel/process/native/event_ledger.zig");
 const file_bridge = @import("kernel/process/native/file_bridge.zig");
 const immutable_base = @import("kernel/process/native/immutable_base.zig");
+const indexing_service = @import("kernel/process/native/indexing_service.zig");
 const manifest = @import("kernel/process/native/manifest.zig");
+const media_print_service = @import("kernel/process/native/media_print_service.zig");
 const measured_boot = @import("kernel/process/native/measured_boot.zig");
 const native_ux = @import("kernel/process/native/native_ux.zig");
 const network_policy = @import("kernel/process/native/network_policy.zig");
+const notification_center = @import("kernel/process/native/notification_center.zig");
 const object_store = @import("kernel/process/native/object_store.zig");
+const package_service = @import("kernel/process/native/package_service.zig");
 const policy_mediation = @import("kernel/process/native/policy_mediation.zig");
+const policy_object = @import("kernel/process/native/policy_object.zig");
 const principal = @import("kernel/process/native/principal.zig");
 const recovery_environment = @import("kernel/process/native/recovery_environment.zig");
+const secure_secret_store = @import("kernel/process/native/secure_secret_store.zig");
 const service_registry = @import("kernel/process/native/service_registry.zig");
 const signing = @import("kernel/process/native/signing.zig");
 const storage_service = @import("kernel/process/native/storage_service.zig");
@@ -610,4 +619,196 @@ test "spec 11 task-first UX records structured task workspace permission and pai
     try std.testing.expect(controller.flows[3].approved);
     try std.testing.expectEqual(native_ux.FlowKind.recover_system, controller.flows[4].kind);
     try std.testing.expectEqualStrings("recovery-environment", controller.flows[4].detailSlice());
+}
+
+test "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy scoped" {
+    var policies = policy_object.Directory.init();
+    const org_policy = try policies.create(.{
+        .scope = .organization,
+        .subject_id = 1,
+        .issuer = policyAuthority(7),
+        .label = "org-defaults",
+        .install_source_mode = .trusted_sources,
+        .allowed_install_sources = &.{ "store:zigos", "repo:corp" },
+        .network_egress_mode = .allow_list,
+        .allowed_sync_destinations = &.{"relay.corp.example"},
+        .removable_storage_allowed = false,
+        .screen_capture_allowed = false,
+        .retention_days = 180,
+        .audit_export_required = true,
+    }, signer("spec.policy.org", 0x81));
+
+    var packages = package_service.Service.init();
+    const bundle_signer = signer("spec.bundle.notes", 0x82);
+
+    const v1_permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace://notes",
+            .rights = .{ .object_read = true, .object_write = true },
+            .local_only = true,
+        },
+    };
+    var v1 = manifest.BundleManifest{
+        .bundle_id = "app.notes",
+        .display_name = "Notes",
+        .publisher = "Example Software",
+        .version_major = 1,
+        .version_minor = 0,
+        .requested_permissions = &v1_permissions,
+    };
+    v1.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v1));
+
+    const first = try packages.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, org_policy);
+    try std.testing.expect(first.installed_new);
+    try std.testing.expect(!first.rollback_available);
+    try std.testing.expect(policies.installSourceAllowed(.organization, 1, "store:zigos"));
+    try std.testing.expect(!policies.installSourceAllowed(.organization, 1, "repo:personal"));
+    try std.testing.expect(policies.syncDestinationAllowed(.organization, 1, "relay.corp.example"));
+
+    const v2_permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace://notes",
+            .rights = .{ .object_read = true, .object_write = true },
+            .local_only = true,
+        },
+        .{
+            .kind = .notification_post,
+            .resource = "notifications://task",
+            .rights = .{ .notification_post = true },
+            .required = false,
+        },
+    };
+    var v2 = manifest.BundleManifest{
+        .bundle_id = "app.notes",
+        .display_name = "Notes",
+        .publisher = "Example Software",
+        .version_major = 1,
+        .version_minor = 1,
+        .requested_permissions = &v2_permissions,
+    };
+    v2.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v2));
+
+    const updated = try packages.install(.{
+        .bundle = v2,
+        .source_identity = "repo:corp",
+        .data_schema_version = 2,
+        .migration_manifest = "notes-v2-migration",
+        .declared_permission_change = true,
+    }, org_policy);
+    try std.testing.expect(updated.updated_existing);
+    try std.testing.expect(updated.permissions_changed);
+    try std.testing.expect(updated.rollback_available);
+
+    const installed = packages.find("app.notes").?;
+    try std.testing.expectEqual(@as(u16, 1), installed.current_version_major);
+    try std.testing.expectEqual(@as(u16, 1), installed.current_version_minor);
+    try std.testing.expectEqual(@as(u32, 2), installed.current_schema_version);
+    try std.testing.expect(!org_policy.removable_storage_allowed);
+    try std.testing.expect(!org_policy.screen_capture_allowed);
+    try std.testing.expect(org_policy.audit_export_required);
+
+    _ = try packages.rollback("app.notes");
+    try std.testing.expectEqual(@as(u16, 0), packages.find("app.notes").?.current_version_minor);
+}
+
+test "spec 2.3 11.4 12 and 15 keep indexing notifications media helpers and diagnostics structured" {
+    var index = indexing_service.Service.init();
+    try index.upsert(11, 500, 1, "Trip Draft", "alpha itinerary and booking checklist");
+    try index.upsert(12, 600, 1, "Payroll", "alpha restricted finance details");
+
+    var results_buffer: [indexing_service.MAX_RESULTS]indexing_service.SearchResult = undefined;
+    const permitted = [_]u64{11};
+    const results = index.query(&permitted, "alpha", &results_buffer);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqual(@as(u64, 500), results[0].object_id);
+
+    var scheduler = accelerator_scheduler.Controller.init();
+    var notifications = notification_center.Center.init();
+    var media = media_print_service.Service.init();
+    const source = app(70);
+
+    const export_job = try media.submit(.{
+        .kind = .media_export,
+        .task_id = 501,
+        .workspace_id = 11,
+        .source_principal = source,
+        .label = "render reel",
+        .visibility = .task,
+    }, &scheduler, &notifications, 20);
+    const print_job = try media.submit(.{
+        .kind = .print_document,
+        .task_id = 502,
+        .workspace_id = 11,
+        .source_principal = source,
+        .label = "print itinerary",
+        .printer_identity = "printer://lobby",
+        .visibility = .user,
+    }, &scheduler, &notifications, 21);
+    _ = try media.complete(export_job.id, &notifications, 30);
+    _ = try media.complete(print_job.id, &notifications, 31);
+
+    try std.testing.expectEqual(accelerator_scheduler.Engine.media, export_job.engine);
+    try std.testing.expectEqual(media_print_service.JobState.completed, print_job.state);
+    try std.testing.expectEqual(notification_center.Reason.print_complete, notifications.latestVisible(31).?.reason);
+
+    var ledger = event_ledger.Ledger.init();
+    try ledger.recordDriverRestart(contract.ServiceClass.media_print_helpers, service(71), 9, 32, "printer helper restart");
+    try ledger.recordSyncConflict(user(8), 11, 33, "documents/itinerary.md conflict", true);
+    var export_buffer: [1024]u8 = undefined;
+    const redacted = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "redacted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "media_print_helpers") != null);
+}
+
+test "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explicit" {
+    var recorder = measured_boot.Recorder.init();
+    recorder.begin(21);
+    try recorder.add(.kernel, "kernel-zigos", "kernel=v3");
+    try recorder.add(.base_image, "stable-b", "image=v3");
+    try recorder.add(.critical_service, "storage", "healthy");
+    try recorder.add(.policy, "org-defaults", "strict");
+    try recorder.add(.driver_set, "signed-drivers", "gpu+npu+net");
+    const boot = recorder.finalize();
+
+    var attestation = attestation_service.Service.init(device(99));
+    const statement = try attestation.attest(boot, "attest.example", "nonce-7", signer("spec.attest.device", 0x91), true);
+    try std.testing.expect(attestation_service.Service.verify(statement));
+    try std.testing.expect(statement.user_visible);
+    try std.testing.expectEqual(@as(usize, 1), attestation.visible_request_count);
+    try std.testing.expect(!std.mem.allEqual(u8, &statement.root_digest, 0));
+
+    var secrets = secure_secret_store.Store.init();
+    const imported = try secrets.importSecret(user(9), "signing-key", "opaque-secret", true, false);
+    const handle = try secrets.lendHandle(imported.id, app(90), 700, true);
+    try std.testing.expect(handle.hardware_backed);
+    try std.testing.expectError(secure_secret_store.Error.RawExportDenied, secrets.exportRaw(handle.id));
+
+    var scheduler = accelerator_scheduler.Controller.init();
+    scheduler.configure(.{
+        .privacy_mode = true,
+        .gpu_available = true,
+        .npu_available = true,
+        .media_available = true,
+    });
+    const inference = scheduler.plan(.{
+        .class = .background_light,
+        .wants_npu = true,
+        .privacy_sensitive = true,
+    });
+    const media_export_plan = scheduler.plan(.{
+        .class = .media_export,
+        .wants_gpu = true,
+        .wants_media_engine = true,
+        .shared_memory_bytes = 4096,
+    });
+    try std.testing.expectEqual(accelerator_scheduler.Engine.cpu, inference.engine);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.privacy_mode, inference.reason);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.media, media_export_plan.engine);
+    try std.testing.expect(media_export_plan.zero_copy_allowed);
 }

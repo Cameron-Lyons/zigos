@@ -213,15 +213,19 @@ pub const PolicyMediator = struct {
                 .kind = .object,
                 .id = if (request.target_id != 0) request.target_id else resourceId(request.resource),
             },
+            .contacts => .{
+                .kind = .object,
+                .id = if (request.target_id != 0) request.target_id else resourceId(request.resource),
+            },
             .network_egress => .{
                 .kind = .service,
                 .id = self.service_targets.network_service_id,
             },
-            .clipboard => .{
+            .clipboard, .screen_capture, .notification_post => .{
                 .kind = .service,
                 .id = self.service_targets.compositor_service_id,
             },
-            .device_access, .camera, .mic, .sensor => .{
+            .device_access, .camera, .mic, .sensor, .location => .{
                 .kind = .device,
                 .id = if (request.target_id != 0) request.target_id else resourceId(request.resource),
             },
@@ -611,4 +615,93 @@ test "policy mediation covers device camera mic sensor and peer ipc permissions"
     try std.testing.expectEqual(@as(u64, 703), sensor_capability.target.id);
     try std.testing.expectEqual(capability.CapabilityTargetKind.service, peer_capability.target.kind);
     try std.testing.expectEqual(@as(u64, 64), peer_capability.target.id);
+}
+
+test "policy mediation maps location contacts screen capture and notification capabilities" {
+    var capability_table = capability.CapabilityTable.init();
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 41 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 2048,
+            .endpoint_slots = 8,
+            .shared_memory_bytes = 2048,
+        },
+        .local_only = true,
+    });
+    var mediator = PolicyMediator.init(
+        .{ .kind = .policy_authority, .serial = 42 },
+        &capability_table,
+        &runtime,
+        .{
+            .network_service_id = 88,
+            .compositor_service_id = 89,
+            .policy_service_id = 90,
+            .service_registry_id = 91,
+        },
+    );
+
+    const requests = [_]manifest.PermissionRequest{
+        .{
+            .kind = .location,
+            .resource = "location.current",
+            .rights = .{ .location_read = true },
+            .local_only = true,
+        },
+        .{
+            .kind = .contacts,
+            .resource = "contacts://personal",
+            .rights = .{ .contacts_read = true },
+            .local_only = true,
+            .target_id = 3_001,
+        },
+        .{
+            .kind = .screen_capture,
+            .resource = "display:main",
+            .rights = .{ .screen_capture = true },
+            .required = false,
+        },
+        .{
+            .kind = .notification_post,
+            .resource = "notifications://task",
+            .rights = .{ .notification_post = true },
+            .required = false,
+        },
+    };
+    const grants = [_]UserGrant{
+        .{ .kind = .location, .resource = "location.current", .local_only = true, .expires_at_ticks = 50 },
+        .{ .kind = .contacts, .resource = "contacts://personal", .local_only = true, .expires_at_ticks = 50 },
+        .{ .kind = .screen_capture, .resource = "display:main", .expires_at_ticks = 50 },
+        .{ .kind = .notification_post, .resource = "notifications://task", .expires_at_ticks = 50 },
+    };
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "app.organizer",
+        .display_name = "Organizer",
+        .publisher = "zigos.dev",
+        .requested_permissions = &requests,
+    };
+
+    const summary = try mediator.applyManifest(task.id, bundle, &grants, 10);
+    try std.testing.expect(summary.decisionForKind(.location).?.allowed);
+    try std.testing.expect(summary.decisionForKind(.contacts).?.allowed);
+    try std.testing.expect(summary.decisionForKind(.screen_capture).?.allowed);
+    try std.testing.expect(summary.decisionForKind(.notification_post).?.allowed);
+
+    const location_capability = capability_table.query(summary.decisionForKind(.location).?.capability_id.?).?;
+    const contacts_capability = capability_table.query(summary.decisionForKind(.contacts).?.capability_id.?).?;
+    const capture_capability = capability_table.query(summary.decisionForKind(.screen_capture).?.capability_id.?).?;
+    const notification_capability = capability_table.query(summary.decisionForKind(.notification_post).?.capability_id.?).?;
+
+    try std.testing.expectEqual(capability.CapabilityTargetKind.device, location_capability.target.kind);
+    try std.testing.expect(location_capability.rights.location_read);
+    try std.testing.expectEqual(capability.CapabilityTargetKind.object, contacts_capability.target.kind);
+    try std.testing.expectEqual(@as(u64, 3_001), contacts_capability.target.id);
+    try std.testing.expect(contacts_capability.rights.contacts_read);
+    try std.testing.expectEqual(capability.CapabilityTargetKind.service, capture_capability.target.kind);
+    try std.testing.expectEqual(@as(u64, 89), capture_capability.target.id);
+    try std.testing.expect(capture_capability.rights.screen_capture);
+    try std.testing.expectEqual(capability.CapabilityTargetKind.service, notification_capability.target.kind);
+    try std.testing.expect(notification_capability.rights.notification_post);
 }
