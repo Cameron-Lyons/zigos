@@ -1,6 +1,5 @@
+const builtin = @import("builtin");
 const std = @import("std");
-const common = @import("../../boot/common.zig");
-const console = @import("../../utils/console.zig");
 const abi = @import("abi.zig");
 const capability = @import("capability.zig");
 const component_port = @import("component_port.zig");
@@ -30,6 +29,19 @@ const sync_service_mod = @import("sync_service.zig");
 const task_runtime = @import("task_runtime.zig");
 const workspace_mod = @import("workspace.zig");
 
+const common = if (builtin.target.os.tag == .freestanding)
+    @import("../../boot/common.zig")
+else
+    struct {
+        pub fn printBootMarker(_: []const u8) void {}
+    };
+const console = if (builtin.target.os.tag == .freestanding)
+    @import("../../utils/console.zig")
+else
+    struct {
+        pub fn print(_: []const u8) void {}
+    };
+
 var initialized = false;
 var capability_table = capability.CapabilityTable.init();
 var endpoint_table = endpoint_mod.Table.init();
@@ -38,14 +50,66 @@ var service_directory = native_service_registry.Registry.init();
 var shared_memory_table = shared_memory_mod.Table.init();
 var driver_directory = driver_service.Directory.init();
 var supervisor = supervisor_mod.Supervisor.init();
-var phase4_storage_service = storage_service_mod.Service{
-    .service_id = 0,
-    .task_id = 0,
-    .owner = .{ .kind = .service, .serial = 0 },
-    .store = undefined,
-    .workspaces = undefined,
-};
+var phase4_storage_service = emptyStorageService();
 const bootstrap_storage_interface = manifest.InterfaceDecl{ .name = "zigos.bootstrap.workspace" };
+
+fn emptyStorageService() storage_service_mod.Service {
+    return .{
+        .service_id = 0,
+        .task_id = 0,
+        .owner = .{ .kind = .service, .serial = 0 },
+        .store = undefined,
+        .workspaces = undefined,
+    };
+}
+
+fn resetStateForTest() void {
+    initialized = false;
+    capability_table = capability.CapabilityTable.init();
+    endpoint_table = endpoint_mod.Table.init();
+    runtime = task_runtime.Runtime.init();
+    service_directory = native_service_registry.Registry.init();
+    shared_memory_table = shared_memory_mod.Table.init();
+    driver_directory = driver_service.Directory.init();
+    supervisor = supervisor_mod.Supervisor.init();
+    phase4_storage_service = emptyStorageService();
+    storage_service_mod.Service.resetPersistentState();
+    sync_service_mod.Service.resetPersistentState();
+}
+
+fn taskCount() usize {
+    var count: usize = 0;
+    for (runtime.tasks) |slot| {
+        if (slot.in_use) count += 1;
+    }
+    return count;
+}
+
+fn taskCountInState(state: task_runtime.TaskState) usize {
+    var count: usize = 0;
+    for (runtime.tasks) |slot| {
+        if (slot.in_use and slot.task.state == state) count += 1;
+    }
+    return count;
+}
+
+fn serviceCount() usize {
+    var count: usize = 0;
+    for (supervisor.services) |slot| {
+        if (slot.in_use) count += 1;
+    }
+    return count;
+}
+
+fn findTaskByLabel(label: []const u8) ?*task_runtime.TaskRecord {
+    for (&runtime.tasks) |*slot| {
+        if (!slot.in_use or slot.task.execution_component_count == 0) continue;
+        if (std.mem.eql(u8, slot.task.execution_components[0].labelSlice(), label)) {
+            return &slot.task;
+        }
+    }
+    return null;
+}
 
 pub fn boot() void {
     if (initialized) return;
@@ -1835,6 +1899,102 @@ pub fn boot() void {
     printNumber(abi.ABI_VERSION);
     console.print("\n");
     console.print("Native-only platform ready\n");
+}
+
+test "boot wires bootstrap services storage sync recovery and phase3 contracts" {
+    resetStateForTest();
+    defer resetStateForTest();
+
+    boot();
+
+    try std.testing.expect(initialized);
+    try std.testing.expectEqual(@as(usize, 11), serviceCount());
+    try std.testing.expectEqual(@as(usize, 9), service_directory.bindingCount());
+    try std.testing.expectEqual(@as(usize, 19), taskCount());
+    try std.testing.expectEqual(@as(usize, 17), taskCountInState(.active));
+    try std.testing.expectEqual(@as(usize, 1), taskCountInState(.suspended));
+    try std.testing.expectEqual(@as(usize, 1), taskCountInState(.terminated));
+
+    const network_service = supervisor.findByClass(.network_stack).?;
+    const storage_service = supervisor.findByClass(.storage_object).?;
+    const sync_service = supervisor.findByClass(.sync_replication).?;
+    try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, network_service.state);
+    try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, storage_service.state);
+    try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, sync_service.state);
+    try std.testing.expectEqual(@as(u16, 1), network_service.restart_count);
+    try std.testing.expectEqual(@as(u16, 1), storage_service.restart_count);
+    try std.testing.expectEqual(@as(u16, 1), sync_service.restart_count);
+
+    try std.testing.expectEqual(@as(u32, 2), driver_directory.findByClass(.network_adapter).?.restart_generation);
+    try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.storage_controller).?.restart_generation);
+    try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.graphics_adapter).?.restart_generation);
+    try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.audio_print_io).?.restart_generation);
+
+    const phase3_classes = [_]contract.ServiceClass{
+        .package_install_update,
+        .indexing_search,
+        .media_print_helpers,
+    };
+    for (phase3_classes) |class| {
+        const descriptor = service_contract.contractForClass(class).?;
+        const connection = try service_directory.connect(descriptor.interface);
+        try std.testing.expectEqual(supervisor.findByClass(class).?.id, connection.service_id);
+    }
+
+    const notes_task = findTaskByLabel("notes").?;
+    const sync_task = findTaskByLabel("sync").?;
+    const capture_task = findTaskByLabel("capture").?;
+    try std.testing.expectEqual(@as(usize, 2), notes_task.execution_component_count);
+    try std.testing.expectEqual(@as(usize, 2), notes_task.capability_count);
+    try std.testing.expectEqual(task_runtime.TaskState.suspended, sync_task.state);
+    try std.testing.expectEqual(@as(usize, 4), capture_task.capability_count);
+
+    const session_user = principal.PrincipalId{ .kind = .user, .serial = 1 };
+    const storage_service_principal = principal.PrincipalId{ .kind = .service, .serial = 4 };
+    const tablet_device_principal = principal.PrincipalId{ .kind = .device, .serial = 2 };
+    const notes_workspace = phase4_storage_service.findWorkspace(session_user, "notes-workspace").?;
+    const imported_workspace = phase4_storage_service.findWorkspace(storage_service_principal, "imported-notes").?;
+    const notes_entry = try phase4_storage_service.resolve(notes_workspace.id, "documents/notes.md");
+    const imported_entry = try phase4_storage_service.resolve(imported_workspace.id, "documents/notes.md");
+    try std.testing.expectEqual(notes_entry.version_id, imported_entry.version_id);
+    try std.testing.expect(phase4_storage_service.findSnapshot(notes_workspace.id, "baseline") != null);
+
+    var restarted_sync = sync_service_mod.Service.init(sync_service.id, 0, sync_service.owner);
+    try std.testing.expect(restarted_sync.loaded_existing_state);
+    try std.testing.expectEqual(@as(usize, 3), restarted_sync.trustedDeviceCount());
+    try std.testing.expect(restarted_sync.findWorkspacePolicy(notes_workspace.id) != null);
+    try std.testing.expect(restarted_sync.findOverlay(notes_workspace.id) != null);
+    try std.testing.expect(restarted_sync.findConflict(notes_workspace.id, tablet_device_principal, "documents/notes.md") == null);
+
+    const state_signer = signing.SignerIdentity{
+        .label = "zigos-base-state",
+        .seed = [_]u8{0xA1} ** 32,
+    };
+    const package_service = supervisor.findByClass(.package_install_update).?;
+    var immutable_base_manager = try immutable_base.Manager.init(&phase4_storage_service, package_service.owner, state_signer);
+    try std.testing.expect(immutable_base_manager.loaded_existing_state);
+    try std.testing.expectEqual(@as(u64, 7), immutable_base_manager.activation_generation);
+    try std.testing.expectEqual(@as(u64, 5), immutable_base_manager.rollback_generation);
+    try std.testing.expectEqualStrings("stable-b", immutable_base_manager.activeImage().?.labelSlice());
+    try std.testing.expectEqualStrings("recovery-reinstall", immutable_base_manager.slots[immutable_base_manager.inactiveSlotIndex()].labelSlice());
+}
+
+test "boot is idempotent once initialized" {
+    resetStateForTest();
+    defer resetStateForTest();
+
+    boot();
+    const services_after_first_boot = serviceCount();
+    const tasks_after_first_boot = taskCount();
+    const bindings_after_first_boot = service_directory.bindingCount();
+    const diagnostics_after_first_boot = supervisor.diagnostic_count;
+
+    boot();
+
+    try std.testing.expectEqual(services_after_first_boot, serviceCount());
+    try std.testing.expectEqual(tasks_after_first_boot, taskCount());
+    try std.testing.expectEqual(bindings_after_first_boot, service_directory.bindingCount());
+    try std.testing.expectEqual(diagnostics_after_first_boot, supervisor.diagnostic_count);
 }
 
 fn printNumber(value: u64) void {

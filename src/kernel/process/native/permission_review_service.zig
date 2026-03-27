@@ -1,3 +1,4 @@
+const std = @import("std");
 const builtin = @import("builtin");
 const manifest = @import("manifest.zig");
 const permission_review = @import("permission_review.zig");
@@ -184,3 +185,88 @@ pub const Service = struct {
         return null;
     }
 };
+
+test "review service retries invalid commands clamps leases and records audits" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = 1 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 1024,
+        },
+        .local_only = true,
+    });
+    const scripted_inputs = [_][]const u8{
+        "wat",
+        "allow local lease=60",
+        "deny",
+    };
+    var service = Service.init(9, 10, &runtime, &scripted_inputs);
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace://notes/documents/notes.md",
+            .rights = .{ .object_read = true, .object_write = true },
+            .local_only = true,
+            .max_lease_ticks = 30,
+        },
+        .{
+            .kind = .network_egress,
+            .resource = "relay.zigos.dev",
+            .rights = .{ .network_remote = true },
+            .required = false,
+        },
+    };
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "app.notes",
+        .display_name = "Notes",
+        .publisher = "zigos.dev",
+        .requested_permissions = &permissions,
+        .signature = .{
+            .format = "ed25519",
+            .signer = "zigos-dev-key",
+        },
+    };
+    var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+
+    const grants = try service.reviewBundle(task.id, bundle, 40, &grants_buffer);
+    try std.testing.expectEqual(@as(usize, 1), grants.len);
+    try std.testing.expectEqual(manifest.PermissionKind.object_access, grants[0].kind);
+    try std.testing.expect(grants[0].local_only);
+    try std.testing.expectEqual(@as(?u64, 70), grants[0].expires_at_ticks);
+    try std.testing.expectEqual(@as(usize, 2), task.audit_count);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.permission_prompted, task.audit_trail[0].kind);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.permission_reviewed, task.audit_trail[1].kind);
+    try std.testing.expectEqual(@as(u32, 2), task.audit_trail[0].detail);
+    try std.testing.expectEqual(@as(u32, 1), task.audit_trail[1].detail);
+}
+
+test "review service rejects invalid manifests before auditing" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = 2 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 1024,
+        },
+        .local_only = true,
+    });
+    const scripted_inputs = [_][]const u8{"allow"};
+    var service = Service.init(11, 12, &runtime, &scripted_inputs);
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "app.sync",
+        .display_name = "Sync",
+        .publisher = "zigos.dev",
+        .background_triggers = &.{.scheduled_sync},
+    };
+    var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+
+    try std.testing.expectError(error.MissingBackgroundPermission, service.reviewBundle(task.id, bundle, 10, &grants_buffer));
+    try std.testing.expectEqual(@as(usize, 0), task.audit_count);
+}

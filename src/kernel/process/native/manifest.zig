@@ -15,6 +15,10 @@ pub const PermissionKind = enum(u8) {
     camera,
     mic,
     sensor,
+    location,
+    contacts,
+    screen_capture,
+    notification_post,
     background_execution,
     peer_ipc,
 };
