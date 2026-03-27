@@ -3,4 +3,4 @@
 set -euo pipefail
 
 echo "Running native smoke boot..."
-zig build zigos-native-smoke-test
+zig build -Doptimize=ReleaseFast zigos-native-smoke-test

@@ -52,5 +52,5 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Native Smoke
-      command: zig build zigos-native-smoke-test
+      command: zig build -Doptimize=ReleaseFast zigos-native-smoke-test
       timeout-minutes: 20
