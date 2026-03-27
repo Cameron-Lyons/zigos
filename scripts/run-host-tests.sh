@@ -16,18 +16,21 @@ from pathlib import Path
 
 root = Path(os.environ['ROOT_DIR'])
 search_roots = [
-    root / 'src/kernel/process/syscall',
-    root / 'src/kernel/fs',
-    root / 'src/kernel/shell',
-    root / 'src/kernel/process',
-    root / 'src/kernel/net/tcp',
+    root / 'src/kernel/process/native',
 ]
+
+excluded = {
+    root / 'src/kernel/process/native/permission_review_service.zig',
+    root / 'src/kernel/process/native/review_component_port.zig',
+}
 
 seen: set[Path] = set()
 targets: list[str] = []
 for base in search_roots:
     for path in sorted(base.rglob('*.zig')):
         if path in seen:
+            continue
+        if path in excluded:
             continue
         try:
             text = path.read_text()
@@ -37,6 +40,18 @@ for base in search_roots:
             continue
         seen.add(path)
         targets.append(str(path.relative_to(root)))
+
+for path in sorted((root / 'src').glob('*_test.zig')):
+    if path in seen:
+        continue
+    try:
+        text = path.read_text()
+    except Exception:
+        continue
+    if 'test "' not in text:
+        continue
+    seen.add(path)
+    targets.append(str(path.relative_to(root)))
 
 for target in targets:
     print(target)

@@ -42,28 +42,6 @@ pub fn init(frequency_hz: u32) void {
 
 pub fn handleInterrupt() void {
     ticks += 1;
-    const woke_sleepers = wakeExpiredSleepers();
-
-    const TCP_TICK_INTERVAL = 50;
-    if (ticks % TCP_TICK_INTERVAL == 0) {
-        const tcp = @import("../net/tcp.zig");
-        tcp.tick();
-    }
-
-    const PREEMPTION_TICKS = 10;
-    if (ticks % PREEMPTION_TICKS == 0 or woke_sleepers) {
-        const scheduler = @import("../process/scheduler.zig");
-        scheduler.preempt();
-
-        const process = @import("../process/process.zig");
-        process.yield();
-    }
-
-    const ALARM_CHECK_INTERVAL = TICKS_PER_SECOND;
-    if (ticks % ALARM_CHECK_INTERVAL == 0) {
-        const signal = @import("../process/signal.zig");
-        signal.checkAlarms();
-    }
 }
 
 pub fn getTicks() u64 {
@@ -85,74 +63,20 @@ pub fn ticksToMilliseconds(tick_count: u64) u64 {
 
 pub fn sleepCurrentTicks(ticks_to_wait: u64) void {
     if (ticks_to_wait == 0) return;
-
-    const process = @import("../process/process.zig");
-    const scheduler = @import("../process/scheduler.zig");
-
-    const current = process.getEffectiveCurrent() orelse {
-        const start_ticks = ticks;
-        while (ticks - start_ticks < ticks_to_wait) {
-            asm volatile ("hlt");
-        }
-        return;
-    };
-
-    const flags = disableInterrupts();
-    const wake_tick = ticks + ticks_to_wait;
-
-    const inserted = scheduleWake(current.pid, wake_tick);
-
-    if (!inserted) {
-        restoreInterrupts(flags);
-        const start_ticks = ticks;
-        while (ticks - start_ticks < ticks_to_wait) {
-            asm volatile ("hlt");
-        }
-        return;
+    const start_ticks = ticks;
+    while (ticks - start_ticks < ticks_to_wait) {
+        asm volatile ("hlt");
     }
-
-    current.state = .Blocked;
-    scheduler.blockProcess(current);
-    restoreInterrupts(flags);
-    process.yield();
 }
 
 pub fn scheduleWake(pid: u32, wake_tick: u64) bool {
-    if (pid == 0) return false;
-
-    lockSleep();
-    defer unlockSleep();
-
-    for (&sleep_entries) |*entry| {
-        if (entry.active and entry.pid == pid) {
-            entry.wake_tick = wake_tick;
-            return true;
-        }
-    }
-
-    for (&sleep_entries) |*entry| {
-        if (!entry.active) {
-            entry.pid = pid;
-            entry.wake_tick = wake_tick;
-            entry.active = true;
-            return true;
-        }
-    }
-
+    _ = pid;
+    _ = wake_tick;
     return false;
 }
 
 pub fn cancelWake(pid: u32) void {
-    if (pid == 0) return;
-
-    lockSleep();
-    defer unlockSleep();
-
-    for (&sleep_entries) |*entry| {
-        if (entry.active and entry.pid == pid) {
-            entry.active = false;
-        }
-    }
+    _ = pid;
 }
 
 pub fn sleep(milliseconds: u32) void {
@@ -182,44 +106,6 @@ fn print_number(num: u32) void {
         i -= 1;
         vga.put_char(digits[i]);
     }
-}
-
-fn lockSleep() void {
-    while (@cmpxchgWeak(u32, &sleep_lock, 0, 1, .acquire, .monotonic) != null) {
-        while (@atomicLoad(u32, &sleep_lock, .monotonic) != 0) {
-            asm volatile ("pause");
-        }
-    }
-}
-
-fn unlockSleep() void {
-    @atomicStore(u32, &sleep_lock, 0, .release);
-}
-
-fn wakeExpiredSleepers() bool {
-    const process = @import("../process/process.zig");
-    const scheduler = @import("../process/scheduler.zig");
-
-    var ready_pids: [MAX_SLEEPERS]u32 = undefined;
-    var ready_count: usize = 0;
-
-    lockSleep();
-    for (&sleep_entries) |*entry| {
-        if (entry.active and entry.wake_tick <= ticks) {
-            ready_pids[ready_count] = entry.pid;
-            ready_count += 1;
-            entry.active = false;
-        }
-    }
-    unlockSleep();
-
-    for (ready_pids[0..ready_count]) |pid| {
-        if (process.getProcessByPid(pid)) |proc| {
-            scheduler.unblockProcess(proc);
-        }
-    }
-
-    return ready_count != 0;
 }
 
 fn disableInterrupts() u32 {

@@ -1,6 +1,5 @@
 const console = @import("../../utils/console.zig");
 const isr = @import("../../interrupts/isr.zig");
-const syscall = @import("../../process/syscall/init.zig");
 const paging = @import("../../memory/paging.zig");
 const swap = @import("../../memory/swap.zig");
 const memory = @import("../../memory/memory.zig");
@@ -14,10 +13,6 @@ pub fn init() void {
     console.print("Initializing interrupts...\n");
     isr.init();
     console.print("Interrupts enabled!\n");
-
-    console.print("Initializing system calls...\n");
-    syscall.init();
-    console.print("System calls ready!\n");
 
     console.print("Initializing paging...\n");
     paging.init();

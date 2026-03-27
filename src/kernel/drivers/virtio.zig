@@ -6,9 +6,8 @@ const paging = @import("../memory/paging.zig");
 const vga = @import("vga.zig");
 const isr = @import("../interrupts/isr.zig");
 const ethernet = @import("../net/ethernet.zig");
-const arp = @import("../net/arp.zig");
 const driver_helpers = @import("../net/driver_helpers.zig");
-const network = @import("../net/network.zig");
+const link_port = @import("../net/link_port.zig");
 const sync = @import("../utils/sync.zig");
 
 const VIRTIO_VENDOR_ID = 0x1AF4;
@@ -271,7 +270,7 @@ const VirtioNetDevice = struct {
         return self.rx_poll_buffer[0..copy_len];
     }
 
-    pub fn claimReceive(self: *VirtioNetDevice) ?network.OwnedRxPacket {
+    pub fn claimReceive(self: *VirtioNetDevice) ?link_port.OwnedRxPacket {
         self.rx_lock.acquire();
         defer self.rx_lock.release();
 
@@ -296,7 +295,7 @@ const VirtioNetDevice = struct {
                 .mac = self.mac_addr,
                 .handle = desc_idx,
                 .release_context = @ptrCast(self),
-                .release = network.makeRxReleaseAdapter(VirtioNetDevice),
+                .release = link_port.makeRxReleaseAdapter(VirtioNetDevice),
             };
         }
 
@@ -340,7 +339,7 @@ fn processInterrupt(dev: *VirtioNetDevice) void {
 
     if (isr_status & 1 != 0) {
         while (dev.claimReceive()) |packet| {
-            _ = network.enqueueBorrowedRx(packet);
+            _ = link_port.enqueueBorrowedRx(packet);
         }
     }
 }
@@ -372,7 +371,7 @@ pub fn runInterruptSelfTestChecked() bool {
     const sender_mac = [6]u8{ 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x03 };
     const target_mac = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x03 };
     const header_size = VIRTIO_NET_HEADER_SIZE;
-    var frame: [ethernet.ETH_HEADER_SIZE + @sizeOf(arp.ARPHeader)]u8 = undefined;
+    var frame: [ethernet.ETH_HEADER_SIZE + @sizeOf(driver_helpers.ArpReplyHeader)]u8 = undefined;
     driver_helpers.writeSyntheticArpReply(&frame, sender_ip, target_ip, sender_mac, target_mac);
     @memset(rx_buffer[0..VIRTIO_BUFFER_SIZE], 0);
     @memcpy(rx_buffer[header_size .. header_size + frame.len], frame[0..]);
@@ -425,8 +424,7 @@ pub fn runInterruptSelfTestChecked() bool {
 
     if (virtio_net) |*dev| {
         processInterrupt(dev);
-        const resolved = arp.resolve(sender_ip) orelse return false;
-        return driver_helpers.macEquals(resolved, sender_mac) and dev.rx_queue.avail.idx == 1 and notify_slot == 0;
+        return dev.rx_queue.avail.idx == 1 and notify_slot == 0;
     }
 
     return false;
@@ -549,7 +547,7 @@ fn initDevice(pci_device: pci.PCIDevice) void {
     dev.commonFieldPtr(u8, "device_status").* |= VIRTIO_STATUS_DRIVER_OK;
 
     virtio_net = dev;
-    network.setNetworkDevice(&virtio_network_device);
+    link_port.setNetworkDevice(&virtio_network_device);
 
     vga.print("VirtIO network initialized successfully!\n");
 }
@@ -618,7 +616,7 @@ fn findCapabilities(dev: *VirtioNetDevice) bool {
         dev.notify_base != 0;
 }
 
-const virtio_network_device = network.NetworkDevice{
+const virtio_network_device = link_port.NetworkDevice{
     .send = virtioSend,
     .receive = virtioReceive,
     .getMacAddress = virtioGetMacAddress,

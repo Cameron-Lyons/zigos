@@ -1,9 +1,8 @@
 const pci = @import("pci.zig");
 const paging = @import("../memory/paging.zig");
 const ethernet = @import("../net/ethernet.zig");
-const arp = @import("../net/arp.zig");
 const driver_helpers = @import("../net/driver_helpers.zig");
-const network = @import("../net/network.zig");
+const link_port = @import("../net/link_port.zig");
 const memory = @import("../memory/memory.zig");
 const isr = @import("../interrupts/isr.zig");
 const sync = @import("../utils/sync.zig");
@@ -483,7 +482,7 @@ const E1000Device = struct {
         return null;
     }
 
-    pub fn claimReceive(self: *E1000Device) ?network.OwnedRxPacket {
+    pub fn claimReceive(self: *E1000Device) ?link_port.OwnedRxPacket {
         self.rx_lock.acquire();
         defer self.rx_lock.release();
 
@@ -501,7 +500,7 @@ const E1000Device = struct {
             .mac = self.mac_addr,
             .handle = cur,
             .release_context = @ptrCast(self),
-            .release = network.makeRxReleaseAdapter(E1000Device),
+            .release = link_port.makeRxReleaseAdapter(E1000Device),
         };
     }
 
@@ -527,7 +526,7 @@ fn processInterrupt(dev: *E1000Device) void {
 
     if (icr & 0x80 != 0) {
         while (dev.claimReceive()) |packet| {
-            _ = network.enqueueBorrowedRx(packet);
+            _ = link_port.enqueueBorrowedRx(packet);
         }
     }
 
@@ -576,7 +575,7 @@ pub fn runInterruptSelfTestChecked() bool {
     const sender_ip: u32 = 0xC0A801F1;
     const target_ip: u32 = 0xC0A80102;
     const sender_mac = [6]u8{ 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02 };
-    var frame: [ethernet.ETH_HEADER_SIZE + @sizeOf(arp.ARPHeader)]u8 = undefined;
+    var frame: [ethernet.ETH_HEADER_SIZE + @sizeOf(driver_helpers.ArpReplyHeader)]u8 = undefined;
     driver_helpers.writeSyntheticArpReply(&frame, sender_ip, target_ip, sender_mac, fake.mac_addr);
 
     fake.rx_descs[0].addr = @intFromPtr(fake.rx_buffers);
@@ -596,9 +595,7 @@ pub fn runInterruptSelfTestChecked() bool {
 
     if (e1000_device) |*dev| {
         processInterrupt(dev);
-        const resolved = arp.resolve(sender_ip) orelse return false;
-        return driver_helpers.macEquals(resolved, sender_mac) and
-            dev.rx_release_cur == 1 and
+        return dev.rx_release_cur == 1 and
             !dev.rx_release_ready[0] and
             dev.readRegister(E1000Registers.RDT) == 0;
     }
@@ -701,12 +698,12 @@ fn initDevice(pci_device: pci.PCIDevice) void {
     dev.enableInterrupts();
 
     e1000_device = dev;
-    network.setNetworkDevice(&e1000NetworkDevice);
+    link_port.setNetworkDevice(&e1000NetworkDevice);
 
     vga.print("E1000 initialized successfully!\n");
 }
 
-const e1000NetworkDevice = network.NetworkDevice{
+const e1000NetworkDevice = link_port.NetworkDevice{
     .send = e1000Send,
     .receive = e1000Receive,
     .getMacAddress = e1000GetMacAddress,

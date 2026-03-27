@@ -6,6 +6,8 @@ export fn kernel_main() void {
     kernel.kernelMain();
 }
 
+export fn syscall_handler(_: *anyopaque) callconv(.c) void {}
+
 comptime {
     _ = isr;
 }
