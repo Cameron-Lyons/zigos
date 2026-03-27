@@ -53,7 +53,10 @@ pub const CapabilityRights = packed struct(u32) {
     network_local: bool = false,
     network_remote: bool = false,
     ipc_peer: bool = false,
-    _reserved: u4 = 0,
+    location_read: bool = false,
+    contacts_read: bool = false,
+    screen_capture: bool = false,
+    notification_post: bool = false,
 
     pub fn containsAll(self: CapabilityRights, requested: CapabilityRights) bool {
         const owned: u32 = @bitCast(self);

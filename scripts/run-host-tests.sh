@@ -22,6 +22,8 @@ search_roots = [
 excluded = {
     root / 'src/kernel/process/native/permission_review_service.zig',
     root / 'src/kernel/process/native/review_component_port.zig',
+    root / 'src/kernel/process/native/session_manager.zig',
+    root / 'src/kernel/process/native/storage_volume_backend.zig',
 }
 
 seen: set[Path] = set()
