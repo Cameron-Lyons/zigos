@@ -2,8 +2,6 @@ const vga = @import("../drivers/vga.zig");
 const device = @import("device.zig");
 const error_handler = @import("../utils/error.zig");
 
-var console_dev: ?*device.Device = null;
-
 fn console_open(dev: *device.Device) error_handler.Error!void {
     _ = dev;
 }
@@ -58,6 +56,5 @@ const console_ops = device.DeviceOps{
 };
 
 pub fn init() !void {
-    console_dev = try device.registerDevice("console", device.DeviceType.CharDevice, console_ops, null);
+    _ = try device.registerDevice("console", device.DeviceType.CharDevice, console_ops, null);
 }
-

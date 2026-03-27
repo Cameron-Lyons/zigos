@@ -4,6 +4,7 @@ const runtime = @import("runtime");
 const std = @import("std");
 const stdio = @import("stdio");
 const syscall = @import("syscall");
+const textutil = @import("textutil");
 
 pub const panic = runtime.panic;
 
@@ -28,12 +29,12 @@ pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[
 fn sortFd(fd: i32, path: ?[*:0]const u8) bool {
     var buffer: [buffer_size]u8 = undefined;
     const content = fsutil.readAll(fd, &buffer) catch |err| {
-        printReadError(path, err);
+        textutil.printReadAllError("sort", path, err);
         return false;
     };
 
     var lines: [max_lines][]const u8 = undefined;
-    const line_count = splitLines(content, &lines) catch {
+    const line_count = textutil.splitLines(content, lines[0..]) catch {
         stdio.eputs("sort: too many lines\n");
         return false;
     };
@@ -46,25 +47,6 @@ fn sortFd(fd: i32, path: ?[*:0]const u8) bool {
     return true;
 }
 
-fn splitLines(content: []const u8, lines: *[max_lines][]const u8) error{TooManyLines}!usize {
-    var count: usize = 0;
-    var start: usize = 0;
-    var i: usize = 0;
-    while (i < content.len) : (i += 1) {
-        if (content[i] != '\n') continue;
-        if (count >= lines.len) return error.TooManyLines;
-        lines[count] = trimCarriageReturn(content[start..i]);
-        count += 1;
-        start = i + 1;
-    }
-    if (start < content.len or content.len == 0) {
-        if (count >= lines.len) return error.TooManyLines;
-        lines[count] = trimCarriageReturn(content[start..]);
-        count += 1;
-    }
-    return count;
-}
-
 fn insertionSort(lines: [][]const u8) void {
     var i: usize = 1;
     while (i < lines.len) : (i += 1) {
@@ -74,21 +56,5 @@ fn insertionSort(lines: [][]const u8) void {
             lines[j] = lines[j - 1];
         }
         lines[j] = current;
-    }
-}
-
-fn trimCarriageReturn(line: []const u8) []const u8 {
-    if (line.len != 0 and line[line.len - 1] == '\r') return line[0 .. line.len - 1];
-    return line;
-}
-
-fn printReadError(path: ?[*:0]const u8, err: fsutil.ReadAllError) void {
-    switch (err) {
-        error.ReadFailed => if (path) |value| {
-            stdio.eprint("sort: failed to read {s}\n", .{cstr.slice(value)});
-        } else {
-            stdio.eputs("sort: failed to read stdin\n");
-        },
-        error.BufferTooSmall => stdio.eputs("sort: input too large\n"),
     }
 }

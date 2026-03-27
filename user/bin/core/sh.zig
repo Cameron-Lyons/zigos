@@ -542,12 +542,6 @@ fn closeOptionalFd(fd: ?i32) void {
     }
 }
 
-fn closeFd(fd: i32) void {
-    if (fd >= 0) {
-        _ = syscall.close(fd);
-    }
-}
-
 fn printParseError(err: ParseError) void {
     switch (err) {
         error.UnterminatedQuote => stdio.eputs("sh: unterminated quote\n"),

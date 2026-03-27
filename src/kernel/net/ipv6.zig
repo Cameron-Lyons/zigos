@@ -51,8 +51,6 @@ pub const ALL_ROUTERS_MULTICAST = IPv6Address{ .octets = .{ 0xFF, 0x02, 0, 0, 0,
 var link_local_addr: IPv6Address = undefined;
 var global_addr: IPv6Address = .{ .octets = [_]u8{0} ** 16 };
 var has_global_addr: bool = false;
-var default_gateway: IPv6Address = .{ .octets = [_]u8{0} ** 16 };
-var has_default_gateway: bool = false;
 var initialized: bool = false;
 
 const ProtocolHandler = fn (src: *const IPv6Address, dst: *const IPv6Address, data: []const u8) void;
@@ -195,8 +193,7 @@ pub fn setGlobalAddress(addr: IPv6Address) void {
 }
 
 pub fn setDefaultGateway(addr: IPv6Address) void {
-    default_gateway = addr;
-    has_default_gateway = true;
+    _ = addr;
     vga.print("IPv6 default gateway configured\n");
 }
 

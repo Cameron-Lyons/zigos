@@ -35,7 +35,6 @@ pub const Runtime = struct {
     dispatchBuiltinFn: *const fn (?*anyopaque, registry.CommandId, []const [*:0]const u8) void,
     registerBackgroundJobFn: *const fn (?*anyopaque, u32, []const CommandToken) void,
     waitForForegroundFn: *const fn (?*anyopaque, u32) bool,
-    setForegroundProcessGroupFn: *const fn (?*anyopaque, ?u32) void,
     launchExternalFn: *const fn (?*anyopaque, []const [*:0]const u8, ?i8, ?i32, ?i32, ?u32) ExternalLaunchError!u32,
 
     fn nextCaptureId(self: *const Runtime) u32 {
@@ -52,10 +51,6 @@ pub const Runtime = struct {
 
     fn waitForForegroundCommand(self: *const Runtime, pid: u32) bool {
         return self.waitForForegroundFn(self.context, pid);
-    }
-
-    fn setForegroundProcessGroup(self: *const Runtime, pgid: ?u32) void {
-        self.setForegroundProcessGroupFn(self.context, pgid);
     }
 
     fn launchExternal(self: *const Runtime, command_args: []const [*:0]const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32, process_group: ?u32) ExternalLaunchError!u32 {

@@ -507,10 +507,6 @@ fn writeArpReply(
     arp_header.target_ip = @byteSwap(target_ip.toU32());
 }
 
-fn ipEquals(a: network.ipv4.IPv4Address, b: network.ipv4.IPv4Address) bool {
-    return std.mem.eql(u8, &a.octets, &b.octets);
-}
-
 fn macEquals(a: [6]u8, b: *const [6]u8) bool {
     return std.mem.eql(u8, &a, b);
 }

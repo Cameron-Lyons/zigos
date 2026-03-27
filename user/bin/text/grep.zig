@@ -4,6 +4,7 @@ const std = @import("std");
 const stdio = @import("stdio");
 const syscall = @import("syscall");
 const fsutil = @import("fsutil");
+const textutil = @import("textutil");
 
 pub const panic = runtime.panic;
 
@@ -74,11 +75,7 @@ fn searchFd(fd: i32, pattern: []const u8, path: ?[*:0]const u8, print_prefix: bo
         const rc = syscall.read(fd, &read_buffer);
         if (rc == 0) break;
         if (syscall.isError(rc)) {
-            if (path) |value| {
-                stdio.eprint("grep: failed to read {s}\n", .{cstr.slice(value)});
-            } else {
-                stdio.eputs("grep: failed to read stdin\n");
-            }
+            textutil.printReadError("grep", path);
             return .failed;
         }
 
