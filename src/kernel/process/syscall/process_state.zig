@@ -13,7 +13,6 @@ var process_dumpable: [support.PROCESS_SLOT_COUNT]u32 = [_]u32{1} ** support.PRO
 var process_keepcaps: [support.PROCESS_SLOT_COUNT]u32 = [_]u32{0} ** support.PROCESS_SLOT_COUNT;
 var process_pdeathsig: [support.PROCESS_SLOT_COUNT]u32 = [_]u32{0} ** support.PROCESS_SLOT_COUNT;
 var process_priorities: [support.PROCESS_SLOT_COUNT]i32 = [_]i32{0} ** support.PROCESS_SLOT_COUNT;
-var tid_addresses: [support.PROCESS_SLOT_COUNT]usize = [_]usize{0} ** support.PROCESS_SLOT_COUNT;
 var robust_list_heads: [support.PROCESS_SLOT_COUNT]usize = [_]usize{0} ** support.PROCESS_SLOT_COUNT;
 var robust_list_lens: [support.PROCESS_SLOT_COUNT]usize = [_]usize{0} ** support.PROCESS_SLOT_COUNT;
 
@@ -225,8 +224,7 @@ pub fn sys_waitid(idtype: u32, id: i32, infop: usize, options: u32) i32 {
 
 pub fn sys_set_tid_address(tidptr: usize) i32 {
     const proc = process.current_process orelse return abi.ESRCH;
-    const pid_idx = support.processMetadataSlot(proc.pid);
-    tid_addresses[pid_idx] = tidptr;
+    _ = tidptr;
     return @intCast(proc.pid);
 }
 

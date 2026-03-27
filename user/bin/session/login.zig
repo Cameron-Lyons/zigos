@@ -2,6 +2,7 @@ const std = @import("std");
 const account = @import("account");
 const cstr = @import("cstr");
 const envutil = @import("envutil");
+const fsutil = @import("fsutil");
 const runtime = @import("runtime");
 const stdio = @import("stdio");
 const syscall = @import("syscall");
@@ -133,21 +134,11 @@ fn appendEnv(
 
 fn printMotd() void {
     var motd_buffer: [account.MAX_FILE]u8 = undefined;
-    const motd = loadFile("/etc/motd", &motd_buffer) orelse return;
+    const motd = fsutil.readFile("/etc/motd", &motd_buffer) catch return;
     stdio.writeAll(syscall.STDOUT, motd);
     if (motd.len == 0 or motd[motd.len - 1] != '\n') {
         stdio.puts("\n");
     }
-}
-
-fn loadFile(path: [*:0]const u8, buffer: []u8) ?[]u8 {
-    const fd = syscall.open(path, syscall.O_RDONLY);
-    if (syscall.isError(fd)) return null;
-    defer _ = syscall.close(fd);
-
-    const rc = syscall.read(fd, buffer);
-    if (rc < 0) return null;
-    return buffer[0..@intCast(rc)];
 }
 
 fn readLine(buffer: []u8) ?usize {

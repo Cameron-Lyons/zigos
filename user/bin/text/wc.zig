@@ -2,6 +2,7 @@ const cstr = @import("cstr");
 const runtime = @import("runtime");
 const stdio = @import("stdio");
 const syscall = @import("syscall");
+const textutil = @import("textutil");
 
 pub const panic = runtime.panic;
 
@@ -58,11 +59,7 @@ fn countFd(fd: i32, path: ?[*:0]const u8) ?Counts {
         const rc = syscall.read(fd, &buffer);
         if (rc == 0) return counts;
         if (syscall.isError(rc)) {
-            if (path) |value| {
-                stdio.eprint("wc: failed to read {s}\n", .{cstr.slice(value)});
-            } else {
-                stdio.eputs("wc: failed to read stdin\n");
-            }
+            textutil.printReadError("wc", path);
             return null;
         }
 

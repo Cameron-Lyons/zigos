@@ -590,10 +590,6 @@ fn isVarChar(char: u8) bool {
     return charHasFlag(char, CharFlag.var_char);
 }
 
-fn isWhitespace(char: u8) bool {
-    return tokenCharClass(char) == .whitespace;
-}
-
 const TestHooks = struct {
     fn getVar(_: ?*anyopaque, name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, name, "USER")) return "root";

@@ -3,6 +3,7 @@ const fsutil = @import("fsutil");
 const runtime = @import("runtime");
 const stdio = @import("stdio");
 const syscall = @import("syscall");
+const textutil = @import("textutil");
 
 pub const panic = runtime.panic;
 
@@ -16,7 +17,7 @@ pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[
     if (argc > 2) {
         const first = argv[1] orelse return 1;
         if (first[0] == '-' and first[1] == 'n') {
-            lines = parseCount(first + 2) orelse {
+            lines = textutil.parseCount(first + 2) orelse {
                 stdio.eputs("tail: invalid count\n");
                 return 1;
             };
@@ -41,7 +42,7 @@ pub export fn main(argc: usize, argv: [*]const ?[*:0]const u8, envp: [*]const ?[
 fn writeTail(fd: i32, lines: usize, path: ?[*:0]const u8) bool {
     var buffer: [buffer_size]u8 = undefined;
     const content = fsutil.readAll(fd, &buffer) catch |err| {
-        printReadError("tail", path, err);
+        textutil.printReadAllError("tail", path, err);
         return false;
     };
 
@@ -69,26 +70,4 @@ fn findTailStart(content: []const u8, lines: usize) usize {
         }
     }
     return 0;
-}
-
-fn parseCount(value: [*:0]const u8) ?usize {
-    const slice = cstr.slice(value);
-    if (slice.len == 0) return null;
-    var result: usize = 0;
-    for (slice) |char| {
-        if (char < '0' or char > '9') return null;
-        result = result * 10 + (char - '0');
-    }
-    return result;
-}
-
-fn printReadError(name: []const u8, path: ?[*:0]const u8, err: fsutil.ReadAllError) void {
-    switch (err) {
-        error.ReadFailed => if (path) |value| {
-            stdio.eprint("{s}: failed to read {s}\n", .{ name, cstr.slice(value) });
-        } else {
-            stdio.eprint("{s}: failed to read stdin\n", .{name});
-        },
-        error.BufferTooSmall => stdio.eprint("{s}: input too large\n", .{name}),
-    }
 }

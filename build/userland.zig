@@ -120,6 +120,28 @@ pub fn addUserProgram(
         .optimize = user_optimize,
     });
     fsutil_module.addImport("syscall", syscall_module);
+    stdio_module.addImport("fsutil", fsutil_module);
+
+    const passwd_shared_module = b.createModule(.{
+        .root_source_file = b.path("src/shared/passwd.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+
+    const ipv4_text_module = b.createModule(.{
+        .root_source_file = b.path("src/shared/ipv4_text.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+
+    const textutil_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/textutil.zig"),
+        .target = target,
+        .optimize = user_optimize,
+    });
+    textutil_module.addImport("cstr", cstr_module);
+    textutil_module.addImport("fsutil", fsutil_module);
+    textutil_module.addImport("stdio", stdio_module);
 
     const processutil_module = b.createModule(.{
         .root_source_file = b.path("user/lib/processutil.zig"),
@@ -141,6 +163,8 @@ pub fn addUserProgram(
         .target = target,
         .optimize = user_optimize,
     });
+    account_module.addImport("fsutil", fsutil_module);
+    account_module.addImport("passwd_shared", passwd_shared_module);
     account_module.addImport("stdio", stdio_module);
     account_module.addImport("syscall", syscall_module);
 
@@ -160,10 +184,12 @@ pub fn addUserProgram(
     user_module.addImport("cli", cli_module);
     user_module.addImport("envutil", envutil_module);
     user_module.addImport("fsutil", fsutil_module);
+    user_module.addImport("ipv4_text", ipv4_text_module);
     user_module.addImport("processutil", processutil_module);
     user_module.addImport("runtime", runtime_module);
     user_module.addImport("shell_registry", shell_registry_module);
     user_module.addImport("syscall", syscall_module);
+    user_module.addImport("textutil", textutil_module);
     user_module.addImport("stdio", stdio_module);
 
     user_module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));

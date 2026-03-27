@@ -357,8 +357,6 @@ var test_mutex: Mutex = undefined;
 var test_semaphore: Semaphore = undefined;
 // SAFETY: initialized via .init() in runTests before use
 var test_rwlock: RWLock = undefined;
-// SAFETY: initialized via .init() in runTests before use
-var test_condvar: ConditionVariable = undefined;
 var shared_counter: u32 = 0;
 
 fn mutex_test_task1() void {

@@ -410,10 +410,7 @@ fn reapExitedProcess(proc: *process.Process) void {
             process.releaseProcessStack(user_stack);
         }
     }
-    if (proc.page_directory) |pd| {
-        _ = pd;
-        proc.page_directory = null;
-    }
+    proc.page_directory = null;
 }
 
 fn emptyRUsage() RUsage {

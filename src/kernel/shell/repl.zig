@@ -1189,7 +1189,6 @@ fn makeExecutionRuntime(self: *Shell) execution.Runtime {
         .dispatchBuiltinFn = executionDispatchBuiltin,
         .registerBackgroundJobFn = executionRegisterBackgroundJob,
         .waitForForegroundFn = executionWaitForForegroundCommand,
-        .setForegroundProcessGroupFn = executionSetForegroundProcessGroup,
         .launchExternalFn = executionLaunchExternal,
     };
 }
@@ -1225,11 +1224,6 @@ fn executionRegisterBackgroundJob(context: ?*anyopaque, pid: u32, tokens: []cons
 fn executionWaitForForegroundCommand(context: ?*anyopaque, pid: u32) bool {
     const self = shellFromExecutionContext(context);
     return waitForForegroundCommand(self, pid);
-}
-
-fn executionSetForegroundProcessGroup(context: ?*anyopaque, pgid: ?u32) void {
-    const self = shellFromExecutionContext(context);
-    self.job_table.foreground_pgid = pgid;
 }
 
 fn executionLaunchExternal(_: ?*anyopaque, command_args: []const [*:0]const u8, nice_value: ?i8, stdin_fd: ?i32, stdout_fd: ?i32, process_group: ?u32) execution.ExternalLaunchError!u32 {

@@ -2,6 +2,7 @@ const cstr = @import("cstr");
 const runtime = @import("runtime");
 const stdio = @import("stdio");
 const syscall = @import("syscall");
+const textutil = @import("textutil");
 
 pub const panic = runtime.panic;
 const dirent_buffer_size = 512;
@@ -26,7 +27,7 @@ fn listDirectory(path: [*:0]const u8) bool {
         const rc = syscall.getdents(fd, &buffer);
         if (rc == 0) return true;
         if (syscall.isError(rc)) {
-            stdio.eprint("ls: failed to read {s}\n", .{cstr.slice(path)});
+            textutil.printReadError("ls", path);
             return false;
         }
 

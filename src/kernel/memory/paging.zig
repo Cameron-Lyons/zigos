@@ -82,20 +82,6 @@ fn set_frame(frame_addr: u32) void {
     }
 }
 
-fn clear_frame(frame_addr: u32) void {
-    const frame = frame_addr / PAGE_SIZE;
-    const idx = frame / 32;
-    const offset = frame % 32;
-    const mask = @as(u32, 1) << @truncate(offset);
-    if ((frame_bitmap[idx] & mask) != 0) {
-        frame_bitmap[idx] &= ~mask;
-        used_frames -= 1;
-        if (idx < frame_search_word_hint) {
-            frame_search_word_hint = idx;
-        }
-    }
-}
-
 fn test_frame(frame_addr: u32) bool {
     const frame = frame_addr / PAGE_SIZE;
     const idx = frame / 32;
