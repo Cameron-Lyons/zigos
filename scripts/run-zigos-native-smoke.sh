@@ -5,7 +5,8 @@ KERNEL_PATH="${1:?kernel path required}"
 LOG_PATH="${2:?serial log path required}"
 NATIVE_STORE_IMAGE="${3:?native store image path required}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
-ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-20}"
+ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-60}"
+ZIGOS_READY_MARKER="ZIGOS:NATIVE:READY"
 
 BASE_LOG_PATH="${LOG_PATH%.log}"
 BOOT1_LOG="${BASE_LOG_PATH}.boot1.log"
@@ -45,8 +46,15 @@ run_boot() {
   QEMU_PID=$!
 
   timed_out=0
+  ready_seen=0
   elapsed=0
   while kill -0 "$QEMU_PID" >/dev/null 2>&1; do
+    if [ -s "$log_path" ] && grep -Fq "$ZIGOS_READY_MARKER" "$log_path"; then
+      ready_seen=1
+      sleep 1
+      kill -TERM "$QEMU_PID" >/dev/null 2>&1 || true
+      break
+    fi
     if [ "$elapsed" -ge "$ZIGOS_NATIVE_SECONDS" ]; then
       timed_out=1
       kill -TERM "$QEMU_PID" >/dev/null 2>&1 || true
@@ -78,6 +86,15 @@ run_boot() {
 
   if [ "$timed_out" -eq 1 ]; then
     echo "Timed idle after validation boot: $log_path" >/dev/null
+  fi
+
+  if [ "$ready_seen" -eq 0 ] && ! grep -Fq "$ZIGOS_READY_MARKER" "$log_path"; then
+    echo "Zigos native smoke test failed: ready marker '$ZIGOS_READY_MARKER' not observed in $log_path" >&2
+    cat "$log_path" >&2
+    if [ -s "$qemu_error_log" ]; then
+      cat "$qemu_error_log" >&2
+    fi
+    exit 1
   fi
 }
 
