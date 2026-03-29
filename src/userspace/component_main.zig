@@ -4,7 +4,7 @@ const userspace_descriptor = @import("userspace_descriptor");
 
 pub const Descriptor = userspace_descriptor.Descriptor;
 
-export var zigos_userspace_descriptor: Descriptor = initDescriptor();
+export var zigos_userspace_descriptor: Descriptor align(@alignOf(Descriptor)) linksection(userspace_descriptor.ELF_SECTION_NAME) = initDescriptor();
 export var zigos_userspace_yield_counter: u32 = 0;
 
 pub fn panic(_: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
