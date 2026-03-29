@@ -1,9 +1,9 @@
 pub const kernel = @import("kernel/boot/entry.zig");
 pub const isr = @import("kernel/interrupts/isr.zig");
 pub const panic = @import("kernel/utils/builtin.zig").panic;
-const abi = @import("kernel/process/native/abi.zig");
-const session_manager = @import("kernel/process/native/session_manager.zig");
-const syscall_surface = @import("kernel/process/native/syscall_surface.zig");
+const abi = @import("native/core/abi.zig");
+const session_manager = @import("native/session/session_manager.zig");
+const syscall_surface = @import("native/kernel_api/syscall_surface.zig");
 const timer = @import("kernel/timer/timer.zig");
 
 export fn kernel_main() void {

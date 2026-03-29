@@ -148,19 +148,19 @@
       "claims": ["1"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 2.1 6.2 and 7 explicit grants are required before a task gains authority"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 5 and 14 keep the base image signed measured atomic and rollback-capable"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 9 and 10 use a trusted device graph selective sync and policy-gated networking"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 13.3 15.2 and 15.3 keep failures explainable restartable and redacted"
         }
       ]
@@ -171,19 +171,19 @@
       "claims": ["2.1", "2.2", "2.3", "2.4", "2.5"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 2.1 6.2 and 7 explicit grants are required before a task gains authority"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 5 and 14 keep the base image signed measured atomic and rollback-capable"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 2.3 11.4 12 and 15 keep indexing notifications media helpers and diagnostics structured"
         },
         {
-          "file": "src/kernel/process/native/file_bridge.zig",
+          "file": "src/native/storage/file_bridge.zig",
           "name": "file bridge is derived, permission-aware, and non-authoritative"
         }
       ]
@@ -194,15 +194,15 @@
       "claims": ["3.1", "3.2", "3.3", "3.4", "3.5"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 3 4.3 and 16 keep principal identity signed and administrative scope split"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 8 storage stays versioned recoverable signed and exposed through a derived file bridge"
         },
         {
-          "file": "src/kernel/process/native/task_runtime.zig",
+          "file": "src/native/task/task_runtime.zig",
           "name": "new tasks start with zero ambient authority and no capabilities"
         }
       ]
@@ -213,19 +213,19 @@
       "claims": ["4.1", "4.2", "4.3"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 4 6.3 13 and 17 keep the kernel typed minimal and route legacy support through isolated portals"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 4 and 6.3 require kernel-mediated launches and typed services to carry userspace image provenance"
         },
         {
-          "file": "src/kernel/process/native/native_kernel.zig",
+          "file": "src/native/kernel_api/native_kernel.zig",
           "name": "native kernel creates tasks endpoints shared memory and typed service connections"
         },
         {
-          "file": "src/kernel/process/native/syscall_surface.zig",
+          "file": "src/native/kernel_api/syscall_surface.zig",
           "name": "syscall surface dispatches typed task creation requests"
         }
       ]
@@ -236,19 +236,19 @@
       "claims": ["5.1", "5.2", "5.3"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 5 and 14 keep the base image signed measured atomic and rollback-capable"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 5.3 recovery mode can reinstall restore repair rotate and revoke"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explicit"
         },
         {
-          "file": "src/kernel/process/native/attestation_service.zig",
+          "file": "src/native/platform/attestation_service.zig",
           "name": "attestation service can use a provisioned hardware-backed root for visible remote requests"
         }
       ]
@@ -259,19 +259,19 @@
       "claims": ["6.1", "6.2", "6.3", "6.4"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 2.1 6.2 and 7 explicit grants are required before a task gains authority"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 4 and 6.3 require kernel-mediated launches and typed services to carry userspace image provenance"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy scoped"
         },
         {
-          "file": "src/kernel/process/native/manifest.zig",
+          "file": "src/native/policy/manifest.zig",
           "name": "validate rejects incomplete background task declarations"
         }
       ]
@@ -282,19 +282,19 @@
       "claims": ["7.1", "7.2", "7.3", "7.4", "7.5"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 2.1 6.2 and 7 explicit grants are required before a task gains authority"
         },
         {
-          "file": "src/kernel/process/native/policy_mediation.zig",
+          "file": "src/native/policy/policy_mediation.zig",
           "name": "policy mediation covers device camera mic sensor and peer ipc permissions"
         },
         {
-          "file": "src/kernel/process/native/policy_mediation.zig",
+          "file": "src/native/policy/policy_mediation.zig",
           "name": "policy mediation maps location contacts screen capture and notification capabilities"
         },
         {
-          "file": "src/kernel/process/native/secure_secret_store.zig",
+          "file": "src/native/platform/secure_secret_store.zig",
           "name": "secure secret store returns handles by default and only exports raw when allowed"
         }
       ]
@@ -305,19 +305,19 @@
       "claims": ["8.1", "8.2", "8.3", "8.4"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 8 storage stays versioned recoverable signed and exposed through a derived file bridge"
         },
         {
-          "file": "src/kernel/process/native/object_store.zig",
+          "file": "src/native/storage/object_store.zig",
           "name": "object store keeps immutable signed versions with stable content addresses"
         },
         {
-          "file": "src/kernel/process/native/workspace.zig",
+          "file": "src/native/storage/workspace.zig",
           "name": "workspace transactions, snapshot restore, delete recovery, and signed export import work"
         },
         {
-          "file": "src/kernel/process/native/file_bridge.zig",
+          "file": "src/native/storage/file_bridge.zig",
           "name": "file bridge is derived, permission-aware, and non-authoritative"
         }
       ]
@@ -328,19 +328,19 @@
       "claims": ["9.1", "9.2", "9.3", "9.4"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 9 and 10 use a trusted device graph selective sync and policy-gated networking"
         },
         {
-          "file": "src/kernel/process/native/device_graph.zig",
+          "file": "src/native/sync/device_graph.zig",
           "name": "device graph roots user principals and manages enrollment rotation and revocation"
         },
         {
-          "file": "src/kernel/process/native/sync_service.zig",
+          "file": "src/native/sync/sync_service_impl.zig",
           "name": "sync service covers device graph policy replication semantics and restart recovery"
         },
         {
-          "file": "src/kernel/process/native/workspace.zig",
+          "file": "src/native/storage/workspace.zig",
           "name": "workspace sharing acts as a mutable policy container"
         }
       ]
@@ -351,15 +351,15 @@
       "claims": ["10.1", "10.2", "10.3"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 9 and 10 use a trusted device graph selective sync and policy-gated networking"
         },
         {
-          "file": "src/kernel/process/native/network_policy.zig",
+          "file": "src/native/sync/network_policy.zig",
           "name": "network policy objects enforce discovery inbound service domain and explicit internet grants"
         },
         {
-          "file": "src/kernel/process/native/network_policy.zig",
+          "file": "src/native/sync/network_policy.zig",
           "name": "network policy connections can require remote attestation and pinned service identities"
         }
       ]
@@ -370,19 +370,19 @@
       "claims": ["11.1", "11.2", "11.3", "11.4"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 11 task-first UX records structured task workspace permission and pairing flows"
         },
         {
-          "file": "src/kernel/process/native/native_ux.zig",
+          "file": "src/native/platform/native_ux.zig",
           "name": "native ux records task workspace pairing review and recovery flows"
         },
         {
-          "file": "src/kernel/process/native/permission_review.zig",
+          "file": "src/native/policy/permission_review.zig",
           "name": "renderToBuffer includes bundle name, permission labels, and decisions"
         },
         {
-          "file": "src/kernel/process/native/notification_center.zig",
+          "file": "src/native/services/notification_center.zig",
           "name": "notification center keeps structured objects task links expiry and suppression"
         }
       ]
@@ -393,19 +393,19 @@
       "claims": ["12.1", "12.2", "12.3"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 2.3 11.4 12 and 15 keep indexing notifications media helpers and diagnostics structured"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explicit"
         },
         {
-          "file": "src/kernel/process/native/accelerator_scheduler.zig",
+          "file": "src/native/task/accelerator_scheduler.zig",
           "name": "accelerator scheduler tracks exclusive engine claims and zero-copy attachments"
         },
         {
-          "file": "src/kernel/process/native/shared_memory.zig",
+          "file": "src/native/kernel_api/shared_memory.zig",
           "name": "shared memory objects label accelerator access and explicit zero-copy attachments"
         }
       ]
@@ -416,19 +416,19 @@
       "claims": ["13.1", "13.2", "13.3"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 4 6.3 13 and 17 keep the kernel typed minimal and route legacy support through isolated portals"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 4 and 13 activate published nic and storage transports through scoped driver services"
         },
         {
-          "file": "src/kernel/process/native/driver_service.zig",
+          "file": "src/native/drivers/driver_service.zig",
           "name": "driver services require signed least-privilege device authority"
         },
         {
-          "file": "src/kernel/process/native/supervisor.zig",
+          "file": "src/native/session/supervisor.zig",
           "name": "driver recovery restarts the failed driver and emits visible diagnostics only when needed"
         }
       ]
@@ -439,19 +439,19 @@
       "claims": ["14.1", "14.2", "14.3"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 5 and 14 keep the base image signed measured atomic and rollback-capable"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy scoped"
         },
         {
-          "file": "src/kernel/process/native/immutable_base.zig",
+          "file": "src/native/platform/immutable_base.zig",
           "name": "immutable base persists signed read-only image activation and rollback metadata"
         },
         {
-          "file": "src/kernel/process/native/package_service.zig",
+          "file": "src/native/services/package_service.zig",
           "name": "package service enforces signed manifests policy gated sources updates and rollback"
         }
       ]
@@ -462,19 +462,19 @@
       "claims": ["15.1", "15.2", "15.3"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 2.3 11.4 12 and 15 keep indexing notifications media helpers and diagnostics structured"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 13.3 15.2 and 15.3 keep failures explainable restartable and redacted"
         },
         {
-          "file": "src/kernel/process/native/event_ledger.zig",
+          "file": "src/native/platform/event_ledger.zig",
           "name": "event ledger exports structured redacted diagnostics and audit history"
         },
         {
-          "file": "src/kernel/process/native/denial_explanation.zig",
+          "file": "src/native/policy/denial_explanation.zig",
           "name": "permission denials explain blocking policy capability approval and retry hints"
         }
       ]
@@ -485,15 +485,15 @@
       "claims": ["16.1", "16.2", "16.3"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy scoped"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 3 4.3 and 16 keep principal identity signed and administrative scope split"
         },
         {
-          "file": "src/kernel/process/native/policy_object.zig",
+          "file": "src/native/policy/policy_object.zig",
           "name": "policy objects remain signed scoped and enforce enterprise controls"
         }
       ]
@@ -504,15 +504,15 @@
       "claims": ["17.1", "17.2"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 4 6.3 13 and 17 keep the kernel typed minimal and route legacy support through isolated portals"
         },
         {
-          "file": "src/kernel/process/native/compatibility_environment.zig",
+          "file": "src/native/services/compatibility_environment.zig",
           "name": "compatibility environments stay isolated labeled and portal-only"
         },
         {
-          "file": "src/kernel/process/native/compatibility_environment.zig",
+          "file": "src/native/services/compatibility_environment.zig",
           "name": "compatibility environments reject unsigned hidden or host-integrated launches"
         }
       ]
@@ -523,11 +523,11 @@
       "claims": ["18"],
       "tests": [
         {
-          "file": "src/kernel/process/native/manifest.zig",
+          "file": "src/native/policy/manifest.zig",
           "name": "validate accepts a signed local-first bundle manifest"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy scoped"
         }
       ]
@@ -538,15 +538,15 @@
       "claims": ["19"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 11 task-first UX records structured task workspace permission and pairing flows"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 5 and 14 keep the base image signed measured atomic and rollback-capable"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 9 and 10 use a trusted device graph selective sync and policy-gated networking"
         }
       ]
@@ -557,19 +557,19 @@
       "claims": ["20"],
       "tests": [
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 2.1 6.2 and 7 explicit grants are required before a task gains authority"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 8 storage stays versioned recoverable signed and exposed through a derived file bridge"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 9 and 10 use a trusted device graph selective sync and policy-gated networking"
         },
         {
-          "file": "src/zigos_spec_test.zig",
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explicit"
         }
       ]
