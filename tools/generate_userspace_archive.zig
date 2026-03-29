@@ -14,40 +14,39 @@ const Artifact = struct {
     signed: bool,
 };
 
-pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
-    const io = init.io;
-    const cwd = std.Io.Dir.cwd();
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const cwd = std.fs.cwd();
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var args = try init.minimal.args.iterateAllocator(allocator);
-    defer args.deinit();
-
-    _ = args.next();
-    const output_dir = args.next() orelse return error.MissingOutputPath;
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+    if (args.len < 2) return error.MissingOutputPath;
+    const output_dir = args[1];
 
     var artifacts = std.ArrayList(Artifact).empty;
     defer artifacts.deinit(allocator);
 
-    while (args.next()) |path| {
-        try artifacts.append(allocator, try parseArtifact(arena, allocator, io, cwd, path));
+    for (args[2..]) |path| {
+        try artifacts.append(allocator, try parseArtifact(arena, allocator, cwd, path));
     }
 
     if (artifacts.items.len == 0) return error.MissingArtifactInput;
-    try writeArchive(io, cwd, allocator, output_dir, artifacts.items);
+    try writeArchive(cwd, allocator, output_dir, artifacts.items);
 }
 
 fn parseArtifact(
     arena: std.mem.Allocator,
     allocator: std.mem.Allocator,
-    io: std.Io,
-    cwd: std.Io.Dir,
+    cwd: std.fs.Dir,
     path: []const u8,
 ) !Artifact {
-    const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(16 * 1024 * 1024));
+    const bytes = try cwd.readFileAlloc(allocator, path, 16 * 1024 * 1024);
     defer allocator.free(bytes);
 
     const header = try readStruct(elf.Elf32_Ehdr, bytes, 0);
@@ -156,13 +155,12 @@ fn findDescriptorSymbolOffset(bytes: []const u8, header: elf.Elf32_Ehdr) !usize 
 }
 
 fn writeArchive(
-    io: std.Io,
-    cwd: std.Io.Dir,
+    cwd: std.fs.Dir,
     allocator: std.mem.Allocator,
     output_dir: []const u8,
     artifacts: []const Artifact,
 ) !void {
-    try cwd.createDirPath(io, output_dir);
+    try cwd.makePath(output_dir);
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     const writer = &aw.writer;
@@ -184,11 +182,11 @@ fn writeArchive(
     );
 
     for (artifacts) |artifact| {
-        const copied_bytes = try cwd.readFileAlloc(io, artifact.source_path, allocator, .limited(16 * 1024 * 1024));
+        const copied_bytes = try cwd.readFileAlloc(allocator, artifact.source_path, 16 * 1024 * 1024);
         defer allocator.free(copied_bytes);
         const copied_path = try std.fs.path.join(allocator, &.{ output_dir, artifact.embedded_name });
         defer allocator.free(copied_path);
-        try cwd.writeFile(io, .{
+        try cwd.writeFile(.{
             .sub_path = copied_path,
             .data = copied_bytes,
         });
@@ -208,7 +206,7 @@ fn writeArchive(
     try writer.writeAll("};\n");
     const output_path = try std.fs.path.join(allocator, &.{ output_dir, "userspace_archive.zig" });
     defer allocator.free(output_path);
-    try cwd.writeFile(io, .{
+    try cwd.writeFile(.{
         .sub_path = output_path,
         .data = aw.written(),
     });
