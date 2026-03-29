@@ -8,7 +8,7 @@ Zigos is a native-only operating system prototype written in Zig. The current tr
 
 The repository now treats the Zigos v0.1 clean-slate OS spec as its explicit conformance target. The design goals, non-goals, implementation map, and example manifest now live in [SPEC.md](/home/cameronl/zigos/SPEC.md).
 
-Repo-level conformance is checked in [src/zigos_spec_test.zig](/home/cameronl/zigos/src/zigos_spec_test.zig), with deeper subsystem coverage living beside each native module under `src/kernel/process/native/`.
+Repo-level conformance is checked in [src/zigos_spec_test.zig](/home/cameronl/zigos/src/zigos_spec_test.zig), with the section-to-test contract enforced by [spec/coverage.json](/home/cameronl/zigos/spec/coverage.json) and [tools/check_spec_coverage.py](/home/cameronl/zigos/tools/check_spec_coverage.py). Deeper subsystem coverage lives beside each native module under `src/kernel/process/native/`.
 
 The native kernel surface is intentionally small:
 
@@ -26,29 +26,36 @@ Everything above that layer is modeled as a native service boundary under `src/k
 
 ```bash
 # Build the native kernel
-zig build kernel
+./scripts/zig.sh build kernel
 
 # Run the native kernel in QEMU
-zig build run
+./scripts/zig.sh build run
 
 # Run native host-side tests
-zig build host-tests
+./scripts/zig.sh build host-tests
+
+# Run the explicit spec coverage and conformance gate
+./scripts/zig.sh build spec-conformance
 
 # Run the native cold-reboot smoke test
-zig build zigos-native-smoke-test
+./scripts/zig.sh build zigos-native-smoke-test
 
 # Build a bootable ISO
-zig build iso
+./scripts/zig.sh build iso
 ```
 
-`zig build run` and `zig build run-zigos-native` attach `build/native-store.img` as the native storage image. `zig build zigos-native-smoke-test` uses `build/native-store-smoke.img` and validates the native bootstrap markers across two QEMU boots.
+`./scripts/zig.sh` is the repo entrypoint for the pinned Zig `0.15.2` toolchain. It prefers a matching active `zig`, then `mise`, then `ZIG_BIN`, and finally a repo-local fallback if one exists.
+
+`./scripts/zig.sh build run` and `./scripts/zig.sh build run-zigos-native` attach `build/native-store.img` as the native storage image. `./scripts/zig.sh build zigos-native-smoke-test` uses `build/native-store-smoke.img` and validates the native bootstrap markers across two QEMU boots.
 
 ## Requirements
 
-- Zig compiler
+- Zig 0.15.2
 - NASM
 - QEMU
 - For ISO builds: GRUB `mkrescue`, `xorriso`, and `mtools`
+
+`build.zig` rejects any Zig version other than `0.15.2`, and the repo now includes both `.tool-versions` and `mise.toml` pins for local toolchain managers. Use `./scripts/zig.sh` for repo commands so the pinned toolchain resolution stays consistent across local shells, scripts, and CI.
 
 ## Native Subsystems
 
@@ -70,8 +77,9 @@ zig build iso
 
 The repository no longer builds or ships the old POSIX-like shell, POSIX-style syscall ABI, or VFS/userland rootfs pipeline. Legacy support is modeled as explicit portal-mediated compatibility environments rather than host-integrated compatibility boot profiles. The freestanding kernel surface is the native typed syscall entry plus the native-only verification targets below:
 
-- `zig build kernel`
-- `zig build host-tests`
-- `zig build zigos-native-smoke-test`
+- `./scripts/zig.sh build kernel`
+- `./scripts/zig.sh build spec-conformance`
+- `./scripts/zig.sh build host-tests`
+- `./scripts/zig.sh build zigos-native-smoke-test`
 
 Storage-volume persistence remains covered by host-side native tests through `src/kernel/process/native/storage_volume.zig`.

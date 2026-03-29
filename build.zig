@@ -1,11 +1,15 @@
 const std = @import("std");
-const shared = @import("build/shared.zig");
-const kernel_build = @import("build/kernel.zig");
-const userspace_build = @import("build/userspace.zig");
+const builtin = @import("builtin");
+const shared = @import("build_support/shared.zig");
+const kernel_build = @import("build_support/kernel.zig");
+const userspace_build = @import("build_support/userspace.zig");
 
 pub const BootProfile = shared.BootProfile;
+const required_zig_version = "0.15.2";
 
 pub fn build(b: *std.Build) void {
+    enforceZigVersion();
+
     const target = b.standardTargetOptions(.{
         .default_target = .{
             .cpu_arch = .x86,
@@ -91,6 +95,13 @@ pub fn build(b: *std.Build) void {
     const host_tests_step = b.step("host-tests", "Run host-side unit tests for native logic");
     host_tests_step.dependOn(&host_tests_cmd.step);
 
+    const spec_conformance_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-spec-conformance.sh",
+    });
+    const spec_conformance_step = b.step("spec-conformance", "Validate spec coverage and run the native spec conformance tests");
+    spec_conformance_step.dependOn(&spec_conformance_cmd.step);
+
     const iso_cmd = b.addSystemCommand(&.{
         "bash",
         "scripts/build-grub-iso.sh",
@@ -103,4 +114,14 @@ pub fn build(b: *std.Build) void {
 
     const iso_step = b.step("iso", "Build a bootable native-only ISO");
     iso_step.dependOn(&iso_cmd.step);
+}
+
+fn enforceZigVersion() void {
+    if (std.mem.eql(u8, builtin.zig_version_string, required_zig_version)) return;
+
+    std.debug.print(
+        "Zigos requires Zig {s}; found {s}. Use `./scripts/zig.sh build ...` or switch the repo toolchain before running `zig build`.\n",
+        .{ required_zig_version, builtin.zig_version_string },
+    );
+    std.process.exit(1);
 }

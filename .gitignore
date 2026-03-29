@@ -1,8 +1,7 @@
 zig-cache/
 .zig-cache/
 zig-out/
-build/*
-!build/userspace.zig
+build/
 disk.img
 serial.log
 qemu.log

@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const boot_markers = @import("../../boot/markers.zig");
 const manifest = @import("manifest.zig");
 const permission_review = @import("permission_review.zig");
 const policy_mediation = @import("policy_mediation.zig");
@@ -119,7 +120,7 @@ pub const Service = struct {
         var review_buffer: [2048]u8 = undefined;
         const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, bundle) catch unreachable;
         console.print(rendered);
-        common.printBootMarker("ZIGOS:PHASE2:UI:REVIEW_RENDERED");
+        common.printBootMarker(boot_markers.phase2_ui_review_rendered);
 
         const grants = permission_review.decisionsToGrants(
             bundle,

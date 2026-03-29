@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const boot_markers = @import("../../boot/markers.zig");
 const task_runtime = @import("task_runtime.zig");
 const userspace_loader = @import("userspace_loader.zig");
 
@@ -154,7 +155,7 @@ pub fn executeTask(
     zigos_userspace_resume_requested = 0;
 
     if (handoff_completed and !probe_marker_printed) {
-        common.printBootMarker("ZIGOS:USERSPACE:EXEC_PROBE:OK");
+        common.printBootMarker(boot_markers.userspace_exec_probe_ok);
         probe_marker_printed = true;
     }
     if (handoff_completed and

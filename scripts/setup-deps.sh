@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
+ZIG="${ROOT_DIR}/scripts/zig.sh"
+
 log() {
   printf '%s\n' "$*"
 }
@@ -44,7 +48,7 @@ install_apt() {
 
   if ! have_cmd zig; then
     if ! ${s} apt-get install -y zig; then
-      log "Could not install Zig from apt on this distro. Install Zig 0.15.2+ from https://ziglang.org/download/"
+      log "Could not install Zig from apt on this distro. Install Zig 0.15.2 exactly from https://ziglang.org/download/ or use mise."
     fi
   fi
 }
@@ -75,12 +79,17 @@ verify_tools() {
   log "Verifying toolchain..."
 
   local missing=0
-  for cmd in zig nasm qemu-system-x86_64 xorriso mformat mcopy mmd mkfs.fat mke2fs; do
+  for cmd in nasm qemu-system-x86_64 xorriso mformat mcopy mmd mkfs.fat mke2fs; do
     if ! have_cmd "${cmd}"; then
       log "Missing command: ${cmd}"
       missing=1
     fi
   done
+
+  if ! "${ZIG}" version >/dev/null 2>&1; then
+    log "Missing Zig 0.15.2. Install it exactly, use mise, or set ZIG_BIN."
+    missing=1
+  fi
 
   local grub_cmd=""
   for cmd in grub-mkrescue i686-elf-grub-mkrescue x86_64-elf-grub-mkrescue; do
@@ -99,7 +108,7 @@ verify_tools() {
     exit 1
   fi
 
-  log "Using Zig: $(zig version)"
+  log "Using Zig: $("${ZIG}" version)"
   log "Using GRUB mkrescue: ${grub_cmd}"
   log "Dependency verification passed."
 }

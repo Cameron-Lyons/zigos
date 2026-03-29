@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-set -eu
+set -euo pipefail
+
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
+ZIG="${ROOT_DIR}/scripts/zig.sh"
+MARKER_TOOL="${ROOT_DIR}/src/print_native_smoke_markers.zig"
 
 KERNEL_PATH="${1:?kernel path required}"
 LOG_PATH="${2:?serial log path required}"
 NATIVE_STORE_IMAGE="${3:?native store image path required}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
 ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-120}"
-ZIGOS_READY_MARKER="ZIGOS:NATIVE:READY"
+ZIGOS_READY_MARKER="$("$ZIG" run "$MARKER_TOOL" -- ready)"
+PHASE4_RELOADED_MARKER="$("$ZIG" run "$MARKER_TOOL" -- boot2_reloaded_phase4 | head -n 1)"
 
 BASE_LOG_PATH="${LOG_PATH%.log}"
 BOOT1_LOG="${BASE_LOG_PATH}.boot1.log"
@@ -21,13 +27,18 @@ mkdir -p "$(dirname "$LOG_PATH")"
 rm -f "$LOG_PATH" "$BOOT1_LOG" "$BOOT2_LOG"
 
 run_boot() {
-  log_path="$1"
-  reset_store="$2"
+  local log_path="$1"
+  local reset_store="$2"
+  local qemu_error_log
+  local qemu_pid
+  local timed_out=0
+  local ready_seen=0
+  local elapsed=0
 
   if [ "$reset_store" = "reset" ]; then
-    bash scripts/build-native-store.sh "$NATIVE_STORE_IMAGE" 8 reset
+    bash "$ROOT_DIR/scripts/build-native-store.sh" "$NATIVE_STORE_IMAGE" 8 reset
   else
-    bash scripts/build-native-store.sh "$NATIVE_STORE_IMAGE" 8 preserve
+    bash "$ROOT_DIR/scripts/build-native-store.sh" "$NATIVE_STORE_IMAGE" 8 preserve
   fi
 
   rm -f "$log_path"
@@ -43,29 +54,26 @@ run_boot() {
     -device "isa-debug-exit,iobase=0xf4,iosize=0x04" \
     -drive "file=$NATIVE_STORE_IMAGE,if=ide,format=raw,index=1,id=disk1" \
     >"$qemu_error_log" 2>&1 &
-  QEMU_PID=$!
+  qemu_pid=$!
 
-  timed_out=0
-  ready_seen=0
-  elapsed=0
-  while kill -0 "$QEMU_PID" >/dev/null 2>&1; do
+  while kill -0 "$qemu_pid" >/dev/null 2>&1; do
     if [ -s "$log_path" ] && grep -Fq "$ZIGOS_READY_MARKER" "$log_path"; then
       ready_seen=1
       sleep 1
-      kill -TERM "$QEMU_PID" >/dev/null 2>&1 || true
+      kill -TERM "$qemu_pid" >/dev/null 2>&1 || true
       break
     fi
     if [ "$elapsed" -ge "$ZIGOS_NATIVE_SECONDS" ]; then
       timed_out=1
-      kill -TERM "$QEMU_PID" >/dev/null 2>&1 || true
+      kill -TERM "$qemu_pid" >/dev/null 2>&1 || true
       sleep 1
-      kill -KILL "$QEMU_PID" >/dev/null 2>&1 || true
+      kill -KILL "$qemu_pid" >/dev/null 2>&1 || true
       break
     fi
     sleep 1
     elapsed=$((elapsed + 1))
   done
-  wait "$QEMU_PID" >/dev/null 2>&1 || true
+  wait "$qemu_pid" >/dev/null 2>&1 || true
 
   if [ ! -s "$log_path" ]; then
     echo "Zigos native smoke test failed: no serial output captured for $log_path" >&2
@@ -98,8 +106,24 @@ run_boot() {
   fi
 }
 
+assert_marker_group() {
+  local log_path="$1"
+  local group="$2"
+  local needle
+
+  while IFS= read -r needle; do
+    [ -n "$needle" ] || continue
+    if ! grep -Fq "$needle" "$log_path"; then
+      echo "Zigos native smoke test failed: missing '$needle' in $log_path" >&2
+      cat "$log_path" >&2
+      exit 1
+    fi
+  done < <("$ZIG" run "$MARKER_TOOL" -- "$group")
+}
+
 assert_log_contains() {
-  log_path="$1"
+  local log_path="$1"
+  local needle
   shift
   for needle in "$@"; do
     if ! grep -Fq "$needle" "$log_path"; then
@@ -111,73 +135,22 @@ assert_log_contains() {
 }
 
 assert_boot_markers() {
-  log_path="$1"
-  assert_log_contains "$log_path" \
-    "BOOT:START" \
-    "BOOT:PROFILE:zigos_native" \
-    "BOOT:CORE_READY" \
-    "ZIGOS:PHASE3:KERNEL_NETWORK:DEFERRED" \
-    "ZIGOS:NATIVE:BOOTSTRAP" \
-    "ZIGOS:TCB:DEFINED" \
-    "ZIGOS:USERSPACE:SCHEDULER:READY" \
-    "ZIGOS:USERSPACE:EXEC_PROBE:OK" \
-    "ZIGOS:PHASE1:NATIVE_KERNEL:READY" \
-    "ZIGOS:PHASE1:NO_ROOT" \
-    "ZIGOS:PHASE1:COMPONENT_ABI:READY" \
-    "ZIGOS:PHASE1:TASK_CREATE:OK" \
-    "ZIGOS:PHASE1:SERVICE_CONNECT:OK" \
-    "ZIGOS:PHASE1:CAP_PASS:OK" \
-    "ZIGOS:SUPERVISOR:READY" \
-    "ZIGOS:POLICY:READY" \
-    "ZIGOS:PHASE2:MANIFEST:VALID" \
-    "ZIGOS:PHASE2:UI:REVIEW_RENDERED" \
-    "ZIGOS:PHASE2:ZERO_AUTHORITY:DENY_NETWORK" \
-    "ZIGOS:PHASE2:ZERO_AUTHORITY:DENY_CLIPBOARD" \
-    "ZIGOS:PHASE2:GRANT:OBJECT_LOCAL" \
-    "ZIGOS:PHASE2:GRANT:NETWORK_LOCAL" \
-    "ZIGOS:PHASE2:DENY:CLIPBOARD" \
-    "ZIGOS:PHASE2:ELF_SUBSTRATE:OK" \
-    "ZIGOS:PHASE2:GRANT:DEVICE_LOCAL" \
-    "ZIGOS:PHASE2:GRANT:CAMERA" \
-    "ZIGOS:PHASE2:DENY:MIC" \
-    "ZIGOS:PHASE2:GRANT:SENSOR_LOCAL" \
-    "ZIGOS:PHASE2:GRANT:PEER_IPC_LOCAL" \
-    "ZIGOS:PHASE2:LEASE:EXPIRED" \
-    "ZIGOS:PHASE3:DRIVER_SERVICE:NIC_READY" \
-    "ZIGOS:PHASE3:SERVICE_CONTRACTS:READY" \
-    "ZIGOS:PHASE3:IPC_CONNECT:ALL_OK" \
-    "ZIGOS:PHASE3:SUPERVISOR:RESTART_OK" \
-    "ZIGOS:PHASE4:OBJECT_STORE:READY" \
-    "ZIGOS:PHASE4:WORKSPACE:TRANSACTION_OK" \
-    "ZIGOS:PHASE5:DEVICE_GRAPH:ROOTED" \
-    "ZIGOS:PHASE6:IMMUTABLE_BASE:ACTIVE" \
-    "ZIGOS:PHASE6:ACTIVATION:ROLLBACK_OK" \
-    "ZIGOS:PHASE6:MEASURED_BOOT:RECORDED" \
-    "ZIGOS:PHASE6:RECOVERY:VERIFY_REINSTALL" \
-    "ZIGOS:PHASE6:UX:RECOVER_SYSTEM" \
-    "ZIGOS:TASK:SESSION_READY" \
-    "ZIGOS:NATIVE:READY"
+  local log_path="$1"
+  assert_marker_group "$log_path" cold_boot
 }
 
 assert_boot2_phase4_markers() {
-  log_path="$1"
-  if grep -Fq "ZIGOS:PHASE4:PERSISTENCE:RELOADED" "$log_path"; then
-    assert_log_contains "$log_path" \
-      "ZIGOS:PHASE4:PERSISTENCE:RELOADED" \
-      "ZIGOS:PHASE4:RELOAD:NOTES_WORKSPACE:DONE" \
-      "ZIGOS:PHASE4:RELOAD:IMPORTED_WORKSPACE:DONE" \
-      "ZIGOS:PHASE4:RELOAD:LATEST_VERSION:DONE"
+  local log_path="$1"
+  if grep -Fq "$PHASE4_RELOADED_MARKER" "$log_path"; then
+    assert_marker_group "$log_path" boot2_reloaded_phase4
     return
   fi
 
-  assert_log_contains "$log_path" \
-    "ZIGOS:PHASE4:STORAGE_SERVICE:RECOVERED" \
-    "ZIGOS:PHASE4:FILE_BRIDGE:DERIVED" \
-    "ZIGOS:PHASE4:PATH_AUTHORITY:DEPRECATED"
+  assert_marker_group "$log_path" boot2_fresh_phase4
 }
 
 assert_review_text() {
-  log_path="$1"
+  local log_path="$1"
   assert_log_contains "$log_path" \
     "Permission review for Notes [app.notes]" \
     "Permission review for Sync [app.sync]" \
