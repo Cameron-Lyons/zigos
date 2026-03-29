@@ -1,4 +1,8 @@
 const ethernet = @import("ethernet.zig");
+const link_port = @import("link_port.zig");
+const pci = @import("../drivers/pci.zig");
+const vga = @import("../drivers/vga.zig");
+const bootstrap_driver_port = @import("../process/native/bootstrap_driver_port.zig");
 
 pub const ArpReplyHeader = packed struct {
     hardware_type: u16,
@@ -62,4 +66,32 @@ pub fn writeSyntheticArpReply(frame: []u8, sender_ip: u32, target_ip: u32, sende
 
 pub fn macEquals(a: [6]u8, b: [6]u8) bool {
     return a[0] == b[0] and a[1] == b[1] and a[2] == b[2] and a[3] == b[3] and a[4] == b[4] and a[5] == b[5];
+}
+
+pub fn printMac(prefix: []const u8, mac: [6]u8) void {
+    vga.print(prefix);
+    for (mac, 0..) |byte, i| {
+        const high = byte >> 4;
+        const low = byte & 0x0F;
+        vga.printChar(if (high < 10) '0' + high else 'A' + high - 10);
+        vga.printChar(if (low < 10) '0' + low else 'A' + low - 10);
+        if (i < 5) vga.print(":");
+    }
+    vga.print("\n");
+}
+
+pub fn publishBootstrapTransport(
+    device_id: u64,
+    publisher: []const u8,
+    current_device: *const fn (u64) ?*const link_port.NetworkDevice,
+    activate_device: *const fn (u64) ?*const link_port.NetworkDevice,
+    is_supported: *const fn (pci.PCIDevice) bool,
+) bool {
+    if (current_device(device_id)) |device| {
+        return bootstrap_driver_port.publishNetworkDevice(device_id, publisher, device, true);
+    }
+
+    const pci_device = pci.findDeviceByStableId(device_id) orelse return false;
+    if (!is_supported(pci_device)) return false;
+    return bootstrap_driver_port.publishNetworkActivator(device_id, publisher, activate_device, true);
 }

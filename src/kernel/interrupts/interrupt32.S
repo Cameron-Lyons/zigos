@@ -2,6 +2,8 @@
 .extern isrHandler
 .extern irqHandler
 .extern syscall_handler
+.extern zigos_userspace_resume_requested
+.extern zigos_resume_from_userspace_interrupt
 
 .macro ISR_NOERRCODE num
 .global isr\num
@@ -59,6 +61,7 @@ ISR_NOERRCODE 29
 ISR_ERRCODE   30
 ISR_NOERRCODE 31
 ISR_NOERRCODE 128
+ISR_NOERRCODE 129
 
 IRQ 0, 32
 IRQ 1, 33
@@ -95,6 +98,8 @@ isr_common_stub:
     je handle_syscall
 
     call isrHandler
+    cmpl $0, zigos_userspace_resume_requested
+    jne userspace_resume
     jmp isr_exit
 
 handle_syscall:
@@ -103,6 +108,8 @@ handle_syscall:
     push %eax
     call syscall_handler
     add $4, %esp
+    cmpl $0, zigos_userspace_resume_requested
+    jne userspace_resume
 
 isr_exit:
     add $4, %esp
@@ -116,6 +123,9 @@ isr_exit:
     popa
     add $8, %esp
     iret
+
+userspace_resume:
+    jmp zigos_resume_from_userspace_interrupt
 
 irq_common_stub:
     pusha

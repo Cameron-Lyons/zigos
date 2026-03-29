@@ -2,9 +2,17 @@ const std = @import("std");
 const abi = @import("kernel/process/native/abi.zig");
 const accelerator_scheduler = @import("kernel/process/native/accelerator_scheduler.zig");
 const attestation_service = @import("kernel/process/native/attestation_service.zig");
+const bootstrap_driver_port = @import("kernel/process/native/bootstrap_driver_port.zig");
 const capability = @import("kernel/process/native/capability.zig");
+const component_port = @import("kernel/process/native/component_port.zig");
+const compatibility_environment = @import("kernel/process/native/compatibility_environment.zig");
 const contract = @import("kernel/process/native/contract.zig");
+const denial_explanation = @import("kernel/process/native/denial_explanation.zig");
+const device_graph = @import("kernel/process/native/device_graph.zig");
+const device_inventory = @import("kernel/process/native/device_inventory.zig");
+const driver_runtime_mod = @import("kernel/process/native/driver_runtime.zig");
 const driver_service = @import("kernel/process/native/driver_service.zig");
+const endpoint = @import("kernel/process/native/endpoint.zig");
 const event_ledger = @import("kernel/process/native/event_ledger.zig");
 const file_bridge = @import("kernel/process/native/file_bridge.zig");
 const immutable_base = @import("kernel/process/native/immutable_base.zig");
@@ -12,6 +20,7 @@ const indexing_service = @import("kernel/process/native/indexing_service.zig");
 const manifest = @import("kernel/process/native/manifest.zig");
 const media_print_service = @import("kernel/process/native/media_print_service.zig");
 const measured_boot = @import("kernel/process/native/measured_boot.zig");
+const native_kernel = @import("kernel/process/native/native_kernel.zig");
 const native_ux = @import("kernel/process/native/native_ux.zig");
 const network_policy = @import("kernel/process/native/network_policy.zig");
 const notification_center = @import("kernel/process/native/notification_center.zig");
@@ -23,10 +32,16 @@ const principal = @import("kernel/process/native/principal.zig");
 const recovery_environment = @import("kernel/process/native/recovery_environment.zig");
 const secure_secret_store = @import("kernel/process/native/secure_secret_store.zig");
 const service_registry = @import("kernel/process/native/service_registry.zig");
+const shared_memory = @import("kernel/process/native/shared_memory.zig");
 const signing = @import("kernel/process/native/signing.zig");
 const storage_service = @import("kernel/process/native/storage_service.zig");
+const storage_volume = @import("kernel/process/native/storage_volume.zig");
+const supervisor = @import("kernel/process/native/supervisor.zig");
 const sync_service = @import("kernel/process/native/sync_service.zig");
 const task_runtime = @import("kernel/process/native/task_runtime.zig");
+const task_runtime_service = @import("kernel/process/native/task_runtime_service.zig");
+const userspace_loader = @import("kernel/process/native/userspace_loader.zig");
+const workspace = @import("kernel/process/native/workspace.zig");
 
 fn signer(label: []const u8, fill: u8) signing.SignerIdentity {
     return .{
@@ -53,6 +68,34 @@ fn service(serial: u64) principal.PrincipalId {
 
 fn policyAuthority(serial: u64) principal.PrincipalId {
     return .{ .kind = .policy_authority, .serial = serial };
+}
+
+fn driverAuthority(
+    holder: principal.PrincipalId,
+    capability_id: u64,
+    task_id: u64,
+    device_id: u64,
+    device_class: driver_service.DeviceClass,
+) capability.Capability {
+    return .{
+        .id = capability_id,
+        .holder = holder,
+        .issuer = policyAuthority(1),
+        .target = driver_service.authorityTarget(device_id),
+        .rights = driver_service.allowedRightsFor(device_class),
+        .scope = .{
+            .task_id = task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = true,
+        },
+        .revocation_generation = 1,
+        .audit = .{},
+    };
 }
 
 fn defaultBudget(background_allowed: bool) task_runtime.ResourceBudget {
@@ -174,20 +217,37 @@ test "spec 2.1 6.2 and 7 explicit grants are required before a task gains author
     try std.testing.expectEqual(@as(u64, 41), network_capability.target.id);
 }
 
-test "spec 4 6.3 13 and 17 keep the kernel typed minimal and free of legacy ambient authority" {
+test "spec 4 6.3 13 and 17 keep the kernel typed minimal and route legacy support through isolated portals" {
     try std.testing.expectEqual(@as(usize, 7), contract.kernel_tcb.len);
     try std.testing.expectEqualStrings("ipc_transport", contract.tcbName(.ipc_transport));
     try std.testing.expectEqualStrings("iommu_dma_isolation_hooks", contract.tcbName(.iommu_dma_isolation_hooks));
 
+    const runtime_descriptor = contract.serviceDescriptor(.task_runtime).?;
     const network = contract.serviceDescriptor(.network_stack).?;
     const storage = contract.serviceDescriptor(.storage_object).?;
     const compositor = contract.serviceDescriptor(.compositor_ui_session).?;
+    const session = contract.serviceDescriptor(.session_manager).?;
+    const registry_service = contract.serviceDescriptor(.service_registry).?;
+    const compatibility_service = contract.serviceDescriptor(.compatibility_portal).?;
+    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, runtime_descriptor.boundary);
+    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, session.boundary);
+    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, registry_service.boundary);
+    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, compatibility_service.boundary);
     try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, network.boundary);
     try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, storage.boundary);
     try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, compositor.boundary);
+    try std.testing.expect(runtime_descriptor.restartable);
+    try std.testing.expect(session.restartable);
+    try std.testing.expect(registry_service.restartable);
+    try std.testing.expect(compatibility_service.restartable);
     try std.testing.expect(network.restartable);
     try std.testing.expect(storage.restartable);
     try std.testing.expect(compositor.restartable);
+    try std.testing.expect(runtime_descriptor.isolation.namespace_isolated);
+    try std.testing.expectEqual(contract.NetworkPrivilege.unrestricted_brokered, network.isolation.network);
+    try std.testing.expectEqual(contract.StoragePrivilege.object_store_authority, storage.isolation.storage);
+    try std.testing.expect(contract.allowsDriverClass(.network_stack, .network_adapter));
+    try std.testing.expect(contract.allowsDriverClass(.storage_object, .storage_controller));
 
     try std.testing.expect(abi.opcode(.task_create) >= 0x100);
     try std.testing.expect(abi.policyOpcode(.authorize_request) >= 0x200);
@@ -199,7 +259,7 @@ test "spec 4 6.3 13 and 17 keep the kernel typed minimal and free of legacy ambi
         .name = "zigos.service.storage",
         .version_major = 1,
         .version_minor = 2,
-    });
+    }, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
     const connection = try registry.connect(.{
         .name = "zigos.service.storage",
         .version_major = 1,
@@ -208,6 +268,7 @@ test "spec 4 6.3 13 and 17 keep the kernel typed minimal and free of legacy ambi
     try std.testing.expectEqual(@as(u64, 55), connection.service_id);
     try std.testing.expectEqual(@as(u64, 101), connection.endpoint_id);
     try std.testing.expect(connection.interface_hash != 0);
+    try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
     try std.testing.expectError(service_registry.Error.VersionMismatch, registry.connect(.{
         .name = "zigos.service.storage",
         .version_major = 2,
@@ -222,6 +283,338 @@ test "spec 4 6.3 13 and 17 keep the kernel typed minimal and free of legacy ambi
     try std.testing.expect(audio_rights.device_use);
     try std.testing.expect(!audio_rights.network_local);
     try std.testing.expect(!audio_rights.object_write);
+
+    device_inventory.reset();
+    device_inventory.registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
+    device_inventory.registerDetected(.network_adapter, 0x8086100E0001, .pci_inventory, false);
+    const storage_handoff = device_inventory.recordForClass(.storage_controller);
+    const network_handoff = device_inventory.recordForClass(.network_adapter);
+    try std.testing.expect(storage_handoff.detected);
+    try std.testing.expect(storage_handoff.kernel_bootstrap);
+    try std.testing.expectEqualStrings("ata_bootstrap", device_inventory.sourceName(storage_handoff.source));
+    try std.testing.expect(network_handoff.detected);
+    try std.testing.expect(!network_handoff.kernel_bootstrap);
+    try std.testing.expectEqualStrings("pci_inventory", device_inventory.sourceName(network_handoff.source));
+
+    var runtime = task_runtime.Runtime.init();
+    var runtime_service_instance = task_runtime_service.Service.init(&runtime);
+    runtime_service_instance.bind(70, service(70));
+    _ = try runtime.createTask(.{
+        .owner = app(30),
+        .component_class = .app_component,
+        .budget = defaultBudget(false),
+        .local_only = true,
+        .initial_component = .{
+            .label = "legacy-launcher",
+            .entry = "app.legacy.launcher",
+        },
+    });
+    runtime_service_instance.checkpoint(12);
+    _ = try runtime.createTask(.{
+        .owner = app(31),
+        .component_class = .app_component,
+        .budget = defaultBudget(false),
+        .local_only = true,
+        .initial_component = .{
+            .label = "ephemeral-task",
+            .entry = "app.ephemeral",
+        },
+    });
+    try std.testing.expect(runtime_service_instance.restartFromCheckpoint(13));
+    try std.testing.expectEqual(@as(u32, 1), runtime_service_instance.restart_generation);
+    try std.testing.expect(runtime.find(2) == null);
+
+    var compatibility_manager = compatibility_environment.Manager.init();
+    const compatibility_bundle = manifest.BundleManifest{
+        .bundle_id = "compat.legacy.accounting",
+        .display_name = "Legacy Accounting",
+        .publisher = "zigos.spec",
+        .signature = .{
+            .format = "ed25519",
+            .signer = "zigos-spec-compat",
+        },
+    };
+    const legacy_environment = try compatibility_manager.launch(.{
+        .service_id = 88,
+        .owner = user(7),
+        .kind = .remote_application_session,
+        .label = "Legacy Accounting Remote Session",
+        .bundle = compatibility_bundle,
+        .network_class = .named_service_only,
+    });
+    try std.testing.expect(legacy_environment.isolated);
+    try std.testing.expect(legacy_environment.clearly_labeled);
+    try std.testing.expect(legacy_environment.portal_only_host_access);
+    try std.testing.expect(legacy_environment.limited_host_integration);
+    try compatibility_manager.grantPortal(legacy_environment.id, .{
+        .kind = .file_import,
+        .capability_id = 401,
+        .read_only = true,
+        .expires_at_ticks = 99,
+    });
+    try std.testing.expect(legacy_environment.hasPortal(.file_import));
+    try std.testing.expectEqual(@as(usize, 1), compatibility_manager.environmentCount());
+    try std.testing.expectError(compatibility_environment.Error.DirectHostAccessForbidden, compatibility_manager.launch(.{
+        .service_id = 89,
+        .owner = user(7),
+        .kind = .container,
+        .label = "Uncontained Legacy Tool",
+        .bundle = compatibility_bundle,
+        .portal_only_host_access = false,
+    }));
+}
+
+test "spec 4 and 6.3 require kernel-mediated launches and typed services to carry userspace image provenance" {
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    var endpoints = endpoint.Table.init();
+    var shared = shared_memory.Table.init();
+    var registry = service_registry.Registry.init();
+    var kernel = native_kernel.Kernel.init(
+        policyAuthority(1),
+        &runtime,
+        &capabilities,
+        &endpoints,
+        &shared,
+        &registry,
+    );
+    var port = component_port.KernelPort.init(&kernel);
+
+    const session_task = try runtime.createTask(.{
+        .owner = service(2),
+        .component_class = .session_manager,
+        .budget = defaultBudget(false),
+        .local_only = true,
+    });
+    const authority = try capabilities.mint(.{
+        .holder = session_task.owner,
+        .issuer = policyAuthority(1),
+        .target = .{ .kind = .service, .id = 99 },
+        .rights = .{
+            .task_create = true,
+            .endpoint_create = true,
+            .endpoint_connect = true,
+            .ipc_peer = true,
+        },
+        .scope = .{ .local_only = true },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = 100,
+            .renewable = true,
+        },
+    });
+
+    try std.testing.expectError(native_kernel.Error.UserspaceLaunchRequired, port.taskCreate(.{
+        .header = component_port.makeHeader(.task_create, 1, session_task.id),
+        .authority_capability_id = authority.id,
+        .request = .{
+            .owner = service(3),
+            .component_class = .service_component,
+            .budget = defaultBudget(false),
+            .local_only = true,
+            .initial_component = .{
+                .label = "unsigned-direct",
+                .entry = "zigos.service.direct",
+            },
+        },
+    }, 1));
+
+    var catalog = userspace_loader.Catalog.init();
+    _ = try catalog.register(.{
+        .bundle = .{
+            .bundle_id = "zigos.system.spec-storage",
+            .display_name = "Spec Storage",
+            .publisher = "zigos.spec",
+            .signature = .{
+                .format = "ed25519",
+                .signer = "zigos-spec-key",
+            },
+        },
+        .component_class = .service_component,
+        .initial_component = .{
+            .label = "spec-storage",
+            .entry = "zigos.object.spec-storage",
+        },
+    });
+
+    const launched = try catalog.launchViaKernel(.{
+        .port = &port,
+        .authority_capability_id = authority.id,
+        .controller_task_id = session_task.id,
+        .correlation_id = 2,
+        .now_ticks = 2,
+    }, "zigos.system.spec-storage", .{
+        .owner = service(4),
+        .budget = defaultBudget(false),
+        .local_only = true,
+    });
+    try std.testing.expect(abi.taskFlagsHas(launched.flags, abi.TASK_FLAG_USERSPACE_PROCESS));
+
+    const service_endpoint = try port.endpointCreate(.{
+        .header = component_port.makeHeader(.endpoint_create, 3, launched.task_id),
+        .authority_capability_id = authority.id,
+        .owner_task_id = launched.task_id,
+        .label = "zigos.object.spec-storage",
+        .flags = .{
+            .local_only = true,
+            .service_port = true,
+        },
+    }, 3);
+    try port.serviceRegister(.{
+        .header = component_port.makeHeader(.service_register, 4, launched.task_id),
+        .authority_capability_id = authority.id,
+        .service_id = 123,
+        .owner_task_id = launched.task_id,
+        .endpoint_capability_id = service_endpoint.capability_id,
+        .interface = .{ .name = "zigos.object.spec-storage" },
+    }, 3);
+
+    const connection = try registry.connect(.{ .name = "zigos.object.spec-storage" });
+    try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
+    try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE));
+}
+
+test "spec 4 and 13 activate published nic and storage transports through scoped driver services" {
+    const FakeNetworkDevice = struct {
+        var activation_count: usize = 0;
+
+        fn send(_: []const u8) void {}
+
+        fn getMacAddress() [6]u8 {
+            return .{ 0x02, 0x11, 0x22, 0x33, 0x44, 0x55 };
+        }
+
+        const published_device = bootstrap_driver_port.NetworkDevice{
+            .send = send,
+            .getMacAddress = getMacAddress,
+        };
+
+        fn activate(device_id: u64) ?*const bootstrap_driver_port.NetworkDevice {
+            if (device_id != 0x8086_100E_0001) return null;
+            activation_count += 1;
+            return &published_device;
+        }
+    };
+    const FakeBackend = struct {
+        var image: []u8 = &.{};
+        var activation_count: usize = 0;
+
+        fn read(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+            const buffer = buffer_ptr[0..buffer_len];
+            const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+            const end = start + buffer.len;
+            if (end > image.len) return false;
+            @memcpy(buffer, image[start..end]);
+            return true;
+        }
+
+        fn write(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+            const buffer = buffer_ptr[0..buffer_len];
+            const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+            const end = start + buffer.len;
+            if (end > image.len) return false;
+            @memcpy(image[start..end], buffer);
+            return true;
+        }
+
+        fn activate(device_id: u64) ?storage_volume.Backend {
+            if (device_id != 0x0000_1F00_0001) return null;
+            activation_count += 1;
+            return .{
+                .sector_count = storage_volume.required_device_sectors,
+                .read = read,
+                .write = write,
+            };
+        }
+    };
+
+    bootstrap_driver_port.reset();
+    defer bootstrap_driver_port.reset();
+
+    var image = [_]u8{0} ** storage_volume.image_bytes;
+    FakeBackend.image = &image;
+
+    const network_device_id: u64 = 0x8086_100E_0001;
+    const storage_device_id: u64 = 0x0000_1F00_0001;
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "svc.driver.runtime",
+        .display_name = "Published Driver Runtime",
+        .publisher = "zigos.spec",
+        .signature = .{
+            .format = "ed25519",
+            .signer = "zigos-spec-driver",
+        },
+    };
+
+    try std.testing.expect(bootstrap_driver_port.publishNetworkActivator(
+        network_device_id,
+        "e1000",
+        FakeNetworkDevice.activate,
+        true,
+    ));
+    try std.testing.expect(bootstrap_driver_port.publishStorageActivator(
+        storage_device_id,
+        "ata-bootstrap",
+        FakeBackend.activate,
+        true,
+    ));
+
+    var directory = driver_service.Directory.init();
+    const network_driver = try directory.register(.{
+        .service_id = 91,
+        .owner_task_id = 901,
+        .device_id = network_device_id,
+        .device_class = .network_adapter,
+        .authority = driverAuthority(service(91), 501, 901, network_device_id, .network_adapter),
+        .bundle = bundle,
+    });
+    const storage_driver = try directory.register(.{
+        .service_id = 92,
+        .owner_task_id = 902,
+        .device_id = storage_device_id,
+        .device_class = .storage_controller,
+        .authority = driverAuthority(service(92), 502, 902, storage_device_id, .storage_controller),
+        .bundle = bundle,
+    });
+    const graphics_driver = try directory.register(.{
+        .service_id = 93,
+        .owner_task_id = 903,
+        .device_id = 0x1234_1111_0001,
+        .device_class = .graphics_adapter,
+        .authority = driverAuthority(service(93), 503, 903, 0x1234_1111_0001, .graphics_adapter),
+        .bundle = bundle,
+    });
+
+    var runtime = driver_runtime_mod.Runtime.init();
+    const network_activation = try runtime.activate(network_driver);
+    const storage_activation = try runtime.activate(storage_driver);
+    const graphics_activation = try runtime.activate(graphics_driver);
+
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, network_activation.mode);
+    try std.testing.expect(network_activation.exclusive_claim);
+    try std.testing.expect(network_activation.kernel_bootstrap);
+    try std.testing.expectEqualStrings("e1000", network_activation.publisherSlice());
+    try std.testing.expectEqual(@as(usize, 1), FakeNetworkDevice.activation_count);
+    try std.testing.expect(bootstrap_driver_port.hasActiveNetworkDevice());
+    try std.testing.expectEqual(@as(u64, 91), bootstrap_driver_port.networkPublication().?.active_service_id);
+    try std.testing.expect(!bootstrap_driver_port.activateNetworkDevice(network_device_id, 999));
+    try std.testing.expect(runtime.deactivate(network_driver.service_id));
+    try std.testing.expect(!bootstrap_driver_port.hasActiveNetworkDevice());
+    try std.testing.expect(bootstrap_driver_port.activateNetworkDevice(network_device_id, 999));
+    try std.testing.expect(bootstrap_driver_port.deactivateNetworkDevice(999));
+
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, storage_activation.mode);
+    try std.testing.expect(storage_activation.exclusive_claim);
+    try std.testing.expect(storage_activation.kernel_bootstrap);
+    try std.testing.expectEqualStrings("ata-bootstrap", storage_activation.publisherSlice());
+    try std.testing.expectEqual(@as(usize, 1), FakeBackend.activation_count);
+    try std.testing.expect(storage_volume.hasAttachedDevice());
+    try std.testing.expectEqual(@as(u64, 92), bootstrap_driver_port.storagePublication().?.active_service_id);
+
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, graphics_activation.mode);
+    try std.testing.expectEqualStrings("e1000", runtime.findByClass(.network_adapter).?.publisherSlice());
+    try std.testing.expectEqualStrings("ata-bootstrap", runtime.findByClass(.storage_controller).?.publisherSlice());
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.graphics_adapter).?.mode);
 }
 
 test "spec 8 storage stays versioned recoverable signed and exposed through a derived file bridge" {
@@ -380,6 +773,13 @@ test "spec 9 and 10 use a trusted device graph selective sync and policy-gated n
         .label = "local",
         .mode = .local_network,
     });
+    const discovery_policy = try sync.createNetworkPolicy(.{
+        .owner = sync_owner,
+        .workspace_id = workspace_record.id,
+        .label = "printer-discovery",
+        .mode = .local_subnet_discovery,
+        .target = "printer",
+    });
     const relay_policy = try sync.createNetworkPolicy(.{
         .owner = sync_owner,
         .workspace_id = workspace_record.id,
@@ -394,6 +794,14 @@ test "spec 9 and 10 use a trusted device graph selective sync and policy-gated n
         .mode = .named_service_identity,
         .target = "overlay.notes.spec",
     });
+    const inbound_policy = try sync.createNetworkPolicy(.{
+        .owner = sync_owner,
+        .workspace_id = workspace_record.id,
+        .label = "document-review",
+        .mode = .inbound_collaborative_session,
+        .target = "document-review/v1",
+    });
+    const collaborator = app(63);
     const prefixes = [_][]const u8{ "documents/", "assets/" };
     _ = try sync.configureWorkspacePolicy(.{
         .workspace_id = workspace_record.id,
@@ -408,6 +816,35 @@ test "spec 9 and 10 use a trusted device graph selective sync and policy-gated n
     });
     _ = try sync.configureOverlay(workspace_record.id, laptop, "overlay.notes.spec", true);
     _ = try sync.publishPrivateService(workspace_record.id, "notes.remote");
+    try storage.shareWorkspace(workspace_record.id, .{
+        .principal_id = collaborator,
+        .can_read = true,
+        .can_write = true,
+        .can_admin = true,
+        .can_export = true,
+        .expires_at_ticks = 40,
+        .network_scope = .trusted_overlay,
+        .reshare_policy = .admin_only,
+        .audit_visibility = .shared_participants,
+    });
+    const share = storage.workspaces.findShareGrant(workspace_record.id, collaborator).?;
+    try std.testing.expectEqual(workspace.ShareNetworkScope.trusted_overlay, share.network_scope);
+    try std.testing.expectEqual(workspace.ResharePolicy.admin_only, share.reshare_policy);
+    try std.testing.expectEqual(workspace.AuditVisibility.shared_participants, share.audit_visibility);
+    try std.testing.expect(storage.workspaces.hasAccess(workspace_record.id, .{
+        .principal_id = collaborator,
+        .wants_write = true,
+        .wants_export = true,
+        .wants_admin = true,
+        .network_scope = .trusted_overlay,
+        .now_ticks = 20,
+    }));
+    try std.testing.expect(storage.workspaces.canReshare(workspace_record.id, collaborator, .trusted_overlay, 20));
+    try std.testing.expect(!storage.workspaces.hasAccess(workspace_record.id, .{
+        .principal_id = collaborator,
+        .network_scope = .relay_assisted,
+        .now_ticks = 50,
+    }));
 
     try sync.setReplicaVersion(workspace_record.id, tablet, "documents/notes.md", notes_v1.object_id, notes_v2.version_id);
     const summary = try sync.replicateWorkspace(&storage, workspace_record.id, laptop, tablet, .device_to_device);
@@ -430,8 +867,12 @@ test "spec 9 and 10 use a trusted device graph selective sync and policy-gated n
     const database_contract = try sync.registerDatabaseContract(workspace_record.id, "app.notes.db", "notes-db", contract_signer);
     try std.testing.expect(try sync.replicateDatabaseContract(database_contract.id, workspace_record.id, laptop, tablet, .relay_assisted));
     try std.testing.expect((try sync.evaluateNetworkPolicy(local_policy.id, .local_network)).allowed);
+    try std.testing.expect((try sync.evaluateNetworkPolicy(discovery_policy.id, .{ .discovery_class = "printer" })).allowed);
+    try std.testing.expect(!(try sync.evaluateNetworkPolicy(discovery_policy.id, .{ .discovery_class = "camera" })).allowed);
     try std.testing.expect((try sync.evaluateNetworkPolicy(relay_policy.id, .{ .domain = "relay.spec.zigos" })).allowed);
     try std.testing.expect((try sync.evaluateNetworkPolicy(overlay_policy.id, .{ .service_identity = "overlay.notes.spec" })).allowed);
+    try std.testing.expect((try sync.evaluateNetworkPolicy(inbound_policy.id, .{ .inbound_session_type = "document-review/v1" })).allowed);
+    try std.testing.expect(!(try sync.evaluateNetworkPolicy(inbound_policy.id, .{ .inbound_session_type = "pair-screen/v1" })).allowed);
 }
 
 test "spec 5 and 14 keep the base image signed measured atomic and rollback-capable" {
@@ -649,12 +1090,20 @@ test "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy 
             .local_only = true,
         },
     };
+    const v1_components = [_]manifest.ExecutionComponentDecl{
+        .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
+    };
+    const v1_assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+    };
     var v1 = manifest.BundleManifest{
         .bundle_id = "app.notes",
         .display_name = "Notes",
         .publisher = "Example Software",
         .version_major = 1,
         .version_minor = 0,
+        .components = &v1_components,
+        .assets = &v1_assets,
         .requested_permissions = &v1_permissions,
     };
     v1.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v1));
@@ -684,12 +1133,22 @@ test "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy 
             .required = false,
         },
     };
+    const v2_components = [_]manifest.ExecutionComponentDecl{
+        .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
+        .{ .id = "notes-sync", .entry = "zigos.notes.sync", .abi = .native_sandbox },
+    };
+    const v2_assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+        .{ .path = "assets/editor.css", .content_type = "text/css" },
+    };
     var v2 = manifest.BundleManifest{
         .bundle_id = "app.notes",
         .display_name = "Notes",
         .publisher = "Example Software",
         .version_major = 1,
         .version_minor = 1,
+        .components = &v2_components,
+        .assets = &v2_assets,
         .requested_permissions = &v2_permissions,
     };
     v2.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v2));
@@ -709,12 +1168,19 @@ test "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy 
     try std.testing.expectEqual(@as(u16, 1), installed.current_version_major);
     try std.testing.expectEqual(@as(u16, 1), installed.current_version_minor);
     try std.testing.expectEqual(@as(u32, 2), installed.current_schema_version);
+    try std.testing.expectEqual(@as(usize, 2), installed.current_component_count);
+    try std.testing.expectEqualStrings("zigos.notes.sync", installed.current_components[1].entrySlice());
+    const launch_plan = try packages.buildLaunchPlan("app.notes");
+    try std.testing.expectEqual(@as(usize, 2), launch_plan.component_count);
+    try std.testing.expectEqual(@as(usize, 2), launch_plan.asset_count);
+    try std.testing.expectEqualStrings("assets/editor.css", launch_plan.assets[1].pathSlice());
     try std.testing.expect(!org_policy.removable_storage_allowed);
     try std.testing.expect(!org_policy.screen_capture_allowed);
     try std.testing.expect(org_policy.audit_export_required);
 
     _ = try packages.rollback("app.notes");
     try std.testing.expectEqual(@as(u16, 0), packages.find("app.notes").?.current_version_minor);
+    try std.testing.expectEqual(@as(usize, 1), packages.find("app.notes").?.current_component_count);
 }
 
 test "spec 2.3 11.4 12 and 15 keep indexing notifications media helpers and diagnostics structured" {
@@ -750,20 +1216,25 @@ test "spec 2.3 11.4 12 and 15 keep indexing notifications media helpers and diag
         .printer_identity = "printer://lobby",
         .visibility = .user,
     }, &scheduler, &notifications, 21);
-    _ = try media.complete(export_job.id, &notifications, 30);
-    _ = try media.complete(print_job.id, &notifications, 31);
+    _ = try media.complete(export_job.id, &scheduler, &notifications, 30);
+    _ = try media.complete(print_job.id, &scheduler, &notifications, 31);
 
     try std.testing.expectEqual(accelerator_scheduler.Engine.media, export_job.engine);
     try std.testing.expectEqual(media_print_service.JobState.completed, print_job.state);
     try std.testing.expectEqual(notification_center.Reason.print_complete, notifications.latestVisible(31).?.reason);
+    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 
     var ledger = event_ledger.Ledger.init();
+    try ledger.recordPermissionDecision(user(8), 503, .screen_capture, false, .policy_denied, 31, "screen capture blocked", true);
     try ledger.recordDriverRestart(contract.ServiceClass.media_print_helpers, service(71), 9, 32, "printer helper restart");
     try ledger.recordSyncConflict(user(8), 11, 33, "documents/itinerary.md conflict", true);
     var export_buffer: [1024]u8 = undefined;
     const redacted = try ledger.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, redacted, "redacted") != null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "media_print_helpers") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "policy=user-grant-policy") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "missing=screen-capture-capability") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "approval=yes") != null);
 }
 
 test "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explicit" {
@@ -777,17 +1248,42 @@ test "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explic
     const boot = recorder.finalize();
 
     var attestation = attestation_service.Service.init(device(99));
-    const statement = try attestation.attest(boot, "attest.example", "nonce-7", signer("spec.attest.device", 0x91), true);
+    attestation.provisionRoot(signer("spec.attest.device", 0x91), .secure_enclave);
+    const statement = try attestation.attestWithProvisionedRoot(boot, "attest.example", "nonce-7", true);
     try std.testing.expect(attestation_service.Service.verify(statement));
     try std.testing.expect(statement.user_visible);
     try std.testing.expectEqual(@as(usize, 1), attestation.visible_request_count);
     try std.testing.expect(!std.mem.allEqual(u8, &statement.root_digest, 0));
+    try std.testing.expectEqual(attestation_service.KeyOrigin.secure_enclave, statement.key_origin);
 
     var secrets = secure_secret_store.Store.init();
     const imported = try secrets.importSecret(user(9), "signing-key", "opaque-secret", true, false);
     const handle = try secrets.lendHandle(imported.id, app(90), 700, true);
     try std.testing.expect(handle.hardware_backed);
+    try std.testing.expect(!imported.resident_material);
+    try std.testing.expect(imported.sealed_digest_present);
     try std.testing.expectError(secure_secret_store.Error.RawExportDenied, secrets.exportRaw(handle.id));
+
+    var policy_directory = network_policy.Directory.init();
+    const peer_policy = try policy_directory.create(.{
+        .owner = service(99),
+        .label = "notes-overlay",
+        .mode = .named_service_identity,
+        .target = "overlay.notes.sync",
+        .require_remote_attestation = true,
+        .pinned_root_digest = statement.root_digest,
+    });
+    try std.testing.expectEqual(network_policy.DecisionReason.attestation_required, (try policy_directory.authorizeConnection(peer_policy.id, .{
+        .destination = .{ .service_identity = "overlay.notes.sync" },
+    })).reason);
+    const peer_decision = try policy_directory.authorizeConnection(peer_policy.id, .{
+        .destination = .{ .service_identity = "overlay.notes.sync" },
+        .attested = true,
+        .peer_root_digest_present = true,
+        .peer_root_digest = statement.root_digest,
+    });
+    try std.testing.expect(peer_decision.allowed);
+    try std.testing.expect(peer_decision.identity_pinned);
 
     var scheduler = accelerator_scheduler.Controller.init();
     scheduler.configure(.{
@@ -807,8 +1303,204 @@ test "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explic
         .wants_media_engine = true,
         .shared_memory_bytes = 4096,
     });
+    var runtime = task_runtime.Runtime.init();
+    const foreground_task = try runtime.createTask(.{
+        .owner = app(91),
+        .component_class = .app_component,
+        .budget = defaultBudget(false),
+        .local_only = true,
+    });
+    var shared = shared_memory.Table.init();
+    const zero_copy = try shared.createWithAccess(foreground_task.id, 4096, .{
+        .media = true,
+    });
+    const engine_claim = try scheduler.claimWithSharedMemory(.{
+        .task_id = foreground_task.id,
+        .request = .{
+            .class = .media_export,
+            .wants_gpu = true,
+            .wants_media_engine = true,
+            .shared_memory_bytes = 4096,
+        },
+        .require_accelerator = true,
+        .shared_memory_object_id = zero_copy.id,
+    }, &shared);
+    const background_task = try runtime.createTask(.{
+        .owner = app(92),
+        .component_class = .app_component,
+        .budget = defaultBudget(true),
+        .local_only = true,
+    });
+    const critical_task = try runtime.createTask(.{
+        .owner = service(93),
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 2_000,
+            .memory_bytes = 128 * 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 4 * 1024,
+            .resource_class = .emergency_system_critical,
+        },
+        .local_only = true,
+    });
     try std.testing.expectEqual(accelerator_scheduler.Engine.cpu, inference.engine);
     try std.testing.expectEqual(accelerator_scheduler.DecisionReason.privacy_mode, inference.reason);
     try std.testing.expectEqual(accelerator_scheduler.Engine.media, media_export_plan.engine);
     try std.testing.expect(media_export_plan.zero_copy_allowed);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.media, engine_claim.engine);
+    try std.testing.expect(engine_claim.zero_copy);
+    try std.testing.expect(try shared.isAcceleratorAttached(zero_copy.id, .media));
+    try std.testing.expect(try scheduler.releaseClaim(engine_claim.id, &shared));
+    try std.testing.expect(!(try shared.isAcceleratorAttached(zero_copy.id, .media)));
+    try std.testing.expectEqual(accelerator_scheduler.ResourceClass.foreground_interactive, foreground_task.resourceClass());
+    try std.testing.expectEqual(accelerator_scheduler.ResourceClass.background_light, background_task.resourceClass());
+    try std.testing.expectEqual(accelerator_scheduler.ResourceClass.emergency_system_critical, critical_task.resourceClass());
+}
+
+test "spec 3 4.3 and 16 keep principal identity signed and administrative scope split" {
+    try std.testing.expect(std.meta.stringToEnum(principal.PrincipalKind, "root") == null);
+    try std.testing.expect(std.meta.stringToEnum(principal.PrincipalKind, "admin") == null);
+
+    var graph = device_graph.Graph.init();
+    const person = user(10);
+    const laptop = device(101);
+    const phone = device(102);
+    const user_identity = signer("spec.identity.user", 0xA1);
+    const laptop_identity = signer("spec.identity.laptop", 0xA2);
+    const phone_identity = signer("spec.identity.phone", 0xA3);
+
+    const root = try graph.ensureUserRoot(person, "owner", user_identity);
+    const laptop_record = try graph.enrollDevice(person, laptop, "laptop", user_identity, laptop_identity, 1);
+    const phone_record = try graph.enrollDevice(person, phone, "phone", user_identity, phone_identity, 2);
+    try std.testing.expect(root.root_signature.isComplete());
+    try std.testing.expect(laptop_record.device_signature.isComplete());
+    try std.testing.expect(laptop_record.enrollment_signature.isComplete());
+    try std.testing.expect(phone_record.device_signature.isComplete());
+    try std.testing.expect(phone_record.enrollment_signature.isComplete());
+    try std.testing.expect(graph.overlayIdFor(laptop) != null);
+    try std.testing.expect(graph.overlayIdFor(phone) != null);
+
+    var policies = policy_object.Directory.init();
+    const user_policy = try policies.create(.{
+        .scope = .user,
+        .subject_id = person.serial,
+        .issuer = policyAuthority(10),
+        .label = "user-defaults",
+        .network_egress_mode = .local_only,
+    }, signer("spec.policy.user", 0xA4));
+    const device_policy = try policies.create(.{
+        .scope = .device,
+        .subject_id = laptop.serial,
+        .issuer = policyAuthority(11),
+        .label = "device-hardening",
+        .install_source_mode = .platform_store_only,
+    }, signer("spec.policy.device", 0xA5));
+    const workspace_policy = try policies.create(.{
+        .scope = .workspace,
+        .subject_id = 500,
+        .issuer = policyAuthority(12),
+        .label = "workspace-sharing",
+        .network_egress_mode = .allow_list,
+        .allowed_sync_destinations = &.{"relay.spec.zigos"},
+    }, signer("spec.policy.workspace", 0xA6));
+    const org_policy = try policies.create(.{
+        .scope = .organization,
+        .subject_id = 77,
+        .issuer = policyAuthority(13),
+        .label = "org-controls",
+        .install_source_mode = .trusted_sources,
+        .allowed_install_sources = &.{ "store:zigos", "repo:corp" },
+        .audit_export_required = true,
+    }, signer("spec.policy.org", 0xA7));
+
+    try std.testing.expect(policies.verify(user_policy.id));
+    try std.testing.expect(policies.verify(device_policy.id));
+    try std.testing.expect(policies.verify(workspace_policy.id));
+    try std.testing.expect(policies.verify(org_policy.id));
+    try std.testing.expectEqual(policy_object.Scope.user, policies.activeForScope(.user, person.serial).?.scope);
+    try std.testing.expectEqual(policy_object.Scope.device, policies.activeForScope(.device, laptop.serial).?.scope);
+    try std.testing.expectEqual(policy_object.Scope.workspace, policies.activeForScope(.workspace, 500).?.scope);
+    try std.testing.expectEqual(policy_object.Scope.organization, policies.activeForScope(.organization, 77).?.scope);
+    try std.testing.expectEqual(policy_object.NetworkEgressMode.local_only, user_policy.network_egress_mode);
+    try std.testing.expect(device_policy.allowsInstallSource("store:zigos"));
+    try std.testing.expect(!device_policy.allowsInstallSource("repo:unsigned"));
+    try std.testing.expect(policies.syncDestinationAllowed(.workspace, 500, "relay.spec.zigos"));
+    try std.testing.expect(!policies.syncDestinationAllowed(.workspace, 500, "relay.other"));
+    try std.testing.expect(org_policy.audit_export_required);
+}
+
+test "spec 13.3 15.2 and 15.3 keep failures explainable restartable and redacted" {
+    const denied = denial_explanation.forPermissionDecision(.screen_capture, .policy_denied);
+    var explanation_buffer: [256]u8 = undefined;
+    const rendered = try denial_explanation.renderToBuffer(&explanation_buffer, denied);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "policy=user-grant-policy") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "missing=screen-capture-capability") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "approval=yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "retry_safe=no") != null);
+
+    const FakeRuntime = struct {
+        activation_count: usize = 0,
+        last_service_id: u64 = 0,
+
+        pub fn activate(self: *@This(), driver: *const driver_service.DriverRecord) !void {
+            self.activation_count += 1;
+            self.last_service_id = driver.service_id;
+        }
+    };
+
+    var supervisor_instance = supervisor.Supervisor.init();
+    const storage_record = try supervisor_instance.register(.storage_object, service(140));
+    try std.testing.expect(supervisor_instance.markHealthy(storage_record.id, 1));
+
+    var directory = driver_service.Directory.init();
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "svc.driver.storage-runtime",
+        .display_name = "Storage Driver Runtime",
+        .publisher = "zigos.spec",
+        .signature = .{
+            .format = "ed25519",
+            .signer = "zigos-spec-driver",
+        },
+    };
+    const storage_driver = try directory.register(.{
+        .service_id = storage_record.id,
+        .owner_task_id = 1_401,
+        .device_id = 0x0000_1F00_0002,
+        .device_class = .storage_controller,
+        .authority = driverAuthority(storage_record.owner, 801, 1_401, 0x0000_1F00_0002, .storage_controller),
+        .bundle = bundle,
+    });
+
+    var runtime = FakeRuntime{};
+    var notifications = notification_center.Center.init();
+    var ledger = event_ledger.Ledger.init();
+    try ledger.recordPermissionDecision(user(12), 700, .screen_capture, false, .policy_denied, 19, "screen capture blocked", true);
+    const recovery = try supervisor_instance.recoverDriverCrash(
+        storage_record.id,
+        &directory,
+        &runtime,
+        &notifications,
+        &ledger,
+        20,
+        0xDEAD,
+        "",
+    );
+
+    try std.testing.expect(!recovery.visible_impact);
+    try std.testing.expectEqual(@as(?u64, null), recovery.notification_id);
+    try std.testing.expectEqual(@as(usize, 1), runtime.activation_count);
+    try std.testing.expectEqual(storage_record.id, runtime.last_service_id);
+    try std.testing.expectEqual(supervisor.ServiceState.healthy, storage_record.state);
+    try std.testing.expectEqual(@as(u16, 1), storage_record.restart_count);
+    try std.testing.expectEqual(@as(u32, 2), storage_driver.restart_generation);
+    try std.testing.expect(notifications.latestVisible(30) == null);
+
+    var export_buffer: [1024]u8 = undefined;
+    const exported = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, exported, "redacted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "policy=user-grant-policy") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "service=storage_object") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "detail=storage driver restarted") != null);
+    try std.testing.expectEqual(contract.ServiceClass.storage_object, ledger.latestKind(.process_crash).?.service_class);
+    try std.testing.expectEqual(contract.ServiceClass.storage_object, ledger.latestKind(.driver_restart).?.service_class);
 }

@@ -1,6 +1,7 @@
 const std = @import("std");
 const abi = @import("abi.zig");
 const manifest = @import("manifest.zig");
+const native_util = @import("util.zig");
 
 pub const MAX_BINDINGS: usize = 24;
 
@@ -9,6 +10,7 @@ pub const Binding = struct {
     owner_task_id: u64,
     endpoint_id: u64,
     interface: manifest.InterfaceDecl,
+    flags: u16 = 0,
 };
 
 pub const Error = error{
@@ -36,6 +38,7 @@ pub const Registry = struct {
         owner_task_id: u64,
         endpoint_id: u64,
         interface: manifest.InterfaceDecl,
+        flags: u16,
     ) Error!void {
         if (self.find(interface.name)) |_| return error.DuplicateInterface;
 
@@ -47,6 +50,7 @@ pub const Registry = struct {
                 .owner_task_id = owner_task_id,
                 .endpoint_id = endpoint_id,
                 .interface = interface,
+                .flags = flags,
             };
             return;
         }
@@ -65,7 +69,7 @@ pub const Registry = struct {
             .interface_hash = hashInterface(binding.interface.name),
             .version_major = binding.interface.version_major,
             .version_minor = binding.interface.version_minor,
-            .flags = 0,
+            .flags = binding.flags,
         };
     }
 
@@ -92,16 +96,12 @@ fn zeroBinding() Binding {
         .owner_task_id = 0,
         .endpoint_id = 0,
         .interface = .{ .name = "" },
+        .flags = 0,
     };
 }
 
 fn hashInterface(name: []const u8) u64 {
-    var hash: u64 = 1469598103934665603;
-    for (name) |byte| {
-        hash ^= byte;
-        hash *%= 1099511628211;
-    }
-    return hash;
+    return native_util.fnv1a64(name);
 }
 
 test "service registry only connects by typed interface declaration" {
@@ -110,7 +110,7 @@ test "service registry only connects by typed interface declaration" {
         .name = "zigos.object.workspace",
         .version_major = 1,
         .version_minor = 2,
-    });
+    }, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
 
     const connection = try registry.connect(.{
         .name = "zigos.object.workspace",
@@ -120,6 +120,7 @@ test "service registry only connects by typed interface declaration" {
     try std.testing.expectEqual(@as(u64, 44), connection.service_id);
     try std.testing.expectEqual(@as(u64, 101), connection.endpoint_id);
     try std.testing.expect(connection.interface_hash != 0);
+    try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
 }
 
 test "service registry rejects duplicate interfaces and incompatible versions" {
@@ -128,11 +129,11 @@ test "service registry rejects duplicate interfaces and incompatible versions" {
         .name = "zigos.object.workspace",
         .version_major = 1,
         .version_minor = 0,
-    });
+    }, 0);
 
     try std.testing.expectError(error.DuplicateInterface, registry.register(45, 8, 102, .{
         .name = "zigos.object.workspace",
-    }));
+    }, 0));
     try std.testing.expectError(error.VersionMismatch, registry.connect(.{
         .name = "zigos.object.workspace",
         .version_major = 2,

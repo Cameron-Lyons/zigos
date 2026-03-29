@@ -1,8 +1,10 @@
 const std = @import("std");
+const native_util = @import("util.zig");
 const object_store = @import("object_store.zig");
 const principal = @import("principal.zig");
 const signing = @import("signing.zig");
 const storage_service = @import("storage_service.zig");
+const copyText = native_util.copyText;
 
 pub const MAX_SYSTEM_IMAGES: usize = 2;
 pub const MAX_LABEL_BYTES: usize = 48;
@@ -94,15 +96,23 @@ pub const Manager = struct {
             .owner = owner,
             .label = state_workspace_label,
         });
+        return initWithWorkspace(storage, owner, state_signer, record.id);
+    }
 
+    pub fn initWithWorkspace(
+        storage: *storage_service.Service,
+        owner: principal.PrincipalId,
+        state_signer: signing.SignerIdentity,
+        workspace_id: u64,
+    ) Error!Manager {
         var manager = Manager{
             .storage = storage,
             .owner = owner,
             .state_signer = state_signer,
-            .workspace_id = record.id,
+            .workspace_id = workspace_id,
         };
 
-        if (storage.resolve(record.id, state_entry_path)) |entry| {
+        if (storage.resolve(workspace_id, state_entry_path)) |entry| {
             const version = storage.store.version(entry.version_id) orelse return error.CorruptState;
             try manager.decode(version.payloadSlice());
             manager.loaded_existing_state = true;
@@ -369,12 +379,6 @@ fn zeroImage() SystemImage {
     };
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
-}
-
 fn parseSlot(text: []const u8) Error!u8 {
     const value = try std.fmt.parseInt(u16, text, 10);
     if (value == empty_slot) return empty_slot;
@@ -390,12 +394,7 @@ fn parseSlotIndex(ascii_digit: u8) ?usize {
 }
 
 fn hashId(seed: u64, text: []const u8) u64 {
-    var hash = seed;
-    for (text) |byte| {
-        hash ^= byte;
-        hash *%= 1099511628211;
-    }
-    return hash;
+    return native_util.fnv1a64WithSeed(seed, text);
 }
 
 fn stateObjectId() u64 {

@@ -1,7 +1,9 @@
 const std = @import("std");
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
+const native_util = @import("util.zig");
 const notification_center = @import("notification_center.zig");
 const principal = @import("principal.zig");
+const copyText = native_util.copyText;
 
 pub const MAX_JOBS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 64;
@@ -44,6 +46,7 @@ pub const JobRecord = struct {
     visibility: Visibility,
     local_only: bool,
     engine: accelerator_scheduler.Engine,
+    claim_id: ?u64,
     notification_id: ?u64,
     label_len: usize,
     label: [MAX_LABEL_BYTES]u8,
@@ -63,7 +66,7 @@ pub const Error = error{
     JobNotFound,
     JobTableFull,
     PrinterRequiresLocalOnly,
-} || notification_center.Error;
+} || accelerator_scheduler.Error || notification_center.Error;
 
 const JobSlot = struct {
     in_use: bool = false,
@@ -81,14 +84,18 @@ pub const Service = struct {
     pub fn submit(
         self: *Service,
         request: JobRequest,
-        scheduler: *const accelerator_scheduler.Controller,
+        scheduler: *accelerator_scheduler.Controller,
         notifications: *notification_center.Center,
         now_ticks: u64,
     ) Error!*JobRecord {
         _ = now_ticks;
         if (request.kind == .print_document and !request.local_only) return error.PrinterRequiresLocalOnly;
 
-        const decision = scheduler.plan(schedulerRequest(request.kind));
+        const claim = try scheduler.claim(.{
+            .task_id = request.task_id,
+            .request = schedulerRequest(request.kind),
+            .require_accelerator = request.kind == .media_export,
+        });
         for (&self.jobs) |*slot| {
             if (slot.in_use) continue;
             slot.in_use = true;
@@ -102,48 +109,61 @@ pub const Service = struct {
             slot.job.state = .running;
             slot.job.visibility = request.visibility;
             slot.job.local_only = request.local_only;
-            slot.job.engine = decision.engine;
+            slot.job.engine = claim.engine;
+            slot.job.claim_id = claim.id;
             slot.job.label_len = copyText(&slot.job.label, request.label);
             slot.job.printer_identity_len = copyText(&slot.job.printer_identity, request.printer_identity);
             if (slot.job.visibility == .task or slot.job.visibility == .user) {
-                const notice = try notifications.post(
-                    request.source_principal,
-                    .policy_notice,
-                    .passive,
-                    request.task_id,
-                    request.label,
-                    0,
-                );
+                const notice = notifications.post(.{
+                    .source = request.source_principal,
+                    .reason = .policy_notice,
+                    .urgency = .passive,
+                    .task_id = request.task_id,
+                    .detail = request.label,
+                    .suppression_policy = .replace_same_source_reason_task,
+                }) catch |err| {
+                    _ = scheduler.releaseClaim(claim.id, null) catch false;
+                    slot.in_use = false;
+                    slot.job = zeroJob();
+                    return err;
+                };
                 slot.job.notification_id = notice.id;
             }
             return &slot.job;
         }
 
+        _ = scheduler.releaseClaim(claim.id, null) catch false;
         return error.JobTableFull;
     }
 
     pub fn complete(
         self: *Service,
         job_id: u64,
+        scheduler: *accelerator_scheduler.Controller,
         notifications: *notification_center.Center,
         now_ticks: u64,
     ) Error!?u64 {
         const job = self.find(job_id) orelse return error.JobNotFound;
         job.state = .completed;
+        if (job.claim_id) |claim_id| {
+            _ = try scheduler.releaseClaim(claim_id, null);
+            job.claim_id = null;
+        }
         if (job.visibility == .hidden) return null;
 
         const reason: notification_center.Reason = switch (job.kind) {
             .media_export => .media_export_complete,
             .print_document => .print_complete,
         };
-        const notice = try notifications.post(
-            job.source_principal,
-            reason,
-            .normal,
-            if (job.visibility == .task) job.task_id else null,
-            job.labelSlice(),
-            now_ticks + 100,
-        );
+        const notice = try notifications.post(.{
+            .source = job.source_principal,
+            .reason = reason,
+            .urgency = .normal,
+            .task_id = if (job.visibility == .task) job.task_id else null,
+            .detail = job.labelSlice(),
+            .expires_at_ticks = now_ticks + 100,
+            .suppression_policy = .replace_same_source_reason_task,
+        });
         job.notification_id = notice.id;
         return notice.id;
     }
@@ -181,6 +201,7 @@ fn zeroJob() JobRecord {
         .visibility = .hidden,
         .local_only = true,
         .engine = .cpu,
+        .claim_id = null,
         .notification_id = null,
         .label_len = 0,
         .label = [_]u8{0} ** MAX_LABEL_BYTES,
@@ -189,11 +210,6 @@ fn zeroJob() JobRecord {
     };
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
-}
 
 test "media print service uses scheduled engines and emits completion notifications" {
     var scheduler = accelerator_scheduler.Controller.init();
@@ -211,6 +227,7 @@ test "media print service uses scheduled engines and emits completion notificati
     }, &scheduler, &notifications, 10);
     try std.testing.expectEqual(accelerator_scheduler.Engine.media, export_job.engine);
     try std.testing.expectEqual(@as(?u64, 1), export_job.notification_id);
+    try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
 
     const print_job = try service.submit(.{
         .kind = .print_document,
@@ -224,10 +241,13 @@ test "media print service uses scheduled engines and emits completion notificati
     }, &scheduler, &notifications, 11);
     try std.testing.expectEqualStrings("printer://office-1", print_job.printerIdentitySlice());
 
-    const completion_id = (try service.complete(print_job.id, &notifications, 20)).?;
+    const completion_id = (try service.complete(print_job.id, &scheduler, &notifications, 20)).?;
     try std.testing.expect(completion_id >= 3);
     try std.testing.expectEqual(JobState.completed, print_job.state);
     try std.testing.expectEqual(notification_center.Reason.print_complete, notifications.latestVisible(20).?.reason);
+    try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
+    _ = try service.complete(export_job.id, &scheduler, &notifications, 21);
+    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 }
 
 test "media print service rejects remote printing and hidden jobs stay silent" {
@@ -255,6 +275,7 @@ test "media print service rejects remote printing and hidden jobs stay silent" {
         .visibility = .hidden,
     }, &scheduler, &notifications, 6);
     try std.testing.expectEqual(@as(?u64, null), hidden.notification_id);
-    try std.testing.expectEqual(@as(?u64, null), try service.complete(hidden.id, &notifications, 7));
+    try std.testing.expectEqual(@as(?u64, null), try service.complete(hidden.id, &scheduler, &notifications, 7));
     try std.testing.expectEqual(@as(usize, 0), notifications.activeCount(7));
+    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 }

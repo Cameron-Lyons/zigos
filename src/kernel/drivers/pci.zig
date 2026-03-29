@@ -100,6 +100,64 @@ pub fn findDevice(vendor_id: u16, device_id: u16) ?PCIDevice {
     return null;
 }
 
+pub fn firstDeviceByClass(class_code: u8) ?PCIDevice {
+    var bus: u16 = 0;
+    while (bus < 256) : (bus += 1) {
+        var device: u8 = 0;
+        while (device < 32) : (device += 1) {
+            var func: u8 = 0;
+            while (func < 8) : (func += 1) {
+                if (checkDevice(@intCast(bus), device, func)) |pci_device| {
+                    if (pci_device.class_code == class_code) {
+                        return pci_device;
+                    }
+
+                    if (func == 0) {
+                        const header_type = readConfig(@intCast(bus), device, 0, 0x0C);
+                        if ((header_type & 0x80) == 0) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return null;
+}
+
+pub fn stableDeviceId(device_info: PCIDevice) u64 {
+    return (@as(u64, device_info.vendor_id) << 32) |
+        (@as(u64, device_info.device_id) << 16) |
+        (@as(u64, device_info.bus) << 8) |
+        (@as(u64, device_info.device) << 3) |
+        @as(u64, device_info.function);
+}
+
+pub fn findDeviceByStableId(target_device_id: u64) ?PCIDevice {
+    var bus: u16 = 0;
+    while (bus < 256) : (bus += 1) {
+        var device: u8 = 0;
+        while (device < 32) : (device += 1) {
+            var func: u8 = 0;
+            while (func < 8) : (func += 1) {
+                if (checkDevice(@intCast(bus), device, func)) |pci_device| {
+                    if (stableDeviceId(pci_device) == target_device_id) return pci_device;
+
+                    if (func == 0) {
+                        const header_type = readConfig(@intCast(bus), device, 0, 0x0C);
+                        if ((header_type & 0x80) == 0) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return null;
+}
+
 pub fn scanBus() void {
     vga.print("Scanning PCI bus...\n");
 
@@ -185,4 +243,3 @@ pub fn writeConfigWord(bus: u8, device: u8, func: u8, offset: u8, value: u16) vo
 pub fn writeConfigDword(bus: u8, device: u8, func: u8, offset: u8, value: u32) void {
     writeConfig(bus, device, func, offset, value);
 }
-

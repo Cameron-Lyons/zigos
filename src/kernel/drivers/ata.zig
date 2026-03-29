@@ -1,4 +1,5 @@
 const x86 = @import("../../arch/x86.zig");
+const common = @import("../boot/common.zig");
 const vga = @import("vga.zig");
 
 const ATA_PRIMARY_BASE: u16 = 0x1F0;
@@ -58,31 +59,12 @@ var primary_slave: ATADevice = undefined;
 var secondary_master: ATADevice = undefined;
 // SAFETY: fully initialized in init() before use
 var secondary_slave: ATADevice = undefined;
-// SAFETY: fully initialized in init() before use
-var probe_primary_master: ATADevice = undefined;
-// SAFETY: fully initialized in init() before use
-var probe_primary_slave: ATADevice = undefined;
-// SAFETY: fully initialized in init() before use
-var probe_secondary_master: ATADevice = undefined;
-// SAFETY: fully initialized in init() before use
-var probe_secondary_slave: ATADevice = undefined;
 
 pub fn init() void {
     vga.print("  - Detecting ATA drives...\n");
 
     primary_master = ATADevice{
         .present = false,
-        .base_port = ATA_PRIMARY_BASE,
-        .ctrl_port = ATA_PRIMARY_CTRL,
-        .is_master = true,
-        .sectors = 0,
-        .model = [_]u8{0} ** 41,
-        .serial = [_]u8{0} ** 21,
-        .supports_lba = false,
-        .supports_lba48 = false,
-    };
-    probe_primary_master = ATADevice{
-        .present = true,
         .base_port = ATA_PRIMARY_BASE,
         .ctrl_port = ATA_PRIMARY_CTRL,
         .is_master = true,
@@ -105,17 +87,6 @@ pub fn init() void {
         .supports_lba = false,
         .supports_lba48 = false,
     };
-    probe_primary_slave = ATADevice{
-        .present = true,
-        .base_port = ATA_PRIMARY_BASE,
-        .ctrl_port = ATA_PRIMARY_CTRL,
-        .is_master = false,
-        .sectors = 0,
-        .model = [_]u8{0} ** 41,
-        .serial = [_]u8{0} ** 21,
-        .supports_lba = false,
-        .supports_lba48 = false,
-    };
     detectDrive(&primary_slave);
 
     secondary_master = ATADevice{
@@ -129,32 +100,10 @@ pub fn init() void {
         .supports_lba = false,
         .supports_lba48 = false,
     };
-    probe_secondary_master = ATADevice{
-        .present = true,
-        .base_port = ATA_SECONDARY_BASE,
-        .ctrl_port = ATA_SECONDARY_CTRL,
-        .is_master = true,
-        .sectors = 0,
-        .model = [_]u8{0} ** 41,
-        .serial = [_]u8{0} ** 21,
-        .supports_lba = false,
-        .supports_lba48 = false,
-    };
     detectDrive(&secondary_master);
 
     secondary_slave = ATADevice{
         .present = false,
-        .base_port = ATA_SECONDARY_BASE,
-        .ctrl_port = ATA_SECONDARY_CTRL,
-        .is_master = false,
-        .sectors = 0,
-        .model = [_]u8{0} ** 41,
-        .serial = [_]u8{0} ** 21,
-        .supports_lba = false,
-        .supports_lba48 = false,
-    };
-    probe_secondary_slave = ATADevice{
-        .present = true,
         .base_port = ATA_SECONDARY_BASE,
         .ctrl_port = ATA_SECONDARY_CTRL,
         .is_master = false,
@@ -182,10 +131,6 @@ pub fn init() void {
         vga.print("    Secondary Slave: ");
         printDriveInfo(&secondary_slave);
     }
-}
-
-pub fn startAsyncWorker() void {
-    // Native-only builds keep ATA access synchronous until storage moves behind a dedicated driver task.
 }
 
 fn detectDrive(device: *ATADevice) void {
@@ -319,6 +264,7 @@ fn writeSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []con
         return ATAError.InvalidParameter;
     }
 
+    common.printBootMarker("ZIGOS:PHASE4:CHECKPOINT:ATA_WRITE_READY_WAIT");
     try waitDriveReady(device);
 
     const drive_select: u8 = if (device.is_master) 0xE0 else 0xF0;
@@ -334,10 +280,12 @@ fn writeSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []con
     x86.outb(device.base_port + ATA_REG_LBA2, @as(u8, @intCast((lba >> 16) & 0xFF)));
 
     x86.outb(device.base_port + ATA_REG_COMMAND, ATA_CMD_WRITE_SECTORS);
+    common.printBootMarker("ZIGOS:PHASE4:CHECKPOINT:ATA_WRITE_COMMAND");
 
     var buffer_offset: usize = 0;
     for (0..count) |_| {
         try waitDataReady(device);
+        common.printBootMarker("ZIGOS:PHASE4:CHECKPOINT:ATA_WRITE_SECTOR");
 
         for (0..256) |_| {
             const word = @as(u16, buffer[buffer_offset]) |
@@ -348,7 +296,9 @@ fn writeSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []con
     }
 
     x86.outb(device.base_port + ATA_REG_COMMAND, ATA_CMD_CACHE_FLUSH);
+    common.printBootMarker("ZIGOS:PHASE4:CHECKPOINT:ATA_WRITE_FLUSH");
     try waitDriveReady(device);
+    common.printBootMarker("ZIGOS:PHASE4:CHECKPOINT:ATA_WRITE_DONE");
 }
 
 pub fn readSectors(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) ATAError!void {
@@ -356,14 +306,6 @@ pub fn readSectors(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) 
 }
 
 pub fn writeSectors(device: *const ATADevice, lba: u64, count: u8, buffer: []const u8) ATAError!void {
-    try writeSectorsSync(device, lba, count, buffer);
-}
-
-pub fn readSectorsAsync(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) ATAError!void {
-    try readSectorsSync(device, lba, count, buffer);
-}
-
-pub fn writeSectorsAsync(device: *const ATADevice, lba: u64, count: u8, buffer: []const u8) ATAError!void {
     try writeSectorsSync(device, lba, count, buffer);
 }
 
@@ -395,13 +337,12 @@ pub fn getSecondarySlave() ?*const ATADevice {
     return null;
 }
 
-pub fn getProbeCandidates() [4]*const ATADevice {
-    return .{
-        if (primary_master.present) &primary_master else &probe_primary_master,
-        if (primary_slave.present) &primary_slave else &probe_primary_slave,
-        if (secondary_master.present) &secondary_master else &probe_secondary_master,
-        if (secondary_slave.present) &secondary_slave else &probe_secondary_slave,
-    };
+pub fn firstDetectedDevice() ?*const ATADevice {
+    return getPrimaryMaster() orelse getPrimarySlave() orelse getSecondaryMaster() orelse getSecondarySlave();
+}
+
+pub fn stableDeviceId(device: *const ATADevice) u64 {
+    return (@as(u64, device.base_port) << 8) | @as(u64, @intFromBool(device.is_master));
 }
 
 fn waitDriveReady(device: *const ATADevice) ATAError!void {

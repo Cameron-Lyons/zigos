@@ -1,10 +1,19 @@
 const std = @import("std");
+const crypto_hash = @import("crypto_hash.zig");
 const manifest = @import("manifest.zig");
+const native_util = @import("util.zig");
 const policy_object = @import("policy_object.zig");
 const signing = @import("signing.zig");
+const copyText = native_util.copyText;
 
 pub const MAX_INSTALLED_BUNDLES: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 64;
+pub const MAX_COMPONENTS_PER_BUNDLE: usize = 8;
+pub const MAX_ASSETS_PER_BUNDLE: usize = 8;
+pub const MAX_COMPONENT_ID_BYTES: usize = 48;
+pub const MAX_COMPONENT_ENTRY_BYTES: usize = 64;
+pub const MAX_ASSET_PATH_BYTES: usize = 64;
+pub const MAX_CONTENT_TYPE_BYTES: usize = 32;
 
 pub const InstallRequest = struct {
     bundle: manifest.BundleManifest,
@@ -22,6 +31,44 @@ pub const InstallResult = struct {
     migration_applied: bool,
 };
 
+pub const StoredComponent = struct {
+    id_len: usize = 0,
+    id: [MAX_COMPONENT_ID_BYTES]u8 = [_]u8{0} ** MAX_COMPONENT_ID_BYTES,
+    entry_len: usize = 0,
+    entry: [MAX_COMPONENT_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_COMPONENT_ENTRY_BYTES,
+    abi: manifest.ComponentAbi = .typed_component_v1,
+
+    pub fn idSlice(self: *const StoredComponent) []const u8 {
+        return self.id[0..self.id_len];
+    }
+
+    pub fn entrySlice(self: *const StoredComponent) []const u8 {
+        return self.entry[0..self.entry_len];
+    }
+};
+
+pub const StoredAsset = struct {
+    path_len: usize = 0,
+    path: [MAX_ASSET_PATH_BYTES]u8 = [_]u8{0} ** MAX_ASSET_PATH_BYTES,
+    content_type_len: usize = 0,
+    content_type: [MAX_CONTENT_TYPE_BYTES]u8 = [_]u8{0} ** MAX_CONTENT_TYPE_BYTES,
+
+    pub fn pathSlice(self: *const StoredAsset) []const u8 {
+        return self.path[0..self.path_len];
+    }
+
+    pub fn contentTypeSlice(self: *const StoredAsset) []const u8 {
+        return self.content_type[0..self.content_type_len];
+    }
+};
+
+pub const LaunchPlan = struct {
+    component_count: usize,
+    components: [MAX_COMPONENTS_PER_BUNDLE]StoredComponent,
+    asset_count: usize,
+    assets: [MAX_ASSETS_PER_BUNDLE]StoredAsset,
+};
+
 pub const InstalledBundle = struct {
     bundle_id_len: usize,
     bundle_id: [MAX_LABEL_BYTES]u8,
@@ -32,11 +79,19 @@ pub const InstalledBundle = struct {
     current_channel: manifest.UpdateChannel,
     current_permission_digest: [32]u8,
     current_schema_version: u32,
+    current_component_count: usize,
+    current_components: [MAX_COMPONENTS_PER_BUNDLE]StoredComponent,
+    current_asset_count: usize,
+    current_assets: [MAX_ASSETS_PER_BUNDLE]StoredAsset,
     previous_version_major: u16,
     previous_version_minor: u16,
     previous_channel: manifest.UpdateChannel,
     previous_permission_digest: [32]u8,
     previous_schema_version: u32,
+    previous_component_count: usize,
+    previous_components: [MAX_COMPONENTS_PER_BUNDLE]StoredComponent,
+    previous_asset_count: usize,
+    previous_assets: [MAX_ASSETS_PER_BUNDLE]StoredAsset,
     rollback_available: bool,
     last_migration_manifest_len: usize,
     last_migration_manifest: [MAX_LABEL_BYTES]u8,
@@ -104,6 +159,10 @@ pub const Service = struct {
             bundle.previous_channel = bundle.current_channel;
             bundle.previous_permission_digest = bundle.current_permission_digest;
             bundle.previous_schema_version = bundle.current_schema_version;
+            bundle.previous_component_count = bundle.current_component_count;
+            bundle.previous_components = bundle.current_components;
+            bundle.previous_asset_count = bundle.current_asset_count;
+            bundle.previous_assets = bundle.current_assets;
             bundle.rollback_available = true;
 
             bundle.publisher_len = copyText(&bundle.publisher, request.bundle.publisher);
@@ -112,6 +171,7 @@ pub const Service = struct {
             bundle.current_channel = request.bundle.update_channel;
             bundle.current_permission_digest = permission_digest;
             bundle.current_schema_version = request.data_schema_version;
+            writeLaunchMetadata(bundle, request.bundle);
             bundle.last_migration_manifest_len = copyText(&bundle.last_migration_manifest, request.migration_manifest);
 
             return .{
@@ -134,6 +194,7 @@ pub const Service = struct {
             slot.bundle.current_channel = request.bundle.update_channel;
             slot.bundle.current_permission_digest = permission_digest;
             slot.bundle.current_schema_version = request.data_schema_version;
+            writeLaunchMetadata(&slot.bundle, request.bundle);
             slot.bundle.last_migration_manifest_len = copyText(&slot.bundle.last_migration_manifest, request.migration_manifest);
             return .{
                 .installed_new = true,
@@ -156,18 +217,30 @@ pub const Service = struct {
         const current_channel = bundle.current_channel;
         const current_permission_digest = bundle.current_permission_digest;
         const current_schema_version = bundle.current_schema_version;
+        const current_component_count = bundle.current_component_count;
+        const current_components = bundle.current_components;
+        const current_asset_count = bundle.current_asset_count;
+        const current_assets = bundle.current_assets;
 
         bundle.current_version_major = bundle.previous_version_major;
         bundle.current_version_minor = bundle.previous_version_minor;
         bundle.current_channel = bundle.previous_channel;
         bundle.current_permission_digest = bundle.previous_permission_digest;
         bundle.current_schema_version = bundle.previous_schema_version;
+        bundle.current_component_count = bundle.previous_component_count;
+        bundle.current_components = bundle.previous_components;
+        bundle.current_asset_count = bundle.previous_asset_count;
+        bundle.current_assets = bundle.previous_assets;
 
         bundle.previous_version_major = current_major;
         bundle.previous_version_minor = current_minor;
         bundle.previous_channel = current_channel;
         bundle.previous_permission_digest = current_permission_digest;
         bundle.previous_schema_version = current_schema_version;
+        bundle.previous_component_count = current_component_count;
+        bundle.previous_components = current_components;
+        bundle.previous_asset_count = current_asset_count;
+        bundle.previous_assets = current_assets;
 
         return .{
             .installed_new = false,
@@ -184,77 +257,98 @@ pub const Service = struct {
         }
         return null;
     }
+
+    pub fn buildLaunchPlan(self: *const Service, bundle_id: []const u8) Error!LaunchPlan {
+        const bundle = self.findConst(bundle_id) orelse return error.BundleNotFound;
+        return .{
+            .component_count = bundle.current_component_count,
+            .components = bundle.current_components,
+            .asset_count = bundle.current_asset_count,
+            .assets = bundle.current_assets,
+        };
+    }
+
+    fn findConst(self: *const Service, bundle_id: []const u8) ?*const InstalledBundle {
+        for (&self.slots) |*slot| {
+            if (slot.in_use and std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id)) return &slot.bundle;
+        }
+        return null;
+    }
 };
 
 pub fn digestBundle(bundle: manifest.BundleManifest) [32]u8 {
-    var digest = [_]u8{0} ** 32;
-    const seeds = [_]u64{
-        0x6A09E667F3BCC909,
-        0xBB67AE8584CAA73B,
-        0x3C6EF372FE94F82B,
-        0xA54FF53A5F1D36F1,
-    };
-    for (seeds, 0..) |seed, index| {
-        var hash = seed;
-        hash = hashBytes(hash, bundle.bundle_id);
-        hash = hashBytes(hash, bundle.display_name);
-        hash = hashBytes(hash, bundle.publisher);
-        hash = hashU64(hash, bundle.version_major);
-        hash = hashU64(hash, bundle.version_minor);
-        hash = hashByte(hash, @intFromEnum(bundle.update_channel));
-        hash = hashBytes(hash, bundle.ai_metadata.model_family);
-        hash = hashByte(hash, @intFromEnum(bundle.ai_metadata.locality));
-        hash = hashByte(hash, if (bundle.ai_metadata.offline_required) 1 else 0);
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "bundle-id", bundle.bundle_id);
+    crypto_hash.updateBytes(&hasher, "display-name", bundle.display_name);
+    crypto_hash.updateBytes(&hasher, "publisher", bundle.publisher);
+    crypto_hash.updateInt(&hasher, "version-major", bundle.version_major);
+    crypto_hash.updateInt(&hasher, "version-minor", bundle.version_minor);
+    crypto_hash.updateEnum(&hasher, "update-channel", bundle.update_channel);
+    crypto_hash.updateBytes(&hasher, "ai-model-family", bundle.ai_metadata.model_family);
+    crypto_hash.updateEnum(&hasher, "ai-locality", bundle.ai_metadata.locality);
+    crypto_hash.updateBool(&hasher, "ai-offline-required", bundle.ai_metadata.offline_required);
 
-        for (bundle.provided_interfaces) |interface| {
-            hash = hashBytes(hash, interface.name);
-            hash = hashU64(hash, interface.version_major);
-            hash = hashU64(hash, interface.version_minor);
-        }
-        for (bundle.consumed_interfaces) |interface| {
-            hash = hashBytes(hash, interface.name);
-            hash = hashU64(hash, interface.version_major);
-            hash = hashU64(hash, interface.version_minor);
-        }
-        for (bundle.requested_permissions) |permission| {
-            const rights_bits: u32 = @bitCast(permission.rights);
-            hash = hashByte(hash, @intFromEnum(permission.kind));
-            hash = hashBytes(hash, permission.resource);
-            hash = hashU64(hash, rights_bits);
-            hash = hashByte(hash, if (permission.required) 1 else 0);
-            hash = hashByte(hash, if (permission.local_only) 1 else 0);
-            hash = hashU64(hash, permission.max_lease_ticks);
-            hash = hashU64(hash, permission.target_id);
-        }
-        for (bundle.background_triggers) |trigger| {
-            hash = hashByte(hash, @intFromEnum(trigger));
-        }
-        std.mem.writeInt(u64, digest[index * 8 ..][0..8], hash, .little);
+    for (bundle.provided_interfaces, 0..) |interface, index| {
+        crypto_hash.updateInt(&hasher, "provided-index", index);
+        crypto_hash.updateBytes(&hasher, "provided-name", interface.name);
+        crypto_hash.updateInt(&hasher, "provided-version-major", interface.version_major);
+        crypto_hash.updateInt(&hasher, "provided-version-minor", interface.version_minor);
     }
-    return digest;
+    for (bundle.consumed_interfaces, 0..) |interface, index| {
+        crypto_hash.updateInt(&hasher, "consumed-index", index);
+        crypto_hash.updateBytes(&hasher, "consumed-name", interface.name);
+        crypto_hash.updateInt(&hasher, "consumed-version-major", interface.version_major);
+        crypto_hash.updateInt(&hasher, "consumed-version-minor", interface.version_minor);
+    }
+    for (bundle.components, 0..) |component, index| {
+        crypto_hash.updateInt(&hasher, "component-index", index);
+        crypto_hash.updateBytes(&hasher, "component-id", component.id);
+        crypto_hash.updateBytes(&hasher, "component-entry", component.entry);
+        crypto_hash.updateEnum(&hasher, "component-abi", component.abi);
+    }
+    for (bundle.assets, 0..) |asset, index| {
+        crypto_hash.updateInt(&hasher, "asset-index", index);
+        crypto_hash.updateBytes(&hasher, "asset-path", asset.path);
+        crypto_hash.updateBytes(&hasher, "asset-content-type", asset.content_type);
+    }
+    for (bundle.requested_permissions, 0..) |permission, index| {
+        const rights_bits: u32 = @bitCast(permission.rights);
+        crypto_hash.updateInt(&hasher, "permission-index", index);
+        crypto_hash.updateEnum(&hasher, "permission-kind", permission.kind);
+        crypto_hash.updateBytes(&hasher, "permission-resource", permission.resource);
+        crypto_hash.updateInt(&hasher, "permission-rights", rights_bits);
+        crypto_hash.updateBool(&hasher, "permission-required", permission.required);
+        crypto_hash.updateBool(&hasher, "permission-local-only", permission.local_only);
+        crypto_hash.updateInt(&hasher, "permission-max-lease", permission.max_lease_ticks);
+        crypto_hash.updateInt(&hasher, "permission-target-id", permission.target_id);
+    }
+    for (bundle.background_tasks, 0..) |task, index| {
+        crypto_hash.updateInt(&hasher, "background-index", index);
+        crypto_hash.updateBytes(&hasher, "background-id", task.id);
+        crypto_hash.updateEnum(&hasher, "background-trigger", task.trigger);
+        crypto_hash.updateInt(&hasher, "background-duration", task.expected_duration_seconds);
+        crypto_hash.updateInt(&hasher, "background-budget-cpu", task.budget.cpu_time_ticks);
+        crypto_hash.updateInt(&hasher, "background-budget-memory", task.budget.memory_bytes);
+        crypto_hash.updateInt(&hasher, "background-budget-shared-memory", task.budget.shared_memory_bytes);
+        crypto_hash.updateEnum(&hasher, "background-network", task.network);
+        crypto_hash.updateEnum(&hasher, "background-visibility", task.visibility);
+    }
+
+    return crypto_hash.finalize(&hasher);
 }
 
 fn permissionDigest(requests: []const manifest.PermissionRequest) [32]u8 {
-    var digest = [_]u8{0} ** 32;
-    const seeds = [_]u64{
-        0x510E527FADE682D1,
-        0x9B05688C2B3E6C1F,
-        0x1F83D9ABFB41BD6B,
-        0x5BE0CD19137E2179,
-    };
-    for (seeds, 0..) |seed, index| {
-        var hash = seed;
-        for (requests) |request| {
-            const rights_bits: u32 = @bitCast(request.rights);
-            hash = hashByte(hash, @intFromEnum(request.kind));
-            hash = hashBytes(hash, request.resource);
-            hash = hashU64(hash, rights_bits);
-            hash = hashByte(hash, if (request.required) 1 else 0);
-            hash = hashByte(hash, if (request.local_only) 1 else 0);
-        }
-        std.mem.writeInt(u64, digest[index * 8 ..][0..8], hash, .little);
+    var hasher = crypto_hash.init();
+    for (requests, 0..) |request, index| {
+        const rights_bits: u32 = @bitCast(request.rights);
+        crypto_hash.updateInt(&hasher, "permission-index", index);
+        crypto_hash.updateEnum(&hasher, "permission-kind", request.kind);
+        crypto_hash.updateBytes(&hasher, "permission-resource", request.resource);
+        crypto_hash.updateInt(&hasher, "permission-rights", rights_bits);
+        crypto_hash.updateBool(&hasher, "permission-required", request.required);
+        crypto_hash.updateBool(&hasher, "permission-local-only", request.local_only);
     }
-    return digest;
+    return crypto_hash.finalize(&hasher);
 }
 
 fn zeroBundle() InstalledBundle {
@@ -268,40 +362,55 @@ fn zeroBundle() InstalledBundle {
         .current_channel = .stable,
         .current_permission_digest = [_]u8{0} ** 32,
         .current_schema_version = 0,
+        .current_component_count = 0,
+        .current_components = [_]StoredComponent{zeroStoredComponent()} ** MAX_COMPONENTS_PER_BUNDLE,
+        .current_asset_count = 0,
+        .current_assets = [_]StoredAsset{zeroStoredAsset()} ** MAX_ASSETS_PER_BUNDLE,
         .previous_version_major = 0,
         .previous_version_minor = 0,
         .previous_channel = .stable,
         .previous_permission_digest = [_]u8{0} ** 32,
         .previous_schema_version = 0,
+        .previous_component_count = 0,
+        .previous_components = [_]StoredComponent{zeroStoredComponent()} ** MAX_COMPONENTS_PER_BUNDLE,
+        .previous_asset_count = 0,
+        .previous_assets = [_]StoredAsset{zeroStoredAsset()} ** MAX_ASSETS_PER_BUNDLE,
         .rollback_available = false,
         .last_migration_manifest_len = 0,
         .last_migration_manifest = [_]u8{0} ** MAX_LABEL_BYTES,
     };
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
-}
 
-fn hashBytes(start: u64, bytes: []const u8) u64 {
-    var hash = start;
-    for (bytes) |byte| {
-        hash ^= byte;
-        hash *%= 1099511628211;
+fn writeLaunchMetadata(bundle: *InstalledBundle, source: manifest.BundleManifest) void {
+    bundle.current_component_count = @min(source.components.len, bundle.current_components.len);
+    var component_index: usize = 0;
+    while (component_index < bundle.current_components.len) : (component_index += 1) {
+        bundle.current_components[component_index] = zeroStoredComponent();
+        if (component_index >= bundle.current_component_count) continue;
+        const component = source.components[component_index];
+        bundle.current_components[component_index].id_len = copyText(&bundle.current_components[component_index].id, component.id);
+        bundle.current_components[component_index].entry_len = copyText(&bundle.current_components[component_index].entry, component.entry);
+        bundle.current_components[component_index].abi = component.abi;
     }
-    return hash;
+
+    bundle.current_asset_count = @min(source.assets.len, bundle.current_assets.len);
+    var asset_index: usize = 0;
+    while (asset_index < bundle.current_assets.len) : (asset_index += 1) {
+        bundle.current_assets[asset_index] = zeroStoredAsset();
+        if (asset_index >= bundle.current_asset_count) continue;
+        const asset = source.assets[asset_index];
+        bundle.current_assets[asset_index].path_len = copyText(&bundle.current_assets[asset_index].path, asset.path);
+        bundle.current_assets[asset_index].content_type_len = copyText(&bundle.current_assets[asset_index].content_type, asset.content_type);
+    }
 }
 
-fn hashByte(start: u64, byte: u8) u64 {
-    return hashBytes(start, &.{byte});
+fn zeroStoredComponent() StoredComponent {
+    return .{};
 }
 
-fn hashU64(start: u64, value: anytype) u64 {
-    var buffer: [8]u8 = [_]u8{0} ** 8;
-    std.mem.writeInt(u64, &buffer, @intCast(value), .little);
-    return hashBytes(start, &buffer);
+fn zeroStoredAsset() StoredAsset {
+    return .{};
 }
 
 test "package service enforces signed manifests policy gated sources updates and rollback" {
@@ -330,12 +439,20 @@ test "package service enforces signed manifests policy gated sources updates and
             .local_only = true,
         },
     };
+    const v1_components = [_]manifest.ExecutionComponentDecl{
+        .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
+    };
+    const v1_assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+    };
     var v1 = manifest.BundleManifest{
         .bundle_id = "app.notes",
         .display_name = "Notes",
         .publisher = "Example Software",
         .version_major = 1,
         .version_minor = 0,
+        .components = &v1_components,
+        .assets = &v1_assets,
         .requested_permissions = &v1_permissions,
         .update_channel = .stable,
     };
@@ -370,12 +487,22 @@ test "package service enforces signed manifests policy gated sources updates and
             .required = false,
         },
     };
+    const v2_components = [_]manifest.ExecutionComponentDecl{
+        .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
+        .{ .id = "notes-sync", .entry = "zigos.notes.sync", .abi = .native_sandbox },
+    };
+    const v2_assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+        .{ .path = "assets/editor.css", .content_type = "text/css" },
+    };
     var v2 = manifest.BundleManifest{
         .bundle_id = "app.notes",
         .display_name = "Notes",
         .publisher = "Example Software",
         .version_major = 1,
         .version_minor = 1,
+        .components = &v2_components,
+        .assets = &v2_assets,
         .requested_permissions = &v2_permissions,
         .update_channel = .stable,
     };
@@ -410,12 +537,21 @@ test "package service enforces signed manifests policy gated sources updates and
     try std.testing.expectEqual(@as(u16, 1), installed.current_version_major);
     try std.testing.expectEqual(@as(u16, 1), installed.current_version_minor);
     try std.testing.expectEqual(@as(u32, 2), installed.current_schema_version);
+    try std.testing.expectEqual(@as(usize, 2), installed.current_component_count);
+    try std.testing.expectEqualStrings("zigos.notes.sync", installed.current_components[1].entrySlice());
+
+    const launch_plan = try service.buildLaunchPlan("app.notes");
+    try std.testing.expectEqual(@as(usize, 2), launch_plan.component_count);
+    try std.testing.expectEqual(@as(usize, 2), launch_plan.asset_count);
+    try std.testing.expectEqualStrings("notes-ui", launch_plan.components[0].idSlice());
+    try std.testing.expectEqualStrings("assets/editor.css", launch_plan.assets[1].pathSlice());
 
     _ = try service.rollback("app.notes");
     const rolled_back = service.find("app.notes").?;
     try std.testing.expectEqual(@as(u16, 1), rolled_back.current_version_major);
     try std.testing.expectEqual(@as(u16, 0), rolled_back.current_version_minor);
     try std.testing.expectEqual(@as(u32, 1), rolled_back.current_schema_version);
+    try std.testing.expectEqual(@as(usize, 1), rolled_back.current_component_count);
 }
 
 test "package service rejects invalid signatures and rollback before any update" {

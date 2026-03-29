@@ -1,8 +1,10 @@
 const std = @import("std");
 const capability = @import("capability.zig");
+const native_util = @import("util.zig");
 const object_store = @import("object_store.zig");
 const signing = @import("signing.zig");
 const workspace = @import("workspace.zig");
+const copyText = native_util.copyText;
 
 pub const AccessMode = enum(u8) {
     read,
@@ -95,11 +97,6 @@ fn normalizePath(path: []const u8) []const u8 {
     return path;
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
-}
 
 test "file bridge is derived, permission-aware, and non-authoritative" {
     var store = object_store.Store.init();

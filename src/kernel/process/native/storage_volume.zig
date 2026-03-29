@@ -1,7 +1,44 @@
+const builtin = @import("builtin");
 const std = @import("std");
+const native_util = @import("util.zig");
 const object_store = @import("object_store.zig");
 const principal = @import("principal.zig");
 const workspace = @import("workspace.zig");
+
+const ata_bridge = if (builtin.target.os.tag == .freestanding)
+    struct {
+        extern fn zigosStorageBootstrapAtaRead(
+            device: *const anyopaque,
+            start_lba: u64,
+            buffer_ptr: [*]u8,
+            buffer_len: usize,
+        ) callconv(.c) bool;
+
+        extern fn zigosStorageBootstrapAtaWrite(
+            device: *const anyopaque,
+            start_lba: u64,
+            buffer_ptr: [*]const u8,
+            buffer_len: usize,
+        ) callconv(.c) bool;
+
+        pub fn read(device: *const anyopaque, start_lba: u64, buffer: []u8) bool {
+            return zigosStorageBootstrapAtaRead(device, start_lba, buffer.ptr, buffer.len);
+        }
+
+        pub fn write(device: *const anyopaque, start_lba: u64, buffer: []const u8) bool {
+            return zigosStorageBootstrapAtaWrite(device, start_lba, buffer.ptr, buffer.len);
+        }
+    }
+else
+    struct {
+        pub fn read(_: *const anyopaque, _: u64, _: []u8) bool {
+            return false;
+        }
+
+        pub fn write(_: *const anyopaque, _: u64, _: []const u8) bool {
+            return false;
+        }
+    };
 
 pub const sector_size: usize = 512;
 pub const slot_sectors: u32 = 384;
@@ -16,7 +53,7 @@ pub const max_signer_bytes: usize = 48;
 
 const volume_magic = "ZG4VOL1";
 const payload_magic = "ZG4STATE";
-const format_version: u16 = 1;
+const format_version: u16 = 2;
 
 pub const Error = error{
     ChecksumMismatch,
@@ -33,17 +70,30 @@ pub const PersistResult = struct {
 
 pub const Backend = struct {
     sector_count: u64,
-    read: *const fn (start_lba: u64, buffer: []u8) bool,
-    write: *const fn (start_lba: u64, buffer: []const u8) bool,
+    read: *const fn (start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool,
+    write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
 };
 
 var io_payload_buffer: [max_payload_bytes]u8 = undefined;
 var sector_buffer: [sector_size]u8 = [_]u8{0} ** sector_size;
-var attached_backend: ?Backend = null;
+var attached_backend_present = false;
+var attached_backend_sector_count: u64 = 0;
+var attached_backend_read: *const fn (u64, [*]u8, usize) callconv(.c) bool = unattachedRead;
+var attached_backend_write: *const fn (u64, [*]const u8, usize) callconv(.c) bool = unattachedWrite;
+var attached_backend_kind: AttachedBackendKind = .none;
+var attached_ata_device: ?*const anyopaque = null;
 var version_signers: [object_store.MAX_VERSIONS][max_signer_bytes]u8 =
     [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** object_store.MAX_VERSIONS;
 var snapshot_signers: [workspace.MAX_SNAPSHOTS][max_signer_bytes]u8 =
     [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** workspace.MAX_SNAPSHOTS;
+
+fn unattachedRead(_: u64, _: [*]u8, _: usize) callconv(.c) bool {
+    return false;
+}
+
+fn unattachedWrite(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
+    return false;
+}
 
 const CursorWriter = struct {
     buffer: []u8,
@@ -129,54 +179,84 @@ const SlotHeader = struct {
     checksum: u64,
 };
 
+const AttachedBackendKind = enum(u8) {
+    none,
+    generic,
+    ata_bootstrap,
+};
+
 pub fn attachBackend(backend: Backend) void {
-    attached_backend = backend;
+    attachBackendFns(backend.sector_count, backend.read, backend.write);
+}
+
+pub fn attachBackendFns(
+    sector_count: u64,
+    read: *const fn (start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool,
+    write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
+) void {
+    attached_backend_present = true;
+    attached_backend_sector_count = sector_count;
+    attached_backend_read = read;
+    attached_backend_write = write;
+    attached_backend_kind = .generic;
+    attached_ata_device = null;
+}
+
+pub fn attachAtaBootstrapDevice(device: *const anyopaque, sector_count: u64) void {
+    attached_backend_present = true;
+    attached_backend_sector_count = sector_count;
+    attached_backend_read = unattachedRead;
+    attached_backend_write = unattachedWrite;
+    attached_backend_kind = .ata_bootstrap;
+    attached_ata_device = device;
 }
 
 pub fn clearAttachedBackend() void {
-    attached_backend = null;
+    attached_backend_present = false;
+    attached_backend_sector_count = 0;
+    attached_backend_read = unattachedRead;
+    attached_backend_write = unattachedWrite;
+    attached_backend_kind = .none;
+    attached_ata_device = null;
 }
 
 pub fn hasAttachedDevice() bool {
-    return attached_backend != null;
+    return attached_backend_present;
 }
 
 pub fn clearAttachedVolume() void {
     if (!hasAttachedDevice()) return;
-    const backend = attached_backend.?;
-    if (backend.sector_count < required_device_sectors) return;
+    if (attached_backend_sector_count < required_device_sectors) return;
     @memset(sector_buffer[0..], 0);
     var slot_index: u32 = 0;
     while (slot_index < slot_count) : (slot_index += 1) {
         const header_lba = slotBaseLba(slot_index);
-        if (!backend.write(header_lba, sector_buffer[0..])) return;
+        if (!writeAttachedRange(header_lba, sector_buffer[0..])) return;
     }
 }
 
 pub fn loadFromVolume(store: *object_store.Store, workspaces: *workspace.Directory) bool {
     if (!hasAttachedDevice()) return false;
-    const backend = attached_backend.?;
-    if (backend.sector_count < required_device_sectors) return false;
+    if (attached_backend_sector_count < required_device_sectors) return false;
 
-    const candidate = (findLatestBackendSlot(backend) catch return false) orelse return false;
-    const payload = readBackendPayload(backend, candidate.slot_index, candidate.header.payload_len) catch return false;
+    const candidate = (findLatestBackendSlot() catch return false) orelse return false;
+    const payload = readBackendPayload(candidate.slot_index, candidate.header.payload_len) catch return false;
     deserializeState(store, workspaces, payload) catch return false;
     return true;
 }
 
 pub fn saveToVolume(store: *const object_store.Store, workspaces: *const workspace.Directory) !PersistResult {
     if (!hasAttachedDevice()) return .{ .generation = 0 };
-    const backend = attached_backend.?;
-    if (backend.sector_count < required_device_sectors) return error.ImageTooSmall;
+    if (attached_backend_sector_count < required_device_sectors) return error.ImageTooSmall;
 
-    const current = findLatestBackendSlot(backend) catch null;
+    const current = findLatestBackendSlot() catch null;
     const payload_len = try serializeState(store, workspaces, io_payload_buffer[0..]);
     const next_slot_index: u32 = if (current) |slot| (slot.slot_index + 1) % slot_count else 0;
     const generation: u64 = if (current) |slot| slot.header.generation + 1 else 1;
     const checksum = checksumBytes(io_payload_buffer[0..payload_len]);
 
-    try writeBackendPayload(backend, next_slot_index, io_payload_buffer[0..payload_len]);
-    try writeBackendHeader(backend, next_slot_index, .{
+    try writeBackendPayload(next_slot_index, io_payload_buffer[0..payload_len]);
+    try writeBackendHeader(next_slot_index, .{
         .generation = generation,
         .payload_len = @intCast(payload_len),
         .checksum = checksum,
@@ -184,7 +264,6 @@ pub fn saveToVolume(store: *const object_store.Store, workspaces: *const workspa
 
     return .{ .generation = generation };
 }
-
 pub fn saveToImage(image: []u8, store: *const object_store.Store, workspaces: *const workspace.Directory) !PersistResult {
     if (image.len < image_bytes) return error.ImageTooSmall;
     const current = findLatestImageSlot(image) catch null;
@@ -245,7 +324,7 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
     }
 
     for (workspaces.workspaces) |slot| {
-        if (!slot.in_use) continue;
+        if (!persistableWorkspaceSlot(slot)) continue;
         try writer.writeU64(slot.workspace.id);
         try writePrincipal(&writer, slot.workspace.owner);
         try writeText(&writer, slot.workspace.labelSlice());
@@ -265,7 +344,7 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
     }
 
     for (workspaces.snapshots) |slot| {
-        if (!slot.in_use) continue;
+        if (!persistableSnapshotSlot(slot)) continue;
         try writer.writeU64(slot.snapshot.id);
         try writer.writeU64(slot.snapshot.workspace_id);
         try writer.writeU32(slot.snapshot.generation);
@@ -311,7 +390,7 @@ fn deserializeState(store: *object_store.Store, workspaces: *workspace.Directory
         const slot = nextObjectSlot(store) orelse return error.CorruptImage;
         slot.in_use = true;
         slot.object.id = try reader.readU64();
-        slot.object.object_type = @enumFromInt(try reader.readByte());
+        slot.object.object_type = try parseObjectType(try reader.readByte());
         slot.object.latest_version_id = try reader.readU64();
         slot.object.version_count = try reader.readU16();
     }
@@ -322,7 +401,7 @@ fn deserializeState(store: *object_store.Store, workspaces: *workspace.Directory
         store.versions[slot_index].version.id = try reader.readU64();
         store.versions[slot_index].version.object_id = try reader.readU64();
         store.versions[slot_index].version.previous_version_id = try reader.readU64();
-        store.versions[slot_index].version.object_type = @enumFromInt(try reader.readByte());
+        store.versions[slot_index].version.object_type = try parseObjectType(try reader.readByte());
         try reader.readBytes(&store.versions[slot_index].version.address);
         store.versions[slot_index].version.metadata = try readMetadata(&reader, &version_signers[slot_index]);
         store.versions[slot_index].version.payload_len = @intCast(try reader.readU16());
@@ -391,12 +470,18 @@ fn readMetadata(reader: *CursorReader, signer_storage: *[max_signer_bytes]u8) Er
 
 fn writeSignature(writer: *CursorWriter, signature: anytype) Error!void {
     if (signature.isPresent()) {
+        const signer = if (signature.signer.len <= max_signer_bytes)
+            signature.signer
+        else
+            "invalid-signer";
+        const public_key_len = @min(signature.public_key_len, signature.public_key.len);
+        const value_len = @min(signature.value_len, signature.value.len);
         try writer.writeByte(1);
-        try writeText(writer, signature.signer);
-        try writer.writeU16(@intCast(signature.public_key_len));
-        try writer.writeBytes(signature.publicKeySlice());
-        try writer.writeU16(@intCast(signature.value_len));
-        try writer.writeBytes(signature.valueSlice());
+        try writeText(writer, signer);
+        try writer.writeU16(@intCast(public_key_len));
+        try writer.writeBytes(signature.public_key[0..public_key_len]);
+        try writer.writeU16(@intCast(value_len));
+        try writer.writeBytes(signature.value[0..value_len]);
         return;
     }
     try writer.writeByte(0);
@@ -445,7 +530,7 @@ fn writePrincipal(writer: *CursorWriter, principal_id: principal.PrincipalId) Er
 
 fn readPrincipal(reader: *CursorReader) Error!principal.PrincipalId {
     return .{
-        .kind = @enumFromInt(try reader.readByte()),
+        .kind = try parsePrincipalKind(try reader.readByte()),
         .serial = try reader.readU64(),
     };
 }
@@ -462,8 +547,60 @@ fn readEntry(reader: *CursorReader) Error!workspace.Entry {
     readTextInto(reader, &entry.path, &entry.path_len) catch return error.CorruptImage;
     entry.object_id = try reader.readU64();
     entry.version_id = try reader.readU64();
-    entry.object_type = @enumFromInt(try reader.readByte());
+    entry.object_type = try parseObjectType(try reader.readByte());
     return entry;
+}
+
+fn parseObjectType(value: u8) Error!object_store.ObjectType {
+    return switch (value) {
+        @intFromEnum(object_store.ObjectType.blob) => .blob,
+        @intFromEnum(object_store.ObjectType.document) => .document,
+        @intFromEnum(object_store.ObjectType.collection) => .collection,
+        @intFromEnum(object_store.ObjectType.secret) => .secret,
+        @intFromEnum(object_store.ObjectType.media_asset) => .media_asset,
+        @intFromEnum(object_store.ObjectType.model_artifact) => .model_artifact,
+        @intFromEnum(object_store.ObjectType.event_stream) => .event_stream,
+        else => error.CorruptImage,
+    };
+}
+
+fn parsePrincipalKind(value: u8) Error!principal.PrincipalKind {
+    return switch (value) {
+        @intFromEnum(principal.PrincipalKind.user) => .user,
+        @intFromEnum(principal.PrincipalKind.device) => .device,
+        @intFromEnum(principal.PrincipalKind.app) => .app,
+        @intFromEnum(principal.PrincipalKind.service) => .service,
+        @intFromEnum(principal.PrincipalKind.policy_authority) => .policy_authority,
+        else => error.CorruptImage,
+    };
+}
+
+fn parseShareNetworkScope(value: u8) Error!workspace.ShareNetworkScope {
+    return switch (value) {
+        @intFromEnum(workspace.ShareNetworkScope.local_only) => .local_only,
+        @intFromEnum(workspace.ShareNetworkScope.trusted_overlay) => .trusted_overlay,
+        @intFromEnum(workspace.ShareNetworkScope.relay_assisted) => .relay_assisted,
+        @intFromEnum(workspace.ShareNetworkScope.unrestricted) => .unrestricted,
+        else => error.CorruptImage,
+    };
+}
+
+fn parseResharePolicy(value: u8) Error!workspace.ResharePolicy {
+    return switch (value) {
+        @intFromEnum(workspace.ResharePolicy.owner_only) => .owner_only,
+        @intFromEnum(workspace.ResharePolicy.admin_only) => .admin_only,
+        @intFromEnum(workspace.ResharePolicy.grantee_allowed) => .grantee_allowed,
+        else => error.CorruptImage,
+    };
+}
+
+fn parseAuditVisibility(value: u8) Error!workspace.AuditVisibility {
+    return switch (value) {
+        @intFromEnum(workspace.AuditVisibility.owner_only) => .owner_only,
+        @intFromEnum(workspace.AuditVisibility.shared_participants) => .shared_participants,
+        @intFromEnum(workspace.AuditVisibility.organization_policy) => .organization_policy,
+        else => error.CorruptImage,
+    };
 }
 
 fn writeShareGrant(writer: *CursorWriter, grant: workspace.ShareGrant) Error!void {
@@ -472,8 +609,12 @@ fn writeShareGrant(writer: *CursorWriter, grant: workspace.ShareGrant) Error!voi
     if (grant.can_read) flags |= 1 << 0;
     if (grant.can_write) flags |= 1 << 1;
     if (grant.can_export) flags |= 1 << 2;
-    if (grant.local_only) flags |= 1 << 3;
+    if (grant.can_admin) flags |= 1 << 3;
     try writer.writeByte(flags);
+    try writer.writeByte(@intFromEnum(grant.network_scope));
+    try writer.writeByte(@intFromEnum(grant.reshare_policy));
+    try writer.writeByte(@intFromEnum(grant.audit_visibility));
+    try writer.writeU64(grant.expires_at_ticks);
 }
 
 fn readShareGrant(reader: *CursorReader) Error!workspace.ShareGrant {
@@ -484,14 +625,18 @@ fn readShareGrant(reader: *CursorReader) Error!workspace.ShareGrant {
         .can_read = (flags & (1 << 0)) != 0,
         .can_write = (flags & (1 << 1)) != 0,
         .can_export = (flags & (1 << 2)) != 0,
-        .local_only = (flags & (1 << 3)) != 0,
+        .can_admin = (flags & (1 << 3)) != 0,
+        .network_scope = try parseShareNetworkScope(try reader.readByte()),
+        .reshare_policy = try parseResharePolicy(try reader.readByte()),
+        .audit_visibility = try parseAuditVisibility(try reader.readByte()),
+        .expires_at_ticks = try reader.readU64(),
     };
 }
 
 fn workspaceCount(workspaces: *const workspace.Directory) usize {
     var count: usize = 0;
     for (workspaces.workspaces) |slot| {
-        if (slot.in_use) count += 1;
+        if (persistableWorkspaceSlot(slot)) count += 1;
     }
     return count;
 }
@@ -499,9 +644,23 @@ fn workspaceCount(workspaces: *const workspace.Directory) usize {
 fn snapshotCount(workspaces: *const workspace.Directory) usize {
     var count: usize = 0;
     for (workspaces.snapshots) |slot| {
-        if (slot.in_use) count += 1;
+        if (persistableSnapshotSlot(slot)) count += 1;
     }
     return count;
+}
+
+fn persistableWorkspaceSlot(slot: anytype) bool {
+    if (!slot.in_use) return false;
+    return slot.workspace.label_len <= slot.workspace.label.len and
+        slot.workspace.entry_count <= workspace.MAX_WORKSPACE_ENTRIES and
+        slot.workspace.share_grant_count <= workspace.MAX_SHARE_GRANTS and
+        slot.workspace.deleted_count <= workspace.MAX_RECOVERABLE_DELETES;
+}
+
+fn persistableSnapshotSlot(slot: anytype) bool {
+    if (!slot.in_use) return false;
+    return slot.snapshot.label_len <= slot.snapshot.label.len and
+        slot.snapshot.entry_count <= workspace.MAX_WORKSPACE_ENTRIES;
 }
 
 fn nextObjectSlot(store: *object_store.Store) ?*@TypeOf(store.objects[0]) {
@@ -567,12 +726,7 @@ fn zeroSnapshotRecord() workspace.SnapshotRecord {
 }
 
 fn checksumBytes(bytes: []const u8) u64 {
-    var hash: u64 = 0xCBF29CE484222325;
-    for (bytes) |byte| {
-        hash ^= byte;
-        hash *%= 1099511628211;
-    }
-    return hash;
+    return native_util.fnv1a64(bytes);
 }
 
 const SlotCandidate = struct {
@@ -594,12 +748,12 @@ fn findLatestImageSlot(image: []const u8) Error!?SlotCandidate {
     return best;
 }
 
-fn findLatestBackendSlot(backend: Backend) Error!?SlotCandidate {
+fn findLatestBackendSlot() Error!?SlotCandidate {
     var best: ?SlotCandidate = null;
     var slot_index: u32 = 0;
     while (slot_index < slot_count) : (slot_index += 1) {
-        const header = readBackendHeader(backend, slot_index) catch continue;
-        const payload = readBackendPayload(backend, slot_index, header.payload_len) catch continue;
+        const header = readBackendHeader(slot_index) catch continue;
+        const payload = readBackendPayload(slot_index, header.payload_len) catch continue;
         if (checksumBytes(payload) != header.checksum) continue;
         if (best == null or header.generation > best.?.header.generation) {
             best = .{ .slot_index = slot_index, .header = header };
@@ -638,38 +792,66 @@ fn readImagePayload(image: []const u8, slot_index: u32, payload_len: u32, buffer
     return buffer[0..payload_len_usize];
 }
 
-fn readBackendHeader(backend: Backend, slot_index: u32) Error!SlotHeader {
+fn readBackendHeader(slot_index: u32) Error!SlotHeader {
     @memset(sector_buffer[0..], 0);
     const lba = slotBaseLba(slot_index);
-    if (!backend.read(lba, sector_buffer[0..])) return error.CorruptImage;
+    if (!readAttachedRange(lba, sector_buffer[0..])) return error.CorruptImage;
     return parseHeader(sector_buffer[0..]);
 }
 
-fn writeBackendHeader(backend: Backend, slot_index: u32, header: SlotHeader) Error!void {
+fn writeBackendHeader(slot_index: u32, header: SlotHeader) Error!void {
     @memset(sector_buffer[0..], 0);
     try encodeHeader(sector_buffer[0..], header);
     const lba = slotBaseLba(slot_index);
-    if (!backend.write(lba, sector_buffer[0..])) return error.CorruptImage;
+    if (!writeAttachedRange(lba, sector_buffer[0..])) return error.CorruptImage;
 }
 
-fn writeBackendPayload(backend: Backend, slot_index: u32, payload: []const u8) Error!void {
+fn writeBackendPayload(slot_index: u32, payload: []const u8) Error!void {
     if (payload.len > max_payload_bytes) return error.NoSpaceLeft;
     const sectors = sectorCountForPayload(payload.len);
     @memset(io_payload_buffer[payload.len .. sectors * sector_size], 0);
     const lba = slotBaseLba(slot_index) + header_sectors;
-    if (!backend.write(lba, io_payload_buffer[0 .. sectors * sector_size])) return error.CorruptImage;
+    const bytes = sectors * sector_size;
+    if (!writeAttachedRange(lba, io_payload_buffer[0..bytes])) return error.CorruptImage;
 }
 
-fn readBackendPayload(backend: Backend, slot_index: u32, payload_len: u32) Error![]const u8 {
+fn readBackendPayload(slot_index: u32, payload_len: u32) Error![]const u8 {
     if (payload_len == 0 or payload_len > max_payload_bytes) return error.CorruptImage;
     const sectors = sectorCountForPayload(payload_len);
     const lba = slotBaseLba(slot_index) + header_sectors;
-    if (!backend.read(lba, io_payload_buffer[0 .. sectors * sector_size])) return error.CorruptImage;
+    const bytes = sectors * sector_size;
+    if (!readAttachedRange(lba, io_payload_buffer[0..bytes])) return error.CorruptImage;
     return io_payload_buffer[0..@as(usize, @intCast(payload_len))];
 }
 
 fn sectorCountForPayload(payload_len: usize) usize {
     return @max(1, (payload_len + sector_size - 1) / sector_size);
+}
+
+fn readAttachedRange(start_lba: u64, buffer: []u8) bool {
+    return switch (attached_backend_kind) {
+        .none => false,
+        .generic => attached_backend_read(start_lba, buffer.ptr, buffer.len),
+        .ata_bootstrap => ataReadRange(start_lba, buffer),
+    };
+}
+
+fn writeAttachedRange(start_lba: u64, buffer: []const u8) bool {
+    return switch (attached_backend_kind) {
+        .none => false,
+        .generic => attached_backend_write(start_lba, buffer.ptr, buffer.len),
+        .ata_bootstrap => ataWriteRange(start_lba, buffer),
+    };
+}
+
+fn ataReadRange(start_lba: u64, buffer: []u8) bool {
+    const device = attached_ata_device orelse return false;
+    return ata_bridge.read(device, start_lba, buffer);
+}
+
+fn ataWriteRange(start_lba: u64, buffer: []const u8) bool {
+    const device = attached_ata_device orelse return false;
+    return ata_bridge.write(device, start_lba, buffer);
 }
 
 fn encodeHeader(buffer: []u8, header: SlotHeader) Error!void {

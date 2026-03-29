@@ -1,6 +1,7 @@
 const std = @import("std");
 const shared = @import("build/shared.zig");
 const kernel_build = @import("build/kernel.zig");
+const userspace_build = @import("build/userspace.zig");
 
 pub const BootProfile = shared.BootProfile;
 
@@ -13,6 +14,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     const optimize = b.standardOptimizeOption(.{});
+    const userspace_images = userspace_build.addUserspaceArtifacts(b, target, optimize);
 
     const zigos_native_kernel = kernel_build.addKernelArtifact(
         b,
@@ -20,13 +22,16 @@ pub fn build(b: *std.Build) void {
         optimize,
         "kernel-zigos-native.elf",
         .zigos_native,
+        userspace_images.archive_module,
     );
 
     const kernel_step = b.step("kernel", "Build the native-only Zigos kernel");
     kernel_step.dependOn(zigos_native_kernel.install_step);
+    kernel_step.dependOn(userspace_images.step);
 
     const zigos_native_kernel_step = b.step("kernel-zigos-native", "Build the Zigos native bootstrap kernel");
     zigos_native_kernel_step.dependOn(zigos_native_kernel.install_step);
+    zigos_native_kernel_step.dependOn(userspace_images.step);
 
     const native_store_cmd = b.addSystemCommand(&.{
         "bash",
@@ -58,6 +63,7 @@ pub fn build(b: *std.Build) void {
     });
     zigos_native_qemu_cmd.step.dependOn(zigos_native_kernel.install_step);
     zigos_native_qemu_cmd.step.dependOn(&native_store_cmd.step);
+    zigos_native_qemu_cmd.step.dependOn(userspace_images.step);
 
     const run_step = b.step("run", "Run the native-only Zigos kernel in QEMU");
     run_step.dependOn(&zigos_native_qemu_cmd.step);
@@ -73,6 +79,7 @@ pub fn build(b: *std.Build) void {
         shared.native_store_smoke_image_path,
     });
     zigos_native_smoke_test_cmd.step.dependOn(zigos_native_kernel.install_step);
+    zigos_native_smoke_test_cmd.step.dependOn(userspace_images.step);
 
     const zigos_native_smoke_test_step = b.step("zigos-native-smoke-test", "Run the Zigos native bootstrap smoke test in QEMU");
     zigos_native_smoke_test_step.dependOn(&zigos_native_smoke_test_cmd.step);
@@ -92,6 +99,7 @@ pub fn build(b: *std.Build) void {
         "build/iso",
     });
     iso_cmd.step.dependOn(zigos_native_kernel.install_step);
+    iso_cmd.step.dependOn(userspace_images.step);
 
     const iso_step = b.step("iso", "Build a bootable native-only ISO");
     iso_step.dependOn(&iso_cmd.step);

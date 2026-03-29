@@ -1,7 +1,10 @@
 const std = @import("std");
+const crypto_hash = @import("crypto_hash.zig");
 const manifest = @import("manifest.zig");
+const native_util = @import("util.zig");
 const principal = @import("principal.zig");
 const signing = @import("signing.zig");
+const copyText = native_util.copyText;
 
 pub const MAX_POLICIES: usize = 16;
 pub const MAX_ALLOW_LIST: usize = 8;
@@ -258,38 +261,30 @@ fn nextGeneration(self: *const Directory, scope: Scope, subject_id: u64) u32 {
 }
 
 fn policyDigest(policy: *const PolicyObject) [32]u8 {
-    var digest = [_]u8{0} ** 32;
-    const seeds = [_]u64{
-        0xCBF29CE484222325,
-        0x9E3779B185EBCA87,
-        0xD6E8FEB86659FD93,
-        0x94D049BB133111EB,
-    };
-    for (seeds, 0..) |seed, index| {
-        var hash = seed;
-        hash = hashByte(hash, @intFromEnum(policy.scope));
-        hash = hashByte(hash, @intFromEnum(policy.issuer.kind));
-        hash = hashU64(hash, policy.subject_id);
-        hash = hashU64(hash, policy.issuer.serial);
-        hash = hashBytes(hash, policy.labelSlice());
-        hash = hashByte(hash, @intFromEnum(policy.install_source_mode));
-        hash = hashByte(hash, @intFromEnum(policy.network_egress_mode));
-        hash = hashByte(hash, if (policy.removable_storage_allowed) 1 else 0);
-        hash = hashByte(hash, if (policy.screen_capture_allowed) 1 else 0);
-        hash = hashU64(hash, policy.retention_days);
-        hash = hashByte(hash, if (policy.audit_export_required) 1 else 0);
+    var hasher = crypto_hash.init();
+    crypto_hash.updateEnum(&hasher, "scope", policy.scope);
+    crypto_hash.updateEnum(&hasher, "issuer-kind", policy.issuer.kind);
+    crypto_hash.updateInt(&hasher, "subject-id", policy.subject_id);
+    crypto_hash.updateInt(&hasher, "issuer-serial", policy.issuer.serial);
+    crypto_hash.updateBytes(&hasher, "label", policy.labelSlice());
+    crypto_hash.updateEnum(&hasher, "install-source-mode", policy.install_source_mode);
+    crypto_hash.updateEnum(&hasher, "network-egress-mode", policy.network_egress_mode);
+    crypto_hash.updateBool(&hasher, "removable-storage-allowed", policy.removable_storage_allowed);
+    crypto_hash.updateBool(&hasher, "screen-capture-allowed", policy.screen_capture_allowed);
+    crypto_hash.updateInt(&hasher, "retention-days", policy.retention_days);
+    crypto_hash.updateBool(&hasher, "audit-export-required", policy.audit_export_required);
 
-        var allow_index: usize = 0;
-        while (allow_index < policy.allowed_install_source_count) : (allow_index += 1) {
-            hash = hashBytes(hash, policy.allowed_install_sources[allow_index][0..policy.allowed_install_source_lens[allow_index]]);
-        }
-        var sync_index: usize = 0;
-        while (sync_index < policy.allowed_sync_destination_count) : (sync_index += 1) {
-            hash = hashBytes(hash, policy.allowed_sync_destinations[sync_index][0..policy.allowed_sync_destination_lens[sync_index]]);
-        }
-        std.mem.writeInt(u64, digest[index * 8 ..][0..8], hash, .little);
+    var allow_index: usize = 0;
+    while (allow_index < policy.allowed_install_source_count) : (allow_index += 1) {
+        crypto_hash.updateInt(&hasher, "install-source-index", allow_index);
+        crypto_hash.updateBytes(&hasher, "install-source", policy.allowed_install_sources[allow_index][0..policy.allowed_install_source_lens[allow_index]]);
     }
-    return digest;
+    var sync_index: usize = 0;
+    while (sync_index < policy.allowed_sync_destination_count) : (sync_index += 1) {
+        crypto_hash.updateInt(&hasher, "sync-destination-index", sync_index);
+        crypto_hash.updateBytes(&hasher, "sync-destination", policy.allowed_sync_destinations[sync_index][0..policy.allowed_sync_destination_lens[sync_index]]);
+    }
+    return crypto_hash.finalize(&hasher);
 }
 
 fn listContains(items: []const [MAX_LABEL_BYTES]u8, lens: []const usize, needle: []const u8) bool {
@@ -299,30 +294,6 @@ fn listContains(items: []const [MAX_LABEL_BYTES]u8, lens: []const usize, needle:
     return false;
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
-}
-
-fn hashBytes(start: u64, bytes: []const u8) u64 {
-    var hash = start;
-    for (bytes) |byte| {
-        hash ^= byte;
-        hash *%= 1099511628211;
-    }
-    return hash;
-}
-
-fn hashByte(start: u64, byte: u8) u64 {
-    return hashBytes(start, &.{byte});
-}
-
-fn hashU64(start: u64, value: u64) u64 {
-    var buffer: [8]u8 = undefined;
-    std.mem.writeInt(u64, &buffer, value, .little);
-    return hashBytes(start, &buffer);
-}
 
 test "policy objects remain signed scoped and enforce enterprise controls" {
     var directory = Directory.init();

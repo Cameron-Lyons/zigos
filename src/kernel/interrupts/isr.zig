@@ -35,6 +35,7 @@ extern fn isr29() void;
 extern fn isr30() void;
 extern fn isr31() void;
 extern fn isr128() void;
+extern fn isr129() void;
 
 extern fn irq0() void;
 extern fn irq1() void;
@@ -108,6 +109,12 @@ const exception_messages = [_][]const u8{
 };
 
 pub export fn isrHandler(regs: *Registers) void {
+    if (custom_handlers[regs.int_no]) |handler| {
+        const frame: *InterruptFrame = @ptrCast(regs);
+        handler(frame);
+        return;
+    }
+
     if (regs.int_no == 14) {
         const paging = @import("../memory/paging.zig");
         paging.page_fault_handler(regs);
@@ -125,7 +132,6 @@ pub export fn isrHandler(regs: *Registers) void {
         }
     }
 }
-
 pub const InterruptFrame = Registers;
 pub const InterruptHandler = *const fn (regs: *InterruptFrame) void;
 
@@ -207,6 +213,7 @@ pub fn init() void {
 
 
     idt.setGate(128, &isr128, 0x08, 0x8E | 0x60);
+    idt.setGate(129, &isr129, 0x08, 0x8E | 0x60);
 
     idt.init();
 }

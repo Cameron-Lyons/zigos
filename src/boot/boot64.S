@@ -7,8 +7,12 @@ multiboot_header:
 
 .section .bss
 .align 16
+.equ BOOT_STACK_SIZE, 262144
 stack_bottom:
-    .skip 16384
+    /* The native session bootstrap now carries substantial typed runtime and
+       crypto state before the scheduler hands off to later tasks. Keep the
+       BSP boot stack comfortably above the compiled session_manager frame. */
+    .skip BOOT_STACK_SIZE
 stack_top:
 
 .section .text

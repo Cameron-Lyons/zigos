@@ -1,11 +1,21 @@
 const std = @import("std");
+const crypto_hash = @import("crypto_hash.zig");
 const manifest = @import("manifest.zig");
 const measured_boot = @import("measured_boot.zig");
+const native_util = @import("util.zig");
 const principal = @import("principal.zig");
 const signing = @import("signing.zig");
+const copyText = native_util.copyText;
 
 pub const MAX_REMOTE_PARTY_BYTES: usize = 64;
 pub const MAX_NONCE_BYTES: usize = 32;
+pub const MAX_ROOT_LABEL_BYTES: usize = 48;
+
+pub const KeyOrigin = enum(u8) {
+    software,
+    secure_enclave,
+    tpm,
+};
 
 pub const Statement = struct {
     device: principal.PrincipalId,
@@ -19,6 +29,9 @@ pub const Statement = struct {
     remote_party: [MAX_REMOTE_PARTY_BYTES]u8,
     nonce_len: usize,
     nonce: [MAX_NONCE_BYTES]u8,
+    key_origin: KeyOrigin,
+    root_label_len: usize,
+    root_label: [MAX_ROOT_LABEL_BYTES]u8,
     root_digest: [32]u8,
     signature: manifest.Signature,
 
@@ -29,6 +42,15 @@ pub const Statement = struct {
     pub fn nonceSlice(self: *const Statement) []const u8 {
         return self.nonce[0..self.nonce_len];
     }
+
+    pub fn rootLabelSlice(self: *const Statement) []const u8 {
+        return self.root_label[0..self.root_label_len];
+    }
+};
+
+pub const Error = error{
+    RootNotProvisioned,
+    UserVisibilityRequired,
 };
 
 pub const Service = struct {
@@ -36,9 +58,21 @@ pub const Service = struct {
     visible_request_count: usize = 0,
     last_remote_party_len: usize = 0,
     last_remote_party: [MAX_REMOTE_PARTY_BYTES]u8 = [_]u8{0} ** MAX_REMOTE_PARTY_BYTES,
+    has_provisioned_root: bool = false,
+    root_origin: KeyOrigin = .software,
+    root_label_len: usize = 0,
+    root_label: [MAX_ROOT_LABEL_BYTES]u8 = [_]u8{0} ** MAX_ROOT_LABEL_BYTES,
+    root_seed: [32]u8 = [_]u8{0} ** 32,
 
     pub fn init(device: principal.PrincipalId) Service {
         return .{ .device = device };
+    }
+
+    pub fn provisionRoot(self: *Service, signer: signing.SignerIdentity, origin: KeyOrigin) void {
+        self.has_provisioned_root = true;
+        self.root_origin = origin;
+        self.root_label_len = copyText(&self.root_label, signer.label);
+        self.root_seed = signer.seed;
     }
 
     pub fn attest(
@@ -48,6 +82,34 @@ pub const Service = struct {
         nonce: []const u8,
         signer: signing.SignerIdentity,
         user_visible: bool,
+    ) !Statement {
+        return self.attestInternal(boot, remote_party, nonce, signer, user_visible, .software);
+    }
+
+    pub fn attestWithProvisionedRoot(
+        self: *Service,
+        boot: measured_boot.BootRecord,
+        remote_party: []const u8,
+        nonce: []const u8,
+        user_visible: bool,
+    ) (Error || anyerror)!Statement {
+        if (!self.has_provisioned_root) return error.RootNotProvisioned;
+        if (remote_party.len != 0 and !user_visible) return error.UserVisibilityRequired;
+
+        return self.attestInternal(boot, remote_party, nonce, .{
+            .label = self.rootLabelSlice(),
+            .seed = self.root_seed,
+        }, user_visible, self.root_origin);
+    }
+
+    fn attestInternal(
+        self: *Service,
+        boot: measured_boot.BootRecord,
+        remote_party: []const u8,
+        nonce: []const u8,
+        signer: signing.SignerIdentity,
+        user_visible: bool,
+        origin: KeyOrigin,
     ) !Statement {
         var statement = Statement{
             .device = self.device,
@@ -61,11 +123,15 @@ pub const Service = struct {
             .remote_party = [_]u8{0} ** MAX_REMOTE_PARTY_BYTES,
             .nonce_len = 0,
             .nonce = [_]u8{0} ** MAX_NONCE_BYTES,
+            .key_origin = origin,
+            .root_label_len = 0,
+            .root_label = [_]u8{0} ** MAX_ROOT_LABEL_BYTES,
             .root_digest = boot.root_digest,
             .signature = .{},
         };
         statement.remote_party_len = copyText(&statement.remote_party, remote_party);
         statement.nonce_len = copyText(&statement.nonce, nonce);
+        statement.root_label_len = copyText(&statement.root_label, signer.label);
 
         if (user_visible) {
             self.visible_request_count += 1;
@@ -81,58 +147,30 @@ pub const Service = struct {
         const digest = statementDigest(statement);
         return signing.verify(statement.signature, &digest);
     }
+
+    fn rootLabelSlice(self: *const Service) []const u8 {
+        return self.root_label[0..self.root_label_len];
+    }
 };
 
 fn statementDigest(statement: Statement) [32]u8 {
-    var digest = [_]u8{0} ** 32;
-    const seeds = [_]u64{
-        0xCBF29CE484222325,
-        0x9E3779B185EBCA87,
-        0xD6E8FEB86659FD93,
-        0x94D049BB133111EB,
-    };
-    for (seeds, 0..) |seed, index| {
-        var hash = seed;
-        hash = hashByte(hash, @intFromEnum(statement.device.kind));
-        hash = hashU64(hash, statement.device.serial);
-        hash = hashU64(hash, statement.generation);
-        hash = hashU64(hash, statement.record_count);
-        hash = hashU64(hash, statement.critical_service_count);
-        hash = hashU64(hash, statement.policy_count);
-        hash = hashU64(hash, statement.driver_count);
-        hash = hashByte(hash, if (statement.user_visible) 1 else 0);
-        hash = hashBytes(hash, statement.remotePartySlice());
-        hash = hashBytes(hash, statement.nonceSlice());
-        hash = hashBytes(hash, &statement.root_digest);
-        std.mem.writeInt(u64, digest[index * 8 ..][0..8], hash, .little);
-    }
-    return digest;
+    var hasher = crypto_hash.init();
+    crypto_hash.updateEnum(&hasher, "device-kind", statement.device.kind);
+    crypto_hash.updateInt(&hasher, "device-serial", statement.device.serial);
+    crypto_hash.updateInt(&hasher, "generation", statement.generation);
+    crypto_hash.updateInt(&hasher, "record-count", statement.record_count);
+    crypto_hash.updateInt(&hasher, "critical-service-count", statement.critical_service_count);
+    crypto_hash.updateInt(&hasher, "policy-count", statement.policy_count);
+    crypto_hash.updateInt(&hasher, "driver-count", statement.driver_count);
+    crypto_hash.updateBool(&hasher, "user-visible", statement.user_visible);
+    crypto_hash.updateBytes(&hasher, "remote-party", statement.remotePartySlice());
+    crypto_hash.updateBytes(&hasher, "nonce", statement.nonceSlice());
+    crypto_hash.updateEnum(&hasher, "key-origin", statement.key_origin);
+    crypto_hash.updateBytes(&hasher, "root-label", statement.rootLabelSlice());
+    crypto_hash.updateBytes(&hasher, "root-digest", &statement.root_digest);
+    return crypto_hash.finalize(&hasher);
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
-}
-
-fn hashBytes(start: u64, bytes: []const u8) u64 {
-    var hash = start;
-    for (bytes) |byte| {
-        hash ^= byte;
-        hash *%= 1099511628211;
-    }
-    return hash;
-}
-
-fn hashByte(start: u64, byte: u8) u64 {
-    return hashBytes(start, &.{byte});
-}
-
-fn hashU64(start: u64, value: anytype) u64 {
-    var buffer: [8]u8 = [_]u8{0} ** 8;
-    std.mem.writeInt(u64, &buffer, @intCast(value), .little);
-    return hashBytes(start, &buffer);
-}
 
 test "attestation service signs measured state and records user visible requests" {
     var recorder = measured_boot.Recorder.init();
@@ -159,6 +197,7 @@ test "attestation service signs measured state and records user visible requests
     try std.testing.expect(Service.verify(statement));
     try std.testing.expectEqual(@as(usize, 1), service.visible_request_count);
     try std.testing.expectEqualStrings("attest.example", service.last_remote_party[0..service.last_remote_party_len]);
+    try std.testing.expectEqual(KeyOrigin.software, statement.key_origin);
 }
 
 test "attestation service does not count hidden requests and detects tampering" {
@@ -182,4 +221,35 @@ test "attestation service does not count hidden requests and detects tampering" 
     tampered.root_digest[0] ^=
         0xFF;
     try std.testing.expect(!Service.verify(tampered));
+}
+
+test "attestation service can use a provisioned hardware-backed root for visible remote requests" {
+    var recorder = measured_boot.Recorder.init();
+    recorder.begin(14);
+    try recorder.add(.kernel, "kernel-zigos", "kernel=v5");
+    try recorder.add(.base_image, "stable-d", "image=v5");
+    const boot = recorder.finalize();
+
+    var service = Service.init(.{ .kind = .device, .serial = 35 });
+    service.provisionRoot(.{
+        .label = "device-se",
+        .seed = [_]u8{0x55} ** 32,
+    }, .secure_enclave);
+
+    try std.testing.expectError(error.UserVisibilityRequired, service.attestWithProvisionedRoot(
+        boot,
+        "attest.example",
+        "nonce-3",
+        false,
+    ));
+
+    const statement = try service.attestWithProvisionedRoot(
+        boot,
+        "attest.example",
+        "nonce-3",
+        true,
+    );
+    try std.testing.expect(Service.verify(statement));
+    try std.testing.expectEqual(KeyOrigin.secure_enclave, statement.key_origin);
+    try std.testing.expectEqualStrings("device-se", statement.rootLabelSlice());
 }

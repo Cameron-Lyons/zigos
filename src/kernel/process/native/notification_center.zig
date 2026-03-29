@@ -1,5 +1,7 @@
 const std = @import("std");
+const native_util = @import("util.zig");
 const principal = @import("principal.zig");
+const copyText = native_util.copyText;
 
 pub const MAX_NOTIFICATIONS: usize = 32;
 pub const MAX_DETAIL_BYTES: usize = 96;
@@ -21,6 +23,22 @@ pub const Urgency = enum(u8) {
     critical,
 };
 
+pub const SuppressionPolicy = enum(u8) {
+    allow_repeat,
+    replace_same_source_reason,
+    replace_same_source_reason_task,
+};
+
+pub const PostRequest = struct {
+    source: principal.PrincipalId,
+    reason: Reason,
+    urgency: Urgency,
+    task_id: ?u64 = null,
+    detail: []const u8,
+    expires_at_ticks: u64 = 0,
+    suppression_policy: SuppressionPolicy = .allow_repeat,
+};
+
 pub const Notification = struct {
     id: u64,
     reason: Reason,
@@ -28,6 +46,7 @@ pub const Notification = struct {
     source: principal.PrincipalId,
     task_id: ?u64,
     expires_at_ticks: u64,
+    suppression_policy: SuppressionPolicy,
     suppressed: bool,
     detail_len: usize,
     detail: [MAX_DETAIL_BYTES]u8,
@@ -60,27 +79,21 @@ pub const Center = struct {
         return .{};
     }
 
-    pub fn post(
-        self: *Center,
-        source: principal.PrincipalId,
-        reason: Reason,
-        urgency: Urgency,
-        task_id: ?u64,
-        detail: []const u8,
-        expires_at_ticks: u64,
-    ) Error!*Notification {
+    pub fn post(self: *Center, request: PostRequest) Error!*Notification {
+        self.applySuppressionPolicy(request);
         for (&self.notifications) |*slot| {
             if (slot.in_use) continue;
             slot.in_use = true;
             slot.notification = zeroNotification();
             slot.notification.id = self.next_notification_id;
             self.next_notification_id += 1;
-            slot.notification.reason = reason;
-            slot.notification.urgency = urgency;
-            slot.notification.source = source;
-            slot.notification.task_id = task_id;
-            slot.notification.expires_at_ticks = expires_at_ticks;
-            slot.notification.detail_len = copyText(&slot.notification.detail, detail);
+            slot.notification.reason = request.reason;
+            slot.notification.urgency = request.urgency;
+            slot.notification.source = request.source;
+            slot.notification.task_id = request.task_id;
+            slot.notification.expires_at_ticks = request.expires_at_ticks;
+            slot.notification.suppression_policy = request.suppression_policy;
+            slot.notification.detail_len = copyText(&slot.notification.detail, request.detail);
             return &slot.notification;
         }
         return error.NotificationTableFull;
@@ -118,6 +131,24 @@ pub const Center = struct {
         }
         return null;
     }
+
+    fn applySuppressionPolicy(self: *Center, request: PostRequest) void {
+        switch (request.suppression_policy) {
+            .allow_repeat => {},
+            .replace_same_source_reason => {
+                _ = self.suppressBySourceReason(request.source, request.reason);
+            },
+            .replace_same_source_reason_task => {
+                for (&self.notifications) |*slot| {
+                    if (!slot.in_use) continue;
+                    if (!slot.notification.source.eql(request.source)) continue;
+                    if (slot.notification.reason != request.reason) continue;
+                    if (slot.notification.task_id != request.task_id) continue;
+                    slot.notification.suppressed = true;
+                }
+            },
+        }
+    }
 };
 
 fn zeroNotification() Notification {
@@ -128,29 +159,89 @@ fn zeroNotification() Notification {
         .source = .{ .kind = .service, .serial = 0 },
         .task_id = null,
         .expires_at_ticks = 0,
+        .suppression_policy = .allow_repeat,
         .suppressed = false,
         .detail_len = 0,
         .detail = [_]u8{0} ** MAX_DETAIL_BYTES,
     };
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
-}
 
 test "notification center keeps structured objects task links expiry and suppression" {
     var center = Center.init();
     const sync_source = principal.PrincipalId{ .kind = .service, .serial = 7 };
     const update_source = principal.PrincipalId{ .kind = .service, .serial = 8 };
 
-    _ = try center.post(sync_source, .sync_conflict, .high, 44, "workspace conflict", 50);
-    const update_notification = try center.post(update_source, .update_ready, .normal, null, "notes update ready", 0);
+    _ = try center.post(.{
+        .source = sync_source,
+        .reason = .sync_conflict,
+        .urgency = .high,
+        .task_id = 44,
+        .detail = "workspace conflict",
+        .expires_at_ticks = 50,
+    });
+    const update_notification = try center.post(.{
+        .source = update_source,
+        .reason = .update_ready,
+        .urgency = .normal,
+        .detail = "notes update ready",
+    });
     try std.testing.expectEqual(@as(usize, 2), center.activeCount(20));
     try std.testing.expectEqualStrings("notes update ready", update_notification.detailSlice());
+    try std.testing.expectEqual(SuppressionPolicy.allow_repeat, update_notification.suppression_policy);
 
     try std.testing.expectEqual(@as(usize, 1), center.suppressBySourceReason(sync_source, .sync_conflict));
     try std.testing.expectEqual(@as(usize, 1), center.activeCount(20));
     try std.testing.expectEqual(update_notification.id, center.latestVisible(60).?.id);
+}
+
+test "notification center applies structured suppression policies before posting replacements" {
+    var center = Center.init();
+    const source = principal.PrincipalId{ .kind = .service, .serial = 9 };
+
+    _ = try center.post(.{
+        .source = source,
+        .reason = .driver_restart,
+        .urgency = .high,
+        .detail = "graphics reset 1",
+        .suppression_policy = .replace_same_source_reason,
+    });
+    const replacement = try center.post(.{
+        .source = source,
+        .reason = .driver_restart,
+        .urgency = .high,
+        .detail = "graphics reset 2",
+        .suppression_policy = .replace_same_source_reason,
+    });
+    _ = try center.post(.{
+        .source = source,
+        .reason = .policy_notice,
+        .urgency = .passive,
+        .task_id = 41,
+        .detail = "task notice 1",
+        .suppression_policy = .replace_same_source_reason_task,
+    });
+    const task_replacement = try center.post(.{
+        .source = source,
+        .reason = .policy_notice,
+        .urgency = .passive,
+        .task_id = 41,
+        .detail = "task notice 2",
+        .suppression_policy = .replace_same_source_reason_task,
+    });
+    _ = try center.post(.{
+        .source = source,
+        .reason = .policy_notice,
+        .urgency = .passive,
+        .task_id = 42,
+        .detail = "other task survives",
+        .suppression_policy = .replace_same_source_reason_task,
+    });
+
+    try std.testing.expectEqual(@as(usize, 3), center.activeCount(1));
+    try std.testing.expect(center.notifications[0].notification.suppressed);
+    try std.testing.expect(center.notifications[2].notification.suppressed);
+    try std.testing.expectEqualStrings("other task survives", center.latestVisible(1).?.detailSlice());
+    try std.testing.expectEqual(SuppressionPolicy.replace_same_source_reason, replacement.suppression_policy);
+    try std.testing.expectEqual(SuppressionPolicy.replace_same_source_reason_task, task_replacement.suppression_policy);
 }

@@ -1,7 +1,11 @@
 const std = @import("std");
+const abi = @import("abi.zig");
 const contract = @import("contract.zig");
+const denial_explanation = @import("denial_explanation.zig");
 const manifest = @import("manifest.zig");
+const native_util = @import("util.zig");
 const principal = @import("principal.zig");
+const copyText = native_util.copyText;
 
 pub const MAX_EVENTS: usize = 64;
 pub const MAX_DETAIL_BYTES: usize = 96;
@@ -31,12 +35,27 @@ pub const Event = struct {
     service_class: contract.ServiceClass = .task_runtime,
     permission_kind: ?manifest.PermissionKind = null,
     allowed: bool = false,
+    denial_reason: abi.DenialReason = .none,
+    user_approval_can_resolve: bool = false,
+    retry_safe: bool = false,
+    policy_label_len: usize = 0,
+    policy_label: [denial_explanation.MAX_LABEL_BYTES]u8 = [_]u8{0} ** denial_explanation.MAX_LABEL_BYTES,
+    missing_capability_len: usize = 0,
+    missing_capability: [denial_explanation.MAX_LABEL_BYTES]u8 = [_]u8{0} ** denial_explanation.MAX_LABEL_BYTES,
     detail_protected: bool = false,
     detail_len: usize = 0,
     detail: [MAX_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_DETAIL_BYTES,
 
     pub fn detailSlice(self: *const Event) []const u8 {
         return self.detail[0..self.detail_len];
+    }
+
+    pub fn policyLabelSlice(self: *const Event) []const u8 {
+        return self.policy_label[0..self.policy_label_len];
+    }
+
+    pub fn missingCapabilitySlice(self: *const Event) []const u8 {
+        return self.missing_capability[0..self.missing_capability_len];
     }
 };
 
@@ -64,10 +83,15 @@ pub const Ledger = struct {
         task_id: u64,
         permission_kind: manifest.PermissionKind,
         allowed: bool,
+        denial_reason: abi.DenialReason,
         tick: u64,
         detail: []const u8,
         protected: bool,
     ) Error!void {
+        const explanation = if (allowed)
+            denial_explanation.none()
+        else
+            denial_explanation.forPermissionDecision(permission_kind, denial_reason);
         try self.append(.{
             .kind = .permission_decision,
             .tick = tick,
@@ -75,6 +99,13 @@ pub const Ledger = struct {
             .task_id = task_id,
             .permission_kind = permission_kind,
             .allowed = allowed,
+            .denial_reason = denial_reason,
+            .user_approval_can_resolve = explanation.user_approval_can_resolve,
+            .retry_safe = explanation.retry_safe,
+            .policy_label_len = clampedExplanationLen(explanation.policySlice()),
+            .policy_label = copyExplanationTextInto(explanation.policySlice()),
+            .missing_capability_len = clampedExplanationLen(explanation.missingCapabilitySlice()),
+            .missing_capability = copyExplanationTextInto(explanation.missingCapabilitySlice()),
             .detail_protected = protected,
             .detail_len = clampedDetailLen(detail),
             .detail = copyTextInto(detail),
@@ -207,6 +238,15 @@ pub const Ledger = struct {
                     @tagName(permission_kind),
                     yesNo(event.allowed),
                 });
+                if (!event.allowed) {
+                    try appendFmt(buffer, &used, " denial={s} policy={s} missing={s} approval={s} retry_safe={s}", .{
+                        @tagName(event.denial_reason),
+                        event.policyLabelSlice(),
+                        event.missingCapabilitySlice(),
+                        yesNo(event.user_approval_can_resolve),
+                        yesNo(event.retry_safe),
+                    });
+                }
             }
             if (event.workspace_id != 0) {
                 try appendFmt(buffer, &used, " workspace={d}", .{event.workspace_id});
@@ -247,18 +287,23 @@ fn zeroEvent() Event {
     };
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
-}
 
 fn clampedDetailLen(src: []const u8) usize {
     return @min(src.len, MAX_DETAIL_BYTES);
 }
 
+fn clampedExplanationLen(src: []const u8) usize {
+    return @min(src.len, denial_explanation.MAX_LABEL_BYTES);
+}
+
 fn copyTextInto(src: []const u8) [MAX_DETAIL_BYTES]u8 {
     var out = [_]u8{0} ** MAX_DETAIL_BYTES;
+    _ = copyText(&out, src);
+    return out;
+}
+
+fn copyExplanationTextInto(src: []const u8) [denial_explanation.MAX_LABEL_BYTES]u8 {
+    var out = [_]u8{0} ** denial_explanation.MAX_LABEL_BYTES;
     _ = copyText(&out, src);
     return out;
 }
@@ -278,7 +323,7 @@ test "event ledger exports structured redacted diagnostics and audit history" {
     const service_subject = principal.PrincipalId{ .kind = .service, .serial = 9 };
     const device_subject = principal.PrincipalId{ .kind = .device, .serial = 42 };
 
-    try ledger.recordPermissionDecision(user, 11, .screen_capture, false, 20, "org policy denied capture", true);
+    try ledger.recordPermissionDecision(user, 11, .screen_capture, false, .policy_denied, 20, "org policy denied capture", true);
     try ledger.recordProcessCrash(.network_stack, service_subject, 21, 5001, "segfault");
     try ledger.recordDriverRestart(.media_print_helpers, service_subject, 88, 22, "audio-print restarted");
     try ledger.recordUpdateTransition(service_subject, 23, true, "rolled back to stable-a");
@@ -290,6 +335,8 @@ test "event ledger exports structured redacted diagnostics and audit history" {
     try std.testing.expect(std.mem.indexOf(u8, exported, "redacted") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "service=network_stack") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "related=42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "policy=user-grant-policy") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "approval=yes") != null);
 
     const full = try ledger.exportText(&buffer, .{ .include_protected_content = true });
     try std.testing.expect(std.mem.indexOf(u8, full, "tax-return.pdf") != null);
