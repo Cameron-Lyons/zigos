@@ -224,15 +224,26 @@ pub fn run(
         support.common.printBootMarker(boot_markers.phase6_recovery_verify_reinstall);
     }
 
-    const recovery_snapshot = context.storage_service_instance.findSnapshot(phase4.notes_workspace_id, "phase6-recovery") orelse
-        context.storage_service_instance.snapshot(phase4.notes_workspace_id, "phase6-recovery", support.phase4_workspace_signer) catch unreachable;
-    const recovery_snapshot_id = recovery_snapshot.id;
-    context.storage_service_instance.exportSnapshotInto(
-        phase4.notes_workspace_id,
-        recovery_snapshot_id,
-        support.phase4_export_signer,
-        context.export_package,
-    ) catch unreachable;
+    if (context.export_package.workspace_id != phase4.notes_workspace_id or
+        context.export_package.snapshot_id == 0)
+    {
+        const recovery_snapshot_id = if (context.storage_service_instance.findSnapshot(phase4.notes_workspace_id, "phase6-recovery")) |snapshot|
+            snapshot.id
+        else created: {
+            const snapshot = context.storage_service_instance.snapshot(
+                phase4.notes_workspace_id,
+                "phase6-recovery",
+                support.phase4_workspace_signer,
+            ) catch unreachable;
+            break :created snapshot.id;
+        };
+        context.storage_service_instance.exportSnapshotInto(
+            phase4.notes_workspace_id,
+            recovery_snapshot_id,
+            support.phase4_export_signer,
+            context.export_package,
+        ) catch unreachable;
+    }
 
     support.common.printBootMarker("ZIGOS:PHASE6:RECOVERY:NOTES_V3_START");
     const notes_v3_request = object_store_mod.PutRequest{
@@ -265,27 +276,15 @@ pub fn run(
     ) catch unreachable;
     _ = context.storage_service_instance.commit(phase4.notes_workspace_id, 120) catch unreachable;
     support.common.printBootMarker("ZIGOS:PHASE6:RECOVERY:NOTES_V3_COMMIT");
-    const restored_from_snapshot = recovery.restoreWorkspaceSnapshot(
+    _ = recovery.restoreWorkspaceExport(
         context.storage_service_instance,
         phase4.notes_workspace_id,
-        recovery_snapshot_id,
+        context.export_package,
         121,
-    ) catch |err| switch (err) {
-        error.SnapshotNotFound => recovery.restoreWorkspaceExport(
-            context.storage_service_instance,
-            phase4.notes_workspace_id,
-            context.export_package,
-            121,
-        ) catch unreachable,
-        else => unreachable,
-    };
+    ) catch unreachable;
     support.common.printBootMarker("ZIGOS:PHASE6:RECOVERY:RESTORE_APPLIED");
-    if (restored_from_snapshot) {
-        const restored_notes = context.storage_service_instance.resolve(phase4.notes_workspace_id, "documents/notes.md") catch unreachable;
-        if (restored_notes.version_id != notes_v3_version_id) {
-            support.common.printBootMarker("ZIGOS:PHASE6:RECOVERY:RESTORE_SNAPSHOT");
-        }
-    }
+    const restored_notes = context.storage_service_instance.resolve(phase4.notes_workspace_id, "documents/notes.md") catch unreachable;
+    _ = restored_notes;
 
     if (phase5_sync_service.findWorkspacePolicy(phase4.notes_workspace_id) == null) {
         _ = phase5_sync_service.configureWorkspacePolicy(.{
