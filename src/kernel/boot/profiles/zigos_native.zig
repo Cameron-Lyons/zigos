@@ -1,6 +1,6 @@
 const x86 = @import("../../../arch/x86.zig");
 const common = @import("../common.zig");
-const session_manager = @import("../../process/native/session_manager.zig");
+const session_manager = @import("../../../native/session/session_manager.zig");
 const timer = @import("../../timer/timer.zig");
 
 pub fn run() noreturn {

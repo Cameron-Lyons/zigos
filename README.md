@@ -6,9 +6,9 @@ Zigos is a native-only operating system prototype written in Zig. The current tr
 
 ## Spec Target
 
-The repository now treats the Zigos v0.1 clean-slate OS spec as its explicit conformance target. The design goals, non-goals, implementation map, and example manifest now live in [SPEC.md](/home/cameronl/zigos/SPEC.md).
+The repository now treats the Zigos v0.1 clean-slate OS spec as its explicit conformance target. The design goals, non-goals, implementation map, and example manifest now live in [SPEC.md](SPEC.md).
 
-Repo-level conformance is checked in [src/zigos_spec_test.zig](/home/cameronl/zigos/src/zigos_spec_test.zig), with the section-to-test contract enforced by [spec/coverage.json](/home/cameronl/zigos/spec/coverage.json) and [tools/check_spec_coverage.py](/home/cameronl/zigos/tools/check_spec_coverage.py). Deeper subsystem coverage lives beside each native module under `src/kernel/process/native/`.
+Repo-level conformance is checked through the thin root [`src/zigos_spec_test.zig`](src/zigos_spec_test.zig), which delegates to the suites under `src/tests/spec/`; the section-to-test contract is enforced by [`spec/coverage.json`](spec/coverage.json) and [`tools/check_spec_coverage.py`](tools/check_spec_coverage.py). Deeper subsystem coverage lives beside each native module under `src/native/`.
 
 The native kernel surface is intentionally small:
 
@@ -20,7 +20,7 @@ The native kernel surface is intentionally small:
 - secure-boot handoff hooks
 - IOMMU and DMA isolation hooks
 
-Everything above that layer is modeled as a native service boundary under `src/kernel/process/native/`.
+Everything above that layer is modeled as a native service boundary under `src/native/`.
 
 ## Build And Test
 
@@ -57,21 +57,19 @@ Everything above that layer is modeled as a native service boundary under `src/k
 
 `build.zig` rejects any Zig version other than `0.15.2`, and the repo now includes both `.tool-versions` and `mise.toml` pins for local toolchain managers. Use `./scripts/zig.sh` for repo commands so the pinned toolchain resolution stays consistent across local shells, scripts, and CI.
 
-## Native Subsystems
+Host-side native tests enter through `src/native_host_test.zig` and delegate to `src/tests/host/`. Deeper subsystem coverage lives beside each native module under `src/native/`.
 
-- `src/kernel/process/native/abi.zig`: native task, capability, IPC, and service ABI
-- `src/kernel/process/native/native_kernel.zig`: kernel-native task/capability/IPC/service operations
-- `src/kernel/process/native/syscall_surface.zig`: freestanding typed syscall dispatch into the native kernel port
-- `src/kernel/process/native/task_runtime_service.zig`: restartable task-runtime checkpoint and recovery wrapper
-- `src/kernel/process/native/policy_mediation.zig`: zero-authority launch mediation and grants
-- `src/kernel/process/native/object_store.zig`: content-addressed immutable object versions
-- `src/kernel/process/native/workspace.zig`: transactional workspaces, snapshots, restore, export/import
-- `src/kernel/process/native/sync_service.zig`: device graph, sync policy, and replication semantics
-- `src/kernel/process/native/immutable_base.zig`: signed base-image state and rollback metadata
-- `src/kernel/process/native/measured_boot.zig`: measured boot coverage records
-- `src/kernel/process/native/recovery_environment.zig`: recovery flows for restore, repair, revoke, and rotate
-- `src/kernel/process/native/compatibility_environment.zig`: explicit VM, container, emulation, and remote-session environments mediated through portals
-- `src/kernel/process/native/native_ux.zig`: task-first UX flows
+## Repository Map
+
+- `src/main.zig`: thin kernel entry and export surface
+- `src/kernel/boot/profiles/zigos_native.zig`: only supported boot profile
+- `src/native/`: native principals, capabilities, runtime, mediation, services, storage, sync, recovery, and UX
+- `src/tests/`: organized host and spec test suites, with thin root entrypoints kept at `src/*.zig`
+- `src/tools/`: Zig helper binaries that need to share the `src/` module root
+- `src/kernel/net/`: low-level networking and device transport
+- `build.zig`: native-only build graph
+- `scripts/`: repo entrypoints for setup, build, run, and verification
+- `tools/`: host-side support utilities such as spec coverage checks
 
 ## Status
 
@@ -82,4 +80,4 @@ The repository no longer builds or ships the old POSIX-like shell, POSIX-style s
 - `./scripts/zig.sh build host-tests`
 - `./scripts/zig.sh build zigos-native-smoke-test`
 
-Storage-volume persistence remains covered by host-side native tests through `src/kernel/process/native/storage_volume.zig`.
+Storage-volume persistence remains covered by host-side native tests through `src/native/storage/storage_volume.zig`.

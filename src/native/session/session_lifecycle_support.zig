@@ -1,0 +1,82 @@
+const builtin = @import("builtin");
+const capability = @import("../kernel_api/capability.zig");
+const driver_service = @import("../drivers/driver_service.zig");
+const object_store_mod = @import("../storage/object_store.zig");
+const principal = @import("../core/principal.zig");
+const signing = @import("../core/signing.zig");
+const storage_service_mod = @import("../storage/storage_service.zig");
+const supervisor_mod = @import("supervisor.zig");
+const sync_service_mod = @import("../sync/sync_service.zig");
+const task_runtime = @import("../task/task_runtime.zig");
+const task_runtime_service_mod = @import("../task/task_runtime_service.zig");
+const workspace_mod = @import("../storage/workspace.zig");
+
+pub const common = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/boot/common.zig")
+else
+    struct {
+        pub fn printBootMarker(_: []const u8) void {}
+    };
+
+pub const phase4_storage_signer = signing.SignerIdentity{
+    .label = "zigos-storage-key",
+    .seed = [_]u8{0x81} ** 32,
+};
+pub const phase4_workspace_signer = signing.SignerIdentity{
+    .label = "zigos-workspace-key",
+    .seed = [_]u8{0x82} ** 32,
+};
+pub const phase4_export_signer = signing.SignerIdentity{
+    .label = "zigos-export-key",
+    .seed = [_]u8{0x83} ** 32,
+};
+
+pub const Context = struct {
+    runtime: *task_runtime.Runtime,
+    runtime_service: *task_runtime_service_mod.Service,
+    supervisor: *supervisor_mod.Supervisor,
+    driver_directory: *driver_service.Directory,
+    storage_service_instance: *storage_service_mod.Service,
+    export_package: *workspace_mod.ExportPackage,
+    policy_authority: principal.PrincipalId,
+    session_service: principal.PrincipalId,
+    session_user: principal.PrincipalId,
+    storage_service_id: u64,
+    storage_task_id: u64,
+    storage_service_principal: principal.PrincipalId,
+    sync_service_id: u64,
+    sync_task_id: u64,
+    sync_service_principal: principal.PrincipalId,
+    policy_service_id: u64,
+    network_service_id: u64,
+    compositor_service_id: u64,
+    package_service_id: u64,
+    package_service_principal: principal.PrincipalId,
+    notes_object_capability: capability.Capability,
+};
+
+pub const Phase4State = struct {
+    notes_workspace_id: u64,
+    notes_object_id: u64,
+    latest_notes_version_id: u64,
+};
+
+pub const Phase5State = struct {
+    workspace_policy: sync_service_mod.WorkspacePolicy,
+    tablet_device_principal: principal.PrincipalId,
+    user_root_signer: signing.SignerIdentity,
+    local_network_policy_id: u64,
+    relay_policy_id: ?u64,
+    overlay_policy_id: ?u64,
+};
+
+pub fn latestInsertedVersion(store: *const object_store_mod.Store) ?*const object_store_mod.VersionRecord {
+    var latest: ?*const object_store_mod.VersionRecord = null;
+    for (&store.versions) |*slot| {
+        if (!slot.in_use) continue;
+        if (latest == null or slot.version.id > latest.?.id) {
+            latest = &slot.version;
+        }
+    }
+    return latest;
+}
