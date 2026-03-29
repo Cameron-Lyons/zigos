@@ -22,7 +22,7 @@ The native kernel surface is intentionally small:
 - secure-boot handoff hooks
 - IOMMU and DMA isolation hooks
 
-Everything above that layer is modeled as a native service boundary under `src/kernel/process/native/`.
+Everything above that layer is modeled as a native service boundary under `src/native/`.
 
 ## Requirements
 
@@ -101,7 +101,7 @@ The smoke test uses `build/native-store-smoke.img` and validates the expected na
 
 ## Verification Model
 
-Repo-level conformance is checked in `src/zigos_spec_test.zig`, with the section-to-test contract enforced by `spec/coverage.json` and `tools/check_spec_coverage.py`.
+Repo-level conformance is checked through the thin root `src/zigos_spec_test.zig`, which delegates to the suites under `src/tests/spec/`; the section-to-test contract is enforced by `spec/coverage.json` and `tools/check_spec_coverage.py`.
 
 The main verification entrypoints are:
 
@@ -110,13 +110,15 @@ The main verification entrypoints are:
 - `./scripts/zig.sh build spec-conformance`
 - `./scripts/zig.sh build zigos-native-smoke-test`
 
-Host-side native tests are rooted at `src/native_host_test.zig`. Deeper subsystem coverage lives beside each native module under `src/kernel/process/native/`.
+Host-side native tests enter through `src/native_host_test.zig` and delegate to `src/tests/host/`. Deeper subsystem coverage lives beside each native module under `src/native/`.
 
 ## Repository Map
 
 - `src/main.zig`: thin kernel entry and export surface
 - `src/kernel/boot/profiles/zigos_native.zig`: only supported boot profile
-- `src/kernel/process/native/`: native principals, capabilities, runtime, mediation, services, storage, sync, recovery, and UX
+- `src/native/`: native principals, capabilities, runtime, mediation, services, storage, sync, recovery, and UX
+- `src/tests/`: organized host and spec test suites, with thin root entrypoints kept at `src/*.zig`
+- `src/tools/`: Zig helper binaries that need to share the `src/` module root
 - `src/kernel/net/`: low-level networking and device transport
 - `build.zig`: native-only build graph
 - `scripts/`: repo entrypoints for setup, build, run, and verification
@@ -126,4 +128,10 @@ Host-side native tests are rooted at `src/native_host_test.zig`. Deeper subsyste
 
 The repository no longer builds or ships the old POSIX-like shell, POSIX-style syscall ABI, or VFS-rooted userland pipeline. Legacy support is modeled as explicit compatibility environments rather than as part of the native platform.
 
+- `./scripts/zig.sh build kernel`
+- `./scripts/zig.sh build spec-conformance`
+- `./scripts/zig.sh build host-tests`
+- `./scripts/zig.sh build zigos-native-smoke-test`
+
+Storage-volume persistence remains covered by host-side native tests through `src/native/storage/storage_volume.zig`.
 The remaining freestanding entry surface is the native typed syscall dispatcher plus the native-only verification targets above.

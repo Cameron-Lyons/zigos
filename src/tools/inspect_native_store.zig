@@ -1,7 +1,7 @@
 const std = @import("std");
-const object_store = @import("../kernel/process/native/object_store.zig");
-const storage_volume = @import("../kernel/process/native/storage_volume.zig");
-const workspace = @import("../kernel/process/native/workspace.zig");
+const object_store = @import("../native/storage/object_store.zig");
+const storage_volume = @import("../native/storage/storage_volume.zig");
+const workspace = @import("../native/storage/workspace.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
