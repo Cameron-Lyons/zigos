@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const boot_markers = @import("../../boot/markers.zig");
 const task_runtime = @import("task_runtime.zig");
 const userspace_executor = @import("userspace_executor.zig");
 const userspace_loader = @import("userspace_loader.zig");
@@ -47,7 +48,7 @@ pub fn init(catalog: *userspace_loader.Catalog, runtime: *task_runtime.Runtime) 
     last_dispatch_tick = 0;
     userspace_executor.init();
     if (builtin.target.os.tag == .freestanding and !ready_marker_printed) {
-        common.printBootMarker("ZIGOS:USERSPACE:SCHEDULER:READY");
+        common.printBootMarker(boot_markers.userspace_scheduler_ready);
         ready_marker_printed = true;
     }
 }

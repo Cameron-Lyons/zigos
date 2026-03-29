@@ -28,9 +28,18 @@ jobs:
         tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
         install /tmp/actionlint /usr/local/bin/actionlint
 
+    - name: Install shellcheck
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y shellcheck
+
     - name: Lint Zig sources
       run: |
         zlint -f github --deny-warnings src
+
+    - name: Lint Shell EntryPoints
+      run: |
+        bash scripts/lint-shell.sh
 
     - name: Lint GitHub workflows
       run: |
@@ -40,17 +49,23 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Kernel Build
-      command: zig build kernel
+      command: ./scripts/zig.sh build kernel
+
+  spec-conformance:
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: Spec Conformance
+      command: ./scripts/zig.sh build spec-conformance
 
   host-tests:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Host Tests
-      command: zig build host-tests
+      command: ./scripts/zig.sh build host-tests
 
   native-smoke:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Native Smoke
-      command: zig build -Doptimize=ReleaseFast zigos-native-smoke-test
+      command: ./scripts/zig.sh build -Doptimize=ReleaseFast zigos-native-smoke-test
       timeout-minutes: 20
