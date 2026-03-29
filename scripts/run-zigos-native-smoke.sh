@@ -149,9 +149,6 @@ assert_boot_markers() {
     "ZIGOS:PHASE3:SUPERVISOR:RESTART_OK" \
     "ZIGOS:PHASE4:OBJECT_STORE:READY" \
     "ZIGOS:PHASE4:WORKSPACE:TRANSACTION_OK" \
-    "ZIGOS:PHASE4:STORAGE_SERVICE:RECOVERED" \
-    "ZIGOS:PHASE4:FILE_BRIDGE:DERIVED" \
-    "ZIGOS:PHASE4:PATH_AUTHORITY:DEPRECATED" \
     "ZIGOS:PHASE5:DEVICE_GRAPH:ROOTED" \
     "ZIGOS:PHASE6:IMMUTABLE_BASE:ACTIVE" \
     "ZIGOS:PHASE6:ACTIVATION:ROLLBACK_OK" \
@@ -160,6 +157,23 @@ assert_boot_markers() {
     "ZIGOS:PHASE6:UX:RECOVER_SYSTEM" \
     "ZIGOS:TASK:SESSION_READY" \
     "ZIGOS:NATIVE:READY"
+}
+
+assert_boot1_phase4_markers() {
+  log_path="$1"
+  assert_log_contains "$log_path" \
+    "ZIGOS:PHASE4:STORAGE_SERVICE:RECOVERED" \
+    "ZIGOS:PHASE4:FILE_BRIDGE:DERIVED" \
+    "ZIGOS:PHASE4:PATH_AUTHORITY:DEPRECATED"
+}
+
+assert_boot2_phase4_markers() {
+  log_path="$1"
+  assert_log_contains "$log_path" \
+    "ZIGOS:PHASE4:PERSISTENCE:RELOADED" \
+    "ZIGOS:PHASE4:RELOAD:NOTES_WORKSPACE:DONE" \
+    "ZIGOS:PHASE4:RELOAD:IMPORTED_WORKSPACE:DONE" \
+    "ZIGOS:PHASE4:RELOAD:LATEST_VERSION:DONE"
 }
 
 assert_review_text() {
@@ -184,10 +198,12 @@ assert_review_text() {
 
 run_boot "$BOOT1_LOG" reset
 assert_boot_markers "$BOOT1_LOG"
+assert_boot1_phase4_markers "$BOOT1_LOG"
 assert_review_text "$BOOT1_LOG"
 
 run_boot "$BOOT2_LOG" preserve
 assert_boot_markers "$BOOT2_LOG"
+assert_boot2_phase4_markers "$BOOT2_LOG"
 assert_review_text "$BOOT2_LOG"
 
 {
