@@ -1,0 +1,22 @@
+const impl = @import("sync_service_impl.zig");
+
+pub const MAX_WORKSPACE_POLICIES = impl.MAX_WORKSPACE_POLICIES;
+pub const MAX_SELECTIVE_PREFIXES = impl.MAX_SELECTIVE_PREFIXES;
+pub const MAX_PREFIX_BYTES = impl.MAX_PREFIX_BYTES;
+pub const MAX_REPLICA_ENTRIES = impl.MAX_REPLICA_ENTRIES;
+pub const MAX_CONFLICTS = impl.MAX_CONFLICTS;
+pub const MAX_DATABASE_CONTRACTS = impl.MAX_DATABASE_CONTRACTS;
+pub const MAX_OVERLAYS = impl.MAX_OVERLAYS;
+pub const MAX_PRIVATE_SERVICES = impl.MAX_PRIVATE_SERVICES;
+pub const MAX_LABEL_BYTES = impl.MAX_LABEL_BYTES;
+pub const TransportMode = impl.TransportMode;
+pub const SyncSemantic = impl.SyncSemantic;
+pub const WorkspacePolicyRequest = impl.WorkspacePolicyRequest;
+pub const WorkspacePolicy = impl.WorkspacePolicy;
+pub const OverlayRecord = impl.OverlayRecord;
+pub const ReplicaEntry = impl.ReplicaEntry;
+pub const ConflictRecord = impl.ConflictRecord;
+pub const DatabaseContract = impl.DatabaseContract;
+pub const ReplicationSummary = impl.ReplicationSummary;
+pub const Error = impl.Error;
+pub const Service = impl.Service;

@@ -7,10 +7,10 @@ const e1000 = @import("../../drivers/e1000.zig");
 const pci = @import("../../drivers/pci.zig");
 const rtl8139 = @import("../../drivers/rtl8139.zig");
 const virtio = @import("../../drivers/virtio.zig");
-const bootstrap_driver_port = @import("../../process/native/bootstrap_driver_port.zig");
-const device_inventory = @import("../../process/native/device_inventory.zig");
-const storage_volume = @import("../../process/native/storage_volume.zig");
-const storage_volume_backend = @import("../../process/native/storage_volume_backend.zig");
+const bootstrap_driver_port = @import("../../../native/drivers/bootstrap_driver_port.zig");
+const device_inventory = @import("../../../native/drivers/device_inventory.zig");
+const storage_volume = @import("../../../native/storage/storage_volume.zig");
+const storage_volume_backend = @import("../../../native/storage/storage_volume_backend.zig");
 const panic_handler = @import("../../utils/panic.zig");
 const common = @import("../common.zig");
 

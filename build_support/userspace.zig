@@ -1,5 +1,5 @@
 const std = @import("std");
-const registry = @import("../src/kernel/process/native/userspace_registry.zig");
+const registry = @import("../src/native/task/userspace_registry.zig");
 
 pub const ArtifactSet = struct {
     step: *std.Build.Step,
@@ -15,7 +15,7 @@ pub fn addUserspaceArtifacts(
     const step = b.step("userspace-images", "Build userspace image artifacts");
     var count: usize = 0;
     const descriptor_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/process/native/userspace_descriptor.zig"),
+        .root_source_file = b.path("src/native/task/userspace_descriptor.zig"),
     });
     const archive_generator = b.addExecutable(.{
         .name = "userspace-archive-generator",

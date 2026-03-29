@@ -2,7 +2,7 @@ const ethernet = @import("ethernet.zig");
 const link_port = @import("link_port.zig");
 const pci = @import("../drivers/pci.zig");
 const vga = @import("../drivers/vga.zig");
-const bootstrap_driver_port = @import("../process/native/bootstrap_driver_port.zig");
+const bootstrap_driver_port = @import("../../native/drivers/bootstrap_driver_port.zig");
 
 pub const ArpReplyHeader = packed struct {
     hardware_type: u16,

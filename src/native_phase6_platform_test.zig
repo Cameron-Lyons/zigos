@@ -1,26 +1,5 @@
-const std = @import("std");
-const accelerator_scheduler = @import("kernel/process/native/accelerator_scheduler.zig");
-const attestation_service = @import("kernel/process/native/attestation_service.zig");
-const event_ledger = @import("kernel/process/native/event_ledger.zig");
-const immutable_base = @import("kernel/process/native/immutable_base.zig");
-const measured_boot = @import("kernel/process/native/measured_boot.zig");
-const native_ux = @import("kernel/process/native/native_ux.zig");
-const notification_center = @import("kernel/process/native/notification_center.zig");
-const policy_object = @import("kernel/process/native/policy_object.zig");
-const recovery_environment = @import("kernel/process/native/recovery_environment.zig");
-const secure_secret_store = @import("kernel/process/native/secure_secret_store.zig");
-const session_manager = @import("kernel/process/native/session_manager.zig");
+const suite = @import("tests/host/phase6_platform_test.zig");
 
-test "phase6 native platform modules compile and expose their tests from the src root" {
-    std.testing.refAllDecls(accelerator_scheduler);
-    std.testing.refAllDecls(attestation_service);
-    std.testing.refAllDecls(event_ledger);
-    std.testing.refAllDecls(immutable_base);
-    std.testing.refAllDecls(measured_boot);
-    std.testing.refAllDecls(native_ux);
-    std.testing.refAllDecls(notification_center);
-    std.testing.refAllDecls(policy_object);
-    std.testing.refAllDecls(recovery_environment);
-    std.testing.refAllDecls(secure_secret_store);
-    std.testing.refAllDecls(session_manager);
+comptime {
+    _ = suite;
 }

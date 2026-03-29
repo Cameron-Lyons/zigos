@@ -23,5 +23,5 @@ Respect the architectural boundaries from the spec:
 Keep the repo tidy:
 
 - Put generated artifacts under `build/`; keep tracked build logic under `build_support/`.
-- Put host-only tools under `src/tools/` rather than `src/kernel/process/native/`.
+- Put host-only support utilities under `tools/`, and Zig helper binaries that share `src/` imports under `src/tools/`, rather than `src/native/`.
 - Prefer small focused modules over growing import hubs and monolithic integration files.
