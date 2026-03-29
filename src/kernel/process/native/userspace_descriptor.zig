@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const MAGIC: u32 = 0x5A474F53;
 pub const VERSION: u16 = 1;
+pub const ELF_SECTION_NAME = ".zigos_userspace_descriptor";
 pub const MAX_BUNDLE_ID_BYTES: usize = 64;
 pub const MAX_DISPLAY_NAME_BYTES: usize = 48;
 pub const MAX_LABEL_BYTES: usize = 48;

@@ -27,6 +27,11 @@ SECTIONS
         *(.eh_frame.*)
     } :rodata
 
+    .zigos_userspace_descriptor : ALIGN(4K)
+    {
+        KEEP(*(.zigos_userspace_descriptor))
+    } :rodata
+
     .data : ALIGN(4K)
     {
         *(.data)
