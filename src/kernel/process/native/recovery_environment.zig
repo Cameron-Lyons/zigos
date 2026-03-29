@@ -10,6 +10,7 @@ const workspace = @import("workspace.zig");
 pub const RecoveryReport = struct {
     image_verified: bool = false,
     image_reinstalled: bool = false,
+    image_activated: bool = false,
     device_trust_revoked: bool = false,
     snapshot_restored: bool = false,
     sync_metadata_repaired: bool = false,
@@ -32,10 +33,18 @@ pub const Environment = struct {
         tick: u64,
     ) immutable_base.Error!bool {
         const verified = manager.verifyActiveImage();
-        _ = try manager.stageImage(manager.inactiveSlotIndex(), "recovery-reinstall", payload, signer, tick);
+        const target_slot = manager.inactiveSlotIndex();
+        _ = try manager.stageImage(target_slot, "recovery-reinstall", payload, signer, tick);
         self.report.image_verified = verified;
-        self.report.image_reinstalled = manager.verifySlot(manager.inactiveSlotIndex());
-        return self.report.image_verified and self.report.image_reinstalled;
+        self.report.image_reinstalled = manager.verifySlot(target_slot);
+        if (self.report.image_reinstalled) {
+            const activation = try manager.activate(target_slot, .{}, tick + 1);
+            self.report.image_activated = !activation.rolled_back and
+                activation.active_slot != null and
+                activation.active_slot.? == target_slot and
+                manager.verifyActiveImage();
+        }
+        return self.report.image_reinstalled and self.report.image_activated;
     }
 
     pub fn revokeDeviceTrust(
@@ -46,7 +55,10 @@ pub const Environment = struct {
         signer: signing.SignerIdentity,
         tick: u64,
     ) sync_service.Error!bool {
-        try sync.revokeTrustedDevice(user, device, signer, tick);
+        sync.revokeTrustedDevice(user, device, signer, tick) catch |err| switch (err) {
+            error.AlreadyRevoked => {},
+            else => return err,
+        };
         self.report.device_trust_revoked = !sync.isTrustedDevice(device);
         return self.report.device_trust_revoked;
     }
@@ -59,6 +71,18 @@ pub const Environment = struct {
         tick: u64,
     ) workspace.Error!bool {
         _ = try storage.restore(workspace_id, snapshot_id, tick);
+        self.report.snapshot_restored = true;
+        return true;
+    }
+
+    pub fn restoreWorkspaceExport(
+        self: *Environment,
+        storage: *storage_service.Service,
+        workspace_id: u64,
+        package: *const workspace.ExportPackage,
+        tick: u64,
+    ) workspace.Error!bool {
+        _ = try storage.restoreFromExportPackage(workspace_id, package, tick);
         self.report.snapshot_restored = true;
         return true;
     }
@@ -172,8 +196,12 @@ test "recovery environment verifies reinstalls restores repairs and rotates" {
     try std.testing.expect(try recovery.repairSyncMetadata(&sync, &storage, workspace_record.id, tablet));
     try std.testing.expectEqual(@as(u32, 2), try recovery.rotateDeviceKeys(&sync, user, tablet, user_signer, tablet_rotated_signer, 18));
     try std.testing.expect(try recovery.revokeDeviceTrust(&sync, user, tablet, user_signer, 19));
+    try std.testing.expect(try recovery.revokeDeviceTrust(&sync, user, tablet, user_signer, 20));
     try std.testing.expect(recovery.report.image_verified);
     try std.testing.expect(recovery.report.image_reinstalled);
+    try std.testing.expect(recovery.report.image_activated);
+    try std.testing.expectEqual(@as(?usize, 1), manager.activeImage().?.slot_index);
+    try std.testing.expect(manager.verifyActiveImage());
     try std.testing.expect(recovery.report.snapshot_restored);
     try std.testing.expect(recovery.report.sync_metadata_repaired);
     try std.testing.expect(recovery.report.device_keys_rotated);

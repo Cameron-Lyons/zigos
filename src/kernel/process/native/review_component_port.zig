@@ -3,6 +3,7 @@ const abi = @import("abi.zig");
 const manifest = @import("manifest.zig");
 const permission_review_service = @import("permission_review_service.zig");
 const policy_mediation = @import("policy_mediation.zig");
+const request_header = @import("request_header.zig");
 
 pub const Error = error{
     SubjectTaskMismatch,
@@ -36,22 +37,15 @@ pub const Port = struct {
 };
 
 pub fn makeHeader(operation: abi.ReviewOperation, correlation_id: u64, subject_task_id: u64) abi.RequestHeader {
-    return .{
-        .operation = abi.reviewOpcode(operation),
-        .correlation_id = correlation_id,
-        .subject_task_id = subject_task_id,
-    };
+    return request_header.makeHeader(abi.reviewOpcode(operation), correlation_id, subject_task_id);
 }
 
 fn validateHeader(header: abi.RequestHeader, expected: abi.ReviewOperation) Error!void {
-    if (header.version != abi.ABI_VERSION) return error.UnsupportedAbiVersion;
-    if (header.operation != abi.reviewOpcode(expected)) return error.UnexpectedOperation;
+    try request_header.validateHeader(header, abi.reviewOpcode(expected));
 }
 
 fn validateSubjectTask(header: abi.RequestHeader, task_id: u64) Error!void {
-    if (header.subject_task_id != 0 and header.subject_task_id != task_id) {
-        return error.SubjectTaskMismatch;
-    }
+    try request_header.validateSubjectTask(header, task_id);
 }
 
 test "review port validates headers and returns reviewed grants" {
@@ -125,11 +119,22 @@ test "review port rejects invalid manifests before entering the review loop" {
     const scripted_inputs = [_][]const u8{"allow"};
     var service = permission_review_service.Service.init(5, 6, &runtime, &scripted_inputs);
     var port = Port.init(&service);
+    const background_tasks = [_]manifest.BackgroundTaskDecl{
+        .{
+            .id = "sync",
+            .trigger = .push_event,
+            .expected_duration_seconds = 30,
+            .budget = .{
+                .cpu_time_ticks = 100,
+                .memory_bytes = 1024,
+            },
+        },
+    };
     const bundle = manifest.BundleManifest{
         .bundle_id = "app.sync",
         .display_name = "Sync",
         .publisher = "zigos.dev",
-        .background_triggers = &.{.scheduled_sync},
+        .background_tasks = &background_tasks,
     };
     var grants_buffer: [permission_review_service.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
 

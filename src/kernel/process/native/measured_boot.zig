@@ -1,4 +1,7 @@
 const std = @import("std");
+const crypto_hash = @import("crypto_hash.zig");
+const native_util = @import("util.zig");
+const copyText = native_util.copyText;
 
 pub const MAX_RECORDS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
@@ -91,60 +94,23 @@ fn zeroRecord() MeasurementRecord {
     };
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
-}
 
 fn hashMeasurement(kind: MeasurementKind, label: []const u8, payload: []const u8) [32]u8 {
-    var digest = [_]u8{0} ** 32;
-    const seeds = [_]u64{
-        0x6A09E667F3BCC909,
-        0xBB67AE8584CAA73B,
-        0x3C6EF372FE94F82B,
-        0xA54FF53A5F1D36F1,
-    };
-    for (seeds, 0..) |seed, index| {
-        var hash = seed;
-        hash = hashByte(hash, @intFromEnum(kind));
-        hash = hashBytes(hash, label);
-        hash = hashBytes(hash, payload);
-        std.mem.writeInt(u64, digest[index * 8 ..][0..8], hash, .little);
-    }
-    return digest;
+    var hasher = crypto_hash.init();
+    crypto_hash.updateEnum(&hasher, "measurement-kind", kind);
+    crypto_hash.updateBytes(&hasher, "label", label);
+    crypto_hash.updateBytes(&hasher, "payload", payload);
+    return crypto_hash.finalize(&hasher);
 }
 
 fn hashDigest(root: [32]u8, record: MeasurementRecord, index: usize) [32]u8 {
-    var next = [_]u8{0} ** 32;
-    const seeds = [_]u64{
-        0x510E527FADE682D1,
-        0x9B05688C2B3E6C1F,
-        0x1F83D9ABFB41BD6B,
-        0x5BE0CD19137E2179,
-    };
-    for (seeds, 0..) |seed, word| {
-        var hash = seed;
-        hash = hashBytes(hash, &root);
-        hash = hashBytes(hash, record.labelSlice());
-        hash = hashBytes(hash, &record.digest);
-        hash = hashByte(hash, @intCast(index));
-        std.mem.writeInt(u64, next[word * 8 ..][0..8], hash, .little);
-    }
-    return next;
-}
-
-fn hashBytes(start: u64, bytes: []const u8) u64 {
-    var hash = start;
-    for (bytes) |byte| {
-        hash ^= byte;
-        hash *%= 1099511628211;
-    }
-    return hash;
-}
-
-fn hashByte(start: u64, byte: u8) u64 {
-    return hashBytes(start, &.{byte});
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "root", &root);
+    crypto_hash.updateEnum(&hasher, "record-kind", record.kind);
+    crypto_hash.updateBytes(&hasher, "record-label", record.labelSlice());
+    crypto_hash.updateBytes(&hasher, "record-digest", &record.digest);
+    crypto_hash.updateInt(&hasher, "record-index", index);
+    return crypto_hash.finalize(&hasher);
 }
 
 test "measured boot records kernel base image services policies and drivers" {

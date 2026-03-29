@@ -1,4 +1,5 @@
 const std = @import("std");
+const shared_memory = @import("shared_memory.zig");
 
 pub const Engine = enum(u8) {
     cpu,
@@ -56,8 +57,46 @@ pub const Decision = struct {
     reason: DecisionReason,
 };
 
+pub const MAX_ENGINE_CLAIMS: usize = 16;
+
+pub const ClaimRequest = struct {
+    task_id: u64,
+    request: Request,
+    require_accelerator: bool = false,
+    shared_memory_object_id: ?u64 = null,
+};
+
+pub const ClaimRecord = struct {
+    id: u64,
+    task_id: u64,
+    class: ResourceClass,
+    engine: Engine,
+    delayed: bool,
+    degraded: bool,
+    zero_copy: bool,
+    reason: DecisionReason,
+    shared_memory_object_id: ?u64,
+    active: bool,
+};
+
+pub const Error = shared_memory.Error || error{
+    AcceleratorRequired,
+    ClaimNotFound,
+    ClaimTableFull,
+    EngineBusy,
+    SharedMemoryTableRequired,
+    ZeroCopyUnavailable,
+};
+
+const ClaimSlot = struct {
+    in_use: bool = false,
+    claim: ClaimRecord = zeroClaim(),
+};
+
 pub const Controller = struct {
     state: SystemState = .{},
+    next_claim_id: u64 = 1,
+    claims: [MAX_ENGINE_CLAIMS]ClaimSlot = [_]ClaimSlot{ClaimSlot{}} ** MAX_ENGINE_CLAIMS,
 
     pub fn init() Controller {
         return .{};
@@ -65,6 +104,94 @@ pub const Controller = struct {
 
     pub fn configure(self: *Controller, state: SystemState) void {
         self.state = state;
+    }
+
+    pub fn claim(self: *Controller, request: ClaimRequest) Error!ClaimRecord {
+        return self.claimWithSharedMemory(request, null);
+    }
+
+    pub fn claimWithSharedMemory(
+        self: *Controller,
+        request: ClaimRequest,
+        shared: ?*shared_memory.Table,
+    ) Error!ClaimRecord {
+        var decision = self.plan(request.request);
+        if (request.require_accelerator and decision.engine == .cpu) return error.AcceleratorRequired;
+
+        if (decision.engine != .cpu and self.findActiveClaimByEngine(decision.engine) != null) {
+            if (request.require_accelerator) return error.EngineBusy;
+            decision.engine = .cpu;
+            decision.degraded = true;
+            decision.zero_copy_allowed = false;
+            decision.reason = .accelerator_unavailable;
+        }
+
+        if (request.shared_memory_object_id) |object_id| {
+            if (decision.engine == .cpu or !decision.zero_copy_allowed) return error.ZeroCopyUnavailable;
+            const shared_table = shared orelse return error.SharedMemoryTableRequired;
+            try shared_table.attachAccelerator(object_id, computeTargetFor(decision.engine));
+        }
+
+        var record = zeroClaim();
+        record.id = self.allocateClaimId();
+        record.task_id = request.task_id;
+        record.class = decision.class;
+        record.engine = decision.engine;
+        record.delayed = decision.delayed;
+        record.degraded = decision.degraded;
+        record.zero_copy = decision.zero_copy_allowed and request.shared_memory_object_id != null;
+        record.reason = decision.reason;
+        record.shared_memory_object_id = request.shared_memory_object_id;
+        record.active = true;
+        return self.upsertClaim(record);
+    }
+
+    pub fn releaseClaim(
+        self: *Controller,
+        claim_id: u64,
+        shared: ?*shared_memory.Table,
+    ) Error!bool {
+        for (&self.claims) |*slot| {
+            if (!slot.in_use or slot.claim.id != claim_id) continue;
+            if (!slot.claim.active) return false;
+
+            if (slot.claim.shared_memory_object_id) |object_id| {
+                const shared_table = shared orelse return error.SharedMemoryTableRequired;
+                _ = try shared_table.detachAccelerator(object_id, computeTargetFor(slot.claim.engine));
+            }
+            slot.claim.active = false;
+            return true;
+        }
+        return error.ClaimNotFound;
+    }
+
+    pub fn revokeTaskClaims(self: *Controller, task_id: u64, shared: ?*shared_memory.Table) Error!u16 {
+        var released: u16 = 0;
+        for (&self.claims) |*slot| {
+            if (!slot.in_use or !slot.claim.active or slot.claim.task_id != task_id) continue;
+            if (slot.claim.shared_memory_object_id) |object_id| {
+                const shared_table = shared orelse return error.SharedMemoryTableRequired;
+                _ = try shared_table.detachAccelerator(object_id, computeTargetFor(slot.claim.engine));
+            }
+            slot.claim.active = false;
+            released += 1;
+        }
+        return released;
+    }
+
+    pub fn findActiveClaim(self: *const Controller, claim_id: u64) ?ClaimRecord {
+        for (self.claims) |slot| {
+            if (slot.in_use and slot.claim.active and slot.claim.id == claim_id) return slot.claim;
+        }
+        return null;
+    }
+
+    pub fn activeClaimCount(self: *const Controller) u16 {
+        var count: u16 = 0;
+        for (self.claims) |slot| {
+            if (slot.in_use and slot.claim.active) count += 1;
+        }
+        return count;
     }
 
     pub fn plan(self: *const Controller, request: Request) Decision {
@@ -147,7 +274,62 @@ pub const Controller = struct {
 
         return decision;
     }
+
+    fn upsertClaim(self: *Controller, record: ClaimRecord) Error!ClaimRecord {
+        for (&self.claims) |*slot| {
+            if (slot.in_use and slot.claim.id == record.id) {
+                slot.claim = record;
+                return slot.claim;
+            }
+        }
+
+        for (&self.claims) |*slot| {
+            if (slot.in_use) continue;
+            slot.in_use = true;
+            slot.claim = record;
+            return slot.claim;
+        }
+
+        return error.ClaimTableFull;
+    }
+
+    fn findActiveClaimByEngine(self: *const Controller, engine: Engine) ?ClaimRecord {
+        if (engine == .cpu) return null;
+        for (self.claims) |slot| {
+            if (slot.in_use and slot.claim.active and slot.claim.engine == engine) return slot.claim;
+        }
+        return null;
+    }
+
+    fn allocateClaimId(self: *Controller) u64 {
+        defer self.next_claim_id += 1;
+        return self.next_claim_id;
+    }
 };
+
+fn computeTargetFor(engine: Engine) shared_memory.ComputeTarget {
+    return switch (engine) {
+        .cpu => .cpu,
+        .gpu => .gpu,
+        .npu => .npu,
+        .media => .media,
+    };
+}
+
+fn zeroClaim() ClaimRecord {
+    return .{
+        .id = 0,
+        .task_id = 0,
+        .class = .background_light,
+        .engine = .cpu,
+        .delayed = false,
+        .degraded = false,
+        .zero_copy = false,
+        .reason = .normal,
+        .shared_memory_object_id = null,
+        .active = false,
+    };
+}
 
 test "accelerator scheduler preserves responsiveness while degrading opportunistic work" {
     var controller = Controller.init();
@@ -203,4 +385,58 @@ test "accelerator scheduler uses media engines and privacy mode falls back from 
     try std.testing.expectEqual(Engine.cpu, inference.engine);
     try std.testing.expect(inference.degraded);
     try std.testing.expectEqual(DecisionReason.privacy_mode, inference.reason);
+}
+
+test "accelerator scheduler tracks exclusive engine claims and zero-copy attachments" {
+    var controller = Controller.init();
+    var shared = shared_memory.Table.init();
+    const object = try shared.createWithAccess(9, 32 * 1024, .{
+        .media = true,
+        .gpu = true,
+    });
+
+    const claim = try controller.claimWithSharedMemory(.{
+        .task_id = 9,
+        .request = .{
+            .class = .media_export,
+            .wants_gpu = true,
+            .wants_media_engine = true,
+            .shared_memory_bytes = 32 * 1024,
+        },
+        .require_accelerator = true,
+        .shared_memory_object_id = object.id,
+    }, &shared);
+    try std.testing.expectEqual(Engine.media, claim.engine);
+    try std.testing.expect(claim.zero_copy);
+    try std.testing.expect(try shared.isAcceleratorAttached(object.id, .media));
+    try std.testing.expectEqual(@as(u16, 1), controller.activeClaimCount());
+
+    try std.testing.expectError(error.EngineBusy, controller.claim(.{
+        .task_id = 10,
+        .request = .{
+            .class = .media_export,
+            .wants_gpu = true,
+            .wants_media_engine = true,
+            .shared_memory_bytes = 32 * 1024,
+        },
+        .require_accelerator = true,
+    }));
+
+    const degraded = try controller.claim(.{
+        .task_id = 11,
+        .request = .{
+            .class = .media_export,
+            .wants_gpu = true,
+            .wants_media_engine = true,
+            .shared_memory_bytes = 32 * 1024,
+        },
+    });
+    try std.testing.expectEqual(Engine.cpu, degraded.engine);
+    try std.testing.expect(degraded.degraded);
+
+    try std.testing.expect(try controller.releaseClaim(claim.id, &shared));
+    try std.testing.expect(!(try shared.isAcceleratorAttached(object.id, .media)));
+    try std.testing.expectEqual(@as(u16, 1), controller.activeClaimCount());
+    try std.testing.expect(try controller.releaseClaim(degraded.id, null));
+    try std.testing.expectEqual(@as(u16, 0), controller.activeClaimCount());
 }

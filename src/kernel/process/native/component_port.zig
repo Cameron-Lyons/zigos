@@ -4,6 +4,7 @@ const capability = @import("capability.zig");
 const endpoint = @import("endpoint.zig");
 const manifest = @import("manifest.zig");
 const native_kernel = @import("native_kernel.zig");
+const request_header = @import("request_header.zig");
 const task_runtime = @import("task_runtime.zig");
 
 pub const Error = native_kernel.Error || error{
@@ -325,16 +326,11 @@ pub const KernelPort = struct {
 };
 
 pub fn makeHeader(operation: abi.NativeOperation, correlation_id: u64, subject_task_id: u64) abi.RequestHeader {
-    return .{
-        .operation = abi.opcode(operation),
-        .correlation_id = correlation_id,
-        .subject_task_id = subject_task_id,
-    };
+    return request_header.makeHeader(abi.opcode(operation), correlation_id, subject_task_id);
 }
 
 fn validateHeader(header: abi.RequestHeader, expected: abi.NativeOperation) Error!void {
-    if (header.version != abi.ABI_VERSION) return error.UnsupportedAbiVersion;
-    if (header.operation != abi.opcode(expected)) return error.UnexpectedOperation;
+    try request_header.validateHeader(header, abi.opcode(expected));
 }
 
 test "kernel port enforces operation ids and forwards typed task create requests" {
@@ -386,9 +382,19 @@ test "kernel port enforces operation ids and forwards typed task create requests
                 .shared_memory_bytes = 512,
             },
             .local_only = true,
+            .launch = .{
+                .boundary = .userspace_process,
+                .image_id = 10,
+                .component_abi_version = 1,
+                .signed = true,
+                .bundle_id = "app.example.port-test",
+            },
+            .userspace_image = task_runtime.syntheticUserspaceImage("port-test", "app.example.port-test"),
         },
     }, 5);
     try std.testing.expect(task.task_id != 0);
+    try std.testing.expect(abi.taskFlagsHas(task.flags, abi.TASK_FLAG_USERSPACE_PROCESS));
+    try std.testing.expect(abi.taskFlagsHas(task.flags, abi.TASK_FLAG_EXECUTABLE_IMAGE_MAPPED));
 
     try std.testing.expectError(error.UnexpectedOperation, port.taskCreate(.{
         .header = makeHeader(.endpoint_create, 78, session_task.id),

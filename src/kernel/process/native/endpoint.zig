@@ -1,9 +1,10 @@
 const std = @import("std");
 const abi = @import("abi.zig");
+const native_util = @import("util.zig");
 
 pub const MAX_ENDPOINTS: usize = 32;
 pub const MAX_ENDPOINT_QUEUE: usize = 8;
-pub const MAX_MESSAGE_BYTES: usize = 96;
+pub const MAX_MESSAGE_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
 
 pub const EndpointFlags = packed struct(u16) {
     local_only: bool = false,
@@ -216,12 +217,7 @@ fn zeroEndpoint() Endpoint {
 }
 
 fn hashLabel(label: []const u8) u64 {
-    var hash: u64 = 1469598103934665603;
-    for (label) |byte| {
-        hash ^= byte;
-        hash *%= 1099511628211;
-    }
-    return hash;
+    return native_util.fnv1a64(label);
 }
 
 test "endpoints connect and exchange queued messages" {

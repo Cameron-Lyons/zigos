@@ -1,6 +1,9 @@
 const abi = @import("abi.zig");
 const capability = @import("capability.zig");
+const denial_explanation = @import("denial_explanation.zig");
+const event_ledger = @import("event_ledger.zig");
 const manifest = @import("manifest.zig");
+const native_util = @import("util.zig");
 const principal = @import("principal.zig");
 const task_runtime = @import("task_runtime.zig");
 
@@ -28,6 +31,7 @@ pub const PermissionDecision = struct {
     capability_id: ?u64 = null,
     local_only: bool = false,
     expires_at_ticks: u64 = 0,
+    explanation: denial_explanation.Explanation = denial_explanation.none(),
 };
 
 pub const ActivationSummary = struct {
@@ -68,6 +72,7 @@ pub const PolicyMediator = struct {
     runtime: *task_runtime.Runtime,
     service_targets: ServiceTargets,
     policy_generation: u32 = 1,
+    ledger: ?*event_ledger.Ledger = null,
 
     pub fn init(
         policy_authority: principal.PrincipalId,
@@ -83,6 +88,10 @@ pub const PolicyMediator = struct {
         };
     }
 
+    pub fn attachLedger(self: *PolicyMediator, ledger: *event_ledger.Ledger) void {
+        self.ledger = ledger;
+    }
+
     pub fn authorizeRequest(
         self: *PolicyMediator,
         task_id: u64,
@@ -93,26 +102,26 @@ pub const PolicyMediator = struct {
         const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
 
         const matched_grant = self.matchGrant(request, grants) orelse {
-            return self.deny(task.id, request.kind, .policy_denied, now_ticks);
+            return self.deny(task.id, request, .policy_denied, now_ticks);
         };
         if (!matched_grant.allow) {
-            return self.deny(task.id, request.kind, .policy_denied, now_ticks);
+            return self.deny(task.id, request, .policy_denied, now_ticks);
         }
         if (matched_grant.expires_at_ticks) |expiry| {
             if (now_ticks > expiry) {
-                return self.deny(task.id, request.kind, .capability_expired, now_ticks);
+                return self.deny(task.id, request, .capability_expired, now_ticks);
             }
         }
         if (request.local_only and !matched_grant.local_only) {
-            return self.deny(task.id, request.kind, .scope_violation, now_ticks);
+            return self.deny(task.id, request, .scope_violation, now_ticks);
         }
         if (request.kind == .background_execution and !task.background_allowed) {
-            return self.deny(task.id, request.kind, .budget_exhausted, now_ticks);
+            return self.deny(task.id, request, .budget_exhausted, now_ticks);
         }
 
         const lease_end = self.resolveLeaseEnd(request, matched_grant, now_ticks);
         if (lease_end < now_ticks) {
-            return self.deny(task.id, request.kind, .capability_expired, now_ticks);
+            return self.deny(task.id, request, .capability_expired, now_ticks);
         }
 
         const granted_local_only = request.local_only or matched_grant.local_only;
@@ -145,6 +154,7 @@ pub const PolicyMediator = struct {
             .detail = @intFromEnum(request.kind),
             .tick = now_ticks,
         });
+        self.recordDecision(task.owner, task.id, request, true, .none, now_ticks);
 
         return .{
             .kind = request.kind,
@@ -152,6 +162,7 @@ pub const PolicyMediator = struct {
             .capability_id = minted.id,
             .local_only = granted_local_only,
             .expires_at_ticks = lease_end,
+            .explanation = denial_explanation.none(),
         };
     }
 
@@ -243,7 +254,7 @@ pub const PolicyMediator = struct {
     fn deny(
         self: *PolicyMediator,
         task_id: u64,
-        kind: manifest.PermissionKind,
+        request: manifest.PermissionRequest,
         reason: abi.DenialReason,
         now_ticks: u64,
     ) Error!PermissionDecision {
@@ -252,12 +263,37 @@ pub const PolicyMediator = struct {
             .detail = @intFromEnum(reason),
             .tick = now_ticks,
         });
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        self.recordDecision(task.owner, task_id, request, false, reason, now_ticks);
 
         return .{
-            .kind = kind,
+            .kind = request.kind,
             .allowed = false,
             .reason = reason,
+            .explanation = denial_explanation.forPermissionDecision(request.kind, reason),
         };
+    }
+
+    fn recordDecision(
+        self: *PolicyMediator,
+        owner: principal.PrincipalId,
+        task_id: u64,
+        request: manifest.PermissionRequest,
+        allowed: bool,
+        reason: abi.DenialReason,
+        now_ticks: u64,
+    ) void {
+        const ledger = self.ledger orelse return;
+        ledger.recordPermissionDecision(
+            owner,
+            task_id,
+            request.kind,
+            allowed,
+            reason,
+            now_ticks,
+            request.resource,
+            request.kind == .object_access or request.kind == .contacts or request.kind == .location,
+        ) catch {};
     }
 };
 
@@ -269,12 +305,7 @@ fn emptyDecision() PermissionDecision {
 }
 
 fn resourceId(resource: []const u8) u64 {
-    var hash: u64 = 1469598103934665603;
-    for (resource) |byte| {
-        hash ^= byte;
-        hash *%= 1099511628211;
-    }
-    return hash;
+    return native_util.fnv1a64(resource);
 }
 
 const std = @import("std");
@@ -304,6 +335,8 @@ test "policy mediation denies zero-authority requests without user grants" {
             .service_registry_id = 14,
         },
     );
+    var ledger = event_ledger.Ledger.init();
+    mediator.attachLedger(&ledger);
 
     const decision = try mediator.authorizeRequest(task.id, .{
         .kind = .network_egress,
@@ -315,6 +348,10 @@ test "policy mediation denies zero-authority requests without user grants" {
 
     try std.testing.expect(!decision.allowed);
     try std.testing.expectEqual(abi.DenialReason.policy_denied, decision.reason);
+    try std.testing.expectEqualStrings("user-grant-policy", decision.explanation.policySlice());
+    try std.testing.expect(decision.explanation.user_approval_can_resolve);
+    try std.testing.expectEqual(event_ledger.EventKind.permission_decision, ledger.latestKind(.permission_decision).?.kind);
+    try std.testing.expectEqual(abi.DenialReason.policy_denied, ledger.latestKind(.permission_decision).?.denial_reason);
     try std.testing.expectEqual(@as(usize, 0), task.capability_count);
 }
 
@@ -343,6 +380,8 @@ test "policy mediation grants local-only object and network capabilities" {
             .service_registry_id = 24,
         },
     );
+    var ledger = event_ledger.Ledger.init();
+    mediator.attachLedger(&ledger);
 
     const requests = [_]manifest.PermissionRequest{
         .{
@@ -379,6 +418,8 @@ test "policy mediation grants local-only object and network capabilities" {
     try std.testing.expectEqual(@as(usize, 2), task.capability_count);
     try std.testing.expect(summary.decisionForKind(.network_egress).?.local_only);
     try std.testing.expectEqual(@as(u64, 35), summary.decisionForKind(.network_egress).?.expires_at_ticks);
+    try std.testing.expect(ledger.latestKind(.permission_decision).?.allowed);
+    try std.testing.expectEqual(abi.DenialReason.none, ledger.latestKind(.permission_decision).?.denial_reason);
 }
 
 test "policy mediation suspends tasks when required background permission is denied" {
@@ -414,12 +455,25 @@ test "policy mediation suspends tasks when required background permission is den
             .rights = .{ .background_run = true },
         },
     };
+    const background_tasks = [_]manifest.BackgroundTaskDecl{
+        .{
+            .id = "sync",
+            .trigger = .sync_completion,
+            .expected_duration_seconds = 30,
+            .budget = .{
+                .cpu_time_ticks = 100,
+                .memory_bytes = 1024,
+            },
+            .network = .local_network_only,
+            .visibility = .status_only,
+        },
+    };
     const bundle = manifest.BundleManifest{
         .bundle_id = "app.sync",
         .display_name = "Sync",
         .publisher = "zigos.dev",
         .requested_permissions = &requests,
-        .background_triggers = &.{.scheduled_sync},
+        .background_tasks = &background_tasks,
     };
     const grants = [_]UserGrant{
         .{ .kind = .background_execution, .resource = "sync", .expires_at_ticks = 30 },
@@ -430,6 +484,8 @@ test "policy mediation suspends tasks when required background permission is den
     try std.testing.expectEqual(@as(usize, 0), summary.granted_count);
     try std.testing.expectEqual(@as(usize, 1), summary.required_denials);
     try std.testing.expectEqual(abi.DenialReason.budget_exhausted, summary.decisionForKind(.background_execution).?.reason);
+    try std.testing.expectEqualStrings("resource-budget-policy", summary.decisionForKind(.background_execution).?.explanation.policySlice());
+    try std.testing.expect(summary.decisionForKind(.background_execution).?.explanation.retry_safe);
     try std.testing.expectEqual(task_runtime.TaskState.suspended, task.state);
 }
 
@@ -496,11 +552,22 @@ test "policy mediation validates manifests before granting capabilities" {
         },
     );
 
+    const background_tasks = [_]manifest.BackgroundTaskDecl{
+        .{
+            .id = "sync",
+            .trigger = .push_event,
+            .expected_duration_seconds = 30,
+            .budget = .{
+                .cpu_time_ticks = 100,
+                .memory_bytes = 1024,
+            },
+        },
+    };
     const bundle = manifest.BundleManifest{
         .bundle_id = "app.sync",
         .display_name = "Sync",
         .publisher = "zigos.dev",
-        .background_triggers = &.{.scheduled_sync},
+        .background_tasks = &background_tasks,
     };
 
     try std.testing.expectError(error.MissingBackgroundPermission, mediator.applyManifest(task.id, bundle, &.{}, 10));

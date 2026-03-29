@@ -1,0 +1,208 @@
+pub const ComponentClass = enum(u8) {
+    session_manager,
+    app_component,
+    service_component,
+};
+
+pub const ImageSpec = struct {
+    bundle_id: []const u8,
+    artifact_name: []const u8,
+    display_name: []const u8,
+    publisher: []const u8,
+    label: []const u8,
+    entry: []const u8,
+    component_class: ComponentClass,
+    signed: bool = true,
+};
+
+pub const boot_image_specs = [_]ImageSpec{
+    .{
+        .bundle_id = "zigos.system.session-manager",
+        .artifact_name = "userspace-session-manager.elf",
+        .display_name = "Session Manager",
+        .publisher = "zigos.system",
+        .label = "session-manager",
+        .entry = "zigos.session.manager",
+        .component_class = .session_manager,
+    },
+    .{
+        .bundle_id = "zigos.system.permission-review",
+        .artifact_name = "userspace-permission-review.elf",
+        .display_name = "Permission Review",
+        .publisher = "zigos.system",
+        .label = "permission-review",
+        .entry = "zigos.permission.review",
+        .component_class = .service_component,
+    },
+    .{
+        .bundle_id = "zigos.system.workspace-storage",
+        .artifact_name = "userspace-workspace-storage.elf",
+        .display_name = "Workspace Storage",
+        .publisher = "zigos.system",
+        .label = "workspace-storage",
+        .entry = "zigos.bootstrap.workspace",
+        .component_class = .service_component,
+    },
+    .{
+        .bundle_id = "zigos.system.phase1-client",
+        .artifact_name = "userspace-phase1-client.elf",
+        .display_name = "Phase 1 Client",
+        .publisher = "zigos.system",
+        .label = "phase1-client",
+        .entry = "app.phase1.client",
+        .component_class = .app_component,
+    },
+    .{
+        .bundle_id = "zigos.system.phase1-temp",
+        .artifact_name = "userspace-phase1-temp.elf",
+        .display_name = "Phase 1 Temp",
+        .publisher = "zigos.system",
+        .label = "temp-task",
+        .entry = "app.temp",
+        .component_class = .app_component,
+    },
+    .{
+        .bundle_id = "app.viewer",
+        .artifact_name = "userspace-viewer.elf",
+        .display_name = "Viewer",
+        .publisher = "zigos.dev",
+        .label = "viewer",
+        .entry = "app.viewer",
+        .component_class = .app_component,
+        .signed = false,
+    },
+    .{
+        .bundle_id = "app.notes",
+        .artifact_name = "userspace-notes.elf",
+        .display_name = "Notes",
+        .publisher = "zigos.dev",
+        .label = "notes",
+        .entry = "app.notes",
+        .component_class = .app_component,
+    },
+    .{
+        .bundle_id = "app.sync",
+        .artifact_name = "userspace-sync.elf",
+        .display_name = "Sync",
+        .publisher = "zigos.dev",
+        .label = "sync",
+        .entry = "app.sync",
+        .component_class = .app_component,
+        .signed = false,
+    },
+    .{
+        .bundle_id = "app.capture",
+        .artifact_name = "userspace-capture.elf",
+        .display_name = "Capture",
+        .publisher = "zigos.dev",
+        .label = "capture",
+        .entry = "app.capture",
+        .component_class = .app_component,
+    },
+    .{
+        .bundle_id = "zigos.system.policy-mediation",
+        .artifact_name = "userspace-policy-mediation.elf",
+        .display_name = "Policy Mediation",
+        .publisher = "zigos.system",
+        .label = "policy-mediation",
+        .entry = "zigos.policy.mediation",
+        .component_class = .service_component,
+    },
+    .{
+        .bundle_id = "zigos.system.network-stack",
+        .artifact_name = "userspace-network-stack.elf",
+        .display_name = "Network Stack",
+        .publisher = "zigos.system",
+        .label = "network-service",
+        .entry = "zigos.service.network.policy",
+        .component_class = .service_component,
+    },
+    .{
+        .bundle_id = "zigos.system.storage-object",
+        .artifact_name = "userspace-storage-object.elf",
+        .display_name = "Storage Object Service",
+        .publisher = "zigos.system",
+        .label = "workspace-storage",
+        .entry = "zigos.object.workspace",
+        .component_class = .service_component,
+    },
+    .{
+        .bundle_id = "zigos.system.package-service",
+        .artifact_name = "userspace-package-service.elf",
+        .display_name = "Package Install Service",
+        .publisher = "zigos.system",
+        .label = "package-service",
+        .entry = "zigos.package.install",
+        .component_class = .service_component,
+    },
+    .{
+        .bundle_id = "zigos.system.compositor",
+        .artifact_name = "userspace-compositor.elf",
+        .display_name = "Compositor Session",
+        .publisher = "zigos.system",
+        .label = "compositor-session",
+        .entry = "zigos.ui.session",
+        .component_class = .service_component,
+    },
+    .{
+        .bundle_id = "zigos.system.indexing-search",
+        .artifact_name = "userspace-indexing-search.elf",
+        .display_name = "Indexing Search",
+        .publisher = "zigos.system",
+        .label = "indexing-service",
+        .entry = "zigos.index.search",
+        .component_class = .service_component,
+    },
+    .{
+        .bundle_id = "zigos.system.sync-service",
+        .artifact_name = "userspace-sync-service.elf",
+        .display_name = "Sync Replication",
+        .publisher = "zigos.system",
+        .label = "sync-service",
+        .entry = "zigos.sync.replication",
+        .component_class = .service_component,
+    },
+    .{
+        .bundle_id = "zigos.system.media-print",
+        .artifact_name = "userspace-media-print.elf",
+        .display_name = "Media Print Helpers",
+        .publisher = "zigos.system",
+        .label = "media-print-service",
+        .entry = "zigos.media.print",
+        .component_class = .service_component,
+    },
+    .{
+        .bundle_id = "zigos.system.compatibility-portal",
+        .artifact_name = "userspace-compatibility-portal.elf",
+        .display_name = "Compatibility Portal",
+        .publisher = "zigos.system",
+        .label = "compatibility-portal",
+        .entry = "zigos.compat.portal",
+        .component_class = .service_component,
+    },
+    .{
+        .bundle_id = "zigos.system.phase3-client",
+        .artifact_name = "userspace-phase3-client.elf",
+        .display_name = "Phase 3 Client",
+        .publisher = "zigos.system",
+        .label = "phase3-client",
+        .entry = "app.phase3.client",
+        .component_class = .app_component,
+    },
+};
+
+pub fn find(bundle_id: []const u8) ?*const ImageSpec {
+    for (&boot_image_specs) |*spec| {
+        if (eql(spec.bundle_id, bundle_id)) return spec;
+    }
+    return null;
+}
+
+fn eql(left: []const u8, right: []const u8) bool {
+    if (left.len != right.len) return false;
+    var index: usize = 0;
+    while (index < left.len) : (index += 1) {
+        if (left[index] != right[index]) return false;
+    }
+    return true;
+}

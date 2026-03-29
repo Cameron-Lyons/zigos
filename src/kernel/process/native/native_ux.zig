@@ -1,5 +1,6 @@
 const std = @import("std");
 const manifest = @import("manifest.zig");
+const native_util = @import("util.zig");
 const object_store = @import("object_store.zig");
 const principal = @import("principal.zig");
 const signing = @import("signing.zig");
@@ -7,6 +8,7 @@ const storage_service = @import("storage_service.zig");
 const sync_service = @import("sync_service.zig");
 const task_runtime = @import("task_runtime.zig");
 const workspace = @import("workspace.zig");
+const copyText = native_util.copyText;
 
 pub const MAX_FLOWS: usize = 16;
 pub const MAX_DETAIL_BYTES: usize = 64;
@@ -135,11 +137,6 @@ fn zeroFlow() FlowRecord {
     };
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
-}
 
 test "native ux records task workspace pairing review and recovery flows" {
     storage_service.Service.resetPersistentState();
