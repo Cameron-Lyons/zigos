@@ -34,10 +34,50 @@ pub const PermissionRequest = struct {
 };
 
 pub const BackgroundTrigger = enum(u8) {
-    workspace_open,
-    scheduled_sync,
-    notification,
-    share_target,
+    user_approved_scheduled_job,
+    push_event,
+    local_object_change,
+    device_proximity,
+    sensor_rule,
+    sync_completion,
+    media_export_completion,
+    organization_policy_task,
+};
+
+pub const BackgroundNetworkMode = enum(u8) {
+    none,
+    local_network_only,
+    named_service_identities,
+    named_domains,
+    unrestricted_internet,
+};
+
+pub const BackgroundVisibility = enum(u8) {
+    hidden,
+    status_only,
+    user_visible,
+    audit_only,
+};
+
+pub const BackgroundResourceBudget = struct {
+    cpu_time_ticks: u64 = 0,
+    memory_bytes: usize = 0,
+    shared_memory_bytes: usize = 0,
+
+    pub fn declared(self: BackgroundResourceBudget) bool {
+        return self.cpu_time_ticks != 0 or
+            self.memory_bytes != 0 or
+            self.shared_memory_bytes != 0;
+    }
+};
+
+pub const BackgroundTaskDecl = struct {
+    id: []const u8,
+    trigger: BackgroundTrigger,
+    expected_duration_seconds: u32,
+    budget: BackgroundResourceBudget = .{},
+    network: BackgroundNetworkMode = .none,
+    visibility: BackgroundVisibility = .status_only,
 };
 
 pub const AiLocality = enum(u8) {
@@ -50,6 +90,22 @@ pub const AiMetadata = struct {
     model_family: []const u8 = "",
     locality: AiLocality = .inherit_task,
     offline_required: bool = false,
+};
+
+pub const ComponentAbi = enum(u8) {
+    typed_component_v1,
+    native_sandbox,
+};
+
+pub const ExecutionComponentDecl = struct {
+    id: []const u8,
+    entry: []const u8,
+    abi: ComponentAbi = .typed_component_v1,
+};
+
+pub const AssetDecl = struct {
+    path: []const u8,
+    content_type: []const u8,
 };
 
 pub const UpdateChannel = enum(u8) {
@@ -68,15 +124,16 @@ pub const Signature = struct {
     value: [64]u8 = [_]u8{0} ** 64,
 
     pub fn publicKeySlice(self: *const Signature) []const u8 {
-        return self.public_key[0..self.public_key_len];
+        return self.public_key[0..@min(self.public_key_len, self.public_key.len)];
     }
 
     pub fn valueSlice(self: *const Signature) []const u8 {
-        return self.value[0..self.value_len];
+        return self.value[0..@min(self.value_len, self.value.len)];
     }
 
     pub fn isPresent(self: *const Signature) bool {
-        return self.signer.len != 0;
+        return self.signer.len != 0 or
+            (self.public_key_len != 0 and self.value_len != 0);
     }
 
     pub fn isComplete(self: *const Signature) bool {
@@ -95,8 +152,10 @@ pub const BundleManifest = struct {
     version_minor: u16 = 0,
     provided_interfaces: []const InterfaceDecl = &.{},
     consumed_interfaces: []const InterfaceDecl = &.{},
+    components: []const ExecutionComponentDecl = &.{},
+    assets: []const AssetDecl = &.{},
     requested_permissions: []const PermissionRequest = &.{},
-    background_triggers: []const BackgroundTrigger = &.{},
+    background_tasks: []const BackgroundTaskDecl = &.{},
     ai_metadata: AiMetadata = .{},
     update_channel: UpdateChannel = .stable,
     signature: Signature = .{},
@@ -106,7 +165,17 @@ pub const ValidationError = error{
     EmptyBundleId,
     EmptyDisplayName,
     EmptyPublisher,
+    ComponentIdEmpty,
+    ComponentEntryEmpty,
+    DuplicateComponentId,
     MissingBackgroundPermission,
+    MissingBackgroundTask,
+    BackgroundTaskIdEmpty,
+    BackgroundTaskDurationMissing,
+    BackgroundTaskBudgetMissing,
+    BackgroundTaskMissingPermission,
+    BackgroundPermissionMissingTask,
+    DuplicateBackgroundTaskId,
     LocalOnlyAiRequiresLocalNetwork,
 };
 
@@ -115,9 +184,14 @@ pub fn validate(bundle: BundleManifest) ValidationError!void {
     if (bundle.display_name.len == 0) return error.EmptyDisplayName;
     if (bundle.publisher.len == 0) return error.EmptyPublisher;
 
-    if (bundle.background_triggers.len > 0 and !hasPermission(bundle, .background_execution)) {
+    if (bundle.background_tasks.len > 0 and !hasPermission(bundle, .background_execution)) {
         return error.MissingBackgroundPermission;
     }
+    if (hasPermission(bundle, .background_execution) and bundle.background_tasks.len == 0) {
+        return error.MissingBackgroundTask;
+    }
+    try validateComponents(bundle);
+    try validateBackgroundTasks(bundle);
 
     if (bundle.ai_metadata.locality == .local_only) {
         for (bundle.requested_permissions) |request| {
@@ -136,6 +210,13 @@ pub fn hasPermission(bundle: BundleManifest, kind: PermissionKind) bool {
     return false;
 }
 
+pub fn findBackgroundTask(bundle: BundleManifest, id: []const u8) ?BackgroundTaskDecl {
+    for (bundle.background_tasks) |task| {
+        if (std.mem.eql(u8, task.id, id)) return task;
+    }
+    return null;
+}
+
 pub fn requiredPermissionCount(bundle: BundleManifest) usize {
     var count: usize = 0;
     for (bundle.requested_permissions) |request| {
@@ -144,12 +225,70 @@ pub fn requiredPermissionCount(bundle: BundleManifest) usize {
     return count;
 }
 
-test "validate rejects background triggers without explicit background permission" {
+fn validateBackgroundTasks(bundle: BundleManifest) ValidationError!void {
+    for (bundle.background_tasks, 0..) |task, index| {
+        if (task.id.len == 0) return error.BackgroundTaskIdEmpty;
+        if (task.expected_duration_seconds == 0) return error.BackgroundTaskDurationMissing;
+        if (!task.budget.declared()) return error.BackgroundTaskBudgetMissing;
+        if (!hasBackgroundPermission(bundle, task.id)) return error.BackgroundTaskMissingPermission;
+
+        var duplicate_index: usize = 0;
+        while (duplicate_index < index) : (duplicate_index += 1) {
+            if (std.mem.eql(u8, bundle.background_tasks[duplicate_index].id, task.id)) {
+                return error.DuplicateBackgroundTaskId;
+            }
+        }
+    }
+
+    for (bundle.requested_permissions) |request| {
+        if (request.kind != .background_execution) continue;
+        if (findBackgroundTask(bundle, request.resource) == null) {
+            return error.BackgroundPermissionMissingTask;
+        }
+    }
+}
+
+fn validateComponents(bundle: BundleManifest) ValidationError!void {
+    for (bundle.components, 0..) |component, index| {
+        if (component.id.len == 0) return error.ComponentIdEmpty;
+        if (component.entry.len == 0) return error.ComponentEntryEmpty;
+
+        var duplicate_index: usize = 0;
+        while (duplicate_index < index) : (duplicate_index += 1) {
+            if (std.mem.eql(u8, bundle.components[duplicate_index].id, component.id)) {
+                return error.DuplicateComponentId;
+            }
+        }
+    }
+}
+
+fn hasBackgroundPermission(bundle: BundleManifest, id: []const u8) bool {
+    for (bundle.requested_permissions) |request| {
+        if (request.kind != .background_execution) continue;
+        if (std.mem.eql(u8, request.resource, id)) return true;
+    }
+    return false;
+}
+
+test "validate rejects background tasks without explicit background permission" {
+    const background_tasks = [_]BackgroundTaskDecl{
+        .{
+            .id = "sync",
+            .trigger = .sync_completion,
+            .expected_duration_seconds = 30,
+            .budget = .{
+                .cpu_time_ticks = 100,
+                .memory_bytes = 1024,
+            },
+            .network = .local_network_only,
+            .visibility = .status_only,
+        },
+    };
     const bundle = BundleManifest{
         .bundle_id = "app.notes",
         .display_name = "Notes",
         .publisher = "zigos.dev",
-        .background_triggers = &.{.scheduled_sync},
+        .background_tasks = &background_tasks,
     };
 
     try std.testing.expectError(error.MissingBackgroundPermission, validate(bundle));
@@ -204,14 +343,31 @@ test "validate accepts a signed local-first bundle manifest" {
     const interfaces = [_]InterfaceDecl{
         .{ .name = "zigos.workspace.document" },
     };
+    const background_tasks = [_]BackgroundTaskDecl{
+        .{
+            .id = "sync",
+            .trigger = .sync_completion,
+            .expected_duration_seconds = 30,
+            .budget = .{
+                .cpu_time_ticks = 100,
+                .memory_bytes = 64 * 1024,
+                .shared_memory_bytes = 8 * 1024,
+            },
+            .network = .local_network_only,
+            .visibility = .status_only,
+        },
+    };
     const bundle = BundleManifest{
         .bundle_id = "app.notes",
         .display_name = "Notes",
         .publisher = "zigos.dev",
+        .components = &[_]ExecutionComponentDecl{
+            .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
+        },
         .provided_interfaces = &interfaces,
         .consumed_interfaces = &interfaces,
         .requested_permissions = &requests,
-        .background_triggers = &.{.workspace_open},
+        .background_tasks = &background_tasks,
         .ai_metadata = .{
             .model_family = "tiny-embed",
             .locality = .local_only,
@@ -226,4 +382,73 @@ test "validate accepts a signed local-first bundle manifest" {
 
     try validate(bundle);
     try std.testing.expectEqual(@as(usize, 1), requiredPermissionCount(bundle));
+}
+
+test "validate rejects background execution permissions without task metadata" {
+    const requests = [_]PermissionRequest{
+        .{
+            .kind = .background_execution,
+            .resource = "sync",
+            .rights = .{ .background_run = true },
+            .required = false,
+        },
+    };
+    const bundle = BundleManifest{
+        .bundle_id = "app.sync",
+        .display_name = "Sync",
+        .publisher = "zigos.dev",
+        .requested_permissions = &requests,
+    };
+
+    try std.testing.expectError(error.MissingBackgroundTask, validate(bundle));
+}
+
+test "validate rejects incomplete background task declarations" {
+    const requests = [_]PermissionRequest{
+        .{
+            .kind = .background_execution,
+            .resource = "sync",
+            .rights = .{ .background_run = true },
+            .required = false,
+        },
+    };
+    const background_tasks = [_]BackgroundTaskDecl{
+        .{
+            .id = "sync",
+            .trigger = .push_event,
+            .expected_duration_seconds = 0,
+        },
+    };
+    const bundle = BundleManifest{
+        .bundle_id = "app.sync",
+        .display_name = "Sync",
+        .publisher = "zigos.dev",
+        .requested_permissions = &requests,
+        .background_tasks = &background_tasks,
+    };
+
+    try std.testing.expectError(error.BackgroundTaskDurationMissing, validate(bundle));
+}
+
+test "validate rejects incomplete or duplicate component declarations" {
+    const invalid = BundleManifest{
+        .bundle_id = "app.invalid",
+        .display_name = "Invalid",
+        .publisher = "zigos.dev",
+        .components = &[_]ExecutionComponentDecl{
+            .{ .id = "", .entry = "zigos.invalid.main" },
+        },
+    };
+    try std.testing.expectError(error.ComponentIdEmpty, validate(invalid));
+
+    const duplicate = BundleManifest{
+        .bundle_id = "app.duplicate",
+        .display_name = "Duplicate",
+        .publisher = "zigos.dev",
+        .components = &[_]ExecutionComponentDecl{
+            .{ .id = "main", .entry = "zigos.duplicate.main" },
+            .{ .id = "main", .entry = "zigos.duplicate.worker" },
+        },
+    };
+    try std.testing.expectError(error.DuplicateComponentId, validate(duplicate));
 }

@@ -1,10 +1,14 @@
 const std = @import("std");
+const crypto_hash = @import("crypto_hash.zig");
 const manifest = @import("manifest.zig");
+const native_util = @import("util.zig");
 const signing = @import("signing.zig");
+const copyText = native_util.copyText;
 
 pub const MAX_OBJECTS: usize = 24;
-pub const MAX_VERSIONS: usize = 64;
-pub const MAX_PAYLOAD_BYTES: usize = 256;
+pub const MAX_VERSIONS: usize = 128;
+pub const MAX_PAYLOAD_BYTES: usize = 512;
+const MAX_METADATA_MESSAGE_BYTES: usize = MAX_PAYLOAD_BYTES + 256;
 
 pub const ObjectType = enum(u8) {
     blob,
@@ -42,11 +46,11 @@ pub const SignedMetadata = struct {
     }
 
     pub fn labelSlice(self: *const SignedMetadata) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@min(self.label_len, self.label.len)];
     }
 
     pub fn contentTypeSlice(self: *const SignedMetadata) []const u8 {
-        return self.content_type[0..self.content_type_len];
+        return self.content_type[0..@min(self.content_type_len, self.content_type.len)];
     }
 
     pub fn isSigned(self: *const SignedMetadata) bool {
@@ -58,7 +62,7 @@ pub const SignedMetadata = struct {
         object_type: ObjectType,
         payload: []const u8,
     ) bool {
-        var message_buffer: [512]u8 = undefined;
+        var message_buffer: [MAX_METADATA_MESSAGE_BYTES]u8 = undefined;
         const message = metadataMessage(&message_buffer, object_type, payload, self.*) catch return false;
         return signing.verify(self.signature, message);
     }
@@ -152,15 +156,15 @@ pub const Store = struct {
     pub fn reset(self: *Store) void {
         self.next_object_id = 1;
         self.next_version_id = 1;
-        for (&self.objects) |*slot| {
-            slot.* = .{};
-        }
-        for (&self.versions) |*slot| {
-            slot.* = .{};
-        }
+        zeroBytes(std.mem.asBytes(&self.objects));
+        zeroBytes(std.mem.asBytes(&self.versions));
     }
 
     pub fn putVersion(self: *Store, request: PutRequest) Error!PutResult {
+        return self.putVersionRef(&request);
+    }
+
+    pub fn putVersionRef(self: *Store, request: *const PutRequest) Error!PutResult {
         if (!request.metadata.isSigned()) return error.UnsignedMetadata;
         if (!request.metadata.signature.isComplete() or !request.metadata.verifyFor(request.object_type, request.payload)) {
             return error.InvalidSignature;
@@ -203,17 +207,15 @@ pub const Store = struct {
 
         const version_id = self.nextVersionId();
         const address = computeAddress(object_record.id, request.object_type, previous_version_id, request.payload, request.metadata);
-        const version_record = VersionRecord{
+        try self.insertVersion(.{
             .id = version_id,
             .object_id = object_record.id,
             .previous_version_id = previous_version_id,
             .object_type = request.object_type,
             .address = address,
-            .metadata = request.metadata,
-            .payload_len = request.payload.len,
-            .payload = copyPayload(request.payload),
-        };
-        try self.insertVersion(version_record);
+            .metadata = &request.metadata,
+            .payload = request.payload,
+        });
 
         object_record.latest_version_id = version_id;
         object_record.version_count += 1;
@@ -290,11 +292,26 @@ pub const Store = struct {
         return error.ObjectTableFull;
     }
 
-    fn insertVersion(self: *Store, version_record: VersionRecord) Error!void {
+    fn insertVersion(self: *Store, request: struct {
+        id: u64,
+        object_id: u64,
+        previous_version_id: u64,
+        object_type: ObjectType,
+        address: ContentAddress,
+        metadata: *const SignedMetadata,
+        payload: []const u8,
+    }) Error!void {
         for (&self.versions) |*slot| {
             if (slot.in_use) continue;
             slot.in_use = true;
-            slot.version = version_record;
+            slot.version.id = request.id;
+            slot.version.object_id = request.object_id;
+            slot.version.previous_version_id = request.previous_version_id;
+            slot.version.object_type = request.object_type;
+            copyBytes(slot.version.address[0..], request.address[0..]);
+            writeMetadata(&slot.version.metadata, request.metadata);
+            slot.version.payload_len = request.payload.len;
+            copyBytes(slot.version.payload[0..request.payload.len], request.payload);
             return;
         }
         return error.VersionTableFull;
@@ -310,7 +327,7 @@ pub fn signMetadata(
     created_at_ticks: u64,
 ) SignMetadataError!SignedMetadata {
     var metadata = SignedMetadata.init(label, content_type, .{}, created_at_ticks);
-    var message_buffer: [512]u8 = undefined;
+    var message_buffer: [MAX_METADATA_MESSAGE_BYTES]u8 = undefined;
     const message = try metadataMessage(&message_buffer, object_type, payload, metadata);
     metadata.signature = try signing.sign(identity, message);
     return metadata;
@@ -322,6 +339,35 @@ fn copyPayload(payload: []const u8) [MAX_PAYLOAD_BYTES]u8 {
     return buffer;
 }
 
+fn zeroBytes(buffer: []u8) void {
+    var index: usize = 0;
+    while (index < buffer.len) : (index += 1) {
+        buffer[index] = 0;
+    }
+}
+
+fn copyBytes(dest: []u8, src: []const u8) void {
+    var index: usize = 0;
+    const len = @min(dest.len, src.len);
+    while (index < len) : (index += 1) {
+        dest[index] = src[index];
+    }
+}
+
+fn writeMetadata(dest: *SignedMetadata, src: *const SignedMetadata) void {
+    dest.signature.format = src.signature.format;
+    dest.signature.signer = src.signature.signer;
+    dest.signature.public_key_len = src.signature.public_key_len;
+    dest.signature.value_len = src.signature.value_len;
+    copyBytes(dest.signature.public_key[0..], src.signature.public_key[0..]);
+    copyBytes(dest.signature.value[0..], src.signature.value[0..]);
+    dest.label_len = src.label_len;
+    copyBytes(dest.label[0..], src.label[0..]);
+    dest.content_type_len = src.content_type_len;
+    copyBytes(dest.content_type[0..], src.content_type[0..]);
+    dest.created_at_ticks = src.created_at_ticks;
+}
+
 fn computeAddress(
     object_id: u64,
     object_type: ObjectType,
@@ -329,52 +375,20 @@ fn computeAddress(
     payload: []const u8,
     metadata: SignedMetadata,
 ) ContentAddress {
-    var address = [_]u8{0} ** 32;
-    const seeds = [_]u64{
-        0xCBF29CE484222325,
-        0x9E3779B185EBCA87,
-        0xD6E8FEB86659FD93,
-        0x94D049BB133111EB,
-    };
-
-    for (seeds, 0..) |seed, index| {
-        var hash = seed;
-        hash = hashBytes(hash, std.mem.asBytes(&object_id));
-        hash = hashBytes(hash, std.mem.asBytes(&previous_version_id));
-        const object_type_tag: u8 = @intFromEnum(object_type);
-        hash = hashByte(hash, object_type_tag);
-        hash = hashBytes(hash, metadata.labelSlice());
-        hash = hashBytes(hash, metadata.contentTypeSlice());
-        hash = hashBytes(hash, metadata.signature.signer);
-        hash = hashBytes(hash, metadata.signature.publicKeySlice());
-        hash = hashBytes(hash, metadata.signature.valueSlice());
-        hash = hashBytes(hash, payload);
-        std.mem.writeInt(u64, address[index * 8 ..][0..8], hash, .little);
-    }
-
-    return address;
+    var hasher = crypto_hash.init();
+    crypto_hash.updateInt(&hasher, "object-id", object_id);
+    crypto_hash.updateInt(&hasher, "previous-version-id", previous_version_id);
+    crypto_hash.updateEnum(&hasher, "object-type", object_type);
+    crypto_hash.updateBytes(&hasher, "label", metadata.labelSlice());
+    crypto_hash.updateBytes(&hasher, "content-type", metadata.contentTypeSlice());
+    crypto_hash.updateInt(&hasher, "created-at", metadata.created_at_ticks);
+    crypto_hash.updateBytes(&hasher, "signature-signer", metadata.signature.signer);
+    crypto_hash.updateBytes(&hasher, "signature-public-key", metadata.signature.publicKeySlice());
+    crypto_hash.updateBytes(&hasher, "signature-value", metadata.signature.valueSlice());
+    crypto_hash.updateBytes(&hasher, "payload", payload);
+    return crypto_hash.finalize(&hasher);
 }
 
-fn hashBytes(start: u64, bytes: []const u8) u64 {
-    var hash = start;
-    for (bytes) |byte| {
-        hash = hashByte(hash, byte);
-    }
-    return hash;
-}
-
-fn hashByte(start: u64, byte: u8) u64 {
-    var hash = start;
-    hash ^= byte;
-    hash *%= 1099511628211;
-    return hash;
-}
-
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
-}
 
 fn metadataMessage(
     buffer: []u8,

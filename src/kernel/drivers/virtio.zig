@@ -5,7 +5,6 @@ const memory = @import("../memory/memory.zig");
 const paging = @import("../memory/paging.zig");
 const vga = @import("vga.zig");
 const isr = @import("../interrupts/isr.zig");
-const ethernet = @import("../net/ethernet.zig");
 const driver_helpers = @import("../net/driver_helpers.zig");
 const link_port = @import("../net/link_port.zig");
 const sync = @import("../utils/sync.zig");
@@ -128,7 +127,6 @@ const VirtioNetDevice = struct {
     rx_buffers: [*]u8,
     tx_buffers: [*]u8,
     rx_lock: sync.SpinLock,
-    rx_poll_buffer: [VIRTIO_BUFFER_SIZE]u8,
 
     fn commonFieldPtr(self: *VirtioNetDevice, comptime T: type, comptime field: []const u8) *align(1) volatile T {
         return @ptrFromInt(@intFromPtr(self.common_cfg) + @offsetOf(VirtioCommonCfg, field));
@@ -262,14 +260,6 @@ const VirtioNetDevice = struct {
         self.processUsedBuffers(&self.tx_queue);
     }
 
-    pub fn receive(self: *VirtioNetDevice) ?[]u8 {
-        const packet = self.claimReceive() orelse return null;
-        const copy_len = @min(packet.data.len, self.rx_poll_buffer.len);
-        @memcpy(self.rx_poll_buffer[0..copy_len], packet.data[0..copy_len]);
-        self.releaseReceived(packet.handle);
-        return self.rx_poll_buffer[0..copy_len];
-    }
-
     pub fn claimReceive(self: *VirtioNetDevice) ?link_port.OwnedRxPacket {
         self.rx_lock.acquire();
         defer self.rx_lock.release();
@@ -351,85 +341,6 @@ fn virtio_interrupt_handler(frame: *isr.InterruptFrame) void {
     }
 }
 
-pub fn runInterruptSelfTestChecked() bool {
-    var common_cfg: VirtioCommonCfg = std.mem.zeroes(VirtioCommonCfg);
-    var device_cfg: VirtioNetConfig = std.mem.zeroes(VirtioNetConfig);
-    var isr_status: u8 = 1;
-    var notify_slot: u16 = 0xFFFF;
-    var rx_desc = [_]VirtqDesc{std.mem.zeroes(VirtqDesc)} ** 256;
-    var tx_desc = [_]VirtqDesc{std.mem.zeroes(VirtqDesc)} ** 256;
-    var rx_avail: VirtqAvail = std.mem.zeroes(VirtqAvail);
-    var tx_avail: VirtqAvail = std.mem.zeroes(VirtqAvail);
-    var rx_used: VirtqUsed = std.mem.zeroes(VirtqUsed);
-    var tx_used: VirtqUsed = std.mem.zeroes(VirtqUsed);
-    const rx_buffer_mem = memory.kmalloc(VIRTIO_BUFFER_SIZE) orelse return false;
-    defer memory.kfree(rx_buffer_mem);
-
-    const rx_buffer: [*]u8 = @ptrCast(rx_buffer_mem);
-    const sender_ip: u32 = 0xC0A801F2;
-    const target_ip: u32 = 0xC0A80102;
-    const sender_mac = [6]u8{ 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x03 };
-    const target_mac = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x03 };
-    const header_size = VIRTIO_NET_HEADER_SIZE;
-    var frame: [ethernet.ETH_HEADER_SIZE + @sizeOf(driver_helpers.ArpReplyHeader)]u8 = undefined;
-    driver_helpers.writeSyntheticArpReply(&frame, sender_ip, target_ip, sender_mac, target_mac);
-    @memset(rx_buffer[0..VIRTIO_BUFFER_SIZE], 0);
-    @memcpy(rx_buffer[header_size .. header_size + frame.len], frame[0..]);
-
-    rx_desc[0].addr = @intFromPtr(rx_buffer);
-    rx_desc[0].len = @intCast(VIRTIO_BUFFER_SIZE);
-    rx_desc[0].flags = VIRTQ_DESC_F_WRITE;
-
-    var fake = VirtioNetDevice{
-        .pci_device = .{ .bus = 0, .device = 0, .function = 0, .vendor_id = 0, .device_id = 0, .class_code = 0, .subclass = 0, .prog_if = 0, .bar0 = 0, .bar1 = 0, .bar2 = 0, .bar3 = 0, .bar4 = 0, .bar5 = 0 },
-        .common_cfg = &common_cfg,
-        .device_cfg = &device_cfg,
-        .notify_base = @intFromPtr(&notify_slot),
-        .notify_off_multiplier = 0,
-        .isr_cfg = @ptrCast(&isr_status),
-        .mac_addr = target_mac,
-        .rx_queue = .{
-            .num = VIRTQUEUE_SIZE,
-            .desc = &rx_desc,
-            .avail = &rx_avail,
-            .used = &rx_used,
-            .notify_off = 0,
-            .last_used_idx = 0,
-            .free_head = 1,
-            .num_free = VIRTQUEUE_SIZE - 1,
-            .desc_state = [_]Virtqueue.DescState{.{ .data = null, .len = 0, .next = 0 }} ** 256,
-        },
-        .tx_queue = .{
-            .num = VIRTQUEUE_SIZE,
-            .desc = &tx_desc,
-            .avail = &tx_avail,
-            .used = &tx_used,
-            .notify_off = 0,
-            .last_used_idx = 0,
-            .free_head = 0,
-            .num_free = VIRTQUEUE_SIZE,
-            .desc_state = [_]Virtqueue.DescState{.{ .data = null, .len = 0, .next = 0 }} ** 256,
-        },
-        .rx_buffers = rx_buffer,
-        .tx_buffers = rx_buffer,
-        .rx_lock = sync.SpinLock.init(),
-        .rx_poll_buffer = undefined,
-    };
-    fake.rx_queue.used.idx = 1;
-    fake.rx_queue.used.ring[0] = .{ .id = 0, .len = @intCast(header_size + frame.len) };
-
-    const previous = virtio_net;
-    virtio_net = fake;
-    defer virtio_net = previous;
-
-    if (virtio_net) |*dev| {
-        processInterrupt(dev);
-        return dev.rx_queue.avail.idx == 1 and notify_slot == 0;
-    }
-
-    return false;
-}
-
 pub fn init() void {
     vga.print("Initializing VirtIO network driver...\n");
 
@@ -457,6 +368,16 @@ pub fn init() void {
     vga.print("No VirtIO network device found.\n");
 }
 
+pub fn publishBootstrapTransport(device_id: u64) bool {
+    return driver_helpers.publishBootstrapTransport(
+        device_id,
+        "virtio",
+        currentNetworkDevice,
+        activatePublishedDevice,
+        isSupportedDevice,
+    );
+}
+
 fn initDevice(pci_device: pci.PCIDevice) void {
     var dev = VirtioNetDevice{
         .pci_device = pci_device,
@@ -481,7 +402,6 @@ fn initDevice(pci_device: pci.PCIDevice) void {
         // SAFETY: allocated when setting up tx descriptors
         .tx_buffers = undefined,
         .rx_lock = sync.SpinLock.init(),
-        .rx_poll_buffer = undefined,
     };
 
     if (!findCapabilities(&dev)) {
@@ -506,15 +426,7 @@ fn initDevice(pci_device: pci.PCIDevice) void {
 
     dev.mac_addr = dev.deviceFieldPtr([6]u8, "mac").*;
 
-    vga.print("VirtIO MAC: ");
-    for (dev.mac_addr, 0..) |byte, i| {
-        const high = byte >> 4;
-        const low = byte & 0x0F;
-        vga.printChar(if (high < 10) '0' + high else 'A' + high - 10);
-        vga.printChar(if (low < 10) '0' + low else 'A' + low - 10);
-        if (i < 5) vga.print(":");
-    }
-    vga.print("\n");
+    driver_helpers.printMac("VirtIO MAC: ", dev.mac_addr);
 
     dev.setupQueue(&dev.rx_queue, 0, VIRTQUEUE_SIZE) catch {
         vga.print("Failed to setup RX queue\n");
@@ -547,9 +459,31 @@ fn initDevice(pci_device: pci.PCIDevice) void {
     dev.commonFieldPtr(u8, "device_status").* |= VIRTIO_STATUS_DRIVER_OK;
 
     virtio_net = dev;
-    link_port.setNetworkDevice(&virtio_network_device);
 
     vga.print("VirtIO network initialized successfully!\n");
+}
+
+fn activatePublishedDevice(device_id: u64) ?*const link_port.NetworkDevice {
+    if (currentNetworkDevice(device_id)) |device| return device;
+
+    const pci_device = pci.findDeviceByStableId(device_id) orelse return null;
+    if (!isSupportedDevice(pci_device)) return null;
+    initDevice(pci_device);
+    return currentNetworkDevice(device_id);
+}
+
+fn currentNetworkDevice(device_id: u64) ?*const link_port.NetworkDevice {
+    if (virtio_net) |*dev| {
+        if (pci.stableDeviceId(dev.pci_device) == device_id) return &virtio_network_device;
+    }
+    return null;
+}
+
+fn isSupportedDevice(pci_device: pci.PCIDevice) bool {
+    return pci_device.vendor_id == VIRTIO_VENDOR_ID and
+        (pci_device.device_id == VIRTIO_NET_DEVICE_ID or
+            pci_device.device_id == VIRTIO_NET_MODERN_ID or
+            (pci_device.device_id >= 0x1040 and pci_device.device_id <= 0x107F));
 }
 
 fn findCapabilities(dev: *VirtioNetDevice) bool {
@@ -618,7 +552,6 @@ fn findCapabilities(dev: *VirtioNetDevice) bool {
 
 const virtio_network_device = link_port.NetworkDevice{
     .send = virtioSend,
-    .receive = virtioReceive,
     .getMacAddress = virtioGetMacAddress,
 };
 
@@ -628,20 +561,9 @@ fn virtioSend(data: []const u8) void {
     }
 }
 
-fn virtioReceive() ?[]u8 {
-    if (virtio_net) |*dev| {
-        return dev.receive();
-    }
-    return null;
-}
-
 fn virtioGetMacAddress() [6]u8 {
     if (virtio_net) |*dev| {
         return dev.mac_addr;
     }
     return [_]u8{0} ** 6;
-}
-
-pub fn isInitialized() bool {
-    return virtio_net != null;
 }

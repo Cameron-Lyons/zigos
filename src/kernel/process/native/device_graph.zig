@@ -1,7 +1,9 @@
 const std = @import("std");
 const manifest = @import("manifest.zig");
+const native_util = @import("util.zig");
 const principal = @import("principal.zig");
 const signing = @import("signing.zig");
+const copyText = native_util.copyText;
 
 pub const MAX_USER_ROOTS: usize = 4;
 pub const MAX_DEVICES: usize = 8;
@@ -406,26 +408,13 @@ fn hexDigit(value: u8) u8 {
     return if (value < 10) '0' + value else 'a' + (value - 10);
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
-}
-
 fn deriveOverlayId(device_principal: principal.PrincipalId, label: []const u8) u64 {
-    var hash: u64 = 1469598103934665603;
-    hash ^= @as(u64, @intFromEnum(device_principal.kind));
-    hash *%= 1099511628211;
-    var serial = device_principal.serial;
-    inline for (0..8) |_| {
-        hash ^= @as(u64, @truncate(serial & 0xFF));
-        hash *%= 1099511628211;
-        serial >>= 8;
-    }
-    for (label) |byte| {
-        hash ^= @as(u64, byte);
-        hash *%= 1099511628211;
-    }
+    var hash = native_util.fnv1a64AppendByte(
+        0xCBF29CE484222325,
+        @as(u8, @intCast(@intFromEnum(device_principal.kind))),
+    );
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, device_principal.serial);
+    hash = native_util.fnv1a64WithSeed(hash, label);
     return hash;
 }
 

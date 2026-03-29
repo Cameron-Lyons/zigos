@@ -1,4 +1,6 @@
 const std = @import("std");
+const native_util = @import("util.zig");
+const copyText = native_util.copyText;
 
 pub const MAX_DOCUMENTS: usize = 32;
 pub const MAX_RESULTS: usize = 8;
@@ -172,11 +174,6 @@ fn zeroDocument() DocumentRecord {
     };
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
-}
 
 test "indexing service remains permission aware and updates ranked results" {
     var service = Service.init();

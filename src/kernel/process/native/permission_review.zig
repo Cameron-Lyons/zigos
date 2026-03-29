@@ -204,6 +204,21 @@ fn appendRequest(
         yesNo(request.required),
         yesNo(request.local_only),
     });
+    if (request.kind == .background_execution) {
+        if (manifest.findBackgroundTask(bundle, request.resource)) |task| {
+            try appendFmt(buffer, used, "    trigger: {s}\n", .{backgroundTriggerLabel(task.trigger)});
+            try appendFmt(buffer, used, "    expected duration: {d} seconds\n", .{task.expected_duration_seconds});
+            try appendFmt(buffer, used, "    budget: cpu={d} memory={d} shared_memory={d}\n", .{
+                task.budget.cpu_time_ticks,
+                task.budget.memory_bytes,
+                task.budget.shared_memory_bytes,
+            });
+            try appendFmt(buffer, used, "    network: {s} visibility: {s}\n", .{
+                backgroundNetworkLabel(task.network),
+                backgroundVisibilityLabel(task.visibility),
+            });
+        }
+    }
     if (request.max_lease_ticks != 0) {
         try appendFmt(buffer, used, "    requested lease: {d} ticks\n", .{request.max_lease_ticks});
     }
@@ -239,6 +254,38 @@ fn permissionLabel(kind: manifest.PermissionKind) []const u8 {
         .notification_post => "Notification posting",
         .background_execution => "Background execution",
         .peer_ipc => "Peer IPC",
+    };
+}
+
+fn backgroundTriggerLabel(trigger: manifest.BackgroundTrigger) []const u8 {
+    return switch (trigger) {
+        .user_approved_scheduled_job => "user-approved scheduled job",
+        .push_event => "push event",
+        .local_object_change => "local object change",
+        .device_proximity => "device proximity",
+        .sensor_rule => "sensor rule",
+        .sync_completion => "sync completion",
+        .media_export_completion => "media/export completion",
+        .organization_policy_task => "organization policy task",
+    };
+}
+
+fn backgroundNetworkLabel(mode: manifest.BackgroundNetworkMode) []const u8 {
+    return switch (mode) {
+        .none => "none",
+        .local_network_only => "local-network-only",
+        .named_service_identities => "named-service-identities",
+        .named_domains => "named-domains",
+        .unrestricted_internet => "unrestricted-internet",
+    };
+}
+
+fn backgroundVisibilityLabel(visibility: manifest.BackgroundVisibility) []const u8 {
+    return switch (visibility) {
+        .hidden => "hidden",
+        .status_only => "status-only",
+        .user_visible => "user-visible",
+        .audit_only => "audit-only",
     };
 }
 

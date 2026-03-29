@@ -11,6 +11,24 @@ pub const DeviceClass = enum(u8) {
     audio_print_io,
 };
 
+pub const MAX_DMA_RANGES: usize = 4;
+
+pub const DmaProtection = enum(u8) {
+    iommu_enforced,
+};
+
+pub const DmaRange = struct {
+    base: u64,
+    length: u64,
+
+    pub fn contains(self: DmaRange, address: u64, length: u64) bool {
+        if (length == 0) return false;
+        const end = address + length - 1;
+        const range_end = self.base + self.length - 1;
+        return address >= self.base and end <= range_end;
+    }
+};
+
 pub const DriverRecord = struct {
     service_id: u64,
     owner_task_id: u64,
@@ -18,11 +36,23 @@ pub const DriverRecord = struct {
     device_class: DeviceClass,
     authority_capability_id: u64,
     restart_generation: u32,
+    dma_domain_id: u64,
+    dma_protection: DmaProtection,
+    dma_range_count: usize,
+    dma_ranges: [MAX_DMA_RANGES]DmaRange,
     signer_len: usize,
     signer: [32]u8,
 
     pub fn signerSlice(self: *const DriverRecord) []const u8 {
         return self.signer[0..self.signer_len];
+    }
+
+    pub fn allowsDma(self: *const DriverRecord, address: u64, length: u64) bool {
+        var index: usize = 0;
+        while (index < self.dma_range_count) : (index += 1) {
+            if (self.dma_ranges[index].contains(address, length)) return true;
+        }
+        return false;
     }
 };
 
@@ -33,6 +63,7 @@ pub const RegistrationRequest = struct {
     device_class: DeviceClass,
     authority: capability.Capability,
     bundle: manifest.BundleManifest,
+    require_iommu: bool = true,
 };
 
 pub const Error = error{
@@ -42,6 +73,7 @@ pub const Error = error{
     InvalidBundleSignature,
     InvalidAuthorityTarget,
     AuthorityRightsEscalation,
+    IommuRequired,
 };
 
 const DriverSlot = struct {
@@ -50,6 +82,7 @@ const DriverSlot = struct {
 };
 
 pub const Directory = struct {
+    next_dma_domain_id: u64 = 1,
     slots: [MAX_DRIVER_SERVICES]DriverSlot = [_]DriverSlot{DriverSlot{}} ** MAX_DRIVER_SERVICES,
 
     pub fn init() Directory {
@@ -58,6 +91,7 @@ pub const Directory = struct {
 
     pub fn register(self: *Directory, request: RegistrationRequest) Error!*DriverRecord {
         if (request.bundle.signature.signer.len == 0) return error.InvalidBundleSignature;
+        if (!request.require_iommu) return error.IommuRequired;
         if (request.authority.target.kind != .device or request.authority.target.id != request.device_id) {
             return error.InvalidAuthorityTarget;
         }
@@ -84,9 +118,14 @@ pub const Directory = struct {
                 .device_class = request.device_class,
                 .authority_capability_id = request.authority.id,
                 .restart_generation = 1,
+                .dma_domain_id = self.allocateDmaDomainId(),
+                .dma_protection = .iommu_enforced,
+                .dma_range_count = 0,
+                .dma_ranges = [_]DmaRange{zeroDmaRange()} ** MAX_DMA_RANGES,
                 .signer_len = 0,
                 .signer = [_]u8{0} ** 32,
             };
+            slot.driver.dma_range_count = defaultDmaRanges(slot.driver.dma_ranges[0..], request.device_class, request.device_id);
             writeSigner(&slot.driver, request.bundle.signature.signer);
             return &slot.driver;
         }
@@ -111,7 +150,13 @@ pub const Directory = struct {
     pub fn markRestarted(self: *Directory, service_id: u64) bool {
         const driver = self.findByService(service_id) orelse return false;
         driver.restart_generation += 1;
+        driver.dma_domain_id = self.allocateDmaDomainId();
         return true;
+    }
+
+    fn allocateDmaDomainId(self: *Directory) u64 {
+        defer self.next_dma_domain_id += 1;
+        return self.next_dma_domain_id;
     }
 };
 
@@ -150,6 +195,39 @@ fn writeSigner(record: *DriverRecord, signer: []const u8) void {
     @memcpy(record.signer[0..record.signer_len], signer[0..record.signer_len]);
 }
 
+fn zeroDmaRange() DmaRange {
+    return .{
+        .base = 0,
+        .length = 0,
+    };
+}
+
+fn defaultDmaRanges(dest: []DmaRange, device_class: DeviceClass, device_id: u64) usize {
+    if (dest.len == 0) return 0;
+    const base = dmaWindowBase(device_id);
+    dest[0] = .{
+        .base = base,
+        .length = switch (device_class) {
+            .network_adapter => 64 * 1024,
+            .storage_controller => 128 * 1024,
+            .graphics_adapter => 16 * 1024 * 1024,
+            .audio_print_io => 1024 * 1024,
+        },
+    };
+    if (dest.len > 1 and (device_class == .network_adapter or device_class == .storage_controller)) {
+        dest[1] = .{
+            .base = base + dest[0].length,
+            .length = dest[0].length,
+        };
+        return 2;
+    }
+    return 1;
+}
+
+fn dmaWindowBase(device_id: u64) u64 {
+    return (device_id & 0x0000_FFFF_FFFF) << 12;
+}
+
 fn zeroDriver() DriverRecord {
     return .{
         .service_id = 0,
@@ -158,6 +236,10 @@ fn zeroDriver() DriverRecord {
         .device_class = .network_adapter,
         .authority_capability_id = 0,
         .restart_generation = 0,
+        .dma_domain_id = 0,
+        .dma_protection = .iommu_enforced,
+        .dma_range_count = 0,
+        .dma_ranges = [_]DmaRange{zeroDmaRange()} ** MAX_DMA_RANGES,
         .signer_len = 0,
         .signer = [_]u8{0} ** 32,
     };
@@ -205,8 +287,13 @@ test "driver services require signed least-privilege device authority" {
 
     try std.testing.expectEqual(@as(u64, 44), driver.service_id);
     try std.testing.expectEqualStrings("zigos-driver-key", driver.signerSlice());
+    try std.testing.expect(driver.dma_domain_id != 0);
+    try std.testing.expectEqual(DmaProtection.iommu_enforced, driver.dma_protection);
+    try std.testing.expect(driver.dma_range_count >= 1);
+    try std.testing.expect(driver.allowsDma(driver.dma_ranges[0].base, 4096));
     try std.testing.expect(directory.markRestarted(44));
     try std.testing.expectEqual(@as(u32, 2), driver.restart_generation);
+    try std.testing.expect(driver.dma_domain_id != 1);
 }
 
 test "driver services reject unsigned bundles and escalated device rights" {
@@ -266,5 +353,32 @@ test "driver services reject unsigned bundles and escalated device rights" {
         .device_class = .storage_controller,
         .authority = escalated_authority,
         .bundle = signed_bundle,
+    }));
+
+    try std.testing.expectError(error.IommuRequired, directory.register(.{
+        .service_id = 52,
+        .owner_task_id = 9,
+        .device_id = 200,
+        .device_class = .storage_controller,
+        .authority = capability.Capability{
+            .id = 13,
+            .holder = .{ .kind = .service, .serial = 3 },
+            .issuer = .{ .kind = .policy_authority, .serial = 1 },
+            .target = authorityTarget(200),
+            .rights = allowedRightsFor(.storage_controller),
+            .scope = .{
+                .task_id = 9,
+                .local_only = true,
+                .broker_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = 0,
+                .expires_at_ticks = std.math.maxInt(u64),
+            },
+            .revocation_generation = 1,
+            .audit = .{},
+        },
+        .bundle = signed_bundle,
+        .require_iommu = false,
     }));
 }

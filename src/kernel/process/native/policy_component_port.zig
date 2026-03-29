@@ -2,6 +2,7 @@ const std = @import("std");
 const abi = @import("abi.zig");
 const manifest = @import("manifest.zig");
 const policy_mediation = @import("policy_mediation.zig");
+const request_header = @import("request_header.zig");
 
 pub const Error = policy_mediation.Error || error{
     SubjectTaskMismatch,
@@ -52,22 +53,15 @@ pub const Port = struct {
 };
 
 pub fn makeHeader(operation: abi.PolicyOperation, correlation_id: u64, subject_task_id: u64) abi.RequestHeader {
-    return .{
-        .operation = abi.policyOpcode(operation),
-        .correlation_id = correlation_id,
-        .subject_task_id = subject_task_id,
-    };
+    return request_header.makeHeader(abi.policyOpcode(operation), correlation_id, subject_task_id);
 }
 
 fn validateHeader(header: abi.RequestHeader, expected: abi.PolicyOperation) Error!void {
-    if (header.version != abi.ABI_VERSION) return error.UnsupportedAbiVersion;
-    if (header.operation != abi.policyOpcode(expected)) return error.UnexpectedOperation;
+    try request_header.validateHeader(header, abi.policyOpcode(expected));
 }
 
 fn validateSubjectTask(header: abi.RequestHeader, task_id: u64) Error!void {
-    if (header.subject_task_id != 0 and header.subject_task_id != task_id) {
-        return error.SubjectTaskMismatch;
-    }
+    try request_header.validateSubjectTask(header, task_id);
 }
 
 test "policy port validates headers and forwards apply manifest requests" {
@@ -164,11 +158,22 @@ test "policy port rejects invalid manifests before mediation" {
         },
     );
     var port = Port.init(&mediator);
+    const background_tasks = [_]manifest.BackgroundTaskDecl{
+        .{
+            .id = "sync",
+            .trigger = .push_event,
+            .expected_duration_seconds = 30,
+            .budget = .{
+                .cpu_time_ticks = 100,
+                .memory_bytes = 1024,
+            },
+        },
+    };
     const bundle = manifest.BundleManifest{
         .bundle_id = "app.sync",
         .display_name = "Sync",
         .publisher = "zigos.dev",
-        .background_triggers = &.{.scheduled_sync},
+        .background_tasks = &background_tasks,
     };
 
     try std.testing.expectError(error.MissingBackgroundPermission, port.applyManifest(.{

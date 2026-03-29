@@ -1,5 +1,8 @@
 const std = @import("std");
+const crypto_hash = @import("crypto_hash.zig");
+const native_util = @import("util.zig");
 const principal = @import("principal.zig");
+const copyText = native_util.copyText;
 
 pub const MAX_SECRETS: usize = 16;
 pub const MAX_HANDLES: usize = 32;
@@ -11,8 +14,11 @@ pub const SecretRecord = struct {
     owner: principal.PrincipalId,
     hardware_backed: bool,
     exportable: bool,
+    resident_material: bool,
     label_len: usize,
     label: [MAX_LABEL_BYTES]u8,
+    sealed_digest_present: bool,
+    sealed_digest: [32]u8,
     value_len: usize,
     value: [MAX_VALUE_BYTES]u8,
 
@@ -84,8 +90,17 @@ pub const Store = struct {
             slot.secret.owner = owner;
             slot.secret.hardware_backed = hardware_backed;
             slot.secret.exportable = exportable;
+            slot.secret.resident_material = true;
             slot.secret.label_len = copyText(&slot.secret.label, label);
-            slot.secret.value_len = copyText(&slot.secret.value, raw);
+            if (hardware_backed and !exportable) {
+                slot.secret.resident_material = false;
+                slot.secret.sealed_digest_present = true;
+                slot.secret.sealed_digest = digestSecretMaterial(raw);
+                slot.secret.value_len = 0;
+                @memset(&slot.secret.value, 0);
+            } else {
+                slot.secret.value_len = copyText(&slot.secret.value, raw);
+            }
             return &slot.secret;
         }
         return error.SecretTableFull;
@@ -151,17 +166,21 @@ fn zeroSecret() SecretRecord {
         .owner = .{ .kind = .service, .serial = 0 },
         .hardware_backed = false,
         .exportable = false,
+        .resident_material = false,
         .label_len = 0,
         .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .sealed_digest_present = false,
+        .sealed_digest = [_]u8{0} ** 32,
         .value_len = 0,
         .value = [_]u8{0} ** MAX_VALUE_BYTES,
     };
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
+
+fn digestSecretMaterial(raw: []const u8) [32]u8 {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "secret-material", raw);
+    return crypto_hash.finalize(&hasher);
 }
 
 test "secure secret store returns handles by default and only exports raw when allowed" {
@@ -173,6 +192,9 @@ test "secure secret store returns handles by default and only exports raw when a
     const handle = try store.lendHandle(api_key.id, app_holder, 90, true);
     try std.testing.expect(handle.hardware_backed);
     try std.testing.expect(!handle.export_allowed);
+    try std.testing.expect(!api_key.resident_material);
+    try std.testing.expect(api_key.sealed_digest_present);
+    try std.testing.expectEqual(@as(usize, 0), api_key.value_len);
     try std.testing.expectError(error.RawExportDenied, store.exportRaw(handle.id));
 
     const exportable = try store.importSecret(owner, "backup-code", "abcd-efgh", false, true);

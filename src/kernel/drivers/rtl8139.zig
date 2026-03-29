@@ -1,14 +1,11 @@
 // zlint-disable suppressed-errors
-const std = @import("std");
 const io = @import("../utils/io.zig");
 const pci = @import("pci.zig");
 const idt = @import("../interrupts/idt.zig");
-const console = @import("../utils/console.zig");
 const vga = @import("vga.zig");
 const memory = @import("../memory/memory.zig");
 const link_port = @import("../net/link_port.zig");
 const driver_helpers = @import("../net/driver_helpers.zig");
-const ethernet = @import("../net/ethernet.zig");
 const sync = @import("../utils/sync.zig");
 
 const RTL8139_VENDOR_ID = 0x10EC;
@@ -17,7 +14,6 @@ const RTL8139_DEVICE_ID = 0x8139;
 const RX_BUFFER_SIZE = 8192 + 16 + 1500;
 const TX_BUFFER_SIZE = 1536;
 const NUM_TX_DESCRIPTORS = 4;
-const RX_POLL_BUFFER_SIZE = 2048;
 const PENDING_RX_CAPACITY = 128;
 
 const Register = enum(u16) {
@@ -109,6 +105,7 @@ const TxStatus = struct {
 };
 
 var rtl8139_device: ?RTL8139 = null;
+var rtl8139_device_id: u64 = 0;
 
 const PendingRx = struct {
     release_offset: u16 = 0,
@@ -121,7 +118,6 @@ const RTL8139 = struct {
     rx_buffer: [*]u8,
     tx_buffers: [NUM_TX_DESCRIPTORS][*]u8,
     rx_lock: sync.SpinLock,
-    rx_poll_buffer: [RX_POLL_BUFFER_SIZE]u8,
     current_tx: u8,
     rx_offset: u16,
     pending_rx: [PENDING_RX_CAPACITY]PendingRx,
@@ -146,7 +142,6 @@ const RTL8139 = struct {
             // SAFETY: each entry assigned from kmalloc in the following loop
             .tx_buffers = undefined,
             .rx_lock = sync.SpinLock.init(),
-            .rx_poll_buffer = undefined,
             .current_tx = 0,
             .rx_offset = 0,
             .pending_rx = [_]PendingRx{.{}} ** PENDING_RX_CAPACITY,
@@ -297,14 +292,6 @@ const RTL8139 = struct {
         self.current_tx = (self.current_tx + 1) % NUM_TX_DESCRIPTORS;
     }
 
-    pub fn receive(self: *RTL8139) ?[]u8 {
-        const packet = self.claimReceive() orelse return null;
-        const copy_len = @min(packet.data.len, self.rx_poll_buffer.len);
-        @memcpy(self.rx_poll_buffer[0..copy_len], packet.data[0..copy_len]);
-        self.releaseReceived(packet.handle);
-        return self.rx_poll_buffer[0..copy_len];
-    }
-
     pub fn claimReceive(self: *RTL8139) ?link_port.OwnedRxPacket {
         self.rx_lock.acquire();
         defer self.rx_lock.release();
@@ -396,66 +383,6 @@ fn initPendingFreeStack(stack: []u8) void {
     }
 }
 
-pub fn runInterruptSelfTestChecked() bool {
-    const rx_mem = memory.kmalloc(RX_BUFFER_SIZE) orelse return false;
-    @memset(@as([*]u8, @ptrCast(rx_mem))[0..RX_BUFFER_SIZE], 0);
-
-    var fake = RTL8139{
-        .io_base = 0,
-        .mac_address = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 },
-        .rx_buffer = @ptrCast(@alignCast(rx_mem)),
-        .tx_buffers = [_][*]u8{@ptrCast(@alignCast(rx_mem))} ** NUM_TX_DESCRIPTORS,
-        .rx_lock = sync.SpinLock.init(),
-        .rx_poll_buffer = undefined,
-        .current_tx = 0,
-        .rx_offset = 0,
-        .pending_rx = [_]PendingRx{.{}} ** PENDING_RX_CAPACITY,
-        .pending_queue = [_]u8{0} ** PENDING_RX_CAPACITY,
-        .pending_free_stack = undefined,
-        .pending_head = 0,
-        .pending_tail = 0,
-        .pending_count = 0,
-        .pending_free_count = PENDING_RX_CAPACITY,
-        .testing = true,
-        .test_chip_cmd = 0x00,
-        .test_intr_status = InterruptStatus.RX_OK,
-        .test_rx_buf_ptr = 0,
-    };
-    initPendingFreeStack(&fake.pending_free_stack);
-
-    const sender_ip = 0xC0A801F0;
-    const target_ip = 0xC0A80102;
-    const sender_mac = [6]u8{ 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
-    const target_mac = fake.mac_address;
-
-    var frame: [ethernet.ETH_HEADER_SIZE + @sizeOf(driver_helpers.ArpReplyHeader)]u8 = undefined;
-    driver_helpers.writeSyntheticArpReply(&frame, sender_ip, target_ip, sender_mac, target_mac);
-
-    const packet_len: u16 = @intCast(frame.len);
-    @as(*align(1) u16, @ptrCast(&fake.rx_buffer[0])).* = 0x0001;
-    @as(*align(1) u16, @ptrCast(&fake.rx_buffer[2])).* = packet_len;
-    @memcpy(fake.rx_buffer[4 .. 4 + frame.len], frame[0..]);
-
-    const previous = rtl8139_device;
-    rtl8139_device = fake;
-    defer rtl8139_device = previous;
-    defer if (rtl8139_device) |*dev| {
-        memory.kfree(@as(*anyopaque, @ptrCast(dev.rx_buffer)));
-    };
-
-    if (rtl8139_device) |*dev| {
-        dev.handleInterrupt();
-
-        const expected_release = (((@as(u16, packet_len) + 4 + 3) & ~@as(u16, 3)) -% 0x10);
-        return dev.pending_count == 0 and
-            dev.pending_free_count == PENDING_RX_CAPACITY and
-            dev.test_intr_status == 0 and
-            dev.test_rx_buf_ptr == expected_release;
-    }
-
-    return false;
-}
-
 pub fn init() void {
     if (pci.findDevice(RTL8139_VENDOR_ID, RTL8139_DEVICE_ID)) |device| {
         vga.print("Found RTL8139 network card\n");
@@ -468,23 +395,49 @@ pub fn init() void {
         };
 
         rtl8139_device = rtl;
-        link_port.setNetworkDevice(&rtl8139_network_device);
+        rtl8139_device_id = pci.stableDeviceId(device);
 
         const irq: u8 = @intCast(pci.readConfig(device.bus, device.device, device.function, 0x3C) & 0xFF);
         idt.register_interrupt_handler(32 + irq, rtl8139InterruptHandler);
 
-        vga.print("RTL8139 initialized - MAC: ");
-        for (rtl.mac_address, 0..) |byte, i| {
-            const high = byte >> 4;
-            const low = byte & 0x0F;
-            vga.printChar(if (high < 10) '0' + high else 'A' + high - 10);
-            vga.printChar(if (low < 10) '0' + low else 'A' + low - 10);
-            if (i < 5) vga.print(":");
-        }
-        vga.print("\n");
+        driver_helpers.printMac("RTL8139 initialized - MAC: ", rtl.mac_address);
     } else {
         vga.print("RTL8139 network card not found\n");
     }
+}
+
+pub fn publishBootstrapTransport(device_id: u64) bool {
+    return driver_helpers.publishBootstrapTransport(
+        device_id,
+        "rtl8139",
+        currentNetworkDevice,
+        activatePublishedDevice,
+        isSupportedDevice,
+    );
+}
+
+fn activatePublishedDevice(device_id: u64) ?*const link_port.NetworkDevice {
+    if (currentNetworkDevice(device_id)) |device| return device;
+
+    const pci_device = pci.findDeviceByStableId(device_id) orelse return null;
+    if (!isSupportedDevice(pci_device)) return null;
+
+    const rtl = RTL8139.init(pci_device) catch return null;
+    rtl8139_device = rtl;
+    rtl8139_device_id = device_id;
+
+    const irq: u8 = @intCast(pci.readConfig(pci_device.bus, pci_device.device, pci_device.function, 0x3C) & 0xFF);
+    idt.register_interrupt_handler(32 + irq, rtl8139InterruptHandler);
+    return currentNetworkDevice(device_id);
+}
+
+fn currentNetworkDevice(device_id: u64) ?*const link_port.NetworkDevice {
+    if (rtl8139_device != null and rtl8139_device_id == device_id) return &rtl8139_network_device;
+    return null;
+}
+
+fn isSupportedDevice(device: pci.PCIDevice) bool {
+    return device.vendor_id == RTL8139_VENDOR_ID and device.device_id == RTL8139_DEVICE_ID;
 }
 
 fn rtl8139InterruptHandler(regs: *idt.InterruptRegisters) callconv(.c) void {
@@ -494,61 +447,20 @@ fn rtl8139InterruptHandler(regs: *idt.InterruptRegisters) callconv(.c) void {
     }
 }
 
-pub fn getMACAddress() ?[6]u8 {
-    if (rtl8139_device) |rtl| {
-        return rtl.mac_address;
-    }
-    return null;
-}
-
-pub fn isInitialized() bool {
-    return rtl8139_device != null;
-}
-
-pub fn send(data: []const u8) void {
+fn rtl8139Send(data: []const u8) void {
     if (rtl8139_device) |*device| {
         device.send(data) catch {};
     }
 }
 
-pub fn receive() ?[]u8 {
-    if (rtl8139_device) |*device| {
-        return device.receive();
+fn rtl8139GetMacAddress() [6]u8 {
+    if (rtl8139_device) |rtl| {
+        return rtl.mac_address;
     }
-    return null;
-}
-
-pub fn getMacAddress() [6]u8 {
-    return getMACAddress() orelse [_]u8{0} ** 6;
+    return [_]u8{0} ** 6;
 }
 
 const rtl8139_network_device = link_port.NetworkDevice{
-    .send = send,
-    .receive = receive,
-    .getMacAddress = getMacAddress,
+    .send = rtl8139Send,
+    .getMacAddress = rtl8139GetMacAddress,
 };
-
-pub fn sendPacket(data: []const u8) !void {
-    if (rtl8139_device) |*rtl| {
-        try rtl.send(data);
-    } else {
-        return error.NoDevice;
-    }
-}
-
-pub fn debugPrintState(prefix: []const u8) void {
-    if (rtl8139_device) |*rtl| {
-        const header = @as(*align(1) const u16, @ptrCast(&rtl.rx_buffer[rtl.rx_offset])).*;
-        const length = @as(*align(1) const u16, @ptrCast(&rtl.rx_buffer[rtl.rx_offset + 2])).*;
-        var line_buf: [192]u8 = undefined;
-        const line = std.fmt.bufPrint(
-            &line_buf,
-            "{s} cmd=0x{x} intr=0x{x} rx_offset=0x{x} hdr=0x{x} len=0x{x} pending={d}/{d}\n",
-            .{ prefix, rtl.readReg8(.ChipCmd), rtl.readReg16(.IntrStatus), rtl.rx_offset, header, length, rtl.pending_count, rtl.pending_free_count },
-        ) catch return;
-        console.print(line);
-    } else {
-        console.print(prefix);
-        console.print(" device=none\n");
-    }
-}

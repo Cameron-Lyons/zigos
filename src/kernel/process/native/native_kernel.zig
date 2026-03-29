@@ -1,4 +1,5 @@
 const std = @import("std");
+const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const abi = @import("abi.zig");
 const capability = @import("capability.zig");
 const endpoint = @import("endpoint.zig");
@@ -29,8 +30,10 @@ pub const SharedMemoryCreateResult = struct {
 
 pub const Error = task_runtime.Error || capability.Error || endpoint.Error || shared_memory.Error || service_registry.Error || error{
     InvalidCapabilityTarget,
+    InvalidUserspaceImage,
     PermissionDenied,
     ScopeViolation,
+    UserspaceLaunchRequired,
 };
 
 pub const Kernel = struct {
@@ -67,6 +70,7 @@ pub const Kernel = struct {
     ) Error!abi.TaskDescriptor {
         const auth = try self.requireCapability(authority_capability_id, now_ticks, .{ .task_create = true });
         if (auth.scope.local_only and !request.local_only) return error.ScopeViolation;
+        try validateTaskCreateRequest(request);
 
         const task = try self.runtime.createTask(request);
         try self.runtime.audit(task.id, .{
@@ -481,6 +485,8 @@ pub const Kernel = struct {
             .ipc_peer = true,
         });
         _ = auth;
+        const owner_task = self.runtime.find(owner_task_id) orelse return error.TaskNotFound;
+        if (!owner_task.runsAsUserspaceProcess()) return error.UserspaceLaunchRequired;
         const endpoint_capability = try self.requireTargetedCapability(
             endpoint_capability_id,
             now_ticks,
@@ -490,7 +496,13 @@ pub const Kernel = struct {
         if (endpoint_capability.scope.task_id) |scoped_task_id| {
             if (scoped_task_id != owner_task_id) return error.ScopeViolation;
         }
-        try self.service_registry.register(service_id, owner_task_id, endpoint_capability.target.id, interface);
+        try self.service_registry.register(
+            service_id,
+            owner_task_id,
+            endpoint_capability.target.id,
+            interface,
+            serviceBindingFlags(owner_task),
+        );
     }
 
     pub fn serviceConnect(
@@ -561,9 +573,34 @@ fn taskDescriptor(task: *const task_runtime.TaskRecord) abi.TaskDescriptor {
 
 fn taskFlags(task: *const task_runtime.TaskRecord) u16 {
     var flags: u16 = 0;
-    if (task.local_only) flags |= 1;
-    if (task.zero_ambient_authority) flags |= 1 << 1;
-    if (task.background_allowed) flags |= 1 << 2;
+    if (task.local_only) flags |= abi.TASK_FLAG_LOCAL_ONLY;
+    if (task.zero_ambient_authority) flags |= abi.TASK_FLAG_ZERO_AMBIENT_AUTHORITY;
+    if (task.background_allowed) flags |= abi.TASK_FLAG_BACKGROUND_ALLOWED;
+    if (task.runsAsUserspaceProcess()) flags |= abi.TASK_FLAG_USERSPACE_PROCESS;
+    if (task.hasLoadedExecutable()) flags |= abi.TASK_FLAG_EXECUTABLE_IMAGE_MAPPED;
+    flags |= @as(u16, @intFromEnum(task.resourceClass())) << abi.TASK_RESOURCE_CLASS_SHIFT;
+    return flags;
+}
+
+fn validateTaskCreateRequest(request: task_runtime.TaskCreateRequest) Error!void {
+    if (request.launch.boundary == .userspace_process and !request.userspace_image.isPresent()) {
+        return error.InvalidUserspaceImage;
+    }
+    switch (request.component_class) {
+        .session_manager => {},
+        .app_component, .service_component => {
+            if (request.launch.boundary != .userspace_process) return error.UserspaceLaunchRequired;
+            if (request.launch.image_id == 0 or request.launch.component_abi_version == 0) {
+                return error.InvalidUserspaceImage;
+            }
+        },
+    }
+}
+
+fn serviceBindingFlags(task: *const task_runtime.TaskRecord) u16 {
+    var flags: u16 = 0;
+    if (task.runsAsUserspaceProcess()) flags |= abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER;
+    if (task.launch.signed) flags |= abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE;
     return flags;
 }
 
@@ -653,8 +690,17 @@ test "native kernel creates tasks endpoints shared memory and typed service conn
             .memory_bytes = 1024,
             .endpoint_slots = 4,
             .shared_memory_bytes = 2048,
+            .resource_class = .emergency_system_critical,
         },
         .local_only = true,
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = 10,
+            .component_abi_version = 1,
+            .signed = true,
+            .bundle_id = "zigos.service.object-store",
+        },
+        .userspace_image = task_runtime.syntheticUserspaceImage("workspace-storage", "zigos.object.workspace"),
     }, 5);
     const app_task_desc = try kernel.taskCreate(authority_capability.id, .{
         .owner = .{ .kind = .app, .serial = 4 },
@@ -664,9 +710,24 @@ test "native kernel creates tasks endpoints shared memory and typed service conn
             .memory_bytes = 1024,
             .endpoint_slots = 4,
             .shared_memory_bytes = 2048,
+            .resource_class = .batch_compute,
         },
         .local_only = true,
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = 11,
+            .component_abi_version = 1,
+            .signed = true,
+            .bundle_id = "app.example.client",
+        },
+        .userspace_image = task_runtime.syntheticUserspaceImage("example-client", "app.example.client"),
     }, 6);
+    try std.testing.expect(abi.taskFlagsHas(service_task_desc.flags, abi.TASK_FLAG_LOCAL_ONLY));
+    try std.testing.expect(abi.taskFlagsHas(service_task_desc.flags, abi.TASK_FLAG_ZERO_AMBIENT_AUTHORITY));
+    try std.testing.expect(abi.taskFlagsHas(service_task_desc.flags, abi.TASK_FLAG_USERSPACE_PROCESS));
+    try std.testing.expect(abi.taskFlagsHas(service_task_desc.flags, abi.TASK_FLAG_EXECUTABLE_IMAGE_MAPPED));
+    try std.testing.expectEqual(@as(u8, @intFromEnum(accelerator_scheduler.ResourceClass.emergency_system_critical)), abi.taskFlagsResourceClass(service_task_desc.flags));
+    try std.testing.expectEqual(@as(u8, @intFromEnum(accelerator_scheduler.ResourceClass.batch_compute)), abi.taskFlagsResourceClass(app_task_desc.flags));
 
     const service_endpoint = try kernel.endpointCreate(authority_capability.id, service_task_desc.task_id, "zigos.object.workspace", .{
         .local_only = true,
@@ -683,6 +744,8 @@ test "native kernel creates tasks endpoints shared memory and typed service conn
         .name = "zigos.object.workspace",
     }, 8);
     try std.testing.expectEqual(@as(u64, 900), connection.service_id);
+    try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
+    try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE));
 
     const shared_result = try kernel.sharedMemoryCreate(authority_capability.id, app_task_desc.task_id, 4096, 9);
     try kernel.endpointSend(app_endpoint.capability_id, 11, "sync-open", shared_result.capability_id, false, 9);
@@ -695,7 +758,144 @@ test "native kernel creates tasks endpoints shared memory and typed service conn
     const accounting = try kernel.accountingQuery(authority_capability.id, app_task_desc.task_id, 10);
     try std.testing.expectEqual(@as(u16, 1), resources.endpoint_count);
     try std.testing.expect(accounting.audit_event_count >= 1);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(accelerator_scheduler.ResourceClass.batch_compute)), abi.taskFlagsResourceClass(resources.flags));
     try std.testing.expectEqual(@as(u64, 10), try kernel.timeQuery(authority_capability.id, 10));
+}
+
+test "native kernel rejects app and service launches without userspace image provenance" {
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    var endpoints = endpoint.Table.init();
+    var shared = shared_memory.Table.init();
+    var registry = service_registry.Registry.init();
+    var kernel = Kernel.init(
+        .{ .kind = .policy_authority, .serial = 1 },
+        &runtime,
+        &capabilities,
+        &endpoints,
+        &shared,
+        &registry,
+    );
+
+    const session_task = try runtime.createTask(.{
+        .owner = .{ .kind = .service, .serial = 2 },
+        .component_class = .session_manager,
+        .budget = .{
+            .cpu_time_ticks = 10_000,
+            .memory_bytes = 4096,
+            .endpoint_slots = 8,
+            .shared_memory_bytes = 4096,
+        },
+        .local_only = true,
+    });
+    const authority_capability = try capabilities.mint(.{
+        .holder = session_task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = 42 },
+        .rights = .{
+            .task_create = true,
+        },
+        .scope = .{ .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
+    });
+
+    try std.testing.expectError(error.UserspaceLaunchRequired, kernel.taskCreate(authority_capability.id, .{
+        .owner = .{ .kind = .app, .serial = 4 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 2048,
+        },
+        .local_only = true,
+    }, 5));
+    try std.testing.expectError(error.InvalidUserspaceImage, kernel.taskCreate(authority_capability.id, .{
+        .owner = .{ .kind = .service, .serial = 5 },
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 2048,
+        },
+        .local_only = true,
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = 0,
+            .component_abi_version = 1,
+            .signed = true,
+        },
+    }, 6));
+}
+
+test "native kernel only registers typed services for userspace-backed tasks" {
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    var endpoints = endpoint.Table.init();
+    var shared = shared_memory.Table.init();
+    var registry = service_registry.Registry.init();
+    var kernel = Kernel.init(
+        .{ .kind = .policy_authority, .serial = 1 },
+        &runtime,
+        &capabilities,
+        &endpoints,
+        &shared,
+        &registry,
+    );
+
+    const session_task = try runtime.createTask(.{
+        .owner = .{ .kind = .service, .serial = 2 },
+        .component_class = .session_manager,
+        .budget = .{
+            .cpu_time_ticks = 10_000,
+            .memory_bytes = 4096,
+            .endpoint_slots = 8,
+            .shared_memory_bytes = 4096,
+        },
+        .local_only = true,
+    });
+    const authority_capability = try capabilities.mint(.{
+        .holder = session_task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = 42 },
+        .rights = .{
+            .endpoint_create = true,
+            .endpoint_connect = true,
+            .ipc_peer = true,
+        },
+        .scope = .{ .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
+    });
+
+    const direct_service_task = try runtime.createTask(.{
+        .owner = .{ .kind = .service, .serial = 7 },
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 2048,
+        },
+        .local_only = true,
+        .initial_component = .{
+            .label = "legacy-service",
+            .entry = "zigos.legacy.service",
+        },
+    });
+    const service_endpoint = try kernel.endpointCreate(authority_capability.id, direct_service_task.id, "zigos.legacy.service", .{
+        .local_only = true,
+        .service_port = true,
+    }, 5);
+
+    try std.testing.expectError(error.UserspaceLaunchRequired, kernel.serviceRegister(
+        authority_capability.id,
+        500,
+        direct_service_task.id,
+        service_endpoint.capability_id,
+        .{ .name = "zigos.legacy.service" },
+        6,
+    ));
 }
 
 test "capability mint query revoke and task termination are exposed by the native kernel" {

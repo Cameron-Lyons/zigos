@@ -1,6 +1,5 @@
 const pci = @import("pci.zig");
 const paging = @import("../memory/paging.zig");
-const ethernet = @import("../net/ethernet.zig");
 const driver_helpers = @import("../net/driver_helpers.zig");
 const link_port = @import("../net/link_port.zig");
 const memory = @import("../memory/memory.zig");
@@ -462,26 +461,6 @@ const E1000Device = struct {
         while ((self.tx_descs[cur].status & TXStatus.DD) == 0) {}
     }
 
-    pub fn receive(self: *E1000Device) ?[]u8 {
-        const cur = self.rx_cur;
-
-        if ((self.rx_descs[cur].status & RXStatus.DD) != 0) {
-            if ((self.rx_descs[cur].status & RXStatus.EOP) != 0) {
-                const len = self.rx_descs[cur].length;
-                const buf_addr = @intFromPtr(&self.rx_buffers[cur * RX_BUFFER_SIZE]);
-
-                self.rx_descs[cur].status = 0;
-                const old_tail = self.readRegister(E1000Registers.RDT);
-                self.writeRegister(E1000Registers.RDT, (old_tail + 1) % E1000_NUM_RX_DESC);
-                self.rx_cur = (self.rx_cur + 1) % E1000_NUM_RX_DESC;
-
-                return @as([*]u8, @ptrFromInt(buf_addr))[0..len];
-            }
-        }
-
-        return null;
-    }
-
     pub fn claimReceive(self: *E1000Device) ?link_port.OwnedRxPacket {
         self.rx_lock.acquire();
         defer self.rx_lock.release();
@@ -540,69 +519,6 @@ fn e1000_interrupt_handler(frame: *isr.InterruptFrame) void {
     }
 }
 
-pub fn runInterruptSelfTestChecked() bool {
-    const mmio_mem = memory.kmalloc(0x6000) orelse return false;
-    const rx_desc_mem = memory.kmalloc(@sizeOf(RXDescriptor) * E1000_NUM_RX_DESC) orelse {
-        memory.kfree(mmio_mem);
-        return false;
-    };
-    const rx_buf_mem = memory.kmalloc(RX_BUFFER_SIZE * E1000_NUM_RX_DESC) orelse {
-        memory.kfree(rx_desc_mem);
-        memory.kfree(mmio_mem);
-        return false;
-    };
-
-    @memset(@as([*]u8, @ptrCast(mmio_mem))[0..0x6000], 0);
-    @memset(@as([*]u8, @ptrCast(rx_desc_mem))[0 .. @sizeOf(RXDescriptor) * E1000_NUM_RX_DESC], 0);
-    @memset(@as([*]u8, @ptrCast(rx_buf_mem))[0 .. RX_BUFFER_SIZE * E1000_NUM_RX_DESC], 0);
-
-    var fake = E1000Device{
-        .pci_device = .{ .bus = 0, .device = 0, .function = 0, .vendor_id = 0, .device_id = 0, .class_code = 0, .subclass = 0, .prog_if = 0, .bar0 = 0, .bar1 = 0, .bar2 = 0, .bar3 = 0, .bar4 = 0, .bar5 = 0 },
-        .mmio_base = @truncate(@intFromPtr(mmio_mem)),
-        .mac_addr = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 },
-        .rx_descs = @ptrCast(@alignCast(rx_desc_mem)),
-        .tx_descs = @ptrCast(@alignCast(rx_desc_mem)),
-        .rx_buffers = @ptrCast(rx_buf_mem),
-        .tx_buffers = @ptrCast(rx_buf_mem),
-        .rx_lock = sync.SpinLock.init(),
-        .rx_cur = 0,
-        .rx_release_cur = 0,
-        .rx_release_ready = [_]bool{false} ** E1000_NUM_RX_DESC,
-        .tx_cur = 0,
-        .eeprom_exists = false,
-    };
-
-    const sender_ip: u32 = 0xC0A801F1;
-    const target_ip: u32 = 0xC0A80102;
-    const sender_mac = [6]u8{ 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02 };
-    var frame: [ethernet.ETH_HEADER_SIZE + @sizeOf(driver_helpers.ArpReplyHeader)]u8 = undefined;
-    driver_helpers.writeSyntheticArpReply(&frame, sender_ip, target_ip, sender_mac, fake.mac_addr);
-
-    fake.rx_descs[0].addr = @intFromPtr(fake.rx_buffers);
-    fake.rx_descs[0].length = @intCast(frame.len);
-    fake.rx_descs[0].status = RXStatus.DD | RXStatus.EOP;
-    @memcpy(fake.rx_buffers[0..frame.len], frame[0..]);
-    fake.writeRegister(E1000Registers.ICR, 0x80);
-
-    const previous = e1000_device;
-    e1000_device = fake;
-    defer {
-        e1000_device = previous;
-        memory.kfree(rx_buf_mem);
-        memory.kfree(rx_desc_mem);
-        memory.kfree(mmio_mem);
-    }
-
-    if (e1000_device) |*dev| {
-        processInterrupt(dev);
-        return dev.rx_release_cur == 1 and
-            !dev.rx_release_ready[0] and
-            dev.readRegister(E1000Registers.RDT) == 0;
-    }
-
-    return false;
-}
-
 pub fn init() void {
     vga.print("Initializing E1000 network driver...\n");
 
@@ -635,6 +551,16 @@ pub fn init() void {
     }
 
     vga.print("No E1000 network card found.\n");
+}
+
+pub fn publishBootstrapTransport(device_id: u64) bool {
+    return driver_helpers.publishBootstrapTransport(
+        device_id,
+        "e1000",
+        currentNetworkDevice,
+        activatePublishedDevice,
+        isSupportedDevice,
+    );
 }
 
 fn initDevice(pci_device: pci.PCIDevice) void {
@@ -675,15 +601,7 @@ fn initDevice(pci_device: pci.PCIDevice) void {
     dev.eeprom_exists = dev.detectEEPROM();
     dev.readMACAddress();
 
-    vga.print("E1000 MAC: ");
-    for (dev.mac_addr, 0..) |byte, i| {
-        const high = byte >> 4;
-        const low = byte & 0x0F;
-        vga.printChar(if (high < 10) '0' + high else 'A' + high - 10);
-        vga.printChar(if (low < 10) '0' + low else 'A' + low - 10);
-        if (i < 5) vga.print(":");
-    }
-    vga.print("\n");
+    driver_helpers.printMac("E1000 MAC: ", dev.mac_addr);
 
     for (0..0x80) |i| {
         dev.writeRegister(E1000Registers.MTA + @as(u32, @intCast(i * 4)), 0);
@@ -698,14 +616,36 @@ fn initDevice(pci_device: pci.PCIDevice) void {
     dev.enableInterrupts();
 
     e1000_device = dev;
-    link_port.setNetworkDevice(&e1000NetworkDevice);
 
     vga.print("E1000 initialized successfully!\n");
 }
 
+fn activatePublishedDevice(device_id: u64) ?*const link_port.NetworkDevice {
+    if (currentNetworkDevice(device_id)) |device| return device;
+
+    const pci_device = pci.findDeviceByStableId(device_id) orelse return null;
+    if (!isSupportedDevice(pci_device)) return null;
+    initDevice(pci_device);
+    return currentNetworkDevice(device_id);
+}
+
+fn currentNetworkDevice(device_id: u64) ?*const link_port.NetworkDevice {
+    if (e1000_device) |*dev| {
+        if (pci.stableDeviceId(dev.pci_device) == device_id) return &e1000NetworkDevice;
+    }
+    return null;
+}
+
+fn isSupportedDevice(pci_device: pci.PCIDevice) bool {
+    if (pci_device.vendor_id != E1000_VENDOR_ID) return false;
+    for (E1000_DEVICE_IDS) |device_id| {
+        if (pci_device.device_id == device_id) return true;
+    }
+    return false;
+}
+
 const e1000NetworkDevice = link_port.NetworkDevice{
     .send = e1000Send,
-    .receive = e1000Receive,
     .getMacAddress = e1000GetMacAddress,
 };
 
@@ -715,20 +655,9 @@ fn e1000Send(data: []const u8) void {
     }
 }
 
-fn e1000Receive() ?[]u8 {
-    if (e1000_device) |*dev| {
-        return dev.receive();
-    }
-    return null;
-}
-
 fn e1000GetMacAddress() [6]u8 {
     if (e1000_device) |*dev| {
         return dev.mac_addr;
     }
     return [_]u8{0} ** 6;
-}
-
-pub fn isInitialized() bool {
-    return e1000_device != null;
 }

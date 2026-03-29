@@ -1,12 +1,35 @@
 pub const kernel = @import("kernel/boot/entry.zig");
 pub const isr = @import("kernel/interrupts/isr.zig");
 pub const panic = @import("kernel/utils/builtin.zig").panic;
+const abi = @import("kernel/process/native/abi.zig");
+const session_manager = @import("kernel/process/native/session_manager.zig");
+const syscall_surface = @import("kernel/process/native/syscall_surface.zig");
+const timer = @import("kernel/timer/timer.zig");
 
 export fn kernel_main() void {
     kernel.kernelMain();
 }
 
-export fn syscall_handler(_: *anyopaque) callconv(.c) void {}
+export fn syscall_handler(context: *anyopaque) callconv(.c) void {
+    const frame: *isr.Registers = @ptrCast(@alignCast(context));
+    const port = session_manager.kernelPort() orelse {
+        frame.eax = @intFromEnum(abi.SyscallStatus.unavailable);
+        frame.edx = 0;
+        frame.ecx = @intFromEnum(abi.DenialReason.none);
+        return;
+    };
+
+    const result = syscall_surface.dispatch(
+        port,
+        timer.getTicks(),
+        frame.eax,
+        frame.ebx,
+        frame.ecx,
+    );
+    frame.eax = @intFromEnum(result.status);
+    frame.edx = result.bytes_written;
+    frame.ecx = @intFromEnum(result.denial_reason);
+}
 
 comptime {
     _ = isr;

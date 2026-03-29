@@ -1,8 +1,10 @@
 const std = @import("std");
 const manifest = @import("manifest.zig");
+const native_util = @import("util.zig");
 const object_store = @import("object_store.zig");
 const principal = @import("principal.zig");
 const signing = @import("signing.zig");
+const copyText = native_util.copyText;
 
 pub const MAX_WORKSPACES: usize = 8;
 pub const MAX_WORKSPACE_ENTRIES: usize = 24;
@@ -10,6 +12,9 @@ pub const MAX_SNAPSHOTS: usize = 16;
 pub const MAX_RECOVERABLE_DELETES: usize = 24;
 pub const MAX_ENTRY_PATH_BYTES: usize = 96;
 pub const MAX_SHARE_GRANTS: usize = 8;
+
+var workspace_message_buffer: [4096]u8 = undefined;
+var restore_entries_scratch: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
 
 pub const Entry = struct {
     path_len: usize = 0,
@@ -29,7 +34,7 @@ pub const Entry = struct {
     }
 
     pub fn pathSlice(self: *const Entry) []const u8 {
-        return self.path[0..self.path_len];
+        return self.path[0..@min(self.path_len, self.path.len)];
     }
 };
 
@@ -38,15 +43,55 @@ pub const CreateRequest = struct {
     label: []const u8,
 };
 
+pub const ShareNetworkScope = enum(u8) {
+    local_only,
+    trusted_overlay,
+    relay_assisted,
+    unrestricted,
+};
+
+pub const ResharePolicy = enum(u8) {
+    owner_only,
+    admin_only,
+    grantee_allowed,
+};
+
+pub const AuditVisibility = enum(u8) {
+    owner_only,
+    shared_participants,
+    organization_policy,
+};
+
 pub const ShareGrant = struct {
     principal_id: principal.PrincipalId,
     can_read: bool = true,
     can_write: bool = false,
+    can_admin: bool = false,
     can_export: bool = false,
-    local_only: bool = false,
+    expires_at_ticks: u64 = 0,
+    network_scope: ShareNetworkScope = .local_only,
+    reshare_policy: ResharePolicy = .owner_only,
+    audit_visibility: AuditVisibility = .owner_only,
+
+    pub fn isActive(self: ShareGrant, now_ticks: u64) bool {
+        return self.expires_at_ticks == 0 or now_ticks <= self.expires_at_ticks;
+    }
+
+    pub fn allowsNetworkScope(self: ShareGrant, requested: ShareNetworkScope) bool {
+        return shareNetworkScopeRank(requested) <= shareNetworkScopeRank(self.network_scope);
+    }
 };
 
 pub const ShareRequest = ShareGrant;
+
+pub const AccessRequest = struct {
+    principal_id: principal.PrincipalId,
+    wants_write: bool = false,
+    wants_export: bool = false,
+    wants_admin: bool = false,
+    network_scope: ShareNetworkScope = .local_only,
+    now_ticks: u64 = 0,
+};
 
 pub const SnapshotRecord = struct {
     id: u64,
@@ -59,7 +104,7 @@ pub const SnapshotRecord = struct {
     entries: [MAX_WORKSPACE_ENTRIES]Entry,
 
     pub fn labelSlice(self: *const SnapshotRecord) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@min(self.label_len, self.label.len)];
     }
 
     pub fn signerSlice(self: *const SnapshotRecord) []const u8 {
@@ -74,15 +119,19 @@ pub const ExportPackage = struct {
     label_len: usize,
     label: [48]u8,
     signature: manifest.Signature = .{},
+    signature_format_len: usize = 0,
+    signature_format_storage: [16]u8 = [_]u8{0} ** 16,
+    signature_signer_len: usize = 0,
+    signature_signer_storage: [48]u8 = [_]u8{0} ** 48,
     entry_count: usize,
     entries: [MAX_WORKSPACE_ENTRIES]Entry,
 
     pub fn labelSlice(self: *const ExportPackage) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@min(self.label_len, self.label.len)];
     }
 
     pub fn signerSlice(self: *const ExportPackage) []const u8 {
-        return self.signature.signer;
+        return exportPackageSignature(self).signer;
     }
 };
 
@@ -103,7 +152,7 @@ pub const WorkspaceRecord = struct {
     deleted_entries: [MAX_RECOVERABLE_DELETES]Entry,
 
     pub fn labelSlice(self: *const WorkspaceRecord) []const u8 {
-        return self.label[0..self.label_len];
+        return self.label[0..@min(self.label_len, self.label.len)];
     }
 };
 
@@ -147,15 +196,15 @@ pub const Directory = struct {
     pub fn reset(self: *Directory) void {
         self.next_workspace_id = 1;
         self.next_snapshot_id = 1;
-        for (&self.workspaces) |*slot| {
-            slot.* = .{};
-        }
-        for (&self.snapshots) |*slot| {
-            slot.* = .{};
-        }
+        zeroBytes(std.mem.asBytes(&self.workspaces));
+        zeroBytes(std.mem.asBytes(&self.snapshots));
     }
 
     pub fn create(self: *Directory, request: CreateRequest) Error!*WorkspaceRecord {
+        return self.createRef(&request);
+    }
+
+    pub fn createRef(self: *Directory, request: *const CreateRequest) Error!*WorkspaceRecord {
         for (&self.workspaces) |*slot| {
             if (slot.in_use) continue;
             slot.in_use = true;
@@ -195,6 +244,15 @@ pub const Directory = struct {
         return null;
     }
 
+    pub fn findByLabel(self: *Directory, label: []const u8) ?*WorkspaceRecord {
+        for (&self.workspaces) |*slot| {
+            if (!slot.in_use) continue;
+            if (!std.mem.eql(u8, slot.workspace.labelSlice(), label)) continue;
+            return &slot.workspace;
+        }
+        return null;
+    }
+
     pub fn findSnapshotByLabel(self: *Directory, workspace_id: u64, label: []const u8) ?*SnapshotRecord {
         for (&self.snapshots) |*slot| {
             if (!slot.in_use) continue;
@@ -220,7 +278,7 @@ pub const Directory = struct {
         if (workspace.transaction_open) return error.TransactionAlreadyOpen;
         workspace.transaction_open = true;
         workspace.staged_entry_count = workspace.entry_count;
-        workspace.staged_entries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+        clearEntries(&workspace.staged_entries);
         copyEntries(
             workspace.staged_entries[0..workspace.entry_count],
             workspace.entries[0..workspace.entry_count],
@@ -263,12 +321,12 @@ pub const Directory = struct {
 
         recordDeletedEntries(workspace);
         workspace.entry_count = workspace.staged_entry_count;
-        workspace.entries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+        clearEntries(&workspace.entries);
         copyEntries(
             workspace.entries[0..workspace.entry_count],
             workspace.staged_entries[0..workspace.entry_count],
         );
-        workspace.staged_entries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+        clearEntries(&workspace.staged_entries);
         workspace.staged_entry_count = 0;
         workspace.transaction_open = false;
         workspace.generation += 1;
@@ -287,26 +345,50 @@ pub const Directory = struct {
         workspace.share_grant_count += 1;
     }
 
-    pub fn hasAccess(
+    pub fn findShareGrant(
         self: *const Directory,
         workspace_id: u64,
         principal_id: principal.PrincipalId,
-        wants_write: bool,
-        wants_export: bool,
-        local_only: bool,
+    ) ?ShareGrant {
+        const workspace = self.lookupConst(workspace_id) orelse return null;
+        for (workspace.share_grants[0..workspace.share_grant_count]) |grant| {
+            if (grant.principal_id.eql(principal_id)) return grant;
+        }
+        return null;
+    }
+
+    pub fn hasAccess(self: *const Directory, workspace_id: u64, request: AccessRequest) bool {
+        const workspace = self.lookupConst(workspace_id) orelse return false;
+        if (workspace.owner.eql(request.principal_id)) return true;
+
+        const grant = self.findShareGrant(workspace_id, request.principal_id) orelse return false;
+        if (!grant.isActive(request.now_ticks)) return false;
+        if (!grant.allowsNetworkScope(request.network_scope)) return false;
+        if (request.wants_admin and !grant.can_admin) return false;
+        if (request.wants_write and !grant.can_write) return false;
+        if (request.wants_export and !grant.can_export) return false;
+        if (!request.wants_write and !request.wants_admin and !grant.can_read) return false;
+        return true;
+    }
+
+    pub fn canReshare(
+        self: *const Directory,
+        workspace_id: u64,
+        principal_id: principal.PrincipalId,
+        network_scope: ShareNetworkScope,
+        now_ticks: u64,
     ) bool {
         const workspace = self.lookupConst(workspace_id) orelse return false;
         if (workspace.owner.eql(principal_id)) return true;
 
-        for (workspace.share_grants[0..workspace.share_grant_count]) |grant| {
-            if (!grant.principal_id.eql(principal_id)) continue;
-            if (local_only and !grant.local_only) continue;
-            if (wants_write and !grant.can_write) continue;
-            if (wants_export and !grant.can_export) continue;
-            if (!wants_write and !grant.can_read) continue;
-            return true;
-        }
-        return false;
+        const grant = self.findShareGrant(workspace_id, principal_id) orelse return false;
+        if (!grant.isActive(now_ticks)) return false;
+        if (!grant.allowsNetworkScope(network_scope)) return false;
+        return switch (grant.reshare_policy) {
+            .owner_only => false,
+            .admin_only => grant.can_admin,
+            .grantee_allowed => true,
+        };
     }
 
     pub fn resolve(self: *const Directory, workspace_id: u64, path: []const u8) Error!Entry {
@@ -354,20 +436,20 @@ pub const Directory = struct {
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
         const snapshot_record = self.findSnapshot(snapshot_id) orelse return error.SnapshotNotFound;
         if (snapshot_record.workspace_id != workspace_id) return error.SnapshotNotFound;
-        if (!verifySnapshotRecord(snapshot_record.*)) return error.InvalidSignature;
+        if (!verifySnapshotRecord(snapshot_record)) return error.InvalidSignature;
 
-        var staged = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
-        copyEntries(staged[0..snapshot_record.entry_count], snapshot_record.entries[0..snapshot_record.entry_count]);
-        recordDeletedEntriesAgainst(workspace, staged[0..snapshot_record.entry_count]);
+        clearEntries(&restore_entries_scratch);
+        copyEntries(restore_entries_scratch[0..snapshot_record.entry_count], snapshot_record.entries[0..snapshot_record.entry_count]);
+        recordDeletedEntriesAgainst(workspace, restore_entries_scratch[0..snapshot_record.entry_count]);
 
-        workspace.entries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+        clearEntries(&workspace.entries);
         workspace.entry_count = snapshot_record.entry_count;
         copyEntries(
             workspace.entries[0..snapshot_record.entry_count],
             snapshot_record.entries[0..snapshot_record.entry_count],
         );
         workspace.transaction_open = false;
-        workspace.staged_entries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+        clearEntries(&workspace.staged_entries);
         workspace.staged_entry_count = 0;
         workspace.generation += 1;
         return workspace.generation;
@@ -400,25 +482,31 @@ pub const Directory = struct {
         snapshot_id: u64,
         identity: signing.SignerIdentity,
     ) Error!ExportPackage {
+        var package = zeroExportPackage();
+        try self.exportSnapshotInto(workspace_id, snapshot_id, identity, &package);
+        return package;
+    }
+
+    pub fn exportSnapshotInto(
+        self: *Directory,
+        workspace_id: u64,
+        snapshot_id: u64,
+        identity: signing.SignerIdentity,
+        out: *ExportPackage,
+    ) Error!void {
         if (identity.label.len == 0) return error.UnsignedExport;
         const snapshot_record = self.findSnapshot(snapshot_id) orelse return error.SnapshotNotFound;
         if (snapshot_record.workspace_id != workspace_id) return error.SnapshotNotFound;
-        if (!verifySnapshotRecord(snapshot_record.*)) return error.InvalidSignature;
+        if (!verifySnapshotRecord(snapshot_record)) return error.InvalidSignature;
 
-        var package = ExportPackage{
-            .workspace_id = workspace_id,
-            .snapshot_id = snapshot_id,
-            .generation = snapshot_record.generation,
-            .label_len = 0,
-            .label = [_]u8{0} ** 48,
-            .signature = .{},
-            .entry_count = snapshot_record.entry_count,
-            .entries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
-        };
-        package.label_len = copyText(&package.label, snapshot_record.labelSlice());
-        copyEntries(package.entries[0..snapshot_record.entry_count], snapshot_record.entries[0..snapshot_record.entry_count]);
-        signExportPackage(&package, identity) catch return error.InvalidSignature;
-        return package;
+        out.* = zeroExportPackage();
+        out.workspace_id = workspace_id;
+        out.snapshot_id = snapshot_id;
+        out.generation = snapshot_record.generation;
+        out.entry_count = snapshot_record.entry_count;
+        out.label_len = copyText(&out.label, snapshot_record.labelSlice());
+        copyEntries(out.entries[0..snapshot_record.entry_count], snapshot_record.entries[0..snapshot_record.entry_count]);
+        signExportPackage(out, identity) catch return error.InvalidSignature;
     }
 
     pub fn importWorkspace(
@@ -428,8 +516,18 @@ pub const Directory = struct {
         package: ExportPackage,
         tick: u64,
     ) Error!*WorkspaceRecord {
+        return self.importWorkspaceFromPackage(owner, label, &package, tick);
+    }
+
+    pub fn importWorkspaceFromPackage(
+        self: *Directory,
+        owner: principal.PrincipalId,
+        label: []const u8,
+        package: *const ExportPackage,
+        tick: u64,
+    ) Error!*WorkspaceRecord {
         _ = tick;
-        if (!package.signature.isPresent()) return error.UnsignedExport;
+        if (!exportPackageSignature(package).isPresent()) return error.UnsignedExport;
         if (!verifyExportPackage(package)) return error.InvalidSignature;
         const workspace = try self.create(.{
             .owner = owner,
@@ -439,6 +537,29 @@ pub const Directory = struct {
         workspace.entry_count = package.entry_count;
         copyEntries(workspace.entries[0..package.entry_count], package.entries[0..package.entry_count]);
         return workspace;
+    }
+
+    pub fn restoreFromExportPackage(
+        self: *Directory,
+        workspace_id: u64,
+        package: *const ExportPackage,
+        tick: u64,
+    ) Error!u32 {
+        _ = tick;
+        if (!exportPackageSignature(package).isPresent()) return error.UnsignedExport;
+        if (!verifyExportPackage(package)) return error.InvalidSignature;
+        if (package.workspace_id != workspace_id) return error.SnapshotNotFound;
+
+        const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
+        recordDeletedEntriesAgainst(workspace, package.entries[0..package.entry_count]);
+        clearEntries(&workspace.entries);
+        workspace.entry_count = package.entry_count;
+        copyEntries(workspace.entries[0..package.entry_count], package.entries[0..package.entry_count]);
+        workspace.transaction_open = false;
+        clearEntries(&workspace.staged_entries);
+        workspace.staged_entry_count = 0;
+        workspace.generation += 1;
+        return workspace.generation;
     }
 
     fn lookupConst(self: *const Directory, workspace_id: u64) ?*const WorkspaceRecord {
@@ -487,6 +608,15 @@ fn zeroWorkspace() WorkspaceRecord {
     };
 }
 
+fn shareNetworkScopeRank(scope: ShareNetworkScope) u8 {
+    return switch (scope) {
+        .local_only => 0,
+        .trusted_overlay => 1,
+        .relay_assisted => 2,
+        .unrestricted => 3,
+    };
+}
+
 fn zeroSnapshot() SnapshotRecord {
     return .{
         .id = 0,
@@ -500,22 +630,50 @@ fn zeroSnapshot() SnapshotRecord {
     };
 }
 
+fn zeroExportPackage() ExportPackage {
+    return .{
+        .workspace_id = 0,
+        .snapshot_id = 0,
+        .generation = 0,
+        .label_len = 0,
+        .label = [_]u8{0} ** 48,
+        .signature = .{},
+        .signature_format_len = 0,
+        .signature_format_storage = [_]u8{0} ** 16,
+        .signature_signer_len = 0,
+        .signature_signer_storage = [_]u8{0} ** 48,
+        .entry_count = 0,
+        .entries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
+    };
+}
+
+pub fn emptyExportPackage() ExportPackage {
+    return zeroExportPackage();
+}
+
 fn copyEntries(dest: []Entry, src: []const Entry) void {
     for (src, 0..) |entry, index| {
         dest[index] = entry;
     }
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
+fn clearEntries(entries: *[MAX_WORKSPACE_ENTRIES]Entry) void {
+    for (entries) |*entry| {
+        entry.* = Entry{};
+    }
 }
 
+fn zeroBytes(buffer: []u8) void {
+    var index: usize = 0;
+    while (index < buffer.len) : (index += 1) {
+        buffer[index] = 0;
+    }
+}
+
+
 fn signSnapshotRecord(snapshot: *SnapshotRecord, identity: signing.SignerIdentity) !void {
-    var message_buffer: [4096]u8 = undefined;
     const message = try snapshotMessage(
-        &message_buffer,
+        &workspace_message_buffer,
         "snapshot",
         snapshot.workspace_id,
         snapshot.generation,
@@ -525,11 +683,10 @@ fn signSnapshotRecord(snapshot: *SnapshotRecord, identity: signing.SignerIdentit
     snapshot.signature = try signing.sign(identity, message);
 }
 
-fn verifySnapshotRecord(snapshot: SnapshotRecord) bool {
+fn verifySnapshotRecord(snapshot: *const SnapshotRecord) bool {
     if (!snapshot.signature.isPresent()) return false;
-    var message_buffer: [4096]u8 = undefined;
     const message = snapshotMessage(
-        &message_buffer,
+        &workspace_message_buffer,
         "snapshot",
         snapshot.workspace_id,
         snapshot.generation,
@@ -540,9 +697,8 @@ fn verifySnapshotRecord(snapshot: SnapshotRecord) bool {
 }
 
 fn signExportPackage(package: *ExportPackage, identity: signing.SignerIdentity) !void {
-    var message_buffer: [4096]u8 = undefined;
     const message = try snapshotMessage(
-        &message_buffer,
+        &workspace_message_buffer,
         "export",
         package.workspace_id,
         package.generation,
@@ -550,20 +706,39 @@ fn signExportPackage(package: *ExportPackage, identity: signing.SignerIdentity) 
         package.entries[0..package.entry_count],
     );
     package.signature = try signing.sign(identity, message);
+    persistExportPackageSignature(package);
 }
 
-fn verifyExportPackage(package: ExportPackage) bool {
-    if (!package.signature.isPresent()) return false;
-    var message_buffer: [4096]u8 = undefined;
+fn verifyExportPackage(package: *const ExportPackage) bool {
+    const signature = exportPackageSignature(package);
+    if (!signature.isPresent()) return false;
     const message = snapshotMessage(
-        &message_buffer,
+        &workspace_message_buffer,
         "export",
         package.workspace_id,
         package.generation,
         package.labelSlice(),
         package.entries[0..package.entry_count],
     ) catch return false;
-    return signing.verify(package.signature, message);
+    return signing.verify(signature, message);
+}
+
+fn persistExportPackageSignature(package: *ExportPackage) void {
+    package.signature_format_len = copyText(&package.signature_format_storage, package.signature.format);
+    package.signature_signer_len = copyText(&package.signature_signer_storage, package.signature.signer);
+    package.signature.format = package.signature_format_storage[0..package.signature_format_len];
+    package.signature.signer = package.signature_signer_storage[0..package.signature_signer_len];
+}
+
+fn exportPackageSignature(package: *const ExportPackage) manifest.Signature {
+    var signature = package.signature;
+    if (package.signature_format_len != 0) {
+        signature.format = package.signature_format_storage[0..package.signature_format_len];
+    }
+    if (package.signature_signer_len != 0) {
+        signature.signer = package.signature_signer_storage[0..package.signature_signer_len];
+    }
+    return signature;
 }
 
 fn snapshotMessage(
@@ -709,6 +884,52 @@ test "workspace transactions, snapshot restore, delete recovery, and signed expo
     try std.testing.expectEqual(first.version_id, (try directory.resolve(imported.id, "documents/notes.md")).version_id);
 }
 
+test "workspace can restore the original workspace from a signed export package" {
+    var store = object_store.Store.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0x64} ** 32,
+    };
+    const export_signer = signing.SignerIdentity{
+        .label = "zigos-export-key",
+        .seed = [_]u8{0x65} ** 32,
+    };
+
+    const first = try store.putVersion(.{
+        .preferred_object_id = 901,
+        .object_type = .document,
+        .payload = "baseline",
+        .metadata = try object_store.signMetadata(signer, "notes", "text/markdown", .document, "baseline", 30),
+    });
+    const second = try store.putVersion(.{
+        .preferred_object_id = 901,
+        .object_type = .document,
+        .payload = "drifted",
+        .metadata = try object_store.signMetadata(signer, "notes", "text/markdown", .document, "drifted", 31),
+        .parent_version_id = first.version_id,
+    });
+
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 3 },
+        .label = "notes-restore",
+    });
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "documents/notes.md", first.object_id, first.version_id, .document);
+    _ = try directory.commit(workspace.id, 32);
+
+    const snapshot = try directory.snapshot(workspace.id, "baseline", signer);
+    const package = try directory.exportSnapshot(workspace.id, snapshot.id, export_signer);
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "documents/notes.md", second.object_id, second.version_id, .document);
+    _ = try directory.commit(workspace.id, 33);
+    try std.testing.expectEqual(second.version_id, (try directory.resolve(workspace.id, "documents/notes.md")).version_id);
+
+    _ = try directory.restoreFromExportPackage(workspace.id, &package, 34);
+    try std.testing.expectEqual(first.version_id, (try directory.resolve(workspace.id, "documents/notes.md")).version_id);
+}
+
 test "workspace snapshots and exports must stay signed" {
     var directory = Directory.init();
     const workspace = try directory.create(.{
@@ -733,6 +954,43 @@ test "workspace snapshots and exports must stay signed" {
     try std.testing.expectError(error.UnsignedExport, directory.importWorkspace(.{ .kind = .service, .serial = 10 }, "import", package, 0));
 }
 
+test "export packages keep self-contained signature state across copies" {
+    var store = object_store.Store.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0x66} ** 32,
+    };
+    const export_signer = signing.SignerIdentity{
+        .label = "zigos-export-key",
+        .seed = [_]u8{0x67} ** 32,
+    };
+
+    const first = try store.putVersion(.{
+        .preferred_object_id = 902,
+        .object_type = .document,
+        .payload = "archived",
+        .metadata = try object_store.signMetadata(signer, "notes", "text/markdown", .document, "archived", 35),
+    });
+
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 4 },
+        .label = "archive-test",
+    });
+    try directory.beginTransaction(workspace.id);
+    _ = try directory.stagePut(workspace.id, "documents/notes.md", first.object_id, first.version_id, .document);
+    _ = try directory.commit(workspace.id, 36);
+
+    const snapshot = try directory.snapshot(workspace.id, "baseline", signer);
+    var package = try directory.exportSnapshot(workspace.id, snapshot.id, export_signer);
+    const copied = package;
+    package = copied;
+
+    try std.testing.expect(exportPackageSignature(&package).isPresent());
+    const imported = try directory.importWorkspace(.{ .kind = .service, .serial = 11 }, "archive-import", package, 37);
+    try std.testing.expectEqual(first.version_id, (try directory.resolve(imported.id, "documents/notes.md")).version_id);
+}
+
 test "workspace sharing acts as a mutable policy container" {
     var directory = Directory.init();
     const notes = try directory.create(.{
@@ -742,14 +1000,54 @@ test "workspace sharing acts as a mutable policy container" {
     try directory.share(notes.id, .{
         .principal_id = .{ .kind = .app, .serial = 7 },
         .can_read = true,
-        .can_write = false,
+        .can_write = true,
+        .can_admin = true,
         .can_export = true,
-        .local_only = true,
+        .expires_at_ticks = 40,
+        .network_scope = .trusted_overlay,
+        .reshare_policy = .admin_only,
+        .audit_visibility = .shared_participants,
     });
+    const initial = directory.findShareGrant(notes.id, .{ .kind = .app, .serial = 7 }).?;
+    try std.testing.expectEqual(ShareNetworkScope.trusted_overlay, initial.network_scope);
+    try std.testing.expectEqual(ResharePolicy.admin_only, initial.reshare_policy);
+    try std.testing.expectEqual(AuditVisibility.shared_participants, initial.audit_visibility);
+    try std.testing.expect(directory.hasAccess(notes.id, .{
+        .principal_id = .{ .kind = .app, .serial = 7 },
+        .wants_write = true,
+        .wants_export = true,
+        .network_scope = .trusted_overlay,
+        .now_ticks = 20,
+    }));
+    try std.testing.expect(!directory.hasAccess(notes.id, .{
+        .principal_id = .{ .kind = .app, .serial = 7 },
+        .wants_write = true,
+        .network_scope = .unrestricted,
+        .now_ticks = 20,
+    }));
+    try std.testing.expect(directory.canReshare(notes.id, .{ .kind = .app, .serial = 7 }, .trusted_overlay, 20));
 
-    try std.testing.expect(directory.hasAccess(notes.id, .{ .kind = .app, .serial = 7 }, false, true, true));
-    try std.testing.expect(!directory.hasAccess(notes.id, .{ .kind = .app, .serial = 7 }, true, false, true));
-    try std.testing.expect(directory.hasAccess(notes.id, .{ .kind = .app, .serial = 7 }, false, false, false));
+    try directory.share(notes.id, .{
+        .principal_id = .{ .kind = .app, .serial = 7 },
+        .can_read = true,
+        .can_write = false,
+        .can_admin = false,
+        .can_export = false,
+        .expires_at_ticks = 15,
+        .network_scope = .local_only,
+        .reshare_policy = .owner_only,
+        .audit_visibility = .organization_policy,
+    });
+    const updated = directory.findShareGrant(notes.id, .{ .kind = .app, .serial = 7 }).?;
+    try std.testing.expectEqual(ShareNetworkScope.local_only, updated.network_scope);
+    try std.testing.expectEqual(ResharePolicy.owner_only, updated.reshare_policy);
+    try std.testing.expectEqual(AuditVisibility.organization_policy, updated.audit_visibility);
+    try std.testing.expect(!directory.hasAccess(notes.id, .{
+        .principal_id = .{ .kind = .app, .serial = 7 },
+        .network_scope = .local_only,
+        .now_ticks = 20,
+    }));
+    try std.testing.expect(!directory.canReshare(notes.id, .{ .kind = .app, .serial = 7 }, .local_only, 20));
 }
 
 test "workspace restore rejects tampered signed snapshots" {
