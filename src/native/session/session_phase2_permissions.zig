@@ -6,8 +6,8 @@ const permission_review_service = @import("../policy/permission_review_service.z
 const policy_component_port = @import("../policy/policy_component_port.zig");
 const policy_mediation = @import("../policy/policy_mediation.zig");
 const review_component_port = @import("../policy/review_component_port.zig");
+const package_service = @import("../services/package_service.zig");
 const support = @import("session_manager_support.zig");
-const userspace_boot_registry = @import("../task/userspace_boot_registry.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 
@@ -52,38 +52,17 @@ fn runViewerPermissionFlow(
     state: *const support.BootstrapState,
     policy_port: *policy_component_port.Port,
 ) void {
-    const viewer_permissions = [_]manifest.PermissionRequest{
-        .{
-            .kind = .network_egress,
-            .resource = "lan.sync",
-            .rights = .{ .network_local = true },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 20,
-        },
-        .{
-            .kind = .clipboard,
-            .resource = "clipboard",
-            .rights = .{ .clipboard_read = true, .clipboard_write = true },
-            .required = false,
-        },
-    };
-    const viewer_bundle = userspace_boot_registry.manifestFor("app.viewer") catch unreachable;
-    const viewer_manifest = manifest.BundleManifest{
-        .bundle_id = viewer_bundle.bundle_id,
-        .display_name = viewer_bundle.display_name,
-        .publisher = viewer_bundle.publisher,
-        .components = viewer_bundle.components,
-        .requested_permissions = &viewer_permissions,
-        .signature = viewer_bundle.signature,
-    };
+    var viewer_resolved: package_service.ResolvedManifest = undefined;
+    const viewer_manifest = env.package_service.resolveCurrentManifest("app.viewer", &viewer_resolved) catch unreachable;
     manifest.validate(viewer_manifest) catch unreachable;
     common.printBootMarker(boot_markers.phase2_manifest_valid);
 
-    const viewer_task = userspace_launch.launchRegisteredDirect(
+    const viewer_task = userspace_launch.launchInstalledDirect(
+        env.package_service,
         env.userspace_catalog,
         env.runtime,
         "app.viewer",
+        .app_component,
         .{
             .owner = state.ids.session_user,
             .budget = .{
@@ -123,56 +102,16 @@ fn runNotesPermissionFlow(
     review_port: *review_component_port.Port,
     policy_port: *policy_component_port.Port,
 ) support.NotesPhaseState {
-    const notes_permissions = [_]manifest.PermissionRequest{
-        .{
-            .kind = .object_access,
-            .resource = "workspace:notes",
-            .rights = .{ .object_read = true, .object_write = true },
-            .local_only = true,
-            .max_lease_ticks = 400,
-        },
-        .{
-            .kind = .network_egress,
-            .resource = "lan.sync",
-            .rights = .{ .network_local = true },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 50,
-        },
-        .{
-            .kind = .clipboard,
-            .resource = "clipboard",
-            .rights = .{ .clipboard_read = true, .clipboard_write = true },
-            .required = false,
-        },
-    };
-    const notes_bundle = userspace_boot_registry.manifestFor("app.notes") catch unreachable;
-    const notes_manifest = manifest.BundleManifest{
-        .bundle_id = notes_bundle.bundle_id,
-        .display_name = notes_bundle.display_name,
-        .publisher = notes_bundle.publisher,
-        .components = notes_bundle.components,
-        .provided_interfaces = &[_]manifest.InterfaceDecl{
-            .{ .name = "zigos.workspace.document" },
-        },
-        .consumed_interfaces = &[_]manifest.InterfaceDecl{
-            .{ .name = "zigos.object.workspace" },
-        },
-        .requested_permissions = &notes_permissions,
-        .ai_metadata = .{
-            .model_family = "tiny-embed",
-            .locality = .local_only,
-            .offline_required = true,
-        },
-        .update_channel = .beta,
-        .signature = notes_bundle.signature,
-    };
+    var notes_resolved: package_service.ResolvedManifest = undefined;
+    const notes_manifest = env.package_service.resolveCurrentManifest("app.notes", &notes_resolved) catch unreachable;
     manifest.validate(notes_manifest) catch unreachable;
 
-    const notes_task = userspace_launch.launchRegisteredDirect(
+    const notes_task = userspace_launch.launchInstalledDirect(
+        env.package_service,
         env.userspace_catalog,
         env.runtime,
         "app.notes",
+        .app_component,
         .{
             .owner = state.ids.session_user,
             .budget = .{
@@ -195,15 +134,6 @@ fn runNotesPermissionFlow(
         .bundle = notes_manifest,
         .output = &notes_grants_buffer,
     }, 10) catch unreachable;
-    if (support.hasGrantForKind(notes_grants, .object_access)) {
-        common.printBootMarker("ZIGOS:PHASE2:UI:APPROVE_OBJECT");
-    }
-    if (support.hasGrantForKind(notes_grants, .network_egress)) {
-        common.printBootMarker("ZIGOS:PHASE2:UI:APPROVE_NETWORK");
-    }
-    if (!support.hasGrantForKind(notes_grants, .clipboard)) {
-        common.printBootMarker("ZIGOS:PHASE2:UI:DENY_CLIPBOARD");
-    }
 
     const notes_summary = policy_port.applyManifest(.{
         .header = policy_component_port.makeHeader(.apply_manifest, 22, notes_task.id),
@@ -246,7 +176,7 @@ fn runNotesPermissionFlow(
 
     return .{
         .task_id = notes_task.id,
-        .network_permission = notes_permissions[1],
+        .network_permission = notes_manifest.requested_permissions[1],
         .grants_len = notes_grants.len,
         .grants = notes_grants_buffer,
         .object_capability = notes_object_capability,
@@ -259,43 +189,16 @@ fn runSyncPermissionFlow(
     review_port: *review_component_port.Port,
     policy_port: *policy_component_port.Port,
 ) void {
-    const sync_permissions = [_]manifest.PermissionRequest{
-        .{
-            .kind = .background_execution,
-            .resource = "sync",
-            .rights = .{ .background_run = true },
-        },
-    };
-    const sync_background_tasks = [_]manifest.BackgroundTaskDecl{
-        .{
-            .id = "sync",
-            .trigger = .sync_completion,
-            .expected_duration_seconds = 30,
-            .budget = .{
-                .cpu_time_ticks = 2_000,
-                .memory_bytes = 128 * 1024,
-                .shared_memory_bytes = 8 * 1024,
-            },
-            .network = .local_network_only,
-            .visibility = .status_only,
-        },
-    };
-    const sync_bundle = userspace_boot_registry.manifestFor("app.sync") catch unreachable;
-    const sync_manifest = manifest.BundleManifest{
-        .bundle_id = sync_bundle.bundle_id,
-        .display_name = sync_bundle.display_name,
-        .publisher = sync_bundle.publisher,
-        .components = sync_bundle.components,
-        .requested_permissions = &sync_permissions,
-        .background_tasks = &sync_background_tasks,
-        .signature = sync_bundle.signature,
-    };
+    var sync_resolved: package_service.ResolvedManifest = undefined;
+    const sync_manifest = env.package_service.resolveCurrentManifest("app.sync", &sync_resolved) catch unreachable;
     manifest.validate(sync_manifest) catch unreachable;
 
-    const sync_task = userspace_launch.launchRegisteredDirect(
+    const sync_task = userspace_launch.launchInstalledDirect(
+        env.package_service,
         env.userspace_catalog,
         env.runtime,
         "app.sync",
+        .app_component,
         .{
             .owner = state.ids.session_user,
             .budget = .{
@@ -318,7 +221,6 @@ fn runSyncPermissionFlow(
         .bundle = sync_manifest,
         .output = &sync_grants_buffer,
     }, 20) catch unreachable;
-    common.printBootMarker("ZIGOS:PHASE2:UI:REVIEW_SYNC");
     const sync_summary = policy_port.applyManifest(.{
         .header = policy_component_port.makeHeader(.apply_manifest, 24, sync_task.id),
         .task_id = sync_task.id,
@@ -338,66 +240,15 @@ fn runCapturePermissionFlow(
     review_port: *review_component_port.Port,
     policy_port: *policy_component_port.Port,
 ) void {
-    const capture_permissions = [_]manifest.PermissionRequest{
-        .{
-            .kind = .device_access,
-            .resource = "capture.card0",
-            .rights = .{ .device_use = true },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 30,
-            .target_id = 700,
-        },
-        .{
-            .kind = .camera,
-            .resource = "camera.front",
-            .rights = .{ .device_use = true },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 35,
-            .target_id = 701,
-        },
-        .{
-            .kind = .mic,
-            .resource = "mic.array",
-            .rights = .{ .device_use = true },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 35,
-            .target_id = 702,
-        },
-        .{
-            .kind = .sensor,
-            .resource = "sensor.lid",
-            .rights = .{ .sensor_read = true },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 25,
-            .target_id = 703,
-        },
-        .{
-            .kind = .peer_ipc,
-            .resource = "zigos.peer.share",
-            .rights = .{ .ipc_peer = true },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 15,
-        },
-    };
-    const capture_bundle = userspace_boot_registry.manifestFor("app.capture") catch unreachable;
-    const capture_manifest = manifest.BundleManifest{
-        .bundle_id = capture_bundle.bundle_id,
-        .display_name = capture_bundle.display_name,
-        .publisher = capture_bundle.publisher,
-        .components = capture_bundle.components,
-        .requested_permissions = &capture_permissions,
-        .signature = capture_bundle.signature,
-    };
+    var capture_resolved: package_service.ResolvedManifest = undefined;
+    const capture_manifest = env.package_service.resolveCurrentManifest("app.capture", &capture_resolved) catch unreachable;
 
-    const capture_task = userspace_launch.launchRegisteredDirect(
+    const capture_task = userspace_launch.launchInstalledDirect(
+        env.package_service,
         env.userspace_catalog,
         env.runtime,
         "app.capture",
+        .app_component,
         .{
             .owner = state.ids.session_user,
             .budget = .{
@@ -420,21 +271,6 @@ fn runCapturePermissionFlow(
         .bundle = capture_manifest,
         .output = &capture_grants_buffer,
     }, 30) catch unreachable;
-    if (support.hasGrantForKind(capture_grants, .device_access)) {
-        common.printBootMarker("ZIGOS:PHASE2:UI:APPROVE_DEVICE");
-    }
-    if (support.hasGrantForKind(capture_grants, .camera)) {
-        common.printBootMarker("ZIGOS:PHASE2:UI:APPROVE_CAMERA");
-    }
-    if (!support.hasGrantForKind(capture_grants, .mic)) {
-        common.printBootMarker("ZIGOS:PHASE2:UI:DENY_MIC");
-    }
-    if (support.hasGrantForKind(capture_grants, .sensor)) {
-        common.printBootMarker("ZIGOS:PHASE2:UI:APPROVE_SENSOR");
-    }
-    if (support.hasGrantForKind(capture_grants, .peer_ipc)) {
-        common.printBootMarker("ZIGOS:PHASE2:UI:APPROVE_PEER_IPC");
-    }
 
     const capture_summary = policy_port.applyManifest(.{
         .header = policy_component_port.makeHeader(.apply_manifest, 27, capture_task.id),

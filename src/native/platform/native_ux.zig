@@ -11,7 +11,9 @@ const workspace = @import("../storage/workspace.zig");
 const copyText = native_util.copyText;
 
 pub const MAX_FLOWS: usize = 16;
-pub const MAX_DETAIL_BYTES: usize = 64;
+pub const MAX_DETAIL_BYTES: usize = 128;
+pub const MAX_BUNDLE_ID_BYTES: usize = 64;
+pub const MAX_PERMISSION_RESOURCE_BYTES: usize = 96;
 
 pub const FlowKind = enum(u8) {
     start_task,
@@ -28,11 +30,29 @@ pub const FlowRecord = struct {
     workspace_id: u64 = 0,
     subject: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
     approved: bool = false,
+    permission_kind: manifest.PermissionKind = .object_access,
+    permission_required: bool = false,
+    permission_local_only: bool = false,
+    decision_local_only: bool = false,
+    decision_has_lease: bool = false,
+    decision_lease_ticks: u64 = 0,
+    bundle_id_len: usize = 0,
+    bundle_id: [MAX_BUNDLE_ID_BYTES]u8 = [_]u8{0} ** MAX_BUNDLE_ID_BYTES,
+    permission_resource_len: usize = 0,
+    permission_resource: [MAX_PERMISSION_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_RESOURCE_BYTES,
     detail_len: usize = 0,
     detail: [MAX_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_DETAIL_BYTES,
 
     pub fn detailSlice(self: *const FlowRecord) []const u8 {
         return self.detail[0..self.detail_len];
+    }
+
+    pub fn bundleIdSlice(self: *const FlowRecord) []const u8 {
+        return self.bundle_id[0..self.bundle_id_len];
+    }
+
+    pub fn permissionResourceSlice(self: *const FlowRecord) []const u8 {
+        return self.permission_resource[0..self.permission_resource_len];
     }
 };
 
@@ -92,8 +112,35 @@ pub const Controller = struct {
         kind: manifest.PermissionKind,
         approved: bool,
     ) Error!bool {
-        _ = try self.record(.review_permission_request, task_id, 0, subject, @tagName(kind), approved);
+        const request = manifest.PermissionRequest{
+            .kind = kind,
+            .resource = @tagName(kind),
+            .rights = .{},
+        };
+        _ = try self.reviewPermissionDecision(task_id, subject, "", request, approved, false, null);
         return approved;
+    }
+
+    pub fn reviewPermissionDecision(
+        self: *Controller,
+        task_id: u64,
+        subject: principal.PrincipalId,
+        bundle_id: []const u8,
+        request: manifest.PermissionRequest,
+        approved: bool,
+        decision_local_only: bool,
+        decision_lease_ticks: ?u64,
+    ) Error!*FlowRecord {
+        const flow = try self.record(.review_permission_request, task_id, 0, subject, request.resource, approved);
+        flow.permission_kind = request.kind;
+        flow.permission_required = request.required;
+        flow.permission_local_only = request.local_only;
+        flow.decision_local_only = decision_local_only;
+        flow.decision_has_lease = decision_lease_ticks != null;
+        flow.decision_lease_ticks = decision_lease_ticks orelse 0;
+        flow.bundle_id_len = copyText(&flow.bundle_id, bundle_id);
+        flow.permission_resource_len = copyText(&flow.permission_resource, request.resource);
+        return flow;
     }
 
     pub fn recoverSystem(
@@ -130,11 +177,51 @@ pub const Controller = struct {
     }
 };
 
+pub fn renderReviewFlowToBuffer(buffer: []u8, flow: *const FlowRecord) ![]const u8 {
+    if (flow.kind != .review_permission_request) return error.UnsupportedFlowKind;
+
+    var used: usize = 0;
+    const decision = if (flow.approved) "allow" else "deny";
+    try appendFmt(buffer, &used, "UX review: task={d} bundle={s} kind={s} resource={s} decision={s}", .{
+        flow.task_id,
+        flow.bundleIdSlice(),
+        @tagName(flow.permission_kind),
+        flow.permissionResourceSlice(),
+        decision,
+    });
+    try appendFmt(buffer, &used, " required={s} requested_local_only={s}", .{
+        yesNo(flow.permission_required),
+        yesNo(flow.permission_local_only),
+    });
+    if (flow.approved) {
+        try appendFmt(buffer, &used, " decision_local_only={s}", .{yesNo(flow.decision_local_only)});
+        if (flow.decision_has_lease) {
+            try appendFmt(buffer, &used, " lease={d}", .{flow.decision_lease_ticks});
+        }
+    }
+    return buffer[0..used];
+}
+
 fn zeroFlow() FlowRecord {
     return .{
         .id = 0,
         .kind = .start_task,
     };
+}
+
+fn appendText(buffer: []u8, used: *usize, text: []const u8) !void {
+    if (used.* + text.len > buffer.len) return error.NoSpaceLeft;
+    @memcpy(buffer[used.*..][0..text.len], text);
+    used.* += text.len;
+}
+
+fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) !void {
+    const rendered = try std.fmt.bufPrint(buffer[used.*..], fmt, args);
+    used.* += rendered.len;
+}
+
+fn yesNo(value: bool) []const u8 {
+    return if (value) "yes" else "no";
 }
 
 
@@ -204,7 +291,38 @@ test "native ux records task workspace pairing review and recovery flows" {
     try std.testing.expectEqualStrings("documents/notes.md", controller.flows[1].detailSlice());
     try std.testing.expect(sync.isTrustedDevice(paired_device));
     try std.testing.expectEqual(notes.version_id, opened.version_id);
+    try std.testing.expectEqual(manifest.PermissionKind.object_access, controller.flows[3].permission_kind);
+    try std.testing.expectEqualStrings("object_access", controller.flows[3].permissionResourceSlice());
 
     sync_service.Service.resetPersistentState();
     storage_service.Service.resetPersistentState();
+}
+
+test "native ux renders structured permission review decisions" {
+    var controller = Controller.init();
+    const subject = principal.PrincipalId{ .kind = .user, .serial = 7 };
+    const flow = try controller.reviewPermissionDecision(
+        44,
+        subject,
+        "app.notes",
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .rights = .{ .object_read = true, .object_write = true },
+            .local_only = true,
+            .max_lease_ticks = 400,
+        },
+        true,
+        true,
+        400,
+    );
+    var buffer: [256]u8 = undefined;
+    const rendered = try renderReviewFlowToBuffer(&buffer, flow);
+
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "bundle=app.notes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "kind=object_access") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "resource=workspace:notes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "decision=allow") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "decision_local_only=yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "lease=400") != null);
 }

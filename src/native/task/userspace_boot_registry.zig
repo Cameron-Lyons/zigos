@@ -2,10 +2,12 @@ const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
 const contract = @import("../session/contract.zig");
 const manifest = @import("../policy/manifest.zig");
+const contract_registry = @import("userspace_contract_registry.zig");
 const registry = @import("userspace_registry.zig");
 const std = @import("std");
 const task_runtime = @import("task_runtime.zig");
 const userspace_loader = @import("userspace_loader.zig");
+const userspace_manifest_signing = @import("userspace_manifest_signing.zig");
 
 pub const Error = userspace_loader.Error || error{
     UnsupportedServiceClass,
@@ -22,13 +24,14 @@ pub fn find(bundle_id: []const u8) ?*const registry.ImageSpec {
 
 pub fn manifestFor(bundle_id: []const u8) Error!manifest.BundleManifest {
     const spec = find(bundle_id) orelse return error.UnknownBundleId;
-    return .{
+    var bundle = manifest.BundleManifest{
         .bundle_id = spec.bundle_id,
         .display_name = spec.display_name,
         .publisher = spec.publisher,
         .components = spec.components,
-        .signature = signatureFor(spec),
     };
+    bundle.signature = signatureFor(bundle, spec.signed);
+    return bundle;
 }
 
 pub fn initialComponentFor(bundle_id: []const u8) Error!task_runtime.ExecutionComponentSpec {
@@ -52,22 +55,26 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
     if (builtin.target.os.tag == .freestanding) {
         const archive = @import("userspace_archive");
         inline for (archive.artifacts) |artifact| {
+            var bundle = manifest.BundleManifest{
+                .bundle_id = artifact.bundle_id,
+                .display_name = artifact.display_name,
+                .publisher = artifact.publisher,
+                .components = &.{.{
+                    .id = artifact.label,
+                    .entry = artifact.entry,
+                }},
+            };
+            bundle.signature = signatureFor(bundle, artifact.signed);
             _ = try catalog.registerEmbeddedArtifact(.{
-                .bundle = .{
-                    .bundle_id = artifact.bundle_id,
-                    .display_name = artifact.display_name,
-                    .publisher = artifact.publisher,
-                    .components = &.{.{
-                        .id = artifact.label,
-                        .entry = artifact.entry,
-                    }},
-                    .signature = signatureForPublisher(artifact.publisher, artifact.signed),
-                },
+                .bundle = bundle,
                 .component_class = componentClassFromByte(artifact.component_class),
                 .initial_component = .{
                     .label = artifact.label,
                     .entry = artifact.entry,
                 },
+                .role_tag = artifact.role_tag,
+                .heartbeat_increment = artifact.heartbeat_increment,
+                .contract_flags = artifact.contract_flags,
                 .elf_bytes = artifact.data,
             });
         }
@@ -75,14 +82,16 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
     }
 
     for (registry.boot_image_specs) |spec| {
+        const userspace_contract = contractRegistryFor(spec.bundle_id);
+        var bundle = manifest.BundleManifest{
+            .bundle_id = spec.bundle_id,
+            .display_name = spec.display_name,
+            .publisher = spec.publisher,
+            .components = spec.components,
+        };
+        bundle.signature = signatureFor(bundle, spec.signed);
         _ = try catalog.register(.{
-            .bundle = .{
-                .bundle_id = spec.bundle_id,
-                .display_name = spec.display_name,
-                .publisher = spec.publisher,
-                .components = spec.components,
-                .signature = signatureFor(&spec),
-            },
+            .bundle = bundle,
             .component_class = switch (spec.component_class) {
                 .session_manager => .session_manager,
                 .app_component => .app_component,
@@ -92,6 +101,9 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
                 .label = spec.label,
                 .entry = spec.entry,
             },
+            .role_tag = userspace_contract.role_tag,
+            .heartbeat_increment = userspace_contract.heartbeat_increment,
+            .contract_flags = userspace_contract.contract_flags,
         });
     }
 }
@@ -110,19 +122,13 @@ pub fn bundleIdForServiceClass(class: contract.ServiceClass) Error![]const u8 {
     };
 }
 
-fn signatureFor(spec: *const registry.ImageSpec) manifest.Signature {
-    return signatureForPublisher(spec.publisher, spec.signed);
+fn signatureFor(bundle: manifest.BundleManifest, signed: bool) manifest.Signature {
+    if (!signed) return .{};
+    return userspace_manifest_signing.signBundle(bundle) catch unreachable;
 }
 
-fn signatureForPublisher(publisher: []const u8, signed: bool) manifest.Signature {
-    if (!signed) return .{};
-    return .{
-        .format = "ed25519",
-        .signer = if (std.mem.eql(u8, publisher, "zigos.system"))
-            "zigos-system-key"
-        else
-            "zigos-dev-key",
-    };
+fn contractRegistryFor(bundle_id: []const u8) contract_registry.ContractSpec {
+    return contract_registry.find(bundle_id).?.*;
 }
 
 fn componentClassFromByte(value: u8) task_runtime.ComponentClass {
@@ -146,4 +152,7 @@ test "boot registry definitions are unique and preload a userspace catalog" {
     );
     try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager") != null);
     try std.testing.expect(catalog.findByBundleId("app.capture") != null);
+    try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager").?.hasTypedContract());
+    try std.testing.expect(catalog.findByBundleId("app.capture").?.hasTypedContract());
+    try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager").?.bundle_signed);
 }
