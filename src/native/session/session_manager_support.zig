@@ -7,6 +7,7 @@ const native_service_registry = @import("../kernel_api/service_registry.zig");
 const permission_review_service = @import("../policy/permission_review_service.zig");
 const phase3_bootstrap = @import("phase3_bootstrap.zig");
 const policy_mediation = @import("../policy/policy_mediation.zig");
+const package_service = @import("../services/package_service.zig");
 const session_bootstrap = @import("session_bootstrap.zig");
 const service_contract = @import("service_contract.zig");
 const supervisor_mod = @import("supervisor.zig");
@@ -50,6 +51,7 @@ pub const Environment = struct {
     runtime: *task_runtime.Runtime,
     service_directory: *native_service_registry.Registry,
     userspace_catalog: *userspace_loader.Catalog,
+    package_service: *package_service.Service,
     supervisor: *supervisor_mod.Supervisor,
     driver_directory: *driver_service.Directory,
     driver_runtime: *driver_runtime_mod.Runtime,

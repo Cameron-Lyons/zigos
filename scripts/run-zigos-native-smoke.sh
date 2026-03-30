@@ -166,7 +166,24 @@ assert_review_text() {
     "input> allow local lease=15" \
     "decision: allow local_only=yes lease=400 ticks" \
     "decision: allow local_only=yes lease=50 ticks" \
-    "decision: deny"
+    "decision: deny" \
+    "UI window: id=1 surface=3 type=app_panel modal=yes title=Notes permission review bundle=app.notes" \
+    "UI window: id=2 surface=4 type=app_panel modal=yes title=Sync permission review bundle=app.sync" \
+    "UI window: id=3 surface=5 type=app_panel modal=yes title=Capture permission review bundle=app.capture" \
+    "UI card: window=1 kind=object_access label=Object access resource=workspace:notes" \
+    "UI card update: window=1 kind=clipboard resource=clipboard decision=deny" \
+    "UI card update: window=2 kind=background_execution resource=sync decision=allow decision_local_only=no decision_lease=10" \
+    "UI card update: window=3 kind=mic resource=mic.array decision=deny" \
+    "UX review: task=" \
+    "bundle=app.notes kind=object_access resource=workspace:notes decision=allow required=yes requested_local_only=yes decision_local_only=yes lease=400" \
+    "bundle=app.notes kind=network_egress resource=lan.sync decision=allow required=no requested_local_only=yes decision_local_only=yes lease=50" \
+    "bundle=app.notes kind=clipboard resource=clipboard decision=deny required=no requested_local_only=no" \
+    "bundle=app.sync kind=background_execution resource=sync decision=allow required=yes requested_local_only=no decision_local_only=no lease=10" \
+    "bundle=app.capture kind=device_access resource=capture.card0 decision=allow required=no requested_local_only=yes decision_local_only=yes lease=30" \
+    "bundle=app.capture kind=camera resource=camera.front decision=allow required=no requested_local_only=yes decision_local_only=yes lease=35" \
+    "bundle=app.capture kind=mic resource=mic.array decision=deny required=no requested_local_only=yes" \
+    "bundle=app.capture kind=sensor resource=sensor.lid decision=allow required=no requested_local_only=yes decision_local_only=yes lease=25" \
+    "bundle=app.capture kind=peer_ipc resource=zigos.peer.share decision=allow required=no requested_local_only=yes decision_local_only=yes lease=15"
 }
 
 run_boot "$BOOT1_LOG" reset

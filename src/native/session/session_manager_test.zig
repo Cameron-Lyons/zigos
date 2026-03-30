@@ -1,5 +1,6 @@
 const std = @import("std");
 const contract = @import("contract.zig");
+const compositor_session = @import("../platform/compositor_session.zig");
 const immutable_base = @import("../platform/immutable_base.zig");
 const principal = @import("../core/principal.zig");
 const service_contract = @import("service_contract.zig");
@@ -22,6 +23,7 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
     const driver_runtime = session_manager.testing.driverRuntimePtr();
     const supervisor = session_manager.testing.supervisorPtr();
     const phase4_storage_service = session_manager.testing.storageServicePtr();
+    const compositor = session_manager.testing.compositorSessionPtr();
 
     try std.testing.expect(session_manager.testing.isInitialized());
     try std.testing.expectEqual(@as(usize, 13), session_manager.testing.countServices());
@@ -30,6 +32,8 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
     try std.testing.expectEqual(@as(usize, 19), session_manager.testing.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 1), session_manager.testing.countTasksInState(.suspended));
     try std.testing.expectEqual(@as(usize, 1), session_manager.testing.countTasksInState(.terminated));
+    try std.testing.expectEqual(@as(usize, 3), compositor.window_count);
+    try std.testing.expectEqual(@as(usize, 9), compositor.item_count);
 
     const runtime_service_record = supervisor.findByClass(.task_runtime).?;
     const compatibility_service = supervisor.findByClass(.compatibility_portal).?;
@@ -99,6 +103,19 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
     try std.testing.expectEqualStrings("zigos.system.storage-object", storage_service_task.launchBundleIdSlice());
     try std.testing.expectEqual(storage_driver_task.id, driver_directory.findByClass(.storage_controller).?.owner_task_id);
     try std.testing.expect(storage_driver_task.id != storage_service_task.id);
+    const notes_review = compositor.findWindowForTaskBundleConst(notes_task.id, "app.notes").?;
+    const sync_review = compositor.findWindowForTaskBundleConst(sync_task.id, "app.sync").?;
+    const capture_review = compositor.findWindowForTaskBundleConst(capture_task.id, "app.capture").?;
+    try std.testing.expectEqual(compositor_session.ViewType.app_panel, notes_review.view_type);
+    try std.testing.expectEqual(@as(?u64, 3), notes_review.ui_surface_id);
+    try std.testing.expectEqualStrings("Notes permission review", notes_review.titleSlice());
+    try std.testing.expectEqual(@as(usize, 3), notes_review.item_count);
+    try std.testing.expectEqual(@as(usize, 1), sync_review.item_count);
+    try std.testing.expectEqual(@as(usize, 5), capture_review.item_count);
+    try std.testing.expectEqual(compositor_session.DecisionState.allow, compositor.findReviewItemConst(notes_review.id, .object_access, "workspace:notes").?.decision);
+    try std.testing.expectEqual(compositor_session.DecisionState.deny, compositor.findReviewItemConst(notes_review.id, .clipboard, "clipboard").?.decision);
+    try std.testing.expectEqual(compositor_session.DecisionState.allow, compositor.findReviewItemConst(sync_review.id, .background_execution, "sync").?.decision);
+    try std.testing.expectEqual(compositor_session.DecisionState.deny, compositor.findReviewItemConst(capture_review.id, .mic, "mic.array").?.decision);
 
     const session_user = principal.PrincipalId{ .kind = .user, .serial = 1 };
     const storage_service_principal = principal.PrincipalId{ .kind = .service, .serial = 4 };

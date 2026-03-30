@@ -11,6 +11,9 @@ const Artifact = struct {
     label: []const u8,
     entry: []const u8,
     component_class: u8,
+    role_tag: u32,
+    heartbeat_increment: u32,
+    contract_flags: u32,
     signed: bool,
 };
 
@@ -65,6 +68,9 @@ fn parseArtifact(
         .label = try arena.dupe(u8, descriptor.labelSlice()),
         .entry = try arena.dupe(u8, descriptor.entrySlice()),
         .component_class = descriptor.component_class,
+        .role_tag = descriptor.role_tag,
+        .heartbeat_increment = descriptor.heartbeat_increment,
+        .contract_flags = descriptor.contract_flags,
         .signed = descriptor.signed != 0,
     };
 }
@@ -173,6 +179,9 @@ fn writeArchive(
         \\    label: []const u8,
         \\    entry: []const u8,
         \\    component_class: u8,
+        \\    role_tag: u32,
+        \\    heartbeat_increment: u32,
+        \\    contract_flags: u32,
         \\    signed: bool,
         \\    data: []const u8,
         \\};
@@ -198,6 +207,9 @@ fn writeArchive(
         try writer.print("        .label = \"{f}\",\n", .{std.zig.fmtString(artifact.label)});
         try writer.print("        .entry = \"{f}\",\n", .{std.zig.fmtString(artifact.entry)});
         try writer.print("        .component_class = {d},\n", .{artifact.component_class});
+        try writer.print("        .role_tag = 0x{x},\n", .{artifact.role_tag});
+        try writer.print("        .heartbeat_increment = {d},\n", .{artifact.heartbeat_increment});
+        try writer.print("        .contract_flags = 0x{x},\n", .{artifact.contract_flags});
         try writer.print("        .signed = {},\n", .{artifact.signed});
         try writer.print("        .data = @embedFile(\"{f}\"),\n", .{std.zig.fmtString(artifact.embedded_name)});
         try writer.writeAll("    },\n");

@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const MAGIC: u32 = 0x5A474F53;
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const ELF_SECTION_NAME = ".zigos_userspace_descriptor";
 pub const MAX_BUNDLE_ID_BYTES: usize = 64;
 pub const MAX_DISPLAY_NAME_BYTES: usize = 48;
@@ -14,6 +14,9 @@ pub const Descriptor = extern struct {
     version: u16,
     component_class: u8,
     signed: u8,
+    role_tag: u32,
+    heartbeat_increment: u32,
+    contract_flags: u32,
     bundle_id_len: u16,
     display_name_len: u16,
     label_len: u16,
@@ -50,6 +53,9 @@ pub const Descriptor = extern struct {
 pub const InitSpec = struct {
     component_class: u8,
     signed: bool,
+    role_tag: u32,
+    heartbeat_increment: u32,
+    contract_flags: u32,
     bundle_id: []const u8,
     display_name: []const u8,
     label: []const u8,
@@ -73,6 +79,9 @@ pub fn init(spec: InitSpec) Descriptor {
     descriptor.version = VERSION;
     descriptor.component_class = spec.component_class;
     descriptor.signed = @intFromBool(spec.signed);
+    descriptor.role_tag = spec.role_tag;
+    descriptor.heartbeat_increment = spec.heartbeat_increment;
+    descriptor.contract_flags = spec.contract_flags;
     descriptor.bundle_id_len = copyTruncated(descriptor.bundle_id[0..], spec.bundle_id);
     descriptor.display_name_len = copyTruncated(descriptor.display_name[0..], spec.display_name);
     descriptor.label_len = copyTruncated(descriptor.label[0..], spec.label);
@@ -101,6 +110,9 @@ test "descriptor init and validate preserve the embedded metadata" {
     const descriptor = init(.{
         .component_class = 2,
         .signed = true,
+        .role_tag = 0xA101,
+        .heartbeat_increment = 1,
+        .contract_flags = 0x3,
         .bundle_id = "zigos.system.session-manager",
         .display_name = "Session Manager",
         .label = "session-manager",
@@ -110,6 +122,9 @@ test "descriptor init and validate preserve the embedded metadata" {
 
     try validate(&descriptor);
     try std.testing.expectEqual(@as(u8, 2), descriptor.component_class);
+    try std.testing.expectEqual(@as(u32, 0xA101), descriptor.role_tag);
+    try std.testing.expectEqual(@as(u32, 1), descriptor.heartbeat_increment);
+    try std.testing.expectEqual(@as(u32, 0x3), descriptor.contract_flags);
     try std.testing.expectEqualStrings("zigos.system.session-manager", descriptor.bundleIdSlice());
     try std.testing.expectEqualStrings("Session Manager", descriptor.displayNameSlice());
     try std.testing.expectEqualStrings("session-manager", descriptor.labelSlice());
