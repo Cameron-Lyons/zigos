@@ -17,6 +17,7 @@ pub const DispatchResult = struct {
 
 pub fn dispatch(
     port: *component_port.KernelPort,
+    caller_task_id: u64,
     now_ticks: u64,
     request_addr: usize,
     response_addr: usize,
@@ -27,6 +28,10 @@ pub fn dispatch(
     };
     if (header.version != abi.ABI_VERSION) return .{
         .status = .unsupported_abi_version,
+    };
+    if (caller_task_id != 0 and header.subject_task_id != caller_task_id) return .{
+        .status = .denied,
+        .denial_reason = .scope_violation,
     };
 
     const operation = nativeOperationFromOpcode(header.operation) orelse return .{
@@ -55,6 +60,10 @@ pub fn dispatch(
         .accounting_query => dispatchAccountingQuery(port, now_ticks, request_addr, response_addr, response_len),
         .service_register => dispatchServiceRegister(port, now_ticks, request_addr),
         .service_connect => dispatchServiceConnect(port, now_ticks, request_addr, response_addr, response_len),
+        .device_describe => dispatchDeviceDescribe(port, now_ticks, request_addr, response_addr, response_len),
+        .device_mmio_window => dispatchDeviceMmioWindow(port, now_ticks, request_addr, response_addr, response_len),
+        .device_port_read => dispatchDevicePortRead(port, now_ticks, request_addr, response_addr, response_len),
+        .device_port_write => dispatchDevicePortWrite(port, now_ticks, request_addr),
     };
 }
 
@@ -318,6 +327,54 @@ fn dispatchServiceConnect(
     return writeResponse(response_addr, response_len, descriptor);
 }
 
+fn dispatchDeviceDescribe(
+    port: *component_port.KernelPort,
+    now_ticks: u64,
+    request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
+) DispatchResult {
+    const request = requestPtr(component_port.DeviceDescribeRequest, request_addr) orelse return invalidRequest();
+    const descriptor = port.deviceDescribe(request.*, now_ticks) catch |err| return mapError(err);
+    return writeResponse(response_addr, response_len, descriptor);
+}
+
+fn dispatchDeviceMmioWindow(
+    port: *component_port.KernelPort,
+    now_ticks: u64,
+    request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
+) DispatchResult {
+    const request = requestPtr(component_port.DeviceMmioWindowRequest, request_addr) orelse return invalidRequest();
+    const descriptor = port.deviceMmioWindow(request.*, now_ticks) catch |err| return mapError(err);
+    return writeResponse(response_addr, response_len, descriptor);
+}
+
+fn dispatchDevicePortRead(
+    port: *component_port.KernelPort,
+    now_ticks: u64,
+    request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
+) DispatchResult {
+    const request = requestPtr(component_port.DevicePortReadRequest, request_addr) orelse return invalidRequest();
+    const value = port.devicePortRead(request.*, now_ticks) catch |err| return mapError(err);
+    return writeResponse(response_addr, response_len, abi.DevicePortReadResponse{
+        .value = value,
+    });
+}
+
+fn dispatchDevicePortWrite(
+    port: *component_port.KernelPort,
+    now_ticks: u64,
+    request_addr: usize,
+) DispatchResult {
+    const request = requestPtr(component_port.DevicePortWriteRequest, request_addr) orelse return invalidRequest();
+    port.devicePortWrite(request.*, now_ticks) catch |err| return mapError(err);
+    return success();
+}
+
 fn requestPtr(comptime T: type, request_addr: usize) ?*const T {
     if (request_addr == 0) return null;
     if (request_addr % @alignOf(T) != 0) return null;
@@ -385,7 +442,7 @@ fn mapError(err: anyerror) DispatchResult {
         .status = .denied,
         .denial_reason = .capability_revoked,
     };
-    if (err == error.ScopeViolation or err == error.ScopeEscalation) return .{
+    if (err == error.ScopeViolation or err == error.ScopeEscalation or err == error.SubjectTaskMismatch) return .{
         .status = .denied,
         .denial_reason = .scope_violation,
     };
@@ -403,6 +460,14 @@ fn mapError(err: anyerror) DispatchResult {
     };
     if (err == error.TaskNotFound or err == error.EndpointNotFound) return .{
         .status = .not_found,
+        .denial_reason = .invalid_target,
+    };
+    if (err == error.DeviceNotFound or err == error.UnsupportedMmioWindow) return .{
+        .status = .not_found,
+        .denial_reason = .invalid_target,
+    };
+    if (err == error.InvalidPort or err == error.UnsupportedWidth) return .{
+        .status = .denied,
         .denial_reason = .invalid_target,
     };
     if (err == error.TableFull or
@@ -484,6 +549,7 @@ const TestKernel = struct {
         });
         self.session_task_id = session_task.id;
         self.authority_capability_id = authority.id;
+        try self.runtime.grantCapability(self.session_task_id, self.authority_capability_id);
     }
 };
 
@@ -519,6 +585,7 @@ test "syscall surface dispatches typed task creation requests" {
 
     const result = dispatch(
         &test_kernel.port,
+        test_kernel.session_task_id,
         5,
         @intFromPtr(&request),
         @intFromPtr(&response),
@@ -579,6 +646,7 @@ test "syscall surface returns an explicit empty receive response when no message
 
     const result = dispatch(
         &test_kernel.port,
+        app_task.task_id,
         8,
         @intFromPtr(&request),
         @intFromPtr(&response),
@@ -614,6 +682,7 @@ test "syscall surface denies task creation without userspace launch provenance" 
 
     const result = dispatch(
         &test_kernel.port,
+        test_kernel.session_task_id,
         9,
         @intFromPtr(&request),
         @intFromPtr(&response),
@@ -634,9 +703,139 @@ test "syscall surface rejects unsupported native operations" {
         .correlation_id = 91,
         .subject_task_id = test_kernel.session_task_id,
     };
-    const result = dispatch(&test_kernel.port, 9, @intFromPtr(&request), 0, 0);
+    const result = dispatch(&test_kernel.port, test_kernel.session_task_id, 9, @intFromPtr(&request), 0, 0);
 
     try std.testing.expectEqual(abi.SyscallStatus.unsupported_operation, result.status);
     try std.testing.expectEqual(abi.DenialReason.unsupported_operation, result.denial_reason);
     try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
+}
+
+test "syscall surface rejects spoofed subject task ids" {
+    var test_kernel = TestKernel{};
+    try test_kernel.init();
+
+    var response = std.mem.zeroes(abi.TaskDescriptor);
+    const request = component_port.TaskCreateRequest{
+        .header = component_port.makeHeader(.task_create, 92, test_kernel.session_task_id + 1),
+        .authority_capability_id = test_kernel.authority_capability_id,
+        .request = .{
+            .owner = .{ .kind = .app, .serial = 99 },
+            .component_class = .app_component,
+            .budget = .{
+                .cpu_time_ticks = 1_000,
+                .memory_bytes = 1024,
+                .endpoint_slots = 4,
+                .shared_memory_bytes = 1024,
+            },
+            .local_only = true,
+            .launch = .{
+                .boundary = .userspace_process,
+                .image_id = 23,
+                .component_abi_version = 1,
+                .signed = true,
+                .bundle_id = "app.example.spoofed-subject",
+            },
+            .userspace_image = task_runtime.syntheticUserspaceImage(
+                "spoofed-subject",
+                "app.example.spoofed-subject",
+            ),
+        },
+    };
+
+    const result = dispatch(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        10,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.TaskDescriptor),
+    );
+
+    try std.testing.expectEqual(abi.SyscallStatus.denied, result.status);
+    try std.testing.expectEqual(abi.DenialReason.scope_violation, result.denial_reason);
+    try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
+}
+
+test "syscall surface dispatches typed device broker requests" {
+    const device_broker = @import("device_broker.zig");
+
+    var test_kernel = TestKernel{};
+    try test_kernel.init();
+    device_broker.reset();
+    defer device_broker.reset();
+
+    const device_capability = try test_kernel.capabilities.mint(.{
+        .holder = .{ .kind = .service, .serial = 2 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .device, .id = 0x1F001 },
+        .rights = .{ .device_use = true },
+        .scope = .{
+            .task_id = test_kernel.session_task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 12,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = true,
+        },
+    });
+    try test_kernel.runtime.grantCapability(test_kernel.session_task_id, device_capability.id);
+    try std.testing.expect(device_broker.publishAtaController(0x1F001, .{
+        .base_port = 0x1F0,
+        .ctrl_port = 0x3F6,
+        .is_master = true,
+        .irq_line = 14,
+        .sector_count = 2048,
+    }));
+
+    const describe_request = component_port.DeviceDescribeRequest{
+        .header = component_port.makeHeader(.device_describe, 101, test_kernel.session_task_id),
+        .device_capability_id = device_capability.id,
+    };
+    var describe_response = std.mem.zeroes(abi.DeviceDescriptor);
+    const describe_result = dispatch(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        12,
+        @intFromPtr(&describe_request),
+        @intFromPtr(&describe_response),
+        @sizeOf(abi.DeviceDescriptor),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.success, describe_result.status);
+    try std.testing.expectEqual(@as(u64, 0x1F001), describe_response.device_id);
+
+    const write_request = component_port.DevicePortWriteRequest{
+        .header = component_port.makeHeader(.device_port_write, 102, test_kernel.session_task_id),
+        .device_capability_id = device_capability.id,
+        .port = 0x1F0 + 7,
+        .width = .u8,
+        .value = 0x5C,
+    };
+    try std.testing.expectEqual(abi.SyscallStatus.success, dispatch(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        12,
+        @intFromPtr(&write_request),
+        0,
+        0,
+    ).status);
+
+    const read_request = component_port.DevicePortReadRequest{
+        .header = component_port.makeHeader(.device_port_read, 103, test_kernel.session_task_id),
+        .device_capability_id = device_capability.id,
+        .port = 0x1F0 + 7,
+        .width = .u8,
+    };
+    var read_response = abi.DevicePortReadResponse{ .value = 0 };
+    const read_result = dispatch(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        12,
+        @intFromPtr(&read_request),
+        @intFromPtr(&read_response),
+        @sizeOf(abi.DevicePortReadResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.success, read_result.status);
+    try std.testing.expectEqual(@as(u32, 0x5C), read_response.value);
 }

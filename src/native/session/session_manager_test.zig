@@ -26,8 +26,8 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
     try std.testing.expect(session_manager.testing.isInitialized());
     try std.testing.expectEqual(@as(usize, 13), session_manager.testing.countServices());
     try std.testing.expectEqual(@as(usize, 10), service_directory.bindingCount());
-    try std.testing.expectEqual(@as(usize, 20), session_manager.testing.countTasks());
-    try std.testing.expectEqual(@as(usize, 18), session_manager.testing.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 21), session_manager.testing.countTasks());
+    try std.testing.expectEqual(@as(usize, 19), session_manager.testing.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 1), session_manager.testing.countTasksInState(.suspended));
     try std.testing.expectEqual(@as(usize, 1), session_manager.testing.countTasksInState(.terminated));
 
@@ -73,6 +73,7 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
     const sync_task = session_manager.testing.findTask("sync").?;
     const capture_task = session_manager.testing.findTask("capture").?;
     const compatibility_task = session_manager.testing.findTask("compatibility-portal").?;
+    const storage_driver_task = session_manager.testing.findTask("storage-driver").?;
     const storage_service_task = session_manager.testing.findTask("workspace-storage").?;
     const sync_service_task = session_manager.testing.findTask("sync-service").?;
     const session_task = session_manager.testing.findTask("session-manager").?;
@@ -83,16 +84,21 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
     try std.testing.expectEqual(@as(usize, 4), capture_task.capability_count);
     try std.testing.expectEqual(task_runtime.TaskState.active, compatibility_task.state);
     try std.testing.expect(runtime.processSeparated(notes_task.id, compatibility_task.id));
+    try std.testing.expectEqual(task_runtime.TaskState.active, storage_driver_task.state);
     try std.testing.expectEqual(@as(u32, 2), storage_service_task.process_generation);
     try std.testing.expectEqual(@as(u32, 2), sync_service_task.process_generation);
     try std.testing.expect(session_task.runsAsUserspaceProcess());
     try std.testing.expect(review_task.runsAsUserspaceProcess());
     try std.testing.expect(notes_task.runsAsUserspaceProcess());
+    try std.testing.expect(storage_driver_task.runsAsUserspaceProcess());
     try std.testing.expect(storage_service_task.runsAsUserspaceProcess());
     try std.testing.expect(compatibility_task.runsAsUserspaceProcess());
     try std.testing.expectEqualStrings("zigos.system.session-manager", session_task.launchBundleIdSlice());
     try std.testing.expectEqualStrings("app.notes", notes_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.storage-driver", storage_driver_task.launchBundleIdSlice());
     try std.testing.expectEqualStrings("zigos.system.storage-object", storage_service_task.launchBundleIdSlice());
+    try std.testing.expectEqual(storage_driver_task.id, driver_directory.findByClass(.storage_controller).?.owner_task_id);
+    try std.testing.expect(storage_driver_task.id != storage_service_task.id);
 
     const session_user = principal.PrincipalId{ .kind = .user, .serial = 1 };
     const storage_service_principal = principal.PrincipalId{ .kind = .service, .serial = 4 };

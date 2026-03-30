@@ -341,6 +341,20 @@ pub fn firstDetectedDevice() ?*const ATADevice {
     return getPrimaryMaster() orelse getPrimarySlave() orelse getSecondaryMaster() orelse getSecondarySlave();
 }
 
+pub fn findDetectedDeviceByStableId(device_id: u64) ?*const ATADevice {
+    const devices = [_]?*const ATADevice{
+        getPrimaryMaster(),
+        getPrimarySlave(),
+        getSecondaryMaster(),
+        getSecondarySlave(),
+    };
+    for (devices) |maybe_device| {
+        const device = maybe_device orelse continue;
+        if (stableDeviceId(device) == device_id) return device;
+    }
+    return null;
+}
+
 pub fn stableDeviceId(device: *const ATADevice) u64 {
     return (@as(u64, device.base_port) << 8) | @as(u64, @intFromBool(device.is_master));
 }

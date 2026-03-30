@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
-const std = @import("std");
 const native_util = @import("../core/util.zig");
+const device_broker = @import("../kernel_api/device_broker.zig");
+const storage_driver_task = @import("storage_driver_task.zig");
 const link_port = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/net/link_port.zig")
 else
@@ -30,12 +31,17 @@ else
         }
     };
 const storage_volume = @import("../storage/storage_volume.zig");
-const storage_volume_backend = @import("../storage/storage_volume_backend.zig");
 const copyText = native_util.copyText;
 
 pub const NetworkDevice = link_port.NetworkDevice;
 pub const NetworkActivator = *const fn (device_id: u64) ?*const link_port.NetworkDevice;
 pub const StorageActivator = *const fn (device_id: u64) ?storage_volume.Backend;
+
+pub const StoragePublicationKind = enum(u8) {
+    backend,
+    activator,
+    ata_bootstrap_bridge,
+};
 
 pub const NetworkPublication = struct {
     device_id: u64,
@@ -57,6 +63,7 @@ pub const StoragePublication = struct {
     publisher: [32]u8 = [_]u8{0} ** 32,
     backend: ?storage_volume.Backend = null,
     activator: ?StorageActivator = null,
+    kind: StoragePublicationKind = .backend,
     kernel_bootstrap: bool = true,
     active_service_id: u64 = 0,
 
@@ -71,6 +78,8 @@ var published_storage: ?StoragePublication = null;
 pub fn reset() void {
     published_network = null;
     published_storage = null;
+    device_broker.reset();
+    storage_driver_task.reset();
     link_port.init();
     link_port.clearNetworkDevice();
     storage_volume.clearAttachedBackend();
@@ -111,6 +120,7 @@ pub fn publishStorageBackend(
     if (!canPublishPublication(StoragePublication, published_storage, device_id)) return false;
     var publication = initPublication(StoragePublication, device_id, publisher, kernel_bootstrap);
     publication.backend = backend;
+    publication.kind = .backend;
     published_storage = publication;
     return true;
 }
@@ -124,6 +134,19 @@ pub fn publishStorageActivator(
     if (!canPublishPublication(StoragePublication, published_storage, device_id)) return false;
     var publication = initPublication(StoragePublication, device_id, publisher, kernel_bootstrap);
     publication.activator = activator;
+    publication.kind = .activator;
+    published_storage = publication;
+    return true;
+}
+
+pub fn publishStorageAtaBootstrap(
+    device_id: u64,
+    publisher: []const u8,
+    kernel_bootstrap: bool,
+) bool {
+    if (!canPublishPublication(StoragePublication, published_storage, device_id)) return false;
+    var publication = initPublication(StoragePublication, device_id, publisher, kernel_bootstrap);
+    publication.kind = .ata_bootstrap_bridge;
     published_storage = publication;
     return true;
 }
@@ -154,19 +177,30 @@ pub fn activateNetworkDevice(device_id: u64, service_id: u64) bool {
     return false;
 }
 
-pub fn activateStorageBackend(device_id: u64, service_id: u64) bool {
+pub fn activateStorageBackend(
+    device_id: u64,
+    service_id: u64,
+    authority_capability_id: u64,
+    owner_task_id: u64,
+    now_ticks: u64,
+) bool {
     if (publicationForActivation(StoragePublication, &published_storage, device_id, service_id)) |publication| {
-        if (publication.backend == null and
-            builtin.target.os.tag == .freestanding and
-            std.mem.eql(u8, publication.publisherSlice(), "ata-bootstrap"))
-        {
-            if (!storage_volume_backend.attachDefaultAtaBackendForDevice(device_id)) return false;
-        } else {
-            if (publication.backend == null) {
-                const activator = publication.activator orelse return false;
-                publication.backend = activator(device_id) orelse return false;
-            }
-            storage_volume.attachBackend(publication.backend.?);
+        switch (publication.kind) {
+            .ata_bootstrap_bridge => {
+                if (!storage_driver_task.attachAtaBootstrapBackend(
+                    device_id,
+                    authority_capability_id,
+                    owner_task_id,
+                    now_ticks,
+                )) return false;
+            },
+            .backend, .activator => {
+                if (publication.backend == null) {
+                    const activator = publication.activator orelse return false;
+                    publication.backend = activator(device_id) orelse return false;
+                }
+                storage_volume.attachBackend(publication.backend.?);
+            },
         }
         publication.active_service_id = service_id;
         return true;

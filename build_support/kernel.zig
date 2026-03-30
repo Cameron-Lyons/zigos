@@ -26,6 +26,7 @@ pub fn addKernelArtifact(
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt32.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupts.s"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush.S"));
+    kernel_module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
     kernel_module.addAssemblyFile(b.path("src/native/task/userspace_entry.S"));
 
     const kernel = b.addExecutable(.{

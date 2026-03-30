@@ -376,6 +376,15 @@ pub const Runtime = struct {
         task.capability_count += 1;
     }
 
+    pub fn hasCapability(self: *const Runtime, task_id: u64, capability_id: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        var index: usize = 0;
+        while (index < task.capability_count) : (index += 1) {
+            if (task.capability_ids[index] == capability_id) return true;
+        }
+        return false;
+    }
+
     pub fn attachComponent(
         self: *Runtime,
         task_id: u64,
