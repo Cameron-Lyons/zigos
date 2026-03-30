@@ -1,3 +1,4 @@
+const abi = @import("../core/abi.zig");
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
@@ -81,6 +82,9 @@ pub fn launchBundleService(
         },
         schedule_task,
     );
+    if (!kernel_port.kernel.runtime.hasCapability(service_task.task_id, authority_capability_id)) {
+        kernel_port.kernel.runtime.grantCapability(service_task.task_id, authority_capability_id) catch unreachable;
+    }
 
     const endpoint = kernel_port.endpointCreate(.{
         .header = component_port.makeHeader(.endpoint_create, correlation_base + 1, service_task.task_id),
@@ -119,8 +123,13 @@ pub fn attachDriver(
     task_id: u64,
     owner: principal.PrincipalId,
     device_class: driver_service.DeviceClass,
+    bootstrap_transport: driver_service.BootstrapTransport,
+    driver_bundle_id: []const u8,
     now_ticks: u64,
 ) *driver_service.DriverRecord {
+    if (!kernel_port.kernel.runtime.hasCapability(task_id, policy_capability_id)) {
+        kernel_port.kernel.runtime.grantCapability(task_id, policy_capability_id) catch unreachable;
+    }
     const driver_capability = kernel_port.capabilityMint(.{
         .header = component_port.makeHeader(.capability_mint, 360 + now_ticks, task_id),
         .policy_capability_id = policy_capability_id,
@@ -152,10 +161,42 @@ pub fn attachDriver(
         .device_id = deviceId(device_class),
         .device_class = device_class,
         .authority = capability_table.query(driver_capability.capability_id).?,
-        .bundle = driverBundle(device_class),
+        .bundle = driverBundle(device_class, driver_bundle_id),
+        .bootstrap_transport = bootstrap_transport,
     }) catch unreachable;
     _ = supervisor.noteDriverAttached(service_id, device_class, driver_capability.capability_id, now_ticks);
     return driver;
+}
+
+pub fn launchDriverTask(
+    catalog: *userspace_loader.Catalog,
+    kernel_port: *component_port.KernelPort,
+    authority_capability_id: u64,
+    controller_task_id: u64,
+    schedule_task: anytype,
+    owner: principal.PrincipalId,
+    bundle_id: []const u8,
+    device_class: driver_service.DeviceClass,
+    correlation_base: u64,
+    now_ticks: u64,
+) abi.TaskDescriptor {
+    return userspace_launch.launchRegisteredKernel(
+        catalog,
+        .{
+            .port = kernel_port,
+            .authority_capability_id = authority_capability_id,
+            .controller_task_id = controller_task_id,
+            .correlation_id = correlation_base,
+            .now_ticks = now_ticks,
+        },
+        bundle_id,
+        .{
+            .owner = owner,
+            .budget = driverBudget(device_class),
+            .local_only = true,
+        },
+        schedule_task,
+    );
 }
 
 pub fn serviceBudget(class: contract.ServiceClass) task_runtime.ResourceBudget {
@@ -177,6 +218,32 @@ pub fn serviceBudget(class: contract.ServiceClass) task_runtime.ResourceBudget {
     };
 }
 
+pub fn driverBudget(device_class: driver_service.DeviceClass) task_runtime.ResourceBudget {
+    return switch (device_class) {
+        .network_adapter, .storage_controller => .{
+            .cpu_time_ticks = 6_000,
+            .memory_bytes = 384 * 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 32 * 1024,
+            .background_allowed = false,
+        },
+        .graphics_adapter => .{
+            .cpu_time_ticks = 10_000,
+            .memory_bytes = 768 * 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 64 * 1024,
+            .background_allowed = false,
+        },
+        .audio_print_io => .{
+            .cpu_time_ticks = 4_000,
+            .memory_bytes = 256 * 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 16 * 1024,
+            .background_allowed = false,
+        },
+    };
+}
+
 pub fn contractsReady(service_directory: *const service_registry.Registry) bool {
     for (service_contract.ordered_phase3_contracts) |entry| {
         _ = service_directory.connect(entry.interface) catch return false;
@@ -188,7 +255,11 @@ fn deviceId(device_class: driver_service.DeviceClass) u64 {
     return device_inventory.deviceIdForClass(device_class);
 }
 
-fn driverBundle(device_class: driver_service.DeviceClass) manifest.BundleManifest {
+fn driverBundle(device_class: driver_service.DeviceClass, bundle_id: []const u8) manifest.BundleManifest {
+    if (bundle_id.len != 0) {
+        return userspace_boot_registry.manifestFor(bundle_id) catch unreachable;
+    }
+
     return switch (device_class) {
         .network_adapter => .{
             .bundle_id = "svc.driver.network",

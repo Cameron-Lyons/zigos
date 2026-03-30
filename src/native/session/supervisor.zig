@@ -221,7 +221,11 @@ pub const Supervisor = struct {
         if (@hasDecl(@TypeOf(runtime.*), "deactivate")) {
             _ = runtime.deactivate(driver.service_id);
         }
-        _ = try runtime.activate(driver);
+        if (@hasDecl(@TypeOf(runtime.*), "activateAt")) {
+            _ = try runtime.activateAt(driver, tick + 2);
+        } else {
+            _ = try runtime.activate(driver);
+        }
         _ = self.completeRestart(service_id, tick + 2);
 
         if (ledger) |recording| {

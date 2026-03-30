@@ -314,6 +314,7 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
             .renewable = true,
         },
     });
+    try runtime.grantCapability(session_task.id, authority.id);
 
     try std.testing.expectError(native_kernel.Error.UserspaceLaunchRequired, port.taskCreate(.{
         .header = component_port.makeHeader(.task_create, 1, session_task.id),
@@ -336,6 +337,9 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
             .bundle_id = "zigos.system.spec-storage",
             .display_name = "Spec Storage",
             .publisher = "zigos.spec",
+            .components = &[_]manifest.ExecutionComponentDecl{
+                .{ .id = "spec-storage", .entry = "zigos.object.spec-storage" },
+            },
             .signature = .{
                 .format = "ed25519",
                 .signer = "zigos-spec-key",
@@ -360,6 +364,7 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         .local_only = true,
     });
     try std.testing.expect(abi.taskFlagsHas(launched.flags, abi.TASK_FLAG_USERSPACE_PROCESS));
+    try runtime.grantCapability(launched.task_id, authority.id);
 
     const service_endpoint = try port.endpointCreate(.{
         .header = component_port.makeHeader(.endpoint_create, 3, launched.task_id),

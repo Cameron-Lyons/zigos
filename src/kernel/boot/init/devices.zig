@@ -8,9 +8,9 @@ const pci = @import("../../drivers/pci.zig");
 const rtl8139 = @import("../../drivers/rtl8139.zig");
 const virtio = @import("../../drivers/virtio.zig");
 const bootstrap_driver_port = @import("../../../native/drivers/bootstrap_driver_port.zig");
+const device_broker = @import("../../../native/kernel_api/device_broker.zig");
 const device_inventory = @import("../../../native/drivers/device_inventory.zig");
-const storage_volume = @import("../../../native/storage/storage_volume.zig");
-const storage_volume_backend = @import("../../../native/storage/storage_volume_backend.zig");
+const storage_driver_protocol = @import("../../../native/drivers/storage_driver_protocol.zig");
 const panic_handler = @import("../../utils/panic.zig");
 const common = @import("../common.zig");
 
@@ -70,11 +70,13 @@ fn publishStorageBootstrapBackend() void {
     const storage_record = device_inventory.recordForClass(.storage_controller);
     if (!storage_record.detected) return;
     if (storage_record.source != .ata_bootstrap) return;
-    _ = bootstrap_driver_port.publishStorageActivator(storage_record.device_id, "ata-bootstrap", activateAtaBootstrapBackend, true);
-}
-
-fn activateAtaBootstrapBackend(device_id: u64) ?storage_volume.Backend {
-    return storage_volume_backend.defaultAtaBackendForDevice(device_id);
+    const drive = ata.findDetectedDeviceByStableId(storage_record.device_id) orelse return;
+    _ = device_broker.publishAtaController(storage_record.device_id, ataBrokerGrant(drive));
+    _ = bootstrap_driver_port.publishStorageAtaBootstrap(
+        storage_record.device_id,
+        "ata-bootstrap",
+        true,
+    );
 }
 
 fn publishDeferredNetworkBootstrap() void {
@@ -88,4 +90,14 @@ fn publishDeferredNetworkBootstrap() void {
 
 fn pciDeviceId(device_info: pci.PCIDevice) u64 {
     return pci.stableDeviceId(device_info);
+}
+
+fn ataBrokerGrant(drive: *const ata.ATADevice) storage_driver_protocol.AtaBrokerGrant {
+    return .{
+        .base_port = drive.base_port,
+        .ctrl_port = drive.ctrl_port,
+        .is_master = drive.is_master,
+        .irq_line = if (drive.base_port == 0x170) 15 else 14,
+        .sector_count = drive.sectors,
+    };
 }

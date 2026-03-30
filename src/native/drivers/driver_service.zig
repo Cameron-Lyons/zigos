@@ -11,6 +11,11 @@ pub const DeviceClass = enum(u8) {
     audio_print_io,
 };
 
+pub const BootstrapTransport = enum(u8) {
+    none,
+    kernel_published_data_plane,
+};
+
 pub const MAX_DMA_RANGES: usize = 4;
 
 pub const DmaProtection = enum(u8) {
@@ -36,6 +41,7 @@ pub const DriverRecord = struct {
     device_class: DeviceClass,
     authority_capability_id: u64,
     restart_generation: u32,
+    bootstrap_transport: BootstrapTransport,
     dma_domain_id: u64,
     dma_protection: DmaProtection,
     dma_range_count: usize,
@@ -63,6 +69,7 @@ pub const RegistrationRequest = struct {
     device_class: DeviceClass,
     authority: capability.Capability,
     bundle: manifest.BundleManifest,
+    bootstrap_transport: BootstrapTransport = .none,
     require_iommu: bool = true,
 };
 
@@ -73,6 +80,7 @@ pub const Error = error{
     InvalidBundleSignature,
     InvalidAuthorityTarget,
     AuthorityRightsEscalation,
+    InvalidBootstrapTransport,
     IommuRequired,
 };
 
@@ -98,6 +106,11 @@ pub const Directory = struct {
         if (!rightsAreSubset(request.authority.rights, allowedRightsFor(request.device_class))) {
             return error.AuthorityRightsEscalation;
         }
+        if (request.bootstrap_transport == .kernel_published_data_plane and
+            !supportsKernelPublishedTransport(request.device_class))
+        {
+            return error.InvalidBootstrapTransport;
+        }
 
         for (&self.slots) |*slot| {
             if (!slot.in_use) continue;
@@ -118,6 +131,7 @@ pub const Directory = struct {
                 .device_class = request.device_class,
                 .authority_capability_id = request.authority.id,
                 .restart_generation = 1,
+                .bootstrap_transport = request.bootstrap_transport,
                 .dma_domain_id = self.allocateDmaDomainId(),
                 .dma_protection = .iommu_enforced,
                 .dma_range_count = 0,
@@ -184,6 +198,13 @@ pub fn allowedRightsFor(device_class: DeviceClass) capability.CapabilityRights {
     };
 }
 
+pub fn supportsKernelPublishedTransport(device_class: DeviceClass) bool {
+    return switch (device_class) {
+        .network_adapter, .storage_controller => true,
+        .graphics_adapter, .audio_print_io => false,
+    };
+}
+
 fn rightsAreSubset(owned: capability.CapabilityRights, allowed: capability.CapabilityRights) bool {
     const owned_bits: u32 = @bitCast(owned);
     const allowed_bits: u32 = @bitCast(allowed);
@@ -236,6 +257,7 @@ fn zeroDriver() DriverRecord {
         .device_class = .network_adapter,
         .authority_capability_id = 0,
         .restart_generation = 0,
+        .bootstrap_transport = .none,
         .dma_domain_id = 0,
         .dma_protection = .iommu_enforced,
         .dma_range_count = 0,
@@ -291,6 +313,7 @@ test "driver services require signed least-privilege device authority" {
     try std.testing.expectEqual(DmaProtection.iommu_enforced, driver.dma_protection);
     try std.testing.expect(driver.dma_range_count >= 1);
     try std.testing.expect(driver.allowsDma(driver.dma_ranges[0].base, 4096));
+    try std.testing.expectEqual(BootstrapTransport.none, driver.bootstrap_transport);
     try std.testing.expect(directory.markRestarted(44));
     try std.testing.expectEqual(@as(u32, 2), driver.restart_generation);
     try std.testing.expect(driver.dma_domain_id != 1);
@@ -380,5 +403,46 @@ test "driver services reject unsigned bundles and escalated device rights" {
         },
         .bundle = signed_bundle,
         .require_iommu = false,
+    }));
+}
+
+test "kernel bootstrap transport is only granted to supported driver classes" {
+    var directory = Directory.init();
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "svc.driver.graphics-runtime",
+        .display_name = "Graphics Driver Runtime",
+        .publisher = "zigos.spec",
+        .signature = .{
+            .format = "ed25519",
+            .signer = "zigos-spec-driver",
+        },
+    };
+
+    try std.testing.expectError(error.InvalidBootstrapTransport, directory.register(.{
+        .service_id = 60,
+        .owner_task_id = 12,
+        .device_id = 0x1234_1111_0001,
+        .device_class = .graphics_adapter,
+        .authority = capability.Capability{
+            .id = 14,
+            .holder = .{ .kind = .service, .serial = 4 },
+            .issuer = .{ .kind = .policy_authority, .serial = 1 },
+            .target = authorityTarget(0x1234_1111_0001),
+            .rights = allowedRightsFor(.graphics_adapter),
+            .scope = .{
+                .task_id = 12,
+                .local_only = true,
+                .broker_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = 0,
+                .expires_at_ticks = std.math.maxInt(u64),
+                .renewable = true,
+            },
+            .revocation_generation = 1,
+            .audit = .{},
+        },
+        .bundle = bundle,
+        .bootstrap_transport = .kernel_published_data_plane,
     }));
 }

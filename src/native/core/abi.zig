@@ -24,6 +24,10 @@ pub const NativeOperation = enum(u16) {
     accounting_query,
     service_register,
     service_connect,
+    device_describe,
+    device_mmio_window,
+    device_port_read,
+    device_port_write,
 };
 
 pub const PolicyOperation = enum(u16) {
@@ -168,6 +172,38 @@ pub const ServiceConnectionDescriptor = extern struct {
     flags: u16,
 };
 
+pub const DEVICE_DESCRIPTOR_FLAG_ATA_MASTER: u16 = 1 << 0;
+pub const MMIO_WINDOW_FLAG_WRITABLE: u16 = 1 << 0;
+pub const MMIO_WINDOW_FLAG_EXECUTABLE: u16 = 1 << 1;
+
+pub const DevicePortWidth = enum(u8) {
+    u8 = 1,
+    u16 = 2,
+    u32 = 4,
+};
+
+pub const DeviceDescriptor = extern struct {
+    device_id: u64,
+    base_port: u16,
+    io_port_count: u16,
+    ctrl_port: u16,
+    irq_line: u8,
+    mmio_window_count: u8,
+    flags: u16,
+    sector_count: u64,
+};
+
+pub const DeviceMmioWindowDescriptor = extern struct {
+    base: u64,
+    length: u64,
+    flags: u16,
+    _reserved: [6]u8,
+};
+
+pub const DevicePortReadResponse = extern struct {
+    value: u32,
+};
+
 pub const BoolResponse = extern struct {
     value: u8,
     _reserved: [7]u8,
@@ -231,6 +267,9 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expectEqual(@as(usize, 56), @sizeOf(CapabilityDescriptor));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(TaskDescriptor));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ResourceDescriptor));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(DeviceDescriptor));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceMmioWindowDescriptor));
+    try std.testing.expectEqual(@as(usize, 4), @sizeOf(DevicePortReadResponse));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(BoolResponse));
     try std.testing.expectEqual(@as(usize, 104), @sizeOf(EndpointCreateResponse));
     try std.testing.expectEqual(@as(usize, 200), @sizeOf(EndpointRecvResponse));
@@ -238,4 +277,5 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(taskFlagsHas(TASK_FLAG_LOCAL_ONLY, TASK_FLAG_LOCAL_ONLY));
     try std.testing.expectEqual(@as(u8, 3), taskFlagsResourceClass(@as(u16, 3) << TASK_RESOURCE_CLASS_SHIFT));
     try std.testing.expect(serviceFlagsHas(SERVICE_CONNECTION_FLAG_USERSPACE_OWNER, SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
+    try std.testing.expectEqual(@as(u8, 4), @intFromEnum(DevicePortWidth.u32));
 }

@@ -1,3 +1,5 @@
+const manifest = @import("../policy/manifest.zig");
+
 pub const ComponentClass = enum(u8) {
     session_manager,
     app_component,
@@ -11,6 +13,7 @@ pub const ImageSpec = struct {
     publisher: []const u8,
     label: []const u8,
     entry: []const u8,
+    components: []const manifest.ExecutionComponentDecl,
     component_class: ComponentClass,
     signed: bool = true,
 };
@@ -23,6 +26,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "session-manager",
         .entry = "zigos.session.manager",
+        .components = &.{.{ .id = "session-manager", .entry = "zigos.session.manager" }},
         .component_class = .session_manager,
     },
     .{
@@ -32,6 +36,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "permission-review",
         .entry = "zigos.permission.review",
+        .components = &.{.{ .id = "permission-review", .entry = "zigos.permission.review" }},
         .component_class = .service_component,
     },
     .{
@@ -41,6 +46,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "workspace-storage",
         .entry = "zigos.bootstrap.workspace",
+        .components = &.{.{ .id = "workspace-storage", .entry = "zigos.bootstrap.workspace" }},
         .component_class = .service_component,
     },
     .{
@@ -50,6 +56,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "phase1-client",
         .entry = "app.phase1.client",
+        .components = &.{.{ .id = "phase1-client", .entry = "app.phase1.client" }},
         .component_class = .app_component,
     },
     .{
@@ -59,6 +66,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "temp-task",
         .entry = "app.temp",
+        .components = &.{.{ .id = "temp-task", .entry = "app.temp" }},
         .component_class = .app_component,
     },
     .{
@@ -68,8 +76,8 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.dev",
         .label = "viewer",
         .entry = "app.viewer",
+        .components = &.{.{ .id = "viewer", .entry = "app.viewer" }},
         .component_class = .app_component,
-        .signed = false,
     },
     .{
         .bundle_id = "app.notes",
@@ -78,6 +86,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.dev",
         .label = "notes",
         .entry = "app.notes",
+        .components = &.{.{ .id = "notes", .entry = "app.notes" }},
         .component_class = .app_component,
     },
     .{
@@ -87,8 +96,8 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.dev",
         .label = "sync",
         .entry = "app.sync",
+        .components = &.{.{ .id = "sync", .entry = "app.sync" }},
         .component_class = .app_component,
-        .signed = false,
     },
     .{
         .bundle_id = "app.capture",
@@ -97,6 +106,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.dev",
         .label = "capture",
         .entry = "app.capture",
+        .components = &.{.{ .id = "capture", .entry = "app.capture" }},
         .component_class = .app_component,
     },
     .{
@@ -106,6 +116,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "policy-mediation",
         .entry = "zigos.policy.mediation",
+        .components = &.{.{ .id = "policy-mediation", .entry = "zigos.policy.mediation" }},
         .component_class = .service_component,
     },
     .{
@@ -115,6 +126,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "network-service",
         .entry = "zigos.service.network.policy",
+        .components = &.{.{ .id = "network-service", .entry = "zigos.service.network.policy" }},
         .component_class = .service_component,
     },
     .{
@@ -124,6 +136,17 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "workspace-storage",
         .entry = "zigos.object.workspace",
+        .components = &.{.{ .id = "workspace-storage", .entry = "zigos.object.workspace" }},
+        .component_class = .service_component,
+    },
+    .{
+        .bundle_id = "zigos.system.storage-driver",
+        .artifact_name = "userspace-storage-driver.elf",
+        .display_name = "Storage Driver",
+        .publisher = "zigos.system",
+        .label = "storage-driver",
+        .entry = "zigos.driver.storage",
+        .components = &.{.{ .id = "storage-driver", .entry = "zigos.driver.storage" }},
         .component_class = .service_component,
     },
     .{
@@ -133,6 +156,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "package-service",
         .entry = "zigos.package.install",
+        .components = &.{.{ .id = "package-service", .entry = "zigos.package.install" }},
         .component_class = .service_component,
     },
     .{
@@ -142,6 +166,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "compositor-session",
         .entry = "zigos.ui.session",
+        .components = &.{.{ .id = "compositor-session", .entry = "zigos.ui.session" }},
         .component_class = .service_component,
     },
     .{
@@ -151,6 +176,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "indexing-service",
         .entry = "zigos.index.search",
+        .components = &.{.{ .id = "indexing-service", .entry = "zigos.index.search" }},
         .component_class = .service_component,
     },
     .{
@@ -160,6 +186,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "sync-service",
         .entry = "zigos.sync.replication",
+        .components = &.{.{ .id = "sync-service", .entry = "zigos.sync.replication" }},
         .component_class = .service_component,
     },
     .{
@@ -169,6 +196,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "media-print-service",
         .entry = "zigos.media.print",
+        .components = &.{.{ .id = "media-print-service", .entry = "zigos.media.print" }},
         .component_class = .service_component,
     },
     .{
@@ -178,6 +206,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "compatibility-portal",
         .entry = "zigos.compat.portal",
+        .components = &.{.{ .id = "compatibility-portal", .entry = "zigos.compat.portal" }},
         .component_class = .service_component,
     },
     .{
@@ -187,6 +216,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .publisher = "zigos.system",
         .label = "phase3-client",
         .entry = "app.phase3.client",
+        .components = &.{.{ .id = "phase3-client", .entry = "app.phase3.client" }},
         .component_class = .app_component,
     },
 };
