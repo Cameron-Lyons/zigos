@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const manifest = @import("manifest.zig");
+const compositor_session = @import("../platform/compositor_session.zig");
+const native_ux = @import("../platform/native_ux.zig");
 const permission_review = @import("permission_review.zig");
 const policy_mediation = @import("policy_mediation.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -51,14 +53,26 @@ else
 
 pub const MAX_REVIEW_DECISIONS: usize = permission_review.MAX_REVIEW_DECISIONS;
 pub const MAX_INPUT_LINE: usize = 96;
+pub const MAX_SCRIPTED_PLAN_ENTRIES: usize = 16;
 pub const Error = task_runtime.Error || manifest.ValidationError;
+
+pub const ScriptedPlanEntry = struct {
+    bundle_id: []const u8,
+    kind: manifest.PermissionKind,
+    resource: []const u8,
+    command: []const u8,
+};
 
 pub const Service = struct {
     service_id: u64,
     task_id: u64,
     runtime: *task_runtime.Runtime,
     scripted_inputs: []const []const u8,
+    scripted_plan: []const ScriptedPlanEntry = &.{},
+    scripted_plan_used: [MAX_SCRIPTED_PLAN_ENTRIES]bool = [_]bool{false} ** MAX_SCRIPTED_PLAN_ENTRIES,
     scripted_cursor: usize = 0,
+    compositor: ?*compositor_session.Session = null,
+    ux: ?*native_ux.Controller = null,
 
     pub fn init(
         service_id: u64,
@@ -74,6 +88,22 @@ pub const Service = struct {
         };
     }
 
+    pub fn initConfigured(
+        service_id: u64,
+        task_id: u64,
+        runtime: *task_runtime.Runtime,
+        scripted_inputs: []const []const u8,
+        scripted_plan: []const ScriptedPlanEntry,
+        compositor: ?*compositor_session.Session,
+        ux: ?*native_ux.Controller,
+    ) Service {
+        var service = init(service_id, task_id, runtime, scripted_inputs);
+        service.scripted_plan = scripted_plan[0..@min(scripted_plan.len, MAX_SCRIPTED_PLAN_ENTRIES)];
+        service.compositor = compositor;
+        service.ux = ux;
+        return service;
+    }
+
     pub fn reviewBundle(
         self: *Service,
         app_task_id: u64,
@@ -82,6 +112,8 @@ pub const Service = struct {
         output: *[MAX_REVIEW_DECISIONS]policy_mediation.UserGrant,
     ) Error![]const policy_mediation.UserGrant {
         try manifest.validate(bundle);
+        const app_task = self.runtime.find(app_task_id) orelse return error.TaskNotFound;
+        const review_window_id = self.ensureReviewWindow(app_task, bundle);
         var decisions: [MAX_REVIEW_DECISIONS]permission_review.ReviewDecision = undefined;
         var decision_count: usize = 0;
 
@@ -96,6 +128,7 @@ pub const Service = struct {
         for (bundle.requested_permissions, 0..) |request, index| {
             if (decision_count >= decisions.len) break;
 
+            self.presentReviewRequest(review_window_id, bundle, request);
             const session = permission_review.initSession(app_task_id, bundle, decisions[0..decision_count]);
             var prompt_buffer: [512]u8 = undefined;
             const prompt = permission_review.renderRequestToBuffer(&prompt_buffer, &session, bundle, index) catch unreachable;
@@ -104,13 +137,14 @@ pub const Service = struct {
 
             while (true) {
                 var input_buffer: [MAX_INPUT_LINE]u8 = undefined;
-                const line = self.readCommandLine(&input_buffer);
+                const line = self.readCommandLine(&input_buffer, bundle, request);
                 const command = permission_review.parseCommand(line) catch {
                     console.print("    invalid command; expected allow [local] [lease=<ticks>] or deny\n");
                     continue;
                 };
 
                 decisions[decision_count] = permission_review.decisionFromCommand(request, command);
+                self.recordDecision(app_task_id, review_window_id, bundle, request, decisions[decision_count]);
                 decision_count += 1;
                 break;
             }
@@ -136,7 +170,19 @@ pub const Service = struct {
         return grants;
     }
 
-    fn readCommandLine(self: *Service, buffer: *[MAX_INPUT_LINE]u8) []const u8 {
+    fn readCommandLine(
+        self: *Service,
+        buffer: *[MAX_INPUT_LINE]u8,
+        bundle: manifest.BundleManifest,
+        request: manifest.PermissionRequest,
+    ) []const u8 {
+        if (self.findPlannedCommand(bundle, request)) |line| {
+            console.print("    input> ");
+            console.print(line);
+            console.print("\n");
+            return line;
+        }
+
         if (self.scripted_cursor < self.scripted_inputs.len) {
             const line = self.scripted_inputs[self.scripted_cursor];
             self.scripted_cursor += 1;
@@ -173,6 +219,98 @@ pub const Service = struct {
 
             x86.hlt();
         }
+    }
+
+    fn findPlannedCommand(
+        self: *Service,
+        bundle: manifest.BundleManifest,
+        request: manifest.PermissionRequest,
+    ) ?[]const u8 {
+        for (self.scripted_plan, 0..) |entry, index| {
+            if (index >= self.scripted_plan_used.len or self.scripted_plan_used[index]) continue;
+            if (!std.mem.eql(u8, entry.bundle_id, bundle.bundle_id)) continue;
+            if (entry.kind != request.kind) continue;
+            if (!std.mem.eql(u8, entry.resource, request.resource)) continue;
+            self.scripted_plan_used[index] = true;
+            return entry.command;
+        }
+        return null;
+    }
+
+    fn recordDecision(
+        self: *Service,
+        app_task_id: u64,
+        review_window_id: ?u64,
+        bundle: manifest.BundleManifest,
+        request: manifest.PermissionRequest,
+        decision: permission_review.ReviewDecision,
+    ) void {
+        if (review_window_id) |window_id| {
+            self.updateReviewWindow(window_id, request, decision);
+        }
+        const ux = self.ux orelse return;
+        const task = self.runtime.find(app_task_id) orelse return;
+        const flow = ux.reviewPermissionDecision(
+            app_task_id,
+            task.owner,
+            bundle.bundle_id,
+            request,
+            decision.allow,
+            decision.local_only,
+            decision.lease_ticks,
+        ) catch return;
+        var buffer: [320]u8 = undefined;
+        const rendered = native_ux.renderReviewFlowToBuffer(&buffer, flow) catch return;
+        console.print(rendered);
+        console.print("\n");
+    }
+
+    fn ensureReviewWindow(self: *Service, app_task: *const task_runtime.TaskRecord, bundle: manifest.BundleManifest) ?u64 {
+        const compositor = self.compositor orelse return null;
+        const existed = compositor.findWindowForTaskBundleConst(app_task.id, bundle.bundle_id) != null;
+        const window = compositor.beginPermissionReview(self.task_id, app_task, bundle) catch return null;
+        if (!existed) {
+            var buffer: [320]u8 = undefined;
+            const rendered = compositor_session.renderWindowToBuffer(&buffer, window) catch return window.id;
+            console.print(rendered);
+            console.print("\n");
+        }
+        return window.id;
+    }
+
+    fn presentReviewRequest(
+        self: *Service,
+        review_window_id: ?u64,
+        bundle: manifest.BundleManifest,
+        request: manifest.PermissionRequest,
+    ) void {
+        const window_id = review_window_id orelse return;
+        const compositor = self.compositor orelse return;
+        const item = compositor.ensureReviewItem(window_id, bundle, request) catch return;
+        var buffer: [512]u8 = undefined;
+        const rendered = compositor_session.renderReviewItemToBuffer(&buffer, window_id, item) catch return;
+        console.print(rendered);
+        console.print("\n");
+    }
+
+    fn updateReviewWindow(
+        self: *Service,
+        window_id: u64,
+        request: manifest.PermissionRequest,
+        decision: permission_review.ReviewDecision,
+    ) void {
+        const compositor = self.compositor orelse return;
+        const item = compositor.recordDecision(
+            window_id,
+            request,
+            decision.allow,
+            decision.local_only,
+            decision.lease_ticks,
+        ) catch return;
+        var buffer: [320]u8 = undefined;
+        const rendered = compositor_session.renderDecisionToBuffer(&buffer, window_id, item) catch return;
+        console.print(rendered);
+        console.print("\n");
     }
 
     fn tryReadChar(self: *const Service) ?u8 {
@@ -281,4 +419,75 @@ test "review service rejects invalid manifests before auditing" {
 
     try std.testing.expectError(error.MissingBackgroundPermission, service.reviewBundle(task.id, bundle, 10, &grants_buffer));
     try std.testing.expectEqual(@as(usize, 0), task.audit_count);
+}
+
+test "review service uses manifest-aware scripted plans and records structured ux flows" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = 3 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 1024,
+        },
+        .local_only = true,
+    });
+    const fallback_inputs = [_][]const u8{"deny"};
+    const scripted_plan = [_]ScriptedPlanEntry{
+        .{
+            .bundle_id = "app.notes",
+            .kind = .network_egress,
+            .resource = "lan.sync",
+            .command = "allow local lease=50",
+        },
+        .{
+            .bundle_id = "app.notes",
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .command = "allow local lease=400",
+        },
+    };
+    var compositor = compositor_session.Session.init();
+    var ux = native_ux.Controller.init();
+    var service = Service.initConfigured(13, 14, &runtime, &fallback_inputs, &scripted_plan, &compositor, &ux);
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .rights = .{ .object_read = true, .object_write = true },
+            .local_only = true,
+            .max_lease_ticks = 400,
+        },
+        .{
+            .kind = .network_egress,
+            .resource = "lan.sync",
+            .rights = .{ .network_local = true },
+            .required = false,
+            .local_only = true,
+            .max_lease_ticks = 50,
+        },
+    };
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "app.notes",
+        .display_name = "Notes",
+        .publisher = "zigos.dev",
+        .requested_permissions = &permissions,
+    };
+    var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+
+    const grants = try service.reviewBundle(task.id, bundle, 20, &grants_buffer);
+    try std.testing.expectEqual(@as(usize, 2), grants.len);
+    try std.testing.expectEqual(@as(usize, 2), ux.flow_count);
+    try std.testing.expectEqual(@as(usize, 1), compositor.window_count);
+    try std.testing.expectEqual(@as(usize, 2), compositor.item_count);
+    try std.testing.expectEqualStrings("Notes permission review", compositor.windows[0].titleSlice());
+    try std.testing.expectEqualStrings("app.notes", ux.flows[0].bundleIdSlice());
+    try std.testing.expectEqualStrings("workspace:notes", ux.flows[0].permissionResourceSlice());
+    try std.testing.expect(ux.flows[0].approved);
+    try std.testing.expectEqual(manifest.PermissionKind.network_egress, ux.flows[1].permission_kind);
+    try std.testing.expectEqual(@as(u64, 50), ux.flows[1].decision_lease_ticks);
+    try std.testing.expectEqual(compositor_session.DecisionState.allow, compositor.findReviewItemConst(compositor.windows[0].id, .object_access, "workspace:notes").?.decision);
+    try std.testing.expectEqualStrings("lan.sync", compositor.findReviewItemConst(compositor.windows[0].id, .network_egress, "lan.sync").?.networkPathSlice());
 }

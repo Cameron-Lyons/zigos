@@ -18,6 +18,7 @@ const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const task_runtime_service = @import("../../native/task/task_runtime_service.zig");
 const userspace_loader = @import("../../native/task/userspace_loader.zig");
+const userspace_manifest_signing = @import("../../native/task/userspace_manifest_signing.zig");
 
 pub fn explicitGrantsRequireAuthority() !void {
     var capability_table = capability.CapabilityTable.init();
@@ -332,24 +333,25 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
     }, 1));
 
     var catalog = userspace_loader.Catalog.init();
-    _ = try catalog.register(.{
-        .bundle = .{
-            .bundle_id = "zigos.system.spec-storage",
-            .display_name = "Spec Storage",
-            .publisher = "zigos.spec",
-            .components = &[_]manifest.ExecutionComponentDecl{
-                .{ .id = "spec-storage", .entry = "zigos.object.spec-storage" },
-            },
-            .signature = .{
-                .format = "ed25519",
-                .signer = "zigos-spec-key",
-            },
+    var storage_bundle = manifest.BundleManifest{
+        .bundle_id = "zigos.system.spec-storage",
+        .display_name = "Spec Storage",
+        .publisher = "zigos.spec",
+        .components = &[_]manifest.ExecutionComponentDecl{
+            .{ .id = "spec-storage", .entry = "zigos.object.spec-storage" },
         },
+    };
+    storage_bundle.signature = try userspace_manifest_signing.signBundle(storage_bundle);
+    _ = try catalog.register(.{
+        .bundle = storage_bundle,
         .component_class = .service_component,
         .initial_component = .{
             .label = "spec-storage",
             .entry = "zigos.object.spec-storage",
         },
+        .role_tag = 0xC301,
+        .heartbeat_increment = 3,
+        .contract_flags = 0x11,
     });
 
     const launched = try catalog.launchViaKernel(.{

@@ -5,6 +5,7 @@ const attestation_service = @import("../../native/platform/attestation_service.z
 const bootstrap_driver_port = @import("../../native/drivers/bootstrap_driver_port.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
 const compatibility_environment = @import("../../native/services/compatibility_environment.zig");
+const compositor_session = @import("../../native/platform/compositor_session.zig");
 const component_port = @import("../../native/kernel_api/component_port.zig");
 const contract = @import("../../native/session/contract.zig");
 const crypto_hash = @import("../../native/core/crypto_hash.zig");
@@ -70,6 +71,7 @@ test "native host root imports native subsystem suites" {
     std.testing.refAllDecls(bootstrap_driver_port);
     std.testing.refAllDecls(capability);
     std.testing.refAllDecls(compatibility_environment);
+    std.testing.refAllDecls(compositor_session);
     std.testing.refAllDecls(component_port);
     std.testing.refAllDecls(contract);
     std.testing.refAllDecls(crypto_hash);
