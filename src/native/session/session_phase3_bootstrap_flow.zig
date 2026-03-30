@@ -98,17 +98,32 @@ fn activateDrivers(
     kernel_port: *component_port.KernelPort,
     phase3: *const support.Phase3Bindings,
 ) void {
+    const storage_driver_task = phase3_bootstrap.launchDriverTask(
+        env.userspace_catalog,
+        kernel_port,
+        state.session_capability.id,
+        state.session_task.id,
+        scheduleUserspaceTask,
+        state.ids.storage_service,
+        "zigos.system.storage-driver",
+        .storage_controller,
+        328,
+        52,
+    );
+
     const phase3_driver_specs = [_]struct {
         service_id: u64,
         task_id: u64,
         owner: principal.PrincipalId,
         device_class: driver_service.DeviceClass,
+        bootstrap_transport: driver_service.BootstrapTransport,
+        driver_bundle_id: []const u8,
         now_ticks: u64,
     }{
-        .{ .service_id = state.services.network_service.id, .task_id = phase3.bindingFor(.network_stack).task_id, .owner = state.ids.network_service, .device_class = .network_adapter, .now_ticks = 52 },
-        .{ .service_id = state.services.storage_service.id, .task_id = phase3.bindingFor(.storage_object).task_id, .owner = state.ids.storage_service, .device_class = .storage_controller, .now_ticks = 53 },
-        .{ .service_id = state.services.compositor_service.id, .task_id = phase3.bindingFor(.compositor_ui_session).task_id, .owner = state.ids.compositor_service, .device_class = .graphics_adapter, .now_ticks = 54 },
-        .{ .service_id = state.services.media_service.id, .task_id = phase3.bindingFor(.media_print_helpers).task_id, .owner = state.ids.media_service, .device_class = .audio_print_io, .now_ticks = 55 },
+        .{ .service_id = state.services.network_service.id, .task_id = phase3.bindingFor(.network_stack).task_id, .owner = state.ids.network_service, .device_class = .network_adapter, .bootstrap_transport = .kernel_published_data_plane, .driver_bundle_id = "zigos.system.network-stack", .now_ticks = 53 },
+        .{ .service_id = state.services.storage_service.id, .task_id = storage_driver_task.task_id, .owner = state.ids.storage_service, .device_class = .storage_controller, .bootstrap_transport = .kernel_published_data_plane, .driver_bundle_id = "zigos.system.storage-driver", .now_ticks = 54 },
+        .{ .service_id = state.services.compositor_service.id, .task_id = phase3.bindingFor(.compositor_ui_session).task_id, .owner = state.ids.compositor_service, .device_class = .graphics_adapter, .bootstrap_transport = .none, .driver_bundle_id = "zigos.system.compositor", .now_ticks = 55 },
+        .{ .service_id = state.services.media_service.id, .task_id = phase3.bindingFor(.media_print_helpers).task_id, .owner = state.ids.media_service, .device_class = .audio_print_io, .bootstrap_transport = .none, .driver_bundle_id = "zigos.system.media-print", .now_ticks = 56 },
     };
 
     var phase3_drivers: [phase3_driver_specs.len]*driver_service.DriverRecord = undefined;
@@ -124,16 +139,18 @@ fn activateDrivers(
             spec.task_id,
             spec.owner,
             spec.device_class,
+            spec.bootstrap_transport,
+            spec.driver_bundle_id,
             spec.now_ticks,
         );
     }
 
     const network_driver = phase3_drivers[0];
     const storage_driver = phase3_drivers[1];
-    const network_activation = env.driver_runtime.activate(network_driver) catch unreachable;
-    const storage_activation = env.driver_runtime.activate(storage_driver) catch unreachable;
-    _ = env.driver_runtime.activate(env.driver_directory.findByClass(.graphics_adapter).?) catch unreachable;
-    _ = env.driver_runtime.activate(env.driver_directory.findByClass(.audio_print_io).?) catch unreachable;
+    const network_activation = env.driver_runtime.activateAt(network_driver, 53) catch unreachable;
+    const storage_activation = env.driver_runtime.activateAt(storage_driver, 54) catch unreachable;
+    _ = env.driver_runtime.activateAt(env.driver_directory.findByClass(.graphics_adapter).?, 55) catch unreachable;
+    _ = env.driver_runtime.activateAt(env.driver_directory.findByClass(.audio_print_io).?, 56) catch unreachable;
     if ((network_activation.mode == .published_data_plane or env.driver_directory.findByClass(.network_adapter) != null) and
         (storage_activation.mode == .published_data_plane or storage_driver.restart_generation == 1))
     {
@@ -177,6 +194,9 @@ fn connectClient(
         },
         scheduleUserspaceTask,
     );
+    if (!env.runtime.hasCapability(phase3_client_task.task_id, state.session_capability.id)) {
+        env.runtime.grantCapability(phase3_client_task.task_id, state.session_capability.id) catch unreachable;
+    }
 
     var phase3_connect_count: usize = 0;
     for (service_contract.ordered_phase3_contracts, phase3.bindings, 0..) |entry, binding, index| {

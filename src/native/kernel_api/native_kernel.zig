@@ -2,6 +2,7 @@ const std = @import("std");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
 const abi = @import("../core/abi.zig");
 const capability = @import("capability.zig");
+const device_broker = @import("device_broker.zig");
 const endpoint = @import("endpoint.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
@@ -28,7 +29,7 @@ pub const SharedMemoryCreateResult = struct {
     capability_id: u64,
 };
 
-pub const Error = task_runtime.Error || capability.Error || endpoint.Error || shared_memory.Error || service_registry.Error || error{
+pub const Error = task_runtime.Error || capability.Error || device_broker.Error || endpoint.Error || shared_memory.Error || service_registry.Error || error{
     InvalidCapabilityTarget,
     InvalidUserspaceImage,
     PermissionDenied,
@@ -534,6 +535,79 @@ pub const Kernel = struct {
         return connection;
     }
 
+    pub fn deviceDescribe(
+        self: *Kernel,
+        device_capability_id: u64,
+        now_ticks: u64,
+    ) Error!abi.DeviceDescriptor {
+        const device_capability = try self.requireTargetedCapability(
+            device_capability_id,
+            now_ticks,
+            .{ .device_use = true },
+            .device,
+        );
+        return deviceDescriptor(try device_broker.describe(device_capability.target.id));
+    }
+
+    pub fn deviceMmioWindow(
+        self: *Kernel,
+        device_capability_id: u64,
+        window_index: u8,
+        now_ticks: u64,
+    ) Error!abi.DeviceMmioWindowDescriptor {
+        const device_capability = try self.requireTargetedCapability(
+            device_capability_id,
+            now_ticks,
+            .{ .device_use = true },
+            .device,
+        );
+        return mmioWindowDescriptor(try device_broker.mmioWindow(device_capability.target.id, window_index));
+    }
+
+    pub fn devicePortRead(
+        self: *Kernel,
+        device_capability_id: u64,
+        port: u16,
+        width: abi.DevicePortWidth,
+        now_ticks: u64,
+    ) Error!u32 {
+        const device_capability = try self.requireTargetedCapability(
+            device_capability_id,
+            now_ticks,
+            .{ .device_use = true },
+            .device,
+        );
+        return device_broker.readPort(device_capability.target.id, port, width);
+    }
+
+    pub fn devicePortWrite(
+        self: *Kernel,
+        device_capability_id: u64,
+        port: u16,
+        width: abi.DevicePortWidth,
+        value: u32,
+        now_ticks: u64,
+    ) Error!void {
+        const device_capability = try self.requireTargetedCapability(
+            device_capability_id,
+            now_ticks,
+            .{ .device_use = true },
+            .device,
+        );
+        return device_broker.writePort(device_capability.target.id, port, width, value);
+    }
+
+    pub fn requireTaskCapability(
+        self: *Kernel,
+        task_id: u64,
+        capability_id: u64,
+        now_ticks: u64,
+    ) Error!void {
+        _ = now_ticks;
+        _ = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
+        if (!self.runtime.hasCapability(task_id, capability_id)) return error.CapabilityNotFound;
+    }
+
     fn requireCapability(
         self: *Kernel,
         capability_id: u64,
@@ -621,6 +695,31 @@ fn capabilityDescriptor(owned: capability.Capability) abi.CapabilityDescriptor {
         .scope_task_id = owned.scope.task_id orelse 0,
         .scope_workspace_id = owned.scope.workspace_id orelse 0,
         .scope_flags = @bitCast(flags),
+    };
+}
+
+fn deviceDescriptor(descriptor: device_broker.ControllerDescriptor) abi.DeviceDescriptor {
+    return .{
+        .device_id = descriptor.device_id,
+        .base_port = descriptor.base_port,
+        .io_port_count = descriptor.io_port_count,
+        .ctrl_port = descriptor.ctrl_port,
+        .irq_line = descriptor.irq_line,
+        .mmio_window_count = descriptor.mmio_window_count,
+        .flags = if (descriptor.is_master) abi.DEVICE_DESCRIPTOR_FLAG_ATA_MASTER else 0,
+        .sector_count = descriptor.sector_count,
+    };
+}
+
+fn mmioWindowDescriptor(window: device_broker.MmioWindow) abi.DeviceMmioWindowDescriptor {
+    var flags: u16 = 0;
+    if (window.writable) flags |= abi.MMIO_WINDOW_FLAG_WRITABLE;
+    if (window.executable) flags |= abi.MMIO_WINDOW_FLAG_EXECUTABLE;
+    return .{
+        .base = window.base,
+        .length = window.length,
+        .flags = flags,
+        ._reserved = [_]u8{0} ** 6,
     };
 }
 
@@ -963,4 +1062,79 @@ test "capability mint query revoke and task termination are exposed by the nativ
     try kernel.capabilityRevoke(admin_capability.id, minted.capability_id, 10);
     try std.testing.expect(capabilities.query(minted.capability_id) == null);
     try std.testing.expect(try kernel.taskTerminate(task_capability.id, 11));
+}
+
+test "native kernel brokers device metadata and port io through device capabilities" {
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    var endpoints = endpoint.Table.init();
+    var shared = shared_memory.Table.init();
+    var registry = service_registry.Registry.init();
+    var kernel = Kernel.init(
+        .{ .kind = .policy_authority, .serial = 1 },
+        &runtime,
+        &capabilities,
+        &endpoints,
+        &shared,
+        &registry,
+    );
+
+    const driver_task = try runtime.createTask(.{
+        .owner = .{ .kind = .service, .serial = 4 },
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 1024,
+        },
+        .local_only = true,
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = 40,
+            .component_abi_version = 1,
+            .signed = true,
+            .bundle_id = "zigos.system.storage-driver",
+        },
+        .userspace_image = task_runtime.syntheticUserspaceImage(
+            "storage-driver-test",
+            "zigos.system.storage-driver",
+        ),
+    });
+    const device_capability = try capabilities.mint(.{
+        .holder = driver_task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .device, .id = 0x1F001 },
+        .rights = .{ .device_use = true },
+        .scope = .{
+            .task_id = driver_task.id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 12,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = true,
+        },
+    });
+    try runtime.grantCapability(driver_task.id, device_capability.id);
+
+    device_broker.reset();
+    defer device_broker.reset();
+    try std.testing.expect(device_broker.publishAtaController(0x1F001, .{
+        .base_port = 0x1F0,
+        .ctrl_port = 0x3F6,
+        .is_master = true,
+        .irq_line = 14,
+        .sector_count = 4096,
+    }));
+
+    const descriptor = try kernel.deviceDescribe(device_capability.id, 12);
+    try std.testing.expectEqual(@as(u64, 0x1F001), descriptor.device_id);
+    try std.testing.expectEqual(@as(u16, 0x1F0), descriptor.base_port);
+    try std.testing.expectEqual(@as(u16, abi.DEVICE_DESCRIPTOR_FLAG_ATA_MASTER), descriptor.flags);
+
+    try kernel.devicePortWrite(device_capability.id, 0x1F0 + 7, .u8, 0xA5, 12);
+    try std.testing.expectEqual(@as(u32, 0xA5), try kernel.devicePortRead(device_capability.id, 0x1F0 + 7, .u8, 12));
+    try std.testing.expectError(error.UnsupportedMmioWindow, kernel.deviceMmioWindow(device_capability.id, 0, 12));
 }

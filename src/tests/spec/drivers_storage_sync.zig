@@ -104,6 +104,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .device_class = .network_adapter,
         .authority = spec_support.driverAuthority(spec_support.service(91), 501, 901, network_device_id, .network_adapter),
         .bundle = bundle,
+        .bootstrap_transport = .kernel_published_data_plane,
     });
     const storage_driver = try directory.register(.{
         .service_id = 92,
@@ -112,6 +113,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .device_class = .storage_controller,
         .authority = spec_support.driverAuthority(spec_support.service(92), 502, 902, storage_device_id, .storage_controller),
         .bundle = bundle,
+        .bootstrap_transport = .kernel_published_data_plane,
     });
     const graphics_driver = try directory.register(.{
         .service_id = 93,
@@ -123,9 +125,9 @@ pub fn publishedDriversActivateScopedTransports() !void {
     });
 
     var runtime = driver_runtime_mod.Runtime.init();
-    const network_activation = try runtime.activate(network_driver);
-    const storage_activation = try runtime.activate(storage_driver);
-    const graphics_activation = try runtime.activate(graphics_driver);
+    const network_activation = try runtime.activateAt(network_driver, 1);
+    const storage_activation = try runtime.activateAt(storage_driver, 1);
+    const graphics_activation = try runtime.activateAt(graphics_driver, 1);
 
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, network_activation.mode);
     try std.testing.expect(network_activation.exclusive_claim);

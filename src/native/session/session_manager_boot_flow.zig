@@ -6,6 +6,7 @@ const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
+const device_broker_client = @import("../kernel_api/device_broker_client.zig");
 const endpoint_mod = @import("../kernel_api/endpoint.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_kernel = @import("../kernel_api/native_kernel.zig");
@@ -110,6 +111,7 @@ fn resetStateForTest() void {
     service_directory = native_service_registry.Registry.init();
     shared_memory_table = shared_memory_mod.Table.init();
     userspace_catalog = userspace_loader.Catalog.init();
+    device_broker_client.reset();
     kernel_instance = native_kernel.Kernel.init(
         .{ .kind = .policy_authority, .serial = 0 },
         runtime_service.runtimePtr(),
@@ -420,6 +422,7 @@ fn prepareKernelInterface(policy_authority: principal.PrincipalId, session_task_
         &service_directory,
     );
     kernel_port_instance = component_port.KernelPort.init(&kernel_instance);
+    device_broker_client.bindKernelPort(&kernel_port_instance);
     kernel_port_ready = true;
     executeUserspaceProbe(session_task_id);
     common.printBootMarker(boot_markers.phase1_native_kernel_ready);

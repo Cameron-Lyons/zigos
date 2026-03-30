@@ -32,6 +32,7 @@ pub const ActivationRecord = struct {
 
 pub const Error = error{
     ActivationTableFull,
+    KernelBootstrapNotAuthorized,
     MissingDmaDomain,
 };
 
@@ -48,7 +49,11 @@ pub const Runtime = struct {
         return .{};
     }
 
-    pub fn activate(self: *Runtime, driver: *const driver_service.DriverRecord) Error!ActivationRecord {
+    pub fn activateAt(
+        self: *Runtime,
+        driver: *const driver_service.DriverRecord,
+        now_ticks: u64,
+    ) Error!ActivationRecord {
         var record = ActivationRecord{
             .service_id = driver.service_id,
             .device_id = driver.device_id,
@@ -67,25 +72,41 @@ pub const Runtime = struct {
         switch (driver.device_class) {
             .network_adapter => {
                 if (bootstrap_driver_port.networkPublication()) |publication| {
-                    if (publication.device_id == driver.device_id and
-                        bootstrap_driver_port.activateNetworkDevice(driver.device_id, driver.service_id))
-                    {
-                        record.mode = .published_data_plane;
-                        record.exclusive_claim = true;
-                        record.kernel_bootstrap = publication.kernel_bootstrap;
-                        record.publisher_len = copyText(record.publisher[0..], publication.publisherSlice());
+                    if (publication.device_id != driver.device_id) {
+                        // Drivers only claim transports published for their own device binding.
+                    } else {
+                        if (publication.kernel_bootstrap and driver.bootstrap_transport != .kernel_published_data_plane) {
+                            return error.KernelBootstrapNotAuthorized;
+                        }
+                        if (bootstrap_driver_port.activateNetworkDevice(driver.device_id, driver.service_id)) {
+                            record.mode = .published_data_plane;
+                            record.exclusive_claim = true;
+                            record.kernel_bootstrap = publication.kernel_bootstrap;
+                            record.publisher_len = copyText(record.publisher[0..], publication.publisherSlice());
+                        }
                     }
                 }
             },
             .storage_controller => {
                 if (bootstrap_driver_port.storagePublication()) |publication| {
-                    if (publication.device_id == driver.device_id and
-                        bootstrap_driver_port.activateStorageBackend(driver.device_id, driver.service_id))
-                    {
-                        record.mode = .published_data_plane;
-                        record.exclusive_claim = true;
-                        record.kernel_bootstrap = publication.kernel_bootstrap;
-                        record.publisher_len = copyText(record.publisher[0..], publication.publisherSlice());
+                    if (publication.device_id != driver.device_id) {
+                        // Drivers only claim transports published for their own device binding.
+                    } else {
+                        if (publication.kernel_bootstrap and driver.bootstrap_transport != .kernel_published_data_plane) {
+                            return error.KernelBootstrapNotAuthorized;
+                        }
+                        if (bootstrap_driver_port.activateStorageBackend(
+                            driver.device_id,
+                            driver.service_id,
+                            driver.authority_capability_id,
+                            driver.owner_task_id,
+                            now_ticks,
+                        )) {
+                            record.mode = .published_data_plane;
+                            record.exclusive_claim = true;
+                            record.kernel_bootstrap = publication.kernel_bootstrap;
+                            record.publisher_len = copyText(record.publisher[0..], publication.publisherSlice());
+                        }
                     }
                 }
             },
@@ -94,6 +115,10 @@ pub const Runtime = struct {
 
         record.activation_generation = self.nextActivationGeneration();
         return self.upsert(record);
+    }
+
+    pub fn activate(self: *Runtime, driver: *const driver_service.DriverRecord) Error!ActivationRecord {
+        return self.activateAt(driver, 0);
     }
 
     pub fn findByClass(self: *const Runtime, device_class: driver_service.DeviceClass) ?ActivationRecord {
@@ -159,4 +184,194 @@ fn zeroActivation() ActivationRecord {
         .publisher_len = 0,
         .publisher = [_]u8{0} ** 32,
     };
+}
+
+test "runtime refuses kernel-published transports for drivers without bootstrap authorization" {
+    const FakeNetworkDevice = struct {
+        fn send(_: []const u8) void {}
+
+        fn getMacAddress() [6]u8 {
+            return .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+        }
+
+        const device = bootstrap_driver_port.NetworkDevice{
+            .send = send,
+            .getMacAddress = getMacAddress,
+        };
+
+        fn activate(device_id: u64) ?*const bootstrap_driver_port.NetworkDevice {
+            if (device_id != 0x8086_100E_0001) return null;
+            return &device;
+        }
+    };
+
+    bootstrap_driver_port.reset();
+    defer bootstrap_driver_port.reset();
+
+    try std.testing.expect(bootstrap_driver_port.publishNetworkActivator(
+        0x8086_100E_0001,
+        "e1000",
+        FakeNetworkDevice.activate,
+        true,
+    ));
+
+    var directory = driver_service.Directory.init();
+    const driver = try directory.register(.{
+        .service_id = 91,
+        .owner_task_id = 901,
+        .device_id = 0x8086_100E_0001,
+        .device_class = .network_adapter,
+        .authority = .{
+            .id = 21,
+            .holder = .{ .kind = .service, .serial = 91 },
+            .issuer = .{ .kind = .policy_authority, .serial = 1 },
+            .target = driver_service.authorityTarget(0x8086_100E_0001),
+            .rights = driver_service.allowedRightsFor(.network_adapter),
+            .scope = .{
+                .task_id = 901,
+                .local_only = true,
+                .broker_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = 0,
+                .expires_at_ticks = std.math.maxInt(u64),
+                .renewable = true,
+            },
+            .revocation_generation = 1,
+            .audit = .{},
+        },
+        .bundle = .{
+            .bundle_id = "svc.driver.net",
+            .display_name = "Network Driver",
+            .publisher = "zigos.spec",
+            .signature = .{
+                .format = "ed25519",
+                .signer = "zigos-spec-driver",
+            },
+        },
+    });
+
+    var runtime = Runtime.init();
+    try std.testing.expectError(error.KernelBootstrapNotAuthorized, runtime.activateAt(driver, 1));
+}
+
+test "runtime uses the activation tick when claiming storage bootstrap authority" {
+    const capability = @import("../kernel_api/capability.zig");
+    const component_port = @import("../kernel_api/component_port.zig");
+    const device_broker = @import("../kernel_api/device_broker.zig");
+    const device_broker_client = @import("../kernel_api/device_broker_client.zig");
+    const endpoint = @import("../kernel_api/endpoint.zig");
+    const native_kernel = @import("../kernel_api/native_kernel.zig");
+    const principal = @import("../core/principal.zig");
+    const service_registry = @import("../kernel_api/service_registry.zig");
+    const shared_memory = @import("../kernel_api/shared_memory.zig");
+    const storage_driver_task = @import("storage_driver_task.zig");
+    const task_runtime = @import("../task/task_runtime.zig");
+
+    const device_id: u64 = 0x0000_1F00_0001;
+
+    bootstrap_driver_port.reset();
+    defer bootstrap_driver_port.reset();
+    device_broker.reset();
+    defer device_broker.reset();
+    device_broker_client.reset();
+    defer device_broker_client.reset();
+    storage_driver_task.reset();
+    defer storage_driver_task.reset();
+    storage_volume.clearAttachedBackend();
+    defer storage_volume.clearAttachedBackend();
+
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    var endpoints = endpoint.Table.init();
+    var shared = shared_memory.Table.init();
+    var registry = service_registry.Registry.init();
+    var kernel = native_kernel.Kernel.init(
+        .{ .kind = .policy_authority, .serial = 1 },
+        &runtime,
+        &capabilities,
+        &endpoints,
+        &shared,
+        &registry,
+    );
+    var kernel_port = component_port.KernelPort.init(&kernel);
+    device_broker_client.bindKernelPort(&kernel_port);
+
+    try std.testing.expect(device_broker.publishAtaController(device_id, .{
+        .base_port = 0x1F0,
+        .ctrl_port = 0x3F6,
+        .is_master = true,
+        .irq_line = 14,
+        .sector_count = storage_volume.required_device_sectors,
+    }));
+    try std.testing.expect(bootstrap_driver_port.publishStorageAtaBootstrap(
+        device_id,
+        "ata-bootstrap",
+        true,
+    ));
+
+    const driver_task = try runtime.createTask(.{
+        .owner = principal.PrincipalId{ .kind = .service, .serial = 30 },
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 1024,
+        },
+        .local_only = true,
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = 30,
+            .component_abi_version = 1,
+            .signed = true,
+            .bundle_id = "zigos.system.storage-driver",
+        },
+        .userspace_image = task_runtime.syntheticUserspaceImage(
+            "storage-driver-lease-test",
+            "zigos.system.storage-driver",
+        ),
+    });
+    const device_capability = try capabilities.mint(.{
+        .holder = driver_task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .device, .id = device_id },
+        .rights = driver_service.allowedRightsFor(.storage_controller),
+        .scope = .{
+            .task_id = driver_task.id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 1,
+            .expires_at_ticks = 5,
+            .renewable = false,
+        },
+        .audit = .{},
+    });
+    try runtime.grantCapability(driver_task.id, device_capability.id);
+
+    var directory = driver_service.Directory.init();
+    const driver = try directory.register(.{
+        .service_id = 30,
+        .owner_task_id = driver_task.id,
+        .device_id = device_id,
+        .device_class = .storage_controller,
+        .authority = capabilities.query(device_capability.id).?,
+        .bundle = .{
+            .bundle_id = "svc.driver.storage-runtime",
+            .display_name = "Storage Driver Runtime",
+            .publisher = "zigos.spec",
+            .signature = .{
+                .format = "ed25519",
+                .signer = "zigos-spec-driver",
+            },
+        },
+        .bootstrap_transport = .kernel_published_data_plane,
+    });
+
+    var driver_runtime = Runtime.init();
+    const activation = try driver_runtime.activateAt(driver, 10);
+    try std.testing.expectEqual(ActivationMode.control_only, activation.mode);
+    try std.testing.expect(!storage_volume.hasAttachedDevice());
 }

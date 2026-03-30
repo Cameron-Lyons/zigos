@@ -107,6 +107,10 @@ pub fn reset() void {
     mappings = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS;
 }
 
+pub fn activeTaskId() u64 {
+    return active_task_id;
+}
+
 pub fn executeTask(
     catalog: *userspace_loader.Catalog,
     runtime: *task_runtime.Runtime,

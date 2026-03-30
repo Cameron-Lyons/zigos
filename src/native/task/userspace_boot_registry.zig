@@ -26,6 +26,7 @@ pub fn manifestFor(bundle_id: []const u8) Error!manifest.BundleManifest {
         .bundle_id = spec.bundle_id,
         .display_name = spec.display_name,
         .publisher = spec.publisher,
+        .components = spec.components,
         .signature = signatureFor(spec),
     };
 }
@@ -56,6 +57,10 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
                     .bundle_id = artifact.bundle_id,
                     .display_name = artifact.display_name,
                     .publisher = artifact.publisher,
+                    .components = &.{.{
+                        .id = artifact.label,
+                        .entry = artifact.entry,
+                    }},
                     .signature = signatureForPublisher(artifact.publisher, artifact.signed),
                 },
                 .component_class = componentClassFromByte(artifact.component_class),
@@ -75,6 +80,7 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
                 .bundle_id = spec.bundle_id,
                 .display_name = spec.display_name,
                 .publisher = spec.publisher,
+                .components = spec.components,
                 .signature = signatureFor(&spec),
             },
             .component_class = switch (spec.component_class) {

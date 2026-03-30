@@ -73,7 +73,9 @@ fn runViewerPermissionFlow(
         .bundle_id = viewer_bundle.bundle_id,
         .display_name = viewer_bundle.display_name,
         .publisher = viewer_bundle.publisher,
+        .components = viewer_bundle.components,
         .requested_permissions = &viewer_permissions,
+        .signature = viewer_bundle.signature,
     };
     manifest.validate(viewer_manifest) catch unreachable;
     common.printBootMarker(boot_markers.phase2_manifest_valid);
@@ -149,6 +151,7 @@ fn runNotesPermissionFlow(
         .bundle_id = notes_bundle.bundle_id,
         .display_name = notes_bundle.display_name,
         .publisher = notes_bundle.publisher,
+        .components = notes_bundle.components,
         .provided_interfaces = &[_]manifest.InterfaceDecl{
             .{ .name = "zigos.workspace.document" },
         },
@@ -233,7 +236,7 @@ fn runNotesPermissionFlow(
         .entry = "/system/components/notes-sync.elf",
     }, 11) catch unreachable;
     const notes_accounting = kernel_port.accountingQuery(.{
-        .header = component_port.makeHeader(.accounting_query, 221, notes_task.id),
+        .header = component_port.makeHeader(.accounting_query, 221, state.session_task.id),
         .authority_capability_id = state.session_capability.id,
         .task_id = notes_task.id,
     }, 11) catch unreachable;
@@ -282,8 +285,10 @@ fn runSyncPermissionFlow(
         .bundle_id = sync_bundle.bundle_id,
         .display_name = sync_bundle.display_name,
         .publisher = sync_bundle.publisher,
+        .components = sync_bundle.components,
         .requested_permissions = &sync_permissions,
         .background_tasks = &sync_background_tasks,
+        .signature = sync_bundle.signature,
     };
     manifest.validate(sync_manifest) catch unreachable;
 
@@ -384,6 +389,7 @@ fn runCapturePermissionFlow(
         .bundle_id = capture_bundle.bundle_id,
         .display_name = capture_bundle.display_name,
         .publisher = capture_bundle.publisher,
+        .components = capture_bundle.components,
         .requested_permissions = &capture_permissions,
         .signature = capture_bundle.signature,
     };

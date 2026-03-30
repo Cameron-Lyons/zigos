@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
@@ -15,13 +16,17 @@ const MAX_IMAGE_HASH_BYTES: usize = 32;
 pub const Error = manifest.ValidationError || component_port.Error || task_runtime.Error || error{
     EmptyLabel,
     EmptyEntry,
+    EmbeddedArtifactRequired,
     InvalidElfHeader,
     InvalidElfMagic,
     InvalidLoadableSegment,
     InvalidProgramHeaderTable,
+    InitialComponentNotDeclared,
     ImageConflict,
     ImageNotFound,
     ImageTableFull,
+    MissingBundleComponent,
+    MissingBundleSignature,
     MissingLoadableSegment,
     TooManyLoadableSegments,
     UnsupportedElfClass,
@@ -207,6 +212,7 @@ pub const Catalog = struct {
         try manifest.validate(request.bundle);
         if (request.initial_component.label.len == 0) return error.EmptyLabel;
         if (request.initial_component.entry.len == 0) return error.EmptyEntry;
+        try validateExecutableBundle(request.bundle, request.initial_component, embedded != null);
 
         if (self.findByBundleId(request.bundle.bundle_id)) |existing| {
             if (!imageMatchesRequest(existing, request, embedded)) return error.ImageConflict;
@@ -270,6 +276,29 @@ fn taskCreateRequest(image: *const ImageRecord, request: LaunchRequest) task_run
         },
         .userspace_image = image.executable_image,
     };
+}
+
+fn validateExecutableBundle(
+    bundle: manifest.BundleManifest,
+    initial_component: task_runtime.ExecutionComponentSpec,
+    has_embedded_artifact: bool,
+) Error!void {
+    if (!bundle.signature.isPresent()) return error.MissingBundleSignature;
+    if (bundle.components.len == 0) return error.MissingBundleComponent;
+    if (!bundleDeclaresInitialComponent(bundle, initial_component)) return error.InitialComponentNotDeclared;
+    if (builtin.target.os.tag == .freestanding and !has_embedded_artifact) {
+        return error.EmbeddedArtifactRequired;
+    }
+}
+
+fn bundleDeclaresInitialComponent(
+    bundle: manifest.BundleManifest,
+    initial_component: task_runtime.ExecutionComponentSpec,
+) bool {
+    for (bundle.components) |component| {
+        if (std.mem.eql(u8, component.entry, initial_component.entry)) return true;
+    }
+    return false;
 }
 
 fn zeroImage() ImageRecord {
@@ -477,6 +506,9 @@ test "userspace image launch records bundle provenance and isolated process stat
             .bundle_id = "app.notes",
             .display_name = "Notes",
             .publisher = "zigos.dev",
+            .components = &[_]manifest.ExecutionComponentDecl{
+                .{ .id = "notes", .entry = "app.notes" },
+            },
             .signature = .{
                 .format = "ed25519",
                 .signer = "zigos-dev-key",
@@ -517,6 +549,9 @@ test "kernel-launched userspace images surface a userspace task flag" {
             .bundle_id = "zigos.service.storage",
             .display_name = "Storage Service",
             .publisher = "zigos.system",
+            .components = &[_]manifest.ExecutionComponentDecl{
+                .{ .id = "workspace-storage", .entry = "zigos.object.workspace" },
+            },
             .signature = .{
                 .format = "ed25519",
                 .signer = "zigos-system-key",
@@ -570,6 +605,7 @@ test "kernel-launched userspace images surface a userspace task flag" {
             .renewable = true,
         },
     });
+    try runtime.grantCapability(controller.id, authority.id);
 
     const descriptor = try catalog.launchViaKernel(.{
         .port = &port,
@@ -617,6 +653,9 @@ test "catalog stores embedded elf metadata for registered userspace artifacts" {
             .bundle_id = "zigos.system.compositor",
             .display_name = "Compositor Session",
             .publisher = "zigos.system",
+            .components = &[_]manifest.ExecutionComponentDecl{
+                .{ .id = "compositor-session", .entry = "zigos.ui.session" },
+            },
             .signature = .{
                 .format = "ed25519",
                 .signer = "zigos-system-key",
@@ -636,4 +675,61 @@ test "catalog stores embedded elf metadata for registered userspace artifacts" {
     try std.testing.expectEqual(bytes.len, image.byte_len);
     try std.testing.expect(image.executable_image.isPresent());
     try std.testing.expectEqual(@as(usize, 1), image.executable_image.segment_count);
+}
+
+test "catalog rejects unsigned bundles and missing declared components for userspace launch" {
+    var catalog = Catalog.init();
+
+    try std.testing.expectError(error.MissingBundleSignature, catalog.register(.{
+        .bundle = .{
+            .bundle_id = "app.unsigned",
+            .display_name = "Unsigned",
+            .publisher = "zigos.dev",
+            .components = &[_]manifest.ExecutionComponentDecl{
+                .{ .id = "unsigned", .entry = "app.unsigned" },
+            },
+        },
+        .component_class = .app_component,
+        .initial_component = .{
+            .label = "unsigned",
+            .entry = "app.unsigned",
+        },
+    }));
+
+    try std.testing.expectError(error.MissingBundleComponent, catalog.register(.{
+        .bundle = .{
+            .bundle_id = "app.no-components",
+            .display_name = "No Components",
+            .publisher = "zigos.dev",
+            .signature = .{
+                .format = "ed25519",
+                .signer = "zigos-dev-key",
+            },
+        },
+        .component_class = .app_component,
+        .initial_component = .{
+            .label = "main",
+            .entry = "app.no-components",
+        },
+    }));
+
+    try std.testing.expectError(error.InitialComponentNotDeclared, catalog.register(.{
+        .bundle = .{
+            .bundle_id = "app.mismatch",
+            .display_name = "Mismatch",
+            .publisher = "zigos.dev",
+            .components = &[_]manifest.ExecutionComponentDecl{
+                .{ .id = "worker", .entry = "app.mismatch.worker" },
+            },
+            .signature = .{
+                .format = "ed25519",
+                .signer = "zigos-dev-key",
+            },
+        },
+        .component_class = .app_component,
+        .initial_component = .{
+            .label = "main",
+            .entry = "app.mismatch.main",
+        },
+    }));
 }

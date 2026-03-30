@@ -22,6 +22,12 @@ fn executeUserspaceProbe(env: *const support.Environment, task_id: u64) void {
     _ = userspace_executor.executeTask(env.userspace_catalog, env.runtime, task_id);
 }
 
+fn grantTaskCapability(env: *const support.Environment, task_id: u64, capability_id: u64) void {
+    if (!env.runtime.hasCapability(task_id, capability_id)) {
+        env.runtime.grantCapability(task_id, capability_id) catch unreachable;
+    }
+}
+
 pub fn run(
     env: *const support.Environment,
     state: *const support.BootstrapState,
@@ -51,6 +57,7 @@ pub fn run(
         scheduleUserspaceTask,
     );
     executeUserspaceProbe(env, storage_task_desc.task_id);
+    grantTaskCapability(env, storage_task_desc.task_id, state.session_capability.id);
     const phase1_client_task_desc = userspace_launch.launchRegisteredKernel(
         env.userspace_catalog,
         .{
@@ -74,6 +81,8 @@ pub fn run(
         },
         scheduleUserspaceTask,
     );
+    grantTaskCapability(env, phase1_client_task_desc.task_id, state.session_capability.id);
+    grantTaskCapability(env, phase1_client_task_desc.task_id, state.policy_capability.id);
     common.printBootMarker(boot_markers.phase1_task_create_ok);
 
     const storage_endpoint = kernel_port.endpointCreate(.{
@@ -260,6 +269,7 @@ pub fn run(
         },
         scheduleUserspaceTask,
     );
+    grantTaskCapability(env, phase1_temp_task.task_id, state.policy_capability.id);
     const phase1_temp_capability = kernel_port.capabilityMint(.{
         .header = component_port.makeHeader(.capability_mint, 18, phase1_temp_task.task_id),
         .policy_capability_id = state.policy_capability.id,
