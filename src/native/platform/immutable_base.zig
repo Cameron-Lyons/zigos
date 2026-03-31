@@ -168,24 +168,43 @@ pub const Manager = struct {
         report: HealthReport,
         tick: u64,
     ) Error!ActivationResult {
+        try self.beginActivation(slot_index, tick);
+        return self.finalizeActivation(report, tick + 1);
+    }
+
+    pub fn beginActivation(
+        self: *Manager,
+        slot_index: usize,
+        tick: u64,
+    ) Error!void {
         if (slot_index >= MAX_SYSTEM_IMAGES) return error.InvalidSlot;
         if (self.slots[slot_index].version_id == 0) return error.ImageNotPresent;
+        if (self.pending_slot != empty_slot) return error.ActivationInProgress;
 
         self.activation_generation += 1;
         self.pending_slot = @intCast(slot_index);
+        if (self.active_slot != empty_slot and self.active_slot != slot_index) {
+            self.last_good_slot = self.active_slot;
+        }
+        self.active_slot = @intCast(slot_index);
+        self.slots[slot_index].activation_generation = self.activation_generation;
         try self.persist(tick);
+    }
 
+    pub fn finalizeActivation(
+        self: *Manager,
+        report: HealthReport,
+        tick: u64,
+    ) Error!ActivationResult {
+        if (self.pending_slot == empty_slot) return error.NoPendingActivation;
+
+        const pending_slot = self.pending_slot;
         const failure = report.failure();
+        self.pending_slot = empty_slot;
         if (failure != .none) {
-            if (self.active_slot != empty_slot) {
-                self.last_good_slot = self.active_slot;
-            }
-            self.pending_slot = empty_slot;
             self.rollback_generation += 1;
-            if (self.last_good_slot != empty_slot) {
-                self.active_slot = self.last_good_slot;
-            }
-            try self.persist(tick + 1);
+            self.active_slot = self.last_good_slot;
+            try self.persist(tick);
             return .{
                 .active_slot = if (self.active_slot == empty_slot) null else @as(usize, self.active_slot),
                 .activation_generation = self.activation_generation,
@@ -195,18 +214,21 @@ pub const Manager = struct {
             };
         }
 
-        self.active_slot = @intCast(slot_index);
+        self.active_slot = pending_slot;
         self.last_good_slot = self.active_slot;
-        self.pending_slot = empty_slot;
-        self.slots[slot_index].activation_generation = self.activation_generation;
-        try self.persist(tick + 1);
+        try self.persist(tick);
         return .{
-            .active_slot = slot_index,
+            .active_slot = pending_slot,
             .activation_generation = self.activation_generation,
             .rollback_generation = self.rollback_generation,
             .failure = .none,
             .rolled_back = false,
         };
+    }
+
+    pub fn pendingSlotIndex(self: *const Manager) ?usize {
+        if (self.pending_slot == empty_slot) return null;
+        return self.pending_slot;
     }
 
     pub fn activeImage(self: *const Manager) ?*const SystemImage {
@@ -421,16 +443,20 @@ test "immutable base persists signed read-only image activation and rollback met
     var storage = storage_service.Service.init(901, 41, owner);
     var manager = try Manager.init(&storage, owner, state_signer);
     _ = try manager.stageImage(0, "stable-a", "kernel=v1", image_signer, 10);
-    const stable = try manager.activate(0, .{}, 11);
+    try manager.beginActivation(0, 11);
+    try std.testing.expectEqualStrings("stable-a", manager.activeImage().?.labelSlice());
+    const stable = try manager.finalizeActivation(.{}, 12);
     try std.testing.expectEqual(@as(?usize, 0), stable.active_slot);
 
     _ = try manager.stageImage(1, "stable-b", "kernel=v2", image_signer, 12);
-    const failed = try manager.activate(1, .{ .ui_ok = false }, 13);
+    try manager.beginActivation(1, 13);
+    try std.testing.expectEqualStrings("stable-b", manager.activeImage().?.labelSlice());
+    const failed = try manager.finalizeActivation(.{ .ui_ok = false }, 14);
     try std.testing.expect(failed.rolled_back);
     try std.testing.expectEqual(HealthFailure.ui, failed.failure);
     try std.testing.expectEqual(@as(?usize, 0), failed.active_slot);
 
-    const activated = try manager.activate(1, .{}, 14);
+    const activated = try manager.activate(1, .{}, 15);
     try std.testing.expect(!activated.rolled_back);
     try std.testing.expectEqual(@as(?usize, 1), activated.active_slot);
     try std.testing.expect(manager.verifyActiveImage());

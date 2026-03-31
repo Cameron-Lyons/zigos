@@ -10,7 +10,7 @@ KERNEL_PATH="${1:?kernel path required}"
 LOG_PATH="${2:?serial log path required}"
 NATIVE_STORE_IMAGE="${3:?native store image path required}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
-ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-120}"
+ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-180}"
 ZIGOS_READY_MARKER="$("$ZIG" run "$MARKER_TOOL" -- ready)"
 PHASE4_RELOADED_MARKER="$("$ZIG" run "$MARKER_TOOL" -- boot2_reloaded_phase4 | head -n 1)"
 

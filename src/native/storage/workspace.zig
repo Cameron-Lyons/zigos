@@ -7,7 +7,7 @@ const signing = @import("../core/signing.zig");
 const copyText = native_util.copyText;
 
 pub const MAX_WORKSPACES: usize = 8;
-pub const MAX_WORKSPACE_ENTRIES: usize = 24;
+pub const MAX_WORKSPACE_ENTRIES: usize = 96;
 pub const MAX_SNAPSHOTS: usize = 16;
 pub const MAX_RECOVERABLE_DELETES: usize = 24;
 pub const MAX_ENTRY_PATH_BYTES: usize = 96;

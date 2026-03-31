@@ -1,5 +1,6 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const manifest = @import("../policy/manifest.zig");
 const std = @import("std");
 const principal = @import("../core/principal.zig");
 
@@ -170,6 +171,7 @@ pub const AuditEventKind = enum(u8) {
     permission_reviewed,
     policy_allowed,
     policy_denied,
+    background_dispatched,
     service_connected,
     service_restarted,
 };
@@ -234,6 +236,15 @@ pub const TaskRecord = struct {
     ui_surface_id: ?u64,
     resource_class: accelerator_scheduler.ResourceClass,
     background_allowed: bool,
+    background_active_count: u16 = 0,
+    background_cpu_consumed_ticks: u64 = 0,
+    background_reserved_memory_bytes: usize = 0,
+    background_reserved_shared_memory_bytes: usize = 0,
+    background_peak_memory_bytes: usize = 0,
+    background_peak_shared_memory_bytes: usize = 0,
+    last_background_network: manifest.BackgroundNetworkMode = .none,
+    last_background_visibility: manifest.BackgroundVisibility = .status_only,
+    last_background_tick: u64 = 0,
     zero_ambient_authority: bool,
     local_only: bool,
     launch: LaunchProvenanceRecord,
@@ -471,6 +482,63 @@ pub const Runtime = struct {
         task.audit_trail[MAX_AUDIT_EVENTS - 1] = event;
     }
 
+    pub fn canReserveBackgroundWork(
+        self: *const Runtime,
+        task_id: u64,
+        budget: manifest.BackgroundResourceBudget,
+    ) bool {
+        const task = self.findConst(task_id) orelse return false;
+        if (task.state != .active or !task.background_allowed) return false;
+
+        const next_cpu = std.math.add(u64, task.background_cpu_consumed_ticks, budget.cpu_time_ticks) catch return false;
+        if (next_cpu > task.budget.cpu_time_ticks) return false;
+
+        const next_memory = std.math.add(usize, task.background_reserved_memory_bytes, budget.memory_bytes) catch return false;
+        if (next_memory > task.budget.memory_bytes) return false;
+
+        const next_shared = std.math.add(usize, task.background_reserved_shared_memory_bytes, budget.shared_memory_bytes) catch return false;
+        if (next_shared > task.budget.shared_memory_bytes) return false;
+
+        return true;
+    }
+
+    pub fn reserveBackgroundWork(
+        self: *Runtime,
+        task_id: u64,
+        budget: manifest.BackgroundResourceBudget,
+        network: manifest.BackgroundNetworkMode,
+        visibility: manifest.BackgroundVisibility,
+        tick: u64,
+    ) Error!bool {
+        if (!self.canReserveBackgroundWork(task_id, budget)) return false;
+        const task = self.find(task_id) orelse return error.TaskNotFound;
+
+        task.background_active_count += 1;
+        task.background_cpu_consumed_ticks += budget.cpu_time_ticks;
+        task.background_reserved_memory_bytes += budget.memory_bytes;
+        task.background_reserved_shared_memory_bytes += budget.shared_memory_bytes;
+        task.background_peak_memory_bytes = @max(task.background_peak_memory_bytes, task.background_reserved_memory_bytes);
+        task.background_peak_shared_memory_bytes = @max(task.background_peak_shared_memory_bytes, task.background_reserved_shared_memory_bytes);
+        task.last_background_network = network;
+        task.last_background_visibility = visibility;
+        task.last_background_tick = tick;
+        return true;
+    }
+
+    pub fn releaseBackgroundWork(
+        self: *Runtime,
+        task_id: u64,
+        budget: manifest.BackgroundResourceBudget,
+    ) Error!bool {
+        const task = self.find(task_id) orelse return error.TaskNotFound;
+        if (task.background_active_count == 0) return false;
+
+        task.background_active_count -= 1;
+        task.background_reserved_memory_bytes = saturatingSub(task.background_reserved_memory_bytes, budget.memory_bytes);
+        task.background_reserved_shared_memory_bytes = saturatingSub(task.background_reserved_shared_memory_bytes, budget.shared_memory_bytes);
+        return true;
+    }
+
     pub fn terminateTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
         const task = self.find(task_id) orelse return error.TaskNotFound;
         if (task.state == .terminated) return false;
@@ -516,6 +584,15 @@ fn zeroTask() TaskRecord {
         .ui_surface_id = null,
         .resource_class = .foreground_interactive,
         .background_allowed = false,
+        .background_active_count = 0,
+        .background_cpu_consumed_ticks = 0,
+        .background_reserved_memory_bytes = 0,
+        .background_reserved_shared_memory_bytes = 0,
+        .background_peak_memory_bytes = 0,
+        .background_peak_shared_memory_bytes = 0,
+        .last_background_network = .none,
+        .last_background_visibility = .status_only,
+        .last_background_tick = 0,
         .zero_ambient_authority = true,
         .local_only = false,
         .launch = zeroLaunchProvenance(),
@@ -651,6 +728,10 @@ fn makeAddressSpace(init: AddressSpaceInit) AddressSpaceRecord {
     };
     record.region_count = init.userspace_image.segment_count + 1;
     return record;
+}
+
+fn saturatingSub(current: usize, amount: usize) usize {
+    return if (amount >= current) 0 else current - amount;
 }
 
 fn zeroAddressSpace() AddressSpaceRecord {

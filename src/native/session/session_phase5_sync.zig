@@ -100,6 +100,13 @@ pub fn run(
             user_root_signer,
             104,
         ) catch unreachable;
+        context.update_ledger.recordDeviceTrustChange(
+            context.session_user,
+            phone_device_principal,
+            false,
+            104,
+            "device revoked",
+        ) catch unreachable;
     }
     if (!phase5_sync_service.isTrustedDevice(phone_device_principal) and phase5_sync_service.trustedDeviceCount() >= 2) {
         support.common.printBootMarker("ZIGOS:PHASE5:DEVICE_REVOKE:OK");
@@ -230,6 +237,13 @@ pub fn run(
     if (device_sync_summary.conflict_count == 1 and
         phase5_sync_service.findConflict(phase4.notes_workspace_id, tablet_device_principal, "documents/notes.md") != null)
     {
+        context.update_ledger.recordSyncConflict(
+            context.session_user,
+            phase4.notes_workspace_id,
+            109,
+            "documents/notes.md conflict",
+            true,
+        ) catch unreachable;
         support.common.printBootMarker("ZIGOS:PHASE5:SYNC:CONFLICT_REPORT");
     }
     if (device_sync_summary.overlay_ready and

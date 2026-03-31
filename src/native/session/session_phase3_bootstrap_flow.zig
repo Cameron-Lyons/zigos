@@ -239,7 +239,7 @@ fn recordDriverRecovery(
         env.driver_directory,
         env.driver_runtime,
         null,
-        null,
+        env.diagnostic_ledger,
         70,
         0x4E,
         "network driver restarted",

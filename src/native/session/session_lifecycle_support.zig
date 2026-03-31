@@ -2,6 +2,8 @@ const builtin = @import("builtin");
 const capability = @import("../kernel_api/capability.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const object_store_mod = @import("../storage/object_store.zig");
+const compositor_session = @import("../platform/compositor_session.zig");
+const event_ledger = @import("../platform/event_ledger.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_service_mod = @import("../storage/storage_service.zig");
@@ -30,11 +32,16 @@ pub const phase4_export_signer = signing.SignerIdentity{
     .label = "zigos-export-key",
     .seed = [_]u8{0x83} ** 32,
 };
+pub const diagnostic_ledger_signer = signing.SignerIdentity{
+    .label = "zigos-diagnostic-ledger",
+    .seed = [_]u8{0x84} ** 32,
+};
 
 pub const Context = struct {
     runtime: *task_runtime.Runtime,
     runtime_service: *task_runtime_service_mod.Service,
     supervisor: *supervisor_mod.Supervisor,
+    compositor: *compositor_session.Session,
     driver_directory: *driver_service.Directory,
     storage_service_instance: *storage_service_mod.Service,
     export_package: *workspace_mod.ExportPackage,
@@ -52,6 +59,7 @@ pub const Context = struct {
     compositor_service_id: u64,
     package_service_id: u64,
     package_service_principal: principal.PrincipalId,
+    update_ledger: *event_ledger.Ledger,
     notes_object_capability: capability.Capability,
 };
 

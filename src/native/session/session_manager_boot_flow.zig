@@ -11,6 +11,7 @@ const device_broker_client = @import("../kernel_api/device_broker_client.zig");
 const endpoint_mod = @import("../kernel_api/endpoint.zig");
 const manifest = @import("../policy/manifest.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
+const event_ledger = @import("../platform/event_ledger.zig");
 const native_kernel = @import("../kernel_api/native_kernel.zig");
 const native_service_registry = @import("../kernel_api/service_registry.zig");
 const native_ux = @import("../platform/native_ux.zig");
@@ -30,6 +31,7 @@ const shared_memory_mod = @import("../kernel_api/shared_memory.zig");
 const storage_service_mod = @import("../storage/storage_service.zig");
 const supervisor_mod = @import("supervisor.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
+const background_dispatch = @import("../task/background_dispatch.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service_mod = @import("../task/task_runtime_service.zig");
 const userspace_executor = @import("../task/userspace_executor.zig");
@@ -73,6 +75,8 @@ var kernel_port_ready = false;
 var driver_directory = driver_service.Directory.init();
 var driver_runtime = driver_runtime_mod.Runtime.init();
 var supervisor = supervisor_mod.Supervisor.init();
+var diagnostic_ledger = event_ledger.Ledger.init();
+var background_dispatcher = background_dispatch.Controller.init();
 var phase4_storage_service = emptyStorageService();
 var phase4_export_package = workspace_mod.emptyExportPackage();
 const bootstrap_review_inputs = [_][]const u8{
@@ -153,6 +157,8 @@ fn environment() Environment {
         .supervisor = &supervisor,
         .driver_directory = &driver_directory,
         .driver_runtime = &driver_runtime,
+        .diagnostic_ledger = &diagnostic_ledger,
+        .background_dispatcher = &background_dispatcher,
     };
 }
 
@@ -192,6 +198,8 @@ fn resetStateForTest() void {
     driver_directory = driver_service.Directory.init();
     driver_runtime = driver_runtime_mod.Runtime.init();
     supervisor = supervisor_mod.Supervisor.init();
+    diagnostic_ledger = event_ledger.Ledger.init();
+    background_dispatcher = background_dispatch.Controller.init();
     phase4_storage_service = emptyStorageService();
     phase4_export_package = workspace_mod.emptyExportPackage();
     userspace_scheduler.reset();
@@ -281,6 +289,14 @@ pub const testing = struct {
 
     pub fn compositorSessionPtr() *compositor_session.Session {
         return &phase2_compositor_session;
+    }
+
+    pub fn backgroundDispatchPtr() *background_dispatch.Controller {
+        return &background_dispatcher;
+    }
+
+    pub fn updateLedgerPtr() *event_ledger.Ledger {
+        return &diagnostic_ledger;
     }
 
     pub fn compatibilityPortalInterface() manifest.InterfaceDecl {
@@ -558,6 +574,7 @@ fn runSessionLifecycle(
         .runtime = &runtime,
         .runtime_service = &runtime_service,
         .supervisor = &supervisor,
+        .compositor = &phase2_compositor_session,
         .driver_directory = &driver_directory,
         .storage_service_instance = &phase4_storage_service,
         .export_package = &phase4_export_package,
@@ -575,6 +592,7 @@ fn runSessionLifecycle(
         .compositor_service_id = state.services.compositor_service.id,
         .package_service_id = state.services.package_service.id,
         .package_service_principal = state.ids.package_service,
+        .update_ledger = &diagnostic_ledger,
         .notes_object_capability = notes_object_capability,
     };
     session_lifecycle_phases.run(&lifecycle_context);
