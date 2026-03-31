@@ -1,11 +1,16 @@
 const std = @import("std");
 const spec_support = @import("support.zig");
+const compositor_session = @import("../../native/platform/compositor_session.zig");
+const event_ledger = @import("../../native/platform/event_ledger.zig");
 const immutable_base = @import("../../native/platform/immutable_base.zig");
 const measured_boot = @import("../../native/platform/measured_boot.zig");
 const object_store = @import("../../native/storage/object_store.zig");
 const recovery_environment = @import("../../native/platform/recovery_environment.zig");
+const supervisor = @import("../../native/session/supervisor.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
 const sync_service = @import("../../native/sync/sync_service.zig");
+const task_runtime = @import("../../native/task/task_runtime.zig");
+const update_health = @import("../../native/platform/update_health.zig");
 
 pub fn baseImageStaysSignedMeasuredAtomicAndRollbackCapable() !void {
     storage_service.Service.resetPersistentState();
@@ -129,4 +134,190 @@ pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {
     try std.testing.expect(recovery.report.device_keys_rotated);
     try std.testing.expect(recovery.report.device_trust_revoked);
     try std.testing.expect(!sync.isTrustedDevice(tablet));
+}
+
+pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
+    storage_service.Service.resetPersistentState();
+    defer storage_service.Service.resetPersistentState();
+
+    const owner = spec_support.service(41);
+    const state_signer = spec_support.signer("spec.health.state", 0x53);
+    const image_signer = spec_support.signer("spec.health.image", 0x54);
+    const object_signer = spec_support.signer("spec.health.object", 0x55);
+    const user = spec_support.user(41);
+    const source_device = spec_support.device(411);
+    const target_device = spec_support.device(412);
+    const user_signer = spec_support.signer("spec.health.user", 0x56);
+    const source_signer = spec_support.signer("spec.health.source", 0x57);
+    const target_signer = spec_support.signer("spec.health.target", 0x58);
+
+    var storage = storage_service.Service.init(701, 71, owner);
+    var manager = try immutable_base.Manager.init(&storage, owner, state_signer);
+    var sync = sync_service.Service.init(702, 72, owner);
+    var compositor = compositor_session.Session.init();
+
+    const probe_record = try storage.putVersion(.{
+        .preferred_object_id = 1_210,
+        .object_type = .document,
+        .payload = "notes-v1",
+        .metadata = try object_store.signMetadata(object_signer, "notes", "text/plain", .document, "notes-v1", 10),
+    });
+    const workspace_record = try storage.createWorkspace(.{
+        .owner = owner,
+        .label = "health-checks",
+    });
+    try storage.beginTransaction(workspace_record.id);
+    try storage.stagePut(workspace_record.id, "documents/notes.md", probe_record.object_id, probe_record.version_id, .document);
+    _ = try storage.commit(workspace_record.id, 11);
+
+    _ = try sync.ensureUserRoot(user, "owner", user_signer);
+    _ = try sync.enrollTrustedDevice(user, source_device, "source", user_signer, source_signer, 12);
+    _ = try sync.enrollTrustedDevice(user, target_device, "target", user_signer, target_signer, 13);
+    const local_policy = try sync.createNetworkPolicy(.{
+        .owner = owner,
+        .workspace_id = workspace_record.id,
+        .label = "health-local",
+        .mode = .local_network,
+    });
+    const overlay_policy = try sync.createNetworkPolicy(.{
+        .owner = owner,
+        .workspace_id = workspace_record.id,
+        .label = "health-overlay",
+        .mode = .named_service_identity,
+        .target = "overlay.health.sync",
+    });
+    _ = try sync.configureWorkspacePolicy(.{
+        .workspace_id = workspace_record.id,
+        .owner = user,
+        .device_to_device_policy_id = local_policy.id,
+        .overlay_policy_id = overlay_policy.id,
+    });
+    _ = try sync.configureOverlay(workspace_record.id, source_device, "overlay.health.sync", true);
+
+    var ui_runtime = task_runtime.Runtime.init();
+    const ui_task = try ui_runtime.createTask(.{
+        .owner = owner,
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = 64 * 1024,
+            .endpoint_slots = 2,
+            .shared_memory_bytes = 4 * 1024,
+        },
+        .ui_surface_id = 7,
+        .initial_component = .{
+            .label = "health-ui",
+            .entry = "zigos.health.ui",
+        },
+    });
+    _ = try compositor.openTaskView(ui_task, "Update Health");
+
+    var supervisor_instance = supervisor.Supervisor.init();
+    const policy_service = try supervisor_instance.register(.policy_mediation, owner);
+    const package_service = try supervisor_instance.register(.package_install_update, owner);
+    const sync_service_record = try supervisor_instance.register(.sync_replication, owner);
+    const network_service = try supervisor_instance.register(.network_stack, owner);
+    const compositor_service = try supervisor_instance.register(.compositor_ui_session, owner);
+    try std.testing.expect(supervisor_instance.noteContractBound(policy_service.id, 5001, 12));
+    try std.testing.expect(supervisor_instance.noteContractBound(package_service.id, 5002, 12));
+    try std.testing.expect(supervisor_instance.noteContractBound(sync_service_record.id, 5003, 12));
+    try std.testing.expect(supervisor_instance.noteContractBound(network_service.id, 5004, 12));
+    try std.testing.expect(supervisor_instance.noteContractBound(compositor_service.id, 5005, 12));
+    try std.testing.expect(supervisor_instance.markHealthy(policy_service.id, 12));
+    try std.testing.expect(supervisor_instance.markHealthy(package_service.id, 12));
+    try std.testing.expect(supervisor_instance.markHealthy(sync_service_record.id, 12));
+    try std.testing.expect(supervisor_instance.markHealthy(network_service.id, 12));
+    try std.testing.expect(supervisor_instance.markHealthy(compositor_service.id, 12));
+
+    const core_service_ids = [_]u64{
+        policy_service.id,
+        package_service.id,
+        sync_service_record.id,
+    };
+    const request = update_health.CheckRequest{
+        .core_service_ids = core_service_ids[0..],
+        .storage_workspace_id = workspace_record.id,
+        .storage_probe_path = "documents/notes.md",
+        .network_service_id = network_service.id,
+        .ui_service_id = compositor_service.id,
+        .network_probe = .{
+            .sync = &sync,
+            .workspace_id = workspace_record.id,
+            .source_device = source_device,
+            .target_device = target_device,
+            .tick = 14,
+        },
+        .ui_probe = .{ .session = &compositor },
+    };
+    var ledger = event_ledger.Ledger.init();
+
+    _ = try manager.stageImage(0, "stable-a", "kernel=v1", image_signer, 13);
+    try manager.beginActivation(0, 14);
+    try update_health.recordBootSuccess(&manager, 15);
+    const initial = try update_health.validatePendingActivation(&manager, &supervisor_instance, &storage, request, &ledger, 16);
+    try std.testing.expect(initial.evaluation.report.isHealthy());
+
+    _ = try manager.stageImage(1, "stable-b", "kernel=v2", image_signer, 17);
+
+    try manager.beginActivation(1, 18);
+    const boot_failure = try update_health.validatePendingActivation(
+        &manager,
+        &supervisor_instance,
+        &storage,
+        request,
+        &ledger,
+        19,
+    );
+    try std.testing.expectEqual(immutable_base.HealthFailure.boot, boot_failure.activation.failure);
+
+    try manager.beginActivation(1, 20);
+    try update_health.recordBootSuccess(&manager, 21);
+    try std.testing.expect(supervisor_instance.recordCrash(sync_service_record.id, 22, 0xCA11));
+    const core_failure = try update_health.validatePendingActivation(&manager, &supervisor_instance, &storage, request, &ledger, 23);
+    try std.testing.expectEqual(immutable_base.HealthFailure.core_service, core_failure.activation.failure);
+    try std.testing.expect(supervisor_instance.markHealthy(sync_service_record.id, 24));
+
+    try manager.beginActivation(1, 25);
+    try update_health.recordBootSuccess(&manager, 26);
+    const storage_failure = try update_health.validatePendingActivation(&manager, &supervisor_instance, &storage, .{
+        .core_service_ids = core_service_ids[0..],
+        .storage_workspace_id = workspace_record.id,
+        .storage_probe_path = "documents/missing.md",
+        .network_service_id = network_service.id,
+        .ui_service_id = compositor_service.id,
+        .network_probe = request.network_probe,
+        .ui_probe = request.ui_probe,
+    }, &ledger, 27);
+    try std.testing.expectEqual(immutable_base.HealthFailure.storage, storage_failure.activation.failure);
+
+    try manager.beginActivation(1, 28);
+    try update_health.recordBootSuccess(&manager, 29);
+    try std.testing.expect(supervisor_instance.recordCrash(network_service.id, 30, 0xCA12));
+    const network_failure = try update_health.validatePendingActivation(&manager, &supervisor_instance, &storage, request, &ledger, 31);
+    try std.testing.expectEqual(immutable_base.HealthFailure.network, network_failure.activation.failure);
+    try std.testing.expect(supervisor_instance.markHealthy(network_service.id, 32));
+
+    try manager.beginActivation(1, 33);
+    try update_health.recordBootSuccess(&manager, 34);
+    try std.testing.expect(supervisor_instance.recordCrash(compositor_service.id, 35, 0xCA13));
+    const ui_failure = try update_health.validatePendingActivation(&manager, &supervisor_instance, &storage, request, &ledger, 36);
+    try std.testing.expectEqual(immutable_base.HealthFailure.ui, ui_failure.activation.failure);
+    try std.testing.expect(supervisor_instance.markHealthy(compositor_service.id, 37));
+
+    try manager.beginActivation(1, 38);
+    try update_health.recordBootSuccess(&manager, 39);
+    const success = try update_health.validatePendingActivation(&manager, &supervisor_instance, &storage, request, &ledger, 40);
+    try std.testing.expect(!success.activation.rolled_back);
+    try std.testing.expectEqual(@as(?usize, 1), success.activation.active_slot);
+    try std.testing.expectEqual(@as(u64, 5), success.activation.rollback_generation);
+
+    var export_buffer: [2048]u8 = undefined;
+    const exported = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, exported, "kind=update_transition") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "failure=boot") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "failure=core_service") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "failure=storage") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "failure=network") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "failure=ui") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "rollback=yes") != null);
 }

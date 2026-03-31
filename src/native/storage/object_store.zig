@@ -5,8 +5,8 @@ const native_util = @import("../core/util.zig");
 const signing = @import("../core/signing.zig");
 const copyText = native_util.copyText;
 
-pub const MAX_OBJECTS: usize = 24;
-pub const MAX_VERSIONS: usize = 128;
+pub const MAX_OBJECTS: usize = 128;
+pub const MAX_VERSIONS: usize = 512;
 pub const MAX_PAYLOAD_BYTES: usize = 512;
 const MAX_METADATA_MESSAGE_BYTES: usize = MAX_PAYLOAD_BYTES + 256;
 

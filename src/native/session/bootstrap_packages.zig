@@ -34,6 +34,15 @@ fn installViewer(packages: *package_service.Service) void {
     const components = [_]manifest.ExecutionComponentDecl{
         .{ .id = "viewer", .entry = "app.viewer" },
     };
+    const provided_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.viewer.document" },
+    };
+    const consumed_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.object.workspace" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/viewer/icon.svg", .content_type = "image/svg+xml" },
+    };
     const permissions = [_]manifest.PermissionRequest{
         .{
             .kind = .network_egress,
@@ -55,7 +64,10 @@ fn installViewer(packages: *package_service.Service) void {
         .bundle_id = "app.viewer",
         .display_name = "Viewer",
         .publisher = "zigos.dev",
+        .provided_interfaces = &provided_interfaces,
+        .consumed_interfaces = &consumed_interfaces,
         .components = &components,
+        .assets = &assets,
         .requested_permissions = &permissions,
     };
     bundle.signature = signing.sign(viewer_signer, &package_service.digestBundle(bundle)) catch unreachable;
@@ -77,6 +89,9 @@ fn installNotes(packages: *package_service.Service) void {
     };
     const consumed_interfaces = [_]manifest.InterfaceDecl{
         .{ .name = "zigos.object.workspace" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/notes/icon.svg", .content_type = "image/svg+xml" },
     };
     const permissions = [_]manifest.PermissionRequest{
         .{
@@ -109,6 +124,7 @@ fn installNotes(packages: *package_service.Service) void {
         .provided_interfaces = &provided_interfaces,
         .consumed_interfaces = &consumed_interfaces,
         .components = &components,
+        .assets = &assets,
         .requested_permissions = &permissions,
         .ai_metadata = .{
             .model_family = "tiny-embed",
@@ -130,6 +146,15 @@ fn installSync(packages: *package_service.Service) void {
 
     const components = [_]manifest.ExecutionComponentDecl{
         .{ .id = "sync", .entry = "app.sync" },
+    };
+    const provided_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.sync.replication" },
+    };
+    const consumed_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.object.workspace" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/sync/icon.svg", .content_type = "image/svg+xml" },
     };
     const permissions = [_]manifest.PermissionRequest{
         .{
@@ -157,7 +182,10 @@ fn installSync(packages: *package_service.Service) void {
         .bundle_id = "app.sync",
         .display_name = "Sync",
         .publisher = "zigos.dev",
+        .provided_interfaces = &provided_interfaces,
+        .consumed_interfaces = &consumed_interfaces,
         .components = &components,
+        .assets = &assets,
         .requested_permissions = &permissions,
         .background_tasks = &background_tasks,
     };
@@ -174,6 +202,15 @@ fn installCapture(packages: *package_service.Service) void {
 
     const components = [_]manifest.ExecutionComponentDecl{
         .{ .id = "capture", .entry = "app.capture" },
+    };
+    const provided_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.capture.session" },
+    };
+    const consumed_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.media.print" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/capture/icon.svg", .content_type = "image/svg+xml" },
     };
     const permissions = [_]manifest.PermissionRequest{
         .{
@@ -226,7 +263,10 @@ fn installCapture(packages: *package_service.Service) void {
         .bundle_id = "app.capture",
         .display_name = "Capture",
         .publisher = "zigos.dev",
+        .provided_interfaces = &provided_interfaces,
+        .consumed_interfaces = &consumed_interfaces,
         .components = &components,
+        .assets = &assets,
         .requested_permissions = &permissions,
     };
     bundle.signature = signing.sign(capture_signer, &package_service.digestBundle(bundle)) catch unreachable;

@@ -228,6 +228,7 @@ pub const Catalog = struct {
         elf_bytes: []const u8,
     ) Error!*const ImageRecord {
         try manifest.validate(request.bundle);
+        try manifest.validateApplicationPackaging(request.bundle);
         if (request.initial_component.label.len == 0) return error.EmptyLabel;
         if (request.initial_component.entry.len == 0) return error.EmptyEntry;
         try validateExecutableBundle(request.bundle, request.initial_component, embedded != null);
@@ -306,7 +307,9 @@ fn validateExecutableBundle(
 ) Error!void {
     if (!bundle.signature.isPresent()) return error.MissingBundleSignature;
     if (!userspace_manifest_signing.verifyBundle(bundle)) return error.InvalidBundleSignature;
-    if (bundle.components.len == 0) return error.MissingBundleComponent;
+    if (!manifest.isApplicationBundle(bundle.bundle_id) and bundle.components.len == 0) {
+        return error.MissingBundleComponent;
+    }
     if (!bundleDeclaresInitialComponent(bundle, initial_component)) return error.InitialComponentNotDeclared;
     if (builtin.target.os.tag == .freestanding and !has_embedded_artifact) {
         return error.EmbeddedArtifactRequired;
@@ -529,13 +532,23 @@ fn makeSyntheticElf32(entry_point: u32, phnum: u16, loadable_segments: u16) [@si
 
 test "userspace image launch records bundle provenance and isolated process state" {
     var catalog = Catalog.init();
+    const interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+        .{ .name = "zigos.object.workspace" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/notes/icon.svg", .content_type = "image/svg+xml" },
+    };
     var bundle = manifest.BundleManifest{
         .bundle_id = "app.notes",
         .display_name = "Notes",
         .publisher = "zigos.dev",
+        .provided_interfaces = interfaces[0..1],
+        .consumed_interfaces = interfaces[1..2],
         .components = &[_]manifest.ExecutionComponentDecl{
             .{ .id = "notes", .entry = "app.notes" },
         },
+        .assets = &assets,
     };
     bundle.signature = try userspace_manifest_signing.signBundle(bundle);
     _ = try catalog.register(.{
@@ -713,15 +726,25 @@ test "catalog stores embedded elf metadata for registered userspace artifacts" {
 
 test "catalog rejects unsigned bundles and missing declared components for userspace launch" {
     var catalog = Catalog.init();
+    const interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+        .{ .name = "zigos.object.workspace" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/default/icon.svg", .content_type = "image/svg+xml" },
+    };
 
     try std.testing.expectError(error.MissingBundleSignature, catalog.register(.{
         .bundle = .{
             .bundle_id = "app.unsigned",
             .display_name = "Unsigned",
             .publisher = "zigos.dev",
+            .provided_interfaces = interfaces[0..1],
+            .consumed_interfaces = interfaces[1..2],
             .components = &[_]manifest.ExecutionComponentDecl{
                 .{ .id = "unsigned", .entry = "app.unsigned" },
             },
+            .assets = &assets,
         },
         .component_class = .app_component,
         .initial_component = .{
@@ -730,12 +753,15 @@ test "catalog rejects unsigned bundles and missing declared components for users
         },
     }));
 
-    try std.testing.expectError(error.MissingBundleComponent, catalog.register(.{
+    try std.testing.expectError(error.MissingExecutableComponent, catalog.register(.{
         .bundle = blk: {
             var bundle = manifest.BundleManifest{
                 .bundle_id = "app.no-components",
                 .display_name = "No Components",
                 .publisher = "zigos.dev",
+                .provided_interfaces = interfaces[0..1],
+                .consumed_interfaces = interfaces[1..2],
+                .assets = &assets,
             };
             bundle.signature = try userspace_manifest_signing.signBundle(bundle);
             break :blk bundle;
@@ -753,9 +779,12 @@ test "catalog rejects unsigned bundles and missing declared components for users
                 .bundle_id = "app.mismatch",
                 .display_name = "Mismatch",
                 .publisher = "zigos.dev",
+                .provided_interfaces = interfaces[0..1],
+                .consumed_interfaces = interfaces[1..2],
                 .components = &[_]manifest.ExecutionComponentDecl{
                     .{ .id = "worker", .entry = "app.mismatch.worker" },
                 },
+                .assets = &assets,
             };
             bundle.signature = try userspace_manifest_signing.signBundle(bundle);
             break :blk bundle;
@@ -770,13 +799,23 @@ test "catalog rejects unsigned bundles and missing declared components for users
 
 test "catalog rejects invalid bundle signatures" {
     var catalog = Catalog.init();
+    const interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+        .{ .name = "zigos.object.workspace" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/default/icon.svg", .content_type = "image/svg+xml" },
+    };
     var bundle = manifest.BundleManifest{
         .bundle_id = "app.invalid-signature",
         .display_name = "Invalid Signature",
         .publisher = "zigos.dev",
+        .provided_interfaces = interfaces[0..1],
+        .consumed_interfaces = interfaces[1..2],
         .components = &[_]manifest.ExecutionComponentDecl{
             .{ .id = "main", .entry = "app.invalid-signature" },
         },
+        .assets = &assets,
     };
     bundle.signature = try userspace_manifest_signing.signBundle(bundle);
     bundle.display_name = "Tampered Signature";

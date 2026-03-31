@@ -21,11 +21,60 @@ pub const MAX_DATABASE_CONTRACTS = state_support.MAX_DATABASE_CONTRACTS;
 pub const MAX_OVERLAYS = state_support.MAX_OVERLAYS;
 pub const MAX_PRIVATE_SERVICES = state_support.MAX_PRIVATE_SERVICES;
 pub const MAX_LABEL_BYTES = state_support.MAX_LABEL_BYTES;
+pub const MAX_OVERLAY_SESSIONS: usize = 8;
 pub const TransportMode = state_support.TransportMode;
 pub const SyncSemantic = state_support.SyncSemantic;
 pub const WorkspacePolicyRequest = state_support.WorkspacePolicyRequest;
 pub const WorkspacePolicy = state_support.WorkspacePolicy;
 pub const OverlayRecord = state_support.OverlayRecord;
+pub const OverlaySessionUse = enum(u8) {
+    sync_replication,
+    remote_access,
+    private_service,
+};
+pub const OverlaySessionState = enum(u8) {
+    establishing,
+    established,
+    closed,
+};
+pub const OverlaySession = struct {
+    session_id: u64 = 0,
+    overlay_id: u64,
+    workspace_id: u64,
+    source_device: principal.PrincipalId,
+    target_device: principal.PrincipalId,
+    usage: OverlaySessionUse,
+    transport: TransportMode,
+    state: OverlaySessionState = .establishing,
+    encrypted: bool,
+    relay_encrypted: bool,
+    remote_access: bool,
+    open_tick: u64 = 0,
+    last_activity_tick: u64 = 0,
+    keepalive_count: u16 = 0,
+    service_identity_len: usize = 0,
+    service_identity: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    relay_domain_len: usize = 0,
+    relay_domain: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    private_service_len: usize = 0,
+    private_service: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+
+    pub fn serviceIdentitySlice(self: *const OverlaySession) []const u8 {
+        return self.service_identity[0..self.service_identity_len];
+    }
+
+    pub fn relayDomainSlice(self: *const OverlaySession) []const u8 {
+        return self.relay_domain[0..self.relay_domain_len];
+    }
+
+    pub fn privateServiceSlice(self: *const OverlaySession) []const u8 {
+        return self.private_service[0..self.private_service_len];
+    }
+
+    pub fn isActive(self: *const OverlaySession) bool {
+        return self.state == .established;
+    }
+};
 pub const ReplicaEntry = state_support.ReplicaEntry;
 pub const ConflictRecord = state_support.ConflictRecord;
 pub const DatabaseContract = state_support.DatabaseContract;
@@ -45,6 +94,22 @@ const zeroOverlay = state_support.zeroOverlay;
 const zeroReplicaEntry = state_support.zeroReplicaEntry;
 const zeroWorkspacePolicy = state_support.zeroWorkspacePolicy;
 
+const OverlaySessionSlot = struct {
+    in_use: bool = false,
+    session: OverlaySession = .{
+        .overlay_id = 0,
+        .workspace_id = 0,
+        .source_device = .{ .kind = .device, .serial = 0 },
+        .target_device = .{ .kind = .device, .serial = 0 },
+        .usage = .sync_replication,
+        .transport = .device_to_device,
+        .state = .closed,
+        .encrypted = true,
+        .relay_encrypted = false,
+        .remote_access = false,
+    },
+};
+
 pub const Service = struct {
     service_id: u64,
     task_id: u64,
@@ -53,6 +118,8 @@ pub const Service = struct {
     storage: ?*storage_service.Service = null,
     state_workspace_id: u64 = 0,
     state: *PersistentState,
+    next_overlay_session_id: u64 = 1,
+    overlay_sessions: [MAX_OVERLAY_SESSIONS]OverlaySessionSlot = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_OVERLAY_SESSIONS,
 
     pub fn init(service_id: u64, task_id: u64, owner: principal.PrincipalId) Service {
         const loaded_existing_state = state_support.has_persisted_state;
@@ -67,6 +134,8 @@ pub const Service = struct {
             .storage = null,
             .state_workspace_id = 0,
             .state = &state_support.persisted_state,
+            .next_overlay_session_id = 1,
+            .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_OVERLAY_SESSIONS,
         };
     }
 
@@ -94,6 +163,8 @@ pub const Service = struct {
             .storage = storage,
             .state_workspace_id = workspace_id,
             .state = &state_support.persisted_state,
+            .next_overlay_session_id = 1,
+            .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_OVERLAY_SESSIONS,
         };
     }
 
@@ -244,6 +315,105 @@ pub const Service = struct {
     pub fn findOverlay(self: *Service, workspace_id: u64) ?*OverlayRecord {
         const slot = self.lookupOverlaySlot(workspace_id) orelse return null;
         return &slot.overlay;
+    }
+
+    pub fn findOverlaySession(self: *Service, session_id: u64) ?*OverlaySession {
+        for (&self.overlay_sessions) |*slot| {
+            if (slot.in_use and slot.session.session_id == session_id) return &slot.session;
+        }
+        return null;
+    }
+
+    pub fn activeOverlaySessionCount(self: *const Service) usize {
+        var count: usize = 0;
+        for (self.overlay_sessions) |slot| {
+            if (slot.in_use and slot.session.state == .established) count += 1;
+        }
+        return count;
+    }
+
+    pub fn openOverlaySession(
+        self: *Service,
+        workspace_id: u64,
+        from_device: principal.PrincipalId,
+        to_device: principal.PrincipalId,
+        usage: OverlaySessionUse,
+        transport: TransportMode,
+        private_service_label: ?[]const u8,
+        tick: u64,
+    ) Error!OverlaySession {
+        try self.ensureTrustedDevices(from_device, to_device);
+        const policy = self.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
+        const overlay = self.findOverlay(workspace_id) orelse return error.OverlayNotFound;
+        const overlay_policy_id = policy.overlay_policy_id orelse return error.TransportDenied;
+        const overlay_decision = try self.evaluateNetworkPolicy(overlay_policy_id, .{
+            .service_identity = overlay.serviceIdentitySlice(),
+        });
+        if (!overlay_decision.allowed) return error.TransportDenied;
+
+        try self.authorizeTransport(policy, transport, null);
+        if (transport == .relay_assisted and !overlay.remote_access_enabled) {
+            return error.RemoteAccessDisabled;
+        }
+
+        var session = OverlaySession{
+            .session_id = self.nextOverlaySessionId(),
+            .overlay_id = overlay.id,
+            .workspace_id = workspace_id,
+            .source_device = from_device,
+            .target_device = to_device,
+            .usage = usage,
+            .transport = transport,
+            .state = .establishing,
+            .encrypted = true,
+            .relay_encrypted = transport == .relay_assisted,
+            .remote_access = false,
+            .open_tick = tick,
+            .last_activity_tick = tick,
+        };
+        session.service_identity_len = copyText(&session.service_identity, overlay.serviceIdentitySlice());
+
+        switch (usage) {
+            .sync_replication => {},
+            .remote_access => {
+                if (!overlay.remote_access_enabled) return error.RemoteAccessDisabled;
+                session.remote_access = true;
+            },
+            .private_service => {
+                const label = private_service_label orelse return error.PrivateServiceNotPublished;
+                if (!overlay.hasPrivateService(label)) return error.PrivateServiceNotPublished;
+                session.private_service_len = copyText(&session.private_service, label);
+                session.remote_access = overlay.remote_access_enabled and transport == .relay_assisted;
+            },
+        }
+
+        if (transport == .relay_assisted) {
+            session.relay_domain_len = copyText(&session.relay_domain, policy.relayDomainSlice());
+            session.remote_access = true;
+        }
+
+        const slot = self.allocateOverlaySessionSlot() orelse return error.OverlayTableFull;
+        slot.in_use = true;
+        slot.session = session;
+        slot.session.state = .established;
+        session.state = .established;
+        return session;
+    }
+
+    pub fn probeOverlaySession(self: *Service, session_id: u64, tick: u64) Error!bool {
+        const session = self.findOverlaySession(session_id) orelse return error.OverlaySessionNotFound;
+        if (session.state != .established) return false;
+        session.keepalive_count += 1;
+        session.last_activity_tick = tick;
+        return true;
+    }
+
+    pub fn closeOverlaySession(self: *Service, session_id: u64, tick: u64) Error!bool {
+        const session = self.findOverlaySession(session_id) orelse return error.OverlaySessionNotFound;
+        if (session.state == .closed) return false;
+        session.state = .closed;
+        session.last_activity_tick = tick;
+        return true;
     }
 
     pub fn setReplicaVersion(
@@ -497,6 +667,21 @@ pub const Service = struct {
         if (!self.state.graph.isTrusted(from_device) or !self.state.graph.isTrusted(to_device)) {
             return error.DeviceNotTrusted;
         }
+    }
+
+    fn allocateOverlaySessionSlot(self: *Service) ?*OverlaySessionSlot {
+        for (&self.overlay_sessions) |*slot| {
+            if (!slot.in_use) return slot;
+        }
+        for (&self.overlay_sessions) |*slot| {
+            if (slot.session.state == .closed) return slot;
+        }
+        return null;
+    }
+
+    fn nextOverlaySessionId(self: *Service) u64 {
+        defer self.next_overlay_session_id += 1;
+        return self.next_overlay_session_id;
     }
 
     fn recordConflict(
@@ -881,4 +1066,142 @@ test "sync service covers device graph policy replication semantics and restart 
 
     Service.resetPersistentState();
     storage_service.Service.resetPersistentState();
+}
+
+test "overlay sessions cover sync remote access private service publishing and encrypted relay" {
+    Service.resetPersistentState();
+
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 91 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 19 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 191 };
+    const tablet = principal.PrincipalId{ .kind = .device, .serial = 192 };
+    const phone = principal.PrincipalId{ .kind = .device, .serial = 193 };
+    const user_signer = signing.SignerIdentity{
+        .label = "overlay-user",
+        .seed = [_]u8{0x61} ** 32,
+    };
+    const laptop_signer = signing.SignerIdentity{
+        .label = "overlay-laptop",
+        .seed = [_]u8{0x62} ** 32,
+    };
+    const tablet_signer = signing.SignerIdentity{
+        .label = "overlay-tablet",
+        .seed = [_]u8{0x63} ** 32,
+    };
+    const phone_signer = signing.SignerIdentity{
+        .label = "overlay-phone",
+        .seed = [_]u8{0x64} ** 32,
+    };
+
+    var service = Service.init(901, 92, sync_owner);
+    _ = try service.ensureUserRoot(user, "owner", user_signer);
+    _ = try service.enrollTrustedDevice(user, laptop, "laptop", user_signer, laptop_signer, 10);
+    _ = try service.enrollTrustedDevice(user, tablet, "tablet", user_signer, tablet_signer, 11);
+    _ = try service.enrollTrustedDevice(user, phone, "phone", user_signer, phone_signer, 12);
+
+    const workspace_id: u64 = 4_200;
+    const local_policy = try service.createNetworkPolicy(.{
+        .owner = sync_owner,
+        .workspace_id = workspace_id,
+        .label = "local",
+        .mode = .local_network,
+    });
+    const overlay_policy = try service.createNetworkPolicy(.{
+        .owner = sync_owner,
+        .workspace_id = workspace_id,
+        .label = "overlay",
+        .mode = .named_service_identity,
+        .target = "overlay.workspace.sync",
+    });
+    const relay_policy = try service.createNetworkPolicy(.{
+        .owner = sync_owner,
+        .workspace_id = workspace_id,
+        .label = "relay",
+        .mode = .named_domain,
+        .target = "relay.zigos.dev",
+    });
+    _ = try service.configureWorkspacePolicy(.{
+        .workspace_id = workspace_id,
+        .owner = user,
+        .device_to_device_policy_id = local_policy.id,
+        .relay_policy_id = relay_policy.id,
+        .overlay_policy_id = overlay_policy.id,
+        .relay_domain = "relay.zigos.dev",
+    });
+
+    _ = try service.configureOverlay(workspace_id, laptop, "overlay.workspace.sync", true);
+    _ = try service.publishPrivateService(workspace_id, "notes.remote");
+
+    const sync_session = try service.openOverlaySession(
+        workspace_id,
+        laptop,
+        tablet,
+        .sync_replication,
+        .device_to_device,
+        null,
+        13,
+    );
+    try std.testing.expectEqual(OverlaySessionUse.sync_replication, sync_session.usage);
+    try std.testing.expect(sync_session.isActive());
+    try std.testing.expect(sync_session.encrypted);
+    try std.testing.expect(!sync_session.relay_encrypted);
+    try std.testing.expectEqualStrings("overlay.workspace.sync", sync_session.serviceIdentitySlice());
+    try std.testing.expectEqual(@as(usize, 1), service.activeOverlaySessionCount());
+    try std.testing.expect(try service.probeOverlaySession(sync_session.session_id, 14));
+    try std.testing.expectEqual(@as(u16, 1), service.findOverlaySession(sync_session.session_id).?.keepalive_count);
+
+    const remote_session = try service.openOverlaySession(
+        workspace_id,
+        laptop,
+        tablet,
+        .remote_access,
+        .relay_assisted,
+        null,
+        15,
+    );
+    try std.testing.expectEqual(OverlaySessionUse.remote_access, remote_session.usage);
+    try std.testing.expect(remote_session.remote_access);
+    try std.testing.expect(remote_session.relay_encrypted);
+    try std.testing.expectEqualStrings("relay.zigos.dev", remote_session.relayDomainSlice());
+
+    const private_service = try service.openOverlaySession(
+        workspace_id,
+        tablet,
+        laptop,
+        .private_service,
+        .relay_assisted,
+        "notes.remote",
+        16,
+    );
+    try std.testing.expectEqual(OverlaySessionUse.private_service, private_service.usage);
+    try std.testing.expect(private_service.remote_access);
+    try std.testing.expect(private_service.relay_encrypted);
+    try std.testing.expectEqualStrings("notes.remote", private_service.privateServiceSlice());
+    try std.testing.expectEqual(@as(usize, 3), service.activeOverlaySessionCount());
+    try std.testing.expect(try service.closeOverlaySession(remote_session.session_id, 17));
+    try std.testing.expectEqual(OverlaySessionState.closed, service.findOverlaySession(remote_session.session_id).?.state);
+    try std.testing.expectEqual(@as(usize, 2), service.activeOverlaySessionCount());
+
+    try std.testing.expectError(error.PrivateServiceNotPublished, service.openOverlaySession(
+        workspace_id,
+        laptop,
+        tablet,
+        .private_service,
+        .relay_assisted,
+        "notes.missing",
+        18,
+    ));
+
+    _ = try service.configureOverlay(workspace_id, laptop, "overlay.workspace.sync", false);
+    try std.testing.expectError(error.RemoteAccessDisabled, service.openOverlaySession(
+        workspace_id,
+        laptop,
+        phone,
+        .remote_access,
+        .relay_assisted,
+        null,
+        19,
+    ));
+
+    Service.resetPersistentState();
 }

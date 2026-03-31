@@ -272,6 +272,7 @@ fn backgroundTriggerLabel(trigger: manifest.BackgroundTrigger) []const u8 {
 
 fn backgroundNetworkLabel(mode: manifest.BackgroundNetworkMode) []const u8 {
     return switch (mode) {
+        .unspecified => "unspecified",
         .none => "none",
         .local_network_only => "local-network-only",
         .named_service_identities => "named-service-identities",
@@ -282,6 +283,7 @@ fn backgroundNetworkLabel(mode: manifest.BackgroundNetworkMode) []const u8 {
 
 fn backgroundVisibilityLabel(visibility: manifest.BackgroundVisibility) []const u8 {
     return switch (visibility) {
+        .unspecified => "unspecified",
         .hidden => "hidden",
         .status_only => "status-only",
         .user_visible => "user-visible",

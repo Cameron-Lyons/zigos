@@ -101,6 +101,16 @@ pub const OverlayRecord = struct {
     pub fn hasPrivateServices(self: *const OverlayRecord) bool {
         return self.private_service_count != 0;
     }
+
+    pub fn hasPrivateService(self: *const OverlayRecord, label: []const u8) bool {
+        var index: usize = 0;
+        while (index < self.private_service_count) : (index += 1) {
+            if (std.mem.eql(u8, self.private_services[index][0..self.private_service_lens[index]], label)) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 pub const ReplicaEntry = struct {
@@ -175,8 +185,11 @@ pub const Error = error{
     InvalidContractSignature,
     InvalidStateSignatureEncoding,
     OverlayNotFound,
+    OverlaySessionNotFound,
     OverlayTableFull,
+    PrivateServiceNotPublished,
     ReplicaTableFull,
+    RemoteAccessDisabled,
     StateSigningFailed,
     StateTooLarge,
     TooManyPrivateServices,

@@ -14,6 +14,10 @@ pub const ImageSpec = struct {
     label: []const u8,
     entry: []const u8,
     components: []const manifest.ExecutionComponentDecl,
+    provided_interfaces: []const manifest.InterfaceDecl = &.{},
+    consumed_interfaces: []const manifest.InterfaceDecl = &.{},
+    assets: []const manifest.AssetDecl = &.{},
+    update_channel: manifest.UpdateChannel = .stable,
     component_class: ComponentClass,
     signed: bool = true,
 };
@@ -77,6 +81,9 @@ pub const boot_image_specs = [_]ImageSpec{
         .label = "viewer",
         .entry = "app.viewer",
         .components = &.{.{ .id = "viewer", .entry = "app.viewer" }},
+        .provided_interfaces = &.{.{ .name = "zigos.viewer.document" }},
+        .consumed_interfaces = &.{.{ .name = "zigos.object.workspace" }},
+        .assets = &.{.{ .path = "assets/viewer/icon.svg", .content_type = "image/svg+xml" }},
         .component_class = .app_component,
     },
     .{
@@ -87,6 +94,10 @@ pub const boot_image_specs = [_]ImageSpec{
         .label = "notes",
         .entry = "app.notes",
         .components = &.{.{ .id = "notes", .entry = "app.notes" }},
+        .provided_interfaces = &.{.{ .name = "zigos.workspace.document" }},
+        .consumed_interfaces = &.{.{ .name = "zigos.object.workspace" }},
+        .assets = &.{.{ .path = "assets/notes/icon.svg", .content_type = "image/svg+xml" }},
+        .update_channel = .beta,
         .component_class = .app_component,
     },
     .{
@@ -97,6 +108,9 @@ pub const boot_image_specs = [_]ImageSpec{
         .label = "sync",
         .entry = "app.sync",
         .components = &.{.{ .id = "sync", .entry = "app.sync" }},
+        .provided_interfaces = &.{.{ .name = "zigos.sync.replication" }},
+        .consumed_interfaces = &.{.{ .name = "zigos.object.workspace" }},
+        .assets = &.{.{ .path = "assets/sync/icon.svg", .content_type = "image/svg+xml" }},
         .component_class = .app_component,
     },
     .{
@@ -107,6 +121,9 @@ pub const boot_image_specs = [_]ImageSpec{
         .label = "capture",
         .entry = "app.capture",
         .components = &.{.{ .id = "capture", .entry = "app.capture" }},
+        .provided_interfaces = &.{.{ .name = "zigos.capture.session" }},
+        .consumed_interfaces = &.{.{ .name = "zigos.media.print" }},
+        .assets = &.{.{ .path = "assets/capture/icon.svg", .content_type = "image/svg+xml" }},
         .component_class = .app_component,
     },
     .{

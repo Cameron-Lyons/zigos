@@ -206,7 +206,7 @@ fn runSyncPermissionFlow(
                 .memory_bytes = 2 * 1024 * 1024,
                 .endpoint_slots = 4,
                 .shared_memory_bytes = 64 * 1024,
-                .background_allowed = false,
+                .background_allowed = true,
             },
             .ui_surface_id = 4,
             .local_only = true,
@@ -230,6 +230,23 @@ fn runSyncPermissionFlow(
     if (sync_summary.decisionForKind(.background_execution)) |decision| {
         if (!decision.allowed and decision.reason == .budget_exhausted) {
             common.printBootMarker("ZIGOS:PHASE2:DENY:BACKGROUND");
+        } else if (decision.allowed) {
+            const dispatch = env.background_dispatcher.dispatch(
+                env.runtime,
+                sync_task.id,
+                sync_manifest,
+                "sync",
+                .sync_completion,
+                21,
+            ) catch unreachable;
+            if (dispatch.allowed and !dispatch.delayed) {
+                _ = env.background_dispatcher.complete(env.runtime, dispatch.record_id.?) catch unreachable;
+                common.printBootMarker("ZIGOS:PHASE2:BACKGROUND:SYNC_DISPATCHED");
+            } else if (dispatch.delayed) {
+                common.printBootMarker("ZIGOS:PHASE2:BACKGROUND:SYNC_DELAYED");
+            } else if (dispatch.reason == .budget_exceeded) {
+                common.printBootMarker("ZIGOS:PHASE2:DENY:BACKGROUND");
+            }
         }
     }
 }
