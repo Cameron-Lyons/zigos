@@ -156,8 +156,14 @@ pub const Store = struct {
     pub fn reset(self: *Store) void {
         self.next_object_id = 1;
         self.next_version_id = 1;
-        zeroBytes(std.mem.asBytes(&self.objects));
-        zeroBytes(std.mem.asBytes(&self.versions));
+        for (&self.objects) |*slot| {
+            if (!slot.in_use) continue;
+            slot.* = .{};
+        }
+        for (&self.versions) |*slot| {
+            if (!slot.in_use) continue;
+            slot.* = .{};
+        }
     }
 
     pub fn putVersion(self: *Store, request: PutRequest) Error!PutResult {
@@ -337,13 +343,6 @@ fn copyPayload(payload: []const u8) [MAX_PAYLOAD_BYTES]u8 {
     var buffer = [_]u8{0} ** MAX_PAYLOAD_BYTES;
     @memcpy(buffer[0..payload.len], payload);
     return buffer;
-}
-
-fn zeroBytes(buffer: []u8) void {
-    var index: usize = 0;
-    while (index < buffer.len) : (index += 1) {
-        buffer[index] = 0;
-    }
 }
 
 fn copyBytes(dest: []u8, src: []const u8) void {

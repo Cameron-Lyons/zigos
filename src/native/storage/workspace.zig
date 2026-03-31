@@ -196,8 +196,14 @@ pub const Directory = struct {
     pub fn reset(self: *Directory) void {
         self.next_workspace_id = 1;
         self.next_snapshot_id = 1;
-        zeroBytes(std.mem.asBytes(&self.workspaces));
-        zeroBytes(std.mem.asBytes(&self.snapshots));
+        for (&self.workspaces) |*slot| {
+            if (!slot.in_use) continue;
+            slot.* = .{};
+        }
+        for (&self.snapshots) |*slot| {
+            if (!slot.in_use) continue;
+            slot.* = .{};
+        }
     }
 
     pub fn create(self: *Directory, request: CreateRequest) Error!*WorkspaceRecord {
@@ -662,14 +668,6 @@ fn clearEntries(entries: *[MAX_WORKSPACE_ENTRIES]Entry) void {
         entry.* = Entry{};
     }
 }
-
-fn zeroBytes(buffer: []u8) void {
-    var index: usize = 0;
-    while (index < buffer.len) : (index += 1) {
-        buffer[index] = 0;
-    }
-}
-
 
 fn signSnapshotRecord(snapshot: *SnapshotRecord, identity: signing.SignerIdentity) !void {
     const message = try snapshotMessage(
