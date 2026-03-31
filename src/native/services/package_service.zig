@@ -30,6 +30,8 @@ pub const InstallRequest = struct {
     data_schema_version: u32 = 1,
     migration_manifest: []const u8 = "",
     declared_permission_change: bool = false,
+    retains_data_compatibility: bool = false,
+    migration_applier: ?MigrationApplier = null,
 };
 
 pub const InstallResult = struct {
@@ -39,6 +41,19 @@ pub const InstallResult = struct {
     rollback_available: bool,
     migration_applied: bool,
 };
+
+pub const MigrationContext = struct {
+    bundle_id: []const u8,
+    from_schema_version: u32,
+    to_schema_version: u32,
+    migration_manifest: []const u8,
+    previous_version_major: u16,
+    previous_version_minor: u16,
+    next_version_major: u16,
+    next_version_minor: u16,
+};
+
+pub const MigrationApplier = *const fn (context: MigrationContext) anyerror!void;
 
 pub const StoredComponent = struct {
     id_len: usize = 0,
@@ -227,6 +242,9 @@ pub const Error = manifest.ValidationError || error{
     InstallSourceDenied,
     InvalidManifestSignature,
     MigrationManifestRequired,
+    MigrationHandlerRequired,
+    MigrationApplyFailed,
+    InvalidMigrationManifest,
     NoRollbackVersion,
     PermissionChangeUndeclared,
 };
@@ -249,6 +267,7 @@ pub const Service = struct {
         policy: ?*const policy_object.PolicyObject,
     ) Error!InstallResult {
         try manifest.validate(request.bundle);
+        try manifest.validateApplicationPackaging(request.bundle);
         const digest = digestBundle(request.bundle);
         if (!signing.verify(request.bundle.signature, &digest)) {
             return error.InvalidManifestSignature;
@@ -263,11 +282,32 @@ pub const Service = struct {
         const existing = self.find(request.bundle.bundle_id);
         if (existing) |bundle| {
             const permissions_changed = !std.mem.eql(u8, &bundle.current_permission_digest, &permission_digest);
+            const schema_changed = request.data_schema_version != bundle.current_schema_version;
+            var migration_applied = false;
             if (permissions_changed and !request.declared_permission_change) {
                 return error.PermissionChangeUndeclared;
             }
-            if (request.data_schema_version > bundle.current_schema_version and request.migration_manifest.len == 0) {
+            if (schema_changed and request.migration_manifest.len == 0 and !request.retains_data_compatibility) {
                 return error.MigrationManifestRequired;
+            }
+            if (request.migration_manifest.len != 0) {
+                try validateMigrationManifest(
+                    request.migration_manifest,
+                    bundle.current_schema_version,
+                    request.data_schema_version,
+                );
+                const migration_applier = request.migration_applier orelse return error.MigrationHandlerRequired;
+                migration_applier(.{
+                    .bundle_id = request.bundle.bundle_id,
+                    .from_schema_version = bundle.current_schema_version,
+                    .to_schema_version = request.data_schema_version,
+                    .migration_manifest = request.migration_manifest,
+                    .previous_version_major = bundle.current_version_major,
+                    .previous_version_minor = bundle.current_version_minor,
+                    .next_version_major = request.bundle.version_major,
+                    .next_version_minor = request.bundle.version_minor,
+                }) catch return error.MigrationApplyFailed;
+                migration_applied = true;
             }
 
             bundle.previous_version_major = bundle.current_version_major;
@@ -307,7 +347,7 @@ pub const Service = struct {
                 .updated_existing = true,
                 .permissions_changed = permissions_changed,
                 .rollback_available = bundle.rollback_available,
-                .migration_applied = request.migration_manifest.len != 0,
+                .migration_applied = migration_applied,
             };
         }
 
@@ -331,7 +371,7 @@ pub const Service = struct {
                 .updated_existing = false,
                 .permissions_changed = false,
                 .rollback_available = false,
-                .migration_applied = request.migration_manifest.len != 0,
+                .migration_applied = false,
             };
         }
 
@@ -541,6 +581,33 @@ pub const Service = struct {
     }
 };
 
+fn validateMigrationManifest(
+    migration_manifest: []const u8,
+    from_schema_version: u32,
+    to_schema_version: u32,
+) Error!void {
+    if (!std.mem.startsWith(u8, migration_manifest, "schema:")) {
+        return error.InvalidMigrationManifest;
+    }
+
+    const payload = migration_manifest["schema:".len..];
+    const separator = std.mem.indexOfScalar(u8, payload, ';') orelse return error.InvalidMigrationManifest;
+    const mapping = payload[0..separator];
+    const summary = payload[separator + 1 ..];
+    if (summary.len == 0) return error.InvalidMigrationManifest;
+
+    const arrow = std.mem.indexOf(u8, mapping, "->") orelse return error.InvalidMigrationManifest;
+    const from_text = mapping[0..arrow];
+    const to_text = mapping[arrow + 2 ..];
+    if (from_text.len == 0 or to_text.len == 0) return error.InvalidMigrationManifest;
+
+    const declared_from = std.fmt.parseInt(u32, from_text, 10) catch return error.InvalidMigrationManifest;
+    const declared_to = std.fmt.parseInt(u32, to_text, 10) catch return error.InvalidMigrationManifest;
+    if (declared_from != from_schema_version or declared_to != to_schema_version) {
+        return error.InvalidMigrationManifest;
+    }
+}
+
 pub fn digestBundle(bundle: manifest.BundleManifest) [32]u8 {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "bundle-id", bundle.bundle_id);
@@ -612,6 +679,8 @@ fn permissionDigest(requests: []const manifest.PermissionRequest) [32]u8 {
         crypto_hash.updateInt(&hasher, "permission-rights", rights_bits);
         crypto_hash.updateBool(&hasher, "permission-required", request.required);
         crypto_hash.updateBool(&hasher, "permission-local-only", request.local_only);
+        crypto_hash.updateInt(&hasher, "permission-max-lease", request.max_lease_ticks);
+        crypto_hash.updateInt(&hasher, "permission-target-id", request.target_id);
     }
     return crypto_hash.finalize(&hasher);
 }
@@ -667,7 +736,6 @@ fn zeroBundle() InstalledBundle {
         .last_migration_manifest = [_]u8{0} ** MAX_LABEL_BYTES,
     };
 }
-
 
 fn writeLaunchMetadata(bundle: *InstalledBundle, source: manifest.BundleManifest) void {
     bundle.current_component_count = @min(source.components.len, bundle.current_components.len);
@@ -792,7 +860,41 @@ fn zeroStoredSignature() StoredSignature {
     return .{};
 }
 
+const test_migration = struct {
+    var apply_count: usize = 0;
+    var last_context: MigrationContext = .{
+        .bundle_id = "",
+        .from_schema_version = 0,
+        .to_schema_version = 0,
+        .migration_manifest = "",
+        .previous_version_major = 0,
+        .previous_version_minor = 0,
+        .next_version_major = 0,
+        .next_version_minor = 0,
+    };
+
+    fn reset() void {
+        apply_count = 0;
+        last_context = .{
+            .bundle_id = "",
+            .from_schema_version = 0,
+            .to_schema_version = 0,
+            .migration_manifest = "",
+            .previous_version_major = 0,
+            .previous_version_minor = 0,
+            .next_version_major = 0,
+            .next_version_minor = 0,
+        };
+    }
+
+    fn apply(context: MigrationContext) anyerror!void {
+        apply_count += 1;
+        last_context = context;
+    }
+};
+
 test "package service enforces signed manifests policy gated sources updates and rollback" {
+    test_migration.reset();
     var policies = policy_object.Directory.init();
     const org_policy = try policies.create(.{
         .scope = .organization,
@@ -821,6 +923,10 @@ test "package service enforces signed manifests policy gated sources updates and
     const v1_components = [_]manifest.ExecutionComponentDecl{
         .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
     };
+    const v1_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+        .{ .name = "zigos.object.workspace" },
+    };
     const v1_assets = [_]manifest.AssetDecl{
         .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
     };
@@ -830,6 +936,8 @@ test "package service enforces signed manifests policy gated sources updates and
         .publisher = "Example Software",
         .version_major = 1,
         .version_minor = 0,
+        .provided_interfaces = v1_interfaces[0..1],
+        .consumed_interfaces = v1_interfaces[1..2],
         .components = &v1_components,
         .assets = &v1_assets,
         .requested_permissions = &v1_permissions,
@@ -870,6 +978,10 @@ test "package service enforces signed manifests policy gated sources updates and
         .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
         .{ .id = "notes-sync", .entry = "zigos.notes.sync", .abi = .native_sandbox },
     };
+    const v2_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+        .{ .name = "zigos.object.workspace" },
+    };
     const v2_assets = [_]manifest.AssetDecl{
         .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
         .{ .path = "assets/editor.css", .content_type = "text/css" },
@@ -880,6 +992,8 @@ test "package service enforces signed manifests policy gated sources updates and
         .publisher = "Example Software",
         .version_major = 1,
         .version_minor = 1,
+        .provided_interfaces = v2_interfaces[0..1],
+        .consumed_interfaces = v2_interfaces[1..2],
         .components = &v2_components,
         .assets = &v2_assets,
         .requested_permissions = &v2_permissions,
@@ -900,17 +1014,38 @@ test "package service enforces signed manifests policy gated sources updates and
         .declared_permission_change = true,
     }, org_policy));
 
-    const updated = try service.install(.{
+    try std.testing.expectError(error.InvalidMigrationManifest, service.install(.{
         .bundle = v2,
         .source_identity = "repo:corp",
         .data_schema_version = 2,
         .migration_manifest = "notes-v2-migration",
         .declared_permission_change = true,
+    }, org_policy));
+
+    try std.testing.expectError(error.MigrationHandlerRequired, service.install(.{
+        .bundle = v2,
+        .source_identity = "repo:corp",
+        .data_schema_version = 2,
+        .migration_manifest = "schema:1->2;notes-v2-migration",
+        .declared_permission_change = true,
+    }, org_policy));
+
+    const updated = try service.install(.{
+        .bundle = v2,
+        .source_identity = "repo:corp",
+        .data_schema_version = 2,
+        .migration_manifest = "schema:1->2;notes-v2-migration",
+        .declared_permission_change = true,
+        .migration_applier = test_migration.apply,
     }, org_policy);
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(updated.permissions_changed);
     try std.testing.expect(updated.rollback_available);
     try std.testing.expect(updated.migration_applied);
+    try std.testing.expectEqual(@as(usize, 1), test_migration.apply_count);
+    try std.testing.expectEqual(@as(u32, 1), test_migration.last_context.from_schema_version);
+    try std.testing.expectEqual(@as(u32, 2), test_migration.last_context.to_schema_version);
+    try std.testing.expectEqualStrings("schema:1->2;notes-v2-migration", test_migration.last_context.migration_manifest);
 
     const installed = service.find("app.notes").?;
     try std.testing.expectEqual(@as(u16, 1), installed.current_version_major);
@@ -947,10 +1082,23 @@ test "package service rejects invalid signatures and rollback before any update"
             .local_only = true,
         },
     };
+    const interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+        .{ .name = "zigos.object.workspace" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+    };
     var bundle = manifest.BundleManifest{
         .bundle_id = "app.notes",
         .display_name = "Notes",
         .publisher = "Example Software",
+        .provided_interfaces = interfaces[0..1],
+        .consumed_interfaces = interfaces[1..2],
+        .components = &[_]manifest.ExecutionComponentDecl{
+            .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
+        },
+        .assets = &assets,
         .requested_permissions = &permissions,
     };
     bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
@@ -969,6 +1117,146 @@ test "package service rejects invalid signatures and rollback before any update"
     try std.testing.expectError(error.NoRollbackVersion, service.rollback("app.notes"));
 }
 
+test "package service treats lease and target scope changes as declared permission changes" {
+    var service = Service.init();
+    const signer_identity = signing.SignerIdentity{
+        .label = "pkg-test-lease-scope",
+        .seed = [_]u8{0x34} ** 32,
+    };
+    const interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+        .{ .name = "zigos.object.workspace" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+    };
+    const v1_permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace://notes",
+            .rights = .{ .object_read = true },
+            .local_only = true,
+            .max_lease_ticks = 120,
+            .target_id = 7,
+        },
+    };
+    var v1 = manifest.BundleManifest{
+        .bundle_id = "app.notes",
+        .display_name = "Notes",
+        .publisher = "Example Software",
+        .provided_interfaces = interfaces[0..1],
+        .consumed_interfaces = interfaces[1..2],
+        .components = &[_]manifest.ExecutionComponentDecl{
+            .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
+        },
+        .assets = &assets,
+        .requested_permissions = &v1_permissions,
+    };
+    v1.signature = try signing.sign(signer_identity, &digestBundle(v1));
+
+    _ = try service.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null);
+
+    const v2_permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace://notes",
+            .rights = .{ .object_read = true },
+            .local_only = true,
+            .max_lease_ticks = 240,
+            .target_id = 9,
+        },
+    };
+    var v2 = manifest.BundleManifest{
+        .bundle_id = "app.notes",
+        .display_name = "Notes",
+        .publisher = "Example Software",
+        .version_minor = 1,
+        .provided_interfaces = interfaces[0..1],
+        .consumed_interfaces = interfaces[1..2],
+        .components = &[_]manifest.ExecutionComponentDecl{
+            .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
+        },
+        .assets = &assets,
+        .requested_permissions = &v2_permissions,
+    };
+    v2.signature = try signing.sign(signer_identity, &digestBundle(v2));
+
+    try std.testing.expectError(error.PermissionChangeUndeclared, service.install(.{
+        .bundle = v2,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
+
+    const updated = try service.install(.{
+        .bundle = v2,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+        .declared_permission_change = true,
+    }, null);
+    try std.testing.expect(updated.updated_existing);
+    try std.testing.expect(updated.permissions_changed);
+    try std.testing.expect(!updated.migration_applied);
+}
+
+test "package service accepts compatible schema updates without a migration manifest" {
+    var service = Service.init();
+    const signer_identity = signing.SignerIdentity{
+        .label = "pkg-test-compat",
+        .seed = [_]u8{0x35} ** 32,
+    };
+    const interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+        .{ .name = "zigos.object.workspace" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+    };
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace://notes",
+            .rights = .{ .object_read = true },
+            .local_only = true,
+        },
+    };
+    var v1 = manifest.BundleManifest{
+        .bundle_id = "app.notes",
+        .display_name = "Notes",
+        .publisher = "Example Software",
+        .provided_interfaces = interfaces[0..1],
+        .consumed_interfaces = interfaces[1..2],
+        .components = &[_]manifest.ExecutionComponentDecl{
+            .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
+        },
+        .assets = &assets,
+        .requested_permissions = &permissions,
+    };
+    v1.signature = try signing.sign(signer_identity, &digestBundle(v1));
+    _ = try service.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null);
+
+    var v2 = v1;
+    v2.version_minor = 1;
+    v2.signature = try signing.sign(signer_identity, &digestBundle(v2));
+
+    const updated = try service.install(.{
+        .bundle = v2,
+        .source_identity = "store:zigos",
+        .data_schema_version = 2,
+        .retains_data_compatibility = true,
+    }, null);
+    try std.testing.expect(updated.updated_existing);
+    try std.testing.expect(!updated.migration_applied);
+    try std.testing.expectEqual(@as(u32, 2), service.find("app.notes").?.current_schema_version);
+}
+
 test "package service resolves installed manifests with stable slices" {
     var service = Service.init();
     const signer_identity = signing.SignerIdentity{
@@ -983,6 +1271,9 @@ test "package service resolves installed manifests with stable slices" {
     };
     const components = [_]manifest.ExecutionComponentDecl{
         .{ .id = "notes", .entry = "app.notes" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
     };
     const permissions = [_]manifest.PermissionRequest{
         .{
@@ -1018,6 +1309,7 @@ test "package service resolves installed manifests with stable slices" {
         .provided_interfaces = &provided_interfaces,
         .consumed_interfaces = &consumed_interfaces,
         .components = &components,
+        .assets = &assets,
         .requested_permissions = &permissions,
         .background_tasks = &background_tasks,
         .ai_metadata = .{

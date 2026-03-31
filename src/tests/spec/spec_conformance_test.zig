@@ -32,8 +32,16 @@ test "spec 5 and 14 keep the base image signed measured atomic and rollback-capa
     try boot_recovery.baseImageStaysSignedMeasuredAtomicAndRollbackCapable();
 }
 
+test "spec 14.2 validates boot core storage network and ui health before finalizing an update" {
+    try boot_recovery.baseOsHealthChecksValidateBootCoreStorageNetworkAndUi();
+}
+
 test "spec 5.3 recovery mode can reinstall restore repair rotate and revoke" {
     try boot_recovery.recoveryModeCanReinstallRestoreRepairRotateAndRevoke();
+}
+
+test "spec 6.4 only runs declared background work with explicit triggers budgets and throttling" {
+    try ux_and_lifecycle.backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled();
 }
 
 test "spec 11 task-first UX records structured task workspace permission and pairing flows" {

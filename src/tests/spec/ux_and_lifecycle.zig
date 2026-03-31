@@ -1,6 +1,7 @@
 const std = @import("std");
 const spec_support = @import("support.zig");
 const accelerator_scheduler = @import("../../native/task/accelerator_scheduler.zig");
+const background_dispatch = @import("../../native/task/background_dispatch.zig");
 const contract = @import("../../native/session/contract.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
 const indexing_service = @import("../../native/services/indexing_service.zig");
@@ -15,6 +16,18 @@ const signing = @import("../../native/core/signing.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
 const sync_service = @import("../../native/sync/sync_service.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
+
+const package_migration = struct {
+    var apply_count: usize = 0;
+
+    fn reset() void {
+        apply_count = 0;
+    }
+
+    fn apply(_: package_service.MigrationContext) anyerror!void {
+        apply_count += 1;
+    }
+};
 
 pub fn taskFirstUxRecordsStructuredFlows() !void {
     storage_service.Service.resetPersistentState();
@@ -80,6 +93,7 @@ pub fn taskFirstUxRecordsStructuredFlows() !void {
 }
 
 pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
+    package_migration.reset();
     var policies = policy_object.Directory.init();
     const org_policy = try policies.create(.{
         .scope = .organization,
@@ -110,6 +124,9 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
     const v1_components = [_]manifest.ExecutionComponentDecl{
         .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
     };
+    const v1_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+    };
     const v1_assets = [_]manifest.AssetDecl{
         .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
     };
@@ -119,6 +136,8 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
         .publisher = "Example Software",
         .version_major = 1,
         .version_minor = 0,
+        .provided_interfaces = &v1_interfaces,
+        .consumed_interfaces = &v1_interfaces,
         .components = &v1_components,
         .assets = &v1_assets,
         .requested_permissions = &v1_permissions,
@@ -154,6 +173,10 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
         .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
         .{ .id = "notes-sync", .entry = "zigos.notes.sync", .abi = .native_sandbox },
     };
+    const v2_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+        .{ .name = "zigos.object.workspace" },
+    };
     const v2_assets = [_]manifest.AssetDecl{
         .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
         .{ .path = "assets/editor.css", .content_type = "text/css" },
@@ -164,6 +187,8 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
         .publisher = "Example Software",
         .version_major = 1,
         .version_minor = 1,
+        .provided_interfaces = v2_interfaces[0..1],
+        .consumed_interfaces = v2_interfaces[1..2],
         .components = &v2_components,
         .assets = &v2_assets,
         .requested_permissions = &v2_permissions,
@@ -174,12 +199,15 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
         .bundle = v2,
         .source_identity = "repo:corp",
         .data_schema_version = 2,
-        .migration_manifest = "notes-v2-migration",
+        .migration_manifest = "schema:1->2;notes-v2-migration",
         .declared_permission_change = true,
+        .migration_applier = package_migration.apply,
     }, org_policy);
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(updated.permissions_changed);
     try std.testing.expect(updated.rollback_available);
+    try std.testing.expect(updated.migration_applied);
+    try std.testing.expectEqual(@as(usize, 1), package_migration.apply_count);
 
     const installed = packages.find("app.notes").?;
     try std.testing.expectEqual(@as(u16, 1), installed.current_version_major);
@@ -198,6 +226,110 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
     _ = try packages.rollback("app.notes");
     try std.testing.expectEqual(@as(u16, 0), packages.find("app.notes").?.current_version_minor);
     try std.testing.expectEqual(@as(usize, 1), packages.find("app.notes").?.current_component_count);
+}
+
+pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {
+    const components = [_]manifest.ExecutionComponentDecl{
+        .{ .id = "sync", .entry = "app.sync" },
+    };
+    const provided_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.background.sync" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/sync/icon.svg", .content_type = "image/svg+xml" },
+    };
+    const permissions = [_]manifest.PermissionRequest{
+        .{ .kind = .background_execution, .resource = "schedule", .rights = .{ .background_run = true } },
+        .{ .kind = .background_execution, .resource = "push", .rights = .{ .background_run = true } },
+        .{ .kind = .background_execution, .resource = "change", .rights = .{ .background_run = true } },
+        .{ .kind = .background_execution, .resource = "proximity", .rights = .{ .background_run = true } },
+        .{ .kind = .background_execution, .resource = "sensor", .rights = .{ .background_run = true } },
+        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .background_run = true } },
+        .{ .kind = .background_execution, .resource = "media", .rights = .{ .background_run = true } },
+        .{ .kind = .background_execution, .resource = "policy", .rights = .{ .background_run = true } },
+    };
+    const background_tasks = [_]manifest.BackgroundTaskDecl{
+        .{ .id = "schedule", .trigger = .user_approved_scheduled_job, .expected_duration_seconds = 30, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = 64 * 1024 }, .network = .none, .visibility = .status_only },
+        .{ .id = "push", .trigger = .push_event, .expected_duration_seconds = 20, .budget = .{ .cpu_time_ticks = 900, .memory_bytes = 48 * 1024 }, .network = .named_service_identities, .visibility = .hidden },
+        .{ .id = "change", .trigger = .local_object_change, .expected_duration_seconds = 15, .budget = .{ .cpu_time_ticks = 800, .memory_bytes = 32 * 1024 }, .network = .none, .visibility = .audit_only },
+        .{ .id = "proximity", .trigger = .device_proximity, .expected_duration_seconds = 10, .budget = .{ .cpu_time_ticks = 700, .memory_bytes = 24 * 1024 }, .network = .none, .visibility = .user_visible },
+        .{ .id = "sensor", .trigger = .sensor_rule, .expected_duration_seconds = 25, .budget = .{ .cpu_time_ticks = 750, .memory_bytes = 32 * 1024 }, .network = .none, .visibility = .status_only },
+        .{ .id = "sync", .trigger = .sync_completion, .expected_duration_seconds = 40, .budget = .{ .cpu_time_ticks = 1_100, .memory_bytes = 96 * 1024 }, .network = .local_network_only, .visibility = .status_only },
+        .{ .id = "media", .trigger = .media_export_completion, .expected_duration_seconds = 35, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = 48 * 1024 }, .network = .named_domains, .visibility = .status_only },
+        .{ .id = "policy", .trigger = .organization_policy_task, .expected_duration_seconds = 45, .budget = .{ .cpu_time_ticks = 1_200, .memory_bytes = 80 * 1024 }, .network = .none, .visibility = .audit_only },
+    };
+
+    var package_bundle = manifest.BundleManifest{
+        .bundle_id = "app.background.spec",
+        .display_name = "Background Spec",
+        .publisher = "zigos.spec",
+        .provided_interfaces = &provided_interfaces,
+        .components = &components,
+        .assets = &assets,
+        .requested_permissions = &permissions,
+        .background_tasks = &background_tasks,
+        .update_channel = .stable,
+    };
+    package_bundle.signature = try signing.sign(spec_support.signer("spec.background.bundle", 0x79), &package_service.digestBundle(package_bundle));
+
+    var packages = package_service.Service.init();
+    _ = try packages.install(.{
+        .bundle = package_bundle,
+        .source_identity = "store.zigos.spec",
+        .data_schema_version = 1,
+    }, null);
+
+    var resolved: package_service.ResolvedManifest = undefined;
+    const installed_bundle = try packages.resolveCurrentManifest("app.background.spec", &resolved);
+
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = spec_support.app(93),
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 20_000,
+            .memory_bytes = 2 * 1024 * 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 64 * 1024,
+            .background_allowed = true,
+        },
+        .ui_surface_id = 9,
+        .local_only = false,
+        .launch = .{
+            .bundle_id = "app.background.spec",
+        },
+    });
+    task.state = .active;
+
+    var dispatcher = background_dispatch.Controller.init();
+    for (installed_bundle.background_tasks) |background_task| {
+        const decision = try dispatcher.dispatch(
+            &runtime,
+            task.id,
+            installed_bundle,
+            background_task.id,
+            background_task.trigger,
+            40,
+        );
+        try std.testing.expect(decision.allowed);
+        try std.testing.expectEqual(background_task.expected_duration_seconds, decision.expected_duration_seconds);
+        try std.testing.expectEqual(background_task.network, decision.network);
+        try std.testing.expectEqual(background_task.visibility, decision.visibility);
+        try std.testing.expect(try dispatcher.complete(&runtime, decision.record_id.?));
+    }
+
+    const first = try dispatcher.dispatch(&runtime, task.id, installed_bundle, "sync", .sync_completion, 50);
+    const second = try dispatcher.dispatch(&runtime, task.id, installed_bundle, "sync", .sync_completion, 51);
+    const third = try dispatcher.dispatch(&runtime, task.id, installed_bundle, "sync", .sync_completion, 52);
+    try std.testing.expect(first.allowed);
+    try std.testing.expect(second.allowed);
+    try std.testing.expect(third.delayed);
+    try std.testing.expectEqual(background_dispatch.DecisionReason.throttled, third.reason);
+    try std.testing.expectEqual(@as(u64, 9_650), task.background_cpu_consumed_ticks);
+    try std.testing.expectEqual(@as(u16, 2), task.background_active_count);
+    try std.testing.expectEqual(manifest.BackgroundNetworkMode.local_network_only, task.last_background_network);
+    try std.testing.expectEqual(manifest.BackgroundVisibility.status_only, task.last_background_visibility);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.background_dispatched, task.audit_trail[task.audit_count - 1].kind);
 }
 
 pub fn structuredServicesAndDiagnosticsStayRedacted() !void {

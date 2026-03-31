@@ -11,6 +11,7 @@ const recovery_environment = @import("../platform/recovery_environment.zig");
 const signing = @import("../core/signing.zig");
 const supervisor_mod = @import("supervisor.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
+const update_health = @import("../platform/update_health.zig");
 const workspace_mod = @import("../storage/workspace.zig");
 const support = @import("session_lifecycle_support.zig");
 
@@ -40,6 +41,7 @@ pub fn run(
         .label = "paired-device",
         .seed = [_]u8{0xA5} ** 32,
     };
+    const local_device_principal = principal.PrincipalId{ .kind = .device, .serial = 1 };
     const recovery_device_principal = principal.PrincipalId{
         .kind = .device,
         .serial = 4,
@@ -72,6 +74,11 @@ pub fn run(
         phase6_state_signer,
         immutable_base_workspace.id,
     ) catch unreachable;
+    const core_health_service_ids = [_]u64{
+        context.policy_service_id,
+        context.package_service_id,
+        context.sync_service_id,
+    };
     support.common.printBootMarker("ZIGOS:PHASE6:INIT_READY");
     if (immutable_base_manager.activeImage() == null) {
         support.common.printBootMarker("ZIGOS:PHASE6:SEED_START");
@@ -83,38 +90,204 @@ pub fn run(
             108,
         ) catch unreachable;
         support.common.printBootMarker("ZIGOS:PHASE6:SEED_SLOT0");
-        _ = immutable_base_manager.activate(0, .{}, 109) catch unreachable;
+        immutable_base_manager.beginActivation(0, 109) catch unreachable;
+        update_health.recordBootSuccess(&immutable_base_manager, 110) catch unreachable;
+        _ = update_health.validatePendingActivation(
+            &immutable_base_manager,
+            context.supervisor,
+            context.storage_service_instance,
+            .{
+                .core_service_ids = core_health_service_ids[0..],
+                .storage_workspace_id = phase4.notes_workspace_id,
+                .storage_probe_path = "documents/notes.md",
+                .network_service_id = context.network_service_id,
+                .ui_service_id = context.compositor_service_id,
+                .network_probe = .{
+                    .sync = phase5_sync_service,
+                    .workspace_id = phase4.notes_workspace_id,
+                    .source_device = local_device_principal,
+                    .target_device = phase5.tablet_device_principal,
+                    .tick = 110,
+                },
+                .ui_probe = .{ .session = context.compositor },
+            },
+            context.update_ledger,
+            111,
+        ) catch unreachable;
         support.common.printBootMarker("ZIGOS:PHASE6:SEED_SLOT0_ACTIVE");
         _ = immutable_base_manager.stageImage(
             1,
             "stable-b",
             "kernel=v2;base=stable-b;mode=ro",
             phase6_image_signer,
-            110,
+            112,
         ) catch unreachable;
         support.common.printBootMarker("ZIGOS:PHASE6:SEED_SLOT1");
 
-        const boot_failure = immutable_base_manager.activate(1, .{ .boot_ok = false }, 111) catch unreachable;
-        if (boot_failure.rolled_back and boot_failure.failure == .boot) {
+        immutable_base_manager.beginActivation(1, 113) catch unreachable;
+        const boot_failure = update_health.validatePendingActivation(
+            &immutable_base_manager,
+            context.supervisor,
+            context.storage_service_instance,
+            .{
+                .core_service_ids = core_health_service_ids[0..],
+                .storage_workspace_id = phase4.notes_workspace_id,
+                .storage_probe_path = "documents/notes.md",
+                .network_service_id = context.network_service_id,
+                .ui_service_id = context.compositor_service_id,
+                .network_probe = .{
+                    .sync = phase5_sync_service,
+                    .workspace_id = phase4.notes_workspace_id,
+                    .source_device = local_device_principal,
+                    .target_device = phase5.tablet_device_principal,
+                    .tick = 113,
+                },
+                .ui_probe = .{ .session = context.compositor },
+            },
+            context.update_ledger,
+            114,
+        ) catch unreachable;
+        if (boot_failure.activation.rolled_back and boot_failure.activation.failure == .boot) {
             support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:BOOT_ROLLBACK");
         }
-        const core_failure = immutable_base_manager.activate(1, .{ .core_services_ok = false }, 112) catch unreachable;
-        if (core_failure.rolled_back and core_failure.failure == .core_service) {
+        immutable_base_manager.beginActivation(1, 115) catch unreachable;
+        update_health.recordBootSuccess(&immutable_base_manager, 116) catch unreachable;
+        _ = context.supervisor.recordCrash(context.sync_service_id, 117, 0x0602);
+        const core_failure = update_health.validatePendingActivation(
+            &immutable_base_manager,
+            context.supervisor,
+            context.storage_service_instance,
+            .{
+                .core_service_ids = core_health_service_ids[0..],
+                .storage_workspace_id = phase4.notes_workspace_id,
+                .storage_probe_path = "documents/notes.md",
+                .network_service_id = context.network_service_id,
+                .ui_service_id = context.compositor_service_id,
+                .network_probe = .{
+                    .sync = phase5_sync_service,
+                    .workspace_id = phase4.notes_workspace_id,
+                    .source_device = local_device_principal,
+                    .target_device = phase5.tablet_device_principal,
+                    .tick = 117,
+                },
+                .ui_probe = .{ .session = context.compositor },
+            },
+            context.update_ledger,
+            118,
+        ) catch unreachable;
+        _ = context.supervisor.markHealthy(context.sync_service_id, 119);
+        if (core_failure.activation.rolled_back and core_failure.activation.failure == .core_service) {
             support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:CORE_ROLLBACK");
         }
-        const ui_failure = immutable_base_manager.activate(1, .{ .ui_ok = false }, 113) catch unreachable;
-        if (ui_failure.rolled_back and ui_failure.failure == .ui) {
+        immutable_base_manager.beginActivation(1, 120) catch unreachable;
+        update_health.recordBootSuccess(&immutable_base_manager, 121) catch unreachable;
+        _ = context.supervisor.recordCrash(context.compositor_service_id, 122, 0x0603);
+        const ui_failure = update_health.validatePendingActivation(
+            &immutable_base_manager,
+            context.supervisor,
+            context.storage_service_instance,
+            .{
+                .core_service_ids = core_health_service_ids[0..],
+                .storage_workspace_id = phase4.notes_workspace_id,
+                .storage_probe_path = "documents/notes.md",
+                .network_service_id = context.network_service_id,
+                .ui_service_id = context.compositor_service_id,
+                .network_probe = .{
+                    .sync = phase5_sync_service,
+                    .workspace_id = phase4.notes_workspace_id,
+                    .source_device = local_device_principal,
+                    .target_device = phase5.tablet_device_principal,
+                    .tick = 122,
+                },
+                .ui_probe = .{ .session = context.compositor },
+            },
+            context.update_ledger,
+            123,
+        ) catch unreachable;
+        _ = context.supervisor.markHealthy(context.compositor_service_id, 124);
+        if (ui_failure.activation.rolled_back and ui_failure.activation.failure == .ui) {
             support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:UI_ROLLBACK");
         }
-        const storage_failure = immutable_base_manager.activate(1, .{ .storage_ok = false }, 114) catch unreachable;
-        if (storage_failure.rolled_back and storage_failure.failure == .storage) {
+        immutable_base_manager.beginActivation(1, 125) catch unreachable;
+        update_health.recordBootSuccess(&immutable_base_manager, 126) catch unreachable;
+        const storage_failure = update_health.validatePendingActivation(
+            &immutable_base_manager,
+            context.supervisor,
+            context.storage_service_instance,
+            .{
+                .core_service_ids = core_health_service_ids[0..],
+                .storage_workspace_id = phase4.notes_workspace_id,
+                .storage_probe_path = "documents/missing.md",
+                .network_service_id = context.network_service_id,
+                .ui_service_id = context.compositor_service_id,
+                .network_probe = .{
+                    .sync = phase5_sync_service,
+                    .workspace_id = phase4.notes_workspace_id,
+                    .source_device = local_device_principal,
+                    .target_device = phase5.tablet_device_principal,
+                    .tick = 126,
+                },
+                .ui_probe = .{ .session = context.compositor },
+            },
+            context.update_ledger,
+            127,
+        ) catch unreachable;
+        if (storage_failure.activation.rolled_back and storage_failure.activation.failure == .storage) {
             support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:STORAGE_ROLLBACK");
         }
-        const network_failure = immutable_base_manager.activate(1, .{ .network_ok = false }, 115) catch unreachable;
-        if (network_failure.rolled_back and network_failure.failure == .network) {
+        immutable_base_manager.beginActivation(1, 128) catch unreachable;
+        update_health.recordBootSuccess(&immutable_base_manager, 129) catch unreachable;
+        _ = context.supervisor.recordCrash(context.network_service_id, 130, 0x0604);
+        const network_failure = update_health.validatePendingActivation(
+            &immutable_base_manager,
+            context.supervisor,
+            context.storage_service_instance,
+            .{
+                .core_service_ids = core_health_service_ids[0..],
+                .storage_workspace_id = phase4.notes_workspace_id,
+                .storage_probe_path = "documents/notes.md",
+                .network_service_id = context.network_service_id,
+                .ui_service_id = context.compositor_service_id,
+                .network_probe = .{
+                    .sync = phase5_sync_service,
+                    .workspace_id = phase4.notes_workspace_id,
+                    .source_device = local_device_principal,
+                    .target_device = phase5.tablet_device_principal,
+                    .tick = 130,
+                },
+                .ui_probe = .{ .session = context.compositor },
+            },
+            context.update_ledger,
+            131,
+        ) catch unreachable;
+        _ = context.supervisor.markHealthy(context.network_service_id, 132);
+        if (network_failure.activation.rolled_back and network_failure.activation.failure == .network) {
             support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:NETWORK_ROLLBACK");
         }
-        _ = immutable_base_manager.activate(1, .{}, 116) catch unreachable;
+        immutable_base_manager.beginActivation(1, 133) catch unreachable;
+        update_health.recordBootSuccess(&immutable_base_manager, 134) catch unreachable;
+        _ = update_health.validatePendingActivation(
+            &immutable_base_manager,
+            context.supervisor,
+            context.storage_service_instance,
+            .{
+                .core_service_ids = core_health_service_ids[0..],
+                .storage_workspace_id = phase4.notes_workspace_id,
+                .storage_probe_path = "documents/notes.md",
+                .network_service_id = context.network_service_id,
+                .ui_service_id = context.compositor_service_id,
+                .network_probe = .{
+                    .sync = phase5_sync_service,
+                    .workspace_id = phase4.notes_workspace_id,
+                    .source_device = local_device_principal,
+                    .target_device = phase5.tablet_device_principal,
+                    .tick = 134,
+                },
+                .ui_probe = .{ .session = context.compositor },
+            },
+            context.update_ledger,
+            135,
+        ) catch unreachable;
     }
 
     if (immutable_base_manager.rollback_generation >= 1) {
@@ -255,7 +428,7 @@ pub fn run(
             "text/markdown",
             .document,
             "# Notes\n- phase6 recovery drift\n",
-            119,
+            136,
         ) catch unreachable,
         .preferred_object_id = null,
         .parent_version_id = phase4.latest_notes_version_id,
@@ -274,13 +447,13 @@ pub fn run(
         notes_v3_version_id,
         .document,
     ) catch unreachable;
-    _ = context.storage_service_instance.commit(phase4.notes_workspace_id, 120) catch unreachable;
+    _ = context.storage_service_instance.commit(phase4.notes_workspace_id, 137) catch unreachable;
     support.common.printBootMarker("ZIGOS:PHASE6:RECOVERY:NOTES_V3_COMMIT");
     _ = recovery.restoreWorkspaceExport(
         context.storage_service_instance,
         phase4.notes_workspace_id,
         context.export_package,
-        121,
+        138,
     ) catch unreachable;
     support.common.printBootMarker("ZIGOS:PHASE6:RECOVERY:RESTORE_APPLIED");
     const restored_notes = context.storage_service_instance.resolve(phase4.notes_workspace_id, "documents/notes.md") catch unreachable;
@@ -316,7 +489,7 @@ pub fn run(
             recovery_device_principal,
             phase5.user_root_signer,
             recovery_rotated_signer,
-            122,
+            139,
         ) catch unreachable;
     }
     if (phase5_sync_service.findDeviceRecord(recovery_device_principal).?.key_rotation_generation >= 2) {
@@ -328,7 +501,7 @@ pub fn run(
             context.session_user,
             recovery_device_principal,
             phase5.user_root_signer,
-            123,
+            140,
         ) catch unreachable;
     }
     if (!phase5_sync_service.isTrustedDevice(recovery_device_principal)) {
@@ -356,6 +529,10 @@ pub fn run(
     if (phase6_notes_task.component_class == .app_component) {
         support.common.printBootMarker("ZIGOS:PHASE6:UX:START_TASK");
     }
+    const task_view = context.compositor.openTaskView(phase6_notes_task, "Edit Notes") catch unreachable;
+    if (task_view.id != 0) {
+        support.common.printBootMarker("ZIGOS:PHASE6:UX:TASK_VIEW");
+    }
 
     const opened_workspace = ux.openWorkspace(
         context.storage_service_instance,
@@ -363,8 +540,22 @@ pub fn run(
         "documents/notes.md",
         context.session_user,
     ) catch unreachable;
+    const workspace_record = context.storage_service_instance.workspaces.find(phase4.notes_workspace_id).?;
+    const workspace_view = context.compositor.openWorkspaceView(
+        phase6_notes_task,
+        phase4.notes_workspace_id,
+        workspace_record.labelSlice(),
+    ) catch unreachable;
+    const document_view = context.compositor.openDocumentView(
+        phase6_notes_task,
+        phase4.notes_workspace_id,
+        "documents/notes.md",
+    ) catch unreachable;
     if (opened_workspace.version_id != 0) {
         support.common.printBootMarker("ZIGOS:PHASE6:UX:OPEN_WORKSPACE");
+    }
+    if (workspace_view.id != 0 and document_view.id != 0) {
+        support.common.printBootMarker("ZIGOS:PHASE6:UX:WINDOW_VIEWS");
     }
 
     ux.pairDevice(
@@ -374,7 +565,14 @@ pub fn run(
         "paired-device",
         phase5.user_root_signer,
         paired_device_signer,
-        124,
+        141,
+    ) catch unreachable;
+    context.update_ledger.recordDeviceTrustChange(
+        context.session_user,
+        paired_device_principal,
+        true,
+        141,
+        "device paired",
     ) catch unreachable;
     if (phase5_sync_service.isTrustedDevice(paired_device_principal)) {
         support.common.printBootMarker("ZIGOS:PHASE6:UX:PAIR_DEVICE");
@@ -393,7 +591,7 @@ pub fn run(
         support.common.printBootMarker(boot_markers.phase6_ux_recover_system);
     }
 
-    context.runtime_service.checkpoint(125);
+    context.runtime_service.checkpoint(142);
     context.storage_service_instance.checkpoint_enabled = true;
     context.storage_service_instance.checkpoint();
     support.common.printBootMarker(boot_markers.task_session_ready);

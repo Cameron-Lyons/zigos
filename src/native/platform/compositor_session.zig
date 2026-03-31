@@ -11,6 +11,7 @@ pub const MAX_TITLE_BYTES: usize = 64;
 pub const MAX_LABEL_BYTES: usize = 64;
 pub const MAX_REASON_BYTES: usize = 128;
 pub const MAX_RESOURCE_BYTES: usize = 96;
+pub const MAX_WINDOW_DETAIL_BYTES: usize = 96;
 
 pub const ViewType = enum(u8) {
     document_view,
@@ -33,12 +34,15 @@ pub const WindowRecord = struct {
     view_type: ViewType = .app_panel,
     visible: bool = true,
     modal: bool = true,
+    workspace_id: u64 = 0,
     bundle_id_len: usize = 0,
     bundle_id: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
     display_name_len: usize = 0,
     display_name: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
     title_len: usize = 0,
     title: [MAX_TITLE_BYTES]u8 = [_]u8{0} ** MAX_TITLE_BYTES,
+    detail_len: usize = 0,
+    detail: [MAX_WINDOW_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_WINDOW_DETAIL_BYTES,
     item_count: usize = 0,
 
     pub fn bundleIdSlice(self: *const WindowRecord) []const u8 {
@@ -51,6 +55,10 @@ pub const WindowRecord = struct {
 
     pub fn titleSlice(self: *const WindowRecord) []const u8 {
         return self.title[0..self.title_len];
+    }
+
+    pub fn detailSlice(self: *const WindowRecord) []const u8 {
+        return self.detail[0..self.detail_len];
     }
 };
 
@@ -143,6 +151,32 @@ pub const Session = struct {
         return window;
     }
 
+    pub fn openDocumentView(
+        self: *Session,
+        app_task: *const task_runtime.TaskRecord,
+        workspace_id: u64,
+        path: []const u8,
+    ) Error!*WindowRecord {
+        return self.createWindow(.document_view, app_task, workspace_id, "", "Document", path, false);
+    }
+
+    pub fn openWorkspaceView(
+        self: *Session,
+        app_task: *const task_runtime.TaskRecord,
+        workspace_id: u64,
+        label: []const u8,
+    ) Error!*WindowRecord {
+        return self.createWindow(.workspace_view, app_task, workspace_id, "", "Workspace", label, false);
+    }
+
+    pub fn openTaskView(
+        self: *Session,
+        app_task: *const task_runtime.TaskRecord,
+        title: []const u8,
+    ) Error!*WindowRecord {
+        return self.createWindow(.full_screen_task_view, app_task, 0, "", title, "", false);
+    }
+
     pub fn ensureReviewItem(
         self: *Session,
         window_id: u64,
@@ -217,6 +251,15 @@ pub const Session = struct {
         return null;
     }
 
+    pub fn probeVisibleWindow(self: *const Session, buffer: []u8) bool {
+        for (self.windows[0..self.window_count]) |*window| {
+            if (!window.visible) continue;
+            _ = renderWindowToBuffer(buffer, window) catch return false;
+            return true;
+        }
+        return false;
+    }
+
     pub fn findReviewItem(
         self: *Session,
         window_id: u64,
@@ -244,18 +287,55 @@ pub const Session = struct {
         }
         return null;
     }
+
+    fn createWindow(
+        self: *Session,
+        view_type: ViewType,
+        app_task: *const task_runtime.TaskRecord,
+        workspace_id: u64,
+        bundle_id: []const u8,
+        title_prefix: []const u8,
+        detail: []const u8,
+        modal: bool,
+    ) Error!*WindowRecord {
+        if (self.window_count >= self.windows.len) return error.WindowTableFull;
+
+        const window = &self.windows[self.window_count];
+        window.* = zeroWindow();
+        window.id = self.next_window_id;
+        self.next_window_id += 1;
+        window.subject_task_id = app_task.id;
+        window.ui_surface_id = app_task.ui_surface_id;
+        window.view_type = view_type;
+        window.visible = true;
+        window.modal = modal;
+        window.workspace_id = workspace_id;
+        window.bundle_id_len = copyText(&window.bundle_id, bundle_id);
+        window.title_len = deriveWindowTitle(&window.title, title_prefix, detail);
+        window.detail_len = copyText(&window.detail, detail);
+        self.window_count += 1;
+        return window;
+    }
 };
 
 pub fn renderWindowToBuffer(buffer: []u8, window: *const WindowRecord) ![]const u8 {
     const surface_id = window.ui_surface_id orelse 0;
-    return std.fmt.bufPrint(buffer, "UI window: id={d} surface={d} type={s} modal={s} title={s} bundle={s}", .{
+    var used: usize = 0;
+    used += (try std.fmt.bufPrint(buffer[used..], "UI window: id={d} surface={d} type={s} modal={s} title={s} bundle={s}", .{
         window.id,
         surface_id,
         viewTypeLabel(window.view_type),
         yesNo(window.modal),
         window.titleSlice(),
         window.bundleIdSlice(),
-    });
+    })).len;
+    if (window.workspace_id != 0) {
+        used += (try std.fmt.bufPrint(buffer[used..], " workspace={d}", .{window.workspace_id})).len;
+    }
+    if (window.detail_len != 0) {
+        used += (try std.fmt.bufPrint(buffer[used..], " detail={s}", .{window.detailSlice()})).len;
+    }
+    return buffer[0..used];
 }
 
 pub fn renderReviewItemToBuffer(
@@ -370,6 +450,14 @@ fn yesNo(value: bool) []const u8 {
     return if (value) "yes" else "no";
 }
 
+fn deriveWindowTitle(buffer: *[MAX_TITLE_BYTES]u8, title_prefix: []const u8, detail: []const u8) usize {
+    if (detail.len == 0) {
+        return copyText(buffer, title_prefix);
+    }
+    const rendered = std.fmt.bufPrint(buffer, "{s}: {s}", .{ title_prefix, detail }) catch return copyText(buffer, detail);
+    return rendered.len;
+}
+
 fn zeroWindow() WindowRecord {
     return .{ .id = 0 };
 }
@@ -472,4 +560,49 @@ test "compositor session reuses an existing window for repeated bundle review" {
 
     try std.testing.expectEqual(first.id, second.id);
     try std.testing.expectEqual(@as(usize, 1), session.window_count);
+}
+
+test "compositor session opens document workspace and full-screen task views" {
+    var runtime = task_runtime.Runtime.init();
+    const app_task = try runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = 3 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 1024,
+        },
+        .ui_surface_id = 7,
+        .local_only = true,
+        .initial_component = .{
+            .label = "organizer",
+            .entry = "app.organizer",
+        },
+    });
+
+    var session = Session.init();
+    const document = try session.openDocumentView(app_task, 41, "documents/plan.md");
+    const workspace_window = try session.openWorkspaceView(app_task, 41, "Trip Project");
+    const fullscreen = try session.openTaskView(app_task, "Edit Media Project");
+
+    try std.testing.expectEqual(ViewType.document_view, document.view_type);
+    try std.testing.expectEqual(@as(u64, 41), document.workspace_id);
+    try std.testing.expectEqualStrings("documents/plan.md", document.detailSlice());
+    try std.testing.expectEqual(ViewType.workspace_view, workspace_window.view_type);
+    try std.testing.expectEqualStrings("Trip Project", workspace_window.detailSlice());
+    try std.testing.expectEqual(ViewType.full_screen_task_view, fullscreen.view_type);
+    try std.testing.expectEqualStrings("Edit Media Project", fullscreen.titleSlice());
+
+    var buffer: [320]u8 = undefined;
+    const rendered = try renderWindowToBuffer(&buffer, document);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "type=document_view") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "detail=documents/plan.md") != null);
+
+    const workspace_rendered = try renderWindowToBuffer(&buffer, workspace_window);
+    try std.testing.expect(std.mem.indexOf(u8, workspace_rendered, "type=workspace_view") != null);
+
+    const fullscreen_rendered = try renderWindowToBuffer(&buffer, fullscreen);
+    try std.testing.expect(std.mem.indexOf(u8, fullscreen_rendered, "type=full_screen_task_view") != null);
+    try std.testing.expect(session.probeVisibleWindow(&buffer));
 }

@@ -5,28 +5,21 @@ import re
 import sys
 from pathlib import Path
 
+from spec_coverage_lib import (
+    MANIFEST_PATH,
+    ROOT_DIR,
+    expected_claims_for_manifest_sections,
+    expected_claims_for_section,
+    expected_headings,
+    load_lines,
+    parse_spec_blocks,
+)
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-SPEC_PATH = ROOT_DIR / "SPEC.md"
-MANIFEST_PATH = ROOT_DIR / "spec" / "coverage.json"
 TEST_PATTERN = re.compile(r'^\s*test\s+"([^"]+)"', re.MULTILINE)
-
-
-def normalized_heading(line: str) -> str:
-    return re.sub(r"^\s*#+\s*", "", line).strip()
 
 
 def load_manifest() -> dict:
     return json.loads(MANIFEST_PATH.read_text())
-
-
-def load_headings() -> set[str]:
-    headings: set[str] = set()
-    for line in SPEC_PATH.read_text().splitlines():
-        heading = normalized_heading(line)
-        if heading:
-            headings.add(heading)
-    return headings
 
 
 def load_test_names(cache: dict[Path, set[str]], path: Path) -> set[str]:
@@ -41,12 +34,21 @@ def load_test_names(cache: dict[Path, set[str]], path: Path) -> set[str]:
 def main() -> int:
     errors: list[str] = []
     manifest = load_manifest()
-    headings = load_headings()
+    blocks = parse_spec_blocks()
+    lines = load_lines()
+    spec_headings = expected_headings(blocks)
     required_headings = manifest["required_headings"]
-    required_claims = set(manifest["required_claims"])
+    required_claims = manifest["required_claims"]
+
+    if required_headings != spec_headings:
+        errors.append("required_headings in coverage manifest are out of sync with SPEC.md")
+
+    expected_manifest_claims = expected_claims_for_manifest_sections(manifest["sections"])
+    if required_claims != expected_manifest_claims:
+        errors.append("required_claims in coverage manifest are out of sync with SPEC.md section requirements")
 
     for heading in required_headings:
-        if heading not in headings:
+        if heading not in spec_headings:
             errors.append(f"Missing required heading in SPEC.md: {heading}")
 
     seen_sections: set[str] = set()
@@ -69,6 +71,12 @@ def main() -> int:
         tests = section.get("tests", [])
         if not tests:
             errors.append(f"Coverage section {section_id} has no test references")
+
+        expected_section_claims = expected_claims_for_section(section_id, blocks, lines)
+        if section.get("claims", []) != expected_section_claims:
+            errors.append(
+                f"Coverage section {section_id} claims are out of sync with SPEC.md for heading {heading}"
+            )
 
         for claim in section.get("claims", []):
             owner = seen_claims.get(claim)
@@ -95,8 +103,9 @@ def main() -> int:
             referenced_test_count += 1
 
     claimed = set(seen_claims)
-    missing_claims = sorted(required_claims - claimed)
-    extra_claims = sorted(claimed - required_claims)
+    required_claim_set = set(required_claims)
+    missing_claims = sorted(required_claim_set - claimed)
+    extra_claims = sorted(claimed - required_claim_set)
 
     for claim in missing_claims:
         errors.append(f"Required spec claim is not covered: {claim}")

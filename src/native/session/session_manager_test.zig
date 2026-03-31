@@ -1,7 +1,10 @@
 const std = @import("std");
 const contract = @import("contract.zig");
+const background_dispatch = @import("../task/background_dispatch.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
+const event_ledger = @import("../platform/event_ledger.zig");
 const immutable_base = @import("../platform/immutable_base.zig");
+const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const service_contract = @import("service_contract.zig");
 const session_manager = @import("session_manager.zig");
@@ -24,15 +27,16 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
     const supervisor = session_manager.testing.supervisorPtr();
     const phase4_storage_service = session_manager.testing.storageServicePtr();
     const compositor = session_manager.testing.compositorSessionPtr();
+    const dispatcher = session_manager.testing.backgroundDispatchPtr();
 
     try std.testing.expect(session_manager.testing.isInitialized());
     try std.testing.expectEqual(@as(usize, 13), session_manager.testing.countServices());
     try std.testing.expectEqual(@as(usize, 10), service_directory.bindingCount());
     try std.testing.expectEqual(@as(usize, 21), session_manager.testing.countTasks());
-    try std.testing.expectEqual(@as(usize, 19), session_manager.testing.countTasksInState(.active));
-    try std.testing.expectEqual(@as(usize, 1), session_manager.testing.countTasksInState(.suspended));
+    try std.testing.expectEqual(@as(usize, 20), session_manager.testing.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.suspended));
     try std.testing.expectEqual(@as(usize, 1), session_manager.testing.countTasksInState(.terminated));
-    try std.testing.expectEqual(@as(usize, 3), compositor.window_count);
+    try std.testing.expectEqual(@as(usize, 6), compositor.window_count);
     try std.testing.expectEqual(@as(usize, 9), compositor.item_count);
 
     const runtime_service_record = supervisor.findByClass(.task_runtime).?;
@@ -84,7 +88,8 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
     const review_task = session_manager.testing.findTask("permission-review").?;
     try std.testing.expectEqual(@as(usize, 2), notes_task.execution_component_count);
     try std.testing.expectEqual(@as(usize, 2), notes_task.capability_count);
-    try std.testing.expectEqual(task_runtime.TaskState.suspended, sync_task.state);
+    try std.testing.expectEqual(task_runtime.TaskState.active, sync_task.state);
+    try std.testing.expect(sync_task.background_allowed);
     try std.testing.expectEqual(@as(usize, 4), capture_task.capability_count);
     try std.testing.expectEqual(task_runtime.TaskState.active, compatibility_task.state);
     try std.testing.expect(runtime.processSeparated(notes_task.id, compatibility_task.id));
@@ -106,6 +111,18 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
     const notes_review = compositor.findWindowForTaskBundleConst(notes_task.id, "app.notes").?;
     const sync_review = compositor.findWindowForTaskBundleConst(sync_task.id, "app.sync").?;
     const capture_review = compositor.findWindowForTaskBundleConst(capture_task.id, "app.capture").?;
+    var app_panel_count: usize = 0;
+    var document_view_count: usize = 0;
+    var workspace_view_count: usize = 0;
+    var task_view_count: usize = 0;
+    for (compositor.windows[0..compositor.window_count]) |window| {
+        switch (window.view_type) {
+            .app_panel => app_panel_count += 1,
+            .document_view => document_view_count += 1,
+            .workspace_view => workspace_view_count += 1,
+            .full_screen_task_view => task_view_count += 1,
+        }
+    }
     try std.testing.expectEqual(compositor_session.ViewType.app_panel, notes_review.view_type);
     try std.testing.expectEqual(@as(?u64, 3), notes_review.ui_surface_id);
     try std.testing.expectEqualStrings("Notes permission review", notes_review.titleSlice());
@@ -116,6 +133,17 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
     try std.testing.expectEqual(compositor_session.DecisionState.deny, compositor.findReviewItemConst(notes_review.id, .clipboard, "clipboard").?.decision);
     try std.testing.expectEqual(compositor_session.DecisionState.allow, compositor.findReviewItemConst(sync_review.id, .background_execution, "sync").?.decision);
     try std.testing.expectEqual(compositor_session.DecisionState.deny, compositor.findReviewItemConst(capture_review.id, .mic, "mic.array").?.decision);
+    try std.testing.expectEqual(@as(usize, 3), app_panel_count);
+    try std.testing.expectEqual(@as(usize, 1), document_view_count);
+    try std.testing.expectEqual(@as(usize, 1), workspace_view_count);
+    try std.testing.expectEqual(@as(usize, 1), task_view_count);
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.activeRecordCount());
+    const latest_dispatch = dispatcher.latestRecord().?;
+    try std.testing.expectEqual(sync_task.id, latest_dispatch.task_id);
+    try std.testing.expectEqual(background_dispatch.RecordState.completed, latest_dispatch.state);
+    try std.testing.expectEqual(manifest.BackgroundTrigger.sync_completion, latest_dispatch.trigger);
+    try std.testing.expectEqualStrings("sync", latest_dispatch.backgroundTaskIdSlice());
+    try std.testing.expectEqual(task_runtime.AuditEventKind.background_dispatched, sync_task.audit_trail[sync_task.audit_count - 1].kind);
 
     const session_user = principal.PrincipalId{ .kind = .user, .serial = 1 };
     const storage_service_principal = principal.PrincipalId{ .kind = .service, .serial = 4 };
@@ -146,6 +174,12 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
     try std.testing.expectEqual(@as(u64, 5), immutable_base_manager.rollback_generation);
     try std.testing.expectEqualStrings("recovery-reinstall", immutable_base_manager.activeImage().?.labelSlice());
     try std.testing.expectEqualStrings("stable-b", immutable_base_manager.slots[immutable_base_manager.inactiveSlotIndex()].labelSlice());
+
+    const ledger = session_manager.testing.updateLedgerPtr();
+    try std.testing.expect(ledger.latestKind(.update_transition) != null);
+    try std.testing.expectEqual(event_ledger.EventKind.sync_conflict, ledger.latestKind(.sync_conflict).?.kind);
+    try std.testing.expectEqual(event_ledger.EventKind.device_trust_change, ledger.latestKind(.device_trust_change).?.kind);
+    try std.testing.expectEqual(event_ledger.EventKind.driver_restart, ledger.latestKind(.driver_restart).?.kind);
 }
 
 test "boot is idempotent once initialized" {

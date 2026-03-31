@@ -28,7 +28,11 @@ pub fn manifestFor(bundle_id: []const u8) Error!manifest.BundleManifest {
         .bundle_id = spec.bundle_id,
         .display_name = spec.display_name,
         .publisher = spec.publisher,
+        .provided_interfaces = spec.provided_interfaces,
+        .consumed_interfaces = spec.consumed_interfaces,
         .components = spec.components,
+        .assets = spec.assets,
+        .update_channel = spec.update_channel,
     };
     bundle.signature = signatureFor(bundle, spec.signed);
     return bundle;
@@ -63,6 +67,18 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
                     .id = artifact.label,
                     .entry = artifact.entry,
                 }},
+                .provided_interfaces = if (manifest.isApplicationBundle(artifact.bundle_id))
+                    &.{.{ .name = artifact.entry }}
+                else
+                    &.{},
+                .consumed_interfaces = if (manifest.isApplicationBundle(artifact.bundle_id))
+                    &.{.{ .name = "zigos.object.workspace" }}
+                else
+                    &.{},
+                .assets = if (manifest.isApplicationBundle(artifact.bundle_id))
+                    &.{.{ .path = "assets/default/icon.svg", .content_type = "image/svg+xml" }}
+                else
+                    &.{},
             };
             bundle.signature = signatureFor(bundle, artifact.signed);
             _ = try catalog.registerEmbeddedArtifact(.{
@@ -87,7 +103,11 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
             .bundle_id = spec.bundle_id,
             .display_name = spec.display_name,
             .publisher = spec.publisher,
+            .provided_interfaces = spec.provided_interfaces,
+            .consumed_interfaces = spec.consumed_interfaces,
             .components = spec.components,
+            .assets = spec.assets,
+            .update_channel = spec.update_channel,
         };
         bundle.signature = signatureFor(bundle, spec.signed);
         _ = try catalog.register(.{
