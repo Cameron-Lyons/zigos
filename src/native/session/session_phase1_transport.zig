@@ -19,7 +19,7 @@ fn scheduleUserspaceTask(task_id: u64) bool {
 }
 
 fn executeUserspaceProbe(env: *const support.Environment, task_id: u64) void {
-    _ = userspace_executor.executeTask(env.userspace_catalog, env.runtime, task_id);
+    _ = userspace_executor.executeTask(env.userspace_catalog, env.runtime, env.capability_table, task_id, 0);
 }
 
 fn grantTaskCapability(env: *const support.Environment, task_id: u64, capability_id: u64) void {
@@ -56,8 +56,8 @@ pub fn run(
         },
         scheduleUserspaceTask,
     );
-    executeUserspaceProbe(env, storage_task_desc.task_id);
     grantTaskCapability(env, storage_task_desc.task_id, state.session_capability.id);
+    executeUserspaceProbe(env, storage_task_desc.task_id);
     const phase1_client_task_desc = userspace_launch.launchRegisteredKernel(
         env.userspace_catalog,
         .{

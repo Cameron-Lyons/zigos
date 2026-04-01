@@ -8,6 +8,12 @@ const std = @import("std");
 const task_runtime = @import("task_runtime.zig");
 const userspace_loader = @import("userspace_loader.zig");
 const userspace_manifest_signing = @import("userspace_manifest_signing.zig");
+const console = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/utils/console.zig")
+else
+    struct {
+        pub fn print(_: []const u8) void {}
+    };
 
 pub const Error = userspace_loader.Error || error{
     UnsupportedServiceClass,
@@ -81,7 +87,7 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
                     &.{},
             };
             bundle.signature = signatureFor(bundle, artifact.signed);
-            _ = try catalog.registerEmbeddedArtifact(.{
+            _ = catalog.registerEmbeddedArtifact(.{
                 .bundle = bundle,
                 .component_class = componentClassFromByte(artifact.component_class),
                 .initial_component = .{
@@ -92,7 +98,12 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
                 .heartbeat_increment = artifact.heartbeat_increment,
                 .contract_flags = artifact.contract_flags,
                 .elf_bytes = artifact.data,
-            });
+            }) catch |err| {
+                console.print("ZIGOS:USERSPACE:ARTIFACT:FAIL ");
+                console.print(artifact.bundle_id);
+                console.print("\n");
+                return err;
+            };
         }
         return;
     }

@@ -10,6 +10,7 @@ const driver_service = @import("../drivers/driver_service.zig");
 const device_broker_client = @import("../kernel_api/device_broker_client.zig");
 const endpoint_mod = @import("../kernel_api/endpoint.zig");
 const manifest = @import("../policy/manifest.zig");
+const bootstrap_review_profile = @import("../policy/bootstrap_review_profile.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const native_kernel = @import("../kernel_api/native_kernel.zig");
@@ -79,73 +80,6 @@ var diagnostic_ledger = event_ledger.Ledger.init();
 var background_dispatcher = background_dispatch.Controller.init();
 var phase4_storage_service = emptyStorageService();
 var phase4_export_package = workspace_mod.emptyExportPackage();
-const bootstrap_review_inputs = [_][]const u8{
-    "allow local lease=400",
-    "allow local lease=50",
-    "deny",
-    "allow lease=10",
-    "allow local lease=30",
-    "allow local lease=35",
-    "deny",
-    "allow local lease=25",
-    "allow local lease=15",
-};
-const bootstrap_review_plan = [_]permission_review_service.ScriptedPlanEntry{
-    .{
-        .bundle_id = "app.notes",
-        .kind = .object_access,
-        .resource = "workspace:notes",
-        .command = "allow local lease=400",
-    },
-    .{
-        .bundle_id = "app.notes",
-        .kind = .network_egress,
-        .resource = "lan.sync",
-        .command = "allow local lease=50",
-    },
-    .{
-        .bundle_id = "app.notes",
-        .kind = .clipboard,
-        .resource = "clipboard",
-        .command = "deny",
-    },
-    .{
-        .bundle_id = "app.sync",
-        .kind = .background_execution,
-        .resource = "sync",
-        .command = "allow lease=10",
-    },
-    .{
-        .bundle_id = "app.capture",
-        .kind = .device_access,
-        .resource = "capture.card0",
-        .command = "allow local lease=30",
-    },
-    .{
-        .bundle_id = "app.capture",
-        .kind = .camera,
-        .resource = "camera.front",
-        .command = "allow local lease=35",
-    },
-    .{
-        .bundle_id = "app.capture",
-        .kind = .mic,
-        .resource = "mic.array",
-        .command = "deny",
-    },
-    .{
-        .bundle_id = "app.capture",
-        .kind = .sensor,
-        .resource = "sensor.lid",
-        .command = "allow local lease=25",
-    },
-    .{
-        .bundle_id = "app.capture",
-        .kind = .peer_ipc,
-        .resource = "zigos.peer.share",
-        .command = "allow local lease=15",
-    },
-};
 
 fn environment() Environment {
     return .{
@@ -310,7 +244,7 @@ pub fn kernelPort() ?*component_port.KernelPort {
 }
 
 fn executeUserspaceProbe(task_id: u64) void {
-    _ = userspace_executor.executeTask(&userspace_catalog, &runtime, task_id);
+    _ = userspace_executor.executeTask(&userspace_catalog, &runtime, &capability_table, task_id, 0);
 }
 
 fn scheduleUserspaceTask(task_id: u64) bool {
@@ -349,7 +283,7 @@ fn initializeBootstrapState() BootstrapState {
     common.printBootMarker(boot_markers.tcb_defined);
 
     const ids = session_bootstrap.principals();
-    session_bootstrap.initializeUserspace(&userspace_catalog, &runtime);
+    session_bootstrap.initializeUserspace(&userspace_catalog, &runtime, &capability_table);
     const services = session_bootstrap.registerCoreServices(&supervisor, &runtime_service, ids);
 
     const session_task = userspace_launch.launchRegisteredDirect(
@@ -528,12 +462,12 @@ fn prepareKernelInterface(policy_authority: principal.PrincipalId, session_task_
 }
 
 fn initReviewService(review_service_id: u64, review_task_id: u64) permission_review_service.Service {
-    return permission_review_service.Service.initConfigured(
+    return permission_review_service.Service.initProfiled(
         review_service_id,
         review_task_id,
         &runtime,
-        &bootstrap_review_inputs,
-        &bootstrap_review_plan,
+        &[_][]const u8{},
+        bootstrap_review_profile.rules[0..],
         &phase2_compositor_session,
         &phase2_ux_controller,
     );

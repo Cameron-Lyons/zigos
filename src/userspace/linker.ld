@@ -32,6 +32,11 @@ SECTIONS
         KEEP(*(.zigos_userspace_descriptor))
     } :rodata
 
+    .zigos_userspace_bootstrap : ALIGN(4K)
+    {
+        KEEP(*(.zigos_userspace_bootstrap))
+    } :data
+
     .data : ALIGN(4K)
     {
         *(.data)

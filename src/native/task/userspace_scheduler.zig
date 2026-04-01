@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
+const capability = @import("../kernel_api/capability.zig");
 const task_runtime = @import("task_runtime.zig");
 const userspace_executor = @import("userspace_executor.zig");
 const userspace_loader = @import("userspace_loader.zig");
@@ -22,6 +23,7 @@ const Slot = struct {
 var initialized = false;
 var catalog_ptr: ?*userspace_loader.Catalog = null;
 var runtime_ptr: ?*task_runtime.Runtime = null;
+var capability_table_ptr: ?*const capability.CapabilityTable = null;
 var slots: [task_runtime.MAX_TASKS]Slot = [_]Slot{Slot{}} ** task_runtime.MAX_TASKS;
 var next_index: usize = 0;
 var last_dispatch_tick: u64 = 0;
@@ -32,6 +34,7 @@ pub fn reset() void {
     initialized = false;
     catalog_ptr = null;
     runtime_ptr = null;
+    capability_table_ptr = null;
     slots = [_]Slot{Slot{}} ** task_runtime.MAX_TASKS;
     next_index = 0;
     last_dispatch_tick = 0;
@@ -40,9 +43,14 @@ pub fn reset() void {
     userspace_executor.reset();
 }
 
-pub fn init(catalog: *userspace_loader.Catalog, runtime: *task_runtime.Runtime) void {
+pub fn init(
+    catalog: *userspace_loader.Catalog,
+    runtime: *task_runtime.Runtime,
+    capability_table: *const capability.CapabilityTable,
+) void {
     catalog_ptr = catalog;
     runtime_ptr = runtime;
+    capability_table_ptr = capability_table;
     initialized = true;
     next_index = 0;
     last_dispatch_tick = 0;
@@ -75,6 +83,7 @@ pub fn runNext(now_ticks: u64) bool {
 
     const catalog = catalog_ptr orelse return false;
     const runtime = runtime_ptr orelse return false;
+    const capability_table = capability_table_ptr orelse return false;
 
     var attempts: usize = 0;
     while (attempts < slots.len) : (attempts += 1) {
@@ -92,11 +101,11 @@ pub fn runNext(now_ticks: u64) bool {
 
         last_dispatch_tick = now_ticks;
         next_index = (index + 1) % slots.len;
-        const yielded = dispatch(catalog, runtime, slot.task_id);
+        const yielded = dispatch(catalog, runtime, capability_table, slot.task_id, now_ticks);
         slot.dispatch_count += 1;
         slot.last_dispatch_tick = now_ticks;
         if (builtin.target.os.tag == .freestanding and yielded and !active_marker_printed) {
-            common.printBootMarker("ZIGOS:USERSPACE:SCHEDULER:ACTIVE");
+            common.printBootMarker(boot_markers.userspace_scheduler_active);
             active_marker_printed = true;
         }
         return yielded;
@@ -109,7 +118,9 @@ pub fn runNext(now_ticks: u64) bool {
 fn dispatch(
     catalog: *userspace_loader.Catalog,
     runtime: *task_runtime.Runtime,
+    capability_table: *const capability.CapabilityTable,
     task_id: u64,
+    now_ticks: u64,
 ) bool {
-    return userspace_executor.executeTask(catalog, runtime, task_id);
+    return userspace_executor.executeTask(catalog, runtime, capability_table, task_id, now_ticks);
 }

@@ -18,12 +18,20 @@ pub fn addUserspaceArtifacts(
     const descriptor_module = b.createModule(.{
         .root_source_file = b.path("src/native/task/userspace_descriptor.zig"),
     });
+    const abi_module = b.createModule(.{
+        .root_source_file = b.path("src/native/core/abi.zig"),
+    });
+    const bootstrap_mailbox_module = b.createModule(.{
+        .root_source_file = b.path("src/native/task/userspace_bootstrap_mailbox.zig"),
+    });
     const runtime_module = b.createModule(.{
         .root_source_file = b.path("src/userspace/runtime.zig"),
         .target = target,
         .optimize = optimize,
     });
     runtime_module.addImport("userspace_descriptor", descriptor_module);
+    runtime_module.addImport("native_abi", abi_module);
+    runtime_module.addImport("userspace_bootstrap_mailbox", bootstrap_mailbox_module);
     const archive_generator = b.addExecutable(.{
         .name = "userspace-archive-generator",
         .root_module = b.createModule(.{
@@ -56,6 +64,7 @@ pub fn addUserspaceArtifacts(
             .target = target,
             .optimize = optimize,
         });
+        module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
         module.addOptions("build_options", options);
         module.addImport("userspace_descriptor", descriptor_module);
         module.addImport("userspace_runtime", runtime_module);
