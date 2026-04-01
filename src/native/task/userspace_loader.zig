@@ -5,6 +5,7 @@ const crypto_hash = @import("../core/crypto_hash.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const std = @import("std");
+const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const task_runtime = @import("task_runtime.zig");
 const userspace_manifest_signing = @import("userspace_manifest_signing.zig");
 
@@ -64,6 +65,7 @@ pub const EmbeddedElfInfo = struct {
     entry_point: u64,
     loadable_segment_count: u16,
     byte_len: usize,
+    bootstrap_mailbox_address: u64,
     file_sha256: [MAX_IMAGE_HASH_BYTES]u8,
     executable_image: task_runtime.ExecutableImageSpec,
 };
@@ -96,6 +98,7 @@ pub const ImageRecord = struct {
     entry_point: u64,
     loadable_segment_count: u16,
     byte_len: usize,
+    bootstrap_mailbox_address: u64,
     file_sha256: [MAX_IMAGE_HASH_BYTES]u8,
     executable_image: task_runtime.ExecutableImageSpec,
     elf_bytes: []const u8,
@@ -258,6 +261,7 @@ pub const Catalog = struct {
             image.entry_point = executable_image.entry_point;
             image.loadable_segment_count = @intCast(executable_image.segment_count);
             image.byte_len = executable_image.file_size_bytes;
+            image.bootstrap_mailbox_address = if (embedded) |info| info.bootstrap_mailbox_address else 0;
             image.file_sha256 = executable_image.file_sha256;
             image.executable_image = executable_image;
             image.elf_bytes = elf_bytes;
@@ -340,6 +344,7 @@ fn zeroImage() ImageRecord {
         .entry_point = 0,
         .loadable_segment_count = 0,
         .byte_len = 0,
+        .bootstrap_mailbox_address = 0,
         .file_sha256 = [_]u8{0} ** MAX_IMAGE_HASH_BYTES,
         .executable_image = .{},
         .elf_bytes = &.{},
@@ -369,6 +374,7 @@ fn imageMatchesRequest(
     const expected_entry_point: u64 = expected_image.entry_point;
     const expected_segment_count: u16 = @intCast(expected_image.segment_count);
     const expected_byte_len: usize = expected_image.file_size_bytes;
+    const expected_bootstrap_mailbox_address: u64 = if (embedded) |info| info.bootstrap_mailbox_address else 0;
     const expected_hash = expected_image.file_sha256;
 
     return existing.component_class == request.component_class and
@@ -381,6 +387,7 @@ fn imageMatchesRequest(
         existing.entry_point == expected_entry_point and
         existing.loadable_segment_count == expected_segment_count and
         existing.byte_len == expected_byte_len and
+        existing.bootstrap_mailbox_address == expected_bootstrap_mailbox_address and
         std.mem.eql(u8, &existing.file_sha256, &expected_hash) and
         std.mem.eql(u8, existing.bundleIdSlice(), request.bundle.bundle_id) and
         std.mem.eql(u8, existing.displayNameSlice(), request.bundle.display_name) and
@@ -423,6 +430,12 @@ fn inspectEmbeddedElf(elf_bytes: []const u8) Error!EmbeddedElfInfo {
     if (header.e_phoff == 0 or program_headers_end > elf_bytes.len) {
         return error.InvalidProgramHeaderTable;
     }
+
+    const bootstrap_mailbox_address = findOptionalSectionAddress(
+        elf_bytes,
+        header,
+        userspace_bootstrap_mailbox.SECTION_NAME,
+    ) orelse 0;
 
     var executable_image = task_runtime.ExecutableImageSpec{};
     executable_image.entry_point = header.e_entry;
@@ -479,9 +492,49 @@ fn inspectEmbeddedElf(elf_bytes: []const u8) Error!EmbeddedElfInfo {
         .entry_point = header.e_entry,
         .loadable_segment_count = @intCast(loadable_segment_count),
         .byte_len = elf_bytes.len,
+        .bootstrap_mailbox_address = bootstrap_mailbox_address,
         .file_sha256 = executable_image.file_sha256,
         .executable_image = executable_image,
     };
+}
+
+fn findOptionalSectionAddress(
+    elf_bytes: []const u8,
+    header: std.elf.Elf32_Ehdr,
+    section_name: []const u8,
+) ?u64 {
+    const section_count: usize = header.e_shnum;
+    if (header.e_shoff == 0 or header.e_shentsize != @sizeOf(std.elf.Elf32_Shdr)) return null;
+    if (header.e_shstrndx == 0 or header.e_shstrndx >= section_count) return null;
+
+    const section_headers_end = @as(usize, header.e_shoff) + @as(usize, header.e_shentsize) * section_count;
+    if (section_headers_end > elf_bytes.len) return null;
+
+    const names_header_offset = @as(usize, header.e_shoff) + @as(usize, header.e_shstrndx) * @sizeOf(std.elf.Elf32_Shdr);
+    var names_header: std.elf.Elf32_Shdr = undefined;
+    @memcpy(std.mem.asBytes(&names_header), elf_bytes[names_header_offset..][0..@sizeOf(std.elf.Elf32_Shdr)]);
+
+    const names_start = @as(usize, names_header.sh_offset);
+    const names_end = names_start + @as(usize, names_header.sh_size);
+    if (names_end > elf_bytes.len) return null;
+    const section_names = elf_bytes[names_start..names_end];
+
+    var index: usize = 0;
+    while (index < section_count) : (index += 1) {
+        const section_offset = @as(usize, header.e_shoff) + index * @sizeOf(std.elf.Elf32_Shdr);
+        var section: std.elf.Elf32_Shdr = undefined;
+        @memcpy(std.mem.asBytes(&section), elf_bytes[section_offset..][0..@sizeOf(std.elf.Elf32_Shdr)]);
+        const name = readOptionalSectionName(section_names, section.sh_name) orelse continue;
+        if (std.mem.eql(u8, name, section_name)) return section.sh_addr;
+    }
+    return null;
+}
+
+fn readOptionalSectionName(section_names: []const u8, offset: u32) ?[]const u8 {
+    if (offset >= section_names.len) return null;
+    var end: usize = offset;
+    while (end < section_names.len and section_names[end] != 0) : (end += 1) {}
+    return section_names[offset..end];
 }
 
 fn makeSyntheticElf32(entry_point: u32, phnum: u16, loadable_segments: u16) [@sizeOf(std.elf.Elf32_Ehdr) + 3 * @sizeOf(std.elf.Elf32_Phdr) + 3 * 128]u8 {

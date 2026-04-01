@@ -1,7 +1,9 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
+const capability = @import("../kernel_api/capability.zig");
 const task_runtime = @import("task_runtime.zig");
+const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_loader = @import("userspace_loader.zig");
 
 const common = if (builtin.target.os.tag == .freestanding)
@@ -114,7 +116,9 @@ pub fn activeTaskId() u64 {
 pub fn executeTask(
     catalog: *userspace_loader.Catalog,
     runtime: *task_runtime.Runtime,
+    capability_table: *const capability.CapabilityTable,
     task_id: u64,
+    now_ticks: u64,
 ) bool {
     if (builtin.target.os.tag != .freestanding) return false;
     init();
@@ -127,6 +131,7 @@ pub fn executeTask(
     if (image.elf_bytes.len == 0) return false;
 
     const mapping = ensureMaterialized(address_space, image) orelse return false;
+    initializeBootstrapMailbox(mapping, image, task, capability_table, now_ticks);
     const kernel_page_directory = freestanding.paging.getCurrentPageDirectory();
     kernel_page_directory_ptr = @intFromPtr(kernel_page_directory);
     freestanding.gdt.setKernelStack(@truncate(trapStackTop()));
@@ -167,10 +172,56 @@ pub fn executeTask(
         mapping.last_user_counter >= 2 and
         !resume_marker_printed)
     {
-        common.printBootMarker("ZIGOS:USERSPACE:RESUME:OK");
+        common.printBootMarker(boot_markers.userspace_resume_ok);
         resume_marker_printed = true;
     }
     return handoff_completed;
+}
+
+fn initializeBootstrapMailbox(
+    mapping: *const MappingEntry,
+    image: *const userspace_loader.ImageRecord,
+    task: *const task_runtime.TaskRecord,
+    capability_table: *const capability.CapabilityTable,
+    now_ticks: u64,
+) void {
+    if (image.bootstrap_mailbox_address == 0) return;
+
+    const bootstrap = selectBootstrapCapability(task, capability_table, now_ticks);
+    const previous_directory = freestanding.paging.getCurrentPageDirectory();
+    freestanding.paging.switchPageDirectory(mapping.pageDirectory());
+    defer freestanding.paging.switchPageDirectory(previous_directory);
+
+    const mailbox_ptr: *userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(@as(usize, @intCast(image.bootstrap_mailbox_address)));
+    mailbox_ptr.* = .{
+        .version = userspace_bootstrap_mailbox.VERSION,
+        .phase = @intFromEnum(userspace_bootstrap_mailbox.Phase.boot),
+        .detail = @intFromEnum(userspace_bootstrap_mailbox.classifyDetail(@intFromEnum(task.component_class), image.contract_flags)),
+        .fault_code = 0,
+        ._reserved0 = [_]u8{0} ** 3,
+        .authority_capability_id = bootstrap.capability_id,
+        .task_id = task.id,
+        .service_id = bootstrap.service_id,
+        .resource_mask = 0,
+        .last_counter = 0,
+    };
+}
+
+fn selectBootstrapCapability(
+    task: *const task_runtime.TaskRecord,
+    capability_table: *const capability.CapabilityTable,
+    now_ticks: u64,
+) struct { capability_id: u64, service_id: u64 } {
+    var index: usize = 0;
+    while (index < task.capability_count) : (index += 1) {
+        const capability_id = task.capability_ids[index];
+        const granted = capability_table.query(capability_id) orelse continue;
+        if (!capability_table.isUsable(granted, now_ticks)) continue;
+        if (!granted.rights.time_query and !granted.rights.resource_query and !granted.rights.accounting_query) continue;
+        const service_id = if (granted.target.kind == .service) granted.target.id else 0;
+        return .{ .capability_id = capability_id, .service_id = service_id };
+    }
+    return .{ .capability_id = 0, .service_id = 0 };
 }
 
 fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {

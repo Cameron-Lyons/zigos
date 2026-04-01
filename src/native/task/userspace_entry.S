@@ -28,7 +28,7 @@ zigos_enter_userspace:
 
 resume_from_userspace:
     mov $1, %eax
-    leave
+    pop %ebp
     ret
 
 .global zigos_resume_from_userspace_interrupt

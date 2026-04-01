@@ -63,6 +63,22 @@ pub const ScriptedPlanEntry = struct {
     command: []const u8,
 };
 
+pub const ProfileLeaseMode = enum(u8) {
+    none,
+    requested,
+    fixed,
+};
+
+pub const ProfileRule = struct {
+    bundle_id: []const u8,
+    kind: manifest.PermissionKind,
+    resource: []const u8,
+    allow: bool,
+    local_only: bool = false,
+    lease_mode: ProfileLeaseMode = .none,
+    fixed_lease_ticks: u64 = 0,
+};
+
 pub const Service = struct {
     service_id: u64,
     task_id: u64,
@@ -71,6 +87,7 @@ pub const Service = struct {
     scripted_plan: []const ScriptedPlanEntry = &.{},
     scripted_plan_used: [MAX_SCRIPTED_PLAN_ENTRIES]bool = [_]bool{false} ** MAX_SCRIPTED_PLAN_ENTRIES,
     scripted_cursor: usize = 0,
+    decision_profile: []const ProfileRule = &.{},
     compositor: ?*compositor_session.Session = null,
     ux: ?*native_ux.Controller = null,
 
@@ -99,6 +116,22 @@ pub const Service = struct {
     ) Service {
         var service = init(service_id, task_id, runtime, scripted_inputs);
         service.scripted_plan = scripted_plan[0..@min(scripted_plan.len, MAX_SCRIPTED_PLAN_ENTRIES)];
+        service.compositor = compositor;
+        service.ux = ux;
+        return service;
+    }
+
+    pub fn initProfiled(
+        service_id: u64,
+        task_id: u64,
+        runtime: *task_runtime.Runtime,
+        scripted_inputs: []const []const u8,
+        decision_profile: []const ProfileRule,
+        compositor: ?*compositor_session.Session,
+        ux: ?*native_ux.Controller,
+    ) Service {
+        var service = init(service_id, task_id, runtime, scripted_inputs);
+        service.decision_profile = decision_profile;
         service.compositor = compositor;
         service.ux = ux;
         return service;
@@ -176,6 +209,13 @@ pub const Service = struct {
         bundle: manifest.BundleManifest,
         request: manifest.PermissionRequest,
     ) []const u8 {
+        if (self.renderProfileCommand(buffer, bundle, request)) |line| {
+            console.print("    input> ");
+            console.print(line);
+            console.print("\n");
+            return line;
+        }
+
         if (self.findPlannedCommand(bundle, request)) |line| {
             console.print("    input> ");
             console.print(line);
@@ -233,6 +273,45 @@ pub const Service = struct {
             if (!std.mem.eql(u8, entry.resource, request.resource)) continue;
             self.scripted_plan_used[index] = true;
             return entry.command;
+        }
+        return null;
+    }
+
+    fn renderProfileCommand(
+        self: *const Service,
+        buffer: *[MAX_INPUT_LINE]u8,
+        bundle: manifest.BundleManifest,
+        request: manifest.PermissionRequest,
+    ) ?[]const u8 {
+        for (self.decision_profile) |rule| {
+            if (!std.mem.eql(u8, rule.bundle_id, bundle.bundle_id)) continue;
+            if (rule.kind != request.kind) continue;
+            if (!std.mem.eql(u8, rule.resource, request.resource)) continue;
+            if (!rule.allow) {
+                @memcpy(buffer[0..4], "deny");
+                return buffer[0..4];
+            }
+
+            const lease_ticks = switch (rule.lease_mode) {
+                .none => null,
+                .requested => if (request.max_lease_ticks != 0) request.max_lease_ticks else null,
+                .fixed => rule.fixed_lease_ticks,
+            };
+            if (lease_ticks) |ticks| {
+                return std.fmt.bufPrint(
+                    buffer,
+                    "allow{s} lease={d}",
+                    .{
+                        if (rule.local_only) " local" else "",
+                        ticks,
+                    },
+                ) catch null;
+            }
+            return std.fmt.bufPrint(
+                buffer,
+                "allow{s}",
+                .{if (rule.local_only) " local" else ""},
+            ) catch null;
         }
         return null;
     }
@@ -490,4 +569,70 @@ test "review service uses manifest-aware scripted plans and records structured u
     try std.testing.expectEqual(@as(u64, 50), ux.flows[1].decision_lease_ticks);
     try std.testing.expectEqual(compositor_session.DecisionState.allow, compositor.findReviewItemConst(compositor.windows[0].id, .object_access, "workspace:notes").?.decision);
     try std.testing.expectEqualStrings("lan.sync", compositor.findReviewItemConst(compositor.windows[0].id, .network_egress, "lan.sync").?.networkPathSlice());
+}
+
+test "review service renders commands from a typed decision profile" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = 4 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 1024,
+        },
+        .local_only = true,
+    });
+    const profile = [_]ProfileRule{
+        .{
+            .bundle_id = "app.notes",
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .allow = true,
+            .local_only = true,
+            .lease_mode = .requested,
+        },
+        .{
+            .bundle_id = "app.notes",
+            .kind = .clipboard,
+            .resource = "clipboard",
+            .allow = false,
+        },
+    };
+    var compositor = compositor_session.Session.init();
+    var ux = native_ux.Controller.init();
+    var service = Service.initProfiled(15, 16, &runtime, &[_][]const u8{}, profile[0..], &compositor, &ux);
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:notes",
+            .rights = .{ .object_read = true, .object_write = true },
+            .local_only = true,
+            .max_lease_ticks = 400,
+        },
+        .{
+            .kind = .clipboard,
+            .resource = "clipboard",
+            .rights = .{ .clipboard_read = true },
+            .required = false,
+        },
+    };
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "app.notes",
+        .display_name = "Notes",
+        .publisher = "zigos.dev",
+        .requested_permissions = &permissions,
+        .signature = .{
+            .format = "ed25519",
+            .signer = "zigos-dev-key",
+        },
+    };
+    var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+
+    const grants = try service.reviewBundle(task.id, bundle, 25, &grants_buffer);
+    try std.testing.expectEqual(@as(usize, 1), grants.len);
+    try std.testing.expectEqual(@as(?u64, 425), grants[0].expires_at_ticks);
+    try std.testing.expectEqual(@as(usize, 2), ux.flow_count);
+    try std.testing.expectEqual(compositor_session.DecisionState.deny, compositor.findReviewItemConst(compositor.windows[0].id, .clipboard, "clipboard").?.decision);
 }

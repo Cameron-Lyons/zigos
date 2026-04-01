@@ -8,6 +8,7 @@ else
     };
 const contract = @import("contract.zig");
 const principal = @import("../core/principal.zig");
+const capability = @import("../kernel_api/capability.zig");
 const supervisor_mod = @import("supervisor.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service = @import("../task/task_runtime_service.zig");
@@ -65,10 +66,14 @@ pub fn principals() Principals {
     };
 }
 
-pub fn initializeUserspace(catalog: *userspace_loader.Catalog, runtime: *task_runtime.Runtime) void {
+pub fn initializeUserspace(
+    catalog: *userspace_loader.Catalog,
+    runtime: *task_runtime.Runtime,
+    capability_table: *const capability.CapabilityTable,
+) void {
     catalog.* = userspace_loader.Catalog.init();
     userspace_boot_registry.registerAll(catalog) catch unreachable;
-    userspace_scheduler.init(catalog, runtime);
+    userspace_scheduler.init(catalog, runtime, capability_table);
     if (catalog.imageCount() != 0) {
         common.printBootMarker(boot_markers.userspace_artifacts_ready);
     }
