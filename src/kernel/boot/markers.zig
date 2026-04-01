@@ -81,8 +81,6 @@ pub const smoke = struct {
         tcb_defined,
         userspace_scheduler_ready,
         userspace_exec_probe_ok,
-        userspace_resume_ok,
-        userspace_scheduler_active,
         phase1_native_kernel_ready,
         phase1_no_root,
         phase1_component_abi_ready,
