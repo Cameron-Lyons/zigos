@@ -9,6 +9,8 @@ pub const tcb_defined = "ZIGOS:TCB:DEFINED";
 pub const userspace_artifacts_ready = "ZIGOS:USERSPACE:ARTIFACTS:READY";
 pub const userspace_scheduler_ready = "ZIGOS:USERSPACE:SCHEDULER:READY";
 pub const userspace_exec_probe_ok = "ZIGOS:USERSPACE:EXEC_PROBE:OK";
+pub const userspace_resume_ok = "ZIGOS:USERSPACE:RESUME:OK";
+pub const userspace_scheduler_active = "ZIGOS:USERSPACE:SCHEDULER:ACTIVE";
 
 pub const supervisor_ready = "ZIGOS:SUPERVISOR:READY";
 pub const phase3_contract_map_ready = "ZIGOS:PHASE3:CONTRACT_MAP:READY";
@@ -79,6 +81,8 @@ pub const smoke = struct {
         tcb_defined,
         userspace_scheduler_ready,
         userspace_exec_probe_ok,
+        userspace_resume_ok,
+        userspace_scheduler_active,
         phase1_native_kernel_ready,
         phase1_no_root,
         phase1_component_abi_ready,
