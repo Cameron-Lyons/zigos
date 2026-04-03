@@ -4,10 +4,10 @@ const driver_service = @import("../../native/drivers/driver_service.zig");
 const indexing_service = @import("../../native/services/indexing_service.zig");
 const media_print_service = @import("../../native/services/media_print_service.zig");
 const package_service = @import("../../native/services/package_service.zig");
-const service_contract = @import("../../native/session/service_contract.zig");
+const service_contract = @import("../../native/session/service_contracts.zig");
 const supervisor = @import("../../native/session/supervisor.zig");
 
-test "phase3 native bootstrap modules compile and expose their tests from the src root" {
+test "service bootstrap bootstrap modules compile and expose their tests from the src root" {
     std.testing.refAllDecls(contract);
     std.testing.refAllDecls(driver_service);
     std.testing.refAllDecls(indexing_service);

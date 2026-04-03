@@ -2,14 +2,21 @@ const std = @import("std");
 const principal = @import("../core/principal.zig");
 const task_runtime = @import("task_runtime.zig");
 
-var persisted_checkpoint_state = task_runtime.Runtime.init();
-var has_persisted_checkpoint = false;
-var persisted_last_checkpoint_tick: u64 = 0;
+pub const CheckpointStore = struct {
+    checkpoint_state: task_runtime.Runtime = task_runtime.Runtime.init(),
+    has_checkpoint: bool = false,
+    last_checkpoint_tick: u64 = 0,
+
+    pub fn reset(self: *CheckpointStore) void {
+        self.* = .{};
+    }
+};
 
 pub const Service = struct {
     service_id: u64 = 0,
     owner: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
     runtime: *task_runtime.Runtime,
+    checkpoint_store: ?*CheckpointStore = null,
     checkpoint_state: task_runtime.Runtime = task_runtime.Runtime.init(),
     has_checkpoint: bool = false,
     restart_generation: u32 = 0,
@@ -22,12 +29,13 @@ pub const Service = struct {
         };
     }
 
-    pub fn initFromPersistedCheckpoint(runtime: *task_runtime.Runtime) Service {
+    pub fn initWithStore(runtime: *task_runtime.Runtime, checkpoint_store: *CheckpointStore) Service {
         var service = Service.init(runtime);
-        if (has_persisted_checkpoint) {
-            service.checkpoint_state = persisted_checkpoint_state;
+        service.checkpoint_store = checkpoint_store;
+        if (checkpoint_store.has_checkpoint) {
+            service.checkpoint_state = checkpoint_store.checkpoint_state;
             service.has_checkpoint = true;
-            service.last_checkpoint_tick = persisted_last_checkpoint_tick;
+            service.last_checkpoint_tick = checkpoint_store.last_checkpoint_tick;
         }
         return service;
     }
@@ -45,9 +53,11 @@ pub const Service = struct {
         self.checkpoint_state = self.runtime.*;
         self.has_checkpoint = true;
         self.last_checkpoint_tick = tick;
-        persisted_checkpoint_state = self.checkpoint_state;
-        has_persisted_checkpoint = true;
-        persisted_last_checkpoint_tick = tick;
+        if (self.checkpoint_store) |checkpoint_store| {
+            checkpoint_store.checkpoint_state = self.checkpoint_state;
+            checkpoint_store.has_checkpoint = true;
+            checkpoint_store.last_checkpoint_tick = tick;
+        }
     }
 
     pub fn restartFromCheckpoint(self: *Service, tick: u64) bool {
@@ -58,18 +68,12 @@ pub const Service = struct {
         self.last_restart_tick = tick;
         return true;
     }
-
-    pub fn resetPersistedCheckpoint() void {
-        persisted_checkpoint_state = task_runtime.Runtime.init();
-        has_persisted_checkpoint = false;
-        persisted_last_checkpoint_tick = 0;
-    }
 };
 
 test "task runtime service restores checkpointed task state on restart" {
-    Service.resetPersistedCheckpoint();
+    var checkpoint_store = CheckpointStore{};
     var runtime = task_runtime.Runtime.init();
-    var service = Service.init(&runtime);
+    var service = Service.initWithStore(&runtime, &checkpoint_store);
     service.bind(44, .{ .kind = .service, .serial = 2 });
 
     const owner = principal.PrincipalId{ .kind = .app, .serial = 7 };
@@ -108,23 +112,20 @@ test "task runtime service restores checkpointed task state on restart" {
     try std.testing.expectEqual(@as(u64, 30), service.last_restart_tick);
     try std.testing.expect(runtime.find(baseline.id) != null);
     try std.testing.expect(runtime.find(2) == null);
-    Service.resetPersistedCheckpoint();
 }
 
 test "task runtime service refuses restart before a checkpoint exists" {
-    Service.resetPersistedCheckpoint();
     var runtime = task_runtime.Runtime.init();
     var service = Service.init(&runtime);
 
     try std.testing.expect(!service.restartFromCheckpoint(10));
     try std.testing.expectEqual(@as(u32, 0), service.restart_generation);
-    Service.resetPersistedCheckpoint();
 }
 
 test "task runtime service can restore a persisted checkpoint after service re-instantiation" {
-    Service.resetPersistedCheckpoint();
+    var checkpoint_store = CheckpointStore{};
     var checkpointed_runtime = task_runtime.Runtime.init();
-    var service = Service.init(&checkpointed_runtime);
+    var service = Service.initWithStore(&checkpointed_runtime, &checkpoint_store);
     service.bind(55, .{ .kind = .service, .serial = 3 });
 
     const owner = principal.PrincipalId{ .kind = .app, .serial = 8 };
@@ -148,12 +149,11 @@ test "task runtime service can restore a persisted checkpoint after service re-i
     service.checkpoint(44);
 
     var restarted_runtime = task_runtime.Runtime.init();
-    var restarted = Service.initFromPersistedCheckpoint(&restarted_runtime);
+    var restarted = Service.initWithStore(&restarted_runtime, &checkpoint_store);
     restarted.bind(55, .{ .kind = .service, .serial = 3 });
 
     try std.testing.expect(restarted.restartFromCheckpoint(45));
     try std.testing.expectEqual(@as(u64, 44), restarted.last_checkpoint_tick);
     try std.testing.expectEqual(@as(u32, 1), restarted.restart_generation);
     try std.testing.expect(restarted_runtime.find(task.id) != null);
-    Service.resetPersistedCheckpoint();
 }

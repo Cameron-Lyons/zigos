@@ -259,109 +259,120 @@ pub const PersistentState = struct {
     }
 };
 
-pub var persisted_state = PersistentState{};
-pub var has_persisted_state = false;
-pub var user_root_signers: [device_graph.MAX_USER_ROOTS][MAX_LABEL_BYTES]u8 =
-    [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** device_graph.MAX_USER_ROOTS;
-pub var device_signature_signers: [device_graph.MAX_DEVICES][4][MAX_LABEL_BYTES]u8 =
-    [_][4][MAX_LABEL_BYTES]u8{[_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** 4} ** device_graph.MAX_DEVICES;
-pub var database_contract_signers: [MAX_DATABASE_CONTRACTS][MAX_LABEL_BYTES]u8 =
-    [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** MAX_DATABASE_CONTRACTS;
-pub var next_state_tick: u64 = 1;
+pub const ResidentState = struct {
+    persisted_state: PersistentState = .{},
+    has_persisted_state: bool = false,
+    user_root_signers: [device_graph.MAX_USER_ROOTS][MAX_LABEL_BYTES]u8 =
+        [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** device_graph.MAX_USER_ROOTS,
+    device_signature_signers: [device_graph.MAX_DEVICES][4][MAX_LABEL_BYTES]u8 =
+        [_][4][MAX_LABEL_BYTES]u8{[_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** 4} ** device_graph.MAX_DEVICES,
+    database_contract_signers: [MAX_DATABASE_CONTRACTS][MAX_LABEL_BYTES]u8 =
+        [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** MAX_DATABASE_CONTRACTS,
+    next_state_tick: u64 = 1,
 
-pub const resident_state = struct {
-    pub fn resetForServiceInit() void {
-        persisted_state.reset();
-        resetSignatureStorage();
+    pub fn resetForServiceInit(self: *ResidentState) void {
+        self.persisted_state.reset();
+        self.resetSignatureStorage();
     }
 
-    pub fn resetPersistent() void {
-        persisted_state.reset();
-        has_persisted_state = false;
-        resetSignatureStorage();
-        next_state_tick = 1;
+    pub fn resetPersistent(self: *ResidentState) void {
+        self.persisted_state.reset();
+        self.has_persisted_state = false;
+        self.resetSignatureStorage();
+        self.next_state_tick = 1;
     }
 
-    pub fn markDirty() void {
-        has_persisted_state = true;
+    pub fn markDirty(self: *ResidentState) void {
+        self.has_persisted_state = true;
+    }
+
+    pub fn userRootCount(self: *const ResidentState) usize {
+        var count: usize = 0;
+        for (self.persisted_state.graph.user_roots) |slot| {
+            if (slot.in_use) count += 1;
+        }
+        return count;
+    }
+
+    pub fn deviceCount(self: *const ResidentState) usize {
+        var count: usize = 0;
+        for (self.persisted_state.graph.devices) |slot| {
+            if (slot.in_use) count += 1;
+        }
+        return count;
+    }
+
+    pub fn networkPolicyCount(self: *const ResidentState) usize {
+        var count: usize = 0;
+        for (self.persisted_state.network_policies.policies) |slot| {
+            if (slot.in_use) count += 1;
+        }
+        return count;
+    }
+
+    pub fn workspacePolicyCount(self: *const ResidentState) usize {
+        var count: usize = 0;
+        for (self.persisted_state.workspace_policies) |slot| {
+            if (slot.in_use) count += 1;
+        }
+        return count;
+    }
+
+    pub fn replicaCount(self: *const ResidentState) usize {
+        var count: usize = 0;
+        for (self.persisted_state.replica_entries) |slot| {
+            if (slot.in_use) count += 1;
+        }
+        return count;
+    }
+
+    pub fn conflictCount(self: *const ResidentState) usize {
+        var count: usize = 0;
+        for (self.persisted_state.conflicts) |slot| {
+            if (slot.in_use) count += 1;
+        }
+        return count;
+    }
+
+    pub fn databaseContractCount(self: *const ResidentState) usize {
+        var count: usize = 0;
+        for (self.persisted_state.database_contracts) |slot| {
+            if (slot.in_use) count += 1;
+        }
+        return count;
+    }
+
+    pub fn overlayCount(self: *const ResidentState) usize {
+        var count: usize = 0;
+        for (self.persisted_state.overlays) |slot| {
+            if (slot.in_use) count += 1;
+        }
+        return count;
+    }
+
+    pub fn nextPersistedPolicyId(self: *const ResidentState) u64 {
+        var next_id: u64 = 1;
+        for (self.persisted_state.network_policies.policies) |slot| {
+            if (!slot.in_use) continue;
+            next_id = @max(next_id, slot.policy.id + 1);
+        }
+        return next_id;
+    }
+
+    pub fn nextPersistTick(self: *ResidentState) u64 {
+        defer self.next_state_tick += 1;
+        return self.next_state_tick;
+    }
+
+    pub fn resetSignatureStorage(self: *ResidentState) void {
+        @memset(std.mem.asBytes(&self.user_root_signers), 0);
+        @memset(std.mem.asBytes(&self.device_signature_signers), 0);
+        @memset(std.mem.asBytes(&self.database_contract_signers), 0);
     }
 };
 
 pub fn readOptionalU64(value: u64) ?u64 {
     return if (value == 0) null else value;
-}
-
-pub fn userRootCount() usize {
-    var count: usize = 0;
-    for (persisted_state.graph.user_roots) |slot| {
-        if (slot.in_use) count += 1;
-    }
-    return count;
-}
-
-pub fn deviceCount() usize {
-    var count: usize = 0;
-    for (persisted_state.graph.devices) |slot| {
-        if (slot.in_use) count += 1;
-    }
-    return count;
-}
-
-pub fn networkPolicyCount() usize {
-    var count: usize = 0;
-    for (persisted_state.network_policies.policies) |slot| {
-        if (slot.in_use) count += 1;
-    }
-    return count;
-}
-
-pub fn workspacePolicyCount() usize {
-    var count: usize = 0;
-    for (persisted_state.workspace_policies) |slot| {
-        if (slot.in_use) count += 1;
-    }
-    return count;
-}
-
-pub fn replicaCount() usize {
-    var count: usize = 0;
-    for (persisted_state.replica_entries) |slot| {
-        if (slot.in_use) count += 1;
-    }
-    return count;
-}
-
-pub fn conflictCount() usize {
-    var count: usize = 0;
-    for (persisted_state.conflicts) |slot| {
-        if (slot.in_use) count += 1;
-    }
-    return count;
-}
-
-pub fn databaseContractCount() usize {
-    var count: usize = 0;
-    for (persisted_state.database_contracts) |slot| {
-        if (slot.in_use) count += 1;
-    }
-    return count;
-}
-
-pub fn overlayCount() usize {
-    var count: usize = 0;
-    for (persisted_state.overlays) |slot| {
-        if (slot.in_use) count += 1;
-    }
-    return count;
-}
-
-pub fn nextPersistedPolicyId() u64 {
-    var next_id: u64 = 1;
-    for (persisted_state.network_policies.policies) |slot| {
-        if (!slot.in_use) continue;
-        next_id = @max(next_id, slot.policy.id + 1);
-    }
-    return next_id;
 }
 
 pub fn chunkPath(buffer: []u8, chunk_index: usize) Error![]const u8 {
@@ -380,17 +391,6 @@ pub fn stateDigest(bytes: []const u8) [32]u8 {
     var hasher = crypto_hash.init();
     hasher.update(bytes);
     return crypto_hash.finalize(&hasher);
-}
-
-pub fn nextPersistTick() u64 {
-    defer next_state_tick += 1;
-    return next_state_tick;
-}
-
-pub fn resetSignatureStorage() void {
-    @memset(std.mem.asBytes(&user_root_signers), 0);
-    @memset(std.mem.asBytes(&device_signature_signers), 0);
-    @memset(std.mem.asBytes(&database_contract_signers), 0);
 }
 
 pub fn zeroDeviceGraphRecord() device_graph.DeviceRecord {

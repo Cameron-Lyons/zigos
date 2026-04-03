@@ -13,14 +13,15 @@ const task_runtime = @import("../../native/task/task_runtime.zig");
 const update_health = @import("../../native/platform/update_health.zig");
 
 pub fn baseImageStaysSignedMeasuredAtomicAndRollbackCapable() !void {
-    storage_service.Service.resetPersistentState();
-    defer storage_service.Service.resetPersistentState();
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
 
     const owner = spec_support.service(40);
     const state_signer = spec_support.signer("spec.base.state", 0x51);
     const image_signer = spec_support.signer("spec.base.image", 0x52);
 
-    var storage = storage_service.Service.init(700, 70, owner);
+    var storage = storage_service.Service.initWithStore(700, 70, owner, &storage_checkpoint_store);
     var manager = try immutable_base.Manager.init(&storage, owner, state_signer);
 
     _ = try manager.stageImage(0, "stable-a", "kernel=v1", image_signer, 10);
@@ -63,10 +64,9 @@ pub fn baseImageStaysSignedMeasuredAtomicAndRollbackCapable() !void {
 }
 
 pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {
-    storage_service.Service.resetPersistentState();
-    sync_service.Service.resetPersistentState();
-    defer storage_service.Service.resetPersistentState();
-    defer sync_service.Service.resetPersistentState();
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
 
     const storage_owner = spec_support.service(50);
     const sync_owner = spec_support.service(51);
@@ -81,7 +81,7 @@ pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {
     const tablet_signer = spec_support.signer("spec.recovery.tablet", 0x66);
     const rotated_tablet_signer = spec_support.signer("spec.recovery.tablet.v2", 0x67);
 
-    var storage = storage_service.Service.init(800, 80, storage_owner);
+    var storage = storage_service.Service.initWithStore(800, 80, storage_owner, &storage_checkpoint_store);
     var manager = try immutable_base.Manager.init(&storage, storage_owner, state_signer);
     _ = try manager.stageImage(0, "stable-a", "kernel=v1", image_signer, 10);
     _ = try manager.activate(0, .{}, 11);
@@ -137,8 +137,9 @@ pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {
 }
 
 pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
-    storage_service.Service.resetPersistentState();
-    defer storage_service.Service.resetPersistentState();
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
 
     const owner = spec_support.service(41);
     const state_signer = spec_support.signer("spec.health.state", 0x53);
@@ -151,7 +152,7 @@ pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
     const source_signer = spec_support.signer("spec.health.source", 0x57);
     const target_signer = spec_support.signer("spec.health.target", 0x58);
 
-    var storage = storage_service.Service.init(701, 71, owner);
+    var storage = storage_service.Service.initWithStore(701, 71, owner, &storage_checkpoint_store);
     var manager = try immutable_base.Manager.init(&storage, owner, state_signer);
     var sync = sync_service.Service.init(702, 72, owner);
     var compositor = compositor_session.Session.init();

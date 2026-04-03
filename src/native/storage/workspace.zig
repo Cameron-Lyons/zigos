@@ -13,9 +13,6 @@ pub const MAX_RECOVERABLE_DELETES: usize = 24;
 pub const MAX_ENTRY_PATH_BYTES: usize = 96;
 pub const MAX_SHARE_GRANTS: usize = 8;
 
-var workspace_message_buffer: [4096]u8 = undefined;
-var restore_entries_scratch: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
-
 pub const Entry = struct {
     path_len: usize = 0,
     path: [MAX_ENTRY_PATH_BYTES]u8 = [_]u8{0} ** MAX_ENTRY_PATH_BYTES,
@@ -228,6 +225,10 @@ pub const Directory = struct {
             if (slot.in_use and slot.workspace.id == workspace_id) return &slot.workspace;
         }
         return null;
+    }
+
+    pub fn findConst(self: *const Directory, workspace_id: u64) ?*const WorkspaceRecord {
+        return self.lookupConst(workspace_id);
     }
 
     pub fn findOwned(self: *Directory, owner: principal.PrincipalId, label: []const u8) ?*WorkspaceRecord {
@@ -444,9 +445,10 @@ pub const Directory = struct {
         if (snapshot_record.workspace_id != workspace_id) return error.SnapshotNotFound;
         if (!verifySnapshotRecord(snapshot_record)) return error.InvalidSignature;
 
-        clearEntries(&restore_entries_scratch);
-        copyEntries(restore_entries_scratch[0..snapshot_record.entry_count], snapshot_record.entries[0..snapshot_record.entry_count]);
-        recordDeletedEntriesAgainst(workspace, restore_entries_scratch[0..snapshot_record.entry_count]);
+        var restore_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+        clearEntries(&restore_entries);
+        copyEntries(restore_entries[0..snapshot_record.entry_count], snapshot_record.entries[0..snapshot_record.entry_count]);
+        recordDeletedEntriesAgainst(workspace, restore_entries[0..snapshot_record.entry_count]);
 
         clearEntries(&workspace.entries);
         workspace.entry_count = snapshot_record.entry_count;
@@ -670,8 +672,9 @@ fn clearEntries(entries: *[MAX_WORKSPACE_ENTRIES]Entry) void {
 }
 
 fn signSnapshotRecord(snapshot: *SnapshotRecord, identity: signing.SignerIdentity) !void {
+    var message_buffer: [4096]u8 = undefined;
     const message = try snapshotMessage(
-        &workspace_message_buffer,
+        &message_buffer,
         "snapshot",
         snapshot.workspace_id,
         snapshot.generation,
@@ -683,8 +686,9 @@ fn signSnapshotRecord(snapshot: *SnapshotRecord, identity: signing.SignerIdentit
 
 fn verifySnapshotRecord(snapshot: *const SnapshotRecord) bool {
     if (!snapshot.signature.isPresent()) return false;
+    var message_buffer: [4096]u8 = undefined;
     const message = snapshotMessage(
-        &workspace_message_buffer,
+        &message_buffer,
         "snapshot",
         snapshot.workspace_id,
         snapshot.generation,
@@ -695,8 +699,9 @@ fn verifySnapshotRecord(snapshot: *const SnapshotRecord) bool {
 }
 
 fn signExportPackage(package: *ExportPackage, identity: signing.SignerIdentity) !void {
+    var message_buffer: [4096]u8 = undefined;
     const message = try snapshotMessage(
-        &workspace_message_buffer,
+        &message_buffer,
         "export",
         package.workspace_id,
         package.generation,
@@ -710,8 +715,9 @@ fn signExportPackage(package: *ExportPackage, identity: signing.SignerIdentity) 
 fn verifyExportPackage(package: *const ExportPackage) bool {
     const signature = exportPackageSignature(package);
     if (!signature.isPresent()) return false;
+    var message_buffer: [4096]u8 = undefined;
     const message = snapshotMessage(
-        &workspace_message_buffer,
+        &message_buffer,
         "export",
         package.workspace_id,
         package.generation,

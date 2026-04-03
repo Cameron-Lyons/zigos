@@ -20,107 +20,111 @@ const Slot = struct {
     last_dispatch_tick: u64 = 0,
 };
 
-var initialized = false;
-var catalog_ptr: ?*userspace_loader.Catalog = null;
-var runtime_ptr: ?*task_runtime.Runtime = null;
-var capability_table_ptr: ?*const capability.CapabilityTable = null;
-var slots: [task_runtime.MAX_TASKS]Slot = [_]Slot{Slot{}} ** task_runtime.MAX_TASKS;
-var next_index: usize = 0;
-var last_dispatch_tick: u64 = 0;
-var ready_marker_printed = false;
-var active_marker_printed = false;
+pub const Scheduler = struct {
+    executor: *userspace_executor.Executor,
+    initialized: bool = false,
+    catalog_ptr: ?*userspace_loader.Catalog = null,
+    runtime_ptr: ?*task_runtime.Runtime = null,
+    capability_table_ptr: ?*const capability.CapabilityTable = null,
+    slots: [task_runtime.MAX_TASKS]Slot = [_]Slot{Slot{}} ** task_runtime.MAX_TASKS,
+    next_index: usize = 0,
+    last_dispatch_tick: u64 = 0,
+    ready_marker_printed: bool = false,
+    active_marker_printed: bool = false,
 
-pub fn reset() void {
-    initialized = false;
-    catalog_ptr = null;
-    runtime_ptr = null;
-    capability_table_ptr = null;
-    slots = [_]Slot{Slot{}} ** task_runtime.MAX_TASKS;
-    next_index = 0;
-    last_dispatch_tick = 0;
-    ready_marker_printed = false;
-    active_marker_printed = false;
-    userspace_executor.reset();
-}
-
-pub fn init(
-    catalog: *userspace_loader.Catalog,
-    runtime: *task_runtime.Runtime,
-    capability_table: *const capability.CapabilityTable,
-) void {
-    catalog_ptr = catalog;
-    runtime_ptr = runtime;
-    capability_table_ptr = capability_table;
-    initialized = true;
-    next_index = 0;
-    last_dispatch_tick = 0;
-    userspace_executor.init();
-    if (builtin.target.os.tag == .freestanding and !ready_marker_printed) {
-        common.printBootMarker(boot_markers.userspace_scheduler_ready);
-        ready_marker_printed = true;
-    }
-}
-
-pub fn registerTask(task_id: u64) bool {
-    if (!initialized) return false;
-    for (&slots) |*slot| {
-        if (slot.in_use and slot.task_id == task_id) return false;
+    pub fn init(executor: *userspace_executor.Executor) Scheduler {
+        return .{ .executor = executor };
     }
 
-    for (&slots) |*slot| {
-        if (slot.in_use) continue;
-        slot.* = .{
-            .in_use = true,
-            .task_id = task_id,
-        };
-        return true;
+    pub fn reset(self: *Scheduler) void {
+        self.initialized = false;
+        self.catalog_ptr = null;
+        self.runtime_ptr = null;
+        self.capability_table_ptr = null;
+        self.slots = [_]Slot{Slot{}} ** task_runtime.MAX_TASKS;
+        self.next_index = 0;
+        self.last_dispatch_tick = 0;
+        self.ready_marker_printed = false;
+        self.active_marker_printed = false;
+        self.executor.reset();
     }
-    return false;
-}
 
-pub fn runNext(now_ticks: u64) bool {
-    if (!initialized) return false;
+    pub fn bind(
+        self: *Scheduler,
+        catalog: *userspace_loader.Catalog,
+        runtime: *task_runtime.Runtime,
+        capability_table: *const capability.CapabilityTable,
+    ) void {
+        self.catalog_ptr = catalog;
+        self.runtime_ptr = runtime;
+        self.capability_table_ptr = capability_table;
+        self.initialized = true;
+        self.next_index = 0;
+        self.last_dispatch_tick = 0;
+        self.executor.init();
+        if (builtin.target.os.tag == .freestanding and !self.ready_marker_printed) {
+            common.printBootMarker(boot_markers.userspace_scheduler_ready);
+            self.ready_marker_printed = true;
+        }
+    }
 
-    const catalog = catalog_ptr orelse return false;
-    const runtime = runtime_ptr orelse return false;
-    const capability_table = capability_table_ptr orelse return false;
-
-    var attempts: usize = 0;
-    while (attempts < slots.len) : (attempts += 1) {
-        const index = (next_index + attempts) % slots.len;
-        const slot = &slots[index];
-        if (!slot.in_use) continue;
-
-        const task = runtime.find(slot.task_id) orelse {
-            slot.in_use = false;
-            continue;
-        };
-        if (task.state != .active or !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) {
-            continue;
+    pub fn registerTask(self: *Scheduler, task_id: u64) bool {
+        if (!self.initialized) return false;
+        for (&self.slots) |*slot| {
+            if (slot.in_use and slot.task_id == task_id) return false;
         }
 
-        last_dispatch_tick = now_ticks;
-        next_index = (index + 1) % slots.len;
-        const yielded = dispatch(catalog, runtime, capability_table, slot.task_id, now_ticks);
-        slot.dispatch_count += 1;
-        slot.last_dispatch_tick = now_ticks;
-        if (builtin.target.os.tag == .freestanding and yielded and !active_marker_printed) {
-            common.printBootMarker(boot_markers.userspace_scheduler_active);
-            active_marker_printed = true;
+        for (&self.slots) |*slot| {
+            if (slot.in_use) continue;
+            slot.* = .{
+                .in_use = true,
+                .task_id = task_id,
+            };
+            return true;
         }
-        return yielded;
+        return false;
     }
 
-    last_dispatch_tick = now_ticks;
-    return false;
-}
+    pub fn executeTask(self: *Scheduler, task_id: u64, now_ticks: u64) bool {
+        if (!self.initialized) return false;
+        const catalog = self.catalog_ptr orelse return false;
+        const runtime = self.runtime_ptr orelse return false;
+        const capability_table = self.capability_table_ptr orelse return false;
+        return self.executor.executeTask(catalog, runtime, capability_table, task_id, now_ticks);
+    }
 
-fn dispatch(
-    catalog: *userspace_loader.Catalog,
-    runtime: *task_runtime.Runtime,
-    capability_table: *const capability.CapabilityTable,
-    task_id: u64,
-    now_ticks: u64,
-) bool {
-    return userspace_executor.executeTask(catalog, runtime, capability_table, task_id, now_ticks);
-}
+    pub fn runNext(self: *Scheduler, now_ticks: u64) bool {
+        if (!self.initialized) return false;
+
+        const runtime = self.runtime_ptr orelse return false;
+
+        var attempts: usize = 0;
+        while (attempts < self.slots.len) : (attempts += 1) {
+            const index = (self.next_index + attempts) % self.slots.len;
+            const slot = &self.slots[index];
+            if (!slot.in_use) continue;
+
+            const task = runtime.find(slot.task_id) orelse {
+                slot.in_use = false;
+                continue;
+            };
+            if (task.state != .active or !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) {
+                continue;
+            }
+
+            self.last_dispatch_tick = now_ticks;
+            self.next_index = (index + 1) % self.slots.len;
+            const yielded = self.executeTask(slot.task_id, now_ticks);
+            slot.dispatch_count += 1;
+            slot.last_dispatch_tick = now_ticks;
+            if (builtin.target.os.tag == .freestanding and yielded and !self.active_marker_printed) {
+                common.printBootMarker(boot_markers.userspace_scheduler_active);
+                self.active_marker_printed = true;
+            }
+            return yielded;
+        }
+
+        self.last_dispatch_tick = now_ticks;
+        return false;
+    }
+};

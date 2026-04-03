@@ -16,12 +16,16 @@ pub fn ensureWorkspace(storage: *storage_service.Service, owner: principal.Princ
     return existing.id;
 }
 
-pub fn load(storage: *storage_service.Service, workspace_id: u64) Error!bool {
+pub fn load(
+    storage: *storage_service.Service,
+    workspace_id: u64,
+    resident: *state_support.ResidentState,
+) Error!bool {
     const index_entry = storage.resolve(workspace_id, state_support.state_index_path) catch |err| switch (err) {
         error.EntryNotFound => return false,
         else => return err,
     };
-    const index_version = storage.store.version(index_entry.version_id) orelse return error.CorruptState;
+    const index_version = storage.version(index_entry.version_id) orelse return error.CorruptState;
     const index = try state_codec.decodeStateIndex(index_version.payloadSlice());
     if (index.chunk_count == 0 or index.chunk_count > state_support.max_state_chunks) return error.CorruptState;
     if (index.total_len == 0 or index.total_len > state_support.max_state_bytes) return error.CorruptState;
@@ -36,7 +40,7 @@ pub fn load(storage: *storage_service.Service, workspace_id: u64) Error!bool {
             error.EntryNotFound => return error.CorruptState,
             else => return err,
         };
-        const chunk_version = storage.store.version(chunk_entry.version_id) orelse return error.CorruptState;
+        const chunk_version = storage.version(chunk_entry.version_id) orelse return error.CorruptState;
         const payload = chunk_version.payloadSlice();
         if (offset + payload.len > index.total_len) return error.CorruptState;
         @memcpy(assembled[offset .. offset + payload.len], payload);
@@ -45,18 +49,22 @@ pub fn load(storage: *storage_service.Service, workspace_id: u64) Error!bool {
     if (offset != index.total_len) return error.CorruptState;
     if (!std.mem.eql(u8, &index.digest, &state_support.stateDigest(assembled[0..offset]))) return error.CorruptState;
 
-    try state_codec.deserialize(assembled[0..offset]);
-    state_support.has_persisted_state = true;
+    try state_codec.deserialize(resident, assembled[0..offset]);
+    resident.has_persisted_state = true;
     return true;
 }
 
-pub fn persist(storage: *storage_service.Service, workspace_id: u64) Error!void {
+pub fn persist(
+    storage: *storage_service.Service,
+    workspace_id: u64,
+    resident: *state_support.ResidentState,
+) Error!void {
     var encoded: [state_support.max_state_bytes]u8 = undefined;
-    const encoded_len = try state_codec.serialize(encoded[0..]);
+    const encoded_len = try state_codec.serialize(resident, encoded[0..]);
     const chunk_count = @divFloor(encoded_len + object_store.MAX_PAYLOAD_BYTES - 1, object_store.MAX_PAYLOAD_BYTES);
     if (chunk_count == 0 or chunk_count > state_support.max_state_chunks) return error.StateTooLarge;
 
-    const tick = state_support.nextPersistTick();
+    const tick = resident.nextPersistTick();
     try storage.beginTransaction(workspace_id);
 
     var chunk_index: usize = 0;

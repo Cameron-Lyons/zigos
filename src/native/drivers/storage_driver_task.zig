@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
+const component_port = @import("../kernel_api/component_port.zig");
 const device_broker_client = @import("../kernel_api/device_broker_client.zig");
 const storage_volume = @import("../storage/storage_volume.zig");
 const storage_volume_backend = @import("../storage/storage_volume_backend.zig");
@@ -29,7 +30,7 @@ pub const AtaDriverError = error{
     BrokerUnavailable,
 };
 
-const AtaControllerSession = struct {
+pub const AtaControllerSession = struct {
     client: device_broker_client.Client,
     device_id: u64,
     base_port: u16,
@@ -38,9 +39,6 @@ const AtaControllerSession = struct {
     irq_line: u8,
     sector_count: u64,
 };
-
-var attached_session: AtaControllerSession = undefined;
-var attached_session_present = false;
 
 const ReadContext = struct {
     session: *const AtaControllerSession,
@@ -60,21 +58,18 @@ const WriteContext = struct {
     }
 };
 
-pub fn reset() void {
-    attached_session_present = false;
-}
-
-pub fn attachAtaBootstrapBackend(
+pub fn establishAtaBootstrapSession(
+    kernel_port: *component_port.KernelPort,
     device_id: u64,
     authority_capability_id: u64,
     task_id: u64,
     now_ticks: u64,
-) bool {
-    var client = device_broker_client.initBound(authority_capability_id, task_id, now_ticks) catch return false;
-    const descriptor = client.describe() catch return false;
-    if (descriptor.device_id != device_id) return false;
+) ?AtaControllerSession {
+    var client = device_broker_client.Client.init(kernel_port, authority_capability_id, task_id, now_ticks);
+    const descriptor = client.describe() catch return null;
+    if (descriptor.device_id != device_id) return null;
 
-    attached_session = .{
+    return .{
         .client = client,
         .device_id = device_id,
         .base_port = descriptor.base_port,
@@ -83,9 +78,10 @@ pub fn attachAtaBootstrapBackend(
         .irq_line = descriptor.irq_line,
         .sector_count = descriptor.sector_count,
     };
-    attached_session_present = true;
-    storage_volume.attachAtaBootstrapDevice(@ptrCast(&attached_session), descriptor.sector_count);
-    return true;
+}
+
+pub fn attachAtaBootstrapSession(session: *AtaControllerSession) void {
+    storage_volume.attachAtaBootstrapDevice(@ptrCast(session), session.sector_count);
 }
 
 export fn zigosStorageBootstrapAtaRead(
@@ -211,7 +207,6 @@ fn writePortU16(session: *AtaControllerSession, port: u16, value: u16) AtaDriver
 
 test "storage driver task attaches only through the kernel device broker" {
     const capability = @import("../kernel_api/capability.zig");
-    const component_port = @import("../kernel_api/component_port.zig");
     const device_broker = @import("../kernel_api/device_broker.zig");
     const endpoint = @import("../kernel_api/endpoint.zig");
     const native_kernel = @import("../kernel_api/native_kernel.zig");
@@ -222,8 +217,6 @@ test "storage driver task attaches only through the kernel device broker" {
 
     storage_volume.clearAttachedBackend();
     defer storage_volume.clearAttachedBackend();
-    reset();
-    defer reset();
     device_broker.reset();
     defer device_broker.reset();
 
@@ -241,9 +234,6 @@ test "storage driver task attaches only through the kernel device broker" {
         &registry,
     );
     var kernel_port = component_port.KernelPort.init(&kernel);
-    device_broker_client.reset();
-    defer device_broker_client.reset();
-    device_broker_client.bindKernelPort(&kernel_port);
 
     const driver_task = try runtime.createTask(.{
         .owner = principal.PrincipalId{ .kind = .service, .serial = 30 },
@@ -285,7 +275,9 @@ test "storage driver task attaches only through the kernel device broker" {
     });
     try runtime.grantCapability(driver_task.id, device_capability.id);
 
-    try std.testing.expect(!attachAtaBootstrapBackend(0x1F001, device_capability.id, driver_task.id, 9));
+    try std.testing.expect(
+        establishAtaBootstrapSession(&kernel_port, 0x1F001, device_capability.id, driver_task.id, 9) == null,
+    );
 
     try std.testing.expect(device_broker.publishAtaController(0x1F001, .{
         .base_port = 0x1F0,
@@ -294,7 +286,7 @@ test "storage driver task attaches only through the kernel device broker" {
         .irq_line = 14,
         .sector_count = storage_volume.required_device_sectors,
     }));
-    try std.testing.expect(attachAtaBootstrapBackend(0x1F001, device_capability.id, driver_task.id, 9));
-    try std.testing.expect(attached_session_present);
+    var session = establishAtaBootstrapSession(&kernel_port, 0x1F001, device_capability.id, driver_task.id, 9).?;
+    attachAtaBootstrapSession(&session);
     try std.testing.expect(storage_volume.hasAttachedDevice());
 }

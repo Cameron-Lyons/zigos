@@ -23,4 +23,5 @@ pub const ConflictRecord = impl.ConflictRecord;
 pub const DatabaseContract = impl.DatabaseContract;
 pub const ReplicationSummary = impl.ReplicationSummary;
 pub const Error = impl.Error;
+pub const ResidentState = impl.ResidentState;
 pub const Service = impl.Service;

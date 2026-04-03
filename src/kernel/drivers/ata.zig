@@ -264,7 +264,7 @@ fn writeSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []con
         return ATAError.InvalidParameter;
     }
 
-    common.printBootMarker("ZIGOS:PHASE4:CHECKPOINT:ATA_WRITE_READY_WAIT");
+    common.printBootMarker("ZIGOS:STORAGE:CHECKPOINT:ATA_WRITE_READY_WAIT");
     try waitDriveReady(device);
 
     const drive_select: u8 = if (device.is_master) 0xE0 else 0xF0;
@@ -280,12 +280,12 @@ fn writeSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []con
     x86.outb(device.base_port + ATA_REG_LBA2, @as(u8, @intCast((lba >> 16) & 0xFF)));
 
     x86.outb(device.base_port + ATA_REG_COMMAND, ATA_CMD_WRITE_SECTORS);
-    common.printBootMarker("ZIGOS:PHASE4:CHECKPOINT:ATA_WRITE_COMMAND");
+    common.printBootMarker("ZIGOS:STORAGE:CHECKPOINT:ATA_WRITE_COMMAND");
 
     var buffer_offset: usize = 0;
     for (0..count) |_| {
         try waitDataReady(device);
-        common.printBootMarker("ZIGOS:PHASE4:CHECKPOINT:ATA_WRITE_SECTOR");
+        common.printBootMarker("ZIGOS:STORAGE:CHECKPOINT:ATA_WRITE_SECTOR");
 
         for (0..256) |_| {
             const word = @as(u16, buffer[buffer_offset]) |
@@ -296,9 +296,9 @@ fn writeSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []con
     }
 
     x86.outb(device.base_port + ATA_REG_COMMAND, ATA_CMD_CACHE_FLUSH);
-    common.printBootMarker("ZIGOS:PHASE4:CHECKPOINT:ATA_WRITE_FLUSH");
+    common.printBootMarker("ZIGOS:STORAGE:CHECKPOINT:ATA_WRITE_FLUSH");
     try waitDriveReady(device);
-    common.printBootMarker("ZIGOS:PHASE4:CHECKPOINT:ATA_WRITE_DONE");
+    common.printBootMarker("ZIGOS:STORAGE:CHECKPOINT:ATA_WRITE_DONE");
 }
 
 pub fn readSectors(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) ATAError!void {

@@ -12,8 +12,6 @@ pub const Error = component_port.Error || error{
     TrapUnavailable,
 };
 
-var bound_kernel_port: ?*component_port.KernelPort = null;
-
 const freestanding_trap = if (builtin.target.os.tag == .freestanding)
     struct {
         extern fn syscall3_asm(request_addr: usize, response_addr: usize, response_len: usize) callconv(.c) usize;
@@ -147,24 +145,6 @@ pub const Client = struct {
         return self.next_correlation_id;
     }
 };
-
-pub fn bindKernelPort(kernel_port: *component_port.KernelPort) void {
-    bound_kernel_port = kernel_port;
-}
-
-pub fn reset() void {
-    bound_kernel_port = null;
-}
-
-pub fn initBound(authority_capability_id: u64, task_id: u64, now_ticks: u64) Error!Client {
-    const kernel_port = bound_kernel_port orelse &undefined_kernel_port;
-    if (builtin.target.os.tag != .freestanding and kernel_port == &undefined_kernel_port) {
-        return error.KernelPortUnavailable;
-    }
-    return Client.init(kernel_port, authority_capability_id, task_id, now_ticks);
-}
-
-var undefined_kernel_port: component_port.KernelPort = undefined;
 
 fn trapCall(request: anytype, response: anytype) Error!void {
     const status = freestanding_trap.call(

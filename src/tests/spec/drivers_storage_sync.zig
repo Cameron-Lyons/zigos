@@ -157,14 +157,15 @@ pub fn publishedDriversActivateScopedTransports() !void {
 }
 
 pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
-    storage_service.Service.resetPersistentState();
-    defer storage_service.Service.resetPersistentState();
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
 
     const storage_owner = spec_support.service(20);
     const writer = spec_support.user(2);
     const storage_signer = spec_support.signer("spec.storage", 0x31);
 
-    var storage = storage_service.Service.init(500, 50, storage_owner);
+    var storage = storage_service.Service.initWithStore(500, 50, storage_owner, &storage_checkpoint_store);
     const draft_v1 = try storage.putVersion(.{
         .preferred_object_id = 1_000,
         .object_type = .document,
@@ -200,8 +201,8 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     const recovered = try storage.resolve(workspace_record.id, "documents/report.md");
     try std.testing.expectEqual(draft_v2.object_id, recovered.object_id);
     try std.testing.expectEqual(draft_v2.version_id, recovered.version_id);
-    try std.testing.expectEqual(@as(usize, 1), storage.store.objectCount());
-    try std.testing.expectEqual(@as(usize, 2), storage.store.versionCount());
+    try std.testing.expectEqual(@as(usize, 1), storage.objectCount());
+    try std.testing.expectEqual(@as(usize, 2), storage.versionCount());
 
     const exported = try storage.exportSnapshot(workspace_record.id, baseline.id, storage_signer);
     const imported = try storage.importWorkspace(spec_support.user(3), "report-import", exported, 7);
@@ -243,10 +244,9 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
 }
 
 pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
-    storage_service.Service.resetPersistentState();
-    sync_service.Service.resetPersistentState();
-    defer storage_service.Service.resetPersistentState();
-    defer sync_service.Service.resetPersistentState();
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
 
     const storage_owner = spec_support.service(30);
     const sync_owner = spec_support.service(31);
@@ -259,7 +259,7 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     const tablet_signer = spec_support.signer("spec.sync.tablet", 0x44);
     const contract_signer = spec_support.signer("spec.sync.contract", 0x45);
 
-    var storage = storage_service.Service.init(600, 60, storage_owner);
+    var storage = storage_service.Service.initWithStore(600, 60, storage_owner, &storage_checkpoint_store);
     const notes_v1 = try storage.putVersion(.{
         .preferred_object_id = 1_100,
         .object_type = .document,
@@ -366,11 +366,11 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
         .reshare_policy = .admin_only,
         .audit_visibility = .shared_participants,
     });
-    const share = storage.workspaces.findShareGrant(workspace_record.id, collaborator).?;
+    const share = storage.findShareGrant(workspace_record.id, collaborator).?;
     try std.testing.expectEqual(workspace.ShareNetworkScope.trusted_overlay, share.network_scope);
     try std.testing.expectEqual(workspace.ResharePolicy.admin_only, share.reshare_policy);
     try std.testing.expectEqual(workspace.AuditVisibility.shared_participants, share.audit_visibility);
-    try std.testing.expect(storage.workspaces.hasAccess(workspace_record.id, .{
+    try std.testing.expect(storage.workspaceHasAccess(workspace_record.id, .{
         .principal_id = collaborator,
         .wants_write = true,
         .wants_export = true,
@@ -378,8 +378,8 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
         .network_scope = .trusted_overlay,
         .now_ticks = 20,
     }));
-    try std.testing.expect(storage.workspaces.canReshare(workspace_record.id, collaborator, .trusted_overlay, 20));
-    try std.testing.expect(!storage.workspaces.hasAccess(workspace_record.id, .{
+    try std.testing.expect(storage.workspaceCanReshare(workspace_record.id, collaborator, .trusted_overlay, 20));
+    try std.testing.expect(!storage.workspaceHasAccess(workspace_record.id, .{
         .principal_id = collaborator,
         .network_scope = .relay_assisted,
         .now_ticks = 50,
@@ -401,7 +401,7 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     try std.testing.expect(sync.findConflict(workspace_record.id, tablet, "documents/notes.md") != null);
     try std.testing.expect(sync.isTrustedDevice(laptop));
     try std.testing.expect(sync.isTrustedDevice(tablet));
-    try std.testing.expect(try sync.transferSecretObject(storage.store, workspace_record.id, secret.object_id, laptop, tablet, .device_to_device));
+    try std.testing.expect(try sync.transferSecretObject(&storage, workspace_record.id, secret.object_id, laptop, tablet, .device_to_device));
 
     const database_contract = try sync.registerDatabaseContract(workspace_record.id, "app.notes.db", "notes-db", contract_signer);
     try std.testing.expect(try sync.replicateDatabaseContract(database_contract.id, workspace_record.id, laptop, tablet, .relay_assisted));

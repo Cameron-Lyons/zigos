@@ -87,7 +87,8 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
                     &.{},
             };
             bundle.signature = signatureFor(bundle, artifact.signed);
-            _ = catalog.registerEmbeddedArtifact(.{
+            const embedded_info = embeddedElfInfoFromArtifact(artifact);
+            _ = catalog.registerEmbeddedArtifactWithInfo(.{
                 .bundle = bundle,
                 .component_class = componentClassFromByte(artifact.component_class),
                 .initial_component = .{
@@ -98,7 +99,7 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
                 .heartbeat_increment = artifact.heartbeat_increment,
                 .contract_flags = artifact.contract_flags,
                 .elf_bytes = artifact.data,
-            }) catch |err| {
+            }, embedded_info) catch |err| {
                 console.print("ZIGOS:USERSPACE:ARTIFACT:FAIL ");
                 console.print(artifact.bundle_id);
                 console.print("\n");
@@ -168,6 +169,47 @@ fn componentClassFromByte(value: u8) task_runtime.ComponentClass {
         @intFromEnum(registry.ComponentClass.app_component) => .app_component,
         else => .service_component,
     };
+}
+
+fn embeddedElfInfoFromArtifact(artifact: anytype) userspace_loader.EmbeddedElfInfo {
+    return .{
+        .entry_point = artifact.entry_point,
+        .loadable_segment_count = @intCast(artifact.segment_count),
+        .byte_len = artifact.file_size_bytes,
+        .bootstrap_mailbox_address = artifact.bootstrap_mailbox_address,
+        .file_sha256 = artifact.file_sha256,
+        .executable_image = executableImageFromArtifact(artifact),
+    };
+}
+
+fn executableImageFromArtifact(artifact: anytype) task_runtime.ExecutableImageSpec {
+    var executable_image = task_runtime.ExecutableImageSpec{
+        .entry_point = artifact.entry_point,
+        .stack_top = artifact.stack_top,
+        .stack_size_bytes = artifact.stack_size_bytes,
+        .file_size_bytes = artifact.file_size_bytes,
+        .file_sha256 = artifact.file_sha256,
+        .segment_count = artifact.segment_count,
+    };
+
+    var index: usize = 0;
+    while (index < artifact.segment_count) : (index += 1) {
+        const segment = artifact.segments[index];
+        executable_image.segments[index] = .{
+            .virtual_address = segment.virtual_address,
+            .file_offset = segment.file_offset,
+            .file_size = segment.file_size,
+            .memory_size = segment.memory_size,
+            .alignment = segment.alignment,
+            .access = .{
+                .read = segment.access.read,
+                .write = segment.access.write,
+                .execute = segment.access.execute,
+            },
+        };
+    }
+
+    return executable_image;
 }
 
 test "boot registry definitions are unique and preload a userspace catalog" {

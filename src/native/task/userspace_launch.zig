@@ -65,7 +65,7 @@ pub fn launchDirectBundle(
         }) catch unreachable;
     }
     const task = catalog.launchDirect(runtime_ptr, bundle.bundle_id, request) catch unreachable;
-    _ = schedule_task(task.id);
+    scheduleTask(schedule_task, task.id);
     return task;
 }
 
@@ -90,7 +90,7 @@ pub fn launchKernelBundle(
         }) catch unreachable;
     }
     const task = catalog.launchViaKernel(authority, bundle.bundle_id, request) catch unreachable;
-    _ = schedule_task(task.task_id);
+    scheduleTask(schedule_task, task.task_id);
     return task;
 }
 
@@ -132,4 +132,21 @@ pub fn launchInstalledDirect(
         request,
         schedule_task,
     );
+}
+
+fn scheduleTask(schedule_target: anytype, task_id: u64) void {
+    switch (@typeInfo(@TypeOf(schedule_target))) {
+        .pointer => |pointer| {
+            if (@hasDecl(pointer.child, "registerTask")) {
+                _ = schedule_target.registerTask(task_id);
+                return;
+            }
+        },
+        .@"fn" => {
+            _ = schedule_target(task_id);
+            return;
+        },
+        else => {},
+    }
+    @compileError("schedule target must be a scheduler pointer or fn(u64) bool");
 }
