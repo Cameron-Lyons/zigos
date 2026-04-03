@@ -29,6 +29,7 @@ rm -f "$LOG_PATH" "$BOOT1_LOG" "$BOOT2_LOG"
 run_boot() {
   local log_path="$1"
   local reset_store="$2"
+  local wait_group="${3:-}"
   local qemu_error_log
   local qemu_pid
   local timed_out=0
@@ -59,9 +60,11 @@ run_boot() {
   while kill -0 "$qemu_pid" >/dev/null 2>&1; do
     if [ -s "$log_path" ] && grep -Fq "$ZIGOS_READY_MARKER" "$log_path"; then
       ready_seen=1
-      sleep 1
-      kill -TERM "$qemu_pid" >/dev/null 2>&1 || true
-      break
+      if [ -z "$wait_group" ] || marker_group_present "$log_path" "$wait_group"; then
+        sleep 1
+        kill -TERM "$qemu_pid" >/dev/null 2>&1 || true
+        break
+      fi
     fi
     if [ "$elapsed" -ge "$ZIGOS_NATIVE_SECONDS" ]; then
       timed_out=1
@@ -106,6 +109,21 @@ run_boot() {
   fi
 }
 
+marker_group_present() {
+  local log_path="$1"
+  local group="$2"
+  local needle
+
+  while IFS= read -r needle; do
+    [ -n "$needle" ] || continue
+    if ! grep -Fq "$needle" "$log_path"; then
+      return 1
+    fi
+  done < <("$ZIG" run "$MARKER_TOOL" -- "$group")
+
+  return 0
+}
+
 assert_marker_group() {
   local log_path="$1"
   local group="$2"
@@ -137,6 +155,7 @@ assert_log_contains() {
 assert_boot_markers() {
   local log_path="$1"
   assert_marker_group "$log_path" cold_boot
+  assert_marker_group "$log_path" post_ready
 }
 
 assert_boot2_phase4_markers() {
@@ -186,11 +205,11 @@ assert_review_text() {
     "bundle=app.capture kind=peer_ipc resource=zigos.peer.share decision=allow required=no requested_local_only=yes decision_local_only=yes lease=15"
 }
 
-run_boot "$BOOT1_LOG" reset
+run_boot "$BOOT1_LOG" reset post_ready
 assert_boot_markers "$BOOT1_LOG"
 assert_review_text "$BOOT1_LOG"
 
-run_boot "$BOOT2_LOG" preserve
+run_boot "$BOOT2_LOG" preserve post_ready
 assert_boot_markers "$BOOT2_LOG"
 assert_boot2_phase4_markers "$BOOT2_LOG"
 assert_review_text "$BOOT2_LOG"

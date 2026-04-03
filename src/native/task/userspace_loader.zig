@@ -537,7 +537,7 @@ fn readOptionalSectionName(section_names: []const u8, offset: u32) ?[]const u8 {
     return section_names[offset..end];
 }
 
-fn makeSyntheticElf32(entry_point: u32, phnum: u16, loadable_segments: u16) [@sizeOf(std.elf.Elf32_Ehdr) + 3 * @sizeOf(std.elf.Elf32_Phdr) + 3 * 128]u8 {
+pub fn makeSyntheticElf32ForTest(entry_point: u32, phnum: u16, loadable_segments: u16) [@sizeOf(std.elf.Elf32_Ehdr) + 3 * @sizeOf(std.elf.Elf32_Phdr) + 3 * 128]u8 {
     var bytes = [_]u8{0} ** (@sizeOf(std.elf.Elf32_Ehdr) + 3 * @sizeOf(std.elf.Elf32_Phdr) + 3 * 128);
     bytes[0] = 0x7F;
     bytes[1] = 'E';
@@ -729,7 +729,7 @@ test "kernel-launched userspace images surface a userspace task flag" {
 }
 
 test "embedded elf inspection records entry points loadable segments and measurements" {
-    const bytes = makeSyntheticElf32(0x401000, 3, 2);
+    const bytes = makeSyntheticElf32ForTest(0x401000, 3, 2);
     const info = try inspectEmbeddedElf(&bytes);
 
     try std.testing.expectEqual(@as(u64, 0x401000), info.entry_point);
@@ -743,7 +743,7 @@ test "embedded elf inspection records entry points loadable segments and measure
 
 test "catalog stores embedded elf metadata for registered userspace artifacts" {
     var catalog = Catalog.init();
-    const bytes = makeSyntheticElf32(0x402000, 2, 1);
+    const bytes = makeSyntheticElf32ForTest(0x402000, 2, 1);
     var bundle = manifest.BundleManifest{
         .bundle_id = "zigos.system.compositor",
         .display_name = "Compositor Session",

@@ -1,6 +1,7 @@
 const architecture_security = @import("architecture_security.zig");
 const boot_recovery = @import("boot_recovery.zig");
 const drivers_storage_sync = @import("drivers_storage_sync.zig");
+const experience_and_policy_edges = @import("experience_and_policy_edges.zig");
 const platform_services = @import("platform_services.zig");
 const ux_and_lifecycle = @import("ux_and_lifecycle.zig");
 
@@ -48,6 +49,14 @@ test "spec 11 task-first UX records structured task workspace permission and pai
     try ux_and_lifecycle.taskFirstUxRecordsStructuredFlows();
 }
 
+test "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible" {
+    try experience_and_policy_edges.permissionReviewsAndSharingStayScopedAndInspectable();
+}
+
+test "spec 11.2 and 17.2 keep task views and compatibility environments explicit" {
+    try experience_and_policy_edges.taskViewsAndCompatibilityEnvironmentsStayExplicit();
+}
+
 test "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy scoped" {
     try ux_and_lifecycle.packageLifecycleStaysDeclarativeSignedAndPolicyScoped();
 }
@@ -58,6 +67,10 @@ test "spec 2.3 11.4 12 and 15 keep indexing notifications media helpers and diag
 
 test "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explicit" {
     try platform_services.attestationSecretsAndAcceleratorPolicyStayExplicit();
+}
+
+test "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible" {
+    try experience_and_policy_edges.thermalPowerAndAppUpdatesStayCompatibilityAware();
 }
 
 test "spec 3 4.3 and 16 keep principal identity signed and administrative scope split" {
