@@ -17,7 +17,6 @@ pub const Service = struct {
     owner: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
     runtime: *task_runtime.Runtime,
     checkpoint_store: ?*CheckpointStore = null,
-    checkpoint_state: task_runtime.Runtime = task_runtime.Runtime.init(),
     has_checkpoint: bool = false,
     restart_generation: u32 = 0,
     last_checkpoint_tick: u64 = 0,
@@ -29,14 +28,29 @@ pub const Service = struct {
         };
     }
 
-    pub fn initWithStore(runtime: *task_runtime.Runtime, checkpoint_store: *CheckpointStore) Service {
-        var service = Service.init(runtime);
-        service.checkpoint_store = checkpoint_store;
+    pub fn initInPlace(self: *Service, runtime: *task_runtime.Runtime) void {
+        self.service_id = 0;
+        self.owner = .{ .kind = .service, .serial = 0 };
+        self.runtime = runtime;
+        self.checkpoint_store = null;
+        self.has_checkpoint = false;
+        self.restart_generation = 0;
+        self.last_checkpoint_tick = 0;
+        self.last_restart_tick = 0;
+    }
+
+    pub fn initWithStoreInPlace(self: *Service, runtime: *task_runtime.Runtime, checkpoint_store: *CheckpointStore) void {
+        self.initInPlace(runtime);
+        self.checkpoint_store = checkpoint_store;
         if (checkpoint_store.has_checkpoint) {
-            service.checkpoint_state = checkpoint_store.checkpoint_state;
-            service.has_checkpoint = true;
-            service.last_checkpoint_tick = checkpoint_store.last_checkpoint_tick;
+            self.has_checkpoint = true;
+            self.last_checkpoint_tick = checkpoint_store.last_checkpoint_tick;
         }
+    }
+
+    pub fn initWithStore(runtime: *task_runtime.Runtime, checkpoint_store: *CheckpointStore) Service {
+        var service: Service = undefined;
+        service.initWithStoreInPlace(runtime, checkpoint_store);
         return service;
     }
 
@@ -50,25 +64,37 @@ pub const Service = struct {
     }
 
     pub fn checkpoint(self: *Service, tick: u64) void {
-        self.checkpoint_state = self.runtime.*;
-        self.has_checkpoint = true;
-        self.last_checkpoint_tick = tick;
         if (self.checkpoint_store) |checkpoint_store| {
-            checkpoint_store.checkpoint_state = self.checkpoint_state;
+            copyRuntime(&checkpoint_store.checkpoint_state, self.runtime);
             checkpoint_store.has_checkpoint = true;
             checkpoint_store.last_checkpoint_tick = tick;
+            self.has_checkpoint = true;
+            self.last_checkpoint_tick = tick;
         }
     }
 
     pub fn restartFromCheckpoint(self: *Service, tick: u64) bool {
-        if (!self.has_checkpoint) return false;
+        const checkpoint_store = self.checkpoint_store orelse return false;
+        if (!checkpoint_store.has_checkpoint) return false;
 
-        self.runtime.* = self.checkpoint_state;
+        copyRuntime(self.runtime, &checkpoint_store.checkpoint_state);
+        self.has_checkpoint = true;
+        self.last_checkpoint_tick = checkpoint_store.last_checkpoint_tick;
         self.restart_generation += 1;
         self.last_restart_tick = tick;
         return true;
     }
 };
+
+fn copyRuntime(dest: *task_runtime.Runtime, src: *const task_runtime.Runtime) void {
+    const dest_bytes: [*]volatile u8 = @ptrCast(dest);
+    const src_bytes: [*]const u8 = @ptrCast(src);
+
+    var index: usize = 0;
+    while (index < @sizeOf(task_runtime.Runtime)) : (index += 1) {
+        dest_bytes[index] = src_bytes[index];
+    }
+}
 
 test "task runtime service restores checkpointed task state on restart" {
     var checkpoint_store = CheckpointStore{};

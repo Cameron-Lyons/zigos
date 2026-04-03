@@ -282,7 +282,7 @@ pub fn getMemoryStats() MemoryStats {
 }
 
 pub fn createUserPageDirectory() !*PageDirectory {
-    const pd_phys = memory.allocatePhysicalPage() orelse return error.OutOfMemory;
+    const pd_phys = alloc_frames(1) orelse return error.OutOfMemory;
     const pd: *PageDirectory = @ptrCast(@alignCast(@as([*]u8, @ptrFromInt(pd_phys))));
 
     for (pd) |*entry| {

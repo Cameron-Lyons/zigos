@@ -11,7 +11,6 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.tcb_defined,
     boot_markers.userspace_scheduler_ready,
     boot_markers.userspace_artifacts_ready,
-    boot_markers.userspace_exec_probe_ok,
     boot_markers.transport_native_kernel_ready,
     boot_markers.transport_no_root,
     boot_markers.transport_component_abi_ready,

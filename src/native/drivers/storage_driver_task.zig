@@ -235,6 +235,10 @@ test "storage driver task attaches only through the kernel device broker" {
     );
     var kernel_port = component_port.KernelPort.init(&kernel);
 
+    const storage_driver_broker_image = task_runtime.syntheticUserspaceImage(
+        "storage-driver-broker-test",
+        "zigos.system.storage-driver",
+    );
     const driver_task = try runtime.createTask(.{
         .owner = principal.PrincipalId{ .kind = .service, .serial = 30 },
         .component_class = .service_component,
@@ -252,10 +256,7 @@ test "storage driver task attaches only through the kernel device broker" {
             .signed = true,
             .bundle_id = "zigos.system.storage-driver",
         },
-        .userspace_image = task_runtime.syntheticUserspaceImage(
-            "storage-driver-broker-test",
-            "zigos.system.storage-driver",
-        ),
+        .userspace_image = &storage_driver_broker_image,
     });
     const device_capability = try capabilities.mint(.{
         .holder = driver_task.owner,

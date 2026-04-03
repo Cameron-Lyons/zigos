@@ -110,7 +110,7 @@ pub fn allocateUserMemory(size: usize, prot: u32) !usize {
         if (found) {
             i = 0;
             while (i < page_count) : (i += 1) {
-                const phys_page = memory.allocatePhysicalPage() orelse {
+                const phys_page = paging.alloc_frames(1) orelse {
                     var j: u32 = 0;
                     while (j < i) : (j += 1) {
                         paging.unmap_page(virt_addr + j * PAGE_SIZE);

@@ -213,7 +213,7 @@ pub const TaskCreateRequest = struct {
     local_only: bool = false,
     initial_component: ExecutionComponentSpec = .{},
     launch: LaunchProvenanceSpec = .{},
-    userspace_image: ExecutableImageSpec = .{},
+    userspace_image: ?*const ExecutableImageSpec = null,
 };
 
 pub const TaskRecord = struct {
@@ -307,8 +307,12 @@ pub const Runtime = struct {
     }
 
     pub fn createTask(self: *Runtime, request: TaskCreateRequest) Error!*TaskRecord {
-        const userspace_image = if (request.launch.boundary == .userspace_process or request.userspace_image.isPresent())
-            try validateUserspaceImage(request.userspace_image)
+        const requested_userspace_image = if (request.userspace_image) |image|
+            image.*
+        else
+            ExecutableImageSpec{};
+        const userspace_image = if (request.launch.boundary == .userspace_process or requested_userspace_image.isPresent())
+            try validateUserspaceImage(requested_userspace_image)
         else
             ExecutableImageSpec{};
         for (&self.tasks) |*slot| {
@@ -784,6 +788,7 @@ test "explicit resource classes override the default task classification" {
 
 test "userspace launch provenance is recorded for explicit image launches" {
     var runtime = Runtime.init();
+    const notes_image = syntheticUserspaceImage("notes", "app.notes");
     const task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 12 },
         .component_class = .app_component,
@@ -806,7 +811,7 @@ test "userspace launch provenance is recorded for explicit image launches" {
             .signed = true,
             .bundle_id = "app.notes",
         },
-        .userspace_image = syntheticUserspaceImage("notes", "app.notes"),
+        .userspace_image = &notes_image,
     });
 
     try std.testing.expect(task.runsAsUserspaceProcess());
@@ -818,6 +823,7 @@ test "userspace launch provenance is recorded for explicit image launches" {
 
 test "userspace tasks materialize executable mappings in their address spaces" {
     var runtime = Runtime.init();
+    const workspace_storage_image = syntheticUserspaceImage("workspace-storage", "zigos.object.workspace");
     const task = try runtime.createTask(.{
         .owner = .{ .kind = .service, .serial = 13 },
         .component_class = .service_component,
@@ -839,7 +845,7 @@ test "userspace tasks materialize executable mappings in their address spaces" {
             .signed = true,
             .bundle_id = "zigos.system.storage-object",
         },
-        .userspace_image = syntheticUserspaceImage("workspace-storage", "zigos.object.workspace"),
+        .userspace_image = &workspace_storage_image,
     });
 
     const address_space = runtime.findAddressSpaceConst(task.address_space_id).?;
@@ -950,6 +956,7 @@ test "tasks are isolated in separate process address space and namespace hosts a
 
 test "rehosting a userspace task rebuilds the mapped executable state" {
     var runtime = Runtime.init();
+    const sync_service_image = syntheticUserspaceImage("sync-service", "zigos.sync.workspace");
     const task = try runtime.createTask(.{
         .owner = .{ .kind = .service, .serial = 14 },
         .component_class = .service_component,
@@ -971,7 +978,7 @@ test "rehosting a userspace task rebuilds the mapped executable state" {
             .signed = true,
             .bundle_id = "zigos.system.sync-service",
         },
-        .userspace_image = syntheticUserspaceImage("sync-service", "zigos.sync.workspace"),
+        .userspace_image = &sync_service_image,
     });
 
     const original_address_space_id = task.address_space_id;

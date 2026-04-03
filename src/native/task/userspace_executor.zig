@@ -1,5 +1,4 @@
 const builtin = @import("builtin");
-const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const capability = @import("../kernel_api/capability.zig");
 const task_runtime = @import("task_runtime.zig");
@@ -95,6 +94,11 @@ pub const Executor = struct {
     active_address_space_id: u64 = 0,
     kernel_page_directory_ptr: usize = 0,
     handoff_completed: bool = false,
+    pending_instruction_pointer: u32 = 0,
+    pending_stack_pointer: u32 = 0,
+    last_trap_instruction_pointer: u32 = 0,
+    last_trap_stack_pointer: u32 = 0,
+    last_trap_counter: u32 = 0,
     mappings: [task_runtime.MAX_TASKS]MappingEntry = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS,
     userspace_kernel_stack: [16 * 1024]u8 align(16) = [_]u8{0} ** (16 * 1024),
 
@@ -116,6 +120,11 @@ pub const Executor = struct {
         self.active_address_space_id = 0;
         self.kernel_page_directory_ptr = 0;
         self.handoff_completed = false;
+        self.pending_instruction_pointer = 0;
+        self.pending_stack_pointer = 0;
+        self.last_trap_instruction_pointer = 0;
+        self.last_trap_stack_pointer = 0;
+        self.last_trap_counter = 0;
         self.mappings = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS;
         zigos_userspace_resume_requested = 0;
         zigos_userspace_resume_esp = 0;
@@ -160,6 +169,11 @@ pub const Executor = struct {
             mapping.resume_stack_pointer
         else
             @as(u32, @intCast(address_space.stack_pointer - 16));
+        @call(.never_inline, recordPendingHandoff, .{
+            self,
+            instruction_pointer,
+            stack_pointer,
+        });
 
         self.active_task_id = task_id;
         self.active_address_space_id = address_space.id;
@@ -167,10 +181,9 @@ pub const Executor = struct {
         zigos_userspace_resume_requested = 0;
 
         freestanding.paging.switchPageDirectory(mapping.pageDirectory());
-        _ = zigos_enter_userspace(
-            instruction_pointer,
-            stack_pointer,
-        );
+        _ = @call(.never_inline, enterUserspace, .{
+            self,
+        });
 
         if (freestanding.paging.getCurrentPageDirectory() != kernel_page_directory) {
             freestanding.paging.switchPageDirectory(kernel_page_directory);
@@ -292,13 +305,19 @@ fn selectBootstrapCapability(
 fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     const executor = registered_executor orelse return;
     if (executor.active_task_id == 0) return;
+    @call(.never_inline, recordTrapState, .{
+        executor,
+        frame.eip,
+        frame.useresp,
+        frame.eax,
+    });
 
     if (executor.findMapping(executor.active_address_space_id)) |mapping| {
         mapping.resume_valid = true;
-        mapping.resume_instruction_pointer = frame.eip;
-        mapping.resume_stack_pointer = frame.useresp;
+        mapping.resume_instruction_pointer = executor.last_trap_instruction_pointer;
+        mapping.resume_stack_pointer = executor.last_trap_stack_pointer;
         mapping.yield_count += 1;
-        mapping.last_user_counter = frame.eax;
+        mapping.last_user_counter = executor.last_trap_counter;
     }
 
     executor.handoff_completed = true;
@@ -354,4 +373,22 @@ fn tightenRegionPermissions(virtual_address: u64, size_bytes: usize, access: tas
 
 fn divCeil(value: usize, divisor: usize) usize {
     return (value + divisor - 1) / divisor;
+}
+
+fn enterUserspace(executor: *const Executor) u32 {
+    return zigos_enter_userspace(
+        executor.pending_instruction_pointer,
+        executor.pending_stack_pointer,
+    );
+}
+
+fn recordPendingHandoff(self: *Executor, instruction_pointer: u32, stack_pointer: u32) void {
+    self.pending_instruction_pointer = instruction_pointer;
+    self.pending_stack_pointer = stack_pointer;
+}
+
+fn recordTrapState(self: *Executor, instruction_pointer: u32, stack_pointer: u32, counter: u32) void {
+    self.last_trap_instruction_pointer = instruction_pointer;
+    self.last_trap_stack_pointer = stack_pointer;
+    self.last_trap_counter = counter;
 }

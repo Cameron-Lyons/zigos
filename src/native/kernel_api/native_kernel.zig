@@ -719,6 +719,8 @@ test "native kernel creates tasks endpoints shared memory and typed service conn
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
     });
 
+    const workspace_storage_image = task_runtime.syntheticUserspaceImage("workspace-storage", "zigos.object.workspace");
+    const example_client_image = task_runtime.syntheticUserspaceImage("example-client", "app.example.client");
     const service_task_desc = try kernel.taskCreate(authority_capability.id, .{
         .owner = .{ .kind = .service, .serial = 3 },
         .component_class = .service_component,
@@ -737,7 +739,7 @@ test "native kernel creates tasks endpoints shared memory and typed service conn
             .signed = true,
             .bundle_id = "zigos.service.object-store",
         },
-        .userspace_image = task_runtime.syntheticUserspaceImage("workspace-storage", "zigos.object.workspace"),
+        .userspace_image = &workspace_storage_image,
     }, 5);
     const app_task_desc = try kernel.taskCreate(authority_capability.id, .{
         .owner = .{ .kind = .app, .serial = 4 },
@@ -757,7 +759,7 @@ test "native kernel creates tasks endpoints shared memory and typed service conn
             .signed = true,
             .bundle_id = "app.example.client",
         },
-        .userspace_image = task_runtime.syntheticUserspaceImage("example-client", "app.example.client"),
+        .userspace_image = &example_client_image,
     }, 6);
     try std.testing.expect(abi.taskFlagsHas(service_task_desc.flags, abi.TASK_FLAG_LOCAL_ONLY));
     try std.testing.expect(abi.taskFlagsHas(service_task_desc.flags, abi.TASK_FLAG_ZERO_AMBIENT_AUTHORITY));
@@ -1017,6 +1019,10 @@ test "native kernel brokers device metadata and port io through device capabilit
         &registry,
     );
 
+    const storage_driver_test_image = task_runtime.syntheticUserspaceImage(
+        "storage-driver-test",
+        "zigos.system.storage-driver",
+    );
     const driver_task = try runtime.createTask(.{
         .owner = .{ .kind = .service, .serial = 4 },
         .component_class = .service_component,
@@ -1034,10 +1040,7 @@ test "native kernel brokers device metadata and port io through device capabilit
             .signed = true,
             .bundle_id = "zigos.system.storage-driver",
         },
-        .userspace_image = task_runtime.syntheticUserspaceImage(
-            "storage-driver-test",
-            "zigos.system.storage-driver",
-        ),
+        .userspace_image = &storage_driver_test_image,
     });
     const device_capability = try capabilities.mint(.{
         .holder = driver_task.owner,

@@ -300,7 +300,7 @@ fn taskCreateRequest(image: *const ImageRecord, request: LaunchRequest) task_run
             .signed = image.bundle_signed,
             .bundle_id = image.bundleIdSlice(),
         },
-        .userspace_image = image.executable_image,
+        .userspace_image = &image.executable_image,
     };
 }
 
