@@ -73,6 +73,17 @@ pub const RegistrationRequest = struct {
     require_iommu: bool = true,
 };
 
+pub const SignedRegistrationRequest = struct {
+    service_id: u64,
+    owner_task_id: u64,
+    device_id: u64,
+    device_class: DeviceClass,
+    authority: capability.Capability,
+    signer: []const u8,
+    bootstrap_transport: BootstrapTransport = .none,
+    require_iommu: bool = true,
+};
+
 pub const Error = error{
     DriverTableFull,
     DuplicateServiceId,
@@ -98,7 +109,20 @@ pub const Directory = struct {
     }
 
     pub fn register(self: *Directory, request: RegistrationRequest) Error!*DriverRecord {
-        if (request.bundle.signature.signer.len == 0) return error.InvalidBundleSignature;
+        return self.registerSigned(.{
+            .service_id = request.service_id,
+            .owner_task_id = request.owner_task_id,
+            .device_id = request.device_id,
+            .device_class = request.device_class,
+            .authority = request.authority,
+            .signer = request.bundle.signature.signer,
+            .bootstrap_transport = request.bootstrap_transport,
+            .require_iommu = request.require_iommu,
+        });
+    }
+
+    pub fn registerSigned(self: *Directory, request: SignedRegistrationRequest) Error!*DriverRecord {
+        if (request.signer.len == 0) return error.InvalidBundleSignature;
         if (!request.require_iommu) return error.IommuRequired;
         if (request.authority.target.kind != .device or request.authority.target.id != request.device_id) {
             return error.InvalidAuthorityTarget;
@@ -140,7 +164,7 @@ pub const Directory = struct {
                 .signer = [_]u8{0} ** 32,
             };
             slot.driver.dma_range_count = defaultDmaRanges(slot.driver.dma_ranges[0..], request.device_class, request.device_id);
-            writeSigner(&slot.driver, request.bundle.signature.signer);
+            writeSigner(&slot.driver, request.signer);
             return &slot.driver;
         }
 

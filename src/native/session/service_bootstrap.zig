@@ -155,13 +155,13 @@ pub fn attachDriver(
             },
         },
     }, now_ticks) catch unreachable;
-    const driver = directory.register(.{
+    const driver = directory.registerSigned(.{
         .service_id = service_id,
         .owner_task_id = task_id,
         .device_id = deviceId(device_class),
         .device_class = device_class,
         .authority = capability_table.query(driver_capability.capability_id).?,
-        .bundle = driverBundle(device_class, driver_bundle_id),
+        .signer = driverSigner(device_class, driver_bundle_id),
         .bootstrap_transport = bootstrap_transport,
     }) catch unreachable;
     _ = supervisor.noteDriverAttached(service_id, device_class, driver_capability.capability_id, now_ticks);
@@ -255,48 +255,17 @@ fn deviceId(device_class: driver_service.DeviceClass) u64 {
     return device_inventory.deviceIdForClass(device_class);
 }
 
-fn driverBundle(device_class: driver_service.DeviceClass, bundle_id: []const u8) manifest.BundleManifest {
+fn driverSigner(device_class: driver_service.DeviceClass, bundle_id: []const u8) []const u8 {
     if (bundle_id.len != 0) {
-        return userspace_boot_registry.manifestFor(bundle_id) catch unreachable;
+        return userspace_boot_registry.signerFor(bundle_id) catch unreachable;
     }
 
     return switch (device_class) {
-        .network_adapter => .{
-            .bundle_id = "svc.driver.network",
-            .display_name = "Network Driver",
-            .publisher = "zigos.dev",
-            .signature = .{
-                .format = "ed25519",
-                .signer = "zigos-driver-key",
-            },
-        },
-        .storage_controller => .{
-            .bundle_id = "svc.driver.storage",
-            .display_name = "Storage Driver",
-            .publisher = "zigos.dev",
-            .signature = .{
-                .format = "ed25519",
-                .signer = "zigos-driver-key",
-            },
-        },
-        .graphics_adapter => .{
-            .bundle_id = "svc.driver.graphics",
-            .display_name = "Graphics Driver",
-            .publisher = "zigos.dev",
-            .signature = .{
-                .format = "ed25519",
-                .signer = "zigos-driver-key",
-            },
-        },
-        .audio_print_io => .{
-            .bundle_id = "svc.driver.media",
-            .display_name = "Media Driver",
-            .publisher = "zigos.dev",
-            .signature = .{
-                .format = "ed25519",
-                .signer = "zigos-driver-key",
-            },
-        },
+        .network_adapter,
+        .storage_controller,
+        .graphics_adapter,
+        .audio_print_io,
+            => "zigos-driver-key",
     };
 }
 

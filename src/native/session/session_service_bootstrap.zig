@@ -21,28 +21,29 @@ pub fn run(
     env: *const support.Environment,
     state: *const support.BootstrapState,
     kernel_port: *component_port.KernelPort,
-) support.ServiceBindings {
-    var service_bindings = bootServices(env, state, kernel_port);
-    connectClient(env, state, kernel_port, &service_bindings);
-    recordDriverRecovery(env, state, &service_bindings);
-    return service_bindings;
+    service_bindings: *support.ServiceBindings,
+) void {
+    bootServices(env, state, kernel_port, service_bindings);
+    connectClient(env, state, kernel_port, service_bindings);
+    recordDriverRecovery(env, state, service_bindings);
 }
 
 pub fn bootServices(
     env: *const support.Environment,
     state: *const support.BootstrapState,
     kernel_port: *component_port.KernelPort,
-) support.ServiceBindings {
-    var service_bindings = launchServices(env, state, kernel_port);
-    activateDrivers(env, state, kernel_port, &service_bindings);
-    return service_bindings;
+    service_bindings: *support.ServiceBindings,
+) void {
+    @call(.never_inline, launchServices, .{ env, state, kernel_port, service_bindings });
+    @call(.never_inline, activateDrivers, .{ env, state, kernel_port, service_bindings });
 }
 
 fn launchServices(
     env: *const support.Environment,
     state: *const support.BootstrapState,
     kernel_port: *component_port.KernelPort,
-) support.ServiceBindings {
+    service_bindings: *support.ServiceBindings,
+) void {
     const service_launch_specs: [service_contract.ordered_service_contracts.len]struct {
         owner: principal.PrincipalId,
         service_id: u64,
@@ -59,7 +60,7 @@ fn launchServices(
         .{ .owner = state.ids.media_service, .service_id = state.services.media_service.id, .correlation_base = 322, .now_ticks = 50 },
     };
 
-    var service_bindings = support.ServiceBindings{ .bindings = undefined };
+    service_bindings.* = .{ .bindings = undefined };
     for (service_contract.ordered_service_contracts, service_launch_specs, 0..) |entry, spec, index| {
         service_bindings.bindings[index] = service_bootstrap.launchContractService(
             env.userspace_catalog,
@@ -92,8 +93,6 @@ fn launchServices(
         51,
     );
     common.printBootMarker("ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY");
-
-    return service_bindings;
 }
 
 fn activateDrivers(
@@ -115,52 +114,75 @@ fn activateDrivers(
         52,
     );
 
-    const driver_specs = [_]struct {
-        service_id: u64,
-        task_id: u64,
-        owner: principal.PrincipalId,
-        device_class: driver_service.DeviceClass,
-        bootstrap_transport: driver_service.BootstrapTransport,
-        driver_bundle_id: []const u8,
-        now_ticks: u64,
-    }{
-        .{ .service_id = state.services.network_service.id, .task_id = service_bindings.bindingFor(.network_stack).task_id, .owner = state.ids.network_service, .device_class = .network_adapter, .bootstrap_transport = .kernel_published_data_plane, .driver_bundle_id = "zigos.system.network-stack", .now_ticks = 53 },
-        .{ .service_id = state.services.storage_service.id, .task_id = storage_driver_task.task_id, .owner = state.ids.storage_service, .device_class = .storage_controller, .bootstrap_transport = .kernel_published_data_plane, .driver_bundle_id = "zigos.system.storage-driver", .now_ticks = 54 },
-        .{ .service_id = state.services.compositor_service.id, .task_id = service_bindings.bindingFor(.compositor_ui_session).task_id, .owner = state.ids.compositor_service, .device_class = .graphics_adapter, .bootstrap_transport = .none, .driver_bundle_id = "zigos.system.compositor", .now_ticks = 55 },
-        .{ .service_id = state.services.media_service.id, .task_id = service_bindings.bindingFor(.media_print_helpers).task_id, .owner = state.ids.media_service, .device_class = .audio_print_io, .bootstrap_transport = .none, .driver_bundle_id = "zigos.system.media-print", .now_ticks = 56 },
-    };
+    const network_driver = service_bootstrap.attachDriver(
+        kernel_port,
+        env.capability_table,
+        env.driver_directory,
+        env.supervisor,
+        state.ids.policy_authority,
+        state.policy_capability.id,
+        state.services.network_service.id,
+        service_bindings.bindingFor(.network_stack).task_id,
+        state.ids.network_service,
+        .network_adapter,
+        .kernel_published_data_plane,
+        "zigos.system.network-stack",
+        53,
+    );
+    const storage_driver = service_bootstrap.attachDriver(
+        kernel_port,
+        env.capability_table,
+        env.driver_directory,
+        env.supervisor,
+        state.ids.policy_authority,
+        state.policy_capability.id,
+        state.services.storage_service.id,
+        storage_driver_task.task_id,
+        state.ids.storage_service,
+        .storage_controller,
+        .kernel_published_data_plane,
+        "zigos.system.storage-driver",
+        54,
+    );
+    _ = service_bootstrap.attachDriver(
+        kernel_port,
+        env.capability_table,
+        env.driver_directory,
+        env.supervisor,
+        state.ids.policy_authority,
+        state.policy_capability.id,
+        state.services.compositor_service.id,
+        service_bindings.bindingFor(.compositor_ui_session).task_id,
+        state.ids.compositor_service,
+        .graphics_adapter,
+        .none,
+        "zigos.system.compositor",
+        55,
+    );
+    _ = service_bootstrap.attachDriver(
+        kernel_port,
+        env.capability_table,
+        env.driver_directory,
+        env.supervisor,
+        state.ids.policy_authority,
+        state.policy_capability.id,
+        state.services.media_service.id,
+        service_bindings.bindingFor(.media_print_helpers).task_id,
+        state.ids.media_service,
+        .audio_print_io,
+        .none,
+        "zigos.system.media-print",
+        56,
+    );
 
-    var drivers: [driver_specs.len]*driver_service.DriverRecord = undefined;
-    for (driver_specs, 0..) |spec, index| {
-        drivers[index] = service_bootstrap.attachDriver(
-            kernel_port,
-            env.capability_table,
-            env.driver_directory,
-            env.supervisor,
-            state.ids.policy_authority,
-            state.policy_capability.id,
-            spec.service_id,
-            spec.task_id,
-            spec.owner,
-            spec.device_class,
-            spec.bootstrap_transport,
-            spec.driver_bundle_id,
-            spec.now_ticks,
-        );
-    }
-
-    const network_driver = drivers[0];
-    const storage_driver = drivers[1];
-    const network_activation = env.driver_runtime.activateAt(network_driver, 53) catch unreachable;
-    const storage_activation = env.driver_runtime.activateAt(storage_driver, 54) catch unreachable;
-    _ = env.driver_runtime.activateAt(env.driver_directory.findByClass(.graphics_adapter).?, 55) catch unreachable;
-    _ = env.driver_runtime.activateAt(env.driver_directory.findByClass(.audio_print_io).?, 56) catch unreachable;
-    if ((network_activation.mode == .published_data_plane or env.driver_directory.findByClass(.network_adapter) != null) and
-        (storage_activation.mode == .published_data_plane or storage_driver.restart_generation == 1))
+    const network_activation_mode = env.driver_runtime.activateModeAt(network_driver, 53) catch unreachable;
+    const storage_activation_mode = env.driver_runtime.activateModeAt(storage_driver, 54) catch unreachable;
+    if ((network_activation_mode == .published_data_plane or env.driver_directory.findByClass(.network_adapter) != null) and
+        (storage_activation_mode == .published_data_plane or storage_driver.restart_generation == 1))
     {
         common.printBootMarker(boot_markers.service_boot_driver_service_network_ready);
     }
-    if (storage_activation.mode == .published_data_plane and storage_volume_mod.hasAttachedDevice()) {
+    if (storage_activation_mode == .published_data_plane and storage_volume_mod.hasAttachedDevice()) {
         common.printBootMarker("ZIGOS:SERVICE_BOOT:DRIVER_SERVICE:STORAGE_READY");
     }
 

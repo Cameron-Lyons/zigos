@@ -5,7 +5,9 @@ pub fn validateTaskCreateRequest(
     ErrorSet: type,
     request: task_runtime.TaskCreateRequest,
 ) ErrorSet!void {
-    if (request.launch.boundary == .userspace_process and !request.userspace_image.isPresent()) {
+    if (request.launch.boundary == .userspace_process and
+        (request.userspace_image == null or !request.userspace_image.?.isPresent()))
+    {
         return error.InvalidUserspaceImage;
     }
     switch (request.component_class) {

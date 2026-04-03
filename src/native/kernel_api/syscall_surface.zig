@@ -557,6 +557,7 @@ test "syscall surface dispatches typed task creation requests" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
+    const syscall_test_image = task_runtime.syntheticUserspaceImage("syscall-test", "app.example.syscall");
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const request = component_port.TaskCreateRequest{
         .header = component_port.makeHeader(.task_create, 77, test_kernel.session_task_id),
@@ -579,7 +580,7 @@ test "syscall surface dispatches typed task creation requests" {
                 .signed = true,
                 .bundle_id = "app.example.syscall",
             },
-            .userspace_image = task_runtime.syntheticUserspaceImage("syscall-test", "app.example.syscall"),
+            .userspace_image = &syscall_test_image,
         },
     };
 
@@ -606,6 +607,7 @@ test "syscall surface returns an explicit empty receive response when no message
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
+    const empty_queue_image = task_runtime.syntheticUserspaceImage("empty-queue", "app.example.empty-queue");
     const app_task = try test_kernel.port.taskCreate(.{
         .header = component_port.makeHeader(.task_create, 88, test_kernel.session_task_id),
         .authority_capability_id = test_kernel.authority_capability_id,
@@ -626,7 +628,7 @@ test "syscall surface returns an explicit empty receive response when no message
                 .signed = true,
                 .bundle_id = "app.example.empty-queue",
             },
-            .userspace_image = task_runtime.syntheticUserspaceImage("empty-queue", "app.example.empty-queue"),
+            .userspace_image = &empty_queue_image,
         },
     }, 6);
     const created = try test_kernel.port.endpointCreate(.{
@@ -714,6 +716,10 @@ test "syscall surface rejects spoofed subject task ids" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
+    const spoofed_subject_image = task_runtime.syntheticUserspaceImage(
+        "spoofed-subject",
+        "app.example.spoofed-subject",
+    );
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const request = component_port.TaskCreateRequest{
         .header = component_port.makeHeader(.task_create, 92, test_kernel.session_task_id + 1),
@@ -735,10 +741,7 @@ test "syscall surface rejects spoofed subject task ids" {
                 .signed = true,
                 .bundle_id = "app.example.spoofed-subject",
             },
-            .userspace_image = task_runtime.syntheticUserspaceImage(
-                "spoofed-subject",
-                "app.example.spoofed-subject",
-            ),
+            .userspace_image = &spoofed_subject_image,
         },
     };
 

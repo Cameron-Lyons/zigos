@@ -124,6 +124,72 @@ pub const Runtime = struct {
         return self.upsert(record);
     }
 
+    pub fn activateModeAt(
+        self: *Runtime,
+        driver: *const driver_service.DriverRecord,
+        now_ticks: u64,
+    ) Error!ActivationMode {
+        var record = ActivationRecord{
+            .service_id = driver.service_id,
+            .device_id = driver.device_id,
+            .device_class = driver.device_class,
+            .dma_domain_id = driver.dma_domain_id,
+            .iommu_enforced = driver.dma_protection == .iommu_enforced,
+            .mode = .control_only,
+            .exclusive_claim = false,
+            .activation_generation = 0,
+            .kernel_bootstrap = false,
+            .publisher_len = 0,
+            .publisher = [_]u8{0} ** 32,
+        };
+        if (record.dma_domain_id == 0 or !record.iommu_enforced) return error.MissingDmaDomain;
+
+        switch (driver.device_class) {
+            .network_adapter => {
+                if (bootstrap_driver_port.networkPublication()) |publication| {
+                    if (publication.device_id == driver.device_id) {
+                        if (publication.kernel_bootstrap and driver.bootstrap_transport != .kernel_published_data_plane) {
+                            return error.KernelBootstrapNotAuthorized;
+                        }
+                        if (bootstrap_driver_port.activateNetworkDevice(driver.device_id, driver.service_id)) {
+                            record.mode = .published_data_plane;
+                            record.exclusive_claim = true;
+                            record.kernel_bootstrap = publication.kernel_bootstrap;
+                            record.publisher_len = copyText(record.publisher[0..], publication.publisherSlice());
+                        }
+                    }
+                }
+            },
+            .storage_controller => {
+                if (bootstrap_driver_port.storagePublication()) |publication| {
+                    if (publication.device_id == driver.device_id) {
+                        if (publication.kernel_bootstrap and driver.bootstrap_transport != .kernel_published_data_plane) {
+                            return error.KernelBootstrapNotAuthorized;
+                        }
+                        if (bootstrap_driver_port.activateStorageBackend(
+                            driver.device_id,
+                            driver.service_id,
+                            driver.authority_capability_id,
+                            driver.owner_task_id,
+                            now_ticks,
+                            self.kernel_port,
+                        )) {
+                            record.mode = .published_data_plane;
+                            record.exclusive_claim = true;
+                            record.kernel_bootstrap = publication.kernel_bootstrap;
+                            record.publisher_len = copyText(record.publisher[0..], publication.publisherSlice());
+                        }
+                    }
+                }
+            },
+            else => {},
+        }
+
+        record.activation_generation = self.nextActivationGeneration();
+        _ = try self.upsert(record);
+        return record.mode;
+    }
+
     pub fn activate(self: *Runtime, driver: *const driver_service.DriverRecord) Error!ActivationRecord {
         return self.activateAt(driver, 0);
     }
@@ -309,6 +375,10 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
         true,
     ));
 
+    const storage_driver_lease_image = task_runtime.syntheticUserspaceImage(
+        "storage-driver-lease-test",
+        "zigos.system.storage-driver",
+    );
     const driver_task = try runtime.createTask(.{
         .owner = principal.PrincipalId{ .kind = .service, .serial = 30 },
         .component_class = .service_component,
@@ -326,10 +396,7 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
             .signed = true,
             .bundle_id = "zigos.system.storage-driver",
         },
-        .userspace_image = task_runtime.syntheticUserspaceImage(
-            "storage-driver-lease-test",
-            "zigos.system.storage-driver",
-        ),
+        .userspace_image = &storage_driver_lease_image,
     });
     const device_capability = try capabilities.mint(.{
         .holder = driver_task.owner,
