@@ -31,7 +31,7 @@ const object_store = @import("../../native/storage/object_store.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const permission_review = @import("../../native/policy/permission_review.zig");
 const permission_review_service = @import("../../native/policy/permission_review_service.zig");
-const phase3_bootstrap = @import("../../native/session/phase3_bootstrap.zig");
+const service_bootstrap = @import("../../native/session/service_bootstrap.zig");
 const policy_component_port = @import("../../native/policy/policy_component_port.zig");
 const policy_mediation = @import("../../native/policy/policy_mediation.zig");
 const policy_object = @import("../../native/policy/policy_object.zig");
@@ -40,7 +40,7 @@ const recovery_environment = @import("../../native/platform/recovery_environment
 const request_header = @import("../../native/core/request_header.zig");
 const review_component_port = @import("../../native/policy/review_component_port.zig");
 const secure_secret_store = @import("../../native/platform/secure_secret_store.zig");
-const service_contract = @import("../../native/session/service_contract.zig");
+const service_contract = @import("../../native/session/service_contracts.zig");
 const service_registry = @import("../../native/kernel_api/service_registry.zig");
 const session_manager = @import("../../native/session/session_manager.zig");
 const session_manager_test = @import("../../native/session/session_manager_test.zig");
@@ -98,7 +98,7 @@ test "native host root imports native subsystem suites" {
     std.testing.refAllDecls(package_service);
     std.testing.refAllDecls(permission_review);
     std.testing.refAllDecls(permission_review_service);
-    std.testing.refAllDecls(phase3_bootstrap);
+    std.testing.refAllDecls(service_bootstrap);
     std.testing.refAllDecls(policy_component_port);
     std.testing.refAllDecls(policy_mediation);
     std.testing.refAllDecls(policy_object);

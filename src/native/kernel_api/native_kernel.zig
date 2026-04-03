@@ -5,6 +5,8 @@ const capability = @import("capability.zig");
 const device_broker = @import("device_broker.zig");
 const endpoint = @import("endpoint.zig");
 const manifest = @import("../policy/manifest.zig");
+const kernel_access = @import("native_kernel_access.zig");
+const kernel_descriptors = @import("native_kernel_descriptors.zig");
 const principal = @import("../core/principal.zig");
 const service_registry = @import("service_registry.zig");
 const shared_memory = @import("shared_memory.zig");
@@ -614,10 +616,7 @@ pub const Kernel = struct {
         now_ticks: u64,
         needed_rights: capability.CapabilityRights,
     ) Error!capability.Capability {
-        const owned = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
-        if (!self.capability_table.isUsable(owned, now_ticks)) return error.CapabilityRevoked;
-        if (!owned.rights.containsAll(needed_rights)) return error.PermissionDenied;
-        return owned;
+        return kernel_access.requireCapability(Error, self, capability_id, now_ticks, needed_rights);
     }
 
     fn requireTargetedCapability(
@@ -627,108 +626,47 @@ pub const Kernel = struct {
         needed_rights: capability.CapabilityRights,
         target_kind: capability.CapabilityTargetKind,
     ) Error!capability.Capability {
-        const owned = try self.requireCapability(capability_id, now_ticks, needed_rights);
-        if (owned.target.kind != target_kind) return error.InvalidCapabilityTarget;
-        return owned;
+        return kernel_access.requireTargetedCapability(
+            Error,
+            self,
+            capability_id,
+            now_ticks,
+            needed_rights,
+            target_kind,
+        );
     }
 };
 
 fn taskDescriptor(task: *const task_runtime.TaskRecord) abi.TaskDescriptor {
-    return .{
-        .task_id = task.id,
-        .owner_serial = task.owner.serial,
-        .owner_kind = @intFromEnum(task.owner.kind),
-        .component_class = @intFromEnum(task.component_class),
-        .state = @intFromEnum(task.state),
-        .flags = taskFlags(task),
-        .ui_surface_id = task.ui_surface_id orelse 0,
-    };
+    return kernel_descriptors.taskDescriptor(task);
 }
 
 fn taskFlags(task: *const task_runtime.TaskRecord) u16 {
-    var flags: u16 = 0;
-    if (task.local_only) flags |= abi.TASK_FLAG_LOCAL_ONLY;
-    if (task.zero_ambient_authority) flags |= abi.TASK_FLAG_ZERO_AMBIENT_AUTHORITY;
-    if (task.background_allowed) flags |= abi.TASK_FLAG_BACKGROUND_ALLOWED;
-    if (task.runsAsUserspaceProcess()) flags |= abi.TASK_FLAG_USERSPACE_PROCESS;
-    if (task.hasLoadedExecutable()) flags |= abi.TASK_FLAG_EXECUTABLE_IMAGE_MAPPED;
-    flags |= @as(u16, @intFromEnum(task.resourceClass())) << abi.TASK_RESOURCE_CLASS_SHIFT;
-    return flags;
+    return kernel_descriptors.taskFlags(task);
 }
 
 fn validateTaskCreateRequest(request: task_runtime.TaskCreateRequest) Error!void {
-    if (request.launch.boundary == .userspace_process and !request.userspace_image.isPresent()) {
-        return error.InvalidUserspaceImage;
-    }
-    switch (request.component_class) {
-        .session_manager => {},
-        .app_component, .service_component => {
-            if (request.launch.boundary != .userspace_process) return error.UserspaceLaunchRequired;
-            if (request.launch.image_id == 0 or request.launch.component_abi_version == 0) {
-                return error.InvalidUserspaceImage;
-            }
-        },
-    }
+    return kernel_access.validateTaskCreateRequest(Error, request);
 }
 
 fn serviceBindingFlags(task: *const task_runtime.TaskRecord) u16 {
-    var flags: u16 = 0;
-    if (task.runsAsUserspaceProcess()) flags |= abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER;
-    if (task.launch.signed) flags |= abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE;
-    return flags;
+    return kernel_descriptors.serviceBindingFlags(task);
 }
 
 fn capabilityDescriptor(owned: capability.Capability) abi.CapabilityDescriptor {
-    const flags = abi.ScopeFlags{
-        .local_only = owned.scope.local_only,
-        .broker_only = owned.scope.broker_only,
-        .task_scoped = owned.scope.task_id != null,
-        .workspace_scoped = owned.scope.workspace_id != null,
-        .ephemeral = !owned.lease.renewable,
-    };
-    return .{
-        .capability_id = owned.id,
-        .target_id = owned.target.id,
-        .rights = @bitCast(owned.rights),
-        .revocation_generation = owned.revocation_generation,
-        .expires_at_ticks = owned.lease.expires_at_ticks,
-        .scope_task_id = owned.scope.task_id orelse 0,
-        .scope_workspace_id = owned.scope.workspace_id orelse 0,
-        .scope_flags = @bitCast(flags),
-    };
+    return kernel_descriptors.capabilityDescriptor(owned);
 }
 
 fn deviceDescriptor(descriptor: device_broker.ControllerDescriptor) abi.DeviceDescriptor {
-    return .{
-        .device_id = descriptor.device_id,
-        .base_port = descriptor.base_port,
-        .io_port_count = descriptor.io_port_count,
-        .ctrl_port = descriptor.ctrl_port,
-        .irq_line = descriptor.irq_line,
-        .mmio_window_count = descriptor.mmio_window_count,
-        .flags = if (descriptor.is_master) abi.DEVICE_DESCRIPTOR_FLAG_ATA_MASTER else 0,
-        .sector_count = descriptor.sector_count,
-    };
+    return kernel_descriptors.deviceDescriptor(descriptor);
 }
 
 fn mmioWindowDescriptor(window: device_broker.MmioWindow) abi.DeviceMmioWindowDescriptor {
-    var flags: u16 = 0;
-    if (window.writable) flags |= abi.MMIO_WINDOW_FLAG_WRITABLE;
-    if (window.executable) flags |= abi.MMIO_WINDOW_FLAG_EXECUTABLE;
-    return .{
-        .base = window.base,
-        .length = window.length,
-        .flags = flags,
-        ._reserved = [_]u8{0} ** 6,
-    };
+    return kernel_descriptors.mmioWindowDescriptor(window);
 }
 
 fn retargetTaskScope(original: capability.CapabilityScope, receiver_task_id: u64) capability.CapabilityScope {
-    var next = original;
-    if (original.task_id != null) {
-        next.task_id = receiver_task_id;
-    }
-    return next;
+    return kernel_access.retargetTaskScope(original, receiver_task_id);
 }
 
 test "native kernel creates tasks endpoints shared memory and typed service connections" {

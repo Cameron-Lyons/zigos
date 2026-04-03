@@ -70,10 +70,11 @@ pub fn initializeUserspace(
     catalog: *userspace_loader.Catalog,
     runtime: *task_runtime.Runtime,
     capability_table: *const capability.CapabilityTable,
+    scheduler: *userspace_scheduler.Scheduler,
 ) void {
     catalog.* = userspace_loader.Catalog.init();
     userspace_boot_registry.registerAll(catalog) catch unreachable;
-    userspace_scheduler.init(catalog, runtime, capability_table);
+    scheduler.bind(catalog, runtime, capability_table);
     if (catalog.imageCount() != 0) {
         common.printBootMarker(boot_markers.userspace_artifacts_ready);
     }
@@ -121,7 +122,7 @@ pub fn registerCoreServices(
         contract.serviceDescriptor(.network_stack).?.boundary == .userspace_service and
         contract.serviceDescriptor(.storage_object).?.boundary == .userspace_service)
     {
-        common.printBootMarker(boot_markers.phase3_contract_map_ready);
+        common.printBootMarker(boot_markers.service_contract_map_ready);
     }
 
     return services;

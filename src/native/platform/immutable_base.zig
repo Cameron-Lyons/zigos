@@ -113,7 +113,7 @@ pub const Manager = struct {
         };
 
         if (storage.resolve(workspace_id, state_entry_path)) |entry| {
-            const version = storage.store.version(entry.version_id) orelse return error.CorruptState;
+            const version = storage.version(entry.version_id) orelse return error.CorruptState;
             try manager.decode(version.payloadSlice());
             manager.loaded_existing_state = true;
         } else |err| switch (err) {
@@ -249,7 +249,7 @@ pub const Manager = struct {
         if (slot_index >= MAX_SYSTEM_IMAGES) return false;
         const image = &self.slots[slot_index];
         if (image.version_id == 0 or !image.read_only) return false;
-        const version = self.storage.store.version(image.version_id) orelse return false;
+        const version = self.storage.version(image.version_id) orelse return false;
         if (version.object_id != image.object_id or version.object_type != .model_artifact) return false;
         if (!version.metadata.isSigned() or !version.metadata.signature.isComplete()) return false;
         if (!version.metadata.verifyFor(.model_artifact, version.payloadSlice())) return false;
@@ -380,7 +380,7 @@ pub const Manager = struct {
 
     fn hydrateSlot(self: *Manager, slot_index: usize) Error!void {
         const slot = &self.slots[slot_index];
-        const version = self.storage.store.version(slot.version_id) orelse return error.CorruptState;
+            const version = self.storage.version(slot.version_id) orelse return error.CorruptState;
         slot.signer_len = copyText(&slot.signer, version.metadata.signature.signer);
         slot.measurement = version.address;
     }
@@ -420,27 +420,28 @@ fn hashId(seed: u64, text: []const u8) u64 {
 }
 
 fn stateObjectId() u64 {
-    return hashId(0xB66D4D66A5A5C001, "phase6:immutable-base:state");
+    return hashId(0xB66D4D66A5A5C001, "platform:immutable-base:state");
 }
 
 fn imageObjectId(slot_index: usize) u64 {
-    return hashId(0xB66D4D66A5A5C101 + @as(u64, @intCast(slot_index)), "phase6:immutable-base:image");
+    return hashId(0xB66D4D66A5A5C101 + @as(u64, @intCast(slot_index)), "platform:immutable-base:image");
 }
 
 test "immutable base persists signed read-only image activation and rollback metadata" {
-    storage_service.Service.resetPersistentState();
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 61 };
     const state_signer = signing.SignerIdentity{
-        .label = "phase6-state",
+        .label = "platform-state",
         .seed = [_]u8{0x61} ** 32,
     };
     const image_signer = signing.SignerIdentity{
-        .label = "phase6-image",
+        .label = "platform-image",
         .seed = [_]u8{0x62} ** 32,
     };
 
-    var storage = storage_service.Service.init(901, 41, owner);
+    var storage = storage_service.Service.initWithStore(901, 41, owner, &storage_checkpoint_store);
     var manager = try Manager.init(&storage, owner, state_signer);
     _ = try manager.stageImage(0, "stable-a", "kernel=v1", image_signer, 10);
     try manager.beginActivation(0, 11);
@@ -461,12 +462,12 @@ test "immutable base persists signed read-only image activation and rollback met
     try std.testing.expectEqual(@as(?usize, 1), activated.active_slot);
     try std.testing.expect(manager.verifyActiveImage());
 
-    var restarted_storage = storage_service.Service.init(901, 42, owner);
+    var restarted_storage = storage_service.Service.initWithStore(901, 42, owner, &storage_checkpoint_store);
     var restarted = try Manager.init(&restarted_storage, owner, state_signer);
     try std.testing.expect(restarted.loaded_existing_state);
     try std.testing.expectEqual(@as(u8, 1), restarted.active_slot);
     try std.testing.expectEqual(@as(u64, 1), restarted.rollback_generation);
     try std.testing.expect(restarted.verifyActiveImage());
 
-    storage_service.Service.resetPersistentState();
+    storage_checkpoint_store.resetPersistent();
 }

@@ -3,13 +3,12 @@ const boot_markers = @import("../../kernel/boot/markers.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const contract = @import("contract.zig");
 const driver_service = @import("../drivers/driver_service.zig");
-const phase3_bootstrap = @import("phase3_bootstrap.zig");
+const service_bootstrap = @import("service_bootstrap.zig");
 const principal = @import("../core/principal.zig");
-const service_contract = @import("service_contract.zig");
+const service_contract = @import("service_contracts.zig");
 const storage_volume_mod = @import("../storage/storage_volume.zig");
 const support = @import("session_manager_support.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
-const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/common.zig")
@@ -18,28 +17,33 @@ else
         pub fn printBootMarker(_: []const u8) void {}
     };
 
-fn scheduleUserspaceTask(task_id: u64) bool {
-    return userspace_scheduler.registerTask(task_id);
-}
-
 pub fn run(
     env: *const support.Environment,
     state: *const support.BootstrapState,
     kernel_port: *component_port.KernelPort,
-) support.Phase3Bindings {
-    var phase3 = launchServices(env, state, kernel_port);
-    activateDrivers(env, state, kernel_port, &phase3);
-    connectClient(env, state, kernel_port, &phase3);
-    recordDriverRecovery(env, state, &phase3);
-    return phase3;
+) support.ServiceBindings {
+    var service_bindings = bootServices(env, state, kernel_port);
+    connectClient(env, state, kernel_port, &service_bindings);
+    recordDriverRecovery(env, state, &service_bindings);
+    return service_bindings;
+}
+
+pub fn bootServices(
+    env: *const support.Environment,
+    state: *const support.BootstrapState,
+    kernel_port: *component_port.KernelPort,
+) support.ServiceBindings {
+    var service_bindings = launchServices(env, state, kernel_port);
+    activateDrivers(env, state, kernel_port, &service_bindings);
+    return service_bindings;
 }
 
 fn launchServices(
     env: *const support.Environment,
     state: *const support.BootstrapState,
     kernel_port: *component_port.KernelPort,
-) support.Phase3Bindings {
-    const phase3_launch_specs: [service_contract.ordered_phase3_contracts.len]struct {
+) support.ServiceBindings {
+    const service_launch_specs: [service_contract.ordered_service_contracts.len]struct {
         owner: principal.PrincipalId,
         service_id: u64,
         correlation_base: u64,
@@ -55,15 +59,15 @@ fn launchServices(
         .{ .owner = state.ids.media_service, .service_id = state.services.media_service.id, .correlation_base = 322, .now_ticks = 50 },
     };
 
-    var phase3 = support.Phase3Bindings{ .bindings = undefined };
-    for (service_contract.ordered_phase3_contracts, phase3_launch_specs, 0..) |entry, spec, index| {
-        phase3.bindings[index] = phase3_bootstrap.launchContractService(
+    var service_bindings = support.ServiceBindings{ .bindings = undefined };
+    for (service_contract.ordered_service_contracts, service_launch_specs, 0..) |entry, spec, index| {
+        service_bindings.bindings[index] = service_bootstrap.launchContractService(
             env.userspace_catalog,
             kernel_port,
             env.supervisor,
             state.session_capability.id,
             state.session_task.id,
-            scheduleUserspaceTask,
+            env.userspace_scheduler,
             spec.owner,
             spec.service_id,
             entry,
@@ -72,38 +76,38 @@ fn launchServices(
         );
     }
 
-    _ = phase3_bootstrap.launchBundleService(
+    _ = service_bootstrap.launchBundleService(
         env.userspace_catalog,
         kernel_port,
         env.supervisor,
         state.session_capability.id,
         state.session_task.id,
-        scheduleUserspaceTask,
+        env.userspace_scheduler,
         state.ids.compatibility_service,
         state.services.compatibility_service.id,
         "zigos.system.compatibility-portal",
         support.compatibility_portal_interface,
-        phase3_bootstrap.serviceBudget(.compatibility_portal),
+        service_bootstrap.serviceBudget(.compatibility_portal),
         325,
         51,
     );
-    common.printBootMarker("ZIGOS:PHASE3:COMPAT_PORTAL:READY");
+    common.printBootMarker("ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY");
 
-    return phase3;
+    return service_bindings;
 }
 
 fn activateDrivers(
     env: *const support.Environment,
     state: *const support.BootstrapState,
     kernel_port: *component_port.KernelPort,
-    phase3: *const support.Phase3Bindings,
+    service_bindings: *const support.ServiceBindings,
 ) void {
-    const storage_driver_task = phase3_bootstrap.launchDriverTask(
+    const storage_driver_task = service_bootstrap.launchDriverTask(
         env.userspace_catalog,
         kernel_port,
         state.session_capability.id,
         state.session_task.id,
-        scheduleUserspaceTask,
+        env.userspace_scheduler,
         state.ids.storage_service,
         "zigos.system.storage-driver",
         .storage_controller,
@@ -111,7 +115,7 @@ fn activateDrivers(
         52,
     );
 
-    const phase3_driver_specs = [_]struct {
+    const driver_specs = [_]struct {
         service_id: u64,
         task_id: u64,
         owner: principal.PrincipalId,
@@ -120,15 +124,15 @@ fn activateDrivers(
         driver_bundle_id: []const u8,
         now_ticks: u64,
     }{
-        .{ .service_id = state.services.network_service.id, .task_id = phase3.bindingFor(.network_stack).task_id, .owner = state.ids.network_service, .device_class = .network_adapter, .bootstrap_transport = .kernel_published_data_plane, .driver_bundle_id = "zigos.system.network-stack", .now_ticks = 53 },
+        .{ .service_id = state.services.network_service.id, .task_id = service_bindings.bindingFor(.network_stack).task_id, .owner = state.ids.network_service, .device_class = .network_adapter, .bootstrap_transport = .kernel_published_data_plane, .driver_bundle_id = "zigos.system.network-stack", .now_ticks = 53 },
         .{ .service_id = state.services.storage_service.id, .task_id = storage_driver_task.task_id, .owner = state.ids.storage_service, .device_class = .storage_controller, .bootstrap_transport = .kernel_published_data_plane, .driver_bundle_id = "zigos.system.storage-driver", .now_ticks = 54 },
-        .{ .service_id = state.services.compositor_service.id, .task_id = phase3.bindingFor(.compositor_ui_session).task_id, .owner = state.ids.compositor_service, .device_class = .graphics_adapter, .bootstrap_transport = .none, .driver_bundle_id = "zigos.system.compositor", .now_ticks = 55 },
-        .{ .service_id = state.services.media_service.id, .task_id = phase3.bindingFor(.media_print_helpers).task_id, .owner = state.ids.media_service, .device_class = .audio_print_io, .bootstrap_transport = .none, .driver_bundle_id = "zigos.system.media-print", .now_ticks = 56 },
+        .{ .service_id = state.services.compositor_service.id, .task_id = service_bindings.bindingFor(.compositor_ui_session).task_id, .owner = state.ids.compositor_service, .device_class = .graphics_adapter, .bootstrap_transport = .none, .driver_bundle_id = "zigos.system.compositor", .now_ticks = 55 },
+        .{ .service_id = state.services.media_service.id, .task_id = service_bindings.bindingFor(.media_print_helpers).task_id, .owner = state.ids.media_service, .device_class = .audio_print_io, .bootstrap_transport = .none, .driver_bundle_id = "zigos.system.media-print", .now_ticks = 56 },
     };
 
-    var phase3_drivers: [phase3_driver_specs.len]*driver_service.DriverRecord = undefined;
-    for (phase3_driver_specs, 0..) |spec, index| {
-        phase3_drivers[index] = phase3_bootstrap.attachDriver(
+    var drivers: [driver_specs.len]*driver_service.DriverRecord = undefined;
+    for (driver_specs, 0..) |spec, index| {
+        drivers[index] = service_bootstrap.attachDriver(
             kernel_port,
             env.capability_table,
             env.driver_directory,
@@ -145,8 +149,8 @@ fn activateDrivers(
         );
     }
 
-    const network_driver = phase3_drivers[0];
-    const storage_driver = phase3_drivers[1];
+    const network_driver = drivers[0];
+    const storage_driver = drivers[1];
     const network_activation = env.driver_runtime.activateAt(network_driver, 53) catch unreachable;
     const storage_activation = env.driver_runtime.activateAt(storage_driver, 54) catch unreachable;
     _ = env.driver_runtime.activateAt(env.driver_directory.findByClass(.graphics_adapter).?, 55) catch unreachable;
@@ -154,14 +158,14 @@ fn activateDrivers(
     if ((network_activation.mode == .published_data_plane or env.driver_directory.findByClass(.network_adapter) != null) and
         (storage_activation.mode == .published_data_plane or storage_driver.restart_generation == 1))
     {
-        common.printBootMarker(boot_markers.phase3_driver_service_nic_ready);
+        common.printBootMarker(boot_markers.service_boot_driver_service_network_ready);
     }
     if (storage_activation.mode == .published_data_plane and storage_volume_mod.hasAttachedDevice()) {
-        common.printBootMarker("ZIGOS:PHASE3:DRIVER_SERVICE:STORAGE_READY");
+        common.printBootMarker("ZIGOS:SERVICE_BOOT:DRIVER_SERVICE:STORAGE_READY");
     }
 
-    if (phase3_bootstrap.contractsReady(env.service_directory)) {
-        common.printBootMarker(boot_markers.phase3_service_contracts_ready);
+    if (service_bootstrap.contractsReady(env.service_directory)) {
+        common.printBootMarker(boot_markers.service_boot_service_contracts_ready);
     }
 }
 
@@ -169,9 +173,9 @@ fn connectClient(
     env: *const support.Environment,
     state: *const support.BootstrapState,
     kernel_port: *component_port.KernelPort,
-    phase3: *const support.Phase3Bindings,
+    service_bindings: *const support.ServiceBindings,
 ) void {
-    const phase3_client_task = userspace_launch.launchRegisteredKernel(
+    const service_client_task = userspace_launch.launchRegisteredKernel(
         env.userspace_catalog,
         .{
             .port = kernel_port,
@@ -180,7 +184,7 @@ fn connectClient(
             .correlation_id = 330,
             .now_ticks = 56,
         },
-        "zigos.system.phase3-client",
+        "zigos.system.service-client",
         .{
             .owner = .{ .kind = .app, .serial = 20 },
             .budget = .{
@@ -192,47 +196,47 @@ fn connectClient(
             },
             .local_only = true,
         },
-        scheduleUserspaceTask,
+        env.userspace_scheduler,
     );
-    if (!env.runtime.hasCapability(phase3_client_task.task_id, state.session_capability.id)) {
-        env.runtime.grantCapability(phase3_client_task.task_id, state.session_capability.id) catch unreachable;
+    if (!env.runtime.hasCapability(service_client_task.task_id, state.session_capability.id)) {
+        env.runtime.grantCapability(service_client_task.task_id, state.session_capability.id) catch unreachable;
     }
 
-    var phase3_connect_count: usize = 0;
-    for (service_contract.ordered_phase3_contracts, phase3.bindings, 0..) |entry, binding, index| {
+    var service_connect_count: usize = 0;
+    for (service_contract.ordered_service_contracts, service_bindings.bindings, 0..) |entry, binding, index| {
         const endpoint_request_id = 331 + @as(u64, @intCast(index * 2));
         const connect_request_id = endpoint_request_id + 1;
         const client_endpoint = kernel_port.endpointCreate(.{
-            .header = component_port.makeHeader(.endpoint_create, endpoint_request_id, phase3_client_task.task_id),
+            .header = component_port.makeHeader(.endpoint_create, endpoint_request_id, service_client_task.task_id),
             .authority_capability_id = state.session_capability.id,
-            .owner_task_id = phase3_client_task.task_id,
+            .owner_task_id = service_client_task.task_id,
             .label = entry.interface.name,
             .flags = .{ .local_only = true },
         }, 57 + @as(u64, @intCast(index))) catch unreachable;
         const registry_connection = env.service_directory.connect(entry.interface) catch unreachable;
         _ = kernel_port.endpointConnect(.{
-            .header = component_port.makeHeader(.endpoint_connect, connect_request_id, phase3_client_task.task_id),
+            .header = component_port.makeHeader(.endpoint_connect, connect_request_id, service_client_task.task_id),
             .endpoint_capability_id = client_endpoint.capability_id,
             .peer_endpoint_id = binding.endpoint_id,
         }, 57 + @as(u64, @intCast(index))) catch unreachable;
-        env.runtime.audit(phase3_client_task.task_id, .{
+        env.runtime.audit(service_client_task.task_id, .{
             .kind = .service_connected,
             .detail = @truncate(registry_connection.service_id),
             .tick = 57 + @as(u64, @intCast(index)),
         }) catch unreachable;
         if (registry_connection.service_id == env.supervisor.findByClass(entry.class).?.id) {
-            phase3_connect_count += 1;
+            service_connect_count += 1;
         }
     }
-    if (phase3_connect_count == service_contract.ordered_phase3_contracts.len) {
-        common.printBootMarker(boot_markers.phase3_ipc_connect_all_ok);
+    if (service_connect_count == service_contract.ordered_service_contracts.len) {
+        common.printBootMarker(boot_markers.service_boot_ipc_connect_all_ok);
     }
 }
 
 fn recordDriverRecovery(
     env: *const support.Environment,
     state: *const support.BootstrapState,
-    phase3: *const support.Phase3Bindings,
+    service_bindings: *const support.ServiceBindings,
 ) void {
     _ = env.supervisor.recoverDriverCrash(
         state.services.network_service.id,
@@ -245,9 +249,9 @@ fn recordDriverRecovery(
         "network driver restarted",
     ) catch unreachable;
     if (env.supervisor.hasDiagnostic(state.services.network_service.id, .crash)) {
-        common.printBootMarker("ZIGOS:PHASE3:SUPERVISOR:CRASH_RECORDED");
+        common.printBootMarker("ZIGOS:SERVICE_BOOT:SUPERVISOR:CRASH_RECORDED");
     }
-    env.runtime.audit(phase3.bindingFor(.network_stack).task_id, .{
+    env.runtime.audit(service_bindings.bindingFor(.network_stack).task_id, .{
         .kind = .service_restarted,
         .detail = @truncate(state.services.network_service.id),
         .tick = 72,
@@ -255,6 +259,6 @@ fn recordDriverRecovery(
     if (env.supervisor.hasDiagnostic(state.services.network_service.id, .restart_completed) and
         env.driver_directory.findByService(state.services.network_service.id).?.restart_generation == 2)
     {
-        common.printBootMarker(boot_markers.phase3_supervisor_restart_ok);
+        common.printBootMarker(boot_markers.service_boot_supervisor_restart_ok);
     }
 }

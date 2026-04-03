@@ -150,9 +150,9 @@ fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32) noreturn {
     }
 }
 
-fn publishState(phase: mailbox.Phase, detail: mailbox.Detail, pulse: u16) void {
-    const counter = mailbox.packCounter(phase, detail, pulse);
-    zigos_userspace_bootstrap.phase = @intFromEnum(phase);
+fn publishState(stage: mailbox.Stage, detail: mailbox.Detail, pulse: u16) void {
+    const counter = mailbox.packCounter(stage, detail, pulse);
+    zigos_userspace_bootstrap.stage = @intFromEnum(stage);
     zigos_userspace_bootstrap.detail = @intFromEnum(detail);
     zigos_userspace_bootstrap.last_counter = counter;
     contract_bindings.zigos_userspace_yield_counter = counter;

@@ -7,7 +7,6 @@ const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
-const device_broker_client = @import("../kernel_api/device_broker_client.zig");
 const endpoint_mod = @import("../kernel_api/endpoint.zig");
 const manifest = @import("../policy/manifest.zig");
 const bootstrap_review_profile = @import("../policy/bootstrap_review_profile.zig");
@@ -23,10 +22,10 @@ const principal = @import("../core/principal.zig");
 const review_component_port = @import("../policy/review_component_port.zig");
 const package_service = @import("../services/package_service.zig");
 const session_bootstrap = @import("session_bootstrap.zig");
-const session_lifecycle_phases = @import("session_lifecycle_phases.zig");
-const session_phase1_transport = @import("session_phase1_transport.zig");
-const session_phase2_permissions = @import("session_phase2_permissions.zig");
-const session_phase3_bootstrap_flow = @import("session_phase3_bootstrap_flow.zig");
+const session_scenario_world = @import("session_scenario_world.zig");
+const session_transport_checks = @import("session_transport_checks.zig");
+const session_permission_flows = @import("session_permission_flows.zig");
+const session_service_bootstrap = @import("session_service_bootstrap.zig");
 const session_support = @import("session_manager_support.zig");
 const shared_memory_mod = @import("../kernel_api/shared_memory.zig");
 const storage_service_mod = @import("../storage/storage_service.zig");
@@ -42,8 +41,8 @@ const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 const workspace_mod = @import("../storage/workspace.zig");
 
 const BootstrapState = session_support.BootstrapState;
-const NotesPhaseState = session_support.NotesPhaseState;
-const Phase3Bindings = session_support.Phase3Bindings;
+const NotesReviewState = session_support.NotesReviewState;
+const ServiceBindings = session_support.ServiceBindings;
 const Environment = session_support.Environment;
 
 const common = if (builtin.target.os.tag == .freestanding)
@@ -59,124 +58,88 @@ else
         pub fn print(_: []const u8) void {}
     };
 
-var initialized = false;
-var capability_table = capability.CapabilityTable.init();
-var endpoint_table = endpoint_mod.Table.init();
-var runtime = task_runtime.Runtime.init();
-var runtime_service = task_runtime_service_mod.Service.init(&runtime);
-var service_directory = native_service_registry.Registry.init();
-var shared_memory_table = shared_memory_mod.Table.init();
-var userspace_catalog = userspace_loader.Catalog.init();
-var package_service_instance = package_service.Service.init();
-var phase2_compositor_session = compositor_session.Session.init();
-var phase2_ux_controller = native_ux.Controller.init();
-var kernel_instance: native_kernel.Kernel = undefined;
-var kernel_port_instance: component_port.KernelPort = undefined;
-var kernel_port_ready = false;
-var driver_directory = driver_service.Directory.init();
-var driver_runtime = driver_runtime_mod.Runtime.init();
-var supervisor = supervisor_mod.Supervisor.init();
-var diagnostic_ledger = event_ledger.Ledger.init();
-var background_dispatcher = background_dispatch.Controller.init();
-var phase4_storage_service = emptyStorageService();
-var phase4_export_package = workspace_mod.emptyExportPackage();
+pub const SessionManager = struct {
+    constructed: bool = false,
+    initialized: bool = false,
+    capability_table: capability.CapabilityTable = capability.CapabilityTable.init(),
+    endpoint_table: endpoint_mod.Table = endpoint_mod.Table.init(),
+    runtime: task_runtime.Runtime = task_runtime.Runtime.init(),
+    runtime_checkpoint_store: task_runtime_service_mod.CheckpointStore = .{},
+    runtime_service: task_runtime_service_mod.Service = undefined,
+    userspace_executor: userspace_executor.Executor = .{},
+    userspace_scheduler: userspace_scheduler.Scheduler = undefined,
+    service_directory: native_service_registry.Registry = native_service_registry.Registry.init(),
+    shared_memory_table: shared_memory_mod.Table = shared_memory_mod.Table.init(),
+    userspace_catalog: userspace_loader.Catalog = userspace_loader.Catalog.init(),
+    package_service_instance: package_service.Service = package_service.Service.init(),
+    review_compositor_session: compositor_session.Session = compositor_session.Session.init(),
+    review_ux_controller: native_ux.Controller = native_ux.Controller.init(),
+    kernel_instance: native_kernel.Kernel = undefined,
+    kernel_port_instance: component_port.KernelPort = undefined,
+    kernel_port_ready: bool = false,
+    driver_directory: driver_service.Directory = driver_service.Directory.init(),
+    driver_runtime: driver_runtime_mod.Runtime = driver_runtime_mod.Runtime.init(),
+    supervisor: supervisor_mod.Supervisor = supervisor_mod.Supervisor.init(),
+    diagnostic_ledger: event_ledger.Ledger = event_ledger.Ledger.init(),
+    background_dispatcher: background_dispatch.Controller = background_dispatch.Controller.init(),
+    storage_checkpoint_store: storage_service_mod.CheckpointStore = .{},
+    storage_service_instance: storage_service_mod.Service = emptyStorageService(),
+    export_package_buffer: workspace_mod.ExportPackage = workspace_mod.emptyExportPackage(),
+    sync_resident_state: sync_service_mod.ResidentState = .{},
 
-fn environment() Environment {
-    return .{
-        .capability_table = &capability_table,
-        .runtime = &runtime,
-        .service_directory = &service_directory,
-        .userspace_catalog = &userspace_catalog,
-        .package_service = &package_service_instance,
-        .supervisor = &supervisor,
-        .driver_directory = &driver_directory,
-        .driver_runtime = &driver_runtime,
-        .diagnostic_ledger = &diagnostic_ledger,
-        .background_dispatcher = &background_dispatcher,
-    };
-}
-
-fn emptyStorageService() storage_service_mod.Service {
-    return .{
-        .service_id = 0,
-        .task_id = 0,
-        .owner = .{ .kind = .service, .serial = 0 },
-        .store = undefined,
-        .workspaces = undefined,
-    };
-}
-
-fn resetStateForTest() void {
-    initialized = false;
-    capability_table = capability.CapabilityTable.init();
-    endpoint_table = endpoint_mod.Table.init();
-    runtime = task_runtime.Runtime.init();
-    runtime_service = task_runtime_service_mod.Service.init(&runtime);
-    service_directory = native_service_registry.Registry.init();
-    shared_memory_table = shared_memory_mod.Table.init();
-    userspace_catalog = userspace_loader.Catalog.init();
-    package_service_instance = package_service.Service.init();
-    phase2_compositor_session = compositor_session.Session.init();
-    phase2_ux_controller = native_ux.Controller.init();
-    device_broker_client.reset();
-    kernel_instance = native_kernel.Kernel.init(
-        .{ .kind = .policy_authority, .serial = 0 },
-        runtime_service.runtimePtr(),
-        &capability_table,
-        &endpoint_table,
-        &shared_memory_table,
-        &service_directory,
-    );
-    kernel_port_instance = component_port.KernelPort.init(&kernel_instance);
-    kernel_port_ready = false;
-    driver_directory = driver_service.Directory.init();
-    driver_runtime = driver_runtime_mod.Runtime.init();
-    supervisor = supervisor_mod.Supervisor.init();
-    diagnostic_ledger = event_ledger.Ledger.init();
-    background_dispatcher = background_dispatch.Controller.init();
-    phase4_storage_service = emptyStorageService();
-    phase4_export_package = workspace_mod.emptyExportPackage();
-    userspace_scheduler.reset();
-    storage_service_mod.Service.resetPersistentState();
-    sync_service_mod.Service.resetPersistentState();
-}
-
-pub const testing = struct {
-    pub fn resetState() void {
-        resetStateForTest();
+    pub fn init() SessionManager {
+        return .{};
     }
 
-    pub fn isInitialized() bool {
-        return initialized;
+    fn ensureConstructed(self: *SessionManager) void {
+        if (self.constructed) return;
+        self.runtime_service = task_runtime_service_mod.Service.initWithStore(
+            &self.runtime,
+            &self.runtime_checkpoint_store,
+        );
+        self.userspace_scheduler = userspace_scheduler.Scheduler.init(&self.userspace_executor);
+        self.constructed = true;
     }
 
-    pub fn countTasks() usize {
+    pub fn reset(self: *SessionManager) void {
+        self.* = SessionManager.init();
+        self.ensureConstructed();
+        self.userspace_scheduler.reset();
+        self.storage_checkpoint_store.resetPersistent();
+        self.sync_resident_state.resetPersistent();
+    }
+
+    pub fn isInitialized(self: *const SessionManager) bool {
+        return self.initialized;
+    }
+
+    pub fn countTasks(self: *const SessionManager) usize {
         var count: usize = 0;
-        for (runtime.tasks) |slot| {
+        for (self.runtime.tasks) |slot| {
             if (slot.in_use) count += 1;
         }
         return count;
     }
 
-    pub fn countTasksInState(state: task_runtime.TaskState) usize {
+    pub fn countTasksInState(self: *const SessionManager, state: task_runtime.TaskState) usize {
         var count: usize = 0;
-        for (runtime.tasks) |slot| {
+        for (self.runtime.tasks) |slot| {
             if (slot.in_use and slot.task.state == state) count += 1;
         }
         return count;
     }
 
-    pub fn countServices() usize {
+    pub fn countServices(self: *const SessionManager) usize {
         var count: usize = 0;
-        for (supervisor.services) |slot| {
+        for (self.supervisor.services) |slot| {
             if (slot.in_use) count += 1;
         }
         return count;
     }
 
-    pub fn findTask(label: []const u8) ?*task_runtime.TaskRecord {
+    pub fn findTask(self: *SessionManager, label: []const u8) ?*task_runtime.TaskRecord {
         var match: ?*task_runtime.TaskRecord = null;
-        for (&runtime.tasks) |*slot| {
+        for (&self.runtime.tasks) |*slot| {
             if (!slot.in_use or slot.task.execution_component_count == 0) continue;
             if (std.mem.eql(u8, slot.task.execution_components[0].labelSlice(), label)) {
                 match = &slot.task;
@@ -185,110 +148,166 @@ pub const testing = struct {
         return match;
     }
 
-    pub fn runtimePtr() *task_runtime.Runtime {
-        return &runtime;
+    pub fn runtimePtr(self: *SessionManager) *task_runtime.Runtime {
+        return &self.runtime;
     }
 
-    pub fn runtimeServicePtr() *task_runtime_service_mod.Service {
-        return &runtime_service;
+    pub fn runtimeServicePtr(self: *SessionManager) *task_runtime_service_mod.Service {
+        self.ensureConstructed();
+        return &self.runtime_service;
     }
 
-    pub fn serviceDirectoryPtr() *native_service_registry.Registry {
-        return &service_directory;
+    pub fn serviceDirectoryPtr(self: *SessionManager) *native_service_registry.Registry {
+        return &self.service_directory;
     }
 
-    pub fn driverDirectoryPtr() *driver_service.Directory {
-        return &driver_directory;
+    pub fn driverDirectoryPtr(self: *SessionManager) *driver_service.Directory {
+        return &self.driver_directory;
     }
 
-    pub fn driverRuntimePtr() *driver_runtime_mod.Runtime {
-        return &driver_runtime;
+    pub fn driverRuntimePtr(self: *SessionManager) *driver_runtime_mod.Runtime {
+        return &self.driver_runtime;
     }
 
-    pub fn supervisorPtr() *supervisor_mod.Supervisor {
-        return &supervisor;
+    pub fn supervisorPtr(self: *SessionManager) *supervisor_mod.Supervisor {
+        return &self.supervisor;
     }
 
-    pub fn storageServicePtr() *storage_service_mod.Service {
-        return &phase4_storage_service;
+    pub fn storageServicePtr(self: *SessionManager) *storage_service_mod.Service {
+        return &self.storage_service_instance;
     }
 
-    pub fn packageServicePtr() *package_service.Service {
-        return &package_service_instance;
+    pub fn packageServicePtr(self: *SessionManager) *package_service.Service {
+        return &self.package_service_instance;
     }
 
-    pub fn phase2UxControllerPtr() *native_ux.Controller {
-        return &phase2_ux_controller;
+    pub fn reviewUxControllerPtr(self: *SessionManager) *native_ux.Controller {
+        return &self.review_ux_controller;
     }
 
-    pub fn compositorSessionPtr() *compositor_session.Session {
-        return &phase2_compositor_session;
+    pub fn compositorSessionPtr(self: *SessionManager) *compositor_session.Session {
+        return &self.review_compositor_session;
     }
 
-    pub fn backgroundDispatchPtr() *background_dispatch.Controller {
-        return &background_dispatcher;
+    pub fn backgroundDispatchPtr(self: *SessionManager) *background_dispatch.Controller {
+        return &self.background_dispatcher;
     }
 
-    pub fn updateLedgerPtr() *event_ledger.Ledger {
-        return &diagnostic_ledger;
+    pub fn updateLedgerPtr(self: *SessionManager) *event_ledger.Ledger {
+        return &self.diagnostic_ledger;
     }
 
-    pub fn compatibilityPortalInterface() manifest.InterfaceDecl {
+    pub fn compatibilityPortalInterface(self: *const SessionManager) manifest.InterfaceDecl {
+        _ = self;
         return session_support.compatibility_portal_interface;
+    }
+
+    pub fn kernelPort(self: *SessionManager) ?*component_port.KernelPort {
+        if (!self.kernel_port_ready) return null;
+        return &self.kernel_port_instance;
+    }
+
+    fn executeUserspaceProbe(self: *SessionManager, task_id: u64) void {
+        _ = self.userspace_scheduler.executeTask(task_id, 0);
+    }
+
+    pub fn runUserspaceScheduler(self: *SessionManager, now_ticks: u64) bool {
+        return self.userspace_scheduler.runNext(now_ticks);
+    }
+
+    pub fn boot(self: *SessionManager) void {
+        self.ensureConstructed();
+        if (self.initialized) return;
+        self.initialized = true;
+        self.kernel_port_ready = false;
+
+        const env = environment(self);
+        const state = initializeBootstrapState(self);
+        const kernel_port = prepareKernelInterface(self, state.ids.policy_authority, state.session_task.id);
+        const service_bindings = session_service_bootstrap.bootServices(&env, &state, kernel_port);
+
+        self.storage_service_instance = storage_service_mod.Service.initWithStore(
+            state.services.storage_service.id,
+            service_bindings.bindingFor(.storage_object).task_id,
+            state.ids.storage_service,
+            &self.storage_checkpoint_store,
+        );
+        self.storage_service_instance.checkpoint_enabled = false;
+
+        self.runtime_service.checkpoint(60);
+        common.printBootMarker(boot_markers.task_session_ready);
+        common.printBootMarker(boot_markers.native_ready);
+        printReadyBanner();
+    }
+
+    pub fn bootScenarioWorld(self: *SessionManager) void {
+        self.ensureConstructed();
+        if (self.initialized) return;
+        self.initialized = true;
+        self.kernel_port_ready = false;
+
+        const env = environment(self);
+        const state = initializeBootstrapState(self);
+        bootstrap_packages.seed(&self.package_service_instance);
+        var mediator = initPolicyMediator(self, state.ids.policy_authority, state.services);
+        const kernel_port = prepareKernelInterface(self, state.ids.policy_authority, state.session_task.id);
+        var review_service = initReviewService(self, state.services.review_service_record.id, state.review_service_task.id);
+        var review_port = review_component_port.Port.init(&review_service);
+        var policy_port = policy_component_port.Port.init(&mediator);
+        common.printBootMarker(boot_markers.permission_review_port_ready);
+        common.printBootMarker(boot_markers.permission_policy_port_ready);
+
+        runTransportChecks(&env, &state, kernel_port);
+        const notes_review = runPermissionFlows(&env, &state, kernel_port, &review_port, &policy_port);
+        const service_bindings = runServiceBootstrap(&env, &state, kernel_port);
+        runSessionLifecycle(self, &state, &service_bindings, notes_review.object_capability);
+        printReadyBanner();
     }
 };
 
-pub fn kernelPort() ?*component_port.KernelPort {
-    if (!kernel_port_ready) return null;
-    return &kernel_port_instance;
+fn environment(self: *SessionManager) Environment {
+    return .{
+        .capability_table = &self.capability_table,
+        .runtime = &self.runtime,
+        .service_directory = &self.service_directory,
+        .userspace_catalog = &self.userspace_catalog,
+        .userspace_scheduler = &self.userspace_scheduler,
+        .package_service = &self.package_service_instance,
+        .supervisor = &self.supervisor,
+        .driver_directory = &self.driver_directory,
+        .driver_runtime = &self.driver_runtime,
+        .diagnostic_ledger = &self.diagnostic_ledger,
+        .background_dispatcher = &self.background_dispatcher,
+    };
 }
 
-fn executeUserspaceProbe(task_id: u64) void {
-    _ = userspace_executor.executeTask(&userspace_catalog, &runtime, &capability_table, task_id, 0);
+fn emptyStorageService() storage_service_mod.Service {
+    return .{
+        .service_id = 0,
+        .task_id = 0,
+        .owner = .{ .kind = .service, .serial = 0 },
+        .checkpoint_store = undefined,
+        .store = undefined,
+        .workspaces = undefined,
+    };
 }
 
-fn scheduleUserspaceTask(task_id: u64) bool {
-    return userspace_scheduler.registerTask(task_id);
-}
-
-pub fn runUserspaceScheduler(now_ticks: u64) bool {
-    return userspace_scheduler.runNext(now_ticks);
-}
-
-pub fn boot() void {
-    if (initialized) return;
-    initialized = true;
-    kernel_port_ready = false;
-
-    const env = environment();
-    const state = initializeBootstrapState();
-    bootstrap_packages.seed(&package_service_instance);
-    var mediator = initPolicyMediator(state.ids.policy_authority, state.services);
-    const kernel_port = prepareKernelInterface(state.ids.policy_authority, state.session_task.id);
-    var review_service = initReviewService(state.services.review_service_record.id, state.review_service_task.id);
-    var review_port = review_component_port.Port.init(&review_service);
-    var policy_port = policy_component_port.Port.init(&mediator);
-    common.printBootMarker(boot_markers.phase2_review_port_ready);
-    common.printBootMarker(boot_markers.phase2_policy_port_ready);
-
-    runPhase1TransportChecks(&env, &state, kernel_port);
-    const notes_phase = runPhase2PermissionFlows(&env, &state, kernel_port, &review_port, &policy_port);
-    const phase3 = runPhase3ServiceBootstrap(&env, &state, kernel_port);
-    runSessionLifecycle(&state, &phase3, notes_phase.object_capability);
-    printReadyBanner();
-}
-
-fn initializeBootstrapState() BootstrapState {
+fn initializeBootstrapState(self: *SessionManager) BootstrapState {
     common.printBootMarker(boot_markers.native_bootstrap);
     common.printBootMarker(boot_markers.tcb_defined);
 
     const ids = session_bootstrap.principals();
-    session_bootstrap.initializeUserspace(&userspace_catalog, &runtime, &capability_table);
-    const services = session_bootstrap.registerCoreServices(&supervisor, &runtime_service, ids);
+    session_bootstrap.initializeUserspace(
+        &self.userspace_catalog,
+        &self.runtime,
+        &self.capability_table,
+        &self.userspace_scheduler,
+    );
+    const services = session_bootstrap.registerCoreServices(&self.supervisor, &self.runtime_service, ids);
 
     const session_task = userspace_launch.launchRegisteredDirect(
-        &userspace_catalog,
-        &runtime,
+        &self.userspace_catalog,
+        &self.runtime,
         "zigos.system.session-manager",
         .{
             .owner = ids.session_user,
@@ -302,13 +321,13 @@ fn initializeBootstrapState() BootstrapState {
             .ui_surface_id = 1,
             .local_only = true,
         },
-        scheduleUserspaceTask,
+        &self.userspace_scheduler,
     );
     common.printBootMarker(boot_markers.policy_ready);
 
     const review_service_task = userspace_launch.launchRegisteredDirect(
-        &userspace_catalog,
-        &runtime,
+        &self.userspace_catalog,
+        &self.runtime,
         "zigos.system.permission-review",
         .{
             .owner = ids.review_service,
@@ -321,13 +340,13 @@ fn initializeBootstrapState() BootstrapState {
             },
             .local_only = true,
         },
-        scheduleUserspaceTask,
+        &self.userspace_scheduler,
     );
-    common.printBootMarker(boot_markers.phase2_ui_service_ready);
-    common.printBootMarker(boot_markers.phase2_ui_service_task_ready);
+    common.printBootMarker(boot_markers.permission_ui_service_ready);
+    common.printBootMarker(boot_markers.permission_ui_service_task_ready);
 
-    const session_capability = mintSessionCapability(ids, services, session_task.id);
-    recordSessionTaskBootstrap(session_task.id, session_capability.id);
+    const session_capability = mintSessionCapability(self, ids, services, session_task.id);
+    recordSessionTaskBootstrap(self, session_task.id, session_capability.id);
 
     return .{
         .ids = ids,
@@ -335,16 +354,17 @@ fn initializeBootstrapState() BootstrapState {
         .session_task = session_task,
         .review_service_task = review_service_task,
         .session_capability = session_capability,
-        .policy_capability = mintPolicyCapability(ids.policy_authority, services.policy_service.id, session_task.id),
+        .policy_capability = mintPolicyCapability(self, ids.policy_authority, services.policy_service.id, session_task.id),
     };
 }
 
 fn mintSessionCapability(
+    self: *SessionManager,
     ids: session_bootstrap.Principals,
     services: session_bootstrap.CoreServices,
     session_task_id: u64,
 ) capability.Capability {
-    return capability_table.mint(.{
+    return self.capability_table.mint(.{
         .holder = ids.session_service,
         .issuer = ids.policy_authority,
         .target = .{ .kind = .service, .id = services.session.id },
@@ -381,13 +401,13 @@ fn mintSessionCapability(
     }) catch unreachable;
 }
 
-fn recordSessionTaskBootstrap(session_task_id: u64, session_capability_id: u64) void {
-    runtime.grantCapability(session_task_id, session_capability_id) catch unreachable;
-    runtime.audit(session_task_id, .{
+fn recordSessionTaskBootstrap(self: *SessionManager, session_task_id: u64, session_capability_id: u64) void {
+    self.runtime.grantCapability(session_task_id, session_capability_id) catch unreachable;
+    self.runtime.audit(session_task_id, .{
         .kind = .created,
         .tick = 0,
     }) catch unreachable;
-    runtime.audit(session_task_id, .{
+    self.runtime.audit(session_task_id, .{
         .kind = .capability_granted,
         .capability_id = session_capability_id,
         .tick = 0,
@@ -395,11 +415,12 @@ fn recordSessionTaskBootstrap(session_task_id: u64, session_capability_id: u64) 
 }
 
 fn mintPolicyCapability(
+    self: *SessionManager,
     policy_authority: principal.PrincipalId,
     policy_service_id: u64,
     session_task_id: u64,
 ) capability.Capability {
-    return capability_table.mint(.{
+    return self.capability_table.mint(.{
         .holder = policy_authority,
         .issuer = policy_authority,
         .target = .{ .kind = .policy, .id = policy_service_id },
@@ -426,13 +447,14 @@ fn mintPolicyCapability(
 }
 
 fn initPolicyMediator(
+    self: *SessionManager,
     policy_authority: principal.PrincipalId,
     services: session_bootstrap.CoreServices,
 ) policy_mediation.PolicyMediator {
     return policy_mediation.PolicyMediator.init(
         policy_authority,
-        &capability_table,
-        runtime_service.runtimePtr(),
+        &self.capability_table,
+        self.runtime_service.runtimePtr(),
         .{
             .network_service_id = services.network_service.id,
             .compositor_service_id = services.compositor_service.id,
@@ -442,94 +464,105 @@ fn initPolicyMediator(
     );
 }
 
-fn prepareKernelInterface(policy_authority: principal.PrincipalId, session_task_id: u64) *component_port.KernelPort {
-    kernel_instance = native_kernel.Kernel.init(
+fn prepareKernelInterface(
+    self: *SessionManager,
+    policy_authority: principal.PrincipalId,
+    session_task_id: u64,
+) *component_port.KernelPort {
+    self.kernel_instance = native_kernel.Kernel.init(
         policy_authority,
-        runtime_service.runtimePtr(),
-        &capability_table,
-        &endpoint_table,
-        &shared_memory_table,
-        &service_directory,
+        self.runtime_service.runtimePtr(),
+        &self.capability_table,
+        &self.endpoint_table,
+        &self.shared_memory_table,
+        &self.service_directory,
     );
-    kernel_port_instance = component_port.KernelPort.init(&kernel_instance);
-    device_broker_client.bindKernelPort(&kernel_port_instance);
-    kernel_port_ready = true;
-    executeUserspaceProbe(session_task_id);
-    common.printBootMarker(boot_markers.phase1_native_kernel_ready);
-    common.printBootMarker(boot_markers.phase1_no_root);
-    common.printBootMarker(boot_markers.phase1_component_abi_ready);
-    return &kernel_port_instance;
+    self.kernel_port_instance = component_port.KernelPort.init(&self.kernel_instance);
+    self.driver_runtime.bindKernelPort(&self.kernel_port_instance);
+    self.kernel_port_ready = true;
+    self.executeUserspaceProbe(session_task_id);
+    common.printBootMarker(boot_markers.transport_native_kernel_ready);
+    common.printBootMarker(boot_markers.transport_no_root);
+    common.printBootMarker(boot_markers.transport_component_abi_ready);
+    return &self.kernel_port_instance;
 }
 
-fn initReviewService(review_service_id: u64, review_task_id: u64) permission_review_service.Service {
+fn initReviewService(
+    self: *SessionManager,
+    review_service_id: u64,
+    review_task_id: u64,
+) permission_review_service.Service {
     return permission_review_service.Service.initProfiled(
         review_service_id,
         review_task_id,
-        &runtime,
+        &self.runtime,
         &[_][]const u8{},
         bootstrap_review_profile.rules[0..],
-        &phase2_compositor_session,
-        &phase2_ux_controller,
+        &self.review_compositor_session,
+        &self.review_ux_controller,
     );
 }
 
-fn runPhase1TransportChecks(
+fn runTransportChecks(
     env: *const Environment,
     state: *const BootstrapState,
     kernel_port: *component_port.KernelPort,
 ) void {
-    session_phase1_transport.run(env, state, kernel_port);
+    session_transport_checks.run(env, state, kernel_port);
 }
 
-fn runPhase2PermissionFlows(
+fn runPermissionFlows(
     env: *const Environment,
     state: *const BootstrapState,
     kernel_port: *component_port.KernelPort,
     review_port: *review_component_port.Port,
     policy_port: *policy_component_port.Port,
-) NotesPhaseState {
-    return session_phase2_permissions.run(env, state, kernel_port, review_port, policy_port);
+) NotesReviewState {
+    return session_permission_flows.run(env, state, kernel_port, review_port, policy_port);
 }
 
-fn runPhase3ServiceBootstrap(
+fn runServiceBootstrap(
     env: *const Environment,
     state: *const BootstrapState,
     kernel_port: *component_port.KernelPort,
-) Phase3Bindings {
-    return session_phase3_bootstrap_flow.run(env, state, kernel_port);
+) ServiceBindings {
+    return session_service_bootstrap.run(env, state, kernel_port);
 }
 
 fn runSessionLifecycle(
+    self: *SessionManager,
     state: *const BootstrapState,
-    phase3: *const Phase3Bindings,
+    service_bindings: *const ServiceBindings,
     notes_object_capability: capability.Capability,
 ) void {
-    var lifecycle_context = session_lifecycle_phases.Context{
-        .runtime = &runtime,
-        .runtime_service = &runtime_service,
-        .supervisor = &supervisor,
-        .compositor = &phase2_compositor_session,
-        .driver_directory = &driver_directory,
-        .storage_service_instance = &phase4_storage_service,
-        .export_package = &phase4_export_package,
+    var lifecycle_context = session_scenario_world.Context{
+        .runtime = &self.runtime,
+        .runtime_service = &self.runtime_service,
+        .supervisor = &self.supervisor,
+        .compositor = &self.review_compositor_session,
+        .driver_directory = &self.driver_directory,
+        .storage_service_instance = &self.storage_service_instance,
+        .storage_checkpoint_store = &self.storage_checkpoint_store,
+        .export_package = &self.export_package_buffer,
         .policy_authority = state.ids.policy_authority,
         .session_service = state.ids.session_service,
         .session_user = state.ids.session_user,
         .storage_service_id = state.services.storage_service.id,
-        .storage_task_id = phase3.bindingFor(.storage_object).task_id,
+        .storage_task_id = service_bindings.bindingFor(.storage_object).task_id,
         .storage_service_principal = state.ids.storage_service,
         .sync_service_id = state.services.sync_service.id,
-        .sync_task_id = phase3.bindingFor(.sync_replication).task_id,
+        .sync_task_id = service_bindings.bindingFor(.sync_replication).task_id,
         .sync_service_principal = state.ids.sync_service,
+        .sync_resident_state = &self.sync_resident_state,
         .policy_service_id = state.services.policy_service.id,
         .network_service_id = state.services.network_service.id,
         .compositor_service_id = state.services.compositor_service.id,
         .package_service_id = state.services.package_service.id,
         .package_service_principal = state.ids.package_service,
-        .update_ledger = &diagnostic_ledger,
+        .update_ledger = &self.diagnostic_ledger,
         .notes_object_capability = notes_object_capability,
     };
-    session_lifecycle_phases.run(&lifecycle_context);
+    session_scenario_world.run(&lifecycle_context);
 }
 
 fn printReadyBanner() void {

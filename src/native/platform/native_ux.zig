@@ -224,30 +224,29 @@ fn yesNo(value: bool) []const u8 {
     return if (value) "yes" else "no";
 }
 
-
 test "native ux records task workspace pairing review and recovery flows" {
-    storage_service.Service.resetPersistentState();
-    sync_service.Service.resetPersistentState();
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 4 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8 };
     const user = principal.PrincipalId{ .kind = .user, .serial = 1 };
     const paired_device = principal.PrincipalId{ .kind = .device, .serial = 31 };
     const object_signer = signing.SignerIdentity{
-        .label = "phase6-storage",
+        .label = "platform-storage",
         .seed = [_]u8{0x81} ** 32,
     };
     const user_signer = signing.SignerIdentity{
-        .label = "phase6-user",
+        .label = "platform-user",
         .seed = [_]u8{0x82} ** 32,
     };
     const device_signer = signing.SignerIdentity{
-        .label = "phase6-device",
+        .label = "platform-device",
         .seed = [_]u8{0x83} ** 32,
     };
 
     var runtime = task_runtime.Runtime.init();
-    var storage = storage_service.Service.init(930, 61, storage_owner);
+    var storage = storage_service.Service.initWithStore(930, 61, storage_owner, &storage_checkpoint_store);
     const notes = try storage.putVersion(.{
         .preferred_object_id = 990,
         .object_type = .document,
@@ -294,8 +293,7 @@ test "native ux records task workspace pairing review and recovery flows" {
     try std.testing.expectEqual(manifest.PermissionKind.object_access, controller.flows[3].permission_kind);
     try std.testing.expectEqualStrings("object_access", controller.flows[3].permissionResourceSlice());
 
-    sync_service.Service.resetPersistentState();
-    storage_service.Service.resetPersistentState();
+    storage_checkpoint_store.resetPersistent();
 }
 
 test "native ux renders structured permission review decisions" {

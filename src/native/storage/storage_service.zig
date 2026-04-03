@@ -7,9 +7,42 @@ const signing = @import("../core/signing.zig");
 const storage_volume = @import("storage_volume.zig");
 const workspace = @import("workspace.zig");
 
-var persisted_store = object_store.Store.init();
-var persisted_workspaces = workspace.Directory.init();
-var has_persisted_state = false;
+pub const CheckpointStore = struct {
+    store: object_store.Store = object_store.Store.init(),
+    workspaces: workspace.Directory = workspace.Directory.init(),
+    has_persisted_state: bool = false,
+
+    pub fn hasCachedPersistentState(self: *const CheckpointStore) bool {
+        return self.has_persisted_state;
+    }
+
+    pub fn resetPreparedState(self: *CheckpointStore) void {
+        self.store.reset();
+        self.workspaces.reset();
+        self.has_persisted_state = false;
+    }
+
+    pub fn loadPreparedStateFromAttachedVolume(self: *CheckpointStore) bool {
+        if (!storage_volume.hasAttachedDevice()) return false;
+        if (storage_volume.loadFromVolume(&self.store, &self.workspaces)) {
+            self.has_persisted_state = true;
+            return true;
+        }
+        return false;
+    }
+
+    pub fn resetPersistent(self: *CheckpointStore) void {
+        self.resetPreparedState();
+        storage_volume.clearAttachedVolume();
+        storage_volume.clearAttachedBackend();
+    }
+
+    fn preparePersistentState(self: *CheckpointStore) bool {
+        if (self.has_persisted_state) return false;
+        self.resetPreparedState();
+        return self.loadPreparedStateFromAttachedVolume();
+    }
+};
 
 pub const Service = struct {
     service_id: u64,
@@ -17,60 +50,54 @@ pub const Service = struct {
     owner: principal.PrincipalId,
     loaded_from_volume: bool = false,
     checkpoint_enabled: bool = true,
+    checkpoint_store: *CheckpointStore,
     store: *object_store.Store,
     workspaces: *workspace.Directory,
 
-    pub fn init(service_id: u64, task_id: u64, owner: principal.PrincipalId) Service {
-        const loaded_from_volume = preparePersistentState();
-        return makeService(service_id, task_id, owner, loaded_from_volume);
+    pub fn initWithStore(
+        service_id: u64,
+        task_id: u64,
+        owner: principal.PrincipalId,
+        checkpoint_store: *CheckpointStore,
+    ) Service {
+        const loaded_from_volume = checkpoint_store.preparePersistentState();
+        return makeService(checkpoint_store, service_id, task_id, owner, loaded_from_volume);
     }
 
-    pub fn bootstrap(service_id: u64, task_id: u64, owner: principal.PrincipalId) Service {
-        const loaded_from_volume = preparePersistentState();
-        return makeService(service_id, task_id, owner, loaded_from_volume);
+    pub fn bootstrapWithStore(
+        service_id: u64,
+        task_id: u64,
+        owner: principal.PrincipalId,
+        checkpoint_store: *CheckpointStore,
+    ) Service {
+        const loaded_from_volume = checkpoint_store.preparePersistentState();
+        return makeService(checkpoint_store, service_id, task_id, owner, loaded_from_volume);
     }
 
-    pub fn bindPrepared(service_id: u64, task_id: u64, owner: principal.PrincipalId, loaded_from_volume: bool) Service {
-        return makeService(service_id, task_id, owner, loaded_from_volume);
+    pub fn bindPrepared(
+        checkpoint_store: *CheckpointStore,
+        service_id: u64,
+        task_id: u64,
+        owner: principal.PrincipalId,
+        loaded_from_volume: bool,
+    ) Service {
+        return makeService(checkpoint_store, service_id, task_id, owner, loaded_from_volume);
     }
 
-    pub fn hasCachedPersistentState() bool {
-        return has_persisted_state;
-    }
-
-    pub fn resetPreparedState() void {
-        persisted_store.reset();
-        persisted_workspaces.reset();
-        has_persisted_state = false;
-    }
-
-    pub fn loadPreparedStateFromAttachedVolume() bool {
-        if (!storage_volume.hasAttachedDevice()) return false;
-        if (storage_volume.loadFromVolume(&persisted_store, &persisted_workspaces)) {
-            has_persisted_state = true;
-            return true;
-        }
-        return false;
-    }
-
-    pub fn resetPersistentState() void {
-        persisted_store.reset();
-        persisted_workspaces.reset();
-        has_persisted_state = false;
-        storage_volume.clearAttachedVolume();
-        storage_volume.clearAttachedBackend();
-    }
-
-    pub fn reloadFromAttachedVolume(service_id: u64, task_id: u64, owner: principal.PrincipalId) Service {
-        Service.resetPreparedState();
-        const loaded_from_volume = Service.loadPreparedStateFromAttachedVolume();
-        return makeService(service_id, task_id, owner, loaded_from_volume);
+    pub fn reloadFromAttachedVolume(
+        service_id: u64,
+        task_id: u64,
+        owner: principal.PrincipalId,
+        checkpoint_store: *CheckpointStore,
+    ) Service {
+        checkpoint_store.resetPreparedState();
+        const loaded_from_volume = checkpoint_store.loadPreparedStateFromAttachedVolume();
+        return makeService(checkpoint_store, service_id, task_id, owner, loaded_from_volume);
     }
 
     pub fn checkpoint(self: *const Service) void {
-        _ = self;
-        has_persisted_state = true;
-        _ = storage_volume.saveToVolume(&persisted_store, &persisted_workspaces) catch null;
+        self.checkpoint_store.has_persisted_state = true;
+        _ = storage_volume.saveToVolume(self.store, self.workspaces) catch null;
     }
 
     pub fn putVersion(self: *Service, request: object_store.PutRequest) object_store.Error!object_store.PutResult {
@@ -224,7 +251,7 @@ pub const Service = struct {
     }
 
     pub fn bridge(self: *Service) file_bridge.Bridge {
-        return file_bridge.Bridge.init(self.store, self.workspaces);
+        return file_bridge.Bridge.init(self, bridgeResolveEntry, bridgeHasVersion);
     }
 
     pub fn bridgeResolve(
@@ -236,28 +263,111 @@ pub const Service = struct {
         var compat_bridge = self.bridge();
         return compat_bridge.resolve(request, authority, now_ticks);
     }
+
+    pub fn object(self: *const Service, object_id: u64) ?*const object_store.ObjectRecord {
+        return self.store.object(object_id);
+    }
+
+    pub fn version(self: *const Service, version_id: u64) ?*const object_store.VersionRecord {
+        return self.store.version(version_id);
+    }
+
+    pub fn latestVersion(self: *const Service, object_id: u64) ?*const object_store.VersionRecord {
+        return self.store.latestVersion(object_id);
+    }
+
+    pub fn latestInsertedVersion(self: *const Service) ?*const object_store.VersionRecord {
+        var latest: ?*const object_store.VersionRecord = null;
+        for (&self.store.versions) |*slot| {
+            if (!slot.in_use) continue;
+            if (latest == null or slot.version.id > latest.?.id) {
+                latest = &slot.version;
+            }
+        }
+        return latest;
+    }
+
+    pub fn objectCount(self: *const Service) usize {
+        return self.store.objectCount();
+    }
+
+    pub fn versionCount(self: *const Service) usize {
+        return self.store.versionCount();
+    }
+
+    pub fn findWorkspaceRecord(self: *Service, workspace_id: u64) ?*workspace.WorkspaceRecord {
+        return self.workspaces.find(workspace_id);
+    }
+
+    pub fn findWorkspaceRecordConst(self: *const Service, workspace_id: u64) ?*const workspace.WorkspaceRecord {
+        return self.workspaces.findConst(workspace_id);
+    }
+
+    pub fn findShareGrant(self: *const Service, workspace_id: u64, principal_id: principal.PrincipalId) ?workspace.ShareGrant {
+        return self.workspaces.findShareGrant(workspace_id, principal_id);
+    }
+
+    pub fn workspaceHasAccess(self: *const Service, workspace_id: u64, request: workspace.AccessRequest) bool {
+        return self.workspaces.hasAccess(workspace_id, request);
+    }
+
+    pub fn workspaceCanReshare(
+        self: *const Service,
+        workspace_id: u64,
+        principal_id: principal.PrincipalId,
+        network_scope: workspace.ShareNetworkScope,
+        now_ticks: u64,
+    ) bool {
+        return self.workspaces.canReshare(workspace_id, principal_id, network_scope, now_ticks);
+    }
+
+    pub fn hasAnySnapshots(self: *const Service) bool {
+        for (self.workspaces.snapshots) |slot| {
+            if (slot.in_use) return true;
+        }
+        return false;
+    }
+
+    pub fn hasAnyWorkspaceRecords(self: *const Service) bool {
+        for (self.workspaces.workspaces) |slot| {
+            if (slot.in_use) return true;
+        }
+        return false;
+    }
 };
 
-fn makeService(service_id: u64, task_id: u64, owner: principal.PrincipalId, loaded_from_volume: bool) Service {
+fn makeService(
+    checkpoint_store: *CheckpointStore,
+    service_id: u64,
+    task_id: u64,
+    owner: principal.PrincipalId,
+    loaded_from_volume: bool,
+) Service {
     return .{
         .service_id = service_id,
         .task_id = task_id,
         .owner = owner,
         .loaded_from_volume = loaded_from_volume,
         .checkpoint_enabled = true,
-        .store = &persisted_store,
-        .workspaces = &persisted_workspaces,
+        .checkpoint_store = checkpoint_store,
+        .store = &checkpoint_store.store,
+        .workspaces = &checkpoint_store.workspaces,
     };
 }
 
-fn preparePersistentState() bool {
-    if (has_persisted_state) return false;
-    Service.resetPreparedState();
-    return Service.loadPreparedStateFromAttachedVolume();
+fn bridgeResolveEntry(context: *const anyopaque, workspace_id: u64, path: []const u8) workspace.Error!workspace.Entry {
+    const service: *const Service = @ptrCast(@alignCast(context));
+    return service.resolve(workspace_id, path);
+}
+
+fn bridgeHasVersion(context: *const anyopaque, version_id: u64) bool {
+    const service: *const Service = @ptrCast(@alignCast(context));
+    return service.version(version_id) != null;
 }
 
 test "storage service retains authoritative object and workspace state across restart" {
-    Service.resetPersistentState();
+    var checkpoint_store = CheckpointStore{};
+    checkpoint_store.resetPersistent();
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 44 };
     const signer = signing.SignerIdentity{
@@ -265,7 +375,7 @@ test "storage service retains authoritative object and workspace state across re
         .seed = [_]u8{0xA4} ** 32,
     };
 
-    var first = Service.init(700, 17, owner);
+    var first = Service.initWithStore(700, 17, owner, &checkpoint_store);
     const object = try first.putVersion(.{
         .preferred_object_id = 950,
         .object_type = .document,
@@ -291,19 +401,19 @@ test "storage service retains authoritative object and workspace state across re
     try first.stagePut(notes.id, "documents/notes.md", object.object_id, object.version_id, .document);
     _ = try first.commit(notes.id, 11);
 
-    var restarted = Service.init(700, 18, owner);
+    var restarted = Service.initWithStore(700, 18, owner, &checkpoint_store);
     const resolved = try restarted.resolve(notes.id, "documents/notes.md");
     const entries = try restarted.entries(notes.id);
-    const grant = restarted.workspaces.findShareGrant(notes.id, .{ .kind = .app, .serial = 70 }).?;
+    const grant = restarted.findShareGrant(notes.id, .{ .kind = .app, .serial = 70 }).?;
     try std.testing.expectEqual(object.object_id, resolved.object_id);
     try std.testing.expectEqual(object.version_id, resolved.version_id);
     try std.testing.expectEqual(@as(usize, 1), entries.len);
-    try std.testing.expectEqual(@as(?*object_store.Store, &persisted_store), restarted.store);
-    try std.testing.expectEqual(@as(?*workspace.Directory, &persisted_workspaces), restarted.workspaces);
+    try std.testing.expectEqual(@as(?*object_store.Store, &checkpoint_store.store), restarted.store);
+    try std.testing.expectEqual(@as(?*workspace.Directory, &checkpoint_store.workspaces), restarted.workspaces);
     try std.testing.expectEqual(workspace.ShareNetworkScope.trusted_overlay, grant.network_scope);
     try std.testing.expectEqual(workspace.ResharePolicy.admin_only, grant.reshare_policy);
     try std.testing.expectEqual(workspace.AuditVisibility.shared_participants, grant.audit_visibility);
-    try std.testing.expect(restarted.workspaces.hasAccess(notes.id, .{
+    try std.testing.expect(restarted.workspaceHasAccess(notes.id, .{
         .principal_id = .{ .kind = .app, .serial = 70 },
         .wants_write = true,
         .wants_export = true,
@@ -311,9 +421,9 @@ test "storage service retains authoritative object and workspace state across re
         .network_scope = .trusted_overlay,
         .now_ticks = 50,
     }));
-    try std.testing.expect(restarted.workspaces.canReshare(notes.id, .{ .kind = .app, .serial = 70 }, .trusted_overlay, 50));
+    try std.testing.expect(restarted.workspaceCanReshare(notes.id, .{ .kind = .app, .serial = 70 }, .trusted_overlay, 50));
 
-    Service.resetPersistentState();
+    checkpoint_store.resetPersistent();
 }
 
 test "storage service reloads authoritative state from the attached volume after a cold start" {
@@ -339,8 +449,9 @@ test "storage service reloads authoritative state from the attached volume after
         }
     };
 
-    Service.resetPersistentState();
-    defer Service.resetPersistentState();
+    var checkpoint_store = CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    defer checkpoint_store.resetPersistent();
 
     var image = [_]u8{0} ** storage_volume.image_bytes;
     FakeBackend.image = &image;
@@ -356,7 +467,7 @@ test "storage service reloads authoritative state from the attached volume after
         .seed = [_]u8{0xA5} ** 32,
     };
 
-    var first = Service.init(701, 17, owner);
+    var first = Service.initWithStore(701, 17, owner, &checkpoint_store);
     const object = try first.putVersion(.{
         .preferred_object_id = 951,
         .object_type = .document,
@@ -381,25 +492,23 @@ test "storage service reloads authoritative state from the attached volume after
     try first.stagePut(notes.id, "documents/notes.md", object.object_id, object.version_id, .document);
     _ = try first.commit(notes.id, 11);
 
-    persisted_store.reset();
-    persisted_workspaces.reset();
-    has_persisted_state = false;
+    checkpoint_store.resetPreparedState();
 
-    var reloaded = Service.init(701, 18, owner);
+    var reloaded = Service.initWithStore(701, 18, owner, &checkpoint_store);
     const resolved = try reloaded.resolve(notes.id, "documents/notes.md");
-    const grant = reloaded.workspaces.findShareGrant(notes.id, .{ .kind = .device, .serial = 88 }).?;
+    const grant = reloaded.findShareGrant(notes.id, .{ .kind = .device, .serial = 88 }).?;
     try std.testing.expect(reloaded.loaded_from_volume);
     try std.testing.expectEqual(object.object_id, resolved.object_id);
     try std.testing.expectEqual(object.version_id, resolved.version_id);
     try std.testing.expectEqual(workspace.ShareNetworkScope.relay_assisted, grant.network_scope);
     try std.testing.expectEqual(workspace.AuditVisibility.organization_policy, grant.audit_visibility);
-    try std.testing.expect(reloaded.workspaces.hasAccess(notes.id, .{
+    try std.testing.expect(reloaded.workspaceHasAccess(notes.id, .{
         .principal_id = .{ .kind = .device, .serial = 88 },
         .wants_export = true,
         .network_scope = .trusted_overlay,
         .now_ticks = 40,
     }));
-    try std.testing.expect(!reloaded.workspaces.hasAccess(notes.id, .{
+    try std.testing.expect(!reloaded.workspaceHasAccess(notes.id, .{
         .principal_id = .{ .kind = .device, .serial = 88 },
         .network_scope = .relay_assisted,
         .now_ticks = 120,

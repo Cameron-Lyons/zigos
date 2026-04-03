@@ -6,14 +6,14 @@ const event_ledger = @import("../platform/event_ledger.zig");
 const immutable_base = @import("../platform/immutable_base.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
-const service_contract = @import("service_contract.zig");
+const service_contract = @import("service_contracts.zig");
 const session_manager = @import("session_manager.zig");
 const signing = @import("../core/signing.zig");
 const supervisor_mod = @import("supervisor.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 
-test "boot wires bootstrap services storage sync recovery and phase3 contracts" {
+test "boot assembles core services without running explicit scenarios" {
     session_manager.testing.resetState();
     defer session_manager.testing.resetState();
 
@@ -25,7 +25,100 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
     const driver_directory = session_manager.testing.driverDirectoryPtr();
     const driver_runtime = session_manager.testing.driverRuntimePtr();
     const supervisor = session_manager.testing.supervisorPtr();
-    const phase4_storage_service = session_manager.testing.storageServicePtr();
+    const storage_service_instance = session_manager.testing.storageServicePtr();
+    const compositor = session_manager.testing.compositorSessionPtr();
+    const dispatcher = session_manager.testing.backgroundDispatchPtr();
+
+    try std.testing.expect(session_manager.testing.isInitialized());
+    try std.testing.expectEqual(@as(usize, 13), session_manager.testing.countServices());
+    try std.testing.expectEqual(@as(usize, 9), service_directory.bindingCount());
+    try std.testing.expectEqual(@as(usize, 12), session_manager.testing.countTasks());
+    try std.testing.expectEqual(@as(usize, 12), session_manager.testing.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.suspended));
+    try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.terminated));
+    try std.testing.expectEqual(@as(usize, 0), compositor.window_count);
+    try std.testing.expectEqual(@as(usize, 0), compositor.item_count);
+
+    const runtime_service_record = supervisor.findByClass(.task_runtime).?;
+    const compatibility_service = supervisor.findByClass(.compatibility_portal).?;
+    const network_service = supervisor.findByClass(.network_stack).?;
+    const storage_service = supervisor.findByClass(.storage_object).?;
+    const sync_service = supervisor.findByClass(.sync_replication).?;
+    const network_activation = driver_runtime.findByClass(.network_adapter).?;
+    const storage_activation = driver_runtime.findByClass(.storage_controller).?;
+    try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, runtime_service_record.state);
+    try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, compatibility_service.state);
+    try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, network_service.state);
+    try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, storage_service.state);
+    try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, sync_service.state);
+    try std.testing.expect(runtime_service.has_checkpoint);
+    try std.testing.expectEqual(@as(u32, 0), runtime_service.restart_generation);
+    try std.testing.expect(network_activation.mode == .control_only or network_activation.mode == .published_data_plane);
+    try std.testing.expect(storage_activation.mode == .control_only or storage_activation.mode == .published_data_plane);
+    try std.testing.expectEqual(@as(u16, 0), network_service.restart_count);
+    try std.testing.expectEqual(@as(u16, 0), storage_service.restart_count);
+    try std.testing.expectEqual(@as(u16, 0), sync_service.restart_count);
+
+    try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.network_adapter).?.restart_generation);
+    try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.storage_controller).?.restart_generation);
+    try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.graphics_adapter).?.restart_generation);
+    try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.audio_print_io).?.restart_generation);
+
+    for (service_contract.ordered_service_contracts) |entry| {
+        const descriptor = service_contract.contractForClass(entry.class).?;
+        const connection = try service_directory.connect(descriptor.interface);
+        try std.testing.expectEqual(supervisor.findByClass(entry.class).?.id, connection.service_id);
+    }
+    const compatibility_connection = try service_directory.connect(session_manager.testing.compatibilityPortalInterface());
+    try std.testing.expectEqual(compatibility_service.id, compatibility_connection.service_id);
+
+    const compatibility_task = session_manager.testing.findTask("compatibility-portal").?;
+    const storage_driver_task = session_manager.testing.findTask("storage-driver").?;
+    const storage_service_task = session_manager.testing.findTask("workspace-storage").?;
+    const sync_service_task = session_manager.testing.findTask("sync-service").?;
+    const session_task = session_manager.testing.findTask("session-manager").?;
+    const review_task = session_manager.testing.findTask("permission-review").?;
+    try std.testing.expect(session_manager.testing.findTask("notes") == null);
+    try std.testing.expect(session_manager.testing.findTask("sync") == null);
+    try std.testing.expect(session_manager.testing.findTask("capture") == null);
+    try std.testing.expectEqual(task_runtime.TaskState.active, compatibility_task.state);
+    try std.testing.expect(runtime.processSeparated(storage_driver_task.id, compatibility_task.id));
+    try std.testing.expectEqual(task_runtime.TaskState.active, storage_driver_task.state);
+    try std.testing.expectEqual(@as(u32, 1), storage_service_task.process_generation);
+    try std.testing.expectEqual(@as(u32, 1), sync_service_task.process_generation);
+    try std.testing.expect(session_task.runsAsUserspaceProcess());
+    try std.testing.expect(review_task.runsAsUserspaceProcess());
+    try std.testing.expect(storage_driver_task.runsAsUserspaceProcess());
+    try std.testing.expect(storage_service_task.runsAsUserspaceProcess());
+    try std.testing.expect(compatibility_task.runsAsUserspaceProcess());
+    try std.testing.expectEqualStrings("zigos.system.session-manager", session_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.storage-driver", storage_driver_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.storage-object", storage_service_task.launchBundleIdSlice());
+    try std.testing.expectEqual(storage_driver_task.id, driver_directory.findByClass(.storage_controller).?.owner_task_id);
+    try std.testing.expect(storage_driver_task.id != storage_service_task.id);
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.activeRecordCount());
+    try std.testing.expect(dispatcher.latestRecord() == null);
+
+    const session_user = principal.PrincipalId{ .kind = .user, .serial = 1 };
+    try std.testing.expectEqual(storage_service.id, storage_service_instance.service_id);
+    try std.testing.expectEqual(storage_service_task.id, storage_service_instance.task_id);
+    try std.testing.expect(storage_service_instance.findWorkspace(session_user, "notes-workspace") == null);
+    try std.testing.expect(session_manager.testing.packageServicePtr().find("app.notes") == null);
+}
+
+test "bootstrap scenario world wires storage sync recovery and policy flows explicitly" {
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+
+    session_manager.bootScenarioWorld();
+
+    const service_directory = session_manager.testing.serviceDirectoryPtr();
+    const runtime = session_manager.testing.runtimePtr();
+    const runtime_service = session_manager.testing.runtimeServicePtr();
+    const driver_directory = session_manager.testing.driverDirectoryPtr();
+    const driver_runtime = session_manager.testing.driverRuntimePtr();
+    const supervisor = session_manager.testing.supervisorPtr();
+    const storage_service_instance = session_manager.testing.storageServicePtr();
     const compositor = session_manager.testing.compositorSessionPtr();
     const dispatcher = session_manager.testing.backgroundDispatchPtr();
 
@@ -64,12 +157,12 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.graphics_adapter).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.audio_print_io).?.restart_generation);
 
-    const phase3_classes = [_]contract.ServiceClass{
+    const service_classes = [_]contract.ServiceClass{
         .package_install_update,
         .indexing_search,
         .media_print_helpers,
     };
-    for (phase3_classes) |class| {
+    for (service_classes) |class| {
         const descriptor = service_contract.contractForClass(class).?;
         const connection = try service_directory.connect(descriptor.interface);
         try std.testing.expectEqual(supervisor.findByClass(class).?.id, connection.service_id);
@@ -148,15 +241,21 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
     const session_user = principal.PrincipalId{ .kind = .user, .serial = 1 };
     const storage_service_principal = principal.PrincipalId{ .kind = .service, .serial = 4 };
     const tablet_device_principal = principal.PrincipalId{ .kind = .device, .serial = 2 };
-    const notes_workspace = phase4_storage_service.findWorkspace(session_user, "notes-workspace").?;
-    const imported_workspace = phase4_storage_service.findWorkspace(storage_service_principal, "imported-notes").?;
-    const notes_entry = try phase4_storage_service.resolve(notes_workspace.id, "documents/notes.md");
-    const imported_entry = try phase4_storage_service.resolve(imported_workspace.id, "documents/notes.md");
+    const notes_workspace = storage_service_instance.findWorkspace(session_user, "notes-workspace").?;
+    const imported_workspace = storage_service_instance.findWorkspace(storage_service_principal, "imported-notes").?;
+    const notes_entry = try storage_service_instance.resolve(notes_workspace.id, "documents/notes.md");
+    const imported_entry = try storage_service_instance.resolve(imported_workspace.id, "documents/notes.md");
     try std.testing.expectEqual(notes_entry.version_id, imported_entry.version_id);
-    try std.testing.expect(phase4_storage_service.findSnapshot(notes_workspace.id, "baseline") != null);
+    try std.testing.expect(storage_service_instance.findSnapshot(notes_workspace.id, "baseline") != null);
 
-    sync_service_mod.Service.resetPersistentState();
-    var restarted_sync = try sync_service_mod.Service.initWithStorage(sync_service.id, 0, sync_service.owner, phase4_storage_service);
+    var restarted_sync_resident = sync_service_mod.ResidentState{};
+    var restarted_sync = try sync_service_mod.Service.initWithStorage(
+        sync_service.id,
+        0,
+        sync_service.owner,
+        storage_service_instance,
+        &restarted_sync_resident,
+    );
     try std.testing.expect(restarted_sync.loaded_existing_state);
     try std.testing.expectEqual(@as(usize, 3), restarted_sync.trustedDeviceCount());
     try std.testing.expect(restarted_sync.findWorkspacePolicy(notes_workspace.id) != null);
@@ -168,7 +267,7 @@ test "boot wires bootstrap services storage sync recovery and phase3 contracts" 
         .seed = [_]u8{0xA1} ** 32,
     };
     const package_service = supervisor.findByClass(.package_install_update).?;
-    var immutable_base_manager = try immutable_base.Manager.init(phase4_storage_service, package_service.owner, state_signer);
+    var immutable_base_manager = try immutable_base.Manager.init(storage_service_instance, package_service.owner, state_signer);
     try std.testing.expect(immutable_base_manager.loaded_existing_state);
     try std.testing.expectEqual(@as(u64, 8), immutable_base_manager.activation_generation);
     try std.testing.expectEqual(@as(u64, 5), immutable_base_manager.rollback_generation);

@@ -20,15 +20,15 @@ else
         pub fn printBootMarker(_: []const u8) void {}
     };
 
-pub const phase4_storage_signer = signing.SignerIdentity{
+pub const storage_signer = signing.SignerIdentity{
     .label = "zigos-storage-key",
     .seed = [_]u8{0x81} ** 32,
 };
-pub const phase4_workspace_signer = signing.SignerIdentity{
+pub const workspace_signer = signing.SignerIdentity{
     .label = "zigos-workspace-key",
     .seed = [_]u8{0x82} ** 32,
 };
-pub const phase4_export_signer = signing.SignerIdentity{
+pub const export_signer = signing.SignerIdentity{
     .label = "zigos-export-key",
     .seed = [_]u8{0x83} ** 32,
 };
@@ -44,6 +44,7 @@ pub const Context = struct {
     compositor: *compositor_session.Session,
     driver_directory: *driver_service.Directory,
     storage_service_instance: *storage_service_mod.Service,
+    storage_checkpoint_store: *storage_service_mod.CheckpointStore,
     export_package: *workspace_mod.ExportPackage,
     policy_authority: principal.PrincipalId,
     session_service: principal.PrincipalId,
@@ -54,6 +55,7 @@ pub const Context = struct {
     sync_service_id: u64,
     sync_task_id: u64,
     sync_service_principal: principal.PrincipalId,
+    sync_resident_state: *sync_service_mod.ResidentState,
     policy_service_id: u64,
     network_service_id: u64,
     compositor_service_id: u64,
@@ -63,13 +65,13 @@ pub const Context = struct {
     notes_object_capability: capability.Capability,
 };
 
-pub const Phase4State = struct {
+pub const StorageScenarioState = struct {
     notes_workspace_id: u64,
     notes_object_id: u64,
     latest_notes_version_id: u64,
 };
 
-pub const Phase5State = struct {
+pub const SyncScenarioState = struct {
     workspace_policy: sync_service_mod.WorkspacePolicy,
     tablet_device_principal: principal.PrincipalId,
     user_root_signer: signing.SignerIdentity,
@@ -78,13 +80,6 @@ pub const Phase5State = struct {
     overlay_policy_id: ?u64,
 };
 
-pub fn latestInsertedVersion(store: *const object_store_mod.Store) ?*const object_store_mod.VersionRecord {
-    var latest: ?*const object_store_mod.VersionRecord = null;
-    for (&store.versions) |*slot| {
-        if (!slot.in_use) continue;
-        if (latest == null or slot.version.id > latest.?.id) {
-            latest = &slot.version;
-        }
-    }
-    return latest;
+pub fn latestInsertedVersion(storage: *const storage_service_mod.Service) ?*const object_store_mod.VersionRecord {
+    return storage.latestInsertedVersion();
 }

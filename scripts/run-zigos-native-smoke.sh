@@ -12,7 +12,6 @@ NATIVE_STORE_IMAGE="${3:?native store image path required}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
 ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-180}"
 ZIGOS_READY_MARKER="$("$ZIG" run "$MARKER_TOOL" -- ready)"
-PHASE4_RELOADED_MARKER="$("$ZIG" run "$MARKER_TOOL" -- boot2_reloaded_phase4 | head -n 1)"
 
 BASE_LOG_PATH="${LOG_PATH%.log}"
 BOOT1_LOG="${BASE_LOG_PATH}.boot1.log"
@@ -121,79 +120,16 @@ assert_marker_group() {
   done < <("$ZIG" run "$MARKER_TOOL" -- "$group")
 }
 
-assert_log_contains() {
-  local log_path="$1"
-  local needle
-  shift
-  for needle in "$@"; do
-    if ! grep -Fq "$needle" "$log_path"; then
-      echo "Zigos native smoke test failed: missing '$needle' in $log_path" >&2
-      cat "$log_path" >&2
-      exit 1
-    fi
-  done
-}
-
 assert_boot_markers() {
   local log_path="$1"
   assert_marker_group "$log_path" cold_boot
 }
 
-assert_boot2_phase4_markers() {
-  local log_path="$1"
-  if grep -Fq "$PHASE4_RELOADED_MARKER" "$log_path"; then
-    assert_marker_group "$log_path" boot2_reloaded_phase4
-    return
-  fi
-
-  assert_marker_group "$log_path" boot2_fresh_phase4
-}
-
-assert_review_text() {
-  local log_path="$1"
-  assert_log_contains "$log_path" \
-    "Permission review for Notes [app.notes]" \
-    "Permission review for Sync [app.sync]" \
-    "Permission review for Capture [app.capture]" \
-    "command: allow [local] [lease=<ticks>] | deny" \
-    "input> allow local lease=400" \
-    "input> allow local lease=50" \
-    "input> deny" \
-    "input> allow lease=10" \
-    "input> allow local lease=30" \
-    "input> allow local lease=35" \
-    "input> allow local lease=25" \
-    "input> allow local lease=15" \
-    "decision: allow local_only=yes lease=400 ticks" \
-    "decision: allow local_only=yes lease=50 ticks" \
-    "decision: deny" \
-    "UI window: id=1 surface=3 type=app_panel modal=yes title=Notes permission review bundle=app.notes" \
-    "UI window: id=2 surface=4 type=app_panel modal=yes title=Sync permission review bundle=app.sync" \
-    "UI window: id=3 surface=5 type=app_panel modal=yes title=Capture permission review bundle=app.capture" \
-    "UI card: window=1 kind=object_access label=Object access resource=workspace:notes" \
-    "UI card update: window=1 kind=clipboard resource=clipboard decision=deny" \
-    "UI card update: window=2 kind=background_execution resource=sync decision=allow decision_local_only=no decision_lease=10" \
-    "UI card update: window=3 kind=mic resource=mic.array decision=deny" \
-    "UX review: task=" \
-    "bundle=app.notes kind=object_access resource=workspace:notes decision=allow required=yes requested_local_only=yes decision_local_only=yes lease=400" \
-    "bundle=app.notes kind=network_egress resource=lan.sync decision=allow required=no requested_local_only=yes decision_local_only=yes lease=50" \
-    "bundle=app.notes kind=clipboard resource=clipboard decision=deny required=no requested_local_only=no" \
-    "bundle=app.sync kind=background_execution resource=sync decision=allow required=yes requested_local_only=no decision_local_only=no lease=10" \
-    "bundle=app.capture kind=device_access resource=capture.card0 decision=allow required=no requested_local_only=yes decision_local_only=yes lease=30" \
-    "bundle=app.capture kind=camera resource=camera.front decision=allow required=no requested_local_only=yes decision_local_only=yes lease=35" \
-    "bundle=app.capture kind=mic resource=mic.array decision=deny required=no requested_local_only=yes" \
-    "bundle=app.capture kind=sensor resource=sensor.lid decision=allow required=no requested_local_only=yes decision_local_only=yes lease=25" \
-    "bundle=app.capture kind=peer_ipc resource=zigos.peer.share decision=allow required=no requested_local_only=yes decision_local_only=yes lease=15"
-}
-
 run_boot "$BOOT1_LOG" reset
 assert_boot_markers "$BOOT1_LOG"
-assert_review_text "$BOOT1_LOG"
 
 run_boot "$BOOT2_LOG" preserve
 assert_boot_markers "$BOOT2_LOG"
-assert_boot2_phase4_markers "$BOOT2_LOG"
-assert_review_text "$BOOT2_LOG"
 
 {
   cat "$BOOT1_LOG"

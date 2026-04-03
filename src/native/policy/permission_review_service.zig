@@ -155,8 +155,8 @@ pub const Service = struct {
             .detail = @intCast(bundle.requested_permissions.len),
             .tick = now_ticks,
         });
-        common.printBootMarker("ZIGOS:PHASE2:UI:REVIEW_READY");
-        common.printBootMarker("ZIGOS:PHASE2:UI:INPUT_LOOP");
+        common.printBootMarker("ZIGOS:PERMISSION:UI:REVIEW_READY");
+        common.printBootMarker("ZIGOS:PERMISSION:UI:INPUT_LOOP");
 
         for (bundle.requested_permissions, 0..) |request, index| {
             if (decision_count >= decisions.len) break;
@@ -187,7 +187,7 @@ pub const Service = struct {
         var review_buffer: [2048]u8 = undefined;
         const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, bundle) catch unreachable;
         console.print(rendered);
-        common.printBootMarker(boot_markers.phase2_ui_review_rendered);
+        common.printBootMarker(boot_markers.permission_ui_review_rendered);
 
         const grants = permission_review.decisionsToGrants(
             bundle,

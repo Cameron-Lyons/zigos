@@ -30,10 +30,9 @@ const package_migration = struct {
 };
 
 pub fn taskFirstUxRecordsStructuredFlows() !void {
-    storage_service.Service.resetPersistentState();
-    sync_service.Service.resetPersistentState();
-    defer storage_service.Service.resetPersistentState();
-    defer sync_service.Service.resetPersistentState();
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
 
     const storage_owner = spec_support.service(60);
     const sync_owner = spec_support.service(61);
@@ -44,7 +43,7 @@ pub fn taskFirstUxRecordsStructuredFlows() !void {
     const device_signer = spec_support.signer("spec.ux.device", 0x73);
 
     var runtime = task_runtime.Runtime.init();
-    var storage = storage_service.Service.init(900, 90, storage_owner);
+    var storage = storage_service.Service.initWithStore(900, 90, storage_owner, &storage_checkpoint_store);
     const document = try storage.putVersion(.{
         .preferred_object_id = 1_300,
         .object_type = .document,
@@ -210,11 +209,11 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
     try std.testing.expectEqual(@as(usize, 1), package_migration.apply_count);
 
     const installed = packages.find("app.notes").?;
-    try std.testing.expectEqual(@as(u16, 1), installed.current_version_major);
-    try std.testing.expectEqual(@as(u16, 1), installed.current_version_minor);
-    try std.testing.expectEqual(@as(u32, 2), installed.current_schema_version);
-    try std.testing.expectEqual(@as(usize, 2), installed.current_component_count);
-    try std.testing.expectEqualStrings("zigos.notes.sync", installed.current_components[1].entrySlice());
+    try std.testing.expectEqual(@as(u16, 1), installed.versionMajor());
+    try std.testing.expectEqual(@as(u16, 1), installed.versionMinor());
+    try std.testing.expectEqual(@as(u32, 2), installed.schemaVersion());
+    try std.testing.expectEqual(@as(usize, 2), installed.componentCount());
+    try std.testing.expectEqualStrings("zigos.notes.sync", installed.componentAt(1).entrySlice());
     const launch_plan = try packages.buildLaunchPlan("app.notes");
     try std.testing.expectEqual(@as(usize, 2), launch_plan.component_count);
     try std.testing.expectEqual(@as(usize, 2), launch_plan.asset_count);
@@ -224,8 +223,8 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
     try std.testing.expect(org_policy.audit_export_required);
 
     _ = try packages.rollback("app.notes");
-    try std.testing.expectEqual(@as(u16, 0), packages.find("app.notes").?.current_version_minor);
-    try std.testing.expectEqual(@as(usize, 1), packages.find("app.notes").?.current_component_count);
+    try std.testing.expectEqual(@as(u16, 0), packages.find("app.notes").?.versionMinor());
+    try std.testing.expectEqual(@as(usize, 1), packages.find("app.notes").?.componentCount());
 }
 
 pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {

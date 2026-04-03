@@ -41,14 +41,24 @@ pub const Error = error{
     WorkspaceScopeViolation,
 };
 
-pub const Bridge = struct {
-    store: *object_store.Store,
-    workspaces: *workspace.Directory,
+pub const ResolveEntryFn = *const fn (
+    context: *const anyopaque,
+    workspace_id: u64,
+    path: []const u8,
+) workspace.Error!workspace.Entry;
 
-    pub fn init(store: *object_store.Store, workspaces: *workspace.Directory) Bridge {
+pub const HasVersionFn = *const fn (context: *const anyopaque, version_id: u64) bool;
+
+pub const Bridge = struct {
+    context: *const anyopaque,
+    resolve_entry: ResolveEntryFn,
+    has_version: HasVersionFn,
+
+    pub fn init(context: *const anyopaque, resolve_entry: ResolveEntryFn, has_version: HasVersionFn) Bridge {
         return .{
-            .store = store,
-            .workspaces = workspaces,
+            .context = context,
+            .resolve_entry = resolve_entry,
+            .has_version = has_version,
         };
     }
 
@@ -59,7 +69,7 @@ pub const Bridge = struct {
         now_ticks: u64,
     ) Error!View {
         const normalized_path = normalizePath(request.path);
-        const entry = self.workspaces.resolve(request.workspace_id, normalized_path) catch return error.PathNotFound;
+        const entry = self.resolve_entry(self.context, request.workspace_id, normalized_path) catch return error.PathNotFound;
 
         if (!authority.lease.isActive(now_ticks)) return error.PermissionDenied;
         if (authority.scope.workspace_id) |workspace_id| {
@@ -75,7 +85,7 @@ pub const Bridge = struct {
         const wants_write = request.access == .write;
         if (wants_write and !authority.rights.object_write) return error.PermissionDenied;
         if (!wants_write and !authority.rights.object_read) return error.PermissionDenied;
-        if (self.store.version(entry.version_id) == null) return error.ObjectMissing;
+        if (!self.has_version(self.context, entry.version_id)) return error.ObjectMissing;
 
         var view = View{
             .workspace_id = request.workspace_id,
@@ -99,6 +109,11 @@ fn normalizePath(path: []const u8) []const u8 {
 
 
 test "file bridge is derived, permission-aware, and non-authoritative" {
+    const TestContext = struct {
+        store: *object_store.Store,
+        workspaces: *const workspace.Directory,
+    };
+
     var store = object_store.Store.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
@@ -119,8 +134,24 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
     try workspaces.beginTransaction(notes.id);
     try workspaces.stagePut(notes.id, "documents/notes.md", object.object_id, object.version_id, .document);
     _ = try workspaces.commit(notes.id, 20);
+    var test_context = TestContext{
+        .store = &store,
+        .workspaces = &workspaces,
+    };
 
-    var bridge = Bridge.init(&store, &workspaces);
+    const resolve_entry = struct {
+        fn call(context: *const anyopaque, workspace_id: u64, path: []const u8) workspace.Error!workspace.Entry {
+            const bridge_context: *const TestContext = @ptrCast(@alignCast(context));
+            return bridge_context.workspaces.resolve(workspace_id, path);
+        }
+    }.call;
+    const has_version = struct {
+        fn call(context: *const anyopaque, version_id: u64) bool {
+            const bridge_context: *const TestContext = @ptrCast(@alignCast(context));
+            return bridge_context.store.version(version_id) != null;
+        }
+    }.call;
+    var bridge = Bridge.init(&test_context, resolve_entry, has_version);
     const read_capability = capability.Capability{
         .id = 1,
         .holder = .{ .kind = .user, .serial = 1 },

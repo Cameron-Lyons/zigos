@@ -11,7 +11,7 @@ const recovery_environment = @import("../../native/platform/recovery_environment
 const secure_secret_store = @import("../../native/platform/secure_secret_store.zig");
 const session_manager = @import("../../native/session/session_manager.zig");
 
-test "phase6 native platform modules compile and expose their tests from the src root" {
+test "platform platform modules compile and expose their tests from the src root" {
     std.testing.refAllDecls(accelerator_scheduler);
     std.testing.refAllDecls(attestation_service);
     std.testing.refAllDecls(event_ledger);

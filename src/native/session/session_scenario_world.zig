@@ -1,14 +1,14 @@
 const event_ledger = @import("../platform/event_ledger.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
 const support = @import("session_lifecycle_support.zig");
-const phase4_storage = @import("session_phase4_storage.zig");
-const phase5_sync = @import("session_phase5_sync.zig");
-const phase6_lifecycle = @import("session_phase6_lifecycle.zig");
+const storage_scenarios = @import("session_storage_scenarios.zig");
+const sync_scenarios = @import("session_sync_scenarios.zig");
+const platform_scenarios = @import("session_platform_scenarios.zig");
 
 pub const Context = support.Context;
 
 pub fn run(context: *Context) void {
-    const phase4 = phase4_storage.run(context);
+    const storage_state = storage_scenarios.run(context);
     const early_boot_ledger = context.update_ledger.*;
     context.update_ledger.* = event_ledger.Ledger.initPersistent(
         context.storage_service_instance,
@@ -16,12 +16,13 @@ pub fn run(context: *Context) void {
         support.diagnostic_ledger_signer,
     ) catch unreachable;
     context.update_ledger.absorb(&early_boot_ledger) catch unreachable;
-    var phase5_sync_service = sync_service_mod.Service.initWithStorage(
+    var sync_service = sync_service_mod.Service.initWithStorage(
         context.sync_service_id,
         context.sync_task_id,
         context.sync_service_principal,
         context.storage_service_instance,
+        context.sync_resident_state,
     ) catch unreachable;
-    const phase5 = phase5_sync.run(context, &phase5_sync_service, phase4);
-    phase6_lifecycle.run(context, &phase5_sync_service, phase4, phase5);
+    const sync_state = sync_scenarios.run(context, &sync_service, storage_state);
+    platform_scenarios.run(context, &sync_service, storage_state, sync_state);
 }
