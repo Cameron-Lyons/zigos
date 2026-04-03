@@ -97,11 +97,6 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.native_ready,
 };
 
-pub const post_ready_required = [_][]const u8{
-    boot_markers.userspace_resume_ok,
-    boot_markers.userspace_scheduler_active,
-};
-
 pub const boot2_reloaded_phase4_required = [_][]const u8{
     boot_markers.phase4_persistence_reloaded,
     boot_markers.phase4_reload_notes_workspace_done,
