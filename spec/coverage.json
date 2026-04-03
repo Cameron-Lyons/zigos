@@ -774,7 +774,15 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 6.4 only runs declared background work with explicit triggers budgets and throttling"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
         },
         {
           "file": "src/native/policy/manifest.zig",
@@ -825,6 +833,10 @@
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 2.1 6.2 and 7 explicit grants are required before a task gains authority"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible"
         },
         {
           "file": "src/native/policy/policy_mediation.zig",
@@ -922,6 +934,10 @@
           "name": "spec 9 and 10 use a trusted device graph selective sync and policy-gated networking"
         },
         {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible"
+        },
+        {
           "file": "src/native/sync/device_graph.zig",
           "name": "device graph roots user principals and manages enrollment rotation and revocation"
         },
@@ -1009,6 +1025,14 @@
           "name": "spec 11 task-first UX records structured task workspace permission and pairing flows"
         },
         {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 11.2 and 17.2 keep task views and compatibility environments explicit"
+        },
+        {
           "file": "src/native/platform/native_ux.zig",
           "name": "native ux records task workspace pairing review and recovery flows"
         },
@@ -1059,6 +1083,10 @@
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explicit"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
         },
         {
           "file": "src/native/task/accelerator_scheduler.zig",
@@ -1139,6 +1167,10 @@
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy scoped"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
         },
         {
           "file": "src/native/platform/immutable_base.zig",
@@ -1251,6 +1283,10 @@
           "name": "spec 4 6.3 13 and 17 keep the kernel typed minimal and route legacy support through isolated portals"
         },
         {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 11.2 and 17.2 keep task views and compatibility environments explicit"
+        },
+        {
           "file": "src/native/services/compatibility_environment.zig",
           "name": "compatibility environments stay isolated labeled and portal-only"
         },
@@ -1326,11 +1362,19 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 5 and 14 keep the base image signed measured atomic and rollback-capable"
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 9 and 10 use a trusted device graph selective sync and policy-gated networking"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
         }
       ]
     },
@@ -1356,6 +1400,14 @@
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explicit"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
         }
       ]
     }

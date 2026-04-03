@@ -84,7 +84,7 @@ All repo Zig commands should go through `./scripts/zig.sh`. It resolves the pinn
 # Run host-side native tests
 ./scripts/zig.sh build host-tests
 
-# Run the spec coverage gate and spec conformance tests
+# Run the spec coverage gate, native spec tests, and freestanding smoke verification
 ./scripts/zig.sh build spec-conformance
 
 # Run the native cold-reboot smoke test across two QEMU boots
@@ -101,7 +101,7 @@ The smoke test uses `build/native-store-smoke.img` and validates the expected na
 
 ## Verification Model
 
-Repo-level conformance is checked through the thin root `src/zigos_spec_test.zig`, which delegates to the suites under `src/tests/spec/`; the section-to-test contract is enforced by `spec/coverage.json` and `tools/check_spec_coverage.py`.
+Repo-level conformance is checked through the thin root `src/zigos_spec_test.zig`, which delegates to the suites under `src/tests/spec/`; the section-to-test contract is enforced by `spec/coverage.json` and `tools/check_spec_coverage.py`. The `spec-conformance` target also runs the native two-boot QEMU smoke harness so the repo-level gate is not host-only.
 
 The main verification entrypoints are:
 

@@ -341,8 +341,9 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
             .{ .id = "spec-storage", .entry = "zigos.object.spec-storage" },
         },
     };
+    const image_bytes = userspace_loader.makeSyntheticElf32ForTest(0x403000, 2, 1);
     storage_bundle.signature = try userspace_manifest_signing.signBundle(storage_bundle);
-    _ = try catalog.register(.{
+    _ = try catalog.registerEmbeddedArtifact(.{
         .bundle = storage_bundle,
         .component_class = .service_component,
         .initial_component = .{
@@ -352,7 +353,9 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         .role_tag = 0xC301,
         .heartbeat_increment = 3,
         .contract_flags = 0x11,
+        .elf_bytes = &image_bytes,
     });
+    try std.testing.expect(catalog.findByBundleId("zigos.system.spec-storage").?.embedsElf());
 
     const launched = try catalog.launchViaKernel(.{
         .port = &port,
@@ -366,6 +369,7 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         .local_only = true,
     });
     try std.testing.expect(abi.taskFlagsHas(launched.flags, abi.TASK_FLAG_USERSPACE_PROCESS));
+    try std.testing.expect(runtime.find(launched.task_id).?.hasLoadedExecutable());
     try runtime.grantCapability(launched.task_id, authority.id);
 
     const service_endpoint = try port.endpointCreate(.{
