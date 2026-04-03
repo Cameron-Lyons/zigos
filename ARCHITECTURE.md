@@ -53,5 +53,6 @@ The repository-level contract for that split is the Zigos v0.1 clean-slate spec 
 - `./scripts/zig.sh build kernel`: native kernel builds
 - `./scripts/zig.sh build host-tests`: the explicit `src/native_host_test.zig` root delegates to the host suites under `src/tests/host/` without rediscovering files at runtime
 - `./scripts/zig.sh build zigos-native-smoke-test`: native bootstrap reaches the expected boot markers across two QEMU boots
+- `./scripts/zig.sh build benchmark`: native spec-aligned service-path benchmarks stay rebuildable and gated in QEMU
 
 The repository no longer treats shell-first execution, POSIX-like syscalls, or VFS-rooted userland as part of the supported platform. Legacy support is modeled explicitly through isolated compatibility environments with portal-mediated host access. The remaining freestanding entry surface is the native typed syscall dispatcher.

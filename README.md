@@ -90,6 +90,9 @@ All repo Zig commands should go through `./scripts/zig.sh`. It resolves the pinn
 # Run the native cold-reboot smoke test across two QEMU boots
 ./scripts/zig.sh build zigos-native-smoke-test
 
+# Run the spec-aligned native benchmark suite in QEMU
+./scripts/zig.sh build benchmark
+
 # Release-fast convenience wrapper for the smoke test
 ./test_kernel.sh
 
@@ -109,6 +112,7 @@ The main verification entrypoints are:
 - `./scripts/zig.sh build host-tests`
 - `./scripts/zig.sh build spec-conformance`
 - `./scripts/zig.sh build zigos-native-smoke-test`
+- `./scripts/zig.sh build benchmark`
 
 Host-side native tests enter through `src/native_host_test.zig` and delegate to `src/tests/host/`. Deeper subsystem coverage lives beside each native module under `src/native/`.
 
@@ -132,6 +136,7 @@ The repository no longer builds or ships the old POSIX-like shell, POSIX-style s
 - `./scripts/zig.sh build spec-conformance`
 - `./scripts/zig.sh build host-tests`
 - `./scripts/zig.sh build zigos-native-smoke-test`
+- `./scripts/zig.sh build benchmark`
 
 Storage-volume persistence remains covered by host-side native tests through `src/native/storage/storage_volume.zig`.
 The remaining freestanding entry surface is the native typed syscall dispatcher plus the native-only verification targets above.
