@@ -29,6 +29,15 @@ pub fn build(b: *std.Build) void {
         userspace_images.archive_module,
     );
 
+    const benchmark_kernel = kernel_build.addKernelArtifact(
+        b,
+        target,
+        optimize,
+        "kernel-benchmark.elf",
+        .benchmark,
+        userspace_images.archive_module,
+    );
+
     const kernel_step = b.step("kernel", "Build the native-only Zigos kernel");
     kernel_step.dependOn(zigos_native_kernel.install_step);
     kernel_step.dependOn(userspace_images.step);
@@ -36,6 +45,10 @@ pub fn build(b: *std.Build) void {
     const zigos_native_kernel_step = b.step("kernel-zigos-native", "Build the Zigos native bootstrap kernel");
     zigos_native_kernel_step.dependOn(zigos_native_kernel.install_step);
     zigos_native_kernel_step.dependOn(userspace_images.step);
+
+    const kernel_benchmark_step = b.step("kernel-benchmark", "Build the spec-aligned native benchmark kernel");
+    kernel_benchmark_step.dependOn(benchmark_kernel.install_step);
+    kernel_benchmark_step.dependOn(userspace_images.step);
 
     const native_store_cmd = b.addSystemCommand(&.{
         "bash",
@@ -106,6 +119,17 @@ pub fn build(b: *std.Build) void {
     spec_conformance_cmd.step.dependOn(userspace_images.step);
     const spec_conformance_step = b.step("spec-conformance", "Validate spec coverage, run native spec tests, and verify the freestanding smoke path");
     spec_conformance_step.dependOn(&spec_conformance_cmd.step);
+
+    const benchmark_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-kernel-benchmark.sh",
+        benchmark_kernel.output_path,
+        "build/kernel-benchmark.log",
+    });
+    benchmark_cmd.step.dependOn(benchmark_kernel.install_step);
+    benchmark_cmd.step.dependOn(userspace_images.step);
+    const benchmark_step = b.step("benchmark", "Build and run the spec-aligned native benchmark suite in QEMU");
+    benchmark_step.dependOn(&benchmark_cmd.step);
 
     const iso_cmd = b.addSystemCommand(&.{
         "bash",

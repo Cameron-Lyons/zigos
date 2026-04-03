@@ -1,6 +1,12 @@
 pub const boot_start = "BOOT:START";
 pub const boot_profile_zigos_native = "BOOT:PROFILE:zigos_native";
+pub const boot_profile_benchmark = "BOOT:PROFILE:benchmark";
 pub const boot_core_ready = "BOOT:CORE_READY";
+
+pub const bench_start = "BENCH:START";
+pub const bench_summary_prefix = "BENCH:SUMMARY";
+pub const bench_pass = "BENCH:PASS";
+pub const bench_fail = "BENCH:FAIL";
 
 pub const kernel_network_deferred = "ZIGOS:KERNEL_NETWORK:DEFERRED";
 

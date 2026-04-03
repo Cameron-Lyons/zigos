@@ -7,7 +7,7 @@ pub fn bootProfile() BootProfile {
 }
 
 pub fn name() []const u8 {
-    return "zigos_native";
+    return @tagName(build_options.boot_profile);
 }
 
 pub fn shouldInitAcpi() bool {
@@ -27,13 +27,13 @@ pub fn shouldInitRuntimeExtras() bool {
 }
 
 pub fn shouldExitOnCompletion() bool {
-    return false;
+    return bootProfile() == .benchmark;
 }
 
 pub fn shouldExitOnPanic() bool {
-    return false;
+    return bootProfile() == .benchmark;
 }
 
 pub fn isNativeProfile() bool {
-    return true;
+    return bootProfile() == .zigos_native;
 }
