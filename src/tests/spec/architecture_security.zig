@@ -208,8 +208,9 @@ pub fn kernelRemainsTypedAndIsolatesLegacy() !void {
     try std.testing.expect(!network_handoff.kernel_bootstrap);
     try std.testing.expectEqualStrings("pci_inventory", device_inventory.sourceName(network_handoff.source));
 
+    var runtime_checkpoint_store = task_runtime_service.CheckpointStore{};
     var runtime = task_runtime.Runtime.init();
-    var runtime_service_instance = task_runtime_service.Service.init(&runtime);
+    var runtime_service_instance = task_runtime_service.Service.initWithStore(&runtime, &runtime_checkpoint_store);
     runtime_service_instance.bind(70, spec_support.service(70));
     _ = try runtime.createTask(.{
         .owner = spec_support.app(30),

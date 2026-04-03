@@ -93,7 +93,7 @@ pub const SessionManager = struct {
 
     fn ensureConstructed(self: *SessionManager) void {
         if (self.constructed) return;
-        self.runtime_service = task_runtime_service_mod.Service.initWithStore(
+        self.runtime_service.initWithStoreInPlace(
             &self.runtime,
             &self.runtime_checkpoint_store,
         );
@@ -224,7 +224,8 @@ pub const SessionManager = struct {
         const env = environment(self);
         const state = initializeBootstrapState(self);
         const kernel_port = prepareKernelInterface(self, state.ids.policy_authority, state.session_task.id);
-        const service_bindings = session_service_bootstrap.bootServices(&env, &state, kernel_port);
+        var service_bindings: ServiceBindings = undefined;
+        session_service_bootstrap.bootServices(&env, &state, kernel_port, &service_bindings);
 
         self.storage_service_instance = storage_service_mod.Service.initWithStore(
             state.services.storage_service.id,
@@ -259,7 +260,8 @@ pub const SessionManager = struct {
 
         runTransportChecks(&env, &state, kernel_port);
         const notes_review = runPermissionFlows(&env, &state, kernel_port, &review_port, &policy_port);
-        const service_bindings = runServiceBootstrap(&env, &state, kernel_port);
+        var service_bindings: ServiceBindings = undefined;
+        runServiceBootstrap(&env, &state, kernel_port, &service_bindings);
         runSessionLifecycle(self, &state, &service_bindings, notes_review.object_capability);
         printReadyBanner();
     }
@@ -525,8 +527,9 @@ fn runServiceBootstrap(
     env: *const Environment,
     state: *const BootstrapState,
     kernel_port: *component_port.KernelPort,
-) ServiceBindings {
-    return session_service_bootstrap.run(env, state, kernel_port);
+    service_bindings: *ServiceBindings,
+) void {
+    session_service_bootstrap.run(env, state, kernel_port, service_bindings);
 }
 
 fn runSessionLifecycle(

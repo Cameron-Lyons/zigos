@@ -61,6 +61,11 @@ pub fn componentClassFor(bundle_id: []const u8) Error!task_runtime.ComponentClas
     };
 }
 
+pub fn signerFor(bundle_id: []const u8) Error![]const u8 {
+    const spec = find(bundle_id) orelse return error.UnknownBundleId;
+    return (userspace_manifest_signing.identityForPublisher(spec.publisher) catch unreachable).label;
+}
+
 pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
     if (builtin.target.os.tag == .freestanding) {
         const archive = @import("userspace_archive");

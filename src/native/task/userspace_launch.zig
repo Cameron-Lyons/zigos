@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
 const manifest = @import("../policy/manifest.zig");
 const contract_registry = @import("userspace_contract_registry.zig");
@@ -5,6 +6,12 @@ const package_service = @import("../services/package_service.zig");
 const task_runtime = @import("task_runtime.zig");
 const userspace_boot_registry = @import("userspace_boot_registry.zig");
 const userspace_loader = @import("userspace_loader.zig");
+const console = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/utils/console.zig")
+else
+    struct {
+        pub fn print(_: []const u8) void {}
+    };
 
 pub fn launchRegisteredDirect(
     catalog: *userspace_loader.Catalog,
@@ -62,9 +69,9 @@ pub fn launchDirectBundle(
             .role_tag = contract.role_tag,
             .heartbeat_increment = contract.heartbeat_increment,
             .contract_flags = contract.contract_flags,
-        }) catch unreachable;
+        }) catch |err| launchFailure(bundle.bundle_id, "register-direct", err);
     }
-    const task = catalog.launchDirect(runtime_ptr, bundle.bundle_id, request) catch unreachable;
+    const task = catalog.launchDirect(runtime_ptr, bundle.bundle_id, request) catch |err| launchFailure(bundle.bundle_id, "launch-direct", err);
     scheduleTask(schedule_task, task.id);
     return task;
 }
@@ -87,9 +94,9 @@ pub fn launchKernelBundle(
             .role_tag = contract.role_tag,
             .heartbeat_increment = contract.heartbeat_increment,
             .contract_flags = contract.contract_flags,
-        }) catch unreachable;
+        }) catch |err| launchFailure(bundle.bundle_id, "register-kernel", err);
     }
-    const task = catalog.launchViaKernel(authority, bundle.bundle_id, request) catch unreachable;
+    const task = catalog.launchViaKernel(authority, bundle.bundle_id, request) catch |err| launchFailure(bundle.bundle_id, "launch-kernel", err);
     scheduleTask(schedule_task, task.task_id);
     return task;
 }
@@ -149,4 +156,17 @@ fn scheduleTask(schedule_target: anytype, task_id: u64) void {
         else => {},
     }
     @compileError("schedule target must be a scheduler pointer or fn(u64) bool");
+}
+
+fn launchFailure(bundle_id: []const u8, phase: []const u8, err: anytype) noreturn {
+    if (builtin.target.os.tag == .freestanding) {
+        console.print("ZIGOS:USERSPACE:LAUNCH:FAIL ");
+        console.print(phase);
+        console.print(" ");
+        console.print(bundle_id);
+        console.print(" ");
+        console.print(@errorName(err));
+        console.print("\n");
+    }
+    unreachable;
 }

@@ -503,6 +503,7 @@ test "kernel port enforces operation ids and forwards typed task create requests
     });
     try runtime.grantCapability(session_task.id, authority_capability.id);
 
+    const port_test_image = task_runtime.syntheticUserspaceImage("port-test", "app.example.port-test");
     const task = try port.taskCreate(.{
         .header = makeHeader(.task_create, 77, session_task.id),
         .authority_capability_id = authority_capability.id,
@@ -523,7 +524,7 @@ test "kernel port enforces operation ids and forwards typed task create requests
                 .signed = true,
                 .bundle_id = "app.example.port-test",
             },
-            .userspace_image = task_runtime.syntheticUserspaceImage("port-test", "app.example.port-test"),
+            .userspace_image = &port_test_image,
         },
     }, 5);
     try std.testing.expect(task.task_id != 0);
@@ -565,6 +566,10 @@ test "kernel port validates and forwards typed device broker requests" {
     );
     var port = KernelPort.init(&kernel);
 
+    const kernel_port_device_image = task_runtime.syntheticUserspaceImage(
+        "kernel-port-device-test",
+        "zigos.system.storage-driver",
+    );
     const driver_task = try runtime.createTask(.{
         .owner = .{ .kind = .service, .serial = 8 },
         .component_class = .service_component,
@@ -582,10 +587,7 @@ test "kernel port validates and forwards typed device broker requests" {
             .signed = true,
             .bundle_id = "zigos.system.storage-driver",
         },
-        .userspace_image = task_runtime.syntheticUserspaceImage(
-            "kernel-port-device-test",
-            "zigos.system.storage-driver",
-        ),
+        .userspace_image = &kernel_port_device_image,
     });
     const device_capability = try capabilities.mint(.{
         .holder = driver_task.owner,
