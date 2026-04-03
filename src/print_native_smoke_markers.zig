@@ -1,5 +1,5 @@
 const std = @import("std");
-const boot_markers = @import("kernel/boot/markers.zig");
+const smoke_markers = @import("native_smoke_markers.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -16,7 +16,7 @@ pub fn main() !void {
 
     if (args.len != 2) {
         try stderr_writer.interface.print(
-            "usage: {s} <ready|cold_boot|boot2_reloaded_phase4|boot2_fresh_phase4>\n",
+            "usage: {s} <ready|cold_boot|post_ready|boot2_reloaded_phase4|boot2_fresh_phase4>\n",
             .{args[0]},
         );
         try stderr_writer.interface.flush();
@@ -25,17 +25,21 @@ pub fn main() !void {
 
     const group = args[1];
     if (std.mem.eql(u8, group, "ready")) {
-        try stdout_writer.interface.print("{s}\n", .{boot_markers.smoke.ready});
+        try stdout_writer.interface.print("{s}\n", .{smoke_markers.ready});
     } else if (std.mem.eql(u8, group, "cold_boot")) {
-        for (boot_markers.smoke.cold_boot_required) |line| {
+        for (smoke_markers.cold_boot_required) |line| {
+            try stdout_writer.interface.print("{s}\n", .{line});
+        }
+    } else if (std.mem.eql(u8, group, "post_ready")) {
+        for (smoke_markers.post_ready_required) |line| {
             try stdout_writer.interface.print("{s}\n", .{line});
         }
     } else if (std.mem.eql(u8, group, "boot2_reloaded_phase4")) {
-        for (boot_markers.smoke.boot2_reloaded_phase4_required) |line| {
+        for (smoke_markers.boot2_reloaded_phase4_required) |line| {
             try stdout_writer.interface.print("{s}\n", .{line});
         }
     } else if (std.mem.eql(u8, group, "boot2_fresh_phase4")) {
-        for (boot_markers.smoke.boot2_fresh_phase4_required) |line| {
+        for (smoke_markers.boot2_fresh_phase4_required) |line| {
             try stdout_writer.interface.print("{s}\n", .{line});
         }
     } else {

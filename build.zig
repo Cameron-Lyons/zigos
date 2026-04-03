@@ -98,8 +98,13 @@ pub fn build(b: *std.Build) void {
     const spec_conformance_cmd = b.addSystemCommand(&.{
         "bash",
         "scripts/run-spec-conformance.sh",
+        zigos_native_kernel.output_path,
+        "build/zigos-native-spec.log",
+        shared.native_store_smoke_image_path,
     });
-    const spec_conformance_step = b.step("spec-conformance", "Validate spec coverage and run the native spec conformance tests");
+    spec_conformance_cmd.step.dependOn(zigos_native_kernel.install_step);
+    spec_conformance_cmd.step.dependOn(userspace_images.step);
+    const spec_conformance_step = b.step("spec-conformance", "Validate spec coverage, run native spec tests, and verify the freestanding smoke path");
     spec_conformance_step.dependOn(&spec_conformance_cmd.step);
 
     const iso_cmd = b.addSystemCommand(&.{
