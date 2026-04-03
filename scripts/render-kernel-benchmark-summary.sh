@@ -75,12 +75,12 @@ load_baselines
 printf '## Kernel Benchmark Summary\n\n'
 
 if [ ! -f "${log_path}" ]; then
-    printf 'No benchmark log found at `%s`.\n' "${log_path}"
+    printf "No benchmark log found at \`%s\`.\n" "${log_path}"
     exit 0
 fi
 
 if ! grep -Fq 'BENCH:RESULT:' "${log_path}"; then
-    printf 'No benchmark results were found in `%s`.\n' "${log_path}"
+    printf "No benchmark results were found in \`%s\`.\n" "${log_path}"
     exit 0
 fi
 
@@ -122,7 +122,7 @@ while IFS= read -r line; do
             fi
 
             seen["${name}"]=1
-            printf '| `%s` | %s | %s | %s | %s | %s | %s |\n' \
+            printf "| \`%s\` | %s | %s | %s | %s | %s | %s |\n" \
                 "${name}" \
                 "${iterations}" \
                 "${actual_cycles_per_op}" \
@@ -146,18 +146,18 @@ for name in "${!baselines[@]}"; do
 done
 
 printf '\n'
-printf -- '- Overall status: `%s`\n' "${overall_status}"
+printf -- "- Overall status: \`%s\`\n" "${overall_status}"
 
 if [ -n "${summary_line}" ]; then
     total_benchmarks="${summary_line#BENCH:SUMMARY:benchmarks=}"
     total_benchmarks="${total_benchmarks%%:*}"
     total_cycles="${summary_line##*:total_cycles=}"
-    printf -- '- Benchmarks reported: `%s`\n' "${total_benchmarks}"
-    printf -- '- Total suite cycles: `%s`\n' "${total_cycles}"
+    printf -- "- Benchmarks reported: \`%s\`\n" "${total_benchmarks}"
+    printf -- "- Total suite cycles: \`%s\`\n" "${total_cycles}"
 fi
 
 if [ "${missing_results}" -ne 0 ]; then
     printf -- '- Missing results for one or more baseline entries.\n'
 fi
 
-printf -- '- Source log: `%s`\n' "${log_path}"
+printf -- "- Source log: \`%s\`\n" "${log_path}"

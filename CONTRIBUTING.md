@@ -5,6 +5,7 @@ Use the pinned toolchain and repo entrypoints:
 - Run Zig commands through `./scripts/zig.sh`.
 - Run host coverage with `./scripts/run-host-tests.sh`.
 - Run spec coverage and spec conformance with `./scripts/run-spec-conformance.sh`.
+- Run native benchmarks with `./scripts/zig.sh build benchmark` when touching performance-sensitive kernel or native-service paths.
 - Run shell lint with `bash scripts/lint-shell.sh`.
 
 Keep the spec contract intact:
