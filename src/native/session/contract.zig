@@ -264,7 +264,7 @@ test "kernel tcb contains the expected bootstrap surface" {
     try std.testing.expectEqualStrings("iommu_dma_isolation_hooks", tcbName(.iommu_dma_isolation_hooks));
 }
 
-test "native bootstrap and phase3 services sit behind restartable userspace contracts" {
+test "native bootstrap and service bootstrap services sit behind restartable userspace contracts" {
     const runtime = serviceDescriptor(.task_runtime).?;
     const session = serviceDescriptor(.session_manager).?;
     const registry = serviceDescriptor(.service_registry).?;

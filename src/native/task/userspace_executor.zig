@@ -79,133 +79,198 @@ const MappingEntry = struct {
     }
 };
 
-var initialized = false;
-var probe_marker_printed = false;
-var resume_marker_printed = false;
-var active_task_id: u64 = 0;
-var active_address_space_id: u64 = 0;
-var kernel_page_directory_ptr: usize = 0;
-var handoff_completed = false;
-var mappings: [task_runtime.MAX_TASKS]MappingEntry = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS;
-var userspace_kernel_stack: [16 * 1024]u8 align(16) = [_]u8{0} ** (16 * 1024);
-
-pub fn init() void {
-    if (builtin.target.os.tag != .freestanding or initialized) return;
-    freestanding.isr.registerHandler(USERSPACE_TRAP_VECTOR, userspaceTrapHandler);
-    initialized = true;
-}
-
-pub fn reset() void {
-    initialized = false;
-    probe_marker_printed = false;
-    resume_marker_printed = false;
-    active_task_id = 0;
-    active_address_space_id = 0;
-    kernel_page_directory_ptr = 0;
-    handoff_completed = false;
-    zigos_userspace_resume_requested = 0;
-    zigos_userspace_resume_esp = 0;
-    zigos_userspace_resume_eip = 0;
-    mappings = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS;
-}
+var trap_handler_registered = false;
+var registered_executor: ?*Executor = null;
 
 pub fn activeTaskId() u64 {
-    return active_task_id;
+    const executor = registered_executor orelse return 0;
+    return executor.activeTaskId();
 }
 
-pub fn executeTask(
-    catalog: *userspace_loader.Catalog,
-    runtime: *task_runtime.Runtime,
-    capability_table: *const capability.CapabilityTable,
-    task_id: u64,
-    now_ticks: u64,
-) bool {
-    if (builtin.target.os.tag != .freestanding) return false;
-    init();
+pub const Executor = struct {
+    initialized: bool = false,
+    probe_marker_printed: bool = false,
+    resume_marker_printed: bool = false,
+    active_task_id: u64 = 0,
+    active_address_space_id: u64 = 0,
+    kernel_page_directory_ptr: usize = 0,
+    handoff_completed: bool = false,
+    mappings: [task_runtime.MAX_TASKS]MappingEntry = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS,
+    userspace_kernel_stack: [16 * 1024]u8 align(16) = [_]u8{0} ** (16 * 1024),
 
-    const task = runtime.find(task_id) orelse return false;
-    if (!task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return false;
-
-    const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return false;
-    const image = catalog.findById(task.launch.image_id) orelse return false;
-    if (image.elf_bytes.len == 0) return false;
-
-    const mapping = ensureMaterialized(address_space, image) orelse return false;
-    initializeBootstrapMailbox(mapping, image, task, capability_table, now_ticks);
-    const kernel_page_directory = freestanding.paging.getCurrentPageDirectory();
-    kernel_page_directory_ptr = @intFromPtr(kernel_page_directory);
-    freestanding.gdt.setKernelStack(@truncate(trapStackTop()));
-    const instruction_pointer = if (mapping.resume_valid)
-        mapping.resume_instruction_pointer
-    else
-        @as(u32, @intCast(address_space.entry_point));
-    const stack_pointer = if (mapping.resume_valid)
-        mapping.resume_stack_pointer
-    else
-        @as(u32, @intCast(address_space.stack_pointer - 16));
-
-    active_task_id = task_id;
-    active_address_space_id = address_space.id;
-    handoff_completed = false;
-    zigos_userspace_resume_requested = 0;
-
-    freestanding.paging.switchPageDirectory(mapping.pageDirectory());
-    _ = zigos_enter_userspace(
-        instruction_pointer,
-        stack_pointer,
-    );
-
-    if (freestanding.paging.getCurrentPageDirectory() != kernel_page_directory) {
-        freestanding.paging.switchPageDirectory(kernel_page_directory);
+    pub fn init(self: *Executor) void {
+        if (builtin.target.os.tag != .freestanding) return;
+        registered_executor = self;
+        if (!trap_handler_registered) {
+            freestanding.isr.registerHandler(USERSPACE_TRAP_VECTOR, userspaceTrapHandler);
+            trap_handler_registered = true;
+        }
+        self.initialized = true;
     }
 
-    active_task_id = 0;
-    active_address_space_id = 0;
-    zigos_userspace_resume_requested = 0;
-
-    if (handoff_completed and !probe_marker_printed) {
-        common.printBootMarker(boot_markers.userspace_exec_probe_ok);
-        probe_marker_printed = true;
+    pub fn reset(self: *Executor) void {
+        self.initialized = false;
+        self.probe_marker_printed = false;
+        self.resume_marker_printed = false;
+        self.active_task_id = 0;
+        self.active_address_space_id = 0;
+        self.kernel_page_directory_ptr = 0;
+        self.handoff_completed = false;
+        self.mappings = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS;
+        zigos_userspace_resume_requested = 0;
+        zigos_userspace_resume_esp = 0;
+        zigos_userspace_resume_eip = 0;
+        if (registered_executor == self) {
+            registered_executor = null;
+        }
     }
-    if (handoff_completed and
-        mapping.yield_count >= 2 and
-        mapping.last_user_counter >= 2 and
-        !resume_marker_printed)
-    {
-        common.printBootMarker(boot_markers.userspace_resume_ok);
-        resume_marker_printed = true;
+
+    pub fn activeTaskId(self: *const Executor) u64 {
+        return self.active_task_id;
     }
-    return handoff_completed;
-}
 
-fn initializeBootstrapMailbox(
-    mapping: *const MappingEntry,
-    image: *const userspace_loader.ImageRecord,
-    task: *const task_runtime.TaskRecord,
-    capability_table: *const capability.CapabilityTable,
-    now_ticks: u64,
-) void {
-    if (image.bootstrap_mailbox_address == 0) return;
+    pub fn executeTask(
+        self: *Executor,
+        catalog: *userspace_loader.Catalog,
+        runtime: *task_runtime.Runtime,
+        capability_table: *const capability.CapabilityTable,
+        task_id: u64,
+        now_ticks: u64,
+    ) bool {
+        if (builtin.target.os.tag != .freestanding) return false;
+        self.init();
 
-    const bootstrap = selectBootstrapCapability(task, capability_table, now_ticks);
-    const previous_directory = freestanding.paging.getCurrentPageDirectory();
-    freestanding.paging.switchPageDirectory(mapping.pageDirectory());
-    defer freestanding.paging.switchPageDirectory(previous_directory);
+        const task = runtime.find(task_id) orelse return false;
+        if (!task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return false;
 
-    const mailbox_ptr: *userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(@as(usize, @intCast(image.bootstrap_mailbox_address)));
-    mailbox_ptr.* = .{
-        .version = userspace_bootstrap_mailbox.VERSION,
-        .phase = @intFromEnum(userspace_bootstrap_mailbox.Phase.boot),
-        .detail = @intFromEnum(userspace_bootstrap_mailbox.classifyDetail(@intFromEnum(task.component_class), image.contract_flags)),
-        .fault_code = 0,
-        ._reserved0 = [_]u8{0} ** 3,
-        .authority_capability_id = bootstrap.capability_id,
-        .task_id = task.id,
-        .service_id = bootstrap.service_id,
-        .resource_mask = 0,
-        .last_counter = 0,
-    };
-}
+        const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return false;
+        const image = catalog.findById(task.launch.image_id) orelse return false;
+        if (image.elf_bytes.len == 0) return false;
+
+        const mapping = self.ensureMaterialized(address_space, image) orelse return false;
+        self.initializeBootstrapMailbox(mapping, image, task, capability_table, now_ticks);
+        const kernel_page_directory = freestanding.paging.getCurrentPageDirectory();
+        self.kernel_page_directory_ptr = @intFromPtr(kernel_page_directory);
+        freestanding.gdt.setKernelStack(@truncate(self.trapStackTop()));
+        const instruction_pointer = if (mapping.resume_valid)
+            mapping.resume_instruction_pointer
+        else
+            @as(u32, @intCast(address_space.entry_point));
+        const stack_pointer = if (mapping.resume_valid)
+            mapping.resume_stack_pointer
+        else
+            @as(u32, @intCast(address_space.stack_pointer - 16));
+
+        self.active_task_id = task_id;
+        self.active_address_space_id = address_space.id;
+        self.handoff_completed = false;
+        zigos_userspace_resume_requested = 0;
+
+        freestanding.paging.switchPageDirectory(mapping.pageDirectory());
+        _ = zigos_enter_userspace(
+            instruction_pointer,
+            stack_pointer,
+        );
+
+        if (freestanding.paging.getCurrentPageDirectory() != kernel_page_directory) {
+            freestanding.paging.switchPageDirectory(kernel_page_directory);
+        }
+
+        self.active_task_id = 0;
+        self.active_address_space_id = 0;
+        zigos_userspace_resume_requested = 0;
+
+        if (self.handoff_completed and !self.probe_marker_printed) {
+            common.printBootMarker(boot_markers.userspace_exec_probe_ok);
+            self.probe_marker_printed = true;
+        }
+        if (self.handoff_completed and
+            mapping.yield_count >= 2 and
+            mapping.last_user_counter >= 2 and
+            !self.resume_marker_printed)
+        {
+            common.printBootMarker(boot_markers.userspace_resume_ok);
+            self.resume_marker_printed = true;
+        }
+        return self.handoff_completed;
+    }
+
+    fn initializeBootstrapMailbox(
+        self: *Executor,
+        mapping: *const MappingEntry,
+        image: *const userspace_loader.ImageRecord,
+        task: *const task_runtime.TaskRecord,
+        capability_table: *const capability.CapabilityTable,
+        now_ticks: u64,
+    ) void {
+        _ = self;
+        if (image.bootstrap_mailbox_address == 0) return;
+
+        const bootstrap = selectBootstrapCapability(task, capability_table, now_ticks);
+        const previous_directory = freestanding.paging.getCurrentPageDirectory();
+        freestanding.paging.switchPageDirectory(mapping.pageDirectory());
+        defer freestanding.paging.switchPageDirectory(previous_directory);
+
+        const mailbox_ptr: *userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(@as(usize, @intCast(image.bootstrap_mailbox_address)));
+        mailbox_ptr.* = .{
+            .version = userspace_bootstrap_mailbox.VERSION,
+            .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.boot),
+            .detail = @intFromEnum(userspace_bootstrap_mailbox.classifyDetail(@intFromEnum(task.component_class), image.contract_flags)),
+            .fault_code = 0,
+            ._reserved0 = [_]u8{0} ** 3,
+            .authority_capability_id = bootstrap.capability_id,
+            .task_id = task.id,
+            .service_id = bootstrap.service_id,
+            .resource_mask = 0,
+            .last_counter = 0,
+        };
+    }
+
+    fn ensureMaterialized(
+        self: *Executor,
+        address_space: *const task_runtime.AddressSpaceRecord,
+        image: *const userspace_loader.ImageRecord,
+    ) ?*MappingEntry {
+        if (self.findMapping(address_space.id)) |entry| return entry;
+
+        const page_directory = freestanding.paging.createUserPageDirectory() catch return null;
+        const previous_directory = freestanding.paging.getCurrentPageDirectory();
+        freestanding.paging.switchPageDirectory(page_directory);
+        defer freestanding.paging.switchPageDirectory(previous_directory);
+
+        for (address_space.regions[0..address_space.region_count]) |region| {
+            switch (region.kind) {
+                .load_segment => mapLoadRegion(region, image.elf_bytes) orelse return null,
+                .stack => mapZeroedRegion(region.virtual_address, region.size_bytes, region.access) orelse return null,
+            }
+        }
+
+        for (&self.mappings) |*entry| {
+            if (entry.in_use) continue;
+            entry.in_use = true;
+            entry.address_space_id = address_space.id;
+            entry.page_directory_ptr = @intFromPtr(page_directory);
+            entry.resume_valid = false;
+            entry.resume_instruction_pointer = 0;
+            entry.resume_stack_pointer = 0;
+            entry.yield_count = 0;
+            entry.last_user_counter = 0;
+            return entry;
+        }
+        return null;
+    }
+
+    fn findMapping(self: *Executor, address_space_id: u64) ?*MappingEntry {
+        for (&self.mappings) |*entry| {
+            if (entry.in_use and entry.address_space_id == address_space_id) return entry;
+        }
+        return null;
+    }
+
+    fn trapStackTop(self: *Executor) usize {
+        return @intFromPtr(&self.userspace_kernel_stack) + self.userspace_kernel_stack.len;
+    }
+};
 
 fn selectBootstrapCapability(
     task: *const task_runtime.TaskRecord,
@@ -225,9 +290,10 @@ fn selectBootstrapCapability(
 }
 
 fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
-    if (active_task_id == 0) return;
+    const executor = registered_executor orelse return;
+    if (executor.active_task_id == 0) return;
 
-    if (findMapping(active_address_space_id)) |mapping| {
+    if (executor.findMapping(executor.active_address_space_id)) |mapping| {
         mapping.resume_valid = true;
         mapping.resume_instruction_pointer = frame.eip;
         mapping.resume_stack_pointer = frame.useresp;
@@ -235,45 +301,12 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
         mapping.last_user_counter = frame.eax;
     }
 
-    handoff_completed = true;
+    executor.handoff_completed = true;
     zigos_userspace_resume_requested = 1;
 
-    if (kernel_page_directory_ptr != 0) {
-        freestanding.paging.switchPageDirectory(@ptrFromInt(kernel_page_directory_ptr));
+    if (executor.kernel_page_directory_ptr != 0) {
+        freestanding.paging.switchPageDirectory(@ptrFromInt(executor.kernel_page_directory_ptr));
     }
-}
-
-fn ensureMaterialized(
-    address_space: *const task_runtime.AddressSpaceRecord,
-    image: *const userspace_loader.ImageRecord,
-) ?*MappingEntry {
-    if (findMapping(address_space.id)) |entry| return entry;
-
-    const page_directory = freestanding.paging.createUserPageDirectory() catch return null;
-    const previous_directory = freestanding.paging.getCurrentPageDirectory();
-    freestanding.paging.switchPageDirectory(page_directory);
-    defer freestanding.paging.switchPageDirectory(previous_directory);
-
-    for (address_space.regions[0..address_space.region_count]) |region| {
-        switch (region.kind) {
-            .load_segment => mapLoadRegion(region, image.elf_bytes) orelse return null,
-            .stack => mapZeroedRegion(region.virtual_address, region.size_bytes, region.access) orelse return null,
-        }
-    }
-
-    for (&mappings) |*entry| {
-        if (entry.in_use) continue;
-        entry.in_use = true;
-        entry.address_space_id = address_space.id;
-        entry.page_directory_ptr = @intFromPtr(page_directory);
-        entry.resume_valid = false;
-        entry.resume_instruction_pointer = 0;
-        entry.resume_stack_pointer = 0;
-        entry.yield_count = 0;
-        entry.last_user_counter = 0;
-        return entry;
-    }
-    return null;
 }
 
 fn mapLoadRegion(region: task_runtime.AddressSpaceRegionRecord, elf_bytes: []const u8) ?void {
@@ -319,17 +352,6 @@ fn tightenRegionPermissions(virtual_address: u64, size_bytes: usize, access: tas
     }
 }
 
-fn findMapping(address_space_id: u64) ?*MappingEntry {
-    for (&mappings) |*entry| {
-        if (entry.in_use and entry.address_space_id == address_space_id) return entry;
-    }
-    return null;
-}
-
 fn divCeil(value: usize, divisor: usize) usize {
     return (value + divisor - 1) / divisor;
-}
-
-fn trapStackTop() usize {
-    return @intFromPtr(&userspace_kernel_stack) + userspace_kernel_stack.len;
 }

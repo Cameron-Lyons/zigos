@@ -87,7 +87,7 @@ const ConflictSlot = state_support.ConflictSlot;
 const DatabaseContractSlot = state_support.DatabaseContractSlot;
 const OverlaySlot = state_support.OverlaySlot;
 const PersistentState = state_support.PersistentState;
-const resident_state = state_support.resident_state;
+pub const ResidentState = state_support.ResidentState;
 const zeroConflict = state_support.zeroConflict;
 const zeroDatabaseContract = state_support.zeroDatabaseContract;
 const zeroOverlay = state_support.zeroOverlay;
@@ -117,13 +117,33 @@ pub const Service = struct {
     loaded_existing_state: bool = false,
     storage: ?*storage_service.Service = null,
     state_workspace_id: u64 = 0,
-    state: *PersistentState,
+    resident_store: ?*ResidentState = null,
+    owned_resident_state: ResidentState = .{},
     next_overlay_session_id: u64 = 1,
     overlay_sessions: [MAX_OVERLAY_SESSIONS]OverlaySessionSlot = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_OVERLAY_SESSIONS,
 
     pub fn init(service_id: u64, task_id: u64, owner: principal.PrincipalId) Service {
-        const loaded_existing_state = state_support.has_persisted_state;
-        if (!state_support.has_persisted_state) {
+        var service = Service{
+            .service_id = service_id,
+            .task_id = task_id,
+            .owner = owner,
+            .storage = null,
+            .state_workspace_id = 0,
+            .next_overlay_session_id = 1,
+            .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_OVERLAY_SESSIONS,
+        };
+        service.owned_resident_state.resetForServiceInit();
+        return service;
+    }
+
+    pub fn initWithResidentState(
+        service_id: u64,
+        task_id: u64,
+        owner: principal.PrincipalId,
+        resident_state: *ResidentState,
+    ) Service {
+        const loaded_existing_state = resident_state.has_persisted_state;
+        if (!resident_state.has_persisted_state) {
             resident_state.resetForServiceInit();
         }
         return .{
@@ -133,7 +153,7 @@ pub const Service = struct {
             .loaded_existing_state = loaded_existing_state,
             .storage = null,
             .state_workspace_id = 0,
-            .state = &state_support.persisted_state,
+            .resident_store = resident_state,
             .next_overlay_session_id = 1,
             .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_OVERLAY_SESSIONS,
         };
@@ -144,12 +164,13 @@ pub const Service = struct {
         task_id: u64,
         owner: principal.PrincipalId,
         storage: *storage_service.Service,
+        resident_state: *ResidentState,
     ) Error!Service {
         const workspace_id = try state_store.ensureWorkspace(storage, owner);
-        const loaded_existing_state = if (state_support.has_persisted_state)
+        const loaded_existing_state = if (resident_state.has_persisted_state)
             true
         else
-            try state_store.load(storage, workspace_id);
+            try state_store.load(storage, workspace_id, resident_state);
 
         if (!loaded_existing_state) {
             resident_state.resetForServiceInit();
@@ -162,14 +183,10 @@ pub const Service = struct {
             .loaded_existing_state = loaded_existing_state,
             .storage = storage,
             .state_workspace_id = workspace_id,
-            .state = &state_support.persisted_state,
+            .resident_store = resident_state,
             .next_overlay_session_id = 1,
             .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_OVERLAY_SESSIONS,
         };
-    }
-
-    pub fn resetPersistentState() void {
-        resident_state.resetPersistent();
     }
 
     pub fn ensureUserRoot(
@@ -178,8 +195,8 @@ pub const Service = struct {
         label: []const u8,
         identity: signing.SignerIdentity,
     ) Error!*device_graph.UserRootRecord {
-        const root = try self.state.graph.ensureUserRoot(user_principal, label, identity);
-        resident_state.markDirty();
+        const root = try self.state().graph.ensureUserRoot(user_principal, label, identity);
+        self.resident().markDirty();
         return root;
     }
 
@@ -192,8 +209,8 @@ pub const Service = struct {
         device_identity: signing.SignerIdentity,
         tick: u64,
     ) Error!*device_graph.DeviceRecord {
-        const record = try self.state.graph.enrollDevice(user_principal, device_principal, label, authorizer, device_identity, tick);
-        resident_state.markDirty();
+        const record = try self.state().graph.enrollDevice(user_principal, device_principal, label, authorizer, device_identity, tick);
+        self.resident().markDirty();
         return record;
     }
 
@@ -205,8 +222,8 @@ pub const Service = struct {
         next_device_identity: signing.SignerIdentity,
         tick: u64,
     ) Error!*device_graph.DeviceRecord {
-        const record = try self.state.graph.rotateDeviceKey(user_principal, device_principal, authorizer, next_device_identity, tick);
-        resident_state.markDirty();
+        const record = try self.state().graph.rotateDeviceKey(user_principal, device_principal, authorizer, next_device_identity, tick);
+        self.resident().markDirty();
         return record;
     }
 
@@ -217,17 +234,17 @@ pub const Service = struct {
         authorizer: signing.SignerIdentity,
         tick: u64,
     ) Error!void {
-        try self.state.graph.revokeDevice(user_principal, device_principal, authorizer, tick);
-        resident_state.markDirty();
+        try self.state().graph.revokeDevice(user_principal, device_principal, authorizer, tick);
+        self.resident().markDirty();
     }
 
     pub fn findDeviceRecord(self: *const Service, device_id: principal.PrincipalId) ?*const device_graph.DeviceRecord {
-        return self.state.graph.findDeviceConst(device_id);
+        return self.stateConst().graph.findDeviceConst(device_id);
     }
 
     pub fn createNetworkPolicy(self: *Service, request: network_policy.CreateRequest) Error!*network_policy.PolicyRecord {
-        const record = try self.state.network_policies.create(request);
-        resident_state.markDirty();
+        const record = try self.state().network_policies.create(request);
+        self.resident().markDirty();
         return record;
     }
 
@@ -236,7 +253,7 @@ pub const Service = struct {
         policy_id: u64,
         destination: network_policy.Destination,
     ) Error!network_policy.Decision {
-        return self.state.network_policies.authorize(policy_id, destination);
+        return self.state().network_policies.authorize(policy_id, destination);
     }
 
     pub fn configureWorkspacePolicy(
@@ -431,7 +448,7 @@ pub const Service = struct {
         slot.entry.path_len = copyText(&slot.entry.path, path);
         slot.entry.object_id = object_id;
         slot.entry.version_id = version_id;
-        resident_state.markDirty();
+        self.resident().markDirty();
     }
 
     pub fn replicaVersion(
@@ -440,7 +457,7 @@ pub const Service = struct {
         device_id: principal.PrincipalId,
         path: []const u8,
     ) ?u64 {
-        for (&self.state.replica_entries) |*slot| {
+        for (&self.stateConst().replica_entries) |*slot| {
             if (!slot.in_use) continue;
             if (slot.entry.workspace_id != workspace_id) continue;
             if (!slot.entry.device_id.eql(device_id)) continue;
@@ -535,7 +552,7 @@ pub const Service = struct {
 
     pub fn transferSecretObject(
         self: *Service,
-        store: *object_store.Store,
+        storage: *const storage_service.Service,
         workspace_id: u64,
         object_id: u64,
         from_device: principal.PrincipalId,
@@ -547,7 +564,7 @@ pub const Service = struct {
         if (!policy.personal_e2ee) return error.TransportDenied;
         try self.authorizeTransport(policy, transport, null);
 
-        const object_record = store.object(object_id) orelse return error.ObjectNotFound;
+        const object_record = storage.object(object_id) orelse return error.ObjectNotFound;
         if (object_record.object_type != .secret) return error.TypeMismatch;
         return true;
     }
@@ -596,7 +613,7 @@ pub const Service = struct {
     }
 
     pub fn trustedDeviceCount(self: *const Service) usize {
-        return self.state.graph.trustedDeviceCount();
+        return self.stateConst().graph.trustedDeviceCount();
     }
 
     pub fn findConflict(
@@ -605,7 +622,7 @@ pub const Service = struct {
         device_id: principal.PrincipalId,
         path: []const u8,
     ) ?*ConflictRecord {
-        for (&self.state.conflicts) |*slot| {
+        for (&self.state().conflicts) |*slot| {
             if (!slot.in_use) continue;
             if (slot.conflict.workspace_id != workspace_id) continue;
             if (!slot.conflict.device_id.eql(device_id)) continue;
@@ -616,14 +633,14 @@ pub const Service = struct {
     }
 
     pub fn isTrustedDevice(self: *const Service, device_id: principal.PrincipalId) bool {
-        return self.state.graph.isTrusted(device_id);
+        return self.stateConst().graph.isTrusted(device_id);
     }
 
-    fn checkpoint(self: *const Service) Error!void {
+    fn checkpoint(self: *Service) Error!void {
         if (self.storage) |storage| {
-            try state_store.persist(storage, self.state_workspace_id);
+            try state_store.persist(storage, self.state_workspace_id, self.residentConst());
         }
-        state_support.has_persisted_state = true;
+        self.resident().markDirty();
     }
 
     fn authorizeTransport(
@@ -664,7 +681,7 @@ pub const Service = struct {
     }
 
     fn ensureTrustedDevices(self: *Service, from_device: principal.PrincipalId, to_device: principal.PrincipalId) Error!void {
-        if (!self.state.graph.isTrusted(from_device) or !self.state.graph.isTrusted(to_device)) {
+        if (!self.state().graph.isTrusted(from_device) or !self.state().graph.isTrusted(to_device)) {
             return error.DeviceNotTrusted;
         }
     }
@@ -704,12 +721,12 @@ pub const Service = struct {
         slot.conflict.local_version_id = local_version_id;
         slot.conflict.remote_version_id = remote_version_id;
         slot.conflict.semantic = semantic;
-        resident_state.markDirty();
+        self.resident().markDirty();
     }
 
     fn countConflictsFor(self: *const Service, workspace_id: u64, device_id: principal.PrincipalId) usize {
         var count: usize = 0;
-        for (self.state.conflicts) |slot| {
+        for (self.stateConst().conflicts) |slot| {
             if (!slot.in_use) continue;
             if (slot.conflict.workspace_id != workspace_id) continue;
             if (!slot.conflict.device_id.eql(device_id)) continue;
@@ -720,19 +737,19 @@ pub const Service = struct {
 
     fn clearConflictsFor(self: *Service, workspace_id: u64, device_id: principal.PrincipalId) Error!bool {
         var cleared = false;
-        for (&self.state.conflicts) |*slot| {
+        for (&self.state().conflicts) |*slot| {
             if (!slot.in_use) continue;
             if (slot.conflict.workspace_id != workspace_id) continue;
             if (!slot.conflict.device_id.eql(device_id)) continue;
             slot.* = .{};
             cleared = true;
         }
-        if (cleared) resident_state.markDirty();
+        if (cleared) self.resident().markDirty();
         return cleared;
     }
 
     fn findDatabaseContract(self: *Service, contract_id: u64) ?*DatabaseContract {
-        for (&self.state.database_contracts) |*slot| {
+        for (&self.state().database_contracts) |*slot| {
             if (slot.in_use and slot.contract.id == contract_id) return &slot.contract;
         }
         return null;
@@ -745,7 +762,7 @@ pub const Service = struct {
         label: []const u8,
         signature: manifest.Signature,
     ) ?*DatabaseContract {
-        for (&self.state.database_contracts) |*slot| {
+        for (&self.state().database_contracts) |*slot| {
             if (!slot.in_use) continue;
             if (slot.contract.workspace_id != workspace_id) continue;
             if (!std.mem.eql(u8, slot.contract.bundleIdSlice(), bundle_id)) continue;
@@ -757,36 +774,36 @@ pub const Service = struct {
     }
 
     fn lookupWorkspacePolicySlot(self: *Service, workspace_id: u64) ?*WorkspacePolicySlot {
-        for (&self.state.workspace_policies) |*slot| {
+        for (&self.state().workspace_policies) |*slot| {
             if (slot.in_use and slot.policy.workspace_id == workspace_id) return slot;
         }
         return null;
     }
 
     fn allocateWorkspacePolicy(self: *Service) ?*WorkspacePolicySlot {
-        for (&self.state.workspace_policies) |*slot| {
+        for (&self.state().workspace_policies) |*slot| {
             if (!slot.in_use) return slot;
         }
         return null;
     }
 
     fn lookupOverlaySlot(self: *Service, workspace_id: u64) ?*OverlaySlot {
-        for (&self.state.overlays) |*slot| {
+        for (&self.state().overlays) |*slot| {
             if (slot.in_use and slot.overlay.workspace_id == workspace_id) return slot;
         }
         return null;
     }
 
     fn allocateOverlay(self: *Service) ?*OverlaySlot {
-        for (&self.state.overlays) |*slot| {
+        for (&self.state().overlays) |*slot| {
             if (!slot.in_use) return slot;
         }
         return null;
     }
 
     fn nextOverlayId(self: *Service) u64 {
-        defer self.state.next_overlay_id += 1;
-        return self.state.next_overlay_id;
+        defer self.state().next_overlay_id += 1;
+        return self.stateConst().next_overlay_id;
     }
 
     fn lookupReplicaSlot(
@@ -795,7 +812,7 @@ pub const Service = struct {
         device_id: principal.PrincipalId,
         path: []const u8,
     ) ?*ReplicaSlot {
-        for (&self.state.replica_entries) |*slot| {
+        for (&self.state().replica_entries) |*slot| {
             if (!slot.in_use) continue;
             if (slot.entry.workspace_id != workspace_id) continue;
             if (!slot.entry.device_id.eql(device_id)) continue;
@@ -806,32 +823,47 @@ pub const Service = struct {
     }
 
     fn allocateReplicaSlot(self: *Service) ?*ReplicaSlot {
-        for (&self.state.replica_entries) |*slot| {
+        for (&self.state().replica_entries) |*slot| {
             if (!slot.in_use) return slot;
         }
         return null;
     }
 
     fn allocateConflict(self: *Service) ?*ConflictSlot {
-        for (&self.state.conflicts) |*slot| {
+        for (&self.state().conflicts) |*slot| {
             if (!slot.in_use) return slot;
         }
         return null;
     }
 
     fn allocateDatabaseContract(self: *Service) ?*DatabaseContractSlot {
-        for (&self.state.database_contracts) |*slot| {
+        for (&self.state().database_contracts) |*slot| {
             if (!slot.in_use) return slot;
         }
         return null;
     }
 
     fn nextDatabaseContractId(self: *Service) u64 {
-        defer self.state.next_contract_id += 1;
-        return self.state.next_contract_id;
+        defer self.state().next_contract_id += 1;
+        return self.stateConst().next_contract_id;
+    }
+
+    fn resident(self: *Service) *ResidentState {
+        return self.resident_store orelse &self.owned_resident_state;
+    }
+
+    fn residentConst(self: *const Service) *ResidentState {
+        return self.resident_store orelse @constCast(&self.owned_resident_state);
+    }
+
+    fn state(self: *Service) *PersistentState {
+        return &self.resident().persisted_state;
+    }
+
+    fn stateConst(self: *const Service) *const PersistentState {
+        return &self.residentConst().persisted_state;
     }
 };
-
 
 fn signatureEql(a: manifest.Signature, b: manifest.Signature) bool {
     return std.mem.eql(u8, a.format, b.format) and
@@ -866,8 +898,8 @@ fn databaseContractMessage(
 }
 
 test "sync service covers device graph policy replication semantics and restart recovery" {
-    storage_service.Service.resetPersistentState();
-    Service.resetPersistentState();
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 4 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8 };
@@ -904,7 +936,7 @@ test "sync service covers device graph policy replication semantics and restart 
         .seed = [_]u8{0x57} ** 32,
     };
 
-    var storage = storage_service.Service.init(40, 4, storage_owner);
+    var storage = storage_service.Service.initWithStore(40, 4, storage_owner, &storage_checkpoint_store);
     const notes_v1 = try storage.putVersion(.{
         .preferred_object_id = 800,
         .object_type = .document,
@@ -947,7 +979,8 @@ test "sync service covers device graph policy replication semantics and restart 
     try storage.stagePut(notes.id, "assets/cover.jpg", cover.object_id, cover.version_id, .media_asset);
     _ = try storage.commit(notes.id, 15);
 
-    var service = try Service.initWithStorage(80, 8, sync_owner, &storage);
+    var resident = ResidentState{};
+    var service = try Service.initWithStorage(80, 8, sync_owner, &storage, &resident);
     _ = try service.ensureUserRoot(user, "cameron", user_signer);
     _ = try service.enrollTrustedDevice(user, laptop, "laptop", user_signer, laptop_signer, 20);
     _ = try service.enrollTrustedDevice(user, tablet, "tablet", user_signer, tablet_signer, 21);
@@ -1040,13 +1073,13 @@ test "sync service covers device graph policy replication semantics and restart 
     try std.testing.expectEqual(@as(usize, 1), summary.conflict_count);
     try std.testing.expect(service.findConflict(notes.id, tablet, "documents/notes.md") != null);
 
-    try std.testing.expect(try service.transferSecretObject(storage.store, notes.id, secret.object_id, laptop, tablet, .device_to_device));
+    try std.testing.expect(try service.transferSecretObject(&storage, notes.id, secret.object_id, laptop, tablet, .device_to_device));
     const contract = try service.registerDatabaseContract(notes.id, "app.db.notes", "notes-db", contract_signer);
     try std.testing.expect(try service.replicateDatabaseContract(contract.id, notes.id, laptop, tablet, .relay_assisted));
     try std.testing.expectError(error.DeviceNotTrusted, service.replicateWorkspace(&storage, notes.id, laptop, phone, .device_to_device));
 
-    Service.resetPersistentState();
-    var restarted = try Service.initWithStorage(80, 9, sync_owner, &storage);
+    var restarted_resident = ResidentState{};
+    var restarted = try Service.initWithStorage(80, 9, sync_owner, &storage, &restarted_resident);
     try std.testing.expect(restarted.loaded_existing_state);
     try std.testing.expectEqual(@as(usize, 2), restarted.trustedDeviceCount());
     try std.testing.expect(restarted.findWorkspacePolicy(notes.id) != null);
@@ -1064,13 +1097,10 @@ test "sync service covers device graph policy replication semantics and restart 
     const restarted_contract = try restarted.registerDatabaseContract(notes.id, "app.db.notes", "notes-db", contract_signer);
     try std.testing.expectEqual(contract.id, restarted_contract.id);
 
-    Service.resetPersistentState();
-    storage_service.Service.resetPersistentState();
+    storage_checkpoint_store.resetPersistent();
 }
 
 test "overlay sessions cover sync remote access private service publishing and encrypted relay" {
-    Service.resetPersistentState();
-
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 91 };
     const user = principal.PrincipalId{ .kind = .user, .serial = 19 };
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 191 };
@@ -1202,6 +1232,4 @@ test "overlay sessions cover sync remote access private service publishing and e
         null,
         19,
     ));
-
-    Service.resetPersistentState();
 }

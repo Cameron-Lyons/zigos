@@ -3,14 +3,14 @@ const contract = @import("contract.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
 
-pub const Phase3Contract = struct {
+pub const ServiceContract = struct {
     class: contract.ServiceClass,
     interface: manifest.InterfaceDecl,
     driver_class: ?driver_service.DeviceClass = null,
     description: []const u8,
 };
 
-pub const ordered_phase3_contracts = [_]Phase3Contract{
+pub const ordered_service_contracts = [_]ServiceContract{
     .{
         .class = .policy_mediation,
         .interface = .{ .name = "zigos.policy.mediation" },
@@ -57,39 +57,39 @@ pub const ordered_phase3_contracts = [_]Phase3Contract{
     },
 };
 
-pub fn contractForClass(class: contract.ServiceClass) ?Phase3Contract {
-    for (ordered_phase3_contracts) |entry| {
+pub fn contractForClass(class: contract.ServiceClass) ?ServiceContract {
+    for (ordered_service_contracts) |entry| {
         if (entry.class == class) return entry;
     }
     return null;
 }
 
 pub fn orderedIndex(class: contract.ServiceClass) ?usize {
-    for (ordered_phase3_contracts, 0..) |entry, index| {
+    for (ordered_service_contracts, 0..) |entry, index| {
         if (entry.class == class) return index;
     }
     return null;
 }
 
-test "phase3 contract order matches the requested decomposition sequence" {
-    try std.testing.expectEqual(contract.ServiceClass.policy_mediation, ordered_phase3_contracts[0].class);
-    try std.testing.expectEqual(contract.ServiceClass.network_stack, ordered_phase3_contracts[1].class);
-    try std.testing.expectEqual(contract.ServiceClass.storage_object, ordered_phase3_contracts[2].class);
-    try std.testing.expectEqual(contract.ServiceClass.package_install_update, ordered_phase3_contracts[3].class);
-    try std.testing.expectEqual(contract.ServiceClass.compositor_ui_session, ordered_phase3_contracts[4].class);
-    try std.testing.expectEqual(contract.ServiceClass.indexing_search, ordered_phase3_contracts[5].class);
-    try std.testing.expectEqual(contract.ServiceClass.sync_replication, ordered_phase3_contracts[6].class);
-    try std.testing.expectEqual(contract.ServiceClass.media_print_helpers, ordered_phase3_contracts[7].class);
+test "service contract order matches the requested decomposition sequence" {
+    try std.testing.expectEqual(contract.ServiceClass.policy_mediation, ordered_service_contracts[0].class);
+    try std.testing.expectEqual(contract.ServiceClass.network_stack, ordered_service_contracts[1].class);
+    try std.testing.expectEqual(contract.ServiceClass.storage_object, ordered_service_contracts[2].class);
+    try std.testing.expectEqual(contract.ServiceClass.package_install_update, ordered_service_contracts[3].class);
+    try std.testing.expectEqual(contract.ServiceClass.compositor_ui_session, ordered_service_contracts[4].class);
+    try std.testing.expectEqual(contract.ServiceClass.indexing_search, ordered_service_contracts[5].class);
+    try std.testing.expectEqual(contract.ServiceClass.sync_replication, ordered_service_contracts[6].class);
+    try std.testing.expectEqual(contract.ServiceClass.media_print_helpers, ordered_service_contracts[7].class);
 }
 
-test "phase3 contract interfaces remain unique and discoverable" {
-    for (ordered_phase3_contracts, 0..) |entry, index| {
+test "service contract interfaces remain unique and discoverable" {
+    for (ordered_service_contracts, 0..) |entry, index| {
         try std.testing.expect(contractForClass(entry.class) != null);
         try std.testing.expectEqual(index, orderedIndex(entry.class).?);
 
         var peer_index: usize = index + 1;
-        while (peer_index < ordered_phase3_contracts.len) : (peer_index += 1) {
-            try std.testing.expect(!std.mem.eql(u8, entry.interface.name, ordered_phase3_contracts[peer_index].interface.name));
+        while (peer_index < ordered_service_contracts.len) : (peer_index += 1) {
+            try std.testing.expect(!std.mem.eql(u8, entry.interface.name, ordered_service_contracts[peer_index].interface.name));
         }
     }
 }

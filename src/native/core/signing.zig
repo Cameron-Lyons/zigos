@@ -37,8 +37,8 @@ test "ed25519 signing produces verifiable native signatures" {
         .label = "zigos.test",
         .seed = [_]u8{0x11} ** Ed25519.KeyPair.seed_length,
     };
-    const signature = try sign(identity, "phase4");
+    const signature = try sign(identity, "storage-state");
     try std.testing.expect(signature.isComplete());
-    try std.testing.expect(verify(signature, "phase4"));
-    try std.testing.expect(!verify(signature, "phase5"));
+    try std.testing.expect(verify(signature, "storage-state"));
+    try std.testing.expect(!verify(signature, "sync-state"));
 }

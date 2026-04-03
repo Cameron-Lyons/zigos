@@ -494,9 +494,9 @@ pub fn thermalPowerAndAppUpdatesStayCompatibilityAware() !void {
     }, null);
     try std.testing.expect(compatible.updated_existing);
     try std.testing.expect(!compatible.migration_applied);
-    try std.testing.expectEqual(@as(u32, 2), packages.find("app.notes").?.current_schema_version);
+    try std.testing.expectEqual(@as(u32, 2), packages.find("app.notes").?.schemaVersion());
 
     _ = try packages.rollback("app.notes");
-    try std.testing.expectEqual(@as(u16, 1), packages.find("app.notes").?.current_version_minor);
-    try std.testing.expectEqual(@as(u32, 1), packages.find("app.notes").?.current_schema_version);
+    try std.testing.expectEqual(@as(u16, 1), packages.find("app.notes").?.versionMinor());
+    try std.testing.expectEqual(@as(u32, 1), packages.find("app.notes").?.schemaVersion());
 }

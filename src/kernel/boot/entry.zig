@@ -21,7 +21,7 @@ pub fn kernelMain() void {
     init_core.init();
     init_devices.init();
     console.print("Delegating network ownership to native service contracts.\n");
-    common.printBootMarker(boot_markers.phase3_kernel_network_deferred);
+    common.printBootMarker(boot_markers.kernel_network_deferred);
     init_runtime.init();
 
     common.printBootMarker(boot_markers.boot_core_ready);

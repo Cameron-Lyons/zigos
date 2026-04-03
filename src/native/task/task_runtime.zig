@@ -1,8 +1,9 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
-const crypto_hash = @import("../core/crypto_hash.zig");
 const manifest = @import("../policy/manifest.zig");
 const std = @import("std");
 const principal = @import("../core/principal.zig");
+const runtime_host = @import("task_runtime_host.zig");
+const launch_helpers = @import("task_runtime_launch.zig");
 
 pub const MAX_TASKS: usize = 32;
 pub const MAX_TASK_CAPABILITIES: usize = 24;
@@ -289,6 +290,8 @@ const AddressSpaceSlot = struct {
     in_use: bool = false,
     address_space: AddressSpaceRecord = zeroAddressSpace(),
 };
+
+const HostAssignment = runtime_host.HostAssignment(ProcessClass, NamespaceClass);
 
 pub const Runtime = struct {
     next_task_id: u64 = 1,
@@ -600,14 +603,6 @@ fn zeroTask() TaskRecord {
     };
 }
 
-const HostAssignment = struct {
-    process_id: u64,
-    address_space_id: u64,
-    namespace_id: u64,
-    process_class: ProcessClass,
-    namespace_class: NamespaceClass,
-};
-
 fn allocateHost(
     self: *Runtime,
     component_class: ComponentClass,
@@ -615,7 +610,16 @@ fn allocateHost(
     image_id: u64,
     userspace_image: ExecutableImageSpec,
 ) Error!HostAssignment {
-    return assignHost(self, component_class, owner_task_id, image_id, userspace_image, null);
+    return runtime_host.allocateHost(
+        Error,
+        ProcessClass,
+        NamespaceClass,
+        self,
+        component_class,
+        owner_task_id,
+        image_id,
+        userspace_image,
+    );
 }
 
 fn reassignHost(
@@ -626,7 +630,10 @@ fn reassignHost(
     userspace_image: ExecutableImageSpec,
     replace_address_space_id: u64,
 ) Error!HostAssignment {
-    return assignHost(
+    return runtime_host.reassignHost(
+        Error,
+        ProcessClass,
+        NamespaceClass,
         self,
         component_class,
         owner_task_id,
@@ -636,150 +643,24 @@ fn reassignHost(
     );
 }
 
-fn assignHost(
-    self: *Runtime,
-    component_class: ComponentClass,
-    owner_task_id: u64,
-    image_id: u64,
-    userspace_image: ExecutableImageSpec,
-    replace_address_space_id: ?u64,
-) Error!HostAssignment {
-    const process_id = self.next_process_id;
-    self.next_process_id += 1;
-    const address_space_id = self.next_address_space_id;
-    self.next_address_space_id += 1;
-    const namespace_id = self.next_namespace_id;
-    self.next_namespace_id += 1;
-
-    try installAddressSpace(self, replace_address_space_id, makeAddressSpace(.{
-        .id = address_space_id,
-        .owner_task_id = owner_task_id,
-        .process_id = process_id,
-        .image_id = image_id,
-        .userspace_image = userspace_image,
-    }));
-
-    return .{
-        .process_id = process_id,
-        .address_space_id = address_space_id,
-        .namespace_id = namespace_id,
-        .process_class = switch (component_class) {
-            .session_manager => .session_host,
-            .app_component => .app_sandbox,
-            .service_component => .service_sandbox,
-        },
-        .namespace_class = switch (component_class) {
-            .session_manager => .session_private,
-            .app_component => .app_private,
-            .service_component => .service_private,
-        },
-    };
-}
-
-const AddressSpaceInit = struct {
-    id: u64,
-    owner_task_id: u64,
-    process_id: u64,
-    image_id: u64,
-    userspace_image: ExecutableImageSpec,
-};
-
-fn makeAddressSpace(init: AddressSpaceInit) AddressSpaceRecord {
-    var record = zeroAddressSpace();
-    record.id = init.id;
-    record.owner_task_id = init.owner_task_id;
-    record.process_id = init.process_id;
-    record.image_id = init.image_id;
-
-    if (!init.userspace_image.isPresent()) return record;
-
-    record.load_state = .executable_loaded;
-    record.entry_point = init.userspace_image.entry_point;
-    record.instruction_pointer = init.userspace_image.entry_point;
-    record.stack_pointer = init.userspace_image.stack_top;
-    record.stack_top = init.userspace_image.stack_top;
-    record.stack_size_bytes = init.userspace_image.stack_size_bytes;
-    record.load_segment_count = init.userspace_image.segment_count;
-    record.image_sha256 = init.userspace_image.file_sha256;
-
-    var index: usize = 0;
-    while (index < init.userspace_image.segment_count) : (index += 1) {
-        const segment = init.userspace_image.segments[index];
-        record.regions[index] = .{
-            .kind = .load_segment,
-            .virtual_address = segment.virtual_address,
-            .size_bytes = segment.memory_size,
-            .file_offset = segment.file_offset,
-            .file_size = segment.file_size,
-            .access = segment.access,
-        };
-    }
-
-    record.regions[index] = .{
-        .kind = .stack,
-        .virtual_address = init.userspace_image.stack_top - init.userspace_image.stack_size_bytes,
-        .size_bytes = init.userspace_image.stack_size_bytes,
-        .file_offset = 0,
-        .file_size = 0,
-        .access = .{
-            .read = true,
-            .write = true,
-        },
-    };
-    record.region_count = init.userspace_image.segment_count + 1;
-    return record;
-}
-
 fn saturatingSub(current: usize, amount: usize) usize {
-    return if (amount >= current) 0 else current - amount;
+    return runtime_host.saturatingSub(current, amount);
 }
 
 fn zeroAddressSpace() AddressSpaceRecord {
-    return .{
-        .id = 0,
-        .owner_task_id = 0,
-        .process_id = 0,
-        .image_id = 0,
-        .load_state = .empty,
-        .entry_point = 0,
-        .instruction_pointer = 0,
-        .stack_pointer = 0,
-        .stack_top = 0,
-        .stack_size_bytes = 0,
-        .load_segment_count = 0,
-        .region_count = 0,
-        .image_sha256 = [_]u8{0} ** MAX_IMAGE_HASH_BYTES,
-        .regions = [_]AddressSpaceRegionRecord{zeroAddressSpaceRegion()} ** (MAX_EXECUTABLE_SEGMENTS + 1),
-    };
+    return runtime_host.zeroAddressSpace(
+        AddressSpaceRecord,
+        AddressSpaceRegionRecord,
+        MAX_EXECUTABLE_SEGMENTS + 1,
+    );
 }
 
 fn zeroAddressSpaceRegion() AddressSpaceRegionRecord {
-    return .{
-        .kind = .load_segment,
-        .virtual_address = 0,
-        .size_bytes = 0,
-        .file_offset = 0,
-        .file_size = 0,
-        .access = .{},
-    };
+    return runtime_host.zeroAddressSpaceRegion(AddressSpaceRegionRecord);
 }
 
 fn validateUserspaceImage(image: ExecutableImageSpec) Error!ExecutableImageSpec {
-    if (!image.isPresent()) return error.InvalidUserspaceImage;
-    if (image.segment_count > MAX_EXECUTABLE_SEGMENTS) return error.InvalidUserspaceImage;
-    if (image.stack_top == 0 or image.stack_size_bytes == 0) return error.InvalidUserspaceImage;
-
-    var has_executable_region = false;
-    var index: usize = 0;
-    while (index < image.segment_count) : (index += 1) {
-        const segment = image.segments[index];
-        if (segment.virtual_address == 0 or segment.memory_size == 0) return error.InvalidUserspaceImage;
-        if (segment.file_size > segment.memory_size) return error.InvalidUserspaceImage;
-        if (segment.alignment == 0) return error.InvalidUserspaceImage;
-        has_executable_region = has_executable_region or segment.access.execute;
-    }
-    if (!has_executable_region) return error.InvalidUserspaceImage;
-    return image;
+    return launch_helpers.validateUserspaceImage(Error, MAX_EXECUTABLE_SEGMENTS, image);
 }
 
 fn installAddressSpace(
@@ -787,140 +668,43 @@ fn installAddressSpace(
     replace_address_space_id: ?u64,
     address_space: AddressSpaceRecord,
 ) Error!void {
-    if (replace_address_space_id) |old_id| {
-        if (findAddressSpaceSlot(self, old_id)) |slot| {
-            slot.in_use = true;
-            slot.address_space = address_space;
-            return;
-        }
-    }
-
-    for (&self.address_spaces) |*slot| {
-        if (slot.in_use) continue;
-        slot.in_use = true;
-        slot.address_space = address_space;
-        return;
-    }
-    return error.AddressSpaceTableFull;
+    return runtime_host.installAddressSpace(Error, self, replace_address_space_id, address_space);
 }
 
 fn findAddressSpaceSlot(self: *Runtime, address_space_id: u64) ?*AddressSpaceSlot {
-    for (&self.address_spaces) |*slot| {
-        if (slot.in_use and slot.address_space.id == address_space_id) return slot;
-    }
-    return null;
+    return runtime_host.findAddressSpaceSlot(self, address_space_id);
 }
 
 fn zeroExecutionComponent() ExecutionComponentRecord {
-    return .{
-        .id = 0,
-        .substrate = .typed_component_abi,
-        .label_len = 0,
-        .label = [_]u8{0} ** 48,
-        .entry_len = 0,
-        .entry = [_]u8{0} ** 64,
-    };
+    return launch_helpers.zeroExecutionComponent(ExecutionComponentRecord);
 }
 
 fn zeroLaunchProvenance() LaunchProvenanceRecord {
-    return .{
-        .boundary = .direct_request,
-        .image_id = 0,
-        .component_abi_version = 0,
-        .signed = false,
-        .bundle_id_len = 0,
-        .bundle_id = [_]u8{0} ** MAX_TASK_BUNDLE_ID_BYTES,
-    };
-}
-
-fn componentClassLabel(component_class: ComponentClass) []const u8 {
-    return switch (component_class) {
-        .session_manager => "session-manager",
-        .app_component => "app-component",
-        .service_component => "service-component",
-    };
-}
-
-fn componentClassEntry(component_class: ComponentClass) []const u8 {
-    return switch (component_class) {
-        .session_manager => "zigos.session.manager",
-        .app_component => "zigos.app.component",
-        .service_component => "zigos.service.component",
-    };
+    return launch_helpers.zeroLaunchProvenance(LaunchProvenanceRecord);
 }
 
 fn defaultInitialComponent(request: TaskCreateRequest) ExecutionComponentSpec {
-    var component = request.initial_component;
-    if (component.label.len == 0) {
-        component.label = componentClassLabel(request.component_class);
-    }
-    if (component.entry.len == 0) {
-        component.entry = componentClassEntry(request.component_class);
-    }
-    return component;
-}
-
-fn copyTruncated(buffer: []u8, source: []const u8) usize {
-    const len = @min(buffer.len - 1, source.len);
-    @memcpy(buffer[0..len], source[0..len]);
-    return len;
+    return launch_helpers.defaultInitialComponent(request);
 }
 
 fn makeLaunchProvenance(spec: LaunchProvenanceSpec) LaunchProvenanceRecord {
-    var record = zeroLaunchProvenance();
-    record.boundary = spec.boundary;
-    record.image_id = spec.image_id;
-    record.component_abi_version = spec.component_abi_version;
-    record.signed = spec.signed;
-    record.bundle_id_len = copyTruncated(record.bundle_id[0..], spec.bundle_id);
-    return record;
+    return launch_helpers.makeLaunchProvenance(LaunchProvenanceRecord, spec);
 }
 
 fn makeExecutionComponent(self: *Runtime, component: ExecutionComponentSpec) ExecutionComponentRecord {
-    var record = zeroExecutionComponent();
-    record.id = self.next_component_id;
-    self.next_component_id += 1;
-    record.substrate = component.substrate;
-    record.label_len = copyTruncated(record.label[0..], component.label);
-    record.entry_len = copyTruncated(record.entry[0..], component.entry);
-    return record;
+    return launch_helpers.makeExecutionComponent(ExecutionComponentRecord, self, component);
 }
 
 pub fn syntheticUserspaceImage(label: []const u8, entry: []const u8) ExecutableImageSpec {
-    var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "label", label);
-    crypto_hash.updateBytes(&hasher, "entry", entry);
-
-    var image = ExecutableImageSpec{};
-    image.entry_point = DEFAULT_SYNTHETIC_ENTRY_POINT;
-    image.stack_top = DEFAULT_USER_STACK_TOP;
-    image.stack_size_bytes = DEFAULT_USER_STACK_SIZE_BYTES;
-    image.file_size_bytes = DEFAULT_SYNTHETIC_IMAGE_BYTES;
-    image.file_sha256 = crypto_hash.finalize(&hasher);
-    image.segment_count = 2;
-    image.segments[0] = .{
-        .virtual_address = DEFAULT_SYNTHETIC_ENTRY_POINT,
-        .file_offset = 0,
-        .file_size = 4096,
-        .memory_size = 4096,
-        .alignment = 0x1000,
-        .access = .{
-            .read = true,
-            .execute = true,
-        },
-    };
-    image.segments[1] = .{
-        .virtual_address = DEFAULT_SYNTHETIC_ENTRY_POINT + 0x1000,
-        .file_offset = 4096,
-        .file_size = 4096,
-        .memory_size = 4096,
-        .alignment = 0x1000,
-        .access = .{
-            .read = true,
-            .write = true,
-        },
-    };
-    return image;
+    return launch_helpers.syntheticUserspaceImage(
+        ExecutableImageSpec,
+        label,
+        entry,
+        DEFAULT_SYNTHETIC_ENTRY_POINT,
+        DEFAULT_USER_STACK_TOP,
+        DEFAULT_USER_STACK_SIZE_BYTES,
+        DEFAULT_SYNTHETIC_IMAGE_BYTES,
+    );
 }
 
 test "new tasks start with zero ambient authority and no capabilities" {

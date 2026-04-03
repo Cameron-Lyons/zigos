@@ -7,7 +7,7 @@ const device_inventory = @import("../drivers/device_inventory.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
-const service_contract = @import("service_contract.zig");
+const service_contract = @import("service_contracts.zig");
 const service_registry = @import("../kernel_api/service_registry.zig");
 const supervisor_mod = @import("supervisor.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -29,7 +29,7 @@ pub fn launchContractService(
     schedule_task: anytype,
     owner: principal.PrincipalId,
     service_id: u64,
-    entry: service_contract.Phase3Contract,
+    entry: service_contract.ServiceContract,
     correlation_base: u64,
     now_ticks: u64,
 ) ServiceBinding {
@@ -245,7 +245,7 @@ pub fn driverBudget(device_class: driver_service.DeviceClass) task_runtime.Resou
 }
 
 pub fn contractsReady(service_directory: *const service_registry.Registry) bool {
-    for (service_contract.ordered_phase3_contracts) |entry| {
+    for (service_contract.ordered_service_contracts) |entry| {
         _ = service_directory.connect(entry.interface) catch return false;
     }
     return true;
@@ -300,12 +300,12 @@ fn driverBundle(device_class: driver_service.DeviceClass, bundle_id: []const u8)
     };
 }
 
-test "contractsReady requires every ordered phase3 contract" {
+test "contractsReady requires every ordered service contract" {
     var registry = service_registry.Registry.init();
 
     try std.testing.expect(!contractsReady(&registry));
 
-    for (service_contract.ordered_phase3_contracts, 0..) |entry, index| {
+    for (service_contract.ordered_service_contracts, 0..) |entry, index| {
         try registry.register(
             10 + @as(u64, @intCast(index)),
             20 + @as(u64, @intCast(index)),

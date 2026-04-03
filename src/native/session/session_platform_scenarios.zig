@@ -17,15 +17,15 @@ const support = @import("session_lifecycle_support.zig");
 
 pub fn run(
     context: *support.Context,
-    phase5_sync_service: *sync_service_mod.Service,
-    phase4: support.Phase4State,
-    phase5: support.Phase5State,
+    sync_service: *sync_service_mod.Service,
+    storage_state: support.StorageScenarioState,
+    sync_state: support.SyncScenarioState,
 ) void {
-    const phase6_state_signer = signing.SignerIdentity{
+    const platform_state_signer = signing.SignerIdentity{
         .label = "zigos-base-state",
         .seed = [_]u8{0xA1} ** 32,
     };
-    const phase6_image_signer = signing.SignerIdentity{
+    const platform_image_signer = signing.SignerIdentity{
         .label = "zigos-base-image",
         .seed = [_]u8{0xA2} ** 32,
     };
@@ -48,30 +48,30 @@ pub fn run(
     };
     const paired_device_principal = principal.PrincipalId{ .kind = .device, .serial = 5 };
 
-    support.common.printBootMarker("ZIGOS:PHASE6:INIT_START");
-    support.common.printBootMarker("ZIGOS:PHASE6:IMMUTABLE_BASE:LOOKUP_START");
+    support.common.printBootMarker("ZIGOS:PLATFORM:INIT_START");
+    support.common.printBootMarker("ZIGOS:PLATFORM:IMMUTABLE_BASE:LOOKUP_START");
     var immutable_base_workspace_found = true;
     const immutable_base_workspace = context.storage_service_instance.findWorkspace(
         context.package_service_principal,
         immutable_base.state_workspace_label,
     ) orelse context.storage_service_instance.findWorkspaceByLabel(immutable_base.state_workspace_label) orelse blk: {
         immutable_base_workspace_found = false;
-        support.common.printBootMarker("ZIGOS:PHASE6:IMMUTABLE_BASE:LOOKUP_MISS");
+        support.common.printBootMarker("ZIGOS:PLATFORM:IMMUTABLE_BASE:LOOKUP_MISS");
         const request = workspace_mod.CreateRequest{
             .owner = context.package_service_principal,
             .label = immutable_base.state_workspace_label,
         };
-        support.common.printBootMarker("ZIGOS:PHASE6:IMMUTABLE_BASE:CREATE_START");
+        support.common.printBootMarker("ZIGOS:PLATFORM:IMMUTABLE_BASE:CREATE_START");
         break :blk context.storage_service_instance.createWorkspaceRef(&request) catch unreachable;
     };
     if (immutable_base_workspace_found) {
-        support.common.printBootMarker("ZIGOS:PHASE6:IMMUTABLE_BASE:LOOKUP_HIT");
+        support.common.printBootMarker("ZIGOS:PLATFORM:IMMUTABLE_BASE:LOOKUP_HIT");
     }
-    support.common.printBootMarker("ZIGOS:PHASE6:IMMUTABLE_BASE:WORKSPACE_READY");
+    support.common.printBootMarker("ZIGOS:PLATFORM:IMMUTABLE_BASE:WORKSPACE_READY");
     var immutable_base_manager = immutable_base.Manager.initWithWorkspace(
         context.storage_service_instance,
         context.package_service_principal,
-        phase6_state_signer,
+        platform_state_signer,
         immutable_base_workspace.id,
     ) catch unreachable;
     const core_health_service_ids = [_]u64{
@@ -79,17 +79,17 @@ pub fn run(
         context.package_service_id,
         context.sync_service_id,
     };
-    support.common.printBootMarker("ZIGOS:PHASE6:INIT_READY");
+    support.common.printBootMarker("ZIGOS:PLATFORM:INIT_READY");
     if (immutable_base_manager.activeImage() == null) {
-        support.common.printBootMarker("ZIGOS:PHASE6:SEED_START");
+        support.common.printBootMarker("ZIGOS:PLATFORM:SEED_START");
         _ = immutable_base_manager.stageImage(
             0,
             "stable-a",
             "kernel=v1;base=stable-a;mode=ro",
-            phase6_image_signer,
+            platform_image_signer,
             108,
         ) catch unreachable;
-        support.common.printBootMarker("ZIGOS:PHASE6:SEED_SLOT0");
+        support.common.printBootMarker("ZIGOS:PLATFORM:SEED_SLOT0");
         immutable_base_manager.beginActivation(0, 109) catch unreachable;
         update_health.recordBootSuccess(&immutable_base_manager, 110) catch unreachable;
         _ = update_health.validatePendingActivation(
@@ -98,15 +98,15 @@ pub fn run(
             context.storage_service_instance,
             .{
                 .core_service_ids = core_health_service_ids[0..],
-                .storage_workspace_id = phase4.notes_workspace_id,
+                .storage_workspace_id = storage_state.notes_workspace_id,
                 .storage_probe_path = "documents/notes.md",
                 .network_service_id = context.network_service_id,
                 .ui_service_id = context.compositor_service_id,
                 .network_probe = .{
-                    .sync = phase5_sync_service,
-                    .workspace_id = phase4.notes_workspace_id,
+                    .sync = sync_service,
+                    .workspace_id = storage_state.notes_workspace_id,
                     .source_device = local_device_principal,
-                    .target_device = phase5.tablet_device_principal,
+                    .target_device = sync_state.tablet_device_principal,
                     .tick = 110,
                 },
                 .ui_probe = .{ .session = context.compositor },
@@ -114,15 +114,15 @@ pub fn run(
             context.update_ledger,
             111,
         ) catch unreachable;
-        support.common.printBootMarker("ZIGOS:PHASE6:SEED_SLOT0_ACTIVE");
+        support.common.printBootMarker("ZIGOS:PLATFORM:SEED_SLOT0_ACTIVE");
         _ = immutable_base_manager.stageImage(
             1,
             "stable-b",
             "kernel=v2;base=stable-b;mode=ro",
-            phase6_image_signer,
+            platform_image_signer,
             112,
         ) catch unreachable;
-        support.common.printBootMarker("ZIGOS:PHASE6:SEED_SLOT1");
+        support.common.printBootMarker("ZIGOS:PLATFORM:SEED_SLOT1");
 
         immutable_base_manager.beginActivation(1, 113) catch unreachable;
         const boot_failure = update_health.validatePendingActivation(
@@ -131,15 +131,15 @@ pub fn run(
             context.storage_service_instance,
             .{
                 .core_service_ids = core_health_service_ids[0..],
-                .storage_workspace_id = phase4.notes_workspace_id,
+                .storage_workspace_id = storage_state.notes_workspace_id,
                 .storage_probe_path = "documents/notes.md",
                 .network_service_id = context.network_service_id,
                 .ui_service_id = context.compositor_service_id,
                 .network_probe = .{
-                    .sync = phase5_sync_service,
-                    .workspace_id = phase4.notes_workspace_id,
+                    .sync = sync_service,
+                    .workspace_id = storage_state.notes_workspace_id,
                     .source_device = local_device_principal,
-                    .target_device = phase5.tablet_device_principal,
+                    .target_device = sync_state.tablet_device_principal,
                     .tick = 113,
                 },
                 .ui_probe = .{ .session = context.compositor },
@@ -148,7 +148,7 @@ pub fn run(
             114,
         ) catch unreachable;
         if (boot_failure.activation.rolled_back and boot_failure.activation.failure == .boot) {
-            support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:BOOT_ROLLBACK");
+            support.common.printBootMarker("ZIGOS:PLATFORM:HEALTHCHECK:BOOT_ROLLBACK");
         }
         immutable_base_manager.beginActivation(1, 115) catch unreachable;
         update_health.recordBootSuccess(&immutable_base_manager, 116) catch unreachable;
@@ -159,15 +159,15 @@ pub fn run(
             context.storage_service_instance,
             .{
                 .core_service_ids = core_health_service_ids[0..],
-                .storage_workspace_id = phase4.notes_workspace_id,
+                .storage_workspace_id = storage_state.notes_workspace_id,
                 .storage_probe_path = "documents/notes.md",
                 .network_service_id = context.network_service_id,
                 .ui_service_id = context.compositor_service_id,
                 .network_probe = .{
-                    .sync = phase5_sync_service,
-                    .workspace_id = phase4.notes_workspace_id,
+                    .sync = sync_service,
+                    .workspace_id = storage_state.notes_workspace_id,
                     .source_device = local_device_principal,
-                    .target_device = phase5.tablet_device_principal,
+                    .target_device = sync_state.tablet_device_principal,
                     .tick = 117,
                 },
                 .ui_probe = .{ .session = context.compositor },
@@ -177,7 +177,7 @@ pub fn run(
         ) catch unreachable;
         _ = context.supervisor.markHealthy(context.sync_service_id, 119);
         if (core_failure.activation.rolled_back and core_failure.activation.failure == .core_service) {
-            support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:CORE_ROLLBACK");
+            support.common.printBootMarker("ZIGOS:PLATFORM:HEALTHCHECK:CORE_ROLLBACK");
         }
         immutable_base_manager.beginActivation(1, 120) catch unreachable;
         update_health.recordBootSuccess(&immutable_base_manager, 121) catch unreachable;
@@ -188,15 +188,15 @@ pub fn run(
             context.storage_service_instance,
             .{
                 .core_service_ids = core_health_service_ids[0..],
-                .storage_workspace_id = phase4.notes_workspace_id,
+                .storage_workspace_id = storage_state.notes_workspace_id,
                 .storage_probe_path = "documents/notes.md",
                 .network_service_id = context.network_service_id,
                 .ui_service_id = context.compositor_service_id,
                 .network_probe = .{
-                    .sync = phase5_sync_service,
-                    .workspace_id = phase4.notes_workspace_id,
+                    .sync = sync_service,
+                    .workspace_id = storage_state.notes_workspace_id,
                     .source_device = local_device_principal,
-                    .target_device = phase5.tablet_device_principal,
+                    .target_device = sync_state.tablet_device_principal,
                     .tick = 122,
                 },
                 .ui_probe = .{ .session = context.compositor },
@@ -206,7 +206,7 @@ pub fn run(
         ) catch unreachable;
         _ = context.supervisor.markHealthy(context.compositor_service_id, 124);
         if (ui_failure.activation.rolled_back and ui_failure.activation.failure == .ui) {
-            support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:UI_ROLLBACK");
+            support.common.printBootMarker("ZIGOS:PLATFORM:HEALTHCHECK:UI_ROLLBACK");
         }
         immutable_base_manager.beginActivation(1, 125) catch unreachable;
         update_health.recordBootSuccess(&immutable_base_manager, 126) catch unreachable;
@@ -216,15 +216,15 @@ pub fn run(
             context.storage_service_instance,
             .{
                 .core_service_ids = core_health_service_ids[0..],
-                .storage_workspace_id = phase4.notes_workspace_id,
+                .storage_workspace_id = storage_state.notes_workspace_id,
                 .storage_probe_path = "documents/missing.md",
                 .network_service_id = context.network_service_id,
                 .ui_service_id = context.compositor_service_id,
                 .network_probe = .{
-                    .sync = phase5_sync_service,
-                    .workspace_id = phase4.notes_workspace_id,
+                    .sync = sync_service,
+                    .workspace_id = storage_state.notes_workspace_id,
                     .source_device = local_device_principal,
-                    .target_device = phase5.tablet_device_principal,
+                    .target_device = sync_state.tablet_device_principal,
                     .tick = 126,
                 },
                 .ui_probe = .{ .session = context.compositor },
@@ -233,7 +233,7 @@ pub fn run(
             127,
         ) catch unreachable;
         if (storage_failure.activation.rolled_back and storage_failure.activation.failure == .storage) {
-            support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:STORAGE_ROLLBACK");
+            support.common.printBootMarker("ZIGOS:PLATFORM:HEALTHCHECK:STORAGE_ROLLBACK");
         }
         immutable_base_manager.beginActivation(1, 128) catch unreachable;
         update_health.recordBootSuccess(&immutable_base_manager, 129) catch unreachable;
@@ -244,15 +244,15 @@ pub fn run(
             context.storage_service_instance,
             .{
                 .core_service_ids = core_health_service_ids[0..],
-                .storage_workspace_id = phase4.notes_workspace_id,
+                .storage_workspace_id = storage_state.notes_workspace_id,
                 .storage_probe_path = "documents/notes.md",
                 .network_service_id = context.network_service_id,
                 .ui_service_id = context.compositor_service_id,
                 .network_probe = .{
-                    .sync = phase5_sync_service,
-                    .workspace_id = phase4.notes_workspace_id,
+                    .sync = sync_service,
+                    .workspace_id = storage_state.notes_workspace_id,
                     .source_device = local_device_principal,
-                    .target_device = phase5.tablet_device_principal,
+                    .target_device = sync_state.tablet_device_principal,
                     .tick = 130,
                 },
                 .ui_probe = .{ .session = context.compositor },
@@ -262,7 +262,7 @@ pub fn run(
         ) catch unreachable;
         _ = context.supervisor.markHealthy(context.network_service_id, 132);
         if (network_failure.activation.rolled_back and network_failure.activation.failure == .network) {
-            support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:NETWORK_ROLLBACK");
+            support.common.printBootMarker("ZIGOS:PLATFORM:HEALTHCHECK:NETWORK_ROLLBACK");
         }
         immutable_base_manager.beginActivation(1, 133) catch unreachable;
         update_health.recordBootSuccess(&immutable_base_manager, 134) catch unreachable;
@@ -272,15 +272,15 @@ pub fn run(
             context.storage_service_instance,
             .{
                 .core_service_ids = core_health_service_ids[0..],
-                .storage_workspace_id = phase4.notes_workspace_id,
+                .storage_workspace_id = storage_state.notes_workspace_id,
                 .storage_probe_path = "documents/notes.md",
                 .network_service_id = context.network_service_id,
                 .ui_service_id = context.compositor_service_id,
                 .network_probe = .{
-                    .sync = phase5_sync_service,
-                    .workspace_id = phase4.notes_workspace_id,
+                    .sync = sync_service,
+                    .workspace_id = storage_state.notes_workspace_id,
                     .source_device = local_device_principal,
-                    .target_device = phase5.tablet_device_principal,
+                    .target_device = sync_state.tablet_device_principal,
                     .tick = 134,
                 },
                 .ui_probe = .{ .session = context.compositor },
@@ -291,41 +291,41 @@ pub fn run(
     }
 
     if (immutable_base_manager.rollback_generation >= 1) {
-        support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:BOOT_ROLLBACK");
+        support.common.printBootMarker("ZIGOS:PLATFORM:HEALTHCHECK:BOOT_ROLLBACK");
     }
     if (immutable_base_manager.rollback_generation >= 2) {
-        support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:CORE_ROLLBACK");
+        support.common.printBootMarker("ZIGOS:PLATFORM:HEALTHCHECK:CORE_ROLLBACK");
     }
     if (immutable_base_manager.rollback_generation >= 3) {
-        support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:UI_ROLLBACK");
+        support.common.printBootMarker("ZIGOS:PLATFORM:HEALTHCHECK:UI_ROLLBACK");
     }
     if (immutable_base_manager.rollback_generation >= 4) {
-        support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:STORAGE_ROLLBACK");
+        support.common.printBootMarker("ZIGOS:PLATFORM:HEALTHCHECK:STORAGE_ROLLBACK");
     }
     if (immutable_base_manager.rollback_generation >= 5) {
-        support.common.printBootMarker("ZIGOS:PHASE6:HEALTHCHECK:NETWORK_ROLLBACK");
+        support.common.printBootMarker("ZIGOS:PLATFORM:HEALTHCHECK:NETWORK_ROLLBACK");
     }
 
     const active_base_image = immutable_base_manager.activeImage().?;
     if (immutable_base_manager.verifyActiveImage() and active_base_image.read_only) {
-        support.common.printBootMarker(boot_markers.phase6_immutable_base_active);
+        support.common.printBootMarker(boot_markers.platform_immutable_base_active);
     }
     if (immutable_base_manager.rollback_generation >= 5) {
-        support.common.printBootMarker(boot_markers.phase6_activation_rollback_ok);
+        support.common.printBootMarker(boot_markers.platform_activation_rollback_ok);
     }
 
     var measured = measured_boot.Recorder.init();
     measured.begin(immutable_base_manager.activation_generation);
-    measured.add(.kernel, "kernel-zigos-native", "phase6-native-kernel") catch unreachable;
+    measured.add(.kernel, "kernel-zigos-native", "platform-native-kernel") catch unreachable;
     measured.add(.base_image, active_base_image.labelSlice(), &active_base_image.measurement) catch unreachable;
     var policy_measure: [96]u8 = undefined;
     const policy_measure_text = std.fmt.bufPrint(
         &policy_measure,
         "offline={d}:e2ee={d}:overlay={d}",
         .{
-            @intFromBool(phase5.workspace_policy.offline_first),
-            @intFromBool(phase5.workspace_policy.personal_e2ee),
-            phase5.workspace_policy.overlay_policy_id orelse 0,
+            @intFromBool(sync_state.workspace_policy.offline_first),
+            @intFromBool(sync_state.workspace_policy.personal_e2ee),
+            sync_state.workspace_policy.overlay_policy_id orelse 0,
         },
     ) catch unreachable;
     measured.add(.policy, "workspace-policy", policy_measure_text) catch unreachable;
@@ -373,15 +373,15 @@ pub fn run(
         measured_boot_record.countKind(.driver_set) == 1 and
         !std.mem.allEqual(u8, &measured_boot_record.root_digest, 0))
     {
-        support.common.printBootMarker(boot_markers.phase6_measured_boot_recorded);
+        support.common.printBootMarker(boot_markers.platform_measured_boot_recorded);
     }
 
-    if (phase5_sync_service.findDeviceRecord(recovery_device_principal) == null) {
-        _ = phase5_sync_service.enrollTrustedDevice(
+    if (sync_service.findDeviceRecord(recovery_device_principal) == null) {
+        _ = sync_service.enrollTrustedDevice(
             context.session_user,
             recovery_device_principal,
             "recovery-device",
-            phase5.user_root_signer,
+            sync_state.user_root_signer,
             recovery_device_signer,
             117,
         ) catch unreachable;
@@ -391,125 +391,125 @@ pub fn run(
     if (recovery.verifyAndReinstallImage(
         &immutable_base_manager,
         "kernel=v2;base=reinstalled;mode=ro",
-        phase6_image_signer,
+        platform_image_signer,
         118,
     ) catch unreachable) {
-        support.common.printBootMarker(boot_markers.phase6_recovery_verify_reinstall);
+        support.common.printBootMarker(boot_markers.platform_recovery_verify_reinstall);
     }
 
-    if (context.export_package.workspace_id != phase4.notes_workspace_id or
+    if (context.export_package.workspace_id != storage_state.notes_workspace_id or
         context.export_package.snapshot_id == 0)
     {
-        const recovery_snapshot_id = if (context.storage_service_instance.findSnapshot(phase4.notes_workspace_id, "phase6-recovery")) |snapshot|
+        const recovery_snapshot_id = if (context.storage_service_instance.findSnapshot(storage_state.notes_workspace_id, "platform-recovery")) |snapshot|
             snapshot.id
         else created: {
             const snapshot = context.storage_service_instance.snapshot(
-                phase4.notes_workspace_id,
-                "phase6-recovery",
-                support.phase4_workspace_signer,
+                storage_state.notes_workspace_id,
+                "platform-recovery",
+                support.workspace_signer,
             ) catch unreachable;
             break :created snapshot.id;
         };
         context.storage_service_instance.exportSnapshotInto(
-            phase4.notes_workspace_id,
+            storage_state.notes_workspace_id,
             recovery_snapshot_id,
-            support.phase4_export_signer,
+            support.export_signer,
             context.export_package,
         ) catch unreachable;
     }
 
-    support.common.printBootMarker("ZIGOS:PHASE6:RECOVERY:NOTES_V3_START");
+    support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:NOTES_V3_START");
     const notes_v3_request = object_store_mod.PutRequest{
         .object_type = .document,
-        .payload = "# Notes\n- phase6 recovery drift\n",
+        .payload = "# Notes\n- platform recovery drift\n",
         .metadata = object_store_mod.signMetadata(
-            support.phase4_storage_signer,
+            support.storage_signer,
             "notes",
             "text/markdown",
             .document,
-            "# Notes\n- phase6 recovery drift\n",
+            "# Notes\n- platform recovery drift\n",
             136,
         ) catch unreachable,
         .preferred_object_id = null,
-        .parent_version_id = phase4.latest_notes_version_id,
+        .parent_version_id = storage_state.latest_notes_version_id,
     };
     _ = context.storage_service_instance.putVersionRef(&notes_v3_request) catch unreachable;
-    support.common.printBootMarker("ZIGOS:PHASE6:RECOVERY:NOTES_V3_PUT");
-    const notes_v3 = support.latestInsertedVersion(context.storage_service_instance.store).?;
+    support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:NOTES_V3_PUT");
+    const notes_v3 = support.latestInsertedVersion(context.storage_service_instance).?;
     const notes_object_id = notes_v3.object_id;
     const notes_v3_version_id = notes_v3.id;
-    support.common.printBootMarker("ZIGOS:PHASE6:RECOVERY:NOTES_V3_LATEST");
-    context.storage_service_instance.beginTransaction(phase4.notes_workspace_id) catch unreachable;
+    support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:NOTES_V3_LATEST");
+    context.storage_service_instance.beginTransaction(storage_state.notes_workspace_id) catch unreachable;
     context.storage_service_instance.stagePut(
-        phase4.notes_workspace_id,
+        storage_state.notes_workspace_id,
         "documents/notes.md",
         notes_object_id,
         notes_v3_version_id,
         .document,
     ) catch unreachable;
-    _ = context.storage_service_instance.commit(phase4.notes_workspace_id, 137) catch unreachable;
-    support.common.printBootMarker("ZIGOS:PHASE6:RECOVERY:NOTES_V3_COMMIT");
+    _ = context.storage_service_instance.commit(storage_state.notes_workspace_id, 137) catch unreachable;
+    support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:NOTES_V3_COMMIT");
     _ = recovery.restoreWorkspaceExport(
         context.storage_service_instance,
-        phase4.notes_workspace_id,
+        storage_state.notes_workspace_id,
         context.export_package,
         138,
     ) catch unreachable;
-    support.common.printBootMarker("ZIGOS:PHASE6:RECOVERY:RESTORE_APPLIED");
-    const restored_notes = context.storage_service_instance.resolve(phase4.notes_workspace_id, "documents/notes.md") catch unreachable;
+    support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:RESTORE_APPLIED");
+    const restored_notes = context.storage_service_instance.resolve(storage_state.notes_workspace_id, "documents/notes.md") catch unreachable;
     _ = restored_notes;
 
-    if (phase5_sync_service.findWorkspacePolicy(phase4.notes_workspace_id) == null) {
-        _ = phase5_sync_service.configureWorkspacePolicy(.{
-            .workspace_id = phase4.notes_workspace_id,
+    if (sync_service.findWorkspacePolicy(storage_state.notes_workspace_id) == null) {
+        _ = sync_service.configureWorkspacePolicy(.{
+            .workspace_id = storage_state.notes_workspace_id,
             .owner = context.session_user,
             .offline_first = true,
             .personal_e2ee = true,
             .selective_prefixes = &.{ "documents/", "assets/" },
-            .device_to_device_policy_id = phase5.local_network_policy_id,
-            .relay_policy_id = phase5.relay_policy_id,
-            .overlay_policy_id = phase5.overlay_policy_id,
+            .device_to_device_policy_id = sync_state.local_network_policy_id,
+            .relay_policy_id = sync_state.relay_policy_id,
+            .overlay_policy_id = sync_state.overlay_policy_id,
             .relay_domain = "relay.zigos.dev",
         }) catch unreachable;
     }
     if (recovery.repairSyncMetadata(
-        phase5_sync_service,
+        sync_service,
         context.storage_service_instance,
-        phase4.notes_workspace_id,
-        phase5.tablet_device_principal,
-    ) catch unreachable and phase5_sync_service.findConflict(phase4.notes_workspace_id, phase5.tablet_device_principal, "documents/notes.md") == null) {
-        support.common.printBootMarker("ZIGOS:PHASE6:RECOVERY:REPAIR_SYNC");
+        storage_state.notes_workspace_id,
+        sync_state.tablet_device_principal,
+    ) catch unreachable and sync_service.findConflict(storage_state.notes_workspace_id, sync_state.tablet_device_principal, "documents/notes.md") == null) {
+        support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:REPAIR_SYNC");
     }
 
-    const recovery_device_record = phase5_sync_service.findDeviceRecord(recovery_device_principal).?;
+    const recovery_device_record = sync_service.findDeviceRecord(recovery_device_principal).?;
     if (recovery_device_record.isTrusted() and recovery_device_record.key_rotation_generation < 2) {
         _ = recovery.rotateDeviceKeys(
-            phase5_sync_service,
+            sync_service,
             context.session_user,
             recovery_device_principal,
-            phase5.user_root_signer,
+            sync_state.user_root_signer,
             recovery_rotated_signer,
             139,
         ) catch unreachable;
     }
-    if (phase5_sync_service.findDeviceRecord(recovery_device_principal).?.key_rotation_generation >= 2) {
-        support.common.printBootMarker("ZIGOS:PHASE6:RECOVERY:ROTATE_KEYS");
+    if (sync_service.findDeviceRecord(recovery_device_principal).?.key_rotation_generation >= 2) {
+        support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:ROTATE_KEYS");
     }
-    if (phase5_sync_service.isTrustedDevice(recovery_device_principal)) {
+    if (sync_service.isTrustedDevice(recovery_device_principal)) {
         _ = recovery.revokeDeviceTrust(
-            phase5_sync_service,
+            sync_service,
             context.session_user,
             recovery_device_principal,
-            phase5.user_root_signer,
+            sync_state.user_root_signer,
             140,
         ) catch unreachable;
     }
-    if (!phase5_sync_service.isTrustedDevice(recovery_device_principal)) {
-        support.common.printBootMarker("ZIGOS:PHASE6:RECOVERY:REVOKE_TRUST");
+    if (!sync_service.isTrustedDevice(recovery_device_principal)) {
+        support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:REVOKE_TRUST");
     }
 
     var ux = native_ux.Controller.init();
-    const phase6_notes_task = ux.startTask(context.runtime, .{
+    const notes_task = ux.startTask(context.runtime, .{
         .owner = context.session_user,
         .component_class = .app_component,
         .budget = .{
@@ -526,44 +526,44 @@ pub fn run(
             .entry = "app.notes",
         },
     }) catch unreachable;
-    if (phase6_notes_task.component_class == .app_component) {
-        support.common.printBootMarker("ZIGOS:PHASE6:UX:START_TASK");
+    if (notes_task.component_class == .app_component) {
+        support.common.printBootMarker("ZIGOS:PLATFORM:UX:START_TASK");
     }
-    const task_view = context.compositor.openTaskView(phase6_notes_task, "Edit Notes") catch unreachable;
+    const task_view = context.compositor.openTaskView(notes_task, "Edit Notes") catch unreachable;
     if (task_view.id != 0) {
-        support.common.printBootMarker("ZIGOS:PHASE6:UX:TASK_VIEW");
+        support.common.printBootMarker("ZIGOS:PLATFORM:UX:TASK_VIEW");
     }
 
     const opened_workspace = ux.openWorkspace(
         context.storage_service_instance,
-        phase4.notes_workspace_id,
+        storage_state.notes_workspace_id,
         "documents/notes.md",
         context.session_user,
     ) catch unreachable;
-    const workspace_record = context.storage_service_instance.workspaces.find(phase4.notes_workspace_id).?;
+    const workspace_record = context.storage_service_instance.findWorkspaceRecord(storage_state.notes_workspace_id).?;
     const workspace_view = context.compositor.openWorkspaceView(
-        phase6_notes_task,
-        phase4.notes_workspace_id,
+        notes_task,
+        storage_state.notes_workspace_id,
         workspace_record.labelSlice(),
     ) catch unreachable;
     const document_view = context.compositor.openDocumentView(
-        phase6_notes_task,
-        phase4.notes_workspace_id,
+        notes_task,
+        storage_state.notes_workspace_id,
         "documents/notes.md",
     ) catch unreachable;
     if (opened_workspace.version_id != 0) {
-        support.common.printBootMarker("ZIGOS:PHASE6:UX:OPEN_WORKSPACE");
+        support.common.printBootMarker("ZIGOS:PLATFORM:UX:OPEN_WORKSPACE");
     }
     if (workspace_view.id != 0 and document_view.id != 0) {
-        support.common.printBootMarker("ZIGOS:PHASE6:UX:WINDOW_VIEWS");
+        support.common.printBootMarker("ZIGOS:PLATFORM:UX:WINDOW_VIEWS");
     }
 
     ux.pairDevice(
-        phase5_sync_service,
+        sync_service,
         context.session_user,
         paired_device_principal,
         "paired-device",
-        phase5.user_root_signer,
+        sync_state.user_root_signer,
         paired_device_signer,
         141,
     ) catch unreachable;
@@ -574,21 +574,21 @@ pub fn run(
         141,
         "device paired",
     ) catch unreachable;
-    if (phase5_sync_service.isTrustedDevice(paired_device_principal)) {
-        support.common.printBootMarker("ZIGOS:PHASE6:UX:PAIR_DEVICE");
+    if (sync_service.isTrustedDevice(paired_device_principal)) {
+        support.common.printBootMarker("ZIGOS:PLATFORM:UX:PAIR_DEVICE");
     }
 
     if (ux.reviewPermissionRequest(
-        phase6_notes_task.id,
+        notes_task.id,
         context.session_user,
         .object_access,
         true,
     ) catch unreachable) {
-        support.common.printBootMarker("ZIGOS:PHASE6:UX:REVIEW_PERMISSION");
+        support.common.printBootMarker("ZIGOS:PLATFORM:UX:REVIEW_PERMISSION");
     }
-    ux.recoverSystem(phase6_notes_task.id, context.session_user, "recovery-environment") catch unreachable;
+    ux.recoverSystem(notes_task.id, context.session_user, "recovery-environment") catch unreachable;
     if (ux.flow_count == 5) {
-        support.common.printBootMarker(boot_markers.phase6_ux_recover_system);
+        support.common.printBootMarker(boot_markers.platform_ux_recover_system);
     }
 
     context.runtime_service.checkpoint(142);

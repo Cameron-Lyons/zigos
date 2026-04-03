@@ -21,8 +21,8 @@ pub const contracts = [_]ContractSpec{
     .{ .bundle_id = "zigos.system.session-manager", .role_tag = 0xA101, .heartbeat_increment = 1, .contract_flags = FLAG_SYSTEM_BUNDLE },
     .{ .bundle_id = "zigos.system.permission-review", .role_tag = 0xA102, .heartbeat_increment = 2, .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_OWNS_UI_SURFACE | FLAG_PERMISSION_REVIEW },
     .{ .bundle_id = "zigos.system.workspace-storage", .role_tag = 0xA103, .heartbeat_increment = 3, .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_STORAGE_BOUNDARY },
-    .{ .bundle_id = "zigos.system.phase1-client", .role_tag = 0xA104, .heartbeat_increment = 4, .contract_flags = FLAG_OWNS_UI_SURFACE },
-    .{ .bundle_id = "zigos.system.phase1-temp", .role_tag = 0xA105, .heartbeat_increment = 5, .contract_flags = 0 },
+    .{ .bundle_id = "zigos.system.transport-probe", .role_tag = 0xA104, .heartbeat_increment = 4, .contract_flags = FLAG_OWNS_UI_SURFACE },
+    .{ .bundle_id = "zigos.system.termination-probe", .role_tag = 0xA105, .heartbeat_increment = 5, .contract_flags = 0 },
     .{ .bundle_id = "app.viewer", .role_tag = 0xA106, .heartbeat_increment = 6, .contract_flags = FLAG_OWNS_UI_SURFACE },
     .{ .bundle_id = "app.notes", .role_tag = 0xA107, .heartbeat_increment = 7, .contract_flags = FLAG_OWNS_UI_SURFACE },
     .{ .bundle_id = "app.sync", .role_tag = 0xA108, .heartbeat_increment = 8, .contract_flags = FLAG_BACKGROUND_ELIGIBLE },
@@ -37,7 +37,7 @@ pub const contracts = [_]ContractSpec{
     .{ .bundle_id = "zigos.system.sync-service", .role_tag = 0xA111, .heartbeat_increment = 17, .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_BACKGROUND_ELIGIBLE },
     .{ .bundle_id = "zigos.system.media-print", .role_tag = 0xA112, .heartbeat_increment = 18, .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_BACKGROUND_ELIGIBLE },
     .{ .bundle_id = "zigos.system.compatibility-portal", .role_tag = 0xA113, .heartbeat_increment = 19, .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_COMPATIBILITY_BOUNDARY },
-    .{ .bundle_id = "zigos.system.phase3-client", .role_tag = 0xA114, .heartbeat_increment = 20, .contract_flags = FLAG_OWNS_UI_SURFACE },
+    .{ .bundle_id = "zigos.system.service-client", .role_tag = 0xA114, .heartbeat_increment = 20, .contract_flags = FLAG_OWNS_UI_SURFACE },
 };
 
 pub fn find(bundle_id: []const u8) ?*const ContractSpec {

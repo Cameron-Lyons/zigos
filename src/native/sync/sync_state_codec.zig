@@ -16,8 +16,6 @@ const MAX_OVERLAYS = state_support.MAX_OVERLAYS;
 const MAX_PRIVATE_SERVICES = state_support.MAX_PRIVATE_SERVICES;
 const MAX_LABEL_BYTES = state_support.MAX_LABEL_BYTES;
 
-const persisted_state = &state_support.persisted_state;
-
 const CursorWriter = struct {
     buffer: []u8,
     offset: usize = 0,
@@ -95,28 +93,28 @@ pub const StateIndex = struct {
     digest: [32]u8,
 };
 
-pub fn serialize(buffer: []u8) Error!usize {
+pub fn serialize(resident: *const state_support.ResidentState, buffer: []u8) Error!usize {
     var writer = CursorWriter{ .buffer = buffer };
     try writer.writeBytes(state_support.state_magic);
     try writer.writeU16(state_support.state_version);
-    try writer.writeU64(persisted_state.next_overlay_id);
-    try writer.writeU64(persisted_state.next_contract_id);
-    try writer.writeU16(@intCast(state_support.userRootCount()));
-    try writer.writeU16(@intCast(state_support.deviceCount()));
-    try writer.writeU16(@intCast(state_support.networkPolicyCount()));
-    try writer.writeU16(@intCast(state_support.workspacePolicyCount()));
-    try writer.writeU16(@intCast(state_support.replicaCount()));
-    try writer.writeU16(@intCast(state_support.conflictCount()));
-    try writer.writeU16(@intCast(state_support.databaseContractCount()));
-    try writer.writeU16(@intCast(state_support.overlayCount()));
+    try writer.writeU64(resident.persisted_state.next_overlay_id);
+    try writer.writeU64(resident.persisted_state.next_contract_id);
+    try writer.writeU16(@intCast(resident.userRootCount()));
+    try writer.writeU16(@intCast(resident.deviceCount()));
+    try writer.writeU16(@intCast(resident.networkPolicyCount()));
+    try writer.writeU16(@intCast(resident.workspacePolicyCount()));
+    try writer.writeU16(@intCast(resident.replicaCount()));
+    try writer.writeU16(@intCast(resident.conflictCount()));
+    try writer.writeU16(@intCast(resident.databaseContractCount()));
+    try writer.writeU16(@intCast(resident.overlayCount()));
 
-    for (persisted_state.graph.user_roots) |slot| {
+    for (resident.persisted_state.graph.user_roots) |slot| {
         if (!slot.in_use) continue;
         try writePrincipal(&writer, slot.root.principal_id);
         try writeText(&writer, slot.root.labelSlice());
         try writeSignature(&writer, slot.root.root_signature);
     }
-    for (persisted_state.graph.devices) |slot| {
+    for (resident.persisted_state.graph.devices) |slot| {
         if (!slot.in_use) continue;
         try writePrincipal(&writer, slot.device.principal_id);
         try writePrincipal(&writer, slot.device.owner);
@@ -132,7 +130,7 @@ pub fn serialize(buffer: []u8) Error!usize {
         try writer.writeU64(slot.device.last_rotated_at_ticks);
         try writer.writeU64(slot.device.revoked_at_ticks);
     }
-    for (persisted_state.network_policies.policies) |slot| {
+    for (resident.persisted_state.network_policies.policies) |slot| {
         if (!slot.in_use) continue;
         try writer.writeU64(slot.policy.id);
         try writePrincipal(&writer, slot.policy.owner);
@@ -147,7 +145,7 @@ pub fn serialize(buffer: []u8) Error!usize {
             try writer.writeBytes(&slot.policy.pinned_root_digest);
         }
     }
-    for (persisted_state.workspace_policies) |slot| {
+    for (resident.persisted_state.workspace_policies) |slot| {
         if (!slot.in_use) continue;
         try writer.writeU64(slot.policy.workspace_id);
         try writePrincipal(&writer, slot.policy.owner);
@@ -164,7 +162,7 @@ pub fn serialize(buffer: []u8) Error!usize {
             try writeText(&writer, prefix);
         }
     }
-    for (persisted_state.replica_entries) |slot| {
+    for (resident.persisted_state.replica_entries) |slot| {
         if (!slot.in_use) continue;
         try writer.writeU64(slot.entry.workspace_id);
         try writePrincipal(&writer, slot.entry.device_id);
@@ -172,7 +170,7 @@ pub fn serialize(buffer: []u8) Error!usize {
         try writer.writeU64(slot.entry.object_id);
         try writer.writeU64(slot.entry.version_id);
     }
-    for (persisted_state.conflicts) |slot| {
+    for (resident.persisted_state.conflicts) |slot| {
         if (!slot.in_use) continue;
         try writer.writeU64(slot.conflict.workspace_id);
         try writePrincipal(&writer, slot.conflict.device_id);
@@ -182,7 +180,7 @@ pub fn serialize(buffer: []u8) Error!usize {
         try writer.writeU64(slot.conflict.remote_version_id);
         try writer.writeByte(@intFromEnum(slot.conflict.semantic));
     }
-    for (persisted_state.database_contracts) |slot| {
+    for (resident.persisted_state.database_contracts) |slot| {
         if (!slot.in_use) continue;
         try writer.writeU64(slot.contract.id);
         try writer.writeU64(slot.contract.workspace_id);
@@ -190,7 +188,7 @@ pub fn serialize(buffer: []u8) Error!usize {
         try writeText(&writer, slot.contract.labelSlice());
         try writeSignature(&writer, slot.contract.signature);
     }
-    for (persisted_state.overlays) |slot| {
+    for (resident.persisted_state.overlays) |slot| {
         if (!slot.in_use) continue;
         try writer.writeU64(slot.overlay.id);
         try writer.writeU64(slot.overlay.workspace_id);
@@ -208,8 +206,8 @@ pub fn serialize(buffer: []u8) Error!usize {
     return writer.offset;
 }
 
-pub fn deserialize(payload: []const u8) Error!void {
-    state_support.resident_state.resetForServiceInit();
+pub fn deserialize(resident: *state_support.ResidentState, payload: []const u8) Error!void {
+    resident.resetForServiceInit();
 
     var reader = CursorReader{ .buffer = payload };
     var magic_buffer: [state_support.state_magic.len]u8 = undefined;
@@ -217,8 +215,8 @@ pub fn deserialize(payload: []const u8) Error!void {
     if (!std.mem.eql(u8, &magic_buffer, state_support.state_magic)) return error.CorruptState;
     if ((try reader.readU16()) != state_support.state_version) return error.UnsupportedStateVersion;
 
-    persisted_state.next_overlay_id = try reader.readU64();
-    persisted_state.next_contract_id = try reader.readU64();
+    resident.persisted_state.next_overlay_id = try reader.readU64();
+    resident.persisted_state.next_contract_id = try reader.readU64();
     const root_count = try reader.readU16();
     const device_count_value = try reader.readU16();
     const network_policy_count = try reader.readU16();
@@ -242,40 +240,40 @@ pub fn deserialize(payload: []const u8) Error!void {
 
     var index: usize = 0;
     while (index < root_count) : (index += 1) {
-        persisted_state.graph.user_roots[index].in_use = true;
-        persisted_state.graph.user_roots[index].root = .{
+        resident.persisted_state.graph.user_roots[index].in_use = true;
+        resident.persisted_state.graph.user_roots[index].root = .{
             .principal_id = try readPrincipal(&reader),
             .label_len = 0,
             .label = [_]u8{0} ** device_graph.MAX_LABEL_BYTES,
             .root_signature = .{},
         };
-        try readTextInto(&reader, &persisted_state.graph.user_roots[index].root.label, &persisted_state.graph.user_roots[index].root.label_len);
-        persisted_state.graph.user_roots[index].root.root_signature = try readSignature(&reader, &state_support.user_root_signers[index]);
+        try readTextInto(&reader, &resident.persisted_state.graph.user_roots[index].root.label, &resident.persisted_state.graph.user_roots[index].root.label_len);
+        resident.persisted_state.graph.user_roots[index].root.root_signature = try readSignature(&reader, &resident.user_root_signers[index]);
     }
 
     index = 0;
     while (index < device_count_value) : (index += 1) {
-        persisted_state.graph.devices[index].in_use = true;
-        persisted_state.graph.devices[index].device = state_support.zeroDeviceGraphRecord();
-        persisted_state.graph.devices[index].device.principal_id = try readPrincipal(&reader);
-        persisted_state.graph.devices[index].device.owner = try readPrincipal(&reader);
-        try readTextInto(&reader, &persisted_state.graph.devices[index].device.label, &persisted_state.graph.devices[index].device.label_len);
-        persisted_state.graph.devices[index].device.overlay_id = try reader.readU64();
-        persisted_state.graph.devices[index].device.status = try parseDeviceStatus(try reader.readByte());
-        persisted_state.graph.devices[index].device.trust_generation = try reader.readU32();
-        persisted_state.graph.devices[index].device.key_rotation_generation = try reader.readU32();
-        persisted_state.graph.devices[index].device.device_signature = try readSignature(&reader, &state_support.device_signature_signers[index][0]);
-        persisted_state.graph.devices[index].device.enrollment_signature = try readSignature(&reader, &state_support.device_signature_signers[index][1]);
-        persisted_state.graph.devices[index].device.rotation_signature = try readSignature(&reader, &state_support.device_signature_signers[index][2]);
-        persisted_state.graph.devices[index].device.revocation_signature = try readSignature(&reader, &state_support.device_signature_signers[index][3]);
-        persisted_state.graph.devices[index].device.last_rotated_at_ticks = try reader.readU64();
-        persisted_state.graph.devices[index].device.revoked_at_ticks = try reader.readU64();
+        resident.persisted_state.graph.devices[index].in_use = true;
+        resident.persisted_state.graph.devices[index].device = state_support.zeroDeviceGraphRecord();
+        resident.persisted_state.graph.devices[index].device.principal_id = try readPrincipal(&reader);
+        resident.persisted_state.graph.devices[index].device.owner = try readPrincipal(&reader);
+        try readTextInto(&reader, &resident.persisted_state.graph.devices[index].device.label, &resident.persisted_state.graph.devices[index].device.label_len);
+        resident.persisted_state.graph.devices[index].device.overlay_id = try reader.readU64();
+        resident.persisted_state.graph.devices[index].device.status = try parseDeviceStatus(try reader.readByte());
+        resident.persisted_state.graph.devices[index].device.trust_generation = try reader.readU32();
+        resident.persisted_state.graph.devices[index].device.key_rotation_generation = try reader.readU32();
+        resident.persisted_state.graph.devices[index].device.device_signature = try readSignature(&reader, &resident.device_signature_signers[index][0]);
+        resident.persisted_state.graph.devices[index].device.enrollment_signature = try readSignature(&reader, &resident.device_signature_signers[index][1]);
+        resident.persisted_state.graph.devices[index].device.rotation_signature = try readSignature(&reader, &resident.device_signature_signers[index][2]);
+        resident.persisted_state.graph.devices[index].device.revocation_signature = try readSignature(&reader, &resident.device_signature_signers[index][3]);
+        resident.persisted_state.graph.devices[index].device.last_rotated_at_ticks = try reader.readU64();
+        resident.persisted_state.graph.devices[index].device.revoked_at_ticks = try reader.readU64();
     }
 
     index = 0;
     while (index < network_policy_count) : (index += 1) {
-        persisted_state.network_policies.policies[index].in_use = true;
-        persisted_state.network_policies.policies[index].policy = .{
+        resident.persisted_state.network_policies.policies[index].in_use = true;
+        resident.persisted_state.network_policies.policies[index].policy = .{
             .id = try reader.readU64(),
             .owner = try readPrincipal(&reader),
             .workspace_id = null,
@@ -290,97 +288,97 @@ pub fn deserialize(payload: []const u8) Error!void {
             .pinned_root_digest = [_]u8{0} ** 32,
         };
         const workspace_id = try reader.readU64();
-        persisted_state.network_policies.policies[index].policy.workspace_id = if (workspace_id == 0) null else workspace_id;
-        try readTextInto(&reader, &persisted_state.network_policies.policies[index].policy.label, &persisted_state.network_policies.policies[index].policy.label_len);
-        persisted_state.network_policies.policies[index].policy.mode = try parsePolicyMode(try reader.readByte());
-        try readTextInto(&reader, &persisted_state.network_policies.policies[index].policy.target, &persisted_state.network_policies.policies[index].policy.target_len);
-        persisted_state.network_policies.policies[index].policy.explicit_internet_grant = (try reader.readByte()) != 0;
-        persisted_state.network_policies.policies[index].policy.require_remote_attestation = (try reader.readByte()) != 0;
-        persisted_state.network_policies.policies[index].policy.pinned_root_digest_present = (try reader.readByte()) != 0;
-        if (persisted_state.network_policies.policies[index].policy.pinned_root_digest_present) {
-            try reader.readBytes(&persisted_state.network_policies.policies[index].policy.pinned_root_digest);
+        resident.persisted_state.network_policies.policies[index].policy.workspace_id = if (workspace_id == 0) null else workspace_id;
+        try readTextInto(&reader, &resident.persisted_state.network_policies.policies[index].policy.label, &resident.persisted_state.network_policies.policies[index].policy.label_len);
+        resident.persisted_state.network_policies.policies[index].policy.mode = try parsePolicyMode(try reader.readByte());
+        try readTextInto(&reader, &resident.persisted_state.network_policies.policies[index].policy.target, &resident.persisted_state.network_policies.policies[index].policy.target_len);
+        resident.persisted_state.network_policies.policies[index].policy.explicit_internet_grant = (try reader.readByte()) != 0;
+        resident.persisted_state.network_policies.policies[index].policy.require_remote_attestation = (try reader.readByte()) != 0;
+        resident.persisted_state.network_policies.policies[index].policy.pinned_root_digest_present = (try reader.readByte()) != 0;
+        if (resident.persisted_state.network_policies.policies[index].policy.pinned_root_digest_present) {
+            try reader.readBytes(&resident.persisted_state.network_policies.policies[index].policy.pinned_root_digest);
         }
     }
-    persisted_state.network_policies.next_policy_id = state_support.nextPersistedPolicyId();
+    resident.persisted_state.network_policies.next_policy_id = resident.nextPersistedPolicyId();
 
     index = 0;
     while (index < workspace_policy_count) : (index += 1) {
-        persisted_state.workspace_policies[index].in_use = true;
-        persisted_state.workspace_policies[index].policy = state_support.zeroWorkspacePolicy();
-        persisted_state.workspace_policies[index].policy.workspace_id = try reader.readU64();
-        persisted_state.workspace_policies[index].policy.owner = try readPrincipal(&reader);
-        persisted_state.workspace_policies[index].policy.offline_first = (try reader.readByte()) != 0;
-        persisted_state.workspace_policies[index].policy.personal_e2ee = (try reader.readByte()) != 0;
-        persisted_state.workspace_policies[index].policy.device_to_device_policy_id = state_support.readOptionalU64(try reader.readU64());
-        persisted_state.workspace_policies[index].policy.relay_policy_id = state_support.readOptionalU64(try reader.readU64());
-        persisted_state.workspace_policies[index].policy.overlay_policy_id = state_support.readOptionalU64(try reader.readU64());
-        try readTextInto(&reader, &persisted_state.workspace_policies[index].policy.relay_domain, &persisted_state.workspace_policies[index].policy.relay_domain_len);
+        resident.persisted_state.workspace_policies[index].in_use = true;
+        resident.persisted_state.workspace_policies[index].policy = state_support.zeroWorkspacePolicy();
+        resident.persisted_state.workspace_policies[index].policy.workspace_id = try reader.readU64();
+        resident.persisted_state.workspace_policies[index].policy.owner = try readPrincipal(&reader);
+        resident.persisted_state.workspace_policies[index].policy.offline_first = (try reader.readByte()) != 0;
+        resident.persisted_state.workspace_policies[index].policy.personal_e2ee = (try reader.readByte()) != 0;
+        resident.persisted_state.workspace_policies[index].policy.device_to_device_policy_id = state_support.readOptionalU64(try reader.readU64());
+        resident.persisted_state.workspace_policies[index].policy.relay_policy_id = state_support.readOptionalU64(try reader.readU64());
+        resident.persisted_state.workspace_policies[index].policy.overlay_policy_id = state_support.readOptionalU64(try reader.readU64());
+        try readTextInto(&reader, &resident.persisted_state.workspace_policies[index].policy.relay_domain, &resident.persisted_state.workspace_policies[index].policy.relay_domain_len);
         const prefix_count = try reader.readU16();
         if (prefix_count > MAX_SELECTIVE_PREFIXES) return error.CorruptState;
-        persisted_state.workspace_policies[index].policy.selective_prefix_count = prefix_count;
+        resident.persisted_state.workspace_policies[index].policy.selective_prefix_count = prefix_count;
         var prefix_index: usize = 0;
         while (prefix_index < prefix_count) : (prefix_index += 1) {
             try readTextInto(
                 &reader,
-                &persisted_state.workspace_policies[index].policy.selective_prefixes[prefix_index],
-                &persisted_state.workspace_policies[index].policy.selective_prefix_lens[prefix_index],
+                &resident.persisted_state.workspace_policies[index].policy.selective_prefixes[prefix_index],
+                &resident.persisted_state.workspace_policies[index].policy.selective_prefix_lens[prefix_index],
             );
         }
     }
 
     index = 0;
     while (index < replica_count_value) : (index += 1) {
-        persisted_state.replica_entries[index].in_use = true;
-        persisted_state.replica_entries[index].entry = state_support.zeroReplicaEntry();
-        persisted_state.replica_entries[index].entry.workspace_id = try reader.readU64();
-        persisted_state.replica_entries[index].entry.device_id = try readPrincipal(&reader);
-        try readTextInto(&reader, &persisted_state.replica_entries[index].entry.path, &persisted_state.replica_entries[index].entry.path_len);
-        persisted_state.replica_entries[index].entry.object_id = try reader.readU64();
-        persisted_state.replica_entries[index].entry.version_id = try reader.readU64();
+        resident.persisted_state.replica_entries[index].in_use = true;
+        resident.persisted_state.replica_entries[index].entry = state_support.zeroReplicaEntry();
+        resident.persisted_state.replica_entries[index].entry.workspace_id = try reader.readU64();
+        resident.persisted_state.replica_entries[index].entry.device_id = try readPrincipal(&reader);
+        try readTextInto(&reader, &resident.persisted_state.replica_entries[index].entry.path, &resident.persisted_state.replica_entries[index].entry.path_len);
+        resident.persisted_state.replica_entries[index].entry.object_id = try reader.readU64();
+        resident.persisted_state.replica_entries[index].entry.version_id = try reader.readU64();
     }
 
     index = 0;
     while (index < conflict_count_value) : (index += 1) {
-        persisted_state.conflicts[index].in_use = true;
-        persisted_state.conflicts[index].conflict = state_support.zeroConflict();
-        persisted_state.conflicts[index].conflict.workspace_id = try reader.readU64();
-        persisted_state.conflicts[index].conflict.device_id = try readPrincipal(&reader);
-        persisted_state.conflicts[index].conflict.object_id = try reader.readU64();
-        try readTextInto(&reader, &persisted_state.conflicts[index].conflict.path, &persisted_state.conflicts[index].conflict.path_len);
-        persisted_state.conflicts[index].conflict.local_version_id = try reader.readU64();
-        persisted_state.conflicts[index].conflict.remote_version_id = try reader.readU64();
-        persisted_state.conflicts[index].conflict.semantic = try parseSyncSemantic(try reader.readByte());
+        resident.persisted_state.conflicts[index].in_use = true;
+        resident.persisted_state.conflicts[index].conflict = state_support.zeroConflict();
+        resident.persisted_state.conflicts[index].conflict.workspace_id = try reader.readU64();
+        resident.persisted_state.conflicts[index].conflict.device_id = try readPrincipal(&reader);
+        resident.persisted_state.conflicts[index].conflict.object_id = try reader.readU64();
+        try readTextInto(&reader, &resident.persisted_state.conflicts[index].conflict.path, &resident.persisted_state.conflicts[index].conflict.path_len);
+        resident.persisted_state.conflicts[index].conflict.local_version_id = try reader.readU64();
+        resident.persisted_state.conflicts[index].conflict.remote_version_id = try reader.readU64();
+        resident.persisted_state.conflicts[index].conflict.semantic = try parseSyncSemantic(try reader.readByte());
     }
 
     index = 0;
     while (index < contract_count) : (index += 1) {
-        persisted_state.database_contracts[index].in_use = true;
-        persisted_state.database_contracts[index].contract = state_support.zeroDatabaseContract();
-        persisted_state.database_contracts[index].contract.id = try reader.readU64();
-        persisted_state.database_contracts[index].contract.workspace_id = try reader.readU64();
-        try readTextInto(&reader, &persisted_state.database_contracts[index].contract.bundle_id, &persisted_state.database_contracts[index].contract.bundle_id_len);
-        try readTextInto(&reader, &persisted_state.database_contracts[index].contract.label, &persisted_state.database_contracts[index].contract.label_len);
-        persisted_state.database_contracts[index].contract.signature = try readSignature(&reader, &state_support.database_contract_signers[index]);
+        resident.persisted_state.database_contracts[index].in_use = true;
+        resident.persisted_state.database_contracts[index].contract = state_support.zeroDatabaseContract();
+        resident.persisted_state.database_contracts[index].contract.id = try reader.readU64();
+        resident.persisted_state.database_contracts[index].contract.workspace_id = try reader.readU64();
+        try readTextInto(&reader, &resident.persisted_state.database_contracts[index].contract.bundle_id, &resident.persisted_state.database_contracts[index].contract.bundle_id_len);
+        try readTextInto(&reader, &resident.persisted_state.database_contracts[index].contract.label, &resident.persisted_state.database_contracts[index].contract.label_len);
+        resident.persisted_state.database_contracts[index].contract.signature = try readSignature(&reader, &resident.database_contract_signers[index]);
     }
 
     index = 0;
     while (index < overlay_count_value) : (index += 1) {
-        persisted_state.overlays[index].in_use = true;
-        persisted_state.overlays[index].overlay = state_support.zeroOverlay();
-        persisted_state.overlays[index].overlay.id = try reader.readU64();
-        persisted_state.overlays[index].overlay.workspace_id = try reader.readU64();
-        persisted_state.overlays[index].overlay.home_device = try readPrincipal(&reader);
-        try readTextInto(&reader, &persisted_state.overlays[index].overlay.service_identity, &persisted_state.overlays[index].overlay.service_identity_len);
-        persisted_state.overlays[index].overlay.remote_access_enabled = (try reader.readByte()) != 0;
+        resident.persisted_state.overlays[index].in_use = true;
+        resident.persisted_state.overlays[index].overlay = state_support.zeroOverlay();
+        resident.persisted_state.overlays[index].overlay.id = try reader.readU64();
+        resident.persisted_state.overlays[index].overlay.workspace_id = try reader.readU64();
+        resident.persisted_state.overlays[index].overlay.home_device = try readPrincipal(&reader);
+        try readTextInto(&reader, &resident.persisted_state.overlays[index].overlay.service_identity, &resident.persisted_state.overlays[index].overlay.service_identity_len);
+        resident.persisted_state.overlays[index].overlay.remote_access_enabled = (try reader.readByte()) != 0;
         const private_service_count = try reader.readU16();
         if (private_service_count > MAX_PRIVATE_SERVICES) return error.CorruptState;
-        persisted_state.overlays[index].overlay.private_service_count = private_service_count;
+        resident.persisted_state.overlays[index].overlay.private_service_count = private_service_count;
         var service_index: usize = 0;
         while (service_index < private_service_count) : (service_index += 1) {
             try readTextInto(
                 &reader,
-                &persisted_state.overlays[index].overlay.private_services[service_index],
-                &persisted_state.overlays[index].overlay.private_service_lens[service_index],
+                &resident.persisted_state.overlays[index].overlay.private_services[service_index],
+                &resident.persisted_state.overlays[index].overlay.private_service_lens[service_index],
             );
         }
     }

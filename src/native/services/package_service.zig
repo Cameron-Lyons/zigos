@@ -1,10 +1,9 @@
 const std = @import("std");
-const crypto_hash = @import("../core/crypto_hash.zig");
 const manifest = @import("../policy/manifest.zig");
-const native_util = @import("../core/util.zig");
 const policy_object = @import("../policy/policy_object.zig");
+const bundle_digest = @import("package_service_digest.zig");
+const bundle_ops = @import("package_service_bundle_ops.zig");
 const signing = @import("../core/signing.zig");
-const copyText = native_util.copyText;
 
 pub const MAX_INSTALLED_BUNDLES: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 64;
@@ -174,52 +173,49 @@ pub const ResolvedManifest = struct {
     signature: manifest.Signature,
 };
 
+pub const BundleRevision = struct {
+    revision_id: u32 = 0,
+    display_name_len: usize = 0,
+    display_name: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    publisher_len: usize = 0,
+    publisher: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    version_major: u16 = 0,
+    version_minor: u16 = 0,
+    channel: manifest.UpdateChannel = .stable,
+    permission_digest: [32]u8 = [_]u8{0} ** 32,
+    schema_version: u32 = 0,
+    component_count: usize = 0,
+    components: [MAX_COMPONENTS_PER_BUNDLE]StoredComponent = [_]StoredComponent{zeroStoredComponent()} ** MAX_COMPONENTS_PER_BUNDLE,
+    asset_count: usize = 0,
+    assets: [MAX_ASSETS_PER_BUNDLE]StoredAsset = [_]StoredAsset{zeroStoredAsset()} ** MAX_ASSETS_PER_BUNDLE,
+    provided_interface_count: usize = 0,
+    provided_interfaces: [MAX_INTERFACES_PER_BUNDLE]StoredInterface = [_]StoredInterface{zeroStoredInterface()} ** MAX_INTERFACES_PER_BUNDLE,
+    consumed_interface_count: usize = 0,
+    consumed_interfaces: [MAX_INTERFACES_PER_BUNDLE]StoredInterface = [_]StoredInterface{zeroStoredInterface()} ** MAX_INTERFACES_PER_BUNDLE,
+    requested_permission_count: usize = 0,
+    requested_permissions: [MAX_PERMISSIONS_PER_BUNDLE]StoredPermission = [_]StoredPermission{zeroStoredPermission()} ** MAX_PERMISSIONS_PER_BUNDLE,
+    background_task_count: usize = 0,
+    background_tasks: [MAX_BACKGROUND_TASKS_PER_BUNDLE]StoredBackgroundTask = [_]StoredBackgroundTask{zeroStoredBackgroundTask()} ** MAX_BACKGROUND_TASKS_PER_BUNDLE,
+    ai_metadata: StoredAiMetadata = zeroStoredAiMetadata(),
+    signature: StoredSignature = zeroStoredSignature(),
+
+    pub fn displayNameSlice(self: *const BundleRevision) []const u8 {
+        return self.display_name[0..self.display_name_len];
+    }
+
+    pub fn publisherSlice(self: *const BundleRevision) []const u8 {
+        return self.publisher[0..self.publisher_len];
+    }
+};
+
 pub const InstalledBundle = struct {
     bundle_id_len: usize,
     bundle_id: [MAX_LABEL_BYTES]u8,
-    display_name_len: usize,
-    display_name: [MAX_LABEL_BYTES]u8,
-    publisher_len: usize,
-    publisher: [MAX_LABEL_BYTES]u8,
-    current_version_major: u16,
-    current_version_minor: u16,
-    current_channel: manifest.UpdateChannel,
-    current_permission_digest: [32]u8,
-    current_schema_version: u32,
-    current_component_count: usize,
-    current_components: [MAX_COMPONENTS_PER_BUNDLE]StoredComponent,
-    current_asset_count: usize,
-    current_assets: [MAX_ASSETS_PER_BUNDLE]StoredAsset,
-    current_provided_interface_count: usize,
-    current_provided_interfaces: [MAX_INTERFACES_PER_BUNDLE]StoredInterface,
-    current_consumed_interface_count: usize,
-    current_consumed_interfaces: [MAX_INTERFACES_PER_BUNDLE]StoredInterface,
-    current_requested_permission_count: usize,
-    current_requested_permissions: [MAX_PERMISSIONS_PER_BUNDLE]StoredPermission,
-    current_background_task_count: usize,
-    current_background_tasks: [MAX_BACKGROUND_TASKS_PER_BUNDLE]StoredBackgroundTask,
-    current_ai_metadata: StoredAiMetadata,
-    current_signature: StoredSignature,
-    previous_version_major: u16,
-    previous_version_minor: u16,
-    previous_channel: manifest.UpdateChannel,
-    previous_permission_digest: [32]u8,
-    previous_schema_version: u32,
-    previous_component_count: usize,
-    previous_components: [MAX_COMPONENTS_PER_BUNDLE]StoredComponent,
-    previous_asset_count: usize,
-    previous_assets: [MAX_ASSETS_PER_BUNDLE]StoredAsset,
-    previous_provided_interface_count: usize,
-    previous_provided_interfaces: [MAX_INTERFACES_PER_BUNDLE]StoredInterface,
-    previous_consumed_interface_count: usize,
-    previous_consumed_interfaces: [MAX_INTERFACES_PER_BUNDLE]StoredInterface,
-    previous_requested_permission_count: usize,
-    previous_requested_permissions: [MAX_PERMISSIONS_PER_BUNDLE]StoredPermission,
-    previous_background_task_count: usize,
-    previous_background_tasks: [MAX_BACKGROUND_TASKS_PER_BUNDLE]StoredBackgroundTask,
-    previous_ai_metadata: StoredAiMetadata,
-    previous_signature: StoredSignature,
-    rollback_available: bool,
+    revision_count: usize,
+    next_revision_id: u32,
+    active_revision_slot: u8,
+    rollback_revision_slot: ?u8,
+    revisions: [2]BundleRevision,
     last_migration_manifest_len: usize,
     last_migration_manifest: [MAX_LABEL_BYTES]u8,
 
@@ -227,12 +223,53 @@ pub const InstalledBundle = struct {
         return self.bundle_id[0..self.bundle_id_len];
     }
 
+    pub fn activeRevision(self: *const InstalledBundle) *const BundleRevision {
+        return &self.revisions[self.active_revision_slot];
+    }
+
+    pub fn activeRevisionMut(self: *InstalledBundle) *BundleRevision {
+        return &self.revisions[self.active_revision_slot];
+    }
+
+    pub fn rollbackRevision(self: *const InstalledBundle) ?*const BundleRevision {
+        const slot = self.rollback_revision_slot orelse return null;
+        return &self.revisions[slot];
+    }
+
+    pub fn rollbackAvailable(self: *const InstalledBundle) bool {
+        return self.rollback_revision_slot != null;
+    }
+
     pub fn displayNameSlice(self: *const InstalledBundle) []const u8 {
-        return self.display_name[0..self.display_name_len];
+        return self.activeRevision().displayNameSlice();
     }
 
     pub fn publisherSlice(self: *const InstalledBundle) []const u8 {
-        return self.publisher[0..self.publisher_len];
+        return self.activeRevision().publisherSlice();
+    }
+
+    pub fn inactiveRevisionSlot(self: *const InstalledBundle) u8 {
+        return if (self.active_revision_slot == 0) 1 else 0;
+    }
+
+    pub fn versionMajor(self: *const InstalledBundle) u16 {
+        return self.activeRevision().version_major;
+    }
+
+    pub fn versionMinor(self: *const InstalledBundle) u16 {
+        return self.activeRevision().version_minor;
+    }
+
+    pub fn schemaVersion(self: *const InstalledBundle) u32 {
+        return self.activeRevision().schema_version;
+    }
+
+    pub fn componentCount(self: *const InstalledBundle) usize {
+        return self.activeRevision().component_count;
+    }
+
+    pub fn componentAt(self: *const InstalledBundle, index: usize) *const StoredComponent {
+        return &self.activeRevision().components[index];
     }
 };
 
@@ -248,6 +285,8 @@ pub const Error = manifest.ValidationError || error{
     NoRollbackVersion,
     PermissionChangeUndeclared,
 };
+
+pub const digestBundle = bundle_digest.digestBundle;
 
 const BundleSlot = struct {
     in_use: bool = false,
@@ -268,7 +307,7 @@ pub const Service = struct {
     ) Error!InstallResult {
         try manifest.validate(request.bundle);
         try manifest.validateApplicationPackaging(request.bundle);
-        const digest = digestBundle(request.bundle);
+        const digest = bundle_digest.digestBundle(request.bundle);
         if (!signing.verify(request.bundle.signature, &digest)) {
             return error.InvalidManifestSignature;
         }
@@ -278,11 +317,12 @@ pub const Service = struct {
             }
         }
 
-        const permission_digest = permissionDigest(request.bundle.requested_permissions);
+        const permission_digest = bundle_digest.permissionDigest(request.bundle.requested_permissions);
         const existing = self.find(request.bundle.bundle_id);
         if (existing) |bundle| {
-            const permissions_changed = !std.mem.eql(u8, &bundle.current_permission_digest, &permission_digest);
-            const schema_changed = request.data_schema_version != bundle.current_schema_version;
+            const active_revision = bundle.activeRevision();
+            const permissions_changed = !std.mem.eql(u8, &active_revision.permission_digest, &permission_digest);
+            const schema_changed = request.data_schema_version != active_revision.schema_version;
             var migration_applied = false;
             if (permissions_changed and !request.declared_permission_change) {
                 return error.PermissionChangeUndeclared;
@@ -291,62 +331,39 @@ pub const Service = struct {
                 return error.MigrationManifestRequired;
             }
             if (request.migration_manifest.len != 0) {
-                try validateMigrationManifest(
+                try bundle_digest.validateMigrationManifest(
+                    Error,
                     request.migration_manifest,
-                    bundle.current_schema_version,
+                    active_revision.schema_version,
                     request.data_schema_version,
                 );
                 const migration_applier = request.migration_applier orelse return error.MigrationHandlerRequired;
                 migration_applier(.{
                     .bundle_id = request.bundle.bundle_id,
-                    .from_schema_version = bundle.current_schema_version,
+                    .from_schema_version = active_revision.schema_version,
                     .to_schema_version = request.data_schema_version,
                     .migration_manifest = request.migration_manifest,
-                    .previous_version_major = bundle.current_version_major,
-                    .previous_version_minor = bundle.current_version_minor,
+                    .previous_version_major = active_revision.version_major,
+                    .previous_version_minor = active_revision.version_minor,
                     .next_version_major = request.bundle.version_major,
                     .next_version_minor = request.bundle.version_minor,
                 }) catch return error.MigrationApplyFailed;
                 migration_applied = true;
             }
 
-            bundle.previous_version_major = bundle.current_version_major;
-            bundle.previous_version_minor = bundle.current_version_minor;
-            bundle.previous_channel = bundle.current_channel;
-            bundle.previous_permission_digest = bundle.current_permission_digest;
-            bundle.previous_schema_version = bundle.current_schema_version;
-            bundle.previous_component_count = bundle.current_component_count;
-            bundle.previous_components = bundle.current_components;
-            bundle.previous_asset_count = bundle.current_asset_count;
-            bundle.previous_assets = bundle.current_assets;
-            bundle.previous_provided_interface_count = bundle.current_provided_interface_count;
-            bundle.previous_provided_interfaces = bundle.current_provided_interfaces;
-            bundle.previous_consumed_interface_count = bundle.current_consumed_interface_count;
-            bundle.previous_consumed_interfaces = bundle.current_consumed_interfaces;
-            bundle.previous_requested_permission_count = bundle.current_requested_permission_count;
-            bundle.previous_requested_permissions = bundle.current_requested_permissions;
-            bundle.previous_background_task_count = bundle.current_background_task_count;
-            bundle.previous_background_tasks = bundle.current_background_tasks;
-            bundle.previous_ai_metadata = bundle.current_ai_metadata;
-            bundle.previous_signature = bundle.current_signature;
-            bundle.rollback_available = true;
-
-            bundle.display_name_len = copyText(&bundle.display_name, request.bundle.display_name);
-            bundle.publisher_len = copyText(&bundle.publisher, request.bundle.publisher);
-            bundle.current_version_major = request.bundle.version_major;
-            bundle.current_version_minor = request.bundle.version_minor;
-            bundle.current_channel = request.bundle.update_channel;
-            bundle.current_permission_digest = permission_digest;
-            bundle.current_schema_version = request.data_schema_version;
-            writeLaunchMetadata(bundle, request.bundle);
-            writeManifestMetadata(bundle, request.bundle);
-            bundle.last_migration_manifest_len = copyText(&bundle.last_migration_manifest, request.migration_manifest);
+            bundle_ops.installRevision(
+                bundle,
+                request.bundle,
+                request.data_schema_version,
+                permission_digest,
+                request.migration_manifest,
+            );
 
             return .{
                 .installed_new = false,
                 .updated_existing = true,
                 .permissions_changed = permissions_changed,
-                .rollback_available = bundle.rollback_available,
+                .rollback_available = bundle.rollbackAvailable(),
                 .migration_applied = migration_applied,
             };
         }
@@ -355,17 +372,13 @@ pub const Service = struct {
             if (slot.in_use) continue;
             slot.in_use = true;
             slot.bundle = zeroBundle();
-            slot.bundle.bundle_id_len = copyText(&slot.bundle.bundle_id, request.bundle.bundle_id);
-            slot.bundle.display_name_len = copyText(&slot.bundle.display_name, request.bundle.display_name);
-            slot.bundle.publisher_len = copyText(&slot.bundle.publisher, request.bundle.publisher);
-            slot.bundle.current_version_major = request.bundle.version_major;
-            slot.bundle.current_version_minor = request.bundle.version_minor;
-            slot.bundle.current_channel = request.bundle.update_channel;
-            slot.bundle.current_permission_digest = permission_digest;
-            slot.bundle.current_schema_version = request.data_schema_version;
-            writeLaunchMetadata(&slot.bundle, request.bundle);
-            writeManifestMetadata(&slot.bundle, request.bundle);
-            slot.bundle.last_migration_manifest_len = copyText(&slot.bundle.last_migration_manifest, request.migration_manifest);
+            bundle_ops.installNew(
+                &slot.bundle,
+                request.bundle,
+                request.data_schema_version,
+                permission_digest,
+                request.migration_manifest,
+            );
             return .{
                 .installed_new = true,
                 .updated_existing = false,
@@ -380,73 +393,14 @@ pub const Service = struct {
 
     pub fn rollback(self: *Service, bundle_id: []const u8) Error!InstallResult {
         const bundle = self.find(bundle_id) orelse return error.BundleNotFound;
-        if (!bundle.rollback_available) return error.NoRollbackVersion;
-
-        const current_major = bundle.current_version_major;
-        const current_minor = bundle.current_version_minor;
-        const current_channel = bundle.current_channel;
-        const current_permission_digest = bundle.current_permission_digest;
-        const current_schema_version = bundle.current_schema_version;
-        const current_component_count = bundle.current_component_count;
-        const current_components = bundle.current_components;
-        const current_asset_count = bundle.current_asset_count;
-        const current_assets = bundle.current_assets;
-        const current_provided_interface_count = bundle.current_provided_interface_count;
-        const current_provided_interfaces = bundle.current_provided_interfaces;
-        const current_consumed_interface_count = bundle.current_consumed_interface_count;
-        const current_consumed_interfaces = bundle.current_consumed_interfaces;
-        const current_requested_permission_count = bundle.current_requested_permission_count;
-        const current_requested_permissions = bundle.current_requested_permissions;
-        const current_background_task_count = bundle.current_background_task_count;
-        const current_background_tasks = bundle.current_background_tasks;
-        const current_ai_metadata = bundle.current_ai_metadata;
-        const current_signature = bundle.current_signature;
-
-        bundle.current_version_major = bundle.previous_version_major;
-        bundle.current_version_minor = bundle.previous_version_minor;
-        bundle.current_channel = bundle.previous_channel;
-        bundle.current_permission_digest = bundle.previous_permission_digest;
-        bundle.current_schema_version = bundle.previous_schema_version;
-        bundle.current_component_count = bundle.previous_component_count;
-        bundle.current_components = bundle.previous_components;
-        bundle.current_asset_count = bundle.previous_asset_count;
-        bundle.current_assets = bundle.previous_assets;
-        bundle.current_provided_interface_count = bundle.previous_provided_interface_count;
-        bundle.current_provided_interfaces = bundle.previous_provided_interfaces;
-        bundle.current_consumed_interface_count = bundle.previous_consumed_interface_count;
-        bundle.current_consumed_interfaces = bundle.previous_consumed_interfaces;
-        bundle.current_requested_permission_count = bundle.previous_requested_permission_count;
-        bundle.current_requested_permissions = bundle.previous_requested_permissions;
-        bundle.current_background_task_count = bundle.previous_background_task_count;
-        bundle.current_background_tasks = bundle.previous_background_tasks;
-        bundle.current_ai_metadata = bundle.previous_ai_metadata;
-        bundle.current_signature = bundle.previous_signature;
-
-        bundle.previous_version_major = current_major;
-        bundle.previous_version_minor = current_minor;
-        bundle.previous_channel = current_channel;
-        bundle.previous_permission_digest = current_permission_digest;
-        bundle.previous_schema_version = current_schema_version;
-        bundle.previous_component_count = current_component_count;
-        bundle.previous_components = current_components;
-        bundle.previous_asset_count = current_asset_count;
-        bundle.previous_assets = current_assets;
-        bundle.previous_provided_interface_count = current_provided_interface_count;
-        bundle.previous_provided_interfaces = current_provided_interfaces;
-        bundle.previous_consumed_interface_count = current_consumed_interface_count;
-        bundle.previous_consumed_interfaces = current_consumed_interfaces;
-        bundle.previous_requested_permission_count = current_requested_permission_count;
-        bundle.previous_requested_permissions = current_requested_permissions;
-        bundle.previous_background_task_count = current_background_task_count;
-        bundle.previous_background_tasks = current_background_tasks;
-        bundle.previous_ai_metadata = current_ai_metadata;
-        bundle.previous_signature = current_signature;
+        if (!bundle.rollbackAvailable()) return error.NoRollbackVersion;
+        bundle_ops.rollback(bundle);
 
         return .{
             .installed_new = false,
             .updated_existing = true,
             .permissions_changed = true,
-            .rollback_available = true,
+            .rollback_available = bundle.rollbackAvailable(),
             .migration_applied = false,
         };
     }
@@ -460,11 +414,12 @@ pub const Service = struct {
 
     pub fn buildLaunchPlan(self: *const Service, bundle_id: []const u8) Error!LaunchPlan {
         const bundle = self.findConst(bundle_id) orelse return error.BundleNotFound;
+        const active_revision = bundle.activeRevision();
         return .{
-            .component_count = bundle.current_component_count,
-            .components = bundle.current_components,
-            .asset_count = bundle.current_asset_count,
-            .assets = bundle.current_assets,
+            .component_count = active_revision.component_count,
+            .components = active_revision.components,
+            .asset_count = active_revision.asset_count,
+            .assets = active_revision.assets,
         };
     }
 
@@ -474,103 +429,7 @@ pub const Service = struct {
         resolved: *ResolvedManifest,
     ) Error!manifest.BundleManifest {
         const bundle = self.findConst(bundle_id) orelse return error.BundleNotFound;
-
-        var index: usize = 0;
-        while (index < bundle.current_provided_interface_count) : (index += 1) {
-            const stored = &bundle.current_provided_interfaces[index];
-            resolved.provided_interfaces[index] = .{
-                .name = stored.nameSlice(),
-                .version_major = stored.version_major,
-                .version_minor = stored.version_minor,
-            };
-        }
-
-        index = 0;
-        while (index < bundle.current_consumed_interface_count) : (index += 1) {
-            const stored = &bundle.current_consumed_interfaces[index];
-            resolved.consumed_interfaces[index] = .{
-                .name = stored.nameSlice(),
-                .version_major = stored.version_major,
-                .version_minor = stored.version_minor,
-            };
-        }
-
-        index = 0;
-        while (index < bundle.current_component_count) : (index += 1) {
-            const stored = &bundle.current_components[index];
-            resolved.components[index] = .{
-                .id = stored.idSlice(),
-                .entry = stored.entrySlice(),
-                .abi = stored.abi,
-            };
-        }
-
-        index = 0;
-        while (index < bundle.current_asset_count) : (index += 1) {
-            const stored = &bundle.current_assets[index];
-            resolved.assets[index] = .{
-                .path = stored.pathSlice(),
-                .content_type = stored.contentTypeSlice(),
-            };
-        }
-
-        index = 0;
-        while (index < bundle.current_requested_permission_count) : (index += 1) {
-            const stored = &bundle.current_requested_permissions[index];
-            resolved.requested_permissions[index] = .{
-                .kind = stored.kind,
-                .resource = stored.resourceSlice(),
-                .rights = stored.rights,
-                .required = stored.required,
-                .local_only = stored.local_only,
-                .max_lease_ticks = stored.max_lease_ticks,
-                .target_id = stored.target_id,
-            };
-        }
-
-        index = 0;
-        while (index < bundle.current_background_task_count) : (index += 1) {
-            const stored = &bundle.current_background_tasks[index];
-            resolved.background_tasks[index] = .{
-                .id = stored.idSlice(),
-                .trigger = stored.trigger,
-                .expected_duration_seconds = stored.expected_duration_seconds,
-                .budget = stored.budget,
-                .network = stored.network,
-                .visibility = stored.visibility,
-            };
-        }
-
-        resolved.ai_metadata = .{
-            .model_family = bundle.current_ai_metadata.modelFamilySlice(),
-            .locality = bundle.current_ai_metadata.locality,
-            .offline_required = bundle.current_ai_metadata.offline_required,
-        };
-        resolved.signature = .{
-            .format = bundle.current_signature.formatSlice(),
-            .signer = bundle.current_signature.signerSlice(),
-            .public_key_len = bundle.current_signature.public_key_len,
-            .public_key = bundle.current_signature.public_key,
-            .value_len = bundle.current_signature.value_len,
-            .value = bundle.current_signature.value,
-        };
-
-        return .{
-            .bundle_id = bundle.bundleIdSlice(),
-            .display_name = bundle.displayNameSlice(),
-            .publisher = bundle.publisherSlice(),
-            .version_major = bundle.current_version_major,
-            .version_minor = bundle.current_version_minor,
-            .provided_interfaces = resolved.provided_interfaces[0..bundle.current_provided_interface_count],
-            .consumed_interfaces = resolved.consumed_interfaces[0..bundle.current_consumed_interface_count],
-            .components = resolved.components[0..bundle.current_component_count],
-            .assets = resolved.assets[0..bundle.current_asset_count],
-            .requested_permissions = resolved.requested_permissions[0..bundle.current_requested_permission_count],
-            .background_tasks = resolved.background_tasks[0..bundle.current_background_task_count],
-            .ai_metadata = resolved.ai_metadata,
-            .update_channel = bundle.current_channel,
-            .signature = resolved.signature,
-        };
+        return bundle_ops.resolveActiveManifest(bundle, resolved);
     }
 
     fn findConst(self: *const Service, bundle_id: []const u8) ?*const InstalledBundle {
@@ -581,255 +440,22 @@ pub const Service = struct {
     }
 };
 
-fn validateMigrationManifest(
-    migration_manifest: []const u8,
-    from_schema_version: u32,
-    to_schema_version: u32,
-) Error!void {
-    if (!std.mem.startsWith(u8, migration_manifest, "schema:")) {
-        return error.InvalidMigrationManifest;
-    }
-
-    const payload = migration_manifest["schema:".len..];
-    const separator = std.mem.indexOfScalar(u8, payload, ';') orelse return error.InvalidMigrationManifest;
-    const mapping = payload[0..separator];
-    const summary = payload[separator + 1 ..];
-    if (summary.len == 0) return error.InvalidMigrationManifest;
-
-    const arrow = std.mem.indexOf(u8, mapping, "->") orelse return error.InvalidMigrationManifest;
-    const from_text = mapping[0..arrow];
-    const to_text = mapping[arrow + 2 ..];
-    if (from_text.len == 0 or to_text.len == 0) return error.InvalidMigrationManifest;
-
-    const declared_from = std.fmt.parseInt(u32, from_text, 10) catch return error.InvalidMigrationManifest;
-    const declared_to = std.fmt.parseInt(u32, to_text, 10) catch return error.InvalidMigrationManifest;
-    if (declared_from != from_schema_version or declared_to != to_schema_version) {
-        return error.InvalidMigrationManifest;
-    }
-}
-
-pub fn digestBundle(bundle: manifest.BundleManifest) [32]u8 {
-    var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "bundle-id", bundle.bundle_id);
-    crypto_hash.updateBytes(&hasher, "display-name", bundle.display_name);
-    crypto_hash.updateBytes(&hasher, "publisher", bundle.publisher);
-    crypto_hash.updateInt(&hasher, "version-major", bundle.version_major);
-    crypto_hash.updateInt(&hasher, "version-minor", bundle.version_minor);
-    crypto_hash.updateEnum(&hasher, "update-channel", bundle.update_channel);
-    crypto_hash.updateBytes(&hasher, "ai-model-family", bundle.ai_metadata.model_family);
-    crypto_hash.updateEnum(&hasher, "ai-locality", bundle.ai_metadata.locality);
-    crypto_hash.updateBool(&hasher, "ai-offline-required", bundle.ai_metadata.offline_required);
-
-    for (bundle.provided_interfaces, 0..) |interface, index| {
-        crypto_hash.updateInt(&hasher, "provided-index", index);
-        crypto_hash.updateBytes(&hasher, "provided-name", interface.name);
-        crypto_hash.updateInt(&hasher, "provided-version-major", interface.version_major);
-        crypto_hash.updateInt(&hasher, "provided-version-minor", interface.version_minor);
-    }
-    for (bundle.consumed_interfaces, 0..) |interface, index| {
-        crypto_hash.updateInt(&hasher, "consumed-index", index);
-        crypto_hash.updateBytes(&hasher, "consumed-name", interface.name);
-        crypto_hash.updateInt(&hasher, "consumed-version-major", interface.version_major);
-        crypto_hash.updateInt(&hasher, "consumed-version-minor", interface.version_minor);
-    }
-    for (bundle.components, 0..) |component, index| {
-        crypto_hash.updateInt(&hasher, "component-index", index);
-        crypto_hash.updateBytes(&hasher, "component-id", component.id);
-        crypto_hash.updateBytes(&hasher, "component-entry", component.entry);
-        crypto_hash.updateEnum(&hasher, "component-abi", component.abi);
-    }
-    for (bundle.assets, 0..) |asset, index| {
-        crypto_hash.updateInt(&hasher, "asset-index", index);
-        crypto_hash.updateBytes(&hasher, "asset-path", asset.path);
-        crypto_hash.updateBytes(&hasher, "asset-content-type", asset.content_type);
-    }
-    for (bundle.requested_permissions, 0..) |permission, index| {
-        const rights_bits: u32 = @bitCast(permission.rights);
-        crypto_hash.updateInt(&hasher, "permission-index", index);
-        crypto_hash.updateEnum(&hasher, "permission-kind", permission.kind);
-        crypto_hash.updateBytes(&hasher, "permission-resource", permission.resource);
-        crypto_hash.updateInt(&hasher, "permission-rights", rights_bits);
-        crypto_hash.updateBool(&hasher, "permission-required", permission.required);
-        crypto_hash.updateBool(&hasher, "permission-local-only", permission.local_only);
-        crypto_hash.updateInt(&hasher, "permission-max-lease", permission.max_lease_ticks);
-        crypto_hash.updateInt(&hasher, "permission-target-id", permission.target_id);
-    }
-    for (bundle.background_tasks, 0..) |task, index| {
-        crypto_hash.updateInt(&hasher, "background-index", index);
-        crypto_hash.updateBytes(&hasher, "background-id", task.id);
-        crypto_hash.updateEnum(&hasher, "background-trigger", task.trigger);
-        crypto_hash.updateInt(&hasher, "background-duration", task.expected_duration_seconds);
-        crypto_hash.updateInt(&hasher, "background-budget-cpu", task.budget.cpu_time_ticks);
-        crypto_hash.updateInt(&hasher, "background-budget-memory", task.budget.memory_bytes);
-        crypto_hash.updateInt(&hasher, "background-budget-shared-memory", task.budget.shared_memory_bytes);
-        crypto_hash.updateEnum(&hasher, "background-network", task.network);
-        crypto_hash.updateEnum(&hasher, "background-visibility", task.visibility);
-    }
-
-    return crypto_hash.finalize(&hasher);
-}
-
-fn permissionDigest(requests: []const manifest.PermissionRequest) [32]u8 {
-    var hasher = crypto_hash.init();
-    for (requests, 0..) |request, index| {
-        const rights_bits: u32 = @bitCast(request.rights);
-        crypto_hash.updateInt(&hasher, "permission-index", index);
-        crypto_hash.updateEnum(&hasher, "permission-kind", request.kind);
-        crypto_hash.updateBytes(&hasher, "permission-resource", request.resource);
-        crypto_hash.updateInt(&hasher, "permission-rights", rights_bits);
-        crypto_hash.updateBool(&hasher, "permission-required", request.required);
-        crypto_hash.updateBool(&hasher, "permission-local-only", request.local_only);
-        crypto_hash.updateInt(&hasher, "permission-max-lease", request.max_lease_ticks);
-        crypto_hash.updateInt(&hasher, "permission-target-id", request.target_id);
-    }
-    return crypto_hash.finalize(&hasher);
-}
-
 fn zeroBundle() InstalledBundle {
     return .{
         .bundle_id_len = 0,
         .bundle_id = [_]u8{0} ** MAX_LABEL_BYTES,
-        .display_name_len = 0,
-        .display_name = [_]u8{0} ** MAX_LABEL_BYTES,
-        .publisher_len = 0,
-        .publisher = [_]u8{0} ** MAX_LABEL_BYTES,
-        .current_version_major = 0,
-        .current_version_minor = 0,
-        .current_channel = .stable,
-        .current_permission_digest = [_]u8{0} ** 32,
-        .current_schema_version = 0,
-        .current_component_count = 0,
-        .current_components = [_]StoredComponent{zeroStoredComponent()} ** MAX_COMPONENTS_PER_BUNDLE,
-        .current_asset_count = 0,
-        .current_assets = [_]StoredAsset{zeroStoredAsset()} ** MAX_ASSETS_PER_BUNDLE,
-        .current_provided_interface_count = 0,
-        .current_provided_interfaces = [_]StoredInterface{zeroStoredInterface()} ** MAX_INTERFACES_PER_BUNDLE,
-        .current_consumed_interface_count = 0,
-        .current_consumed_interfaces = [_]StoredInterface{zeroStoredInterface()} ** MAX_INTERFACES_PER_BUNDLE,
-        .current_requested_permission_count = 0,
-        .current_requested_permissions = [_]StoredPermission{zeroStoredPermission()} ** MAX_PERMISSIONS_PER_BUNDLE,
-        .current_background_task_count = 0,
-        .current_background_tasks = [_]StoredBackgroundTask{zeroStoredBackgroundTask()} ** MAX_BACKGROUND_TASKS_PER_BUNDLE,
-        .current_ai_metadata = zeroStoredAiMetadata(),
-        .current_signature = zeroStoredSignature(),
-        .previous_version_major = 0,
-        .previous_version_minor = 0,
-        .previous_channel = .stable,
-        .previous_permission_digest = [_]u8{0} ** 32,
-        .previous_schema_version = 0,
-        .previous_component_count = 0,
-        .previous_components = [_]StoredComponent{zeroStoredComponent()} ** MAX_COMPONENTS_PER_BUNDLE,
-        .previous_asset_count = 0,
-        .previous_assets = [_]StoredAsset{zeroStoredAsset()} ** MAX_ASSETS_PER_BUNDLE,
-        .previous_provided_interface_count = 0,
-        .previous_provided_interfaces = [_]StoredInterface{zeroStoredInterface()} ** MAX_INTERFACES_PER_BUNDLE,
-        .previous_consumed_interface_count = 0,
-        .previous_consumed_interfaces = [_]StoredInterface{zeroStoredInterface()} ** MAX_INTERFACES_PER_BUNDLE,
-        .previous_requested_permission_count = 0,
-        .previous_requested_permissions = [_]StoredPermission{zeroStoredPermission()} ** MAX_PERMISSIONS_PER_BUNDLE,
-        .previous_background_task_count = 0,
-        .previous_background_tasks = [_]StoredBackgroundTask{zeroStoredBackgroundTask()} ** MAX_BACKGROUND_TASKS_PER_BUNDLE,
-        .previous_ai_metadata = zeroStoredAiMetadata(),
-        .previous_signature = zeroStoredSignature(),
-        .rollback_available = false,
+        .revision_count = 0,
+        .next_revision_id = 1,
+        .active_revision_slot = 0,
+        .rollback_revision_slot = null,
+        .revisions = [_]BundleRevision{zeroBundleRevision()} ** 2,
         .last_migration_manifest_len = 0,
         .last_migration_manifest = [_]u8{0} ** MAX_LABEL_BYTES,
     };
 }
 
-fn writeLaunchMetadata(bundle: *InstalledBundle, source: manifest.BundleManifest) void {
-    bundle.current_component_count = @min(source.components.len, bundle.current_components.len);
-    var component_index: usize = 0;
-    while (component_index < bundle.current_components.len) : (component_index += 1) {
-        bundle.current_components[component_index] = zeroStoredComponent();
-        if (component_index >= bundle.current_component_count) continue;
-        const component = source.components[component_index];
-        bundle.current_components[component_index].id_len = copyText(&bundle.current_components[component_index].id, component.id);
-        bundle.current_components[component_index].entry_len = copyText(&bundle.current_components[component_index].entry, component.entry);
-        bundle.current_components[component_index].abi = component.abi;
-    }
-
-    bundle.current_asset_count = @min(source.assets.len, bundle.current_assets.len);
-    var asset_index: usize = 0;
-    while (asset_index < bundle.current_assets.len) : (asset_index += 1) {
-        bundle.current_assets[asset_index] = zeroStoredAsset();
-        if (asset_index >= bundle.current_asset_count) continue;
-        const asset = source.assets[asset_index];
-        bundle.current_assets[asset_index].path_len = copyText(&bundle.current_assets[asset_index].path, asset.path);
-        bundle.current_assets[asset_index].content_type_len = copyText(&bundle.current_assets[asset_index].content_type, asset.content_type);
-    }
-}
-
-fn writeManifestMetadata(bundle: *InstalledBundle, source: manifest.BundleManifest) void {
-    bundle.current_provided_interface_count = @min(source.provided_interfaces.len, bundle.current_provided_interfaces.len);
-    var interface_index: usize = 0;
-    while (interface_index < bundle.current_provided_interfaces.len) : (interface_index += 1) {
-        bundle.current_provided_interfaces[interface_index] = zeroStoredInterface();
-        if (interface_index >= bundle.current_provided_interface_count) continue;
-        const interface = source.provided_interfaces[interface_index];
-        bundle.current_provided_interfaces[interface_index].name_len = copyText(&bundle.current_provided_interfaces[interface_index].name, interface.name);
-        bundle.current_provided_interfaces[interface_index].version_major = interface.version_major;
-        bundle.current_provided_interfaces[interface_index].version_minor = interface.version_minor;
-    }
-
-    bundle.current_consumed_interface_count = @min(source.consumed_interfaces.len, bundle.current_consumed_interfaces.len);
-    interface_index = 0;
-    while (interface_index < bundle.current_consumed_interfaces.len) : (interface_index += 1) {
-        bundle.current_consumed_interfaces[interface_index] = zeroStoredInterface();
-        if (interface_index >= bundle.current_consumed_interface_count) continue;
-        const interface = source.consumed_interfaces[interface_index];
-        bundle.current_consumed_interfaces[interface_index].name_len = copyText(&bundle.current_consumed_interfaces[interface_index].name, interface.name);
-        bundle.current_consumed_interfaces[interface_index].version_major = interface.version_major;
-        bundle.current_consumed_interfaces[interface_index].version_minor = interface.version_minor;
-    }
-
-    bundle.current_requested_permission_count = @min(source.requested_permissions.len, bundle.current_requested_permissions.len);
-    var permission_index: usize = 0;
-    while (permission_index < bundle.current_requested_permissions.len) : (permission_index += 1) {
-        bundle.current_requested_permissions[permission_index] = zeroStoredPermission();
-        if (permission_index >= bundle.current_requested_permission_count) continue;
-        const permission = source.requested_permissions[permission_index];
-        bundle.current_requested_permissions[permission_index].kind = permission.kind;
-        bundle.current_requested_permissions[permission_index].resource_len = copyText(&bundle.current_requested_permissions[permission_index].resource, permission.resource);
-        bundle.current_requested_permissions[permission_index].rights = permission.rights;
-        bundle.current_requested_permissions[permission_index].required = permission.required;
-        bundle.current_requested_permissions[permission_index].local_only = permission.local_only;
-        bundle.current_requested_permissions[permission_index].max_lease_ticks = permission.max_lease_ticks;
-        bundle.current_requested_permissions[permission_index].target_id = permission.target_id;
-    }
-
-    bundle.current_background_task_count = @min(source.background_tasks.len, bundle.current_background_tasks.len);
-    var background_index: usize = 0;
-    while (background_index < bundle.current_background_tasks.len) : (background_index += 1) {
-        bundle.current_background_tasks[background_index] = zeroStoredBackgroundTask();
-        if (background_index >= bundle.current_background_task_count) continue;
-        const task = source.background_tasks[background_index];
-        bundle.current_background_tasks[background_index].id_len = copyText(&bundle.current_background_tasks[background_index].id, task.id);
-        bundle.current_background_tasks[background_index].trigger = task.trigger;
-        bundle.current_background_tasks[background_index].expected_duration_seconds = task.expected_duration_seconds;
-        bundle.current_background_tasks[background_index].budget = task.budget;
-        bundle.current_background_tasks[background_index].network = task.network;
-        bundle.current_background_tasks[background_index].visibility = task.visibility;
-    }
-
-    bundle.current_ai_metadata = zeroStoredAiMetadata();
-    bundle.current_ai_metadata.model_family_len = copyText(&bundle.current_ai_metadata.model_family, source.ai_metadata.model_family);
-    bundle.current_ai_metadata.locality = source.ai_metadata.locality;
-    bundle.current_ai_metadata.offline_required = source.ai_metadata.offline_required;
-
-    bundle.current_signature = zeroStoredSignature();
-    bundle.current_signature.format_len = copyText(&bundle.current_signature.format, source.signature.format);
-    bundle.current_signature.signer_len = copyText(&bundle.current_signature.signer, source.signature.signer);
-    bundle.current_signature.public_key_len = @min(source.signature.public_key_len, bundle.current_signature.public_key.len);
-    @memcpy(
-        bundle.current_signature.public_key[0..bundle.current_signature.public_key_len],
-        source.signature.public_key[0..bundle.current_signature.public_key_len],
-    );
-    bundle.current_signature.value_len = @min(source.signature.value_len, bundle.current_signature.value.len);
-    @memcpy(
-        bundle.current_signature.value[0..bundle.current_signature.value_len],
-        source.signature.value[0..bundle.current_signature.value_len],
-    );
+fn zeroBundleRevision() BundleRevision {
+    return .{};
 }
 
 fn zeroStoredComponent() StoredComponent {
@@ -1048,11 +674,11 @@ test "package service enforces signed manifests policy gated sources updates and
     try std.testing.expectEqualStrings("schema:1->2;notes-v2-migration", test_migration.last_context.migration_manifest);
 
     const installed = service.find("app.notes").?;
-    try std.testing.expectEqual(@as(u16, 1), installed.current_version_major);
-    try std.testing.expectEqual(@as(u16, 1), installed.current_version_minor);
-    try std.testing.expectEqual(@as(u32, 2), installed.current_schema_version);
-    try std.testing.expectEqual(@as(usize, 2), installed.current_component_count);
-    try std.testing.expectEqualStrings("zigos.notes.sync", installed.current_components[1].entrySlice());
+    try std.testing.expectEqual(@as(u16, 1), installed.versionMajor());
+    try std.testing.expectEqual(@as(u16, 1), installed.versionMinor());
+    try std.testing.expectEqual(@as(u32, 2), installed.schemaVersion());
+    try std.testing.expectEqual(@as(usize, 2), installed.componentCount());
+    try std.testing.expectEqualStrings("zigos.notes.sync", installed.componentAt(1).entrySlice());
 
     const launch_plan = try service.buildLaunchPlan("app.notes");
     try std.testing.expectEqual(@as(usize, 2), launch_plan.component_count);
@@ -1062,10 +688,10 @@ test "package service enforces signed manifests policy gated sources updates and
 
     _ = try service.rollback("app.notes");
     const rolled_back = service.find("app.notes").?;
-    try std.testing.expectEqual(@as(u16, 1), rolled_back.current_version_major);
-    try std.testing.expectEqual(@as(u16, 0), rolled_back.current_version_minor);
-    try std.testing.expectEqual(@as(u32, 1), rolled_back.current_schema_version);
-    try std.testing.expectEqual(@as(usize, 1), rolled_back.current_component_count);
+    try std.testing.expectEqual(@as(u16, 1), rolled_back.versionMajor());
+    try std.testing.expectEqual(@as(u16, 0), rolled_back.versionMinor());
+    try std.testing.expectEqual(@as(u32, 1), rolled_back.schemaVersion());
+    try std.testing.expectEqual(@as(usize, 1), rolled_back.componentCount());
 }
 
 test "package service rejects invalid signatures and rollback before any update" {
@@ -1254,7 +880,7 @@ test "package service accepts compatible schema updates without a migration mani
     }, null);
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(!updated.migration_applied);
-    try std.testing.expectEqual(@as(u32, 2), service.find("app.notes").?.current_schema_version);
+    try std.testing.expectEqual(@as(u32, 2), service.find("app.notes").?.schemaVersion());
 }
 
 test "package service resolves installed manifests with stable slices" {

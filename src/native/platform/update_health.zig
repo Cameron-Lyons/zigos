@@ -179,7 +179,7 @@ fn bootActivationHealthy(manager: *immutable_base.Manager) bool {
 }
 
 fn storageMountHealthy(storage: *const storage_service.Service, workspace_id: u64, path: []const u8) bool {
-    const workspace_record = storage.workspaces.find(workspace_id) orelse return false;
+    const workspace_record = storage.findWorkspaceRecordConst(workspace_id) orelse return false;
     if (workspace_record.generation == 0 and workspace_record.entry_count == 0) return false;
 
     const entries = storage.entries(workspace_id) catch return false;
@@ -187,9 +187,9 @@ fn storageMountHealthy(storage: *const storage_service.Service, workspace_id: u6
 
     const resolved = storage.resolve(workspace_id, path) catch return false;
     if (resolved.version_id == 0 or resolved.object_id == 0) return false;
-    const version = storage.store.version(resolved.version_id) orelse return false;
+    const version = storage.version(resolved.version_id) orelse return false;
     if (version.object_id != resolved.object_id) return false;
-    _ = storage.store.object(resolved.object_id) orelse return false;
+    _ = storage.object(resolved.object_id) orelse return false;
     return version.metadata.verifyFor(version.object_type, version.payloadSlice());
 }
 
@@ -252,7 +252,7 @@ fn yesNo(value: bool) []const u8 {
 
 fn loadBootWitness(manager: *immutable_base.Manager) immutable_base.Error!BootWitness {
     const entry = try manager.storage.resolve(manager.workspace_id, boot_witness_entry_path);
-    const version = manager.storage.store.version(entry.version_id) orelse return error.CorruptState;
+    const version = manager.storage.version(entry.version_id) orelse return error.CorruptState;
     if (version.payloadSlice().len != @sizeOf(BootWitness)) return error.CorruptState;
 
     var witness = std.mem.zeroes(BootWitness);
@@ -262,7 +262,7 @@ fn loadBootWitness(manager: *immutable_base.Manager) immutable_base.Error!BootWi
 }
 
 fn bootWitnessObjectId() u64 {
-    return native_util.fnv1a64WithSeed(0xB0075CC355000001, "phase6:update-health:boot-success");
+    return native_util.fnv1a64WithSeed(0xB0075CC355000001, "platform:update-health:boot-success");
 }
 
 fn registerHealthyService(
@@ -382,8 +382,9 @@ fn seedUiProbe(session: *compositor_session.Session) !UiProbe {
 }
 
 test "update health validates boot core storage network and ui checks and records update history" {
-    storage_service.Service.resetPersistentState();
-    defer storage_service.Service.resetPersistentState();
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 70 };
     const state_signer = signing.SignerIdentity{
@@ -399,7 +400,7 @@ test "update health validates boot core storage network and ui checks and record
         .seed = [_]u8{0x33} ** 32,
     };
 
-    var storage = storage_service.Service.init(1_001, 201, owner);
+    var storage = storage_service.Service.initWithStore(1_001, 201, owner, &storage_checkpoint_store);
     const probe_workspace_id = try seedStorageProbe(&storage, owner, object_signer);
     var manager = try immutable_base.Manager.init(&storage, owner, state_signer);
     var sync = sync_service.Service.init(1_500, 401, owner);
@@ -448,8 +449,9 @@ test "update health validates boot core storage network and ui checks and record
 }
 
 test "update health failures trigger rollback for each required post-activation check" {
-    storage_service.Service.resetPersistentState();
-    defer storage_service.Service.resetPersistentState();
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 71 };
     const state_signer = signing.SignerIdentity{
@@ -465,7 +467,7 @@ test "update health failures trigger rollback for each required post-activation 
         .seed = [_]u8{0x43} ** 32,
     };
 
-    var storage = storage_service.Service.init(1_002, 202, owner);
+    var storage = storage_service.Service.initWithStore(1_002, 202, owner, &storage_checkpoint_store);
     const probe_workspace_id = try seedStorageProbe(&storage, owner, object_signer);
     var manager = try immutable_base.Manager.init(&storage, owner, state_signer);
     var sync = sync_service.Service.init(1_501, 402, owner);

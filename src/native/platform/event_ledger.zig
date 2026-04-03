@@ -447,7 +447,7 @@ pub const Ledger = struct {
         self.next_sequence = 1;
 
         if (storage.resolve(self.workspace_id, state_entry_path)) |entry| {
-            const version = storage.store.version(entry.version_id) orelse return error.CorruptState;
+            const version = storage.version(entry.version_id) orelse return error.CorruptState;
             self.next_sequence = try parseHeader(version.payloadSlice());
         } else |err| switch (err) {
             error.EntryNotFound => return,
@@ -459,7 +459,7 @@ pub const Ledger = struct {
         for (entries) |entry| {
             if (!std.mem.startsWith(u8, entry.pathSlice(), event_entry_prefix)) continue;
             if (loaded_count >= self.events.len) break;
-            const version = storage.store.version(entry.version_id) orelse return error.CorruptState;
+            const version = storage.version(entry.version_id) orelse return error.CorruptState;
             self.events[loaded_count].in_use = true;
             self.events[loaded_count].event = (try parsePersistentEvent(version.payloadSlice())).intoEvent();
             loaded_count += 1;
@@ -707,14 +707,14 @@ fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype
 }
 
 fn stateObjectId() u64 {
-    return native_util.fnv1a64WithSeed(0xED6E7EEC0D000001, "phase6:event-ledger:state");
+    return native_util.fnv1a64WithSeed(0xED6E7EEC0D000001, "platform:event-ledger:state");
 }
 
 fn eventObjectId(sequence: u64) u64 {
     const slot_index = @as(usize, @intCast((sequence - 1) % MAX_PERSISTED_EVENTS));
     return native_util.fnv1a64WithSeed(
         0xED6E7EEC0D000101 + @as(u64, @intCast(slot_index)),
-        "phase6:event-ledger:event-slot",
+        "platform:event-ledger:event-slot",
     );
 }
 
@@ -766,7 +766,8 @@ test "event ledger exports structured redacted diagnostics and audit history" {
 }
 
 test "event ledger persists history across restart" {
-    storage_service.Service.resetPersistentState();
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 44 };
     const signer = signing.SignerIdentity{
@@ -774,12 +775,12 @@ test "event ledger persists history across restart" {
         .seed = [_]u8{0xA7} ** 32,
     };
 
-    var storage = storage_service.Service.init(901, 300, owner);
+    var storage = storage_service.Service.initWithStore(901, 300, owner, &storage_checkpoint_store);
     var ledger = try Ledger.initPersistent(&storage, owner, signer);
     try ledger.recordUpdateTransition(owner, 1, .none, false, 10, "stable-b activated");
     try ledger.recordDeviceTrustChange(owner, .{ .kind = .device, .serial = 4 }, false, 11, "device revoked");
 
-    var restarted_storage = storage_service.Service.init(901, 301, owner);
+    var restarted_storage = storage_service.Service.initWithStore(901, 301, owner, &storage_checkpoint_store);
     var restarted = try Ledger.initPersistent(&restarted_storage, owner, signer);
     try std.testing.expect(restarted.loaded_existing_state);
     try std.testing.expectEqual(EventKind.device_trust_change, restarted.latestKind(.device_trust_change).?.kind);
@@ -789,11 +790,12 @@ test "event ledger persists history across restart" {
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=update_transition") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=device_trust_change") != null);
 
-    storage_service.Service.resetPersistentState();
+    storage_checkpoint_store.resetPersistent();
 }
 
 test "event ledger persistence retains full in-memory history and detail payloads" {
-    storage_service.Service.resetPersistentState();
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 45 };
     const signer = signing.SignerIdentity{
@@ -801,7 +803,7 @@ test "event ledger persistence retains full in-memory history and detail payload
         .seed = [_]u8{0xA8} ** 32,
     };
 
-    var storage = storage_service.Service.init(902, 302, owner);
+    var storage = storage_service.Service.initWithStore(902, 302, owner, &storage_checkpoint_store);
     var ledger = try Ledger.initPersistent(&storage, owner, signer);
 
     var tick: u64 = 10;
@@ -818,9 +820,9 @@ test "event ledger persistence retains full in-memory history and detail payload
         );
     }
 
-    try std.testing.expectEqual(@as(usize, 9), storage.store.objectCount());
+    try std.testing.expectEqual(@as(usize, 9), storage.objectCount());
 
-    var restarted_storage = storage_service.Service.init(902, 303, owner);
+    var restarted_storage = storage_service.Service.initWithStore(902, 303, owner, &storage_checkpoint_store);
     var restarted = try Ledger.initPersistent(&restarted_storage, owner, signer);
     try std.testing.expectEqual(@as(u64, 9), restarted.next_sequence);
 
@@ -830,5 +832,5 @@ test "event ledger persistence retains full in-memory history and detail payload
     try std.testing.expect(std.mem.indexOf(u8, exported, "#8 ") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "abcdefghijklmnopqrstuvwxyz-0123456789") != null);
 
-    storage_service.Service.resetPersistentState();
+    storage_checkpoint_store.resetPersistent();
 }

@@ -114,8 +114,8 @@ pub const Environment = struct {
 };
 
 test "recovery environment verifies reinstalls restores repairs and rotates" {
-    storage_service.Service.resetPersistentState();
-    sync_service.Service.resetPersistentState();
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 4 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8 };
@@ -124,19 +124,19 @@ test "recovery environment verifies reinstalls restores repairs and rotates" {
     const tablet = principal.PrincipalId{ .kind = .device, .serial = 22 };
 
     const state_signer = signing.SignerIdentity{
-        .label = "phase6-state",
+        .label = "platform-state",
         .seed = [_]u8{0x71} ** 32,
     };
     const image_signer = signing.SignerIdentity{
-        .label = "phase6-image",
+        .label = "platform-image",
         .seed = [_]u8{0x72} ** 32,
     };
     const object_signer = signing.SignerIdentity{
-        .label = "phase6-storage",
+        .label = "platform-storage",
         .seed = [_]u8{0x73} ** 32,
     };
     const user_signer = signing.SignerIdentity{
-        .label = "phase6-user",
+        .label = "platform-user",
         .seed = [_]u8{0x74} ** 32,
     };
     const device_signer = signing.SignerIdentity{
@@ -152,7 +152,7 @@ test "recovery environment verifies reinstalls restores repairs and rotates" {
         .seed = [_]u8{0x77} ** 32,
     };
 
-    var storage = storage_service.Service.init(920, 51, storage_owner);
+    var storage = storage_service.Service.initWithStore(920, 51, storage_owner, &storage_checkpoint_store);
     var manager = try immutable_base.Manager.init(&storage, storage_owner, state_signer);
     _ = try manager.stageImage(0, "stable-a", "kernel=v1", image_signer, 10);
     _ = try manager.activate(0, .{}, 11);
@@ -207,6 +207,5 @@ test "recovery environment verifies reinstalls restores repairs and rotates" {
     try std.testing.expect(recovery.report.device_keys_rotated);
     try std.testing.expect(recovery.report.device_trust_revoked);
 
-    sync_service.Service.resetPersistentState();
-    storage_service.Service.resetPersistentState();
+    storage_checkpoint_store.resetPersistent();
 }

@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const native_util = @import("../core/util.zig");
+const component_port = @import("../kernel_api/component_port.zig");
 const device_broker = @import("../kernel_api/device_broker.zig");
 const storage_driver_task = @import("storage_driver_task.zig");
 const link_port = if (builtin.target.os.tag == .freestanding)
@@ -62,6 +63,7 @@ pub const StoragePublication = struct {
     publisher_len: usize = 0,
     publisher: [32]u8 = [_]u8{0} ** 32,
     backend: ?storage_volume.Backend = null,
+    ata_session: ?storage_driver_task.AtaControllerSession = null,
     activator: ?StorageActivator = null,
     kind: StoragePublicationKind = .backend,
     kernel_bootstrap: bool = true,
@@ -79,7 +81,6 @@ pub fn reset() void {
     published_network = null;
     published_storage = null;
     device_broker.reset();
-    storage_driver_task.reset();
     link_port.init();
     link_port.clearNetworkDevice();
     storage_volume.clearAttachedBackend();
@@ -183,16 +184,22 @@ pub fn activateStorageBackend(
     authority_capability_id: u64,
     owner_task_id: u64,
     now_ticks: u64,
+    kernel_port: ?*component_port.KernelPort,
 ) bool {
     if (publicationForActivation(StoragePublication, &published_storage, device_id, service_id)) |publication| {
         switch (publication.kind) {
             .ata_bootstrap_bridge => {
-                if (!storage_driver_task.attachAtaBootstrapBackend(
-                    device_id,
-                    authority_capability_id,
-                    owner_task_id,
-                    now_ticks,
-                )) return false;
+                const bound_kernel_port = kernel_port orelse return false;
+                if (publication.ata_session == null) {
+                    publication.ata_session = storage_driver_task.establishAtaBootstrapSession(
+                        bound_kernel_port,
+                        device_id,
+                        authority_capability_id,
+                        owner_task_id,
+                        now_ticks,
+                    ) orelse return false;
+                }
+                storage_driver_task.attachAtaBootstrapSession(&publication.ata_session.?);
             },
             .backend, .activator => {
                 if (publication.backend == null) {
@@ -221,6 +228,7 @@ pub fn deactivateNetworkDevice(service_id: u64) bool {
 pub fn deactivateStorageBackend(service_id: u64) bool {
     if (publicationForDeactivation(StoragePublication, &published_storage, service_id)) |publication| {
         publication.active_service_id = 0;
+        publication.ata_session = null;
         storage_volume.clearAttachedBackend();
         return true;
     }

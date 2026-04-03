@@ -1,6 +1,7 @@
 const std = @import("std");
 const bootstrap_driver_port = @import("bootstrap_driver_port.zig");
 const driver_service = @import("driver_service.zig");
+const component_port = @import("../kernel_api/component_port.zig");
 const storage_volume = @import("../storage/storage_volume.zig");
 const native_util = @import("../core/util.zig");
 const copyText = native_util.copyText;
@@ -42,11 +43,16 @@ const ActivationSlot = struct {
 };
 
 pub const Runtime = struct {
+    kernel_port: ?*component_port.KernelPort = null,
     next_activation_generation: u32 = 1,
     slots: [MAX_ACTIVATIONS]ActivationSlot = [_]ActivationSlot{ActivationSlot{}} ** MAX_ACTIVATIONS,
 
     pub fn init() Runtime {
         return .{};
+    }
+
+    pub fn bindKernelPort(self: *Runtime, kernel_port: *component_port.KernelPort) void {
+        self.kernel_port = kernel_port;
     }
 
     pub fn activateAt(
@@ -101,6 +107,7 @@ pub const Runtime = struct {
                             driver.authority_capability_id,
                             driver.owner_task_id,
                             now_ticks,
+                            self.kernel_port,
                         )) {
                             record.mode = .published_data_plane;
                             record.exclusive_claim = true;
@@ -257,15 +264,12 @@ test "runtime refuses kernel-published transports for drivers without bootstrap 
 
 test "runtime uses the activation tick when claiming storage bootstrap authority" {
     const capability = @import("../kernel_api/capability.zig");
-    const component_port = @import("../kernel_api/component_port.zig");
     const device_broker = @import("../kernel_api/device_broker.zig");
-    const device_broker_client = @import("../kernel_api/device_broker_client.zig");
     const endpoint = @import("../kernel_api/endpoint.zig");
     const native_kernel = @import("../kernel_api/native_kernel.zig");
     const principal = @import("../core/principal.zig");
     const service_registry = @import("../kernel_api/service_registry.zig");
     const shared_memory = @import("../kernel_api/shared_memory.zig");
-    const storage_driver_task = @import("storage_driver_task.zig");
     const task_runtime = @import("../task/task_runtime.zig");
 
     const device_id: u64 = 0x0000_1F00_0001;
@@ -274,10 +278,6 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
     defer bootstrap_driver_port.reset();
     device_broker.reset();
     defer device_broker.reset();
-    device_broker_client.reset();
-    defer device_broker_client.reset();
-    storage_driver_task.reset();
-    defer storage_driver_task.reset();
     storage_volume.clearAttachedBackend();
     defer storage_volume.clearAttachedBackend();
 
@@ -295,7 +295,6 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
         &registry,
     );
     var kernel_port = component_port.KernelPort.init(&kernel);
-    device_broker_client.bindKernelPort(&kernel_port);
 
     try std.testing.expect(device_broker.publishAtaController(device_id, .{
         .base_port = 0x1F0,
@@ -371,6 +370,7 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
     });
 
     var driver_runtime = Runtime.init();
+    driver_runtime.bindKernelPort(&kernel_port);
     const activation = try driver_runtime.activateAt(driver, 10);
     try std.testing.expectEqual(ActivationMode.control_only, activation.mode);
     try std.testing.expect(!storage_volume.hasAttachedDevice());
