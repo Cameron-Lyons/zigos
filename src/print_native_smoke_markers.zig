@@ -16,7 +16,7 @@ pub fn main() !void {
 
     if (args.len != 2) {
         try stderr_writer.interface.print(
-            "usage: {s} <ready|cold_boot|post_ready|boot2_reloaded_phase4|boot2_fresh_phase4>\n",
+            "usage: {s} <ready|cold_boot|boot2_reloaded_phase4|boot2_fresh_phase4>\n",
             .{args[0]},
         );
         try stderr_writer.interface.flush();
@@ -28,10 +28,6 @@ pub fn main() !void {
         try stdout_writer.interface.print("{s}\n", .{smoke_markers.ready});
     } else if (std.mem.eql(u8, group, "cold_boot")) {
         for (smoke_markers.cold_boot_required) |line| {
-            try stdout_writer.interface.print("{s}\n", .{line});
-        }
-    } else if (std.mem.eql(u8, group, "post_ready")) {
-        for (smoke_markers.post_ready_required) |line| {
             try stdout_writer.interface.print("{s}\n", .{line});
         }
     } else if (std.mem.eql(u8, group, "boot2_reloaded_phase4")) {
