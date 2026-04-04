@@ -65,7 +65,7 @@ pub const Service = struct {
 
     pub fn checkpoint(self: *Service, tick: u64) void {
         if (self.checkpoint_store) |checkpoint_store| {
-            checkpoint_store.checkpoint_state = self.runtime.snapshot();
+            self.runtime.writeSnapshot(&checkpoint_store.checkpoint_state);
             checkpoint_store.has_checkpoint = true;
             checkpoint_store.last_checkpoint_tick = tick;
             self.has_checkpoint = true;
