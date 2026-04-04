@@ -12,6 +12,7 @@ pub const MAX_AUDIT_EVENTS: usize = 16;
 pub const MAX_TASK_BUNDLE_ID_BYTES: usize = 64;
 pub const MAX_EXECUTABLE_SEGMENTS: usize = 8;
 pub const MAX_IMAGE_HASH_BYTES: usize = 32;
+const INDEX_CAPACITY: usize = MAX_TASKS * 2;
 pub const DEFAULT_USER_STACK_TOP: u64 = 0xBFFF_F000;
 pub const DEFAULT_USER_STACK_SIZE_BYTES: usize = 64 * 1024;
 pub const DEFAULT_SYNTHETIC_ENTRY_POINT: u64 = 0x0804_8000;
@@ -291,6 +292,30 @@ const AddressSpaceSlot = struct {
     address_space: AddressSpaceRecord = zeroAddressSpace(),
 };
 
+const IndexState = enum(u8) {
+    empty,
+    filled,
+    tombstone,
+};
+
+const IdIndexSlot = struct {
+    state: IndexState = .empty,
+    id: u64 = 0,
+    slot_index: usize = 0,
+};
+
+pub const Snapshot = struct {
+    next_task_id: u64,
+    next_process_id: u64,
+    next_address_space_id: u64,
+    next_namespace_id: u64,
+    next_component_id: u64,
+    task_index_slots: [INDEX_CAPACITY]IdIndexSlot,
+    address_space_index_slots: [INDEX_CAPACITY]IdIndexSlot,
+    tasks: [MAX_TASKS]TaskSlot,
+    address_spaces: [MAX_TASKS]AddressSpaceSlot,
+};
+
 const HostAssignment = runtime_host.HostAssignment(ProcessClass, NamespaceClass);
 
 pub const Runtime = struct {
@@ -299,11 +324,53 @@ pub const Runtime = struct {
     next_address_space_id: u64 = 1,
     next_namespace_id: u64 = 1,
     next_component_id: u64 = 1,
+    task_index_slots: [INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(),
+    address_space_index_slots: [INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(),
     tasks: [MAX_TASKS]TaskSlot = [_]TaskSlot{TaskSlot{}} ** MAX_TASKS,
     address_spaces: [MAX_TASKS]AddressSpaceSlot = [_]AddressSpaceSlot{AddressSpaceSlot{}} ** MAX_TASKS,
 
     pub fn init() Runtime {
         return Runtime{};
+    }
+
+    pub fn initSnapshot() Snapshot {
+        return .{
+            .next_task_id = 1,
+            .next_process_id = 1,
+            .next_address_space_id = 1,
+            .next_namespace_id = 1,
+            .next_component_id = 1,
+            .task_index_slots = emptyIndexTable(),
+            .address_space_index_slots = emptyIndexTable(),
+            .tasks = [_]TaskSlot{TaskSlot{}} ** MAX_TASKS,
+            .address_spaces = [_]AddressSpaceSlot{AddressSpaceSlot{}} ** MAX_TASKS,
+        };
+    }
+
+    pub fn snapshot(self: *const Runtime) Snapshot {
+        return .{
+            .next_task_id = self.next_task_id,
+            .next_process_id = self.next_process_id,
+            .next_address_space_id = self.next_address_space_id,
+            .next_namespace_id = self.next_namespace_id,
+            .next_component_id = self.next_component_id,
+            .task_index_slots = self.task_index_slots,
+            .address_space_index_slots = self.address_space_index_slots,
+            .tasks = self.tasks,
+            .address_spaces = self.address_spaces,
+        };
+    }
+
+    pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) void {
+        self.next_task_id = state.next_task_id;
+        self.next_process_id = state.next_process_id;
+        self.next_address_space_id = state.next_address_space_id;
+        self.next_namespace_id = state.next_namespace_id;
+        self.next_component_id = state.next_component_id;
+        self.task_index_slots = state.task_index_slots;
+        self.address_space_index_slots = state.address_space_index_slots;
+        self.tasks = state.tasks;
+        self.address_spaces = state.address_spaces;
     }
 
     pub fn createTask(self: *Runtime, request: TaskCreateRequest) Error!*TaskRecord {
@@ -315,7 +382,7 @@ pub const Runtime = struct {
             try validateUserspaceImage(requested_userspace_image)
         else
             ExecutableImageSpec{};
-        for (&self.tasks) |*slot| {
+        for (&self.tasks, 0..) |*slot, slot_index| {
             if (slot.in_use) continue;
             const task_id = self.next_task_id;
             self.next_task_id += 1;
@@ -356,12 +423,14 @@ pub const Runtime = struct {
                 .userspace_image = userspace_image,
             };
             slot.task.execution_components[0] = initial_component;
+            indexInsert(&self.task_index_slots, task_id, slot_index);
             return &slot.task;
         }
         return error.TaskTableFull;
     }
 
     pub fn find(self: *Runtime, task_id: u64) ?*TaskRecord {
+        if (self.indexedTaskSlot(task_id)) |slot| return &slot.task;
         for (&self.tasks) |*slot| {
             if (slot.in_use and slot.task.id == task_id) return &slot.task;
         }
@@ -369,6 +438,7 @@ pub const Runtime = struct {
     }
 
     fn findConst(self: *const Runtime, task_id: u64) ?*const TaskRecord {
+        if (self.indexedTaskSlotConst(task_id)) |slot| return &slot.task;
         for (&self.tasks) |*slot| {
             if (slot.in_use and slot.task.id == task_id) return &slot.task;
         }
@@ -381,10 +451,47 @@ pub const Runtime = struct {
     }
 
     pub fn findAddressSpaceConst(self: *const Runtime, address_space_id: u64) ?*const AddressSpaceRecord {
+        if (self.indexedAddressSpaceSlotConst(address_space_id)) |slot| return &slot.address_space;
         for (&self.address_spaces) |*slot| {
             if (slot.in_use and slot.address_space.id == address_space_id) return &slot.address_space;
         }
         return null;
+    }
+
+    pub fn indexedAddressSpaceSlot(self: *Runtime, address_space_id: u64) ?*AddressSpaceSlot {
+        const slot_index = indexLookup(&self.address_space_index_slots, address_space_id) orelse return null;
+        const slot = &self.address_spaces[slot_index];
+        if (!slot.in_use or slot.address_space.id != address_space_id) return null;
+        return slot;
+    }
+
+    fn indexedAddressSpaceSlotConst(self: *const Runtime, address_space_id: u64) ?*const AddressSpaceSlot {
+        const slot_index = indexLookup(&self.address_space_index_slots, address_space_id) orelse return null;
+        const slot = &self.address_spaces[slot_index];
+        if (!slot.in_use or slot.address_space.id != address_space_id) return null;
+        return slot;
+    }
+
+    fn indexedTaskSlot(self: *Runtime, task_id: u64) ?*TaskSlot {
+        const slot_index = indexLookup(&self.task_index_slots, task_id) orelse return null;
+        const slot = &self.tasks[slot_index];
+        if (!slot.in_use or slot.task.id != task_id) return null;
+        return slot;
+    }
+
+    fn indexedTaskSlotConst(self: *const Runtime, task_id: u64) ?*const TaskSlot {
+        const slot_index = indexLookup(&self.task_index_slots, task_id) orelse return null;
+        const slot = &self.tasks[slot_index];
+        if (!slot.in_use or slot.task.id != task_id) return null;
+        return slot;
+    }
+
+    pub fn noteAddressSpaceInstalled(self: *Runtime, address_space_id: u64, slot_index: usize) void {
+        indexInsert(&self.address_space_index_slots, address_space_id, slot_index);
+    }
+
+    pub fn removeAddressSpaceIndex(self: *Runtime, address_space_id: u64) void {
+        indexRemove(&self.address_space_index_slots, address_space_id);
     }
 
     pub fn grantCapability(self: *Runtime, task_id: u64, capability_id: u64) Error!void {
@@ -649,6 +756,86 @@ fn reassignHost(
 
 fn saturatingSub(current: usize, amount: usize) usize {
     return runtime_host.saturatingSub(current, amount);
+}
+
+fn emptyIndexTable() [INDEX_CAPACITY]IdIndexSlot {
+    return [_]IdIndexSlot{IdIndexSlot{}} ** INDEX_CAPACITY;
+}
+
+fn indexLookup(table: *const [INDEX_CAPACITY]IdIndexSlot, id: u64) ?usize {
+    if (id == 0) return null;
+
+    var index = indexHash(id);
+    var attempts: usize = 0;
+    while (attempts < INDEX_CAPACITY) : (attempts += 1) {
+        const entry = table[index];
+        switch (entry.state) {
+            .empty => return null,
+            .filled => if (entry.id == id) return entry.slot_index,
+            .tombstone => {},
+        }
+        index = (index + 1) % INDEX_CAPACITY;
+    }
+    return null;
+}
+
+fn indexInsert(table: *[INDEX_CAPACITY]IdIndexSlot, id: u64, slot_index: usize) void {
+    if (id == 0) unreachable;
+
+    var index = indexHash(id);
+    var first_tombstone: ?usize = null;
+    var attempts: usize = 0;
+    while (attempts < INDEX_CAPACITY) : (attempts += 1) {
+        switch (table[index].state) {
+            .empty => {
+                const insert_index = first_tombstone orelse index;
+                table[insert_index] = .{
+                    .state = .filled,
+                    .id = id,
+                    .slot_index = slot_index,
+                };
+                return;
+            },
+            .filled => {
+                if (table[index].id == id) {
+                    table[index].slot_index = slot_index;
+                    return;
+                }
+            },
+            .tombstone => {
+                if (first_tombstone == null) first_tombstone = index;
+            },
+        }
+        index = (index + 1) % INDEX_CAPACITY;
+    }
+
+    unreachable;
+}
+
+fn indexRemove(table: *[INDEX_CAPACITY]IdIndexSlot, id: u64) void {
+    if (id == 0) return;
+
+    var index = indexHash(id);
+    var attempts: usize = 0;
+    while (attempts < INDEX_CAPACITY) : (attempts += 1) {
+        switch (table[index].state) {
+            .empty => return,
+            .filled => {
+                if (table[index].id == id) {
+                    table[index].state = .tombstone;
+                    table[index].id = 0;
+                    table[index].slot_index = 0;
+                    return;
+                }
+            },
+            .tombstone => {},
+        }
+        index = (index + 1) % INDEX_CAPACITY;
+    }
+}
+
+fn indexHash(id: u64) usize {
+    return @as(usize, @intCast((id *% 0x9E37_79B9_7F4A_7C15) % INDEX_CAPACITY));
 }
 
 fn zeroAddressSpace() AddressSpaceRecord {
@@ -984,6 +1171,7 @@ test "rehosting a userspace task rebuilds the mapped executable state" {
     const original_address_space_id = task.address_space_id;
     try std.testing.expect(try runtime.rehostTask(task.id, 77));
     try std.testing.expect(task.address_space_id != original_address_space_id);
+    try std.testing.expect(runtime.findAddressSpaceConst(original_address_space_id) == null);
 
     const address_space = runtime.findAddressSpaceConst(task.address_space_id).?;
     try std.testing.expect(address_space.hasMappedExecutable());

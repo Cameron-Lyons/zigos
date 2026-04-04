@@ -93,6 +93,11 @@ pub fn zeroAddressSpace(AddressSpaceType: type, RegionType: type, comptime regio
 }
 
 pub fn findAddressSpaceSlot(runtime: anytype, address_space_id: u64) ?*@TypeOf(runtime.address_spaces[0]) {
+    const RuntimeType = @typeInfo(@TypeOf(runtime)).pointer.child;
+    if (@hasDecl(RuntimeType, "indexedAddressSpaceSlot")) {
+        return runtime.indexedAddressSpaceSlot(address_space_id);
+    }
+
     for (&runtime.address_spaces) |*slot| {
         if (slot.in_use and slot.address_space.id == address_space_id) return slot;
     }
@@ -109,17 +114,38 @@ pub fn installAddressSpace(
         if (findAddressSpaceSlot(runtime, old_id)) |slot| {
             slot.in_use = true;
             slot.address_space = address_space;
+            noteAddressSpaceIndexRemoved(runtime, old_id);
+            noteAddressSpaceIndexInstalled(runtime, address_space.id, slotIndexFor(runtime, slot));
             return;
         }
     }
 
-    for (&runtime.address_spaces) |*slot| {
+    for (&runtime.address_spaces, 0..) |*slot, slot_index| {
         if (slot.in_use) continue;
         slot.in_use = true;
         slot.address_space = address_space;
+        noteAddressSpaceIndexInstalled(runtime, address_space.id, slot_index);
         return;
     }
     return error.AddressSpaceTableFull;
+}
+
+fn noteAddressSpaceIndexInstalled(runtime: anytype, address_space_id: u64, slot_index: usize) void {
+    const RuntimeType = @typeInfo(@TypeOf(runtime)).pointer.child;
+    if (@hasDecl(RuntimeType, "noteAddressSpaceInstalled")) {
+        runtime.noteAddressSpaceInstalled(address_space_id, slot_index);
+    }
+}
+
+fn noteAddressSpaceIndexRemoved(runtime: anytype, address_space_id: u64) void {
+    const RuntimeType = @typeInfo(@TypeOf(runtime)).pointer.child;
+    if (@hasDecl(RuntimeType, "removeAddressSpaceIndex")) {
+        runtime.removeAddressSpaceIndex(address_space_id);
+    }
+}
+
+fn slotIndexFor(runtime: anytype, slot: anytype) usize {
+    return (@intFromPtr(slot) - @intFromPtr(&runtime.address_spaces[0])) / @sizeOf(@TypeOf(runtime.address_spaces[0]));
 }
 
 fn assignHost(

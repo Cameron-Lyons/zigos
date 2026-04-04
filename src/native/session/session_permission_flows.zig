@@ -71,7 +71,7 @@ fn runViewerPermissionFlow(
             .local_only = true,
         },
         env.userspace_scheduler,
-    );
+    ) catch unreachable;
     const viewer_summary = policy_port.applyManifest(.{
         .header = policy_component_port.makeHeader(.apply_manifest, 20, viewer_task.id),
         .task_id = viewer_task.id,
@@ -120,7 +120,7 @@ fn runNotesPermissionFlow(
             .local_only = true,
         },
         env.userspace_scheduler,
-    );
+    ) catch unreachable;
 
     var notes_grants_buffer: [permission_review_service.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
     const notes_grants = review_port.reviewBundle(.{
@@ -207,7 +207,7 @@ fn runSyncPermissionFlow(
             .local_only = true,
         },
         env.userspace_scheduler,
-    );
+    ) catch unreachable;
 
     var sync_grants_buffer: [permission_review_service.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
     const sync_grants = review_port.reviewBundle(.{
@@ -274,7 +274,7 @@ fn runCapturePermissionFlow(
             .local_only = true,
         },
         env.userspace_scheduler,
-    );
+    ) catch unreachable;
 
     var capture_grants_buffer: [permission_review_service.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
     const capture_grants = review_port.reviewBundle(.{

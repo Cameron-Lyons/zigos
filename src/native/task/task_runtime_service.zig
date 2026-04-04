@@ -3,7 +3,7 @@ const principal = @import("../core/principal.zig");
 const task_runtime = @import("task_runtime.zig");
 
 pub const CheckpointStore = struct {
-    checkpoint_state: task_runtime.Runtime = task_runtime.Runtime.init(),
+    checkpoint_state: task_runtime.Snapshot = task_runtime.Runtime.initSnapshot(),
     has_checkpoint: bool = false,
     last_checkpoint_tick: u64 = 0,
 
@@ -65,7 +65,7 @@ pub const Service = struct {
 
     pub fn checkpoint(self: *Service, tick: u64) void {
         if (self.checkpoint_store) |checkpoint_store| {
-            copyRuntime(&checkpoint_store.checkpoint_state, self.runtime);
+            checkpoint_store.checkpoint_state = self.runtime.snapshot();
             checkpoint_store.has_checkpoint = true;
             checkpoint_store.last_checkpoint_tick = tick;
             self.has_checkpoint = true;
@@ -77,7 +77,7 @@ pub const Service = struct {
         const checkpoint_store = self.checkpoint_store orelse return false;
         if (!checkpoint_store.has_checkpoint) return false;
 
-        copyRuntime(self.runtime, &checkpoint_store.checkpoint_state);
+        self.runtime.restoreFromSnapshot(&checkpoint_store.checkpoint_state);
         self.has_checkpoint = true;
         self.last_checkpoint_tick = checkpoint_store.last_checkpoint_tick;
         self.restart_generation += 1;
@@ -85,16 +85,6 @@ pub const Service = struct {
         return true;
     }
 };
-
-fn copyRuntime(dest: *task_runtime.Runtime, src: *const task_runtime.Runtime) void {
-    const dest_bytes: [*]volatile u8 = @ptrCast(dest);
-    const src_bytes: [*]const u8 = @ptrCast(src);
-
-    var index: usize = 0;
-    while (index < @sizeOf(task_runtime.Runtime)) : (index += 1) {
-        dest_bytes[index] = src_bytes[index];
-    }
-}
 
 test "task runtime service restores checkpointed task state on restart" {
     var checkpoint_store = CheckpointStore{};

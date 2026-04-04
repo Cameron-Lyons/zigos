@@ -12,8 +12,7 @@ SPEC_PATH = ROOT_DIR / "SPEC.md"
 MANIFEST_PATH = ROOT_DIR / "spec" / "coverage.json"
 
 HEADING_PATTERN = re.compile(r"^\s*(#{2,3})\s+(.+?)\s*$")
-BULLET_PATTERN = re.compile(r"^\s*-\s+(.+?)\s*$")
-NUMBERED_PATTERN = re.compile(r"^\s*\d+\.\s+(.+?)\s*$")
+REQUIREMENT_PATTERN = re.compile(r"^\s*<!--\s*REQ:\s*([A-Z0-9][A-Z0-9-]*)\s*-->\s*$")
 
 
 @dataclass(frozen=True)
@@ -23,6 +22,7 @@ class SpecBlock:
     number: str
     start_line: int
     end_line: int
+    requirement_id: str | None
 
 
 def section_number(title: str) -> str:
@@ -32,12 +32,40 @@ def section_number(title: str) -> str:
 def parse_spec_blocks() -> list[SpecBlock]:
     blocks: list[SpecBlock] = []
     lines = SPEC_PATH.read_text().splitlines()
+    pending_requirement_id: str | None = None
+    pending_requirement_line: int | None = None
+    seen_requirement_ids: set[str] = set()
 
     for lineno, line in enumerate(lines, start=1):
+        requirement_match = REQUIREMENT_PATTERN.match(line)
+        if requirement_match is not None:
+            if pending_requirement_id is not None:
+                raise ValueError(
+                    "Requirement marker "
+                    f"{pending_requirement_id} on line {pending_requirement_line} "
+                    f"must attach to the next heading before line {lineno}"
+                )
+            pending_requirement_id = requirement_match.group(1)
+            pending_requirement_line = lineno
+            continue
+
         match = HEADING_PATTERN.match(line)
         if match is None:
+            if pending_requirement_id is not None and line.strip():
+                raise ValueError(
+                    "Requirement marker "
+                    f"{pending_requirement_id} on line {pending_requirement_line} "
+                    "must appear immediately before a heading"
+                )
             continue
         marks, title = match.groups()
+        requirement_id = pending_requirement_id
+        if requirement_id is not None:
+            if requirement_id in seen_requirement_ids:
+                raise ValueError(f"Duplicate spec requirement id: {requirement_id}")
+            seen_requirement_ids.add(requirement_id)
+        pending_requirement_id = None
+        pending_requirement_line = None
         blocks.append(
             SpecBlock(
                 level=len(marks),
@@ -45,7 +73,15 @@ def parse_spec_blocks() -> list[SpecBlock]:
                 number=section_number(title),
                 start_line=lineno,
                 end_line=len(lines),
+                requirement_id=requirement_id,
             )
+        )
+
+    if pending_requirement_id is not None:
+        raise ValueError(
+            "Requirement marker "
+            f"{pending_requirement_id} on line {pending_requirement_line} "
+            "must attach to a heading"
         )
 
     finalized: list[SpecBlock] = []
@@ -58,6 +94,7 @@ def parse_spec_blocks() -> list[SpecBlock]:
                 number=block.number,
                 start_line=block.start_line,
                 end_line=end_line,
+                requirement_id=block.requirement_id,
             )
         )
     return finalized
@@ -67,71 +104,34 @@ def load_lines() -> list[str]:
     return SPEC_PATH.read_text().splitlines()
 
 
-def block_claims(block: SpecBlock, lines: list[str]) -> list[str]:
-    claims: list[str] = []
-    seen: set[str] = set()
-
-    for raw_line in lines[block.start_line : block.end_line]:
-        stripped = raw_line.strip()
-        if not stripped:
-            continue
-        bullet = BULLET_PATTERN.match(raw_line)
-        if bullet is not None:
-            claim = f"{block.number}::{bullet.group(1).strip()}"
-        else:
-            numbered = NUMBERED_PATTERN.match(raw_line)
-            if numbered is not None:
-                claim = f"{block.number}::{numbered.group(1).strip()}"
-            elif stripped.endswith(":"):
-                continue
-            else:
-                claim = f"{block.number}::{stripped}"
-
-        if claim in seen:
-            continue
-        claims.append(claim)
-        seen.add(claim)
-
-    if claims:
-        return claims
-    return [block.number]
-
-
 def expected_headings(blocks: list[SpecBlock]) -> list[str]:
     return [block.title for block in blocks]
 
 
-def expected_claims_for_section(section_id: str, blocks: list[SpecBlock], lines: list[str]) -> list[str]:
+def expected_requirements_for_section(section_id: str, blocks: list[SpecBlock]) -> list[str]:
     top_block = next((block for block in blocks if block.number == section_id and block.level == 2), None)
     child_blocks = [block for block in blocks if block.level == 3 and block.number.startswith(f"{section_id}.")]
 
-    claims: list[str] = []
+    requirements: list[str] = []
     seen: set[str] = set()
 
-    if top_block is not None:
-        top_claims = block_claims(top_block, lines)
-        if child_blocks and top_claims == [section_id]:
-            top_claims = []
-        for claim in top_claims:
-            if claim not in seen:
-                claims.append(claim)
-                seen.add(claim)
+    if top_block is not None and top_block.requirement_id is not None:
+        requirements.append(top_block.requirement_id)
+        seen.add(top_block.requirement_id)
 
     for block in child_blocks:
-        for claim in block_claims(block, lines):
-            if claim not in seen:
-                claims.append(claim)
-                seen.add(claim)
+        requirement_id = block.requirement_id
+        if requirement_id is None or requirement_id in seen:
+            continue
+        requirements.append(requirement_id)
+        seen.add(requirement_id)
 
-    if claims:
-        return claims
-    return [section_id]
+    return requirements
 
 
-def expected_claims_for_manifest_sections(sections: list[dict]) -> list[str]:
+def expected_requirements_for_manifest_sections(sections: list[dict]) -> list[str]:
     blocks = parse_spec_blocks()
-    lines = load_lines()
-    claims: list[str] = []
+    requirements: list[str] = []
     for section in sections:
-        claims.extend(expected_claims_for_section(section["id"], blocks, lines))
-    return claims
+        requirements.extend(expected_requirements_for_section(section["id"], blocks))
+    return requirements
