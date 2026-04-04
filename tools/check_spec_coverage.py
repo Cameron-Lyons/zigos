@@ -8,10 +8,9 @@ from pathlib import Path
 from spec_coverage_lib import (
     MANIFEST_PATH,
     ROOT_DIR,
-    expected_claims_for_manifest_sections,
-    expected_claims_for_section,
+    expected_requirements_for_manifest_sections,
+    expected_requirements_for_section,
     expected_headings,
-    load_lines,
     parse_spec_blocks,
 )
 
@@ -35,24 +34,25 @@ def main() -> int:
     errors: list[str] = []
     manifest = load_manifest()
     blocks = parse_spec_blocks()
-    lines = load_lines()
     spec_headings = expected_headings(blocks)
     required_headings = manifest["required_headings"]
-    required_claims = manifest["required_claims"]
+    required_requirements = manifest["required_requirements"]
 
     if required_headings != spec_headings:
         errors.append("required_headings in coverage manifest are out of sync with SPEC.md")
 
-    expected_manifest_claims = expected_claims_for_manifest_sections(manifest["sections"])
-    if required_claims != expected_manifest_claims:
-        errors.append("required_claims in coverage manifest are out of sync with SPEC.md section requirements")
+    expected_manifest_requirements = expected_requirements_for_manifest_sections(manifest["sections"])
+    if required_requirements != expected_manifest_requirements:
+        errors.append(
+            "required_requirements in coverage manifest are out of sync with SPEC.md requirement ids"
+        )
 
     for heading in required_headings:
         if heading not in spec_headings:
             errors.append(f"Missing required heading in SPEC.md: {heading}")
 
     seen_sections: set[str] = set()
-    seen_claims: dict[str, str] = {}
+    seen_requirements: dict[str, str] = {}
     test_cache: dict[Path, set[str]] = {}
     referenced_test_count = 0
 
@@ -72,19 +72,21 @@ def main() -> int:
         if not tests:
             errors.append(f"Coverage section {section_id} has no test references")
 
-        expected_section_claims = expected_claims_for_section(section_id, blocks, lines)
-        if section.get("claims", []) != expected_section_claims:
+        expected_section_requirements = expected_requirements_for_section(section_id, blocks)
+        if section.get("requirements", []) != expected_section_requirements:
             errors.append(
-                f"Coverage section {section_id} claims are out of sync with SPEC.md for heading {heading}"
+                "Coverage section "
+                f"{section_id} requirements are out of sync with SPEC.md for heading {heading}"
             )
 
-        for claim in section.get("claims", []):
-            owner = seen_claims.get(claim)
+        for requirement_id in section.get("requirements", []):
+            owner = seen_requirements.get(requirement_id)
             if owner is not None:
                 errors.append(
-                    f"Claim {claim} is mapped more than once in coverage manifest: {owner} and {section_id}"
+                    "Requirement "
+                    f"{requirement_id} is mapped more than once in coverage manifest: {owner} and {section_id}"
                 )
-            seen_claims[claim] = section_id
+            seen_requirements[requirement_id] = section_id
 
         for test_ref in tests:
             path = ROOT_DIR / test_ref["file"]
@@ -102,15 +104,15 @@ def main() -> int:
                 )
             referenced_test_count += 1
 
-    claimed = set(seen_claims)
-    required_claim_set = set(required_claims)
-    missing_claims = sorted(required_claim_set - claimed)
-    extra_claims = sorted(claimed - required_claim_set)
+    covered_requirements = set(seen_requirements)
+    required_requirement_set = set(required_requirements)
+    missing_requirements = sorted(required_requirement_set - covered_requirements)
+    extra_requirements = sorted(covered_requirements - required_requirement_set)
 
-    for claim in missing_claims:
-        errors.append(f"Required spec claim is not covered: {claim}")
-    for claim in extra_claims:
-        errors.append(f"Unexpected spec claim in coverage manifest: {claim}")
+    for requirement_id in missing_requirements:
+        errors.append(f"Required spec requirement is not covered: {requirement_id}")
+    for requirement_id in extra_requirements:
+        errors.append(f"Unexpected spec requirement in coverage manifest: {requirement_id}")
 
     if errors:
         for error in errors:
@@ -120,7 +122,7 @@ def main() -> int:
     print(
         "Spec coverage OK: "
         f"{len(required_headings)} headings, "
-        f"{len(required_claims)} claims, "
+        f"{len(required_requirements)} requirements, "
         f"{len(manifest['sections'])} section groups, "
         f"{referenced_test_count} test references"
     )

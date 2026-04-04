@@ -1,4 +1,16 @@
+const std = @import("std");
+const contract = @import("../session/contract.zig");
 const manifest = @import("../policy/manifest.zig");
+
+pub const FLAG_SYSTEM_BUNDLE: u32 = 1 << 0;
+pub const FLAG_OWNS_UI_SURFACE: u32 = 1 << 1;
+pub const FLAG_PERMISSION_REVIEW: u32 = 1 << 2;
+pub const FLAG_BACKGROUND_ELIGIBLE: u32 = 1 << 3;
+pub const FLAG_STORAGE_BOUNDARY: u32 = 1 << 4;
+pub const FLAG_NETWORK_BOUNDARY: u32 = 1 << 5;
+pub const FLAG_POLICY_BOUNDARY: u32 = 1 << 6;
+pub const FLAG_DRIVER_BOUNDARY: u32 = 1 << 7;
+pub const FLAG_COMPATIBILITY_BOUNDARY: u32 = 1 << 8;
 
 pub const ComponentClass = enum(u8) {
     session_manager,
@@ -6,9 +18,17 @@ pub const ComponentClass = enum(u8) {
     service_component,
 };
 
+pub const ContractSpec = struct {
+    bundle_id: []const u8,
+    role_tag: u32,
+    heartbeat_increment: u32,
+    contract_flags: u32,
+};
+
 pub const ImageSpec = struct {
     bundle_id: []const u8,
     artifact_name: []const u8,
+    source_path: []const u8 = "src/userspace/component_main.zig",
     display_name: []const u8,
     publisher: []const u8,
     label: []const u8,
@@ -19,6 +39,10 @@ pub const ImageSpec = struct {
     assets: []const manifest.AssetDecl = &.{},
     update_channel: manifest.UpdateChannel = .stable,
     component_class: ComponentClass,
+    role_tag: u32,
+    heartbeat_increment: u32,
+    contract_flags: u32 = 0,
+    service_class: ?contract.ServiceClass = null,
     signed: bool = true,
 };
 
@@ -32,6 +56,10 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "zigos.session.manager",
         .components = &.{.{ .id = "session-manager", .entry = "zigos.session.manager" }},
         .component_class = .session_manager,
+        .role_tag = 0xA101,
+        .heartbeat_increment = 1,
+        .contract_flags = FLAG_SYSTEM_BUNDLE,
+        .service_class = .session_manager,
     },
     .{
         .bundle_id = "zigos.system.permission-review",
@@ -42,6 +70,10 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "zigos.permission.review",
         .components = &.{.{ .id = "permission-review", .entry = "zigos.permission.review" }},
         .component_class = .service_component,
+        .role_tag = 0xA102,
+        .heartbeat_increment = 2,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_OWNS_UI_SURFACE | FLAG_PERMISSION_REVIEW,
+        .service_class = .permission_review_ui,
     },
     .{
         .bundle_id = "zigos.system.workspace-storage",
@@ -52,6 +84,9 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "zigos.bootstrap.workspace",
         .components = &.{.{ .id = "workspace-storage", .entry = "zigos.bootstrap.workspace" }},
         .component_class = .service_component,
+        .role_tag = 0xA103,
+        .heartbeat_increment = 3,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_STORAGE_BOUNDARY,
     },
     .{
         .bundle_id = "zigos.system.transport-probe",
@@ -62,6 +97,9 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "app.transport.probe",
         .components = &.{.{ .id = "transport-probe", .entry = "app.transport.probe" }},
         .component_class = .app_component,
+        .role_tag = 0xA104,
+        .heartbeat_increment = 4,
+        .contract_flags = FLAG_OWNS_UI_SURFACE,
     },
     .{
         .bundle_id = "zigos.system.termination-probe",
@@ -72,6 +110,8 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "app.termination.probe",
         .components = &.{.{ .id = "termination-probe", .entry = "app.termination.probe" }},
         .component_class = .app_component,
+        .role_tag = 0xA105,
+        .heartbeat_increment = 5,
     },
     .{
         .bundle_id = "app.viewer",
@@ -85,6 +125,9 @@ pub const boot_image_specs = [_]ImageSpec{
         .consumed_interfaces = &.{.{ .name = "zigos.object.workspace" }},
         .assets = &.{.{ .path = "assets/viewer/icon.svg", .content_type = "image/svg+xml" }},
         .component_class = .app_component,
+        .role_tag = 0xA106,
+        .heartbeat_increment = 6,
+        .contract_flags = FLAG_OWNS_UI_SURFACE,
     },
     .{
         .bundle_id = "app.notes",
@@ -99,6 +142,9 @@ pub const boot_image_specs = [_]ImageSpec{
         .assets = &.{.{ .path = "assets/notes/icon.svg", .content_type = "image/svg+xml" }},
         .update_channel = .beta,
         .component_class = .app_component,
+        .role_tag = 0xA107,
+        .heartbeat_increment = 7,
+        .contract_flags = FLAG_OWNS_UI_SURFACE,
     },
     .{
         .bundle_id = "app.sync",
@@ -112,6 +158,9 @@ pub const boot_image_specs = [_]ImageSpec{
         .consumed_interfaces = &.{.{ .name = "zigos.object.workspace" }},
         .assets = &.{.{ .path = "assets/sync/icon.svg", .content_type = "image/svg+xml" }},
         .component_class = .app_component,
+        .role_tag = 0xA108,
+        .heartbeat_increment = 8,
+        .contract_flags = FLAG_BACKGROUND_ELIGIBLE,
     },
     .{
         .bundle_id = "app.capture",
@@ -125,6 +174,9 @@ pub const boot_image_specs = [_]ImageSpec{
         .consumed_interfaces = &.{.{ .name = "zigos.media.print" }},
         .assets = &.{.{ .path = "assets/capture/icon.svg", .content_type = "image/svg+xml" }},
         .component_class = .app_component,
+        .role_tag = 0xA109,
+        .heartbeat_increment = 9,
+        .contract_flags = FLAG_OWNS_UI_SURFACE,
     },
     .{
         .bundle_id = "zigos.system.policy-mediation",
@@ -135,6 +187,10 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "zigos.policy.mediation",
         .components = &.{.{ .id = "policy-mediation", .entry = "zigos.policy.mediation" }},
         .component_class = .service_component,
+        .role_tag = 0xA10A,
+        .heartbeat_increment = 10,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_POLICY_BOUNDARY,
+        .service_class = .policy_mediation,
     },
     .{
         .bundle_id = "zigos.system.network-stack",
@@ -145,6 +201,10 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "zigos.service.network.policy",
         .components = &.{.{ .id = "network-service", .entry = "zigos.service.network.policy" }},
         .component_class = .service_component,
+        .role_tag = 0xA10B,
+        .heartbeat_increment = 11,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_NETWORK_BOUNDARY,
+        .service_class = .network_stack,
     },
     .{
         .bundle_id = "zigos.system.storage-object",
@@ -155,6 +215,10 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "zigos.object.workspace",
         .components = &.{.{ .id = "workspace-storage", .entry = "zigos.object.workspace" }},
         .component_class = .service_component,
+        .role_tag = 0xA10C,
+        .heartbeat_increment = 12,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_STORAGE_BOUNDARY,
+        .service_class = .storage_object,
     },
     .{
         .bundle_id = "zigos.system.storage-driver",
@@ -165,6 +229,9 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "zigos.driver.storage",
         .components = &.{.{ .id = "storage-driver", .entry = "zigos.driver.storage" }},
         .component_class = .service_component,
+        .role_tag = 0xA10D,
+        .heartbeat_increment = 13,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_DRIVER_BOUNDARY | FLAG_STORAGE_BOUNDARY,
     },
     .{
         .bundle_id = "zigos.system.package-service",
@@ -175,6 +242,10 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "zigos.package.install",
         .components = &.{.{ .id = "package-service", .entry = "zigos.package.install" }},
         .component_class = .service_component,
+        .role_tag = 0xA10E,
+        .heartbeat_increment = 14,
+        .contract_flags = FLAG_SYSTEM_BUNDLE,
+        .service_class = .package_install_update,
     },
     .{
         .bundle_id = "zigos.system.compositor",
@@ -185,6 +256,10 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "zigos.ui.session",
         .components = &.{.{ .id = "compositor-session", .entry = "zigos.ui.session" }},
         .component_class = .service_component,
+        .role_tag = 0xA10F,
+        .heartbeat_increment = 15,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_OWNS_UI_SURFACE,
+        .service_class = .compositor_ui_session,
     },
     .{
         .bundle_id = "zigos.system.indexing-search",
@@ -195,6 +270,10 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "zigos.index.search",
         .components = &.{.{ .id = "indexing-service", .entry = "zigos.index.search" }},
         .component_class = .service_component,
+        .role_tag = 0xA110,
+        .heartbeat_increment = 16,
+        .contract_flags = FLAG_SYSTEM_BUNDLE,
+        .service_class = .indexing_search,
     },
     .{
         .bundle_id = "zigos.system.sync-service",
@@ -205,6 +284,10 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "zigos.sync.replication",
         .components = &.{.{ .id = "sync-service", .entry = "zigos.sync.replication" }},
         .component_class = .service_component,
+        .role_tag = 0xA111,
+        .heartbeat_increment = 17,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_BACKGROUND_ELIGIBLE,
+        .service_class = .sync_replication,
     },
     .{
         .bundle_id = "zigos.system.media-print",
@@ -215,6 +298,10 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "zigos.media.print",
         .components = &.{.{ .id = "media-print-service", .entry = "zigos.media.print" }},
         .component_class = .service_component,
+        .role_tag = 0xA112,
+        .heartbeat_increment = 18,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_BACKGROUND_ELIGIBLE,
+        .service_class = .media_print_helpers,
     },
     .{
         .bundle_id = "zigos.system.compatibility-portal",
@@ -225,6 +312,10 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "zigos.compat.portal",
         .components = &.{.{ .id = "compatibility-portal", .entry = "zigos.compat.portal" }},
         .component_class = .service_component,
+        .role_tag = 0xA113,
+        .heartbeat_increment = 19,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_COMPATIBILITY_BOUNDARY,
+        .service_class = .compatibility_portal,
     },
     .{
         .bundle_id = "zigos.system.service-client",
@@ -235,21 +326,52 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "app.service.client",
         .components = &.{.{ .id = "service-client", .entry = "app.service.client" }},
         .component_class = .app_component,
+        .role_tag = 0xA114,
+        .heartbeat_increment = 20,
+        .contract_flags = FLAG_OWNS_UI_SURFACE,
     },
 };
 
 pub fn find(bundle_id: []const u8) ?*const ImageSpec {
     for (&boot_image_specs) |*spec| {
-        if (eql(spec.bundle_id, bundle_id)) return spec;
+        if (std.mem.eql(u8, spec.bundle_id, bundle_id)) return spec;
     }
     return null;
 }
 
-fn eql(left: []const u8, right: []const u8) bool {
-    if (left.len != right.len) return false;
-    var index: usize = 0;
-    while (index < left.len) : (index += 1) {
-        if (left[index] != right[index]) return false;
+pub fn contractFor(bundle_id: []const u8) ?ContractSpec {
+    const spec = find(bundle_id) orelse return null;
+    return contractForSpec(spec);
+}
+
+pub fn findByServiceClass(class: contract.ServiceClass) ?*const ImageSpec {
+    for (&boot_image_specs) |*spec| {
+        if (spec.service_class == class) return spec;
     }
-    return true;
+    return null;
+}
+
+pub fn contractForSpec(spec: *const ImageSpec) ContractSpec {
+    return .{
+        .bundle_id = spec.bundle_id,
+        .role_tag = spec.role_tag,
+        .heartbeat_increment = spec.heartbeat_increment,
+        .contract_flags = spec.contract_flags,
+    };
+}
+
+test "userspace registry definitions stay unique and keep typed contract metadata attached" {
+    for (boot_image_specs, 0..) |spec, index| {
+        try std.testing.expect(spec.role_tag != 0);
+        try std.testing.expect(spec.heartbeat_increment != 0);
+        try std.testing.expect(std.mem.eql(u8, spec.source_path, "src/userspace/component_main.zig"));
+
+        var peer_index: usize = 0;
+        while (peer_index < index) : (peer_index += 1) {
+            try std.testing.expect(!std.mem.eql(u8, boot_image_specs[peer_index].bundle_id, spec.bundle_id));
+            try std.testing.expect(boot_image_specs[peer_index].role_tag != spec.role_tag);
+        }
+    }
+
+    try std.testing.expect(findByServiceClass(.storage_object) != null);
 }

@@ -11,8 +11,9 @@ Use the pinned toolchain and repo entrypoints:
 Keep the spec contract intact:
 
 - Treat `SPEC.md` as the architecture contract and `spec/coverage.json` as the coverage manifest.
+- Keep the hidden `<!-- REQ: ... -->` anchors in `SPEC.md` stable when editing prose so coverage mappings do not churn.
 - If you add, rename, or split spec tests, keep the test names and coverage references aligned.
-- Prefer expanding tests and coverage before changing architecture claims.
+- Prefer expanding tests and coverage before changing requirement anchors or architecture claims.
 
 Respect the architectural boundaries from the spec:
 

@@ -74,7 +74,7 @@ fn launchServices(
             entry,
             spec.correlation_base,
             spec.now_ticks,
-        );
+        ) catch unreachable;
     }
 
     _ = service_bootstrap.launchBundleService(
@@ -91,7 +91,7 @@ fn launchServices(
         service_bootstrap.serviceBudget(.compatibility_portal),
         325,
         51,
-    );
+    ) catch unreachable;
     common.printBootMarker("ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY");
 }
 
@@ -112,7 +112,7 @@ fn activateDrivers(
         .storage_controller,
         328,
         52,
-    );
+    ) catch unreachable;
 
     const network_driver = service_bootstrap.attachDriver(
         kernel_port,
@@ -219,7 +219,7 @@ fn connectClient(
             .local_only = true,
         },
         env.userspace_scheduler,
-    );
+    ) catch unreachable;
     if (!env.runtime.hasCapability(service_client_task.task_id, state.session_capability.id)) {
         env.runtime.grantCapability(service_client_task.task_id, state.session_capability.id) catch unreachable;
     }

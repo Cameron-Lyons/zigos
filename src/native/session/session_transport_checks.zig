@@ -49,7 +49,7 @@ pub fn run(
             .local_only = true,
         },
         env.userspace_scheduler,
-    );
+    ) catch unreachable;
     grantTaskCapability(env, storage_task_desc.task_id, state.session_capability.id);
     executeUserspaceProbe(env, storage_task_desc.task_id);
     const transport_probe_task = userspace_launch.launchRegisteredKernel(
@@ -74,7 +74,7 @@ pub fn run(
             .local_only = true,
         },
         env.userspace_scheduler,
-    );
+    ) catch unreachable;
     grantTaskCapability(env, transport_probe_task.task_id, state.session_capability.id);
     grantTaskCapability(env, transport_probe_task.task_id, state.policy_capability.id);
     common.printBootMarker(boot_markers.transport_task_create_ok);
@@ -262,7 +262,7 @@ pub fn run(
             .local_only = true,
         },
         env.userspace_scheduler,
-    );
+    ) catch unreachable;
     grantTaskCapability(env, termination_probe_task.task_id, state.policy_capability.id);
     const termination_probe_capability = kernel_port.capabilityMint(.{
         .header = component_port.makeHeader(.capability_mint, 18, termination_probe_task.task_id),
