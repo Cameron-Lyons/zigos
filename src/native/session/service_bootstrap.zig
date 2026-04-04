@@ -15,6 +15,8 @@ const userspace_boot_registry = @import("../task/userspace_boot_registry.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 
+pub const Error = userspace_launch.Error || userspace_boot_registry.Error || component_port.Error;
+
 pub const ServiceBinding = struct {
     task_id: u64,
     endpoint_id: u64,
@@ -32,7 +34,7 @@ pub fn launchContractService(
     entry: service_contract.ServiceContract,
     correlation_base: u64,
     now_ticks: u64,
-) ServiceBinding {
+) Error!ServiceBinding {
     return launchBundleService(
         catalog,
         kernel_port,
@@ -42,7 +44,7 @@ pub fn launchContractService(
         schedule_task,
         owner,
         service_id,
-        userspace_boot_registry.bundleIdForServiceClass(entry.class) catch unreachable,
+        try userspace_boot_registry.bundleIdForServiceClass(entry.class),
         entry.interface,
         serviceBudget(entry.class),
         correlation_base,
@@ -64,8 +66,8 @@ pub fn launchBundleService(
     budget: task_runtime.ResourceBudget,
     correlation_base: u64,
     now_ticks: u64,
-) ServiceBinding {
-    const service_task = userspace_launch.launchRegisteredKernel(
+) Error!ServiceBinding {
+    const service_task = try userspace_launch.launchRegisteredKernel(
         catalog,
         .{
             .port = kernel_port,
@@ -83,10 +85,10 @@ pub fn launchBundleService(
         schedule_task,
     );
     if (!kernel_port.kernel.runtime.hasCapability(service_task.task_id, authority_capability_id)) {
-        kernel_port.kernel.runtime.grantCapability(service_task.task_id, authority_capability_id) catch unreachable;
+        try kernel_port.kernel.runtime.grantCapability(service_task.task_id, authority_capability_id);
     }
 
-    const endpoint = kernel_port.endpointCreate(.{
+    const endpoint = try kernel_port.endpointCreate(.{
         .header = component_port.makeHeader(.endpoint_create, correlation_base + 1, service_task.task_id),
         .authority_capability_id = authority_capability_id,
         .owner_task_id = service_task.task_id,
@@ -95,15 +97,15 @@ pub fn launchBundleService(
             .local_only = true,
             .service_port = true,
         },
-    }, now_ticks) catch unreachable;
-    kernel_port.serviceRegister(.{
+    }, now_ticks);
+    try kernel_port.serviceRegister(.{
         .header = component_port.makeHeader(.service_register, correlation_base + 2, service_task.task_id),
         .authority_capability_id = authority_capability_id,
         .service_id = service_id,
         .owner_task_id = service_task.task_id,
         .endpoint_capability_id = endpoint.capability_id,
         .interface = interface,
-    }, now_ticks) catch unreachable;
+    }, now_ticks);
     _ = supervisor.noteContractBound(service_id, endpoint.endpoint.endpoint_id, now_ticks);
 
     return .{
@@ -179,7 +181,7 @@ pub fn launchDriverTask(
     device_class: driver_service.DeviceClass,
     correlation_base: u64,
     now_ticks: u64,
-) abi.TaskDescriptor {
+) Error!abi.TaskDescriptor {
     return userspace_launch.launchRegisteredKernel(
         catalog,
         .{

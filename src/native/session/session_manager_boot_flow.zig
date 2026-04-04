@@ -324,7 +324,7 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapState {
             .local_only = true,
         },
         &self.userspace_scheduler,
-    );
+    ) catch unreachable;
     common.printBootMarker(boot_markers.policy_ready);
 
     const review_service_task = userspace_launch.launchRegisteredDirect(
@@ -343,7 +343,7 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapState {
             .local_only = true,
         },
         &self.userspace_scheduler,
-    );
+    ) catch unreachable;
     common.printBootMarker(boot_markers.permission_ui_service_ready);
     common.printBootMarker(boot_markers.permission_ui_service_task_ready);
 

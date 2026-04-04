@@ -2,6 +2,7 @@
 
 Hypothetical clean-slate operating system spec, v0.1
 
+<!-- REQ: REQ-DESIGN-GOALS-AND-NON-GOALS -->
 ## 1. Design goals
 
 Zigos is designed for how computers are actually used in 2026:
@@ -37,6 +38,7 @@ Non-goals
 
 ## 2. Core architectural principles
 
+<!-- REQ: REQ-ZERO-AMBIENT-AUTHORITY -->
 ### 2.1 Zero ambient authority
 
 A process starts with no access to:
@@ -53,6 +55,7 @@ A process starts with no access to:
 
 Every access must be granted explicitly.
 
+<!-- REQ: REQ-IMMUTABLE-BASE-SYSTEM -->
 ### 2.2 Immutable base system
 
 The OS base image is:
@@ -63,6 +66,7 @@ The OS base image is:
 - updated atomically
 - rollback-capable
 
+<!-- REQ: REQ-USERSPACE-SERVICES-BY-DEFAULT -->
 ### 2.3 User-space services by default
 
 Most subsystems outside scheduling, memory management, interrupt routing, and capability enforcement run outside the kernel:
@@ -76,6 +80,7 @@ Most subsystems outside scheduling, memory management, interrupt routing, and ca
 - indexer
 - print/media subsystems
 
+<!-- REQ: REQ-DATA-IS-VERSIONED -->
 ### 2.4 Data is versioned
 
 User data is versioned and recoverable by default:
@@ -86,6 +91,7 @@ User data is versioned and recoverable by default:
 - selective sync
 - auditable sharing
 
+<!-- REQ: REQ-PLATFORM-APIS-OVER-SYSTEM-INTERNALS -->
 ### 2.5 Platform APIs over system internals
 
 Applications use stable, typed platform APIs.
@@ -102,6 +108,7 @@ They do not:
 
 Zigos exposes five core primitives:
 
+<!-- REQ: REQ-PRINCIPAL-MODEL -->
 ### 3.1 Principal
 
 An identity that can hold authority:
@@ -114,6 +121,7 @@ An identity that can hold authority:
 
 Each principal has cryptographic identity.
 
+<!-- REQ: REQ-CAPABILITY-MODEL -->
 ### 3.2 Capability
 
 An unforgeable token granting a limited right over an object or service.
@@ -125,6 +133,7 @@ Examples:
 - send HTTPS requests to service Z
 - use microphone while task T is foregrounded
 
+<!-- REQ: REQ-OBJECT-MODEL -->
 ### 3.3 Object
 
 The base storage unit.
@@ -140,6 +149,7 @@ Object types include:
 
 Objects are content-addressed and versioned.
 
+<!-- REQ: REQ-WORKSPACE-MODEL -->
 ### 3.4 Workspace
 
 A mutable container for related objects, policies, and sharing rules.
@@ -152,6 +162,7 @@ Examples:
 - video editing project
 - team design workspace
 
+<!-- REQ: REQ-TASK-MODEL -->
 ### 3.5 Task
 
 A transient execution context combining:
@@ -166,6 +177,7 @@ The user experiences "tasks" more directly than "apps."
 
 ## 4. Kernel specification
 
+<!-- REQ: REQ-KERNEL-TYPE-AND-BOUNDARY -->
 ### 4.1 Kernel type
 
 Zigos uses a microkernel or microkernel-like architecture.
@@ -195,6 +207,7 @@ These must run outside the kernel:
 - indexing/search
 - sync/replication
 
+<!-- REQ: REQ-KERNEL-REQUIREMENTS -->
 ### 4.2 Kernel requirements
 
 The kernel MUST:
@@ -206,6 +219,7 @@ The kernel MUST:
 - support capability passing over IPC
 - support per-process and per-task resource accounting
 
+<!-- REQ: REQ-PRIVILEGE-MODEL -->
 ### 4.3 Privilege model
 
 There is no traditional omnipotent "root" user in normal operation.
@@ -219,6 +233,7 @@ Instead:
 
 ## 5. Boot, trust, and attestation
 
+<!-- REQ: REQ-BOOT-CHAIN -->
 ### 5.1 Boot chain
 
 Boot sequence:
@@ -228,6 +243,7 @@ Boot sequence:
 3. kernel verifies core service set
 4. system launches into a measured, attestable state
 
+<!-- REQ: REQ-MEASURED-STATE -->
 ### 5.2 Measured state
 
 The system maintains a measurement of:
@@ -240,6 +256,7 @@ The system maintains a measurement of:
 
 Remote attestation is optional and user-visible when used.
 
+<!-- REQ: REQ-RECOVERY-MODE -->
 ### 5.3 Recovery mode
 
 A separate recovery environment must:
@@ -252,6 +269,7 @@ A separate recovery environment must:
 
 ## 6. Process and application model
 
+<!-- REQ: REQ-APP-PACKAGING -->
 ### 6.1 App packaging
 
 Applications are shipped as signed bundles containing:
@@ -264,6 +282,7 @@ Applications are shipped as signed bundles containing:
 
 Installers are not arbitrary scripts.
 
+<!-- REQ: REQ-APP-EXECUTION -->
 ### 6.2 App execution
 
 Each app instance runs in:
@@ -274,6 +293,7 @@ Each app instance runs in:
 
 App instances are isolated from one another unless linked by explicit platform channels.
 
+<!-- REQ: REQ-COMPONENT-MODEL -->
 ### 6.3 Component model
 
 The default application ABI is a typed component ABI designed for:
@@ -285,6 +305,7 @@ The default application ABI is a typed component ABI designed for:
 
 Native code is allowed, but only inside the same capability sandbox.
 
+<!-- REQ: REQ-BACKGROUND-EXECUTION -->
 ### 6.4 Background execution
 
 Background work is not unrestricted.
@@ -311,6 +332,7 @@ The system may throttle, delay, or deny abusive workloads.
 
 ## 7. Security model
 
+<!-- REQ: REQ-CAPABILITY-BASED-ACCESS-CONTROL -->
 ### 7.1 Capability-based access control
 
 All protected resources are accessed through capabilities.
@@ -323,6 +345,7 @@ Examples:
 - an IP address does not imply permission to connect
 - knowing another app exists does not allow IPC with it
 
+<!-- REQ: REQ-PERMISSION-GRANTS -->
 ### 7.2 Permission grants
 
 Permissions are:
@@ -338,6 +361,7 @@ Examples:
 - "Allow this editor to modify Workspace Alpha"
 - "Allow this scanner app to use the camera for 10 minutes"
 
+<!-- REQ: REQ-DATA-EGRESS-CONTROL -->
 ### 7.3 Data egress control
 
 Network access is split into:
@@ -350,6 +374,7 @@ Network access is split into:
 
 Default is none.
 
+<!-- REQ: REQ-PROCESS-ISOLATION -->
 ### 7.4 Process isolation
 
 Apps may not:
@@ -362,6 +387,7 @@ Apps may not:
 
 Such rights require special user-visible entitlements.
 
+<!-- REQ: REQ-SECRETS -->
 ### 7.5 Secrets
 
 Secrets are stored in hardware-backed secure storage when available.
@@ -370,6 +396,7 @@ Apps receive handles to secrets, not raw export, unless explicitly allowed.
 
 ## 8. Storage model
 
+<!-- REQ: REQ-OBJECT-STORE -->
 ### 8.1 Object store
 
 The native storage layer is a content-addressed object store.
@@ -383,6 +410,7 @@ Properties:
 - efficient replication
 - built-in history
 
+<!-- REQ: REQ-MUTABLE-STATE -->
 ### 8.2 Mutable state
 
 Mutable user data is represented as:
@@ -392,6 +420,7 @@ Mutable user data is represented as:
 - transactional workspace state
 - CRDT-backed shared objects where suitable
 
+<!-- REQ: REQ-FILE-BRIDGE -->
 ### 8.3 File bridge
 
 For compatibility with user expectations and simple tooling, Zigos provides a file view.
@@ -405,6 +434,7 @@ The file view is:
 
 This means users can still drag, save, and export "files," but the OS internally tracks richer structure.
 
+<!-- REQ: REQ-SNAPSHOTS-AND-RECOVERY -->
 ### 8.4 Snapshots and recovery
 
 Every workspace supports:
@@ -417,6 +447,7 @@ Every workspace supports:
 
 ## 9. Sync and multi-device model
 
+<!-- REQ: REQ-DEVICE-GRAPH -->
 ### 9.1 Device graph
 
 A user account is a graph of trusted devices, not a cloud username/password pair.
@@ -428,6 +459,7 @@ Each device has:
 - per-workspace sync policy
 - revocation status
 
+<!-- REQ: REQ-LOCAL-FIRST-REPLICATION -->
 ### 9.2 Local-first replication
 
 Sync is built into the OS.
@@ -441,6 +473,7 @@ Requirements:
 - relay-assisted sync when needed
 - conflict detection at object level
 
+<!-- REQ: REQ-SYNC-SEMANTICS -->
 ### 9.3 Sync semantics
 
 Different data classes use different replication models:
@@ -450,6 +483,7 @@ Different data classes use different replication models:
 - secrets: explicit secure transfer
 - databases: application-declared transactional sync model
 
+<!-- REQ: REQ-SHARING -->
 ### 9.4 Sharing
 
 Users share objects or workspaces with:
@@ -469,6 +503,7 @@ Sharing specifies:
 
 ## 10. Networking model
 
+<!-- REQ: REQ-IDENTITY-FIRST-NETWORKING -->
 ### 10.1 Identity-first networking
 
 Services are addressed by identity as well as location.
@@ -481,6 +516,7 @@ The OS prefers:
 - explicit egress rules
 - scoped local network discovery
 
+<!-- REQ: REQ-NETWORK-PERMISSIONS -->
 ### 10.2 Network permissions
 
 Network permissions are granted as policy objects, for example:
@@ -490,6 +526,7 @@ Network permissions are granted as policy objects, for example:
 - join local subnet discovery for printers only
 - accept inbound connections for collaborative session type X
 
+<!-- REQ: REQ-PRIVATE-OVERLAY -->
 ### 10.3 Private overlay
 
 Zigos includes a private user-device overlay network for:
@@ -501,6 +538,7 @@ Zigos includes a private user-device overlay network for:
 
 ## 11. UI and interaction model
 
+<!-- REQ: REQ-TASK-FIRST-UX -->
 ### 11.1 Task-first UX
 
 The top-level UX is task-oriented rather than purely app-oriented.
@@ -515,6 +553,7 @@ Examples:
 
 Apps still exist, but the OS orchestrates the task.
 
+<!-- REQ: REQ-WINDOWS-AND-VIEWS -->
 ### 11.2 Windows and views
 
 The system supports multiple view types:
@@ -524,6 +563,7 @@ The system supports multiple view types:
 - app panel
 - full-screen media/task view
 
+<!-- REQ: REQ-PERMISSION-UX -->
 ### 11.3 Permission UX
 
 Permissions are granted at meaningful moments, not as blanket startup prompts.
@@ -537,6 +577,7 @@ The system should say:
 - with what network path
 - whether the operation stays local
 
+<!-- REQ: REQ-NOTIFICATIONS -->
 ### 11.4 Notifications
 
 Notifications are structured objects with:
@@ -552,6 +593,7 @@ Apps cannot spam arbitrary notifications indefinitely.
 
 ## 12. Hardware and resource management
 
+<!-- REQ: REQ-UNIFIED-RESOURCE-SCHEDULER -->
 ### 12.1 Unified resource scheduler
 
 The OS scheduler manages:
@@ -564,6 +606,7 @@ The OS scheduler manages:
 - thermals
 - battery budget
 
+<!-- REQ: REQ-SHARED-MEMORY-OBJECTS -->
 ### 12.2 Shared memory objects
 
 The platform supports secure shared memory objects across compute units, with:
@@ -573,6 +616,7 @@ The platform supports secure shared memory objects across compute units, with:
 - zero-copy where possible
 - explicit revocation
 
+<!-- REQ: REQ-THERMAL-AND-POWER-POLICY -->
 ### 12.3 Thermal and power policy
 
 Every task receives a resource class:
@@ -592,6 +636,7 @@ The scheduler may degrade quality or delay work to preserve:
 
 ## 13. Driver model
 
+<!-- REQ: REQ-USERSPACE-DRIVERS -->
 ### 13.1 User-space drivers
 
 All possible drivers run in user space.
@@ -605,12 +650,14 @@ Requirements:
 - signed distribution
 - versioned interfaces
 
+<!-- REQ: REQ-DRIVER-PERMISSIONS -->
 ### 13.2 Driver permissions
 
 A driver receives only the authority needed for its device class.
 
 A compromised audio driver should not gain display or network authority.
 
+<!-- REQ: REQ-DRIVER-HOT-SWAP-AND-FAILURE-RECOVERY -->
 ### 13.3 Hot-swap and failure recovery
 
 Driver failure should:
@@ -622,6 +669,7 @@ Driver failure should:
 
 ## 14. Updates and system lifecycle
 
+<!-- REQ: REQ-BASE-OS-UPDATES -->
 ### 14.1 Base OS updates
 
 Base OS updates are:
@@ -632,6 +680,7 @@ Base OS updates are:
 - staged
 - rollback-capable
 
+<!-- REQ: REQ-HEALTH-CHECKS -->
 ### 14.2 Health checks
 
 After update activation, the system validates:
@@ -644,6 +693,7 @@ After update activation, the system validates:
 
 Failure triggers automatic rollback.
 
+<!-- REQ: REQ-APP-UPDATES -->
 ### 14.3 App updates
 
 App updates are independent of base OS updates and must:
@@ -655,6 +705,7 @@ App updates are independent of base OS updates and must:
 
 ## 15. Observability and diagnostics
 
+<!-- REQ: REQ-STRUCTURED-EVENT-LEDGER -->
 ### 15.1 Structured event ledger
 
 The OS keeps a structured event ledger for:
@@ -666,6 +717,7 @@ The OS keeps a structured event ledger for:
 - sync conflicts
 - device trust changes
 
+<!-- REQ: REQ-EXPLAINABLE-DENIALS -->
 ### 15.2 Explainable denials
 
 When an action fails, the OS should explain:
@@ -675,6 +727,7 @@ When an action fails, the OS should explain:
 - whether user approval can resolve it
 - whether retry is safe
 
+<!-- REQ: REQ-PRIVACY-PRESERVING-DIAGNOSTICS -->
 ### 15.3 Privacy-preserving diagnostics
 
 Crash and telemetry reporting are:
@@ -686,6 +739,7 @@ Crash and telemetry reporting are:
 
 ## 16. Policy and administration
 
+<!-- REQ: REQ-POLICY-OBJECTS -->
 ### 16.1 Policy objects
 
 Policies are signed objects applied at:
@@ -695,6 +749,7 @@ Policies are signed objects applied at:
 - workspace scope
 - organization scope
 
+<!-- REQ: REQ-POLICY-EXAMPLES -->
 ### 16.2 Policy examples
 
 Policies can control:
@@ -706,16 +761,19 @@ Policies can control:
 - sync destinations
 - retention and audit requirements
 
+<!-- REQ: REQ-ENTERPRISE-SUPPORT -->
 ### 16.3 Enterprise support
 
 Enterprise management exists, but as additive policy, not as a separate fork of the OS design.
 
 ## 17. Compatibility strategy
 
+<!-- REQ: REQ-NATIVE-PLATFORM -->
 ### 17.1 Native platform
 
 The native platform does not preserve legacy APIs for compatibility's sake.
 
+<!-- REQ: REQ-LEGACY-SUPPORT -->
 ### 17.2 Legacy support
 
 Legacy apps run in explicit compatibility environments:
@@ -732,6 +790,7 @@ These environments are:
 - limited in host integration
 - granted access through portals, not direct host control
 
+<!-- REQ: REQ-EXAMPLE-APPLICATION-MANIFEST -->
 ## 18. Example application manifest
 
 Here's what an app permission model might look like:
@@ -776,6 +835,7 @@ That is a very different world from:
 - "this process can open sockets anywhere"
 - "this updater runs forever in the background"
 
+<!-- REQ: REQ-ZIGOS-USER-EXPERIENCE -->
 ## 19. What using Zigos would feel like
 
 For users:
@@ -803,6 +863,7 @@ For administrators:
 - device trust is manageable
 - rollback and recovery are straightforward
 
+<!-- REQ: REQ-ONE-SENTENCE-SUMMARY -->
 ## 20. One-sentence summary
 
 Zigos is a capability-based, local-first, multi-device operating system with an immutable core, versioned object storage, strong sandboxing, explicit identity, and first-class support for modern accelerators.
