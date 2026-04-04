@@ -347,18 +347,16 @@ pub const Runtime = struct {
         };
     }
 
-    pub fn snapshot(self: *const Runtime) Snapshot {
-        return .{
-            .next_task_id = self.next_task_id,
-            .next_process_id = self.next_process_id,
-            .next_address_space_id = self.next_address_space_id,
-            .next_namespace_id = self.next_namespace_id,
-            .next_component_id = self.next_component_id,
-            .task_index_slots = self.task_index_slots,
-            .address_space_index_slots = self.address_space_index_slots,
-            .tasks = self.tasks,
-            .address_spaces = self.address_spaces,
-        };
+    pub fn writeSnapshot(self: *const Runtime, out: *Snapshot) void {
+        out.next_task_id = self.next_task_id;
+        out.next_process_id = self.next_process_id;
+        out.next_address_space_id = self.next_address_space_id;
+        out.next_namespace_id = self.next_namespace_id;
+        out.next_component_id = self.next_component_id;
+        copySlots(IdIndexSlot, out.task_index_slots[0..], self.task_index_slots[0..]);
+        copySlots(IdIndexSlot, out.address_space_index_slots[0..], self.address_space_index_slots[0..]);
+        copySlots(TaskSlot, out.tasks[0..], self.tasks[0..]);
+        copySlots(AddressSpaceSlot, out.address_spaces[0..], self.address_spaces[0..]);
     }
 
     pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) void {
@@ -367,10 +365,10 @@ pub const Runtime = struct {
         self.next_address_space_id = state.next_address_space_id;
         self.next_namespace_id = state.next_namespace_id;
         self.next_component_id = state.next_component_id;
-        self.task_index_slots = state.task_index_slots;
-        self.address_space_index_slots = state.address_space_index_slots;
-        self.tasks = state.tasks;
-        self.address_spaces = state.address_spaces;
+        copySlots(IdIndexSlot, self.task_index_slots[0..], state.task_index_slots[0..]);
+        copySlots(IdIndexSlot, self.address_space_index_slots[0..], state.address_space_index_slots[0..]);
+        copySlots(TaskSlot, self.tasks[0..], state.tasks[0..]);
+        copySlots(AddressSpaceSlot, self.address_spaces[0..], state.address_spaces[0..]);
     }
 
     pub fn createTask(self: *Runtime, request: TaskCreateRequest) Error!*TaskRecord {
@@ -760,6 +758,17 @@ fn saturatingSub(current: usize, amount: usize) usize {
 
 fn emptyIndexTable() [INDEX_CAPACITY]IdIndexSlot {
     return [_]IdIndexSlot{IdIndexSlot{}} ** INDEX_CAPACITY;
+}
+
+fn copySlots(comptime T: type, dest: []T, src: []const T) void {
+    copyBytes(std.mem.sliceAsBytes(dest), std.mem.sliceAsBytes(src));
+}
+
+fn copyBytes(dest: []u8, src: []const u8) void {
+    var index: usize = 0;
+    while (index < dest.len and index < src.len) : (index += 1) {
+        dest[index] = src[index];
+    }
 }
 
 fn indexLookup(table: *const [INDEX_CAPACITY]IdIndexSlot, id: u64) ?usize {
