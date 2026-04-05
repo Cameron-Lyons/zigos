@@ -450,6 +450,9 @@ fn deserializeState(store: *object_store.Store, workspaces: *workspace.Directory
             workspaces.snapshots[slot_index].snapshot.entries[entry_index] = try readEntry(&reader);
         }
     }
+
+    store.rebuildIndexes();
+    workspaces.rebuildIndexes();
 }
 
 fn writeMetadata(writer: *CursorWriter, metadata: object_store.SignedMetadata) Error!void {
@@ -692,37 +695,11 @@ fn nextSnapshotSlotIndex(workspaces: *workspace.Directory) ?usize {
 }
 
 fn zeroWorkspaceRecord() workspace.WorkspaceRecord {
-    return .{
-        .id = 0,
-        .owner = .{ .kind = .service, .serial = 0 },
-        .label_len = 0,
-        .label = [_]u8{0} ** 48,
-        .generation = 0,
-        .entry_count = 0,
-        .entries = [_]workspace.Entry{workspace.Entry{}} ** workspace.MAX_WORKSPACE_ENTRIES,
-        .share_grant_count = 0,
-        .share_grants = [_]workspace.ShareGrant{workspace.ShareGrant{
-            .principal_id = .{ .kind = .service, .serial = 0 },
-        }} ** workspace.MAX_SHARE_GRANTS,
-        .transaction_open = false,
-        .staged_entry_count = 0,
-        .staged_entries = [_]workspace.Entry{workspace.Entry{}} ** workspace.MAX_WORKSPACE_ENTRIES,
-        .deleted_count = 0,
-        .deleted_entries = [_]workspace.Entry{workspace.Entry{}} ** workspace.MAX_RECOVERABLE_DELETES,
-    };
+    return workspace.emptyWorkspaceRecord();
 }
 
 fn zeroSnapshotRecord() workspace.SnapshotRecord {
-    return .{
-        .id = 0,
-        .workspace_id = 0,
-        .generation = 0,
-        .label_len = 0,
-        .label = [_]u8{0} ** 48,
-        .signature = .{},
-        .entry_count = 0,
-        .entries = [_]workspace.Entry{workspace.Entry{}} ** workspace.MAX_WORKSPACE_ENTRIES,
-    };
+    return workspace.emptySnapshotRecord();
 }
 
 fn checksumBytes(bytes: []const u8) u64 {

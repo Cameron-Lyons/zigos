@@ -162,6 +162,11 @@ test "task runtime service can restore a persisted checkpoint after service re-i
             .entry = "app.checkpointed",
         },
     });
+    _ = try checkpointed_runtime.attachComponent(task.id, .{
+        .label = "sidecar",
+        .entry = "app.sidecar",
+    }, 43);
+    try checkpointed_runtime.grantCapability(task.id, 91);
     service.checkpoint(44);
 
     var restarted_runtime = task_runtime.Runtime.init();
@@ -171,5 +176,9 @@ test "task runtime service can restore a persisted checkpoint after service re-i
     try std.testing.expect(restarted.restartFromCheckpoint(45));
     try std.testing.expectEqual(@as(u64, 44), restarted.last_checkpoint_tick);
     try std.testing.expectEqual(@as(u32, 1), restarted.restart_generation);
-    try std.testing.expect(restarted_runtime.find(task.id) != null);
+    const restored = restarted_runtime.find(task.id).?;
+    try std.testing.expectEqual(@as(usize, 2), restored.execution_component_count);
+    try std.testing.expectEqualStrings("sidecar", restored.executionComponents()[1].labelSlice());
+    try std.testing.expectEqual(@as(usize, 1), restored.capability_count);
+    try std.testing.expectEqual(@as(u64, 91), restored.capabilityIds()[0]);
 }
