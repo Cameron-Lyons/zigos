@@ -8,6 +8,8 @@ pub const ServiceContract = struct {
     interface: manifest.InterfaceDecl,
     driver_class: ?driver_service.DeviceClass = null,
     description: []const u8,
+    boot_correlation_base: u64,
+    boot_tick: u64,
 };
 
 pub const ordered_service_contracts = [_]ServiceContract{
@@ -15,45 +17,68 @@ pub const ordered_service_contracts = [_]ServiceContract{
         .class = .policy_mediation,
         .interface = .{ .name = "zigos.policy.mediation" },
         .description = "runtime grants, denials, and policy enforcement",
+        .boot_correlation_base = 301,
+        .boot_tick = 31,
     },
     .{
         .class = .network_stack,
         .interface = .{ .name = "zigos.service.network.policy" },
         .driver_class = .network_adapter,
         .description = "network stack, egress mediation, and device-backed packet IO",
+        .boot_correlation_base = 304,
+        .boot_tick = 34,
     },
     .{
         .class = .storage_object,
         .interface = .{ .name = "zigos.object.workspace" },
         .driver_class = .storage_controller,
         .description = "content-addressed object versions, workspace authority, snapshots, and derived file-bridge views",
+        .boot_correlation_base = 307,
+        .boot_tick = 35,
     },
     .{
         .class = .package_install_update,
         .interface = .{ .name = "zigos.package.install" },
         .description = "bundle install, update, and channel management",
+        .boot_correlation_base = 310,
+        .boot_tick = 38,
     },
     .{
         .class = .compositor_ui_session,
         .interface = .{ .name = "zigos.ui.session" },
         .driver_class = .graphics_adapter,
         .description = "compositor, input routing, and UI session ownership",
+        .boot_correlation_base = 313,
+        .boot_tick = 41,
     },
     .{
         .class = .indexing_search,
         .interface = .{ .name = "zigos.index.search" },
         .description = "indexing and search query service",
+        .boot_correlation_base = 316,
+        .boot_tick = 44,
     },
     .{
         .class = .sync_replication,
         .interface = .{ .name = "zigos.sync.replication" },
         .description = "local-first sync and replication service",
+        .boot_correlation_base = 319,
+        .boot_tick = 47,
     },
     .{
         .class = .media_print_helpers,
         .interface = .{ .name = "zigos.media.print" },
         .driver_class = .audio_print_io,
         .description = "media and print helper pipeline",
+        .boot_correlation_base = 322,
+        .boot_tick = 50,
+    },
+    .{
+        .class = .compatibility_portal,
+        .interface = .{ .name = "zigos.compat.portal" },
+        .description = "isolated compatibility portal service",
+        .boot_correlation_base = 325,
+        .boot_tick = 51,
     },
 };
 
@@ -80,6 +105,7 @@ test "service contract order matches the requested decomposition sequence" {
     try std.testing.expectEqual(contract.ServiceClass.indexing_search, ordered_service_contracts[5].class);
     try std.testing.expectEqual(contract.ServiceClass.sync_replication, ordered_service_contracts[6].class);
     try std.testing.expectEqual(contract.ServiceClass.media_print_helpers, ordered_service_contracts[7].class);
+    try std.testing.expectEqual(contract.ServiceClass.compatibility_portal, ordered_service_contracts[8].class);
 }
 
 test "service contract interfaces remain unique and discoverable" {

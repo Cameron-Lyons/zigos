@@ -141,7 +141,7 @@ pub const SessionManager = struct {
         var match: ?*task_runtime.TaskRecord = null;
         for (&self.runtime.tasks) |*slot| {
             if (!slot.in_use or slot.task.execution_component_count == 0) continue;
-            if (std.mem.eql(u8, slot.task.execution_components[0].labelSlice(), label)) {
+            if (std.mem.eql(u8, slot.task.executionComponents()[0].labelSlice(), label)) {
                 match = &slot.task;
             }
         }

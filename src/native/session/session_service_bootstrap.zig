@@ -44,24 +44,8 @@ fn launchServices(
     kernel_port: *component_port.KernelPort,
     service_bindings: *support.ServiceBindings,
 ) void {
-    const service_launch_specs: [service_contract.ordered_service_contracts.len]struct {
-        owner: principal.PrincipalId,
-        service_id: u64,
-        correlation_base: u64,
-        now_ticks: u64,
-    } = .{
-        .{ .owner = state.ids.policy_authority, .service_id = state.services.policy_service.id, .correlation_base = 301, .now_ticks = 31 },
-        .{ .owner = state.ids.network_service, .service_id = state.services.network_service.id, .correlation_base = 304, .now_ticks = 34 },
-        .{ .owner = state.ids.storage_service, .service_id = state.services.storage_service.id, .correlation_base = 307, .now_ticks = 35 },
-        .{ .owner = state.ids.package_service, .service_id = state.services.package_service.id, .correlation_base = 310, .now_ticks = 38 },
-        .{ .owner = state.ids.compositor_service, .service_id = state.services.compositor_service.id, .correlation_base = 313, .now_ticks = 41 },
-        .{ .owner = state.ids.indexing_service, .service_id = state.services.indexing_service.id, .correlation_base = 316, .now_ticks = 44 },
-        .{ .owner = state.ids.sync_service, .service_id = state.services.sync_service.id, .correlation_base = 319, .now_ticks = 47 },
-        .{ .owner = state.ids.media_service, .service_id = state.services.media_service.id, .correlation_base = 322, .now_ticks = 50 },
-    };
-
     service_bindings.* = .{ .bindings = undefined };
-    for (service_contract.ordered_service_contracts, service_launch_specs, 0..) |entry, spec, index| {
+    for (service_contract.ordered_service_contracts, 0..) |entry, index| {
         service_bindings.bindings[index] = service_bootstrap.launchContractService(
             env.userspace_catalog,
             kernel_port,
@@ -69,30 +53,16 @@ fn launchServices(
             state.session_capability.id,
             state.session_task.id,
             env.userspace_scheduler,
-            spec.owner,
-            spec.service_id,
+            serviceOwner(state, entry.class),
+            serviceId(state, entry.class),
             entry,
-            spec.correlation_base,
-            spec.now_ticks,
+            entry.boot_correlation_base,
+            entry.boot_tick,
         ) catch unreachable;
+        if (entry.class == .compatibility_portal) {
+            common.printBootMarker("ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY");
+        }
     }
-
-    _ = service_bootstrap.launchBundleService(
-        env.userspace_catalog,
-        kernel_port,
-        env.supervisor,
-        state.session_capability.id,
-        state.session_task.id,
-        env.userspace_scheduler,
-        state.ids.compatibility_service,
-        state.services.compatibility_service.id,
-        "zigos.system.compatibility-portal",
-        support.compatibility_portal_interface,
-        service_bootstrap.serviceBudget(.compatibility_portal),
-        325,
-        51,
-    ) catch unreachable;
-    common.printBootMarker("ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY");
 }
 
 fn activateDrivers(
@@ -283,4 +253,34 @@ fn recordDriverRecovery(
     {
         common.printBootMarker(boot_markers.service_boot_supervisor_restart_ok);
     }
+}
+
+fn serviceOwner(state: *const support.BootstrapState, class: contract.ServiceClass) principal.PrincipalId {
+    return switch (class) {
+        .policy_mediation => state.ids.policy_authority,
+        .network_stack => state.ids.network_service,
+        .storage_object => state.ids.storage_service,
+        .package_install_update => state.ids.package_service,
+        .compositor_ui_session => state.ids.compositor_service,
+        .indexing_search => state.ids.indexing_service,
+        .sync_replication => state.ids.sync_service,
+        .media_print_helpers => state.ids.media_service,
+        .compatibility_portal => state.ids.compatibility_service,
+        else => unreachable,
+    };
+}
+
+fn serviceId(state: *const support.BootstrapState, class: contract.ServiceClass) u64 {
+    return switch (class) {
+        .policy_mediation => state.services.policy_service.id,
+        .network_stack => state.services.network_service.id,
+        .storage_object => state.services.storage_service.id,
+        .package_install_update => state.services.package_service.id,
+        .compositor_ui_session => state.services.compositor_service.id,
+        .indexing_search => state.services.indexing_service.id,
+        .sync_replication => state.services.sync_service.id,
+        .media_print_helpers => state.services.media_service.id,
+        .compatibility_portal => state.services.compatibility_service.id,
+        else => unreachable,
+    };
 }

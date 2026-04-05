@@ -50,6 +50,19 @@ const BackgroundContext = struct {
     dispatcher: background_dispatch.Controller = background_dispatch.Controller.init(),
 };
 
+const WorkspaceCommitContext = struct {
+    baseline: workspace.Directory = workspace.Directory.init(),
+    workspace_id: u64 = 0,
+};
+
+const TaskCheckpointContext = struct {
+    source_runtime: task_runtime.Runtime = task_runtime.Runtime.init(),
+    restored_runtime: task_runtime.Runtime = task_runtime.Runtime.init(),
+    snapshot: task_runtime.Snapshot = task_runtime.Runtime.initSnapshot(),
+    primary_task_id: u64 = 0,
+    secondary_task_id: u64 = 0,
+};
+
 const PackageContext = struct {
     service: package_service.Service = package_service.Service.init(),
     resolved: package_service.ResolvedManifest = undefined,
@@ -79,8 +92,10 @@ const cases = [_]BenchmarkCase{
     .{ .name = "permission.review.render_grants", .iterations = 12_000, .runIteration = benchmarkPermissionReviewRender },
     .{ .name = "network_policy.authorize_connection", .iterations = 60_000, .runIteration = benchmarkNetworkPolicyAuthorize },
     .{ .name = "background_dispatch.allowed_sync", .iterations = 8_000, .runIteration = benchmarkBackgroundDispatch },
+    .{ .name = "task_runtime.checkpoint.write_restore", .iterations = 8_000, .runIteration = benchmarkTaskCheckpointWriteRestore },
     .{ .name = "accelerator_scheduler.claim_release", .iterations = 25_000, .runIteration = benchmarkAcceleratorClaimRelease },
     .{ .name = "storage.file_bridge.resolve_view", .iterations = 40_000, .runIteration = benchmarkFileBridgeResolve },
+    .{ .name = "storage.workspace.commit_overlay", .iterations = 12_000, .runIteration = benchmarkWorkspaceCommitOverlay },
     .{ .name = "package_revision.rollforward_rollback", .iterations = 20_000, .runIteration = benchmarkPackageRevision },
     .{ .name = "indexing_service.query_ranked", .iterations = 20_000, .runIteration = benchmarkIndexingQuery },
     .{ .name = "media_print.submit_complete", .iterations = 8_000, .runIteration = benchmarkMediaPrintSubmitComplete },
@@ -250,6 +265,8 @@ var event_ledger_buffer: [2048]u8 = undefined;
 var file_bridge_context = FileBridgeContext{};
 var network_policy_context = NetworkPolicyContext{};
 var background_context = BackgroundContext{};
+var workspace_commit_context = WorkspaceCommitContext{};
+var task_checkpoint_context = TaskCheckpointContext{};
 var package_context = PackageContext{};
 var indexing_context = IndexingContext{};
 var media_context = MediaContext{};
@@ -279,6 +296,8 @@ fn prepareFixtures() void {
     if (fixtures_prepared) return;
     prepareFileBridgeFixture();
     prepareNetworkPolicyFixture();
+    prepareWorkspaceCommitFixture();
+    prepareTaskCheckpointFixture();
     fixtures_prepared = true;
 }
 
@@ -333,6 +352,97 @@ fn prepareNetworkPolicyFixture() void {
         .peer_root_digest_present = true,
         .peer_root_digest = digest,
     };
+}
+
+fn prepareWorkspaceCommitFixture() void {
+    workspace_commit_context.baseline = workspace.Directory.init();
+    const notes = workspace_commit_context.baseline.create(.{
+        .owner = app(41),
+        .label = "benchmark-notes",
+    }) catch unreachable;
+    workspace_commit_context.workspace_id = notes.id;
+
+    workspace_commit_context.baseline.beginTransaction(notes.id) catch unreachable;
+    workspace_commit_context.baseline.stagePut(notes.id, "documents/plan.md", 900, 901, .document) catch unreachable;
+    workspace_commit_context.baseline.stagePut(notes.id, "assets/cover.jpg", 902, 903, .media_asset) catch unreachable;
+    workspace_commit_context.baseline.stagePut(notes.id, "collections/inbox", 904, 905, .collection) catch unreachable;
+    _ = workspace_commit_context.baseline.commit(notes.id, 10) catch unreachable;
+}
+
+fn prepareTaskCheckpointFixture() void {
+    task_checkpoint_context.source_runtime = task_runtime.Runtime.init();
+    task_checkpoint_context.restored_runtime = task_runtime.Runtime.init();
+    task_checkpoint_context.snapshot = task_runtime.Runtime.initSnapshot();
+
+    const sync_image = task_runtime.syntheticUserspaceImage("sync-ui", "app.sync.ui");
+    const primary = task_checkpoint_context.source_runtime.createTask(.{
+        .owner = app(120),
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 20_000,
+            .memory_bytes = 2 * 1024 * 1024,
+            .endpoint_slots = 8,
+            .shared_memory_bytes = 128 * 1024,
+            .background_allowed = true,
+        },
+        .ui_surface_id = 12,
+        .local_only = false,
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = 44,
+            .component_abi_version = 1,
+            .signed = true,
+            .bundle_id = "app.sync",
+        },
+        .userspace_image = &sync_image,
+    }) catch unreachable;
+    task_checkpoint_context.primary_task_id = primary.id;
+    _ = task_checkpoint_context.source_runtime.attachComponent(primary.id, .{
+        .label = "sync-worker",
+        .entry = "app.sync.worker",
+    }, 60) catch unreachable;
+    task_checkpoint_context.source_runtime.grantCapability(primary.id, 301) catch unreachable;
+    task_checkpoint_context.source_runtime.grantCapability(primary.id, 302) catch unreachable;
+    _ = task_checkpoint_context.source_runtime.reserveBackgroundWork(
+        primary.id,
+        .{
+            .cpu_time_ticks = 400,
+            .memory_bytes = 32 * 1024,
+            .shared_memory_bytes = 4 * 1024,
+        },
+        .local_network_only,
+        .status_only,
+        61,
+    ) catch unreachable;
+    task_checkpoint_context.source_runtime.audit(primary.id, .{
+        .kind = .service_connected,
+        .detail = 7,
+        .tick = 62,
+    }) catch unreachable;
+
+    const helper = task_checkpoint_context.source_runtime.createTask(.{
+        .owner = service(121),
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 4_000,
+            .memory_bytes = 128 * 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 8 * 1024,
+            .background_allowed = false,
+        },
+        .local_only = true,
+        .initial_component = .{
+            .label = "checkpoint-helper",
+            .entry = "service.checkpoint.helper",
+        },
+    }) catch unreachable;
+    task_checkpoint_context.secondary_task_id = helper.id;
+    task_checkpoint_context.source_runtime.grantCapability(helper.id, 401) catch unreachable;
+    task_checkpoint_context.source_runtime.audit(helper.id, .{
+        .kind = .policy_allowed,
+        .detail = 1,
+        .tick = 63,
+    }) catch unreachable;
 }
 
 fn runCase(case: BenchmarkCase) u64 {
@@ -495,6 +605,26 @@ fn benchmarkBackgroundDispatch(iteration: u32) u64 {
         @intFromEnum(task.last_background_network);
 }
 
+fn benchmarkTaskCheckpointWriteRestore(iteration: u32) u64 {
+    _ = iteration;
+    task_checkpoint_context.source_runtime.writeSnapshot(&task_checkpoint_context.snapshot);
+    task_checkpoint_context.restored_runtime.restoreFromSnapshot(&task_checkpoint_context.snapshot);
+
+    const restored_primary = task_checkpoint_context.restored_runtime.find(task_checkpoint_context.primary_task_id) orelse unreachable;
+    const restored_helper = task_checkpoint_context.restored_runtime.find(task_checkpoint_context.secondary_task_id) orelse unreachable;
+    const latest_primary = restored_primary.latestAuditEvent() orelse unreachable;
+    const latest_helper = restored_helper.latestAuditEvent() orelse unreachable;
+
+    return restored_primary.id +
+        restored_primary.execution_component_count +
+        restored_primary.capability_count +
+        restored_primary.userspaceImage().segment_count +
+        restored_primary.background_cpu_consumed_ticks +
+        latest_primary.tick +
+        restored_helper.capability_count +
+        latest_helper.tick;
+}
+
 fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
     var controller = accelerator_scheduler.Controller.init();
     controller.configure(.{
@@ -532,6 +662,24 @@ fn benchmarkFileBridgeResolve(iteration: u32) u64 {
         .access = .read,
     }, file_bridge_context.authority, 30 + iteration) catch unreachable;
     return view.object_id + view.version_id + view.path_len + @intFromBool(view.readable);
+}
+
+fn benchmarkWorkspaceCommitOverlay(iteration: u32) u64 {
+    var directory = workspace_commit_context.baseline;
+    const workspace_id = workspace_commit_context.workspace_id;
+
+    directory.beginTransaction(workspace_id) catch unreachable;
+    directory.stagePut(workspace_id, "documents/plan.md", 900, 1_100 + iteration, .document) catch unreachable;
+    directory.stageDelete(workspace_id, "assets/cover.jpg") catch unreachable;
+    directory.stagePut(workspace_id, "documents/draft.md", 1_200 + iteration, 1_300 + iteration, .document) catch unreachable;
+    directory.stagePut(workspace_id, "documents/tmp.md", 1_400 + iteration, 1_500 + iteration, .document) catch unreachable;
+    directory.stageDelete(workspace_id, "documents/tmp.md") catch unreachable;
+
+    const generation = directory.commit(workspace_id, 70 + iteration) catch unreachable;
+    const entries = directory.entries(workspace_id) catch unreachable;
+    const plan = directory.resolve(workspace_id, "documents/plan.md") catch unreachable;
+    const draft = directory.resolve(workspace_id, "documents/draft.md") catch unreachable;
+    return generation + entries.len + plan.version_id + draft.object_id;
 }
 
 fn benchmarkPackageRevision(iteration: u32) u64 {

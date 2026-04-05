@@ -290,9 +290,7 @@ fn selectBootstrapCapability(
     capability_table: *const capability.CapabilityTable,
     now_ticks: u64,
 ) struct { capability_id: u64, service_id: u64 } {
-    var index: usize = 0;
-    while (index < task.capability_count) : (index += 1) {
-        const capability_id = task.capability_ids[index];
+    for (task.capabilityIds()) |capability_id| {
         const granted = capability_table.query(capability_id) orelse continue;
         if (!capability_table.isUsable(granted, now_ticks)) continue;
         if (!granted.rights.time_query and !granted.rights.resource_query and !granted.rights.accounting_query) continue;

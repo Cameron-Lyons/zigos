@@ -9,6 +9,8 @@ pub const MAX_OBJECTS: usize = 128;
 pub const MAX_VERSIONS: usize = 512;
 pub const MAX_PAYLOAD_BYTES: usize = 512;
 const MAX_METADATA_MESSAGE_BYTES: usize = MAX_PAYLOAD_BYTES + 256;
+const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
+const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 
 pub const ObjectType = enum(u8) {
     blob,
@@ -143,9 +145,23 @@ const VersionSlot = struct {
     },
 };
 
+const IndexState = enum(u8) {
+    empty,
+    filled,
+    tombstone,
+};
+
+const IdIndexSlot = struct {
+    state: IndexState = .empty,
+    id: u64 = 0,
+    slot_index: usize = 0,
+};
+
 pub const Store = struct {
     next_object_id: u64 = 1,
     next_version_id: u64 = 1,
+    object_index_slots: [OBJECT_INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(OBJECT_INDEX_CAPACITY),
+    version_index_slots: [VERSION_INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(VERSION_INDEX_CAPACITY),
     objects: [MAX_OBJECTS]ObjectSlot = [_]ObjectSlot{ObjectSlot{}} ** MAX_OBJECTS,
     versions: [MAX_VERSIONS]VersionSlot = [_]VersionSlot{VersionSlot{}} ** MAX_VERSIONS,
 
@@ -156,6 +172,8 @@ pub const Store = struct {
     pub fn reset(self: *Store) void {
         self.next_object_id = 1;
         self.next_version_id = 1;
+        self.object_index_slots = emptyIndexTable(OBJECT_INDEX_CAPACITY);
+        self.version_index_slots = emptyIndexTable(VERSION_INDEX_CAPACITY);
         for (&self.objects) |*slot| {
             if (!slot.in_use) continue;
             slot.* = .{};
@@ -163,6 +181,20 @@ pub const Store = struct {
         for (&self.versions) |*slot| {
             if (!slot.in_use) continue;
             slot.* = .{};
+        }
+    }
+
+    pub fn rebuildIndexes(self: *Store) void {
+        self.object_index_slots = emptyIndexTable(OBJECT_INDEX_CAPACITY);
+        self.version_index_slots = emptyIndexTable(VERSION_INDEX_CAPACITY);
+
+        for (self.objects, 0..) |slot, slot_index| {
+            if (!slot.in_use) continue;
+            indexInsert(OBJECT_INDEX_CAPACITY, &self.object_index_slots, slot.object.id, slot_index);
+        }
+        for (self.versions, 0..) |slot, slot_index| {
+            if (!slot.in_use) continue;
+            indexInsert(VERSION_INDEX_CAPACITY, &self.version_index_slots, slot.version.id, slot_index);
         }
     }
 
@@ -235,6 +267,7 @@ pub const Store = struct {
     }
 
     pub fn object(self: *Store, object_id: u64) ?*ObjectRecord {
+        if (self.indexedObjectSlot(object_id)) |slot| return &slot.object;
         for (&self.objects) |*slot| {
             if (slot.in_use and slot.object.id == object_id) return &slot.object;
         }
@@ -242,6 +275,7 @@ pub const Store = struct {
     }
 
     pub fn version(self: *Store, version_id: u64) ?*VersionRecord {
+        if (self.indexedVersionSlot(version_id)) |slot| return &slot.version;
         for (&self.versions) |*slot| {
             if (slot.in_use and slot.version.id == version_id) return &slot.version;
         }
@@ -281,7 +315,7 @@ pub const Store = struct {
     }
 
     fn createObject(self: *Store, object_id: u64, object_type: ObjectType) Error!*ObjectRecord {
-        for (&self.objects) |*slot| {
+        for (&self.objects, 0..) |*slot, slot_index| {
             if (slot.in_use) continue;
             slot.in_use = true;
             slot.object = .{
@@ -293,6 +327,7 @@ pub const Store = struct {
             if (object_id >= self.next_object_id) {
                 self.next_object_id = object_id + 1;
             }
+            indexInsert(OBJECT_INDEX_CAPACITY, &self.object_index_slots, object_id, slot_index);
             return &slot.object;
         }
         return error.ObjectTableFull;
@@ -307,7 +342,7 @@ pub const Store = struct {
         metadata: *const SignedMetadata,
         payload: []const u8,
     }) Error!void {
-        for (&self.versions) |*slot| {
+        for (&self.versions, 0..) |*slot, slot_index| {
             if (slot.in_use) continue;
             slot.in_use = true;
             slot.version.id = request.id;
@@ -318,9 +353,24 @@ pub const Store = struct {
             writeMetadata(&slot.version.metadata, request.metadata);
             slot.version.payload_len = request.payload.len;
             copyBytes(slot.version.payload[0..request.payload.len], request.payload);
+            indexInsert(VERSION_INDEX_CAPACITY, &self.version_index_slots, request.id, slot_index);
             return;
         }
         return error.VersionTableFull;
+    }
+
+    fn indexedObjectSlot(self: *Store, object_id: u64) ?*ObjectSlot {
+        const slot_index = indexLookup(OBJECT_INDEX_CAPACITY, &self.object_index_slots, object_id) orelse return null;
+        const slot = &self.objects[slot_index];
+        if (!slot.in_use or slot.object.id != object_id) return null;
+        return slot;
+    }
+
+    fn indexedVersionSlot(self: *Store, version_id: u64) ?*VersionSlot {
+        const slot_index = indexLookup(VERSION_INDEX_CAPACITY, &self.version_index_slots, version_id) orelse return null;
+        const slot = &self.versions[slot_index];
+        if (!slot.in_use or slot.version.id != version_id) return null;
+        return slot;
     }
 };
 
@@ -367,6 +417,64 @@ fn writeMetadata(dest: *SignedMetadata, src: *const SignedMetadata) void {
     dest.created_at_ticks = src.created_at_ticks;
 }
 
+fn emptyIndexTable(comptime capacity: usize) [capacity]IdIndexSlot {
+    return [_]IdIndexSlot{IdIndexSlot{}} ** capacity;
+}
+
+fn indexLookup(comptime capacity: usize, table: *const [capacity]IdIndexSlot, id: u64) ?usize {
+    if (id == 0) return null;
+
+    var index = indexHash(id, capacity);
+    var attempts: usize = 0;
+    while (attempts < capacity) : (attempts += 1) {
+        const entry = table[index];
+        switch (entry.state) {
+            .empty => return null,
+            .filled => if (entry.id == id) return entry.slot_index,
+            .tombstone => {},
+        }
+        index = (index + 1) % capacity;
+    }
+    return null;
+}
+
+fn indexInsert(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64, slot_index: usize) void {
+    if (id == 0) unreachable;
+
+    var index = indexHash(id, capacity);
+    var first_tombstone: ?usize = null;
+    var attempts: usize = 0;
+    while (attempts < capacity) : (attempts += 1) {
+        switch (table[index].state) {
+            .empty => {
+                const insert_index = first_tombstone orelse index;
+                table[insert_index] = .{
+                    .state = .filled,
+                    .id = id,
+                    .slot_index = slot_index,
+                };
+                return;
+            },
+            .filled => {
+                if (table[index].id == id) {
+                    table[index].slot_index = slot_index;
+                    return;
+                }
+            },
+            .tombstone => {
+                if (first_tombstone == null) first_tombstone = index;
+            },
+        }
+        index = (index + 1) % capacity;
+    }
+
+    unreachable;
+}
+
+fn indexHash(id: u64, comptime capacity: usize) usize {
+    return @as(usize, @intCast((id *% 0x9E37_79B9_7F4A_7C15) % capacity));
+}
+
 fn computeAddress(
     object_id: u64,
     object_type: ObjectType,
@@ -387,7 +495,6 @@ fn computeAddress(
     crypto_hash.updateBytes(&hasher, "payload", payload);
     return crypto_hash.finalize(&hasher);
 }
-
 
 fn metadataMessage(
     buffer: []u8,

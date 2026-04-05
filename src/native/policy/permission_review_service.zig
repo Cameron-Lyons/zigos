@@ -456,10 +456,10 @@ test "review service retries invalid commands clamps leases and records audits" 
     try std.testing.expect(grants[0].local_only);
     try std.testing.expectEqual(@as(?u64, 70), grants[0].expires_at_ticks);
     try std.testing.expectEqual(@as(usize, 2), task.audit_count);
-    try std.testing.expectEqual(task_runtime.AuditEventKind.permission_prompted, task.audit_trail[0].kind);
-    try std.testing.expectEqual(task_runtime.AuditEventKind.permission_reviewed, task.audit_trail[1].kind);
-    try std.testing.expectEqual(@as(u32, 2), task.audit_trail[0].detail);
-    try std.testing.expectEqual(@as(u32, 1), task.audit_trail[1].detail);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.permission_prompted, task.auditEventAt(0).?.kind);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.permission_reviewed, task.auditEventAt(1).?.kind);
+    try std.testing.expectEqual(@as(u32, 2), task.auditEventAt(0).?.detail);
+    try std.testing.expectEqual(@as(u32, 1), task.auditEventAt(1).?.detail);
 }
 
 test "review service rejects invalid manifests before auditing" {

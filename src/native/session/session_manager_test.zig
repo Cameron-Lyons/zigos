@@ -236,7 +236,7 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expectEqual(background_dispatch.RecordState.completed, latest_dispatch.state);
     try std.testing.expectEqual(manifest.BackgroundTrigger.sync_completion, latest_dispatch.trigger);
     try std.testing.expectEqualStrings("sync", latest_dispatch.backgroundTaskIdSlice());
-    try std.testing.expectEqual(task_runtime.AuditEventKind.background_dispatched, sync_task.audit_trail[sync_task.audit_count - 1].kind);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.background_dispatched, sync_task.latestAuditEvent().?.kind);
 
     const session_user = principal.PrincipalId{ .kind = .user, .serial = 1 };
     const storage_service_principal = principal.PrincipalId{ .kind = .service, .serial = 4 };

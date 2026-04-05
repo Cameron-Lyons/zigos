@@ -362,7 +362,7 @@ test "background dispatch accepts declared triggers and preserves task metadata"
     try std.testing.expectEqual(@as(usize, 0), task.background_reserved_memory_bytes);
     try std.testing.expectEqual(manifest.BackgroundNetworkMode.none, task.last_background_network);
     try std.testing.expectEqual(manifest.BackgroundVisibility.audit_only, task.last_background_visibility);
-    try std.testing.expectEqual(task_runtime.AuditEventKind.background_dispatched, task.audit_trail[task.audit_count - 1].kind);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.background_dispatched, task.latestAuditEvent().?.kind);
 }
 
 test "background dispatch throttles delayed work and denies abusive budgets" {
