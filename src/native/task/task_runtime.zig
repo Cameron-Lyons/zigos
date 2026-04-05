@@ -13,6 +13,7 @@ pub const MAX_TASK_BUNDLE_ID_BYTES: usize = 64;
 pub const MAX_EXECUTABLE_SEGMENTS: usize = 8;
 pub const MAX_IMAGE_HASH_BYTES: usize = 32;
 const INDEX_CAPACITY: usize = MAX_TASKS * 2;
+const CAPABILITY_INDEX_CAPACITY: usize = MAX_TASK_CAPABILITIES * 2;
 pub const DEFAULT_USER_STACK_TOP: u64 = 0xBFFF_F000;
 pub const DEFAULT_USER_STACK_SIZE_BYTES: usize = 64 * 1024;
 pub const DEFAULT_SYNTHETIC_ENTRY_POINT: u64 = 0x0804_8000;
@@ -217,6 +218,26 @@ pub const TaskCreateRequest = struct {
     userspace_image: ?*const ExecutableImageSpec = null,
 };
 
+const IndexState = enum(u8) {
+    empty,
+    filled,
+    tombstone,
+};
+
+const IdIndexSlot = struct {
+    state: IndexState = .empty,
+    id: u64 = 0,
+    slot_index: usize = 0,
+};
+
+const TaskColdRecord = struct {
+    execution_components: [MAX_TASK_COMPONENTS]ExecutionComponentRecord = [_]ExecutionComponentRecord{zeroExecutionComponent()} ** MAX_TASK_COMPONENTS,
+    capability_ids: [MAX_TASK_CAPABILITIES]u64 = [_]u64{0} ** MAX_TASK_CAPABILITIES,
+    capability_index_slots: [CAPABILITY_INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(CAPABILITY_INDEX_CAPACITY),
+    audit_trail: [MAX_AUDIT_EVENTS]AuditEvent = [_]AuditEvent{AuditEvent{ .kind = .created }} ** MAX_AUDIT_EVENTS,
+    userspace_image: ExecutableImageSpec = .{},
+};
+
 pub const TaskRecord = struct {
     id: u64,
     process_id: u64,
@@ -228,12 +249,10 @@ pub const TaskRecord = struct {
     owner: principal.PrincipalId,
     state: TaskState,
     component_class: ComponentClass,
-    execution_components: [MAX_TASK_COMPONENTS]ExecutionComponentRecord,
     execution_component_count: usize,
-    capability_ids: [MAX_TASK_CAPABILITIES]u64,
     capability_count: usize,
     budget: ResourceBudget,
-    audit_trail: [MAX_AUDIT_EVENTS]AuditEvent,
+    audit_start: usize,
     audit_count: usize,
     ui_surface_id: ?u64,
     resource_class: accelerator_scheduler.ResourceClass,
@@ -250,7 +269,7 @@ pub const TaskRecord = struct {
     zero_ambient_authority: bool,
     local_only: bool,
     launch: LaunchProvenanceRecord,
-    userspace_image: ExecutableImageSpec,
+    cold_state: ?*TaskColdRecord,
 
     pub fn resourceClass(self: *const TaskRecord) accelerator_scheduler.ResourceClass {
         return self.resource_class;
@@ -268,8 +287,30 @@ pub const TaskRecord = struct {
         return self.launch.bundleIdSlice();
     }
 
+    pub fn executionComponents(self: *const TaskRecord) []const ExecutionComponentRecord {
+        return taskColdConst(self).execution_components[0..self.execution_component_count];
+    }
+
+    pub fn capabilityIds(self: *const TaskRecord) []const u64 {
+        return taskColdConst(self).capability_ids[0..self.capability_count];
+    }
+
+    pub fn userspaceImage(self: *const TaskRecord) *const ExecutableImageSpec {
+        return &taskColdConst(self).userspace_image;
+    }
+
     pub fn hasLoadedExecutable(self: *const TaskRecord) bool {
-        return self.userspace_image.isPresent();
+        return self.userspaceImage().isPresent();
+    }
+
+    pub fn auditEventAt(self: *const TaskRecord, index: usize) ?AuditEvent {
+        if (index >= self.audit_count) return null;
+        return taskColdConst(self).audit_trail[(self.audit_start + index) % MAX_AUDIT_EVENTS];
+    }
+
+    pub fn latestAuditEvent(self: *const TaskRecord) ?AuditEvent {
+        if (self.audit_count == 0) return null;
+        return self.auditEventAt(self.audit_count - 1);
     }
 };
 
@@ -292,18 +333,6 @@ const AddressSpaceSlot = struct {
     address_space: AddressSpaceRecord = zeroAddressSpace(),
 };
 
-const IndexState = enum(u8) {
-    empty,
-    filled,
-    tombstone,
-};
-
-const IdIndexSlot = struct {
-    state: IndexState = .empty,
-    id: u64 = 0,
-    slot_index: usize = 0,
-};
-
 pub const Snapshot = struct {
     next_task_id: u64,
     next_process_id: u64,
@@ -313,10 +342,12 @@ pub const Snapshot = struct {
     task_index_slots: [INDEX_CAPACITY]IdIndexSlot,
     address_space_index_slots: [INDEX_CAPACITY]IdIndexSlot,
     tasks: [MAX_TASKS]TaskSlot,
+    task_cold: [MAX_TASKS]TaskColdRecord,
     address_spaces: [MAX_TASKS]AddressSpaceSlot,
 };
 
 const HostAssignment = runtime_host.HostAssignment(ProcessClass, NamespaceClass);
+const detached_task_cold = zeroTaskCold();
 
 pub const Runtime = struct {
     next_task_id: u64 = 1,
@@ -324,9 +355,10 @@ pub const Runtime = struct {
     next_address_space_id: u64 = 1,
     next_namespace_id: u64 = 1,
     next_component_id: u64 = 1,
-    task_index_slots: [INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(),
-    address_space_index_slots: [INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(),
+    task_index_slots: [INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(INDEX_CAPACITY),
+    address_space_index_slots: [INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(INDEX_CAPACITY),
     tasks: [MAX_TASKS]TaskSlot = [_]TaskSlot{TaskSlot{}} ** MAX_TASKS,
+    task_cold: [MAX_TASKS]TaskColdRecord = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
     address_spaces: [MAX_TASKS]AddressSpaceSlot = [_]AddressSpaceSlot{AddressSpaceSlot{}} ** MAX_TASKS,
 
     pub fn init() Runtime {
@@ -340,9 +372,10 @@ pub const Runtime = struct {
             .next_address_space_id = 1,
             .next_namespace_id = 1,
             .next_component_id = 1,
-            .task_index_slots = emptyIndexTable(),
-            .address_space_index_slots = emptyIndexTable(),
+            .task_index_slots = emptyIndexTable(INDEX_CAPACITY),
+            .address_space_index_slots = emptyIndexTable(INDEX_CAPACITY),
             .tasks = [_]TaskSlot{TaskSlot{}} ** MAX_TASKS,
+            .task_cold = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
             .address_spaces = [_]AddressSpaceSlot{AddressSpaceSlot{}} ** MAX_TASKS,
         };
     }
@@ -356,6 +389,8 @@ pub const Runtime = struct {
         copySlots(IdIndexSlot, out.task_index_slots[0..], self.task_index_slots[0..]);
         copySlots(IdIndexSlot, out.address_space_index_slots[0..], self.address_space_index_slots[0..]);
         copySlots(TaskSlot, out.tasks[0..], self.tasks[0..]);
+        copyTaskColdStates(self.tasks[0..], out.task_cold[0..], self.task_cold[0..]);
+        bindTaskColdStates(out.tasks[0..], out.task_cold[0..]);
         copySlots(AddressSpaceSlot, out.address_spaces[0..], self.address_spaces[0..]);
     }
 
@@ -368,6 +403,8 @@ pub const Runtime = struct {
         copySlots(IdIndexSlot, self.task_index_slots[0..], state.task_index_slots[0..]);
         copySlots(IdIndexSlot, self.address_space_index_slots[0..], state.address_space_index_slots[0..]);
         copySlots(TaskSlot, self.tasks[0..], state.tasks[0..]);
+        copyTaskColdStates(self.tasks[0..], self.task_cold[0..], state.task_cold[0..]);
+        bindTaskColdStates(self.tasks[0..], self.task_cold[0..]);
         copySlots(AddressSpaceSlot, self.address_spaces[0..], state.address_spaces[0..]);
     }
 
@@ -394,6 +431,7 @@ pub const Runtime = struct {
             );
 
             slot.in_use = true;
+            self.task_cold[slot_index] = zeroTaskCold();
             slot.task = .{
                 .id = task_id,
                 .process_id = host.process_id,
@@ -405,12 +443,10 @@ pub const Runtime = struct {
                 .owner = request.owner,
                 .state = .active,
                 .component_class = request.component_class,
-                .execution_components = [_]ExecutionComponentRecord{zeroExecutionComponent()} ** MAX_TASK_COMPONENTS,
                 .execution_component_count = 1,
-                .capability_ids = [_]u64{0} ** MAX_TASK_CAPABILITIES,
                 .capability_count = 0,
                 .budget = request.budget,
-                .audit_trail = [_]AuditEvent{AuditEvent{ .kind = .created }} ** MAX_AUDIT_EVENTS,
+                .audit_start = 0,
                 .audit_count = 0,
                 .ui_surface_id = request.ui_surface_id,
                 .resource_class = request.budget.effectiveResourceClass(),
@@ -418,10 +454,11 @@ pub const Runtime = struct {
                 .zero_ambient_authority = true,
                 .local_only = request.local_only,
                 .launch = makeLaunchProvenance(request.launch),
-                .userspace_image = userspace_image,
+                .cold_state = &self.task_cold[slot_index],
             };
-            slot.task.execution_components[0] = initial_component;
-            indexInsert(&self.task_index_slots, task_id, slot_index);
+            self.task_cold[slot_index].userspace_image = userspace_image;
+            self.task_cold[slot_index].execution_components[0] = initial_component;
+            indexInsert(INDEX_CAPACITY, &self.task_index_slots, task_id, slot_index);
             return &slot.task;
         }
         return error.TaskTableFull;
@@ -457,55 +494,54 @@ pub const Runtime = struct {
     }
 
     pub fn indexedAddressSpaceSlot(self: *Runtime, address_space_id: u64) ?*AddressSpaceSlot {
-        const slot_index = indexLookup(&self.address_space_index_slots, address_space_id) orelse return null;
+        const slot_index = indexLookup(INDEX_CAPACITY, &self.address_space_index_slots, address_space_id) orelse return null;
         const slot = &self.address_spaces[slot_index];
         if (!slot.in_use or slot.address_space.id != address_space_id) return null;
         return slot;
     }
 
     fn indexedAddressSpaceSlotConst(self: *const Runtime, address_space_id: u64) ?*const AddressSpaceSlot {
-        const slot_index = indexLookup(&self.address_space_index_slots, address_space_id) orelse return null;
+        const slot_index = indexLookup(INDEX_CAPACITY, &self.address_space_index_slots, address_space_id) orelse return null;
         const slot = &self.address_spaces[slot_index];
         if (!slot.in_use or slot.address_space.id != address_space_id) return null;
         return slot;
     }
 
     fn indexedTaskSlot(self: *Runtime, task_id: u64) ?*TaskSlot {
-        const slot_index = indexLookup(&self.task_index_slots, task_id) orelse return null;
+        const slot_index = indexLookup(INDEX_CAPACITY, &self.task_index_slots, task_id) orelse return null;
         const slot = &self.tasks[slot_index];
         if (!slot.in_use or slot.task.id != task_id) return null;
         return slot;
     }
 
     fn indexedTaskSlotConst(self: *const Runtime, task_id: u64) ?*const TaskSlot {
-        const slot_index = indexLookup(&self.task_index_slots, task_id) orelse return null;
+        const slot_index = indexLookup(INDEX_CAPACITY, &self.task_index_slots, task_id) orelse return null;
         const slot = &self.tasks[slot_index];
         if (!slot.in_use or slot.task.id != task_id) return null;
         return slot;
     }
 
     pub fn noteAddressSpaceInstalled(self: *Runtime, address_space_id: u64, slot_index: usize) void {
-        indexInsert(&self.address_space_index_slots, address_space_id, slot_index);
+        indexInsert(INDEX_CAPACITY, &self.address_space_index_slots, address_space_id, slot_index);
     }
 
     pub fn removeAddressSpaceIndex(self: *Runtime, address_space_id: u64) void {
-        indexRemove(&self.address_space_index_slots, address_space_id);
+        indexRemove(INDEX_CAPACITY, &self.address_space_index_slots, address_space_id);
     }
 
     pub fn grantCapability(self: *Runtime, task_id: u64, capability_id: u64) Error!void {
         const task = self.find(task_id) orelse return error.TaskNotFound;
+        const cold = taskCold(task);
+        if (taskHasCapability(task, capability_id)) return;
         if (task.capability_count >= MAX_TASK_CAPABILITIES) return error.CapabilityTableFull;
-        task.capability_ids[task.capability_count] = capability_id;
+        cold.capability_ids[task.capability_count] = capability_id;
+        indexInsert(CAPABILITY_INDEX_CAPACITY, &cold.capability_index_slots, capability_id, task.capability_count);
         task.capability_count += 1;
     }
 
     pub fn hasCapability(self: *const Runtime, task_id: u64, capability_id: u64) bool {
         const task = self.findConst(task_id) orelse return false;
-        var index: usize = 0;
-        while (index < task.capability_count) : (index += 1) {
-            if (task.capability_ids[index] == capability_id) return true;
-        }
-        return false;
+        return taskHasCapability(task, capability_id);
     }
 
     pub fn attachComponent(
@@ -515,10 +551,11 @@ pub const Runtime = struct {
         tick: u64,
     ) Error!ExecutionComponentRecord {
         const task = self.find(task_id) orelse return error.TaskNotFound;
+        const cold = taskCold(task);
         if (task.execution_component_count >= MAX_TASK_COMPONENTS) return error.ComponentTableFull;
 
         const record = makeExecutionComponent(self, component);
-        task.execution_components[task.execution_component_count] = record;
+        cold.execution_components[task.execution_component_count] = record;
         task.execution_component_count += 1;
         try self.audit(task_id, .{
             .kind = .component_attached,
@@ -530,18 +567,18 @@ pub const Runtime = struct {
 
     pub fn revokeCapability(self: *Runtime, task_id: u64, capability_id: u64) Error!bool {
         const task = self.find(task_id) orelse return error.TaskNotFound;
-        var index: usize = 0;
-        while (index < task.capability_count) : (index += 1) {
-            if (task.capability_ids[index] != capability_id) continue;
-
+        const cold = taskCold(task);
+        if (taskCapabilityIndex(task, capability_id)) |index| {
             var tail = index;
             while (tail + 1 < task.capability_count) : (tail += 1) {
-                task.capability_ids[tail] = task.capability_ids[tail + 1];
+                cold.capability_ids[tail] = cold.capability_ids[tail + 1];
             }
             task.capability_count -= 1;
-            task.capability_ids[task.capability_count] = 0;
+            cold.capability_ids[task.capability_count] = 0;
+            rebuildCapabilityIndex(task);
             return true;
         }
+
         return false;
     }
 
@@ -562,7 +599,7 @@ pub const Runtime = struct {
             task.component_class,
             task.id,
             task.launch.image_id,
-            task.userspace_image,
+            task.userspaceImage().*,
             task.address_space_id,
         );
         task.process_id = host.process_id;
@@ -581,17 +618,16 @@ pub const Runtime = struct {
 
     pub fn audit(self: *Runtime, task_id: u64, event: AuditEvent) Error!void {
         const task = self.find(task_id) orelse return error.TaskNotFound;
+        const cold = taskCold(task);
         if (task.audit_count < MAX_AUDIT_EVENTS) {
-            task.audit_trail[task.audit_count] = event;
+            const slot_index = (task.audit_start + task.audit_count) % MAX_AUDIT_EVENTS;
+            cold.audit_trail[slot_index] = event;
             task.audit_count += 1;
             return;
         }
 
-        var index: usize = 1;
-        while (index < MAX_AUDIT_EVENTS) : (index += 1) {
-            task.audit_trail[index - 1] = task.audit_trail[index];
-        }
-        task.audit_trail[MAX_AUDIT_EVENTS - 1] = event;
+        cold.audit_trail[task.audit_start] = event;
+        task.audit_start = (task.audit_start + 1) % MAX_AUDIT_EVENTS;
     }
 
     pub fn canReserveBackgroundWork(
@@ -656,9 +692,8 @@ pub const Runtime = struct {
         if (task.state == .terminated) return false;
 
         task.state = .terminated;
-        task.execution_components = [_]ExecutionComponentRecord{zeroExecutionComponent()} ** MAX_TASK_COMPONENTS;
+        taskCold(task).* = zeroTaskCold();
         task.execution_component_count = 0;
-        task.capability_ids = [_]u64{0} ** MAX_TASK_CAPABILITIES;
         task.capability_count = 0;
         try self.audit(task_id, .{
             .kind = .terminated,
@@ -680,9 +715,7 @@ fn zeroTask() TaskRecord {
         .owner = .{ .kind = .service, .serial = 0 },
         .state = .staged,
         .component_class = .service_component,
-        .execution_components = [_]ExecutionComponentRecord{zeroExecutionComponent()} ** MAX_TASK_COMPONENTS,
         .execution_component_count = 0,
-        .capability_ids = [_]u64{0} ** MAX_TASK_CAPABILITIES,
         .capability_count = 0,
         .budget = .{
             .cpu_time_ticks = 0,
@@ -691,7 +724,7 @@ fn zeroTask() TaskRecord {
             .shared_memory_bytes = 0,
             .background_allowed = false,
         },
-        .audit_trail = [_]AuditEvent{AuditEvent{ .kind = .created }} ** MAX_AUDIT_EVENTS,
+        .audit_start = 0,
         .audit_count = 0,
         .ui_surface_id = null,
         .resource_class = .foreground_interactive,
@@ -708,7 +741,7 @@ fn zeroTask() TaskRecord {
         .zero_ambient_authority = true,
         .local_only = false,
         .launch = zeroLaunchProvenance(),
-        .userspace_image = .{},
+        .cold_state = null,
     };
 }
 
@@ -756,8 +789,38 @@ fn saturatingSub(current: usize, amount: usize) usize {
     return runtime_host.saturatingSub(current, amount);
 }
 
-fn emptyIndexTable() [INDEX_CAPACITY]IdIndexSlot {
-    return [_]IdIndexSlot{IdIndexSlot{}} ** INDEX_CAPACITY;
+fn emptyIndexTable(comptime capacity: usize) [capacity]IdIndexSlot {
+    return [_]IdIndexSlot{IdIndexSlot{}} ** capacity;
+}
+
+fn zeroTaskCold() TaskColdRecord {
+    return .{};
+}
+
+fn taskCold(task: *TaskRecord) *TaskColdRecord {
+    return task.cold_state orelse unreachable;
+}
+
+fn taskColdConst(task: *const TaskRecord) *const TaskColdRecord {
+    return task.cold_state orelse &detached_task_cold;
+}
+
+fn copyTaskColdStates(task_slots: []const TaskSlot, dest: []TaskColdRecord, src: []const TaskColdRecord) void {
+    var index: usize = 0;
+    while (index < dest.len) : (index += 1) {
+        dest[index] = zeroTaskCold();
+        if (index >= task_slots.len or !task_slots[index].in_use) continue;
+        dest[index] = src[index];
+    }
+}
+
+fn bindTaskColdStates(task_slots: []TaskSlot, task_cold: []TaskColdRecord) void {
+    for (task_slots, 0..) |*slot, slot_index| {
+        slot.task.cold_state = if (slot.in_use and slot_index < task_cold.len)
+            &task_cold[slot_index]
+        else
+            null;
+    }
 }
 
 fn copySlots(comptime T: type, dest: []T, src: []const T) void {
@@ -771,30 +834,30 @@ fn copyBytes(dest: []u8, src: []const u8) void {
     }
 }
 
-fn indexLookup(table: *const [INDEX_CAPACITY]IdIndexSlot, id: u64) ?usize {
+fn indexLookup(comptime capacity: usize, table: *const [capacity]IdIndexSlot, id: u64) ?usize {
     if (id == 0) return null;
 
-    var index = indexHash(id);
+    var index = indexHash(id, capacity);
     var attempts: usize = 0;
-    while (attempts < INDEX_CAPACITY) : (attempts += 1) {
+    while (attempts < capacity) : (attempts += 1) {
         const entry = table[index];
         switch (entry.state) {
             .empty => return null,
             .filled => if (entry.id == id) return entry.slot_index,
             .tombstone => {},
         }
-        index = (index + 1) % INDEX_CAPACITY;
+        index = (index + 1) % capacity;
     }
     return null;
 }
 
-fn indexInsert(table: *[INDEX_CAPACITY]IdIndexSlot, id: u64, slot_index: usize) void {
+fn indexInsert(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64, slot_index: usize) void {
     if (id == 0) unreachable;
 
-    var index = indexHash(id);
+    var index = indexHash(id, capacity);
     var first_tombstone: ?usize = null;
     var attempts: usize = 0;
-    while (attempts < INDEX_CAPACITY) : (attempts += 1) {
+    while (attempts < capacity) : (attempts += 1) {
         switch (table[index].state) {
             .empty => {
                 const insert_index = first_tombstone orelse index;
@@ -815,18 +878,18 @@ fn indexInsert(table: *[INDEX_CAPACITY]IdIndexSlot, id: u64, slot_index: usize) 
                 if (first_tombstone == null) first_tombstone = index;
             },
         }
-        index = (index + 1) % INDEX_CAPACITY;
+        index = (index + 1) % capacity;
     }
 
     unreachable;
 }
 
-fn indexRemove(table: *[INDEX_CAPACITY]IdIndexSlot, id: u64) void {
+fn indexRemove(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64) void {
     if (id == 0) return;
 
-    var index = indexHash(id);
+    var index = indexHash(id, capacity);
     var attempts: usize = 0;
-    while (attempts < INDEX_CAPACITY) : (attempts += 1) {
+    while (attempts < capacity) : (attempts += 1) {
         switch (table[index].state) {
             .empty => return,
             .filled => {
@@ -839,12 +902,40 @@ fn indexRemove(table: *[INDEX_CAPACITY]IdIndexSlot, id: u64) void {
             },
             .tombstone => {},
         }
-        index = (index + 1) % INDEX_CAPACITY;
+        index = (index + 1) % capacity;
     }
 }
 
-fn indexHash(id: u64) usize {
-    return @as(usize, @intCast((id *% 0x9E37_79B9_7F4A_7C15) % INDEX_CAPACITY));
+fn indexHash(id: u64, comptime capacity: usize) usize {
+    return @as(usize, @intCast((id *% 0x9E37_79B9_7F4A_7C15) % capacity));
+}
+
+fn taskCapabilityIndex(task: *const TaskRecord, capability_id: u64) ?usize {
+    const cold = taskColdConst(task);
+    const slot_index = indexLookup(CAPABILITY_INDEX_CAPACITY, &cold.capability_index_slots, capability_id) orelse return null;
+    if (slot_index >= task.capability_count) return null;
+    if (cold.capability_ids[slot_index] != capability_id) return null;
+    return slot_index;
+}
+
+fn taskHasCapability(task: *const TaskRecord, capability_id: u64) bool {
+    const cold = taskColdConst(task);
+    if (taskCapabilityIndex(task, capability_id) != null) return true;
+
+    var index: usize = 0;
+    while (index < task.capability_count) : (index += 1) {
+        if (cold.capability_ids[index] == capability_id) return true;
+    }
+    return false;
+}
+
+fn rebuildCapabilityIndex(task: *TaskRecord) void {
+    const cold = taskCold(task);
+    cold.capability_index_slots = emptyIndexTable(CAPABILITY_INDEX_CAPACITY);
+    var index: usize = 0;
+    while (index < task.capability_count) : (index += 1) {
+        indexInsert(CAPABILITY_INDEX_CAPACITY, &cold.capability_index_slots, cold.capability_ids[index], index);
+    }
 }
 
 fn zeroAddressSpace() AddressSpaceRecord {
@@ -928,8 +1019,8 @@ test "new tasks start with zero ambient authority and no capabilities" {
     try std.testing.expect(task.local_only);
     try std.testing.expectEqual(@as(?u64, 7), task.ui_surface_id);
     try std.testing.expectEqual(@as(usize, 1), task.execution_component_count);
-    try std.testing.expectEqual(ExecutionSubstrate.typed_component_abi, task.execution_components[0].substrate);
-    try std.testing.expectEqualStrings("session-manager", task.execution_components[0].labelSlice());
+    try std.testing.expectEqual(ExecutionSubstrate.typed_component_abi, task.executionComponents()[0].substrate);
+    try std.testing.expectEqualStrings("session-manager", task.executionComponents()[0].labelSlice());
     try std.testing.expectEqual(accelerator_scheduler.ResourceClass.foreground_interactive, task.resourceClass());
     try std.testing.expect(task.hasDedicatedHost());
     try std.testing.expectEqual(ProcessClass.session_host, task.process_class);
@@ -960,7 +1051,7 @@ test "granting and revoking capabilities updates the task table" {
 
     try std.testing.expect(try runtime.revokeCapability(task.id, 11));
     try std.testing.expectEqual(@as(usize, 1), task.capability_count);
-    try std.testing.expectEqual(@as(u64, 12), task.capability_ids[0]);
+    try std.testing.expectEqual(@as(u64, 12), task.capabilityIds()[0]);
 }
 
 test "explicit resource classes override the default task classification" {
@@ -1048,9 +1139,9 @@ test "userspace tasks materialize executable mappings in their address spaces" {
     try std.testing.expect(task.hasLoadedExecutable());
     try std.testing.expect(address_space.hasMappedExecutable());
     try std.testing.expectEqual(@as(u64, 45), address_space.image_id);
-    try std.testing.expectEqual(task.userspace_image.entry_point, address_space.instruction_pointer);
-    try std.testing.expectEqual(task.userspace_image.segment_count, address_space.load_segment_count);
-    try std.testing.expectEqual(task.userspace_image.segment_count + 1, address_space.region_count);
+    try std.testing.expectEqual(task.userspaceImage().entry_point, address_space.instruction_pointer);
+    try std.testing.expectEqual(task.userspaceImage().segment_count, address_space.load_segment_count);
+    try std.testing.expectEqual(task.userspaceImage().segment_count + 1, address_space.region_count);
     try std.testing.expectEqual(AddressSpaceRegionKind.stack, address_space.regions[address_space.region_count - 1].kind);
 }
 
@@ -1077,8 +1168,8 @@ test "audit trail keeps the most recent events" {
     }
 
     try std.testing.expectEqual(@as(usize, MAX_AUDIT_EVENTS), task.audit_count);
-    try std.testing.expectEqual(@as(u32, 2), task.audit_trail[0].detail);
-    try std.testing.expectEqual(@as(u32, MAX_AUDIT_EVENTS + 1), task.audit_trail[MAX_AUDIT_EVENTS - 1].detail);
+    try std.testing.expectEqual(@as(u32, 2), task.auditEventAt(0).?.detail);
+    try std.testing.expectEqual(@as(u32, MAX_AUDIT_EVENTS + 1), task.latestAuditEvent().?.detail);
 }
 
 test "tasks can attach execution components while preserving launch substrate" {
@@ -1106,11 +1197,11 @@ test "tasks can attach execution components while preserving launch substrate" {
     }, 12);
 
     try std.testing.expectEqual(@as(usize, 2), task.execution_component_count);
-    try std.testing.expectEqualStrings("notes-ui", task.execution_components[0].labelSlice());
+    try std.testing.expectEqualStrings("notes-ui", task.executionComponents()[0].labelSlice());
     try std.testing.expectEqual(ExecutionSubstrate.early_elf_runner, helper.substrate);
     try std.testing.expectEqualStrings("notes-sync-helper", helper.labelSlice());
     try std.testing.expectEqualStrings("/system/components/notes-sync.elf", helper.entrySlice());
-    try std.testing.expectEqual(AuditEventKind.component_attached, task.audit_trail[task.audit_count - 1].kind);
+    try std.testing.expectEqual(AuditEventKind.component_attached, task.latestAuditEvent().?.kind);
 }
 
 test "tasks are isolated in separate process address space and namespace hosts and can be rehosted" {
@@ -1147,7 +1238,7 @@ test "tasks are isolated in separate process address space and namespace hosts a
     try std.testing.expect(service_task.process_id != original_process_id);
     try std.testing.expect(service_task.address_space_id != original_address_space_id);
     try std.testing.expectEqual(@as(u32, 2), service_task.process_generation);
-    try std.testing.expectEqual(AuditEventKind.service_restarted, service_task.audit_trail[service_task.audit_count - 1].kind);
+    try std.testing.expectEqual(AuditEventKind.service_restarted, service_task.latestAuditEvent().?.kind);
 }
 
 test "rehosting a userspace task rebuilds the mapped executable state" {
@@ -1184,8 +1275,8 @@ test "rehosting a userspace task rebuilds the mapped executable state" {
 
     const address_space = runtime.findAddressSpaceConst(task.address_space_id).?;
     try std.testing.expect(address_space.hasMappedExecutable());
-    try std.testing.expectEqual(task.userspace_image.entry_point, address_space.instruction_pointer);
-    try std.testing.expectEqual(task.userspace_image.segment_count, address_space.load_segment_count);
+    try std.testing.expectEqual(task.userspaceImage().entry_point, address_space.instruction_pointer);
+    try std.testing.expectEqual(task.userspaceImage().segment_count, address_space.load_segment_count);
 }
 
 test "terminating a task clears its capabilities and marks the state" {
@@ -1206,5 +1297,5 @@ test "terminating a task clears its capabilities and marks the state" {
     try std.testing.expectEqual(TaskState.terminated, task.state);
     try std.testing.expectEqual(@as(usize, 0), task.execution_component_count);
     try std.testing.expectEqual(@as(usize, 0), task.capability_count);
-    try std.testing.expectEqual(AuditEventKind.terminated, task.audit_trail[task.audit_count - 1].kind);
+    try std.testing.expectEqual(AuditEventKind.terminated, task.latestAuditEvent().?.kind);
 }

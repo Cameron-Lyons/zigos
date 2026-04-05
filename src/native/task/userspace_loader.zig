@@ -509,7 +509,7 @@ test "userspace image launch records bundle provenance and isolated process stat
     try std.testing.expect(launched.hasDedicatedHost());
     try std.testing.expect(launched.hasLoadedExecutable());
     try std.testing.expectEqualStrings("app.notes", launched.launchBundleIdSlice());
-    try std.testing.expectEqualStrings("notes", launched.execution_components[0].labelSlice());
+    try std.testing.expectEqualStrings("notes", launched.executionComponents()[0].labelSlice());
     try std.testing.expect(runtime.findAddressSpaceConst(launched.address_space_id).?.hasMappedExecutable());
 }
 

@@ -12,6 +12,9 @@ pub const MAX_SNAPSHOTS: usize = 16;
 pub const MAX_RECOVERABLE_DELETES: usize = 24;
 pub const MAX_ENTRY_PATH_BYTES: usize = 96;
 pub const MAX_SHARE_GRANTS: usize = 8;
+const WORKSPACE_INDEX_CAPACITY: usize = MAX_WORKSPACES * 2;
+const SNAPSHOT_INDEX_CAPACITY: usize = MAX_SNAPSHOTS * 2;
+const ENTRY_INDEX_CAPACITY: usize = MAX_WORKSPACE_ENTRIES * 2;
 
 pub const Entry = struct {
     path_len: usize = 0,
@@ -140,11 +143,14 @@ pub const WorkspaceRecord = struct {
     generation: u32,
     entry_count: usize,
     entries: [MAX_WORKSPACE_ENTRIES]Entry,
+    entry_index_slots: [ENTRY_INDEX_CAPACITY]EntryIndexSlot,
     share_grant_count: usize,
     share_grants: [MAX_SHARE_GRANTS]ShareGrant,
     transaction_open: bool,
     staged_entry_count: usize,
     staged_entries: [MAX_WORKSPACE_ENTRIES]Entry,
+    staged_entry_index_slots: [ENTRY_INDEX_CAPACITY]EntryIndexSlot,
+    staged_effective_entry_count: usize,
     deleted_count: usize,
     deleted_entries: [MAX_RECOVERABLE_DELETES]Entry,
 
@@ -180,9 +186,29 @@ const SnapshotSlot = struct {
     snapshot: SnapshotRecord = zeroSnapshot(),
 };
 
+const IndexState = enum(u8) {
+    empty,
+    filled,
+    tombstone,
+};
+
+const IdIndexSlot = struct {
+    state: IndexState = .empty,
+    id: u64 = 0,
+    slot_index: usize = 0,
+};
+
+const EntryIndexSlot = struct {
+    state: IndexState = .empty,
+    path_hash: u64 = 0,
+    slot_index: usize = 0,
+};
+
 pub const Directory = struct {
     next_workspace_id: u64 = 1,
     next_snapshot_id: u64 = 1,
+    workspace_index_slots: [WORKSPACE_INDEX_CAPACITY]IdIndexSlot = emptyIdIndexTable(WORKSPACE_INDEX_CAPACITY),
+    snapshot_index_slots: [SNAPSHOT_INDEX_CAPACITY]IdIndexSlot = emptyIdIndexTable(SNAPSHOT_INDEX_CAPACITY),
     workspaces: [MAX_WORKSPACES]WorkspaceSlot = [_]WorkspaceSlot{WorkspaceSlot{}} ** MAX_WORKSPACES,
     snapshots: [MAX_SNAPSHOTS]SnapshotSlot = [_]SnapshotSlot{SnapshotSlot{}} ** MAX_SNAPSHOTS,
 
@@ -193,6 +219,8 @@ pub const Directory = struct {
     pub fn reset(self: *Directory) void {
         self.next_workspace_id = 1;
         self.next_snapshot_id = 1;
+        self.workspace_index_slots = emptyIdIndexTable(WORKSPACE_INDEX_CAPACITY);
+        self.snapshot_index_slots = emptyIdIndexTable(SNAPSHOT_INDEX_CAPACITY);
         for (&self.workspaces) |*slot| {
             if (!slot.in_use) continue;
             slot.* = .{};
@@ -203,24 +231,41 @@ pub const Directory = struct {
         }
     }
 
+    pub fn rebuildIndexes(self: *Directory) void {
+        self.workspace_index_slots = emptyIdIndexTable(WORKSPACE_INDEX_CAPACITY);
+        self.snapshot_index_slots = emptyIdIndexTable(SNAPSHOT_INDEX_CAPACITY);
+
+        for (&self.workspaces, 0..) |*slot, slot_index| {
+            if (!slot.in_use) continue;
+            rebuildWorkspaceIndexes(&slot.workspace);
+            indexInsert(WORKSPACE_INDEX_CAPACITY, &self.workspace_index_slots, slot.workspace.id, slot_index);
+        }
+        for (self.snapshots, 0..) |slot, slot_index| {
+            if (!slot.in_use) continue;
+            indexInsert(SNAPSHOT_INDEX_CAPACITY, &self.snapshot_index_slots, slot.snapshot.id, slot_index);
+        }
+    }
+
     pub fn create(self: *Directory, request: CreateRequest) Error!*WorkspaceRecord {
         return self.createRef(&request);
     }
 
     pub fn createRef(self: *Directory, request: *const CreateRequest) Error!*WorkspaceRecord {
-        for (&self.workspaces) |*slot| {
+        for (&self.workspaces, 0..) |*slot, slot_index| {
             if (slot.in_use) continue;
             slot.in_use = true;
             slot.workspace = zeroWorkspace();
             slot.workspace.id = self.nextWorkspaceId();
             slot.workspace.owner = request.owner;
             slot.workspace.label_len = copyText(&slot.workspace.label, request.label);
+            indexInsert(WORKSPACE_INDEX_CAPACITY, &self.workspace_index_slots, slot.workspace.id, slot_index);
             return &slot.workspace;
         }
         return error.WorkspaceTableFull;
     }
 
     pub fn find(self: *Directory, workspace_id: u64) ?*WorkspaceRecord {
+        if (self.indexedWorkspaceSlot(workspace_id)) |slot| return &slot.workspace;
         for (&self.workspaces) |*slot| {
             if (slot.in_use and slot.workspace.id == workspace_id) return &slot.workspace;
         }
@@ -284,12 +329,10 @@ pub const Directory = struct {
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
         if (workspace.transaction_open) return error.TransactionAlreadyOpen;
         workspace.transaction_open = true;
-        workspace.staged_entry_count = workspace.entry_count;
         clearEntries(&workspace.staged_entries);
-        copyEntries(
-            workspace.staged_entries[0..workspace.entry_count],
-            workspace.entries[0..workspace.entry_count],
-        );
+        workspace.staged_entry_count = 0;
+        workspace.staged_effective_entry_count = workspace.entry_count;
+        rebuildStagedEntryIndex(workspace);
     }
 
     pub fn stagePut(
@@ -304,21 +347,57 @@ pub const Directory = struct {
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
         if (!workspace.transaction_open) return error.NoActiveTransaction;
 
-        if (findEntryIndex(workspace.staged_entries[0..workspace.staged_entry_count], path)) |index| {
+        if (findStagedEntryIndex(workspace, path)) |index| {
+            if (isDeleteTombstone(workspace.staged_entries[index])) {
+                workspace.staged_effective_entry_count += 1;
+            }
             workspace.staged_entries[index] = Entry.init(path, object_id, version_id, object_type);
             return;
+        }
+        if (findWorkspaceEntryIndex(workspace, path) == null) {
+            if (workspace.staged_effective_entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
+            workspace.staged_effective_entry_count += 1;
         }
         if (workspace.staged_entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
 
         workspace.staged_entries[workspace.staged_entry_count] = Entry.init(path, object_id, version_id, object_type);
+        entryIndexInsert(
+            &workspace.staged_entry_index_slots,
+            workspace.staged_entries[workspace.staged_entry_count].pathSlice(),
+            workspace.staged_entry_count,
+        );
         workspace.staged_entry_count += 1;
     }
 
     pub fn stageDelete(self: *Directory, workspace_id: u64, path: []const u8) Error!void {
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
         if (!workspace.transaction_open) return error.NoActiveTransaction;
-        const index = findEntryIndex(workspace.staged_entries[0..workspace.staged_entry_count], path) orelse return error.EntryNotFound;
-        removeEntry(&workspace.staged_entries, &workspace.staged_entry_count, index);
+        const base_exists = findWorkspaceEntryIndex(workspace, path) != null;
+
+        if (findStagedEntryIndex(workspace, path)) |index| {
+            if (isDeleteTombstone(workspace.staged_entries[index])) return error.EntryNotFound;
+
+            workspace.staged_effective_entry_count -= 1;
+            if (base_exists) {
+                workspace.staged_entries[index] = deleteTombstone(path);
+            } else {
+                removeEntry(&workspace.staged_entries, &workspace.staged_entry_count, index);
+                rebuildStagedEntryIndex(workspace);
+            }
+            return;
+        }
+
+        if (!base_exists) return error.EntryNotFound;
+        if (workspace.staged_entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
+
+        workspace.staged_entries[workspace.staged_entry_count] = deleteTombstone(path);
+        entryIndexInsert(
+            &workspace.staged_entry_index_slots,
+            workspace.staged_entries[workspace.staged_entry_count].pathSlice(),
+            workspace.staged_entry_count,
+        );
+        workspace.staged_entry_count += 1;
+        workspace.staged_effective_entry_count -= 1;
     }
 
     pub fn commit(self: *Directory, workspace_id: u64, tick: u64) Error!u32 {
@@ -327,15 +406,9 @@ pub const Directory = struct {
         if (!workspace.transaction_open) return error.NoActiveTransaction;
 
         recordDeletedEntries(workspace);
-        workspace.entry_count = workspace.staged_entry_count;
-        clearEntries(&workspace.entries);
-        copyEntries(
-            workspace.entries[0..workspace.entry_count],
-            workspace.staged_entries[0..workspace.entry_count],
-        );
-        clearEntries(&workspace.staged_entries);
-        workspace.staged_entry_count = 0;
-        workspace.transaction_open = false;
+        applyTransactionOverlay(workspace);
+        clearTransactionState(workspace);
+        rebuildWorkspaceEntryIndex(workspace);
         workspace.generation += 1;
         return workspace.generation;
     }
@@ -400,7 +473,7 @@ pub const Directory = struct {
 
     pub fn resolve(self: *const Directory, workspace_id: u64, path: []const u8) Error!Entry {
         const workspace = self.lookupConst(workspace_id) orelse return error.WorkspaceNotFound;
-        const index = findEntryIndex(workspace.entries[0..workspace.entry_count], path) orelse return error.EntryNotFound;
+        const index = findWorkspaceEntryIndex(workspace, path) orelse return error.EntryNotFound;
         return workspace.entries[index];
     }
 
@@ -418,7 +491,7 @@ pub const Directory = struct {
         if (identity.label.len == 0) return error.UnsignedSnapshot;
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
 
-        for (&self.snapshots) |*slot| {
+        for (&self.snapshots, 0..) |*slot, slot_index| {
             if (slot.in_use) continue;
             slot.in_use = true;
             slot.snapshot = zeroSnapshot();
@@ -432,6 +505,7 @@ pub const Directory = struct {
                 workspace.entries[0..workspace.entry_count],
             );
             signSnapshotRecord(&slot.snapshot, identity) catch return error.InvalidSignature;
+            indexInsert(SNAPSHOT_INDEX_CAPACITY, &self.snapshot_index_slots, slot.snapshot.id, slot_index);
             return &slot.snapshot;
         }
 
@@ -456,9 +530,8 @@ pub const Directory = struct {
             workspace.entries[0..snapshot_record.entry_count],
             snapshot_record.entries[0..snapshot_record.entry_count],
         );
-        workspace.transaction_open = false;
-        clearEntries(&workspace.staged_entries);
-        workspace.staged_entry_count = 0;
+        clearTransactionState(workspace);
+        rebuildWorkspaceEntryIndex(workspace);
         workspace.generation += 1;
         return workspace.generation;
     }
@@ -476,6 +549,7 @@ pub const Directory = struct {
             if (workspace.entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
 
             workspace.entries[workspace.entry_count] = entry;
+            entryIndexInsert(&workspace.entry_index_slots, entry.pathSlice(), workspace.entry_count);
             workspace.entry_count += 1;
             workspace.generation += 1;
             return true;
@@ -544,6 +618,7 @@ pub const Directory = struct {
         workspace.generation = package.generation;
         workspace.entry_count = package.entry_count;
         copyEntries(workspace.entries[0..package.entry_count], package.entries[0..package.entry_count]);
+        rebuildWorkspaceEntryIndex(workspace);
         return workspace;
     }
 
@@ -563,14 +638,14 @@ pub const Directory = struct {
         clearEntries(&workspace.entries);
         workspace.entry_count = package.entry_count;
         copyEntries(workspace.entries[0..package.entry_count], package.entries[0..package.entry_count]);
-        workspace.transaction_open = false;
-        clearEntries(&workspace.staged_entries);
-        workspace.staged_entry_count = 0;
+        clearTransactionState(workspace);
+        rebuildWorkspaceEntryIndex(workspace);
         workspace.generation += 1;
         return workspace.generation;
     }
 
     fn lookupConst(self: *const Directory, workspace_id: u64) ?*const WorkspaceRecord {
+        if (self.indexedWorkspaceSlotConst(workspace_id)) |slot| return &slot.workspace;
         for (&self.workspaces) |*slot| {
             if (slot.in_use and slot.workspace.id == workspace_id) return &slot.workspace;
         }
@@ -578,10 +653,32 @@ pub const Directory = struct {
     }
 
     fn findSnapshot(self: *Directory, snapshot_id: u64) ?*SnapshotRecord {
+        if (self.indexedSnapshotSlot(snapshot_id)) |slot| return &slot.snapshot;
         for (&self.snapshots) |*slot| {
             if (slot.in_use and slot.snapshot.id == snapshot_id) return &slot.snapshot;
         }
         return null;
+    }
+
+    fn indexedWorkspaceSlot(self: *Directory, workspace_id: u64) ?*WorkspaceSlot {
+        const slot_index = indexLookup(WORKSPACE_INDEX_CAPACITY, &self.workspace_index_slots, workspace_id) orelse return null;
+        const slot = &self.workspaces[slot_index];
+        if (!slot.in_use or slot.workspace.id != workspace_id) return null;
+        return slot;
+    }
+
+    fn indexedWorkspaceSlotConst(self: *const Directory, workspace_id: u64) ?*const WorkspaceSlot {
+        const slot_index = indexLookup(WORKSPACE_INDEX_CAPACITY, &self.workspace_index_slots, workspace_id) orelse return null;
+        const slot = &self.workspaces[slot_index];
+        if (!slot.in_use or slot.workspace.id != workspace_id) return null;
+        return slot;
+    }
+
+    fn indexedSnapshotSlot(self: *Directory, snapshot_id: u64) ?*SnapshotSlot {
+        const slot_index = indexLookup(SNAPSHOT_INDEX_CAPACITY, &self.snapshot_index_slots, snapshot_id) orelse return null;
+        const slot = &self.snapshots[slot_index];
+        if (!slot.in_use or slot.snapshot.id != snapshot_id) return null;
+        return slot;
     }
 
     fn nextWorkspaceId(self: *Directory) u64 {
@@ -604,6 +701,7 @@ fn zeroWorkspace() WorkspaceRecord {
         .generation = 0,
         .entry_count = 0,
         .entries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
+        .entry_index_slots = emptyEntryIndexTable(),
         .share_grant_count = 0,
         .share_grants = [_]ShareGrant{ShareGrant{
             .principal_id = .{ .kind = .service, .serial = 0 },
@@ -611,9 +709,15 @@ fn zeroWorkspace() WorkspaceRecord {
         .transaction_open = false,
         .staged_entry_count = 0,
         .staged_entries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
+        .staged_entry_index_slots = emptyEntryIndexTable(),
+        .staged_effective_entry_count = 0,
         .deleted_count = 0,
         .deleted_entries = [_]Entry{Entry{}} ** MAX_RECOVERABLE_DELETES,
     };
+}
+
+pub fn emptyWorkspaceRecord() WorkspaceRecord {
+    return zeroWorkspace();
 }
 
 fn shareNetworkScopeRank(scope: ShareNetworkScope) u8 {
@@ -638,6 +742,10 @@ fn zeroSnapshot() SnapshotRecord {
     };
 }
 
+pub fn emptySnapshotRecord() SnapshotRecord {
+    return zeroSnapshot();
+}
+
 fn zeroExportPackage() ExportPackage {
     return .{
         .workspace_id = 0,
@@ -657,6 +765,14 @@ fn zeroExportPackage() ExportPackage {
 
 pub fn emptyExportPackage() ExportPackage {
     return zeroExportPackage();
+}
+
+fn emptyIdIndexTable(comptime capacity: usize) [capacity]IdIndexSlot {
+    return [_]IdIndexSlot{IdIndexSlot{}} ** capacity;
+}
+
+fn emptyEntryIndexTable() [ENTRY_INDEX_CAPACITY]EntryIndexSlot {
+    return [_]EntryIndexSlot{EntryIndexSlot{}} ** ENTRY_INDEX_CAPACITY;
 }
 
 fn copyEntries(dest: []Entry, src: []const Entry) void {
@@ -788,11 +904,152 @@ fn appendFormat(buffer: []u8, offset: usize, comptime fmt: []const u8, args: any
     return offset + text.len;
 }
 
+fn rebuildWorkspaceIndexes(workspace: *WorkspaceRecord) void {
+    rebuildWorkspaceEntryIndex(workspace);
+    rebuildStagedEntryIndex(workspace);
+}
+
+fn rebuildWorkspaceEntryIndex(workspace: *WorkspaceRecord) void {
+    rebuildEntryIndex(&workspace.entry_index_slots, workspace.entries[0..workspace.entry_count]);
+}
+
+fn rebuildStagedEntryIndex(workspace: *WorkspaceRecord) void {
+    rebuildEntryIndex(&workspace.staged_entry_index_slots, workspace.staged_entries[0..workspace.staged_entry_count]);
+}
+
+fn rebuildEntryIndex(table: *[ENTRY_INDEX_CAPACITY]EntryIndexSlot, entries: []const Entry) void {
+    table.* = emptyEntryIndexTable();
+    for (entries, 0..) |entry, slot_index| {
+        entryIndexInsert(table, entry.pathSlice(), slot_index);
+    }
+}
+
+fn findWorkspaceEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?usize {
+    return entryIndexLookup(&workspace.entry_index_slots, workspace.entries[0..workspace.entry_count], path);
+}
+
+fn findStagedEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?usize {
+    return entryIndexLookup(&workspace.staged_entry_index_slots, workspace.staged_entries[0..workspace.staged_entry_count], path);
+}
+
+fn deleteTombstone(path: []const u8) Entry {
+    return Entry.init(path, 0, 0, .blob);
+}
+
+fn isDeleteTombstone(entry: Entry) bool {
+    return entry.object_id == 0 and entry.version_id == 0;
+}
+
 fn findEntryIndex(entries: []const Entry, path: []const u8) ?usize {
     for (entries, 0..) |entry, index| {
         if (std.mem.eql(u8, entry.pathSlice(), path)) return index;
     }
     return null;
+}
+
+fn entryIndexLookup(table: *const [ENTRY_INDEX_CAPACITY]EntryIndexSlot, entries: []const Entry, path: []const u8) ?usize {
+    const path_hash = hashPath(path);
+    var index = path_hash % ENTRY_INDEX_CAPACITY;
+    var attempts: usize = 0;
+    while (attempts < ENTRY_INDEX_CAPACITY) : (attempts += 1) {
+        const slot = table[index];
+        switch (slot.state) {
+            .empty => return null,
+            .filled => {
+                if (slot.path_hash == path_hash and slot.slot_index < entries.len and std.mem.eql(u8, entries[slot.slot_index].pathSlice(), path)) {
+                    return slot.slot_index;
+                }
+            },
+            .tombstone => {},
+        }
+        index = (index + 1) % ENTRY_INDEX_CAPACITY;
+    }
+    return null;
+}
+
+fn entryIndexInsert(table: *[ENTRY_INDEX_CAPACITY]EntryIndexSlot, path: []const u8, slot_index: usize) void {
+    const path_hash = hashPath(path);
+    var index = path_hash % ENTRY_INDEX_CAPACITY;
+    var first_tombstone: ?usize = null;
+    var attempts: usize = 0;
+    while (attempts < ENTRY_INDEX_CAPACITY) : (attempts += 1) {
+        switch (table[index].state) {
+            .empty => {
+                const insert_index = first_tombstone orelse index;
+                table[insert_index] = .{
+                    .state = .filled,
+                    .path_hash = path_hash,
+                    .slot_index = slot_index,
+                };
+                return;
+            },
+            .filled => {},
+            .tombstone => {
+                if (first_tombstone == null) first_tombstone = index;
+            },
+        }
+        index = (index + 1) % ENTRY_INDEX_CAPACITY;
+    }
+
+    unreachable;
+}
+
+fn indexLookup(comptime capacity: usize, table: *const [capacity]IdIndexSlot, id: u64) ?usize {
+    if (id == 0) return null;
+
+    var index = indexHash(id, capacity);
+    var attempts: usize = 0;
+    while (attempts < capacity) : (attempts += 1) {
+        const entry = table[index];
+        switch (entry.state) {
+            .empty => return null,
+            .filled => if (entry.id == id) return entry.slot_index,
+            .tombstone => {},
+        }
+        index = (index + 1) % capacity;
+    }
+    return null;
+}
+
+fn indexInsert(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64, slot_index: usize) void {
+    if (id == 0) unreachable;
+
+    var index = indexHash(id, capacity);
+    var first_tombstone: ?usize = null;
+    var attempts: usize = 0;
+    while (attempts < capacity) : (attempts += 1) {
+        switch (table[index].state) {
+            .empty => {
+                const insert_index = first_tombstone orelse index;
+                table[insert_index] = .{
+                    .state = .filled,
+                    .id = id,
+                    .slot_index = slot_index,
+                };
+                return;
+            },
+            .filled => {
+                if (table[index].id == id) {
+                    table[index].slot_index = slot_index;
+                    return;
+                }
+            },
+            .tombstone => {
+                if (first_tombstone == null) first_tombstone = index;
+            },
+        }
+        index = (index + 1) % capacity;
+    }
+
+    unreachable;
+}
+
+fn indexHash(id: u64, comptime capacity: usize) usize {
+    return @as(usize, @intCast((id *% 0x9E37_79B9_7F4A_7C15) % capacity));
+}
+
+fn hashPath(path: []const u8) usize {
+    return @as(usize, @truncate(std.hash.Fnv1a_64.hash(path)));
 }
 
 fn removeEntry(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: *usize, index: usize) void {
@@ -805,7 +1062,12 @@ fn removeEntry(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: *usize, index: usi
 }
 
 fn recordDeletedEntries(workspace: *WorkspaceRecord) void {
-    recordDeletedEntriesAgainst(workspace, workspace.staged_entries[0..workspace.staged_entry_count]);
+    for (workspace.entries[0..workspace.entry_count]) |entry| {
+        const staged_index = findStagedEntryIndex(workspace, entry.pathSlice()) orelse continue;
+        if (isDeleteTombstone(workspace.staged_entries[staged_index])) {
+            appendDeleted(workspace, entry);
+        }
+    }
 }
 
 fn recordDeletedEntriesAgainst(workspace: *WorkspaceRecord, target_entries: []const Entry) void {
@@ -827,6 +1089,41 @@ fn appendDeleted(workspace: *WorkspaceRecord, entry: Entry) void {
         workspace.deleted_entries[index - 1] = workspace.deleted_entries[index];
     }
     workspace.deleted_entries[MAX_RECOVERABLE_DELETES - 1] = entry;
+}
+
+fn applyTransactionOverlay(workspace: *WorkspaceRecord) void {
+    var next_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+    var next_count: usize = 0;
+
+    for (workspace.entries[0..workspace.entry_count]) |entry| {
+        if (findStagedEntryIndex(workspace, entry.pathSlice())) |staged_index| {
+            const staged_entry = workspace.staged_entries[staged_index];
+            if (isDeleteTombstone(staged_entry)) continue;
+            next_entries[next_count] = staged_entry;
+        } else {
+            next_entries[next_count] = entry;
+        }
+        next_count += 1;
+    }
+
+    for (workspace.staged_entries[0..workspace.staged_entry_count]) |staged_entry| {
+        if (isDeleteTombstone(staged_entry)) continue;
+        if (findWorkspaceEntryIndex(workspace, staged_entry.pathSlice()) != null) continue;
+        next_entries[next_count] = staged_entry;
+        next_count += 1;
+    }
+
+    clearEntries(&workspace.entries);
+    workspace.entry_count = next_count;
+    copyEntries(workspace.entries[0..next_count], next_entries[0..next_count]);
+}
+
+fn clearTransactionState(workspace: *WorkspaceRecord) void {
+    workspace.transaction_open = false;
+    clearEntries(&workspace.staged_entries);
+    workspace.staged_entry_count = 0;
+    workspace.staged_effective_entry_count = 0;
+    rebuildStagedEntryIndex(workspace);
 }
 
 test "workspace transactions, snapshot restore, delete recovery, and signed export import work" {
@@ -932,6 +1229,21 @@ test "workspace can restore the original workspace from a signed export package"
 
     _ = try directory.restoreFromExportPackage(workspace.id, &package, 34);
     try std.testing.expectEqual(first.version_id, (try directory.resolve(workspace.id, "documents/notes.md")).version_id);
+}
+
+test "workspace overlay transactions can cancel staged additions before commit" {
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 4 },
+        .label = "overlay-cancel",
+    });
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "documents/draft.md", 10, 20, .document);
+    try directory.stageDelete(workspace.id, "documents/draft.md");
+    try std.testing.expectEqual(@as(u32, 1), try directory.commit(workspace.id, 40));
+    try std.testing.expectEqual(@as(usize, 0), (try directory.entries(workspace.id)).len);
+    try std.testing.expectError(error.EntryNotFound, directory.resolve(workspace.id, "documents/draft.md"));
 }
 
 test "workspace snapshots and exports must stay signed" {

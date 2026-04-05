@@ -11,6 +11,7 @@ pub const CheckpointStore = struct {
     store: object_store.Store = object_store.Store.init(),
     workspaces: workspace.Directory = workspace.Directory.init(),
     has_persisted_state: bool = false,
+    dirty: bool = false,
 
     pub fn hasCachedPersistentState(self: *const CheckpointStore) bool {
         return self.has_persisted_state;
@@ -20,12 +21,14 @@ pub const CheckpointStore = struct {
         self.store.reset();
         self.workspaces.reset();
         self.has_persisted_state = false;
+        self.dirty = false;
     }
 
     pub fn loadPreparedStateFromAttachedVolume(self: *CheckpointStore) bool {
         if (!storage_volume.hasAttachedDevice()) return false;
         if (storage_volume.loadFromVolume(&self.store, &self.workspaces)) {
             self.has_persisted_state = true;
+            self.dirty = false;
             return true;
         }
         return false;
@@ -50,6 +53,7 @@ pub const Service = struct {
     owner: principal.PrincipalId,
     loaded_from_volume: bool = false,
     checkpoint_enabled: bool = true,
+    deferred_checkpoint_count: usize = 0,
     checkpoint_store: *CheckpointStore,
     store: *object_store.Store,
     workspaces: *workspace.Directory,
@@ -96,8 +100,7 @@ pub const Service = struct {
     }
 
     pub fn checkpoint(self: *const Service) void {
-        self.checkpoint_store.has_persisted_state = true;
-        _ = storage_volume.saveToVolume(self.store, self.workspaces) catch null;
+        self.flushCheckpoint();
     }
 
     pub fn putVersion(self: *Service, request: object_store.PutRequest) object_store.Error!object_store.PutResult {
@@ -106,7 +109,7 @@ pub const Service = struct {
 
     pub fn putVersionRef(self: *Service, request: *const object_store.PutRequest) object_store.Error!object_store.PutResult {
         const result = try self.store.putVersionRef(request);
-        if (self.checkpoint_enabled) self.checkpoint();
+        self.noteMutation(true);
         return result;
     }
 
@@ -116,13 +119,14 @@ pub const Service = struct {
 
     pub fn createWorkspaceRef(self: *Service, request: *const workspace.CreateRequest) workspace.Error!*workspace.WorkspaceRecord {
         const record = try self.workspaces.createRef(request);
-        if (self.checkpoint_enabled) self.checkpoint();
+        self.noteMutation(true);
         return record;
     }
 
     pub fn beginTransaction(self: *Service, workspace_id: u64) workspace.Error!void {
         try self.workspaces.beginTransaction(workspace_id);
-        if (self.checkpoint_enabled) self.checkpoint();
+        self.deferred_checkpoint_count += 1;
+        self.noteMutation(false);
     }
 
     pub fn stagePut(
@@ -134,17 +138,18 @@ pub const Service = struct {
         object_type: object_store.ObjectType,
     ) workspace.Error!void {
         try self.workspaces.stagePut(workspace_id, path, object_id, version_id, object_type);
-        if (self.checkpoint_enabled) self.checkpoint();
+        self.noteMutation(false);
     }
 
     pub fn stageDelete(self: *Service, workspace_id: u64, path: []const u8) workspace.Error!void {
         try self.workspaces.stageDelete(workspace_id, path);
-        if (self.checkpoint_enabled) self.checkpoint();
+        self.noteMutation(false);
     }
 
     pub fn commit(self: *Service, workspace_id: u64, tick: u64) workspace.Error!u32 {
         const generation = try self.workspaces.commit(workspace_id, tick);
-        if (self.checkpoint_enabled) self.checkpoint();
+        if (self.deferred_checkpoint_count != 0) self.deferred_checkpoint_count -= 1;
+        self.noteMutation(true);
         return generation;
     }
 
@@ -155,13 +160,13 @@ pub const Service = struct {
         identity: signing.SignerIdentity,
     ) workspace.Error!*workspace.SnapshotRecord {
         const snapshot_record = try self.workspaces.snapshot(workspace_id, label, identity);
-        if (self.checkpoint_enabled) self.checkpoint();
+        self.noteMutation(true);
         return snapshot_record;
     }
 
     pub fn restore(self: *Service, workspace_id: u64, snapshot_id: u64, tick: u64) workspace.Error!u32 {
         const generation = try self.workspaces.restore(workspace_id, snapshot_id, tick);
-        if (self.checkpoint_enabled) self.checkpoint();
+        self.noteMutation(true);
         return generation;
     }
 
@@ -172,13 +177,13 @@ pub const Service = struct {
         tick: u64,
     ) workspace.Error!u32 {
         const generation = try self.workspaces.restoreFromExportPackage(workspace_id, package, tick);
-        if (self.checkpoint_enabled) self.checkpoint();
+        self.noteMutation(true);
         return generation;
     }
 
     pub fn recoverDeleted(self: *Service, workspace_id: u64, path: []const u8, tick: u64) workspace.Error!bool {
         const recovered = try self.workspaces.recoverDeleted(workspace_id, path, tick);
-        if (self.checkpoint_enabled) self.checkpoint();
+        if (recovered) self.noteMutation(true);
         return recovered;
     }
 
@@ -209,7 +214,7 @@ pub const Service = struct {
         tick: u64,
     ) workspace.Error!*workspace.WorkspaceRecord {
         const record = try self.workspaces.importWorkspace(owner, label, package, tick);
-        if (self.checkpoint_enabled) self.checkpoint();
+        self.noteMutation(true);
         return record;
     }
 
@@ -221,13 +226,13 @@ pub const Service = struct {
         tick: u64,
     ) workspace.Error!*workspace.WorkspaceRecord {
         const record = try self.workspaces.importWorkspaceFromPackage(owner, label, package, tick);
-        if (self.checkpoint_enabled) self.checkpoint();
+        self.noteMutation(true);
         return record;
     }
 
     pub fn shareWorkspace(self: *Service, workspace_id: u64, request: workspace.ShareRequest) workspace.Error!void {
         try self.workspaces.share(workspace_id, request);
-        if (self.checkpoint_enabled) self.checkpoint();
+        self.noteMutation(true);
     }
 
     pub fn resolve(self: *const Service, workspace_id: u64, path: []const u8) workspace.Error!workspace.Entry {
@@ -334,6 +339,23 @@ pub const Service = struct {
         }
         return false;
     }
+
+    fn noteMutation(self: *const Service, durable_boundary: bool) void {
+        self.checkpoint_store.has_persisted_state = true;
+        self.checkpoint_store.dirty = true;
+        if (!self.checkpoint_enabled) return;
+        if (durable_boundary and self.deferred_checkpoint_count == 0) {
+            self.flushCheckpoint();
+        }
+    }
+
+    fn flushCheckpoint(self: *const Service) void {
+        self.checkpoint_store.has_persisted_state = true;
+        if (!self.checkpoint_store.dirty) return;
+        if (!storage_volume.hasAttachedDevice()) return;
+        _ = storage_volume.saveToVolume(self.store, self.workspaces) catch return;
+        self.checkpoint_store.dirty = false;
+    }
 };
 
 fn makeService(
@@ -349,6 +371,7 @@ fn makeService(
         .owner = owner,
         .loaded_from_volume = loaded_from_volume,
         .checkpoint_enabled = true,
+        .deferred_checkpoint_count = 0,
         .checkpoint_store = checkpoint_store,
         .store = &checkpoint_store.store,
         .workspaces = &checkpoint_store.workspaces,

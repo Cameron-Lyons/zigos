@@ -328,7 +328,7 @@ pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {
     try std.testing.expectEqual(@as(u16, 2), task.background_active_count);
     try std.testing.expectEqual(manifest.BackgroundNetworkMode.local_network_only, task.last_background_network);
     try std.testing.expectEqual(manifest.BackgroundVisibility.status_only, task.last_background_visibility);
-    try std.testing.expectEqual(task_runtime.AuditEventKind.background_dispatched, task.audit_trail[task.audit_count - 1].kind);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.background_dispatched, task.latestAuditEvent().?.kind);
 }
 
 pub fn structuredServicesAndDiagnosticsStayRedacted() !void {
