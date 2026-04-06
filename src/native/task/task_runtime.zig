@@ -1,6 +1,7 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const manifest = @import("../policy/manifest.zig");
 const std = @import("std");
+const builtin = @import("builtin");
 const principal = @import("../core/principal.zig");
 const runtime_host = @import("task_runtime_host.zig");
 const launch_helpers = @import("task_runtime_launch.zig");
@@ -389,7 +390,8 @@ pub const Runtime = struct {
         copySlots(IdIndexSlot, out.task_index_slots[0..], self.task_index_slots[0..]);
         copySlots(IdIndexSlot, out.address_space_index_slots[0..], self.address_space_index_slots[0..]);
         copySlots(TaskSlot, out.tasks[0..], self.tasks[0..]);
-        copyTaskColdStates(self.tasks[0..], out.task_cold[0..], self.task_cold[0..]);
+        // Keep the cold-state copy out of line; freestanding i386 ReleaseFast traps if this path is inlined.
+        @call(.never_inline, copyTaskColdStates, .{ self.tasks[0..], out.task_cold[0..], self.task_cold[0..] });
         bindTaskColdStates(out.tasks[0..], out.task_cold[0..]);
         copySlots(AddressSpaceSlot, out.address_spaces[0..], self.address_spaces[0..]);
     }
@@ -403,7 +405,7 @@ pub const Runtime = struct {
         copySlots(IdIndexSlot, self.task_index_slots[0..], state.task_index_slots[0..]);
         copySlots(IdIndexSlot, self.address_space_index_slots[0..], state.address_space_index_slots[0..]);
         copySlots(TaskSlot, self.tasks[0..], state.tasks[0..]);
-        copyTaskColdStates(self.tasks[0..], self.task_cold[0..], state.task_cold[0..]);
+        @call(.never_inline, copyTaskColdStates, .{ self.tasks[0..], self.task_cold[0..], state.task_cold[0..] });
         bindTaskColdStates(self.tasks[0..], self.task_cold[0..]);
         copySlots(AddressSpaceSlot, self.address_spaces[0..], state.address_spaces[0..]);
     }
@@ -431,7 +433,7 @@ pub const Runtime = struct {
             );
 
             slot.in_use = true;
-            self.task_cold[slot_index] = zeroTaskCold();
+            resetTaskCold(&self.task_cold[slot_index]);
             slot.task = .{
                 .id = task_id,
                 .process_id = host.process_id,
@@ -692,7 +694,7 @@ pub const Runtime = struct {
         if (task.state == .terminated) return false;
 
         task.state = .terminated;
-        taskCold(task).* = zeroTaskCold();
+        resetTaskCold(taskCold(task));
         task.execution_component_count = 0;
         task.capability_count = 0;
         try self.audit(task_id, .{
@@ -797,6 +799,14 @@ fn zeroTaskCold() TaskColdRecord {
     return .{};
 }
 
+fn resetTaskCold(dest: *TaskColdRecord) void {
+    zeroBytes(std.mem.asBytes(dest));
+}
+
+fn copyTaskCold(dest: *TaskColdRecord, src: *const TaskColdRecord) void {
+    copyBytes(std.mem.asBytes(dest), std.mem.asBytes(src));
+}
+
 fn taskCold(task: *TaskRecord) *TaskColdRecord {
     return task.cold_state orelse unreachable;
 }
@@ -808,9 +818,9 @@ fn taskColdConst(task: *const TaskRecord) *const TaskColdRecord {
 fn copyTaskColdStates(task_slots: []const TaskSlot, dest: []TaskColdRecord, src: []const TaskColdRecord) void {
     var index: usize = 0;
     while (index < dest.len) : (index += 1) {
-        dest[index] = zeroTaskCold();
+        resetTaskCold(&dest[index]);
         if (index >= task_slots.len or !task_slots[index].in_use) continue;
-        dest[index] = src[index];
+        copyTaskCold(&dest[index], &src[index]);
     }
 }
 
@@ -828,9 +838,47 @@ fn copySlots(comptime T: type, dest: []T, src: []const T) void {
 }
 
 fn copyBytes(dest: []u8, src: []const u8) void {
+    if (builtin.target.cpu.arch == .x86 and builtin.target.os.tag == .freestanding) {
+        // Use the x86 string op directly so the native boot checkpoint path stays scalar and predictable.
+        const count: u32 = @intCast(@min(dest.len, src.len));
+        if (count == 0) return;
+        asm volatile (
+            \\cld
+            \\rep movsb
+            :
+            : [dst] "{edi}" (dest.ptr),
+              [src] "{esi}" (src.ptr),
+              [count] "{ecx}" (count),
+            : .{ .memory = true }
+        );
+        return;
+    }
+
     var index: usize = 0;
     while (index < dest.len and index < src.len) : (index += 1) {
         dest[index] = src[index];
+    }
+}
+
+fn zeroBytes(dest: []u8) void {
+    if (builtin.target.cpu.arch == .x86 and builtin.target.os.tag == .freestanding) {
+        const count: u32 = @intCast(dest.len);
+        if (count == 0) return;
+        asm volatile (
+            \\cld
+            \\rep stosb
+            :
+            : [dst] "{edi}" (dest.ptr),
+              [count] "{ecx}" (count),
+              [value] "{eax}" (@as(u32, 0)),
+            : .{ .memory = true }
+        );
+        return;
+    }
+
+    var index: usize = 0;
+    while (index < dest.len) : (index += 1) {
+        dest[index] = 0;
     }
 }
 
