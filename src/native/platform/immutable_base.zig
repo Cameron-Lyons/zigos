@@ -380,7 +380,7 @@ pub const Manager = struct {
 
     fn hydrateSlot(self: *Manager, slot_index: usize) Error!void {
         const slot = &self.slots[slot_index];
-            const version = self.storage.version(slot.version_id) orelse return error.CorruptState;
+        const version = self.storage.version(slot.version_id) orelse return error.CorruptState;
         slot.signer_len = copyText(&slot.signer, version.metadata.signature.signer);
         slot.measurement = version.address;
     }

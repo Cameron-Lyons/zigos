@@ -32,4 +32,3 @@ pub fn clear() void {
 pub fn clearWithColor(color: u8) void {
     vga.clearWithColor(color);
 }
-

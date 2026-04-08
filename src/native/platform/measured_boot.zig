@@ -94,7 +94,6 @@ fn zeroRecord() MeasurementRecord {
     };
 }
 
-
 fn hashMeasurement(kind: MeasurementKind, label: []const u8, payload: []const u8) [32]u8 {
     var hasher = crypto_hash.init();
     crypto_hash.updateEnum(&hasher, "measurement-kind", kind);

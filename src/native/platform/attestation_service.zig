@@ -171,7 +171,6 @@ fn statementDigest(statement: Statement) [32]u8 {
     return crypto_hash.finalize(&hasher);
 }
 
-
 test "attestation service signs measured state and records user visible requests" {
     var recorder = measured_boot.Recorder.init();
     recorder.begin(12);

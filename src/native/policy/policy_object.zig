@@ -294,7 +294,6 @@ fn listContains(items: []const [MAX_LABEL_BYTES]u8, lens: []const usize, needle:
     return false;
 }
 
-
 test "policy objects remain signed scoped and enforce enterprise controls" {
     var directory = Directory.init();
     const policy = try directory.create(.{

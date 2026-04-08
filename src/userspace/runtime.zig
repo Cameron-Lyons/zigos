@@ -80,7 +80,7 @@ pub export fn zigos_userspace_contract_main() callconv(.c) noreturn {
 }
 
 pub fn startAsm(comptime _: u32) []const u8 {
-    return
+    const assembly =
         \\mov $0x23, %ax
         \\mov %ax, %ds
         \\mov %ax, %es
@@ -89,6 +89,7 @@ pub fn startAsm(comptime _: u32) []const u8 {
         \\call zigos_userspace_contract_main
         \\ud2
     ;
+    return assembly;
 }
 
 fn runStartupQueries(detail: mailbox.Detail) void {
