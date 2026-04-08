@@ -107,7 +107,6 @@ fn normalizePath(path: []const u8) []const u8 {
     return path;
 }
 
-
 test "file bridge is derived, permission-aware, and non-authoritative" {
     const TestContext = struct {
         store: *object_store.Store,

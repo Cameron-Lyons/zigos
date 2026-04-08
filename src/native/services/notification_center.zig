@@ -166,7 +166,6 @@ fn zeroNotification() Notification {
     };
 }
 
-
 test "notification center keeps structured objects task links expiry and suppression" {
     var center = Center.init();
     const sync_source = principal.PrincipalId{ .kind = .service, .serial = 7 };
