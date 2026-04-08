@@ -211,7 +211,6 @@ pub fn init() void {
     idt.setGate(46, &irq14, 0x08, 0x8E);
     idt.setGate(47, &irq15, 0x08, 0x8E);
 
-
     idt.setGate(128, &isr128, 0x08, 0x8E | 0x60);
     idt.setGate(129, &isr129, 0x08, 0x8E | 0x60);
 

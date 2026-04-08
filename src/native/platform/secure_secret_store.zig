@@ -176,7 +176,6 @@ fn zeroSecret() SecretRecord {
     };
 }
 
-
 fn digestSecretMaterial(raw: []const u8) [32]u8 {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "secret-material", raw);

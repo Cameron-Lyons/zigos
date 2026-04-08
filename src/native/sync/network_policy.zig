@@ -309,7 +309,6 @@ fn zeroPolicy() PolicyRecord {
     };
 }
 
-
 fn policyMatchesRequest(policy: *const PolicyRecord, request: CreateRequest) bool {
     if (!policy.owner.eql(request.owner)) return false;
     if (policy.workspace_id != request.workspace_id) return false;

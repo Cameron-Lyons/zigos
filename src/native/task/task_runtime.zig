@@ -849,8 +849,7 @@ fn copyBytes(dest: []u8, src: []const u8) void {
             : [dst] "{edi}" (dest.ptr),
               [src] "{esi}" (src.ptr),
               [count] "{ecx}" (count),
-            : .{ .memory = true }
-        );
+            : .{ .memory = true });
         return;
     }
 
@@ -871,8 +870,7 @@ fn zeroBytes(dest: []u8) void {
             : [dst] "{edi}" (dest.ptr),
               [count] "{ecx}" (count),
               [value] "{eax}" (@as(u32, 0)),
-            : .{ .memory = true }
-        );
+            : .{ .memory = true });
         return;
     }
 

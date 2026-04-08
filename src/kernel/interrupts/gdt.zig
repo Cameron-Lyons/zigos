@@ -121,4 +121,3 @@ fn writeTss(num: usize, ss0: u16, esp0: u32) void {
 pub fn setKernelStack(stack: u32) void {
     tss.esp0 = stack;
 }
-

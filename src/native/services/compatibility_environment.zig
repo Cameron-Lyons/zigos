@@ -236,7 +236,6 @@ fn emptyPortal() PortalGrant {
     };
 }
 
-
 test "compatibility environments stay isolated labeled and portal-only" {
     var manager = Manager.init();
     const bundle = manifest.BundleManifest{

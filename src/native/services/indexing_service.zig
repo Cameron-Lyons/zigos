@@ -174,7 +174,6 @@ fn zeroDocument() DocumentRecord {
     };
 }
 
-
 test "indexing service remains permission aware and updates ranked results" {
     var service = Service.init();
     try service.upsert(1, 100, 1, "Alpha Notes", "alpha alpha roadmap");

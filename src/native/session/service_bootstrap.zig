@@ -267,7 +267,7 @@ fn driverSigner(device_class: driver_service.DeviceClass, bundle_id: []const u8)
         .storage_controller,
         .graphics_adapter,
         .audio_print_io,
-            => "zigos-driver-key",
+        => "zigos-driver-key",
     };
 }
 

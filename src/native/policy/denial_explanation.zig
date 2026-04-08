@@ -104,7 +104,6 @@ fn retrySafe(reason: abi.DenialReason) bool {
     };
 }
 
-
 fn yesNo(value: bool) []const u8 {
     return if (value) "yes" else "no";
 }
