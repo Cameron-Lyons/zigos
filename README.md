@@ -104,11 +104,7 @@ The smoke test uses `build/native-store-smoke.img` and validates the expected na
 
 ## Verification Model
 
-<<<<<<< Updated upstream
 Repo-level conformance is checked through the thin root `src/zigos_spec_test.zig`, which delegates to the suites under `src/tests/spec/`; the section-to-test contract is enforced by `spec/coverage.json` and `tools/check_spec_coverage.py`, with stable `REQ-*` anchors in `SPEC.md` driving the manifest instead of line-by-line prose claims. The `spec-conformance` target also runs the native two-boot QEMU smoke harness so the repo-level gate is not host-only.
-=======
-Repo-level conformance is checked through the thin root `src/zigos_spec_test.zig`, which delegates to the suites under `src/tests/spec/`; the section-to-test contract is enforced by `spec/coverage.json` and `tools/check_spec_coverage.py`.
->>>>>>> Stashed changes
 
 The main verification entrypoints are:
 

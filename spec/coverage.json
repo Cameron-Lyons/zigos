@@ -229,7 +229,6 @@
           "name": "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy scoped"
         },
         {
-<<<<<<< Updated upstream
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible"
         },
@@ -242,8 +241,6 @@
           "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
         },
         {
-=======
->>>>>>> Stashed changes
           "file": "src/native/policy/manifest.zig",
           "name": "validate rejects incomplete background task declarations"
         },
@@ -272,13 +269,10 @@
           "name": "spec 2.1 6.2 and 7 explicit grants are required before a task gains authority"
         },
         {
-<<<<<<< Updated upstream
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible"
         },
         {
-=======
->>>>>>> Stashed changes
           "file": "src/native/policy/policy_mediation.zig",
           "name": "policy mediation covers device camera mic sensor and peer ipc permissions"
         },
@@ -336,13 +330,10 @@
           "name": "spec 9 and 10 use a trusted device graph selective sync and policy-gated networking"
         },
         {
-<<<<<<< Updated upstream
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible"
         },
         {
-=======
->>>>>>> Stashed changes
           "file": "src/native/sync/device_graph.zig",
           "name": "device graph roots user principals and manages enrollment rotation and revocation"
         },
@@ -398,7 +389,6 @@
           "name": "spec 11 task-first UX records structured task workspace permission and pairing flows"
         },
         {
-<<<<<<< Updated upstream
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible"
         },
@@ -407,19 +397,14 @@
           "name": "spec 11.2 and 17.2 keep task views and compatibility environments explicit"
         },
         {
-=======
->>>>>>> Stashed changes
           "file": "src/native/platform/native_ux.zig",
           "name": "native ux records task workspace pairing review and recovery flows"
         },
         {
-<<<<<<< Updated upstream
           "file": "src/native/platform/compositor_session.zig",
           "name": "compositor session opens document workspace and full-screen task views"
         },
         {
-=======
->>>>>>> Stashed changes
           "file": "src/native/policy/permission_review.zig",
           "name": "renderToBuffer includes bundle name, permission labels, and decisions"
         },
@@ -448,13 +433,10 @@
           "name": "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explicit"
         },
         {
-<<<<<<< Updated upstream
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
         },
         {
-=======
->>>>>>> Stashed changes
           "file": "src/native/task/accelerator_scheduler.zig",
           "name": "accelerator scheduler tracks exclusive engine claims and zero-copy attachments"
         },
@@ -506,7 +488,6 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-<<<<<<< Updated upstream
           "name": "spec 14.2 validates boot core storage network and ui health before finalizing an update"
         },
         {
@@ -518,16 +499,10 @@
           "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
         },
         {
-=======
-          "name": "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy scoped"
-        },
-        {
->>>>>>> Stashed changes
           "file": "src/native/platform/immutable_base.zig",
           "name": "immutable base persists signed read-only image activation and rollback metadata"
         },
         {
-<<<<<<< Updated upstream
           "file": "src/native/platform/update_health.zig",
           "name": "update health validates boot core storage network and ui checks and records update history"
         },
@@ -536,8 +511,6 @@
           "name": "update health failures trigger rollback for each required post-activation check"
         },
         {
-=======
->>>>>>> Stashed changes
           "file": "src/native/services/package_service.zig",
           "name": "package service enforces signed manifests policy gated sources updates and rollback"
         }
@@ -565,13 +538,10 @@
           "name": "event ledger exports structured redacted diagnostics and audit history"
         },
         {
-<<<<<<< Updated upstream
           "file": "src/native/platform/update_health.zig",
           "name": "update health failures trigger rollback for each required post-activation check"
         },
         {
-=======
->>>>>>> Stashed changes
           "file": "src/native/policy/denial_explanation.zig",
           "name": "permission denials explain blocking policy capability approval and retry hints"
         }
@@ -614,13 +584,10 @@
           "name": "spec 4 6.3 13 and 17 keep the kernel typed minimal and route legacy support through isolated portals"
         },
         {
-<<<<<<< Updated upstream
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 11.2 and 17.2 keep task views and compatibility environments explicit"
         },
         {
-=======
->>>>>>> Stashed changes
           "file": "src/native/services/compatibility_environment.zig",
           "name": "compatibility environments stay isolated labeled and portal-only"
         },
@@ -661,13 +628,10 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-<<<<<<< Updated upstream
           "name": "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible"
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-=======
->>>>>>> Stashed changes
           "name": "spec 5 and 14 keep the base image signed measured atomic and rollback-capable"
         },
         {

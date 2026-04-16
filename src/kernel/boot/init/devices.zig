@@ -8,15 +8,9 @@ const pci = @import("../../drivers/pci.zig");
 const rtl8139 = @import("../../drivers/rtl8139.zig");
 const virtio = @import("../../drivers/virtio.zig");
 const bootstrap_driver_port = @import("../../../native/drivers/bootstrap_driver_port.zig");
-<<<<<<< Updated upstream
 const device_broker = @import("../../../native/kernel_api/device_broker.zig");
 const device_inventory = @import("../../../native/drivers/device_inventory.zig");
 const storage_driver_protocol = @import("../../../native/drivers/storage_driver_protocol.zig");
-=======
-const device_inventory = @import("../../../native/drivers/device_inventory.zig");
-const storage_volume = @import("../../../native/storage/storage_volume.zig");
-const storage_volume_backend = @import("../../../native/storage/storage_volume_backend.zig");
->>>>>>> Stashed changes
 const panic_handler = @import("../../utils/panic.zig");
 const common = @import("../common.zig");
 
