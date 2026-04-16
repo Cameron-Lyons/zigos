@@ -24,7 +24,7 @@ export fn syscall_handler(context: *anyopaque) callconv(.c) void {
         port,
         userspace_executor.activeTaskId(),
         timer.getTicks(),
-        frame.eaxpenguinz0,
+        frame.eax,
         frame.ebx,
         frame.ecx,
     );
