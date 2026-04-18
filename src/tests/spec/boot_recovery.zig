@@ -12,6 +12,58 @@ const sync_service = @import("../../native/sync/sync_service.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const update_health = @import("../../native/platform/update_health.zig");
 
+const PendingActivationFailureCase = struct {
+    expected_failure: immutable_base.HealthFailure,
+    begin_tick: u64,
+    validation_tick: u64,
+    boot_success_tick: ?u64 = null,
+    storage_probe_path: []const u8 = "documents/notes.md",
+    crash_service_id: ?u64 = null,
+    crash_tick: u64 = 0,
+    crash_reason: u32 = 0,
+    mark_healthy_tick: ?u64 = null,
+};
+
+fn expectPendingActivationFailure(
+    manager: *immutable_base.Manager,
+    supervisor_instance: *supervisor.Supervisor,
+    storage: *storage_service.Service,
+    ledger: *event_ledger.Ledger,
+    base_request: update_health.CheckRequest,
+    case: PendingActivationFailureCase,
+) !void {
+    try manager.beginActivation(1, case.begin_tick);
+    if (case.boot_success_tick) |tick| {
+        try update_health.recordBootSuccess(manager, tick);
+    }
+    if (case.crash_service_id) |service_id| {
+        try std.testing.expect(supervisor_instance.recordCrash(service_id, case.crash_tick, case.crash_reason));
+    }
+
+    const request = update_health.CheckRequest{
+        .core_service_ids = base_request.core_service_ids,
+        .storage_workspace_id = base_request.storage_workspace_id,
+        .storage_probe_path = case.storage_probe_path,
+        .network_service_id = base_request.network_service_id,
+        .ui_service_id = base_request.ui_service_id,
+        .network_probe = base_request.network_probe,
+        .ui_probe = base_request.ui_probe,
+    };
+    const failure = try update_health.validatePendingActivation(
+        manager,
+        supervisor_instance,
+        storage,
+        request,
+        ledger,
+        case.validation_tick,
+    );
+    try std.testing.expectEqual(case.expected_failure, failure.activation.failure);
+
+    if (case.crash_service_id) |service_id| {
+        try std.testing.expect(supervisor_instance.markHealthy(service_id, case.mark_healthy_tick.?));
+    }
+}
+
 pub fn baseImageStaysSignedMeasuredAtomicAndRollbackCapable() !void {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
     storage_checkpoint_store.resetPersistent();
@@ -260,50 +312,53 @@ pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
 
     _ = try manager.stageImage(1, "stable-b", "kernel=v2", image_signer, 17);
 
-    try manager.beginActivation(1, 18);
-    const boot_failure = try update_health.validatePendingActivation(
-        &manager,
-        &supervisor_instance,
-        &storage,
-        request,
-        &ledger,
-        19,
-    );
-    try std.testing.expectEqual(immutable_base.HealthFailure.boot, boot_failure.activation.failure);
-
-    try manager.beginActivation(1, 20);
-    try update_health.recordBootSuccess(&manager, 21);
-    try std.testing.expect(supervisor_instance.recordCrash(sync_service_record.id, 22, 0xCA11));
-    const core_failure = try update_health.validatePendingActivation(&manager, &supervisor_instance, &storage, request, &ledger, 23);
-    try std.testing.expectEqual(immutable_base.HealthFailure.core_service, core_failure.activation.failure);
-    try std.testing.expect(supervisor_instance.markHealthy(sync_service_record.id, 24));
-
-    try manager.beginActivation(1, 25);
-    try update_health.recordBootSuccess(&manager, 26);
-    const storage_failure = try update_health.validatePendingActivation(&manager, &supervisor_instance, &storage, .{
-        .core_service_ids = core_service_ids[0..],
-        .storage_workspace_id = workspace_record.id,
-        .storage_probe_path = "documents/missing.md",
-        .network_service_id = network_service.id,
-        .ui_service_id = compositor_service.id,
-        .network_probe = request.network_probe,
-        .ui_probe = request.ui_probe,
-    }, &ledger, 27);
-    try std.testing.expectEqual(immutable_base.HealthFailure.storage, storage_failure.activation.failure);
-
-    try manager.beginActivation(1, 28);
-    try update_health.recordBootSuccess(&manager, 29);
-    try std.testing.expect(supervisor_instance.recordCrash(network_service.id, 30, 0xCA12));
-    const network_failure = try update_health.validatePendingActivation(&manager, &supervisor_instance, &storage, request, &ledger, 31);
-    try std.testing.expectEqual(immutable_base.HealthFailure.network, network_failure.activation.failure);
-    try std.testing.expect(supervisor_instance.markHealthy(network_service.id, 32));
-
-    try manager.beginActivation(1, 33);
-    try update_health.recordBootSuccess(&manager, 34);
-    try std.testing.expect(supervisor_instance.recordCrash(compositor_service.id, 35, 0xCA13));
-    const ui_failure = try update_health.validatePendingActivation(&manager, &supervisor_instance, &storage, request, &ledger, 36);
-    try std.testing.expectEqual(immutable_base.HealthFailure.ui, ui_failure.activation.failure);
-    try std.testing.expect(supervisor_instance.markHealthy(compositor_service.id, 37));
+    const failure_cases = [_]PendingActivationFailureCase{
+        .{
+            .expected_failure = .boot,
+            .begin_tick = 18,
+            .validation_tick = 19,
+        },
+        .{
+            .expected_failure = .core_service,
+            .begin_tick = 20,
+            .boot_success_tick = 21,
+            .crash_service_id = sync_service_record.id,
+            .crash_tick = 22,
+            .crash_reason = 0xCA11,
+            .validation_tick = 23,
+            .mark_healthy_tick = 24,
+        },
+        .{
+            .expected_failure = .storage,
+            .begin_tick = 25,
+            .boot_success_tick = 26,
+            .storage_probe_path = "documents/missing.md",
+            .validation_tick = 27,
+        },
+        .{
+            .expected_failure = .network,
+            .begin_tick = 28,
+            .boot_success_tick = 29,
+            .crash_service_id = network_service.id,
+            .crash_tick = 30,
+            .crash_reason = 0xCA12,
+            .validation_tick = 31,
+            .mark_healthy_tick = 32,
+        },
+        .{
+            .expected_failure = .ui,
+            .begin_tick = 33,
+            .boot_success_tick = 34,
+            .crash_service_id = compositor_service.id,
+            .crash_tick = 35,
+            .crash_reason = 0xCA13,
+            .validation_tick = 36,
+            .mark_healthy_tick = 37,
+        },
+    };
+    for (failure_cases) |case| {
+        try expectPendingActivationFailure(&manager, &supervisor_instance, &storage, &ledger, request, case);
+    }
 
     try manager.beginActivation(1, 38);
     try update_health.recordBootSuccess(&manager, 39);

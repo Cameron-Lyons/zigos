@@ -2,7 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const component_port = @import("../kernel_api/component_port.zig");
-const support = @import("session_manager_support.zig");
+const support = @import("../session/session_manager_support.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 
 const common = if (builtin.target.os.tag == .freestanding)

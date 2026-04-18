@@ -1,9 +1,9 @@
 const event_ledger = @import("../platform/event_ledger.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
-const support = @import("session_lifecycle_support.zig");
-const storage_scenarios = @import("session_storage_scenarios.zig");
-const sync_scenarios = @import("session_sync_scenarios.zig");
-const platform_scenarios = @import("session_platform_scenarios.zig");
+const support = @import("scenario_support.zig");
+const storage_scenarios = @import("storage_scenarios.zig");
+const sync_scenarios = @import("sync_scenarios.zig");
+const platform_scenarios = @import("platform_scenarios.zig");
 
 pub const Context = support.Context;
 
