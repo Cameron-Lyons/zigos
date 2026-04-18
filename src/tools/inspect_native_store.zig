@@ -3,19 +3,16 @@ const object_store = @import("../native/storage/object_store.zig");
 const storage_volume = @import("../native/storage/storage_volume.zig");
 const workspace = @import("../native/storage/workspace.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const io = init.io;
 
     const image_path = if (args.len > 1) args[1] else "build/native-store-smoke.img";
-    const image = try std.fs.cwd().readFileAlloc(allocator, image_path, 16 * 1024 * 1024);
+    const image = try std.Io.Dir.cwd().readFileAlloc(io, image_path, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(image);
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
 
     var store = object_store.Store.init();
     var workspaces = workspace.Directory.init();
