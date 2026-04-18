@@ -1,6 +1,6 @@
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
-const contract = @import("contract.zig");
+const contract = @import("../session/contract.zig");
 const device_inventory = @import("../drivers/device_inventory.zig");
 const immutable_base = @import("../platform/immutable_base.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
@@ -9,11 +9,11 @@ const object_store_mod = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
 const recovery_environment = @import("../platform/recovery_environment.zig");
 const signing = @import("../core/signing.zig");
-const supervisor_mod = @import("supervisor.zig");
+const supervisor_mod = @import("../session/supervisor.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
 const update_health = @import("../platform/update_health.zig");
 const workspace_mod = @import("../storage/workspace.zig");
-const support = @import("session_lifecycle_support.zig");
+const support = @import("scenario_support.zig");
 
 pub fn run(
     context: *support.Context,

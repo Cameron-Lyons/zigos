@@ -10,6 +10,7 @@ The repository-level contract for that split is the Zigos v0.1 clean-slate spec 
 - `src/kernel/boot/entry.zig`: native boot sequencing
 - `src/kernel/boot/profiles/zigos_native.zig`: only boot profile
 - `src/native/`: native principals, capabilities, task runtime, mediation, services, storage, sync, recovery, and UX
+- `src/native/demo/`: seeded bundle manifests plus explicit scenario-world/demo flows used to exercise spec stories
 - `src/native/kernel_api/syscall_surface.zig`: typed freestanding syscall entry for native kernel operations
 - `src/kernel/net/link_port.zig`: low-level packet/device transport kept below higher-level native networking policy
 - `build.zig`: native-only build graph
@@ -46,10 +47,12 @@ The repository-level contract for that split is the Zigos v0.1 clean-slate spec 
 - `src/native/sync/network_policy.zig`: explicit egress policy objects
 - `src/native/services/compatibility_environment.zig`: isolated VM/container/emulation/remote-session environments with portal-only host access
 - `src/native/session/supervisor.zig`: crash/restart tracking for restartable services
+- `src/native/demo/scenario_world.zig`: explicit scenario-world/demo orchestration kept outside the core session manager
 
 ## Verification
 
-- `./scripts/zig.sh build spec-conformance`: the full `SPEC.md` heading set, section claims, and mapped test anchors remain in sync
+- `./scripts/zig.sh build spec-tests`: the `SPEC.md` heading set, section claims, and mapped host-side test anchors remain in sync
+- `./scripts/zig.sh build spec-conformance`: `spec-tests` plus freestanding smoke verification
 - `./scripts/zig.sh build kernel`: native kernel builds
 - `./scripts/zig.sh build host-tests`: the explicit `src/native_host_test.zig` root delegates to the host suites under `src/tests/host/` without rediscovering files at runtime
 - `./scripts/zig.sh build zigos-native-smoke-test`: native bootstrap reaches the expected boot markers across two QEMU boots

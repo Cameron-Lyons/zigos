@@ -18,6 +18,26 @@ pub fn build(b: *std.Build) void {
         },
     });
     const optimize = b.standardOptimizeOption(.{});
+    const host_tests_module = b.createModule(.{
+        .root_source_file = b.path("src/native_host_test.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const host_tests = b.addTest(.{
+        .name = "native-host-tests",
+        .root_module = host_tests_module,
+    });
+    const run_host_tests = b.addRunArtifact(host_tests);
+    const spec_tests_module = b.createModule(.{
+        .root_source_file = b.path("src/zigos_spec_test.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const spec_tests = b.addTest(.{
+        .name = "zigos-spec-tests",
+        .root_module = spec_tests_module,
+    });
+    const run_spec_tests = b.addRunArtifact(spec_tests);
     const userspace_images = userspace_build.addUserspaceArtifacts(b, target, optimize);
 
     const zigos_native_kernel = kernel_build.addKernelArtifact(
@@ -101,24 +121,29 @@ pub fn build(b: *std.Build) void {
     const zigos_native_smoke_test_step = b.step("zigos-native-smoke-test", "Run the Zigos native bootstrap smoke test in QEMU");
     zigos_native_smoke_test_step.dependOn(&zigos_native_smoke_test_cmd.step);
 
-    const host_tests_cmd = b.addSystemCommand(&.{
-        "bash",
-        "scripts/run-host-tests.sh",
-    });
     const host_tests_step = b.step("host-tests", "Run host-side unit tests for native logic");
-    host_tests_step.dependOn(&host_tests_cmd.step);
+    host_tests_step.dependOn(&run_host_tests.step);
 
-    const spec_conformance_cmd = b.addSystemCommand(&.{
+    const spec_coverage_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/check_spec_coverage.py",
+    });
+    run_spec_tests.step.dependOn(&spec_coverage_cmd.step);
+    const spec_tests_step = b.step("spec-tests", "Run the spec coverage gate and native spec unit tests");
+    spec_tests_step.dependOn(&run_spec_tests.step);
+
+    const spec_smoke_cmd = b.addSystemCommand(&.{
         "bash",
-        "scripts/run-spec-conformance.sh",
+        "scripts/run-zigos-native-smoke.sh",
         zigos_native_kernel.output_path,
         "build/zigos-native-spec.log",
         shared.native_store_smoke_image_path,
     });
-    spec_conformance_cmd.step.dependOn(zigos_native_kernel.install_step);
-    spec_conformance_cmd.step.dependOn(userspace_images.step);
+    spec_smoke_cmd.step.dependOn(zigos_native_kernel.install_step);
+    spec_smoke_cmd.step.dependOn(userspace_images.step);
+    spec_smoke_cmd.step.dependOn(&run_spec_tests.step);
     const spec_conformance_step = b.step("spec-conformance", "Validate spec coverage, run native spec tests, and verify the freestanding smoke path");
-    spec_conformance_step.dependOn(&spec_conformance_cmd.step);
+    spec_conformance_step.dependOn(&spec_smoke_cmd.step);
 
     const benchmark_cmd = b.addSystemCommand(&.{
         "bash",

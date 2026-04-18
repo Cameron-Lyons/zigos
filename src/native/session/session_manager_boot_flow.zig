@@ -1,7 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
-const bootstrap_packages = @import("bootstrap_packages.zig");
+const bootstrap_packages = @import("../demo/bootstrap_packages.zig");
 const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
@@ -22,9 +22,9 @@ const principal = @import("../core/principal.zig");
 const review_component_port = @import("../policy/review_component_port.zig");
 const package_service = @import("../services/package_service.zig");
 const session_bootstrap = @import("session_bootstrap.zig");
-const session_scenario_world = @import("session_scenario_world.zig");
-const session_transport_checks = @import("session_transport_checks.zig");
-const session_permission_flows = @import("session_permission_flows.zig");
+const scenario_world = @import("../demo/scenario_world.zig");
+const transport_checks = @import("../demo/transport_checks.zig");
+const permission_flows = @import("../demo/permission_flows.zig");
 const session_service_bootstrap = @import("session_service_bootstrap.zig");
 const session_support = @import("session_manager_support.zig");
 const shared_memory_mod = @import("../kernel_api/shared_memory.zig");
@@ -510,7 +510,7 @@ fn runTransportChecks(
     state: *const BootstrapState,
     kernel_port: *component_port.KernelPort,
 ) void {
-    session_transport_checks.run(env, state, kernel_port);
+    transport_checks.run(env, state, kernel_port);
 }
 
 fn runPermissionFlows(
@@ -520,7 +520,7 @@ fn runPermissionFlows(
     review_port: *review_component_port.Port,
     policy_port: *policy_component_port.Port,
 ) NotesReviewState {
-    return session_permission_flows.run(env, state, kernel_port, review_port, policy_port);
+    return permission_flows.run(env, state, kernel_port, review_port, policy_port);
 }
 
 fn runServiceBootstrap(
@@ -538,7 +538,7 @@ fn runSessionLifecycle(
     service_bindings: *const ServiceBindings,
     notes_object_capability: capability.Capability,
 ) void {
-    var lifecycle_context = session_scenario_world.Context{
+    var lifecycle_context = scenario_world.Context{
         .runtime = &self.runtime,
         .runtime_service = &self.runtime_service,
         .supervisor = &self.supervisor,
@@ -565,7 +565,7 @@ fn runSessionLifecycle(
         .update_ledger = &self.diagnostic_ledger,
         .notes_object_capability = notes_object_capability,
     };
-    session_scenario_world.run(&lifecycle_context);
+    scenario_world.run(&lifecycle_context);
 }
 
 fn printReadyBanner() void {

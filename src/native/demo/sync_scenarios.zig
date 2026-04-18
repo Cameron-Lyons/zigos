@@ -2,7 +2,7 @@ const boot_markers = @import("../../kernel/boot/markers.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
-const support = @import("session_lifecycle_support.zig");
+const support = @import("scenario_support.zig");
 
 pub fn run(
     context: *support.Context,

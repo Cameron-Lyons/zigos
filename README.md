@@ -110,6 +110,7 @@ The main verification entrypoints are:
 
 - `./scripts/zig.sh build kernel`
 - `./scripts/zig.sh build host-tests`
+- `./scripts/zig.sh build spec-tests`
 - `./scripts/zig.sh build spec-conformance`
 - `./scripts/zig.sh build zigos-native-smoke-test`
 - `./scripts/zig.sh build benchmark`
@@ -121,6 +122,7 @@ Host-side native tests enter through `src/native_host_test.zig` and delegate to 
 - `src/main.zig`: thin kernel entry and export surface
 - `src/kernel/boot/profiles/zigos_native.zig`: only supported boot profile
 - `src/native/`: native principals, capabilities, runtime, mediation, services, storage, sync, recovery, and UX
+- `src/native/demo/`: seeded demo bundles and scenario-world flows used by explicit conformance demos
 - `src/tests/`: organized host and spec test suites, with thin root entrypoints kept at `src/*.zig`
 - `src/tools/`: Zig helper binaries that need to share the `src/` module root
 - `src/kernel/net/`: low-level networking and device transport
