@@ -704,14 +704,14 @@ fn benchmarkPackageRevision(iteration: u32) u64 {
 
     const slot = &package_context.service.slots[0];
     slot.in_use = true;
-    package_service_bundle_ops.installNew(&slot.bundle, package_bundle_v1, 1, [_]u8{0x11} ** 32, "");
+    package_service_bundle_ops.installNew(&slot.bundle, package_bundle_v1, 1, [_]u8{0x11} ** 32, "") catch unreachable;
     package_service_bundle_ops.installRevision(
         &slot.bundle,
         package_bundle_v2,
         2,
         [_]u8{0x22} ** 32,
         "schema:1->2;notes-v2-migration",
-    );
+    ) catch unreachable;
     const active = package_service_bundle_ops.resolveActiveManifest(&slot.bundle, &package_context.resolved);
     const launch_plan = package_context.service.buildLaunchPlan("app.notes") catch unreachable;
     package_service_bundle_ops.rollback(&slot.bundle);
