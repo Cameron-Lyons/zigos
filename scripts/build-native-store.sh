@@ -9,13 +9,17 @@ mkdir -p "$(dirname "$IMAGE_PATH")"
 
 bytes=$((SIZE_MIB * 1024 * 1024))
 
+file_size_bytes() {
+  stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1"
+}
+
 case "$MODE" in
   preserve)
     if [ ! -f "$IMAGE_PATH" ]; then
       truncate -s "$bytes" "$IMAGE_PATH"
       exit 0
     fi
-    current_size=$(stat -c '%s' "$IMAGE_PATH")
+    current_size=$(file_size_bytes "$IMAGE_PATH")
     if [ "$current_size" -lt "$bytes" ]; then
       truncate -s "$bytes" "$IMAGE_PATH"
     fi

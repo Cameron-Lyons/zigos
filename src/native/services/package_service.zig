@@ -273,7 +273,7 @@ pub const InstalledBundle = struct {
     }
 };
 
-pub const Error = manifest.ValidationError || error{
+pub const Error = bundle_ops.Error || error{
     BundleNotFound,
     BundleTableFull,
     InstallSourceDenied,
@@ -307,6 +307,7 @@ pub const Service = struct {
     ) Error!InstallResult {
         try manifest.validate(request.bundle);
         try manifest.validateApplicationPackaging(request.bundle);
+        try bundle_ops.validateInstallTarget(InstalledBundle, request.bundle, request.migration_manifest);
         const digest = bundle_digest.digestBundle(request.bundle);
         if (!signing.verify(request.bundle.signature, &digest)) {
             return error.InvalidManifestSignature;
@@ -351,7 +352,7 @@ pub const Service = struct {
                 migration_applied = true;
             }
 
-            bundle_ops.installRevision(
+            try bundle_ops.installRevision(
                 bundle,
                 request.bundle,
                 request.data_schema_version,
@@ -372,7 +373,7 @@ pub const Service = struct {
             if (slot.in_use) continue;
             slot.in_use = true;
             slot.bundle = zeroBundle();
-            bundle_ops.installNew(
+            try bundle_ops.installNew(
                 &slot.bundle,
                 request.bundle,
                 request.data_schema_version,
@@ -741,6 +742,49 @@ test "package service rejects invalid signatures and rollback before any update"
         .source_identity = "store:zigos",
     }, null);
     try std.testing.expectError(error.NoRollbackVersion, service.rollback("app.notes"));
+}
+
+test "package service rejects oversized manifests instead of truncating stored metadata" {
+    var service = Service.init();
+    const signer_identity = signing.SignerIdentity{
+        .label = "pkg-test-bounds",
+        .seed = [_]u8{0x36} ** 32,
+    };
+    const long_bundle_id = [_]u8{'b'} ** (MAX_LABEL_BYTES + 1);
+    const interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+        .{ .name = "zigos.object.workspace" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+    };
+
+    var bundle = manifest.BundleManifest{
+        .bundle_id = long_bundle_id[0..],
+        .display_name = "Notes",
+        .publisher = "Example Software",
+        .provided_interfaces = interfaces[0..1],
+        .consumed_interfaces = interfaces[1..2],
+        .components = &[_]manifest.ExecutionComponentDecl{
+            .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
+        },
+        .assets = &assets,
+    };
+    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+
+    try std.testing.expectError(error.BundleIdTooLong, service.install(.{
+        .bundle = bundle,
+        .source_identity = "store:zigos",
+    }, null));
+
+    const long_migration_manifest = [_]u8{'m'} ** (MAX_LABEL_BYTES + 1);
+    bundle.bundle_id = "app.notes";
+    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+    try std.testing.expectError(error.MigrationManifestTooLong, service.install(.{
+        .bundle = bundle,
+        .source_identity = "store:zigos",
+        .migration_manifest = long_migration_manifest[0..],
+    }, null));
 }
 
 test "package service treats lease and target scope changes as declared permission changes" {
