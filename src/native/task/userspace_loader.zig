@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
+const native_util = @import("../core/util.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const elf_image_inspector = @import("elf_image_inspector.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -12,7 +13,10 @@ pub const MAX_IMAGES: usize = 24;
 const MAX_BUNDLE_ID_BYTES: usize = 64;
 const MAX_DISPLAY_NAME_BYTES: usize = 48;
 const MAX_PUBLISHER_BYTES: usize = 48;
+const MAX_LABEL_BYTES: usize = 48;
+const MAX_ENTRY_BYTES: usize = 64;
 const MAX_IMAGE_HASH_BYTES: usize = 32;
+const copyTextExact = native_util.copyTextExact;
 
 pub const Error = manifest.ValidationError || component_port.Error || task_runtime.Error || elf_image_inspector.Error || error{
     EmptyLabel,
@@ -26,6 +30,8 @@ pub const Error = manifest.ValidationError || component_port.Error || task_runti
     ImageConflict,
     ImageNotFound,
     ImageTableFull,
+    InitialComponentEntryTooLong,
+    InitialComponentLabelTooLong,
     MissingBundleComponent,
     MissingBundleSignature,
     InvalidBundleSignature,
@@ -101,9 +107,9 @@ pub const ImageRecord = struct {
     publisher_len: usize,
     publisher: [MAX_PUBLISHER_BYTES]u8,
     label_len: usize,
-    label: [48]u8,
+    label: [MAX_LABEL_BYTES]u8,
     entry_len: usize,
-    entry: [64]u8,
+    entry: [MAX_ENTRY_BYTES]u8,
 
     pub fn bundleIdSlice(self: *const ImageRecord) []const u8 {
         return self.bundle_id[0..self.bundle_id_len];
@@ -232,6 +238,7 @@ pub const Catalog = struct {
     ) Error!*const ImageRecord {
         try manifest.validate(request.bundle);
         try manifest.validateApplicationPackaging(request.bundle);
+        try validateStoredMetadata(request.bundle, request.initial_component);
         if (request.initial_component.label.len == 0) return error.EmptyLabel;
         if (request.initial_component.entry.len == 0) return error.EmptyEntry;
         try validateExecutableBundle(request.bundle, request.initial_component, embedded != null);
@@ -265,11 +272,11 @@ pub const Catalog = struct {
             image.file_sha256 = executable_image.file_sha256;
             image.executable_image = executable_image;
             image.elf_bytes = elf_bytes;
-            image.bundle_id_len = copyTruncated(image.bundle_id[0..], request.bundle.bundle_id);
-            image.display_name_len = copyTruncated(image.display_name[0..], request.bundle.display_name);
-            image.publisher_len = copyTruncated(image.publisher[0..], request.bundle.publisher);
-            image.label_len = copyTruncated(image.label[0..], request.initial_component.label);
-            image.entry_len = copyTruncated(image.entry[0..], request.initial_component.entry);
+            image.bundle_id_len = copyTextExact(image.bundle_id[0..], request.bundle.bundle_id) catch return error.BundleIdTooLong;
+            image.display_name_len = copyTextExact(image.display_name[0..], request.bundle.display_name) catch return error.DisplayNameTooLong;
+            image.publisher_len = copyTextExact(image.publisher[0..], request.bundle.publisher) catch return error.PublisherTooLong;
+            image.label_len = copyTextExact(image.label[0..], request.initial_component.label) catch return error.InitialComponentLabelTooLong;
+            image.entry_len = copyTextExact(image.entry[0..], request.initial_component.entry) catch return error.InitialComponentEntryTooLong;
 
             slot.in_use = true;
             slot.image = image;
@@ -355,9 +362,9 @@ fn zeroImage() ImageRecord {
         .publisher_len = 0,
         .publisher = [_]u8{0} ** MAX_PUBLISHER_BYTES,
         .label_len = 0,
-        .label = [_]u8{0} ** 48,
+        .label = [_]u8{0} ** MAX_LABEL_BYTES,
         .entry_len = 0,
-        .entry = [_]u8{0} ** 64,
+        .entry = [_]u8{0} ** MAX_ENTRY_BYTES,
     };
 }
 
@@ -403,10 +410,22 @@ fn componentAbiVersion(substrate: task_runtime.ExecutionSubstrate) u16 {
     };
 }
 
-fn copyTruncated(buffer: []u8, source: []const u8) usize {
-    const len = @min(buffer.len - 1, source.len);
-    @memcpy(buffer[0..len], source[0..len]);
-    return len;
+fn validateStoredMetadata(
+    bundle: manifest.BundleManifest,
+    initial_component: task_runtime.ExecutionComponentSpec,
+) Error!void {
+    if (bundle.bundle_id.len > arrayFieldLen(ImageRecord, "bundle_id")) return error.BundleIdTooLong;
+    if (bundle.display_name.len > arrayFieldLen(ImageRecord, "display_name")) return error.DisplayNameTooLong;
+    if (bundle.publisher.len > arrayFieldLen(ImageRecord, "publisher")) return error.PublisherTooLong;
+    if (initial_component.label.len > arrayFieldLen(ImageRecord, "label")) return error.InitialComponentLabelTooLong;
+    if (initial_component.entry.len > arrayFieldLen(ImageRecord, "entry")) return error.InitialComponentEntryTooLong;
+}
+
+fn arrayFieldLen(comptime T: type, comptime field_name: []const u8) usize {
+    return switch (@typeInfo(@FieldType(T, field_name))) {
+        .array => |array| array.len,
+        else => @compileError("userspace_loader metadata fields must be fixed-size arrays"),
+    };
 }
 
 fn syntheticExecutableImage(request: ImageRegisterRequest) task_runtime.ExecutableImageSpec {
@@ -653,6 +672,48 @@ test "catalog stores embedded elf metadata for registered userspace artifacts" {
     try std.testing.expectEqual(@as(u32, 15), image.heartbeat_increment);
 }
 
+test "catalog preserves exact-limit identity and component labels without truncation" {
+    var catalog = Catalog.init();
+    const bundle_id = [_]u8{'b'} ** MAX_BUNDLE_ID_BYTES;
+    const display_name = [_]u8{'d'} ** MAX_DISPLAY_NAME_BYTES;
+    const entry = [_]u8{'e'} ** MAX_ENTRY_BYTES;
+    const label = [_]u8{'l'} ** MAX_LABEL_BYTES;
+    const interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+        .{ .name = "zigos.object.workspace" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/default/icon.svg", .content_type = "image/svg+xml" },
+    };
+
+    var bundle = manifest.BundleManifest{
+        .bundle_id = bundle_id[0..],
+        .display_name = display_name[0..],
+        .publisher = "zigos.dev",
+        .provided_interfaces = interfaces[0..1],
+        .consumed_interfaces = interfaces[1..2],
+        .components = &[_]manifest.ExecutionComponentDecl{
+            .{ .id = "main", .entry = entry[0..] },
+        },
+        .assets = &assets,
+    };
+    bundle.signature = try userspace_manifest_signing.signBundle(bundle);
+
+    const image = try catalog.register(.{
+        .bundle = bundle,
+        .component_class = .app_component,
+        .initial_component = .{
+            .label = label[0..],
+            .entry = entry[0..],
+        },
+    });
+
+    try std.testing.expectEqualStrings(bundle_id[0..], image.bundleIdSlice());
+    try std.testing.expectEqualStrings(display_name[0..], image.displayNameSlice());
+    try std.testing.expectEqualStrings(label[0..], image.labelSlice());
+    try std.testing.expectEqualStrings(entry[0..], image.entrySlice());
+}
+
 test "catalog rejects unsigned bundles and missing declared components for userspace launch" {
     var catalog = Catalog.init();
     const interfaces = [_]manifest.InterfaceDecl{
@@ -722,6 +783,30 @@ test "catalog rejects unsigned bundles and missing declared components for users
         .initial_component = .{
             .label = "main",
             .entry = "app.mismatch.main",
+        },
+    }));
+
+    const long_label = [_]u8{'l'} ** (MAX_LABEL_BYTES + 1);
+    try std.testing.expectError(error.InitialComponentLabelTooLong, catalog.register(.{
+        .bundle = blk: {
+            var bundle = manifest.BundleManifest{
+                .bundle_id = "app.long-label",
+                .display_name = "Long Label",
+                .publisher = "zigos.dev",
+                .provided_interfaces = interfaces[0..1],
+                .consumed_interfaces = interfaces[1..2],
+                .components = &[_]manifest.ExecutionComponentDecl{
+                    .{ .id = "main", .entry = "app.long-label" },
+                },
+                .assets = &assets,
+            };
+            bundle.signature = try userspace_manifest_signing.signBundle(bundle);
+            break :blk bundle;
+        },
+        .component_class = .app_component,
+        .initial_component = .{
+            .label = long_label[0..],
+            .entry = "app.long-label",
         },
     }));
 }

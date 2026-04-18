@@ -1,7 +1,17 @@
+const std = @import("std");
+
+pub const CopyTextExactError = error{DestinationTooSmall};
+
 pub fn copyText(dest: []u8, src: []const u8) usize {
     const len = @min(dest.len, src.len);
     @memcpy(dest[0..len], src[0..len]);
     return len;
+}
+
+pub fn copyTextExact(dest: []u8, src: []const u8) CopyTextExactError!usize {
+    if (src.len > dest.len) return error.DestinationTooSmall;
+    @memcpy(dest[0..src.len], src);
+    return src.len;
 }
 
 pub fn fnv1a64(bytes: []const u8) u64 {
@@ -31,4 +41,12 @@ pub fn fnv1a64AppendU64LittleEndian(hash: u64, value: u64) u64 {
         remaining >>= 8;
     }
     return next;
+}
+
+test "copyTextExact rejects undersized destinations and preserves exact lengths" {
+    var buffer = [_]u8{0} ** 4;
+
+    try std.testing.expectEqual(@as(usize, 4), try copyTextExact(&buffer, "zigo"));
+    try std.testing.expectEqualStrings("zigo", &buffer);
+    try std.testing.expectError(error.DestinationTooSmall, copyTextExact(buffer[0..3], "zigo"));
 }
