@@ -4,14 +4,28 @@ inputs:
   zig-version:
     description: Zig version to install
     required: false
-    default: "0.15.2"
+    default: ""
 runs:
   using: composite
   steps:
+    - name: Resolve Zig version
+      id: resolve-zig-version
+      shell: bash
+      run: |
+        version="${{ inputs.zig-version }}"
+        if [ -z "${version}" ]; then
+          version="$(awk '$1 == "zig" { print $2; exit }' .tool-versions)"
+        fi
+        if [ -z "${version}" ]; then
+          echo "Unable to resolve Zig version from input or .tool-versions" >&2
+          exit 1
+        fi
+        echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
     - name: Install Zig
       uses: goto-bus-stop/setup-zig@v2
       with:
-        version: ${{ inputs.zig-version }}
+        version: ${{ steps.resolve-zig-version.outputs.version }}
 
     - name: Install build dependencies
       shell: bash
