@@ -115,15 +115,15 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
     };
 
     var grants_buffer: [permission_review.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
-    const grants = permission_review.decisionsToGrants(bundle, &decisions, 50, &grants_buffer);
+    const grants = permission_review.decisionsToGrants(&bundle, &decisions, 50, &grants_buffer);
     try std.testing.expectEqual(@as(usize, 2), grants.len);
     try std.testing.expect(grants[0].local_only);
     try std.testing.expectEqual(@as(?u64, 250), grants[0].expires_at_ticks);
     try std.testing.expectEqual(@as(?u64, 80), grants[1].expires_at_ticks);
 
-    var review_session = permission_review.initSession(app_task.id, bundle, &decisions);
+    var review_session = permission_review.initSession(app_task.id, &bundle, &decisions);
     var summary_buffer: [2048]u8 = undefined;
-    const rendered_summary = try permission_review.renderToBuffer(&summary_buffer, &review_session, bundle);
+    const rendered_summary = try permission_review.renderToBuffer(&summary_buffer, &review_session, &bundle);
     try expectContains(rendered_summary, "Permission review for Trip Planner [app.trip]");
     try expectContains(rendered_summary, "requested lease: 400 ticks");
     try expectContains(rendered_summary, "decision: allow local_only=yes lease=200 ticks");

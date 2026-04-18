@@ -39,6 +39,10 @@ const FileBridgeContext = struct {
     authority: capability.Capability = zeroCapability(),
 };
 
+const PermissionReviewContext = struct {
+    decisions: [2]permission_review.ReviewDecision = undefined,
+};
+
 const NetworkPolicyContext = struct {
     directory: network_policy.Directory = network_policy.Directory.init(),
     policy_id: u64 = 0,
@@ -263,6 +267,7 @@ var permission_review_grants: [permission_review.MAX_REVIEW_DECISIONS]policy_med
 var event_ledger_buffer: [2048]u8 = undefined;
 
 var file_bridge_context = FileBridgeContext{};
+var permission_review_context = PermissionReviewContext{};
 var network_policy_context = NetworkPolicyContext{};
 var background_context = BackgroundContext{};
 var workspace_commit_context = WorkspaceCommitContext{};
@@ -272,11 +277,8 @@ var indexing_context = IndexingContext{};
 var media_context = MediaContext{};
 var compatibility_context = CompatibilityContext{};
 var event_ledger_context = EventLedgerContext{};
-var fixtures_prepared = false;
 
 pub fn run() noreturn {
-    prepareFixtures();
-
     console.print("Running native spec-aligned benchmarks...\n");
     console.print(boot_markers.bench_start);
     console.print("\n");
@@ -293,12 +295,11 @@ pub fn run() noreturn {
 }
 
 fn prepareFixtures() void {
-    if (fixtures_prepared) return;
     prepareFileBridgeFixture();
+    preparePermissionReviewFixture();
     prepareNetworkPolicyFixture();
     prepareWorkspaceCommitFixture();
     prepareTaskCheckpointFixture();
-    fixtures_prepared = true;
 }
 
 fn prepareFileBridgeFixture() void {
@@ -351,6 +352,19 @@ fn prepareNetworkPolicyFixture() void {
         .attested = true,
         .peer_root_digest_present = true,
         .peer_root_digest = digest,
+    };
+}
+
+fn preparePermissionReviewFixture() void {
+    permission_review_context.decisions = .{
+        permission_review.decisionFromCommand(
+            permission_review_requests[0],
+            permission_review.parseCommand("allow local lease=200") catch unreachable,
+        ),
+        permission_review.decisionFromCommand(
+            permission_review_requests[1],
+            permission_review.parseCommand("allow lease=30") catch unreachable,
+        ),
     };
 }
 
@@ -446,6 +460,8 @@ fn prepareTaskCheckpointFixture() void {
 }
 
 fn runCase(case: BenchmarkCase) u64 {
+    // Benchmark cases mutate shared fixtures, so rebuild them before each case.
+    prepareFixtures();
     var checksum: u64 = 0;
     const start = x86.rdtsc();
     var iteration: u32 = 0;
@@ -531,20 +547,19 @@ fn benchmarkCapabilityDerive(iteration: u32) u64 {
 }
 
 fn benchmarkPermissionReviewRender(iteration: u32) u64 {
-    const decision_a = permission_review.decisionFromCommand(
-        permission_review_requests[0],
-        permission_review.parseCommand("allow local lease=200") catch unreachable,
+    const session = permission_review.initSession(
+        200 + iteration,
+        &permission_review_bundle,
+        permission_review_context.decisions[0..],
     );
-    const decision_b = permission_review.decisionFromCommand(
-        permission_review_requests[1],
-        permission_review.parseCommand("allow lease=30") catch unreachable,
-    );
-    const decisions = [_]permission_review.ReviewDecision{ decision_a, decision_b };
-    var session = permission_review.initSession(200 + iteration, permission_review_bundle, &decisions);
-    const rendered = permission_review.renderToBuffer(&permission_review_buffer, &session, permission_review_bundle) catch unreachable;
+    const rendered = permission_review.renderToBuffer(
+        &permission_review_buffer,
+        &session,
+        &permission_review_bundle,
+    ) catch unreachable;
     const grants = permission_review.decisionsToGrants(
-        permission_review_bundle,
-        &decisions,
+        &permission_review_bundle,
+        permission_review_context.decisions[0..],
         50 + iteration,
         &permission_review_grants,
     );
@@ -665,7 +680,8 @@ fn benchmarkFileBridgeResolve(iteration: u32) u64 {
 }
 
 fn benchmarkWorkspaceCommitOverlay(iteration: u32) u64 {
-    var directory = workspace_commit_context.baseline;
+    prepareWorkspaceCommitFixture();
+    const directory = &workspace_commit_context.baseline;
     const workspace_id = workspace_commit_context.workspace_id;
 
     directory.beginTransaction(workspace_id) catch unreachable;

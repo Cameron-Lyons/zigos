@@ -36,7 +36,7 @@ pub const ReviewSession = struct {
     decisions: [MAX_REVIEW_DECISIONS]ReviewDecision,
 };
 
-pub fn initSession(task_id: u64, bundle: manifest.BundleManifest, decisions: []const ReviewDecision) ReviewSession {
+pub fn initSession(task_id: u64, bundle: *const manifest.BundleManifest, decisions: []const ReviewDecision) ReviewSession {
     var session = ReviewSession{
         .task_id = task_id,
         .bundle_id = bundle.bundle_id,
@@ -54,7 +54,7 @@ pub fn initSession(task_id: u64, bundle: manifest.BundleManifest, decisions: []c
 pub fn renderToBuffer(
     buffer: []u8,
     session: *const ReviewSession,
-    bundle: manifest.BundleManifest,
+    bundle: *const manifest.BundleManifest,
 ) ![]const u8 {
     var used: usize = 0;
 
@@ -74,7 +74,7 @@ pub fn renderToBuffer(
 pub fn renderRequestToBuffer(
     buffer: []u8,
     session: *const ReviewSession,
-    bundle: manifest.BundleManifest,
+    bundle: *const manifest.BundleManifest,
     request_index: usize,
 ) RenderError![]const u8 {
     if (request_index >= bundle.requested_permissions.len) {
@@ -87,7 +87,7 @@ pub fn renderRequestToBuffer(
 }
 
 pub fn decisionsToGrants(
-    bundle: manifest.BundleManifest,
+    bundle: *const manifest.BundleManifest,
     decisions: []const ReviewDecision,
     now_ticks: u64,
     output: *[MAX_REVIEW_DECISIONS]policy_mediation.UserGrant,
@@ -187,7 +187,7 @@ fn appendRequest(
     buffer: []u8,
     used: *usize,
     session: *const ReviewSession,
-    bundle: manifest.BundleManifest,
+    bundle: *const manifest.BundleManifest,
     request: manifest.PermissionRequest,
     index: usize,
 ) !void {
@@ -205,7 +205,7 @@ fn appendRequest(
         yesNo(request.local_only),
     });
     if (request.kind == .background_execution) {
-        if (manifest.findBackgroundTask(bundle, request.resource)) |task| {
+        if (manifest.findBackgroundTask(bundle.*, request.resource)) |task| {
             try appendFmt(buffer, used, "    trigger: {s}\n", .{backgroundTriggerLabel(task.trigger)});
             try appendFmt(buffer, used, "    expected duration: {d} seconds\n", .{task.expected_duration_seconds});
             try appendFmt(buffer, used, "    budget: cpu={d} memory={d} shared_memory={d}\n", .{
@@ -373,7 +373,7 @@ test "decisionsToGrants clamps lease duration to the manifest request" {
         },
     };
     var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
-    const grants = decisionsToGrants(bundle, &decisions, 10, &grants_buffer);
+    const grants = decisionsToGrants(&bundle, &decisions, 10, &grants_buffer);
 
     try std.testing.expectEqual(@as(usize, 1), grants.len);
     try std.testing.expect(grants[0].local_only);
@@ -415,10 +415,10 @@ test "renderToBuffer includes bundle name, permission labels, and decisions" {
             .allow = false,
         },
     };
-    const session = initSession(3, bundle, &decisions);
+    const session = initSession(3, &bundle, &decisions);
 
     var buffer: [2048]u8 = undefined;
-    const rendered = try renderToBuffer(&buffer, &session, bundle);
+    const rendered = try renderToBuffer(&buffer, &session, &bundle);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Permission review for Notes") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Object access") != null);
@@ -455,10 +455,10 @@ test "renderRequestToBuffer marks undecided requests as pending" {
         .publisher = "zigos.dev",
         .requested_permissions = &permissions,
     };
-    const session = initSession(4, bundle, &.{});
+    const session = initSession(4, &bundle, &.{});
 
     var buffer: [512]u8 = undefined;
-    const rendered = try renderRequestToBuffer(&buffer, &session, bundle, 0);
+    const rendered = try renderRequestToBuffer(&buffer, &session, &bundle, 0);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Network egress") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "decision: pending") != null);
@@ -499,9 +499,9 @@ test "renderToBuffer labels expanded location contacts screen capture and notifi
     const decisions = [_]ReviewDecision{
         .{ .kind = .location, .resource = "location.current", .allow = true },
     };
-    const session = initSession(44, bundle, &decisions);
+    const session = initSession(44, &bundle, &decisions);
     var buffer: [1024]u8 = undefined;
-    const rendered = try renderToBuffer(&buffer, &session, bundle);
+    const rendered = try renderToBuffer(&buffer, &session, &bundle);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Location") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Contacts") != null);
