@@ -5,7 +5,7 @@ const kernel_build = @import("build_support/kernel.zig");
 const userspace_build = @import("build_support/userspace.zig");
 
 pub const BootProfile = shared.BootProfile;
-const required_zig_version = "0.15.2";
+const required_zig_version = "0.16.0";
 
 pub fn build(b: *std.Build) void {
     enforceZigVersion();

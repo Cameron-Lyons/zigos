@@ -629,23 +629,23 @@ const PersistentEventRecord = extern struct {
     fn intoEvent(self: PersistentEventRecord) Error!PersistentEvent {
         var event = zeroPersistentEvent();
         event.sequence = self.sequence;
-        event.kind = std.meta.intToEnum(EventKind, self.kind) catch return error.CorruptState;
+        event.kind = std.enums.fromInt(EventKind, self.kind) orelse return error.CorruptState;
         event.tick = self.tick;
         event.subject = .{
-            .kind = std.meta.intToEnum(principal.PrincipalKind, self.subject_kind) catch return error.CorruptState,
+            .kind = std.enums.fromInt(principal.PrincipalKind, self.subject_kind) orelse return error.CorruptState,
             .serial = self.subject_serial,
         };
         event.task_id = self.task_id;
         event.workspace_id = self.workspace_id;
         event.related_id = self.related_id;
         event.detail_code = self.detail_code;
-        event.service_class = std.meta.intToEnum(contract.ServiceClass, self.service_class) catch return error.CorruptState;
+        event.service_class = std.enums.fromInt(contract.ServiceClass, self.service_class) orelse return error.CorruptState;
         event.permission_kind = if (self.permission_kind == permission_kind_none)
             null
         else
-            (std.meta.intToEnum(manifest.PermissionKind, self.permission_kind) catch return error.CorruptState);
+            (std.enums.fromInt(manifest.PermissionKind, self.permission_kind) orelse return error.CorruptState);
         event.allowed = (self.flags & (1 << 0)) != 0;
-        event.denial_reason = std.meta.intToEnum(abi.DenialReason, self.denial_reason) catch return error.CorruptState;
+        event.denial_reason = std.enums.fromInt(abi.DenialReason, self.denial_reason) orelse return error.CorruptState;
         event.user_approval_can_resolve = (self.flags & (1 << 1)) != 0;
         event.retry_safe = (self.flags & (1 << 2)) != 0;
         event.detail_protected = (self.flags & (1 << 3)) != 0;
@@ -697,7 +697,7 @@ fn yesNo(value: bool) []const u8 {
 }
 
 fn updateFailureLabel(code: u32) []const u8 {
-    const failure = std.meta.intToEnum(immutable_base.HealthFailure, @as(u8, @intCast(code))) catch return "corrupt";
+    const failure = std.enums.fromInt(immutable_base.HealthFailure, @as(u8, @intCast(code))) orelse return "corrupt";
     return @tagName(failure);
 }
 
