@@ -28,7 +28,7 @@ Everything above that layer is modeled as a native service boundary under `src/n
 
 Use the pinned Zig toolchain and repo entrypoints:
 
-- Zig `0.15.2` exactly
+- Zig `0.16.0` exactly
 - `nasm`
 - `qemu-system-x86_64`
 - Python 3 for spec coverage checks
@@ -41,7 +41,7 @@ For ISO and disk-image workflows, install the full set verified by `scripts/setu
 - `dosfstools`
 - `e2fsprogs`
 
-The repo includes both `.tool-versions` and `mise.toml` pins. `build.zig` rejects any Zig version other than `0.15.2`.
+The repo includes both `.tool-versions` and `mise.toml` pins. `build.zig` rejects any Zig version other than `0.16.0`.
 
 ## Setup
 
@@ -59,7 +59,7 @@ That script supports:
 All repo Zig commands should go through `./scripts/zig.sh`. It resolves the pinned Zig version in this order:
 
 1. `ZIG_BIN`
-2. active `zig` if it is `0.15.2`
+2. active `zig` if it is `0.16.0`
 3. `mise`
 4. repo-local fallback binaries if present
 
