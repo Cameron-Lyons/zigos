@@ -162,9 +162,9 @@ pub const Service = struct {
             if (decision_count >= decisions.len) break;
 
             self.presentReviewRequest(review_window_id, bundle, request);
-            const session = permission_review.initSession(app_task_id, bundle, decisions[0..decision_count]);
+            const session = permission_review.initSession(app_task_id, &bundle, decisions[0..decision_count]);
             var prompt_buffer: [512]u8 = undefined;
-            const prompt = permission_review.renderRequestToBuffer(&prompt_buffer, &session, bundle, index) catch unreachable;
+            const prompt = permission_review.renderRequestToBuffer(&prompt_buffer, &session, &bundle, index) catch unreachable;
             console.print(prompt);
             console.print("    command: allow [local] [lease=<ticks>] | deny\n");
 
@@ -183,14 +183,14 @@ pub const Service = struct {
             }
         }
 
-        const reviewed_session = permission_review.initSession(app_task_id, bundle, decisions[0..decision_count]);
+        const reviewed_session = permission_review.initSession(app_task_id, &bundle, decisions[0..decision_count]);
         var review_buffer: [2048]u8 = undefined;
-        const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, bundle) catch unreachable;
+        const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, &bundle) catch unreachable;
         console.print(rendered);
         common.printBootMarker(boot_markers.permission_ui_review_rendered);
 
         const grants = permission_review.decisionsToGrants(
-            bundle,
+            &bundle,
             reviewed_session.decisions[0..reviewed_session.decision_count],
             now_ticks,
             output,
