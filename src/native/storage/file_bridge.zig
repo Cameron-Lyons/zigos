@@ -81,9 +81,11 @@ pub const Bridge = struct {
     ) Error!View {
         const normalized_path = normalizePath(request.path);
         const entry = self.resolve_entry(self.context, request.workspace_id, normalized_path) catch return error.PathNotFound;
-        const authority = self.capability_table.query(authority_capability_id) orelse return error.CapabilityNotFound;
-
-        if (!self.capability_table.isUsable(authority, now_ticks)) return error.CapabilityRevoked;
+        const authority = self.capability_table.requireUsable(authority_capability_id, now_ticks) catch |err| switch (err) {
+            error.CapabilityNotFound => return error.CapabilityNotFound,
+            error.CapabilityRevoked => return error.CapabilityRevoked,
+            else => unreachable,
+        };
         if (!authority.holder.eql(requester)) return error.PermissionDenied;
         if (authority.scope.workspace_id) |workspace_id| {
             if (workspace_id != request.workspace_id) return error.WorkspaceScopeViolation;
