@@ -157,6 +157,7 @@ pub const Error = error{
 const CapabilitySlot = struct {
     in_use: bool = false,
     capability: Capability = zeroCapability(),
+    target_generation_index: u8 = 0,
 };
 
 const TargetGeneration = struct {
@@ -175,7 +176,7 @@ pub const CapabilityTable = struct {
     }
 
     pub fn mint(self: *CapabilityTable, request: MintRequest) Error!Capability {
-        const generation = try self.ensureTargetGeneration(request.target);
+        const target_generation_index = try self.ensureTargetGenerationIndex(request.target);
         return self.insert(.{
             .id = self.allocateCapabilityId(),
             .holder = request.holder,
@@ -184,14 +185,15 @@ pub const CapabilityTable = struct {
             .rights = request.rights,
             .scope = request.scope,
             .lease = request.lease,
-            .revocation_generation = generation,
+            .revocation_generation = self.targetGenerationAt(target_generation_index).generation,
             .audit = request.audit,
-        });
+        }, target_generation_index);
     }
 
     pub fn derive(self: *CapabilityTable, request: DeriveRequest) Error!Capability {
-        const parent = self.query(request.parent_capability_id) orelse return error.CapabilityNotFound;
-        if (!self.isUsable(parent, request.lease.issued_at_ticks)) return error.CapabilityRevoked;
+        const parent_slot = self.findConstSlot(request.parent_capability_id) orelse return error.CapabilityNotFound;
+        const parent = &parent_slot.capability;
+        if (!self.isUsableSlot(parent_slot, request.lease.issued_at_ticks)) return error.CapabilityRevoked;
         if (!parent.rights.capability_derive) return error.RightsEscalation;
         if (!parent.rights.containsAll(request.rights)) return error.RightsEscalation;
         if (!request.scope.isSubsetOf(parent.scope)) return error.ScopeEscalation;
@@ -207,12 +209,13 @@ pub const CapabilityTable = struct {
             .lease = request.lease,
             .revocation_generation = parent.revocation_generation,
             .audit = request.audit,
-        });
+        }, parent_slot.target_generation_index);
     }
 
     pub fn pass(self: *CapabilityTable, request: PassRequest) Error!Capability {
-        const original = self.query(request.capability_id) orelse return error.CapabilityNotFound;
-        if (!self.isUsable(original, request.now_ticks)) return error.CapabilityRevoked;
+        const original_slot = self.findConstSlot(request.capability_id) orelse return error.CapabilityNotFound;
+        const original = &original_slot.capability;
+        if (!self.isUsableSlot(original_slot, request.now_ticks)) return error.CapabilityRevoked;
         if (!original.rights.capability_pass) return error.RightsEscalation;
         const next_scope = request.scope orelse original.scope;
         if (!scopeIsPassCompatible(next_scope, original.scope)) return error.ScopeEscalation;
@@ -227,7 +230,7 @@ pub const CapabilityTable = struct {
             .lease = original.lease,
             .revocation_generation = original.revocation_generation,
             .audit = request.audit,
-        });
+        }, original_slot.target_generation_index);
 
         if (request.revoke_source) {
             const source_slot = self.findSlot(request.capability_id) orelse return error.CapabilityNotFound;
@@ -239,9 +242,9 @@ pub const CapabilityTable = struct {
 
     pub fn revoke(self: *CapabilityTable, capability_id: u64) Error!void {
         const slot = self.findSlot(capability_id) orelse return error.CapabilityNotFound;
-        const target = slot.capability.target;
+        const target_generation_index = slot.target_generation_index;
         slot.in_use = false;
-        try self.bumpTargetGeneration(target);
+        self.targetGenerationAtMut(target_generation_index).generation += 1;
     }
 
     pub fn query(self: *const CapabilityTable, capability_id: u64) ?Capability {
@@ -264,9 +267,9 @@ pub const CapabilityTable = struct {
     }
 
     pub fn requireUsable(self: *const CapabilityTable, capability_id: u64, now_ticks: u64) Error!*const Capability {
-        const capability_ref = self.queryRef(capability_id) orelse return error.CapabilityNotFound;
-        if (!self.isUsableRef(capability_ref, now_ticks)) return error.CapabilityRevoked;
-        return capability_ref;
+        const slot = self.findConstSlot(capability_id) orelse return error.CapabilityNotFound;
+        if (!self.isUsableSlot(slot, now_ticks)) return error.CapabilityRevoked;
+        return &slot.capability;
     }
 
     fn allocateCapabilityId(self: *CapabilityTable) u64 {
@@ -274,11 +277,12 @@ pub const CapabilityTable = struct {
         return self.next_capability_id;
     }
 
-    fn insert(self: *CapabilityTable, capability: Capability) Error!Capability {
+    fn insert(self: *CapabilityTable, capability: Capability, target_generation_index: u8) Error!Capability {
         for (&self.slots) |*slot| {
             if (slot.in_use) continue;
             slot.in_use = true;
             slot.capability = capability;
+            slot.target_generation_index = target_generation_index;
             return capability;
         }
         return error.TableFull;
@@ -298,30 +302,33 @@ pub const CapabilityTable = struct {
         return null;
     }
 
-    fn ensureTargetGeneration(self: *CapabilityTable, target: CapabilityTarget) Error!u32 {
-        for (&self.target_generations) |*entry| {
-            if (entry.in_use and entry.target.eql(target)) return entry.generation;
+    fn isUsableSlot(self: *const CapabilityTable, slot: *const CapabilitySlot, now_ticks: u64) bool {
+        return slot.capability.lease.isActive(now_ticks) and
+            self.targetGenerationAt(slot.target_generation_index).generation == slot.capability.revocation_generation;
+    }
+
+    fn ensureTargetGenerationIndex(self: *CapabilityTable, target: CapabilityTarget) Error!u8 {
+        for (&self.target_generations, 0..) |*entry, index| {
+            if (entry.in_use and entry.target.eql(target)) return @intCast(index);
         }
 
-        for (&self.target_generations) |*entry| {
+        for (&self.target_generations, 0..) |*entry, index| {
             if (entry.in_use) continue;
             entry.in_use = true;
             entry.target = target;
             entry.generation = 1;
-            return entry.generation;
+            return @intCast(index);
         }
 
         return error.TargetTableFull;
     }
 
-    fn bumpTargetGeneration(self: *CapabilityTable, target: CapabilityTarget) Error!void {
-        for (&self.target_generations) |*entry| {
-            if (entry.in_use and entry.target.eql(target)) {
-                entry.generation += 1;
-                return;
-            }
-        }
-        return error.TargetTableFull;
+    fn targetGenerationAt(self: *const CapabilityTable, target_generation_index: u8) *const TargetGeneration {
+        return &self.target_generations[target_generation_index];
+    }
+
+    fn targetGenerationAtMut(self: *CapabilityTable, target_generation_index: u8) *TargetGeneration {
+        return &self.target_generations[target_generation_index];
     }
 
     fn currentTargetGeneration(self: *const CapabilityTable, target: CapabilityTarget) u32 {
