@@ -245,16 +245,28 @@ pub const CapabilityTable = struct {
     }
 
     pub fn query(self: *const CapabilityTable, capability_id: u64) ?Capability {
-        for (self.slots) |slot| {
-            if (slot.in_use and slot.capability.id == capability_id) {
-                return slot.capability;
-            }
-        }
-        return null;
+        const capability_ref = self.queryRef(capability_id) orelse return null;
+        return capability_ref.*;
+    }
+
+    pub fn queryRef(self: *const CapabilityTable, capability_id: u64) ?*const Capability {
+        const slot = self.findConstSlot(capability_id) orelse return null;
+        return &slot.capability;
     }
 
     pub fn isUsable(self: *const CapabilityTable, capability: Capability, now_ticks: u64) bool {
-        return capability.lease.isActive(now_ticks) and self.currentTargetGeneration(capability.target) == capability.revocation_generation;
+        return self.isUsableRef(&capability, now_ticks);
+    }
+
+    pub fn isUsableRef(self: *const CapabilityTable, capability: *const Capability, now_ticks: u64) bool {
+        return capability.lease.isActive(now_ticks) and
+            self.currentTargetGeneration(capability.target) == capability.revocation_generation;
+    }
+
+    pub fn requireUsable(self: *const CapabilityTable, capability_id: u64, now_ticks: u64) Error!*const Capability {
+        const capability_ref = self.queryRef(capability_id) orelse return error.CapabilityNotFound;
+        if (!self.isUsableRef(capability_ref, now_ticks)) return error.CapabilityRevoked;
+        return capability_ref;
     }
 
     fn allocateCapabilityId(self: *CapabilityTable) u64 {
@@ -273,6 +285,13 @@ pub const CapabilityTable = struct {
     }
 
     fn findSlot(self: *CapabilityTable, capability_id: u64) ?*CapabilitySlot {
+        for (&self.slots) |*slot| {
+            if (slot.in_use and slot.capability.id == capability_id) return slot;
+        }
+        return null;
+    }
+
+    fn findConstSlot(self: *const CapabilityTable, capability_id: u64) ?*const CapabilitySlot {
         for (&self.slots) |*slot| {
             if (slot.in_use and slot.capability.id == capability_id) return slot;
         }
