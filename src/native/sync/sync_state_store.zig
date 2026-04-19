@@ -64,8 +64,12 @@ pub fn persist(
     const chunk_count = @divFloor(encoded_len + object_store.MAX_PAYLOAD_BYTES - 1, object_store.MAX_PAYLOAD_BYTES);
     if (chunk_count == 0 or chunk_count > state_support.max_state_chunks) return error.StateTooLarge;
 
-    const tick = resident.nextPersistTick();
-    try storage.beginTransaction(workspace_id);
+    var chunk_dirty: [state_support.max_state_chunks]bool = [_]bool{false} ** state_support.max_state_chunks;
+    var chunk_version_ids: [state_support.max_state_chunks]u64 = [_]u64{0} ** state_support.max_state_chunks;
+    var removed_chunk_paths: [state_support.max_state_chunks][workspace.MAX_ENTRY_PATH_BYTES]u8 =
+        [_][workspace.MAX_ENTRY_PATH_BYTES]u8{[_]u8{0} ** workspace.MAX_ENTRY_PATH_BYTES} ** state_support.max_state_chunks;
+    var removed_chunk_path_lens: [state_support.max_state_chunks]usize = [_]usize{0} ** state_support.max_state_chunks;
+    var has_chunk_changes = false;
 
     var chunk_index: usize = 0;
     while (chunk_index < chunk_count) : (chunk_index += 1) {
@@ -78,31 +82,28 @@ pub fn persist(
             error.EntryNotFound => null,
             else => return err,
         };
-        const result = try storage.putVersion(.{
-            .preferred_object_id = state_support.chunkObjectId(chunk_index),
-            .object_type = .blob,
-            .payload = payload,
-            .metadata = object_store.signMetadata(
-                state_support.state_signer,
-                path,
-                "application/zigos-sync-chunk",
-                .blob,
-                payload,
-                tick,
-            ) catch return error.StateSigningFailed,
-            .parent_version_id = if (existing_entry) |entry| entry.version_id else null,
-        });
-        try storage.stagePut(workspace_id, path, result.object_id, result.version_id, .blob);
+        if (existing_entry) |entry| {
+            chunk_version_ids[chunk_index] = entry.version_id;
+            const existing_version = storage.version(entry.version_id) orelse return error.CorruptState;
+            if (std.mem.eql(u8, existing_version.payloadSlice(), payload)) continue;
+        }
+
+        chunk_dirty[chunk_index] = true;
+        has_chunk_changes = true;
     }
 
     chunk_index = chunk_count;
     while (chunk_index < state_support.max_state_chunks) : (chunk_index += 1) {
         var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
         const path = try state_support.chunkPath(path_buffer[0..], chunk_index);
-        storage.stageDelete(workspace_id, path) catch |err| switch (err) {
-            error.EntryNotFound => {},
+        const existing_entry = storage.resolve(workspace_id, path) catch |err| switch (err) {
+            error.EntryNotFound => null,
             else => return err,
         };
+        if (existing_entry == null) continue;
+        removed_chunk_path_lens[chunk_index] = path.len;
+        @memcpy(removed_chunk_paths[chunk_index][0..path.len], path);
+        has_chunk_changes = true;
     }
 
     var index_payload: [object_store.MAX_PAYLOAD_BYTES]u8 = undefined;
@@ -116,20 +117,68 @@ pub fn persist(
         error.EntryNotFound => null,
         else => return err,
     };
-    const index_result = try storage.putVersion(.{
-        .preferred_object_id = state_support.indexObjectId(),
-        .object_type = .document,
-        .payload = index_bytes,
-        .metadata = object_store.signMetadata(
-            state_support.state_signer,
-            state_support.state_index_path,
-            "application/zigos-sync-index",
-            .document,
-            index_bytes,
-            tick,
-        ) catch return error.StateSigningFailed,
-        .parent_version_id = if (existing_index) |entry| entry.version_id else null,
-    });
-    try storage.stagePut(workspace_id, state_support.state_index_path, index_result.object_id, index_result.version_id, .document);
+
+    const index_dirty = blk: {
+        if (existing_index) |entry| {
+            const version = storage.version(entry.version_id) orelse return error.CorruptState;
+            break :blk !std.mem.eql(u8, version.payloadSlice(), index_bytes);
+        }
+        break :blk true;
+    };
+    if (!has_chunk_changes and !index_dirty) return;
+
+    const tick = resident.nextPersistTick();
+    try storage.beginTransaction(workspace_id);
+
+    chunk_index = 0;
+    while (chunk_index < chunk_count) : (chunk_index += 1) {
+        if (!chunk_dirty[chunk_index]) continue;
+
+        const start = chunk_index * object_store.MAX_PAYLOAD_BYTES;
+        const end = @min(start + object_store.MAX_PAYLOAD_BYTES, encoded_len);
+        const payload = encoded[start..end];
+        var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+        const path = try state_support.chunkPath(path_buffer[0..], chunk_index);
+        const result = try storage.putVersion(.{
+            .preferred_object_id = state_support.chunkObjectId(chunk_index),
+            .object_type = .blob,
+            .payload = payload,
+            .metadata = object_store.signMetadata(
+                state_support.state_signer,
+                path,
+                "application/zigos-sync-chunk",
+                .blob,
+                payload,
+                tick,
+            ) catch return error.StateSigningFailed,
+            .parent_version_id = if (chunk_version_ids[chunk_index] != 0) chunk_version_ids[chunk_index] else null,
+        });
+        try storage.stagePut(workspace_id, path, result.object_id, result.version_id, .blob);
+    }
+
+    chunk_index = chunk_count;
+    while (chunk_index < state_support.max_state_chunks) : (chunk_index += 1) {
+        if (removed_chunk_path_lens[chunk_index] == 0) continue;
+        try storage.stageDelete(workspace_id, removed_chunk_paths[chunk_index][0..removed_chunk_path_lens[chunk_index]]);
+    }
+
+    if (index_dirty) {
+        const index_result = try storage.putVersion(.{
+            .preferred_object_id = state_support.indexObjectId(),
+            .object_type = .document,
+            .payload = index_bytes,
+            .metadata = object_store.signMetadata(
+                state_support.state_signer,
+                state_support.state_index_path,
+                "application/zigos-sync-index",
+                .document,
+                index_bytes,
+                tick,
+            ) catch return error.StateSigningFailed,
+            .parent_version_id = if (existing_index) |entry| entry.version_id else null,
+        });
+        try storage.stagePut(workspace_id, state_support.state_index_path, index_result.object_id, index_result.version_id, .document);
+    }
+
     _ = try storage.commit(workspace_id, tick);
 }
