@@ -35,8 +35,10 @@ const FileBridgeContext = struct {
     expected_version_id: u64 = 0,
     entry: workspace.Entry = .{},
     version_present: bool = false,
+    capability_table: capability.CapabilityTable = capability.CapabilityTable.init(),
     bridge: ?file_bridge.Bridge = null,
-    authority: capability.Capability = zeroCapability(),
+    authority_capability_id: u64 = 0,
+    requester: principal.PrincipalId = .{ .kind = .app, .serial = 0 },
 };
 
 const PermissionReviewContext = struct {
@@ -303,6 +305,7 @@ fn prepareFixtures() void {
 }
 
 fn prepareFileBridgeFixture() void {
+    file_bridge_context.capability_table = capability.CapabilityTable.init();
     file_bridge_context.expected_workspace_id = 41;
     file_bridge_context.expected_path = "documents/plan.md";
     file_bridge_context.expected_version_id = 901;
@@ -313,9 +316,7 @@ fn prepareFileBridgeFixture() void {
         .document,
     );
     file_bridge_context.version_present = true;
-    file_bridge_context.bridge = file_bridge.Bridge.init(&file_bridge_context, resolveBridgeEntry, bridgeHasVersion);
-    file_bridge_context.authority = .{
-        .id = 1,
+    const authority = file_bridge_context.capability_table.mint(.{
         .holder = app(1),
         .issuer = policyAuthority(1),
         .target = .{ .kind = .object, .id = 900 },
@@ -330,9 +331,16 @@ fn prepareFileBridgeFixture() void {
             .issued_at_ticks = 0,
             .expires_at_ticks = std.math.maxInt(u64),
         },
-        .revocation_generation = 1,
         .audit = .{},
-    };
+    }) catch unreachable;
+    file_bridge_context.bridge = file_bridge.Bridge.init(
+        &file_bridge_context,
+        &file_bridge_context.capability_table,
+        resolveBridgeEntry,
+        bridgeHasVersion,
+    );
+    file_bridge_context.authority_capability_id = authority.id;
+    file_bridge_context.requester = authority.holder;
 }
 
 fn prepareNetworkPolicyFixture() void {
@@ -675,7 +683,7 @@ fn benchmarkFileBridgeResolve(iteration: u32) u64 {
         .workspace_id = file_bridge_context.expected_workspace_id,
         .path = if ((iteration & 1) == 0) "/documents/plan.md" else "documents/plan.md",
         .access = .read,
-    }, file_bridge_context.authority, 30 + iteration) catch unreachable;
+    }, file_bridge_context.requester, file_bridge_context.authority_capability_id, 30 + iteration) catch unreachable;
     return view.object_id + view.version_id + view.path_len + @intFromBool(view.readable);
 }
 
@@ -864,21 +872,4 @@ fn device(serial: u64) principal.PrincipalId {
 
 fn policyAuthority(serial: u64) principal.PrincipalId {
     return .{ .kind = .policy_authority, .serial = serial };
-}
-
-fn zeroCapability() capability.Capability {
-    return .{
-        .id = 0,
-        .holder = .{ .kind = .service, .serial = 0 },
-        .issuer = .{ .kind = .service, .serial = 0 },
-        .target = .{ .kind = .object, .id = 0 },
-        .rights = .{},
-        .scope = .{},
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = 0,
-        },
-        .revocation_generation = 0,
-        .audit = .{},
-    };
 }
