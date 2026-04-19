@@ -335,16 +335,16 @@ pub const AddressSpaceSlot = struct {
 };
 
 pub const Snapshot = struct {
-    next_task_id: u64,
-    next_process_id: u64,
-    next_address_space_id: u64,
-    next_namespace_id: u64,
-    next_component_id: u64,
-    task_index_slots: [INDEX_CAPACITY]IdIndexSlot,
-    address_space_index_slots: [INDEX_CAPACITY]IdIndexSlot,
-    tasks: [MAX_TASKS]TaskSlot,
-    task_cold: [MAX_TASKS]TaskColdRecord,
-    address_spaces: [MAX_TASKS]AddressSpaceSlot,
+    next_task_id: u64 = 1,
+    next_process_id: u64 = 1,
+    next_address_space_id: u64 = 1,
+    next_namespace_id: u64 = 1,
+    next_component_id: u64 = 1,
+    task_count: usize = 0,
+    tasks: [MAX_TASKS]TaskSlot = [_]TaskSlot{TaskSlot{}} ** MAX_TASKS,
+    task_cold: [MAX_TASKS]TaskColdRecord = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
+    address_space_count: usize = 0,
+    address_spaces: [MAX_TASKS]AddressSpaceSlot = [_]AddressSpaceSlot{AddressSpaceSlot{}} ** MAX_TASKS,
 };
 
 const detached_task_cold = zeroTaskCold();

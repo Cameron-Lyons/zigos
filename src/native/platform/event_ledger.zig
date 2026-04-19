@@ -94,6 +94,7 @@ pub const Ledger = struct {
     },
     workspace_id: u64 = 0,
     loaded_existing_state: bool = false,
+    header_version_id: u64 = 0,
     next_sequence: u64 = 1,
     events: [MAX_EVENTS]EventSlot = [_]EventSlot{EventSlot{}} ** MAX_EVENTS,
 
@@ -355,44 +356,37 @@ pub const Ledger = struct {
             slot.event = event;
             slot.event.sequence = self.next_sequence;
             self.next_sequence += 1;
-            try self.persist(event.tick);
+            try self.persist(slot.event);
             return;
         }
         return error.EventTableFull;
     }
 
-    fn persist(self: *Ledger, tick: u64) Error!void {
+    fn persist(self: *Ledger, latest_event: Event) Error!void {
         const storage = self.storage orelse return;
-        var recent: [MAX_PERSISTED_EVENTS]PersistentEvent = [_]PersistentEvent{zeroPersistentEvent()} ** MAX_PERSISTED_EVENTS;
-        const recent_events = self.recentEventsForPersistence(&recent);
-
         var header = PersistentHeader{ .next_sequence = self.next_sequence };
         const header_payload = std.mem.asBytes(&header);
-        const existing_header = storage.resolve(self.workspace_id, state_entry_path) catch |err| switch (err) {
-            error.EntryNotFound => null,
-            else => return err,
+        const previous_header_version_id = if (self.header_version_id != 0)
+            self.header_version_id
+        else blk: {
+            const existing_header = storage.resolve(self.workspace_id, state_entry_path) catch |err| switch (err) {
+                error.EntryNotFound => break :blk 0,
+                else => return err,
+            };
+            break :blk existing_header.version_id;
         };
 
         try storage.beginTransaction(self.workspace_id);
-        const existing_entries = storage.entries(self.workspace_id) catch &.{};
-
-        var persisted_paths: [MAX_PERSISTED_EVENTS][workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
-        var persisted_path_lens: [MAX_PERSISTED_EVENTS]usize = [_]usize{0} ** MAX_PERSISTED_EVENTS;
-        for (recent_events, 0..) |event, index| {
-            persisted_path_lens[index] = try writeEventEntryPath(&persisted_paths[index], event.sequence);
-        }
-
-        for (existing_entries) |entry| {
-            if (!std.mem.startsWith(u8, entry.pathSlice(), event_entry_prefix)) continue;
-            var keep_entry = false;
-            for (persisted_path_lens, 0..) |path_len, index| {
-                if (path_len == 0) continue;
-                if (std.mem.eql(u8, entry.pathSlice(), persisted_paths[index][0..path_len])) {
-                    keep_entry = true;
-                    break;
-                }
-            }
-            if (!keep_entry) try storage.stageDelete(self.workspace_id, entry.pathSlice());
+        if (latest_event.sequence > MAX_PERSISTED_EVENTS) {
+            var expired_path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+            const expired_path = expired_path_buffer[0..try writeEventEntryPath(
+                &expired_path_buffer,
+                latest_event.sequence - MAX_PERSISTED_EVENTS,
+            )];
+            storage.stageDelete(self.workspace_id, expired_path) catch |err| switch (err) {
+                error.EntryNotFound => {},
+                else => return err,
+            };
         }
 
         const header_result = try storage.putVersion(.{
@@ -405,50 +399,46 @@ pub const Ledger = struct {
                 "application/zigos-event-ledger",
                 .document,
                 header_payload,
-                tick,
+                latest_event.tick,
             ),
-            .parent_version_id = if (existing_header) |entry| entry.version_id else null,
+            .parent_version_id = if (previous_header_version_id != 0) previous_header_version_id else null,
         });
         try storage.stagePut(self.workspace_id, state_entry_path, header_result.object_id, header_result.version_id, .document);
+        self.header_version_id = header_result.version_id;
 
-        for (recent_events, 0..) |event, index| {
-            const path = persisted_paths[index][0..persisted_path_lens[index]];
-            const existing_event = storage.resolve(self.workspace_id, path) catch |err| switch (err) {
-                error.EntryNotFound => null,
-                else => return err,
-            };
-            if (existing_event != null) continue;
+        var event_path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+        const event_path = event_path_buffer[0..try writeEventEntryPath(&event_path_buffer, latest_event.sequence)];
+        var payload_record = PersistentEventRecord.fromEvent(PersistentEvent.fromEvent(latest_event));
+        const payload = std.mem.asBytes(&payload_record);
+        const result = try storage.putVersion(.{
+            .preferred_object_id = eventObjectId(latest_event.sequence),
+            .object_type = .document,
+            .payload = payload,
+            .metadata = try object_store.signMetadata(
+                self.state_signer,
+                "event-ledger-entry",
+                "application/zigos-event-ledger-entry",
+                .document,
+                payload,
+                latest_event.tick,
+            ),
+            .parent_version_id = null,
+        });
+        try storage.stagePut(self.workspace_id, event_path, result.object_id, result.version_id, .document);
 
-            var payload_record = PersistentEventRecord.fromEvent(event);
-            const payload = std.mem.asBytes(&payload_record);
-            const result = try storage.putVersion(.{
-                .preferred_object_id = eventObjectId(event.sequence),
-                .object_type = .document,
-                .payload = payload,
-                .metadata = try object_store.signMetadata(
-                    self.state_signer,
-                    "event-ledger-entry",
-                    "application/zigos-event-ledger-entry",
-                    .document,
-                    payload,
-                    tick,
-                ),
-                .parent_version_id = if (existing_event) |entry| entry.version_id else null,
-            });
-            try storage.stagePut(self.workspace_id, path, result.object_id, result.version_id, .document);
-        }
-
-        _ = try storage.commit(self.workspace_id, tick);
+        _ = try storage.commit(self.workspace_id, latest_event.tick);
     }
 
     fn loadPersistedEvents(self: *Ledger) Error!void {
         const storage = self.storage orelse return;
         self.events = [_]EventSlot{EventSlot{}} ** MAX_EVENTS;
         self.next_sequence = 1;
+        self.header_version_id = 0;
 
         if (storage.resolve(self.workspace_id, state_entry_path)) |entry| {
             const version = storage.version(entry.version_id) orelse return error.CorruptState;
             self.next_sequence = try parseHeader(version.payloadSlice());
+            self.header_version_id = entry.version_id;
         } else |err| switch (err) {
             error.EntryNotFound => return,
             else => return err,

@@ -329,10 +329,9 @@ pub const Directory = struct {
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
         if (workspace.transaction_open) return error.TransactionAlreadyOpen;
         workspace.transaction_open = true;
-        clearEntries(&workspace.staged_entries);
         workspace.staged_entry_count = 0;
         workspace.staged_effective_entry_count = workspace.entry_count;
-        rebuildStagedEntryIndex(workspace);
+        workspace.staged_entry_index_slots = emptyEntryIndexTable();
     }
 
     pub fn stagePut(
@@ -405,10 +404,8 @@ pub const Directory = struct {
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
         if (!workspace.transaction_open) return error.NoActiveTransaction;
 
-        recordDeletedEntries(workspace);
-        applyTransactionOverlay(workspace);
+        applyTransactionDelta(workspace);
         clearTransactionState(workspace);
-        rebuildWorkspaceEntryIndex(workspace);
         workspace.generation += 1;
         return workspace.generation;
     }
@@ -1118,12 +1115,36 @@ fn applyTransactionOverlay(workspace: *WorkspaceRecord) void {
     copyEntries(workspace.entries[0..next_count], next_entries[0..next_count]);
 }
 
+fn applyTransactionDelta(workspace: *WorkspaceRecord) void {
+    var staged_index: usize = 0;
+    while (staged_index < workspace.staged_entry_count) : (staged_index += 1) {
+        const staged_entry = workspace.staged_entries[staged_index];
+        const path = staged_entry.pathSlice();
+
+        if (isDeleteTombstone(staged_entry)) {
+            const existing_index = findWorkspaceEntryIndex(workspace, path) orelse continue;
+            appendDeleted(workspace, workspace.entries[existing_index]);
+            removeEntry(&workspace.entries, &workspace.entry_count, existing_index);
+            rebuildWorkspaceEntryIndex(workspace);
+            continue;
+        }
+
+        if (findWorkspaceEntryIndex(workspace, path)) |existing_index| {
+            workspace.entries[existing_index] = staged_entry;
+            continue;
+        }
+
+        workspace.entries[workspace.entry_count] = staged_entry;
+        entryIndexInsert(&workspace.entry_index_slots, path, workspace.entry_count);
+        workspace.entry_count += 1;
+    }
+}
+
 fn clearTransactionState(workspace: *WorkspaceRecord) void {
     workspace.transaction_open = false;
-    clearEntries(&workspace.staged_entries);
     workspace.staged_entry_count = 0;
     workspace.staged_effective_entry_count = 0;
-    rebuildStagedEntryIndex(workspace);
+    workspace.staged_entry_index_slots = emptyEntryIndexTable();
 }
 
 test "workspace transactions, snapshot restore, delete recovery, and signed export import work" {

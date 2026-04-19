@@ -75,8 +75,6 @@ pub fn installNew(
     bundle.next_revision_id = 2;
     bundle.active_revision_slot = 0;
     bundle.rollback_revision_slot = null;
-    bundle.revisions[0] = .{};
-    bundle.revisions[1] = .{};
     try writeRevision(&bundle.revisions[0], source, data_schema_version, permission_digest, 1);
     bundle.last_migration_manifest_len = copyTextExact(&bundle.last_migration_manifest, migration_manifest) catch return error.MigrationManifestTooLong;
 }
@@ -92,7 +90,6 @@ pub fn installRevision(
     try validateInstallTarget(BundleType, source, migration_manifest);
 
     const target_slot = bundle.inactiveRevisionSlot();
-    bundle.revisions[target_slot] = .{};
     try writeRevision(&bundle.revisions[target_slot], source, data_schema_version, permission_digest, bundle.next_revision_id);
     bundle.next_revision_id += 1;
     if (bundle.revision_count == 0) {

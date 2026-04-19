@@ -52,6 +52,7 @@ const saturatingSub = model.saturatingSub;
 const emptyIndexTable = model.emptyIndexTable;
 const zeroTaskCold = model.zeroTaskCold;
 const resetTaskCold = model.resetTaskCold;
+const copyTaskCold = model.copyTaskCold;
 const copyTaskColdStates = model.copyTaskColdStates;
 const bindTaskColdStates = model.bindTaskColdStates;
 const copySlots = model.copySlots;
@@ -86,18 +87,7 @@ pub const Runtime = struct {
     }
 
     pub fn initSnapshot() Snapshot {
-        return .{
-            .next_task_id = 1,
-            .next_process_id = 1,
-            .next_address_space_id = 1,
-            .next_namespace_id = 1,
-            .next_component_id = 1,
-            .task_index_slots = emptyIndexTable(INDEX_CAPACITY),
-            .address_space_index_slots = emptyIndexTable(INDEX_CAPACITY),
-            .tasks = [_]TaskSlot{TaskSlot{}} ** MAX_TASKS,
-            .task_cold = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
-            .address_spaces = [_]AddressSpaceSlot{AddressSpaceSlot{}} ** MAX_TASKS,
-        };
+        return Snapshot{};
     }
 
     pub fn writeSnapshot(self: *const Runtime, out: *Snapshot) void {
@@ -106,27 +96,45 @@ pub const Runtime = struct {
         out.next_address_space_id = self.next_address_space_id;
         out.next_namespace_id = self.next_namespace_id;
         out.next_component_id = self.next_component_id;
-        copySlots(IdIndexSlot, out.task_index_slots[0..], self.task_index_slots[0..]);
-        copySlots(IdIndexSlot, out.address_space_index_slots[0..], self.address_space_index_slots[0..]);
-        copySlots(TaskSlot, out.tasks[0..], self.tasks[0..]);
-        // Keep the cold-state copy out of line; freestanding i386 ReleaseFast traps if this path is inlined.
-        @call(.never_inline, copyTaskColdStates, .{ self.tasks[0..], out.task_cold[0..], self.task_cold[0..] });
-        bindTaskColdStates(out.tasks[0..], out.task_cold[0..]);
-        copySlots(AddressSpaceSlot, out.address_spaces[0..], self.address_spaces[0..]);
+        out.task_count = 0;
+        for (self.tasks, 0..) |slot, slot_index| {
+            if (!slot.in_use) continue;
+            const dense_index = out.task_count;
+            out.tasks[dense_index] = slot;
+            copyTaskCold(&out.task_cold[dense_index], &self.task_cold[slot_index]);
+            out.task_count += 1;
+        }
+        bindTaskColdStates(out.tasks[0..out.task_count], out.task_cold[0..out.task_count]);
+
+        out.address_space_count = 0;
+        for (self.address_spaces) |slot| {
+            if (!slot.in_use) continue;
+            out.address_spaces[out.address_space_count] = slot;
+            out.address_space_count += 1;
+        }
     }
 
     pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) void {
+        self.* = Runtime.init();
         self.next_task_id = state.next_task_id;
         self.next_process_id = state.next_process_id;
         self.next_address_space_id = state.next_address_space_id;
         self.next_namespace_id = state.next_namespace_id;
         self.next_component_id = state.next_component_id;
-        copySlots(IdIndexSlot, self.task_index_slots[0..], state.task_index_slots[0..]);
-        copySlots(IdIndexSlot, self.address_space_index_slots[0..], state.address_space_index_slots[0..]);
-        copySlots(TaskSlot, self.tasks[0..], state.tasks[0..]);
-        @call(.never_inline, copyTaskColdStates, .{ self.tasks[0..], self.task_cold[0..], state.task_cold[0..] });
-        bindTaskColdStates(self.tasks[0..], self.task_cold[0..]);
-        copySlots(AddressSpaceSlot, self.address_spaces[0..], state.address_spaces[0..]);
+
+        var task_index: usize = 0;
+        while (task_index < state.task_count) : (task_index += 1) {
+            self.tasks[task_index] = state.tasks[task_index];
+            copyTaskCold(&self.task_cold[task_index], &state.task_cold[task_index]);
+            self.tasks[task_index].task.cold_state = &self.task_cold[task_index];
+            indexInsert(INDEX_CAPACITY, &self.task_index_slots, self.tasks[task_index].task.id, task_index);
+        }
+
+        var address_space_index: usize = 0;
+        while (address_space_index < state.address_space_count) : (address_space_index += 1) {
+            self.address_spaces[address_space_index] = state.address_spaces[address_space_index];
+            self.noteAddressSpaceInstalled(self.address_spaces[address_space_index].address_space.id, address_space_index);
+        }
     }
 
     pub fn createTask(self: *Runtime, request: TaskCreateRequest) Error!*TaskRecord {
