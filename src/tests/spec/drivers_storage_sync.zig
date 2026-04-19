@@ -12,6 +12,7 @@ const sync_service = @import("../../native/sync/sync_service.zig");
 const workspace = @import("../../native/storage/workspace.zig");
 
 pub fn publishedDriversActivateScopedTransports() !void {
+    var capabilities = capability.CapabilityTable.init();
     const FakeNetworkDevice = struct {
         var activation_count: usize = 0;
 
@@ -97,30 +98,60 @@ pub fn publishedDriversActivateScopedTransports() !void {
     ));
 
     var directory = driver_service.Directory.init();
+    const network_authority = try spec_support.driverAuthority(
+        &capabilities,
+        spec_support.service(91),
+        901,
+        network_device_id,
+        .network_adapter,
+    );
     const network_driver = try directory.register(.{
         .service_id = 91,
         .owner_task_id = 901,
         .device_id = network_device_id,
         .device_class = .network_adapter,
-        .authority = spec_support.driverAuthority(spec_support.service(91), 501, 901, network_device_id, .network_adapter),
+        .authority_capability_id = network_authority.id,
+        .capability_table = &capabilities,
+        .requester = network_authority.holder,
+        .now_ticks = 1,
         .bundle = bundle,
         .bootstrap_transport = .kernel_published_data_plane,
     });
+    const storage_authority = try spec_support.driverAuthority(
+        &capabilities,
+        spec_support.service(92),
+        902,
+        storage_device_id,
+        .storage_controller,
+    );
     const storage_driver = try directory.register(.{
         .service_id = 92,
         .owner_task_id = 902,
         .device_id = storage_device_id,
         .device_class = .storage_controller,
-        .authority = spec_support.driverAuthority(spec_support.service(92), 502, 902, storage_device_id, .storage_controller),
+        .authority_capability_id = storage_authority.id,
+        .capability_table = &capabilities,
+        .requester = storage_authority.holder,
+        .now_ticks = 1,
         .bundle = bundle,
         .bootstrap_transport = .kernel_published_data_plane,
     });
+    const graphics_authority = try spec_support.driverAuthority(
+        &capabilities,
+        spec_support.service(93),
+        903,
+        0x1234_1111_0001,
+        .graphics_adapter,
+    );
     const graphics_driver = try directory.register(.{
         .service_id = 93,
         .owner_task_id = 903,
         .device_id = 0x1234_1111_0001,
         .device_class = .graphics_adapter,
-        .authority = spec_support.driverAuthority(spec_support.service(93), 503, 903, 0x1234_1111_0001, .graphics_adapter),
+        .authority_capability_id = graphics_authority.id,
+        .capability_table = &capabilities,
+        .requester = graphics_authority.holder,
+        .now_ticks = 1,
         .bundle = bundle,
     });
 
@@ -166,6 +197,8 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     const storage_signer = spec_support.signer("spec.storage", 0x31);
 
     var storage = storage_service.Service.initWithStore(500, 50, storage_owner, &storage_checkpoint_store);
+    var bridge_capabilities = capability.CapabilityTable.init();
+    storage.bindCapabilityTable(&bridge_capabilities);
     const draft_v1 = try storage.putVersion(.{
         .preferred_object_id = 1_000,
         .object_type = .document,
@@ -209,8 +242,7 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     const imported_entry = try storage.resolve(imported.id, "documents/report.md");
     try std.testing.expectEqual(draft_v1.version_id, imported_entry.version_id);
 
-    const workspace_capability = capability.Capability{
-        .id = 1,
+    const workspace_capability = try bridge_capabilities.mint(.{
         .holder = writer,
         .issuer = spec_support.policyAuthority(1),
         .target = .{ .kind = .workspace, .id = workspace_record.id },
@@ -228,14 +260,13 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
             .issued_at_ticks = 0,
             .expires_at_ticks = 100,
         },
-        .revocation_generation = 1,
         .audit = .{},
-    };
+    });
     const view = try storage.bridgeResolve(.{
         .workspace_id = workspace_record.id,
         .path = "/documents/report.md",
         .access = .read,
-    }, workspace_capability, 8);
+    }, workspace_capability.holder, workspace_capability.id, 8);
     try std.testing.expect(!view.authoritative);
     try std.testing.expect(view.readable);
     try std.testing.expect(view.writable);

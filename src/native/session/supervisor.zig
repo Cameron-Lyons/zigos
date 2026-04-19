@@ -371,14 +371,13 @@ fn defaultDriverRestartDetail(device_class: driver_service.DeviceClass) []const 
 }
 
 fn driverAuthority(
+    capability_table: *capability.CapabilityTable,
     holder: principal.PrincipalId,
-    capability_id: u64,
     task_id: u64,
     device_id: u64,
     device_class: driver_service.DeviceClass,
-) capability.Capability {
-    return .{
-        .id = capability_id,
+) !capability.Capability {
+    return capability_table.mint(.{
         .holder = holder,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = driver_service.authorityTarget(device_id),
@@ -393,9 +392,8 @@ fn driverAuthority(
             .expires_at_ticks = std.math.maxInt(u64),
             .renewable = true,
         },
-        .revocation_generation = 1,
         .audit = .{},
-    };
+    });
 }
 
 test "supervisor registers services using the contract boundary map" {
@@ -472,6 +470,7 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
     try std.testing.expect(supervisor.markHealthy(storage.id, 1));
 
     var directory = driver_service.Directory.init();
+    var capabilities = capability.CapabilityTable.init();
     const bundle = manifest.BundleManifest{
         .bundle_id = "svc.driver.runtime",
         .display_name = "Driver Runtime",
@@ -481,20 +480,40 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
             .signer = "zigos-driver-key",
         },
     };
+    const graphics_authority = try driverAuthority(
+        &capabilities,
+        compositor.owner,
+        401,
+        0x1234_1111_0001,
+        .graphics_adapter,
+    );
     const graphics_driver = try directory.register(.{
         .service_id = compositor.id,
         .owner_task_id = 401,
         .device_id = 0x1234_1111_0001,
         .device_class = .graphics_adapter,
-        .authority = driverAuthority(compositor.owner, 501, 401, 0x1234_1111_0001, .graphics_adapter),
+        .authority_capability_id = graphics_authority.id,
+        .capability_table = &capabilities,
+        .requester = graphics_authority.holder,
+        .now_ticks = 1,
         .bundle = bundle,
     });
+    const storage_authority = try driverAuthority(
+        &capabilities,
+        storage.owner,
+        402,
+        0x0000_1F00_0001,
+        .storage_controller,
+    );
     _ = try directory.register(.{
         .service_id = storage.id,
         .owner_task_id = 402,
         .device_id = 0x0000_1F00_0001,
         .device_class = .storage_controller,
-        .authority = driverAuthority(storage.owner, 502, 402, 0x0000_1F00_0001, .storage_controller),
+        .authority_capability_id = storage_authority.id,
+        .capability_table = &capabilities,
+        .requester = storage_authority.holder,
+        .now_ticks = 1,
         .bundle = bundle,
     });
 
@@ -521,7 +540,7 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
     try std.testing.expectEqual(@as(u32, 2), graphics_driver.restart_generation);
     try std.testing.expectEqual(notification_center.Reason.driver_restart, notifications.latestVisible(20).?.reason);
     try std.testing.expectEqual(contract.ServiceClass.compositor_ui_session, ledger.latestKind(.process_crash).?.service_class);
-    try std.testing.expectEqual(@as(u64, 501), ledger.latestKind(.driver_restart).?.related_id);
+    try std.testing.expectEqual(graphics_authority.id, ledger.latestKind(.driver_restart).?.related_id);
     try std.testing.expectEqual(ServiceState.healthy, storage.state);
     try std.testing.expectEqual(@as(u32, 1), directory.findByService(storage.id).?.restart_generation);
 }

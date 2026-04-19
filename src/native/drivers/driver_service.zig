@@ -1,6 +1,7 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const manifest = @import("../policy/manifest.zig");
+const principal = @import("../core/principal.zig");
 
 pub const MAX_DRIVER_SERVICES: usize = 8;
 
@@ -67,7 +68,10 @@ pub const RegistrationRequest = struct {
     owner_task_id: u64,
     device_id: u64,
     device_class: DeviceClass,
-    authority: capability.Capability,
+    authority_capability_id: u64,
+    capability_table: *const capability.CapabilityTable,
+    requester: principal.PrincipalId,
+    now_ticks: u64,
     bundle: manifest.BundleManifest,
     bootstrap_transport: BootstrapTransport = .none,
     require_iommu: bool = true,
@@ -78,19 +82,26 @@ pub const SignedRegistrationRequest = struct {
     owner_task_id: u64,
     device_id: u64,
     device_class: DeviceClass,
-    authority: capability.Capability,
+    authority_capability_id: u64,
+    capability_table: *const capability.CapabilityTable,
+    requester: principal.PrincipalId,
+    now_ticks: u64,
     signer: []const u8,
     bootstrap_transport: BootstrapTransport = .none,
     require_iommu: bool = true,
 };
 
 pub const Error = error{
+    CapabilityNotFound,
+    CapabilityRevoked,
     DriverTableFull,
     DuplicateServiceId,
     DuplicateDeviceBinding,
     InvalidBundleSignature,
     InvalidAuthorityTarget,
     AuthorityRightsEscalation,
+    AuthorityHolderMismatch,
+    AuthorityScopeViolation,
     InvalidBootstrapTransport,
     IommuRequired,
 };
@@ -114,7 +125,10 @@ pub const Directory = struct {
             .owner_task_id = request.owner_task_id,
             .device_id = request.device_id,
             .device_class = request.device_class,
-            .authority = request.authority,
+            .authority_capability_id = request.authority_capability_id,
+            .capability_table = request.capability_table,
+            .requester = request.requester,
+            .now_ticks = request.now_ticks,
             .signer = request.bundle.signature.signer,
             .bootstrap_transport = request.bootstrap_transport,
             .require_iommu = request.require_iommu,
@@ -122,12 +136,18 @@ pub const Directory = struct {
     }
 
     pub fn registerSigned(self: *Directory, request: SignedRegistrationRequest) Error!*DriverRecord {
+        const authority = request.capability_table.query(request.authority_capability_id) orelse return error.CapabilityNotFound;
         if (request.signer.len == 0) return error.InvalidBundleSignature;
         if (!request.require_iommu) return error.IommuRequired;
-        if (request.authority.target.kind != .device or request.authority.target.id != request.device_id) {
+        if (!request.capability_table.isUsable(authority, request.now_ticks)) return error.CapabilityRevoked;
+        if (!authority.holder.eql(request.requester)) return error.AuthorityHolderMismatch;
+        if (authority.scope.task_id) |task_id| {
+            if (task_id != request.owner_task_id) return error.AuthorityScopeViolation;
+        }
+        if (authority.target.kind != .device or authority.target.id != request.device_id) {
             return error.InvalidAuthorityTarget;
         }
-        if (!rightsAreSubset(request.authority.rights, allowedRightsFor(request.device_class))) {
+        if (!rightsAreSubset(authority.rights, allowedRightsFor(request.device_class))) {
             return error.AuthorityRightsEscalation;
         }
         if (request.bootstrap_transport == .kernel_published_data_plane and
@@ -153,7 +173,7 @@ pub const Directory = struct {
                 .owner_task_id = request.owner_task_id,
                 .device_id = request.device_id,
                 .device_class = request.device_class,
-                .authority_capability_id = request.authority.id,
+                .authority_capability_id = authority.id,
                 .restart_generation = 1,
                 .bootstrap_transport = request.bootstrap_transport,
                 .dma_domain_id = self.allocateDmaDomainId(),
@@ -293,6 +313,7 @@ fn zeroDriver() DriverRecord {
 
 test "driver services require signed least-privilege device authority" {
     var directory = Directory.init();
+    var capabilities = capability.CapabilityTable.init();
     const bundle = manifest.BundleManifest{
         .bundle_id = "svc.net.driver",
         .display_name = "Network Driver",
@@ -302,8 +323,7 @@ test "driver services require signed least-privilege device authority" {
             .signer = "zigos-driver-key",
         },
     };
-    const authority = capability.Capability{
-        .id = 11,
+    const authority = try capabilities.mint(.{
         .holder = .{ .kind = .service, .serial = 2 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = authorityTarget(100),
@@ -318,16 +338,18 @@ test "driver services require signed least-privilege device authority" {
             .expires_at_ticks = std.math.maxInt(u64),
             .renewable = true,
         },
-        .revocation_generation = 1,
         .audit = .{},
-    };
+    });
 
     const driver = try directory.register(.{
         .service_id = 44,
         .owner_task_id = 7,
         .device_id = 100,
         .device_class = .network_adapter,
-        .authority = authority,
+        .authority_capability_id = authority.id,
+        .capability_table = &capabilities,
+        .requester = authority.holder,
+        .now_ticks = 1,
         .bundle = bundle,
     });
 
@@ -345,13 +367,13 @@ test "driver services require signed least-privilege device authority" {
 
 test "driver services reject unsigned bundles and escalated device rights" {
     var directory = Directory.init();
+    var capabilities = capability.CapabilityTable.init();
     const unsigned_bundle = manifest.BundleManifest{
         .bundle_id = "svc.storage.driver",
         .display_name = "Storage Driver",
         .publisher = "zigos.dev",
     };
-    const escalated_authority = capability.Capability{
-        .id = 12,
+    const escalated_authority = try capabilities.mint(.{
         .holder = .{ .kind = .service, .serial = 3 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = authorityTarget(200),
@@ -370,16 +392,18 @@ test "driver services reject unsigned bundles and escalated device rights" {
             .issued_at_ticks = 0,
             .expires_at_ticks = std.math.maxInt(u64),
         },
-        .revocation_generation = 1,
         .audit = .{},
-    };
+    });
 
     try std.testing.expectError(error.InvalidBundleSignature, directory.register(.{
         .service_id = 50,
         .owner_task_id = 9,
         .device_id = 200,
         .device_class = .storage_controller,
-        .authority = escalated_authority,
+        .authority_capability_id = escalated_authority.id,
+        .capability_table = &capabilities,
+        .requester = escalated_authority.holder,
+        .now_ticks = 1,
         .bundle = unsigned_bundle,
     }));
 
@@ -398,33 +422,38 @@ test "driver services reject unsigned bundles and escalated device rights" {
         .owner_task_id = 9,
         .device_id = 200,
         .device_class = .storage_controller,
-        .authority = escalated_authority,
+        .authority_capability_id = escalated_authority.id,
+        .capability_table = &capabilities,
+        .requester = escalated_authority.holder,
+        .now_ticks = 1,
         .bundle = signed_bundle,
     }));
 
+    const storage_authority = try capabilities.mint(.{
+        .holder = .{ .kind = .service, .serial = 3 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = authorityTarget(200),
+        .rights = allowedRightsFor(.storage_controller),
+        .scope = .{
+            .task_id = 9,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = std.math.maxInt(u64),
+        },
+        .audit = .{},
+    });
     try std.testing.expectError(error.IommuRequired, directory.register(.{
         .service_id = 52,
         .owner_task_id = 9,
         .device_id = 200,
         .device_class = .storage_controller,
-        .authority = capability.Capability{
-            .id = 13,
-            .holder = .{ .kind = .service, .serial = 3 },
-            .issuer = .{ .kind = .policy_authority, .serial = 1 },
-            .target = authorityTarget(200),
-            .rights = allowedRightsFor(.storage_controller),
-            .scope = .{
-                .task_id = 9,
-                .local_only = true,
-                .broker_only = true,
-            },
-            .lease = .{
-                .issued_at_ticks = 0,
-                .expires_at_ticks = std.math.maxInt(u64),
-            },
-            .revocation_generation = 1,
-            .audit = .{},
-        },
+        .authority_capability_id = storage_authority.id,
+        .capability_table = &capabilities,
+        .requester = storage_authority.holder,
+        .now_ticks = 1,
         .bundle = signed_bundle,
         .require_iommu = false,
     }));
@@ -432,6 +461,7 @@ test "driver services reject unsigned bundles and escalated device rights" {
 
 test "kernel bootstrap transport is only granted to supported driver classes" {
     var directory = Directory.init();
+    var capabilities = capability.CapabilityTable.init();
     const bundle = manifest.BundleManifest{
         .bundle_id = "svc.driver.graphics-runtime",
         .display_name = "Graphics Driver Runtime",
@@ -441,31 +471,33 @@ test "kernel bootstrap transport is only granted to supported driver classes" {
             .signer = "zigos-spec-driver",
         },
     };
+    const graphics_authority = try capabilities.mint(.{
+        .holder = .{ .kind = .service, .serial = 4 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = authorityTarget(0x1234_1111_0001),
+        .rights = allowedRightsFor(.graphics_adapter),
+        .scope = .{
+            .task_id = 12,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = true,
+        },
+        .audit = .{},
+    });
 
     try std.testing.expectError(error.InvalidBootstrapTransport, directory.register(.{
         .service_id = 60,
         .owner_task_id = 12,
         .device_id = 0x1234_1111_0001,
         .device_class = .graphics_adapter,
-        .authority = capability.Capability{
-            .id = 14,
-            .holder = .{ .kind = .service, .serial = 4 },
-            .issuer = .{ .kind = .policy_authority, .serial = 1 },
-            .target = authorityTarget(0x1234_1111_0001),
-            .rights = allowedRightsFor(.graphics_adapter),
-            .scope = .{
-                .task_id = 12,
-                .local_only = true,
-                .broker_only = true,
-            },
-            .lease = .{
-                .issued_at_ticks = 0,
-                .expires_at_ticks = std.math.maxInt(u64),
-                .renewable = true,
-            },
-            .revocation_generation = 1,
-            .audit = .{},
-        },
+        .authority_capability_id = graphics_authority.id,
+        .capability_table = &capabilities,
+        .requester = graphics_authority.holder,
+        .now_ticks = 1,
         .bundle = bundle,
         .bootstrap_transport = .kernel_published_data_plane,
     }));

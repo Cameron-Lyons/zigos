@@ -2,6 +2,7 @@ const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("object_store.zig");
+const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const workspace = @import("workspace.zig");
 const copyText = native_util.copyText;
@@ -35,6 +36,8 @@ pub const View = struct {
 
 pub const Error = error{
     CapabilityRequired,
+    CapabilityNotFound,
+    CapabilityRevoked,
     ObjectMissing,
     PathNotFound,
     PermissionDenied,
@@ -51,12 +54,19 @@ pub const HasVersionFn = *const fn (context: *const anyopaque, version_id: u64) 
 
 pub const Bridge = struct {
     context: *const anyopaque,
+    capability_table: *const capability.CapabilityTable,
     resolve_entry: ResolveEntryFn,
     has_version: HasVersionFn,
 
-    pub fn init(context: *const anyopaque, resolve_entry: ResolveEntryFn, has_version: HasVersionFn) Bridge {
+    pub fn init(
+        context: *const anyopaque,
+        capability_table: *const capability.CapabilityTable,
+        resolve_entry: ResolveEntryFn,
+        has_version: HasVersionFn,
+    ) Bridge {
         return .{
             .context = context,
+            .capability_table = capability_table,
             .resolve_entry = resolve_entry,
             .has_version = has_version,
         };
@@ -65,13 +75,16 @@ pub const Bridge = struct {
     pub fn resolve(
         self: *Bridge,
         request: ResolveRequest,
-        authority: capability.Capability,
+        requester: principal.PrincipalId,
+        authority_capability_id: u64,
         now_ticks: u64,
     ) Error!View {
         const normalized_path = normalizePath(request.path);
         const entry = self.resolve_entry(self.context, request.workspace_id, normalized_path) catch return error.PathNotFound;
+        const authority = self.capability_table.query(authority_capability_id) orelse return error.CapabilityNotFound;
 
-        if (!authority.lease.isActive(now_ticks)) return error.PermissionDenied;
+        if (!self.capability_table.isUsable(authority, now_ticks)) return error.CapabilityRevoked;
+        if (!authority.holder.eql(requester)) return error.PermissionDenied;
         if (authority.scope.workspace_id) |workspace_id| {
             if (workspace_id != request.workspace_id) return error.WorkspaceScopeViolation;
         }
@@ -150,9 +163,9 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
             return bridge_context.store.version(version_id) != null;
         }
     }.call;
-    var bridge = Bridge.init(&test_context, resolve_entry, has_version);
-    const read_capability = capability.Capability{
-        .id = 1,
+    var capabilities = capability.CapabilityTable.init();
+    var bridge = Bridge.init(&test_context, &capabilities, resolve_entry, has_version);
+    const read_capability = try capabilities.mint(.{
         .holder = .{ .kind = .user, .serial = 1 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .object, .id = object.object_id },
@@ -167,14 +180,13 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
             .issued_at_ticks = 0,
             .expires_at_ticks = 100,
         },
-        .revocation_generation = 1,
         .audit = .{},
-    };
+    });
     const view = try bridge.resolve(.{
         .workspace_id = notes.id,
         .path = "/documents/notes.md",
         .access = .read,
-    }, read_capability, 30);
+    }, read_capability.holder, read_capability.id, 30);
     try std.testing.expect(!view.authoritative);
     try std.testing.expectEqualStrings("documents/notes.md", view.pathSlice());
     try std.testing.expectEqual(object.version_id, view.version_id);
@@ -183,10 +195,9 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
         .workspace_id = notes.id,
         .path = "documents/notes.md",
         .access = .write,
-    }, read_capability, 30));
+    }, read_capability.holder, read_capability.id, 30));
 
-    const invalid_capability = capability.Capability{
-        .id = 2,
+    const invalid_capability = try capabilities.mint(.{
         .holder = .{ .kind = .user, .serial = 1 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .service, .id = 44 },
@@ -196,12 +207,11 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
             .issued_at_ticks = 0,
             .expires_at_ticks = 100,
         },
-        .revocation_generation = 1,
         .audit = .{},
-    };
+    });
     try std.testing.expectError(error.CapabilityRequired, bridge.resolve(.{
         .workspace_id = notes.id,
         .path = "documents/notes.md",
         .access = .read,
-    }, invalid_capability, 30));
+    }, invalid_capability.holder, invalid_capability.id, 30));
 }

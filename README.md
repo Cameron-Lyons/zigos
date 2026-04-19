@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Zigos is a native-only operating system prototype written in Zig. The current tree implements a capability-first kernel and service architecture with task-scoped authority, restartable native services, a content-addressed object store, local-first sync primitives, immutable-base state, measured-boot records, and task-first UX scaffolding.
+Zigos is a native-only operating system prototype written in Zig. The current tree implements a capability-first kernel and service architecture with principal-bound, task-scoped authority, restartable native services, a content-addressed object store, local-first sync primitives, immutable-base state, measured-boot records, and task-first UX scaffolding.
 
 ## Current Focus
 
@@ -23,6 +23,15 @@ The native kernel surface is intentionally small:
 - IOMMU and DMA isolation hooks
 
 Everything above that layer is modeled as a native service boundary under `src/native/`.
+
+## Authority Model
+
+The current native tree treats capabilities as live kernel-backed authority, not as advisory metadata:
+
+- the syscall boundary requires the calling task to possess the capability id, match the capability holder principal, and satisfy any task scope
+- the session manager keeps the broad session and policy capabilities; launched services and clients receive only narrow derived or minted bootstrap capabilities for their own task
+- service-facing helpers such as the storage file bridge and driver registration resolve capability ids through the capability table so revocation and lease checks still apply
+- boot-time service launch failures are recorded through the supervisor as structured crashes instead of trapping through `unreachable`
 
 ## Requirements
 
