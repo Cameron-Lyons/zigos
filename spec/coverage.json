@@ -98,6 +98,10 @@
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 13.3 15.2 and 15.3 keep failures explainable restartable and redacted"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 1 keeps installs declarative privilege explicit and legacy access isolated"
         }
       ],
       "requirements": [
@@ -538,6 +542,10 @@
           "name": "event ledger exports structured redacted diagnostics and audit history"
         },
         {
+          "file": "src/native/platform/event_ledger.zig",
+          "name": "event ledger requires explicit opt-in before remote sharing personal device diagnostics"
+        },
+        {
           "file": "src/native/platform/update_health.zig",
           "name": "update health failures trigger rollback for each required post-activation check"
         },
@@ -610,6 +618,10 @@
           "name": "validate accepts a signed local-first bundle manifest"
         },
         {
+          "file": "src/native/services/package_service.zig",
+          "name": "package service round-trips the example writer manifest fields without widening authority"
+        },
+        {
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy scoped"
         }
@@ -641,6 +653,10 @@
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 19 user journeys keep installs sync permissions updates and recovery cohesive"
         }
       ],
       "requirements": [

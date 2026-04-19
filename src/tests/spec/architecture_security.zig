@@ -10,6 +10,7 @@ const device_inventory = @import("../../native/drivers/device_inventory.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const native_kernel = @import("../../native/kernel_api/native_kernel.zig");
+const package_service = @import("../../native/services/package_service.zig");
 const policy_mediation = @import("../../native/policy/policy_mediation.zig");
 const policy_object = @import("../../native/policy/policy_object.zig");
 const principal = @import("../../native/core/principal.zig");
@@ -19,6 +20,88 @@ const task_runtime = @import("../../native/task/task_runtime.zig");
 const task_runtime_service = @import("../../native/task/task_runtime_service.zig");
 const userspace_loader = @import("../../native/task/userspace_loader.zig");
 const userspace_manifest_signing = @import("../../native/task/userspace_manifest_signing.zig");
+
+pub fn designGoalsKeepInstallsDeclarativeAndAuthorityExplicit() !void {
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = spec_support.app(41),
+        .component_class = .app_component,
+        .budget = spec_support.defaultBudget(false),
+        .local_only = true,
+    });
+    try std.testing.expect(task.zero_ambient_authority);
+    try std.testing.expectEqual(@as(usize, 0), task.capability_count);
+
+    var policies = policy_object.Directory.init();
+    const install_policy = try policies.create(.{
+        .scope = .organization,
+        .subject_id = 41,
+        .issuer = spec_support.policyAuthority(41),
+        .label = "trusted-installs",
+        .install_source_mode = .trusted_sources,
+        .allowed_install_sources = &.{"store:zigos"},
+    }, spec_support.signer("spec.design.policy", 0x16));
+
+    const interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "writer.edit/v1" },
+    };
+    const components = [_]manifest.ExecutionComponentDecl{
+        .{ .id = "writer-ui", .entry = "app.writer.ui" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+    };
+    var bundle = manifest.BundleManifest{
+        .bundle_id = "app.writer",
+        .display_name = "Writer",
+        .publisher = "zigos.spec",
+        .provided_interfaces = &interfaces,
+        .components = &components,
+        .assets = &assets,
+    };
+    bundle.signature = try userspace_manifest_signing.signBundle(bundle);
+
+    var packages = package_service.Service.init();
+    _ = try packages.install(.{
+        .bundle = bundle,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, install_policy);
+    try std.testing.expectError(package_service.Error.InstallSourceDenied, packages.install(.{
+        .bundle = bundle,
+        .source_identity = "repo:opaque-script",
+        .data_schema_version = 1,
+    }, install_policy));
+
+    var compatibility_manager = compatibility_environment.Manager.init();
+    var legacy_bundle = manifest.BundleManifest{
+        .bundle_id = "compat.legacy.writer",
+        .display_name = "Legacy Writer",
+        .publisher = "zigos.spec",
+    };
+    legacy_bundle.signature = try userspace_manifest_signing.signBundle(legacy_bundle);
+
+    try std.testing.expectError(compatibility_environment.Error.DirectHostAccessForbidden, compatibility_manager.launch(.{
+        .service_id = 141,
+        .owner = spec_support.user(41),
+        .kind = .remote_application_session,
+        .label = "Legacy Writer Remote Session",
+        .bundle = legacy_bundle,
+        .portal_only_host_access = false,
+    }));
+
+    const environment = try compatibility_manager.launch(.{
+        .service_id = 142,
+        .owner = spec_support.user(41),
+        .kind = .remote_application_session,
+        .label = "Legacy Writer Remote Session",
+        .bundle = legacy_bundle,
+        .network_class = .named_service_only,
+    });
+    try std.testing.expect(environment.isolated);
+    try std.testing.expect(environment.clearly_labeled);
+    try std.testing.expect(environment.portal_only_host_access);
+}
 
 pub fn explicitGrantsRequireAuthority() !void {
     var capability_table = capability.CapabilityTable.init();

@@ -727,3 +727,103 @@ test "package service resolves installed manifests with stable slices" {
     try std.testing.expectEqualStrings("sync", current.background_tasks[0].id);
     try std.testing.expectEqualStrings("tiny-embed", current.ai_metadata.model_family);
 }
+
+test "package service round-trips the example writer manifest fields without widening authority" {
+    var service = Service.init();
+    const signer_identity = signing.SignerIdentity{
+        .label = "pkg-test-example-writer",
+        .seed = [_]u8{0x37} ** 32,
+    };
+    const provided_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "writer.edit/v1" },
+    };
+    const consumed_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "documents.open/v1" },
+        .{ .name = "export.pdf/v1" },
+    };
+    const components = [_]manifest.ExecutionComponentDecl{
+        .{ .id = "writer-ui", .entry = "com.example.writer.ui" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+    };
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace://report-alpha",
+            .rights = .{ .object_read = true, .object_write = true },
+            .local_only = true,
+        },
+        .{
+            .kind = .network_egress,
+            .resource = "sync.example.com",
+            .rights = .{ .network_remote = true },
+            .required = false,
+        },
+        .{
+            .kind = .background_execution,
+            .resource = "sync-complete",
+            .rights = .{ .background_run = true },
+            .required = false,
+        },
+    };
+    const background_tasks = [_]manifest.BackgroundTaskDecl{
+        .{
+            .id = "sync-complete",
+            .trigger = .sync_completion,
+            .expected_duration_seconds = 30,
+            .budget = .{
+                .cpu_time_ticks = 100,
+                .memory_bytes = 64 * 1024,
+            },
+            .network = .none,
+            .visibility = .status_only,
+        },
+    };
+
+    var bundle = manifest.BundleManifest{
+        .bundle_id = "com.example.writer",
+        .display_name = "Writer",
+        .publisher = "Example Software",
+        .version_major = 1,
+        .version_minor = 4,
+        .provided_interfaces = &provided_interfaces,
+        .consumed_interfaces = &consumed_interfaces,
+        .components = &components,
+        .assets = &assets,
+        .requested_permissions = &permissions,
+        .background_tasks = &background_tasks,
+    };
+    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+
+    _ = try service.install(.{
+        .bundle = bundle,
+        .source_identity = "store:zigos",
+    }, null);
+
+    var resolved: ResolvedManifest = undefined;
+    const current = try service.resolveCurrentManifest("com.example.writer", &resolved);
+
+    try std.testing.expectEqualStrings("com.example.writer", current.bundle_id);
+    try std.testing.expectEqualStrings("Writer", current.display_name);
+    try std.testing.expectEqualStrings("Example Software", current.publisher);
+    try std.testing.expectEqual(@as(u16, 1), current.version_major);
+    try std.testing.expectEqual(@as(u16, 4), current.version_minor);
+    try std.testing.expectEqual(@as(usize, 1), current.provided_interfaces.len);
+    try std.testing.expectEqual(@as(usize, 2), current.consumed_interfaces.len);
+    try std.testing.expectEqualStrings("writer.edit/v1", current.provided_interfaces[0].name);
+    try std.testing.expectEqualStrings("documents.open/v1", current.consumed_interfaces[0].name);
+    try std.testing.expectEqualStrings("export.pdf/v1", current.consumed_interfaces[1].name);
+    try std.testing.expectEqual(@as(usize, 3), current.requested_permissions.len);
+    try std.testing.expectEqualStrings("workspace://report-alpha", current.requested_permissions[0].resource);
+    try std.testing.expectEqualStrings("sync.example.com", current.requested_permissions[1].resource);
+    try std.testing.expectEqualStrings("sync-complete", current.requested_permissions[2].resource);
+    try std.testing.expectEqual(@as(usize, 1), current.background_tasks.len);
+    try std.testing.expectEqualStrings("sync-complete", current.background_tasks[0].id);
+
+    for (current.requested_permissions) |request| {
+        try std.testing.expect(request.kind != .camera);
+        try std.testing.expect(request.kind != .mic);
+        try std.testing.expect(request.kind != .location);
+    }
+}

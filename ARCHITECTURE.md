@@ -1,61 +1,88 @@
 # Architecture
 
-Zigos is organized around a native-only kernel/service split.
+Zigos is a native-only operating system prototype organized as a small freestanding kernel plus a restartable native service stack. The repository-level contract for that split is the Zigos v0.1 clean-slate spec in [SPEC.md](SPEC.md). This document maps that contract onto the current source tree and build/boot pipeline.
 
-The repository-level contract for that split is the Zigos v0.1 clean-slate spec described in [SPEC.md](/home/cameronl/zigos/SPEC.md). This file focuses on how that spec maps onto the current code layout.
+## Layered System
 
-## Core Layout
+- `src/main.zig`: thin export surface that exposes `kernel_main` and the typed syscall handler
+- `src/kernel/`: freestanding boot, memory, interrupt, timer, device, and low-level networking code
+- `src/native/kernel_api/`: typed kernel boundary for tasks, capabilities, endpoints, services, shared memory, and device access
+- `src/native/session/`: principal assignment, supervisor state, session manager boot flow, and ordered service bootstrap
+- `src/native/task/`: task/runtime model plus userspace image registry, loader, launch, scheduler, and bootstrap mailbox support
+- `src/userspace/`: shared freestanding runtime and linker script used by every embedded userspace image
+- `src/native/policy/`, `src/native/platform/`, `src/native/services/`, `src/native/storage/`, `src/native/sync/`, `src/native/drivers/`: the native service and platform layers above the kernel boundary
+- `src/native/demo/`: seeded packages, scenario-world orchestration, permission flows, and transport demos used by spec-aligned stories
+- `src/tests/host/` and `src/tests/spec/`: host-side native tests plus spec-conformance suites
+- `build_support/`: build helpers for kernel and userspace artifacts
+- `tools/`: host-side support utilities such as spec coverage checks
 
-- `src/main.zig`: thin kernel entry/export surface
-- `src/kernel/boot/entry.zig`: native boot sequencing
-- `src/kernel/boot/profiles/zigos_native.zig`: only boot profile
-- `src/native/`: native principals, capabilities, task runtime, mediation, services, storage, sync, recovery, and UX
-- `src/native/demo/`: seeded bundle manifests plus explicit scenario-world/demo flows used to exercise spec stories
-- `src/native/kernel_api/syscall_surface.zig`: typed freestanding syscall entry for native kernel operations
-- `src/kernel/net/link_port.zig`: low-level packet/device transport kept below higher-level native networking policy
-- `build.zig`: native-only build graph
-- `scripts/run-zigos-native-smoke.sh`: native cold-reboot smoke harness
+## Build and Boot Path
 
-## Native Boundaries
+1. `build_support/userspace.zig` compiles every image declared in `src/native/task/userspace_registry.zig`, generates a `userspace_archive` module, and feeds that archive into the kernel build.
+2. `src/kernel/boot/entry.zig` performs freestanding bring-up and enters the selected boot profile:
+   - `src/kernel/boot/profiles/zigos_native.zig` for the main native system
+   - `src/kernel/boot/profiles/benchmark.zig` for benchmark runs
+3. `src/native/session/session_bootstrap.zig` assigns the built-in principals, preloads the userspace catalog through `src/native/task/userspace_boot_registry.zig`, initializes the userspace scheduler, and registers the core service records with the supervisor.
+4. `src/native/session/session_manager_boot_flow.zig` constructs the long-lived system state: capability table, endpoint table, task runtime, service registry, shared memory table, driver directory/runtime, event ledger, background dispatch, storage checkpoint state, and sync resident state.
+5. `src/native/session/phase3_bootstrap.zig` launches the ordered contract services declared in `src/native/session/service_contract.zig`, binds their interfaces into `src/native/kernel_api/service_registry.zig`, and attaches driver authority for device-backed services.
+6. `src/userspace/runtime.zig` is the common runtime for every userspace image: it validates the embedded descriptor, reads the bootstrap mailbox, performs initial typed queries, publishes heartbeat or fault state, and then enters steady-state execution.
 
-- Kernel TCB: scheduling, virtual memory, IPC transport, capability enforcement, interrupts/timekeeping, secure-boot handoff hooks, IOMMU/DMA isolation hooks
-- Native task runtime service: task ownership, component attachment, budgets, audit trail, zero-ambient-authority launch state, and checkpointed restart recovery
-- Native syscall entry: typed `int 0x80` dispatch into the native kernel port, with explicit request buffers and typed responses
-- Native mediation: manifest validation, permission review, policy grants, denials, lease enforcement
-- Native services: network policy, storage/object authority, package/update, compositor/session, indexing/search, sync/replication, media/print helpers, compatibility portals
-- Native data model: immutable object versions plus transactional workspaces, snapshots, restore, delete recovery, export/import
+## Kernel Boundary
 
-## Spec Mapping
+The freestanding kernel remains intentionally small. Its trusted computing base is modeled by `src/native/session/contract.zig` and centers on:
 
-- Principals, capabilities, objects, workspaces, and tasks live under `src/native/` as first-class types rather than POSIX-like process and path abstractions.
-- Zero-ambient-authority launch and permission mediation are enforced by `task_runtime.zig`, `capability.zig`, `manifest.zig`, `permission_review*.zig`, and `policy_mediation.zig`.
-- Immutable base images, measured boot, attestation, and rollback are modeled by `immutable_base.zig`, `measured_boot.zig`, `attestation_service.zig`, and `recovery_environment.zig`.
-- Local-first multi-device sync and explicit networking are modeled by `device_graph.zig`, `sync_service.zig`, and `network_policy.zig`.
-- Explainable denials, structured notifications, and privacy-preserving diagnostics are modeled by `denial_explanation.zig`, `notification_center.zig`, `event_ledger.zig`, and `supervisor.zig`.
-- Native compatibility is explicit and isolated through `compatibility_environment.zig`; the repo does not treat legacy APIs as part of the native platform.
+- scheduling
+- virtual memory
+- IPC transport
+- capability table enforcement
+- interrupts and timekeeping
+- secure-boot handoff hooks
+- IOMMU and DMA isolation hooks
 
-## Key Modules
+Everything above that layer is mediated through typed native interfaces:
 
-- `src/native/session/contract.zig`: kernel/service boundary catalog
-- `src/native/session/service_contract.zig`: ordered native service contracts
-- `src/native/kernel_api/native_kernel.zig`: task/capability/endpoint/shared-memory/service operations
-- `src/native/kernel_api/component_port.zig`: typed component bridge used during bootstrap
-- `src/native/task/task_runtime_service.zig`: restartable wrapper around the native task catalog
-- `src/native/storage/storage_service.zig`: authoritative object/workspace service
-- `src/native/storage/file_bridge.zig`: derived, non-authoritative file-style view over workspace state
-- `src/native/sync/device_graph.zig`: user/device trust graph
-- `src/native/sync/network_policy.zig`: explicit egress policy objects
-- `src/native/services/compatibility_environment.zig`: isolated VM/container/emulation/remote-session environments with portal-only host access
-- `src/native/session/supervisor.zig`: crash/restart tracking for restartable services
-- `src/native/demo/scenario_world.zig`: explicit scenario-world/demo orchestration kept outside the core session manager
+- `src/native/kernel_api/native_kernel.zig`: authoritative implementation of task, capability, endpoint, shared-memory, service, and device operations
+- `src/native/kernel_api/component_port.zig`: in-process typed request/response boundary used by bootstrap code and host tests
+- `src/native/kernel_api/syscall_surface.zig`: freestanding syscall dispatcher that validates the request header, subject task, ABI version, and response sizing before calling the same kernel API
+- `src/main.zig`: wires the architecture trap handler into `syscall_surface.dispatch`, so freestanding userspace goes through the same typed authority checks as in-process callers
+
+The repository no longer treats POSIX-style syscalls, shell-first execution, or a VFS-rooted userland as part of the native platform.
+
+## Native Service Model
+
+- `src/native/session/contract.zig`: service classes, boundaries, restart policy, and isolation profiles
+- `src/native/session/supervisor.zig`: service registration, isolation-domain tracking, crash diagnostics, restart requests, and contract/driver binding events
+- `src/native/task/task_runtime.zig` and `src/native/task/task_runtime_service.zig`: task ownership, explicit resource budgets, attached components, checkpoints, and restart recovery
+- `src/native/task/userspace_loader.zig`, `src/native/task/userspace_launch.zig`, and `src/native/task/userspace_manifest_signing.zig`: signed bundle registration, embedded ELF metadata, and zero-ambient-authority launch state
+- `src/native/drivers/driver_service.zig`: device-class-scoped driver authority, IOMMU-backed DMA ranges, and restart-generation tracking
+- `src/native/policy/manifest.zig`, `src/native/policy/policy_mediation.zig`, `src/native/policy/permission_review*.zig`, and `src/native/policy/denial_explanation.zig`: manifest validation, mediation, permission review, and explainable denials
+- `src/native/storage/`: content-addressed object versions, transactional workspaces, snapshots, export/import, delete recovery, persistent volume state, and the non-authoritative file bridge
+- `src/native/sync/`: device graph, sync state, replication service state, and explicit network policy objects
+- `src/native/platform/`: immutable base state, measured boot, attestation, update health, secure secret storage, event ledger, compositor session, and native UX control
+- `src/native/services/`: package install/update, indexing/search, notifications, compatibility portal, and media/print helper services
+
+## Userspace Image Model
+
+Userspace images are declared statically in `src/native/task/userspace_registry.zig`. That registry currently covers:
+
+- system bundles such as the session manager, permission review surface, policy mediation, network, storage, package, compositor, indexing, sync, media/print, and compatibility services
+- driver-facing bundles such as the storage driver artifact
+- demo or app-facing bundles such as `app.viewer`, `app.notes`, `app.sync`, and `app.capture`
+
+Each image carries typed metadata: bundle id, publisher, initial component, role tag, heartbeat increment, contract flags, provided and consumed interfaces, and signature state. `src/native/task/userspace_boot_registry.zig` loads those definitions into the runtime catalog, while `src/userspace/runtime.zig` gives every embedded image the same bootstrap mailbox and syscall/query conventions.
 
 ## Verification
 
-- `./scripts/zig.sh build spec-tests`: the `SPEC.md` heading set, section claims, and mapped host-side test anchors remain in sync
-- `./scripts/zig.sh build spec-conformance`: `spec-tests` plus freestanding smoke verification
-- `./scripts/zig.sh build kernel`: native kernel builds
-- `./scripts/zig.sh build host-tests`: the explicit `src/native_host_test.zig` root delegates to the host suites under `src/tests/host/` without rediscovering files at runtime
-- `./scripts/zig.sh build zigos-native-smoke-test`: native bootstrap reaches the expected boot markers across two QEMU boots
-- `./scripts/zig.sh build benchmark`: native spec-aligned service-path benchmarks stay rebuildable and gated in QEMU
+The repository keeps architecture and spec claims tied to explicit verification entrypoints:
 
-The repository no longer treats shell-first execution, POSIX-like syscalls, or VFS-rooted userland as part of the supported platform. Legacy support is modeled explicitly through isolated compatibility environments with portal-mediated host access. The remaining freestanding entry surface is the native typed syscall dispatcher.
+- `./scripts/zig.sh build kernel`: build the main native kernel
+- `./scripts/zig.sh build kernel-zigos-native`: build the primary native bootstrap kernel
+- `./scripts/zig.sh build kernel-benchmark`: build the benchmark kernel profile
+- `./scripts/zig.sh build host-tests`: run the thin `src/native_host_test.zig` root over `src/tests/host/`
+- `./scripts/zig.sh build spec-tests`: run `spec/coverage.json`, `tools/check_spec_coverage.py`, and the thin `src/zigos_spec_test.zig` root over `src/tests/spec/`
+- `./scripts/zig.sh build spec-conformance`: `spec-tests` plus the freestanding native smoke path
+- `./scripts/zig.sh build zigos-native-smoke-test`: two-boot QEMU smoke verification through `scripts/run-zigos-native-smoke.sh`
+- `./scripts/zig.sh build benchmark`: spec-aligned benchmark execution through `scripts/run-kernel-benchmark.sh`
+- `./scripts/zig.sh build iso`: bootable ISO generation through `scripts/build-grub-iso.sh`
+
+Architecture claims in this repository should map back either to a concrete implementation boundary in the files above or to a spec requirement covered by the `spec-tests` and `spec-conformance` gates.
