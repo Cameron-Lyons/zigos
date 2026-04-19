@@ -289,30 +289,34 @@ test "runtime refuses kernel-published transports for drivers without bootstrap 
     ));
 
     var directory = driver_service.Directory.init();
+    const capability = @import("../kernel_api/capability.zig");
+    var capabilities = capability.CapabilityTable.init();
+    const driver_authority = try capabilities.mint(.{
+        .holder = .{ .kind = .service, .serial = 91 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = driver_service.authorityTarget(0x8086_100E_0001),
+        .rights = driver_service.allowedRightsFor(.network_adapter),
+        .scope = .{
+            .task_id = 901,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = true,
+        },
+        .audit = .{},
+    });
     const driver = try directory.register(.{
         .service_id = 91,
         .owner_task_id = 901,
         .device_id = 0x8086_100E_0001,
         .device_class = .network_adapter,
-        .authority = .{
-            .id = 21,
-            .holder = .{ .kind = .service, .serial = 91 },
-            .issuer = .{ .kind = .policy_authority, .serial = 1 },
-            .target = driver_service.authorityTarget(0x8086_100E_0001),
-            .rights = driver_service.allowedRightsFor(.network_adapter),
-            .scope = .{
-                .task_id = 901,
-                .local_only = true,
-                .broker_only = true,
-            },
-            .lease = .{
-                .issued_at_ticks = 0,
-                .expires_at_ticks = std.math.maxInt(u64),
-                .renewable = true,
-            },
-            .revocation_generation = 1,
-            .audit = .{},
-        },
+        .authority_capability_id = driver_authority.id,
+        .capability_table = &capabilities,
+        .requester = driver_authority.holder,
+        .now_ticks = 1,
         .bundle = .{
             .bundle_id = "svc.driver.net",
             .display_name = "Network Driver",
@@ -423,7 +427,10 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
         .owner_task_id = driver_task.id,
         .device_id = device_id,
         .device_class = .storage_controller,
-        .authority = capabilities.query(device_capability.id).?,
+        .authority_capability_id = device_capability.id,
+        .capability_table = &capabilities,
+        .requester = driver_task.owner,
+        .now_ticks = 2,
         .bundle = .{
             .bundle_id = "svc.driver.storage-runtime",
             .display_name = "Storage Driver Runtime",

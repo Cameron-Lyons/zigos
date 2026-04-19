@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const boot_markers = @import("../../kernel/boot/markers.zig");
+const bootstrap_capabilities = @import("bootstrap_capabilities.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const contract = @import("contract.zig");
 const driver_service = @import("../drivers/driver_service.zig");
@@ -22,10 +23,11 @@ pub fn run(
     state: *const support.BootstrapState,
     kernel_port: *component_port.KernelPort,
     service_bindings: *support.ServiceBindings,
-) void {
-    bootServices(env, state, kernel_port, service_bindings);
+) bool {
+    if (!bootServices(env, state, kernel_port, service_bindings)) return false;
     connectClient(env, state, kernel_port, service_bindings);
     recordDriverRecovery(env, state, service_bindings);
+    return true;
 }
 
 pub fn bootServices(
@@ -33,9 +35,10 @@ pub fn bootServices(
     state: *const support.BootstrapState,
     kernel_port: *component_port.KernelPort,
     service_bindings: *support.ServiceBindings,
-) void {
-    @call(.never_inline, launchServices, .{ env, state, kernel_port, service_bindings });
+) bool {
+    if (!@call(.never_inline, launchServices, .{ env, state, kernel_port, service_bindings })) return false;
     @call(.never_inline, activateDrivers, .{ env, state, kernel_port, service_bindings });
+    return true;
 }
 
 fn launchServices(
@@ -43,7 +46,7 @@ fn launchServices(
     state: *const support.BootstrapState,
     kernel_port: *component_port.KernelPort,
     service_bindings: *support.ServiceBindings,
-) void {
+) bool {
     service_bindings.* = .{ .bindings = undefined };
     for (service_contract.ordered_service_contracts, 0..) |entry, index| {
         service_bindings.bindings[index] = service_bootstrap.launchContractService(
@@ -58,11 +61,15 @@ fn launchServices(
             entry,
             entry.boot_correlation_base,
             entry.boot_tick,
-        ) catch unreachable;
+        ) catch |err| {
+            _ = env.supervisor.recordCrash(serviceId(state, entry.class), entry.boot_tick, bootFailureCode(err));
+            return false;
+        };
         if (entry.class == .compatibility_portal) {
             common.printBootMarker("ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY");
         }
     }
+    return true;
 }
 
 fn activateDrivers(
@@ -91,6 +98,7 @@ fn activateDrivers(
         env.supervisor,
         state.ids.policy_authority,
         state.policy_capability.id,
+        state.session_task.id,
         state.services.network_service.id,
         service_bindings.bindingFor(.network_stack).task_id,
         state.ids.network_service,
@@ -106,6 +114,7 @@ fn activateDrivers(
         env.supervisor,
         state.ids.policy_authority,
         state.policy_capability.id,
+        state.session_task.id,
         state.services.storage_service.id,
         storage_driver_task.task_id,
         state.ids.storage_service,
@@ -121,6 +130,7 @@ fn activateDrivers(
         env.supervisor,
         state.ids.policy_authority,
         state.policy_capability.id,
+        state.session_task.id,
         state.services.compositor_service.id,
         service_bindings.bindingFor(.compositor_ui_session).task_id,
         state.ids.compositor_service,
@@ -136,6 +146,7 @@ fn activateDrivers(
         env.supervisor,
         state.ids.policy_authority,
         state.policy_capability.id,
+        state.session_task.id,
         state.services.media_service.id,
         service_bindings.bindingFor(.media_print_helpers).task_id,
         state.ids.media_service,
@@ -190,17 +201,23 @@ fn connectClient(
         },
         env.userspace_scheduler,
     ) catch unreachable;
-    if (!env.runtime.hasCapability(service_client_task.task_id, state.session_capability.id)) {
-        env.runtime.grantCapability(service_client_task.task_id, state.session_capability.id) catch unreachable;
-    }
+    const service_client_authority_id = bootstrap_capabilities.deriveTaskCapability(
+        kernel_port,
+        state.session_task.id,
+        state.session_capability.id,
+        service_client_task.task_id,
+        bootstrap_capabilities.serviceBootstrapRights(),
+        331,
+        56,
+    ) catch unreachable;
 
     var service_connect_count: usize = 0;
     for (service_contract.ordered_service_contracts, service_bindings.bindings, 0..) |entry, binding, index| {
-        const endpoint_request_id = 331 + @as(u64, @intCast(index * 2));
+        const endpoint_request_id = 332 + @as(u64, @intCast(index * 2));
         const connect_request_id = endpoint_request_id + 1;
         const client_endpoint = kernel_port.endpointCreate(.{
             .header = component_port.makeHeader(.endpoint_create, endpoint_request_id, service_client_task.task_id),
-            .authority_capability_id = state.session_capability.id,
+            .authority_capability_id = service_client_authority_id,
             .owner_task_id = service_client_task.task_id,
             .label = entry.interface.name,
             .flags = .{ .local_only = true },
@@ -283,4 +300,13 @@ fn serviceId(state: *const support.BootstrapState, class: contract.ServiceClass)
         .compatibility_portal => state.services.compatibility_service.id,
         else => unreachable,
     };
+}
+
+fn bootFailureCode(err: anyerror) u32 {
+    var hash: u64 = 14695981039346656037;
+    for (@errorName(err)) |byte| {
+        hash ^= byte;
+        hash *%= 1099511628211;
+    }
+    return @truncate(hash);
 }

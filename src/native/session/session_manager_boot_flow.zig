@@ -225,7 +225,11 @@ pub const SessionManager = struct {
         const state = initializeBootstrapState(self);
         const kernel_port = prepareKernelInterface(self, state.ids.policy_authority, state.session_task.id);
         var service_bindings: ServiceBindings = undefined;
-        session_service_bootstrap.bootServices(&env, &state, kernel_port, &service_bindings);
+        if (!session_service_bootstrap.bootServices(&env, &state, kernel_port, &service_bindings)) {
+            self.initialized = false;
+            self.kernel_port_ready = false;
+            return;
+        }
 
         self.storage_service_instance = storage_service_mod.Service.initWithStore(
             state.services.storage_service.id,
@@ -233,6 +237,7 @@ pub const SessionManager = struct {
             state.ids.storage_service,
             &self.storage_checkpoint_store,
         );
+        self.storage_service_instance.bindCapabilityTable(&self.capability_table);
         self.storage_service_instance.checkpoint_enabled = false;
 
         self.runtime_service.checkpoint(60);
@@ -261,7 +266,11 @@ pub const SessionManager = struct {
         runTransportChecks(&env, &state, kernel_port);
         const notes_review = runPermissionFlows(&env, &state, kernel_port, &review_port, &policy_port);
         var service_bindings: ServiceBindings = undefined;
-        runServiceBootstrap(&env, &state, kernel_port, &service_bindings);
+        if (!runServiceBootstrap(&env, &state, kernel_port, &service_bindings)) {
+            self.initialized = false;
+            self.kernel_port_ready = false;
+            return;
+        }
         runSessionLifecycle(self, &state, &service_bindings, notes_review.object_capability);
         printReadyBanner();
     }
@@ -288,6 +297,7 @@ fn emptyStorageService() storage_service_mod.Service {
         .service_id = 0,
         .task_id = 0,
         .owner = .{ .kind = .service, .serial = 0 },
+        .capability_table = null,
         .checkpoint_store = undefined,
         .store = undefined,
         .workspaces = undefined,
@@ -312,7 +322,7 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapState {
         &self.runtime,
         "zigos.system.session-manager",
         .{
-            .owner = ids.session_user,
+            .owner = ids.session_service,
             .budget = .{
                 .cpu_time_ticks = 50_000,
                 .memory_bytes = 8 * 1024 * 1024,
@@ -348,7 +358,14 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapState {
     common.printBootMarker(boot_markers.permission_ui_service_task_ready);
 
     const session_capability = mintSessionCapability(self, ids, services, session_task.id);
-    recordSessionTaskBootstrap(self, session_task.id, session_capability.id);
+    const policy_capability = mintPolicyCapability(
+        self,
+        ids.session_service,
+        ids.policy_authority,
+        services.policy_service.id,
+        session_task.id,
+    );
+    recordSessionTaskBootstrap(self, session_task.id, session_capability.id, policy_capability.id);
 
     return .{
         .ids = ids,
@@ -356,7 +373,7 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapState {
         .session_task = session_task,
         .review_service_task = review_service_task,
         .session_capability = session_capability,
-        .policy_capability = mintPolicyCapability(self, ids.policy_authority, services.policy_service.id, session_task.id),
+        .policy_capability = policy_capability,
     };
 }
 
@@ -376,6 +393,7 @@ fn mintSessionCapability(
             .endpoint_connect = true,
             .endpoint_send = true,
             .endpoint_recv = true,
+            .capability_derive = true,
             .capability_query = true,
             .shared_memory_create = true,
             .shared_memory_map = true,
@@ -403,8 +421,14 @@ fn mintSessionCapability(
     }) catch unreachable;
 }
 
-fn recordSessionTaskBootstrap(self: *SessionManager, session_task_id: u64, session_capability_id: u64) void {
+fn recordSessionTaskBootstrap(
+    self: *SessionManager,
+    session_task_id: u64,
+    session_capability_id: u64,
+    policy_capability_id: u64,
+) void {
     self.runtime.grantCapability(session_task_id, session_capability_id) catch unreachable;
+    self.runtime.grantCapability(session_task_id, policy_capability_id) catch unreachable;
     self.runtime.audit(session_task_id, .{
         .kind = .created,
         .tick = 0,
@@ -414,16 +438,22 @@ fn recordSessionTaskBootstrap(self: *SessionManager, session_task_id: u64, sessi
         .capability_id = session_capability_id,
         .tick = 0,
     }) catch unreachable;
+    self.runtime.audit(session_task_id, .{
+        .kind = .capability_granted,
+        .capability_id = policy_capability_id,
+        .tick = 0,
+    }) catch unreachable;
 }
 
 fn mintPolicyCapability(
     self: *SessionManager,
+    holder: principal.PrincipalId,
     policy_authority: principal.PrincipalId,
     policy_service_id: u64,
     session_task_id: u64,
 ) capability.Capability {
     return self.capability_table.mint(.{
-        .holder = policy_authority,
+        .holder = holder,
         .issuer = policy_authority,
         .target = .{ .kind = .policy, .id = policy_service_id },
         .rights = .{
@@ -528,8 +558,8 @@ fn runServiceBootstrap(
     state: *const BootstrapState,
     kernel_port: *component_port.KernelPort,
     service_bindings: *ServiceBindings,
-) void {
-    session_service_bootstrap.run(env, state, kernel_port, service_bindings);
+) bool {
+    return session_service_bootstrap.run(env, state, kernel_port, service_bindings);
 }
 
 fn runSessionLifecycle(
@@ -539,6 +569,7 @@ fn runSessionLifecycle(
     notes_object_capability: capability.Capability,
 ) void {
     var lifecycle_context = scenario_world.Context{
+        .capability_table = &self.capability_table,
         .runtime = &self.runtime,
         .runtime_service = &self.runtime_service,
         .supervisor = &self.supervisor,

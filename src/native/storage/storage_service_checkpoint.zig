@@ -54,6 +54,7 @@ pub fn makeService(
         .service_id = service_id,
         .task_id = task_id,
         .owner = owner,
+        .capability_table = null,
         .loaded_from_volume = loaded_from_volume,
         .checkpoint_enabled = true,
         .deferred_checkpoint_count = 0,

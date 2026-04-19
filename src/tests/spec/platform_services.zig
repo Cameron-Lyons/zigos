@@ -6,6 +6,7 @@ const contract = @import("../../native/session/contract.zig");
 const denial_explanation = @import("../../native/policy/denial_explanation.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
+const capability = @import("../../native/kernel_api/capability.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const measured_boot = @import("../../native/platform/measured_boot.zig");
 const network_policy = @import("../../native/sync/network_policy.zig");
@@ -159,6 +160,7 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
     try std.testing.expect(supervisor_instance.markHealthy(storage_record.id, 1));
 
     var directory = driver_service.Directory.init();
+    var capabilities = capability.CapabilityTable.init();
     const bundle = manifest.BundleManifest{
         .bundle_id = "svc.driver.storage-runtime",
         .display_name = "Storage Driver Runtime",
@@ -168,12 +170,22 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
             .signer = "zigos-spec-driver",
         },
     };
+    const storage_authority = try spec_support.driverAuthority(
+        &capabilities,
+        storage_record.owner,
+        1_401,
+        0x0000_1F00_0002,
+        .storage_controller,
+    );
     const storage_driver = try directory.register(.{
         .service_id = storage_record.id,
         .owner_task_id = 1_401,
         .device_id = 0x0000_1F00_0002,
         .device_class = .storage_controller,
-        .authority = spec_support.driverAuthority(storage_record.owner, 801, 1_401, 0x0000_1F00_0002, .storage_controller),
+        .authority_capability_id = storage_authority.id,
+        .capability_table = &capabilities,
+        .requester = storage_authority.holder,
+        .now_ticks = 1,
         .bundle = bundle,
     });
 

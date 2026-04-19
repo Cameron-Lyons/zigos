@@ -33,14 +33,13 @@ pub fn policyAuthority(serial: u64) principal.PrincipalId {
 }
 
 pub fn driverAuthority(
+    capability_table: *capability.CapabilityTable,
     holder: principal.PrincipalId,
-    capability_id: u64,
     task_id: u64,
     device_id: u64,
     device_class: driver_service.DeviceClass,
-) capability.Capability {
-    return .{
-        .id = capability_id,
+) !capability.Capability {
+    return capability_table.mint(.{
         .holder = holder,
         .issuer = policyAuthority(1),
         .target = driver_service.authorityTarget(device_id),
@@ -55,9 +54,8 @@ pub fn driverAuthority(
             .expires_at_ticks = std.math.maxInt(u64),
             .renewable = true,
         },
-        .revocation_generation = 1,
         .audit = .{},
-    };
+    });
 }
 
 pub fn defaultBudget(background_allowed: bool) task_runtime.ResourceBudget {

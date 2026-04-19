@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
+const bootstrap_capabilities = @import("../session/bootstrap_capabilities.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const support = @import("../session/session_manager_support.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
@@ -14,12 +15,6 @@ else
 
 fn executeUserspaceProbe(env: *const support.Environment, task_id: u64) void {
     _ = env.userspace_scheduler.executeTask(task_id, 0);
-}
-
-fn grantTaskCapability(env: *const support.Environment, task_id: u64, capability_id: u64) void {
-    if (!env.runtime.hasCapability(task_id, capability_id)) {
-        env.runtime.grantCapability(task_id, capability_id) catch unreachable;
-    }
 }
 
 pub fn run(
@@ -50,7 +45,15 @@ pub fn run(
         },
         env.userspace_scheduler,
     ) catch unreachable;
-    grantTaskCapability(env, storage_task_desc.task_id, state.session_capability.id);
+    const storage_authority_capability_id = bootstrap_capabilities.deriveTaskCapability(
+        kernel_port,
+        state.session_task.id,
+        state.session_capability.id,
+        storage_task_desc.task_id,
+        bootstrap_capabilities.serviceBootstrapRights(),
+        3,
+        3,
+    ) catch unreachable;
     executeUserspaceProbe(env, storage_task_desc.task_id);
     const transport_probe_task = userspace_launch.launchRegisteredKernel(
         env.userspace_catalog,
@@ -75,13 +78,20 @@ pub fn run(
         },
         env.userspace_scheduler,
     ) catch unreachable;
-    grantTaskCapability(env, transport_probe_task.task_id, state.session_capability.id);
-    grantTaskCapability(env, transport_probe_task.task_id, state.policy_capability.id);
+    const transport_probe_authority_id = bootstrap_capabilities.deriveTaskCapability(
+        kernel_port,
+        state.session_task.id,
+        state.session_capability.id,
+        transport_probe_task.task_id,
+        bootstrap_capabilities.transportBootstrapRights(),
+        4,
+        4,
+    ) catch unreachable;
     common.printBootMarker(boot_markers.transport_task_create_ok);
 
     const storage_endpoint = kernel_port.endpointCreate(.{
         .header = component_port.makeHeader(.endpoint_create, 3, storage_task_desc.task_id),
-        .authority_capability_id = state.session_capability.id,
+        .authority_capability_id = storage_authority_capability_id,
         .owner_task_id = storage_task_desc.task_id,
         .label = support.bootstrap_storage_interface.name,
         .flags = .{
@@ -92,7 +102,7 @@ pub fn run(
     common.printBootMarker("ZIGOS:TRANSPORT:ENDPOINT_CREATE:OK");
     kernel_port.serviceRegister(.{
         .header = component_port.makeHeader(.service_register, 4, storage_task_desc.task_id),
-        .authority_capability_id = state.session_capability.id,
+        .authority_capability_id = storage_authority_capability_id,
         .service_id = state.services.storage_service.id,
         .owner_task_id = storage_task_desc.task_id,
         .endpoint_capability_id = storage_endpoint.capability_id,
@@ -102,14 +112,14 @@ pub fn run(
 
     const transport_probe_endpoint = kernel_port.endpointCreate(.{
         .header = component_port.makeHeader(.endpoint_create, 5, transport_probe_task.task_id),
-        .authority_capability_id = state.session_capability.id,
+        .authority_capability_id = transport_probe_authority_id,
         .owner_task_id = transport_probe_task.task_id,
         .label = "transport.probe",
         .flags = .{ .local_only = true },
     }, 4) catch unreachable;
     _ = kernel_port.serviceConnect(.{
         .header = component_port.makeHeader(.service_connect, 6, transport_probe_task.task_id),
-        .authority_capability_id = state.session_capability.id,
+        .authority_capability_id = transport_probe_authority_id,
         .endpoint_capability_id = transport_probe_endpoint.capability_id,
         .interface = support.bootstrap_storage_interface,
     }, 4) catch unreachable;
@@ -117,7 +127,7 @@ pub fn run(
 
     const transport_probe_shm = kernel_port.sharedMemoryCreate(.{
         .header = component_port.makeHeader(.shared_memory_create, 7, transport_probe_task.task_id),
-        .authority_capability_id = state.session_capability.id,
+        .authority_capability_id = transport_probe_authority_id,
         .owner_task_id = transport_probe_task.task_id,
         .size_bytes = 4096,
     }, 5) catch unreachable;
@@ -148,7 +158,7 @@ pub fn run(
 
     const transport_probe_resources = kernel_port.resourceQuery(.{
         .header = component_port.makeHeader(.resource_query, 10, transport_probe_task.task_id),
-        .authority_capability_id = state.session_capability.id,
+        .authority_capability_id = transport_probe_authority_id,
         .task_id = transport_probe_task.task_id,
     }, 7) catch unreachable;
     if (transport_probe_resources.endpoint_count == 1) {
@@ -156,7 +166,7 @@ pub fn run(
     }
     const transport_probe_accounting = kernel_port.accountingQuery(.{
         .header = component_port.makeHeader(.accounting_query, 11, transport_probe_task.task_id),
-        .authority_capability_id = state.session_capability.id,
+        .authority_capability_id = transport_probe_authority_id,
         .task_id = transport_probe_task.task_id,
     }, 7) catch unreachable;
     if (transport_probe_accounting.audit_event_count != 0) {
@@ -164,13 +174,13 @@ pub fn run(
     }
     if ((kernel_port.timeQuery(.{
         .header = component_port.makeHeader(.time_query, 12, transport_probe_task.task_id),
-        .authority_capability_id = state.session_capability.id,
+        .authority_capability_id = transport_probe_authority_id,
     }, 7) catch unreachable) == 7) {
         common.printBootMarker("ZIGOS:TRANSPORT:TIME_QUERY:OK");
     }
 
     const derivable_capability = kernel_port.capabilityMint(.{
-        .header = component_port.makeHeader(.capability_mint, 13, transport_probe_task.task_id),
+        .header = component_port.makeHeader(.capability_mint, 13, state.session_task.id),
         .policy_capability_id = state.policy_capability.id,
         .request = .{
             .holder = env.runtime.find(transport_probe_task.task_id).?.owner,
@@ -204,7 +214,7 @@ pub fn run(
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_MINT:OK");
     _ = kernel_port.capabilityQuery(.{
         .header = component_port.makeHeader(.capability_query, 14, transport_probe_task.task_id),
-        .authority_capability_id = state.session_capability.id,
+        .authority_capability_id = transport_probe_authority_id,
         .capability_id = derivable_capability.capability_id,
     }, 7) catch unreachable;
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_QUERY:OK");
@@ -234,7 +244,7 @@ pub fn run(
     }) catch unreachable;
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_DERIVE:OK");
     kernel_port.capabilityRevoke(.{
-        .header = component_port.makeHeader(.capability_revoke, 16, transport_probe_task.task_id),
+        .header = component_port.makeHeader(.capability_revoke, 16, state.session_task.id),
         .authority_capability_id = state.policy_capability.id,
         .capability_id = derivable_capability.capability_id,
     }, 7) catch unreachable;
@@ -263,35 +273,20 @@ pub fn run(
         },
         env.userspace_scheduler,
     ) catch unreachable;
-    grantTaskCapability(env, termination_probe_task.task_id, state.policy_capability.id);
-    const termination_probe_capability = kernel_port.capabilityMint(.{
-        .header = component_port.makeHeader(.capability_mint, 18, termination_probe_task.task_id),
-        .policy_capability_id = state.policy_capability.id,
-        .request = .{
-            .holder = env.runtime.find(termination_probe_task.task_id).?.owner,
-            .issuer = state.ids.policy_authority,
-            .target = .{ .kind = .task, .id = termination_probe_task.task_id },
-            .rights = .{ .task_terminate = true },
-            .scope = .{
-                .task_id = termination_probe_task.task_id,
-                .local_only = true,
-                .broker_only = true,
-            },
-            .lease = .{
-                .issued_at_ticks = 8,
-                .expires_at_ticks = 50,
-                .renewable = false,
-            },
-            .audit = .{
-                .policy_generation = 1,
-                .source_task_id = termination_probe_task.task_id,
-                .broker_service_id = state.services.policy_service.id,
-            },
-        },
-    }, 8) catch unreachable;
+    const termination_probe_capability_id = bootstrap_capabilities.mintTaskCapability(
+        kernel_port,
+        state.session_task.id,
+        state.policy_capability.id,
+        termination_probe_task.task_id,
+        .{ .kind = .task, .id = termination_probe_task.task_id },
+        .{ .task_terminate = true },
+        state.ids.policy_authority,
+        18,
+        8,
+    ) catch unreachable;
     _ = kernel_port.taskTerminate(.{
         .header = component_port.makeHeader(.task_terminate, 19, termination_probe_task.task_id),
-        .task_capability_id = termination_probe_capability.capability_id,
+        .task_capability_id = termination_probe_capability_id,
     }, 9) catch unreachable;
     common.printBootMarker("ZIGOS:TRANSPORT:TASK_TERMINATE:OK");
 }

@@ -38,6 +38,7 @@ pub const diagnostic_ledger_signer = signing.SignerIdentity{
 };
 
 pub const Context = struct {
+    capability_table: *capability.CapabilityTable,
     runtime: *task_runtime.Runtime,
     runtime_service: *task_runtime_service_mod.Service,
     supervisor: *supervisor_mod.Supervisor,

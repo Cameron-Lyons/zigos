@@ -307,6 +307,7 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
             .task_create = true,
             .endpoint_create = true,
             .endpoint_connect = true,
+            .capability_derive = true,
             .ipc_peer = true,
         },
         .scope = .{ .local_only = true },
@@ -371,11 +372,31 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
     });
     try std.testing.expect(abi.taskFlagsHas(launched.flags, abi.TASK_FLAG_USERSPACE_PROCESS));
     try std.testing.expect(runtime.find(launched.task_id).?.hasLoadedExecutable());
-    try runtime.grantCapability(launched.task_id, authority.id);
+    const launched_authority = try port.capabilityDerive(.{
+        .header = component_port.makeHeader(.capability_derive, 3, session_task.id),
+        .request = .{
+            .parent_capability_id = authority.id,
+            .holder = runtime.find(launched.task_id).?.owner,
+            .rights = .{
+                .endpoint_create = true,
+                .endpoint_connect = true,
+                .ipc_peer = true,
+            },
+            .scope = .{
+                .task_id = launched.task_id,
+                .local_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = 2,
+                .expires_at_ticks = 100,
+                .renewable = false,
+            },
+        },
+    });
 
     const service_endpoint = try port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, 3, launched.task_id),
-        .authority_capability_id = authority.id,
+        .header = component_port.makeHeader(.endpoint_create, 4, launched.task_id),
+        .authority_capability_id = launched_authority.capability_id,
         .owner_task_id = launched.task_id,
         .label = "zigos.object.spec-storage",
         .flags = .{
@@ -384,8 +405,8 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         },
     }, 3);
     try port.serviceRegister(.{
-        .header = component_port.makeHeader(.service_register, 4, launched.task_id),
-        .authority_capability_id = authority.id,
+        .header = component_port.makeHeader(.service_register, 5, launched.task_id),
+        .authority_capability_id = launched_authority.capability_id,
         .service_id = 123,
         .owner_task_id = launched.task_id,
         .endpoint_capability_id = service_endpoint.capability_id,
