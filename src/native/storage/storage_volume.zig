@@ -50,6 +50,13 @@ pub const image_bytes: usize = slot_count * slot_bytes;
 pub const max_payload_bytes: usize = payload_sectors * sector_size;
 pub const required_device_sectors: u64 = slot_count * slot_sectors;
 pub const max_signer_bytes: usize = 48;
+const root_sector_count: u32 = 2;
+const data_start_sector: u32 = root_sector_count;
+const data_start_byte: usize = data_start_sector * sector_size;
+const data_capacity_bytes: usize = image_bytes - data_start_byte;
+const root_magic = "ZG4LOG1";
+const root_format_version: u16 = 1;
+const max_workspace_state_bytes: usize = 16 * 1024;
 
 const volume_magic = "ZG4VOL1";
 const payload_magic = "ZG4STATE";
@@ -60,6 +67,7 @@ pub const Error = error{
     CorruptImage,
     ImageTooSmall,
     InvalidSignatureEncoding,
+    MissingCheckpoint,
     NoSpaceLeft,
     UnsupportedVersion,
 };
@@ -75,7 +83,9 @@ pub const Backend = struct {
 };
 
 var io_payload_buffer: [max_payload_bytes]u8 = undefined;
+var io_log_buffer: [data_capacity_bytes]u8 = undefined;
 var sector_buffer: [sector_size]u8 = [_]u8{0} ** sector_size;
+var workspace_state_buffer: [max_workspace_state_bytes]u8 = undefined;
 var attached_backend_present = false;
 var attached_backend_sector_count: u64 = 0;
 var attached_backend_read: *const fn (u64, [*]u8, usize) callconv(.c) bool = unattachedRead;
@@ -179,6 +189,45 @@ const SlotHeader = struct {
     checksum: u64,
 };
 
+const WorkspaceSummary = struct {
+    id: u64 = 0,
+    generation: u32 = 0,
+    state_hash: u64 = 0,
+};
+
+const RootState = struct {
+    generation: u64 = 0,
+    log_bytes: u32 = 0,
+    next_object_id: u64 = 1,
+    next_version_id: u64 = 1,
+    next_workspace_id: u64 = 1,
+    next_snapshot_id: u64 = 1,
+    last_version_id: u64 = 0,
+    last_snapshot_id: u64 = 0,
+    workspace_summary_count: usize = 0,
+    workspace_summaries: [workspace.MAX_WORKSPACES]WorkspaceSummary =
+        [_]WorkspaceSummary{WorkspaceSummary{}} ** workspace.MAX_WORKSPACES,
+};
+
+const LoadedRoot = struct {
+    sector_index: u32,
+    root: RootState,
+};
+
+const LogRecordKind = enum(u8) {
+    checkpoint = 1,
+    object_state = 2,
+    version_state = 3,
+    workspace_state = 4,
+    snapshot_state = 5,
+};
+
+const LogRecordHeader = struct {
+    kind: LogRecordKind,
+    payload_len: u32,
+    checksum: u64,
+};
+
 const AttachedBackendKind = enum(u8) {
     none,
     generic,
@@ -228,10 +277,9 @@ pub fn clearAttachedVolume() void {
     if (!hasAttachedDevice()) return;
     if (attached_backend_sector_count < required_device_sectors) return;
     @memset(sector_buffer[0..], 0);
-    var slot_index: u32 = 0;
-    while (slot_index < slot_count) : (slot_index += 1) {
-        const header_lba = slotBaseLba(slot_index);
-        if (!writeAttachedRange(header_lba, sector_buffer[0..])) return;
+    var sector_index: u32 = 0;
+    while (sector_index < root_sector_count) : (sector_index += 1) {
+        if (!writeAttachedRange(sector_index, sector_buffer[0..])) return;
     }
 }
 
@@ -239,9 +287,10 @@ pub fn loadFromVolume(store: *object_store.Store, workspaces: *workspace.Directo
     if (!hasAttachedDevice()) return false;
     if (attached_backend_sector_count < required_device_sectors) return false;
 
-    const candidate = (findLatestBackendSlot() catch return false) orelse return false;
-    const payload = readBackendPayload(candidate.slot_index, candidate.header.payload_len) catch return false;
-    deserializeState(store, workspaces, payload) catch return false;
+    const loaded = (findLatestBackendRoot() catch return false) orelse return false;
+    if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_capacity_bytes) return false;
+    if (!readAttachedBytes(data_start_byte, io_log_buffer[0..loaded.root.log_bytes])) return false;
+    replayLog(store, workspaces, io_log_buffer[0..loaded.root.log_bytes], loaded.root) catch return false;
     return true;
 }
 
@@ -249,45 +298,429 @@ pub fn saveToVolume(store: *const object_store.Store, workspaces: *const workspa
     if (!hasAttachedDevice()) return .{ .generation = 0 };
     if (attached_backend_sector_count < required_device_sectors) return error.ImageTooSmall;
 
-    const current = findLatestBackendSlot() catch null;
-    const payload_len = try serializeState(store, workspaces, io_payload_buffer[0..]);
-    const next_slot_index: u32 = if (current) |slot| (slot.slot_index + 1) % slot_count else 0;
-    const generation: u64 = if (current) |slot| slot.header.generation + 1 else 1;
-    const checksum = checksumBytes(io_payload_buffer[0..payload_len]);
-
-    try writeBackendPayload(next_slot_index, io_payload_buffer[0..payload_len]);
-    try writeBackendHeader(next_slot_index, .{
-        .generation = generation,
-        .payload_len = @intCast(payload_len),
-        .checksum = checksum,
+    const current = findLatestBackendRoot() catch null;
+    return saveIncremental(current, store, workspaces, BackendWriteFns{
+        .write_bytes = writeAttachedBytes,
+        .write_root = writeBackendRoot,
     });
-
-    return .{ .generation = generation };
 }
 pub fn saveToImage(image: []u8, store: *const object_store.Store, workspaces: *const workspace.Directory) !PersistResult {
     if (image.len < image_bytes) return error.ImageTooSmall;
-    const current = findLatestImageSlot(image) catch null;
-    const payload_len = try serializeState(store, workspaces, io_payload_buffer[0..]);
-    const next_slot_index: u32 = if (current) |slot| (slot.slot_index + 1) % slot_count else 0;
-    const generation: u64 = if (current) |slot| slot.header.generation + 1 else 1;
-    const checksum = checksumBytes(io_payload_buffer[0..payload_len]);
-
-    try writeImagePayload(image, next_slot_index, io_payload_buffer[0..payload_len]);
-    try writeImageHeader(image, next_slot_index, .{
-        .generation = generation,
-        .payload_len = @intCast(payload_len),
-        .checksum = checksum,
+    const current = findLatestImageRoot(image) catch null;
+    return saveIncremental(current, store, workspaces, ImageWriteFns{
+        .image = image,
     });
-
-    return .{ .generation = generation };
 }
 
 pub fn loadFromImage(image: []const u8, store: *object_store.Store, workspaces: *workspace.Directory) !u64 {
     if (image.len < image_bytes) return error.ImageTooSmall;
-    const candidate = (try findLatestImageSlot(image)) orelse return error.CorruptImage;
-    const payload = try readImagePayload(image, candidate.slot_index, candidate.header.payload_len, io_payload_buffer[0..]);
-    try deserializeState(store, workspaces, payload);
-    return candidate.header.generation;
+    const loaded = (try findLatestImageRoot(image)) orelse return error.CorruptImage;
+    if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_capacity_bytes) return error.CorruptImage;
+    @memcpy(io_log_buffer[0..loaded.root.log_bytes], image[data_start_byte .. data_start_byte + loaded.root.log_bytes]);
+    try replayLog(store, workspaces, io_log_buffer[0..loaded.root.log_bytes], loaded.root);
+    return loaded.root.generation;
+}
+
+const BackendWriteFns = struct {
+    write_bytes: *const fn (offset: usize, bytes: []const u8) bool,
+    write_root: *const fn (sector_index: u32, root: RootState) Error!void,
+};
+
+const ImageWriteFns = struct {
+    image: []u8,
+};
+
+fn saveIncremental(
+    current: ?LoadedRoot,
+    store: *const object_store.Store,
+    workspaces: *const workspace.Directory,
+    writer: anytype,
+) Error!PersistResult {
+    const current_generation = if (current) |loaded| loaded.root.generation else 0;
+    const append_len = if (current) |loaded|
+        try buildDeltaLog(io_log_buffer[0..], loaded.root, store, workspaces)
+    else
+        0;
+
+    if (current != null and append_len == 0) {
+        return .{ .generation = current_generation };
+    }
+
+    if (current != null and appendLenFits(current.?.root, append_len)) {
+        const next_generation = current_generation + 1;
+        const next_root = buildRootState(next_generation, current.?.root.log_bytes + @as(u32, @intCast(append_len)), store, workspaces);
+        const next_root_sector = nextRootSector(current);
+        try writeBytes(writer, data_start_byte + current.?.root.log_bytes, io_log_buffer[0..append_len]);
+        try writeRoot(writer, next_root_sector, next_root);
+        return .{ .generation = next_generation };
+    }
+
+    const checkpoint_payload_len = try serializeState(store, workspaces, io_payload_buffer[0..]);
+    var log_writer = CursorWriter{ .buffer = io_log_buffer[0..] };
+    try appendRecordPayload(&log_writer, .checkpoint, io_payload_buffer[0..checkpoint_payload_len]);
+
+    const next_generation = current_generation + 1;
+    const next_root = buildRootState(next_generation, @intCast(log_writer.offset), store, workspaces);
+    const next_root_sector = nextRootSector(current);
+    try writeBytes(writer, data_start_byte, io_log_buffer[0..log_writer.offset]);
+    try writeRoot(writer, next_root_sector, next_root);
+    return .{ .generation = next_generation };
+}
+
+fn appendLenFits(root: RootState, append_len: usize) bool {
+    return @as(usize, root.log_bytes) + append_len <= data_capacity_bytes;
+}
+
+fn writeBytes(writer: anytype, offset: usize, bytes: []const u8) Error!void {
+    switch (@TypeOf(writer)) {
+        ImageWriteFns => {
+            if (offset + bytes.len > writer.image.len) return error.ImageTooSmall;
+            @memcpy(writer.image[offset .. offset + bytes.len], bytes);
+        },
+        BackendWriteFns => {
+            if (!writer.write_bytes(offset, bytes)) return error.CorruptImage;
+        },
+        else => @compileError("unsupported incremental writer"),
+    }
+}
+
+fn writeRoot(writer: anytype, sector_index: u32, root: RootState) Error!void {
+    switch (@TypeOf(writer)) {
+        ImageWriteFns => try writeImageRoot(writer.image, sector_index, root),
+        BackendWriteFns => try writer.write_root(sector_index, root),
+        else => @compileError("unsupported root writer"),
+    }
+}
+
+fn buildDeltaLog(
+    buffer: []u8,
+    root: RootState,
+    store: *const object_store.Store,
+    workspaces: *const workspace.Directory,
+) Error!usize {
+    var writer = CursorWriter{ .buffer = buffer };
+
+    for (store.objects) |slot| {
+        if (!slot.in_use) continue;
+        if (slot.object.latest_version_id <= root.last_version_id) continue;
+        try appendObjectRecord(&writer, slot.object);
+    }
+
+    for (store.versions) |slot| {
+        if (!slot.in_use) continue;
+        if (slot.version.id <= root.last_version_id) continue;
+        try appendVersionRecord(&writer, slot.version);
+    }
+
+    for (workspaces.workspaces) |slot| {
+        if (!persistableWorkspaceSlot(slot)) continue;
+        const summary = findWorkspaceSummary(root, slot.workspace.id);
+        const state_hash = try workspaceStateHash(&slot.workspace);
+        if (summary) |persisted| {
+            if (persisted.generation == slot.workspace.generation and persisted.state_hash == state_hash) continue;
+        }
+        try appendWorkspaceRecord(&writer, slot.workspace);
+    }
+
+    for (workspaces.snapshots) |slot| {
+        if (!persistableSnapshotSlot(slot)) continue;
+        if (slot.snapshot.id <= root.last_snapshot_id) continue;
+        try appendSnapshotRecord(&writer, slot.snapshot);
+    }
+
+    return writer.offset;
+}
+
+fn buildRootState(
+    generation: u64,
+    log_bytes: u32,
+    store: *const object_store.Store,
+    workspaces: *const workspace.Directory,
+) RootState {
+    var root = RootState{
+        .generation = generation,
+        .log_bytes = log_bytes,
+        .next_object_id = store.next_object_id,
+        .next_version_id = store.next_version_id,
+        .next_workspace_id = workspaces.next_workspace_id,
+        .next_snapshot_id = workspaces.next_snapshot_id,
+        .last_version_id = if (store.next_version_id > 0) store.next_version_id - 1 else 0,
+        .last_snapshot_id = if (workspaces.next_snapshot_id > 0) workspaces.next_snapshot_id - 1 else 0,
+    };
+    for (workspaces.workspaces) |slot| {
+        if (!persistableWorkspaceSlot(slot)) continue;
+        root.workspace_summaries[root.workspace_summary_count] = .{
+            .id = slot.workspace.id,
+            .generation = slot.workspace.generation,
+            .state_hash = workspaceStateHash(&slot.workspace) catch unreachable,
+        };
+        root.workspace_summary_count += 1;
+    }
+    return root;
+}
+
+fn findWorkspaceSummary(root: RootState, workspace_id: u64) ?WorkspaceSummary {
+    var index: usize = 0;
+    while (index < root.workspace_summary_count) : (index += 1) {
+        const summary = root.workspace_summaries[index];
+        if (summary.id == workspace_id) return summary;
+    }
+    return null;
+}
+
+fn workspaceStateHash(record: *const workspace.WorkspaceRecord) Error!u64 {
+    var writer = CursorWriter{ .buffer = workspace_state_buffer[0..] };
+    try encodeWorkspaceBody(&writer, record.*);
+    return checksumBytes(workspace_state_buffer[0..writer.offset]);
+}
+
+fn replayLog(store: *object_store.Store, workspaces: *workspace.Directory, log: []const u8, root: RootState) Error!void {
+    store.reset();
+    workspaces.reset();
+
+    var reader = CursorReader{ .buffer = log };
+    var saw_checkpoint = false;
+    while (reader.offset < reader.buffer.len) {
+        const header = try readRecordHeader(&reader);
+        const payload = try reader.readSlice(header.payload_len);
+        if (checksumBytes(payload) != header.checksum) return error.ChecksumMismatch;
+
+        switch (header.kind) {
+            .checkpoint => {
+                try deserializeState(store, workspaces, payload);
+                saw_checkpoint = true;
+            },
+            .object_state => try applyObjectRecord(store, payload),
+            .version_state => try applyVersionRecord(store, payload),
+            .workspace_state => try applyWorkspaceRecord(workspaces, payload),
+            .snapshot_state => try applySnapshotRecord(workspaces, payload),
+        }
+    }
+    if (!saw_checkpoint) return error.MissingCheckpoint;
+
+    store.next_object_id = root.next_object_id;
+    store.next_version_id = root.next_version_id;
+    workspaces.next_workspace_id = root.next_workspace_id;
+    workspaces.next_snapshot_id = root.next_snapshot_id;
+    store.rebuildIndexes();
+    workspaces.rebuildIndexes();
+}
+
+fn appendObjectRecord(writer: *CursorWriter, record: object_store.ObjectRecord) Error!void {
+    const header_offset = try beginRecord(writer, .object_state);
+    try encodeObjectBody(writer, record);
+    try finishRecord(writer, header_offset);
+}
+
+fn appendVersionRecord(writer: *CursorWriter, record: object_store.VersionRecord) Error!void {
+    const header_offset = try beginRecord(writer, .version_state);
+    try encodeVersionBody(writer, record);
+    try finishRecord(writer, header_offset);
+}
+
+fn appendWorkspaceRecord(writer: *CursorWriter, record: workspace.WorkspaceRecord) Error!void {
+    const header_offset = try beginRecord(writer, .workspace_state);
+    try encodeWorkspaceBody(writer, record);
+    try finishRecord(writer, header_offset);
+}
+
+fn appendSnapshotRecord(writer: *CursorWriter, record: workspace.SnapshotRecord) Error!void {
+    const header_offset = try beginRecord(writer, .snapshot_state);
+    try encodeSnapshotBody(writer, record);
+    try finishRecord(writer, header_offset);
+}
+
+fn appendRecordPayload(writer: *CursorWriter, kind: LogRecordKind, payload: []const u8) Error!void {
+    const header_offset = try beginRecord(writer, kind);
+    try writer.writeBytes(payload);
+    try finishRecord(writer, header_offset);
+}
+
+fn beginRecord(writer: *CursorWriter, kind: LogRecordKind) Error!usize {
+    const header_offset = writer.offset;
+    try writer.writeByte(@intFromEnum(kind));
+    try writer.writeU32(0);
+    try writer.writeU64(0);
+    return header_offset;
+}
+
+fn finishRecord(writer: *CursorWriter, header_offset: usize) Error!void {
+    const payload_offset = header_offset + recordHeaderLen();
+    const payload_len = writer.offset - payload_offset;
+    const checksum = checksumBytes(writer.buffer[payload_offset..writer.offset]);
+    writeU32At(writer.buffer[header_offset + 1 .. header_offset + 5], @intCast(payload_len));
+    writeU64At(writer.buffer[header_offset + 5 .. header_offset + 13], checksum);
+}
+
+fn recordHeaderLen() usize {
+    return 1 + 4 + 8;
+}
+
+fn readRecordHeader(reader: *CursorReader) Error!LogRecordHeader {
+    return .{
+        .kind = try parseLogRecordKind(try reader.readByte()),
+        .payload_len = try reader.readU32(),
+        .checksum = try reader.readU64(),
+    };
+}
+
+fn parseLogRecordKind(value: u8) Error!LogRecordKind {
+    return switch (value) {
+        @intFromEnum(LogRecordKind.checkpoint) => .checkpoint,
+        @intFromEnum(LogRecordKind.object_state) => .object_state,
+        @intFromEnum(LogRecordKind.version_state) => .version_state,
+        @intFromEnum(LogRecordKind.workspace_state) => .workspace_state,
+        @intFromEnum(LogRecordKind.snapshot_state) => .snapshot_state,
+        else => error.CorruptImage,
+    };
+}
+
+fn encodeObjectBody(writer: *CursorWriter, record: object_store.ObjectRecord) Error!void {
+    try writer.writeU64(record.id);
+    try writer.writeByte(@intFromEnum(record.object_type));
+    try writer.writeU64(record.latest_version_id);
+    try writer.writeU16(record.version_count);
+}
+
+fn encodeVersionBody(writer: *CursorWriter, record: object_store.VersionRecord) Error!void {
+    try writer.writeU64(record.id);
+    try writer.writeU64(record.object_id);
+    try writer.writeU64(record.previous_version_id);
+    try writer.writeByte(@intFromEnum(record.object_type));
+    try writer.writeBytes(&record.address);
+    try writeMetadata(writer, record.metadata);
+    try writer.writeU16(@intCast(record.payload_len));
+    try writer.writeBytes(record.payloadSlice());
+}
+
+fn encodeWorkspaceBody(writer: *CursorWriter, record: workspace.WorkspaceRecord) Error!void {
+    try writer.writeU64(record.id);
+    try writePrincipal(writer, record.owner);
+    try writeText(writer, record.labelSlice());
+    try writer.writeU32(record.generation);
+    try writer.writeU16(@intCast(record.entry_count));
+    for (record.entries[0..record.entry_count]) |entry| {
+        try writeEntry(writer, entry);
+    }
+    try writer.writeU16(@intCast(record.share_grant_count));
+    for (record.share_grants[0..record.share_grant_count]) |grant| {
+        try writeShareGrant(writer, grant);
+    }
+    try writer.writeU16(@intCast(record.deleted_count));
+    for (record.deleted_entries[0..record.deleted_count]) |entry| {
+        try writeEntry(writer, entry);
+    }
+}
+
+fn encodeSnapshotBody(writer: *CursorWriter, record: workspace.SnapshotRecord) Error!void {
+    try writer.writeU64(record.id);
+    try writer.writeU64(record.workspace_id);
+    try writer.writeU32(record.generation);
+    try writeText(writer, record.labelSlice());
+    try writeSignature(writer, record.signature);
+    try writer.writeU16(@intCast(record.entry_count));
+    for (record.entries[0..record.entry_count]) |entry| {
+        try writeEntry(writer, entry);
+    }
+}
+
+fn applyObjectRecord(store: *object_store.Store, payload: []const u8) Error!void {
+    var reader = CursorReader{ .buffer = payload };
+    const object_id = try reader.readU64();
+    const object_type = try parseObjectType(try reader.readByte());
+    const latest_version_id = try reader.readU64();
+    const version_count = try reader.readU16();
+
+    if (store.object(object_id)) |record| {
+        record.object_type = object_type;
+        record.latest_version_id = latest_version_id;
+        record.version_count = version_count;
+        return;
+    }
+
+    const slot = nextObjectSlot(store) orelse return error.CorruptImage;
+    slot.in_use = true;
+    slot.object = .{
+        .id = object_id,
+        .object_type = object_type,
+        .latest_version_id = latest_version_id,
+        .version_count = version_count,
+    };
+}
+
+fn applyVersionRecord(store: *object_store.Store, payload: []const u8) Error!void {
+    var reader = CursorReader{ .buffer = payload };
+    const slot_index = nextVersionSlotIndex(store) orelse return error.CorruptImage;
+    store.versions[slot_index].in_use = true;
+    store.versions[slot_index].version.id = try reader.readU64();
+    store.versions[slot_index].version.object_id = try reader.readU64();
+    store.versions[slot_index].version.previous_version_id = try reader.readU64();
+    store.versions[slot_index].version.object_type = try parseObjectType(try reader.readByte());
+    try reader.readBytes(&store.versions[slot_index].version.address);
+    store.versions[slot_index].version.metadata = try readMetadata(&reader, &version_signers[slot_index]);
+    store.versions[slot_index].version.payload_len = @intCast(try reader.readU16());
+    if (store.versions[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
+    @memset(store.versions[slot_index].version.payload[0..], 0);
+    try reader.readBytes(store.versions[slot_index].version.payload[0..store.versions[slot_index].version.payload_len]);
+}
+
+fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) Error!void {
+    var reader = CursorReader{ .buffer = payload };
+    const workspace_id = try reader.readU64();
+    const slot = findWorkspaceSlotById(workspaces, workspace_id) orelse nextWorkspaceSlot(workspaces) orelse return error.CorruptImage;
+    slot.in_use = true;
+    slot.workspace = zeroWorkspaceRecord();
+    slot.workspace.id = workspace_id;
+    slot.workspace.owner = try readPrincipal(&reader);
+    readTextInto(&reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
+    slot.workspace.generation = try reader.readU32();
+    slot.workspace.entry_count = @intCast(try reader.readU16());
+    if (slot.workspace.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
+    for (0..slot.workspace.entry_count) |entry_index| {
+        slot.workspace.entries[entry_index] = try readEntry(&reader);
+    }
+    slot.workspace.share_grant_count = @intCast(try reader.readU16());
+    if (slot.workspace.share_grant_count > workspace.MAX_SHARE_GRANTS) return error.CorruptImage;
+    for (0..slot.workspace.share_grant_count) |grant_index| {
+        slot.workspace.share_grants[grant_index] = try readShareGrant(&reader);
+    }
+    slot.workspace.deleted_count = @intCast(try reader.readU16());
+    if (slot.workspace.deleted_count > workspace.MAX_RECOVERABLE_DELETES) return error.CorruptImage;
+    for (0..slot.workspace.deleted_count) |entry_index| {
+        slot.workspace.deleted_entries[entry_index] = try readEntry(&reader);
+    }
+}
+
+fn applySnapshotRecord(workspaces: *workspace.Directory, payload: []const u8) Error!void {
+    var reader = CursorReader{ .buffer = payload };
+    const snapshot_id = try reader.readU64();
+    const slot_index = findSnapshotSlotIndexById(workspaces, snapshot_id) orelse nextSnapshotSlotIndex(workspaces) orelse return error.CorruptImage;
+    workspaces.snapshots[slot_index].in_use = true;
+    workspaces.snapshots[slot_index].snapshot = zeroSnapshotRecord();
+    workspaces.snapshots[slot_index].snapshot.id = snapshot_id;
+    workspaces.snapshots[slot_index].snapshot.workspace_id = try reader.readU64();
+    workspaces.snapshots[slot_index].snapshot.generation = try reader.readU32();
+    readTextInto(&reader, &workspaces.snapshots[slot_index].snapshot.label, &workspaces.snapshots[slot_index].snapshot.label_len) catch return error.CorruptImage;
+    workspaces.snapshots[slot_index].snapshot.signature = try readSignature(&reader, &snapshot_signers[slot_index]);
+    workspaces.snapshots[slot_index].snapshot.entry_count = @intCast(try reader.readU16());
+    if (workspaces.snapshots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
+    for (0..workspaces.snapshots[slot_index].snapshot.entry_count) |entry_index| {
+        workspaces.snapshots[slot_index].snapshot.entries[entry_index] = try readEntry(&reader);
+    }
+}
+
+fn findWorkspaceSlotById(workspaces: *workspace.Directory, workspace_id: u64) ?*@TypeOf(workspaces.workspaces[0]) {
+    for (&workspaces.workspaces) |*slot| {
+        if (slot.in_use and slot.workspace.id == workspace_id) return slot;
+    }
+    return null;
+}
+
+fn findSnapshotSlotIndexById(workspaces: *workspace.Directory, snapshot_id: u64) ?usize {
+    for (workspaces.snapshots, 0..) |slot, index| {
+        if (slot.in_use and slot.snapshot.id == snapshot_id) return index;
+    }
+    return null;
 }
 
 fn serializeState(store: *const object_store.Store, workspaces: *const workspace.Directory, buffer: []u8) Error!usize {
@@ -706,6 +1139,175 @@ fn checksumBytes(bytes: []const u8) u64 {
     return native_util.fnv1a64(bytes);
 }
 
+fn nextRootSector(current: ?LoadedRoot) u32 {
+    return if (current) |loaded|
+        if (loaded.sector_index == 0) 1 else 0
+    else
+        0;
+}
+
+fn findLatestImageRoot(image: []const u8) Error!?LoadedRoot {
+    var best: ?LoadedRoot = null;
+    var sector_index: u32 = 0;
+    while (sector_index < root_sector_count) : (sector_index += 1) {
+        const root = readImageRoot(image, sector_index) catch continue;
+        if (best == null or root.root.generation > best.?.root.generation) {
+            best = root;
+        }
+    }
+    return best;
+}
+
+fn findLatestBackendRoot() Error!?LoadedRoot {
+    var best: ?LoadedRoot = null;
+    var sector_index: u32 = 0;
+    while (sector_index < root_sector_count) : (sector_index += 1) {
+        const root = readBackendRoot(sector_index) catch continue;
+        if (best == null or root.root.generation > best.?.root.generation) {
+            best = root;
+        }
+    }
+    return best;
+}
+
+fn readImageRoot(image: []const u8, sector_index: u32) Error!LoadedRoot {
+    const offset = @as(usize, sector_index) * sector_size;
+    if (offset + sector_size > image.len) return error.ImageTooSmall;
+    return .{
+        .sector_index = sector_index,
+        .root = try parseRoot(image[offset .. offset + sector_size]),
+    };
+}
+
+fn writeImageRoot(image: []u8, sector_index: u32, root: RootState) Error!void {
+    const offset = @as(usize, sector_index) * sector_size;
+    if (offset + sector_size > image.len) return error.ImageTooSmall;
+    try encodeRoot(image[offset .. offset + sector_size], root);
+}
+
+fn readBackendRoot(sector_index: u32) Error!LoadedRoot {
+    @memset(sector_buffer[0..], 0);
+    if (!readAttachedRange(sector_index, sector_buffer[0..])) return error.CorruptImage;
+    return .{
+        .sector_index = sector_index,
+        .root = try parseRoot(sector_buffer[0..]),
+    };
+}
+
+fn writeBackendRoot(sector_index: u32, root: RootState) Error!void {
+    @memset(sector_buffer[0..], 0);
+    try encodeRoot(sector_buffer[0..], root);
+    if (!writeAttachedRange(sector_index, sector_buffer[0..])) return error.CorruptImage;
+}
+
+fn encodeRoot(buffer: []u8, root: RootState) Error!void {
+    var writer = CursorWriter{ .buffer = buffer };
+    try writer.writeBytes(root_magic);
+    try writer.writeU16(root_format_version);
+    try writer.writeU64(root.generation);
+    try writer.writeU32(root.log_bytes);
+    try writer.writeU64(root.next_object_id);
+    try writer.writeU64(root.next_version_id);
+    try writer.writeU64(root.next_workspace_id);
+    try writer.writeU64(root.next_snapshot_id);
+    try writer.writeU64(root.last_version_id);
+    try writer.writeU64(root.last_snapshot_id);
+    try writer.writeU16(@intCast(root.workspace_summary_count));
+    for (root.workspace_summaries[0..root.workspace_summary_count]) |summary| {
+        try writer.writeU64(summary.id);
+        try writer.writeU32(summary.generation);
+        try writer.writeU64(summary.state_hash);
+    }
+    const checksum = checksumBytes(buffer[0..writer.offset]);
+    try writer.writeU64(checksum);
+}
+
+fn parseRoot(buffer: []const u8) Error!RootState {
+    var reader = CursorReader{ .buffer = buffer };
+    var magic: [root_magic.len]u8 = undefined;
+    try reader.readBytes(&magic);
+    if (!std.mem.eql(u8, &magic, root_magic)) return error.CorruptImage;
+    if ((try reader.readU16()) != root_format_version) return error.UnsupportedVersion;
+
+    var root = RootState{
+        .generation = try reader.readU64(),
+        .log_bytes = try reader.readU32(),
+        .next_object_id = try reader.readU64(),
+        .next_version_id = try reader.readU64(),
+        .next_workspace_id = try reader.readU64(),
+        .next_snapshot_id = try reader.readU64(),
+        .last_version_id = try reader.readU64(),
+        .last_snapshot_id = try reader.readU64(),
+    };
+    root.workspace_summary_count = try reader.readU16();
+    if (root.workspace_summary_count > root.workspace_summaries.len) return error.CorruptImage;
+    for (0..root.workspace_summary_count) |index| {
+        root.workspace_summaries[index] = .{
+            .id = try reader.readU64(),
+            .generation = try reader.readU32(),
+            .state_hash = try reader.readU64(),
+        };
+    }
+    if (root.log_bytes > data_capacity_bytes) return error.CorruptImage;
+    const checksum_offset = reader.offset;
+    const checksum = try reader.readU64();
+    if (checksum != checksumBytes(buffer[0..checksum_offset])) return error.ChecksumMismatch;
+    return root;
+}
+
+fn writeAttachedBytes(offset: usize, bytes: []const u8) bool {
+    if (offset + bytes.len > image_bytes) return false;
+    var remaining = bytes.len;
+    var cursor: usize = 0;
+    while (remaining > 0) {
+        const absolute_offset = offset + cursor;
+        const sector_index = absolute_offset / sector_size;
+        const sector_offset = absolute_offset % sector_size;
+        const chunk_len = @min(remaining, sector_size - sector_offset);
+
+        if (sector_offset == 0 and chunk_len == sector_size) {
+            if (!writeAttachedRange(@intCast(sector_index), bytes[cursor .. cursor + chunk_len])) return false;
+        } else {
+            if (!readAttachedRange(@intCast(sector_index), sector_buffer[0..])) return false;
+            @memcpy(sector_buffer[sector_offset .. sector_offset + chunk_len], bytes[cursor .. cursor + chunk_len]);
+            if (!writeAttachedRange(@intCast(sector_index), sector_buffer[0..])) return false;
+        }
+
+        cursor += chunk_len;
+        remaining -= chunk_len;
+    }
+    return true;
+}
+
+fn readAttachedBytes(offset: usize, buffer: []u8) bool {
+    if (offset + buffer.len > image_bytes) return false;
+    var remaining = buffer.len;
+    var cursor: usize = 0;
+    while (remaining > 0) {
+        const absolute_offset = offset + cursor;
+        const sector_index = absolute_offset / sector_size;
+        const sector_offset = absolute_offset % sector_size;
+        const chunk_len = @min(remaining, sector_size - sector_offset);
+        if (!readAttachedRange(@intCast(sector_index), sector_buffer[0..])) return false;
+        @memcpy(buffer[cursor .. cursor + chunk_len], sector_buffer[sector_offset .. sector_offset + chunk_len]);
+        cursor += chunk_len;
+        remaining -= chunk_len;
+    }
+    return true;
+}
+
+fn writeU32At(buffer: []u8, value: u32) void {
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &bytes, value, .little);
+    @memcpy(buffer[0..4], &bytes);
+}
+
+fn writeU64At(buffer: []u8, value: u64) void {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, value, .little);
+    @memcpy(buffer[0..8], &bytes);
+}
+
 const SlotCandidate = struct {
     slot_index: u32,
     header: SlotHeader,
@@ -882,6 +1484,8 @@ test "storage volume image reloads the latest persisted state across slot genera
     _ = try workspaces.commit(notes.id, 11);
     const generation_one = try saveToImage(image, &store, &workspaces);
     try std.testing.expectEqual(@as(u64, 1), generation_one.generation);
+    const root_after_first = (try findLatestImageRoot(image)).?.root;
+    const first_log_bytes = root_after_first.log_bytes;
 
     const second = try store.putVersion(.{
         .preferred_object_id = 900,
@@ -895,6 +1499,9 @@ test "storage volume image reloads the latest persisted state across slot genera
     _ = try workspaces.commit(notes.id, 13);
     const generation_two = try saveToImage(image, &store, &workspaces);
     try std.testing.expectEqual(@as(u64, 2), generation_two.generation);
+    const root_after_second = (try findLatestImageRoot(image)).?.root;
+    try std.testing.expect(root_after_second.log_bytes > first_log_bytes);
+    try std.testing.expect(root_after_second.log_bytes < first_log_bytes + 4 * sector_size);
 
     var loaded_store = object_store.Store.init();
     var loaded_workspaces = workspace.Directory.init();
@@ -925,7 +1532,7 @@ test "storage volume rejects corrupted slot payloads" {
         .metadata = try object_store.signMetadata(signer, "blob", "application/octet-stream", .blob, "blob", 10),
     });
     _ = try saveToImage(image, &store, &workspaces);
-    image[sector_size + 3] ^= 0xFF;
+    image[data_start_byte + 3] ^= 0xFF;
 
     var loaded_store = object_store.Store.init();
     var loaded_workspaces = workspace.Directory.init();

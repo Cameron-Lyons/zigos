@@ -17,15 +17,26 @@ if [ -n "${QEMU_EXTRA_ARGS:-}" ]; then
 fi
 
 set +e
-"$qemu_binary" \
-    -kernel "$kernel_path" \
-    -m "$memory_size" \
-    -display none \
-    -serial "$serial_target" \
-    -monitor none \
-    -no-reboot \
-    -device "$qemu_debug_exit_device" \
-    "${extra_args[@]}"
+if [ ${#extra_args[@]} -gt 0 ]; then
+    "$qemu_binary" \
+        -kernel "$kernel_path" \
+        -m "$memory_size" \
+        -display none \
+        -serial "$serial_target" \
+        -monitor none \
+        -no-reboot \
+        -device "$qemu_debug_exit_device" \
+        "${extra_args[@]}"
+else
+    "$qemu_binary" \
+        -kernel "$kernel_path" \
+        -m "$memory_size" \
+        -display none \
+        -serial "$serial_target" \
+        -monitor none \
+        -no-reboot \
+        -device "$qemu_debug_exit_device"
+fi
 qemu_exit_code=$?
 set -e
 
