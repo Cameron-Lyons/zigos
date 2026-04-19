@@ -1,4 +1,5 @@
 const abi = @import("../core/abi.zig");
+const bootstrap_capabilities = @import("bootstrap_capabilities.zig");
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
@@ -84,13 +85,19 @@ pub fn launchBundleService(
         },
         schedule_task,
     );
-    if (!kernel_port.kernel.runtime.hasCapability(service_task.task_id, authority_capability_id)) {
-        try kernel_port.kernel.runtime.grantCapability(service_task.task_id, authority_capability_id);
-    }
+    const service_authority_capability_id = try bootstrap_capabilities.deriveTaskCapability(
+        kernel_port,
+        controller_task_id,
+        authority_capability_id,
+        service_task.task_id,
+        bootstrap_capabilities.serviceBootstrapRights(),
+        correlation_base + 1,
+        now_ticks,
+    );
 
     const endpoint = try kernel_port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, correlation_base + 1, service_task.task_id),
-        .authority_capability_id = authority_capability_id,
+        .header = component_port.makeHeader(.endpoint_create, correlation_base + 2, service_task.task_id),
+        .authority_capability_id = service_authority_capability_id,
         .owner_task_id = service_task.task_id,
         .label = interface.name,
         .flags = .{
@@ -99,8 +106,8 @@ pub fn launchBundleService(
         },
     }, now_ticks);
     try kernel_port.serviceRegister(.{
-        .header = component_port.makeHeader(.service_register, correlation_base + 2, service_task.task_id),
-        .authority_capability_id = authority_capability_id,
+        .header = component_port.makeHeader(.service_register, correlation_base + 3, service_task.task_id),
+        .authority_capability_id = service_authority_capability_id,
         .service_id = service_id,
         .owner_task_id = service_task.task_id,
         .endpoint_capability_id = endpoint.capability_id,
@@ -121,6 +128,7 @@ pub fn attachDriver(
     supervisor: *supervisor_mod.Supervisor,
     policy_authority: principal.PrincipalId,
     policy_capability_id: u64,
+    controller_task_id: u64,
     service_id: u64,
     task_id: u64,
     owner: principal.PrincipalId,
@@ -129,44 +137,31 @@ pub fn attachDriver(
     driver_bundle_id: []const u8,
     now_ticks: u64,
 ) *driver_service.DriverRecord {
-    if (!kernel_port.kernel.runtime.hasCapability(task_id, policy_capability_id)) {
-        kernel_port.kernel.runtime.grantCapability(task_id, policy_capability_id) catch unreachable;
-    }
-    const driver_capability = kernel_port.capabilityMint(.{
-        .header = component_port.makeHeader(.capability_mint, 360 + now_ticks, task_id),
-        .policy_capability_id = policy_capability_id,
-        .request = .{
-            .holder = owner,
-            .issuer = policy_authority,
-            .target = driver_service.authorityTarget(deviceId(device_class)),
-            .rights = driver_service.allowedRightsFor(device_class),
-            .scope = .{
-                .task_id = task_id,
-                .local_only = true,
-                .broker_only = true,
-            },
-            .lease = .{
-                .issued_at_ticks = now_ticks,
-                .expires_at_ticks = std.math.maxInt(u64),
-                .renewable = true,
-            },
-            .audit = .{
-                .policy_generation = 1,
-                .source_task_id = task_id,
-                .broker_service_id = service_id,
-            },
-        },
-    }, now_ticks) catch unreachable;
+    _ = owner;
+    const driver_capability_id = bootstrap_capabilities.mintTaskCapability(
+        kernel_port,
+        controller_task_id,
+        policy_capability_id,
+        task_id,
+        driver_service.authorityTarget(deviceId(device_class)),
+        driver_service.allowedRightsFor(device_class),
+        policy_authority,
+        360 + now_ticks,
+        now_ticks,
+    ) catch unreachable;
     const driver = directory.registerSigned(.{
         .service_id = service_id,
         .owner_task_id = task_id,
         .device_id = deviceId(device_class),
         .device_class = device_class,
-        .authority = capability_table.query(driver_capability.capability_id).?,
+        .authority_capability_id = driver_capability_id,
+        .capability_table = capability_table,
+        .requester = kernel_port.kernel.runtime.find(task_id).?.owner,
+        .now_ticks = now_ticks,
         .signer = driverSigner(device_class, driver_bundle_id),
         .bootstrap_transport = bootstrap_transport,
     }) catch unreachable;
-    _ = supervisor.noteDriverAttached(service_id, device_class, driver_capability.capability_id, now_ticks);
+    _ = supervisor.noteDriverAttached(service_id, device_class, driver_capability_id, now_ticks);
     return driver;
 }
 

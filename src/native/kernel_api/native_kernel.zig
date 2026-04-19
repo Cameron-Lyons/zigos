@@ -257,10 +257,13 @@ pub const Kernel = struct {
         request: capability.MintRequest,
         now_ticks: u64,
     ) Error!abi.CapabilityDescriptor {
-        const policy_capability = try self.requireCapability(policy_capability_id, now_ticks, .{
+        _ = try self.requireTargetedCapability(policy_capability_id, now_ticks, .{
             .capability_mint = true,
-        });
-        if (policy_capability.holder.kind != .policy_authority) return error.PermissionDenied;
+        }, .policy);
+        if (request.scope.task_id) |task_id| {
+            const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+            if (!task.owner.eql(request.holder)) return error.PermissionDenied;
+        }
 
         const minted = try self.capability_table.mint(request);
         if (request.scope.task_id) |task_id| {
@@ -270,6 +273,10 @@ pub const Kernel = struct {
     }
 
     pub fn capabilityDerive(self: *Kernel, request: capability.DeriveRequest) Error!abi.CapabilityDescriptor {
+        if (request.scope.task_id) |task_id| {
+            const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+            if (!task.owner.eql(request.holder)) return error.PermissionDenied;
+        }
         const derived = try self.capability_table.derive(request);
         if (request.scope.task_id) |task_id| {
             try self.runtime.grantCapability(task_id, derived.id);
@@ -605,9 +612,14 @@ pub const Kernel = struct {
         capability_id: u64,
         now_ticks: u64,
     ) Error!void {
-        _ = now_ticks;
-        _ = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        const owned = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
+        if (!self.capability_table.isUsable(owned, now_ticks)) return error.CapabilityRevoked;
         if (!self.runtime.hasCapability(task_id, capability_id)) return error.CapabilityNotFound;
+        if (!task.owner.eql(owned.holder)) return error.PermissionDenied;
+        if (owned.scope.task_id) |scoped_task_id| {
+            if (scoped_task_id != task_id) return error.ScopeViolation;
+        }
     }
 
     fn requireCapability(

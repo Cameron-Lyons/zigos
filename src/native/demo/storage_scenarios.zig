@@ -37,6 +37,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
         context.storage_service_principal,
         storage_reloaded,
     );
+    context.storage_service_instance.bindCapabilityTable(context.capability_table);
     context.storage_service_instance.checkpoint_enabled = false;
     support.common.printBootMarker("ZIGOS:STORAGE:BOOTSTRAP:DONE");
     support.common.printBootMarker("ZIGOS:STORAGE:SEED:BOOTSTRAP_READY");
@@ -266,6 +267,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
                 context.storage_service_principal,
                 context.storage_checkpoint_store,
             );
+        context.storage_service_instance.bindCapabilityTable(context.capability_table);
         context.storage_service_instance.checkpoint_enabled = false;
         _ = context.supervisor.completeRestart(context.storage_service_id, 96);
         if (context.supervisor.hasDiagnostic(context.storage_service_id, .restart_completed) and
@@ -279,15 +281,14 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
         .workspace_id = notes_workspace_id,
         .path = "/documents/notes.md",
         .access = .read,
-    }, context.notes_object_capability, 94) catch unreachable;
+    }, context.notes_object_capability.holder, context.notes_object_capability.id, 94) catch unreachable;
     if (!bridge_view.authoritative and bridge_view.object_id == notes_object_id and
         bridge_view.version_id == notes_entry.version_id)
     {
         support.common.printBootMarker(boot_markers.storage_file_bridge_derived);
     }
 
-    const invalid_path_capability = capability.Capability{
-        .id = 0xF404,
+    const invalid_path_capability = context.capability_table.mint(.{
         .holder = context.session_user,
         .issuer = context.policy_authority,
         .target = .{ .kind = .service, .id = context.storage_service_id },
@@ -302,14 +303,13 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
             .expires_at_ticks = std.math.maxInt(u64),
             .renewable = false,
         },
-        .revocation_generation = 1,
         .audit = .{},
-    };
+    }) catch unreachable;
     if (context.storage_service_instance.bridgeResolve(.{
         .workspace_id = notes_workspace_id,
         .path = "documents/notes.md",
         .access = .read,
-    }, invalid_path_capability, 94)) |_| {} else |err| {
+    }, context.session_user, invalid_path_capability.id, 94)) |_| {} else |err| {
         if (err == error.CapabilityRequired) {
             support.common.printBootMarker(boot_markers.storage_path_authority_deprecated);
         }

@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const boot_markers = @import("../../kernel/boot/markers.zig");
+const bootstrap_capabilities = @import("bootstrap_capabilities.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const contract = @import("contract.zig");
 const driver_service = @import("../drivers/driver_service.zig");
@@ -120,6 +121,7 @@ fn activateDrivers(
             env.supervisor,
             state.ids.policy_authority,
             state.policy_capability.id,
+            state.session_task.id,
             spec.service_id,
             spec.task_id,
             spec.owner,
@@ -177,14 +179,23 @@ fn connectClient(
         },
         scheduleUserspaceTask,
     );
+    const phase3_client_authority_id = bootstrap_capabilities.deriveTaskCapability(
+        kernel_port,
+        state.session_task.id,
+        state.session_capability.id,
+        phase3_client_task.task_id,
+        bootstrap_capabilities.serviceBootstrapRights(),
+        331,
+        56,
+    ) catch unreachable;
 
     var phase3_connect_count: usize = 0;
     for (service_contract.ordered_phase3_contracts, phase3.bindings, 0..) |entry, binding, index| {
-        const endpoint_request_id = 331 + @as(u64, @intCast(index * 2));
+        const endpoint_request_id = 332 + @as(u64, @intCast(index * 2));
         const connect_request_id = endpoint_request_id + 1;
         const client_endpoint = kernel_port.endpointCreate(.{
             .header = component_port.makeHeader(.endpoint_create, endpoint_request_id, phase3_client_task.task_id),
-            .authority_capability_id = state.session_capability.id,
+            .authority_capability_id = phase3_client_authority_id,
             .owner_task_id = phase3_client_task.task_id,
             .label = entry.interface.name,
             .flags = .{ .local_only = true },

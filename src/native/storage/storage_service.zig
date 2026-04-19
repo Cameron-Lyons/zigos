@@ -14,6 +14,7 @@ pub const Service = struct {
     service_id: u64,
     task_id: u64,
     owner: principal.PrincipalId,
+    capability_table: ?*const capability.CapabilityTable = null,
     loaded_from_volume: bool = false,
     checkpoint_enabled: bool = true,
     deferred_checkpoint_count: usize = 0,
@@ -64,6 +65,10 @@ pub const Service = struct {
 
     pub fn checkpoint(self: *const Service) void {
         self.flushCheckpoint();
+    }
+
+    pub fn bindCapabilityTable(self: *Service, capability_table: *const capability.CapabilityTable) void {
+        self.capability_table = capability_table;
     }
 
     pub fn putVersion(self: *Service, request: object_store.PutRequest) object_store.Error!object_store.PutResult {
@@ -218,18 +223,20 @@ pub const Service = struct {
         return self.workspaces.findSnapshotByLabel(workspace_id, label);
     }
 
-    pub fn bridge(self: *Service) file_bridge.Bridge {
-        return file_bridge.Bridge.init(self, bridgeResolveEntry, bridgeHasVersion);
+    pub fn bridge(self: *Service) ?file_bridge.Bridge {
+        const capability_table = self.capability_table orelse return null;
+        return file_bridge.Bridge.init(self, capability_table, bridgeResolveEntry, bridgeHasVersion);
     }
 
     pub fn bridgeResolve(
         self: *Service,
         request: file_bridge.ResolveRequest,
-        authority: capability.Capability,
+        requester: principal.PrincipalId,
+        authority_capability_id: u64,
         now_ticks: u64,
     ) file_bridge.Error!file_bridge.View {
-        var compat_bridge = self.bridge();
-        return compat_bridge.resolve(request, authority, now_ticks);
+        var compat_bridge = self.bridge() orelse return error.CapabilityRequired;
+        return compat_bridge.resolve(request, requester, authority_capability_id, now_ticks);
     }
 
     pub fn object(self: *const Service, object_id: u64) ?*const object_store.ObjectRecord {
