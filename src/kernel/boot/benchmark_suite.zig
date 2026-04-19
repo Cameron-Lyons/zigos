@@ -1,27 +1,41 @@
 const std = @import("std");
 const x86 = @import("../../arch/x86.zig");
+const abi = @import("../../native/core/abi.zig");
 const console = @import("../utils/console.zig");
 const qemu_exit = @import("../utils/qemu_exit.zig");
 const boot_markers = @import("markers.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const principal = @import("../../native/core/principal.zig");
+const signing = @import("../../native/core/signing.zig");
 const manifest = @import("../../native/policy/manifest.zig");
+const denial_explanation = @import("../../native/policy/denial_explanation.zig");
 const permission_review = @import("../../native/policy/permission_review.zig");
 const policy_mediation = @import("../../native/policy/policy_mediation.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const background_dispatch = @import("../../native/task/background_dispatch.zig");
 const accelerator_scheduler = @import("../../native/task/accelerator_scheduler.zig");
 const network_policy = @import("../../native/sync/network_policy.zig");
+const sync_service = @import("../../native/sync/sync_service.zig");
 const workspace = @import("../../native/storage/workspace.zig");
 const file_bridge = @import("../../native/storage/file_bridge.zig");
+const object_store = @import("../../native/storage/object_store.zig");
+const storage_service = @import("../../native/storage/storage_service.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const package_service_bundle_ops = @import("../../native/services/package_service_bundle_ops.zig");
 const indexing_service = @import("../../native/services/indexing_service.zig");
 const notification_center = @import("../../native/services/notification_center.zig");
 const media_print_service = @import("../../native/services/media_print_service.zig");
 const compatibility_environment = @import("../../native/services/compatibility_environment.zig");
+const compositor_session = @import("../../native/platform/compositor_session.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
+const immutable_base = @import("../../native/platform/immutable_base.zig");
+const recovery_environment = @import("../../native/platform/recovery_environment.zig");
+const secure_secret_store = @import("../../native/platform/secure_secret_store.zig");
+const update_health = @import("../../native/platform/update_health.zig");
+const driver_service = @import("../../native/drivers/driver_service.zig");
+const contract = @import("../../native/session/contract.zig");
+const supervisor_mod = @import("../../native/session/supervisor.zig");
 
 const BenchmarkCase = struct {
     name: []const u8,
@@ -93,6 +107,44 @@ const EventLedgerContext = struct {
     ledger: event_ledger.Ledger = event_ledger.Ledger.init(),
 };
 
+const SecretStoreContext = struct {
+    store: secure_secret_store.Store = secure_secret_store.Store.init(),
+    owner: principal.PrincipalId = .{ .kind = .user, .serial = 61 },
+    holder: principal.PrincipalId = .{ .kind = .app, .serial = 62 },
+};
+
+const OverlaySessionContext = struct {
+    service: sync_service.Service = sync_service.Service.init(930, 71, .{ .kind = .service, .serial = 33 }),
+    workspace_id: u64 = 0,
+    source_device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
+    target_device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
+};
+
+const RecoveryContext = struct {
+    checkpoint_store: storage_service.CheckpointStore = .{},
+    storage: storage_service.Service = undefined,
+    manager: immutable_base.Manager = undefined,
+    sync: sync_service.Service = undefined,
+    environment: recovery_environment.Environment = undefined,
+    workspace_id: u64 = 0,
+    snapshot_id: u64 = 0,
+    user: principal.PrincipalId = .{ .kind = .user, .serial = 1 },
+    primary_device: principal.PrincipalId = .{ .kind = .device, .serial = 21 },
+    tablet: principal.PrincipalId = .{ .kind = .device, .serial = 22 },
+};
+
+const UpdateHealthContext = struct {
+    checkpoint_store: storage_service.CheckpointStore = .{},
+    storage: storage_service.Service = undefined,
+    manager: immutable_base.Manager = undefined,
+    sync: sync_service.Service = undefined,
+    compositor: compositor_session.Session = compositor_session.Session.init(),
+    supervisor: supervisor_mod.Supervisor = supervisor_mod.Supervisor.init(),
+    ledger: event_ledger.Ledger = event_ledger.Ledger.init(),
+    core_service_ids: [3]u64 = [_]u64{0} ** 3,
+    request: update_health.CheckRequest = undefined,
+};
+
 const cases = [_]BenchmarkCase{
     .{ .name = "capability.derive.workspace_object", .iterations = 40_000, .runIteration = benchmarkCapabilityDerive },
     .{ .name = "permission.review.render_grants", .iterations = 12_000, .runIteration = benchmarkPermissionReviewRender },
@@ -107,6 +159,12 @@ const cases = [_]BenchmarkCase{
     .{ .name = "media_print.submit_complete", .iterations = 8_000, .runIteration = benchmarkMediaPrintSubmitComplete },
     .{ .name = "compatibility_environment.launch_portal", .iterations = 12_000, .runIteration = benchmarkCompatibilityLaunchPortal },
     .{ .name = "event_ledger.export_redacted", .iterations = 4_000, .runIteration = benchmarkEventLedgerExport },
+    .{ .name = "secret_store.import_handle_export", .iterations = 20_000, .runIteration = benchmarkSecretStoreImportHandleExport },
+    .{ .name = "denial_explanation.render_policy_hint", .iterations = 32_000, .runIteration = benchmarkDenialExplanationRender },
+    .{ .name = "sync_service.overlay_session_flow", .iterations = 8_000, .runIteration = benchmarkOverlaySessionFlow },
+    .{ .name = "recovery_environment.reinstall_restore_repair", .iterations = 4, .runIteration = benchmarkRecoveryLifecycle },
+    .{ .name = "update_health.validate_pending_activation", .iterations = 8, .runIteration = benchmarkUpdateHealthValidation },
+    .{ .name = "driver_recovery.restart_driver", .iterations = 512, .runIteration = benchmarkDriverRecoveryRestart },
 };
 
 const permission_review_requests = [_]manifest.PermissionRequest{
@@ -267,6 +325,7 @@ const compatibility_bundle = manifest.BundleManifest{
 var permission_review_buffer: [2048]u8 = undefined;
 var permission_review_grants: [permission_review.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
 var event_ledger_buffer: [2048]u8 = undefined;
+var denial_explanation_buffer: [192]u8 = undefined;
 
 var file_bridge_context = FileBridgeContext{};
 var permission_review_context = PermissionReviewContext{};
@@ -279,6 +338,10 @@ var indexing_context = IndexingContext{};
 var media_context = MediaContext{};
 var compatibility_context = CompatibilityContext{};
 var event_ledger_context = EventLedgerContext{};
+var secret_store_context = SecretStoreContext{};
+var overlay_session_context = OverlaySessionContext{};
+var recovery_context = RecoveryContext{};
+var update_health_context = UpdateHealthContext{};
 
 pub fn run() noreturn {
     console.print("Running native spec-aligned benchmarks...\n");
@@ -300,6 +363,7 @@ fn prepareFixtures() void {
     prepareFileBridgeFixture();
     preparePermissionReviewFixture();
     prepareNetworkPolicyFixture();
+    prepareOverlaySessionFixture();
     prepareWorkspaceCommitFixture();
     prepareTaskCheckpointFixture();
 }
@@ -465,6 +529,71 @@ fn prepareTaskCheckpointFixture() void {
         .detail = 1,
         .tick = 63,
     }) catch unreachable;
+}
+
+fn prepareOverlaySessionFixture() void {
+    overlay_session_context.service = sync_service.Service.init(930, 71, service(33));
+    overlay_session_context.workspace_id = 4_200;
+    overlay_session_context.source_device = device(191);
+    overlay_session_context.target_device = device(192);
+
+    const owner = user(19);
+    _ = overlay_session_context.service.ensureUserRoot(owner, "overlay-owner", signer("overlay-user", 0x61)) catch unreachable;
+    _ = overlay_session_context.service.enrollTrustedDevice(
+        owner,
+        overlay_session_context.source_device,
+        "overlay-laptop",
+        signer("overlay-user", 0x61),
+        signer("overlay-laptop", 0x62),
+        10,
+    ) catch unreachable;
+    _ = overlay_session_context.service.enrollTrustedDevice(
+        owner,
+        overlay_session_context.target_device,
+        "overlay-tablet",
+        signer("overlay-user", 0x61),
+        signer("overlay-tablet", 0x63),
+        11,
+    ) catch unreachable;
+
+    const local_policy = overlay_session_context.service.createNetworkPolicy(.{
+        .owner = overlay_session_context.service.owner,
+        .workspace_id = overlay_session_context.workspace_id,
+        .label = "overlay-local",
+        .mode = .local_network,
+    }) catch unreachable;
+    const overlay_policy = overlay_session_context.service.createNetworkPolicy(.{
+        .owner = overlay_session_context.service.owner,
+        .workspace_id = overlay_session_context.workspace_id,
+        .label = "overlay-service",
+        .mode = .named_service_identity,
+        .target = "overlay.workspace.sync",
+    }) catch unreachable;
+    const relay_policy = overlay_session_context.service.createNetworkPolicy(.{
+        .owner = overlay_session_context.service.owner,
+        .workspace_id = overlay_session_context.workspace_id,
+        .label = "overlay-relay",
+        .mode = .named_domain,
+        .target = "relay.zigos.dev",
+    }) catch unreachable;
+    _ = overlay_session_context.service.configureWorkspacePolicy(.{
+        .workspace_id = overlay_session_context.workspace_id,
+        .owner = owner,
+        .device_to_device_policy_id = local_policy.id,
+        .relay_policy_id = relay_policy.id,
+        .overlay_policy_id = overlay_policy.id,
+        .relay_domain = "relay.zigos.dev",
+    }) catch unreachable;
+    _ = overlay_session_context.service.configureOverlay(
+        overlay_session_context.workspace_id,
+        overlay_session_context.source_device,
+        "overlay.workspace.sync",
+        true,
+    ) catch unreachable;
+    _ = overlay_session_context.service.publishPrivateService(
+        overlay_session_context.workspace_id,
+        "notes.remote",
+    ) catch unreachable;
 }
 
 fn runCase(case: BenchmarkCase) u64 {
@@ -836,6 +965,565 @@ fn benchmarkEventLedgerExport(iteration: u32) u64 {
 
     const exported = event_ledger_context.ledger.exportText(&event_ledger_buffer, .{}) catch unreachable;
     return exported.len + event_ledger_context.ledger.next_sequence;
+}
+
+fn benchmarkSecretStoreImportHandleExport(iteration: u32) u64 {
+    secret_store_context.store = secure_secret_store.Store.init();
+    const exportable = (iteration & 1) != 0;
+    const secret = secret_store_context.store.importSecret(
+        secret_store_context.owner,
+        if (exportable) "backup-code" else "api-key",
+        if (exportable) "abcd-efgh" else "super-secret-token",
+        !exportable,
+        exportable,
+    ) catch unreachable;
+    const handle = secret_store_context.store.lendHandle(
+        secret.id,
+        secret_store_context.holder,
+        700 + iteration,
+        true,
+    ) catch unreachable;
+    const described = secret_store_context.store.describeHandle(handle.id) orelse unreachable;
+    if (exportable) {
+        const exported = secret_store_context.store.exportRaw(handle.id) catch unreachable;
+        return secret.id +
+            handle.id +
+            described.task_id +
+            exported.len +
+            @as(u64, @intFromBool(described.export_allowed));
+    }
+    _ = secret_store_context.store.exportRaw(handle.id) catch |err| switch (err) {
+        error.RawExportDenied => {},
+        else => unreachable,
+    };
+    return secret.id +
+        handle.id +
+        described.task_id +
+        @as(u64, @intFromBool(secret.hardware_backed)) +
+        @as(u64, @intFromBool(secret.sealed_digest_present));
+}
+
+fn benchmarkDenialExplanationRender(iteration: u32) u64 {
+    const kind: manifest.PermissionKind = switch (@mod(iteration, 4)) {
+        0 => .network_egress,
+        1 => .object_access,
+        2 => .background_execution,
+        else => .screen_capture,
+    };
+    const reason: abi.DenialReason = switch (@mod(iteration, 4)) {
+        0 => .policy_denied,
+        1 => .capability_missing,
+        2 => .budget_exhausted,
+        else => .capability_expired,
+    };
+    const explanation = denial_explanation.forPermissionDecision(kind, reason);
+    const rendered = denial_explanation.renderToBuffer(&denial_explanation_buffer, explanation) catch unreachable;
+    return rendered.len +
+        explanation.policy_len +
+        explanation.missing_capability_len +
+        @as(u64, @intFromBool(explanation.user_approval_can_resolve)) +
+        @as(u64, @intFromBool(explanation.retry_safe));
+}
+
+fn benchmarkOverlaySessionFlow(iteration: u32) u64 {
+    const usage: sync_service.OverlaySessionUse = switch (@mod(iteration, 3)) {
+        0 => .sync_replication,
+        1 => .remote_access,
+        else => .private_service,
+    };
+    const transport: sync_service.TransportMode = switch (usage) {
+        .sync_replication => .device_to_device,
+        .remote_access, .private_service => .relay_assisted,
+    };
+    const session = overlay_session_context.service.openOverlaySession(
+        overlay_session_context.workspace_id,
+        overlay_session_context.source_device,
+        overlay_session_context.target_device,
+        usage,
+        transport,
+        if (usage == .private_service) "notes.remote" else null,
+        40 + iteration,
+    ) catch unreachable;
+    _ = overlay_session_context.service.probeOverlaySession(session.session_id, 41 + iteration) catch unreachable;
+    const live = overlay_session_context.service.findOverlaySession(session.session_id) orelse unreachable;
+    _ = overlay_session_context.service.closeOverlaySession(session.session_id, 42 + iteration) catch unreachable;
+
+    return session.session_id +
+        session.overlay_id +
+        live.keepalive_count +
+        @as(u64, @intFromBool(session.encrypted)) +
+        @as(u64, @intFromBool(session.relay_encrypted)) +
+        @as(u64, @intFromBool(session.remote_access));
+}
+
+fn benchmarkRecoveryLifecycle(iteration: u32) u64 {
+    prepareRecoveryFixture(iteration);
+    const payload = if ((iteration & 1) == 0) "kernel=v2" else "kernel=v3";
+    const reinstalled = recovery_context.environment.verifyAndReinstallImage(
+        &recovery_context.manager,
+        payload,
+        signer("platform-image", 0x72),
+        16 + iteration,
+    ) catch unreachable;
+    const restored = recovery_context.environment.restoreWorkspaceSnapshot(
+        &recovery_context.storage,
+        recovery_context.workspace_id,
+        recovery_context.snapshot_id,
+        17 + iteration,
+    ) catch unreachable;
+    const repaired = recovery_context.environment.repairSyncMetadata(
+        &recovery_context.sync,
+        &recovery_context.storage,
+        recovery_context.workspace_id,
+        recovery_context.tablet,
+    ) catch unreachable;
+    const rotation_generation = recovery_context.environment.rotateDeviceKeys(
+        &recovery_context.sync,
+        recovery_context.user,
+        recovery_context.tablet,
+        signer("platform-user", 0x74),
+        signer("tablet-device-v2", 0x77),
+        18 + iteration,
+    ) catch unreachable;
+    const revoked = recovery_context.environment.revokeDeviceTrust(
+        &recovery_context.sync,
+        recovery_context.user,
+        recovery_context.tablet,
+        signer("platform-user", 0x74),
+        19 + iteration,
+    ) catch unreachable;
+
+    return @as(u64, @intFromBool(reinstalled)) +
+        @as(u64, @intFromBool(restored)) +
+        @as(u64, @intFromBool(repaired)) +
+        rotation_generation +
+        @as(u64, @intFromBool(revoked)) +
+        @as(u64, @intFromBool(recovery_context.environment.report.image_activated));
+}
+
+fn benchmarkUpdateHealthValidation(iteration: u32) u64 {
+    prepareUpdateHealthFixture(iteration);
+    update_health_context.manager.beginActivation(0, 13 + iteration) catch unreachable;
+    update_health.recordBootSuccess(&update_health_context.manager, 14 + iteration) catch unreachable;
+    const result = update_health.validatePendingActivation(
+        &update_health_context.manager,
+        &update_health_context.supervisor,
+        &update_health_context.storage,
+        update_health_context.request,
+        &update_health_context.ledger,
+        15 + iteration,
+    ) catch unreachable;
+    const event = update_health_context.ledger.latestKind(.update_transition) orelse unreachable;
+    return result.evaluation.core_services_started +
+        @as(u64, @intFromBool(result.evaluation.report.isHealthy())) +
+        @as(u64, @intFromBool(result.evaluation.network_service_ok)) +
+        @as(u64, @intFromBool(result.evaluation.ui_service_ok)) +
+        result.activation.activation_generation +
+        event.sequence;
+}
+
+fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
+    var supervisor = supervisor_mod.Supervisor.init();
+    const compositor = supervisor.register(.compositor_ui_session, service(50 + iteration)) catch unreachable;
+    if (!supervisor.markHealthy(compositor.id, 1 + iteration)) unreachable;
+
+    var directory = driver_service.Directory.init();
+    var capabilities = capability.CapabilityTable.init();
+    const authority = mintDriverAuthority(
+        &capabilities,
+        compositor.owner,
+        401 + iteration,
+        @as(u64, 0x1234_1111_0001) + iteration,
+        .graphics_adapter,
+    );
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "svc.driver.runtime",
+        .display_name = "Driver Runtime",
+        .publisher = "zigos.spec",
+        .signature = .{
+            .format = "ed25519",
+            .signer = "zigos-driver-key",
+        },
+    };
+    const driver = directory.register(.{
+        .service_id = compositor.id,
+        .owner_task_id = 401 + iteration,
+        .device_id = @as(u64, 0x1234_1111_0001) + iteration,
+        .device_class = .graphics_adapter,
+        .authority_capability_id = authority.id,
+        .capability_table = &capabilities,
+        .requester = authority.holder,
+        .now_ticks = 1 + iteration,
+        .bundle = bundle,
+    }) catch unreachable;
+
+    var runtime = DriverRecoveryRuntime{};
+    var notifications = notification_center.Center.init();
+    var ledger = event_ledger.Ledger.init();
+    const recovery = supervisor.recoverDriverCrash(
+        compositor.id,
+        &directory,
+        &runtime,
+        &notifications,
+        &ledger,
+        10 + iteration,
+        0xD1,
+        "display driver restart",
+    ) catch unreachable;
+
+    return driver.restart_generation +
+        runtime.activation_count +
+        compositor.restart_count +
+        @as(u64, @intFromBool(recovery.visible_impact)) +
+        @as(u64, @intFromBool(recovery.notification_id != null)) +
+        ledger.latestKind(.driver_restart).?.sequence;
+}
+
+const DriverRecoveryRuntime = struct {
+    activation_count: usize = 0,
+
+    pub fn activate(self: *@This(), _: *const driver_service.DriverRecord) !void {
+        self.activation_count += 1;
+    }
+};
+
+fn prepareRecoveryFixture(iteration: u32) void {
+    recovery_context.checkpoint_store.resetPersistent();
+
+    const storage_owner = service(4);
+    const sync_owner = service(8);
+    recovery_context.storage = storage_service.Service.initWithStore(920, 51, storage_owner, &recovery_context.checkpoint_store);
+    recovery_context.manager = immutable_base.Manager.init(
+        &recovery_context.storage,
+        storage_owner,
+        signer("platform-state", 0x71),
+    ) catch unreachable;
+    _ = recovery_context.manager.stageImage(0, "stable-a", "kernel=v1", signer("platform-image", 0x72), 10 + iteration) catch unreachable;
+    _ = recovery_context.manager.activate(0, .{}, 11 + iteration) catch unreachable;
+
+    const notes_v1 = recovery_context.storage.putVersion(.{
+        .preferred_object_id = 980,
+        .object_type = .document,
+        .payload = "notes-v1",
+        .metadata = object_store.signMetadata(
+            signer("platform-storage", 0x73),
+            "notes",
+            "text/plain",
+            .document,
+            "notes-v1",
+            12 + iteration,
+        ) catch unreachable,
+    }) catch unreachable;
+    const notes_v2 = recovery_context.storage.putVersion(.{
+        .preferred_object_id = 980,
+        .object_type = .document,
+        .payload = "notes-v2",
+        .metadata = object_store.signMetadata(
+            signer("platform-storage", 0x73),
+            "notes",
+            "text/plain",
+            .document,
+            "notes-v2",
+            13 + iteration,
+        ) catch unreachable,
+        .parent_version_id = notes_v1.version_id,
+    }) catch unreachable;
+    const workspace_record = recovery_context.storage.createWorkspace(.{
+        .owner = recovery_context.user,
+        .label = "recovery-notes",
+    }) catch unreachable;
+    recovery_context.workspace_id = workspace_record.id;
+    recovery_context.storage.beginTransaction(workspace_record.id) catch unreachable;
+    recovery_context.storage.stagePut(
+        workspace_record.id,
+        "documents/notes.md",
+        notes_v1.object_id,
+        notes_v1.version_id,
+        .document,
+    ) catch unreachable;
+    _ = recovery_context.storage.commit(workspace_record.id, 14 + iteration) catch unreachable;
+    const snapshot = recovery_context.storage.snapshot(
+        workspace_record.id,
+        "baseline",
+        signer("platform-storage", 0x73),
+    ) catch unreachable;
+    recovery_context.snapshot_id = snapshot.id;
+    recovery_context.storage.beginTransaction(workspace_record.id) catch unreachable;
+    recovery_context.storage.stagePut(
+        workspace_record.id,
+        "documents/notes.md",
+        notes_v2.object_id,
+        notes_v2.version_id,
+        .document,
+    ) catch unreachable;
+    _ = recovery_context.storage.commit(workspace_record.id, 15 + iteration) catch unreachable;
+
+    recovery_context.sync = sync_service.Service.init(921, 52, sync_owner);
+    _ = recovery_context.sync.ensureUserRoot(recovery_context.user, "cameron", signer("platform-user", 0x74)) catch unreachable;
+    _ = recovery_context.sync.enrollTrustedDevice(
+        recovery_context.user,
+        recovery_context.primary_device,
+        "primary",
+        signer("platform-user", 0x74),
+        signer("primary-device", 0x75),
+        16 + iteration,
+    ) catch unreachable;
+    _ = recovery_context.sync.enrollTrustedDevice(
+        recovery_context.user,
+        recovery_context.tablet,
+        "tablet",
+        signer("platform-user", 0x74),
+        signer("tablet-device", 0x76),
+        17 + iteration,
+    ) catch unreachable;
+    const local_policy = recovery_context.sync.createNetworkPolicy(.{
+        .owner = sync_owner,
+        .workspace_id = workspace_record.id,
+        .label = "local-net",
+        .mode = .local_network,
+    }) catch unreachable;
+    _ = recovery_context.sync.configureWorkspacePolicy(.{
+        .workspace_id = workspace_record.id,
+        .owner = recovery_context.user,
+        .device_to_device_policy_id = local_policy.id,
+        .selective_prefixes = &.{"documents/"},
+    }) catch unreachable;
+    recovery_context.sync.setReplicaVersion(
+        workspace_record.id,
+        recovery_context.tablet,
+        "documents/notes.md",
+        notes_v1.object_id,
+        notes_v1.version_id,
+    ) catch unreachable;
+
+    recovery_context.environment = recovery_environment.Environment.init(storage_owner);
+}
+
+fn prepareUpdateHealthFixture(iteration: u32) void {
+    update_health_context.checkpoint_store.resetPersistent();
+    const owner = service(70);
+    update_health_context.storage = storage_service.Service.initWithStore(1_001, 201, owner, &update_health_context.checkpoint_store);
+    const probe_workspace_id = seedUpdateHealthStorageProbe(
+        &update_health_context.storage,
+        owner,
+        signer("update-health-object", 0x33),
+        9 + iteration,
+    );
+    update_health_context.manager = immutable_base.Manager.init(
+        &update_health_context.storage,
+        owner,
+        signer("update-health-state", 0x31),
+    ) catch unreachable;
+    update_health_context.sync = sync_service.Service.init(1_500, 401, owner);
+    update_health_context.compositor = compositor_session.Session.init();
+    update_health_context.supervisor = supervisor_mod.Supervisor.init();
+    update_health_context.ledger = event_ledger.Ledger.init();
+
+    const network_probe = seedUpdateHealthNetworkProbe(
+        &update_health_context.sync,
+        probe_workspace_id,
+        12 + iteration,
+    );
+    const ui_probe = seedUpdateHealthUiProbe(&update_health_context.compositor);
+    _ = update_health_context.manager.stageImage(
+        0,
+        "stable-a",
+        "kernel=v1",
+        signer("update-health-image", 0x32),
+        11 + iteration,
+    ) catch unreachable;
+
+    update_health_context.core_service_ids[0] = registerHealthyServiceForBenchmark(
+        &update_health_context.supervisor,
+        .policy_mediation,
+        owner,
+        12 + iteration,
+    );
+    update_health_context.core_service_ids[1] = registerHealthyServiceForBenchmark(
+        &update_health_context.supervisor,
+        .package_install_update,
+        owner,
+        12 + iteration,
+    );
+    update_health_context.core_service_ids[2] = registerHealthyServiceForBenchmark(
+        &update_health_context.supervisor,
+        .sync_replication,
+        owner,
+        12 + iteration,
+    );
+    const network_service_id = registerHealthyServiceForBenchmark(
+        &update_health_context.supervisor,
+        .network_stack,
+        owner,
+        12 + iteration,
+    );
+    const ui_service_id = registerHealthyServiceForBenchmark(
+        &update_health_context.supervisor,
+        .compositor_ui_session,
+        owner,
+        12 + iteration,
+    );
+
+    update_health_context.request = .{
+        .core_service_ids = update_health_context.core_service_ids[0..],
+        .storage_workspace_id = probe_workspace_id,
+        .storage_probe_path = "documents/notes.md",
+        .network_service_id = network_service_id,
+        .ui_service_id = ui_service_id,
+        .network_probe = network_probe,
+        .ui_probe = ui_probe,
+    };
+}
+
+fn registerHealthyServiceForBenchmark(
+    supervisor: *supervisor_mod.Supervisor,
+    class: contract.ServiceClass,
+    owner: principal.PrincipalId,
+    tick: u64,
+) u64 {
+    const service_record = supervisor.register(class, owner) catch unreachable;
+    if (!supervisor.noteContractBound(service_record.id, 100 + service_record.id, tick)) unreachable;
+    if (!supervisor.markHealthy(service_record.id, tick)) unreachable;
+    return service_record.id;
+}
+
+fn seedUpdateHealthStorageProbe(
+    storage: *storage_service.Service,
+    owner: principal.PrincipalId,
+    identity: signing.SignerIdentity,
+    tick: u64,
+) u64 {
+    const record = storage.putVersion(.{
+        .preferred_object_id = 7_700,
+        .object_type = .document,
+        .payload = "notes-v1",
+        .metadata = object_store.signMetadata(
+            identity,
+            "notes",
+            "text/plain",
+            .document,
+            "notes-v1",
+            tick,
+        ) catch unreachable,
+    }) catch unreachable;
+    const workspace_record = storage.createWorkspace(.{
+        .owner = owner,
+        .label = "update-health",
+    }) catch unreachable;
+    storage.beginTransaction(workspace_record.id) catch unreachable;
+    storage.stagePut(workspace_record.id, "documents/notes.md", record.object_id, record.version_id, .document) catch unreachable;
+    _ = storage.commit(workspace_record.id, tick + 1) catch unreachable;
+    return workspace_record.id;
+}
+
+fn seedUpdateHealthNetworkProbe(
+    sync: *sync_service.Service,
+    workspace_id: u64,
+    tick_base: u64,
+) update_health.NetworkProbe {
+    const owner = user(88);
+    const source_device = device(881);
+    const target_device = device(882);
+    _ = sync.ensureUserRoot(owner, "update-health", signer("update-health-user", 0x51)) catch unreachable;
+    _ = sync.enrollTrustedDevice(
+        owner,
+        source_device,
+        "source",
+        signer("update-health-user", 0x51),
+        signer("update-health-source", 0x52),
+        tick_base,
+    ) catch unreachable;
+    _ = sync.enrollTrustedDevice(
+        owner,
+        target_device,
+        "target",
+        signer("update-health-user", 0x51),
+        signer("update-health-target", 0x53),
+        tick_base + 1,
+    ) catch unreachable;
+
+    const local_policy = sync.createNetworkPolicy(.{
+        .owner = sync.owner,
+        .workspace_id = workspace_id,
+        .label = "health-local",
+        .mode = .local_network,
+    }) catch unreachable;
+    const overlay_policy = sync.createNetworkPolicy(.{
+        .owner = sync.owner,
+        .workspace_id = workspace_id,
+        .label = "health-overlay",
+        .mode = .named_service_identity,
+        .target = "overlay.health.sync",
+    }) catch unreachable;
+    _ = sync.configureWorkspacePolicy(.{
+        .workspace_id = workspace_id,
+        .owner = owner,
+        .device_to_device_policy_id = local_policy.id,
+        .overlay_policy_id = overlay_policy.id,
+    }) catch unreachable;
+    _ = sync.configureOverlay(workspace_id, source_device, "overlay.health.sync", true) catch unreachable;
+
+    return .{
+        .sync = sync,
+        .workspace_id = workspace_id,
+        .source_device = source_device,
+        .target_device = target_device,
+        .tick = tick_base + 2,
+    };
+}
+
+fn seedUpdateHealthUiProbe(session: *compositor_session.Session) update_health.UiProbe {
+    var runtime = task_runtime.Runtime.init();
+    const task = runtime.createTask(.{
+        .owner = service(89),
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = 64 * 1024,
+            .endpoint_slots = 2,
+            .shared_memory_bytes = 4 * 1024,
+        },
+        .ui_surface_id = 3,
+        .initial_component = .{
+            .label = "health-ui",
+            .entry = "zigos.health.ui",
+        },
+    }) catch unreachable;
+    _ = session.openTaskView(task, "Update Health") catch unreachable;
+    return .{ .session = session };
+}
+
+fn mintDriverAuthority(
+    capability_table: *capability.CapabilityTable,
+    holder: principal.PrincipalId,
+    task_id: u64,
+    device_id: u64,
+    device_class: driver_service.DeviceClass,
+) capability.Capability {
+    return capability_table.mint(.{
+        .holder = holder,
+        .issuer = policyAuthority(1),
+        .target = driver_service.authorityTarget(device_id),
+        .rights = driver_service.allowedRightsFor(device_class),
+        .scope = .{
+            .task_id = task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = true,
+        },
+        .audit = .{},
+    }) catch unreachable;
+}
+
+fn signer(label: []const u8, seed_byte: u8) signing.SignerIdentity {
+    return .{
+        .label = label,
+        .seed = [_]u8{seed_byte} ** 32,
+    };
 }
 
 fn resolveBridgeEntry(

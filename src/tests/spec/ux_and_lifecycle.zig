@@ -91,6 +91,211 @@ pub fn taskFirstUxRecordsStructuredFlows() !void {
     try std.testing.expectEqualStrings("recovery-environment", controller.flows[4].detailSlice());
 }
 
+pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
+
+    const storage_owner = spec_support.service(62);
+    const sync_owner = spec_support.service(63);
+    const person = spec_support.user(16);
+    const primary_device = spec_support.device(161);
+    const paired_device = spec_support.device(162);
+    const object_signer = spec_support.signer("spec.journey.object", 0x84);
+    const user_signer = spec_support.signer("spec.journey.user", 0x85);
+    const primary_signer = spec_support.signer("spec.journey.primary", 0x86);
+    const paired_signer = spec_support.signer("spec.journey.paired", 0x87);
+    const bundle_signer = spec_support.signer("spec.journey.bundle", 0x88);
+
+    var policies = policy_object.Directory.init();
+    const org_policy = try policies.create(.{
+        .scope = .organization,
+        .subject_id = 16,
+        .issuer = spec_support.policyAuthority(16),
+        .label = "journey-defaults",
+        .install_source_mode = .trusted_sources,
+        .allowed_install_sources = &.{"store:zigos"},
+        .network_egress_mode = .allow_list,
+        .allowed_sync_destinations = &.{"relay.zigos.example"},
+        .audit_export_required = true,
+    }, spec_support.signer("spec.journey.policy", 0x89));
+
+    const provided_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+    };
+    const consumed_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.object.workspace" },
+    };
+    const components = [_]manifest.ExecutionComponentDecl{
+        .{ .id = "trip-ui", .entry = "app.trip.ui" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+    };
+    const v1_permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace://trip/documents/plan.md",
+            .rights = .{ .object_read = true, .object_write = true },
+            .local_only = true,
+            .max_lease_ticks = 120,
+        },
+    };
+    var v1 = manifest.BundleManifest{
+        .bundle_id = "app.trip",
+        .display_name = "Trip Planner",
+        .publisher = "Example Software",
+        .provided_interfaces = &provided_interfaces,
+        .consumed_interfaces = &consumed_interfaces,
+        .components = &components,
+        .assets = &assets,
+        .requested_permissions = &v1_permissions,
+    };
+    v1.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v1));
+
+    var packages = package_service.Service.init();
+    const installed = try packages.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, org_policy);
+    try std.testing.expect(installed.installed_new);
+
+    var storage = storage_service.Service.initWithStore(910, 96, storage_owner, &storage_checkpoint_store);
+    const document = try storage.putVersion(.{
+        .preferred_object_id = 1_360,
+        .object_type = .document,
+        .payload = "trip-plan-v1",
+        .metadata = try object_store.signMetadata(object_signer, "trip-plan", "text/plain", .document, "trip-plan-v1", 10),
+    });
+    const workspace_record = try storage.createWorkspace(.{
+        .owner = person,
+        .label = "trip",
+    });
+    try storage.beginTransaction(workspace_record.id);
+    try storage.stagePut(workspace_record.id, "documents/plan.md", document.object_id, document.version_id, .document);
+    _ = try storage.commit(workspace_record.id, 11);
+
+    var sync = sync_service.Service.init(911, 97, sync_owner);
+    _ = try sync.ensureUserRoot(person, "owner", user_signer);
+    _ = try sync.enrollTrustedDevice(person, primary_device, "laptop", user_signer, primary_signer, 12);
+
+    var runtime = task_runtime.Runtime.init();
+    var controller = native_ux.Controller.init();
+    const task = try controller.startTask(&runtime, .{
+        .owner = person,
+        .component_class = .app_component,
+        .budget = spec_support.defaultBudget(false),
+        .local_only = true,
+        .initial_component = .{
+            .label = "trip-planner",
+            .entry = "app.trip.ui",
+        },
+        .launch = .{
+            .signed = true,
+            .bundle_id = "app.trip",
+        },
+    });
+    try std.testing.expectEqualStrings("app.trip", task.launchBundleIdSlice());
+
+    const opened = try controller.openWorkspace(&storage, workspace_record.id, "documents/plan.md", person);
+    try std.testing.expectEqual(document.version_id, opened.version_id);
+    try controller.pairDevice(&sync, person, paired_device, "tablet", user_signer, paired_signer, 13);
+
+    const local_policy = try sync.createNetworkPolicy(.{
+        .owner = sync_owner,
+        .workspace_id = workspace_record.id,
+        .label = "trip-local",
+        .mode = .local_network,
+    });
+    const overlay_policy = try sync.createNetworkPolicy(.{
+        .owner = sync_owner,
+        .workspace_id = workspace_record.id,
+        .label = "trip-overlay",
+        .mode = .named_service_identity,
+        .target = "overlay.trip.sync",
+    });
+    const relay_policy = try sync.createNetworkPolicy(.{
+        .owner = sync_owner,
+        .workspace_id = workspace_record.id,
+        .label = "trip-relay",
+        .mode = .named_domain,
+        .target = "relay.zigos.example",
+    });
+    _ = try sync.configureWorkspacePolicy(.{
+        .workspace_id = workspace_record.id,
+        .owner = person,
+        .offline_first = true,
+        .personal_e2ee = true,
+        .selective_prefixes = &.{"documents/"},
+        .device_to_device_policy_id = local_policy.id,
+        .relay_policy_id = relay_policy.id,
+        .overlay_policy_id = overlay_policy.id,
+        .relay_domain = "relay.zigos.example",
+    });
+    _ = try sync.configureOverlay(workspace_record.id, primary_device, "overlay.trip.sync", true);
+
+    const review = try controller.reviewPermissionDecision(
+        task.id,
+        person,
+        "app.trip",
+        v1_permissions[0],
+        true,
+        true,
+        120,
+    );
+    var review_buffer: [512]u8 = undefined;
+    const rendered_review = try native_ux.renderReviewFlowToBuffer(&review_buffer, review);
+    try std.testing.expect(std.mem.indexOf(u8, rendered_review, "bundle=app.trip") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered_review, "decision=allow") != null);
+
+    const summary = try sync.replicateWorkspace(
+        &storage,
+        workspace_record.id,
+        primary_device,
+        paired_device,
+        .device_to_device,
+    );
+    try std.testing.expect(summary.offline_first);
+    try std.testing.expect(summary.personal_e2ee);
+    try std.testing.expect(summary.used_device_to_device);
+    try std.testing.expect(summary.overlay_ready);
+    try std.testing.expectEqual(@as(usize, 1), summary.selected_entry_count);
+
+    const v2_assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+        .{ .path = "assets/theme.css", .content_type = "text/css" },
+    };
+    var v2 = manifest.BundleManifest{
+        .bundle_id = "app.trip",
+        .display_name = "Trip Planner",
+        .publisher = "Example Software",
+        .version_major = 1,
+        .version_minor = 1,
+        .provided_interfaces = &provided_interfaces,
+        .consumed_interfaces = &consumed_interfaces,
+        .components = &components,
+        .assets = &v2_assets,
+        .requested_permissions = &v1_permissions,
+    };
+    v2.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v2));
+
+    const updated = try packages.install(.{
+        .bundle = v2,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, org_policy);
+    try std.testing.expect(updated.updated_existing);
+    try std.testing.expect(updated.rollback_available);
+    _ = try packages.rollback("app.trip");
+    try std.testing.expectEqual(@as(u16, 0), packages.find("app.trip").?.versionMinor());
+
+    try controller.recoverSystem(task.id, person, "restored previous trip planner version");
+    try std.testing.expectEqual(@as(usize, 5), controller.flow_count);
+    try std.testing.expectEqual(native_ux.FlowKind.recover_system, controller.flows[4].kind);
+    try std.testing.expectEqualStrings("restored previous trip planner version", controller.flows[4].detailSlice());
+}
+
 pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
     package_migration.reset();
     var policies = policy_object.Directory.init();

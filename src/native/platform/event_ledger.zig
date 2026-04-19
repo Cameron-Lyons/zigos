@@ -42,6 +42,12 @@ pub const ExportOptions = struct {
     include_protected_content: bool = false,
 };
 
+pub const RemoteShareOptions = struct {
+    include_protected_content: bool = false,
+    personal_device: bool = true,
+    user_opted_in: bool = false,
+};
+
 pub const Event = struct {
     sequence: u64 = 0,
     kind: EventKind,
@@ -338,6 +344,17 @@ pub const Ledger = struct {
             try appendFmt(buffer, &used, " detail={s}\n", .{detail});
         }
         return buffer[0..used];
+    }
+
+    pub fn exportRemoteShare(
+        self: *const Ledger,
+        buffer: []u8,
+        options: RemoteShareOptions,
+    ) Error![]const u8 {
+        if (options.personal_device and !options.user_opted_in) return error.ConsentRequired;
+        return self.exportText(buffer, .{
+            .include_protected_content = options.include_protected_content,
+        });
     }
 
     pub fn absorb(self: *Ledger, source: *const Ledger) Error!void {
@@ -753,6 +770,28 @@ test "event ledger exports structured redacted diagnostics and audit history" {
     const full = try ledger.exportText(&buffer, .{ .include_protected_content = true });
     try std.testing.expect(std.mem.indexOf(u8, full, "tax-return.pdf") != null);
     try std.testing.expectEqual(EventKind.device_trust_change, ledger.latestKind(.device_trust_change).?.kind);
+}
+
+test "event ledger requires explicit opt-in before remote sharing personal device diagnostics" {
+    var ledger = Ledger.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 17 };
+
+    try ledger.recordSyncConflict(user, 41, 50, "documents/payroll.xlsx conflict", true);
+
+    var buffer: [1024]u8 = undefined;
+    try std.testing.expectError(error.ConsentRequired, ledger.exportRemoteShare(&buffer, .{}));
+
+    const opted_in = try ledger.exportRemoteShare(&buffer, .{
+        .user_opted_in = true,
+    });
+    try std.testing.expect(std.mem.indexOf(u8, opted_in, "redacted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, opted_in, "payroll.xlsx") == null);
+
+    const managed = try ledger.exportRemoteShare(&buffer, .{
+        .personal_device = false,
+        .include_protected_content = true,
+    });
+    try std.testing.expect(std.mem.indexOf(u8, managed, "payroll.xlsx") != null);
 }
 
 test "event ledger persists history across restart" {
