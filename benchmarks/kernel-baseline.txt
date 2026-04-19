@@ -14,6 +14,5 @@ event_ledger.export_redacted 635582.44 60
 secret_store.import_handle_export 36780.55 60
 denial_explanation.render_policy_hint 5114.25 60
 sync_service.overlay_session_flow 6513.50 60
-recovery_environment.reinstall_restore_repair 1217117500.00 100
 update_health.validate_pending_activation 735415750.00 100
 driver_recovery.restart_driver 57082.03 60
