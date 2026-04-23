@@ -7,9 +7,15 @@ pub const CheckpointStore = struct {
     workspaces: workspace.Directory = workspace.Directory.init(),
     has_persisted_state: bool = false,
     dirty: bool = false,
+    last_checkpoint_generation: u64 = 0,
+    last_checkpoint_error: ?storage_volume.Error = null,
 
     pub fn hasCachedPersistentState(self: *const CheckpointStore) bool {
         return self.has_persisted_state;
+    }
+
+    pub fn checkpointHealthy(self: *const CheckpointStore) bool {
+        return self.last_checkpoint_error == null;
     }
 
     pub fn resetPreparedState(self: *CheckpointStore) void {
@@ -17,6 +23,8 @@ pub const CheckpointStore = struct {
         self.workspaces.reset();
         self.has_persisted_state = false;
         self.dirty = false;
+        self.last_checkpoint_generation = 0;
+        self.last_checkpoint_error = null;
     }
 
     pub fn loadPreparedStateFromAttachedVolume(self: *CheckpointStore) bool {
@@ -77,6 +85,11 @@ pub fn flushCheckpoint(service: anytype) void {
     service.checkpoint_store.has_persisted_state = true;
     if (!service.checkpoint_store.dirty) return;
     if (!storage_volume.hasAttachedDevice()) return;
-    _ = storage_volume.saveToVolume(service.store, service.workspaces) catch return;
+    const result = storage_volume.saveToVolume(service.store, service.workspaces) catch |err| {
+        service.checkpoint_store.last_checkpoint_error = err;
+        return;
+    };
+    service.checkpoint_store.last_checkpoint_generation = result.generation;
+    service.checkpoint_store.last_checkpoint_error = null;
     service.checkpoint_store.dirty = false;
 }
