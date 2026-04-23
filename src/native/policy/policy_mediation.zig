@@ -229,8 +229,8 @@ pub const PolicyMediator = struct {
                 .id = if (request.target_id != 0) request.target_id else resourceId(request.resource),
             },
             .network_egress => .{
-                .kind = .service,
-                .id = self.service_targets.network_service_id,
+                .kind = .network_policy,
+                .id = if (request.target_id != 0) request.target_id else resourceId(request.resource),
             },
             .clipboard, .screen_capture, .notification_post => .{
                 .kind = .service,
@@ -418,6 +418,9 @@ test "policy mediation grants local-only object and network capabilities" {
     try std.testing.expectEqual(@as(usize, 2), task.capability_count);
     try std.testing.expect(summary.decisionForKind(.network_egress).?.local_only);
     try std.testing.expectEqual(@as(u64, 35), summary.decisionForKind(.network_egress).?.expires_at_ticks);
+    const network_capability = capability_table.query(summary.decisionForKind(.network_egress).?.capability_id.?).?;
+    try std.testing.expectEqual(capability.CapabilityTargetKind.network_policy, network_capability.target.kind);
+    try std.testing.expectEqual(resourceId("lan.sync"), network_capability.target.id);
     try std.testing.expect(ledger.latestKind(.permission_decision).?.allowed);
     try std.testing.expectEqual(abi.DenialReason.none, ledger.latestKind(.permission_decision).?.denial_reason);
 }

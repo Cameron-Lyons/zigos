@@ -13,11 +13,14 @@ else
         pub fn printBootMarker(_: []const u8) void {}
     };
 
+const DISPATCH_CPU_TICK_COST: u64 = 1_000;
+
 const Slot = struct {
     in_use: bool = false,
     task_id: u64 = 0,
     dispatch_count: u64 = 0,
     last_dispatch_tick: u64 = 0,
+    cpu_ticks_consumed: u64 = 0,
 };
 
 pub const Scheduler = struct {
@@ -111,12 +114,14 @@ pub const Scheduler = struct {
             if (task.state != .active or !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) {
                 continue;
             }
+            if (!hasDispatchBudget(slot, task)) continue;
 
             self.last_dispatch_tick = now_ticks;
             self.next_index = (index + 1) % self.slots.len;
             const yielded = self.executeTask(slot.task_id, now_ticks);
             slot.dispatch_count += 1;
             slot.last_dispatch_tick = now_ticks;
+            slot.cpu_ticks_consumed += DISPATCH_CPU_TICK_COST;
             if (builtin.target.os.tag == .freestanding and yielded and !self.active_marker_printed) {
                 common.printBootMarker(boot_markers.userspace_scheduler_active);
                 self.active_marker_printed = true;
@@ -128,3 +133,46 @@ pub const Scheduler = struct {
         return false;
     }
 };
+
+fn hasDispatchBudget(slot: *const Slot, task: *const task_runtime.TaskRecord) bool {
+    const next = std.math.add(u64, slot.cpu_ticks_consumed, DISPATCH_CPU_TICK_COST) catch return false;
+    return next <= task.budget.cpu_time_ticks;
+}
+
+test "userspace scheduler stops dispatching tasks after their cpu budget is consumed" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+
+    const image = task_runtime.syntheticUserspaceImage("budgeted", "app.example.budgeted");
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 1 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = DISPATCH_CPU_TICK_COST,
+            .memory_bytes = 1024,
+            .endpoint_slots = 2,
+            .shared_memory_bytes = 1024,
+        },
+        .local_only = true,
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = 1,
+            .component_abi_version = 1,
+            .signed = true,
+            .bundle_id = "app.example.budgeted",
+        },
+        .userspace_image = &image,
+    });
+
+    try std.testing.expect(scheduler.registerTask(task.id));
+    try std.testing.expect(!scheduler.runNext(1));
+    try std.testing.expectEqual(@as(u64, 1), scheduler.slots[0].dispatch_count);
+    try std.testing.expectEqual(DISPATCH_CPU_TICK_COST, scheduler.slots[0].cpu_ticks_consumed);
+
+    try std.testing.expect(!scheduler.runNext(2));
+    try std.testing.expectEqual(@as(u64, 1), scheduler.slots[0].dispatch_count);
+}

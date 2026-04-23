@@ -80,7 +80,6 @@ pub const Bridge = struct {
         now_ticks: u64,
     ) Error!View {
         const normalized_path = normalizePath(request.path);
-        const entry = self.resolve_entry(self.context, request.workspace_id, normalized_path) catch return error.PathNotFound;
         const authority = self.capability_table.requireUsable(authority_capability_id, now_ticks) catch |err| switch (err) {
             error.CapabilityNotFound => return error.CapabilityNotFound,
             error.CapabilityRevoked => return error.CapabilityRevoked,
@@ -92,14 +91,27 @@ pub const Bridge = struct {
         }
 
         switch (authority.target.kind) {
-            .object => if (authority.target.id != entry.object_id) return error.PermissionDenied,
             .workspace => if (authority.target.id != request.workspace_id) return error.WorkspaceScopeViolation,
+            .object => {},
             else => return error.CapabilityRequired,
         }
 
         const wants_write = request.access == .write;
         if (wants_write and !authority.rights.object_write) return error.PermissionDenied;
         if (!wants_write and !authority.rights.object_read) return error.PermissionDenied;
+
+        const entry = switch (authority.target.kind) {
+            .workspace => blk: {
+                break :blk self.resolve_entry(self.context, request.workspace_id, normalized_path) catch return error.PathNotFound;
+            },
+            .object => blk: {
+                const resolved = self.resolve_entry(self.context, request.workspace_id, normalized_path) catch return error.PermissionDenied;
+                if (authority.target.id != resolved.object_id) return error.PermissionDenied;
+                break :blk resolved;
+            },
+            else => unreachable,
+        };
+
         if (!self.has_version(self.context, entry.version_id)) return error.ObjectMissing;
 
         var view = View{
@@ -198,6 +210,16 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
         .path = "documents/notes.md",
         .access = .write,
     }, read_capability.holder, read_capability.id, 30));
+    try std.testing.expectError(error.PermissionDenied, bridge.resolve(.{
+        .workspace_id = notes.id,
+        .path = "documents/missing.md",
+        .access = .read,
+    }, read_capability.holder, read_capability.id, 30));
+    try std.testing.expectError(error.PermissionDenied, bridge.resolve(.{
+        .workspace_id = notes.id,
+        .path = "documents/missing.md",
+        .access = .read,
+    }, .{ .kind = .user, .serial = 2 }, read_capability.id, 30));
 
     const invalid_capability = try capabilities.mint(.{
         .holder = .{ .kind = .user, .serial = 1 },
@@ -214,6 +236,11 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
     try std.testing.expectError(error.CapabilityRequired, bridge.resolve(.{
         .workspace_id = notes.id,
         .path = "documents/notes.md",
+        .access = .read,
+    }, invalid_capability.holder, invalid_capability.id, 30));
+    try std.testing.expectError(error.CapabilityRequired, bridge.resolve(.{
+        .workspace_id = notes.id,
+        .path = "documents/missing.md",
         .access = .read,
     }, invalid_capability.holder, invalid_capability.id, 30));
 }

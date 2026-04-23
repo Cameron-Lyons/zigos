@@ -10,6 +10,7 @@ const device_inventory = @import("../../native/drivers/device_inventory.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const native_kernel = @import("../../native/kernel_api/native_kernel.zig");
+const native_util = @import("../../native/core/util.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const policy_mediation = @import("../../native/policy/policy_mediation.zig");
 const policy_object = @import("../../native/policy/policy_object.zig");
@@ -208,8 +209,8 @@ pub fn explicitGrantsRequireAuthority() !void {
     try std.testing.expect(network_capability.scope.broker_only);
     try std.testing.expect(network_capability.rights.network_local);
     try std.testing.expect(!network_capability.rights.network_remote);
-    try std.testing.expectEqual(capability.CapabilityTargetKind.service, network_capability.target.kind);
-    try std.testing.expectEqual(@as(u64, 41), network_capability.target.id);
+    try std.testing.expectEqual(capability.CapabilityTargetKind.network_policy, network_capability.target.kind);
+    try std.testing.expectEqual(native_util.fnv1a64("lan.sync"), network_capability.target.id);
 }
 
 pub fn kernelRemainsTypedAndIsolatesLegacy() !void {

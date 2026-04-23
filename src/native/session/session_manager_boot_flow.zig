@@ -44,6 +44,7 @@ const BootstrapState = session_support.BootstrapState;
 const NotesReviewState = session_support.NotesReviewState;
 const ServiceBindings = session_support.ServiceBindings;
 const Environment = session_support.Environment;
+const BootstrapError = session_bootstrap.Error || userspace_launch.Error || capability.Error || task_runtime.Error;
 
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/common.zig")
@@ -222,7 +223,11 @@ pub const SessionManager = struct {
         self.kernel_port_ready = false;
 
         const env = environment(self);
-        const state = initializeBootstrapState(self);
+        const state = initializeBootstrapState(self) catch {
+            self.initialized = false;
+            self.kernel_port_ready = false;
+            return;
+        };
         const kernel_port = prepareKernelInterface(self, state.ids.policy_authority, state.session_task.id);
         var service_bindings: ServiceBindings = undefined;
         if (!session_service_bootstrap.bootServices(&env, &state, kernel_port, &service_bindings)) {
@@ -253,7 +258,11 @@ pub const SessionManager = struct {
         self.kernel_port_ready = false;
 
         const env = environment(self);
-        const state = initializeBootstrapState(self);
+        const state = initializeBootstrapState(self) catch {
+            self.initialized = false;
+            self.kernel_port_ready = false;
+            return;
+        };
         bootstrap_packages.seed(&self.package_service_instance);
         var mediator = initPolicyMediator(self, state.ids.policy_authority, state.services);
         const kernel_port = prepareKernelInterface(self, state.ids.policy_authority, state.session_task.id);
@@ -304,18 +313,18 @@ fn emptyStorageService() storage_service_mod.Service {
     };
 }
 
-fn initializeBootstrapState(self: *SessionManager) BootstrapState {
+fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState {
     common.printBootMarker(boot_markers.native_bootstrap);
     common.printBootMarker(boot_markers.tcb_defined);
 
     const ids = session_bootstrap.principals();
-    session_bootstrap.initializeUserspace(
+    try session_bootstrap.initializeUserspace(
         &self.userspace_catalog,
         &self.runtime,
         &self.capability_table,
         &self.userspace_scheduler,
     );
-    const services = session_bootstrap.registerCoreServices(&self.supervisor, &self.runtime_service, ids);
+    const services = try session_bootstrap.registerCoreServices(&self.supervisor, &self.runtime_service, ids);
 
     const session_task = userspace_launch.launchRegisteredDirect(
         &self.userspace_catalog,
@@ -334,7 +343,10 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapState {
             .local_only = true,
         },
         &self.userspace_scheduler,
-    ) catch unreachable;
+    ) catch |err| {
+        _ = self.supervisor.recordCrash(services.session.id, 0, bootFailureCode(err));
+        return err;
+    };
     common.printBootMarker(boot_markers.policy_ready);
 
     const review_service_task = userspace_launch.launchRegisteredDirect(
@@ -353,19 +365,31 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapState {
             .local_only = true,
         },
         &self.userspace_scheduler,
-    ) catch unreachable;
+    ) catch |err| {
+        _ = self.supervisor.recordCrash(services.review_service_record.id, 0, bootFailureCode(err));
+        return err;
+    };
     common.printBootMarker(boot_markers.permission_ui_service_ready);
     common.printBootMarker(boot_markers.permission_ui_service_task_ready);
 
-    const session_capability = mintSessionCapability(self, ids, services, session_task.id);
+    const session_capability = mintSessionCapability(self, ids, services, session_task.id) catch |err| {
+        _ = self.supervisor.recordCrash(services.session.id, 0, bootFailureCode(err));
+        return err;
+    };
     const policy_capability = mintPolicyCapability(
         self,
         ids.session_service,
         ids.policy_authority,
         services.policy_service.id,
         session_task.id,
-    );
-    recordSessionTaskBootstrap(self, session_task.id, session_capability.id, policy_capability.id);
+    ) catch |err| {
+        _ = self.supervisor.recordCrash(services.policy_service.id, 0, bootFailureCode(err));
+        return err;
+    };
+    recordSessionTaskBootstrap(self, session_task.id, session_capability.id, policy_capability.id) catch |err| {
+        _ = self.supervisor.recordCrash(services.session.id, 0, bootFailureCode(err));
+        return err;
+    };
 
     return .{
         .ids = ids,
@@ -382,8 +406,8 @@ fn mintSessionCapability(
     ids: session_bootstrap.Principals,
     services: session_bootstrap.CoreServices,
     session_task_id: u64,
-) capability.Capability {
-    return self.capability_table.mint(.{
+) capability.Error!capability.Capability {
+    return try self.capability_table.mint(.{
         .holder = ids.session_service,
         .issuer = ids.policy_authority,
         .target = .{ .kind = .service, .id = services.session.id },
@@ -418,7 +442,7 @@ fn mintSessionCapability(
             .source_task_id = session_task_id,
             .broker_service_id = services.policy_service.id,
         },
-    }) catch unreachable;
+    });
 }
 
 fn recordSessionTaskBootstrap(
@@ -426,23 +450,23 @@ fn recordSessionTaskBootstrap(
     session_task_id: u64,
     session_capability_id: u64,
     policy_capability_id: u64,
-) void {
-    self.runtime.grantCapability(session_task_id, session_capability_id) catch unreachable;
-    self.runtime.grantCapability(session_task_id, policy_capability_id) catch unreachable;
-    self.runtime.audit(session_task_id, .{
+) task_runtime.Error!void {
+    try self.runtime.grantCapability(session_task_id, session_capability_id);
+    try self.runtime.grantCapability(session_task_id, policy_capability_id);
+    try self.runtime.audit(session_task_id, .{
         .kind = .created,
         .tick = 0,
-    }) catch unreachable;
-    self.runtime.audit(session_task_id, .{
+    });
+    try self.runtime.audit(session_task_id, .{
         .kind = .capability_granted,
         .capability_id = session_capability_id,
         .tick = 0,
-    }) catch unreachable;
-    self.runtime.audit(session_task_id, .{
+    });
+    try self.runtime.audit(session_task_id, .{
         .kind = .capability_granted,
         .capability_id = policy_capability_id,
         .tick = 0,
-    }) catch unreachable;
+    });
 }
 
 fn mintPolicyCapability(
@@ -451,8 +475,8 @@ fn mintPolicyCapability(
     policy_authority: principal.PrincipalId,
     policy_service_id: u64,
     session_task_id: u64,
-) capability.Capability {
-    return self.capability_table.mint(.{
+) capability.Error!capability.Capability {
+    return try self.capability_table.mint(.{
         .holder = holder,
         .issuer = policy_authority,
         .target = .{ .kind = .policy, .id = policy_service_id },
@@ -475,7 +499,7 @@ fn mintPolicyCapability(
             .source_task_id = session_task_id,
             .broker_service_id = policy_service_id,
         },
-    }) catch unreachable;
+    });
 }
 
 fn initPolicyMediator(
@@ -611,4 +635,13 @@ fn printNumber(value: u64) void {
     var buffer: [20]u8 = undefined;
     const text = std.fmt.bufPrint(&buffer, "{d}", .{value}) catch return;
     console.print(text);
+}
+
+fn bootFailureCode(err: anyerror) u32 {
+    var hash: u64 = 14695981039346656037;
+    for (@errorName(err)) |byte| {
+        hash ^= byte;
+        hash *%= 1099511628211;
+    }
+    return @truncate(hash);
 }

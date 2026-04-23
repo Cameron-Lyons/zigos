@@ -4,12 +4,15 @@ const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 
 pub const MAX_BINDINGS: usize = 24;
+pub const MAX_INTERFACE_NAME_BYTES: usize = 64;
 
 pub const Binding = struct {
     service_id: u64,
     owner_task_id: u64,
     endpoint_id: u64,
     interface: manifest.InterfaceDecl,
+    interface_name_len: usize,
+    interface_name: [MAX_INTERFACE_NAME_BYTES]u8,
     flags: u16 = 0,
 };
 
@@ -17,6 +20,7 @@ pub const Error = error{
     BindingTableFull,
     DuplicateInterface,
     InterfaceNotFound,
+    InterfaceNameTooLong,
     VersionMismatch,
 };
 
@@ -45,13 +49,20 @@ pub const Registry = struct {
         for (&self.slots) |*slot| {
             if (slot.in_use) continue;
             slot.in_use = true;
-            slot.binding = .{
-                .service_id = service_id,
-                .owner_task_id = owner_task_id,
-                .endpoint_id = endpoint_id,
-                .interface = interface,
-                .flags = flags,
+            slot.binding = zeroBinding();
+            slot.binding.service_id = service_id;
+            slot.binding.owner_task_id = owner_task_id;
+            slot.binding.endpoint_id = endpoint_id;
+            slot.binding.interface_name_len = native_util.copyTextExact(
+                slot.binding.interface_name[0..],
+                interface.name,
+            ) catch return error.InterfaceNameTooLong;
+            slot.binding.interface = .{
+                .name = slot.binding.interface_name[0..slot.binding.interface_name_len],
+                .version_major = interface.version_major,
+                .version_minor = interface.version_minor,
             };
+            slot.binding.flags = flags;
             return;
         }
 
@@ -96,6 +107,8 @@ fn zeroBinding() Binding {
         .owner_task_id = 0,
         .endpoint_id = 0,
         .interface = .{ .name = "" },
+        .interface_name_len = 0,
+        .interface_name = [_]u8{0} ** MAX_INTERFACE_NAME_BYTES,
         .flags = 0,
     };
 }
@@ -139,4 +152,28 @@ test "service registry rejects duplicate interfaces and incompatible versions" {
         .version_major = 2,
         .version_minor = 0,
     }));
+}
+
+test "service registry owns interface name bytes" {
+    var registry = Registry.init();
+    var name = [_]u8{ 'z', 'i', 'g', 'o', 's', '.', 'm', 'u', 't', 'a', 'b', 'l', 'e' };
+    try registry.register(44, 7, 101, .{
+        .name = name[0..],
+        .version_major = 1,
+        .version_minor = 0,
+    }, 0);
+
+    @memset(name[0..], 'x');
+
+    try std.testing.expectError(error.InterfaceNotFound, registry.connect(.{
+        .name = name[0..],
+        .version_major = 1,
+        .version_minor = 0,
+    }));
+    const connection = try registry.connect(.{
+        .name = "zigos.mutable",
+        .version_major = 1,
+        .version_minor = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 44), connection.service_id);
 }

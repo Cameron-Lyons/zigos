@@ -16,7 +16,7 @@ const userspace_boot_registry = @import("../task/userspace_boot_registry.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 
-pub const Error = userspace_launch.Error || userspace_boot_registry.Error || component_port.Error;
+pub const Error = userspace_launch.Error || userspace_boot_registry.Error || component_port.Error || driver_service.Error;
 
 pub const ServiceBinding = struct {
     task_id: u64,
@@ -136,9 +136,9 @@ pub fn attachDriver(
     bootstrap_transport: driver_service.BootstrapTransport,
     driver_bundle_id: []const u8,
     now_ticks: u64,
-) *driver_service.DriverRecord {
+) Error!*driver_service.DriverRecord {
     _ = owner;
-    const driver_capability_id = bootstrap_capabilities.mintTaskCapability(
+    const driver_capability_id = try bootstrap_capabilities.mintTaskCapability(
         kernel_port,
         controller_task_id,
         policy_capability_id,
@@ -148,19 +148,20 @@ pub fn attachDriver(
         policy_authority,
         360 + now_ticks,
         now_ticks,
-    ) catch unreachable;
-    const driver = directory.registerSigned(.{
+    );
+    const requester = kernel_port.kernel.runtime.find(task_id) orelse return error.TaskNotFound;
+    const driver = try directory.registerSigned(.{
         .service_id = service_id,
         .owner_task_id = task_id,
         .device_id = deviceId(device_class),
         .device_class = device_class,
         .authority_capability_id = driver_capability_id,
         .capability_table = capability_table,
-        .requester = kernel_port.kernel.runtime.find(task_id).?.owner,
+        .requester = requester.owner,
         .now_ticks = now_ticks,
-        .signer = driverSigner(device_class, driver_bundle_id),
+        .signer = try driverSigner(device_class, driver_bundle_id),
         .bootstrap_transport = bootstrap_transport,
-    }) catch unreachable;
+    });
     _ = supervisor.noteDriverAttached(service_id, device_class, driver_capability_id, now_ticks);
     return driver;
 }
@@ -252,9 +253,9 @@ fn deviceId(device_class: driver_service.DeviceClass) u64 {
     return device_inventory.deviceIdForClass(device_class);
 }
 
-fn driverSigner(device_class: driver_service.DeviceClass, bundle_id: []const u8) []const u8 {
+fn driverSigner(device_class: driver_service.DeviceClass, bundle_id: []const u8) userspace_boot_registry.Error![]const u8 {
     if (bundle_id.len != 0) {
-        return userspace_boot_registry.signerFor(bundle_id) catch unreachable;
+        return try userspace_boot_registry.signerFor(bundle_id);
     }
 
     return switch (device_class) {

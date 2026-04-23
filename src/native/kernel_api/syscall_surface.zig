@@ -1,4 +1,5 @@
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
+const builtin = @import("builtin");
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const capability = @import("capability.zig");
@@ -8,6 +9,11 @@ const native_kernel = @import("native_kernel.zig");
 const service_registry = @import("service_registry.zig");
 const shared_memory = @import("shared_memory.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+
+const USER_POINTER_FLOOR: usize = 0x10000;
+const USER_POINTER_CEILING_32: usize = 0xC0000000;
+const MAX_COMPONENT_LABEL_BYTES: usize = 48;
+const MAX_COMPONENT_ENTRY_BYTES: usize = 64;
 
 pub const DispatchResult = struct {
     status: abi.SyscallStatus,
@@ -23,7 +29,7 @@ pub fn dispatch(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const header = requestPtr(abi.RequestHeader, request_addr) orelse return .{
+    const header = readRequest(abi.RequestHeader, request_addr) orelse return .{
         .status = .invalid_request_pointer,
     };
     if (header.version != abi.ABI_VERSION) return .{
@@ -74,8 +80,19 @@ fn dispatchTaskCreate(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.TaskCreateRequest, request_addr) orelse return invalidRequest();
-    const task = port.taskCreate(request.*, now_ticks) catch |err| return mapError(err);
+    var request = readRequest(component_port.TaskCreateRequest, request_addr) orelse return invalidRequest();
+    var bundle_id_buffer: [task_runtime.MAX_TASK_BUNDLE_ID_BYTES]u8 = undefined;
+    var component_label_buffer: [MAX_COMPONENT_LABEL_BYTES]u8 = undefined;
+    var component_entry_buffer: [MAX_COMPONENT_ENTRY_BYTES]u8 = undefined;
+    var image_copy = task_runtime.ExecutableImageSpec{};
+    if (!sanitizeTaskCreateRequest(
+        &request,
+        &bundle_id_buffer,
+        &component_label_buffer,
+        &component_entry_buffer,
+        &image_copy,
+    )) return invalidRequest();
+    const task = port.taskCreate(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, task);
 }
 
@@ -86,8 +103,8 @@ fn dispatchTaskTerminate(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.TaskTerminateRequest, request_addr) orelse return invalidRequest();
-    const terminated = port.taskTerminate(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.TaskTerminateRequest, request_addr) orelse return invalidRequest();
+    const terminated = port.taskTerminate(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, abi.BoolResponse{
         .value = @intFromBool(terminated),
         ._reserved = [_]u8{0} ** 7,
@@ -101,8 +118,10 @@ fn dispatchEndpointCreate(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.EndpointCreateRequest, request_addr) orelse return invalidRequest();
-    const created = port.endpointCreate(request.*, now_ticks) catch |err| return mapError(err);
+    var request = readRequest(component_port.EndpointCreateRequest, request_addr) orelse return invalidRequest();
+    var label_buffer: [MAX_COMPONENT_LABEL_BYTES]u8 = undefined;
+    request.label = copyUserSlice(request.label, &label_buffer) orelse return invalidRequest();
+    const created = port.endpointCreate(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, abi.EndpointCreateResponse{
         .endpoint = created.endpoint,
         .capability = created.capability,
@@ -117,8 +136,8 @@ fn dispatchEndpointConnect(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.EndpointConnectRequest, request_addr) orelse return invalidRequest();
-    const descriptor = port.endpointConnect(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.EndpointConnectRequest, request_addr) orelse return invalidRequest();
+    const descriptor = port.endpointConnect(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, descriptor);
 }
 
@@ -127,8 +146,10 @@ fn dispatchEndpointSend(
     now_ticks: u64,
     request_addr: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.EndpointSendRequest, request_addr) orelse return invalidRequest();
-    port.endpointSend(request.*, now_ticks) catch |err| return mapError(err);
+    var request = readRequest(component_port.EndpointSendRequest, request_addr) orelse return invalidRequest();
+    var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
+    request.payload = copyUserSlice(request.payload, &payload_buffer) orelse return invalidRequest();
+    port.endpointSend(request, now_ticks) catch |err| return mapError(err);
     return success();
 }
 
@@ -139,8 +160,8 @@ fn dispatchEndpointRecv(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.EndpointRecvRequest, request_addr) orelse return invalidRequest();
-    const received = port.endpointRecv(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.EndpointRecvRequest, request_addr) orelse return invalidRequest();
+    const received = port.endpointRecv(request, now_ticks) catch |err| return mapError(err);
 
     var response = std.mem.zeroes(abi.EndpointRecvResponse);
     if (received) |message| {
@@ -162,8 +183,8 @@ fn dispatchCapabilityMint(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.CapabilityMintRequest, request_addr) orelse return invalidRequest();
-    const descriptor = port.capabilityMint(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.CapabilityMintRequest, request_addr) orelse return invalidRequest();
+    const descriptor = port.capabilityMint(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, descriptor);
 }
 
@@ -173,8 +194,8 @@ fn dispatchCapabilityDerive(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.CapabilityDeriveRequest, request_addr) orelse return invalidRequest();
-    const descriptor = port.capabilityDerive(request.*) catch |err| return mapError(err);
+    const request = readRequest(component_port.CapabilityDeriveRequest, request_addr) orelse return invalidRequest();
+    const descriptor = port.capabilityDerive(request) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, descriptor);
 }
 
@@ -185,8 +206,8 @@ fn dispatchCapabilityPass(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.CapabilityPassRequest, request_addr) orelse return invalidRequest();
-    const descriptor = port.capabilityPass(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.CapabilityPassRequest, request_addr) orelse return invalidRequest();
+    const descriptor = port.capabilityPass(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, descriptor);
 }
 
@@ -195,8 +216,8 @@ fn dispatchCapabilityRevoke(
     now_ticks: u64,
     request_addr: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.CapabilityRevokeRequest, request_addr) orelse return invalidRequest();
-    port.capabilityRevoke(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.CapabilityRevokeRequest, request_addr) orelse return invalidRequest();
+    port.capabilityRevoke(request, now_ticks) catch |err| return mapError(err);
     return success();
 }
 
@@ -207,8 +228,8 @@ fn dispatchCapabilityQuery(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.CapabilityQueryRequest, request_addr) orelse return invalidRequest();
-    const descriptor = port.capabilityQuery(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.CapabilityQueryRequest, request_addr) orelse return invalidRequest();
+    const descriptor = port.capabilityQuery(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, descriptor);
 }
 
@@ -219,8 +240,8 @@ fn dispatchSharedMemoryCreate(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.SharedMemoryCreateRequest, request_addr) orelse return invalidRequest();
-    const created = port.sharedMemoryCreate(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.SharedMemoryCreateRequest, request_addr) orelse return invalidRequest();
+    const created = port.sharedMemoryCreate(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, abi.SharedMemoryCreateResponse{
         .object = created.object,
         .capability = created.capability,
@@ -235,8 +256,8 @@ fn dispatchSharedMemoryMap(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.SharedMemoryMapRequest, request_addr) orelse return invalidRequest();
-    const descriptor = port.sharedMemoryMap(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.SharedMemoryMapRequest, request_addr) orelse return invalidRequest();
+    const descriptor = port.sharedMemoryMap(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, descriptor);
 }
 
@@ -247,8 +268,8 @@ fn dispatchSharedMemoryUnmap(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.SharedMemoryUnmapRequest, request_addr) orelse return invalidRequest();
-    const unmapped = port.sharedMemoryUnmap(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.SharedMemoryUnmapRequest, request_addr) orelse return invalidRequest();
+    const unmapped = port.sharedMemoryUnmap(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, abi.BoolResponse{
         .value = @intFromBool(unmapped),
         ._reserved = [_]u8{0} ** 7,
@@ -262,8 +283,8 @@ fn dispatchSharedMemoryRevoke(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.SharedMemoryRevokeRequest, request_addr) orelse return invalidRequest();
-    const descriptor = port.sharedMemoryRevoke(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.SharedMemoryRevokeRequest, request_addr) orelse return invalidRequest();
+    const descriptor = port.sharedMemoryRevoke(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, descriptor);
 }
 
@@ -274,8 +295,8 @@ fn dispatchTimeQuery(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.TimeQueryRequest, request_addr) orelse return invalidRequest();
-    const queried = port.timeQuery(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.TimeQueryRequest, request_addr) orelse return invalidRequest();
+    const queried = port.timeQuery(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, abi.TimeQueryResponse{
         .now_ticks = queried,
     });
@@ -288,8 +309,8 @@ fn dispatchResourceQuery(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.ResourceQueryRequest, request_addr) orelse return invalidRequest();
-    const descriptor = port.resourceQuery(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.ResourceQueryRequest, request_addr) orelse return invalidRequest();
+    const descriptor = port.resourceQuery(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, descriptor);
 }
 
@@ -300,8 +321,8 @@ fn dispatchAccountingQuery(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.AccountingQueryRequest, request_addr) orelse return invalidRequest();
-    const descriptor = port.accountingQuery(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.AccountingQueryRequest, request_addr) orelse return invalidRequest();
+    const descriptor = port.accountingQuery(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, descriptor);
 }
 
@@ -310,8 +331,10 @@ fn dispatchServiceRegister(
     now_ticks: u64,
     request_addr: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.ServiceRegisterRequest, request_addr) orelse return invalidRequest();
-    port.serviceRegister(request.*, now_ticks) catch |err| return mapError(err);
+    var request = readRequest(component_port.ServiceRegisterRequest, request_addr) orelse return invalidRequest();
+    var interface_name_buffer: [service_registry.MAX_INTERFACE_NAME_BYTES]u8 = undefined;
+    request.interface.name = copyUserSlice(request.interface.name, &interface_name_buffer) orelse return invalidRequest();
+    port.serviceRegister(request, now_ticks) catch |err| return mapError(err);
     return success();
 }
 
@@ -322,8 +345,10 @@ fn dispatchServiceConnect(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.ServiceConnectRequest, request_addr) orelse return invalidRequest();
-    const descriptor = port.serviceConnect(request.*, now_ticks) catch |err| return mapError(err);
+    var request = readRequest(component_port.ServiceConnectRequest, request_addr) orelse return invalidRequest();
+    var interface_name_buffer: [service_registry.MAX_INTERFACE_NAME_BYTES]u8 = undefined;
+    request.interface.name = copyUserSlice(request.interface.name, &interface_name_buffer) orelse return invalidRequest();
+    const descriptor = port.serviceConnect(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, descriptor);
 }
 
@@ -334,8 +359,8 @@ fn dispatchDeviceDescribe(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.DeviceDescribeRequest, request_addr) orelse return invalidRequest();
-    const descriptor = port.deviceDescribe(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.DeviceDescribeRequest, request_addr) orelse return invalidRequest();
+    const descriptor = port.deviceDescribe(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, descriptor);
 }
 
@@ -346,8 +371,8 @@ fn dispatchDeviceMmioWindow(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.DeviceMmioWindowRequest, request_addr) orelse return invalidRequest();
-    const descriptor = port.deviceMmioWindow(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.DeviceMmioWindowRequest, request_addr) orelse return invalidRequest();
+    const descriptor = port.deviceMmioWindow(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, descriptor);
 }
 
@@ -358,8 +383,8 @@ fn dispatchDevicePortRead(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.DevicePortReadRequest, request_addr) orelse return invalidRequest();
-    const value = port.devicePortRead(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.DevicePortReadRequest, request_addr) orelse return invalidRequest();
+    const value = port.devicePortRead(request, now_ticks) catch |err| return mapError(err);
     return writeResponse(response_addr, response_len, abi.DevicePortReadResponse{
         .value = value,
     });
@@ -370,15 +395,67 @@ fn dispatchDevicePortWrite(
     now_ticks: u64,
     request_addr: usize,
 ) DispatchResult {
-    const request = requestPtr(component_port.DevicePortWriteRequest, request_addr) orelse return invalidRequest();
-    port.devicePortWrite(request.*, now_ticks) catch |err| return mapError(err);
+    const request = readRequest(component_port.DevicePortWriteRequest, request_addr) orelse return invalidRequest();
+    port.devicePortWrite(request, now_ticks) catch |err| return mapError(err);
     return success();
 }
 
-fn requestPtr(comptime T: type, request_addr: usize) ?*const T {
-    if (request_addr == 0) return null;
-    if (request_addr % @alignOf(T) != 0) return null;
-    return @ptrFromInt(request_addr);
+fn readRequest(comptime T: type, request_addr: usize) ?T {
+    return readUserValue(T, request_addr);
+}
+
+fn readUserValue(comptime T: type, addr: usize) ?T {
+    if (!validateUserRange(addr, @sizeOf(T), @alignOf(T))) return null;
+    const ptr: *const T = @ptrFromInt(addr);
+    return ptr.*;
+}
+
+fn sanitizeTaskCreateRequest(
+    request: *component_port.TaskCreateRequest,
+    bundle_id_buffer: []u8,
+    component_label_buffer: []u8,
+    component_entry_buffer: []u8,
+    image_copy: *task_runtime.ExecutableImageSpec,
+) bool {
+    request.request.launch.bundle_id = copyUserSlice(
+        request.request.launch.bundle_id,
+        bundle_id_buffer,
+    ) orelse return false;
+    request.request.initial_component.label = copyUserSlice(
+        request.request.initial_component.label,
+        component_label_buffer,
+    ) orelse return false;
+    request.request.initial_component.entry = copyUserSlice(
+        request.request.initial_component.entry,
+        component_entry_buffer,
+    ) orelse return false;
+
+    if (request.request.userspace_image) |image_ptr| {
+        image_copy.* = readUserValue(task_runtime.ExecutableImageSpec, @intFromPtr(image_ptr)) orelse return false;
+        request.request.userspace_image = image_copy;
+    }
+    return true;
+}
+
+fn copyUserSlice(slice: []const u8, dest: []u8) ?[]const u8 {
+    if (slice.len > dest.len) return null;
+    if (slice.len == 0) return dest[0..0];
+    if (!validateUserRange(@intFromPtr(slice.ptr), slice.len, 1)) return null;
+    @memcpy(dest[0..slice.len], slice);
+    return dest[0..slice.len];
+}
+
+fn validateUserRange(addr: usize, len: usize, alignment: usize) bool {
+    if (len == 0) return true;
+    if (addr == 0 or addr < USER_POINTER_FLOOR) return false;
+    if (alignment != 0 and addr % alignment != 0) return false;
+    const end_exclusive = std.math.add(usize, addr, len) catch return false;
+    if (end_exclusive <= addr) return false;
+
+    if (builtin.target.os.tag == .freestanding and @bitSizeOf(usize) <= 32) {
+        if (end_exclusive > USER_POINTER_CEILING_32) return false;
+    }
+    return true;
 }
 
 fn nativeOperationFromOpcode(opcode: u16) ?abi.NativeOperation {
@@ -392,7 +469,7 @@ fn nativeOperationFromOpcode(opcode: u16) ?abi.NativeOperation {
 
 fn responseBuffer(response_addr: usize, response_len: usize) ?[]u8 {
     if (response_len == 0) return &[_]u8{};
-    if (response_addr == 0) return null;
+    if (!validateUserRange(response_addr, response_len, 1)) return null;
     const bytes: [*]u8 = @ptrFromInt(response_addr);
     return bytes[0..response_len];
 }
@@ -451,6 +528,10 @@ fn mapError(err: anyerror) DispatchResult {
         .denial_reason = .capability_expired,
     };
     if (err == error.InvalidCapabilityTarget) return .{
+        .status = .denied,
+        .denial_reason = .invalid_target,
+    };
+    if (err == error.InterfaceNameTooLong or err == error.MessageTooLarge) return .{
         .status = .denied,
         .denial_reason = .invalid_target,
     };
@@ -712,6 +793,28 @@ test "syscall surface rejects unsupported native operations" {
     try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
 }
 
+test "syscall surface rejects invalid request and response pointer ranges" {
+    var test_kernel = TestKernel{};
+    try test_kernel.init();
+
+    const low_request = dispatch(&test_kernel.port, test_kernel.session_task_id, 9, 0x1000, 0, 0);
+    try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, low_request.status);
+
+    const request = component_port.TimeQueryRequest{
+        .header = component_port.makeHeader(.time_query, 92, test_kernel.session_task_id),
+        .authority_capability_id = test_kernel.authority_capability_id,
+    };
+    const bad_response = dispatch(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        9,
+        @intFromPtr(&request),
+        std.math.maxInt(usize) - 4,
+        16,
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.invalid_response_buffer, bad_response.status);
+}
+
 test "syscall surface rejects spoofed subject task ids" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
@@ -757,6 +860,55 @@ test "syscall surface rejects spoofed subject task ids" {
     try std.testing.expectEqual(abi.SyscallStatus.denied, result.status);
     try std.testing.expectEqual(abi.DenialReason.scope_violation, result.denial_reason);
     try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
+}
+
+test "syscall surface copies and bounds embedded user buffers" {
+    var test_kernel = TestKernel{};
+    try test_kernel.init();
+
+    const bad_image_ptr: *const task_runtime.ExecutableImageSpec = @ptrFromInt(0x1000);
+    var response = std.mem.zeroes(abi.TaskDescriptor);
+    const bad_image_request = component_port.TaskCreateRequest{
+        .header = component_port.makeHeader(.task_create, 93, test_kernel.session_task_id),
+        .authority_capability_id = test_kernel.authority_capability_id,
+        .request = .{
+            .owner = .{ .kind = .app, .serial = 100 },
+            .component_class = .app_component,
+            .budget = .{
+                .cpu_time_ticks = 1_000,
+                .memory_bytes = 1024,
+                .endpoint_slots = 4,
+                .shared_memory_bytes = 1024,
+            },
+            .local_only = true,
+            .userspace_image = bad_image_ptr,
+        },
+    };
+    const bad_image = dispatch(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        10,
+        @intFromPtr(&bad_image_request),
+        @intFromPtr(&response),
+        @sizeOf(abi.TaskDescriptor),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, bad_image.status);
+
+    const oversized_payload = [_]u8{0xAB} ** (endpoint.MAX_MESSAGE_BYTES + 1);
+    const send_request = component_port.EndpointSendRequest{
+        .header = component_port.makeHeader(.endpoint_send, 94, test_kernel.session_task_id),
+        .endpoint_capability_id = test_kernel.authority_capability_id,
+        .payload = oversized_payload[0..],
+    };
+    const oversized = dispatch(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        10,
+        @intFromPtr(&send_request),
+        0,
+        0,
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, oversized.status);
 }
 
 test "syscall surface dispatches typed device broker requests" {
