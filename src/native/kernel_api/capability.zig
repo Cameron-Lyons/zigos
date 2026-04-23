@@ -13,6 +13,7 @@ pub const CapabilityTargetKind = enum(u8) {
     workspace,
     device,
     policy,
+    network_policy,
 };
 
 pub const CapabilityTarget = struct {

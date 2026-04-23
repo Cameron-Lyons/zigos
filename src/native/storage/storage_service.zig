@@ -478,3 +478,41 @@ test "storage service reloads authoritative state from the attached volume after
         .now_ticks = 120,
     }));
 }
+
+test "storage service records checkpoint flush failures" {
+    const FailingBackend = struct {
+        fn read(_: u64, _: [*]u8, _: usize) callconv(.c) bool {
+            return false;
+        }
+
+        fn write(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
+            return false;
+        }
+    };
+
+    var checkpoint_store = CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    defer checkpoint_store.resetPersistent();
+    storage_volume.attachBackend(.{
+        .sector_count = storage_volume.required_device_sectors,
+        .read = FailingBackend.read,
+        .write = FailingBackend.write,
+    });
+    defer storage_volume.clearAttachedBackend();
+
+    var service = Service.initWithStore(702, 19, .{ .kind = .service, .serial = 46 }, &checkpoint_store);
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0xA6} ** 32,
+    };
+    _ = try service.putVersion(.{
+        .preferred_object_id = 952,
+        .object_type = .document,
+        .payload = "checkpoint failure",
+        .metadata = try object_store.signMetadata(signer, "failure", "text/plain", .document, "checkpoint failure", 10),
+    });
+
+    try std.testing.expect(checkpoint_store.dirty);
+    try std.testing.expect(!checkpoint_store.checkpointHealthy());
+    try std.testing.expectEqual(storage_volume.Error.CorruptImage, checkpoint_store.last_checkpoint_error.?);
+}

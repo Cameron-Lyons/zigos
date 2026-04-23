@@ -48,6 +48,8 @@ pub const CoreServices = struct {
     media_service: *supervisor_mod.ServiceRecord,
 };
 
+pub const Error = userspace_boot_registry.Error || supervisor_mod.Error;
+
 pub fn principals() Principals {
     return .{
         .policy_authority = .{ .kind = .policy_authority, .serial = 1 },
@@ -71,9 +73,9 @@ pub fn initializeUserspace(
     runtime: *task_runtime.Runtime,
     capability_table: *const capability.CapabilityTable,
     scheduler: *userspace_scheduler.Scheduler,
-) void {
+) userspace_boot_registry.Error!void {
     catalog.* = userspace_loader.Catalog.init();
-    userspace_boot_registry.registerAll(catalog) catch unreachable;
+    try userspace_boot_registry.registerAll(catalog);
     scheduler.bind(catalog, runtime, capability_table);
     if (catalog.imageCount() != 0) {
         common.printBootMarker(boot_markers.userspace_artifacts_ready);
@@ -84,21 +86,21 @@ pub fn registerCoreServices(
     supervisor: *supervisor_mod.Supervisor,
     runtime_service: *task_runtime_service.Service,
     ids: Principals,
-) CoreServices {
+) supervisor_mod.Error!CoreServices {
     const services = CoreServices{
-        .runtime_service_record = supervisor.register(.task_runtime, ids.task_runtime_service) catch unreachable,
-        .service_registry = supervisor.register(.service_registry, ids.policy_authority) catch unreachable,
-        .policy_service = supervisor.register(.policy_mediation, ids.policy_authority) catch unreachable,
-        .session = supervisor.register(.session_manager, ids.session_service) catch unreachable,
-        .review_service_record = supervisor.register(.permission_review_ui, ids.review_service) catch unreachable,
-        .compatibility_service = supervisor.register(.compatibility_portal, ids.compatibility_service) catch unreachable,
-        .network_service = supervisor.register(.network_stack, ids.network_service) catch unreachable,
-        .compositor_service = supervisor.register(.compositor_ui_session, ids.compositor_service) catch unreachable,
-        .storage_service = supervisor.register(.storage_object, ids.storage_service) catch unreachable,
-        .package_service = supervisor.register(.package_install_update, ids.package_service) catch unreachable,
-        .indexing_service = supervisor.register(.indexing_search, ids.indexing_service) catch unreachable,
-        .sync_service = supervisor.register(.sync_replication, ids.sync_service) catch unreachable,
-        .media_service = supervisor.register(.media_print_helpers, ids.media_service) catch unreachable,
+        .runtime_service_record = try supervisor.register(.task_runtime, ids.task_runtime_service),
+        .service_registry = try supervisor.register(.service_registry, ids.policy_authority),
+        .policy_service = try supervisor.register(.policy_mediation, ids.policy_authority),
+        .session = try supervisor.register(.session_manager, ids.session_service),
+        .review_service_record = try supervisor.register(.permission_review_ui, ids.review_service),
+        .compatibility_service = try supervisor.register(.compatibility_portal, ids.compatibility_service),
+        .network_service = try supervisor.register(.network_stack, ids.network_service),
+        .compositor_service = try supervisor.register(.compositor_ui_session, ids.compositor_service),
+        .storage_service = try supervisor.register(.storage_object, ids.storage_service),
+        .package_service = try supervisor.register(.package_install_update, ids.package_service),
+        .indexing_service = try supervisor.register(.indexing_search, ids.indexing_service),
+        .sync_service = try supervisor.register(.sync_replication, ids.sync_service),
+        .media_service = try supervisor.register(.media_print_helpers, ids.media_service),
     };
 
     runtime_service.bind(services.runtime_service_record.id, ids.task_runtime_service);
