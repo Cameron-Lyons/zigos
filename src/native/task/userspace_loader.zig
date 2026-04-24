@@ -32,6 +32,7 @@ pub const Error = manifest.ValidationError || component_port.Error || task_runti
     ImageTableFull,
     InitialComponentEntryTooLong,
     InitialComponentLabelTooLong,
+    InitialComponentAbiMismatch,
     MissingBundleComponent,
     MissingBundleSignature,
     InvalidBundleSignature,
@@ -321,20 +322,36 @@ fn validateExecutableBundle(
     if (!manifest.isApplicationBundle(bundle.bundle_id) and bundle.components.len == 0) {
         return error.MissingBundleComponent;
     }
-    if (!bundleDeclaresInitialComponent(bundle, initial_component)) return error.InitialComponentNotDeclared;
+    const declared_component = declaredInitialComponent(bundle, initial_component) orelse {
+        return error.InitialComponentNotDeclared;
+    };
+    if (initial_component.substrate != substrateForComponentAbi(declared_component.abi)) {
+        return error.InitialComponentAbiMismatch;
+    }
     if (builtin.target.os.tag == .freestanding and !has_embedded_artifact) {
         return error.EmbeddedArtifactRequired;
     }
 }
 
-fn bundleDeclaresInitialComponent(
+fn declaredInitialComponent(
     bundle: manifest.BundleManifest,
     initial_component: task_runtime.ExecutionComponentSpec,
-) bool {
+) ?manifest.ExecutionComponentDecl {
     for (bundle.components) |component| {
-        if (std.mem.eql(u8, component.entry, initial_component.entry)) return true;
+        if (std.mem.eql(u8, component.id, initial_component.label) and
+            std.mem.eql(u8, component.entry, initial_component.entry))
+        {
+            return component;
+        }
     }
-    return false;
+    return null;
+}
+
+pub fn substrateForComponentAbi(component_abi: manifest.ComponentAbi) task_runtime.ExecutionSubstrate {
+    return switch (component_abi) {
+        .typed_component_v1 => .typed_component_abi,
+        .native_sandbox => .early_elf_runner,
+    };
 }
 
 fn zeroImage() ImageRecord {
@@ -693,7 +710,7 @@ test "catalog preserves exact-limit identity and component labels without trunca
         .provided_interfaces = interfaces[0..1],
         .consumed_interfaces = interfaces[1..2],
         .components = &[_]manifest.ExecutionComponentDecl{
-            .{ .id = "main", .entry = entry[0..] },
+            .{ .id = label[0..], .entry = entry[0..] },
         },
         .assets = &assets,
     };
@@ -783,6 +800,52 @@ test "catalog rejects unsigned bundles and missing declared components for users
         .initial_component = .{
             .label = "main",
             .entry = "app.mismatch.main",
+        },
+    }));
+
+    try std.testing.expectError(error.InitialComponentNotDeclared, catalog.register(.{
+        .bundle = blk: {
+            var bundle = manifest.BundleManifest{
+                .bundle_id = "app.label-spoof",
+                .display_name = "Label Spoof",
+                .publisher = "zigos.dev",
+                .provided_interfaces = interfaces[0..1],
+                .consumed_interfaces = interfaces[1..2],
+                .components = &[_]manifest.ExecutionComponentDecl{
+                    .{ .id = "declared-main", .entry = "app.label-spoof" },
+                },
+                .assets = &assets,
+            };
+            bundle.signature = try userspace_manifest_signing.signBundle(bundle);
+            break :blk bundle;
+        },
+        .component_class = .app_component,
+        .initial_component = .{
+            .label = "spoofed-main",
+            .entry = "app.label-spoof",
+        },
+    }));
+
+    try std.testing.expectError(error.InitialComponentAbiMismatch, catalog.register(.{
+        .bundle = blk: {
+            var bundle = manifest.BundleManifest{
+                .bundle_id = "app.abi-mismatch",
+                .display_name = "ABI Mismatch",
+                .publisher = "zigos.dev",
+                .provided_interfaces = interfaces[0..1],
+                .consumed_interfaces = interfaces[1..2],
+                .components = &[_]manifest.ExecutionComponentDecl{
+                    .{ .id = "native-main", .entry = "app.abi-mismatch", .abi = .native_sandbox },
+                },
+                .assets = &assets,
+            };
+            bundle.signature = try userspace_manifest_signing.signBundle(bundle);
+            break :blk bundle;
+        },
+        .component_class = .app_component,
+        .initial_component = .{
+            .label = "native-main",
+            .entry = "app.abi-mismatch",
         },
     }));
 

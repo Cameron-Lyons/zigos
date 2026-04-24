@@ -596,6 +596,7 @@ fn runSessionLifecycle(
         .capability_table = &self.capability_table,
         .runtime = &self.runtime,
         .runtime_service = &self.runtime_service,
+        .userspace_catalog = &self.userspace_catalog,
         .supervisor = &self.supervisor,
         .compositor = &self.review_compositor_session,
         .driver_directory = &self.driver_directory,
