@@ -1,7 +1,6 @@
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const contract = @import("../session/contract.zig");
-const device_inventory = @import("../drivers/device_inventory.zig");
 const immutable_base = @import("../platform/immutable_base.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
 const native_ux = @import("../platform/native_ux.zig");
@@ -11,7 +10,9 @@ const recovery_environment = @import("../platform/recovery_environment.zig");
 const signing = @import("../core/signing.zig");
 const supervisor_mod = @import("../session/supervisor.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
+const task_runtime = @import("../task/task_runtime.zig");
 const update_health = @import("../platform/update_health.zig");
+const userspace_loader = @import("../task/userspace_loader.zig");
 const workspace_mod = @import("../storage/workspace.zig");
 const support = @import("scenario_support.zig");
 
@@ -243,35 +244,23 @@ pub fn run(
         context.supervisor.find(context.network_service_id).?,
     };
     for (critical_services) |service_record| {
-        var service_measure: [96]u8 = undefined;
-        const service_measure_text = std.fmt.bufPrint(
-            &service_measure,
-            "{s}:{d}:{d}",
-            .{
-                contract.serviceName(service_record.class),
-                @intFromEnum(service_record.state),
-                service_record.restart_count,
-            },
-        ) catch unreachable;
-        measured.add(.critical_service, contract.serviceName(service_record.class), service_measure_text) catch unreachable;
+        if (criticalServiceImage(context, service_record)) |image| {
+            measured.addCriticalServiceImage(service_record, image) catch unreachable;
+        } else {
+            var service_measure: [96]u8 = undefined;
+            const service_measure_text = std.fmt.bufPrint(
+                &service_measure,
+                "{s}:{d}:{d}",
+                .{
+                    contract.serviceName(service_record.class),
+                    @intFromEnum(service_record.state),
+                    service_record.restart_count,
+                },
+            ) catch unreachable;
+            measured.add(.critical_service, contract.serviceName(service_record.class), service_measure_text) catch unreachable;
+        }
     }
-    var driver_measure: [192]u8 = undefined;
-    const driver_measure_text = std.fmt.bufPrint(
-        &driver_measure,
-        "{s}:{d}:{s}|{s}:{d}:{s}|{s}:{d}:{s}",
-        .{
-            context.driver_directory.findByClass(.network_adapter).?.signerSlice(),
-            context.driver_directory.findByClass(.network_adapter).?.restart_generation,
-            device_inventory.sourceName(device_inventory.recordForClass(.network_adapter).source),
-            context.driver_directory.findByClass(.storage_controller).?.signerSlice(),
-            context.driver_directory.findByClass(.storage_controller).?.restart_generation,
-            device_inventory.sourceName(device_inventory.recordForClass(.storage_controller).source),
-            context.driver_directory.findByClass(.graphics_adapter).?.signerSlice(),
-            context.driver_directory.findByClass(.graphics_adapter).?.restart_generation,
-            device_inventory.sourceName(device_inventory.recordForClass(.graphics_adapter).source),
-        },
-    ) catch unreachable;
-    measured.add(.driver_set, "core-driver-set", driver_measure_text) catch unreachable;
+    measured.addDriverSet("core-driver-set", context.driver_directory) catch unreachable;
     const measured_boot_record = measured.finalize();
     if (measured_boot_record.countKind(.kernel) == 1 and
         measured_boot_record.countKind(.base_image) == 1 and
@@ -541,6 +530,27 @@ fn ensureImmutableBaseWorkspace(context: *support.Context) ImmutableBaseWorkspac
         .workspace = context.storage_service_instance.createWorkspaceRef(&request) catch unreachable,
         .found_existing = false,
     };
+}
+
+fn criticalServiceImage(
+    context: *const support.Context,
+    service_record: *const supervisor_mod.ServiceRecord,
+) ?*const userspace_loader.ImageRecord {
+    const task = taskForOwner(context.runtime, service_record.owner) orelse return null;
+    if (!task.runsAsUserspaceProcess()) return null;
+    if (task.launch.image_id == 0) return null;
+    return context.userspace_catalog.findById(task.launch.image_id);
+}
+
+fn taskForOwner(
+    runtime: *const task_runtime.Runtime,
+    owner: principal.PrincipalId,
+) ?*const task_runtime.TaskRecord {
+    for (&runtime.tasks) |*slot| {
+        if (!slot.in_use) continue;
+        if (slot.task.owner.eql(owner)) return &slot.task;
+    }
+    return null;
 }
 
 fn beginValidatedActivation(

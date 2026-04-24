@@ -144,6 +144,7 @@ pub fn launchInstalledDirect(
         bundle,
         component_class,
         .{
+            .substrate = userspace_loader.substrateForComponentAbi(launch_plan.components[0].abi),
             .label = launch_plan.components[0].idSlice(),
             .entry = launch_plan.components[0].entrySlice(),
         },

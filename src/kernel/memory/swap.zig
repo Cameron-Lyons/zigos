@@ -1,12 +1,8 @@
 const paging = @import("paging.zig");
-const memory = @import("memory.zig");
-const ata = @import("../drivers/ata.zig");
 const vga = @import("../drivers/vga.zig");
 
 const PAGE_SIZE = 4096;
 const SWAP_SLOT_COUNT = 8192;
-const SWAP_START_LBA: u64 = 2048;
-const SECTORS_PER_PAGE = PAGE_SIZE / 512;
 
 const SwapFlags = struct {
     const PRESENT: u8 = 1 << 0;
@@ -25,12 +21,28 @@ pub const SwapStats = struct {
     total_slots: u32,
 };
 
+pub const Backend = struct {
+    context: ?*anyopaque = null,
+    slot_count: u32 = SWAP_SLOT_COUNT,
+    write_page: *const fn (context: ?*anyopaque, slot: u32, page_data: [*]const u8) bool,
+    read_page: *const fn (context: ?*anyopaque, slot: u32, page_data: [*]u8) bool,
+};
+
 var swap_table: [SWAP_SLOT_COUNT]SwapEntry = [_]SwapEntry{SwapEntry{ .slot = 0, .flags = 0 }} ** SWAP_SLOT_COUNT;
 var swap_bitmap: [SWAP_SLOT_COUNT / 32]u32 = [_]u32{0} ** (SWAP_SLOT_COUNT / 32);
 var used_swap_slots: u32 = 0;
 var clock_hand: u32 = 0;
 var initialized: bool = false;
 var swap_search_word_hint: u32 = 0;
+var backend: ?Backend = null;
+
+pub fn registerBackend(new_backend: Backend) void {
+    backend = new_backend;
+}
+
+pub fn clearBackend() void {
+    backend = null;
+}
 
 pub fn init() void {
     for (&swap_table) |*entry| {
@@ -48,10 +60,15 @@ pub fn init() void {
     initialized = true;
 
     vga.print("Swap initialized: ");
-    printDec(SWAP_SLOT_COUNT);
-    vga.print(" slots (");
-    printDec(SWAP_SLOT_COUNT * PAGE_SIZE / 1024 / 1024);
-    vga.print(" MB)\n");
+    if (backend) |active_backend| {
+        const total_slots = activeSlotCount(active_backend);
+        printDec(total_slots);
+        vga.print(" slots (");
+        printDec(total_slots * PAGE_SIZE / 1024 / 1024);
+        vga.print(" MB)\n");
+    } else {
+        vga.print("no page backend\n");
+    }
 }
 
 fn allocSwapSlotRange(start_word: u32, end_word: u32) ?u32 {
@@ -93,23 +110,19 @@ fn freeSwapSlot(slot: u32) void {
 }
 
 fn writePageToDisk(slot: u32, page_data: [*]const u8) bool {
-    const device = ata.getPrimaryMaster() orelse return false;
-    const lba = SWAP_START_LBA + @as(u64, slot) * SECTORS_PER_PAGE;
-
-    ata.writeSectors(device, lba, SECTORS_PER_PAGE, page_data[0..PAGE_SIZE]) catch {
-        return false;
-    };
-    return true;
+    const active_backend = backend orelse return false;
+    if (slot >= activeSlotCount(active_backend)) return false;
+    return active_backend.write_page(active_backend.context, slot, page_data);
 }
 
 fn readPageFromDisk(slot: u32, page_data: [*]u8) bool {
-    const device = ata.getPrimaryMaster() orelse return false;
-    const lba = SWAP_START_LBA + @as(u64, slot) * SECTORS_PER_PAGE;
+    const active_backend = backend orelse return false;
+    if (slot >= activeSlotCount(active_backend)) return false;
+    return active_backend.read_page(active_backend.context, slot, page_data);
+}
 
-    ata.readSectors(device, lba, SECTORS_PER_PAGE, page_data[0..PAGE_SIZE]) catch {
-        return false;
-    };
-    return true;
+fn activeSlotCount(active_backend: Backend) u32 {
+    return @min(active_backend.slot_count, SWAP_SLOT_COUNT);
 }
 
 fn heapTableIndex(aligned_addr: u32) u32 {
@@ -151,6 +164,7 @@ pub fn clockAlgorithm() ?u32 {
 
 pub fn swapOut(vaddr: u32) !void {
     if (!initialized) return error.NotInitialized;
+    if (backend == null) return error.SwapBackendUnavailable;
 
     const aligned_addr = vaddr & ~@as(u32, PAGE_SIZE - 1);
 
@@ -177,6 +191,7 @@ pub fn swapOut(vaddr: u32) !void {
 
 pub fn swapIn(vaddr: u32) !void {
     if (!initialized) return error.NotInitialized;
+    if (backend == null) return error.SwapBackendUnavailable;
 
     const aligned_addr = vaddr & ~@as(u32, PAGE_SIZE - 1);
     const table_index = heapTableIndex(aligned_addr);
@@ -215,6 +230,7 @@ pub fn isSwapped(vaddr: u32) bool {
 
 pub fn tryFreeFrame() bool {
     if (!initialized) return false;
+    if (backend == null) return false;
 
     const victim = clockAlgorithm() orelse return false;
 
@@ -223,10 +239,12 @@ pub fn tryFreeFrame() bool {
 }
 
 pub fn getSwapStats() SwapStats {
+    const total_slots = if (backend) |active_backend| activeSlotCount(active_backend) else 0;
+    const used_slots = @min(used_swap_slots, total_slots);
     return SwapStats{
-        .free_slots = SWAP_SLOT_COUNT - used_swap_slots,
-        .used_slots = used_swap_slots,
-        .total_slots = SWAP_SLOT_COUNT,
+        .free_slots = total_slots - used_slots,
+        .used_slots = used_slots,
+        .total_slots = total_slots,
     };
 }
 

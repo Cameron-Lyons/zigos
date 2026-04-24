@@ -3,10 +3,7 @@ const config = @import("../../config.zig");
 const device = @import("../../devices/device.zig");
 const console_device = @import("../../devices/console_device.zig");
 const ata = @import("../../drivers/ata.zig");
-const e1000 = @import("../../drivers/e1000.zig");
 const pci = @import("../../drivers/pci.zig");
-const rtl8139 = @import("../../drivers/rtl8139.zig");
-const virtio = @import("../../drivers/virtio.zig");
 const bootstrap_driver_port = @import("../../../native/drivers/bootstrap_driver_port.zig");
 const device_broker = @import("../../../native/kernel_api/device_broker.zig");
 const device_inventory = @import("../../../native/drivers/device_inventory.zig");
@@ -82,10 +79,8 @@ fn publishStorageBootstrapBackend() void {
 fn publishDeferredNetworkBootstrap() void {
     const network_record = device_inventory.recordForClass(.network_adapter);
     if (!network_record.detected) return;
-
-    if (virtio.publishBootstrapTransport(network_record.device_id)) return;
-    if (e1000.publishBootstrapTransport(network_record.device_id)) return;
-    if (rtl8139.publishBootstrapTransport(network_record.device_id)) return;
+    // Network adapters are deliberately left as user-space driver claims. Kernel
+    // boot records inventory only; it does not publish NIC data-plane transports.
 }
 
 fn pciDeviceId(device_info: pci.PCIDevice) u64 {
