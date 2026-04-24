@@ -11,6 +11,7 @@ const supervisor_mod = @import("../session/supervisor.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service_mod = @import("../task/task_runtime_service.zig");
+const userspace_loader = @import("../task/userspace_loader.zig");
 const workspace_mod = @import("../storage/workspace.zig");
 
 pub const common = if (builtin.target.os.tag == .freestanding)
@@ -41,6 +42,7 @@ pub const Context = struct {
     capability_table: *capability.CapabilityTable,
     runtime: *task_runtime.Runtime,
     runtime_service: *task_runtime_service_mod.Service,
+    userspace_catalog: *userspace_loader.Catalog,
     supervisor: *supervisor_mod.Supervisor,
     compositor: *compositor_session.Session,
     driver_directory: *driver_service.Directory,
