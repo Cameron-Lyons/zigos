@@ -576,14 +576,12 @@ test "kernel-launched userspace images surface a userspace task flag" {
     var capabilities = @import("../kernel_api/capability.zig").CapabilityTable.init();
     var endpoints = @import("../kernel_api/endpoint.zig").Table.init();
     var shared = @import("../kernel_api/shared_memory.zig").Table.init();
-    var registry = @import("../kernel_api/service_registry.zig").Registry.init();
     var kernel = @import("../kernel_api/native_kernel.zig").Kernel.init(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
-        &registry,
     );
     var port = component_port.KernelPort.init(&kernel);
 
@@ -598,7 +596,7 @@ test "kernel-launched userspace images surface a userspace task flag" {
         },
         .local_only = true,
     });
-    const authority = try capabilities.mint(.{
+    const authority = try capabilities.mintBootRoot(.{
         .holder = controller.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .service, .id = 42 },

@@ -211,7 +211,6 @@ test "storage driver task attaches only through the kernel device broker" {
     const endpoint = @import("../kernel_api/endpoint.zig");
     const native_kernel = @import("../kernel_api/native_kernel.zig");
     const principal = @import("../core/principal.zig");
-    const service_registry = @import("../kernel_api/service_registry.zig");
     const shared_memory = @import("../kernel_api/shared_memory.zig");
     const task_runtime = @import("../task/task_runtime.zig");
 
@@ -224,14 +223,12 @@ test "storage driver task attaches only through the kernel device broker" {
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
     var shared = shared_memory.Table.init();
-    var registry = service_registry.Registry.init();
     var kernel = native_kernel.Kernel.init(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
-        &registry,
     );
     var kernel_port = component_port.KernelPort.init(&kernel);
 
@@ -258,7 +255,7 @@ test "storage driver task attaches only through the kernel device broker" {
         },
         .userspace_image = &storage_driver_broker_image,
     });
-    const device_capability = try capabilities.mint(.{
+    const device_capability = try capabilities.mintBootRoot(.{
         .holder = driver_task.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .device, .id = 0x1F001 },

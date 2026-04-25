@@ -5,10 +5,11 @@ const component_port = @import("../kernel_api/component_port.zig");
 const contract = @import("contract.zig");
 const device_inventory = @import("../drivers/device_inventory.zig");
 const driver_service = @import("../drivers/driver_service.zig");
+const kernel_descriptors = @import("../kernel_api/native_kernel_descriptors.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const service_contract = @import("service_contract.zig");
-const service_registry = @import("../kernel_api/service_registry.zig");
+const service_registry = @import("../services/service_registry.zig");
 const supervisor_mod = @import("supervisor.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const userspace_boot_registry = @import("../task/userspace_boot_registry.zig");
@@ -23,6 +24,7 @@ pub const ServiceBinding = struct {
 pub fn launchContractService(
     catalog: *userspace_loader.Catalog,
     kernel_port: *component_port.KernelPort,
+    service_directory: *service_registry.Service,
     supervisor: *supervisor_mod.Supervisor,
     authority_capability_id: u64,
     controller_task_id: u64,
@@ -36,6 +38,7 @@ pub fn launchContractService(
     return launchBundleService(
         catalog,
         kernel_port,
+        service_directory,
         supervisor,
         authority_capability_id,
         controller_task_id,
@@ -53,6 +56,7 @@ pub fn launchContractService(
 pub fn launchBundleService(
     catalog: *userspace_loader.Catalog,
     kernel_port: *component_port.KernelPort,
+    service_directory: *service_registry.Service,
     supervisor: *supervisor_mod.Supervisor,
     authority_capability_id: u64,
     controller_task_id: u64,
@@ -102,14 +106,14 @@ pub fn launchBundleService(
             .service_port = true,
         },
     }, now_ticks) catch unreachable;
-    kernel_port.serviceRegister(.{
-        .header = component_port.makeHeader(.service_register, correlation_base + 3, service_task.task_id),
-        .authority_capability_id = service_authority_capability_id,
-        .service_id = service_id,
-        .owner_task_id = service_task.task_id,
-        .endpoint_capability_id = endpoint.capability_id,
-        .interface = interface,
-    }, now_ticks) catch unreachable;
+    const service_record = kernel_port.kernel.runtime.find(service_task.task_id) orelse unreachable;
+    service_directory.register(
+        service_id,
+        service_task.task_id,
+        endpoint.endpoint.endpoint_id,
+        interface,
+        kernel_descriptors.serviceBindingFlags(service_record),
+    ) catch unreachable;
     _ = supervisor.noteContractBound(service_id, endpoint.endpoint.endpoint_id, now_ticks);
 
     return .{
@@ -178,7 +182,7 @@ pub fn serviceBudget(class: contract.ServiceClass) task_runtime.ResourceBudget {
     };
 }
 
-pub fn contractsReady(service_directory: *const service_registry.Registry) bool {
+pub fn contractsReady(service_directory: *const service_registry.Service) bool {
     for (service_contract.ordered_phase3_contracts) |entry| {
         _ = service_directory.connect(entry.interface) catch return false;
     }
@@ -231,7 +235,11 @@ fn driverBundle(device_class: driver_service.DeviceClass) manifest.BundleManifes
 }
 
 test "contractsReady requires every ordered phase3 contract" {
-    var registry = service_registry.Registry.init();
+    var registry = service_registry.Service.initWithBootstrap(.{
+        .task_id = 1,
+        .endpoint_id = 1,
+        .endpoint_capability_id = 1,
+    });
 
     try std.testing.expect(!contractsReady(&registry));
 

@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const contract = @import("../session/contract.zig");
 const manifest = @import("../policy/manifest.zig");
 const registry = @import("userspace_registry.zig");
+const service_catalog = @import("../session/service_catalog.zig");
 const std = @import("std");
 const task_runtime = @import("task_runtime.zig");
 const userspace_loader = @import("userspace_loader.zig");
@@ -95,8 +96,7 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
 }
 
 pub fn bundleIdForServiceClass(class: contract.ServiceClass) Error![]const u8 {
-    const spec = registry.findByServiceClass(class) orelse return error.UnsupportedServiceClass;
-    return spec.bundle_id;
+    return service_catalog.bundleIdForServiceClass(class) orelse error.UnsupportedServiceClass;
 }
 
 fn signatureFor(bundle: manifest.BundleManifest, signed: bool) SigningError!manifest.Signature {

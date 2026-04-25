@@ -3,6 +3,7 @@ const principal = @import("../core/principal.zig");
 
 pub const MAX_CAPABILITIES: usize = 128;
 pub const MAX_TARGET_GENERATIONS: usize = 64;
+pub const MAX_GRANT_PLAN_ENTRIES: usize = 16;
 
 pub const CapabilityTargetKind = enum(u8) {
     task,
@@ -127,6 +128,29 @@ pub const MintRequest = struct {
     audit: AuditMetadata = .{},
 };
 
+pub const GrantPlanEntry = struct {
+    task_id: u64,
+    request: MintRequest,
+};
+
+pub const GrantPlan = struct {
+    entry_count: usize = 0,
+    entries: [MAX_GRANT_PLAN_ENTRIES]GrantPlanEntry = [_]GrantPlanEntry{emptyGrantPlanEntry()} ** MAX_GRANT_PLAN_ENTRIES,
+
+    pub fn addMint(self: *GrantPlan, task_id: u64, request: MintRequest) Error!void {
+        if (self.entry_count >= self.entries.len) return error.GrantPlanFull;
+        self.entries[self.entry_count] = .{
+            .task_id = task_id,
+            .request = request,
+        };
+        self.entry_count += 1;
+    }
+
+    pub fn slice(self: *const GrantPlan) []const GrantPlanEntry {
+        return self.entries[0..self.entry_count];
+    }
+};
+
 pub const DeriveRequest = struct {
     parent_capability_id: u64,
     holder: principal.PrincipalId,
@@ -152,6 +176,7 @@ pub const Error = error{
     RightsEscalation,
     ScopeEscalation,
     TableFull,
+    GrantPlanFull,
     TargetTableFull,
 };
 
@@ -176,7 +201,19 @@ pub const CapabilityTable = struct {
         return CapabilityTable{};
     }
 
-    pub fn mint(self: *CapabilityTable, request: MintRequest) Error!Capability {
+    pub fn mintBootRoot(self: *CapabilityTable, request: MintRequest) Error!Capability {
+        return self.mintFromGrantPlan(request);
+    }
+
+    pub fn applyGrantPlan(self: *CapabilityTable, plan: *const GrantPlan, output: []Capability) Error![]Capability {
+        if (output.len < plan.entry_count) return error.TableFull;
+        for (plan.slice(), 0..) |entry, index| {
+            output[index] = try self.mintFromGrantPlan(entry.request);
+        }
+        return output[0..plan.entry_count];
+    }
+
+    fn mintFromGrantPlan(self: *CapabilityTable, request: MintRequest) Error!Capability {
         const target_generation_index = try self.ensureTargetGenerationIndex(request.target);
         return self.insert(.{
             .id = self.allocateCapabilityId(),
@@ -358,6 +395,25 @@ fn zeroCapability() Capability {
     };
 }
 
+fn emptyGrantPlanEntry() GrantPlanEntry {
+    return .{
+        .task_id = 0,
+        .request = .{
+            .holder = .{ .kind = .service, .serial = 0 },
+            .issuer = .{ .kind = .service, .serial = 0 },
+            .target = .{ .kind = .service, .id = 0 },
+            .rights = .{},
+            .scope = .{},
+            .lease = .{
+                .issued_at_ticks = 0,
+                .expires_at_ticks = 0,
+                .renewable = false,
+            },
+            .audit = .{},
+        },
+    };
+}
+
 fn scopeIsPassCompatible(next_scope: CapabilityScope, original_scope: CapabilityScope) bool {
     if (original_scope.workspace_id) |workspace_id| {
         if (next_scope.workspace_id == null or next_scope.workspace_id.? != workspace_id) return false;
@@ -388,7 +444,7 @@ test "capabilities derive narrower rights and are invalidated by target revocati
     const session = principal.PrincipalId{ .kind = .service, .serial = 2 };
     const task = principal.PrincipalId{ .kind = .user, .serial = 9 };
 
-    const parent = try table.mint(.{
+    const parent = try table.mintBootRoot(.{
         .holder = session,
         .issuer = policy,
         .target = .{ .kind = .service, .id = 42 },
@@ -424,7 +480,7 @@ test "derive rejects rights and scope escalation" {
     const issuer = principal.PrincipalId{ .kind = .policy_authority, .serial = 1 };
     const holder = principal.PrincipalId{ .kind = .service, .serial = 7 };
 
-    const parent = try table.mint(.{
+    const parent = try table.mintBootRoot(.{
         .holder = holder,
         .issuer = issuer,
         .target = .{ .kind = .workspace, .id = 3 },
@@ -467,7 +523,7 @@ test "passing capabilities duplicates or transfers authority based on request fl
     const source = principal.PrincipalId{ .kind = .service, .serial = 7 };
     const target = principal.PrincipalId{ .kind = .app, .serial = 3 };
 
-    const original = try table.mint(.{
+    const original = try table.mintBootRoot(.{
         .holder = source,
         .issuer = issuer,
         .target = .{ .kind = .endpoint, .id = 99 },
@@ -501,7 +557,7 @@ test "passing capabilities duplicates or transfers authority based on request fl
 
 test "expired capabilities are no longer usable" {
     var table = CapabilityTable.init();
-    const capability = try table.mint(.{
+    const capability = try table.mintBootRoot(.{
         .holder = .{ .kind = .service, .serial = 1 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .endpoint, .id = 99 },

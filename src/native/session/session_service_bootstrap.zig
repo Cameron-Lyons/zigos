@@ -50,6 +50,7 @@ fn launchServices(
         service_bindings.bindings[index] = service_bootstrap.launchContractService(
             env.userspace_catalog,
             kernel_port,
+            env.service_directory,
             env.supervisor,
             state.session_capability.id,
             state.session_task.id,

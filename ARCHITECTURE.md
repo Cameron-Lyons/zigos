@@ -23,8 +23,8 @@ Zigos is a native-only operating system prototype organized as a small freestand
    - `src/kernel/boot/profiles/zigos_native.zig` for the main native system
    - `src/kernel/boot/profiles/benchmark.zig` for benchmark runs
 3. `src/native/session/session_bootstrap.zig` assigns the built-in principals, preloads the userspace catalog through `src/native/task/userspace_boot_registry.zig`, initializes the userspace scheduler, and registers the core service records with the supervisor.
-4. `src/native/session/session_manager_boot_flow.zig` constructs the long-lived system state: capability table, endpoint table, task runtime, service registry, shared memory table, driver directory/runtime, event ledger, background dispatch, storage checkpoint state, and sync resident state.
-5. `src/native/session/phase3_bootstrap.zig` launches the ordered contract services declared in `src/native/session/service_contract.zig`, binds their interfaces into `src/native/kernel_api/service_registry.zig`, and attaches driver authority for device-backed services.
+4. `src/native/session/session_manager_boot_flow.zig` constructs the long-lived system state: capability table, endpoint table, task runtime, userspace service registry, shared memory table, driver directory/runtime, event ledger, background dispatch, storage checkpoint state, and sync resident state.
+5. `src/native/session/phase3_bootstrap.zig` launches the ordered contract services declared in `src/native/session/service_contract.zig`, publishes their interfaces through `src/native/services/service_registry.zig`, and attaches driver authority for device-backed services.
 6. `src/userspace/runtime.zig` is the common runtime for every userspace image: it validates the embedded descriptor, reads the bootstrap mailbox, performs initial typed queries, publishes heartbeat or fault state, and then enters steady-state execution.
 
 ## Kernel Boundary
@@ -41,7 +41,7 @@ The freestanding kernel remains intentionally small. Its trusted computing base 
 
 Everything above that layer is mediated through typed native interfaces:
 
-- `src/native/kernel_api/native_kernel.zig`: authoritative implementation of task, capability, endpoint, shared-memory, service, and device operations
+- `src/native/kernel_api/native_kernel.zig`: authoritative implementation of task, capability, endpoint, shared-memory, and device operations
 - `src/native/kernel_api/component_port.zig`: in-process typed request/response boundary used by bootstrap code and host tests
 - `src/native/kernel_api/syscall_surface.zig`: freestanding syscall dispatcher that validates the request header, subject task, ABI version, and response sizing before calling the same kernel API
 - `src/main.zig`: wires the architecture trap handler into `syscall_surface.dispatch`, so freestanding userspace goes through the same typed authority checks as in-process callers

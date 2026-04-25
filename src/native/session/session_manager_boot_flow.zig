@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
+const bootstrap_capabilities = @import("bootstrap_capabilities.zig");
 const bootstrap_packages = @import("../demo/bootstrap_packages.zig");
 const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
@@ -12,8 +13,9 @@ const manifest = @import("../policy/manifest.zig");
 const bootstrap_review_profile = @import("../policy/bootstrap_review_profile.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
+const kernel_descriptors = @import("../kernel_api/native_kernel_descriptors.zig");
 const native_kernel = @import("../kernel_api/native_kernel.zig");
-const native_service_registry = @import("../kernel_api/service_registry.zig");
+const native_service_registry = @import("../services/service_registry.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const permission_review_service = @import("../policy/permission_review_service.zig");
 const policy_mediation = @import("../policy/policy_mediation.zig");
@@ -69,7 +71,7 @@ pub const SessionManager = struct {
     runtime_service: task_runtime_service_mod.Service = undefined,
     userspace_executor: userspace_executor.Executor = .{},
     userspace_scheduler: userspace_scheduler.Scheduler = undefined,
-    service_directory: native_service_registry.Registry = native_service_registry.Registry.init(),
+    service_directory: native_service_registry.Service = native_service_registry.Service.init(),
     shared_memory_table: shared_memory_mod.Table = shared_memory_mod.Table.init(),
     userspace_catalog: userspace_loader.Catalog = userspace_loader.Catalog.init(),
     package_service_instance: package_service.Service = package_service.Service.init(),
@@ -158,7 +160,7 @@ pub const SessionManager = struct {
         return &self.runtime_service;
     }
 
-    pub fn serviceDirectoryPtr(self: *SessionManager) *native_service_registry.Registry {
+    pub fn serviceDirectoryPtr(self: *SessionManager) *native_service_registry.Service {
         return &self.service_directory;
     }
 
@@ -229,6 +231,11 @@ pub const SessionManager = struct {
             return;
         };
         const kernel_port = prepareKernelInterface(self, state.ids.policy_authority, state.session_task.id);
+        if (!bootstrapServiceRegistry(self, &state, kernel_port)) {
+            self.initialized = false;
+            self.kernel_port_ready = false;
+            return;
+        }
         var service_bindings: ServiceBindings = undefined;
         if (!session_service_bootstrap.bootServices(&env, &state, kernel_port, &service_bindings)) {
             self.initialized = false;
@@ -266,6 +273,11 @@ pub const SessionManager = struct {
         bootstrap_packages.seed(&self.package_service_instance);
         var mediator = initPolicyMediator(self, state.ids.policy_authority, state.services);
         const kernel_port = prepareKernelInterface(self, state.ids.policy_authority, state.session_task.id);
+        if (!bootstrapServiceRegistry(self, &state, kernel_port)) {
+            self.initialized = false;
+            self.kernel_port_ready = false;
+            return;
+        }
         var review_service = initReviewService(self, state.services.review_service_record.id, state.review_service_task.id);
         var review_port = review_component_port.Port.init(&review_service);
         var policy_port = policy_component_port.Port.init(&mediator);
@@ -407,7 +419,7 @@ fn mintSessionCapability(
     services: session_bootstrap.CoreServices,
     session_task_id: u64,
 ) capability.Error!capability.Capability {
-    return try self.capability_table.mint(.{
+    return try self.capability_table.mintBootRoot(.{
         .holder = ids.session_service,
         .issuer = ids.policy_authority,
         .target = .{ .kind = .service, .id = services.session.id },
@@ -476,7 +488,7 @@ fn mintPolicyCapability(
     policy_service_id: u64,
     session_task_id: u64,
 ) capability.Error!capability.Capability {
-    return try self.capability_table.mint(.{
+    return try self.capability_table.mintBootRoot(.{
         .holder = holder,
         .issuer = policy_authority,
         .target = .{ .kind = .policy, .id = policy_service_id },
@@ -531,7 +543,6 @@ fn prepareKernelInterface(
         &self.capability_table,
         &self.endpoint_table,
         &self.shared_memory_table,
-        &self.service_directory,
     );
     self.kernel_port_instance = component_port.KernelPort.init(&self.kernel_instance);
     self.driver_runtime.bindKernelPort(&self.kernel_port_instance);
@@ -541,6 +552,83 @@ fn prepareKernelInterface(
     common.printBootMarker(boot_markers.transport_no_root);
     common.printBootMarker(boot_markers.transport_component_abi_ready);
     return &self.kernel_port_instance;
+}
+
+fn bootstrapServiceRegistry(
+    self: *SessionManager,
+    state: *const BootstrapState,
+    kernel_port: *component_port.KernelPort,
+) bool {
+    const registry_task = userspace_launch.launchRegisteredKernel(
+        &self.userspace_catalog,
+        .{
+            .port = kernel_port,
+            .authority_capability_id = state.session_capability.id,
+            .controller_task_id = state.session_task.id,
+            .correlation_id = 24,
+            .now_ticks = 24,
+        },
+        "zigos.system.service-registry",
+        .{
+            .owner = state.ids.policy_authority,
+            .budget = .{
+                .cpu_time_ticks = 8_000,
+                .memory_bytes = 512 * 1024,
+                .endpoint_slots = 8,
+                .shared_memory_bytes = 64 * 1024,
+                .background_allowed = false,
+            },
+            .local_only = true,
+        },
+        &self.userspace_scheduler,
+    ) catch |err| {
+        _ = self.supervisor.recordCrash(state.services.service_registry.id, 24, bootFailureCode(err));
+        return false;
+    };
+    const registry_authority_id = bootstrap_capabilities.deriveTaskCapability(
+        kernel_port,
+        state.session_task.id,
+        state.session_capability.id,
+        registry_task.task_id,
+        bootstrap_capabilities.serviceBootstrapRights(),
+        25,
+        25,
+    ) catch |err| {
+        _ = self.supervisor.recordCrash(state.services.service_registry.id, 25, bootFailureCode(err));
+        return false;
+    };
+    const registry_endpoint = kernel_port.endpointCreate(.{
+        .header = component_port.makeHeader(.endpoint_create, 26, registry_task.task_id),
+        .authority_capability_id = registry_authority_id,
+        .owner_task_id = registry_task.task_id,
+        .label = "zigos.service.registry",
+        .flags = .{
+            .local_only = true,
+            .service_port = true,
+        },
+    }, 26) catch |err| {
+        _ = self.supervisor.recordCrash(state.services.service_registry.id, 26, bootFailureCode(err));
+        return false;
+    };
+
+    self.service_directory.bindBootstrap(.{
+        .task_id = registry_task.task_id,
+        .endpoint_id = registry_endpoint.endpoint.endpoint_id,
+        .endpoint_capability_id = registry_endpoint.capability_id,
+    });
+    const registry_record = self.runtime.find(registry_task.task_id) orelse return false;
+    self.service_directory.register(
+        state.services.service_registry.id,
+        registry_task.task_id,
+        registry_endpoint.endpoint.endpoint_id,
+        .{ .name = "zigos.service.registry" },
+        kernel_descriptors.serviceBindingFlags(registry_record),
+    ) catch |err| {
+        _ = self.supervisor.recordCrash(state.services.service_registry.id, 26, bootFailureCode(err));
+        return false;
+    };
+    _ = self.supervisor.noteContractBound(state.services.service_registry.id, registry_endpoint.endpoint.endpoint_id, 26);
+    return true;
 }
 
 fn initReviewService(
