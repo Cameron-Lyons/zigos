@@ -11,8 +11,8 @@ indexing_service.query_ranked 202462.18 40
 media_print.submit_complete 136500.90 40
 compatibility_environment.launch_portal 30609.03 50
 event_ledger.export_redacted 635582.44 60
-secret_store.import_handle_export 36780.55 60
-denial_explanation.render_policy_hint 5114.25 60
-sync_service.overlay_session_flow 6513.50 60
-update_health.validate_pending_activation 735415750.00 100
-driver_recovery.restart_driver 57082.03 60
+secret_store.import_handle_export 96904.55 60
+denial_explanation.render_policy_hint 15283.87 60
+sync_service.overlay_session_flow 21629.42 60
+update_health.validate_pending_activation 2317858270.00 100
+driver_recovery.restart_driver 354572.15 60
