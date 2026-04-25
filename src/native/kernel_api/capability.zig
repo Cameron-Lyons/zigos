@@ -165,6 +165,7 @@ pub const PassRequest = struct {
     new_holder: principal.PrincipalId,
     now_ticks: u64,
     revoke_source: bool = false,
+    allow_task_retarget: bool = false,
     scope: ?CapabilityScope = null,
     audit: AuditMetadata = .{},
 };
@@ -256,7 +257,7 @@ pub const CapabilityTable = struct {
         if (!self.isUsableSlot(original_slot, request.now_ticks)) return error.CapabilityRevoked;
         if (!original.rights.capability_pass) return error.RightsEscalation;
         const next_scope = request.scope orelse original.scope;
-        if (!scopeIsPassCompatible(next_scope, original.scope)) return error.ScopeEscalation;
+        if (!scopeIsPassCompatible(next_scope, original.scope, request.allow_task_retarget)) return error.ScopeEscalation;
 
         const passed = try self.insert(.{
             .id = self.allocateCapabilityId(),
@@ -414,7 +415,11 @@ fn emptyGrantPlanEntry() GrantPlanEntry {
     };
 }
 
-fn scopeIsPassCompatible(next_scope: CapabilityScope, original_scope: CapabilityScope) bool {
+fn scopeIsPassCompatible(next_scope: CapabilityScope, original_scope: CapabilityScope, allow_task_retarget: bool) bool {
+    if (original_scope.task_id) |task_id| {
+        if (next_scope.task_id == null) return false;
+        if (next_scope.task_id.? != task_id and !allow_task_retarget) return false;
+    }
     if (original_scope.workspace_id) |workspace_id| {
         if (next_scope.workspace_id == null or next_scope.workspace_id.? != workspace_id) return false;
     }
