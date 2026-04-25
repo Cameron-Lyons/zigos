@@ -22,8 +22,6 @@ pub const NativeOperation = enum(u16) {
     time_query,
     resource_query,
     accounting_query,
-    service_register,
-    service_connect,
     device_describe,
     device_mmio_window,
     device_port_read,

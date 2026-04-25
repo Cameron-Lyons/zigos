@@ -9,13 +9,14 @@ const device_graph = @import("../../native/sync/device_graph.zig");
 const device_inventory = @import("../../native/drivers/device_inventory.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const manifest = @import("../../native/policy/manifest.zig");
+const kernel_descriptors = @import("../../native/kernel_api/native_kernel_descriptors.zig");
 const native_kernel = @import("../../native/kernel_api/native_kernel.zig");
 const native_util = @import("../../native/core/util.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const policy_mediation = @import("../../native/policy/policy_mediation.zig");
 const policy_object = @import("../../native/policy/policy_object.zig");
 const principal = @import("../../native/core/principal.zig");
-const service_registry = @import("../../native/kernel_api/service_registry.zig");
+const service_registry = @import("../../native/services/service_registry.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const task_runtime_service = @import("../../native/task/task_runtime_service.zig");
@@ -214,6 +215,12 @@ pub fn explicitGrantsRequireAuthority() !void {
 }
 
 pub fn kernelRemainsTypedAndIsolatesLegacy() !void {
+    var registry = service_registry.Service.initWithBootstrap(.{
+        .task_id = 1,
+        .endpoint_id = 1,
+        .endpoint_capability_id = 1,
+    });
+
     try std.testing.expectEqual(@as(usize, 7), contract.kernel_tcb.len);
     try std.testing.expectEqualStrings("ipc_transport", contract.tcbName(.ipc_transport));
     try std.testing.expectEqualStrings("iommu_dma_isolation_hooks", contract.tcbName(.iommu_dma_isolation_hooks));
@@ -249,8 +256,6 @@ pub fn kernelRemainsTypedAndIsolatesLegacy() !void {
     try std.testing.expect(abi.policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(abi.reviewOpcode(.review_bundle) >= 0x240);
     try std.testing.expectEqual(@as(u16, 1), abi.ABI_VERSION);
-
-    var registry = service_registry.Registry.init();
     try registry.register(55, 7, 101, .{
         .name = "zigos.service.storage",
         .version_major = 1,
@@ -366,14 +371,17 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
     var capabilities = capability.CapabilityTable.init();
     var endpoints = @import("../../native/kernel_api/endpoint.zig").Table.init();
     var shared = shared_memory.Table.init();
-    var registry = service_registry.Registry.init();
+    var service_directory = service_registry.Service.initWithBootstrap(.{
+        .task_id = 2,
+        .endpoint_id = 99,
+        .endpoint_capability_id = 100,
+    });
     var kernel = native_kernel.Kernel.init(
         spec_support.policyAuthority(1),
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
-        &registry,
     );
     var port = component_port.KernelPort.init(&kernel);
 
@@ -383,7 +391,7 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         .budget = spec_support.defaultBudget(false),
         .local_only = true,
     });
-    const authority = try capabilities.mint(.{
+    const authority = try capabilities.mintBootRoot(.{
         .holder = session_task.owner,
         .issuer = spec_support.policyAuthority(1),
         .target = .{ .kind = .service, .id = 99 },
@@ -488,16 +496,16 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
             .service_port = true,
         },
     }, 3);
-    try port.serviceRegister(.{
-        .header = component_port.makeHeader(.service_register, 5, launched.task_id),
-        .authority_capability_id = launched_authority.capability_id,
-        .service_id = 123,
-        .owner_task_id = launched.task_id,
-        .endpoint_capability_id = service_endpoint.capability_id,
-        .interface = .{ .name = "zigos.object.spec-storage" },
-    }, 3);
+    const launched_record = runtime.find(launched.task_id).?;
+    try service_directory.register(
+        123,
+        launched.task_id,
+        service_endpoint.endpoint.endpoint_id,
+        .{ .name = "zigos.object.spec-storage" },
+        kernel_descriptors.serviceBindingFlags(launched_record),
+    );
 
-    const connection = try registry.connect(.{ .name = "zigos.object.spec-storage" });
+    const connection = try service_directory.connect(.{ .name = "zigos.object.spec-storage" });
     try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
     try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE));
 }

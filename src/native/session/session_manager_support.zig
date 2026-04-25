@@ -4,7 +4,7 @@ const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const manifest = @import("../policy/manifest.zig");
-const native_service_registry = @import("../kernel_api/service_registry.zig");
+const native_service_registry = @import("../services/service_registry.zig");
 const permission_review_service = @import("../policy/permission_review_service.zig");
 const service_bootstrap = @import("service_bootstrap.zig");
 const policy_mediation = @import("../policy/policy_mediation.zig");
@@ -52,7 +52,7 @@ pub const ServiceBindings = struct {
 pub const Environment = struct {
     capability_table: *capability.CapabilityTable,
     runtime: *task_runtime.Runtime,
-    service_directory: *native_service_registry.Registry,
+    service_directory: *native_service_registry.Service,
     userspace_catalog: *userspace_loader.Catalog,
     userspace_scheduler: *userspace_scheduler.Scheduler,
     package_service: *package_service.Service,

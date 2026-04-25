@@ -380,7 +380,7 @@ fn prepareFileBridgeFixture() void {
         .document,
     );
     file_bridge_context.version_present = true;
-    const authority = file_bridge_context.capability_table.mint(.{
+    const authority = file_bridge_context.capability_table.mintBootRoot(.{
         .holder = app(1),
         .issuer = policyAuthority(1),
         .target = .{ .kind = .object, .id = 900 },
@@ -639,7 +639,7 @@ fn emitSummary(benchmark_count: usize, total_cycles: u64) void {
 
 fn benchmarkCapabilityDerive(iteration: u32) u64 {
     var table = capability.CapabilityTable.init();
-    const parent = table.mint(.{
+    const parent = table.mintBootRoot(.{
         .holder = app(10),
         .issuer = policyAuthority(1),
         .target = .{ .kind = .workspace, .id = 500 + iteration },
@@ -1500,7 +1500,7 @@ fn mintDriverAuthority(
     device_id: u64,
     device_class: driver_service.DeviceClass,
 ) capability.Capability {
-    return capability_table.mint(.{
+    return capability_table.mintBootRoot(.{
         .holder = holder,
         .issuer = policyAuthority(1),
         .target = driver_service.authorityTarget(device_id),

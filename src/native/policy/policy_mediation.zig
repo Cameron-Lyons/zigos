@@ -34,6 +34,8 @@ pub const PermissionDecision = struct {
     explanation: denial_explanation.Explanation = denial_explanation.none(),
 };
 
+pub const GrantPlan = capability.GrantPlan;
+
 pub const ActivationSummary = struct {
     granted_count: usize = 0,
     denied_count: usize = 0,
@@ -124,12 +126,47 @@ pub const PolicyMediator = struct {
             return self.deny(task.id, request, .capability_expired, now_ticks);
         }
 
+        const plan = try self.grantPlanForRequest(task_id, request, matched_grant, lease_end, now_ticks);
+        var minted_buffer: [capability.MAX_GRANT_PLAN_ENTRIES]capability.Capability = undefined;
+        const minted = try self.capability_table.applyGrantPlan(&plan, &minted_buffer);
+        for (plan.slice(), minted) |entry, granted_capability| {
+            try self.runtime.grantCapability(entry.task_id, granted_capability.id);
+        }
+        const capability_id = minted[0].id;
+        try self.runtime.audit(task.id, .{
+            .kind = .policy_allowed,
+            .capability_id = capability_id,
+            .detail = @intFromEnum(request.kind),
+            .tick = now_ticks,
+        });
+        self.recordDecision(task.owner, task.id, request, true, .none, now_ticks);
+
         const granted_local_only = request.local_only or matched_grant.local_only;
-        const target = self.resolveTarget(request);
-        const minted = try self.capability_table.mint(.{
+        return .{
+            .kind = request.kind,
+            .allowed = true,
+            .capability_id = capability_id,
+            .local_only = granted_local_only,
+            .expires_at_ticks = lease_end,
+            .explanation = denial_explanation.none(),
+        };
+    }
+
+    pub fn grantPlanForRequest(
+        self: *const PolicyMediator,
+        task_id: u64,
+        request: manifest.PermissionRequest,
+        grant: UserGrant,
+        lease_end: u64,
+        now_ticks: u64,
+    ) Error!GrantPlan {
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        const granted_local_only = request.local_only or grant.local_only;
+        var plan = GrantPlan{};
+        try plan.addMint(task.id, .{
             .holder = task.owner,
             .issuer = self.policy_authority,
-            .target = target,
+            .target = self.resolveTarget(request),
             .rights = request.rights,
             .scope = .{
                 .task_id = task.id,
@@ -147,23 +184,7 @@ pub const PolicyMediator = struct {
                 .broker_service_id = self.service_targets.policy_service_id,
             },
         });
-        try self.runtime.grantCapability(task.id, minted.id);
-        try self.runtime.audit(task.id, .{
-            .kind = .policy_allowed,
-            .capability_id = minted.id,
-            .detail = @intFromEnum(request.kind),
-            .tick = now_ticks,
-        });
-        self.recordDecision(task.owner, task.id, request, true, .none, now_ticks);
-
-        return .{
-            .kind = request.kind,
-            .allowed = true,
-            .capability_id = minted.id,
-            .local_only = granted_local_only,
-            .expires_at_ticks = lease_end,
-            .explanation = denial_explanation.none(),
-        };
+        return plan;
     }
 
     pub fn applyManifest(

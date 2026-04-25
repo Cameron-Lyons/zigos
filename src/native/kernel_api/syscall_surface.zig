@@ -6,7 +6,6 @@ const capability = @import("capability.zig");
 const component_port = @import("component_port.zig");
 const endpoint = @import("endpoint.zig");
 const native_kernel = @import("native_kernel.zig");
-const service_registry = @import("service_registry.zig");
 const shared_memory = @import("shared_memory.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 
@@ -64,8 +63,6 @@ pub fn dispatch(
         .time_query => dispatchTimeQuery(port, now_ticks, request_addr, response_addr, response_len),
         .resource_query => dispatchResourceQuery(port, now_ticks, request_addr, response_addr, response_len),
         .accounting_query => dispatchAccountingQuery(port, now_ticks, request_addr, response_addr, response_len),
-        .service_register => dispatchServiceRegister(port, now_ticks, request_addr),
-        .service_connect => dispatchServiceConnect(port, now_ticks, request_addr, response_addr, response_len),
         .device_describe => dispatchDeviceDescribe(port, now_ticks, request_addr, response_addr, response_len),
         .device_mmio_window => dispatchDeviceMmioWindow(port, now_ticks, request_addr, response_addr, response_len),
         .device_port_read => dispatchDevicePortRead(port, now_ticks, request_addr, response_addr, response_len),
@@ -326,32 +323,6 @@ fn dispatchAccountingQuery(
     return writeResponse(response_addr, response_len, descriptor);
 }
 
-fn dispatchServiceRegister(
-    port: *component_port.KernelPort,
-    now_ticks: u64,
-    request_addr: usize,
-) DispatchResult {
-    var request = readRequest(component_port.ServiceRegisterRequest, request_addr) orelse return invalidRequest();
-    var interface_name_buffer: [service_registry.MAX_INTERFACE_NAME_BYTES]u8 = undefined;
-    request.interface.name = copyUserSlice(request.interface.name, &interface_name_buffer) orelse return invalidRequest();
-    port.serviceRegister(request, now_ticks) catch |err| return mapError(err);
-    return success();
-}
-
-fn dispatchServiceConnect(
-    port: *component_port.KernelPort,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    var request = readRequest(component_port.ServiceConnectRequest, request_addr) orelse return invalidRequest();
-    var interface_name_buffer: [service_registry.MAX_INTERFACE_NAME_BYTES]u8 = undefined;
-    request.interface.name = copyUserSlice(request.interface.name, &interface_name_buffer) orelse return invalidRequest();
-    const descriptor = port.serviceConnect(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(response_addr, response_len, descriptor);
-}
-
 fn dispatchDeviceDescribe(
     port: *component_port.KernelPort,
     now_ticks: u64,
@@ -576,7 +547,6 @@ const TestKernel = struct {
     capabilities: capability.CapabilityTable = capability.CapabilityTable.init(),
     endpoints: endpoint.Table = endpoint.Table.init(),
     shared: shared_memory.Table = shared_memory.Table.init(),
-    registry: service_registry.Registry = service_registry.Registry.init(),
     kernel: native_kernel.Kernel = undefined,
     port: component_port.KernelPort = undefined,
     session_task_id: u64 = 0,
@@ -589,7 +559,6 @@ const TestKernel = struct {
             &self.capabilities,
             &self.endpoints,
             &self.shared,
-            &self.registry,
         );
         self.port = component_port.KernelPort.init(&self.kernel);
 
@@ -604,7 +573,7 @@ const TestKernel = struct {
             },
             .local_only = true,
         });
-        const authority = try self.capabilities.mint(.{
+        const authority = try self.capabilities.mintBootRoot(.{
             .holder = session_task.owner,
             .issuer = .{ .kind = .policy_authority, .serial = 1 },
             .target = .{ .kind = .service, .id = 42 },
@@ -919,7 +888,7 @@ test "syscall surface dispatches typed device broker requests" {
     device_broker.reset();
     defer device_broker.reset();
 
-    const device_capability = try test_kernel.capabilities.mint(.{
+    const device_capability = try test_kernel.capabilities.mintBootRoot(.{
         .holder = .{ .kind = .service, .serial = 2 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .device, .id = 0x1F001 },

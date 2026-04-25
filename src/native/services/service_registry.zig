@@ -6,6 +6,12 @@ const native_util = @import("../core/util.zig");
 pub const MAX_BINDINGS: usize = 24;
 pub const MAX_INTERFACE_NAME_BYTES: usize = 64;
 
+pub const BootstrapEndpoint = struct {
+    task_id: u64,
+    endpoint_id: u64,
+    endpoint_capability_id: u64,
+};
+
 pub const Binding = struct {
     service_id: u64,
     owner_task_id: u64,
@@ -22,11 +28,50 @@ pub const Error = error{
     InterfaceNotFound,
     InterfaceNameTooLong,
     VersionMismatch,
+    RegistryNotBootstrapped,
 };
 
 const BindingSlot = struct {
     in_use: bool = false,
     binding: Binding = zeroBinding(),
+};
+
+pub const Service = struct {
+    bootstrap: ?BootstrapEndpoint = null,
+    registry: Registry = Registry.init(),
+
+    pub fn init() Service {
+        return .{};
+    }
+
+    pub fn initWithBootstrap(bootstrap: BootstrapEndpoint) Service {
+        return .{ .bootstrap = bootstrap };
+    }
+
+    pub fn bindBootstrap(self: *Service, bootstrap: BootstrapEndpoint) void {
+        self.bootstrap = bootstrap;
+    }
+
+    pub fn register(
+        self: *Service,
+        service_id: u64,
+        owner_task_id: u64,
+        endpoint_id: u64,
+        interface: manifest.InterfaceDecl,
+        flags: u16,
+    ) Error!void {
+        if (self.bootstrap == null) return error.RegistryNotBootstrapped;
+        return self.registry.register(service_id, owner_task_id, endpoint_id, interface, flags);
+    }
+
+    pub fn connect(self: *const Service, interface: manifest.InterfaceDecl) Error!abi.ServiceConnectionDescriptor {
+        if (self.bootstrap == null) return error.RegistryNotBootstrapped;
+        return self.registry.connect(interface);
+    }
+
+    pub fn bindingCount(self: *const Service) usize {
+        return self.registry.bindingCount();
+    }
 };
 
 pub const Registry = struct {
@@ -115,6 +160,32 @@ fn zeroBinding() Binding {
 
 fn hashInterface(name: []const u8) u64 {
     return native_util.fnv1a64(name);
+}
+
+test "service registry service requires bootstrap endpoint before discovery" {
+    var service = Service.init();
+    try std.testing.expectError(error.RegistryNotBootstrapped, service.register(44, 7, 101, .{
+        .name = "zigos.object.workspace",
+    }, 0));
+
+    service.bindBootstrap(.{
+        .task_id = 2,
+        .endpoint_id = 99,
+        .endpoint_capability_id = 123,
+    });
+    try service.register(44, 7, 101, .{
+        .name = "zigos.object.workspace",
+        .version_major = 1,
+        .version_minor = 2,
+    }, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
+
+    const connection = try service.connect(.{
+        .name = "zigos.object.workspace",
+        .version_major = 1,
+        .version_minor = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 44), connection.service_id);
+    try std.testing.expectEqual(@as(u64, 101), connection.endpoint_id);
 }
 
 test "service registry only connects by typed interface declaration" {

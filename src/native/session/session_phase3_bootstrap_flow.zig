@@ -61,6 +61,7 @@ fn launchServices(
         phase3.bindings[index] = phase3_bootstrap.launchContractService(
             env.userspace_catalog,
             kernel_port,
+            env.service_directory,
             env.supervisor,
             state.session_capability.id,
             state.session_task.id,
@@ -76,6 +77,7 @@ fn launchServices(
     _ = phase3_bootstrap.launchBundleService(
         env.userspace_catalog,
         kernel_port,
+        env.service_directory,
         env.supervisor,
         state.session_capability.id,
         state.session_task.id,

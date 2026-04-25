@@ -5,7 +5,7 @@ const driver_runtime = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const manifest = @import("../policy/manifest.zig");
-const native_service_registry = @import("../kernel_api/service_registry.zig");
+const native_service_registry = @import("../services/service_registry.zig");
 const package_service = @import("../services/package_service.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const supervisor = @import("supervisor.zig");
@@ -51,7 +51,7 @@ pub const testing = struct {
         return default_manager.runtimeServicePtr();
     }
 
-    pub fn serviceDirectoryPtr() *native_service_registry.Registry {
+    pub fn serviceDirectoryPtr() *native_service_registry.Service {
         return default_manager.serviceDirectoryPtr();
     }
 

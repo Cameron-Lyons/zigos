@@ -1,74 +1,16 @@
 const std = @import("std");
 const contract = @import("contract.zig");
-const driver_service = @import("../drivers/driver_service.zig");
-const manifest = @import("../policy/manifest.zig");
+const service_catalog = @import("service_catalog.zig");
 
-pub const Phase3Contract = struct {
-    class: contract.ServiceClass,
-    interface: manifest.InterfaceDecl,
-    driver_class: ?driver_service.DeviceClass = null,
-    description: []const u8,
-};
-
-pub const ordered_phase3_contracts = [_]Phase3Contract{
-    .{
-        .class = .policy_mediation,
-        .interface = .{ .name = "zigos.policy.mediation" },
-        .description = "runtime grants, denials, and policy enforcement",
-    },
-    .{
-        .class = .network_stack,
-        .interface = .{ .name = "zigos.service.network.policy" },
-        .driver_class = .network_adapter,
-        .description = "network stack, egress mediation, and device-backed packet IO",
-    },
-    .{
-        .class = .storage_object,
-        .interface = .{ .name = "zigos.object.workspace" },
-        .driver_class = .storage_controller,
-        .description = "content-addressed object versions, workspace authority, snapshots, and derived file-bridge views",
-    },
-    .{
-        .class = .package_install_update,
-        .interface = .{ .name = "zigos.package.install" },
-        .description = "bundle install, update, and channel management",
-    },
-    .{
-        .class = .compositor_ui_session,
-        .interface = .{ .name = "zigos.ui.session" },
-        .driver_class = .graphics_adapter,
-        .description = "compositor, input routing, and UI session ownership",
-    },
-    .{
-        .class = .indexing_search,
-        .interface = .{ .name = "zigos.index.search" },
-        .description = "indexing and search query service",
-    },
-    .{
-        .class = .sync_replication,
-        .interface = .{ .name = "zigos.sync.replication" },
-        .description = "local-first sync and replication service",
-    },
-    .{
-        .class = .media_print_helpers,
-        .interface = .{ .name = "zigos.media.print" },
-        .driver_class = .audio_print_io,
-        .description = "media and print helper pipeline",
-    },
-};
+pub const Phase3Contract = service_catalog.Phase3Contract;
+pub const ordered_phase3_contracts = service_catalog.ordered_phase3_contracts;
 
 pub fn contractForClass(class: contract.ServiceClass) ?Phase3Contract {
-    for (ordered_phase3_contracts) |entry| {
-        if (entry.class == class) return entry;
-    }
-    return null;
+    return service_catalog.phase3ContractForClass(class);
 }
 
 pub fn orderedIndex(class: contract.ServiceClass) ?usize {
-    for (ordered_phase3_contracts, 0..) |entry, index| {
-        if (entry.class == class) return index;
-    }
-    return null;
+    return service_catalog.orderedPhase3Index(class);
 }
 
 test "phase3 contract order matches the requested decomposition sequence" {
