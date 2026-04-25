@@ -179,7 +179,7 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
     }.call;
     var capabilities = capability.CapabilityTable.init();
     var bridge = Bridge.init(&test_context, &capabilities, resolve_entry, has_version);
-    const read_capability = try capabilities.mint(.{
+    const read_capability = try capabilities.mintBootRoot(.{
         .holder = .{ .kind = .user, .serial = 1 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .object, .id = object.object_id },
@@ -221,7 +221,7 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
         .access = .read,
     }, .{ .kind = .user, .serial = 2 }, read_capability.id, 30));
 
-    const invalid_capability = try capabilities.mint(.{
+    const invalid_capability = try capabilities.mintBootRoot(.{
         .holder = .{ .kind = .user, .serial = 1 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .service, .id = 44 },

@@ -39,7 +39,7 @@ pub fn driverAuthority(
     device_id: u64,
     device_class: driver_service.DeviceClass,
 ) !capability.Capability {
-    return capability_table.mint(.{
+    return capability_table.mintBootRoot(.{
         .holder = holder,
         .issuer = policyAuthority(1),
         .target = driver_service.authorityTarget(device_id),

@@ -176,7 +176,7 @@
         },
         {
           "file": "src/native/kernel_api/native_kernel.zig",
-          "name": "native kernel creates tasks endpoints shared memory and typed service connections"
+          "name": "native kernel creates tasks endpoints and shared memory without owning service discovery"
         },
         {
           "file": "src/native/kernel_api/syscall_surface.zig",

@@ -31,9 +31,9 @@ test "boot assembles core services without running explicit scenarios" {
 
     try std.testing.expect(session_manager.testing.isInitialized());
     try std.testing.expectEqual(@as(usize, 13), session_manager.testing.countServices());
-    try std.testing.expectEqual(@as(usize, 9), service_directory.bindingCount());
-    try std.testing.expectEqual(@as(usize, 12), session_manager.testing.countTasks());
-    try std.testing.expectEqual(@as(usize, 12), session_manager.testing.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 10), service_directory.bindingCount());
+    try std.testing.expectEqual(@as(usize, 13), session_manager.testing.countTasks());
+    try std.testing.expectEqual(@as(usize, 13), session_manager.testing.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.suspended));
     try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.terminated));
     try std.testing.expectEqual(@as(usize, 0), compositor.window_count);
@@ -124,9 +124,9 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
 
     try std.testing.expect(session_manager.testing.isInitialized());
     try std.testing.expectEqual(@as(usize, 13), session_manager.testing.countServices());
-    try std.testing.expectEqual(@as(usize, 10), service_directory.bindingCount());
-    try std.testing.expectEqual(@as(usize, 21), session_manager.testing.countTasks());
-    try std.testing.expectEqual(@as(usize, 20), session_manager.testing.countTasksInState(.active));
+    try std.testing.expectEqual(@as(usize, 11), service_directory.bindingCount());
+    try std.testing.expectEqual(@as(usize, 22), session_manager.testing.countTasks());
+    try std.testing.expectEqual(@as(usize, 21), session_manager.testing.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.suspended));
     try std.testing.expectEqual(@as(usize, 1), session_manager.testing.countTasksInState(.terminated));
     try std.testing.expectEqual(@as(usize, 6), compositor.window_count);

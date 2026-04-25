@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const component_port = @import("../kernel_api/component_port.zig");
+const kernel_descriptors = @import("../kernel_api/native_kernel_descriptors.zig");
 const support = @import("session_manager_support.zig");
 const userspace_executor = @import("../task/userspace_executor.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
@@ -87,14 +88,14 @@ pub fn run(
         },
     }, 3) catch unreachable;
     common.printBootMarker("ZIGOS:PHASE1:ENDPOINT_CREATE:OK");
-    kernel_port.serviceRegister(.{
-        .header = component_port.makeHeader(.service_register, 4, storage_task_desc.task_id),
-        .authority_capability_id = state.session_capability.id,
-        .service_id = state.services.storage_service.id,
-        .owner_task_id = storage_task_desc.task_id,
-        .endpoint_capability_id = storage_endpoint.capability_id,
-        .interface = support.bootstrap_storage_interface,
-    }, 3) catch unreachable;
+    const storage_record = env.runtime.find(storage_task_desc.task_id) orelse unreachable;
+    env.service_directory.register(
+        state.services.storage_service.id,
+        storage_task_desc.task_id,
+        storage_endpoint.endpoint.endpoint_id,
+        support.bootstrap_storage_interface,
+        kernel_descriptors.serviceBindingFlags(storage_record),
+    ) catch unreachable;
     common.printBootMarker("ZIGOS:PHASE1:SERVICE_REGISTER:OK");
 
     const phase1_client_endpoint = kernel_port.endpointCreate(.{
@@ -104,12 +105,17 @@ pub fn run(
         .label = "phase1.client",
         .flags = .{ .local_only = true },
     }, 4) catch unreachable;
-    _ = kernel_port.serviceConnect(.{
-        .header = component_port.makeHeader(.service_connect, 6, phase1_client_task_desc.task_id),
-        .authority_capability_id = state.session_capability.id,
+    const storage_connection = env.service_directory.connect(support.bootstrap_storage_interface) catch unreachable;
+    _ = kernel_port.endpointConnect(.{
+        .header = component_port.makeHeader(.endpoint_connect, 6, phase1_client_task_desc.task_id),
         .endpoint_capability_id = phase1_client_endpoint.capability_id,
-        .interface = support.bootstrap_storage_interface,
+        .peer_endpoint_id = storage_connection.endpoint_id,
     }, 4) catch unreachable;
+    env.runtime.audit(phase1_client_task_desc.task_id, .{
+        .kind = .service_connected,
+        .detail = @truncate(storage_connection.service_id),
+        .tick = 4,
+    }) catch unreachable;
     common.printBootMarker(boot_markers.phase1_service_connect_ok);
 
     const phase1_shm = kernel_port.sharedMemoryCreate(.{

@@ -288,7 +288,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
         support.common.printBootMarker(boot_markers.storage_file_bridge_derived);
     }
 
-    const invalid_path_capability = context.capability_table.mint(.{
+    const invalid_path_capability = context.capability_table.mintBootRoot(.{
         .holder = context.session_user,
         .issuer = context.policy_authority,
         .target = .{ .kind = .service, .id = context.storage_service_id },
