@@ -24,7 +24,7 @@ Zigos is a native-only operating system prototype organized as a small freestand
    - `src/kernel/boot/profiles/benchmark.zig` for benchmark runs
 3. `src/native/session/session_bootstrap.zig` assigns the built-in principals, preloads the userspace catalog through `src/native/task/userspace_boot_registry.zig`, initializes the userspace scheduler, and registers the core service records with the supervisor.
 4. `src/native/session/session_manager_boot_flow.zig` constructs the long-lived system state: capability table, endpoint table, task runtime, userspace service registry, shared memory table, driver directory/runtime, event ledger, background dispatch, storage checkpoint state, and sync resident state.
-5. `src/native/session/phase3_bootstrap.zig` launches the ordered contract services declared in `src/native/session/service_contract.zig`, publishes their interfaces through `src/native/services/service_registry.zig`, and attaches driver authority for device-backed services.
+5. `src/native/session/service_bootstrap.zig` launches the ordered contract services declared in `src/native/session/service_contracts.zig`, publishes their interfaces through `src/native/services/service_registry.zig`, and attaches driver authority for device-backed services.
 6. `src/userspace/runtime.zig` is the common runtime for every userspace image: it validates the embedded descriptor, reads the bootstrap mailbox, performs initial typed queries, publishes heartbeat or fault state, and then enters steady-state execution.
 
 ## Kernel Boundary

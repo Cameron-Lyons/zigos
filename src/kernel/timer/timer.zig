@@ -4,7 +4,12 @@ const io = @import("../utils/io.zig");
 const PIT_CHANNEL0 = 0x40;
 const PIT_COMMAND = 0x43;
 const PIT_FREQUENCY = 1193180;
+const PIT_COMMAND_RATE_GENERATOR = 0x36;
+const LOW_BYTE_MASK: u32 = 0xFF;
+const BYTE_BITS: u4 = 8;
 const MAX_SLEEPERS = 128;
+const DECIMAL_BASE: u32 = 10;
+const U32_DECIMAL_DIGITS: usize = 10;
 
 pub const TICKS_PER_SECOND: u64 = 100;
 pub const DEFAULT_FREQUENCY_HZ: u32 = @intCast(TICKS_PER_SECOND);
@@ -32,10 +37,10 @@ pub fn init(frequency_hz: u32) void {
 
     const divisor = PIT_FREQUENCY / frequency_hz;
 
-    io.outb(PIT_COMMAND, 0x36);
+    io.outb(PIT_COMMAND, PIT_COMMAND_RATE_GENERATOR);
 
-    io.outb(PIT_CHANNEL0, @truncate(divisor & 0xFF));
-    io.outb(PIT_CHANNEL0, @truncate((divisor >> 8) & 0xFF));
+    io.outb(PIT_CHANNEL0, @truncate(divisor & LOW_BYTE_MASK));
+    io.outb(PIT_CHANNEL0, @truncate((divisor >> BYTE_BITS) & LOW_BYTE_MASK));
 
     vga.print("Timer initialized!\n");
 }
@@ -93,12 +98,12 @@ fn print_number(num: u32) void {
     }
 
     // SAFETY: filled by the following digit extraction loop
-    var digits: [10]u8 = undefined;
+    var digits: [U32_DECIMAL_DIGITS]u8 = undefined;
     var i: usize = 0;
     var n = num;
 
-    while (n > 0) : (n /= 10) {
-        digits[i] = @as(u8, @truncate(n % 10)) + '0';
+    while (n > 0) : (n /= DECIMAL_BASE) {
+        digits[i] = @as(u8, @truncate(n % DECIMAL_BASE)) + '0';
         i += 1;
     }
 
