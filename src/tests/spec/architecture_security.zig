@@ -396,7 +396,7 @@ fn invariantNoRightsEscalationThroughDeriveOrPass() !void {
         const parent = try table.mintBootRoot(.{
             .holder = spec_support.service(10),
             .issuer = spec_support.policyAuthority(1),
-            .target = .{ .kind = .object, .id = 1_000 + index },
+            .target = .{ .kind = .service, .id = 1_000 + index },
             .rights = parent_rights,
             .scope = .{ .task_id = 40, .workspace_id = 70, .local_only = true, .broker_only = true },
             .lease = .{ .issued_at_ticks = 10, .expires_at_ticks = 100, .renewable = true },
@@ -440,11 +440,17 @@ fn invariantRevocationAlwaysWins() !void {
 
     for (targets, 0..) |target, index| {
         var table = capability.CapabilityTable.init();
+        const parent_rights = switch (target.kind) {
+            .object => capability.CapabilityRights{ .capability_derive = true, .capability_pass = true, .capability_query = true, .object_read = true },
+            .network_policy => capability.CapabilityRights{ .capability_derive = true, .capability_pass = true, .capability_query = true, .network_local = true },
+            .device => capability.CapabilityRights{ .capability_derive = true, .capability_pass = true, .capability_query = true, .device_use = true, .network_local = true },
+            else => unreachable,
+        };
         const parent = try table.mintBootRoot(.{
             .holder = spec_support.service(30 + index),
             .issuer = spec_support.policyAuthority(1),
             .target = target,
-            .rights = .{ .capability_derive = true, .capability_pass = true, .capability_query = true, .object_read = true, .device_use = true, .network_local = true },
+            .rights = parent_rights,
             .scope = .{ .task_id = 80 + index, .local_only = true, .broker_only = true },
             .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 1_000, .renewable = true },
         });

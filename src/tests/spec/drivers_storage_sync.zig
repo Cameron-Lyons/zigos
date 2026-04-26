@@ -266,7 +266,12 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
         .workspace_id = workspace_record.id,
         .path = "/documents/report.md",
         .access = .read,
-    }, workspace_capability.holder, workspace_capability.id, 8);
+    }, .{
+        .task_id = 88,
+        .principal = workspace_capability.holder,
+        .capability_id = workspace_capability.id,
+        .now_ticks = 8,
+    });
     try std.testing.expect(!view.authoritative);
     try std.testing.expect(view.readable);
     try std.testing.expect(view.writable);

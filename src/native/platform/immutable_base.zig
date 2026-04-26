@@ -53,7 +53,7 @@ pub const SystemImage = struct {
     activation_generation: u64,
     signer_len: usize,
     signer: [MAX_LABEL_BYTES]u8,
-    measurement: object_store.ContentAddress,
+    measurement: object_store.BlobAddress,
 
     pub fn labelSlice(self: *const SystemImage) []const u8 {
         return self.label[0..self.label_len];
@@ -157,7 +157,7 @@ pub const Manager = struct {
         slot.read_only = true;
         slot.activation_generation = self.activation_generation;
         slot.signer_len = copyText(&slot.signer, signer.label);
-        slot.measurement = result.address;
+        slot.measurement = result.blob_address;
         try self.persist(tick);
         return slot;
     }
@@ -254,7 +254,7 @@ pub const Manager = struct {
         if (!version.metadata.isSigned() or !version.metadata.signature.isComplete()) return false;
         if (!version.metadata.verifyFor(.model_artifact, version.payloadSlice())) return false;
         if (!std.mem.eql(u8, version.metadata.signature.signer, image.signerSlice())) return false;
-        return std.mem.eql(u8, &version.address, &image.measurement);
+        return std.mem.eql(u8, &version.blob_address, &image.measurement);
     }
 
     fn persist(self: *Manager, tick: u64) Error!void {
@@ -382,7 +382,7 @@ pub const Manager = struct {
         const slot = &self.slots[slot_index];
         const version = self.storage.version(slot.version_id) orelse return error.CorruptState;
         slot.signer_len = copyText(&slot.signer, version.metadata.signature.signer);
-        slot.measurement = version.address;
+        slot.measurement = version.blob_address;
     }
 };
 

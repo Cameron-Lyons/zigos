@@ -65,6 +65,7 @@ pub const Context = struct {
     package_service_id: u64,
     package_service_principal: principal.PrincipalId,
     update_ledger: *event_ledger.Ledger,
+    notes_task_id: u64,
     notes_object_capability: capability.Capability,
 };
 

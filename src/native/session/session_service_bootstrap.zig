@@ -39,28 +39,31 @@ pub fn bootServices(
     return @call(.never_inline, activateDrivers, .{ env, state, kernel_port, service_bindings });
 }
 
+pub fn bootRegistryService(
+    env: *const support.Environment,
+    state: *const support.BootstrapState,
+    kernel_port: *component_port.KernelPort,
+    service_bindings: *support.ServiceBindings,
+) bool {
+    const index = service_contract.orderedIndex(.service_registry).?;
+    if (service_bindings.bindings[index].task_id != 0) return true;
+    const entry = service_contract.contractForClass(.service_registry).?;
+    service_bindings.bindings[index] = launchService(env, state, kernel_port, entry) catch |err| {
+        _ = env.supervisor.recordCrash(serviceId(state, entry.class), entry.boot_tick, bootFailureCode(err));
+        return false;
+    };
+    return true;
+}
+
 fn launchServices(
     env: *const support.Environment,
     state: *const support.BootstrapState,
     kernel_port: *component_port.KernelPort,
     service_bindings: *support.ServiceBindings,
 ) bool {
-    service_bindings.* = .{ .bindings = undefined };
     for (service_contract.ordered_service_contracts, 0..) |entry, index| {
-        service_bindings.bindings[index] = service_bootstrap.launchContractService(
-            env.userspace_catalog,
-            kernel_port,
-            env.service_directory,
-            env.supervisor,
-            state.session_capability.id,
-            state.session_task.id,
-            env.userspace_scheduler,
-            serviceOwner(state, entry.class),
-            serviceId(state, entry.class),
-            entry,
-            entry.boot_correlation_base,
-            entry.boot_tick,
-        ) catch |err| {
+        if (service_bindings.bindings[index].task_id != 0) continue;
+        service_bindings.bindings[index] = launchService(env, state, kernel_port, entry) catch |err| {
             _ = env.supervisor.recordCrash(serviceId(state, entry.class), entry.boot_tick, bootFailureCode(err));
             return false;
         };
@@ -69,6 +72,28 @@ fn launchServices(
         }
     }
     return true;
+}
+
+fn launchService(
+    env: *const support.Environment,
+    state: *const support.BootstrapState,
+    kernel_port: *component_port.KernelPort,
+    entry: service_contract.ServiceContract,
+) service_bootstrap.Error!service_bootstrap.ServiceBinding {
+    return service_bootstrap.launchContractService(
+        env.userspace_catalog,
+        kernel_port,
+        env.service_directory,
+        env.supervisor,
+        state.session_capability.id,
+        state.session_task.id,
+        env.userspace_scheduler,
+        serviceOwner(state, entry.class),
+        serviceId(state, entry.class),
+        entry,
+        entry.boot_correlation_base,
+        entry.boot_tick,
+    );
 }
 
 fn activateDrivers(
@@ -322,7 +347,9 @@ fn recordDriverRecovery(
 
 fn serviceOwner(state: *const support.BootstrapState, class: contract.ServiceClass) principal.PrincipalId {
     return switch (class) {
+        .service_registry => state.ids.policy_authority,
         .policy_mediation => state.ids.policy_authority,
+        .permission_review_ui => state.ids.review_service,
         .network_stack => state.ids.network_service,
         .storage_object => state.ids.storage_service,
         .package_install_update => state.ids.package_service,
@@ -337,7 +364,9 @@ fn serviceOwner(state: *const support.BootstrapState, class: contract.ServiceCla
 
 fn serviceId(state: *const support.BootstrapState, class: contract.ServiceClass) u64 {
     return switch (class) {
+        .service_registry => state.services.service_registry.id,
         .policy_mediation => state.services.policy_service.id,
+        .permission_review_ui => state.services.review_service_record.id,
         .network_stack => state.services.network_service.id,
         .storage_object => state.services.storage_service.id,
         .package_install_update => state.services.package_service.id,

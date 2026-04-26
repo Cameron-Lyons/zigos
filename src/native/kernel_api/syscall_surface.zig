@@ -498,7 +498,7 @@ fn mapError(err: anyerror) DispatchResult {
         .status = .denied,
         .denial_reason = .capability_expired,
     };
-    if (err == error.InvalidCapabilityTarget) return .{
+    if (err == error.InvalidCapabilityTarget or err == error.InvalidCapabilityRights) return .{
         .status = .denied,
         .denial_reason = .invalid_target,
     };
