@@ -44,6 +44,12 @@ pub const NotesReviewState = struct {
 pub const ServiceBindings = struct {
     bindings: [service_contract.ordered_service_contracts.len]service_bootstrap.ServiceBinding,
 
+    pub fn init() ServiceBindings {
+        return .{
+            .bindings = [_]service_bootstrap.ServiceBinding{.{ .task_id = 0, .endpoint_id = 0 }} ** service_contract.ordered_service_contracts.len,
+        };
+    }
+
     pub fn bindingFor(self: *const ServiceBindings, class: contract.ServiceClass) service_bootstrap.ServiceBinding {
         return self.bindings[service_contract.orderedIndex(class).?];
     }

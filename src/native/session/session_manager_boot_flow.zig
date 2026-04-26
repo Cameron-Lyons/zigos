@@ -1,7 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
-const bootstrap_capabilities = @import("bootstrap_capabilities.zig");
 const bootstrap_packages = @import("../demo/bootstrap_packages.zig");
 const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
@@ -13,7 +12,6 @@ const manifest = @import("../policy/manifest.zig");
 const bootstrap_review_profile = @import("../policy/bootstrap_review_profile.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
-const kernel_descriptors = @import("../kernel_api/native_kernel_descriptors.zig");
 const native_kernel = @import("../kernel_api/native_kernel.zig");
 const native_service_registry = @import("../services/service_registry.zig");
 const native_ux = @import("../platform/native_ux.zig");
@@ -27,6 +25,7 @@ const session_bootstrap = @import("session_bootstrap.zig");
 const scenario_world = @import("../demo/scenario_world.zig");
 const transport_checks = @import("../demo/transport_checks.zig");
 const permission_flows = @import("../demo/permission_flows.zig");
+const service_catalog = @import("service_catalog.zig");
 const session_service_bootstrap = @import("session_service_bootstrap.zig");
 const session_support = @import("session_manager_support.zig");
 const shared_memory_mod = @import("../kernel_api/shared_memory.zig");
@@ -46,7 +45,7 @@ const BootstrapState = session_support.BootstrapState;
 const NotesReviewState = session_support.NotesReviewState;
 const ServiceBindings = session_support.ServiceBindings;
 const Environment = session_support.Environment;
-const BootstrapError = session_bootstrap.Error || userspace_launch.Error || capability.Error || task_runtime.Error;
+const BootstrapError = error{ MissingBootstrapLaunch, MissingBootstrapGrant, MissingUserspaceImage } || session_bootstrap.Error || userspace_launch.Error || capability.Error || task_runtime.Error;
 
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/common.zig")
@@ -231,12 +230,7 @@ pub const SessionManager = struct {
             return;
         };
         const kernel_port = prepareKernelInterface(self, state.ids.policy_authority, state.session_task.id);
-        if (!bootstrapServiceRegistry(self, &state, kernel_port)) {
-            self.initialized = false;
-            self.kernel_port_ready = false;
-            return;
-        }
-        var service_bindings: ServiceBindings = undefined;
+        var service_bindings = ServiceBindings.init();
         if (!session_service_bootstrap.bootServices(&env, &state, kernel_port, &service_bindings)) {
             self.initialized = false;
             self.kernel_port_ready = false;
@@ -273,7 +267,8 @@ pub const SessionManager = struct {
         bootstrap_packages.seed(&self.package_service_instance);
         var mediator = initPolicyMediator(self, state.ids.policy_authority, state.services);
         const kernel_port = prepareKernelInterface(self, state.ids.policy_authority, state.session_task.id);
-        if (!bootstrapServiceRegistry(self, &state, kernel_port)) {
+        var service_bindings = ServiceBindings.init();
+        if (!session_service_bootstrap.bootRegistryService(&env, &state, kernel_port, &service_bindings)) {
             self.initialized = false;
             self.kernel_port_ready = false;
             return;
@@ -286,13 +281,12 @@ pub const SessionManager = struct {
 
         runTransportChecks(&env, &state, kernel_port);
         const notes_review = runPermissionFlows(&env, &state, kernel_port, &review_port, &policy_port);
-        var service_bindings: ServiceBindings = undefined;
         if (!runServiceBootstrap(&env, &state, kernel_port, &service_bindings)) {
             self.initialized = false;
             self.kernel_port_ready = false;
             return;
         }
-        runSessionLifecycle(self, &state, &service_bindings, notes_review.object_capability);
+        runSessionLifecycle(self, &state, &service_bindings, notes_review);
         printReadyBanner();
     }
 };
@@ -338,63 +332,24 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState
     );
     const services = try session_bootstrap.registerCoreServices(&self.supervisor, &self.runtime_service, ids);
 
-    const session_task = userspace_launch.launchRegisteredDirect(
-        &self.userspace_catalog,
-        &self.runtime,
-        "zigos.system.session-manager",
-        .{
-            .owner = ids.session_service,
-            .budget = .{
-                .cpu_time_ticks = 50_000,
-                .memory_bytes = 8 * 1024 * 1024,
-                .endpoint_slots = 16,
-                .shared_memory_bytes = 256 * 1024,
-                .background_allowed = false,
-            },
-            .ui_surface_id = 1,
-            .local_only = true,
-        },
-        &self.userspace_scheduler,
-    ) catch |err| {
+    const session_task = launchNativeBootstrapService(self, ids, services, .session_manager) catch |err| {
         _ = self.supervisor.recordCrash(services.session.id, 0, bootFailureCode(err));
         return err;
     };
     common.printBootMarker(boot_markers.policy_ready);
 
-    const review_service_task = userspace_launch.launchRegisteredDirect(
-        &self.userspace_catalog,
-        &self.runtime,
-        "zigos.system.permission-review",
-        .{
-            .owner = ids.review_service,
-            .budget = .{
-                .cpu_time_ticks = 10_000,
-                .memory_bytes = 512 * 1024,
-                .endpoint_slots = 4,
-                .shared_memory_bytes = 16 * 1024,
-                .background_allowed = false,
-            },
-            .local_only = true,
-        },
-        &self.userspace_scheduler,
-    ) catch |err| {
+    const review_service_task = launchNativeBootstrapService(self, ids, services, .permission_review_ui) catch |err| {
         _ = self.supervisor.recordCrash(services.review_service_record.id, 0, bootFailureCode(err));
         return err;
     };
     common.printBootMarker(boot_markers.permission_ui_service_ready);
     common.printBootMarker(boot_markers.permission_ui_service_task_ready);
 
-    const session_capability = mintSessionCapability(self, ids, services, session_task.id) catch |err| {
+    const session_capability = mintNativeBootstrapGrant(self, ids, services, session_task.id, .session_manager, .session_service_authority) catch |err| {
         _ = self.supervisor.recordCrash(services.session.id, 0, bootFailureCode(err));
         return err;
     };
-    const policy_capability = mintPolicyCapability(
-        self,
-        ids.session_service,
-        ids.policy_authority,
-        services.policy_service.id,
-        session_task.id,
-    ) catch |err| {
+    const policy_capability = mintNativeBootstrapGrant(self, ids, services, session_task.id, .session_manager, .policy_mint_authority) catch |err| {
         _ = self.supervisor.recordCrash(services.policy_service.id, 0, bootFailureCode(err));
         return err;
     };
@@ -413,33 +368,56 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState
     };
 }
 
-fn mintSessionCapability(
+fn launchNativeBootstrapService(
+    self: *SessionManager,
+    ids: session_bootstrap.Principals,
+    services: session_bootstrap.CoreServices,
+    class: service_catalog.ServiceClass,
+) BootstrapError!*task_runtime.TaskRecord {
+    const launch = service_catalog.bootstrapLaunchForClass(class) orelse return error.MissingBootstrapLaunch;
+    if (launch.mode != .native_direct) return error.MissingBootstrapLaunch;
+    const bundle_id = service_catalog.bundleIdForServiceClass(class) orelse return error.MissingUserspaceImage;
+    return userspace_launch.launchRegisteredDirect(
+        &self.userspace_catalog,
+        &self.runtime,
+        bundle_id,
+        .{
+            .owner = serviceOwner(ids, class),
+            .budget = launch.budget,
+            .ui_surface_id = launch.ui_surface_id,
+            .local_only = true,
+        },
+        &self.userspace_scheduler,
+    ) catch |err| {
+        _ = self.supervisor.recordCrash(serviceRecord(services, class).id, launch.tick, bootFailureCode(err));
+        return err;
+    };
+}
+
+fn mintNativeBootstrapGrant(
     self: *SessionManager,
     ids: session_bootstrap.Principals,
     services: session_bootstrap.CoreServices,
     session_task_id: u64,
-) capability.Error!capability.Capability {
+    class: service_catalog.ServiceClass,
+    grant: service_catalog.BootstrapGrantKind,
+) BootstrapError!capability.Capability {
+    if (!catalogDeclaresGrant(class, grant)) return error.MissingBootstrapGrant;
+    const target: capability.CapabilityTarget = switch (grant) {
+        .session_service_authority => .{ .kind = .service, .id = services.session.id },
+        .policy_mint_authority => .{ .kind = .policy, .id = services.policy_service.id },
+        .service_task_authority => return error.MissingBootstrapGrant,
+    };
+    const broker_service_id = switch (grant) {
+        .session_service_authority => services.policy_service.id,
+        .policy_mint_authority => services.policy_service.id,
+        .service_task_authority => unreachable,
+    };
     return try self.capability_table.mintBootRoot(.{
         .holder = ids.session_service,
         .issuer = ids.policy_authority,
-        .target = .{ .kind = .service, .id = services.session.id },
-        .rights = .{
-            .task_create = true,
-            .endpoint_create = true,
-            .endpoint_connect = true,
-            .endpoint_send = true,
-            .endpoint_recv = true,
-            .capability_derive = true,
-            .capability_query = true,
-            .shared_memory_create = true,
-            .shared_memory_map = true,
-            .shared_memory_unmap = true,
-            .shared_memory_revoke = true,
-            .time_query = true,
-            .resource_query = true,
-            .accounting_query = true,
-            .ipc_peer = true,
-        },
+        .target = target,
+        .rights = service_catalog.rightsForBootstrapGrant(grant),
         .scope = .{
             .local_only = true,
             .broker_only = true,
@@ -452,9 +430,53 @@ fn mintSessionCapability(
         .audit = .{
             .policy_generation = 1,
             .source_task_id = session_task_id,
-            .broker_service_id = services.policy_service.id,
+            .broker_service_id = broker_service_id,
         },
     });
+}
+
+fn catalogDeclaresGrant(class: service_catalog.ServiceClass, grant: service_catalog.BootstrapGrantKind) bool {
+    const launch = service_catalog.bootstrapLaunchForClass(class) orelse return false;
+    for (launch.grants) |declared| {
+        if (declared == grant) return true;
+    }
+    return false;
+}
+
+fn serviceOwner(ids: session_bootstrap.Principals, class: service_catalog.ServiceClass) principal.PrincipalId {
+    return switch (class) {
+        .task_runtime => ids.task_runtime_service,
+        .session_manager => ids.session_service,
+        .policy_mediation => ids.policy_authority,
+        .permission_review_ui => ids.review_service,
+        .service_registry => ids.policy_authority,
+        .compatibility_portal => ids.compatibility_service,
+        .network_stack => ids.network_service,
+        .storage_object => ids.storage_service,
+        .package_install_update => ids.package_service,
+        .compositor_ui_session => ids.compositor_service,
+        .indexing_search => ids.indexing_service,
+        .sync_replication => ids.sync_service,
+        .media_print_helpers => ids.media_service,
+    };
+}
+
+fn serviceRecord(services: session_bootstrap.CoreServices, class: service_catalog.ServiceClass) *supervisor_mod.ServiceRecord {
+    return switch (class) {
+        .task_runtime => services.runtime_service_record,
+        .session_manager => services.session,
+        .policy_mediation => services.policy_service,
+        .permission_review_ui => services.review_service_record,
+        .service_registry => services.service_registry,
+        .compatibility_portal => services.compatibility_service,
+        .network_stack => services.network_service,
+        .storage_object => services.storage_service,
+        .package_install_update => services.package_service,
+        .compositor_ui_session => services.compositor_service,
+        .indexing_search => services.indexing_service,
+        .sync_replication => services.sync_service,
+        .media_print_helpers => services.media_service,
+    };
 }
 
 fn recordSessionTaskBootstrap(
@@ -478,39 +500,6 @@ fn recordSessionTaskBootstrap(
         .kind = .capability_granted,
         .capability_id = policy_capability_id,
         .tick = 0,
-    });
-}
-
-fn mintPolicyCapability(
-    self: *SessionManager,
-    holder: principal.PrincipalId,
-    policy_authority: principal.PrincipalId,
-    policy_service_id: u64,
-    session_task_id: u64,
-) capability.Error!capability.Capability {
-    return try self.capability_table.mintBootRoot(.{
-        .holder = holder,
-        .issuer = policy_authority,
-        .target = .{ .kind = .policy, .id = policy_service_id },
-        .rights = .{
-            .capability_mint = true,
-            .capability_query = true,
-            .capability_revoke = true,
-        },
-        .scope = .{
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = true,
-        },
-        .audit = .{
-            .policy_generation = 1,
-            .source_task_id = session_task_id,
-            .broker_service_id = policy_service_id,
-        },
     });
 }
 
@@ -552,83 +541,6 @@ fn prepareKernelInterface(
     common.printBootMarker(boot_markers.transport_no_root);
     common.printBootMarker(boot_markers.transport_component_abi_ready);
     return &self.kernel_port_instance;
-}
-
-fn bootstrapServiceRegistry(
-    self: *SessionManager,
-    state: *const BootstrapState,
-    kernel_port: *component_port.KernelPort,
-) bool {
-    const registry_task = userspace_launch.launchRegisteredKernel(
-        &self.userspace_catalog,
-        .{
-            .port = kernel_port,
-            .authority_capability_id = state.session_capability.id,
-            .controller_task_id = state.session_task.id,
-            .correlation_id = 24,
-            .now_ticks = 24,
-        },
-        "zigos.system.service-registry",
-        .{
-            .owner = state.ids.policy_authority,
-            .budget = .{
-                .cpu_time_ticks = 8_000,
-                .memory_bytes = 512 * 1024,
-                .endpoint_slots = 8,
-                .shared_memory_bytes = 64 * 1024,
-                .background_allowed = false,
-            },
-            .local_only = true,
-        },
-        &self.userspace_scheduler,
-    ) catch |err| {
-        _ = self.supervisor.recordCrash(state.services.service_registry.id, 24, bootFailureCode(err));
-        return false;
-    };
-    const registry_authority_id = bootstrap_capabilities.deriveTaskCapability(
-        kernel_port,
-        state.session_task.id,
-        state.session_capability.id,
-        registry_task.task_id,
-        bootstrap_capabilities.serviceBootstrapRights(),
-        25,
-        25,
-    ) catch |err| {
-        _ = self.supervisor.recordCrash(state.services.service_registry.id, 25, bootFailureCode(err));
-        return false;
-    };
-    const registry_endpoint = kernel_port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, 26, registry_task.task_id),
-        .authority_capability_id = registry_authority_id,
-        .owner_task_id = registry_task.task_id,
-        .label = "zigos.service.registry",
-        .flags = .{
-            .local_only = true,
-            .service_port = true,
-        },
-    }, 26) catch |err| {
-        _ = self.supervisor.recordCrash(state.services.service_registry.id, 26, bootFailureCode(err));
-        return false;
-    };
-
-    self.service_directory.bindBootstrap(.{
-        .task_id = registry_task.task_id,
-        .endpoint_id = registry_endpoint.endpoint.endpoint_id,
-        .endpoint_capability_id = registry_endpoint.capability_id,
-    });
-    const registry_record = self.runtime.find(registry_task.task_id) orelse return false;
-    self.service_directory.register(
-        state.services.service_registry.id,
-        registry_task.task_id,
-        registry_endpoint.endpoint.endpoint_id,
-        .{ .name = "zigos.service.registry" },
-        kernel_descriptors.serviceBindingFlags(registry_record),
-    ) catch |err| {
-        _ = self.supervisor.recordCrash(state.services.service_registry.id, 26, bootFailureCode(err));
-        return false;
-    };
-    _ = self.supervisor.noteContractBound(state.services.service_registry.id, registry_endpoint.endpoint.endpoint_id, 26);
-    return true;
 }
 
 fn initReviewService(
@@ -678,7 +590,7 @@ fn runSessionLifecycle(
     self: *SessionManager,
     state: *const BootstrapState,
     service_bindings: *const ServiceBindings,
-    notes_object_capability: capability.Capability,
+    notes_review: NotesReviewState,
 ) void {
     var lifecycle_context = scenario_world.Context{
         .capability_table = &self.capability_table,
@@ -707,7 +619,8 @@ fn runSessionLifecycle(
         .package_service_id = state.services.package_service.id,
         .package_service_principal = state.ids.package_service,
         .update_ledger = &self.diagnostic_ledger,
-        .notes_object_capability = notes_object_capability,
+        .notes_task_id = notes_review.task_id,
+        .notes_object_capability = notes_review.object_capability,
     };
     scenario_world.run(&lifecycle_context);
 }

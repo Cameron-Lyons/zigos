@@ -9,6 +9,7 @@ const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const service_contract = @import("service_contracts.zig");
+const service_catalog = @import("service_catalog.zig");
 const service_registry = @import("../services/service_registry.zig");
 const kernel_descriptors = @import("../kernel_api/native_kernel_descriptors.zig");
 const supervisor_mod = @import("supervisor.zig");
@@ -17,7 +18,7 @@ const userspace_boot_registry = @import("../task/userspace_boot_registry.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 
-pub const Error = userspace_launch.Error || userspace_boot_registry.Error || component_port.Error || driver_service.Error || service_registry.Error;
+pub const Error = error{MissingBootstrapGrant} || userspace_launch.Error || userspace_boot_registry.Error || component_port.Error || driver_service.Error || service_registry.Error;
 
 pub const ServiceBinding = struct {
     task_id: u64,
@@ -50,7 +51,9 @@ pub fn launchContractService(
         service_id,
         try userspace_boot_registry.bundleIdForServiceClass(entry.class),
         entry.interface,
-        serviceBudget(entry.class),
+        entry.boot_budget,
+        entry.class,
+        rightsForGrant(entry.bootstrap_grants, .service_task_authority) orelse return error.MissingBootstrapGrant,
         correlation_base,
         now_ticks,
     );
@@ -69,6 +72,8 @@ pub fn launchBundleService(
     bundle_id: []const u8,
     interface: manifest.InterfaceDecl,
     budget: task_runtime.ResourceBudget,
+    class: contract.ServiceClass,
+    bootstrap_rights: capability.CapabilityRights,
     correlation_base: u64,
     now_ticks: u64,
 ) Error!ServiceBinding {
@@ -94,7 +99,7 @@ pub fn launchBundleService(
         controller_task_id,
         authority_capability_id,
         service_task.task_id,
-        bootstrap_capabilities.serviceBootstrapRights(),
+        bootstrap_rights,
         correlation_base + 1,
         now_ticks,
     );
@@ -109,6 +114,13 @@ pub fn launchBundleService(
             .service_port = true,
         },
     }, now_ticks);
+    if (class == .service_registry) {
+        service_directory.bindBootstrap(.{
+            .task_id = service_task.task_id,
+            .endpoint_id = endpoint.endpoint.endpoint_id,
+            .endpoint_capability_id = endpoint.capability_id,
+        });
+    }
     const service_record = kernel_port.kernel.runtime.find(service_task.task_id) orelse return error.TaskNotFound;
     try service_directory.register(
         service_id,
@@ -202,22 +214,7 @@ pub fn launchDriverTask(
 }
 
 pub fn serviceBudget(class: contract.ServiceClass) task_runtime.ResourceBudget {
-    return switch (class) {
-        .network_stack, .storage_object, .compositor_ui_session => .{
-            .cpu_time_ticks = 16_000,
-            .memory_bytes = 1024 * 1024,
-            .endpoint_slots = 8,
-            .shared_memory_bytes = 128 * 1024,
-            .background_allowed = false,
-        },
-        else => .{
-            .cpu_time_ticks = 8_000,
-            .memory_bytes = 512 * 1024,
-            .endpoint_slots = 6,
-            .shared_memory_bytes = 64 * 1024,
-            .background_allowed = false,
-        },
-    };
+    return (service_catalog.bootstrapLaunchForClass(class) orelse unreachable).budget;
 }
 
 pub fn driverBudget(device_class: driver_service.DeviceClass) task_runtime.ResourceBudget {
@@ -269,6 +266,16 @@ fn driverSigner(device_class: driver_service.DeviceClass, bundle_id: []const u8)
         .audio_print_io,
         => "zigos-driver-key",
     };
+}
+
+fn rightsForGrant(
+    grants: []const service_catalog.BootstrapGrantKind,
+    requested: service_catalog.BootstrapGrantKind,
+) ?capability.CapabilityRights {
+    for (grants) |grant| {
+        if (grant == requested) return service_catalog.rightsForBootstrapGrant(grant);
+    }
+    return null;
 }
 
 test "contractsReady requires every ordered service contract" {

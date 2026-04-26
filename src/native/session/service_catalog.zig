@@ -1,6 +1,8 @@
 const std = @import("std");
+const capability = @import("../kernel_api/capability.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
+const task_runtime = @import("../task/task_runtime.zig");
 
 pub const KernelTcbComponent = enum(u8) {
     scheduling,
@@ -99,6 +101,26 @@ pub const BootstrapTiming = struct {
     tick: u64,
 };
 
+pub const BootstrapLaunchMode = enum(u8) {
+    native_direct,
+    kernel_contract,
+};
+
+pub const BootstrapGrantKind = enum(u8) {
+    session_service_authority,
+    policy_mint_authority,
+    service_task_authority,
+};
+
+pub const BootstrapLaunch = struct {
+    mode: BootstrapLaunchMode,
+    budget: task_runtime.ResourceBudget,
+    correlation_base: u64,
+    tick: u64,
+    ui_surface_id: ?u64 = null,
+    grants: []const BootstrapGrantKind = &.{},
+};
+
 pub const ServiceCatalogEntry = struct {
     class: ServiceClass,
     boundary: ServiceBoundary,
@@ -110,7 +132,7 @@ pub const ServiceCatalogEntry = struct {
     isolation: IsolationProfile,
     userspace_image: ?UserspaceImageIdentity = null,
     description: []const u8,
-    service_bootstrap: ?BootstrapTiming = null,
+    service_bootstrap: ?BootstrapLaunch = null,
     legacy_phase3: bool = false,
 
     pub fn restartable(self: ServiceCatalogEntry) bool {
@@ -131,8 +153,10 @@ pub const ServiceContract = struct {
     interface: manifest.InterfaceDecl,
     driver_class: ?driver_service.DeviceClass = null,
     description: []const u8,
+    boot_budget: task_runtime.ResourceBudget,
     boot_correlation_base: u64,
     boot_tick: u64,
+    bootstrap_grants: []const BootstrapGrantKind,
 };
 
 pub const Phase3Contract = struct {
@@ -180,6 +204,20 @@ pub const catalog = [_]ServiceCatalogEntry{
             .contract_flags = 1 << 0,
         },
         .description = "restartable native session and task coordinator",
+        .service_bootstrap = .{
+            .mode = .native_direct,
+            .budget = .{
+                .cpu_time_ticks = 50_000,
+                .memory_bytes = 8 * 1024 * 1024,
+                .endpoint_slots = 16,
+                .shared_memory_bytes = 256 * 1024,
+                .background_allowed = false,
+            },
+            .correlation_base = 0,
+            .tick = 0,
+            .ui_surface_id = 1,
+            .grants = &.{ .session_service_authority, .policy_mint_authority },
+        },
     },
     .{
         .class = .policy_mediation,
@@ -200,7 +238,13 @@ pub const catalog = [_]ServiceCatalogEntry{
             .contract_flags = (1 << 0) | (1 << 6),
         },
         .description = "runtime grants, denials, and policy enforcement",
-        .service_bootstrap = .{ .correlation_base = 301, .tick = 31 },
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.policy_mediation),
+            .correlation_base = 301,
+            .tick = 31,
+            .grants = &.{.service_task_authority},
+        },
         .legacy_phase3 = true,
     },
     .{
@@ -222,6 +266,18 @@ pub const catalog = [_]ServiceCatalogEntry{
             .contract_flags = (1 << 0) | (1 << 1) | (1 << 2),
         },
         .description = "task-scoped permission review service for reviewed grants and denials",
+        .service_bootstrap = .{
+            .mode = .native_direct,
+            .budget = .{
+                .cpu_time_ticks = 10_000,
+                .memory_bytes = 512 * 1024,
+                .endpoint_slots = 4,
+                .shared_memory_bytes = 16 * 1024,
+                .background_allowed = false,
+            },
+            .correlation_base = 302,
+            .tick = 32,
+        },
     },
     .{
         .class = .service_registry,
@@ -241,6 +297,19 @@ pub const catalog = [_]ServiceCatalogEntry{
             .contract_flags = 1 << 0,
         },
         .description = "typed service registration and brokered connection directory",
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = .{
+                .cpu_time_ticks = 8_000,
+                .memory_bytes = 512 * 1024,
+                .endpoint_slots = 8,
+                .shared_memory_bytes = 64 * 1024,
+                .background_allowed = false,
+            },
+            .correlation_base = 24,
+            .tick = 24,
+            .grants = &.{.service_task_authority},
+        },
     },
     .{
         .class = .network_stack,
@@ -262,7 +331,13 @@ pub const catalog = [_]ServiceCatalogEntry{
             .contract_flags = (1 << 0) | (1 << 5),
         },
         .description = "network stack, egress mediation, and device-backed packet IO",
-        .service_bootstrap = .{ .correlation_base = 304, .tick = 34 },
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.network_stack),
+            .correlation_base = 304,
+            .tick = 34,
+            .grants = &.{.service_task_authority},
+        },
         .legacy_phase3 = true,
     },
     .{
@@ -285,7 +360,13 @@ pub const catalog = [_]ServiceCatalogEntry{
             .contract_flags = (1 << 0) | (1 << 4),
         },
         .description = "content-addressed object versions, workspace authority, snapshots, and derived file-bridge views",
-        .service_bootstrap = .{ .correlation_base = 307, .tick = 35 },
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.storage_object),
+            .correlation_base = 307,
+            .tick = 35,
+            .grants = &.{.service_task_authority},
+        },
         .legacy_phase3 = true,
     },
     .{
@@ -307,7 +388,13 @@ pub const catalog = [_]ServiceCatalogEntry{
             .contract_flags = 1 << 0,
         },
         .description = "bundle install, update, and channel management",
-        .service_bootstrap = .{ .correlation_base = 310, .tick = 38 },
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.package_install_update),
+            .correlation_base = 310,
+            .tick = 38,
+            .grants = &.{.service_task_authority},
+        },
         .legacy_phase3 = true,
     },
     .{
@@ -330,7 +417,13 @@ pub const catalog = [_]ServiceCatalogEntry{
             .contract_flags = (1 << 0) | (1 << 1),
         },
         .description = "compositor, input routing, and UI session ownership",
-        .service_bootstrap = .{ .correlation_base = 313, .tick = 41 },
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.compositor_ui_session),
+            .correlation_base = 313,
+            .tick = 41,
+            .grants = &.{.service_task_authority},
+        },
         .legacy_phase3 = true,
     },
     .{
@@ -352,7 +445,13 @@ pub const catalog = [_]ServiceCatalogEntry{
             .contract_flags = 1 << 0,
         },
         .description = "indexing and search query service",
-        .service_bootstrap = .{ .correlation_base = 316, .tick = 44 },
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.indexing_search),
+            .correlation_base = 316,
+            .tick = 44,
+            .grants = &.{.service_task_authority},
+        },
         .legacy_phase3 = true,
     },
     .{
@@ -374,7 +473,13 @@ pub const catalog = [_]ServiceCatalogEntry{
             .contract_flags = (1 << 0) | (1 << 3),
         },
         .description = "local-first sync and replication service",
-        .service_bootstrap = .{ .correlation_base = 319, .tick = 47 },
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.sync_replication),
+            .correlation_base = 319,
+            .tick = 47,
+            .grants = &.{.service_task_authority},
+        },
         .legacy_phase3 = true,
     },
     .{
@@ -397,7 +502,13 @@ pub const catalog = [_]ServiceCatalogEntry{
             .contract_flags = (1 << 0) | (1 << 3),
         },
         .description = "media and print helper pipeline",
-        .service_bootstrap = .{ .correlation_base = 322, .tick = 50 },
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.media_print_helpers),
+            .correlation_base = 322,
+            .tick = 50,
+            .grants = &.{.service_task_authority},
+        },
         .legacy_phase3 = true,
     },
     .{
@@ -419,7 +530,13 @@ pub const catalog = [_]ServiceCatalogEntry{
             .contract_flags = (1 << 0) | (1 << 8),
         },
         .description = "isolated compatibility portal service",
-        .service_bootstrap = .{ .correlation_base = 325, .tick = 51 },
+        .service_bootstrap = .{
+            .mode = .kernel_contract,
+            .budget = defaultServiceBudget(.compatibility_portal),
+            .correlation_base = 325,
+            .tick = 51,
+            .grants = &.{.service_task_authority},
+        },
     },
 };
 
@@ -432,21 +549,33 @@ pub const default_services = blk: {
 };
 
 pub const ordered_service_contracts = blk: {
-    const count = serviceBootstrapCount();
+    const count = kernelBootstrapCount();
     var derived: [count]ServiceContract = undefined;
-    var index: usize = 0;
-    for (catalog) |entry| {
-        if (entry.service_bootstrap) |timing| {
-            derived[index] = .{
+    var used = [_]bool{false} ** catalog.len;
+    var count_out: usize = 0;
+    while (count_out < count) {
+        var progressed = false;
+        for (catalog, 0..) |entry, index| {
+            const launch = entry.service_bootstrap orelse continue;
+            if (launch.mode != .kernel_contract or used[index]) continue;
+            if (!dependenciesSatisfied(entry, derived[0..count_out])) continue;
+
+            derived[count_out] = .{
                 .class = entry.class,
                 .interface = entry.interface,
                 .driver_class = entry.driver_class,
                 .description = entry.description,
-                .boot_correlation_base = timing.correlation_base,
-                .boot_tick = timing.tick,
+                .boot_budget = launch.budget,
+                .boot_correlation_base = launch.correlation_base,
+                .boot_tick = launch.tick,
+                .bootstrap_grants = launch.grants,
             };
-            index += 1;
+            used[index] = true;
+            count_out += 1;
+            progressed = true;
+            break;
         }
+        if (!progressed) @compileError("service catalog bootstrap dependencies contain a cycle or missing precondition");
     }
     break :blk derived;
 };
@@ -519,6 +648,43 @@ pub fn bundleIdForServiceClass(class: ServiceClass) ?[]const u8 {
     return image.bundle_id;
 }
 
+pub fn bootstrapLaunchForClass(class: ServiceClass) ?BootstrapLaunch {
+    const entry = entryForClass(class) orelse return null;
+    return entry.service_bootstrap;
+}
+
+pub fn rightsForBootstrapGrant(kind: BootstrapGrantKind) capability.CapabilityRights {
+    return switch (kind) {
+        .session_service_authority => .{
+            .task_create = true,
+            .endpoint_create = true,
+            .endpoint_connect = true,
+            .endpoint_send = true,
+            .endpoint_recv = true,
+            .capability_derive = true,
+            .capability_query = true,
+            .shared_memory_create = true,
+            .shared_memory_map = true,
+            .shared_memory_unmap = true,
+            .shared_memory_revoke = true,
+            .time_query = true,
+            .resource_query = true,
+            .accounting_query = true,
+            .ipc_peer = true,
+        },
+        .policy_mint_authority => .{
+            .capability_mint = true,
+            .capability_query = true,
+            .capability_revoke = true,
+        },
+        .service_task_authority => .{
+            .endpoint_create = true,
+            .endpoint_connect = true,
+            .ipc_peer = true,
+        },
+    };
+}
+
 pub fn allowsDriverClass(class: ServiceClass, device_class: driver_service.DeviceClass) bool {
     const entry = entryForClass(class) orelse return false;
     const expected = entry.driver_class orelse return false;
@@ -573,6 +739,56 @@ fn serviceBootstrapCount() usize {
     return count;
 }
 
+fn kernelBootstrapCount() usize {
+    comptime var count: usize = 0;
+    inline for (catalog) |entry| {
+        if (entry.service_bootstrap) |launch| {
+            if (launch.mode == .kernel_contract) count += 1;
+        }
+    }
+    return count;
+}
+
+fn isKernelBootstrapClass(class: ServiceClass) bool {
+    const entry = entryForClass(class) orelse return false;
+    const launch = entry.service_bootstrap orelse return false;
+    return launch.mode == .kernel_contract;
+}
+
+fn dependenciesSatisfied(entry: ServiceCatalogEntry, ordered: []const ServiceContract) bool {
+    for (entry.dependencies) |dependency| {
+        if (!isKernelBootstrapClass(dependency)) continue;
+        var found = false;
+        for (ordered) |contract_entry| {
+            if (contract_entry.class == dependency) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+fn defaultServiceBudget(class: ServiceClass) task_runtime.ResourceBudget {
+    return switch (class) {
+        .network_stack, .storage_object, .compositor_ui_session => .{
+            .cpu_time_ticks = 16_000,
+            .memory_bytes = 1024 * 1024,
+            .endpoint_slots = 8,
+            .shared_memory_bytes = 128 * 1024,
+            .background_allowed = false,
+        },
+        else => .{
+            .cpu_time_ticks = 8_000,
+            .memory_bytes = 512 * 1024,
+            .endpoint_slots = 6,
+            .shared_memory_bytes = 64 * 1024,
+            .background_allowed = false,
+        },
+    };
+}
+
 fn legacyPhase3Count() usize {
     comptime var count: usize = 0;
     inline for (catalog) |entry| {
@@ -583,14 +799,16 @@ fn legacyPhase3Count() usize {
 
 test "service catalog derives descriptors and bootstrap contracts from one source" {
     try std.testing.expectEqual(@as(usize, catalog.len), default_services.len);
-    try std.testing.expectEqual(@as(usize, 9), ordered_service_contracts.len);
+    try std.testing.expectEqual(@as(usize, 10), ordered_service_contracts.len);
     try std.testing.expectEqual(@as(usize, 8), ordered_phase3_contracts.len);
-    try std.testing.expectEqual(ServiceClass.policy_mediation, ordered_service_contracts[0].class);
-    try std.testing.expectEqual(ServiceClass.compatibility_portal, ordered_service_contracts[8].class);
+    try std.testing.expectEqual(ServiceClass.service_registry, ordered_service_contracts[0].class);
+    try std.testing.expectEqual(ServiceClass.policy_mediation, ordered_service_contracts[1].class);
+    try std.testing.expectEqual(ServiceClass.compatibility_portal, ordered_service_contracts[9].class);
     try std.testing.expectEqual(ServiceClass.media_print_helpers, ordered_phase3_contracts[7].class);
     try std.testing.expectEqualStrings("zigos.system.storage-object", bundleIdForServiceClass(.storage_object).?);
     try std.testing.expect(allowsDriverClass(.network_stack, .network_adapter));
     try std.testing.expect(!allowsDriverClass(.policy_mediation, .network_adapter));
+    try std.testing.expectEqual(BootstrapLaunchMode.native_direct, bootstrapLaunchForClass(.session_manager).?.mode);
 }
 
 test "service catalog interfaces remain unique and dependencies point at catalog entries" {

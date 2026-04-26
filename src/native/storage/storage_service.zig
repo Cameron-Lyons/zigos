@@ -10,7 +10,16 @@ const workspace = @import("workspace.zig");
 
 pub const CheckpointStore = checkpoint_support.CheckpointStore;
 
-pub const Service = struct {
+pub const AuthorityContext = struct {
+    task_id: u64,
+    principal: principal.PrincipalId,
+    capability_id: u64,
+    now_ticks: u64,
+};
+
+pub const AuthorityError = file_bridge.Error;
+
+pub const StorageCore = struct {
     service_id: u64,
     task_id: u64,
     owner: principal.PrincipalId,
@@ -27,9 +36,9 @@ pub const Service = struct {
         task_id: u64,
         owner: principal.PrincipalId,
         checkpoint_store: *CheckpointStore,
-    ) Service {
+    ) StorageCore {
         const loaded_from_volume = checkpoint_store.preparePersistentState();
-        return checkpoint_support.makeService(Service, checkpoint_store, service_id, task_id, owner, loaded_from_volume);
+        return checkpoint_support.makeService(StorageCore, checkpoint_store, service_id, task_id, owner, loaded_from_volume);
     }
 
     pub fn bootstrapWithStore(
@@ -37,9 +46,9 @@ pub const Service = struct {
         task_id: u64,
         owner: principal.PrincipalId,
         checkpoint_store: *CheckpointStore,
-    ) Service {
+    ) StorageCore {
         const loaded_from_volume = checkpoint_store.preparePersistentState();
-        return checkpoint_support.makeService(Service, checkpoint_store, service_id, task_id, owner, loaded_from_volume);
+        return checkpoint_support.makeService(StorageCore, checkpoint_store, service_id, task_id, owner, loaded_from_volume);
     }
 
     pub fn bindPrepared(
@@ -48,8 +57,8 @@ pub const Service = struct {
         task_id: u64,
         owner: principal.PrincipalId,
         loaded_from_volume: bool,
-    ) Service {
-        return checkpoint_support.makeService(Service, checkpoint_store, service_id, task_id, owner, loaded_from_volume);
+    ) StorageCore {
+        return checkpoint_support.makeService(StorageCore, checkpoint_store, service_id, task_id, owner, loaded_from_volume);
     }
 
     pub fn reloadFromAttachedVolume(
@@ -57,10 +66,10 @@ pub const Service = struct {
         task_id: u64,
         owner: principal.PrincipalId,
         checkpoint_store: *CheckpointStore,
-    ) Service {
+    ) StorageCore {
         checkpoint_store.resetPreparedState();
         const loaded_from_volume = checkpoint_store.loadPreparedStateFromAttachedVolume();
-        return checkpoint_support.makeService(Service, checkpoint_store, service_id, task_id, owner, loaded_from_volume);
+        return checkpoint_support.makeService(StorageCore, checkpoint_store, service_id, task_id, owner, loaded_from_volume);
     }
 
     pub fn checkpoint(self: *const Service) void {
@@ -229,14 +238,21 @@ pub const Service = struct {
     }
 
     pub fn bridgeResolve(
-        self: *Service,
+        self: *StorageCore,
         request: file_bridge.ResolveRequest,
-        requester: principal.PrincipalId,
-        authority_capability_id: u64,
-        now_ticks: u64,
+        authority: AuthorityContext,
     ) file_bridge.Error!file_bridge.View {
-        var compat_bridge = self.bridge() orelse return error.CapabilityRequired;
-        return compat_bridge.resolve(request, requester, authority_capability_id, now_ticks);
+        const capability_table = self.capability_table orelse return error.CapabilityRequired;
+        var port = StoragePort.init(self, capability_table);
+        return port.resolve(authority, request) catch |err| switch (err) {
+            error.CapabilityNotFound => return error.CapabilityNotFound,
+            error.CapabilityRequired => return error.CapabilityRequired,
+            error.CapabilityRevoked => return error.CapabilityRevoked,
+            error.ObjectMissing => return error.ObjectMissing,
+            error.PermissionDenied => return error.PermissionDenied,
+            error.WorkspaceScopeViolation => return error.WorkspaceScopeViolation,
+            else => return error.PathNotFound,
+        };
     }
 
     pub fn object(self: *const Service, object_id: u64) ?*const object_store.ObjectRecord {
@@ -319,14 +335,238 @@ pub const Service = struct {
     }
 };
 
+pub const Service = StorageCore;
+
+pub const StoragePort = struct {
+    core: *StorageCore,
+    capability_table: *const capability.CapabilityTable,
+
+    pub fn init(core: *StorageCore, capability_table: *const capability.CapabilityTable) StoragePort {
+        core.bindCapabilityTable(capability_table);
+        return .{
+            .core = core,
+            .capability_table = capability_table,
+        };
+    }
+
+    pub fn putVersion(self: *StoragePort, authority: AuthorityContext, request: object_store.PutRequest) (AuthorityError || object_store.Error)!object_store.PutResult {
+        _ = try self.requireStorageAuthority(authority, null, .write);
+        return self.core.putVersion(request);
+    }
+
+    pub fn putVersionRef(self: *StoragePort, authority: AuthorityContext, request: *const object_store.PutRequest) (AuthorityError || object_store.Error)!object_store.PutResult {
+        _ = try self.requireStorageAuthority(authority, null, .write);
+        return self.core.putVersionRef(request);
+    }
+
+    pub fn createWorkspace(self: *StoragePort, authority: AuthorityContext, request: workspace.CreateRequest) (AuthorityError || workspace.Error)!*workspace.WorkspaceRecord {
+        _ = try self.requireStorageAuthority(authority, null, .write);
+        return self.core.createWorkspace(request);
+    }
+
+    pub fn createWorkspaceRef(self: *StoragePort, authority: AuthorityContext, request: *const workspace.CreateRequest) (AuthorityError || workspace.Error)!*workspace.WorkspaceRecord {
+        _ = try self.requireStorageAuthority(authority, null, .write);
+        return self.core.createWorkspaceRef(request);
+    }
+
+    pub fn beginTransaction(self: *StoragePort, authority: AuthorityContext, workspace_id: u64) (AuthorityError || workspace.Error)!void {
+        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
+        return self.core.beginTransaction(workspace_id);
+    }
+
+    pub fn stagePut(
+        self: *StoragePort,
+        authority: AuthorityContext,
+        workspace_id: u64,
+        path: []const u8,
+        object_id: u64,
+        version_id: u64,
+        object_type: object_store.ObjectType,
+    ) (AuthorityError || workspace.Error)!void {
+        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
+        return self.core.stagePut(workspace_id, path, object_id, version_id, object_type);
+    }
+
+    pub fn stageDelete(self: *StoragePort, authority: AuthorityContext, workspace_id: u64, path: []const u8) (AuthorityError || workspace.Error)!void {
+        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
+        return self.core.stageDelete(workspace_id, path);
+    }
+
+    pub fn commit(self: *StoragePort, authority: AuthorityContext, workspace_id: u64) (AuthorityError || workspace.Error)!u32 {
+        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
+        return self.core.commit(workspace_id, authority.now_ticks);
+    }
+
+    pub fn snapshot(
+        self: *StoragePort,
+        authority: AuthorityContext,
+        workspace_id: u64,
+        label: []const u8,
+        identity: signing.SignerIdentity,
+    ) (AuthorityError || workspace.Error)!*workspace.SnapshotRecord {
+        _ = try self.requireStorageAuthority(authority, workspace_id, .read);
+        return self.core.snapshot(workspace_id, label, identity);
+    }
+
+    pub fn restore(self: *StoragePort, authority: AuthorityContext, workspace_id: u64, snapshot_id: u64) (AuthorityError || workspace.Error)!u32 {
+        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
+        return self.core.restore(workspace_id, snapshot_id, authority.now_ticks);
+    }
+
+    pub fn restoreFromExportPackage(
+        self: *StoragePort,
+        authority: AuthorityContext,
+        workspace_id: u64,
+        package: *const workspace.ExportPackage,
+    ) (AuthorityError || workspace.Error)!u32 {
+        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
+        return self.core.restoreFromExportPackage(workspace_id, package, authority.now_ticks);
+    }
+
+    pub fn recoverDeleted(self: *StoragePort, authority: AuthorityContext, workspace_id: u64, path: []const u8) (AuthorityError || workspace.Error)!bool {
+        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
+        return self.core.recoverDeleted(workspace_id, path, authority.now_ticks);
+    }
+
+    pub fn importWorkspace(
+        self: *StoragePort,
+        authority: AuthorityContext,
+        owner: principal.PrincipalId,
+        label: []const u8,
+        package: workspace.ExportPackage,
+    ) (AuthorityError || workspace.Error)!*workspace.WorkspaceRecord {
+        _ = try self.requireStorageAuthority(authority, null, .write);
+        return self.core.importWorkspace(owner, label, package, authority.now_ticks);
+    }
+
+    pub fn importWorkspaceFromPackage(
+        self: *StoragePort,
+        authority: AuthorityContext,
+        owner: principal.PrincipalId,
+        label: []const u8,
+        package: *const workspace.ExportPackage,
+    ) (AuthorityError || workspace.Error)!*workspace.WorkspaceRecord {
+        _ = try self.requireStorageAuthority(authority, null, .write);
+        return self.core.importWorkspaceFromPackage(owner, label, package, authority.now_ticks);
+    }
+
+    pub fn shareWorkspace(self: *StoragePort, authority: AuthorityContext, workspace_id: u64, request: workspace.ShareRequest) (AuthorityError || workspace.Error)!void {
+        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
+        return self.core.shareWorkspace(workspace_id, request);
+    }
+
+    pub fn resolve(self: *StoragePort, authority: AuthorityContext, request: file_bridge.ResolveRequest) (AuthorityError || workspace.Error)!file_bridge.View {
+        _ = try self.requireStorageAuthority(authority, request.workspace_id, request.access);
+        var bridge = file_bridge.Bridge.init(self.core, self.capability_table, bridgeResolveEntry, bridgeHasVersion);
+        return bridge.resolve(request, authority.principal, authority.capability_id, authority.now_ticks);
+    }
+
+    fn requireStorageAuthority(
+        self: *const StoragePort,
+        authority_context: AuthorityContext,
+        workspace_id: ?u64,
+        access: file_bridge.AccessMode,
+    ) AuthorityError!*const capability.Capability {
+        const authority = self.capability_table.requireUsable(authority_context.capability_id, authority_context.now_ticks) catch |err| switch (err) {
+            error.CapabilityNotFound => return error.CapabilityNotFound,
+            error.CapabilityRevoked => return error.CapabilityRevoked,
+            else => unreachable,
+        };
+        if (!authority.holder.eql(authority_context.principal)) return error.PermissionDenied;
+        if (authority.scope.task_id) |scoped_task_id| {
+            if (scoped_task_id != authority_context.task_id) return error.PermissionDenied;
+        }
+        if (workspace_id) |requested_workspace_id| {
+            if (authority.scope.workspace_id) |scoped_workspace_id| {
+                if (scoped_workspace_id != requested_workspace_id) return error.WorkspaceScopeViolation;
+            }
+        }
+        switch (authority.target.kind) {
+            .service => if (authority.target.id != self.core.service_id) return error.CapabilityRequired,
+            .workspace => if (workspace_id == null or authority.target.id != workspace_id.?) return error.WorkspaceScopeViolation,
+            .object => if (access == .write) return error.PermissionDenied,
+            else => return error.CapabilityRequired,
+        }
+        if (access == .write and !authority.rights.object_write) return error.PermissionDenied;
+        if (access == .read and !authority.rights.object_read) return error.PermissionDenied;
+        return authority;
+    }
+};
+
 fn bridgeResolveEntry(context: *const anyopaque, workspace_id: u64, path: []const u8) workspace.Error!workspace.Entry {
-    const service: *const Service = @ptrCast(@alignCast(context));
+    const service: *const StorageCore = @ptrCast(@alignCast(context));
     return service.resolve(workspace_id, path);
 }
 
 fn bridgeHasVersion(context: *const anyopaque, version_id: u64) bool {
-    const service: *const Service = @ptrCast(@alignCast(context));
+    const service: *const StorageCore = @ptrCast(@alignCast(context));
     return service.version(version_id) != null;
+}
+
+test "storage port requires authority context for protected mutations" {
+    var checkpoint_store = CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    defer checkpoint_store.resetPersistent();
+
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 47 };
+    const actor = principal.PrincipalId{ .kind = .user, .serial = 7 };
+    var core = StorageCore.initWithStore(703, 20, owner, &checkpoint_store);
+    var capabilities = capability.CapabilityTable.init();
+    var port = StoragePort.init(&core, &capabilities);
+
+    const read_only = try capabilities.mintBootRoot(.{
+        .holder = actor,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = core.service_id },
+        .rights = .{ .object_read = true },
+        .scope = .{ .task_id = 20, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    const writer = try capabilities.mintBootRoot(.{
+        .holder = actor,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = core.service_id },
+        .rights = .{ .object_read = true, .object_write = true },
+        .scope = .{ .task_id = 20, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0xA7} ** 32,
+    };
+    const request = object_store.PutRequest{
+        .preferred_object_id = 953,
+        .object_type = .document,
+        .payload = "authorized",
+        .metadata = try object_store.signMetadata(signer, "authorized", "text/plain", .document, "authorized", 10),
+    };
+
+    try std.testing.expectError(error.PermissionDenied, port.putVersion(.{
+        .task_id = 20,
+        .principal = actor,
+        .capability_id = read_only.id,
+        .now_ticks = 10,
+    }, request));
+
+    const result = try port.putVersion(.{
+        .task_id = 20,
+        .principal = actor,
+        .capability_id = writer.id,
+        .now_ticks = 10,
+    }, request);
+    try std.testing.expectEqual(@as(u64, 953), result.object_id);
+
+    try std.testing.expectError(error.PermissionDenied, port.createWorkspace(.{
+        .task_id = 21,
+        .principal = actor,
+        .capability_id = writer.id,
+        .now_ticks = 10,
+    }, .{
+        .owner = actor,
+        .label = "denied-task",
+    }));
 }
 
 test "storage service retains authoritative object and workspace state across restart" {
