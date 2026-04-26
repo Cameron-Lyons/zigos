@@ -2,6 +2,7 @@ const std = @import("std");
 const principal = @import("../core/principal.zig");
 
 pub const MAX_CAPABILITIES: usize = 128;
+pub const CAPABILITY_INDEX_CAPACITY: usize = MAX_CAPABILITIES * 2;
 pub const MAX_TARGET_GENERATIONS: usize = 64;
 pub const MAX_GRANT_PLAN_ENTRIES: usize = 16;
 
@@ -65,7 +66,23 @@ pub const CapabilityRights = packed struct(u32) {
         const needed: u32 = @bitCast(requested);
         return (owned & needed) == needed;
     }
+
+    pub fn intersects(self: CapabilityRights, other: CapabilityRights) bool {
+        const left: u32 = @bitCast(self);
+        const right: u32 = @bitCast(other);
+        return (left & right) != 0;
+    }
+
+    pub fn unionWith(self: CapabilityRights, other: CapabilityRights) CapabilityRights {
+        const left: u32 = @bitCast(self);
+        const right: u32 = @bitCast(other);
+        return @bitCast(left | right);
+    }
 };
+
+pub fn rightsAreValidForTarget(target: CapabilityTarget, rights: CapabilityRights) bool {
+    return allowedRightsForTarget(target.kind).containsAll(rights);
+}
 
 pub const CapabilityScope = struct {
     task_id: ?u64 = null,
@@ -173,6 +190,7 @@ pub const PassRequest = struct {
 pub const Error = error{
     CapabilityNotFound,
     CapabilityRevoked,
+    InvalidCapabilityRights,
     LeaseEscalation,
     RightsEscalation,
     ScopeEscalation,
@@ -185,6 +203,8 @@ const CapabilitySlot = struct {
     in_use: bool = false,
     capability: Capability = zeroCapability(),
     target_generation_index: u8 = 0,
+    next_holder_index: ?usize = null,
+    next_target_index: ?usize = null,
 };
 
 const TargetGeneration = struct {
@@ -193,9 +213,33 @@ const TargetGeneration = struct {
     generation: u32 = 1,
 };
 
+const IndexState = enum(u8) {
+    empty,
+    filled,
+    tombstone,
+};
+
+const IdIndexSlot = struct {
+    state: IndexState = .empty,
+    id: u64 = 0,
+    slot_index: usize = 0,
+};
+
+const GrantReservation = struct {
+    entry_count: usize = 0,
+    slot_indexes: [MAX_GRANT_PLAN_ENTRIES]usize = [_]usize{0} ** MAX_GRANT_PLAN_ENTRIES,
+    target_generation_indexes: [MAX_GRANT_PLAN_ENTRIES]u8 = [_]u8{0} ** MAX_GRANT_PLAN_ENTRIES,
+    new_target_count: usize = 0,
+    new_target_indexes: [MAX_GRANT_PLAN_ENTRIES]u8 = [_]u8{0} ** MAX_GRANT_PLAN_ENTRIES,
+    new_targets: [MAX_GRANT_PLAN_ENTRIES]CapabilityTarget = [_]CapabilityTarget{.{ .kind = .task, .id = 0 }} ** MAX_GRANT_PLAN_ENTRIES,
+};
+
 pub const CapabilityTable = struct {
     next_capability_id: u64 = 1,
     slots: [MAX_CAPABILITIES]CapabilitySlot = [_]CapabilitySlot{CapabilitySlot{}} ** MAX_CAPABILITIES,
+    capability_index_slots: [CAPABILITY_INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(CAPABILITY_INDEX_CAPACITY),
+    holder_index_slots: [CAPABILITY_INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(CAPABILITY_INDEX_CAPACITY),
+    target_index_slots: [CAPABILITY_INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(CAPABILITY_INDEX_CAPACITY),
     target_generations: [MAX_TARGET_GENERATIONS]TargetGeneration = [_]TargetGeneration{TargetGeneration{}} ** MAX_TARGET_GENERATIONS,
 
     pub fn init() CapabilityTable {
@@ -208,13 +252,49 @@ pub const CapabilityTable = struct {
 
     pub fn applyGrantPlan(self: *CapabilityTable, plan: *const GrantPlan, output: []Capability) Error![]Capability {
         if (output.len < plan.entry_count) return error.TableFull;
-        for (plan.slice(), 0..) |entry, index| {
-            output[index] = try self.mintFromGrantPlan(entry.request);
-        }
+        const reservation = try self.reserveGrantPlan(plan);
+        self.commitGrantPlan(plan, reservation, output);
         return output[0..plan.entry_count];
     }
 
+    pub fn rollbackGrant(self: *CapabilityTable, capabilities: []const Capability) void {
+        for (capabilities) |minted| {
+            self.discard(minted.id);
+        }
+    }
+
+    pub fn queryByHolder(self: *const CapabilityTable, holder: principal.PrincipalId, output: []Capability) []Capability {
+        var count: usize = 0;
+        var next_index = self.indexedHead(&self.holder_index_slots, holderKey(holder));
+        while (next_index) |slot_index| {
+            const slot = &self.slots[slot_index];
+            if (slot.in_use and slot.capability.holder.eql(holder)) {
+                if (count >= output.len) break;
+                output[count] = slot.capability;
+                count += 1;
+            }
+            next_index = slot.next_holder_index;
+        }
+        return output[0..count];
+    }
+
+    pub fn queryByTarget(self: *const CapabilityTable, target: CapabilityTarget, output: []Capability) []Capability {
+        var count: usize = 0;
+        var next_index = self.indexedHead(&self.target_index_slots, targetKey(target));
+        while (next_index) |slot_index| {
+            const slot = &self.slots[slot_index];
+            if (slot.in_use and slot.capability.target.eql(target)) {
+                if (count >= output.len) break;
+                output[count] = slot.capability;
+                count += 1;
+            }
+            next_index = slot.next_target_index;
+        }
+        return output[0..count];
+    }
+
     fn mintFromGrantPlan(self: *CapabilityTable, request: MintRequest) Error!Capability {
+        if (!rightsAreValidForTarget(request.target, request.rights)) return error.InvalidCapabilityRights;
         const target_generation_index = try self.ensureTargetGenerationIndex(request.target);
         return self.insert(.{
             .id = self.allocateCapabilityId(),
@@ -235,6 +315,7 @@ pub const CapabilityTable = struct {
         if (!self.isUsableSlot(parent_slot, request.lease.issued_at_ticks)) return error.CapabilityRevoked;
         if (!parent.rights.capability_derive) return error.RightsEscalation;
         if (!parent.rights.containsAll(request.rights)) return error.RightsEscalation;
+        if (!rightsAreValidForTarget(parent.target, request.rights)) return error.InvalidCapabilityRights;
         if (!request.scope.isSubsetOf(parent.scope)) return error.ScopeEscalation;
         if (!request.lease.isSubsetOf(parent.lease)) return error.LeaseEscalation;
 
@@ -272,8 +353,8 @@ pub const CapabilityTable = struct {
         }, original_slot.target_generation_index);
 
         if (request.revoke_source) {
-            const source_slot = self.findSlot(request.capability_id) orelse return error.CapabilityNotFound;
-            source_slot.in_use = false;
+            const source_slot_index = self.findSlotIndex(request.capability_id) orelse return error.CapabilityNotFound;
+            self.removeSlot(source_slot_index);
         }
 
         return passed;
@@ -282,7 +363,7 @@ pub const CapabilityTable = struct {
     pub fn revoke(self: *CapabilityTable, capability_id: u64) Error!void {
         const slot = self.findSlot(capability_id) orelse return error.CapabilityNotFound;
         const target_generation_index = slot.target_generation_index;
-        slot.in_use = false;
+        self.discard(capability_id);
         self.targetGenerationAtMut(target_generation_index).generation += 1;
     }
 
@@ -317,17 +398,22 @@ pub const CapabilityTable = struct {
     }
 
     fn insert(self: *CapabilityTable, capability: Capability, target_generation_index: u8) Error!Capability {
-        for (&self.slots) |*slot| {
+        for (&self.slots, 0..) |*slot, slot_index| {
             if (slot.in_use) continue;
             slot.in_use = true;
             slot.capability = capability;
             slot.target_generation_index = target_generation_index;
+            self.indexSlot(slot_index);
             return capability;
         }
         return error.TableFull;
     }
 
     fn findSlot(self: *CapabilityTable, capability_id: u64) ?*CapabilitySlot {
+        if (indexLookup(CAPABILITY_INDEX_CAPACITY, &self.capability_index_slots, capability_id)) |slot_index| {
+            const slot = &self.slots[slot_index];
+            if (slot.in_use and slot.capability.id == capability_id) return slot;
+        }
         for (&self.slots) |*slot| {
             if (slot.in_use and slot.capability.id == capability_id) return slot;
         }
@@ -335,6 +421,10 @@ pub const CapabilityTable = struct {
     }
 
     fn findConstSlot(self: *const CapabilityTable, capability_id: u64) ?*const CapabilitySlot {
+        if (indexLookup(CAPABILITY_INDEX_CAPACITY, &self.capability_index_slots, capability_id)) |slot_index| {
+            const slot = &self.slots[slot_index];
+            if (slot.in_use and slot.capability.id == capability_id) return slot;
+        }
         for (&self.slots) |*slot| {
             if (slot.in_use and slot.capability.id == capability_id) return slot;
         }
@@ -376,7 +466,287 @@ pub const CapabilityTable = struct {
         }
         return 1;
     }
+
+    fn reserveGrantPlan(self: *const CapabilityTable, plan: *const GrantPlan) Error!GrantReservation {
+        var reservation = GrantReservation{ .entry_count = plan.entry_count };
+        for (plan.slice(), 0..) |entry, index| {
+            if (!rightsAreValidForTarget(entry.request.target, entry.request.rights)) return error.InvalidCapabilityRights;
+            reservation.slot_indexes[index] = try self.reserveCapabilitySlot(&reservation, index);
+            reservation.target_generation_indexes[index] = try self.reserveTargetGeneration(entry.request.target, &reservation);
+        }
+        return reservation;
+    }
+
+    fn commitGrantPlan(
+        self: *CapabilityTable,
+        plan: *const GrantPlan,
+        reservation: GrantReservation,
+        output: []Capability,
+    ) void {
+        var new_target_index: usize = 0;
+        while (new_target_index < reservation.new_target_count) : (new_target_index += 1) {
+            const table_index = reservation.new_target_indexes[new_target_index];
+            self.target_generations[table_index] = .{
+                .in_use = true,
+                .target = reservation.new_targets[new_target_index],
+                .generation = 1,
+            };
+        }
+
+        for (plan.slice(), 0..) |entry, index| {
+            const capability = Capability{
+                .id = self.allocateCapabilityId(),
+                .holder = entry.request.holder,
+                .issuer = entry.request.issuer,
+                .target = entry.request.target,
+                .rights = entry.request.rights,
+                .scope = entry.request.scope,
+                .lease = entry.request.lease,
+                .revocation_generation = self.targetGenerationAt(reservation.target_generation_indexes[index]).generation,
+                .audit = entry.request.audit,
+            };
+            const slot_index = reservation.slot_indexes[index];
+            self.slots[slot_index] = .{
+                .in_use = true,
+                .capability = capability,
+                .target_generation_index = reservation.target_generation_indexes[index],
+            };
+            self.indexSlot(slot_index);
+            output[index] = capability;
+        }
+    }
+
+    fn reserveCapabilitySlot(self: *const CapabilityTable, reservation: *const GrantReservation, used_count: usize) Error!usize {
+        for (self.slots, 0..) |slot, slot_index| {
+            if (slot.in_use) continue;
+            if (reservationContainsSlot(reservation, used_count, slot_index)) continue;
+            return slot_index;
+        }
+        return error.TableFull;
+    }
+
+    fn reserveTargetGeneration(self: *const CapabilityTable, target: CapabilityTarget, reservation: *GrantReservation) Error!u8 {
+        if (self.findTargetGenerationIndex(target)) |index| return index;
+
+        var reserved_index: usize = 0;
+        while (reserved_index < reservation.new_target_count) : (reserved_index += 1) {
+            if (reservation.new_targets[reserved_index].eql(target)) {
+                return reservation.new_target_indexes[reserved_index];
+            }
+        }
+
+        for (self.target_generations, 0..) |entry, index| {
+            if (entry.in_use) continue;
+            if (reservationContainsTargetGeneration(reservation, @intCast(index))) continue;
+            if (reservation.new_target_count >= reservation.new_target_indexes.len) return error.TargetTableFull;
+            reservation.new_target_indexes[reservation.new_target_count] = @intCast(index);
+            reservation.new_targets[reservation.new_target_count] = target;
+            reservation.new_target_count += 1;
+            return @intCast(index);
+        }
+
+        return error.TargetTableFull;
+    }
+
+    fn findTargetGenerationIndex(self: *const CapabilityTable, target: CapabilityTarget) ?u8 {
+        for (self.target_generations, 0..) |entry, index| {
+            if (entry.in_use and entry.target.eql(target)) return @intCast(index);
+        }
+        return null;
+    }
+
+    fn discard(self: *CapabilityTable, capability_id: u64) void {
+        const slot_index = self.findSlotIndex(capability_id) orelse return;
+        self.removeSlot(slot_index);
+    }
+
+    fn findSlotIndex(self: *const CapabilityTable, capability_id: u64) ?usize {
+        if (indexLookup(CAPABILITY_INDEX_CAPACITY, &self.capability_index_slots, capability_id)) |slot_index| {
+            const slot = &self.slots[slot_index];
+            if (slot.in_use and slot.capability.id == capability_id) return slot_index;
+        }
+        for (self.slots, 0..) |slot, slot_index| {
+            if (slot.in_use and slot.capability.id == capability_id) return slot_index;
+        }
+        return null;
+    }
+
+    fn removeSlot(self: *CapabilityTable, slot_index: usize) void {
+        if (slot_index >= self.slots.len or !self.slots[slot_index].in_use) return;
+        const removed = self.slots[slot_index].capability;
+        indexRemove(CAPABILITY_INDEX_CAPACITY, &self.capability_index_slots, removed.id);
+        self.unlinkHolder(slot_index, holderKey(removed.holder));
+        self.unlinkTarget(slot_index, targetKey(removed.target));
+        self.slots[slot_index] = CapabilitySlot{};
+    }
+
+    fn indexSlot(self: *CapabilityTable, slot_index: usize) void {
+        const cap = self.slots[slot_index].capability;
+        indexInsert(CAPABILITY_INDEX_CAPACITY, &self.capability_index_slots, cap.id, slot_index);
+
+        const holder_key = holderKey(cap.holder);
+        self.slots[slot_index].next_holder_index = self.indexedHead(&self.holder_index_slots, holder_key);
+        indexInsert(CAPABILITY_INDEX_CAPACITY, &self.holder_index_slots, holder_key, slot_index);
+
+        const target_key = targetKey(cap.target);
+        self.slots[slot_index].next_target_index = self.indexedHead(&self.target_index_slots, target_key);
+        indexInsert(CAPABILITY_INDEX_CAPACITY, &self.target_index_slots, target_key, slot_index);
+    }
+
+    fn indexedHead(self: *const CapabilityTable, table: *const [CAPABILITY_INDEX_CAPACITY]IdIndexSlot, key: u64) ?usize {
+        _ = self;
+        return indexLookup(CAPABILITY_INDEX_CAPACITY, table, key);
+    }
+
+    fn unlinkHolder(self: *CapabilityTable, slot_index: usize, key: u64) void {
+        self.unlinkChain(slot_index, key, &self.holder_index_slots, true);
+    }
+
+    fn unlinkTarget(self: *CapabilityTable, slot_index: usize, key: u64) void {
+        self.unlinkChain(slot_index, key, &self.target_index_slots, false);
+    }
+
+    fn unlinkChain(
+        self: *CapabilityTable,
+        slot_index: usize,
+        key: u64,
+        index_table: *[CAPABILITY_INDEX_CAPACITY]IdIndexSlot,
+        comptime holder_chain: bool,
+    ) void {
+        var previous: ?usize = null;
+        var current = indexLookup(CAPABILITY_INDEX_CAPACITY, index_table, key);
+        while (current) |current_index| {
+            const next = if (holder_chain)
+                self.slots[current_index].next_holder_index
+            else
+                self.slots[current_index].next_target_index;
+            if (current_index == slot_index) {
+                if (previous) |previous_index| {
+                    if (holder_chain) {
+                        self.slots[previous_index].next_holder_index = next;
+                    } else {
+                        self.slots[previous_index].next_target_index = next;
+                    }
+                } else if (next) |next_index| {
+                    indexInsert(CAPABILITY_INDEX_CAPACITY, index_table, key, next_index);
+                } else {
+                    indexRemove(CAPABILITY_INDEX_CAPACITY, index_table, key);
+                }
+                return;
+            }
+            previous = current_index;
+            current = next;
+        }
+    }
 };
+
+fn reservationContainsSlot(reservation: *const GrantReservation, used_count: usize, slot_index: usize) bool {
+    var index: usize = 0;
+    while (index < used_count) : (index += 1) {
+        if (reservation.slot_indexes[index] == slot_index) return true;
+    }
+    return false;
+}
+
+fn reservationContainsTargetGeneration(reservation: *const GrantReservation, target_generation_index: u8) bool {
+    var index: usize = 0;
+    while (index < reservation.new_target_count) : (index += 1) {
+        if (reservation.new_target_indexes[index] == target_generation_index) return true;
+    }
+    return false;
+}
+
+fn emptyIndexTable(comptime capacity: usize) [capacity]IdIndexSlot {
+    return [_]IdIndexSlot{IdIndexSlot{}} ** capacity;
+}
+
+fn indexLookup(comptime capacity: usize, table: *const [capacity]IdIndexSlot, id: u64) ?usize {
+    if (id == 0) return null;
+
+    var index = indexHash(id, capacity);
+    var attempts: usize = 0;
+    while (attempts < capacity) : (attempts += 1) {
+        const entry = table[index];
+        switch (entry.state) {
+            .empty => return null,
+            .filled => if (entry.id == id) return entry.slot_index,
+            .tombstone => {},
+        }
+        index = (index + 1) % capacity;
+    }
+    return null;
+}
+
+fn indexInsert(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64, slot_index: usize) void {
+    if (id == 0) unreachable;
+
+    var index = indexHash(id, capacity);
+    var first_tombstone: ?usize = null;
+    var attempts: usize = 0;
+    while (attempts < capacity) : (attempts += 1) {
+        switch (table[index].state) {
+            .empty => {
+                const insert_index = first_tombstone orelse index;
+                table[insert_index] = .{
+                    .state = .filled,
+                    .id = id,
+                    .slot_index = slot_index,
+                };
+                return;
+            },
+            .filled => {
+                if (table[index].id == id) {
+                    table[index].slot_index = slot_index;
+                    return;
+                }
+            },
+            .tombstone => {
+                if (first_tombstone == null) first_tombstone = index;
+            },
+        }
+        index = (index + 1) % capacity;
+    }
+
+    unreachable;
+}
+
+fn indexRemove(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64) void {
+    if (id == 0) return;
+
+    var index = indexHash(id, capacity);
+    var attempts: usize = 0;
+    while (attempts < capacity) : (attempts += 1) {
+        switch (table[index].state) {
+            .empty => return,
+            .filled => {
+                if (table[index].id == id) {
+                    table[index].state = .tombstone;
+                    table[index].id = 0;
+                    table[index].slot_index = 0;
+                    return;
+                }
+            },
+            .tombstone => {},
+        }
+        index = (index + 1) % capacity;
+    }
+}
+
+fn indexHash(id: u64, comptime capacity: usize) usize {
+    return @as(usize, @intCast((id *% 0x9E37_79B9_7F4A_7C15) % capacity));
+}
+
+fn holderKey(holder: principal.PrincipalId) u64 {
+    return nonZeroKey((@as(u64, @intFromEnum(holder.kind)) << 56) ^ holder.serial);
+}
+
+fn targetKey(target: CapabilityTarget) u64 {
+    return nonZeroKey((@as(u64, @intFromEnum(target.kind)) << 56) ^ target.id);
+}
+
+fn nonZeroKey(key: u64) u64 {
+    return if (key == 0) 0xD1B5_4A32_D192_ED03 else key;
+}
 
 fn zeroCapability() Capability {
     return .{
@@ -426,6 +796,67 @@ fn scopeIsPassCompatible(next_scope: CapabilityScope, original_scope: Capability
     if (original_scope.local_only and !next_scope.local_only) return false;
     if (original_scope.broker_only and !next_scope.broker_only) return false;
     return true;
+}
+
+fn allowedRightsForTarget(kind: CapabilityTargetKind) CapabilityRights {
+    const common = capabilityDelegationRights();
+    return switch (kind) {
+        .task => common.unionWith(.{
+            .task_create = true,
+            .task_terminate = true,
+            .time_query = true,
+            .resource_query = true,
+            .accounting_query = true,
+            .background_run = true,
+            .notification_post = true,
+        }),
+        .endpoint => common.unionWith(.{
+            .endpoint_create = true,
+            .endpoint_connect = true,
+            .endpoint_send = true,
+            .endpoint_recv = true,
+            .ipc_peer = true,
+        }),
+        .shared_memory => common.unionWith(.{
+            .shared_memory_create = true,
+            .shared_memory_map = true,
+            .shared_memory_unmap = true,
+            .shared_memory_revoke = true,
+        }),
+        .object => common.unionWith(.{
+            .object_read = true,
+            .object_write = true,
+            .contacts_read = true,
+        }),
+        .device => common.unionWith(.{
+            .device_use = true,
+            .object_read = true,
+            .object_write = true,
+            .sensor_read = true,
+            .location_read = true,
+            .screen_capture = true,
+            .network_local = true,
+        }),
+        .network_policy => common.unionWith(.{
+            .network_local = true,
+            .network_remote = true,
+        }),
+        .service, .workspace, .policy => allRights(),
+    };
+}
+
+fn capabilityDelegationRights() CapabilityRights {
+    return .{
+        .capability_mint = true,
+        .capability_derive = true,
+        .capability_pass = true,
+        .capability_revoke = true,
+        .capability_query = true,
+    };
+}
+
+fn allRights() CapabilityRights {
+    return @bitCast(@as(u32, std.math.maxInt(u32)));
 }
 
 fn fullSessionRights() CapabilityRights {
@@ -519,6 +950,33 @@ test "derive rejects rights and scope escalation" {
         },
         .scope = .{ .workspace_id = 3, .local_only = false },
         .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 10, .renewable = false },
+    }));
+}
+
+test "mint rejects rights that do not match concrete target kind" {
+    var table = CapabilityTable.init();
+    const issuer = principal.PrincipalId{ .kind = .policy_authority, .serial = 1 };
+    const holder = principal.PrincipalId{ .kind = .service, .serial = 7 };
+
+    try std.testing.expect(rightsAreValidForTarget(
+        .{ .kind = .object, .id = 3 },
+        .{ .object_read = true, .capability_query = true },
+    ));
+    try std.testing.expect(!rightsAreValidForTarget(
+        .{ .kind = .object, .id = 3 },
+        .{ .object_read = true, .network_remote = true },
+    ));
+
+    try std.testing.expectError(error.InvalidCapabilityRights, table.mintBootRoot(.{
+        .holder = holder,
+        .issuer = issuer,
+        .target = .{ .kind = .object, .id = 3 },
+        .rights = .{
+            .object_read = true,
+            .network_remote = true,
+        },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 50, .renewable = false },
     }));
 }
 

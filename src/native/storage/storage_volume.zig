@@ -587,7 +587,8 @@ fn encodeVersionBody(writer: *CursorWriter, record: object_store.VersionRecord) 
     try writer.writeU64(record.object_id);
     try writer.writeU64(record.previous_version_id);
     try writer.writeByte(@intFromEnum(record.object_type));
-    try writer.writeBytes(&record.address);
+    try writer.writeBytes(&record.blob_address);
+    try writer.writeBytes(&record.version_address);
     try writeMetadata(writer, record.metadata);
     try writer.writeU16(@intCast(record.payload_len));
     try writer.writeBytes(record.payloadSlice());
@@ -656,7 +657,8 @@ fn applyVersionRecord(store: *object_store.Store, payload: []const u8) Error!voi
     store.versions[slot_index].version.object_id = try reader.readU64();
     store.versions[slot_index].version.previous_version_id = try reader.readU64();
     store.versions[slot_index].version.object_type = try parseObjectType(try reader.readByte());
-    try reader.readBytes(&store.versions[slot_index].version.address);
+    try reader.readBytes(&store.versions[slot_index].version.blob_address);
+    try reader.readBytes(&store.versions[slot_index].version.version_address);
     store.versions[slot_index].version.metadata = try readMetadata(&reader, &version_signers[slot_index]);
     store.versions[slot_index].version.payload_len = @intCast(try reader.readU16());
     if (store.versions[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
@@ -750,7 +752,8 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
         try writer.writeU64(slot.version.object_id);
         try writer.writeU64(slot.version.previous_version_id);
         try writer.writeByte(@intFromEnum(slot.version.object_type));
-        try writer.writeBytes(&slot.version.address);
+        try writer.writeBytes(&slot.version.blob_address);
+        try writer.writeBytes(&slot.version.version_address);
         try writeMetadata(&writer, slot.version.metadata);
         try writer.writeU16(@intCast(slot.version.payload_len));
         try writer.writeBytes(slot.version.payloadSlice());
@@ -835,7 +838,8 @@ fn deserializeState(store: *object_store.Store, workspaces: *workspace.Directory
         store.versions[slot_index].version.object_id = try reader.readU64();
         store.versions[slot_index].version.previous_version_id = try reader.readU64();
         store.versions[slot_index].version.object_type = try parseObjectType(try reader.readByte());
-        try reader.readBytes(&store.versions[slot_index].version.address);
+        try reader.readBytes(&store.versions[slot_index].version.blob_address);
+        try reader.readBytes(&store.versions[slot_index].version.version_address);
         store.versions[slot_index].version.metadata = try readMetadata(&reader, &version_signers[slot_index]);
         store.versions[slot_index].version.payload_len = @intCast(try reader.readU16());
         if (store.versions[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;

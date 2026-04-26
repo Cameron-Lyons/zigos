@@ -22,7 +22,8 @@ pub const ObjectType = enum(u8) {
     event_stream,
 };
 
-pub const ContentAddress = [32]u8;
+pub const BlobAddress = [32]u8;
+pub const VersionAddress = [32]u8;
 
 pub const SignedMetadata = struct {
     signature: manifest.Signature = .{},
@@ -81,7 +82,8 @@ pub const PutRequest = struct {
 pub const PutResult = struct {
     object_id: u64,
     version_id: u64,
-    address: ContentAddress,
+    blob_address: BlobAddress,
+    version_address: VersionAddress,
     new_object: bool,
 };
 
@@ -97,7 +99,8 @@ pub const VersionRecord = struct {
     object_id: u64,
     previous_version_id: u64,
     object_type: ObjectType,
-    address: ContentAddress,
+    blob_address: BlobAddress,
+    version_address: VersionAddress,
     metadata: SignedMetadata,
     payload_len: usize,
     payload: [MAX_PAYLOAD_BYTES]u8,
@@ -138,7 +141,8 @@ const VersionSlot = struct {
         .object_id = 0,
         .previous_version_id = 0,
         .object_type = .blob,
-        .address = [_]u8{0} ** 32,
+        .blob_address = [_]u8{0} ** 32,
+        .version_address = [_]u8{0} ** 32,
         .metadata = .{},
         .payload_len = 0,
         .payload = [_]u8{0} ** MAX_PAYLOAD_BYTES,
@@ -244,13 +248,15 @@ pub const Store = struct {
         }
 
         const version_id = self.nextVersionId();
-        const address = computeAddress(object_record.id, request.object_type, previous_version_id, request.payload, request.metadata);
+        const blob_address = computeBlobAddress(request.payload);
+        const version_address = computeVersionAddress(previous_version_id, request.metadata, blob_address);
         try self.insertVersion(.{
             .id = version_id,
             .object_id = object_record.id,
             .previous_version_id = previous_version_id,
             .object_type = request.object_type,
-            .address = address,
+            .blob_address = blob_address,
+            .version_address = version_address,
             .metadata = &request.metadata,
             .payload = request.payload,
         });
@@ -261,7 +267,8 @@ pub const Store = struct {
         return .{
             .object_id = object_record.id,
             .version_id = version_id,
-            .address = address,
+            .blob_address = blob_address,
+            .version_address = version_address,
             .new_object = created_new_object,
         };
     }
@@ -338,7 +345,8 @@ pub const Store = struct {
         object_id: u64,
         previous_version_id: u64,
         object_type: ObjectType,
-        address: ContentAddress,
+        blob_address: BlobAddress,
+        version_address: VersionAddress,
         metadata: *const SignedMetadata,
         payload: []const u8,
     }) Error!void {
@@ -349,7 +357,8 @@ pub const Store = struct {
             slot.version.object_id = request.object_id;
             slot.version.previous_version_id = request.previous_version_id;
             slot.version.object_type = request.object_type;
-            copyBytes(slot.version.address[0..], request.address[0..]);
+            copyBytes(slot.version.blob_address[0..], request.blob_address[0..]);
+            copyBytes(slot.version.version_address[0..], request.version_address[0..]);
             writeMetadata(&slot.version.metadata, request.metadata);
             slot.version.payload_len = request.payload.len;
             copyBytes(slot.version.payload[0..request.payload.len], request.payload);
@@ -475,24 +484,26 @@ fn indexHash(id: u64, comptime capacity: usize) usize {
     return @as(usize, @intCast((id *% 0x9E37_79B9_7F4A_7C15) % capacity));
 }
 
-fn computeAddress(
-    object_id: u64,
-    object_type: ObjectType,
-    previous_version_id: u64,
-    payload: []const u8,
-    metadata: SignedMetadata,
-) ContentAddress {
+fn computeBlobAddress(payload: []const u8) BlobAddress {
     var hasher = crypto_hash.init();
-    crypto_hash.updateInt(&hasher, "object-id", object_id);
+    crypto_hash.updateBytes(&hasher, "payload", payload);
+    return crypto_hash.finalize(&hasher);
+}
+
+fn computeVersionAddress(
+    previous_version_id: u64,
+    metadata: SignedMetadata,
+    blob_address: BlobAddress,
+) VersionAddress {
+    var hasher = crypto_hash.init();
     crypto_hash.updateInt(&hasher, "previous-version-id", previous_version_id);
-    crypto_hash.updateEnum(&hasher, "object-type", object_type);
     crypto_hash.updateBytes(&hasher, "label", metadata.labelSlice());
     crypto_hash.updateBytes(&hasher, "content-type", metadata.contentTypeSlice());
     crypto_hash.updateInt(&hasher, "created-at", metadata.created_at_ticks);
     crypto_hash.updateBytes(&hasher, "signature-signer", metadata.signature.signer);
     crypto_hash.updateBytes(&hasher, "signature-public-key", metadata.signature.publicKeySlice());
     crypto_hash.updateBytes(&hasher, "signature-value", metadata.signature.valueSlice());
-    crypto_hash.updateBytes(&hasher, "payload", payload);
+    crypto_hash.updateBytes(&hasher, "blob-address", &blob_address);
     return crypto_hash.finalize(&hasher);
 }
 
@@ -536,7 +547,7 @@ fn appendBytes(buffer: []u8, offset: usize, bytes: []const u8) error{NoSpaceLeft
     return offset + bytes.len;
 }
 
-test "object store keeps immutable signed versions with stable content addresses" {
+test "object store keeps immutable signed versions with stable version addresses" {
     var store = Store.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
@@ -563,11 +574,39 @@ test "object store keeps immutable signed versions with stable content addresses
     try std.testing.expectEqual(@as(usize, 2), store.versionCount());
     try std.testing.expectEqual(@as(u64, 900), first.object_id);
     try std.testing.expectEqual(@as(u64, 900), second.object_id);
-    try std.testing.expect(!std.mem.eql(u8, &first.address, &second.address));
+    try std.testing.expect(!std.mem.eql(u8, &first.version_address, &second.version_address));
     try std.testing.expectEqualStrings("hello", store.version(first.version_id).?.payloadSlice());
     try std.testing.expectEqualStrings("hello, world", store.latestVersion(first.object_id).?.payloadSlice());
     try std.testing.expectEqual(first.version_id, store.version(second.version_id).?.previous_version_id);
     try std.testing.expectEqualStrings("zigos-storage-key", store.latestVersion(first.object_id).?.metadata.signature.signer);
+}
+
+test "object store splits blob and version addresses" {
+    var store = Store.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0x44} ** 32,
+    };
+    const metadata_v1 = try signMetadata(signer, "notes-a", "text/plain", .document, "same", 10);
+    const metadata_v2 = try signMetadata(signer, "notes-b", "text/plain", .document, "same", 11);
+
+    const first = try store.putVersion(.{
+        .preferred_object_id = 910,
+        .object_type = .document,
+        .payload = "same",
+        .metadata = metadata_v1,
+    });
+    const second = try store.putVersion(.{
+        .preferred_object_id = 911,
+        .object_type = .document,
+        .payload = "same",
+        .metadata = metadata_v2,
+    });
+
+    try std.testing.expect(std.mem.eql(u8, &first.blob_address, &second.blob_address));
+    try std.testing.expect(!std.mem.eql(u8, &first.version_address, &second.version_address));
+    try std.testing.expect(std.mem.eql(u8, &store.version(first.version_id).?.blob_address, &first.blob_address));
+    try std.testing.expect(std.mem.eql(u8, &store.version(second.version_id).?.version_address, &second.version_address));
 }
 
 test "object store supports every native object type and rejects unsigned metadata" {

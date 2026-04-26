@@ -281,7 +281,12 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
         .workspace_id = notes_workspace_id,
         .path = "/documents/notes.md",
         .access = .read,
-    }, context.notes_object_capability.holder, context.notes_object_capability.id, 94) catch unreachable;
+    }, .{
+        .task_id = context.notes_task_id,
+        .principal = context.notes_object_capability.holder,
+        .capability_id = context.notes_object_capability.id,
+        .now_ticks = 94,
+    }) catch unreachable;
     if (!bridge_view.authoritative and bridge_view.object_id == notes_object_id and
         bridge_view.version_id == notes_entry.version_id)
     {
@@ -309,7 +314,12 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
         .workspace_id = notes_workspace_id,
         .path = "documents/notes.md",
         .access = .read,
-    }, context.session_user, invalid_path_capability.id, 94)) |_| {} else |err| {
+    }, .{
+        .task_id = context.storage_task_id,
+        .principal = context.session_user,
+        .capability_id = invalid_path_capability.id,
+        .now_ticks = 94,
+    })) |_| {} else |err| {
         if (err == error.CapabilityRequired) {
             support.common.printBootMarker(boot_markers.storage_path_authority_deprecated);
         }

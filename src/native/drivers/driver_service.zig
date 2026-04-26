@@ -381,7 +381,7 @@ test "driver services reject unsigned bundles and escalated device rights" {
             .device_use = true,
             .object_read = true,
             .object_write = true,
-            .network_remote = true,
+            .sensor_read = true,
         },
         .scope = .{
             .task_id = 9,

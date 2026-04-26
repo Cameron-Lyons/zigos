@@ -13,16 +13,14 @@ pub fn orderedIndex(class: contract.ServiceClass) ?usize {
     return service_catalog.orderedServiceIndex(class);
 }
 
-test "service contract order matches the requested decomposition sequence" {
-    try std.testing.expectEqual(contract.ServiceClass.policy_mediation, ordered_service_contracts[0].class);
-    try std.testing.expectEqual(contract.ServiceClass.network_stack, ordered_service_contracts[1].class);
-    try std.testing.expectEqual(contract.ServiceClass.storage_object, ordered_service_contracts[2].class);
-    try std.testing.expectEqual(contract.ServiceClass.package_install_update, ordered_service_contracts[3].class);
-    try std.testing.expectEqual(contract.ServiceClass.compositor_ui_session, ordered_service_contracts[4].class);
-    try std.testing.expectEqual(contract.ServiceClass.indexing_search, ordered_service_contracts[5].class);
-    try std.testing.expectEqual(contract.ServiceClass.sync_replication, ordered_service_contracts[6].class);
-    try std.testing.expectEqual(contract.ServiceClass.media_print_helpers, ordered_service_contracts[7].class);
-    try std.testing.expectEqual(contract.ServiceClass.compatibility_portal, ordered_service_contracts[8].class);
+test "service contract order follows declared dependencies" {
+    try std.testing.expectEqual(contract.ServiceClass.service_registry, ordered_service_contracts[0].class);
+    try std.testing.expect(orderedIndex(.service_registry).? < orderedIndex(.policy_mediation).?);
+    try std.testing.expect(orderedIndex(.policy_mediation).? < orderedIndex(.network_stack).?);
+    try std.testing.expect(orderedIndex(.policy_mediation).? < orderedIndex(.storage_object).?);
+    try std.testing.expect(orderedIndex(.storage_object).? < orderedIndex(.package_install_update).?);
+    try std.testing.expect(orderedIndex(.network_stack).? < orderedIndex(.package_install_update).?);
+    try std.testing.expect(orderedIndex(.compositor_ui_session).? < orderedIndex(.compatibility_portal).?);
 }
 
 test "service contract interfaces remain unique and discoverable" {

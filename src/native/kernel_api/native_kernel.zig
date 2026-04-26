@@ -243,6 +243,7 @@ pub const Kernel = struct {
 
         if (message.attached_capability_id) |attached_capability_id| {
             const receiver = self.runtime.find(receiver_task_id) orelse return error.TaskNotFound;
+            try self.validateRuntimeGrant(receiver_task_id, 1);
             const original = self.capability_table.query(attached_capability_id) orelse return error.CapabilityNotFound;
             const passed = try self.capability_table.pass(.{
                 .capability_id = attached_capability_id,
@@ -257,6 +258,7 @@ pub const Kernel = struct {
                     .broker_service_id = original.audit.broker_service_id,
                 },
             });
+            errdefer self.capability_table.rollbackGrant(&.{passed});
             try self.runtime.grantCapability(receiver_task_id, passed.id);
 
             if (message.move_attached_capability) {
@@ -302,11 +304,24 @@ pub const Kernel = struct {
         plan: *const capability.GrantPlan,
         output: []capability.Capability,
     ) Error![]capability.Capability {
+        try self.validateRuntimeGrantPlan(plan);
         const minted = try self.capability_table.applyGrantPlan(plan, output);
+        var attached_count: usize = 0;
+        errdefer {
+            var revoke_index: usize = 0;
+            while (revoke_index < attached_count) : (revoke_index += 1) {
+                const entry = plan.entries[revoke_index];
+                if (entry.task_id != 0) {
+                    _ = self.runtime.revokeCapability(entry.task_id, minted[revoke_index].id) catch false;
+                }
+            }
+            self.capability_table.rollbackGrant(minted);
+        }
         for (plan.slice(), minted) |entry, granted_capability| {
             if (entry.task_id != 0) {
                 try self.runtime.grantCapability(entry.task_id, granted_capability.id);
             }
+            attached_count += 1;
         }
         return minted;
     }
@@ -328,8 +343,10 @@ pub const Kernel = struct {
         if (request.scope.task_id) |task_id| {
             const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
             if (!task.owner.eql(request.holder)) return error.PermissionDenied;
+            try self.validateRuntimeGrant(task_id, 1);
         }
         const derived = try self.capability_table.derive(request);
+        errdefer self.capability_table.rollbackGrant(&.{derived});
         if (request.scope.task_id) |task_id| {
             try self.runtime.grantCapability(task_id, derived.id);
         }
@@ -346,6 +363,7 @@ pub const Kernel = struct {
         const capability_id = context.presented_capability_id;
         _ = try self.requireOperationCapability(context, .capability_pass, now_ticks, .{ .capability_pass = true });
         const receiver = self.runtime.find(receiver_task_id) orelse return error.TaskNotFound;
+        try self.validateRuntimeGrant(receiver_task_id, 1);
         const original = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
         const passed = try self.capability_table.pass(.{
             .capability_id = capability_id,
@@ -360,6 +378,7 @@ pub const Kernel = struct {
                 .broker_service_id = original.audit.broker_service_id,
             },
         });
+        errdefer self.capability_table.rollbackGrant(&.{passed});
         try self.runtime.grantCapability(receiver_task_id, passed.id);
         if (revoke_source) {
             if (original.scope.task_id) |source_task_id| {
@@ -685,6 +704,24 @@ pub const Kernel = struct {
         if (context.operation != expected_operation) return error.UnexpectedOperation;
         if (context.caller_task_id != 0) {
             try self.requireTaskCapability(context.caller_task_id, context.presented_capability_id, now_ticks);
+        }
+    }
+
+    fn validateRuntimeGrantPlan(self: *Kernel, plan: *const capability.GrantPlan) Error!void {
+        for (plan.slice(), 0..) |entry, index| {
+            if (entry.task_id == 0) continue;
+            var planned_for_task: usize = 0;
+            for (plan.entries[0 .. index + 1]) |candidate| {
+                if (candidate.task_id == entry.task_id) planned_for_task += 1;
+            }
+            try self.validateRuntimeGrant(entry.task_id, planned_for_task);
+        }
+    }
+
+    fn validateRuntimeGrant(self: *Kernel, task_id: u64, additional_count: usize) Error!void {
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        if (task.capability_count + additional_count > task_runtime.MAX_TASK_CAPABILITIES) {
+            return error.CapabilityTableFull;
         }
     }
 };
@@ -1055,6 +1092,65 @@ test "capability mint query revoke and task termination are exposed by the nativ
     try kernel.capabilityRevoke(testContext(.capability_revoke, admin_capability.id, .{ .capability = minted.capability_id }), minted.capability_id, 10);
     try std.testing.expect(capabilities.query(minted.capability_id) == null);
     try std.testing.expect(try kernel.taskTerminate(testContext(.task_terminate, task_capability.id, .none), 11));
+}
+
+test "capability grant plan does not mint when runtime attachment cannot fit" {
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    var endpoints = endpoint.Table.init();
+    var shared = shared_memory.Table.init();
+    var kernel = Kernel.init(
+        .{ .kind = .policy_authority, .serial = 1 },
+        &runtime,
+        &capabilities,
+        &endpoints,
+        &shared,
+    );
+
+    const target_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 7 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 2,
+            .shared_memory_bytes = 1024,
+        },
+        .local_only = true,
+    });
+    const admin_capability = try capabilities.mintBootRoot(.{
+        .holder = .{ .kind = .policy_authority, .serial = 1 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .policy, .id = 1 },
+        .rights = .{ .capability_mint = true },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
+    });
+
+    var index: usize = 0;
+    while (index < task_runtime.MAX_TASK_CAPABILITIES) : (index += 1) {
+        const existing = try capabilities.mintBootRoot(.{
+            .holder = target_task.owner,
+            .issuer = .{ .kind = .policy_authority, .serial = 1 },
+            .target = .{ .kind = .object, .id = 1000 + index },
+            .rights = .{ .object_read = true },
+            .scope = .{ .task_id = target_task.id, .local_only = true },
+            .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100, .renewable = false },
+        });
+        try runtime.grantCapability(target_task.id, existing.id);
+    }
+
+    const next_capability_id = capabilities.next_capability_id;
+    try std.testing.expectError(error.CapabilityTableFull, kernel.capabilityMint(testContext(.capability_mint, admin_capability.id, .{ .policy = 1 }), .{
+        .holder = target_task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .object, .id = 55 },
+        .rights = .{ .object_read = true },
+        .scope = .{ .task_id = target_task.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100, .renewable = false },
+    }, 10));
+    try std.testing.expectEqual(next_capability_id, capabilities.next_capability_id);
+    try std.testing.expect(capabilities.query(next_capability_id) == null);
 }
 
 test "native kernel brokers device metadata and port io through device capabilities" {
