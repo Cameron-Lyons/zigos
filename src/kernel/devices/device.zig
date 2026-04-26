@@ -15,8 +15,10 @@ pub const DeviceOps = struct {
     ioctl: ?*const fn (device: *Device, request: u32, arg: usize) error_handler.Error!i32,
 };
 
+const DEVICE_NAME_BYTES: usize = 64;
+
 pub const Device = struct {
-    name: [64]u8,
+    name: [DEVICE_NAME_BYTES]u8,
     device_type: DeviceType,
     major: u16,
     minor: u16,
@@ -34,7 +36,7 @@ pub fn init() void {
 }
 
 pub fn registerDevice(name: []const u8, device_type: DeviceType, ops: DeviceOps, private_data: ?*anyopaque) error_handler.Error!*Device {
-    if (name.len >= 64) {
+    if (name.len >= DEVICE_NAME_BYTES) {
         return error_handler.Error.InvalidParameter;
     }
 
@@ -42,7 +44,7 @@ pub fn registerDevice(name: []const u8, device_type: DeviceType, ops: DeviceOps,
     const device: *Device = @ptrCast(@alignCast(device_mem));
 
     device.* = Device{
-        .name = [_]u8{0} ** 64,
+        .name = [_]u8{0} ** DEVICE_NAME_BYTES,
         .device_type = device_type,
         .major = next_major,
         .minor = 0,
@@ -80,10 +82,10 @@ pub fn findDevice(name: []const u8) ?*Device {
     var current = device_list;
     while (current) |device| {
         var i: usize = 0;
-        while (i < name.len and i < 64 and device.name[i] != 0) : (i += 1) {
+        while (i < name.len and i < DEVICE_NAME_BYTES and device.name[i] != 0) : (i += 1) {
             if (device.name[i] != name[i]) break;
         }
-        if (i == name.len and (i >= 64 or device.name[i] == 0)) {
+        if (i == name.len and (i >= DEVICE_NAME_BYTES or device.name[i] == 0)) {
             return device;
         }
         current = device.next;

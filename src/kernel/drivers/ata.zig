@@ -29,6 +29,33 @@ const ATA_SR_ERR: u8 = 0x01;
 
 const ATA_MASTER: u8 = 0xA0;
 const ATA_SLAVE: u8 = 0xB0;
+const ATA_LBA28_MASTER: u8 = 0xE0;
+const ATA_LBA28_SLAVE: u8 = 0xF0;
+const ATA_IDENTIFY_WORDS: usize = 256;
+const ATA_WORD_BYTES: usize = 2;
+const ATA_SECTOR_SIZE: usize = 512;
+const ATA_SECTOR_WORDS: usize = ATA_SECTOR_SIZE / ATA_WORD_BYTES;
+const ATA_MAX_SECTORS_PER_PIO: u8 = 128;
+const ATA_POLL_DELAY_READS: usize = 4;
+const ATA_WAIT_LIMIT: u32 = 100000;
+const ATA_MODEL_BYTES: usize = 40;
+const ATA_SERIAL_BYTES: usize = 20;
+const ATA_MODEL_BUFFER_BYTES: usize = ATA_MODEL_BYTES + 1;
+const ATA_SERIAL_BUFFER_BYTES: usize = ATA_SERIAL_BYTES + 1;
+const ATA_IDENTIFY_LBA_WORD: usize = 49;
+const ATA_IDENTIFY_LBA48_WORD: usize = 83;
+const ATA_IDENTIFY_LBA28_SECTORS_WORD: usize = 60;
+const ATA_IDENTIFY_LBA48_SECTORS_WORD: usize = 100;
+const ATA_IDENTIFY_MODEL_WORD_START: usize = 27;
+const ATA_IDENTIFY_MODEL_WORD_END: usize = 47;
+const ATA_IDENTIFY_SERIAL_WORD_START: usize = 10;
+const ATA_IDENTIFY_SERIAL_WORD_END: usize = 20;
+const ATA_IDENTIFY_LBA_SUPPORTED: u16 = 0x200;
+const ATA_IDENTIFY_LBA48_SUPPORTED: u16 = 0x400;
+const LOW_BYTE_MASK: u16 = 0xFF;
+const LOW_BYTE_MASK_U64: u64 = 0xFF;
+const LBA28_DRIVE_HEAD_MASK: u8 = 0x0F;
+const BYTE_BITS: u6 = 8;
 
 pub const ATAError = error{
     Timeout,
@@ -45,8 +72,8 @@ pub const ATADevice = struct {
     ctrl_port: u16,
     is_master: bool,
     sectors: u64,
-    model: [41]u8,
-    serial: [21]u8,
+    model: [ATA_MODEL_BUFFER_BYTES]u8,
+    serial: [ATA_SERIAL_BUFFER_BYTES]u8,
     supports_lba: bool,
     supports_lba48: bool,
 };
@@ -69,8 +96,8 @@ pub fn init() void {
         .ctrl_port = ATA_PRIMARY_CTRL,
         .is_master = true,
         .sectors = 0,
-        .model = [_]u8{0} ** 41,
-        .serial = [_]u8{0} ** 21,
+        .model = [_]u8{0} ** ATA_MODEL_BUFFER_BYTES,
+        .serial = [_]u8{0} ** ATA_SERIAL_BUFFER_BYTES,
         .supports_lba = false,
         .supports_lba48 = false,
     };
@@ -82,8 +109,8 @@ pub fn init() void {
         .ctrl_port = ATA_PRIMARY_CTRL,
         .is_master = false,
         .sectors = 0,
-        .model = [_]u8{0} ** 41,
-        .serial = [_]u8{0} ** 21,
+        .model = [_]u8{0} ** ATA_MODEL_BUFFER_BYTES,
+        .serial = [_]u8{0} ** ATA_SERIAL_BUFFER_BYTES,
         .supports_lba = false,
         .supports_lba48 = false,
     };
@@ -95,8 +122,8 @@ pub fn init() void {
         .ctrl_port = ATA_SECONDARY_CTRL,
         .is_master = true,
         .sectors = 0,
-        .model = [_]u8{0} ** 41,
-        .serial = [_]u8{0} ** 21,
+        .model = [_]u8{0} ** ATA_MODEL_BUFFER_BYTES,
+        .serial = [_]u8{0} ** ATA_SERIAL_BUFFER_BYTES,
         .supports_lba = false,
         .supports_lba48 = false,
     };
@@ -108,8 +135,8 @@ pub fn init() void {
         .ctrl_port = ATA_SECONDARY_CTRL,
         .is_master = false,
         .sectors = 0,
-        .model = [_]u8{0} ** 41,
-        .serial = [_]u8{0} ** 21,
+        .model = [_]u8{0} ** ATA_MODEL_BUFFER_BYTES,
+        .serial = [_]u8{0} ** ATA_SERIAL_BUFFER_BYTES,
         .supports_lba = false,
         .supports_lba48 = false,
     };
@@ -136,7 +163,7 @@ pub fn init() void {
 fn detectDrive(device: *ATADevice) void {
     x86.outb(device.base_port + ATA_REG_DRIVE, if (device.is_master) ATA_MASTER else ATA_SLAVE);
 
-    for (0..4) |_| {
+    for (0..ATA_POLL_DELAY_READS) |_| {
         _ = x86.inb(device.ctrl_port);
     }
 
@@ -166,47 +193,47 @@ fn detectDrive(device: *ATADevice) void {
     }
 
     // SAFETY: filled by the subsequent port I/O reads in the loop
-    var buffer: [256]u16 = undefined;
+    var buffer: [ATA_IDENTIFY_WORDS]u16 = undefined;
     for (&buffer) |*word| {
         word.* = x86.inw(device.base_port + ATA_REG_DATA);
     }
 
     device.present = true;
 
-    if ((buffer[49] & 0x200) != 0) {
+    if ((buffer[ATA_IDENTIFY_LBA_WORD] & ATA_IDENTIFY_LBA_SUPPORTED) != 0) {
         device.supports_lba = true;
     }
 
-    if ((buffer[83] & 0x400) != 0) {
+    if ((buffer[ATA_IDENTIFY_LBA48_WORD] & ATA_IDENTIFY_LBA48_SUPPORTED) != 0) {
         device.supports_lba48 = true;
     }
 
     if (device.supports_lba48) {
-        device.sectors = @as(u64, buffer[100]) |
-            (@as(u64, buffer[101]) << 16) |
-            (@as(u64, buffer[102]) << 32) |
-            (@as(u64, buffer[103]) << 48);
+        device.sectors = @as(u64, buffer[ATA_IDENTIFY_LBA48_SECTORS_WORD]) |
+            (@as(u64, buffer[ATA_IDENTIFY_LBA48_SECTORS_WORD + 1]) << 16) |
+            (@as(u64, buffer[ATA_IDENTIFY_LBA48_SECTORS_WORD + 2]) << 32) |
+            (@as(u64, buffer[ATA_IDENTIFY_LBA48_SECTORS_WORD + 3]) << 48);
     } else if (device.supports_lba) {
-        device.sectors = @as(u64, buffer[60]) | (@as(u64, buffer[61]) << 16);
+        device.sectors = @as(u64, buffer[ATA_IDENTIFY_LBA28_SECTORS_WORD]) | (@as(u64, buffer[ATA_IDENTIFY_LBA28_SECTORS_WORD + 1]) << 16);
     }
 
     var model_idx: usize = 0;
-    for (27..47) |i| {
-        device.model[model_idx] = @as(u8, @intCast((buffer[i] >> 8) & 0xFF));
+    for (ATA_IDENTIFY_MODEL_WORD_START..ATA_IDENTIFY_MODEL_WORD_END) |i| {
+        device.model[model_idx] = @as(u8, @intCast((buffer[i] >> BYTE_BITS) & LOW_BYTE_MASK));
         model_idx += 1;
-        device.model[model_idx] = @as(u8, @intCast(buffer[i] & 0xFF));
+        device.model[model_idx] = @as(u8, @intCast(buffer[i] & LOW_BYTE_MASK));
         model_idx += 1;
     }
-    device.model[40] = 0;
+    device.model[ATA_MODEL_BYTES] = 0;
 
     var serial_idx: usize = 0;
-    for (10..20) |i| {
-        device.serial[serial_idx] = @as(u8, @intCast((buffer[i] >> 8) & 0xFF));
+    for (ATA_IDENTIFY_SERIAL_WORD_START..ATA_IDENTIFY_SERIAL_WORD_END) |i| {
+        device.serial[serial_idx] = @as(u8, @intCast((buffer[i] >> BYTE_BITS) & LOW_BYTE_MASK));
         serial_idx += 1;
-        device.serial[serial_idx] = @as(u8, @intCast(buffer[i] & 0xFF));
+        device.serial[serial_idx] = @as(u8, @intCast(buffer[i] & LOW_BYTE_MASK));
         serial_idx += 1;
     }
-    device.serial[20] = 0;
+    device.serial[ATA_SERIAL_BYTES] = 0;
 }
 
 fn readSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) ATAError!void {
@@ -214,27 +241,27 @@ fn readSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) 
         return ATAError.NotFound;
     }
 
-    if (count == 0 or count > 128) {
+    if (count == 0 or count > ATA_MAX_SECTORS_PER_PIO) {
         return ATAError.InvalidParameter;
     }
 
-    if (buffer.len < @as(usize, count) * 512) {
+    if (buffer.len < @as(usize, count) * ATA_SECTOR_SIZE) {
         return ATAError.InvalidParameter;
     }
 
     try waitDriveReady(device);
 
-    const drive_select: u8 = if (device.is_master) 0xE0 else 0xF0;
-    x86.outb(device.base_port + ATA_REG_DRIVE, drive_select | @as(u8, @intCast((lba >> 24) & 0x0F)));
-    for (0..4) |_| {
+    const drive_select: u8 = if (device.is_master) ATA_LBA28_MASTER else ATA_LBA28_SLAVE;
+    x86.outb(device.base_port + ATA_REG_DRIVE, drive_select | @as(u8, @intCast((lba >> 24) & LBA28_DRIVE_HEAD_MASK)));
+    for (0..ATA_POLL_DELAY_READS) |_| {
         _ = x86.inb(device.ctrl_port);
     }
 
     x86.outb(device.base_port + ATA_REG_SECCOUNT, count);
 
-    x86.outb(device.base_port + ATA_REG_LBA0, @as(u8, @intCast(lba & 0xFF)));
-    x86.outb(device.base_port + ATA_REG_LBA1, @as(u8, @intCast((lba >> 8) & 0xFF)));
-    x86.outb(device.base_port + ATA_REG_LBA2, @as(u8, @intCast((lba >> 16) & 0xFF)));
+    x86.outb(device.base_port + ATA_REG_LBA0, @as(u8, @intCast(lba & LOW_BYTE_MASK_U64)));
+    x86.outb(device.base_port + ATA_REG_LBA1, @as(u8, @intCast((lba >> 8) & LOW_BYTE_MASK_U64)));
+    x86.outb(device.base_port + ATA_REG_LBA2, @as(u8, @intCast((lba >> 16) & LOW_BYTE_MASK_U64)));
 
     x86.outb(device.base_port + ATA_REG_COMMAND, ATA_CMD_READ_SECTORS);
 
@@ -242,11 +269,11 @@ fn readSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) 
     for (0..count) |_| {
         try waitDataReady(device);
 
-        for (0..256) |_| {
+        for (0..ATA_SECTOR_WORDS) |_| {
             const word = x86.inw(device.base_port + ATA_REG_DATA);
-            buffer[buffer_offset] = @as(u8, @intCast(word & 0xFF));
-            buffer[buffer_offset + 1] = @as(u8, @intCast((word >> 8) & 0xFF));
-            buffer_offset += 2;
+            buffer[buffer_offset] = @as(u8, @intCast(word & LOW_BYTE_MASK));
+            buffer[buffer_offset + 1] = @as(u8, @intCast((word >> BYTE_BITS) & LOW_BYTE_MASK));
+            buffer_offset += ATA_WORD_BYTES;
         }
     }
 }
@@ -256,28 +283,28 @@ fn writeSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []con
         return ATAError.NotFound;
     }
 
-    if (count == 0 or count > 128) {
+    if (count == 0 or count > ATA_MAX_SECTORS_PER_PIO) {
         return ATAError.InvalidParameter;
     }
 
-    if (buffer.len < @as(usize, count) * 512) {
+    if (buffer.len < @as(usize, count) * ATA_SECTOR_SIZE) {
         return ATAError.InvalidParameter;
     }
 
     common.printBootMarker("ZIGOS:STORAGE:CHECKPOINT:ATA_WRITE_READY_WAIT");
     try waitDriveReady(device);
 
-    const drive_select: u8 = if (device.is_master) 0xE0 else 0xF0;
-    x86.outb(device.base_port + ATA_REG_DRIVE, drive_select | @as(u8, @intCast((lba >> 24) & 0x0F)));
-    for (0..4) |_| {
+    const drive_select: u8 = if (device.is_master) ATA_LBA28_MASTER else ATA_LBA28_SLAVE;
+    x86.outb(device.base_port + ATA_REG_DRIVE, drive_select | @as(u8, @intCast((lba >> 24) & LBA28_DRIVE_HEAD_MASK)));
+    for (0..ATA_POLL_DELAY_READS) |_| {
         _ = x86.inb(device.ctrl_port);
     }
 
     x86.outb(device.base_port + ATA_REG_SECCOUNT, count);
 
-    x86.outb(device.base_port + ATA_REG_LBA0, @as(u8, @intCast(lba & 0xFF)));
-    x86.outb(device.base_port + ATA_REG_LBA1, @as(u8, @intCast((lba >> 8) & 0xFF)));
-    x86.outb(device.base_port + ATA_REG_LBA2, @as(u8, @intCast((lba >> 16) & 0xFF)));
+    x86.outb(device.base_port + ATA_REG_LBA0, @as(u8, @intCast(lba & LOW_BYTE_MASK_U64)));
+    x86.outb(device.base_port + ATA_REG_LBA1, @as(u8, @intCast((lba >> 8) & LOW_BYTE_MASK_U64)));
+    x86.outb(device.base_port + ATA_REG_LBA2, @as(u8, @intCast((lba >> 16) & LOW_BYTE_MASK_U64)));
 
     x86.outb(device.base_port + ATA_REG_COMMAND, ATA_CMD_WRITE_SECTORS);
     common.printBootMarker("ZIGOS:STORAGE:CHECKPOINT:ATA_WRITE_COMMAND");
@@ -287,11 +314,11 @@ fn writeSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []con
         try waitDataReady(device);
         common.printBootMarker("ZIGOS:STORAGE:CHECKPOINT:ATA_WRITE_SECTOR");
 
-        for (0..256) |_| {
+        for (0..ATA_SECTOR_WORDS) |_| {
             const word = @as(u16, buffer[buffer_offset]) |
-                (@as(u16, buffer[buffer_offset + 1]) << 8);
+                (@as(u16, buffer[buffer_offset + 1]) << BYTE_BITS);
             x86.outw(device.base_port + ATA_REG_DATA, word);
-            buffer_offset += 2;
+            buffer_offset += ATA_WORD_BYTES;
         }
     }
 
@@ -360,7 +387,7 @@ pub fn stableDeviceId(device: *const ATADevice) u64 {
 }
 
 fn waitDriveReady(device: *const ATADevice) ATAError!void {
-    var timeout: u32 = 100000;
+    var timeout: u32 = ATA_WAIT_LIMIT;
     while (timeout > 0) : (timeout -= 1) {
         const status = x86.inb(device.base_port + ATA_REG_STATUS);
         if ((status & ATA_SR_BSY) == 0) {
@@ -374,7 +401,7 @@ fn waitDriveReady(device: *const ATADevice) ATAError!void {
 }
 
 fn waitDataReady(device: *const ATADevice) ATAError!void {
-    var timeout: u32 = 100000;
+    var timeout: u32 = ATA_WAIT_LIMIT;
     while (timeout > 0) : (timeout -= 1) {
         const status = x86.inb(device.base_port + ATA_REG_STATUS);
         if ((status & ATA_SR_BSY) == 0 and (status & ATA_SR_DRQ) != 0) {
@@ -389,12 +416,12 @@ fn waitDataReady(device: *const ATADevice) ATAError!void {
 
 fn printDriveInfo(device: *const ATADevice) void {
     var i: usize = 0;
-    while (i < 40 and device.model[i] != 0) : (i += 1) {
+    while (i < ATA_MODEL_BYTES and device.model[i] != 0) : (i += 1) {
         vga.put_char(device.model[i]);
     }
 
     vga.print(" (");
-    printSize(device.sectors * 512);
+    printSize(device.sectors * @as(u64, ATA_SECTOR_SIZE));
     vga.print(")\n");
 }
 

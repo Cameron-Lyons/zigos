@@ -60,6 +60,23 @@ pub const Runtime = struct {
         driver: *const driver_service.DriverRecord,
         now_ticks: u64,
     ) Error!ActivationRecord {
+        return self.activateRecordAt(driver, now_ticks);
+    }
+
+    pub fn activateModeAt(
+        self: *Runtime,
+        driver: *const driver_service.DriverRecord,
+        now_ticks: u64,
+    ) Error!ActivationMode {
+        const record = try self.activateRecordAt(driver, now_ticks);
+        return record.mode;
+    }
+
+    fn activateRecordAt(
+        self: *Runtime,
+        driver: *const driver_service.DriverRecord,
+        now_ticks: u64,
+    ) Error!ActivationRecord {
         var record = ActivationRecord{
             .service_id = driver.service_id,
             .device_id = driver.device_id,
@@ -78,9 +95,7 @@ pub const Runtime = struct {
         switch (driver.device_class) {
             .network_adapter => {
                 if (bootstrap_driver_port.networkPublication()) |publication| {
-                    if (publication.device_id != driver.device_id) {
-                        // Drivers only claim transports published for their own device binding.
-                    } else {
+                    if (publication.device_id == driver.device_id) {
                         if (publication.kernel_bootstrap and driver.bootstrap_transport != .kernel_published_data_plane) {
                             return error.KernelBootstrapNotAuthorized;
                         }
@@ -95,9 +110,7 @@ pub const Runtime = struct {
             },
             .storage_controller => {
                 if (bootstrap_driver_port.storagePublication()) |publication| {
-                    if (publication.device_id != driver.device_id) {
-                        // Drivers only claim transports published for their own device binding.
-                    } else {
+                    if (publication.device_id == driver.device_id) {
                         if (publication.kernel_bootstrap and driver.bootstrap_transport != .kernel_published_data_plane) {
                             return error.KernelBootstrapNotAuthorized;
                         }
@@ -122,72 +135,6 @@ pub const Runtime = struct {
 
         record.activation_generation = self.nextActivationGeneration();
         return self.upsert(record);
-    }
-
-    pub fn activateModeAt(
-        self: *Runtime,
-        driver: *const driver_service.DriverRecord,
-        now_ticks: u64,
-    ) Error!ActivationMode {
-        var record = ActivationRecord{
-            .service_id = driver.service_id,
-            .device_id = driver.device_id,
-            .device_class = driver.device_class,
-            .dma_domain_id = driver.dma_domain_id,
-            .iommu_enforced = driver.dma_protection == .iommu_enforced,
-            .mode = .control_only,
-            .exclusive_claim = false,
-            .activation_generation = 0,
-            .kernel_bootstrap = false,
-            .publisher_len = 0,
-            .publisher = [_]u8{0} ** 32,
-        };
-        if (record.dma_domain_id == 0 or !record.iommu_enforced) return error.MissingDmaDomain;
-
-        switch (driver.device_class) {
-            .network_adapter => {
-                if (bootstrap_driver_port.networkPublication()) |publication| {
-                    if (publication.device_id == driver.device_id) {
-                        if (publication.kernel_bootstrap and driver.bootstrap_transport != .kernel_published_data_plane) {
-                            return error.KernelBootstrapNotAuthorized;
-                        }
-                        if (bootstrap_driver_port.activateNetworkDevice(driver.device_id, driver.service_id)) {
-                            record.mode = .published_data_plane;
-                            record.exclusive_claim = true;
-                            record.kernel_bootstrap = publication.kernel_bootstrap;
-                            record.publisher_len = copyText(record.publisher[0..], publication.publisherSlice());
-                        }
-                    }
-                }
-            },
-            .storage_controller => {
-                if (bootstrap_driver_port.storagePublication()) |publication| {
-                    if (publication.device_id == driver.device_id) {
-                        if (publication.kernel_bootstrap and driver.bootstrap_transport != .kernel_published_data_plane) {
-                            return error.KernelBootstrapNotAuthorized;
-                        }
-                        if (bootstrap_driver_port.activateStorageBackend(
-                            driver.device_id,
-                            driver.service_id,
-                            driver.authority_capability_id,
-                            driver.owner_task_id,
-                            now_ticks,
-                            self.kernel_port,
-                        )) {
-                            record.mode = .published_data_plane;
-                            record.exclusive_claim = true;
-                            record.kernel_bootstrap = publication.kernel_bootstrap;
-                            record.publisher_len = copyText(record.publisher[0..], publication.publisherSlice());
-                        }
-                    }
-                }
-            },
-            else => {},
-        }
-
-        record.activation_generation = self.nextActivationGeneration();
-        _ = try self.upsert(record);
-        return record.mode;
     }
 
     pub fn activate(self: *Runtime, driver: *const driver_service.DriverRecord) Error!ActivationRecord {
