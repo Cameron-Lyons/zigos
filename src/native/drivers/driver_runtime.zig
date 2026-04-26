@@ -238,7 +238,7 @@ test "runtime refuses kernel-published transports for drivers without bootstrap 
     var directory = driver_service.Directory.init();
     const capability = @import("../kernel_api/capability.zig");
     var capabilities = capability.CapabilityTable.init();
-    const driver_authority = try capabilities.mint(.{
+    const driver_authority = try capabilities.mintBootRoot(.{
         .holder = .{ .kind = .service, .serial = 91 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = driver_service.authorityTarget(0x8086_100E_0001),
@@ -285,7 +285,6 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
     const endpoint = @import("../kernel_api/endpoint.zig");
     const native_kernel = @import("../kernel_api/native_kernel.zig");
     const principal = @import("../core/principal.zig");
-    const service_registry = @import("../kernel_api/service_registry.zig");
     const shared_memory = @import("../kernel_api/shared_memory.zig");
     const task_runtime = @import("../task/task_runtime.zig");
 
@@ -302,14 +301,12 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
     var shared = shared_memory.Table.init();
-    var registry = service_registry.Registry.init();
     var kernel = native_kernel.Kernel.init(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
-        &registry,
     );
     var kernel_port = component_port.KernelPort.init(&kernel);
 
@@ -349,7 +346,7 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
         },
         .userspace_image = &storage_driver_lease_image,
     });
-    const device_capability = try capabilities.mint(.{
+    const device_capability = try capabilities.mintBootRoot(.{
         .holder = driver_task.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .device, .id = device_id },

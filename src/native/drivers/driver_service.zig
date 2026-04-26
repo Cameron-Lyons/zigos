@@ -323,7 +323,7 @@ test "driver services require signed least-privilege device authority" {
             .signer = "zigos-driver-key",
         },
     };
-    const authority = try capabilities.mint(.{
+    const authority = try capabilities.mintBootRoot(.{
         .holder = .{ .kind = .service, .serial = 2 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = authorityTarget(100),
@@ -373,7 +373,7 @@ test "driver services reject unsigned bundles and escalated device rights" {
         .display_name = "Storage Driver",
         .publisher = "zigos.dev",
     };
-    const escalated_authority = try capabilities.mint(.{
+    const escalated_authority = try capabilities.mintBootRoot(.{
         .holder = .{ .kind = .service, .serial = 3 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = authorityTarget(200),
@@ -429,7 +429,7 @@ test "driver services reject unsigned bundles and escalated device rights" {
         .bundle = signed_bundle,
     }));
 
-    const storage_authority = try capabilities.mint(.{
+    const storage_authority = try capabilities.mintBootRoot(.{
         .holder = .{ .kind = .service, .serial = 3 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = authorityTarget(200),
@@ -471,7 +471,7 @@ test "kernel bootstrap transport is only granted to supported driver classes" {
             .signer = "zigos-spec-driver",
         },
     };
-    const graphics_authority = try capabilities.mint(.{
+    const graphics_authority = try capabilities.mintBootRoot(.{
         .holder = .{ .kind = .service, .serial = 4 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = authorityTarget(0x1234_1111_0001),

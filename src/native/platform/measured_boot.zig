@@ -233,7 +233,7 @@ test "driver set measurements bind signed driver records and restart generation"
 
     var capabilities = capability.CapabilityTable.init();
     var directory = driver_service.Directory.init();
-    const authority = try capabilities.mint(.{
+    const authority = try capabilities.mintBootRoot(.{
         .holder = .{ .kind = .service, .serial = 2 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = driver_service.authorityTarget(100),

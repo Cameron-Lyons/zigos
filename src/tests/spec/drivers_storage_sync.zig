@@ -242,7 +242,7 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     const imported_entry = try storage.resolve(imported.id, "documents/report.md");
     try std.testing.expectEqual(draft_v1.version_id, imported_entry.version_id);
 
-    const workspace_capability = try bridge_capabilities.mint(.{
+    const workspace_capability = try bridge_capabilities.mintBootRoot(.{
         .holder = writer,
         .issuer = spec_support.policyAuthority(1),
         .target = .{ .kind = .workspace, .id = workspace_record.id },

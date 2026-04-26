@@ -9,13 +9,14 @@ const device_graph = @import("../../native/sync/device_graph.zig");
 const device_inventory = @import("../../native/drivers/device_inventory.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const manifest = @import("../../native/policy/manifest.zig");
+const kernel_descriptors = @import("../../native/kernel_api/native_kernel_descriptors.zig");
 const native_kernel = @import("../../native/kernel_api/native_kernel.zig");
 const native_util = @import("../../native/core/util.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const policy_mediation = @import("../../native/policy/policy_mediation.zig");
 const policy_object = @import("../../native/policy/policy_object.zig");
 const principal = @import("../../native/core/principal.zig");
-const service_registry = @import("../../native/kernel_api/service_registry.zig");
+const service_registry = @import("../../native/services/service_registry.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const task_runtime_service = @import("../../native/task/task_runtime_service.zig");
@@ -213,7 +214,21 @@ pub fn explicitGrantsRequireAuthority() !void {
     try std.testing.expectEqual(native_util.fnv1a64("lan.sync"), network_capability.target.id);
 }
 
+pub fn capabilityLatticePreservesSecurityInvariants() !void {
+    try invariantNoRightsEscalationThroughDeriveOrPass();
+    try invariantRevocationAlwaysWins();
+    try invariantExpiredLeasesFailEverywhere();
+    try invariantTaskScopedCapabilitiesCannotCrossTaskBoundaries();
+    try invariantTargetKindsDisambiguateHashedIds();
+}
+
 pub fn kernelRemainsTypedAndIsolatesLegacy() !void {
+    var registry = service_registry.Service.initWithBootstrap(.{
+        .task_id = 1,
+        .endpoint_id = 1,
+        .endpoint_capability_id = 1,
+    });
+
     try std.testing.expectEqual(@as(usize, 7), contract.kernel_tcb.len);
     try std.testing.expectEqualStrings("ipc_transport", contract.tcbName(.ipc_transport));
     try std.testing.expectEqualStrings("iommu_dma_isolation_hooks", contract.tcbName(.iommu_dma_isolation_hooks));
@@ -249,8 +264,6 @@ pub fn kernelRemainsTypedAndIsolatesLegacy() !void {
     try std.testing.expect(abi.policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(abi.reviewOpcode(.review_bundle) >= 0x240);
     try std.testing.expectEqual(@as(u16, 1), abi.ABI_VERSION);
-
-    var registry = service_registry.Registry.init();
     try registry.register(55, 7, 101, .{
         .name = "zigos.service.storage",
         .version_major = 1,
@@ -361,19 +374,214 @@ pub fn kernelRemainsTypedAndIsolatesLegacy() !void {
     }));
 }
 
+fn invariantNoRightsEscalationThroughDeriveOrPass() !void {
+    const parent_rights = capability.CapabilityRights{
+        .capability_derive = true,
+        .capability_pass = true,
+        .capability_query = true,
+        .endpoint_send = true,
+        .object_read = true,
+        .network_local = true,
+    };
+    const requested_rights = [_]capability.CapabilityRights{
+        .{ .capability_query = true },
+        .{ .endpoint_send = true, .object_read = true },
+        .{ .network_local = true, .network_remote = true },
+        .{ .object_write = true },
+        .{ .task_terminate = true },
+    };
+
+    for (requested_rights, 0..) |rights, index| {
+        var table = capability.CapabilityTable.init();
+        const parent = try table.mintBootRoot(.{
+            .holder = spec_support.service(10),
+            .issuer = spec_support.policyAuthority(1),
+            .target = .{ .kind = .object, .id = 1_000 + index },
+            .rights = parent_rights,
+            .scope = .{ .task_id = 40, .workspace_id = 70, .local_only = true, .broker_only = true },
+            .lease = .{ .issued_at_ticks = 10, .expires_at_ticks = 100, .renewable = true },
+        });
+
+        if (parent_rights.containsAll(rights)) {
+            const derived = try table.derive(.{
+                .parent_capability_id = parent.id,
+                .holder = spec_support.app(20 + index),
+                .rights = rights,
+                .scope = parent.scope,
+                .lease = .{ .issued_at_ticks = 11, .expires_at_ticks = 90, .renewable = false },
+            });
+            try std.testing.expect(parent.rights.containsAll(derived.rights));
+        } else {
+            try std.testing.expectError(error.RightsEscalation, table.derive(.{
+                .parent_capability_id = parent.id,
+                .holder = spec_support.app(20 + index),
+                .rights = rights,
+                .scope = parent.scope,
+                .lease = .{ .issued_at_ticks = 11, .expires_at_ticks = 90, .renewable = false },
+            }));
+        }
+
+        const passed = try table.pass(.{
+            .capability_id = parent.id,
+            .new_holder = spec_support.app(50 + index),
+            .now_ticks = 20,
+            .scope = parent.scope,
+        });
+        try std.testing.expectEqual(@as(u32, @bitCast(parent.rights)), @as(u32, @bitCast(passed.rights)));
+    }
+}
+
+fn invariantRevocationAlwaysWins() !void {
+    const targets = [_]capability.CapabilityTarget{
+        .{ .kind = .object, .id = 901 },
+        .{ .kind = .network_policy, .id = 901 },
+        .{ .kind = .device, .id = 901 },
+    };
+
+    for (targets, 0..) |target, index| {
+        var table = capability.CapabilityTable.init();
+        const parent = try table.mintBootRoot(.{
+            .holder = spec_support.service(30 + index),
+            .issuer = spec_support.policyAuthority(1),
+            .target = target,
+            .rights = .{ .capability_derive = true, .capability_pass = true, .capability_query = true, .object_read = true, .device_use = true, .network_local = true },
+            .scope = .{ .task_id = 80 + index, .local_only = true, .broker_only = true },
+            .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 1_000, .renewable = true },
+        });
+        const derived = try table.derive(.{
+            .parent_capability_id = parent.id,
+            .holder = spec_support.app(40 + index),
+            .rights = .{ .capability_query = true },
+            .scope = parent.scope,
+            .lease = .{ .issued_at_ticks = 2, .expires_at_ticks = 900, .renewable = false },
+        });
+        const passed = try table.pass(.{
+            .capability_id = parent.id,
+            .new_holder = spec_support.app(50 + index),
+            .now_ticks = 3,
+            .scope = parent.scope,
+        });
+
+        try table.revoke(parent.id);
+        try std.testing.expect(!table.isUsable(derived, 4));
+        try std.testing.expect(!table.isUsable(passed, 4));
+        try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(derived.id, 4));
+        try std.testing.expectError(error.CapabilityRevoked, table.pass(.{
+            .capability_id = passed.id,
+            .new_holder = spec_support.app(60 + index),
+            .now_ticks = 4,
+        }));
+    }
+}
+
+fn invariantExpiredLeasesFailEverywhere() !void {
+    var table = capability.CapabilityTable.init();
+    const expiring = try table.mintBootRoot(.{
+        .holder = spec_support.service(70),
+        .issuer = spec_support.policyAuthority(1),
+        .target = .{ .kind = .service, .id = 700 },
+        .rights = .{ .capability_derive = true, .capability_pass = true, .capability_query = true },
+        .scope = .{ .task_id = 700, .local_only = true },
+        .lease = .{ .issued_at_ticks = 10, .expires_at_ticks = 20, .renewable = false },
+    });
+
+    try std.testing.expect(!table.isUsable(expiring, 9));
+    try std.testing.expect(!table.isUsable(expiring, 21));
+    try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(expiring.id, 21));
+    try std.testing.expectError(error.CapabilityRevoked, table.derive(.{
+        .parent_capability_id = expiring.id,
+        .holder = spec_support.app(71),
+        .rights = .{ .capability_query = true },
+        .scope = expiring.scope,
+        .lease = .{ .issued_at_ticks = 21, .expires_at_ticks = 21, .renewable = false },
+    }));
+    try std.testing.expectError(error.CapabilityRevoked, table.pass(.{
+        .capability_id = expiring.id,
+        .new_holder = spec_support.app(72),
+        .now_ticks = 21,
+    }));
+}
+
+fn invariantTaskScopedCapabilitiesCannotCrossTaskBoundaries() !void {
+    var table = capability.CapabilityTable.init();
+    const parent = try table.mintBootRoot(.{
+        .holder = spec_support.service(80),
+        .issuer = spec_support.policyAuthority(1),
+        .target = .{ .kind = .endpoint, .id = 8080 },
+        .rights = .{ .capability_derive = true, .capability_pass = true, .endpoint_send = true },
+        .scope = .{ .task_id = 81, .local_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100, .renewable = false },
+    });
+
+    try std.testing.expectError(error.ScopeEscalation, table.derive(.{
+        .parent_capability_id = parent.id,
+        .holder = spec_support.app(82),
+        .rights = .{ .endpoint_send = true },
+        .scope = .{ .task_id = 82, .local_only = true },
+        .lease = .{ .issued_at_ticks = 2, .expires_at_ticks = 90, .renewable = false },
+    }));
+    try std.testing.expectError(error.ScopeEscalation, table.pass(.{
+        .capability_id = parent.id,
+        .new_holder = spec_support.app(82),
+        .now_ticks = 2,
+        .scope = .{ .task_id = 82, .local_only = true },
+    }));
+}
+
+fn invariantTargetKindsDisambiguateHashedIds() !void {
+    const shared_id = native_util.fnv1a64("shared-target-id");
+    var table = capability.CapabilityTable.init();
+    const object_cap = try table.mintBootRoot(.{
+        .holder = spec_support.app(90),
+        .issuer = spec_support.policyAuthority(1),
+        .target = .{ .kind = .object, .id = shared_id },
+        .rights = .{ .object_read = true },
+        .scope = .{ .task_id = 90, .local_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100, .renewable = false },
+    });
+    const network_cap = try table.mintBootRoot(.{
+        .holder = spec_support.app(91),
+        .issuer = spec_support.policyAuthority(1),
+        .target = .{ .kind = .network_policy, .id = shared_id },
+        .rights = .{ .network_local = true },
+        .scope = .{ .task_id = 91, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100, .renewable = false },
+    });
+    const device_cap = try table.mintBootRoot(.{
+        .holder = spec_support.app(92),
+        .issuer = spec_support.policyAuthority(1),
+        .target = .{ .kind = .device, .id = shared_id },
+        .rights = .{ .device_use = true },
+        .scope = .{ .task_id = 92, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100, .renewable = false },
+    });
+
+    try std.testing.expect(!object_cap.target.eql(network_cap.target));
+    try std.testing.expect(!object_cap.target.eql(device_cap.target));
+    try std.testing.expect(!network_cap.target.eql(device_cap.target));
+
+    try table.revoke(object_cap.id);
+    try std.testing.expect(!table.isUsable(object_cap, 2));
+    try std.testing.expect(table.isUsable(network_cap, 2));
+    try std.testing.expect(table.isUsable(device_cap, 2));
+}
+
 pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
     var endpoints = @import("../../native/kernel_api/endpoint.zig").Table.init();
     var shared = shared_memory.Table.init();
-    var registry = service_registry.Registry.init();
+    var service_directory = service_registry.Service.initWithBootstrap(.{
+        .task_id = 2,
+        .endpoint_id = 99,
+        .endpoint_capability_id = 100,
+    });
     var kernel = native_kernel.Kernel.init(
         spec_support.policyAuthority(1),
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
-        &registry,
     );
     var port = component_port.KernelPort.init(&kernel);
 
@@ -383,7 +591,7 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         .budget = spec_support.defaultBudget(false),
         .local_only = true,
     });
-    const authority = try capabilities.mint(.{
+    const authority = try capabilities.mintBootRoot(.{
         .holder = session_task.owner,
         .issuer = spec_support.policyAuthority(1),
         .target = .{ .kind = .service, .id = 99 },
@@ -488,16 +696,16 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
             .service_port = true,
         },
     }, 3);
-    try port.serviceRegister(.{
-        .header = component_port.makeHeader(.service_register, 5, launched.task_id),
-        .authority_capability_id = launched_authority.capability_id,
-        .service_id = 123,
-        .owner_task_id = launched.task_id,
-        .endpoint_capability_id = service_endpoint.capability_id,
-        .interface = .{ .name = "zigos.object.spec-storage" },
-    }, 3);
+    const launched_record = runtime.find(launched.task_id).?;
+    try service_directory.register(
+        123,
+        launched.task_id,
+        service_endpoint.endpoint.endpoint_id,
+        .{ .name = "zigos.object.spec-storage" },
+        kernel_descriptors.serviceBindingFlags(launched_record),
+    );
 
-    const connection = try registry.connect(.{ .name = "zigos.object.spec-storage" });
+    const connection = try service_directory.connect(.{ .name = "zigos.object.spec-storage" });
     try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
     try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE));
 }
