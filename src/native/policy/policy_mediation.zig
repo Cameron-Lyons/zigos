@@ -128,10 +128,7 @@ pub const PolicyMediator = struct {
 
         const plan = try self.grantPlanForRequest(task_id, request, matched_grant, lease_end, now_ticks);
         var minted_buffer: [capability.MAX_GRANT_PLAN_ENTRIES]capability.Capability = undefined;
-        const minted = try self.capability_table.applyGrantPlan(&plan, &minted_buffer);
-        for (plan.slice(), minted) |entry, granted_capability| {
-            try self.runtime.grantCapability(entry.task_id, granted_capability.id);
-        }
+        const minted = try self.applyGrantPlanTransactional(&plan, &minted_buffer);
         const capability_id = minted[0].id;
         try self.runtime.audit(task.id, .{
             .kind = .policy_allowed,
@@ -185,6 +182,33 @@ pub const PolicyMediator = struct {
             },
         });
         return plan;
+    }
+
+    fn applyGrantPlanTransactional(
+        self: *PolicyMediator,
+        plan: *const GrantPlan,
+        output: []capability.Capability,
+    ) Error![]capability.Capability {
+        const minted = try self.capability_table.applyGrantPlan(plan, output);
+        var attached_count: usize = 0;
+        errdefer {
+            var revoke_index: usize = 0;
+            while (revoke_index < attached_count) : (revoke_index += 1) {
+                const entry = plan.entries[revoke_index];
+                if (entry.task_id != 0) {
+                    _ = self.runtime.revokeCapability(entry.task_id, minted[revoke_index].id) catch false;
+                }
+            }
+            self.capability_table.rollbackGrant(minted);
+        }
+
+        for (plan.slice(), minted) |entry, granted_capability| {
+            if (entry.task_id != 0) {
+                try self.runtime.grantCapability(entry.task_id, granted_capability.id);
+            }
+            attached_count += 1;
+        }
+        return minted;
     }
 
     pub fn applyManifest(
@@ -444,6 +468,48 @@ test "policy mediation grants local-only object and network capabilities" {
     try std.testing.expectEqual(resourceId("lan.sync"), network_capability.target.id);
     try std.testing.expect(ledger.latestKind(.permission_decision).?.allowed);
     try std.testing.expectEqual(abi.DenialReason.none, ledger.latestKind(.permission_decision).?.denial_reason);
+}
+
+test "policy mediation rolls back minted capability when task attachment fails" {
+    var capability_table = capability.CapabilityTable.init();
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = 20 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 1024,
+        },
+    });
+    var existing_id: u64 = 10;
+    while (existing_id < 10 + task_runtime.MAX_TASK_CAPABILITIES) : (existing_id += 1) {
+        try runtime.grantCapability(task.id, existing_id);
+    }
+    var mediator = PolicyMediator.init(
+        .{ .kind = .policy_authority, .serial = 1 },
+        &capability_table,
+        &runtime,
+        .{
+            .network_service_id = 21,
+            .compositor_service_id = 22,
+            .policy_service_id = 23,
+            .service_registry_id = 24,
+        },
+    );
+
+    try std.testing.expectError(error.CapabilityTableFull, mediator.authorizeRequest(task.id, .{
+        .kind = .object_access,
+        .resource = "workspace:notes",
+        .rights = .{ .object_read = true },
+    }, &.{
+        .{ .kind = .object_access, .resource = "workspace:notes", .expires_at_ticks = 100 },
+    }, 10));
+
+    try std.testing.expectEqual(@as(usize, task_runtime.MAX_TASK_CAPABILITIES), task.capability_count);
+    try std.testing.expect(capability_table.query(1) == null);
+    try std.testing.expect(!runtime.hasCapability(task.id, 1));
 }
 
 test "policy mediation suspends tasks when required background permission is denied" {

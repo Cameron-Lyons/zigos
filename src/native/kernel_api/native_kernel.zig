@@ -391,7 +391,7 @@ pub const Kernel = struct {
     pub fn capabilityRevoke(self: *Kernel, context: KernelCallContext, capability_id: u64, now_ticks: u64) Error!void {
         _ = try self.requireOperationCapability(context, .capability_revoke, now_ticks, .{ .capability_revoke = true });
         const revoked = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
-        try self.capability_table.revoke(capability_id);
+        try self.capability_table.revokeTargetAuthority(capability_id);
         if (revoked.scope.task_id) |task_id| {
             _ = try self.runtime.revokeCapability(task_id, capability_id);
         }

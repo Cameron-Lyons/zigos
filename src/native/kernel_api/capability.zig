@@ -360,7 +360,12 @@ pub const CapabilityTable = struct {
         return passed;
     }
 
-    pub fn revoke(self: *CapabilityTable, capability_id: u64) Error!void {
+    pub fn revokeGrant(self: *CapabilityTable, capability_id: u64) Error!void {
+        _ = self.findConstSlot(capability_id) orelse return error.CapabilityNotFound;
+        self.discard(capability_id);
+    }
+
+    pub fn revokeTargetAuthority(self: *CapabilityTable, capability_id: u64) Error!void {
         const slot = self.findSlot(capability_id) orelse return error.CapabilityNotFound;
         const target_generation_index = slot.target_generation_index;
         self.discard(capability_id);
@@ -874,7 +879,7 @@ fn fullSessionRights() CapabilityRights {
     };
 }
 
-test "capabilities derive narrower rights and are invalidated by target revocation" {
+test "capabilities derive narrower rights and grant revocation leaves sibling authority usable" {
     var table = CapabilityTable.init();
     const policy = principal.PrincipalId{ .kind = .policy_authority, .serial = 1 };
     const session = principal.PrincipalId{ .kind = .service, .serial = 2 };
@@ -907,7 +912,51 @@ test "capabilities derive narrower rights and are invalidated by target revocati
     try std.testing.expect(table.isUsable(parent, 10));
     try std.testing.expect(table.isUsable(derived, 10));
 
-    try table.revoke(parent.id);
+    try table.revokeGrant(parent.id);
+    try std.testing.expect(table.query(parent.id) == null);
+    try std.testing.expect(table.isUsable(derived, 10));
+}
+
+test "target authority revocation invalidates sibling and derived capabilities" {
+    var table = CapabilityTable.init();
+    const policy = principal.PrincipalId{ .kind = .policy_authority, .serial = 1 };
+    const session = principal.PrincipalId{ .kind = .service, .serial = 2 };
+    const task = principal.PrincipalId{ .kind = .user, .serial = 9 };
+
+    const parent = try table.mintBootRoot(.{
+        .holder = session,
+        .issuer = policy,
+        .target = .{ .kind = .service, .id = 42 },
+        .rights = fullSessionRights(),
+        .scope = .{ .task_id = 100, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
+        .audit = .{ .policy_generation = 1, .source_task_id = 100, .broker_service_id = 42 },
+    });
+    const sibling = try table.mintBootRoot(.{
+        .holder = session,
+        .issuer = policy,
+        .target = .{ .kind = .service, .id = 42 },
+        .rights = .{ .capability_query = true, .time_query = true },
+        .scope = .{ .task_id = 100, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = false },
+        .audit = .{ .policy_generation = 1, .source_task_id = 100, .broker_service_id = 42 },
+    });
+    const derived = try table.derive(.{
+        .parent_capability_id = parent.id,
+        .holder = task,
+        .rights = .{
+            .endpoint_connect = true,
+            .endpoint_send = true,
+            .endpoint_recv = true,
+            .capability_query = true,
+        },
+        .scope = .{ .task_id = 100, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 5, .expires_at_ticks = 500, .renewable = false },
+        .audit = .{ .policy_generation = 1, .source_task_id = 100, .broker_service_id = 42 },
+    });
+
+    try table.revokeTargetAuthority(parent.id);
+    try std.testing.expect(!table.isUsable(sibling, 10));
     try std.testing.expect(!table.isUsable(derived, 10));
 }
 
