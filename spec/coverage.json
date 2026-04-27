@@ -307,7 +307,7 @@
         },
         {
           "file": "src/native/storage/object_store.zig",
-          "name": "object store keeps immutable signed versions with stable content addresses"
+          "name": "object store keeps immutable signed versions with stable version addresses"
         },
         {
           "file": "src/native/storage/workspace.zig",

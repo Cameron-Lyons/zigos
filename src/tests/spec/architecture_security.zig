@@ -468,7 +468,7 @@ fn invariantRevocationAlwaysWins() !void {
             .scope = parent.scope,
         });
 
-        try table.revoke(parent.id);
+        try table.revokeTargetAuthority(parent.id);
         try std.testing.expect(!table.isUsable(derived, 4));
         try std.testing.expect(!table.isUsable(passed, 4));
         try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(derived.id, 4));
@@ -566,8 +566,9 @@ fn invariantTargetKindsDisambiguateHashedIds() !void {
     try std.testing.expect(!object_cap.target.eql(device_cap.target));
     try std.testing.expect(!network_cap.target.eql(device_cap.target));
 
-    try table.revoke(object_cap.id);
-    try std.testing.expect(!table.isUsable(object_cap, 2));
+    try table.revokeGrant(object_cap.id);
+    try std.testing.expect(table.query(object_cap.id) == null);
+    try std.testing.expectError(error.CapabilityNotFound, table.requireUsable(object_cap.id, 2));
     try std.testing.expect(table.isUsable(network_cap, 2));
     try std.testing.expect(table.isUsable(device_cap, 2));
 }
