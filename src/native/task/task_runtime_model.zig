@@ -624,6 +624,7 @@ pub fn rebuildCapabilityIndex(task: *TaskRecord) void {
     cold.capability_index_slots = emptyIndexTable(CAPABILITY_INDEX_CAPACITY);
     var index: usize = 0;
     while (index < task.capability_count) : (index += 1) {
+        if (cold.capability_ids[index] == 0) continue;
         indexInsert(CAPABILITY_INDEX_CAPACITY, &cold.capability_index_slots, cold.capability_ids[index], index);
     }
 }

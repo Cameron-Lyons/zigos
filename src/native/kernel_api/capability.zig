@@ -627,8 +627,19 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn allocateCapabilityId(self: *Self) u64 {
+            if (self.next_capability_id == 0) {
+                self.next_capability_id = self.highestAllocatedCapabilityId() + 1;
+            }
             defer self.next_capability_id += 1;
             return self.next_capability_id;
+        }
+
+        fn highestAllocatedCapabilityId(self: *const Self) u64 {
+            var highest: u64 = 0;
+            for (self.slots) |slot| {
+                if (slot.in_use and slot.capability.id > highest) highest = slot.capability.id;
+            }
+            return highest;
         }
 
         fn insert(self: *Self, capability: Capability, target_generation_index: u8) Error!Capability {
@@ -728,8 +739,10 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             }
 
             for (plan.slice(), 0..) |entry, index| {
-                const capability = Capability{
-                    .id = self.allocateCapabilityId(),
+                const capability_id = self.allocateCapabilityId();
+                if (capability_id == 0) native_util.impossibleByInvariant("capability allocator never returns the reserved zero id");
+                const granted_capability = Capability{
+                    .id = capability_id,
                     .holder = entry.request.holder,
                     .issuer = entry.request.issuer,
                     .target = entry.request.target,
@@ -742,11 +755,11 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 const slot_index = reservation.slot_indexes[index];
                 self.slots[slot_index] = .{
                     .in_use = true,
-                    .capability = capability,
+                    .capability = granted_capability,
                     .target_generation_index = reservation.target_generation_indexes[index],
                 };
                 self.indexSlot(slot_index);
-                output[index] = capability;
+                output[index] = granted_capability;
             }
         }
 
@@ -816,13 +829,16 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 
         fn indexSlot(self: *Self, slot_index: usize) void {
             const cap = self.slots[slot_index].capability;
+            if (cap.id == 0) native_util.impossibleByInvariant("capability table slots never index the reserved zero capability id");
             indexInsert(TABLE_INDEX_CAPACITY, &self.capability_index_slots, cap.id, slot_index);
 
             const holder_key = holderKey(cap.holder);
+            if (holder_key == 0) native_util.impossibleByInvariant("capability table holder indexes never use the reserved zero key");
             self.slots[slot_index].next_holder_index = self.indexedHead(&self.holder_index_slots, holder_key);
             indexInsert(TABLE_INDEX_CAPACITY, &self.holder_index_slots, holder_key, slot_index);
 
             const target_key = targetKey(cap.target);
+            if (target_key == 0) native_util.impossibleByInvariant("capability table target indexes never use the reserved zero key");
             self.slots[slot_index].next_target_index = self.indexedHead(&self.target_index_slots, target_key);
             indexInsert(TABLE_INDEX_CAPACITY, &self.target_index_slots, target_key, slot_index);
         }

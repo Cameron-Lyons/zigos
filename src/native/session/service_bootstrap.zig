@@ -78,37 +78,75 @@ pub fn launchBundleService(
     correlation_base: u64,
     now_ticks: u64,
 ) Error!ServiceBinding {
-    const service_task = try userspace_launch.launchRegisteredKernel(
-        catalog,
-        .{
-            .port = kernel_port,
-            .authority_capability_id = authority_capability_id,
-            .controller_task_id = controller_task_id,
-            .correlation_id = correlation_base,
-            .now_ticks = now_ticks,
-        },
-        bundle_id,
-        .{
-            .owner = owner,
-            .budget = budget,
-            .local_only = true,
-        },
-        schedule_task,
-    );
-    const service_authority_capability_id = try bootstrap_capabilities.deriveTaskCapability(
-        kernel_port,
-        controller_task_id,
-        authority_capability_id,
-        service_task.task_id,
-        bootstrap_rights,
-        correlation_base + 1,
-        now_ticks,
-    );
+    const service_task_id, const service_authority_capability_id = if (controller_task_id == 0) blk: {
+        const service_task = try userspace_launch.launchRegisteredDirect(
+            catalog,
+            kernel_port.kernel.runtime,
+            bundle_id,
+            .{
+                .owner = owner,
+                .budget = budget,
+                .local_only = true,
+            },
+            schedule_task,
+        );
+        const service_authority = try kernel_port.kernel.capability_table.mintBootRoot(.{
+            .holder = owner,
+            .issuer = kernel_port.kernel.policy_authority,
+            .target = .{ .kind = .service, .id = service_id },
+            .rights = bootstrap_rights,
+            .scope = .{
+                .task_id = service_task.id,
+                .local_only = true,
+                .broker_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = now_ticks,
+                .expires_at_ticks = std.math.maxInt(u64),
+                .renewable = false,
+            },
+            .audit = .{
+                .policy_generation = 1,
+                .source_task_id = 0,
+                .broker_service_id = service_id,
+            },
+        });
+        try kernel_port.kernel.runtime.grantCapability(service_task.id, service_authority.id);
+        break :blk .{ service_task.id, service_authority.id };
+    } else blk: {
+        const service_task = try userspace_launch.launchRegisteredKernel(
+            catalog,
+            .{
+                .port = kernel_port,
+                .authority_capability_id = authority_capability_id,
+                .controller_task_id = controller_task_id,
+                .correlation_id = correlation_base,
+                .now_ticks = now_ticks,
+            },
+            bundle_id,
+            .{
+                .owner = owner,
+                .budget = budget,
+                .local_only = true,
+            },
+            schedule_task,
+        );
+        const derived_authority = try bootstrap_capabilities.deriveTaskCapability(
+            kernel_port,
+            controller_task_id,
+            authority_capability_id,
+            service_task.task_id,
+            bootstrap_rights,
+            correlation_base + 1,
+            now_ticks,
+        );
+        break :blk .{ service_task.task_id, derived_authority };
+    };
 
     const endpoint = try kernel_port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, correlation_base + 2, service_task.task_id),
+        .header = component_port.makeHeader(.endpoint_create, correlation_base + 2, service_task_id),
         .authority_capability_id = service_authority_capability_id,
-        .owner_task_id = service_task.task_id,
+        .owner_task_id = service_task_id,
         .label = interface.name,
         .flags = .{
             .local_only = true,
@@ -117,15 +155,15 @@ pub fn launchBundleService(
     }, now_ticks);
     if (class == .service_registry) {
         service_directory.bindBootstrap(.{
-            .task_id = service_task.task_id,
+            .task_id = service_task_id,
             .endpoint_id = endpoint.endpoint.endpoint_id,
             .endpoint_capability_id = endpoint.capability_id,
         });
     }
-    const service_record = kernel_port.kernel.runtime.find(service_task.task_id) orelse return error.TaskNotFound;
+    const service_record = kernel_port.kernel.runtime.find(service_task_id) orelse return error.TaskNotFound;
     try service_directory.register(
         service_id,
-        service_task.task_id,
+        service_task_id,
         endpoint.endpoint.endpoint_id,
         interface,
         kernel_descriptors.serviceBindingFlags(service_record),
@@ -133,7 +171,7 @@ pub fn launchBundleService(
     _ = supervisor.noteContractBound(service_id, endpoint.endpoint.endpoint_id, now_ticks);
 
     return .{
-        .task_id = service_task.task_id,
+        .task_id = service_task_id,
         .endpoint_id = endpoint.endpoint.endpoint_id,
     };
 }
@@ -154,8 +192,31 @@ pub fn attachDriver(
     driver_bundle_id: []const u8,
     now_ticks: u64,
 ) Error!*driver_service.DriverRecord {
-    _ = owner;
-    const driver_capability_id = try bootstrap_capabilities.mintTaskCapability(
+    const driver_capability_id = if (controller_task_id == 0) blk: {
+        const driver_capability = try capability_table.mintBootRoot(.{
+            .holder = owner,
+            .issuer = policy_authority,
+            .target = driver_service.authorityTarget(deviceId(device_class)),
+            .rights = driver_service.allowedRightsFor(device_class),
+            .scope = .{
+                .task_id = task_id,
+                .local_only = true,
+                .broker_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = now_ticks,
+                .expires_at_ticks = std.math.maxInt(u64),
+                .renewable = false,
+            },
+            .audit = .{
+                .policy_generation = 1,
+                .source_task_id = 0,
+                .broker_service_id = service_id,
+            },
+        });
+        try kernel_port.kernel.runtime.grantCapability(task_id, driver_capability.id);
+        break :blk driver_capability.id;
+    } else try bootstrap_capabilities.mintTaskCapability(
         kernel_port,
         controller_task_id,
         policy_capability_id,
@@ -195,6 +256,20 @@ pub fn launchDriverTask(
     correlation_base: u64,
     now_ticks: u64,
 ) Error!abi.TaskDescriptor {
+    if (controller_task_id == 0) {
+        const task = try userspace_launch.launchRegisteredDirect(
+            catalog,
+            kernel_port.kernel.runtime,
+            bundle_id,
+            .{
+                .owner = owner,
+                .budget = driverBudget(device_class),
+                .local_only = true,
+            },
+            schedule_task,
+        );
+        return kernel_descriptors.taskDescriptor(task);
+    }
     return userspace_launch.launchRegisteredKernel(
         catalog,
         .{
