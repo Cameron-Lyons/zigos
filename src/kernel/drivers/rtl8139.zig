@@ -449,7 +449,11 @@ fn rtl8139InterruptHandler(regs: *idt.InterruptRegisters) callconv(.c) void {
 
 fn rtl8139Send(data: []const u8) void {
     if (rtl8139_device) |*device| {
-        device.send(data) catch {};
+        device.send(data) catch |err| {
+            vga.print("RTL8139 TX dropped: ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+        };
     }
 }
 

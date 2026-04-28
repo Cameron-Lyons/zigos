@@ -1,4 +1,5 @@
 const vga = @import("../drivers/vga.zig");
+const panic_utils = @import("panic.zig");
 
 const MAX_ENV_VARS = 64;
 const MAX_VAR_NAME_LEN = 64;
@@ -32,11 +33,18 @@ pub fn init() void {
 
     initialized = true;
 
-    setVar("PATH", "/bin:/usr/bin:/mnt/bin") catch {};
-    setVar("HOME", "/home/user") catch {};
-    setVar("SHELL", "/bin/sh") catch {};
-    setVar("USER", "root") catch {};
-    setVar("TERM", "vga") catch {};
+    setDefaultVar("PATH", "/bin:/usr/bin:/mnt/bin");
+    setDefaultVar("HOME", "/home/user");
+    setDefaultVar("SHELL", "/bin/sh");
+    setDefaultVar("USER", "root");
+    setDefaultVar("TERM", "vga");
+}
+
+fn setDefaultVar(comptime name: []const u8, comptime value: []const u8) void {
+    setVar(name, value) catch |err| panic_utils.panic(
+        "Default environment variable violates invariant: {s}={s}: {s}",
+        .{ name, value, @errorName(err) },
+    );
 }
 
 pub fn setVar(name: []const u8, value: []const u8) !void {

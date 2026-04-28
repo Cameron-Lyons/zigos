@@ -246,10 +246,10 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
         .holder = writer,
         .issuer = spec_support.policyAuthority(1),
         .target = .{ .kind = .workspace, .id = workspace_record.id },
-        .rights = .{
+        .rights = .{ .workspace = .{
             .object_read = true,
             .object_write = true,
-        },
+        } },
         .scope = .{
             .task_id = 88,
             .workspace_id = workspace_record.id,

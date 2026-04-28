@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
 const manifest = @import("../policy/manifest.zig");
+const native_util = @import("../core/util.zig");
 const package_service = @import("../services/package_service.zig");
 const registry = @import("userspace_registry.zig");
 const task_runtime = @import("task_runtime.zig");
@@ -136,7 +137,7 @@ pub fn launchInstalledDirect(
     var resolved: package_service.ResolvedManifest = undefined;
     const bundle = try packages.resolveCurrentManifest(bundle_id, &resolved);
     const launch_plan = try packages.buildLaunchPlan(bundle_id);
-    if (launch_plan.component_count == 0) unreachable;
+    if (launch_plan.component_count == 0) return error.MissingBundleComponent;
 
     return launchDirectBundle(
         catalog,

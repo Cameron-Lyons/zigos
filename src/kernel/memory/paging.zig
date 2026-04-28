@@ -1,6 +1,7 @@
 const vga = @import("../drivers/vga.zig");
 const memory = @import("memory.zig");
 const swap = @import("swap.zig");
+const panic_utils = @import("../utils/panic.zig");
 
 fn isSwapped(vaddr: u32) bool {
     return swap.isSwapped(vaddr);
@@ -372,7 +373,13 @@ pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Register
 
     if (present) {
         if (isSwapped(faulting_address)) {
-            swapIn(faulting_address) catch {};
+            swapIn(faulting_address) catch |err| {
+                vga.print("\n=== PAGE FAULT SWAP-IN FAILED ===\n");
+                vga.print("Reason: ");
+                vga.print(@errorName(err));
+                vga.print("\n");
+                panic_utils.panic("Cannot recover swapped page at 0x{x}", .{faulting_address});
+            };
             return;
         }
         if (handle_demand_paging(faulting_address, write, user)) {

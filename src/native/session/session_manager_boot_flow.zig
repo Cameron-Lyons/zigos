@@ -1,7 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
-const bootstrap_packages = @import("../demo/bootstrap_packages.zig");
 const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
@@ -9,22 +8,14 @@ const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const endpoint_mod = @import("../kernel_api/endpoint.zig");
 const manifest = @import("../policy/manifest.zig");
-const bootstrap_review_profile = @import("../policy/bootstrap_review_profile.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const native_kernel = @import("../kernel_api/native_kernel.zig");
 const native_service_registry = @import("../services/service_registry.zig");
 const native_ux = @import("../platform/native_ux.zig");
-const permission_review_service = @import("../policy/permission_review_service.zig");
-const policy_mediation = @import("../policy/policy_mediation.zig");
-const policy_component_port = @import("../policy/policy_component_port.zig");
 const principal = @import("../core/principal.zig");
-const review_component_port = @import("../policy/review_component_port.zig");
 const package_service = @import("../services/package_service.zig");
 const session_bootstrap = @import("session_bootstrap.zig");
-const scenario_world = @import("../demo/scenario_world.zig");
-const transport_checks = @import("../demo/transport_checks.zig");
-const permission_flows = @import("../demo/permission_flows.zig");
 const service_catalog = @import("service_catalog.zig");
 const session_service_bootstrap = @import("session_service_bootstrap.zig");
 const session_support = @import("session_manager_support.zig");
@@ -41,11 +32,17 @@ const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 const workspace_mod = @import("../storage/workspace.zig");
 
-const BootstrapState = session_support.BootstrapState;
-const NotesReviewState = session_support.NotesReviewState;
-const ServiceBindings = session_support.ServiceBindings;
-const Environment = session_support.Environment;
+pub const BootstrapState = session_support.BootstrapState;
+pub const ServiceBindings = session_support.ServiceBindings;
+pub const Environment = session_support.Environment;
 const BootstrapError = error{ MissingBootstrapLaunch, MissingBootstrapGrant, MissingUserspaceImage } || session_bootstrap.Error || userspace_launch.Error || capability.Error || task_runtime.Error;
+
+pub const ServiceGraph = struct {
+    env: Environment,
+    state: BootstrapState,
+    kernel_port: *component_port.KernelPort,
+    service_bindings: ServiceBindings,
+};
 
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/common.zig")
@@ -218,76 +215,57 @@ pub const SessionManager = struct {
     }
 
     pub fn boot(self: *SessionManager) void {
-        self.ensureConstructed();
-        if (self.initialized) return;
-        self.initialized = true;
-        self.kernel_port_ready = false;
-
-        const env = environment(self);
-        const state = initializeBootstrapState(self) catch {
-            self.initialized = false;
-            self.kernel_port_ready = false;
-            return;
-        };
-        const kernel_port = prepareKernelInterface(self, state.ids.policy_authority, state.session_task.id);
-        var service_bindings = ServiceBindings.init();
-        if (!session_service_bootstrap.bootServices(&env, &state, kernel_port, &service_bindings)) {
-            self.initialized = false;
-            self.kernel_port_ready = false;
-            return;
-        }
-
-        self.storage_service_instance = storage_service_mod.Service.initWithStore(
-            state.services.storage_service.id,
-            service_bindings.bindingFor(.storage_object).task_id,
-            state.ids.storage_service,
-            &self.storage_checkpoint_store,
-        );
-        self.storage_service_instance.bindCapabilityTable(&self.capability_table);
-        self.storage_service_instance.checkpoint_enabled = false;
-
-        self.runtime_service.checkpoint(60);
+        _ = self.buildProductionServiceGraph() orelse return;
         common.printBootMarker(boot_markers.task_session_ready);
         common.printBootMarker(boot_markers.native_ready);
         printReadyBanner();
     }
 
-    pub fn bootScenarioWorld(self: *SessionManager) void {
+    pub fn beginServiceGraph(self: *SessionManager) ?ServiceGraph {
         self.ensureConstructed();
-        if (self.initialized) return;
+        if (self.initialized) return null;
         self.initialized = true;
         self.kernel_port_ready = false;
 
         const env = environment(self);
         const state = initializeBootstrapState(self) catch {
-            self.initialized = false;
-            self.kernel_port_ready = false;
-            return;
+            self.failBoot();
+            return null;
         };
-        bootstrap_packages.seed(&self.package_service_instance);
-        var mediator = initPolicyMediator(self, state.ids.policy_authority, state.services);
         const kernel_port = prepareKernelInterface(self, state.ids.policy_authority, state.session_task.id);
-        var service_bindings = ServiceBindings.init();
-        if (!session_service_bootstrap.bootRegistryService(&env, &state, kernel_port, &service_bindings)) {
-            self.initialized = false;
-            self.kernel_port_ready = false;
-            return;
-        }
-        var review_service = initReviewService(self, state.services.review_service_record.id, state.review_service_task.id);
-        var review_port = review_component_port.Port.init(&review_service);
-        var policy_port = policy_component_port.Port.init(&mediator);
-        common.printBootMarker(boot_markers.permission_review_port_ready);
-        common.printBootMarker(boot_markers.permission_policy_port_ready);
+        return .{
+            .env = env,
+            .state = state,
+            .kernel_port = kernel_port,
+            .service_bindings = ServiceBindings.init(),
+        };
+    }
 
-        runTransportChecks(&env, &state, kernel_port);
-        const notes_review = runPermissionFlows(&env, &state, kernel_port, &review_port, &policy_port);
-        if (!runServiceBootstrap(&env, &state, kernel_port, &service_bindings)) {
-            self.initialized = false;
-            self.kernel_port_ready = false;
-            return;
+    pub fn buildProductionServiceGraph(self: *SessionManager) ?ServiceGraph {
+        var graph = self.beginServiceGraph() orelse return null;
+        if (!session_service_bootstrap.bootServices(&graph.env, &graph.state, graph.kernel_port, &graph.service_bindings)) {
+            self.failBoot();
+            return null;
         }
-        runSessionLifecycle(self, &state, &service_bindings, notes_review);
-        printReadyBanner();
+        self.bindProductionStorageService(&graph);
+        self.runtime_service.checkpoint(60);
+        return graph;
+    }
+
+    pub fn bindProductionStorageService(self: *SessionManager, graph: *const ServiceGraph) void {
+        self.storage_service_instance = storage_service_mod.Service.initWithStore(
+            graph.state.services.storage_service.id,
+            graph.service_bindings.bindingFor(.storage_object).task_id,
+            graph.state.ids.storage_service,
+            &self.storage_checkpoint_store,
+        );
+        self.storage_service_instance.bindCapabilityTable(&self.capability_table);
+        self.storage_service_instance.checkpoint_enabled = false;
+    }
+
+    pub fn failBoot(self: *SessionManager) void {
+        self.initialized = false;
+        self.kernel_port_ready = false;
     }
 };
 
@@ -503,24 +481,6 @@ fn recordSessionTaskBootstrap(
     });
 }
 
-fn initPolicyMediator(
-    self: *SessionManager,
-    policy_authority: principal.PrincipalId,
-    services: session_bootstrap.CoreServices,
-) policy_mediation.PolicyMediator {
-    return policy_mediation.PolicyMediator.init(
-        policy_authority,
-        &self.capability_table,
-        self.runtime_service.runtimePtr(),
-        .{
-            .network_service_id = services.network_service.id,
-            .compositor_service_id = services.compositor_service.id,
-            .policy_service_id = services.policy_service.id,
-            .service_registry_id = services.service_registry.id,
-        },
-    );
-}
-
 fn prepareKernelInterface(
     self: *SessionManager,
     policy_authority: principal.PrincipalId,
@@ -543,89 +503,7 @@ fn prepareKernelInterface(
     return &self.kernel_port_instance;
 }
 
-fn initReviewService(
-    self: *SessionManager,
-    review_service_id: u64,
-    review_task_id: u64,
-) permission_review_service.Service {
-    return permission_review_service.Service.initProfiled(
-        review_service_id,
-        review_task_id,
-        &self.runtime,
-        &[_][]const u8{},
-        bootstrap_review_profile.rules[0..],
-        &self.review_compositor_session,
-        &self.review_ux_controller,
-    );
-}
-
-fn runTransportChecks(
-    env: *const Environment,
-    state: *const BootstrapState,
-    kernel_port: *component_port.KernelPort,
-) void {
-    transport_checks.run(env, state, kernel_port);
-}
-
-fn runPermissionFlows(
-    env: *const Environment,
-    state: *const BootstrapState,
-    kernel_port: *component_port.KernelPort,
-    review_port: *review_component_port.Port,
-    policy_port: *policy_component_port.Port,
-) NotesReviewState {
-    return permission_flows.run(env, state, kernel_port, review_port, policy_port);
-}
-
-fn runServiceBootstrap(
-    env: *const Environment,
-    state: *const BootstrapState,
-    kernel_port: *component_port.KernelPort,
-    service_bindings: *ServiceBindings,
-) bool {
-    return session_service_bootstrap.run(env, state, kernel_port, service_bindings);
-}
-
-fn runSessionLifecycle(
-    self: *SessionManager,
-    state: *const BootstrapState,
-    service_bindings: *const ServiceBindings,
-    notes_review: NotesReviewState,
-) void {
-    var lifecycle_context = scenario_world.Context{
-        .capability_table = &self.capability_table,
-        .runtime = &self.runtime,
-        .runtime_service = &self.runtime_service,
-        .userspace_catalog = &self.userspace_catalog,
-        .supervisor = &self.supervisor,
-        .compositor = &self.review_compositor_session,
-        .driver_directory = &self.driver_directory,
-        .storage_service_instance = &self.storage_service_instance,
-        .storage_checkpoint_store = &self.storage_checkpoint_store,
-        .export_package = &self.export_package_buffer,
-        .policy_authority = state.ids.policy_authority,
-        .session_service = state.ids.session_service,
-        .session_user = state.ids.session_user,
-        .storage_service_id = state.services.storage_service.id,
-        .storage_task_id = service_bindings.bindingFor(.storage_object).task_id,
-        .storage_service_principal = state.ids.storage_service,
-        .sync_service_id = state.services.sync_service.id,
-        .sync_task_id = service_bindings.bindingFor(.sync_replication).task_id,
-        .sync_service_principal = state.ids.sync_service,
-        .sync_resident_state = &self.sync_resident_state,
-        .policy_service_id = state.services.policy_service.id,
-        .network_service_id = state.services.network_service.id,
-        .compositor_service_id = state.services.compositor_service.id,
-        .package_service_id = state.services.package_service.id,
-        .package_service_principal = state.ids.package_service,
-        .update_ledger = &self.diagnostic_ledger,
-        .notes_task_id = notes_review.task_id,
-        .notes_object_capability = notes_review.object_capability,
-    };
-    scenario_world.run(&lifecycle_context);
-}
-
-fn printReadyBanner() void {
+pub fn printReadyBanner() void {
     console.print("Zigos native session manager online\n");
     console.print("Native ABI: capability-ipc-v");
     printNumber(abi.ABI_VERSION);

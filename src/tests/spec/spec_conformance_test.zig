@@ -1,3 +1,4 @@
+const adversarial_security = @import("adversarial_security.zig");
 const architecture_security = @import("architecture_security.zig");
 const boot_recovery = @import("boot_recovery.zig");
 const drivers_storage_sync = @import("drivers_storage_sync.zig");
@@ -124,4 +125,28 @@ test "spec 13.3 15.2 and 15.3 keep failures explainable restartable and redacted
 
 test "spec 19 user journeys keep installs sync permissions updates and recovery cohesive" {
     try runSpecCase(21);
+}
+
+test "adversarial spec rejects revoked capabilities during ipc" {
+    try adversarial_security.revokedCapabilitiesFailDuringIpc();
+}
+
+test "adversarial spec rejects expired leases at kernel service boundaries" {
+    try adversarial_security.expiredLeasesFailAtKernelServiceBoundaries();
+}
+
+test "adversarial spec rejects malformed manifests" {
+    try adversarial_security.malformedManifestsStayRejected();
+}
+
+test "adversarial spec refuses corrupted storage logs" {
+    try adversarial_security.corruptedStorageLogsDoNotReplay();
+}
+
+test "adversarial spec records service crash loops without losing restart state" {
+    try adversarial_security.serviceCrashLoopsRemainDiagnosableAndBounded();
+}
+
+test "adversarial spec treats downgrade and rollback metadata replay as invalid" {
+    try adversarial_security.downgradeAndRollbackAttacksNeedFreshSignedMetadata();
 }

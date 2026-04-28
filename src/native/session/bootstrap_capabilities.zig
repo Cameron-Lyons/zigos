@@ -3,15 +3,15 @@ const component_port = @import("../kernel_api/component_port.zig");
 const principal = @import("../core/principal.zig");
 
 pub fn serviceBootstrapRights() capability.CapabilityRights {
-    return .{
+    return .{ .service = .{
         .endpoint_create = true,
         .endpoint_connect = true,
         .ipc_peer = true,
-    };
+    } };
 }
 
 pub fn transportBootstrapRights() capability.CapabilityRights {
-    return .{
+    return .{ .service = .{
         .endpoint_create = true,
         .endpoint_connect = true,
         .capability_query = true,
@@ -20,7 +20,7 @@ pub fn transportBootstrapRights() capability.CapabilityRights {
         .resource_query = true,
         .accounting_query = true,
         .ipc_peer = true,
-    };
+    } };
 }
 
 pub fn deriveTaskCapability(

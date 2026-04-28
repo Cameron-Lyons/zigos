@@ -122,7 +122,7 @@ pub const Controller = struct {
         const permission = manifest.findBackgroundPermission(bundle, background_task_id) orelse {
             return self.recordDecision(task_id, background_task_id, trigger, background_task, .background_permission_missing, tick);
         };
-        if (!permission.rights.background_run) {
+        if (!permission.rights.has(.background_run)) {
             return self.recordDecision(task_id, background_task_id, trigger, background_task, .background_permission_missing, tick);
         }
         if (background_task.trigger != trigger) {
@@ -318,14 +318,14 @@ test "background dispatch accepts declared triggers and preserves task metadata"
     task.state = .active;
 
     const permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "schedule", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "push", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "change", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "proximity", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "sensor", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "media", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "policy", .rights = .{ .background_run = true } },
+        .{ .kind = .background_execution, .resource = "schedule", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "push", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "change", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "proximity", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "sensor", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "media", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "policy", .rights = .{ .task = .{ .background_run = true } } },
     };
     const background_tasks = [_]manifest.BackgroundTaskDecl{
         .{ .id = "schedule", .trigger = .user_approved_scheduled_job, .expected_duration_seconds = 30, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = 64 * 1024 }, .network = .none, .visibility = .status_only },
@@ -385,10 +385,10 @@ test "background dispatch throttles delayed work and denies abusive budgets" {
     task.state = .active;
 
     const safe_permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .background_run = true } },
+        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .task = .{ .background_run = true } } },
     };
     const abusive_permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "heavy", .rights = .{ .background_run = true } },
+        .{ .kind = .background_execution, .resource = "heavy", .rights = .{ .task = .{ .background_run = true } } },
     };
     const safe_tasks = [_]manifest.BackgroundTaskDecl{
         .{ .id = "sync", .trigger = .sync_completion, .expected_duration_seconds = 30, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = 64 * 1024 }, .network = .local_network_only, .visibility = .status_only },
@@ -479,8 +479,8 @@ test "background dispatch denies remote work for local-only tasks and user-visib
     no_surface.state = .active;
 
     const permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "remote", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "visible", .rights = .{ .background_run = true } },
+        .{ .kind = .background_execution, .resource = "remote", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "visible", .rights = .{ .task = .{ .background_run = true } } },
     };
     const tasks = [_]manifest.BackgroundTaskDecl{
         .{ .id = "remote", .trigger = .push_event, .expected_duration_seconds = 20, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = 64 * 1024 }, .network = .named_domains, .visibility = .status_only },
@@ -522,10 +522,10 @@ test "background dispatch requires the launched bundle and explicit run rights" 
     task.state = .active;
 
     const safe_permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .background_run = true } },
+        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .task = .{ .background_run = true } } },
     };
     const missing_right_permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "sync", .rights = .{} },
+        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .policy = .{} } },
     };
     const tasks = [_]manifest.BackgroundTaskDecl{
         .{ .id = "sync", .trigger = .sync_completion, .expected_duration_seconds = 30, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = 64 * 1024 }, .network = .local_network_only, .visibility = .status_only },
@@ -574,7 +574,7 @@ test "background dispatch reuses completed and denied record slots" {
     task.state = .active;
 
     const permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .background_run = true } },
+        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .task = .{ .background_run = true } } },
     };
     const tasks = [_]manifest.BackgroundTaskDecl{
         .{

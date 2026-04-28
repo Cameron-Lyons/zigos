@@ -43,6 +43,14 @@ pub fn fnv1a64AppendU64LittleEndian(hash: u64, value: u64) u64 {
     return next;
 }
 
+pub fn impossibleByInvariant(comptime message: []const u8) noreturn {
+    std.debug.panic("impossible by invariant: {s}", .{message});
+}
+
+pub fn impossibleByInvariantError(comptime message: []const u8, err: anyerror) noreturn {
+    std.debug.panic("impossible by invariant: {s}: {s}", .{ message, @errorName(err) });
+}
+
 test "copyTextExact rejects undersized destinations and preserves exact lengths" {
     var buffer = [_]u8{0} ** 4;
 

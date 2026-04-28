@@ -192,14 +192,14 @@ pub fn run(
             .holder = env.runtime.find(transport_probe_task.task_id).?.owner,
             .issuer = state.ids.policy_authority,
             .target = .{ .kind = .object, .id = 0xCAFE },
-            .rights = .{
+            .rights = .{ .object = .{
                 .object_read = true,
                 .object_write = true,
                 .capability_derive = true,
                 .capability_query = true,
                 .capability_revoke = true,
                 .capability_pass = true,
-            },
+            } },
             .scope = .{
                 .task_id = transport_probe_task.task_id,
                 .local_only = true,
@@ -230,7 +230,7 @@ pub fn run(
         .request = .{
             .parent_capability_id = derivable_capability.capability_id,
             .holder = env.runtime.find(transport_probe_task.task_id).?.owner,
-            .rights = .{ .object_read = true },
+            .rights = .{ .object = .{ .object_read = true } },
             .scope = .{
                 .task_id = transport_probe_task.task_id,
                 .local_only = true,
@@ -285,7 +285,7 @@ pub fn run(
         state.policy_capability.id,
         termination_probe_task.task_id,
         .{ .kind = .task, .id = termination_probe_task.task_id },
-        .{ .task_terminate = true },
+        .{ .task = .{ .task_terminate = true } },
         state.ids.policy_authority,
         18,
         8,

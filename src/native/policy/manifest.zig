@@ -223,7 +223,7 @@ pub fn validate(bundle: BundleManifest) ValidationError!void {
     if (bundle.ai_metadata.locality == .local_only) {
         for (bundle.requested_permissions) |request| {
             if (request.kind != .network_egress) continue;
-            if (!request.local_only or request.rights.network_remote) {
+            if (!request.local_only or request.rights.has(.network_remote)) {
                 return error.LocalOnlyAiRequiresLocalNetwork;
             }
         }
@@ -277,7 +277,7 @@ fn validateBackgroundTasks(bundle: BundleManifest) ValidationError!void {
         if (task.network == .unspecified) return error.BackgroundTaskNetworkMissing;
         if (task.visibility == .unspecified) return error.BackgroundTaskVisibilityMissing;
         const permission = findBackgroundPermission(bundle, task.id) orelse return error.BackgroundTaskMissingPermission;
-        if (!permission.rights.background_run) return error.BackgroundPermissionMissingRunRight;
+        if (!permission.rights.has(.background_run)) return error.BackgroundPermissionMissingRunRight;
 
         var duplicate_index: usize = 0;
         while (duplicate_index < index) : (duplicate_index += 1) {
@@ -352,7 +352,7 @@ test "validate requires local-only AI manifests to keep network requests local" 
         .{
             .kind = .network_egress,
             .resource = "internet",
-            .rights = .{ .network_remote = true },
+            .rights = .{ .network_policy = .{ .network_remote = true } },
             .local_only = false,
         },
     };
@@ -376,20 +376,20 @@ test "validate accepts a signed local-first bundle manifest" {
         .{
             .kind = .object_access,
             .resource = "workspace:notes",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
         },
         .{
             .kind = .network_egress,
             .resource = "lan.sync",
-            .rights = .{ .network_local = true },
+            .rights = .{ .network_policy = .{ .network_local = true } },
             .required = false,
             .local_only = true,
         },
         .{
             .kind = .background_execution,
             .resource = "sync",
-            .rights = .{ .background_run = true },
+            .rights = .{ .task = .{ .background_run = true } },
             .required = false,
         },
     };
@@ -447,7 +447,7 @@ test "validate rejects background execution permissions without task metadata" {
         .{
             .kind = .background_execution,
             .resource = "sync",
-            .rights = .{ .background_run = true },
+            .rights = .{ .task = .{ .background_run = true } },
             .required = false,
         },
     };
@@ -466,7 +466,7 @@ test "validate rejects incomplete background task declarations" {
         .{
             .kind = .background_execution,
             .resource = "sync",
-            .rights = .{ .background_run = true },
+            .rights = .{ .task = .{ .background_run = true } },
             .required = false,
         },
     };
@@ -495,7 +495,7 @@ test "validate rejects background tasks that omit network and visibility declara
         .{
             .kind = .background_execution,
             .resource = "sync",
-            .rights = .{ .background_run = true },
+            .rights = .{ .task = .{ .background_run = true } },
             .required = false,
         },
     };
@@ -544,7 +544,7 @@ test "validate rejects background task declarations without background run right
         .{
             .kind = .background_execution,
             .resource = "sync",
-            .rights = .{},
+            .rights = .{ .policy = .{} },
             .required = false,
         },
     };

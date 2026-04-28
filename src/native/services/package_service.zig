@@ -261,7 +261,7 @@ test "package service enforces signed manifests policy gated sources updates and
         .{
             .kind = .object_access,
             .resource = "workspace://notes",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
         },
     };
@@ -309,13 +309,13 @@ test "package service enforces signed manifests policy gated sources updates and
         .{
             .kind = .object_access,
             .resource = "workspace://notes",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
         },
         .{
             .kind = .network_egress,
             .resource = "relay.notes.example",
-            .rights = .{ .network_remote = true },
+            .rights = .{ .network_policy = .{ .network_remote = true } },
             .required = false,
         },
     };
@@ -423,7 +423,7 @@ test "package service rejects invalid signatures and rollback before any update"
         .{
             .kind = .object_access,
             .resource = "workspace://notes",
-            .rights = .{ .object_read = true },
+            .rights = .{ .object = .{ .object_read = true } },
             .local_only = true,
         },
     };
@@ -522,7 +522,7 @@ test "package service treats lease and target scope changes as declared permissi
         .{
             .kind = .object_access,
             .resource = "workspace://notes",
-            .rights = .{ .object_read = true },
+            .rights = .{ .object = .{ .object_read = true } },
             .local_only = true,
             .max_lease_ticks = 120,
             .target_id = 7,
@@ -552,7 +552,7 @@ test "package service treats lease and target scope changes as declared permissi
         .{
             .kind = .object_access,
             .resource = "workspace://notes",
-            .rights = .{ .object_read = true },
+            .rights = .{ .object = .{ .object_read = true } },
             .local_only = true,
             .max_lease_ticks = 240,
             .target_id = 9,
@@ -607,7 +607,7 @@ test "package service accepts compatible schema updates without a migration mani
         .{
             .kind = .object_access,
             .resource = "workspace://notes",
-            .rights = .{ .object_read = true },
+            .rights = .{ .object = .{ .object_read = true } },
             .local_only = true,
         },
     };
@@ -667,14 +667,14 @@ test "package service resolves installed manifests with stable slices" {
         .{
             .kind = .object_access,
             .resource = "workspace:notes",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
             .max_lease_ticks = 400,
         },
         .{
             .kind = .background_execution,
             .resource = "sync",
-            .rights = .{ .background_run = true },
+            .rights = .{ .task = .{ .background_run = true } },
         },
     };
     const background_tasks = [_]manifest.BackgroundTaskDecl{
@@ -751,19 +751,19 @@ test "package service round-trips the example writer manifest fields without wid
         .{
             .kind = .object_access,
             .resource = "workspace://report-alpha",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
         },
         .{
             .kind = .network_egress,
             .resource = "sync.example.com",
-            .rights = .{ .network_remote = true },
+            .rights = .{ .network_policy = .{ .network_remote = true } },
             .required = false,
         },
         .{
             .kind = .background_execution,
             .resource = "sync-complete",
-            .rights = .{ .background_run = true },
+            .rights = .{ .task = .{ .background_run = true } },
             .required = false,
         },
     };

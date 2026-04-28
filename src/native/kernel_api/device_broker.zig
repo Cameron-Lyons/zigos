@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const abi = @import("../core/abi.zig");
+const native_util = @import("../core/util.zig");
 const storage_driver_protocol = @import("../drivers/storage_driver_protocol.zig");
 
 const x86 = if (builtin.target.os.tag == .freestanding)
@@ -8,15 +9,15 @@ const x86 = if (builtin.target.os.tag == .freestanding)
 else
     struct {
         pub fn inb(_: u16) u8 {
-            unreachable;
+            native_util.impossibleByInvariant("host device broker cannot perform x86 port input");
         }
 
         pub fn inw(_: u16) u16 {
-            unreachable;
+            native_util.impossibleByInvariant("host device broker cannot perform x86 port input");
         }
 
         pub fn inl(_: u16) u32 {
-            unreachable;
+            native_util.impossibleByInvariant("host device broker cannot perform x86 port input");
         }
 
         pub fn outb(_: u16, _: u8) void {}

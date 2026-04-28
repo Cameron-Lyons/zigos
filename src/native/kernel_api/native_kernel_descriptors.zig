@@ -44,7 +44,7 @@ pub fn capabilityDescriptor(owned: capability.Capability) abi.CapabilityDescript
     return .{
         .capability_id = owned.id,
         .target_id = owned.target.id,
-        .rights = @bitCast(owned.rights),
+        .rights = owned.rights.toBits(),
         .revocation_generation = owned.revocation_generation,
         .expires_at_ticks = owned.lease.expires_at_ticks,
         .scope_task_id = owned.scope.task_id orelse 0,

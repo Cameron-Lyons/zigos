@@ -114,7 +114,7 @@ pub const Manager = struct {
 
         if (storage.resolve(workspace_id, state_entry_path)) |entry| {
             const version = storage.version(entry.version_id) orelse return error.CorruptState;
-            try manager.decode(version.payloadSlice());
+            try manager.decode(try storage.versionPayload(version));
             manager.loaded_existing_state = true;
         } else |err| switch (err) {
             error.EntryNotFound => {},
@@ -252,7 +252,8 @@ pub const Manager = struct {
         const version = self.storage.version(image.version_id) orelse return false;
         if (version.object_id != image.object_id or version.object_type != .model_artifact) return false;
         if (!version.metadata.isSigned() or !version.metadata.signature.isComplete()) return false;
-        if (!version.metadata.verifyFor(.model_artifact, version.payloadSlice())) return false;
+        const payload = self.storage.versionPayload(version) catch return false;
+        if (!version.metadata.verifyFor(.model_artifact, payload)) return false;
         if (!std.mem.eql(u8, version.metadata.signature.signer, image.signerSlice())) return false;
         return std.mem.eql(u8, &version.blob_address, &image.measurement);
     }

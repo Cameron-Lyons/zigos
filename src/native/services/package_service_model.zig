@@ -102,7 +102,7 @@ pub const StoredPermission = struct {
     kind: manifest.PermissionKind = .object_access,
     resource_len: usize = 0,
     resource: [MAX_PERMISSION_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_RESOURCE_BYTES,
-    rights: @FieldType(manifest.PermissionRequest, "rights") = .{},
+    rights: @FieldType(manifest.PermissionRequest, "rights") = .{ .policy = .{} },
     required: bool = true,
     local_only: bool = false,
     max_lease_ticks: u64 = 0,

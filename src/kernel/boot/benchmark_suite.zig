@@ -171,19 +171,19 @@ const permission_review_requests = [_]manifest.PermissionRequest{
     .{
         .kind = .object_access,
         .resource = "workspace://trip/documents/plan.md",
-        .rights = .{
+        .rights = .{ .object = .{
             .object_read = true,
             .object_write = true,
-        },
+        } },
         .local_only = true,
         .max_lease_ticks = 400,
     },
     .{
         .kind = .network_egress,
         .resource = "https://api.example.com",
-        .rights = .{
+        .rights = .{ .network_policy = .{
             .network_remote = true,
-        },
+        } },
         .required = false,
         .max_lease_ticks = 60,
     },
@@ -204,7 +204,7 @@ const background_permissions = [_]manifest.PermissionRequest{
     .{
         .kind = .background_execution,
         .resource = "sync",
-        .rights = .{ .background_run = true },
+        .rights = .{ .task = .{ .background_run = true } },
     },
 };
 
@@ -236,7 +236,7 @@ const package_v1_permissions = [_]manifest.PermissionRequest{
     .{
         .kind = .object_access,
         .resource = "workspace://notes",
-        .rights = .{ .object_read = true, .object_write = true },
+        .rights = .{ .object = .{ .object_read = true, .object_write = true } },
         .local_only = true,
     },
 };
@@ -245,13 +245,13 @@ const package_v2_permissions = [_]manifest.PermissionRequest{
     .{
         .kind = .object_access,
         .resource = "workspace://notes",
-        .rights = .{ .object_read = true, .object_write = true },
+        .rights = .{ .object = .{ .object_read = true, .object_write = true } },
         .local_only = true,
     },
     .{
         .kind = .network_egress,
         .resource = "relay.notes.example",
-        .rights = .{ .network_remote = true },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
         .required = false,
     },
 };
@@ -384,7 +384,7 @@ fn prepareFileBridgeFixture() void {
         .holder = app(1),
         .issuer = policyAuthority(1),
         .target = .{ .kind = .object, .id = 900 },
-        .rights = .{ .object_read = true, .object_write = true },
+        .rights = .{ .object = .{ .object_read = true, .object_write = true } },
         .scope = .{
             .task_id = 7,
             .workspace_id = file_bridge_context.expected_workspace_id,
@@ -643,11 +643,11 @@ fn benchmarkCapabilityDerive(iteration: u32) u64 {
         .holder = app(10),
         .issuer = policyAuthority(1),
         .target = .{ .kind = .workspace, .id = 500 + iteration },
-        .rights = .{
+        .rights = .{ .object = .{
             .object_read = true,
             .object_write = true,
             .capability_derive = true,
-        },
+        } },
         .scope = .{
             .task_id = 700 + iteration,
             .workspace_id = 500 + iteration,
@@ -665,7 +665,7 @@ fn benchmarkCapabilityDerive(iteration: u32) u64 {
     const derived = table.derive(.{
         .parent_capability_id = parent.id,
         .holder = app(11),
-        .rights = .{ .object_read = true },
+        .rights = .{ .object = .{ .object_read = true } },
         .scope = .{
             .task_id = 700 + iteration,
             .workspace_id = 500 + iteration,

@@ -224,21 +224,21 @@ pub fn authorityTarget(device_id: u64) capability.CapabilityTarget {
 
 pub fn allowedRightsFor(device_class: DeviceClass) capability.CapabilityRights {
     return switch (device_class) {
-        .network_adapter => .{
+        .network_adapter => .{ .device = .{
             .device_use = true,
             .network_local = true,
-        },
-        .storage_controller => .{
+        } },
+        .storage_controller => .{ .device = .{
             .device_use = true,
             .object_read = true,
             .object_write = true,
-        },
-        .graphics_adapter => .{
+        } },
+        .graphics_adapter => .{ .device = .{
             .device_use = true,
-        },
-        .audio_print_io => .{
+        } },
+        .audio_print_io => .{ .device = .{
             .device_use = true,
-        },
+        } },
     };
 }
 
@@ -250,8 +250,8 @@ pub fn supportsKernelPublishedTransport(device_class: DeviceClass) bool {
 }
 
 fn rightsAreSubset(owned: capability.CapabilityRights, allowed: capability.CapabilityRights) bool {
-    const owned_bits: u32 = @bitCast(owned);
-    const allowed_bits: u32 = @bitCast(allowed);
+    const owned_bits = owned.toBits();
+    const allowed_bits = allowed.toBits();
     return (owned_bits & ~allowed_bits) == 0;
 }
 
@@ -377,12 +377,12 @@ test "driver services reject unsigned bundles and escalated device rights" {
         .holder = .{ .kind = .service, .serial = 3 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = authorityTarget(200),
-        .rights = .{
+        .rights = .{ .device = .{
             .device_use = true,
             .object_read = true,
             .object_write = true,
             .sensor_read = true,
-        },
+        } },
         .scope = .{
             .task_id = 9,
             .local_only = true,

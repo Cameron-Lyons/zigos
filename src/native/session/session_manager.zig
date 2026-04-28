@@ -1,4 +1,5 @@
 const boot_flow = @import("session_manager_boot_flow.zig");
+const demo_boot = @import("../demo/session_demo_boot.zig");
 const background_dispatch = @import("../task/background_dispatch.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const driver_runtime = @import("../drivers/driver_runtime.zig");
@@ -105,7 +106,7 @@ pub fn boot() void {
 }
 
 pub fn bootScenarioWorld() void {
-    default_manager.bootScenarioWorld();
+    demo_boot.bootScenarioWorld(&default_manager);
 }
 
 pub fn kernelPort() ?*component_port.KernelPort {

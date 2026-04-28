@@ -60,7 +60,7 @@ const max_workspace_state_bytes: usize = 16 * 1024;
 
 const volume_magic = "ZG4VOL1";
 const payload_magic = "ZG4STATE";
-const format_version: u16 = 2;
+const format_version: u16 = 3;
 
 pub const Error = error{
     ChecksumMismatch,
@@ -220,6 +220,7 @@ const LogRecordKind = enum(u8) {
     version_state = 3,
     workspace_state = 4,
     snapshot_state = 5,
+    blob_state = 6,
 };
 
 const LogRecordHeader = struct {
@@ -409,6 +410,9 @@ fn buildDeltaLog(
     for (store.versions) |slot| {
         if (!slot.in_use) continue;
         if (slot.version.id <= root.last_version_id) continue;
+        if (store.blob(slot.version.blob_address)) |blob| {
+            try appendBlobRecord(&writer, blob.*);
+        }
         try appendVersionRecord(&writer, slot.version);
     }
 
@@ -491,6 +495,7 @@ fn replayLog(store: *object_store.Store, workspaces: *workspace.Directory, log: 
                 saw_checkpoint = true;
             },
             .object_state => try applyObjectRecord(store, payload),
+            .blob_state => try applyBlobRecord(store, payload),
             .version_state => try applyVersionRecord(store, payload),
             .workspace_state => try applyWorkspaceRecord(workspaces, payload),
             .snapshot_state => try applySnapshotRecord(workspaces, payload),
@@ -571,6 +576,7 @@ fn parseLogRecordKind(value: u8) Error!LogRecordKind {
         @intFromEnum(LogRecordKind.version_state) => .version_state,
         @intFromEnum(LogRecordKind.workspace_state) => .workspace_state,
         @intFromEnum(LogRecordKind.snapshot_state) => .snapshot_state,
+        @intFromEnum(LogRecordKind.blob_state) => .blob_state,
         else => error.CorruptImage,
     };
 }
@@ -591,6 +597,19 @@ fn encodeVersionBody(writer: *CursorWriter, record: object_store.VersionRecord) 
     try writer.writeBytes(&record.version_address);
     try writeMetadata(writer, record.metadata);
     try writer.writeU16(@intCast(record.payload_len));
+    try writer.writeU16(record.chunk_count);
+}
+
+fn appendBlobRecord(writer: *CursorWriter, record: object_store.BlobRecord) Error!void {
+    const header_offset = try beginRecord(writer, .blob_state);
+    try encodeBlobBody(writer, record);
+    try finishRecord(writer, header_offset);
+}
+
+fn encodeBlobBody(writer: *CursorWriter, record: object_store.BlobRecord) Error!void {
+    try writer.writeBytes(&record.address);
+    try writer.writeU16(@intCast(record.payload_len));
+    try writer.writeU16(record.ref_count);
     try writer.writeBytes(record.payloadSlice());
 }
 
@@ -662,8 +681,21 @@ fn applyVersionRecord(store: *object_store.Store, payload: []const u8) Error!voi
     store.versions[slot_index].version.metadata = try readMetadata(&reader, &version_signers[slot_index]);
     store.versions[slot_index].version.payload_len = @intCast(try reader.readU16());
     if (store.versions[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
-    @memset(store.versions[slot_index].version.payload[0..], 0);
-    try reader.readBytes(store.versions[slot_index].version.payload[0..store.versions[slot_index].version.payload_len]);
+    store.versions[slot_index].version.chunk_count = try reader.readU16();
+    store.versions[slot_index].version.blob_slot_index = findBlobSlotIndex(store, store.versions[slot_index].version.blob_address) orelse return error.CorruptImage;
+}
+
+fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
+    var reader = CursorReader{ .buffer = payload };
+    var address: object_store.BlobAddress = undefined;
+    try reader.readBytes(&address);
+    const payload_len: usize = @intCast(try reader.readU16());
+    const ref_count = try reader.readU16();
+    if (payload_len > object_store.MAX_BLOB_BYTES) return error.CorruptImage;
+    var bytes: [object_store.MAX_BLOB_BYTES]u8 = [_]u8{0} ** object_store.MAX_BLOB_BYTES;
+    try reader.readBytes(bytes[0..payload_len]);
+    const slot_index = store.putBlob(address, bytes[0..payload_len]) catch return error.CorruptImage;
+    store.blobs[slot_index].blob.ref_count = ref_count;
 }
 
 fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) Error!void {
@@ -733,6 +765,7 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
     try writer.writeU64(store.next_version_id);
     try writer.writeU16(@intCast(store.objectCount()));
     try writer.writeU16(@intCast(store.versionCount()));
+    try writer.writeU16(@intCast(store.blobCount()));
     try writer.writeU64(workspaces.next_workspace_id);
     try writer.writeU64(workspaces.next_snapshot_id);
     try writer.writeU16(@intCast(workspaceCount(workspaces)));
@@ -746,6 +779,11 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
         try writer.writeU16(slot.object.version_count);
     }
 
+    for (store.blobs) |slot| {
+        if (!slot.in_use) continue;
+        try encodeBlobBody(&writer, slot.blob);
+    }
+
     for (store.versions) |slot| {
         if (!slot.in_use) continue;
         try writer.writeU64(slot.version.id);
@@ -756,7 +794,7 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
         try writer.writeBytes(&slot.version.version_address);
         try writeMetadata(&writer, slot.version.metadata);
         try writer.writeU16(@intCast(slot.version.payload_len));
-        try writer.writeBytes(slot.version.payloadSlice());
+        try writer.writeU16(slot.version.chunk_count);
     }
 
     for (workspaces.workspaces) |slot| {
@@ -809,6 +847,7 @@ fn deserializeState(store: *object_store.Store, workspaces: *workspace.Directory
     store.next_version_id = try reader.readU64();
     const object_count = try reader.readU16();
     const version_count = try reader.readU16();
+    const blob_count = try reader.readU16();
     workspaces.next_workspace_id = try reader.readU64();
     workspaces.next_snapshot_id = try reader.readU64();
     const workspace_count_value = try reader.readU16();
@@ -816,6 +855,7 @@ fn deserializeState(store: *object_store.Store, workspaces: *workspace.Directory
 
     if (object_count > object_store.MAX_OBJECTS or
         version_count > object_store.MAX_VERSIONS or
+        blob_count > object_store.MAX_BLOBS or
         workspace_count_value > workspace.MAX_WORKSPACES or
         snapshot_count_value > workspace.MAX_SNAPSHOTS)
     {
@@ -831,6 +871,18 @@ fn deserializeState(store: *object_store.Store, workspaces: *workspace.Directory
         slot.object.version_count = try reader.readU16();
     }
 
+    for (0..@as(usize, blob_count)) |_| {
+        const slot = nextBlobSlot(store) orelse return error.CorruptImage;
+        slot.in_use = true;
+        try reader.readBytes(&slot.blob.address);
+        slot.blob.payload_len = @intCast(try reader.readU16());
+        slot.blob.ref_count = try reader.readU16();
+        if (slot.blob.payload_len > object_store.MAX_BLOB_BYTES) return error.CorruptImage;
+        @memset(slot.blob.payload[0..], 0);
+        try reader.readBytes(slot.blob.payload[0..slot.blob.payload_len]);
+        if (!std.mem.eql(u8, &object_store.computeBlobAddress(slot.blob.payloadSlice()), &slot.blob.address)) return error.CorruptImage;
+    }
+
     for (0..@as(usize, version_count)) |_| {
         const slot_index = nextVersionSlotIndex(store) orelse return error.CorruptImage;
         store.versions[slot_index].in_use = true;
@@ -843,8 +895,8 @@ fn deserializeState(store: *object_store.Store, workspaces: *workspace.Directory
         store.versions[slot_index].version.metadata = try readMetadata(&reader, &version_signers[slot_index]);
         store.versions[slot_index].version.payload_len = @intCast(try reader.readU16());
         if (store.versions[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
-        @memset(store.versions[slot_index].version.payload[0..], 0);
-        try reader.readBytes(store.versions[slot_index].version.payload[0..store.versions[slot_index].version.payload_len]);
+        store.versions[slot_index].version.chunk_count = try reader.readU16();
+        store.versions[slot_index].version.blob_slot_index = findBlobSlotIndex(store, store.versions[slot_index].version.blob_address) orelse return error.CorruptImage;
     }
 
     for (0..@as(usize, workspace_count_value)) |_| {
@@ -1113,6 +1165,20 @@ fn nextObjectSlot(store: *object_store.Store) ?*@TypeOf(store.objects[0]) {
 fn nextVersionSlotIndex(store: *object_store.Store) ?usize {
     for (store.versions, 0..) |slot, index| {
         if (!slot.in_use) return index;
+    }
+    return null;
+}
+
+fn nextBlobSlot(store: *object_store.Store) ?*object_store.BlobSlot {
+    for (&store.blobs) |*slot| {
+        if (!slot.in_use) return slot;
+    }
+    return null;
+}
+
+fn findBlobSlotIndex(store: *const object_store.Store, address: object_store.BlobAddress) ?usize {
+    for (store.blobs, 0..) |slot, index| {
+        if (slot.in_use and std.mem.eql(u8, &slot.blob.address, &address)) return index;
     }
     return null;
 }
@@ -1512,7 +1578,9 @@ test "storage volume image reloads the latest persisted state across slot genera
     const loaded_generation = try loadFromImage(image, &loaded_store, &loaded_workspaces);
     try std.testing.expectEqual(@as(u64, 2), loaded_generation);
     try std.testing.expectEqual(@as(usize, 1), loaded_store.objectCount());
+    try std.testing.expectEqual(@as(usize, 2), loaded_store.blobCount());
     try std.testing.expectEqual(second.version_id, loaded_store.latestVersion(900).?.id);
+    try std.testing.expectEqualStrings("hello again", try loaded_store.versionPayload(loaded_store.latestVersion(900).?));
     try std.testing.expectEqualStrings("zigos-storage-key", loaded_store.latestVersion(900).?.metadata.signature.signer);
     const loaded_notes = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 1 }, "notes").?;
     try std.testing.expectEqual(second.version_id, (try loaded_workspaces.resolve(loaded_notes.id, "documents/notes.md")).version_id);

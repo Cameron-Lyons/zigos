@@ -6,6 +6,7 @@ const device_broker = @import("device_broker.zig");
 const endpoint = @import("endpoint.zig");
 const kernel_access = @import("native_kernel_access.zig");
 const kernel_descriptors = @import("native_kernel_descriptors.zig");
+const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const shared_memory = @import("shared_memory.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -84,7 +85,7 @@ pub const Kernel = struct {
         request: task_runtime.TaskCreateRequest,
         now_ticks: u64,
     ) Error!abi.TaskDescriptor {
-        const auth = try self.requireOperationCapability(context, .task_create, now_ticks, .{ .task_create = true });
+        const auth = try self.requireOperationCapability(context, .task_create, now_ticks, capability.CapabilityRights.single(.task_create));
         if (auth.scope.local_only and !request.local_only) return error.ScopeViolation;
         try validateTaskCreateRequest(request);
 
@@ -101,7 +102,7 @@ pub const Kernel = struct {
             context,
             .task_terminate,
             now_ticks,
-            .{ .task_terminate = true },
+            capability.CapabilityRights.single(.task_terminate),
             .task,
         );
         return self.runtime.terminateTask(task_capability.target.id, now_ticks);
@@ -115,7 +116,7 @@ pub const Kernel = struct {
         flags: endpoint.EndpointFlags,
         now_ticks: u64,
     ) Error!EndpointCreateResult {
-        const auth = try self.requireOperationCapability(context, .endpoint_create, now_ticks, .{ .endpoint_create = true });
+        const auth = try self.requireOperationCapability(context, .endpoint_create, now_ticks, capability.CapabilityRights.single(.endpoint_create));
         if (auth.scope.task_id) |scoped_task_id| {
             if (scoped_task_id != owner_task_id) return error.ScopeViolation;
         }
@@ -127,12 +128,12 @@ pub const Kernel = struct {
             .holder = task.owner,
             .issuer = self.policy_authority,
             .target = .{ .kind = .endpoint, .id = created.id },
-            .rights = .{
+            .rights = .{ .endpoint = .{
                 .endpoint_connect = true,
                 .endpoint_send = true,
                 .endpoint_recv = true,
                 .capability_query = true,
-            },
+            } },
             .scope = .{
                 .task_id = owner_task_id,
                 .local_only = flags.local_only,
@@ -166,7 +167,7 @@ pub const Kernel = struct {
             context,
             .endpoint_connect,
             now_ticks,
-            .{ .endpoint_connect = true },
+            capability.CapabilityRights.single(.endpoint_connect),
             .endpoint,
         );
         try self.endpoint_table.connect(endpoint_capability.target.id, peer_endpoint_id);
@@ -186,7 +187,7 @@ pub const Kernel = struct {
             context,
             .endpoint_send,
             now_ticks,
-            .{ .endpoint_send = true },
+            capability.CapabilityRights.single(.endpoint_send),
             .endpoint,
         );
         if (attached_capability_id) |capability_id| {
@@ -195,7 +196,7 @@ pub const Kernel = struct {
             }
             const attached = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
             if (!self.capability_table.isUsable(attached, now_ticks)) return error.CapabilityRevoked;
-            if (!attached.rights.capability_pass) return error.PermissionDenied;
+            if (!attached.rights.has(.capability_pass)) return error.PermissionDenied;
             if (attached.scope.task_id != endpoint_capability.scope.task_id) return error.ScopeViolation;
         }
 
@@ -219,7 +220,7 @@ pub const Kernel = struct {
             context,
             .endpoint_recv,
             now_ticks,
-            .{ .endpoint_recv = true },
+            capability.CapabilityRights.single(.endpoint_recv),
             .endpoint,
         );
         if (endpoint_capability.scope.task_id) |scoped_task_id| {
@@ -280,9 +281,9 @@ pub const Kernel = struct {
         now_ticks: u64,
     ) Error!abi.CapabilityDescriptor {
         try self.requireCallSubject(context, .capability_mint, now_ticks);
-        _ = try self.requireTargetedCapability(context.presented_capability_id, now_ticks, .{
+        _ = try self.requireTargetedCapability(context.presented_capability_id, now_ticks, .{ .policy = .{
             .capability_mint = true,
-        }, .policy);
+        } }, .policy);
         if (request.scope.task_id) |task_id| {
             const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
             if (!task.owner.eql(request.holder)) return error.PermissionDenied;
@@ -312,7 +313,8 @@ pub const Kernel = struct {
             while (revoke_index < attached_count) : (revoke_index += 1) {
                 const entry = plan.entries[revoke_index];
                 if (entry.task_id != 0) {
-                    _ = self.runtime.revokeCapability(entry.task_id, minted[revoke_index].id) catch false;
+                    _ = self.runtime.revokeCapability(entry.task_id, minted[revoke_index].id) catch |err|
+                        native_util.impossibleByInvariantError("rollback revokes capabilities attached earlier in this kernel grant transaction", err);
                 }
             }
             self.capability_table.rollbackGrant(minted);
@@ -339,7 +341,7 @@ pub const Kernel = struct {
     }
 
     pub fn capabilityDerive(self: *Kernel, context: KernelCallContext, request: capability.DeriveRequest) Error!abi.CapabilityDescriptor {
-        _ = try self.requireOperationCapability(context, .capability_derive, request.lease.issued_at_ticks, .{ .capability_derive = true });
+        _ = try self.requireOperationCapability(context, .capability_derive, request.lease.issued_at_ticks, capability.CapabilityRights.single(.capability_derive));
         if (request.scope.task_id) |task_id| {
             const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
             if (!task.owner.eql(request.holder)) return error.PermissionDenied;
@@ -361,7 +363,7 @@ pub const Kernel = struct {
         revoke_source: bool,
     ) Error!abi.CapabilityDescriptor {
         const capability_id = context.presented_capability_id;
-        _ = try self.requireOperationCapability(context, .capability_pass, now_ticks, .{ .capability_pass = true });
+        _ = try self.requireOperationCapability(context, .capability_pass, now_ticks, capability.CapabilityRights.single(.capability_pass));
         const receiver = self.runtime.find(receiver_task_id) orelse return error.TaskNotFound;
         try self.validateRuntimeGrant(receiver_task_id, 1);
         const original = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
@@ -389,7 +391,7 @@ pub const Kernel = struct {
     }
 
     pub fn capabilityRevoke(self: *Kernel, context: KernelCallContext, capability_id: u64, now_ticks: u64) Error!void {
-        _ = try self.requireOperationCapability(context, .capability_revoke, now_ticks, .{ .capability_revoke = true });
+        _ = try self.requireOperationCapability(context, .capability_revoke, now_ticks, capability.CapabilityRights.single(.capability_revoke));
         const revoked = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
         try self.capability_table.revokeTargetAuthority(capability_id);
         if (revoked.scope.task_id) |task_id| {
@@ -403,7 +405,7 @@ pub const Kernel = struct {
         capability_id: u64,
         now_ticks: u64,
     ) Error!abi.CapabilityDescriptor {
-        _ = try self.requireOperationCapability(context, .capability_query, now_ticks, .{ .capability_query = true });
+        _ = try self.requireOperationCapability(context, .capability_query, now_ticks, capability.CapabilityRights.single(.capability_query));
         const queried = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
         return capabilityDescriptor(queried);
     }
@@ -415,9 +417,9 @@ pub const Kernel = struct {
         size_bytes: usize,
         now_ticks: u64,
     ) Error!SharedMemoryCreateResult {
-        const auth = try self.requireOperationCapability(context, .shared_memory_create, now_ticks, .{
+        const auth = try self.requireOperationCapability(context, .shared_memory_create, now_ticks, .{ .shared_memory = .{
             .shared_memory_create = true,
-        });
+        } });
         if (auth.scope.task_id) |scoped_task_id| {
             if (scoped_task_id != owner_task_id) return error.ScopeViolation;
         }
@@ -428,13 +430,13 @@ pub const Kernel = struct {
             .holder = task.owner,
             .issuer = self.policy_authority,
             .target = .{ .kind = .shared_memory, .id = object.id },
-            .rights = .{
+            .rights = .{ .shared_memory = .{
                 .shared_memory_map = true,
                 .shared_memory_unmap = true,
                 .shared_memory_revoke = true,
                 .capability_pass = true,
                 .capability_query = true,
-            },
+            } },
             .scope = .{
                 .task_id = owner_task_id,
                 .local_only = true,
@@ -468,7 +470,7 @@ pub const Kernel = struct {
             context,
             .shared_memory_map,
             now_ticks,
-            .{ .shared_memory_map = true },
+            capability.CapabilityRights.single(.shared_memory_map),
             .shared_memory,
         );
         if (object_capability.scope.task_id) |scoped_task_id| {
@@ -488,7 +490,7 @@ pub const Kernel = struct {
             context,
             .shared_memory_unmap,
             now_ticks,
-            .{ .shared_memory_unmap = true },
+            capability.CapabilityRights.single(.shared_memory_unmap),
             .shared_memory,
         );
         if (object_capability.scope.task_id) |scoped_task_id| {
@@ -506,7 +508,7 @@ pub const Kernel = struct {
             context,
             .shared_memory_revoke,
             now_ticks,
-            .{ .shared_memory_revoke = true },
+            capability.CapabilityRights.single(.shared_memory_revoke),
             .shared_memory,
         );
         try self.shared_memory_table.revoke(object_capability.target.id);
@@ -514,7 +516,7 @@ pub const Kernel = struct {
     }
 
     pub fn timeQuery(self: *Kernel, context: KernelCallContext, now_ticks: u64) Error!u64 {
-        _ = try self.requireOperationCapability(context, .time_query, now_ticks, .{ .time_query = true });
+        _ = try self.requireOperationCapability(context, .time_query, now_ticks, capability.CapabilityRights.single(.time_query));
         return now_ticks;
     }
 
@@ -524,7 +526,7 @@ pub const Kernel = struct {
         task_id: u64,
         now_ticks: u64,
     ) Error!abi.ResourceDescriptor {
-        _ = try self.requireOperationCapability(context, .resource_query, now_ticks, .{ .resource_query = true });
+        _ = try self.requireOperationCapability(context, .resource_query, now_ticks, capability.CapabilityRights.single(.resource_query));
         const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
         return .{
             .task_id = task.id,
@@ -544,7 +546,7 @@ pub const Kernel = struct {
         task_id: u64,
         now_ticks: u64,
     ) Error!abi.AccountingDescriptor {
-        _ = try self.requireOperationCapability(context, .accounting_query, now_ticks, .{ .accounting_query = true });
+        _ = try self.requireOperationCapability(context, .accounting_query, now_ticks, capability.CapabilityRights.single(.accounting_query));
         const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
         return .{
             .task_id = task.id,
@@ -566,7 +568,7 @@ pub const Kernel = struct {
             context,
             .device_describe,
             now_ticks,
-            .{ .device_use = true },
+            capability.CapabilityRights.single(.device_use),
             .device,
         );
         return deviceDescriptor(try device_broker.describe(device_capability.target.id));
@@ -582,7 +584,7 @@ pub const Kernel = struct {
             context,
             .device_mmio_window,
             now_ticks,
-            .{ .device_use = true },
+            capability.CapabilityRights.single(.device_use),
             .device,
         );
         return mmioWindowDescriptor(try device_broker.mmioWindow(device_capability.target.id, window_index));
@@ -599,7 +601,7 @@ pub const Kernel = struct {
             context,
             .device_port_read,
             now_ticks,
-            .{ .device_use = true },
+            capability.CapabilityRights.single(.device_use),
             .device,
         );
         return device_broker.readPort(device_capability.target.id, port, width);
@@ -617,7 +619,7 @@ pub const Kernel = struct {
             context,
             .device_port_write,
             now_ticks,
-            .{ .device_use = true },
+            capability.CapabilityRights.single(.device_use),
             .device,
         );
         return device_broker.writePort(device_capability.target.id, port, width, value);
@@ -805,7 +807,7 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
         .holder = session_task.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .service, .id = 42 },
-        .rights = .{
+        .rights = .{ .service = .{
             .task_create = true,
             .endpoint_create = true,
             .endpoint_connect = true,
@@ -820,7 +822,7 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
             .time_query = true,
             .ipc_peer = true,
             .capability_query = true,
-        },
+        } },
         .scope = .{ .local_only = true },
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
     });
@@ -927,9 +929,9 @@ test "native kernel rejects app and service launches without userspace image pro
         .holder = session_task.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .service, .id = 42 },
-        .rights = .{
+        .rights = .{ .service = .{
             .task_create = true,
-        },
+        } },
         .scope = .{ .local_only = true },
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
     });
@@ -992,11 +994,11 @@ test "native kernel leaves typed service registration outside the TCB" {
         .holder = session_task.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .service, .id = 42 },
-        .rights = .{
+        .rights = .{ .service = .{
             .endpoint_create = true,
             .endpoint_connect = true,
             .ipc_peer = true,
-        },
+        } },
         .scope = .{ .local_only = true },
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
     });
@@ -1052,12 +1054,12 @@ test "capability mint query revoke and task termination are exposed by the nativ
         .holder = .{ .kind = .policy_authority, .serial = 1 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .policy, .id = 1 },
-        .rights = .{
+        .rights = .{ .policy = .{
             .capability_mint = true,
             .capability_query = true,
             .capability_revoke = true,
             .task_terminate = true,
-        },
+        } },
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
     });
@@ -1065,7 +1067,7 @@ test "capability mint query revoke and task termination are exposed by the nativ
         .holder = target_task.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .task, .id = target_task.id },
-        .rights = .{ .task_terminate = true },
+        .rights = .{ .task = .{ .task_terminate = true } },
         .scope = .{ .task_id = target_task.id, .local_only = true },
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = false },
     });
@@ -1075,10 +1077,10 @@ test "capability mint query revoke and task termination are exposed by the nativ
         .holder = target_task.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .object, .id = 55 },
-        .rights = .{
+        .rights = .{ .object = .{
             .object_read = true,
             .capability_query = true,
-        },
+        } },
         .scope = .{ .task_id = target_task.id, .local_only = true },
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100, .renewable = false },
     }, 10);
@@ -1122,7 +1124,7 @@ test "capability grant plan does not mint when runtime attachment cannot fit" {
         .holder = .{ .kind = .policy_authority, .serial = 1 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .policy, .id = 1 },
-        .rights = .{ .capability_mint = true },
+        .rights = .{ .policy = .{ .capability_mint = true } },
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
     });
@@ -1133,7 +1135,7 @@ test "capability grant plan does not mint when runtime attachment cannot fit" {
             .holder = target_task.owner,
             .issuer = .{ .kind = .policy_authority, .serial = 1 },
             .target = .{ .kind = .object, .id = 1000 + index },
-            .rights = .{ .object_read = true },
+            .rights = .{ .object = .{ .object_read = true } },
             .scope = .{ .task_id = target_task.id, .local_only = true },
             .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100, .renewable = false },
         });
@@ -1145,7 +1147,7 @@ test "capability grant plan does not mint when runtime attachment cannot fit" {
         .holder = target_task.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .object, .id = 55 },
-        .rights = .{ .object_read = true },
+        .rights = .{ .object = .{ .object_read = true } },
         .scope = .{ .task_id = target_task.id, .local_only = true },
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100, .renewable = false },
     }, 10));
@@ -1193,7 +1195,7 @@ test "native kernel brokers device metadata and port io through device capabilit
         .holder = driver_task.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .device, .id = 0x1F001 },
-        .rights = .{ .device_use = true },
+        .rights = .{ .device = .{ .device_use = true } },
         .scope = .{
             .task_id = driver_task.id,
             .local_only = true,

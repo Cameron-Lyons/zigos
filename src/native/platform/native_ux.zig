@@ -115,7 +115,7 @@ pub const Controller = struct {
         const request = manifest.PermissionRequest{
             .kind = kind,
             .resource = @tagName(kind),
-            .rights = .{},
+            .rights = .{ .policy = .{} },
         };
         _ = try self.reviewPermissionDecision(task_id, subject, "", request, approved, false, null);
         return approved;
@@ -306,7 +306,7 @@ test "native ux renders structured permission review decisions" {
         .{
             .kind = .object_access,
             .resource = "workspace:notes",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
             .max_lease_ticks = 400,
         },
