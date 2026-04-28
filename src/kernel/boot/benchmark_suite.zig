@@ -643,7 +643,7 @@ fn benchmarkCapabilityDerive(iteration: u32) u64 {
         .holder = app(10),
         .issuer = policyAuthority(1),
         .target = .{ .kind = .workspace, .id = 500 + iteration },
-        .rights = .{ .object = .{
+        .rights = .{ .workspace = .{
             .object_read = true,
             .object_write = true,
             .capability_derive = true,
@@ -665,7 +665,7 @@ fn benchmarkCapabilityDerive(iteration: u32) u64 {
     const derived = table.derive(.{
         .parent_capability_id = parent.id,
         .holder = app(11),
-        .rights = .{ .object = .{ .object_read = true } },
+        .rights = .{ .workspace = .{ .object_read = true } },
         .scope = .{
             .task_id = 700 + iteration,
             .workspace_id = 500 + iteration,

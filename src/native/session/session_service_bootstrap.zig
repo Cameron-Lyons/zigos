@@ -5,6 +5,7 @@ const component_port = @import("../kernel_api/component_port.zig");
 const contract = @import("contract.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const native_util = @import("../core/util.zig");
+const std = @import("std");
 const service_bootstrap = @import("service_bootstrap.zig");
 const principal = @import("../core/principal.zig");
 const service_contract = @import("service_contracts.zig");
@@ -81,13 +82,14 @@ fn launchService(
     kernel_port: *component_port.KernelPort,
     entry: service_contract.ServiceContract,
 ) service_bootstrap.Error!service_bootstrap.ServiceBinding {
+    try env.runtime.grantCapability(state.session_task.id, state.session_capability.id);
     return service_bootstrap.launchContractService(
         env.userspace_catalog,
         kernel_port,
         env.service_directory,
         env.supervisor,
         state.session_capability.id,
-        state.session_task.id,
+        if (entry.class == .service_registry) state.session_task.id else 0,
         env.userspace_scheduler,
         serviceOwner(state, entry.class),
         serviceId(state, entry.class),
@@ -107,7 +109,7 @@ fn activateDrivers(
         env.userspace_catalog,
         kernel_port,
         state.session_capability.id,
-        state.session_task.id,
+        0,
         env.userspace_scheduler,
         state.ids.storage_service,
         "zigos.system.storage-driver",
@@ -126,7 +128,7 @@ fn activateDrivers(
         env.supervisor,
         state.ids.policy_authority,
         state.policy_capability.id,
-        state.session_task.id,
+        0,
         state.services.network_service.id,
         service_bindings.bindingFor(.network_stack).task_id,
         state.ids.network_service,
@@ -145,7 +147,7 @@ fn activateDrivers(
         env.supervisor,
         state.ids.policy_authority,
         state.policy_capability.id,
-        state.session_task.id,
+        0,
         state.services.storage_service.id,
         storage_driver_task.task_id,
         state.ids.storage_service,
@@ -164,7 +166,7 @@ fn activateDrivers(
         env.supervisor,
         state.ids.policy_authority,
         state.policy_capability.id,
-        state.session_task.id,
+        0,
         state.services.compositor_service.id,
         service_bindings.bindingFor(.compositor_ui_session).task_id,
         state.ids.compositor_service,
@@ -183,7 +185,7 @@ fn activateDrivers(
         env.supervisor,
         state.ids.policy_authority,
         state.policy_capability.id,
-        state.session_task.id,
+        0,
         state.services.media_service.id,
         service_bindings.bindingFor(.media_print_helpers).task_id,
         state.ids.media_service,
@@ -225,15 +227,9 @@ fn connectClient(
     kernel_port: *component_port.KernelPort,
     service_bindings: *const support.ServiceBindings,
 ) bool {
-    const service_client_task = userspace_launch.launchRegisteredKernel(
+    const service_client_task = userspace_launch.launchRegisteredDirect(
         env.userspace_catalog,
-        .{
-            .port = kernel_port,
-            .authority_capability_id = state.session_capability.id,
-            .controller_task_id = state.session_task.id,
-            .correlation_id = 330,
-            .now_ticks = 56,
-        },
+        env.runtime,
         "zigos.system.service-client",
         .{
             .owner = .{ .kind = .app, .serial = 20 },
@@ -251,15 +247,31 @@ fn connectClient(
         _ = env.supervisor.recordCrash(state.services.service_registry.id, 56, bootFailureCode(err));
         return false;
     };
-    const service_client_authority_id = bootstrap_capabilities.deriveTaskCapability(
-        kernel_port,
-        state.session_task.id,
-        state.session_capability.id,
-        service_client_task.task_id,
-        bootstrap_capabilities.serviceBootstrapRights(),
-        331,
-        56,
-    ) catch |err| {
+    const service_client_authority = env.capability_table.mintBootRoot(.{
+        .holder = service_client_task.owner,
+        .issuer = state.ids.policy_authority,
+        .target = .{ .kind = .service, .id = state.services.service_registry.id },
+        .rights = bootstrap_capabilities.serviceBootstrapRights(),
+        .scope = .{
+            .task_id = service_client_task.id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 56,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = false,
+        },
+        .audit = .{
+            .policy_generation = 1,
+            .source_task_id = 0,
+            .broker_service_id = state.services.service_registry.id,
+        },
+    }) catch |err| {
+        _ = env.supervisor.recordCrash(state.services.service_registry.id, 56, bootFailureCode(err));
+        return false;
+    };
+    env.runtime.grantCapability(service_client_task.id, service_client_authority.id) catch |err| {
         _ = env.supervisor.recordCrash(state.services.service_registry.id, 56, bootFailureCode(err));
         return false;
     };
@@ -269,9 +281,9 @@ fn connectClient(
         const endpoint_request_id = 332 + @as(u64, @intCast(index * 2));
         const connect_request_id = endpoint_request_id + 1;
         const client_endpoint = kernel_port.endpointCreate(.{
-            .header = component_port.makeHeader(.endpoint_create, endpoint_request_id, service_client_task.task_id),
-            .authority_capability_id = service_client_authority_id,
-            .owner_task_id = service_client_task.task_id,
+            .header = component_port.makeHeader(.endpoint_create, endpoint_request_id, service_client_task.id),
+            .authority_capability_id = service_client_authority.id,
+            .owner_task_id = service_client_task.id,
             .label = entry.interface.name,
             .flags = .{ .local_only = true },
         }, 57 + @as(u64, @intCast(index))) catch |err| {
@@ -283,14 +295,14 @@ fn connectClient(
             return false;
         };
         _ = kernel_port.endpointConnect(.{
-            .header = component_port.makeHeader(.endpoint_connect, connect_request_id, service_client_task.task_id),
+            .header = component_port.makeHeader(.endpoint_connect, connect_request_id, service_client_task.id),
             .endpoint_capability_id = client_endpoint.capability_id,
             .peer_endpoint_id = binding.endpoint_id,
         }, 57 + @as(u64, @intCast(index))) catch |err| {
             _ = env.supervisor.recordCrash(serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), bootFailureCode(err));
             return false;
         };
-        env.runtime.audit(service_client_task.task_id, .{
+        env.runtime.audit(service_client_task.id, .{
             .kind = .service_connected,
             .detail = @truncate(registry_connection.service_id),
             .tick = 57 + @as(u64, @intCast(index)),
