@@ -4,6 +4,7 @@ const bootstrap_capabilities = @import("bootstrap_capabilities.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const contract = @import("contract.zig");
 const driver_service = @import("../drivers/driver_service.zig");
+const native_util = @import("../core/util.zig");
 const service_bootstrap = @import("service_bootstrap.zig");
 const principal = @import("../core/principal.zig");
 const service_contract = @import("service_contracts.zig");
@@ -358,7 +359,7 @@ fn serviceOwner(state: *const support.BootstrapState, class: contract.ServiceCla
         .sync_replication => state.ids.sync_service,
         .media_print_helpers => state.ids.media_service,
         .compatibility_portal => state.ids.compatibility_service,
-        else => unreachable,
+        else => native_util.impossibleByInvariant("only managed bootstrap service classes have service owners"),
     };
 }
 
@@ -375,7 +376,7 @@ fn serviceId(state: *const support.BootstrapState, class: contract.ServiceClass)
         .sync_replication => state.services.sync_service.id,
         .media_print_helpers => state.services.media_service.id,
         .compatibility_portal => state.services.compatibility_service.id,
-        else => unreachable,
+        else => native_util.impossibleByInvariant("only managed bootstrap service classes have service ids"),
     };
 }
 

@@ -600,10 +600,10 @@ test "kernel-launched userspace images surface a userspace task flag" {
         .holder = controller.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .service, .id = 42 },
-        .rights = .{
+        .rights = .{ .service = .{
             .task_create = true,
             .capability_query = true,
-        },
+        } },
         .scope = .{ .local_only = true },
         .lease = .{
             .issued_at_ticks = 0,

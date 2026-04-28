@@ -557,7 +557,11 @@ const virtio_network_device = link_port.NetworkDevice{
 
 fn virtioSend(data: []const u8) void {
     if (virtio_net) |*dev| {
-        dev.send(data) catch {};
+        dev.send(data) catch |err| {
+            vga.print("VirtIO TX dropped: ");
+            vga.print(@errorName(err));
+            vga.print("\n");
+        };
     }
 }
 

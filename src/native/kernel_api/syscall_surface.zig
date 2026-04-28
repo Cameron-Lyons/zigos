@@ -25,6 +25,69 @@ const UserMemoryAccess = enum {
     write,
 };
 
+const RequestCopyRule = enum {
+    plain,
+    embedded_user_buffers,
+};
+
+const DispatchHandler = *const fn (
+    port: *component_port.KernelPort,
+    memory: UserMemoryContext,
+    now_ticks: u64,
+    request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
+) DispatchResult;
+
+const SyscallDescriptor = struct {
+    operation: abi.NativeOperation,
+    request_size: usize,
+    response_size: usize,
+    request_copy: RequestCopyRule,
+    handler: DispatchHandler,
+};
+
+fn syscallDescriptor(
+    comptime operation: abi.NativeOperation,
+    comptime Request: type,
+    comptime Response: type,
+    comptime request_copy: RequestCopyRule,
+    comptime handler: DispatchHandler,
+) SyscallDescriptor {
+    return .{
+        .operation = operation,
+        .request_size = @sizeOf(Request),
+        .response_size = if (Response == void) 0 else @sizeOf(Response),
+        .request_copy = request_copy,
+        .handler = handler,
+    };
+}
+
+const syscall_table = [_]SyscallDescriptor{
+    syscallDescriptor(.task_create, component_port.TaskCreateRequest, abi.TaskDescriptor, .embedded_user_buffers, dispatchTaskCreate),
+    syscallDescriptor(.task_terminate, component_port.TaskTerminateRequest, abi.BoolResponse, .plain, dispatchTaskTerminate),
+    syscallDescriptor(.endpoint_create, component_port.EndpointCreateRequest, abi.EndpointCreateResponse, .embedded_user_buffers, dispatchEndpointCreate),
+    syscallDescriptor(.endpoint_connect, component_port.EndpointConnectRequest, abi.EndpointDescriptor, .plain, dispatchEndpointConnect),
+    syscallDescriptor(.endpoint_send, component_port.EndpointSendRequest, void, .embedded_user_buffers, dispatchEndpointSend),
+    syscallDescriptor(.endpoint_recv, component_port.EndpointRecvRequest, abi.EndpointRecvResponse, .plain, dispatchEndpointRecv),
+    syscallDescriptor(.capability_mint, component_port.CapabilityMintRequest, abi.CapabilityDescriptor, .plain, dispatchCapabilityMint),
+    syscallDescriptor(.capability_derive, component_port.CapabilityDeriveRequest, abi.CapabilityDescriptor, .plain, dispatchCapabilityDerive),
+    syscallDescriptor(.capability_pass, component_port.CapabilityPassRequest, abi.CapabilityDescriptor, .plain, dispatchCapabilityPass),
+    syscallDescriptor(.capability_revoke, component_port.CapabilityRevokeRequest, void, .plain, dispatchCapabilityRevoke),
+    syscallDescriptor(.capability_query, component_port.CapabilityQueryRequest, abi.CapabilityDescriptor, .plain, dispatchCapabilityQuery),
+    syscallDescriptor(.shared_memory_create, component_port.SharedMemoryCreateRequest, abi.SharedMemoryCreateResponse, .plain, dispatchSharedMemoryCreate),
+    syscallDescriptor(.shared_memory_map, component_port.SharedMemoryMapRequest, abi.SharedMemoryDescriptor, .plain, dispatchSharedMemoryMap),
+    syscallDescriptor(.shared_memory_unmap, component_port.SharedMemoryUnmapRequest, abi.BoolResponse, .plain, dispatchSharedMemoryUnmap),
+    syscallDescriptor(.shared_memory_revoke, component_port.SharedMemoryRevokeRequest, abi.SharedMemoryDescriptor, .plain, dispatchSharedMemoryRevoke),
+    syscallDescriptor(.time_query, component_port.TimeQueryRequest, abi.TimeQueryResponse, .plain, dispatchTimeQuery),
+    syscallDescriptor(.resource_query, component_port.ResourceQueryRequest, abi.ResourceDescriptor, .plain, dispatchResourceQuery),
+    syscallDescriptor(.accounting_query, component_port.AccountingQueryRequest, abi.AccountingDescriptor, .plain, dispatchAccountingQuery),
+    syscallDescriptor(.device_describe, component_port.DeviceDescribeRequest, abi.DeviceDescriptor, .plain, dispatchDeviceDescribe),
+    syscallDescriptor(.device_mmio_window, component_port.DeviceMmioWindowRequest, abi.DeviceMmioWindowDescriptor, .plain, dispatchDeviceMmioWindow),
+    syscallDescriptor(.device_port_read, component_port.DevicePortReadRequest, abi.DevicePortReadResponse, .plain, dispatchDevicePortRead),
+    syscallDescriptor(.device_port_write, component_port.DevicePortWriteRequest, void, .plain, dispatchDevicePortWrite),
+};
+
 const UserMemoryContext = struct {
     address_space: ?*const task_runtime.AddressSpaceRecord,
 
@@ -59,35 +122,12 @@ pub fn dispatch(
         .denial_reason = .scope_violation,
     };
 
-    const operation = nativeOperationFromOpcode(header.operation) orelse return .{
+    const descriptor = syscallDescriptorFromOpcode(header.operation) orelse return .{
         .status = .unsupported_operation,
         .denial_reason = .unsupported_operation,
     };
 
-    return switch (operation) {
-        .task_create => dispatchTaskCreate(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .task_terminate => dispatchTaskTerminate(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .endpoint_create => dispatchEndpointCreate(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .endpoint_connect => dispatchEndpointConnect(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .endpoint_send => dispatchEndpointSend(port, memory, now_ticks, request_addr),
-        .endpoint_recv => dispatchEndpointRecv(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .capability_mint => dispatchCapabilityMint(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .capability_derive => dispatchCapabilityDerive(port, memory, request_addr, response_addr, response_len),
-        .capability_pass => dispatchCapabilityPass(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .capability_revoke => dispatchCapabilityRevoke(port, memory, now_ticks, request_addr),
-        .capability_query => dispatchCapabilityQuery(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .shared_memory_create => dispatchSharedMemoryCreate(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .shared_memory_map => dispatchSharedMemoryMap(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .shared_memory_unmap => dispatchSharedMemoryUnmap(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .shared_memory_revoke => dispatchSharedMemoryRevoke(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .time_query => dispatchTimeQuery(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .resource_query => dispatchResourceQuery(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .accounting_query => dispatchAccountingQuery(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .device_describe => dispatchDeviceDescribe(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .device_mmio_window => dispatchDeviceMmioWindow(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .device_port_read => dispatchDevicePortRead(port, memory, now_ticks, request_addr, response_addr, response_len),
-        .device_port_write => dispatchDevicePortWrite(port, memory, now_ticks, request_addr),
-    };
+    return descriptor.handler(port, memory, now_ticks, request_addr, response_addr, response_len);
 }
 
 fn dispatchTaskCreate(
@@ -168,7 +208,11 @@ fn dispatchEndpointSend(
     memory: UserMemoryContext,
     now_ticks: u64,
     request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
 ) DispatchResult {
+    _ = response_len;
+    _ = response_addr;
     var request = readRequest(component_port.EndpointSendRequest, memory, request_addr) orelse return invalidRequest();
     var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
     request.payload = copyUserSlice(memory, request.payload, &payload_buffer) orelse return invalidRequest();
@@ -216,10 +260,12 @@ fn dispatchCapabilityMint(
 fn dispatchCapabilityDerive(
     port: *component_port.KernelPort,
     memory: UserMemoryContext,
+    now_ticks: u64,
     request_addr: usize,
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
+    _ = now_ticks;
     const request = readRequest(component_port.CapabilityDeriveRequest, memory, request_addr) orelse return invalidRequest();
     const descriptor = port.capabilityDerive(request) catch |err| return mapError(err);
     return writeResponse(memory, response_addr, response_len, descriptor);
@@ -243,7 +289,11 @@ fn dispatchCapabilityRevoke(
     memory: UserMemoryContext,
     now_ticks: u64,
     request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
 ) DispatchResult {
+    _ = response_len;
+    _ = response_addr;
     const request = readRequest(component_port.CapabilityRevokeRequest, memory, request_addr) orelse return invalidRequest();
     port.capabilityRevoke(request, now_ticks) catch |err| return mapError(err);
     return success();
@@ -408,7 +458,11 @@ fn dispatchDevicePortWrite(
     memory: UserMemoryContext,
     now_ticks: u64,
     request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
 ) DispatchResult {
+    _ = response_len;
+    _ = response_addr;
     const request = readRequest(component_port.DevicePortWriteRequest, memory, request_addr) orelse return invalidRequest();
     port.devicePortWrite(request, now_ticks) catch |err| return mapError(err);
     return success();
@@ -513,13 +567,17 @@ fn regionAllows(access: task_runtime.SegmentAccess, requested: UserMemoryAccess)
     };
 }
 
-fn nativeOperationFromOpcode(opcode: u16) ?abi.NativeOperation {
-    inline for (std.meta.fields(abi.NativeOperation)) |field| {
-        if (field.value == opcode) {
-            return @field(abi.NativeOperation, field.name);
+fn syscallDescriptorFromOpcode(opcode: u16) ?*const SyscallDescriptor {
+    for (&syscall_table) |*descriptor| {
+        if (abi.opcode(descriptor.operation) == opcode) {
+            return descriptor;
         }
     }
     return null;
+}
+
+fn syscallDescriptorFor(operation: abi.NativeOperation) ?*const SyscallDescriptor {
+    return syscallDescriptorFromOpcode(abi.opcode(operation));
 }
 
 fn responseBuffer(memory: UserMemoryContext, response_addr: usize, response_len: usize) ?[]u8 {
@@ -626,6 +684,25 @@ fn mapError(err: anyerror) DispatchResult {
     return .{ .status = .internal_error };
 }
 
+test "syscall descriptor table covers every native operation with ABI metadata" {
+    try std.testing.expectEqual(std.meta.fields(abi.NativeOperation).len, syscall_table.len);
+
+    inline for (std.meta.fields(abi.NativeOperation)) |field| {
+        const operation: abi.NativeOperation = @enumFromInt(field.value);
+        const descriptor = syscallDescriptorFor(operation) orelse return error.MissingSyscallDescriptor;
+        try std.testing.expectEqual(operation, descriptor.operation);
+        try std.testing.expect(descriptor.request_size >= @sizeOf(abi.RequestHeader));
+    }
+
+    try std.testing.expectEqual(@sizeOf(component_port.TaskCreateRequest), syscallDescriptorFor(.task_create).?.request_size);
+    try std.testing.expectEqual(@sizeOf(abi.TaskDescriptor), syscallDescriptorFor(.task_create).?.response_size);
+    try std.testing.expectEqual(RequestCopyRule.embedded_user_buffers, syscallDescriptorFor(.task_create).?.request_copy);
+    try std.testing.expectEqual(@as(usize, 0), syscallDescriptorFor(.endpoint_send).?.response_size);
+    try std.testing.expectEqual(RequestCopyRule.embedded_user_buffers, syscallDescriptorFor(.endpoint_send).?.request_copy);
+    try std.testing.expectEqual(@sizeOf(abi.DevicePortReadResponse), syscallDescriptorFor(.device_port_read).?.response_size);
+    try std.testing.expectEqual(@as(usize, 0), syscallDescriptorFor(.device_port_write).?.response_size);
+}
+
 const TestKernel = struct {
     runtime: task_runtime.Runtime = task_runtime.Runtime.init(),
     capabilities: capability.CapabilityTable = capability.CapabilityTable.init(),
@@ -661,7 +738,7 @@ const TestKernel = struct {
             .holder = session_task.owner,
             .issuer = .{ .kind = .policy_authority, .serial = 1 },
             .target = .{ .kind = .service, .id = 42 },
-            .rights = .{
+            .rights = .{ .service = .{
                 .task_create = true,
                 .task_terminate = true,
                 .endpoint_create = true,
@@ -677,7 +754,7 @@ const TestKernel = struct {
                 .time_query = true,
                 .ipc_peer = true,
                 .capability_query = true,
-            },
+            } },
             .scope = .{ .local_only = true },
             .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
         });
@@ -1012,7 +1089,7 @@ test "syscall surface dispatches typed device broker requests" {
         .holder = .{ .kind = .service, .serial = 2 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .device, .id = 0x1F001 },
-        .rights = .{ .device_use = true },
+        .rights = .{ .device = .{ .device_use = true } },
         .scope = .{
             .task_id = test_kernel.session_task_id,
             .local_only = true,

@@ -259,7 +259,7 @@ test "storage driver task attaches only through the kernel device broker" {
         .holder = driver_task.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .device, .id = 0x1F001 },
-        .rights = .{ .device_use = true },
+        .rights = .{ .device = .{ .device_use = true } },
         .scope = .{
             .task_id = driver_task.id,
             .local_only = true,

@@ -122,7 +122,11 @@ pub const Service = struct {
                     .detail = request.label,
                     .suppression_policy = .replace_same_source_reason_task,
                 }) catch |err| {
-                    _ = scheduler.releaseClaim(claim.id, null) catch false;
+                    _ = scheduler.releaseClaim(claim.id, null) catch |release_err| {
+                        slot.in_use = false;
+                        slot.job = zeroJob();
+                        return release_err;
+                    };
                     slot.in_use = false;
                     slot.job = zeroJob();
                     return err;
@@ -132,7 +136,7 @@ pub const Service = struct {
             return &slot.job;
         }
 
-        _ = scheduler.releaseClaim(claim.id, null) catch false;
+        _ = try scheduler.releaseClaim(claim.id, null);
         return error.JobTableFull;
     }
 

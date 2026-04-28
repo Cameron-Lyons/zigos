@@ -190,7 +190,8 @@ fn storageMountHealthy(storage: *const storage_service.Service, workspace_id: u6
     const version = storage.version(resolved.version_id) orelse return false;
     if (version.object_id != resolved.object_id) return false;
     _ = storage.object(resolved.object_id) orelse return false;
-    return version.metadata.verifyFor(version.object_type, version.payloadSlice());
+    const payload = storage.versionPayload(version) catch return false;
+    return version.metadata.verifyFor(version.object_type, payload);
 }
 
 fn serviceStarted(supervisor: *supervisor_mod.Supervisor, service_id: u64) bool {
@@ -211,11 +212,17 @@ fn networkServiceHealthy(probe: ?NetworkProbe) bool {
         check.private_service_label,
         check.tick,
     ) catch return false;
-    defer _ = check.sync.closeOverlaySession(session.session_id, check.tick + 2) catch false;
-
-    _ = check.sync.probeOverlaySession(session.session_id, check.tick + 1) catch return false;
-    const live = check.sync.findOverlaySession(session.session_id) orelse return false;
-    return live.isActive() and live.keepalive_count != 0;
+    _ = check.sync.probeOverlaySession(session.session_id, check.tick + 1) catch {
+        _ = check.sync.closeOverlaySession(session.session_id, check.tick + 2) catch return false;
+        return false;
+    };
+    const live = check.sync.findOverlaySession(session.session_id) orelse {
+        _ = check.sync.closeOverlaySession(session.session_id, check.tick + 2) catch return false;
+        return false;
+    };
+    const healthy = live.isActive() and live.keepalive_count != 0;
+    _ = check.sync.closeOverlaySession(session.session_id, check.tick + 2) catch return false;
+    return healthy;
 }
 
 fn uiServiceHealthy(probe: ?UiProbe) bool {
@@ -253,10 +260,11 @@ fn yesNo(value: bool) []const u8 {
 fn loadBootWitness(manager: *immutable_base.Manager) immutable_base.Error!BootWitness {
     const entry = try manager.storage.resolve(manager.workspace_id, boot_witness_entry_path);
     const version = manager.storage.version(entry.version_id) orelse return error.CorruptState;
-    if (version.payloadSlice().len != @sizeOf(BootWitness)) return error.CorruptState;
+    const payload = try manager.storage.versionPayload(version);
+    if (payload.len != @sizeOf(BootWitness)) return error.CorruptState;
 
     var witness = std.mem.zeroes(BootWitness);
-    @memcpy(std.mem.asBytes(&witness), version.payloadSlice());
+    @memcpy(std.mem.asBytes(&witness), payload);
     if (witness.magic != boot_witness_magic) return error.CorruptState;
     return witness;
 }

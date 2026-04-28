@@ -488,7 +488,7 @@ test "kernel port enforces operation ids and forwards typed task create requests
         .holder = session_task.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .service, .id = 1 },
-        .rights = .{ .task_create = true },
+        .rights = .{ .service = .{ .task_create = true } },
         .scope = .{ .local_only = true },
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
     });
@@ -582,7 +582,7 @@ test "kernel port validates and forwards typed device broker requests" {
         .holder = driver_task.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .device, .id = 0x1F001 },
-        .rights = .{ .device_use = true },
+        .rights = .{ .device = .{ .device_use = true } },
         .scope = .{
             .task_id = driver_task.id,
             .local_only = true,

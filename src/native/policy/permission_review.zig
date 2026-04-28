@@ -299,20 +299,20 @@ fn rightsSummary(rights: capability.CapabilityRights, buffer: *[160]u8) []const 
     var used: usize = 0;
     var first = true;
 
-    appendRight(buffer, &used, &first, rights.object_read, "object_read") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.object_write, "object_write") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.device_use, "device_use") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.clipboard_read, "clipboard_read") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.clipboard_write, "clipboard_write") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.sensor_read, "sensor_read") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.background_run, "background_run") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.network_local, "network_local") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.network_remote, "network_remote") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.ipc_peer, "ipc_peer") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.location_read, "location_read") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.contacts_read, "contacts_read") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.screen_capture, "screen_capture") catch return "rights_error";
-    appendRight(buffer, &used, &first, rights.notification_post, "notification_post") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.has(.object_read), "object_read") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.has(.object_write), "object_write") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.has(.device_use), "device_use") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.has(.clipboard_read), "clipboard_read") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.has(.clipboard_write), "clipboard_write") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.has(.sensor_read), "sensor_read") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.has(.background_run), "background_run") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.has(.network_local), "network_local") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.has(.network_remote), "network_remote") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.has(.ipc_peer), "ipc_peer") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.has(.location_read), "location_read") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.has(.contacts_read), "contacts_read") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.has(.screen_capture), "screen_capture") catch return "rights_error";
+    appendRight(buffer, &used, &first, rights.has(.notification_post), "notification_post") catch return "rights_error";
 
     if (first) {
         return "none";
@@ -351,7 +351,7 @@ test "decisionsToGrants clamps lease duration to the manifest request" {
         .{
             .kind = .network_egress,
             .resource = "lan.sync",
-            .rights = .{ .network_local = true },
+            .rights = .{ .network_policy = .{ .network_local = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 50,
@@ -385,13 +385,13 @@ test "renderToBuffer includes bundle name, permission labels, and decisions" {
         .{
             .kind = .object_access,
             .resource = "workspace:notes",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
         },
         .{
             .kind = .clipboard,
             .resource = "clipboard",
-            .rights = .{ .clipboard_read = true },
+            .rights = .{ .workspace = .{ .clipboard_read = true } },
             .required = false,
         },
     };
@@ -443,7 +443,7 @@ test "renderRequestToBuffer marks undecided requests as pending" {
         .{
             .kind = .network_egress,
             .resource = "lan.sync",
-            .rights = .{ .network_local = true },
+            .rights = .{ .network_policy = .{ .network_local = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 50,
@@ -469,24 +469,24 @@ test "renderToBuffer labels expanded location contacts screen capture and notifi
         .{
             .kind = .location,
             .resource = "location.current",
-            .rights = .{ .location_read = true },
+            .rights = .{ .device = .{ .location_read = true } },
             .required = false,
         },
         .{
             .kind = .contacts,
             .resource = "contacts://personal",
-            .rights = .{ .contacts_read = true },
+            .rights = .{ .object = .{ .contacts_read = true } },
         },
         .{
             .kind = .screen_capture,
             .resource = "display:main",
-            .rights = .{ .screen_capture = true },
+            .rights = .{ .device = .{ .screen_capture = true } },
             .required = false,
         },
         .{
             .kind = .notification_post,
             .resource = "notifications://task",
-            .rights = .{ .notification_post = true },
+            .rights = .{ .task = .{ .notification_post = true } },
             .required = false,
         },
     };

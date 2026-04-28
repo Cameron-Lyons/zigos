@@ -427,14 +427,14 @@ test "review service retries invalid commands clamps leases and records audits" 
         .{
             .kind = .object_access,
             .resource = "workspace://notes/documents/notes.md",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
             .max_lease_ticks = 30,
         },
         .{
             .kind = .network_egress,
             .resource = "relay.zigos.dev",
-            .rights = .{ .network_remote = true },
+            .rights = .{ .network_policy = .{ .network_remote = true } },
             .required = false,
         },
     };
@@ -535,14 +535,14 @@ test "review service uses manifest-aware scripted plans and records structured u
         .{
             .kind = .object_access,
             .resource = "workspace:notes",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
             .max_lease_ticks = 400,
         },
         .{
             .kind = .network_egress,
             .resource = "lan.sync",
-            .rights = .{ .network_local = true },
+            .rights = .{ .network_policy = .{ .network_local = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 50,
@@ -607,14 +607,14 @@ test "review service renders commands from a typed decision profile" {
         .{
             .kind = .object_access,
             .resource = "workspace:notes",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
             .max_lease_ticks = 400,
         },
         .{
             .kind = .clipboard,
             .resource = "clipboard",
-            .rights = .{ .clipboard_read = true },
+            .rights = .{ .workspace = .{ .clipboard_read = true } },
             .required = false,
         },
     };

@@ -297,7 +297,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
         .holder = context.session_user,
         .issuer = context.policy_authority,
         .target = .{ .kind = .service, .id = context.storage_service_id },
-        .rights = .{},
+        .rights = .{ .service = .{} },
         .scope = .{
             .workspace_id = notes_workspace_id,
             .local_only = true,

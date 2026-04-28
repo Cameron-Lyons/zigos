@@ -124,19 +124,19 @@ pub fn explicitGrantsRequireAuthority() !void {
         .{
             .kind = .object_access,
             .resource = "workspace://report-alpha/documents/report.md",
-            .rights = .{
+            .rights = .{ .object = .{
                 .object_read = true,
                 .object_write = true,
-            },
+            } },
             .target_id = 9_001,
             .local_only = true,
         },
         .{
             .kind = .network_egress,
             .resource = "lan.sync",
-            .rights = .{
+            .rights = .{ .network_policy = .{
                 .network_local = true,
-            },
+            } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 50,
@@ -208,8 +208,8 @@ pub fn explicitGrantsRequireAuthority() !void {
     try std.testing.expectEqual(granted_task.id, network_capability.scope.task_id.?);
     try std.testing.expect(network_capability.scope.local_only);
     try std.testing.expect(network_capability.scope.broker_only);
-    try std.testing.expect(network_capability.rights.network_local);
-    try std.testing.expect(!network_capability.rights.network_remote);
+    try std.testing.expect(network_capability.rights.has(.network_local));
+    try std.testing.expect(!network_capability.rights.has(.network_remote));
     try std.testing.expectEqual(capability.CapabilityTargetKind.network_policy, network_capability.target.kind);
     try std.testing.expectEqual(native_util.fnv1a64("lan.sync"), network_capability.target.id);
 }
@@ -286,12 +286,12 @@ pub fn kernelRemainsTypedAndIsolatesLegacy() !void {
 
     const network_rights = driver_service.allowedRightsFor(.network_adapter);
     const audio_rights = driver_service.allowedRightsFor(.audio_print_io);
-    try std.testing.expect(network_rights.device_use);
-    try std.testing.expect(network_rights.network_local);
-    try std.testing.expect(!network_rights.network_remote);
-    try std.testing.expect(audio_rights.device_use);
-    try std.testing.expect(!audio_rights.network_local);
-    try std.testing.expect(!audio_rights.object_write);
+    try std.testing.expect(network_rights.has(.device_use));
+    try std.testing.expect(network_rights.has(.network_local));
+    try std.testing.expect(!network_rights.has(.network_remote));
+    try std.testing.expect(audio_rights.has(.device_use));
+    try std.testing.expect(!audio_rights.has(.network_local));
+    try std.testing.expect(!audio_rights.has(.object_write));
 
     device_inventory.reset();
     device_inventory.registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
@@ -375,20 +375,20 @@ pub fn kernelRemainsTypedAndIsolatesLegacy() !void {
 }
 
 fn invariantNoRightsEscalationThroughDeriveOrPass() !void {
-    const parent_rights = capability.CapabilityRights{
+    const parent_rights = capability.CapabilityRights{ .service = .{
         .capability_derive = true,
         .capability_pass = true,
         .capability_query = true,
         .endpoint_send = true,
         .object_read = true,
         .network_local = true,
-    };
+    } };
     const requested_rights = [_]capability.CapabilityRights{
-        .{ .capability_query = true },
-        .{ .endpoint_send = true, .object_read = true },
-        .{ .network_local = true, .network_remote = true },
-        .{ .object_write = true },
-        .{ .task_terminate = true },
+        .{ .service = .{ .capability_query = true } },
+        .{ .service = .{ .endpoint_send = true, .object_read = true } },
+        .{ .service = .{ .network_local = true, .network_remote = true } },
+        .{ .service = .{ .object_write = true } },
+        .{ .service = .{ .task_terminate = true } },
     };
 
     for (requested_rights, 0..) |rights, index| {
@@ -427,7 +427,7 @@ fn invariantNoRightsEscalationThroughDeriveOrPass() !void {
             .now_ticks = 20,
             .scope = parent.scope,
         });
-        try std.testing.expectEqual(@as(u32, @bitCast(parent.rights)), @as(u32, @bitCast(passed.rights)));
+        try std.testing.expectEqual(parent.rights.toBits(), passed.rights.toBits());
     }
 }
 
@@ -441,9 +441,9 @@ fn invariantRevocationAlwaysWins() !void {
     for (targets, 0..) |target, index| {
         var table = capability.CapabilityTable.init();
         const parent_rights = switch (target.kind) {
-            .object => capability.CapabilityRights{ .capability_derive = true, .capability_pass = true, .capability_query = true, .object_read = true },
-            .network_policy => capability.CapabilityRights{ .capability_derive = true, .capability_pass = true, .capability_query = true, .network_local = true },
-            .device => capability.CapabilityRights{ .capability_derive = true, .capability_pass = true, .capability_query = true, .device_use = true, .network_local = true },
+            .object => capability.CapabilityRights{ .object = .{ .capability_derive = true, .capability_pass = true, .capability_query = true, .object_read = true } },
+            .network_policy => capability.CapabilityRights{ .network_policy = .{ .capability_derive = true, .capability_pass = true, .capability_query = true, .network_local = true } },
+            .device => capability.CapabilityRights{ .device = .{ .capability_derive = true, .capability_pass = true, .capability_query = true, .device_use = true, .network_local = true } },
             else => unreachable,
         };
         const parent = try table.mintBootRoot(.{
@@ -457,7 +457,7 @@ fn invariantRevocationAlwaysWins() !void {
         const derived = try table.derive(.{
             .parent_capability_id = parent.id,
             .holder = spec_support.app(40 + index),
-            .rights = .{ .capability_query = true },
+            .rights = capability.CapabilityRights.single(.capability_query).retarget(target.kind),
             .scope = parent.scope,
             .lease = .{ .issued_at_ticks = 2, .expires_at_ticks = 900, .renewable = false },
         });
@@ -486,7 +486,7 @@ fn invariantExpiredLeasesFailEverywhere() !void {
         .holder = spec_support.service(70),
         .issuer = spec_support.policyAuthority(1),
         .target = .{ .kind = .service, .id = 700 },
-        .rights = .{ .capability_derive = true, .capability_pass = true, .capability_query = true },
+        .rights = .{ .service = .{ .capability_derive = true, .capability_pass = true, .capability_query = true } },
         .scope = .{ .task_id = 700, .local_only = true },
         .lease = .{ .issued_at_ticks = 10, .expires_at_ticks = 20, .renewable = false },
     });
@@ -497,7 +497,7 @@ fn invariantExpiredLeasesFailEverywhere() !void {
     try std.testing.expectError(error.CapabilityRevoked, table.derive(.{
         .parent_capability_id = expiring.id,
         .holder = spec_support.app(71),
-        .rights = .{ .capability_query = true },
+        .rights = .{ .service = .{ .capability_query = true } },
         .scope = expiring.scope,
         .lease = .{ .issued_at_ticks = 21, .expires_at_ticks = 21, .renewable = false },
     }));
@@ -514,7 +514,7 @@ fn invariantTaskScopedCapabilitiesCannotCrossTaskBoundaries() !void {
         .holder = spec_support.service(80),
         .issuer = spec_support.policyAuthority(1),
         .target = .{ .kind = .endpoint, .id = 8080 },
-        .rights = .{ .capability_derive = true, .capability_pass = true, .endpoint_send = true },
+        .rights = .{ .endpoint = .{ .capability_derive = true, .capability_pass = true, .endpoint_send = true } },
         .scope = .{ .task_id = 81, .local_only = true },
         .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100, .renewable = false },
     });
@@ -522,7 +522,7 @@ fn invariantTaskScopedCapabilitiesCannotCrossTaskBoundaries() !void {
     try std.testing.expectError(error.ScopeEscalation, table.derive(.{
         .parent_capability_id = parent.id,
         .holder = spec_support.app(82),
-        .rights = .{ .endpoint_send = true },
+        .rights = .{ .endpoint = .{ .endpoint_send = true } },
         .scope = .{ .task_id = 82, .local_only = true },
         .lease = .{ .issued_at_ticks = 2, .expires_at_ticks = 90, .renewable = false },
     }));
@@ -541,7 +541,7 @@ fn invariantTargetKindsDisambiguateHashedIds() !void {
         .holder = spec_support.app(90),
         .issuer = spec_support.policyAuthority(1),
         .target = .{ .kind = .object, .id = shared_id },
-        .rights = .{ .object_read = true },
+        .rights = .{ .object = .{ .object_read = true } },
         .scope = .{ .task_id = 90, .local_only = true },
         .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100, .renewable = false },
     });
@@ -549,7 +549,7 @@ fn invariantTargetKindsDisambiguateHashedIds() !void {
         .holder = spec_support.app(91),
         .issuer = spec_support.policyAuthority(1),
         .target = .{ .kind = .network_policy, .id = shared_id },
-        .rights = .{ .network_local = true },
+        .rights = .{ .network_policy = .{ .network_local = true } },
         .scope = .{ .task_id = 91, .local_only = true, .broker_only = true },
         .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100, .renewable = false },
     });
@@ -557,7 +557,7 @@ fn invariantTargetKindsDisambiguateHashedIds() !void {
         .holder = spec_support.app(92),
         .issuer = spec_support.policyAuthority(1),
         .target = .{ .kind = .device, .id = shared_id },
-        .rights = .{ .device_use = true },
+        .rights = .{ .device = .{ .device_use = true } },
         .scope = .{ .task_id = 92, .local_only = true, .broker_only = true },
         .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100, .renewable = false },
     });
@@ -602,13 +602,13 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         .holder = session_task.owner,
         .issuer = spec_support.policyAuthority(1),
         .target = .{ .kind = .service, .id = 99 },
-        .rights = .{
+        .rights = .{ .service = .{
             .task_create = true,
             .endpoint_create = true,
             .endpoint_connect = true,
             .capability_derive = true,
             .ipc_peer = true,
-        },
+        } },
         .scope = .{ .local_only = true },
         .lease = .{
             .issued_at_ticks = 0,
@@ -676,11 +676,11 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         .request = .{
             .parent_capability_id = authority.id,
             .holder = runtime.find(launched.task_id).?.owner,
-            .rights = .{
+            .rights = .{ .service = .{
                 .endpoint_create = true,
                 .endpoint_connect = true,
                 .ipc_peer = true,
-            },
+            } },
             .scope = .{
                 .task_id = launched.task_id,
                 .local_only = true,

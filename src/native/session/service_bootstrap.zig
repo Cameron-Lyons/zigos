@@ -10,6 +10,7 @@ const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const service_contract = @import("service_contracts.zig");
 const service_catalog = @import("service_catalog.zig");
+const native_util = @import("../core/util.zig");
 const service_registry = @import("../services/service_registry.zig");
 const kernel_descriptors = @import("../kernel_api/native_kernel_descriptors.zig");
 const supervisor_mod = @import("supervisor.zig");
@@ -214,7 +215,8 @@ pub fn launchDriverTask(
 }
 
 pub fn serviceBudget(class: contract.ServiceClass) task_runtime.ResourceBudget {
-    return (service_catalog.bootstrapLaunchForClass(class) orelse unreachable).budget;
+    return (service_catalog.bootstrapLaunchForClass(class) orelse
+        native_util.impossibleByInvariant("service budget is only requested for bootstrap service classes")).budget;
 }
 
 pub fn driverBudget(device_class: driver_service.DeviceClass) task_runtime.ResourceBudget {

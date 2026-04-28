@@ -488,14 +488,14 @@ test "compositor session creates app-panel permission review windows and cards" 
         .{
             .kind = .object_access,
             .resource = "workspace:notes",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
             .max_lease_ticks = 400,
         },
         .{
             .kind = .network_egress,
             .resource = "lan.sync",
-            .rights = .{ .network_local = true },
+            .rights = .{ .network_policy = .{ .network_local = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 50,

@@ -136,7 +136,7 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
         .{
             .kind = .object_access,
             .resource = "workspace://trip/documents/plan.md",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
             .max_lease_ticks = 120,
         },
@@ -321,7 +321,7 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
         .{
             .kind = .object_access,
             .resource = "workspace://notes",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
         },
     };
@@ -363,13 +363,13 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
         .{
             .kind = .object_access,
             .resource = "workspace://notes",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
         },
         .{
             .kind = .notification_post,
             .resource = "notifications://task",
-            .rights = .{ .notification_post = true },
+            .rights = .{ .task = .{ .notification_post = true } },
             .required = false,
         },
     };
@@ -443,14 +443,14 @@ pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {
         .{ .path = "assets/sync/icon.svg", .content_type = "image/svg+xml" },
     };
     const permissions = [_]manifest.PermissionRequest{
-        .{ .kind = .background_execution, .resource = "schedule", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "push", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "change", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "proximity", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "sensor", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "media", .rights = .{ .background_run = true } },
-        .{ .kind = .background_execution, .resource = "policy", .rights = .{ .background_run = true } },
+        .{ .kind = .background_execution, .resource = "schedule", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "push", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "change", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "proximity", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "sensor", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "sync", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "media", .rights = .{ .task = .{ .background_run = true } } },
+        .{ .kind = .background_execution, .resource = "policy", .rights = .{ .task = .{ .background_run = true } } },
     };
     const background_tasks = [_]manifest.BackgroundTaskDecl{
         .{ .id = "schedule", .trigger = .user_approved_scheduled_job, .expected_duration_seconds = 30, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = 64 * 1024 }, .network = .none, .visibility = .status_only },
