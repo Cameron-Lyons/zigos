@@ -655,7 +655,7 @@ pub fn bootstrapLaunchForClass(class: ServiceClass) ?BootstrapLaunch {
 
 pub fn rightsForBootstrapGrant(kind: BootstrapGrantKind) capability.CapabilityRights {
     return switch (kind) {
-        .session_service_authority => .{
+        .session_service_authority => .{ .service = .{
             .task_create = true,
             .endpoint_create = true,
             .endpoint_connect = true,
@@ -671,17 +671,17 @@ pub fn rightsForBootstrapGrant(kind: BootstrapGrantKind) capability.CapabilityRi
             .resource_query = true,
             .accounting_query = true,
             .ipc_peer = true,
-        },
-        .policy_mint_authority => .{
+        } },
+        .policy_mint_authority => .{ .policy = .{
             .capability_mint = true,
             .capability_query = true,
             .capability_revoke = true,
-        },
-        .service_task_authority => .{
+        } },
+        .service_task_authority => .{ .service = .{
             .endpoint_create = true,
             .endpoint_connect = true,
             .ipc_peer = true,
-        },
+        } },
     };
 }
 

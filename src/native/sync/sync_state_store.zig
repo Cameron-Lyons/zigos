@@ -26,7 +26,7 @@ pub fn load(
         else => return err,
     };
     const index_version = storage.version(index_entry.version_id) orelse return error.CorruptState;
-    const index = try state_codec.decodeStateIndex(index_version.payloadSlice());
+    const index = try state_codec.decodeStateIndex(try storage.versionPayload(index_version));
     if (index.chunk_count == 0 or index.chunk_count > state_support.max_state_chunks) return error.CorruptState;
     if (index.total_len == 0 or index.total_len > state_support.max_state_bytes) return error.CorruptState;
 
@@ -41,7 +41,7 @@ pub fn load(
             else => return err,
         };
         const chunk_version = storage.version(chunk_entry.version_id) orelse return error.CorruptState;
-        const payload = chunk_version.payloadSlice();
+        const payload = try storage.versionPayload(chunk_version);
         if (offset + payload.len > index.total_len) return error.CorruptState;
         @memcpy(assembled[offset .. offset + payload.len], payload);
         offset += payload.len;
@@ -85,7 +85,7 @@ pub fn persist(
         if (existing_entry) |entry| {
             chunk_version_ids[chunk_index] = entry.version_id;
             const existing_version = storage.version(entry.version_id) orelse return error.CorruptState;
-            if (std.mem.eql(u8, existing_version.payloadSlice(), payload)) continue;
+            if (std.mem.eql(u8, try storage.versionPayload(existing_version), payload)) continue;
         }
 
         chunk_dirty[chunk_index] = true;
@@ -121,7 +121,7 @@ pub fn persist(
     const index_dirty = blk: {
         if (existing_index) |entry| {
             const version = storage.version(entry.version_id) orelse return error.CorruptState;
-            break :blk !std.mem.eql(u8, version.payloadSlice(), index_bytes);
+            break :blk !std.mem.eql(u8, try storage.versionPayload(version), index_bytes);
         }
         break :blk true;
     };

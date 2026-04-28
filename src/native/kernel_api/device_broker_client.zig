@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
 const component_port = @import("component_port.zig");
+const native_util = @import("../core/util.zig");
 
 pub const Error = component_port.Error || error{
     KernelPortUnavailable,
@@ -27,7 +28,7 @@ const freestanding_trap = if (builtin.target.os.tag == .freestanding)
 else
     struct {
         fn call(_: usize, _: usize, _: usize) abi.SyscallStatus {
-            unreachable;
+            native_util.impossibleByInvariant("host device broker client cannot issue freestanding syscall traps");
         }
     };
 

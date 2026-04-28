@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const capability = @import("../kernel_api/capability.zig");
 const task_runtime = @import("task_runtime.zig");
+const native_util = @import("../core/util.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_loader = @import("userspace_loader.zig");
 
@@ -42,7 +43,7 @@ else
             }
 
             pub fn getCurrentPageDirectory() *PageDirectory {
-                unreachable;
+                native_util.impossibleByInvariant("host tests never request a live userspace page directory");
             }
 
             pub fn switchPageDirectory(_: *PageDirectory) void {}
@@ -293,7 +294,7 @@ fn selectBootstrapCapability(
     for (task.capabilityIds()) |capability_id| {
         const granted = capability_table.query(capability_id) orelse continue;
         if (!capability_table.isUsable(granted, now_ticks)) continue;
-        if (!granted.rights.time_query and !granted.rights.resource_query and !granted.rights.accounting_query) continue;
+        if (!granted.rights.has(.time_query) and !granted.rights.has(.resource_query) and !granted.rights.has(.accounting_query)) continue;
         const service_id = if (granted.target.kind == .service) granted.target.id else 0;
         return .{ .capability_id = capability_id, .service_id = service_id };
     }

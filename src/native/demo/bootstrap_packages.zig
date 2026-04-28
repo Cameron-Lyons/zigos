@@ -47,7 +47,7 @@ fn installViewer(packages: *package_service.Service) void {
         .{
             .kind = .network_egress,
             .resource = "lan.sync",
-            .rights = .{ .network_local = true },
+            .rights = .{ .network_policy = .{ .network_local = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 20,
@@ -55,7 +55,7 @@ fn installViewer(packages: *package_service.Service) void {
         .{
             .kind = .clipboard,
             .resource = "clipboard",
-            .rights = .{ .clipboard_read = true, .clipboard_write = true },
+            .rights = .{ .workspace = .{ .clipboard_read = true, .clipboard_write = true } },
             .required = false,
         },
     };
@@ -97,14 +97,14 @@ fn installNotes(packages: *package_service.Service) void {
         .{
             .kind = .object_access,
             .resource = "workspace:notes",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
             .max_lease_ticks = 400,
         },
         .{
             .kind = .network_egress,
             .resource = "lan.sync",
-            .rights = .{ .network_local = true },
+            .rights = .{ .network_policy = .{ .network_local = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 50,
@@ -112,7 +112,7 @@ fn installNotes(packages: *package_service.Service) void {
         .{
             .kind = .clipboard,
             .resource = "clipboard",
-            .rights = .{ .clipboard_read = true, .clipboard_write = true },
+            .rights = .{ .workspace = .{ .clipboard_read = true, .clipboard_write = true } },
             .required = false,
         },
     };
@@ -160,7 +160,7 @@ fn installSync(packages: *package_service.Service) void {
         .{
             .kind = .background_execution,
             .resource = "sync",
-            .rights = .{ .background_run = true },
+            .rights = .{ .task = .{ .background_run = true } },
         },
     };
     const background_tasks = [_]manifest.BackgroundTaskDecl{
@@ -216,7 +216,7 @@ fn installCapture(packages: *package_service.Service) void {
         .{
             .kind = .device_access,
             .resource = "capture.card0",
-            .rights = .{ .device_use = true },
+            .rights = .{ .device = .{ .device_use = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 30,
@@ -225,7 +225,7 @@ fn installCapture(packages: *package_service.Service) void {
         .{
             .kind = .camera,
             .resource = "camera.front",
-            .rights = .{ .device_use = true },
+            .rights = .{ .device = .{ .device_use = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 35,
@@ -234,7 +234,7 @@ fn installCapture(packages: *package_service.Service) void {
         .{
             .kind = .mic,
             .resource = "mic.array",
-            .rights = .{ .device_use = true },
+            .rights = .{ .device = .{ .device_use = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 35,
@@ -243,7 +243,7 @@ fn installCapture(packages: *package_service.Service) void {
         .{
             .kind = .sensor,
             .resource = "sensor.lid",
-            .rights = .{ .sensor_read = true },
+            .rights = .{ .device = .{ .sensor_read = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 25,
@@ -252,7 +252,7 @@ fn installCapture(packages: *package_service.Service) void {
         .{
             .kind = .peer_ipc,
             .resource = "zigos.peer.share",
-            .rights = .{ .ipc_peer = true },
+            .rights = .{ .endpoint = .{ .ipc_peer = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 15,

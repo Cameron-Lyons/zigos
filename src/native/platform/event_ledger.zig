@@ -454,7 +454,7 @@ pub const Ledger = struct {
 
         if (storage.resolve(self.workspace_id, state_entry_path)) |entry| {
             const version = storage.version(entry.version_id) orelse return error.CorruptState;
-            self.next_sequence = try parseHeader(version.payloadSlice());
+            self.next_sequence = try parseHeader(try storage.versionPayload(version));
             self.header_version_id = entry.version_id;
         } else |err| switch (err) {
             error.EntryNotFound => return,
@@ -468,7 +468,7 @@ pub const Ledger = struct {
             if (loaded_count >= self.events.len) break;
             const version = storage.version(entry.version_id) orelse return error.CorruptState;
             self.events[loaded_count].in_use = true;
-            self.events[loaded_count].event = (try parsePersistentEvent(version.payloadSlice())).intoEvent();
+            self.events[loaded_count].event = (try parsePersistentEvent(try storage.versionPayload(version))).intoEvent();
             loaded_count += 1;
         }
 

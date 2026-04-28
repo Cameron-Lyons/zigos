@@ -988,7 +988,7 @@ fn entryIndexInsert(table: *[ENTRY_INDEX_CAPACITY]EntryIndexSlot, path: []const 
         index = (index + 1) % ENTRY_INDEX_CAPACITY;
     }
 
-    unreachable;
+    native_util.impossibleByInvariant("entry index capacity covers all workspace entry slots");
 }
 
 fn indexLookup(comptime capacity: usize, table: *const [capacity]IdIndexSlot, id: u64) ?usize {
@@ -1009,7 +1009,7 @@ fn indexLookup(comptime capacity: usize, table: *const [capacity]IdIndexSlot, id
 }
 
 fn indexInsert(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64, slot_index: usize) void {
-    if (id == 0) unreachable;
+    if (id == 0) native_util.impossibleByInvariant("id indexes never store the reserved zero id");
 
     var index = indexHash(id, capacity);
     var first_tombstone: ?usize = null;
@@ -1038,7 +1038,7 @@ fn indexInsert(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64,
         index = (index + 1) % capacity;
     }
 
-    unreachable;
+    native_util.impossibleByInvariant("id index capacity covers all live workspace slots");
 }
 
 fn indexHash(id: u64, comptime capacity: usize) usize {

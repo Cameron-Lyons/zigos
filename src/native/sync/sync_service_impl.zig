@@ -22,6 +22,13 @@ pub const MAX_OVERLAYS = state_support.MAX_OVERLAYS;
 pub const MAX_PRIVATE_SERVICES = state_support.MAX_PRIVATE_SERVICES;
 pub const MAX_LABEL_BYTES = state_support.MAX_LABEL_BYTES;
 pub const MAX_OVERLAY_SESSIONS: usize = 8;
+pub const ServiceConfig = struct {
+    max_overlay_sessions: usize = MAX_OVERLAY_SESSIONS,
+
+    pub fn validate(comptime config: ServiceConfig) void {
+        if (config.max_overlay_sessions == 0) @compileError("sync service requires at least one overlay session slot");
+    }
+};
 pub const TransportMode = state_support.TransportMode;
 pub const SyncSemantic = state_support.SyncSemantic;
 pub const WorkspacePolicyRequest = state_support.WorkspacePolicyRequest;
@@ -110,760 +117,768 @@ const OverlaySessionSlot = struct {
     },
 };
 
-pub const Service = struct {
-    service_id: u64,
-    task_id: u64,
-    owner: principal.PrincipalId,
-    loaded_existing_state: bool = false,
-    storage: ?*storage_service.Service = null,
-    state_workspace_id: u64 = 0,
-    resident_store: ?*ResidentState = null,
-    owned_resident_state: ResidentState = .{},
-    next_overlay_session_id: u64 = 1,
-    overlay_sessions: [MAX_OVERLAY_SESSIONS]OverlaySessionSlot = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_OVERLAY_SESSIONS,
+pub const Service = ServiceWith(.{});
 
-    pub fn init(service_id: u64, task_id: u64, owner: principal.PrincipalId) Service {
-        var service = Service{
-            .service_id = service_id,
-            .task_id = task_id,
-            .owner = owner,
-            .storage = null,
-            .state_workspace_id = 0,
-            .next_overlay_session_id = 1,
-            .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_OVERLAY_SESSIONS,
-        };
-        service.owned_resident_state.resetForServiceInit();
-        return service;
-    }
+pub fn ServiceWith(comptime config: ServiceConfig) type {
+    config.validate();
+    return struct {
+        const Self = @This();
+        const MAX_SERVICE_OVERLAY_SESSIONS = config.max_overlay_sessions;
 
-    pub fn initWithResidentState(
         service_id: u64,
         task_id: u64,
         owner: principal.PrincipalId,
-        resident_state: *ResidentState,
-    ) Service {
-        const loaded_existing_state = resident_state.has_persisted_state;
-        if (!resident_state.has_persisted_state) {
-            resident_state.resetForServiceInit();
-        }
-        return .{
-            .service_id = service_id,
-            .task_id = task_id,
-            .owner = owner,
-            .loaded_existing_state = loaded_existing_state,
-            .storage = null,
-            .state_workspace_id = 0,
-            .resident_store = resident_state,
-            .next_overlay_session_id = 1,
-            .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_OVERLAY_SESSIONS,
-        };
-    }
+        loaded_existing_state: bool = false,
+        storage: ?*storage_service.Service = null,
+        state_workspace_id: u64 = 0,
+        resident_store: ?*ResidentState = null,
+        owned_resident_state: ResidentState = .{},
+        next_overlay_session_id: u64 = 1,
+        overlay_sessions: [MAX_SERVICE_OVERLAY_SESSIONS]OverlaySessionSlot = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_SERVICE_OVERLAY_SESSIONS,
 
-    pub fn initWithStorage(
-        service_id: u64,
-        task_id: u64,
-        owner: principal.PrincipalId,
-        storage: *storage_service.Service,
-        resident_state: *ResidentState,
-    ) Error!Service {
-        const workspace_id = try state_store.ensureWorkspace(storage, owner);
-        const loaded_existing_state = if (resident_state.has_persisted_state)
-            true
-        else
-            try state_store.load(storage, workspace_id, resident_state);
-
-        if (!loaded_existing_state) {
-            resident_state.resetForServiceInit();
+        pub fn init(service_id: u64, task_id: u64, owner: principal.PrincipalId) Self {
+            var service = Self{
+                .service_id = service_id,
+                .task_id = task_id,
+                .owner = owner,
+                .storage = null,
+                .state_workspace_id = 0,
+                .next_overlay_session_id = 1,
+                .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_SERVICE_OVERLAY_SESSIONS,
+            };
+            service.owned_resident_state.resetForServiceInit();
+            return service;
         }
 
-        return .{
-            .service_id = service_id,
-            .task_id = task_id,
-            .owner = owner,
-            .loaded_existing_state = loaded_existing_state,
-            .storage = storage,
-            .state_workspace_id = workspace_id,
-            .resident_store = resident_state,
-            .next_overlay_session_id = 1,
-            .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_OVERLAY_SESSIONS,
-        };
-    }
-
-    pub fn ensureUserRoot(
-        self: *Service,
-        user_principal: principal.PrincipalId,
-        label: []const u8,
-        identity: signing.SignerIdentity,
-    ) Error!*device_graph.UserRootRecord {
-        const root = try self.state().graph.ensureUserRoot(user_principal, label, identity);
-        self.resident().markDirty();
-        return root;
-    }
-
-    pub fn enrollTrustedDevice(
-        self: *Service,
-        user_principal: principal.PrincipalId,
-        device_principal: principal.PrincipalId,
-        label: []const u8,
-        authorizer: signing.SignerIdentity,
-        device_identity: signing.SignerIdentity,
-        tick: u64,
-    ) Error!*device_graph.DeviceRecord {
-        const record = try self.state().graph.enrollDevice(user_principal, device_principal, label, authorizer, device_identity, tick);
-        self.resident().markDirty();
-        return record;
-    }
-
-    pub fn rotateDeviceKey(
-        self: *Service,
-        user_principal: principal.PrincipalId,
-        device_principal: principal.PrincipalId,
-        authorizer: signing.SignerIdentity,
-        next_device_identity: signing.SignerIdentity,
-        tick: u64,
-    ) Error!*device_graph.DeviceRecord {
-        const record = try self.state().graph.rotateDeviceKey(user_principal, device_principal, authorizer, next_device_identity, tick);
-        self.resident().markDirty();
-        return record;
-    }
-
-    pub fn revokeTrustedDevice(
-        self: *Service,
-        user_principal: principal.PrincipalId,
-        device_principal: principal.PrincipalId,
-        authorizer: signing.SignerIdentity,
-        tick: u64,
-    ) Error!void {
-        try self.state().graph.revokeDevice(user_principal, device_principal, authorizer, tick);
-        self.resident().markDirty();
-    }
-
-    pub fn findDeviceRecord(self: *const Service, device_id: principal.PrincipalId) ?*const device_graph.DeviceRecord {
-        return self.stateConst().graph.findDeviceConst(device_id);
-    }
-
-    pub fn createNetworkPolicy(self: *Service, request: network_policy.CreateRequest) Error!*network_policy.PolicyRecord {
-        const record = try self.state().network_policies.create(request);
-        self.resident().markDirty();
-        return record;
-    }
-
-    pub fn evaluateNetworkPolicy(
-        self: *Service,
-        policy_id: u64,
-        destination: network_policy.Destination,
-    ) Error!network_policy.Decision {
-        return self.state().network_policies.authorize(policy_id, destination);
-    }
-
-    pub fn configureWorkspacePolicy(
-        self: *Service,
-        request: WorkspacePolicyRequest,
-    ) Error!*WorkspacePolicy {
-        if (request.selective_prefixes.len > MAX_SELECTIVE_PREFIXES) return error.TooManySelectivePrefixes;
-
-        const slot = self.lookupWorkspacePolicySlot(request.workspace_id) orelse self.allocateWorkspacePolicy() orelse return error.WorkspacePolicyTableFull;
-        slot.in_use = true;
-        slot.policy = zeroWorkspacePolicy();
-        slot.policy.workspace_id = request.workspace_id;
-        slot.policy.owner = request.owner;
-        slot.policy.offline_first = request.offline_first;
-        slot.policy.personal_e2ee = request.personal_e2ee;
-        slot.policy.device_to_device_policy_id = request.device_to_device_policy_id;
-        slot.policy.relay_policy_id = request.relay_policy_id;
-        slot.policy.overlay_policy_id = request.overlay_policy_id;
-        slot.policy.relay_domain_len = copyText(&slot.policy.relay_domain, request.relay_domain);
-
-        for (request.selective_prefixes, 0..) |prefix, index| {
-            slot.policy.selective_prefix_lens[index] = copyText(&slot.policy.selective_prefixes[index], prefix);
-            slot.policy.selective_prefix_count += 1;
-        }
-
-        try self.checkpoint();
-        return &slot.policy;
-    }
-
-    pub fn findWorkspacePolicy(self: *Service, workspace_id: u64) ?*WorkspacePolicy {
-        const slot = self.lookupWorkspacePolicySlot(workspace_id) orelse return null;
-        return &slot.policy;
-    }
-
-    pub fn configureOverlay(
-        self: *Service,
-        workspace_id: u64,
-        home_device: principal.PrincipalId,
-        service_identity: []const u8,
-        remote_access_enabled: bool,
-    ) Error!*OverlayRecord {
-        const slot = self.lookupOverlaySlot(workspace_id) orelse self.allocateOverlay() orelse return error.OverlayTableFull;
-        slot.in_use = true;
-        if (slot.overlay.id == 0) {
-            slot.overlay = zeroOverlay();
-            slot.overlay.id = self.nextOverlayId();
-            slot.overlay.workspace_id = workspace_id;
-        }
-        slot.overlay.home_device = home_device;
-        slot.overlay.service_identity_len = copyText(&slot.overlay.service_identity, service_identity);
-        slot.overlay.remote_access_enabled = remote_access_enabled;
-        try self.checkpoint();
-        return &slot.overlay;
-    }
-
-    pub fn publishPrivateService(
-        self: *Service,
-        workspace_id: u64,
-        label: []const u8,
-    ) Error!*OverlayRecord {
-        const overlay = self.findOverlay(workspace_id) orelse return error.OverlayNotFound;
-        var index: usize = 0;
-        while (index < overlay.private_service_count) : (index += 1) {
-            if (std.mem.eql(u8, overlay.private_services[index][0..overlay.private_service_lens[index]], label)) {
-                return overlay;
+        pub fn initWithResidentState(
+            service_id: u64,
+            task_id: u64,
+            owner: principal.PrincipalId,
+            resident_state: *ResidentState,
+        ) Self {
+            const loaded_existing_state = resident_state.has_persisted_state;
+            if (!resident_state.has_persisted_state) {
+                resident_state.resetForServiceInit();
             }
-        }
-        if (overlay.private_service_count >= MAX_PRIVATE_SERVICES) return error.TooManyPrivateServices;
-        const slot_index = overlay.private_service_count;
-        overlay.private_service_lens[slot_index] = copyText(&overlay.private_services[slot_index], label);
-        overlay.private_service_count += 1;
-        try self.checkpoint();
-        return overlay;
-    }
-
-    pub fn findOverlay(self: *Service, workspace_id: u64) ?*OverlayRecord {
-        const slot = self.lookupOverlaySlot(workspace_id) orelse return null;
-        return &slot.overlay;
-    }
-
-    pub fn findOverlaySession(self: *Service, session_id: u64) ?*OverlaySession {
-        for (&self.overlay_sessions) |*slot| {
-            if (slot.in_use and slot.session.session_id == session_id) return &slot.session;
-        }
-        return null;
-    }
-
-    pub fn activeOverlaySessionCount(self: *const Service) usize {
-        var count: usize = 0;
-        for (self.overlay_sessions) |slot| {
-            if (slot.in_use and slot.session.state == .established) count += 1;
-        }
-        return count;
-    }
-
-    pub fn openOverlaySession(
-        self: *Service,
-        workspace_id: u64,
-        from_device: principal.PrincipalId,
-        to_device: principal.PrincipalId,
-        usage: OverlaySessionUse,
-        transport: TransportMode,
-        private_service_label: ?[]const u8,
-        tick: u64,
-    ) Error!OverlaySession {
-        try self.ensureTrustedDevices(from_device, to_device);
-        const policy = self.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
-        const overlay = self.findOverlay(workspace_id) orelse return error.OverlayNotFound;
-        const overlay_policy_id = policy.overlay_policy_id orelse return error.TransportDenied;
-        const overlay_decision = try self.evaluateNetworkPolicy(overlay_policy_id, .{
-            .service_identity = overlay.serviceIdentitySlice(),
-        });
-        if (!overlay_decision.allowed) return error.TransportDenied;
-
-        try self.authorizeTransport(policy, transport, null);
-        if (transport == .relay_assisted and !overlay.remote_access_enabled) {
-            return error.RemoteAccessDisabled;
+            return .{
+                .service_id = service_id,
+                .task_id = task_id,
+                .owner = owner,
+                .loaded_existing_state = loaded_existing_state,
+                .storage = null,
+                .state_workspace_id = 0,
+                .resident_store = resident_state,
+                .next_overlay_session_id = 1,
+                .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_SERVICE_OVERLAY_SESSIONS,
+            };
         }
 
-        var session = OverlaySession{
-            .session_id = self.nextOverlaySessionId(),
-            .overlay_id = overlay.id,
-            .workspace_id = workspace_id,
-            .source_device = from_device,
-            .target_device = to_device,
-            .usage = usage,
-            .transport = transport,
-            .state = .establishing,
-            .encrypted = true,
-            .relay_encrypted = transport == .relay_assisted,
-            .remote_access = false,
-            .open_tick = tick,
-            .last_activity_tick = tick,
-        };
-        session.service_identity_len = copyText(&session.service_identity, overlay.serviceIdentitySlice());
+        pub fn initWithStorage(
+            service_id: u64,
+            task_id: u64,
+            owner: principal.PrincipalId,
+            storage: *storage_service.Service,
+            resident_state: *ResidentState,
+        ) Error!Self {
+            const workspace_id = try state_store.ensureWorkspace(storage, owner);
+            const loaded_existing_state = if (resident_state.has_persisted_state)
+                true
+            else
+                try state_store.load(storage, workspace_id, resident_state);
 
-        switch (usage) {
-            .sync_replication => {},
-            .remote_access => {
-                if (!overlay.remote_access_enabled) return error.RemoteAccessDisabled;
-                session.remote_access = true;
-            },
-            .private_service => {
-                const label = private_service_label orelse return error.PrivateServiceNotPublished;
-                if (!overlay.hasPrivateService(label)) return error.PrivateServiceNotPublished;
-                session.private_service_len = copyText(&session.private_service, label);
-                session.remote_access = overlay.remote_access_enabled and transport == .relay_assisted;
-            },
-        }
-
-        if (transport == .relay_assisted) {
-            session.relay_domain_len = copyText(&session.relay_domain, policy.relayDomainSlice());
-            session.remote_access = true;
-        }
-
-        const slot = self.allocateOverlaySessionSlot() orelse return error.OverlayTableFull;
-        slot.in_use = true;
-        slot.session = session;
-        slot.session.state = .established;
-        session.state = .established;
-        return session;
-    }
-
-    pub fn probeOverlaySession(self: *Service, session_id: u64, tick: u64) Error!bool {
-        const session = self.findOverlaySession(session_id) orelse return error.OverlaySessionNotFound;
-        if (session.state != .established) return false;
-        session.keepalive_count += 1;
-        session.last_activity_tick = tick;
-        return true;
-    }
-
-    pub fn closeOverlaySession(self: *Service, session_id: u64, tick: u64) Error!bool {
-        const session = self.findOverlaySession(session_id) orelse return error.OverlaySessionNotFound;
-        if (session.state == .closed) return false;
-        session.state = .closed;
-        session.last_activity_tick = tick;
-        return true;
-    }
-
-    pub fn setReplicaVersion(
-        self: *Service,
-        workspace_id: u64,
-        device_id: principal.PrincipalId,
-        path: []const u8,
-        object_id: u64,
-        version_id: u64,
-    ) Error!void {
-        const slot = self.lookupReplicaSlot(workspace_id, device_id, path) orelse self.allocateReplicaSlot() orelse return error.ReplicaTableFull;
-        slot.in_use = true;
-        slot.entry.workspace_id = workspace_id;
-        slot.entry.device_id = device_id;
-        slot.entry.path_len = copyText(&slot.entry.path, path);
-        slot.entry.object_id = object_id;
-        slot.entry.version_id = version_id;
-        self.resident().markDirty();
-    }
-
-    pub fn replicaVersion(
-        self: *const Service,
-        workspace_id: u64,
-        device_id: principal.PrincipalId,
-        path: []const u8,
-    ) ?u64 {
-        for (&self.stateConst().replica_entries) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.entry.workspace_id != workspace_id) continue;
-            if (!slot.entry.device_id.eql(device_id)) continue;
-            if (!std.mem.eql(u8, slot.entry.pathSlice(), path)) continue;
-            return slot.entry.version_id;
-        }
-        return null;
-    }
-
-    pub fn registerDatabaseContract(
-        self: *Service,
-        workspace_id: u64,
-        bundle_id: []const u8,
-        label: []const u8,
-        identity: signing.SignerIdentity,
-    ) Error!*DatabaseContract {
-        var message_buffer: [160]u8 = undefined;
-        const message = databaseContractMessage(&message_buffer, workspace_id, bundle_id, label) catch return error.InvalidContractSignature;
-        const signature = signing.sign(identity, message) catch return error.InvalidContractSignature;
-        if (!signing.verify(signature, message)) return error.InvalidContractSignature;
-
-        if (self.findEquivalentDatabaseContract(workspace_id, bundle_id, label, signature)) |existing| {
-            return existing;
-        }
-
-        const slot = self.allocateDatabaseContract() orelse return error.DatabaseContractTableFull;
-        slot.in_use = true;
-        slot.contract = zeroDatabaseContract();
-        slot.contract.id = self.nextDatabaseContractId();
-        slot.contract.workspace_id = workspace_id;
-        slot.contract.bundle_id_len = copyText(&slot.contract.bundle_id, bundle_id);
-        slot.contract.label_len = copyText(&slot.contract.label, label);
-        slot.contract.signature = signature;
-
-        try self.checkpoint();
-        return &slot.contract;
-    }
-
-    pub fn replicateWorkspace(
-        self: *Service,
-        store: *const storage_service.Service,
-        workspace_id: u64,
-        from_device: principal.PrincipalId,
-        to_device: principal.PrincipalId,
-        transport: TransportMode,
-    ) Error!ReplicationSummary {
-        try self.ensureTrustedDevices(from_device, to_device);
-        const policy = self.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
-        var summary = ReplicationSummary{
-            .personal_e2ee = policy.personal_e2ee,
-            .offline_first = policy.offline_first,
-        };
-
-        try self.authorizeTransport(policy, transport, &summary);
-        try self.evaluateOverlay(policy, workspace_id, &summary);
-
-        const entries = try store.entries(workspace_id);
-        for (entries) |entry| {
-            if (!policy.matchesPath(entry.pathSlice())) {
-                summary.skipped_entry_count += 1;
-                continue;
-            }
-            summary.selected_entry_count += 1;
-
-            const semantic = classifyEntry(entry);
-            const remote_version_id = self.replicaVersion(workspace_id, to_device, entry.pathSlice()) orelse 0;
-            if (remote_version_id != 0 and remote_version_id != entry.version_id) {
-                try self.recordConflict(
-                    workspace_id,
-                    to_device,
-                    entry.object_id,
-                    entry.pathSlice(),
-                    entry.version_id,
-                    remote_version_id,
-                    semantic,
-                );
+            if (!loaded_existing_state) {
+                resident_state.resetForServiceInit();
             }
 
-            switch (semantic) {
-                .mergeable_crdt => summary.merged_count += 1,
-                .chunked_snapshot => summary.snapshot_count += 1,
-                else => {},
-            }
-            try self.setReplicaVersion(workspace_id, to_device, entry.pathSlice(), entry.object_id, entry.version_id);
+            return .{
+                .service_id = service_id,
+                .task_id = task_id,
+                .owner = owner,
+                .loaded_existing_state = loaded_existing_state,
+                .storage = storage,
+                .state_workspace_id = workspace_id,
+                .resident_store = resident_state,
+                .next_overlay_session_id = 1,
+                .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_SERVICE_OVERLAY_SESSIONS,
+            };
         }
-        summary.conflict_count = self.countConflictsFor(workspace_id, to_device);
-        if (summary.selected_entry_count != 0 or summary.conflict_count != 0) {
+
+        pub fn ensureUserRoot(
+            self: *Self,
+            user_principal: principal.PrincipalId,
+            label: []const u8,
+            identity: signing.SignerIdentity,
+        ) Error!*device_graph.UserRootRecord {
+            const root = try self.state().graph.ensureUserRoot(user_principal, label, identity);
+            self.resident().markDirty();
+            return root;
+        }
+
+        pub fn enrollTrustedDevice(
+            self: *Self,
+            user_principal: principal.PrincipalId,
+            device_principal: principal.PrincipalId,
+            label: []const u8,
+            authorizer: signing.SignerIdentity,
+            device_identity: signing.SignerIdentity,
+            tick: u64,
+        ) Error!*device_graph.DeviceRecord {
+            const record = try self.state().graph.enrollDevice(user_principal, device_principal, label, authorizer, device_identity, tick);
+            self.resident().markDirty();
+            return record;
+        }
+
+        pub fn rotateDeviceKey(
+            self: *Self,
+            user_principal: principal.PrincipalId,
+            device_principal: principal.PrincipalId,
+            authorizer: signing.SignerIdentity,
+            next_device_identity: signing.SignerIdentity,
+            tick: u64,
+        ) Error!*device_graph.DeviceRecord {
+            const record = try self.state().graph.rotateDeviceKey(user_principal, device_principal, authorizer, next_device_identity, tick);
+            self.resident().markDirty();
+            return record;
+        }
+
+        pub fn revokeTrustedDevice(
+            self: *Self,
+            user_principal: principal.PrincipalId,
+            device_principal: principal.PrincipalId,
+            authorizer: signing.SignerIdentity,
+            tick: u64,
+        ) Error!void {
+            try self.state().graph.revokeDevice(user_principal, device_principal, authorizer, tick);
+            self.resident().markDirty();
+        }
+
+        pub fn findDeviceRecord(self: *const Self, device_id: principal.PrincipalId) ?*const device_graph.DeviceRecord {
+            return self.stateConst().graph.findDeviceConst(device_id);
+        }
+
+        pub fn createNetworkPolicy(self: *Self, request: network_policy.CreateRequest) Error!*network_policy.PolicyRecord {
+            const record = try self.state().network_policies.create(request);
+            self.resident().markDirty();
+            return record;
+        }
+
+        pub fn evaluateNetworkPolicy(
+            self: *Self,
+            policy_id: u64,
+            destination: network_policy.Destination,
+        ) Error!network_policy.Decision {
+            return self.state().network_policies.authorize(policy_id, destination);
+        }
+
+        pub fn configureWorkspacePolicy(
+            self: *Self,
+            request: WorkspacePolicyRequest,
+        ) Error!*WorkspacePolicy {
+            if (request.selective_prefixes.len > MAX_SELECTIVE_PREFIXES) return error.TooManySelectivePrefixes;
+
+            const slot = self.lookupWorkspacePolicySlot(request.workspace_id) orelse self.allocateWorkspacePolicy() orelse return error.WorkspacePolicyTableFull;
+            slot.in_use = true;
+            slot.policy = zeroWorkspacePolicy();
+            slot.policy.workspace_id = request.workspace_id;
+            slot.policy.owner = request.owner;
+            slot.policy.offline_first = request.offline_first;
+            slot.policy.personal_e2ee = request.personal_e2ee;
+            slot.policy.device_to_device_policy_id = request.device_to_device_policy_id;
+            slot.policy.relay_policy_id = request.relay_policy_id;
+            slot.policy.overlay_policy_id = request.overlay_policy_id;
+            slot.policy.relay_domain_len = copyText(&slot.policy.relay_domain, request.relay_domain);
+
+            for (request.selective_prefixes, 0..) |prefix, index| {
+                slot.policy.selective_prefix_lens[index] = copyText(&slot.policy.selective_prefixes[index], prefix);
+                slot.policy.selective_prefix_count += 1;
+            }
+
             try self.checkpoint();
+            return &slot.policy;
         }
-        return summary;
-    }
 
-    pub fn transferSecretObject(
-        self: *Service,
-        storage: *const storage_service.Service,
-        workspace_id: u64,
-        object_id: u64,
-        from_device: principal.PrincipalId,
-        to_device: principal.PrincipalId,
-        transport: TransportMode,
-    ) Error!bool {
-        try self.ensureTrustedDevices(from_device, to_device);
-        const policy = self.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
-        if (!policy.personal_e2ee) return error.TransportDenied;
-        try self.authorizeTransport(policy, transport, null);
-
-        const object_record = storage.object(object_id) orelse return error.ObjectNotFound;
-        if (object_record.object_type != .secret) return error.TypeMismatch;
-        return true;
-    }
-
-    pub fn replicateDatabaseContract(
-        self: *Service,
-        contract_id: u64,
-        workspace_id: u64,
-        from_device: principal.PrincipalId,
-        to_device: principal.PrincipalId,
-        transport: TransportMode,
-    ) Error!bool {
-        try self.ensureTrustedDevices(from_device, to_device);
-        const policy = self.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
-        try self.authorizeTransport(policy, transport, null);
-
-        const record = self.findDatabaseContract(contract_id) orelse return error.DatabaseContractNotFound;
-        var message_buffer: [160]u8 = undefined;
-        const message = databaseContractMessage(
-            &message_buffer,
-            record.workspace_id,
-            record.bundleIdSlice(),
-            record.labelSlice(),
-        ) catch return error.InvalidContractSignature;
-        if (!signing.verify(record.signature, message)) return error.InvalidContractSignature;
-        return true;
-    }
-
-    pub fn repairWorkspaceMetadata(
-        self: *Service,
-        store: *const storage_service.Service,
-        workspace_id: u64,
-        device_id: principal.PrincipalId,
-    ) Error!bool {
-        if (!self.isTrustedDevice(device_id)) return error.DeviceNotTrusted;
-        const policy = self.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
-        var repaired = try self.clearConflictsFor(workspace_id, device_id);
-        const entries = try store.entries(workspace_id);
-        for (entries) |entry| {
-            if (!policy.matchesPath(entry.pathSlice())) continue;
-            try self.setReplicaVersion(workspace_id, device_id, entry.pathSlice(), entry.object_id, entry.version_id);
-            repaired = true;
+        pub fn findWorkspacePolicy(self: *Self, workspace_id: u64) ?*WorkspacePolicy {
+            const slot = self.lookupWorkspacePolicySlot(workspace_id) orelse return null;
+            return &slot.policy;
         }
-        if (repaired) try self.checkpoint();
-        return repaired;
-    }
 
-    pub fn trustedDeviceCount(self: *const Service) usize {
-        return self.stateConst().graph.trustedDeviceCount();
-    }
-
-    pub fn findConflict(
-        self: *Service,
-        workspace_id: u64,
-        device_id: principal.PrincipalId,
-        path: []const u8,
-    ) ?*ConflictRecord {
-        for (&self.state().conflicts) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.conflict.workspace_id != workspace_id) continue;
-            if (!slot.conflict.device_id.eql(device_id)) continue;
-            if (!std.mem.eql(u8, slot.conflict.pathSlice(), path)) continue;
-            return &slot.conflict;
+        pub fn configureOverlay(
+            self: *Self,
+            workspace_id: u64,
+            home_device: principal.PrincipalId,
+            service_identity: []const u8,
+            remote_access_enabled: bool,
+        ) Error!*OverlayRecord {
+            const slot = self.lookupOverlaySlot(workspace_id) orelse self.allocateOverlay() orelse return error.OverlayTableFull;
+            slot.in_use = true;
+            if (slot.overlay.id == 0) {
+                slot.overlay = zeroOverlay();
+                slot.overlay.id = self.nextOverlayId();
+                slot.overlay.workspace_id = workspace_id;
+            }
+            slot.overlay.home_device = home_device;
+            slot.overlay.service_identity_len = copyText(&slot.overlay.service_identity, service_identity);
+            slot.overlay.remote_access_enabled = remote_access_enabled;
+            try self.checkpoint();
+            return &slot.overlay;
         }
-        return null;
-    }
 
-    pub fn isTrustedDevice(self: *const Service, device_id: principal.PrincipalId) bool {
-        return self.stateConst().graph.isTrusted(device_id);
-    }
-
-    fn checkpoint(self: *Service) Error!void {
-        if (self.storage) |storage| {
-            try state_store.persist(storage, self.state_workspace_id, self.residentConst());
+        pub fn publishPrivateService(
+            self: *Self,
+            workspace_id: u64,
+            label: []const u8,
+        ) Error!*OverlayRecord {
+            const overlay = self.findOverlay(workspace_id) orelse return error.OverlayNotFound;
+            var index: usize = 0;
+            while (index < overlay.private_service_count) : (index += 1) {
+                if (std.mem.eql(u8, overlay.private_services[index][0..overlay.private_service_lens[index]], label)) {
+                    return overlay;
+                }
+            }
+            if (overlay.private_service_count >= MAX_PRIVATE_SERVICES) return error.TooManyPrivateServices;
+            const slot_index = overlay.private_service_count;
+            overlay.private_service_lens[slot_index] = copyText(&overlay.private_services[slot_index], label);
+            overlay.private_service_count += 1;
+            try self.checkpoint();
+            return overlay;
         }
-        self.resident().markDirty();
-    }
 
-    fn authorizeTransport(
-        self: *Service,
-        policy: *const WorkspacePolicy,
-        transport: TransportMode,
-        summary: ?*ReplicationSummary,
-    ) Error!void {
-        switch (transport) {
-            .device_to_device => {
-                const policy_id = policy.device_to_device_policy_id orelse return error.TransportDenied;
-                const decision = try self.evaluateNetworkPolicy(policy_id, .local_network);
-                if (!decision.allowed) return error.TransportDenied;
-                if (summary) |value| value.used_device_to_device = true;
-            },
-            .relay_assisted => {
-                const policy_id = policy.relay_policy_id orelse return error.TransportDenied;
-                const decision = try self.evaluateNetworkPolicy(policy_id, .{ .domain = policy.relayDomainSlice() });
-                if (!decision.allowed) return error.TransportDenied;
-                if (summary) |value| value.used_relay = true;
-            },
+        pub fn findOverlay(self: *Self, workspace_id: u64) ?*OverlayRecord {
+            const slot = self.lookupOverlaySlot(workspace_id) orelse return null;
+            return &slot.overlay;
         }
-    }
 
-    fn evaluateOverlay(
-        self: *Service,
-        policy: *const WorkspacePolicy,
-        workspace_id: u64,
-        summary: *ReplicationSummary,
-    ) Error!void {
-        const overlay_policy_id = policy.overlay_policy_id orelse return;
-        const overlay = self.findOverlay(workspace_id) orelse return;
-        const decision = try self.evaluateNetworkPolicy(overlay_policy_id, .{ .service_identity = overlay.serviceIdentitySlice() });
-        if (!decision.allowed) return;
-        summary.overlay_ready = true;
-        summary.remote_access_ready = overlay.remote_access_enabled;
-        summary.private_service_published = overlay.hasPrivateServices();
-    }
-
-    fn ensureTrustedDevices(self: *Service, from_device: principal.PrincipalId, to_device: principal.PrincipalId) Error!void {
-        if (!self.state().graph.isTrusted(from_device) or !self.state().graph.isTrusted(to_device)) {
-            return error.DeviceNotTrusted;
+        pub fn findOverlaySession(self: *Self, session_id: u64) ?*OverlaySession {
+            for (&self.overlay_sessions) |*slot| {
+                if (slot.in_use and slot.session.session_id == session_id) return &slot.session;
+            }
+            return null;
         }
-    }
 
-    fn allocateOverlaySessionSlot(self: *Service) ?*OverlaySessionSlot {
-        for (&self.overlay_sessions) |*slot| {
-            if (!slot.in_use) return slot;
+        pub fn activeOverlaySessionCount(self: *const Self) usize {
+            var count: usize = 0;
+            for (self.overlay_sessions) |slot| {
+                if (slot.in_use and slot.session.state == .established) count += 1;
+            }
+            return count;
         }
-        for (&self.overlay_sessions) |*slot| {
-            if (slot.session.state == .closed) return slot;
+
+        pub fn openOverlaySession(
+            self: *Self,
+            workspace_id: u64,
+            from_device: principal.PrincipalId,
+            to_device: principal.PrincipalId,
+            usage: OverlaySessionUse,
+            transport: TransportMode,
+            private_service_label: ?[]const u8,
+            tick: u64,
+        ) Error!OverlaySession {
+            try self.ensureTrustedDevices(from_device, to_device);
+            const policy = self.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
+            const overlay = self.findOverlay(workspace_id) orelse return error.OverlayNotFound;
+            const overlay_policy_id = policy.overlay_policy_id orelse return error.TransportDenied;
+            const overlay_decision = try self.evaluateNetworkPolicy(overlay_policy_id, .{
+                .service_identity = overlay.serviceIdentitySlice(),
+            });
+            if (!overlay_decision.allowed) return error.TransportDenied;
+
+            try self.authorizeTransport(policy, transport, null);
+            if (transport == .relay_assisted and !overlay.remote_access_enabled) {
+                return error.RemoteAccessDisabled;
+            }
+
+            var session = OverlaySession{
+                .session_id = self.nextOverlaySessionId(),
+                .overlay_id = overlay.id,
+                .workspace_id = workspace_id,
+                .source_device = from_device,
+                .target_device = to_device,
+                .usage = usage,
+                .transport = transport,
+                .state = .establishing,
+                .encrypted = true,
+                .relay_encrypted = transport == .relay_assisted,
+                .remote_access = false,
+                .open_tick = tick,
+                .last_activity_tick = tick,
+            };
+            session.service_identity_len = copyText(&session.service_identity, overlay.serviceIdentitySlice());
+
+            switch (usage) {
+                .sync_replication => {},
+                .remote_access => {
+                    if (!overlay.remote_access_enabled) return error.RemoteAccessDisabled;
+                    session.remote_access = true;
+                },
+                .private_service => {
+                    const label = private_service_label orelse return error.PrivateServiceNotPublished;
+                    if (!overlay.hasPrivateService(label)) return error.PrivateServiceNotPublished;
+                    session.private_service_len = copyText(&session.private_service, label);
+                    session.remote_access = overlay.remote_access_enabled and transport == .relay_assisted;
+                },
+            }
+
+            if (transport == .relay_assisted) {
+                session.relay_domain_len = copyText(&session.relay_domain, policy.relayDomainSlice());
+                session.remote_access = true;
+            }
+
+            const slot = self.allocateOverlaySessionSlot() orelse return error.OverlayTableFull;
+            slot.in_use = true;
+            slot.session = session;
+            slot.session.state = .established;
+            session.state = .established;
+            return session;
         }
-        return null;
-    }
 
-    fn nextOverlaySessionId(self: *Service) u64 {
-        defer self.next_overlay_session_id += 1;
-        return self.next_overlay_session_id;
-    }
-
-    fn recordConflict(
-        self: *Service,
-        workspace_id: u64,
-        device_id: principal.PrincipalId,
-        object_id: u64,
-        path: []const u8,
-        local_version_id: u64,
-        remote_version_id: u64,
-        semantic: SyncSemantic,
-    ) Error!void {
-        const slot = self.allocateConflict() orelse return error.ConflictTableFull;
-        slot.in_use = true;
-        slot.conflict = zeroConflict();
-        slot.conflict.workspace_id = workspace_id;
-        slot.conflict.device_id = device_id;
-        slot.conflict.object_id = object_id;
-        slot.conflict.path_len = copyText(&slot.conflict.path, path);
-        slot.conflict.local_version_id = local_version_id;
-        slot.conflict.remote_version_id = remote_version_id;
-        slot.conflict.semantic = semantic;
-        self.resident().markDirty();
-    }
-
-    fn countConflictsFor(self: *const Service, workspace_id: u64, device_id: principal.PrincipalId) usize {
-        var count: usize = 0;
-        for (self.stateConst().conflicts) |slot| {
-            if (!slot.in_use) continue;
-            if (slot.conflict.workspace_id != workspace_id) continue;
-            if (!slot.conflict.device_id.eql(device_id)) continue;
-            count += 1;
+        pub fn probeOverlaySession(self: *Self, session_id: u64, tick: u64) Error!bool {
+            const session = self.findOverlaySession(session_id) orelse return error.OverlaySessionNotFound;
+            if (session.state != .established) return false;
+            session.keepalive_count += 1;
+            session.last_activity_tick = tick;
+            return true;
         }
-        return count;
-    }
 
-    fn clearConflictsFor(self: *Service, workspace_id: u64, device_id: principal.PrincipalId) Error!bool {
-        var cleared = false;
-        for (&self.state().conflicts) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.conflict.workspace_id != workspace_id) continue;
-            if (!slot.conflict.device_id.eql(device_id)) continue;
-            slot.* = .{};
-            cleared = true;
+        pub fn closeOverlaySession(self: *Self, session_id: u64, tick: u64) Error!bool {
+            const session = self.findOverlaySession(session_id) orelse return error.OverlaySessionNotFound;
+            if (session.state == .closed) return false;
+            session.state = .closed;
+            session.last_activity_tick = tick;
+            return true;
         }
-        if (cleared) self.resident().markDirty();
-        return cleared;
-    }
 
-    fn findDatabaseContract(self: *Service, contract_id: u64) ?*DatabaseContract {
-        for (&self.state().database_contracts) |*slot| {
-            if (slot.in_use and slot.contract.id == contract_id) return &slot.contract;
+        pub fn setReplicaVersion(
+            self: *Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            path: []const u8,
+            object_id: u64,
+            version_id: u64,
+        ) Error!void {
+            const slot = self.lookupReplicaSlot(workspace_id, device_id, path) orelse self.allocateReplicaSlot() orelse return error.ReplicaTableFull;
+            slot.in_use = true;
+            slot.entry.workspace_id = workspace_id;
+            slot.entry.device_id = device_id;
+            slot.entry.path_len = copyText(&slot.entry.path, path);
+            slot.entry.object_id = object_id;
+            slot.entry.version_id = version_id;
+            self.resident().markDirty();
         }
-        return null;
-    }
 
-    fn findEquivalentDatabaseContract(
-        self: *Service,
-        workspace_id: u64,
-        bundle_id: []const u8,
-        label: []const u8,
-        signature: manifest.Signature,
-    ) ?*DatabaseContract {
-        for (&self.state().database_contracts) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.contract.workspace_id != workspace_id) continue;
-            if (!std.mem.eql(u8, slot.contract.bundleIdSlice(), bundle_id)) continue;
-            if (!std.mem.eql(u8, slot.contract.labelSlice(), label)) continue;
-            if (!signatureEql(slot.contract.signature, signature)) continue;
+        pub fn replicaVersion(
+            self: *const Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            path: []const u8,
+        ) ?u64 {
+            for (&self.stateConst().replica_entries) |*slot| {
+                if (!slot.in_use) continue;
+                if (slot.entry.workspace_id != workspace_id) continue;
+                if (!slot.entry.device_id.eql(device_id)) continue;
+                if (!std.mem.eql(u8, slot.entry.pathSlice(), path)) continue;
+                return slot.entry.version_id;
+            }
+            return null;
+        }
+
+        pub fn registerDatabaseContract(
+            self: *Self,
+            workspace_id: u64,
+            bundle_id: []const u8,
+            label: []const u8,
+            identity: signing.SignerIdentity,
+        ) Error!*DatabaseContract {
+            var message_buffer: [160]u8 = undefined;
+            const message = databaseContractMessage(&message_buffer, workspace_id, bundle_id, label) catch return error.InvalidContractSignature;
+            const signature = signing.sign(identity, message) catch return error.InvalidContractSignature;
+            if (!signing.verify(signature, message)) return error.InvalidContractSignature;
+
+            if (self.findEquivalentDatabaseContract(workspace_id, bundle_id, label, signature)) |existing| {
+                return existing;
+            }
+
+            const slot = self.allocateDatabaseContract() orelse return error.DatabaseContractTableFull;
+            slot.in_use = true;
+            slot.contract = zeroDatabaseContract();
+            slot.contract.id = self.nextDatabaseContractId();
+            slot.contract.workspace_id = workspace_id;
+            slot.contract.bundle_id_len = copyText(&slot.contract.bundle_id, bundle_id);
+            slot.contract.label_len = copyText(&slot.contract.label, label);
+            slot.contract.signature = signature;
+
+            try self.checkpoint();
             return &slot.contract;
         }
-        return null;
-    }
 
-    fn lookupWorkspacePolicySlot(self: *Service, workspace_id: u64) ?*WorkspacePolicySlot {
-        for (&self.state().workspace_policies) |*slot| {
-            if (slot.in_use and slot.policy.workspace_id == workspace_id) return slot;
+        pub fn replicateWorkspace(
+            self: *Self,
+            store: *const storage_service.Service,
+            workspace_id: u64,
+            from_device: principal.PrincipalId,
+            to_device: principal.PrincipalId,
+            transport: TransportMode,
+        ) Error!ReplicationSummary {
+            try self.ensureTrustedDevices(from_device, to_device);
+            const policy = self.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
+            var summary = ReplicationSummary{
+                .personal_e2ee = policy.personal_e2ee,
+                .offline_first = policy.offline_first,
+            };
+
+            try self.authorizeTransport(policy, transport, &summary);
+            try self.evaluateOverlay(policy, workspace_id, &summary);
+
+            const entries = try store.entries(workspace_id);
+            for (entries) |entry| {
+                if (!policy.matchesPath(entry.pathSlice())) {
+                    summary.skipped_entry_count += 1;
+                    continue;
+                }
+                summary.selected_entry_count += 1;
+
+                const semantic = classifyEntry(entry);
+                const remote_version_id = self.replicaVersion(workspace_id, to_device, entry.pathSlice()) orelse 0;
+                if (remote_version_id != 0 and remote_version_id != entry.version_id) {
+                    try self.recordConflict(
+                        workspace_id,
+                        to_device,
+                        entry.object_id,
+                        entry.pathSlice(),
+                        entry.version_id,
+                        remote_version_id,
+                        semantic,
+                    );
+                }
+
+                switch (semantic) {
+                    .mergeable_crdt => summary.merged_count += 1,
+                    .chunked_snapshot => summary.snapshot_count += 1,
+                    else => {},
+                }
+                try self.setReplicaVersion(workspace_id, to_device, entry.pathSlice(), entry.object_id, entry.version_id);
+            }
+            summary.conflict_count = self.countConflictsFor(workspace_id, to_device);
+            if (summary.selected_entry_count != 0 or summary.conflict_count != 0) {
+                try self.checkpoint();
+            }
+            return summary;
         }
-        return null;
-    }
 
-    fn allocateWorkspacePolicy(self: *Service) ?*WorkspacePolicySlot {
-        for (&self.state().workspace_policies) |*slot| {
-            if (!slot.in_use) return slot;
+        pub fn transferSecretObject(
+            self: *Self,
+            storage: *const storage_service.Service,
+            workspace_id: u64,
+            object_id: u64,
+            from_device: principal.PrincipalId,
+            to_device: principal.PrincipalId,
+            transport: TransportMode,
+        ) Error!bool {
+            try self.ensureTrustedDevices(from_device, to_device);
+            const policy = self.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
+            if (!policy.personal_e2ee) return error.TransportDenied;
+            try self.authorizeTransport(policy, transport, null);
+
+            const object_record = storage.object(object_id) orelse return error.ObjectNotFound;
+            if (object_record.object_type != .secret) return error.TypeMismatch;
+            return true;
         }
-        return null;
-    }
 
-    fn lookupOverlaySlot(self: *Service, workspace_id: u64) ?*OverlaySlot {
-        for (&self.state().overlays) |*slot| {
-            if (slot.in_use and slot.overlay.workspace_id == workspace_id) return slot;
+        pub fn replicateDatabaseContract(
+            self: *Self,
+            contract_id: u64,
+            workspace_id: u64,
+            from_device: principal.PrincipalId,
+            to_device: principal.PrincipalId,
+            transport: TransportMode,
+        ) Error!bool {
+            try self.ensureTrustedDevices(from_device, to_device);
+            const policy = self.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
+            try self.authorizeTransport(policy, transport, null);
+
+            const record = self.findDatabaseContract(contract_id) orelse return error.DatabaseContractNotFound;
+            var message_buffer: [160]u8 = undefined;
+            const message = databaseContractMessage(
+                &message_buffer,
+                record.workspace_id,
+                record.bundleIdSlice(),
+                record.labelSlice(),
+            ) catch return error.InvalidContractSignature;
+            if (!signing.verify(record.signature, message)) return error.InvalidContractSignature;
+            return true;
         }
-        return null;
-    }
 
-    fn allocateOverlay(self: *Service) ?*OverlaySlot {
-        for (&self.state().overlays) |*slot| {
-            if (!slot.in_use) return slot;
+        pub fn repairWorkspaceMetadata(
+            self: *Self,
+            store: *const storage_service.Service,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+        ) Error!bool {
+            if (!self.isTrustedDevice(device_id)) return error.DeviceNotTrusted;
+            const policy = self.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
+            var repaired = try self.clearConflictsFor(workspace_id, device_id);
+            const entries = try store.entries(workspace_id);
+            for (entries) |entry| {
+                if (!policy.matchesPath(entry.pathSlice())) continue;
+                try self.setReplicaVersion(workspace_id, device_id, entry.pathSlice(), entry.object_id, entry.version_id);
+                repaired = true;
+            }
+            if (repaired) try self.checkpoint();
+            return repaired;
         }
-        return null;
-    }
 
-    fn nextOverlayId(self: *Service) u64 {
-        defer self.state().next_overlay_id += 1;
-        return self.stateConst().next_overlay_id;
-    }
-
-    fn lookupReplicaSlot(
-        self: *Service,
-        workspace_id: u64,
-        device_id: principal.PrincipalId,
-        path: []const u8,
-    ) ?*ReplicaSlot {
-        for (&self.state().replica_entries) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.entry.workspace_id != workspace_id) continue;
-            if (!slot.entry.device_id.eql(device_id)) continue;
-            if (!std.mem.eql(u8, slot.entry.pathSlice(), path)) continue;
-            return slot;
+        pub fn trustedDeviceCount(self: *const Self) usize {
+            return self.stateConst().graph.trustedDeviceCount();
         }
-        return null;
-    }
 
-    fn allocateReplicaSlot(self: *Service) ?*ReplicaSlot {
-        for (&self.state().replica_entries) |*slot| {
-            if (!slot.in_use) return slot;
+        pub fn findConflict(
+            self: *Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            path: []const u8,
+        ) ?*ConflictRecord {
+            for (&self.state().conflicts) |*slot| {
+                if (!slot.in_use) continue;
+                if (slot.conflict.workspace_id != workspace_id) continue;
+                if (!slot.conflict.device_id.eql(device_id)) continue;
+                if (!std.mem.eql(u8, slot.conflict.pathSlice(), path)) continue;
+                return &slot.conflict;
+            }
+            return null;
         }
-        return null;
-    }
 
-    fn allocateConflict(self: *Service) ?*ConflictSlot {
-        for (&self.state().conflicts) |*slot| {
-            if (!slot.in_use) return slot;
+        pub fn isTrustedDevice(self: *const Self, device_id: principal.PrincipalId) bool {
+            return self.stateConst().graph.isTrusted(device_id);
         }
-        return null;
-    }
 
-    fn allocateDatabaseContract(self: *Service) ?*DatabaseContractSlot {
-        for (&self.state().database_contracts) |*slot| {
-            if (!slot.in_use) return slot;
+        fn checkpoint(self: *Self) Error!void {
+            if (self.storage) |storage| {
+                try state_store.persist(storage, self.state_workspace_id, self.residentConst());
+            }
+            self.resident().markDirty();
         }
-        return null;
-    }
 
-    fn nextDatabaseContractId(self: *Service) u64 {
-        defer self.state().next_contract_id += 1;
-        return self.stateConst().next_contract_id;
-    }
+        fn authorizeTransport(
+            self: *Self,
+            policy: *const WorkspacePolicy,
+            transport: TransportMode,
+            summary: ?*ReplicationSummary,
+        ) Error!void {
+            switch (transport) {
+                .device_to_device => {
+                    const policy_id = policy.device_to_device_policy_id orelse return error.TransportDenied;
+                    const decision = try self.evaluateNetworkPolicy(policy_id, .local_network);
+                    if (!decision.allowed) return error.TransportDenied;
+                    if (summary) |value| value.used_device_to_device = true;
+                },
+                .relay_assisted => {
+                    const policy_id = policy.relay_policy_id orelse return error.TransportDenied;
+                    const decision = try self.evaluateNetworkPolicy(policy_id, .{ .domain = policy.relayDomainSlice() });
+                    if (!decision.allowed) return error.TransportDenied;
+                    if (summary) |value| value.used_relay = true;
+                },
+            }
+        }
 
-    fn resident(self: *Service) *ResidentState {
-        return self.resident_store orelse &self.owned_resident_state;
-    }
+        fn evaluateOverlay(
+            self: *Self,
+            policy: *const WorkspacePolicy,
+            workspace_id: u64,
+            summary: *ReplicationSummary,
+        ) Error!void {
+            const overlay_policy_id = policy.overlay_policy_id orelse return;
+            const overlay = self.findOverlay(workspace_id) orelse return;
+            const decision = try self.evaluateNetworkPolicy(overlay_policy_id, .{ .service_identity = overlay.serviceIdentitySlice() });
+            if (!decision.allowed) return;
+            summary.overlay_ready = true;
+            summary.remote_access_ready = overlay.remote_access_enabled;
+            summary.private_service_published = overlay.hasPrivateServices();
+        }
 
-    fn residentConst(self: *const Service) *ResidentState {
-        return self.resident_store orelse @constCast(&self.owned_resident_state);
-    }
+        fn ensureTrustedDevices(self: *Self, from_device: principal.PrincipalId, to_device: principal.PrincipalId) Error!void {
+            if (!self.state().graph.isTrusted(from_device) or !self.state().graph.isTrusted(to_device)) {
+                return error.DeviceNotTrusted;
+            }
+        }
 
-    fn state(self: *Service) *PersistentState {
-        return &self.resident().persisted_state;
-    }
+        fn allocateOverlaySessionSlot(self: *Self) ?*OverlaySessionSlot {
+            for (&self.overlay_sessions) |*slot| {
+                if (!slot.in_use) return slot;
+            }
+            for (&self.overlay_sessions) |*slot| {
+                if (slot.session.state == .closed) return slot;
+            }
+            return null;
+        }
 
-    fn stateConst(self: *const Service) *const PersistentState {
-        return &self.residentConst().persisted_state;
-    }
-};
+        fn nextOverlaySessionId(self: *Self) u64 {
+            defer self.next_overlay_session_id += 1;
+            return self.next_overlay_session_id;
+        }
+
+        fn recordConflict(
+            self: *Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            object_id: u64,
+            path: []const u8,
+            local_version_id: u64,
+            remote_version_id: u64,
+            semantic: SyncSemantic,
+        ) Error!void {
+            const slot = self.allocateConflict() orelse return error.ConflictTableFull;
+            slot.in_use = true;
+            slot.conflict = zeroConflict();
+            slot.conflict.workspace_id = workspace_id;
+            slot.conflict.device_id = device_id;
+            slot.conflict.object_id = object_id;
+            slot.conflict.path_len = copyText(&slot.conflict.path, path);
+            slot.conflict.local_version_id = local_version_id;
+            slot.conflict.remote_version_id = remote_version_id;
+            slot.conflict.semantic = semantic;
+            self.resident().markDirty();
+        }
+
+        fn countConflictsFor(self: *const Self, workspace_id: u64, device_id: principal.PrincipalId) usize {
+            var count: usize = 0;
+            for (self.stateConst().conflicts) |slot| {
+                if (!slot.in_use) continue;
+                if (slot.conflict.workspace_id != workspace_id) continue;
+                if (!slot.conflict.device_id.eql(device_id)) continue;
+                count += 1;
+            }
+            return count;
+        }
+
+        fn clearConflictsFor(self: *Self, workspace_id: u64, device_id: principal.PrincipalId) Error!bool {
+            var cleared = false;
+            for (&self.state().conflicts) |*slot| {
+                if (!slot.in_use) continue;
+                if (slot.conflict.workspace_id != workspace_id) continue;
+                if (!slot.conflict.device_id.eql(device_id)) continue;
+                slot.* = .{};
+                cleared = true;
+            }
+            if (cleared) self.resident().markDirty();
+            return cleared;
+        }
+
+        fn findDatabaseContract(self: *Self, contract_id: u64) ?*DatabaseContract {
+            for (&self.state().database_contracts) |*slot| {
+                if (slot.in_use and slot.contract.id == contract_id) return &slot.contract;
+            }
+            return null;
+        }
+
+        fn findEquivalentDatabaseContract(
+            self: *Self,
+            workspace_id: u64,
+            bundle_id: []const u8,
+            label: []const u8,
+            signature: manifest.Signature,
+        ) ?*DatabaseContract {
+            for (&self.state().database_contracts) |*slot| {
+                if (!slot.in_use) continue;
+                if (slot.contract.workspace_id != workspace_id) continue;
+                if (!std.mem.eql(u8, slot.contract.bundleIdSlice(), bundle_id)) continue;
+                if (!std.mem.eql(u8, slot.contract.labelSlice(), label)) continue;
+                if (!signatureEql(slot.contract.signature, signature)) continue;
+                return &slot.contract;
+            }
+            return null;
+        }
+
+        fn lookupWorkspacePolicySlot(self: *Self, workspace_id: u64) ?*WorkspacePolicySlot {
+            for (&self.state().workspace_policies) |*slot| {
+                if (slot.in_use and slot.policy.workspace_id == workspace_id) return slot;
+            }
+            return null;
+        }
+
+        fn allocateWorkspacePolicy(self: *Self) ?*WorkspacePolicySlot {
+            for (&self.state().workspace_policies) |*slot| {
+                if (!slot.in_use) return slot;
+            }
+            return null;
+        }
+
+        fn lookupOverlaySlot(self: *Self, workspace_id: u64) ?*OverlaySlot {
+            for (&self.state().overlays) |*slot| {
+                if (slot.in_use and slot.overlay.workspace_id == workspace_id) return slot;
+            }
+            return null;
+        }
+
+        fn allocateOverlay(self: *Self) ?*OverlaySlot {
+            for (&self.state().overlays) |*slot| {
+                if (!slot.in_use) return slot;
+            }
+            return null;
+        }
+
+        fn nextOverlayId(self: *Self) u64 {
+            defer self.state().next_overlay_id += 1;
+            return self.stateConst().next_overlay_id;
+        }
+
+        fn lookupReplicaSlot(
+            self: *Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            path: []const u8,
+        ) ?*ReplicaSlot {
+            for (&self.state().replica_entries) |*slot| {
+                if (!slot.in_use) continue;
+                if (slot.entry.workspace_id != workspace_id) continue;
+                if (!slot.entry.device_id.eql(device_id)) continue;
+                if (!std.mem.eql(u8, slot.entry.pathSlice(), path)) continue;
+                return slot;
+            }
+            return null;
+        }
+
+        fn allocateReplicaSlot(self: *Self) ?*ReplicaSlot {
+            for (&self.state().replica_entries) |*slot| {
+                if (!slot.in_use) return slot;
+            }
+            return null;
+        }
+
+        fn allocateConflict(self: *Self) ?*ConflictSlot {
+            for (&self.state().conflicts) |*slot| {
+                if (!slot.in_use) return slot;
+            }
+            return null;
+        }
+
+        fn allocateDatabaseContract(self: *Self) ?*DatabaseContractSlot {
+            for (&self.state().database_contracts) |*slot| {
+                if (!slot.in_use) return slot;
+            }
+            return null;
+        }
+
+        fn nextDatabaseContractId(self: *Self) u64 {
+            defer self.state().next_contract_id += 1;
+            return self.stateConst().next_contract_id;
+        }
+
+        fn resident(self: *Self) *ResidentState {
+            return self.resident_store orelse &self.owned_resident_state;
+        }
+
+        fn residentConst(self: *const Self) *ResidentState {
+            return self.resident_store orelse @constCast(&self.owned_resident_state);
+        }
+
+        fn state(self: *Self) *PersistentState {
+            return &self.resident().persisted_state;
+        }
+
+        fn stateConst(self: *const Self) *const PersistentState {
+            return &self.residentConst().persisted_state;
+        }
+    };
+}
 
 fn signatureEql(a: manifest.Signature, b: manifest.Signature) bool {
     return std.mem.eql(u8, a.format, b.format) and
@@ -1232,4 +1247,11 @@ test "overlay sessions cover sync remote access private service publishing and e
         null,
         19,
     ));
+}
+
+test "sync service overlay session capacity is configurable" {
+    const SmallService = ServiceWith(.{ .max_overlay_sessions = 2 });
+    const service = SmallService.init(1, 2, .{ .kind = .service, .serial = 3 });
+
+    try std.testing.expectEqual(@as(usize, 2), service.overlay_sessions.len);
 }

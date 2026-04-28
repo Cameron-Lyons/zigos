@@ -5,6 +5,7 @@ const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const runtime_host = @import("task_runtime_host.zig");
 const std = @import("std");
+const native_util = @import("../core/util.zig");
 
 pub const MAX_TASKS: usize = 32;
 pub const MAX_TASK_CAPABILITIES: usize = 24;
@@ -452,7 +453,7 @@ pub fn copyTaskCold(dest: *TaskColdRecord, src: *const TaskColdRecord) void {
 }
 
 pub fn taskCold(task: *TaskRecord) *TaskColdRecord {
-    return task.cold_state orelse unreachable;
+    return task.cold_state orelse native_util.impossibleByInvariant("active task records are bound to cold state storage");
 }
 
 pub fn taskColdConst(task: *const TaskRecord) *const TaskColdRecord {
@@ -541,7 +542,7 @@ pub fn indexLookup(comptime capacity: usize, table: *const [capacity]IdIndexSlot
 }
 
 pub fn indexInsert(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64, slot_index: usize) void {
-    if (id == 0) unreachable;
+    if (id == 0) native_util.impossibleByInvariant("id indexes never store the reserved zero id");
 
     var index = indexHash(id, capacity);
     var first_tombstone: ?usize = null;
@@ -570,7 +571,7 @@ pub fn indexInsert(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: 
         index = (index + 1) % capacity;
     }
 
-    unreachable;
+    native_util.impossibleByInvariant("id index capacity covers all live task slots");
 }
 
 pub fn indexRemove(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64) void {

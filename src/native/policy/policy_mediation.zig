@@ -36,6 +36,17 @@ pub const PermissionDecision = struct {
 
 pub const GrantPlan = capability.GrantPlan;
 
+pub const Decision = struct {
+    request: manifest.PermissionRequest,
+    task_id: u64,
+    owner: principal.PrincipalId,
+    allowed: bool,
+    reason: abi.DenialReason = .none,
+    grant: ?UserGrant = null,
+    local_only: bool = false,
+    lease_end: u64 = 0,
+};
+
 pub const ActivationSummary = struct {
     granted_count: usize = 0,
     denied_count: usize = 0,
@@ -66,7 +77,7 @@ pub const ActivationSummary = struct {
     }
 };
 
-pub const Error = task_runtime.Error || capability.Error || manifest.ValidationError;
+pub const Error = task_runtime.Error || capability.Error || manifest.ValidationError || event_ledger.Error;
 
 pub const PolicyMediator = struct {
     policy_authority: principal.PrincipalId,
@@ -101,51 +112,118 @@ pub const PolicyMediator = struct {
         grants: []const UserGrant,
         now_ticks: u64,
     ) Error!PermissionDecision {
-        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        const decision = try self.evaluate(task_id, request, grants, now_ticks);
+        if (!decision.allowed) {
+            return self.commitDeniedDecision(decision, now_ticks);
+        }
 
+        const grant_plan = try self.planGrant(decision, now_ticks);
+        var minted_buffer: [capability.MAX_GRANT_PLAN_ENTRIES]capability.Capability = undefined;
+        return self.commitGrantPlan(decision, &grant_plan, &minted_buffer, now_ticks);
+    }
+
+    pub fn evaluate(
+        self: *const PolicyMediator,
+        task_id: u64,
+        request: manifest.PermissionRequest,
+        grants: []const UserGrant,
+        now_ticks: u64,
+    ) Error!Decision {
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
         const matched_grant = self.matchGrant(request, grants) orelse {
-            return self.deny(task.id, request, .policy_denied, now_ticks);
+            return self.denialDecision(task, request, .policy_denied);
         };
         if (!matched_grant.allow) {
-            return self.deny(task.id, request, .policy_denied, now_ticks);
+            return self.denialDecision(task, request, .policy_denied);
         }
         if (matched_grant.expires_at_ticks) |expiry| {
             if (now_ticks > expiry) {
-                return self.deny(task.id, request, .capability_expired, now_ticks);
+                return self.denialDecision(task, request, .capability_expired);
             }
         }
         if (request.local_only and !matched_grant.local_only) {
-            return self.deny(task.id, request, .scope_violation, now_ticks);
+            return self.denialDecision(task, request, .scope_violation);
         }
         if (request.kind == .background_execution and !task.background_allowed) {
-            return self.deny(task.id, request, .budget_exhausted, now_ticks);
+            return self.denialDecision(task, request, .budget_exhausted);
         }
 
         const lease_end = self.resolveLeaseEnd(request, matched_grant, now_ticks);
         if (lease_end < now_ticks) {
-            return self.deny(task.id, request, .capability_expired, now_ticks);
+            return self.denialDecision(task, request, .capability_expired);
         }
-
-        const plan = try self.grantPlanForRequest(task_id, request, matched_grant, lease_end, now_ticks);
-        var minted_buffer: [capability.MAX_GRANT_PLAN_ENTRIES]capability.Capability = undefined;
-        const minted = try self.applyGrantPlanTransactional(&plan, &minted_buffer);
-        const capability_id = minted[0].id;
-        try self.runtime.audit(task.id, .{
-            .kind = .policy_allowed,
-            .capability_id = capability_id,
-            .detail = @intFromEnum(request.kind),
-            .tick = now_ticks,
-        });
-        self.recordDecision(task.owner, task.id, request, true, .none, now_ticks);
 
         const granted_local_only = request.local_only or matched_grant.local_only;
         return .{
-            .kind = request.kind,
+            .request = request,
+            .task_id = task.id,
+            .owner = task.owner,
+            .allowed = true,
+            .grant = matched_grant,
+            .local_only = granted_local_only,
+            .lease_end = lease_end,
+        };
+    }
+
+    pub fn planGrant(
+        self: *const PolicyMediator,
+        decision: Decision,
+        now_ticks: u64,
+    ) Error!GrantPlan {
+        if (!decision.allowed) return GrantPlan{};
+        return self.grantPlanForRequest(
+            decision.task_id,
+            decision.request,
+            decision.grant.?,
+            decision.lease_end,
+            now_ticks,
+        );
+    }
+
+    pub fn commitGrantPlan(
+        self: *PolicyMediator,
+        decision: Decision,
+        grant_plan: *const GrantPlan,
+        minted_buffer: []capability.Capability,
+        now_ticks: u64,
+    ) Error!PermissionDecision {
+        const minted = try self.applyGrantPlanTransactional(grant_plan, minted_buffer);
+        const capability_id = minted[0].id;
+        try self.runtime.audit(decision.task_id, .{
+            .kind = .policy_allowed,
+            .capability_id = capability_id,
+            .detail = @intFromEnum(decision.request.kind),
+            .tick = now_ticks,
+        });
+        try self.recordDecision(decision.owner, decision.task_id, decision.request, true, .none, now_ticks);
+
+        return .{
+            .kind = decision.request.kind,
             .allowed = true,
             .capability_id = capability_id,
-            .local_only = granted_local_only,
-            .expires_at_ticks = lease_end,
+            .local_only = decision.local_only,
+            .expires_at_ticks = decision.lease_end,
             .explanation = denial_explanation.none(),
+        };
+    }
+
+    pub fn commitDeniedDecision(
+        self: *PolicyMediator,
+        decision: Decision,
+        now_ticks: u64,
+    ) Error!PermissionDecision {
+        try self.runtime.audit(decision.task_id, .{
+            .kind = .policy_denied,
+            .detail = @intFromEnum(decision.reason),
+            .tick = now_ticks,
+        });
+        try self.recordDecision(decision.owner, decision.task_id, decision.request, false, decision.reason, now_ticks);
+
+        return .{
+            .kind = decision.request.kind,
+            .allowed = false,
+            .reason = decision.reason,
+            .explanation = denial_explanation.forPermissionDecision(decision.request.kind, decision.reason),
         };
     }
 
@@ -159,12 +237,13 @@ pub const PolicyMediator = struct {
     ) Error!GrantPlan {
         const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
         const granted_local_only = request.local_only or grant.local_only;
+        const target = self.resolveTarget(request);
         var plan = GrantPlan{};
         try plan.addMint(task.id, .{
             .holder = task.owner,
             .issuer = self.policy_authority,
-            .target = self.resolveTarget(request),
-            .rights = request.rights,
+            .target = target,
+            .rights = request.rights.retarget(target.kind),
             .scope = .{
                 .task_id = task.id,
                 .local_only = granted_local_only,
@@ -196,7 +275,8 @@ pub const PolicyMediator = struct {
             while (revoke_index < attached_count) : (revoke_index += 1) {
                 const entry = plan.entries[revoke_index];
                 if (entry.task_id != 0) {
-                    _ = self.runtime.revokeCapability(entry.task_id, minted[revoke_index].id) catch false;
+                    _ = self.runtime.revokeCapability(entry.task_id, minted[revoke_index].id) catch |err|
+                        native_util.impossibleByInvariantError("rollback revokes capabilities attached earlier in this grant transaction", err);
                 }
             }
             self.capability_table.rollbackGrant(minted);
@@ -296,26 +376,19 @@ pub const PolicyMediator = struct {
         };
     }
 
-    fn deny(
-        self: *PolicyMediator,
-        task_id: u64,
+    fn denialDecision(
+        self: *const PolicyMediator,
+        task: *const task_runtime.TaskRecord,
         request: manifest.PermissionRequest,
         reason: abi.DenialReason,
-        now_ticks: u64,
-    ) Error!PermissionDecision {
-        try self.runtime.audit(task_id, .{
-            .kind = .policy_denied,
-            .detail = @intFromEnum(reason),
-            .tick = now_ticks,
-        });
-        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
-        self.recordDecision(task.owner, task_id, request, false, reason, now_ticks);
-
+    ) Decision {
+        _ = self;
         return .{
-            .kind = request.kind,
+            .request = request,
+            .task_id = task.id,
+            .owner = task.owner,
             .allowed = false,
             .reason = reason,
-            .explanation = denial_explanation.forPermissionDecision(request.kind, reason),
         };
     }
 
@@ -327,9 +400,9 @@ pub const PolicyMediator = struct {
         allowed: bool,
         reason: abi.DenialReason,
         now_ticks: u64,
-    ) void {
+    ) Error!void {
         const ledger = self.ledger orelse return;
-        ledger.recordPermissionDecision(
+        try ledger.recordPermissionDecision(
             owner,
             task_id,
             request.kind,
@@ -338,7 +411,7 @@ pub const PolicyMediator = struct {
             now_ticks,
             request.resource,
             request.kind == .object_access or request.kind == .contacts or request.kind == .location,
-        ) catch {};
+        );
     }
 };
 
@@ -386,7 +459,7 @@ test "policy mediation denies zero-authority requests without user grants" {
     const decision = try mediator.authorizeRequest(task.id, .{
         .kind = .network_egress,
         .resource = "lan.sync",
-        .rights = .{ .network_local = true },
+        .rights = .{ .network_policy = .{ .network_local = true } },
         .required = false,
         .local_only = true,
     }, &.{}, 10);
@@ -432,13 +505,13 @@ test "policy mediation grants local-only object and network capabilities" {
         .{
             .kind = .object_access,
             .resource = "workspace:notes",
-            .rights = .{ .object_read = true, .object_write = true },
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
         },
         .{
             .kind = .network_egress,
             .resource = "lan.sync",
-            .rights = .{ .network_local = true },
+            .rights = .{ .network_policy = .{ .network_local = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 25,
@@ -502,7 +575,7 @@ test "policy mediation rolls back minted capability when task attachment fails" 
     try std.testing.expectError(error.CapabilityTableFull, mediator.authorizeRequest(task.id, .{
         .kind = .object_access,
         .resource = "workspace:notes",
-        .rights = .{ .object_read = true },
+        .rights = .{ .object = .{ .object_read = true } },
     }, &.{
         .{ .kind = .object_access, .resource = "workspace:notes", .expires_at_ticks = 100 },
     }, 10));
@@ -542,7 +615,7 @@ test "policy mediation suspends tasks when required background permission is den
         .{
             .kind = .background_execution,
             .resource = "sync",
-            .rights = .{ .background_run = true },
+            .rights = .{ .task = .{ .background_run = true } },
         },
     };
     const background_tasks = [_]manifest.BackgroundTaskDecl{
@@ -607,7 +680,7 @@ test "policy mediation reports expired grants" {
     const decision = try mediator.authorizeRequest(task.id, .{
         .kind = .network_egress,
         .resource = "lan.sync",
-        .rights = .{ .network_local = true },
+        .rights = .{ .network_policy = .{ .network_local = true } },
         .local_only = true,
     }, &.{
         .{ .kind = .network_egress, .resource = "lan.sync", .local_only = true, .expires_at_ticks = 5 },
@@ -694,7 +767,7 @@ test "policy mediation covers device camera mic sensor and peer ipc permissions"
         .{
             .kind = .device_access,
             .resource = "capture.card0",
-            .rights = .{ .device_use = true },
+            .rights = .{ .device = .{ .device_use = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 30,
@@ -703,7 +776,7 @@ test "policy mediation covers device camera mic sensor and peer ipc permissions"
         .{
             .kind = .camera,
             .resource = "camera.front",
-            .rights = .{ .device_use = true },
+            .rights = .{ .device = .{ .device_use = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 35,
@@ -712,7 +785,7 @@ test "policy mediation covers device camera mic sensor and peer ipc permissions"
         .{
             .kind = .mic,
             .resource = "mic.array",
-            .rights = .{ .device_use = true },
+            .rights = .{ .device = .{ .device_use = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 35,
@@ -721,7 +794,7 @@ test "policy mediation covers device camera mic sensor and peer ipc permissions"
         .{
             .kind = .sensor,
             .resource = "sensor.lid",
-            .rights = .{ .sensor_read = true },
+            .rights = .{ .device = .{ .sensor_read = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 25,
@@ -730,7 +803,7 @@ test "policy mediation covers device camera mic sensor and peer ipc permissions"
         .{
             .kind = .peer_ipc,
             .resource = "zigos.peer.share",
-            .rights = .{ .ipc_peer = true },
+            .rights = .{ .endpoint = .{ .ipc_peer = true } },
             .required = false,
             .local_only = true,
             .max_lease_ticks = 15,
@@ -804,26 +877,26 @@ test "policy mediation maps location contacts screen capture and notification ca
         .{
             .kind = .location,
             .resource = "location.current",
-            .rights = .{ .location_read = true },
+            .rights = .{ .device = .{ .location_read = true } },
             .local_only = true,
         },
         .{
             .kind = .contacts,
             .resource = "contacts://personal",
-            .rights = .{ .contacts_read = true },
+            .rights = .{ .object = .{ .contacts_read = true } },
             .local_only = true,
             .target_id = 3_001,
         },
         .{
             .kind = .screen_capture,
             .resource = "display:main",
-            .rights = .{ .screen_capture = true },
+            .rights = .{ .device = .{ .screen_capture = true } },
             .required = false,
         },
         .{
             .kind = .notification_post,
             .resource = "notifications://task",
-            .rights = .{ .notification_post = true },
+            .rights = .{ .task = .{ .notification_post = true } },
             .required = false,
         },
     };
@@ -852,13 +925,13 @@ test "policy mediation maps location contacts screen capture and notification ca
     const notification_capability = capability_table.query(summary.decisionForKind(.notification_post).?.capability_id.?).?;
 
     try std.testing.expectEqual(capability.CapabilityTargetKind.device, location_capability.target.kind);
-    try std.testing.expect(location_capability.rights.location_read);
+    try std.testing.expect(location_capability.rights.has(.location_read));
     try std.testing.expectEqual(capability.CapabilityTargetKind.object, contacts_capability.target.kind);
     try std.testing.expectEqual(@as(u64, 3_001), contacts_capability.target.id);
-    try std.testing.expect(contacts_capability.rights.contacts_read);
+    try std.testing.expect(contacts_capability.rights.has(.contacts_read));
     try std.testing.expectEqual(capability.CapabilityTargetKind.service, capture_capability.target.kind);
     try std.testing.expectEqual(@as(u64, 89), capture_capability.target.id);
-    try std.testing.expect(capture_capability.rights.screen_capture);
+    try std.testing.expect(capture_capability.rights.has(.screen_capture));
     try std.testing.expectEqual(capability.CapabilityTargetKind.service, notification_capability.target.kind);
-    try std.testing.expect(notification_capability.rights.notification_post);
+    try std.testing.expect(notification_capability.rights.has(.notification_post));
 }

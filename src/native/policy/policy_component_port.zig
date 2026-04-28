@@ -94,7 +94,7 @@ test "policy port validates headers and forwards apply manifest requests" {
         .{
             .kind = .object_access,
             .resource = "workspace:notes",
-            .rights = .{ .object_read = true },
+            .rights = .{ .object = .{ .object_read = true } },
             .local_only = true,
             .max_lease_ticks = 20,
         },

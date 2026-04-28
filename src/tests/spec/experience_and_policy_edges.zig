@@ -75,19 +75,19 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
         .{
             .kind = .object_access,
             .resource = "workspace://trip/documents/plan.md",
-            .rights = .{
+            .rights = .{ .object = .{
                 .object_read = true,
                 .object_write = true,
-            },
+            } },
             .local_only = true,
             .max_lease_ticks = 400,
         },
         .{
             .kind = .network_egress,
             .resource = "https://api.example.com",
-            .rights = .{
+            .rights = .{ .network_policy = .{
                 .network_remote = true,
-            },
+            } },
             .required = false,
             .max_lease_ticks = 60,
         },
@@ -403,10 +403,10 @@ pub fn thermalPowerAndAppUpdatesStayCompatibilityAware() !void {
         .{
             .kind = .object_access,
             .resource = "workspace://notes",
-            .rights = .{
+            .rights = .{ .object = .{
                 .object_read = true,
                 .object_write = true,
-            },
+            } },
             .local_only = true,
         },
     };
@@ -432,18 +432,18 @@ pub fn thermalPowerAndAppUpdatesStayCompatibilityAware() !void {
         .{
             .kind = .object_access,
             .resource = "workspace://notes",
-            .rights = .{
+            .rights = .{ .object = .{
                 .object_read = true,
                 .object_write = true,
-            },
+            } },
             .local_only = true,
         },
         .{
             .kind = .notification_post,
             .resource = "notifications://task",
-            .rights = .{
+            .rights = .{ .task = .{
                 .notification_post = true,
-            },
+            } },
             .required = false,
         },
     };

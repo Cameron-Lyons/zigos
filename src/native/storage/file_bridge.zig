@@ -83,7 +83,7 @@ pub const Bridge = struct {
         const authority = self.capability_table.requireUsable(authority_capability_id, now_ticks) catch |err| switch (err) {
             error.CapabilityNotFound => return error.CapabilityNotFound,
             error.CapabilityRevoked => return error.CapabilityRevoked,
-            else => unreachable,
+            else => native_util.impossibleByInvariantError("file bridge authority lookup only reports not-found or revoked capabilities", err),
         };
         if (!authority.holder.eql(requester)) return error.PermissionDenied;
         if (authority.scope.workspace_id) |workspace_id| {
@@ -97,8 +97,8 @@ pub const Bridge = struct {
         }
 
         const wants_write = request.access == .write;
-        if (wants_write and !authority.rights.object_write) return error.PermissionDenied;
-        if (!wants_write and !authority.rights.object_read) return error.PermissionDenied;
+        if (wants_write and !authority.rights.has(.object_write)) return error.PermissionDenied;
+        if (!wants_write and !authority.rights.has(.object_read)) return error.PermissionDenied;
 
         const entry = switch (authority.target.kind) {
             .workspace => blk: {
@@ -109,7 +109,7 @@ pub const Bridge = struct {
                 if (authority.target.id != resolved.object_id) return error.PermissionDenied;
                 break :blk resolved;
             },
-            else => unreachable,
+            else => native_util.impossibleByInvariant("authority target kind was validated before resolving file bridge entry"),
         };
 
         if (!self.has_version(self.context, entry.version_id)) return error.ObjectMissing;
@@ -119,8 +119,8 @@ pub const Bridge = struct {
             .object_id = entry.object_id,
             .version_id = entry.version_id,
             .object_type = entry.object_type,
-            .readable = authority.rights.object_read,
-            .writable = authority.rights.object_write,
+            .readable = authority.rights.has(.object_read),
+            .writable = authority.rights.has(.object_write),
             .path_len = 0,
             .path = [_]u8{0} ** 96,
         };
@@ -183,7 +183,7 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
         .holder = .{ .kind = .user, .serial = 1 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .object, .id = object.object_id },
-        .rights = .{ .object_read = true },
+        .rights = .{ .object = .{ .object_read = true } },
         .scope = .{
             .task_id = 7,
             .workspace_id = notes.id,
@@ -225,7 +225,7 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
         .holder = .{ .kind = .user, .serial = 1 },
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .service, .id = 44 },
-        .rights = .{},
+        .rights = .{ .service = .{} },
         .scope = .{},
         .lease = .{
             .issued_at_ticks = 0,

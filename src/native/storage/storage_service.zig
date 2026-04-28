@@ -3,6 +3,7 @@ const capability = @import("../kernel_api/capability.zig");
 const file_bridge = @import("file_bridge.zig");
 const object_store = @import("object_store.zig");
 const checkpoint_support = @import("storage_service_checkpoint.zig");
+const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_volume = @import("storage_volume.zig");
@@ -263,6 +264,10 @@ pub const StorageCore = struct {
         return self.store.version(version_id);
     }
 
+    pub fn versionPayload(self: *const Service, version_record: *const object_store.VersionRecord) object_store.Error![]const u8 {
+        return self.store.versionPayload(version_record);
+    }
+
     pub fn latestVersion(self: *const Service, object_id: u64) ?*const object_store.VersionRecord {
         return self.store.latestVersion(object_id);
     }
@@ -470,7 +475,7 @@ pub const StoragePort = struct {
         const authority = self.capability_table.requireUsable(authority_context.capability_id, authority_context.now_ticks) catch |err| switch (err) {
             error.CapabilityNotFound => return error.CapabilityNotFound,
             error.CapabilityRevoked => return error.CapabilityRevoked,
-            else => unreachable,
+            else => native_util.impossibleByInvariantError("storage authority lookup only reports not-found or revoked capabilities", err),
         };
         if (!authority.holder.eql(authority_context.principal)) return error.PermissionDenied;
         if (authority.scope.task_id) |scoped_task_id| {
@@ -487,8 +492,8 @@ pub const StoragePort = struct {
             .object => if (access == .write) return error.PermissionDenied,
             else => return error.CapabilityRequired,
         }
-        if (access == .write and !authority.rights.object_write) return error.PermissionDenied;
-        if (access == .read and !authority.rights.object_read) return error.PermissionDenied;
+        if (access == .write and !authority.rights.has(.object_write)) return error.PermissionDenied;
+        if (access == .read and !authority.rights.has(.object_read)) return error.PermissionDenied;
         return authority;
     }
 };
@@ -518,7 +523,7 @@ test "storage port requires authority context for protected mutations" {
         .holder = actor,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .service, .id = core.service_id },
-        .rights = .{ .object_read = true },
+        .rights = .{ .service = .{ .object_read = true } },
         .scope = .{ .task_id = 20, .local_only = true, .broker_only = true },
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
         .audit = .{},
@@ -527,7 +532,7 @@ test "storage port requires authority context for protected mutations" {
         .holder = actor,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
         .target = .{ .kind = .service, .id = core.service_id },
-        .rights = .{ .object_read = true, .object_write = true },
+        .rights = .{ .service = .{ .object_read = true, .object_write = true } },
         .scope = .{ .task_id = 20, .local_only = true, .broker_only = true },
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
         .audit = .{},
