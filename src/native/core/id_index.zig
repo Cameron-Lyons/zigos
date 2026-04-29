@@ -12,11 +12,11 @@ pub const Slot = struct {
     slot_index: usize = 0,
 };
 
-pub fn emptyTable(comptime capacity: usize) [capacity]Slot {
+pub inline fn emptyTable(comptime capacity: usize) [capacity]Slot {
     return [_]Slot{Slot{}} ** capacity;
 }
 
-pub fn lookup(comptime capacity: usize, table: *const [capacity]Slot, id: u64) ?usize {
+pub inline fn lookup(comptime capacity: usize, table: *const [capacity]Slot, id: u64) ?usize {
     if (id == 0) return null;
 
     var index = hash(id, capacity);
@@ -33,7 +33,7 @@ pub fn lookup(comptime capacity: usize, table: *const [capacity]Slot, id: u64) ?
     return null;
 }
 
-pub fn insert(comptime capacity: usize, table: *[capacity]Slot, id: u64, slot_index: usize, comptime invariant_message: []const u8) void {
+pub inline fn insert(comptime capacity: usize, table: *[capacity]Slot, id: u64, slot_index: usize, comptime invariant_message: []const u8) void {
     if (id == 0) native_util.impossibleByInvariant(invariant_message);
 
     var index = hash(id, capacity);
@@ -66,7 +66,7 @@ pub fn insert(comptime capacity: usize, table: *[capacity]Slot, id: u64, slot_in
     native_util.impossibleByInvariant("id index capacity covers all live slots");
 }
 
-pub fn remove(comptime capacity: usize, table: *[capacity]Slot, id: u64) void {
+pub inline fn remove(comptime capacity: usize, table: *[capacity]Slot, id: u64) void {
     if (id == 0) return;
 
     var index = hash(id, capacity);
@@ -88,6 +88,6 @@ pub fn remove(comptime capacity: usize, table: *[capacity]Slot, id: u64) void {
     }
 }
 
-pub fn hash(id: u64, comptime capacity: usize) usize {
+pub inline fn hash(id: u64, comptime capacity: usize) usize {
     return @as(usize, @intCast((id *% 0x9E37_79B9_7F4A_7C15) % capacity));
 }
