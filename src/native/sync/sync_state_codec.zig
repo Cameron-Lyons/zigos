@@ -1,4 +1,5 @@
 const std = @import("std");
+const binary_cursor = @import("../core/binary_cursor.zig");
 const device_graph = @import("device_graph.zig");
 const manifest = @import("../policy/manifest.zig");
 const network_policy = @import("network_policy.zig");
@@ -16,76 +17,8 @@ const MAX_OVERLAYS = state_support.MAX_OVERLAYS;
 const MAX_PRIVATE_SERVICES = state_support.MAX_PRIVATE_SERVICES;
 const MAX_LABEL_BYTES = state_support.MAX_LABEL_BYTES;
 
-const CursorWriter = struct {
-    buffer: []u8,
-    offset: usize = 0,
-
-    fn writeByte(self: *CursorWriter, value: u8) Error!void {
-        if (self.offset >= self.buffer.len) return error.StateTooLarge;
-        self.buffer[self.offset] = value;
-        self.offset += 1;
-    }
-
-    fn writeBytes(self: *CursorWriter, bytes: []const u8) Error!void {
-        if (self.offset + bytes.len > self.buffer.len) return error.StateTooLarge;
-        @memcpy(self.buffer[self.offset .. self.offset + bytes.len], bytes);
-        self.offset += bytes.len;
-    }
-
-    fn writeU16(self: *CursorWriter, value: u16) Error!void {
-        var bytes: [2]u8 = undefined;
-        std.mem.writeInt(u16, &bytes, value, .little);
-        try self.writeBytes(&bytes);
-    }
-
-    fn writeU32(self: *CursorWriter, value: u32) Error!void {
-        var bytes: [4]u8 = undefined;
-        std.mem.writeInt(u32, &bytes, value, .little);
-        try self.writeBytes(&bytes);
-    }
-
-    fn writeU64(self: *CursorWriter, value: u64) Error!void {
-        var bytes: [8]u8 = undefined;
-        std.mem.writeInt(u64, &bytes, value, .little);
-        try self.writeBytes(&bytes);
-    }
-};
-
-const CursorReader = struct {
-    buffer: []const u8,
-    offset: usize = 0,
-
-    fn readByte(self: *CursorReader) Error!u8 {
-        if (self.offset >= self.buffer.len) return error.CorruptState;
-        const value = self.buffer[self.offset];
-        self.offset += 1;
-        return value;
-    }
-
-    fn readBytes(self: *CursorReader, dest: []u8) Error!void {
-        if (self.offset + dest.len > self.buffer.len) return error.CorruptState;
-        @memcpy(dest, self.buffer[self.offset .. self.offset + dest.len]);
-        self.offset += dest.len;
-    }
-
-    fn readU16(self: *CursorReader) Error!u16 {
-        var bytes: [2]u8 = undefined;
-        try self.readBytes(&bytes);
-        return std.mem.readInt(u16, &bytes, .little);
-    }
-
-    fn readU32(self: *CursorReader) Error!u32 {
-        var bytes: [4]u8 = undefined;
-        try self.readBytes(&bytes);
-        return std.mem.readInt(u32, &bytes, .little);
-    }
-
-    fn readU64(self: *CursorReader) Error!u64 {
-        var bytes: [8]u8 = undefined;
-        try self.readBytes(&bytes);
-        return std.mem.readInt(u64, &bytes, .little);
-    }
-};
+const CursorWriter = binary_cursor.Writer(Error, error.StateTooLarge);
+const CursorReader = binary_cursor.Reader(Error, error.CorruptState);
 
 pub const StateIndex = struct {
     total_len: usize,

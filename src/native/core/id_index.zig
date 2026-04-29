@@ -1,0 +1,93 @@
+const native_util = @import("util.zig");
+
+pub const State = enum(u8) {
+    empty,
+    filled,
+    tombstone,
+};
+
+pub const Slot = struct {
+    state: State = .empty,
+    id: u64 = 0,
+    slot_index: usize = 0,
+};
+
+pub fn emptyTable(comptime capacity: usize) [capacity]Slot {
+    return [_]Slot{Slot{}} ** capacity;
+}
+
+pub fn lookup(comptime capacity: usize, table: *const [capacity]Slot, id: u64) ?usize {
+    if (id == 0) return null;
+
+    var index = hash(id, capacity);
+    var attempts: usize = 0;
+    while (attempts < capacity) : (attempts += 1) {
+        const entry = table[index];
+        switch (entry.state) {
+            .empty => return null,
+            .filled => if (entry.id == id) return entry.slot_index,
+            .tombstone => {},
+        }
+        index = (index + 1) % capacity;
+    }
+    return null;
+}
+
+pub fn insert(comptime capacity: usize, table: *[capacity]Slot, id: u64, slot_index: usize, comptime invariant_message: []const u8) void {
+    if (id == 0) native_util.impossibleByInvariant(invariant_message);
+
+    var index = hash(id, capacity);
+    var first_tombstone: ?usize = null;
+    var attempts: usize = 0;
+    while (attempts < capacity) : (attempts += 1) {
+        switch (table[index].state) {
+            .empty => {
+                const insert_index = first_tombstone orelse index;
+                table[insert_index] = .{
+                    .state = .filled,
+                    .id = id,
+                    .slot_index = slot_index,
+                };
+                return;
+            },
+            .filled => {
+                if (table[index].id == id) {
+                    table[index].slot_index = slot_index;
+                    return;
+                }
+            },
+            .tombstone => {
+                if (first_tombstone == null) first_tombstone = index;
+            },
+        }
+        index = (index + 1) % capacity;
+    }
+
+    native_util.impossibleByInvariant("id index capacity covers all live slots");
+}
+
+pub fn remove(comptime capacity: usize, table: *[capacity]Slot, id: u64) void {
+    if (id == 0) return;
+
+    var index = hash(id, capacity);
+    var attempts: usize = 0;
+    while (attempts < capacity) : (attempts += 1) {
+        switch (table[index].state) {
+            .empty => return,
+            .filled => {
+                if (table[index].id == id) {
+                    table[index].state = .tombstone;
+                    table[index].id = 0;
+                    table[index].slot_index = 0;
+                    return;
+                }
+            },
+            .tombstone => {},
+        }
+        index = (index + 1) % capacity;
+    }
+}
+
+pub fn hash(id: u64, comptime capacity: usize) usize {
+    return @as(usize, @intCast((id *% 0x9E37_79B9_7F4A_7C15) % capacity));
+}
