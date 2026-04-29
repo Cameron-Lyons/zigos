@@ -13,6 +13,7 @@ const network_policy = @import("../../native/sync/network_policy.zig");
 const notification_center = @import("../../native/services/notification_center.zig");
 const secure_secret_store = @import("../../native/platform/secure_secret_store.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
+const storage_service = @import("../../native/storage/storage_service.zig");
 const supervisor = @import("../../native/session/supervisor.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 
@@ -25,6 +26,24 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     try recorder.add(.policy, "org-defaults", "strict");
     try recorder.add(.driver_set, "signed-drivers", "gpu+npu+net");
     const boot = recorder.finalize();
+
+    var checkpoint_store = storage_service.CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    defer checkpoint_store.resetPersistent();
+
+    const measurement_owner = spec_support.service(99);
+    const measurement_signer = spec_support.signer("spec.measured.state", 0x90);
+    var measurement_storage = storage_service.Service.initWithStore(990, 99, measurement_owner, &checkpoint_store);
+    var journal = try measured_boot.MeasurementJournal.init(&measurement_storage, measurement_owner, measurement_signer);
+    const first_measurement = try journal.record(boot, 5);
+    try std.testing.expect(first_measurement.previous == null);
+    try std.testing.expect(journal.latestMatches(&boot));
+
+    var restarted_measurement_storage = storage_service.Service.initWithStore(990, 100, measurement_owner, &checkpoint_store);
+    var restarted_journal = try measured_boot.MeasurementJournal.init(&restarted_measurement_storage, measurement_owner, measurement_signer);
+    try std.testing.expect(restarted_journal.loaded_existing_state);
+    try std.testing.expect(restarted_journal.hasPreviousMeasurement());
+    try std.testing.expect(restarted_journal.latestMatches(&boot));
 
     var attestation = attestation_service.Service.init(spec_support.device(99));
     attestation.provisionRoot(spec_support.signer("spec.attest.device", 0x91), .secure_enclave);

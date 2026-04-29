@@ -787,4 +787,32 @@ pub fn principalIdentityAndAdministrativeScopeStaySplit() !void {
     try std.testing.expect(policies.syncDestinationAllowed(.workspace, 500, "relay.spec.zigos"));
     try std.testing.expect(!policies.syncDestinationAllowed(.workspace, 500, "relay.other"));
     try std.testing.expect(org_policy.audit_export_required);
+
+    const subjects = policy_object.SubjectSet{
+        .user_id = person.serial,
+        .device_id = laptop.serial,
+        .workspace_id = 500,
+        .organization_id = 77,
+    };
+    const store_install = policies.installSourceDecision(subjects, "store:zigos");
+    try std.testing.expect(store_install.allowed);
+    const personal_install = policies.installSourceDecision(subjects, "repo:corp");
+    try std.testing.expect(!personal_install.allowed);
+    try std.testing.expectEqual(policy_object.DecisionReason.install_source_denied, personal_install.reason);
+    try std.testing.expectEqual(policy_object.Scope.device, personal_install.blocking_scope.?);
+
+    const relay_sync = policies.syncDestinationDecision(subjects, "relay.spec.zigos");
+    try std.testing.expect(!relay_sync.allowed);
+    try std.testing.expectEqual(policy_object.DecisionReason.sync_destination_denied, relay_sync.reason);
+    try std.testing.expectEqual(policy_object.Scope.user, relay_sync.blocking_scope.?);
+
+    const workspace_only = policy_object.SubjectSet{
+        .workspace_id = 500,
+        .organization_id = 77,
+    };
+    const workspace_relay = policies.syncDestinationDecision(workspace_only, "relay.spec.zigos");
+    try std.testing.expect(workspace_relay.allowed);
+    const other_sync = policies.syncDestinationDecision(workspace_only, "relay.other");
+    try std.testing.expect(!other_sync.allowed);
+    try std.testing.expectEqual(policy_object.Scope.workspace, other_sync.blocking_scope.?);
 }

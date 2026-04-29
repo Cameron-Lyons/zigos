@@ -1,4 +1,5 @@
 const crypto_hash = @import("../core/crypto_hash.zig");
+const native_util = @import("../core/util.zig");
 const std = @import("std");
 
 pub fn zeroExecutionComponent(RecordType: type) RecordType {
@@ -46,7 +47,7 @@ pub fn makeLaunchProvenance(RecordType: type, spec: anytype) RecordType {
     record.image_id = spec.image_id;
     record.component_abi_version = spec.component_abi_version;
     record.signed = spec.signed;
-    record.bundle_id_len = copyTruncated(record.bundle_id[0..], spec.bundle_id);
+    record.bundle_id_len = native_util.copyTextWithReserve(record.bundle_id[0..], spec.bundle_id, 1);
     return record;
 }
 
@@ -55,8 +56,8 @@ pub fn makeExecutionComponent(RecordType: type, runtime: anytype, component: any
     record.id = runtime.next_component_id;
     runtime.next_component_id += 1;
     record.substrate = component.substrate;
-    record.label_len = copyTruncated(record.label[0..], component.label);
-    record.entry_len = copyTruncated(record.entry[0..], component.entry);
+    record.label_len = native_util.copyTextWithReserve(record.label[0..], component.label, 1);
+    record.entry_len = native_util.copyTextWithReserve(record.entry[0..], component.entry, 1);
     return record;
 }
 
@@ -125,10 +126,4 @@ pub fn syntheticUserspaceImage(
         },
     };
     return image;
-}
-
-fn copyTruncated(buffer: []u8, source: []const u8) usize {
-    const len = @min(buffer.len - 1, source.len);
-    @memcpy(buffer[0..len], source[0..len]);
-    return len;
 }

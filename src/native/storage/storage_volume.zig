@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const binary_cursor = @import("../core/binary_cursor.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("object_store.zig");
 const principal = @import("../core/principal.zig");
@@ -105,83 +106,8 @@ fn unattachedWrite(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
     return false;
 }
 
-const CursorWriter = struct {
-    buffer: []u8,
-    offset: usize = 0,
-
-    fn writeByte(self: *CursorWriter, value: u8) Error!void {
-        if (self.offset >= self.buffer.len) return error.NoSpaceLeft;
-        self.buffer[self.offset] = value;
-        self.offset += 1;
-    }
-
-    fn writeBytes(self: *CursorWriter, bytes: []const u8) Error!void {
-        if (self.offset + bytes.len > self.buffer.len) return error.NoSpaceLeft;
-        @memcpy(self.buffer[self.offset .. self.offset + bytes.len], bytes);
-        self.offset += bytes.len;
-    }
-
-    fn writeU16(self: *CursorWriter, value: u16) Error!void {
-        var bytes: [2]u8 = undefined;
-        std.mem.writeInt(u16, &bytes, value, .little);
-        try self.writeBytes(&bytes);
-    }
-
-    fn writeU32(self: *CursorWriter, value: u32) Error!void {
-        var bytes: [4]u8 = undefined;
-        std.mem.writeInt(u32, &bytes, value, .little);
-        try self.writeBytes(&bytes);
-    }
-
-    fn writeU64(self: *CursorWriter, value: u64) Error!void {
-        var bytes: [8]u8 = undefined;
-        std.mem.writeInt(u64, &bytes, value, .little);
-        try self.writeBytes(&bytes);
-    }
-};
-
-const CursorReader = struct {
-    buffer: []const u8,
-    offset: usize = 0,
-
-    fn readByte(self: *CursorReader) Error!u8 {
-        if (self.offset >= self.buffer.len) return error.CorruptImage;
-        const value = self.buffer[self.offset];
-        self.offset += 1;
-        return value;
-    }
-
-    fn readBytes(self: *CursorReader, dest: []u8) Error!void {
-        if (self.offset + dest.len > self.buffer.len) return error.CorruptImage;
-        @memcpy(dest, self.buffer[self.offset .. self.offset + dest.len]);
-        self.offset += dest.len;
-    }
-
-    fn readSlice(self: *CursorReader, len: usize) Error![]const u8 {
-        if (self.offset + len > self.buffer.len) return error.CorruptImage;
-        const slice = self.buffer[self.offset .. self.offset + len];
-        self.offset += len;
-        return slice;
-    }
-
-    fn readU16(self: *CursorReader) Error!u16 {
-        var bytes: [2]u8 = undefined;
-        try self.readBytes(&bytes);
-        return std.mem.readInt(u16, &bytes, .little);
-    }
-
-    fn readU32(self: *CursorReader) Error!u32 {
-        var bytes: [4]u8 = undefined;
-        try self.readBytes(&bytes);
-        return std.mem.readInt(u32, &bytes, .little);
-    }
-
-    fn readU64(self: *CursorReader) Error!u64 {
-        var bytes: [8]u8 = undefined;
-        try self.readBytes(&bytes);
-        return std.mem.readInt(u64, &bytes, .little);
-    }
-};
+const CursorWriter = binary_cursor.Writer(Error, error.NoSpaceLeft);
+const CursorReader = binary_cursor.Reader(Error, error.CorruptImage);
 
 const SlotHeader = struct {
     generation: u64,
