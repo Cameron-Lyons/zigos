@@ -8,6 +8,13 @@ pub fn copyText(dest: []u8, src: []const u8) usize {
     return len;
 }
 
+pub fn copyTextWithReserve(dest: []u8, src: []const u8, comptime reserve: usize) usize {
+    const capacity = dest.len -| reserve;
+    const len = @min(capacity, src.len);
+    @memcpy(dest[0..len], src[0..len]);
+    return len;
+}
+
 pub fn copyTextExact(dest: []u8, src: []const u8) CopyTextExactError!usize {
     if (src.len > dest.len) return error.DestinationTooSmall;
     @memcpy(dest[0..src.len], src);

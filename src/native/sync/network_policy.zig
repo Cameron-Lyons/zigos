@@ -1,4 +1,5 @@
 const std = @import("std");
+const capability = @import("../kernel_api/capability.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const copyText = native_util.copyText;
@@ -82,6 +83,39 @@ pub const ConnectionEvidence = struct {
     attested: bool = false,
     peer_root_digest_present: bool = false,
     peer_root_digest: [32]u8 = [_]u8{0} ** 32,
+};
+
+pub const EgressDecisionReason = enum(u8) {
+    none,
+    capability_missing,
+    capability_revoked,
+    holder_mismatch,
+    scope_violation,
+    target_mismatch,
+    missing_local_right,
+    missing_remote_right,
+    policy_denied,
+    destination_mismatch,
+    explicit_grant_required,
+    attestation_required,
+    identity_pin_mismatch,
+};
+
+pub const EgressConnectionRequest = struct {
+    task_id: u64,
+    principal_id: principal.PrincipalId,
+    capability_id: u64,
+    policy_id: u64,
+    evidence: ConnectionEvidence,
+    now_ticks: u64,
+};
+
+pub const EgressDecision = struct {
+    allowed: bool,
+    reason: EgressDecisionReason = .none,
+    policy_id: u64,
+    capability_id: u64,
+    policy_decision: Decision = .{ .allowed = false },
 };
 
 pub const Error = error{
@@ -292,6 +326,63 @@ pub const Directory = struct {
     }
 };
 
+pub const EgressBroker = struct {
+    policies: *Directory,
+    capabilities: *const capability.CapabilityTable,
+
+    pub fn init(
+        policies: *Directory,
+        capabilities: *const capability.CapabilityTable,
+    ) EgressBroker {
+        return .{
+            .policies = policies,
+            .capabilities = capabilities,
+        };
+    }
+
+    pub fn connect(self: *EgressBroker, request: EgressConnectionRequest) Error!EgressDecision {
+        const presented = self.capabilities.requireUsable(request.capability_id, request.now_ticks) catch |err| switch (err) {
+            error.CapabilityNotFound => return denyEgress(request, .capability_missing, .{ .allowed = false }),
+            error.CapabilityRevoked => return denyEgress(request, .capability_revoked, .{ .allowed = false }),
+            else => return denyEgress(request, .capability_revoked, .{ .allowed = false }),
+        };
+
+        if (!presented.holder.eql(request.principal_id)) {
+            return denyEgress(request, .holder_mismatch, .{ .allowed = false });
+        }
+        if (presented.scope.task_id) |task_id| {
+            if (task_id != request.task_id) {
+                return denyEgress(request, .scope_violation, .{ .allowed = false });
+            }
+        }
+        if (presented.target.kind != .network_policy or presented.target.id != request.policy_id) {
+            return denyEgress(request, .target_mismatch, .{ .allowed = false });
+        }
+
+        const policy_decision = try self.policies.authorizeConnection(request.policy_id, request.evidence);
+        if (!policy_decision.allowed) {
+            return denyEgress(request, egressReasonFromPolicy(policy_decision.reason), policy_decision);
+        }
+        if (presented.scope.local_only and !policyModeIsLocal(policy_decision.matched_mode)) {
+            return denyEgress(request, .scope_violation, policy_decision);
+        }
+        if (!capabilityAllowsMode(presented.rights, policy_decision.matched_mode)) {
+            return denyEgress(
+                request,
+                if (policyModeIsLocal(policy_decision.matched_mode)) .missing_local_right else .missing_remote_right,
+                policy_decision,
+            );
+        }
+
+        return .{
+            .allowed = true,
+            .policy_id = request.policy_id,
+            .capability_id = request.capability_id,
+            .policy_decision = policy_decision,
+        };
+    }
+};
+
 fn zeroPolicy() PolicyRecord {
     return .{
         .id = 0,
@@ -322,6 +413,48 @@ fn policyMatchesRequest(policy: *const PolicyRecord, request: CreateRequest) boo
         return policy.pinned_root_digest_present and std.mem.eql(u8, &policy.pinned_root_digest, &digest);
     }
     return !policy.pinned_root_digest_present;
+}
+
+fn denyEgress(
+    request: EgressConnectionRequest,
+    reason: EgressDecisionReason,
+    policy_decision: Decision,
+) EgressDecision {
+    return .{
+        .allowed = false,
+        .reason = reason,
+        .policy_id = request.policy_id,
+        .capability_id = request.capability_id,
+        .policy_decision = policy_decision,
+    };
+}
+
+fn egressReasonFromPolicy(reason: DecisionReason) EgressDecisionReason {
+    return switch (reason) {
+        .none => .none,
+        .policy_denied => .policy_denied,
+        .destination_mismatch => .destination_mismatch,
+        .explicit_grant_required => .explicit_grant_required,
+        .attestation_required => .attestation_required,
+        .identity_pin_mismatch => .identity_pin_mismatch,
+    };
+}
+
+fn capabilityAllowsMode(rights: capability.CapabilityRights, mode: PolicyMode) bool {
+    if (policyModeIsLocal(mode)) return rights.has(.network_local);
+    return rights.has(.network_remote);
+}
+
+fn policyModeIsLocal(mode: PolicyMode) bool {
+    return switch (mode) {
+        .local_network, .local_subnet_discovery => true,
+        .none,
+        .named_service_identity,
+        .named_domain,
+        .inbound_collaborative_session,
+        .unrestricted_internet,
+        => false,
+    };
 }
 
 test "network policy objects enforce discovery inbound service domain and explicit internet grants" {
@@ -458,4 +591,127 @@ test "network policy creation is idempotent for identical requests" {
     });
 
     try std.testing.expectEqual(first.id, second.id);
+}
+
+test "egress broker requires a usable network policy capability before connecting" {
+    var directory = Directory.init();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 12 };
+    const app = principal.PrincipalId{ .kind = .app, .serial = 12 };
+
+    const relay = try directory.create(.{
+        .owner = owner,
+        .label = "relay",
+        .mode = .named_domain,
+        .target = "relay.zigos.dev",
+    });
+    const local = try directory.create(.{
+        .owner = owner,
+        .label = "local",
+        .mode = .local_network,
+    });
+
+    var capabilities = capability.CapabilityTable.init();
+    const remote_capability = try capabilities.mintBootRoot(.{
+        .holder = app,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .network_policy, .id = relay.id },
+        .rights = .{ .network_policy = .{
+            .capability_derive = true,
+            .network_remote = true,
+        } },
+        .scope = .{
+            .task_id = 701,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = 100,
+        },
+    });
+    const stale_remote_capability = try capabilities.derive(.{
+        .parent_capability_id = remote_capability.id,
+        .holder = app,
+        .rights = .{ .network_policy = .{
+            .network_remote = true,
+        } },
+        .scope = remote_capability.scope,
+        .lease = .{
+            .issued_at_ticks = 1,
+            .expires_at_ticks = 90,
+        },
+    });
+    const local_capability = try capabilities.mintBootRoot(.{
+        .holder = app,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .network_policy, .id = local.id },
+        .rights = .{ .network_policy = .{
+            .network_local = true,
+        } },
+        .scope = .{
+            .task_id = 701,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = 100,
+        },
+    });
+
+    var broker = EgressBroker.init(&directory, &capabilities);
+    const allowed = try broker.connect(.{
+        .task_id = 701,
+        .principal_id = app,
+        .capability_id = remote_capability.id,
+        .policy_id = relay.id,
+        .evidence = .{ .destination = .{ .domain = "relay.zigos.dev" } },
+        .now_ticks = 10,
+    });
+    try std.testing.expect(allowed.allowed);
+    try std.testing.expectEqual(PolicyMode.named_domain, allowed.policy_decision.matched_mode);
+
+    const wrong_domain = try broker.connect(.{
+        .task_id = 701,
+        .principal_id = app,
+        .capability_id = remote_capability.id,
+        .policy_id = relay.id,
+        .evidence = .{ .destination = .{ .domain = "example.com" } },
+        .now_ticks = 10,
+    });
+    try std.testing.expect(!wrong_domain.allowed);
+    try std.testing.expectEqual(EgressDecisionReason.destination_mismatch, wrong_domain.reason);
+
+    const wrong_task = try broker.connect(.{
+        .task_id = 702,
+        .principal_id = app,
+        .capability_id = remote_capability.id,
+        .policy_id = relay.id,
+        .evidence = .{ .destination = .{ .domain = "relay.zigos.dev" } },
+        .now_ticks = 10,
+    });
+    try std.testing.expect(!wrong_task.allowed);
+    try std.testing.expectEqual(EgressDecisionReason.scope_violation, wrong_task.reason);
+
+    const wrong_policy = try broker.connect(.{
+        .task_id = 701,
+        .principal_id = app,
+        .capability_id = local_capability.id,
+        .policy_id = relay.id,
+        .evidence = .{ .destination = .{ .domain = "relay.zigos.dev" } },
+        .now_ticks = 10,
+    });
+    try std.testing.expect(!wrong_policy.allowed);
+    try std.testing.expectEqual(EgressDecisionReason.target_mismatch, wrong_policy.reason);
+
+    try capabilities.revokeTargetAuthority(remote_capability.id);
+    const revoked = try broker.connect(.{
+        .task_id = 701,
+        .principal_id = app,
+        .capability_id = stale_remote_capability.id,
+        .policy_id = relay.id,
+        .evidence = .{ .destination = .{ .domain = "relay.zigos.dev" } },
+        .now_ticks = 10,
+    });
+    try std.testing.expect(!revoked.allowed);
+    try std.testing.expectEqual(EgressDecisionReason.capability_revoked, revoked.reason);
 }

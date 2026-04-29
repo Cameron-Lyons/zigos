@@ -2,12 +2,22 @@ const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const native_util = @import("../core/util.zig");
+const object_store = @import("../storage/object_store.zig");
+const principal = @import("../core/principal.zig");
+const signing = @import("../core/signing.zig");
+const storage_service = @import("../storage/storage_service.zig");
 const supervisor_mod = @import("../session/supervisor.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const copyText = native_util.copyText;
 
 pub const MAX_RECORDS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
+pub const MEASUREMENT_KIND_COUNT: usize = 5;
+pub const state_workspace_label = "system-measured-boot";
+
+const state_entry_path = "state/latest";
+const state_magic = "ZMB1";
+const state_version: u16 = 1;
 
 pub const MeasurementKind = enum(u8) {
     kernel,
@@ -43,8 +53,60 @@ pub const BootRecord = struct {
     }
 };
 
+pub const BootSummary = struct {
+    generation: u64,
+    record_count: u16,
+    kind_counts: [MEASUREMENT_KIND_COUNT]u16,
+    root_digest: [32]u8,
+
+    pub fn fromRecord(boot: *const BootRecord) BootSummary {
+        var summary = BootSummary{
+            .generation = boot.generation,
+            .record_count = @intCast(boot.record_count),
+            .kind_counts = [_]u16{0} ** MEASUREMENT_KIND_COUNT,
+            .root_digest = boot.root_digest,
+        };
+        for (boot.records[0..boot.record_count]) |record| {
+            summary.kind_counts[@intFromEnum(record.kind)] += 1;
+        }
+        return summary;
+    }
+
+    pub fn countKind(self: *const BootSummary, kind: MeasurementKind) u16 {
+        return self.kind_counts[@intFromEnum(kind)];
+    }
+
+    pub fn matchesRecord(self: *const BootSummary, boot: *const BootRecord) bool {
+        const other = BootSummary.fromRecord(boot);
+        return self.eql(other);
+    }
+
+    pub fn eql(self: *const BootSummary, other: BootSummary) bool {
+        return self.generation == other.generation and
+            self.record_count == other.record_count and
+            std.mem.eql(u16, &self.kind_counts, &other.kind_counts) and
+            std.mem.eql(u8, &self.root_digest, &other.root_digest);
+    }
+};
+
+pub const BootComparison = struct {
+    previous: ?BootSummary,
+    current: BootSummary,
+    same_root_digest: bool,
+    same_generation: bool,
+    same_record_shape: bool,
+
+    pub fn changed(self: *const BootComparison) bool {
+        return self.previous != null and
+            (!self.same_root_digest or !self.same_generation or !self.same_record_shape);
+    }
+};
+
 pub const Error = error{
     RecordTableFull,
+    CorruptState,
+    StateTooLarge,
+    UnsupportedStateVersion,
 };
 
 pub const Recorder = struct {
@@ -138,6 +200,96 @@ pub const Recorder = struct {
     }
 };
 
+pub const MeasurementJournal = struct {
+    storage: *storage_service.Service,
+    owner: principal.PrincipalId,
+    state_signer: signing.SignerIdentity,
+    workspace_id: u64,
+    loaded_existing_state: bool = false,
+    latest_version_id: u64 = 0,
+    previous_summary: ?BootSummary = null,
+    latest_summary: ?BootSummary = null,
+
+    pub fn init(
+        storage: *storage_service.Service,
+        owner: principal.PrincipalId,
+        state_signer: signing.SignerIdentity,
+    ) anyerror!MeasurementJournal {
+        const workspace_record = storage.findWorkspace(owner, state_workspace_label) orelse
+            try storage.createWorkspace(.{
+                .owner = owner,
+                .label = state_workspace_label,
+            });
+
+        var journal = MeasurementJournal{
+            .storage = storage,
+            .owner = owner,
+            .state_signer = state_signer,
+            .workspace_id = workspace_record.id,
+        };
+
+        if (storage.resolve(workspace_record.id, state_entry_path)) |entry| {
+            const version = storage.version(entry.version_id) orelse return error.CorruptState;
+            journal.latest_summary = try decodeSummary(try storage.versionPayload(version));
+            journal.loaded_existing_state = true;
+            journal.latest_version_id = entry.version_id;
+        } else |err| switch (err) {
+            error.EntryNotFound => {},
+            else => return err,
+        }
+
+        return journal;
+    }
+
+    pub fn record(self: *MeasurementJournal, boot: BootRecord, tick: u64) anyerror!BootComparison {
+        const previous = self.latest_summary;
+        const current = BootSummary.fromRecord(&boot);
+        var comparison = compareSummaries(previous, current);
+        try self.persist(current, tick);
+        self.previous_summary = previous;
+        self.latest_summary = current;
+        comparison.previous = previous;
+        comparison.current = current;
+        return comparison;
+    }
+
+    pub fn hasPreviousMeasurement(self: *const MeasurementJournal) bool {
+        return self.latest_summary != null;
+    }
+
+    pub fn latestMatches(self: *const MeasurementJournal, boot: *const BootRecord) bool {
+        const latest = self.latest_summary orelse return false;
+        return latest.matchesRecord(boot);
+    }
+
+    fn persist(self: *MeasurementJournal, summary: BootSummary, tick: u64) anyerror!void {
+        var payload_buffer: [128]u8 = undefined;
+        const payload = try encodeSummary(summary, &payload_buffer);
+        const existing_entry = self.storage.resolve(self.workspace_id, state_entry_path) catch |err| switch (err) {
+            error.EntryNotFound => null,
+            else => return err,
+        };
+        const result = try self.storage.putVersion(.{
+            .preferred_object_id = stateObjectId(),
+            .object_type = .document,
+            .payload = payload,
+            .metadata = try object_store.signMetadata(
+                self.state_signer,
+                "measured-boot-state",
+                "application/zigos-measured-boot",
+                .document,
+                payload,
+                tick,
+            ),
+            .parent_version_id = if (existing_entry) |entry| entry.version_id else null,
+        });
+        try self.storage.beginTransaction(self.workspace_id);
+        try self.storage.stagePut(self.workspace_id, state_entry_path, result.object_id, result.version_id, .document);
+        _ = try self.storage.commit(self.workspace_id, tick);
+        self.latest_version_id = result.version_id;
+    }
+};
+
 fn zeroRecord() MeasurementRecord {
     return .{
         .kind = .kernel,
@@ -165,6 +317,120 @@ fn hashDigest(root: [32]u8, record: MeasurementRecord, index: usize) [32]u8 {
     return crypto_hash.finalize(&hasher);
 }
 
+fn compareSummaries(previous: ?BootSummary, current: BootSummary) BootComparison {
+    const same_root_digest = if (previous) |summary|
+        std.mem.eql(u8, &summary.root_digest, &current.root_digest)
+    else
+        false;
+    const same_generation = if (previous) |summary|
+        summary.generation == current.generation
+    else
+        false;
+    const same_record_shape = if (previous) |summary|
+        summary.record_count == current.record_count and std.mem.eql(u16, &summary.kind_counts, &current.kind_counts)
+    else
+        false;
+    return .{
+        .previous = previous,
+        .current = current,
+        .same_root_digest = same_root_digest,
+        .same_generation = same_generation,
+        .same_record_shape = same_record_shape,
+    };
+}
+
+fn encodeSummary(summary: BootSummary, buffer: []u8) Error![]const u8 {
+    var writer = CursorWriter{ .buffer = buffer };
+    try writer.writeBytes(state_magic);
+    try writer.writeU16(state_version);
+    try writer.writeU64(summary.generation);
+    try writer.writeU16(summary.record_count);
+    try writer.writeBytes(&summary.root_digest);
+    for (summary.kind_counts) |count| {
+        try writer.writeU16(count);
+    }
+    return buffer[0..writer.offset];
+}
+
+fn decodeSummary(payload: []const u8) Error!BootSummary {
+    var reader = CursorReader{ .buffer = payload };
+    var magic_buffer: [state_magic.len]u8 = undefined;
+    try reader.readBytes(&magic_buffer);
+    if (!std.mem.eql(u8, &magic_buffer, state_magic)) return error.CorruptState;
+    if ((try reader.readU16()) != state_version) return error.UnsupportedStateVersion;
+
+    var summary = BootSummary{
+        .generation = try reader.readU64(),
+        .record_count = try reader.readU16(),
+        .kind_counts = [_]u16{0} ** MEASUREMENT_KIND_COUNT,
+        .root_digest = [_]u8{0} ** 32,
+    };
+    if (summary.record_count > MAX_RECORDS) return error.CorruptState;
+    try reader.readBytes(&summary.root_digest);
+    var total_count: u16 = 0;
+    for (&summary.kind_counts) |*count| {
+        count.* = try reader.readU16();
+        total_count += count.*;
+    }
+    if (total_count != summary.record_count) return error.CorruptState;
+    if (!reader.eof()) return error.CorruptState;
+    return summary;
+}
+
+const CursorWriter = struct {
+    buffer: []u8,
+    offset: usize = 0,
+
+    fn writeBytes(self: *CursorWriter, bytes: []const u8) Error!void {
+        if (self.offset + bytes.len > self.buffer.len) return error.StateTooLarge;
+        @memcpy(self.buffer[self.offset .. self.offset + bytes.len], bytes);
+        self.offset += bytes.len;
+    }
+
+    fn writeU16(self: *CursorWriter, value: u16) Error!void {
+        var bytes: [2]u8 = undefined;
+        std.mem.writeInt(u16, &bytes, value, .little);
+        try self.writeBytes(&bytes);
+    }
+
+    fn writeU64(self: *CursorWriter, value: u64) Error!void {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &bytes, value, .little);
+        try self.writeBytes(&bytes);
+    }
+};
+
+const CursorReader = struct {
+    buffer: []const u8,
+    offset: usize = 0,
+
+    fn readBytes(self: *CursorReader, dest: []u8) Error!void {
+        if (self.offset + dest.len > self.buffer.len) return error.CorruptState;
+        @memcpy(dest, self.buffer[self.offset .. self.offset + dest.len]);
+        self.offset += dest.len;
+    }
+
+    fn readU16(self: *CursorReader) Error!u16 {
+        var bytes: [2]u8 = undefined;
+        try self.readBytes(&bytes);
+        return std.mem.readInt(u16, &bytes, .little);
+    }
+
+    fn readU64(self: *CursorReader) Error!u64 {
+        var bytes: [8]u8 = undefined;
+        try self.readBytes(&bytes);
+        return std.mem.readInt(u64, &bytes, .little);
+    }
+
+    fn eof(self: *const CursorReader) bool {
+        return self.offset == self.buffer.len;
+    }
+};
+
+fn stateObjectId() u64 {
+    return native_util.fnv1a64WithSeed(0xB0075A7E600D0001, "platform:measured-boot:latest");
+}
+
 test "measured boot records kernel base image services policies and drivers" {
     var recorder = Recorder.init();
     recorder.begin(7);
@@ -183,11 +449,14 @@ test "measured boot records kernel base image services policies and drivers" {
     try std.testing.expectEqual(@as(usize, 1), boot.countKind(.policy));
     try std.testing.expectEqual(@as(usize, 1), boot.countKind(.driver_set));
     try std.testing.expect(!std.mem.allEqual(u8, &boot.root_digest, 0));
+
+    const summary = BootSummary.fromRecord(&boot);
+    try std.testing.expect(summary.matchesRecord(&boot));
+    try std.testing.expectEqual(@as(u16, 1), summary.countKind(.kernel));
 }
 
 test "critical service measurements bind launched userspace image artifacts" {
     const manifest = @import("../policy/manifest.zig");
-    const principal = @import("../core/principal.zig");
     const userspace_manifest_signing = @import("../task/userspace_manifest_signing.zig");
 
     var catalog = userspace_loader.Catalog.init();
@@ -284,4 +553,58 @@ test "driver set measurements bind signed driver records and restart generation"
     try std.testing.expectEqual(@as(usize, 1), first.countKind(.driver_set));
     try std.testing.expectEqualStrings("core-driver-set", first.records[0].labelSlice());
     try std.testing.expect(!std.mem.eql(u8, &first.records[0].digest, &second.records[0].digest));
+}
+
+test "measured boot journal persists and compares latest boot summary across restart" {
+    var checkpoint_store = storage_service.CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    defer checkpoint_store.resetPersistent();
+
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 160 };
+    const state_signer = signing.SignerIdentity{
+        .label = "measured-boot-state",
+        .seed = [_]u8{0xA1} ** 32,
+    };
+
+    var first_storage = storage_service.Service.initWithStore(1_600, 160, owner, &checkpoint_store);
+    var first_journal = try MeasurementJournal.init(&first_storage, owner, state_signer);
+    try std.testing.expect(!first_journal.loaded_existing_state);
+
+    var recorder = Recorder.init();
+    recorder.begin(44);
+    try recorder.add(.kernel, "kernel-zigos-native", "kernel=v1");
+    try recorder.add(.base_image, "stable-a", "image=v1");
+    try recorder.add(.critical_service, "storage", "healthy");
+    try recorder.add(.policy, "workspace-policy", "strict");
+    try recorder.add(.driver_set, "core-driver-set", "drivers=v1");
+    const first_boot = recorder.finalize();
+    const first_comparison = try first_journal.record(first_boot, 10);
+    try std.testing.expect(first_comparison.previous == null);
+    try std.testing.expect(!first_comparison.changed());
+
+    var restarted_storage = storage_service.Service.initWithStore(1_600, 161, owner, &checkpoint_store);
+    var restarted_journal = try MeasurementJournal.init(&restarted_storage, owner, state_signer);
+    try std.testing.expect(restarted_journal.loaded_existing_state);
+    try std.testing.expect(restarted_journal.latestMatches(&first_boot));
+
+    var second_recorder = Recorder.init();
+    second_recorder.begin(45);
+    try second_recorder.add(.kernel, "kernel-zigos-native", "kernel=v2");
+    try second_recorder.add(.base_image, "stable-b", "image=v2");
+    try second_recorder.add(.critical_service, "storage", "healthy");
+    try second_recorder.add(.policy, "workspace-policy", "strict");
+    try second_recorder.add(.driver_set, "core-driver-set", "drivers=v1");
+    const second_boot = second_recorder.finalize();
+    const second_comparison = try restarted_journal.record(second_boot, 11);
+    try std.testing.expect(second_comparison.previous != null);
+    try std.testing.expect(second_comparison.changed());
+    try std.testing.expect(!second_comparison.same_root_digest);
+    try std.testing.expect(!second_comparison.same_generation);
+    try std.testing.expect(second_comparison.same_record_shape);
+
+    var second_restart_storage = storage_service.Service.initWithStore(1_600, 162, owner, &checkpoint_store);
+    var second_restart = try MeasurementJournal.init(&second_restart_storage, owner, state_signer);
+    try std.testing.expect(second_restart.loaded_existing_state);
+    try std.testing.expect(second_restart.latestMatches(&second_boot));
+    try std.testing.expect(!second_restart.latestMatches(&first_boot));
 }

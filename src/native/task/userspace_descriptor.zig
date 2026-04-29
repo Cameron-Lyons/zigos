@@ -82,12 +82,18 @@ pub fn init(spec: InitSpec) Descriptor {
     descriptor.role_tag = spec.role_tag;
     descriptor.heartbeat_increment = spec.heartbeat_increment;
     descriptor.contract_flags = spec.contract_flags;
-    descriptor.bundle_id_len = copyTruncated(descriptor.bundle_id[0..], spec.bundle_id);
-    descriptor.display_name_len = copyTruncated(descriptor.display_name[0..], spec.display_name);
-    descriptor.label_len = copyTruncated(descriptor.label[0..], spec.label);
-    descriptor.entry_len = copyTruncated(descriptor.entry[0..], spec.entry);
-    descriptor.publisher_len = copyTruncated(descriptor.publisher[0..], spec.publisher);
+    descriptor.bundle_id_len = @intCast(copyText(descriptor.bundle_id[0..], spec.bundle_id));
+    descriptor.display_name_len = @intCast(copyText(descriptor.display_name[0..], spec.display_name));
+    descriptor.label_len = @intCast(copyText(descriptor.label[0..], spec.label));
+    descriptor.entry_len = @intCast(copyText(descriptor.entry[0..], spec.entry));
+    descriptor.publisher_len = @intCast(copyText(descriptor.publisher[0..], spec.publisher));
     return descriptor;
+}
+
+fn copyText(dest: []u8, src: []const u8) usize {
+    const len = @min(dest.len, src.len);
+    @memcpy(dest[0..len], src[0..len]);
+    return len;
 }
 
 pub fn validate(descriptor: *const Descriptor) ValidationError!void {
@@ -98,12 +104,6 @@ pub fn validate(descriptor: *const Descriptor) ValidationError!void {
     if (descriptor.label_len > descriptor.label.len) return error.InvalidLabelLength;
     if (descriptor.entry_len > descriptor.entry.len) return error.InvalidEntryLength;
     if (descriptor.publisher_len > descriptor.publisher.len) return error.InvalidPublisherLength;
-}
-
-fn copyTruncated(buffer: []u8, source: []const u8) u16 {
-    const len = @min(buffer.len, source.len);
-    @memcpy(buffer[0..len], source[0..len]);
-    return @intCast(len);
 }
 
 test "descriptor init and validate preserve the embedded metadata" {

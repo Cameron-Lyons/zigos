@@ -5,6 +5,7 @@ const capability = @import("../../native/kernel_api/capability.zig");
 const driver_runtime_mod = @import("../../native/drivers/driver_runtime.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const manifest = @import("../../native/policy/manifest.zig");
+const network_policy = @import("../../native/sync/network_policy.zig");
 const object_store = @import("../../native/storage/object_store.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
 const storage_volume = @import("../../native/storage/storage_volume.zig");
@@ -448,4 +449,42 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     try std.testing.expect((try sync.evaluateNetworkPolicy(overlay_policy.id, .{ .service_identity = "overlay.notes.spec" })).allowed);
     try std.testing.expect((try sync.evaluateNetworkPolicy(inbound_policy.id, .{ .inbound_session_type = "document-review/v1" })).allowed);
     try std.testing.expect(!(try sync.evaluateNetworkPolicy(inbound_policy.id, .{ .inbound_session_type = "pair-screen/v1" })).allowed);
+
+    var egress_capabilities = capability.CapabilityTable.init();
+    const relay_egress_capability = try egress_capabilities.mintBootRoot(.{
+        .holder = collaborator,
+        .issuer = spec_support.policyAuthority(31),
+        .target = .{ .kind = .network_policy, .id = relay_policy.id },
+        .rights = .{ .network_policy = .{
+            .network_remote = true,
+        } },
+        .scope = .{
+            .task_id = 631,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 20,
+            .expires_at_ticks = 40,
+        },
+    });
+    const relay_connection = try sync.authorizeNetworkConnection(&egress_capabilities, .{
+        .task_id = 631,
+        .principal_id = collaborator,
+        .capability_id = relay_egress_capability.id,
+        .policy_id = relay_policy.id,
+        .evidence = .{ .destination = .{ .domain = "relay.spec.zigos" } },
+        .now_ticks = 25,
+    });
+    try std.testing.expect(relay_connection.allowed);
+
+    const denied_relay_connection = try sync.authorizeNetworkConnection(&egress_capabilities, .{
+        .task_id = 631,
+        .principal_id = collaborator,
+        .capability_id = relay_egress_capability.id,
+        .policy_id = relay_policy.id,
+        .evidence = .{ .destination = .{ .domain = "other.spec.zigos" } },
+        .now_ticks = 25,
+    });
+    try std.testing.expect(!denied_relay_connection.allowed);
+    try std.testing.expectEqual(network_policy.EgressDecisionReason.destination_mismatch, denied_relay_connection.reason);
 }

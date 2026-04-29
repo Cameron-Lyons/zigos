@@ -1,4 +1,5 @@
 const std = @import("std");
+const capability = @import("../kernel_api/capability.zig");
 const device_graph = @import("device_graph.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
@@ -268,6 +269,15 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             destination: network_policy.Destination,
         ) Error!network_policy.Decision {
             return self.state().network_policies.authorize(policy_id, destination);
+        }
+
+        pub fn authorizeNetworkConnection(
+            self: *Self,
+            capability_table: *const capability.CapabilityTable,
+            request: network_policy.EgressConnectionRequest,
+        ) Error!network_policy.EgressDecision {
+            var broker = network_policy.EgressBroker.init(&self.state().network_policies, capability_table);
+            return broker.connect(request);
         }
 
         pub fn configureWorkspacePolicy(

@@ -1,6 +1,7 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const builtin = @import("builtin");
 const launch_helpers = @import("task_runtime_launch.zig");
+const id_index = @import("../core/id_index.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const runtime_host = @import("task_runtime_host.zig");
@@ -220,17 +221,7 @@ pub const TaskCreateRequest = struct {
     userspace_image: ?*const ExecutableImageSpec = null,
 };
 
-const IndexState = enum(u8) {
-    empty,
-    filled,
-    tombstone,
-};
-
-pub const IdIndexSlot = struct {
-    state: IndexState = .empty,
-    id: u64 = 0,
-    slot_index: usize = 0,
-};
+pub const IdIndexSlot = id_index.Slot;
 
 pub const TaskColdRecord = struct {
     execution_components: [MAX_TASK_COMPONENTS]ExecutionComponentRecord = [_]ExecutionComponentRecord{zeroExecutionComponent()} ** MAX_TASK_COMPONENTS,
@@ -437,7 +428,7 @@ pub fn saturatingSub(current: usize, amount: usize) usize {
 }
 
 pub fn emptyIndexTable(comptime capacity: usize) [capacity]IdIndexSlot {
-    return [_]IdIndexSlot{IdIndexSlot{}} ** capacity;
+    return id_index.emptyTable(capacity);
 }
 
 pub fn zeroTaskCold() TaskColdRecord {
@@ -525,79 +516,19 @@ pub fn zeroBytes(dest: []u8) void {
 }
 
 pub fn indexLookup(comptime capacity: usize, table: *const [capacity]IdIndexSlot, id: u64) ?usize {
-    if (id == 0) return null;
-
-    var index = indexHash(id, capacity);
-    var attempts: usize = 0;
-    while (attempts < capacity) : (attempts += 1) {
-        const entry = table[index];
-        switch (entry.state) {
-            .empty => return null,
-            .filled => if (entry.id == id) return entry.slot_index,
-            .tombstone => {},
-        }
-        index = (index + 1) % capacity;
-    }
-    return null;
+    return id_index.lookup(capacity, table, id);
 }
 
 pub fn indexInsert(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64, slot_index: usize) void {
-    if (id == 0) native_util.impossibleByInvariant("id indexes never store the reserved zero id");
-
-    var index = indexHash(id, capacity);
-    var first_tombstone: ?usize = null;
-    var attempts: usize = 0;
-    while (attempts < capacity) : (attempts += 1) {
-        switch (table[index].state) {
-            .empty => {
-                const insert_index = first_tombstone orelse index;
-                table[insert_index] = .{
-                    .state = .filled,
-                    .id = id,
-                    .slot_index = slot_index,
-                };
-                return;
-            },
-            .filled => {
-                if (table[index].id == id) {
-                    table[index].slot_index = slot_index;
-                    return;
-                }
-            },
-            .tombstone => {
-                if (first_tombstone == null) first_tombstone = index;
-            },
-        }
-        index = (index + 1) % capacity;
-    }
-
-    native_util.impossibleByInvariant("id index capacity covers all live task slots");
+    id_index.insert(capacity, table, id, slot_index, "id indexes never store the reserved zero id");
 }
 
 pub fn indexRemove(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64) void {
-    if (id == 0) return;
-
-    var index = indexHash(id, capacity);
-    var attempts: usize = 0;
-    while (attempts < capacity) : (attempts += 1) {
-        switch (table[index].state) {
-            .empty => return,
-            .filled => {
-                if (table[index].id == id) {
-                    table[index].state = .tombstone;
-                    table[index].id = 0;
-                    table[index].slot_index = 0;
-                    return;
-                }
-            },
-            .tombstone => {},
-        }
-        index = (index + 1) % capacity;
-    }
+    id_index.remove(capacity, table, id);
 }
 
 pub fn indexHash(id: u64, comptime capacity: usize) usize {
-    return @as(usize, @intCast((id *% 0x9E37_79B9_7F4A_7C15) % capacity));
+    return id_index.hash(id, capacity);
 }
 
 pub fn taskCapabilityIndex(task: *const TaskRecord, capability_id: u64) ?usize {
