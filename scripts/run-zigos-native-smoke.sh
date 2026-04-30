@@ -143,7 +143,7 @@ append_build_artifact_measurements() {
   printf 'MEASURED_BOOT:BUILD_ARTIFACT kernel path=%s sha256=%s\n' "$KERNEL_PATH" "$kernel_digest"
   find "$ROOT_DIR/zig-out/bin" -maxdepth 1 -type f -name 'userspace-*.elf' | LC_ALL=C sort |
     while IFS= read -r artifact; do
-      printf 'MEASURED_BOOT:BUILD_ARTIFACT userspace path=%s sha256=%s\n' "${artifact#$ROOT_DIR/}" "$(sha256_file "$artifact")"
+      printf 'MEASURED_BOOT:BUILD_ARTIFACT userspace path=%s sha256=%s\n' "${artifact#"$ROOT_DIR"/}" "$(sha256_file "$artifact")"
     done
 }
 
