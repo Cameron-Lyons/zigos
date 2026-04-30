@@ -18,6 +18,10 @@ else
         pub fn printBootMarker(_: []const u8) void {}
     };
 
+var reboot_proof_checkpoint_store: task_runtime_service.CheckpointStore = .{};
+var reboot_proof_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
+var reboot_proof_restarted_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
+
 pub fn runAndPrint() bool {
     if (!processIsolationBlocksForeignSharedMemory()) return false;
     common.printBootMarker(boot_markers.runtime_proof_process_isolation);
@@ -201,28 +205,31 @@ pub fn driverAuthorityEscapeIsRejected() bool {
 }
 
 pub fn rebootGrantAndRevocationStatePersists() bool {
-    var checkpoint_store = task_runtime_service.CheckpointStore{};
-    var runtime = task_runtime.Runtime.init();
-    var service_instance = task_runtime_service.Service.initWithStore(&runtime, &checkpoint_store);
+    reboot_proof_checkpoint_store.reset();
+    reboot_proof_runtime = task_runtime.Runtime.init();
+    reboot_proof_restarted_runtime = task_runtime.Runtime.init();
+
+    var service_instance = task_runtime_service.Service.initWithStore(&reboot_proof_runtime, &reboot_proof_checkpoint_store);
     service_instance.bind(50, service(50));
-    const task = runtime.createTask(.{
+    const task = reboot_proof_runtime.createTask(.{
         .owner = app(50),
         .component_class = .app_component,
         .budget = budget(),
         .local_only = true,
     }) catch return false;
-    runtime.grantCapability(task.id, 91) catch return false;
-    runtime.grantCapability(task.id, 92) catch return false;
+    const task_id = task.id;
+    reboot_proof_runtime.grantCapability(task_id, 91) catch return false;
+    reboot_proof_runtime.grantCapability(task_id, 92) catch return false;
     service_instance.checkpoint(1);
-    if (!(runtime.revokeCapability(task.id, 91) catch return false)) return false;
+    if (!(reboot_proof_runtime.revokeCapability(task_id, 91) catch return false)) return false;
     service_instance.checkpoint(2);
 
-    var restarted_runtime = task_runtime.Runtime.init();
-    var restarted = task_runtime_service.Service.initWithStore(&restarted_runtime, &checkpoint_store);
+    var restarted = task_runtime_service.Service.initWithStore(&reboot_proof_restarted_runtime, &reboot_proof_checkpoint_store);
     restarted.bind(50, service(50));
     if (!restarted.restartFromCheckpoint(3)) return false;
-    const restored = restarted_runtime.find(task.id) orelse return false;
-    return !restarted_runtime.hasCapability(restored.id, 91) and restarted_runtime.hasCapability(restored.id, 92);
+    const restored = reboot_proof_restarted_runtime.find(task_id) orelse return false;
+    return !reboot_proof_restarted_runtime.hasCapability(restored.id, 91) and
+        reboot_proof_restarted_runtime.hasCapability(restored.id, 92);
 }
 
 fn budget() task_runtime.ResourceBudget {

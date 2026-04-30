@@ -1,5 +1,4 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
-const builtin = @import("builtin");
 const launch_helpers = @import("task_runtime_launch.zig");
 const id_index = @import("../core/id_index.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -474,41 +473,14 @@ pub fn copySlots(comptime T: type, dest: []T, src: []const T) void {
 }
 
 pub fn copyBytes(dest: []u8, src: []const u8) void {
-    if (builtin.target.cpu.arch == .x86 and builtin.target.os.tag == .freestanding) {
-        const count: u32 = @intCast(@min(dest.len, src.len));
-        if (count == 0) return;
-        asm volatile (
-            \\cld
-            \\rep movsb
-            :
-            : [dst] "{edi}" (dest.ptr),
-              [src] "{esi}" (src.ptr),
-              [count] "{ecx}" (count),
-            : .{ .memory = true });
-        return;
-    }
-
+    const len = @min(dest.len, src.len);
     var index: usize = 0;
-    while (index < dest.len and index < src.len) : (index += 1) {
+    while (index < len) : (index += 1) {
         dest[index] = src[index];
     }
 }
 
 pub fn zeroBytes(dest: []u8) void {
-    if (builtin.target.cpu.arch == .x86 and builtin.target.os.tag == .freestanding) {
-        const count: u32 = @intCast(dest.len);
-        if (count == 0) return;
-        asm volatile (
-            \\cld
-            \\rep stosb
-            :
-            : [dst] "{edi}" (dest.ptr),
-              [count] "{ecx}" (count),
-              [value] "{eax}" (@as(u32, 0)),
-            : .{ .memory = true });
-        return;
-    }
-
     var index: usize = 0;
     while (index < dest.len) : (index += 1) {
         dest[index] = 0;

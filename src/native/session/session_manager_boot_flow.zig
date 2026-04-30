@@ -89,6 +89,7 @@ pub const SessionManager = struct {
     storage_service_instance: storage_service_mod.Service = emptyStorageService(),
     export_package_buffer: workspace_mod.ExportPackage = workspace_mod.emptyExportPackage(),
     sync_resident_state: sync_service_mod.ResidentState = .{},
+    service_bindings: ServiceBindings = ServiceBindings.init(),
 
     pub fn init() SessionManager {
         return .{};
@@ -252,10 +253,16 @@ pub const SessionManager = struct {
 
     pub fn buildProductionServiceGraph(self: *SessionManager) ?ServiceGraph {
         var graph = self.beginServiceGraph() orelse return null;
-        if (!session_service_bootstrap.bootServices(&graph.env, &graph.state, graph.kernel_port, &graph.service_bindings)) {
+        const env_snapshot = graph.env;
+        const state_snapshot = graph.state;
+        self.service_bindings = ServiceBindings.init();
+        if (!session_service_bootstrap.bootServices(&env_snapshot, &state_snapshot, graph.kernel_port, &self.service_bindings)) {
             self.failBoot();
             return null;
         }
+        graph.env = env_snapshot;
+        graph.state = state_snapshot;
+        graph.service_bindings = self.service_bindings;
         self.bindProductionStorageService(&graph);
         self.runtime_service.checkpoint(60);
         return graph;
