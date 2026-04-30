@@ -37,8 +37,10 @@ pub fn bootServices(
     kernel_port: *component_port.KernelPort,
     service_bindings: *support.ServiceBindings,
 ) bool {
-    if (!@call(.never_inline, launchServices, .{ env, state, kernel_port, service_bindings })) return false;
-    return @call(.never_inline, activateDrivers, .{ env, state, kernel_port, service_bindings });
+    const env_snapshot = env.*;
+    const state_snapshot = state.*;
+    if (!@call(.never_inline, launchServices, .{ &env_snapshot, &state_snapshot, kernel_port, service_bindings })) return false;
+    return @call(.never_inline, activateDrivers, .{ &env_snapshot, &state_snapshot, kernel_port, service_bindings });
 }
 
 pub fn bootRegistryService(
