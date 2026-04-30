@@ -1,9 +1,11 @@
+const std = @import("std");
 const adversarial_security = @import("adversarial_security.zig");
 const architecture_security = @import("architecture_security.zig");
 const boot_recovery = @import("boot_recovery.zig");
 const drivers_storage_sync = @import("drivers_storage_sync.zig");
 const experience_and_policy_edges = @import("experience_and_policy_edges.zig");
 const platform_services = @import("platform_services.zig");
+const runtime_negative_proofs = @import("../../native/session/runtime_negative_proofs.zig");
 const ux_and_lifecycle = @import("ux_and_lifecycle.zig");
 
 const SpecCase = struct {
@@ -149,4 +151,12 @@ test "adversarial spec records service crash loops without losing restart state"
 
 test "adversarial spec treats downgrade and rollback metadata replay as invalid" {
     try adversarial_security.downgradeAndRollbackAttacksNeedFreshSignedMetadata();
+}
+
+test "adversarial freestanding runtime proofs reject modeled bypasses" {
+    try std.testing.expect(runtime_negative_proofs.processIsolationBlocksForeignSharedMemory());
+    try std.testing.expect(runtime_negative_proofs.syscallSubjectSpoofingIsRejected());
+    try std.testing.expect(runtime_negative_proofs.rawNetworkSendBypassIsDenied());
+    try std.testing.expect(runtime_negative_proofs.driverAuthorityEscapeIsRejected());
+    try std.testing.expect(runtime_negative_proofs.rebootGrantAndRevocationStatePersists());
 }

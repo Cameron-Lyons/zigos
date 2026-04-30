@@ -7,6 +7,7 @@ const component_port = @import("component_port.zig");
 const endpoint = @import("endpoint.zig");
 const native_kernel = @import("native_kernel.zig");
 const shared_memory = @import("shared_memory.zig");
+const syscall_abi = @import("syscall_abi.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 
 const USER_POINTER_FLOOR: usize = 0x10000;
@@ -25,11 +26,6 @@ const UserMemoryAccess = enum {
     write,
 };
 
-const RequestCopyRule = enum {
-    plain,
-    embedded_user_buffers,
-};
-
 const DispatchHandler = *const fn (
     port: *component_port.KernelPort,
     memory: UserMemoryContext,
@@ -43,49 +39,49 @@ const SyscallDescriptor = struct {
     operation: abi.NativeOperation,
     request_size: usize,
     response_size: usize,
-    request_copy: RequestCopyRule,
+    domain: syscall_abi.Domain,
+    request_copy: syscall_abi.RequestCopyRule,
     handler: DispatchHandler,
 };
 
 fn syscallDescriptor(
     comptime operation: abi.NativeOperation,
-    comptime Request: type,
-    comptime Response: type,
-    comptime request_copy: RequestCopyRule,
     comptime handler: DispatchHandler,
 ) SyscallDescriptor {
+    const declaration = syscall_abi.declarationFor(operation);
     return .{
         .operation = operation,
-        .request_size = @sizeOf(Request),
-        .response_size = if (Response == void) 0 else @sizeOf(Response),
-        .request_copy = request_copy,
+        .request_size = declaration.requestSize(),
+        .response_size = declaration.responseSize(),
+        .domain = declaration.domain,
+        .request_copy = declaration.request_copy,
         .handler = handler,
     };
 }
 
 const syscall_table = [_]SyscallDescriptor{
-    syscallDescriptor(.task_create, component_port.TaskCreateRequest, abi.TaskDescriptor, .embedded_user_buffers, dispatchTaskCreate),
-    syscallDescriptor(.task_terminate, component_port.TaskTerminateRequest, abi.BoolResponse, .plain, dispatchTaskTerminate),
-    syscallDescriptor(.endpoint_create, component_port.EndpointCreateRequest, abi.EndpointCreateResponse, .embedded_user_buffers, dispatchEndpointCreate),
-    syscallDescriptor(.endpoint_connect, component_port.EndpointConnectRequest, abi.EndpointDescriptor, .plain, dispatchEndpointConnect),
-    syscallDescriptor(.endpoint_send, component_port.EndpointSendRequest, void, .embedded_user_buffers, dispatchEndpointSend),
-    syscallDescriptor(.endpoint_recv, component_port.EndpointRecvRequest, abi.EndpointRecvResponse, .plain, dispatchEndpointRecv),
-    syscallDescriptor(.capability_mint, component_port.CapabilityMintRequest, abi.CapabilityDescriptor, .plain, dispatchCapabilityMint),
-    syscallDescriptor(.capability_derive, component_port.CapabilityDeriveRequest, abi.CapabilityDescriptor, .plain, dispatchCapabilityDerive),
-    syscallDescriptor(.capability_pass, component_port.CapabilityPassRequest, abi.CapabilityDescriptor, .plain, dispatchCapabilityPass),
-    syscallDescriptor(.capability_revoke, component_port.CapabilityRevokeRequest, void, .plain, dispatchCapabilityRevoke),
-    syscallDescriptor(.capability_query, component_port.CapabilityQueryRequest, abi.CapabilityDescriptor, .plain, dispatchCapabilityQuery),
-    syscallDescriptor(.shared_memory_create, component_port.SharedMemoryCreateRequest, abi.SharedMemoryCreateResponse, .plain, dispatchSharedMemoryCreate),
-    syscallDescriptor(.shared_memory_map, component_port.SharedMemoryMapRequest, abi.SharedMemoryDescriptor, .plain, dispatchSharedMemoryMap),
-    syscallDescriptor(.shared_memory_unmap, component_port.SharedMemoryUnmapRequest, abi.BoolResponse, .plain, dispatchSharedMemoryUnmap),
-    syscallDescriptor(.shared_memory_revoke, component_port.SharedMemoryRevokeRequest, abi.SharedMemoryDescriptor, .plain, dispatchSharedMemoryRevoke),
-    syscallDescriptor(.time_query, component_port.TimeQueryRequest, abi.TimeQueryResponse, .plain, dispatchTimeQuery),
-    syscallDescriptor(.resource_query, component_port.ResourceQueryRequest, abi.ResourceDescriptor, .plain, dispatchResourceQuery),
-    syscallDescriptor(.accounting_query, component_port.AccountingQueryRequest, abi.AccountingDescriptor, .plain, dispatchAccountingQuery),
-    syscallDescriptor(.device_describe, component_port.DeviceDescribeRequest, abi.DeviceDescriptor, .plain, dispatchDeviceDescribe),
-    syscallDescriptor(.device_mmio_window, component_port.DeviceMmioWindowRequest, abi.DeviceMmioWindowDescriptor, .plain, dispatchDeviceMmioWindow),
-    syscallDescriptor(.device_port_read, component_port.DevicePortReadRequest, abi.DevicePortReadResponse, .plain, dispatchDevicePortRead),
-    syscallDescriptor(.device_port_write, component_port.DevicePortWriteRequest, void, .plain, dispatchDevicePortWrite),
+    syscallDescriptor(.task_create, dispatchTaskCreate),
+    syscallDescriptor(.task_terminate, dispatchTaskTerminate),
+    syscallDescriptor(.endpoint_create, dispatchEndpointCreate),
+    syscallDescriptor(.endpoint_connect, dispatchEndpointConnect),
+    syscallDescriptor(.endpoint_send, dispatchEndpointSend),
+    syscallDescriptor(.endpoint_recv, dispatchEndpointRecv),
+    syscallDescriptor(.capability_mint, dispatchCapabilityMint),
+    syscallDescriptor(.capability_derive, dispatchCapabilityDerive),
+    syscallDescriptor(.capability_pass, dispatchCapabilityPass),
+    syscallDescriptor(.capability_revoke, dispatchCapabilityRevoke),
+    syscallDescriptor(.capability_query, dispatchCapabilityQuery),
+    syscallDescriptor(.shared_memory_create, dispatchSharedMemoryCreate),
+    syscallDescriptor(.shared_memory_map, dispatchSharedMemoryMap),
+    syscallDescriptor(.shared_memory_unmap, dispatchSharedMemoryUnmap),
+    syscallDescriptor(.shared_memory_revoke, dispatchSharedMemoryRevoke),
+    syscallDescriptor(.time_query, dispatchTimeQuery),
+    syscallDescriptor(.resource_query, dispatchResourceQuery),
+    syscallDescriptor(.accounting_query, dispatchAccountingQuery),
+    syscallDescriptor(.device_describe, dispatchDeviceDescribe),
+    syscallDescriptor(.device_mmio_window, dispatchDeviceMmioWindow),
+    syscallDescriptor(.device_port_read, dispatchDevicePortRead),
+    syscallDescriptor(.device_port_write, dispatchDevicePortWrite),
 };
 
 const UserMemoryContext = struct {
@@ -696,9 +692,9 @@ test "syscall descriptor table covers every native operation with ABI metadata" 
 
     try std.testing.expectEqual(@sizeOf(component_port.TaskCreateRequest), syscallDescriptorFor(.task_create).?.request_size);
     try std.testing.expectEqual(@sizeOf(abi.TaskDescriptor), syscallDescriptorFor(.task_create).?.response_size);
-    try std.testing.expectEqual(RequestCopyRule.embedded_user_buffers, syscallDescriptorFor(.task_create).?.request_copy);
+    try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscallDescriptorFor(.task_create).?.request_copy);
     try std.testing.expectEqual(@as(usize, 0), syscallDescriptorFor(.endpoint_send).?.response_size);
-    try std.testing.expectEqual(RequestCopyRule.embedded_user_buffers, syscallDescriptorFor(.endpoint_send).?.request_copy);
+    try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscallDescriptorFor(.endpoint_send).?.request_copy);
     try std.testing.expectEqual(@sizeOf(abi.DevicePortReadResponse), syscallDescriptorFor(.device_port_read).?.response_size);
     try std.testing.expectEqual(@as(usize, 0), syscallDescriptorFor(.device_port_write).?.response_size);
 }

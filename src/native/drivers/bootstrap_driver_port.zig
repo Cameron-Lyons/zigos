@@ -1,3 +1,4 @@
+const std = @import("std");
 const builtin = @import("builtin");
 const native_util = @import("../core/util.zig");
 const component_port = @import("../kernel_api/component_port.zig");
@@ -11,12 +12,29 @@ else
             send: *const fn ([]const u8) void,
             getMacAddress: *const fn () [6]u8,
         };
+        const StubEgressRequest = struct {
+            frame: []const u8,
+            source_mac: [6]u8,
+            egress_capability_id: u64,
+            network_policy_id: u64,
+        };
+        const StubEgressDecision = struct {
+            allowed: bool,
+            capability_backed: bool,
+        };
+        const StubEgressBroker = *const fn (request: StubEgressRequest) StubEgressDecision;
         pub const NetworkDevice = StubNetworkDevice;
 
         var active_device: ?*const StubNetworkDevice = null;
+        var egress_broker: ?StubEgressBroker = null;
+        var active_egress_capability_id: u64 = 0;
+        var active_network_policy_id: u64 = 0;
 
         pub fn init() void {
             active_device = null;
+            egress_broker = null;
+            active_egress_capability_id = 0;
+            active_network_policy_id = 0;
         }
 
         pub fn setNetworkDevice(device: *const StubNetworkDevice) void {
@@ -30,11 +48,47 @@ else
         pub fn hasNetworkDevice() bool {
             return active_device != null;
         }
+
+        pub fn setEgressBroker(broker: ?StubEgressBroker) void {
+            egress_broker = broker;
+        }
+
+        pub fn bindEgressCapability(capability_id: u64, policy_id: u64) void {
+            active_egress_capability_id = capability_id;
+            active_network_policy_id = policy_id;
+        }
+
+        pub fn clearEgressCapability() void {
+            active_egress_capability_id = 0;
+            active_network_policy_id = 0;
+        }
+
+        pub fn authorizeDriverTx(frame: []const u8) bool {
+            const device = active_device orelse return false;
+            const broker = egress_broker orelse return false;
+            const decision = broker(.{
+                .frame = frame,
+                .source_mac = device.getMacAddress(),
+                .egress_capability_id = active_egress_capability_id,
+                .network_policy_id = active_network_policy_id,
+            });
+            return decision.allowed and decision.capability_backed;
+        }
+
+        pub fn sendActiveNetworkFrame(frame: []const u8) bool {
+            if (!@This().authorizeDriverTx(frame)) return false;
+            const device = active_device orelse return false;
+            device.send(frame);
+            return true;
+        }
     };
 const storage_volume = @import("../storage/storage_volume.zig");
 const copyText = native_util.copyText;
 
 pub const NetworkDevice = link_port.NetworkDevice;
+pub const EgressRequest = if (builtin.target.os.tag == .freestanding) link_port.EgressRequest else link_port.StubEgressRequest;
+pub const EgressDecision = if (builtin.target.os.tag == .freestanding) link_port.EgressDecision else link_port.StubEgressDecision;
+pub const EgressBroker = if (builtin.target.os.tag == .freestanding) link_port.EgressBroker else link_port.StubEgressBroker;
 pub const NetworkActivator = *const fn (device_id: u64) ?*const link_port.NetworkDevice;
 pub const StorageActivator = *const fn (device_id: u64) ?storage_volume.Backend;
 
@@ -164,6 +218,30 @@ pub fn hasActiveNetworkDevice() bool {
     return link_port.hasNetworkDevice();
 }
 
+pub fn setEgressBroker(broker: ?EgressBroker) void {
+    link_port.setEgressBroker(broker);
+}
+
+pub fn bindEgressCapability(capability_id: u64, policy_id: u64) void {
+    link_port.bindEgressCapability(capability_id, policy_id);
+}
+
+pub fn clearEgressCapability() void {
+    link_port.clearEgressCapability();
+}
+
+pub fn authorizeDriverTx(frame: []const u8) bool {
+    return link_port.authorizeDriverTx(frame);
+}
+
+pub fn sendActiveNetworkFrame(frame: []const u8) bool {
+    if (builtin.target.os.tag == .freestanding) {
+        if (!link_port.authorizeDriverTx(frame)) return false;
+        return false;
+    }
+    return link_port.sendActiveNetworkFrame(frame);
+}
+
 pub fn activateNetworkDevice(device_id: u64, service_id: u64) bool {
     if (publicationForActivation(NetworkPublication, &published_network, device_id, service_id)) |publication| {
         if (publication.network_device == null) {
@@ -266,4 +344,100 @@ fn initPublication(comptime T: type, device_id: u64, publisher: []const u8, kern
     };
     publication.publisher_len = copyText(publication.publisher[0..], publisher);
     return publication;
+}
+
+test "driver-backed network tx fails closed without capability-backed egress decision" {
+    if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
+
+    reset();
+    defer reset();
+
+    const Harness = struct {
+        var send_count: usize = 0;
+        var saw_policy_id: u64 = 0;
+        var saw_capability_id: u64 = 0;
+
+        fn send(_: []const u8) void {
+            send_count += 1;
+        }
+
+        fn mac() [6]u8 {
+            return [_]u8{ 0x02, 0, 0, 0, 0, 1 };
+        }
+
+        fn broker(request: EgressRequest) EgressDecision {
+            saw_policy_id = request.network_policy_id;
+            saw_capability_id = request.egress_capability_id;
+            return .{
+                .allowed = request.network_policy_id == 44 and request.egress_capability_id == 99,
+                .capability_backed = request.egress_capability_id != 0,
+            };
+        }
+    };
+
+    const device = NetworkDevice{
+        .send = Harness.send,
+        .getMacAddress = Harness.mac,
+    };
+    try std.testing.expect(publishNetworkDevice(7001, "test-net", &device, false));
+    try std.testing.expect(activateNetworkDevice(7001, 9));
+
+    const frame_with_raw_destination = "GET / HTTP/1.1\r\nHost: relay.zigos.dev\r\nX-IP: 203.0.113.7\r\n\r\n";
+    try std.testing.expect(!sendActiveNetworkFrame(frame_with_raw_destination));
+    try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
+
+    setEgressBroker(Harness.broker);
+    try std.testing.expect(!sendActiveNetworkFrame(frame_with_raw_destination));
+    try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
+    try std.testing.expectEqual(@as(u64, 0), Harness.saw_capability_id);
+
+    bindEgressCapability(99, 44);
+    try std.testing.expect(sendActiveNetworkFrame(frame_with_raw_destination));
+    try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
+    try std.testing.expectEqual(@as(u64, 44), Harness.saw_policy_id);
+    try std.testing.expectEqual(@as(u64, 99), Harness.saw_capability_id);
+}
+
+test "adversarial raw IP or domain knowledge cannot substitute for egress capability" {
+    if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
+
+    reset();
+    defer reset();
+
+    const Harness = struct {
+        var send_count: usize = 0;
+
+        fn send(_: []const u8) void {
+            send_count += 1;
+        }
+
+        fn mac() [6]u8 {
+            return [_]u8{ 0x02, 0, 0, 0, 0, 2 };
+        }
+
+        fn adversarialBroker(request: EgressRequest) EgressDecision {
+            const contains_known_ip = std.mem.indexOf(u8, request.frame, "203.0.113.7") != null;
+            const contains_known_domain = std.mem.indexOf(u8, request.frame, "relay.zigos.dev") != null;
+            return .{
+                .allowed = contains_known_ip and contains_known_domain,
+                .capability_backed = request.egress_capability_id == 31337 and request.network_policy_id == 5150,
+            };
+        }
+    };
+
+    const device = NetworkDevice{
+        .send = Harness.send,
+        .getMacAddress = Harness.mac,
+    };
+    try std.testing.expect(publishNetworkDevice(7002, "test-net", &device, false));
+    try std.testing.expect(activateNetworkDevice(7002, 10));
+    setEgressBroker(Harness.adversarialBroker);
+
+    const forged_frame = "dst=203.0.113.7; host=relay.zigos.dev";
+    try std.testing.expect(!sendActiveNetworkFrame(forged_frame));
+    try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
+
+    bindEgressCapability(31337, 5150);
+    try std.testing.expect(sendActiveNetworkFrame(forged_frame));
+    try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
 }

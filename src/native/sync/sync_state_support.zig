@@ -17,6 +17,7 @@ pub const MAX_DATABASE_CONTRACTS: usize = 8;
 pub const MAX_OVERLAYS: usize = 4;
 pub const MAX_PRIVATE_SERVICES: usize = 4;
 pub const MAX_LABEL_BYTES: usize = 48;
+pub const MAX_TRANSPORT_FRAMES: usize = 64;
 pub const state_workspace_label = "system-sync";
 pub const state_index_path = "state/index";
 pub const state_chunk_prefix = "state/chunks/";
@@ -174,6 +175,8 @@ pub const ReplicationSummary = struct {
     private_service_published: bool = false,
     personal_e2ee: bool = false,
     offline_first: bool = false,
+    transport_frame_count: usize = 0,
+    encrypted_transport_count: usize = 0,
 };
 
 pub const Error = error{
@@ -195,6 +198,7 @@ pub const Error = error{
     TooManyPrivateServices,
     TooManySelectivePrefixes,
     TransportDenied,
+    TransportQueueFull,
     UnsupportedStateVersion,
     WorkspacePolicyNotFound,
     WorkspacePolicyTableFull,

@@ -7,6 +7,20 @@ pub const NetworkDevice = struct {
     getMacAddress: *const fn () [6]u8,
 };
 
+pub const EgressRequest = struct {
+    frame: []const u8,
+    source_mac: [6]u8,
+    egress_capability_id: u64,
+    network_policy_id: u64,
+};
+
+pub const EgressDecision = struct {
+    allowed: bool,
+    capability_backed: bool,
+};
+
+pub const EgressBroker = *const fn (request: EgressRequest) EgressDecision;
+
 pub const OwnedRxReleaseFn = *const fn (?*anyopaque, handle: usize) void;
 
 pub const OwnedRxPacket = struct {
@@ -19,18 +33,38 @@ pub const OwnedRxPacket = struct {
 
 var current_device: ?*const NetworkDevice = null;
 var ingress_handler: ?IngressHandler = null;
+var egress_broker: ?EgressBroker = null;
+var active_egress_capability_id: u64 = 0;
+var active_network_policy_id: u64 = 0;
 
 pub fn init() void {
     ingress_handler = null;
+    egress_broker = null;
+    active_egress_capability_id = 0;
+    active_network_policy_id = 0;
 }
 
 pub fn setIngressHandler(handler: ?IngressHandler) void {
     ingress_handler = handler;
 }
 
+pub fn setEgressBroker(broker: ?EgressBroker) void {
+    egress_broker = broker;
+}
+
+pub fn bindEgressCapability(capability_id: u64, policy_id: u64) void {
+    active_egress_capability_id = capability_id;
+    active_network_policy_id = policy_id;
+}
+
+pub fn clearEgressCapability() void {
+    active_egress_capability_id = 0;
+    active_network_policy_id = 0;
+}
+
 pub fn setNetworkDevice(device: *const NetworkDevice) void {
     current_device = device;
-    ethernet.setTxSender(device.send);
+    ethernet.setTxSender(brokeredSend);
     ethernet.setMacProvider(device.getMacAddress);
 }
 
@@ -42,6 +76,18 @@ pub fn clearNetworkDevice() void {
 
 pub fn hasNetworkDevice() bool {
     return current_device != null;
+}
+
+pub fn authorizeDriverTx(frame: []const u8) bool {
+    const device = current_device orelse return false;
+    const broker = egress_broker orelse return false;
+    const decision = broker(.{
+        .frame = frame,
+        .source_mac = device.getMacAddress(),
+        .egress_capability_id = active_egress_capability_id,
+        .network_policy_id = active_network_policy_id,
+    });
+    return decision.allowed and decision.capability_backed;
 }
 
 pub fn enqueueRxPacket(packet: []const u8, mac: [6]u8) void {
@@ -61,4 +107,9 @@ pub fn makeRxReleaseAdapter(comptime T: type) OwnedRxReleaseFn {
             self.releaseReceived(handle);
         }
     }.release;
+}
+
+fn brokeredSend(frame: []const u8) void {
+    if (!authorizeDriverTx(frame)) return;
+    if (current_device) |device| device.send(frame);
 }

@@ -9,6 +9,7 @@ const event_ledger = @import("../../native/platform/event_ledger.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const measured_boot = @import("../../native/platform/measured_boot.zig");
+const native_ux = @import("../../native/platform/native_ux.zig");
 const network_policy = @import("../../native/sync/network_policy.zig");
 const notification_center = @import("../../native/services/notification_center.zig");
 const secure_secret_store = @import("../../native/platform/secure_secret_store.zig");
@@ -240,4 +241,57 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
     try std.testing.expect(std.mem.indexOf(u8, exported, "detail=storage driver restarted") != null);
     try std.testing.expectEqual(contract.ServiceClass.storage_object, ledger.latestKind(.process_crash).?.service_class);
     try std.testing.expectEqual(contract.ServiceClass.storage_object, ledger.latestKind(.driver_restart).?.service_class);
+
+    var checkpoint_store = storage_service.CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    defer checkpoint_store.resetPersistent();
+    const ledger_owner = spec_support.service(141);
+    const ledger_signer = spec_support.signer("spec.policy.ux.history", 0x94);
+    var history_storage = storage_service.Service.initWithStore(991, 141, ledger_owner, &checkpoint_store);
+    var durable_ledger = try event_ledger.Ledger.initPersistent(&history_storage, ledger_owner, ledger_signer);
+    try durable_ledger.recordPermissionReview(spec_support.user(12), 700, .screen_capture, false, 21, "screen capture review denied", false);
+    try durable_ledger.recordPermissionDecision(spec_support.user(12), 700, .screen_capture, false, .policy_denied, 22, "screen capture blocked", true);
+    try durable_ledger.recordCapabilityGrant(spec_support.user(12), 700, 8801, .object_access, 23, "workspace grant");
+    try durable_ledger.recordCapabilityRevocation(spec_support.user(12), 700, 8801, .object_access, 24, "workspace grant revoked");
+
+    const notification = try notifications.post(.{
+        .source = spec_support.app(12),
+        .reason = .permission_request,
+        .urgency = .high,
+        .task_id = 700,
+        .detail = "review needed",
+    });
+    try durable_ledger.recordNotification(notification.*, 25);
+
+    var ux = native_ux.Controller.init();
+    const flow = try ux.reviewPermissionDecision(
+        700,
+        spec_support.user(12),
+        "app.capture",
+        .{
+            .kind = .screen_capture,
+            .resource = "screen:main",
+            .rights = .{ .service = .{} },
+        },
+        false,
+        false,
+        null,
+    );
+    try durable_ledger.recordTaskFlow(flow.*, 26);
+
+    var restarted_storage = storage_service.Service.initWithStore(991, 142, ledger_owner, &checkpoint_store);
+    var restarted_ledger = try event_ledger.Ledger.initPersistent(&restarted_storage, ledger_owner, ledger_signer);
+    try std.testing.expect(restarted_ledger.loaded_existing_state);
+    try std.testing.expectEqual(@as(usize, 1), restarted_ledger.countMatching(.{ .kind = .permission_review, .task_id = 700 }));
+    try std.testing.expectEqual(@as(usize, 1), restarted_ledger.countMatching(.{ .kind = .permission_decision, .task_id = 700 }));
+    try std.testing.expectEqual(@as(usize, 1), restarted_ledger.countMatching(.{ .kind = .capability_grant, .task_id = 700 }));
+    try std.testing.expectEqual(@as(usize, 1), restarted_ledger.countMatching(.{ .kind = .capability_revocation, .task_id = 700 }));
+    try std.testing.expectEqual(@as(usize, 1), restarted_ledger.countMatching(.{ .kind = .notification, .task_id = 700 }));
+    try std.testing.expectEqual(@as(usize, 1), restarted_ledger.countMatching(.{ .kind = .task_flow, .task_id = 700 }));
+
+    var history_buffer: [2]event_ledger.Event = undefined;
+    const redacted = restarted_ledger.queryEvents(.{ .kind = .permission_decision, .task_id = 700 }, &history_buffer);
+    try std.testing.expectEqualStrings("redacted", redacted[0].detailSlice());
+    const protected = restarted_ledger.queryEvents(.{ .kind = .permission_decision, .task_id = 700, .include_protected_content = true }, &history_buffer);
+    try std.testing.expectEqualStrings("screen capture blocked", protected[0].detailSlice());
 }

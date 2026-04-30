@@ -57,7 +57,7 @@ test references.
 | `REQ-KERNEL-TYPE-AND-BOUNDARY` | Modeled | `src/native/session/contract.zig`, `src/native/kernel_api/native_kernel.zig`, `src/native/kernel_api/syscall_surface.zig` | Audit `src/kernel/` for service logic that should move above the typed boundary. |
 | `REQ-KERNEL-REQUIREMENTS` | Modeled | `src/native/kernel_api/syscall_surface.zig`, `src/native/kernel_api/endpoint.zig`, `src/native/kernel_api/shared_memory.zig` | Strengthen real address-space and process isolation evidence in QEMU tests. |
 | `REQ-PRIVILEGE-MODEL` | Modeled | `src/native/policy/policy_object.zig`, `src/native/platform/recovery_environment.zig`, `src/native/platform/event_ledger.zig` | Add break-glass recovery authorization and audit tests. |
-| `REQ-BOOT-CHAIN` | Scenario | `src/native/platform/measured_boot.zig`, `src/native/platform/immutable_base.zig`, `src/kernel/boot/profiles/zigos_native.zig` | Connect bootloader/kernel/base-image measurements to real build artifacts. |
+| `REQ-BOOT-CHAIN` | Enforced | `src/native/platform/measured_boot.zig`, `src/native/session/session_manager_boot_flow.zig`, `scripts/run-zigos-native-smoke.sh` | Native smoke hashes bootloader, kernel, userspace service artifacts, policy set, base image, and driver set, then compares measured roots across cold reboot. |
 | `REQ-MEASURED-STATE` | Enforced | `src/native/platform/measured_boot.zig`, `src/native/platform/attestation_service.zig` | Wire persisted measurement comparison into the QEMU cold-reboot smoke markers. |
 | `REQ-RECOVERY-MODE` | Modeled | `src/native/platform/recovery_environment.zig`, `src/tests/spec/boot_recovery.zig` | Add a dedicated recovery boot profile or recovery-mode entry path. |
 | `REQ-APP-PACKAGING` | Enforced | `src/native/policy/manifest.zig`, `src/native/services/package_service.zig`, `src/native/task/userspace_manifest_signing.zig` | Add package repository trust rotation and revoked publisher tests. |
@@ -65,26 +65,26 @@ test references.
 | `REQ-COMPONENT-MODEL` | Modeled | `src/native/task/userspace_descriptor.zig`, `src/native/task/userspace_contract_registry.zig`, `src/native/services/service_registry.zig` | Expand typed component ABI beyond descriptor/query bootstrap. |
 | `REQ-BACKGROUND-EXECUTION` | Enforced | `src/native/policy/manifest.zig`, `src/native/task/background_dispatch.zig` | Add expiration and abuse tests that cross task restart boundaries. |
 | `REQ-CAPABILITY-BASED-ACCESS-CONTROL` | Enforced | `src/native/kernel_api/capability.zig`, `src/native/kernel_api/native_kernel_access.zig` | Require new protected services to accept capability ids, not raw names. |
-| `REQ-PERMISSION-GRANTS` | Enforced | `src/native/policy/permission_review.zig`, `src/native/policy/permission_review_service.zig`, `src/native/policy/policy_mediation.zig` | Persist user-visible grant history and revocation records across reboot. |
+| `REQ-PERMISSION-GRANTS` | Enforced | `src/native/policy/permission_review.zig`, `src/native/policy/permission_review_service.zig`, `src/native/policy/policy_mediation.zig`, `src/native/platform/event_ledger.zig` | Add cross-device revocation propagation tests once sync transport leaves the deterministic queue. |
 | `REQ-DATA-EGRESS-CONTROL` | Enforced | `src/native/sync/network_policy.zig`, `src/native/sync/sync_service_impl.zig` | Route real packet transmit paths through the egress broker. |
 | `REQ-PROCESS-ISOLATION` | Modeled | `src/native/task/task_runtime_model.zig`, `src/native/platform/compositor_session.zig` | Add MMU-backed memory/window isolation checks in QEMU. |
-| `REQ-SECRETS` | Modeled | `src/native/platform/secure_secret_store.zig` | Replace simulated hardware backing with platform hooks where available. |
+| `REQ-SECRETS` | Enforced | `src/native/platform/secure_secret_store.zig` | Bind the hardware seal provider to platform-specific secure-enclave hooks on targets that expose them. |
 | `REQ-OBJECT-STORE` | Enforced | `src/native/storage/object_store.zig`, `src/native/storage/storage_volume.zig` | Increase persistence tests for dedup, integrity, and partial-write recovery. |
 | `REQ-MUTABLE-STATE` | Modeled | `src/native/storage/workspace.zig`, `src/native/storage/storage_service.zig` | Add CRDT/mergeable document semantics instead of only transactional workspace state. |
 | `REQ-FILE-BRIDGE` | Enforced | `src/native/storage/file_bridge.zig` | Add end-to-end tests from app capability to file-view export/import. |
 | `REQ-SNAPSHOTS-AND-RECOVERY` | Enforced | `src/native/storage/workspace.zig`, `src/native/platform/recovery_environment.zig` | Add signed snapshot replay/downgrade adversarial tests. |
 | `REQ-DEVICE-GRAPH` | Enforced | `src/native/sync/device_graph.zig` | Add multi-user/team trust graph conflict tests. |
-| `REQ-LOCAL-FIRST-REPLICATION` | Modeled | `src/native/sync/sync_service_impl.zig`, `src/native/sync/sync_state_store.zig` | Implement transport-backed replication rather than only service-state replication summaries. |
-| `REQ-SYNC-SEMANTICS` | Modeled | `src/native/sync/sync_state_support.zig`, `src/native/sync/sync_service_impl.zig` | Add concrete CRDT, chunk, secret-transfer, and database sync adapters. |
+| `REQ-LOCAL-FIRST-REPLICATION` | Modeled | `src/native/sync/sync_service_impl.zig`, `src/native/sync/sync_state_store.zig`, `src/native/sync/sync_adapters.zig` | Replace the deterministic in-memory transport queue with an encrypted device/relay transport harness. |
+| `REQ-SYNC-SEMANTICS` | Enforced | `src/native/sync/sync_state_support.zig`, `src/native/sync/sync_service_impl.zig`, `src/native/sync/sync_adapters.zig` | Expand the mergeable document adapter from ancestry checks to richer CRDT operations. |
 | `REQ-SHARING` | Enforced | `src/native/storage/workspace.zig`, `src/tests/spec/experience_and_policy_edges.zig` | Add sharing audit persistence and revocation propagation tests. |
 | `REQ-IDENTITY-FIRST-NETWORKING` | Modeled | `src/native/sync/network_policy.zig`, `src/native/platform/attestation_service.zig` | Bind service identity decisions to actual network connection creation. |
 | `REQ-NETWORK-PERMISSIONS` | Enforced | `src/native/sync/network_policy.zig`, `src/native/sync/sync_service_impl.zig` | Add denial tests at every network-facing service boundary. |
 | `REQ-PRIVATE-OVERLAY` | Modeled | `src/native/sync/sync_service_impl.zig` | Implement a real encrypted overlay transport or a stronger simulated transport harness. |
 | `REQ-TASK-FIRST-UX` | Scenario | `src/native/platform/native_ux.zig`, `src/native/platform/compositor_session.zig` | Add durable task restoration and user-facing audit export. |
 | `REQ-WINDOWS-AND-VIEWS` | Scenario | `src/native/platform/compositor_session.zig` | Connect view records to a real compositor surface or deterministic renderer. |
-| `REQ-PERMISSION-UX` | Scenario | `src/native/policy/permission_review.zig`, `src/native/policy/permission_review_service.zig`, `src/native/platform/compositor_session.zig` | Persist rendered review decisions and support later inspection/revocation. |
+| `REQ-PERMISSION-UX` | Enforced | `src/native/policy/permission_review.zig`, `src/native/policy/permission_review_service.zig`, `src/native/platform/compositor_session.zig`, `src/native/platform/event_ledger.zig` | Connect the persisted permission timeline to a deterministic renderer once the compositor grows beyond records. |
 | `REQ-NOTIFICATIONS` | Enforced | `src/native/services/notification_center.zig` | Add spam/suppression tests under repeated app abuse. |
-| `REQ-UNIFIED-RESOURCE-SCHEDULER` | Modeled | `src/native/task/accelerator_scheduler.zig` | Integrate actual CPU scheduling/accounting and hardware accelerator availability signals. |
+| `REQ-UNIFIED-RESOURCE-SCHEDULER` | Modeled | `src/native/task/accelerator_scheduler.zig` | Feed real CPU accounting and hardware availability signals into the existing policy controller. |
 | `REQ-SHARED-MEMORY-OBJECTS` | Enforced | `src/native/kernel_api/shared_memory.zig`, `src/native/task/accelerator_scheduler.zig` | Add revocation tests while accelerator claims are active. |
 | `REQ-THERMAL-AND-POWER-POLICY` | Modeled | `src/native/task/accelerator_scheduler.zig`, `src/native/task/task_runtime_model.zig` | Add thermal/battery policy inputs and degradation decisions. |
 | `REQ-USERSPACE-DRIVERS` | Modeled | `src/native/drivers/driver_service.zig`, `src/native/drivers/driver_runtime.zig` | Move more real driver execution behind restartable userspace processes. |
@@ -98,7 +98,7 @@ test references.
 | `REQ-PRIVACY-PRESERVING-DIAGNOSTICS` | Modeled | `src/native/platform/event_ledger.zig` | Add opt-in remote sharing tests and protected-content scrub assertions. |
 | `REQ-POLICY-OBJECTS` | Enforced | `src/native/policy/policy_object.zig` | Wire composite policy decisions into more service enforcement paths. |
 | `REQ-POLICY-EXAMPLES` | Enforced | `src/native/policy/policy_object.zig`, `src/tests/spec/ux_and_lifecycle.zig` | Add removable-storage and screen-capture denial flows at service boundaries. |
-| `REQ-ENTERPRISE-SUPPORT` | Modeled | `src/native/policy/policy_object.zig` | Add mixed personal/organization policy composition tests. |
+| `REQ-ENTERPRISE-SUPPORT` | Enforced | `src/native/policy/policy_object.zig` | Add persistence/import tests for organization policy updates and stale-generation rejection. |
 | `REQ-NATIVE-PLATFORM` | Modeled | `ARCHITECTURE.md`, `src/native/services/compatibility_environment.zig` | Keep POSIX-like affordances isolated to explicit compatibility environments. |
 | `REQ-LEGACY-SUPPORT` | Enforced | `src/native/services/compatibility_environment.zig` | Add portal-specific capability mediation tests for VM/container/emulation modes. |
 | `REQ-EXAMPLE-APPLICATION-MANIFEST` | Enforced | `src/native/policy/manifest.zig`, `src/native/demo/bootstrap_packages.zig` | Add parser/import tests if external manifest files become supported. |
@@ -107,24 +107,22 @@ test references.
 
 ## Priority Backlog
 
-1. **Real boot trust chain**: connect immutable-base and measured-boot state to
-   actual kernel/base-image artifacts, then surface measurement comparisons in
-   the QEMU cold-reboot smoke log.
-2. **Freestanding isolation proof**: add QEMU tests that prove process address
-   spaces, task scopes, and syscall subject validation hold outside host tests.
-3. **Network egress broker**: wire real packet transmission through the broker
-   so driver-backed network sends cannot bypass `network_policy` or named service
-   identity checks.
+1. **Hardware-backed boot trust**: replace smoke-time artifact hashing with a
+   target-backed root-of-trust integration where hardware support exists.
+2. **MMU fault isolation proof**: add QEMU tests that intentionally fault cross
+   address-space memory access and assert the kernel reports the denial.
+3. **Network transport hardening**: replace deterministic egress/replication
+   queues with encrypted device-to-device and relay transport harnesses.
 4. **Component ABI depth**: expand typed component interfaces past descriptor
    bootstrap into versioned request/response contracts for core services.
-5. **Sync semantics**: add concrete merge/chunk/secret/database replication
-   adapters instead of only policy and state summaries.
+5. **Sync adapter depth**: expand mergeable document handling from ancestry
+   checks into richer CRDT operations and merge proofs.
 6. **Driver boundary audit**: explicitly classify remaining kernel-side device
    code as bootstrap support or move it behind userspace driver contracts.
-7. **Policy conflict handling**: use composite policy decisions at install,
-   sync, removable-storage, screen-capture, and recovery service boundaries.
-8. **UX persistence**: persist permission reviews, task flows, notifications,
-   and revocations so the user can inspect them after restart.
+7. **Policy persistence**: add import/update tests for organization policy
+   generations and stale policy rejection.
+8. **UX rendering**: connect durable permission timelines to a deterministic
+   compositor renderer rather than only structured records.
 
 ## Maintenance Rules
 

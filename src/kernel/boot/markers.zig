@@ -34,6 +34,11 @@ pub const transport_component_abi_ready = "ZIGOS:TRANSPORT:COMPONENT_ABI:READY";
 pub const transport_task_create_ok = "ZIGOS:TRANSPORT:TASK_CREATE:OK";
 pub const transport_service_connect_ok = "ZIGOS:TRANSPORT:SERVICE_CONNECT:OK";
 pub const transport_cap_pass_ok = "ZIGOS:TRANSPORT:CAP_PASS:OK";
+pub const runtime_proof_process_isolation = "ZIGOS:RUNTIME_PROOF:PROCESS_ISOLATION:PASS";
+pub const runtime_proof_syscall_subject_spoof = "ZIGOS:RUNTIME_PROOF:SYSCALL_SUBJECT_SPOOF:PASS";
+pub const runtime_proof_raw_network_bypass = "ZIGOS:RUNTIME_PROOF:RAW_NETWORK_BYPASS:PASS";
+pub const runtime_proof_driver_authority_escape = "ZIGOS:RUNTIME_PROOF:DRIVER_AUTHORITY_ESCAPE:PASS";
+pub const runtime_proof_reboot_grant_revocation = "ZIGOS:RUNTIME_PROOF:REBOOT_GRANT_REVOCATION:PASS";
 
 pub const permission_manifest_valid = "ZIGOS:PERMISSION:MANIFEST:VALID";
 pub const permission_zero_authority_deny_network = "ZIGOS:PERMISSION:ZERO_AUTHORITY:DENY_NETWORK";
@@ -69,6 +74,9 @@ pub const sync_device_graph_rooted = "ZIGOS:SYNC:DEVICE_GRAPH:ROOTED";
 pub const platform_immutable_base_active = "ZIGOS:PLATFORM:IMMUTABLE_BASE:ACTIVE";
 pub const platform_activation_rollback_ok = "ZIGOS:PLATFORM:ACTIVATION:ROLLBACK_OK";
 pub const platform_measured_boot_recorded = "ZIGOS:PLATFORM:MEASURED_BOOT:RECORDED";
+pub const platform_measured_boot_first = "ZIGOS:PLATFORM:MEASURED_BOOT:COMPARE:FIRST_BOOT";
+pub const platform_measured_boot_same_root = "ZIGOS:PLATFORM:MEASURED_BOOT:COMPARE:SAME_ROOT";
+pub const platform_measured_boot_same_shape = "ZIGOS:PLATFORM:MEASURED_BOOT:COMPARE:SAME_SHAPE";
 pub const platform_recovery_verify_reinstall = "ZIGOS:PLATFORM:RECOVERY:VERIFY_REINSTALL";
 pub const platform_ux_recover_system = "ZIGOS:PLATFORM:UX:RECOVER_SYSTEM";
 

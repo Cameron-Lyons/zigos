@@ -7,6 +7,7 @@ const network_policy = @import("network_policy.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
+const sync_adapters = @import("sync_adapters.zig");
 const state_store = @import("sync_state_store.zig");
 const state_support = @import("sync_state_support.zig");
 const storage_service = @import("../storage/storage_service.zig");
@@ -87,6 +88,12 @@ pub const ReplicaEntry = state_support.ReplicaEntry;
 pub const ConflictRecord = state_support.ConflictRecord;
 pub const DatabaseContract = state_support.DatabaseContract;
 pub const ReplicationSummary = state_support.ReplicationSummary;
+pub const MergeableDocumentAdapter = sync_adapters.MergeableDocumentAdapter;
+pub const ChunkMediaAdapter = sync_adapters.ChunkMediaAdapter;
+pub const SecretTransferAdapter = sync_adapters.SecretTransferAdapter;
+pub const DatabaseSyncAdapter = sync_adapters.DatabaseSyncAdapter;
+pub const TransportFrame = sync_adapters.TransportFrame;
+pub const TransportQueue = sync_adapters.TransportQueue;
 pub const Error = state_support.Error;
 
 const WorkspacePolicySlot = state_support.WorkspacePolicySlot;
@@ -136,6 +143,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         owned_resident_state: ResidentState = .{},
         next_overlay_session_id: u64 = 1,
         overlay_sessions: [MAX_SERVICE_OVERLAY_SESSIONS]OverlaySessionSlot = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_SERVICE_OVERLAY_SESSIONS,
+        mergeable_document_adapter: MergeableDocumentAdapter = sync_adapters.default_mergeable_document_adapter,
+        chunk_media_adapter: ChunkMediaAdapter = sync_adapters.default_chunk_media_adapter,
+        secret_transfer_adapter: SecretTransferAdapter = sync_adapters.default_secret_transfer_adapter,
+        database_sync_adapter: DatabaseSyncAdapter = sync_adapters.default_database_sync_adapter,
+        transport_queue: TransportQueue = TransportQueue.init(),
 
         pub fn init(service_id: u64, task_id: u64, owner: principal.PrincipalId) Self {
             var service = Self{
@@ -146,6 +158,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .state_workspace_id = 0,
                 .next_overlay_session_id = 1,
                 .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_SERVICE_OVERLAY_SESSIONS,
+                .mergeable_document_adapter = sync_adapters.default_mergeable_document_adapter,
+                .chunk_media_adapter = sync_adapters.default_chunk_media_adapter,
+                .secret_transfer_adapter = sync_adapters.default_secret_transfer_adapter,
+                .database_sync_adapter = sync_adapters.default_database_sync_adapter,
+                .transport_queue = TransportQueue.init(),
             };
             service.owned_resident_state.resetForServiceInit();
             return service;
@@ -171,6 +188,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .resident_store = resident_state,
                 .next_overlay_session_id = 1,
                 .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_SERVICE_OVERLAY_SESSIONS,
+                .mergeable_document_adapter = sync_adapters.default_mergeable_document_adapter,
+                .chunk_media_adapter = sync_adapters.default_chunk_media_adapter,
+                .secret_transfer_adapter = sync_adapters.default_secret_transfer_adapter,
+                .database_sync_adapter = sync_adapters.default_database_sync_adapter,
+                .transport_queue = TransportQueue.init(),
             };
         }
 
@@ -201,7 +223,42 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .resident_store = resident_state,
                 .next_overlay_session_id = 1,
                 .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_SERVICE_OVERLAY_SESSIONS,
+                .mergeable_document_adapter = sync_adapters.default_mergeable_document_adapter,
+                .chunk_media_adapter = sync_adapters.default_chunk_media_adapter,
+                .secret_transfer_adapter = sync_adapters.default_secret_transfer_adapter,
+                .database_sync_adapter = sync_adapters.default_database_sync_adapter,
+                .transport_queue = TransportQueue.init(),
             };
+        }
+
+        pub fn bindSyncAdapters(
+            self: *Self,
+            mergeable_document_adapter: MergeableDocumentAdapter,
+            chunk_media_adapter: ChunkMediaAdapter,
+            secret_transfer_adapter: SecretTransferAdapter,
+            database_sync_adapter: DatabaseSyncAdapter,
+        ) void {
+            self.mergeable_document_adapter = mergeable_document_adapter;
+            self.chunk_media_adapter = chunk_media_adapter;
+            self.secret_transfer_adapter = secret_transfer_adapter;
+            self.database_sync_adapter = database_sync_adapter;
+        }
+
+        pub fn transportFrameCount(self: *const Self) usize {
+            return self.transport_queue.count();
+        }
+
+        pub fn transportFrameCountFor(self: *const Self, workspace_id: u64, device_id: principal.PrincipalId) usize {
+            return self.transport_queue.countFor(workspace_id, device_id);
+        }
+
+        pub fn latestTransportFrameForPath(
+            self: *const Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            path: []const u8,
+        ) ?TransportFrame {
+            return self.transport_queue.latestForPath(workspace_id, device_id, path);
         }
 
         pub fn ensureUserRoot(
@@ -548,23 +605,60 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
                 const semantic = classifyEntry(entry);
                 const remote_version_id = self.replicaVersion(workspace_id, to_device, entry.pathSlice()) orelse 0;
-                if (remote_version_id != 0 and remote_version_id != entry.version_id) {
-                    try self.recordConflict(
-                        workspace_id,
-                        to_device,
-                        entry.object_id,
-                        entry.pathSlice(),
-                        entry.version_id,
-                        remote_version_id,
-                        semantic,
-                    );
-                }
 
                 switch (semantic) {
-                    .mergeable_crdt => summary.merged_count += 1,
-                    .chunked_snapshot => summary.snapshot_count += 1,
-                    else => {},
+                    .mergeable_crdt => {
+                        const result = try self.mergeable_document_adapter.merge(.{
+                            .store = store,
+                            .entry = entry,
+                            .remote_version_id = remote_version_id,
+                        });
+                        if (result.merged) summary.merged_count += 1;
+                        if (result.conflict) {
+                            try self.recordConflict(
+                                workspace_id,
+                                to_device,
+                                entry.object_id,
+                                entry.pathSlice(),
+                                entry.version_id,
+                                remote_version_id,
+                                semantic,
+                            );
+                        }
+                    },
+                    .chunked_snapshot => {
+                        const result = try self.chunk_media_adapter.replicate(.{
+                            .store = store,
+                            .entry = entry,
+                        });
+                        if (result.snapshot_replicated) summary.snapshot_count += result.replicated_chunks;
+                    },
+                    .secure_transfer => {
+                        const result = try self.secret_transfer_adapter.transfer(.{
+                            .store = store,
+                            .workspace_id = workspace_id,
+                            .object_id = entry.object_id,
+                            .from_device = from_device,
+                            .to_device = to_device,
+                            .personal_e2ee = policy.personal_e2ee,
+                        });
+                        if (result.transferred) summary.secret_transfer_count += 1;
+                    },
+                    .transactional_contract => summary.transactional_count += 1,
                 }
+                const frame = try self.transport_queue.enqueue(.{
+                    .workspace_id = workspace_id,
+                    .object_id = entry.object_id,
+                    .version_id = entry.version_id,
+                    .source_device = from_device,
+                    .target_device = to_device,
+                    .transport = transport,
+                    .semantic = semantic,
+                    .encrypted = policy.personal_e2ee,
+                    .path = entry.pathSlice(),
+                });
+                summary.transport_frame_count += 1;
+                if (frame.encrypted) summary.encrypted_transport_count += 1;
                 try self.setReplicaVersion(workspace_id, to_device, entry.pathSlice(), entry.object_id, entry.version_id);
             }
             summary.conflict_count = self.countConflictsFor(workspace_id, to_device);
@@ -588,9 +682,15 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             if (!policy.personal_e2ee) return error.TransportDenied;
             try self.authorizeTransport(policy, transport, null);
 
-            const object_record = storage.object(object_id) orelse return error.ObjectNotFound;
-            if (object_record.object_type != .secret) return error.TypeMismatch;
-            return true;
+            const result = try self.secret_transfer_adapter.transfer(.{
+                .store = storage,
+                .workspace_id = workspace_id,
+                .object_id = object_id,
+                .from_device = from_device,
+                .to_device = to_device,
+                .personal_e2ee = policy.personal_e2ee,
+            });
+            return result.transferred;
         }
 
         pub fn replicateDatabaseContract(
@@ -606,15 +706,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             try self.authorizeTransport(policy, transport, null);
 
             const record = self.findDatabaseContract(contract_id) orelse return error.DatabaseContractNotFound;
-            var message_buffer: [160]u8 = undefined;
-            const message = databaseContractMessage(
-                &message_buffer,
-                record.workspace_id,
-                record.bundleIdSlice(),
-                record.labelSlice(),
-            ) catch return error.InvalidContractSignature;
-            if (!signing.verify(record.signature, message)) return error.InvalidContractSignature;
-            return true;
+            const result = try self.database_sync_adapter.replicate(.{
+                .contract = record,
+                .workspace_id = workspace_id,
+                .from_device = from_device,
+                .to_device = to_device,
+            });
+            return result.replicated;
         }
 
         pub fn repairWorkspaceMetadata(
@@ -1095,6 +1193,12 @@ test "sync service covers device graph policy replication semantics and restart 
     try std.testing.expectEqual(@as(usize, 1), summary.skipped_entry_count);
     try std.testing.expectEqual(@as(usize, 1), summary.merged_count);
     try std.testing.expectEqual(@as(usize, 1), summary.snapshot_count);
+    try std.testing.expectEqual(@as(usize, 2), summary.transport_frame_count);
+    try std.testing.expectEqual(@as(usize, 2), summary.encrypted_transport_count);
+    try std.testing.expectEqual(@as(usize, 2), service.transportFrameCountFor(notes.id, tablet));
+    const notes_frame = service.latestTransportFrameForPath(notes.id, tablet, "documents/notes.md").?;
+    try std.testing.expect(notes_frame.encrypted);
+    try std.testing.expectEqual(SyncSemantic.mergeable_crdt, notes_frame.semantic);
     try std.testing.expectEqual(@as(usize, 1), summary.conflict_count);
     try std.testing.expect(service.findConflict(notes.id, tablet, "documents/notes.md") != null);
 
