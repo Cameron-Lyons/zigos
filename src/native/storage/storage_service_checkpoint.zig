@@ -9,6 +9,7 @@ pub const CheckpointStore = struct {
     dirty: bool = false,
     last_checkpoint_generation: u64 = 0,
     last_checkpoint_error: ?storage_volume.Error = null,
+    volume: storage_volume.Volume = storage_volume.Volume.init(),
 
     pub fn hasCachedPersistentState(self: *const CheckpointStore) bool {
         return self.has_persisted_state;
@@ -28,8 +29,11 @@ pub const CheckpointStore = struct {
     }
 
     pub fn loadPreparedStateFromAttachedVolume(self: *CheckpointStore) bool {
-        if (!storage_volume.hasAttachedDevice()) return false;
-        if (storage_volume.loadFromVolume(&self.store, &self.workspaces)) {
+        if (!self.volume.hasAttachedDevice() and storage_volume.hasAttachedDevice()) {
+            self.volume.adoptAttachedBackendFrom(storage_volume.defaultVolume());
+        }
+        if (!self.volume.hasAttachedDevice()) return false;
+        if (self.volume.loadFromVolume(&self.store, &self.workspaces)) {
             self.has_persisted_state = true;
             self.dirty = false;
             return true;
@@ -39,8 +43,8 @@ pub const CheckpointStore = struct {
 
     pub fn resetPersistent(self: *CheckpointStore) void {
         self.resetPreparedState();
-        storage_volume.clearAttachedVolume();
-        storage_volume.clearAttachedBackend();
+        self.volume.clearAttachedVolume();
+        self.volume.clearAttachedBackend();
     }
 
     pub fn preparePersistentState(self: *CheckpointStore) bool {
@@ -84,8 +88,11 @@ pub fn noteMutation(service: anytype, durable_boundary: bool) void {
 pub fn flushCheckpoint(service: anytype) void {
     service.checkpoint_store.has_persisted_state = true;
     if (!service.checkpoint_store.dirty) return;
-    if (!storage_volume.hasAttachedDevice()) return;
-    const result = storage_volume.saveToVolume(service.store, service.workspaces) catch |err| {
+    if (!service.checkpoint_store.volume.hasAttachedDevice() and storage_volume.hasAttachedDevice()) {
+        service.checkpoint_store.volume.adoptAttachedBackendFrom(storage_volume.defaultVolume());
+    }
+    if (!service.checkpoint_store.volume.hasAttachedDevice()) return;
+    const result = service.checkpoint_store.volume.saveToVolume(service.store, service.workspaces) catch |err| {
         service.checkpoint_store.last_checkpoint_error = err;
         return;
     };

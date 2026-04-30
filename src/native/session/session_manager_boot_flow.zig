@@ -10,15 +10,18 @@ const endpoint_mod = @import("../kernel_api/endpoint.zig");
 const manifest = @import("../policy/manifest.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
+const measured_boot = @import("../platform/measured_boot.zig");
 const native_kernel = @import("../kernel_api/native_kernel.zig");
 const native_service_registry = @import("../services/service_registry.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const principal = @import("../core/principal.zig");
 const package_service = @import("../services/package_service.zig");
+const runtime_negative_proofs = @import("runtime_negative_proofs.zig");
 const session_bootstrap = @import("session_bootstrap.zig");
 const service_catalog = @import("service_catalog.zig");
 const session_service_bootstrap = @import("session_service_bootstrap.zig");
 const session_support = @import("session_manager_support.zig");
+const signing = @import("../core/signing.zig");
 const shared_memory_mod = @import("../kernel_api/shared_memory.zig");
 const storage_service_mod = @import("../storage/storage_service.zig");
 const supervisor_mod = @import("supervisor.zig");
@@ -55,6 +58,7 @@ const console = if (builtin.target.os.tag == .freestanding)
 else
     struct {
         pub fn print(_: []const u8) void {}
+        pub fn printChar(_: u8) void {}
     };
 
 pub const SessionManager = struct {
@@ -215,7 +219,12 @@ pub const SessionManager = struct {
     }
 
     pub fn boot(self: *SessionManager) void {
-        _ = self.buildProductionServiceGraph() orelse return;
+        const graph = self.buildProductionServiceGraph() orelse return;
+        recordProductionMeasuredBoot(self, &graph);
+        if (!runtime_negative_proofs.runAndPrint()) {
+            self.failBoot();
+            return;
+        }
         common.printBootMarker(boot_markers.task_session_ready);
         common.printBootMarker(boot_markers.native_ready);
         printReadyBanner();
@@ -253,7 +262,7 @@ pub const SessionManager = struct {
     }
 
     pub fn bindProductionStorageService(self: *SessionManager, graph: *const ServiceGraph) void {
-        self.storage_service_instance = storage_service_mod.Service.initWithStore(
+        self.storage_service_instance = storage_service_mod.Service.reloadFromAttachedVolume(
             graph.state.services.storage_service.id,
             graph.service_bindings.bindingFor(.storage_object).task_id,
             graph.state.ids.storage_service,
@@ -509,6 +518,98 @@ pub fn printReadyBanner() void {
     printNumber(abi.ABI_VERSION);
     console.print("\n");
     console.print("Native-only platform ready\n");
+}
+
+fn recordProductionMeasuredBoot(manager: *SessionManager, graph: *const ServiceGraph) void {
+    var measured = measured_boot.Recorder.init();
+    measured.begin(1);
+    measured.add(.kernel, "bootloader+kernel-zigos-native", "src/boot/boot64.S:zig-out/bin/kernel-zigos-native.elf") catch unreachable;
+    measured.add(.base_image, "production-native-base", "native-store:production-service-graph") catch unreachable;
+    measured.add(.policy, "production-policy-set", "zero-root:capability-ipc:local-first") catch unreachable;
+
+    const critical_services = [_]*supervisor_mod.ServiceRecord{
+        graph.state.services.policy_service,
+        graph.state.services.storage_service,
+        graph.state.services.compositor_service,
+        graph.state.services.network_service,
+    };
+    for (critical_services) |service_record| {
+        const image = criticalServiceImage(manager, service_record) orelse unreachable;
+        measured.addCriticalServiceImage(service_record, image) catch unreachable;
+    }
+    measured.addDriverSet("production-driver-set", &manager.driver_directory) catch unreachable;
+
+    const boot = measured.finalize();
+    printMeasurementSummary(&boot);
+    supportMeasuredBootShape(&boot);
+    recordMeasurementComparison(manager, &boot);
+}
+
+fn criticalServiceImage(
+    manager: *SessionManager,
+    service_record: *const supervisor_mod.ServiceRecord,
+) ?*const userspace_loader.ImageRecord {
+    const bundle_id = service_catalog.bundleIdForServiceClass(service_record.class) orelse return null;
+    return manager.userspace_catalog.findByBundleId(bundle_id);
+}
+
+fn supportMeasuredBootShape(boot: *const measured_boot.BootRecord) void {
+    if (boot.countKind(.kernel) == 1 and
+        boot.countKind(.base_image) == 1 and
+        boot.countKind(.critical_service) == 4 and
+        boot.countKind(.policy) == 1 and
+        boot.countKind(.driver_set) == 1 and
+        !std.mem.allEqual(u8, &boot.root_digest, 0))
+    {
+        common.printBootMarker(boot_markers.platform_measured_boot_recorded);
+    }
+}
+
+fn recordMeasurementComparison(manager: *SessionManager, boot: *const measured_boot.BootRecord) void {
+    const measurement_signer = signing.SignerIdentity{
+        .label = "zigos-measured-boot-state",
+        .seed = [_]u8{0xA6} ** 32,
+    };
+    var journal = measured_boot.MeasurementJournal.init(
+        &manager.storage_service_instance,
+        session_bootstrap.principals().package_service,
+        measurement_signer,
+    ) catch unreachable;
+    const comparison = journal.record(boot.*, 130) catch unreachable;
+    manager.storage_service_instance.checkpoint();
+    if (comparison.previous == null) {
+        common.printBootMarker(boot_markers.platform_measured_boot_first);
+        return;
+    }
+    if (comparison.same_root_digest) {
+        common.printBootMarker(boot_markers.platform_measured_boot_same_root);
+    }
+    if (comparison.same_record_shape) {
+        common.printBootMarker(boot_markers.platform_measured_boot_same_shape);
+    }
+}
+
+fn printMeasurementSummary(boot: *const measured_boot.BootRecord) void {
+    console.print("ZIGOS:PLATFORM:MEASURED_BOOT:ROOT ");
+    printHexDigest(&boot.root_digest);
+    console.print("\n");
+    for (boot.records[0..boot.record_count]) |record| {
+        console.print("ZIGOS:PLATFORM:MEASURED_BOOT:RECORD ");
+        console.print(@tagName(record.kind));
+        console.print(" ");
+        console.print(record.labelSlice());
+        console.print(" ");
+        printHexDigest(&record.digest);
+        console.print("\n");
+    }
+}
+
+fn printHexDigest(digest: *const [32]u8) void {
+    const hex = "0123456789abcdef";
+    for (digest.*) |byte| {
+        console.printChar(hex[byte >> 4]);
+        console.printChar(hex[byte & 0x0f]);
+    }
 }
 
 fn printNumber(value: u64) void {

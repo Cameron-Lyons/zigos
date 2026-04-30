@@ -196,6 +196,16 @@ pub const PolicyMediator = struct {
             .tick = now_ticks,
         });
         try self.recordDecision(decision.owner, decision.task_id, decision.request, true, .none, now_ticks);
+        if (self.ledger) |ledger| {
+            try ledger.recordCapabilityGrant(
+                decision.owner,
+                decision.task_id,
+                capability_id,
+                decision.request.kind,
+                now_ticks,
+                decision.request.resource,
+            );
+        }
 
         return .{
             .kind = decision.request.kind,
@@ -225,6 +235,36 @@ pub const PolicyMediator = struct {
             .reason = decision.reason,
             .explanation = denial_explanation.forPermissionDecision(decision.request.kind, decision.reason),
         };
+    }
+
+    pub fn revokeGrantedCapability(
+        self: *PolicyMediator,
+        task_id: u64,
+        capability_id: u64,
+        permission_kind: ?manifest.PermissionKind,
+        now_ticks: u64,
+        detail: []const u8,
+    ) Error!bool {
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        const detached = try self.runtime.revokeCapability(task_id, capability_id);
+        if (!detached) return false;
+        try self.capability_table.revokeGrant(capability_id);
+        try self.runtime.audit(task_id, .{
+            .kind = .capability_revoked,
+            .capability_id = capability_id,
+            .tick = now_ticks,
+        });
+        if (self.ledger) |ledger| {
+            try ledger.recordCapabilityRevocation(
+                task.owner,
+                task_id,
+                capability_id,
+                permission_kind,
+                now_ticks,
+                detail,
+            );
+        }
+        return true;
     }
 
     pub fn grantPlanForRequest(
@@ -541,6 +581,12 @@ test "policy mediation grants local-only object and network capabilities" {
     try std.testing.expectEqual(resourceId("lan.sync"), network_capability.target.id);
     try std.testing.expect(ledger.latestKind(.permission_decision).?.allowed);
     try std.testing.expectEqual(abi.DenialReason.none, ledger.latestKind(.permission_decision).?.denial_reason);
+
+    const revoked_capability_id = summary.decisionForKind(.network_egress).?.capability_id.?;
+    try std.testing.expect(try mediator.revokeGrantedCapability(task.id, revoked_capability_id, .network_egress, 20, "network grant revoked"));
+    try std.testing.expect(!runtime.hasCapability(task.id, revoked_capability_id));
+    try std.testing.expect(capability_table.query(revoked_capability_id) == null);
+    try std.testing.expectEqual(event_ledger.EventKind.capability_revocation, ledger.latestKind(.capability_revocation).?.kind);
 }
 
 test "policy mediation rolls back minted capability when task attachment fails" {

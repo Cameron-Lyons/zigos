@@ -13,6 +13,7 @@ pub const SecretRecord = struct {
     id: u64,
     owner: principal.PrincipalId,
     hardware_backed: bool,
+    hardware_provider_used: bool,
     exportable: bool,
     resident_material: bool,
     label_len: usize,
@@ -34,6 +35,16 @@ pub const SecretHandle = struct {
     task_id: u64,
     hardware_backed: bool,
     export_allowed: bool,
+};
+
+pub const HardwareSealProvider = struct {
+    available: bool = false,
+    sealFn: *const fn (label: []const u8, raw: []const u8) [32]u8 = defaultSeal,
+
+    pub fn seal(self: HardwareSealProvider, label: []const u8, raw: []const u8) ?[32]u8 {
+        if (!self.available) return null;
+        return self.sealFn(label, raw);
+    }
 };
 
 pub const Error = error{
@@ -65,11 +76,16 @@ const HandleSlot = struct {
 pub const Store = struct {
     next_secret_id: u64 = 1,
     next_handle_id: u64 = 1,
+    hardware_provider: HardwareSealProvider = .{},
     secrets: [MAX_SECRETS]SecretSlot = [_]SecretSlot{SecretSlot{}} ** MAX_SECRETS,
     handles: [MAX_HANDLES]HandleSlot = [_]HandleSlot{HandleSlot{}} ** MAX_HANDLES,
 
     pub fn init() Store {
         return .{};
+    }
+
+    pub fn attachHardwareProvider(self: *Store, provider: HardwareSealProvider) void {
+        self.hardware_provider = provider;
     }
 
     pub fn importSecret(
@@ -95,7 +111,12 @@ pub const Store = struct {
             if (hardware_backed and !exportable) {
                 slot.secret.resident_material = false;
                 slot.secret.sealed_digest_present = true;
-                slot.secret.sealed_digest = digestSecretMaterial(raw);
+                if (self.hardware_provider.seal(label, raw)) |sealed_digest| {
+                    slot.secret.hardware_provider_used = true;
+                    slot.secret.sealed_digest = sealed_digest;
+                } else {
+                    slot.secret.sealed_digest = digestSecretMaterial(raw);
+                }
                 slot.secret.value_len = 0;
                 @memset(&slot.secret.value, 0);
             } else {
@@ -165,6 +186,7 @@ fn zeroSecret() SecretRecord {
         .id = 0,
         .owner = .{ .kind = .service, .serial = 0 },
         .hardware_backed = false,
+        .hardware_provider_used = false,
         .exportable = false,
         .resident_material = false,
         .label_len = 0,
@@ -182,6 +204,13 @@ fn digestSecretMaterial(raw: []const u8) [32]u8 {
     return crypto_hash.finalize(&hasher);
 }
 
+fn defaultSeal(label: []const u8, raw: []const u8) [32]u8 {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "hardware-seal-label", label);
+    crypto_hash.updateBytes(&hasher, "hardware-seal-material", raw);
+    return crypto_hash.finalize(&hasher);
+}
+
 test "secure secret store returns handles by default and only exports raw when allowed" {
     var store = Store.init();
     const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
@@ -193,12 +222,39 @@ test "secure secret store returns handles by default and only exports raw when a
     try std.testing.expect(!handle.export_allowed);
     try std.testing.expect(!api_key.resident_material);
     try std.testing.expect(api_key.sealed_digest_present);
+    try std.testing.expect(!api_key.hardware_provider_used);
     try std.testing.expectEqual(@as(usize, 0), api_key.value_len);
     try std.testing.expectError(error.RawExportDenied, store.exportRaw(handle.id));
 
     const exportable = try store.importSecret(owner, "backup-code", "abcd-efgh", false, true);
     const export_handle = try store.lendHandle(exportable.id, app_holder, 91, true);
     try std.testing.expectEqualStrings("abcd-efgh", try store.exportRaw(export_handle.id));
+}
+
+test "secure secret store uses hardware seal provider when available" {
+    const Provider = struct {
+        fn seal(label: []const u8, raw: []const u8) [32]u8 {
+            var hasher = crypto_hash.init();
+            crypto_hash.updateBytes(&hasher, "test-hardware", label);
+            crypto_hash.updateBytes(&hasher, "sealed", raw);
+            return crypto_hash.finalize(&hasher);
+        }
+    };
+
+    var store = Store.init();
+    store.attachHardwareProvider(.{
+        .available = true,
+        .sealFn = Provider.seal,
+    });
+
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 3 };
+    const sealed = try store.importSecret(owner, "device-key", "private-material", true, false);
+    try std.testing.expect(sealed.hardware_backed);
+    try std.testing.expect(sealed.hardware_provider_used);
+    try std.testing.expect(sealed.sealed_digest_present);
+    const expected = Provider.seal("device-key", "private-material");
+    try std.testing.expectEqualSlices(u8, expected[0..], sealed.sealed_digest[0..]);
+    try std.testing.expectEqual(@as(usize, 0), sealed.value_len);
 }
 
 test "secure secret store reports missing handles and oversized secrets" {

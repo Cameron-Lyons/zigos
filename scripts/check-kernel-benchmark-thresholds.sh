@@ -39,4 +39,13 @@ while read -r name max_cycles_per_op; do
     fi
 done < "${threshold_file}"
 
+while IFS= read -r line; do
+    name="${line#BENCH:RESULT:}"
+    name="${name%%:*}"
+    if ! awk -v benchmark_name="${name}" '$1 == benchmark_name { found = 1 } END { exit found ? 0 : 1 }' "${threshold_file}"; then
+        echo "Kernel benchmark threshold failed: untracked result for ${name}" >&2
+        exit 1
+    fi
+done < <(grep -F 'BENCH:RESULT:' "${log_path}" || true)
+
 echo "Kernel benchmark thresholds passed."
