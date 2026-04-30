@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const contract = @import("../session/contract.zig");
 const immutable_base = @import("../platform/immutable_base.zig");
@@ -15,6 +16,13 @@ const update_health = @import("../platform/update_health.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const workspace_mod = @import("../storage/workspace.zig");
 const support = @import("scenario_support.zig");
+const console = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/utils/console.zig")
+else
+    struct {
+        pub fn print(_: []const u8) void {}
+        pub fn printChar(_: u8) void {}
+    };
 
 pub fn run(
     context: *support.Context,
@@ -262,6 +270,7 @@ pub fn run(
     }
     measured.addDriverSet("core-driver-set", context.driver_directory) catch unreachable;
     const measured_boot_record = measured.finalize();
+    printMeasurementSummary(&measured_boot_record);
     if (measured_boot_record.countKind(.kernel) == 1 and
         measured_boot_record.countKind(.base_image) == 1 and
         measured_boot_record.countKind(.critical_service) == 4 and
@@ -271,6 +280,7 @@ pub fn run(
     {
         support.common.printBootMarker(boot_markers.platform_measured_boot_recorded);
     }
+    recordMeasuredBootComparison(context, &measured_boot_record);
 
     if (sync_service.findDeviceRecord(recovery_device_principal) == null) {
         _ = sync_service.enrollTrustedDevice(
@@ -619,5 +629,55 @@ fn emitRollbackMarker(
 ) void {
     if (result.activation.rolled_back and result.activation.failure == failure) {
         support.common.printBootMarker(marker);
+    }
+}
+
+fn recordMeasuredBootComparison(
+    context: *support.Context,
+    boot: *const measured_boot.BootRecord,
+) void {
+    const measurement_owner = context.package_service_principal;
+    const measurement_signer = signing.SignerIdentity{
+        .label = "zigos-measured-boot-state",
+        .seed = [_]u8{0xA6} ** 32,
+    };
+    var journal = measured_boot.MeasurementJournal.init(
+        context.storage_service_instance,
+        measurement_owner,
+        measurement_signer,
+    ) catch unreachable;
+    const comparison = journal.record(boot.*, 130) catch unreachable;
+    if (comparison.previous == null) {
+        support.common.printBootMarker(boot_markers.platform_measured_boot_first);
+        return;
+    }
+    if (comparison.same_root_digest) {
+        support.common.printBootMarker(boot_markers.platform_measured_boot_same_root);
+    }
+    if (comparison.same_record_shape) {
+        support.common.printBootMarker(boot_markers.platform_measured_boot_same_shape);
+    }
+}
+
+fn printMeasurementSummary(boot: *const measured_boot.BootRecord) void {
+    console.print("ZIGOS:PLATFORM:MEASURED_BOOT:ROOT ");
+    printHexDigest(&boot.root_digest);
+    console.print("\n");
+    for (boot.records[0..boot.record_count]) |record| {
+        console.print("ZIGOS:PLATFORM:MEASURED_BOOT:RECORD ");
+        console.print(@tagName(record.kind));
+        console.print(" ");
+        console.print(record.labelSlice());
+        console.print(" ");
+        printHexDigest(&record.digest);
+        console.print("\n");
+    }
+}
+
+fn printHexDigest(digest: *const [32]u8) void {
+    const hex = "0123456789abcdef";
+    for (digest.*) |byte| {
+        console.printChar(hex[byte >> 4]);
+        console.printChar(hex[byte & 0x0f]);
     }
 }

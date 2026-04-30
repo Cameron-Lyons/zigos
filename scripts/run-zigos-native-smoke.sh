@@ -125,6 +125,44 @@ assert_boot_markers() {
   assert_marker_group "$log_path" cold_boot
 }
 
+sha256_file() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  else
+    shasum -a 256 "$path" | awk '{print $1}'
+  fi
+}
+
+append_build_artifact_measurements() {
+  local kernel_digest
+  local artifact
+  kernel_digest="$(sha256_file "$KERNEL_PATH")"
+  printf '\n=== BUILD ARTIFACT MEASUREMENTS ===\n'
+  printf 'MEASURED_BOOT:BUILD_ARTIFACT bootloader source=src/boot/boot64.S sha256=%s\n' "$(sha256_file "$ROOT_DIR/src/boot/boot64.S")"
+  printf 'MEASURED_BOOT:BUILD_ARTIFACT kernel path=%s sha256=%s\n' "$KERNEL_PATH" "$kernel_digest"
+  find "$ROOT_DIR/zig-out/bin" -maxdepth 1 -type f -name 'userspace-*.elf' | LC_ALL=C sort |
+    while IFS= read -r artifact; do
+      printf 'MEASURED_BOOT:BUILD_ARTIFACT userspace path=%s sha256=%s\n' "${artifact#$ROOT_DIR/}" "$(sha256_file "$artifact")"
+    done
+}
+
+append_measured_boot_comparison() {
+  local boot1_root
+  local boot2_root
+  boot1_root="$(awk '/^ZIGOS:PLATFORM:MEASURED_BOOT:ROOT / {print $2; exit}' "$BOOT1_LOG")"
+  boot2_root="$(awk '/^ZIGOS:PLATFORM:MEASURED_BOOT:ROOT / {print $2; exit}' "$BOOT2_LOG")"
+  printf '\n=== MEASURED BOOT COMPARISON ===\n'
+  printf 'MEASURED_BOOT:BOOT1_ROOT %s\n' "$boot1_root"
+  printf 'MEASURED_BOOT:BOOT2_ROOT %s\n' "$boot2_root"
+  if [ -n "$boot1_root" ] && [ "$boot1_root" = "$boot2_root" ]; then
+    printf 'MEASURED_BOOT:ROOT_COMPARE MATCH\n'
+  else
+    printf 'MEASURED_BOOT:ROOT_COMPARE MISMATCH\n'
+    return 1
+  fi
+}
+
 run_boot "$BOOT1_LOG" reset
 assert_boot_markers "$BOOT1_LOG"
 
@@ -135,6 +173,8 @@ assert_boot_markers "$BOOT2_LOG"
   cat "$BOOT1_LOG"
   printf '\n=== COLD REBOOT ===\n'
   cat "$BOOT2_LOG"
+  append_measured_boot_comparison
+  append_build_artifact_measurements
 } >"$LOG_PATH"
 
 echo "Zigos native smoke test passed across cold reboot. Logs: $LOG_PATH"

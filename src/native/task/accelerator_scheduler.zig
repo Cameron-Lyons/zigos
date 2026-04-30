@@ -28,6 +28,8 @@ pub const DecisionReason = enum(u8) {
     battery_preserve,
     privacy_mode,
     accelerator_unavailable,
+    cpu_budget,
+    memory_bandwidth,
 };
 
 pub const SystemState = struct {
@@ -37,6 +39,8 @@ pub const SystemState = struct {
     gpu_available: bool = true,
     npu_available: bool = true,
     media_available: bool = true,
+    cpu_budget_ticks: u64 = std.math.maxInt(u64),
+    memory_bandwidth_units: usize = std.math.maxInt(usize),
 };
 
 pub const Request = struct {
@@ -46,6 +50,8 @@ pub const Request = struct {
     wants_media_engine: bool = false,
     privacy_sensitive: bool = false,
     shared_memory_bytes: usize = 0,
+    expected_cpu_ticks: u64 = 0,
+    memory_bandwidth_units: usize = 0,
 };
 
 pub const Decision = struct {
@@ -203,6 +209,23 @@ pub const Controller = struct {
             .zero_copy_allowed = false,
             .reason = .normal,
         };
+
+        if (request.class != .emergency_system_critical) {
+            if (request.expected_cpu_ticks != 0 and request.expected_cpu_ticks > self.state.cpu_budget_ticks) {
+                decision.delayed = true;
+                decision.degraded = true;
+                decision.reason = .cpu_budget;
+                return decision;
+            }
+            if (request.memory_bandwidth_units != 0 and request.memory_bandwidth_units > self.state.memory_bandwidth_units) {
+                decision.degraded = true;
+                if (request.class == .batch_compute or request.class == .background_light) {
+                    decision.delayed = true;
+                }
+                decision.reason = .memory_bandwidth;
+                return decision;
+            }
+        }
 
         switch (request.class) {
             .emergency_system_critical => return decision,
@@ -385,6 +408,38 @@ test "accelerator scheduler uses media engines and privacy mode falls back from 
     try std.testing.expectEqual(Engine.cpu, inference.engine);
     try std.testing.expect(inference.degraded);
     try std.testing.expectEqual(DecisionReason.privacy_mode, inference.reason);
+}
+
+test "accelerator scheduler uses cpu and memory bandwidth accounting signals" {
+    var controller = Controller.init();
+    controller.configure(.{
+        .cpu_budget_ticks = 1_000,
+        .memory_bandwidth_units = 200,
+    });
+
+    const over_cpu_budget = controller.plan(.{
+        .class = .background_light,
+        .expected_cpu_ticks = 2_000,
+    });
+    try std.testing.expect(over_cpu_budget.delayed);
+    try std.testing.expect(over_cpu_budget.degraded);
+    try std.testing.expectEqual(DecisionReason.cpu_budget, over_cpu_budget.reason);
+
+    const memory_limited = controller.plan(.{
+        .class = .batch_compute,
+        .memory_bandwidth_units = 512,
+    });
+    try std.testing.expect(memory_limited.delayed);
+    try std.testing.expect(memory_limited.degraded);
+    try std.testing.expectEqual(DecisionReason.memory_bandwidth, memory_limited.reason);
+
+    const emergency = controller.plan(.{
+        .class = .emergency_system_critical,
+        .expected_cpu_ticks = 10_000,
+        .memory_bandwidth_units = 10_000,
+    });
+    try std.testing.expect(!emergency.delayed);
+    try std.testing.expect(!emergency.degraded);
 }
 
 test "accelerator scheduler tracks exclusive engine claims and zero-copy attachments" {

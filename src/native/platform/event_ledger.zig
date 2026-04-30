@@ -5,6 +5,8 @@ const denial_explanation = @import("../policy/denial_explanation.zig");
 const immutable_base = @import("immutable_base.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
+const native_ux = @import("native_ux.zig");
+const notification_center = @import("../services/notification_center.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
@@ -36,9 +38,22 @@ pub const EventKind = enum(u8) {
     update_transition,
     sync_conflict,
     device_trust_change,
+    permission_review,
+    capability_grant,
+    capability_revocation,
+    notification,
+    task_flow,
 };
 
 pub const ExportOptions = struct {
+    include_protected_content: bool = false,
+};
+
+pub const Query = struct {
+    kind: ?EventKind = null,
+    subject: ?principal.PrincipalId = null,
+    task_id: ?u64 = null,
+    workspace_id: ?u64 = null,
     include_protected_content: bool = false,
 };
 
@@ -173,6 +188,111 @@ pub const Ledger = struct {
         });
     }
 
+    pub fn recordPermissionReview(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        permission_kind: manifest.PermissionKind,
+        approved: bool,
+        tick: u64,
+        detail: []const u8,
+        protected: bool,
+    ) Error!void {
+        try self.append(.{
+            .kind = .permission_review,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .permission_kind = permission_kind,
+            .allowed = approved,
+            .detail_protected = protected,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordCapabilityGrant(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        capability_id: u64,
+        permission_kind: ?manifest.PermissionKind,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        try self.append(.{
+            .kind = .capability_grant,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .related_id = capability_id,
+            .permission_kind = permission_kind,
+            .allowed = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordCapabilityRevocation(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        capability_id: u64,
+        permission_kind: ?manifest.PermissionKind,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        try self.append(.{
+            .kind = .capability_revocation,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .related_id = capability_id,
+            .permission_kind = permission_kind,
+            .allowed = false,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordNotification(
+        self: *Ledger,
+        notification: notification_center.Notification,
+        tick: u64,
+    ) Error!void {
+        try self.append(.{
+            .kind = .notification,
+            .tick = tick,
+            .subject = notification.source,
+            .task_id = notification.task_id orelse 0,
+            .related_id = notification.id,
+            .detail_code = @intFromEnum(notification.reason),
+            .allowed = !notification.suppressed,
+            .detail_len = clampedDetailLen(notification.detailSlice()),
+            .detail = copyTextInto(notification.detailSlice()),
+        });
+    }
+
+    pub fn recordTaskFlow(
+        self: *Ledger,
+        flow: native_ux.FlowRecord,
+        tick: u64,
+    ) Error!void {
+        try self.append(.{
+            .kind = .task_flow,
+            .tick = tick,
+            .subject = flow.subject,
+            .task_id = flow.task_id,
+            .workspace_id = flow.workspace_id,
+            .related_id = flow.id,
+            .detail_code = @intFromEnum(flow.kind),
+            .permission_kind = if (flow.kind == .review_permission_request) flow.permission_kind else null,
+            .allowed = flow.approved,
+            .detail_len = clampedDetailLen(flow.detailSlice()),
+            .detail = copyTextInto(flow.detailSlice()),
+        });
+    }
+
     pub fn recordProcessCrash(
         self: *Ledger,
         service_class: contract.ServiceClass,
@@ -281,6 +401,27 @@ pub const Ledger = struct {
         return null;
     }
 
+    pub fn queryEvents(self: *const Ledger, query: Query, output: []Event) []Event {
+        var count: usize = 0;
+        for (self.events) |slot| {
+            if (!slot.in_use) continue;
+            if (!matchesQuery(slot.event, query)) continue;
+            if (count >= output.len) break;
+            output[count] = redactedForQuery(slot.event, query);
+            count += 1;
+        }
+        return output[0..count];
+    }
+
+    pub fn countMatching(self: *const Ledger, query: Query) usize {
+        var count: usize = 0;
+        for (self.events) |slot| {
+            if (!slot.in_use) continue;
+            if (matchesQuery(slot.event, query)) count += 1;
+        }
+        return count;
+    }
+
     pub fn exportText(self: *const Ledger, buffer: []u8, options: ExportOptions) Error![]const u8 {
         var used: usize = 0;
         for (self.events) |slot| {
@@ -324,6 +465,23 @@ pub const Ledger = struct {
                 .device_trust_change => {
                     try appendFmt(buffer, &used, " device={d} trusted={s}", .{
                         event.related_id,
+                        yesNo(event.allowed),
+                    });
+                },
+                .capability_grant, .capability_revocation => {
+                    try appendFmt(buffer, &used, " capability={d}", .{event.related_id});
+                },
+                .notification => {
+                    try appendFmt(buffer, &used, " notification={d} reason={s} visible={s}", .{
+                        event.related_id,
+                        notificationReasonLabel(event.detail_code),
+                        yesNo(event.allowed),
+                    });
+                },
+                .task_flow => {
+                    try appendFmt(buffer, &used, " flow={d} flow_kind={s} approved={s}", .{
+                        event.related_id,
+                        flowKindLabel(event.detail_code),
                         yesNo(event.allowed),
                     });
                 },
@@ -708,6 +866,41 @@ fn updateFailureLabel(code: u32) []const u8 {
     return @tagName(failure);
 }
 
+fn notificationReasonLabel(code: u32) []const u8 {
+    if (code > std.math.maxInt(u8)) return "corrupt";
+    const reason = std.enums.fromInt(notification_center.Reason, @as(u8, @intCast(code))) orelse return "corrupt";
+    return @tagName(reason);
+}
+
+fn flowKindLabel(code: u32) []const u8 {
+    if (code > std.math.maxInt(u8)) return "corrupt";
+    const kind = std.enums.fromInt(native_ux.FlowKind, @as(u8, @intCast(code))) orelse return "corrupt";
+    return @tagName(kind);
+}
+
+fn matchesQuery(event: Event, query: Query) bool {
+    if (query.kind) |kind| {
+        if (event.kind != kind) return false;
+    }
+    if (query.subject) |subject| {
+        if (!event.subject.eql(subject)) return false;
+    }
+    if (query.task_id) |task_id| {
+        if (event.task_id != task_id) return false;
+    }
+    if (query.workspace_id) |workspace_id| {
+        if (event.workspace_id != workspace_id) return false;
+    }
+    return true;
+}
+
+fn redactedForQuery(event: Event, query: Query) Event {
+    if (!event.detail_protected or query.include_protected_content) return event;
+    var redacted = event;
+    redacted.detail_len = copyText(&redacted.detail, "redacted");
+    return redacted;
+}
+
 fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) Error!void {
     const rendered = std.fmt.bufPrint(buffer[used.*..], fmt, args) catch return error.NoSpaceLeft;
     used.* += rendered.len;
@@ -818,6 +1011,80 @@ test "event ledger persists history across restart" {
     const exported = try restarted.exportText(&buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=update_transition") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=device_trust_change") != null);
+
+    storage_checkpoint_store.resetPersistent();
+}
+
+test "event ledger persists user visible policy ux history across restart and query" {
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 46 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 8 };
+    const app = principal.PrincipalId{ .kind = .app, .serial = 9 };
+    const signer = signing.SignerIdentity{
+        .label = "policy-ux-history",
+        .seed = [_]u8{0xA9} ** 32,
+    };
+
+    var storage = storage_service.Service.initWithStore(903, 304, owner, &storage_checkpoint_store);
+    var ledger = try Ledger.initPersistent(&storage, owner, signer);
+    try ledger.recordPermissionReview(user, 503, .screen_capture, false, 30, "screen capture review denied", false);
+    try ledger.recordPermissionDecision(user, 503, .screen_capture, false, .policy_denied, 31, "screen capture blocked", true);
+    try ledger.recordCapabilityGrant(user, 503, 7001, .object_access, 32, "workspace grant");
+    try ledger.recordCapabilityRevocation(user, 503, 7001, .object_access, 33, "workspace grant revoked");
+
+    var notifications = notification_center.Center.init();
+    const notification = try notifications.post(.{
+        .source = app,
+        .reason = .permission_request,
+        .urgency = .high,
+        .task_id = 503,
+        .detail = "app needs screen capture",
+    });
+    try ledger.recordNotification(notification.*, 34);
+
+    var ux = native_ux.Controller.init();
+    const flow = try ux.reviewPermissionDecision(
+        503,
+        user,
+        "app.capture",
+        .{
+            .kind = .screen_capture,
+            .resource = "screen:main",
+            .rights = .{ .service = .{} },
+            .required = true,
+        },
+        false,
+        false,
+        null,
+    );
+    try ledger.recordTaskFlow(flow.*, 35);
+
+    var restarted_storage = storage_service.Service.initWithStore(903, 305, owner, &storage_checkpoint_store);
+    var restarted = try Ledger.initPersistent(&restarted_storage, owner, signer);
+    try std.testing.expect(restarted.loaded_existing_state);
+    try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .kind = .permission_review, .task_id = 503 }));
+    try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .kind = .permission_decision, .task_id = 503 }));
+    try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .kind = .capability_grant, .task_id = 503 }));
+    try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .kind = .capability_revocation, .task_id = 503 }));
+    try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .kind = .notification, .task_id = 503 }));
+    try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .kind = .task_flow, .task_id = 503 }));
+
+    var events_buffer: [4]Event = undefined;
+    const redacted = restarted.queryEvents(.{ .kind = .permission_decision, .task_id = 503 }, &events_buffer);
+    try std.testing.expectEqual(@as(usize, 1), redacted.len);
+    try std.testing.expectEqualStrings("redacted", redacted[0].detailSlice());
+    const full = restarted.queryEvents(.{ .kind = .permission_decision, .task_id = 503, .include_protected_content = true }, &events_buffer);
+    try std.testing.expectEqualStrings("screen capture blocked", full[0].detailSlice());
+
+    var export_buffer: [2048]u8 = undefined;
+    const exported = try restarted.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, exported, "kind=permission_review") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "kind=capability_grant") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "kind=capability_revocation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "reason=permission_request") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "flow_kind=review_permission_request") != null);
 
     storage_checkpoint_store.resetPersistent();
 }

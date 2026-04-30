@@ -39,4 +39,13 @@ while read -r name baseline_cycles_per_op allowed_regression_percent; do
     fi
 done < "${baseline_file}"
 
+while IFS= read -r line; do
+    name="${line#BENCH:RESULT:}"
+    name="${name%%:*}"
+    if ! awk -v benchmark_name="${name}" '$1 == benchmark_name { found = 1 } END { exit found ? 0 : 1 }' "${baseline_file}"; then
+        echo "Kernel benchmark baseline check failed: untracked result for ${name}" >&2
+        exit 1
+    fi
+done < <(grep -F 'BENCH:RESULT:' "${log_path}" || true)
+
 echo "Kernel benchmark baseline comparison passed."
