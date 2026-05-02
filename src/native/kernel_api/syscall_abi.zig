@@ -1,5 +1,7 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
+const component_port = @import("component_port.zig");
+const syscall_dispatch = @import("syscall_dispatch.zig");
 const task_syscalls = @import("task_syscalls.zig");
 const endpoint_syscalls = @import("endpoint_syscalls.zig");
 const capability_syscalls = @import("capability_syscalls.zig");
@@ -19,11 +21,21 @@ pub const RequestCopyRule = enum {
     embedded_user_buffers,
 };
 
+pub const DispatchHandler = *const fn (
+    port: *component_port.KernelPort,
+    memory: syscall_dispatch.UserMemoryContext,
+    now_ticks: u64,
+    request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
+) syscall_dispatch.DispatchResult;
+
 pub const Operation = struct {
     operation: abi.NativeOperation,
     domain: Domain,
     Request: type,
     Response: type,
+    handler: DispatchHandler,
     request_copy: RequestCopyRule = .plain,
 
     pub fn requestSize(comptime self: Operation) usize {

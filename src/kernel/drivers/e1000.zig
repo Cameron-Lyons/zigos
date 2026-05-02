@@ -305,6 +305,11 @@ const CTRLBits = struct {
 
 var e1000_device: ?E1000Device = null;
 
+pub const InitError = error{
+    OutOfMemory,
+    UnsupportedBar,
+};
+
 const E1000Device = struct {
     pci_device: pci.PCIDevice,
     mmio_base: u32,
@@ -379,11 +384,11 @@ const E1000Device = struct {
         }
     }
 
-    fn initRX(self: *E1000Device) void {
+    fn initRX(self: *E1000Device) InitError!void {
         const rx_desc_size = @sizeOf(RXDescriptor) * E1000_NUM_RX_DESC;
-        const rx_desc_mem = memory.kmalloc(rx_desc_size + 16) orelse unreachable;
+        const rx_desc_mem = memory.kmalloc(rx_desc_size + 16) orelse return error.OutOfMemory;
         self.rx_descs = @as([*]align(16) RXDescriptor, @ptrCast(@alignCast(rx_desc_mem)));
-        const rx_buf_mem = memory.kmalloc(RX_BUFFER_SIZE * E1000_NUM_RX_DESC) orelse unreachable;
+        const rx_buf_mem = memory.kmalloc(RX_BUFFER_SIZE * E1000_NUM_RX_DESC) orelse return error.OutOfMemory;
         self.rx_buffers = @as([*]u8, @ptrCast(rx_buf_mem));
 
         for (0..E1000_NUM_RX_DESC) |i| {
@@ -405,11 +410,11 @@ const E1000Device = struct {
         self.writeRegister(E1000Registers.RCTL, RCTLBits.EN | RCTLBits.SBP | RCTLBits.UPE | RCTLBits.MPE | RCTLBits.LBM_NONE | RCTLBits.RDMTS_HALF | RCTLBits.BAM | RCTLBits.SECRC | RCTLBits.BSIZE_2048);
     }
 
-    fn initTX(self: *E1000Device) void {
+    fn initTX(self: *E1000Device) InitError!void {
         const tx_desc_size = @sizeOf(TXDescriptor) * E1000_NUM_TX_DESC;
-        const tx_desc_mem = memory.kmalloc(tx_desc_size + 16) orelse unreachable;
+        const tx_desc_mem = memory.kmalloc(tx_desc_size + 16) orelse return error.OutOfMemory;
         self.tx_descs = @as([*]align(16) TXDescriptor, @ptrCast(@alignCast(tx_desc_mem)));
-        const tx_buf_mem = memory.kmalloc(TX_BUFFER_SIZE * E1000_NUM_TX_DESC) orelse unreachable;
+        const tx_buf_mem = memory.kmalloc(TX_BUFFER_SIZE * E1000_NUM_TX_DESC) orelse return error.OutOfMemory;
         self.tx_buffers = @as([*]u8, @ptrCast(tx_buf_mem));
 
         for (0..E1000_NUM_TX_DESC) |i| {
@@ -533,7 +538,11 @@ pub fn init() void {
                         for (E1000_DEVICE_IDS) |device_id| {
                             if (pci_device.device_id == device_id) {
                                 vga.print("Found E1000 network card!\n");
-                                initDevice(pci_device);
+                                initDevice(pci_device) catch |err| {
+                                    vga.print("E1000 initialization failed: ");
+                                    vga.print(initErrorMessage(err));
+                                    vga.print("\n");
+                                };
                                 return;
                             }
                         }
@@ -563,7 +572,7 @@ pub fn publishBootstrapTransport(device_id: u64) bool {
     );
 }
 
-fn initDevice(pci_device: pci.PCIDevice) void {
+fn initDevice(pci_device: pci.PCIDevice) InitError!void {
     var dev = E1000Device{
         .pci_device = pci_device,
         .mmio_base = 0,
@@ -592,8 +601,7 @@ fn initDevice(pci_device: pci.PCIDevice) void {
         const map_size = (E1000_MMIO_MAP_SIZE + 0xFFF) & ~@as(u32, 0xFFF);
         paging.map_range(aligned_base, aligned_base, map_size, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE);
     } else {
-        vga.print("E1000: BAR0 is I/O space, not supported\n");
-        return;
+        return error.UnsupportedBar;
     }
 
     pci.writeConfigWord(pci_device.bus, pci_device.device, pci_device.function, 0x04, pci.readConfigWord(pci_device.bus, pci_device.device, pci_device.function, 0x04) | 0x06);
@@ -611,8 +619,8 @@ fn initDevice(pci_device: pci.PCIDevice) void {
     isr.registerHandler(0x20 + irq_line, e1000_interrupt_handler);
 
     dev.linkUp();
-    dev.initRX();
-    dev.initTX();
+    try dev.initRX();
+    try dev.initTX();
     dev.enableInterrupts();
 
     e1000_device = dev;
@@ -625,8 +633,15 @@ fn activatePublishedDevice(device_id: u64) ?*const link_port.NetworkDevice {
 
     const pci_device = pci.findDeviceByStableId(device_id) orelse return null;
     if (!isSupportedDevice(pci_device)) return null;
-    initDevice(pci_device);
+    initDevice(pci_device) catch return null;
     return currentNetworkDevice(device_id);
+}
+
+fn initErrorMessage(err: InitError) []const u8 {
+    return switch (err) {
+        error.OutOfMemory => "descriptor or packet buffer allocation failed",
+        error.UnsupportedBar => "BAR0 is I/O space, MMIO is required",
+    };
 }
 
 fn currentNetworkDevice(device_id: u64) ?*const link_port.NetworkDevice {

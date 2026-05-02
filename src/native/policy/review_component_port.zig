@@ -1,6 +1,7 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const manifest = @import("manifest.zig");
+const manifest_fixtures = @import("manifest_fixtures.zig");
 const permission_review_service = @import("permission_review_service.zig");
 const policy_mediation = @import("policy_mediation.zig");
 const request_header = @import("../core/request_header.zig");
@@ -119,23 +120,8 @@ test "review port rejects invalid manifests before entering the review loop" {
     const scripted_inputs = [_][]const u8{"allow"};
     var service = permission_review_service.Service.init(5, 6, &runtime, &scripted_inputs);
     var port = Port.init(&service);
-    const background_tasks = [_]manifest.BackgroundTaskDecl{
-        .{
-            .id = "sync",
-            .trigger = .push_event,
-            .expected_duration_seconds = 30,
-            .budget = .{
-                .cpu_time_ticks = 100,
-                .memory_bytes = 1024,
-            },
-        },
-    };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.sync",
-        .display_name = "Sync",
-        .publisher = "zigos.dev",
-        .background_tasks = &background_tasks,
-    };
+    var bundle = manifest_fixtures.syncPushBundle();
+    bundle.requested_permissions = &.{};
     var grants_buffer: [permission_review_service.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
 
     try std.testing.expectError(error.MissingBackgroundPermission, port.reviewBundle(.{

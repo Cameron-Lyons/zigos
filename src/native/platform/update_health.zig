@@ -12,6 +12,8 @@ const sync_service = @import("../sync/sync_service.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const supervisor_mod = @import("../session/supervisor.zig");
 
+const yesNo = native_util.yesNo;
+
 pub const CheckRequest = struct {
     core_service_ids: []const u64,
     storage_workspace_id: u64,
@@ -251,10 +253,6 @@ fn renderTransitionDetail(
             @tagName(activation.failure),
         },
     ) catch "update-transition";
-}
-
-fn yesNo(value: bool) []const u8 {
-    return if (value) "yes" else "no";
 }
 
 fn loadBootWitness(manager: *immutable_base.Manager) immutable_base.Error!BootWitness {

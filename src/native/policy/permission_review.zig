@@ -1,7 +1,10 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const manifest = @import("manifest.zig");
+const native_util = @import("../core/util.zig");
 const policy_mediation = @import("policy_mediation.zig");
+
+const yesNo = native_util.yesNo;
 
 pub const MAX_REVIEW_DECISIONS: usize = policy_mediation.MAX_PERMISSION_DECISIONS;
 
@@ -289,10 +292,6 @@ fn backgroundVisibilityLabel(visibility: manifest.BackgroundVisibility) []const 
         .user_visible => "user-visible",
         .audit_only => "audit-only",
     };
-}
-
-fn yesNo(value: bool) []const u8 {
-    return if (value) "yes" else "no";
 }
 
 fn rightsSummary(rights: capability.CapabilityRights, buffer: *[160]u8) []const u8 {

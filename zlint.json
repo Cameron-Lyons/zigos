@@ -1,6 +1,3 @@
 {
-  "ignore": [
-    "src/kernel/process/ring3.zig",
-    "src/kernel/process/userspace.zig"
-  ]
+  "ignore": []
 }

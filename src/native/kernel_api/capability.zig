@@ -426,12 +426,14 @@ const CapabilitySlot = struct {
     target_generation_index: u8 = 0,
     next_holder_index: ?usize = null,
     next_target_index: ?usize = null,
+    next_free_index: ?usize = null,
 };
 
 const TargetGeneration = struct {
     in_use: bool = false,
     target: CapabilityTarget = .{ .kind = .task, .id = 0 },
     generation: u32 = 1,
+    next_free_index: ?usize = null,
 };
 
 const IdIndexSlot = id_index.Slot;
@@ -460,7 +462,12 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         capability_index_slots: [TABLE_INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(TABLE_INDEX_CAPACITY),
         holder_index_slots: [TABLE_INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(TABLE_INDEX_CAPACITY),
         target_index_slots: [TABLE_INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(TABLE_INDEX_CAPACITY),
+        target_generation_index_slots: [TABLE_INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(TABLE_INDEX_CAPACITY),
         target_generations: [MAX_TABLE_TARGET_GENERATIONS]TargetGeneration = [_]TargetGeneration{TargetGeneration{}} ** MAX_TABLE_TARGET_GENERATIONS,
+        next_slot_index: usize = 0,
+        next_target_generation_index: usize = 0,
+        free_slot_head: ?usize = null,
+        free_target_generation_head: ?usize = null,
 
         pub fn init() Self {
             return Self{};
@@ -634,15 +641,14 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn insert(self: *Self, capability: Capability, target_generation_index: u8) Error!Capability {
-            for (&self.slots, 0..) |*slot, slot_index| {
-                if (slot.in_use) continue;
-                slot.in_use = true;
-                slot.capability = capability;
-                slot.target_generation_index = target_generation_index;
-                self.indexSlot(slot_index);
-                return capability;
-            }
-            return error.TableFull;
+            const slot_index = self.popFreeSlot() orelse return error.TableFull;
+            self.slots[slot_index] = .{
+                .in_use = true,
+                .capability = capability,
+                .target_generation_index = target_generation_index,
+            };
+            self.indexSlot(slot_index);
+            return capability;
         }
 
         fn findSlot(self: *Self, capability_id: u64) ?*CapabilitySlot {
@@ -673,19 +679,16 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn ensureTargetGenerationIndex(self: *Self, target: CapabilityTarget) Error!u8 {
-            for (&self.target_generations, 0..) |*entry, index| {
-                if (entry.in_use and entry.target.eql(target)) return @intCast(index);
-            }
+            if (self.findTargetGenerationIndex(target)) |index| return index;
 
-            for (&self.target_generations, 0..) |*entry, index| {
-                if (entry.in_use) continue;
-                entry.in_use = true;
-                entry.target = target;
-                entry.generation = 1;
-                return @intCast(index);
-            }
-
-            return error.TargetTableFull;
+            const index = self.popFreeTargetGeneration() orelse return error.TargetTableFull;
+            self.target_generations[index] = .{
+                .in_use = true,
+                .target = target,
+                .generation = 1,
+            };
+            indexInsert(TABLE_INDEX_CAPACITY, &self.target_generation_index_slots, targetKey(target), index);
+            return @intCast(index);
         }
 
         fn targetGenerationAt(self: *const Self, target_generation_index: u8) *const TargetGeneration {
@@ -697,8 +700,8 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn currentTargetGeneration(self: *const Self, target: CapabilityTarget) u32 {
-            for (self.target_generations) |entry| {
-                if (entry.in_use and entry.target.eql(target)) return entry.generation;
+            if (self.findTargetGenerationIndex(target)) |index| {
+                return self.targetGenerationAt(index).generation;
             }
             return 1;
         }
@@ -722,11 +725,13 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             var new_target_index: usize = 0;
             while (new_target_index < reservation.new_target_count) : (new_target_index += 1) {
                 const table_index = reservation.new_target_indexes[new_target_index];
+                self.claimReservedTargetGeneration(table_index);
                 self.target_generations[table_index] = .{
                     .in_use = true,
                     .target = reservation.new_targets[new_target_index],
                     .generation = 1,
                 };
+                indexInsert(TABLE_INDEX_CAPACITY, &self.target_generation_index_slots, targetKey(reservation.new_targets[new_target_index]), table_index);
             }
 
             for (plan.slice(), 0..) |entry, index| {
@@ -744,6 +749,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                     .audit = entry.request.audit,
                 };
                 const slot_index = reservation.slot_indexes[index];
+                self.claimReservedSlot(slot_index);
                 self.slots[slot_index] = .{
                     .in_use = true,
                     .capability = granted_capability,
@@ -755,8 +761,15 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn reserveCapabilitySlot(self: *const Self, reservation: *const GrantReservation, used_count: usize) Error!usize {
-            for (self.slots, 0..) |slot, slot_index| {
-                if (slot.in_use) continue;
+            var next_index = self.free_slot_head;
+            while (next_index) |slot_index| {
+                if (slot_index >= self.slots.len) return error.TableFull;
+                next_index = self.slots[slot_index].next_free_index;
+                if (reservationContainsSlot(reservation, used_count, slot_index)) continue;
+                return slot_index;
+            }
+            var slot_index = self.next_slot_index;
+            while (slot_index < self.slots.len) : (slot_index += 1) {
                 if (reservationContainsSlot(reservation, used_count, slot_index)) continue;
                 return slot_index;
             }
@@ -773,8 +786,10 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 }
             }
 
-            for (self.target_generations, 0..) |entry, index| {
-                if (entry.in_use) continue;
+            var next_index = self.free_target_generation_head;
+            while (next_index) |index| {
+                if (index >= self.target_generations.len) return error.TargetTableFull;
+                next_index = self.target_generations[index].next_free_index;
                 if (reservationContainsTargetGeneration(reservation, @intCast(index))) continue;
                 if (reservation.new_target_count >= reservation.new_target_indexes.len) return error.TargetTableFull;
                 reservation.new_target_indexes[reservation.new_target_count] = @intCast(index);
@@ -782,12 +797,23 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 reservation.new_target_count += 1;
                 return @intCast(index);
             }
+            var index = self.next_target_generation_index;
+            while (index < self.target_generations.len) : (index += 1) {
+                const target_generation_index: u8 = @intCast(index);
+                if (reservationContainsTargetGeneration(reservation, target_generation_index)) continue;
+                if (reservation.new_target_count >= reservation.new_target_indexes.len) return error.TargetTableFull;
+                reservation.new_target_indexes[reservation.new_target_count] = target_generation_index;
+                reservation.new_targets[reservation.new_target_count] = target;
+                reservation.new_target_count += 1;
+                return target_generation_index;
+            }
 
             return error.TargetTableFull;
         }
 
         fn findTargetGenerationIndex(self: *const Self, target: CapabilityTarget) ?u8 {
-            for (self.target_generations, 0..) |entry, index| {
+            if (indexLookup(TABLE_INDEX_CAPACITY, &self.target_generation_index_slots, targetKey(target))) |index| {
+                const entry = &self.target_generations[index];
                 if (entry.in_use and entry.target.eql(target)) return @intCast(index);
             }
             return null;
@@ -815,7 +841,88 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             indexRemove(TABLE_INDEX_CAPACITY, &self.capability_index_slots, removed.id);
             self.unlinkHolder(slot_index, holderKey(removed.holder));
             self.unlinkTarget(slot_index, targetKey(removed.target));
-            self.slots[slot_index] = CapabilitySlot{};
+            self.slots[slot_index] = .{
+                .next_free_index = self.free_slot_head,
+            };
+            self.free_slot_head = slot_index;
+        }
+
+        fn popFreeSlot(self: *Self) ?usize {
+            if (self.free_slot_head) |slot_index| {
+                if (slot_index >= self.slots.len) return null;
+                self.free_slot_head = self.slots[slot_index].next_free_index;
+                self.slots[slot_index].next_free_index = null;
+                return slot_index;
+            }
+            if (self.next_slot_index >= self.slots.len) return null;
+            defer self.next_slot_index += 1;
+            return self.next_slot_index;
+        }
+
+        fn claimReservedSlot(self: *Self, slot_index: usize) void {
+            if (slot_index >= self.next_slot_index) {
+                self.next_slot_index = slot_index + 1;
+            } else {
+                self.unlinkFreeSlot(slot_index);
+            }
+        }
+
+        fn unlinkFreeSlot(self: *Self, slot_index: usize) void {
+            var previous: ?usize = null;
+            var current = self.free_slot_head;
+            while (current) |current_index| {
+                if (current_index == slot_index) {
+                    const next = self.slots[current_index].next_free_index;
+                    if (previous) |previous_index| {
+                        self.slots[previous_index].next_free_index = next;
+                    } else {
+                        self.free_slot_head = next;
+                    }
+                    self.slots[current_index].next_free_index = null;
+                    return;
+                }
+                previous = current_index;
+                current = self.slots[current_index].next_free_index;
+            }
+        }
+
+        fn popFreeTargetGeneration(self: *Self) ?usize {
+            if (self.free_target_generation_head) |index| {
+                if (index >= self.target_generations.len) return null;
+                self.free_target_generation_head = self.target_generations[index].next_free_index;
+                self.target_generations[index].next_free_index = null;
+                return index;
+            }
+            if (self.next_target_generation_index >= self.target_generations.len) return null;
+            defer self.next_target_generation_index += 1;
+            return self.next_target_generation_index;
+        }
+
+        fn claimReservedTargetGeneration(self: *Self, index: usize) void {
+            if (index >= self.next_target_generation_index) {
+                self.next_target_generation_index = index + 1;
+            } else {
+                self.unlinkFreeTargetGeneration(index);
+            }
+        }
+
+        fn unlinkFreeTargetGeneration(self: *Self, index: usize) void {
+            var previous: ?usize = null;
+            var current = self.free_target_generation_head;
+            while (current) |current_index| {
+                if (current_index == index) {
+                    const next = self.target_generations[current_index].next_free_index;
+                    if (previous) |previous_index| {
+                        self.target_generations[previous_index].next_free_index = next;
+                    } else {
+                        self.free_target_generation_head = next;
+                    }
+                    self.target_generations[current_index].next_free_index = null;
+                    return;
+                }
+                previous = current_index;
+                current = self.target_generations[current_index].next_free_index;
+            }
         }
 
         fn indexSlot(self: *Self, slot_index: usize) void {
@@ -1311,6 +1418,103 @@ test "capability table capacity is configurable" {
         .issuer = holder,
         .target = .{ .kind = .service, .id = 1 },
         .rights = .{ .service = .{ .capability_query = true } },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
+    }));
+}
+
+test "capability table reuses revoked slots through a free list" {
+    const SmallTable = CapabilityTableWith(.{
+        .max_capabilities = 3,
+        .capability_index_capacity = 8,
+        .max_target_generations = 2,
+    });
+    var table = SmallTable.init();
+    const holder = principal.PrincipalId{ .kind = .service, .serial = 1 };
+
+    const first = try table.mintBootRoot(.{
+        .holder = holder,
+        .issuer = holder,
+        .target = .{ .kind = .service, .id = 1 },
+        .rights = .{ .service = .{ .capability_query = true } },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
+    });
+    const second = try table.mintBootRoot(.{
+        .holder = holder,
+        .issuer = holder,
+        .target = .{ .kind = .service, .id = 1 },
+        .rights = .{ .service = .{ .capability_query = true } },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
+    });
+
+    try table.revokeGrant(first.id);
+    const reused = try table.mintBootRoot(.{
+        .holder = holder,
+        .issuer = holder,
+        .target = .{ .kind = .service, .id = 1 },
+        .rights = .{ .service = .{ .capability_query = true } },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
+    });
+
+    try std.testing.expect(table.query(second.id) != null);
+    try std.testing.expect(table.query(first.id) == null);
+    try std.testing.expect(table.query(reused.id) != null);
+    try std.testing.expectEqual(@as(?usize, null), table.free_slot_head);
+    try std.testing.expectEqual(@as(usize, 2), table.next_slot_index);
+
+    const third = try table.mintBootRoot(.{
+        .holder = holder,
+        .issuer = holder,
+        .target = .{ .kind = .service, .id = 1 },
+        .rights = .{ .service = .{ .capability_query = true } },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
+    });
+    try std.testing.expect(table.query(third.id) != null);
+    try std.testing.expectEqual(@as(usize, 3), table.next_slot_index);
+}
+
+test "grant plan reserves target generation slots from the indexed free chain" {
+    const SmallTable = CapabilityTableWith(.{
+        .max_capabilities = 4,
+        .capability_index_capacity = 8,
+        .max_target_generations = 2,
+    });
+    var table = SmallTable.init();
+    const holder = principal.PrincipalId{ .kind = .service, .serial = 1 };
+    var plan = GrantPlan{};
+
+    try plan.addMint(1, .{
+        .holder = holder,
+        .issuer = holder,
+        .target = .{ .kind = .service, .id = 1 },
+        .rights = .{ .service = .{ .capability_query = true } },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
+    });
+    try plan.addMint(1, .{
+        .holder = holder,
+        .issuer = holder,
+        .target = .{ .kind = .workspace, .id = 2 },
+        .rights = .{ .workspace = .{ .capability_query = true } },
+        .scope = .{},
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
+    });
+
+    var output: [2]Capability = undefined;
+    _ = try table.applyGrantPlan(&plan, &output);
+    try std.testing.expect(table.free_target_generation_head == null);
+    try std.testing.expectEqual(@as(usize, 2), table.next_target_generation_index);
+    try std.testing.expectEqual(@as(u32, 1), table.currentTargetGeneration(.{ .kind = .workspace, .id = 2 }));
+
+    try std.testing.expectError(error.TargetTableFull, table.mintBootRoot(.{
+        .holder = holder,
+        .issuer = holder,
+        .target = .{ .kind = .object, .id = 3 },
+        .rights = .{ .object = .{ .object_read = true } },
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
     }));

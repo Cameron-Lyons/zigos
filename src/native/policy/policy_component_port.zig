@@ -1,6 +1,7 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const manifest = @import("manifest.zig");
+const manifest_fixtures = @import("manifest_fixtures.zig");
 const policy_mediation = @import("policy_mediation.zig");
 const request_header = @import("../core/request_header.zig");
 
@@ -158,23 +159,8 @@ test "policy port rejects invalid manifests before mediation" {
         },
     );
     var port = Port.init(&mediator);
-    const background_tasks = [_]manifest.BackgroundTaskDecl{
-        .{
-            .id = "sync",
-            .trigger = .push_event,
-            .expected_duration_seconds = 30,
-            .budget = .{
-                .cpu_time_ticks = 100,
-                .memory_bytes = 1024,
-            },
-        },
-    };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.sync",
-        .display_name = "Sync",
-        .publisher = "zigos.dev",
-        .background_tasks = &background_tasks,
-    };
+    var bundle = manifest_fixtures.syncPushBundle();
+    bundle.requested_permissions = &.{};
 
     try std.testing.expectError(error.MissingBackgroundPermission, port.applyManifest(.{
         .header = makeHeader(.apply_manifest, 3, task.id),

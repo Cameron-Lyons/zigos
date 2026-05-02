@@ -15,6 +15,7 @@ from spec_coverage_lib import (
 )
 
 TEST_PATTERN = re.compile(r'^\s*test\s+"([^"]+)"', re.MULTILINE)
+EVIDENCE_STATUSES = {"enforced", "modeled", "scenario", "deferred"}
 
 
 def load_manifest() -> dict:
@@ -114,6 +115,100 @@ def main() -> int:
     for requirement_id in extra_requirements:
         errors.append(f"Unexpected spec requirement in coverage manifest: {requirement_id}")
 
+    evidence = manifest.get("requirement_evidence", {})
+    if not isinstance(evidence, dict):
+        errors.append("coverage manifest requirement_evidence must be an object")
+        evidence = {}
+
+    evidence_requirements = set(evidence)
+    missing_evidence = sorted(required_requirement_set - evidence_requirements)
+    extra_evidence = sorted(evidence_requirements - required_requirement_set)
+    for requirement_id in missing_evidence:
+        errors.append(f"Required spec requirement is missing requirement_evidence: {requirement_id}")
+    for requirement_id in extra_evidence:
+        errors.append(f"Unexpected requirement_evidence entry: {requirement_id}")
+
+    enforced_count = 0
+    scenario_count = 0
+    negative_test_count = 0
+    for requirement_id in required_requirements:
+        requirement_evidence = evidence.get(requirement_id)
+        if not isinstance(requirement_evidence, dict):
+            errors.append(f"Requirement evidence for {requirement_id} must be an object")
+            continue
+
+        status = requirement_evidence.get("status")
+        if status not in EVIDENCE_STATUSES:
+            errors.append(
+                f"Requirement evidence for {requirement_id} has invalid status: {status!r}"
+            )
+            continue
+
+        if status == "scenario":
+            scenario_count += 1
+        if status == "enforced":
+            enforced_count += 1
+            enforcement_modules = requirement_evidence.get("enforcement_modules", [])
+            if not isinstance(enforcement_modules, list) or not enforcement_modules:
+                errors.append(
+                    f"Enforced requirement {requirement_id} must list enforcement_modules"
+                )
+            else:
+                for module in enforcement_modules:
+                    if not isinstance(module, str):
+                        errors.append(
+                            f"Enforced requirement {requirement_id} has non-string enforcement module"
+                        )
+                        continue
+                    module_path = ROOT_DIR / module
+                    if not module_path.exists():
+                        errors.append(
+                            f"Enforced requirement {requirement_id} references missing enforcement module: {module}"
+                        )
+                    elif module_path.match("src/tests/spec/*"):
+                        errors.append(
+                            f"Enforced requirement {requirement_id} uses a spec test as an enforcement module: {module}"
+                        )
+
+            negative_tests = requirement_evidence.get("negative_tests", [])
+            if not isinstance(negative_tests, list) or not negative_tests:
+                errors.append(f"Enforced requirement {requirement_id} must list negative_tests")
+            else:
+                for test_ref in negative_tests:
+                    if not isinstance(test_ref, dict):
+                        errors.append(
+                            f"Enforced requirement {requirement_id} has malformed negative test reference"
+                        )
+                        continue
+                    path_value = test_ref.get("file")
+                    name_value = test_ref.get("name")
+                    if not isinstance(path_value, str) or not isinstance(name_value, str):
+                        errors.append(
+                            f"Enforced requirement {requirement_id} negative test references need file and name"
+                        )
+                        continue
+                    path = ROOT_DIR / path_value
+                    if not path.exists():
+                        errors.append(
+                            f"Enforced requirement {requirement_id} references missing negative test file: {path_value}"
+                        )
+                        continue
+                    test_names = load_test_names(test_cache, path)
+                    if name_value not in test_names:
+                        errors.append(
+                            f"Enforced requirement {requirement_id} references missing negative test in {path_value}: {name_value}"
+                        )
+                    negative_test_count += 1
+        else:
+            if "negative_tests" in requirement_evidence:
+                errors.append(
+                    f"Requirement {requirement_id} is {status} but lists negative_tests; mark it enforced or remove the enforced evidence"
+                )
+            if not requirement_evidence.get("coverage_note"):
+                errors.append(
+                    f"Requirement {requirement_id} is {status} and must include coverage_note explaining why it is not enforced"
+                )
+
     if errors:
         for error in errors:
             print(error, file=sys.stderr)
@@ -124,7 +219,10 @@ def main() -> int:
         f"{len(required_headings)} headings, "
         f"{len(required_requirements)} requirements, "
         f"{len(manifest['sections'])} section groups, "
-        f"{referenced_test_count} test references"
+        f"{referenced_test_count} test references, "
+        f"{enforced_count} enforced requirements, "
+        f"{scenario_count} scenario-only requirements, "
+        f"{negative_test_count} negative test references"
     )
     return 0
 
