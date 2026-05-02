@@ -186,6 +186,33 @@ pub fn publishedDriversActivateScopedTransports() !void {
     try std.testing.expectEqualStrings("e1000", runtime.findByClass(.network_adapter).?.publisherSlice());
     try std.testing.expectEqualStrings("ata-bootstrap", runtime.findByClass(.storage_controller).?.publisherSlice());
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.graphics_adapter).?.mode);
+
+    var unauthorized_directory = driver_service.Directory.init();
+    const unauthorized_network = try unauthorized_directory.register(.{
+        .service_id = 95,
+        .owner_task_id = 901,
+        .device_id = network_device_id,
+        .device_class = .network_adapter,
+        .authority_capability_id = network_authority.id,
+        .capability_table = &capabilities,
+        .requester = network_authority.holder,
+        .now_ticks = 2,
+        .bundle = bundle,
+    });
+    try std.testing.expectError(driver_runtime_mod.Error.KernelBootstrapNotAuthorized, runtime.activateAt(unauthorized_network, 2));
+    var unsupported_transport_directory = driver_service.Directory.init();
+    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
+        .service_id = 94,
+        .owner_task_id = 903,
+        .device_id = 0x1234_1111_0001,
+        .device_class = .graphics_adapter,
+        .authority_capability_id = graphics_authority.id,
+        .capability_table = &capabilities,
+        .requester = graphics_authority.holder,
+        .now_ticks = 2,
+        .bundle = bundle,
+        .bootstrap_transport = .kernel_published_data_plane,
+    }));
 }
 
 pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
@@ -487,4 +514,121 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     });
     try std.testing.expect(!denied_relay_connection.allowed);
     try std.testing.expectEqual(network_policy.EgressDecisionReason.destination_mismatch, denied_relay_connection.reason);
+
+    const latest_notes_frame = sync.latestTransportFrameForPath(workspace_record.id, tablet, "documents/notes.md").?;
+    try std.testing.expect(latest_notes_frame.encrypted);
+    try std.testing.expectEqual(sync_service.TransportMode.device_to_device, latest_notes_frame.transport);
+    try std.testing.expectEqual(sync_service.SyncSemantic.mergeable_crdt, latest_notes_frame.semantic);
+    try std.testing.expectEqualStrings("documents/notes.md", latest_notes_frame.pathSlice());
+    try std.testing.expectEqual(summary.transport_frame_count, summary.encrypted_transport_count);
+
+    const relay_session = try sync.openOverlaySession(
+        workspace_record.id,
+        laptop,
+        tablet,
+        .remote_access,
+        .relay_assisted,
+        null,
+        30,
+    );
+    try std.testing.expect(relay_session.encrypted);
+    try std.testing.expect(relay_session.relay_encrypted);
+    try std.testing.expect(relay_session.remote_access);
+    try std.testing.expectEqualStrings("overlay.notes.spec", relay_session.serviceIdentitySlice());
+    try std.testing.expectEqualStrings("relay.spec.zigos", relay_session.relayDomainSlice());
+    try std.testing.expectError(sync_service.Error.DeviceNotTrusted, sync.openOverlaySession(
+        workspace_record.id,
+        laptop,
+        spec_support.device(99),
+        .sync_replication,
+        .device_to_device,
+        null,
+        31,
+    ));
+
+    try realDriverEgressRequiresNetworkPolicyCapability(collaborator);
+}
+
+fn realDriverEgressRequiresNetworkPolicyCapability(requester: @TypeOf(spec_support.app(1))) !void {
+    if (@import("builtin").target.os.tag == .freestanding) return error.SkipZigTest;
+
+    const Harness = struct {
+        var send_count: usize = 0;
+        var policies = network_policy.Directory.init();
+        var capabilities = capability.CapabilityTable.init();
+        var task_id: u64 = 0;
+        var principal_id = spec_support.app(0);
+        var live_policy_id: u64 = 0;
+
+        fn send(_: []const u8) void {
+            send_count += 1;
+        }
+
+        fn mac() [6]u8 {
+            return .{ 0x02, 0x99, 0x88, 0x77, 0x66, 0x55 };
+        }
+
+        fn broker(request: bootstrap_driver_port.EgressRequest) bootstrap_driver_port.EgressDecision {
+            var egress = network_policy.EgressBroker.init(&policies, &capabilities);
+            const decision = egress.connect(.{
+                .task_id = task_id,
+                .principal_id = principal_id,
+                .capability_id = request.egress_capability_id,
+                .policy_id = request.network_policy_id,
+                .evidence = .{ .destination = .{ .domain = "relay.spec.zigos" } },
+                .now_ticks = 25,
+            }) catch return .{ .allowed = false, .capability_backed = false };
+            return .{
+                .allowed = decision.allowed,
+                .capability_backed = decision.allowed and decision.capability_id != 0 and decision.policy_id == live_policy_id,
+            };
+        }
+    };
+
+    bootstrap_driver_port.reset();
+    defer bootstrap_driver_port.reset();
+
+    Harness.send_count = 0;
+    Harness.policies = network_policy.Directory.init();
+    Harness.capabilities = capability.CapabilityTable.init();
+    Harness.task_id = 631;
+    Harness.principal_id = requester;
+    const policy = try Harness.policies.create(.{
+        .owner = spec_support.service(31),
+        .label = "relay",
+        .mode = .named_domain,
+        .target = "relay.spec.zigos",
+    });
+    Harness.live_policy_id = policy.id;
+    const authority = try Harness.capabilities.mintBootRoot(.{
+        .holder = requester,
+        .issuer = spec_support.policyAuthority(31),
+        .target = .{ .kind = .network_policy, .id = policy.id },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .scope = .{ .task_id = Harness.task_id, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 20, .expires_at_ticks = 40 },
+    });
+    const device = bootstrap_driver_port.NetworkDevice{
+        .send = Harness.send,
+        .getMacAddress = Harness.mac,
+    };
+    try std.testing.expect(bootstrap_driver_port.publishNetworkDevice(0xCAFE, "policy-egress", &device, false));
+    try std.testing.expect(bootstrap_driver_port.activateNetworkDevice(0xCAFE, 800));
+    bootstrap_driver_port.setEgressBroker(Harness.broker);
+
+    const frame = "dst=relay.spec.zigos";
+    try std.testing.expect(!bootstrap_driver_port.sendActiveNetworkFrame(frame));
+    try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
+
+    bootstrap_driver_port.bindEgressCapability(authority.id + 1, policy.id);
+    try std.testing.expect(!bootstrap_driver_port.sendActiveNetworkFrame(frame));
+    try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
+
+    bootstrap_driver_port.bindEgressCapability(authority.id, policy.id + 1);
+    try std.testing.expect(!bootstrap_driver_port.sendActiveNetworkFrame(frame));
+    try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
+
+    bootstrap_driver_port.bindEgressCapability(authority.id, policy.id);
+    try std.testing.expect(bootstrap_driver_port.sendActiveNetworkFrame(frame));
+    try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
 }

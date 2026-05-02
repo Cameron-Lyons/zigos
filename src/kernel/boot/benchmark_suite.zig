@@ -43,6 +43,12 @@ const BenchmarkCase = struct {
     runIteration: *const fn (iteration: u32) u64,
 };
 
+const ScalingCapabilityTable = capability.CapabilityTableWith(.{
+    .max_capabilities = 512,
+    .capability_index_capacity = 1024,
+    .max_target_generations = 128,
+});
+
 const FileBridgeContext = struct {
     expected_workspace_id: u64 = 0,
     expected_path: []const u8 = "",
@@ -147,6 +153,8 @@ const UpdateHealthContext = struct {
 
 const cases = [_]BenchmarkCase{
     .{ .name = "capability.derive.workspace_object", .iterations = 40_000, .runIteration = benchmarkCapabilityDerive },
+    .{ .name = "capability.mint_reuse_free_slot", .iterations = 4_000, .runIteration = benchmarkCapabilityMintReuseFreeSlot },
+    .{ .name = "capability.target_generation_lookup", .iterations = 4_000, .runIteration = benchmarkCapabilityTargetGenerationLookup },
     .{ .name = "permission.review.render_grants", .iterations = 12_000, .runIteration = benchmarkPermissionReviewRender },
     .{ .name = "network_policy.authorize_connection", .iterations = 60_000, .runIteration = benchmarkNetworkPolicyAuthorize },
     .{ .name = "background_dispatch.allowed_sync", .iterations = 8_000, .runIteration = benchmarkBackgroundDispatch },
@@ -681,6 +689,100 @@ fn benchmarkCapabilityDerive(iteration: u32) u64 {
         },
     }) catch unreachable;
     return derived.id + derived.target.id + derived.scope.workspace_id.?;
+}
+
+fn benchmarkCapabilityMintReuseFreeSlot(iteration: u32) u64 {
+    var table = ScalingCapabilityTable.init();
+    var minted_ids: [128]u64 = [_]u64{0} ** 128;
+    var checksum: u64 = iteration;
+
+    for (&minted_ids, 0..) |*capability_id, index| {
+        const minted = table.mintBootRoot(.{
+            .holder = app(1000 + @as(u32, @intCast(index % 31))),
+            .issuer = policyAuthority(3),
+            .target = .{ .kind = .workspace, .id = 8000 + iteration },
+            .rights = .{ .workspace = .{
+                .object_read = true,
+                .object_write = true,
+                .capability_query = true,
+            } },
+            .scope = .{
+                .workspace_id = 8000 + iteration,
+                .local_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = 1,
+                .expires_at_ticks = 1000,
+            },
+        }) catch unreachable;
+        capability_id.* = minted.id;
+        checksum +%= minted.id;
+    }
+
+    var index: usize = 0;
+    while (index < minted_ids.len) : (index += 2) {
+        table.revokeGrant(minted_ids[index]) catch unreachable;
+    }
+
+    index = 0;
+    while (index < 64) : (index += 1) {
+        const minted = table.mintBootRoot(.{
+            .holder = app(2000 + @as(u32, @intCast(index % 31))),
+            .issuer = policyAuthority(3),
+            .target = .{ .kind = .workspace, .id = 8000 + iteration },
+            .rights = .{ .workspace = .{
+                .object_read = true,
+                .capability_query = true,
+            } },
+            .scope = .{
+                .workspace_id = 8000 + iteration,
+                .local_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = 1,
+                .expires_at_ticks = 1000,
+            },
+        }) catch unreachable;
+        checksum +%= minted.id + minted.holder.serial;
+    }
+
+    return checksum;
+}
+
+fn benchmarkCapabilityTargetGenerationLookup(iteration: u32) u64 {
+    var table = ScalingCapabilityTable.init();
+    var capabilities: [96]capability.Capability = undefined;
+    var checksum: u64 = iteration;
+
+    for (&capabilities, 0..) |*slot, index| {
+        const target_id = 12_000 + iteration * 128 + @as(u32, @intCast(index));
+        slot.* = table.mintBootRoot(.{
+            .holder = app(3000 + @as(u32, @intCast(index % 31))),
+            .issuer = policyAuthority(4),
+            .target = .{ .kind = .service, .id = target_id },
+            .rights = .{ .service = .{
+                .capability_query = true,
+                .capability_revoke = true,
+            } },
+            .scope = .{
+                .task_id = 4000 + @as(u32, @intCast(index)),
+                .local_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = 1,
+                .expires_at_ticks = 1000,
+            },
+        }) catch unreachable;
+        checksum +%= slot.id;
+    }
+
+    for (capabilities, 0..) |capability_record, index| {
+        if (table.isUsable(capability_record, 10)) checksum +%= @as(u64, @intCast(index + 1));
+    }
+
+    table.revokeTargetAuthority(capabilities[capabilities.len - 1].id) catch unreachable;
+    if (!table.isUsable(capabilities[capabilities.len - 1], 10)) checksum +%= capabilities[capabilities.len - 1].target.id;
+    return checksum;
 }
 
 fn benchmarkPermissionReviewRender(iteration: u32) u64 {

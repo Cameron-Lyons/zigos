@@ -175,6 +175,10 @@
           "name": "spec 4 and 6.3 require kernel-mediated launches and typed services to carry userspace image provenance"
         },
         {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 4 6.3 and 7 harden modeled kernel isolation and component abi claims"
+        },
+        {
           "file": "src/native/kernel_api/native_kernel.zig",
           "name": "native kernel creates tasks endpoints and shared memory without owning service discovery"
         },
@@ -230,6 +234,10 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 4 6.3 and 7 harden modeled kernel isolation and component abi claims"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy scoped"
         },
         {
@@ -275,6 +283,10 @@
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 4 6.3 and 7 harden modeled kernel isolation and component abi claims"
         },
         {
           "file": "src/native/policy/policy_mediation.zig",
@@ -759,5 +771,572 @@
     "REQ-EXAMPLE-APPLICATION-MANIFEST",
     "REQ-ZIGOS-USER-EXPERIENCE",
     "REQ-ONE-SENTENCE-SUMMARY"
-  ]
+  ],
+  "requirement_evidence": {
+    "REQ-DESIGN-GOALS-AND-NON-GOALS": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-ZERO-AMBIENT-AUTHORITY": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/task/task_runtime.zig",
+        "src/native/policy/policy_mediation.zig",
+        "src/native/kernel_api/native_kernel.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/policy/policy_mediation.zig",
+          "name": "policy mediation denies zero-authority requests without user grants"
+        }
+      ]
+    },
+    "REQ-IMMUTABLE-BASE-SYSTEM": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-USERSPACE-SERVICES-BY-DEFAULT": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-DATA-IS-VERSIONED": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/storage/object_store.zig",
+        "src/native/storage/workspace.zig",
+        "src/native/storage/storage_service.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/storage/storage_volume.zig",
+          "name": "storage volume rejects corrupted slot payloads"
+        }
+      ]
+    },
+    "REQ-PLATFORM-APIS-OVER-SYSTEM-INTERNALS": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-PRINCIPAL-MODEL": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/core/principal.zig",
+        "src/native/core/signing.zig",
+        "src/native/sync/device_graph.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation service does not count hidden requests and detects tampering"
+        }
+      ]
+    },
+    "REQ-CAPABILITY-MODEL": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/kernel_api/capability.zig",
+        "src/native/kernel_api/native_kernel.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/kernel_api/capability.zig",
+          "name": "derive rejects rights and scope escalation"
+        }
+      ]
+    },
+    "REQ-OBJECT-MODEL": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/storage/object_store.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/storage/object_store.zig",
+          "name": "object store supports every native object type and rejects unsigned metadata"
+        }
+      ]
+    },
+    "REQ-WORKSPACE-MODEL": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/storage/workspace.zig",
+        "src/native/storage/storage_service.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/storage/workspace.zig",
+          "name": "workspace restore rejects tampered signed snapshots"
+        }
+      ]
+    },
+    "REQ-TASK-MODEL": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/task/task_runtime_model.zig",
+        "src/native/task/task_runtime_service.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/task/task_runtime_service.zig",
+          "name": "task runtime service refuses restart before a checkpoint exists"
+        }
+      ]
+    },
+    "REQ-KERNEL-TYPE-AND-BOUNDARY": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-KERNEL-REQUIREMENTS": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-PRIVILEGE-MODEL": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-BOOT-CHAIN": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/platform/measured_boot.zig",
+        "src/native/session/session_manager_boot_flow.zig",
+        "scripts/run-zigos-native-smoke.sh"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "adversarial spec treats downgrade and rollback metadata replay as invalid"
+        }
+      ]
+    },
+    "REQ-MEASURED-STATE": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/platform/measured_boot.zig",
+        "src/native/platform/attestation_service.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation service does not count hidden requests and detects tampering"
+        }
+      ]
+    },
+    "REQ-RECOVERY-MODE": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-APP-PACKAGING": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/policy/manifest.zig",
+        "src/native/services/package_service.zig",
+        "src/native/task/userspace_manifest_signing.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/services/package_service.zig",
+          "name": "package service rejects invalid signatures and rollback before any update"
+        }
+      ]
+    },
+    "REQ-APP-EXECUTION": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-COMPONENT-MODEL": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-BACKGROUND-EXECUTION": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/policy/manifest.zig",
+        "src/native/task/background_dispatch.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/task/background_dispatch.zig",
+          "name": "background dispatch throttles delayed work and denies abusive budgets"
+        }
+      ]
+    },
+    "REQ-CAPABILITY-BASED-ACCESS-CONTROL": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/kernel_api/capability.zig",
+        "src/native/kernel_api/native_kernel_access.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "adversarial spec rejects revoked capabilities during ipc"
+        }
+      ]
+    },
+    "REQ-PERMISSION-GRANTS": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/policy/permission_review.zig",
+        "src/native/policy/permission_review_service.zig",
+        "src/native/policy/policy_mediation.zig",
+        "src/native/platform/event_ledger.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/policy/policy_mediation.zig",
+          "name": "policy mediation denies zero-authority requests without user grants"
+        }
+      ]
+    },
+    "REQ-DATA-EGRESS-CONTROL": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/sync/network_policy.zig",
+        "src/native/sync/sync_service_impl.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/drivers/bootstrap_driver_port.zig",
+          "name": "adversarial raw IP or domain knowledge cannot substitute for egress capability"
+        }
+      ]
+    },
+    "REQ-PROCESS-ISOLATION": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-SECRETS": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/platform/secure_secret_store.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/platform/secure_secret_store.zig",
+          "name": "secure secret store reports missing handles and oversized secrets"
+        }
+      ]
+    },
+    "REQ-OBJECT-STORE": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/storage/object_store.zig",
+        "src/native/storage/storage_volume.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/storage/object_store.zig",
+          "name": "object store verifies blob backend corruption before serving payloads"
+        }
+      ]
+    },
+    "REQ-MUTABLE-STATE": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-FILE-BRIDGE": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/storage/file_bridge.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/storage/file_bridge.zig",
+          "name": "file bridge is derived, permission-aware, and non-authoritative"
+        }
+      ]
+    },
+    "REQ-SNAPSHOTS-AND-RECOVERY": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/storage/workspace.zig",
+        "src/native/platform/recovery_environment.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/storage/workspace.zig",
+          "name": "workspace restore rejects tampered signed snapshots"
+        }
+      ]
+    },
+    "REQ-DEVICE-GRAPH": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/sync/device_graph.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/sync/device_graph.zig",
+          "name": "device graph roots user principals and manages enrollment rotation and revocation"
+        }
+      ]
+    },
+    "REQ-LOCAL-FIRST-REPLICATION": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-SYNC-SEMANTICS": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/sync/sync_state_support.zig",
+        "src/native/sync/sync_service_impl.zig",
+        "src/native/sync/sync_adapters.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/sync/sync_service_impl.zig",
+          "name": "sync service covers device graph policy replication semantics and restart recovery"
+        }
+      ]
+    },
+    "REQ-SHARING": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/storage/workspace.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/storage/workspace.zig",
+          "name": "workspace sharing acts as a mutable policy container"
+        }
+      ]
+    },
+    "REQ-IDENTITY-FIRST-NETWORKING": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-NETWORK-PERMISSIONS": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/sync/network_policy.zig",
+        "src/native/sync/sync_service_impl.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/sync/network_policy.zig",
+          "name": "egress broker requires a usable network policy capability before connecting"
+        }
+      ]
+    },
+    "REQ-PRIVATE-OVERLAY": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-TASK-FIRST-UX": {
+      "status": "scenario",
+      "coverage_note": "scenario-only"
+    },
+    "REQ-WINDOWS-AND-VIEWS": {
+      "status": "scenario",
+      "coverage_note": "scenario-only"
+    },
+    "REQ-PERMISSION-UX": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/policy/permission_review.zig",
+        "src/native/policy/permission_review_service.zig",
+        "src/native/platform/compositor_session.zig",
+        "src/native/platform/event_ledger.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/policy/permission_review_service.zig",
+          "name": "review service rejects invalid manifests before auditing"
+        }
+      ]
+    },
+    "REQ-NOTIFICATIONS": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/services/notification_center.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/services/media_print_service.zig",
+          "name": "media print service rejects remote printing and hidden jobs stay silent"
+        }
+      ]
+    },
+    "REQ-UNIFIED-RESOURCE-SCHEDULER": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-SHARED-MEMORY-OBJECTS": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/kernel_api/shared_memory.zig",
+        "src/native/task/accelerator_scheduler.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/kernel_api/shared_memory.zig",
+          "name": "shared memory objects map unmap and revoke across tasks"
+        }
+      ]
+    },
+    "REQ-THERMAL-AND-POWER-POLICY": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-USERSPACE-DRIVERS": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-DRIVER-PERMISSIONS": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/drivers/driver_service.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/drivers/driver_service.zig",
+          "name": "driver services reject unsigned bundles and escalated device rights"
+        }
+      ]
+    },
+    "REQ-DRIVER-HOT-SWAP-AND-FAILURE-RECOVERY": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/session/supervisor.zig",
+        "src/native/drivers/driver_service.zig",
+        "src/native/platform/event_ledger.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "adversarial spec records service crash loops without losing restart state"
+        }
+      ]
+    },
+    "REQ-BASE-OS-UPDATES": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-HEALTH-CHECKS": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/platform/update_health.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/platform/update_health.zig",
+          "name": "update health failures trigger rollback for each required post-activation check"
+        }
+      ]
+    },
+    "REQ-APP-UPDATES": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/services/package_service.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/services/package_service.zig",
+          "name": "package service rejects invalid signatures and rollback before any update"
+        }
+      ]
+    },
+    "REQ-STRUCTURED-EVENT-LEDGER": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/platform/event_ledger.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/platform/event_ledger.zig",
+          "name": "event ledger requires explicit opt-in before remote sharing personal device diagnostics"
+        }
+      ]
+    },
+    "REQ-EXPLAINABLE-DENIALS": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/policy/denial_explanation.zig",
+        "src/native/platform/event_ledger.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/policy/denial_explanation.zig",
+          "name": "permission denials explain blocking policy capability approval and retry hints"
+        }
+      ]
+    },
+    "REQ-PRIVACY-PRESERVING-DIAGNOSTICS": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-POLICY-OBJECTS": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/policy/policy_object.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/policy/policy_object.zig",
+          "name": "policy objects reject oversized lists and refuse authorization after tampering"
+        }
+      ]
+    },
+    "REQ-POLICY-EXAMPLES": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/policy/policy_object.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/policy/policy_object.zig",
+          "name": "policy objects reject oversized lists and refuse authorization after tampering"
+        }
+      ]
+    },
+    "REQ-ENTERPRISE-SUPPORT": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/policy/policy_object.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/policy/policy_object.zig",
+          "name": "policy objects reject oversized lists and refuse authorization after tampering"
+        }
+      ]
+    },
+    "REQ-NATIVE-PLATFORM": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    },
+    "REQ-LEGACY-SUPPORT": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/services/compatibility_environment.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/services/compatibility_environment.zig",
+          "name": "compatibility environments reject unsigned hidden or host-integrated launches"
+        }
+      ]
+    },
+    "REQ-EXAMPLE-APPLICATION-MANIFEST": {
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/policy/manifest.zig",
+        "src/native/demo/bootstrap_packages.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/policy/manifest.zig",
+          "name": "validate rejects incomplete or duplicate component declarations"
+        }
+      ]
+    },
+    "REQ-ZIGOS-USER-EXPERIENCE": {
+      "status": "scenario",
+      "coverage_note": "scenario-only"
+    },
+    "REQ-ONE-SENTENCE-SUMMARY": {
+      "status": "modeled",
+      "coverage_note": "modeled; not yet claimed enforced"
+    }
+  }
 }

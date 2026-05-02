@@ -10,6 +10,9 @@ const required_zig_version = "0.16.0";
 pub fn build(b: *std.Build) void {
     enforceZigVersion();
 
+    const verify_smoke = b.option(bool, "verify-smoke", "Include the QEMU native smoke test in `zig build verify`") orelse false;
+    const verify_benchmark = b.option(bool, "verify-benchmark", "Include the QEMU benchmark suite in `zig build verify`") orelse false;
+
     const target = b.standardTargetOptions(.{
         .default_target = .{
             .cpu_arch = .x86,
@@ -124,6 +127,21 @@ pub fn build(b: *std.Build) void {
     const host_tests_step = b.step("host-tests", "Run host-side unit tests for native logic");
     host_tests_step.dependOn(&run_host_tests.step);
 
+    const fmt_check_cmd = b.addSystemCommand(&.{
+        "bash",
+        "-c",
+        "./scripts/zig.sh fmt --check $(git ls-files '*.zig')",
+    });
+    const fmt_check_step = b.step("fmt-check", "Check Zig formatting for tracked source files");
+    fmt_check_step.dependOn(&fmt_check_cmd.step);
+
+    const shell_lint_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/lint-shell.sh",
+    });
+    const shell_lint_step = b.step("shell-lint", "Run ShellCheck over all repository shell scripts");
+    shell_lint_step.dependOn(&shell_lint_cmd.step);
+
     const spec_coverage_cmd = b.addSystemCommand(&.{
         "python3",
         "tools/check_spec_coverage.py",
@@ -155,6 +173,14 @@ pub fn build(b: *std.Build) void {
     benchmark_cmd.step.dependOn(userspace_images.step);
     const benchmark_step = b.step("benchmark", "Build and run the spec-aligned native benchmark suite in QEMU");
     benchmark_step.dependOn(&benchmark_cmd.step);
+
+    const verify_step = b.step("verify", "Run formatting, shell lint, host tests, and spec tests; pass -Dverify-smoke=true and/or -Dverify-benchmark=true for QEMU gates");
+    verify_step.dependOn(&fmt_check_cmd.step);
+    verify_step.dependOn(&shell_lint_cmd.step);
+    verify_step.dependOn(&run_host_tests.step);
+    verify_step.dependOn(&run_spec_tests.step);
+    if (verify_smoke) verify_step.dependOn(&zigos_native_smoke_test_cmd.step);
+    if (verify_benchmark) verify_step.dependOn(&benchmark_cmd.step);
 
     const iso_cmd = b.addSystemCommand(&.{
         "bash",

@@ -18,6 +18,8 @@ const policy_object = @import("../../native/policy/policy_object.zig");
 const principal = @import("../../native/core/principal.zig");
 const service_registry = @import("../../native/services/service_registry.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
+const syscall_abi = @import("../../native/kernel_api/syscall_abi.zig");
+const syscall_surface = @import("../../native/kernel_api/syscall_surface.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const task_runtime_service = @import("../../native/task/task_runtime_service.zig");
 const userspace_loader = @import("../../native/task/userspace_loader.zig");
@@ -715,6 +717,76 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
     const connection = try service_directory.connect(.{ .name = "zigos.object.spec-storage" });
     try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
     try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE));
+}
+
+pub fn modeledKernelClaimsHaveHardEnforcementProofs() !void {
+    try mmuStyleAddressSpaceValidationRejectsCrossSpaceRanges();
+    try componentAbiDeclarationsCoverEveryTypedOperation();
+}
+
+fn mmuStyleAddressSpaceValidationRejectsCrossSpaceRanges() !void {
+    var app_address_space = std.mem.zeroes(task_runtime.AddressSpaceRecord);
+    app_address_space.id = 1;
+    app_address_space.owner_task_id = 10;
+    app_address_space.region_count = 2;
+    app_address_space.regions[0] = .{
+        .kind = .load_segment,
+        .virtual_address = 0x20000,
+        .size_bytes = 0x1000,
+        .file_offset = 0,
+        .file_size = 0,
+        .access = .{ .read = true, .execute = true },
+    };
+    app_address_space.regions[1] = .{
+        .kind = .stack,
+        .virtual_address = 0x30000,
+        .size_bytes = 0x1000,
+        .file_offset = 0,
+        .file_size = 0,
+        .access = .{ .read = true, .write = true },
+    };
+
+    var peer_address_space = std.mem.zeroes(task_runtime.AddressSpaceRecord);
+    peer_address_space.id = 2;
+    peer_address_space.owner_task_id = 11;
+    peer_address_space.region_count = 1;
+    peer_address_space.regions[0] = .{
+        .kind = .load_segment,
+        .virtual_address = 0x40000,
+        .size_bytes = 0x1000,
+        .file_offset = 0,
+        .file_size = 0,
+        .access = .{ .read = true, .write = true },
+    };
+
+    try std.testing.expect(syscall_surface.validateAddressSpaceRange(&app_address_space, 0x20020, 0x20080, .read));
+    try std.testing.expect(!syscall_surface.validateAddressSpaceRange(&app_address_space, 0x20020, 0x20080, .write));
+    try std.testing.expect(syscall_surface.validateAddressSpaceRange(&app_address_space, 0x30020, 0x30080, .write));
+    try std.testing.expect(!syscall_surface.validateAddressSpaceRange(&app_address_space, 0x20FF0, 0x30020, .read));
+    try std.testing.expect(!syscall_surface.validateAddressSpaceRange(&app_address_space, 0x40020, 0x40080, .read));
+    try std.testing.expect(syscall_surface.validateAddressSpaceRange(&peer_address_space, 0x40020, 0x40080, .write));
+}
+
+fn componentAbiDeclarationsCoverEveryTypedOperation() !void {
+    try std.testing.expectEqual(std.meta.fields(abi.NativeOperation).len, syscall_abi.operations.len);
+
+    inline for (std.meta.fields(abi.NativeOperation)) |field| {
+        const operation: abi.NativeOperation = @enumFromInt(field.value);
+        const declaration = syscall_abi.declarationFor(operation);
+        try std.testing.expectEqual(operation, declaration.operation);
+        try std.testing.expect(declaration.requestSize() >= @sizeOf(abi.RequestHeader));
+        if (declaration.responseSize() != 0) {
+            try std.testing.expect(declaration.responseSize() >= @sizeOf(u8));
+        }
+    }
+
+    try std.testing.expectEqual(syscall_abi.Domain.task, syscall_abi.declarationFor(.task_create).domain);
+    try std.testing.expectEqual(syscall_abi.Domain.endpoint, syscall_abi.declarationFor(.endpoint_send).domain);
+    try std.testing.expectEqual(syscall_abi.Domain.capability, syscall_abi.declarationFor(.capability_derive).domain);
+    try std.testing.expectEqual(syscall_abi.Domain.shared_memory, syscall_abi.declarationFor(.shared_memory_map).domain);
+    try std.testing.expectEqual(syscall_abi.Domain.device, syscall_abi.declarationFor(.device_port_write).domain);
+    try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscall_abi.declarationFor(.task_create).request_copy);
+    try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscall_abi.declarationFor(.endpoint_send).request_copy);
 }
 
 pub fn principalIdentityAndAdministrativeScopeStaySplit() !void {

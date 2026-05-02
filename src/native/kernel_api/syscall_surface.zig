@@ -1,6 +1,5 @@
-const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
-const builtin = @import("builtin");
 const std = @import("std");
+const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
 const abi = @import("../core/abi.zig");
 const capability = @import("capability.zig");
 const component_port = @import("component_port.zig");
@@ -8,27 +7,16 @@ const endpoint = @import("endpoint.zig");
 const native_kernel = @import("native_kernel.zig");
 const shared_memory = @import("shared_memory.zig");
 const syscall_abi = @import("syscall_abi.zig");
+const syscall_dispatch = @import("syscall_dispatch.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 
-const USER_POINTER_FLOOR: usize = 0x10000;
-const USER_POINTER_CEILING_32: usize = 0xC0000000;
-const MAX_COMPONENT_LABEL_BYTES: usize = 48;
-const MAX_COMPONENT_ENTRY_BYTES: usize = 64;
-
-pub const DispatchResult = struct {
-    status: abi.SyscallStatus,
-    bytes_written: u32 = 0,
-    denial_reason: abi.DenialReason = .none,
-};
-
-const UserMemoryAccess = enum {
-    read,
-    write,
-};
+pub const DispatchResult = syscall_dispatch.DispatchResult;
+pub const UserMemoryAccess = syscall_dispatch.UserMemoryAccess;
+pub const validateAddressSpaceRange = syscall_dispatch.validateAddressSpaceRange;
 
 const DispatchHandler = *const fn (
     port: *component_port.KernelPort,
-    memory: UserMemoryContext,
+    memory: syscall_dispatch.UserMemoryContext,
     now_ticks: u64,
     request_addr: usize,
     response_addr: usize,
@@ -45,58 +33,27 @@ const SyscallDescriptor = struct {
 };
 
 fn syscallDescriptor(
-    comptime operation: abi.NativeOperation,
-    comptime handler: DispatchHandler,
+    comptime declaration: syscall_abi.Operation,
 ) SyscallDescriptor {
-    const declaration = syscall_abi.declarationFor(operation);
     return .{
-        .operation = operation,
+        .operation = declaration.operation,
         .request_size = declaration.requestSize(),
         .response_size = declaration.responseSize(),
         .domain = declaration.domain,
         .request_copy = declaration.request_copy,
-        .handler = handler,
+        .handler = declaration.handler,
     };
 }
 
-const syscall_table = [_]SyscallDescriptor{
-    syscallDescriptor(.task_create, dispatchTaskCreate),
-    syscallDescriptor(.task_terminate, dispatchTaskTerminate),
-    syscallDescriptor(.endpoint_create, dispatchEndpointCreate),
-    syscallDescriptor(.endpoint_connect, dispatchEndpointConnect),
-    syscallDescriptor(.endpoint_send, dispatchEndpointSend),
-    syscallDescriptor(.endpoint_recv, dispatchEndpointRecv),
-    syscallDescriptor(.capability_mint, dispatchCapabilityMint),
-    syscallDescriptor(.capability_derive, dispatchCapabilityDerive),
-    syscallDescriptor(.capability_pass, dispatchCapabilityPass),
-    syscallDescriptor(.capability_revoke, dispatchCapabilityRevoke),
-    syscallDescriptor(.capability_query, dispatchCapabilityQuery),
-    syscallDescriptor(.shared_memory_create, dispatchSharedMemoryCreate),
-    syscallDescriptor(.shared_memory_map, dispatchSharedMemoryMap),
-    syscallDescriptor(.shared_memory_unmap, dispatchSharedMemoryUnmap),
-    syscallDescriptor(.shared_memory_revoke, dispatchSharedMemoryRevoke),
-    syscallDescriptor(.time_query, dispatchTimeQuery),
-    syscallDescriptor(.resource_query, dispatchResourceQuery),
-    syscallDescriptor(.accounting_query, dispatchAccountingQuery),
-    syscallDescriptor(.device_describe, dispatchDeviceDescribe),
-    syscallDescriptor(.device_mmio_window, dispatchDeviceMmioWindow),
-    syscallDescriptor(.device_port_read, dispatchDevicePortRead),
-    syscallDescriptor(.device_port_write, dispatchDevicePortWrite),
-};
-
-const UserMemoryContext = struct {
-    address_space: ?*const task_runtime.AddressSpaceRecord,
-
-    fn init(port: *const component_port.KernelPort, caller_task_id: u64) UserMemoryContext {
-        const runtime = port.kernel.runtime;
-        const task = if (caller_task_id != 0) runtime.find(caller_task_id) else null;
-        const address_space = if (task) |caller_task|
-            runtime.findAddressSpaceConst(caller_task.address_space_id)
-        else
-            null;
-        return .{ .address_space = address_space };
+fn buildSyscallTable() [syscall_abi.operations.len]SyscallDescriptor {
+    var table: [syscall_abi.operations.len]SyscallDescriptor = undefined;
+    inline for (syscall_abi.operations, 0..) |declaration, index| {
+        table[index] = syscallDescriptor(declaration);
     }
-};
+    return table;
+}
+
+const syscall_table = buildSyscallTable();
 
 pub fn dispatch(
     port: *component_port.KernelPort,
@@ -106,8 +63,8 @@ pub fn dispatch(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const memory = UserMemoryContext.init(port, caller_task_id);
-    const header = readRequest(abi.RequestHeader, memory, request_addr) orelse return .{
+    const memory = syscall_dispatch.UserMemoryContext.init(port, caller_task_id);
+    const header = syscall_dispatch.readRequest(abi.RequestHeader, memory, request_addr) orelse return .{
         .status = .invalid_request_pointer,
     };
     if (header.version != abi.ABI_VERSION) return .{
@@ -126,443 +83,6 @@ pub fn dispatch(
     return descriptor.handler(port, memory, now_ticks, request_addr, response_addr, response_len);
 }
 
-fn dispatchTaskCreate(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    var request = readRequest(component_port.TaskCreateRequest, memory, request_addr) orelse return invalidRequest();
-    var bundle_id_buffer: [task_runtime.MAX_TASK_BUNDLE_ID_BYTES]u8 = undefined;
-    var component_label_buffer: [MAX_COMPONENT_LABEL_BYTES]u8 = undefined;
-    var component_entry_buffer: [MAX_COMPONENT_ENTRY_BYTES]u8 = undefined;
-    var image_copy = task_runtime.ExecutableImageSpec{};
-    if (!sanitizeTaskCreateRequest(
-        memory,
-        &request,
-        &bundle_id_buffer,
-        &component_label_buffer,
-        &component_entry_buffer,
-        &image_copy,
-    )) return invalidRequest();
-    const task = port.taskCreate(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, task);
-}
-
-fn dispatchTaskTerminate(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.TaskTerminateRequest, memory, request_addr) orelse return invalidRequest();
-    const terminated = port.taskTerminate(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, abi.BoolResponse{
-        .value = @intFromBool(terminated),
-        ._reserved = [_]u8{0} ** 7,
-    });
-}
-
-fn dispatchEndpointCreate(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    var request = readRequest(component_port.EndpointCreateRequest, memory, request_addr) orelse return invalidRequest();
-    var label_buffer: [MAX_COMPONENT_LABEL_BYTES]u8 = undefined;
-    request.label = copyUserSlice(memory, request.label, &label_buffer) orelse return invalidRequest();
-    const created = port.endpointCreate(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, abi.EndpointCreateResponse{
-        .endpoint = created.endpoint,
-        .capability = created.capability,
-        .capability_id = created.capability_id,
-    });
-}
-
-fn dispatchEndpointConnect(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.EndpointConnectRequest, memory, request_addr) orelse return invalidRequest();
-    const descriptor = port.endpointConnect(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, descriptor);
-}
-
-fn dispatchEndpointSend(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    _ = response_len;
-    _ = response_addr;
-    var request = readRequest(component_port.EndpointSendRequest, memory, request_addr) orelse return invalidRequest();
-    var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
-    request.payload = copyUserSlice(memory, request.payload, &payload_buffer) orelse return invalidRequest();
-    port.endpointSend(request, now_ticks) catch |err| return mapError(err);
-    return success();
-}
-
-fn dispatchEndpointRecv(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.EndpointRecvRequest, memory, request_addr) orelse return invalidRequest();
-    const received = port.endpointRecv(request, now_ticks) catch |err| return mapError(err);
-
-    var response = std.mem.zeroes(abi.EndpointRecvResponse);
-    if (received) |message| {
-        response.present = 1;
-        response.has_attached_capability = @intFromBool(message.attached_capability != null);
-        response.message = message.message;
-        @memcpy(response.payload[0..message.payload_len], message.payload[0..message.payload_len]);
-        if (message.attached_capability) |attached| {
-            response.attached_capability = attached;
-        }
-    }
-    return writeResponse(memory, response_addr, response_len, response);
-}
-
-fn dispatchCapabilityMint(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.CapabilityMintRequest, memory, request_addr) orelse return invalidRequest();
-    const descriptor = port.capabilityMint(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, descriptor);
-}
-
-fn dispatchCapabilityDerive(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    _ = now_ticks;
-    const request = readRequest(component_port.CapabilityDeriveRequest, memory, request_addr) orelse return invalidRequest();
-    const descriptor = port.capabilityDerive(request) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, descriptor);
-}
-
-fn dispatchCapabilityPass(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.CapabilityPassRequest, memory, request_addr) orelse return invalidRequest();
-    const descriptor = port.capabilityPass(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, descriptor);
-}
-
-fn dispatchCapabilityRevoke(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    _ = response_len;
-    _ = response_addr;
-    const request = readRequest(component_port.CapabilityRevokeRequest, memory, request_addr) orelse return invalidRequest();
-    port.capabilityRevoke(request, now_ticks) catch |err| return mapError(err);
-    return success();
-}
-
-fn dispatchCapabilityQuery(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.CapabilityQueryRequest, memory, request_addr) orelse return invalidRequest();
-    const descriptor = port.capabilityQuery(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, descriptor);
-}
-
-fn dispatchSharedMemoryCreate(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.SharedMemoryCreateRequest, memory, request_addr) orelse return invalidRequest();
-    const created = port.sharedMemoryCreate(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, abi.SharedMemoryCreateResponse{
-        .object = created.object,
-        .capability = created.capability,
-        .capability_id = created.capability_id,
-    });
-}
-
-fn dispatchSharedMemoryMap(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.SharedMemoryMapRequest, memory, request_addr) orelse return invalidRequest();
-    const descriptor = port.sharedMemoryMap(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, descriptor);
-}
-
-fn dispatchSharedMemoryUnmap(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.SharedMemoryUnmapRequest, memory, request_addr) orelse return invalidRequest();
-    const unmapped = port.sharedMemoryUnmap(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, abi.BoolResponse{
-        .value = @intFromBool(unmapped),
-        ._reserved = [_]u8{0} ** 7,
-    });
-}
-
-fn dispatchSharedMemoryRevoke(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.SharedMemoryRevokeRequest, memory, request_addr) orelse return invalidRequest();
-    const descriptor = port.sharedMemoryRevoke(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, descriptor);
-}
-
-fn dispatchTimeQuery(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.TimeQueryRequest, memory, request_addr) orelse return invalidRequest();
-    const queried = port.timeQuery(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, abi.TimeQueryResponse{
-        .now_ticks = queried,
-    });
-}
-
-fn dispatchResourceQuery(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.ResourceQueryRequest, memory, request_addr) orelse return invalidRequest();
-    const descriptor = port.resourceQuery(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, descriptor);
-}
-
-fn dispatchAccountingQuery(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.AccountingQueryRequest, memory, request_addr) orelse return invalidRequest();
-    const descriptor = port.accountingQuery(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, descriptor);
-}
-
-fn dispatchDeviceDescribe(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.DeviceDescribeRequest, memory, request_addr) orelse return invalidRequest();
-    const descriptor = port.deviceDescribe(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, descriptor);
-}
-
-fn dispatchDeviceMmioWindow(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.DeviceMmioWindowRequest, memory, request_addr) orelse return invalidRequest();
-    const descriptor = port.deviceMmioWindow(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, descriptor);
-}
-
-fn dispatchDevicePortRead(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const request = readRequest(component_port.DevicePortReadRequest, memory, request_addr) orelse return invalidRequest();
-    const value = port.devicePortRead(request, now_ticks) catch |err| return mapError(err);
-    return writeResponse(memory, response_addr, response_len, abi.DevicePortReadResponse{
-        .value = value,
-    });
-}
-
-fn dispatchDevicePortWrite(
-    port: *component_port.KernelPort,
-    memory: UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    _ = response_len;
-    _ = response_addr;
-    const request = readRequest(component_port.DevicePortWriteRequest, memory, request_addr) orelse return invalidRequest();
-    port.devicePortWrite(request, now_ticks) catch |err| return mapError(err);
-    return success();
-}
-
-fn readRequest(comptime T: type, memory: UserMemoryContext, request_addr: usize) ?T {
-    return readUserValue(T, memory, request_addr);
-}
-
-fn readUserValue(comptime T: type, memory: UserMemoryContext, addr: usize) ?T {
-    if (!validateUserRange(memory, addr, @sizeOf(T), @alignOf(T), .read)) return null;
-    const ptr: *const T = @ptrFromInt(addr);
-    return ptr.*;
-}
-
-fn sanitizeTaskCreateRequest(
-    memory: UserMemoryContext,
-    request: *component_port.TaskCreateRequest,
-    bundle_id_buffer: []u8,
-    component_label_buffer: []u8,
-    component_entry_buffer: []u8,
-    image_copy: *task_runtime.ExecutableImageSpec,
-) bool {
-    request.request.launch.bundle_id = copyUserSlice(
-        memory,
-        request.request.launch.bundle_id,
-        bundle_id_buffer,
-    ) orelse return false;
-    request.request.initial_component.label = copyUserSlice(
-        memory,
-        request.request.initial_component.label,
-        component_label_buffer,
-    ) orelse return false;
-    request.request.initial_component.entry = copyUserSlice(
-        memory,
-        request.request.initial_component.entry,
-        component_entry_buffer,
-    ) orelse return false;
-
-    if (request.request.userspace_image) |image_ptr| {
-        image_copy.* = readUserValue(task_runtime.ExecutableImageSpec, memory, @intFromPtr(image_ptr)) orelse return false;
-        request.request.userspace_image = image_copy;
-    }
-    return true;
-}
-
-fn copyUserSlice(memory: UserMemoryContext, slice: []const u8, dest: []u8) ?[]const u8 {
-    if (slice.len > dest.len) return null;
-    if (slice.len == 0) return dest[0..0];
-    if (!validateUserRange(memory, @intFromPtr(slice.ptr), slice.len, 1, .read)) return null;
-    @memcpy(dest[0..slice.len], slice);
-    return dest[0..slice.len];
-}
-
-fn validateUserRange(memory: UserMemoryContext, addr: usize, len: usize, alignment: usize, access: UserMemoryAccess) bool {
-    if (len == 0) return true;
-    if (addr == 0 or addr < USER_POINTER_FLOOR) return false;
-    if (alignment != 0 and addr % alignment != 0) return false;
-    const end_exclusive = std.math.add(usize, addr, len) catch return false;
-    if (end_exclusive <= addr) return false;
-
-    if (builtin.target.os.tag == .freestanding and @bitSizeOf(usize) <= 32) {
-        if (end_exclusive > USER_POINTER_CEILING_32) return false;
-    }
-
-    if (memory.address_space) |address_space| {
-        if (address_space.region_count == 0) return true;
-        return validateAddressSpaceRange(address_space, addr, end_exclusive, access);
-    }
-    return true;
-}
-
-fn validateAddressSpaceRange(
-    address_space: *const task_runtime.AddressSpaceRecord,
-    addr: usize,
-    end_exclusive: usize,
-    access: UserMemoryAccess,
-) bool {
-    if (address_space.region_count == 0) return false;
-
-    var covered_until = addr;
-    while (covered_until < end_exclusive) {
-        var advanced = false;
-        for (address_space.regions[0..address_space.region_count]) |region| {
-            const region_start = std.math.cast(usize, region.virtual_address) orelse continue;
-            const region_end = std.math.add(usize, region_start, region.size_bytes) catch continue;
-            if (covered_until < region_start or covered_until >= region_end) continue;
-            if (!regionAllows(region.access, access)) return false;
-            covered_until = @min(end_exclusive, region_end);
-            advanced = true;
-            break;
-        }
-        if (!advanced) return false;
-    }
-    return true;
-}
-
-fn regionAllows(access: task_runtime.SegmentAccess, requested: UserMemoryAccess) bool {
-    return switch (requested) {
-        .read => access.read,
-        .write => access.write,
-    };
-}
-
 fn syscallDescriptorFromOpcode(opcode: u16) ?*const SyscallDescriptor {
     for (&syscall_table) |*descriptor| {
         if (abi.opcode(descriptor.operation) == opcode) {
@@ -574,110 +94,6 @@ fn syscallDescriptorFromOpcode(opcode: u16) ?*const SyscallDescriptor {
 
 fn syscallDescriptorFor(operation: abi.NativeOperation) ?*const SyscallDescriptor {
     return syscallDescriptorFromOpcode(abi.opcode(operation));
-}
-
-fn responseBuffer(memory: UserMemoryContext, response_addr: usize, response_len: usize) ?[]u8 {
-    if (response_len == 0) return &[_]u8{};
-    if (!validateUserRange(memory, response_addr, response_len, 1, .write)) return null;
-    const bytes: [*]u8 = @ptrFromInt(response_addr);
-    return bytes[0..response_len];
-}
-
-fn writeResponse(memory: UserMemoryContext, response_addr: usize, response_len: usize, value: anytype) DispatchResult {
-    const buffer = responseBuffer(memory, response_addr, response_len) orelse return .{
-        .status = .invalid_response_buffer,
-    };
-    const bytes = std.mem.asBytes(&value);
-    if (buffer.len < bytes.len) return .{
-        .status = .buffer_too_small,
-    };
-    @memcpy(buffer[0..bytes.len], bytes);
-    return .{
-        .status = .success,
-        .bytes_written = @intCast(bytes.len),
-    };
-}
-
-fn success() DispatchResult {
-    return .{ .status = .success };
-}
-
-fn invalidRequest() DispatchResult {
-    return .{ .status = .invalid_request_pointer };
-}
-
-fn mapError(err: anyerror) DispatchResult {
-    if (err == error.UnsupportedAbiVersion) return .{ .status = .unsupported_abi_version };
-    if (err == error.UnexpectedOperation) return .{
-        .status = .unsupported_operation,
-        .denial_reason = .unsupported_operation,
-    };
-    if (err == error.PermissionDenied or err == error.RightsEscalation) return .{
-        .status = .denied,
-        .denial_reason = .policy_denied,
-    };
-    if (err == error.UserspaceLaunchRequired or err == error.InvalidUserspaceImage) return .{
-        .status = .denied,
-        .denial_reason = .policy_denied,
-    };
-    if (err == error.CapabilityNotFound) return .{
-        .status = .not_found,
-        .denial_reason = .capability_missing,
-    };
-    if (err == error.CapabilityRevoked) return .{
-        .status = .denied,
-        .denial_reason = .capability_revoked,
-    };
-    if (err == error.ScopeViolation or err == error.ScopeEscalation or err == error.SubjectTaskMismatch) return .{
-        .status = .denied,
-        .denial_reason = .scope_violation,
-    };
-    if (err == error.LeaseEscalation) return .{
-        .status = .denied,
-        .denial_reason = .capability_expired,
-    };
-    if (err == error.InvalidCapabilityTarget or err == error.InvalidCapabilityRights) return .{
-        .status = .denied,
-        .denial_reason = .invalid_target,
-    };
-    if (err == error.InterfaceNameTooLong or err == error.MessageTooLarge) return .{
-        .status = .denied,
-        .denial_reason = .invalid_target,
-    };
-    if (err == error.InterfaceNotFound) return .{
-        .status = .not_found,
-        .denial_reason = .interface_not_found,
-    };
-    if (err == error.TaskNotFound or err == error.EndpointNotFound) return .{
-        .status = .not_found,
-        .denial_reason = .invalid_target,
-    };
-    if (err == error.DeviceNotFound or err == error.UnsupportedMmioWindow) return .{
-        .status = .not_found,
-        .denial_reason = .invalid_target,
-    };
-    if (err == error.InvalidPort or err == error.UnsupportedWidth) return .{
-        .status = .denied,
-        .denial_reason = .invalid_target,
-    };
-    if (err == error.TableFull or
-        err == error.TargetTableFull or
-        err == error.BindingTableFull or
-        err == error.ComponentTableFull or
-        err == error.CapabilityTableFull or
-        err == error.TaskTableFull or
-        err == error.EndpointBusy or
-        err == error.QueueFull or
-        err == error.PeerNotConnected or
-        err == error.VersionMismatch)
-    {
-        return .{
-            .status = .conflict,
-            .denial_reason = .budget_exhausted,
-        };
-    }
-
-    return .{ .status = .internal_error };
 }
 
 test "syscall descriptor table covers every native operation with ABI metadata" {

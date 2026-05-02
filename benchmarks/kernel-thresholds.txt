@@ -1,4 +1,6 @@
 capability.derive.workspace_object 250000
+capability.mint_reuse_free_slot 4000000
+capability.target_generation_lookup 2500000
 permission.review.render_grants 300000
 network_policy.authorize_connection 15000
 background_dispatch.allowed_sync 800000

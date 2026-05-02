@@ -9,6 +9,7 @@ const sync_service = @import("../sync/sync_service.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const workspace = @import("../storage/workspace.zig");
 const copyText = native_util.copyText;
+const yesNo = native_util.yesNo;
 
 pub const MAX_FLOWS: usize = 16;
 pub const MAX_DETAIL_BYTES: usize = 128;
@@ -218,10 +219,6 @@ fn appendText(buffer: []u8, used: *usize, text: []const u8) !void {
 fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) !void {
     const rendered = try std.fmt.bufPrint(buffer[used.*..], fmt, args);
     used.* += rendered.len;
-}
-
-fn yesNo(value: bool) []const u8 {
-    return if (value) "yes" else "no";
 }
 
 test "native ux records task workspace pairing review and recovery flows" {
