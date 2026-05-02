@@ -4,6 +4,7 @@ const native_util = @import("../core/util.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 
 const copyText = native_util.copyText;
+const yesNo = native_util.yesNo;
 
 pub const MAX_WINDOWS: usize = 8;
 pub const MAX_REVIEW_ITEMS: usize = 32;
@@ -444,10 +445,6 @@ fn viewTypeLabel(view_type: ViewType) []const u8 {
         .app_panel => "app_panel",
         .full_screen_task_view => "full_screen_task_view",
     };
-}
-
-fn yesNo(value: bool) []const u8 {
-    return if (value) "yes" else "no";
 }
 
 fn deriveWindowTitle(buffer: *[MAX_TITLE_BYTES]u8, title_prefix: []const u8, detail: []const u8) usize {

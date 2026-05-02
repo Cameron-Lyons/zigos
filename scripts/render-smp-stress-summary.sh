@@ -7,12 +7,12 @@ log_path="${1:?smp stress log path required}"
 printf '## SMP Stress Summary\n\n'
 
 if [ ! -f "${log_path}" ]; then
-    printf 'No SMP stress log found at `%s`.\n' "${log_path}"
+    printf "No SMP stress log found at \`%s\`.\n" "${log_path}"
     exit 0
 fi
 
 if ! grep -Fq 'SMP:' "${log_path}"; then
-    printf 'No SMP stress markers were found in `%s`.\n' "${log_path}"
+    printf "No SMP stress markers were found in \`%s\`.\n" "${log_path}"
     exit 0
 fi
 
@@ -52,13 +52,13 @@ fi
 
 printf '| Metric | Value |\n'
 printf '| --- | --- |\n'
-printf '| Status | `%s` |\n' "${status}"
-printf '| Active CPUs | `%s` |\n' "${active_cpus}"
-printf '| Tasks created marker | `%s` |\n' "${tasks_created}"
-printf '| Tasks done marker | `%s` |\n' "${tasks_done}"
-printf '| Context switches | `%s` |\n' "${context_switches}"
-printf '| Ready processes | `%s` |\n' "${ready_processes}"
-printf '| Blocked processes | `%s` |\n' "${blocked_processes}"
-printf '| CPU usage | `%s%%` |\n' "${cpu_usage}"
+printf "| Status | \`%s\` |\n" "${status}"
+printf "| Active CPUs | \`%s\` |\n" "${active_cpus}"
+printf "| Tasks created marker | \`%s\` |\n" "${tasks_created}"
+printf "| Tasks done marker | \`%s\` |\n" "${tasks_done}"
+printf "| Context switches | \`%s\` |\n" "${context_switches}"
+printf "| Ready processes | \`%s\` |\n" "${ready_processes}"
+printf "| Blocked processes | \`%s\` |\n" "${blocked_processes}"
+printf "| CPU usage | \`%s%%\` |\n" "${cpu_usage}"
 printf '\n'
-printf -- '- Source log: `%s`\n' "${log_path}"
+printf -- "- Source log: \`%s\`\n" "${log_path}"

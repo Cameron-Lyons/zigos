@@ -21,6 +21,10 @@ pub fn copyTextExact(dest: []u8, src: []const u8) CopyTextExactError!usize {
     return src.len;
 }
 
+pub fn yesNo(value: bool) []const u8 {
+    return if (value) "yes" else "no";
+}
+
 pub fn fnv1a64(bytes: []const u8) u64 {
     return fnv1a64WithSeed(0xCBF29CE484222325, bytes);
 }

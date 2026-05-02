@@ -3,6 +3,7 @@ const abi = @import("../core/abi.zig");
 const manifest = @import("manifest.zig");
 const native_util = @import("../core/util.zig");
 const copyText = native_util.copyText;
+const yesNo = native_util.yesNo;
 
 pub const MAX_LABEL_BYTES: usize = 48;
 
@@ -102,10 +103,6 @@ fn retrySafe(reason: abi.DenialReason) bool {
         .budget_exhausted, .interface_not_found => true,
         else => false,
     };
-}
-
-fn yesNo(value: bool) []const u8 {
-    return if (value) "yes" else "no";
 }
 
 test "permission denials explain blocking policy capability approval and retry hints" {

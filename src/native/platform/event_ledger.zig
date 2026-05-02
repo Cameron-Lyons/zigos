@@ -13,6 +13,7 @@ const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const workspace = @import("../storage/workspace.zig");
 const copyText = native_util.copyText;
+const yesNo = native_util.yesNo;
 
 pub const MAX_EVENTS: usize = 64;
 pub const MAX_DETAIL_BYTES: usize = 96;
@@ -99,7 +100,13 @@ pub const Event = struct {
     }
 };
 
-pub const Error = anyerror;
+pub const Error = object_store.Error || workspace.Error || error{
+    ConsentRequired,
+    CorruptState,
+    EventTableFull,
+    NoSpaceLeft,
+    SigningFailed,
+};
 
 const EventSlot = struct {
     in_use: bool = false,
@@ -568,7 +575,7 @@ pub const Ledger = struct {
             .preferred_object_id = stateObjectId(),
             .object_type = .document,
             .payload = header_payload,
-            .metadata = try object_store.signMetadata(
+            .metadata = try signLedgerMetadata(
                 self.state_signer,
                 "event-ledger-state",
                 "application/zigos-event-ledger",
@@ -589,7 +596,7 @@ pub const Ledger = struct {
             .preferred_object_id = eventObjectId(latest_event.sequence),
             .object_type = .document,
             .payload = payload,
-            .metadata = try object_store.signMetadata(
+            .metadata = try signLedgerMetadata(
                 self.state_signer,
                 "event-ledger-entry",
                 "application/zigos-event-ledger-entry",
@@ -857,10 +864,6 @@ fn copyExplanationTextInto(src: []const u8) [denial_explanation.MAX_LABEL_BYTES]
     return out;
 }
 
-fn yesNo(value: bool) []const u8 {
-    return if (value) "yes" else "no";
-}
-
 fn updateFailureLabel(code: u32) []const u8 {
     const failure = std.enums.fromInt(immutable_base.HealthFailure, @as(u8, @intCast(code))) orelse return "corrupt";
     return @tagName(failure);
@@ -904,6 +907,24 @@ fn redactedForQuery(event: Event, query: Query) Event {
 fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) Error!void {
     const rendered = std.fmt.bufPrint(buffer[used.*..], fmt, args) catch return error.NoSpaceLeft;
     used.* += rendered.len;
+}
+
+fn signLedgerMetadata(
+    identity: signing.SignerIdentity,
+    label: []const u8,
+    content_type: []const u8,
+    object_type: object_store.ObjectType,
+    payload: []const u8,
+    created_at_ticks: u64,
+) Error!object_store.SignedMetadata {
+    return object_store.signMetadata(
+        identity,
+        label,
+        content_type,
+        object_type,
+        payload,
+        created_at_ticks,
+    ) catch error.SigningFailed;
 }
 
 fn stateObjectId() u64 {
