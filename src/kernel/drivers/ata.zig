@@ -64,6 +64,7 @@ pub const ATAError = error{
     InvalidParameter,
     ReadError,
     WriteError,
+    KernelDataPlaneDisabled,
 };
 
 pub const ATADevice = struct {
@@ -329,11 +330,19 @@ fn writeSectorsSync(device: *const ATADevice, lba: u64, count: u8, buffer: []con
 }
 
 pub fn readSectors(device: *const ATADevice, lba: u64, count: u8, buffer: []u8) ATAError!void {
-    try readSectorsSync(device, lba, count, buffer);
+    _ = device;
+    _ = lba;
+    _ = count;
+    _ = buffer;
+    return error.KernelDataPlaneDisabled;
 }
 
 pub fn writeSectors(device: *const ATADevice, lba: u64, count: u8, buffer: []const u8) ATAError!void {
-    try writeSectorsSync(device, lba, count, buffer);
+    _ = device;
+    _ = lba;
+    _ = count;
+    _ = buffer;
+    return error.KernelDataPlaneDisabled;
 }
 
 pub fn getPrimaryMaster() ?*const ATADevice {

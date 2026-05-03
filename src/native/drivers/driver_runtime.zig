@@ -11,6 +11,7 @@ pub const MAX_ACTIVATIONS: usize = 8;
 pub const ActivationMode = enum(u8) {
     control_only,
     published_data_plane,
+    userspace_brokered_data_plane,
 };
 
 pub const ActivationRecord = struct {
@@ -122,7 +123,10 @@ pub const Runtime = struct {
                             now_ticks,
                             self.kernel_port,
                         )) {
-                            record.mode = .published_data_plane;
+                            record.mode = if (publication.kind == .ata_bootstrap_bridge)
+                                .userspace_brokered_data_plane
+                            else
+                                .published_data_plane;
                             record.exclusive_claim = true;
                             record.kernel_bootstrap = publication.kernel_bootstrap;
                             record.publisher_len = copyText(record.publisher[0..], publication.publisherSlice());
@@ -151,7 +155,7 @@ pub const Runtime = struct {
     pub fn deactivate(self: *Runtime, service_id: u64) bool {
         for (&self.slots) |*slot| {
             if (!slot.in_use or slot.activation.service_id != service_id) continue;
-            if (slot.activation.mode == .published_data_plane and slot.activation.exclusive_claim) {
+            if (slot.activation.mode != .control_only and slot.activation.exclusive_claim) {
                 const released = switch (slot.activation.device_class) {
                     .network_adapter => bootstrap_driver_port.deactivateNetworkDevice(service_id),
                     .storage_controller => bootstrap_driver_port.deactivateStorageBackend(service_id),
@@ -206,7 +210,7 @@ fn zeroActivation() ActivationRecord {
     };
 }
 
-test "runtime refuses kernel-published transports for drivers without bootstrap authorization" {
+test "kernel bootstrap cannot publish network data-plane transports" {
     const FakeNetworkDevice = struct {
         fn send(_: []const u8) void {}
 
@@ -228,7 +232,7 @@ test "runtime refuses kernel-published transports for drivers without bootstrap 
     bootstrap_driver_port.reset();
     defer bootstrap_driver_port.reset();
 
-    try std.testing.expect(bootstrap_driver_port.publishNetworkActivator(
+    try std.testing.expect(!bootstrap_driver_port.publishNetworkActivator(
         0x8086_100E_0001,
         "e1000",
         FakeNetworkDevice.activate,
@@ -276,7 +280,9 @@ test "runtime refuses kernel-published transports for drivers without bootstrap 
     });
 
     var runtime = Runtime.init();
-    try std.testing.expectError(error.KernelBootstrapNotAuthorized, runtime.activateAt(driver, 1));
+    const activation = try runtime.activateAt(driver, 1);
+    try std.testing.expectEqual(ActivationMode.control_only, activation.mode);
+    try std.testing.expect(!activation.exclusive_claim);
 }
 
 test "runtime uses the activation tick when claiming storage bootstrap authority" {

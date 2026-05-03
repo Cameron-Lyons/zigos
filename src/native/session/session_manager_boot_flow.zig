@@ -226,6 +226,14 @@ pub const SessionManager = struct {
             self.failBoot();
             return;
         }
+        if (!runtime_negative_proofs.runFreestandingAndPrint(
+            &self.userspace_catalog,
+            &self.runtime,
+            &self.userspace_scheduler,
+        )) {
+            self.failBoot();
+            return;
+        }
         common.printBootMarker(boot_markers.task_session_ready);
         common.printBootMarker(boot_markers.native_ready);
         printReadyBanner();
@@ -253,6 +261,10 @@ pub const SessionManager = struct {
 
     pub fn buildProductionServiceGraph(self: *SessionManager) ?ServiceGraph {
         var graph = self.beginServiceGraph() orelse return null;
+        if (!verifyProductionArtifactManifest(self)) {
+            self.failBoot();
+            return null;
+        }
         const env_snapshot = graph.env;
         const state_snapshot = graph.state;
         self.service_bindings = ServiceBindings.init();
@@ -284,6 +296,44 @@ pub const SessionManager = struct {
         self.kernel_port_ready = false;
     }
 };
+
+fn verifyProductionArtifactManifest(manager: *SessionManager) bool {
+    const manifest_signer = signing.SignerIdentity{
+        .label = "zigos-artifact-manifest",
+        .seed = [_]u8{0xB7} ** 32,
+    };
+    const artifact_manifest = buildProductionArtifactManifest(manager) catch return false;
+    const signed_manifest = measured_boot.signArtifactManifest(artifact_manifest, manifest_signer) catch return false;
+    if (!measured_boot.verifySignedArtifactManifest(&signed_manifest)) return false;
+    common.printBootMarker(boot_markers.platform_artifact_manifest_verified);
+    return true;
+}
+
+fn buildProductionArtifactManifest(manager: *SessionManager) !measured_boot.ArtifactManifest {
+    var manifest_record = measured_boot.ArtifactManifest.init(1);
+    try manifest_record.add(.kernel, "bootloader+kernel-zigos-native", "src/boot/boot64.S:zig-out/bin/kernel-zigos-native.elf");
+    try manifest_record.add(.base_image, "production-native-base", "native-store:production-service-graph");
+    try manifest_record.add(.policy, "production-policy-set", "zero-root:capability-ipc:local-first");
+
+    const critical_service_classes = [_]service_catalog.ServiceClass{
+        .policy_mediation,
+        .storage_object,
+        .compositor_ui_session,
+        .network_stack,
+    };
+    for (critical_service_classes) |class| {
+        const bundle_id = service_catalog.bundleIdForServiceClass(class) orelse return error.MissingBootstrapLaunch;
+        const image = manager.userspace_catalog.findByBundleId(bundle_id) orelse return error.MissingUserspaceImage;
+        try manifest_record.addUserspaceServiceImage(image);
+    }
+
+    try manifest_record.add(
+        .driver_set,
+        "production-driver-set",
+        "network=userspace-control-only;storage=userspace-brokered-ata;graphics=control-only;audio=control-only",
+    );
+    return manifest_record;
+}
 
 fn environment(self: *SessionManager) Environment {
     return .{
