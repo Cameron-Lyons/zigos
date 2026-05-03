@@ -52,11 +52,13 @@ else
             }
             pub fn map_range(_: u32, _: u32, _: u32, _: u32) void {}
             pub fn set_current_page_flags(_: u32, _: u32) void {}
+            pub fn page_fault_handler(_: *const isr.InterruptFrame) void {}
         };
     };
 
 const PAGE_SIZE: usize = 4096;
 const USERSPACE_TRAP_VECTOR: u8 = 129;
+const PAGE_FAULT_VECTOR: u8 = 14;
 
 pub export var zigos_userspace_resume_requested: u32 = 0;
 pub export var zigos_userspace_resume_esp: u32 = 0;
@@ -73,6 +75,9 @@ const MappingEntry = struct {
     resume_stack_pointer: u32 = 0,
     yield_count: u64 = 0,
     last_user_counter: u32 = 0,
+    page_fault_count: u64 = 0,
+    last_fault_address: u32 = 0,
+    last_fault_error_code: u32 = 0,
 
     fn pageDirectory(self: *const MappingEntry) *freestanding.paging.PageDirectory {
         return @ptrFromInt(self.page_directory_ptr);
@@ -100,6 +105,10 @@ pub const Executor = struct {
     last_trap_instruction_pointer: u32 = 0,
     last_trap_stack_pointer: u32 = 0,
     last_trap_counter: u32 = 0,
+    last_fault_task_id: u64 = 0,
+    last_fault_address: u32 = 0,
+    last_fault_error_code: u32 = 0,
+    user_page_fault_count: u64 = 0,
     mappings: [task_runtime.MAX_TASKS]MappingEntry = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS,
     userspace_kernel_stack: [16 * 1024]u8 align(16) = [_]u8{0} ** (16 * 1024),
 
@@ -108,6 +117,7 @@ pub const Executor = struct {
         registered_executor = self;
         if (!trap_handler_registered) {
             freestanding.isr.registerHandler(USERSPACE_TRAP_VECTOR, userspaceTrapHandler);
+            freestanding.isr.registerHandler(PAGE_FAULT_VECTOR, userspacePageFaultHandler);
             trap_handler_registered = true;
         }
         self.initialized = true;
@@ -126,6 +136,10 @@ pub const Executor = struct {
         self.last_trap_instruction_pointer = 0;
         self.last_trap_stack_pointer = 0;
         self.last_trap_counter = 0;
+        self.last_fault_task_id = 0;
+        self.last_fault_address = 0;
+        self.last_fault_error_code = 0;
+        self.user_page_fault_count = 0;
         self.mappings = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS;
         zigos_userspace_resume_requested = 0;
         zigos_userspace_resume_esp = 0;
@@ -137,6 +151,29 @@ pub const Executor = struct {
 
     pub fn activeTaskId(self: *const Executor) u64 {
         return self.active_task_id;
+    }
+
+    pub fn consumeUserPageFault(
+        self: *Executor,
+        task_id: u64,
+        expected_fault_address: u32,
+    ) bool {
+        if (self.last_fault_task_id != task_id) return false;
+        if (self.last_fault_address != expected_fault_address) return false;
+        if ((self.last_fault_error_code & 0x4) == 0) return false;
+        self.last_fault_task_id = 0;
+        self.last_fault_address = 0;
+        self.last_fault_error_code = 0;
+        return true;
+    }
+
+    pub fn observedUserCounter(
+        self: *Executor,
+        address_space_id: u64,
+        expected_counter: u32,
+    ) bool {
+        const mapping = self.findMapping(address_space_id) orelse return false;
+        return mapping.last_user_counter == expected_counter;
     }
 
     pub fn executeTask(
@@ -269,6 +306,9 @@ pub const Executor = struct {
             entry.resume_stack_pointer = 0;
             entry.yield_count = 0;
             entry.last_user_counter = 0;
+            entry.page_fault_count = 0;
+            entry.last_fault_address = 0;
+            entry.last_fault_error_code = 0;
             return entry;
         }
         return null;
@@ -317,6 +357,38 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
         mapping.resume_stack_pointer = executor.last_trap_stack_pointer;
         mapping.yield_count += 1;
         mapping.last_user_counter = executor.last_trap_counter;
+    }
+
+    executor.handoff_completed = true;
+    zigos_userspace_resume_requested = 1;
+
+    if (executor.kernel_page_directory_ptr != 0) {
+        freestanding.paging.switchPageDirectory(@ptrFromInt(executor.kernel_page_directory_ptr));
+    }
+}
+
+fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
+    const executor = registered_executor orelse {
+        freestanding.paging.page_fault_handler(frame);
+        return;
+    };
+    if (executor.active_task_id == 0 or (frame.err_code & 0x4) == 0) {
+        freestanding.paging.page_fault_handler(frame);
+        return;
+    }
+
+    const faulting_address = readFaultAddress();
+    @call(.never_inline, recordUserPageFault, .{
+        executor,
+        executor.active_task_id,
+        faulting_address,
+        frame.err_code,
+    });
+
+    if (executor.findMapping(executor.active_address_space_id)) |mapping| {
+        mapping.page_fault_count += 1;
+        mapping.last_fault_address = faulting_address;
+        mapping.last_fault_error_code = frame.err_code;
     }
 
     executor.handoff_completed = true;
@@ -390,4 +462,17 @@ fn recordTrapState(self: *Executor, instruction_pointer: u32, stack_pointer: u32
     self.last_trap_instruction_pointer = instruction_pointer;
     self.last_trap_stack_pointer = stack_pointer;
     self.last_trap_counter = counter;
+}
+
+fn recordUserPageFault(self: *Executor, task_id: u64, faulting_address: u32, error_code: u32) void {
+    self.last_fault_task_id = task_id;
+    self.last_fault_address = faulting_address;
+    self.last_fault_error_code = error_code;
+    self.user_page_fault_count += 1;
+}
+
+fn readFaultAddress() u32 {
+    return asm volatile ("mov %%cr2, %[addr]"
+        : [addr] "=r" (-> u32),
+    );
 }

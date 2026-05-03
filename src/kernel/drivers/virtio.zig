@@ -342,30 +342,7 @@ fn virtio_interrupt_handler(frame: *isr.InterruptFrame) void {
 }
 
 pub fn init() void {
-    vga.print("Initializing VirtIO network driver...\n");
-
-    var bus: u16 = 0;
-    while (bus < 256) : (bus += 1) {
-        var device: u8 = 0;
-        while (device < 32) : (device += 1) {
-            var func: u8 = 0;
-            while (func < 8) : (func += 1) {
-                if (pci.checkDevice(@intCast(bus), device, func)) |pci_device| {
-                    if (pci_device.vendor_id == VIRTIO_VENDOR_ID and
-                        (pci_device.device_id == VIRTIO_NET_DEVICE_ID or
-                            pci_device.device_id == VIRTIO_NET_MODERN_ID or
-                            (pci_device.device_id >= 0x1040 and pci_device.device_id <= 0x107F)))
-                    {
-                        vga.print("Found VirtIO network device!\n");
-                        initDevice(pci_device);
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
-    vga.print("No VirtIO network device found.\n");
+    vga.print("VirtIO network kernel driver is inventory-only; userspace driver claim required.\n");
 }
 
 pub fn publishBootstrapTransport(device_id: u64) bool {
@@ -464,18 +441,12 @@ fn initDevice(pci_device: pci.PCIDevice) void {
 }
 
 fn activatePublishedDevice(device_id: u64) ?*const link_port.NetworkDevice {
-    if (currentNetworkDevice(device_id)) |device| return device;
-
-    const pci_device = pci.findDeviceByStableId(device_id) orelse return null;
-    if (!isSupportedDevice(pci_device)) return null;
-    initDevice(pci_device);
-    return currentNetworkDevice(device_id);
+    _ = device_id;
+    return null;
 }
 
 fn currentNetworkDevice(device_id: u64) ?*const link_port.NetworkDevice {
-    if (virtio_net) |*dev| {
-        if (pci.stableDeviceId(dev.pci_device) == device_id) return &virtio_network_device;
-    }
+    _ = device_id;
     return null;
 }
 
@@ -556,13 +527,7 @@ const virtio_network_device = link_port.NetworkDevice{
 };
 
 fn virtioSend(data: []const u8) void {
-    if (virtio_net) |*dev| {
-        dev.send(data) catch |err| {
-            vga.print("VirtIO TX dropped: ");
-            vga.print(@errorName(err));
-            vga.print("\n");
-        };
-    }
+    _ = data;
 }
 
 fn virtioGetMacAddress() [6]u8 {

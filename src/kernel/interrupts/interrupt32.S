@@ -104,7 +104,6 @@ isr_common_stub:
 
 handle_syscall:
     mov (%esp), %eax
-    add $4, %eax
     push %eax
     call syscall_handler
     add $4, %esp

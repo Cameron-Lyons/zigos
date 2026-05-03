@@ -85,12 +85,6 @@ pub fn publishedDriversActivateScopedTransports() !void {
         },
     };
 
-    try std.testing.expect(bootstrap_driver_port.publishNetworkActivator(
-        network_device_id,
-        "e1000",
-        FakeNetworkDevice.activate,
-        true,
-    ));
     try std.testing.expect(bootstrap_driver_port.publishStorageActivator(
         storage_device_id,
         "ata-bootstrap",
@@ -116,7 +110,6 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .requester = network_authority.holder,
         .now_ticks = 1,
         .bundle = bundle,
-        .bootstrap_transport = .kernel_published_data_plane,
     });
     const storage_authority = try spec_support.driverAuthority(
         &capabilities,
@@ -161,18 +154,13 @@ pub fn publishedDriversActivateScopedTransports() !void {
     const storage_activation = try runtime.activateAt(storage_driver, 1);
     const graphics_activation = try runtime.activateAt(graphics_driver, 1);
 
-    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, network_activation.mode);
-    try std.testing.expect(network_activation.exclusive_claim);
-    try std.testing.expect(network_activation.kernel_bootstrap);
-    try std.testing.expectEqualStrings("e1000", network_activation.publisherSlice());
-    try std.testing.expectEqual(@as(usize, 1), FakeNetworkDevice.activation_count);
-    try std.testing.expect(bootstrap_driver_port.hasActiveNetworkDevice());
-    try std.testing.expectEqual(@as(u64, 91), bootstrap_driver_port.networkPublication().?.active_service_id);
-    try std.testing.expect(!bootstrap_driver_port.activateNetworkDevice(network_device_id, 999));
-    try std.testing.expect(runtime.deactivate(network_driver.service_id));
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, network_activation.mode);
+    try std.testing.expect(!network_activation.exclusive_claim);
+    try std.testing.expect(!network_activation.kernel_bootstrap);
+    try std.testing.expectEqual(@as(usize, 0), FakeNetworkDevice.activation_count);
     try std.testing.expect(!bootstrap_driver_port.hasActiveNetworkDevice());
-    try std.testing.expect(bootstrap_driver_port.activateNetworkDevice(network_device_id, 999));
-    try std.testing.expect(bootstrap_driver_port.deactivateNetworkDevice(999));
+    try std.testing.expect(bootstrap_driver_port.networkPublication() == null);
+    try std.testing.expect(runtime.deactivate(network_driver.service_id));
 
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, storage_activation.mode);
     try std.testing.expect(storage_activation.exclusive_claim);
@@ -183,12 +171,12 @@ pub fn publishedDriversActivateScopedTransports() !void {
     try std.testing.expectEqual(@as(u64, 92), bootstrap_driver_port.storagePublication().?.active_service_id);
 
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, graphics_activation.mode);
-    try std.testing.expectEqualStrings("e1000", runtime.findByClass(.network_adapter).?.publisherSlice());
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.network_adapter).?.mode);
     try std.testing.expectEqualStrings("ata-bootstrap", runtime.findByClass(.storage_controller).?.publisherSlice());
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.graphics_adapter).?.mode);
 
-    var unauthorized_directory = driver_service.Directory.init();
-    const unauthorized_network = try unauthorized_directory.register(.{
+    var unsupported_network_transport_directory = driver_service.Directory.init();
+    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_network_transport_directory.register(.{
         .service_id = 95,
         .owner_task_id = 901,
         .device_id = network_device_id,
@@ -198,8 +186,8 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .requester = network_authority.holder,
         .now_ticks = 2,
         .bundle = bundle,
-    });
-    try std.testing.expectError(driver_runtime_mod.Error.KernelBootstrapNotAuthorized, runtime.activateAt(unauthorized_network, 2));
+        .bootstrap_transport = .kernel_published_data_plane,
+    }));
     var unsupported_transport_directory = driver_service.Directory.init();
     try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
         .service_id = 94,
@@ -494,6 +482,22 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
             .expires_at_ticks = 40,
         },
     });
+    const local_egress_capability = try egress_capabilities.mintBootRoot(.{
+        .holder = collaborator,
+        .issuer = spec_support.policyAuthority(31),
+        .target = .{ .kind = .network_policy, .id = local_policy.id },
+        .rights = .{ .network_policy = .{
+            .network_local = true,
+        } },
+        .scope = .{
+            .task_id = 631,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 20,
+            .expires_at_ticks = 40,
+        },
+    });
     const relay_connection = try sync.authorizeNetworkConnection(&egress_capabilities, .{
         .task_id = 631,
         .principal_id = collaborator,
@@ -514,6 +518,49 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     });
     try std.testing.expect(!denied_relay_connection.allowed);
     try std.testing.expectEqual(network_policy.EgressDecisionReason.destination_mismatch, denied_relay_connection.reason);
+
+    var packet_broker = sync.egressBroker(&egress_capabilities);
+    var transport_harness = sync_service.transport_harness.Harness.init();
+    const local_packet_session = try transport_harness.openDeviceToDevice(&packet_broker, .{
+        .task_id = 631,
+        .principal_id = collaborator,
+        .capability_id = local_egress_capability.id,
+        .policy_id = local_policy.id,
+        .evidence = .{ .destination = .local_network },
+        .now_ticks = 25,
+    }, laptop, tablet);
+    const local_packet = try transport_harness.encryptPacket(&local_packet_session, "documents/notes.md:v2");
+    try std.testing.expect(local_packet.encrypted);
+    try std.testing.expect(local_packet.egress_allowed);
+    try std.testing.expectEqual(sync_service.TransportMode.device_to_device, local_packet.transport);
+    try std.testing.expect(!std.mem.eql(u8, local_packet.ciphertextSlice(), "documents/notes.md:v2"));
+
+    const relay_packet_session = try transport_harness.openRelay(&packet_broker, .{
+        .task_id = 631,
+        .principal_id = collaborator,
+        .capability_id = relay_egress_capability.id,
+        .policy_id = relay_policy.id,
+        .evidence = .{ .destination = .{ .domain = "relay.spec.zigos" } },
+        .now_ticks = 25,
+    }, laptop, tablet, "relay.spec.zigos");
+    const relay_packet = try transport_harness.encryptPacket(&relay_packet_session, "relay-sync-frame");
+    try std.testing.expect(relay_packet.encrypted);
+    try std.testing.expect(relay_packet.egress_allowed);
+    try std.testing.expectEqual(sync_service.TransportMode.relay_assisted, relay_packet.transport);
+    try std.testing.expectEqualStrings("relay.spec.zigos", relay_packet_session.relayDomainSlice());
+    try std.testing.expect(!std.mem.eql(u8, relay_packet.ciphertextSlice(), "relay-sync-frame"));
+
+    try std.testing.expectError(sync_service.transport_harness.Error.EgressDenied, transport_harness.openRelay(&packet_broker, .{
+        .task_id = 631,
+        .principal_id = collaborator,
+        .capability_id = relay_egress_capability.id,
+        .policy_id = relay_policy.id,
+        .evidence = .{ .destination = .{ .domain = "other.spec.zigos" } },
+        .now_ticks = 25,
+    }, laptop, tablet, "other.spec.zigos"));
+    try std.testing.expectEqual(@as(usize, 2), transport_harness.created_sessions);
+    try std.testing.expectEqual(@as(usize, 1), transport_harness.denied_sessions);
+    try std.testing.expectEqual(@as(usize, 2), transport_harness.encrypted_packets);
 
     const latest_notes_frame = sync.latestTransportFrameForPath(workspace_record.id, tablet, "documents/notes.md").?;
     try std.testing.expect(latest_notes_frame.encrypted);

@@ -2,7 +2,6 @@ const ethernet = @import("ethernet.zig");
 const link_port = @import("link_port.zig");
 const pci = @import("../drivers/pci.zig");
 const vga = @import("../drivers/vga.zig");
-const bootstrap_driver_port = @import("../../native/drivers/bootstrap_driver_port.zig");
 
 pub const ArpReplyHeader = packed struct {
     hardware_type: u16,
@@ -87,11 +86,10 @@ pub fn publishBootstrapTransport(
     activate_device: *const fn (u64) ?*const link_port.NetworkDevice,
     is_supported: *const fn (pci.PCIDevice) bool,
 ) bool {
-    if (current_device(device_id)) |device| {
-        return bootstrap_driver_port.publishNetworkDevice(device_id, publisher, device, true);
-    }
-
-    const pci_device = pci.findDeviceByStableId(device_id) orelse return false;
-    if (!is_supported(pci_device)) return false;
-    return bootstrap_driver_port.publishNetworkActivator(device_id, publisher, activate_device, true);
+    _ = device_id;
+    _ = publisher;
+    _ = current_device;
+    _ = activate_device;
+    _ = is_supported;
+    return false;
 }

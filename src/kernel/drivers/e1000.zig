@@ -525,41 +525,7 @@ fn e1000_interrupt_handler(frame: *isr.InterruptFrame) void {
 }
 
 pub fn init() void {
-    vga.print("Initializing E1000 network driver...\n");
-
-    var bus: u16 = 0;
-    while (bus < 256) : (bus += 1) {
-        var device: u8 = 0;
-        while (device < 32) : (device += 1) {
-            var func: u8 = 0;
-            while (func < 8) : (func += 1) {
-                if (pci.checkDevice(@intCast(bus), device, func)) |pci_device| {
-                    if (pci_device.vendor_id == E1000_VENDOR_ID) {
-                        for (E1000_DEVICE_IDS) |device_id| {
-                            if (pci_device.device_id == device_id) {
-                                vga.print("Found E1000 network card!\n");
-                                initDevice(pci_device) catch |err| {
-                                    vga.print("E1000 initialization failed: ");
-                                    vga.print(initErrorMessage(err));
-                                    vga.print("\n");
-                                };
-                                return;
-                            }
-                        }
-                    }
-
-                    if (func == 0) {
-                        const header_type = pci.readConfig(@intCast(bus), device, 0, 0x0C) >> 16;
-                        if ((header_type & 0x80) == 0) {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    vga.print("No E1000 network card found.\n");
+    vga.print("E1000 kernel driver is inventory-only; userspace driver claim required.\n");
 }
 
 pub fn publishBootstrapTransport(device_id: u64) bool {
@@ -629,12 +595,8 @@ fn initDevice(pci_device: pci.PCIDevice) InitError!void {
 }
 
 fn activatePublishedDevice(device_id: u64) ?*const link_port.NetworkDevice {
-    if (currentNetworkDevice(device_id)) |device| return device;
-
-    const pci_device = pci.findDeviceByStableId(device_id) orelse return null;
-    if (!isSupportedDevice(pci_device)) return null;
-    initDevice(pci_device) catch return null;
-    return currentNetworkDevice(device_id);
+    _ = device_id;
+    return null;
 }
 
 fn initErrorMessage(err: InitError) []const u8 {
@@ -645,9 +607,7 @@ fn initErrorMessage(err: InitError) []const u8 {
 }
 
 fn currentNetworkDevice(device_id: u64) ?*const link_port.NetworkDevice {
-    if (e1000_device) |*dev| {
-        if (pci.stableDeviceId(dev.pci_device) == device_id) return &e1000NetworkDevice;
-    }
+    _ = device_id;
     return null;
 }
 
@@ -665,9 +625,7 @@ const e1000NetworkDevice = link_port.NetworkDevice{
 };
 
 fn e1000Send(data: []const u8) void {
-    if (e1000_device) |*dev| {
-        dev.send(data);
-    }
+    _ = data;
 }
 
 fn e1000GetMacAddress() [6]u8 {

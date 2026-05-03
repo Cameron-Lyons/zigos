@@ -17,6 +17,11 @@ pub const BootstrapTransport = enum(u8) {
     kernel_published_data_plane,
 };
 
+pub const KernelDriverRole = enum(u8) {
+    inventory_only,
+    bootstrap_broker_only,
+};
+
 pub const MAX_DMA_RANGES: usize = 4;
 
 pub const DmaProtection = enum(u8) {
@@ -244,8 +249,34 @@ pub fn allowedRightsFor(device_class: DeviceClass) capability.CapabilityRights {
 
 pub fn supportsKernelPublishedTransport(device_class: DeviceClass) bool {
     return switch (device_class) {
-        .network_adapter, .storage_controller => true,
-        .graphics_adapter, .audio_print_io => false,
+        .storage_controller => true,
+        .network_adapter, .graphics_adapter, .audio_print_io => false,
+    };
+}
+
+pub fn kernelDriverRole(device_class: DeviceClass) KernelDriverRole {
+    return switch (device_class) {
+        .storage_controller => .bootstrap_broker_only,
+        .network_adapter, .graphics_adapter, .audio_print_io => .inventory_only,
+    };
+}
+
+pub fn requiresUserspaceDataPlane(device_class: DeviceClass) bool {
+    return switch (kernelDriverRole(device_class)) {
+        .inventory_only, .bootstrap_broker_only => true,
+    };
+}
+
+pub fn permitsKernelDataPlane(device_class: DeviceClass) bool {
+    return switch (kernelDriverRole(device_class)) {
+        .inventory_only, .bootstrap_broker_only => false,
+    };
+}
+
+pub fn permitsKernelBootstrapBroker(device_class: DeviceClass) bool {
+    return switch (kernelDriverRole(device_class)) {
+        .bootstrap_broker_only => true,
+        .inventory_only => false,
     };
 }
 
@@ -363,6 +394,91 @@ test "driver services require signed least-privilege device authority" {
     try std.testing.expect(directory.markRestarted(44));
     try std.testing.expectEqual(@as(u32, 2), driver.restart_generation);
     try std.testing.expect(driver.dma_domain_id != 1);
+}
+
+test "kernel driver roles keep data planes out of kernel by default" {
+    try std.testing.expectEqual(KernelDriverRole.inventory_only, kernelDriverRole(.network_adapter));
+    try std.testing.expectEqual(KernelDriverRole.bootstrap_broker_only, kernelDriverRole(.storage_controller));
+    try std.testing.expect(requiresUserspaceDataPlane(.network_adapter));
+    try std.testing.expect(requiresUserspaceDataPlane(.storage_controller));
+    try std.testing.expect(!permitsKernelDataPlane(.network_adapter));
+    try std.testing.expect(!permitsKernelDataPlane(.storage_controller));
+    try std.testing.expect(!supportsKernelPublishedTransport(.network_adapter));
+    try std.testing.expect(supportsKernelPublishedTransport(.storage_controller));
+    try std.testing.expect(!permitsKernelBootstrapBroker(.network_adapter));
+    try std.testing.expect(permitsKernelBootstrapBroker(.storage_controller));
+}
+
+test "network drivers cannot request kernel published data planes" {
+    var directory = Directory.init();
+    var capabilities = capability.CapabilityTable.init();
+    const authority = try capabilities.mintBootRoot(.{
+        .holder = .{ .kind = .service, .serial = 91 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = authorityTarget(0x8086_100E_0001),
+        .rights = allowedRightsFor(.network_adapter),
+        .scope = .{
+            .task_id = 901,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = true,
+        },
+        .audit = .{},
+    });
+
+    try std.testing.expectError(error.InvalidBootstrapTransport, directory.registerSigned(.{
+        .service_id = 91,
+        .owner_task_id = 901,
+        .device_id = 0x8086_100E_0001,
+        .device_class = .network_adapter,
+        .authority_capability_id = authority.id,
+        .capability_table = &capabilities,
+        .requester = authority.holder,
+        .now_ticks = 1,
+        .signer = "zigos-spec-driver",
+        .bootstrap_transport = .kernel_published_data_plane,
+    }));
+}
+
+test "storage bootstrap bridge remains available for userspace storage driver claims" {
+    var directory = Directory.init();
+    var capabilities = capability.CapabilityTable.init();
+    const authority = try capabilities.mintBootRoot(.{
+        .holder = .{ .kind = .service, .serial = 92 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = authorityTarget(0x0000_1F00_0001),
+        .rights = allowedRightsFor(.storage_controller),
+        .scope = .{
+            .task_id = 902,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = true,
+        },
+        .audit = .{},
+    });
+
+    const driver = try directory.registerSigned(.{
+        .service_id = 92,
+        .owner_task_id = 902,
+        .device_id = 0x0000_1F00_0001,
+        .device_class = .storage_controller,
+        .authority_capability_id = authority.id,
+        .capability_table = &capabilities,
+        .requester = authority.holder,
+        .now_ticks = 1,
+        .signer = "zigos-spec-driver",
+        .bootstrap_transport = .kernel_published_data_plane,
+    });
+
+    try std.testing.expectEqual(BootstrapTransport.kernel_published_data_plane, driver.bootstrap_transport);
 }
 
 test "driver services reject unsigned bundles and escalated device rights" {

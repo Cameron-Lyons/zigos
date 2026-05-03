@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
@@ -7,16 +8,23 @@ const endpoint = @import("../kernel_api/endpoint.zig");
 const native_kernel = @import("../kernel_api/native_kernel.zig");
 const principal = @import("../core/principal.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
+const userspace_bootstrap_mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
+const userspace_loader = @import("../task/userspace_loader.zig");
+const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service = @import("../task/task_runtime_service.zig");
 const network_policy = @import("../sync/network_policy.zig");
 
-const common = if (@import("builtin").target.os.tag == .freestanding)
+const common = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/common.zig")
 else
     struct {
         pub fn printBootMarker(_: []const u8) void {}
     };
+
+const MMU_PROOF_BUNDLE_ID = "zigos.proof.mmu-isolation";
+const FOREIGN_SHARED_MEMORY_PROBE_ADDR: u32 = 0x7000_0000;
+const PROOF_SYSCALL_POINTER_DENIED_PULSE: u16 = 0x41;
 
 var reboot_proof_checkpoint_store: task_runtime_service.CheckpointStore = .{};
 var reboot_proof_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
@@ -39,6 +47,46 @@ pub fn runAndPrint() bool {
     common.printBootMarker(boot_markers.runtime_proof_reboot_grant_revocation);
 
     return true;
+}
+
+pub fn runFreestandingAndPrint(
+    catalog: *userspace_loader.Catalog,
+    runtime: *task_runtime.Runtime,
+    scheduler: *userspace_scheduler.Scheduler,
+) bool {
+    if (builtin.target.os.tag != .freestanding) return true;
+    const launched = catalog.launchDirect(runtime, MMU_PROOF_BUNDLE_ID, .{
+        .owner = app(60),
+        .budget = budget(),
+        .local_only = true,
+    }) catch return false;
+
+    const expected_denial_counter = userspace_bootstrap_mailbox.packCounter(
+        .syscall_ready,
+        .proof,
+        PROOF_SYSCALL_POINTER_DENIED_PULSE,
+    );
+
+    var saw_syscall_pointer_denial = false;
+    var attempt: usize = 0;
+    while (attempt < 8) : (attempt += 1) {
+        if (!scheduler.executeTask(launched.id, attempt)) return false;
+
+        if (!saw_syscall_pointer_denial and
+            scheduler.executor.observedUserCounter(launched.address_space_id, expected_denial_counter))
+        {
+            common.printBootMarker(boot_markers.runtime_proof_syscall_pointer_isolation);
+            saw_syscall_pointer_denial = true;
+        }
+
+        if (scheduler.executor.consumeUserPageFault(launched.id, FOREIGN_SHARED_MEMORY_PROBE_ADDR)) {
+            if (!saw_syscall_pointer_denial) return false;
+            common.printBootMarker(boot_markers.runtime_proof_mmu_user_fault);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 pub fn processIsolationBlocksForeignSharedMemory() bool {

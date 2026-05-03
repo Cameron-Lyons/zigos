@@ -135,7 +135,7 @@ fn activateDrivers(
         service_bindings.bindingFor(.network_stack).task_id,
         state.ids.network_service,
         .network_adapter,
-        .kernel_published_data_plane,
+        .none,
         "zigos.system.network-stack",
         53,
     ) catch |err| {
@@ -208,12 +208,17 @@ fn activateDrivers(
         _ = env.supervisor.recordCrash(state.services.storage_service.id, 54, bootFailureCode(err));
         return false;
     };
-    if ((network_activation_mode == .published_data_plane or env.driver_directory.findByClass(.network_adapter) != null) and
-        (storage_activation_mode == .published_data_plane or storage_driver.restart_generation == 1))
+    if ((network_activation_mode == .control_only or env.driver_directory.findByClass(.network_adapter) != null) and
+        (storage_activation_mode == .published_data_plane or
+            storage_activation_mode == .userspace_brokered_data_plane or
+            storage_driver.restart_generation == 1))
     {
         common.printBootMarker(boot_markers.service_boot_driver_service_network_ready);
     }
-    if (storage_activation_mode == .published_data_plane and storage_volume_mod.hasAttachedDevice()) {
+    if ((storage_activation_mode == .published_data_plane or
+        storage_activation_mode == .userspace_brokered_data_plane) and
+        storage_volume_mod.hasAttachedDevice())
+    {
         common.printBootMarker("ZIGOS:SERVICE_BOOT:DRIVER_SERVICE:STORAGE_READY");
     }
 

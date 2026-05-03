@@ -12,6 +12,7 @@ pub const FLAG_NETWORK_BOUNDARY: u32 = 1 << 5;
 pub const FLAG_POLICY_BOUNDARY: u32 = 1 << 6;
 pub const FLAG_DRIVER_BOUNDARY: u32 = 1 << 7;
 pub const FLAG_COMPATIBILITY_BOUNDARY: u32 = 1 << 8;
+pub const FLAG_MMU_PROOF_PROBE: u32 = 1 << 9;
 
 pub const ComponentClass = enum(u8) {
     session_manager,
@@ -208,6 +209,19 @@ pub const boot_image_specs = [_]ImageSpec{
         .role_tag = 0xA114,
         .heartbeat_increment = 20,
         .contract_flags = FLAG_OWNS_UI_SURFACE,
+    },
+    .{
+        .bundle_id = "zigos.proof.mmu-isolation",
+        .artifact_name = "userspace-mmu-isolation-proof.elf",
+        .display_name = "MMU Isolation Proof",
+        .publisher = "zigos.system",
+        .label = "mmu-isolation-proof",
+        .entry = "zigos.proof.mmu-isolation",
+        .components = &.{.{ .id = "mmu-isolation-proof", .entry = "zigos.proof.mmu-isolation" }},
+        .component_class = .app_component,
+        .role_tag = 0xA116,
+        .heartbeat_increment = 22,
+        .contract_flags = FLAG_MMU_PROOF_PROBE,
     },
 };
 
