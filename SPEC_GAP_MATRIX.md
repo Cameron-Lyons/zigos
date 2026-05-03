@@ -24,7 +24,7 @@ Result on 2026-04-29:
 - `spec-conformance`: passed, including spec coverage and cold-reboot smoke
 - `zigos-native-smoke-test`: passed across cold reboot
 
-`spec-tests` reports 77 headings, 61 requirements, 20 section groups, and 99
+`spec-tests` reports 77 headings, 61 requirements, 20 section groups, and 102
 test references.
 
 ## Status Legend

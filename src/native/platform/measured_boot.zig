@@ -3,6 +3,7 @@ const crypto_hash = @import("../core/crypto_hash.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("../storage/object_store.zig");
+const policy_manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
@@ -13,6 +14,7 @@ const copyText = native_util.copyText;
 pub const MAX_RECORDS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MEASUREMENT_KIND_COUNT: usize = 5;
+pub const MAX_MANIFEST_ENTRIES: usize = MAX_RECORDS;
 pub const state_workspace_label = "system-measured-boot";
 
 const state_entry_path = "state/latest";
@@ -35,6 +37,67 @@ pub const MeasurementRecord = struct {
 
     pub fn labelSlice(self: *const MeasurementRecord) []const u8 {
         return self.label[0..self.label_len];
+    }
+};
+
+pub const ArtifactManifestEntry = MeasurementRecord;
+
+pub const ArtifactManifest = struct {
+    generation: u64,
+    entry_count: usize,
+    entries: [MAX_MANIFEST_ENTRIES]ArtifactManifestEntry,
+
+    pub fn init(generation: u64) ArtifactManifest {
+        return .{
+            .generation = generation,
+            .entry_count = 0,
+            .entries = [_]ArtifactManifestEntry{zeroRecord()} ** MAX_MANIFEST_ENTRIES,
+        };
+    }
+
+    pub fn add(self: *ArtifactManifest, kind: MeasurementKind, label: []const u8, payload: []const u8) Error!void {
+        if (self.entry_count >= MAX_MANIFEST_ENTRIES) return error.RecordTableFull;
+        self.entries[self.entry_count] = .{
+            .kind = kind,
+            .label_len = 0,
+            .label = [_]u8{0} ** MAX_LABEL_BYTES,
+            .digest = hashMeasurement(kind, label, payload),
+        };
+        self.entries[self.entry_count].label_len = copyText(&self.entries[self.entry_count].label, label);
+        self.entry_count += 1;
+    }
+
+    pub fn addUserspaceServiceImage(
+        self: *ArtifactManifest,
+        image: *const userspace_loader.ImageRecord,
+    ) Error!void {
+        var payload = [_]u8{0} ** 64;
+        @memcpy(payload[0..32], &image.file_sha256);
+        std.mem.writeInt(u64, payload[32..40], image.id, .little);
+        std.mem.writeInt(u64, payload[40..48], image.entry_point, .little);
+        std.mem.writeInt(u64, payload[48..56], @intCast(image.byte_len), .little);
+        std.mem.writeInt(u32, payload[56..60], image.contract_flags, .little);
+        std.mem.writeInt(u16, payload[60..62], image.component_abi_version, .little);
+        return self.add(.critical_service, image.bundleIdSlice(), payload[0..62]);
+    }
+
+    pub fn countKind(self: *const ArtifactManifest, kind: MeasurementKind) usize {
+        var count: usize = 0;
+        for (self.entries[0..self.entry_count]) |entry| {
+            if (entry.kind == kind) count += 1;
+        }
+        return count;
+    }
+};
+
+pub const SignedArtifactManifest = struct {
+    manifest: ArtifactManifest,
+    signature: policy_manifest.Signature,
+
+    pub fn verify(self: *const SignedArtifactManifest) bool {
+        var payload_buffer: [2048]u8 = undefined;
+        const payload = encodeArtifactManifest(self.manifest, &payload_buffer) catch return false;
+        return signing.verify(self.signature, payload) and requiredArtifactShape(&self.manifest);
     }
 };
 
@@ -107,6 +170,7 @@ pub const Error = error{
     CorruptState,
     StateTooLarge,
     UnsupportedStateVersion,
+    ManifestTooLarge,
 };
 
 pub const Recorder = struct {
@@ -199,6 +263,42 @@ pub const Recorder = struct {
         };
     }
 };
+
+pub fn signArtifactManifest(
+    artifact_manifest: ArtifactManifest,
+    identity: signing.SignerIdentity,
+) anyerror!SignedArtifactManifest {
+    var payload_buffer: [2048]u8 = undefined;
+    const payload = try encodeArtifactManifest(artifact_manifest, &payload_buffer);
+    return .{
+        .manifest = artifact_manifest,
+        .signature = try signing.sign(identity, payload),
+    };
+}
+
+pub fn verifySignedArtifactManifest(signed_manifest: *const SignedArtifactManifest) bool {
+    return signed_manifest.verify();
+}
+
+pub fn bootRecordMatchesManifest(boot: *const BootRecord, artifact_manifest: *const ArtifactManifest) bool {
+    if (boot.generation != artifact_manifest.generation) return false;
+    if (boot.record_count != artifact_manifest.entry_count) return false;
+    var matched = [_]bool{false} ** MAX_MANIFEST_ENTRIES;
+    for (boot.records[0..boot.record_count]) |record| {
+        var found = false;
+        for (artifact_manifest.entries[0..artifact_manifest.entry_count], 0..) |entry, index| {
+            if (matched[index]) continue;
+            if (record.kind != entry.kind) continue;
+            if (!std.mem.eql(u8, record.labelSlice(), entry.labelSlice())) continue;
+            if (!std.mem.eql(u8, &record.digest, &entry.digest)) continue;
+            matched[index] = true;
+            found = true;
+            break;
+        }
+        if (!found) return false;
+    }
+    return true;
+}
 
 pub const MeasurementJournal = struct {
     storage: *storage_service.Service,
@@ -337,6 +437,47 @@ fn compareSummaries(previous: ?BootSummary, current: BootSummary) BootComparison
         .same_generation = same_generation,
         .same_record_shape = same_record_shape,
     };
+}
+
+fn requiredArtifactShape(artifact_manifest: *const ArtifactManifest) bool {
+    return artifact_manifest.countKind(.kernel) == 1 and
+        artifact_manifest.countKind(.base_image) == 1 and
+        artifact_manifest.countKind(.critical_service) >= 4 and
+        artifact_manifest.countKind(.policy) == 1 and
+        artifact_manifest.countKind(.driver_set) == 1;
+}
+
+fn encodeArtifactManifest(artifact_manifest: ArtifactManifest, buffer: []u8) Error![]const u8 {
+    var offset: usize = 0;
+    offset = appendManifestFormat(buffer, offset, "ZAM1|g={d}|n={d}", .{
+        artifact_manifest.generation,
+        artifact_manifest.entry_count,
+    }) catch return error.ManifestTooLarge;
+    for (artifact_manifest.entries[0..artifact_manifest.entry_count]) |entry| {
+        offset = appendManifestFormat(buffer, offset, "|{s}:{s}:", .{
+            @tagName(entry.kind),
+            entry.labelSlice(),
+        }) catch return error.ManifestTooLarge;
+        offset = appendHexDigest(buffer, offset, &entry.digest) catch return error.ManifestTooLarge;
+    }
+    return buffer[0..offset];
+}
+
+fn appendManifestFormat(buffer: []u8, offset: usize, comptime fmt: []const u8, args: anytype) error{NoSpaceLeft}!usize {
+    const text = std.fmt.bufPrint(buffer[offset..], fmt, args) catch return error.NoSpaceLeft;
+    return offset + text.len;
+}
+
+fn appendHexDigest(buffer: []u8, offset: usize, digest: *const [32]u8) error{NoSpaceLeft}!usize {
+    const hex = "0123456789abcdef";
+    if (offset + 64 > buffer.len) return error.NoSpaceLeft;
+    var cursor = offset;
+    for (digest.*) |byte| {
+        buffer[cursor] = hex[byte >> 4];
+        buffer[cursor + 1] = hex[byte & 0x0f];
+        cursor += 2;
+    }
+    return cursor;
 }
 
 fn encodeSummary(summary: BootSummary, buffer: []u8) Error![]const u8 {
@@ -607,4 +748,38 @@ test "measured boot journal persists and compares latest boot summary across res
     try std.testing.expect(second_restart.loaded_existing_state);
     try std.testing.expect(second_restart.latestMatches(&second_boot));
     try std.testing.expect(!second_restart.latestMatches(&first_boot));
+}
+
+test "signed artifact manifests bind required boot artifact classes before activation" {
+    var artifact_manifest = ArtifactManifest.init(7);
+    try artifact_manifest.add(.kernel, "kernel-zigos-native", "kernel-bytes-v1");
+    try artifact_manifest.add(.base_image, "stable-a", "base-image-v1");
+    try artifact_manifest.add(.critical_service, "zigos.system.policy", "policy-service-elf");
+    try artifact_manifest.add(.critical_service, "zigos.system.storage", "storage-service-elf");
+    try artifact_manifest.add(.critical_service, "zigos.system.compositor", "compositor-service-elf");
+    try artifact_manifest.add(.critical_service, "zigos.system.network", "network-service-elf");
+    try artifact_manifest.add(.policy, "production-policy-set", "policy-v1");
+    try artifact_manifest.add(.driver_set, "production-driver-set", "drivers-v1");
+
+    const signer = signing.SignerIdentity{
+        .label = "artifact-manifest-test",
+        .seed = [_]u8{0xB7} ** 32,
+    };
+    const signed_manifest = try signArtifactManifest(artifact_manifest, signer);
+    try std.testing.expect(verifySignedArtifactManifest(&signed_manifest));
+
+    var tampered = signed_manifest;
+    tampered.manifest.entries[0].digest[0] ^= 0xFF;
+    try std.testing.expect(!verifySignedArtifactManifest(&tampered));
+
+    var boot = BootRecord{
+        .generation = artifact_manifest.generation,
+        .record_count = artifact_manifest.entry_count,
+        .records = [_]MeasurementRecord{zeroRecord()} ** MAX_RECORDS,
+        .root_digest = [_]u8{0} ** 32,
+    };
+    @memcpy(boot.records[0..artifact_manifest.entry_count], artifact_manifest.entries[0..artifact_manifest.entry_count]);
+    try std.testing.expect(bootRecordMatchesManifest(&boot, &artifact_manifest));
+    boot.records[1].digest[0] ^= 0xAA;
+    try std.testing.expect(!bootRecordMatchesManifest(&boot, &artifact_manifest));
 }

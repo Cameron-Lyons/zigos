@@ -2,6 +2,7 @@ const std = @import("std");
 const abi = @import("../core/abi.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
+const typed_component_abi = @import("typed_component_abi.zig");
 
 pub const MAX_BINDINGS: usize = 24;
 pub const MAX_INTERFACE_NAME_BYTES: usize = 64;
@@ -20,6 +21,7 @@ pub const Binding = struct {
     interface_name_len: usize,
     interface_name: [MAX_INTERFACE_NAME_BYTES]u8,
     flags: u16 = 0,
+    typed_contract_hash: u64 = 0,
 };
 
 pub const Error = error{
@@ -29,6 +31,7 @@ pub const Error = error{
     InterfaceNameTooLong,
     VersionMismatch,
     RegistryNotBootstrapped,
+    TypedContractMismatch,
 };
 
 const BindingSlot = struct {
@@ -90,6 +93,7 @@ pub const Registry = struct {
         flags: u16,
     ) Error!void {
         if (self.find(interface.name)) |_| return error.DuplicateInterface;
+        if (!typedContractCompatible(interface)) return error.TypedContractMismatch;
 
         for (&self.slots) |*slot| {
             if (slot.in_use) continue;
@@ -108,6 +112,9 @@ pub const Registry = struct {
                 .version_minor = interface.version_minor,
             };
             slot.binding.flags = flags;
+            if (typed_component_abi.contractFor(interface.name)) |contract| {
+                slot.binding.typed_contract_hash = contract.contract_hash;
+            }
             return;
         }
 
@@ -116,8 +123,10 @@ pub const Registry = struct {
 
     pub fn connect(self: *const Registry, interface: manifest.InterfaceDecl) Error!abi.ServiceConnectionDescriptor {
         const binding = self.find(interface.name) orelse return error.InterfaceNotFound;
+        if (!typedContractCompatible(binding.interface)) return error.TypedContractMismatch;
         if (binding.interface.version_major != interface.version_major) return error.VersionMismatch;
         if (binding.interface.version_minor < interface.version_minor) return error.VersionMismatch;
+        if (!typedContractCompatible(interface)) return error.TypedContractMismatch;
 
         return .{
             .service_id = binding.service_id,
@@ -155,11 +164,18 @@ fn zeroBinding() Binding {
         .interface_name_len = 0,
         .interface_name = [_]u8{0} ** MAX_INTERFACE_NAME_BYTES,
         .flags = 0,
+        .typed_contract_hash = 0,
     };
 }
 
 fn hashInterface(name: []const u8) u64 {
     return native_util.fnv1a64(name);
+}
+
+fn typedContractCompatible(interface: manifest.InterfaceDecl) bool {
+    if (typed_component_abi.contractFor(interface.name) == null) return true;
+    typed_component_abi.validateInterface(interface) catch return false;
+    return true;
 }
 
 test "service registry service requires bootstrap endpoint before discovery" {
@@ -223,6 +239,34 @@ test "service registry rejects duplicate interfaces and incompatible versions" {
         .version_major = 2,
         .version_minor = 0,
     }));
+}
+
+test "service registry binds known interfaces to generated typed contracts" {
+    var registry = Registry.init();
+    try registry.register(44, 7, 101, .{
+        .name = "zigos.service.registry",
+        .version_major = 1,
+        .version_minor = 0,
+    }, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
+
+    const binding = registry.find("zigos.service.registry").?;
+    try std.testing.expect(binding.typed_contract_hash != 0);
+
+    _ = try registry.connect(.{
+        .name = "zigos.service.registry",
+        .version_major = 1,
+        .version_minor = 0,
+    });
+    try std.testing.expectError(error.VersionMismatch, registry.connect(.{
+        .name = "zigos.service.registry",
+        .version_major = 2,
+        .version_minor = 0,
+    }));
+    try std.testing.expectError(error.TypedContractMismatch, registry.register(45, 8, 102, .{
+        .name = "zigos.task.runtime",
+        .version_major = 2,
+        .version_minor = 0,
+    }, 0));
 }
 
 test "service registry owns interface name bytes" {

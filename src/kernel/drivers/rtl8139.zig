@@ -384,26 +384,7 @@ fn initPendingFreeStack(stack: []u8) void {
 }
 
 pub fn init() void {
-    if (pci.findDevice(RTL8139_VENDOR_ID, RTL8139_DEVICE_ID)) |device| {
-        vga.print("Found RTL8139 network card\n");
-
-        const rtl = RTL8139.init(device) catch |err| {
-            vga.print("Failed to initialize RTL8139: ");
-            vga.print(@errorName(err));
-            vga.print("\n");
-            return;
-        };
-
-        rtl8139_device = rtl;
-        rtl8139_device_id = pci.stableDeviceId(device);
-
-        const irq: u8 = @intCast(pci.readConfig(device.bus, device.device, device.function, 0x3C) & 0xFF);
-        idt.register_interrupt_handler(32 + irq, rtl8139InterruptHandler);
-
-        driver_helpers.printMac("RTL8139 initialized - MAC: ", rtl.mac_address);
-    } else {
-        vga.print("RTL8139 network card not found\n");
-    }
+    vga.print("RTL8139 kernel driver is inventory-only; userspace driver claim required.\n");
 }
 
 pub fn publishBootstrapTransport(device_id: u64) bool {
@@ -417,22 +398,12 @@ pub fn publishBootstrapTransport(device_id: u64) bool {
 }
 
 fn activatePublishedDevice(device_id: u64) ?*const link_port.NetworkDevice {
-    if (currentNetworkDevice(device_id)) |device| return device;
-
-    const pci_device = pci.findDeviceByStableId(device_id) orelse return null;
-    if (!isSupportedDevice(pci_device)) return null;
-
-    const rtl = RTL8139.init(pci_device) catch return null;
-    rtl8139_device = rtl;
-    rtl8139_device_id = device_id;
-
-    const irq: u8 = @intCast(pci.readConfig(pci_device.bus, pci_device.device, pci_device.function, 0x3C) & 0xFF);
-    idt.register_interrupt_handler(32 + irq, rtl8139InterruptHandler);
-    return currentNetworkDevice(device_id);
+    _ = device_id;
+    return null;
 }
 
 fn currentNetworkDevice(device_id: u64) ?*const link_port.NetworkDevice {
-    if (rtl8139_device != null and rtl8139_device_id == device_id) return &rtl8139_network_device;
+    _ = device_id;
     return null;
 }
 
@@ -448,13 +419,7 @@ fn rtl8139InterruptHandler(regs: *idt.InterruptRegisters) callconv(.c) void {
 }
 
 fn rtl8139Send(data: []const u8) void {
-    if (rtl8139_device) |*device| {
-        device.send(data) catch |err| {
-            vga.print("RTL8139 TX dropped: ");
-            vga.print(@errorName(err));
-            vga.print("\n");
-        };
-    }
+    _ = data;
 }
 
 fn rtl8139GetMacAddress() [6]u8 {

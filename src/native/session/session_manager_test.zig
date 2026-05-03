@@ -53,8 +53,8 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, sync_service.state);
     try std.testing.expect(runtime_service.has_checkpoint);
     try std.testing.expectEqual(@as(u32, 0), runtime_service.restart_generation);
-    try std.testing.expect(network_activation.mode == .control_only or network_activation.mode == .published_data_plane);
-    try std.testing.expect(storage_activation.mode == .control_only or storage_activation.mode == .published_data_plane);
+    try std.testing.expect(network_activation.mode == .control_only);
+    try std.testing.expect(storage_activation.mode == .control_only or storage_activation.mode == .published_data_plane or storage_activation.mode == .userspace_brokered_data_plane);
     try std.testing.expectEqual(@as(u16, 0), network_service.restart_count);
     try std.testing.expectEqual(@as(u16, 0), storage_service.restart_count);
     try std.testing.expectEqual(@as(u16, 0), sync_service.restart_count);
@@ -146,8 +146,8 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, sync_service.state);
     try std.testing.expect(runtime_service.has_checkpoint);
     try std.testing.expectEqual(@as(u32, 0), runtime_service.restart_generation);
-    try std.testing.expect(network_activation.mode == .control_only or network_activation.mode == .published_data_plane);
-    try std.testing.expect(storage_activation.mode == .control_only or storage_activation.mode == .published_data_plane);
+    try std.testing.expect(network_activation.mode == .control_only);
+    try std.testing.expect(storage_activation.mode == .control_only or storage_activation.mode == .published_data_plane or storage_activation.mode == .userspace_brokered_data_plane);
     try std.testing.expectEqual(@as(u16, 1), network_service.restart_count);
     try std.testing.expectEqual(@as(u16, 1), storage_service.restart_count);
     try std.testing.expectEqual(@as(u16, 1), sync_service.restart_count);

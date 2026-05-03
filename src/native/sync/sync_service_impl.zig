@@ -337,6 +337,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return broker.connect(request);
         }
 
+        pub fn egressBroker(
+            self: *Self,
+            capability_table: *const capability.CapabilityTable,
+        ) network_policy.EgressBroker {
+            return network_policy.EgressBroker.init(&self.state().network_policies, capability_table);
+        }
+
         pub fn configureWorkspacePolicy(
             self: *Self,
             request: WorkspacePolicyRequest,

@@ -146,6 +146,7 @@ pub fn publishNetworkDevice(
     network_device: *const link_port.NetworkDevice,
     kernel_bootstrap: bool,
 ) bool {
+    if (kernel_bootstrap) return false;
     if (!canPublishPublication(NetworkPublication, published_network, device_id)) return false;
     var publication = initPublication(NetworkPublication, device_id, publisher, kernel_bootstrap);
     publication.network_device = network_device;
@@ -159,6 +160,7 @@ pub fn publishNetworkActivator(
     activator: NetworkActivator,
     kernel_bootstrap: bool,
 ) bool {
+    if (kernel_bootstrap) return false;
     if (!canPublishPublication(NetworkPublication, published_network, device_id)) return false;
     var publication = initPublication(NetworkPublication, device_id, publisher, kernel_bootstrap);
     publication.activator = activator;

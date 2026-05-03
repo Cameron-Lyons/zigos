@@ -22,6 +22,8 @@ pub const Descriptor = extern struct {
     label_len: u16,
     entry_len: u16,
     publisher_len: u16,
+    typed_abi_major: u16,
+    typed_abi_minor: u16,
     reserved: u16,
     bundle_id: [MAX_BUNDLE_ID_BYTES]u8,
     display_name: [MAX_DISPLAY_NAME_BYTES]u8,
@@ -71,6 +73,7 @@ pub const ValidationError = error{
     InvalidLabelLength,
     InvalidEntryLength,
     InvalidPublisherLength,
+    UnsupportedTypedAbiVersion,
 };
 
 pub fn init(spec: InitSpec) Descriptor {
@@ -87,6 +90,8 @@ pub fn init(spec: InitSpec) Descriptor {
     descriptor.label_len = @intCast(copyText(descriptor.label[0..], spec.label));
     descriptor.entry_len = @intCast(copyText(descriptor.entry[0..], spec.entry));
     descriptor.publisher_len = @intCast(copyText(descriptor.publisher[0..], spec.publisher));
+    descriptor.typed_abi_major = 1;
+    descriptor.typed_abi_minor = 0;
     return descriptor;
 }
 
@@ -104,6 +109,7 @@ pub fn validate(descriptor: *const Descriptor) ValidationError!void {
     if (descriptor.label_len > descriptor.label.len) return error.InvalidLabelLength;
     if (descriptor.entry_len > descriptor.entry.len) return error.InvalidEntryLength;
     if (descriptor.publisher_len > descriptor.publisher.len) return error.InvalidPublisherLength;
+    if (descriptor.typed_abi_major != 1) return error.UnsupportedTypedAbiVersion;
 }
 
 test "descriptor init and validate preserve the embedded metadata" {
@@ -125,6 +131,8 @@ test "descriptor init and validate preserve the embedded metadata" {
     try std.testing.expectEqual(@as(u32, 0xA101), descriptor.role_tag);
     try std.testing.expectEqual(@as(u32, 1), descriptor.heartbeat_increment);
     try std.testing.expectEqual(@as(u32, 0x3), descriptor.contract_flags);
+    try std.testing.expectEqual(@as(u16, 1), descriptor.typed_abi_major);
+    try std.testing.expectEqual(@as(u16, 0), descriptor.typed_abi_minor);
     try std.testing.expectEqualStrings("zigos.system.session-manager", descriptor.bundleIdSlice());
     try std.testing.expectEqualStrings("Session Manager", descriptor.displayNameSlice());
     try std.testing.expectEqualStrings("session-manager", descriptor.labelSlice());

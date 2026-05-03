@@ -37,6 +37,10 @@ else
 
 export var zigos_userspace_bootstrap: mailbox.Mailbox align(@alignOf(mailbox.Mailbox)) linksection(mailbox.SECTION_NAME) = .{};
 
+const MMU_ISOLATION_PROOF_ROLE_TAG: u32 = 0xA116;
+const FOREIGN_SHARED_MEMORY_PROBE_ADDR: usize = 0x7000_0000;
+const PROOF_SYSCALL_POINTER_DENIED_PULSE: u16 = 0x41;
+
 const freestanding_trap = if (builtin.target.os.tag == .freestanding)
     struct {
         extern fn syscall3_asm(request_addr: usize, response_addr: usize, response_len: usize) callconv(.c) usize;
@@ -76,6 +80,10 @@ pub export fn zigos_userspace_contract_main() callconv(.c) noreturn {
         runStartupQueries(detail);
     }
 
+    if (descriptor.role_tag == MMU_ISOLATION_PROOF_ROLE_TAG) {
+        runMmuIsolationProbe(detail);
+    }
+
     runSteadyState(detail, descriptor.heartbeat_increment);
 }
 
@@ -105,6 +113,27 @@ fn runStartupQueries(detail: mailbox.Detail) void {
     if (@as(u32, @bitCast(resource_mask)) != 0) {
         publishState(.syscall_ready, detail, 3);
     }
+}
+
+fn runMmuIsolationProbe(detail: mailbox.Detail) noreturn {
+    if (invalidSyscallPointerIsDenied()) {
+        publishState(.syscall_ready, detail, PROOF_SYSCALL_POINTER_DENIED_PULSE);
+    } else {
+        signalFault(detail, 0x71);
+    }
+
+    const foreign_shared_memory: *volatile u8 = @ptrFromInt(FOREIGN_SHARED_MEMORY_PROBE_ADDR);
+    _ = foreign_shared_memory.*;
+    signalFault(detail, 0x72);
+}
+
+fn invalidSyscallPointerIsDenied() bool {
+    var response = abi.TimeQueryResponse{ .now_ticks = 0 };
+    return freestanding_trap.call(
+        FOREIGN_SHARED_MEMORY_PROBE_ADDR,
+        @intFromPtr(&response),
+        @sizeOf(abi.TimeQueryResponse),
+    ) == .invalid_request_pointer;
 }
 
 fn queryTime(authority_capability_id: u64, task_id: u64, mask: *mailbox.ResourceMask) bool {
