@@ -1,6 +1,7 @@
 const std = @import("std");
 const adversarial_security = @import("adversarial_security.zig");
 const architecture_security = @import("architecture_security.zig");
+const backlog_gates = @import("backlog_gates.zig");
 const boot_recovery = @import("boot_recovery.zig");
 const drivers_storage_sync = @import("drivers_storage_sync.zig");
 const experience_and_policy_edges = @import("experience_and_policy_edges.zig");
@@ -164,4 +165,24 @@ test "adversarial freestanding runtime proofs reject modeled bypasses" {
     try std.testing.expect(runtime_negative_proofs.rawNetworkSendBypassIsDenied());
     try std.testing.expect(runtime_negative_proofs.driverAuthorityEscapeIsRejected());
     try std.testing.expect(runtime_negative_proofs.rebootGrantAndRevocationStatePersists());
+}
+
+test "backlog gate enforces isolation proof depth" {
+    try backlog_gates.isolationProofDepthGate();
+}
+
+test "backlog gate enforces network transport hardening" {
+    try backlog_gates.networkTransportHardeningGate();
+}
+
+test "backlog gate enforces component ABI depth" {
+    try backlog_gates.componentAbiDepthGate();
+}
+
+test "backlog gate enforces driver boundary audit" {
+    try backlog_gates.driverBoundaryAuditGate();
+}
+
+test "backlog gate enforces UX rendering" {
+    try backlog_gates.uxRenderingGate();
 }

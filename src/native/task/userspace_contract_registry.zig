@@ -13,7 +13,7 @@ pub const FLAG_COMPATIBILITY_BOUNDARY = registry.FLAG_COMPATIBILITY_BOUNDARY;
 
 pub const ContractSpec = registry.ContractSpec;
 
-pub const contracts = comptime blk: {
+pub const contracts = blk: {
     var derived: [registry.boot_image_specs.len]ContractSpec = undefined;
     for (registry.boot_image_specs, 0..) |spec, index| {
         derived[index] = registry.contractForSpec(&spec);

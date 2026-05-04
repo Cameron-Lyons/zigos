@@ -7,9 +7,9 @@ pub fn init() void {
     console.print("Initializing timer...\n");
     timer.init(timer.DEFAULT_FREQUENCY_HZ);
 
-    console.print("Initializing keyboard...\n");
-    keyboard.init();
-    console.print("Keyboard ready!\n");
+    console.print("Recording keyboard bootstrap inventory...\n");
+    keyboard.recordBootstrapInventoryOnly();
+    console.print("Keyboard data plane deferred to userspace driver contracts.\n");
 
     devices.startDeferredRuntimeInit();
 }

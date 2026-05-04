@@ -76,7 +76,15 @@ pub const ValidationError = error{
     UnsupportedTypedAbiVersion,
 };
 
-pub fn init(spec: InitSpec) Descriptor {
+pub const InitError = error{
+    BundleIdTooLong,
+    DisplayNameTooLong,
+    LabelTooLong,
+    EntryTooLong,
+    PublisherTooLong,
+};
+
+pub fn init(spec: InitSpec) InitError!Descriptor {
     var descriptor = std.mem.zeroes(Descriptor);
     descriptor.magic = MAGIC;
     descriptor.version = VERSION;
@@ -85,20 +93,30 @@ pub fn init(spec: InitSpec) Descriptor {
     descriptor.role_tag = spec.role_tag;
     descriptor.heartbeat_increment = spec.heartbeat_increment;
     descriptor.contract_flags = spec.contract_flags;
-    descriptor.bundle_id_len = @intCast(copyText(descriptor.bundle_id[0..], spec.bundle_id));
-    descriptor.display_name_len = @intCast(copyText(descriptor.display_name[0..], spec.display_name));
-    descriptor.label_len = @intCast(copyText(descriptor.label[0..], spec.label));
-    descriptor.entry_len = @intCast(copyText(descriptor.entry[0..], spec.entry));
-    descriptor.publisher_len = @intCast(copyText(descriptor.publisher[0..], spec.publisher));
+    descriptor.bundle_id_len = @intCast(copyTextExact(descriptor.bundle_id[0..], spec.bundle_id) catch return error.BundleIdTooLong);
+    descriptor.display_name_len = @intCast(copyTextExact(descriptor.display_name[0..], spec.display_name) catch return error.DisplayNameTooLong);
+    descriptor.label_len = @intCast(copyTextExact(descriptor.label[0..], spec.label) catch return error.LabelTooLong);
+    descriptor.entry_len = @intCast(copyTextExact(descriptor.entry[0..], spec.entry) catch return error.EntryTooLong);
+    descriptor.publisher_len = @intCast(copyTextExact(descriptor.publisher[0..], spec.publisher) catch return error.PublisherTooLong);
     descriptor.typed_abi_major = 1;
     descriptor.typed_abi_minor = 0;
     return descriptor;
 }
 
-fn copyText(dest: []u8, src: []const u8) usize {
-    const len = @min(dest.len, src.len);
-    @memcpy(dest[0..len], src[0..len]);
-    return len;
+pub fn initComptime(comptime spec: InitSpec) Descriptor {
+    return init(spec) catch |err| switch (err) {
+        error.BundleIdTooLong => @compileError("userspace descriptor bundle id exceeds MAX_BUNDLE_ID_BYTES"),
+        error.DisplayNameTooLong => @compileError("userspace descriptor display name exceeds MAX_DISPLAY_NAME_BYTES"),
+        error.LabelTooLong => @compileError("userspace descriptor label exceeds MAX_LABEL_BYTES"),
+        error.EntryTooLong => @compileError("userspace descriptor entry exceeds MAX_ENTRY_BYTES"),
+        error.PublisherTooLong => @compileError("userspace descriptor publisher exceeds MAX_PUBLISHER_BYTES"),
+    };
+}
+
+fn copyTextExact(dest: []u8, src: []const u8) error{DestinationTooSmall}!usize {
+    if (src.len > dest.len) return error.DestinationTooSmall;
+    @memcpy(dest[0..src.len], src);
+    return src.len;
 }
 
 pub fn validate(descriptor: *const Descriptor) ValidationError!void {
@@ -113,7 +131,7 @@ pub fn validate(descriptor: *const Descriptor) ValidationError!void {
 }
 
 test "descriptor init and validate preserve the embedded metadata" {
-    const descriptor = init(.{
+    const descriptor = try init(.{
         .component_class = 2,
         .signed = true,
         .role_tag = 0xA101,
@@ -138,4 +156,45 @@ test "descriptor init and validate preserve the embedded metadata" {
     try std.testing.expectEqualStrings("session-manager", descriptor.labelSlice());
     try std.testing.expectEqualStrings("zigos.session.manager", descriptor.entrySlice());
     try std.testing.expectEqualStrings("zigos.system", descriptor.publisherSlice());
+}
+
+test "descriptor init rejects oversized identity strings instead of truncating" {
+    const oversized_bundle_id = [_]u8{'b'} ** (MAX_BUNDLE_ID_BYTES + 1);
+    const oversized_display_name = [_]u8{'d'} ** (MAX_DISPLAY_NAME_BYTES + 1);
+    const oversized_label = [_]u8{'l'} ** (MAX_LABEL_BYTES + 1);
+    const oversized_entry = [_]u8{'e'} ** (MAX_ENTRY_BYTES + 1);
+    const oversized_publisher = [_]u8{'p'} ** (MAX_PUBLISHER_BYTES + 1);
+
+    const base = InitSpec{
+        .component_class = 2,
+        .signed = true,
+        .role_tag = 0xA101,
+        .heartbeat_increment = 1,
+        .contract_flags = 0x3,
+        .bundle_id = "zigos.system.session-manager",
+        .display_name = "Session Manager",
+        .label = "session-manager",
+        .entry = "zigos.session.manager",
+        .publisher = "zigos.system",
+    };
+
+    var spec = base;
+    spec.bundle_id = oversized_bundle_id[0..];
+    try std.testing.expectError(error.BundleIdTooLong, init(spec));
+
+    spec = base;
+    spec.display_name = oversized_display_name[0..];
+    try std.testing.expectError(error.DisplayNameTooLong, init(spec));
+
+    spec = base;
+    spec.label = oversized_label[0..];
+    try std.testing.expectError(error.LabelTooLong, init(spec));
+
+    spec = base;
+    spec.entry = oversized_entry[0..];
+    try std.testing.expectError(error.EntryTooLong, init(spec));
+
+    spec = base;
+    spec.publisher = oversized_publisher[0..];
+    try std.testing.expectError(error.PublisherTooLong, init(spec));
 }

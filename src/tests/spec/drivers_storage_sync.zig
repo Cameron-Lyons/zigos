@@ -89,7 +89,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         storage_device_id,
         "ata-bootstrap",
         FakeBackend.activate,
-        true,
+        false,
     ));
 
     var directory = driver_service.Directory.init();
@@ -164,7 +164,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
 
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, storage_activation.mode);
     try std.testing.expect(storage_activation.exclusive_claim);
-    try std.testing.expect(storage_activation.kernel_bootstrap);
+    try std.testing.expect(!storage_activation.kernel_bootstrap);
     try std.testing.expectEqualStrings("ata-bootstrap", storage_activation.publisherSlice());
     try std.testing.expectEqual(@as(usize, 1), FakeBackend.activation_count);
     try std.testing.expect(storage_volume.hasAttachedDevice());

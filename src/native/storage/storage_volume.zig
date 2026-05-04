@@ -169,10 +169,12 @@ pub const Volume = struct {
         if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_capacity_bytes) return false;
         if (!readAttachedBytes(self, data_start_byte, self.io_log_buffer[0..loaded.root.log_bytes])) return false;
         replayLog(self, store, workspaces, self.io_log_buffer[0..loaded.root.log_bytes], loaded.root) catch return false;
+        store.clearDirty();
+        workspaces.clearDirty();
         return true;
     }
 
-    pub fn saveToVolume(self: *Volume, store: *const object_store.Store, workspaces: *const workspace.Directory) !PersistResult {
+    pub fn saveToVolume(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory) !PersistResult {
         if (!self.hasAttachedDevice()) return .{ .generation = 0 };
         if (self.attached_backend_sector_count < required_device_sectors) return error.ImageTooSmall;
 
@@ -180,7 +182,7 @@ pub const Volume = struct {
         return saveIncremental(self, current, store, workspaces, BackendWriteFns{ .volume = self });
     }
 
-    pub fn saveToImage(self: *Volume, image: []u8, store: *const object_store.Store, workspaces: *const workspace.Directory) !PersistResult {
+    pub fn saveToImage(self: *Volume, image: []u8, store: *object_store.Store, workspaces: *workspace.Directory) !PersistResult {
         if (image.len < image_bytes) return error.ImageTooSmall;
         const current = findLatestImageRoot(image) catch null;
         return saveIncremental(self, current, store, workspaces, ImageWriteFns{ .image = image });
@@ -192,6 +194,8 @@ pub const Volume = struct {
         if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_capacity_bytes) return error.CorruptImage;
         @memcpy(self.io_log_buffer[0..loaded.root.log_bytes], image[data_start_byte .. data_start_byte + loaded.root.log_bytes]);
         try replayLog(self, store, workspaces, self.io_log_buffer[0..loaded.root.log_bytes], loaded.root);
+        store.clearDirty();
+        workspaces.clearDirty();
         return loaded.root.generation;
     }
 };
@@ -291,10 +295,10 @@ pub fn loadFromVolume(store: *object_store.Store, workspaces: *workspace.Directo
     return default_volume.loadFromVolume(store, workspaces);
 }
 
-pub fn saveToVolume(store: *const object_store.Store, workspaces: *const workspace.Directory) !PersistResult {
+pub fn saveToVolume(store: *object_store.Store, workspaces: *workspace.Directory) !PersistResult {
     return default_volume.saveToVolume(store, workspaces);
 }
-pub fn saveToImage(image: []u8, store: *const object_store.Store, workspaces: *const workspace.Directory) !PersistResult {
+pub fn saveToImage(image: []u8, store: *object_store.Store, workspaces: *workspace.Directory) !PersistResult {
     return default_volume.saveToImage(image, store, workspaces);
 }
 
@@ -313,8 +317,8 @@ const ImageWriteFns = struct {
 fn saveIncremental(
     self: *Volume,
     current: ?LoadedRoot,
-    store: *const object_store.Store,
-    workspaces: *const workspace.Directory,
+    store: *object_store.Store,
+    workspaces: *workspace.Directory,
     writer: anytype,
 ) Error!PersistResult {
     const current_generation = if (current) |loaded| loaded.root.generation else 0;
@@ -324,6 +328,8 @@ fn saveIncremental(
         0;
 
     if (current != null and append_len == 0) {
+        store.clearDirty();
+        workspaces.clearDirty();
         return .{ .generation = current_generation };
     }
 
@@ -333,6 +339,8 @@ fn saveIncremental(
         const next_root_sector = nextRootSector(current);
         try writeBytes(writer, data_start_byte + current.?.root.log_bytes, self.io_log_buffer[0..append_len]);
         try writeRoot(writer, next_root_sector, next_root);
+        store.clearDirty();
+        workspaces.clearDirty();
         return .{ .generation = next_generation };
     }
 
@@ -345,6 +353,8 @@ fn saveIncremental(
     const next_root_sector = nextRootSector(current);
     try writeBytes(writer, data_start_byte, self.io_log_buffer[0..log_writer.offset]);
     try writeRoot(writer, next_root_sector, next_root);
+    store.clearDirty();
+    workspaces.clearDirty();
     return .{ .generation = next_generation };
 }
 
@@ -377,40 +387,40 @@ fn buildDeltaLog(
     self: *Volume,
     buffer: []u8,
     root: RootState,
-    store: *const object_store.Store,
-    workspaces: *const workspace.Directory,
+    store: *object_store.Store,
+    workspaces: *workspace.Directory,
 ) Error!usize {
     var writer = CursorWriter{ .buffer = buffer };
 
-    for (store.objects) |slot| {
-        if (!slot.in_use) continue;
-        if (slot.object.latest_version_id <= root.last_version_id) continue;
-        try appendObjectRecord(&writer, slot.object);
+    for (store.dirtyObjectIds()) |object_id| {
+        const object_record = store.object(object_id) orelse continue;
+        if (object_record.latest_version_id <= root.last_version_id) continue;
+        try appendObjectRecord(&writer, object_record.*);
     }
 
-    for (store.versions) |slot| {
-        if (!slot.in_use) continue;
-        if (slot.version.id <= root.last_version_id) continue;
-        if (store.blob(slot.version.blob_address)) |blob| {
+    for (store.dirtyVersionIds()) |version_id| {
+        const version_record = store.version(version_id) orelse continue;
+        if (version_record.id <= root.last_version_id) continue;
+        if (store.blob(version_record.blob_address)) |blob| {
             try appendBlobRecord(&writer, blob.*);
         }
-        try appendVersionRecord(&writer, slot.version);
+        try appendVersionRecord(&writer, version_record.*);
     }
 
-    for (workspaces.workspaces) |slot| {
-        if (!persistableWorkspaceSlot(slot)) continue;
-        const summary = findWorkspaceSummary(root, slot.workspace.id);
-        const state_hash = try workspaceStateHash(self, &slot.workspace);
+    for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
+        const workspace_record = workspaces.findConst(workspace_id) orelse continue;
+        const summary = findWorkspaceSummary(root, workspace_record.id);
+        const state_hash = try workspaceStateHash(self, workspace_record);
         if (summary) |persisted| {
-            if (persisted.generation == slot.workspace.generation and persisted.state_hash == state_hash) continue;
+            if (persisted.generation == workspace_record.generation and persisted.state_hash == state_hash) continue;
         }
-        try appendWorkspaceRecord(&writer, slot.workspace);
+        try appendWorkspaceRecord(&writer, workspace_record.*);
     }
 
-    for (workspaces.snapshots) |slot| {
-        if (!persistableSnapshotSlot(slot)) continue;
-        if (slot.snapshot.id <= root.last_snapshot_id) continue;
-        try appendSnapshotRecord(&writer, slot.snapshot);
+    for (workspaces.dirtySnapshotIds()) |snapshot_id| {
+        const snapshot_record = findSnapshotConst(workspaces, snapshot_id) orelse continue;
+        if (snapshot_record.id <= root.last_snapshot_id) continue;
+        try appendSnapshotRecord(&writer, snapshot_record.*);
     }
 
     return writer.offset;
@@ -735,6 +745,13 @@ fn findWorkspaceSlotById(workspaces: *workspace.Directory, workspace_id: u64) ?*
 fn findSnapshotSlotIndexById(workspaces: *workspace.Directory, snapshot_id: u64) ?usize {
     for (workspaces.snapshots, 0..) |slot, index| {
         if (slot.in_use and slot.snapshot.id == snapshot_id) return index;
+    }
+    return null;
+}
+
+fn findSnapshotConst(workspaces: *const workspace.Directory, snapshot_id: u64) ?*const workspace.SnapshotRecord {
+    for (&workspaces.snapshots) |*slot| {
+        if (slot.in_use and slot.snapshot.id == snapshot_id) return &slot.snapshot;
     }
     return null;
 }
@@ -1412,8 +1429,14 @@ test "storage volume image reloads the latest persisted state across slot genera
     try workspaces.beginTransaction(notes.id);
     try workspaces.stagePut(notes.id, "documents/notes.md", first.object_id, first.version_id, .document);
     _ = try workspaces.commit(notes.id, 11);
+    try std.testing.expectEqual(@as(usize, 1), store.dirtyObjectIds().len);
+    try std.testing.expectEqual(@as(usize, 1), store.dirtyVersionIds().len);
+    try std.testing.expectEqual(@as(usize, 1), workspaces.dirtyWorkspaceIds().len);
     const generation_one = try saveToImage(image, &store, &workspaces);
     try std.testing.expectEqual(@as(u64, 1), generation_one.generation);
+    try std.testing.expectEqual(@as(usize, 0), store.dirtyObjectIds().len);
+    try std.testing.expectEqual(@as(usize, 0), store.dirtyVersionIds().len);
+    try std.testing.expectEqual(@as(usize, 0), workspaces.dirtyWorkspaceIds().len);
     const root_after_first = (try findLatestImageRoot(image)).?.root;
     const first_log_bytes = root_after_first.log_bytes;
 
@@ -1427,11 +1450,19 @@ test "storage volume image reloads the latest persisted state across slot genera
     try workspaces.beginTransaction(notes.id);
     try workspaces.stagePut(notes.id, "documents/notes.md", second.object_id, second.version_id, .document);
     _ = try workspaces.commit(notes.id, 13);
+    try std.testing.expectEqual(@as(usize, 1), store.dirtyObjectIds().len);
+    try std.testing.expectEqual(@as(usize, 1), store.dirtyVersionIds().len);
+    try std.testing.expectEqual(@as(usize, 1), workspaces.dirtyWorkspaceIds().len);
     const generation_two = try saveToImage(image, &store, &workspaces);
     try std.testing.expectEqual(@as(u64, 2), generation_two.generation);
+    try std.testing.expectEqual(@as(usize, 0), store.dirtyObjectIds().len);
+    try std.testing.expectEqual(@as(usize, 0), store.dirtyVersionIds().len);
+    try std.testing.expectEqual(@as(usize, 0), workspaces.dirtyWorkspaceIds().len);
     const root_after_second = (try findLatestImageRoot(image)).?.root;
     try std.testing.expect(root_after_second.log_bytes > first_log_bytes);
     try std.testing.expect(root_after_second.log_bytes < first_log_bytes + 4 * sector_size);
+    const unchanged_generation = try saveToImage(image, &store, &workspaces);
+    try std.testing.expectEqual(generation_two.generation, unchanged_generation.generation);
 
     var loaded_store = object_store.Store.init();
     var loaded_workspaces = workspace.Directory.init();

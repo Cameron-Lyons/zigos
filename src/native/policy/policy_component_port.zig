@@ -6,6 +6,7 @@ const policy_mediation = @import("policy_mediation.zig");
 const request_header = @import("../core/request_header.zig");
 
 pub const Error = policy_mediation.Error || error{
+    SubjectTaskRequired,
     SubjectTaskMismatch,
     UnexpectedOperation,
     UnsupportedAbiVersion,

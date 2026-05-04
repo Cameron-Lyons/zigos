@@ -1,5 +1,10 @@
+const builtin = @import("builtin");
 const object_store = @import("object_store.zig");
-const storage_volume = @import("storage_volume.zig");
+const root = @import("root");
+const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
+    root.storage_volume
+else
+    @import("storage_volume.zig");
 const workspace = @import("workspace.zig");
 
 pub const CheckpointStore = struct {

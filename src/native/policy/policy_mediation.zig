@@ -981,3 +981,64 @@ test "policy mediation maps location contacts screen capture and notification ca
     try std.testing.expectEqual(capability.CapabilityTargetKind.service, notification_capability.target.kind);
     try std.testing.expect(notification_capability.rights.has(.notification_post));
 }
+
+test "policy mediation denies clipboard and screen capture without explicit grants" {
+    var capability_table = capability.CapabilityTable.init();
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 77 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 2048,
+            .endpoint_slots = 8,
+            .shared_memory_bytes = 2048,
+        },
+        .local_only = true,
+    });
+    var mediator = PolicyMediator.init(
+        .{ .kind = .policy_authority, .serial = 78 },
+        &capability_table,
+        &runtime,
+        .{
+            .network_service_id = 88,
+            .compositor_service_id = 89,
+            .policy_service_id = 90,
+            .service_registry_id = 91,
+        },
+    );
+
+    const requests = [_]manifest.PermissionRequest{
+        .{
+            .kind = .clipboard,
+            .resource = "clipboard",
+            .rights = .{ .workspace = .{ .clipboard_read = true } },
+            .required = false,
+        },
+        .{
+            .kind = .screen_capture,
+            .resource = "display:main",
+            .rights = .{ .device = .{ .screen_capture = true } },
+            .required = false,
+        },
+    };
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "app.scrape-attempt",
+        .display_name = "Scrape Attempt",
+        .publisher = "zigos.dev",
+        .requested_permissions = &requests,
+    };
+
+    const summary = try mediator.applyManifest(task.id, bundle, &.{}, 10);
+
+    try std.testing.expectEqual(@as(usize, 0), summary.granted_count);
+    try std.testing.expectEqual(@as(usize, 2), summary.denied_count);
+    try std.testing.expectEqual(@as(usize, 0), summary.required_denials);
+    try std.testing.expectEqual(task_runtime.TaskState.active, task.state);
+    try std.testing.expectEqual(@as(usize, 0), task.capability_count);
+    try std.testing.expect(!summary.decisionForKind(.clipboard).?.allowed);
+    try std.testing.expectEqual(abi.DenialReason.policy_denied, summary.decisionForKind(.clipboard).?.reason);
+    try std.testing.expect(!summary.decisionForKind(.screen_capture).?.allowed);
+    try std.testing.expectEqual(abi.DenialReason.policy_denied, summary.decisionForKind(.screen_capture).?.reason);
+    try std.testing.expect(capability_table.query(1) == null);
+}

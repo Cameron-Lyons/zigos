@@ -23,6 +23,9 @@ pub fn addUserspaceArtifacts(
     const bootstrap_mailbox_module = b.createModule(.{
         .root_source_file = b.path("src/native/task/userspace_bootstrap_mailbox.zig"),
     });
+    const elf_image_inspector_module = b.createModule(.{
+        .root_source_file = b.path("src/native_elf_image_inspector.zig"),
+    });
     const runtime_module = b.createModule(.{
         .root_source_file = b.path("src/userspace/runtime.zig"),
         .target = target,
@@ -40,6 +43,7 @@ pub fn addUserspaceArtifacts(
         }),
     });
     archive_generator.root_module.addImport("userspace_descriptor", descriptor_module);
+    archive_generator.root_module.addImport("elf_image_inspector", elf_image_inspector_module);
     const archive_run = b.addRunArtifact(archive_generator);
     const archive_dir = archive_run.addOutputDirectoryArg("userspace-archive");
     const archive_source = archive_dir.path(b, "userspace_archive.zig");

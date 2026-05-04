@@ -8,6 +8,7 @@ const task_runtime = @import("../task/task_runtime.zig");
 
 pub const Error = native_kernel.Error || error{
     UnexpectedOperation,
+    SubjectTaskRequired,
     SubjectTaskMismatch,
     UnsupportedAbiVersion,
 };
@@ -419,6 +420,7 @@ pub fn makeHeader(operation: abi.NativeOperation, correlation_id: u64, subject_t
 
 fn validateHeader(header: abi.RequestHeader, expected: abi.NativeOperation) Error!void {
     try request_header.validateHeader(header, abi.opcode(expected));
+    if (header.subject_task_id == 0) return error.SubjectTaskRequired;
 }
 
 fn validateSubjectTask(header: abi.RequestHeader, task_id: u64) Error!void {
@@ -444,7 +446,7 @@ fn validateCallerCapability(
     capability_id: u64,
     now_ticks: u64,
 ) Error!void {
-    if (header.subject_task_id == 0) return;
+    if (header.subject_task_id == 0) return error.SubjectTaskRequired;
     try self.kernel.requireTaskCapability(header.subject_task_id, capability_id, now_ticks);
 }
 
@@ -527,6 +529,21 @@ test "kernel port enforces operation ids and forwards typed task create requests
         .authority_capability_id = authority_capability.id,
         .request = .{
             .owner = .{ .kind = .app, .serial = 3 },
+            .component_class = .app_component,
+            .budget = .{
+                .cpu_time_ticks = 100,
+                .memory_bytes = 512,
+                .endpoint_slots = 2,
+                .shared_memory_bytes = 512,
+            },
+            .local_only = true,
+        },
+    }, 6));
+    try std.testing.expectError(error.SubjectTaskRequired, port.taskCreate(.{
+        .header = makeHeader(.task_create, 79, 0),
+        .authority_capability_id = authority_capability.id,
+        .request = .{
+            .owner = .{ .kind = .app, .serial = 4 },
             .component_class = .app_component,
             .budget = .{
                 .cpu_time_ticks = 100,

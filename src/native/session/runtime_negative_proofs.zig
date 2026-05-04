@@ -8,7 +8,6 @@ const endpoint = @import("../kernel_api/endpoint.zig");
 const native_kernel = @import("../kernel_api/native_kernel.zig");
 const principal = @import("../core/principal.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
-const userspace_bootstrap_mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -61,19 +60,17 @@ pub fn runFreestandingAndPrint(
         .local_only = true,
     }) catch return false;
 
-    const expected_denial_counter = userspace_bootstrap_mailbox.packCounter(
-        .syscall_ready,
-        .proof,
-        PROOF_SYSCALL_POINTER_DENIED_PULSE,
-    );
-
     var saw_syscall_pointer_denial = false;
     var attempt: usize = 0;
     while (attempt < 8) : (attempt += 1) {
-        if (!scheduler.executeTask(launched.id, attempt)) return false;
+        const yielded = scheduler.executeTask(launched.id, attempt);
 
         if (!saw_syscall_pointer_denial and
-            scheduler.executor.observedUserCounter(launched.address_space_id, expected_denial_counter))
+            scheduler.executor.observedUserCounterStagePulse(
+                launched.address_space_id,
+                .syscall_ready,
+                PROOF_SYSCALL_POINTER_DENIED_PULSE,
+            ))
         {
             common.printBootMarker(boot_markers.runtime_proof_syscall_pointer_isolation);
             saw_syscall_pointer_denial = true;
@@ -84,6 +81,8 @@ pub fn runFreestandingAndPrint(
             common.printBootMarker(boot_markers.runtime_proof_mmu_user_fault);
             return true;
         }
+
+        if (!yielded) return false;
     }
 
     return false;

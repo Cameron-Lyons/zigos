@@ -1,46 +1,9 @@
 const std = @import("std");
 const elf = std.elf;
+const elf_image_inspector = @import("elf_image_inspector");
 const userspace_descriptor = @import("userspace_descriptor");
 
-const DEFAULT_USER_STACK_TOP: u64 = 0xBFFF_F000;
-const DEFAULT_USER_STACK_SIZE_BYTES: usize = 64 * 1024;
-const MAX_IMAGE_HASH_BYTES: usize = 32;
-const MAX_EXECUTABLE_SEGMENTS: usize = 8;
-const BOOTSTRAP_MAILBOX_SECTION_NAME = ".zigos_userspace_bootstrap";
-
-const SegmentAccess = packed struct(u8) {
-    read: bool = true,
-    write: bool = false,
-    execute: bool = false,
-    _reserved: u5 = 0,
-};
-
-const ExecutableSegmentSpec = struct {
-    virtual_address: u64 = 0,
-    file_offset: u32 = 0,
-    file_size: u32 = 0,
-    memory_size: u32 = 0,
-    alignment: u32 = 0x1000,
-    access: SegmentAccess = .{},
-};
-
-const ExecutableImageSpec = struct {
-    entry_point: u64 = 0,
-    stack_top: u64 = DEFAULT_USER_STACK_TOP,
-    stack_size_bytes: usize = DEFAULT_USER_STACK_SIZE_BYTES,
-    file_size_bytes: usize = 0,
-    file_sha256: [MAX_IMAGE_HASH_BYTES]u8 = [_]u8{0} ** MAX_IMAGE_HASH_BYTES,
-    segment_count: usize = 0,
-    segments: [MAX_EXECUTABLE_SEGMENTS]ExecutableSegmentSpec = [_]ExecutableSegmentSpec{ExecutableSegmentSpec{}} ** MAX_EXECUTABLE_SEGMENTS,
-};
-
-const EmbeddedInfo = struct {
-    entry_point: u64,
-    byte_len: usize,
-    bootstrap_mailbox_address: u64,
-    file_sha256: [MAX_IMAGE_HASH_BYTES]u8,
-    executable_image: ExecutableImageSpec,
-};
+const EmbeddedInfo = elf_image_inspector.Inspection;
 
 const Artifact = struct {
     source_path: []const u8,
@@ -112,7 +75,7 @@ fn parseArtifact(
         .heartbeat_increment = descriptor.heartbeat_increment,
         .contract_flags = descriptor.contract_flags,
         .signed = descriptor.signed != 0,
-        .embedded_info = try inspectEmbeddedElf(bytes),
+        .embedded_info = try elf_image_inspector.inspect(bytes),
     };
 }
 
@@ -319,81 +282,6 @@ fn writeArchive(
     });
 }
 
-fn inspectEmbeddedElf(elf_bytes: []const u8) !EmbeddedInfo {
-    if (elf_bytes.len < @sizeOf(elf.Elf32_Ehdr)) return error.InvalidElfHeader;
-
-    const header = try readStruct(elf.Elf32_Ehdr, elf_bytes, 0);
-    if (!std.mem.eql(u8, header.e_ident[0..4], "\x7fELF")) return error.InvalidElfMagic;
-    if (header.e_ident[elf.EI_CLASS] != elf.ELFCLASS32) return error.UnsupportedElfClass;
-    if (header.e_ident[elf.EI_DATA] != elf.ELFDATA2LSB) return error.UnsupportedElfEndian;
-    if (header.e_machine != .@"386") return error.UnsupportedElfMachine;
-    if (header.e_phentsize != @sizeOf(elf.Elf32_Phdr)) return error.InvalidProgramHeaderTable;
-
-    const program_headers_end = @as(usize, header.e_phoff) +
-        @as(usize, header.e_phentsize) * @as(usize, header.e_phnum);
-    if (header.e_phoff == 0 or program_headers_end > elf_bytes.len) {
-        return error.InvalidProgramHeaderTable;
-    }
-
-    var executable_image = ExecutableImageSpec{};
-    executable_image.entry_point = header.e_entry;
-    executable_image.stack_top = DEFAULT_USER_STACK_TOP;
-    executable_image.stack_size_bytes = DEFAULT_USER_STACK_SIZE_BYTES;
-    executable_image.file_size_bytes = elf_bytes.len;
-
-    var loadable_segment_count: usize = 0;
-    var offset: usize = header.e_phoff;
-    var index: usize = 0;
-    while (index < header.e_phnum) : (index += 1) {
-        const program_header = try readStruct(elf.Elf32_Phdr, elf_bytes, offset);
-        if (program_header.p_type == elf.PT_LOAD) {
-            if (loadable_segment_count >= MAX_EXECUTABLE_SEGMENTS) {
-                return error.TooManyLoadableSegments;
-            }
-            if (program_header.p_vaddr == 0 or program_header.p_memsz == 0) {
-                return error.InvalidLoadableSegment;
-            }
-            if (program_header.p_filesz > program_header.p_memsz) return error.InvalidLoadableSegment;
-
-            const segment_end = @as(usize, program_header.p_offset) + @as(usize, program_header.p_filesz);
-            if (segment_end > elf_bytes.len) return error.InvalidLoadableSegment;
-
-            executable_image.segments[loadable_segment_count] = .{
-                .virtual_address = program_header.p_vaddr,
-                .file_offset = program_header.p_offset,
-                .file_size = @intCast(program_header.p_filesz),
-                .memory_size = @intCast(program_header.p_memsz),
-                .alignment = if (program_header.p_align == 0) 1 else program_header.p_align,
-                .access = .{
-                    .read = (program_header.p_flags & elf.PF_R) != 0,
-                    .write = (program_header.p_flags & elf.PF_W) != 0,
-                    .execute = (program_header.p_flags & elf.PF_X) != 0,
-                },
-            };
-            loadable_segment_count += 1;
-        }
-        offset += @sizeOf(elf.Elf32_Phdr);
-    }
-    if (loadable_segment_count == 0) return error.MissingLoadableSegment;
-
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update(elf_bytes);
-    hasher.final(&executable_image.file_sha256);
-    executable_image.segment_count = loadable_segment_count;
-
-    return .{
-        .entry_point = header.e_entry,
-        .byte_len = elf_bytes.len,
-        .bootstrap_mailbox_address = findOptionalSectionAddress(
-            elf_bytes,
-            header,
-            BOOTSTRAP_MAILBOX_SECTION_NAME,
-        ) orelse 0,
-        .file_sha256 = executable_image.file_sha256,
-        .executable_image = executable_image,
-    };
-}
-
 fn sectionHeader(bytes: []const u8, header: elf.Elf32_Ehdr, index: usize) !elf.Elf32_Shdr {
     const offset = @as(usize, header.e_shoff) + index * @as(usize, header.e_shentsize);
     return readStruct(elf.Elf32_Shdr, bytes, offset);
@@ -418,41 +306,4 @@ fn readStruct(comptime T: type, bytes: []const u8, offset: usize) !T {
     var value: T = undefined;
     @memcpy(std.mem.asBytes(&value), bytes[offset..][0..@sizeOf(T)]);
     return value;
-}
-
-fn findOptionalSectionAddress(
-    elf_bytes: []const u8,
-    header: elf.Elf32_Ehdr,
-    section_name: []const u8,
-) ?u64 {
-    const section_count: usize = header.e_shnum;
-    if (header.e_shoff == 0 or header.e_shentsize != @sizeOf(elf.Elf32_Shdr)) return null;
-    if (header.e_shstrndx == 0 or header.e_shstrndx >= section_count) return null;
-
-    const section_headers_end = @as(usize, header.e_shoff) + @as(usize, header.e_shentsize) * section_count;
-    if (section_headers_end > elf_bytes.len) return null;
-
-    const names_header_offset = @as(usize, header.e_shoff) + @as(usize, header.e_shstrndx) * @sizeOf(elf.Elf32_Shdr);
-    const names_header = readStruct(elf.Elf32_Shdr, elf_bytes, names_header_offset) catch return null;
-
-    const names_start = @as(usize, names_header.sh_offset);
-    const names_end = names_start + @as(usize, names_header.sh_size);
-    if (names_end > elf_bytes.len) return null;
-    const section_names = elf_bytes[names_start..names_end];
-
-    var index: usize = 0;
-    while (index < section_count) : (index += 1) {
-        const section_offset = @as(usize, header.e_shoff) + index * @sizeOf(elf.Elf32_Shdr);
-        const section = readStruct(elf.Elf32_Shdr, elf_bytes, section_offset) catch return null;
-        const name = readOptionalSectionName(section_names, section.sh_name) orelse continue;
-        if (std.mem.eql(u8, name, section_name)) return section.sh_addr;
-    }
-    return null;
-}
-
-fn readOptionalSectionName(section_names: []const u8, offset: u32) ?[]const u8 {
-    if (offset >= section_names.len) return null;
-    var end: usize = offset;
-    while (end < section_names.len and section_names[end] != 0) : (end += 1) {}
-    return section_names[offset..end];
 }

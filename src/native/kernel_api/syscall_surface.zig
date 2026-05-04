@@ -63,6 +63,10 @@ pub fn dispatch(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
+    if (caller_task_id == 0) return .{
+        .status = .denied,
+        .denial_reason = .scope_violation,
+    };
     const memory = syscall_dispatch.UserMemoryContext.init(port, caller_task_id);
     const header = syscall_dispatch.readRequest(abi.RequestHeader, memory, request_addr) orelse return .{
         .status = .invalid_request_pointer,
@@ -70,7 +74,7 @@ pub fn dispatch(
     if (header.version != abi.ABI_VERSION) return .{
         .status = .unsupported_abi_version,
     };
-    if (caller_task_id != 0 and header.subject_task_id != caller_task_id) return .{
+    if (header.subject_task_id == 0 or header.subject_task_id != caller_task_id) return .{
         .status = .denied,
         .denial_reason = .scope_violation,
     };
@@ -268,10 +272,12 @@ test "syscall surface returns an explicit empty receive response when no message
         .endpoint_capability_id = created.capability_id,
         .receiver_task_id = app_task.task_id,
     };
+    const app_record = test_kernel.runtime.find(app_task.task_id).?;
+    test_kernel.runtime.findAddressSpace(app_record.address_space_id).?.region_count = 0;
 
     const result = dispatch(
         &test_kernel.port,
-        0,
+        app_task.task_id,
         8,
         @intFromPtr(&request),
         @intFromPtr(&response),
@@ -402,6 +408,35 @@ test "syscall surface rejects spoofed subject task ids" {
     try std.testing.expectEqual(abi.SyscallStatus.denied, result.status);
     try std.testing.expectEqual(abi.DenialReason.scope_violation, result.denial_reason);
     try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
+
+    var zero_caller_response = std.mem.zeroes(abi.TaskDescriptor);
+    const zero_caller_result = dispatch(
+        &test_kernel.port,
+        0,
+        10,
+        @intFromPtr(&request),
+        @intFromPtr(&zero_caller_response),
+        @sizeOf(abi.TaskDescriptor),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.denied, zero_caller_result.status);
+    try std.testing.expectEqual(abi.DenialReason.scope_violation, zero_caller_result.denial_reason);
+
+    const zero_subject_request = component_port.TaskCreateRequest{
+        .header = component_port.makeHeader(.task_create, 93, 0),
+        .authority_capability_id = test_kernel.authority_capability_id,
+        .request = request.request,
+    };
+    var zero_subject_response = std.mem.zeroes(abi.TaskDescriptor);
+    const zero_subject_result = dispatch(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        10,
+        @intFromPtr(&zero_subject_request),
+        @intFromPtr(&zero_subject_response),
+        @sizeOf(abi.TaskDescriptor),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.denied, zero_subject_result.status);
+    try std.testing.expectEqual(abi.DenialReason.scope_violation, zero_subject_result.denial_reason);
 }
 
 test "syscall surface copies and bounds embedded user buffers" {

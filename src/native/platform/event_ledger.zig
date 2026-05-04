@@ -113,6 +113,44 @@ const EventSlot = struct {
     event: Event = zeroEvent(),
 };
 
+const event_kind_count = std.meta.fields(EventKind).len;
+const no_event_index = std.math.maxInt(usize);
+
+const IndexList = struct {
+    head: usize = no_event_index,
+    tail: usize = no_event_index,
+    count: usize = 0,
+
+    fn append(self: *IndexList, links: *[MAX_EVENTS]usize, event_index: usize) void {
+        links[event_index] = no_event_index;
+        if (self.tail == no_event_index) {
+            self.head = event_index;
+        } else {
+            links[self.tail] = event_index;
+        }
+        self.tail = event_index;
+        self.count += 1;
+    }
+};
+
+const SubjectIndexSlot = struct {
+    in_use: bool = false,
+    subject: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
+    list: IndexList = .{},
+};
+
+const TaskIndexSlot = struct {
+    in_use: bool = false,
+    task_id: u64 = 0,
+    list: IndexList = .{},
+};
+
+const QueryIndex = enum {
+    kind,
+    subject,
+    task,
+};
+
 pub const Ledger = struct {
     storage: ?*storage_service.Service = null,
     owner: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
@@ -125,6 +163,12 @@ pub const Ledger = struct {
     header_version_id: u64 = 0,
     next_sequence: u64 = 1,
     events: [MAX_EVENTS]EventSlot = [_]EventSlot{EventSlot{}} ** MAX_EVENTS,
+    kind_index: [event_kind_count]IndexList = [_]IndexList{IndexList{}} ** event_kind_count,
+    subject_index: [MAX_EVENTS]SubjectIndexSlot = [_]SubjectIndexSlot{SubjectIndexSlot{}} ** MAX_EVENTS,
+    task_index: [MAX_EVENTS]TaskIndexSlot = [_]TaskIndexSlot{TaskIndexSlot{}} ** MAX_EVENTS,
+    next_by_kind: [MAX_EVENTS]usize = [_]usize{no_event_index} ** MAX_EVENTS,
+    next_by_subject: [MAX_EVENTS]usize = [_]usize{no_event_index} ** MAX_EVENTS,
+    next_by_task: [MAX_EVENTS]usize = [_]usize{no_event_index} ** MAX_EVENTS,
 
     pub fn init() Ledger {
         return .{};
@@ -398,116 +442,30 @@ pub const Ledger = struct {
     }
 
     pub fn latestKind(self: *const Ledger, kind: EventKind) ?Event {
-        var index = self.events.len;
-        while (index > 0) {
-            index -= 1;
-            const slot = self.events[index];
-            if (!slot.in_use) continue;
-            if (slot.event.kind == kind) return slot.event;
-        }
-        return null;
+        const list = self.kind_index[kindIndex(kind)];
+        if (list.tail == no_event_index) return null;
+        return self.events[list.tail].event;
     }
 
     pub fn queryEvents(self: *const Ledger, query: Query, output: []Event) []Event {
         var count: usize = 0;
-        for (self.events) |slot| {
-            if (!slot.in_use) continue;
-            if (!matchesQuery(slot.event, query)) continue;
-            if (count >= output.len) break;
-            output[count] = redactedForQuery(slot.event, query);
-            count += 1;
-        }
+        self.visitMatching(query, output.len, &count, output);
         return output[0..count];
     }
 
     pub fn countMatching(self: *const Ledger, query: Query) usize {
         var count: usize = 0;
-        for (self.events) |slot| {
-            if (!slot.in_use) continue;
-            if (matchesQuery(slot.event, query)) count += 1;
-        }
+        self.visitMatching(query, std.math.maxInt(usize), &count, null);
         return count;
     }
 
     pub fn exportText(self: *const Ledger, buffer: []u8, options: ExportOptions) Error![]const u8 {
         var used: usize = 0;
-        for (self.events) |slot| {
-            if (!slot.in_use) continue;
-            const event = slot.event;
-            const detail = if (event.detail_protected and !options.include_protected_content)
-                "redacted"
-            else
-                event.detailSlice();
-
-            try appendFmt(buffer, &used, "#{d} tick={d} kind={s} subject={s}:{d}", .{
-                event.sequence,
-                event.tick,
-                @tagName(event.kind),
-                @tagName(event.subject.kind),
-                event.subject.serial,
-            });
-            if (event.permission_kind) |permission_kind| {
-                try appendFmt(buffer, &used, " permission={s} allowed={s}", .{
-                    @tagName(permission_kind),
-                    yesNo(event.allowed),
-                });
-                if (!event.allowed) {
-                    try appendFmt(buffer, &used, " denial={s} policy={s} missing={s} approval={s} retry_safe={s}", .{
-                        @tagName(event.denial_reason),
-                        event.policyLabelSlice(),
-                        event.missingCapabilitySlice(),
-                        yesNo(event.user_approval_can_resolve),
-                        yesNo(event.retry_safe),
-                    });
-                }
-            }
-            switch (event.kind) {
-                .update_transition => {
-                    try appendFmt(buffer, &used, " slot={d} rollback={s} failure={s}", .{
-                        event.related_id,
-                        yesNo(!event.allowed),
-                        updateFailureLabel(event.detail_code),
-                    });
-                },
-                .device_trust_change => {
-                    try appendFmt(buffer, &used, " device={d} trusted={s}", .{
-                        event.related_id,
-                        yesNo(event.allowed),
-                    });
-                },
-                .capability_grant, .capability_revocation => {
-                    try appendFmt(buffer, &used, " capability={d}", .{event.related_id});
-                },
-                .notification => {
-                    try appendFmt(buffer, &used, " notification={d} reason={s} visible={s}", .{
-                        event.related_id,
-                        notificationReasonLabel(event.detail_code),
-                        yesNo(event.allowed),
-                    });
-                },
-                .task_flow => {
-                    try appendFmt(buffer, &used, " flow={d} flow_kind={s} approved={s}", .{
-                        event.related_id,
-                        flowKindLabel(event.detail_code),
-                        yesNo(event.allowed),
-                    });
-                },
-                else => {},
-            }
-            if (event.workspace_id != 0) {
-                try appendFmt(buffer, &used, " workspace={d}", .{event.workspace_id});
-            }
-            if (event.related_id != 0 and event.kind != .update_transition and event.kind != .device_trust_change) {
-                try appendFmt(buffer, &used, " related={d}", .{event.related_id});
-            }
-            if (event.detail_code != 0 and event.kind != .update_transition) {
-                try appendFmt(buffer, &used, " code={d}", .{event.detail_code});
-            }
-            if (event.kind == .process_crash or event.kind == .driver_restart) {
-                try appendFmt(buffer, &used, " service={s}", .{@tagName(event.service_class)});
-            }
-            try appendFmt(buffer, &used, " detail={s}\n", .{detail});
-        }
+        var records: [MAX_EVENTS]Event = undefined;
+        const events = self.queryEvents(.{
+            .include_protected_content = options.include_protected_content,
+        }, &records);
+        for (events) |event| try renderTextEvent(event, buffer, &used);
         return buffer[0..used];
     }
 
@@ -532,16 +490,156 @@ pub const Ledger = struct {
     }
 
     fn append(self: *Ledger, event: Event) Error!void {
-        for (&self.events) |*slot| {
+        for (&self.events, 0..) |*slot, index| {
             if (slot.in_use) continue;
             slot.in_use = true;
             slot.event = event;
             slot.event.sequence = self.next_sequence;
             self.next_sequence += 1;
+            self.indexEvent(index) catch |err| {
+                slot.* = EventSlot{};
+                self.rebuildIndexes();
+                return err;
+            };
             try self.persist(slot.event);
             return;
         }
         return error.EventTableFull;
+    }
+
+    fn visitMatching(
+        self: *const Ledger,
+        query: Query,
+        limit: usize,
+        count: *usize,
+        output: ?[]Event,
+    ) void {
+        var selected_index: ?QueryIndex = null;
+        var selected_count: usize = std.math.maxInt(usize);
+        if (query.kind) |kind| {
+            selected_index = .kind;
+            selected_count = self.kind_index[kindIndex(kind)].count;
+        }
+        if (query.subject) |subject| {
+            if (self.findSubjectIndex(subject)) |index| {
+                const candidate_count = self.subject_index[index].list.count;
+                if (candidate_count < selected_count) {
+                    selected_index = .subject;
+                    selected_count = candidate_count;
+                }
+            } else {
+                return;
+            }
+        }
+        if (query.task_id) |task_id| {
+            if (self.findTaskIndex(task_id)) |index| {
+                const candidate_count = self.task_index[index].list.count;
+                if (candidate_count < selected_count) {
+                    selected_index = .task;
+                    selected_count = candidate_count;
+                }
+            } else {
+                return;
+            }
+        }
+        if (selected_index) |index_kind| {
+            switch (index_kind) {
+                .kind => self.visitIndex(self.kind_index[kindIndex(query.kind.?)].head, &self.next_by_kind, query, limit, count, output),
+                .subject => self.visitIndex(self.subject_index[self.findSubjectIndex(query.subject.?).?].list.head, &self.next_by_subject, query, limit, count, output),
+                .task => self.visitIndex(self.task_index[self.findTaskIndex(query.task_id.?).?].list.head, &self.next_by_task, query, limit, count, output),
+            }
+            return;
+        }
+
+        for (self.events) |slot| {
+            if (!slot.in_use) continue;
+            if (!matchesQuery(slot.event, query)) continue;
+            if (count.* >= limit) break;
+            if (output) |records| records[count.*] = redactedForQuery(slot.event, query);
+            count.* += 1;
+        }
+    }
+
+    fn visitIndex(
+        self: *const Ledger,
+        head: usize,
+        links: *const [MAX_EVENTS]usize,
+        query: Query,
+        limit: usize,
+        count: *usize,
+        output: ?[]Event,
+    ) void {
+        var cursor = head;
+        while (cursor != no_event_index and count.* < limit) : (cursor = links[cursor]) {
+            const slot = self.events[cursor];
+            if (!slot.in_use or !matchesQuery(slot.event, query)) continue;
+            if (output) |records| records[count.*] = redactedForQuery(slot.event, query);
+            count.* += 1;
+        }
+    }
+
+    fn indexEvent(self: *Ledger, event_index: usize) Error!void {
+        const event = self.events[event_index].event;
+        self.kind_index[kindIndex(event.kind)].append(&self.next_by_kind, event_index);
+        try self.indexSubject(event.subject, event_index);
+        if (event.task_id != 0) try self.indexTask(event.task_id, event_index);
+    }
+
+    fn indexSubject(self: *Ledger, subject: principal.PrincipalId, event_index: usize) Error!void {
+        const slot_index = self.findOrCreateSubjectIndex(subject) orelse return error.EventTableFull;
+        self.subject_index[slot_index].list.append(&self.next_by_subject, event_index);
+    }
+
+    fn indexTask(self: *Ledger, task_id: u64, event_index: usize) Error!void {
+        const slot_index = self.findOrCreateTaskIndex(task_id) orelse return error.EventTableFull;
+        self.task_index[slot_index].list.append(&self.next_by_task, event_index);
+    }
+
+    fn findSubjectIndex(self: *const Ledger, subject: principal.PrincipalId) ?usize {
+        for (self.subject_index, 0..) |slot, index| {
+            if (slot.in_use and slot.subject.eql(subject)) return index;
+        }
+        return null;
+    }
+
+    fn findTaskIndex(self: *const Ledger, task_id: u64) ?usize {
+        for (self.task_index, 0..) |slot, index| {
+            if (slot.in_use and slot.task_id == task_id) return index;
+        }
+        return null;
+    }
+
+    fn findOrCreateSubjectIndex(self: *Ledger, subject: principal.PrincipalId) ?usize {
+        if (self.findSubjectIndex(subject)) |index| return index;
+        for (&self.subject_index, 0..) |*slot, index| {
+            if (slot.in_use) continue;
+            slot.* = .{ .in_use = true, .subject = subject };
+            return index;
+        }
+        return null;
+    }
+
+    fn findOrCreateTaskIndex(self: *Ledger, task_id: u64) ?usize {
+        if (self.findTaskIndex(task_id)) |index| return index;
+        for (&self.task_index, 0..) |*slot, index| {
+            if (slot.in_use) continue;
+            slot.* = .{ .in_use = true, .task_id = task_id };
+            return index;
+        }
+        return null;
+    }
+
+    fn rebuildIndexes(self: *Ledger) void {
+        self.kind_index = [_]IndexList{IndexList{}} ** event_kind_count;
+        self.subject_index = [_]SubjectIndexSlot{SubjectIndexSlot{}} ** MAX_EVENTS;
+        self.task_index = [_]TaskIndexSlot{TaskIndexSlot{}} ** MAX_EVENTS;
+        self.next_by_kind = [_]usize{no_event_index} ** MAX_EVENTS;
+        self.next_by_subject = [_]usize{no_event_index} ** MAX_EVENTS;
+        self.next_by_task = [_]usize{no_event_index} ** MAX_EVENTS;
+        for (self.events, 0..) |slot, index| {
+            if (!slot.in_use) continue;
+            self.indexEvent(index) catch unreachable;
+        }
     }
 
     fn persist(self: *Ledger, latest_event: Event) Error!void {
@@ -614,6 +712,7 @@ pub const Ledger = struct {
     fn loadPersistedEvents(self: *Ledger) Error!void {
         const storage = self.storage orelse return;
         self.events = [_]EventSlot{EventSlot{}} ** MAX_EVENTS;
+        self.rebuildIndexes();
         self.next_sequence = 1;
         self.header_version_id = 0;
 
@@ -650,6 +749,7 @@ pub const Ledger = struct {
         if (loaded_count > 0 and self.next_sequence <= self.events[loaded_count - 1].event.sequence) {
             self.next_sequence = self.events[loaded_count - 1].event.sequence + 1;
         }
+        self.rebuildIndexes();
     }
 
     fn recentEventsForPersistence(
@@ -881,6 +981,10 @@ fn flowKindLabel(code: u32) []const u8 {
     return @tagName(kind);
 }
 
+fn kindIndex(kind: EventKind) usize {
+    return @intFromEnum(kind);
+}
+
 fn matchesQuery(event: Event, query: Query) bool {
     if (query.kind) |kind| {
         if (event.kind != kind) return false;
@@ -902,6 +1006,77 @@ fn redactedForQuery(event: Event, query: Query) Event {
     var redacted = event;
     redacted.detail_len = copyText(&redacted.detail, "redacted");
     return redacted;
+}
+
+fn renderTextEvent(event: Event, buffer: []u8, used: *usize) Error!void {
+    try appendFmt(buffer, used, "#{d} tick={d} kind={s} subject={s}:{d}", .{
+        event.sequence,
+        event.tick,
+        @tagName(event.kind),
+        @tagName(event.subject.kind),
+        event.subject.serial,
+    });
+    if (event.permission_kind) |permission_kind| {
+        try appendFmt(buffer, used, " permission={s} allowed={s}", .{
+            @tagName(permission_kind),
+            yesNo(event.allowed),
+        });
+        if (!event.allowed) {
+            try appendFmt(buffer, used, " denial={s} policy={s} missing={s} approval={s} retry_safe={s}", .{
+                @tagName(event.denial_reason),
+                event.policyLabelSlice(),
+                event.missingCapabilitySlice(),
+                yesNo(event.user_approval_can_resolve),
+                yesNo(event.retry_safe),
+            });
+        }
+    }
+    switch (event.kind) {
+        .update_transition => {
+            try appendFmt(buffer, used, " slot={d} rollback={s} failure={s}", .{
+                event.related_id,
+                yesNo(!event.allowed),
+                updateFailureLabel(event.detail_code),
+            });
+        },
+        .device_trust_change => {
+            try appendFmt(buffer, used, " device={d} trusted={s}", .{
+                event.related_id,
+                yesNo(event.allowed),
+            });
+        },
+        .capability_grant, .capability_revocation => {
+            try appendFmt(buffer, used, " capability={d}", .{event.related_id});
+        },
+        .notification => {
+            try appendFmt(buffer, used, " notification={d} reason={s} visible={s}", .{
+                event.related_id,
+                notificationReasonLabel(event.detail_code),
+                yesNo(event.allowed),
+            });
+        },
+        .task_flow => {
+            try appendFmt(buffer, used, " flow={d} flow_kind={s} approved={s}", .{
+                event.related_id,
+                flowKindLabel(event.detail_code),
+                yesNo(event.allowed),
+            });
+        },
+        else => {},
+    }
+    if (event.workspace_id != 0) {
+        try appendFmt(buffer, used, " workspace={d}", .{event.workspace_id});
+    }
+    if (event.related_id != 0 and event.kind != .update_transition and event.kind != .device_trust_change) {
+        try appendFmt(buffer, used, " related={d}", .{event.related_id});
+    }
+    if (event.detail_code != 0 and event.kind != .update_transition) {
+        try appendFmt(buffer, used, " code={d}", .{event.detail_code});
+    }
+    if (event.kind == .process_crash or event.kind == .driver_restart) {
+        try appendFmt(buffer, used, " service={s}", .{@tagName(event.service_class)});
+    }
+    try appendFmt(buffer, used, " detail={s}\n", .{event.detailSlice()});
 }
 
 fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) Error!void {
@@ -1006,6 +1181,45 @@ test "event ledger requires explicit opt-in before remote sharing personal devic
         .include_protected_content = true,
     });
     try std.testing.expect(std.mem.indexOf(u8, managed, "payroll.xlsx") != null);
+}
+
+test "event ledger indexes structured queries by kind subject and task" {
+    var ledger = Ledger.init();
+    const alice = principal.PrincipalId{ .kind = .user, .serial = 101 };
+    const bob = principal.PrincipalId{ .kind = .user, .serial = 202 };
+    const storage_subject = principal.PrincipalId{ .kind = .service, .serial = 303 };
+
+    try ledger.recordPermissionDecision(alice, 44, .screen_capture, false, .policy_denied, 10, "alice protected", true);
+    try ledger.recordCapabilityGrant(alice, 44, 700, .object_access, 11, "alice grant");
+    try ledger.recordPermissionReview(bob, 55, .camera, true, 12, "bob review", false);
+    try ledger.recordDriverRestart(.storage_object, storage_subject, 900, 13, "driver restart");
+    try ledger.recordCapabilityRevocation(alice, 66, 700, .object_access, 14, "alice revoke");
+
+    try std.testing.expectEqual(@as(usize, 1), ledger.kind_index[kindIndex(.permission_decision)].count);
+    try std.testing.expectEqual(@as(usize, 3), ledger.subject_index[ledger.findSubjectIndex(alice).?].list.count);
+    try std.testing.expectEqual(@as(usize, 2), ledger.task_index[ledger.findTaskIndex(44).?].list.count);
+    try std.testing.expectEqual(EventKind.capability_revocation, ledger.latestKind(.capability_revocation).?.kind);
+
+    var records: [4]Event = undefined;
+    const task_matches = ledger.queryEvents(.{ .task_id = 44 }, &records);
+    try std.testing.expectEqual(@as(usize, 2), task_matches.len);
+    try std.testing.expectEqual(@as(u64, 1), task_matches[0].sequence);
+    try std.testing.expectEqual(@as(u64, 2), task_matches[1].sequence);
+    try std.testing.expectEqualStrings("redacted", task_matches[0].detailSlice());
+
+    const subject_and_kind = ledger.queryEvents(.{ .subject = alice, .kind = .capability_revocation }, &records);
+    try std.testing.expectEqual(@as(usize, 1), subject_and_kind.len);
+    try std.testing.expectEqual(@as(u64, 5), subject_and_kind[0].sequence);
+
+    const protected = ledger.queryEvents(.{ .subject = alice, .task_id = 44, .include_protected_content = true }, &records);
+    try std.testing.expectEqual(@as(usize, 2), protected.len);
+    try std.testing.expectEqualStrings("alice protected", protected[0].detailSlice());
+
+    var export_buffer: [1024]u8 = undefined;
+    const exported = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, exported, "#1 tick=10 kind=permission_decision") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "detail=redacted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "detail=alice protected") == null);
 }
 
 test "event ledger persists history across restart" {
