@@ -202,6 +202,10 @@ pub const Directory = struct {
     snapshot_index_slots: [SNAPSHOT_INDEX_CAPACITY]IdIndexSlot = emptyIdIndexTable(SNAPSHOT_INDEX_CAPACITY),
     workspaces: [MAX_WORKSPACES]WorkspaceSlot = [_]WorkspaceSlot{WorkspaceSlot{}} ** MAX_WORKSPACES,
     snapshots: [MAX_SNAPSHOTS]SnapshotSlot = [_]SnapshotSlot{SnapshotSlot{}} ** MAX_SNAPSHOTS,
+    dirty_workspace_count: usize = 0,
+    dirty_workspace_ids: [MAX_WORKSPACES]u64 = [_]u64{0} ** MAX_WORKSPACES,
+    dirty_snapshot_count: usize = 0,
+    dirty_snapshot_ids: [MAX_SNAPSHOTS]u64 = [_]u64{0} ** MAX_SNAPSHOTS,
 
     pub fn init() Directory {
         return .{};
@@ -212,6 +216,7 @@ pub const Directory = struct {
         self.next_snapshot_id = 1;
         self.workspace_index_slots = emptyIdIndexTable(WORKSPACE_INDEX_CAPACITY);
         self.snapshot_index_slots = emptyIdIndexTable(SNAPSHOT_INDEX_CAPACITY);
+        self.clearDirty();
         for (&self.workspaces) |*slot| {
             if (!slot.in_use) continue;
             slot.* = .{};
@@ -250,6 +255,7 @@ pub const Directory = struct {
             slot.workspace.owner = request.owner;
             slot.workspace.label_len = copyText(&slot.workspace.label, request.label);
             indexInsert(WORKSPACE_INDEX_CAPACITY, &self.workspace_index_slots, slot.workspace.id, slot_index);
+            self.markWorkspaceDirty(slot.workspace.id);
             return &slot.workspace;
         }
         return error.WorkspaceTableFull;
@@ -398,6 +404,7 @@ pub const Directory = struct {
         applyTransactionDelta(workspace);
         clearTransactionState(workspace);
         workspace.generation += 1;
+        self.markWorkspaceDirty(workspace_id);
         return workspace.generation;
     }
 
@@ -406,11 +413,13 @@ pub const Directory = struct {
         for (workspace.share_grants[0..workspace.share_grant_count]) |*grant| {
             if (!grant.principal_id.eql(request.principal_id)) continue;
             grant.* = request;
+            self.markWorkspaceDirty(workspace_id);
             return;
         }
         if (workspace.share_grant_count >= MAX_SHARE_GRANTS) return error.ShareTableFull;
         workspace.share_grants[workspace.share_grant_count] = request;
         workspace.share_grant_count += 1;
+        self.markWorkspaceDirty(workspace_id);
     }
 
     pub fn findShareGrant(
@@ -494,6 +503,7 @@ pub const Directory = struct {
             );
             signSnapshotRecord(&slot.snapshot, identity) catch return error.InvalidSignature;
             indexInsert(SNAPSHOT_INDEX_CAPACITY, &self.snapshot_index_slots, slot.snapshot.id, slot_index);
+            self.markSnapshotDirty(slot.snapshot.id);
             return &slot.snapshot;
         }
 
@@ -521,6 +531,7 @@ pub const Directory = struct {
         clearTransactionState(workspace);
         rebuildWorkspaceEntryIndex(workspace);
         workspace.generation += 1;
+        self.markWorkspaceDirty(workspace_id);
         return workspace.generation;
     }
 
@@ -540,6 +551,7 @@ pub const Directory = struct {
             entryIndexInsert(&workspace.entry_index_slots, entry.pathSlice(), workspace.entry_count);
             workspace.entry_count += 1;
             workspace.generation += 1;
+            self.markWorkspaceDirty(workspace_id);
             return true;
         }
 
@@ -607,6 +619,7 @@ pub const Directory = struct {
         workspace.entry_count = package.entry_count;
         copyEntries(workspace.entries[0..package.entry_count], package.entries[0..package.entry_count]);
         rebuildWorkspaceEntryIndex(workspace);
+        self.markWorkspaceDirty(workspace.id);
         return workspace;
     }
 
@@ -629,7 +642,23 @@ pub const Directory = struct {
         clearTransactionState(workspace);
         rebuildWorkspaceEntryIndex(workspace);
         workspace.generation += 1;
+        self.markWorkspaceDirty(workspace_id);
         return workspace.generation;
+    }
+
+    pub fn dirtyWorkspaceIds(self: *const Directory) []const u64 {
+        return self.dirty_workspace_ids[0..self.dirty_workspace_count];
+    }
+
+    pub fn dirtySnapshotIds(self: *const Directory) []const u64 {
+        return self.dirty_snapshot_ids[0..self.dirty_snapshot_count];
+    }
+
+    pub fn clearDirty(self: *Directory) void {
+        @memset(self.dirty_workspace_ids[0..], 0);
+        @memset(self.dirty_snapshot_ids[0..], 0);
+        self.dirty_workspace_count = 0;
+        self.dirty_snapshot_count = 0;
     }
 
     fn lookupConst(self: *const Directory, workspace_id: u64) ?*const WorkspaceRecord {
@@ -678,7 +707,25 @@ pub const Directory = struct {
         defer self.next_snapshot_id += 1;
         return self.next_snapshot_id;
     }
+
+    fn markWorkspaceDirty(self: *Directory, workspace_id: u64) void {
+        appendDirtyId(MAX_WORKSPACES, &self.dirty_workspace_ids, &self.dirty_workspace_count, workspace_id);
+    }
+
+    fn markSnapshotDirty(self: *Directory, snapshot_id: u64) void {
+        appendDirtyId(MAX_SNAPSHOTS, &self.dirty_snapshot_ids, &self.dirty_snapshot_count, snapshot_id);
+    }
 };
+
+fn appendDirtyId(comptime capacity: usize, ids: *[capacity]u64, count: *usize, id: u64) void {
+    if (id == 0) return;
+    for (ids[0..count.*]) |existing| {
+        if (existing == id) return;
+    }
+    if (count.* >= capacity) native_util.impossibleByInvariant("dirty id capacity covers table slots");
+    ids[count.*] = id;
+    count.* += 1;
+}
 
 fn zeroWorkspace() WorkspaceRecord {
     return .{
@@ -1061,28 +1108,14 @@ fn applyTransactionOverlay(workspace: *WorkspaceRecord) void {
 }
 
 fn applyTransactionDelta(workspace: *WorkspaceRecord) void {
-    var staged_index: usize = 0;
-    while (staged_index < workspace.staged_entry_count) : (staged_index += 1) {
-        const staged_entry = workspace.staged_entries[staged_index];
-        const path = staged_entry.pathSlice();
-
-        if (isDeleteTombstone(staged_entry)) {
-            const existing_index = findWorkspaceEntryIndex(workspace, path) orelse continue;
-            appendDeleted(workspace, workspace.entries[existing_index]);
-            removeEntry(&workspace.entries, &workspace.entry_count, existing_index);
-            rebuildWorkspaceEntryIndex(workspace);
-            continue;
-        }
-
-        if (findWorkspaceEntryIndex(workspace, path)) |existing_index| {
-            workspace.entries[existing_index] = staged_entry;
-            continue;
-        }
-
-        workspace.entries[workspace.entry_count] = staged_entry;
-        entryIndexInsert(&workspace.entry_index_slots, path, workspace.entry_count);
-        workspace.entry_count += 1;
+    for (workspace.staged_entries[0..workspace.staged_entry_count]) |staged_entry| {
+        if (!isDeleteTombstone(staged_entry)) continue;
+        const existing_index = findWorkspaceEntryIndex(workspace, staged_entry.pathSlice()) orelse continue;
+        appendDeleted(workspace, workspace.entries[existing_index]);
     }
+
+    applyTransactionOverlay(workspace);
+    rebuildWorkspaceEntryIndex(workspace);
 }
 
 fn clearTransactionState(workspace: *WorkspaceRecord) void {
@@ -1210,6 +1243,40 @@ test "workspace overlay transactions can cancel staged additions before commit" 
     try std.testing.expectEqual(@as(u32, 1), try directory.commit(workspace.id, 40));
     try std.testing.expectEqual(@as(usize, 0), (try directory.entries(workspace.id)).len);
     try std.testing.expectError(error.EntryNotFound, directory.resolve(workspace.id, "documents/draft.md"));
+}
+
+test "workspace commit applies multiple staged deletions with one rebuilt index" {
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 7 },
+        .label = "multi-delete",
+    });
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "a.md", 10, 100, .document);
+    try directory.stagePut(workspace.id, "b.md", 11, 101, .document);
+    try directory.stagePut(workspace.id, "c.md", 12, 102, .document);
+    try directory.stagePut(workspace.id, "d.md", 13, 103, .document);
+    _ = try directory.commit(workspace.id, 41);
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stageDelete(workspace.id, "a.md");
+    try directory.stageDelete(workspace.id, "b.md");
+    try directory.stageDelete(workspace.id, "c.md");
+    try directory.stagePut(workspace.id, "d.md", 14, 104, .document);
+    try directory.stagePut(workspace.id, "e.md", 15, 105, .document);
+    _ = try directory.commit(workspace.id, 42);
+
+    const entries_after_delete = try directory.entries(workspace.id);
+    try std.testing.expectEqual(@as(usize, 2), entries_after_delete.len);
+    try std.testing.expectError(error.EntryNotFound, directory.resolve(workspace.id, "a.md"));
+    try std.testing.expectError(error.EntryNotFound, directory.resolve(workspace.id, "b.md"));
+    try std.testing.expectError(error.EntryNotFound, directory.resolve(workspace.id, "c.md"));
+    try std.testing.expectEqual(@as(u64, 104), (try directory.resolve(workspace.id, "d.md")).version_id);
+    try std.testing.expectEqual(@as(u64, 105), (try directory.resolve(workspace.id, "e.md")).version_id);
+
+    const record = directory.find(workspace.id).?;
+    try std.testing.expectEqual(@as(usize, 3), record.deleted_count);
 }
 
 test "workspace snapshots and exports must stay signed" {

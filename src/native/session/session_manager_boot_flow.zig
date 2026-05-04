@@ -53,6 +53,24 @@ else
     struct {
         pub fn printBootMarker(_: []const u8) void {}
     };
+const native_measured_boot_storage = if (builtin.target.os.tag == .freestanding)
+    struct {
+        extern fn zigosStorageBootstrapAtaRead(
+            device: *const anyopaque,
+            start_lba: u64,
+            buffer_ptr: [*]u8,
+            buffer_len: usize,
+        ) callconv(.c) bool;
+
+        extern fn zigosStorageBootstrapAtaWrite(
+            device: *const anyopaque,
+            start_lba: u64,
+            buffer_ptr: [*]const u8,
+            buffer_len: usize,
+        ) callconv(.c) bool;
+    }
+else
+    struct {};
 const console = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/utils/console.zig")
 else
@@ -281,11 +299,15 @@ pub const SessionManager = struct {
     }
 
     pub fn bindProductionStorageService(self: *SessionManager, graph: *const ServiceGraph) void {
-        self.storage_service_instance = storage_service_mod.Service.reloadFromAttachedVolume(
+        self.storage_checkpoint_store.resetPreparedState();
+        _ = adoptRootStorageVolume(&self.storage_checkpoint_store);
+        const loaded_from_volume = self.storage_checkpoint_store.loadPreparedStateFromAttachedVolume();
+        self.storage_service_instance = storage_service_mod.Service.bindPrepared(
+            &self.storage_checkpoint_store,
             graph.state.services.storage_service.id,
             graph.service_bindings.bindingFor(.storage_object).task_id,
             graph.state.ids.storage_service,
-            &self.storage_checkpoint_store,
+            loaded_from_volume,
         );
         self.storage_service_instance.bindCapabilityTable(&self.capability_table);
         self.storage_service_instance.checkpoint_enabled = false;
@@ -294,6 +316,7 @@ pub const SessionManager = struct {
     pub fn failBoot(self: *SessionManager) void {
         self.initialized = false;
         self.kernel_port_ready = false;
+        clearRootKernelPort();
     }
 };
 
@@ -562,11 +585,46 @@ fn prepareKernelInterface(
     self.kernel_port_instance = component_port.KernelPort.init(&self.kernel_instance);
     self.driver_runtime.bindKernelPort(&self.kernel_port_instance);
     self.kernel_port_ready = true;
+    publishRootKernelPort(&self.kernel_port_instance);
     self.executeUserspaceProbe(session_task_id);
     common.printBootMarker(boot_markers.transport_native_kernel_ready);
     common.printBootMarker(boot_markers.transport_no_root);
     common.printBootMarker(boot_markers.transport_component_abi_ready);
     return &self.kernel_port_instance;
+}
+
+fn publishRootKernelPort(port: anytype) void {
+    if (builtin.target.os.tag != .freestanding) return;
+    const root = @import("root");
+    if (@hasDecl(root, "publishKernelPort")) {
+        root.publishKernelPort(port);
+    }
+}
+
+fn clearRootKernelPort() void {
+    if (builtin.target.os.tag != .freestanding) return;
+    const root = @import("root");
+    if (@hasDecl(root, "clearKernelPort")) {
+        root.clearKernelPort();
+    }
+}
+
+fn adoptRootStorageVolume(checkpoint_store: *storage_service_mod.CheckpointStore) bool {
+    if (builtin.target.os.tag != .freestanding) return false;
+    const root = @import("root");
+    if (!@hasDecl(root, "storage_volume")) return false;
+    const root_volume = root.storage_volume.defaultVolume();
+    if (!root_volume.hasAttachedDevice()) return false;
+    if (root_volume.attached_ata_device) |device| {
+        checkpoint_store.volume.attachAtaBootstrapDevice(device, root_volume.attached_backend_sector_count);
+        return true;
+    }
+    checkpoint_store.volume.attachBackendFns(
+        root_volume.attached_backend_sector_count,
+        root_volume.attached_backend_read,
+        root_volume.attached_backend_write,
+    );
+    return true;
 }
 
 pub fn printReadyBanner() void {
@@ -627,12 +685,25 @@ fn recordMeasurementComparison(manager: *SessionManager, boot: *const measured_b
         .label = "zigos-measured-boot-state",
         .seed = [_]u8{0xA6} ** 32,
     };
+    const direct_previous = loadDirectMeasuredBootSummary();
     var journal = measured_boot.MeasurementJournal.init(
         &manager.storage_service_instance,
         session_bootstrap.principals().package_service,
         measurement_signer,
     ) catch unreachable;
-    const comparison = journal.record(boot.*, 130) catch unreachable;
+    var comparison = journal.record(boot.*, 130) catch unreachable;
+    const current_summary = measured_boot.BootSummary.fromRecord(boot);
+    if (comparison.previous == null) {
+        if (direct_previous) |previous| {
+            comparison.previous = previous;
+            comparison.same_root_digest = std.mem.eql(u8, &previous.root_digest, &current_summary.root_digest);
+            comparison.same_generation = previous.generation == current_summary.generation;
+            comparison.same_record_shape = previous.record_count == current_summary.record_count and
+                std.mem.eql(u16, &previous.kind_counts, &current_summary.kind_counts);
+        }
+    }
+    _ = storeDirectMeasuredBootSummary(current_summary);
+    _ = adoptRootStorageVolume(&manager.storage_checkpoint_store);
     manager.storage_service_instance.checkpoint();
     if (comparison.previous == null) {
         common.printBootMarker(boot_markers.platform_measured_boot_first);
@@ -644,6 +715,81 @@ fn recordMeasurementComparison(manager: *SessionManager, boot: *const measured_b
     if (comparison.same_record_shape) {
         common.printBootMarker(boot_markers.platform_measured_boot_same_shape);
     }
+}
+
+const direct_measured_boot_lba: u64 = 1536;
+const direct_measured_boot_magic = "ZMB2";
+const direct_measured_boot_version: u16 = 1;
+
+fn loadDirectMeasuredBootSummary() ?measured_boot.BootSummary {
+    if (builtin.target.os.tag != .freestanding) return null;
+    var sector = [_]u8{0} ** 512;
+    if (!readDirectMeasuredBootSector(&sector)) return null;
+    if (!std.mem.eql(u8, sector[0..4], direct_measured_boot_magic)) return null;
+    if (std.mem.readInt(u16, sector[4..6], .little) != direct_measured_boot_version) return null;
+
+    var summary = measured_boot.BootSummary{
+        .generation = std.mem.readInt(u64, sector[8..16], .little),
+        .record_count = std.mem.readInt(u16, sector[6..8], .little),
+        .kind_counts = [_]u16{0} ** measured_boot.MEASUREMENT_KIND_COUNT,
+        .root_digest = [_]u8{0} ** 32,
+    };
+    var offset: usize = 16;
+    for (&summary.kind_counts) |*count| {
+        count.* = std.mem.readInt(u16, sector[offset..][0..2], .little);
+        offset += 2;
+    }
+    @memcpy(&summary.root_digest, sector[32..64]);
+    if (std.mem.allEqual(u8, &summary.root_digest, 0)) return null;
+    return summary;
+}
+
+fn storeDirectMeasuredBootSummary(summary: measured_boot.BootSummary) bool {
+    if (builtin.target.os.tag != .freestanding) return false;
+    var sector = [_]u8{0} ** 512;
+    @memcpy(sector[0..4], direct_measured_boot_magic);
+    std.mem.writeInt(u16, sector[4..6], direct_measured_boot_version, .little);
+    std.mem.writeInt(u16, sector[6..8], summary.record_count, .little);
+    std.mem.writeInt(u64, sector[8..16], summary.generation, .little);
+    var offset: usize = 16;
+    for (summary.kind_counts) |count| {
+        std.mem.writeInt(u16, sector[offset..][0..2], count, .little);
+        offset += 2;
+    }
+    @memcpy(sector[32..64], &summary.root_digest);
+    return writeDirectMeasuredBootSector(&sector);
+}
+
+fn readDirectMeasuredBootSector(buffer: *[512]u8) bool {
+    const root = @import("root");
+    if (!@hasDecl(root, "storage_volume")) return false;
+    const root_volume = root.storage_volume.defaultVolume();
+    if (!root_volume.hasAttachedDevice()) return false;
+    if (root_volume.attached_ata_device) |device| {
+        return native_measured_boot_storage.zigosStorageBootstrapAtaRead(
+            device,
+            direct_measured_boot_lba,
+            buffer.ptr,
+            buffer.len,
+        );
+    }
+    return root_volume.attached_backend_read(direct_measured_boot_lba, buffer.ptr, buffer.len);
+}
+
+fn writeDirectMeasuredBootSector(buffer: *const [512]u8) bool {
+    const root = @import("root");
+    if (!@hasDecl(root, "storage_volume")) return false;
+    const root_volume = root.storage_volume.defaultVolume();
+    if (!root_volume.hasAttachedDevice()) return false;
+    if (root_volume.attached_ata_device) |device| {
+        return native_measured_boot_storage.zigosStorageBootstrapAtaWrite(
+            device,
+            direct_measured_boot_lba,
+            buffer.ptr,
+            buffer.len,
+        );
+    }
+    return root_volume.attached_backend_write(direct_measured_boot_lba, buffer.ptr, buffer.len);
 }
 
 fn printMeasurementSummary(boot: *const measured_boot.BootRecord) void {

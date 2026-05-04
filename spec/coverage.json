@@ -237,6 +237,10 @@
           "name": "spec 4 6.3 and 7 harden modeled kernel isolation and component abi claims"
         },
         {
+          "file": "src/native/task/userspace_registry.zig",
+          "name": "userspace registry keeps the freestanding MMU isolation proof in the boot catalog"
+        },
+        {
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 6.1 14.3 and 16 keep package lifecycle declarative signed and policy scoped"
         },
@@ -295,6 +299,10 @@
         {
           "file": "src/native/policy/policy_mediation.zig",
           "name": "policy mediation maps location contacts screen capture and notification capabilities"
+        },
+        {
+          "file": "src/native/policy/policy_mediation.zig",
+          "name": "policy mediation denies clipboard and screen capture without explicit grants"
         },
         {
           "file": "src/native/platform/secure_secret_store.zig",
@@ -883,12 +891,42 @@
       ]
     },
     "REQ-KERNEL-TYPE-AND-BOUNDARY": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/session/contract.zig",
+        "src/native/kernel_api/native_kernel.zig",
+        "src/native/kernel_api/syscall_surface.zig",
+        "src/native/session/service_catalog.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 4 6.3 13 and 17 keep the kernel typed minimal and route legacy support through isolated portals"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 4 6.3 and 7 harden modeled kernel isolation and component abi claims"
+        }
+      ]
     },
     "REQ-KERNEL-REQUIREMENTS": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/kernel_api/syscall_surface.zig",
+        "src/native/kernel_api/endpoint.zig",
+        "src/native/kernel_api/shared_memory.zig",
+        "src/native/kernel_api/native_kernel.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 4 6.3 and 7 harden modeled kernel isolation and component abi claims"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "adversarial spec rejects revoked capabilities during ipc"
+        }
+      ]
     },
     "REQ-PRIVILEGE-MODEL": {
       "status": "modeled",
@@ -944,8 +982,21 @@
       "coverage_note": "modeled; not yet claimed enforced"
     },
     "REQ-COMPONENT-MODEL": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/services/typed_component_abi.zig",
+        "src/native/task/userspace_contract_registry.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "backlog gate enforces component ABI depth"
+        },
+        {
+          "file": "src/native/services/typed_component_abi.zig",
+          "name": "typed component ABI rejects incompatible interfaces and malformed messages"
+        }
+      ]
     },
     "REQ-BACKGROUND-EXECUTION": {
       "status": "enforced",
@@ -1002,8 +1053,27 @@
       ]
     },
     "REQ-PROCESS-ISOLATION": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/task/task_runtime_model.zig",
+        "src/native/task/userspace_executor.zig",
+        "src/native/kernel_api/syscall_surface.zig",
+        "src/native/session/runtime_negative_proofs.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 4 6.3 and 7 harden modeled kernel isolation and component abi claims"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "adversarial freestanding runtime proofs reject modeled bypasses"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "backlog gate enforces isolation proof depth"
+        }
+      ]
     },
     "REQ-SECRETS": {
       "status": "enforced",
@@ -1119,16 +1189,48 @@
       ]
     },
     "REQ-PRIVATE-OVERLAY": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/sync/sync_service_impl.zig",
+        "src/native/sync/sync_transport_harness.zig",
+        "src/native/sync/network_policy.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 9 and 10 use a trusted device graph selective sync and policy-gated networking"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "backlog gate enforces network transport hardening"
+        }
+      ]
     },
     "REQ-TASK-FIRST-UX": {
-      "status": "scenario",
-      "coverage_note": "scenario-only"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/platform/compositor_session.zig",
+        "src/native/platform/event_ledger.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "backlog gate enforces UX rendering"
+        }
+      ]
     },
     "REQ-WINDOWS-AND-VIEWS": {
-      "status": "scenario",
-      "coverage_note": "scenario-only"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/platform/compositor_session.zig",
+        "src/native/platform/event_ledger.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "backlog gate enforces UX rendering"
+        }
+      ]
     },
     "REQ-PERMISSION-UX": {
       "status": "enforced",
@@ -1158,8 +1260,22 @@
       ]
     },
     "REQ-UNIFIED-RESOURCE-SCHEDULER": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/task/accelerator_scheduler.zig",
+        "src/native/task/userspace_scheduler.zig",
+        "src/native/task/task_runtime_model.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explicit"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
+        }
+      ]
     },
     "REQ-SHARED-MEMORY-OBJECTS": {
       "status": "enforced",
@@ -1175,12 +1291,40 @@
       ]
     },
     "REQ-THERMAL-AND-POWER-POLICY": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/task/accelerator_scheduler.zig",
+        "src/native/task/task_runtime_model.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
+        }
+      ]
     },
     "REQ-USERSPACE-DRIVERS": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/drivers/driver_service.zig",
+        "src/native/drivers/driver_runtime.zig",
+        "src/native/session/session_service_bootstrap.zig",
+        "src/native/drivers/bootstrap_driver_port.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 4 and 13 activate published nic and storage transports through scoped driver services"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "adversarial freestanding runtime proofs reject modeled bypasses"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "backlog gate enforces driver boundary audit"
+        }
+      ]
     },
     "REQ-DRIVER-PERMISSIONS": {
       "status": "enforced",
@@ -1191,6 +1335,10 @@
         {
           "file": "src/native/drivers/driver_service.zig",
           "name": "driver services reject unsigned bundles and escalated device rights"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "backlog gate enforces driver boundary audit"
         }
       ]
     },
@@ -1209,8 +1357,23 @@
       ]
     },
     "REQ-BASE-OS-UPDATES": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/platform/immutable_base.zig",
+        "src/native/platform/update_health.zig",
+        "src/native/platform/measured_boot.zig",
+        "src/native/session/session_manager_boot_flow.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 5 and 14 keep the base image signed measured atomic and rollback-capable"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 14.2 validates boot core storage network and ui health before finalizing an update"
+        }
+      ]
     },
     "REQ-HEALTH-CHECKS": {
       "status": "enforced",
@@ -1331,8 +1494,17 @@
       ]
     },
     "REQ-ZIGOS-USER-EXPERIENCE": {
-      "status": "scenario",
-      "coverage_note": "scenario-only"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/platform/compositor_session.zig",
+        "src/native/platform/event_ledger.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "backlog gate enforces UX rendering"
+        }
+      ]
     },
     "REQ-ONE-SENTENCE-SUMMARY": {
       "status": "modeled",

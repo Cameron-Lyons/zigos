@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.len != 2) {
         try stderr_writer.interface.print(
-            "usage: {s} <ready|cold_boot>\n",
+            "usage: {s} <ready|cold_boot|first_boot|cold_reboot>\n",
             .{args[0]},
         );
         try stderr_writer.interface.flush();
@@ -24,6 +24,14 @@ pub fn main(init: std.process.Init) !void {
         try stdout_writer.interface.print("{s}\n", .{smoke_markers.ready});
     } else if (std.mem.eql(u8, group, "cold_boot")) {
         for (smoke_markers.cold_boot_required) |line| {
+            try stdout_writer.interface.print("{s}\n", .{line});
+        }
+    } else if (std.mem.eql(u8, group, "first_boot")) {
+        for (smoke_markers.first_boot_required) |line| {
+            try stdout_writer.interface.print("{s}\n", .{line});
+        }
+    } else if (std.mem.eql(u8, group, "cold_reboot")) {
+        for (smoke_markers.cold_reboot_required) |line| {
             try stdout_writer.interface.print("{s}\n", .{line});
         }
     } else {

@@ -56,7 +56,7 @@ else
         }
     };
 
-pub fn initDescriptor(spec: userspace_descriptor.InitSpec) Descriptor {
+pub fn initDescriptor(spec: userspace_descriptor.InitSpec) userspace_descriptor.InitError!Descriptor {
     return userspace_descriptor.init(spec);
 }
 
@@ -116,10 +116,11 @@ fn runStartupQueries(detail: mailbox.Detail) void {
 }
 
 fn runMmuIsolationProbe(detail: mailbox.Detail) noreturn {
-    if (invalidSyscallPointerIsDenied()) {
+    const pointer_probe_status = invalidSyscallPointerStatus();
+    if (pointer_probe_status == .invalid_request_pointer) {
         publishState(.syscall_ready, detail, PROOF_SYSCALL_POINTER_DENIED_PULSE);
     } else {
-        signalFault(detail, 0x71);
+        signalFault(detail, @truncate(@intFromEnum(pointer_probe_status)));
     }
 
     const foreign_shared_memory: *volatile u8 = @ptrFromInt(FOREIGN_SHARED_MEMORY_PROBE_ADDR);
@@ -127,13 +128,13 @@ fn runMmuIsolationProbe(detail: mailbox.Detail) noreturn {
     signalFault(detail, 0x72);
 }
 
-fn invalidSyscallPointerIsDenied() bool {
+fn invalidSyscallPointerStatus() abi.SyscallStatus {
     var response = abi.TimeQueryResponse{ .now_ticks = 0 };
     return freestanding_trap.call(
         FOREIGN_SHARED_MEMORY_PROBE_ADDR,
         @intFromPtr(&response),
         @sizeOf(abi.TimeQueryResponse),
-    ) == .invalid_request_pointer;
+    );
 }
 
 fn queryTime(authority_capability_id: u64, task_id: u64, mask: *mailbox.ResourceMask) bool {

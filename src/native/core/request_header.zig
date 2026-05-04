@@ -7,6 +7,7 @@ pub const HeaderError = error{
 };
 
 pub const SubjectTaskError = error{
+    SubjectTaskRequired,
     SubjectTaskMismatch,
 };
 
@@ -24,7 +25,8 @@ pub fn validateHeader(header: abi.RequestHeader, expected_operation: u16) Header
 }
 
 pub fn validateSubjectTask(header: abi.RequestHeader, task_id: u64) SubjectTaskError!void {
-    if (header.subject_task_id != 0 and header.subject_task_id != task_id) {
+    if (header.subject_task_id == 0) return error.SubjectTaskRequired;
+    if (header.subject_task_id != task_id) {
         return error.SubjectTaskMismatch;
     }
 }
@@ -36,6 +38,7 @@ test "request header helper validates version operation and subject task" {
     try validateSubjectTask(header, 9);
 
     try std.testing.expectError(error.UnexpectedOperation, validateHeader(header, abi.opcode(.endpoint_create)));
+    try std.testing.expectError(error.SubjectTaskRequired, validateSubjectTask(makeHeader(abi.opcode(.task_create), 7, 0), 9));
     try std.testing.expectError(error.SubjectTaskMismatch, validateSubjectTask(header, 10));
     try std.testing.expectError(error.UnsupportedAbiVersion, validateHeader(.{
         .version = abi.ABI_VERSION + 1,

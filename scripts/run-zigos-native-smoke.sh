@@ -51,7 +51,7 @@ run_boot() {
     -monitor none \
     -no-reboot \
     -device "isa-debug-exit,iobase=0xf4,iosize=0x04" \
-    -drive "file=$NATIVE_STORE_IMAGE,if=ide,format=raw,index=1,id=disk1" \
+    -drive "file=$NATIVE_STORE_IMAGE,if=ide,format=raw,index=0,id=disk0" \
     >"$qemu_error_log" 2>&1 &
   qemu_pid=$!
 
@@ -125,6 +125,16 @@ assert_boot_markers() {
   assert_marker_group "$log_path" cold_boot
 }
 
+assert_first_boot_markers() {
+  local log_path="$1"
+  assert_marker_group "$log_path" first_boot
+}
+
+assert_reboot_markers() {
+  local log_path="$1"
+  assert_marker_group "$log_path" cold_reboot
+}
+
 sha256_file() {
   local path="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -165,9 +175,11 @@ append_measured_boot_comparison() {
 
 run_boot "$BOOT1_LOG" reset
 assert_boot_markers "$BOOT1_LOG"
+assert_first_boot_markers "$BOOT1_LOG"
 
 run_boot "$BOOT2_LOG" preserve
 assert_boot_markers "$BOOT2_LOG"
+assert_reboot_markers "$BOOT2_LOG"
 
 {
   cat "$BOOT1_LOG"

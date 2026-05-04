@@ -1,8 +1,13 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const device_broker_client = @import("../kernel_api/device_broker_client.zig");
-const storage_volume = @import("../storage/storage_volume.zig");
+const root = @import("root");
+const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
+    root.storage_volume
+else
+    @import("../storage/storage_volume.zig");
 const storage_volume_backend = @import("../storage/storage_volume_backend.zig");
 
 const ATA_REG_DATA: u16 = 0;
