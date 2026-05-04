@@ -3,7 +3,10 @@ const builtin = @import("builtin");
 const native_util = @import("../core/util.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const device_broker = @import("../kernel_api/device_broker.zig");
+const device_inventory = @import("device_inventory.zig");
+const driver_service = @import("driver_service.zig");
 const storage_driver_task = @import("storage_driver_task.zig");
+const root = @import("root");
 const link_port = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/net/link_port.zig")
 else
@@ -82,7 +85,10 @@ else
             return true;
         }
     };
-const storage_volume = @import("../storage/storage_volume.zig");
+const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
+    root.storage_volume
+else
+    @import("../storage/storage_volume.zig");
 const copyText = native_util.copyText;
 
 pub const NetworkDevice = link_port.NetworkDevice;
@@ -174,6 +180,7 @@ pub fn publishStorageBackend(
     backend: storage_volume.Backend,
     kernel_bootstrap: bool,
 ) bool {
+    if (kernel_bootstrap) return false;
     if (!canPublishPublication(StoragePublication, published_storage, device_id)) return false;
     var publication = initPublication(StoragePublication, device_id, publisher, kernel_bootstrap);
     publication.backend = backend;
@@ -188,6 +195,7 @@ pub fn publishStorageActivator(
     activator: StorageActivator,
     kernel_bootstrap: bool,
 ) bool {
+    if (kernel_bootstrap) return false;
     if (!canPublishPublication(StoragePublication, published_storage, device_id)) return false;
     var publication = initPublication(StoragePublication, device_id, publisher, kernel_bootstrap);
     publication.activator = activator;
@@ -201,11 +209,25 @@ pub fn publishStorageAtaBootstrap(
     publisher: []const u8,
     kernel_bootstrap: bool,
 ) bool {
+    if (kernel_bootstrap) return false;
     if (!canPublishPublication(StoragePublication, published_storage, device_id)) return false;
     var publication = initPublication(StoragePublication, device_id, publisher, kernel_bootstrap);
     publication.kind = .ata_bootstrap_bridge;
     published_storage = publication;
     return true;
+}
+
+pub fn claimStorageAtaBootstrapInventory(driver: *const driver_service.DriverRecord, publisher: []const u8) bool {
+    if (driver.device_class != .storage_controller) return false;
+    if (driver.bootstrap_transport != .kernel_published_data_plane) return false;
+
+    const inventory = device_inventory.recordForClass(.storage_controller);
+    if (!inventory.detected or inventory.device_id != driver.device_id) return false;
+    if (inventory.source != .ata_bootstrap or !inventory.kernel_bootstrap) return false;
+
+    const grant = device_inventory.ataBootstrapGrant(driver.device_id) orelse return false;
+    if (!device_broker.publishAtaController(driver.device_id, grant)) return false;
+    return publishStorageAtaBootstrap(driver.device_id, publisher, false);
 }
 
 pub fn networkPublication() ?NetworkPublication {
@@ -442,4 +464,36 @@ test "adversarial raw IP or domain knowledge cannot substitute for egress capabi
     bindEgressCapability(31337, 5150);
     try std.testing.expect(sendActiveNetworkFrame(forged_frame));
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
+}
+
+test "kernel bootstrap cannot publish storage data-plane transports directly" {
+    if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
+
+    reset();
+    defer reset();
+
+    const Backend = struct {
+        fn read(_: u64, _: [*]u8, _: usize) callconv(.c) bool {
+            return false;
+        }
+
+        fn write(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
+            return false;
+        }
+
+        fn activate(_: u64) ?storage_volume.Backend {
+            return null;
+        }
+    };
+
+    const backend = storage_volume.Backend{
+        .sector_count = 1,
+        .read = Backend.read,
+        .write = Backend.write,
+    };
+
+    try std.testing.expect(!publishStorageBackend(0x1F001, "kernel-storage", backend, true));
+    try std.testing.expect(!publishStorageActivator(0x1F001, "kernel-storage", Backend.activate, true));
+    try std.testing.expect(!publishStorageAtaBootstrap(0x1F001, "kernel-storage", true));
+    try std.testing.expect(storagePublication() == null);
 }

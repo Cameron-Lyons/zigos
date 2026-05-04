@@ -17,7 +17,7 @@ export fn _start() callconv(.naked) noreturn {
 }
 
 fn initDescriptor() Descriptor {
-    return userspace_descriptor.init(.{
+    return userspace_descriptor.initComptime(.{
         .component_class = build_options.component_class,
         .signed = build_options.signed,
         .role_tag = build_options.role_tag,

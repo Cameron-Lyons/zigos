@@ -5,7 +5,6 @@ const console_device = @import("../../devices/console_device.zig");
 const ata = @import("../../drivers/ata.zig");
 const pci = @import("../../drivers/pci.zig");
 const bootstrap_driver_port = @import("../../../native/drivers/bootstrap_driver_port.zig");
-const device_broker = @import("../../../native/kernel_api/device_broker.zig");
 const device_inventory = @import("../../../native/drivers/device_inventory.zig");
 const storage_driver_protocol = @import("../../../native/drivers/storage_driver_protocol.zig");
 const panic_handler = @import("../../utils/panic.zig");
@@ -22,25 +21,24 @@ pub fn init() void {
     ata.init();
     captureAtaBootstrapInventory();
     capturePciInventory();
-    publishStorageBootstrapBackend();
-    console.print("Device drivers ready!\n");
+    console.print("Bootstrap device inventory ready!\n");
 
     if (config.shouldInitRuntimeExtras() or config.shouldInitAcpi()) {
-        console.print("Deferring PCI inventory scan and optional device init...\n");
+        console.print("Deferring optional device init after PCI inventory capture...\n");
     } else {
-        console.print("Scanning PCI bus...\n");
-        pci.scanBus();
+        console.print("PCI data planes remain unpublished until userspace driver claims.\n");
     }
 }
 
 pub fn startDeferredRuntimeInit() void {
-    console.print("Publishing deferred native driver transports...\n");
+    console.print("Deferred runtime keeps device data planes behind userspace drivers...\n");
     publishDeferredNetworkBootstrap();
 }
 
 fn captureAtaBootstrapInventory() void {
     if (ata.firstDetectedDevice()) |drive| {
         device_inventory.registerDetected(.storage_controller, ata.stableDeviceId(drive), .ata_bootstrap, true);
+        device_inventory.recordAtaBootstrapGrant(ata.stableDeviceId(drive), ataBrokerGrant(drive));
     }
 }
 
@@ -61,19 +59,6 @@ fn capturePciInventory() void {
             device_inventory.registerDetected(.storage_controller, pciDeviceId(dev), .pci_inventory, false);
         }
     }
-}
-
-fn publishStorageBootstrapBackend() void {
-    const storage_record = device_inventory.recordForClass(.storage_controller);
-    if (!storage_record.detected) return;
-    if (storage_record.source != .ata_bootstrap) return;
-    const drive = ata.findDetectedDeviceByStableId(storage_record.device_id) orelse return;
-    _ = device_broker.publishAtaController(storage_record.device_id, ataBrokerGrant(drive));
-    _ = bootstrap_driver_port.publishStorageAtaBootstrap(
-        storage_record.device_id,
-        "ata-bootstrap",
-        true,
-    );
 }
 
 fn publishDeferredNetworkBootstrap() void {

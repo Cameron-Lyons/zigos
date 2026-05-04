@@ -133,7 +133,7 @@ pub const ServiceCatalogEntry = struct {
     userspace_image: ?UserspaceImageIdentity = null,
     description: []const u8,
     service_bootstrap: ?BootstrapLaunch = null,
-    legacy_phase3: bool = false,
+    published_native_service: bool = false,
 
     pub fn restartable(self: ServiceCatalogEntry) bool {
         return self.restart_policy == .supervised_restart;
@@ -159,7 +159,7 @@ pub const ServiceContract = struct {
     bootstrap_grants: []const BootstrapGrantKind,
 };
 
-pub const Phase3Contract = struct {
+pub const PublishedNativeServiceContract = struct {
     class: ServiceClass,
     interface: manifest.InterfaceDecl,
     driver_class: ?driver_service.DeviceClass = null,
@@ -245,7 +245,7 @@ pub const catalog = [_]ServiceCatalogEntry{
             .tick = 31,
             .grants = &.{.service_task_authority},
         },
-        .legacy_phase3 = true,
+        .published_native_service = true,
     },
     .{
         .class = .permission_review_ui,
@@ -338,7 +338,7 @@ pub const catalog = [_]ServiceCatalogEntry{
             .tick = 34,
             .grants = &.{.service_task_authority},
         },
-        .legacy_phase3 = true,
+        .published_native_service = true,
     },
     .{
         .class = .storage_object,
@@ -367,7 +367,7 @@ pub const catalog = [_]ServiceCatalogEntry{
             .tick = 35,
             .grants = &.{.service_task_authority},
         },
-        .legacy_phase3 = true,
+        .published_native_service = true,
     },
     .{
         .class = .package_install_update,
@@ -395,7 +395,7 @@ pub const catalog = [_]ServiceCatalogEntry{
             .tick = 38,
             .grants = &.{.service_task_authority},
         },
-        .legacy_phase3 = true,
+        .published_native_service = true,
     },
     .{
         .class = .compositor_ui_session,
@@ -424,7 +424,7 @@ pub const catalog = [_]ServiceCatalogEntry{
             .tick = 41,
             .grants = &.{.service_task_authority},
         },
-        .legacy_phase3 = true,
+        .published_native_service = true,
     },
     .{
         .class = .indexing_search,
@@ -452,7 +452,7 @@ pub const catalog = [_]ServiceCatalogEntry{
             .tick = 44,
             .grants = &.{.service_task_authority},
         },
-        .legacy_phase3 = true,
+        .published_native_service = true,
     },
     .{
         .class = .sync_replication,
@@ -480,7 +480,7 @@ pub const catalog = [_]ServiceCatalogEntry{
             .tick = 47,
             .grants = &.{.service_task_authority},
         },
-        .legacy_phase3 = true,
+        .published_native_service = true,
     },
     .{
         .class = .media_print_helpers,
@@ -509,7 +509,7 @@ pub const catalog = [_]ServiceCatalogEntry{
             .tick = 50,
             .grants = &.{.service_task_authority},
         },
-        .legacy_phase3 = true,
+        .published_native_service = true,
     },
     .{
         .class = .compatibility_portal,
@@ -580,12 +580,12 @@ pub const ordered_service_contracts = blk: {
     break :blk derived;
 };
 
-pub const ordered_phase3_contracts = blk: {
-    const count = legacyPhase3Count();
-    var derived: [count]Phase3Contract = undefined;
+pub const ordered_published_native_service_contracts = blk: {
+    const count = publishedNativeServiceCount();
+    var derived: [count]PublishedNativeServiceContract = undefined;
     var index: usize = 0;
     for (catalog) |entry| {
-        if (entry.legacy_phase3) {
+        if (entry.published_native_service) {
             derived[index] = .{
                 .class = entry.class,
                 .interface = entry.interface,
@@ -617,8 +617,8 @@ pub fn serviceContractForClass(class: ServiceClass) ?ServiceContract {
     return null;
 }
 
-pub fn phase3ContractForClass(class: ServiceClass) ?Phase3Contract {
-    for (ordered_phase3_contracts) |entry| {
+pub fn publishedNativeServiceContractForClass(class: ServiceClass) ?PublishedNativeServiceContract {
+    for (ordered_published_native_service_contracts) |entry| {
         if (entry.class == class) return entry;
     }
     return null;
@@ -631,8 +631,8 @@ pub fn orderedServiceIndex(class: ServiceClass) ?usize {
     return null;
 }
 
-pub fn orderedPhase3Index(class: ServiceClass) ?usize {
-    for (ordered_phase3_contracts, 0..) |entry, index| {
+pub fn orderedPublishedNativeServiceIndex(class: ServiceClass) ?usize {
+    for (ordered_published_native_service_contracts, 0..) |entry, index| {
         if (entry.class == class) return index;
     }
     return null;
@@ -789,10 +789,10 @@ fn defaultServiceBudget(class: ServiceClass) task_runtime.ResourceBudget {
     };
 }
 
-fn legacyPhase3Count() usize {
+fn publishedNativeServiceCount() usize {
     comptime var count: usize = 0;
     inline for (catalog) |entry| {
-        if (entry.legacy_phase3) count += 1;
+        if (entry.published_native_service) count += 1;
     }
     return count;
 }
@@ -800,11 +800,11 @@ fn legacyPhase3Count() usize {
 test "service catalog derives descriptors and bootstrap contracts from one source" {
     try std.testing.expectEqual(@as(usize, catalog.len), default_services.len);
     try std.testing.expectEqual(@as(usize, 10), ordered_service_contracts.len);
-    try std.testing.expectEqual(@as(usize, 8), ordered_phase3_contracts.len);
+    try std.testing.expectEqual(@as(usize, 8), ordered_published_native_service_contracts.len);
     try std.testing.expectEqual(ServiceClass.service_registry, ordered_service_contracts[0].class);
     try std.testing.expectEqual(ServiceClass.policy_mediation, ordered_service_contracts[1].class);
     try std.testing.expectEqual(ServiceClass.compatibility_portal, ordered_service_contracts[9].class);
-    try std.testing.expectEqual(ServiceClass.media_print_helpers, ordered_phase3_contracts[7].class);
+    try std.testing.expectEqual(ServiceClass.media_print_helpers, ordered_published_native_service_contracts[7].class);
     try std.testing.expectEqualStrings("zigos.system.storage-object", bundleIdForServiceClass(.storage_object).?);
     try std.testing.expect(allowsDriverClass(.network_stack, .network_adapter));
     try std.testing.expect(!allowsDriverClass(.policy_mediation, .network_adapter));

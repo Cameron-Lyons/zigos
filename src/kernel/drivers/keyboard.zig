@@ -126,9 +126,13 @@ var alt_pressed: bool = false;
 var caps_lock: bool = false;
 var keyboard_line_discipline: ?LineDiscipline = null;
 var input_echo_enabled: bool = true;
+var kernel_input_data_plane_enabled: bool = false;
 
 pub fn handleInterrupt() void {
     const scancode = io.inb(KEYBOARD_DATA_PORT);
+    if (!kernel_input_data_plane_enabled) {
+        return;
+    }
 
     if ((scancode & 0x80) != 0) {
         const key_release = scancode & 0x7F;
@@ -239,10 +243,15 @@ fn isAlpha(ch: u8) bool {
     return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z');
 }
 
-pub fn init() void {
+pub fn recordBootstrapInventoryOnly() void {
+    kernel_input_data_plane_enabled = false;
     while (io.inb(KEYBOARD_STATUS_PORT) & 0x01 != 0) {
         _ = io.inb(KEYBOARD_DATA_PORT);
     }
+}
+
+pub fn enableLegacyKernelInputDataPlaneForDebug() void {
+    kernel_input_data_plane_enabled = true;
 }
 
 pub fn setLineDiscipline(line_discipline: LineDiscipline) void {

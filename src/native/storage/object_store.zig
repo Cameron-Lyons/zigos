@@ -213,6 +213,10 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         objects: [MAX_STORE_OBJECTS]ObjectSlot = [_]ObjectSlot{ObjectSlot{}} ** MAX_STORE_OBJECTS,
         versions: [MAX_STORE_VERSIONS]VersionSlot = [_]VersionSlot{VersionSlot{}} ** MAX_STORE_VERSIONS,
         blobs: [MAX_BLOBS]BlobSlot = [_]BlobSlot{BlobSlot{}} ** MAX_BLOBS,
+        dirty_object_count: usize = 0,
+        dirty_object_ids: [MAX_STORE_OBJECTS]u64 = [_]u64{0} ** MAX_STORE_OBJECTS,
+        dirty_version_count: usize = 0,
+        dirty_version_ids: [MAX_STORE_VERSIONS]u64 = [_]u64{0} ** MAX_STORE_VERSIONS,
 
         pub fn init() Self {
             return .{};
@@ -224,6 +228,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             self.object_index_slots = emptyIndexTable(STORE_OBJECT_INDEX_CAPACITY);
             self.version_index_slots = emptyIndexTable(STORE_VERSION_INDEX_CAPACITY);
             self.blob_index_slots = emptyIndexTable(STORE_BLOB_INDEX_CAPACITY);
+            self.clearDirty();
             for (&self.objects) |*slot| {
                 if (!slot.in_use) continue;
                 slot.* = .{};
@@ -320,6 +325,8 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
             object_record.latest_version_id = version_id;
             object_record.version_count += 1;
+            self.markObjectDirty(object_record.id);
+            self.markVersionDirty(version_id);
 
             return .{
                 .object_id = object_record.id,
@@ -392,6 +399,21 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             return count;
         }
 
+        pub fn dirtyObjectIds(self: *const Self) []const u64 {
+            return self.dirty_object_ids[0..self.dirty_object_count];
+        }
+
+        pub fn dirtyVersionIds(self: *const Self) []const u64 {
+            return self.dirty_version_ids[0..self.dirty_version_count];
+        }
+
+        pub fn clearDirty(self: *Self) void {
+            @memset(self.dirty_object_ids[0..], 0);
+            @memset(self.dirty_version_ids[0..], 0);
+            self.dirty_object_count = 0;
+            self.dirty_version_count = 0;
+        }
+
         fn nextObjectId(self: *Self) u64 {
             defer self.next_object_id += 1;
             return self.next_object_id;
@@ -461,6 +483,12 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                     return slot_index;
                 }
             }
+            if (self.exactBlobSlotIndex(address)) |exact_slot_index| {
+                const exact = &self.blobs[exact_slot_index];
+                if (exact.blob.payload_len != payload.len or !std.mem.eql(u8, exact.blob.payloadSlice(), payload)) return error.CorruptBlob;
+                exact.blob.ref_count +|= 1;
+                return exact_slot_index;
+            }
             for (&self.blobs, 0..) |*slot, slot_index| {
                 if (slot.in_use) continue;
                 slot.in_use = true;
@@ -495,7 +523,32 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             if (!slot.in_use or !std.mem.eql(u8, &slot.blob.address, &address)) return null;
             return slot;
         }
+
+        fn exactBlobSlotIndex(self: *Self, address: BlobAddress) ?usize {
+            for (&self.blobs, 0..) |*slot, slot_index| {
+                if (slot.in_use and std.mem.eql(u8, &slot.blob.address, &address)) return slot_index;
+            }
+            return null;
+        }
+
+        fn markObjectDirty(self: *Self, object_id: u64) void {
+            appendDirtyId(MAX_STORE_OBJECTS, &self.dirty_object_ids, &self.dirty_object_count, object_id);
+        }
+
+        fn markVersionDirty(self: *Self, version_id: u64) void {
+            appendDirtyId(MAX_STORE_VERSIONS, &self.dirty_version_ids, &self.dirty_version_count, version_id);
+        }
     };
+}
+
+fn appendDirtyId(comptime capacity: usize, ids: *[capacity]u64, count: *usize, id: u64) void {
+    if (id == 0) return;
+    for (ids[0..count.*]) |existing| {
+        if (existing == id) return;
+    }
+    if (count.* >= capacity) native_util.impossibleByInvariant("dirty id capacity covers table slots");
+    ids[count.*] = id;
+    count.* += 1;
 }
 
 pub fn signMetadata(
@@ -704,6 +757,32 @@ test "object store splits blob and version addresses" {
     try std.testing.expect(std.mem.eql(u8, &store.version(first.version_id).?.blob_address, &first.blob_address));
     try std.testing.expect(std.mem.eql(u8, &store.version(second.version_id).?.version_address, &second.version_address));
     try std.testing.expectEqual(@as(usize, 1), store.blobCount());
+}
+
+test "object store falls back to exact blob address match after index-key collision" {
+    var store = Store.init();
+
+    var first_address = [_]u8{0} ** 32;
+    var second_address = [_]u8{0} ** 32;
+    const shared_prefix = [_]u8{ 0xD0, 0xED, 0x0B, 0x10, 0xBA, 0x5E, 0xAA, 0x55 };
+    @memcpy(first_address[0..shared_prefix.len], &shared_prefix);
+    @memcpy(second_address[0..shared_prefix.len], &shared_prefix);
+    first_address[8] = 1;
+    second_address[8] = 2;
+
+    const first_slot = try store.putBlob(first_address, "first");
+    const second_slot = try store.putBlob(second_address, "second");
+    try std.testing.expect(first_slot != second_slot);
+    try std.testing.expectEqual(@as(usize, 2), store.blobCount());
+
+    const first_again = try store.putBlob(first_address, "first");
+    try std.testing.expectEqual(first_slot, first_again);
+    try std.testing.expectEqual(@as(usize, 2), store.blobCount());
+    try std.testing.expectEqual(@as(u16, 2), store.blobs[first_slot].blob.ref_count);
+    try std.testing.expectEqual(@as(u16, 1), store.blobs[second_slot].blob.ref_count);
+    try std.testing.expectEqualStrings("first", store.blob(first_address).?.payloadSlice());
+    try std.testing.expectEqualStrings("second", store.blob(second_address).?.payloadSlice());
+    try std.testing.expectError(error.CorruptBlob, store.putBlob(first_address, "changed"));
 }
 
 test "object store verifies blob backend corruption before serving payloads" {

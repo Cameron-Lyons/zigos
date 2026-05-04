@@ -99,7 +99,7 @@ pub fn build(b: *std.Build) void {
         "-no-reboot",
         "-no-shutdown",
         "-drive",
-        "file=" ++ shared.native_store_image_path ++ ",if=ide,format=raw,index=1,id=disk1",
+        "file=" ++ shared.native_store_image_path ++ ",if=ide,format=raw,index=0,id=disk0",
     });
     zigos_native_qemu_cmd.step.dependOn(zigos_native_kernel.install_step);
     zigos_native_qemu_cmd.step.dependOn(&native_store_cmd.step);
@@ -130,7 +130,7 @@ pub fn build(b: *std.Build) void {
     const fmt_check_cmd = b.addSystemCommand(&.{
         "bash",
         "-c",
-        "./scripts/zig.sh fmt --check $(git ls-files '*.zig')",
+        "git ls-files -z '*.zig' | while IFS= read -r -d '' file; do [ -e \"$file\" ] && printf '%s\\0' \"$file\"; done | xargs -0 ./scripts/zig.sh fmt --check",
     });
     const fmt_check_step = b.step("fmt-check", "Check Zig formatting for tracked source files");
     fmt_check_step.dependOn(&fmt_check_cmd.step);

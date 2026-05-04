@@ -144,6 +144,7 @@ pub const Executor = struct {
         zigos_userspace_resume_requested = 0;
         zigos_userspace_resume_esp = 0;
         zigos_userspace_resume_eip = 0;
+        publishRootActiveTaskId(0);
         if (registered_executor == self) {
             registered_executor = null;
         }
@@ -174,6 +175,17 @@ pub const Executor = struct {
     ) bool {
         const mapping = self.findMapping(address_space_id) orelse return false;
         return mapping.last_user_counter == expected_counter;
+    }
+
+    pub fn observedUserCounterStagePulse(
+        self: *Executor,
+        address_space_id: u64,
+        expected_stage: userspace_bootstrap_mailbox.Stage,
+        expected_pulse: u16,
+    ) bool {
+        const mapping = self.findMapping(address_space_id) orelse return false;
+        return @as(u8, @truncate(mapping.last_user_counter >> 24)) == @intFromEnum(expected_stage) and
+            @as(u16, @truncate(mapping.last_user_counter)) == expected_pulse;
     }
 
     pub fn executeTask(
@@ -215,6 +227,7 @@ pub const Executor = struct {
 
         self.active_task_id = task_id;
         self.active_address_space_id = address_space.id;
+        publishRootActiveTaskId(task_id);
         self.handoff_completed = false;
         zigos_userspace_resume_requested = 0;
 
@@ -229,6 +242,7 @@ pub const Executor = struct {
 
         self.active_task_id = 0;
         self.active_address_space_id = 0;
+        publishRootActiveTaskId(0);
         zigos_userspace_resume_requested = 0;
 
         if (self.handoff_completed and !self.probe_marker_printed) {
@@ -471,8 +485,29 @@ fn recordUserPageFault(self: *Executor, task_id: u64, faulting_address: u32, err
     self.user_page_fault_count += 1;
 }
 
+fn publishRootActiveTaskId(task_id: u64) void {
+    if (builtin.target.os.tag != .freestanding) return;
+    const root = @import("root");
+    if (@hasDecl(root, "publishUserspaceActiveTaskId")) {
+        root.publishUserspaceActiveTaskId(task_id);
+    }
+}
+
 fn readFaultAddress() u32 {
     return asm volatile ("mov %%cr2, %[addr]"
         : [addr] "=r" (-> u32),
     );
+}
+
+test "executor matches userspace counters by stage and pulse" {
+    var executor = Executor{};
+    executor.mappings[0] = .{
+        .in_use = true,
+        .address_space_id = 42,
+        .last_user_counter = userspace_bootstrap_mailbox.packCounter(.syscall_ready, .proof, 0x41),
+    };
+
+    try @import("std").testing.expect(executor.observedUserCounterStagePulse(42, .syscall_ready, 0x41));
+    try @import("std").testing.expect(!executor.observedUserCounterStagePulse(42, .steady, 0x41));
+    try @import("std").testing.expect(!executor.observedUserCounterStagePulse(42, .syscall_ready, 0x42));
 }

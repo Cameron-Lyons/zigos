@@ -138,7 +138,7 @@ pub fn mapError(err: anyerror) DispatchResult {
         .status = .denied,
         .denial_reason = .capability_revoked,
     };
-    if (err == error.ScopeViolation or err == error.ScopeEscalation or err == error.SubjectTaskMismatch) return .{
+    if (err == error.ScopeViolation or err == error.ScopeEscalation or err == error.SubjectTaskMismatch or err == error.SubjectTaskRequired) return .{
         .status = .denied,
         .denial_reason = .scope_violation,
     };

@@ -268,3 +268,13 @@ test "userspace registry definitions stay unique and keep typed contract metadat
 
     try std.testing.expect(findByServiceClass(.storage_object) != null);
 }
+
+test "userspace registry keeps the freestanding MMU isolation proof in the boot catalog" {
+    const proof = find("zigos.proof.mmu-isolation") orelse return error.MissingMmuIsolationProof;
+
+    try std.testing.expectEqual(@as(u32, 0xA116), proof.role_tag);
+    try std.testing.expect((proof.contract_flags & FLAG_MMU_PROOF_PROBE) != 0);
+    try std.testing.expectEqual(ComponentClass.app_component, proof.component_class);
+    try std.testing.expectEqualStrings("userspace-mmu-isolation-proof.elf", proof.artifact_name);
+    try std.testing.expectEqualStrings("zigos.proof.mmu-isolation", proof.entry);
+}

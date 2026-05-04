@@ -3,13 +3,19 @@ const boot_markers = @import("../../kernel/boot/markers.zig");
 const bootstrap_capabilities = @import("bootstrap_capabilities.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const contract = @import("contract.zig");
+const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
+const device_inventory = @import("../drivers/device_inventory.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const native_util = @import("../core/util.zig");
 const std = @import("std");
 const service_bootstrap = @import("service_bootstrap.zig");
 const principal = @import("../core/principal.zig");
 const service_contract = @import("service_contracts.zig");
-const storage_volume_mod = @import("../storage/storage_volume.zig");
+const root = @import("root");
+const storage_volume_mod = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
+    root.storage_volume
+else
+    @import("../storage/storage_volume.zig");
 const support = @import("session_manager_support.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 
@@ -161,6 +167,15 @@ fn activateDrivers(
         _ = env.supervisor.recordCrash(state.services.storage_service.id, 54, bootFailureCode(err));
         return false;
     };
+    const storage_inventory = device_inventory.recordForClass(.storage_controller);
+    if (bootstrap_driver_port.storagePublication() == null and
+        storage_inventory.detected and
+        storage_inventory.source == .ata_bootstrap and
+        !bootstrap_driver_port.claimStorageAtaBootstrapInventory(storage_driver, "zigos.system.storage-driver"))
+    {
+        _ = env.supervisor.recordCrash(state.services.storage_service.id, 54, bootFailureCode(error.InvalidBootstrapTransport));
+        return false;
+    }
     _ = service_bootstrap.attachDriver(
         kernel_port,
         env.capability_table,

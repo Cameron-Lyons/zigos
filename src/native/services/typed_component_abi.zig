@@ -16,6 +16,7 @@ pub const Error = error{
     InvalidRequestLength,
     InvalidResponseLength,
     MalformedMessage,
+    SubjectTaskRequired,
 };
 
 pub const WireHeader = extern struct {
@@ -169,6 +170,7 @@ pub fn validateMessage(
 ) Error!void {
     if (header.magic != MAGIC) return error.InvalidMagic;
     if (header.abi_version != VERSION) return error.UnsupportedAbiVersion;
+    if (header.subject_task_id == 0) return error.SubjectTaskRequired;
     if (header.interface_major != interface.version_major or
         header.interface_minor > interface.version_minor)
     {
@@ -296,6 +298,15 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
     header.magic = MAGIC;
     header.request_len -= 1;
     try std.testing.expectError(Error.MalformedMessage, validateMessage(
+        iface,
+        .service_connect,
+        header,
+        @sizeOf(ServiceConnectionRequest),
+        @sizeOf(ServiceConnectionResponse),
+    ));
+    header.request_len += 1;
+    header.subject_task_id = 0;
+    try std.testing.expectError(Error.SubjectTaskRequired, validateMessage(
         iface,
         .service_connect,
         header,
