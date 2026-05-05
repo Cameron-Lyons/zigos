@@ -71,6 +71,7 @@ pub fn revokedCapabilitiesFailDuringIpc() !void {
     _ = try port.endpointConnect(.{
         .header = component_port.makeHeader(.endpoint_connect, 3, sender.id),
         .endpoint_capability_id = sender_endpoint.capability_id,
+        .peer_endpoint_capability_id = receiver_endpoint.capability_id,
         .peer_endpoint_id = receiver_endpoint.endpoint.endpoint_id,
     }, 2);
 

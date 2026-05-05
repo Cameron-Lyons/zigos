@@ -8,6 +8,11 @@ pub const SignerIdentity = struct {
     seed: [Ed25519.KeyPair.seed_length]u8,
 };
 
+pub fn publicKey(identity: SignerIdentity) ![Ed25519.PublicKey.encoded_length]u8 {
+    const key_pair = try Ed25519.KeyPair.generateDeterministic(identity.seed);
+    return key_pair.public_key.toBytes();
+}
+
 pub fn sign(identity: SignerIdentity, message: []const u8) !manifest.Signature {
     const key_pair = try Ed25519.KeyPair.generateDeterministic(identity.seed);
     const signature = try key_pair.sign(message, null);
@@ -39,6 +44,7 @@ test "ed25519 signing produces verifiable native signatures" {
     };
     const signature = try sign(identity, "storage-state");
     try std.testing.expect(signature.isComplete());
+    try std.testing.expectEqualSlices(u8, &try publicKey(identity), signature.publicKeySlice());
     try std.testing.expect(verify(signature, "storage-state"));
     try std.testing.expect(!verify(signature, "sync-state"));
 }

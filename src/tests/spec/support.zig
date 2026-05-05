@@ -2,6 +2,7 @@ const std = @import("std");
 const capability = @import("../../native/kernel_api/capability.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const principal = @import("../../native/core/principal.zig");
+const package_service = @import("../../native/services/package_service.zig");
 const signing = @import("../../native/core/signing.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 
@@ -30,6 +31,21 @@ pub fn service(serial: u64) principal.PrincipalId {
 
 pub fn policyAuthority(serial: u64) principal.PrincipalId {
     return .{ .kind = .policy_authority, .serial = serial };
+}
+
+pub fn trustPackagePublisher(
+    packages: *package_service.Service,
+    identity: signing.SignerIdentity,
+    publisher: []const u8,
+) !void {
+    const issuer = policyAuthority(1);
+    _ = try packages.trustPolicyAuthorityRoot(issuer, [_]u8{0x5A} ** 32);
+    _ = try packages.trustPublisher(
+        .{ .kind = .app, .serial = std.hash.Wyhash.hash(0x5A47_5350_4543, publisher) },
+        issuer,
+        publisher,
+        try signing.publicKey(identity),
+    );
 }
 
 pub fn driverAuthority(

@@ -18,6 +18,7 @@ pub const Binding = struct {
     service_id: u64,
     owner_task_id: u64,
     endpoint_id: u64,
+    endpoint_capability_id: u64,
     interface: manifest.InterfaceDecl,
     interface_name_len: usize,
     interface_name: [MAX_INTERFACE_NAME_BYTES]u8,
@@ -62,11 +63,12 @@ pub const Service = struct {
         service_id: u64,
         owner_task_id: u64,
         endpoint_id: u64,
+        endpoint_capability_id: u64,
         interface: manifest.InterfaceDecl,
         flags: u16,
     ) Error!void {
         if (self.bootstrap == null) return error.RegistryNotBootstrapped;
-        return self.registry.register(service_id, owner_task_id, endpoint_id, interface, flags);
+        return self.registry.register(service_id, owner_task_id, endpoint_id, endpoint_capability_id, interface, flags);
     }
 
     pub fn connect(self: *const Service, interface: manifest.InterfaceDecl) Error!abi.ServiceConnectionDescriptor {
@@ -91,6 +93,7 @@ pub const Registry = struct {
         service_id: u64,
         owner_task_id: u64,
         endpoint_id: u64,
+        endpoint_capability_id: u64,
         interface: manifest.InterfaceDecl,
         flags: u16,
     ) Error!void {
@@ -104,6 +107,7 @@ pub const Registry = struct {
         slot.binding.service_id = service_id;
         slot.binding.owner_task_id = owner_task_id;
         slot.binding.endpoint_id = endpoint_id;
+        slot.binding.endpoint_capability_id = endpoint_capability_id;
         slot.binding.interface_name_len = native_util.copyTextExact(
             slot.binding.interface_name[0..],
             interface.name,
@@ -133,6 +137,7 @@ pub const Registry = struct {
         return .{
             .service_id = binding.service_id,
             .endpoint_id = binding.endpoint_id,
+            .endpoint_capability_id = binding.endpoint_capability_id,
             .interface_hash = hashInterface(binding.interface.name),
             .version_major = binding.interface.version_major,
             .version_minor = binding.interface.version_minor,
@@ -159,6 +164,7 @@ fn zeroBinding() Binding {
         .service_id = 0,
         .owner_task_id = 0,
         .endpoint_id = 0,
+        .endpoint_capability_id = 0,
         .interface = .{ .name = "" },
         .interface_name_len = 0,
         .interface_name = [_]u8{0} ** MAX_INTERFACE_NAME_BYTES,
@@ -187,7 +193,7 @@ fn platformInterfaceAllowed(interface: manifest.InterfaceDecl) bool {
 
 test "service registry service requires bootstrap endpoint before discovery" {
     var service = Service.init();
-    try std.testing.expectError(error.RegistryNotBootstrapped, service.register(44, 7, 101, .{
+    try std.testing.expectError(error.RegistryNotBootstrapped, service.register(44, 7, 101, 201, .{
         .name = "zigos.object.workspace",
     }, 0));
 
@@ -196,7 +202,7 @@ test "service registry service requires bootstrap endpoint before discovery" {
         .endpoint_id = 99,
         .endpoint_capability_id = 123,
     });
-    try service.register(44, 7, 101, .{
+    try service.register(44, 7, 101, 201, .{
         .name = "zigos.object.workspace",
         .version_major = 1,
         .version_minor = 2,
@@ -209,11 +215,12 @@ test "service registry service requires bootstrap endpoint before discovery" {
     });
     try std.testing.expectEqual(@as(u64, 44), connection.service_id);
     try std.testing.expectEqual(@as(u64, 101), connection.endpoint_id);
+    try std.testing.expectEqual(@as(u64, 201), connection.endpoint_capability_id);
 }
 
 test "service registry only connects by typed interface declaration" {
     var registry = Registry.init();
-    try registry.register(44, 7, 101, .{
+    try registry.register(44, 7, 101, 201, .{
         .name = "zigos.object.workspace",
         .version_major = 1,
         .version_minor = 2,
@@ -226,19 +233,20 @@ test "service registry only connects by typed interface declaration" {
     });
     try std.testing.expectEqual(@as(u64, 44), connection.service_id);
     try std.testing.expectEqual(@as(u64, 101), connection.endpoint_id);
+    try std.testing.expectEqual(@as(u64, 201), connection.endpoint_capability_id);
     try std.testing.expect(connection.interface_hash != 0);
     try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
 }
 
 test "service registry rejects duplicate interfaces and incompatible versions" {
     var registry = Registry.init();
-    try registry.register(44, 7, 101, .{
+    try registry.register(44, 7, 101, 201, .{
         .name = "zigos.object.workspace",
         .version_major = 1,
         .version_minor = 0,
     }, 0);
 
-    try std.testing.expectError(error.DuplicateInterface, registry.register(45, 8, 102, .{
+    try std.testing.expectError(error.DuplicateInterface, registry.register(45, 8, 102, 202, .{
         .name = "zigos.object.workspace",
     }, 0));
     try std.testing.expectError(error.VersionMismatch, registry.connect(.{
@@ -253,14 +261,14 @@ test "service registry does not consume a binding slot when an interface name is
     const too_long = "zigos.object.workspace.interface.name.that.is.definitely.longer.than.sixty.four.bytes";
     try std.testing.expect(too_long.len > MAX_INTERFACE_NAME_BYTES);
 
-    try std.testing.expectError(error.InterfaceNameTooLong, registry.register(44, 7, 101, .{
+    try std.testing.expectError(error.InterfaceNameTooLong, registry.register(44, 7, 101, 201, .{
         .name = too_long,
         .version_major = 1,
         .version_minor = 0,
     }, 0));
     try std.testing.expectEqual(@as(usize, 0), registry.bindingCount());
 
-    try registry.register(45, 7, 102, .{
+    try registry.register(45, 7, 102, 202, .{
         .name = "zigos.object.workspace",
         .version_major = 1,
         .version_minor = 0,
@@ -271,28 +279,28 @@ test "service registry does not consume a binding slot when an interface name is
 test "service registry rejects internal interface names and unversioned API bypasses" {
     var registry = Registry.init();
 
-    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.register(44, 7, 101, .{
+    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.register(44, 7, 101, 201, .{
         .name = "zigos.internal.storage.raw",
         .version_major = 1,
         .version_minor = 0,
     }, 0));
-    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.register(44, 7, 101, .{
+    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.register(44, 7, 101, 201, .{
         .name = "kernel.task.table",
         .version_major = 1,
         .version_minor = 0,
     }, 0));
-    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.register(44, 7, 101, .{
+    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.register(44, 7, 101, 201, .{
         .name = "vfs.root",
         .version_major = 1,
         .version_minor = 0,
     }, 0));
-    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.register(44, 7, 101, .{
+    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.register(44, 7, 101, 201, .{
         .name = "zigos.object.workspace",
         .version_major = 0,
         .version_minor = 0,
     }, 0));
 
-    try registry.register(44, 7, 101, .{
+    try registry.register(44, 7, 101, 201, .{
         .name = "zigos.object.workspace",
         .version_major = 1,
         .version_minor = 0,
@@ -306,7 +314,7 @@ test "service registry rejects internal interface names and unversioned API bypa
 
 test "service registry binds known interfaces to generated typed contracts" {
     var registry = Registry.init();
-    try registry.register(44, 7, 101, .{
+    try registry.register(44, 7, 101, 201, .{
         .name = "zigos.service.registry",
         .version_major = 1,
         .version_minor = 0,
@@ -325,7 +333,7 @@ test "service registry binds known interfaces to generated typed contracts" {
         .version_major = 2,
         .version_minor = 0,
     }));
-    try std.testing.expectError(error.TypedContractMismatch, registry.register(45, 8, 102, .{
+    try std.testing.expectError(error.TypedContractMismatch, registry.register(45, 8, 102, 202, .{
         .name = "zigos.task.runtime",
         .version_major = 2,
         .version_minor = 0,
@@ -335,7 +343,7 @@ test "service registry binds known interfaces to generated typed contracts" {
 test "service registry owns interface name bytes" {
     var registry = Registry.init();
     var name = [_]u8{ 'z', 'i', 'g', 'o', 's', '.', 'm', 'u', 't', 'a', 'b', 'l', 'e' };
-    try registry.register(44, 7, 101, .{
+    try registry.register(44, 7, 101, 201, .{
         .name = name[0..],
         .version_major = 1,
         .version_minor = 0,

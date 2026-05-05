@@ -154,6 +154,7 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
     v1.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v1));
 
     var packages = package_service.Service.init();
+    try spec_support.trustPackagePublisher(&packages, bundle_signer, "Example Software");
     const installed = try packages.install(.{
         .bundle = v1,
         .source_identity = "store:zigos",
@@ -316,6 +317,7 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
 
     var packages = package_service.Service.init();
     const bundle_signer = spec_support.signer("spec.bundle.notes", 0x82);
+    try spec_support.trustPackagePublisher(&packages, bundle_signer, "Example Software");
 
     const v1_permissions = [_]manifest.PermissionRequest{
         .{
@@ -474,9 +476,11 @@ pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {
         .background_tasks = &background_tasks,
         .update_channel = .stable,
     };
-    package_bundle.signature = try signing.sign(spec_support.signer("spec.background.bundle", 0x79), &package_service.digestBundle(package_bundle));
+    const package_signer = spec_support.signer("spec.background.bundle", 0x79);
+    package_bundle.signature = try signing.sign(package_signer, &package_service.digestBundle(package_bundle));
 
     var packages = package_service.Service.init();
+    try spec_support.trustPackagePublisher(&packages, package_signer, "zigos.spec");
     _ = try packages.install(.{
         .bundle = package_bundle,
         .source_identity = "store.zigos.spec",

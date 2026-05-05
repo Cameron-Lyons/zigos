@@ -2,7 +2,6 @@ const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
-const copyText = native_util.copyText;
 
 pub const MAX_SECRETS: usize = 16;
 pub const MAX_HANDLES: usize = 32;
@@ -50,6 +49,7 @@ pub const HardwareSealProvider = struct {
 pub const Error = error{
     HandleNotFound,
     HandleTableFull,
+    LabelTooLong,
     RawExportDenied,
     SecretNotFound,
     SecretTableFull,
@@ -107,7 +107,7 @@ pub const Store = struct {
             slot.secret.hardware_backed = hardware_backed;
             slot.secret.exportable = exportable;
             slot.secret.resident_material = true;
-            slot.secret.label_len = copyText(&slot.secret.label, label);
+            slot.secret.label_len = native_util.copyTextExact(&slot.secret.label, label) catch return error.LabelTooLong;
             if (hardware_backed and !exportable) {
                 slot.secret.resident_material = false;
                 slot.secret.sealed_digest_present = true;
@@ -120,7 +120,7 @@ pub const Store = struct {
                 slot.secret.value_len = 0;
                 @memset(&slot.secret.value, 0);
             } else {
-                slot.secret.value_len = copyText(&slot.secret.value, raw);
+                slot.secret.value_len = native_util.copyTextExact(&slot.secret.value, raw) catch unreachable;
             }
             return &slot.secret;
         }

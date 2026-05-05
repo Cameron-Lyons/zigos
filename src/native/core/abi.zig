@@ -164,6 +164,7 @@ pub const AccountingDescriptor = extern struct {
 pub const ServiceConnectionDescriptor = extern struct {
     service_id: u64,
     endpoint_id: u64,
+    endpoint_capability_id: u64,
     interface_hash: u64,
     version_major: u16,
     version_minor: u16,

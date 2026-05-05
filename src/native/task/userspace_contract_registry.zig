@@ -1,4 +1,5 @@
 const std = @import("std");
+const id_index = @import("../core/id_index.zig");
 const registry = @import("userspace_registry.zig");
 
 pub const FLAG_SYSTEM_BUNDLE = registry.FLAG_SYSTEM_BUNDLE;
@@ -21,11 +22,30 @@ pub const contracts = blk: {
     break :blk derived;
 };
 
+const BUNDLE_INDEX_CAPACITY: usize = contracts.len * 2;
+const bundle_index = buildBundleIndex();
+
 pub fn find(bundle_id: []const u8) ?*const ContractSpec {
+    const key = registry.bundleIndexKey(bundle_id);
+    if (id_index.lookup(BUNDLE_INDEX_CAPACITY, &bundle_index, key)) |contract_index| {
+        if (contract_index < contracts.len and std.mem.eql(u8, contracts[contract_index].bundle_id, bundle_id)) {
+            return &contracts[contract_index];
+        }
+    }
+
     for (&contracts) |*contract| {
         if (std.mem.eql(u8, contract.bundle_id, bundle_id)) return contract;
     }
     return null;
+}
+
+fn buildBundleIndex() [BUNDLE_INDEX_CAPACITY]id_index.Slot {
+    @setEvalBranchQuota(10_000);
+    var index = id_index.emptyTable(BUNDLE_INDEX_CAPACITY);
+    for (contracts, 0..) |contract, contract_index| {
+        id_index.insert(BUNDLE_INDEX_CAPACITY, &index, registry.bundleIndexKey(contract.bundle_id), contract_index, "contract bundle id index covers userspace contracts");
+    }
+    return index;
 }
 
 test "userspace contracts stay unique and cover every boot artifact" {

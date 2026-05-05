@@ -180,6 +180,7 @@ pub const ReplicationSummary = struct {
 };
 
 pub const Error = error{
+    BundleIdTooLong,
     ConflictTableFull,
     CorruptState,
     DatabaseContractNotFound,
@@ -190,6 +191,8 @@ pub const Error = error{
     DuplicateDocumentOperation,
     InvalidContractSignature,
     InvalidStateSignatureEncoding,
+    LabelTooLong,
+    NetworkTargetTooLong,
     OverlayNotFound,
     OverlaySessionNotFound,
     OverlayTableFull,
@@ -198,8 +201,10 @@ pub const Error = error{
     RemoteAccessDisabled,
     StateSigningFailed,
     StateTooLarge,
+    PathTooLong,
     TooManyPrivateServices,
     TooManySelectivePrefixes,
+    ServiceIdentityTooLong,
     TransportDenied,
     TransportQueueFull,
     TooManyDocumentOperations,

@@ -85,7 +85,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         },
     };
 
-    try std.testing.expect(bootstrap_driver_port.publishStorageActivator(
+    try std.testing.expect(try bootstrap_driver_port.publishStorageActivator(
         storage_device_id,
         "ata-bootstrap",
         FakeBackend.activate,
@@ -659,7 +659,7 @@ fn realDriverEgressRequiresNetworkPolicyCapability(requester: @TypeOf(spec_suppo
         .send = Harness.send,
         .getMacAddress = Harness.mac,
     };
-    try std.testing.expect(bootstrap_driver_port.publishNetworkDevice(0xCAFE, "policy-egress", &device, false));
+    try std.testing.expect(try bootstrap_driver_port.publishNetworkDevice(0xCAFE, "policy-egress", &device, false));
     try std.testing.expect(bootstrap_driver_port.activateNetworkDevice(0xCAFE, 800));
     bootstrap_driver_port.setEgressBroker(Harness.broker);
 

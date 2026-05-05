@@ -54,6 +54,10 @@ fn buildSyscallTable() [syscall_abi.operations.len]SyscallDescriptor {
 }
 
 const syscall_table = buildSyscallTable();
+const opcode_index = buildOpcodeIndex();
+const native_opcode_base: u16 = abi.opcode(.task_create);
+const native_opcode_count: usize = std.meta.fields(abi.NativeOperation).len;
+const missing_opcode_index = std.math.maxInt(usize);
 
 pub fn dispatch(
     port: *component_port.KernelPort,
@@ -88,16 +92,25 @@ pub fn dispatch(
 }
 
 fn syscallDescriptorFromOpcode(opcode: u16) ?*const SyscallDescriptor {
-    for (&syscall_table) |*descriptor| {
-        if (abi.opcode(descriptor.operation) == opcode) {
-            return descriptor;
-        }
-    }
-    return null;
+    if (opcode < native_opcode_base) return null;
+    const offset = opcode - native_opcode_base;
+    if (offset >= native_opcode_count) return null;
+    const table_index = opcode_index[offset];
+    if (table_index == missing_opcode_index) return null;
+    return &syscall_table[table_index];
 }
 
 fn syscallDescriptorFor(operation: abi.NativeOperation) ?*const SyscallDescriptor {
     return syscallDescriptorFromOpcode(abi.opcode(operation));
+}
+
+fn buildOpcodeIndex() [native_opcode_count]usize {
+    var index = [_]usize{missing_opcode_index} ** native_opcode_count;
+    for (syscall_table, 0..) |descriptor, table_index| {
+        const offset = abi.opcode(descriptor.operation) - native_opcode_base;
+        index[offset] = table_index;
+    }
+    return index;
 }
 
 test "syscall descriptor table covers every native operation with ABI metadata" {

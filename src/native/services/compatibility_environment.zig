@@ -3,7 +3,6 @@ const fixed_table = @import("../core/fixed_table.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
-const copyText = native_util.copyText;
 
 pub const MAX_ENVIRONMENTS: usize = 8;
 pub const MAX_PORTALS_PER_ENVIRONMENT: usize = 8;
@@ -99,6 +98,8 @@ pub const Error = error{
     HiddenEnvironmentForbidden,
     IsolationRequired,
     InvalidPortalCapability,
+    LabelTooLong,
+    SignerTooLong,
 };
 
 const EnvironmentSlot = struct {
@@ -141,8 +142,8 @@ pub const Manager = struct {
             .portal_count = 0,
             .portals = [_]PortalGrant{emptyPortal()} ** MAX_PORTALS_PER_ENVIRONMENT,
         };
-        slot.environment.label_len = copyText(slot.environment.label[0..], request.label);
-        slot.environment.signer_len = copyText(slot.environment.signer[0..], request.bundle.signature.signer);
+        slot.environment.label_len = native_util.copyTextExact(slot.environment.label[0..], request.label) catch return error.LabelTooLong;
+        slot.environment.signer_len = native_util.copyTextExact(slot.environment.signer[0..], request.bundle.signature.signer) catch return error.SignerTooLong;
         return &slot.environment;
     }
 

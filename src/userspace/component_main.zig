@@ -16,6 +16,10 @@ export fn _start() callconv(.naked) noreturn {
     asm volatile (runtime.startAsm(build_options.heartbeat_increment));
 }
 
+export fn zigos_userspace_contract_main() callconv(.c) noreturn {
+    runtime.zigos_userspace_contract_main();
+}
+
 fn initDescriptor() Descriptor {
     return userspace_descriptor.initComptime(.{
         .component_class = build_options.component_class,

@@ -89,7 +89,6 @@ const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(r
     root.storage_volume
 else
     @import("../storage/storage_volume.zig");
-const copyText = native_util.copyText;
 
 pub const NetworkDevice = link_port.NetworkDevice;
 pub const EgressRequest = if (builtin.target.os.tag == .freestanding) link_port.EgressRequest else link_port.StubEgressRequest;
@@ -102,6 +101,10 @@ pub const StoragePublicationKind = enum(u8) {
     backend,
     activator,
     ata_bootstrap_bridge,
+};
+
+pub const Error = error{
+    PublisherTooLong,
 };
 
 pub const NetworkPublication = struct {
@@ -151,10 +154,10 @@ pub fn publishNetworkDevice(
     publisher: []const u8,
     network_device: *const link_port.NetworkDevice,
     kernel_bootstrap: bool,
-) bool {
+) Error!bool {
     if (kernel_bootstrap) return false;
     if (!canPublishPublication(NetworkPublication, published_network, device_id)) return false;
-    var publication = initPublication(NetworkPublication, device_id, publisher, kernel_bootstrap);
+    var publication = try initPublication(NetworkPublication, device_id, publisher, kernel_bootstrap);
     publication.network_device = network_device;
     published_network = publication;
     return true;
@@ -165,10 +168,10 @@ pub fn publishNetworkActivator(
     publisher: []const u8,
     activator: NetworkActivator,
     kernel_bootstrap: bool,
-) bool {
+) Error!bool {
     if (kernel_bootstrap) return false;
     if (!canPublishPublication(NetworkPublication, published_network, device_id)) return false;
-    var publication = initPublication(NetworkPublication, device_id, publisher, kernel_bootstrap);
+    var publication = try initPublication(NetworkPublication, device_id, publisher, kernel_bootstrap);
     publication.activator = activator;
     published_network = publication;
     return true;
@@ -179,10 +182,10 @@ pub fn publishStorageBackend(
     publisher: []const u8,
     backend: storage_volume.Backend,
     kernel_bootstrap: bool,
-) bool {
+) Error!bool {
     if (kernel_bootstrap) return false;
     if (!canPublishPublication(StoragePublication, published_storage, device_id)) return false;
-    var publication = initPublication(StoragePublication, device_id, publisher, kernel_bootstrap);
+    var publication = try initPublication(StoragePublication, device_id, publisher, kernel_bootstrap);
     publication.backend = backend;
     publication.kind = .backend;
     published_storage = publication;
@@ -194,10 +197,10 @@ pub fn publishStorageActivator(
     publisher: []const u8,
     activator: StorageActivator,
     kernel_bootstrap: bool,
-) bool {
+) Error!bool {
     if (kernel_bootstrap) return false;
     if (!canPublishPublication(StoragePublication, published_storage, device_id)) return false;
-    var publication = initPublication(StoragePublication, device_id, publisher, kernel_bootstrap);
+    var publication = try initPublication(StoragePublication, device_id, publisher, kernel_bootstrap);
     publication.activator = activator;
     publication.kind = .activator;
     published_storage = publication;
@@ -208,16 +211,16 @@ pub fn publishStorageAtaBootstrap(
     device_id: u64,
     publisher: []const u8,
     kernel_bootstrap: bool,
-) bool {
+) Error!bool {
     if (kernel_bootstrap) return false;
     if (!canPublishPublication(StoragePublication, published_storage, device_id)) return false;
-    var publication = initPublication(StoragePublication, device_id, publisher, kernel_bootstrap);
+    var publication = try initPublication(StoragePublication, device_id, publisher, kernel_bootstrap);
     publication.kind = .ata_bootstrap_bridge;
     published_storage = publication;
     return true;
 }
 
-pub fn claimStorageAtaBootstrapInventory(driver: *const driver_service.DriverRecord, publisher: []const u8) bool {
+pub fn claimStorageAtaBootstrapInventory(driver: *const driver_service.DriverRecord, publisher: []const u8) Error!bool {
     if (driver.device_class != .storage_controller) return false;
     if (driver.bootstrap_transport != .kernel_published_data_plane) return false;
 
@@ -361,12 +364,12 @@ fn publicationForDeactivation(comptime T: type, publication: *?T, service_id: u6
     return null;
 }
 
-fn initPublication(comptime T: type, device_id: u64, publisher: []const u8, kernel_bootstrap: bool) T {
+fn initPublication(comptime T: type, device_id: u64, publisher: []const u8, kernel_bootstrap: bool) Error!T {
     var publication = T{
         .device_id = device_id,
         .kernel_bootstrap = kernel_bootstrap,
     };
-    publication.publisher_len = copyText(publication.publisher[0..], publisher);
+    publication.publisher_len = native_util.copyTextExact(publication.publisher[0..], publisher) catch return error.PublisherTooLong;
     return publication;
 }
 
@@ -403,7 +406,7 @@ test "driver-backed network tx fails closed without capability-backed egress dec
         .send = Harness.send,
         .getMacAddress = Harness.mac,
     };
-    try std.testing.expect(publishNetworkDevice(7001, "test-net", &device, false));
+    try std.testing.expect(try publishNetworkDevice(7001, "test-net", &device, false));
     try std.testing.expect(activateNetworkDevice(7001, 9));
 
     const frame_with_raw_destination = "GET / HTTP/1.1\r\nHost: relay.zigos.dev\r\nX-IP: 203.0.113.7\r\n\r\n";
@@ -453,7 +456,7 @@ test "adversarial raw IP or domain knowledge cannot substitute for egress capabi
         .send = Harness.send,
         .getMacAddress = Harness.mac,
     };
-    try std.testing.expect(publishNetworkDevice(7002, "test-net", &device, false));
+    try std.testing.expect(try publishNetworkDevice(7002, "test-net", &device, false));
     try std.testing.expect(activateNetworkDevice(7002, 10));
     setEgressBroker(Harness.adversarialBroker);
 
@@ -492,8 +495,8 @@ test "kernel bootstrap cannot publish storage data-plane transports directly" {
         .write = Backend.write,
     };
 
-    try std.testing.expect(!publishStorageBackend(0x1F001, "kernel-storage", backend, true));
-    try std.testing.expect(!publishStorageActivator(0x1F001, "kernel-storage", Backend.activate, true));
-    try std.testing.expect(!publishStorageAtaBootstrap(0x1F001, "kernel-storage", true));
+    try std.testing.expect(!(try publishStorageBackend(0x1F001, "kernel-storage", backend, true)));
+    try std.testing.expect(!(try publishStorageActivator(0x1F001, "kernel-storage", Backend.activate, true)));
+    try std.testing.expect(!(try publishStorageAtaBootstrap(0x1F001, "kernel-storage", true)));
     try std.testing.expect(storagePublication() == null);
 }

@@ -8,6 +8,7 @@ const endpoint = @import("../kernel_api/endpoint.zig");
 const native_kernel = @import("../kernel_api/native_kernel.zig");
 const principal = @import("../core/principal.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
+const userspace_bootstrap_mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -22,8 +23,6 @@ else
     };
 
 const MMU_PROOF_BUNDLE_ID = "zigos.proof.mmu-isolation";
-const FOREIGN_SHARED_MEMORY_PROBE_ADDR: u32 = 0x7000_0000;
-const PROOF_SYSCALL_POINTER_DENIED_PULSE: u16 = 0x41;
 
 var reboot_proof_checkpoint_store: task_runtime_service.CheckpointStore = .{};
 var reboot_proof_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
@@ -69,14 +68,14 @@ pub fn runFreestandingAndPrint(
             scheduler.executor.observedUserCounterStagePulse(
                 launched.address_space_id,
                 .syscall_ready,
-                PROOF_SYSCALL_POINTER_DENIED_PULSE,
+                userspace_bootstrap_mailbox.PROOF_SYSCALL_POINTER_DENIED_PULSE,
             ))
         {
             common.printBootMarker(boot_markers.runtime_proof_syscall_pointer_isolation);
             saw_syscall_pointer_denial = true;
         }
 
-        if (scheduler.executor.consumeUserPageFault(launched.id, FOREIGN_SHARED_MEMORY_PROBE_ADDR)) {
+        if (scheduler.executor.consumeUserPageFault(launched.id, userspace_bootstrap_mailbox.FOREIGN_SHARED_MEMORY_PROBE_ADDR)) {
             if (!saw_syscall_pointer_denial) return false;
             common.printBootMarker(boot_markers.runtime_proof_mmu_user_fault);
             return true;

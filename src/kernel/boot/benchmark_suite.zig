@@ -386,7 +386,7 @@ fn prepareFileBridgeFixture() void {
         900,
         file_bridge_context.expected_version_id,
         .document,
-    );
+    ) catch unreachable;
     file_bridge_context.version_present = true;
     const authority = file_bridge_context.capability_table.mintBootRoot(.{
         .holder = app(1),

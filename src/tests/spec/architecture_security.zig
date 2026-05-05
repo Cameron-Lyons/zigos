@@ -66,6 +66,7 @@ pub fn designGoalsKeepInstallsDeclarativeAndAuthorityExplicit() !void {
     bundle.signature = try userspace_manifest_signing.signBundle(bundle);
 
     var packages = package_service.Service.init();
+    try spec_support.trustPackagePublisher(&packages, try userspace_manifest_signing.identityForPublisher(bundle.publisher), bundle.publisher);
     _ = try packages.install(.{
         .bundle = bundle,
         .source_identity = "store:zigos",
@@ -266,7 +267,7 @@ pub fn kernelRemainsTypedAndIsolatesLegacy() !void {
     try std.testing.expect(abi.policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(abi.reviewOpcode(.review_bundle) >= 0x240);
     try std.testing.expectEqual(@as(u16, 1), abi.ABI_VERSION);
-    try registry.register(55, 7, 101, .{
+    try registry.register(55, 7, 101, 201, .{
         .name = "zigos.service.storage",
         .version_major = 1,
         .version_minor = 2,
@@ -710,6 +711,7 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         123,
         launched.task_id,
         service_endpoint.endpoint.endpoint_id,
+        service_endpoint.capability_id,
         .{ .name = "zigos.object.spec-storage" },
         kernel_descriptors.serviceBindingFlags(launched_record),
     );

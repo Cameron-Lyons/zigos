@@ -5,7 +5,6 @@ const object_store = @import("object_store.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const workspace = @import("workspace.zig");
-const copyText = native_util.copyText;
 
 pub const AccessMode = enum(u8) {
     read,
@@ -39,6 +38,7 @@ pub const Error = error{
     CapabilityNotFound,
     CapabilityRevoked,
     ObjectMissing,
+    PathTooLong,
     PathNotFound,
     PermissionDenied,
     WorkspaceScopeViolation,
@@ -124,7 +124,7 @@ pub const Bridge = struct {
             .path_len = 0,
             .path = [_]u8{0} ** 96,
         };
-        view.path_len = copyText(&view.path, normalized_path);
+        view.path_len = native_util.copyTextExact(&view.path, normalized_path) catch return error.PathTooLong;
         return view;
     }
 };

@@ -170,11 +170,16 @@ fn activateDrivers(
     const storage_inventory = device_inventory.recordForClass(.storage_controller);
     if (bootstrap_driver_port.storagePublication() == null and
         storage_inventory.detected and
-        storage_inventory.source == .ata_bootstrap and
-        !bootstrap_driver_port.claimStorageAtaBootstrapInventory(storage_driver, "zigos.system.storage-driver"))
+        storage_inventory.source == .ata_bootstrap)
     {
-        _ = env.supervisor.recordCrash(state.services.storage_service.id, 54, bootFailureCode(error.InvalidBootstrapTransport));
-        return false;
+        const claimed_storage_bootstrap = bootstrap_driver_port.claimStorageAtaBootstrapInventory(
+            storage_driver,
+            "zigos.system.storage-driver",
+        ) catch false;
+        if (!claimed_storage_bootstrap) {
+            _ = env.supervisor.recordCrash(state.services.storage_service.id, 54, bootFailureCode(error.InvalidBootstrapTransport));
+            return false;
+        }
     }
     _ = service_bootstrap.attachDriver(
         kernel_port,
@@ -319,6 +324,7 @@ fn connectClient(
         _ = kernel_port.endpointConnect(.{
             .header = component_port.makeHeader(.endpoint_connect, connect_request_id, service_client_task.id),
             .endpoint_capability_id = client_endpoint.capability_id,
+            .peer_endpoint_capability_id = registry_connection.endpoint_capability_id,
             .peer_endpoint_id = binding.endpoint_id,
         }, 57 + @as(u64, @intCast(index))) catch |err| {
             _ = env.supervisor.recordCrash(serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), bootFailureCode(err));
@@ -415,10 +421,5 @@ fn serviceId(state: *const support.BootstrapState, class: contract.ServiceClass)
 }
 
 fn bootFailureCode(err: anyerror) u32 {
-    var hash: u64 = 14695981039346656037;
-    for (@errorName(err)) |byte| {
-        hash ^= byte;
-        hash *%= 1099511628211;
-    }
-    return @truncate(hash);
+    return @truncate(native_util.fnv1a64(@errorName(err)));
 }

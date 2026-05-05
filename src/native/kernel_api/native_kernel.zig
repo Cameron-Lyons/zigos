@@ -133,6 +133,7 @@ pub const Kernel = struct {
                 .endpoint_send = true,
                 .endpoint_recv = true,
                 .capability_query = true,
+                .ipc_peer = true,
             } },
             .scope = .{
                 .task_id = owner_task_id,
@@ -160,6 +161,7 @@ pub const Kernel = struct {
     pub fn endpointConnect(
         self: *Kernel,
         context: KernelCallContext,
+        peer_endpoint_capability_id: u64,
         peer_endpoint_id: u64,
         now_ticks: u64,
     ) Error!abi.EndpointDescriptor {
@@ -170,6 +172,12 @@ pub const Kernel = struct {
             capability.CapabilityRights.single(.endpoint_connect),
             .endpoint,
         );
+        const peer_capability = try self.requirePeerEndpointCapability(
+            peer_endpoint_capability_id,
+            peer_endpoint_id,
+            now_ticks,
+        );
+        if (endpoint_capability.scope.local_only != peer_capability.scope.local_only) return error.ScopeViolation;
         try self.endpoint_table.connect(endpoint_capability.target.id, peer_endpoint_id);
         return self.endpoint_table.descriptor(endpoint_capability.target.id);
     }
@@ -391,8 +399,8 @@ pub const Kernel = struct {
     }
 
     pub fn capabilityRevoke(self: *Kernel, context: KernelCallContext, capability_id: u64, now_ticks: u64) Error!void {
-        _ = try self.requireOperationCapability(context, .capability_revoke, now_ticks, capability.CapabilityRights.single(.capability_revoke));
         const revoked = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
+        _ = try self.requireCapabilityOperationAuthority(context, .capability_revoke, now_ticks, revoked, .capability_revoke);
         try self.capability_table.revokeTargetAuthority(capability_id);
         if (revoked.scope.task_id) |task_id| {
             _ = try self.runtime.revokeCapability(task_id, capability_id);
@@ -405,8 +413,8 @@ pub const Kernel = struct {
         capability_id: u64,
         now_ticks: u64,
     ) Error!abi.CapabilityDescriptor {
-        _ = try self.requireOperationCapability(context, .capability_query, now_ticks, capability.CapabilityRights.single(.capability_query));
         const queried = self.capability_table.query(capability_id) orelse return error.CapabilityNotFound;
+        _ = try self.requireCapabilityOperationAuthority(context, .capability_query, now_ticks, queried, .capability_query);
         return capabilityDescriptor(queried);
     }
 
@@ -697,6 +705,42 @@ pub const Kernel = struct {
         return owned;
     }
 
+    fn requirePeerEndpointCapability(
+        self: *Kernel,
+        peer_endpoint_capability_id: u64,
+        peer_endpoint_id: u64,
+        now_ticks: u64,
+    ) Error!capability.Capability {
+        const peer = try self.requireTargetedCapability(
+            peer_endpoint_capability_id,
+            now_ticks,
+            .{ .endpoint = .{ .ipc_peer = true } },
+            .endpoint,
+        );
+        if (peer.target.id != peer_endpoint_id) return error.InvalidCapabilityTarget;
+        return peer;
+    }
+
+    fn requireCapabilityOperationAuthority(
+        self: *Kernel,
+        context: KernelCallContext,
+        expected_operation: abi.NativeOperation,
+        now_ticks: u64,
+        target_capability: capability.Capability,
+        right: capability.CapabilityRight,
+    ) Error!capability.Capability {
+        try self.requireCallSubject(context, expected_operation, now_ticks);
+        const authority = try self.requireTargetedCapability(
+            context.presented_capability_id,
+            now_ticks,
+            capability.CapabilityRights.single(right).retarget(target_capability.target.kind),
+            target_capability.target.kind,
+        );
+        if (!authority.target.eql(target_capability.target)) return error.InvalidCapabilityTarget;
+        try validateContextTarget(context.target, target_capability.target);
+        return authority;
+    }
+
     fn requireCallSubject(
         self: *Kernel,
         context: KernelCallContext,
@@ -884,7 +928,7 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     const app_endpoint = try kernel.endpointCreate(testContext(.endpoint_create, authority_capability.id, .{ .task = app_task_desc.task_id }), app_task_desc.task_id, "app.endpoint", .{
         .local_only = true,
     }, 8);
-    _ = try kernel.endpointConnect(testContext(.endpoint_connect, app_endpoint.capability_id, .none), service_endpoint.endpoint.endpoint_id, 8);
+    _ = try kernel.endpointConnect(testContext(.endpoint_connect, app_endpoint.capability_id, .none), service_endpoint.capability_id, service_endpoint.endpoint.endpoint_id, 8);
 
     const shared_result = try kernel.sharedMemoryCreate(testContext(.shared_memory_create, authority_capability.id, .{ .task = app_task_desc.task_id }), app_task_desc.task_id, 4096, 9);
     try kernel.endpointSend(testContext(.endpoint_send, app_endpoint.capability_id, .none), 11, "sync-open", shared_result.capability_id, false, 9);
@@ -1080,6 +1124,7 @@ test "capability mint query revoke and task termination are exposed by the nativ
         .rights = .{ .object = .{
             .object_read = true,
             .capability_query = true,
+            .capability_revoke = true,
         } },
         .scope = .{ .task_id = target_task.id, .local_only = true },
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100, .renewable = false },
@@ -1090,8 +1135,10 @@ test "capability mint query revoke and task termination are exposed by the nativ
     unowned_query.caller_task_id = target_task.id;
     try std.testing.expectError(error.CapabilityNotFound, kernel.capabilityQuery(unowned_query, minted.capability_id, 10));
 
-    _ = try kernel.capabilityQuery(testContext(.capability_query, admin_capability.id, .{ .capability = minted.capability_id }), minted.capability_id, 10);
-    try kernel.capabilityRevoke(testContext(.capability_revoke, admin_capability.id, .{ .capability = minted.capability_id }), minted.capability_id, 10);
+    try std.testing.expectError(error.InvalidCapabilityTarget, kernel.capabilityQuery(testContext(.capability_query, admin_capability.id, .{ .capability = minted.capability_id }), minted.capability_id, 10));
+    _ = try kernel.capabilityQuery(testContext(.capability_query, minted.capability_id, .{ .capability = minted.capability_id }), minted.capability_id, 10);
+    try std.testing.expectError(error.InvalidCapabilityTarget, kernel.capabilityRevoke(testContext(.capability_revoke, admin_capability.id, .{ .capability = minted.capability_id }), minted.capability_id, 10));
+    try kernel.capabilityRevoke(testContext(.capability_revoke, minted.capability_id, .{ .capability = minted.capability_id }), minted.capability_id, 10);
     try std.testing.expect(capabilities.query(minted.capability_id) == null);
     try std.testing.expect(try kernel.taskTerminate(testContext(.task_terminate, task_capability.id, .none), 11));
 }

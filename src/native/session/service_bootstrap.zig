@@ -165,6 +165,7 @@ pub fn launchBundleService(
         service_id,
         service_task_id,
         endpoint.endpoint.endpoint_id,
+        endpoint.capability_id,
         interface,
         kernel_descriptors.serviceBindingFlags(service_record),
     );
@@ -369,6 +370,7 @@ test "contractsReady requires every ordered service contract" {
             10 + @as(u64, @intCast(index)),
             20 + @as(u64, @intCast(index)),
             30 + @as(u64, @intCast(index)),
+            40 + @as(u64, @intCast(index)),
             entry.interface,
             0,
         );
