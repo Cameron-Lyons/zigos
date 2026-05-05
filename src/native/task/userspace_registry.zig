@@ -1,7 +1,10 @@
 const std = @import("std");
 const contract = @import("../session/contract.zig");
+const id_index = @import("../core/id_index.zig");
 const manifest = @import("../policy/manifest.zig");
+const native_util = @import("../core/util.zig");
 const service_catalog = @import("../session/service_catalog.zig");
+const userspace_mailbox = @import("userspace_bootstrap_mailbox.zig");
 
 pub const FLAG_SYSTEM_BUNDLE: u32 = 1 << 0;
 pub const FLAG_OWNS_UI_SURFACE: u32 = 1 << 1;
@@ -45,6 +48,7 @@ pub const ImageSpec = struct {
     heartbeat_increment: u32,
     contract_flags: u32 = 0,
     service_class: ?contract.ServiceClass = null,
+    service_kind: userspace_mailbox.ServiceKind = .generic,
     signed: bool = true,
 };
 
@@ -54,6 +58,7 @@ fn serviceImageSpec(class: contract.ServiceClass, component_class: ComponentClas
     return .{
         .bundle_id = image.bundle_id,
         .artifact_name = image.artifact_name,
+        .source_path = serviceSourcePath(class),
         .display_name = image.display_name,
         .publisher = image.publisher,
         .label = image.label,
@@ -65,6 +70,30 @@ fn serviceImageSpec(class: contract.ServiceClass, component_class: ComponentClas
         .heartbeat_increment = image.heartbeat_increment,
         .contract_flags = image.contract_flags,
         .service_class = class,
+        .service_kind = serviceKindForClass(class),
+    };
+}
+
+fn serviceSourcePath(class: contract.ServiceClass) []const u8 {
+    return switch (class) {
+        .network_stack,
+        .storage_object,
+        .package_install_update,
+        .compositor_ui_session,
+        .sync_replication,
+        => "src/userspace/service_main.zig",
+        else => "src/userspace/component_main.zig",
+    };
+}
+
+fn serviceKindForClass(class: contract.ServiceClass) userspace_mailbox.ServiceKind {
+    return switch (class) {
+        .network_stack => .network,
+        .storage_object => .storage,
+        .package_install_update => .package,
+        .compositor_ui_session => .compositor,
+        .sync_replication => .sync,
+        else => .generic,
     };
 }
 
@@ -219,13 +248,23 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "zigos.proof.mmu-isolation",
         .components = &.{.{ .id = "mmu-isolation-proof", .entry = "zigos.proof.mmu-isolation" }},
         .component_class = .app_component,
-        .role_tag = 0xA116,
+        .role_tag = userspace_mailbox.MMU_ISOLATION_PROOF_ROLE_TAG,
         .heartbeat_increment = 22,
         .contract_flags = FLAG_MMU_PROOF_PROBE,
     },
 };
 
+const BUNDLE_INDEX_CAPACITY: usize = boot_image_specs.len * 2;
+const bundle_index = buildBundleIndex();
+
 pub fn find(bundle_id: []const u8) ?*const ImageSpec {
+    const key = bundleIndexKey(bundle_id);
+    if (id_index.lookup(BUNDLE_INDEX_CAPACITY, &bundle_index, key)) |spec_index| {
+        if (spec_index < boot_image_specs.len and std.mem.eql(u8, boot_image_specs[spec_index].bundle_id, bundle_id)) {
+            return &boot_image_specs[spec_index];
+        }
+    }
+
     for (&boot_image_specs) |*spec| {
         if (std.mem.eql(u8, spec.bundle_id, bundle_id)) return spec;
     }
@@ -253,11 +292,24 @@ pub fn contractForSpec(spec: *const ImageSpec) ContractSpec {
     };
 }
 
+pub fn bundleIndexKey(bundle_id: []const u8) u64 {
+    const hash = native_util.fnv1a64(bundle_id);
+    return if (hash == 0) 1 else hash;
+}
+
+fn buildBundleIndex() [BUNDLE_INDEX_CAPACITY]id_index.Slot {
+    @setEvalBranchQuota(10_000);
+    var index = id_index.emptyTable(BUNDLE_INDEX_CAPACITY);
+    for (boot_image_specs, 0..) |spec, spec_index| {
+        id_index.insert(BUNDLE_INDEX_CAPACITY, &index, bundleIndexKey(spec.bundle_id), spec_index, "boot bundle id index covers userspace registry");
+    }
+    return index;
+}
+
 test "userspace registry definitions stay unique and keep typed contract metadata attached" {
     for (boot_image_specs, 0..) |spec, index| {
         try std.testing.expect(spec.role_tag != 0);
         try std.testing.expect(spec.heartbeat_increment != 0);
-        try std.testing.expect(std.mem.eql(u8, spec.source_path, "src/userspace/component_main.zig"));
 
         var peer_index: usize = 0;
         while (peer_index < index) : (peer_index += 1) {
@@ -269,10 +321,24 @@ test "userspace registry definitions stay unique and keep typed contract metadat
     try std.testing.expect(findByServiceClass(.storage_object) != null);
 }
 
+test "core platform services use the parameterized userspace service entrypoint" {
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.storage_object).?.source_path);
+    try std.testing.expectEqual(userspace_mailbox.ServiceKind.storage, findByServiceClass(.storage_object).?.service_kind);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.sync_replication).?.source_path);
+    try std.testing.expectEqual(userspace_mailbox.ServiceKind.sync, findByServiceClass(.sync_replication).?.service_kind);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.network_stack).?.source_path);
+    try std.testing.expectEqual(userspace_mailbox.ServiceKind.network, findByServiceClass(.network_stack).?.service_kind);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.package_install_update).?.source_path);
+    try std.testing.expectEqual(userspace_mailbox.ServiceKind.package, findByServiceClass(.package_install_update).?.service_kind);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.compositor_ui_session).?.source_path);
+    try std.testing.expectEqual(userspace_mailbox.ServiceKind.compositor, findByServiceClass(.compositor_ui_session).?.service_kind);
+    try std.testing.expectEqualStrings("src/userspace/component_main.zig", findByServiceClass(.policy_mediation).?.source_path);
+}
+
 test "userspace registry keeps the freestanding MMU isolation proof in the boot catalog" {
     const proof = find("zigos.proof.mmu-isolation") orelse return error.MissingMmuIsolationProof;
 
-    try std.testing.expectEqual(@as(u32, 0xA116), proof.role_tag);
+    try std.testing.expectEqual(userspace_mailbox.MMU_ISOLATION_PROOF_ROLE_TAG, proof.role_tag);
     try std.testing.expect((proof.contract_flags & FLAG_MMU_PROOF_PROBE) != 0);
     try std.testing.expectEqual(ComponentClass.app_component, proof.component_class);
     try std.testing.expectEqualStrings("userspace-mmu-isolation-proof.elf", proof.artifact_name);

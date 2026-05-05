@@ -1,4 +1,5 @@
 const std = @import("std");
+const binary_cursor = @import("../core/binary_cursor.zig");
 const fixed_table = @import("../core/fixed_table.zig");
 const id_index = @import("../core/id_index.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -6,7 +7,6 @@ const native_util = @import("../core/util.zig");
 const object_store = @import("object_store.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
-const copyText = native_util.copyText;
 
 pub const MAX_WORKSPACES: usize = 8;
 pub const MAX_WORKSPACE_ENTRIES: usize = 96;
@@ -25,13 +25,13 @@ pub const Entry = struct {
     version_id: u64 = 0,
     object_type: object_store.ObjectType = .blob,
 
-    pub fn init(path: []const u8, object_id: u64, version_id: u64, object_type: object_store.ObjectType) Entry {
+    pub fn init(path: []const u8, object_id: u64, version_id: u64, object_type: object_store.ObjectType) Error!Entry {
         var entry = Entry{
             .object_id = object_id,
             .version_id = version_id,
             .object_type = object_type,
         };
-        entry.path_len = copyText(&entry.path, path);
+        entry.path_len = native_util.copyTextExact(&entry.path, path) catch return error.PathTooLong;
         return entry;
     }
 
@@ -172,6 +172,9 @@ pub const Error = error{
     SnapshotTableFull,
     TransactionAlreadyOpen,
     InvalidSignature,
+    LabelTooLong,
+    SignatureFormatTooLong,
+    SignatureSignerTooLong,
     UnsignedExport,
     UnsignedSnapshot,
     WorkspaceNotFound,
@@ -294,7 +297,7 @@ pub const Directory = struct {
         slot.workspace = zeroWorkspace();
         slot.workspace.id = self.nextWorkspaceId();
         slot.workspace.owner = request.owner;
-        slot.workspace.label_len = copyText(&slot.workspace.label, request.label);
+        slot.workspace.label_len = native_util.copyTextExact(&slot.workspace.label, request.label) catch return error.LabelTooLong;
         indexInsert(WORKSPACE_INDEX_CAPACITY, &self.workspace_index_slots, slot.workspace.id, slot_index);
         self.markWorkspaceDirty(slot.workspace.id);
         return &slot.workspace;
@@ -381,7 +384,7 @@ pub const Directory = struct {
             if (isDeleteTombstone(workspace.staged_entries[index])) {
                 workspace.staged_effective_entry_count += 1;
             }
-            workspace.staged_entries[index] = Entry.init(path, object_id, version_id, object_type);
+            workspace.staged_entries[index] = try Entry.init(path, object_id, version_id, object_type);
             return;
         }
         if (findWorkspaceEntryIndex(workspace, path) == null) {
@@ -390,7 +393,7 @@ pub const Directory = struct {
         }
         if (workspace.staged_entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
 
-        workspace.staged_entries[workspace.staged_entry_count] = Entry.init(path, object_id, version_id, object_type);
+        workspace.staged_entries[workspace.staged_entry_count] = try Entry.init(path, object_id, version_id, object_type);
         entryIndexInsert(
             &workspace.staged_entry_index_slots,
             workspace.staged_entries[workspace.staged_entry_count].pathSlice(),
@@ -400,6 +403,7 @@ pub const Directory = struct {
     }
 
     pub fn stageDelete(self: *Directory, workspace_id: u64, path: []const u8) Error!void {
+        if (path.len > MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
         if (!workspace.transaction_open) return error.NoActiveTransaction;
         const base_exists = findWorkspaceEntryIndex(workspace, path) != null;
@@ -409,7 +413,7 @@ pub const Directory = struct {
 
             workspace.staged_effective_entry_count -= 1;
             if (base_exists) {
-                workspace.staged_entries[index] = deleteTombstone(path);
+                workspace.staged_entries[index] = try deleteTombstone(path);
             } else {
                 removeEntry(&workspace.staged_entries, &workspace.staged_entry_count, index);
                 rebuildStagedEntryIndex(workspace);
@@ -420,7 +424,7 @@ pub const Directory = struct {
         if (!base_exists) return error.EntryNotFound;
         if (workspace.staged_entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
 
-        workspace.staged_entries[workspace.staged_entry_count] = deleteTombstone(path);
+        workspace.staged_entries[workspace.staged_entry_count] = try deleteTombstone(path);
         entryIndexInsert(
             &workspace.staged_entry_index_slots,
             workspace.staged_entries[workspace.staged_entry_count].pathSlice(),
@@ -529,7 +533,7 @@ pub const Directory = struct {
             slot.snapshot.id = self.nextSnapshotId();
             slot.snapshot.workspace_id = workspace.id;
             slot.snapshot.generation = workspace.generation;
-            slot.snapshot.label_len = copyText(&slot.snapshot.label, label);
+            slot.snapshot.label_len = native_util.copyTextExact(&slot.snapshot.label, label) catch return error.LabelTooLong;
             slot.snapshot.entry_count = workspace.entry_count;
             copyEntries(
                 slot.snapshot.entries[0..workspace.entry_count],
@@ -620,7 +624,7 @@ pub const Directory = struct {
         out.snapshot_id = snapshot_id;
         out.generation = snapshot_record.generation;
         out.entry_count = snapshot_record.entry_count;
-        out.label_len = copyText(&out.label, snapshot_record.labelSlice());
+        out.label_len = native_util.copyTextExact(&out.label, snapshot_record.labelSlice()) catch return error.LabelTooLong;
         copyEntries(out.entries[0..snapshot_record.entry_count], snapshot_record.entries[0..snapshot_record.entry_count]);
         signExportPackage(out, identity) catch return error.InvalidSignature;
     }
@@ -887,7 +891,7 @@ fn signExportPackage(package: *ExportPackage, identity: signing.SignerIdentity) 
         package.entries[0..package.entry_count],
     );
     package.signature = try signing.sign(identity, message);
-    persistExportPackageSignature(package);
+    try persistExportPackageSignature(package);
 }
 
 fn verifyExportPackage(package: *const ExportPackage) bool {
@@ -905,9 +909,9 @@ fn verifyExportPackage(package: *const ExportPackage) bool {
     return signing.verify(signature, message);
 }
 
-fn persistExportPackageSignature(package: *ExportPackage) void {
-    package.signature_format_len = copyText(&package.signature_format_storage, package.signature.format);
-    package.signature_signer_len = copyText(&package.signature_signer_storage, package.signature.signer);
+fn persistExportPackageSignature(package: *ExportPackage) Error!void {
+    package.signature_format_len = native_util.copyTextExact(&package.signature_format_storage, package.signature.format) catch return error.SignatureFormatTooLong;
+    package.signature_signer_len = native_util.copyTextExact(&package.signature_signer_storage, package.signature.signer) catch return error.SignatureSignerTooLong;
     package.signature.format = package.signature_format_storage[0..package.signature_format_len];
     package.signature.signer = package.signature_signer_storage[0..package.signature_signer_len];
 }
@@ -931,39 +935,28 @@ fn snapshotMessage(
     label: []const u8,
     entries: []const Entry,
 ) error{NoSpaceLeft}![]const u8 {
-    var used: usize = 0;
-    used = try appendFormat(
-        buffer,
-        used,
-        "{s}:{d}:{d}:{s}",
-        .{ tag, workspace_id, generation, label },
-    );
+    var writer = BinaryWriter{ .buffer = buffer };
+    try writer.writeBytes("zigos.workspace.snapshot.v2");
+    try writeLengthPrefixed(&writer, tag);
+    try writer.writeU64(workspace_id);
+    try writer.writeU32(generation);
+    try writeLengthPrefixed(&writer, label);
+    try writer.writeU16(@intCast(entries.len));
     for (entries) |entry| {
-        used = try appendFormat(
-            buffer,
-            used,
-            "\n{s}|{d}|{d}|{s}",
-            .{ entry.pathSlice(), entry.object_id, entry.version_id, objectTypeName(entry.object_type) },
-        );
+        try writeLengthPrefixed(&writer, entry.pathSlice());
+        try writer.writeU64(entry.object_id);
+        try writer.writeU64(entry.version_id);
+        try writer.writeByte(@intFromEnum(entry.object_type));
     }
-    return buffer[0..used];
+    return buffer[0..writer.offset];
 }
 
-fn objectTypeName(object_type: object_store.ObjectType) []const u8 {
-    return switch (object_type) {
-        .blob => "blob",
-        .document => "document",
-        .collection => "collection",
-        .secret => "secret",
-        .media_asset => "media_asset",
-        .model_artifact => "model_artifact",
-        .event_stream => "event_stream",
-    };
-}
+const BinaryWriter = binary_cursor.Writer(error{NoSpaceLeft}, error.NoSpaceLeft);
 
-fn appendFormat(buffer: []u8, offset: usize, comptime fmt: []const u8, args: anytype) error{NoSpaceLeft}!usize {
-    const text = std.fmt.bufPrint(buffer[offset..], fmt, args) catch return error.NoSpaceLeft;
-    return offset + text.len;
+fn writeLengthPrefixed(writer: *BinaryWriter, bytes: []const u8) error{NoSpaceLeft}!void {
+    if (bytes.len > std.math.maxInt(u16)) return error.NoSpaceLeft;
+    try writer.writeU16(@intCast(bytes.len));
+    try writer.writeBytes(bytes);
 }
 
 fn rebuildWorkspaceIndexes(workspace: *WorkspaceRecord) void {
@@ -994,7 +987,7 @@ fn findStagedEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?us
     return entryIndexLookup(&workspace.staged_entry_index_slots, workspace.staged_entries[0..workspace.staged_entry_count], path);
 }
 
-fn deleteTombstone(path: []const u8) Entry {
+fn deleteTombstone(path: []const u8) Error!Entry {
     return Entry.init(path, 0, 0, .blob);
 }
 
@@ -1208,6 +1201,25 @@ test "workspace transactions, snapshot restore, delete recovery, and signed expo
     const imported = try directory.importWorkspace(.{ .kind = .service, .serial = 9 }, "imported-notes", package, 25);
     try std.testing.expectEqualStrings("imported-notes", imported.labelSlice());
     try std.testing.expectEqual(first.version_id, (try directory.resolve(imported.id, "documents/notes.md")).version_id);
+}
+
+test "workspace paths reject overlong values instead of truncating" {
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 44 },
+        .label = "notes",
+    });
+
+    try std.testing.expectError(
+        error.PathTooLong,
+        directory.stagePut(
+            workspace.id,
+            "documents/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md",
+            10,
+            20,
+            .document,
+        ),
+    );
 }
 
 test "workspace can restore the original workspace from a signed export package" {

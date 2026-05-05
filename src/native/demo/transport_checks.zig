@@ -106,6 +106,7 @@ pub fn run(
         state.services.storage_service.id,
         storage_task_desc.task_id,
         storage_endpoint.endpoint.endpoint_id,
+        storage_endpoint.capability_id,
         support.bootstrap_storage_interface,
         kernel_descriptors.serviceBindingFlags(storage_record),
     ) catch unreachable;
@@ -122,6 +123,7 @@ pub fn run(
     _ = kernel_port.endpointConnect(.{
         .header = component_port.makeHeader(.endpoint_connect, 6, transport_probe_task.task_id),
         .endpoint_capability_id = transport_probe_endpoint.capability_id,
+        .peer_endpoint_capability_id = storage_connection.endpoint_capability_id,
         .peer_endpoint_id = storage_connection.endpoint_id,
     }, 4) catch unreachable;
     env.runtime.audit(transport_probe_task.task_id, .{
@@ -220,7 +222,7 @@ pub fn run(
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_MINT:OK");
     _ = kernel_port.capabilityQuery(.{
         .header = component_port.makeHeader(.capability_query, 14, transport_probe_task.task_id),
-        .authority_capability_id = transport_probe_authority_id,
+        .authority_capability_id = derivable_capability.capability_id,
         .capability_id = derivable_capability.capability_id,
     }, 7) catch unreachable;
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_QUERY:OK");
@@ -250,8 +252,8 @@ pub fn run(
     }) catch unreachable;
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_DERIVE:OK");
     kernel_port.capabilityRevoke(.{
-        .header = component_port.makeHeader(.capability_revoke, 16, state.session_task.id),
-        .authority_capability_id = state.policy_capability.id,
+        .header = component_port.makeHeader(.capability_revoke, 16, transport_probe_task.task_id),
+        .authority_capability_id = derivable_capability.capability_id,
         .capability_id = derivable_capability.capability_id,
     }, 7) catch unreachable;
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_REVOKE:OK");

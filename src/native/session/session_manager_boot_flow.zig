@@ -4,6 +4,7 @@ const boot_markers = @import("../../kernel/boot/markers.zig");
 const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const endpoint_mod = @import("../kernel_api/endpoint.zig");
@@ -13,6 +14,7 @@ const event_ledger = @import("../platform/event_ledger.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
 const native_kernel = @import("../kernel_api/native_kernel.zig");
 const native_service_registry = @import("../services/service_registry.zig");
+const native_util = @import("../core/util.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const principal = @import("../core/principal.zig");
 const package_service = @import("../services/package_service.zig");
@@ -239,7 +241,10 @@ pub const SessionManager = struct {
 
     pub fn boot(self: *SessionManager) void {
         const graph = self.buildProductionServiceGraph() orelse return;
-        recordProductionMeasuredBoot(self, &graph);
+        if (!recordProductionMeasuredBoot(self, &graph)) {
+            self.failBoot();
+            return;
+        }
         if (!runtime_negative_proofs.runAndPrint()) {
             self.failBoot();
             return;
@@ -279,10 +284,6 @@ pub const SessionManager = struct {
 
     pub fn buildProductionServiceGraph(self: *SessionManager) ?ServiceGraph {
         var graph = self.beginServiceGraph() orelse return null;
-        if (!verifyProductionArtifactManifest(self)) {
-            self.failBoot();
-            return null;
-        }
         const env_snapshot = graph.env;
         const state_snapshot = graph.state;
         self.service_bindings = ServiceBindings.init();
@@ -295,6 +296,10 @@ pub const SessionManager = struct {
         graph.service_bindings = self.service_bindings;
         self.bindProductionStorageService(&graph);
         self.runtime_service.checkpoint(60);
+        if (!verifyProductionArtifactManifest(self, &graph)) {
+            self.failBoot();
+            return null;
+        }
         return graph;
     }
 
@@ -320,23 +325,26 @@ pub const SessionManager = struct {
     }
 };
 
-fn verifyProductionArtifactManifest(manager: *SessionManager) bool {
+fn verifyProductionArtifactManifest(manager: *SessionManager, graph: *const ServiceGraph) bool {
     const manifest_signer = signing.SignerIdentity{
         .label = "zigos-artifact-manifest",
         .seed = [_]u8{0xB7} ** 32,
     };
-    const artifact_manifest = buildProductionArtifactManifest(manager) catch return false;
+    const artifact_manifest = buildProductionArtifactManifest(manager, graph) catch return false;
     const signed_manifest = measured_boot.signArtifactManifest(artifact_manifest, manifest_signer) catch return false;
     if (!measured_boot.verifySignedArtifactManifest(&signed_manifest)) return false;
     common.printBootMarker(boot_markers.platform_artifact_manifest_verified);
     return true;
 }
 
-fn buildProductionArtifactManifest(manager: *SessionManager) !measured_boot.ArtifactManifest {
+fn buildProductionArtifactManifest(manager: *SessionManager, graph: *const ServiceGraph) !measured_boot.ArtifactManifest {
     var manifest_record = measured_boot.ArtifactManifest.init(1);
-    try manifest_record.add(.kernel, "bootloader+kernel-zigos-native", "src/boot/boot64.S:zig-out/bin/kernel-zigos-native.elf");
-    try manifest_record.add(.base_image, "production-native-base", "native-store:production-service-graph");
-    try manifest_record.add(.policy, "production-policy-set", "zero-root:capability-ipc:local-first");
+    const kernel_digest = productionKernelMeasurementDigest();
+    const base_manifest_digest = productionBaseImageManifestDigest(manager, graph);
+    const policy_digest = productionPolicyDigest(manager, graph);
+    try manifest_record.add(.kernel, "bootloader+kernel-zigos-native", &kernel_digest);
+    try manifest_record.add(.base_image, "production-native-base", &base_manifest_digest);
+    try manifest_record.add(.policy, "production-policy-set", &policy_digest);
 
     const critical_service_classes = [_]service_catalog.ServiceClass{
         .policy_mediation,
@@ -345,17 +353,157 @@ fn buildProductionArtifactManifest(manager: *SessionManager) !measured_boot.Arti
         .network_stack,
     };
     for (critical_service_classes) |class| {
-        const bundle_id = service_catalog.bundleIdForServiceClass(class) orelse return error.MissingBootstrapLaunch;
+        const service = manager.supervisor.findByClass(class) orelse return error.MissingBootstrapLaunch;
+        const bundle_id = service_catalog.bundleIdForServiceClass(service.class) orelse return error.MissingBootstrapLaunch;
         const image = manager.userspace_catalog.findByBundleId(bundle_id) orelse return error.MissingUserspaceImage;
-        try manifest_record.addUserspaceServiceImage(image);
+        try manifest_record.addCriticalServiceImage(service, image);
     }
 
-    try manifest_record.add(
-        .driver_set,
-        "production-driver-set",
-        "network=userspace-control-only;storage=userspace-brokered-ata;graphics=control-only;audio=control-only",
-    );
+    try manifest_record.addDriverSet("production-driver-set", &manager.driver_directory);
     return manifest_record;
+}
+
+fn productionKernelMeasurementDigest() [32]u8 {
+    var hasher = crypto_hash.init();
+    const bootloader_digest = bootloaderProvidedMeasurementDigest();
+    const kernel_digest = kernelImageDigest();
+    crypto_hash.updateBytes(&hasher, "bootloader-measurement-digest", &bootloader_digest);
+    crypto_hash.updateBytes(&hasher, "kernel-image-digest", &kernel_digest);
+    return crypto_hash.finalize(&hasher);
+}
+
+fn bootloaderProvidedMeasurementDigest() [32]u8 {
+    if (builtin.target.os.tag == .freestanding) {
+        const root = @import("root");
+        if (@hasDecl(root, "bootloaderMeasurementDigest")) {
+            return root.bootloaderMeasurementDigest();
+        }
+    }
+    return syntheticBootloaderMeasurementDigest();
+}
+
+fn kernelImageDigest() [32]u8 {
+    if (builtin.target.os.tag == .freestanding) {
+        const root = @import("root");
+        if (@hasDecl(root, "kernelImageDigest")) {
+            return root.kernelImageDigest();
+        }
+    }
+    return syntheticKernelImageDigest();
+}
+
+fn syntheticBootloaderMeasurementDigest() [32]u8 {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "measurement-source", "host-synthetic-bootloader-measurement");
+    crypto_hash.updateBytes(&hasher, "bootloader", "multiboot-v1");
+    crypto_hash.updateBytes(&hasher, "entry", "src/boot/boot64.S");
+    return crypto_hash.finalize(&hasher);
+}
+
+fn syntheticKernelImageDigest() [32]u8 {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "measurement-source", "host-synthetic-kernel-image");
+    crypto_hash.updateBytes(&hasher, "kernel", "kernel-zigos-native.elf");
+    crypto_hash.updateBytes(&hasher, "profile", "zigos_native");
+    return crypto_hash.finalize(&hasher);
+}
+
+fn productionBaseImageManifestDigest(manager: *const SessionManager, graph: *const ServiceGraph) [32]u8 {
+    var hasher = crypto_hash.init();
+    hashPrincipal(&hasher, "policy-authority", graph.state.ids.policy_authority);
+    hashPrincipal(&hasher, "session-service", graph.state.ids.session_service);
+    crypto_hash.updateInt(&hasher, "session-task-id", graph.state.session_task.id);
+    crypto_hash.updateInt(&hasher, "review-service-task-id", graph.state.review_service_task.id);
+
+    for (manager.supervisor.services) |slot| {
+        if (!slot.in_use) continue;
+        hashServiceRecord(&hasher, &slot.service);
+    }
+    for (graph.service_bindings.bindings) |binding| {
+        crypto_hash.updateInt(&hasher, "binding-task-id", binding.task_id);
+        crypto_hash.updateInt(&hasher, "binding-endpoint-id", binding.endpoint_id);
+    }
+    for (manager.userspace_catalog.images) |slot| {
+        if (!slot.in_use) continue;
+        const image = &slot.image;
+        crypto_hash.updateBytes(&hasher, "image-bundle", image.bundleIdSlice());
+        crypto_hash.updateBytes(&hasher, "image-file-sha256", &image.file_sha256);
+        crypto_hash.updateInt(&hasher, "image-id", image.id);
+        crypto_hash.updateInt(&hasher, "image-byte-len", image.byte_len);
+        crypto_hash.updateInt(&hasher, "image-contract-flags", image.contract_flags);
+    }
+    return crypto_hash.finalize(&hasher);
+}
+
+fn productionPolicyDigest(manager: *const SessionManager, graph: *const ServiceGraph) [32]u8 {
+    var hasher = crypto_hash.init();
+    hashPrincipal(&hasher, "session-capability-holder", graph.state.session_capability.holder);
+    hashCapability(&hasher, "session-capability", &graph.state.session_capability);
+    hashCapability(&hasher, "policy-capability", &graph.state.policy_capability);
+
+    for (manager.capability_table.slots) |slot| {
+        if (!slot.in_use) continue;
+        hashCapability(&hasher, "capability", &slot.capability);
+    }
+    for (manager.service_directory.registry.slots) |slot| {
+        if (!slot.in_use) continue;
+        const binding = &slot.binding;
+        crypto_hash.updateInt(&hasher, "registry-service-id", binding.service_id);
+        crypto_hash.updateInt(&hasher, "registry-owner-task-id", binding.owner_task_id);
+        crypto_hash.updateInt(&hasher, "registry-endpoint-id", binding.endpoint_id);
+        crypto_hash.updateInt(&hasher, "registry-endpoint-capability-id", binding.endpoint_capability_id);
+        crypto_hash.updateBytes(&hasher, "registry-interface", binding.interface.name);
+        crypto_hash.updateInt(&hasher, "registry-version-major", binding.interface.version_major);
+        crypto_hash.updateInt(&hasher, "registry-version-minor", binding.interface.version_minor);
+        crypto_hash.updateInt(&hasher, "registry-flags", binding.flags);
+        crypto_hash.updateInt(&hasher, "registry-contract-hash", binding.typed_contract_hash);
+    }
+    return crypto_hash.finalize(&hasher);
+}
+
+fn hashPrincipal(hasher: *crypto_hash.Hasher, tag: []const u8, id: principal.PrincipalId) void {
+    crypto_hash.updateBytes(hasher, "principal-tag", tag);
+    crypto_hash.updateEnum(hasher, "principal-kind", id.kind);
+    crypto_hash.updateInt(hasher, "principal-serial", id.serial);
+}
+
+fn hashServiceRecord(hasher: *crypto_hash.Hasher, service: *const supervisor_mod.ServiceRecord) void {
+    crypto_hash.updateInt(hasher, "service-id", service.id);
+    crypto_hash.updateInt(hasher, "service-isolation-domain-id", service.isolation_domain_id);
+    crypto_hash.updateEnum(hasher, "service-class", service.class);
+    crypto_hash.updateEnum(hasher, "service-boundary", service.boundary);
+    hashPrincipal(hasher, "service-owner", service.owner);
+    crypto_hash.updateBool(hasher, "service-restartable", service.restartable);
+    crypto_hash.updateEnum(hasher, "service-network-privilege", service.network_privilege);
+    crypto_hash.updateEnum(hasher, "service-storage-privilege", service.storage_privilege);
+    crypto_hash.updateEnum(hasher, "service-ui-privilege", service.ui_privilege);
+    if (service.driver_class) |driver_class| {
+        crypto_hash.updateBool(hasher, "service-driver-class-present", true);
+        crypto_hash.updateEnum(hasher, "service-driver-class", driver_class);
+    } else {
+        crypto_hash.updateBool(hasher, "service-driver-class-present", false);
+    }
+}
+
+fn hashCapability(hasher: *crypto_hash.Hasher, tag: []const u8, cap: *const capability.Capability) void {
+    crypto_hash.updateBytes(hasher, "capability-tag", tag);
+    crypto_hash.updateInt(hasher, "capability-id", cap.id);
+    hashPrincipal(hasher, "capability-holder", cap.holder);
+    hashPrincipal(hasher, "capability-issuer", cap.issuer);
+    crypto_hash.updateEnum(hasher, "capability-target-kind", cap.target.kind);
+    crypto_hash.updateInt(hasher, "capability-target-id", cap.target.id);
+    crypto_hash.updateInt(hasher, "capability-rights", cap.rights.toBits());
+    crypto_hash.updateInt(hasher, "capability-scope-task", cap.scope.task_id orelse 0);
+    crypto_hash.updateInt(hasher, "capability-scope-workspace", cap.scope.workspace_id orelse 0);
+    crypto_hash.updateBool(hasher, "capability-scope-local-only", cap.scope.local_only);
+    crypto_hash.updateBool(hasher, "capability-scope-broker-only", cap.scope.broker_only);
+    crypto_hash.updateInt(hasher, "capability-issued-at", cap.lease.issued_at_ticks);
+    crypto_hash.updateInt(hasher, "capability-expires-at", cap.lease.expires_at_ticks);
+    crypto_hash.updateBool(hasher, "capability-renewable", cap.lease.renewable);
+    crypto_hash.updateInt(hasher, "capability-revocation-generation", cap.revocation_generation);
+    crypto_hash.updateInt(hasher, "capability-policy-generation", cap.audit.policy_generation);
+    crypto_hash.updateInt(hasher, "capability-source-task-id", cap.audit.source_task_id);
+    crypto_hash.updateInt(hasher, "capability-broker-service-id", cap.audit.broker_service_id);
 }
 
 fn environment(self: *SessionManager) Environment {
@@ -635,12 +783,23 @@ pub fn printReadyBanner() void {
     console.print("Native-only platform ready\n");
 }
 
-fn recordProductionMeasuredBoot(manager: *SessionManager, graph: *const ServiceGraph) void {
+fn recordProductionMeasuredBoot(manager: *SessionManager, graph: *const ServiceGraph) bool {
+    const manifest_signer = signing.SignerIdentity{
+        .label = "zigos-artifact-manifest",
+        .seed = [_]u8{0xB7} ** 32,
+    };
+    const artifact_manifest = buildProductionArtifactManifest(manager, graph) catch return false;
+    const signed_manifest = measured_boot.signArtifactManifest(artifact_manifest, manifest_signer) catch return false;
+    if (!measured_boot.verifySignedArtifactManifest(&signed_manifest)) return false;
+
     var measured = measured_boot.Recorder.init();
     measured.begin(1);
-    measured.add(.kernel, "bootloader+kernel-zigos-native", "src/boot/boot64.S:zig-out/bin/kernel-zigos-native.elf") catch unreachable;
-    measured.add(.base_image, "production-native-base", "native-store:production-service-graph") catch unreachable;
-    measured.add(.policy, "production-policy-set", "zero-root:capability-ipc:local-first") catch unreachable;
+    const kernel_digest = productionKernelMeasurementDigest();
+    const base_manifest_digest = productionBaseImageManifestDigest(manager, graph);
+    const policy_digest = productionPolicyDigest(manager, graph);
+    measured.add(.kernel, "bootloader+kernel-zigos-native", &kernel_digest) catch return false;
+    measured.add(.base_image, "production-native-base", &base_manifest_digest) catch return false;
+    measured.add(.policy, "production-policy-set", &policy_digest) catch return false;
 
     const critical_services = [_]*supervisor_mod.ServiceRecord{
         graph.state.services.policy_service,
@@ -649,15 +808,17 @@ fn recordProductionMeasuredBoot(manager: *SessionManager, graph: *const ServiceG
         graph.state.services.network_service,
     };
     for (critical_services) |service_record| {
-        const image = criticalServiceImage(manager, service_record) orelse unreachable;
-        measured.addCriticalServiceImage(service_record, image) catch unreachable;
+        const image = criticalServiceImage(manager, service_record) orelse return false;
+        measured.addCriticalServiceImage(service_record, image) catch return false;
     }
-    measured.addDriverSet("production-driver-set", &manager.driver_directory) catch unreachable;
+    measured.addDriverSet("production-driver-set", &manager.driver_directory) catch return false;
 
     const boot = measured.finalize();
+    if (!measured_boot.bootRecordMatchesManifest(&boot, &signed_manifest.manifest)) return false;
     printMeasurementSummary(&boot);
     supportMeasuredBootShape(&boot);
     recordMeasurementComparison(manager, &boot);
+    return true;
 }
 
 fn criticalServiceImage(
@@ -822,10 +983,5 @@ fn printNumber(value: u64) void {
 }
 
 fn bootFailureCode(err: anyerror) u32 {
-    var hash: u64 = 14695981039346656037;
-    for (@errorName(err)) |byte| {
-        hash ^= byte;
-        hash *%= 1099511628211;
-    }
-    return @truncate(hash);
+    return @truncate(native_util.fnv1a64(@errorName(err)));
 }

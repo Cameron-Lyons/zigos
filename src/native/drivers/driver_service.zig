@@ -1,10 +1,12 @@
 const std = @import("std");
 const fixed_table = @import("../core/fixed_table.zig");
+const id_index = @import("../core/id_index.zig");
 const capability = @import("../kernel_api/capability.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 
 pub const MAX_DRIVER_SERVICES: usize = 8;
+const SERVICE_INDEX_CAPACITY: usize = MAX_DRIVER_SERVICES * 2;
 
 pub const DeviceClass = enum(u8) {
     network_adapter,
@@ -136,6 +138,7 @@ fn driverSlotMatchesClass(device_class: DeviceClass, slot: *const DriverSlot) bo
 
 pub const Directory = struct {
     next_dma_domain_id: u64 = 1,
+    service_index_slots: [SERVICE_INDEX_CAPACITY]id_index.Slot = id_index.emptyTable(SERVICE_INDEX_CAPACITY),
     slots: [MAX_DRIVER_SERVICES]DriverSlot = [_]DriverSlot{DriverSlot{}} ** MAX_DRIVER_SERVICES,
 
     pub fn init() Directory {
@@ -179,7 +182,7 @@ pub const Directory = struct {
             return error.InvalidBootstrapTransport;
         }
 
-        if (fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, request.service_id, driverSlotMatchesServiceId) != null) {
+        if (self.findByService(request.service_id) != null) {
             return error.DuplicateServiceId;
         }
         if (fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, DriverBindingLookup{
@@ -187,7 +190,8 @@ pub const Directory = struct {
             .device_id = request.device_id,
         }, driverSlotMatchesBinding) != null) return error.DuplicateDeviceBinding;
 
-        const slot = fixed_table.firstFreeSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots) orelse return error.DriverTableFull;
+        const slot_index = fixed_table.firstFreeSlotIndex(DriverSlot, MAX_DRIVER_SERVICES, &self.slots) orelse return error.DriverTableFull;
+        const slot = &self.slots[slot_index];
         slot.in_use = true;
         slot.driver = .{
             .service_id = request.service_id,
@@ -206,11 +210,22 @@ pub const Directory = struct {
         };
         slot.driver.dma_range_count = defaultDmaRanges(slot.driver.dma_ranges[0..], request.device_class, request.device_id);
         writeSigner(&slot.driver, request.signer);
+        id_index.insert(SERVICE_INDEX_CAPACITY, &self.service_index_slots, slot.driver.service_id, slot_index, "driver service id index covers driver table");
         return &slot.driver;
     }
 
     pub fn findByService(self: *Directory, service_id: u64) ?*DriverRecord {
-        const slot = fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, service_id, driverSlotMatchesServiceId) orelse return null;
+        const slot = fixed_table.findIndexedSlot(
+            DriverSlot,
+            MAX_DRIVER_SERVICES,
+            SERVICE_INDEX_CAPACITY,
+            &self.slots,
+            &self.service_index_slots,
+            service_id,
+            driverSlotServiceId,
+            service_id,
+            driverSlotMatchesServiceId,
+        ) orelse return null;
         return &slot.driver;
     }
 
@@ -231,6 +246,10 @@ pub const Directory = struct {
         return self.next_dma_domain_id;
     }
 };
+
+fn driverSlotServiceId(slot: *const DriverSlot) u64 {
+    return slot.driver.service_id;
+}
 
 pub fn authorityTarget(device_id: u64) capability.CapabilityTarget {
     return .{ .kind = .device, .id = device_id };

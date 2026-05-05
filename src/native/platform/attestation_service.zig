@@ -5,7 +5,6 @@ const measured_boot = @import("measured_boot.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
-const copyText = native_util.copyText;
 
 pub const MAX_REMOTE_PARTY_BYTES: usize = 64;
 pub const MAX_NONCE_BYTES: usize = 32;
@@ -49,7 +48,10 @@ pub const Statement = struct {
 };
 
 pub const Error = error{
+    NonceTooLong,
+    RemotePartyTooLong,
     RootNotProvisioned,
+    RootLabelTooLong,
     UserVisibilityRequired,
 };
 
@@ -68,10 +70,10 @@ pub const Service = struct {
         return .{ .device = device };
     }
 
-    pub fn provisionRoot(self: *Service, signer: signing.SignerIdentity, origin: KeyOrigin) void {
+    pub fn provisionRoot(self: *Service, signer: signing.SignerIdentity, origin: KeyOrigin) Error!void {
         self.has_provisioned_root = true;
         self.root_origin = origin;
-        self.root_label_len = copyText(&self.root_label, signer.label);
+        self.root_label_len = native_util.copyTextExact(&self.root_label, signer.label) catch return error.RootLabelTooLong;
         self.root_seed = signer.seed;
     }
 
@@ -129,13 +131,13 @@ pub const Service = struct {
             .root_digest = boot.root_digest,
             .signature = .{},
         };
-        statement.remote_party_len = copyText(&statement.remote_party, remote_party);
-        statement.nonce_len = copyText(&statement.nonce, nonce);
-        statement.root_label_len = copyText(&statement.root_label, signer.label);
+        statement.remote_party_len = native_util.copyTextExact(&statement.remote_party, remote_party) catch return error.RemotePartyTooLong;
+        statement.nonce_len = native_util.copyTextExact(&statement.nonce, nonce) catch return error.NonceTooLong;
+        statement.root_label_len = native_util.copyTextExact(&statement.root_label, signer.label) catch return error.RootLabelTooLong;
 
         if (user_visible) {
             self.visible_request_count += 1;
-            self.last_remote_party_len = copyText(&self.last_remote_party, remote_party);
+            self.last_remote_party_len = native_util.copyTextExact(&self.last_remote_party, remote_party) catch return error.RemotePartyTooLong;
         }
 
         const digest = statementDigest(statement);
@@ -230,7 +232,7 @@ test "attestation service can use a provisioned hardware-backed root for visible
     const boot = recorder.finalize();
 
     var service = Service.init(.{ .kind = .device, .serial = 35 });
-    service.provisionRoot(.{
+    try service.provisionRoot(.{
         .label = "device-se",
         .seed = [_]u8{0x55} ** 32,
     }, .secure_enclave);

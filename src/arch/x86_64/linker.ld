@@ -4,6 +4,7 @@ SECTIONS
 {
     . = 1M;
     __kernel_start = .;
+    __kernel_measure_start = .;
 
     .text : ALIGN(4K)
     {
@@ -15,6 +16,7 @@ SECTIONS
     {
         *(.rodata)
     }
+    __kernel_measure_end = .;
 
     .data : ALIGN(4K)
     {

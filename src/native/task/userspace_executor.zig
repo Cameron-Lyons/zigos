@@ -504,10 +504,10 @@ test "executor matches userspace counters by stage and pulse" {
     executor.mappings[0] = .{
         .in_use = true,
         .address_space_id = 42,
-        .last_user_counter = userspace_bootstrap_mailbox.packCounter(.syscall_ready, .proof, 0x41),
+        .last_user_counter = userspace_bootstrap_mailbox.packCounter(.syscall_ready, .proof, userspace_bootstrap_mailbox.PROOF_SYSCALL_POINTER_DENIED_PULSE),
     };
 
-    try @import("std").testing.expect(executor.observedUserCounterStagePulse(42, .syscall_ready, 0x41));
-    try @import("std").testing.expect(!executor.observedUserCounterStagePulse(42, .steady, 0x41));
+    try @import("std").testing.expect(executor.observedUserCounterStagePulse(42, .syscall_ready, userspace_bootstrap_mailbox.PROOF_SYSCALL_POINTER_DENIED_PULSE));
+    try @import("std").testing.expect(!executor.observedUserCounterStagePulse(42, .steady, userspace_bootstrap_mailbox.PROOF_SYSCALL_POINTER_DENIED_PULSE));
     try @import("std").testing.expect(!executor.observedUserCounterStagePulse(42, .syscall_ready, 0x42));
 }

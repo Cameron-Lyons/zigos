@@ -3,7 +3,6 @@ const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
 const native_util = @import("../core/util.zig");
 const notification_center = @import("notification_center.zig");
 const principal = @import("../core/principal.zig");
-const copyText = native_util.copyText;
 
 pub const MAX_JOBS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 64;
@@ -65,6 +64,8 @@ pub const JobRecord = struct {
 pub const Error = error{
     JobNotFound,
     JobTableFull,
+    LabelTooLong,
+    PrinterIdentityTooLong,
     PrinterRequiresLocalOnly,
 } || accelerator_scheduler.Error || notification_center.Error;
 
@@ -111,8 +112,8 @@ pub const Service = struct {
             slot.job.local_only = request.local_only;
             slot.job.engine = claim.engine;
             slot.job.claim_id = claim.id;
-            slot.job.label_len = copyText(&slot.job.label, request.label);
-            slot.job.printer_identity_len = copyText(&slot.job.printer_identity, request.printer_identity);
+            slot.job.label_len = native_util.copyTextExact(&slot.job.label, request.label) catch return error.LabelTooLong;
+            slot.job.printer_identity_len = native_util.copyTextExact(&slot.job.printer_identity, request.printer_identity) catch return error.PrinterIdentityTooLong;
             if (slot.job.visibility == .task or slot.job.visibility == .user) {
                 const notice = notifications.post(.{
                     .source = request.source_principal,

@@ -1,11 +1,13 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const fixed_table = @import("../core/fixed_table.zig");
+const id_index = @import("../core/id_index.zig");
 const native_util = @import("../core/util.zig");
 
 pub const MAX_ENDPOINTS: usize = 32;
 pub const MAX_ENDPOINT_QUEUE: usize = 8;
 pub const MAX_MESSAGE_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
+const ENDPOINT_INDEX_CAPACITY: usize = MAX_ENDPOINTS * 2;
 
 pub const EndpointFlags = packed struct(u16) {
     local_only: bool = false,
@@ -60,6 +62,7 @@ const EndpointSlot = struct {
 
 pub const Table = struct {
     next_endpoint_id: u64 = 1,
+    endpoint_index_slots: [ENDPOINT_INDEX_CAPACITY]id_index.Slot = id_index.emptyTable(ENDPOINT_INDEX_CAPACITY),
     slots: [MAX_ENDPOINTS]EndpointSlot = [_]EndpointSlot{EndpointSlot{}} ** MAX_ENDPOINTS,
 
     pub fn init() Table {
@@ -67,7 +70,8 @@ pub const Table = struct {
     }
 
     pub fn create(self: *Table, owner_task_id: u64, label: []const u8, flags: EndpointFlags) Error!Endpoint {
-        const slot = fixed_table.firstFreeSlot(EndpointSlot, MAX_ENDPOINTS, &self.slots) orelse return error.TableFull;
+        const slot_index = fixed_table.firstFreeSlotIndex(EndpointSlot, MAX_ENDPOINTS, &self.slots) orelse return error.TableFull;
+        const slot = &self.slots[slot_index];
         slot.in_use = true;
         slot.endpoint = .{
             .id = self.allocateEndpointId(),
@@ -77,6 +81,7 @@ pub const Table = struct {
             .label = [_]u8{0} ** 48,
         };
         @memcpy(slot.endpoint.label[0..slot.endpoint.label_len], label[0..slot.endpoint.label_len]);
+        id_index.insert(ENDPOINT_INDEX_CAPACITY, &self.endpoint_index_slots, slot.endpoint.id, slot_index, "endpoint id index covers endpoint table");
         return slot.endpoint;
     }
 
@@ -174,15 +179,39 @@ pub const Table = struct {
     }
 
     fn find(self: *Table, endpoint_id: u64) ?*Endpoint {
-        const slot = fixed_table.findSlot(EndpointSlot, MAX_ENDPOINTS, &self.slots, endpoint_id, endpointSlotMatchesId) orelse return null;
+        const slot = fixed_table.findIndexedSlot(
+            EndpointSlot,
+            MAX_ENDPOINTS,
+            ENDPOINT_INDEX_CAPACITY,
+            &self.slots,
+            &self.endpoint_index_slots,
+            endpoint_id,
+            endpointSlotId,
+            endpoint_id,
+            endpointSlotMatchesId,
+        ) orelse return null;
         return &slot.endpoint;
     }
 
     fn findConst(self: *const Table, endpoint_id: u64) ?*const Endpoint {
-        const slot = fixed_table.findConstSlot(EndpointSlot, MAX_ENDPOINTS, &self.slots, endpoint_id, endpointSlotMatchesId) orelse return null;
+        const slot = fixed_table.findIndexedConstSlot(
+            EndpointSlot,
+            MAX_ENDPOINTS,
+            ENDPOINT_INDEX_CAPACITY,
+            &self.slots,
+            &self.endpoint_index_slots,
+            endpoint_id,
+            endpointSlotId,
+            endpoint_id,
+            endpointSlotMatchesId,
+        ) orelse return null;
         return &slot.endpoint;
     }
 };
+
+fn endpointSlotId(slot: *const EndpointSlot) u64 {
+    return slot.endpoint.id;
+}
 
 fn endpointSlotMatchesId(endpoint_id: u64, slot: *const EndpointSlot) bool {
     return slot.endpoint.id == endpoint_id;

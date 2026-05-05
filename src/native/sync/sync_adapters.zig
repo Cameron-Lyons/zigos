@@ -574,7 +574,7 @@ test "mergeable document adapter applies deterministic CRDT operations and rejec
     const adapter_value = DefaultMergeableDocumentAdapter.adapter();
     const result = try adapter_value.merge(.{
         .store = &storage,
-        .entry = workspace.Entry.init("documents/notes.md", document.object_id, document.version_id, .document),
+        .entry = try workspace.Entry.init("documents/notes.md", document.object_id, document.version_id, .document),
         .base_document = "hello",
         .local_operations = local_operations[0..],
         .remote_operations = remote_operations[0..],
@@ -648,7 +648,7 @@ test "default chunk media adapter reports concrete payload chunks" {
     const adapter_value = DefaultChunkMediaAdapter.adapter();
     const result = try adapter_value.replicate(.{
         .store = &storage,
-        .entry = workspace.Entry.init("assets/clip.raw", media.object_id, media.version_id, .media_asset),
+        .entry = try workspace.Entry.init("assets/clip.raw", media.object_id, media.version_id, .media_asset),
     });
     try std.testing.expect(result.snapshot_replicated);
     try std.testing.expectEqual(@as(usize, 2), result.replicated_chunks);

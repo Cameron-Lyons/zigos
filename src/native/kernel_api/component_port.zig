@@ -35,6 +35,7 @@ pub const EndpointCreateRequest = struct {
 pub const EndpointConnectRequest = struct {
     header: abi.RequestHeader,
     endpoint_capability_id: u64,
+    peer_endpoint_capability_id: u64,
     peer_endpoint_id: u64,
 };
 
@@ -192,6 +193,7 @@ pub const KernelPort = struct {
         try validateHeader(request.header, .endpoint_connect);
         return self.kernel.endpointConnect(
             callContext(request.header, request.endpoint_capability_id, .none),
+            request.peer_endpoint_capability_id,
             request.peer_endpoint_id,
             now_ticks,
         );

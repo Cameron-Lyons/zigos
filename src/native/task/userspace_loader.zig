@@ -1,5 +1,7 @@
 const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
+const fixed_table = @import("../core/fixed_table.zig");
+const id_index = @import("../core/id_index.zig");
 const native_util = @import("../core/util.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const elf_image_inspector = @import("elf_image_inspector.zig");
@@ -10,6 +12,7 @@ const task_runtime = @import("task_runtime.zig");
 const userspace_manifest_signing = @import("userspace_manifest_signing.zig");
 
 pub const MAX_IMAGES: usize = 24;
+const BUNDLE_INDEX_CAPACITY: usize = MAX_IMAGES * 2;
 const MAX_BUNDLE_ID_BYTES: usize = 64;
 const MAX_DISPLAY_NAME_BYTES: usize = 48;
 const MAX_PUBLISHER_BYTES: usize = 48;
@@ -148,6 +151,7 @@ const ImageSlot = struct {
 
 pub const Catalog = struct {
     next_image_id: u64 = 1,
+    bundle_index_slots: [BUNDLE_INDEX_CAPACITY]id_index.Slot = id_index.emptyTable(BUNDLE_INDEX_CAPACITY),
     images: [MAX_IMAGES]ImageSlot = [_]ImageSlot{ImageSlot{}} ** MAX_IMAGES,
 
     pub fn init() Catalog {
@@ -181,11 +185,19 @@ pub const Catalog = struct {
     }
 
     pub fn findByBundleId(self: *Catalog, bundle_id: []const u8) ?*const ImageRecord {
-        for (&self.images) |*slot| {
-            if (!slot.in_use) continue;
-            if (std.mem.eql(u8, slot.image.bundleIdSlice(), bundle_id)) return &slot.image;
-        }
-        return null;
+        const key = bundleIndexKey(bundle_id);
+        const slot = fixed_table.findIndexedConstSlot(
+            ImageSlot,
+            MAX_IMAGES,
+            BUNDLE_INDEX_CAPACITY,
+            &self.images,
+            &self.bundle_index_slots,
+            key,
+            imageSlotBundleKey,
+            bundle_id,
+            imageSlotMatchesBundleId,
+        ) orelse return null;
+        return &slot.image;
     }
 
     pub fn findById(self: *Catalog, image_id: u64) ?*const ImageRecord {
@@ -249,8 +261,8 @@ pub const Catalog = struct {
             return existing;
         }
 
-        for (&self.images) |*slot| {
-            if (slot.in_use) continue;
+        if (fixed_table.firstFreeSlotIndex(ImageSlot, MAX_IMAGES, &self.images)) |slot_index| {
+            const slot = &self.images[slot_index];
 
             var image = zeroImage();
             const executable_image = if (embedded) |info|
@@ -281,6 +293,7 @@ pub const Catalog = struct {
 
             slot.in_use = true;
             slot.image = image;
+            id_index.insert(BUNDLE_INDEX_CAPACITY, &self.bundle_index_slots, bundleIndexKey(slot.image.bundleIdSlice()), slot_index, "userspace bundle id index covers image table");
             self.next_image_id += 1;
             return &slot.image;
         }
@@ -288,6 +301,19 @@ pub const Catalog = struct {
         return error.ImageTableFull;
     }
 };
+
+fn bundleIndexKey(bundle_id: []const u8) u64 {
+    const hash = native_util.fnv1a64(bundle_id);
+    return if (hash == 0) 1 else hash;
+}
+
+fn imageSlotBundleKey(slot: *const ImageSlot) u64 {
+    return bundleIndexKey(slot.image.bundleIdSlice());
+}
+
+fn imageSlotMatchesBundleId(bundle_id: []const u8, slot: *const ImageSlot) bool {
+    return std.mem.eql(u8, slot.image.bundleIdSlice(), bundle_id);
+}
 
 fn taskCreateRequest(image: *const ImageRecord, request: LaunchRequest) task_runtime.TaskCreateRequest {
     return .{
