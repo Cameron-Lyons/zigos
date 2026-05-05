@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const binary_cursor = @import("../core/binary_cursor.zig");
+const fixed_table = @import("../core/fixed_table.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("object_store.zig");
 const principal = @import("../core/principal.zig");
@@ -335,7 +336,7 @@ fn saveIncremental(
 
     if (current != null and appendLenFits(current.?.root, append_len)) {
         const next_generation = current_generation + 1;
-        const next_root = buildRootState(self, next_generation, current.?.root.log_bytes + @as(u32, @intCast(append_len)), store, workspaces);
+        const next_root = try buildRootState(self, next_generation, current.?.root.log_bytes + @as(u32, @intCast(append_len)), store, workspaces);
         const next_root_sector = nextRootSector(current);
         try writeBytes(writer, data_start_byte + current.?.root.log_bytes, self.io_log_buffer[0..append_len]);
         try writeRoot(writer, next_root_sector, next_root);
@@ -349,7 +350,7 @@ fn saveIncremental(
     try appendRecordPayload(&log_writer, .checkpoint, self.io_payload_buffer[0..checkpoint_payload_len]);
 
     const next_generation = current_generation + 1;
-    const next_root = buildRootState(self, next_generation, @intCast(log_writer.offset), store, workspaces);
+    const next_root = try buildRootState(self, next_generation, @intCast(log_writer.offset), store, workspaces);
     const next_root_sector = nextRootSector(current);
     try writeBytes(writer, data_start_byte, self.io_log_buffer[0..log_writer.offset]);
     try writeRoot(writer, next_root_sector, next_root);
@@ -432,7 +433,7 @@ fn buildRootState(
     log_bytes: u32,
     store: *const object_store.Store,
     workspaces: *const workspace.Directory,
-) RootState {
+) Error!RootState {
     var root = RootState{
         .generation = generation,
         .log_bytes = log_bytes,
@@ -448,7 +449,7 @@ fn buildRootState(
         root.workspace_summaries[root.workspace_summary_count] = .{
             .id = slot.workspace.id,
             .generation = slot.workspace.generation,
-            .state_hash = workspaceStateHash(self, &slot.workspace) catch unreachable,
+            .state_hash = try workspaceStateHash(self, &slot.workspace),
         };
         root.workspace_summary_count += 1;
     }
@@ -1155,24 +1156,15 @@ fn persistableSnapshotSlot(slot: anytype) bool {
 }
 
 fn nextObjectSlot(store: *object_store.Store) ?*@TypeOf(store.objects[0]) {
-    for (&store.objects) |*slot| {
-        if (!slot.in_use) return slot;
-    }
-    return null;
+    return fixed_table.firstFreeSlot(@TypeOf(store.objects[0]), object_store.MAX_OBJECTS, &store.objects);
 }
 
 fn nextVersionSlotIndex(store: *object_store.Store) ?usize {
-    for (store.versions, 0..) |slot, index| {
-        if (!slot.in_use) return index;
-    }
-    return null;
+    return fixed_table.firstFreeSlotIndex(@TypeOf(store.versions[0]), object_store.MAX_VERSIONS, &store.versions);
 }
 
 fn nextBlobSlot(store: *object_store.Store) ?*object_store.BlobSlot {
-    for (&store.blobs) |*slot| {
-        if (!slot.in_use) return slot;
-    }
-    return null;
+    return fixed_table.firstFreeSlot(object_store.BlobSlot, object_store.MAX_BLOBS, &store.blobs);
 }
 
 fn findBlobSlotIndex(store: *const object_store.Store, address: object_store.BlobAddress) ?usize {
@@ -1183,17 +1175,11 @@ fn findBlobSlotIndex(store: *const object_store.Store, address: object_store.Blo
 }
 
 fn nextWorkspaceSlot(workspaces: *workspace.Directory) ?*@TypeOf(workspaces.workspaces[0]) {
-    for (&workspaces.workspaces) |*slot| {
-        if (!slot.in_use) return slot;
-    }
-    return null;
+    return fixed_table.firstFreeSlot(@TypeOf(workspaces.workspaces[0]), workspace.MAX_WORKSPACES, &workspaces.workspaces);
 }
 
 fn nextSnapshotSlotIndex(workspaces: *workspace.Directory) ?usize {
-    for (workspaces.snapshots, 0..) |slot, index| {
-        if (!slot.in_use) return index;
-    }
-    return null;
+    return fixed_table.firstFreeSlotIndex(@TypeOf(workspaces.snapshots[0]), workspace.MAX_SNAPSHOTS, &workspaces.snapshots);
 }
 
 fn zeroWorkspaceRecord() workspace.WorkspaceRecord {
@@ -1405,148 +1391,12 @@ fn ataWriteRange(self: *Volume, start_lba: u64, buffer: []const u8) bool {
     return ata_bridge.write(device, start_lba, buffer);
 }
 
-test "storage volume image reloads the latest persisted state across slot generations" {
-    const image = try std.testing.allocator.alloc(u8, image_bytes);
-    defer std.testing.allocator.free(image);
-    @memset(image, 0);
+pub const testing = struct {
+    pub fn latestImageLogBytes(image: []const u8) Error!u32 {
+        return (try findLatestImageRoot(image)).?.root.log_bytes;
+    }
 
-    var store = object_store.Store.init();
-    var workspaces = workspace.Directory.init();
-    const signer = @import("../core/signing.zig").SignerIdentity{
-        .label = "zigos-storage-key",
-        .seed = [_]u8{0x71} ** 32,
-    };
-    const first = try store.putVersion(.{
-        .preferred_object_id = 900,
-        .object_type = .document,
-        .payload = "hello",
-        .metadata = try object_store.signMetadata(signer, "notes", "text/markdown", .document, "hello", 10),
-    });
-    const notes = try workspaces.create(.{
-        .owner = .{ .kind = .user, .serial = 1 },
-        .label = "notes",
-    });
-    try workspaces.beginTransaction(notes.id);
-    try workspaces.stagePut(notes.id, "documents/notes.md", first.object_id, first.version_id, .document);
-    _ = try workspaces.commit(notes.id, 11);
-    try std.testing.expectEqual(@as(usize, 1), store.dirtyObjectIds().len);
-    try std.testing.expectEqual(@as(usize, 1), store.dirtyVersionIds().len);
-    try std.testing.expectEqual(@as(usize, 1), workspaces.dirtyWorkspaceIds().len);
-    const generation_one = try saveToImage(image, &store, &workspaces);
-    try std.testing.expectEqual(@as(u64, 1), generation_one.generation);
-    try std.testing.expectEqual(@as(usize, 0), store.dirtyObjectIds().len);
-    try std.testing.expectEqual(@as(usize, 0), store.dirtyVersionIds().len);
-    try std.testing.expectEqual(@as(usize, 0), workspaces.dirtyWorkspaceIds().len);
-    const root_after_first = (try findLatestImageRoot(image)).?.root;
-    const first_log_bytes = root_after_first.log_bytes;
-
-    const second = try store.putVersion(.{
-        .preferred_object_id = 900,
-        .object_type = .document,
-        .payload = "hello again",
-        .metadata = try object_store.signMetadata(signer, "notes", "text/markdown", .document, "hello again", 12),
-        .parent_version_id = first.version_id,
-    });
-    try workspaces.beginTransaction(notes.id);
-    try workspaces.stagePut(notes.id, "documents/notes.md", second.object_id, second.version_id, .document);
-    _ = try workspaces.commit(notes.id, 13);
-    try std.testing.expectEqual(@as(usize, 1), store.dirtyObjectIds().len);
-    try std.testing.expectEqual(@as(usize, 1), store.dirtyVersionIds().len);
-    try std.testing.expectEqual(@as(usize, 1), workspaces.dirtyWorkspaceIds().len);
-    const generation_two = try saveToImage(image, &store, &workspaces);
-    try std.testing.expectEqual(@as(u64, 2), generation_two.generation);
-    try std.testing.expectEqual(@as(usize, 0), store.dirtyObjectIds().len);
-    try std.testing.expectEqual(@as(usize, 0), store.dirtyVersionIds().len);
-    try std.testing.expectEqual(@as(usize, 0), workspaces.dirtyWorkspaceIds().len);
-    const root_after_second = (try findLatestImageRoot(image)).?.root;
-    try std.testing.expect(root_after_second.log_bytes > first_log_bytes);
-    try std.testing.expect(root_after_second.log_bytes < first_log_bytes + 4 * sector_size);
-    const unchanged_generation = try saveToImage(image, &store, &workspaces);
-    try std.testing.expectEqual(generation_two.generation, unchanged_generation.generation);
-
-    var loaded_store = object_store.Store.init();
-    var loaded_workspaces = workspace.Directory.init();
-    const loaded_generation = try loadFromImage(image, &loaded_store, &loaded_workspaces);
-    try std.testing.expectEqual(@as(u64, 2), loaded_generation);
-    try std.testing.expectEqual(@as(usize, 1), loaded_store.objectCount());
-    try std.testing.expectEqual(@as(usize, 2), loaded_store.blobCount());
-    try std.testing.expectEqual(second.version_id, loaded_store.latestVersion(900).?.id);
-    try std.testing.expectEqualStrings("hello again", try loaded_store.versionPayload(loaded_store.latestVersion(900).?));
-    try std.testing.expectEqualStrings("zigos-storage-key", loaded_store.latestVersion(900).?.metadata.signature.signer);
-    const loaded_notes = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 1 }, "notes").?;
-    try std.testing.expectEqual(second.version_id, (try loaded_workspaces.resolve(loaded_notes.id, "documents/notes.md")).version_id);
-}
-
-test "storage volume instances keep image reload state isolated" {
-    var first_volume = Volume.init();
-    var second_volume = Volume.init();
-    const first_image = try std.testing.allocator.alloc(u8, image_bytes);
-    defer std.testing.allocator.free(first_image);
-    const second_image = try std.testing.allocator.alloc(u8, image_bytes);
-    defer std.testing.allocator.free(second_image);
-    @memset(first_image, 0);
-    @memset(second_image, 0);
-
-    const signer = @import("../core/signing.zig").SignerIdentity{
-        .label = "zigos-storage-key",
-        .seed = [_]u8{0x73} ** 32,
-    };
-
-    var first_store = object_store.Store.init();
-    var first_workspaces = workspace.Directory.init();
-    _ = try first_store.putVersion(.{
-        .preferred_object_id = 910,
-        .object_type = .document,
-        .payload = "first volume",
-        .metadata = try object_store.signMetadata(signer, "first", "text/plain", .document, "first volume", 1),
-    });
-    _ = try first_volume.saveToImage(first_image, &first_store, &first_workspaces);
-
-    var second_store = object_store.Store.init();
-    var second_workspaces = workspace.Directory.init();
-    _ = try second_store.putVersion(.{
-        .preferred_object_id = 920,
-        .object_type = .document,
-        .payload = "second volume",
-        .metadata = try object_store.signMetadata(signer, "second", "text/plain", .document, "second volume", 2),
-    });
-    _ = try second_volume.saveToImage(second_image, &second_store, &second_workspaces);
-
-    var loaded_first_store = object_store.Store.init();
-    var loaded_first_workspaces = workspace.Directory.init();
-    var loaded_second_store = object_store.Store.init();
-    var loaded_second_workspaces = workspace.Directory.init();
-
-    _ = try first_volume.loadFromImage(first_image, &loaded_first_store, &loaded_first_workspaces);
-    _ = try second_volume.loadFromImage(second_image, &loaded_second_store, &loaded_second_workspaces);
-
-    try std.testing.expectEqualStrings("first volume", try loaded_first_store.versionPayload(loaded_first_store.latestVersion(910).?));
-    try std.testing.expectEqualStrings("second volume", try loaded_second_store.versionPayload(loaded_second_store.latestVersion(920).?));
-    try std.testing.expect(loaded_first_store.latestVersion(920) == null);
-    try std.testing.expect(loaded_second_store.latestVersion(910) == null);
-}
-
-test "storage volume rejects corrupted slot payloads" {
-    const image = try std.testing.allocator.alloc(u8, image_bytes);
-    defer std.testing.allocator.free(image);
-    @memset(image, 0);
-
-    var store = object_store.Store.init();
-    var workspaces = workspace.Directory.init();
-    const signer = @import("../core/signing.zig").SignerIdentity{
-        .label = "zigos-storage-key",
-        .seed = [_]u8{0x72} ** 32,
-    };
-    _ = try store.putVersion(.{
-        .preferred_object_id = 901,
-        .object_type = .blob,
-        .payload = "blob",
-        .metadata = try object_store.signMetadata(signer, "blob", "application/octet-stream", .blob, "blob", 10),
-    });
-    _ = try saveToImage(image, &store, &workspaces);
-    image[data_start_byte + 3] ^= 0xFF;
-
-    var loaded_store = object_store.Store.init();
-    var loaded_workspaces = workspace.Directory.init();
-    try std.testing.expectError(error.CorruptImage, loadFromImage(image, &loaded_store, &loaded_workspaces));
-}
+    pub fn corruptDataByte(image: []u8, offset: usize) void {
+        image[data_start_byte + offset] ^= 0xFF;
+    }
+};

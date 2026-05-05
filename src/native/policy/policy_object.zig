@@ -1,5 +1,6 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const fixed_table = @import("../core/fixed_table.zig");
 const manifest = @import("manifest.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
@@ -155,40 +156,35 @@ pub const Directory = struct {
         if (request.allowed_install_sources.len > MAX_ALLOW_LIST) return error.TooManyInstallSources;
         if (request.allowed_sync_destinations.len > MAX_ALLOW_LIST) return error.TooManySyncDestinations;
 
-        for (&self.slots) |*slot| {
-            if (slot.in_use) continue;
+        const slot = fixed_table.firstFreeSlot(PolicySlot, MAX_POLICIES, &self.slots) orelse return error.PolicyTableFull;
+        slot.in_use = true;
+        slot.policy = zeroPolicy();
+        slot.policy.id = self.next_policy_id;
+        self.next_policy_id += 1;
+        slot.policy.generation = nextGeneration(self, request.scope, request.subject_id);
+        slot.policy.scope = request.scope;
+        slot.policy.subject_id = request.subject_id;
+        slot.policy.issuer = request.issuer;
+        slot.policy.label_len = copyText(&slot.policy.label, request.label);
+        slot.policy.install_source_mode = request.install_source_mode;
+        slot.policy.network_egress_mode = request.network_egress_mode;
+        slot.policy.removable_storage_allowed = request.removable_storage_allowed;
+        slot.policy.screen_capture_allowed = request.screen_capture_allowed;
+        slot.policy.retention_days = request.retention_days;
+        slot.policy.audit_export_required = request.audit_export_required;
 
-            slot.in_use = true;
-            slot.policy = zeroPolicy();
-            slot.policy.id = self.next_policy_id;
-            self.next_policy_id += 1;
-            slot.policy.generation = nextGeneration(self, request.scope, request.subject_id);
-            slot.policy.scope = request.scope;
-            slot.policy.subject_id = request.subject_id;
-            slot.policy.issuer = request.issuer;
-            slot.policy.label_len = copyText(&slot.policy.label, request.label);
-            slot.policy.install_source_mode = request.install_source_mode;
-            slot.policy.network_egress_mode = request.network_egress_mode;
-            slot.policy.removable_storage_allowed = request.removable_storage_allowed;
-            slot.policy.screen_capture_allowed = request.screen_capture_allowed;
-            slot.policy.retention_days = request.retention_days;
-            slot.policy.audit_export_required = request.audit_export_required;
-
-            for (request.allowed_install_sources, 0..) |source_identity, index| {
-                slot.policy.allowed_install_source_lens[index] = copyText(&slot.policy.allowed_install_sources[index], source_identity);
-                slot.policy.allowed_install_source_count += 1;
-            }
-            for (request.allowed_sync_destinations, 0..) |destination, index| {
-                slot.policy.allowed_sync_destination_lens[index] = copyText(&slot.policy.allowed_sync_destinations[index], destination);
-                slot.policy.allowed_sync_destination_count += 1;
-            }
-
-            const digest = policyDigest(&slot.policy);
-            slot.policy.signature = try signing.sign(signer, &digest);
-            return &slot.policy;
+        for (request.allowed_install_sources, 0..) |source_identity, index| {
+            slot.policy.allowed_install_source_lens[index] = copyText(&slot.policy.allowed_install_sources[index], source_identity);
+            slot.policy.allowed_install_source_count += 1;
+        }
+        for (request.allowed_sync_destinations, 0..) |destination, index| {
+            slot.policy.allowed_sync_destination_lens[index] = copyText(&slot.policy.allowed_sync_destinations[index], destination);
+            slot.policy.allowed_sync_destination_count += 1;
         }
 
-        return error.PolicyTableFull;
+        const digest = policyDigest(&slot.policy);
+        slot.policy.signature = try signing.sign(signer, &digest);
+        return &slot.policy;
     }
 
     pub fn activeForScope(self: *Directory, scope: Scope, subject_id: u64) ?*PolicyObject {
@@ -285,10 +281,8 @@ pub const Directory = struct {
     }
 
     fn findConst(self: *const Directory, policy_id: u64) ?*const PolicyObject {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and slot.policy.id == policy_id) return &slot.policy;
-        }
-        return null;
+        const slot = fixed_table.findConstSlot(PolicySlot, MAX_POLICIES, &self.slots, policy_id, policySlotMatchesId) orelse return null;
+        return &slot.policy;
     }
 
     fn activeForScopeConst(self: *const Directory, scope: Scope, subject_id: u64) ?*const PolicyObject {
@@ -316,6 +310,10 @@ pub const Directory = struct {
         return block(policy, .unsigned_policy);
     }
 };
+
+fn policySlotMatchesId(policy_id: u64, slot: *const PolicySlot) bool {
+    return slot.policy.id == policy_id;
+}
 
 const ActivePolicyIterator = struct {
     directory: *const Directory,

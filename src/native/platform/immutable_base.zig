@@ -472,3 +472,39 @@ test "immutable base persists signed read-only image activation and rollback met
 
     storage_checkpoint_store.resetPersistent();
 }
+
+test "immutable base verification rejects mutable signer and measurement tampering" {
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 62 };
+    const state_signer = signing.SignerIdentity{
+        .label = "platform-state",
+        .seed = [_]u8{0x63} ** 32,
+    };
+    const image_signer = signing.SignerIdentity{
+        .label = "platform-image",
+        .seed = [_]u8{0x64} ** 32,
+    };
+
+    var storage = storage_service.Service.initWithStore(902, 43, owner, &storage_checkpoint_store);
+    var manager = try Manager.init(&storage, owner, state_signer);
+    _ = try manager.stageImage(0, "stable-a", "kernel=v1", image_signer, 10);
+    _ = try manager.activate(0, .{}, 11);
+    try std.testing.expect(manager.verifyActiveImage());
+
+    manager.slots[0].read_only = false;
+    try std.testing.expect(!manager.verifyActiveImage());
+    manager.slots[0].read_only = true;
+    try std.testing.expect(manager.verifyActiveImage());
+
+    manager.slots[0].measurement[0] ^= 0xFF;
+    try std.testing.expect(!manager.verifyActiveImage());
+    manager.slots[0].measurement[0] ^= 0xFF;
+    try std.testing.expect(manager.verifyActiveImage());
+
+    manager.slots[0].signer[0] = 'x';
+    try std.testing.expect(!manager.verifyActiveImage());
+
+    storage_checkpoint_store.resetPersistent();
+}

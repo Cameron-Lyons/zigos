@@ -1,4 +1,5 @@
 const std = @import("std");
+const fixed_table = @import("../core/fixed_table.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
@@ -120,41 +121,34 @@ pub const Manager = struct {
         if (!request.clearly_labeled) return error.HiddenEnvironmentForbidden;
         if (!request.isolated) return error.IsolationRequired;
 
-        for (&self.slots) |*slot| {
-            if (slot.in_use) continue;
-
-            slot.in_use = true;
-            slot.environment = .{
-                .id = self.allocateEnvironmentId(),
-                .service_id = request.service_id,
-                .owner = request.owner,
-                .kind = request.kind,
-                .state = .active,
-                .network_class = request.network_class,
-                .isolated = request.isolated,
-                .clearly_labeled = request.clearly_labeled,
-                .portal_only_host_access = request.portal_only_host_access,
-                .limited_host_integration = true,
-                .label_len = 0,
-                .label = [_]u8{0} ** 48,
-                .signer_len = 0,
-                .signer = [_]u8{0} ** 32,
-                .portal_count = 0,
-                .portals = [_]PortalGrant{emptyPortal()} ** MAX_PORTALS_PER_ENVIRONMENT,
-            };
-            slot.environment.label_len = copyText(slot.environment.label[0..], request.label);
-            slot.environment.signer_len = copyText(slot.environment.signer[0..], request.bundle.signature.signer);
-            return &slot.environment;
-        }
-
-        return error.EnvironmentTableFull;
+        const slot = fixed_table.firstFreeSlot(EnvironmentSlot, MAX_ENVIRONMENTS, &self.slots) orelse return error.EnvironmentTableFull;
+        slot.in_use = true;
+        slot.environment = .{
+            .id = self.allocateEnvironmentId(),
+            .service_id = request.service_id,
+            .owner = request.owner,
+            .kind = request.kind,
+            .state = .active,
+            .network_class = request.network_class,
+            .isolated = request.isolated,
+            .clearly_labeled = request.clearly_labeled,
+            .portal_only_host_access = request.portal_only_host_access,
+            .limited_host_integration = true,
+            .label_len = 0,
+            .label = [_]u8{0} ** 48,
+            .signer_len = 0,
+            .signer = [_]u8{0} ** 32,
+            .portal_count = 0,
+            .portals = [_]PortalGrant{emptyPortal()} ** MAX_PORTALS_PER_ENVIRONMENT,
+        };
+        slot.environment.label_len = copyText(slot.environment.label[0..], request.label);
+        slot.environment.signer_len = copyText(slot.environment.signer[0..], request.bundle.signature.signer);
+        return &slot.environment;
     }
 
     pub fn find(self: *Manager, environment_id: u64) ?*EnvironmentRecord {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and slot.environment.id == environment_id) return &slot.environment;
-        }
-        return null;
+        const slot = fixed_table.findSlot(EnvironmentSlot, MAX_ENVIRONMENTS, &self.slots, environment_id, environmentSlotMatchesId) orelse return null;
+        return &slot.environment;
     }
 
     pub fn grantPortal(self: *Manager, environment_id: u64, grant: PortalGrant) Error!void {
@@ -193,11 +187,7 @@ pub const Manager = struct {
     }
 
     pub fn environmentCount(self: *const Manager) usize {
-        var count: usize = 0;
-        for (self.slots) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
+        return fixed_table.countInUse(EnvironmentSlot, MAX_ENVIRONMENTS, &self.slots);
     }
 
     fn allocateEnvironmentId(self: *Manager) u64 {
@@ -205,6 +195,10 @@ pub const Manager = struct {
         return self.next_environment_id;
     }
 };
+
+fn environmentSlotMatchesId(environment_id: u64, slot: *const EnvironmentSlot) bool {
+    return slot.environment.id == environment_id;
+}
 
 fn zeroEnvironment() EnvironmentRecord {
     return .{

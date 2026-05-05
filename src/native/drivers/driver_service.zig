@@ -1,4 +1,5 @@
 const std = @import("std");
+const fixed_table = @import("../core/fixed_table.zig");
 const capability = @import("../kernel_api/capability.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
@@ -116,6 +117,23 @@ const DriverSlot = struct {
     driver: DriverRecord = zeroDriver(),
 };
 
+const DriverBindingLookup = struct {
+    device_class: DeviceClass,
+    device_id: u64,
+};
+
+fn driverSlotMatchesServiceId(service_id: u64, slot: *const DriverSlot) bool {
+    return slot.driver.service_id == service_id;
+}
+
+fn driverSlotMatchesBinding(context: DriverBindingLookup, slot: *const DriverSlot) bool {
+    return slot.driver.device_class == context.device_class and slot.driver.device_id == context.device_id;
+}
+
+fn driverSlotMatchesClass(device_class: DeviceClass, slot: *const DriverSlot) bool {
+    return slot.driver.device_class == device_class;
+}
+
 pub const Directory = struct {
     next_dma_domain_id: u64 = 1,
     slots: [MAX_DRIVER_SERVICES]DriverSlot = [_]DriverSlot{DriverSlot{}} ** MAX_DRIVER_SERVICES,
@@ -161,53 +179,44 @@ pub const Directory = struct {
             return error.InvalidBootstrapTransport;
         }
 
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.driver.service_id == request.service_id) return error.DuplicateServiceId;
-            if (slot.driver.device_class == request.device_class and slot.driver.device_id == request.device_id) {
-                return error.DuplicateDeviceBinding;
-            }
+        if (fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, request.service_id, driverSlotMatchesServiceId) != null) {
+            return error.DuplicateServiceId;
         }
+        if (fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, DriverBindingLookup{
+            .device_class = request.device_class,
+            .device_id = request.device_id,
+        }, driverSlotMatchesBinding) != null) return error.DuplicateDeviceBinding;
 
-        for (&self.slots) |*slot| {
-            if (slot.in_use) continue;
-
-            slot.in_use = true;
-            slot.driver = .{
-                .service_id = request.service_id,
-                .owner_task_id = request.owner_task_id,
-                .device_id = request.device_id,
-                .device_class = request.device_class,
-                .authority_capability_id = authority.id,
-                .restart_generation = 1,
-                .bootstrap_transport = request.bootstrap_transport,
-                .dma_domain_id = self.allocateDmaDomainId(),
-                .dma_protection = .iommu_enforced,
-                .dma_range_count = 0,
-                .dma_ranges = [_]DmaRange{zeroDmaRange()} ** MAX_DMA_RANGES,
-                .signer_len = 0,
-                .signer = [_]u8{0} ** 32,
-            };
-            slot.driver.dma_range_count = defaultDmaRanges(slot.driver.dma_ranges[0..], request.device_class, request.device_id);
-            writeSigner(&slot.driver, request.signer);
-            return &slot.driver;
-        }
-
-        return error.DriverTableFull;
+        const slot = fixed_table.firstFreeSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots) orelse return error.DriverTableFull;
+        slot.in_use = true;
+        slot.driver = .{
+            .service_id = request.service_id,
+            .owner_task_id = request.owner_task_id,
+            .device_id = request.device_id,
+            .device_class = request.device_class,
+            .authority_capability_id = authority.id,
+            .restart_generation = 1,
+            .bootstrap_transport = request.bootstrap_transport,
+            .dma_domain_id = self.allocateDmaDomainId(),
+            .dma_protection = .iommu_enforced,
+            .dma_range_count = 0,
+            .dma_ranges = [_]DmaRange{zeroDmaRange()} ** MAX_DMA_RANGES,
+            .signer_len = 0,
+            .signer = [_]u8{0} ** 32,
+        };
+        slot.driver.dma_range_count = defaultDmaRanges(slot.driver.dma_ranges[0..], request.device_class, request.device_id);
+        writeSigner(&slot.driver, request.signer);
+        return &slot.driver;
     }
 
     pub fn findByService(self: *Directory, service_id: u64) ?*DriverRecord {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and slot.driver.service_id == service_id) return &slot.driver;
-        }
-        return null;
+        const slot = fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, service_id, driverSlotMatchesServiceId) orelse return null;
+        return &slot.driver;
     }
 
     pub fn findByClass(self: *Directory, device_class: DeviceClass) ?*DriverRecord {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and slot.driver.device_class == device_class) return &slot.driver;
-        }
-        return null;
+        const slot = fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, device_class, driverSlotMatchesClass) orelse return null;
+        return &slot.driver;
     }
 
     pub fn markRestarted(self: *Directory, service_id: u64) bool {

@@ -28,6 +28,7 @@ pub const StorageCore = struct {
     loaded_from_volume: bool = false,
     checkpoint_enabled: bool = true,
     deferred_checkpoint_count: usize = 0,
+    checkpoint_batch_depth: usize = 0,
     checkpoint_store: *CheckpointStore,
     store: *object_store.Store,
     workspaces: *workspace.Directory,
@@ -75,6 +76,19 @@ pub const StorageCore = struct {
 
     pub fn checkpoint(self: *const Service) void {
         self.flushCheckpoint();
+    }
+
+    pub fn beginCheckpointBatch(self: *Service) void {
+        self.checkpoint_batch_depth += 1;
+    }
+
+    pub fn flushCheckpointBatch(self: *Service) void {
+        if (self.checkpoint_batch_depth != 0) self.checkpoint_batch_depth -= 1;
+        if (self.checkpoint_batch_depth == 0) self.flushCheckpoint();
+    }
+
+    pub fn pendingCheckpointMutations(self: *const Service) bool {
+        return self.checkpoint_store.dirty;
     }
 
     pub fn bindCapabilityTable(self: *Service, capability_table: *const capability.CapabilityTable) void {
@@ -722,6 +736,78 @@ test "storage service reloads authoritative state from the attached volume after
         .network_scope = .relay_assisted,
         .now_ticks = 120,
     }));
+}
+
+test "storage service coalesces checkpoint writes across an explicit batch" {
+    const FakeBackend = struct {
+        var image: []u8 = &.{};
+
+        fn read(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+            const buffer = buffer_ptr[0..buffer_len];
+            const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+            const end = start + buffer.len;
+            if (end > image.len) return false;
+            @memcpy(buffer, image[start..end]);
+            return true;
+        }
+
+        fn write(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+            const buffer = buffer_ptr[0..buffer_len];
+            const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+            const end = start + buffer.len;
+            if (end > image.len) return false;
+            @memcpy(image[start..end], buffer);
+            return true;
+        }
+    };
+
+    var checkpoint_store = CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    defer checkpoint_store.resetPersistent();
+
+    var image = [_]u8{0} ** storage_volume.image_bytes;
+    FakeBackend.image = &image;
+    storage_volume.attachBackend(.{
+        .sector_count = storage_volume.required_device_sectors,
+        .read = FakeBackend.read,
+        .write = FakeBackend.write,
+    });
+    defer storage_volume.clearAttachedBackend();
+
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 48 };
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0xA8} ** 32,
+    };
+
+    var service = Service.initWithStore(704, 21, owner, &checkpoint_store);
+    service.beginCheckpointBatch();
+    const object = try service.putVersion(.{
+        .preferred_object_id = 954,
+        .object_type = .document,
+        .payload = "batched checkpoint",
+        .metadata = try object_store.signMetadata(signer, "batched", "text/plain", .document, "batched checkpoint", 10),
+    });
+    const notes = try service.createWorkspace(.{
+        .owner = .{ .kind = .user, .serial = 3 },
+        .label = "batched-notes",
+    });
+    try service.beginTransaction(notes.id);
+    try service.stagePut(notes.id, "documents/batched.md", object.object_id, object.version_id, .document);
+    _ = try service.commit(notes.id, 11);
+
+    try std.testing.expect(service.pendingCheckpointMutations());
+    try std.testing.expectEqual(@as(u64, 0), checkpoint_store.last_checkpoint_generation);
+
+    service.flushCheckpointBatch();
+    try std.testing.expect(!service.pendingCheckpointMutations());
+    try std.testing.expectEqual(@as(u64, 1), checkpoint_store.last_checkpoint_generation);
+
+    checkpoint_store.resetPreparedState();
+    var reloaded = Service.initWithStore(704, 22, owner, &checkpoint_store);
+    try std.testing.expect(reloaded.loaded_from_volume);
+    const resolved = try reloaded.resolve(notes.id, "documents/batched.md");
+    try std.testing.expectEqual(object.version_id, resolved.version_id);
 }
 
 test "storage service records checkpoint flush failures" {

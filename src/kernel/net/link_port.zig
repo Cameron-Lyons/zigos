@@ -1,5 +1,8 @@
 const ethernet = @import("ethernet.zig");
 
+pub const kernel_boundary_role = "bootstrap_network_link_shim";
+pub const publishes_full_network_service = false;
+
 pub const IngressHandler = *const fn (packet: []const u8, mac: [6]u8) void;
 
 pub const NetworkDevice = struct {

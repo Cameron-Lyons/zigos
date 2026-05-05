@@ -10,6 +10,9 @@ const storage_driver_protocol = @import("../../../native/drivers/storage_driver_
 const panic_handler = @import("../../utils/panic.zig");
 const common = @import("../common.zig");
 
+pub const kernel_boundary_role = "bootstrap_device_inventory_shim";
+pub const publishes_device_data_planes = false;
+
 pub fn init() void {
     console.print("Initializing device drivers...\n");
     bootstrap_driver_port.reset();

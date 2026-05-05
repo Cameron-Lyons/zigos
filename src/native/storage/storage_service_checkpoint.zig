@@ -75,6 +75,7 @@ pub fn makeService(
         .loaded_from_volume = loaded_from_volume,
         .checkpoint_enabled = true,
         .deferred_checkpoint_count = 0,
+        .checkpoint_batch_depth = 0,
         .checkpoint_store = checkpoint_store,
         .store = &checkpoint_store.store,
         .workspaces = &checkpoint_store.workspaces,
@@ -85,7 +86,7 @@ pub fn noteMutation(service: anytype, durable_boundary: bool) void {
     service.checkpoint_store.has_persisted_state = true;
     service.checkpoint_store.dirty = true;
     if (!service.checkpoint_enabled) return;
-    if (durable_boundary and service.deferred_checkpoint_count == 0) {
+    if (durable_boundary and service.deferred_checkpoint_count == 0 and service.checkpoint_batch_depth == 0) {
         flushCheckpoint(service);
     }
 }

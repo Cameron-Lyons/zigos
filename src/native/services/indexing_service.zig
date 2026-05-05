@@ -1,4 +1,5 @@
 const std = @import("std");
+const fixed_table = @import("../core/fixed_table.zig");
 const native_util = @import("../core/util.zig");
 const copyText = native_util.copyText;
 
@@ -47,6 +48,11 @@ const DocumentSlot = struct {
     record: DocumentRecord = zeroDocument(),
 };
 
+const DocumentKey = struct {
+    workspace_id: u64,
+    object_id: u64,
+};
+
 pub const Service = struct {
     documents: [MAX_DOCUMENTS]DocumentSlot = [_]DocumentSlot{DocumentSlot{}} ** MAX_DOCUMENTS,
 
@@ -69,8 +75,7 @@ pub const Service = struct {
             return;
         }
 
-        for (&self.documents) |*slot| {
-            if (slot.in_use) continue;
+        if (fixed_table.firstFreeSlot(DocumentSlot, MAX_DOCUMENTS, &self.documents)) |slot| {
             slot.in_use = true;
             slot.record = zeroDocument();
             slot.record.workspace_id = workspace_id;
@@ -124,13 +129,16 @@ pub const Service = struct {
     }
 
     fn findSlot(self: *Service, workspace_id: u64, object_id: u64) ?*DocumentSlot {
-        for (&self.documents) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.record.workspace_id == workspace_id and slot.record.object_id == object_id) return slot;
-        }
-        return null;
+        return fixed_table.findSlot(DocumentSlot, MAX_DOCUMENTS, &self.documents, DocumentKey{
+            .workspace_id = workspace_id,
+            .object_id = object_id,
+        }, documentSlotMatchesObject);
     }
 };
+
+fn documentSlotMatchesObject(context: DocumentKey, slot: *const DocumentSlot) bool {
+    return slot.record.workspace_id == context.workspace_id and slot.record.object_id == context.object_id;
+}
 
 fn compareResults(_: void, left: SearchResult, right: SearchResult) bool {
     if (left.score == right.score) return left.object_id < right.object_id;

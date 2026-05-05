@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
+const fixed_table = @import("../core/fixed_table.zig");
 const capability = @import("../kernel_api/capability.zig");
 const task_runtime = @import("task_runtime.zig");
 const userspace_executor = @import("userspace_executor.zig");
@@ -73,19 +74,14 @@ pub const Scheduler = struct {
 
     pub fn registerTask(self: *Scheduler, task_id: u64) bool {
         if (!self.initialized) return false;
-        for (&self.slots) |*slot| {
-            if (slot.in_use and slot.task_id == task_id) return false;
-        }
+        if (fixed_table.findSlot(Slot, task_runtime.MAX_TASKS, &self.slots, task_id, slotMatchesTaskId) != null) return false;
 
-        for (&self.slots) |*slot| {
-            if (slot.in_use) continue;
-            slot.* = .{
-                .in_use = true,
-                .task_id = task_id,
-            };
-            return true;
-        }
-        return false;
+        const slot = fixed_table.firstFreeSlot(Slot, task_runtime.MAX_TASKS, &self.slots) orelse return false;
+        slot.* = .{
+            .in_use = true,
+            .task_id = task_id,
+        };
+        return true;
     }
 
     pub fn executeTask(self: *Scheduler, task_id: u64, now_ticks: u64) bool {
@@ -133,6 +129,10 @@ pub const Scheduler = struct {
         return false;
     }
 };
+
+fn slotMatchesTaskId(task_id: u64, slot: *const Slot) bool {
+    return slot.task_id == task_id;
+}
 
 fn hasDispatchBudget(slot: *const Slot, task: *const task_runtime.TaskRecord) bool {
     const next = std.math.add(u64, slot.cpu_ticks_consumed, DISPATCH_CPU_TICK_COST) catch return false;

@@ -1,5 +1,8 @@
 const vga = @import("../drivers/vga.zig");
 
+pub const kernel_boundary_role = "bootstrap_network_shim";
+pub const publishes_full_network_service = false;
+
 pub const ETH_HEADER_SIZE = 14;
 pub const ETH_MTU = 1500;
 

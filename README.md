@@ -41,6 +41,8 @@ Use the pinned Zig toolchain and repo entrypoints:
 - `nasm`
 - `qemu-system-x86_64`
 - Python 3 for spec coverage checks
+- ShellCheck for `zig build lint` and `zig build verify`
+- Optional: `zlint` and `actionlint`; local hooks run them when installed, or require them with `ZIGOS_REQUIRE_ZLINT=1` / `ZIGOS_REQUIRE_ACTIONLINT=1`
 
 For ISO and disk-image workflows, install the full set verified by `scripts/setup-deps.sh`:
 
@@ -93,8 +95,11 @@ All repo Zig commands should go through `./scripts/zig.sh`. It resolves the pinn
 # Run host-side native tests
 ./scripts/zig.sh build host-tests
 
-# Run local hygiene plus host/spec tests
+# Run CI-aligned local lint, kernel build, and host/spec tests
 ./scripts/zig.sh build verify
+
+# Run local lint only
+./scripts/zig.sh build lint
 
 # Include optional QEMU gates in the verify target
 ./scripts/zig.sh build -Dverify-smoke=true -Dverify-benchmark=true verify
@@ -125,6 +130,7 @@ The main verification entrypoints are:
 
 - `./scripts/zig.sh build verify`
 - `./scripts/zig.sh build -Dverify-smoke=true -Dverify-benchmark=true verify`
+- `./scripts/zig.sh build lint`
 - `./scripts/zig.sh build kernel`
 - `./scripts/zig.sh build host-tests`
 - `./scripts/zig.sh build spec-tests`

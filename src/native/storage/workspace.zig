@@ -1,4 +1,5 @@
 const std = @import("std");
+const fixed_table = @import("../core/fixed_table.zig");
 const id_index = @import("../core/id_index.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
@@ -187,6 +188,16 @@ const SnapshotSlot = struct {
     snapshot: SnapshotRecord = zeroSnapshot(),
 };
 
+const WorkspaceLookup = struct {
+    owner: principal.PrincipalId,
+    label: []const u8,
+};
+
+const SnapshotLookup = struct {
+    workspace_id: u64,
+    label: []const u8,
+};
+
 const IdIndexSlot = id_index.Slot;
 
 const EntryIndexSlot = struct {
@@ -194,6 +205,36 @@ const EntryIndexSlot = struct {
     path_hash: u64 = 0,
     slot_index: usize = 0,
 };
+
+fn workspaceSlotMatchesOwnerLabel(context: WorkspaceLookup, slot: *const WorkspaceSlot) bool {
+    return slot.workspace.owner.eql(context.owner) and
+        std.mem.eql(u8, slot.workspace.labelSlice(), context.label);
+}
+
+fn workspaceSlotMatchesLabel(label: []const u8, slot: *const WorkspaceSlot) bool {
+    return std.mem.eql(u8, slot.workspace.labelSlice(), label);
+}
+
+fn workspaceSlotMatchesId(workspace_id: u64, slot: *const WorkspaceSlot) bool {
+    return slot.workspace.id == workspace_id;
+}
+
+fn workspaceSlotId(slot: *const WorkspaceSlot) u64 {
+    return slot.workspace.id;
+}
+
+fn snapshotSlotMatchesWorkspaceLabel(context: SnapshotLookup, slot: *const SnapshotSlot) bool {
+    return slot.snapshot.workspace_id == context.workspace_id and
+        std.mem.eql(u8, slot.snapshot.labelSlice(), context.label);
+}
+
+fn snapshotSlotMatchesId(snapshot_id: u64, slot: *const SnapshotSlot) bool {
+    return slot.snapshot.id == snapshot_id;
+}
+
+fn snapshotSlotId(slot: *const SnapshotSlot) u64 {
+    return slot.snapshot.id;
+}
 
 pub const Directory = struct {
     next_workspace_id: u64 = 1,
@@ -247,26 +288,31 @@ pub const Directory = struct {
     }
 
     pub fn createRef(self: *Directory, request: *const CreateRequest) Error!*WorkspaceRecord {
-        for (&self.workspaces, 0..) |*slot, slot_index| {
-            if (slot.in_use) continue;
-            slot.in_use = true;
-            slot.workspace = zeroWorkspace();
-            slot.workspace.id = self.nextWorkspaceId();
-            slot.workspace.owner = request.owner;
-            slot.workspace.label_len = copyText(&slot.workspace.label, request.label);
-            indexInsert(WORKSPACE_INDEX_CAPACITY, &self.workspace_index_slots, slot.workspace.id, slot_index);
-            self.markWorkspaceDirty(slot.workspace.id);
-            return &slot.workspace;
-        }
-        return error.WorkspaceTableFull;
+        const slot_index = fixed_table.firstFreeSlotIndex(WorkspaceSlot, MAX_WORKSPACES, &self.workspaces) orelse return error.WorkspaceTableFull;
+        const slot = &self.workspaces[slot_index];
+        slot.in_use = true;
+        slot.workspace = zeroWorkspace();
+        slot.workspace.id = self.nextWorkspaceId();
+        slot.workspace.owner = request.owner;
+        slot.workspace.label_len = copyText(&slot.workspace.label, request.label);
+        indexInsert(WORKSPACE_INDEX_CAPACITY, &self.workspace_index_slots, slot.workspace.id, slot_index);
+        self.markWorkspaceDirty(slot.workspace.id);
+        return &slot.workspace;
     }
 
     pub fn find(self: *Directory, workspace_id: u64) ?*WorkspaceRecord {
-        if (self.indexedWorkspaceSlot(workspace_id)) |slot| return &slot.workspace;
-        for (&self.workspaces) |*slot| {
-            if (slot.in_use and slot.workspace.id == workspace_id) return &slot.workspace;
-        }
-        return null;
+        const slot = fixed_table.findIndexedSlot(
+            WorkspaceSlot,
+            MAX_WORKSPACES,
+            WORKSPACE_INDEX_CAPACITY,
+            &self.workspaces,
+            &self.workspace_index_slots,
+            workspace_id,
+            workspaceSlotId,
+            workspace_id,
+            workspaceSlotMatchesId,
+        ) orelse return null;
+        return &slot.workspace;
     }
 
     pub fn findConst(self: *const Directory, workspace_id: u64) ?*const WorkspaceRecord {
@@ -274,52 +320,40 @@ pub const Directory = struct {
     }
 
     pub fn findOwned(self: *Directory, owner: principal.PrincipalId, label: []const u8) ?*WorkspaceRecord {
-        for (&self.workspaces) |*slot| {
-            if (!slot.in_use) continue;
-            if (!slot.workspace.owner.eql(owner)) continue;
-            if (!std.mem.eql(u8, slot.workspace.labelSlice(), label)) continue;
-            return &slot.workspace;
-        }
-        return null;
+        const slot = fixed_table.findSlot(WorkspaceSlot, MAX_WORKSPACES, &self.workspaces, WorkspaceLookup{
+            .owner = owner,
+            .label = label,
+        }, workspaceSlotMatchesOwnerLabel) orelse return null;
+        return &slot.workspace;
     }
 
     pub fn findOwnedConst(self: *const Directory, owner: principal.PrincipalId, label: []const u8) ?*const WorkspaceRecord {
-        for (&self.workspaces) |*slot| {
-            if (!slot.in_use) continue;
-            if (!slot.workspace.owner.eql(owner)) continue;
-            if (!std.mem.eql(u8, slot.workspace.labelSlice(), label)) continue;
-            return &slot.workspace;
-        }
-        return null;
+        const slot = fixed_table.findConstSlot(WorkspaceSlot, MAX_WORKSPACES, &self.workspaces, WorkspaceLookup{
+            .owner = owner,
+            .label = label,
+        }, workspaceSlotMatchesOwnerLabel) orelse return null;
+        return &slot.workspace;
     }
 
     pub fn findByLabel(self: *Directory, label: []const u8) ?*WorkspaceRecord {
-        for (&self.workspaces) |*slot| {
-            if (!slot.in_use) continue;
-            if (!std.mem.eql(u8, slot.workspace.labelSlice(), label)) continue;
-            return &slot.workspace;
-        }
-        return null;
+        const slot = fixed_table.findSlot(WorkspaceSlot, MAX_WORKSPACES, &self.workspaces, label, workspaceSlotMatchesLabel) orelse return null;
+        return &slot.workspace;
     }
 
     pub fn findSnapshotByLabel(self: *Directory, workspace_id: u64, label: []const u8) ?*SnapshotRecord {
-        for (&self.snapshots) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.snapshot.workspace_id != workspace_id) continue;
-            if (!std.mem.eql(u8, slot.snapshot.labelSlice(), label)) continue;
-            return &slot.snapshot;
-        }
-        return null;
+        const slot = fixed_table.findSlot(SnapshotSlot, MAX_SNAPSHOTS, &self.snapshots, SnapshotLookup{
+            .workspace_id = workspace_id,
+            .label = label,
+        }, snapshotSlotMatchesWorkspaceLabel) orelse return null;
+        return &slot.snapshot;
     }
 
     pub fn findSnapshotByLabelConst(self: *const Directory, workspace_id: u64, label: []const u8) ?*const SnapshotRecord {
-        for (&self.snapshots) |*slot| {
-            if (!slot.in_use) continue;
-            if (slot.snapshot.workspace_id != workspace_id) continue;
-            if (!std.mem.eql(u8, slot.snapshot.labelSlice(), label)) continue;
-            return &slot.snapshot;
-        }
-        return null;
+        const slot = fixed_table.findConstSlot(SnapshotSlot, MAX_SNAPSHOTS, &self.snapshots, SnapshotLookup{
+            .workspace_id = workspace_id,
+            .label = label,
+        }, snapshotSlotMatchesWorkspaceLabel) orelse return null;
+        return &slot.snapshot;
     }
 
     pub fn beginTransaction(self: *Directory, workspace_id: u64) Error!void {
@@ -662,40 +696,33 @@ pub const Directory = struct {
     }
 
     fn lookupConst(self: *const Directory, workspace_id: u64) ?*const WorkspaceRecord {
-        if (self.indexedWorkspaceSlotConst(workspace_id)) |slot| return &slot.workspace;
-        for (&self.workspaces) |*slot| {
-            if (slot.in_use and slot.workspace.id == workspace_id) return &slot.workspace;
-        }
-        return null;
+        const slot = fixed_table.findIndexedConstSlot(
+            WorkspaceSlot,
+            MAX_WORKSPACES,
+            WORKSPACE_INDEX_CAPACITY,
+            &self.workspaces,
+            &self.workspace_index_slots,
+            workspace_id,
+            workspaceSlotId,
+            workspace_id,
+            workspaceSlotMatchesId,
+        ) orelse return null;
+        return &slot.workspace;
     }
 
     fn findSnapshot(self: *Directory, snapshot_id: u64) ?*SnapshotRecord {
-        if (self.indexedSnapshotSlot(snapshot_id)) |slot| return &slot.snapshot;
-        for (&self.snapshots) |*slot| {
-            if (slot.in_use and slot.snapshot.id == snapshot_id) return &slot.snapshot;
-        }
-        return null;
-    }
-
-    fn indexedWorkspaceSlot(self: *Directory, workspace_id: u64) ?*WorkspaceSlot {
-        const slot_index = indexLookup(WORKSPACE_INDEX_CAPACITY, &self.workspace_index_slots, workspace_id) orelse return null;
-        const slot = &self.workspaces[slot_index];
-        if (!slot.in_use or slot.workspace.id != workspace_id) return null;
-        return slot;
-    }
-
-    fn indexedWorkspaceSlotConst(self: *const Directory, workspace_id: u64) ?*const WorkspaceSlot {
-        const slot_index = indexLookup(WORKSPACE_INDEX_CAPACITY, &self.workspace_index_slots, workspace_id) orelse return null;
-        const slot = &self.workspaces[slot_index];
-        if (!slot.in_use or slot.workspace.id != workspace_id) return null;
-        return slot;
-    }
-
-    fn indexedSnapshotSlot(self: *Directory, snapshot_id: u64) ?*SnapshotSlot {
-        const slot_index = indexLookup(SNAPSHOT_INDEX_CAPACITY, &self.snapshot_index_slots, snapshot_id) orelse return null;
-        const slot = &self.snapshots[slot_index];
-        if (!slot.in_use or slot.snapshot.id != snapshot_id) return null;
-        return slot;
+        const slot = fixed_table.findIndexedSlot(
+            SnapshotSlot,
+            MAX_SNAPSHOTS,
+            SNAPSHOT_INDEX_CAPACITY,
+            &self.snapshots,
+            &self.snapshot_index_slots,
+            snapshot_id,
+            snapshotSlotId,
+            snapshot_id,
+            snapshotSlotMatchesId,
+        ) orelse return null;
+        return &slot.snapshot;
     }
 
     fn nextWorkspaceId(self: *Directory) u64 {

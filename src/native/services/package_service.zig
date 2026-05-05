@@ -3,6 +3,7 @@ const manifest = @import("../policy/manifest.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const bundle_digest = @import("package_service_digest.zig");
 const bundle_ops = @import("package_service_bundle_ops.zig");
+const fixed_table = @import("../core/fixed_table.zig");
 const model = @import("package_service_model.zig");
 const signing = @import("../core/signing.zig");
 
@@ -133,8 +134,7 @@ pub const Service = struct {
             };
         }
 
-        for (&self.slots) |*slot| {
-            if (slot.in_use) continue;
+        if (fixed_table.firstFreeSlot(BundleSlot, MAX_INSTALLED_BUNDLES, &self.slots)) |slot| {
             slot.in_use = true;
             slot.bundle = zeroBundle();
             try bundle_ops.installNew(
@@ -171,10 +171,8 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, bundle_id: []const u8) ?*InstalledBundle {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id)) return &slot.bundle;
-        }
-        return null;
+        const slot = fixed_table.findSlot(BundleSlot, MAX_INSTALLED_BUNDLES, &self.slots, bundle_id, bundleSlotMatchesId) orelse return null;
+        return &slot.bundle;
     }
 
     pub fn buildLaunchPlan(self: *const Service, bundle_id: []const u8) Error!LaunchPlan {
@@ -198,12 +196,14 @@ pub const Service = struct {
     }
 
     fn findConst(self: *const Service, bundle_id: []const u8) ?*const InstalledBundle {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id)) return &slot.bundle;
-        }
-        return null;
+        const slot = fixed_table.findConstSlot(BundleSlot, MAX_INSTALLED_BUNDLES, &self.slots, bundle_id, bundleSlotMatchesId) orelse return null;
+        return &slot.bundle;
     }
 };
+
+fn bundleSlotMatchesId(bundle_id: []const u8, slot: *const BundleSlot) bool {
+    return std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id);
+}
 
 const test_migration = struct {
     var apply_count: usize = 0;
