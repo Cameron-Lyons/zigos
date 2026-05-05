@@ -1,4 +1,5 @@
 const std = @import("std");
+const fixed_table = @import("../core/fixed_table.zig");
 const capability = @import("../kernel_api/capability.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
@@ -156,37 +157,31 @@ pub const Directory = struct {
             else => {},
         }
 
-        for (&self.policies) |*slot| {
-            if (!slot.in_use) continue;
-            if (policyMatchesRequest(&slot.policy, request)) return &slot.policy;
-        }
-
-        for (&self.policies) |*slot| {
-            if (slot.in_use) continue;
-            slot.in_use = true;
-            slot.policy = zeroPolicy();
-            slot.policy.id = self.nextPolicyId();
-            slot.policy.owner = request.owner;
-            slot.policy.workspace_id = request.workspace_id;
-            slot.policy.label_len = copyText(&slot.policy.label, request.label);
-            slot.policy.mode = request.mode;
-            slot.policy.target_len = copyText(&slot.policy.target, request.target);
-            slot.policy.explicit_internet_grant = request.explicit_internet_grant;
-            slot.policy.require_remote_attestation = request.require_remote_attestation;
-            if (request.pinned_root_digest) |digest| {
-                slot.policy.pinned_root_digest_present = true;
-                slot.policy.pinned_root_digest = digest;
-            }
+        if (fixed_table.findSlot(PolicySlot, MAX_POLICIES, &self.policies, request, policySlotMatchesRequest)) |slot| {
             return &slot.policy;
         }
-        return error.PolicyTableFull;
+
+        const slot = fixed_table.firstFreeSlot(PolicySlot, MAX_POLICIES, &self.policies) orelse return error.PolicyTableFull;
+        slot.in_use = true;
+        slot.policy = zeroPolicy();
+        slot.policy.id = self.nextPolicyId();
+        slot.policy.owner = request.owner;
+        slot.policy.workspace_id = request.workspace_id;
+        slot.policy.label_len = copyText(&slot.policy.label, request.label);
+        slot.policy.mode = request.mode;
+        slot.policy.target_len = copyText(&slot.policy.target, request.target);
+        slot.policy.explicit_internet_grant = request.explicit_internet_grant;
+        slot.policy.require_remote_attestation = request.require_remote_attestation;
+        if (request.pinned_root_digest) |digest| {
+            slot.policy.pinned_root_digest_present = true;
+            slot.policy.pinned_root_digest = digest;
+        }
+        return &slot.policy;
     }
 
     pub fn find(self: *Directory, policy_id: u64) ?*PolicyRecord {
-        for (&self.policies) |*slot| {
-            if (slot.in_use and slot.policy.id == policy_id) return &slot.policy;
-        }
-        return null;
+        const slot = fixed_table.findSlot(PolicySlot, MAX_POLICIES, &self.policies, policy_id, policySlotMatchesId) orelse return null;
+        return &slot.policy;
     }
 
     pub fn authorize(self: *Directory, policy_id: u64, destination: Destination) Error!Decision {
@@ -382,6 +377,14 @@ pub const EgressBroker = struct {
         };
     }
 };
+
+fn policySlotMatchesRequest(request: CreateRequest, slot: *const PolicySlot) bool {
+    return policyMatchesRequest(&slot.policy, request);
+}
+
+fn policySlotMatchesId(policy_id: u64, slot: *const PolicySlot) bool {
+    return slot.policy.id == policy_id;
+}
 
 fn zeroPolicy() PolicyRecord {
     return .{
@@ -714,4 +717,99 @@ test "egress broker requires a usable network policy capability before connectin
     });
     try std.testing.expect(!revoked.allowed);
     try std.testing.expectEqual(EgressDecisionReason.capability_revoked, revoked.reason);
+}
+
+test "egress broker binds connection creation to attested pinned service identity" {
+    var directory = Directory.init();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 13 };
+    const app = principal.PrincipalId{ .kind = .app, .serial = 13 };
+    const pinned_digest = [_]u8{0xD1} ** 32;
+    const wrong_digest = [_]u8{0xD2} ** 32;
+
+    const overlay = try directory.create(.{
+        .owner = owner,
+        .label = "notes-overlay",
+        .mode = .named_service_identity,
+        .target = "overlay.notes.sync",
+        .require_remote_attestation = true,
+        .pinned_root_digest = pinned_digest,
+    });
+    var capabilities = capability.CapabilityTable.init();
+    const overlay_capability = try capabilities.mintBootRoot(.{
+        .holder = app,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .network_policy, .id = overlay.id },
+        .rights = .{ .network_policy = .{
+            .network_remote = true,
+        } },
+        .scope = .{
+            .task_id = 801,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = 100,
+        },
+    });
+    var broker = EgressBroker.init(&directory, &capabilities);
+
+    const missing_attestation = try broker.connect(.{
+        .task_id = 801,
+        .principal_id = app,
+        .capability_id = overlay_capability.id,
+        .policy_id = overlay.id,
+        .evidence = .{ .destination = .{ .service_identity = "overlay.notes.sync" } },
+        .now_ticks = 10,
+    });
+    try std.testing.expect(!missing_attestation.allowed);
+    try std.testing.expectEqual(EgressDecisionReason.attestation_required, missing_attestation.reason);
+
+    const wrong_identity = try broker.connect(.{
+        .task_id = 801,
+        .principal_id = app,
+        .capability_id = overlay_capability.id,
+        .policy_id = overlay.id,
+        .evidence = .{
+            .destination = .{ .service_identity = "overlay.notes.sync" },
+            .attested = true,
+            .peer_root_digest_present = true,
+            .peer_root_digest = wrong_digest,
+        },
+        .now_ticks = 10,
+    });
+    try std.testing.expect(!wrong_identity.allowed);
+    try std.testing.expectEqual(EgressDecisionReason.identity_pin_mismatch, wrong_identity.reason);
+
+    const wrong_service = try broker.connect(.{
+        .task_id = 801,
+        .principal_id = app,
+        .capability_id = overlay_capability.id,
+        .policy_id = overlay.id,
+        .evidence = .{
+            .destination = .{ .service_identity = "overlay.other" },
+            .attested = true,
+            .peer_root_digest_present = true,
+            .peer_root_digest = pinned_digest,
+        },
+        .now_ticks = 10,
+    });
+    try std.testing.expect(!wrong_service.allowed);
+    try std.testing.expectEqual(EgressDecisionReason.destination_mismatch, wrong_service.reason);
+
+    const allowed = try broker.connect(.{
+        .task_id = 801,
+        .principal_id = app,
+        .capability_id = overlay_capability.id,
+        .policy_id = overlay.id,
+        .evidence = .{
+            .destination = .{ .service_identity = "overlay.notes.sync" },
+            .attested = true,
+            .peer_root_digest_present = true,
+            .peer_root_digest = pinned_digest,
+        },
+        .now_ticks = 10,
+    });
+    try std.testing.expect(allowed.allowed);
+    try std.testing.expect(allowed.policy_decision.attestation_required);
+    try std.testing.expect(allowed.policy_decision.identity_pinned);
 }

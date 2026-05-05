@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
+const fixed_table = @import("../core/fixed_table.zig");
 
 pub const MAX_SHARED_MEMORY_OBJECTS: usize = 24;
 pub const MAX_MAPPINGS_PER_OBJECT: usize = 8;
@@ -89,25 +90,21 @@ pub const Table = struct {
     ) Error!Object {
         if (size_bytes == 0) return error.SizeZero;
 
-        for (&self.slots) |*slot| {
-            if (slot.in_use) continue;
-            slot.in_use = true;
-            slot.object = .{
-                .id = self.allocateObjectId(),
-                .owner_task_id = owner_task_id,
-                .size_bytes = size_bytes,
-                .revocation_generation = 1,
-                .attachment_generation = 1,
-                .revoked = false,
-                .compute_access = compute_access,
-                .attached_compute = ComputeAccess.empty(),
-                .mapped_task_ids = [_]u64{0} ** MAX_MAPPINGS_PER_OBJECT,
-                .mapping_count = 0,
-            };
-            return slot.object;
-        }
-
-        return error.TableFull;
+        const slot = fixed_table.firstFreeSlot(ObjectSlot, MAX_SHARED_MEMORY_OBJECTS, &self.slots) orelse return error.TableFull;
+        slot.in_use = true;
+        slot.object = .{
+            .id = self.allocateObjectId(),
+            .owner_task_id = owner_task_id,
+            .size_bytes = size_bytes,
+            .revocation_generation = 1,
+            .attachment_generation = 1,
+            .revoked = false,
+            .compute_access = compute_access,
+            .attached_compute = ComputeAccess.empty(),
+            .mapped_task_ids = [_]u64{0} ** MAX_MAPPINGS_PER_OBJECT,
+            .mapping_count = 0,
+        };
+        return slot.object;
     }
 
     pub fn map(self: *Table, object_id: u64, task_id: u64) Error!void {
@@ -192,14 +189,7 @@ pub const Table = struct {
     }
 
     pub fn mappingsForTask(self: *const Table, task_id: u64) u16 {
-        var count: u16 = 0;
-        for (self.slots) |slot| {
-            if (!slot.in_use or slot.object.revoked) continue;
-            for (slot.object.mapped_task_ids[0..slot.object.mapping_count]) |mapped_task_id| {
-                if (mapped_task_id == task_id) count += 1;
-            }
-        }
-        return count;
+        return @intCast(fixed_table.countMatching(ObjectSlot, MAX_SHARED_MEMORY_OBJECTS, &self.slots, task_id, objectSlotMapsTask));
     }
 
     fn allocateObjectId(self: *Table) u64 {
@@ -208,19 +198,27 @@ pub const Table = struct {
     }
 
     fn find(self: *Table, object_id: u64) ?*Object {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and slot.object.id == object_id) return &slot.object;
-        }
-        return null;
+        const slot = fixed_table.findSlot(ObjectSlot, MAX_SHARED_MEMORY_OBJECTS, &self.slots, object_id, objectSlotMatchesId) orelse return null;
+        return &slot.object;
     }
 
     fn findConst(self: *const Table, object_id: u64) ?*const Object {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and slot.object.id == object_id) return &slot.object;
-        }
-        return null;
+        const slot = fixed_table.findConstSlot(ObjectSlot, MAX_SHARED_MEMORY_OBJECTS, &self.slots, object_id, objectSlotMatchesId) orelse return null;
+        return &slot.object;
     }
 };
+
+fn objectSlotMatchesId(object_id: u64, slot: *const ObjectSlot) bool {
+    return slot.object.id == object_id;
+}
+
+fn objectSlotMapsTask(task_id: u64, slot: *const ObjectSlot) bool {
+    if (slot.object.revoked) return false;
+    for (slot.object.mapped_task_ids[0..slot.object.mapping_count]) |mapped_task_id| {
+        if (mapped_task_id == task_id) return true;
+    }
+    return false;
+}
 
 fn zeroObject() Object {
     return .{

@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
+const fixed_table = @import("../core/fixed_table.zig");
 const native_util = @import("../core/util.zig");
 
 pub const MAX_ENDPOINTS: usize = 32;
@@ -66,21 +67,17 @@ pub const Table = struct {
     }
 
     pub fn create(self: *Table, owner_task_id: u64, label: []const u8, flags: EndpointFlags) Error!Endpoint {
-        for (&self.slots) |*slot| {
-            if (slot.in_use) continue;
-
-            slot.in_use = true;
-            slot.endpoint = .{
-                .id = self.allocateEndpointId(),
-                .owner_task_id = owner_task_id,
-                .flags = flags,
-                .label_len = @min(label.len, 47),
-                .label = [_]u8{0} ** 48,
-            };
-            @memcpy(slot.endpoint.label[0..slot.endpoint.label_len], label[0..slot.endpoint.label_len]);
-            return slot.endpoint;
-        }
-        return error.TableFull;
+        const slot = fixed_table.firstFreeSlot(EndpointSlot, MAX_ENDPOINTS, &self.slots) orelse return error.TableFull;
+        slot.in_use = true;
+        slot.endpoint = .{
+            .id = self.allocateEndpointId(),
+            .owner_task_id = owner_task_id,
+            .flags = flags,
+            .label_len = @min(label.len, 47),
+            .label = [_]u8{0} ** 48,
+        };
+        @memcpy(slot.endpoint.label[0..slot.endpoint.label_len], label[0..slot.endpoint.label_len]);
+        return slot.endpoint;
     }
 
     pub fn connect(self: *Table, endpoint_id: u64, peer_endpoint_id: u64) Error!void {
@@ -168,13 +165,7 @@ pub const Table = struct {
     }
 
     pub fn activeForTask(self: *const Table, task_id: u64) u16 {
-        var count: u16 = 0;
-        for (self.slots) |slot| {
-            if (slot.in_use and slot.endpoint.owner_task_id == task_id) {
-                count += 1;
-            }
-        }
-        return count;
+        return @intCast(fixed_table.countMatching(EndpointSlot, MAX_ENDPOINTS, &self.slots, task_id, endpointSlotMatchesTask));
     }
 
     fn allocateEndpointId(self: *Table) u64 {
@@ -183,19 +174,23 @@ pub const Table = struct {
     }
 
     fn find(self: *Table, endpoint_id: u64) ?*Endpoint {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and slot.endpoint.id == endpoint_id) return &slot.endpoint;
-        }
-        return null;
+        const slot = fixed_table.findSlot(EndpointSlot, MAX_ENDPOINTS, &self.slots, endpoint_id, endpointSlotMatchesId) orelse return null;
+        return &slot.endpoint;
     }
 
     fn findConst(self: *const Table, endpoint_id: u64) ?*const Endpoint {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and slot.endpoint.id == endpoint_id) return &slot.endpoint;
-        }
-        return null;
+        const slot = fixed_table.findConstSlot(EndpointSlot, MAX_ENDPOINTS, &self.slots, endpoint_id, endpointSlotMatchesId) orelse return null;
+        return &slot.endpoint;
     }
 };
+
+fn endpointSlotMatchesId(endpoint_id: u64, slot: *const EndpointSlot) bool {
+    return slot.endpoint.id == endpoint_id;
+}
+
+fn endpointSlotMatchesTask(task_id: u64, slot: *const EndpointSlot) bool {
+    return slot.endpoint.owner_task_id == task_id;
+}
 
 fn zeroMessage() Message {
     return .{

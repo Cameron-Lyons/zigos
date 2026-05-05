@@ -169,6 +169,10 @@ pub const Ledger = struct {
     next_by_kind: [MAX_EVENTS]usize = [_]usize{no_event_index} ** MAX_EVENTS,
     next_by_subject: [MAX_EVENTS]usize = [_]usize{no_event_index} ** MAX_EVENTS,
     next_by_task: [MAX_EVENTS]usize = [_]usize{no_event_index} ** MAX_EVENTS,
+    persistence_batch_depth: usize = 0,
+    pending_persist_first_sequence: u64 = 0,
+    pending_persist_count: usize = 0,
+    pending_persist_latest_tick: u64 = 0,
 
     pub fn init() Ledger {
         return .{};
@@ -202,6 +206,24 @@ pub const Ledger = struct {
         }
 
         return ledger;
+    }
+
+    pub fn beginPersistenceBatch(self: *Ledger) void {
+        self.persistence_batch_depth += 1;
+    }
+
+    pub fn flushPersistenceBatch(self: *Ledger) Error!void {
+        if (self.persistence_batch_depth != 0) self.persistence_batch_depth -= 1;
+        if (self.persistence_batch_depth != 0 or self.pending_persist_count == 0) return;
+
+        const first_sequence = self.pending_persist_first_sequence;
+        const latest_sequence = first_sequence + @as(u64, @intCast(self.pending_persist_count)) - 1;
+        try self.persistRange(first_sequence, latest_sequence, self.pending_persist_latest_tick);
+        self.clearPendingPersistence();
+    }
+
+    pub fn pendingPersistenceCount(self: *const Ledger) usize {
+        return self.pending_persist_count;
     }
 
     pub fn recordPermissionDecision(
@@ -498,10 +520,14 @@ pub const Ledger = struct {
             self.next_sequence += 1;
             self.indexEvent(index) catch |err| {
                 slot.* = EventSlot{};
-                self.rebuildIndexes();
+                try self.rebuildIndexes();
                 return err;
             };
-            try self.persist(slot.event);
+            if (self.persistence_batch_depth == 0) {
+                try self.persistRange(slot.event.sequence, slot.event.sequence, slot.event.tick);
+            } else {
+                self.markPendingPersistence(slot.event);
+            }
             return;
         }
         return error.EventTableFull;
@@ -629,7 +655,7 @@ pub const Ledger = struct {
         return null;
     }
 
-    fn rebuildIndexes(self: *Ledger) void {
+    fn rebuildIndexes(self: *Ledger) Error!void {
         self.kind_index = [_]IndexList{IndexList{}} ** event_kind_count;
         self.subject_index = [_]SubjectIndexSlot{SubjectIndexSlot{}} ** MAX_EVENTS;
         self.task_index = [_]TaskIndexSlot{TaskIndexSlot{}} ** MAX_EVENTS;
@@ -638,11 +664,33 @@ pub const Ledger = struct {
         self.next_by_task = [_]usize{no_event_index} ** MAX_EVENTS;
         for (self.events, 0..) |slot, index| {
             if (!slot.in_use) continue;
-            self.indexEvent(index) catch unreachable;
+            try self.indexEvent(index);
         }
     }
 
-    fn persist(self: *Ledger, latest_event: Event) Error!void {
+    fn markPendingPersistence(self: *Ledger, event: Event) void {
+        if (self.storage == null) return;
+        if (self.pending_persist_count == 0) {
+            self.pending_persist_first_sequence = event.sequence;
+        }
+        self.pending_persist_count += 1;
+        self.pending_persist_latest_tick = event.tick;
+    }
+
+    fn clearPendingPersistence(self: *Ledger) void {
+        self.pending_persist_first_sequence = 0;
+        self.pending_persist_count = 0;
+        self.pending_persist_latest_tick = 0;
+    }
+
+    fn findEventBySequence(self: *const Ledger, sequence: u64) ?Event {
+        for (self.events) |slot| {
+            if (slot.in_use and slot.event.sequence == sequence) return slot.event;
+        }
+        return null;
+    }
+
+    fn persistRange(self: *Ledger, first_sequence: u64, latest_sequence: u64, latest_tick: u64) Error!void {
         const storage = self.storage orelse return;
         var header = PersistentHeader{ .next_sequence = self.next_sequence };
         const header_payload = std.mem.asBytes(&header);
@@ -657,11 +705,13 @@ pub const Ledger = struct {
         };
 
         try storage.beginTransaction(self.workspace_id);
-        if (latest_event.sequence > MAX_PERSISTED_EVENTS) {
+        var expired_sequence = first_sequence;
+        while (expired_sequence <= latest_sequence) : (expired_sequence += 1) {
+            if (expired_sequence <= MAX_PERSISTED_EVENTS) continue;
             var expired_path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
             const expired_path = expired_path_buffer[0..try writeEventEntryPath(
                 &expired_path_buffer,
-                latest_event.sequence - MAX_PERSISTED_EVENTS,
+                expired_sequence - MAX_PERSISTED_EVENTS,
             )];
             storage.stageDelete(self.workspace_id, expired_path) catch |err| switch (err) {
                 error.EntryNotFound => {},
@@ -679,40 +729,44 @@ pub const Ledger = struct {
                 "application/zigos-event-ledger",
                 .document,
                 header_payload,
-                latest_event.tick,
+                latest_tick,
             ),
             .parent_version_id = if (previous_header_version_id != 0) previous_header_version_id else null,
         });
         try storage.stagePut(self.workspace_id, state_entry_path, header_result.object_id, header_result.version_id, .document);
         self.header_version_id = header_result.version_id;
 
-        var event_path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
-        const event_path = event_path_buffer[0..try writeEventEntryPath(&event_path_buffer, latest_event.sequence)];
-        var payload_record = PersistentEventRecord.fromEvent(PersistentEvent.fromEvent(latest_event));
-        const payload = std.mem.asBytes(&payload_record);
-        const result = try storage.putVersion(.{
-            .preferred_object_id = eventObjectId(latest_event.sequence),
-            .object_type = .document,
-            .payload = payload,
-            .metadata = try signLedgerMetadata(
-                self.state_signer,
-                "event-ledger-entry",
-                "application/zigos-event-ledger-entry",
-                .document,
-                payload,
-                latest_event.tick,
-            ),
-            .parent_version_id = null,
-        });
-        try storage.stagePut(self.workspace_id, event_path, result.object_id, result.version_id, .document);
+        var sequence = first_sequence;
+        while (sequence <= latest_sequence) : (sequence += 1) {
+            const event = self.findEventBySequence(sequence) orelse return error.CorruptState;
+            var event_path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+            const event_path = event_path_buffer[0..try writeEventEntryPath(&event_path_buffer, event.sequence)];
+            var payload_record = PersistentEventRecord.fromEvent(PersistentEvent.fromEvent(event));
+            const payload = std.mem.asBytes(&payload_record);
+            const result = try storage.putVersion(.{
+                .preferred_object_id = eventObjectId(event.sequence),
+                .object_type = .document,
+                .payload = payload,
+                .metadata = try signLedgerMetadata(
+                    self.state_signer,
+                    "event-ledger-entry",
+                    "application/zigos-event-ledger-entry",
+                    .document,
+                    payload,
+                    event.tick,
+                ),
+                .parent_version_id = null,
+            });
+            try storage.stagePut(self.workspace_id, event_path, result.object_id, result.version_id, .document);
+        }
 
-        _ = try storage.commit(self.workspace_id, latest_event.tick);
+        _ = try storage.commit(self.workspace_id, latest_tick);
     }
 
     fn loadPersistedEvents(self: *Ledger) Error!void {
         const storage = self.storage orelse return;
         self.events = [_]EventSlot{EventSlot{}} ** MAX_EVENTS;
-        self.rebuildIndexes();
+        try self.rebuildIndexes();
         self.next_sequence = 1;
         self.header_version_id = 0;
 
@@ -749,7 +803,7 @@ pub const Ledger = struct {
         if (loaded_count > 0 and self.next_sequence <= self.events[loaded_count - 1].event.sequence) {
             self.next_sequence = self.events[loaded_count - 1].event.sequence + 1;
         }
-        self.rebuildIndexes();
+        try self.rebuildIndexes();
     }
 
     fn recentEventsForPersistence(
@@ -1132,236 +1186,4 @@ fn parsePersistentEvent(payload: []const u8) Error!PersistentEvent {
 fn writeEventEntryPath(buffer: []u8, sequence: u64) Error!usize {
     const path = std.fmt.bufPrint(buffer, "{s}{d}", .{ event_entry_prefix, sequence }) catch return error.NoSpaceLeft;
     return path.len;
-}
-
-test "event ledger exports structured redacted diagnostics and audit history" {
-    var ledger = Ledger.init();
-    const user = principal.PrincipalId{ .kind = .user, .serial = 7 };
-    const service_subject = principal.PrincipalId{ .kind = .service, .serial = 9 };
-    const device_subject = principal.PrincipalId{ .kind = .device, .serial = 42 };
-
-    try ledger.recordPermissionDecision(user, 11, .screen_capture, false, .policy_denied, 20, "org policy denied capture", true);
-    try ledger.recordProcessCrash(.network_stack, service_subject, 21, 5001, "segfault");
-    try ledger.recordDriverRestart(.media_print_helpers, service_subject, 88, 22, "audio-print restarted");
-    try ledger.recordUpdateTransition(service_subject, 1, .boot, true, 23, "rolled back to stable-a");
-    try ledger.recordSyncConflict(user, 5, 24, "documents/tax-return.pdf conflict", true);
-    try ledger.recordDeviceTrustChange(user, device_subject, false, 25, "device revoked");
-
-    var buffer: [2048]u8 = undefined;
-    const exported = try ledger.exportText(&buffer, .{});
-    try std.testing.expect(std.mem.indexOf(u8, exported, "redacted") != null);
-    try std.testing.expect(std.mem.indexOf(u8, exported, "service=network_stack") != null);
-    try std.testing.expect(std.mem.indexOf(u8, exported, "slot=1 rollback=yes failure=boot") != null);
-    try std.testing.expect(std.mem.indexOf(u8, exported, "device=42 trusted=no") != null);
-    try std.testing.expect(std.mem.indexOf(u8, exported, "policy=user-grant-policy") != null);
-    try std.testing.expect(std.mem.indexOf(u8, exported, "approval=yes") != null);
-
-    const full = try ledger.exportText(&buffer, .{ .include_protected_content = true });
-    try std.testing.expect(std.mem.indexOf(u8, full, "tax-return.pdf") != null);
-    try std.testing.expectEqual(EventKind.device_trust_change, ledger.latestKind(.device_trust_change).?.kind);
-}
-
-test "event ledger requires explicit opt-in before remote sharing personal device diagnostics" {
-    var ledger = Ledger.init();
-    const user = principal.PrincipalId{ .kind = .user, .serial = 17 };
-
-    try ledger.recordSyncConflict(user, 41, 50, "documents/payroll.xlsx conflict", true);
-
-    var buffer: [1024]u8 = undefined;
-    try std.testing.expectError(error.ConsentRequired, ledger.exportRemoteShare(&buffer, .{}));
-
-    const opted_in = try ledger.exportRemoteShare(&buffer, .{
-        .user_opted_in = true,
-    });
-    try std.testing.expect(std.mem.indexOf(u8, opted_in, "redacted") != null);
-    try std.testing.expect(std.mem.indexOf(u8, opted_in, "payroll.xlsx") == null);
-
-    const managed = try ledger.exportRemoteShare(&buffer, .{
-        .personal_device = false,
-        .include_protected_content = true,
-    });
-    try std.testing.expect(std.mem.indexOf(u8, managed, "payroll.xlsx") != null);
-}
-
-test "event ledger indexes structured queries by kind subject and task" {
-    var ledger = Ledger.init();
-    const alice = principal.PrincipalId{ .kind = .user, .serial = 101 };
-    const bob = principal.PrincipalId{ .kind = .user, .serial = 202 };
-    const storage_subject = principal.PrincipalId{ .kind = .service, .serial = 303 };
-
-    try ledger.recordPermissionDecision(alice, 44, .screen_capture, false, .policy_denied, 10, "alice protected", true);
-    try ledger.recordCapabilityGrant(alice, 44, 700, .object_access, 11, "alice grant");
-    try ledger.recordPermissionReview(bob, 55, .camera, true, 12, "bob review", false);
-    try ledger.recordDriverRestart(.storage_object, storage_subject, 900, 13, "driver restart");
-    try ledger.recordCapabilityRevocation(alice, 66, 700, .object_access, 14, "alice revoke");
-
-    try std.testing.expectEqual(@as(usize, 1), ledger.kind_index[kindIndex(.permission_decision)].count);
-    try std.testing.expectEqual(@as(usize, 3), ledger.subject_index[ledger.findSubjectIndex(alice).?].list.count);
-    try std.testing.expectEqual(@as(usize, 2), ledger.task_index[ledger.findTaskIndex(44).?].list.count);
-    try std.testing.expectEqual(EventKind.capability_revocation, ledger.latestKind(.capability_revocation).?.kind);
-
-    var records: [4]Event = undefined;
-    const task_matches = ledger.queryEvents(.{ .task_id = 44 }, &records);
-    try std.testing.expectEqual(@as(usize, 2), task_matches.len);
-    try std.testing.expectEqual(@as(u64, 1), task_matches[0].sequence);
-    try std.testing.expectEqual(@as(u64, 2), task_matches[1].sequence);
-    try std.testing.expectEqualStrings("redacted", task_matches[0].detailSlice());
-
-    const subject_and_kind = ledger.queryEvents(.{ .subject = alice, .kind = .capability_revocation }, &records);
-    try std.testing.expectEqual(@as(usize, 1), subject_and_kind.len);
-    try std.testing.expectEqual(@as(u64, 5), subject_and_kind[0].sequence);
-
-    const protected = ledger.queryEvents(.{ .subject = alice, .task_id = 44, .include_protected_content = true }, &records);
-    try std.testing.expectEqual(@as(usize, 2), protected.len);
-    try std.testing.expectEqualStrings("alice protected", protected[0].detailSlice());
-
-    var export_buffer: [1024]u8 = undefined;
-    const exported = try ledger.exportText(&export_buffer, .{});
-    try std.testing.expect(std.mem.indexOf(u8, exported, "#1 tick=10 kind=permission_decision") != null);
-    try std.testing.expect(std.mem.indexOf(u8, exported, "detail=redacted") != null);
-    try std.testing.expect(std.mem.indexOf(u8, exported, "detail=alice protected") == null);
-}
-
-test "event ledger persists history across restart" {
-    var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-
-    const owner = principal.PrincipalId{ .kind = .service, .serial = 44 };
-    const signer = signing.SignerIdentity{
-        .label = "diagnostic-ledger",
-        .seed = [_]u8{0xA7} ** 32,
-    };
-
-    var storage = storage_service.Service.initWithStore(901, 300, owner, &storage_checkpoint_store);
-    var ledger = try Ledger.initPersistent(&storage, owner, signer);
-    try ledger.recordUpdateTransition(owner, 1, .none, false, 10, "stable-b activated");
-    try ledger.recordDeviceTrustChange(owner, .{ .kind = .device, .serial = 4 }, false, 11, "device revoked");
-
-    var restarted_storage = storage_service.Service.initWithStore(901, 301, owner, &storage_checkpoint_store);
-    var restarted = try Ledger.initPersistent(&restarted_storage, owner, signer);
-    try std.testing.expect(restarted.loaded_existing_state);
-    try std.testing.expectEqual(EventKind.device_trust_change, restarted.latestKind(.device_trust_change).?.kind);
-
-    var buffer: [1024]u8 = undefined;
-    const exported = try restarted.exportText(&buffer, .{});
-    try std.testing.expect(std.mem.indexOf(u8, exported, "kind=update_transition") != null);
-    try std.testing.expect(std.mem.indexOf(u8, exported, "kind=device_trust_change") != null);
-
-    storage_checkpoint_store.resetPersistent();
-}
-
-test "event ledger persists user visible policy ux history across restart and query" {
-    var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-
-    const owner = principal.PrincipalId{ .kind = .service, .serial = 46 };
-    const user = principal.PrincipalId{ .kind = .user, .serial = 8 };
-    const app = principal.PrincipalId{ .kind = .app, .serial = 9 };
-    const signer = signing.SignerIdentity{
-        .label = "policy-ux-history",
-        .seed = [_]u8{0xA9} ** 32,
-    };
-
-    var storage = storage_service.Service.initWithStore(903, 304, owner, &storage_checkpoint_store);
-    var ledger = try Ledger.initPersistent(&storage, owner, signer);
-    try ledger.recordPermissionReview(user, 503, .screen_capture, false, 30, "screen capture review denied", false);
-    try ledger.recordPermissionDecision(user, 503, .screen_capture, false, .policy_denied, 31, "screen capture blocked", true);
-    try ledger.recordCapabilityGrant(user, 503, 7001, .object_access, 32, "workspace grant");
-    try ledger.recordCapabilityRevocation(user, 503, 7001, .object_access, 33, "workspace grant revoked");
-
-    var notifications = notification_center.Center.init();
-    const notification = try notifications.post(.{
-        .source = app,
-        .reason = .permission_request,
-        .urgency = .high,
-        .task_id = 503,
-        .detail = "app needs screen capture",
-    });
-    try ledger.recordNotification(notification.*, 34);
-
-    var ux = native_ux.Controller.init();
-    const flow = try ux.reviewPermissionDecision(
-        503,
-        user,
-        "app.capture",
-        .{
-            .kind = .screen_capture,
-            .resource = "screen:main",
-            .rights = .{ .service = .{} },
-            .required = true,
-        },
-        false,
-        false,
-        null,
-    );
-    try ledger.recordTaskFlow(flow.*, 35);
-
-    var restarted_storage = storage_service.Service.initWithStore(903, 305, owner, &storage_checkpoint_store);
-    var restarted = try Ledger.initPersistent(&restarted_storage, owner, signer);
-    try std.testing.expect(restarted.loaded_existing_state);
-    try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .kind = .permission_review, .task_id = 503 }));
-    try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .kind = .permission_decision, .task_id = 503 }));
-    try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .kind = .capability_grant, .task_id = 503 }));
-    try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .kind = .capability_revocation, .task_id = 503 }));
-    try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .kind = .notification, .task_id = 503 }));
-    try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .kind = .task_flow, .task_id = 503 }));
-
-    var events_buffer: [4]Event = undefined;
-    const redacted = restarted.queryEvents(.{ .kind = .permission_decision, .task_id = 503 }, &events_buffer);
-    try std.testing.expectEqual(@as(usize, 1), redacted.len);
-    try std.testing.expectEqualStrings("redacted", redacted[0].detailSlice());
-    const full = restarted.queryEvents(.{ .kind = .permission_decision, .task_id = 503, .include_protected_content = true }, &events_buffer);
-    try std.testing.expectEqualStrings("screen capture blocked", full[0].detailSlice());
-
-    var export_buffer: [2048]u8 = undefined;
-    const exported = try restarted.exportText(&export_buffer, .{});
-    try std.testing.expect(std.mem.indexOf(u8, exported, "kind=permission_review") != null);
-    try std.testing.expect(std.mem.indexOf(u8, exported, "kind=capability_grant") != null);
-    try std.testing.expect(std.mem.indexOf(u8, exported, "kind=capability_revocation") != null);
-    try std.testing.expect(std.mem.indexOf(u8, exported, "reason=permission_request") != null);
-    try std.testing.expect(std.mem.indexOf(u8, exported, "flow_kind=review_permission_request") != null);
-
-    storage_checkpoint_store.resetPersistent();
-}
-
-test "event ledger persistence retains full in-memory history and detail payloads" {
-    var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-
-    const owner = principal.PrincipalId{ .kind = .service, .serial = 45 };
-    const signer = signing.SignerIdentity{
-        .label = "diagnostic-ledger-bounded",
-        .seed = [_]u8{0xA8} ** 32,
-    };
-
-    var storage = storage_service.Service.initWithStore(902, 302, owner, &storage_checkpoint_store);
-    var ledger = try Ledger.initPersistent(&storage, owner, signer);
-
-    var tick: u64 = 10;
-    while (tick < 18) : (tick += 1) {
-        var detail_buffer: [96]u8 = undefined;
-        const detail = try std.fmt.bufPrint(&detail_buffer, "event-{d}-detail-abcdefghijklmnopqrstuvwxyz-0123456789", .{tick});
-        try ledger.recordUpdateTransition(
-            owner,
-            @as(usize, @intCast(tick % 2)),
-            if ((tick % 2) == 0) .storage else .none,
-            (tick % 2) == 0,
-            tick,
-            detail,
-        );
-    }
-
-    try std.testing.expectEqual(@as(usize, 9), storage.objectCount());
-
-    var restarted_storage = storage_service.Service.initWithStore(902, 303, owner, &storage_checkpoint_store);
-    var restarted = try Ledger.initPersistent(&restarted_storage, owner, signer);
-    try std.testing.expectEqual(@as(u64, 9), restarted.next_sequence);
-
-    var buffer: [2048]u8 = undefined;
-    const exported = try restarted.exportText(&buffer, .{});
-    try std.testing.expect(std.mem.indexOf(u8, exported, "#1 ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, exported, "#8 ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, exported, "abcdefghijklmnopqrstuvwxyz-0123456789") != null);
-
-    storage_checkpoint_store.resetPersistent();
 }

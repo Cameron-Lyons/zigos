@@ -17,6 +17,29 @@ from spec_coverage_lib import (
 TEST_PATTERN = re.compile(r'^\s*test\s+"([^"]+)"', re.MULTILINE)
 EVIDENCE_STATUSES = {"enforced", "modeled", "scenario", "deferred"}
 
+META_REQUIREMENT_DEPENDENCIES = {
+    "REQ-DESIGN-GOALS-AND-NON-GOALS": [
+        "REQ-ZERO-AMBIENT-AUTHORITY",
+        "REQ-IMMUTABLE-BASE-SYSTEM",
+        "REQ-LOCAL-FIRST-REPLICATION",
+        "REQ-APP-EXECUTION",
+        "REQ-MUTABLE-STATE",
+        "REQ-EXPLAINABLE-DENIALS",
+        "REQ-USERSPACE-DRIVERS",
+        "REQ-NATIVE-PLATFORM",
+    ],
+    "REQ-ONE-SENTENCE-SUMMARY": [
+        "REQ-CAPABILITY-MODEL",
+        "REQ-LOCAL-FIRST-REPLICATION",
+        "REQ-DEVICE-GRAPH",
+        "REQ-IMMUTABLE-BASE-SYSTEM",
+        "REQ-DATA-IS-VERSIONED",
+        "REQ-PROCESS-ISOLATION",
+        "REQ-IDENTITY-FIRST-NETWORKING",
+        "REQ-UNIFIED-RESOURCE-SCHEDULER",
+    ],
+}
+
 
 def load_manifest() -> dict:
     return json.loads(MANIFEST_PATH.read_text())
@@ -207,6 +230,22 @@ def main() -> int:
             if not requirement_evidence.get("coverage_note"):
                 errors.append(
                     f"Requirement {requirement_id} is {status} and must include coverage_note explaining why it is not enforced"
+                )
+
+    for requirement_id, dependencies in META_REQUIREMENT_DEPENDENCIES.items():
+        requirement_evidence = evidence.get(requirement_id, {})
+        if requirement_evidence.get("status") != "enforced":
+            continue
+        for dependency_id in dependencies:
+            dependency_evidence = evidence.get(dependency_id)
+            if dependency_evidence is None:
+                errors.append(
+                    f"Meta requirement {requirement_id} depends on missing requirement evidence: {dependency_id}"
+                )
+                continue
+            if dependency_evidence.get("status") != "enforced":
+                errors.append(
+                    f"Meta requirement {requirement_id} depends on {dependency_id}, which is {dependency_evidence.get('status')!r}, not enforced"
                 )
 
     if errors:

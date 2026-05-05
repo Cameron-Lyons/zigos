@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
+const fixed_table = @import("../core/fixed_table.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const typed_component_abi = @import("typed_component_abi.zig");
@@ -32,6 +33,7 @@ pub const Error = error{
     VersionMismatch,
     RegistryNotBootstrapped,
     TypedContractMismatch,
+    UnsupportedPlatformInterface,
 };
 
 const BindingSlot = struct {
@@ -92,36 +94,36 @@ pub const Registry = struct {
         interface: manifest.InterfaceDecl,
         flags: u16,
     ) Error!void {
+        if (!platformInterfaceAllowed(interface)) return error.UnsupportedPlatformInterface;
         if (self.find(interface.name)) |_| return error.DuplicateInterface;
         if (!typedContractCompatible(interface)) return error.TypedContractMismatch;
 
-        for (&self.slots) |*slot| {
-            if (slot.in_use) continue;
-            slot.in_use = true;
-            slot.binding = zeroBinding();
-            slot.binding.service_id = service_id;
-            slot.binding.owner_task_id = owner_task_id;
-            slot.binding.endpoint_id = endpoint_id;
-            slot.binding.interface_name_len = native_util.copyTextExact(
-                slot.binding.interface_name[0..],
-                interface.name,
-            ) catch return error.InterfaceNameTooLong;
-            slot.binding.interface = .{
-                .name = slot.binding.interface_name[0..slot.binding.interface_name_len],
-                .version_major = interface.version_major,
-                .version_minor = interface.version_minor,
-            };
-            slot.binding.flags = flags;
-            if (typed_component_abi.contractFor(interface.name)) |contract| {
-                slot.binding.typed_contract_hash = contract.contract_hash;
-            }
-            return;
+        const slot = fixed_table.firstFreeSlot(BindingSlot, MAX_BINDINGS, &self.slots) orelse return error.BindingTableFull;
+        slot.in_use = true;
+        slot.binding = zeroBinding();
+        slot.binding.service_id = service_id;
+        slot.binding.owner_task_id = owner_task_id;
+        slot.binding.endpoint_id = endpoint_id;
+        slot.binding.interface_name_len = native_util.copyTextExact(
+            slot.binding.interface_name[0..],
+            interface.name,
+        ) catch {
+            slot.* = .{};
+            return error.InterfaceNameTooLong;
+        };
+        slot.binding.interface = .{
+            .name = slot.binding.interface_name[0..slot.binding.interface_name_len],
+            .version_major = interface.version_major,
+            .version_minor = interface.version_minor,
+        };
+        slot.binding.flags = flags;
+        if (typed_component_abi.contractFor(interface.name)) |contract| {
+            slot.binding.typed_contract_hash = contract.contract_hash;
         }
-
-        return error.BindingTableFull;
     }
 
     pub fn connect(self: *const Registry, interface: manifest.InterfaceDecl) Error!abi.ServiceConnectionDescriptor {
+        if (!platformInterfaceAllowed(interface)) return error.UnsupportedPlatformInterface;
         const binding = self.find(interface.name) orelse return error.InterfaceNotFound;
         if (!typedContractCompatible(binding.interface)) return error.TypedContractMismatch;
         if (binding.interface.version_major != interface.version_major) return error.VersionMismatch;
@@ -139,21 +141,18 @@ pub const Registry = struct {
     }
 
     pub fn bindingCount(self: *const Registry) usize {
-        var count: usize = 0;
-        for (self.slots) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
+        return fixed_table.countInUse(BindingSlot, MAX_BINDINGS, &self.slots);
     }
 
     fn find(self: *const Registry, name: []const u8) ?*const Binding {
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (std.mem.eql(u8, slot.binding.interface.name, name)) return &slot.binding;
-        }
-        return null;
+        const slot = fixed_table.findConstSlot(BindingSlot, MAX_BINDINGS, &self.slots, name, bindingSlotMatchesName) orelse return null;
+        return &slot.binding;
     }
 };
+
+fn bindingSlotMatchesName(name: []const u8, slot: *const BindingSlot) bool {
+    return std.mem.eql(u8, slot.binding.interface.name, name);
+}
 
 fn zeroBinding() Binding {
     return .{
@@ -176,6 +175,14 @@ fn typedContractCompatible(interface: manifest.InterfaceDecl) bool {
     if (typed_component_abi.contractFor(interface.name) == null) return true;
     typed_component_abi.validateInterface(interface) catch return false;
     return true;
+}
+
+fn platformInterfaceAllowed(interface: manifest.InterfaceDecl) bool {
+    if (interface.name.len == 0 or interface.version_major == 0) return false;
+    return !std.mem.startsWith(u8, interface.name, "zigos.internal.") and
+        !std.mem.startsWith(u8, interface.name, "kernel.") and
+        !std.mem.startsWith(u8, interface.name, "sys.") and
+        !std.mem.startsWith(u8, interface.name, "vfs.");
 }
 
 test "service registry service requires bootstrap endpoint before discovery" {
@@ -237,6 +244,62 @@ test "service registry rejects duplicate interfaces and incompatible versions" {
     try std.testing.expectError(error.VersionMismatch, registry.connect(.{
         .name = "zigos.object.workspace",
         .version_major = 2,
+        .version_minor = 0,
+    }));
+}
+
+test "service registry does not consume a binding slot when an interface name is too long" {
+    var registry = Registry.init();
+    const too_long = "zigos.object.workspace.interface.name.that.is.definitely.longer.than.sixty.four.bytes";
+    try std.testing.expect(too_long.len > MAX_INTERFACE_NAME_BYTES);
+
+    try std.testing.expectError(error.InterfaceNameTooLong, registry.register(44, 7, 101, .{
+        .name = too_long,
+        .version_major = 1,
+        .version_minor = 0,
+    }, 0));
+    try std.testing.expectEqual(@as(usize, 0), registry.bindingCount());
+
+    try registry.register(45, 7, 102, .{
+        .name = "zigos.object.workspace",
+        .version_major = 1,
+        .version_minor = 0,
+    }, 0);
+    try std.testing.expectEqual(@as(usize, 1), registry.bindingCount());
+}
+
+test "service registry rejects internal interface names and unversioned API bypasses" {
+    var registry = Registry.init();
+
+    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.register(44, 7, 101, .{
+        .name = "zigos.internal.storage.raw",
+        .version_major = 1,
+        .version_minor = 0,
+    }, 0));
+    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.register(44, 7, 101, .{
+        .name = "kernel.task.table",
+        .version_major = 1,
+        .version_minor = 0,
+    }, 0));
+    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.register(44, 7, 101, .{
+        .name = "vfs.root",
+        .version_major = 1,
+        .version_minor = 0,
+    }, 0));
+    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.register(44, 7, 101, .{
+        .name = "zigos.object.workspace",
+        .version_major = 0,
+        .version_minor = 0,
+    }, 0));
+
+    try registry.register(44, 7, 101, .{
+        .name = "zigos.object.workspace",
+        .version_major = 1,
+        .version_minor = 0,
+    }, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
+    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.connect(.{
+        .name = "sys.raw-process-table",
+        .version_major = 1,
         .version_minor = 0,
     }));
 }

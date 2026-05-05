@@ -9,16 +9,144 @@ const workspace = @import("../storage/workspace.zig");
 
 pub const Error = state_support.Error;
 pub const MAX_TRANSPORT_FRAMES = state_support.MAX_TRANSPORT_FRAMES;
+pub const MAX_DOCUMENT_OPERATIONS: usize = 16;
+pub const MAX_DOCUMENT_OPERATION_TEXT_BYTES: usize = 64;
+pub const MAX_DOCUMENT_VECTOR_CLOCKS: usize = 8;
+
+pub const DocumentOperationKind = enum(u8) {
+    insert,
+    delete,
+};
+
+pub const DocumentOperation = struct {
+    kind: DocumentOperationKind,
+    position: usize,
+    delete_len: usize = 0,
+    text_len: usize = 0,
+    text: [MAX_DOCUMENT_OPERATION_TEXT_BYTES]u8 = [_]u8{0} ** MAX_DOCUMENT_OPERATION_TEXT_BYTES,
+    actor: principal.PrincipalId,
+    lamport: u64,
+
+    pub fn insert(position: usize, text: []const u8, actor: principal.PrincipalId, lamport: u64) Error!DocumentOperation {
+        if (text.len > MAX_DOCUMENT_OPERATION_TEXT_BYTES) return error.DocumentOperationTooLarge;
+        var operation = DocumentOperation{
+            .kind = .insert,
+            .position = position,
+            .actor = actor,
+            .lamport = lamport,
+        };
+        operation.text_len = text.len;
+        @memcpy(operation.text[0..text.len], text);
+        return operation;
+    }
+
+    pub fn remove(position: usize, delete_len: usize, actor: principal.PrincipalId, lamport: u64) DocumentOperation {
+        return .{
+            .kind = .delete,
+            .position = position,
+            .delete_len = delete_len,
+            .actor = actor,
+            .lamport = lamport,
+        };
+    }
+
+    pub fn textSlice(self: *const DocumentOperation) []const u8 {
+        return self.text[0..self.text_len];
+    }
+};
+
+pub const DocumentOperationId = struct {
+    actor: principal.PrincipalId,
+    lamport: u64,
+
+    fn eql(self: DocumentOperationId, other: DocumentOperationId) bool {
+        return self.lamport == other.lamport and self.actor.eql(other.actor);
+    }
+};
+
+pub const DocumentVectorClock = struct {
+    actor: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
+    lamport: u64 = 0,
+};
+
+pub const DocumentOperationLog = struct {
+    operations: [MAX_DOCUMENT_OPERATIONS]DocumentOperation = undefined,
+    operation_count: usize = 0,
+    clocks: [MAX_DOCUMENT_VECTOR_CLOCKS]DocumentVectorClock = [_]DocumentVectorClock{.{}} ** MAX_DOCUMENT_VECTOR_CLOCKS,
+    clock_count: usize = 0,
+
+    pub fn append(self: *DocumentOperationLog, operation: DocumentOperation) Error!void {
+        const id = operationId(operation);
+        if (self.contains(id)) return error.DuplicateDocumentOperation;
+        if (self.operation_count >= self.operations.len) return error.DocumentOperationLogFull;
+        self.operations[self.operation_count] = operation;
+        self.operation_count += 1;
+        try self.observe(operation.actor, operation.lamport);
+    }
+
+    pub fn mergeFrom(self: *DocumentOperationLog, remote: *const DocumentOperationLog) Error!void {
+        for (remote.slice()) |operation| {
+            const id = operationId(operation);
+            if (self.contains(id)) {
+                try self.observe(operation.actor, operation.lamport);
+                continue;
+            }
+            try self.append(operation);
+        }
+    }
+
+    pub fn slice(self: *const DocumentOperationLog) []const DocumentOperation {
+        return self.operations[0..self.operation_count];
+    }
+
+    pub fn clockFor(self: *const DocumentOperationLog, actor: principal.PrincipalId) u64 {
+        for (self.clocks[0..self.clock_count]) |clock| {
+            if (clock.actor.eql(actor)) return clock.lamport;
+        }
+        return 0;
+    }
+
+    pub fn apply(self: *const DocumentOperationLog, base_document: []const u8, output: []u8) Error![]const u8 {
+        return applyMergeableDocumentOperations(base_document, self.slice(), &.{}, output);
+    }
+
+    fn contains(self: *const DocumentOperationLog, id: DocumentOperationId) bool {
+        for (self.slice()) |operation| {
+            if (operationId(operation).eql(id)) return true;
+        }
+        return false;
+    }
+
+    fn observe(self: *DocumentOperationLog, actor: principal.PrincipalId, lamport: u64) Error!void {
+        for (self.clocks[0..self.clock_count]) |*clock| {
+            if (!clock.actor.eql(actor)) continue;
+            clock.lamport = @max(clock.lamport, lamport);
+            return;
+        }
+        if (self.clock_count >= self.clocks.len) return error.DocumentOperationLogFull;
+        self.clocks[self.clock_count] = .{ .actor = actor, .lamport = lamport };
+        self.clock_count += 1;
+    }
+};
+
+fn operationId(operation: DocumentOperation) DocumentOperationId {
+    return .{ .actor = operation.actor, .lamport = operation.lamport };
+}
 
 pub const MergeRequest = struct {
     store: *const storage_service.Service,
     entry: workspace.Entry,
     remote_version_id: u64 = 0,
+    base_document: []const u8 = "",
+    local_operations: []const DocumentOperation = &.{},
+    remote_operations: []const DocumentOperation = &.{},
+    merge_buffer: ?[]u8 = null,
 };
 
 pub const MergeResult = struct {
     merged: bool,
     conflict: bool,
+    merged_document_len: usize = 0,
 };
 
 pub const MergeableDocumentAdapter = struct {
@@ -28,6 +156,48 @@ pub const MergeableDocumentAdapter = struct {
         return self.mergeFn(request);
     }
 };
+
+pub fn applyMergeableDocumentOperations(
+    base_document: []const u8,
+    local_operations: []const DocumentOperation,
+    remote_operations: []const DocumentOperation,
+    output: []u8,
+) Error![]const u8 {
+    if (base_document.len > output.len) return error.DocumentBufferTooSmall;
+    var operations: [MAX_DOCUMENT_OPERATIONS * 2]DocumentOperation = undefined;
+    var operation_count: usize = 0;
+    for (local_operations) |operation| {
+        if (operation_count >= operations.len) return error.TooManyDocumentOperations;
+        operations[operation_count] = operation;
+        operation_count += 1;
+    }
+    for (remote_operations) |operation| {
+        if (operation_count >= operations.len) return error.TooManyDocumentOperations;
+        operations[operation_count] = operation;
+        operation_count += 1;
+    }
+    sortDocumentOperations(operations[0..operation_count]);
+
+    @memcpy(output[0..base_document.len], base_document);
+    var len = base_document.len;
+    for (operations[0..operation_count]) |operation| {
+        len = try applyDocumentOperation(operation, output, len);
+    }
+    return output[0..len];
+}
+
+pub fn mergeDocumentOperationLogs(
+    base_document: []const u8,
+    local_log: *const DocumentOperationLog,
+    remote_log: *const DocumentOperationLog,
+    merged_log: *DocumentOperationLog,
+    output: []u8,
+) Error![]const u8 {
+    merged_log.* = DocumentOperationLog{};
+    try merged_log.mergeFrom(local_log);
+    try merged_log.mergeFrom(remote_log);
+    return merged_log.apply(base_document, output);
+}
 
 pub const ChunkReplicationRequest = struct {
     store: *const storage_service.Service,
@@ -217,6 +387,17 @@ pub const DefaultMergeableDocumentAdapter = struct {
         }
         const local_version = request.store.version(request.entry.version_id) orelse return error.VersionNotFound;
         if (local_version.object_type != request.entry.object_type) return error.TypeMismatch;
+        if (request.local_operations.len != 0 or request.remote_operations.len != 0) {
+            if (request.entry.object_type != .document) return error.TypeMismatch;
+            const merge_buffer = request.merge_buffer orelse return error.DocumentBufferTooSmall;
+            const merged_document = try applyMergeableDocumentOperations(
+                request.base_document,
+                request.local_operations,
+                request.remote_operations,
+                merge_buffer,
+            );
+            return .{ .merged = true, .conflict = false, .merged_document_len = merged_document.len };
+        }
         if (request.remote_version_id == 0 or request.remote_version_id == request.entry.version_id) {
             return .{ .merged = true, .conflict = false };
         }
@@ -307,6 +488,56 @@ fn chunkCountForPayload(payload_len: usize) usize {
     return (payload_len + chunk_size - 1) / chunk_size;
 }
 
+fn sortDocumentOperations(operations: []DocumentOperation) void {
+    var index: usize = 1;
+    while (index < operations.len) : (index += 1) {
+        const value = operations[index];
+        var insert_at = index;
+        while (insert_at > 0 and documentOperationLess(value, operations[insert_at - 1])) : (insert_at -= 1) {
+            operations[insert_at] = operations[insert_at - 1];
+        }
+        operations[insert_at] = value;
+    }
+}
+
+fn documentOperationLess(left: DocumentOperation, right: DocumentOperation) bool {
+    if (left.lamport != right.lamport) return left.lamport < right.lamport;
+    if (left.actor.serial != right.actor.serial) return left.actor.serial < right.actor.serial;
+    if (left.actor.kind != right.actor.kind) return @intFromEnum(left.actor.kind) < @intFromEnum(right.actor.kind);
+    if (left.position != right.position) return left.position < right.position;
+    return @intFromEnum(left.kind) < @intFromEnum(right.kind);
+}
+
+fn applyDocumentOperation(operation: DocumentOperation, output: []u8, current_len: usize) Error!usize {
+    return switch (operation.kind) {
+        .insert => applyInsert(operation, output, current_len),
+        .delete => applyDelete(operation, output, current_len),
+    };
+}
+
+fn applyInsert(operation: DocumentOperation, output: []u8, current_len: usize) Error!usize {
+    if (operation.text_len == 0) return current_len;
+    if (current_len + operation.text_len > output.len) return error.DocumentBufferTooSmall;
+    const position = @min(operation.position, current_len);
+    var index = current_len;
+    while (index > position) : (index -= 1) {
+        output[index + operation.text_len - 1] = output[index - 1];
+    }
+    @memcpy(output[position .. position + operation.text_len], operation.textSlice());
+    return current_len + operation.text_len;
+}
+
+fn applyDelete(operation: DocumentOperation, output: []u8, current_len: usize) Error!usize {
+    if (operation.delete_len == 0 or operation.position >= current_len) return current_len;
+    const delete_end = @min(current_len, operation.position + operation.delete_len);
+    const removed = delete_end - operation.position;
+    var index = delete_end;
+    while (index < current_len) : (index += 1) {
+        output[index - removed] = output[index];
+    }
+    return current_len - removed;
+}
+
 fn databaseContractMessage(
     buffer: []u8,
     workspace_id: u64,
@@ -314,6 +545,90 @@ fn databaseContractMessage(
     label: []const u8,
 ) error{NoSpaceLeft}![]const u8 {
     return std.fmt.bufPrint(buffer, "db-contract:{d}:{s}:{s}", .{ workspace_id, bundle_id, label }) catch error.NoSpaceLeft;
+}
+
+test "mergeable document adapter applies deterministic CRDT operations and rejects undersized buffers" {
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 402 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 7 };
+    const tablet = principal.PrincipalId{ .kind = .device, .serial = 8 };
+    const signer = signing.SignerIdentity{
+        .label = "sync-crdt-storage",
+        .seed = [_]u8{0x92} ** 32,
+    };
+    var checkpoint_store = storage_service.CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    var storage = storage_service.Service.initWithStore(402, 5, storage_owner, &checkpoint_store);
+    const document = try storage.putVersion(.{
+        .object_type = .document,
+        .payload = "hello",
+        .metadata = try object_store.signMetadata(signer, "notes", "text/plain", .document, "hello", 1),
+    });
+
+    const local_operations = [_]DocumentOperation{
+        try DocumentOperation.insert(5, " from laptop", laptop, 2),
+    };
+    const remote_operations = [_]DocumentOperation{
+        try DocumentOperation.insert(5, " and tablet", tablet, 1),
+    };
+    var merge_buffer: [96]u8 = undefined;
+    const adapter_value = DefaultMergeableDocumentAdapter.adapter();
+    const result = try adapter_value.merge(.{
+        .store = &storage,
+        .entry = workspace.Entry.init("documents/notes.md", document.object_id, document.version_id, .document),
+        .base_document = "hello",
+        .local_operations = local_operations[0..],
+        .remote_operations = remote_operations[0..],
+        .merge_buffer = merge_buffer[0..],
+    });
+    try std.testing.expect(result.merged);
+    try std.testing.expect(!result.conflict);
+    try std.testing.expectEqualStrings("hello from laptop and tablet", merge_buffer[0..result.merged_document_len]);
+
+    var replay_buffer: [96]u8 = undefined;
+    const replayed = try applyMergeableDocumentOperations(
+        "hello",
+        remote_operations[0..],
+        local_operations[0..],
+        replay_buffer[0..],
+    );
+    try std.testing.expectEqualStrings(merge_buffer[0..result.merged_document_len], replayed);
+
+    var small_buffer: [8]u8 = undefined;
+    try std.testing.expectError(error.DocumentBufferTooSmall, applyMergeableDocumentOperations(
+        "hello",
+        local_operations[0..],
+        remote_operations[0..],
+        small_buffer[0..],
+    ));
+
+    checkpoint_store.resetPersistent();
+}
+
+test "document operation log merges CRDT operations idempotently with vector clocks" {
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 17 };
+    const tablet = principal.PrincipalId{ .kind = .device, .serial = 18 };
+
+    var laptop_log = DocumentOperationLog{};
+    try laptop_log.append(try DocumentOperation.insert(6, "from laptop ", laptop, 1));
+    try laptop_log.append(try DocumentOperation.insert(18, "today", laptop, 2));
+
+    var tablet_log = DocumentOperationLog{};
+    try tablet_log.append(try DocumentOperation.insert(6, "from tablet ", tablet, 1));
+    try tablet_log.append(DocumentOperation.remove(0, 0, tablet, 2));
+
+    var merged_log = DocumentOperationLog{};
+    var merge_buffer: [128]u8 = undefined;
+    const merged = try mergeDocumentOperationLogs("hello ", &laptop_log, &tablet_log, &merged_log, merge_buffer[0..]);
+    try std.testing.expectEqualStrings("hello from tablet todayfrom laptop ", merged);
+    try std.testing.expectEqual(@as(u64, 2), merged_log.clockFor(laptop));
+    try std.testing.expectEqual(@as(u64, 2), merged_log.clockFor(tablet));
+
+    try merged_log.mergeFrom(&tablet_log);
+    var replay_buffer: [128]u8 = undefined;
+    const replayed = try merged_log.apply("hello ", replay_buffer[0..]);
+    try std.testing.expectEqualStrings(merged, replayed);
+
+    try std.testing.expectError(error.DuplicateDocumentOperation, laptop_log.append(try DocumentOperation.insert(6, "duplicate", laptop, 1)));
 }
 
 test "default chunk media adapter reports concrete payload chunks" {
