@@ -1,5 +1,6 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const fixed_table = @import("../core/fixed_table.zig");
 const id_index = @import("../core/id_index.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
@@ -193,6 +194,30 @@ pub const BlobSlot = struct {
 
 const IdIndexSlot = id_index.Slot;
 
+fn objectSlotMatchesId(object_id: u64, slot: *const ObjectSlot) bool {
+    return slot.object.id == object_id;
+}
+
+fn objectSlotId(slot: *const ObjectSlot) u64 {
+    return slot.object.id;
+}
+
+fn versionSlotMatchesId(version_id: u64, slot: *const VersionSlot) bool {
+    return slot.version.id == version_id;
+}
+
+fn versionSlotId(slot: *const VersionSlot) u64 {
+    return slot.version.id;
+}
+
+fn blobSlotMatchesAddress(address: BlobAddress, slot: *const BlobSlot) bool {
+    return std.mem.eql(u8, &slot.blob.address, &address);
+}
+
+fn blobSlotIndexId(slot: *const BlobSlot) u64 {
+    return indexIdForBytes(&slot.blob.address);
+}
+
 pub const Store = StoreWith(.{});
 
 pub fn StoreWith(comptime config: StoreConfig) type {
@@ -338,19 +363,33 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         pub fn object(self: *Self, object_id: u64) ?*ObjectRecord {
-            if (self.indexedObjectSlot(object_id)) |slot| return &slot.object;
-            for (&self.objects) |*slot| {
-                if (slot.in_use and slot.object.id == object_id) return &slot.object;
-            }
-            return null;
+            const slot = fixed_table.findIndexedSlot(
+                ObjectSlot,
+                MAX_STORE_OBJECTS,
+                STORE_OBJECT_INDEX_CAPACITY,
+                &self.objects,
+                &self.object_index_slots,
+                object_id,
+                objectSlotId,
+                object_id,
+                objectSlotMatchesId,
+            ) orelse return null;
+            return &slot.object;
         }
 
         pub fn version(self: *Self, version_id: u64) ?*VersionRecord {
-            if (self.indexedVersionSlot(version_id)) |slot| return &slot.version;
-            for (&self.versions) |*slot| {
-                if (slot.in_use and slot.version.id == version_id) return &slot.version;
-            }
-            return null;
+            const slot = fixed_table.findIndexedSlot(
+                VersionSlot,
+                MAX_STORE_VERSIONS,
+                STORE_VERSION_INDEX_CAPACITY,
+                &self.versions,
+                &self.version_index_slots,
+                version_id,
+                versionSlotId,
+                version_id,
+                versionSlotMatchesId,
+            ) orelse return null;
+            return &slot.version;
         }
 
         pub fn latestVersion(self: *Self, object_id: u64) ?*VersionRecord {
@@ -376,27 +415,15 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         pub fn blobCount(self: *const Self) usize {
-            var count: usize = 0;
-            for (self.blobs) |slot| {
-                if (slot.in_use) count += 1;
-            }
-            return count;
+            return fixed_table.countInUse(BlobSlot, MAX_BLOBS, &self.blobs);
         }
 
         pub fn objectCount(self: *const Self) usize {
-            var count: usize = 0;
-            for (self.objects) |slot| {
-                if (slot.in_use) count += 1;
-            }
-            return count;
+            return fixed_table.countInUse(ObjectSlot, MAX_STORE_OBJECTS, &self.objects);
         }
 
         pub fn versionCount(self: *const Self) usize {
-            var count: usize = 0;
-            for (self.versions) |slot| {
-                if (slot.in_use) count += 1;
-            }
-            return count;
+            return fixed_table.countInUse(VersionSlot, MAX_STORE_VERSIONS, &self.versions);
         }
 
         pub fn dirtyObjectIds(self: *const Self) []const u64 {
@@ -425,22 +452,20 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         fn createObject(self: *Self, object_id: u64, object_type: ObjectType) Error!*ObjectRecord {
-            for (&self.objects, 0..) |*slot, slot_index| {
-                if (slot.in_use) continue;
-                slot.in_use = true;
-                slot.object = .{
-                    .id = object_id,
-                    .object_type = object_type,
-                    .latest_version_id = 0,
-                    .version_count = 0,
-                };
-                if (object_id >= self.next_object_id) {
-                    self.next_object_id = object_id + 1;
-                }
-                indexInsert(STORE_OBJECT_INDEX_CAPACITY, &self.object_index_slots, object_id, slot_index);
-                return &slot.object;
+            const slot_index = fixed_table.firstFreeSlotIndex(ObjectSlot, MAX_STORE_OBJECTS, &self.objects) orelse return error.ObjectTableFull;
+            const slot = &self.objects[slot_index];
+            slot.in_use = true;
+            slot.object = .{
+                .id = object_id,
+                .object_type = object_type,
+                .latest_version_id = 0,
+                .version_count = 0,
+            };
+            if (object_id >= self.next_object_id) {
+                self.next_object_id = object_id + 1;
             }
-            return error.ObjectTableFull;
+            indexInsert(STORE_OBJECT_INDEX_CAPACITY, &self.object_index_slots, object_id, slot_index);
+            return &slot.object;
         }
 
         fn insertVersion(self: *Self, request: struct {
@@ -454,23 +479,20 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             payload_len: usize,
             blob_slot_index: usize,
         }) Error!void {
-            for (&self.versions, 0..) |*slot, slot_index| {
-                if (slot.in_use) continue;
-                slot.in_use = true;
-                slot.version.id = request.id;
-                slot.version.object_id = request.object_id;
-                slot.version.previous_version_id = request.previous_version_id;
-                slot.version.object_type = request.object_type;
-                copyBytes(slot.version.blob_address[0..], request.blob_address[0..]);
-                copyBytes(slot.version.version_address[0..], request.version_address[0..]);
-                writeMetadata(&slot.version.metadata, request.metadata);
-                slot.version.payload_len = request.payload_len;
-                slot.version.blob_slot_index = request.blob_slot_index;
-                slot.version.chunk_count = chunkCountForLen(request.payload_len);
-                indexInsert(STORE_VERSION_INDEX_CAPACITY, &self.version_index_slots, request.id, slot_index);
-                return;
-            }
-            return error.VersionTableFull;
+            const slot_index = fixed_table.firstFreeSlotIndex(VersionSlot, MAX_STORE_VERSIONS, &self.versions) orelse return error.VersionTableFull;
+            const slot = &self.versions[slot_index];
+            slot.in_use = true;
+            slot.version.id = request.id;
+            slot.version.object_id = request.object_id;
+            slot.version.previous_version_id = request.previous_version_id;
+            slot.version.object_type = request.object_type;
+            copyBytes(slot.version.blob_address[0..], request.blob_address[0..]);
+            copyBytes(slot.version.version_address[0..], request.version_address[0..]);
+            writeMetadata(&slot.version.metadata, request.metadata);
+            slot.version.payload_len = request.payload_len;
+            slot.version.blob_slot_index = request.blob_slot_index;
+            slot.version.chunk_count = chunkCountForLen(request.payload_len);
+            indexInsert(STORE_VERSION_INDEX_CAPACITY, &self.version_index_slots, request.id, slot_index);
         }
 
         pub fn putBlob(self: *Self, address: BlobAddress, payload: []const u8) Error!usize {
@@ -489,39 +511,30 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 exact.blob.ref_count +|= 1;
                 return exact_slot_index;
             }
-            for (&self.blobs, 0..) |*slot, slot_index| {
-                if (slot.in_use) continue;
-                slot.in_use = true;
-                slot.blob.address = address;
-                slot.blob.payload_len = payload.len;
-                @memset(slot.blob.payload[0..], 0);
-                copyBytes(slot.blob.payload[0..payload.len], payload);
-                slot.blob.ref_count = 1;
-                indexInsertBytes(STORE_BLOB_INDEX_CAPACITY, &self.blob_index_slots, &address, slot_index);
-                return slot_index;
-            }
-            return error.BlobTableFull;
-        }
-
-        fn indexedObjectSlot(self: *Self, object_id: u64) ?*ObjectSlot {
-            const slot_index = indexLookup(STORE_OBJECT_INDEX_CAPACITY, &self.object_index_slots, object_id) orelse return null;
-            const slot = &self.objects[slot_index];
-            if (!slot.in_use or slot.object.id != object_id) return null;
-            return slot;
-        }
-
-        fn indexedVersionSlot(self: *Self, version_id: u64) ?*VersionSlot {
-            const slot_index = indexLookup(STORE_VERSION_INDEX_CAPACITY, &self.version_index_slots, version_id) orelse return null;
-            const slot = &self.versions[slot_index];
-            if (!slot.in_use or slot.version.id != version_id) return null;
-            return slot;
+            const slot_index = fixed_table.firstFreeSlotIndex(BlobSlot, MAX_BLOBS, &self.blobs) orelse return error.BlobTableFull;
+            const slot = &self.blobs[slot_index];
+            slot.in_use = true;
+            slot.blob.address = address;
+            slot.blob.payload_len = payload.len;
+            @memset(slot.blob.payload[0..], 0);
+            copyBytes(slot.blob.payload[0..payload.len], payload);
+            slot.blob.ref_count = 1;
+            indexInsertBytes(STORE_BLOB_INDEX_CAPACITY, &self.blob_index_slots, &address, slot_index);
+            return slot_index;
         }
 
         fn indexedBlobSlot(self: *const Self, address: BlobAddress) ?*const BlobSlot {
-            const slot_index = indexLookupBytes(STORE_BLOB_INDEX_CAPACITY, &self.blob_index_slots, &address) orelse return null;
-            const slot = &self.blobs[slot_index];
-            if (!slot.in_use or !std.mem.eql(u8, &slot.blob.address, &address)) return null;
-            return slot;
+            return fixed_table.findIndexedConstSlot(
+                BlobSlot,
+                MAX_BLOBS,
+                STORE_BLOB_INDEX_CAPACITY,
+                &self.blobs,
+                &self.blob_index_slots,
+                indexIdForBytes(&address),
+                blobSlotIndexId,
+                address,
+                blobSlotMatchesAddress,
+            );
         }
 
         fn exactBlobSlotIndex(self: *Self, address: BlobAddress) ?usize {
@@ -607,16 +620,14 @@ fn indexInsert(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64,
 }
 
 fn indexLookupBytes(comptime capacity: usize, table: *const [capacity]IdIndexSlot, bytes: []const u8) ?usize {
-    var id: u64 = 0;
-    const len = @min(bytes.len, @sizeOf(u64));
-    var index: usize = 0;
-    while (index < len) : (index += 1) {
-        id |= @as(u64, bytes[index]) << @intCast(index * 8);
-    }
-    return indexLookup(capacity, table, id);
+    return indexLookup(capacity, table, indexIdForBytes(bytes));
 }
 
 fn indexInsertBytes(comptime capacity: usize, table: *[capacity]IdIndexSlot, bytes: []const u8, slot_index: usize) void {
+    indexInsert(capacity, table, indexIdForBytes(bytes), slot_index);
+}
+
+fn indexIdForBytes(bytes: []const u8) u64 {
     var id: u64 = 0;
     const len = @min(bytes.len, @sizeOf(u64));
     var index: usize = 0;
@@ -624,7 +635,7 @@ fn indexInsertBytes(comptime capacity: usize, table: *[capacity]IdIndexSlot, byt
         id |= @as(u64, bytes[index]) << @intCast(index * 8);
     }
     if (id == 0) id = 1;
-    indexInsert(capacity, table, id, slot_index);
+    return id;
 }
 
 fn chunkCountForLen(payload_len: usize) u16 {

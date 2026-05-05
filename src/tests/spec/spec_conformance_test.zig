@@ -7,7 +7,12 @@ const drivers_storage_sync = @import("drivers_storage_sync.zig");
 const experience_and_policy_edges = @import("experience_and_policy_edges.zig");
 const platform_services = @import("platform_services.zig");
 const runtime_negative_proofs = @import("../../native/session/runtime_negative_proofs.zig");
+const sync_service_test = @import("../../native/sync/sync_service_test.zig");
 const ux_and_lifecycle = @import("ux_and_lifecycle.zig");
+
+comptime {
+    _ = sync_service_test;
+}
 
 const SpecCase = struct {
     run: *const fn () anyerror!void,
@@ -175,12 +180,20 @@ test "backlog gate enforces network transport hardening" {
     try backlog_gates.networkTransportHardeningGate();
 }
 
+test "backlog gate enforces sync adapter depth" {
+    try backlog_gates.syncAdapterDepthGate();
+}
+
 test "backlog gate enforces component ABI depth" {
     try backlog_gates.componentAbiDepthGate();
 }
 
 test "backlog gate enforces driver boundary audit" {
     try backlog_gates.driverBoundaryAuditGate();
+}
+
+test "backlog gate enforces kernel bootstrap shim boundary" {
+    try backlog_gates.kernelBootstrapShimBoundaryGate();
 }
 
 test "backlog gate enforces UX rendering" {

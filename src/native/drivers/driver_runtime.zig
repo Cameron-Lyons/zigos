@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const bootstrap_driver_port = @import("bootstrap_driver_port.zig");
 const driver_service = @import("driver_service.zig");
 const component_port = @import("../kernel_api/component_port.zig");
+const fixed_table = @import("../core/fixed_table.zig");
 const root = @import("root");
 const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
     root.storage_volume
@@ -151,10 +152,8 @@ pub const Runtime = struct {
     }
 
     pub fn findByClass(self: *const Runtime, device_class: driver_service.DeviceClass) ?ActivationRecord {
-        for (self.slots) |slot| {
-            if (slot.in_use and slot.activation.device_class == device_class) return slot.activation;
-        }
-        return null;
+        const slot = fixed_table.findConstSlot(ActivationSlot, MAX_ACTIVATIONS, &self.slots, device_class, activationSlotMatchesClass) orelse return null;
+        return slot.activation;
     }
 
     pub fn deactivate(self: *Runtime, service_id: u64) bool {
@@ -176,21 +175,15 @@ pub const Runtime = struct {
     }
 
     fn upsert(self: *Runtime, activation: ActivationRecord) Error!ActivationRecord {
-        for (&self.slots) |*slot| {
-            if (slot.in_use and slot.activation.service_id == activation.service_id) {
-                slot.activation = activation;
-                return slot.activation;
-            }
-        }
-
-        for (&self.slots) |*slot| {
-            if (slot.in_use) continue;
-            slot.in_use = true;
+        if (fixed_table.findSlot(ActivationSlot, MAX_ACTIVATIONS, &self.slots, activation.service_id, activationSlotMatchesService)) |slot| {
             slot.activation = activation;
             return slot.activation;
         }
 
-        return error.ActivationTableFull;
+        const slot = fixed_table.firstFreeSlot(ActivationSlot, MAX_ACTIVATIONS, &self.slots) orelse return error.ActivationTableFull;
+        slot.in_use = true;
+        slot.activation = activation;
+        return slot.activation;
     }
 
     fn nextActivationGeneration(self: *Runtime) u32 {
@@ -198,6 +191,14 @@ pub const Runtime = struct {
         return self.next_activation_generation;
     }
 };
+
+fn activationSlotMatchesClass(device_class: driver_service.DeviceClass, slot: *const ActivationSlot) bool {
+    return slot.activation.device_class == device_class;
+}
+
+fn activationSlotMatchesService(service_id: u64, slot: *const ActivationSlot) bool {
+    return slot.activation.service_id == service_id;
+}
 
 fn zeroActivation() ActivationRecord {
     return .{

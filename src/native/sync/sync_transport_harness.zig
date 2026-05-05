@@ -6,10 +6,14 @@ const network_policy = @import("network_policy.zig");
 const sync_state = @import("sync_state_support.zig");
 
 pub const MAX_PACKET_BYTES: usize = 256;
+pub const MAX_RELAY_PACKETS: usize = 16;
 
 pub const Error = error{
     EgressDenied,
     PacketTooLarge,
+    PacketAuthenticationFailed,
+    PacketTargetMismatch,
+    RelayQueueFull,
 };
 
 pub const EncryptedPacket = struct {
@@ -27,6 +31,50 @@ pub const EncryptedPacket = struct {
 
     pub fn ciphertextSlice(self: *const EncryptedPacket) []const u8 {
         return self.ciphertext[0..self.ciphertext_len];
+    }
+};
+
+const RelayPacketSlot = struct {
+    in_use: bool = false,
+    packet: EncryptedPacket = undefined,
+};
+
+pub const Relay = struct {
+    packets: [MAX_RELAY_PACKETS]RelayPacketSlot = [_]RelayPacketSlot{.{}} ** MAX_RELAY_PACKETS,
+    accepted_packets: usize = 0,
+    delivered_packets: usize = 0,
+
+    pub fn init() Relay {
+        return .{};
+    }
+
+    pub fn submit(self: *Relay, packet: EncryptedPacket) Error!void {
+        if (!packet.encrypted or !packet.egress_allowed) return error.EgressDenied;
+        for (&self.packets) |*slot| {
+            if (slot.in_use) continue;
+            slot.in_use = true;
+            slot.packet = packet;
+            self.accepted_packets += 1;
+            return;
+        }
+        return error.RelayQueueFull;
+    }
+
+    pub fn deliverNext(
+        self: *Relay,
+        session: *const TransportSession,
+        plaintext_out: []u8,
+    ) Error!?[]const u8 {
+        for (&self.packets) |*slot| {
+            if (!slot.in_use) continue;
+            if (!slot.packet.target_device.eql(session.target_device)) continue;
+            if (!slot.packet.source_device.eql(session.source_device)) continue;
+            const plaintext = try decryptPacket(session, slot.packet, plaintext_out);
+            slot.in_use = false;
+            self.delivered_packets += 1;
+            return plaintext;
+        }
+        return null;
     }
 };
 
@@ -126,6 +174,18 @@ pub const Harness = struct {
         return packet;
     }
 
+    pub fn sendRelayPacket(
+        self: *Harness,
+        relay: *Relay,
+        session: *const TransportSession,
+        plaintext: []const u8,
+    ) Error!EncryptedPacket {
+        if (session.transport != .relay_assisted) return error.EgressDenied;
+        const packet = try self.encryptPacket(session, plaintext);
+        try relay.submit(packet);
+        return packet;
+    }
+
     fn openSession(
         self: *Harness,
         broker: *network_policy.EgressBroker,
@@ -194,6 +254,35 @@ fn digestPayload(session: *const TransportSession, plaintext: []const u8) [32]u8
     return crypto_hash.finalize(&hasher);
 }
 
+fn decryptPacket(
+    session: *const TransportSession,
+    packet: EncryptedPacket,
+    plaintext_out: []u8,
+) Error![]const u8 {
+    if (!packet.target_device.eql(session.target_device) or !packet.source_device.eql(session.source_device)) {
+        return error.PacketTargetMismatch;
+    }
+    if (packet.ciphertext_len > plaintext_out.len) return error.PacketTooLarge;
+    var index: usize = 0;
+    while (index < packet.ciphertext_len) : (index += 1) {
+        plaintext_out[index] = packet.ciphertext[index] ^ session.key[index % session.key.len];
+    }
+    const plaintext = plaintext_out[0..packet.ciphertext_len];
+    const expected_digest = digestPayload(session, plaintext);
+    if (!std.mem.eql(u8, &expected_digest, &packet.payload_digest)) {
+        return error.PacketAuthenticationFailed;
+    }
+    return plaintext;
+}
+
+pub fn decryptForSession(
+    session: *const TransportSession,
+    packet: EncryptedPacket,
+    plaintext_out: []u8,
+) Error![]const u8 {
+    return decryptPacket(session, packet, plaintext_out);
+}
+
 test "encrypted transport harness only creates sessions after egress approval" {
     var policies = network_policy.Directory.init();
     var capabilities = capability.CapabilityTable.init();
@@ -233,6 +322,14 @@ test "encrypted transport harness only creates sessions after egress approval" {
     try std.testing.expect(!std.mem.eql(u8, packet.ciphertextSlice(), "sync payload"));
     try std.testing.expectEqual(@as(usize, 1), harness.created_sessions);
 
+    var relay_queue = Relay.init();
+    _ = try harness.sendRelayPacket(&relay_queue, &session, "relay op log");
+    var plaintext_buffer: [MAX_PACKET_BYTES]u8 = undefined;
+    const delivered = (try relay_queue.deliverNext(&session, plaintext_buffer[0..])).?;
+    try std.testing.expectEqualStrings("relay op log", delivered);
+    try std.testing.expectEqual(@as(usize, 1), relay_queue.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 1), relay_queue.delivered_packets);
+
     try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, .{
         .task_id = 42,
         .principal_id = app,
@@ -243,4 +340,94 @@ test "encrypted transport harness only creates sessions after egress approval" {
     }, source, target, "other.sync.example"));
     try std.testing.expectEqual(@as(usize, 1), harness.denied_sessions);
     try std.testing.expectEqual(@as(usize, 1), harness.created_sessions);
+}
+
+test "encrypted transport harness binds device sessions to attested identity and route" {
+    var policies = network_policy.Directory.init();
+    var capabilities = capability.CapabilityTable.init();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 3 };
+    const app = principal.PrincipalId{ .kind = .app, .serial = 4 };
+    const source = principal.PrincipalId{ .kind = .device, .serial = 20 };
+    const target = principal.PrincipalId{ .kind = .device, .serial = 21 };
+    const other_target = principal.PrincipalId{ .kind = .device, .serial = 22 };
+    const pinned_digest = [_]u8{0xA5} ** 32;
+    const local = try policies.create(.{
+        .owner = owner,
+        .label = "local-pinned",
+        .mode = .local_network,
+        .require_remote_attestation = true,
+        .pinned_root_digest = pinned_digest,
+    });
+    const local_capability = try capabilities.mintBootRoot(.{
+        .holder = app,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .network_policy, .id = local.id },
+        .rights = .{ .network_policy = .{ .network_local = true } },
+        .scope = .{ .task_id = 43, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 10 },
+        .audit = .{},
+    });
+    var broker = network_policy.EgressBroker.init(&policies, &capabilities);
+    var harness = Harness.init();
+
+    try std.testing.expectError(error.EgressDenied, harness.openDeviceToDevice(&broker, .{
+        .task_id = 43,
+        .principal_id = app,
+        .capability_id = local_capability.id,
+        .policy_id = local.id,
+        .evidence = .{ .destination = .local_network },
+        .now_ticks = 5,
+    }, source, target));
+
+    try std.testing.expectError(error.EgressDenied, harness.openDeviceToDevice(&broker, .{
+        .task_id = 43,
+        .principal_id = app,
+        .capability_id = local_capability.id,
+        .policy_id = local.id,
+        .evidence = .{
+            .destination = .{ .domain = "relay.sync.example" },
+            .attested = true,
+            .peer_root_digest_present = true,
+            .peer_root_digest = pinned_digest,
+        },
+        .now_ticks = 5,
+    }, source, target));
+
+    const session = try harness.openDeviceToDevice(&broker, .{
+        .task_id = 43,
+        .principal_id = app,
+        .capability_id = local_capability.id,
+        .policy_id = local.id,
+        .evidence = .{
+            .destination = .local_network,
+            .attested = true,
+            .peer_root_digest_present = true,
+            .peer_root_digest = pinned_digest,
+        },
+        .now_ticks = 5,
+    }, source, target);
+    try std.testing.expectEqual(sync_state.TransportMode.device_to_device, session.transport);
+    try std.testing.expect(session.egress_decision.policy_decision.identity_pinned);
+
+    const retargeted = try harness.openDeviceToDevice(&broker, .{
+        .task_id = 43,
+        .principal_id = app,
+        .capability_id = local_capability.id,
+        .policy_id = local.id,
+        .evidence = .{
+            .destination = .local_network,
+            .attested = true,
+            .peer_root_digest_present = true,
+            .peer_root_digest = pinned_digest,
+        },
+        .now_ticks = 5,
+    }, source, other_target);
+    try std.testing.expect(!std.mem.eql(u8, &session.key, &retargeted.key));
+
+    const packet = try harness.encryptPacket(&session, "local sync");
+    try std.testing.expect(packet.encrypted);
+    try std.testing.expectEqual(source, packet.source_device);
+    try std.testing.expectEqual(target, packet.target_device);
+    try std.testing.expectEqual(@as(usize, 2), harness.created_sessions);
+    try std.testing.expectEqual(@as(usize, 1), harness.denied_sessions);
 }

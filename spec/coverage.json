@@ -362,7 +362,7 @@
           "name": "device graph roots user principals and manages enrollment rotation and revocation"
         },
         {
-          "file": "src/native/sync/sync_service_impl.zig",
+          "file": "src/native/sync/sync_service_test.zig",
           "name": "sync service covers device graph policy replication semantics and restart recovery"
         },
         {
@@ -394,7 +394,7 @@
           "name": "network policy connections can require remote attestation and pinned service identities"
         },
         {
-          "file": "src/native/sync/sync_service_impl.zig",
+          "file": "src/native/sync/sync_service_test.zig",
           "name": "overlay sessions cover sync remote access private service publishing and encrypted relay"
         }
       ],
@@ -558,11 +558,11 @@
           "name": "spec 13.3 15.2 and 15.3 keep failures explainable restartable and redacted"
         },
         {
-          "file": "src/native/platform/event_ledger.zig",
+          "file": "src/native/platform/event_ledger_test.zig",
           "name": "event ledger exports structured redacted diagnostics and audit history"
         },
         {
-          "file": "src/native/platform/event_ledger.zig",
+          "file": "src/native/platform/event_ledger_test.zig",
           "name": "event ledger requires explicit opt-in before remote sharing personal device diagnostics"
         },
         {
@@ -782,8 +782,28 @@
   ],
   "requirement_evidence": {
     "REQ-DESIGN-GOALS-AND-NON-GOALS": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "tools/check_spec_coverage.py",
+        "src/native/policy/policy_mediation.zig",
+        "src/native/platform/immutable_base.zig",
+        "src/native/sync/sync_service_impl.zig",
+        "src/native/services/compatibility_environment.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/policy/policy_mediation.zig",
+          "name": "policy mediation denies zero-authority requests without user grants"
+        },
+        {
+          "file": "src/native/services/compatibility_environment.zig",
+          "name": "compatibility environments reject unsigned hidden or host-integrated launches"
+        },
+        {
+          "file": "src/native/session/runtime_negative_proofs.zig",
+          "name": "runtime negative proofs reject modeled bypasses"
+        }
+      ]
     },
     "REQ-ZERO-AMBIENT-AUTHORITY": {
       "status": "enforced",
@@ -800,12 +820,39 @@
       ]
     },
     "REQ-IMMUTABLE-BASE-SYSTEM": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/platform/immutable_base.zig",
+        "src/native/platform/update_health.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/platform/immutable_base.zig",
+          "name": "immutable base verification rejects mutable signer and measurement tampering"
+        }
+      ]
     },
     "REQ-USERSPACE-SERVICES-BY-DEFAULT": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/session/service_catalog.zig",
+        "src/native/session/contract.zig",
+        "src/native/drivers/driver_service.zig",
+        "src/kernel/net/ethernet.zig",
+        "src/kernel/net/link_port.zig",
+        "src/kernel/drivers/ata.zig",
+        "src/kernel/boot/init/devices.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_catalog.zig",
+          "name": "default service catalog keeps native services userspace restartable and zero ambient"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "backlog gate enforces kernel bootstrap shim boundary"
+        }
+      ]
     },
     "REQ-DATA-IS-VERSIONED": {
       "status": "enforced",
@@ -816,14 +863,28 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/storage/storage_volume.zig",
+          "file": "src/native/storage/storage_volume_test.zig",
           "name": "storage volume rejects corrupted slot payloads"
         }
       ]
     },
     "REQ-PLATFORM-APIS-OVER-SYSTEM-INTERNALS": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/core/abi.zig",
+        "src/native/kernel_api/syscall_surface.zig",
+        "src/native/services/service_registry.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/services/service_registry.zig",
+          "name": "service registry rejects internal interface names and unversioned API bypasses"
+        },
+        {
+          "file": "src/native/kernel_api/syscall_surface.zig",
+          "name": "syscall surface rejects unsupported native operations"
+        }
+      ]
     },
     "REQ-PRINCIPAL-MODEL": {
       "status": "enforced",
@@ -896,7 +957,11 @@
         "src/native/session/contract.zig",
         "src/native/kernel_api/native_kernel.zig",
         "src/native/kernel_api/syscall_surface.zig",
-        "src/native/session/service_catalog.zig"
+        "src/native/session/service_catalog.zig",
+        "src/kernel/net/ethernet.zig",
+        "src/kernel/net/link_port.zig",
+        "src/kernel/drivers/ata.zig",
+        "src/kernel/boot/init/devices.zig"
       ],
       "negative_tests": [
         {
@@ -906,6 +971,10 @@
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "spec 4 6.3 and 7 harden modeled kernel isolation and component abi claims"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "backlog gate enforces kernel bootstrap shim boundary"
         }
       ]
     },
@@ -929,8 +998,22 @@
       ]
     },
     "REQ-PRIVILEGE-MODEL": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/policy/policy_object.zig",
+        "src/native/platform/recovery_environment.zig",
+        "src/native/platform/event_ledger.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/platform/recovery_environment.zig",
+          "name": "recovery environment audits break-glass recovery authorization"
+        },
+        {
+          "file": "src/native/policy/policy_object.zig",
+          "name": "policy objects reject oversized lists and refuse authorization after tampering"
+        }
+      ]
     },
     "REQ-BOOT-CHAIN": {
       "status": "enforced",
@@ -960,8 +1043,16 @@
       ]
     },
     "REQ-RECOVERY-MODE": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/platform/recovery_environment.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/platform/recovery_environment.zig",
+          "name": "recovery environment requires recovery profile and refuses missing repair targets"
+        }
+      ]
     },
     "REQ-APP-PACKAGING": {
       "status": "enforced",
@@ -978,8 +1069,19 @@
       ]
     },
     "REQ-APP-EXECUTION": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/task/task_runtime.zig",
+        "src/native/task/userspace_launch.zig",
+        "src/native/task/userspace_executor.zig",
+        "src/native/session/runtime_negative_proofs.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/session/runtime_negative_proofs.zig",
+          "name": "runtime negative proofs reject modeled bypasses"
+        }
+      ]
     },
     "REQ-COMPONENT-MODEL": {
       "status": "enforced",
@@ -1101,8 +1203,26 @@
       ]
     },
     "REQ-MUTABLE-STATE": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/storage/workspace.zig",
+        "src/native/storage/storage_service.zig",
+        "src/native/sync/sync_adapters.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/sync/sync_adapters.zig",
+          "name": "mergeable document adapter applies deterministic CRDT operations and rejects undersized buffers"
+        },
+        {
+          "file": "src/native/sync/sync_adapters.zig",
+          "name": "document operation log merges CRDT operations idempotently with vector clocks"
+        },
+        {
+          "file": "src/native/storage/workspace.zig",
+          "name": "workspace restore rejects tampered signed snapshots"
+        }
+      ]
     },
     "REQ-FILE-BRIDGE": {
       "status": "enforced",
@@ -1142,8 +1262,27 @@
       ]
     },
     "REQ-LOCAL-FIRST-REPLICATION": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/sync/sync_service_impl.zig",
+        "src/native/sync/sync_state_store.zig",
+        "src/native/sync/sync_adapters.zig",
+        "src/native/sync/sync_transport_harness.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/sync/sync_transport_harness.zig",
+          "name": "encrypted transport harness binds device sessions to attested identity and route"
+        },
+        {
+          "file": "src/native/sync/sync_transport_harness.zig",
+          "name": "encrypted transport harness only creates sessions after egress approval"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "backlog gate enforces sync adapter depth"
+        }
+      ]
     },
     "REQ-SYNC-SEMANTICS": {
       "status": "enforced",
@@ -1154,8 +1293,16 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/sync/sync_service_impl.zig",
+          "file": "src/native/sync/sync_service_test.zig",
           "name": "sync service covers device graph policy replication semantics and restart recovery"
+        },
+        {
+          "file": "src/native/sync/sync_adapters.zig",
+          "name": "document operation log merges CRDT operations idempotently with vector clocks"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "backlog gate enforces sync adapter depth"
         }
       ]
     },
@@ -1172,8 +1319,22 @@
       ]
     },
     "REQ-IDENTITY-FIRST-NETWORKING": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/sync/network_policy.zig",
+        "src/native/platform/attestation_service.zig",
+        "src/native/sync/sync_transport_harness.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/sync/network_policy.zig",
+          "name": "egress broker binds connection creation to attested pinned service identity"
+        },
+        {
+          "file": "src/native/sync/network_policy.zig",
+          "name": "network policy connections can require remote attestation and pinned service identities"
+        }
+      ]
     },
     "REQ-NETWORK-PERMISSIONS": {
       "status": "enforced",
@@ -1309,7 +1470,11 @@
         "src/native/drivers/driver_service.zig",
         "src/native/drivers/driver_runtime.zig",
         "src/native/session/session_service_bootstrap.zig",
-        "src/native/drivers/bootstrap_driver_port.zig"
+        "src/native/drivers/bootstrap_driver_port.zig",
+        "src/kernel/net/ethernet.zig",
+        "src/kernel/net/link_port.zig",
+        "src/kernel/drivers/ata.zig",
+        "src/kernel/boot/init/devices.zig"
       ],
       "negative_tests": [
         {
@@ -1323,6 +1488,10 @@
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
           "name": "backlog gate enforces driver boundary audit"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "backlog gate enforces kernel bootstrap shim boundary"
         }
       ]
     },
@@ -1406,7 +1575,7 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/platform/event_ledger.zig",
+          "file": "src/native/platform/event_ledger_test.zig",
           "name": "event ledger requires explicit opt-in before remote sharing personal device diagnostics"
         }
       ]
@@ -1425,8 +1594,20 @@
       ]
     },
     "REQ-PRIVACY-PRESERVING-DIAGNOSTICS": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/platform/event_ledger.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/platform/event_ledger_test.zig",
+          "name": "event ledger requires explicit opt-in before remote sharing personal device diagnostics"
+        },
+        {
+          "file": "src/native/platform/event_ledger_test.zig",
+          "name": "event ledger remote sharing scrubs protected diagnostics unless explicitly included"
+        }
+      ]
     },
     "REQ-POLICY-OBJECTS": {
       "status": "enforced",
@@ -1465,8 +1646,21 @@
       ]
     },
     "REQ-NATIVE-PLATFORM": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "src/native/services/compatibility_environment.zig",
+        "src/native/services/service_registry.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/services/compatibility_environment.zig",
+          "name": "compatibility environments reject unsigned hidden or host-integrated launches"
+        },
+        {
+          "file": "src/native/services/service_registry.zig",
+          "name": "service registry rejects internal interface names and unversioned API bypasses"
+        }
+      ]
     },
     "REQ-LEGACY-SUPPORT": {
       "status": "enforced",
@@ -1507,8 +1701,29 @@
       ]
     },
     "REQ-ONE-SENTENCE-SUMMARY": {
-      "status": "modeled",
-      "coverage_note": "modeled; not yet claimed enforced"
+      "status": "enforced",
+      "enforcement_modules": [
+        "tools/check_spec_coverage.py",
+        "src/native/kernel_api/capability.zig",
+        "src/native/sync/sync_service_impl.zig",
+        "src/native/platform/immutable_base.zig",
+        "src/native/task/task_runtime_model.zig",
+        "src/native/task/accelerator_scheduler.zig"
+      ],
+      "negative_tests": [
+        {
+          "file": "src/native/platform/immutable_base.zig",
+          "name": "immutable base verification rejects mutable signer and measurement tampering"
+        },
+        {
+          "file": "src/native/session/runtime_negative_proofs.zig",
+          "name": "runtime negative proofs reject modeled bypasses"
+        },
+        {
+          "file": "src/native/sync/sync_transport_harness.zig",
+          "name": "encrypted transport harness binds device sessions to attested identity and route"
+        }
+      ]
     }
   }
 }

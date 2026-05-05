@@ -8,9 +8,15 @@ const network_policy = @import("../../native/sync/network_policy.zig");
 const principal = @import("../../native/core/principal.zig");
 const runtime_negative_proofs = @import("../../native/session/runtime_negative_proofs.zig");
 const spec_support = @import("support.zig");
+const sync_adapters = @import("../../native/sync/sync_adapters.zig");
 const sync_transport = @import("../../native/sync/sync_transport_harness.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const typed_component_abi = @import("../../native/services/typed_component_abi.zig");
+
+const kernel_ethernet_source = @embedFile("../../kernel/net/ethernet.zig");
+const kernel_link_port_source = @embedFile("../../kernel/net/link_port.zig");
+const kernel_ata_source = @embedFile("../../kernel/drivers/ata.zig");
+const kernel_device_init_source = @embedFile("../../kernel/boot/init/devices.zig");
 
 pub fn isolationProofDepthGate() !void {
     try std.testing.expect(runtime_negative_proofs.processIsolationBlocksForeignSharedMemory());
@@ -55,6 +61,12 @@ pub fn networkTransportHardeningGate() !void {
     try std.testing.expect(packet.encrypted);
     try std.testing.expect(!std.mem.eql(u8, packet.ciphertextSlice(), "backlog transport frame"));
 
+    var relay_queue = sync_transport.Relay.init();
+    _ = try harness.sendRelayPacket(&relay_queue, &session, "backlog op frame");
+    var plaintext_buffer: [sync_transport.MAX_PACKET_BYTES]u8 = undefined;
+    const delivered = (try relay_queue.deliverNext(&session, plaintext_buffer[0..])).?;
+    try std.testing.expectEqualStrings("backlog op frame", delivered);
+
     try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, .{
         .task_id = 81,
         .principal_id = app,
@@ -63,6 +75,27 @@ pub fn networkTransportHardeningGate() !void {
         .evidence = .{ .destination = .{ .domain = "unexpected.backlog.example" } },
         .now_ticks = 10,
     }, source, target, "relay.backlog.example"));
+}
+
+pub fn syncAdapterDepthGate() !void {
+    const laptop = spec_support.device(711);
+    const tablet = spec_support.device(712);
+    var laptop_log = sync_adapters.DocumentOperationLog{};
+    var tablet_log = sync_adapters.DocumentOperationLog{};
+    try laptop_log.append(try sync_adapters.DocumentOperation.insert(5, " from laptop", laptop, 1));
+    try tablet_log.append(try sync_adapters.DocumentOperation.insert(5, " and tablet", tablet, 1));
+
+    var merged_log = sync_adapters.DocumentOperationLog{};
+    var output: [96]u8 = undefined;
+    const merged = try sync_adapters.mergeDocumentOperationLogs("hello", &laptop_log, &tablet_log, &merged_log, output[0..]);
+    try std.testing.expectEqualStrings("hello and tablet from laptop", merged);
+    try std.testing.expectEqual(@as(u64, 1), merged_log.clockFor(laptop));
+    try std.testing.expectEqual(@as(u64, 1), merged_log.clockFor(tablet));
+
+    try merged_log.mergeFrom(&tablet_log);
+    var replay: [96]u8 = undefined;
+    const replayed = try merged_log.apply("hello", replay[0..]);
+    try std.testing.expectEqualStrings(merged, replayed);
 }
 
 pub fn componentAbiDepthGate() !void {
@@ -144,6 +177,54 @@ pub fn driverBoundaryAuditGate() !void {
     }));
 }
 
+pub fn kernelBootstrapShimBoundaryGate() !void {
+    try expectContains(kernel_ethernet_source, "kernel_boundary_role = \"bootstrap_network_shim\"");
+    try expectContains(kernel_ethernet_source, "publishes_full_network_service = false");
+    try expectContains(kernel_link_port_source, "kernel_boundary_role = \"bootstrap_network_link_shim\"");
+    try expectContains(kernel_link_port_source, "publishes_full_network_service = false");
+    try expectContains(kernel_ata_source, "kernel_boundary_role = \"bootstrap_storage_inventory_shim\"");
+    try expectContains(kernel_ata_source, "publishes_full_storage_service = false");
+    try expectContains(kernel_ata_source, "ata_data_plane_exports_fail_closed = true");
+    try expectContains(kernel_ata_source, "return error.KernelDataPlaneDisabled");
+    try expectContains(kernel_device_init_source, "kernel_boundary_role = \"bootstrap_device_inventory_shim\"");
+    try expectContains(kernel_device_init_source, "publishes_device_data_planes = false");
+
+    const kernel_net_sources = [_][]const u8{
+        kernel_ethernet_source,
+        kernel_link_port_source,
+    };
+    const forbidden_network_service_tokens = [_][]const u8{
+        "pub fn connect(",
+        "pub fn listen(",
+        "pub fn accept(",
+        "pub fn bindSocket(",
+        "pub fn route",
+        "pub fn resolveDns",
+        "pub fn dhcp",
+        "TcpConnection",
+        "UdpSocket",
+    };
+    for (kernel_net_sources) |source| {
+        for (forbidden_network_service_tokens) |token| {
+            try expectMissing(source, token);
+        }
+    }
+
+    const forbidden_storage_service_tokens = [_][]const u8{
+        "pub fn putVersion",
+        "pub fn createWorkspace",
+        "pub fn beginTransaction",
+        "pub fn stagePut",
+        "pub fn commit",
+        "pub fn snapshot",
+        "pub fn restore",
+    };
+    for (forbidden_storage_service_tokens) |token| {
+        try expectMissing(kernel_ata_source, token);
+        try expectMissing(kernel_device_init_source, token);
+    }
+}
+
 pub fn uxRenderingGate() !void {
     var runtime = task_runtime.Runtime.init();
     const app_task = try runtime.createTask(.{
@@ -196,6 +277,10 @@ test "backlog gates enforce network transport hardening" {
     try networkTransportHardeningGate();
 }
 
+test "backlog gates enforce sync adapter depth" {
+    try syncAdapterDepthGate();
+}
+
 test "backlog gates enforce component ABI depth" {
     try componentAbiDepthGate();
 }
@@ -204,6 +289,18 @@ test "backlog gates enforce driver boundary audit" {
     try driverBoundaryAuditGate();
 }
 
+test "backlog gates enforce kernel bootstrap shim boundary" {
+    try kernelBootstrapShimBoundaryGate();
+}
+
 test "backlog gates enforce UX rendering" {
     try uxRenderingGate();
+}
+
+fn expectContains(haystack: []const u8, needle: []const u8) !void {
+    try std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null);
+}
+
+fn expectMissing(haystack: []const u8, needle: []const u8) !void {
+    try std.testing.expect(std.mem.indexOf(u8, haystack, needle) == null);
 }

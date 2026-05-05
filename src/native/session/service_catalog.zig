@@ -1,4 +1,5 @@
 const std = @import("std");
+const fixed_table = @import("../core/fixed_table.zig");
 const capability = @import("../kernel_api/capability.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -599,10 +600,8 @@ pub const ordered_published_native_service_contracts = blk: {
 };
 
 pub fn entryForClass(class: ServiceClass) ?ServiceCatalogEntry {
-    for (catalog) |entry| {
-        if (entry.class == class) return entry;
-    }
-    return null;
+    const entry = fixed_table.findValue(ServiceCatalogEntry, catalog[0..], class, catalogEntryMatchesClass) orelse return null;
+    return entry.*;
 }
 
 pub fn serviceDescriptor(class: ServiceClass) ?ServiceDescriptor {
@@ -611,31 +610,21 @@ pub fn serviceDescriptor(class: ServiceClass) ?ServiceDescriptor {
 }
 
 pub fn serviceContractForClass(class: ServiceClass) ?ServiceContract {
-    for (ordered_service_contracts) |entry| {
-        if (entry.class == class) return entry;
-    }
-    return null;
+    const entry = fixed_table.findValue(ServiceContract, ordered_service_contracts[0..], class, serviceContractMatchesClass) orelse return null;
+    return entry.*;
 }
 
 pub fn publishedNativeServiceContractForClass(class: ServiceClass) ?PublishedNativeServiceContract {
-    for (ordered_published_native_service_contracts) |entry| {
-        if (entry.class == class) return entry;
-    }
-    return null;
+    const entry = fixed_table.findValue(PublishedNativeServiceContract, ordered_published_native_service_contracts[0..], class, publishedNativeContractMatchesClass) orelse return null;
+    return entry.*;
 }
 
 pub fn orderedServiceIndex(class: ServiceClass) ?usize {
-    for (ordered_service_contracts, 0..) |entry, index| {
-        if (entry.class == class) return index;
-    }
-    return null;
+    return fixed_table.findValueIndex(ServiceContract, ordered_service_contracts[0..], class, serviceContractMatchesClass);
 }
 
 pub fn orderedPublishedNativeServiceIndex(class: ServiceClass) ?usize {
-    for (ordered_published_native_service_contracts, 0..) |entry, index| {
-        if (entry.class == class) return index;
-    }
-    return null;
+    return fixed_table.findValueIndex(PublishedNativeServiceContract, ordered_published_native_service_contracts[0..], class, publishedNativeContractMatchesClass);
 }
 
 pub fn imageForClass(class: ServiceClass) ?UserspaceImageIdentity {
@@ -689,6 +678,18 @@ pub fn allowsDriverClass(class: ServiceClass, device_class: driver_service.Devic
     const entry = entryForClass(class) orelse return false;
     const expected = entry.driver_class orelse return false;
     return expected == device_class;
+}
+
+fn catalogEntryMatchesClass(class: ServiceClass, entry: *const ServiceCatalogEntry) bool {
+    return entry.class == class;
+}
+
+fn serviceContractMatchesClass(class: ServiceClass, entry: *const ServiceContract) bool {
+    return entry.class == class;
+}
+
+fn publishedNativeContractMatchesClass(class: ServiceClass, entry: *const PublishedNativeServiceContract) bool {
+    return entry.class == class;
 }
 
 pub fn tcbName(component: KernelTcbComponent) []const u8 {
@@ -821,6 +822,29 @@ test "service catalog interfaces remain unique and dependencies point at catalog
         var peer_index: usize = index + 1;
         while (peer_index < catalog.len) : (peer_index += 1) {
             try std.testing.expect(!std.mem.eql(u8, entry.interface.name, catalog[peer_index].interface.name));
+        }
+    }
+}
+
+test "default service catalog keeps native services userspace restartable and zero ambient" {
+    for (catalog) |entry| {
+        try std.testing.expectEqual(ServiceBoundary.userspace_service, entry.boundary);
+        try std.testing.expectEqual(RestartPolicy.supervised_restart, entry.restart_policy);
+        try std.testing.expect(entry.isolation.namespace_isolated);
+        try std.testing.expect(entry.isolation.zero_ambient_authority);
+
+        if (entry.driver_class) |driver_class| {
+            try std.testing.expect(entry.isolation.driver_class != null);
+            try std.testing.expectEqual(driver_class, entry.isolation.driver_class.?);
+            try std.testing.expect(allowsDriverClass(entry.class, driver_class));
+        }
+
+        if (entry.service_bootstrap) |launch| {
+            if (launch.mode == .kernel_contract) {
+                try std.testing.expect(entry.userspace_image != null);
+                try std.testing.expect(launch.grants.len != 0);
+                try std.testing.expectEqual(BootstrapGrantKind.service_task_authority, launch.grants[0]);
+            }
         }
     }
 }

@@ -2,6 +2,10 @@ const x86 = @import("../../arch/x86.zig");
 const common = @import("../boot/common.zig");
 const vga = @import("vga.zig");
 
+pub const kernel_boundary_role = "bootstrap_storage_inventory_shim";
+pub const publishes_full_storage_service = false;
+pub const ata_data_plane_exports_fail_closed = true;
+
 const ATA_PRIMARY_BASE: u16 = 0x1F0;
 const ATA_PRIMARY_CTRL: u16 = 0x3F6;
 const ATA_SECONDARY_BASE: u16 = 0x170;

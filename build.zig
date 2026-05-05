@@ -142,6 +142,26 @@ pub fn build(b: *std.Build) void {
     const shell_lint_step = b.step("shell-lint", "Run ShellCheck over all repository shell scripts");
     shell_lint_step.dependOn(&shell_lint_cmd.step);
 
+    const zig_lint_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/lint-zig.sh",
+    });
+    const zig_lint_step = b.step("zig-lint", "Run zlint over Zig sources when zlint is installed");
+    zig_lint_step.dependOn(&zig_lint_cmd.step);
+
+    const action_lint_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/lint-actions.sh",
+    });
+    const action_lint_step = b.step("action-lint", "Run actionlint over GitHub workflows when actionlint is installed");
+    action_lint_step.dependOn(&action_lint_cmd.step);
+
+    const lint_step = b.step("lint", "Run local lint checks: Zig fmt, optional zlint, ShellCheck, and optional actionlint");
+    lint_step.dependOn(&fmt_check_cmd.step);
+    lint_step.dependOn(&zig_lint_cmd.step);
+    lint_step.dependOn(&shell_lint_cmd.step);
+    lint_step.dependOn(&action_lint_cmd.step);
+
     const spec_coverage_cmd = b.addSystemCommand(&.{
         "python3",
         "tools/check_spec_coverage.py",
@@ -174,9 +194,9 @@ pub fn build(b: *std.Build) void {
     const benchmark_step = b.step("benchmark", "Build and run the spec-aligned native benchmark suite in QEMU");
     benchmark_step.dependOn(&benchmark_cmd.step);
 
-    const verify_step = b.step("verify", "Run formatting, shell lint, host tests, and spec tests; pass -Dverify-smoke=true and/or -Dverify-benchmark=true for QEMU gates");
-    verify_step.dependOn(&fmt_check_cmd.step);
-    verify_step.dependOn(&shell_lint_cmd.step);
+    const verify_step = b.step("verify", "Run local CI-aligned checks: lint, kernel build, host tests, and spec tests; pass -Dverify-smoke=true and/or -Dverify-benchmark=true for QEMU gates");
+    verify_step.dependOn(lint_step);
+    verify_step.dependOn(kernel_step);
     verify_step.dependOn(&run_host_tests.step);
     verify_step.dependOn(&run_spec_tests.step);
     if (verify_smoke) verify_step.dependOn(&zigos_native_smoke_test_cmd.step);
