@@ -1108,7 +1108,7 @@ fn appendDeleted(workspace: *WorkspaceRecord, entry: Entry) void {
 }
 
 fn applyTransactionOverlay(workspace: *WorkspaceRecord) void {
-    var next_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+    var next_entries: [MAX_WORKSPACE_ENTRIES]Entry = undefined;
     var next_count: usize = 0;
 
     for (workspace.entries[0..workspace.entry_count]) |entry| {
@@ -1129,7 +1129,6 @@ fn applyTransactionOverlay(workspace: *WorkspaceRecord) void {
         next_count += 1;
     }
 
-    clearEntries(&workspace.entries);
     workspace.entry_count = next_count;
     copyEntries(workspace.entries[0..next_count], next_entries[0..next_count]);
 }
