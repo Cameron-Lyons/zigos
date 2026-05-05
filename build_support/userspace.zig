@@ -60,6 +60,7 @@ pub fn addUserspaceArtifacts(
         options.addOption(u32, "role_tag", spec.role_tag);
         options.addOption(u32, "heartbeat_increment", spec.heartbeat_increment);
         options.addOption(u32, "contract_flags", spec.contract_flags);
+        options.addOption(u8, "service_kind", @intFromEnum(spec.service_kind));
 
         const module = b.addModule(spec.artifact_name, .{
             .root_source_file = b.path(spec.source_path),

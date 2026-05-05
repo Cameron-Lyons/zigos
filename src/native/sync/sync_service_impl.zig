@@ -13,7 +13,6 @@ const state_store = @import("sync_state_store.zig");
 const state_support = @import("sync_state_support.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const workspace = @import("../storage/workspace.zig");
-const copyText = native_util.copyText;
 
 pub const MAX_WORKSPACE_POLICIES = state_support.MAX_WORKSPACE_POLICIES;
 pub const MAX_SELECTIVE_PREFIXES = state_support.MAX_SELECTIVE_PREFIXES;
@@ -411,10 +410,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.policy.device_to_device_policy_id = request.device_to_device_policy_id;
             slot.policy.relay_policy_id = request.relay_policy_id;
             slot.policy.overlay_policy_id = request.overlay_policy_id;
-            slot.policy.relay_domain_len = copyText(&slot.policy.relay_domain, request.relay_domain);
+            slot.policy.relay_domain_len = native_util.copyTextExact(&slot.policy.relay_domain, request.relay_domain) catch return error.NetworkTargetTooLong;
 
             for (request.selective_prefixes, 0..) |prefix, index| {
-                slot.policy.selective_prefix_lens[index] = copyText(&slot.policy.selective_prefixes[index], prefix);
+                slot.policy.selective_prefix_lens[index] = native_util.copyTextExact(&slot.policy.selective_prefixes[index], prefix) catch return error.PathTooLong;
                 slot.policy.selective_prefix_count += 1;
             }
 
@@ -442,7 +441,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 slot.overlay.workspace_id = workspace_id;
             }
             slot.overlay.home_device = home_device;
-            slot.overlay.service_identity_len = copyText(&slot.overlay.service_identity, service_identity);
+            slot.overlay.service_identity_len = native_util.copyTextExact(&slot.overlay.service_identity, service_identity) catch return error.ServiceIdentityTooLong;
             slot.overlay.remote_access_enabled = remote_access_enabled;
             try self.checkpoint();
             return &slot.overlay;
@@ -462,7 +461,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             }
             if (overlay.private_service_count >= MAX_PRIVATE_SERVICES) return error.TooManyPrivateServices;
             const slot_index = overlay.private_service_count;
-            overlay.private_service_lens[slot_index] = copyText(&overlay.private_services[slot_index], label);
+            overlay.private_service_lens[slot_index] = native_util.copyTextExact(&overlay.private_services[slot_index], label) catch return error.ServiceIdentityTooLong;
             overlay.private_service_count += 1;
             try self.checkpoint();
             return overlay;
@@ -527,7 +526,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .open_tick = tick,
                 .last_activity_tick = tick,
             };
-            session.service_identity_len = copyText(&session.service_identity, overlay.serviceIdentitySlice());
+            session.service_identity_len = native_util.copyTextExact(&session.service_identity, overlay.serviceIdentitySlice()) catch return error.ServiceIdentityTooLong;
 
             switch (usage) {
                 .sync_replication => {},
@@ -538,13 +537,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .private_service => {
                     const label = private_service_label orelse return error.PrivateServiceNotPublished;
                     if (!overlay.hasPrivateService(label)) return error.PrivateServiceNotPublished;
-                    session.private_service_len = copyText(&session.private_service, label);
+                    session.private_service_len = native_util.copyTextExact(&session.private_service, label) catch return error.ServiceIdentityTooLong;
                     session.remote_access = overlay.remote_access_enabled and transport == .relay_assisted;
                 },
             }
 
             if (transport == .relay_assisted) {
-                session.relay_domain_len = copyText(&session.relay_domain, policy.relayDomainSlice());
+                session.relay_domain_len = native_util.copyTextExact(&session.relay_domain, policy.relayDomainSlice()) catch return error.NetworkTargetTooLong;
                 session.remote_access = true;
             }
 
@@ -584,7 +583,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.in_use = true;
             slot.entry.workspace_id = workspace_id;
             slot.entry.device_id = device_id;
-            slot.entry.path_len = copyText(&slot.entry.path, path);
+            slot.entry.path_len = native_util.copyTextExact(&slot.entry.path, path) catch return error.PathTooLong;
             slot.entry.object_id = object_id;
             slot.entry.version_id = version_id;
             self.resident().markDirty();
@@ -625,8 +624,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.contract = zeroDatabaseContract();
             slot.contract.id = self.nextDatabaseContractId();
             slot.contract.workspace_id = workspace_id;
-            slot.contract.bundle_id_len = copyText(&slot.contract.bundle_id, bundle_id);
-            slot.contract.label_len = copyText(&slot.contract.label, label);
+            slot.contract.bundle_id_len = native_util.copyTextExact(&slot.contract.bundle_id, bundle_id) catch return error.BundleIdTooLong;
+            slot.contract.label_len = native_util.copyTextExact(&slot.contract.label, label) catch return error.LabelTooLong;
             slot.contract.signature = signature;
 
             try self.checkpoint();
@@ -895,7 +894,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.conflict.workspace_id = workspace_id;
             slot.conflict.device_id = device_id;
             slot.conflict.object_id = object_id;
-            slot.conflict.path_len = copyText(&slot.conflict.path, path);
+            slot.conflict.path_len = native_util.copyTextExact(&slot.conflict.path, path) catch return error.PathTooLong;
             slot.conflict.local_version_id = local_version_id;
             slot.conflict.remote_version_id = remote_version_id;
             slot.conflict.semantic = semantic;

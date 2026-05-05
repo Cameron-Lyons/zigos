@@ -5,12 +5,17 @@ pub const session_manager = @import("native/session/session_manager.zig");
 pub const storage_volume = @import("native/storage/storage_volume.zig");
 const abi = @import("native/core/abi.zig");
 const component_port = @import("native/kernel_api/component_port.zig");
+const crypto_hash = @import("native/core/crypto_hash.zig");
+const config = @import("kernel/config.zig");
 const syscall_surface = @import("native/kernel_api/syscall_surface.zig");
 const userspace_executor = @import("native/task/userspace_executor.zig");
 const timer = @import("kernel/timer/timer.zig");
 
 var published_kernel_port_addr: usize = 0;
 var published_active_task_id: u64 = 0;
+
+extern const __kernel_measure_start: u8;
+extern const __kernel_measure_end: u8;
 
 pub fn publishKernelPort(port: anytype) void {
     published_kernel_port_addr = @intFromPtr(port);
@@ -22,6 +27,22 @@ pub fn clearKernelPort() void {
 
 pub fn publishUserspaceActiveTaskId(task_id: u64) void {
     published_active_task_id = task_id;
+}
+
+pub fn bootloaderMeasurementDigest() [32]u8 {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "bootloader", "multiboot-v1");
+    crypto_hash.updateBytes(&hasher, "boot-profile", config.name());
+    crypto_hash.updateBytes(&hasher, "entry-assembly", "src/boot/boot64.S");
+    return crypto_hash.finalize(&hasher);
+}
+
+pub fn kernelImageDigest() [32]u8 {
+    const start = @intFromPtr(&__kernel_measure_start);
+    const end = @intFromPtr(&__kernel_measure_end);
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "kernel-measured-region", @as([*]const u8, @ptrFromInt(start))[0 .. end - start]);
+    return crypto_hash.finalize(&hasher);
 }
 
 export fn kernel_main() void {

@@ -1,10 +1,10 @@
 const std = @import("std");
+const binary_cursor = @import("../core/binary_cursor.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
-const copyText = native_util.copyText;
 
 pub const MAX_SYSTEM_IMAGES: usize = 2;
 pub const MAX_LABEL_BYTES: usize = 48;
@@ -151,12 +151,12 @@ pub const Manager = struct {
         const slot = &self.slots[slot_index];
         slot.* = zeroImage();
         slot.slot_index = @intCast(slot_index);
-        slot.label_len = copyText(&slot.label, label);
+        slot.label_len = try native_util.copyTextExact(&slot.label, label);
         slot.object_id = result.object_id;
         slot.version_id = result.version_id;
         slot.read_only = true;
         slot.activation_generation = self.activation_generation;
-        slot.signer_len = copyText(&slot.signer, signer.label);
+        slot.signer_len = try native_util.copyTextExact(&slot.signer, signer.label);
         slot.measurement = result.blob_address;
         try self.persist(tick);
         return slot;
@@ -285,32 +285,22 @@ pub const Manager = struct {
     }
 
     fn encode(self: *const Manager, buffer: []u8) Error![]const u8 {
-        var written = try std.fmt.bufPrint(
-            buffer,
-            "v1|a={d}|l={d}|p={d}|ag={d}|rg={d}",
-            .{
-                self.active_slot,
-                self.last_good_slot,
-                self.pending_slot,
-                self.activation_generation,
-                self.rollback_generation,
-            },
-        );
+        var writer = BinaryWriter{ .buffer = buffer };
+        try writer.writeBytes("zigos.immutable-base.state.v2");
+        try writer.writeByte(self.active_slot);
+        try writer.writeByte(self.last_good_slot);
+        try writer.writeByte(self.pending_slot);
+        try writer.writeU64(self.activation_generation);
+        try writer.writeU64(self.rollback_generation);
+        try writer.writeByte(@intCast(self.slots.len));
         for (self.slots, 0..) |slot, index| {
-            const suffix = try std.fmt.bufPrint(
-                buffer[written.len..],
-                "|s{d}={s},{d},{d},{d}",
-                .{
-                    index,
-                    slot.labelSlice(),
-                    slot.object_id,
-                    slot.version_id,
-                    @intFromBool(slot.read_only),
-                },
-            );
-            written = buffer[0 .. written.len + suffix.len];
+            try writer.writeByte(@intCast(index));
+            try writeLengthPrefixed(&writer, slot.labelSlice());
+            try writer.writeU64(slot.object_id);
+            try writer.writeU64(slot.version_id);
+            try writer.writeByte(@intFromBool(slot.read_only));
         }
-        return written;
+        return buffer[0..writer.offset];
     }
 
     fn decode(self: *Manager, payload: []const u8) Error!void {
@@ -321,39 +311,22 @@ pub const Manager = struct {
         self.rollback_generation = 0;
         self.slots = [_]SystemImage{zeroImage()} ** MAX_SYSTEM_IMAGES;
 
-        var parts = std.mem.splitScalar(u8, payload, '|');
-        const version = parts.next() orelse return error.CorruptState;
-        if (!std.mem.eql(u8, version, "v1")) return error.CorruptState;
-
-        while (parts.next()) |part| {
-            if (part.len == 0) continue;
-            if (std.mem.startsWith(u8, part, "a=")) {
-                self.active_slot = try parseSlot(part[2..]);
-                continue;
-            }
-            if (std.mem.startsWith(u8, part, "l=")) {
-                self.last_good_slot = try parseSlot(part[2..]);
-                continue;
-            }
-            if (std.mem.startsWith(u8, part, "p=")) {
-                self.pending_slot = try parseSlot(part[2..]);
-                continue;
-            }
-            if (std.mem.startsWith(u8, part, "ag=")) {
-                self.activation_generation = try std.fmt.parseInt(u64, part[3..], 10);
-                continue;
-            }
-            if (std.mem.startsWith(u8, part, "rg=")) {
-                self.rollback_generation = try std.fmt.parseInt(u64, part[3..], 10);
-                continue;
-            }
-            if (part.len >= 4 and part[0] == 's' and part[2] == '=') {
-                const slot_index = parseSlotIndex(part[1]) orelse return error.CorruptState;
-                try self.decodeSlot(slot_index, part[3..]);
-                continue;
-            }
-            return error.CorruptState;
+        var reader = BinaryReader{ .buffer = payload };
+        const domain = try reader.readSlice("zigos.immutable-base.state.v2".len);
+        if (!std.mem.eql(u8, domain, "zigos.immutable-base.state.v2")) return error.CorruptState;
+        self.active_slot = try readSlot(&reader);
+        self.last_good_slot = try readSlot(&reader);
+        self.pending_slot = try readSlot(&reader);
+        self.activation_generation = try reader.readU64();
+        self.rollback_generation = try reader.readU64();
+        const slot_count = try reader.readByte();
+        if (slot_count != MAX_SYSTEM_IMAGES) return error.CorruptState;
+        for (0..slot_count) |_| {
+            const slot_index = try reader.readByte();
+            if (slot_index >= MAX_SYSTEM_IMAGES) return error.CorruptState;
+            try self.decodeSlot(slot_index, &reader);
         }
+        if (reader.offset != payload.len) return error.CorruptState;
 
         for (0..MAX_SYSTEM_IMAGES) |slot_index| {
             if (self.slots[slot_index].version_id == 0) continue;
@@ -361,28 +334,26 @@ pub const Manager = struct {
         }
     }
 
-    fn decodeSlot(self: *Manager, slot_index: usize, payload: []const u8) Error!void {
-        var field_iter = std.mem.splitScalar(u8, payload, ',');
-        const label = field_iter.next() orelse return error.CorruptState;
-        const object_id_text = field_iter.next() orelse return error.CorruptState;
-        const version_id_text = field_iter.next() orelse return error.CorruptState;
-        const read_only_text = field_iter.next() orelse return error.CorruptState;
-        if (field_iter.next() != null) return error.CorruptState;
-
+    fn decodeSlot(self: *Manager, slot_index: usize, reader: *BinaryReader) Error!void {
+        const label = try readLengthPrefixed(reader);
         const slot = &self.slots[slot_index];
         slot.* = zeroImage();
         slot.slot_index = @intCast(slot_index);
-        slot.label_len = copyText(&slot.label, label);
-        slot.object_id = try std.fmt.parseInt(u64, object_id_text, 10);
-        slot.version_id = try std.fmt.parseInt(u64, version_id_text, 10);
-        slot.read_only = try std.fmt.parseInt(u8, read_only_text, 10) != 0;
+        slot.label_len = try native_util.copyTextExact(&slot.label, label);
+        slot.object_id = try reader.readU64();
+        slot.version_id = try reader.readU64();
+        slot.read_only = switch (try reader.readByte()) {
+            0 => false,
+            1 => true,
+            else => return error.CorruptState,
+        };
         slot.activation_generation = self.activation_generation;
     }
 
     fn hydrateSlot(self: *Manager, slot_index: usize) Error!void {
         const slot = &self.slots[slot_index];
         const version = self.storage.version(slot.version_id) orelse return error.CorruptState;
-        slot.signer_len = copyText(&slot.signer, version.metadata.signature.signer);
+        slot.signer_len = try native_util.copyTextExact(&slot.signer, version.metadata.signature.signer);
         slot.measurement = version.blob_address;
     }
 };
@@ -402,17 +373,24 @@ fn zeroImage() SystemImage {
     };
 }
 
-fn parseSlot(text: []const u8) Error!u8 {
-    const value = try std.fmt.parseInt(u16, text, 10);
-    if (value == empty_slot) return empty_slot;
-    if (value >= MAX_SYSTEM_IMAGES) return error.CorruptState;
-    return @intCast(value);
+const BinaryWriter = binary_cursor.Writer(Error, error.NoSpaceLeft);
+const BinaryReader = binary_cursor.Reader(Error, error.CorruptState);
+
+fn writeLengthPrefixed(writer: *BinaryWriter, bytes: []const u8) Error!void {
+    if (bytes.len > std.math.maxInt(u16)) return error.NoSpaceLeft;
+    try writer.writeU16(@intCast(bytes.len));
+    try writer.writeBytes(bytes);
 }
 
-fn parseSlotIndex(ascii_digit: u8) ?usize {
-    if (ascii_digit < '0' or ascii_digit > '9') return null;
-    const value = ascii_digit - '0';
-    if (value >= MAX_SYSTEM_IMAGES) return null;
+fn readLengthPrefixed(reader: *BinaryReader) Error![]const u8 {
+    const len = try reader.readU16();
+    return reader.readSlice(len);
+}
+
+fn readSlot(reader: *BinaryReader) Error!u8 {
+    const value = try reader.readByte();
+    if (value == empty_slot) return empty_slot;
+    if (value >= MAX_SYSTEM_IMAGES) return error.CorruptState;
     return value;
 }
 

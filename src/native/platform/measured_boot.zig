@@ -56,12 +56,16 @@ pub const ArtifactManifest = struct {
     }
 
     pub fn add(self: *ArtifactManifest, kind: MeasurementKind, label: []const u8, payload: []const u8) Error!void {
+        return self.addDigest(kind, label, hashMeasurement(kind, label, payload));
+    }
+
+    pub fn addDigest(self: *ArtifactManifest, kind: MeasurementKind, label: []const u8, digest: [32]u8) Error!void {
         if (self.entry_count >= MAX_MANIFEST_ENTRIES) return error.RecordTableFull;
         self.entries[self.entry_count] = .{
             .kind = kind,
             .label_len = 0,
             .label = [_]u8{0} ** MAX_LABEL_BYTES,
-            .digest = hashMeasurement(kind, label, payload),
+            .digest = digest,
         };
         self.entries[self.entry_count].label_len = copyText(&self.entries[self.entry_count].label, label);
         self.entry_count += 1;
@@ -71,7 +75,7 @@ pub const ArtifactManifest = struct {
         self: *ArtifactManifest,
         image: *const userspace_loader.ImageRecord,
     ) Error!void {
-        var payload = [_]u8{0} ** 64;
+        var payload = [_]u8{0} ** 62;
         @memcpy(payload[0..32], &image.file_sha256);
         std.mem.writeInt(u64, payload[32..40], image.id, .little);
         std.mem.writeInt(u64, payload[40..48], image.entry_point, .little);
@@ -79,6 +83,25 @@ pub const ArtifactManifest = struct {
         std.mem.writeInt(u32, payload[56..60], image.contract_flags, .little);
         std.mem.writeInt(u16, payload[60..62], image.component_abi_version, .little);
         return self.add(.critical_service, image.bundleIdSlice(), payload[0..62]);
+    }
+
+    pub fn addCriticalServiceImage(
+        self: *ArtifactManifest,
+        service: *const supervisor_mod.ServiceRecord,
+        image: *const userspace_loader.ImageRecord,
+    ) Error!void {
+        var payload: CriticalServiceMeasurementPayload = undefined;
+        const bytes = criticalServiceMeasurementPayload(&payload, service, image);
+        return self.add(.critical_service, image.bundleIdSlice(), bytes);
+    }
+
+    pub fn addDriverSet(
+        self: *ArtifactManifest,
+        label: []const u8,
+        directory: *const driver_service.Directory,
+    ) Error!void {
+        const digest = driverSetDigest(directory);
+        return self.add(.driver_set, label, &digest);
     }
 
     pub fn countKind(self: *const ArtifactManifest, kind: MeasurementKind) usize {
@@ -189,12 +212,16 @@ pub const Recorder = struct {
     }
 
     pub fn add(self: *Recorder, kind: MeasurementKind, label: []const u8, payload: []const u8) Error!void {
+        return self.addDigest(kind, label, hashMeasurement(kind, label, payload));
+    }
+
+    pub fn addDigest(self: *Recorder, kind: MeasurementKind, label: []const u8, digest: [32]u8) Error!void {
         if (self.record_count >= MAX_RECORDS) return error.RecordTableFull;
         self.records[self.record_count] = .{
             .kind = kind,
             .label_len = 0,
             .label = [_]u8{0} ** MAX_LABEL_BYTES,
-            .digest = hashMeasurement(kind, label, payload),
+            .digest = digest,
         };
         self.records[self.record_count].label_len = copyText(&self.records[self.record_count].label, label);
         self.record_count += 1;
@@ -205,17 +232,9 @@ pub const Recorder = struct {
         service: *const supervisor_mod.ServiceRecord,
         image: *const userspace_loader.ImageRecord,
     ) Error!void {
-        var payload = [_]u8{0} ** 72;
-        @memcpy(payload[0..32], &image.file_sha256);
-        std.mem.writeInt(u64, payload[32..40], image.id, .little);
-        std.mem.writeInt(u64, payload[40..48], image.entry_point, .little);
-        std.mem.writeInt(u64, payload[48..56], @intCast(image.byte_len), .little);
-        std.mem.writeInt(u16, payload[56..58], @intFromEnum(service.class), .little);
-        std.mem.writeInt(u16, payload[58..60], @intFromEnum(service.state), .little);
-        std.mem.writeInt(u16, payload[60..62], service.restart_count, .little);
-        std.mem.writeInt(u32, payload[62..66], image.contract_flags, .little);
-        std.mem.writeInt(u16, payload[66..68], image.component_abi_version, .little);
-        return self.add(.critical_service, image.bundleIdSlice(), payload[0..68]);
+        var payload: CriticalServiceMeasurementPayload = undefined;
+        const bytes = criticalServiceMeasurementPayload(&payload, service, image);
+        return self.add(.critical_service, image.bundleIdSlice(), bytes);
     }
 
     pub fn addDriverSet(
@@ -223,30 +242,7 @@ pub const Recorder = struct {
         label: []const u8,
         directory: *const driver_service.Directory,
     ) Error!void {
-        var hasher = crypto_hash.init();
-        var driver_count: usize = 0;
-        for (directory.slots) |slot| {
-            if (!slot.in_use) continue;
-            driver_count += 1;
-            const driver = &slot.driver;
-            crypto_hash.updateInt(&hasher, "service-id", driver.service_id);
-            crypto_hash.updateInt(&hasher, "owner-task-id", driver.owner_task_id);
-            crypto_hash.updateInt(&hasher, "device-id", driver.device_id);
-            crypto_hash.updateEnum(&hasher, "device-class", driver.device_class);
-            crypto_hash.updateInt(&hasher, "authority-capability-id", driver.authority_capability_id);
-            crypto_hash.updateInt(&hasher, "restart-generation", driver.restart_generation);
-            crypto_hash.updateEnum(&hasher, "bootstrap-transport", driver.bootstrap_transport);
-            crypto_hash.updateInt(&hasher, "dma-domain-id", driver.dma_domain_id);
-            crypto_hash.updateEnum(&hasher, "dma-protection", driver.dma_protection);
-            crypto_hash.updateBytes(&hasher, "signer", driver.signerSlice());
-            crypto_hash.updateInt(&hasher, "dma-range-count", driver.dma_range_count);
-            for (driver.dma_ranges[0..driver.dma_range_count]) |range| {
-                crypto_hash.updateInt(&hasher, "dma-range-base", range.base);
-                crypto_hash.updateInt(&hasher, "dma-range-length", range.length);
-            }
-        }
-        crypto_hash.updateInt(&hasher, "driver-count", driver_count);
-        const digest = crypto_hash.finalize(&hasher);
+        const digest = driverSetDigest(directory);
         return self.add(.driver_set, label, &digest);
     }
 
@@ -404,6 +400,50 @@ fn hashMeasurement(kind: MeasurementKind, label: []const u8, payload: []const u8
     crypto_hash.updateEnum(&hasher, "measurement-kind", kind);
     crypto_hash.updateBytes(&hasher, "label", label);
     crypto_hash.updateBytes(&hasher, "payload", payload);
+    return crypto_hash.finalize(&hasher);
+}
+
+const CriticalServiceMeasurementPayload = [64]u8;
+
+fn criticalServiceMeasurementPayload(
+    payload: *CriticalServiceMeasurementPayload,
+    service: *const supervisor_mod.ServiceRecord,
+    image: *const userspace_loader.ImageRecord,
+) []const u8 {
+    @memcpy(payload[0..32], &image.file_sha256);
+    std.mem.writeInt(u64, payload[32..40], image.id, .little);
+    std.mem.writeInt(u64, payload[40..48], image.entry_point, .little);
+    std.mem.writeInt(u64, payload[48..56], @intCast(image.byte_len), .little);
+    std.mem.writeInt(u16, payload[56..58], @intFromEnum(service.class), .little);
+    std.mem.writeInt(u32, payload[58..62], image.contract_flags, .little);
+    std.mem.writeInt(u16, payload[62..64], image.component_abi_version, .little);
+    return payload[0..64];
+}
+
+fn driverSetDigest(directory: *const driver_service.Directory) [32]u8 {
+    var hasher = crypto_hash.init();
+    var driver_count: usize = 0;
+    for (directory.slots) |slot| {
+        if (!slot.in_use) continue;
+        driver_count += 1;
+        const driver = &slot.driver;
+        crypto_hash.updateInt(&hasher, "service-id", driver.service_id);
+        crypto_hash.updateInt(&hasher, "owner-task-id", driver.owner_task_id);
+        crypto_hash.updateInt(&hasher, "device-id", driver.device_id);
+        crypto_hash.updateEnum(&hasher, "device-class", driver.device_class);
+        crypto_hash.updateInt(&hasher, "authority-capability-id", driver.authority_capability_id);
+        crypto_hash.updateInt(&hasher, "restart-generation", driver.restart_generation);
+        crypto_hash.updateEnum(&hasher, "bootstrap-transport", driver.bootstrap_transport);
+        crypto_hash.updateInt(&hasher, "dma-domain-id", driver.dma_domain_id);
+        crypto_hash.updateEnum(&hasher, "dma-protection", driver.dma_protection);
+        crypto_hash.updateBytes(&hasher, "signer", driver.signerSlice());
+        crypto_hash.updateInt(&hasher, "dma-range-count", driver.dma_range_count);
+        for (driver.dma_ranges[0..driver.dma_range_count]) |range| {
+            crypto_hash.updateInt(&hasher, "dma-range-base", range.base);
+            crypto_hash.updateInt(&hasher, "dma-range-length", range.length);
+        }
+    }
+    crypto_hash.updateInt(&hasher, "driver-count", driver_count);
     return crypto_hash.finalize(&hasher);
 }
 

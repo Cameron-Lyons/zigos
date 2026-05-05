@@ -1,11 +1,11 @@
 const std = @import("std");
+const binary_cursor = @import("../core/binary_cursor.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const fixed_table = @import("../core/fixed_table.zig");
 const id_index = @import("../core/id_index.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const signing = @import("../core/signing.zig");
-const copyText = native_util.copyText;
 
 pub const MAX_OBJECTS: usize = 128;
 pub const MAX_VERSIONS: usize = 512;
@@ -51,7 +51,7 @@ pub const SignedMetadata = struct {
     label_len: usize = 0,
     label: [48]u8 = [_]u8{0} ** 48,
     content_type_len: usize = 0,
-    content_type: [32]u8 = [_]u8{0} ** 32,
+    content_type: [64]u8 = [_]u8{0} ** 64,
     created_at_ticks: u64 = 0,
 
     pub fn init(
@@ -59,13 +59,13 @@ pub const SignedMetadata = struct {
         content_type: []const u8,
         signature: manifest.Signature,
         created_at_ticks: u64,
-    ) SignedMetadata {
+    ) error{ LabelTooLong, ContentTypeTooLong }!SignedMetadata {
         var metadata = SignedMetadata{
             .signature = signature,
             .created_at_ticks = created_at_ticks,
         };
-        metadata.label_len = copyText(&metadata.label, label);
-        metadata.content_type_len = copyText(&metadata.content_type, content_type);
+        metadata.label_len = native_util.copyTextExact(&metadata.label, label) catch return error.LabelTooLong;
+        metadata.content_type_len = native_util.copyTextExact(&metadata.content_type, content_type) catch return error.ContentTypeTooLong;
         return metadata;
     }
 
@@ -140,7 +140,9 @@ pub const BlobRecord = struct {
 };
 
 pub const Error = error{
+    ContentTypeTooLong,
     InvalidSignature,
+    LabelTooLong,
     ObjectNotFound,
     ObjectTableFull,
     ParentMismatch,
@@ -154,7 +156,7 @@ pub const Error = error{
     CorruptBlob,
 };
 
-pub const SignMetadataError = anyerror;
+pub const SignMetadataError = error{ ContentTypeTooLong, LabelTooLong } || anyerror;
 
 const ObjectSlot = struct {
     in_use: bool = false,
@@ -572,7 +574,7 @@ pub fn signMetadata(
     payload: []const u8,
     created_at_ticks: u64,
 ) SignMetadataError!SignedMetadata {
-    var metadata = SignedMetadata.init(label, content_type, .{}, created_at_ticks);
+    var metadata = try SignedMetadata.init(label, content_type, .{}, created_at_ticks);
     var message_buffer: [MAX_METADATA_MESSAGE_BYTES]u8 = undefined;
     const message = try metadataMessage(&message_buffer, object_type, payload, metadata);
     metadata.signature = try signing.sign(identity, message);
@@ -673,38 +675,22 @@ fn metadataMessage(
     payload: []const u8,
     metadata: SignedMetadata,
 ) error{NoSpaceLeft}![]const u8 {
-    var used: usize = 0;
-    used = try appendFormat(
-        buffer,
-        used,
-        "object:{s}\nlabel:{s}\ncontent-type:{s}\ncreated:{d}\npayload:",
-        .{ objectTypeName(object_type), metadata.labelSlice(), metadata.contentTypeSlice(), metadata.created_at_ticks },
-    );
-    used = try appendBytes(buffer, used, payload);
-    return buffer[0..used];
+    var writer = BinaryWriter{ .buffer = buffer };
+    try writer.writeBytes("zigos.object.metadata.v2");
+    try writer.writeByte(@intFromEnum(object_type));
+    try writeLengthPrefixed(&writer, metadata.labelSlice());
+    try writeLengthPrefixed(&writer, metadata.contentTypeSlice());
+    try writer.writeU64(metadata.created_at_ticks);
+    try writeLengthPrefixed(&writer, payload);
+    return buffer[0..writer.offset];
 }
 
-fn objectTypeName(object_type: ObjectType) []const u8 {
-    return switch (object_type) {
-        .blob => "blob",
-        .document => "document",
-        .collection => "collection",
-        .secret => "secret",
-        .media_asset => "media_asset",
-        .model_artifact => "model_artifact",
-        .event_stream => "event_stream",
-    };
-}
+const BinaryWriter = binary_cursor.Writer(error{NoSpaceLeft}, error.NoSpaceLeft);
 
-fn appendFormat(buffer: []u8, offset: usize, comptime fmt: []const u8, args: anytype) error{NoSpaceLeft}!usize {
-    const text = std.fmt.bufPrint(buffer[offset..], fmt, args) catch return error.NoSpaceLeft;
-    return offset + text.len;
-}
-
-fn appendBytes(buffer: []u8, offset: usize, bytes: []const u8) error{NoSpaceLeft}!usize {
-    if (offset + bytes.len > buffer.len) return error.NoSpaceLeft;
-    @memcpy(buffer[offset .. offset + bytes.len], bytes);
-    return offset + bytes.len;
+fn writeLengthPrefixed(writer: *BinaryWriter, bytes: []const u8) error{NoSpaceLeft}!void {
+    if (bytes.len > std.math.maxInt(u16)) return error.NoSpaceLeft;
+    try writer.writeU16(@intCast(bytes.len));
+    try writer.writeBytes(bytes);
 }
 
 test "object store keeps immutable signed versions with stable version addresses" {
@@ -739,6 +725,24 @@ test "object store keeps immutable signed versions with stable version addresses
     try std.testing.expectEqualStrings("hello, world", try store.versionPayload(store.latestVersion(first.object_id).?));
     try std.testing.expectEqual(first.version_id, store.version(second.version_id).?.previous_version_id);
     try std.testing.expectEqualStrings("zigos-storage-key", store.latestVersion(first.object_id).?.metadata.signature.signer);
+}
+
+test "signed metadata rejects overlong labels instead of truncating" {
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0x29} ** 32,
+    };
+    try std.testing.expectError(
+        error.LabelTooLong,
+        signMetadata(
+            signer,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "text/plain",
+            .document,
+            "payload",
+            1,
+        ),
+    );
 }
 
 test "object store splits blob and version addresses" {
@@ -853,7 +857,7 @@ test "object store supports every native object type and rejects unsigned metada
     try std.testing.expectError(error.UnsignedMetadata, store.putVersion(.{
         .object_type = .blob,
         .payload = "unsigned",
-        .metadata = SignedMetadata.init("unsigned", "application/octet-stream", .{}, 0),
+        .metadata = try SignedMetadata.init("unsigned", "application/octet-stream", .{}, 0),
     }));
 }
 

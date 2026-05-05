@@ -1,9 +1,11 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const fixed_table = @import("../core/fixed_table.zig");
+const id_index = @import("../core/id_index.zig");
 
 pub const MAX_SHARED_MEMORY_OBJECTS: usize = 24;
 pub const MAX_MAPPINGS_PER_OBJECT: usize = 8;
+const SHARED_MEMORY_INDEX_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * 2;
 
 pub const ComputeTarget = enum(u8) {
     cpu,
@@ -72,6 +74,7 @@ const ObjectSlot = struct {
 
 pub const Table = struct {
     next_object_id: u64 = 1,
+    object_index_slots: [SHARED_MEMORY_INDEX_CAPACITY]id_index.Slot = id_index.emptyTable(SHARED_MEMORY_INDEX_CAPACITY),
     slots: [MAX_SHARED_MEMORY_OBJECTS]ObjectSlot = [_]ObjectSlot{ObjectSlot{}} ** MAX_SHARED_MEMORY_OBJECTS,
 
     pub fn init() Table {
@@ -90,7 +93,8 @@ pub const Table = struct {
     ) Error!Object {
         if (size_bytes == 0) return error.SizeZero;
 
-        const slot = fixed_table.firstFreeSlot(ObjectSlot, MAX_SHARED_MEMORY_OBJECTS, &self.slots) orelse return error.TableFull;
+        const slot_index = fixed_table.firstFreeSlotIndex(ObjectSlot, MAX_SHARED_MEMORY_OBJECTS, &self.slots) orelse return error.TableFull;
+        const slot = &self.slots[slot_index];
         slot.in_use = true;
         slot.object = .{
             .id = self.allocateObjectId(),
@@ -104,6 +108,7 @@ pub const Table = struct {
             .mapped_task_ids = [_]u64{0} ** MAX_MAPPINGS_PER_OBJECT,
             .mapping_count = 0,
         };
+        id_index.insert(SHARED_MEMORY_INDEX_CAPACITY, &self.object_index_slots, slot.object.id, slot_index, "shared memory id index covers object table");
         return slot.object;
     }
 
@@ -198,15 +203,39 @@ pub const Table = struct {
     }
 
     fn find(self: *Table, object_id: u64) ?*Object {
-        const slot = fixed_table.findSlot(ObjectSlot, MAX_SHARED_MEMORY_OBJECTS, &self.slots, object_id, objectSlotMatchesId) orelse return null;
+        const slot = fixed_table.findIndexedSlot(
+            ObjectSlot,
+            MAX_SHARED_MEMORY_OBJECTS,
+            SHARED_MEMORY_INDEX_CAPACITY,
+            &self.slots,
+            &self.object_index_slots,
+            object_id,
+            objectSlotId,
+            object_id,
+            objectSlotMatchesId,
+        ) orelse return null;
         return &slot.object;
     }
 
     fn findConst(self: *const Table, object_id: u64) ?*const Object {
-        const slot = fixed_table.findConstSlot(ObjectSlot, MAX_SHARED_MEMORY_OBJECTS, &self.slots, object_id, objectSlotMatchesId) orelse return null;
+        const slot = fixed_table.findIndexedConstSlot(
+            ObjectSlot,
+            MAX_SHARED_MEMORY_OBJECTS,
+            SHARED_MEMORY_INDEX_CAPACITY,
+            &self.slots,
+            &self.object_index_slots,
+            object_id,
+            objectSlotId,
+            object_id,
+            objectSlotMatchesId,
+        ) orelse return null;
         return &slot.object;
     }
 };
+
+fn objectSlotId(slot: *const ObjectSlot) u64 {
+    return slot.object.id;
+}
 
 fn objectSlotMatchesId(object_id: u64, slot: *const ObjectSlot) bool {
     return slot.object.id == object_id;

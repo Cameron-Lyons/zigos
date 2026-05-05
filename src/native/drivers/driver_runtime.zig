@@ -4,15 +4,16 @@ const bootstrap_driver_port = @import("bootstrap_driver_port.zig");
 const driver_service = @import("driver_service.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const fixed_table = @import("../core/fixed_table.zig");
+const id_index = @import("../core/id_index.zig");
 const root = @import("root");
 const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
     root.storage_volume
 else
     @import("../storage/storage_volume.zig");
 const native_util = @import("../core/util.zig");
-const copyText = native_util.copyText;
 
 pub const MAX_ACTIVATIONS: usize = 8;
+const SERVICE_INDEX_CAPACITY: usize = MAX_ACTIVATIONS * 2;
 
 pub const ActivationMode = enum(u8) {
     control_only,
@@ -42,6 +43,7 @@ pub const Error = error{
     ActivationTableFull,
     KernelBootstrapNotAuthorized,
     MissingDmaDomain,
+    PublisherTooLong,
 };
 
 const ActivationSlot = struct {
@@ -52,6 +54,7 @@ const ActivationSlot = struct {
 pub const Runtime = struct {
     kernel_port: ?*component_port.KernelPort = null,
     next_activation_generation: u32 = 1,
+    service_index_slots: [SERVICE_INDEX_CAPACITY]id_index.Slot = id_index.emptyTable(SERVICE_INDEX_CAPACITY),
     slots: [MAX_ACTIVATIONS]ActivationSlot = [_]ActivationSlot{ActivationSlot{}} ** MAX_ACTIVATIONS,
 
     pub fn init() Runtime {
@@ -110,7 +113,7 @@ pub const Runtime = struct {
                             record.mode = .published_data_plane;
                             record.exclusive_claim = true;
                             record.kernel_bootstrap = publication.kernel_bootstrap;
-                            record.publisher_len = copyText(record.publisher[0..], publication.publisherSlice());
+                            record.publisher_len = native_util.copyTextExact(record.publisher[0..], publication.publisherSlice()) catch return error.PublisherTooLong;
                         }
                     }
                 }
@@ -135,7 +138,7 @@ pub const Runtime = struct {
                                 .published_data_plane;
                             record.exclusive_claim = true;
                             record.kernel_bootstrap = publication.kernel_bootstrap;
-                            record.publisher_len = copyText(record.publisher[0..], publication.publisherSlice());
+                            record.publisher_len = native_util.copyTextExact(record.publisher[0..], publication.publisherSlice()) catch return error.PublisherTooLong;
                         }
                     }
                 }
@@ -157,8 +160,7 @@ pub const Runtime = struct {
     }
 
     pub fn deactivate(self: *Runtime, service_id: u64) bool {
-        for (&self.slots) |*slot| {
-            if (!slot.in_use or slot.activation.service_id != service_id) continue;
+        if (self.findByServiceSlot(service_id)) |slot| {
             if (slot.activation.mode != .control_only and slot.activation.exclusive_claim) {
                 const released = switch (slot.activation.device_class) {
                     .network_adapter => bootstrap_driver_port.deactivateNetworkDevice(service_id),
@@ -175,15 +177,31 @@ pub const Runtime = struct {
     }
 
     fn upsert(self: *Runtime, activation: ActivationRecord) Error!ActivationRecord {
-        if (fixed_table.findSlot(ActivationSlot, MAX_ACTIVATIONS, &self.slots, activation.service_id, activationSlotMatchesService)) |slot| {
+        if (self.findByServiceSlot(activation.service_id)) |slot| {
             slot.activation = activation;
             return slot.activation;
         }
 
-        const slot = fixed_table.firstFreeSlot(ActivationSlot, MAX_ACTIVATIONS, &self.slots) orelse return error.ActivationTableFull;
+        const slot_index = fixed_table.firstFreeSlotIndex(ActivationSlot, MAX_ACTIVATIONS, &self.slots) orelse return error.ActivationTableFull;
+        const slot = &self.slots[slot_index];
         slot.in_use = true;
         slot.activation = activation;
+        id_index.insert(SERVICE_INDEX_CAPACITY, &self.service_index_slots, activation.service_id, slot_index, "driver activation service id index covers activation table");
         return slot.activation;
+    }
+
+    fn findByServiceSlot(self: *Runtime, service_id: u64) ?*ActivationSlot {
+        return fixed_table.findIndexedSlot(
+            ActivationSlot,
+            MAX_ACTIVATIONS,
+            SERVICE_INDEX_CAPACITY,
+            &self.slots,
+            &self.service_index_slots,
+            service_id,
+            activationSlotServiceId,
+            service_id,
+            activationSlotMatchesService,
+        );
     }
 
     fn nextActivationGeneration(self: *Runtime) u32 {
@@ -191,6 +209,10 @@ pub const Runtime = struct {
         return self.next_activation_generation;
     }
 };
+
+fn activationSlotServiceId(slot: *const ActivationSlot) u64 {
+    return slot.activation.service_id;
+}
 
 fn activationSlotMatchesClass(device_class: driver_service.DeviceClass, slot: *const ActivationSlot) bool {
     return slot.activation.device_class == device_class;
@@ -238,12 +260,12 @@ test "kernel bootstrap cannot publish network data-plane transports" {
     bootstrap_driver_port.reset();
     defer bootstrap_driver_port.reset();
 
-    try std.testing.expect(!bootstrap_driver_port.publishNetworkActivator(
+    try std.testing.expect(!(try bootstrap_driver_port.publishNetworkActivator(
         0x8086_100E_0001,
         "e1000",
         FakeNetworkDevice.activate,
         true,
-    ));
+    )));
 
     var directory = driver_service.Directory.init();
     const capability = @import("../kernel_api/capability.zig");
@@ -397,7 +419,7 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
         },
         .bootstrap_transport = .kernel_published_data_plane,
     });
-    try std.testing.expect(bootstrap_driver_port.claimStorageAtaBootstrapInventory(driver, "zigos.system.storage-driver"));
+    try std.testing.expect(try bootstrap_driver_port.claimStorageAtaBootstrapInventory(driver, "zigos.system.storage-driver"));
 
     var driver_runtime = Runtime.init();
     driver_runtime.bindKernelPort(&kernel_port);

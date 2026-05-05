@@ -1,6 +1,7 @@
 const manifest = @import("../policy/manifest.zig");
 const manifest_fixtures = @import("../policy/manifest_fixtures.zig");
 const package_service = @import("../services/package_service.zig");
+const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 
 const store_source = "store:zigos";
@@ -23,10 +24,20 @@ const capture_signer = signing.SignerIdentity{
 };
 
 pub fn seed(packages: *package_service.Service) void {
+    trustDemoPublishers(packages);
     installViewer(packages);
     installNotes(packages);
     installSync(packages);
     installCapture(packages);
+}
+
+fn trustDemoPublishers(packages: *package_service.Service) void {
+    const issuer = principal.PrincipalId{ .kind = .policy_authority, .serial = 1 };
+    _ = packages.trustPolicyAuthorityRoot(issuer, [_]u8{0x5A} ** 32) catch unreachable;
+    _ = packages.trustPublisher(.{ .kind = .app, .serial = 41 }, issuer, "zigos.dev", signing.publicKey(viewer_signer) catch unreachable) catch unreachable;
+    _ = packages.trustPublisher(.{ .kind = .app, .serial = 42 }, issuer, "zigos.dev", signing.publicKey(notes_signer) catch unreachable) catch unreachable;
+    _ = packages.trustPublisher(.{ .kind = .app, .serial = 43 }, issuer, "zigos.dev", signing.publicKey(sync_signer) catch unreachable) catch unreachable;
+    _ = packages.trustPublisher(.{ .kind = .app, .serial = 44 }, issuer, "zigos.dev", signing.publicKey(capture_signer) catch unreachable) catch unreachable;
 }
 
 fn installViewer(packages: *package_service.Service) void {

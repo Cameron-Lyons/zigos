@@ -3,7 +3,6 @@ const fixed_table = @import("../core/fixed_table.zig");
 const capability = @import("../kernel_api/capability.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
-const copyText = native_util.copyText;
 
 pub const MAX_POLICIES: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
@@ -120,7 +119,9 @@ pub const EgressDecision = struct {
 };
 
 pub const Error = error{
+    LabelTooLong,
     TargetRequired,
+    TargetTooLong,
     PolicyNotFound,
     PolicyTableFull,
 };
@@ -167,9 +168,9 @@ pub const Directory = struct {
         slot.policy.id = self.nextPolicyId();
         slot.policy.owner = request.owner;
         slot.policy.workspace_id = request.workspace_id;
-        slot.policy.label_len = copyText(&slot.policy.label, request.label);
+        slot.policy.label_len = native_util.copyTextExact(&slot.policy.label, request.label) catch return error.LabelTooLong;
         slot.policy.mode = request.mode;
-        slot.policy.target_len = copyText(&slot.policy.target, request.target);
+        slot.policy.target_len = native_util.copyTextExact(&slot.policy.target, request.target) catch return error.TargetTooLong;
         slot.policy.explicit_internet_grant = request.explicit_internet_grant;
         slot.policy.require_remote_attestation = request.require_remote_attestation;
         if (request.pinned_root_digest) |digest| {
@@ -517,6 +518,21 @@ test "network policy objects enforce discovery inbound service domain and explic
     try std.testing.expect((try directory.authorize(inbound_policy.id, .{ .inbound_session_type = "document-review/v1" })).allowed);
     try std.testing.expect(!(try directory.authorize(inbound_policy.id, .{ .inbound_session_type = "pair-screen/v1" })).allowed);
     try std.testing.expect((try directory.authorize(internet_policy.id, .public_internet)).allowed);
+}
+
+test "network policy targets reject overlong values instead of truncating" {
+    var directory = Directory.init();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 80 };
+
+    try std.testing.expectError(
+        error.TargetTooLong,
+        directory.create(.{
+            .owner = owner,
+            .label = "egress",
+            .mode = .named_domain,
+            .target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.zigos.example",
+        }),
+    );
 }
 
 test "network policy objects require explicit targets for scoped discovery and inbound policies" {

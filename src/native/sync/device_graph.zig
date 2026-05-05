@@ -3,7 +3,6 @@ const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
-const copyText = native_util.copyText;
 
 pub const MAX_USER_ROOTS: usize = 4;
 pub const MAX_DEVICES: usize = 8;
@@ -59,6 +58,7 @@ pub const Error = error{
     InvalidRootSignature,
     InvalidRotationSignature,
     InvalidDeviceSignature,
+    LabelTooLong,
     RootNotFound,
     UserRootTableFull,
 };
@@ -103,7 +103,7 @@ pub const Graph = struct {
         slot.in_use = true;
         slot.root = zeroUserRoot();
         slot.root.principal_id = user_principal;
-        slot.root.label_len = copyText(&slot.root.label, label);
+        slot.root.label_len = native_util.copyTextExact(&slot.root.label, label) catch return error.LabelTooLong;
 
         var message_buffer: [128]u8 = undefined;
         const message = rootMessage(&message_buffer, user_principal, label) catch return error.InvalidRootSignature;
@@ -136,7 +136,7 @@ pub const Graph = struct {
         slot.device = zeroDevice();
         slot.device.principal_id = device_principal;
         slot.device.owner = user_principal;
-        slot.device.label_len = copyText(&slot.device.label, label);
+        slot.device.label_len = native_util.copyTextExact(&slot.device.label, label) catch return error.LabelTooLong;
         slot.device.overlay_id = overlay_id;
 
         var device_message_buffer: [192]u8 = undefined;

@@ -1,6 +1,7 @@
 const std = @import("std");
 const manifest = @import("../policy/manifest.zig");
 const policy_object = @import("../policy/policy_object.zig");
+const principal = @import("../core/principal.zig");
 const bundle_digest = @import("package_service_digest.zig");
 const bundle_ops = @import("package_service_bundle_ops.zig");
 const fixed_table = @import("../core/fixed_table.zig");
@@ -45,6 +46,8 @@ pub const Error = bundle_ops.Error || error{
     BundleTableFull,
     InstallSourceDenied,
     InvalidManifestSignature,
+    UntrustedManifestSigner,
+    PublisherKeyRevoked,
     MigrationManifestRequired,
     MigrationHandlerRequired,
     MigrationApplyFailed,
@@ -60,9 +63,32 @@ const zeroBundle = model.zeroBundle;
 
 pub const Service = struct {
     slots: [MAX_INSTALLED_BUNDLES]BundleSlot = [_]BundleSlot{BundleSlot{}} ** MAX_INSTALLED_BUNDLES,
+    trust_store: principal.Keyring = principal.Keyring.init(),
 
     pub fn init() Service {
         return .{};
+    }
+
+    pub fn trustPublisher(
+        self: *Service,
+        publisher_principal: principal.PrincipalId,
+        issuer: principal.PrincipalId,
+        publisher: []const u8,
+        public_key: [32]u8,
+    ) principal.KeyringError!*principal.PrincipalKeyRecord {
+        return self.trust_store.bindPublisher(publisher_principal, issuer, publisher, public_key);
+    }
+
+    pub fn trustPolicyAuthorityRoot(
+        self: *Service,
+        authority: principal.PrincipalId,
+        public_key: [32]u8,
+    ) principal.KeyringError!*principal.PrincipalKeyRecord {
+        return self.trust_store.bindPolicyAuthorityRoot(authority, public_key);
+    }
+
+    pub fn revokePublisher(self: *Service, publisher_principal: principal.PrincipalId) principal.KeyringError!void {
+        return self.trust_store.revokePrincipal(publisher_principal);
     }
 
     pub fn install(
@@ -76,6 +102,13 @@ pub const Service = struct {
         const digest = bundle_digest.digestBundle(request.bundle);
         if (!signing.verify(request.bundle.signature, &digest)) {
             return error.InvalidManifestSignature;
+        }
+        const trusted = self.trust_store.trustedPublisherSignature(request.bundle.publisher, request.bundle.signature);
+        if (!trusted) {
+            if (publisherKeyWasRevoked(&self.trust_store, request.bundle.publisher, request.bundle.signature)) {
+                return error.PublisherKeyRevoked;
+            }
+            return error.UntrustedManifestSigner;
         }
         if (policy) |active_policy| {
             if (!active_policy.allowsInstallSource(request.source_identity)) {
@@ -201,6 +234,22 @@ pub const Service = struct {
     }
 };
 
+fn publisherKeyWasRevoked(
+    trust_store: *const principal.Keyring,
+    publisher: []const u8,
+    signature: manifest.Signature,
+) bool {
+    if (!signature.isComplete()) return false;
+    for (&trust_store.slots) |*slot| {
+        if (!slot.in_use or !slot.record.revoked) continue;
+        if (slot.record.publisher_len == 0) continue;
+        if (!std.mem.eql(u8, slot.record.publisherSlice(), publisher)) continue;
+        if (!std.mem.eql(u8, slot.record.public_key[0..], signature.publicKeySlice())) continue;
+        return true;
+    }
+    return false;
+}
+
 fn bundleSlotMatchesId(bundle_id: []const u8, slot: *const BundleSlot) bool {
     return std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id);
 }
@@ -237,6 +286,23 @@ const test_migration = struct {
         last_context = context;
     }
 };
+
+fn trustTestPublisher(
+    service: *Service,
+    signer_identity: signing.SignerIdentity,
+    publisher: []const u8,
+) !void {
+    _ = try service.trustPolicyAuthorityRoot(
+        .{ .kind = .policy_authority, .serial = 1 },
+        [_]u8{0x51} ** 32,
+    );
+    _ = try service.trustPublisher(
+        .{ .kind = .app, .serial = std.hash.Wyhash.hash(0x5A47_5445_5354, publisher) },
+        .{ .kind = .policy_authority, .serial = 1 },
+        publisher,
+        try signing.publicKey(signer_identity),
+    );
+}
 
 test "package service enforces signed manifests policy gated sources updates and rollback" {
     test_migration.reset();
@@ -291,6 +357,7 @@ test "package service enforces signed manifests policy gated sources updates and
     v1.signature = try signing.sign(bundle_key, &digestBundle(v1));
 
     var service = Service.init();
+    try trustTestPublisher(&service, bundle_key, "Example Software");
     const first = try service.install(.{
         .bundle = v1,
         .source_identity = "store:zigos",
@@ -419,6 +486,7 @@ test "package service rejects invalid signatures and rollback before any update"
         .label = "pkg-test",
         .seed = [_]u8{0x31} ** 32,
     };
+    try trustTestPublisher(&service, signer_identity, "Example Software");
     const permissions = [_]manifest.PermissionRequest{
         .{
             .kind = .object_access,
@@ -462,12 +530,58 @@ test "package service rejects invalid signatures and rollback before any update"
     try std.testing.expectError(error.NoRollbackVersion, service.rollback("app.notes"));
 }
 
+test "package service rejects untrusted self-signed and revoked publisher bundles" {
+    const signer_identity = signing.SignerIdentity{
+        .label = "self-signed-example",
+        .seed = [_]u8{0x38} ** 32,
+    };
+    const components = [_]manifest.ExecutionComponentDecl{
+        .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
+    };
+    const interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.workspace.document" },
+    };
+    const assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+    };
+    var bundle = manifest.BundleManifest{
+        .bundle_id = "app.notes",
+        .display_name = "Notes",
+        .publisher = "Example Software",
+        .provided_interfaces = &interfaces,
+        .components = &components,
+        .assets = &assets,
+    };
+    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+
+    var service = Service.init();
+    try std.testing.expectError(error.UntrustedManifestSigner, service.install(.{
+        .bundle = bundle,
+        .source_identity = "store:zigos",
+    }, null));
+
+    const publisher_principal = principal.PrincipalId{ .kind = .app, .serial = 38 };
+    _ = try service.trustPublisher(
+        publisher_principal,
+        .{ .kind = .policy_authority, .serial = 1 },
+        "Example Software",
+        try signing.publicKey(signer_identity),
+    );
+    try service.revokePublisher(publisher_principal);
+
+    try std.testing.expectError(error.PublisherKeyRevoked, service.install(.{
+        .bundle = bundle,
+        .source_identity = "store:zigos",
+    }, null));
+}
+
 test "package service rejects oversized manifests instead of truncating stored metadata" {
     var service = Service.init();
     const signer_identity = signing.SignerIdentity{
         .label = "pkg-test-bounds",
         .seed = [_]u8{0x36} ** 32,
     };
+    try trustTestPublisher(&service, signer_identity, "Example Software");
     const long_bundle_id = [_]u8{'b'} ** (MAX_LABEL_BYTES + 1);
     const interfaces = [_]manifest.InterfaceDecl{
         .{ .name = "zigos.workspace.document" },
@@ -511,6 +625,7 @@ test "package service treats lease and target scope changes as declared permissi
         .label = "pkg-test-lease-scope",
         .seed = [_]u8{0x34} ** 32,
     };
+    try trustTestPublisher(&service, signer_identity, "Example Software");
     const interfaces = [_]manifest.InterfaceDecl{
         .{ .name = "zigos.workspace.document" },
         .{ .name = "zigos.object.workspace" },
@@ -596,6 +711,7 @@ test "package service accepts compatible schema updates without a migration mani
         .label = "pkg-test-compat",
         .seed = [_]u8{0x35} ** 32,
     };
+    try trustTestPublisher(&service, signer_identity, "Example Software");
     const interfaces = [_]manifest.InterfaceDecl{
         .{ .name = "zigos.workspace.document" },
         .{ .name = "zigos.object.workspace" },
@@ -651,6 +767,7 @@ test "package service resolves installed manifests with stable slices" {
         .label = "pkg-test-resolve",
         .seed = [_]u8{0x32} ** 32,
     };
+    try trustTestPublisher(&service, signer_identity, "Example Software");
     const provided_interfaces = [_]manifest.InterfaceDecl{
         .{ .name = "zigos.workspace.document" },
     };
@@ -734,6 +851,7 @@ test "package service round-trips the example writer manifest fields without wid
         .label = "pkg-test-example-writer",
         .seed = [_]u8{0x37} ** 32,
     };
+    try trustTestPublisher(&service, signer_identity, "Example Software");
     const provided_interfaces = [_]manifest.InterfaceDecl{
         .{ .name = "writer.edit/v1" },
     };

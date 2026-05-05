@@ -1,5 +1,9 @@
 pub const SECTION_NAME = ".zigos_userspace_bootstrap";
 pub const VERSION: u16 = 1;
+pub const MMU_ISOLATION_PROOF_ROLE_TAG: u32 = 0xA116;
+pub const FOREIGN_SHARED_MEMORY_PROBE_ADDR: u32 = 0x7000_0000;
+pub const PROOF_SYSCALL_POINTER_DENIED_PULSE: u16 = 0x41;
+pub const PROOF_FOREIGN_MEMORY_ACCESS_FAULT_CODE: u8 = 0x72;
 
 const FLAG_OWNS_UI_SURFACE: u32 = 1 << 1;
 const FLAG_PERMISSION_REVIEW: u32 = 1 << 2;
@@ -19,8 +23,18 @@ pub const Stage = enum(u8) {
     descriptor_ready = 0x20,
     mailbox_ready = 0x30,
     syscall_ready = 0x40,
+    service_ready = 0x48,
     steady = 0x50,
     fault = 0xF0,
+};
+
+pub const ServiceKind = enum(u8) {
+    generic = 0,
+    storage = 1,
+    sync = 2,
+    network = 3,
+    package = 4,
+    compositor = 5,
 };
 
 pub const Detail = enum(u8) {
@@ -55,6 +69,10 @@ pub const Mailbox = extern struct {
     task_id: u64 = 0,
     service_id: u64 = 0,
     resource_mask: u32 = 0,
+    service_kind: u8 = @intFromEnum(ServiceKind.generic),
+    service_ready: u8 = 0,
+    service_operation_count: u16 = 0,
+    service_state_hash: u64 = 0,
     last_counter: u32 = 0,
 };
 
@@ -88,4 +106,17 @@ test "mailbox counter encoding preserves stage and detail" {
     try @import("std").testing.expectEqual(Stage.steady, stageFromCounter(counter));
     try @import("std").testing.expectEqual(@as(u8, @intFromEnum(Detail.network)), @as(u8, @truncate(counter >> 16)));
     try @import("std").testing.expectEqual(@as(u16, 42), @as(u16, @truncate(counter)));
+}
+
+test "mailbox records userspace service readiness separately from generic heartbeat" {
+    var mailbox = Mailbox{};
+    mailbox.service_kind = @intFromEnum(ServiceKind.storage);
+    mailbox.service_ready = 1;
+    mailbox.service_operation_count = 3;
+    mailbox.service_state_hash = 0xA5;
+
+    try @import("std").testing.expectEqual(ServiceKind.storage, @as(ServiceKind, @enumFromInt(mailbox.service_kind)));
+    try @import("std").testing.expectEqual(@as(u8, 1), mailbox.service_ready);
+    try @import("std").testing.expectEqual(@as(u16, 3), mailbox.service_operation_count);
+    try @import("std").testing.expectEqual(@as(u64, 0xA5), mailbox.service_state_hash);
 }

@@ -5,7 +5,6 @@ const manifest = @import("manifest.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
-const copyText = native_util.copyText;
 
 pub const MAX_POLICIES: usize = 16;
 pub const MAX_ALLOW_LIST: usize = 8;
@@ -130,7 +129,10 @@ pub const PolicyObject = struct {
 };
 
 pub const Error = error{
+    InstallSourceTooLong,
+    LabelTooLong,
     PolicyTableFull,
+    SyncDestinationTooLong,
     TooManyInstallSources,
     TooManySyncDestinations,
 };
@@ -165,7 +167,7 @@ pub const Directory = struct {
         slot.policy.scope = request.scope;
         slot.policy.subject_id = request.subject_id;
         slot.policy.issuer = request.issuer;
-        slot.policy.label_len = copyText(&slot.policy.label, request.label);
+        slot.policy.label_len = native_util.copyTextExact(&slot.policy.label, request.label) catch return error.LabelTooLong;
         slot.policy.install_source_mode = request.install_source_mode;
         slot.policy.network_egress_mode = request.network_egress_mode;
         slot.policy.removable_storage_allowed = request.removable_storage_allowed;
@@ -174,11 +176,11 @@ pub const Directory = struct {
         slot.policy.audit_export_required = request.audit_export_required;
 
         for (request.allowed_install_sources, 0..) |source_identity, index| {
-            slot.policy.allowed_install_source_lens[index] = copyText(&slot.policy.allowed_install_sources[index], source_identity);
+            slot.policy.allowed_install_source_lens[index] = native_util.copyTextExact(&slot.policy.allowed_install_sources[index], source_identity) catch return error.InstallSourceTooLong;
             slot.policy.allowed_install_source_count += 1;
         }
         for (request.allowed_sync_destinations, 0..) |destination, index| {
-            slot.policy.allowed_sync_destination_lens[index] = copyText(&slot.policy.allowed_sync_destinations[index], destination);
+            slot.policy.allowed_sync_destination_lens[index] = native_util.copyTextExact(&slot.policy.allowed_sync_destinations[index], destination) catch return error.SyncDestinationTooLong;
             slot.policy.allowed_sync_destination_count += 1;
         }
 

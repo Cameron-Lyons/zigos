@@ -389,6 +389,7 @@ pub fn thermalPowerAndAppUpdatesStayCompatibilityAware() !void {
 
     var packages = package_service.Service.init();
     const signer_identity = spec_support.signer("spec.update.bundle", 0xA1);
+    try spec_support.trustPackagePublisher(&packages, signer_identity, "Example Software");
     const interfaces = [_]manifest.InterfaceDecl{
         .{ .name = "zigos.workspace.document" },
         .{ .name = "zigos.object.workspace" },
