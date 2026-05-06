@@ -5,6 +5,10 @@ inputs:
     description: Zig version to install
     required: false
     default: ""
+  install-build-dependencies:
+    description: Install and verify OS build dependencies after Zig is available
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
@@ -48,13 +52,13 @@ runs:
         curl \
           --fail \
           --location \
-          --retry 8 \
+          --retry 4 \
           --retry-all-errors \
-          --retry-delay 10 \
+          --retry-delay 5 \
           --connect-timeout 30 \
           --speed-limit 1024 \
           --speed-time 60 \
-          --max-time 300 \
+          --max-time 180 \
           --output "${archive}" \
           "${download_url}"
 
@@ -88,5 +92,6 @@ runs:
         "${install_dir}/zig" version
 
     - name: Install build dependencies
+      if: inputs.install-build-dependencies == 'true'
       shell: bash
       run: ./scripts/setup-deps.sh

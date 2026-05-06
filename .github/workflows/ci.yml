@@ -17,6 +17,8 @@ jobs:
 
     - name: Set up ZigOS CI
       uses: ./.github/actions/setup-zigos-ci
+      with:
+        install-build-dependencies: "false"
 
   lint:
     needs: zig-toolchain
