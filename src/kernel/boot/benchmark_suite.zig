@@ -6,6 +6,7 @@ const qemu_exit = @import("../utils/qemu_exit.zig");
 const boot_markers = @import("markers.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
+const ids = @import("../../native/core/ids.zig");
 const principal = @import("../../native/core/principal.zig");
 const signing = @import("../../native/core/signing.zig");
 const manifest = @import("../../native/policy/manifest.zig");
@@ -78,7 +79,7 @@ const BackgroundContext = struct {
 
 const WorkspaceCommitContext = struct {
     baseline: workspace.Directory = workspace.Directory.init(),
-    workspace_id: u64 = 0,
+    workspace_id: ids.WorkspaceId = ids.WorkspaceId.zero,
 };
 
 const TaskCheckpointContext = struct {
@@ -383,8 +384,8 @@ fn prepareFileBridgeFixture() void {
     file_bridge_context.expected_version_id = 901;
     file_bridge_context.entry = workspace.Entry.init(
         file_bridge_context.expected_path,
-        900,
-        file_bridge_context.expected_version_id,
+        ids.object(900),
+        ids.version(file_bridge_context.expected_version_id),
         .document,
     ) catch unreachable;
     file_bridge_context.version_present = true;
@@ -457,9 +458,9 @@ fn prepareWorkspaceCommitFixture() void {
     workspace_commit_context.workspace_id = notes.id;
 
     workspace_commit_context.baseline.beginTransaction(notes.id) catch unreachable;
-    workspace_commit_context.baseline.stagePut(notes.id, "documents/plan.md", 900, 901, .document) catch unreachable;
-    workspace_commit_context.baseline.stagePut(notes.id, "assets/cover.jpg", 902, 903, .media_asset) catch unreachable;
-    workspace_commit_context.baseline.stagePut(notes.id, "collections/inbox", 904, 905, .collection) catch unreachable;
+    workspace_commit_context.baseline.stagePut(notes.id, "documents/plan.md", ids.object(900), ids.version(901), .document) catch unreachable;
+    workspace_commit_context.baseline.stagePut(notes.id, "assets/cover.jpg", ids.object(902), ids.version(903), .media_asset) catch unreachable;
+    workspace_commit_context.baseline.stagePut(notes.id, "collections/inbox", ids.object(904), ids.version(905), .collection) catch unreachable;
     _ = workspace_commit_context.baseline.commit(notes.id, 10) catch unreachable;
 }
 
@@ -891,12 +892,13 @@ fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
     });
 
     var shared = shared_memory.Table.init();
-    const object = shared.createWithAccess(800 + iteration, 64 * 1024, .{
+    const task_id = ids.task(800 + iteration);
+    const object = shared.createWithAccess(task_id, 64 * 1024, .{
         .cpu = true,
         .gpu = true,
     }) catch unreachable;
     const claim = controller.claimWithSharedMemory(.{
-        .task_id = 800 + iteration,
+        .task_id = task_id.raw(),
         .request = .{
             .class = .foreground_interactive,
             .wants_gpu = true,
@@ -905,7 +907,7 @@ fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
         .shared_memory_object_id = object.id,
     }, &shared) catch unreachable;
     const released = controller.releaseClaim(claim.id, &shared) catch unreachable;
-    return claim.id + object.id + @intFromBool(released) + @intFromEnum(claim.engine);
+    return claim.id + object.id.raw() + @intFromBool(released) + @intFromEnum(claim.engine);
 }
 
 fn benchmarkFileBridgeResolve(iteration: u32) u64 {
@@ -924,17 +926,17 @@ fn benchmarkWorkspaceCommitOverlay(iteration: u32) u64 {
     const workspace_id = workspace_commit_context.workspace_id;
 
     directory.beginTransaction(workspace_id) catch unreachable;
-    directory.stagePut(workspace_id, "documents/plan.md", 900, 1_100 + iteration, .document) catch unreachable;
+    directory.stagePut(workspace_id, "documents/plan.md", ids.object(900), ids.version(1_100 + iteration), .document) catch unreachable;
     directory.stageDelete(workspace_id, "assets/cover.jpg") catch unreachable;
-    directory.stagePut(workspace_id, "documents/draft.md", 1_200 + iteration, 1_300 + iteration, .document) catch unreachable;
-    directory.stagePut(workspace_id, "documents/tmp.md", 1_400 + iteration, 1_500 + iteration, .document) catch unreachable;
+    directory.stagePut(workspace_id, "documents/draft.md", ids.object(1_200 + iteration), ids.version(1_300 + iteration), .document) catch unreachable;
+    directory.stagePut(workspace_id, "documents/tmp.md", ids.object(1_400 + iteration), ids.version(1_500 + iteration), .document) catch unreachable;
     directory.stageDelete(workspace_id, "documents/tmp.md") catch unreachable;
 
     const generation = directory.commit(workspace_id, 70 + iteration) catch unreachable;
     const entries = directory.entries(workspace_id) catch unreachable;
     const plan = directory.resolve(workspace_id, "documents/plan.md") catch unreachable;
     const draft = directory.resolve(workspace_id, "documents/draft.md") catch unreachable;
-    return generation + entries.len + plan.version_id + draft.object_id;
+    return generation + entries.len + plan.version_id.raw() + draft.object_id.raw();
 }
 
 fn benchmarkPackageRevision(iteration: u32) u64 {
@@ -1304,7 +1306,7 @@ fn prepareRecoveryFixture(iteration: u32) void {
     _ = recovery_context.manager.activate(0, .{}, 11 + iteration) catch unreachable;
 
     const notes_v1 = recovery_context.storage.putVersion(.{
-        .preferred_object_id = 980,
+        .preferred_object_id = ids.object(980),
         .object_type = .document,
         .payload = "notes-v1",
         .metadata = object_store.signMetadata(
@@ -1317,7 +1319,7 @@ fn prepareRecoveryFixture(iteration: u32) void {
         ) catch unreachable,
     }) catch unreachable;
     const notes_v2 = recovery_context.storage.putVersion(.{
-        .preferred_object_id = 980,
+        .preferred_object_id = ids.object(980),
         .object_type = .document,
         .payload = "notes-v2",
         .metadata = object_store.signMetadata(
@@ -1334,7 +1336,7 @@ fn prepareRecoveryFixture(iteration: u32) void {
         .owner = recovery_context.user,
         .label = "recovery-notes",
     }) catch unreachable;
-    recovery_context.workspace_id = workspace_record.id;
+    recovery_context.workspace_id = workspace_record.id.raw();
     recovery_context.storage.beginTransaction(workspace_record.id) catch unreachable;
     recovery_context.storage.stagePut(
         workspace_record.id,
@@ -1349,7 +1351,7 @@ fn prepareRecoveryFixture(iteration: u32) void {
         "baseline",
         signer("platform-storage", 0x73),
     ) catch unreachable;
-    recovery_context.snapshot_id = snapshot.id;
+    recovery_context.snapshot_id = snapshot.id.raw();
     recovery_context.storage.beginTransaction(workspace_record.id) catch unreachable;
     recovery_context.storage.stagePut(
         workspace_record.id,
@@ -1380,18 +1382,18 @@ fn prepareRecoveryFixture(iteration: u32) void {
     ) catch unreachable;
     const local_policy = recovery_context.sync.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_record.id.raw(),
         .label = "local-net",
         .mode = .local_network,
     }) catch unreachable;
     _ = recovery_context.sync.configureWorkspacePolicy(.{
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_record.id.raw(),
         .owner = recovery_context.user,
         .device_to_device_policy_id = local_policy.id,
         .selective_prefixes = &.{"documents/"},
     }) catch unreachable;
     recovery_context.sync.setReplicaVersion(
-        workspace_record.id,
+        workspace_record.id.raw(),
         recovery_context.tablet,
         "documents/notes.md",
         notes_v1.object_id,
@@ -1496,7 +1498,7 @@ fn seedUpdateHealthStorageProbe(
     tick: u64,
 ) u64 {
     const record = storage.putVersion(.{
-        .preferred_object_id = 7_700,
+        .preferred_object_id = ids.object(7_700),
         .object_type = .document,
         .payload = "notes-v1",
         .metadata = object_store.signMetadata(
@@ -1515,7 +1517,7 @@ fn seedUpdateHealthStorageProbe(
     storage.beginTransaction(workspace_record.id) catch unreachable;
     storage.stagePut(workspace_record.id, "documents/notes.md", record.object_id, record.version_id, .document) catch unreachable;
     _ = storage.commit(workspace_record.id, tick + 1) catch unreachable;
-    return workspace_record.id;
+    return workspace_record.id.raw();
 }
 
 fn seedUpdateHealthNetworkProbe(
