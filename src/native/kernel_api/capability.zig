@@ -13,6 +13,7 @@ pub const TableConfig = struct {
     max_capabilities: usize = MAX_CAPABILITIES,
     capability_index_capacity: usize = CAPABILITY_INDEX_CAPACITY,
     max_target_generations: usize = MAX_TARGET_GENERATIONS,
+    debug_index_checks: bool = true,
 
     pub fn validate(comptime config: TableConfig) void {
         if (config.max_capabilities == 0) @compileError("capability table requires at least one capability slot");
@@ -817,7 +818,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn debugAssertTargetGenerationIndexMissAbsent(self: *const Self, target: CapabilityTarget) void {
-            if (!debugIndexChecksEnabled()) return;
+            if (!debugIndexChecksEnabledForTable()) return;
             for (self.target_generations) |entry| {
                 if (entry.in_use and entry.target.eql(target)) {
                     native_util.impossibleByInvariant("target generation index missed a live target");
@@ -826,7 +827,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn debugAssertHolderIndexMissAbsent(self: *const Self, holder: principal.PrincipalId) void {
-            if (!debugIndexChecksEnabled()) return;
+            if (!debugIndexChecksEnabledForTable()) return;
             for (self.slots) |slot| {
                 if (slot.in_use and slot.capability.holder.eql(holder)) {
                     native_util.impossibleByInvariant("holder index missed a live capability");
@@ -835,7 +836,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn debugAssertTargetIndexMissAbsent(self: *const Self, target: CapabilityTarget) void {
-            if (!debugIndexChecksEnabled()) return;
+            if (!debugIndexChecksEnabledForTable()) return;
             for (self.slots) |slot| {
                 if (slot.in_use and slot.capability.target.eql(target)) {
                     native_util.impossibleByInvariant("target index missed a live capability");
@@ -861,7 +862,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn debugAssertCapabilityIndexMissAbsent(self: *const Self, capability_id: u64) void {
-            if (!debugIndexChecksEnabled()) return;
+            if (!debugIndexChecksEnabledForTable()) return;
             for (self.slots) |slot| {
                 if (slot.in_use and slot.capability.id == capability_id) {
                     native_util.impossibleByInvariant("capability index missed a live capability");
@@ -1019,6 +1020,10 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 previous = current_index;
                 current = next;
             }
+        }
+
+        fn debugIndexChecksEnabledForTable() bool {
+            return config.debug_index_checks and debugIndexChecksEnabled();
         }
     };
 }
