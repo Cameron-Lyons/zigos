@@ -53,32 +53,32 @@ test "sync service covers device graph policy replication semantics and restart 
 
     var storage = storage_service.Service.initWithStore(40, 4, storage_owner, &storage_checkpoint_store);
     const notes_v1 = try storage.putVersion(.{
-        .preferred_object_id = 800,
+        .preferred_object_id = object_store.ids.object(800),
         .object_type = .document,
         .payload = "# Notes\n- v1\n",
         .metadata = try object_store.signMetadata(storage_signer, "notes", "text/markdown", .document, "# Notes\n- v1\n", 10),
     });
     const notes_v2 = try storage.putVersion(.{
-        .preferred_object_id = 800,
+        .preferred_object_id = object_store.ids.object(800),
         .object_type = .document,
         .payload = "# Notes\n- v2\n",
         .metadata = try object_store.signMetadata(storage_signer, "notes", "text/markdown", .document, "# Notes\n- v2\n", 11),
         .parent_version_id = notes_v1.version_id,
     });
     const inbox = try storage.putVersion(.{
-        .preferred_object_id = 801,
+        .preferred_object_id = object_store.ids.object(801),
         .object_type = .collection,
         .payload = "inbox",
         .metadata = try object_store.signMetadata(storage_signer, "inbox", "application/zigos-collection", .collection, "inbox", 12),
     });
     const cover = try storage.putVersion(.{
-        .preferred_object_id = 802,
+        .preferred_object_id = object_store.ids.object(802),
         .object_type = .media_asset,
         .payload = "jpeg:cover",
         .metadata = try object_store.signMetadata(storage_signer, "cover", "image/jpeg", .media_asset, "jpeg:cover", 13),
     });
     const secret = try storage.putVersion(.{
-        .preferred_object_id = 803,
+        .preferred_object_id = object_store.ids.object(803),
         .object_type = .secret,
         .payload = "enc:secret",
         .metadata = try object_store.signMetadata(storage_signer, "secret", "application/zigos-secret", .secret, "enc:secret", 14),
@@ -88,6 +88,7 @@ test "sync service covers device graph policy replication semantics and restart 
         .owner = user,
         .label = "notes",
     });
+    const notes_id = notes.id.raw();
     try storage.beginTransaction(notes.id);
     try storage.stagePut(notes.id, "documents/notes.md", notes_v1.object_id, notes_v1.version_id, .document);
     try storage.stagePut(notes.id, "collections/inbox", inbox.object_id, inbox.version_id, .collection);
@@ -105,47 +106,47 @@ test "sync service covers device graph policy replication semantics and restart 
 
     const none_policy = try service.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = notes.id,
+        .workspace_id = notes_id,
         .label = "none",
         .mode = .none,
     });
     const local_policy = try service.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = notes.id,
+        .workspace_id = notes_id,
         .label = "local",
         .mode = .local_network,
     });
     const discovery_policy = try service.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = notes.id,
+        .workspace_id = notes_id,
         .label = "printer-discovery",
         .mode = .local_subnet_discovery,
         .target = "printer",
     });
     const overlay_policy = try service.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = notes.id,
+        .workspace_id = notes_id,
         .label = "overlay",
         .mode = .named_service_identity,
         .target = "overlay.notes.sync",
     });
     const relay_policy = try service.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = notes.id,
+        .workspace_id = notes_id,
         .label = "relay",
         .mode = .named_domain,
         .target = "relay.zigos.dev",
     });
     const inbound_policy = try service.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = notes.id,
+        .workspace_id = notes_id,
         .label = "collab-review",
         .mode = .inbound_collaborative_session,
         .target = "document-review/v1",
     });
     const internet_policy = try service.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = notes.id,
+        .workspace_id = notes_id,
         .label = "internet",
         .mode = .unrestricted_internet,
         .explicit_internet_grant = true,
@@ -160,7 +161,7 @@ test "sync service covers device graph policy replication semantics and restart 
     try std.testing.expect((try service.evaluateNetworkPolicy(internet_policy.id, .public_internet)).allowed);
 
     _ = try service.configureWorkspacePolicy(.{
-        .workspace_id = notes.id,
+        .workspace_id = notes_id,
         .owner = user,
         .offline_first = true,
         .personal_e2ee = true,
@@ -170,11 +171,11 @@ test "sync service covers device graph policy replication semantics and restart 
         .overlay_policy_id = overlay_policy.id,
         .relay_domain = "relay.zigos.dev",
     });
-    _ = try service.configureOverlay(notes.id, laptop, "overlay.notes.sync", true);
-    _ = try service.publishPrivateService(notes.id, "notes.remote");
+    _ = try service.configureOverlay(notes_id, laptop, "overlay.notes.sync", true);
+    _ = try service.publishPrivateService(notes_id, "notes.remote");
 
-    try service.setReplicaVersion(notes.id, tablet, "documents/notes.md", notes_v1.object_id, notes_v2.version_id);
-    const summary = try service.replicateWorkspace(&storage, notes.id, laptop, tablet, .device_to_device);
+    try service.setReplicaVersion(notes_id, tablet, "documents/notes.md", notes_v1.object_id, notes_v2.version_id);
+    const summary = try service.replicateWorkspace(&storage, notes_id, laptop, tablet, .device_to_device);
     try std.testing.expect(summary.offline_first);
     try std.testing.expect(summary.personal_e2ee);
     try std.testing.expect(summary.used_device_to_device);
@@ -187,35 +188,36 @@ test "sync service covers device graph policy replication semantics and restart 
     try std.testing.expectEqual(@as(usize, 1), summary.snapshot_count);
     try std.testing.expectEqual(@as(usize, 2), summary.transport_frame_count);
     try std.testing.expectEqual(@as(usize, 2), summary.encrypted_transport_count);
-    try std.testing.expectEqual(@as(usize, 2), service.transportFrameCountFor(notes.id, tablet));
-    const notes_frame = service.latestTransportFrameForPath(notes.id, tablet, "documents/notes.md").?;
+    try std.testing.expectEqual(@as(usize, 2), service.transportFrameCountFor(notes_id, tablet));
+    const notes_frame = service.latestTransportFrameForPath(notes_id, tablet, "documents/notes.md").?;
     try std.testing.expect(notes_frame.encrypted);
     try std.testing.expectEqual(SyncSemantic.mergeable_crdt, notes_frame.semantic);
     try std.testing.expectEqual(@as(usize, 1), summary.conflict_count);
-    try std.testing.expect(service.findConflict(notes.id, tablet, "documents/notes.md") != null);
+    try std.testing.expect(service.findConflict(notes_id, tablet, "documents/notes.md") != null);
 
-    try std.testing.expect(try service.transferSecretObject(&storage, notes.id, secret.object_id, laptop, tablet, .device_to_device));
-    const contract = try service.registerDatabaseContract(notes.id, "app.db.notes", "notes-db", contract_signer);
-    try std.testing.expect(try service.replicateDatabaseContract(contract.id, notes.id, laptop, tablet, .relay_assisted));
-    try std.testing.expectError(error.DeviceNotTrusted, service.replicateWorkspace(&storage, notes.id, laptop, phone, .device_to_device));
+    try std.testing.expect(try service.transferSecretObject(&storage, notes_id, secret.object_id, laptop, tablet, .device_to_device));
+    const contract = try service.registerDatabaseContract(notes_id, "app.db.notes", "notes-db", contract_signer);
+    try std.testing.expect(try service.replicateDatabaseContract(contract.id, notes_id, laptop, tablet, .relay_assisted));
+    try std.testing.expectError(error.DeviceNotTrusted, service.replicateWorkspace(&storage, notes_id, laptop, phone, .device_to_device));
 
     var restarted_resident = ResidentState{};
     var restarted = try Service.initWithStorage(80, 9, sync_owner, &storage, &restarted_resident);
     try std.testing.expect(restarted.loaded_existing_state);
     try std.testing.expectEqual(@as(usize, 2), restarted.trustedDeviceCount());
-    try std.testing.expect(restarted.findWorkspacePolicy(notes.id) != null);
-    try std.testing.expect(restarted.findOverlay(notes.id) != null);
-    try std.testing.expect(restarted.findConflict(notes.id, tablet, "documents/notes.md") != null);
+    try std.testing.expect(restarted.findWorkspacePolicy(notes_id) != null);
+    try std.testing.expect(restarted.findOverlay(notes_id) != null);
+    try std.testing.expectEqual(notes_v1.version_id.raw(), restarted.replicaVersion(notes_id, tablet, "documents/notes.md").?);
+    try std.testing.expect(restarted.findConflict(notes_id, tablet, "documents/notes.md") != null);
     const restarted_local_policy = try restarted.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = notes.id,
+        .workspace_id = notes_id,
         .label = "local",
         .mode = .local_network,
     });
     try std.testing.expectEqual(local_policy.id, restarted_local_policy.id);
-    const restarted_overlay = try restarted.publishPrivateService(notes.id, "notes.remote");
+    const restarted_overlay = try restarted.publishPrivateService(notes_id, "notes.remote");
     try std.testing.expectEqual(@as(usize, 1), restarted_overlay.private_service_count);
-    const restarted_contract = try restarted.registerDatabaseContract(notes.id, "app.db.notes", "notes-db", contract_signer);
+    const restarted_contract = try restarted.registerDatabaseContract(notes_id, "app.db.notes", "notes-db", contract_signer);
     try std.testing.expectEqual(contract.id, restarted_contract.id);
 
     storage_checkpoint_store.resetPersistent();

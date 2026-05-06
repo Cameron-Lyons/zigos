@@ -83,12 +83,12 @@ pub const Controller = struct {
     pub fn openWorkspace(
         self: *Controller,
         storage: *storage_service.Service,
-        workspace_id: u64,
+        workspace_id: anytype,
         path: []const u8,
         owner: principal.PrincipalId,
     ) Error!workspace.Entry {
         const entry = try storage.resolve(workspace_id, path);
-        _ = try self.record(.open_workspace, 0, workspace_id, owner, path, true);
+        _ = try self.record(.open_workspace, 0, object_store.ids.raw(workspace_id), owner, path, true);
         return entry;
     }
 
@@ -245,7 +245,7 @@ test "native ux records task workspace pairing review and recovery flows" {
     var runtime = task_runtime.Runtime.init();
     var storage = storage_service.Service.initWithStore(930, 61, storage_owner, &storage_checkpoint_store);
     const notes = try storage.putVersion(.{
-        .preferred_object_id = 990,
+        .preferred_object_id = object_store.ids.object(990),
         .object_type = .document,
         .payload = "notes-v1",
         .metadata = try object_store.signMetadata(object_signer, "notes", "text/plain", .document, "notes-v1", 10),

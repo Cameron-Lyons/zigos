@@ -303,8 +303,8 @@ pub fn run(
         support.common.printBootMarker(boot_markers.platform_recovery_verify_reinstall);
     }
 
-    if (context.export_package.workspace_id != storage_state.notes_workspace_id or
-        context.export_package.snapshot_id == 0)
+    if (context.export_package.workspace_id.raw() != storage_state.notes_workspace_id or
+        context.export_package.snapshot_id.isZero())
     {
         const recovery_snapshot_id = if (context.storage_service_instance.findSnapshot(storage_state.notes_workspace_id, "platform-recovery")) |snapshot|
             snapshot.id
@@ -337,7 +337,7 @@ pub fn run(
             136,
         ) catch unreachable,
         .preferred_object_id = null,
-        .parent_version_id = storage_state.latest_notes_version_id,
+        .parent_version_id = object_store_mod.ids.version(storage_state.latest_notes_version_id),
     };
     _ = context.storage_service_instance.putVersionRef(&notes_v3_request) catch unreachable;
     support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:NOTES_V3_PUT");
@@ -457,7 +457,7 @@ pub fn run(
         storage_state.notes_workspace_id,
         "documents/notes.md",
     ) catch unreachable;
-    if (opened_workspace.version_id != 0) {
+    if (!opened_workspace.version_id.isZero()) {
         support.common.printBootMarker("ZIGOS:PLATFORM:UX:OPEN_WORKSPACE");
     }
     if (workspace_view.id != 0 and document_view.id != 0) {

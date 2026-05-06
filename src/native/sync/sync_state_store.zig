@@ -13,7 +13,7 @@ pub fn ensureWorkspace(storage: *storage_service.Service, owner: principal.Princ
         .owner = owner,
         .label = state_support.state_workspace_label,
     });
-    return existing.id;
+    return existing.id.raw();
 }
 
 pub fn load(
@@ -83,7 +83,7 @@ pub fn persist(
             else => return err,
         };
         if (existing_entry) |entry| {
-            chunk_version_ids[chunk_index] = entry.version_id;
+            chunk_version_ids[chunk_index] = entry.version_id.raw();
             const existing_version = storage.version(entry.version_id) orelse return error.CorruptState;
             if (std.mem.eql(u8, try storage.versionPayload(existing_version), payload)) continue;
         }
@@ -140,7 +140,7 @@ pub fn persist(
         var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
         const path = try state_support.chunkPath(path_buffer[0..], chunk_index);
         const result = try storage.putVersion(.{
-            .preferred_object_id = state_support.chunkObjectId(chunk_index),
+            .preferred_object_id = object_store.ids.object(state_support.chunkObjectId(chunk_index)),
             .object_type = .blob,
             .payload = payload,
             .metadata = object_store.signMetadata(
@@ -151,7 +151,7 @@ pub fn persist(
                 payload,
                 tick,
             ) catch return error.StateSigningFailed,
-            .parent_version_id = if (chunk_version_ids[chunk_index] != 0) chunk_version_ids[chunk_index] else null,
+            .parent_version_id = if (chunk_version_ids[chunk_index] != 0) object_store.ids.version(chunk_version_ids[chunk_index]) else null,
         });
         try storage.stagePut(workspace_id, path, result.object_id, result.version_id, .blob);
     }
@@ -164,7 +164,7 @@ pub fn persist(
 
     if (index_dirty) {
         const index_result = try storage.putVersion(.{
-            .preferred_object_id = state_support.indexObjectId(),
+            .preferred_object_id = object_store.ids.object(state_support.indexObjectId()),
             .object_type = .document,
             .payload = index_bytes,
             .metadata = object_store.signMetadata(

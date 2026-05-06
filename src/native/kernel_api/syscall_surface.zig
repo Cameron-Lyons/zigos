@@ -4,6 +4,7 @@ const abi = @import("../core/abi.zig");
 const capability = @import("capability.zig");
 const component_port = @import("component_port.zig");
 const endpoint = @import("endpoint.zig");
+const kernel_operation_descriptor = @import("kernel_operation_descriptor.zig");
 const native_kernel = @import("native_kernel.zig");
 const shared_memory = @import("shared_memory.zig");
 const syscall_abi = @import("syscall_abi.zig");
@@ -29,6 +30,10 @@ const SyscallDescriptor = struct {
     response_size: usize,
     domain: syscall_abi.Domain,
     request_copy: syscall_abi.RequestCopyRule,
+    required_right: capability.CapabilityRight,
+    target_kind: kernel_operation_descriptor.TargetKindRule,
+    scope_rule: kernel_operation_descriptor.ScopeRule,
+    auto_grant_count: usize,
     handler: DispatchHandler,
 };
 
@@ -41,6 +46,10 @@ fn syscallDescriptor(
         .response_size = declaration.responseSize(),
         .domain = declaration.domain,
         .request_copy = declaration.request_copy,
+        .required_right = declaration.required_right,
+        .target_kind = declaration.target_kind,
+        .scope_rule = declaration.scope_rule,
+        .auto_grant_count = declaration.auto_grants.len,
         .handler = declaration.handler,
     };
 }
@@ -130,6 +139,13 @@ test "syscall descriptor table covers every native operation with ABI metadata" 
     try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscallDescriptorFor(.endpoint_send).?.request_copy);
     try std.testing.expectEqual(@sizeOf(abi.DevicePortReadResponse), syscallDescriptorFor(.device_port_read).?.response_size);
     try std.testing.expectEqual(@as(usize, 0), syscallDescriptorFor(.device_port_write).?.response_size);
+    try std.testing.expectEqual(capability.CapabilityRight.endpoint_send, syscallDescriptorFor(.endpoint_send).?.required_right);
+    try std.testing.expect(syscallDescriptorFor(.endpoint_create).?.scope_rule.task_scope_matches_request_task);
+    try std.testing.expectEqual(@as(usize, 1), syscallDescriptorFor(.shared_memory_create).?.auto_grant_count);
+    try std.testing.expect(switch (syscallDescriptorFor(.device_describe).?.target_kind) {
+        .fixed => |kind| kind == .device,
+        else => false,
+    });
 }
 
 const TestKernel = struct {

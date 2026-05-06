@@ -154,11 +154,7 @@ pub const SessionManager = struct {
     }
 
     pub fn countServices(self: *const SessionManager) usize {
-        var count: usize = 0;
-        for (self.supervisor.services) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
+        return self.supervisor.serviceCount();
     }
 
     pub fn findTask(self: *SessionManager, label: []const u8) ?*task_runtime.TaskRecord {
@@ -415,7 +411,7 @@ fn productionBaseImageManifestDigest(manager: *const SessionManager, graph: *con
     crypto_hash.updateInt(&hasher, "session-task-id", graph.state.session_task.id);
     crypto_hash.updateInt(&hasher, "review-service-task-id", graph.state.review_service_task.id);
 
-    for (manager.supervisor.services) |slot| {
+    for (manager.supervisor.service_arena.slots) |slot| {
         if (!slot.in_use) continue;
         hashServiceRecord(&hasher, &slot.service);
     }

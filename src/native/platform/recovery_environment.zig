@@ -176,8 +176,8 @@ pub const Environment = struct {
     pub fn restoreWorkspaceSnapshot(
         self: *Environment,
         storage: *storage_service.Service,
-        workspace_id: u64,
-        snapshot_id: u64,
+        workspace_id: anytype,
+        snapshot_id: anytype,
         tick: u64,
     ) workspace.Error!bool {
         _ = try storage.restore(workspace_id, snapshot_id, tick);
@@ -188,7 +188,7 @@ pub const Environment = struct {
     pub fn restoreWorkspaceExport(
         self: *Environment,
         storage: *storage_service.Service,
-        workspace_id: u64,
+        workspace_id: anytype,
         package: *const workspace.ExportPackage,
         tick: u64,
     ) workspace.Error!bool {
@@ -201,10 +201,10 @@ pub const Environment = struct {
         self: *Environment,
         sync: *sync_service.Service,
         storage: *const storage_service.Service,
-        workspace_id: u64,
+        workspace_id: anytype,
         device_id: principal.PrincipalId,
     ) sync_service.Error!bool {
-        self.report.sync_metadata_repaired = try sync.repairWorkspaceMetadata(storage, workspace_id, device_id);
+        self.report.sync_metadata_repaired = try sync.repairWorkspaceMetadata(storage, object_store.ids.raw(workspace_id), device_id);
         return self.report.sync_metadata_repaired;
     }
 
@@ -287,7 +287,7 @@ test "recovery environment verifies reinstalls restores repairs and rotates" {
     _ = try manager.activate(0, .{}, 11);
 
     const notes = try storage.putVersion(.{
-        .preferred_object_id = 980,
+        .preferred_object_id = object_store.ids.object(980),
         .object_type = .document,
         .payload = "notes-v1",
         .metadata = try object_store.signMetadata(object_signer, "notes", "text/plain", .document, "notes-v1", 12),
@@ -307,17 +307,17 @@ test "recovery environment verifies reinstalls restores repairs and rotates" {
     _ = try sync.enrollTrustedDevice(user, tablet, "tablet", user_signer, tablet_signer, 15);
     const local_policy = try sync.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_record.id.raw(),
         .label = "local-net",
         .mode = .local_network,
     });
     _ = try sync.configureWorkspacePolicy(.{
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_record.id.raw(),
         .owner = user,
         .device_to_device_policy_id = local_policy.id,
     });
-    try sync.setReplicaVersion(workspace_record.id, tablet, "documents/notes.md", notes.object_id, notes.version_id + 1);
-    _ = try sync.replicateWorkspace(&storage, workspace_record.id, primary_device, tablet, .device_to_device);
+    try sync.setReplicaVersion(workspace_record.id.raw(), tablet, "documents/notes.md", notes.object_id.raw(), notes.version_id.raw() + 1);
+    _ = try sync.replicateWorkspace(&storage, workspace_record.id.raw(), primary_device, tablet, .device_to_device);
 
     var recovery = Environment.init(storage_owner);
     try std.testing.expect(try recovery.verifyAndReinstallImage(&manager, "kernel=v2", image_signer, 16));

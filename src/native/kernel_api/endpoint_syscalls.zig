@@ -5,10 +5,10 @@ const endpoint = @import("endpoint.zig");
 const syscall_abi = @import("syscall_abi.zig");
 
 pub const operations = [_]syscall_abi.Operation{
-    .{ .operation = .endpoint_create, .domain = .endpoint, .Request = component_port.EndpointCreateRequest, .Response = abi.EndpointCreateResponse, .handler = dispatchEndpointCreate, .request_copy = .embedded_user_buffers },
-    .{ .operation = .endpoint_connect, .domain = .endpoint, .Request = component_port.EndpointConnectRequest, .Response = abi.EndpointDescriptor, .handler = dispatchEndpointConnect },
-    .{ .operation = .endpoint_send, .domain = .endpoint, .Request = component_port.EndpointSendRequest, .Response = void, .handler = dispatchEndpointSend, .request_copy = .embedded_user_buffers },
-    .{ .operation = .endpoint_recv, .domain = .endpoint, .Request = component_port.EndpointRecvRequest, .Response = abi.EndpointRecvResponse, .handler = dispatchEndpointRecv },
+    syscall_abi.declare(.endpoint_create, .endpoint, component_port.EndpointCreateRequest, abi.EndpointCreateResponse, dispatchEndpointCreate, .embedded_user_buffers),
+    syscall_abi.declare(.endpoint_connect, .endpoint, component_port.EndpointConnectRequest, abi.EndpointDescriptor, dispatchEndpointConnect, .plain),
+    syscall_abi.declare(.endpoint_send, .endpoint, component_port.EndpointSendRequest, void, dispatchEndpointSend, .embedded_user_buffers),
+    syscall_abi.declare(.endpoint_recv, .endpoint, component_port.EndpointRecvRequest, abi.EndpointRecvResponse, dispatchEndpointRecv, .plain),
 };
 
 const MAX_COMPONENT_LABEL_BYTES: usize = 48;

@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const id_index = @import("../core/id_index.zig");
 const principal = @import("../core/principal.zig");
@@ -493,13 +494,15 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         pub fn queryByHolder(self: *const Self, holder: principal.PrincipalId, output: []Capability) []Capability {
             var count: usize = 0;
             var next_index = self.indexedHead(&self.holder_index_slots, holderKey(holder));
+            if (next_index == null) self.debugAssertHolderIndexMissAbsent(holder);
             while (next_index) |slot_index| {
+                if (slot_index >= self.slots.len) native_util.impossibleByInvariant("holder index points outside capability slots");
                 const slot = &self.slots[slot_index];
-                if (slot.in_use and slot.capability.holder.eql(holder)) {
-                    if (count >= output.len) break;
-                    output[count] = slot.capability;
-                    count += 1;
-                }
+                if (!slot.in_use) native_util.impossibleByInvariant("holder index points at a free capability slot");
+                if (!slot.capability.holder.eql(holder)) native_util.impossibleByInvariant("holder index points at the wrong capability");
+                if (count >= output.len) break;
+                output[count] = slot.capability;
+                count += 1;
                 next_index = slot.next_holder_index;
             }
             return output[0..count];
@@ -508,13 +511,15 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         pub fn queryByTarget(self: *const Self, target: CapabilityTarget, output: []Capability) []Capability {
             var count: usize = 0;
             var next_index = self.indexedHead(&self.target_index_slots, targetKey(target));
+            if (next_index == null) self.debugAssertTargetIndexMissAbsent(target);
             while (next_index) |slot_index| {
+                if (slot_index >= self.slots.len) native_util.impossibleByInvariant("target index points outside capability slots");
                 const slot = &self.slots[slot_index];
-                if (slot.in_use and slot.capability.target.eql(target)) {
-                    if (count >= output.len) break;
-                    output[count] = slot.capability;
-                    count += 1;
-                }
+                if (!slot.in_use) native_util.impossibleByInvariant("target index points at a free capability slot");
+                if (!slot.capability.target.eql(target)) native_util.impossibleByInvariant("target index points at the wrong capability");
+                if (count >= output.len) break;
+                output[count] = slot.capability;
+                count += 1;
                 next_index = slot.next_target_index;
             }
             return output[0..count];
@@ -652,25 +657,13 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn findSlot(self: *Self, capability_id: u64) ?*CapabilitySlot {
-            if (indexLookup(TABLE_INDEX_CAPACITY, &self.capability_index_slots, capability_id)) |slot_index| {
-                const slot = &self.slots[slot_index];
-                if (slot.in_use and slot.capability.id == capability_id) return slot;
-            }
-            for (&self.slots) |*slot| {
-                if (slot.in_use and slot.capability.id == capability_id) return slot;
-            }
-            return null;
+            const slot_index = self.findSlotIndex(capability_id) orelse return null;
+            return &self.slots[slot_index];
         }
 
         fn findConstSlot(self: *const Self, capability_id: u64) ?*const CapabilitySlot {
-            if (indexLookup(TABLE_INDEX_CAPACITY, &self.capability_index_slots, capability_id)) |slot_index| {
-                const slot = &self.slots[slot_index];
-                if (slot.in_use and slot.capability.id == capability_id) return slot;
-            }
-            for (&self.slots) |*slot| {
-                if (slot.in_use and slot.capability.id == capability_id) return slot;
-            }
-            return null;
+            const slot_index = self.findSlotIndex(capability_id) orelse return null;
+            return &self.slots[slot_index];
         }
 
         fn isUsableSlot(self: *const Self, slot: *const CapabilitySlot, now_ticks: u64) bool {
@@ -813,10 +806,41 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 
         fn findTargetGenerationIndex(self: *const Self, target: CapabilityTarget) ?u8 {
             if (indexLookup(TABLE_INDEX_CAPACITY, &self.target_generation_index_slots, targetKey(target))) |index| {
+                if (index >= self.target_generations.len) native_util.impossibleByInvariant("target generation index points outside slots");
                 const entry = &self.target_generations[index];
-                if (entry.in_use and entry.target.eql(target)) return @intCast(index);
+                if (!entry.in_use) native_util.impossibleByInvariant("target generation index points at a free slot");
+                if (!entry.target.eql(target)) native_util.impossibleByInvariant("target generation index points at the wrong target");
+                return @intCast(index);
             }
+            self.debugAssertTargetGenerationIndexMissAbsent(target);
             return null;
+        }
+
+        fn debugAssertTargetGenerationIndexMissAbsent(self: *const Self, target: CapabilityTarget) void {
+            if (!debugIndexChecksEnabled()) return;
+            for (self.target_generations) |entry| {
+                if (entry.in_use and entry.target.eql(target)) {
+                    native_util.impossibleByInvariant("target generation index missed a live target");
+                }
+            }
+        }
+
+        fn debugAssertHolderIndexMissAbsent(self: *const Self, holder: principal.PrincipalId) void {
+            if (!debugIndexChecksEnabled()) return;
+            for (self.slots) |slot| {
+                if (slot.in_use and slot.capability.holder.eql(holder)) {
+                    native_util.impossibleByInvariant("holder index missed a live capability");
+                }
+            }
+        }
+
+        fn debugAssertTargetIndexMissAbsent(self: *const Self, target: CapabilityTarget) void {
+            if (!debugIndexChecksEnabled()) return;
+            for (self.slots) |slot| {
+                if (slot.in_use and slot.capability.target.eql(target)) {
+                    native_util.impossibleByInvariant("target index missed a live capability");
+                }
+            }
         }
 
         fn discard(self: *Self, capability_id: u64) void {
@@ -825,14 +849,24 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         fn findSlotIndex(self: *const Self, capability_id: u64) ?usize {
-            if (indexLookup(TABLE_INDEX_CAPACITY, &self.capability_index_slots, capability_id)) |slot_index| {
-                const slot = &self.slots[slot_index];
-                if (slot.in_use and slot.capability.id == capability_id) return slot_index;
+            const slot_index = indexLookup(TABLE_INDEX_CAPACITY, &self.capability_index_slots, capability_id) orelse {
+                self.debugAssertCapabilityIndexMissAbsent(capability_id);
+                return null;
+            };
+            if (slot_index >= self.slots.len) native_util.impossibleByInvariant("capability index points outside slots");
+            const slot = &self.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("capability index points at a free slot");
+            if (slot.capability.id != capability_id) native_util.impossibleByInvariant("capability index points at the wrong slot");
+            return slot_index;
+        }
+
+        fn debugAssertCapabilityIndexMissAbsent(self: *const Self, capability_id: u64) void {
+            if (!debugIndexChecksEnabled()) return;
+            for (self.slots) |slot| {
+                if (slot.in_use and slot.capability.id == capability_id) {
+                    native_util.impossibleByInvariant("capability index missed a live capability");
+                }
             }
-            for (self.slots, 0..) |slot, slot_index| {
-                if (slot.in_use and slot.capability.id == capability_id) return slot_index;
-            }
-            return null;
         }
 
         fn removeSlot(self: *Self, slot_index: usize) void {
@@ -1031,6 +1065,10 @@ fn targetKey(target: CapabilityTarget) u64 {
 
 fn nonZeroKey(key: u64) u64 {
     return if (key == 0) 0xD1B5_4A32_D192_ED03 else key;
+}
+
+fn debugIndexChecksEnabled() bool {
+    return builtin.mode == .Debug;
 }
 
 fn zeroCapability() Capability {

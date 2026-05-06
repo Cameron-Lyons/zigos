@@ -1,0 +1,474 @@
+const builtin = @import("builtin");
+const std = @import("std");
+const id_index = @import("id_index.zig");
+const ids = @import("ids.zig");
+const native_util = @import("util.zig");
+
+pub fn UniqueIndex(comptime capacity: usize) type {
+    if (capacity == 0) @compileError("unique index requires at least one slot");
+
+    return struct {
+        const Self = @This();
+
+        slots: [capacity]id_index.Slot = id_index.emptyTable(capacity),
+
+        pub fn init() Self {
+            return .{};
+        }
+
+        pub fn reset(self: *Self) void {
+            self.slots = id_index.emptyTable(capacity);
+        }
+
+        pub fn lookup(self: *const Self, key: u64) ?usize {
+            return id_index.lookup(capacity, &self.slots, key);
+        }
+
+        pub fn insert(self: *Self, key: u64, slot_index: usize) void {
+            id_index.insert(capacity, &self.slots, key, slot_index, "indexed arena unique indexes never store zero keys");
+        }
+
+        pub fn remove(self: *Self, key: u64) void {
+            id_index.remove(capacity, &self.slots, key);
+        }
+    };
+}
+
+pub fn IndexedArena(
+    comptime Slot: type,
+    comptime capacity: usize,
+    comptime index_capacity: usize,
+    comptime keyOf: anytype,
+) type {
+    return IndexedArenaWithKey(u64, Slot, capacity, index_capacity, keyOf);
+}
+
+pub fn IndexedArenaWithKey(
+    comptime Key: type,
+    comptime Slot: type,
+    comptime capacity: usize,
+    comptime index_capacity: usize,
+    comptime keyOf: anytype,
+) type {
+    if (capacity == 0) @compileError("indexed arena requires at least one slot");
+    if (index_capacity < capacity) @compileError("indexed arena primary index capacity must cover slots");
+
+    return struct {
+        const Self = @This();
+
+        slots: [capacity]Slot = [_]Slot{Slot{}} ** capacity,
+        primary_index: UniqueIndex(index_capacity) = UniqueIndex(index_capacity).init(),
+        slot_keys: [capacity]Key = [_]Key{ids.zero(Key)} ** capacity,
+        free_next: [capacity]?usize = [_]?usize{null} ** capacity,
+        free_head: ?usize = null,
+        next_unclaimed_index: usize = 0,
+        dirty_count: usize = 0,
+        dirty_ids: [capacity]Key = [_]Key{ids.zero(Key)} ** capacity,
+
+        pub fn init() Self {
+            return .{};
+        }
+
+        pub fn reset(self: *Self) void {
+            self.* = Self.init();
+        }
+
+        pub fn reserve(self: *Self, key: Key) ?*Slot {
+            const slot_index = self.reserveIndex(key) orelse return null;
+            return &self.slots[slot_index];
+        }
+
+        pub fn reserveIndex(self: *Self, key: Key) ?usize {
+            const raw_key = ids.raw(key);
+            if (raw_key == 0) return null;
+            if (self.primary_index.lookup(raw_key) != null) return null;
+
+            const slot_index = self.popFreeIndex() orelse return null;
+            self.slots[slot_index] = Slot{};
+            self.slots[slot_index].in_use = true;
+            self.slot_keys[slot_index] = key;
+            self.primary_index.insert(raw_key, slot_index);
+            self.markDirty(key);
+            return slot_index;
+        }
+
+        pub fn reserveAtIndex(self: *Self, key: Key, slot_index: usize) ?*Slot {
+            const claimed_index = self.reserveIndexAt(key, slot_index) orelse return null;
+            return &self.slots[claimed_index];
+        }
+
+        pub fn reserveIndexAt(self: *Self, key: Key, slot_index: usize) ?usize {
+            const raw_key = ids.raw(key);
+            if (raw_key == 0 or slot_index >= capacity) return null;
+            if (self.primary_index.lookup(raw_key) != null) return null;
+            if (self.slots[slot_index].in_use) return null;
+            if (!self.claimFreeIndex(slot_index)) return null;
+
+            self.slots[slot_index] = Slot{};
+            self.slots[slot_index].in_use = true;
+            self.slot_keys[slot_index] = key;
+            self.primary_index.insert(raw_key, slot_index);
+            self.markDirty(key);
+            return slot_index;
+        }
+
+        pub fn availableIndexExcluding(
+            self: *const Self,
+            context: anytype,
+            comptime excludes: anytype,
+        ) ?usize {
+            var next_index = self.free_head;
+            var attempts: usize = 0;
+            while (next_index) |slot_index| : (attempts += 1) {
+                if (slot_index >= capacity or attempts >= capacity) return null;
+                next_index = self.free_next[slot_index];
+                if (excludes(context, slot_index)) continue;
+                return slot_index;
+            }
+
+            var slot_index = self.next_unclaimed_index;
+            while (slot_index < capacity) : (slot_index += 1) {
+                if (excludes(context, slot_index)) continue;
+                return slot_index;
+            }
+            return null;
+        }
+
+        pub fn get(self: *Self, key: Key) ?*Slot {
+            const slot_index = self.findIndex(key) orelse return null;
+            return &self.slots[slot_index];
+        }
+
+        pub fn getConst(self: *const Self, key: Key) ?*const Slot {
+            const slot_index = self.findIndex(key) orelse return null;
+            return &self.slots[slot_index];
+        }
+
+        pub fn remove(self: *Self, key: Key) bool {
+            const slot_index = self.findIndex(key) orelse return false;
+            return self.removeIndex(slot_index);
+        }
+
+        pub fn removeIndex(self: *Self, slot_index: usize) bool {
+            if (slot_index >= capacity) return false;
+            const slot = &self.slots[slot_index];
+            if (!slot.in_use) return false;
+
+            const key = self.slot_keys[slot_index];
+            const raw_key = ids.raw(key);
+            if (raw_key != 0) {
+                self.primary_index.remove(raw_key);
+                self.markDirty(key);
+            }
+            slot.* = Slot{};
+            self.slot_keys[slot_index] = ids.zero(Key);
+            self.pushFreeIndex(slot_index);
+            return true;
+        }
+
+        pub fn rebuildPrimaryIndex(self: *Self) void {
+            self.primary_index.reset();
+            self.slot_keys = [_]Key{ids.zero(Key)} ** capacity;
+            self.free_next = [_]?usize{null} ** capacity;
+            self.free_head = null;
+            self.next_unclaimed_index = capacity;
+
+            for (&self.slots, 0..) |*slot, slot_index| {
+                if (slot.in_use) {
+                    const key = keyOf(slot);
+                    const raw_key = ids.raw(key);
+                    if (raw_key != 0) {
+                        self.slot_keys[slot_index] = key;
+                        self.primary_index.insert(raw_key, slot_index);
+                    }
+                }
+            }
+
+            var slot_index = capacity;
+            while (slot_index > 0) {
+                slot_index -= 1;
+                if (!self.slots[slot_index].in_use) self.pushFreeIndex(slot_index);
+            }
+        }
+
+        pub fn countInUse(self: *const Self) usize {
+            var count: usize = 0;
+            for (self.slots) |slot| {
+                if (slot.in_use) count += 1;
+            }
+            return count;
+        }
+
+        pub fn countMatching(self: *const Self, context: anytype, comptime matches: anytype) usize {
+            var count: usize = 0;
+            for (&self.slots) |*slot| {
+                if (!slot.in_use) continue;
+                if (matches(context, slot)) count += 1;
+            }
+            return count;
+        }
+
+        pub fn findMatching(self: *Self, context: anytype, comptime matches: anytype) ?*Slot {
+            for (&self.slots) |*slot| {
+                if (!slot.in_use) continue;
+                if (matches(context, slot)) return slot;
+            }
+            return null;
+        }
+
+        pub fn findConstMatching(self: *const Self, context: anytype, comptime matches: anytype) ?*const Slot {
+            for (&self.slots) |*slot| {
+                if (!slot.in_use) continue;
+                if (matches(context, slot)) return slot;
+            }
+            return null;
+        }
+
+        pub fn findByUniqueIndex(
+            self: *Self,
+            secondary_index: anytype,
+            key: u64,
+            context: anytype,
+            comptime matches: anytype,
+        ) ?*Slot {
+            if (secondary_index.lookup(key)) |slot_index| {
+                if (slot_index >= capacity) native_util.impossibleByInvariant("indexed arena secondary index points outside slots");
+                const slot = &self.slots[slot_index];
+                if (!slot.in_use) native_util.impossibleByInvariant("indexed arena secondary index points at a free slot");
+                if (!matches(context, slot)) native_util.impossibleByInvariant("indexed arena secondary index points at the wrong slot");
+                return slot;
+            }
+            if (debugScanFallbackEnabled() and self.findMatching(context, matches) != null) {
+                native_util.impossibleByInvariant("indexed arena secondary index missed a live slot");
+            }
+            return null;
+        }
+
+        pub fn findConstByUniqueIndex(
+            self: *const Self,
+            secondary_index: anytype,
+            key: u64,
+            context: anytype,
+            comptime matches: anytype,
+        ) ?*const Slot {
+            if (secondary_index.lookup(key)) |slot_index| {
+                if (slot_index >= capacity) native_util.impossibleByInvariant("indexed arena secondary index points outside slots");
+                const slot = &self.slots[slot_index];
+                if (!slot.in_use) native_util.impossibleByInvariant("indexed arena secondary index points at a free slot");
+                if (!matches(context, slot)) native_util.impossibleByInvariant("indexed arena secondary index points at the wrong slot");
+                return slot;
+            }
+            if (debugScanFallbackEnabled() and self.findConstMatching(context, matches) != null) {
+                native_util.impossibleByInvariant("indexed arena secondary index missed a live slot");
+            }
+            return null;
+        }
+
+        pub fn rebuildUniqueIndex(
+            self: *const Self,
+            secondary_index: anytype,
+            comptime secondaryKeyOf: anytype,
+        ) void {
+            secondary_index.reset();
+            for (self.slots, 0..) |slot, slot_index| {
+                if (!slot.in_use) continue;
+                const key = secondaryKeyOf(&slot);
+                if (key != 0) secondary_index.insert(key, slot_index);
+            }
+        }
+
+        pub fn markDirty(self: *Self, key: Key) void {
+            const raw_key = ids.raw(key);
+            if (raw_key == 0) return;
+            for (self.dirty_ids[0..self.dirty_count]) |existing| {
+                if (ids.raw(existing) == raw_key) return;
+            }
+            if (self.dirty_count >= capacity) native_util.impossibleByInvariant("indexed arena dirty id capacity covers slot capacity");
+            self.dirty_ids[self.dirty_count] = key;
+            self.dirty_count += 1;
+        }
+
+        pub fn dirtyIds(self: *const Self) []const Key {
+            return self.dirty_ids[0..self.dirty_count];
+        }
+
+        pub fn clearDirty(self: *Self) void {
+            @memset(self.dirty_ids[0..], ids.zero(Key));
+            self.dirty_count = 0;
+        }
+
+        fn findIndex(self: *const Self, key: Key) ?usize {
+            const raw_key = ids.raw(key);
+            if (raw_key == 0) return null;
+            if (self.primary_index.lookup(raw_key)) |slot_index| {
+                if (slot_index >= capacity) native_util.impossibleByInvariant("indexed arena primary index points outside slots");
+                const slot = &self.slots[slot_index];
+                if (!slot.in_use) native_util.impossibleByInvariant("indexed arena primary index points at a free slot");
+                if (ids.raw(self.slot_keys[slot_index]) != raw_key) native_util.impossibleByInvariant("indexed arena primary index points at the wrong key");
+                const payload_key = keyOf(slot);
+                const raw_payload_key = ids.raw(payload_key);
+                if (raw_payload_key != 0 and raw_payload_key != raw_key) native_util.impossibleByInvariant("indexed arena slot payload key diverged from its primary index");
+                return slot_index;
+            }
+            if (debugScanFallbackEnabled() and self.scanForKey(key) != null) {
+                native_util.impossibleByInvariant("indexed arena primary index missed a live slot");
+            }
+            return null;
+        }
+
+        fn scanForKey(self: *const Self, key: Key) ?usize {
+            const raw_key = ids.raw(key);
+            for (self.slots, 0..) |slot, slot_index| {
+                if (slot.in_use and ids.raw(keyOf(&slot)) == raw_key) return slot_index;
+            }
+            return null;
+        }
+
+        fn popFreeIndex(self: *Self) ?usize {
+            if (self.free_head) |slot_index| {
+                if (slot_index >= capacity) return null;
+                self.free_head = self.free_next[slot_index];
+                self.free_next[slot_index] = null;
+                return slot_index;
+            }
+
+            if (self.next_unclaimed_index >= capacity) return null;
+            const slot_index = self.next_unclaimed_index;
+            self.next_unclaimed_index += 1;
+            return slot_index;
+        }
+
+        fn pushFreeIndex(self: *Self, slot_index: usize) void {
+            self.free_next[slot_index] = self.free_head;
+            self.free_head = slot_index;
+        }
+
+        fn claimFreeIndex(self: *Self, slot_index: usize) bool {
+            if (slot_index >= capacity or self.slots[slot_index].in_use) return false;
+
+            if (slot_index >= self.next_unclaimed_index) {
+                while (self.next_unclaimed_index < slot_index) : (self.next_unclaimed_index += 1) {
+                    self.pushFreeIndex(self.next_unclaimed_index);
+                }
+                self.next_unclaimed_index = slot_index + 1;
+                return true;
+            }
+
+            return self.unlinkFreeIndex(slot_index);
+        }
+
+        fn unlinkFreeIndex(self: *Self, slot_index: usize) bool {
+            var previous: ?usize = null;
+            var current = self.free_head;
+            while (current) |current_index| {
+                if (current_index >= capacity) return false;
+                const next = self.free_next[current_index];
+                if (current_index == slot_index) {
+                    if (previous) |previous_index| {
+                        self.free_next[previous_index] = next;
+                    } else {
+                        self.free_head = next;
+                    }
+                    self.free_next[current_index] = null;
+                    return true;
+                }
+                previous = current_index;
+                current = next;
+            }
+            return false;
+        }
+    };
+}
+
+fn debugScanFallbackEnabled() bool {
+    return builtin.mode == .Debug;
+}
+
+const TestRecord = struct {
+    id: u64 = 0,
+    owner: u64 = 0,
+    label: []const u8 = "",
+};
+
+const TestSlot = struct {
+    in_use: bool = false,
+    record: TestRecord = .{},
+};
+
+fn testSlotId(slot: *const TestSlot) u64 {
+    return slot.record.id;
+}
+
+fn testSlotOwner(slot: *const TestSlot) u64 {
+    return slot.record.owner;
+}
+
+fn testSlotMatchesOwner(owner: u64, slot: *const TestSlot) bool {
+    return slot.record.owner == owner;
+}
+
+fn testIndexExcluded(excluded_index: usize, slot_index: usize) bool {
+    return excluded_index == slot_index;
+}
+
+test "indexed arena reserves reuses indexes and tracks dirty ids" {
+    const Arena = IndexedArena(TestSlot, 4, 8, testSlotId);
+    var arena = Arena.init();
+
+    const first = arena.reserve(41).?;
+    try std.testing.expectEqual(@as(?*TestSlot, null), arena.reserve(41));
+    first.record = .{ .id = 41, .owner = 7, .label = "first" };
+    const second_index = arena.reserveIndex(42).?;
+    arena.slots[second_index].record = .{ .id = 42, .owner = 8, .label = "second" };
+
+    try std.testing.expectEqual(@as(usize, 2), arena.countInUse());
+    try std.testing.expectEqualStrings("first", arena.get(41).?.record.label);
+    try std.testing.expectEqual(@as(u64, 42), arena.getConst(42).?.record.id);
+    try std.testing.expectEqual(@as(usize, 2), arena.dirtyIds().len);
+
+    try std.testing.expect(arena.remove(41));
+    const pending_index = arena.reserveIndex(44).?;
+    try std.testing.expect(arena.removeIndex(pending_index));
+    const pending_reused = arena.reserve(44).?;
+    pending_reused.record = .{ .id = 44, .owner = 10, .label = "pending-reused" };
+    try std.testing.expect(arena.remove(44));
+    const reused = arena.reserve(43).?;
+    reused.record = .{ .id = 43, .owner = 9, .label = "reused" };
+
+    try std.testing.expectEqualStrings("reused", arena.get(43).?.record.label);
+    try std.testing.expectEqual(@as(usize, 2), arena.countInUse());
+    arena.clearDirty();
+    try std.testing.expectEqual(@as(usize, 0), arena.dirtyIds().len);
+}
+
+test "indexed arena reserves explicit free indexes" {
+    const Arena = IndexedArena(TestSlot, 4, 8, testSlotId);
+    var arena = Arena.init();
+
+    const reserved = arena.reserveAtIndex(41, 2).?;
+    reserved.record = .{ .id = 41, .owner = 7, .label = "explicit" };
+    try std.testing.expectEqual(@as(usize, 0), arena.availableIndexExcluding(@as(usize, 1), testIndexExcluded).?);
+    try std.testing.expectEqualStrings("explicit", arena.get(41).?.record.label);
+
+    _ = arena.reserveAtIndex(42, 0).?;
+    try std.testing.expectEqual(@as(usize, 1), arena.availableIndexExcluding(@as(usize, 3), testIndexExcluded).?);
+}
+
+test "indexed arena supports secondary indexes" {
+    const Arena = IndexedArena(TestSlot, 4, 8, testSlotId);
+    const OwnerIndex = UniqueIndex(8);
+    var arena = Arena.init();
+    var owner_index = OwnerIndex.init();
+
+    const alpha_index = arena.reserveIndex(1).?;
+    arena.slots[alpha_index].record = .{ .id = 1, .owner = 91, .label = "alpha" };
+    const beta_index = arena.reserveIndex(2).?;
+    arena.slots[beta_index].record = .{ .id = 2, .owner = 92, .label = "beta" };
+    arena.rebuildUniqueIndex(&owner_index, testSlotOwner);
+
+    try std.testing.expectEqualStrings(
+        "beta",
+        arena.findByUniqueIndex(&owner_index, 92, @as(u64, 92), testSlotMatchesOwner).?.record.label,
+    );
+    try std.testing.expectEqual(@as(?*TestSlot, null), arena.findByUniqueIndex(&owner_index, 93, @as(u64, 93), testSlotMatchesOwner));
+}

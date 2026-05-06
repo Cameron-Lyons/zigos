@@ -125,6 +125,10 @@ pub const ReplicaEntry = struct {
     pub fn pathSlice(self: *const ReplicaEntry) []const u8 {
         return self.path[0..self.path_len];
     }
+
+    pub fn pathHash(self: *const ReplicaEntry) u64 {
+        return workspace.pathHash(self.pathSlice());
+    }
 };
 
 pub const ConflictRecord = struct {

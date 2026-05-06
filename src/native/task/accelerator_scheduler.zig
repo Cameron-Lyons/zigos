@@ -1,4 +1,5 @@
 const std = @import("std");
+const ids = @import("../core/ids.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
 
 pub const Engine = enum(u8) {
@@ -69,7 +70,7 @@ pub const ClaimRequest = struct {
     task_id: u64,
     request: Request,
     require_accelerator: bool = false,
-    shared_memory_object_id: ?u64 = null,
+    shared_memory_object_id: ?ids.SharedMemoryId = null,
 };
 
 pub const ClaimRecord = struct {
@@ -81,7 +82,7 @@ pub const ClaimRecord = struct {
     degraded: bool,
     zero_copy: bool,
     reason: DecisionReason,
-    shared_memory_object_id: ?u64,
+    shared_memory_object_id: ?ids.SharedMemoryId,
     active: bool,
 };
 
@@ -445,7 +446,7 @@ test "accelerator scheduler uses cpu and memory bandwidth accounting signals" {
 test "accelerator scheduler tracks exclusive engine claims and zero-copy attachments" {
     var controller = Controller.init();
     var shared = shared_memory.Table.init();
-    const object = try shared.createWithAccess(9, 32 * 1024, .{
+    const object = try shared.createWithAccess(ids.task(9), 32 * 1024, .{
         .media = true,
         .gpu = true,
     });

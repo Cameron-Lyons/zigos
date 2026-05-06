@@ -2,7 +2,8 @@ const std = @import("std");
 const binary_cursor = @import("../core/binary_cursor.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const fixed_table = @import("../core/fixed_table.zig");
-const id_index = @import("../core/id_index.zig");
+pub const ids = @import("../core/ids.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const signing = @import("../core/signing.zig");
@@ -93,32 +94,32 @@ pub const SignedMetadata = struct {
 };
 
 pub const PutRequest = struct {
-    preferred_object_id: ?u64 = null,
+    preferred_object_id: ?ids.ObjectId = null,
     object_type: ObjectType,
     payload: []const u8,
     metadata: SignedMetadata,
-    parent_version_id: ?u64 = null,
+    parent_version_id: ?ids.VersionId = null,
 };
 
 pub const PutResult = struct {
-    object_id: u64,
-    version_id: u64,
+    object_id: ids.ObjectId,
+    version_id: ids.VersionId,
     blob_address: BlobAddress,
     version_address: VersionAddress,
     new_object: bool,
 };
 
 pub const ObjectRecord = struct {
-    id: u64,
+    id: ids.ObjectId,
     object_type: ObjectType,
-    latest_version_id: u64,
+    latest_version_id: ids.VersionId,
     version_count: u16,
 };
 
 pub const VersionRecord = struct {
-    id: u64,
-    object_id: u64,
-    previous_version_id: u64,
+    id: ids.VersionId,
+    object_id: ids.ObjectId,
+    previous_version_id: ids.VersionId,
     object_type: ObjectType,
     blob_address: BlobAddress,
     version_address: VersionAddress,
@@ -161,9 +162,9 @@ pub const SignMetadataError = error{ ContentTypeTooLong, LabelTooLong } || anyer
 const ObjectSlot = struct {
     in_use: bool = false,
     object: ObjectRecord = .{
-        .id = 0,
+        .id = ids.ObjectId.zero,
         .object_type = .blob,
-        .latest_version_id = 0,
+        .latest_version_id = ids.VersionId.zero,
         .version_count = 0,
     },
 };
@@ -171,9 +172,9 @@ const ObjectSlot = struct {
 const VersionSlot = struct {
     in_use: bool = false,
     version: VersionRecord = .{
-        .id = 0,
-        .object_id = 0,
-        .previous_version_id = 0,
+        .id = ids.VersionId.zero,
+        .object_id = ids.ObjectId.zero,
+        .previous_version_id = ids.VersionId.zero,
         .object_type = .blob,
         .blob_address = [_]u8{0} ** 32,
         .version_address = [_]u8{0} ** 32,
@@ -194,21 +195,11 @@ pub const BlobSlot = struct {
     },
 };
 
-const IdIndexSlot = id_index.Slot;
-
-fn objectSlotMatchesId(object_id: u64, slot: *const ObjectSlot) bool {
-    return slot.object.id == object_id;
-}
-
-fn objectSlotId(slot: *const ObjectSlot) u64 {
+fn objectSlotId(slot: *const ObjectSlot) ids.ObjectId {
     return slot.object.id;
 }
 
-fn versionSlotMatchesId(version_id: u64, slot: *const VersionSlot) bool {
-    return slot.version.id == version_id;
-}
-
-fn versionSlotId(slot: *const VersionSlot) u64 {
+fn versionSlotId(slot: *const VersionSlot) ids.VersionId {
     return slot.version.id;
 }
 
@@ -231,19 +222,16 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         const STORE_OBJECT_INDEX_CAPACITY = config.object_index_capacity;
         const STORE_VERSION_INDEX_CAPACITY = config.version_index_capacity;
         const STORE_BLOB_INDEX_CAPACITY = config.blob_index_capacity;
+        const ObjectArena = indexed_arena.IndexedArenaWithKey(ids.ObjectId, ObjectSlot, MAX_STORE_OBJECTS, STORE_OBJECT_INDEX_CAPACITY, objectSlotId);
+        const VersionArena = indexed_arena.IndexedArenaWithKey(ids.VersionId, VersionSlot, MAX_STORE_VERSIONS, STORE_VERSION_INDEX_CAPACITY, versionSlotId);
+        const BlobIndex = indexed_arena.UniqueIndex(STORE_BLOB_INDEX_CAPACITY);
 
         next_object_id: u64 = 1,
         next_version_id: u64 = 1,
-        object_index_slots: [STORE_OBJECT_INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(STORE_OBJECT_INDEX_CAPACITY),
-        version_index_slots: [STORE_VERSION_INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(STORE_VERSION_INDEX_CAPACITY),
-        blob_index_slots: [STORE_BLOB_INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(STORE_BLOB_INDEX_CAPACITY),
-        objects: [MAX_STORE_OBJECTS]ObjectSlot = [_]ObjectSlot{ObjectSlot{}} ** MAX_STORE_OBJECTS,
-        versions: [MAX_STORE_VERSIONS]VersionSlot = [_]VersionSlot{VersionSlot{}} ** MAX_STORE_VERSIONS,
+        objects: ObjectArena = ObjectArena.init(),
+        versions: VersionArena = VersionArena.init(),
+        blob_index: BlobIndex = BlobIndex.init(),
         blobs: [MAX_BLOBS]BlobSlot = [_]BlobSlot{BlobSlot{}} ** MAX_BLOBS,
-        dirty_object_count: usize = 0,
-        dirty_object_ids: [MAX_STORE_OBJECTS]u64 = [_]u64{0} ** MAX_STORE_OBJECTS,
-        dirty_version_count: usize = 0,
-        dirty_version_ids: [MAX_STORE_VERSIONS]u64 = [_]u64{0} ** MAX_STORE_VERSIONS,
 
         pub fn init() Self {
             return .{};
@@ -252,18 +240,9 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         pub fn reset(self: *Self) void {
             self.next_object_id = 1;
             self.next_version_id = 1;
-            self.object_index_slots = emptyIndexTable(STORE_OBJECT_INDEX_CAPACITY);
-            self.version_index_slots = emptyIndexTable(STORE_VERSION_INDEX_CAPACITY);
-            self.blob_index_slots = emptyIndexTable(STORE_BLOB_INDEX_CAPACITY);
-            self.clearDirty();
-            for (&self.objects) |*slot| {
-                if (!slot.in_use) continue;
-                slot.* = .{};
-            }
-            for (&self.versions) |*slot| {
-                if (!slot.in_use) continue;
-                slot.* = .{};
-            }
+            self.objects.reset();
+            self.versions.reset();
+            self.blob_index.reset();
             for (&self.blobs) |*slot| {
                 if (!slot.in_use) continue;
                 slot.* = .{};
@@ -271,21 +250,13 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         pub fn rebuildIndexes(self: *Self) void {
-            self.object_index_slots = emptyIndexTable(STORE_OBJECT_INDEX_CAPACITY);
-            self.version_index_slots = emptyIndexTable(STORE_VERSION_INDEX_CAPACITY);
-            self.blob_index_slots = emptyIndexTable(STORE_BLOB_INDEX_CAPACITY);
+            self.objects.rebuildPrimaryIndex();
+            self.versions.rebuildPrimaryIndex();
+            self.blob_index.reset();
 
-            for (self.objects, 0..) |slot, slot_index| {
-                if (!slot.in_use) continue;
-                indexInsert(STORE_OBJECT_INDEX_CAPACITY, &self.object_index_slots, slot.object.id, slot_index);
-            }
-            for (self.versions, 0..) |slot, slot_index| {
-                if (!slot.in_use) continue;
-                indexInsert(STORE_VERSION_INDEX_CAPACITY, &self.version_index_slots, slot.version.id, slot_index);
-            }
             for (self.blobs, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
-                indexInsertBytes(STORE_BLOB_INDEX_CAPACITY, &self.blob_index_slots, &slot.blob.address, slot_index);
+                self.blob_index.insert(indexIdForBytes(&slot.blob.address), slot_index);
             }
         }
 
@@ -306,9 +277,9 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                     const parent = self.version(parent_version_id) orelse return error.VersionNotFound;
                     if (parent.object_type != request.object_type) return error.TypeMismatch;
                     const existing = self.object(parent.object_id) orelse return error.ObjectNotFound;
-                    if (existing.latest_version_id != parent_version_id) return error.ParentMismatch;
+                    if (!existing.latest_version_id.eql(parent_version_id)) return error.ParentMismatch;
                     if (request.preferred_object_id) |preferred_object_id| {
-                        if (preferred_object_id != existing.id) return error.ParentMismatch;
+                        if (!preferred_object_id.eql(existing.id)) return error.ParentMismatch;
                     }
                     break :blk existing;
                 }
@@ -330,14 +301,14 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 parent_version_id
             else
                 object_record.latest_version_id;
-            if (object_record.latest_version_id != 0 and previous_version_id != object_record.latest_version_id) {
+            if (!object_record.latest_version_id.isZero() and !previous_version_id.eql(object_record.latest_version_id)) {
                 return error.ParentMismatch;
             }
 
             const version_id = self.nextVersionId();
             const blob_address = computeBlobAddress(request.payload);
             const blob_slot_index = try self.putBlob(blob_address, request.payload);
-            const version_address = computeVersionAddress(previous_version_id, request.metadata, blob_address);
+            const version_address = computeVersionAddress(previous_version_id.raw(), request.metadata, blob_address);
             try self.insertVersion(.{
                 .id = version_id,
                 .object_id = object_record.id,
@@ -364,39 +335,19 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             };
         }
 
-        pub fn object(self: *Self, object_id: u64) ?*ObjectRecord {
-            const slot = fixed_table.findIndexedSlot(
-                ObjectSlot,
-                MAX_STORE_OBJECTS,
-                STORE_OBJECT_INDEX_CAPACITY,
-                &self.objects,
-                &self.object_index_slots,
-                object_id,
-                objectSlotId,
-                object_id,
-                objectSlotMatchesId,
-            ) orelse return null;
+        pub fn object(self: *Self, object_id: anytype) ?*ObjectRecord {
+            const slot = self.objects.get(ids.coerce(ids.ObjectId, object_id)) orelse return null;
             return &slot.object;
         }
 
-        pub fn version(self: *Self, version_id: u64) ?*VersionRecord {
-            const slot = fixed_table.findIndexedSlot(
-                VersionSlot,
-                MAX_STORE_VERSIONS,
-                STORE_VERSION_INDEX_CAPACITY,
-                &self.versions,
-                &self.version_index_slots,
-                version_id,
-                versionSlotId,
-                version_id,
-                versionSlotMatchesId,
-            ) orelse return null;
+        pub fn version(self: *Self, version_id: anytype) ?*VersionRecord {
+            const slot = self.versions.get(ids.coerce(ids.VersionId, version_id)) orelse return null;
             return &slot.version;
         }
 
-        pub fn latestVersion(self: *Self, object_id: u64) ?*VersionRecord {
+        pub fn latestVersion(self: *Self, object_id: anytype) ?*VersionRecord {
             const object_record = self.object(object_id) orelse return null;
-            if (object_record.latest_version_id == 0) return null;
+            if (object_record.latest_version_id.isZero()) return null;
             return self.version(object_record.latest_version_id);
         }
 
@@ -409,9 +360,14 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         pub fn blob(self: *const Self, address: BlobAddress) ?*const BlobRecord {
-            if (self.indexedBlobSlot(address)) |slot| return &slot.blob;
-            for (&self.blobs) |*slot| {
-                if (slot.in_use and std.mem.eql(u8, &slot.blob.address, &address)) return &slot.blob;
+            const slot_index = self.blobSlotIndex(address) orelse return null;
+            const slot = &self.blobs[slot_index];
+            return &slot.blob;
+        }
+
+        pub fn blobSlotIndex(self: *const Self, address: BlobAddress) ?usize {
+            if (self.indexedBlobSlot(address)) |slot| {
+                return (@intFromPtr(slot) - @intFromPtr(&self.blobs[0])) / @sizeOf(BlobSlot);
             }
             return null;
         }
@@ -421,59 +377,54 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         pub fn objectCount(self: *const Self) usize {
-            return fixed_table.countInUse(ObjectSlot, MAX_STORE_OBJECTS, &self.objects);
+            return self.objects.countInUse();
         }
 
         pub fn versionCount(self: *const Self) usize {
-            return fixed_table.countInUse(VersionSlot, MAX_STORE_VERSIONS, &self.versions);
+            return self.versions.countInUse();
         }
 
-        pub fn dirtyObjectIds(self: *const Self) []const u64 {
-            return self.dirty_object_ids[0..self.dirty_object_count];
+        pub fn dirtyObjectIds(self: *const Self) []const ids.ObjectId {
+            return self.objects.dirtyIds();
         }
 
-        pub fn dirtyVersionIds(self: *const Self) []const u64 {
-            return self.dirty_version_ids[0..self.dirty_version_count];
+        pub fn dirtyVersionIds(self: *const Self) []const ids.VersionId {
+            return self.versions.dirtyIds();
         }
 
         pub fn clearDirty(self: *Self) void {
-            @memset(self.dirty_object_ids[0..], 0);
-            @memset(self.dirty_version_ids[0..], 0);
-            self.dirty_object_count = 0;
-            self.dirty_version_count = 0;
+            self.objects.clearDirty();
+            self.versions.clearDirty();
         }
 
-        fn nextObjectId(self: *Self) u64 {
+        fn nextObjectId(self: *Self) ids.ObjectId {
             defer self.next_object_id += 1;
-            return self.next_object_id;
+            return ids.object(self.next_object_id);
         }
 
-        fn nextVersionId(self: *Self) u64 {
+        fn nextVersionId(self: *Self) ids.VersionId {
             defer self.next_version_id += 1;
-            return self.next_version_id;
+            return ids.version(self.next_version_id);
         }
 
-        fn createObject(self: *Self, object_id: u64, object_type: ObjectType) Error!*ObjectRecord {
-            const slot_index = fixed_table.firstFreeSlotIndex(ObjectSlot, MAX_STORE_OBJECTS, &self.objects) orelse return error.ObjectTableFull;
-            const slot = &self.objects[slot_index];
-            slot.in_use = true;
+        fn createObject(self: *Self, object_id: ids.ObjectId, object_type: ObjectType) Error!*ObjectRecord {
+            const slot = self.objects.reserve(object_id) orelse return error.ObjectTableFull;
             slot.object = .{
                 .id = object_id,
                 .object_type = object_type,
-                .latest_version_id = 0,
+                .latest_version_id = ids.VersionId.zero,
                 .version_count = 0,
             };
-            if (object_id >= self.next_object_id) {
-                self.next_object_id = object_id + 1;
+            if (object_id.raw() >= self.next_object_id) {
+                self.next_object_id = object_id.raw() + 1;
             }
-            indexInsert(STORE_OBJECT_INDEX_CAPACITY, &self.object_index_slots, object_id, slot_index);
             return &slot.object;
         }
 
         fn insertVersion(self: *Self, request: struct {
-            id: u64,
-            object_id: u64,
-            previous_version_id: u64,
+            id: ids.VersionId,
+            object_id: ids.ObjectId,
+            previous_version_id: ids.VersionId,
             object_type: ObjectType,
             blob_address: BlobAddress,
             version_address: VersionAddress,
@@ -481,9 +432,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             payload_len: usize,
             blob_slot_index: usize,
         }) Error!void {
-            const slot_index = fixed_table.firstFreeSlotIndex(VersionSlot, MAX_STORE_VERSIONS, &self.versions) orelse return error.VersionTableFull;
-            const slot = &self.versions[slot_index];
-            slot.in_use = true;
+            const slot = self.versions.reserve(request.id) orelse return error.VersionTableFull;
             slot.version.id = request.id;
             slot.version.object_id = request.object_id;
             slot.version.previous_version_id = request.previous_version_id;
@@ -494,24 +443,15 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             slot.version.payload_len = request.payload_len;
             slot.version.blob_slot_index = request.blob_slot_index;
             slot.version.chunk_count = chunkCountForLen(request.payload_len);
-            indexInsert(STORE_VERSION_INDEX_CAPACITY, &self.version_index_slots, request.id, slot_index);
         }
 
         pub fn putBlob(self: *Self, address: BlobAddress, payload: []const u8) Error!usize {
             if (payload.len > MAX_BLOB_BYTES) return error.PayloadTooLarge;
-            if (indexLookupBytes(STORE_BLOB_INDEX_CAPACITY, &self.blob_index_slots, &address)) |slot_index| {
+            if (self.blobSlotIndex(address)) |slot_index| {
                 const slot = &self.blobs[slot_index];
-                if (slot.in_use and std.mem.eql(u8, &slot.blob.address, &address)) {
-                    if (slot.blob.payload_len != payload.len or !std.mem.eql(u8, slot.blob.payloadSlice(), payload)) return error.CorruptBlob;
-                    slot.blob.ref_count +|= 1;
-                    return slot_index;
-                }
-            }
-            if (self.exactBlobSlotIndex(address)) |exact_slot_index| {
-                const exact = &self.blobs[exact_slot_index];
-                if (exact.blob.payload_len != payload.len or !std.mem.eql(u8, exact.blob.payloadSlice(), payload)) return error.CorruptBlob;
-                exact.blob.ref_count +|= 1;
-                return exact_slot_index;
+                if (slot.blob.payload_len != payload.len or !std.mem.eql(u8, slot.blob.payloadSlice(), payload)) return error.CorruptBlob;
+                slot.blob.ref_count +|= 1;
+                return slot_index;
             }
             const slot_index = fixed_table.firstFreeSlotIndex(BlobSlot, MAX_BLOBS, &self.blobs) orelse return error.BlobTableFull;
             const slot = &self.blobs[slot_index];
@@ -521,7 +461,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             @memset(slot.blob.payload[0..], 0);
             copyBytes(slot.blob.payload[0..payload.len], payload);
             slot.blob.ref_count = 1;
-            indexInsertBytes(STORE_BLOB_INDEX_CAPACITY, &self.blob_index_slots, &address, slot_index);
+            self.blob_index.insert(indexIdForBytes(&address), slot_index);
             return slot_index;
         }
 
@@ -531,7 +471,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 MAX_BLOBS,
                 STORE_BLOB_INDEX_CAPACITY,
                 &self.blobs,
-                &self.blob_index_slots,
+                &self.blob_index.slots,
                 indexIdForBytes(&address),
                 blobSlotIndexId,
                 address,
@@ -539,31 +479,14 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             );
         }
 
-        fn exactBlobSlotIndex(self: *Self, address: BlobAddress) ?usize {
-            for (&self.blobs, 0..) |*slot, slot_index| {
-                if (slot.in_use and std.mem.eql(u8, &slot.blob.address, &address)) return slot_index;
-            }
-            return null;
+        fn markObjectDirty(self: *Self, object_id: ids.ObjectId) void {
+            self.objects.markDirty(object_id);
         }
 
-        fn markObjectDirty(self: *Self, object_id: u64) void {
-            appendDirtyId(MAX_STORE_OBJECTS, &self.dirty_object_ids, &self.dirty_object_count, object_id);
-        }
-
-        fn markVersionDirty(self: *Self, version_id: u64) void {
-            appendDirtyId(MAX_STORE_VERSIONS, &self.dirty_version_ids, &self.dirty_version_count, version_id);
+        fn markVersionDirty(self: *Self, version_id: ids.VersionId) void {
+            self.versions.markDirty(version_id);
         }
     };
-}
-
-fn appendDirtyId(comptime capacity: usize, ids: *[capacity]u64, count: *usize, id: u64) void {
-    if (id == 0) return;
-    for (ids[0..count.*]) |existing| {
-        if (existing == id) return;
-    }
-    if (count.* >= capacity) native_util.impossibleByInvariant("dirty id capacity covers table slots");
-    ids[count.*] = id;
-    count.* += 1;
 }
 
 pub fn signMetadata(
@@ -579,12 +502,6 @@ pub fn signMetadata(
     const message = try metadataMessage(&message_buffer, object_type, payload, metadata);
     metadata.signature = try signing.sign(identity, message);
     return metadata;
-}
-
-fn copyPayload(payload: []const u8) [MAX_PAYLOAD_BYTES]u8 {
-    var buffer = [_]u8{0} ** MAX_PAYLOAD_BYTES;
-    @memcpy(buffer[0..payload.len], payload);
-    return buffer;
 }
 
 fn copyBytes(dest: []u8, src: []const u8) void {
@@ -609,35 +526,9 @@ fn writeMetadata(dest: *SignedMetadata, src: *const SignedMetadata) void {
     dest.created_at_ticks = src.created_at_ticks;
 }
 
-fn emptyIndexTable(comptime capacity: usize) [capacity]IdIndexSlot {
-    return id_index.emptyTable(capacity);
-}
-
-fn indexLookup(comptime capacity: usize, table: *const [capacity]IdIndexSlot, id: u64) ?usize {
-    return id_index.lookup(capacity, table, id);
-}
-
-fn indexInsert(comptime capacity: usize, table: *[capacity]IdIndexSlot, id: u64, slot_index: usize) void {
-    id_index.insert(capacity, table, id, slot_index, "id indexes never store the reserved zero id");
-}
-
-fn indexLookupBytes(comptime capacity: usize, table: *const [capacity]IdIndexSlot, bytes: []const u8) ?usize {
-    return indexLookup(capacity, table, indexIdForBytes(bytes));
-}
-
-fn indexInsertBytes(comptime capacity: usize, table: *[capacity]IdIndexSlot, bytes: []const u8, slot_index: usize) void {
-    indexInsert(capacity, table, indexIdForBytes(bytes), slot_index);
-}
-
 fn indexIdForBytes(bytes: []const u8) u64 {
-    var id: u64 = 0;
-    const len = @min(bytes.len, @sizeOf(u64));
-    var index: usize = 0;
-    while (index < len) : (index += 1) {
-        id |= @as(u64, bytes[index]) << @intCast(index * 8);
-    }
-    if (id == 0) id = 1;
-    return id;
+    const id = native_util.fnv1a64(bytes);
+    return if (id == 0) 1 else id;
 }
 
 fn chunkCountForLen(payload_len: usize) u16 {
@@ -703,13 +594,13 @@ test "object store keeps immutable signed versions with stable version addresses
     const metadata_v2 = try signMetadata(signer, "notes", "text/markdown", .document, "hello, world", 11);
 
     const first = try store.putVersion(.{
-        .preferred_object_id = 900,
+        .preferred_object_id = ids.object(900),
         .object_type = .document,
         .payload = "hello",
         .metadata = metadata_v1,
     });
     const second = try store.putVersion(.{
-        .preferred_object_id = 900,
+        .preferred_object_id = ids.object(900),
         .object_type = .document,
         .payload = "hello, world",
         .metadata = metadata_v2,
@@ -718,8 +609,8 @@ test "object store keeps immutable signed versions with stable version addresses
 
     try std.testing.expectEqual(@as(usize, 1), store.objectCount());
     try std.testing.expectEqual(@as(usize, 2), store.versionCount());
-    try std.testing.expectEqual(@as(u64, 900), first.object_id);
-    try std.testing.expectEqual(@as(u64, 900), second.object_id);
+    try std.testing.expectEqual(ids.object(900), first.object_id);
+    try std.testing.expectEqual(ids.object(900), second.object_id);
     try std.testing.expect(!std.mem.eql(u8, &first.version_address, &second.version_address));
     try std.testing.expectEqualStrings("hello", try store.versionPayload(store.version(first.version_id).?));
     try std.testing.expectEqualStrings("hello, world", try store.versionPayload(store.latestVersion(first.object_id).?));
@@ -755,13 +646,13 @@ test "object store splits blob and version addresses" {
     const metadata_v2 = try signMetadata(signer, "notes-b", "text/plain", .document, "same", 11);
 
     const first = try store.putVersion(.{
-        .preferred_object_id = 910,
+        .preferred_object_id = ids.object(910),
         .object_type = .document,
         .payload = "same",
         .metadata = metadata_v1,
     });
     const second = try store.putVersion(.{
-        .preferred_object_id = 911,
+        .preferred_object_id = ids.object(911),
         .object_type = .document,
         .payload = "same",
         .metadata = metadata_v2,
@@ -774,7 +665,7 @@ test "object store splits blob and version addresses" {
     try std.testing.expectEqual(@as(usize, 1), store.blobCount());
 }
 
-test "object store falls back to exact blob address match after index-key collision" {
+test "object store indexes full blob addresses authoritatively" {
     var store = Store.init();
 
     var first_address = [_]u8{0} ** 32;
@@ -808,7 +699,7 @@ test "object store verifies blob backend corruption before serving payloads" {
     };
 
     const result = try store.putVersion(.{
-        .preferred_object_id = 912,
+        .preferred_object_id = ids.object(912),
         .object_type = .document,
         .payload = "checked",
         .metadata = try signMetadata(signer, "checked", "text/plain", .document, "checked", 12),
@@ -846,7 +737,7 @@ test "object store supports every native object type and rejects unsigned metada
             .event_stream => "events",
         };
         _ = try store.putVersion(.{
-            .preferred_object_id = 1000 + @as(u64, @intCast(index)),
+            .preferred_object_id = ids.object(1000 + @as(u64, @intCast(index))),
             .object_type = object_type,
             .payload = payload,
             .metadata = try signMetadata(signer, payload, "application/octet-stream", object_type, payload, @intCast(index)),
@@ -871,7 +762,7 @@ test "object store rejects tampered metadata signatures" {
     metadata.created_at_ticks = 11;
 
     try std.testing.expectError(error.InvalidSignature, store.putVersion(.{
-        .preferred_object_id = 901,
+        .preferred_object_id = ids.object(901),
         .object_type = .document,
         .payload = "hello",
         .metadata = metadata,
@@ -893,14 +784,14 @@ test "object store capacity is configurable" {
     };
 
     _ = try store.putVersion(.{
-        .preferred_object_id = 1,
+        .preferred_object_id = ids.object(1),
         .object_type = .document,
         .payload = "one",
         .metadata = try signMetadata(signer, "one", "text/plain", .document, "one", 1),
     });
 
     try std.testing.expectError(error.ObjectTableFull, store.putVersion(.{
-        .preferred_object_id = 2,
+        .preferred_object_id = ids.object(2),
         .object_type = .document,
         .payload = "two",
         .metadata = try signMetadata(signer, "two", "text/plain", .document, "two", 2),

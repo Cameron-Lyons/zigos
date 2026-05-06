@@ -1,5 +1,6 @@
 const std = @import("std");
 const id_index = @import("../core/id_index.zig");
+const native_util = @import("../core/util.zig");
 const registry = @import("userspace_registry.zig");
 
 pub const FLAG_SYSTEM_BUNDLE = registry.FLAG_SYSTEM_BUNDLE;
@@ -27,16 +28,17 @@ const bundle_index = buildBundleIndex();
 
 pub fn find(bundle_id: []const u8) ?*const ContractSpec {
     const key = registry.bundleIndexKey(bundle_id);
-    if (id_index.lookup(BUNDLE_INDEX_CAPACITY, &bundle_index, key)) |contract_index| {
-        if (contract_index < contracts.len and std.mem.eql(u8, contracts[contract_index].bundle_id, bundle_id)) {
-            return &contracts[contract_index];
-        }
+    const contract_index = id_index.lookup(BUNDLE_INDEX_CAPACITY, &bundle_index, key) orelse {
+        debugAssertBundleIndexMissAbsent(bundle_id);
+        return null;
+    };
+    if (contract_index >= contracts.len) {
+        native_util.impossibleByInvariant("contract bundle id index points outside contracts");
     }
-
-    for (&contracts) |*contract| {
-        if (std.mem.eql(u8, contract.bundle_id, bundle_id)) return contract;
+    if (!std.mem.eql(u8, contracts[contract_index].bundle_id, bundle_id)) {
+        native_util.impossibleByInvariant("contract bundle id index points at the wrong contract");
     }
-    return null;
+    return &contracts[contract_index];
 }
 
 fn buildBundleIndex() [BUNDLE_INDEX_CAPACITY]id_index.Slot {
@@ -46,6 +48,15 @@ fn buildBundleIndex() [BUNDLE_INDEX_CAPACITY]id_index.Slot {
         id_index.insert(BUNDLE_INDEX_CAPACITY, &index, registry.bundleIndexKey(contract.bundle_id), contract_index, "contract bundle id index covers userspace contracts");
     }
     return index;
+}
+
+fn debugAssertBundleIndexMissAbsent(bundle_id: []const u8) void {
+    if (@import("builtin").mode != .Debug) return;
+    for (contracts) |contract| {
+        if (std.mem.eql(u8, contract.bundle_id, bundle_id)) {
+            native_util.impossibleByInvariant("contract bundle id index missed a contract");
+        }
+    }
 }
 
 test "userspace contracts stay unique and cover every boot artifact" {

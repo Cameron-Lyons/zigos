@@ -4,10 +4,10 @@ const dispatch = @import("syscall_dispatch.zig");
 const syscall_abi = @import("syscall_abi.zig");
 
 pub const operations = [_]syscall_abi.Operation{
-    .{ .operation = .device_describe, .domain = .device, .Request = component_port.DeviceDescribeRequest, .Response = abi.DeviceDescriptor, .handler = dispatchDeviceDescribe },
-    .{ .operation = .device_mmio_window, .domain = .device, .Request = component_port.DeviceMmioWindowRequest, .Response = abi.DeviceMmioWindowDescriptor, .handler = dispatchDeviceMmioWindow },
-    .{ .operation = .device_port_read, .domain = .device, .Request = component_port.DevicePortReadRequest, .Response = abi.DevicePortReadResponse, .handler = dispatchDevicePortRead },
-    .{ .operation = .device_port_write, .domain = .device, .Request = component_port.DevicePortWriteRequest, .Response = void, .handler = dispatchDevicePortWrite },
+    syscall_abi.declare(.device_describe, .device, component_port.DeviceDescribeRequest, abi.DeviceDescriptor, dispatchDeviceDescribe, .plain),
+    syscall_abi.declare(.device_mmio_window, .device, component_port.DeviceMmioWindowRequest, abi.DeviceMmioWindowDescriptor, dispatchDeviceMmioWindow, .plain),
+    syscall_abi.declare(.device_port_read, .device, component_port.DevicePortReadRequest, abi.DevicePortReadResponse, dispatchDevicePortRead, .plain),
+    syscall_abi.declare(.device_port_write, .device, component_port.DevicePortWriteRequest, void, dispatchDevicePortWrite, .plain),
 };
 
 pub fn dispatchDeviceDescribe(

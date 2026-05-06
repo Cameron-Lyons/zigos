@@ -789,6 +789,14 @@ fn componentAbiDeclarationsCoverEveryTypedOperation() !void {
     try std.testing.expectEqual(syscall_abi.Domain.device, syscall_abi.declarationFor(.device_port_write).domain);
     try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscall_abi.declarationFor(.task_create).request_copy);
     try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscall_abi.declarationFor(.endpoint_send).request_copy);
+    try std.testing.expectEqual(capability.CapabilityRight.task_create, syscall_abi.declarationFor(.task_create).required_right);
+    try std.testing.expectEqual(capability.CapabilityRight.device_use, syscall_abi.declarationFor(.device_port_read).required_right);
+    try std.testing.expect(switch (syscall_abi.declarationFor(.shared_memory_map).target_kind) {
+        .fixed => |kind| kind == .shared_memory,
+        else => false,
+    });
+    try std.testing.expect(syscall_abi.declarationFor(.endpoint_create).scope_rule.task_scope_matches_request_task);
+    try std.testing.expectEqual(@as(usize, 1), syscall_abi.declarationFor(.endpoint_create).auto_grants.len);
 }
 
 pub fn principalIdentityAndAdministrativeScopeStaySplit() !void {
