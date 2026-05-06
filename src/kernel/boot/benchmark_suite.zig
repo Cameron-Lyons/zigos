@@ -48,6 +48,7 @@ const ScalingCapabilityTable = capability.CapabilityTableWith(.{
     .max_capabilities = 512,
     .capability_index_capacity = 1024,
     .max_target_generations = 128,
+    .debug_index_checks = false,
 });
 
 const FileBridgeContext = struct {
