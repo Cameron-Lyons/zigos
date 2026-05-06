@@ -23,7 +23,7 @@ pub const state_index_path = "state/index";
 pub const state_chunk_prefix = "state/chunks/";
 pub const state_magic = "ZGSYNC1";
 pub const state_index_magic = "ZGSYNCI";
-pub const state_version: u16 = 2;
+pub const state_version: u16 = 3;
 pub const max_state_chunks: usize = workspace.MAX_WORKSPACE_ENTRIES - 1;
 pub const max_state_bytes: usize = max_state_chunks * object_store.MAX_PAYLOAD_BYTES;
 pub const state_signer = signing.SignerIdentity{
@@ -117,6 +117,7 @@ pub const OverlayRecord = struct {
 pub const ReplicaEntry = struct {
     workspace_id: u64,
     device_id: principal.PrincipalId,
+    workspace_generation: u32,
     path_len: usize,
     path: [workspace.MAX_ENTRY_PATH_BYTES]u8,
     object_id: u64,
@@ -465,6 +466,7 @@ pub fn zeroReplicaEntry() ReplicaEntry {
     return .{
         .workspace_id = 0,
         .device_id = .{ .kind = .device, .serial = 0 },
+        .workspace_generation = 0,
         .path_len = 0,
         .path = [_]u8{0} ** workspace.MAX_ENTRY_PATH_BYTES,
         .object_id = 0,

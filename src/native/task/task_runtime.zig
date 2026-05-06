@@ -43,7 +43,6 @@ pub const Snapshot = model.Snapshot;
 pub const syntheticUserspaceImage = model.syntheticUserspaceImage;
 
 const INDEX_CAPACITY = model.INDEX_CAPACITY;
-const CAPABILITY_INDEX_CAPACITY = model.CAPABILITY_INDEX_CAPACITY;
 const IdIndexSlot = model.IdIndexSlot;
 const TaskColdRecord = model.TaskColdRecord;
 const TaskSlot = model.TaskSlot;
@@ -335,7 +334,7 @@ pub const Runtime = struct {
         if (taskHasCapability(task, capability_id)) return;
         if (task.capability_count >= MAX_TASK_CAPABILITIES) return error.CapabilityTableFull;
         cold.capability_ids[task.capability_count] = capability_id;
-        indexInsert(CAPABILITY_INDEX_CAPACITY, &cold.capability_index_slots, capability_id, task.capability_count);
+        cold.capability_index.insert(capability_id, task.capability_count);
         task.capability_count += 1;
     }
 
@@ -369,13 +368,17 @@ pub const Runtime = struct {
         const task = self.find(task_id) orelse return error.TaskNotFound;
         const cold = taskCold(task);
         if (taskCapabilityIndex(task, capability_id)) |index| {
-            var tail = index;
-            while (tail + 1 < task.capability_count) : (tail += 1) {
-                cold.capability_ids[tail] = cold.capability_ids[tail + 1];
+            const last_index = task.capability_count - 1;
+            const moved_capability_id = cold.capability_ids[last_index];
+
+            cold.capability_index.remove(capability_id);
+            if (index != last_index) {
+                cold.capability_ids[index] = moved_capability_id;
+                cold.capability_index.insert(moved_capability_id, index);
             }
+
             task.capability_count -= 1;
             cold.capability_ids[task.capability_count] = 0;
-            rebuildCapabilityIndex(task);
             return true;
         }
 
@@ -555,12 +558,17 @@ test "granting and revoking capabilities updates the task table" {
 
     try runtime.grantCapability(task.id, 11);
     try runtime.grantCapability(task.id, 12);
-    try std.testing.expectEqual(@as(usize, 2), task.capability_count);
+    try runtime.grantCapability(task.id, 13);
+    try std.testing.expectEqual(@as(usize, 3), task.capability_count);
     try std.testing.expectEqual(accelerator_scheduler.ResourceClass.background_light, task.resourceClass());
 
-    try std.testing.expect(try runtime.revokeCapability(task.id, 11));
-    try std.testing.expectEqual(@as(usize, 1), task.capability_count);
-    try std.testing.expectEqual(@as(u64, 12), task.capabilityIds()[0]);
+    try std.testing.expect(try runtime.revokeCapability(task.id, 12));
+    try std.testing.expectEqual(@as(usize, 2), task.capability_count);
+    try std.testing.expect(runtime.hasCapability(task.id, 11));
+    try std.testing.expect(!runtime.hasCapability(task.id, 12));
+    try std.testing.expect(runtime.hasCapability(task.id, 13));
+    try std.testing.expectEqual(@as(u64, 13), task.capabilityIds()[1]);
+    try std.testing.expect(!try runtime.revokeCapability(task.id, 99));
 }
 
 test "restoring a snapshot rebuilds authoritative indexes" {

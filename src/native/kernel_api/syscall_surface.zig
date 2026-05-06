@@ -4,7 +4,7 @@ const abi = @import("../core/abi.zig");
 const capability = @import("capability.zig");
 const component_port = @import("component_port.zig");
 const endpoint = @import("endpoint.zig");
-const kernel_operation_descriptor = @import("kernel_operation_descriptor.zig");
+const operation_metadata = @import("operation_metadata.zig");
 const native_kernel = @import("native_kernel.zig");
 const shared_memory = @import("shared_memory.zig");
 const syscall_abi = @import("syscall_abi.zig");
@@ -31,8 +31,8 @@ const SyscallDescriptor = struct {
     domain: syscall_abi.Domain,
     request_copy: syscall_abi.RequestCopyRule,
     required_right: capability.CapabilityRight,
-    target_kind: kernel_operation_descriptor.TargetKindRule,
-    scope_rule: kernel_operation_descriptor.ScopeRule,
+    target_kind: operation_metadata.TargetKindRule,
+    scope_rule: operation_metadata.ScopeRule,
     auto_grant_count: usize,
     handler: DispatchHandler,
 };

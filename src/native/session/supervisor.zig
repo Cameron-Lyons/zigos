@@ -71,11 +71,13 @@ const ServiceSlot = struct {
 };
 
 const ServiceArena = indexed_arena.IndexedArena(ServiceSlot, MAX_SERVICES, SERVICE_INDEX_CAPACITY, serviceSlotId);
+const ServiceClassIndex = indexed_arena.UniqueIndex(SERVICE_INDEX_CAPACITY);
 
 pub const Supervisor = struct {
     next_service_id: u64 = 1,
     next_isolation_domain_id: u64 = 1,
     service_arena: ServiceArena = ServiceArena.init(),
+    service_class_index: ServiceClassIndex = ServiceClassIndex.init(),
     next_diagnostic_sequence: u64 = 1,
     diagnostics: [MAX_DIAGNOSTICS]DiagnosticEvent = [_]DiagnosticEvent{zeroDiagnostic()} ** MAX_DIAGNOSTICS,
     diagnostic_count: usize = 0,
@@ -88,7 +90,8 @@ pub const Supervisor = struct {
         const descriptor = contract.serviceDescriptor(class) orelse return error.UnknownServiceClass;
 
         const service_id = self.nextServiceId();
-        const slot = self.service_arena.reserve(service_id) orelse return error.ServiceTableFull;
+        const slot_index = self.service_arena.reserveIndex(service_id) orelse return error.ServiceTableFull;
+        const slot = &self.service_arena.slots[slot_index];
 
         slot.service = .{
             .id = service_id,
@@ -105,6 +108,7 @@ pub const Supervisor = struct {
             .restart_count = 0,
             .last_transition_tick = 0,
         };
+        self.service_class_index.insert(serviceClassKey(class), slot_index);
         self.record(slot.service, .registered, 0, 0, 0);
         return &slot.service;
     }
@@ -115,7 +119,8 @@ pub const Supervisor = struct {
     }
 
     pub fn findByClass(self: *Supervisor, class: contract.ServiceClass) ?*ServiceRecord {
-        const slot = self.service_arena.findMatching(class, serviceSlotMatchesClass) orelse return null;
+        const slot_index = self.service_class_index.lookup(serviceClassKey(class)) orelse return null;
+        const slot = self.serviceSlotAt(slot_index, class) orelse return null;
         return &slot.service;
     }
 
@@ -320,14 +325,22 @@ pub const Supervisor = struct {
         const slot = self.service_arena.getConst(service_id) orelse return null;
         return &slot.service;
     }
+
+    fn serviceSlotAt(self: *Supervisor, slot_index: usize, class: contract.ServiceClass) ?*ServiceSlot {
+        if (slot_index >= MAX_SERVICES) return null;
+        const slot = &self.service_arena.slots[slot_index];
+        if (!slot.in_use) return null;
+        if (slot.service.class != class) return null;
+        return slot;
+    }
 };
 
 fn serviceSlotId(slot: *const ServiceSlot) u64 {
     return slot.service.id;
 }
 
-fn serviceSlotMatchesClass(class: contract.ServiceClass, slot: *const ServiceSlot) bool {
-    return slot.service.class == class;
+fn serviceClassKey(class: contract.ServiceClass) u64 {
+    return @as(u64, @intFromEnum(class)) + 1;
 }
 
 fn zeroService() ServiceRecord {

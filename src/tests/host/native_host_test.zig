@@ -34,6 +34,7 @@ const native_util = @import("../../native/core/util.zig");
 const network_policy = @import("../../native/sync/network_policy.zig");
 const notification_center = @import("../../native/services/notification_center.zig");
 const object_store = @import("../../native/storage/object_store.zig");
+const operation_metadata = @import("../../native/kernel_api/operation_metadata.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const permission_review = @import("../../native/policy/permission_review.zig");
 const permission_review_service = @import("../../native/policy/permission_review_service.zig");
@@ -53,6 +54,7 @@ const session_manager_test = @import("../../native/session/session_manager_test.
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const signing = @import("../../native/core/signing.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
+const storage_service_ipc = @import("../../native/storage/storage_service_ipc.zig");
 const storage_volume = @import("../../native/storage/storage_volume.zig");
 const storage_volume_backend = @import("../../native/storage/storage_volume_backend.zig");
 const storage_volume_test = @import("../../native/storage/storage_volume_test.zig");
@@ -110,6 +112,7 @@ test "native host root imports native subsystem suites" {
     std.testing.refAllDecls(network_policy);
     std.testing.refAllDecls(notification_center);
     std.testing.refAllDecls(object_store);
+    std.testing.refAllDecls(operation_metadata);
     std.testing.refAllDecls(package_service);
     std.testing.refAllDecls(permission_review);
     std.testing.refAllDecls(permission_review_service);
@@ -129,6 +132,7 @@ test "native host root imports native subsystem suites" {
     std.testing.refAllDecls(shared_memory);
     std.testing.refAllDecls(signing);
     std.testing.refAllDecls(storage_service);
+    std.testing.refAllDecls(storage_service_ipc);
     std.testing.refAllDecls(storage_volume);
     std.testing.refAllDecls(storage_volume_backend);
     std.testing.refAllDecls(storage_volume_test);

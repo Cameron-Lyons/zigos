@@ -3,6 +3,7 @@ const abi = @import("../core/abi.zig");
 const capability = @import("capability.zig");
 const endpoint = @import("endpoint.zig");
 const native_kernel = @import("native_kernel.zig");
+const operation_metadata = @import("operation_metadata.zig");
 const request_header = @import("../core/request_header.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 
@@ -420,8 +421,9 @@ pub fn makeHeader(operation: abi.NativeOperation, correlation_id: u64, subject_t
     return request_header.makeHeader(abi.opcode(operation), correlation_id, subject_task_id);
 }
 
-fn validateHeader(header: abi.RequestHeader, expected: abi.NativeOperation) Error!void {
-    try request_header.validateHeader(header, abi.opcode(expected));
+fn validateHeader(header: abi.RequestHeader, comptime expected: abi.NativeOperation) Error!void {
+    const descriptor = operation_metadata.declarationFor(expected);
+    try request_header.validateHeader(header, abi.opcode(descriptor.operation));
     if (header.subject_task_id == 0) return error.SubjectTaskRequired;
 }
 

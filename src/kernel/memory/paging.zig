@@ -453,11 +453,15 @@ const HEAP_START: u32 = KERNEL_HEAP_START;
 const HEAP_INITIAL_SIZE: u32 = 1024 * 1024;
 pub const KERNEL_HEAP_MAX_SIZE: u32 = 16 * 1024 * 1024;
 const HEAP_MAX_SIZE: u32 = KERNEL_HEAP_MAX_SIZE;
+const HEAP_HEADER_MAGIC: u31 = 0x1234567;
+const HEAP_BLOCK_ALIGNMENT: u32 = 8;
+const HEAP_MIN_SPLIT_PAYLOAD: u32 = 16;
+const MAX_U32: u32 = ~@as(u32, 0);
 
 const BlockHeader = packed struct {
     size: u32,
     is_free: bool,
-    magic: u31 = 0x1234567,
+    magic: u31 = HEAP_HEADER_MAGIC,
 };
 
 var heap_start: u32 = HEAP_START;
@@ -489,7 +493,7 @@ pub fn init_heap() void {
 fn find_best_fit(size: u32) ?*BlockHeader {
     var current: *BlockHeader = @ptrFromInt(heap_start);
     var best_fit: ?*BlockHeader = null;
-    var best_size: u32 = 0xFFFFFFFF;
+    var best_size: u32 = MAX_U32;
 
     while (@intFromPtr(current) < heap_end) {
         if (current.is_free and current.size >= size and current.size < best_size) {
@@ -507,7 +511,7 @@ fn find_best_fit(size: u32) ?*BlockHeader {
 
 fn expand_heap(size: u32) bool {
     const header_size: u32 = @sizeOf(BlockHeader);
-    if (size > 0xFFFFFFFF - header_size) return false;
+    if (size > MAX_U32 - header_size) return false;
     const required_size = size + header_size;
     const new_pages = (required_size + PAGE_SIZE - 1) / PAGE_SIZE;
     const new_size = new_pages * PAGE_SIZE;
@@ -534,7 +538,7 @@ fn expand_heap(size: u32) bool {
 }
 
 pub fn kmalloc(size: u32) ?*anyopaque {
-    const aligned_size = (size + 7) & ~@as(u32, 7);
+    const aligned_size = alignHeapAllocation(size);
 
     var block = find_best_fit(aligned_size);
     if (block == null) {
@@ -547,9 +551,10 @@ pub fn kmalloc(size: u32) ?*anyopaque {
 
     const header = block.?;
 
-    if (header.size > aligned_size + @sizeOf(BlockHeader) + 16) {
-        const remaining_size = header.size - aligned_size - @sizeOf(BlockHeader);
-        const new_block_addr = @intFromPtr(header) + @sizeOf(BlockHeader) + aligned_size;
+    const header_size: u32 = @sizeOf(BlockHeader);
+    if (header.size > aligned_size + header_size + HEAP_MIN_SPLIT_PAYLOAD) {
+        const remaining_size = header.size - aligned_size - header_size;
+        const new_block_addr = @intFromPtr(header) + @as(usize, header_size) + @as(usize, aligned_size);
         const new_block: *BlockHeader = @ptrFromInt(new_block_addr);
         new_block.* = BlockHeader{
             .size = remaining_size,
@@ -562,11 +567,15 @@ pub fn kmalloc(size: u32) ?*anyopaque {
     return @as(*anyopaque, @ptrFromInt(@intFromPtr(header) + @sizeOf(BlockHeader)));
 }
 
+fn alignHeapAllocation(size: u32) u32 {
+    return (size + HEAP_BLOCK_ALIGNMENT - 1) & ~(HEAP_BLOCK_ALIGNMENT - 1);
+}
+
 pub fn kfree(ptr: *anyopaque) void {
     const header_addr = @intFromPtr(ptr) - @sizeOf(BlockHeader);
     const header: *BlockHeader = @ptrFromInt(header_addr);
 
-    if (header.magic != 0x1234567) {
+    if (header.magic != HEAP_HEADER_MAGIC) {
         vga.print("kfree: invalid magic number!\n");
         return;
     }

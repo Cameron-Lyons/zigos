@@ -8,6 +8,7 @@ const manifest = @import("../../native/policy/manifest.zig");
 const network_policy = @import("../../native/sync/network_policy.zig");
 const object_store = @import("../../native/storage/object_store.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
+const storage_service_ipc = @import("../../native/storage/storage_service_ipc.zig");
 const storage_volume = @import("../../native/storage/storage_volume.zig");
 const sync_service = @import("../../native/sync/sync_service.zig");
 const workspace = @import("../../native/storage/workspace.zig");
@@ -204,6 +205,8 @@ pub fn publishedDriversActivateScopedTransports() !void {
 }
 
 pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
+    try storage_service_ipc.userspaceCreateWorkspaceRoundTripProof();
+
     var storage_checkpoint_store = storage_service.CheckpointStore{};
     storage_checkpoint_store.resetPersistent();
     defer storage_checkpoint_store.resetPersistent();

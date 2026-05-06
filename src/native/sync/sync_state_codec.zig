@@ -99,6 +99,7 @@ pub fn serialize(resident: *const state_support.ResidentState, buffer: []u8) Err
         if (!slot.in_use) continue;
         try writer.writeU64(slot.entry.workspace_id);
         try writePrincipal(&writer, slot.entry.device_id);
+        try writer.writeU32(slot.entry.workspace_generation);
         try writeText(&writer, slot.entry.pathSlice());
         try writer.writeU64(slot.entry.object_id);
         try writer.writeU64(slot.entry.version_id);
@@ -265,6 +266,7 @@ pub fn deserialize(resident: *state_support.ResidentState, payload: []const u8) 
         resident.persisted_state.replica_entries[index].entry = state_support.zeroReplicaEntry();
         resident.persisted_state.replica_entries[index].entry.workspace_id = try reader.readU64();
         resident.persisted_state.replica_entries[index].entry.device_id = try readPrincipal(&reader);
+        resident.persisted_state.replica_entries[index].entry.workspace_generation = try reader.readU32();
         try readTextInto(&reader, &resident.persisted_state.replica_entries[index].entry.path, &resident.persisted_state.replica_entries[index].entry.path_len);
         resident.persisted_state.replica_entries[index].entry.object_id = try reader.readU64();
         resident.persisted_state.replica_entries[index].entry.version_id = try reader.readU64();

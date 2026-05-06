@@ -51,11 +51,13 @@ const ActivationSlot = struct {
 };
 
 const ActivationArena = indexed_arena.IndexedArena(ActivationSlot, MAX_ACTIVATIONS, SERVICE_INDEX_CAPACITY, activationSlotServiceId);
+const ActivationClassIndex = indexed_arena.UniqueIndex(SERVICE_INDEX_CAPACITY);
 
 pub const Runtime = struct {
     kernel_port: ?*component_port.KernelPort = null,
     next_activation_generation: u32 = 1,
     arena: ActivationArena = ActivationArena.init(),
+    class_index: ActivationClassIndex = ActivationClassIndex.init(),
 
     pub fn init() Runtime {
         return .{};
@@ -155,7 +157,10 @@ pub const Runtime = struct {
     }
 
     pub fn findByClass(self: *const Runtime, device_class: driver_service.DeviceClass) ?ActivationRecord {
-        const slot = self.arena.findConstMatching(device_class, activationSlotMatchesClass) orelse return null;
+        const slot_index = self.class_index.lookup(deviceClassKey(device_class)) orelse return null;
+        if (slot_index >= MAX_ACTIVATIONS) return null;
+        const slot = self.arena.slots[slot_index];
+        if (!slot.in_use or slot.activation.device_class != device_class) return null;
         return slot.activation;
     }
 
@@ -178,12 +183,17 @@ pub const Runtime = struct {
 
     fn upsert(self: *Runtime, activation: ActivationRecord) Error!ActivationRecord {
         if (self.findByServiceSlot(activation.service_id)) |slot| {
+            self.class_index.remove(deviceClassKey(slot.activation.device_class));
             slot.activation = activation;
+            const slot_index = self.arena.slotIndexOf(activation.service_id).?;
+            self.class_index.insert(deviceClassKey(activation.device_class), slot_index);
             return slot.activation;
         }
 
-        const slot = self.arena.reserve(activation.service_id) orelse return error.ActivationTableFull;
+        const slot_index = self.arena.reserveIndex(activation.service_id) orelse return error.ActivationTableFull;
+        const slot = &self.arena.slots[slot_index];
         slot.activation = activation;
+        self.class_index.insert(deviceClassKey(activation.device_class), slot_index);
         return slot.activation;
     }
 
@@ -201,8 +211,8 @@ fn activationSlotServiceId(slot: *const ActivationSlot) u64 {
     return slot.activation.service_id;
 }
 
-fn activationSlotMatchesClass(device_class: driver_service.DeviceClass, slot: *const ActivationSlot) bool {
-    return slot.activation.device_class == device_class;
+fn deviceClassKey(device_class: driver_service.DeviceClass) u64 {
+    return @as(u64, @intFromEnum(device_class)) + 1;
 }
 
 fn zeroActivation() ActivationRecord {
