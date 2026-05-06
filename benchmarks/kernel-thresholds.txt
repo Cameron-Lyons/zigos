@@ -5,7 +5,7 @@ permission.review.render_grants 300000
 network_policy.authorize_connection 15000
 background_dispatch.allowed_sync 800000
 task_runtime.checkpoint.write_restore 9000000
-accelerator_scheduler.claim_release 60000
+accelerator_scheduler.claim_release 90000
 storage.file_bridge.resolve_view 15000
 storage.workspace.commit_overlay 4000000
 package_revision.rollforward_rollback 1500000
