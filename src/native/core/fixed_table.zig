@@ -1,5 +1,7 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const id_index = @import("id_index.zig");
+const native_util = @import("util.zig");
 
 pub fn firstFreeSlot(comptime Slot: type, comptime capacity: usize, slots: *[capacity]Slot) ?*Slot {
     for (slots) |*slot| {
@@ -102,12 +104,17 @@ pub fn findIndexedSlot(
     comptime matches: anytype,
 ) ?*Slot {
     if (id_index.lookup(index_capacity, index_slots, id)) |slot_index| {
-        if (slot_index < capacity) {
-            const slot = &slots[slot_index];
-            if (slot.in_use and idOf(slot) == id and matches(context, slot)) return slot;
-        }
+        if (slot_index >= capacity) native_util.impossibleByInvariant("fixed table index points outside slots");
+        const slot = &slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("fixed table index points at a free slot");
+        if (idOf(slot) != id) native_util.impossibleByInvariant("fixed table index points at the wrong key");
+        if (!matches(context, slot)) native_util.impossibleByInvariant("fixed table indexed key does not satisfy the exact lookup");
+        return slot;
     }
-    return findSlot(Slot, capacity, slots, context, matches);
+    if (debugIndexChecksEnabled() and findSlot(Slot, capacity, slots, context, matches) != null) {
+        native_util.impossibleByInvariant("fixed table index missed a live slot");
+    }
+    return null;
 }
 
 pub fn findIndexedConstSlot(
@@ -122,12 +129,21 @@ pub fn findIndexedConstSlot(
     comptime matches: anytype,
 ) ?*const Slot {
     if (id_index.lookup(index_capacity, index_slots, id)) |slot_index| {
-        if (slot_index < capacity) {
-            const slot = &slots[slot_index];
-            if (slot.in_use and idOf(slot) == id and matches(context, slot)) return slot;
-        }
+        if (slot_index >= capacity) native_util.impossibleByInvariant("fixed table index points outside slots");
+        const slot = &slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("fixed table index points at a free slot");
+        if (idOf(slot) != id) native_util.impossibleByInvariant("fixed table index points at the wrong key");
+        if (!matches(context, slot)) native_util.impossibleByInvariant("fixed table indexed key does not satisfy the exact lookup");
+        return slot;
     }
-    return findConstSlot(Slot, capacity, slots, context, matches);
+    if (debugIndexChecksEnabled() and findConstSlot(Slot, capacity, slots, context, matches) != null) {
+        native_util.impossibleByInvariant("fixed table index missed a live slot");
+    }
+    return null;
+}
+
+fn debugIndexChecksEnabled() bool {
+    return builtin.mode == .Debug;
 }
 
 const TestSlot = struct {

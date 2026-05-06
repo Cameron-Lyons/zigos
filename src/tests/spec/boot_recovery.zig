@@ -139,7 +139,7 @@ pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {
     _ = try manager.activate(0, .{}, 11);
 
     const notes = try storage.putVersion(.{
-        .preferred_object_id = 1_200,
+        .preferred_object_id = object_store.ids.object(1_200),
         .object_type = .document,
         .payload = "incident-v1",
         .metadata = try object_store.signMetadata(object_signer, "incident", "text/plain", .document, "incident-v1", 12),
@@ -160,17 +160,17 @@ pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {
 
     const local_policy = try sync.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_record.id.raw(),
         .label = "local",
         .mode = .local_network,
     });
     _ = try sync.configureWorkspacePolicy(.{
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_record.id.raw(),
         .owner = person,
         .device_to_device_policy_id = local_policy.id,
     });
-    try sync.setReplicaVersion(workspace_record.id, tablet, "documents/incident.md", notes.object_id, notes.version_id + 1);
-    _ = try sync.replicateWorkspace(&storage, workspace_record.id, primary, tablet, .device_to_device);
+    try sync.setReplicaVersion(workspace_record.id.raw(), tablet, "documents/incident.md", notes.object_id, notes.version_id.raw() + 1);
+    _ = try sync.replicateWorkspace(&storage, workspace_record.id.raw(), primary, tablet, .device_to_device);
 
     var recovery = recovery_environment.Environment.init(storage_owner);
     try std.testing.expect(try recovery.verifyAndReinstallImage(&manager, "kernel=v2", image_signer, 16));
@@ -210,7 +210,7 @@ pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
     var compositor = compositor_session.Session.init();
 
     const probe_record = try storage.putVersion(.{
-        .preferred_object_id = 1_210,
+        .preferred_object_id = object_store.ids.object(1_210),
         .object_type = .document,
         .payload = "notes-v1",
         .metadata = try object_store.signMetadata(object_signer, "notes", "text/plain", .document, "notes-v1", 10),
@@ -228,24 +228,24 @@ pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
     _ = try sync.enrollTrustedDevice(user, target_device, "target", user_signer, target_signer, 13);
     const local_policy = try sync.createNetworkPolicy(.{
         .owner = owner,
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_record.id.raw(),
         .label = "health-local",
         .mode = .local_network,
     });
     const overlay_policy = try sync.createNetworkPolicy(.{
         .owner = owner,
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_record.id.raw(),
         .label = "health-overlay",
         .mode = .named_service_identity,
         .target = "overlay.health.sync",
     });
     _ = try sync.configureWorkspacePolicy(.{
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_record.id.raw(),
         .owner = user,
         .device_to_device_policy_id = local_policy.id,
         .overlay_policy_id = overlay_policy.id,
     });
-    _ = try sync.configureOverlay(workspace_record.id, source_device, "overlay.health.sync", true);
+    _ = try sync.configureOverlay(workspace_record.id.raw(), source_device, "overlay.health.sync", true);
 
     var ui_runtime = task_runtime.Runtime.init();
     const ui_task = try ui_runtime.createTask(.{
@@ -289,13 +289,13 @@ pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
     };
     const request = update_health.CheckRequest{
         .core_service_ids = core_service_ids[0..],
-        .storage_workspace_id = workspace_record.id,
+        .storage_workspace_id = workspace_record.id.raw(),
         .storage_probe_path = "documents/notes.md",
         .network_service_id = network_service.id,
         .ui_service_id = compositor_service.id,
         .network_probe = .{
             .sync = &sync,
-            .workspace_id = workspace_record.id,
+            .workspace_id = workspace_record.id.raw(),
             .source_device = source_device,
             .target_device = target_device,
             .tick = 14,

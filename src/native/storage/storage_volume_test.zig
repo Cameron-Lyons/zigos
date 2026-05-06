@@ -21,7 +21,7 @@ test "storage volume image reloads the latest persisted state across slot genera
         .seed = [_]u8{0x71} ** 32,
     };
     const first = try store.putVersion(.{
-        .preferred_object_id = 900,
+        .preferred_object_id = object_store.ids.object(900),
         .object_type = .document,
         .payload = "hello",
         .metadata = try object_store.signMetadata(signer, "notes", "text/markdown", .document, "hello", 10),
@@ -44,7 +44,7 @@ test "storage volume image reloads the latest persisted state across slot genera
     const first_log_bytes = try storage_volume.testing.latestImageLogBytes(image);
 
     const second = try store.putVersion(.{
-        .preferred_object_id = 900,
+        .preferred_object_id = object_store.ids.object(900),
         .object_type = .document,
         .payload = "hello again",
         .metadata = try object_store.signMetadata(signer, "notes", "text/markdown", .document, "hello again", 12),
@@ -80,6 +80,57 @@ test "storage volume image reloads the latest persisted state across slot genera
     try std.testing.expectEqual(second.version_id, (try loaded_workspaces.resolve(loaded_notes.id, "documents/notes.md")).version_id);
 }
 
+test "storage volume persists workspace snapshot roots through entry mutations" {
+    const image = try std.testing.allocator.alloc(u8, image_bytes);
+    defer std.testing.allocator.free(image);
+    @memset(image, 0);
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0x74} ** 32,
+    };
+    const first = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(930),
+        .object_type = .document,
+        .payload = "baseline",
+        .metadata = try object_store.signMetadata(signer, "notes", "text/markdown", .document, "baseline", 20),
+    });
+    const second = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(930),
+        .object_type = .document,
+        .payload = "later",
+        .metadata = try object_store.signMetadata(signer, "notes", "text/markdown", .document, "later", 21),
+        .parent_version_id = first.version_id,
+    });
+
+    const notes = try workspaces.create(.{
+        .owner = .{ .kind = .user, .serial = 9 },
+        .label = "snapshot-notes",
+    });
+    try workspaces.beginTransaction(notes.id);
+    try workspaces.stagePut(notes.id, "documents/notes.md", first.object_id, first.version_id, .document);
+    _ = try workspaces.commit(notes.id, 22);
+    _ = try workspaces.snapshot(notes.id, "baseline", signer);
+
+    try workspaces.beginTransaction(notes.id);
+    try workspaces.stagePut(notes.id, "documents/notes.md", second.object_id, second.version_id, .document);
+    _ = try workspaces.commit(notes.id, 23);
+    _ = try saveToImage(image, &store, &workspaces);
+
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    _ = try loadFromImage(image, &loaded_store, &loaded_workspaces);
+
+    const loaded_notes = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 9 }, "snapshot-notes").?;
+    const loaded_snapshot = loaded_workspaces.findSnapshotByLabel(loaded_notes.id, "baseline").?;
+    try std.testing.expectEqual(second.version_id, (try loaded_workspaces.resolve(loaded_notes.id, "documents/notes.md")).version_id);
+
+    _ = try loaded_workspaces.restore(loaded_notes.id, loaded_snapshot.id, 24);
+    try std.testing.expectEqual(first.version_id, (try loaded_workspaces.resolve(loaded_notes.id, "documents/notes.md")).version_id);
+}
+
 test "storage volume instances keep image reload state isolated" {
     var first_volume = Volume.init();
     var second_volume = Volume.init();
@@ -98,7 +149,7 @@ test "storage volume instances keep image reload state isolated" {
     var first_store = object_store.Store.init();
     var first_workspaces = workspace.Directory.init();
     _ = try first_store.putVersion(.{
-        .preferred_object_id = 910,
+        .preferred_object_id = object_store.ids.object(910),
         .object_type = .document,
         .payload = "first volume",
         .metadata = try object_store.signMetadata(signer, "first", "text/plain", .document, "first volume", 1),
@@ -108,7 +159,7 @@ test "storage volume instances keep image reload state isolated" {
     var second_store = object_store.Store.init();
     var second_workspaces = workspace.Directory.init();
     _ = try second_store.putVersion(.{
-        .preferred_object_id = 920,
+        .preferred_object_id = object_store.ids.object(920),
         .object_type = .document,
         .payload = "second volume",
         .metadata = try object_store.signMetadata(signer, "second", "text/plain", .document, "second volume", 2),
@@ -141,7 +192,7 @@ test "storage volume rejects corrupted slot payloads" {
         .seed = [_]u8{0x72} ** 32,
     };
     _ = try store.putVersion(.{
-        .preferred_object_id = 901,
+        .preferred_object_id = object_store.ids.object(901),
         .object_type = .blob,
         .payload = "blob",
         .metadata = try object_store.signMetadata(signer, "blob", "application/octet-stream", .blob, "blob", 10),

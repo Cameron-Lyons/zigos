@@ -259,16 +259,17 @@ const bundle_index = buildBundleIndex();
 
 pub fn find(bundle_id: []const u8) ?*const ImageSpec {
     const key = bundleIndexKey(bundle_id);
-    if (id_index.lookup(BUNDLE_INDEX_CAPACITY, &bundle_index, key)) |spec_index| {
-        if (spec_index < boot_image_specs.len and std.mem.eql(u8, boot_image_specs[spec_index].bundle_id, bundle_id)) {
-            return &boot_image_specs[spec_index];
-        }
+    const spec_index = id_index.lookup(BUNDLE_INDEX_CAPACITY, &bundle_index, key) orelse {
+        debugAssertBundleIndexMissAbsent(bundle_id);
+        return null;
+    };
+    if (spec_index >= boot_image_specs.len) {
+        native_util.impossibleByInvariant("boot bundle id index points outside registry specs");
     }
-
-    for (&boot_image_specs) |*spec| {
-        if (std.mem.eql(u8, spec.bundle_id, bundle_id)) return spec;
+    if (!std.mem.eql(u8, boot_image_specs[spec_index].bundle_id, bundle_id)) {
+        native_util.impossibleByInvariant("boot bundle id index points at the wrong registry spec");
     }
-    return null;
+    return &boot_image_specs[spec_index];
 }
 
 pub fn contractFor(bundle_id: []const u8) ?ContractSpec {
@@ -304,6 +305,15 @@ fn buildBundleIndex() [BUNDLE_INDEX_CAPACITY]id_index.Slot {
         id_index.insert(BUNDLE_INDEX_CAPACITY, &index, bundleIndexKey(spec.bundle_id), spec_index, "boot bundle id index covers userspace registry");
     }
     return index;
+}
+
+fn debugAssertBundleIndexMissAbsent(bundle_id: []const u8) void {
+    if (@import("builtin").mode != .Debug) return;
+    for (boot_image_specs) |spec| {
+        if (std.mem.eql(u8, spec.bundle_id, bundle_id)) {
+            native_util.impossibleByInvariant("boot bundle id index missed a registry spec");
+        }
+    }
 }
 
 test "userspace registry definitions stay unique and keep typed contract metadata attached" {

@@ -3,8 +3,7 @@ const capability = @import("../kernel_api/capability.zig");
 const contract = @import("contract.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
-const fixed_table = @import("../core/fixed_table.zig");
-const id_index = @import("../core/id_index.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const notification_center = @import("../services/notification_center.zig");
 const principal = @import("../core/principal.zig");
@@ -71,11 +70,12 @@ const ServiceSlot = struct {
     service: ServiceRecord = zeroService(),
 };
 
+const ServiceArena = indexed_arena.IndexedArena(ServiceSlot, MAX_SERVICES, SERVICE_INDEX_CAPACITY, serviceSlotId);
+
 pub const Supervisor = struct {
     next_service_id: u64 = 1,
     next_isolation_domain_id: u64 = 1,
-    service_index_slots: [SERVICE_INDEX_CAPACITY]id_index.Slot = id_index.emptyTable(SERVICE_INDEX_CAPACITY),
-    services: [MAX_SERVICES]ServiceSlot = [_]ServiceSlot{ServiceSlot{}} ** MAX_SERVICES,
+    service_arena: ServiceArena = ServiceArena.init(),
     next_diagnostic_sequence: u64 = 1,
     diagnostics: [MAX_DIAGNOSTICS]DiagnosticEvent = [_]DiagnosticEvent{zeroDiagnostic()} ** MAX_DIAGNOSTICS,
     diagnostic_count: usize = 0,
@@ -87,12 +87,11 @@ pub const Supervisor = struct {
     pub fn register(self: *Supervisor, class: contract.ServiceClass, owner: principal.PrincipalId) Error!*ServiceRecord {
         const descriptor = contract.serviceDescriptor(class) orelse return error.UnknownServiceClass;
 
-        const slot_index = fixed_table.firstFreeSlotIndex(ServiceSlot, MAX_SERVICES, &self.services) orelse return error.ServiceTableFull;
-        const slot = &self.services[slot_index];
+        const service_id = self.nextServiceId();
+        const slot = self.service_arena.reserve(service_id) orelse return error.ServiceTableFull;
 
-        slot.in_use = true;
         slot.service = .{
-            .id = self.nextServiceId(),
+            .id = service_id,
             .isolation_domain_id = self.nextIsolationDomainId(),
             .class = class,
             .boundary = descriptor.boundary,
@@ -106,31 +105,22 @@ pub const Supervisor = struct {
             .restart_count = 0,
             .last_transition_tick = 0,
         };
-        id_index.insert(SERVICE_INDEX_CAPACITY, &self.service_index_slots, slot.service.id, slot_index, "supervisor service id index covers service table");
         self.record(slot.service, .registered, 0, 0, 0);
         return &slot.service;
     }
 
     pub fn find(self: *Supervisor, service_id: u64) ?*ServiceRecord {
-        const slot = fixed_table.findIndexedSlot(
-            ServiceSlot,
-            MAX_SERVICES,
-            SERVICE_INDEX_CAPACITY,
-            &self.services,
-            &self.service_index_slots,
-            service_id,
-            serviceSlotId,
-            service_id,
-            serviceSlotMatchesId,
-        ) orelse return null;
+        const slot = self.service_arena.get(service_id) orelse return null;
         return &slot.service;
     }
 
     pub fn findByClass(self: *Supervisor, class: contract.ServiceClass) ?*ServiceRecord {
-        for (&self.services) |*slot| {
-            if (slot.in_use and slot.service.class == class) return &slot.service;
-        }
-        return null;
+        const slot = self.service_arena.findMatching(class, serviceSlotMatchesClass) orelse return null;
+        return &slot.service;
+    }
+
+    pub fn serviceCount(self: *const Supervisor) usize {
+        return self.service_arena.countInUse();
     }
 
     pub fn allowsDriverAttachment(self: *const Supervisor, service_id: u64, device_class: driver_service.DeviceClass) bool {
@@ -327,17 +317,7 @@ pub const Supervisor = struct {
     }
 
     fn findConst(self: *const Supervisor, service_id: u64) ?*const ServiceRecord {
-        const slot = fixed_table.findIndexedConstSlot(
-            ServiceSlot,
-            MAX_SERVICES,
-            SERVICE_INDEX_CAPACITY,
-            &self.services,
-            &self.service_index_slots,
-            service_id,
-            serviceSlotId,
-            service_id,
-            serviceSlotMatchesId,
-        ) orelse return null;
+        const slot = self.service_arena.getConst(service_id) orelse return null;
         return &slot.service;
     }
 };
@@ -346,8 +326,8 @@ fn serviceSlotId(slot: *const ServiceSlot) u64 {
     return slot.service.id;
 }
 
-fn serviceSlotMatchesId(service_id: u64, slot: *const ServiceSlot) bool {
-    return slot.service.id == service_id;
+fn serviceSlotMatchesClass(class: contract.ServiceClass, slot: *const ServiceSlot) bool {
+    return slot.service.class == class;
 }
 
 fn zeroService() ServiceRecord {

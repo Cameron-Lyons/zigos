@@ -13,6 +13,7 @@ from spec_coverage_lib import (
     expected_headings,
     parse_spec_blocks,
 )
+from generate_spec_gap_matrix import GAP_MATRIX_PATH, render_gap_matrix
 
 TEST_PATTERN = re.compile(r'^\s*test\s+"([^"]+)"', re.MULTILINE)
 EVIDENCE_STATUSES = {"enforced", "modeled", "scenario", "deferred"}
@@ -247,6 +248,14 @@ def main() -> int:
                 errors.append(
                     f"Meta requirement {requirement_id} depends on {dependency_id}, which is {dependency_evidence.get('status')!r}, not enforced"
                 )
+
+    expected_gap_matrix = render_gap_matrix(manifest)
+    actual_gap_matrix = GAP_MATRIX_PATH.read_text() if GAP_MATRIX_PATH.exists() else ""
+    if actual_gap_matrix != expected_gap_matrix:
+        errors.append(
+            "SPEC_GAP_MATRIX.md is out of sync with spec/coverage.json; "
+            "run python3 tools/generate_spec_gap_matrix.py"
+        )
 
     if errors:
         for error in errors:

@@ -1,6 +1,8 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
+const builtin = @import("builtin");
 const manifest = @import("../policy/manifest.zig");
 const model = @import("task_runtime_model.zig");
+const native_util = @import("../core/util.zig");
 const std = @import("std");
 
 pub const MAX_TASKS = model.MAX_TASKS;
@@ -126,14 +128,30 @@ pub const Runtime = struct {
         while (task_index < state.task_count) : (task_index += 1) {
             self.tasks[task_index] = state.tasks[task_index];
             copyTaskCold(&self.task_cold[task_index], &state.task_cold[task_index]);
-            self.tasks[task_index].task.cold_state = &self.task_cold[task_index];
-            indexInsert(INDEX_CAPACITY, &self.task_index_slots, self.tasks[task_index].task.id, task_index);
         }
 
         var address_space_index: usize = 0;
         while (address_space_index < state.address_space_count) : (address_space_index += 1) {
             self.address_spaces[address_space_index] = state.address_spaces[address_space_index];
-            self.noteAddressSpaceInstalled(self.address_spaces[address_space_index].address_space.id, address_space_index);
+        }
+        self.rebuildIndexes();
+        self.debugAssertIndexIntegrity();
+    }
+
+    pub fn rebuildIndexes(self: *Runtime) void {
+        self.task_index_slots = emptyIndexTable(INDEX_CAPACITY);
+        self.address_space_index_slots = emptyIndexTable(INDEX_CAPACITY);
+
+        for (&self.tasks, 0..) |*slot, slot_index| {
+            if (!slot.in_use) continue;
+            slot.task.cold_state = &self.task_cold[slot_index];
+            indexInsert(INDEX_CAPACITY, &self.task_index_slots, slot.task.id, slot_index);
+            rebuildCapabilityIndex(&slot.task);
+        }
+
+        for (self.address_spaces, 0..) |slot, slot_index| {
+            if (!slot.in_use) continue;
+            indexInsert(INDEX_CAPACITY, &self.address_space_index_slots, slot.address_space.id, slot_index);
         }
     }
 
@@ -195,17 +213,13 @@ pub const Runtime = struct {
 
     pub fn find(self: *Runtime, task_id: u64) ?*TaskRecord {
         if (self.indexedTaskSlot(task_id)) |slot| return &slot.task;
-        for (&self.tasks) |*slot| {
-            if (slot.in_use and slot.task.id == task_id) return &slot.task;
-        }
+        self.debugAssertTaskIndexMissAbsent(task_id);
         return null;
     }
 
     fn findConst(self: *const Runtime, task_id: u64) ?*const TaskRecord {
         if (self.indexedTaskSlotConst(task_id)) |slot| return &slot.task;
-        for (&self.tasks) |*slot| {
-            if (slot.in_use and slot.task.id == task_id) return &slot.task;
-        }
+        self.debugAssertTaskIndexMissAbsent(task_id);
         return null;
     }
 
@@ -216,37 +230,55 @@ pub const Runtime = struct {
 
     pub fn findAddressSpaceConst(self: *const Runtime, address_space_id: u64) ?*const AddressSpaceRecord {
         if (self.indexedAddressSpaceSlotConst(address_space_id)) |slot| return &slot.address_space;
-        for (&self.address_spaces) |*slot| {
-            if (slot.in_use and slot.address_space.id == address_space_id) return &slot.address_space;
-        }
+        self.debugAssertAddressSpaceIndexMissAbsent(address_space_id);
         return null;
     }
 
     pub fn indexedAddressSpaceSlot(self: *Runtime, address_space_id: u64) ?*AddressSpaceSlot {
-        const slot_index = indexLookup(INDEX_CAPACITY, &self.address_space_index_slots, address_space_id) orelse return null;
+        const slot_index = indexLookup(INDEX_CAPACITY, &self.address_space_index_slots, address_space_id) orelse {
+            self.debugAssertAddressSpaceIndexMissAbsent(address_space_id);
+            return null;
+        };
+        if (slot_index >= self.address_spaces.len) native_util.impossibleByInvariant("address space index points outside slots");
         const slot = &self.address_spaces[slot_index];
-        if (!slot.in_use or slot.address_space.id != address_space_id) return null;
+        if (!slot.in_use) native_util.impossibleByInvariant("address space index points at a free slot");
+        if (slot.address_space.id != address_space_id) native_util.impossibleByInvariant("address space index points at the wrong slot");
         return slot;
     }
 
     fn indexedAddressSpaceSlotConst(self: *const Runtime, address_space_id: u64) ?*const AddressSpaceSlot {
-        const slot_index = indexLookup(INDEX_CAPACITY, &self.address_space_index_slots, address_space_id) orelse return null;
+        const slot_index = indexLookup(INDEX_CAPACITY, &self.address_space_index_slots, address_space_id) orelse {
+            self.debugAssertAddressSpaceIndexMissAbsent(address_space_id);
+            return null;
+        };
+        if (slot_index >= self.address_spaces.len) native_util.impossibleByInvariant("address space index points outside slots");
         const slot = &self.address_spaces[slot_index];
-        if (!slot.in_use or slot.address_space.id != address_space_id) return null;
+        if (!slot.in_use) native_util.impossibleByInvariant("address space index points at a free slot");
+        if (slot.address_space.id != address_space_id) native_util.impossibleByInvariant("address space index points at the wrong slot");
         return slot;
     }
 
     fn indexedTaskSlot(self: *Runtime, task_id: u64) ?*TaskSlot {
-        const slot_index = indexLookup(INDEX_CAPACITY, &self.task_index_slots, task_id) orelse return null;
+        const slot_index = indexLookup(INDEX_CAPACITY, &self.task_index_slots, task_id) orelse {
+            self.debugAssertTaskIndexMissAbsent(task_id);
+            return null;
+        };
+        if (slot_index >= self.tasks.len) native_util.impossibleByInvariant("task index points outside slots");
         const slot = &self.tasks[slot_index];
-        if (!slot.in_use or slot.task.id != task_id) return null;
+        if (!slot.in_use) native_util.impossibleByInvariant("task index points at a free slot");
+        if (slot.task.id != task_id) native_util.impossibleByInvariant("task index points at the wrong slot");
         return slot;
     }
 
     fn indexedTaskSlotConst(self: *const Runtime, task_id: u64) ?*const TaskSlot {
-        const slot_index = indexLookup(INDEX_CAPACITY, &self.task_index_slots, task_id) orelse return null;
+        const slot_index = indexLookup(INDEX_CAPACITY, &self.task_index_slots, task_id) orelse {
+            self.debugAssertTaskIndexMissAbsent(task_id);
+            return null;
+        };
+        if (slot_index >= self.tasks.len) native_util.impossibleByInvariant("task index points outside slots");
         const slot = &self.tasks[slot_index];
-        if (!slot.in_use or slot.task.id != task_id) return null;
+        if (!slot.in_use) native_util.impossibleByInvariant("task index points at a free slot");
+        if (slot.task.id != task_id) native_util.impossibleByInvariant("task index points at the wrong slot");
         return slot;
     }
 
@@ -256,6 +288,45 @@ pub const Runtime = struct {
 
     pub fn removeAddressSpaceIndex(self: *Runtime, address_space_id: u64) void {
         indexRemove(INDEX_CAPACITY, &self.address_space_index_slots, address_space_id);
+    }
+
+    fn debugAssertIndexIntegrity(self: *const Runtime) void {
+        if (!debugIndexChecksEnabled()) return;
+        for (self.tasks) |slot| {
+            if (!slot.in_use) continue;
+            _ = self.indexedTaskSlotConst(slot.task.id) orelse
+                native_util.impossibleByInvariant("task index missing a live task");
+            var capability_index: usize = 0;
+            while (capability_index < slot.task.capability_count) : (capability_index += 1) {
+                const capability_id = slot.task.capabilityIds()[capability_index];
+                if (capability_id != 0 and !taskHasCapability(&slot.task, capability_id)) {
+                    native_util.impossibleByInvariant("task capability index missing a live capability");
+                }
+            }
+        }
+        for (self.address_spaces) |slot| {
+            if (!slot.in_use) continue;
+            _ = self.indexedAddressSpaceSlotConst(slot.address_space.id) orelse
+                native_util.impossibleByInvariant("address space index missing a live address space");
+        }
+    }
+
+    fn debugAssertTaskIndexMissAbsent(self: *const Runtime, task_id: u64) void {
+        if (!debugIndexChecksEnabled()) return;
+        for (self.tasks) |slot| {
+            if (slot.in_use and slot.task.id == task_id) {
+                native_util.impossibleByInvariant("task index missed a live task");
+            }
+        }
+    }
+
+    fn debugAssertAddressSpaceIndexMissAbsent(self: *const Runtime, address_space_id: u64) void {
+        if (!debugIndexChecksEnabled()) return;
+        for (self.address_spaces) |slot| {
+            if (slot.in_use and slot.address_space.id == address_space_id) {
+                native_util.impossibleByInvariant("address space index missed a live address space");
+            }
+        }
     }
 
     pub fn grantCapability(self: *Runtime, task_id: u64, capability_id: u64) Error!void {
@@ -432,6 +503,10 @@ pub const Runtime = struct {
     }
 };
 
+fn debugIndexChecksEnabled() bool {
+    return builtin.mode == .Debug;
+}
+
 test "new tasks start with zero ambient authority and no capabilities" {
     var runtime = Runtime.init();
     const task = try runtime.createTask(.{
@@ -486,6 +561,34 @@ test "granting and revoking capabilities updates the task table" {
     try std.testing.expect(try runtime.revokeCapability(task.id, 11));
     try std.testing.expectEqual(@as(usize, 1), task.capability_count);
     try std.testing.expectEqual(@as(u64, 12), task.capabilityIds()[0]);
+}
+
+test "restoring a snapshot rebuilds authoritative indexes" {
+    var runtime = Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .service, .serial = 22 },
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 3_000,
+            .memory_bytes = 4096,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 8192,
+            .background_allowed = true,
+        },
+    });
+    try runtime.grantCapability(task.id, 91);
+    const task_id = task.id;
+    const address_space_id = task.address_space_id;
+
+    var snapshot = Runtime.initSnapshot();
+    runtime.writeSnapshot(&snapshot);
+
+    var restored = Runtime.init();
+    restored.restoreFromSnapshot(&snapshot);
+
+    try std.testing.expect(restored.find(task_id) != null);
+    try std.testing.expect(restored.findAddressSpaceConst(address_space_id) != null);
+    try std.testing.expect(restored.hasCapability(task_id, 91));
 }
 
 test "explicit resource classes override the default task classification" {

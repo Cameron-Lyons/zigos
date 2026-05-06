@@ -1,7 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const binary_cursor = @import("../core/binary_cursor.zig");
-const fixed_table = @import("../core/fixed_table.zig");
+const ids = @import("../core/ids.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("object_store.zig");
 const principal = @import("../core/principal.zig");
@@ -58,10 +58,10 @@ const data_start_byte: usize = data_start_sector * sector_size;
 const data_capacity_bytes: usize = image_bytes - data_start_byte;
 const root_magic = "ZG4LOG1";
 const root_format_version: u16 = 1;
-const max_workspace_state_bytes: usize = 16 * 1024;
+const max_workspace_state_bytes: usize = 64 * 1024;
 
 const payload_magic = "ZG4STATE";
-const format_version: u16 = 3;
+const format_version: u16 = 4;
 
 pub const Error = error{
     ChecksumMismatch,
@@ -395,13 +395,13 @@ fn buildDeltaLog(
 
     for (store.dirtyObjectIds()) |object_id| {
         const object_record = store.object(object_id) orelse continue;
-        if (object_record.latest_version_id <= root.last_version_id) continue;
+        if (object_record.latest_version_id.raw() <= root.last_version_id) continue;
         try appendObjectRecord(&writer, object_record.*);
     }
 
     for (store.dirtyVersionIds()) |version_id| {
         const version_record = store.version(version_id) orelse continue;
-        if (version_record.id <= root.last_version_id) continue;
+        if (version_record.id.raw() <= root.last_version_id) continue;
         if (store.blob(version_record.blob_address)) |blob| {
             try appendBlobRecord(&writer, blob.*);
         }
@@ -410,7 +410,7 @@ fn buildDeltaLog(
 
     for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
         const workspace_record = workspaces.findConst(workspace_id) orelse continue;
-        const summary = findWorkspaceSummary(root, workspace_record.id);
+        const summary = findWorkspaceSummary(root, workspace_record.id.raw());
         const state_hash = try workspaceStateHash(self, workspace_record);
         if (summary) |persisted| {
             if (persisted.generation == workspace_record.generation and persisted.state_hash == state_hash) continue;
@@ -420,7 +420,7 @@ fn buildDeltaLog(
 
     for (workspaces.dirtySnapshotIds()) |snapshot_id| {
         const snapshot_record = findSnapshotConst(workspaces, snapshot_id) orelse continue;
-        if (snapshot_record.id <= root.last_snapshot_id) continue;
+        if (snapshot_record.id.raw() <= root.last_snapshot_id) continue;
         try appendSnapshotRecord(&writer, snapshot_record.*);
     }
 
@@ -444,10 +444,10 @@ fn buildRootState(
         .last_version_id = if (store.next_version_id > 0) store.next_version_id - 1 else 0,
         .last_snapshot_id = if (workspaces.next_snapshot_id > 0) workspaces.next_snapshot_id - 1 else 0,
     };
-    for (workspaces.workspaces) |slot| {
+    for (workspaces.workspaces.slots) |slot| {
         if (!persistableWorkspaceSlot(slot)) continue;
         root.workspace_summaries[root.workspace_summary_count] = .{
-            .id = slot.workspace.id,
+            .id = slot.workspace.id.raw(),
             .generation = slot.workspace.generation,
             .state_hash = try workspaceStateHash(self, &slot.workspace),
         };
@@ -575,16 +575,16 @@ fn parseLogRecordKind(value: u8) Error!LogRecordKind {
 }
 
 fn encodeObjectBody(writer: *CursorWriter, record: object_store.ObjectRecord) Error!void {
-    try writer.writeU64(record.id);
+    try writer.writeU64(record.id.raw());
     try writer.writeByte(@intFromEnum(record.object_type));
-    try writer.writeU64(record.latest_version_id);
+    try writer.writeU64(record.latest_version_id.raw());
     try writer.writeU16(record.version_count);
 }
 
 fn encodeVersionBody(writer: *CursorWriter, record: object_store.VersionRecord) Error!void {
-    try writer.writeU64(record.id);
-    try writer.writeU64(record.object_id);
-    try writer.writeU64(record.previous_version_id);
+    try writer.writeU64(record.id.raw());
+    try writer.writeU64(record.object_id.raw());
+    try writer.writeU64(record.previous_version_id.raw());
     try writer.writeByte(@intFromEnum(record.object_type));
     try writer.writeBytes(&record.blob_address);
     try writer.writeBytes(&record.version_address);
@@ -607,13 +607,18 @@ fn encodeBlobBody(writer: *CursorWriter, record: object_store.BlobRecord) Error!
 }
 
 fn encodeWorkspaceBody(writer: *CursorWriter, record: workspace.WorkspaceRecord) Error!void {
-    try writer.writeU64(record.id);
+    try writer.writeU64(record.id.raw());
     try writePrincipal(writer, record.owner);
     try writeText(writer, record.labelSlice());
     try writer.writeU32(record.generation);
     try writer.writeU16(@intCast(record.entry_count));
     for (record.entries[0..record.entry_count]) |entry| {
         try writeEntry(writer, entry);
+    }
+    try writer.writeU16(@intCast(record.entry_mutation_count));
+    for (record.entry_mutations[0..record.entry_mutation_count]) |mutation| {
+        try writer.writeU32(mutation.generation);
+        try writeEntry(writer, mutation.entry);
     }
     try writer.writeU16(@intCast(record.share_grant_count));
     for (record.share_grants[0..record.share_grant_count]) |grant| {
@@ -626,22 +631,19 @@ fn encodeWorkspaceBody(writer: *CursorWriter, record: workspace.WorkspaceRecord)
 }
 
 fn encodeSnapshotBody(writer: *CursorWriter, record: workspace.SnapshotRecord) Error!void {
-    try writer.writeU64(record.id);
-    try writer.writeU64(record.workspace_id);
+    try writer.writeU64(record.id.raw());
+    try writer.writeU64(record.workspace_id.raw());
     try writer.writeU32(record.generation);
     try writeText(writer, record.labelSlice());
     try writeSignature(writer, record.signature);
     try writer.writeU16(@intCast(record.entry_count));
-    for (record.entries[0..record.entry_count]) |entry| {
-        try writeEntry(writer, entry);
-    }
 }
 
 fn applyObjectRecord(store: *object_store.Store, payload: []const u8) Error!void {
     var reader = CursorReader{ .buffer = payload };
-    const object_id = try reader.readU64();
+    const object_id = ids.object(try reader.readU64());
     const object_type = try parseObjectType(try reader.readByte());
-    const latest_version_id = try reader.readU64();
+    const latest_version_id = ids.version(try reader.readU64());
     const version_count = try reader.readU16();
 
     if (store.object(object_id)) |record| {
@@ -651,8 +653,7 @@ fn applyObjectRecord(store: *object_store.Store, payload: []const u8) Error!void
         return;
     }
 
-    const slot = nextObjectSlot(store) orelse return error.CorruptImage;
-    slot.in_use = true;
+    const slot = store.objects.reserve(object_id) orelse return error.CorruptImage;
     slot.object = .{
         .id = object_id,
         .object_type = object_type,
@@ -663,19 +664,19 @@ fn applyObjectRecord(store: *object_store.Store, payload: []const u8) Error!void
 
 fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []const u8) Error!void {
     var reader = CursorReader{ .buffer = payload };
-    const slot_index = nextVersionSlotIndex(store) orelse return error.CorruptImage;
-    store.versions[slot_index].in_use = true;
-    store.versions[slot_index].version.id = try reader.readU64();
-    store.versions[slot_index].version.object_id = try reader.readU64();
-    store.versions[slot_index].version.previous_version_id = try reader.readU64();
-    store.versions[slot_index].version.object_type = try parseObjectType(try reader.readByte());
-    try reader.readBytes(&store.versions[slot_index].version.blob_address);
-    try reader.readBytes(&store.versions[slot_index].version.version_address);
-    store.versions[slot_index].version.metadata = try readMetadata(&reader, &self.version_signers[slot_index]);
-    store.versions[slot_index].version.payload_len = @intCast(try reader.readU16());
-    if (store.versions[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
-    store.versions[slot_index].version.chunk_count = try reader.readU16();
-    store.versions[slot_index].version.blob_slot_index = findBlobSlotIndex(store, store.versions[slot_index].version.blob_address) orelse return error.CorruptImage;
+    const version_id = ids.version(try reader.readU64());
+    const slot_index = store.versions.reserveIndex(version_id) orelse return error.CorruptImage;
+    store.versions.slots[slot_index].version.id = version_id;
+    store.versions.slots[slot_index].version.object_id = ids.object(try reader.readU64());
+    store.versions.slots[slot_index].version.previous_version_id = ids.version(try reader.readU64());
+    store.versions.slots[slot_index].version.object_type = try parseObjectType(try reader.readByte());
+    try reader.readBytes(&store.versions.slots[slot_index].version.blob_address);
+    try reader.readBytes(&store.versions.slots[slot_index].version.version_address);
+    store.versions.slots[slot_index].version.metadata = try readMetadata(&reader, &self.version_signers[slot_index]);
+    store.versions.slots[slot_index].version.payload_len = @intCast(try reader.readU16());
+    if (store.versions.slots[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
+    store.versions.slots[slot_index].version.chunk_count = try reader.readU16();
+    store.versions.slots[slot_index].version.blob_slot_index = findBlobSlotIndex(store, store.versions.slots[slot_index].version.blob_address) orelse return error.CorruptImage;
 }
 
 fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
@@ -693,9 +694,9 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
 
 fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) Error!void {
     var reader = CursorReader{ .buffer = payload };
-    const workspace_id = try reader.readU64();
-    const slot = findWorkspaceSlotById(workspaces, workspace_id) orelse nextWorkspaceSlot(workspaces) orelse return error.CorruptImage;
-    slot.in_use = true;
+    const workspace_id = ids.workspace(try reader.readU64());
+    const slot = findWorkspaceSlotById(workspaces, workspace_id) orelse
+        workspaces.workspaces.reserve(workspace_id) orelse return error.CorruptImage;
     slot.workspace = zeroWorkspaceRecord();
     slot.workspace.id = workspace_id;
     slot.workspace.owner = try readPrincipal(&reader);
@@ -705,6 +706,14 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
     if (slot.workspace.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
     for (0..slot.workspace.entry_count) |entry_index| {
         slot.workspace.entries[entry_index] = try readEntry(&reader);
+    }
+    slot.workspace.entry_mutation_count = @intCast(try reader.readU16());
+    if (slot.workspace.entry_mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
+    for (0..slot.workspace.entry_mutation_count) |mutation_index| {
+        slot.workspace.entry_mutations[mutation_index] = .{
+            .generation = try reader.readU32(),
+            .entry = try readEntry(&reader),
+        };
     }
     slot.workspace.share_grant_count = @intCast(try reader.readU16());
     if (slot.workspace.share_grant_count > workspace.MAX_SHARE_GRANTS) return error.CorruptImage;
@@ -720,39 +729,36 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
 
 fn applySnapshotRecord(self: *Volume, workspaces: *workspace.Directory, payload: []const u8) Error!void {
     var reader = CursorReader{ .buffer = payload };
-    const snapshot_id = try reader.readU64();
-    const slot_index = findSnapshotSlotIndexById(workspaces, snapshot_id) orelse nextSnapshotSlotIndex(workspaces) orelse return error.CorruptImage;
-    workspaces.snapshots[slot_index].in_use = true;
-    workspaces.snapshots[slot_index].snapshot = zeroSnapshotRecord();
-    workspaces.snapshots[slot_index].snapshot.id = snapshot_id;
-    workspaces.snapshots[slot_index].snapshot.workspace_id = try reader.readU64();
-    workspaces.snapshots[slot_index].snapshot.generation = try reader.readU32();
-    readTextInto(&reader, &workspaces.snapshots[slot_index].snapshot.label, &workspaces.snapshots[slot_index].snapshot.label_len) catch return error.CorruptImage;
-    workspaces.snapshots[slot_index].snapshot.signature = try readSignature(&reader, &self.snapshot_signers[slot_index]);
-    workspaces.snapshots[slot_index].snapshot.entry_count = @intCast(try reader.readU16());
-    if (workspaces.snapshots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
-    for (0..workspaces.snapshots[slot_index].snapshot.entry_count) |entry_index| {
-        workspaces.snapshots[slot_index].snapshot.entries[entry_index] = try readEntry(&reader);
-    }
+    const snapshot_id = ids.snapshot(try reader.readU64());
+    const slot_index = findSnapshotSlotIndexById(workspaces, snapshot_id) orelse
+        workspaces.snapshots.reserveIndex(snapshot_id) orelse return error.CorruptImage;
+    workspaces.snapshots.slots[slot_index].snapshot = zeroSnapshotRecord();
+    workspaces.snapshots.slots[slot_index].snapshot.id = snapshot_id;
+    workspaces.snapshots.slots[slot_index].snapshot.workspace_id = ids.workspace(try reader.readU64());
+    workspaces.snapshots.slots[slot_index].snapshot.generation = try reader.readU32();
+    readTextInto(&reader, &workspaces.snapshots.slots[slot_index].snapshot.label, &workspaces.snapshots.slots[slot_index].snapshot.label_len) catch return error.CorruptImage;
+    workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(&reader, &self.snapshot_signers[slot_index]);
+    workspaces.snapshots.slots[slot_index].snapshot.entry_count = @intCast(try reader.readU16());
+    if (workspaces.snapshots.slots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
 }
 
-fn findWorkspaceSlotById(workspaces: *workspace.Directory, workspace_id: u64) ?*@TypeOf(workspaces.workspaces[0]) {
-    for (&workspaces.workspaces) |*slot| {
-        if (slot.in_use and slot.workspace.id == workspace_id) return slot;
+fn findWorkspaceSlotById(workspaces: *workspace.Directory, workspace_id: ids.WorkspaceId) ?*@TypeOf(workspaces.workspaces.slots[0]) {
+    for (&workspaces.workspaces.slots) |*slot| {
+        if (slot.in_use and slot.workspace.id.eql(workspace_id)) return slot;
     }
     return null;
 }
 
-fn findSnapshotSlotIndexById(workspaces: *workspace.Directory, snapshot_id: u64) ?usize {
-    for (workspaces.snapshots, 0..) |slot, index| {
-        if (slot.in_use and slot.snapshot.id == snapshot_id) return index;
+fn findSnapshotSlotIndexById(workspaces: *workspace.Directory, snapshot_id: ids.SnapshotId) ?usize {
+    for (workspaces.snapshots.slots, 0..) |slot, index| {
+        if (slot.in_use and slot.snapshot.id.eql(snapshot_id)) return index;
     }
     return null;
 }
 
-fn findSnapshotConst(workspaces: *const workspace.Directory, snapshot_id: u64) ?*const workspace.SnapshotRecord {
-    for (&workspaces.snapshots) |*slot| {
-        if (slot.in_use and slot.snapshot.id == snapshot_id) return &slot.snapshot;
+fn findSnapshotConst(workspaces: *const workspace.Directory, snapshot_id: ids.SnapshotId) ?*const workspace.SnapshotRecord {
+    for (&workspaces.snapshots.slots) |*slot| {
+        if (slot.in_use and slot.snapshot.id.eql(snapshot_id)) return &slot.snapshot;
     }
     return null;
 }
@@ -771,11 +777,11 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
     try writer.writeU16(@intCast(workspaceCount(workspaces)));
     try writer.writeU16(@intCast(snapshotCount(workspaces)));
 
-    for (store.objects) |slot| {
+    for (store.objects.slots) |slot| {
         if (!slot.in_use) continue;
-        try writer.writeU64(slot.object.id);
+        try writer.writeU64(slot.object.id.raw());
         try writer.writeByte(@intFromEnum(slot.object.object_type));
-        try writer.writeU64(slot.object.latest_version_id);
+        try writer.writeU64(slot.object.latest_version_id.raw());
         try writer.writeU16(slot.object.version_count);
     }
 
@@ -784,11 +790,11 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
         try encodeBlobBody(&writer, slot.blob);
     }
 
-    for (store.versions) |slot| {
+    for (store.versions.slots) |slot| {
         if (!slot.in_use) continue;
-        try writer.writeU64(slot.version.id);
-        try writer.writeU64(slot.version.object_id);
-        try writer.writeU64(slot.version.previous_version_id);
+        try writer.writeU64(slot.version.id.raw());
+        try writer.writeU64(slot.version.object_id.raw());
+        try writer.writeU64(slot.version.previous_version_id.raw());
         try writer.writeByte(@intFromEnum(slot.version.object_type));
         try writer.writeBytes(&slot.version.blob_address);
         try writer.writeBytes(&slot.version.version_address);
@@ -797,15 +803,20 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
         try writer.writeU16(slot.version.chunk_count);
     }
 
-    for (workspaces.workspaces) |slot| {
+    for (workspaces.workspaces.slots) |slot| {
         if (!persistableWorkspaceSlot(slot)) continue;
-        try writer.writeU64(slot.workspace.id);
+        try writer.writeU64(slot.workspace.id.raw());
         try writePrincipal(&writer, slot.workspace.owner);
         try writeText(&writer, slot.workspace.labelSlice());
         try writer.writeU32(slot.workspace.generation);
         try writer.writeU16(@intCast(slot.workspace.entry_count));
         for (slot.workspace.entries[0..slot.workspace.entry_count]) |entry| {
             try writeEntry(&writer, entry);
+        }
+        try writer.writeU16(@intCast(slot.workspace.entry_mutation_count));
+        for (slot.workspace.entry_mutations[0..slot.workspace.entry_mutation_count]) |mutation| {
+            try writer.writeU32(mutation.generation);
+            try writeEntry(&writer, mutation.entry);
         }
         try writer.writeU16(@intCast(slot.workspace.share_grant_count));
         for (slot.workspace.share_grants[0..slot.workspace.share_grant_count]) |grant| {
@@ -817,17 +828,14 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
         }
     }
 
-    for (workspaces.snapshots) |slot| {
+    for (workspaces.snapshots.slots) |slot| {
         if (!persistableSnapshotSlot(slot)) continue;
-        try writer.writeU64(slot.snapshot.id);
-        try writer.writeU64(slot.snapshot.workspace_id);
+        try writer.writeU64(slot.snapshot.id.raw());
+        try writer.writeU64(slot.snapshot.workspace_id.raw());
         try writer.writeU32(slot.snapshot.generation);
         try writeText(&writer, slot.snapshot.labelSlice());
         try writeSignature(&writer, slot.snapshot.signature);
         try writer.writeU16(@intCast(slot.snapshot.entry_count));
-        for (slot.snapshot.entries[0..slot.snapshot.entry_count]) |entry| {
-            try writeEntry(&writer, entry);
-        }
     }
 
     return writer.offset;
@@ -863,47 +871,48 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
     }
 
     for (0..@as(usize, object_count)) |_| {
-        const slot = nextObjectSlot(store) orelse return error.CorruptImage;
-        slot.in_use = true;
-        slot.object.id = try reader.readU64();
+        const object_id = ids.object(try reader.readU64());
+        const slot = store.objects.reserve(object_id) orelse return error.CorruptImage;
+        slot.object.id = object_id;
         slot.object.object_type = try parseObjectType(try reader.readByte());
-        slot.object.latest_version_id = try reader.readU64();
+        slot.object.latest_version_id = ids.version(try reader.readU64());
         slot.object.version_count = try reader.readU16();
     }
 
     for (0..@as(usize, blob_count)) |_| {
-        const slot = nextBlobSlot(store) orelse return error.CorruptImage;
-        slot.in_use = true;
-        try reader.readBytes(&slot.blob.address);
-        slot.blob.payload_len = @intCast(try reader.readU16());
-        slot.blob.ref_count = try reader.readU16();
-        if (slot.blob.payload_len > object_store.MAX_BLOB_BYTES) return error.CorruptImage;
-        @memset(slot.blob.payload[0..], 0);
-        try reader.readBytes(slot.blob.payload[0..slot.blob.payload_len]);
-        if (!std.mem.eql(u8, &object_store.computeBlobAddress(slot.blob.payloadSlice()), &slot.blob.address)) return error.CorruptImage;
+        var address: object_store.BlobAddress = undefined;
+        try reader.readBytes(&address);
+        const payload_len: usize = @intCast(try reader.readU16());
+        const ref_count = try reader.readU16();
+        if (payload_len > object_store.MAX_BLOB_BYTES) return error.CorruptImage;
+        var bytes: [object_store.MAX_BLOB_BYTES]u8 = [_]u8{0} ** object_store.MAX_BLOB_BYTES;
+        try reader.readBytes(bytes[0..payload_len]);
+        if (!std.mem.eql(u8, &object_store.computeBlobAddress(bytes[0..payload_len]), &address)) return error.CorruptImage;
+        const slot_index = store.putBlob(address, bytes[0..payload_len]) catch return error.CorruptImage;
+        store.blobs[slot_index].blob.ref_count = ref_count;
     }
 
     for (0..@as(usize, version_count)) |_| {
-        const slot_index = nextVersionSlotIndex(store) orelse return error.CorruptImage;
-        store.versions[slot_index].in_use = true;
-        store.versions[slot_index].version.id = try reader.readU64();
-        store.versions[slot_index].version.object_id = try reader.readU64();
-        store.versions[slot_index].version.previous_version_id = try reader.readU64();
-        store.versions[slot_index].version.object_type = try parseObjectType(try reader.readByte());
-        try reader.readBytes(&store.versions[slot_index].version.blob_address);
-        try reader.readBytes(&store.versions[slot_index].version.version_address);
-        store.versions[slot_index].version.metadata = try readMetadata(&reader, &self.version_signers[slot_index]);
-        store.versions[slot_index].version.payload_len = @intCast(try reader.readU16());
-        if (store.versions[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
-        store.versions[slot_index].version.chunk_count = try reader.readU16();
-        store.versions[slot_index].version.blob_slot_index = findBlobSlotIndex(store, store.versions[slot_index].version.blob_address) orelse return error.CorruptImage;
+        const version_id = ids.version(try reader.readU64());
+        const slot_index = store.versions.reserveIndex(version_id) orelse return error.CorruptImage;
+        store.versions.slots[slot_index].version.id = version_id;
+        store.versions.slots[slot_index].version.object_id = ids.object(try reader.readU64());
+        store.versions.slots[slot_index].version.previous_version_id = ids.version(try reader.readU64());
+        store.versions.slots[slot_index].version.object_type = try parseObjectType(try reader.readByte());
+        try reader.readBytes(&store.versions.slots[slot_index].version.blob_address);
+        try reader.readBytes(&store.versions.slots[slot_index].version.version_address);
+        store.versions.slots[slot_index].version.metadata = try readMetadata(&reader, &self.version_signers[slot_index]);
+        store.versions.slots[slot_index].version.payload_len = @intCast(try reader.readU16());
+        if (store.versions.slots[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
+        store.versions.slots[slot_index].version.chunk_count = try reader.readU16();
+        store.versions.slots[slot_index].version.blob_slot_index = findBlobSlotIndex(store, store.versions.slots[slot_index].version.blob_address) orelse return error.CorruptImage;
     }
 
     for (0..@as(usize, workspace_count_value)) |_| {
-        const slot = nextWorkspaceSlot(workspaces) orelse return error.CorruptImage;
-        slot.in_use = true;
+        const workspace_id = ids.workspace(try reader.readU64());
+        const slot = workspaces.workspaces.reserve(workspace_id) orelse return error.CorruptImage;
         slot.workspace = zeroWorkspaceRecord();
-        slot.workspace.id = try reader.readU64();
+        slot.workspace.id = workspace_id;
         slot.workspace.owner = try readPrincipal(&reader);
         readTextInto(&reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
         slot.workspace.generation = try reader.readU32();
@@ -911,6 +920,14 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         if (slot.workspace.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
         for (0..slot.workspace.entry_count) |entry_index| {
             slot.workspace.entries[entry_index] = try readEntry(&reader);
+        }
+        slot.workspace.entry_mutation_count = @intCast(try reader.readU16());
+        if (slot.workspace.entry_mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
+        for (0..slot.workspace.entry_mutation_count) |mutation_index| {
+            slot.workspace.entry_mutations[mutation_index] = .{
+                .generation = try reader.readU32(),
+                .entry = try readEntry(&reader),
+            };
         }
         slot.workspace.share_grant_count = @intCast(try reader.readU16());
         if (slot.workspace.share_grant_count > workspace.MAX_SHARE_GRANTS) return error.CorruptImage;
@@ -925,19 +942,16 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
     }
 
     for (0..@as(usize, snapshot_count_value)) |_| {
-        const slot_index = nextSnapshotSlotIndex(workspaces) orelse return error.CorruptImage;
-        workspaces.snapshots[slot_index].in_use = true;
-        workspaces.snapshots[slot_index].snapshot = zeroSnapshotRecord();
-        workspaces.snapshots[slot_index].snapshot.id = try reader.readU64();
-        workspaces.snapshots[slot_index].snapshot.workspace_id = try reader.readU64();
-        workspaces.snapshots[slot_index].snapshot.generation = try reader.readU32();
-        readTextInto(&reader, &workspaces.snapshots[slot_index].snapshot.label, &workspaces.snapshots[slot_index].snapshot.label_len) catch return error.CorruptImage;
-        workspaces.snapshots[slot_index].snapshot.signature = try readSignature(&reader, &self.snapshot_signers[slot_index]);
-        workspaces.snapshots[slot_index].snapshot.entry_count = @intCast(try reader.readU16());
-        if (workspaces.snapshots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
-        for (0..workspaces.snapshots[slot_index].snapshot.entry_count) |entry_index| {
-            workspaces.snapshots[slot_index].snapshot.entries[entry_index] = try readEntry(&reader);
-        }
+        const snapshot_id = ids.snapshot(try reader.readU64());
+        const slot_index = workspaces.snapshots.reserveIndex(snapshot_id) orelse return error.CorruptImage;
+        workspaces.snapshots.slots[slot_index].snapshot = zeroSnapshotRecord();
+        workspaces.snapshots.slots[slot_index].snapshot.id = snapshot_id;
+        workspaces.snapshots.slots[slot_index].snapshot.workspace_id = ids.workspace(try reader.readU64());
+        workspaces.snapshots.slots[slot_index].snapshot.generation = try reader.readU32();
+        readTextInto(&reader, &workspaces.snapshots.slots[slot_index].snapshot.label, &workspaces.snapshots.slots[slot_index].snapshot.label_len) catch return error.CorruptImage;
+        workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(&reader, &self.snapshot_signers[slot_index]);
+        workspaces.snapshots.slots[slot_index].snapshot.entry_count = @intCast(try reader.readU16());
+        if (workspaces.snapshots.slots[slot_index].snapshot.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
     }
 
     store.rebuildIndexes();
@@ -1029,16 +1043,16 @@ fn readPrincipal(reader: *CursorReader) Error!principal.PrincipalId {
 
 fn writeEntry(writer: *CursorWriter, entry: workspace.Entry) Error!void {
     try writeText(writer, entry.pathSlice());
-    try writer.writeU64(entry.object_id);
-    try writer.writeU64(entry.version_id);
+    try writer.writeU64(entry.object_id.raw());
+    try writer.writeU64(entry.version_id.raw());
     try writer.writeByte(@intFromEnum(entry.object_type));
 }
 
 fn readEntry(reader: *CursorReader) Error!workspace.Entry {
     var entry = workspace.Entry{};
     readTextInto(reader, &entry.path, &entry.path_len) catch return error.CorruptImage;
-    entry.object_id = try reader.readU64();
-    entry.version_id = try reader.readU64();
+    entry.object_id = ids.object(try reader.readU64());
+    entry.version_id = ids.version(try reader.readU64());
     entry.object_type = try parseObjectType(try reader.readByte());
     return entry;
 }
@@ -1127,7 +1141,7 @@ fn readShareGrant(reader: *CursorReader) Error!workspace.ShareGrant {
 
 fn workspaceCount(workspaces: *const workspace.Directory) usize {
     var count: usize = 0;
-    for (workspaces.workspaces) |slot| {
+    for (workspaces.workspaces.slots) |slot| {
         if (persistableWorkspaceSlot(slot)) count += 1;
     }
     return count;
@@ -1135,7 +1149,7 @@ fn workspaceCount(workspaces: *const workspace.Directory) usize {
 
 fn snapshotCount(workspaces: *const workspace.Directory) usize {
     var count: usize = 0;
-    for (workspaces.snapshots) |slot| {
+    for (workspaces.snapshots.slots) |slot| {
         if (persistableSnapshotSlot(slot)) count += 1;
     }
     return count;
@@ -1145,6 +1159,7 @@ fn persistableWorkspaceSlot(slot: anytype) bool {
     if (!slot.in_use) return false;
     return slot.workspace.label_len <= slot.workspace.label.len and
         slot.workspace.entry_count <= workspace.MAX_WORKSPACE_ENTRIES and
+        slot.workspace.entry_mutation_count <= workspace.MAX_WORKSPACE_ENTRY_MUTATIONS and
         slot.workspace.share_grant_count <= workspace.MAX_SHARE_GRANTS and
         slot.workspace.deleted_count <= workspace.MAX_RECOVERABLE_DELETES;
 }
@@ -1155,31 +1170,8 @@ fn persistableSnapshotSlot(slot: anytype) bool {
         slot.snapshot.entry_count <= workspace.MAX_WORKSPACE_ENTRIES;
 }
 
-fn nextObjectSlot(store: *object_store.Store) ?*@TypeOf(store.objects[0]) {
-    return fixed_table.firstFreeSlot(@TypeOf(store.objects[0]), object_store.MAX_OBJECTS, &store.objects);
-}
-
-fn nextVersionSlotIndex(store: *object_store.Store) ?usize {
-    return fixed_table.firstFreeSlotIndex(@TypeOf(store.versions[0]), object_store.MAX_VERSIONS, &store.versions);
-}
-
-fn nextBlobSlot(store: *object_store.Store) ?*object_store.BlobSlot {
-    return fixed_table.firstFreeSlot(object_store.BlobSlot, object_store.MAX_BLOBS, &store.blobs);
-}
-
 fn findBlobSlotIndex(store: *const object_store.Store, address: object_store.BlobAddress) ?usize {
-    for (store.blobs, 0..) |slot, index| {
-        if (slot.in_use and std.mem.eql(u8, &slot.blob.address, &address)) return index;
-    }
-    return null;
-}
-
-fn nextWorkspaceSlot(workspaces: *workspace.Directory) ?*@TypeOf(workspaces.workspaces[0]) {
-    return fixed_table.firstFreeSlot(@TypeOf(workspaces.workspaces[0]), workspace.MAX_WORKSPACES, &workspaces.workspaces);
-}
-
-fn nextSnapshotSlotIndex(workspaces: *workspace.Directory) ?usize {
-    return fixed_table.firstFreeSlotIndex(@TypeOf(workspaces.snapshots[0]), workspace.MAX_SNAPSHOTS, &workspaces.snapshots);
+    return store.blobSlotIndex(address);
 }
 
 fn zeroWorkspaceRecord() workspace.WorkspaceRecord {

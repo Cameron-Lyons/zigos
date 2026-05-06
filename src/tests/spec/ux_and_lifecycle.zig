@@ -45,7 +45,7 @@ pub fn taskFirstUxRecordsStructuredFlows() !void {
     var runtime = task_runtime.Runtime.init();
     var storage = storage_service.Service.initWithStore(900, 90, storage_owner, &storage_checkpoint_store);
     const document = try storage.putVersion(.{
-        .preferred_object_id = 1_300,
+        .preferred_object_id = object_store.ids.object(1_300),
         .object_type = .document,
         .payload = "trip-plan",
         .metadata = try object_store.signMetadata(object_signer, "trip", "text/plain", .document, "trip-plan", 10),
@@ -81,7 +81,7 @@ pub fn taskFirstUxRecordsStructuredFlows() !void {
     try std.testing.expectEqual(native_ux.FlowKind.start_task, controller.flows[0].kind);
     try std.testing.expectEqual(task.id, controller.flows[0].task_id);
     try std.testing.expectEqual(native_ux.FlowKind.open_workspace, controller.flows[1].kind);
-    try std.testing.expectEqual(workspace_record.id, controller.flows[1].workspace_id);
+    try std.testing.expectEqual(workspace_record.id.raw(), controller.flows[1].workspace_id);
     try std.testing.expectEqualStrings("documents/plan.md", controller.flows[1].detailSlice());
     try std.testing.expectEqual(document.version_id, opened.version_id);
     try std.testing.expectEqual(native_ux.FlowKind.pair_device, controller.flows[2].kind);
@@ -164,7 +164,7 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
 
     var storage = storage_service.Service.initWithStore(910, 96, storage_owner, &storage_checkpoint_store);
     const document = try storage.putVersion(.{
-        .preferred_object_id = 1_360,
+        .preferred_object_id = object_store.ids.object(1_360),
         .object_type = .document,
         .payload = "trip-plan-v1",
         .metadata = try object_store.signMetadata(object_signer, "trip-plan", "text/plain", .document, "trip-plan-v1", 10),
@@ -205,26 +205,26 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
 
     const local_policy = try sync.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_record.id.raw(),
         .label = "trip-local",
         .mode = .local_network,
     });
     const overlay_policy = try sync.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_record.id.raw(),
         .label = "trip-overlay",
         .mode = .named_service_identity,
         .target = "overlay.trip.sync",
     });
     const relay_policy = try sync.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_record.id.raw(),
         .label = "trip-relay",
         .mode = .named_domain,
         .target = "relay.zigos.example",
     });
     _ = try sync.configureWorkspacePolicy(.{
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_record.id.raw(),
         .owner = person,
         .offline_first = true,
         .personal_e2ee = true,
@@ -234,7 +234,7 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
         .overlay_policy_id = overlay_policy.id,
         .relay_domain = "relay.zigos.example",
     });
-    _ = try sync.configureOverlay(workspace_record.id, primary_device, "overlay.trip.sync", true);
+    _ = try sync.configureOverlay(workspace_record.id.raw(), primary_device, "overlay.trip.sync", true);
 
     const review = try controller.reviewPermissionDecision(
         task.id,
@@ -252,7 +252,7 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
 
     const summary = try sync.replicateWorkspace(
         &storage,
-        workspace_record.id,
+        workspace_record.id.raw(),
         primary_device,
         paired_device,
         .device_to_device,

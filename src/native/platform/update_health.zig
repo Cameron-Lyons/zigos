@@ -146,7 +146,7 @@ pub fn recordBootSuccess(
         else => return err,
     };
     const result = try manager.storage.putVersion(.{
-        .preferred_object_id = bootWitnessObjectId(),
+        .preferred_object_id = object_store.ids.object(bootWitnessObjectId()),
         .object_type = .document,
         .payload = payload,
         .metadata = try object_store.signMetadata(
@@ -188,9 +188,9 @@ fn storageMountHealthy(storage: *const storage_service.Service, workspace_id: u6
     if (path.len == 0) return entries.len != 0 or workspace_record.generation != 0;
 
     const resolved = storage.resolve(workspace_id, path) catch return false;
-    if (resolved.version_id == 0 or resolved.object_id == 0) return false;
+    if (resolved.version_id.isZero() or resolved.object_id.isZero()) return false;
     const version = storage.version(resolved.version_id) orelse return false;
-    if (version.object_id != resolved.object_id) return false;
+    if (!version.object_id.eql(resolved.object_id)) return false;
     _ = storage.object(resolved.object_id) orelse return false;
     const payload = storage.versionPayload(version) catch return false;
     return version.metadata.verifyFor(version.object_type, payload);
@@ -289,7 +289,7 @@ fn seedStorageProbe(
     signer: signing.SignerIdentity,
 ) !u64 {
     const record = try storage.putVersion(.{
-        .preferred_object_id = 7_700,
+        .preferred_object_id = object_store.ids.object(7_700),
         .object_type = .document,
         .payload = "notes-v1",
         .metadata = try object_store.signMetadata(
@@ -308,7 +308,7 @@ fn seedStorageProbe(
     try storage.beginTransaction(workspace_record.id);
     try storage.stagePut(workspace_record.id, "documents/notes.md", record.object_id, record.version_id, .document);
     _ = try storage.commit(workspace_record.id, 10);
-    return workspace_record.id;
+    return workspace_record.id.raw();
 }
 
 fn seedNetworkProbe(

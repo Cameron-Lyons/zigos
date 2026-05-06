@@ -216,13 +216,13 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     var bridge_capabilities = capability.CapabilityTable.init();
     storage.bindCapabilityTable(&bridge_capabilities);
     const draft_v1 = try storage.putVersion(.{
-        .preferred_object_id = 1_000,
+        .preferred_object_id = object_store.ids.object(1_000),
         .object_type = .document,
         .payload = "report-v1",
         .metadata = try object_store.signMetadata(storage_signer, "report", "text/markdown", .document, "report-v1", 1),
     });
     const draft_v2 = try storage.putVersion(.{
-        .preferred_object_id = 1_000,
+        .preferred_object_id = object_store.ids.object(1_000),
         .object_type = .document,
         .payload = "report-v2",
         .metadata = try object_store.signMetadata(storage_signer, "report", "text/markdown", .document, "report-v2", 2),
@@ -261,14 +261,14 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     const workspace_capability = try bridge_capabilities.mintBootRoot(.{
         .holder = writer,
         .issuer = spec_support.policyAuthority(1),
-        .target = .{ .kind = .workspace, .id = workspace_record.id },
+        .target = .{ .kind = .workspace, .id = workspace_record.id.raw() },
         .rights = .{ .workspace = .{
             .object_read = true,
             .object_write = true,
         } },
         .scope = .{
             .task_id = 88,
-            .workspace_id = workspace_record.id,
+            .workspace_id = workspace_record.id.raw(),
             .local_only = true,
             .broker_only = true,
         },
@@ -279,7 +279,7 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
         .audit = .{},
     });
     const view = try storage.bridgeResolve(.{
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_record.id.raw(),
         .path = "/documents/report.md",
         .access = .read,
     }, .{
@@ -292,7 +292,7 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     try std.testing.expect(view.readable);
     try std.testing.expect(view.writable);
     try std.testing.expectEqualStrings("documents/report.md", view.pathSlice());
-    try std.testing.expectEqual(draft_v2.version_id, view.version_id);
+    try std.testing.expectEqual(draft_v2.version_id.raw(), view.version_id);
 }
 
 pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
@@ -313,32 +313,32 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
 
     var storage = storage_service.Service.initWithStore(600, 60, storage_owner, &storage_checkpoint_store);
     const notes_v1 = try storage.putVersion(.{
-        .preferred_object_id = 1_100,
+        .preferred_object_id = object_store.ids.object(1_100),
         .object_type = .document,
         .payload = "notes-v1",
         .metadata = try object_store.signMetadata(storage_signer, "notes", "text/plain", .document, "notes-v1", 1),
     });
     const notes_v2 = try storage.putVersion(.{
-        .preferred_object_id = 1_100,
+        .preferred_object_id = object_store.ids.object(1_100),
         .object_type = .document,
         .payload = "notes-v2",
         .metadata = try object_store.signMetadata(storage_signer, "notes", "text/plain", .document, "notes-v2", 2),
         .parent_version_id = notes_v1.version_id,
     });
     const cover = try storage.putVersion(.{
-        .preferred_object_id = 1_101,
+        .preferred_object_id = object_store.ids.object(1_101),
         .object_type = .media_asset,
         .payload = "cover.jpg",
         .metadata = try object_store.signMetadata(storage_signer, "cover", "image/jpeg", .media_asset, "cover.jpg", 3),
     });
     const inbox = try storage.putVersion(.{
-        .preferred_object_id = 1_102,
+        .preferred_object_id = object_store.ids.object(1_102),
         .object_type = .collection,
         .payload = "inbox",
         .metadata = try object_store.signMetadata(storage_signer, "inbox", "application/zigos-collection", .collection, "inbox", 4),
     });
     const secret = try storage.putVersion(.{
-        .preferred_object_id = 1_103,
+        .preferred_object_id = object_store.ids.object(1_103),
         .object_type = .secret,
         .payload = "enc:top-secret",
         .metadata = try object_store.signMetadata(storage_signer, "secret", "application/zigos-secret", .secret, "enc:top-secret", 5),
@@ -347,6 +347,7 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
         .owner = person,
         .label = "shared-notes",
     });
+    const workspace_id = workspace_record.id.raw();
     try storage.beginTransaction(workspace_record.id);
     try storage.stagePut(workspace_record.id, "documents/notes.md", notes_v1.object_id, notes_v1.version_id, .document);
     try storage.stagePut(workspace_record.id, "assets/cover.jpg", cover.object_id, cover.version_id, .media_asset);
@@ -360,34 +361,34 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
 
     const local_policy = try sync.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_id,
         .label = "local",
         .mode = .local_network,
     });
     const discovery_policy = try sync.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_id,
         .label = "printer-discovery",
         .mode = .local_subnet_discovery,
         .target = "printer",
     });
     const relay_policy = try sync.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_id,
         .label = "relay",
         .mode = .named_domain,
         .target = "relay.spec.zigos",
     });
     const overlay_policy = try sync.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_id,
         .label = "overlay",
         .mode = .named_service_identity,
         .target = "overlay.notes.spec",
     });
     const inbound_policy = try sync.createNetworkPolicy(.{
         .owner = sync_owner,
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_id,
         .label = "document-review",
         .mode = .inbound_collaborative_session,
         .target = "document-review/v1",
@@ -395,7 +396,7 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     const collaborator = spec_support.app(63);
     const prefixes = [_][]const u8{ "documents/", "assets/" };
     _ = try sync.configureWorkspacePolicy(.{
-        .workspace_id = workspace_record.id,
+        .workspace_id = workspace_id,
         .owner = person,
         .offline_first = true,
         .personal_e2ee = true,
@@ -405,8 +406,8 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
         .overlay_policy_id = overlay_policy.id,
         .relay_domain = "relay.spec.zigos",
     });
-    _ = try sync.configureOverlay(workspace_record.id, laptop, "overlay.notes.spec", true);
-    _ = try sync.publishPrivateService(workspace_record.id, "notes.remote");
+    _ = try sync.configureOverlay(workspace_id, laptop, "overlay.notes.spec", true);
+    _ = try sync.publishPrivateService(workspace_id, "notes.remote");
     try storage.shareWorkspace(workspace_record.id, .{
         .principal_id = collaborator,
         .can_read = true,
@@ -437,8 +438,8 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
         .now_ticks = 50,
     }));
 
-    try sync.setReplicaVersion(workspace_record.id, tablet, "documents/notes.md", notes_v1.object_id, notes_v2.version_id);
-    const summary = try sync.replicateWorkspace(&storage, workspace_record.id, laptop, tablet, .device_to_device);
+    try sync.setReplicaVersion(workspace_id, tablet, "documents/notes.md", notes_v1.object_id, notes_v2.version_id);
+    const summary = try sync.replicateWorkspace(&storage, workspace_id, laptop, tablet, .device_to_device);
     try std.testing.expect(summary.offline_first);
     try std.testing.expect(summary.personal_e2ee);
     try std.testing.expect(summary.used_device_to_device);
@@ -450,13 +451,13 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     try std.testing.expectEqual(@as(usize, 1), summary.merged_count);
     try std.testing.expectEqual(@as(usize, 1), summary.snapshot_count);
     try std.testing.expectEqual(@as(usize, 1), summary.conflict_count);
-    try std.testing.expect(sync.findConflict(workspace_record.id, tablet, "documents/notes.md") != null);
+    try std.testing.expect(sync.findConflict(workspace_id, tablet, "documents/notes.md") != null);
     try std.testing.expect(sync.isTrustedDevice(laptop));
     try std.testing.expect(sync.isTrustedDevice(tablet));
-    try std.testing.expect(try sync.transferSecretObject(&storage, workspace_record.id, secret.object_id, laptop, tablet, .device_to_device));
+    try std.testing.expect(try sync.transferSecretObject(&storage, workspace_id, secret.object_id, laptop, tablet, .device_to_device));
 
-    const database_contract = try sync.registerDatabaseContract(workspace_record.id, "app.notes.db", "notes-db", contract_signer);
-    try std.testing.expect(try sync.replicateDatabaseContract(database_contract.id, workspace_record.id, laptop, tablet, .relay_assisted));
+    const database_contract = try sync.registerDatabaseContract(workspace_id, "app.notes.db", "notes-db", contract_signer);
+    try std.testing.expect(try sync.replicateDatabaseContract(database_contract.id, workspace_id, laptop, tablet, .relay_assisted));
     try std.testing.expect((try sync.evaluateNetworkPolicy(local_policy.id, .local_network)).allowed);
     try std.testing.expect((try sync.evaluateNetworkPolicy(discovery_policy.id, .{ .discovery_class = "printer" })).allowed);
     try std.testing.expect(!(try sync.evaluateNetworkPolicy(discovery_policy.id, .{ .discovery_class = "camera" })).allowed);
@@ -562,7 +563,7 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     try std.testing.expectEqual(@as(usize, 1), transport_harness.denied_sessions);
     try std.testing.expectEqual(@as(usize, 2), transport_harness.encrypted_packets);
 
-    const latest_notes_frame = sync.latestTransportFrameForPath(workspace_record.id, tablet, "documents/notes.md").?;
+    const latest_notes_frame = sync.latestTransportFrameForPath(workspace_id, tablet, "documents/notes.md").?;
     try std.testing.expect(latest_notes_frame.encrypted);
     try std.testing.expectEqual(sync_service.TransportMode.device_to_device, latest_notes_frame.transport);
     try std.testing.expectEqual(sync_service.SyncSemantic.mergeable_crdt, latest_notes_frame.semantic);
@@ -570,7 +571,7 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     try std.testing.expectEqual(summary.transport_frame_count, summary.encrypted_transport_count);
 
     const relay_session = try sync.openOverlaySession(
-        workspace_record.id,
+        workspace_id,
         laptop,
         tablet,
         .remote_access,
@@ -584,7 +585,7 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     try std.testing.expectEqualStrings("overlay.notes.spec", relay_session.serviceIdentitySlice());
     try std.testing.expectEqualStrings("relay.spec.zigos", relay_session.relayDomainSlice());
     try std.testing.expectError(sync_service.Error.DeviceNotTrusted, sync.openOverlaySession(
-        workspace_record.id,
+        workspace_id,
         laptop,
         spec_support.device(99),
         .sync_replication,

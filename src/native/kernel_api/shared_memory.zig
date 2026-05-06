@@ -1,7 +1,7 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
-const fixed_table = @import("../core/fixed_table.zig");
-const id_index = @import("../core/id_index.zig");
+const ids = @import("../core/ids.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 
 pub const MAX_SHARED_MEMORY_OBJECTS: usize = 24;
 pub const MAX_MAPPINGS_PER_OBJECT: usize = 8;
@@ -36,15 +36,15 @@ pub const ComputeAccess = packed struct(u8) {
 };
 
 pub const Object = struct {
-    id: u64,
-    owner_task_id: u64,
+    id: ids.SharedMemoryId,
+    owner_task_id: ids.TaskId,
     size_bytes: usize,
     revocation_generation: u32,
     attachment_generation: u32,
     revoked: bool,
     compute_access: ComputeAccess,
     attached_compute: ComputeAccess,
-    mapped_task_ids: [MAX_MAPPINGS_PER_OBJECT]u64,
+    mapped_task_ids: [MAX_MAPPINGS_PER_OBJECT]ids.TaskId,
     mapping_count: usize,
 
     pub fn allowsCompute(self: *const Object, target: ComputeTarget) bool {
@@ -72,32 +72,32 @@ const ObjectSlot = struct {
     object: Object = zeroObject(),
 };
 
+const ObjectArena = indexed_arena.IndexedArenaWithKey(ids.SharedMemoryId, ObjectSlot, MAX_SHARED_MEMORY_OBJECTS, SHARED_MEMORY_INDEX_CAPACITY, objectSlotId);
+
 pub const Table = struct {
     next_object_id: u64 = 1,
-    object_index_slots: [SHARED_MEMORY_INDEX_CAPACITY]id_index.Slot = id_index.emptyTable(SHARED_MEMORY_INDEX_CAPACITY),
-    slots: [MAX_SHARED_MEMORY_OBJECTS]ObjectSlot = [_]ObjectSlot{ObjectSlot{}} ** MAX_SHARED_MEMORY_OBJECTS,
+    arena: ObjectArena = ObjectArena.init(),
 
     pub fn init() Table {
         return .{};
     }
 
-    pub fn create(self: *Table, owner_task_id: u64, size_bytes: usize) Error!Object {
+    pub fn create(self: *Table, owner_task_id: ids.TaskId, size_bytes: usize) Error!Object {
         return self.createWithAccess(owner_task_id, size_bytes, .{});
     }
 
     pub fn createWithAccess(
         self: *Table,
-        owner_task_id: u64,
+        owner_task_id: ids.TaskId,
         size_bytes: usize,
         compute_access: ComputeAccess,
     ) Error!Object {
         if (size_bytes == 0) return error.SizeZero;
 
-        const slot_index = fixed_table.firstFreeSlotIndex(ObjectSlot, MAX_SHARED_MEMORY_OBJECTS, &self.slots) orelse return error.TableFull;
-        const slot = &self.slots[slot_index];
-        slot.in_use = true;
+        const object_id = self.allocateObjectId();
+        const slot = self.arena.reserve(object_id) orelse return error.TableFull;
         slot.object = .{
-            .id = self.allocateObjectId(),
+            .id = object_id,
             .owner_task_id = owner_task_id,
             .size_bytes = size_bytes,
             .revocation_generation = 1,
@@ -105,19 +105,18 @@ pub const Table = struct {
             .revoked = false,
             .compute_access = compute_access,
             .attached_compute = ComputeAccess.empty(),
-            .mapped_task_ids = [_]u64{0} ** MAX_MAPPINGS_PER_OBJECT,
+            .mapped_task_ids = [_]ids.TaskId{ids.TaskId.zero} ** MAX_MAPPINGS_PER_OBJECT,
             .mapping_count = 0,
         };
-        id_index.insert(SHARED_MEMORY_INDEX_CAPACITY, &self.object_index_slots, slot.object.id, slot_index, "shared memory id index covers object table");
         return slot.object;
     }
 
-    pub fn map(self: *Table, object_id: u64, task_id: u64) Error!void {
+    pub fn map(self: *Table, object_id: ids.SharedMemoryId, task_id: ids.TaskId) Error!void {
         const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
         if (object.revoked) return error.Revoked;
 
         for (object.mapped_task_ids[0..object.mapping_count]) |mapped_task_id| {
-            if (mapped_task_id == task_id) return error.AlreadyMapped;
+            if (mapped_task_id.eql(task_id)) return error.AlreadyMapped;
         }
         if (object.mapping_count >= object.mapped_task_ids.len) return error.TableFull;
 
@@ -125,34 +124,34 @@ pub const Table = struct {
         object.mapping_count += 1;
     }
 
-    pub fn unmap(self: *Table, object_id: u64, task_id: u64) Error!bool {
+    pub fn unmap(self: *Table, object_id: ids.SharedMemoryId, task_id: ids.TaskId) Error!bool {
         const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
         var index: usize = 0;
         while (index < object.mapping_count) : (index += 1) {
-            if (object.mapped_task_ids[index] != task_id) continue;
+            if (!object.mapped_task_ids[index].eql(task_id)) continue;
 
             var tail = index;
             while (tail + 1 < object.mapping_count) : (tail += 1) {
                 object.mapped_task_ids[tail] = object.mapped_task_ids[tail + 1];
             }
             object.mapping_count -= 1;
-            object.mapped_task_ids[object.mapping_count] = 0;
+            object.mapped_task_ids[object.mapping_count] = ids.TaskId.zero;
             return true;
         }
         return false;
     }
 
-    pub fn revoke(self: *Table, object_id: u64) Error!void {
+    pub fn revoke(self: *Table, object_id: ids.SharedMemoryId) Error!void {
         const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
         object.revoked = true;
         object.revocation_generation += 1;
         object.attachment_generation += 1;
         object.attached_compute = ComputeAccess.empty();
         object.mapping_count = 0;
-        object.mapped_task_ids = [_]u64{0} ** MAX_MAPPINGS_PER_OBJECT;
+        object.mapped_task_ids = [_]ids.TaskId{ids.TaskId.zero} ** MAX_MAPPINGS_PER_OBJECT;
     }
 
-    pub fn attachAccelerator(self: *Table, object_id: u64, target: ComputeTarget) Error!void {
+    pub fn attachAccelerator(self: *Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!void {
         const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
         if (object.revoked) return error.Revoked;
         if (!object.allowsCompute(target)) return error.AcceleratorAccessDenied;
@@ -162,7 +161,7 @@ pub const Table = struct {
         object.attachment_generation += 1;
     }
 
-    pub fn detachAccelerator(self: *Table, object_id: u64, target: ComputeTarget) Error!bool {
+    pub fn detachAccelerator(self: *Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!bool {
         const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
         if (!object.attachedTo(target)) return false;
 
@@ -171,11 +170,11 @@ pub const Table = struct {
         return true;
     }
 
-    pub fn descriptor(self: *const Table, object_id: u64) Error!abi.SharedMemoryDescriptor {
+    pub fn descriptor(self: *const Table, object_id: ids.SharedMemoryId) Error!abi.SharedMemoryDescriptor {
         const object = self.findConst(object_id) orelse return error.SharedMemoryNotFound;
         return .{
-            .object_id = object.id,
-            .owner_task_id = object.owner_task_id,
+            .object_id = object.id.raw(),
+            .owner_task_id = object.owner_task_id.raw(),
             .size_bytes = object.size_bytes,
             .revocation_generation = object.revocation_generation,
             .mapped_task_count = @intCast(object.mapping_count),
@@ -183,83 +182,59 @@ pub const Table = struct {
         };
     }
 
-    pub fn allowsAccelerator(self: *const Table, object_id: u64, target: ComputeTarget) Error!bool {
+    pub fn allowsAccelerator(self: *const Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!bool {
         const object = self.findConst(object_id) orelse return error.SharedMemoryNotFound;
         return object.allowsCompute(target);
     }
 
-    pub fn isAcceleratorAttached(self: *const Table, object_id: u64, target: ComputeTarget) Error!bool {
+    pub fn isAcceleratorAttached(self: *const Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!bool {
         const object = self.findConst(object_id) orelse return error.SharedMemoryNotFound;
         return object.attachedTo(target);
     }
 
-    pub fn mappingsForTask(self: *const Table, task_id: u64) u16 {
-        return @intCast(fixed_table.countMatching(ObjectSlot, MAX_SHARED_MEMORY_OBJECTS, &self.slots, task_id, objectSlotMapsTask));
+    pub fn mappingsForTask(self: *const Table, task_id: ids.TaskId) u16 {
+        return @intCast(self.arena.countMatching(task_id, objectSlotMapsTask));
     }
 
-    fn allocateObjectId(self: *Table) u64 {
+    fn allocateObjectId(self: *Table) ids.SharedMemoryId {
         defer self.next_object_id += 1;
-        return self.next_object_id;
+        return ids.sharedMemory(self.next_object_id);
     }
 
-    fn find(self: *Table, object_id: u64) ?*Object {
-        const slot = fixed_table.findIndexedSlot(
-            ObjectSlot,
-            MAX_SHARED_MEMORY_OBJECTS,
-            SHARED_MEMORY_INDEX_CAPACITY,
-            &self.slots,
-            &self.object_index_slots,
-            object_id,
-            objectSlotId,
-            object_id,
-            objectSlotMatchesId,
-        ) orelse return null;
+    fn find(self: *Table, object_id: ids.SharedMemoryId) ?*Object {
+        const slot = self.arena.get(object_id) orelse return null;
         return &slot.object;
     }
 
-    fn findConst(self: *const Table, object_id: u64) ?*const Object {
-        const slot = fixed_table.findIndexedConstSlot(
-            ObjectSlot,
-            MAX_SHARED_MEMORY_OBJECTS,
-            SHARED_MEMORY_INDEX_CAPACITY,
-            &self.slots,
-            &self.object_index_slots,
-            object_id,
-            objectSlotId,
-            object_id,
-            objectSlotMatchesId,
-        ) orelse return null;
+    fn findConst(self: *const Table, object_id: ids.SharedMemoryId) ?*const Object {
+        const slot = self.arena.getConst(object_id) orelse return null;
         return &slot.object;
     }
 };
 
-fn objectSlotId(slot: *const ObjectSlot) u64 {
+fn objectSlotId(slot: *const ObjectSlot) ids.SharedMemoryId {
     return slot.object.id;
 }
 
-fn objectSlotMatchesId(object_id: u64, slot: *const ObjectSlot) bool {
-    return slot.object.id == object_id;
-}
-
-fn objectSlotMapsTask(task_id: u64, slot: *const ObjectSlot) bool {
+fn objectSlotMapsTask(task_id: ids.TaskId, slot: *const ObjectSlot) bool {
     if (slot.object.revoked) return false;
     for (slot.object.mapped_task_ids[0..slot.object.mapping_count]) |mapped_task_id| {
-        if (mapped_task_id == task_id) return true;
+        if (mapped_task_id.eql(task_id)) return true;
     }
     return false;
 }
 
 fn zeroObject() Object {
     return .{
-        .id = 0,
-        .owner_task_id = 0,
+        .id = ids.SharedMemoryId.zero,
+        .owner_task_id = ids.TaskId.zero,
         .size_bytes = 0,
         .revocation_generation = 0,
         .attachment_generation = 0,
         .revoked = false,
         .compute_access = .{},
         .attached_compute = ComputeAccess.empty(),
-        .mapped_task_ids = [_]u64{0} ** MAX_MAPPINGS_PER_OBJECT,
+        .mapped_task_ids = [_]ids.TaskId{ids.TaskId.zero} ** MAX_MAPPINGS_PER_OBJECT,
         .mapping_count = 0,
     };
 }
@@ -275,23 +250,23 @@ fn setComputeAccess(access: *ComputeAccess, target: ComputeTarget, value: bool) 
 
 test "shared memory objects map unmap and revoke across tasks" {
     var table = Table.init();
-    const object = try table.create(7, 4096);
+    const object = try table.create(ids.task(7), 4096);
 
-    try table.map(object.id, 7);
-    try table.map(object.id, 8);
+    try table.map(object.id, ids.task(7));
+    try table.map(object.id, ids.task(8));
     try std.testing.expectEqual(@as(u16, 2), (try table.descriptor(object.id)).mapped_task_count);
-    try std.testing.expect(try table.unmap(object.id, 8));
+    try std.testing.expect(try table.unmap(object.id, ids.task(8)));
 
     try table.revoke(object.id);
     const descriptor = try table.descriptor(object.id);
     try std.testing.expectEqual(@as(u16, 0), descriptor.mapped_task_count);
     try std.testing.expectEqual(@as(u16, 1), descriptor.flags);
-    try std.testing.expectError(error.Revoked, table.map(object.id, 9));
+    try std.testing.expectError(error.Revoked, table.map(object.id, ids.task(9)));
 }
 
 test "shared memory objects label accelerator access and explicit zero-copy attachments" {
     var table = Table.init();
-    const object = try table.createWithAccess(7, 16 * 1024, .{
+    const object = try table.createWithAccess(ids.task(7), 16 * 1024, .{
         .gpu = true,
         .media = true,
     });

@@ -7,6 +7,7 @@ const denial_explanation = @import("../../native/policy/denial_explanation.zig")
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
+const ids = @import("../../native/core/ids.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const measured_boot = @import("../../native/platform/measured_boot.zig");
 const native_ux = @import("../../native/platform/native_ux.zig");
@@ -110,7 +111,7 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
         .local_only = true,
     });
     var shared = shared_memory.Table.init();
-    const zero_copy = try shared.createWithAccess(foreground_task.id, 4096, .{
+    const zero_copy = try shared.createWithAccess(ids.task(foreground_task.id), 4096, .{
         .media = true,
     });
     const engine_claim = try scheduler.claimWithSharedMemory(.{

@@ -103,16 +103,16 @@ pub const Manager = struct {
         storage: *storage_service.Service,
         owner: principal.PrincipalId,
         state_signer: signing.SignerIdentity,
-        workspace_id: u64,
+        workspace_id: anytype,
     ) Error!Manager {
         var manager = Manager{
             .storage = storage,
             .owner = owner,
             .state_signer = state_signer,
-            .workspace_id = workspace_id,
+            .workspace_id = object_store.ids.raw(workspace_id),
         };
 
-        if (storage.resolve(workspace_id, state_entry_path)) |entry| {
+        if (storage.resolve(manager.workspace_id, state_entry_path)) |entry| {
             const version = storage.version(entry.version_id) orelse return error.CorruptState;
             try manager.decode(try storage.versionPayload(version));
             manager.loaded_existing_state = true;
@@ -135,7 +135,7 @@ pub const Manager = struct {
         if (slot_index >= MAX_SYSTEM_IMAGES) return error.InvalidSlot;
 
         const result = try self.storage.putVersion(.{
-            .preferred_object_id = imageObjectId(slot_index),
+            .preferred_object_id = object_store.ids.object(imageObjectId(slot_index)),
             .object_type = .model_artifact,
             .payload = payload,
             .metadata = try object_store.signMetadata(
@@ -152,8 +152,8 @@ pub const Manager = struct {
         slot.* = zeroImage();
         slot.slot_index = @intCast(slot_index);
         slot.label_len = try native_util.copyTextExact(&slot.label, label);
-        slot.object_id = result.object_id;
-        slot.version_id = result.version_id;
+        slot.object_id = result.object_id.raw();
+        slot.version_id = result.version_id.raw();
         slot.read_only = true;
         slot.activation_generation = self.activation_generation;
         slot.signer_len = try native_util.copyTextExact(&slot.signer, signer.label);
@@ -250,7 +250,7 @@ pub const Manager = struct {
         const image = &self.slots[slot_index];
         if (image.version_id == 0 or !image.read_only) return false;
         const version = self.storage.version(image.version_id) orelse return false;
-        if (version.object_id != image.object_id or version.object_type != .model_artifact) return false;
+        if (version.object_id.raw() != image.object_id or version.object_type != .model_artifact) return false;
         if (!version.metadata.isSigned() or !version.metadata.signature.isComplete()) return false;
         const payload = self.storage.versionPayload(version) catch return false;
         if (!version.metadata.verifyFor(.model_artifact, payload)) return false;
@@ -266,7 +266,7 @@ pub const Manager = struct {
             else => return err,
         };
         const result = try self.storage.putVersion(.{
-            .preferred_object_id = stateObjectId(),
+            .preferred_object_id = object_store.ids.object(stateObjectId()),
             .object_type = .document,
             .payload = encoded,
             .metadata = try object_store.signMetadata(

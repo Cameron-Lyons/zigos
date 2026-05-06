@@ -4,10 +4,10 @@ const dispatch = @import("syscall_dispatch.zig");
 const syscall_abi = @import("syscall_abi.zig");
 
 pub const operations = [_]syscall_abi.Operation{
-    .{ .operation = .shared_memory_create, .domain = .shared_memory, .Request = component_port.SharedMemoryCreateRequest, .Response = abi.SharedMemoryCreateResponse, .handler = dispatchSharedMemoryCreate },
-    .{ .operation = .shared_memory_map, .domain = .shared_memory, .Request = component_port.SharedMemoryMapRequest, .Response = abi.SharedMemoryDescriptor, .handler = dispatchSharedMemoryMap },
-    .{ .operation = .shared_memory_unmap, .domain = .shared_memory, .Request = component_port.SharedMemoryUnmapRequest, .Response = abi.BoolResponse, .handler = dispatchSharedMemoryUnmap },
-    .{ .operation = .shared_memory_revoke, .domain = .shared_memory, .Request = component_port.SharedMemoryRevokeRequest, .Response = abi.SharedMemoryDescriptor, .handler = dispatchSharedMemoryRevoke },
+    syscall_abi.declare(.shared_memory_create, .shared_memory, component_port.SharedMemoryCreateRequest, abi.SharedMemoryCreateResponse, dispatchSharedMemoryCreate, .plain),
+    syscall_abi.declare(.shared_memory_map, .shared_memory, component_port.SharedMemoryMapRequest, abi.SharedMemoryDescriptor, dispatchSharedMemoryMap, .plain),
+    syscall_abi.declare(.shared_memory_unmap, .shared_memory, component_port.SharedMemoryUnmapRequest, abi.BoolResponse, dispatchSharedMemoryUnmap, .plain),
+    syscall_abi.declare(.shared_memory_revoke, .shared_memory, component_port.SharedMemoryRevokeRequest, abi.SharedMemoryDescriptor, dispatchSharedMemoryRevoke, .plain),
 };
 
 pub fn dispatchSharedMemoryCreate(

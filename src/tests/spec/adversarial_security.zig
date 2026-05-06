@@ -217,7 +217,7 @@ pub fn corruptedStorageLogsDoNotReplay() !void {
     var workspaces = workspace.Directory.init();
     const signer = spec_support.signer("spec.storage.corrupt", 0x71);
     _ = try store.putVersion(.{
-        .preferred_object_id = 301,
+        .preferred_object_id = object_store.ids.object(301),
         .object_type = .document,
         .payload = "clean",
         .metadata = try object_store.signMetadata(signer, "clean", "text/plain", .document, "clean", 1),

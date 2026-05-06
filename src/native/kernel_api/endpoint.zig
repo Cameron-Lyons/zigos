@@ -1,7 +1,7 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
-const fixed_table = @import("../core/fixed_table.zig");
-const id_index = @import("../core/id_index.zig");
+const ids = @import("../core/ids.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 
 pub const MAX_ENDPOINTS: usize = 32;
@@ -17,9 +17,9 @@ pub const EndpointFlags = packed struct(u16) {
 };
 
 pub const Message = struct {
-    sender_task_id: u64,
+    sender_task_id: ids.TaskId,
     correlation_id: u64,
-    attached_capability_id: ?u64 = null,
+    attached_capability_id: ?ids.CapabilityId = null,
     move_attached_capability: bool = false,
     flags: EndpointFlags = .{},
     len: usize,
@@ -31,12 +31,12 @@ pub const Message = struct {
 };
 
 pub const Endpoint = struct {
-    id: u64,
-    owner_task_id: u64,
+    id: ids.EndpointId,
+    owner_task_id: ids.TaskId,
     flags: EndpointFlags,
     label_len: usize,
     label: [48]u8,
-    peer_endpoint_id: ?u64 = null,
+    peer_endpoint_id: ?ids.EndpointId = null,
     queue_head: usize = 0,
     queue_len: usize = 0,
     queue: [MAX_ENDPOINT_QUEUE]Message = [_]Message{zeroMessage()} ** MAX_ENDPOINT_QUEUE,
@@ -60,32 +60,31 @@ const EndpointSlot = struct {
     endpoint: Endpoint = zeroEndpoint(),
 };
 
+const EndpointArena = indexed_arena.IndexedArenaWithKey(ids.EndpointId, EndpointSlot, MAX_ENDPOINTS, ENDPOINT_INDEX_CAPACITY, endpointSlotId);
+
 pub const Table = struct {
     next_endpoint_id: u64 = 1,
-    endpoint_index_slots: [ENDPOINT_INDEX_CAPACITY]id_index.Slot = id_index.emptyTable(ENDPOINT_INDEX_CAPACITY),
-    slots: [MAX_ENDPOINTS]EndpointSlot = [_]EndpointSlot{EndpointSlot{}} ** MAX_ENDPOINTS,
+    arena: EndpointArena = EndpointArena.init(),
 
     pub fn init() Table {
         return .{};
     }
 
-    pub fn create(self: *Table, owner_task_id: u64, label: []const u8, flags: EndpointFlags) Error!Endpoint {
-        const slot_index = fixed_table.firstFreeSlotIndex(EndpointSlot, MAX_ENDPOINTS, &self.slots) orelse return error.TableFull;
-        const slot = &self.slots[slot_index];
-        slot.in_use = true;
+    pub fn create(self: *Table, owner_task_id: ids.TaskId, label: []const u8, flags: EndpointFlags) Error!Endpoint {
+        const endpoint_id = self.allocateEndpointId();
+        const slot = self.arena.reserve(endpoint_id) orelse return error.TableFull;
         slot.endpoint = .{
-            .id = self.allocateEndpointId(),
+            .id = endpoint_id,
             .owner_task_id = owner_task_id,
             .flags = flags,
             .label_len = @min(label.len, 47),
             .label = [_]u8{0} ** 48,
         };
         @memcpy(slot.endpoint.label[0..slot.endpoint.label_len], label[0..slot.endpoint.label_len]);
-        id_index.insert(ENDPOINT_INDEX_CAPACITY, &self.endpoint_index_slots, slot.endpoint.id, slot_index, "endpoint id index covers endpoint table");
         return slot.endpoint;
     }
 
-    pub fn connect(self: *Table, endpoint_id: u64, peer_endpoint_id: u64) Error!void {
+    pub fn connect(self: *Table, endpoint_id: ids.EndpointId, peer_endpoint_id: ids.EndpointId) Error!void {
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
         const peer = self.find(peer_endpoint_id) orelse return error.EndpointNotFound;
 
@@ -115,11 +114,11 @@ pub const Table = struct {
 
     pub fn send(
         self: *Table,
-        endpoint_id: u64,
-        sender_task_id: u64,
+        endpoint_id: ids.EndpointId,
+        sender_task_id: ids.TaskId,
         correlation_id: u64,
         payload: []const u8,
-        attached_capability_id: ?u64,
+        attached_capability_id: ?ids.CapabilityId,
         move_attached_capability: bool,
     ) Error!void {
         if (payload.len > MAX_MESSAGE_BYTES) return error.MessageTooLarge;
@@ -145,7 +144,7 @@ pub const Table = struct {
         peer.queue_len += 1;
     }
 
-    pub fn recv(self: *Table, endpoint_id: u64) Error!?Message {
+    pub fn recv(self: *Table, endpoint_id: ids.EndpointId) Error!?Message {
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
         if (endpoint.queue_len == 0) return null;
 
@@ -157,73 +156,49 @@ pub const Table = struct {
         return message;
     }
 
-    pub fn descriptor(self: *const Table, endpoint_id: u64) Error!abi.EndpointDescriptor {
+    pub fn descriptor(self: *const Table, endpoint_id: ids.EndpointId) Error!abi.EndpointDescriptor {
         const endpoint = self.findConst(endpoint_id) orelse return error.EndpointNotFound;
         return .{
-            .endpoint_id = endpoint.id,
-            .owner_task_id = endpoint.owner_task_id,
-            .peer_endpoint_id = endpoint.peer_endpoint_id orelse 0,
+            .endpoint_id = endpoint.id.raw(),
+            .owner_task_id = endpoint.owner_task_id.raw(),
+            .peer_endpoint_id = if (endpoint.peer_endpoint_id) |id| id.raw() else 0,
             .queued_messages = @intCast(endpoint.queue_len),
             .flags = @bitCast(endpoint.flags),
             .label_hash = hashLabel(endpoint.labelSlice()),
         };
     }
 
-    pub fn activeForTask(self: *const Table, task_id: u64) u16 {
-        return @intCast(fixed_table.countMatching(EndpointSlot, MAX_ENDPOINTS, &self.slots, task_id, endpointSlotMatchesTask));
+    pub fn activeForTask(self: *const Table, task_id: ids.TaskId) u16 {
+        return @intCast(self.arena.countMatching(task_id, endpointSlotMatchesTask));
     }
 
-    fn allocateEndpointId(self: *Table) u64 {
+    fn allocateEndpointId(self: *Table) ids.EndpointId {
         defer self.next_endpoint_id += 1;
-        return self.next_endpoint_id;
+        return ids.endpoint(self.next_endpoint_id);
     }
 
-    fn find(self: *Table, endpoint_id: u64) ?*Endpoint {
-        const slot = fixed_table.findIndexedSlot(
-            EndpointSlot,
-            MAX_ENDPOINTS,
-            ENDPOINT_INDEX_CAPACITY,
-            &self.slots,
-            &self.endpoint_index_slots,
-            endpoint_id,
-            endpointSlotId,
-            endpoint_id,
-            endpointSlotMatchesId,
-        ) orelse return null;
+    fn find(self: *Table, endpoint_id: ids.EndpointId) ?*Endpoint {
+        const slot = self.arena.get(endpoint_id) orelse return null;
         return &slot.endpoint;
     }
 
-    fn findConst(self: *const Table, endpoint_id: u64) ?*const Endpoint {
-        const slot = fixed_table.findIndexedConstSlot(
-            EndpointSlot,
-            MAX_ENDPOINTS,
-            ENDPOINT_INDEX_CAPACITY,
-            &self.slots,
-            &self.endpoint_index_slots,
-            endpoint_id,
-            endpointSlotId,
-            endpoint_id,
-            endpointSlotMatchesId,
-        ) orelse return null;
+    fn findConst(self: *const Table, endpoint_id: ids.EndpointId) ?*const Endpoint {
+        const slot = self.arena.getConst(endpoint_id) orelse return null;
         return &slot.endpoint;
     }
 };
 
-fn endpointSlotId(slot: *const EndpointSlot) u64 {
+fn endpointSlotId(slot: *const EndpointSlot) ids.EndpointId {
     return slot.endpoint.id;
 }
 
-fn endpointSlotMatchesId(endpoint_id: u64, slot: *const EndpointSlot) bool {
-    return slot.endpoint.id == endpoint_id;
-}
-
-fn endpointSlotMatchesTask(task_id: u64, slot: *const EndpointSlot) bool {
-    return slot.endpoint.owner_task_id == task_id;
+fn endpointSlotMatchesTask(task_id: ids.TaskId, slot: *const EndpointSlot) bool {
+    return slot.endpoint.owner_task_id.eql(task_id);
 }
 
 fn zeroMessage() Message {
     return .{
-        .sender_task_id = 0,
+        .sender_task_id = ids.TaskId.zero,
         .correlation_id = 0,
         .len = 0,
         .bytes = [_]u8{0} ** MAX_MESSAGE_BYTES,
@@ -232,8 +207,8 @@ fn zeroMessage() Message {
 
 fn zeroEndpoint() Endpoint {
     return .{
-        .id = 0,
-        .owner_task_id = 0,
+        .id = ids.EndpointId.zero,
+        .owner_task_id = ids.TaskId.zero,
         .flags = .{},
         .label_len = 0,
         .label = [_]u8{0} ** 48,
@@ -246,42 +221,42 @@ fn hashLabel(label: []const u8) u64 {
 
 test "endpoints connect and exchange queued messages" {
     var table = Table.init();
-    const left = try table.create(10, "left", .{ .local_only = true });
-    const right = try table.create(11, "right", .{ .local_only = true });
+    const left = try table.create(ids.task(10), "left", .{ .local_only = true });
+    const right = try table.create(ids.task(11), "right", .{ .local_only = true });
     try table.connect(left.id, right.id);
 
-    try table.send(left.id, 10, 77, "hello", null, false);
+    try table.send(left.id, ids.task(10), 77, "hello", null, false);
     const received = (try table.recv(right.id)).?;
 
-    try std.testing.expectEqual(@as(u64, 10), received.sender_task_id);
+    try std.testing.expect(received.sender_task_id.eql(ids.task(10)));
     try std.testing.expectEqual(@as(u64, 77), received.correlation_id);
     try std.testing.expectEqualStrings("hello", received.payload());
 }
 
 test "endpoint descriptors track peer links and queue depth" {
     var table = Table.init();
-    const left = try table.create(10, "left", .{});
-    const right = try table.create(11, "right", .{ .service_port = true });
+    const left = try table.create(ids.task(10), "left", .{});
+    const right = try table.create(ids.task(11), "right", .{ .service_port = true });
     try table.connect(left.id, right.id);
-    try table.send(left.id, 10, 1, "ok", 99, true);
+    try table.send(left.id, ids.task(10), 1, "ok", ids.capability(99), true);
 
     const descriptor = try table.descriptor(right.id);
-    try std.testing.expectEqual(left.id, descriptor.peer_endpoint_id);
+    try std.testing.expectEqual(left.id.raw(), descriptor.peer_endpoint_id);
     try std.testing.expectEqual(@as(u16, 1), descriptor.queued_messages);
     try std.testing.expect(descriptor.label_hash != 0);
 }
 
 test "service ports accept multiple client connections without blocking later binds" {
     var table = Table.init();
-    const client_a = try table.create(10, "client-a", .{});
-    const client_b = try table.create(11, "client-b", .{});
-    const service = try table.create(12, "service", .{ .service_port = true });
+    const client_a = try table.create(ids.task(10), "client-a", .{});
+    const client_b = try table.create(ids.task(11), "client-b", .{});
+    const service = try table.create(ids.task(12), "service", .{ .service_port = true });
 
     try table.connect(client_a.id, service.id);
     try table.connect(client_b.id, service.id);
-    try table.send(client_b.id, 11, 77, "ping", null, false);
+    try table.send(client_b.id, ids.task(11), 77, "ping", null, false);
 
     const received = (try table.recv(service.id)).?;
-    try std.testing.expectEqual(@as(u64, 11), received.sender_task_id);
-    try std.testing.expectEqual(@as(u64, service.id), (try table.descriptor(client_b.id)).peer_endpoint_id);
+    try std.testing.expect(received.sender_task_id.eql(ids.task(11)));
+    try std.testing.expectEqual(service.id.raw(), (try table.descriptor(client_b.id)).peer_endpoint_id);
 }

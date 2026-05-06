@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
         .{ generation, store.objectCount(), store.versionCount(), workspaces.next_workspace_id, workspaces.next_snapshot_id },
     );
 
-    for (store.objects) |slot| {
+    for (store.objects.slots) |slot| {
         if (!slot.in_use) continue;
         try stdout_writer.interface.print(
             "object id={d} latest={d} count={d}\n",
@@ -31,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
         );
     }
 
-    for (store.versions) |slot| {
+    for (store.versions.slots) |slot| {
         if (!slot.in_use) continue;
         try stdout_writer.interface.print(
             "version id={d} object={d} prev={d} label={s} content_type={s} payload_len={d}\n",
@@ -46,7 +46,7 @@ pub fn main(init: std.process.Init) !void {
         );
     }
 
-    for (workspaces.workspaces) |slot| {
+    for (workspaces.workspaces.slots) |slot| {
         if (!slot.in_use) continue;
         try stdout_writer.interface.print(
             "workspace id={d} label={s} generation={d} entries={d}\n",
@@ -54,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
         );
     }
 
-    for (workspaces.snapshots) |slot| {
+    for (workspaces.snapshots.slots) |slot| {
         if (!slot.in_use) continue;
         try stdout_writer.interface.print(
             "snapshot id={d} workspace={d} label={s} entries={d}\n",

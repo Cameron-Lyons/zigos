@@ -321,14 +321,14 @@ pub const MeasurementJournal = struct {
             .storage = storage,
             .owner = owner,
             .state_signer = state_signer,
-            .workspace_id = workspace_record.id,
+            .workspace_id = workspace_record.id.raw(),
         };
 
         if (storage.resolve(workspace_record.id, state_entry_path)) |entry| {
             const version = storage.version(entry.version_id) orelse return error.CorruptState;
             journal.latest_summary = try decodeSummary(try storage.versionPayload(version));
             journal.loaded_existing_state = true;
-            journal.latest_version_id = entry.version_id;
+            journal.latest_version_id = entry.version_id.raw();
         } else |err| switch (err) {
             error.EntryNotFound => {},
             else => return err,
@@ -366,7 +366,7 @@ pub const MeasurementJournal = struct {
             else => return err,
         };
         const result = try self.storage.putVersion(.{
-            .preferred_object_id = stateObjectId(),
+            .preferred_object_id = object_store.ids.object(stateObjectId()),
             .object_type = .document,
             .payload = payload,
             .metadata = try object_store.signMetadata(
@@ -382,7 +382,7 @@ pub const MeasurementJournal = struct {
         try self.storage.beginTransaction(self.workspace_id);
         try self.storage.stagePut(self.workspace_id, state_entry_path, result.object_id, result.version_id, .document);
         _ = try self.storage.commit(self.workspace_id, tick);
-        self.latest_version_id = result.version_id;
+        self.latest_version_id = result.version_id.raw();
     }
 };
 
