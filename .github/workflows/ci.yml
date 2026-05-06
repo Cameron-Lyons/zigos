@@ -7,7 +7,19 @@ on:
     branches: [ master, main ]
 
 jobs:
+  zig-toolchain:
+    name: Zig Toolchain Cache
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up ZigOS CI
+      uses: ./.github/actions/setup-zigos-ci
+
   lint:
+    needs: zig-toolchain
     runs-on: ubuntu-latest
 
     steps:
@@ -46,24 +58,28 @@ jobs:
         actionlint
 
   kernel-build:
+    needs: zig-toolchain
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Kernel Build
       command: ./scripts/zig.sh build kernel
 
   spec-conformance:
+    needs: zig-toolchain
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Spec Conformance
       command: ./scripts/zig.sh build spec-conformance
 
   host-tests:
+    needs: zig-toolchain
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Host Tests
       command: ./scripts/zig.sh build host-tests
 
   native-smoke:
+    needs: zig-toolchain
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Native Smoke
@@ -71,6 +87,7 @@ jobs:
       timeout-minutes: 20
 
   benchmark:
+    needs: zig-toolchain
     uses: ./.github/workflows/run-zig-summary-command.yml
     with:
       job-name: Native Benchmarks
