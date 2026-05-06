@@ -6,6 +6,8 @@ const indexed_arena = @import("../core/indexed_arena.zig");
 pub const MAX_SHARED_MEMORY_OBJECTS: usize = 24;
 pub const MAX_MAPPINGS_PER_OBJECT: usize = 8;
 const SHARED_MEMORY_INDEX_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * 2;
+const MAPPING_EDGE_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * MAX_MAPPINGS_PER_OBJECT;
+const MAPPING_INDEX_CAPACITY: usize = MAPPING_EDGE_CAPACITY * 2;
 
 pub const ComputeTarget = enum(u8) {
     cpu,
@@ -73,10 +75,12 @@ const ObjectSlot = struct {
 };
 
 const ObjectArena = indexed_arena.IndexedArenaWithKey(ids.SharedMemoryId, ObjectSlot, MAX_SHARED_MEMORY_OBJECTS, SHARED_MEMORY_INDEX_CAPACITY, objectSlotId);
+const MappingIndex = indexed_arena.MultimapIndex(MAPPING_EDGE_CAPACITY, MAPPING_EDGE_CAPACITY, MAPPING_INDEX_CAPACITY);
 
 pub const Table = struct {
     next_object_id: u64 = 1,
     arena: ObjectArena = ObjectArena.init(),
+    mapping_index: MappingIndex = MappingIndex.init(),
 
     pub fn init() Table {
         return .{};
@@ -112,7 +116,8 @@ pub const Table = struct {
     }
 
     pub fn map(self: *Table, object_id: ids.SharedMemoryId, task_id: ids.TaskId) Error!void {
-        const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
+        const object_slot_index = self.arena.slotIndexOf(object_id) orelse return error.SharedMemoryNotFound;
+        const object = &self.arena.slots[object_slot_index].object;
         if (object.revoked) return error.Revoked;
 
         for (object.mapped_task_ids[0..object.mapping_count]) |mapped_task_id| {
@@ -120,19 +125,25 @@ pub const Table = struct {
         }
         if (object.mapping_count >= object.mapped_task_ids.len) return error.TableFull;
 
+        if (!self.mapping_index.append(task_id.raw(), mappingEdgeIndex(object_slot_index, object.mapping_count))) return error.TableFull;
         object.mapped_task_ids[object.mapping_count] = task_id;
         object.mapping_count += 1;
     }
 
     pub fn unmap(self: *Table, object_id: ids.SharedMemoryId, task_id: ids.TaskId) Error!bool {
-        const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
+        const object_slot_index = self.arena.slotIndexOf(object_id) orelse return error.SharedMemoryNotFound;
+        const object = &self.arena.slots[object_slot_index].object;
         var index: usize = 0;
         while (index < object.mapping_count) : (index += 1) {
             if (!object.mapped_task_ids[index].eql(task_id)) continue;
 
+            _ = self.mapping_index.remove(task_id.raw(), mappingEdgeIndex(object_slot_index, index));
             var tail = index;
             while (tail + 1 < object.mapping_count) : (tail += 1) {
-                object.mapped_task_ids[tail] = object.mapped_task_ids[tail + 1];
+                const moved_task_id = object.mapped_task_ids[tail + 1];
+                _ = self.mapping_index.remove(moved_task_id.raw(), mappingEdgeIndex(object_slot_index, tail + 1));
+                if (!self.mapping_index.append(moved_task_id.raw(), mappingEdgeIndex(object_slot_index, tail))) return error.TableFull;
+                object.mapped_task_ids[tail] = moved_task_id;
             }
             object.mapping_count -= 1;
             object.mapped_task_ids[object.mapping_count] = ids.TaskId.zero;
@@ -142,7 +153,11 @@ pub const Table = struct {
     }
 
     pub fn revoke(self: *Table, object_id: ids.SharedMemoryId) Error!void {
-        const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
+        const object_slot_index = self.arena.slotIndexOf(object_id) orelse return error.SharedMemoryNotFound;
+        const object = &self.arena.slots[object_slot_index].object;
+        for (object.mapped_task_ids[0..object.mapping_count], 0..) |task_id, mapping_index| {
+            _ = self.mapping_index.remove(task_id.raw(), mappingEdgeIndex(object_slot_index, mapping_index));
+        }
         object.revoked = true;
         object.revocation_generation += 1;
         object.attachment_generation += 1;
@@ -193,7 +208,7 @@ pub const Table = struct {
     }
 
     pub fn mappingsForTask(self: *const Table, task_id: ids.TaskId) u16 {
-        return @intCast(self.arena.countMatching(task_id, objectSlotMapsTask));
+        return @intCast(self.mapping_index.count(task_id.raw()));
     }
 
     fn allocateObjectId(self: *Table) ids.SharedMemoryId {
@@ -216,12 +231,8 @@ fn objectSlotId(slot: *const ObjectSlot) ids.SharedMemoryId {
     return slot.object.id;
 }
 
-fn objectSlotMapsTask(task_id: ids.TaskId, slot: *const ObjectSlot) bool {
-    if (slot.object.revoked) return false;
-    for (slot.object.mapped_task_ids[0..slot.object.mapping_count]) |mapped_task_id| {
-        if (mapped_task_id.eql(task_id)) return true;
-    }
-    return false;
+fn mappingEdgeIndex(object_slot_index: usize, mapping_index: usize) usize {
+    return object_slot_index * MAX_MAPPINGS_PER_OBJECT + mapping_index;
 }
 
 fn zeroObject() Object {

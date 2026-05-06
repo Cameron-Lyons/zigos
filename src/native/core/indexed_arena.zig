@@ -4,6 +4,12 @@ const id_index = @import("id_index.zig");
 const ids = @import("ids.zig");
 const native_util = @import("util.zig");
 
+pub const no_index = std.math.maxInt(usize);
+
+pub fn nonZeroKey(key: u64) u64 {
+    return if (key == 0) 1 else key;
+}
+
 pub fn UniqueIndex(comptime capacity: usize) type {
     if (capacity == 0) @compileError("unique index requires at least one slot");
 
@@ -24,12 +30,144 @@ pub fn UniqueIndex(comptime capacity: usize) type {
             return id_index.lookup(capacity, &self.slots, key);
         }
 
+        pub fn contains(self: *const Self, key: u64) bool {
+            return self.lookup(key) != null;
+        }
+
         pub fn insert(self: *Self, key: u64, slot_index: usize) void {
             id_index.insert(capacity, &self.slots, key, slot_index, "indexed arena unique indexes never store zero keys");
         }
 
         pub fn remove(self: *Self, key: u64) void {
             id_index.remove(capacity, &self.slots, key);
+        }
+    };
+}
+
+pub fn MultimapIndex(
+    comptime link_capacity: usize,
+    comptime bucket_capacity: usize,
+    comptime index_capacity: usize,
+) type {
+    if (link_capacity == 0) @compileError("multimap index requires at least one linked slot");
+    if (bucket_capacity == 0) @compileError("multimap index requires at least one bucket");
+    if (index_capacity < bucket_capacity) @compileError("multimap bucket index capacity must cover buckets");
+
+    return struct {
+        const Self = @This();
+        const BucketIndex = UniqueIndex(index_capacity);
+
+        const Bucket = struct {
+            in_use: bool = false,
+            key: u64 = 0,
+            head: usize = no_index,
+            tail: usize = no_index,
+            count: usize = 0,
+        };
+
+        bucket_index: BucketIndex = BucketIndex.init(),
+        buckets: [bucket_capacity]Bucket = [_]Bucket{Bucket{}} ** bucket_capacity,
+        next_by_slot: [link_capacity]usize = [_]usize{no_index} ** link_capacity,
+
+        pub fn init() Self {
+            return .{};
+        }
+
+        pub fn reset(self: *Self) void {
+            self.* = Self.init();
+        }
+
+        pub fn count(self: *const Self, key: u64) usize {
+            const entry = self.bucketConst(key) orelse return 0;
+            return entry.count;
+        }
+
+        pub fn head(self: *const Self, key: u64) usize {
+            const entry = self.bucketConst(key) orelse return no_index;
+            return entry.head;
+        }
+
+        pub fn tail(self: *const Self, key: u64) usize {
+            const entry = self.bucketConst(key) orelse return no_index;
+            return entry.tail;
+        }
+
+        pub fn next(self: *const Self, slot_index: usize) usize {
+            if (slot_index >= link_capacity) return no_index;
+            return self.next_by_slot[slot_index];
+        }
+
+        pub fn append(self: *Self, key: u64, slot_index: usize) bool {
+            if (key == 0 or slot_index >= link_capacity) return false;
+            const entry = self.findOrCreateBucket(key) orelse return false;
+            self.next_by_slot[slot_index] = no_index;
+            if (entry.tail == no_index) {
+                entry.head = slot_index;
+            } else {
+                self.next_by_slot[entry.tail] = slot_index;
+            }
+            entry.tail = slot_index;
+            entry.count += 1;
+            return true;
+        }
+
+        pub fn remove(self: *Self, key: u64, slot_index: usize) bool {
+            if (key == 0 or slot_index >= link_capacity) return false;
+            const entry = self.bucket(key) orelse return false;
+
+            var previous: usize = no_index;
+            var current = entry.head;
+            while (current != no_index) : (current = self.next_by_slot[current]) {
+                if (current == slot_index) {
+                    const next_index = self.next_by_slot[current];
+                    if (previous == no_index) {
+                        entry.head = next_index;
+                    } else {
+                        self.next_by_slot[previous] = next_index;
+                    }
+                    if (entry.tail == current) entry.tail = previous;
+                    self.next_by_slot[current] = no_index;
+                    entry.count -= 1;
+                    if (entry.count == 0) {
+                        const bucket_key = entry.key;
+                        entry.* = .{};
+                        self.bucket_index.remove(bucket_key);
+                    }
+                    return true;
+                }
+                previous = current;
+            }
+            return false;
+        }
+
+        fn bucket(self: *Self, key: u64) ?*Bucket {
+            const bucket_index = self.bucket_index.lookup(key) orelse return null;
+            if (bucket_index >= bucket_capacity) native_util.impossibleByInvariant("multimap bucket index points outside buckets");
+            const slot = &self.buckets[bucket_index];
+            if (!slot.in_use or slot.key != key) native_util.impossibleByInvariant("multimap bucket index points at the wrong bucket");
+            return slot;
+        }
+
+        fn bucketConst(self: *const Self, key: u64) ?*const Bucket {
+            const bucket_index = self.bucket_index.lookup(key) orelse return null;
+            if (bucket_index >= bucket_capacity) native_util.impossibleByInvariant("multimap bucket index points outside buckets");
+            const slot = &self.buckets[bucket_index];
+            if (!slot.in_use or slot.key != key) native_util.impossibleByInvariant("multimap bucket index points at the wrong bucket");
+            return slot;
+        }
+
+        fn findOrCreateBucket(self: *Self, key: u64) ?*Bucket {
+            if (self.bucket(key)) |slot| return slot;
+            for (&self.buckets, 0..) |*slot, bucket_index| {
+                if (slot.in_use) continue;
+                slot.* = .{
+                    .in_use = true,
+                    .key = key,
+                };
+                self.bucket_index.insert(key, bucket_index);
+                return slot;
+            }
+            return null;
         }
     };
 }
@@ -144,6 +282,10 @@ pub fn IndexedArenaWithKey(
             return &self.slots[slot_index];
         }
 
+        pub fn slotIndexOf(self: *const Self, key: Key) ?usize {
+            return self.findIndex(key);
+        }
+
         pub fn remove(self: *Self, key: Key) bool {
             const slot_index = self.findIndex(key) orelse return false;
             return self.removeIndex(slot_index);
@@ -199,7 +341,7 @@ pub fn IndexedArenaWithKey(
             return count;
         }
 
-        pub fn countMatching(self: *const Self, context: anytype, comptime matches: anytype) usize {
+        fn countMatching(self: *const Self, context: anytype, comptime matches: anytype) usize {
             var count: usize = 0;
             for (&self.slots) |*slot| {
                 if (!slot.in_use) continue;
@@ -208,7 +350,7 @@ pub fn IndexedArenaWithKey(
             return count;
         }
 
-        pub fn findMatching(self: *Self, context: anytype, comptime matches: anytype) ?*Slot {
+        fn findMatching(self: *Self, context: anytype, comptime matches: anytype) ?*Slot {
             for (&self.slots) |*slot| {
                 if (!slot.in_use) continue;
                 if (matches(context, slot)) return slot;
@@ -216,7 +358,7 @@ pub fn IndexedArenaWithKey(
             return null;
         }
 
-        pub fn findConstMatching(self: *const Self, context: anytype, comptime matches: anytype) ?*const Slot {
+        fn findConstMatching(self: *const Self, context: anytype, comptime matches: anytype) ?*const Slot {
             for (&self.slots) |*slot| {
                 if (!slot.in_use) continue;
                 if (matches(context, slot)) return slot;
@@ -471,4 +613,25 @@ test "indexed arena supports secondary indexes" {
         arena.findByUniqueIndex(&owner_index, 92, @as(u64, 92), testSlotMatchesOwner).?.record.label,
     );
     try std.testing.expectEqual(@as(?*TestSlot, null), arena.findByUniqueIndex(&owner_index, 93, @as(u64, 93), testSlotMatchesOwner));
+}
+
+test "indexed arena supports maintained multimap indexes" {
+    const OwnerMultimap = MultimapIndex(4, 4, 8);
+    var owner_index = OwnerMultimap.init();
+
+    try std.testing.expect(owner_index.append(7, 0));
+    try std.testing.expect(owner_index.append(7, 2));
+    try std.testing.expect(owner_index.append(8, 1));
+
+    try std.testing.expectEqual(@as(usize, 2), owner_index.count(7));
+    try std.testing.expectEqual(@as(usize, 1), owner_index.count(8));
+    try std.testing.expectEqual(@as(usize, 0), owner_index.head(7));
+    try std.testing.expectEqual(@as(usize, 2), owner_index.next(0));
+    try std.testing.expectEqual(no_index, owner_index.next(2));
+
+    try std.testing.expect(owner_index.remove(7, 0));
+    try std.testing.expectEqual(@as(usize, 1), owner_index.count(7));
+    try std.testing.expectEqual(@as(usize, 2), owner_index.head(7));
+    try std.testing.expect(owner_index.remove(7, 2));
+    try std.testing.expectEqual(@as(usize, 0), owner_index.count(7));
 }

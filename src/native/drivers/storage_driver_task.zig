@@ -28,6 +28,14 @@ const ATA_SR_DF: u8 = 0x20;
 const ATA_SR_DRQ: u8 = 0x08;
 const ATA_SR_ERR: u8 = 0x01;
 
+const ATA_MAX_SECTOR_TRANSFER: u8 = 128;
+const ATA_WORDS_PER_SECTOR: usize = storage_volume.sector_size / @sizeOf(u16);
+const ATA_DRIVE_SELECT_MASTER: u8 = 0xE0;
+const ATA_DRIVE_SELECT_SLAVE: u8 = 0xF0;
+const ATA_LBA28_HEAD_MASK: u64 = 0x0F;
+const ATA_ALT_STATUS_SETTLE_READS: usize = 4;
+const ATA_POLL_LIMIT: u32 = 100_000;
+
 pub const AtaDriverError = error{
     Timeout,
     DriveError,
@@ -112,27 +120,16 @@ export fn zigosStorageBootstrapAtaWrite(
 }
 
 fn readSectors(session: *AtaControllerSession, lba: u64, count: u8, buffer: []u8) AtaDriverError!void {
-    if (count == 0 or count > 128) return error.InvalidParameter;
+    if (count == 0 or count > ATA_MAX_SECTOR_TRANSFER) return error.InvalidParameter;
     if (buffer.len < @as(usize, count) * storage_volume.sector_size) return error.InvalidParameter;
 
     try waitDriveReady(session);
-
-    const drive_select: u8 = if (session.is_master) 0xE0 else 0xF0;
-    try writePortU8(session, session.base_port + ATA_REG_DRIVE, drive_select | @as(u8, @intCast((lba >> 24) & 0x0F)));
-    for (0..4) |_| {
-        _ = try readPortU8(session, session.ctrl_port);
-    }
-
-    try writePortU8(session, session.base_port + ATA_REG_SECCOUNT, count);
-    try writePortU8(session, session.base_port + ATA_REG_LBA0, @as(u8, @intCast(lba & 0xFF)));
-    try writePortU8(session, session.base_port + ATA_REG_LBA1, @as(u8, @intCast((lba >> 8) & 0xFF)));
-    try writePortU8(session, session.base_port + ATA_REG_LBA2, @as(u8, @intCast((lba >> 16) & 0xFF)));
-    try writePortU8(session, session.base_port + ATA_REG_COMMAND, ATA_CMD_READ_SECTORS);
+    try issueLba28Command(session, lba, count, ATA_CMD_READ_SECTORS);
 
     var buffer_offset: usize = 0;
     for (0..count) |_| {
         try waitDataReady(session);
-        for (0..256) |_| {
+        for (0..ATA_WORDS_PER_SECTOR) |_| {
             const word = try readPortU16(session, session.base_port + ATA_REG_DATA);
             buffer[buffer_offset] = @as(u8, @truncate(word));
             buffer[buffer_offset + 1] = @as(u8, @truncate(word >> 8));
@@ -142,27 +139,16 @@ fn readSectors(session: *AtaControllerSession, lba: u64, count: u8, buffer: []u8
 }
 
 fn writeSectors(session: *AtaControllerSession, lba: u64, count: u8, buffer: []const u8) AtaDriverError!void {
-    if (count == 0 or count > 128) return error.InvalidParameter;
+    if (count == 0 or count > ATA_MAX_SECTOR_TRANSFER) return error.InvalidParameter;
     if (buffer.len < @as(usize, count) * storage_volume.sector_size) return error.InvalidParameter;
 
     try waitDriveReady(session);
-
-    const drive_select: u8 = if (session.is_master) 0xE0 else 0xF0;
-    try writePortU8(session, session.base_port + ATA_REG_DRIVE, drive_select | @as(u8, @intCast((lba >> 24) & 0x0F)));
-    for (0..4) |_| {
-        _ = try readPortU8(session, session.ctrl_port);
-    }
-
-    try writePortU8(session, session.base_port + ATA_REG_SECCOUNT, count);
-    try writePortU8(session, session.base_port + ATA_REG_LBA0, @as(u8, @intCast(lba & 0xFF)));
-    try writePortU8(session, session.base_port + ATA_REG_LBA1, @as(u8, @intCast((lba >> 8) & 0xFF)));
-    try writePortU8(session, session.base_port + ATA_REG_LBA2, @as(u8, @intCast((lba >> 16) & 0xFF)));
-    try writePortU8(session, session.base_port + ATA_REG_COMMAND, ATA_CMD_WRITE_SECTORS);
+    try issueLba28Command(session, lba, count, ATA_CMD_WRITE_SECTORS);
 
     var buffer_offset: usize = 0;
     for (0..count) |_| {
         try waitDataReady(session);
-        for (0..256) |_| {
+        for (0..ATA_WORDS_PER_SECTOR) |_| {
             const word = @as(u16, buffer[buffer_offset]) |
                 (@as(u16, buffer[buffer_offset + 1]) << 8);
             try writePortU16(session, session.base_port + ATA_REG_DATA, word);
@@ -174,8 +160,22 @@ fn writeSectors(session: *AtaControllerSession, lba: u64, count: u8, buffer: []c
     try waitDriveReady(session);
 }
 
+fn issueLba28Command(session: *AtaControllerSession, lba: u64, count: u8, command: u8) AtaDriverError!void {
+    const drive_select = if (session.is_master) ATA_DRIVE_SELECT_MASTER else ATA_DRIVE_SELECT_SLAVE;
+    try writePortU8(session, session.base_port + ATA_REG_DRIVE, drive_select | @as(u8, @intCast((lba >> 24) & ATA_LBA28_HEAD_MASK)));
+    for (0..ATA_ALT_STATUS_SETTLE_READS) |_| {
+        _ = try readPortU8(session, session.ctrl_port);
+    }
+
+    try writePortU8(session, session.base_port + ATA_REG_SECCOUNT, count);
+    try writePortU8(session, session.base_port + ATA_REG_LBA0, @as(u8, @truncate(lba)));
+    try writePortU8(session, session.base_port + ATA_REG_LBA1, @as(u8, @truncate(lba >> 8)));
+    try writePortU8(session, session.base_port + ATA_REG_LBA2, @as(u8, @truncate(lba >> 16)));
+    try writePortU8(session, session.base_port + ATA_REG_COMMAND, command);
+}
+
 fn waitDriveReady(session: *AtaControllerSession) AtaDriverError!void {
-    var timeout: u32 = 100000;
+    var timeout: u32 = ATA_POLL_LIMIT;
     while (timeout > 0) : (timeout -= 1) {
         const status = try readPortU8(session, session.base_port + ATA_REG_STATUS);
         if ((status & ATA_SR_BSY) == 0) return;
@@ -185,7 +185,7 @@ fn waitDriveReady(session: *AtaControllerSession) AtaDriverError!void {
 }
 
 fn waitDataReady(session: *AtaControllerSession) AtaDriverError!void {
-    var timeout: u32 = 100000;
+    var timeout: u32 = ATA_POLL_LIMIT;
     while (timeout > 0) : (timeout -= 1) {
         const status = try readPortU8(session, session.base_port + ATA_REG_STATUS);
         if ((status & ATA_SR_BSY) == 0 and (status & ATA_SR_DRQ) != 0) return;

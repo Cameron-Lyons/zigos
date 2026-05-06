@@ -1,16 +1,7 @@
 const abi = @import("../core/abi.zig");
 const component_port = @import("component_port.zig");
 const dispatch = @import("syscall_dispatch.zig");
-const syscall_abi = @import("syscall_abi.zig");
 const task_runtime = @import("../task/task_runtime.zig");
-
-pub const operations = [_]syscall_abi.Operation{
-    syscall_abi.declare(.task_create, .task, component_port.TaskCreateRequest, abi.TaskDescriptor, dispatchTaskCreate, .embedded_user_buffers),
-    syscall_abi.declare(.task_terminate, .task, component_port.TaskTerminateRequest, abi.BoolResponse, dispatchTaskTerminate, .plain),
-    syscall_abi.declare(.time_query, .task, component_port.TimeQueryRequest, abi.TimeQueryResponse, dispatchTimeQuery, .plain),
-    syscall_abi.declare(.resource_query, .task, component_port.ResourceQueryRequest, abi.ResourceDescriptor, dispatchResourceQuery, .plain),
-    syscall_abi.declare(.accounting_query, .task, component_port.AccountingQueryRequest, abi.AccountingDescriptor, dispatchAccountingQuery, .plain),
-};
 
 const MAX_COMPONENT_LABEL_BYTES: usize = 48;
 const MAX_COMPONENT_ENTRY_BYTES: usize = 64;

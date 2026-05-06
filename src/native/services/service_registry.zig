@@ -1,6 +1,7 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const fixed_table = @import("../core/fixed_table.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const typed_component_abi = @import("typed_component_abi.zig");
@@ -41,6 +42,8 @@ const BindingSlot = struct {
     in_use: bool = false,
     binding: Binding = zeroBinding(),
 };
+
+const InterfaceNameIndex = indexed_arena.UniqueIndex(MAX_BINDINGS * 2);
 
 pub const Service = struct {
     bootstrap: ?BootstrapEndpoint = null,
@@ -83,6 +86,7 @@ pub const Service = struct {
 
 pub const Registry = struct {
     slots: [MAX_BINDINGS]BindingSlot = [_]BindingSlot{BindingSlot{}} ** MAX_BINDINGS,
+    interface_name_index: InterfaceNameIndex = InterfaceNameIndex.init(),
 
     pub fn init() Registry {
         return .{};
@@ -101,7 +105,8 @@ pub const Registry = struct {
         if (self.find(interface.name)) |_| return error.DuplicateInterface;
         if (!typedContractCompatible(interface)) return error.TypedContractMismatch;
 
-        const slot = fixed_table.firstFreeSlot(BindingSlot, MAX_BINDINGS, &self.slots) orelse return error.BindingTableFull;
+        const slot_index = fixed_table.firstFreeSlotIndex(BindingSlot, MAX_BINDINGS, &self.slots) orelse return error.BindingTableFull;
+        const slot = &self.slots[slot_index];
         slot.in_use = true;
         slot.binding = zeroBinding();
         slot.binding.service_id = service_id;
@@ -124,6 +129,7 @@ pub const Registry = struct {
         if (typed_component_abi.contractFor(interface.name)) |contract| {
             slot.binding.typed_contract_hash = contract.contract_hash;
         }
+        self.interface_name_index.insert(interfaceNameKey(slot.binding.interface.name), slot_index);
     }
 
     pub fn connect(self: *const Registry, interface: manifest.InterfaceDecl) Error!abi.ServiceConnectionDescriptor {
@@ -150,7 +156,11 @@ pub const Registry = struct {
     }
 
     fn find(self: *const Registry, name: []const u8) ?*const Binding {
-        const slot = fixed_table.findConstSlot(BindingSlot, MAX_BINDINGS, &self.slots, name, bindingSlotMatchesName) orelse return null;
+        const slot_index = self.interface_name_index.lookup(interfaceNameKey(name)) orelse return null;
+        if (slot_index >= MAX_BINDINGS) native_util.impossibleByInvariant("service registry name index points outside bindings");
+        const slot = &self.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("service registry name index points at a free binding");
+        if (!bindingSlotMatchesName(name, slot)) native_util.impossibleByInvariant("service registry name index points at the wrong binding");
         return &slot.binding;
     }
 };
@@ -175,6 +185,10 @@ fn zeroBinding() Binding {
 
 fn hashInterface(name: []const u8) u64 {
     return native_util.fnv1a64(name);
+}
+
+fn interfaceNameKey(name: []const u8) u64 {
+    return indexed_arena.nonZeroKey(hashInterface(name));
 }
 
 fn typedContractCompatible(interface: manifest.InterfaceDecl) bool {

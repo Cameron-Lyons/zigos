@@ -1,6 +1,34 @@
+const gdt = @import("gdt.zig");
 const idt = @import("idt.zig");
 const keyboard = @import("../drivers/keyboard.zig");
 const io = @import("../utils/io.zig");
+
+const GateHandler = *const fn () callconv(.c) void;
+
+const IDT_INTERRUPT_GATE: u8 = 0x8E;
+const IDT_USER_DPL: u8 = 0x60;
+const EXCEPTION_VECTOR_COUNT: u32 = 32;
+const PAGE_FAULT_VECTOR: u32 = 14;
+const IRQ_BASE_VECTOR: u8 = 32;
+const IRQ_SLAVE_BASE_VECTOR: u32 = 40;
+const TIMER_IRQ_VECTOR: u32 = 32;
+const KEYBOARD_IRQ_VECTOR: u32 = 33;
+const SYSCALL_VECTOR: u8 = 128;
+const NATIVE_SYSCALL_VECTOR: u8 = 129;
+
+const PIC_MASTER_COMMAND_PORT: u16 = 0x20;
+const PIC_MASTER_DATA_PORT: u16 = 0x21;
+const PIC_SLAVE_COMMAND_PORT: u16 = 0xA0;
+const PIC_SLAVE_DATA_PORT: u16 = 0xA1;
+const PIC_EOI: u8 = 0x20;
+const PIC_ICW1_INIT: u8 = 0x10;
+const PIC_ICW1_EXPECT_ICW4: u8 = 0x01;
+const PIC_ICW4_8086: u8 = 0x01;
+const PIC_MASTER_OFFSET: u8 = 0x20;
+const PIC_SLAVE_OFFSET: u8 = 0x28;
+const PIC_MASTER_HAS_SLAVE_ON_IRQ2: u8 = 0x04;
+const PIC_SLAVE_CASCADE_ID: u8 = 0x02;
+const PIC_MASK_NONE: u8 = 0x00;
 
 extern fn isr0() void;
 extern fn isr1() void;
@@ -53,6 +81,60 @@ extern fn irq12() void;
 extern fn irq13() void;
 extern fn irq14() void;
 extern fn irq15() void;
+
+const exception_stubs = [_]GateHandler{
+    &isr0,
+    &isr1,
+    &isr2,
+    &isr3,
+    &isr4,
+    &isr5,
+    &isr6,
+    &isr7,
+    &isr8,
+    &isr9,
+    &isr10,
+    &isr11,
+    &isr12,
+    &isr13,
+    &isr14,
+    &isr15,
+    &isr16,
+    &isr17,
+    &isr18,
+    &isr19,
+    &isr20,
+    &isr21,
+    &isr22,
+    &isr23,
+    &isr24,
+    &isr25,
+    &isr26,
+    &isr27,
+    &isr28,
+    &isr29,
+    &isr30,
+    &isr31,
+};
+
+const irq_stubs = [_]GateHandler{
+    &irq0,
+    &irq1,
+    &irq2,
+    &irq3,
+    &irq4,
+    &irq5,
+    &irq6,
+    &irq7,
+    &irq8,
+    &irq9,
+    &irq10,
+    &irq11,
+    &irq12,
+    &irq13,
+    &irq14,
+    &irq15,
+};
 
 pub const Registers = struct {
     ds: u32,
@@ -115,7 +197,7 @@ pub export fn isrHandler(regs: *Registers) void {
         return;
     }
 
-    if (regs.int_no == 14) {
+    if (regs.int_no == PAGE_FAULT_VECTOR) {
         const paging = @import("../memory/paging.zig");
         paging.page_fault_handler(regs);
         return;
@@ -123,7 +205,7 @@ pub export fn isrHandler(regs: *Registers) void {
 
     const console = @import("../utils/console.zig");
     console.print("Received interrupt: ");
-    if (regs.int_no < 32) {
+    if (regs.int_no < EXCEPTION_VECTOR_COUNT) {
         console.print(exception_messages[regs.int_no]);
         console.print("\n");
         console.print("System Halted!\n");
@@ -142,90 +224,56 @@ pub fn registerHandler(vector: u8, handler: InterruptHandler) void {
 }
 
 pub export fn irqHandler(regs: *Registers) void {
-    if (regs.int_no >= 40) {
-        io.outb(0xA0, 0x20);
+    if (regs.int_no >= IRQ_SLAVE_BASE_VECTOR) {
+        io.outb(PIC_SLAVE_COMMAND_PORT, PIC_EOI);
     }
-    io.outb(0x20, 0x20);
+    io.outb(PIC_MASTER_COMMAND_PORT, PIC_EOI);
 
     if (custom_handlers[regs.int_no]) |handler| {
         const frame: *InterruptFrame = @ptrCast(regs);
         handler(frame);
-    } else if (regs.int_no == 32) {
+    } else if (regs.int_no == TIMER_IRQ_VECTOR) {
         const timer = @import("../timer/timer.zig");
         timer.handleInterrupt();
-    } else if (regs.int_no == 33) {
+    } else if (regs.int_no == KEYBOARD_IRQ_VECTOR) {
         keyboard.handleInterrupt();
     }
 }
 
 pub fn init() void {
-    idt.setGate(0, &isr0, 0x08, 0x8E);
-    idt.setGate(1, &isr1, 0x08, 0x8E);
-    idt.setGate(2, &isr2, 0x08, 0x8E);
-    idt.setGate(3, &isr3, 0x08, 0x8E);
-    idt.setGate(4, &isr4, 0x08, 0x8E);
-    idt.setGate(5, &isr5, 0x08, 0x8E);
-    idt.setGate(6, &isr6, 0x08, 0x8E);
-    idt.setGate(7, &isr7, 0x08, 0x8E);
-    idt.setGate(8, &isr8, 0x08, 0x8E);
-    idt.setGate(9, &isr9, 0x08, 0x8E);
-    idt.setGate(10, &isr10, 0x08, 0x8E);
-    idt.setGate(11, &isr11, 0x08, 0x8E);
-    idt.setGate(12, &isr12, 0x08, 0x8E);
-    idt.setGate(13, &isr13, 0x08, 0x8E);
-    idt.setGate(14, &isr14, 0x08, 0x8E);
-    idt.setGate(15, &isr15, 0x08, 0x8E);
-    idt.setGate(16, &isr16, 0x08, 0x8E);
-    idt.setGate(17, &isr17, 0x08, 0x8E);
-    idt.setGate(18, &isr18, 0x08, 0x8E);
-    idt.setGate(19, &isr19, 0x08, 0x8E);
-    idt.setGate(20, &isr20, 0x08, 0x8E);
-    idt.setGate(21, &isr21, 0x08, 0x8E);
-    idt.setGate(22, &isr22, 0x08, 0x8E);
-    idt.setGate(23, &isr23, 0x08, 0x8E);
-    idt.setGate(24, &isr24, 0x08, 0x8E);
-    idt.setGate(25, &isr25, 0x08, 0x8E);
-    idt.setGate(26, &isr26, 0x08, 0x8E);
-    idt.setGate(27, &isr27, 0x08, 0x8E);
-    idt.setGate(28, &isr28, 0x08, 0x8E);
-    idt.setGate(29, &isr29, 0x08, 0x8E);
-    idt.setGate(30, &isr30, 0x08, 0x8E);
-    idt.setGate(31, &isr31, 0x08, 0x8E);
+    for (exception_stubs, 0..) |stub, vector| {
+        setKernelGate(@as(u8, @intCast(vector)), stub);
+    }
 
     remapPIC();
 
-    idt.setGate(32, &irq0, 0x08, 0x8E);
-    idt.setGate(33, &irq1, 0x08, 0x8E);
-    idt.setGate(34, &irq2, 0x08, 0x8E);
-    idt.setGate(35, &irq3, 0x08, 0x8E);
-    idt.setGate(36, &irq4, 0x08, 0x8E);
-    idt.setGate(37, &irq5, 0x08, 0x8E);
-    idt.setGate(38, &irq6, 0x08, 0x8E);
-    idt.setGate(39, &irq7, 0x08, 0x8E);
-    idt.setGate(40, &irq8, 0x08, 0x8E);
-    idt.setGate(41, &irq9, 0x08, 0x8E);
-    idt.setGate(42, &irq10, 0x08, 0x8E);
-    idt.setGate(43, &irq11, 0x08, 0x8E);
-    idt.setGate(44, &irq12, 0x08, 0x8E);
-    idt.setGate(45, &irq13, 0x08, 0x8E);
-    idt.setGate(46, &irq14, 0x08, 0x8E);
-    idt.setGate(47, &irq15, 0x08, 0x8E);
+    for (irq_stubs, 0..) |stub, irq| {
+        setKernelGate(@as(u8, @intCast(@as(usize, IRQ_BASE_VECTOR) + irq)), stub);
+    }
 
-    idt.setGate(128, &isr128, 0x08, 0x8E | 0x60);
-    idt.setGate(129, &isr129, 0x08, 0x8E | 0x60);
+    setUserGate(SYSCALL_VECTOR, &isr128);
+    setUserGate(NATIVE_SYSCALL_VECTOR, &isr129);
 
     idt.init();
 }
 
+fn setKernelGate(vector: u8, handler: GateHandler) void {
+    idt.setGate(vector, handler, gdt.KERNEL_CODE_SEG, IDT_INTERRUPT_GATE);
+}
+
+fn setUserGate(vector: u8, handler: GateHandler) void {
+    idt.setGate(vector, handler, gdt.KERNEL_CODE_SEG, IDT_INTERRUPT_GATE | IDT_USER_DPL);
+}
+
 fn remapPIC() void {
-    io.outb(0x20, 0x11);
-    io.outb(0xA0, 0x11);
-    io.outb(0x21, 0x20);
-    io.outb(0xA1, 0x28);
-    io.outb(0x21, 0x04);
-    io.outb(0xA1, 0x02);
-    io.outb(0x21, 0x01);
-    io.outb(0xA1, 0x01);
-    io.outb(0x21, 0x0);
-    io.outb(0xA1, 0x0);
+    io.outb(PIC_MASTER_COMMAND_PORT, PIC_ICW1_INIT | PIC_ICW1_EXPECT_ICW4);
+    io.outb(PIC_SLAVE_COMMAND_PORT, PIC_ICW1_INIT | PIC_ICW1_EXPECT_ICW4);
+    io.outb(PIC_MASTER_DATA_PORT, PIC_MASTER_OFFSET);
+    io.outb(PIC_SLAVE_DATA_PORT, PIC_SLAVE_OFFSET);
+    io.outb(PIC_MASTER_DATA_PORT, PIC_MASTER_HAS_SLAVE_ON_IRQ2);
+    io.outb(PIC_SLAVE_DATA_PORT, PIC_SLAVE_CASCADE_ID);
+    io.outb(PIC_MASTER_DATA_PORT, PIC_ICW4_8086);
+    io.outb(PIC_SLAVE_DATA_PORT, PIC_ICW4_8086);
+    io.outb(PIC_MASTER_DATA_PORT, PIC_MASK_NONE);
+    io.outb(PIC_SLAVE_DATA_PORT, PIC_MASK_NONE);
 }
