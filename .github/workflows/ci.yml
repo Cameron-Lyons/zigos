@@ -30,6 +30,8 @@ jobs:
 
     - name: Set up ZigOS CI
       uses: ./.github/actions/setup-zigos-ci
+      with:
+        install-build-dependencies: "false"
 
     - name: Install zlint
       run: |
@@ -65,6 +67,7 @@ jobs:
     with:
       job-name: Kernel Build
       command: ./scripts/zig.sh build kernel
+      install-build-dependencies: false
 
   spec-conformance:
     needs: zig-toolchain
@@ -79,6 +82,7 @@ jobs:
     with:
       job-name: Host Tests
       command: ./scripts/zig.sh build host-tests
+      install-build-dependencies: false
 
   native-smoke:
     needs: zig-toolchain

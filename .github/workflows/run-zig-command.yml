@@ -13,6 +13,10 @@ on:
         required: false
         type: number
         default: 30
+      install-build-dependencies:
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   run:
@@ -26,6 +30,8 @@ jobs:
 
     - name: Set up ZigOS CI
       uses: ./.github/actions/setup-zigos-ci
+      with:
+        install-build-dependencies: ${{ inputs.install-build-dependencies }}
 
     - name: Run command
       shell: bash
