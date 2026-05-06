@@ -21,11 +21,69 @@ runs:
           exit 1
         fi
         echo "version=${version}" >> "${GITHUB_OUTPUT}"
+        echo "install-dir=build/zig-x86_64-linux-${version}" >> "${GITHUB_OUTPUT}"
+
+    - name: Restore Zig toolchain cache
+      id: restore-zig
+      uses: actions/cache/restore@v4
+      continue-on-error: true
+      with:
+        path: ${{ steps.resolve-zig-version.outputs.install-dir }}
+        key: zig-linux-x86_64-${{ steps.resolve-zig-version.outputs.version }}
 
     - name: Install Zig
-      uses: goto-bus-stop/setup-zig@v2
+      if: steps.restore-zig.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        version="${{ steps.resolve-zig-version.outputs.version }}"
+        install_dir="${GITHUB_WORKSPACE}/${{ steps.resolve-zig-version.outputs.install-dir }}"
+        archive="${RUNNER_TEMP}/zig-${version}.tar.xz"
+        download_url="https://ziglang.org/download/${version}/zig-x86_64-linux-${version}.tar.xz"
+
+        rm -rf "${install_dir}"
+        mkdir -p "$(dirname "${install_dir}")"
+
+        curl \
+          --fail \
+          --location \
+          --retry 8 \
+          --retry-all-errors \
+          --retry-delay 10 \
+          --connect-timeout 30 \
+          --max-time 900 \
+          --output "${archive}" \
+          "${download_url}"
+
+        tar -xJf "${archive}" -C "$(dirname "${install_dir}")"
+        if [ ! -x "${install_dir}/zig" ]; then
+          echo "Installed Zig binary not found at ${install_dir}/zig" >&2
+          exit 1
+        fi
+        if [ "$("${install_dir}/zig" version)" != "${version}" ]; then
+          echo "Installed Zig version mismatch: expected ${version}, got $("${install_dir}/zig" version)" >&2
+          exit 1
+        fi
+
+    - name: Save Zig toolchain cache
+      if: steps.restore-zig.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      continue-on-error: true
       with:
-        version: ${{ steps.resolve-zig-version.outputs.version }}
+        path: ${{ steps.resolve-zig-version.outputs.install-dir }}
+        key: zig-linux-x86_64-${{ steps.resolve-zig-version.outputs.version }}
+
+    - name: Add Zig to PATH
+      shell: bash
+      run: |
+        install_dir="${GITHUB_WORKSPACE}/${{ steps.resolve-zig-version.outputs.install-dir }}"
+        if [ ! -x "${install_dir}/zig" ]; then
+          echo "Zig binary not found at ${install_dir}/zig" >&2
+          exit 1
+        fi
+        echo "${install_dir}" >> "${GITHUB_PATH}"
+        "${install_dir}/zig" version
 
     - name: Install build dependencies
       shell: bash
