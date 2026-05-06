@@ -1,4 +1,5 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
+const builtin = @import("builtin");
 const launch_helpers = @import("task_runtime_launch.zig");
 const id_index = @import("../core/id_index.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -505,21 +506,32 @@ pub fn indexHash(id: u64, comptime capacity: usize) usize {
 
 pub fn taskCapabilityIndex(task: *const TaskRecord, capability_id: u64) ?usize {
     const cold = taskColdConst(task);
-    const slot_index = indexLookup(CAPABILITY_INDEX_CAPACITY, &cold.capability_index_slots, capability_id) orelse return null;
-    if (slot_index >= task.capability_count) return null;
-    if (cold.capability_ids[slot_index] != capability_id) return null;
+    const slot_index = indexLookup(CAPABILITY_INDEX_CAPACITY, &cold.capability_index_slots, capability_id) orelse {
+        if (debugIndexChecksEnabled() and taskCapabilityScanIndex(task, capability_id) != null) {
+            native_util.impossibleByInvariant("task capability index missed a live capability");
+        }
+        return null;
+    };
+    if (slot_index >= task.capability_count) native_util.impossibleByInvariant("task capability index points outside live capabilities");
+    if (cold.capability_ids[slot_index] != capability_id) native_util.impossibleByInvariant("task capability index points at the wrong capability");
     return slot_index;
 }
 
 pub fn taskHasCapability(task: *const TaskRecord, capability_id: u64) bool {
-    const cold = taskColdConst(task);
-    if (taskCapabilityIndex(task, capability_id) != null) return true;
+    return taskCapabilityIndex(task, capability_id) != null;
+}
 
+fn taskCapabilityScanIndex(task: *const TaskRecord, capability_id: u64) ?usize {
+    const cold = taskColdConst(task);
     var index: usize = 0;
     while (index < task.capability_count) : (index += 1) {
-        if (cold.capability_ids[index] == capability_id) return true;
+        if (cold.capability_ids[index] == capability_id) return index;
     }
-    return false;
+    return null;
+}
+
+fn debugIndexChecksEnabled() bool {
+    return builtin.mode == .Debug;
 }
 
 pub fn rebuildCapabilityIndex(task: *TaskRecord) void {

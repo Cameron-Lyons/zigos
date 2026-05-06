@@ -3,6 +3,7 @@ const capability = @import("../kernel_api/capability.zig");
 const file_bridge = @import("file_bridge.zig");
 const object_store = @import("object_store.zig");
 const checkpoint_support = @import("storage_service_checkpoint.zig");
+const ids = @import("../core/ids.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
@@ -115,31 +116,32 @@ pub const StorageCore = struct {
         return record;
     }
 
-    pub fn beginTransaction(self: *Service, workspace_id: u64) workspace.Error!void {
-        try self.workspaces.beginTransaction(workspace_id);
+    pub fn beginTransaction(self: *Service, workspace_id: anytype) workspace.Error!void {
+        const key = workspaceId(workspace_id);
+        try self.workspaces.beginTransaction(key);
         self.deferred_checkpoint_count += 1;
         self.noteMutation(false);
     }
 
     pub fn stagePut(
         self: *Service,
-        workspace_id: u64,
+        workspace_id: anytype,
         path: []const u8,
-        object_id: u64,
-        version_id: u64,
+        object_id: anytype,
+        version_id: anytype,
         object_type: object_store.ObjectType,
     ) workspace.Error!void {
-        try self.workspaces.stagePut(workspace_id, path, object_id, version_id, object_type);
+        try self.workspaces.stagePut(workspaceId(workspace_id), path, objectId(object_id), versionId(version_id), object_type);
         self.noteMutation(false);
     }
 
-    pub fn stageDelete(self: *Service, workspace_id: u64, path: []const u8) workspace.Error!void {
-        try self.workspaces.stageDelete(workspace_id, path);
+    pub fn stageDelete(self: *Service, workspace_id: anytype, path: []const u8) workspace.Error!void {
+        try self.workspaces.stageDelete(workspaceId(workspace_id), path);
         self.noteMutation(false);
     }
 
-    pub fn commit(self: *Service, workspace_id: u64, tick: u64) workspace.Error!u32 {
-        const generation = try self.workspaces.commit(workspace_id, tick);
+    pub fn commit(self: *Service, workspace_id: anytype, tick: u64) workspace.Error!u32 {
+        const generation = try self.workspaces.commit(workspaceId(workspace_id), tick);
         if (self.deferred_checkpoint_count != 0) self.deferred_checkpoint_count -= 1;
         self.noteMutation(true);
         return generation;
@@ -147,55 +149,55 @@ pub const StorageCore = struct {
 
     pub fn snapshot(
         self: *Service,
-        workspace_id: u64,
+        workspace_id: anytype,
         label: []const u8,
         identity: signing.SignerIdentity,
     ) workspace.Error!*workspace.SnapshotRecord {
-        const snapshot_record = try self.workspaces.snapshot(workspace_id, label, identity);
+        const snapshot_record = try self.workspaces.snapshot(workspaceId(workspace_id), label, identity);
         self.noteMutation(true);
         return snapshot_record;
     }
 
-    pub fn restore(self: *Service, workspace_id: u64, snapshot_id: u64, tick: u64) workspace.Error!u32 {
-        const generation = try self.workspaces.restore(workspace_id, snapshot_id, tick);
+    pub fn restore(self: *Service, workspace_id: anytype, snapshot_id: anytype, tick: u64) workspace.Error!u32 {
+        const generation = try self.workspaces.restore(workspaceId(workspace_id), snapshotId(snapshot_id), tick);
         self.noteMutation(true);
         return generation;
     }
 
     pub fn restoreFromExportPackage(
         self: *Service,
-        workspace_id: u64,
+        workspace_id: anytype,
         package: *const workspace.ExportPackage,
         tick: u64,
     ) workspace.Error!u32 {
-        const generation = try self.workspaces.restoreFromExportPackage(workspace_id, package, tick);
+        const generation = try self.workspaces.restoreFromExportPackage(workspaceId(workspace_id), package, tick);
         self.noteMutation(true);
         return generation;
     }
 
-    pub fn recoverDeleted(self: *Service, workspace_id: u64, path: []const u8, tick: u64) workspace.Error!bool {
-        const recovered = try self.workspaces.recoverDeleted(workspace_id, path, tick);
+    pub fn recoverDeleted(self: *Service, workspace_id: anytype, path: []const u8, tick: u64) workspace.Error!bool {
+        const recovered = try self.workspaces.recoverDeleted(workspaceId(workspace_id), path, tick);
         if (recovered) self.noteMutation(true);
         return recovered;
     }
 
     pub fn exportSnapshot(
         self: *Service,
-        workspace_id: u64,
-        snapshot_id: u64,
+        workspace_id: anytype,
+        snapshot_id: anytype,
         identity: signing.SignerIdentity,
     ) workspace.Error!workspace.ExportPackage {
-        return self.workspaces.exportSnapshot(workspace_id, snapshot_id, identity);
+        return self.workspaces.exportSnapshot(workspaceId(workspace_id), snapshotId(snapshot_id), identity);
     }
 
     pub fn exportSnapshotInto(
         self: *Service,
-        workspace_id: u64,
-        snapshot_id: u64,
+        workspace_id: anytype,
+        snapshot_id: anytype,
         identity: signing.SignerIdentity,
         out: *workspace.ExportPackage,
     ) workspace.Error!void {
-        return self.workspaces.exportSnapshotInto(workspace_id, snapshot_id, identity, out);
+        return self.workspaces.exportSnapshotInto(workspaceId(workspace_id), snapshotId(snapshot_id), identity, out);
     }
 
     pub fn importWorkspace(
@@ -222,17 +224,17 @@ pub const StorageCore = struct {
         return record;
     }
 
-    pub fn shareWorkspace(self: *Service, workspace_id: u64, request: workspace.ShareRequest) workspace.Error!void {
-        try self.workspaces.share(workspace_id, request);
+    pub fn shareWorkspace(self: *Service, workspace_id: anytype, request: workspace.ShareRequest) workspace.Error!void {
+        try self.workspaces.share(workspaceId(workspace_id), request);
         self.noteMutation(true);
     }
 
-    pub fn resolve(self: *const Service, workspace_id: u64, path: []const u8) workspace.Error!workspace.Entry {
-        return self.workspaces.resolve(workspace_id, path);
+    pub fn resolve(self: *const Service, workspace_id: anytype, path: []const u8) workspace.Error!workspace.Entry {
+        return self.workspaces.resolve(workspaceId(workspace_id), path);
     }
 
-    pub fn entries(self: *const Service, workspace_id: u64) workspace.Error![]const workspace.Entry {
-        return self.workspaces.entries(workspace_id);
+    pub fn entries(self: *const Service, workspace_id: anytype) workspace.Error![]const workspace.Entry {
+        return self.workspaces.entries(workspaceId(workspace_id));
     }
 
     pub fn findWorkspace(self: *Service, owner: principal.PrincipalId, label: []const u8) ?*workspace.WorkspaceRecord {
@@ -243,8 +245,8 @@ pub const StorageCore = struct {
         return self.workspaces.findByLabel(label);
     }
 
-    pub fn findSnapshot(self: *Service, workspace_id: u64, label: []const u8) ?*workspace.SnapshotRecord {
-        return self.workspaces.findSnapshotByLabel(workspace_id, label);
+    pub fn findSnapshot(self: *Service, workspace_id: anytype, label: []const u8) ?*workspace.SnapshotRecord {
+        return self.workspaces.findSnapshotByLabel(workspaceId(workspace_id), label);
     }
 
     pub fn bridge(self: *Service) ?file_bridge.Bridge {
@@ -270,27 +272,27 @@ pub const StorageCore = struct {
         };
     }
 
-    pub fn object(self: *const Service, object_id: u64) ?*const object_store.ObjectRecord {
-        return self.store.object(object_id);
+    pub fn object(self: *const Service, object_id: anytype) ?*const object_store.ObjectRecord {
+        return self.store.object(objectId(object_id));
     }
 
-    pub fn version(self: *const Service, version_id: u64) ?*const object_store.VersionRecord {
-        return self.store.version(version_id);
+    pub fn version(self: *const Service, version_id: anytype) ?*const object_store.VersionRecord {
+        return self.store.version(versionId(version_id));
     }
 
     pub fn versionPayload(self: *const Service, version_record: *const object_store.VersionRecord) object_store.Error![]const u8 {
         return self.store.versionPayload(version_record);
     }
 
-    pub fn latestVersion(self: *const Service, object_id: u64) ?*const object_store.VersionRecord {
-        return self.store.latestVersion(object_id);
+    pub fn latestVersion(self: *const Service, object_id: anytype) ?*const object_store.VersionRecord {
+        return self.store.latestVersion(objectId(object_id));
     }
 
     pub fn latestInsertedVersion(self: *const Service) ?*const object_store.VersionRecord {
         var latest: ?*const object_store.VersionRecord = null;
-        for (&self.store.versions) |*slot| {
+        for (&self.store.versions.slots) |*slot| {
             if (!slot.in_use) continue;
-            if (latest == null or slot.version.id > latest.?.id) {
+            if (latest == null or slot.version.id.raw() > latest.?.id.raw()) {
                 latest = &slot.version;
             }
         }
@@ -305,41 +307,41 @@ pub const StorageCore = struct {
         return self.store.versionCount();
     }
 
-    pub fn findWorkspaceRecord(self: *Service, workspace_id: u64) ?*workspace.WorkspaceRecord {
-        return self.workspaces.find(workspace_id);
+    pub fn findWorkspaceRecord(self: *Service, workspace_id: anytype) ?*workspace.WorkspaceRecord {
+        return self.workspaces.find(workspaceId(workspace_id));
     }
 
-    pub fn findWorkspaceRecordConst(self: *const Service, workspace_id: u64) ?*const workspace.WorkspaceRecord {
-        return self.workspaces.findConst(workspace_id);
+    pub fn findWorkspaceRecordConst(self: *const Service, workspace_id: anytype) ?*const workspace.WorkspaceRecord {
+        return self.workspaces.findConst(workspaceId(workspace_id));
     }
 
-    pub fn findShareGrant(self: *const Service, workspace_id: u64, principal_id: principal.PrincipalId) ?workspace.ShareGrant {
-        return self.workspaces.findShareGrant(workspace_id, principal_id);
+    pub fn findShareGrant(self: *const Service, workspace_id: anytype, principal_id: principal.PrincipalId) ?workspace.ShareGrant {
+        return self.workspaces.findShareGrant(workspaceId(workspace_id), principal_id);
     }
 
-    pub fn workspaceHasAccess(self: *const Service, workspace_id: u64, request: workspace.AccessRequest) bool {
-        return self.workspaces.hasAccess(workspace_id, request);
+    pub fn workspaceHasAccess(self: *const Service, workspace_id: anytype, request: workspace.AccessRequest) bool {
+        return self.workspaces.hasAccess(workspaceId(workspace_id), request);
     }
 
     pub fn workspaceCanReshare(
         self: *const Service,
-        workspace_id: u64,
+        workspace_id: anytype,
         principal_id: principal.PrincipalId,
         network_scope: workspace.ShareNetworkScope,
         now_ticks: u64,
     ) bool {
-        return self.workspaces.canReshare(workspace_id, principal_id, network_scope, now_ticks);
+        return self.workspaces.canReshare(workspaceId(workspace_id), principal_id, network_scope, now_ticks);
     }
 
     pub fn hasAnySnapshots(self: *const Service) bool {
-        for (self.workspaces.snapshots) |slot| {
+        for (self.workspaces.snapshots.slots) |slot| {
             if (slot.in_use) return true;
         }
         return false;
     }
 
     pub fn hasAnyWorkspaceRecords(self: *const Service) bool {
-        for (self.workspaces.workspaces) |slot| {
+        for (self.workspaces.workspaces.slots) |slot| {
             if (slot.in_use) return true;
         }
         return false;
@@ -388,63 +390,71 @@ pub const StoragePort = struct {
         return self.core.createWorkspaceRef(request);
     }
 
-    pub fn beginTransaction(self: *StoragePort, authority: AuthorityContext, workspace_id: u64) (AuthorityError || workspace.Error)!void {
-        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
-        return self.core.beginTransaction(workspace_id);
+    pub fn beginTransaction(self: *StoragePort, authority: AuthorityContext, workspace_id: anytype) (AuthorityError || workspace.Error)!void {
+        const key = workspaceId(workspace_id);
+        _ = try self.requireStorageAuthority(authority, key, .write);
+        return self.core.beginTransaction(key);
     }
 
     pub fn stagePut(
         self: *StoragePort,
         authority: AuthorityContext,
-        workspace_id: u64,
+        workspace_id: anytype,
         path: []const u8,
-        object_id: u64,
-        version_id: u64,
+        object_id: anytype,
+        version_id: anytype,
         object_type: object_store.ObjectType,
     ) (AuthorityError || workspace.Error)!void {
-        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
-        return self.core.stagePut(workspace_id, path, object_id, version_id, object_type);
+        const key = workspaceId(workspace_id);
+        _ = try self.requireStorageAuthority(authority, key, .write);
+        return self.core.stagePut(key, path, objectId(object_id), versionId(version_id), object_type);
     }
 
-    pub fn stageDelete(self: *StoragePort, authority: AuthorityContext, workspace_id: u64, path: []const u8) (AuthorityError || workspace.Error)!void {
-        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
-        return self.core.stageDelete(workspace_id, path);
+    pub fn stageDelete(self: *StoragePort, authority: AuthorityContext, workspace_id: anytype, path: []const u8) (AuthorityError || workspace.Error)!void {
+        const key = workspaceId(workspace_id);
+        _ = try self.requireStorageAuthority(authority, key, .write);
+        return self.core.stageDelete(key, path);
     }
 
-    pub fn commit(self: *StoragePort, authority: AuthorityContext, workspace_id: u64) (AuthorityError || workspace.Error)!u32 {
-        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
-        return self.core.commit(workspace_id, authority.now_ticks);
+    pub fn commit(self: *StoragePort, authority: AuthorityContext, workspace_id: anytype) (AuthorityError || workspace.Error)!u32 {
+        const key = workspaceId(workspace_id);
+        _ = try self.requireStorageAuthority(authority, key, .write);
+        return self.core.commit(key, authority.now_ticks);
     }
 
     pub fn snapshot(
         self: *StoragePort,
         authority: AuthorityContext,
-        workspace_id: u64,
+        workspace_id: anytype,
         label: []const u8,
         identity: signing.SignerIdentity,
     ) (AuthorityError || workspace.Error)!*workspace.SnapshotRecord {
-        _ = try self.requireStorageAuthority(authority, workspace_id, .read);
-        return self.core.snapshot(workspace_id, label, identity);
+        const key = workspaceId(workspace_id);
+        _ = try self.requireStorageAuthority(authority, key, .read);
+        return self.core.snapshot(key, label, identity);
     }
 
-    pub fn restore(self: *StoragePort, authority: AuthorityContext, workspace_id: u64, snapshot_id: u64) (AuthorityError || workspace.Error)!u32 {
-        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
-        return self.core.restore(workspace_id, snapshot_id, authority.now_ticks);
+    pub fn restore(self: *StoragePort, authority: AuthorityContext, workspace_id: anytype, snapshot_id: anytype) (AuthorityError || workspace.Error)!u32 {
+        const key = workspaceId(workspace_id);
+        _ = try self.requireStorageAuthority(authority, key, .write);
+        return self.core.restore(key, snapshotId(snapshot_id), authority.now_ticks);
     }
 
     pub fn restoreFromExportPackage(
         self: *StoragePort,
         authority: AuthorityContext,
-        workspace_id: u64,
+        workspace_id: anytype,
         package: *const workspace.ExportPackage,
     ) (AuthorityError || workspace.Error)!u32 {
-        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
-        return self.core.restoreFromExportPackage(workspace_id, package, authority.now_ticks);
+        const key = workspaceId(workspace_id);
+        _ = try self.requireStorageAuthority(authority, key, .write);
+        return self.core.restoreFromExportPackage(key, package, authority.now_ticks);
     }
 
-    pub fn recoverDeleted(self: *StoragePort, authority: AuthorityContext, workspace_id: u64, path: []const u8) (AuthorityError || workspace.Error)!bool {
-        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
-        return self.core.recoverDeleted(workspace_id, path, authority.now_ticks);
+    pub fn recoverDeleted(self: *StoragePort, authority: AuthorityContext, workspace_id: anytype, path: []const u8) (AuthorityError || workspace.Error)!bool {
+        const key = workspaceId(workspace_id);
+        _ = try self.requireStorageAuthority(authority, key, .write);
+        return self.core.recoverDeleted(key, path, authority.now_ticks);
     }
 
     pub fn importWorkspace(
@@ -469,13 +479,14 @@ pub const StoragePort = struct {
         return self.core.importWorkspaceFromPackage(owner, label, package, authority.now_ticks);
     }
 
-    pub fn shareWorkspace(self: *StoragePort, authority: AuthorityContext, workspace_id: u64, request: workspace.ShareRequest) (AuthorityError || workspace.Error)!void {
-        _ = try self.requireStorageAuthority(authority, workspace_id, .write);
-        return self.core.shareWorkspace(workspace_id, request);
+    pub fn shareWorkspace(self: *StoragePort, authority: AuthorityContext, workspace_id: anytype, request: workspace.ShareRequest) (AuthorityError || workspace.Error)!void {
+        const key = workspaceId(workspace_id);
+        _ = try self.requireStorageAuthority(authority, key, .write);
+        return self.core.shareWorkspace(key, request);
     }
 
     pub fn resolve(self: *StoragePort, authority: AuthorityContext, request: file_bridge.ResolveRequest) (AuthorityError || workspace.Error)!file_bridge.View {
-        _ = try self.requireStorageAuthority(authority, request.workspace_id, request.access);
+        _ = try self.requireStorageAuthority(authority, ids.workspace(request.workspace_id), request.access);
         var bridge = file_bridge.Bridge.init(self.core, self.capability_table, bridgeResolveEntry, bridgeHasVersion);
         return bridge.resolve(request, authority.principal, authority.capability_id, authority.now_ticks);
     }
@@ -483,7 +494,7 @@ pub const StoragePort = struct {
     fn requireStorageAuthority(
         self: *const StoragePort,
         authority_context: AuthorityContext,
-        workspace_id: ?u64,
+        workspace_id: ?ids.WorkspaceId,
         access: file_bridge.AccessMode,
     ) AuthorityError!*const capability.Capability {
         const authority = self.capability_table.requireUsable(authority_context.capability_id, authority_context.now_ticks) catch |err| switch (err) {
@@ -497,12 +508,12 @@ pub const StoragePort = struct {
         }
         if (workspace_id) |requested_workspace_id| {
             if (authority.scope.workspace_id) |scoped_workspace_id| {
-                if (scoped_workspace_id != requested_workspace_id) return error.WorkspaceScopeViolation;
+                if (scoped_workspace_id != requested_workspace_id.raw()) return error.WorkspaceScopeViolation;
             }
         }
         switch (authority.target.kind) {
             .service => if (authority.target.id != self.core.service_id) return error.CapabilityRequired,
-            .workspace => if (workspace_id == null or authority.target.id != workspace_id.?) return error.WorkspaceScopeViolation,
+            .workspace => if (workspace_id == null or authority.target.id != workspace_id.?.raw()) return error.WorkspaceScopeViolation,
             .object => if (access == .write) return error.PermissionDenied,
             else => return error.CapabilityRequired,
         }
@@ -514,12 +525,28 @@ pub const StoragePort = struct {
 
 fn bridgeResolveEntry(context: *const anyopaque, workspace_id: u64, path: []const u8) workspace.Error!workspace.Entry {
     const service: *const StorageCore = @ptrCast(@alignCast(context));
-    return service.resolve(workspace_id, path);
+    return service.resolve(ids.workspace(workspace_id), path);
 }
 
 fn bridgeHasVersion(context: *const anyopaque, version_id: u64) bool {
     const service: *const StorageCore = @ptrCast(@alignCast(context));
-    return service.version(version_id) != null;
+    return service.version(ids.version(version_id)) != null;
+}
+
+fn workspaceId(value: anytype) ids.WorkspaceId {
+    return ids.coerce(ids.WorkspaceId, value);
+}
+
+fn objectId(value: anytype) ids.ObjectId {
+    return ids.coerce(ids.ObjectId, value);
+}
+
+fn versionId(value: anytype) ids.VersionId {
+    return ids.coerce(ids.VersionId, value);
+}
+
+fn snapshotId(value: anytype) ids.SnapshotId {
+    return ids.coerce(ids.SnapshotId, value);
 }
 
 test "storage port requires authority context for protected mutations" {
@@ -556,7 +583,7 @@ test "storage port requires authority context for protected mutations" {
         .seed = [_]u8{0xA7} ** 32,
     };
     const request = object_store.PutRequest{
-        .preferred_object_id = 953,
+        .preferred_object_id = ids.object(953),
         .object_type = .document,
         .payload = "authorized",
         .metadata = try object_store.signMetadata(signer, "authorized", "text/plain", .document, "authorized", 10),
@@ -575,7 +602,7 @@ test "storage port requires authority context for protected mutations" {
         .capability_id = writer.id,
         .now_ticks = 10,
     }, request);
-    try std.testing.expectEqual(@as(u64, 953), result.object_id);
+    try std.testing.expectEqual(ids.object(953), result.object_id);
 
     try std.testing.expectError(error.PermissionDenied, port.createWorkspace(.{
         .task_id = 21,
@@ -600,7 +627,7 @@ test "storage service retains authoritative object and workspace state across re
 
     var first = Service.initWithStore(700, 17, owner, &checkpoint_store);
     const object = try first.putVersion(.{
-        .preferred_object_id = 950,
+        .preferred_object_id = ids.object(950),
         .object_type = .document,
         .payload = "workspace hello",
         .metadata = try object_store.signMetadata(signer, "notes", "text/markdown", .document, "workspace hello", 10),
@@ -692,7 +719,7 @@ test "storage service reloads authoritative state from the attached volume after
 
     var first = Service.initWithStore(701, 17, owner, &checkpoint_store);
     const object = try first.putVersion(.{
-        .preferred_object_id = 951,
+        .preferred_object_id = ids.object(951),
         .object_type = .document,
         .payload = "cold-start hello",
         .metadata = try object_store.signMetadata(signer, "notes", "text/markdown", .document, "cold-start hello", 10),
@@ -783,7 +810,7 @@ test "storage service coalesces checkpoint writes across an explicit batch" {
     var service = Service.initWithStore(704, 21, owner, &checkpoint_store);
     service.beginCheckpointBatch();
     const object = try service.putVersion(.{
-        .preferred_object_id = 954,
+        .preferred_object_id = ids.object(954),
         .object_type = .document,
         .payload = "batched checkpoint",
         .metadata = try object_store.signMetadata(signer, "batched", "text/plain", .document, "batched checkpoint", 10),
@@ -837,7 +864,7 @@ test "storage service records checkpoint flush failures" {
         .seed = [_]u8{0xA6} ** 32,
     };
     _ = try service.putVersion(.{
-        .preferred_object_id = 952,
+        .preferred_object_id = ids.object(952),
         .object_type = .document,
         .payload = "checkpoint failure",
         .metadata = try object_store.signMetadata(signer, "failure", "text/plain", .document, "checkpoint failure", 10),

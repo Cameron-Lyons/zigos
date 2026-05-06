@@ -398,10 +398,10 @@ pub const DefaultMergeableDocumentAdapter = struct {
             );
             return .{ .merged = true, .conflict = false, .merged_document_len = merged_document.len };
         }
-        if (request.remote_version_id == 0 or request.remote_version_id == request.entry.version_id) {
+        if (request.remote_version_id == 0 or request.remote_version_id == request.entry.version_id.raw()) {
             return .{ .merged = true, .conflict = false };
         }
-        if (local_version.previous_version_id == request.remote_version_id) {
+        if (local_version.previous_version_id.raw() == request.remote_version_id) {
             return .{ .merged = true, .conflict = false };
         }
         return .{ .merged = true, .conflict = true };

@@ -3,8 +3,7 @@ const builtin = @import("builtin");
 const bootstrap_driver_port = @import("bootstrap_driver_port.zig");
 const driver_service = @import("driver_service.zig");
 const component_port = @import("../kernel_api/component_port.zig");
-const fixed_table = @import("../core/fixed_table.zig");
-const id_index = @import("../core/id_index.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const root = @import("root");
 const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
     root.storage_volume
@@ -51,11 +50,12 @@ const ActivationSlot = struct {
     activation: ActivationRecord = zeroActivation(),
 };
 
+const ActivationArena = indexed_arena.IndexedArena(ActivationSlot, MAX_ACTIVATIONS, SERVICE_INDEX_CAPACITY, activationSlotServiceId);
+
 pub const Runtime = struct {
     kernel_port: ?*component_port.KernelPort = null,
     next_activation_generation: u32 = 1,
-    service_index_slots: [SERVICE_INDEX_CAPACITY]id_index.Slot = id_index.emptyTable(SERVICE_INDEX_CAPACITY),
-    slots: [MAX_ACTIVATIONS]ActivationSlot = [_]ActivationSlot{ActivationSlot{}} ** MAX_ACTIVATIONS,
+    arena: ActivationArena = ActivationArena.init(),
 
     pub fn init() Runtime {
         return .{};
@@ -155,7 +155,7 @@ pub const Runtime = struct {
     }
 
     pub fn findByClass(self: *const Runtime, device_class: driver_service.DeviceClass) ?ActivationRecord {
-        const slot = fixed_table.findConstSlot(ActivationSlot, MAX_ACTIVATIONS, &self.slots, device_class, activationSlotMatchesClass) orelse return null;
+        const slot = self.arena.findConstMatching(device_class, activationSlotMatchesClass) orelse return null;
         return slot.activation;
     }
 
@@ -182,26 +182,13 @@ pub const Runtime = struct {
             return slot.activation;
         }
 
-        const slot_index = fixed_table.firstFreeSlotIndex(ActivationSlot, MAX_ACTIVATIONS, &self.slots) orelse return error.ActivationTableFull;
-        const slot = &self.slots[slot_index];
-        slot.in_use = true;
+        const slot = self.arena.reserve(activation.service_id) orelse return error.ActivationTableFull;
         slot.activation = activation;
-        id_index.insert(SERVICE_INDEX_CAPACITY, &self.service_index_slots, activation.service_id, slot_index, "driver activation service id index covers activation table");
         return slot.activation;
     }
 
     fn findByServiceSlot(self: *Runtime, service_id: u64) ?*ActivationSlot {
-        return fixed_table.findIndexedSlot(
-            ActivationSlot,
-            MAX_ACTIVATIONS,
-            SERVICE_INDEX_CAPACITY,
-            &self.slots,
-            &self.service_index_slots,
-            service_id,
-            activationSlotServiceId,
-            service_id,
-            activationSlotMatchesService,
-        );
+        return self.arena.get(service_id);
     }
 
     fn nextActivationGeneration(self: *Runtime) u32 {
@@ -216,10 +203,6 @@ fn activationSlotServiceId(slot: *const ActivationSlot) u64 {
 
 fn activationSlotMatchesClass(device_class: driver_service.DeviceClass, slot: *const ActivationSlot) bool {
     return slot.activation.device_class == device_class;
-}
-
-fn activationSlotMatchesService(service_id: u64, slot: *const ActivationSlot) bool {
-    return slot.activation.service_id == service_id;
 }
 
 fn zeroActivation() ActivationRecord {

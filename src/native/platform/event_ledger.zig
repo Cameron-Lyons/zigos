@@ -2,6 +2,7 @@ const std = @import("std");
 const abi = @import("../core/abi.zig");
 const contract = @import("../session/contract.zig");
 const denial_explanation = @import("../policy/denial_explanation.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const immutable_base = @import("immutable_base.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
@@ -113,6 +114,11 @@ const EventSlot = struct {
     event: Event = zeroEvent(),
 };
 
+fn eventSlotSequence(slot: *const EventSlot) u64 {
+    return slot.event.sequence;
+}
+
+const EventArena = indexed_arena.IndexedArena(EventSlot, MAX_EVENTS, MAX_EVENTS * 2, eventSlotSequence);
 const event_kind_count = std.meta.fields(EventKind).len;
 const no_event_index = std.math.maxInt(usize);
 
@@ -162,7 +168,7 @@ pub const Ledger = struct {
     loaded_existing_state: bool = false,
     header_version_id: u64 = 0,
     next_sequence: u64 = 1,
-    events: [MAX_EVENTS]EventSlot = [_]EventSlot{EventSlot{}} ** MAX_EVENTS,
+    events: EventArena = EventArena.init(),
     kind_index: [event_kind_count]IndexList = [_]IndexList{IndexList{}} ** event_kind_count,
     subject_index: [MAX_EVENTS]SubjectIndexSlot = [_]SubjectIndexSlot{SubjectIndexSlot{}} ** MAX_EVENTS,
     task_index: [MAX_EVENTS]TaskIndexSlot = [_]TaskIndexSlot{TaskIndexSlot{}} ** MAX_EVENTS,
@@ -194,7 +200,7 @@ pub const Ledger = struct {
             .storage = storage,
             .owner = owner,
             .state_signer = state_signer,
-            .workspace_id = workspace_record.id,
+            .workspace_id = workspace_record.id.raw(),
         };
 
         if (storage.resolve(workspace_record.id, state_entry_path)) |_| {
@@ -466,7 +472,7 @@ pub const Ledger = struct {
     pub fn latestKind(self: *const Ledger, kind: EventKind) ?Event {
         const list = self.kind_index[kindIndex(kind)];
         if (list.tail == no_event_index) return null;
-        return self.events[list.tail].event;
+        return self.events.slots[list.tail].event;
     }
 
     pub fn queryEvents(self: *const Ledger, query: Query, output: []Event) []Event {
@@ -503,7 +509,7 @@ pub const Ledger = struct {
     }
 
     pub fn absorb(self: *Ledger, source: *const Ledger) Error!void {
-        for (source.events) |slot| {
+        for (source.events.slots) |slot| {
             if (!slot.in_use) continue;
             var event = slot.event;
             event.sequence = 0;
@@ -512,25 +518,22 @@ pub const Ledger = struct {
     }
 
     fn append(self: *Ledger, event: Event) Error!void {
-        for (&self.events, 0..) |*slot, index| {
-            if (slot.in_use) continue;
-            slot.in_use = true;
-            slot.event = event;
-            slot.event.sequence = self.next_sequence;
-            self.next_sequence += 1;
-            self.indexEvent(index) catch |err| {
-                slot.* = EventSlot{};
-                try self.rebuildIndexes();
-                return err;
-            };
-            if (self.persistence_batch_depth == 0) {
-                try self.persistRange(slot.event.sequence, slot.event.sequence, slot.event.tick);
-            } else {
-                self.markPendingPersistence(slot.event);
-            }
-            return;
+        const sequence = self.next_sequence;
+        const event_index = self.events.reserveIndex(sequence) orelse return error.EventTableFull;
+        const slot = &self.events.slots[event_index];
+        slot.event = event;
+        slot.event.sequence = sequence;
+        self.next_sequence += 1;
+        self.indexEvent(event_index) catch |err| {
+            _ = self.events.removeIndex(event_index);
+            try self.rebuildIndexes();
+            return err;
+        };
+        if (self.persistence_batch_depth == 0) {
+            try self.persistRange(slot.event.sequence, slot.event.sequence, slot.event.tick);
+        } else {
+            self.markPendingPersistence(slot.event);
         }
-        return error.EventTableFull;
     }
 
     fn visitMatching(
@@ -577,7 +580,7 @@ pub const Ledger = struct {
             return;
         }
 
-        for (self.events) |slot| {
+        for (self.events.slots) |slot| {
             if (!slot.in_use) continue;
             if (!matchesQuery(slot.event, query)) continue;
             if (count.* >= limit) break;
@@ -597,7 +600,7 @@ pub const Ledger = struct {
     ) void {
         var cursor = head;
         while (cursor != no_event_index and count.* < limit) : (cursor = links[cursor]) {
-            const slot = self.events[cursor];
+            const slot = self.events.slots[cursor];
             if (!slot.in_use or !matchesQuery(slot.event, query)) continue;
             if (output) |records| records[count.*] = redactedForQuery(slot.event, query);
             count.* += 1;
@@ -605,7 +608,7 @@ pub const Ledger = struct {
     }
 
     fn indexEvent(self: *Ledger, event_index: usize) Error!void {
-        const event = self.events[event_index].event;
+        const event = self.events.slots[event_index].event;
         self.kind_index[kindIndex(event.kind)].append(&self.next_by_kind, event_index);
         try self.indexSubject(event.subject, event_index);
         if (event.task_id != 0) try self.indexTask(event.task_id, event_index);
@@ -662,7 +665,8 @@ pub const Ledger = struct {
         self.next_by_kind = [_]usize{no_event_index} ** MAX_EVENTS;
         self.next_by_subject = [_]usize{no_event_index} ** MAX_EVENTS;
         self.next_by_task = [_]usize{no_event_index} ** MAX_EVENTS;
-        for (self.events, 0..) |slot, index| {
+        self.events.rebuildPrimaryIndex();
+        for (self.events.slots, 0..) |slot, index| {
             if (!slot.in_use) continue;
             try self.indexEvent(index);
         }
@@ -684,10 +688,8 @@ pub const Ledger = struct {
     }
 
     fn findEventBySequence(self: *const Ledger, sequence: u64) ?Event {
-        for (self.events) |slot| {
-            if (slot.in_use and slot.event.sequence == sequence) return slot.event;
-        }
-        return null;
+        const slot = self.events.getConst(sequence) orelse return null;
+        return slot.event;
     }
 
     fn persistRange(self: *Ledger, first_sequence: u64, latest_sequence: u64, latest_tick: u64) Error!void {
@@ -701,7 +703,7 @@ pub const Ledger = struct {
                 error.EntryNotFound => break :blk 0,
                 else => return err,
             };
-            break :blk existing_header.version_id;
+            break :blk existing_header.version_id.raw();
         };
 
         try storage.beginTransaction(self.workspace_id);
@@ -720,7 +722,7 @@ pub const Ledger = struct {
         }
 
         const header_result = try storage.putVersion(.{
-            .preferred_object_id = stateObjectId(),
+            .preferred_object_id = object_store.ids.object(stateObjectId()),
             .object_type = .document,
             .payload = header_payload,
             .metadata = try signLedgerMetadata(
@@ -731,10 +733,10 @@ pub const Ledger = struct {
                 header_payload,
                 latest_tick,
             ),
-            .parent_version_id = if (previous_header_version_id != 0) previous_header_version_id else null,
+            .parent_version_id = if (previous_header_version_id != 0) object_store.ids.version(previous_header_version_id) else null,
         });
         try storage.stagePut(self.workspace_id, state_entry_path, header_result.object_id, header_result.version_id, .document);
-        self.header_version_id = header_result.version_id;
+        self.header_version_id = header_result.version_id.raw();
 
         var sequence = first_sequence;
         while (sequence <= latest_sequence) : (sequence += 1) {
@@ -744,7 +746,7 @@ pub const Ledger = struct {
             var payload_record = PersistentEventRecord.fromEvent(PersistentEvent.fromEvent(event));
             const payload = std.mem.asBytes(&payload_record);
             const result = try storage.putVersion(.{
-                .preferred_object_id = eventObjectId(event.sequence),
+                .preferred_object_id = object_store.ids.object(eventObjectId(event.sequence)),
                 .object_type = .document,
                 .payload = payload,
                 .metadata = try signLedgerMetadata(
@@ -765,7 +767,7 @@ pub const Ledger = struct {
 
     fn loadPersistedEvents(self: *Ledger) Error!void {
         const storage = self.storage orelse return;
-        self.events = [_]EventSlot{EventSlot{}} ** MAX_EVENTS;
+        self.events.reset();
         try self.rebuildIndexes();
         self.next_sequence = 1;
         self.header_version_id = 0;
@@ -773,7 +775,7 @@ pub const Ledger = struct {
         if (storage.resolve(self.workspace_id, state_entry_path)) |entry| {
             const version = storage.version(entry.version_id) orelse return error.CorruptState;
             self.next_sequence = try parseHeader(try storage.versionPayload(version));
-            self.header_version_id = entry.version_id;
+            self.header_version_id = entry.version_id.raw();
         } else |err| switch (err) {
             error.EntryNotFound => return,
             else => return err,
@@ -783,25 +785,26 @@ pub const Ledger = struct {
         var loaded_count: usize = 0;
         for (entries) |entry| {
             if (!std.mem.startsWith(u8, entry.pathSlice(), event_entry_prefix)) continue;
-            if (loaded_count >= self.events.len) break;
+            if (loaded_count >= MAX_EVENTS) break;
             const version = storage.version(entry.version_id) orelse return error.CorruptState;
-            self.events[loaded_count].in_use = true;
-            self.events[loaded_count].event = (try parsePersistentEvent(try storage.versionPayload(version))).intoEvent();
+            const event = (try parsePersistentEvent(try storage.versionPayload(version))).intoEvent();
+            const slot_index = self.events.reserveIndexAt(event.sequence, loaded_count) orelse return error.CorruptState;
+            self.events.slots[slot_index].event = event;
             loaded_count += 1;
         }
 
         var index: usize = 1;
         while (index < loaded_count) : (index += 1) {
             var cursor = index;
-            while (cursor > 0 and self.events[cursor - 1].event.sequence > self.events[cursor].event.sequence) : (cursor -= 1) {
-                const tmp = self.events[cursor - 1];
-                self.events[cursor - 1] = self.events[cursor];
-                self.events[cursor] = tmp;
+            while (cursor > 0 and self.events.slots[cursor - 1].event.sequence > self.events.slots[cursor].event.sequence) : (cursor -= 1) {
+                const tmp = self.events.slots[cursor - 1];
+                self.events.slots[cursor - 1] = self.events.slots[cursor];
+                self.events.slots[cursor] = tmp;
             }
         }
 
-        if (loaded_count > 0 and self.next_sequence <= self.events[loaded_count - 1].event.sequence) {
-            self.next_sequence = self.events[loaded_count - 1].event.sequence + 1;
+        if (loaded_count > 0 and self.next_sequence <= self.events.slots[loaded_count - 1].event.sequence) {
+            self.next_sequence = self.events.slots[loaded_count - 1].event.sequence + 1;
         }
         try self.rebuildIndexes();
     }
@@ -811,14 +814,14 @@ pub const Ledger = struct {
         buffer: *[MAX_PERSISTED_EVENTS]PersistentEvent,
     ) []const PersistentEvent {
         var total_in_use: usize = 0;
-        for (self.events) |slot| {
+        for (self.events.slots) |slot| {
             if (slot.in_use) total_in_use += 1;
         }
 
         const keep = @min(total_in_use, MAX_PERSISTED_EVENTS);
         var start = total_in_use - keep;
         var write_index: usize = 0;
-        for (self.events) |slot| {
+        for (self.events.slots) |slot| {
             if (!slot.in_use) continue;
             if (start != 0) {
                 start -= 1;

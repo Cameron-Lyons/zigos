@@ -1,6 +1,8 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
+const capability = @import("capability.zig");
 const component_port = @import("component_port.zig");
+const kernel_operation_descriptor = @import("kernel_operation_descriptor.zig");
 const syscall_dispatch = @import("syscall_dispatch.zig");
 const task_syscalls = @import("task_syscalls.zig");
 const endpoint_syscalls = @import("endpoint_syscalls.zig");
@@ -37,6 +39,10 @@ pub const Operation = struct {
     Response: type,
     handler: DispatchHandler,
     request_copy: RequestCopyRule = .plain,
+    required_right: capability.CapabilityRight,
+    target_kind: kernel_operation_descriptor.TargetKindRule = .none,
+    scope_rule: kernel_operation_descriptor.ScopeRule = .{},
+    auto_grants: []const kernel_operation_descriptor.AutoGrant = &.{},
 
     pub fn requestSize(comptime self: Operation) usize {
         return @sizeOf(self.Request);
@@ -46,6 +52,29 @@ pub const Operation = struct {
         return if (self.Response == void) 0 else @sizeOf(self.Response);
     }
 };
+
+pub fn declare(
+    comptime operation: abi.NativeOperation,
+    comptime domain: Domain,
+    comptime Request: type,
+    comptime Response: type,
+    comptime handler: DispatchHandler,
+    comptime request_copy: RequestCopyRule,
+) Operation {
+    const descriptor = kernel_operation_descriptor.declarationFor(operation);
+    return .{
+        .operation = operation,
+        .domain = domain,
+        .Request = Request,
+        .Response = Response,
+        .handler = handler,
+        .request_copy = request_copy,
+        .required_right = descriptor.required_right,
+        .target_kind = descriptor.target_kind,
+        .scope_rule = descriptor.scope_rule,
+        .auto_grants = descriptor.auto_grants,
+    };
+}
 
 pub const operations = task_syscalls.operations ++
     endpoint_syscalls.operations ++
@@ -65,7 +94,15 @@ test "single syscall ABI declaration covers every native operation" {
     inline for (std.meta.fields(abi.NativeOperation)) |field| {
         const operation: abi.NativeOperation = @enumFromInt(field.value);
         const declaration = declarationFor(operation);
+        const kernel_declaration = kernel_operation_descriptor.declarationFor(operation);
         try std.testing.expectEqual(operation, declaration.operation);
+        try std.testing.expectEqual(kernel_declaration.required_right, declaration.required_right);
         try std.testing.expect(declaration.requestSize() >= @sizeOf(abi.RequestHeader));
     }
+    try std.testing.expect(switch (declarationFor(.endpoint_send).target_kind) {
+        .fixed => |kind| kind == .endpoint,
+        else => false,
+    });
+    try std.testing.expect(declarationFor(.task_create).scope_rule.local_scope_requires_request_local);
+    try std.testing.expectEqual(@as(usize, 1), declarationFor(.shared_memory_create).auto_grants.len);
 }

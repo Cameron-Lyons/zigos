@@ -2,6 +2,7 @@ const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const device_graph = @import("device_graph.zig");
 const fixed_table = @import("../core/fixed_table.zig");
+const id_index = @import("../core/id_index.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const network_policy = @import("network_policy.zig");
@@ -24,6 +25,7 @@ pub const MAX_OVERLAYS = state_support.MAX_OVERLAYS;
 pub const MAX_PRIVATE_SERVICES = state_support.MAX_PRIVATE_SERVICES;
 pub const MAX_LABEL_BYTES = state_support.MAX_LABEL_BYTES;
 pub const MAX_OVERLAY_SESSIONS: usize = 8;
+const REPLICA_INDEX_CAPACITY: usize = MAX_REPLICA_ENTRIES * 2;
 pub const ServiceConfig = struct {
     max_overlay_sessions: usize = MAX_OVERLAY_SESSIONS,
 
@@ -137,6 +139,19 @@ const ReplicaLookup = struct {
     workspace_id: u64,
     device_id: principal.PrincipalId,
     path: []const u8,
+    path_hash: u64,
+};
+
+const ReplicaIndexKey = struct {
+    workspace_id: u64 = 0,
+    device_id: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
+    path_hash: u64 = 0,
+};
+
+const ReplicaIndexSlot = struct {
+    state: id_index.State = .empty,
+    key: ReplicaIndexKey = .{},
+    slot_index: usize = 0,
 };
 
 const DatabaseContractLookup = struct {
@@ -161,6 +176,7 @@ fn overlaySlotMatches(context: OverlayLookup, slot: *const OverlaySlot) bool {
 fn replicaSlotMatches(context: ReplicaLookup, slot: *const ReplicaSlot) bool {
     return slot.entry.workspace_id == context.workspace_id and
         slot.entry.device_id.eql(context.device_id) and
+        slot.entry.pathHash() == context.path_hash and
         std.mem.eql(u8, slot.entry.pathSlice(), context.path);
 }
 
@@ -173,6 +189,83 @@ fn equivalentDatabaseContractSlotMatches(context: DatabaseContractEquivalentLook
         std.mem.eql(u8, slot.contract.bundleIdSlice(), context.bundle_id) and
         std.mem.eql(u8, slot.contract.labelSlice(), context.label) and
         signatureEql(slot.contract.signature, context.signature);
+}
+
+fn emptyReplicaIndex() [REPLICA_INDEX_CAPACITY]ReplicaIndexSlot {
+    return [_]ReplicaIndexSlot{ReplicaIndexSlot{}} ** REPLICA_INDEX_CAPACITY;
+}
+
+fn replicaIndexKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) ReplicaIndexKey {
+    return .{
+        .workspace_id = workspace_id,
+        .device_id = device_id,
+        .path_hash = path_hash,
+    };
+}
+
+fn replicaIndexLookup(table: *const [REPLICA_INDEX_CAPACITY]ReplicaIndexSlot, key: ReplicaIndexKey) ?usize {
+    var index = replicaIndexStart(key);
+    var attempts: usize = 0;
+    while (attempts < REPLICA_INDEX_CAPACITY) : (attempts += 1) {
+        const slot = table[index];
+        switch (slot.state) {
+            .empty => return null,
+            .filled => if (replicaIndexKeyEql(slot.key, key)) return slot.slot_index,
+            .tombstone => {},
+        }
+        index = (index + 1) % REPLICA_INDEX_CAPACITY;
+    }
+    return null;
+}
+
+fn replicaIndexInsert(table: *[REPLICA_INDEX_CAPACITY]ReplicaIndexSlot, key: ReplicaIndexKey, slot_index: usize) void {
+    var index = replicaIndexStart(key);
+    var first_tombstone: ?usize = null;
+    var attempts: usize = 0;
+    while (attempts < REPLICA_INDEX_CAPACITY) : (attempts += 1) {
+        switch (table[index].state) {
+            .empty => {
+                const insert_index = first_tombstone orelse index;
+                table[insert_index] = .{
+                    .state = .filled,
+                    .key = key,
+                    .slot_index = slot_index,
+                };
+                return;
+            },
+            .filled => {
+                if (replicaIndexKeyEql(table[index].key, key)) {
+                    table[index].slot_index = slot_index;
+                    return;
+                }
+            },
+            .tombstone => {
+                if (first_tombstone == null) first_tombstone = index;
+            },
+        }
+        index = (index + 1) % REPLICA_INDEX_CAPACITY;
+    }
+
+    native_util.impossibleByInvariant("replica index capacity covers replica slots");
+}
+
+fn replicaIndexStart(key: ReplicaIndexKey) usize {
+    return @as(usize, @intCast(replicaIndexHash(key) % REPLICA_INDEX_CAPACITY));
+}
+
+fn replicaIndexHash(key: ReplicaIndexKey) u64 {
+    var hash: u64 = 0xCBF2_9CE4_8422_2325;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.workspace_id);
+    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(key.device_id.kind));
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.device_id.serial);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.path_hash);
+    return hash;
+}
+
+fn replicaIndexKeyEql(left: ReplicaIndexKey, right: ReplicaIndexKey) bool {
+    return left.workspace_id == right.workspace_id and
+        left.device_id.eql(right.device_id) and
+        left.path_hash == right.path_hash;
 }
 
 pub const Service = ServiceWith(.{});
@@ -191,6 +284,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         state_workspace_id: u64 = 0,
         resident_store: ?*ResidentState = null,
         owned_resident_state: ResidentState = .{},
+        replica_index_slots: [REPLICA_INDEX_CAPACITY]ReplicaIndexSlot = emptyReplicaIndex(),
         next_overlay_session_id: u64 = 1,
         overlay_sessions: [MAX_SERVICE_OVERLAY_SESSIONS]OverlaySessionSlot = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_SERVICE_OVERLAY_SESSIONS,
         mergeable_document_adapter: MergeableDocumentAdapter = sync_adapters.default_mergeable_document_adapter,
@@ -228,7 +322,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             if (!resident_state.has_persisted_state) {
                 resident_state.resetForServiceInit();
             }
-            return .{
+            var service = Self{
                 .service_id = service_id,
                 .task_id = task_id,
                 .owner = owner,
@@ -244,6 +338,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .database_sync_adapter = sync_adapters.default_database_sync_adapter,
                 .transport_queue = TransportQueue.init(),
             };
+            service.rebuildReplicaIndex();
+            return service;
         }
 
         pub fn initWithStorage(
@@ -263,7 +359,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 resident_state.resetForServiceInit();
             }
 
-            return .{
+            var service = Self{
                 .service_id = service_id,
                 .task_id = task_id,
                 .owner = owner,
@@ -279,6 +375,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .database_sync_adapter = sync_adapters.default_database_sync_adapter,
                 .transport_queue = TransportQueue.init(),
             };
+            service.rebuildReplicaIndex();
+            return service;
         }
 
         pub fn bindSyncAdapters(
@@ -421,8 +519,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return &slot.policy;
         }
 
-        pub fn findWorkspacePolicy(self: *Self, workspace_id: u64) ?*WorkspacePolicy {
-            const slot = self.lookupWorkspacePolicySlot(workspace_id) orelse return null;
+        pub fn findWorkspacePolicy(self: *Self, workspace_id: anytype) ?*WorkspacePolicy {
+            const slot = self.lookupWorkspacePolicySlot(object_store.ids.raw(workspace_id)) orelse return null;
             return &slot.policy;
         }
 
@@ -467,8 +565,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return overlay;
         }
 
-        pub fn findOverlay(self: *Self, workspace_id: u64) ?*OverlayRecord {
-            const slot = self.lookupOverlaySlot(workspace_id) orelse return null;
+        pub fn findOverlay(self: *Self, workspace_id: anytype) ?*OverlayRecord {
+            const slot = self.lookupOverlaySlot(object_store.ids.raw(workspace_id)) orelse return null;
             return &slot.overlay;
         }
 
@@ -576,17 +674,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             workspace_id: u64,
             device_id: principal.PrincipalId,
             path: []const u8,
-            object_id: u64,
-            version_id: u64,
+            object_id: anytype,
+            version_id: anytype,
         ) Error!void {
-            const slot = self.lookupReplicaSlot(workspace_id, device_id, path) orelse self.allocateReplicaSlot() orelse return error.ReplicaTableFull;
-            slot.in_use = true;
-            slot.entry.workspace_id = workspace_id;
-            slot.entry.device_id = device_id;
-            slot.entry.path_len = native_util.copyTextExact(&slot.entry.path, path) catch return error.PathTooLong;
-            slot.entry.object_id = object_id;
-            slot.entry.version_id = version_id;
-            self.resident().markDirty();
+            if (path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
+            try self.setReplicaVersionForPathHash(workspace_id, device_id, path, workspace.pathHash(path), object_id, version_id);
         }
 
         pub fn replicaVersion(
@@ -595,11 +687,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             device_id: principal.PrincipalId,
             path: []const u8,
         ) ?u64 {
-            const slot = fixed_table.findConstSlot(ReplicaSlot, MAX_REPLICA_ENTRIES, &self.stateConst().replica_entries, ReplicaLookup{
-                .workspace_id = workspace_id,
-                .device_id = device_id,
-                .path = path,
-            }, replicaSlotMatches) orelse return null;
+            const slot = self.lookupReplicaSlotConst(workspace_id, device_id, path, workspace.pathHash(path)) orelse return null;
             return slot.entry.version_id;
         }
 
@@ -659,7 +747,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 summary.selected_entry_count += 1;
 
                 const semantic = classifyEntry(entry);
-                const remote_version_id = self.replicaVersion(workspace_id, to_device, entry.pathSlice()) orelse 0;
+                const entry_path = entry.pathSlice();
+                const entry_path_hash = entry.pathHash();
+                const remote_version_id = self.replicaVersionForPathHash(workspace_id, to_device, entry_path, entry_path_hash) orelse 0;
 
                 switch (semantic) {
                     .mergeable_crdt => {
@@ -673,9 +763,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                             try self.recordConflict(
                                 workspace_id,
                                 to_device,
-                                entry.object_id,
-                                entry.pathSlice(),
-                                entry.version_id,
+                                entry.object_id.raw(),
+                                entry_path,
+                                entry.version_id.raw(),
                                 remote_version_id,
                                 semantic,
                             );
@@ -692,7 +782,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                         const result = try self.secret_transfer_adapter.transfer(.{
                             .store = store,
                             .workspace_id = workspace_id,
-                            .object_id = entry.object_id,
+                            .object_id = entry.object_id.raw(),
                             .from_device = from_device,
                             .to_device = to_device,
                             .personal_e2ee = policy.personal_e2ee,
@@ -703,18 +793,18 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 }
                 const frame = try self.transport_queue.enqueue(.{
                     .workspace_id = workspace_id,
-                    .object_id = entry.object_id,
-                    .version_id = entry.version_id,
+                    .object_id = entry.object_id.raw(),
+                    .version_id = entry.version_id.raw(),
                     .source_device = from_device,
                     .target_device = to_device,
                     .transport = transport,
                     .semantic = semantic,
                     .encrypted = policy.personal_e2ee,
-                    .path = entry.pathSlice(),
+                    .path = entry_path,
                 });
                 summary.transport_frame_count += 1;
                 if (frame.encrypted) summary.encrypted_transport_count += 1;
-                try self.setReplicaVersion(workspace_id, to_device, entry.pathSlice(), entry.object_id, entry.version_id);
+                try self.setReplicaVersionForPathHash(workspace_id, to_device, entry_path, entry_path_hash, entry.object_id, entry.version_id);
             }
             summary.conflict_count = self.countConflictsFor(workspace_id, to_device);
             if (summary.selected_entry_count != 0 or summary.conflict_count != 0) {
@@ -727,7 +817,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             self: *Self,
             storage: *const storage_service.Service,
             workspace_id: u64,
-            object_id: u64,
+            object_id: anytype,
             from_device: principal.PrincipalId,
             to_device: principal.PrincipalId,
             transport: TransportMode,
@@ -740,7 +830,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             const result = try self.secret_transfer_adapter.transfer(.{
                 .store = storage,
                 .workspace_id = workspace_id,
-                .object_id = object_id,
+                .object_id = object_store.ids.raw(object_id),
                 .from_device = from_device,
                 .to_device = to_device,
                 .personal_e2ee = policy.personal_e2ee,
@@ -795,13 +885,14 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         pub fn findConflict(
             self: *Self,
-            workspace_id: u64,
+            workspace_id: anytype,
             device_id: principal.PrincipalId,
             path: []const u8,
         ) ?*ConflictRecord {
+            const raw_workspace_id = object_store.ids.raw(workspace_id);
             for (&self.state().conflicts) |*slot| {
                 if (!slot.in_use) continue;
-                if (slot.conflict.workspace_id != workspace_id) continue;
+                if (slot.conflict.workspace_id != raw_workspace_id) continue;
                 if (!slot.conflict.device_id.eql(device_id)) continue;
                 if (!std.mem.eql(u8, slot.conflict.pathSlice(), path)) continue;
                 return &slot.conflict;
@@ -973,21 +1064,85 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return self.stateConst().next_overlay_id;
         }
 
-        fn lookupReplicaSlot(
+        fn lookupReplicaSlotIndex(
+            self: *const Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            path: []const u8,
+            path_hash: u64,
+        ) ?usize {
+            const slot_index = replicaIndexLookup(&self.replica_index_slots, replicaIndexKey(workspace_id, device_id, path_hash)) orelse return null;
+            if (slot_index >= MAX_REPLICA_ENTRIES) native_util.impossibleByInvariant("replica index points outside slots");
+            const slot = &self.stateConst().replica_entries[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("replica index points at a free slot");
+            if (!replicaSlotMatches(.{
+                .workspace_id = workspace_id,
+                .device_id = device_id,
+                .path = path,
+                .path_hash = path_hash,
+            }, slot)) {
+                native_util.impossibleByInvariant("replica index points at the wrong slot");
+            }
+            return slot_index;
+        }
+
+        fn lookupReplicaSlotConst(
+            self: *const Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            path: []const u8,
+            path_hash: u64,
+        ) ?*const ReplicaSlot {
+            const slot_index = self.lookupReplicaSlotIndex(workspace_id, device_id, path, path_hash) orelse return null;
+            return &self.stateConst().replica_entries[slot_index];
+        }
+
+        fn replicaVersionForPathHash(
+            self: *const Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            path: []const u8,
+            path_hash: u64,
+        ) ?u64 {
+            const slot = self.lookupReplicaSlotConst(workspace_id, device_id, path, path_hash) orelse return null;
+            return slot.entry.version_id;
+        }
+
+        fn setReplicaVersionForPathHash(
             self: *Self,
             workspace_id: u64,
             device_id: principal.PrincipalId,
             path: []const u8,
-        ) ?*ReplicaSlot {
-            return fixed_table.findSlot(ReplicaSlot, MAX_REPLICA_ENTRIES, &self.state().replica_entries, ReplicaLookup{
-                .workspace_id = workspace_id,
-                .device_id = device_id,
-                .path = path,
-            }, replicaSlotMatches);
+            path_hash: u64,
+            object_id: anytype,
+            version_id: anytype,
+        ) Error!void {
+            if (path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
+            const slot_index = if (self.lookupReplicaSlotIndex(workspace_id, device_id, path, path_hash)) |existing_index|
+                existing_index
+            else
+                fixed_table.firstFreeSlotIndex(ReplicaSlot, MAX_REPLICA_ENTRIES, &self.stateConst().replica_entries) orelse return error.ReplicaTableFull;
+            const slot = &self.state().replica_entries[slot_index];
+            slot.in_use = true;
+            slot.entry.workspace_id = workspace_id;
+            slot.entry.device_id = device_id;
+            slot.entry.path_len = native_util.copyTextExact(&slot.entry.path, path) catch return error.PathTooLong;
+            slot.entry.object_id = object_store.ids.raw(object_id);
+            slot.entry.version_id = object_store.ids.raw(version_id);
+            replicaIndexInsert(&self.replica_index_slots, replicaIndexKey(workspace_id, device_id, path_hash), slot_index);
+            self.resident().markDirty();
         }
 
-        fn allocateReplicaSlot(self: *Self) ?*ReplicaSlot {
-            return fixed_table.firstFreeSlot(ReplicaSlot, MAX_REPLICA_ENTRIES, &self.state().replica_entries);
+        fn rebuildReplicaIndex(self: *Self) void {
+            self.replica_index_slots = emptyReplicaIndex();
+            for (self.stateConst().replica_entries, 0..) |slot, slot_index| {
+                if (!slot.in_use) continue;
+                replicaIndexInsert(
+                    &self.replica_index_slots,
+                    replicaIndexKey(slot.entry.workspace_id, slot.entry.device_id, slot.entry.pathHash()),
+                    slot_index,
+                );
+            }
         }
 
         fn allocateConflict(self: *Self) ?*ConflictSlot {

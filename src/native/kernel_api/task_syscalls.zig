@@ -5,11 +5,11 @@ const syscall_abi = @import("syscall_abi.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 
 pub const operations = [_]syscall_abi.Operation{
-    .{ .operation = .task_create, .domain = .task, .Request = component_port.TaskCreateRequest, .Response = abi.TaskDescriptor, .handler = dispatchTaskCreate, .request_copy = .embedded_user_buffers },
-    .{ .operation = .task_terminate, .domain = .task, .Request = component_port.TaskTerminateRequest, .Response = abi.BoolResponse, .handler = dispatchTaskTerminate },
-    .{ .operation = .time_query, .domain = .task, .Request = component_port.TimeQueryRequest, .Response = abi.TimeQueryResponse, .handler = dispatchTimeQuery },
-    .{ .operation = .resource_query, .domain = .task, .Request = component_port.ResourceQueryRequest, .Response = abi.ResourceDescriptor, .handler = dispatchResourceQuery },
-    .{ .operation = .accounting_query, .domain = .task, .Request = component_port.AccountingQueryRequest, .Response = abi.AccountingDescriptor, .handler = dispatchAccountingQuery },
+    syscall_abi.declare(.task_create, .task, component_port.TaskCreateRequest, abi.TaskDescriptor, dispatchTaskCreate, .embedded_user_buffers),
+    syscall_abi.declare(.task_terminate, .task, component_port.TaskTerminateRequest, abi.BoolResponse, dispatchTaskTerminate, .plain),
+    syscall_abi.declare(.time_query, .task, component_port.TimeQueryRequest, abi.TimeQueryResponse, dispatchTimeQuery, .plain),
+    syscall_abi.declare(.resource_query, .task, component_port.ResourceQueryRequest, abi.ResourceDescriptor, dispatchResourceQuery, .plain),
+    syscall_abi.declare(.accounting_query, .task, component_port.AccountingQueryRequest, abi.AccountingDescriptor, dispatchAccountingQuery, .plain),
 };
 
 const MAX_COMPONENT_LABEL_BYTES: usize = 48;
