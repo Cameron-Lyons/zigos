@@ -120,36 +120,9 @@ fn eventSlotSequence(slot: *const EventSlot) u64 {
 
 const EventArena = indexed_arena.IndexedArena(EventSlot, MAX_EVENTS, MAX_EVENTS * 2, eventSlotSequence);
 const event_kind_count = std.meta.fields(EventKind).len;
-const no_event_index = std.math.maxInt(usize);
-
-const IndexList = struct {
-    head: usize = no_event_index,
-    tail: usize = no_event_index,
-    count: usize = 0,
-
-    fn append(self: *IndexList, links: *[MAX_EVENTS]usize, event_index: usize) void {
-        links[event_index] = no_event_index;
-        if (self.tail == no_event_index) {
-            self.head = event_index;
-        } else {
-            links[self.tail] = event_index;
-        }
-        self.tail = event_index;
-        self.count += 1;
-    }
-};
-
-const SubjectIndexSlot = struct {
-    in_use: bool = false,
-    subject: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
-    list: IndexList = .{},
-};
-
-const TaskIndexSlot = struct {
-    in_use: bool = false,
-    task_id: u64 = 0,
-    list: IndexList = .{},
-};
+const KindEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, event_kind_count, event_kind_count * 2);
+const SubjectEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, MAX_EVENTS, MAX_EVENTS * 2);
+const TaskEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, MAX_EVENTS, MAX_EVENTS * 2);
 
 const QueryIndex = enum {
     kind,
@@ -169,12 +142,9 @@ pub const Ledger = struct {
     header_version_id: u64 = 0,
     next_sequence: u64 = 1,
     events: EventArena = EventArena.init(),
-    kind_index: [event_kind_count]IndexList = [_]IndexList{IndexList{}} ** event_kind_count,
-    subject_index: [MAX_EVENTS]SubjectIndexSlot = [_]SubjectIndexSlot{SubjectIndexSlot{}} ** MAX_EVENTS,
-    task_index: [MAX_EVENTS]TaskIndexSlot = [_]TaskIndexSlot{TaskIndexSlot{}} ** MAX_EVENTS,
-    next_by_kind: [MAX_EVENTS]usize = [_]usize{no_event_index} ** MAX_EVENTS,
-    next_by_subject: [MAX_EVENTS]usize = [_]usize{no_event_index} ** MAX_EVENTS,
-    next_by_task: [MAX_EVENTS]usize = [_]usize{no_event_index} ** MAX_EVENTS,
+    kind_index: KindEventIndex = KindEventIndex.init(),
+    subject_index: SubjectEventIndex = SubjectEventIndex.init(),
+    task_index: TaskEventIndex = TaskEventIndex.init(),
     persistence_batch_depth: usize = 0,
     pending_persist_first_sequence: u64 = 0,
     pending_persist_count: usize = 0,
@@ -470,9 +440,9 @@ pub const Ledger = struct {
     }
 
     pub fn latestKind(self: *const Ledger, kind: EventKind) ?Event {
-        const list = self.kind_index[kindIndex(kind)];
-        if (list.tail == no_event_index) return null;
-        return self.events.slots[list.tail].event;
+        const tail = self.kind_index.tail(kindKey(kind));
+        if (tail == indexed_arena.no_index) return null;
+        return self.events.slots[tail].event;
     }
 
     pub fn queryEvents(self: *const Ledger, query: Query, output: []Event) []Event {
@@ -547,35 +517,29 @@ pub const Ledger = struct {
         var selected_count: usize = std.math.maxInt(usize);
         if (query.kind) |kind| {
             selected_index = .kind;
-            selected_count = self.kind_index[kindIndex(kind)].count;
+            selected_count = self.kind_index.count(kindKey(kind));
         }
         if (query.subject) |subject| {
-            if (self.findSubjectIndex(subject)) |index| {
-                const candidate_count = self.subject_index[index].list.count;
-                if (candidate_count < selected_count) {
-                    selected_index = .subject;
-                    selected_count = candidate_count;
-                }
-            } else {
-                return;
+            const candidate_count = self.subject_index.count(subjectKey(subject));
+            if (candidate_count == 0) return;
+            if (candidate_count < selected_count) {
+                selected_index = .subject;
+                selected_count = candidate_count;
             }
         }
         if (query.task_id) |task_id| {
-            if (self.findTaskIndex(task_id)) |index| {
-                const candidate_count = self.task_index[index].list.count;
-                if (candidate_count < selected_count) {
-                    selected_index = .task;
-                    selected_count = candidate_count;
-                }
-            } else {
-                return;
+            const candidate_count = self.task_index.count(taskKey(task_id));
+            if (candidate_count == 0) return;
+            if (candidate_count < selected_count) {
+                selected_index = .task;
+                selected_count = candidate_count;
             }
         }
         if (selected_index) |index_kind| {
             switch (index_kind) {
-                .kind => self.visitIndex(self.kind_index[kindIndex(query.kind.?)].head, &self.next_by_kind, query, limit, count, output),
-                .subject => self.visitIndex(self.subject_index[self.findSubjectIndex(query.subject.?).?].list.head, &self.next_by_subject, query, limit, count, output),
-                .task => self.visitIndex(self.task_index[self.findTaskIndex(query.task_id.?).?].list.head, &self.next_by_task, query, limit, count, output),
+                .kind => self.visitIndex(&self.kind_index, kindKey(query.kind.?), query, limit, count, output),
+                .subject => self.visitIndex(&self.subject_index, subjectKey(query.subject.?), query, limit, count, output),
+                .task => self.visitIndex(&self.task_index, taskKey(query.task_id.?), query, limit, count, output),
             }
             return;
         }
@@ -591,15 +555,15 @@ pub const Ledger = struct {
 
     fn visitIndex(
         self: *const Ledger,
-        head: usize,
-        links: *const [MAX_EVENTS]usize,
+        index: anytype,
+        key: u64,
         query: Query,
         limit: usize,
         count: *usize,
         output: ?[]Event,
     ) void {
-        var cursor = head;
-        while (cursor != no_event_index and count.* < limit) : (cursor = links[cursor]) {
+        var cursor = index.head(key);
+        while (cursor != indexed_arena.no_index and count.* < limit) : (cursor = index.next(cursor)) {
             const slot = self.events.slots[cursor];
             if (!slot.in_use or !matchesQuery(slot.event, query)) continue;
             if (output) |records| records[count.*] = redactedForQuery(slot.event, query);
@@ -609,62 +573,15 @@ pub const Ledger = struct {
 
     fn indexEvent(self: *Ledger, event_index: usize) Error!void {
         const event = self.events.slots[event_index].event;
-        self.kind_index[kindIndex(event.kind)].append(&self.next_by_kind, event_index);
-        try self.indexSubject(event.subject, event_index);
-        if (event.task_id != 0) try self.indexTask(event.task_id, event_index);
-    }
-
-    fn indexSubject(self: *Ledger, subject: principal.PrincipalId, event_index: usize) Error!void {
-        const slot_index = self.findOrCreateSubjectIndex(subject) orelse return error.EventTableFull;
-        self.subject_index[slot_index].list.append(&self.next_by_subject, event_index);
-    }
-
-    fn indexTask(self: *Ledger, task_id: u64, event_index: usize) Error!void {
-        const slot_index = self.findOrCreateTaskIndex(task_id) orelse return error.EventTableFull;
-        self.task_index[slot_index].list.append(&self.next_by_task, event_index);
-    }
-
-    fn findSubjectIndex(self: *const Ledger, subject: principal.PrincipalId) ?usize {
-        for (self.subject_index, 0..) |slot, index| {
-            if (slot.in_use and slot.subject.eql(subject)) return index;
-        }
-        return null;
-    }
-
-    fn findTaskIndex(self: *const Ledger, task_id: u64) ?usize {
-        for (self.task_index, 0..) |slot, index| {
-            if (slot.in_use and slot.task_id == task_id) return index;
-        }
-        return null;
-    }
-
-    fn findOrCreateSubjectIndex(self: *Ledger, subject: principal.PrincipalId) ?usize {
-        if (self.findSubjectIndex(subject)) |index| return index;
-        for (&self.subject_index, 0..) |*slot, index| {
-            if (slot.in_use) continue;
-            slot.* = .{ .in_use = true, .subject = subject };
-            return index;
-        }
-        return null;
-    }
-
-    fn findOrCreateTaskIndex(self: *Ledger, task_id: u64) ?usize {
-        if (self.findTaskIndex(task_id)) |index| return index;
-        for (&self.task_index, 0..) |*slot, index| {
-            if (slot.in_use) continue;
-            slot.* = .{ .in_use = true, .task_id = task_id };
-            return index;
-        }
-        return null;
+        if (!self.kind_index.append(kindKey(event.kind), event_index)) return error.EventTableFull;
+        if (!self.subject_index.append(subjectKey(event.subject), event_index)) return error.EventTableFull;
+        if (event.task_id != 0 and !self.task_index.append(taskKey(event.task_id), event_index)) return error.EventTableFull;
     }
 
     fn rebuildIndexes(self: *Ledger) Error!void {
-        self.kind_index = [_]IndexList{IndexList{}} ** event_kind_count;
-        self.subject_index = [_]SubjectIndexSlot{SubjectIndexSlot{}} ** MAX_EVENTS;
-        self.task_index = [_]TaskIndexSlot{TaskIndexSlot{}} ** MAX_EVENTS;
-        self.next_by_kind = [_]usize{no_event_index} ** MAX_EVENTS;
-        self.next_by_subject = [_]usize{no_event_index} ** MAX_EVENTS;
-        self.next_by_task = [_]usize{no_event_index} ** MAX_EVENTS;
+        self.kind_index.reset();
+        self.subject_index.reset();
+        self.task_index.reset();
         self.events.rebuildPrimaryIndex();
         for (self.events.slots, 0..) |slot, index| {
             if (!slot.in_use) continue;
@@ -1038,8 +955,19 @@ fn flowKindLabel(code: u32) []const u8 {
     return @tagName(kind);
 }
 
-fn kindIndex(kind: EventKind) usize {
-    return @intFromEnum(kind);
+fn kindKey(kind: EventKind) u64 {
+    return @as(u64, @intFromEnum(kind)) + 1;
+}
+
+fn subjectKey(subject: principal.PrincipalId) u64 {
+    var hash: u64 = 0xCBF2_9CE4_8422_2325;
+    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(subject.kind));
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, subject.serial);
+    return indexed_arena.nonZeroKey(hash);
+}
+
+fn taskKey(task_id: u64) u64 {
+    return indexed_arena.nonZeroKey(task_id);
 }
 
 fn matchesQuery(event: Event, query: Query) bool {

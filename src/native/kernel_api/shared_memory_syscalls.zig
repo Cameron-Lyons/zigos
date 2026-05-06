@@ -1,14 +1,6 @@
 const abi = @import("../core/abi.zig");
 const component_port = @import("component_port.zig");
 const dispatch = @import("syscall_dispatch.zig");
-const syscall_abi = @import("syscall_abi.zig");
-
-pub const operations = [_]syscall_abi.Operation{
-    syscall_abi.declare(.shared_memory_create, .shared_memory, component_port.SharedMemoryCreateRequest, abi.SharedMemoryCreateResponse, dispatchSharedMemoryCreate, .plain),
-    syscall_abi.declare(.shared_memory_map, .shared_memory, component_port.SharedMemoryMapRequest, abi.SharedMemoryDescriptor, dispatchSharedMemoryMap, .plain),
-    syscall_abi.declare(.shared_memory_unmap, .shared_memory, component_port.SharedMemoryUnmapRequest, abi.BoolResponse, dispatchSharedMemoryUnmap, .plain),
-    syscall_abi.declare(.shared_memory_revoke, .shared_memory, component_port.SharedMemoryRevokeRequest, abi.SharedMemoryDescriptor, dispatchSharedMemoryRevoke, .plain),
-};
 
 pub fn dispatchSharedMemoryCreate(
     port: *component_port.KernelPort,

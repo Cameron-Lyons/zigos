@@ -61,10 +61,12 @@ const EndpointSlot = struct {
 };
 
 const EndpointArena = indexed_arena.IndexedArenaWithKey(ids.EndpointId, EndpointSlot, MAX_ENDPOINTS, ENDPOINT_INDEX_CAPACITY, endpointSlotId);
+const EndpointOwnerIndex = indexed_arena.MultimapIndex(MAX_ENDPOINTS, MAX_ENDPOINTS, ENDPOINT_INDEX_CAPACITY);
 
 pub const Table = struct {
     next_endpoint_id: u64 = 1,
     arena: EndpointArena = EndpointArena.init(),
+    owner_index: EndpointOwnerIndex = EndpointOwnerIndex.init(),
 
     pub fn init() Table {
         return .{};
@@ -72,7 +74,8 @@ pub const Table = struct {
 
     pub fn create(self: *Table, owner_task_id: ids.TaskId, label: []const u8, flags: EndpointFlags) Error!Endpoint {
         const endpoint_id = self.allocateEndpointId();
-        const slot = self.arena.reserve(endpoint_id) orelse return error.TableFull;
+        const slot_index = self.arena.reserveIndex(endpoint_id) orelse return error.TableFull;
+        const slot = &self.arena.slots[slot_index];
         slot.endpoint = .{
             .id = endpoint_id,
             .owner_task_id = owner_task_id,
@@ -81,6 +84,9 @@ pub const Table = struct {
             .label = [_]u8{0} ** 48,
         };
         @memcpy(slot.endpoint.label[0..slot.endpoint.label_len], label[0..slot.endpoint.label_len]);
+        if (!self.owner_index.append(owner_task_id.raw(), slot_index)) {
+            native_util.impossibleByInvariant("endpoint owner index capacity covers endpoint slots");
+        }
         return slot.endpoint;
     }
 
@@ -169,7 +175,7 @@ pub const Table = struct {
     }
 
     pub fn activeForTask(self: *const Table, task_id: ids.TaskId) u16 {
-        return @intCast(self.arena.countMatching(task_id, endpointSlotMatchesTask));
+        return @intCast(self.owner_index.count(task_id.raw()));
     }
 
     fn allocateEndpointId(self: *Table) ids.EndpointId {
@@ -190,10 +196,6 @@ pub const Table = struct {
 
 fn endpointSlotId(slot: *const EndpointSlot) ids.EndpointId {
     return slot.endpoint.id;
-}
-
-fn endpointSlotMatchesTask(task_id: ids.TaskId, slot: *const EndpointSlot) bool {
-    return slot.endpoint.owner_task_id.eql(task_id);
 }
 
 fn zeroMessage() Message {

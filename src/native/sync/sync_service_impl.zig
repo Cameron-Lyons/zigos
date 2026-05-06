@@ -2,7 +2,7 @@ const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const device_graph = @import("device_graph.zig");
 const fixed_table = @import("../core/fixed_table.zig");
-const id_index = @import("../core/id_index.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const network_policy = @import("network_policy.zig");
@@ -148,12 +148,6 @@ const ReplicaIndexKey = struct {
     path_hash: u64 = 0,
 };
 
-const ReplicaIndexSlot = struct {
-    state: id_index.State = .empty,
-    key: ReplicaIndexKey = .{},
-    slot_index: usize = 0,
-};
-
 const DatabaseContractLookup = struct {
     id: u64,
 };
@@ -191,9 +185,7 @@ fn equivalentDatabaseContractSlotMatches(context: DatabaseContractEquivalentLook
         signatureEql(slot.contract.signature, context.signature);
 }
 
-fn emptyReplicaIndex() [REPLICA_INDEX_CAPACITY]ReplicaIndexSlot {
-    return [_]ReplicaIndexSlot{ReplicaIndexSlot{}} ** REPLICA_INDEX_CAPACITY;
-}
+const ReplicaIndex = indexed_arena.UniqueIndex(REPLICA_INDEX_CAPACITY);
 
 fn replicaIndexKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) ReplicaIndexKey {
     return .{
@@ -203,54 +195,8 @@ fn replicaIndexKey(workspace_id: u64, device_id: principal.PrincipalId, path_has
     };
 }
 
-fn replicaIndexLookup(table: *const [REPLICA_INDEX_CAPACITY]ReplicaIndexSlot, key: ReplicaIndexKey) ?usize {
-    var index = replicaIndexStart(key);
-    var attempts: usize = 0;
-    while (attempts < REPLICA_INDEX_CAPACITY) : (attempts += 1) {
-        const slot = table[index];
-        switch (slot.state) {
-            .empty => return null,
-            .filled => if (replicaIndexKeyEql(slot.key, key)) return slot.slot_index,
-            .tombstone => {},
-        }
-        index = (index + 1) % REPLICA_INDEX_CAPACITY;
-    }
-    return null;
-}
-
-fn replicaIndexInsert(table: *[REPLICA_INDEX_CAPACITY]ReplicaIndexSlot, key: ReplicaIndexKey, slot_index: usize) void {
-    var index = replicaIndexStart(key);
-    var first_tombstone: ?usize = null;
-    var attempts: usize = 0;
-    while (attempts < REPLICA_INDEX_CAPACITY) : (attempts += 1) {
-        switch (table[index].state) {
-            .empty => {
-                const insert_index = first_tombstone orelse index;
-                table[insert_index] = .{
-                    .state = .filled,
-                    .key = key,
-                    .slot_index = slot_index,
-                };
-                return;
-            },
-            .filled => {
-                if (replicaIndexKeyEql(table[index].key, key)) {
-                    table[index].slot_index = slot_index;
-                    return;
-                }
-            },
-            .tombstone => {
-                if (first_tombstone == null) first_tombstone = index;
-            },
-        }
-        index = (index + 1) % REPLICA_INDEX_CAPACITY;
-    }
-
-    native_util.impossibleByInvariant("replica index capacity covers replica slots");
-}
-
-fn replicaIndexStart(key: ReplicaIndexKey) usize {
-    return @as(usize, @intCast(replicaIndexHash(key) % REPLICA_INDEX_CAPACITY));
+fn replicaIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) u64 {
+    return indexed_arena.nonZeroKey(replicaIndexHash(replicaIndexKey(workspace_id, device_id, path_hash)));
 }
 
 fn replicaIndexHash(key: ReplicaIndexKey) u64 {
@@ -260,12 +206,6 @@ fn replicaIndexHash(key: ReplicaIndexKey) u64 {
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.device_id.serial);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.path_hash);
     return hash;
-}
-
-fn replicaIndexKeyEql(left: ReplicaIndexKey, right: ReplicaIndexKey) bool {
-    return left.workspace_id == right.workspace_id and
-        left.device_id.eql(right.device_id) and
-        left.path_hash == right.path_hash;
 }
 
 pub const Service = ServiceWith(.{});
@@ -284,7 +224,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         state_workspace_id: u64 = 0,
         resident_store: ?*ResidentState = null,
         owned_resident_state: ResidentState = .{},
-        replica_index_slots: [REPLICA_INDEX_CAPACITY]ReplicaIndexSlot = emptyReplicaIndex(),
+        replica_index: ReplicaIndex = ReplicaIndex.init(),
         next_overlay_session_id: u64 = 1,
         overlay_sessions: [MAX_SERVICE_OVERLAY_SESSIONS]OverlaySessionSlot = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_SERVICE_OVERLAY_SESSIONS,
         mergeable_document_adapter: MergeableDocumentAdapter = sync_adapters.default_mergeable_document_adapter,
@@ -678,7 +618,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             version_id: anytype,
         ) Error!void {
             if (path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
-            try self.setReplicaVersionForPathHash(workspace_id, device_id, path, workspace.pathHash(path), object_id, version_id);
+            try self.setReplicaVersionForPathHash(workspace_id, device_id, path, workspace.pathHash(path), object_id, version_id, 0);
         }
 
         pub fn replicaVersion(
@@ -738,18 +678,22 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             try self.authorizeTransport(policy, transport, &summary);
             try self.evaluateOverlay(policy, workspace_id, &summary);
 
-            const entries = try store.entries(workspace_id);
-            for (entries) |entry| {
+            const last_replicated_generation = self.replicaWorkspaceGeneration(workspace_id, to_device);
+            const changes = try store.entryChangesSince(workspace_id, last_replicated_generation);
+            for (changes, 0..) |mutation, mutation_index| {
+                const entry = mutation.entry;
+                if (hasLaterChangeForPath(changes, mutation_index, entry.pathSlice())) continue;
                 if (!policy.matchesPath(entry.pathSlice())) {
                     summary.skipped_entry_count += 1;
                     continue;
                 }
-                summary.selected_entry_count += 1;
 
                 const semantic = classifyEntry(entry);
                 const entry_path = entry.pathSlice();
                 const entry_path_hash = entry.pathHash();
                 const remote_version_id = self.replicaVersionForPathHash(workspace_id, to_device, entry_path, entry_path_hash) orelse 0;
+                if (remote_version_id == entry.version_id.raw()) continue;
+                summary.selected_entry_count += 1;
 
                 switch (semantic) {
                     .mergeable_crdt => {
@@ -804,7 +748,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 });
                 summary.transport_frame_count += 1;
                 if (frame.encrypted) summary.encrypted_transport_count += 1;
-                try self.setReplicaVersionForPathHash(workspace_id, to_device, entry_path, entry_path_hash, entry.object_id, entry.version_id);
+                try self.setReplicaVersionForPathHash(workspace_id, to_device, entry_path, entry_path_hash, entry.object_id, entry.version_id, mutation.generation);
             }
             summary.conflict_count = self.countConflictsFor(workspace_id, to_device);
             if (summary.selected_entry_count != 0 or summary.conflict_count != 0) {
@@ -1071,7 +1015,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             path: []const u8,
             path_hash: u64,
         ) ?usize {
-            const slot_index = replicaIndexLookup(&self.replica_index_slots, replicaIndexKey(workspace_id, device_id, path_hash)) orelse return null;
+            const slot_index = self.replica_index.lookup(replicaIndexLookupKey(workspace_id, device_id, path_hash)) orelse return null;
             if (slot_index >= MAX_REPLICA_ENTRIES) native_util.impossibleByInvariant("replica index points outside slots");
             const slot = &self.stateConst().replica_entries[slot_index];
             if (!slot.in_use) native_util.impossibleByInvariant("replica index points at a free slot");
@@ -1116,6 +1060,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             path_hash: u64,
             object_id: anytype,
             version_id: anytype,
+            workspace_generation: u32,
         ) Error!void {
             if (path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
             const slot_index = if (self.lookupReplicaSlotIndex(workspace_id, device_id, path, path_hash)) |existing_index|
@@ -1129,19 +1074,26 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.entry.path_len = native_util.copyTextExact(&slot.entry.path, path) catch return error.PathTooLong;
             slot.entry.object_id = object_store.ids.raw(object_id);
             slot.entry.version_id = object_store.ids.raw(version_id);
-            replicaIndexInsert(&self.replica_index_slots, replicaIndexKey(workspace_id, device_id, path_hash), slot_index);
+            slot.entry.workspace_generation = workspace_generation;
+            self.replica_index.insert(replicaIndexLookupKey(workspace_id, device_id, path_hash), slot_index);
             self.resident().markDirty();
         }
 
+        fn replicaWorkspaceGeneration(self: *const Self, workspace_id: u64, device_id: principal.PrincipalId) u32 {
+            var generation: u32 = 0;
+            for (self.stateConst().replica_entries) |slot| {
+                if (!slot.in_use) continue;
+                if (slot.entry.workspace_id != workspace_id or !slot.entry.device_id.eql(device_id)) continue;
+                generation = @max(generation, slot.entry.workspace_generation);
+            }
+            return generation;
+        }
+
         fn rebuildReplicaIndex(self: *Self) void {
-            self.replica_index_slots = emptyReplicaIndex();
+            self.replica_index.reset();
             for (self.stateConst().replica_entries, 0..) |slot, slot_index| {
                 if (!slot.in_use) continue;
-                replicaIndexInsert(
-                    &self.replica_index_slots,
-                    replicaIndexKey(slot.entry.workspace_id, slot.entry.device_id, slot.entry.pathHash()),
-                    slot_index,
-                );
+                self.replica_index.insert(replicaIndexLookupKey(slot.entry.workspace_id, slot.entry.device_id, slot.entry.pathHash()), slot_index);
             }
         }
 
@@ -1197,6 +1149,14 @@ fn classifyEntry(entry: workspace.Entry) SyncSemantic {
         else
             .chunked_snapshot,
     };
+}
+
+fn hasLaterChangeForPath(changes: []const workspace.EntryMutation, current_index: usize, path: []const u8) bool {
+    var index = current_index + 1;
+    while (index < changes.len) : (index += 1) {
+        if (std.mem.eql(u8, changes[index].entry.pathSlice(), path)) return true;
+    }
+    return false;
 }
 
 fn databaseContractMessage(

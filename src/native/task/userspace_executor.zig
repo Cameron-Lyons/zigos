@@ -1,8 +1,9 @@
 const builtin = @import("builtin");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const capability = @import("../kernel_api/capability.zig");
-const task_runtime = @import("task_runtime.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
+const task_runtime = @import("task_runtime.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_loader = @import("userspace_loader.zig");
 
@@ -59,6 +60,8 @@ else
 const PAGE_SIZE: usize = 4096;
 const USERSPACE_TRAP_VECTOR: u8 = 129;
 const PAGE_FAULT_VECTOR: u8 = 14;
+const MAPPING_INDEX_CAPACITY: usize = task_runtime.MAX_TASKS * 2;
+const MappingIndex = indexed_arena.UniqueIndex(MAPPING_INDEX_CAPACITY);
 
 pub export var zigos_userspace_resume_requested: u32 = 0;
 pub export var zigos_userspace_resume_esp: u32 = 0;
@@ -110,6 +113,7 @@ pub const Executor = struct {
     last_fault_error_code: u32 = 0,
     user_page_fault_count: u64 = 0,
     mappings: [task_runtime.MAX_TASKS]MappingEntry = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS,
+    mapping_index: MappingIndex = MappingIndex.init(),
     userspace_kernel_stack: [16 * 1024]u8 align(16) = [_]u8{0} ** (16 * 1024),
 
     pub fn init(self: *Executor) void {
@@ -141,6 +145,7 @@ pub const Executor = struct {
         self.last_fault_error_code = 0;
         self.user_page_fault_count = 0;
         self.mappings = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS;
+        self.mapping_index.reset();
         zigos_userspace_resume_requested = 0;
         zigos_userspace_resume_esp = 0;
         zigos_userspace_resume_eip = 0;
@@ -310,7 +315,7 @@ pub const Executor = struct {
             }
         }
 
-        for (&self.mappings) |*entry| {
+        for (&self.mappings, 0..) |*entry, slot_index| {
             if (entry.in_use) continue;
             entry.in_use = true;
             entry.address_space_id = address_space.id;
@@ -323,22 +328,48 @@ pub const Executor = struct {
             entry.page_fault_count = 0;
             entry.last_fault_address = 0;
             entry.last_fault_error_code = 0;
+            self.mapping_index.insert(address_space.id, slot_index);
             return entry;
         }
         return null;
     }
 
     fn findMapping(self: *Executor, address_space_id: u64) ?*MappingEntry {
-        for (&self.mappings) |*entry| {
-            if (entry.in_use and entry.address_space_id == address_space_id) return entry;
+        const slot_index = self.mapping_index.lookup(address_space_id) orelse {
+            self.debugAssertMappingIndexMissAbsent(address_space_id);
+            return null;
+        };
+        if (slot_index >= self.mappings.len) native_util.impossibleByInvariant("executor mapping index points outside mappings");
+        const entry = &self.mappings[slot_index];
+        if (!entry.in_use) native_util.impossibleByInvariant("executor mapping index points at a free mapping");
+        if (entry.address_space_id != address_space_id) native_util.impossibleByInvariant("executor mapping index points at the wrong mapping");
+        return entry;
+    }
+
+    fn rebuildMappingIndex(self: *Executor) void {
+        self.mapping_index.reset();
+        for (self.mappings, 0..) |entry, slot_index| {
+            if (entry.in_use and entry.address_space_id != 0) self.mapping_index.insert(entry.address_space_id, slot_index);
         }
-        return null;
+    }
+
+    fn debugAssertMappingIndexMissAbsent(self: *const Executor, address_space_id: u64) void {
+        if (!debugIndexChecksEnabled()) return;
+        for (self.mappings) |entry| {
+            if (entry.in_use and entry.address_space_id == address_space_id) {
+                native_util.impossibleByInvariant("executor mapping index missed a live address space");
+            }
+        }
     }
 
     fn trapStackTop(self: *Executor) usize {
         return @intFromPtr(&self.userspace_kernel_stack) + self.userspace_kernel_stack.len;
     }
 };
+
+fn debugIndexChecksEnabled() bool {
+    return builtin.mode == .Debug;
+}
 
 fn selectBootstrapCapability(
     task: *const task_runtime.TaskRecord,
@@ -506,6 +537,7 @@ test "executor matches userspace counters by stage and pulse" {
         .address_space_id = 42,
         .last_user_counter = userspace_bootstrap_mailbox.packCounter(.syscall_ready, .proof, userspace_bootstrap_mailbox.PROOF_SYSCALL_POINTER_DENIED_PULSE),
     };
+    executor.rebuildMappingIndex();
 
     try @import("std").testing.expect(executor.observedUserCounterStagePulse(42, .syscall_ready, userspace_bootstrap_mailbox.PROOF_SYSCALL_POINTER_DENIED_PULSE));
     try @import("std").testing.expect(!executor.observedUserCounterStagePulse(42, .steady, userspace_bootstrap_mailbox.PROOF_SYSCALL_POINTER_DENIED_PULSE));

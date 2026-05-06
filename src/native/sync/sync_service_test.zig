@@ -194,6 +194,9 @@ test "sync service covers device graph policy replication semantics and restart 
     try std.testing.expectEqual(SyncSemantic.mergeable_crdt, notes_frame.semantic);
     try std.testing.expectEqual(@as(usize, 1), summary.conflict_count);
     try std.testing.expect(service.findConflict(notes_id, tablet, "documents/notes.md") != null);
+    const clean_summary = try service.replicateWorkspace(&storage, notes_id, laptop, tablet, .device_to_device);
+    try std.testing.expectEqual(@as(usize, 0), clean_summary.selected_entry_count);
+    try std.testing.expectEqual(@as(usize, 0), clean_summary.transport_frame_count);
 
     try std.testing.expect(try service.transferSecretObject(&storage, notes_id, secret.object_id, laptop, tablet, .device_to_device));
     const contract = try service.registerDatabaseContract(notes_id, "app.db.notes", "notes-db", contract_signer);

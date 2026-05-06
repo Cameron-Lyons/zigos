@@ -7,7 +7,7 @@ const endpoint = @import("endpoint.zig");
 const ids = @import("../core/ids.zig");
 const kernel_access = @import("native_kernel_access.zig");
 const kernel_descriptors = @import("native_kernel_descriptors.zig");
-const kernel_operation_descriptor = @import("kernel_operation_descriptor.zig");
+const operation_metadata = @import("operation_metadata.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const shared_memory = @import("shared_memory.zig");
@@ -316,14 +316,14 @@ pub const Kernel = struct {
     fn applySingleAutoGrant(
         self: *Kernel,
         comptime operation: abi.NativeOperation,
-        comptime grant_kind: kernel_operation_descriptor.AutoGrantKind,
+        comptime grant_kind: operation_metadata.AutoGrantKind,
         task_id: u64,
         holder: principal.PrincipalId,
         target: capability.CapabilityTarget,
         request_local_only: bool,
         now_ticks: u64,
     ) Error!capability.Capability {
-        const grant = kernel_operation_descriptor.autoGrantFor(operation, grant_kind);
+        const grant = operation_metadata.autoGrantFor(operation, grant_kind);
         const scoped_task_id: ?u64 = if (grant.task_scoped) task_id else null;
         const local_only = switch (grant.locality) {
             .request => request_local_only,
@@ -614,7 +614,7 @@ pub const Kernel = struct {
         now_ticks: u64,
         input: AuthorizationInput,
     ) Error!capability.Capability {
-        const descriptor = kernel_operation_descriptor.declarationFor(expected_operation);
+        const descriptor = operation_metadata.declarationFor(expected_operation);
         try self.requireCallSubject(context, descriptor.operation, now_ticks);
 
         const base_rights = capability.CapabilityRights.single(descriptor.required_right);
@@ -740,7 +740,7 @@ fn retargetTaskScope(original: capability.CapabilityScope, receiver_task_id: u64
 }
 
 fn validateOperationScope(
-    rule: kernel_operation_descriptor.ScopeRule,
+    rule: operation_metadata.ScopeRule,
     scope: capability.CapabilityScope,
     input: AuthorizationInput,
 ) Error!void {

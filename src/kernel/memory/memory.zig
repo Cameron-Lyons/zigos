@@ -7,6 +7,7 @@ const MIN_BLOCK_SIZE: usize = 16;
 const BLOCK_ALIGNMENT: usize = 16;
 
 const PAGE_SIZE: usize = 4096;
+const MAX_PHYSICAL_MEMORY: usize = 128 * 1024 * 1024;
 extern var __kernel_end: u8;
 
 fn alignUp(addr: usize, alignment: usize) usize {
@@ -219,8 +220,7 @@ pub fn getMemoryStats() struct { total: usize, used: usize, free: usize } {
 }
 
 pub fn allocPages(num_pages: usize) ?[*]u8 {
-    const page_size = 4096;
-    const size = num_pages * page_size;
+    const size = num_pages * PAGE_SIZE;
 
     const ptr = kmalloc(size);
     if (ptr) |p| {
@@ -241,7 +241,7 @@ pub fn allocatePhysicalPage() ?u32 {
     const page = next_physical_page;
     next_physical_page += PAGE_SIZE;
 
-    if (next_physical_page > 128 * 1024 * 1024) {
+    if (next_physical_page > MAX_PHYSICAL_MEMORY) {
         return null;
     }
 

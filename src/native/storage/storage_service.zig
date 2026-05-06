@@ -237,6 +237,10 @@ pub const StorageCore = struct {
         return self.workspaces.entries(workspaceId(workspace_id));
     }
 
+    pub fn entryChangesSince(self: *const Service, workspace_id: anytype, generation: u32) workspace.Error![]const workspace.EntryMutation {
+        return self.workspaces.entryChangesSince(workspaceId(workspace_id), generation);
+    }
+
     pub fn findWorkspace(self: *Service, owner: principal.PrincipalId, label: []const u8) ?*workspace.WorkspaceRecord {
         return self.workspaces.findOwned(owner, label);
     }

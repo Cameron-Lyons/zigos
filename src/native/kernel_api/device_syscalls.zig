@@ -1,14 +1,6 @@
 const abi = @import("../core/abi.zig");
 const component_port = @import("component_port.zig");
 const dispatch = @import("syscall_dispatch.zig");
-const syscall_abi = @import("syscall_abi.zig");
-
-pub const operations = [_]syscall_abi.Operation{
-    syscall_abi.declare(.device_describe, .device, component_port.DeviceDescribeRequest, abi.DeviceDescriptor, dispatchDeviceDescribe, .plain),
-    syscall_abi.declare(.device_mmio_window, .device, component_port.DeviceMmioWindowRequest, abi.DeviceMmioWindowDescriptor, dispatchDeviceMmioWindow, .plain),
-    syscall_abi.declare(.device_port_read, .device, component_port.DevicePortReadRequest, abi.DevicePortReadResponse, dispatchDevicePortRead, .plain),
-    syscall_abi.declare(.device_port_write, .device, component_port.DevicePortWriteRequest, void, dispatchDevicePortWrite, .plain),
-};
 
 pub fn dispatchDeviceDescribe(
     port: *component_port.KernelPort,

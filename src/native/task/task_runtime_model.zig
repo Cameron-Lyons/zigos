@@ -2,6 +2,7 @@ const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const builtin = @import("builtin");
 const launch_helpers = @import("task_runtime_launch.zig");
 const id_index = @import("../core/id_index.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const runtime_host = @import("task_runtime_host.zig");
@@ -222,11 +223,12 @@ pub const TaskCreateRequest = struct {
 };
 
 pub const IdIndexSlot = id_index.Slot;
+pub const CapabilityIndex = indexed_arena.UniqueIndex(CAPABILITY_INDEX_CAPACITY);
 
 pub const TaskColdRecord = struct {
     execution_components: [MAX_TASK_COMPONENTS]ExecutionComponentRecord = [_]ExecutionComponentRecord{zeroExecutionComponent()} ** MAX_TASK_COMPONENTS,
     capability_ids: [MAX_TASK_CAPABILITIES]u64 = [_]u64{0} ** MAX_TASK_CAPABILITIES,
-    capability_index_slots: [CAPABILITY_INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(CAPABILITY_INDEX_CAPACITY),
+    capability_index: CapabilityIndex = CapabilityIndex.init(),
     audit_trail: [MAX_AUDIT_EVENTS]AuditEvent = [_]AuditEvent{AuditEvent{ .kind = .created }} ** MAX_AUDIT_EVENTS,
     userspace_image: ExecutableImageSpec = .{},
 };
@@ -506,7 +508,7 @@ pub fn indexHash(id: u64, comptime capacity: usize) usize {
 
 pub fn taskCapabilityIndex(task: *const TaskRecord, capability_id: u64) ?usize {
     const cold = taskColdConst(task);
-    const slot_index = indexLookup(CAPABILITY_INDEX_CAPACITY, &cold.capability_index_slots, capability_id) orelse {
+    const slot_index = cold.capability_index.lookup(capability_id) orelse {
         if (debugIndexChecksEnabled() and taskCapabilityScanIndex(task, capability_id) != null) {
             native_util.impossibleByInvariant("task capability index missed a live capability");
         }
@@ -536,11 +538,11 @@ fn debugIndexChecksEnabled() bool {
 
 pub fn rebuildCapabilityIndex(task: *TaskRecord) void {
     const cold = taskCold(task);
-    cold.capability_index_slots = emptyIndexTable(CAPABILITY_INDEX_CAPACITY);
+    cold.capability_index.reset();
     var index: usize = 0;
     while (index < task.capability_count) : (index += 1) {
         if (cold.capability_ids[index] == 0) continue;
-        indexInsert(CAPABILITY_INDEX_CAPACITY, &cold.capability_index_slots, cold.capability_ids[index], index);
+        cold.capability_index.insert(cold.capability_ids[index], index);
     }
 }
 
