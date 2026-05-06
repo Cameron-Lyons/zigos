@@ -52,7 +52,9 @@ runs:
           --retry-all-errors \
           --retry-delay 10 \
           --connect-timeout 30 \
-          --max-time 900 \
+          --speed-limit 1024 \
+          --speed-time 60 \
+          --max-time 300 \
           --output "${archive}" \
           "${download_url}"
 
