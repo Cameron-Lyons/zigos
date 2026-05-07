@@ -1,6 +1,7 @@
 const std = @import("std");
 const fixed_table = @import("../core/fixed_table.zig");
 const capability = @import("../kernel_api/capability.zig");
+const component_abi_schema = @import("../services/component_abi_schema.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -177,11 +178,20 @@ pub const kernel_tcb = [_]KernelTcbComponent{
     .iommu_dma_isolation_hooks,
 };
 
+fn catalogInterface(comptime class: ServiceClass) manifest.InterfaceDecl {
+    inline for (@typeInfo(component_abi_schema.ServiceBinding).@"enum".fields) |field| {
+        if (std.mem.eql(u8, field.name, @tagName(class))) {
+            return component_abi_schema.interfaceForService(@enumFromInt(field.value));
+        }
+    }
+    @compileError("service catalog class is missing a component ABI service binding");
+}
+
 pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .task_runtime,
         .boundary = .userspace_service,
-        .interface = .{ .name = "zigos.task.runtime" },
+        .interface = catalogInterface(.task_runtime),
         .required_capabilities = &.{.service_bootstrap},
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true },
@@ -190,7 +200,7 @@ pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .session_manager,
         .boundary = .userspace_service,
-        .interface = .{ .name = "zigos.session.manager" },
+        .interface = catalogInterface(.session_manager),
         .required_capabilities = &.{ .service_bootstrap, .ui_session_surface },
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .ui = .session_surface },
@@ -223,7 +233,7 @@ pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .policy_mediation,
         .boundary = .userspace_service,
-        .interface = .{ .name = "zigos.policy.mediation" },
+        .interface = catalogInterface(.policy_mediation),
         .required_capabilities = &.{ .service_bootstrap, .policy_authority },
         .dependencies = &.{.service_registry},
         .restart_policy = .supervised_restart,
@@ -251,7 +261,7 @@ pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .permission_review_ui,
         .boundary = .userspace_service,
-        .interface = .{ .name = "zigos.permission.review" },
+        .interface = catalogInterface(.permission_review_ui),
         .required_capabilities = &.{ .service_bootstrap, .permission_review, .ui_review_surface },
         .dependencies = &.{.policy_mediation},
         .restart_policy = .supervised_restart,
@@ -283,7 +293,7 @@ pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .service_registry,
         .boundary = .userspace_service,
-        .interface = .{ .name = "zigos.service.registry" },
+        .interface = catalogInterface(.service_registry),
         .required_capabilities = &.{ .service_bootstrap, .endpoint_registry },
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true },
@@ -315,7 +325,7 @@ pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .network_stack,
         .boundary = .userspace_service,
-        .interface = .{ .name = "zigos.service.network.policy" },
+        .interface = catalogInterface(.network_stack),
         .required_capabilities = &.{ .service_bootstrap, .unrestricted_network, .device_authority },
         .dependencies = &.{.policy_mediation},
         .driver_class = .network_adapter,
@@ -344,7 +354,7 @@ pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .storage_object,
         .boundary = .userspace_service,
-        .interface = .{ .name = "zigos.object.workspace" },
+        .interface = catalogInterface(.storage_object),
         .required_capabilities = &.{ .service_bootstrap, .object_store_authority, .device_authority },
         .dependencies = &.{.policy_mediation},
         .driver_class = .storage_controller,
@@ -373,7 +383,7 @@ pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .package_install_update,
         .boundary = .userspace_service,
-        .interface = .{ .name = "zigos.package.install" },
+        .interface = catalogInterface(.package_install_update),
         .required_capabilities = &.{ .service_bootstrap, .metadata_storage, .named_peer_network },
         .dependencies = &.{ .policy_mediation, .storage_object, .network_stack },
         .restart_policy = .supervised_restart,
@@ -401,7 +411,7 @@ pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .compositor_ui_session,
         .boundary = .userspace_service,
-        .interface = .{ .name = "zigos.ui.session" },
+        .interface = catalogInterface(.compositor_ui_session),
         .required_capabilities = &.{ .service_bootstrap, .ui_session_surface, .device_authority },
         .dependencies = &.{.policy_mediation},
         .driver_class = .graphics_adapter,
@@ -430,7 +440,7 @@ pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .indexing_search,
         .boundary = .userspace_service,
-        .interface = .{ .name = "zigos.index.search" },
+        .interface = catalogInterface(.indexing_search),
         .required_capabilities = &.{ .service_bootstrap, .metadata_storage },
         .dependencies = &.{.storage_object},
         .restart_policy = .supervised_restart,
@@ -458,7 +468,7 @@ pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .sync_replication,
         .boundary = .userspace_service,
-        .interface = .{ .name = "zigos.sync.replication" },
+        .interface = catalogInterface(.sync_replication),
         .required_capabilities = &.{ .service_bootstrap, .named_peer_network, .metadata_storage, .background_execution },
         .dependencies = &.{ .storage_object, .network_stack },
         .restart_policy = .supervised_restart,
@@ -486,7 +496,7 @@ pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .media_print_helpers,
         .boundary = .userspace_service,
-        .interface = .{ .name = "zigos.media.print" },
+        .interface = catalogInterface(.media_print_helpers),
         .required_capabilities = &.{ .service_bootstrap, .device_authority, .background_execution },
         .dependencies = &.{.policy_mediation},
         .driver_class = .audio_print_io,
@@ -515,7 +525,7 @@ pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .compatibility_portal,
         .boundary = .userspace_service,
-        .interface = .{ .name = "zigos.compat.portal" },
+        .interface = catalogInterface(.compatibility_portal),
         .required_capabilities = &.{ .service_bootstrap, .named_peer_network, .ui_review_surface },
         .dependencies = &.{ .policy_mediation, .network_stack, .compositor_ui_session },
         .restart_policy = .supervised_restart,
@@ -802,10 +812,12 @@ test "service catalog derives descriptors and bootstrap contracts from one sourc
     try std.testing.expectEqual(@as(usize, catalog.len), default_services.len);
     try std.testing.expectEqual(@as(usize, 10), ordered_service_contracts.len);
     try std.testing.expectEqual(@as(usize, 8), ordered_published_native_service_contracts.len);
+    try std.testing.expectEqual(component_abi_schema.service_catalog_bindings.len, catalog.len);
     try std.testing.expectEqual(ServiceClass.service_registry, ordered_service_contracts[0].class);
     try std.testing.expectEqual(ServiceClass.policy_mediation, ordered_service_contracts[1].class);
     try std.testing.expectEqual(ServiceClass.compatibility_portal, ordered_service_contracts[9].class);
     try std.testing.expectEqual(ServiceClass.media_print_helpers, ordered_published_native_service_contracts[7].class);
+    try std.testing.expectEqualStrings(component_abi_schema.interfaceForService(.storage_object).name, entryForClass(.storage_object).?.interface.name);
     try std.testing.expectEqualStrings("zigos.system.storage-object", bundleIdForServiceClass(.storage_object).?);
     try std.testing.expect(allowsDriverClass(.network_stack, .network_adapter));
     try std.testing.expect(!allowsDriverClass(.policy_mediation, .network_adapter));

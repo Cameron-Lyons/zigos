@@ -29,7 +29,13 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.permission_ui_service_task_ready,
     boot_markers.service_boot_driver_service_network_ready,
     boot_markers.service_boot_service_contracts_ready,
+    boot_markers.service_boot_supervisor_crash_recorded,
+    boot_markers.service_boot_driver_rehost_ok,
+    boot_markers.service_boot_supervisor_restart_ok,
+    boot_markers.service_boot_supervisor_restart_without_reboot,
     "ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY",
+    boot_markers.platform_bootloader_measurement_provided,
+    boot_markers.platform_build_artifact_manifest_verified,
     boot_markers.platform_artifact_manifest_verified,
     boot_markers.platform_measured_boot_recorded,
     boot_markers.task_session_ready,
@@ -43,6 +49,19 @@ pub const cold_reboot_required = [_][]const u8{
 
 pub const first_boot_required = [_][]const u8{
     boot_markers.platform_measured_boot_first,
+};
+
+pub const driver_restart_required = [_][]const u8{
+    boot_markers.service_boot_supervisor_crash_recorded,
+    boot_markers.service_boot_driver_rehost_ok,
+    boot_markers.service_boot_supervisor_restart_ok,
+    boot_markers.service_boot_supervisor_restart_without_reboot,
+};
+
+pub const ab_rollback_required = [_][]const u8{
+    boot_markers.platform_immutable_base_active,
+    boot_markers.platform_activation_rollback_ok,
+    boot_markers.platform_ab_image_rollback_ok,
 };
 
 fn contains(group: []const []const u8, marker: []const u8) bool {
@@ -70,8 +89,22 @@ test "native smoke gate requires runtime isolation proof markers" {
 }
 
 test "native smoke gate requires measured boot reboot comparison markers" {
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_bootloader_measurement_provided));
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_build_artifact_manifest_verified));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_measured_boot_recorded));
     try std.testing.expect(contains(&first_boot_required, boot_markers.platform_measured_boot_first));
     try std.testing.expect(contains(&cold_reboot_required, boot_markers.platform_measured_boot_same_root));
     try std.testing.expect(contains(&cold_reboot_required, boot_markers.platform_measured_boot_same_shape));
+}
+
+test "native smoke gate requires in-boot driver crash restart proof markers" {
+    for (driver_restart_required) |marker| {
+        try std.testing.expect(contains(&cold_boot_required, marker));
+    }
+}
+
+test "native smoke gate requires A/B image rollback proof markers" {
+    for (ab_rollback_required) |marker| {
+        try std.testing.expect(contains(&ab_rollback_required, marker));
+    }
 }

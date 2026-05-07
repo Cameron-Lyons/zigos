@@ -11,13 +11,14 @@ const signing = @import("../core/signing.zig");
 pub const MAX_OBJECTS: usize = 128;
 pub const MAX_VERSIONS: usize = 512;
 pub const MAX_BLOBS: usize = 512;
-pub const MAX_CHUNK_BYTES: usize = 128;
-pub const MAX_BLOB_CHUNKS: usize = 4;
-pub const MAX_CHUNKS: usize = MAX_BLOBS * MAX_BLOB_CHUNKS;
+pub const PAGE_SIZE_BYTES: usize = 4096;
+pub const MAX_CHUNK_BYTES: usize = PAGE_SIZE_BYTES;
+pub const MAX_BLOB_CHUNKS: usize = 16;
+pub const MAX_CHUNKS: usize = 128;
 pub const MAX_BLOB_BYTES: usize = MAX_CHUNK_BYTES * MAX_BLOB_CHUNKS;
 pub const MAX_PAYLOAD_BYTES: usize = MAX_BLOB_BYTES;
 pub const MAX_VERSION_PARENTS: usize = 2;
-const MAX_METADATA_MESSAGE_BYTES: usize = MAX_PAYLOAD_BYTES + 256;
+const MAX_METADATA_MESSAGE_BYTES: usize = 256;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -149,6 +150,7 @@ pub const ChunkRef = struct {
 
 pub const BlobRecord = struct {
     address: BlobAddress,
+    merkle_root: BlobAddress,
     payload_len: usize,
     chunk_count: u16,
     chunks: [MAX_BLOB_CHUNKS]ChunkRef,
@@ -216,6 +218,7 @@ pub const BlobSlot = struct {
     in_use: bool = false,
     blob: BlobRecord = .{
         .address = [_]u8{0} ** 32,
+        .merkle_root = [_]u8{0} ** 32,
         .payload_len = 0,
         .chunk_count = 0,
         .chunks = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS,
@@ -417,11 +420,24 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         pub fn versionPayload(self: *Self, version_record: *const VersionRecord) Error![]const u8 {
+            if (version_record.payload_len > self.payload_read_buffer.len) return error.PayloadTooLarge;
+            return self.versionPayloadInto(version_record, self.payload_read_buffer[0..version_record.payload_len]);
+        }
+
+        pub fn versionPayloadInto(
+            self: *Self,
+            version_record: *const VersionRecord,
+            out: []u8,
+        ) Error![]const u8 {
+            if (out.len < version_record.payload_len) return error.PayloadTooLarge;
             const blob_record = self.blob(version_record.blob_address) orelse return error.BlobNotFound;
             if (blob_record.payload_len != version_record.payload_len) return error.CorruptBlob;
             if (!std.mem.eql(u8, &blob_record.address, &version_record.blob_address)) return error.CorruptBlob;
             if (blob_record.chunk_count != version_record.chunk_count) return error.CorruptBlob;
             const blob_chunk_count: usize = @intCast(blob_record.chunk_count);
+            if (!std.mem.eql(u8, &computeBlobMerkleRoot(blob_record.chunks[0..blob_chunk_count]), &blob_record.merkle_root)) {
+                return error.CorruptBlob;
+            }
             if (!std.mem.eql(u8, &computeBlobManifestAddress(blob_record.payload_len, blob_record.chunks[0..blob_chunk_count]), &version_record.blob_address)) {
                 return error.CorruptBlob;
             }
@@ -434,12 +450,12 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 if (!std.mem.eql(u8, &computeChunkAddress(chunk_record.chunkSlice()), &chunk_ref.address)) return error.CorruptBlob;
                 const chunk_payload_len: usize = @intCast(chunk_record.payload_len);
                 const next_offset = write_offset + chunk_payload_len;
-                if (next_offset > version_record.payload_len or next_offset > self.payload_read_buffer.len) return error.CorruptBlob;
-                copyBytes(self.payload_read_buffer[write_offset..next_offset], chunk_record.chunkSlice());
+                if (next_offset > version_record.payload_len or next_offset > out.len) return error.CorruptBlob;
+                copyBytes(out[write_offset..next_offset], chunk_record.chunkSlice());
                 write_offset = next_offset;
             }
             if (write_offset != version_record.payload_len) return error.CorruptBlob;
-            return self.payload_read_buffer[0..write_offset];
+            return out[0..write_offset];
         }
 
         pub fn blob(self: *const Self, address: BlobAddress) ?*const BlobRecord {
@@ -566,6 +582,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot = &self.blobs[slot_index];
             slot.in_use = true;
             slot.blob.address = address;
+            slot.blob.merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
             slot.blob.payload_len = payload.len;
             slot.blob.chunk_count = @intCast(chunk_count);
             slot.blob.chunks = chunk_refs;
@@ -712,14 +729,45 @@ pub fn computeChunkAddress(payload: []const u8) ChunkAddress {
 }
 
 pub fn computeBlobManifestAddress(payload_len: usize, chunk_refs: []const ChunkRef) BlobAddress {
+    const merkle_root = computeBlobMerkleRoot(chunk_refs);
     var hasher = crypto_hash.init();
     crypto_hash.updateInt(&hasher, "payload-len", payload_len);
     crypto_hash.updateInt(&hasher, "chunk-count", chunk_refs.len);
-    for (chunk_refs) |chunk_ref| {
-        crypto_hash.updateBytes(&hasher, "chunk-address", &chunk_ref.address);
-        crypto_hash.updateInt(&hasher, "chunk-len", chunk_ref.payload_len);
-    }
+    crypto_hash.updateBytes(&hasher, "chunk-merkle-root", &merkle_root);
     return crypto_hash.finalize(&hasher);
+}
+
+pub fn computeBlobMerkleRoot(chunk_refs: []const ChunkRef) BlobAddress {
+    if (chunk_refs.len == 0) {
+        var empty_hasher = crypto_hash.init();
+        crypto_hash.updateBytes(&empty_hasher, "blob-merkle-empty", "");
+        return crypto_hash.finalize(&empty_hasher);
+    }
+
+    var level = [_]BlobAddress{[_]u8{0} ** 32} ** MAX_BLOB_CHUNKS;
+    var level_count = chunk_refs.len;
+    for (chunk_refs, 0..) |chunk_ref, index| {
+        var hasher = crypto_hash.init();
+        crypto_hash.updateBytes(&hasher, "blob-merkle-leaf", &chunk_ref.address);
+        crypto_hash.updateInt(&hasher, "chunk-len", chunk_ref.payload_len);
+        level[index] = crypto_hash.finalize(&hasher);
+    }
+
+    while (level_count > 1) {
+        var next_count: usize = 0;
+        var index: usize = 0;
+        while (index < level_count) : (index += 2) {
+            const left = level[index];
+            const right = if (index + 1 < level_count) level[index + 1] else left;
+            var hasher = crypto_hash.init();
+            crypto_hash.updateBytes(&hasher, "blob-merkle-left", &left);
+            crypto_hash.updateBytes(&hasher, "blob-merkle-right", &right);
+            level[next_count] = crypto_hash.finalize(&hasher);
+            next_count += 1;
+        }
+        level_count = next_count;
+    }
+    return level[0];
 }
 
 fn buildChunkRefs(payload: []const u8, out: *[MAX_BLOB_CHUNKS]ChunkRef) Error!usize {
@@ -780,6 +828,7 @@ fn blobManifestMatches(blob_record: BlobRecord, payload_len: usize, chunk_refs: 
     if (blob_record.payload_len != payload_len) return false;
     const chunk_count: usize = @intCast(blob_record.chunk_count);
     if (chunk_count != chunk_refs.len) return false;
+    if (!std.mem.eql(u8, &blob_record.merkle_root, &computeBlobMerkleRoot(chunk_refs))) return false;
     var index: usize = 0;
     while (index < chunk_count) : (index += 1) {
         if (!std.mem.eql(u8, &blob_record.chunks[index].address, &chunk_refs[index].address)) return false;
@@ -800,8 +849,22 @@ fn metadataMessage(
     try writeLengthPrefixed(&writer, metadata.labelSlice());
     try writeLengthPrefixed(&writer, metadata.contentTypeSlice());
     try writer.writeU64(metadata.created_at_ticks);
-    try writeLengthPrefixed(&writer, payload);
+    try writer.writeU64(@intCast(payload.len));
+    const payload_digest = computePayloadDigest(payload);
+    try writer.writeBytes(&payload_digest);
     return buffer[0..writer.offset];
+}
+
+fn computePayloadDigest(payload: []const u8) [32]u8 {
+    var hasher = crypto_hash.init();
+    var offset: usize = 0;
+    while (offset < payload.len) {
+        const end = @min(offset + MAX_CHUNK_BYTES, payload.len);
+        crypto_hash.updateBytes(&hasher, "payload-page", payload[offset..end]);
+        offset = end;
+    }
+    crypto_hash.updateInt(&hasher, "payload-len", payload.len);
+    return crypto_hash.finalize(&hasher);
 }
 
 const BinaryWriter = binary_cursor.Writer(error{NoSpaceLeft}, error.NoSpaceLeft);
@@ -918,6 +981,39 @@ test "object store indexes full blob addresses authoritatively" {
     try std.testing.expectEqualStrings("first", store.chunk(first_blob.chunks[0].address).?.chunkSlice());
     try std.testing.expectEqualStrings("second", store.chunk(second_blob.chunks[0].address).?.chunkSlice());
     try std.testing.expectError(error.CorruptBlob, store.putBlob(first_address, "changed"));
+}
+
+test "object store streams page-sized chunks into Merkle-addressed blob manifests" {
+    var store = Store.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-large-storage-key",
+        .seed = [_]u8{0x46} ** 32,
+    };
+    var payload: [PAGE_SIZE_BYTES * 3 + 17]u8 = undefined;
+    for (&payload, 0..) |*byte, index| {
+        byte.* = @intCast((index * 31) & 0xFF);
+    }
+
+    const result = try store.putVersion(.{
+        .preferred_object_id = ids.object(913),
+        .object_type = .media_asset,
+        .payload = &payload,
+        .metadata = try signMetadata(signer, "large-media", "application/octet-stream", .media_asset, &payload, 13),
+    });
+
+    const version_record = store.version(result.version_id).?;
+    const blob = store.blob(version_record.blob_address).?;
+    try std.testing.expectEqual(payload.len, blob.payload_len);
+    try std.testing.expectEqual(@as(u16, 4), blob.chunk_count);
+    try std.testing.expectEqual(@as(u16, PAGE_SIZE_BYTES), blob.chunks[0].payload_len);
+    try std.testing.expectEqual(@as(u16, 17), blob.chunks[3].payload_len);
+    const chunk_count: usize = @intCast(blob.chunk_count);
+    try std.testing.expect(std.mem.eql(u8, &blob.merkle_root, &computeBlobMerkleRoot(blob.chunks[0..chunk_count])));
+    try std.testing.expect(std.mem.eql(u8, &blob.address, &computeBlobManifestAddress(blob.payload_len, blob.chunks[0..chunk_count])));
+
+    var out: [payload.len]u8 = undefined;
+    const loaded = try store.versionPayloadInto(version_record, &out);
+    try std.testing.expectEqualSlices(u8, &payload, loaded);
 }
 
 test "object store verifies blob backend corruption before serving payloads" {

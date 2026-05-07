@@ -1,4 +1,5 @@
 const capability = @import("../kernel_api/capability.zig");
+const component_abi_schema = @import("../services/component_abi_schema.zig");
 const contract = @import("contract.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
@@ -17,8 +18,8 @@ const task_runtime = @import("../task/task_runtime.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 
-pub const bootstrap_storage_interface = manifest.InterfaceDecl{ .name = "zigos.bootstrap.workspace" };
-pub const compatibility_portal_interface = manifest.InterfaceDecl{ .name = "zigos.compat.portal" };
+pub const bootstrap_storage_interface = component_abi_schema.interfaceDecl(.bootstrap_workspace);
+pub const compatibility_portal_interface = component_abi_schema.interfaceForService(.compatibility_portal);
 
 pub const BootstrapState = struct {
     ids: session_bootstrap.Principals,

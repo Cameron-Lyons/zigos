@@ -15,6 +15,7 @@ pub const MAX_RECORDS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MEASUREMENT_KIND_COUNT: usize = 5;
 pub const MAX_MANIFEST_ENTRIES: usize = MAX_RECORDS;
+pub const MAX_BUILD_ARTIFACTS: usize = 32;
 pub const state_workspace_label = "system-measured-boot";
 
 const state_entry_path = "state/latest";
@@ -41,6 +42,23 @@ pub const MeasurementRecord = struct {
 };
 
 pub const ArtifactManifestEntry = MeasurementRecord;
+
+pub const BuildArtifactKind = enum(u8) {
+    bootloader_source,
+    bootloader_measurement,
+    userspace_image,
+};
+
+pub const BuildArtifactEntry = struct {
+    kind: BuildArtifactKind,
+    label_len: usize,
+    label: [MAX_LABEL_BYTES]u8,
+    digest: [32]u8,
+
+    pub fn labelSlice(self: *const BuildArtifactEntry) []const u8 {
+        return self.label[0..self.label_len];
+    }
+};
 
 pub const ArtifactManifest = struct {
     generation: u64,
@@ -124,6 +142,49 @@ pub const SignedArtifactManifest = struct {
     }
 };
 
+pub const BuildArtifactManifest = struct {
+    generation: u64,
+    entry_count: usize,
+    entries: [MAX_BUILD_ARTIFACTS]BuildArtifactEntry,
+    signature: policy_manifest.Signature,
+
+    pub fn init(generation: u64) BuildArtifactManifest {
+        return .{
+            .generation = generation,
+            .entry_count = 0,
+            .entries = [_]BuildArtifactEntry{zeroBuildArtifactEntry()} ** MAX_BUILD_ARTIFACTS,
+            .signature = .{},
+        };
+    }
+
+    pub fn addDigest(self: *BuildArtifactManifest, kind: BuildArtifactKind, label: []const u8, digest: [32]u8) Error!void {
+        if (self.entry_count >= MAX_BUILD_ARTIFACTS) return error.RecordTableFull;
+        self.entries[self.entry_count] = try buildArtifactEntry(kind, label, digest);
+        self.entry_count += 1;
+    }
+
+    pub fn countKind(self: *const BuildArtifactManifest, kind: BuildArtifactKind) usize {
+        var count: usize = 0;
+        for (self.entries[0..self.entry_count]) |entry| {
+            if (entry.kind == kind) count += 1;
+        }
+        return count;
+    }
+
+    pub fn find(self: *const BuildArtifactManifest, kind: BuildArtifactKind, label: []const u8) ?BuildArtifactEntry {
+        for (self.entries[0..self.entry_count]) |entry| {
+            if (entry.kind == kind and std.mem.eql(u8, entry.labelSlice(), label)) return entry;
+        }
+        return null;
+    }
+
+    pub fn verify(self: *const BuildArtifactManifest) bool {
+        var payload_buffer: [4096]u8 = undefined;
+        const payload = encodeBuildArtifactManifest(self.generation, self.entries[0..self.entry_count], &payload_buffer) catch return false;
+        return signing.verify(self.signature, payload) and requiredBuildArtifactShape(self);
+    }
+};
+
 pub const BootRecord = struct {
     generation: u64,
     record_count: usize,
@@ -194,6 +255,7 @@ pub const Error = error{
     StateTooLarge,
     UnsupportedStateVersion,
     ManifestTooLarge,
+    InvalidBuildArtifactKind,
 };
 
 pub const Recorder = struct {
@@ -274,6 +336,51 @@ pub fn signArtifactManifest(
 
 pub fn verifySignedArtifactManifest(signed_manifest: *const SignedArtifactManifest) bool {
     return signed_manifest.verify();
+}
+
+pub fn verifyBuildArtifactManifest(manifest: *const BuildArtifactManifest) bool {
+    return manifest.verify();
+}
+
+pub fn buildArtifactEntry(kind: BuildArtifactKind, label: []const u8, digest: [32]u8) Error!BuildArtifactEntry {
+    var entry = zeroBuildArtifactEntry();
+    entry.kind = kind;
+    entry.label_len = copyText(&entry.label, label);
+    entry.digest = digest;
+    return entry;
+}
+
+pub fn buildArtifactManifestFromGenerated(comptime generated: anytype) Error!BuildArtifactManifest {
+    var manifest = BuildArtifactManifest.init(generated.generation);
+    inline for (generated.entries) |entry| {
+        const kind = std.enums.fromInt(BuildArtifactKind, entry.kind) orelse return error.InvalidBuildArtifactKind;
+        try manifest.addDigest(kind, entry.label, entry.digest);
+    }
+    manifest.signature = .{
+        .format = generated.signature_format,
+        .signer = generated.signature_signer,
+        .public_key_len = generated.signature_public_key.len,
+        .public_key = generated.signature_public_key,
+        .value_len = generated.signature_value.len,
+        .value = generated.signature_value,
+    };
+    return manifest;
+}
+
+pub fn encodeBuildArtifactManifest(generation: u64, entries: []const BuildArtifactEntry, buffer: []u8) Error![]const u8 {
+    var offset: usize = 0;
+    offset = appendManifestFormat(buffer, offset, "ZBAM1|g={d}|n={d}", .{
+        generation,
+        entries.len,
+    }) catch return error.ManifestTooLarge;
+    for (entries) |entry| {
+        offset = appendManifestFormat(buffer, offset, "|{s}:{s}:", .{
+            @tagName(entry.kind),
+            entry.labelSlice(),
+        }) catch return error.ManifestTooLarge;
+        offset = appendHexDigest(buffer, offset, &entry.digest) catch return error.ManifestTooLarge;
+    }
+    return buffer[0..offset];
 }
 
 pub fn bootRecordMatchesManifest(boot: *const BootRecord, artifact_manifest: *const ArtifactManifest) bool {
@@ -395,6 +502,15 @@ fn zeroRecord() MeasurementRecord {
     };
 }
 
+fn zeroBuildArtifactEntry() BuildArtifactEntry {
+    return .{
+        .kind = .bootloader_source,
+        .label_len = 0,
+        .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .digest = [_]u8{0} ** 32,
+    };
+}
+
 fn hashMeasurement(kind: MeasurementKind, label: []const u8, payload: []const u8) [32]u8 {
     var hasher = crypto_hash.init();
     crypto_hash.updateEnum(&hasher, "measurement-kind", kind);
@@ -485,6 +601,12 @@ fn requiredArtifactShape(artifact_manifest: *const ArtifactManifest) bool {
         artifact_manifest.countKind(.critical_service) >= 4 and
         artifact_manifest.countKind(.policy) == 1 and
         artifact_manifest.countKind(.driver_set) == 1;
+}
+
+fn requiredBuildArtifactShape(manifest: *const BuildArtifactManifest) bool {
+    return manifest.countKind(.bootloader_source) == 1 and
+        manifest.countKind(.bootloader_measurement) == 1 and
+        manifest.countKind(.userspace_image) >= 10;
 }
 
 fn encodeArtifactManifest(artifact_manifest: ArtifactManifest, buffer: []u8) Error![]const u8 {
@@ -822,4 +944,31 @@ test "signed artifact manifests bind required boot artifact classes before activ
     try std.testing.expect(bootRecordMatchesManifest(&boot, &artifact_manifest));
     boot.records[1].digest[0] ^= 0xAA;
     try std.testing.expect(!bootRecordMatchesManifest(&boot, &artifact_manifest));
+}
+
+test "build-generated artifact manifests verify signatures and required build artifacts" {
+    var manifest = BuildArtifactManifest.init(1);
+    try manifest.addDigest(.bootloader_source, "src/boot/boot64.S", [_]u8{0x10} ** 32);
+    try manifest.addDigest(.bootloader_measurement, "multiboot-v1:zigos_native", [_]u8{0x11} ** 32);
+    inline for (0..10) |index| {
+        const digest = [_]u8{@intCast(0x20 + index)} ** 32;
+        var label_buffer: [32]u8 = undefined;
+        const label = try std.fmt.bufPrint(&label_buffer, "zigos.system.test-{d}", .{index});
+        try manifest.addDigest(.userspace_image, label, digest);
+    }
+
+    var payload_buffer: [4096]u8 = undefined;
+    const payload = try encodeBuildArtifactManifest(manifest.generation, manifest.entries[0..manifest.entry_count], &payload_buffer);
+    const signer = signing.SignerIdentity{
+        .label = "build-artifact-test",
+        .seed = [_]u8{0xC7} ** 32,
+    };
+    manifest.signature = try signing.sign(signer, payload);
+
+    try std.testing.expect(verifyBuildArtifactManifest(&manifest));
+    try std.testing.expect(manifest.find(.bootloader_measurement, "multiboot-v1:zigos_native") != null);
+
+    var tampered = manifest;
+    tampered.entries[0].digest[0] ^= 0xFF;
+    try std.testing.expect(!verifyBuildArtifactManifest(&tampered));
 }

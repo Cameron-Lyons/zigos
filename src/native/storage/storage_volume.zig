@@ -44,7 +44,7 @@ else
     };
 
 pub const sector_size: usize = 512;
-pub const slot_sectors: u32 = 384;
+pub const slot_sectors: u32 = 512;
 pub const slot_count: u32 = 2;
 pub const header_sectors: u32 = 1;
 pub const payload_sectors: u32 = slot_sectors - header_sectors;
@@ -58,11 +58,14 @@ const data_start_sector: u32 = root_sector_count;
 const data_start_byte: usize = data_start_sector * sector_size;
 const data_capacity_bytes: usize = image_bytes - data_start_byte;
 const root_magic = "ZG4LOG1";
-const root_format_version: u16 = 1;
+const root_format_version: u16 = 2;
 const max_workspace_state_bytes: usize = 64 * 1024;
+const max_replay_log_records: u16 = 128;
+const max_log_segments: u16 = 16;
+const compaction_threshold_bytes: u32 = @intCast((data_capacity_bytes * 3) / 4);
 
 const payload_magic = "ZG4STATE";
-const format_version: u16 = 5;
+const format_version: u16 = 6;
 
 pub const Error = error{
     ChecksumMismatch,
@@ -234,6 +237,9 @@ const RootState = struct {
     next_snapshot_id: u64 = 1,
     last_version_id: u64 = 0,
     last_snapshot_id: u64 = 0,
+    log_record_count: u16 = 0,
+    log_segment_count: u16 = 0,
+    compacted_generation: u64 = 0,
     workspace_summary_count: usize = 0,
     workspace_summaries: [workspace.MAX_WORKSPACES]WorkspaceSummary =
         [_]WorkspaceSummary{WorkspaceSummary{}} ** workspace.MAX_WORKSPACES,
@@ -252,12 +258,19 @@ const LogRecordKind = enum(u8) {
     snapshot_state = 5,
     blob_state = 6,
     chunk_state = 7,
+    segment_boundary = 8,
 };
 
 const LogRecordHeader = struct {
     kind: LogRecordKind,
     payload_len: u32,
     checksum: u64,
+};
+
+const BuiltLog = struct {
+    bytes_len: usize = 0,
+    record_count: u16 = 0,
+    segment_count: u16 = 0,
 };
 
 const AttachedBackendKind = enum(u8) {
@@ -325,22 +338,26 @@ fn saveIncremental(
     writer: anytype,
 ) Error!PersistResult {
     const current_generation = if (current) |loaded| loaded.root.generation else 0;
-    const append_len = if (current) |loaded|
+    const delta = if (current) |loaded|
         try buildDeltaLog(self, self.io_log_buffer[0..], loaded.root, store, workspaces)
     else
-        0;
+        BuiltLog{};
 
-    if (current != null and append_len == 0) {
+    if (current != null and delta.bytes_len == 0) {
         store.clearDirty();
         workspaces.clearDirty();
         return .{ .generation = current_generation };
     }
 
-    if (current != null and appendLenFits(current.?.root, append_len)) {
+    if (current != null and appendLogFits(current.?.root, delta)) {
         const next_generation = current_generation + 1;
-        const next_root = try buildRootState(self, next_generation, current.?.root.log_bytes + @as(u32, @intCast(append_len)), store, workspaces);
+        const next_log_bytes = current.?.root.log_bytes + @as(u32, @intCast(delta.bytes_len));
+        var next_root = try buildRootState(self, next_generation, next_log_bytes, store, workspaces);
+        next_root.log_record_count = current.?.root.log_record_count + delta.record_count;
+        next_root.log_segment_count = current.?.root.log_segment_count + delta.segment_count;
+        next_root.compacted_generation = current.?.root.compacted_generation;
         const next_root_sector = nextRootSector(current);
-        try writeBytes(writer, data_start_byte + current.?.root.log_bytes, self.io_log_buffer[0..append_len]);
+        try writeBytes(writer, data_start_byte + current.?.root.log_bytes, self.io_log_buffer[0..delta.bytes_len]);
         try writeRoot(writer, next_root_sector, next_root);
         store.clearDirty();
         workspaces.clearDirty();
@@ -352,7 +369,10 @@ fn saveIncremental(
     try appendRecordPayload(&log_writer, .checkpoint, self.io_payload_buffer[0..checkpoint_payload_len]);
 
     const next_generation = current_generation + 1;
-    const next_root = try buildRootState(self, next_generation, @intCast(log_writer.offset), store, workspaces);
+    var next_root = try buildRootState(self, next_generation, @intCast(log_writer.offset), store, workspaces);
+    next_root.log_record_count = 1;
+    next_root.log_segment_count = 0;
+    next_root.compacted_generation = next_generation;
     const next_root_sector = nextRootSector(current);
     try writeBytes(writer, data_start_byte, self.io_log_buffer[0..log_writer.offset]);
     try writeRoot(writer, next_root_sector, next_root);
@@ -361,8 +381,12 @@ fn saveIncremental(
     return .{ .generation = next_generation };
 }
 
-fn appendLenFits(root: RootState, append_len: usize) bool {
-    return @as(usize, root.log_bytes) + append_len <= data_capacity_bytes;
+fn appendLogFits(root: RootState, delta: BuiltLog) bool {
+    if (@as(usize, root.log_bytes) + delta.bytes_len > data_capacity_bytes) return false;
+    if (root.log_bytes + @as(u32, @intCast(delta.bytes_len)) > compaction_threshold_bytes) return false;
+    if (@as(u32, root.log_record_count) + delta.record_count > max_replay_log_records) return false;
+    if (@as(u32, root.log_segment_count) + delta.segment_count > max_log_segments) return false;
+    return true;
 }
 
 fn writeBytes(writer: anytype, offset: usize, bytes: []const u8) Error!void {
@@ -392,8 +416,9 @@ fn buildDeltaLog(
     root: RootState,
     store: *object_store.Store,
     workspaces: *workspace.Directory,
-) Error!usize {
+) Error!BuiltLog {
     var writer = CursorWriter{ .buffer = buffer };
+    try appendRecordPayload(&writer, .segment_boundary, &.{});
 
     for (store.dirtyObjectIds()) |object_id| {
         const object_record = store.object(object_id) orelse continue;
@@ -427,7 +452,12 @@ fn buildDeltaLog(
         try appendSnapshotRecord(&writer, snapshot_record.*);
     }
 
-    return writer.offset;
+    if (writer.offset == recordHeaderLen()) return .{};
+    return .{
+        .bytes_len = writer.offset,
+        .record_count = countLogRecords(buffer[0..writer.offset]) catch return error.CorruptImage,
+        .segment_count = 1,
+    };
 }
 
 fn buildRootState(
@@ -477,18 +507,29 @@ fn workspaceStateHash(self: *Volume, record: *const workspace.WorkspaceRecord) E
 fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, log: []const u8, root: RootState) Error!void {
     store.reset();
     workspaces.reset();
+    if (root.log_record_count == 0 or root.log_record_count > max_replay_log_records) return error.CorruptImage;
+    if (root.log_segment_count > max_log_segments) return error.CorruptImage;
 
     var reader = CursorReader{ .buffer = log };
     var saw_checkpoint = false;
+    var replayed_records: u16 = 0;
+    var replayed_segments: u16 = 0;
     while (reader.offset < reader.buffer.len) {
         const header = try readRecordHeader(&reader);
         const payload = try reader.readSlice(header.payload_len);
         if (checksumBytes(payload) != header.checksum) return error.ChecksumMismatch;
+        replayed_records += 1;
+        if (replayed_records > max_replay_log_records) return error.CorruptImage;
 
         switch (header.kind) {
             .checkpoint => {
                 try deserializeState(self, store, workspaces, payload);
                 saw_checkpoint = true;
+            },
+            .segment_boundary => {
+                if (payload.len != 0) return error.CorruptImage;
+                replayed_segments += 1;
+                if (replayed_segments > max_log_segments) return error.CorruptImage;
             },
             .object_state => try applyObjectRecord(store, payload),
             .chunk_state => try applyChunkRecord(store, payload),
@@ -499,6 +540,8 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
         }
     }
     if (!saw_checkpoint) return error.MissingCheckpoint;
+    if (replayed_records != root.log_record_count) return error.CorruptImage;
+    if (replayed_segments != root.log_segment_count) return error.CorruptImage;
 
     store.next_object_id = root.next_object_id;
     store.next_version_id = root.next_version_id;
@@ -506,6 +549,17 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
     workspaces.next_snapshot_id = root.next_snapshot_id;
     store.rebuildIndexes();
     workspaces.rebuildIndexes();
+}
+
+fn countLogRecords(log: []const u8) Error!u16 {
+    var reader = CursorReader{ .buffer = log };
+    var count: u16 = 0;
+    while (reader.offset < reader.buffer.len) {
+        const header = try readRecordHeader(&reader);
+        _ = try reader.readSlice(header.payload_len);
+        count += 1;
+    }
+    return count;
 }
 
 fn appendObjectRecord(writer: *CursorWriter, record: object_store.ObjectRecord) Error!void {
@@ -583,6 +637,7 @@ fn parseLogRecordKind(value: u8) Error!LogRecordKind {
         @intFromEnum(LogRecordKind.snapshot_state) => .snapshot_state,
         @intFromEnum(LogRecordKind.blob_state) => .blob_state,
         @intFromEnum(LogRecordKind.chunk_state) => .chunk_state,
+        @intFromEnum(LogRecordKind.segment_boundary) => .segment_boundary,
         else => error.CorruptImage,
     };
 }
@@ -607,7 +662,7 @@ fn encodeVersionBody(writer: *CursorWriter, record: object_store.VersionRecord) 
     try writer.writeBytes(&record.blob_address);
     try writer.writeBytes(&record.version_address);
     try writeMetadata(writer, record.metadata);
-    try writer.writeU16(@intCast(record.payload_len));
+    try writer.writeU32(@intCast(record.payload_len));
     try writer.writeU16(record.chunk_count);
 }
 
@@ -625,7 +680,8 @@ fn appendChunkRecord(writer: *CursorWriter, record: object_store.ChunkRecord) Er
 
 fn encodeBlobBody(writer: *CursorWriter, record: object_store.BlobRecord) Error!void {
     try writer.writeBytes(&record.address);
-    try writer.writeU16(@intCast(record.payload_len));
+    try writer.writeBytes(&record.merkle_root);
+    try writer.writeU32(@intCast(record.payload_len));
     try writer.writeU16(record.ref_count);
     try writer.writeU16(record.chunk_count);
     const chunk_count: usize = @intCast(record.chunk_count);
@@ -715,7 +771,7 @@ fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []cons
     try reader.readBytes(&store.versions.slots[slot_index].version.blob_address);
     try reader.readBytes(&store.versions.slots[slot_index].version.version_address);
     store.versions.slots[slot_index].version.metadata = try readMetadata(&reader, &self.version_signers[slot_index]);
-    store.versions.slots[slot_index].version.payload_len = @intCast(try reader.readU16());
+    store.versions.slots[slot_index].version.payload_len = @intCast(try reader.readU32());
     if (store.versions.slots[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
     store.versions.slots[slot_index].version.chunk_count = try reader.readU16();
     store.versions.slots[slot_index].version.blob_slot_index = findBlobSlotIndex(store, store.versions.slots[slot_index].version.blob_address) orelse return error.CorruptImage;
@@ -725,7 +781,9 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
     var reader = CursorReader{ .buffer = payload };
     var address: object_store.BlobAddress = undefined;
     try reader.readBytes(&address);
-    const payload_len: usize = @intCast(try reader.readU16());
+    var merkle_root: object_store.BlobAddress = undefined;
+    try reader.readBytes(&merkle_root);
+    const payload_len: usize = @intCast(try reader.readU32());
     const ref_count = try reader.readU16();
     const chunk_count: usize = @intCast(try reader.readU16());
     if (payload_len > object_store.MAX_PAYLOAD_BYTES or chunk_count > object_store.MAX_BLOB_CHUNKS) return error.CorruptImage;
@@ -736,6 +794,7 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
         chunk_refs[chunk_index].payload_len = try reader.readU16();
         chunk_refs[chunk_index].slot_index = store.chunkSlotIndex(chunk_refs[chunk_index].address) orelse return error.CorruptImage;
     }
+    if (!std.mem.eql(u8, &object_store.computeBlobMerkleRoot(chunk_refs[0..chunk_count]), &merkle_root)) return error.CorruptImage;
     if (!std.mem.eql(u8, &object_store.computeBlobManifestAddress(payload_len, chunk_refs[0..chunk_count]), &address)) return error.CorruptImage;
     const slot_index = if (store.blobSlotIndex(address)) |existing_index|
         existing_index
@@ -744,6 +803,7 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
     const slot = &store.blobs[slot_index];
     slot.in_use = true;
     slot.blob.address = address;
+    slot.blob.merkle_root = merkle_root;
     slot.blob.payload_len = payload_len;
     slot.blob.ref_count = ref_count;
     slot.blob.chunk_count = @intCast(chunk_count);
@@ -886,7 +946,7 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
         try writer.writeBytes(&slot.version.blob_address);
         try writer.writeBytes(&slot.version.version_address);
         try writeMetadata(&writer, slot.version.metadata);
-        try writer.writeU16(@intCast(slot.version.payload_len));
+        try writer.writeU32(@intCast(slot.version.payload_len));
         try writer.writeU16(slot.version.chunk_count);
     }
 
@@ -983,11 +1043,13 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         const payload_start = reader.offset;
         var address: object_store.BlobAddress = undefined;
         try reader.readBytes(&address);
-        const payload_len: usize = @intCast(try reader.readU16());
+        var merkle_root: object_store.BlobAddress = undefined;
+        try reader.readBytes(&merkle_root);
+        const payload_len: usize = @intCast(try reader.readU32());
         _ = try reader.readU16();
         const chunk_ref_count: usize = @intCast(try reader.readU16());
         if (payload_len > object_store.MAX_PAYLOAD_BYTES or chunk_ref_count > object_store.MAX_BLOB_CHUNKS) return error.CorruptImage;
-        const payload_end = payload_start + 32 + 2 + 2 + 2 + chunk_ref_count * (32 + 2);
+        const payload_end = payload_start + 32 + 32 + 4 + 2 + 2 + chunk_ref_count * (32 + 2);
         if (payload_end > reader.buffer.len) return error.CorruptImage;
         reader.offset = payload_start;
         try applyBlobRecord(store, reader.buffer[payload_start..payload_end]);
@@ -1010,7 +1072,7 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         try reader.readBytes(&store.versions.slots[slot_index].version.blob_address);
         try reader.readBytes(&store.versions.slots[slot_index].version.version_address);
         store.versions.slots[slot_index].version.metadata = try readMetadata(&reader, &self.version_signers[slot_index]);
-        store.versions.slots[slot_index].version.payload_len = @intCast(try reader.readU16());
+        store.versions.slots[slot_index].version.payload_len = @intCast(try reader.readU32());
         if (store.versions.slots[slot_index].version.payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
         store.versions.slots[slot_index].version.chunk_count = try reader.readU16();
         store.versions.slots[slot_index].version.blob_slot_index = findBlobSlotIndex(store, store.versions.slots[slot_index].version.blob_address) orelse return error.CorruptImage;
@@ -1370,6 +1432,9 @@ fn encodeRoot(buffer: []u8, root: RootState) Error!void {
     try writer.writeU64(root.next_snapshot_id);
     try writer.writeU64(root.last_version_id);
     try writer.writeU64(root.last_snapshot_id);
+    try writer.writeU16(root.log_record_count);
+    try writer.writeU16(root.log_segment_count);
+    try writer.writeU64(root.compacted_generation);
     try writer.writeU16(@intCast(root.workspace_summary_count));
     for (root.workspace_summaries[0..root.workspace_summary_count]) |summary| {
         try writer.writeU64(summary.id);
@@ -1397,6 +1462,9 @@ fn parseRoot(buffer: []const u8) Error!RootState {
         .last_version_id = try reader.readU64(),
         .last_snapshot_id = try reader.readU64(),
     };
+    root.log_record_count = try reader.readU16();
+    root.log_segment_count = try reader.readU16();
+    root.compacted_generation = try reader.readU64();
     root.workspace_summary_count = try reader.readU16();
     if (root.workspace_summary_count > root.workspace_summaries.len) return error.CorruptImage;
     for (0..root.workspace_summary_count) |index| {
@@ -1407,6 +1475,8 @@ fn parseRoot(buffer: []const u8) Error!RootState {
         };
     }
     if (root.log_bytes > data_capacity_bytes) return error.CorruptImage;
+    if (root.log_record_count == 0 or root.log_record_count > max_replay_log_records) return error.CorruptImage;
+    if (root.log_segment_count > max_log_segments) return error.CorruptImage;
     const checksum_offset = reader.offset;
     const checksum = try reader.readU64();
     if (checksum != checksumBytes(buffer[0..checksum_offset])) return error.ChecksumMismatch;
@@ -1495,6 +1565,18 @@ fn ataWriteRange(self: *Volume, start_lba: u64, buffer: []const u8) bool {
 pub const testing = struct {
     pub fn latestImageLogBytes(image: []const u8) Error!u32 {
         return (try findLatestImageRoot(image)).?.root.log_bytes;
+    }
+
+    pub fn latestImageLogRecordCount(image: []const u8) Error!u16 {
+        return (try findLatestImageRoot(image)).?.root.log_record_count;
+    }
+
+    pub fn latestImageLogSegmentCount(image: []const u8) Error!u16 {
+        return (try findLatestImageRoot(image)).?.root.log_segment_count;
+    }
+
+    pub fn latestImageCompactedGeneration(image: []const u8) Error!u64 {
+        return (try findLatestImageRoot(image)).?.root.compacted_generation;
     }
 
     pub fn corruptDataByte(image: []u8, offset: usize) void {

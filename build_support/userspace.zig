@@ -5,6 +5,7 @@ pub const ArtifactSet = struct {
     step: *std.Build.Step,
     count: usize,
     archive_module: *std.Build.Module,
+    production_manifest_module: *std.Build.Module,
 };
 
 pub fn addUserspaceArtifacts(
@@ -14,15 +15,23 @@ pub fn addUserspaceArtifacts(
 ) ArtifactSet {
     const step = b.step("userspace-images", "Build userspace image artifacts");
     var count: usize = 0;
+    const userspace_wire_module = b.createModule(.{
+        .root_source_file = b.path("src/native/task/userspace_wire.zig"),
+    });
     const descriptor_module = b.createModule(.{
         .root_source_file = b.path("src/native/task/userspace_descriptor.zig"),
     });
+    descriptor_module.addImport("userspace_wire", userspace_wire_module);
     const abi_module = b.createModule(.{
         .root_source_file = b.path("src/native/core/abi.zig"),
     });
     const bootstrap_mailbox_module = b.createModule(.{
         .root_source_file = b.path("src/native/task/userspace_bootstrap_mailbox.zig"),
     });
+    const service_protocol_module = b.createModule(.{
+        .root_source_file = b.path("src/native/task/userspace_service_protocol.zig"),
+    });
+    service_protocol_module.addImport("userspace_wire", userspace_wire_module);
     const elf_image_inspector_module = b.createModule(.{
         .root_source_file = b.path("src/native_elf_image_inspector.zig"),
     });
@@ -34,6 +43,7 @@ pub fn addUserspaceArtifacts(
     runtime_module.addImport("userspace_descriptor", descriptor_module);
     runtime_module.addImport("native_abi", abi_module);
     runtime_module.addImport("userspace_bootstrap_mailbox", bootstrap_mailbox_module);
+    runtime_module.addImport("userspace_service_protocol", service_protocol_module);
     const archive_generator = b.addExecutable(.{
         .name = "userspace-archive-generator",
         .root_module = b.createModule(.{
@@ -47,6 +57,9 @@ pub fn addUserspaceArtifacts(
     const archive_run = b.addRunArtifact(archive_generator);
     const archive_dir = archive_run.addOutputDirectoryArg("userspace-archive");
     const archive_source = archive_dir.path(b, "userspace_archive.zig");
+    const production_manifest_source = archive_dir.path(b, "production_artifact_manifest.zig");
+    archive_run.addArg("zigos_native");
+    archive_run.addFileArg(b.path("src/boot/boot64.S"));
 
     for (registry.boot_image_specs) |spec| {
         const options = b.addOptions();
@@ -89,6 +102,9 @@ pub fn addUserspaceArtifacts(
         .count = count,
         .archive_module = b.createModule(.{
             .root_source_file = archive_source,
+        }),
+        .production_manifest_module = b.createModule(.{
+            .root_source_file = production_manifest_source,
         }),
     };
 }

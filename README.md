@@ -6,10 +6,11 @@ Zigos is a native-only operating system prototype written in Zig. The current tr
 
 ## Current Focus
 
-This repository treats the Zigos v0.1 clean-slate OS spec as its explicit conformance target. The spec, architecture notes, and contribution guidance live here:
+This repository treats the Zigos v0.1 clean-slate OS spec as its explicit conformance target. The spec, architecture notes, generated gap matrix, and contribution guidance live here:
 
 - [SPEC.md](SPEC.md): design goals, platform model, and conformance target
 - [ARCHITECTURE.md](ARCHITECTURE.md): how the current code maps onto the spec
+- [SPEC_GAP_MATRIX.md](SPEC_GAP_MATRIX.md): generated requirement status and evidence backlog
 - [CONTRIBUTING.md](CONTRIBUTING.md): repo conventions and verification expectations
 
 The native kernel surface is intentionally small:
@@ -22,7 +23,7 @@ The native kernel surface is intentionally small:
 - secure-boot handoff hooks
 - IOMMU and DMA isolation hooks
 
-Everything above that layer is modeled as a native service boundary under `src/native/`.
+Everything above that layer lives behind native service and embedded userspace boundaries: service and platform modules under `src/native/`, the freestanding component runtime under `src/userspace/`, and build-time image/archive wiring under `build_support/`.
 
 ## Authority Model
 
@@ -77,7 +78,7 @@ All repo Zig commands should go through `./scripts/zig.sh`. It resolves the pinn
 ## Quick Start
 
 ```bash
-# Build the native kernel
+# Build the native kernel and embedded userspace archive
 ./scripts/zig.sh build kernel
 
 # Run the native kernel in QEMU
@@ -89,9 +90,18 @@ All repo Zig commands should go through `./scripts/zig.sh`. It resolves the pinn
 
 `./scripts/zig.sh build run` and `./scripts/zig.sh build run-zigos-native` attach `build/native-store.img` as the native storage image.
 
+The `kernel`, `run`, `spec-conformance`, `zigos-native-smoke-test`, and `benchmark` targets build the current userspace image archive from `src/native/task/userspace_registry.zig` before using the kernel artifact.
+
 ## Common Commands
 
 ```bash
+# Build only the embedded userspace image artifacts
+./scripts/zig.sh build userspace-images
+
+# Build the explicit native and benchmark kernel profiles
+./scripts/zig.sh build kernel-zigos-native
+./scripts/zig.sh build kernel-benchmark
+
 # Run host-side native tests
 ./scripts/zig.sh build host-tests
 
@@ -100,6 +110,9 @@ All repo Zig commands should go through `./scripts/zig.sh`. It resolves the pinn
 
 # Run local lint only
 ./scripts/zig.sh build lint
+
+# Run the spec coverage gate and native spec unit tests without QEMU smoke
+./scripts/zig.sh build spec-tests
 
 # Include optional QEMU gates in the verify target
 ./scripts/zig.sh build -Dverify-smoke=true -Dverify-benchmark=true verify
@@ -124,7 +137,7 @@ The smoke test uses `build/native-store-smoke.img` and validates the expected na
 
 ## Verification Model
 
-Repo-level conformance is checked through the thin root `src/zigos_spec_test.zig`, which delegates to the suites under `src/tests/spec/`; the section-to-test contract is enforced by `spec/coverage.json` and `tools/check_spec_coverage.py`, with stable `REQ-*` anchors in `SPEC.md` driving the manifest instead of line-by-line prose claims. `Enforced` requirements in the manifest must name implementation modules and adversarial or negative tests; modeled and scenario-only requirements stay explicitly marked until they earn that evidence. The `spec-conformance` target also runs the native two-boot QEMU smoke harness so the repo-level gate is not host-only.
+Repo-level conformance is checked through the thin root `src/zigos_spec_test.zig`, which delegates to the suites under `src/tests/spec/`; the section-to-test contract is enforced by `spec/coverage.json` and `tools/check_spec_coverage.py`, with stable `REQ-*` anchors in `SPEC.md` driving the manifest instead of line-by-line prose claims. `SPEC_GAP_MATRIX.md` is generated from that manifest by `tools/generate_spec_gap_matrix.py`, and the coverage check rejects stale matrix output. `Enforced` requirements in the manifest must name implementation modules and adversarial or negative tests; modeled and scenario-only requirements stay explicitly marked until they earn that evidence. The `spec-conformance` target also runs the native two-boot QEMU smoke harness so the repo-level gate is not host-only.
 
 The main verification entrypoints are:
 
@@ -146,16 +159,22 @@ Host-side native tests enter through `src/native_host_test.zig` and delegate to 
 - `src/kernel/boot/profiles/zigos_native.zig`: only supported boot profile
 - `src/native/`: native principals, capabilities, runtime, mediation, services, storage, sync, recovery, and UX
 - `src/native/demo/`: seeded demo bundles and scenario-world flows used by explicit conformance demos
+- `src/userspace/`: freestanding userspace runtime, entry points, and linker script for embedded component images
 - `src/tests/`: organized host and spec test suites, with thin root entrypoints kept at `src/*.zig`
 - `src/tools/`: Zig helper binaries that need to share the `src/` module root
 - `src/kernel/net/`: low-level networking and device transport
 - `build.zig`: native-only build graph
+- `build_support/`: build helpers for kernel artifacts, embedded userspace images, and shared build paths
+- `benchmarks/`: benchmark baselines and threshold files used by the QEMU benchmark gate
+- `spec/coverage.json`: executable mapping from `SPEC.md` requirements to implementation and test evidence
 - `scripts/`: repo entrypoints for setup, build, run, and verification
 - `tools/`: host-side support utilities such as spec coverage checks
 
 ## Status
 
 The repository no longer builds or ships the old POSIX-like shell, POSIX-style syscall ABI, or VFS-rooted userland pipeline. Legacy support is modeled as explicit compatibility environments rather than as part of the native platform.
+
+For the current requirement status, use [SPEC_GAP_MATRIX.md](SPEC_GAP_MATRIX.md); it is generated from `spec/coverage.json` and separates enforced behavior from modeled or scenario-only evidence.
 
 - `./scripts/zig.sh build kernel`
 - `./scripts/zig.sh build spec-conformance`

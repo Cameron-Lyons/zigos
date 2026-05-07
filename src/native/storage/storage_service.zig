@@ -6,11 +6,26 @@ const checkpoint_support = @import("storage_service_checkpoint.zig");
 const ids = @import("../core/ids.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
+const shared_memory = @import("../kernel_api/shared_memory.zig");
 const signing = @import("../core/signing.zig");
 const storage_volume = @import("storage_volume.zig");
 const workspace = @import("workspace.zig");
 
 pub const CheckpointStore = checkpoint_support.CheckpointStore;
+
+pub const SharedPayloadTransfer = struct {
+    table: *const shared_memory.Table,
+    object_id: ids.SharedMemoryId,
+    producer_task_id: ids.TaskId,
+    storage_task_id: ids.TaskId,
+    bytes: []const u8,
+};
+
+pub const SharedPayloadError = object_store.Error || shared_memory.Error || error{
+    PermissionDenied,
+    SharedMemoryNotMapped,
+    SharedMemorySizeMismatch,
+};
 
 pub const AuthorityContext = struct {
     task_id: u64,
@@ -104,6 +119,31 @@ pub const StorageCore = struct {
         const result = try self.store.putVersionRef(request);
         self.noteMutation(true);
         return result;
+    }
+
+    pub fn putVersionFromSharedMemory(
+        self: *Service,
+        request: object_store.PutRequest,
+        transfer: SharedPayloadTransfer,
+    ) SharedPayloadError!object_store.PutResult {
+        return self.putVersionFromSharedMemoryRef(&request, transfer);
+    }
+
+    pub fn putVersionFromSharedMemoryRef(
+        self: *Service,
+        request: *const object_store.PutRequest,
+        transfer: SharedPayloadTransfer,
+    ) SharedPayloadError!object_store.PutResult {
+        const descriptor = try transfer.table.descriptor(transfer.object_id);
+        if (descriptor.flags != 0) return error.Revoked;
+        if (descriptor.size_bytes != transfer.bytes.len) return error.SharedMemorySizeMismatch;
+        if (descriptor.owner_task_id != transfer.producer_task_id.raw()) return error.PermissionDenied;
+        if (!transfer.table.hasMapping(transfer.object_id, transfer.producer_task_id)) return error.SharedMemoryNotMapped;
+        if (!transfer.table.hasMapping(transfer.object_id, transfer.storage_task_id)) return error.SharedMemoryNotMapped;
+
+        var shared_request = request.*;
+        shared_request.payload = transfer.bytes;
+        return self.putVersionRef(&shared_request);
     }
 
     pub fn createWorkspace(self: *Service, request: workspace.CreateRequest) workspace.Error!*workspace.WorkspaceRecord {
@@ -384,6 +424,16 @@ pub const StoragePort = struct {
         return self.core.putVersionRef(request);
     }
 
+    pub fn putVersionFromSharedMemoryRef(
+        self: *StoragePort,
+        authority: AuthorityContext,
+        request: *const object_store.PutRequest,
+        transfer: SharedPayloadTransfer,
+    ) (AuthorityError || SharedPayloadError)!object_store.PutResult {
+        _ = try self.requireStorageAuthority(authority, null, .write);
+        return self.core.putVersionFromSharedMemoryRef(request, transfer);
+    }
+
     pub fn createWorkspace(self: *StoragePort, authority: AuthorityContext, request: workspace.CreateRequest) (AuthorityError || workspace.Error)!*workspace.WorkspaceRecord {
         _ = try self.requireStorageAuthority(authority, null, .write);
         return self.core.createWorkspace(request);
@@ -616,6 +666,57 @@ test "storage port requires authority context for protected mutations" {
     }, .{
         .owner = actor,
         .label = "denied-task",
+    }));
+}
+
+test "storage service accepts large object payloads through mapped shared memory transfer" {
+    var checkpoint_store = CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    defer checkpoint_store.resetPersistent();
+
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 48 };
+    const producer_task_id = ids.task(200);
+    const storage_task_id = ids.task(201);
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0xA8} ** 32,
+    };
+
+    var payload: [object_store.PAGE_SIZE_BYTES * 2 + 33]u8 = undefined;
+    for (&payload, 0..) |*byte, index| {
+        byte.* = @intCast((index * 17) & 0xFF);
+    }
+
+    var shared = shared_memory.Table.init();
+    const transfer_object = try shared.create(producer_task_id, payload.len);
+    try shared.map(transfer_object.id, producer_task_id);
+    try shared.map(transfer_object.id, storage_task_id);
+
+    var service = Service.initWithStore(704, storage_task_id.raw(), owner, &checkpoint_store);
+    const request = object_store.PutRequest{
+        .preferred_object_id = ids.object(954),
+        .object_type = .media_asset,
+        .payload = &.{},
+        .metadata = try object_store.signMetadata(signer, "large", "application/octet-stream", .media_asset, &payload, 12),
+    };
+    const result = try service.putVersionFromSharedMemoryRef(&request, .{
+        .table = &shared,
+        .object_id = transfer_object.id,
+        .producer_task_id = producer_task_id,
+        .storage_task_id = storage_task_id,
+        .bytes = &payload,
+    });
+
+    const loaded = try service.versionPayload(service.version(result.version_id).?);
+    try std.testing.expectEqualSlices(u8, &payload, loaded);
+
+    const wrong_size = payload[0 .. payload.len - 1];
+    try std.testing.expectError(error.SharedMemorySizeMismatch, service.putVersionFromSharedMemoryRef(&request, .{
+        .table = &shared,
+        .object_id = transfer_object.id,
+        .producer_task_id = producer_task_id,
+        .storage_task_id = storage_task_id,
+        .bytes = wrong_size,
     }));
 }
 

@@ -59,7 +59,10 @@ pub const permission_lease_expired = "ZIGOS:PERMISSION:LEASE:EXPIRED";
 pub const service_boot_driver_service_network_ready = "ZIGOS:SERVICE_BOOT:DRIVER_SERVICE:NETWORK_READY";
 pub const service_boot_service_contracts_ready = "ZIGOS:SERVICE_BOOT:SERVICE_CONTRACTS:READY";
 pub const service_boot_ipc_connect_all_ok = "ZIGOS:SERVICE_BOOT:IPC_CONNECT:ALL_OK";
+pub const service_boot_supervisor_crash_recorded = "ZIGOS:SERVICE_BOOT:SUPERVISOR:CRASH_RECORDED";
+pub const service_boot_driver_rehost_ok = "ZIGOS:SERVICE_BOOT:DRIVER:REHOST_OK";
 pub const service_boot_supervisor_restart_ok = "ZIGOS:SERVICE_BOOT:SUPERVISOR:RESTART_OK";
+pub const service_boot_supervisor_restart_without_reboot = "ZIGOS:SERVICE_BOOT:SUPERVISOR:RESTART_WITHOUT_REBOOT";
 
 pub const storage_object_store_ready = "ZIGOS:STORAGE:OBJECT_STORE:READY";
 pub const storage_workspace_transaction_ok = "ZIGOS:STORAGE:WORKSPACE:TRANSACTION_OK";
@@ -75,6 +78,9 @@ pub const sync_device_graph_rooted = "ZIGOS:SYNC:DEVICE_GRAPH:ROOTED";
 
 pub const platform_immutable_base_active = "ZIGOS:PLATFORM:IMMUTABLE_BASE:ACTIVE";
 pub const platform_activation_rollback_ok = "ZIGOS:PLATFORM:ACTIVATION:ROLLBACK_OK";
+pub const platform_ab_image_rollback_ok = "ZIGOS:PLATFORM:AB_IMAGE:ROLLBACK_OK";
+pub const platform_build_artifact_manifest_verified = "ZIGOS:PLATFORM:BUILD_ARTIFACT_MANIFEST:VERIFIED";
+pub const platform_bootloader_measurement_provided = "ZIGOS:PLATFORM:BOOTLOADER_MEASUREMENT:PROVIDED";
 pub const platform_artifact_manifest_verified = "ZIGOS:PLATFORM:ARTIFACT_MANIFEST:VERIFIED";
 pub const platform_measured_boot_recorded = "ZIGOS:PLATFORM:MEASURED_BOOT:RECORDED";
 pub const platform_measured_boot_first = "ZIGOS:PLATFORM:MEASURED_BOOT:COMPARE:FIRST_BOOT";

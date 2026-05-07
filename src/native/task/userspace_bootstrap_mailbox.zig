@@ -59,6 +59,15 @@ pub const ResourceMask = packed struct(u32) {
     _reserved: u29 = 0,
 };
 
+pub const ServiceStatusFlags = packed struct(u32) {
+    endpoint_created: bool = false,
+    loopback_connected: bool = false,
+    request_received: bool = false,
+    response_received: bool = false,
+    all_operations_completed: bool = false,
+    _reserved: u27 = 0,
+};
+
 pub const Mailbox = extern struct {
     version: u16 = VERSION,
     stage: u8 = @intFromEnum(Stage.boot),
@@ -73,6 +82,10 @@ pub const Mailbox = extern struct {
     service_ready: u8 = 0,
     service_operation_count: u16 = 0,
     service_state_hash: u64 = 0,
+    service_endpoint_id: u64 = 0,
+    service_peer_endpoint_id: u64 = 0,
+    service_ipc_roundtrips: u16 = 0,
+    service_status_flags: u32 = 0,
     last_counter: u32 = 0,
 };
 
@@ -114,9 +127,24 @@ test "mailbox records userspace service readiness separately from generic heartb
     mailbox.service_ready = 1;
     mailbox.service_operation_count = 3;
     mailbox.service_state_hash = 0xA5;
+    mailbox.service_endpoint_id = 10;
+    mailbox.service_peer_endpoint_id = 11;
+    mailbox.service_ipc_roundtrips = 3;
+    mailbox.service_status_flags = @bitCast(ServiceStatusFlags{
+        .endpoint_created = true,
+        .loopback_connected = true,
+        .request_received = true,
+        .response_received = true,
+        .all_operations_completed = true,
+    });
 
     try @import("std").testing.expectEqual(ServiceKind.storage, @as(ServiceKind, @enumFromInt(mailbox.service_kind)));
     try @import("std").testing.expectEqual(@as(u8, 1), mailbox.service_ready);
     try @import("std").testing.expectEqual(@as(u16, 3), mailbox.service_operation_count);
     try @import("std").testing.expectEqual(@as(u64, 0xA5), mailbox.service_state_hash);
+    try @import("std").testing.expectEqual(@as(u64, 10), mailbox.service_endpoint_id);
+    try @import("std").testing.expectEqual(@as(u64, 11), mailbox.service_peer_endpoint_id);
+    try @import("std").testing.expectEqual(@as(u16, 3), mailbox.service_ipc_roundtrips);
+    const flags: ServiceStatusFlags = @bitCast(mailbox.service_status_flags);
+    try @import("std").testing.expect(flags.all_operations_completed);
 }

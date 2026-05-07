@@ -8,6 +8,7 @@ pub fn addKernelArtifact(
     name: []const u8,
     boot_profile: shared.BootProfile,
     userspace_archive: ?*std.Build.Module,
+    production_manifest: ?*std.Build.Module,
 ) shared.KernelArtifact {
     const options = b.addOptions();
     options.addOption(shared.BootProfile, "boot_profile", boot_profile);
@@ -19,6 +20,9 @@ pub fn addKernelArtifact(
     });
     if (userspace_archive) |archive_module| {
         kernel_module.addImport("userspace_archive", archive_module);
+    }
+    if (production_manifest) |manifest_module| {
+        kernel_module.addImport("production_artifact_manifest", manifest_module);
     }
 
     kernel_module.addOptions("build_options", options);

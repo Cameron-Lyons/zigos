@@ -16,6 +16,7 @@ const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const spec_support = @import("support.zig");
 const supervisor = @import("../../native/session/supervisor.zig");
 const sync_adapters = @import("../../native/sync/sync_adapters.zig");
+const sync_service_test = @import("../../native/sync/sync_service_test.zig");
 const sync_transport = @import("../../native/sync/sync_transport_harness.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const typed_component_abi = @import("../../native/services/typed_component_abi.zig");
@@ -24,6 +25,13 @@ const kernel_ethernet_source = @embedFile("../../kernel/net/ethernet.zig");
 const kernel_link_port_source = @embedFile("../../kernel/net/link_port.zig");
 const kernel_ata_source = @embedFile("../../kernel/drivers/ata.zig");
 const kernel_device_init_source = @embedFile("../../kernel/boot/init/devices.zig");
+const indexed_arena_source = @embedFile("../../native/core/indexed_arena.zig");
+const service_registry_source = @embedFile("../../native/services/service_registry.zig");
+const userspace_scheduler_source = @embedFile("../../native/task/userspace_scheduler.zig");
+const indexing_service_source = @embedFile("../../native/services/indexing_service.zig");
+const event_ledger_source = @embedFile("../../native/platform/event_ledger.zig");
+const sync_service_test_source = @embedFile("../../native/sync/sync_service_test.zig");
+const sync_transport_harness_source = @embedFile("../../native/sync/sync_transport_harness.zig");
 
 pub fn isolationProofDepthGate() !void {
     try std.testing.expect(runtime_negative_proofs.processIsolationBlocksForeignSharedMemory());
@@ -105,8 +113,22 @@ pub fn syncAdapterDepthGate() !void {
     try std.testing.expectEqualStrings(merged, replayed);
 }
 
+pub fn syncPrivateOverlayEndToEndGate() !void {
+    try expectContains(sync_transport_harness_source, "SignedEncryptedFrame");
+    try expectContains(sync_transport_harness_source, "encryptSignedFrame");
+    try expectContains(sync_transport_harness_source, "verifySignedFrame");
+    try expectContains(sync_service_test_source, "deterministicTwoDeviceOverlayReplication");
+    try expectContains(sync_service_test_source, "openOverlaySession");
+    try expectContains(sync_service_test_source, "replicateWorkspace");
+    try expectContains(sync_service_test_source, "relay_queue.submit");
+    try sync_service_test.deterministicTwoDeviceOverlayReplication();
+}
+
 pub fn componentAbiDepthGate() !void {
-    const iface = manifest.InterfaceDecl{ .name = "zigos.service.registry", .version_major = 1, .version_minor = 0 };
+    const iface = typed_component_abi.Interface(.service_registry);
+    try std.testing.expectEqual(typed_component_abi.coverage_references.len, typed_component_abi.coverageReferenceCountForRequirement("REQ-COMPONENT-MODEL"));
+    try std.testing.expectEqualStrings("zigos.object.workspace", typed_component_abi.interfaceForService(.storage_object).name);
+
     var header = typed_component_abi.WireHeader{
         .interface_major = 1,
         .interface_minor = 0,
@@ -141,6 +163,46 @@ pub fn componentAbiDepthGate() !void {
         @sizeOf(typed_component_abi.ServiceConnectionRequest),
         @sizeOf(typed_component_abi.ServiceConnectionResponse),
     ));
+}
+
+pub fn indexedHotPathTablesGate() !void {
+    try expectContains(indexed_arena_source, "used_count");
+    try expectContains(indexed_arena_source, "return self.used_count");
+
+    try expectContains(service_registry_source, "BindingArena");
+    try expectContains(service_registry_source, "bindings: BindingArena");
+    try expectMissing(service_registry_source, "fixed_table");
+    try expectMissing(service_registry_source, "firstFreeSlot");
+
+    try expectContains(userspace_scheduler_source, "SchedulerSlotArena");
+    try expectContains(userspace_scheduler_source, "slots: SchedulerSlotArena");
+    try expectContains(userspace_scheduler_source, "ready_heads");
+    try expectContains(userspace_scheduler_source, "selectReadyResourceClass");
+    try expectContains(userspace_scheduler_source, "wakeTask");
+    try expectContains(userspace_scheduler_source, "refillTaskBudget");
+    try expectContains(userspace_scheduler_source, "deadline_tick");
+    try expectContains(userspace_scheduler_source, "configureResourceState");
+    try expectContains(userspace_scheduler_source, "accelerator_claim_heads");
+    try expectContains(userspace_scheduler_source, "grantNextAcceleratorClaim");
+    try expectMissing(userspace_scheduler_source, "fixed_table");
+    try expectMissing(userspace_scheduler_source, "firstFreeSlot");
+    try expectMissing(userspace_scheduler_source, "next_index");
+    try expectMissing(userspace_scheduler_source, "while (attempts < self.slots.slots.len)");
+
+    try expectContains(indexing_service_source, "DocumentArena");
+    try expectContains(indexing_service_source, "documents: DocumentArena");
+    try expectMissing(indexing_service_source, "fixed_table");
+    try expectMissing(indexing_service_source, "firstFreeSlot");
+
+    try expectContains(event_ledger_source, "EventArena");
+    try expectContains(event_ledger_source, "kind_index");
+    try expectContains(event_ledger_source, "subject_index");
+    try expectContains(event_ledger_source, "task_index");
+    try expectContains(event_ledger_source, "visitIndex");
+
+    try expectContains(sync_transport_harness_source, "RelayPacketArena");
+    try expectContains(sync_transport_harness_source, "RelaySessionIndex");
+    try expectMissing(sync_transport_harness_source, "for (&self.packets)");
 }
 
 pub fn driverBoundaryAuditGate() !void {
@@ -187,12 +249,13 @@ pub fn driverBoundaryAuditGate() !void {
 pub fn kernelBootstrapShimBoundaryGate() !void {
     try expectContains(kernel_ethernet_source, "kernel_boundary_role = \"bootstrap_network_shim\"");
     try expectContains(kernel_ethernet_source, "publishes_full_network_service = false");
+    try expectContains(kernel_ethernet_source, "network_data_plane_exports_fail_closed = true");
     try expectContains(kernel_link_port_source, "kernel_boundary_role = \"bootstrap_network_link_shim\"");
     try expectContains(kernel_link_port_source, "publishes_full_network_service = false");
+    try expectContains(kernel_link_port_source, "network_data_plane_exports_fail_closed = true");
     try expectContains(kernel_ata_source, "kernel_boundary_role = \"bootstrap_storage_inventory_shim\"");
     try expectContains(kernel_ata_source, "publishes_full_storage_service = false");
     try expectContains(kernel_ata_source, "ata_data_plane_exports_fail_closed = true");
-    try expectContains(kernel_ata_source, "return error.KernelDataPlaneDisabled");
     try expectContains(kernel_device_init_source, "kernel_boundary_role = \"bootstrap_device_inventory_shim\"");
     try expectContains(kernel_device_init_source, "publishes_device_data_planes = false");
 
@@ -208,6 +271,12 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
         "pub fn route",
         "pub fn resolveDns",
         "pub fn dhcp",
+        "pub fn sendFrame",
+        "pub fn handleRxPacket",
+        "pub fn registerHandler",
+        "pub fn setEgressBroker",
+        "pub fn bindEgressCapability",
+        "pub fn authorizeDriverTx",
         "TcpConnection",
         "UdpSocket",
     };
@@ -225,6 +294,11 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
         "pub fn commit",
         "pub fn snapshot",
         "pub fn restore",
+        "pub fn readSectors",
+        "pub fn writeSectors",
+        "READ_SECTORS",
+        "WRITE_SECTORS",
+        "CACHE_FLUSH",
     };
     for (forbidden_storage_service_tokens) |token| {
         try expectMissing(kernel_ata_source, token);
@@ -673,6 +747,10 @@ test "backlog gates enforce sync adapter depth" {
 
 test "backlog gates enforce component ABI depth" {
     try componentAbiDepthGate();
+}
+
+test "backlog gates enforce indexed hot-path tables" {
+    try indexedHotPathTablesGate();
 }
 
 test "backlog gates enforce driver boundary audit" {
