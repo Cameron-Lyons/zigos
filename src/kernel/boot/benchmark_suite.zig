@@ -373,6 +373,7 @@ fn prepareFixtures() void {
     prepareFileBridgeFixture();
     preparePermissionReviewFixture();
     prepareNetworkPolicyFixture();
+    prepareIndexingFixture();
     prepareOverlaySessionFixture();
     prepareWorkspaceCommitFixture();
     prepareTaskCheckpointFixture();
@@ -448,6 +449,13 @@ fn preparePermissionReviewFixture() void {
             permission_review.parseCommand("allow lease=30") catch unreachable,
         ),
     };
+}
+
+fn prepareIndexingFixture() void {
+    indexing_context.service = indexing_service.Service.init();
+    indexing_context.service.upsert(1, 100, 1, "Alpha Notes", "alpha alpha roadmap") catch unreachable;
+    indexing_context.service.upsert(1, 101, 2, "Quarterly Report", "finance alpha summary") catch unreachable;
+    indexing_context.service.upsert(2, 200, 1, "Private Contract", "alpha restricted") catch unreachable;
 }
 
 fn prepareWorkspaceCommitFixture() void {
@@ -966,11 +974,6 @@ fn benchmarkPackageRevision(iteration: u32) u64 {
 
 fn benchmarkIndexingQuery(iteration: u32) u64 {
     _ = iteration;
-    indexing_context.service = indexing_service.Service.init();
-    indexing_context.service.upsert(1, 100, 1, "Alpha Notes", "alpha alpha roadmap") catch unreachable;
-    indexing_context.service.upsert(1, 101, 2, "Quarterly Report", "finance alpha summary") catch unreachable;
-    indexing_context.service.upsert(2, 200, 1, "Private Contract", "alpha restricted") catch unreachable;
-
     const permitted = [_]u64{1};
     const results = indexing_context.service.query(&permitted, "alpha", &indexing_context.results);
     if (results.len == 0) return 0;
