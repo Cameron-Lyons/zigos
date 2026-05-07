@@ -135,6 +135,66 @@ assert_reboot_markers() {
   assert_marker_group "$log_path" cold_reboot
 }
 
+assert_ab_rollback_markers() {
+  local log_path="$1"
+  assert_marker_group "$log_path" ab_rollback
+}
+
+line_number() {
+  local log_path="$1"
+  local marker="$2"
+  grep -Fn "$marker" "$log_path" | head -n1 | cut -d: -f1
+}
+
+assert_driver_restart_without_reboot() {
+  local log_path="$1"
+  local boot_marker
+  local crash_marker
+  local rehost_marker
+  local restart_marker
+  local no_reboot_marker
+  local ready_marker
+  local boot_count
+  local boot_line
+  local crash_line
+  local rehost_line
+  local restart_line
+  local no_reboot_line
+  local ready_line
+
+  assert_marker_group "$log_path" driver_restart
+  boot_marker="BOOT:START"
+  crash_marker="ZIGOS:SERVICE_BOOT:SUPERVISOR:CRASH_RECORDED"
+  rehost_marker="ZIGOS:SERVICE_BOOT:DRIVER:REHOST_OK"
+  restart_marker="ZIGOS:SERVICE_BOOT:SUPERVISOR:RESTART_OK"
+  no_reboot_marker="ZIGOS:SERVICE_BOOT:SUPERVISOR:RESTART_WITHOUT_REBOOT"
+  ready_marker="$ZIGOS_READY_MARKER"
+
+  boot_count="$(grep -Fc "$boot_marker" "$log_path")"
+  if [ "$boot_count" -ne 1 ]; then
+    echo "Zigos native smoke test failed: expected one boot start before driver restart proof in $log_path, found $boot_count" >&2
+    cat "$log_path" >&2
+    exit 1
+  fi
+
+  boot_line="$(line_number "$log_path" "$boot_marker")"
+  crash_line="$(line_number "$log_path" "$crash_marker")"
+  rehost_line="$(line_number "$log_path" "$rehost_marker")"
+  restart_line="$(line_number "$log_path" "$restart_marker")"
+  no_reboot_line="$(line_number "$log_path" "$no_reboot_marker")"
+  ready_line="$(line_number "$log_path" "$ready_marker")"
+
+  if [ "$boot_line" -ge "$crash_line" ] ||
+     [ "$crash_line" -ge "$rehost_line" ] ||
+     [ "$rehost_line" -ge "$restart_line" ] ||
+     [ "$restart_line" -ge "$no_reboot_line" ] ||
+     [ "$no_reboot_line" -ge "$ready_line" ]; then
+    echo "Zigos native smoke test failed: driver restart proof markers are out of order in $log_path" >&2
+    cat "$log_path" >&2
+    exit 1
+  fi
+}
+
 sha256_file() {
   local path="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -176,10 +236,14 @@ append_measured_boot_comparison() {
 run_boot "$BOOT1_LOG" reset
 assert_boot_markers "$BOOT1_LOG"
 assert_first_boot_markers "$BOOT1_LOG"
+assert_ab_rollback_markers "$BOOT1_LOG"
+assert_driver_restart_without_reboot "$BOOT1_LOG"
 
 run_boot "$BOOT2_LOG" preserve
 assert_boot_markers "$BOOT2_LOG"
 assert_reboot_markers "$BOOT2_LOG"
+assert_ab_rollback_markers "$BOOT2_LOG"
+assert_driver_restart_without_reboot "$BOOT2_LOG"
 
 {
   cat "$BOOT1_LOG"

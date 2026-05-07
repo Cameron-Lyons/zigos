@@ -820,17 +820,33 @@
       ]
     },
     "REQ-USERSPACE-SERVICES-BY-DEFAULT": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/session/service_catalog.zig",
         "src/native/session/contract.zig",
         "src/native/drivers/driver_service.zig",
+        "src/native/services/userspace_service_ipc.zig",
+        "src/native/session/session_manager_boot_flow.zig",
+        "src/native/session/session_service_bootstrap.zig",
         "src/kernel/net/ethernet.zig",
         "src/kernel/net/link_port.zig",
         "src/kernel/drivers/ata.zig",
         "src/kernel/boot/init/devices.zig"
       ],
-      "coverage_note": "Service catalog and driver/service boundaries model the split, but kernel shim exclusions are still checked partly by source markers instead of an end-to-end userspace service proof."
+      "negative_tests": [
+        {
+          "file": "src/native/services/userspace_service_ipc.zig",
+          "name": "core userspace service startup protocols run through endpoint syscalls"
+        },
+        {
+          "file": "src/tests/spec/backlog_gates.zig",
+          "name": "backlog gates enforce kernel bootstrap shim boundary"
+        },
+        {
+          "file": "src/native/session/session_manager_test.zig",
+          "name": "boot assembles core services without running explicit scenarios"
+        }
+      ]
     },
     "REQ-DATA-IS-VERSIONED": {
       "status": "enforced",
@@ -930,18 +946,34 @@
       ]
     },
     "REQ-KERNEL-TYPE-AND-BOUNDARY": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/session/contract.zig",
         "src/native/kernel_api/native_kernel.zig",
         "src/native/kernel_api/syscall_surface.zig",
         "src/native/session/service_catalog.zig",
+        "src/native/drivers/bootstrap_driver_port.zig",
+        "src/native/drivers/network_driver_task.zig",
+        "src/native/session/session_service_bootstrap.zig",
         "src/kernel/net/ethernet.zig",
         "src/kernel/net/link_port.zig",
         "src/kernel/drivers/ata.zig",
         "src/kernel/boot/init/devices.zig"
       ],
-      "coverage_note": "The typed native kernel boundary is implemented, but the microkernel boundary claim still depends on modeled service contracts and kernel shim marker checks."
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/backlog_gates.zig",
+          "name": "backlog gates enforce kernel bootstrap shim boundary"
+        },
+        {
+          "file": "src/native/drivers/network_driver_task.zig",
+          "name": "network driver data plane is brokered by explicit egress capability"
+        },
+        {
+          "file": "src/native/session/runtime_negative_proofs.zig",
+          "name": "runtime negative proofs reject modeled bypasses"
+        }
+      ]
     },
     "REQ-KERNEL-REQUIREMENTS": {
       "status": "modeled",
@@ -951,7 +983,7 @@
         "src/native/kernel_api/shared_memory.zig",
         "src/native/kernel_api/native_kernel.zig"
       ],
-      "coverage_note": "Typed syscall and capability checks exist, but service restart/resource accounting isolation is not yet proven through the real freestanding syscall path for every requirement."
+      "coverage_note": "Typed syscall, capability checks, and booted driver restart are implemented, but resource-accounting isolation is not yet proven through the real freestanding syscall path for every requirement."
     },
     "REQ-PRIVILEGE-MODEL": {
       "status": "enforced",
@@ -972,13 +1004,24 @@
       ]
     },
     "REQ-BOOT-CHAIN": {
-      "status": "scenario",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/measured_boot.zig",
         "src/native/session/session_manager_boot_flow.zig",
+        "src/main.zig",
+        "tools/generate_userspace_archive.zig",
         "scripts/run-zigos-native-smoke.sh"
       ],
-      "coverage_note": "Measured boot and smoke tests exercise the boot story, but the boot chain still uses modeled artifact measurements and does not yet verify real bootloader-provided measurements end to end."
+      "negative_tests": [
+        {
+          "file": "src/native/platform/measured_boot.zig",
+          "name": "build-generated artifact manifests verify signatures and required build artifacts"
+        },
+        {
+          "file": "src/native_smoke_markers.zig",
+          "name": "native smoke gate requires measured boot reboot comparison markers"
+        }
+      ]
     },
     "REQ-MEASURED-STATE": {
       "status": "enforced",
@@ -1035,12 +1078,28 @@
       ]
     },
     "REQ-COMPONENT-MODEL": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
+        "src/native/services/component_abi_schema.zig",
         "src/native/services/typed_component_abi.zig",
-        "src/native/task/userspace_contract_registry.zig"
+        "src/native/session/service_catalog.zig",
+        "src/native/task/userspace_contract_registry.zig",
+        "src/native/services/userspace_service_ipc.zig"
       ],
-      "coverage_note": "The typed ABI validator and contract registry exist, but component interop is still modeled rather than exercised by distinct real userspace service implementations."
+      "negative_tests": [
+        {
+          "file": "src/native/services/component_abi_schema.zig",
+          "name": "component ABI schema emits manifest interfaces and service catalog bindings"
+        },
+        {
+          "file": "src/native/services/typed_component_abi.zig",
+          "name": "typed component ABI derives operation IDs, wire types, and validators from schema"
+        },
+        {
+          "file": "src/native/services/userspace_service_ipc.zig",
+          "name": "core userspace service startup protocols run through endpoint syscalls"
+        }
+      ]
     },
     "REQ-BACKGROUND-EXECUTION": {
       "status": "enforced",
@@ -1117,12 +1176,25 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/storage/object_store.zig",
-        "src/native/storage/storage_volume.zig"
+        "src/native/storage/storage_volume.zig",
+        "src/native/storage/storage_service.zig"
       ],
       "negative_tests": [
         {
           "file": "src/native/storage/object_store.zig",
           "name": "object store verifies blob backend corruption before serving payloads"
+        },
+        {
+          "file": "src/native/storage/object_store.zig",
+          "name": "object store streams page-sized chunks into Merkle-addressed blob manifests"
+        },
+        {
+          "file": "src/native/storage/storage_service.zig",
+          "name": "storage service accepts large object payloads through mapped shared memory transfer"
+        },
+        {
+          "file": "src/native/storage/storage_volume_test.zig",
+          "name": "storage volume compacts segmented logs and reloads page-sized blob payloads"
         }
       ]
     },
@@ -1330,18 +1402,37 @@
       "coverage_note": "Thermal and power policy decisions are covered by scheduler model tests, not live runtime scheduling enforcement."
     },
     "REQ-USERSPACE-DRIVERS": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/drivers/driver_service.zig",
         "src/native/drivers/driver_runtime.zig",
         "src/native/session/session_service_bootstrap.zig",
         "src/native/drivers/bootstrap_driver_port.zig",
+        "src/native/drivers/network_driver_task.zig",
+        "src/native/drivers/storage_driver_task.zig",
         "src/kernel/net/ethernet.zig",
         "src/kernel/net/link_port.zig",
         "src/kernel/drivers/ata.zig",
         "src/kernel/boot/init/devices.zig"
       ],
-      "coverage_note": "Driver service authority and runtime behavior are modeled, while kernel shim boundaries still rely partly on marker checks and bootstrap inventory paths."
+      "negative_tests": [
+        {
+          "file": "src/native/drivers/driver_runtime.zig",
+          "name": "kernel bootstrap cannot publish network data-plane transports"
+        },
+        {
+          "file": "src/native/drivers/bootstrap_driver_port.zig",
+          "name": "kernel bootstrap cannot publish storage data-plane transports directly"
+        },
+        {
+          "file": "src/native/drivers/storage_driver_task.zig",
+          "name": "storage driver task attaches only through the kernel device broker"
+        },
+        {
+          "file": "src/tests/spec/backlog_gates.zig",
+          "name": "backlog gates enforce kernel bootstrap shim boundary"
+        }
+      ]
     },
     "REQ-DRIVER-PERMISSIONS": {
       "status": "modeled",
@@ -1351,23 +1442,53 @@
       "coverage_note": "Driver authority narrowing is implemented in the driver service model, but not yet proven through real driver process launch and device operations."
     },
     "REQ-DRIVER-HOT-SWAP-AND-FAILURE-RECOVERY": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/session/supervisor.zig",
         "src/native/drivers/driver_service.zig",
+        "src/native/drivers/driver_runtime.zig",
+        "src/native/session/session_service_bootstrap.zig",
+        "src/native/session/session_manager_boot_flow.zig",
         "src/native/platform/event_ledger.zig"
       ],
-      "coverage_note": "Supervisor restart diagnostics are implemented in-process; real driver crash/restart recovery is not yet exercised end to end."
+      "negative_tests": [
+        {
+          "file": "src/native/session/supervisor.zig",
+          "name": "driver recovery restarts the failed driver and emits visible diagnostics only when needed"
+        },
+        {
+          "file": "src/tests/spec/backlog_gates.zig",
+          "name": "backlog gates enforce kernel bootstrap shim boundary"
+        },
+        {
+          "file": "src/native/session/session_manager_test.zig",
+          "name": "boot assembles core services without running explicit scenarios"
+        }
+      ]
     },
     "REQ-BASE-OS-UPDATES": {
-      "status": "scenario",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/immutable_base.zig",
         "src/native/platform/update_health.zig",
         "src/native/platform/measured_boot.zig",
-        "src/native/session/session_manager_boot_flow.zig"
+        "src/native/session/session_manager_boot_flow.zig",
+        "scripts/run-zigos-native-smoke.sh"
       ],
-      "coverage_note": "Immutable-base and update-health flows are covered, but activation/rollback still uses modeled image state rather than a real image boot/rollback cycle."
+      "negative_tests": [
+        {
+          "file": "src/native/platform/immutable_base.zig",
+          "name": "immutable base persists signed read-only image activation and rollback metadata"
+        },
+        {
+          "file": "src/native_smoke_markers.zig",
+          "name": "native smoke gate requires A/B image rollback proof markers"
+        },
+        {
+          "file": "src/native/session/session_manager_test.zig",
+          "name": "boot assembles core services without running explicit scenarios"
+        }
+      ]
     },
     "REQ-HEALTH-CHECKS": {
       "status": "enforced",

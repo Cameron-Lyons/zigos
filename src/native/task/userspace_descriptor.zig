@@ -1,4 +1,5 @@
 const std = @import("std");
+const userspace_wire = @import("userspace_wire");
 
 pub const MAGIC: u32 = 0x5A474F53;
 pub const VERSION: u16 = 2;
@@ -93,11 +94,11 @@ pub fn init(spec: InitSpec) InitError!Descriptor {
     descriptor.role_tag = spec.role_tag;
     descriptor.heartbeat_increment = spec.heartbeat_increment;
     descriptor.contract_flags = spec.contract_flags;
-    descriptor.bundle_id_len = @intCast(copyTextExact(descriptor.bundle_id[0..], spec.bundle_id) catch return error.BundleIdTooLong);
-    descriptor.display_name_len = @intCast(copyTextExact(descriptor.display_name[0..], spec.display_name) catch return error.DisplayNameTooLong);
-    descriptor.label_len = @intCast(copyTextExact(descriptor.label[0..], spec.label) catch return error.LabelTooLong);
-    descriptor.entry_len = @intCast(copyTextExact(descriptor.entry[0..], spec.entry) catch return error.EntryTooLong);
-    descriptor.publisher_len = @intCast(copyTextExact(descriptor.publisher[0..], spec.publisher) catch return error.PublisherTooLong);
+    descriptor.bundle_id_len = @intCast(userspace_wire.copyTextExact(descriptor.bundle_id[0..], spec.bundle_id) catch return error.BundleIdTooLong);
+    descriptor.display_name_len = @intCast(userspace_wire.copyTextExact(descriptor.display_name[0..], spec.display_name) catch return error.DisplayNameTooLong);
+    descriptor.label_len = @intCast(userspace_wire.copyTextExact(descriptor.label[0..], spec.label) catch return error.LabelTooLong);
+    descriptor.entry_len = @intCast(userspace_wire.copyTextExact(descriptor.entry[0..], spec.entry) catch return error.EntryTooLong);
+    descriptor.publisher_len = @intCast(userspace_wire.copyTextExact(descriptor.publisher[0..], spec.publisher) catch return error.PublisherTooLong);
     descriptor.typed_abi_major = 1;
     descriptor.typed_abi_minor = 0;
     return descriptor;
@@ -111,12 +112,6 @@ pub fn initComptime(comptime spec: InitSpec) Descriptor {
         error.EntryTooLong => @compileError("userspace descriptor entry exceeds MAX_ENTRY_BYTES"),
         error.PublisherTooLong => @compileError("userspace descriptor publisher exceeds MAX_PUBLISHER_BYTES"),
     };
-}
-
-fn copyTextExact(dest: []u8, src: []const u8) error{DestinationTooSmall}!usize {
-    if (src.len > dest.len) return error.DestinationTooSmall;
-    @memcpy(dest[0..src.len], src);
-    return src.len;
 }
 
 pub fn validate(descriptor: *const Descriptor) ValidationError!void {

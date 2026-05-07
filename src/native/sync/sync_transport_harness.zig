@@ -1,7 +1,11 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
+const manifest = @import("../policy/manifest.zig");
+const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
+const signing = @import("../core/signing.zig");
 const network_policy = @import("network_policy.zig");
 const sync_state = @import("sync_state_support.zig");
 
@@ -13,6 +17,7 @@ pub const Error = error{
     PacketTooLarge,
     PacketAuthenticationFailed,
     PacketTargetMismatch,
+    FrameSigningFailed,
     RelayQueueFull,
 };
 
@@ -34,13 +39,25 @@ pub const EncryptedPacket = struct {
     }
 };
 
+pub const SignedEncryptedFrame = struct {
+    packet: EncryptedPacket,
+    packet_digest: [32]u8,
+    signature: manifest.Signature,
+};
+
 const RelayPacketSlot = struct {
     in_use: bool = false,
+    packet_id: u64 = 0,
     packet: EncryptedPacket = undefined,
 };
 
+const RelayPacketArena = indexed_arena.IndexedArenaWithKey(u64, RelayPacketSlot, MAX_RELAY_PACKETS, MAX_RELAY_PACKETS * 2, relayPacketSlotId);
+const RelaySessionIndex = indexed_arena.MultimapIndex(MAX_RELAY_PACKETS, MAX_RELAY_PACKETS, MAX_RELAY_PACKETS * 2);
+
 pub const Relay = struct {
-    packets: [MAX_RELAY_PACKETS]RelayPacketSlot = [_]RelayPacketSlot{.{}} ** MAX_RELAY_PACKETS,
+    next_packet_id: u64 = 1,
+    packets: RelayPacketArena = RelayPacketArena.init(),
+    session_index: RelaySessionIndex = RelaySessionIndex.init(),
     accepted_packets: usize = 0,
     delivered_packets: usize = 0,
 
@@ -50,14 +67,16 @@ pub const Relay = struct {
 
     pub fn submit(self: *Relay, packet: EncryptedPacket) Error!void {
         if (!packet.encrypted or !packet.egress_allowed) return error.EgressDenied;
-        for (&self.packets) |*slot| {
-            if (slot.in_use) continue;
-            slot.in_use = true;
-            slot.packet = packet;
-            self.accepted_packets += 1;
-            return;
+        const packet_id = self.nextPacketId();
+        const slot_index = self.packets.reserveIndex(packet_id) orelse return error.RelayQueueFull;
+        const slot = &self.packets.slots[slot_index];
+        slot.packet_id = packet_id;
+        slot.packet = packet;
+        if (!self.session_index.append(relayPacketSessionKey(packet), slot_index)) {
+            _ = self.packets.removeIndex(slot_index);
+            native_util.impossibleByInvariant("relay session index capacity covers relay packet slots");
         }
-        return error.RelayQueueFull;
+        self.accepted_packets += 1;
     }
 
     pub fn deliverNext(
@@ -65,18 +84,50 @@ pub const Relay = struct {
         session: *const TransportSession,
         plaintext_out: []u8,
     ) Error!?[]const u8 {
-        for (&self.packets) |*slot| {
-            if (!slot.in_use) continue;
-            if (!slot.packet.target_device.eql(session.target_device)) continue;
-            if (!slot.packet.source_device.eql(session.source_device)) continue;
-            const plaintext = try decryptPacket(session, slot.packet, plaintext_out);
-            slot.in_use = false;
-            self.delivered_packets += 1;
-            return plaintext;
+        const key = relaySessionKey(session.id, session.source_device, session.target_device);
+        const slot_index = self.session_index.head(key);
+        if (slot_index == indexed_arena.no_index) return null;
+        if (slot_index >= MAX_RELAY_PACKETS) native_util.impossibleByInvariant("relay session index points outside packet slots");
+        const slot = &self.packets.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("relay session index points at a free packet");
+        if (slot.packet.session_id != session.id or
+            !slot.packet.target_device.eql(session.target_device) or
+            !slot.packet.source_device.eql(session.source_device))
+        {
+            native_util.impossibleByInvariant("relay session index points at the wrong packet");
         }
-        return null;
+        const plaintext = try decryptPacket(session, slot.packet, plaintext_out);
+        _ = self.session_index.remove(key, slot_index);
+        _ = self.packets.removeIndex(slot_index);
+        self.delivered_packets += 1;
+        return plaintext;
+    }
+
+    fn nextPacketId(self: *Relay) u64 {
+        const packet_id = self.next_packet_id;
+        self.next_packet_id +%= 1;
+        if (self.next_packet_id == 0) self.next_packet_id = 1;
+        return packet_id;
     }
 };
+
+fn relayPacketSlotId(slot: *const RelayPacketSlot) u64 {
+    return slot.packet_id;
+}
+
+fn relayPacketSessionKey(packet: EncryptedPacket) u64 {
+    return relaySessionKey(packet.session_id, packet.source_device, packet.target_device);
+}
+
+fn relaySessionKey(session_id: u64, source_device: principal.PrincipalId, target_device: principal.PrincipalId) u64 {
+    var bytes: [26]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..8], session_id, .little);
+    bytes[8] = @intFromEnum(source_device.kind);
+    std.mem.writeInt(u64, bytes[9..17], source_device.serial, .little);
+    bytes[17] = @intFromEnum(target_device.kind);
+    std.mem.writeInt(u64, bytes[18..26], target_device.serial, .little);
+    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(0x5A47_5245_4C41_59, &bytes));
+}
 
 pub const TransportSession = struct {
     id: u64,
@@ -174,6 +225,16 @@ pub const Harness = struct {
         return packet;
     }
 
+    pub fn encryptSignedFrame(
+        self: *Harness,
+        session: *const TransportSession,
+        plaintext: []const u8,
+        identity: signing.SignerIdentity,
+    ) Error!SignedEncryptedFrame {
+        const packet = try self.encryptPacket(session, plaintext);
+        return signPacket(packet, identity);
+    }
+
     pub fn sendRelayPacket(
         self: *Harness,
         relay: *Relay,
@@ -226,6 +287,24 @@ pub const Harness = struct {
     }
 };
 
+pub fn signPacket(
+    packet: EncryptedPacket,
+    identity: signing.SignerIdentity,
+) Error!SignedEncryptedFrame {
+    const digest = packetDigest(packet);
+    return .{
+        .packet = packet,
+        .packet_digest = digest,
+        .signature = signing.sign(identity, &digest) catch return error.FrameSigningFailed,
+    };
+}
+
+pub fn verifySignedFrame(frame: *const SignedEncryptedFrame) bool {
+    const expected_digest = packetDigest(frame.packet);
+    if (!std.mem.eql(u8, &expected_digest, &frame.packet_digest)) return false;
+    return signing.verify(frame.signature, &frame.packet_digest);
+}
+
 fn deriveSessionKey(
     transport: sync_state.TransportMode,
     request: network_policy.EgressConnectionRequest,
@@ -252,6 +331,28 @@ fn digestPayload(session: *const TransportSession, plaintext: []const u8) [32]u8
     crypto_hash.updateBytes(&hasher, "key", &session.key);
     crypto_hash.updateBytes(&hasher, "plaintext", plaintext);
     return crypto_hash.finalize(&hasher);
+}
+
+fn packetDigest(packet: EncryptedPacket) [32]u8 {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateInt(&hasher, "session", packet.session_id);
+    crypto_hash.updateEnum(&hasher, "transport", packet.transport);
+    crypto_hash.updateInt(&hasher, "policy", packet.policy_id);
+    crypto_hash.updateInt(&hasher, "capability", packet.capability_id);
+    updatePrincipal(&hasher, "source", packet.source_device);
+    updatePrincipal(&hasher, "target", packet.target_device);
+    crypto_hash.updateBytes(&hasher, "ciphertext", packet.ciphertextSlice());
+    crypto_hash.updateBytes(&hasher, "payload-digest", &packet.payload_digest);
+    crypto_hash.updateBool(&hasher, "encrypted", packet.encrypted);
+    crypto_hash.updateBool(&hasher, "egress-allowed", packet.egress_allowed);
+    return crypto_hash.finalize(&hasher);
+}
+
+fn updatePrincipal(hasher: *crypto_hash.Hasher, tag: []const u8, value: principal.PrincipalId) void {
+    var bytes: [9]u8 = undefined;
+    bytes[0] = @intFromEnum(value.kind);
+    std.mem.writeInt(u64, bytes[1..9], value.serial, .little);
+    crypto_hash.updateBytes(hasher, tag, &bytes);
 }
 
 fn decryptPacket(
@@ -281,6 +382,15 @@ pub fn decryptForSession(
     plaintext_out: []u8,
 ) Error![]const u8 {
     return decryptPacket(session, packet, plaintext_out);
+}
+
+pub fn decryptSignedFrame(
+    session: *const TransportSession,
+    frame: *const SignedEncryptedFrame,
+    plaintext_out: []u8,
+) Error![]const u8 {
+    if (!verifySignedFrame(frame)) return error.PacketAuthenticationFailed;
+    return decryptPacket(session, frame.packet, plaintext_out);
 }
 
 test "encrypted transport harness only creates sessions after egress approval" {
@@ -324,9 +434,11 @@ test "encrypted transport harness only creates sessions after egress approval" {
 
     var relay_queue = Relay.init();
     _ = try harness.sendRelayPacket(&relay_queue, &session, "relay op log");
+    try std.testing.expectEqual(@as(usize, 1), relay_queue.packets.countInUse());
     var plaintext_buffer: [MAX_PACKET_BYTES]u8 = undefined;
     const delivered = (try relay_queue.deliverNext(&session, plaintext_buffer[0..])).?;
     try std.testing.expectEqualStrings("relay op log", delivered);
+    try std.testing.expectEqual(@as(usize, 0), relay_queue.packets.countInUse());
     try std.testing.expectEqual(@as(usize, 1), relay_queue.accepted_packets);
     try std.testing.expectEqual(@as(usize, 1), relay_queue.delivered_packets);
 

@@ -200,6 +200,7 @@ pub fn IndexedArenaWithKey(
         free_next: [capacity]?usize = [_]?usize{null} ** capacity,
         free_head: ?usize = null,
         next_unclaimed_index: usize = 0,
+        used_count: usize = 0,
         dirty_count: usize = 0,
         dirty_ids: [capacity]Key = [_]Key{ids.zero(Key)} ** capacity,
 
@@ -226,6 +227,7 @@ pub fn IndexedArenaWithKey(
             self.slots[slot_index].in_use = true;
             self.slot_keys[slot_index] = key;
             self.primary_index.insert(raw_key, slot_index);
+            self.used_count += 1;
             self.markDirty(key);
             return slot_index;
         }
@@ -246,6 +248,7 @@ pub fn IndexedArenaWithKey(
             self.slots[slot_index].in_use = true;
             self.slot_keys[slot_index] = key;
             self.primary_index.insert(raw_key, slot_index);
+            self.used_count += 1;
             self.markDirty(key);
             return slot_index;
         }
@@ -304,6 +307,7 @@ pub fn IndexedArenaWithKey(
             }
             slot.* = Slot{};
             self.slot_keys[slot_index] = ids.zero(Key);
+            self.used_count -= 1;
             self.pushFreeIndex(slot_index);
             return true;
         }
@@ -314,6 +318,7 @@ pub fn IndexedArenaWithKey(
             self.free_next = [_]?usize{null} ** capacity;
             self.free_head = null;
             self.next_unclaimed_index = capacity;
+            self.used_count = 0;
 
             for (&self.slots, 0..) |*slot, slot_index| {
                 if (slot.in_use) {
@@ -323,6 +328,7 @@ pub fn IndexedArenaWithKey(
                         self.slot_keys[slot_index] = key;
                         self.primary_index.insert(raw_key, slot_index);
                     }
+                    self.used_count += 1;
                 }
             }
 
@@ -334,11 +340,7 @@ pub fn IndexedArenaWithKey(
         }
 
         pub fn countInUse(self: *const Self) usize {
-            var count: usize = 0;
-            for (self.slots) |slot| {
-                if (slot.in_use) count += 1;
-            }
-            return count;
+            return self.used_count;
         }
 
         fn countMatching(self: *const Self, context: anytype, comptime matches: anytype) usize {

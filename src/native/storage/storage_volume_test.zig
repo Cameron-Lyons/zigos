@@ -80,6 +80,59 @@ test "storage volume image reloads the latest persisted state across slot genera
     try std.testing.expectEqual(second.version_id, (try loaded_workspaces.resolve(loaded_notes.id, "documents/notes.md")).version_id);
 }
 
+test "storage volume compacts segmented logs and reloads page-sized blob payloads" {
+    const image = try std.testing.allocator.alloc(u8, image_bytes);
+    defer std.testing.allocator.free(image);
+    @memset(image, 0);
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0x75} ** 32,
+    };
+
+    var large_payload: [object_store.PAGE_SIZE_BYTES * 2 + 19]u8 = undefined;
+    for (&large_payload, 0..) |*byte, index| {
+        byte.* = @intCast((index * 23) & 0xFF);
+    }
+    const large = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(940),
+        .object_type = .media_asset,
+        .payload = &large_payload,
+        .metadata = try object_store.signMetadata(signer, "large", "application/octet-stream", .media_asset, &large_payload, 30),
+    });
+    _ = try saveToImage(image, &store, &workspaces);
+
+    var previous_version_id = object_store.ids.VersionId.zero;
+    for (0..20) |index| {
+        var payload_buffer: [32]u8 = undefined;
+        const payload = try std.fmt.bufPrint(&payload_buffer, "delta-{d}", .{index});
+        const result = try store.putVersion(.{
+            .preferred_object_id = object_store.ids.object(941),
+            .object_type = .document,
+            .payload = payload,
+            .metadata = try object_store.signMetadata(signer, "delta", "text/plain", .document, payload, 31 + @as(u64, @intCast(index))),
+            .parent_version_id = if (previous_version_id.isZero()) null else previous_version_id,
+        });
+        previous_version_id = result.version_id;
+        _ = try saveToImage(image, &store, &workspaces);
+    }
+
+    try std.testing.expect((try storage_volume.testing.latestImageCompactedGeneration(image)) > 1);
+    try std.testing.expect((try storage_volume.testing.latestImageLogRecordCount(image)) <= 128);
+    try std.testing.expect((try storage_volume.testing.latestImageLogSegmentCount(image)) <= 16);
+
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    _ = try loadFromImage(image, &loaded_store, &loaded_workspaces);
+
+    var out: [large_payload.len]u8 = undefined;
+    const loaded_large = try loaded_store.versionPayloadInto(loaded_store.version(large.version_id).?, &out);
+    try std.testing.expectEqualSlices(u8, &large_payload, loaded_large);
+    try std.testing.expectEqual(previous_version_id, loaded_store.latestVersion(941).?.id);
+}
+
 test "storage volume persists workspace snapshot roots through entry mutations" {
     const image = try std.testing.allocator.alloc(u8, image_bytes);
     defer std.testing.allocator.free(image);
@@ -132,8 +185,13 @@ test "storage volume persists workspace snapshot roots through entry mutations" 
 }
 
 test "storage volume instances keep image reload state isolated" {
-    var first_volume = Volume.init();
-    var second_volume = Volume.init();
+    const allocator = std.testing.allocator;
+    const first_volume = try allocator.create(Volume);
+    defer allocator.destroy(first_volume);
+    const second_volume = try allocator.create(Volume);
+    defer allocator.destroy(second_volume);
+    first_volume.* = Volume.init();
+    second_volume.* = Volume.init();
     const first_image = try std.testing.allocator.alloc(u8, image_bytes);
     defer std.testing.allocator.free(first_image);
     const second_image = try std.testing.allocator.alloc(u8, image_bytes);
@@ -146,33 +204,49 @@ test "storage volume instances keep image reload state isolated" {
         .seed = [_]u8{0x73} ** 32,
     };
 
-    var first_store = object_store.Store.init();
-    var first_workspaces = workspace.Directory.init();
+    const first_store = try allocator.create(object_store.Store);
+    defer allocator.destroy(first_store);
+    const first_workspaces = try allocator.create(workspace.Directory);
+    defer allocator.destroy(first_workspaces);
+    first_store.* = object_store.Store.init();
+    first_workspaces.* = workspace.Directory.init();
     _ = try first_store.putVersion(.{
         .preferred_object_id = object_store.ids.object(910),
         .object_type = .document,
         .payload = "first volume",
         .metadata = try object_store.signMetadata(signer, "first", "text/plain", .document, "first volume", 1),
     });
-    _ = try first_volume.saveToImage(first_image, &first_store, &first_workspaces);
+    _ = try first_volume.saveToImage(first_image, first_store, first_workspaces);
 
-    var second_store = object_store.Store.init();
-    var second_workspaces = workspace.Directory.init();
+    const second_store = try allocator.create(object_store.Store);
+    defer allocator.destroy(second_store);
+    const second_workspaces = try allocator.create(workspace.Directory);
+    defer allocator.destroy(second_workspaces);
+    second_store.* = object_store.Store.init();
+    second_workspaces.* = workspace.Directory.init();
     _ = try second_store.putVersion(.{
         .preferred_object_id = object_store.ids.object(920),
         .object_type = .document,
         .payload = "second volume",
         .metadata = try object_store.signMetadata(signer, "second", "text/plain", .document, "second volume", 2),
     });
-    _ = try second_volume.saveToImage(second_image, &second_store, &second_workspaces);
+    _ = try second_volume.saveToImage(second_image, second_store, second_workspaces);
 
-    var loaded_first_store = object_store.Store.init();
-    var loaded_first_workspaces = workspace.Directory.init();
-    var loaded_second_store = object_store.Store.init();
-    var loaded_second_workspaces = workspace.Directory.init();
+    const loaded_first_store = try allocator.create(object_store.Store);
+    defer allocator.destroy(loaded_first_store);
+    const loaded_first_workspaces = try allocator.create(workspace.Directory);
+    defer allocator.destroy(loaded_first_workspaces);
+    const loaded_second_store = try allocator.create(object_store.Store);
+    defer allocator.destroy(loaded_second_store);
+    const loaded_second_workspaces = try allocator.create(workspace.Directory);
+    defer allocator.destroy(loaded_second_workspaces);
+    loaded_first_store.* = object_store.Store.init();
+    loaded_first_workspaces.* = workspace.Directory.init();
+    loaded_second_store.* = object_store.Store.init();
+    loaded_second_workspaces.* = workspace.Directory.init();
 
-    _ = try first_volume.loadFromImage(first_image, &loaded_first_store, &loaded_first_workspaces);
-    _ = try second_volume.loadFromImage(second_image, &loaded_second_store, &loaded_second_workspaces);
+    _ = try first_volume.loadFromImage(first_image, loaded_first_store, loaded_first_workspaces);
+    _ = try second_volume.loadFromImage(second_image, loaded_second_store, loaded_second_workspaces);
 
     try std.testing.expectEqualStrings("first volume", try loaded_first_store.versionPayload(loaded_first_store.latestVersion(910).?));
     try std.testing.expectEqualStrings("second volume", try loaded_second_store.versionPayload(loaded_second_store.latestVersion(920).?));

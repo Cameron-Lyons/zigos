@@ -44,6 +44,7 @@ test "boot assembles core services without running explicit scenarios" {
     const network_service = supervisor.findByClass(.network_stack).?;
     const storage_service = supervisor.findByClass(.storage_object).?;
     const sync_service = supervisor.findByClass(.sync_replication).?;
+    const package_service = supervisor.findByClass(.package_install_update).?;
     const network_activation = driver_runtime.findByClass(.network_adapter).?;
     const storage_activation = driver_runtime.findByClass(.storage_controller).?;
     try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, runtime_service_record.state);
@@ -55,11 +56,11 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expectEqual(@as(u32, 0), runtime_service.restart_generation);
     try std.testing.expect(network_activation.mode == .control_only);
     try std.testing.expect(storage_activation.mode == .control_only or storage_activation.mode == .published_data_plane or storage_activation.mode == .userspace_brokered_data_plane);
-    try std.testing.expectEqual(@as(u16, 0), network_service.restart_count);
+    try std.testing.expectEqual(@as(u16, 1), network_service.restart_count);
     try std.testing.expectEqual(@as(u16, 0), storage_service.restart_count);
     try std.testing.expectEqual(@as(u16, 0), sync_service.restart_count);
 
-    try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.network_adapter).?.restart_generation);
+    try std.testing.expectEqual(@as(u32, 2), driver_directory.findByClass(.network_adapter).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.storage_controller).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.graphics_adapter).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.audio_print_io).?.restart_generation);
@@ -73,6 +74,7 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expectEqual(compatibility_service.id, compatibility_connection.service_id);
 
     const compatibility_task = session_manager.testing.findTask("compatibility-portal").?;
+    const network_service_task = session_manager.testing.findTask("network-service").?;
     const storage_driver_task = session_manager.testing.findTask("storage-driver").?;
     const storage_service_task = session_manager.testing.findTask("workspace-storage").?;
     const sync_service_task = session_manager.testing.findTask("sync-service").?;
@@ -82,6 +84,7 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expect(session_manager.testing.findTask("sync") == null);
     try std.testing.expect(session_manager.testing.findTask("capture") == null);
     try std.testing.expectEqual(task_runtime.TaskState.active, compatibility_task.state);
+    try std.testing.expectEqual(@as(u32, 2), network_service_task.process_generation);
     try std.testing.expect(runtime.processSeparated(storage_driver_task.id, compatibility_task.id));
     try std.testing.expectEqual(task_runtime.TaskState.active, storage_driver_task.state);
     try std.testing.expectEqual(@as(u32, 1), storage_service_task.process_generation);
@@ -104,6 +107,17 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expectEqual(storage_service_task.id, storage_service_instance.task_id);
     try std.testing.expect(storage_service_instance.findWorkspace(session_user, "notes-workspace") == null);
     try std.testing.expect(session_manager.testing.packageServicePtr().find("app.notes") == null);
+
+    const base_state_signer = signing.SignerIdentity{
+        .label = "zigos-base-state",
+        .seed = [_]u8{0xA1} ** 32,
+    };
+    var base_manager = try immutable_base.Manager.init(storage_service_instance, package_service.owner, base_state_signer);
+    try std.testing.expect(base_manager.loaded_existing_state);
+    try std.testing.expectEqual(@as(u64, 2), base_manager.activation_generation);
+    try std.testing.expectEqual(@as(u64, 1), base_manager.rollback_generation);
+    try std.testing.expectEqualStrings("stable-a", base_manager.activeImage().?.labelSlice());
+    try std.testing.expectEqualStrings("stable-b", base_manager.slots[base_manager.inactiveSlotIndex()].labelSlice());
 }
 
 test "bootstrap scenario world wires storage sync recovery and policy flows explicitly" {

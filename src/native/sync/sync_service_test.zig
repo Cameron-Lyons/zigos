@@ -1,9 +1,12 @@
 const std = @import("std");
+const capability = @import("../kernel_api/capability.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const sync_service = @import("sync_service_impl.zig");
+const sync_transport = @import("sync_transport_harness.zig");
+const task_runtime = @import("../task/task_runtime.zig");
 
 const OverlaySessionState = sync_service.OverlaySessionState;
 const OverlaySessionUse = sync_service.OverlaySessionUse;
@@ -11,6 +14,384 @@ const ResidentState = sync_service.ResidentState;
 const Service = sync_service.Service;
 const ServiceWith = sync_service.ServiceWith;
 const SyncSemantic = sync_service.SyncSemantic;
+
+const EndToEndPolicyIds = struct {
+    local_policy_id: u64,
+    overlay_policy_id: u64,
+    relay_policy_id: u64,
+};
+
+pub fn deterministicTwoDeviceOverlayReplication() !void {
+    var runtime = task_runtime.Runtime.init();
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 920 };
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 921 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 922 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 923 };
+    const tablet = principal.PrincipalId{ .kind = .device, .serial = 924 };
+    const policy_authority = principal.PrincipalId{ .kind = .policy_authority, .serial = 925 };
+    const path = "documents/notes.md";
+    const relay_domain = "relay.e2e.zigos";
+    const overlay_identity = "overlay.e2e.notes";
+    const private_service = "notes.remote";
+    const object_id = object_store.ids.object(9_100);
+    const user_signer = signing.SignerIdentity{
+        .label = "sync-e2e-user",
+        .seed = [_]u8{0x71} ** 32,
+    };
+    const laptop_signer = signing.SignerIdentity{
+        .label = "sync-e2e-laptop",
+        .seed = [_]u8{0x72} ** 32,
+    };
+    const tablet_signer = signing.SignerIdentity{
+        .label = "sync-e2e-tablet",
+        .seed = [_]u8{0x73} ** 32,
+    };
+    const storage_signer = signing.SignerIdentity{
+        .label = "sync-e2e-storage",
+        .seed = [_]u8{0x74} ** 32,
+    };
+
+    const source_task = try createSyncServiceTask(&runtime, sync_owner, "sync-source", "zigos.system.sync.source", 9_210);
+    const target_task = try createSyncServiceTask(&runtime, sync_owner, "sync-target", "zigos.system.sync.target", 9_211);
+    try std.testing.expect(source_task.runsAsUserspaceProcess());
+    try std.testing.expect(target_task.runsAsUserspaceProcess());
+    try std.testing.expect(source_task.hasLoadedExecutable());
+    try std.testing.expect(target_task.hasLoadedExecutable());
+    try std.testing.expectEqual(task_runtime.ComponentClass.service_component, source_task.component_class);
+    try std.testing.expectEqual(task_runtime.ComponentClass.service_component, target_task.component_class);
+
+    var source_checkpoint_store = storage_service.CheckpointStore{};
+    var target_checkpoint_store = storage_service.CheckpointStore{};
+    source_checkpoint_store.resetPersistent();
+    target_checkpoint_store.resetPersistent();
+
+    var source_storage = storage_service.Service.initWithStore(9_220, 9_220, storage_owner, &source_checkpoint_store);
+    const source_base = try source_storage.putVersion(.{
+        .preferred_object_id = object_id,
+        .object_type = .document,
+        .payload = "base notes",
+        .metadata = try object_store.signMetadata(storage_signer, "notes-base", "text/plain", .document, "base notes", 10),
+    });
+    const source_edit = try source_storage.putVersion(.{
+        .preferred_object_id = object_id,
+        .object_type = .document,
+        .payload = "laptop edit",
+        .metadata = try object_store.signMetadata(storage_signer, "notes-laptop", "text/plain", .document, "laptop edit", 11),
+        .parent_version_id = source_base.version_id,
+    });
+    const source_workspace = try source_storage.createWorkspace(.{
+        .owner = user,
+        .label = "notes",
+    });
+    try source_storage.beginTransaction(source_workspace.id);
+    try source_storage.stagePut(source_workspace.id, path, source_edit.object_id, source_edit.version_id, .document);
+    _ = try source_storage.commit(source_workspace.id, 12);
+
+    var target_storage = storage_service.Service.initWithStore(9_221, 9_221, storage_owner, &target_checkpoint_store);
+    const target_base = try target_storage.putVersion(.{
+        .preferred_object_id = object_id,
+        .object_type = .document,
+        .payload = "base notes",
+        .metadata = try object_store.signMetadata(storage_signer, "notes-base", "text/plain", .document, "base notes", 20),
+    });
+    const target_draft = try target_storage.putVersion(.{
+        .preferred_object_id = object_id,
+        .object_type = .document,
+        .payload = "tablet draft",
+        .metadata = try object_store.signMetadata(storage_signer, "notes-tablet-draft", "text/plain", .document, "tablet draft", 21),
+        .parent_version_id = target_base.version_id,
+    });
+    const target_conflict = try target_storage.putVersion(.{
+        .preferred_object_id = object_id,
+        .object_type = .document,
+        .payload = "tablet conflict",
+        .metadata = try object_store.signMetadata(storage_signer, "notes-tablet-conflict", "text/plain", .document, "tablet conflict", 22),
+        .parent_version_id = target_draft.version_id,
+    });
+    const target_workspace = try target_storage.createWorkspace(.{
+        .owner = user,
+        .label = "notes",
+    });
+    try std.testing.expectEqual(source_workspace.id.raw(), target_workspace.id.raw());
+    try target_storage.beginTransaction(target_workspace.id);
+    try target_storage.stagePut(target_workspace.id, path, target_conflict.object_id, target_conflict.version_id, .document);
+    _ = try target_storage.commit(target_workspace.id, 23);
+
+    const workspace_id = source_workspace.id.raw();
+    var source_resident = ResidentState{};
+    var target_resident = ResidentState{};
+    var source_sync = try Service.initWithStorage(9_230, source_task.id, sync_owner, &source_storage, &source_resident);
+    var target_sync = try Service.initWithStorage(9_231, target_task.id, sync_owner, &target_storage, &target_resident);
+    const source_policies = try configureEndToEndSync(
+        &source_sync,
+        sync_owner,
+        user,
+        laptop,
+        tablet,
+        user_signer,
+        laptop_signer,
+        tablet_signer,
+        workspace_id,
+        overlay_identity,
+        relay_domain,
+        private_service,
+        30,
+    );
+    const target_policies = try configureEndToEndSync(
+        &target_sync,
+        sync_owner,
+        user,
+        laptop,
+        tablet,
+        user_signer,
+        laptop_signer,
+        tablet_signer,
+        workspace_id,
+        overlay_identity,
+        relay_domain,
+        private_service,
+        40,
+    );
+
+    const overlay_decision = try target_sync.evaluateNetworkPolicy(target_policies.overlay_policy_id, .{
+        .service_identity = overlay_identity,
+    });
+    try std.testing.expect(overlay_decision.allowed);
+
+    const source_private_session = try source_sync.openOverlaySession(
+        workspace_id,
+        laptop,
+        tablet,
+        .private_service,
+        .relay_assisted,
+        private_service,
+        50,
+    );
+    try std.testing.expect(source_private_session.isActive());
+    try std.testing.expect(source_private_session.encrypted);
+    try std.testing.expect(source_private_session.relay_encrypted);
+    try std.testing.expect(source_private_session.remote_access);
+    try std.testing.expectEqualStrings(private_service, source_private_session.privateServiceSlice());
+
+    const target_private_session = try target_sync.openOverlaySession(
+        workspace_id,
+        tablet,
+        laptop,
+        .private_service,
+        .relay_assisted,
+        private_service,
+        51,
+    );
+    try std.testing.expect(target_private_session.isActive());
+    try std.testing.expect(target_private_session.relay_encrypted);
+    try std.testing.expectEqualStrings(private_service, target_private_session.privateServiceSlice());
+
+    var capabilities = capability.CapabilityTable.init();
+    const relay_capability = try capabilities.mintBootRoot(.{
+        .holder = sync_owner,
+        .issuer = policy_authority,
+        .target = .{ .kind = .network_policy, .id = source_policies.relay_policy_id },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .scope = .{ .task_id = source_task.id, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    var source_broker = source_sync.egressBroker(&capabilities);
+    var transport = sync_transport.Harness.init();
+    const relay_session = try transport.openRelay(&source_broker, .{
+        .task_id = source_task.id,
+        .principal_id = sync_owner,
+        .capability_id = relay_capability.id,
+        .policy_id = source_policies.relay_policy_id,
+        .evidence = .{ .destination = .{ .domain = relay_domain } },
+        .now_ticks = 52,
+    }, laptop, tablet, relay_domain);
+    try std.testing.expectEqual(sync_service.TransportMode.relay_assisted, relay_session.transport);
+    try std.testing.expect(relay_session.egress_decision.allowed);
+    try std.testing.expectEqualStrings(relay_domain, relay_session.relayDomainSlice());
+
+    try std.testing.expectError(error.EgressDenied, transport.openRelay(&source_broker, .{
+        .task_id = source_task.id,
+        .principal_id = sync_owner,
+        .capability_id = relay_capability.id,
+        .policy_id = source_policies.relay_policy_id,
+        .evidence = .{ .destination = .{ .domain = "unexpected.e2e.zigos" } },
+        .now_ticks = 52,
+    }, laptop, tablet, "unexpected.e2e.zigos"));
+    try std.testing.expectEqual(@as(usize, 1), transport.denied_sessions);
+
+    try source_sync.setReplicaVersion(workspace_id, tablet, path, source_edit.object_id, target_conflict.version_id);
+    const summary = try source_sync.replicateWorkspace(&source_storage, workspace_id, laptop, tablet, .relay_assisted);
+    try std.testing.expect(summary.offline_first);
+    try std.testing.expect(summary.personal_e2ee);
+    try std.testing.expect(summary.used_relay);
+    try std.testing.expect(summary.overlay_ready);
+    try std.testing.expect(summary.remote_access_ready);
+    try std.testing.expect(summary.private_service_published);
+    try std.testing.expectEqual(@as(usize, 1), summary.selected_entry_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.merged_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.conflict_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.transport_frame_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.encrypted_transport_count);
+    try std.testing.expect(source_sync.findConflict(workspace_id, tablet, path) != null);
+
+    const frame = source_sync.latestTransportFrameForPath(workspace_id, tablet, path) orelse return error.MissingTransportFrame;
+    try std.testing.expect(frame.encrypted);
+    try std.testing.expectEqual(sync_service.TransportMode.relay_assisted, frame.transport);
+    try std.testing.expectEqual(SyncSemantic.mergeable_crdt, frame.semantic);
+    const source_frame_version = source_storage.version(frame.version_id) orelse return error.MissingTransportFrameVersion;
+    const source_payload = try source_storage.versionPayload(source_frame_version);
+    var payload_buffer: [sync_transport.MAX_PACKET_BYTES]u8 = undefined;
+    const plaintext = try std.fmt.bufPrint(&payload_buffer, "{s}|{s}", .{ frame.pathSlice(), source_payload });
+    const signed_frame = try transport.encryptSignedFrame(&relay_session, plaintext, laptop_signer);
+    try std.testing.expect(sync_transport.verifySignedFrame(&signed_frame));
+    try std.testing.expect(signed_frame.packet.encrypted);
+    try std.testing.expect(signed_frame.packet.egress_allowed);
+    try std.testing.expect(!std.mem.eql(u8, signed_frame.packet.ciphertextSlice(), plaintext));
+
+    var relay_queue = sync_transport.Relay.init();
+    try relay_queue.submit(signed_frame.packet);
+    var delivered_buffer: [sync_transport.MAX_PACKET_BYTES]u8 = undefined;
+    const delivered = (try relay_queue.deliverNext(&relay_session, delivered_buffer[0..])) orelse return error.MissingRelayFrame;
+    try std.testing.expectEqualStrings(plaintext, delivered);
+    try std.testing.expectEqual(@as(usize, 1), relay_queue.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 1), relay_queue.delivered_packets);
+
+    var authenticated_buffer: [sync_transport.MAX_PACKET_BYTES]u8 = undefined;
+    const authenticated = try sync_transport.decryptSignedFrame(&relay_session, &signed_frame, authenticated_buffer[0..]);
+    try std.testing.expectEqualStrings(delivered, authenticated);
+    var tampered = signed_frame;
+    tampered.packet.ciphertext[0] ^= 0x01;
+    try std.testing.expect(!sync_transport.verifySignedFrame(&tampered));
+    try std.testing.expectError(error.PacketAuthenticationFailed, sync_transport.decryptSignedFrame(&relay_session, &tampered, authenticated_buffer[0..]));
+
+    const delimiter = std.mem.indexOfScalar(u8, authenticated, '|') orelse return error.MissingPayloadDelimiter;
+    const replicated_path = authenticated[0..delimiter];
+    const replicated_payload = authenticated[delimiter + 1 ..];
+    try std.testing.expectEqualStrings(path, replicated_path);
+    try std.testing.expectEqualStrings("laptop edit", replicated_payload);
+
+    const replicated_version = try target_storage.putVersion(.{
+        .preferred_object_id = object_id,
+        .object_type = .document,
+        .payload = replicated_payload,
+        .metadata = try object_store.signMetadata(storage_signer, "notes-replicated", "text/plain", .document, replicated_payload, 53),
+        .parent_version_id = target_conflict.version_id,
+    });
+    try target_storage.beginTransaction(target_workspace.id);
+    try target_storage.stagePut(target_workspace.id, replicated_path, replicated_version.object_id, replicated_version.version_id, .document);
+    const replicated_generation = try target_storage.commit(target_workspace.id, 54);
+    try std.testing.expect(replicated_generation > 1);
+    try target_sync.setReplicaVersion(workspace_id, laptop, replicated_path, replicated_version.object_id, replicated_version.version_id);
+
+    const resolved = try target_storage.resolve(target_workspace.id, path);
+    try std.testing.expectEqual(replicated_version.version_id, resolved.version_id);
+    const target_version = target_storage.version(resolved.version_id) orelse return error.MissingTargetVersion;
+    const target_payload = try target_storage.versionPayload(target_version);
+    try std.testing.expectEqualStrings("laptop edit", target_payload);
+    try std.testing.expectEqual(replicated_version.version_id.raw(), target_sync.replicaVersion(workspace_id, laptop, path).?);
+    try std.testing.expectEqual(source_edit.version_id.raw(), source_sync.replicaVersion(workspace_id, tablet, path).?);
+
+    source_checkpoint_store.resetPersistent();
+    target_checkpoint_store.resetPersistent();
+}
+
+fn createSyncServiceTask(
+    runtime: *task_runtime.Runtime,
+    owner: principal.PrincipalId,
+    label: []const u8,
+    bundle_id: []const u8,
+    image_id: u64,
+) !*task_runtime.TaskRecord {
+    const image = task_runtime.syntheticUserspaceImage(label, bundle_id);
+    return runtime.createTask(.{
+        .owner = owner,
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 2_000,
+            .memory_bytes = 128 * 1024,
+            .endpoint_slots = 8,
+            .shared_memory_bytes = 32 * 1024,
+            .background_allowed = true,
+        },
+        .local_only = true,
+        .initial_component = .{
+            .label = label,
+            .entry = bundle_id,
+        },
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = image_id,
+            .component_abi_version = 1,
+            .signed = true,
+            .bundle_id = bundle_id,
+        },
+        .userspace_image = &image,
+    });
+}
+
+fn configureEndToEndSync(
+    service: *Service,
+    sync_owner: principal.PrincipalId,
+    user: principal.PrincipalId,
+    laptop: principal.PrincipalId,
+    tablet: principal.PrincipalId,
+    user_signer: signing.SignerIdentity,
+    laptop_signer: signing.SignerIdentity,
+    tablet_signer: signing.SignerIdentity,
+    workspace_id: u64,
+    overlay_identity: []const u8,
+    relay_domain: []const u8,
+    private_service: []const u8,
+    tick_base: u64,
+) !EndToEndPolicyIds {
+    _ = try service.ensureUserRoot(user, "owner", user_signer);
+    _ = try service.enrollTrustedDevice(user, laptop, "laptop", user_signer, laptop_signer, tick_base);
+    _ = try service.enrollTrustedDevice(user, tablet, "tablet", user_signer, tablet_signer, tick_base + 1);
+
+    const local_policy = try service.createNetworkPolicy(.{
+        .owner = sync_owner,
+        .workspace_id = workspace_id,
+        .label = "local",
+        .mode = .local_network,
+    });
+    const overlay_policy = try service.createNetworkPolicy(.{
+        .owner = sync_owner,
+        .workspace_id = workspace_id,
+        .label = "overlay",
+        .mode = .named_service_identity,
+        .target = overlay_identity,
+    });
+    const relay_policy = try service.createNetworkPolicy(.{
+        .owner = sync_owner,
+        .workspace_id = workspace_id,
+        .label = "relay",
+        .mode = .named_domain,
+        .target = relay_domain,
+    });
+    _ = try service.configureWorkspacePolicy(.{
+        .workspace_id = workspace_id,
+        .owner = user,
+        .offline_first = true,
+        .personal_e2ee = true,
+        .selective_prefixes = &.{"documents/"},
+        .device_to_device_policy_id = local_policy.id,
+        .relay_policy_id = relay_policy.id,
+        .overlay_policy_id = overlay_policy.id,
+        .relay_domain = relay_domain,
+    });
+    _ = try service.configureOverlay(workspace_id, laptop, overlay_identity, true);
+    _ = try service.publishPrivateService(workspace_id, private_service);
+    return .{
+        .local_policy_id = local_policy.id,
+        .overlay_policy_id = overlay_policy.id,
+        .relay_policy_id = relay_policy.id,
+    };
+}
+
+test "sync private overlay replicates end to end across two service tasks" {
+    try deterministicTwoDeviceOverlayReplication();
+}
 
 test "sync service covers device graph policy replication semantics and restart recovery" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};

@@ -11,6 +11,7 @@ const endpoint_mod = @import("../kernel_api/endpoint.zig");
 const manifest = @import("../policy/manifest.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
+const immutable_base = @import("../platform/immutable_base.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
 const native_kernel = @import("../kernel_api/native_kernel.zig");
 const native_service_registry = @import("../services/service_registry.zig");
@@ -41,6 +42,7 @@ pub const BootstrapState = session_support.BootstrapState;
 pub const ServiceBindings = session_support.ServiceBindings;
 pub const Environment = session_support.Environment;
 const BootstrapError = error{ MissingBootstrapLaunch, MissingBootstrapGrant, MissingUserspaceImage } || session_bootstrap.Error || userspace_launch.Error || capability.Error || task_runtime.Error;
+const build_bootloader_measurement_label = "multiboot-v1:zigos_native";
 
 pub const ServiceGraph = struct {
     env: Environment,
@@ -290,8 +292,16 @@ pub const SessionManager = struct {
         graph.env = env_snapshot;
         graph.state = state_snapshot;
         graph.service_bindings = self.service_bindings;
+        if (!session_service_bootstrap.proveDriverCrashRestart(&graph.env, &graph.state, &graph.service_bindings)) {
+            self.failBoot();
+            return null;
+        }
         self.bindProductionStorageService(&graph);
         self.runtime_service.checkpoint(60);
+        if (!proveProductionAbImageRollback(self, &graph)) {
+            self.failBoot();
+            return null;
+        }
         if (!verifyProductionArtifactManifest(self, &graph)) {
             self.failBoot();
             return null;
@@ -327,15 +337,83 @@ fn verifyProductionArtifactManifest(manager: *SessionManager, graph: *const Serv
         .seed = [_]u8{0xB7} ** 32,
     };
     const artifact_manifest = buildProductionArtifactManifest(manager, graph) catch return false;
+    if (builtin.target.os.tag == .freestanding) {
+        if (!verifyGeneratedProductionArtifactManifest(manager, true)) return false;
+        common.printBootMarker(boot_markers.platform_artifact_manifest_verified);
+        return true;
+    }
     const signed_manifest = measured_boot.signArtifactManifest(artifact_manifest, manifest_signer) catch return false;
     if (!measured_boot.verifySignedArtifactManifest(&signed_manifest)) return false;
     common.printBootMarker(boot_markers.platform_artifact_manifest_verified);
     return true;
 }
 
+fn verifyGeneratedProductionArtifactManifest(manager: *SessionManager, print_markers: bool) bool {
+    if (builtin.target.os.tag != .freestanding) return true;
+
+    const root = @import("root");
+    if (!@hasDecl(root, "production_artifact_manifest")) return false;
+    const generated_manifest = measured_boot.buildArtifactManifestFromGenerated(root.production_artifact_manifest) catch return false;
+    if (!measured_boot.verifyBuildArtifactManifest(&generated_manifest)) return false;
+
+    const bootloader_digest = bootloaderProvidedMeasurementDigest() catch return false;
+    const bootloader_entry = generated_manifest.find(
+        .bootloader_measurement,
+        build_bootloader_measurement_label,
+    ) orelse return false;
+    if (!std.mem.eql(u8, &bootloader_entry.digest, &bootloader_digest)) return false;
+
+    var userspace_artifact_count: usize = 0;
+    for (generated_manifest.entries[0..generated_manifest.entry_count]) |entry| {
+        if (entry.kind != .userspace_image) continue;
+        const image = manager.userspace_catalog.findByBundleId(entry.labelSlice()) orelse return false;
+        if (!image.bundle_signed) return false;
+        if (!std.mem.eql(u8, &image.file_sha256, &entry.digest)) return false;
+        userspace_artifact_count += 1;
+    }
+    if (userspace_artifact_count != manager.userspace_catalog.imageCount()) return false;
+
+    if (print_markers) {
+        common.printBootMarker(boot_markers.platform_bootloader_measurement_provided);
+        common.printBootMarker(boot_markers.platform_build_artifact_manifest_verified);
+    }
+    return true;
+}
+
+fn proveProductionAbImageRollback(manager: *SessionManager, graph: *const ServiceGraph) bool {
+    const state_signer = signing.SignerIdentity{
+        .label = "zigos-base-state",
+        .seed = [_]u8{0xA1} ** 32,
+    };
+    const image_signer = signing.SignerIdentity{
+        .label = "zigos-base-image",
+        .seed = [_]u8{0xA2} ** 32,
+    };
+
+    var base_manager = immutable_base.Manager.init(
+        &manager.storage_service_instance,
+        graph.state.ids.package_service,
+        state_signer,
+    ) catch return false;
+    _ = base_manager.stageImage(0, "stable-a", "zigos-native-base:stable-a", image_signer, 70) catch return false;
+    const stable = base_manager.activate(0, .{}, 71) catch return false;
+    if (stable.rolled_back or stable.active_slot == null or stable.active_slot.? != 0) return false;
+
+    _ = base_manager.stageImage(1, "stable-b", "zigos-native-base:stable-b", image_signer, 72) catch return false;
+    const rolled_back = base_manager.activate(1, .{ .network_ok = false }, 73) catch return false;
+    if (!rolled_back.rolled_back) return false;
+    if (rolled_back.active_slot == null or rolled_back.active_slot.? != 0) return false;
+    if (!base_manager.verifyActiveImage()) return false;
+
+    common.printBootMarker(boot_markers.platform_immutable_base_active);
+    common.printBootMarker(boot_markers.platform_activation_rollback_ok);
+    common.printBootMarker(boot_markers.platform_ab_image_rollback_ok);
+    return true;
+}
+
 fn buildProductionArtifactManifest(manager: *SessionManager, graph: *const ServiceGraph) !measured_boot.ArtifactManifest {
     var manifest_record = measured_boot.ArtifactManifest.init(1);
-    const kernel_digest = productionKernelMeasurementDigest();
+    const kernel_digest = try productionKernelMeasurementDigest();
     const base_manifest_digest = productionBaseImageManifestDigest(manager, graph);
     const policy_digest = productionPolicyDigest(manager, graph);
     try manifest_record.add(.kernel, "bootloader+kernel-zigos-native", &kernel_digest);
@@ -359,31 +437,33 @@ fn buildProductionArtifactManifest(manager: *SessionManager, graph: *const Servi
     return manifest_record;
 }
 
-fn productionKernelMeasurementDigest() [32]u8 {
+fn productionKernelMeasurementDigest() ![32]u8 {
     var hasher = crypto_hash.init();
-    const bootloader_digest = bootloaderProvidedMeasurementDigest();
-    const kernel_digest = kernelImageDigest();
+    const bootloader_digest = try bootloaderProvidedMeasurementDigest();
+    const kernel_digest = try kernelImageDigest();
     crypto_hash.updateBytes(&hasher, "bootloader-measurement-digest", &bootloader_digest);
     crypto_hash.updateBytes(&hasher, "kernel-image-digest", &kernel_digest);
     return crypto_hash.finalize(&hasher);
 }
 
-fn bootloaderProvidedMeasurementDigest() [32]u8 {
+fn bootloaderProvidedMeasurementDigest() ![32]u8 {
     if (builtin.target.os.tag == .freestanding) {
         const root = @import("root");
         if (@hasDecl(root, "bootloaderMeasurementDigest")) {
             return root.bootloaderMeasurementDigest();
         }
+        return error.MissingBootloaderMeasurement;
     }
     return syntheticBootloaderMeasurementDigest();
 }
 
-fn kernelImageDigest() [32]u8 {
+fn kernelImageDigest() ![32]u8 {
     if (builtin.target.os.tag == .freestanding) {
         const root = @import("root");
         if (@hasDecl(root, "kernelImageDigest")) {
             return root.kernelImageDigest();
         }
+        return error.MissingKernelMeasurement;
     }
     return syntheticKernelImageDigest();
 }
@@ -441,7 +521,7 @@ fn productionPolicyDigest(manager: *const SessionManager, graph: *const ServiceG
         if (!slot.in_use) continue;
         hashCapability(&hasher, "capability", &slot.capability);
     }
-    for (manager.service_directory.registry.slots) |slot| {
+    for (manager.service_directory.registry.bindings.slots) |slot| {
         if (!slot.in_use) continue;
         const binding = &slot.binding;
         crypto_hash.updateInt(&hasher, "registry-service-id", binding.service_id);
@@ -785,12 +865,16 @@ fn recordProductionMeasuredBoot(manager: *SessionManager, graph: *const ServiceG
         .seed = [_]u8{0xB7} ** 32,
     };
     const artifact_manifest = buildProductionArtifactManifest(manager, graph) catch return false;
-    const signed_manifest = measured_boot.signArtifactManifest(artifact_manifest, manifest_signer) catch return false;
-    if (!measured_boot.verifySignedArtifactManifest(&signed_manifest)) return false;
+    if (builtin.target.os.tag == .freestanding) {
+        if (!verifyGeneratedProductionArtifactManifest(manager, false)) return false;
+    } else {
+        const signed_manifest = measured_boot.signArtifactManifest(artifact_manifest, manifest_signer) catch return false;
+        if (!measured_boot.verifySignedArtifactManifest(&signed_manifest)) return false;
+    }
 
     var measured = measured_boot.Recorder.init();
     measured.begin(1);
-    const kernel_digest = productionKernelMeasurementDigest();
+    const kernel_digest = productionKernelMeasurementDigest() catch return false;
     const base_manifest_digest = productionBaseImageManifestDigest(manager, graph);
     const policy_digest = productionPolicyDigest(manager, graph);
     measured.add(.kernel, "bootloader+kernel-zigos-native", &kernel_digest) catch return false;
@@ -810,7 +894,7 @@ fn recordProductionMeasuredBoot(manager: *SessionManager, graph: *const ServiceG
     measured.addDriverSet("production-driver-set", &manager.driver_directory) catch return false;
 
     const boot = measured.finalize();
-    if (!measured_boot.bootRecordMatchesManifest(&boot, &signed_manifest.manifest)) return false;
+    if (!measured_boot.bootRecordMatchesManifest(&boot, &artifact_manifest)) return false;
     printMeasurementSummary(&boot);
     supportMeasuredBootShape(&boot);
     recordMeasurementComparison(manager, &boot);
