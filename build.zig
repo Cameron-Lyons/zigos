@@ -21,11 +21,17 @@ pub fn build(b: *std.Build) void {
         },
     });
     const optimize = b.standardOptimizeOption(.{});
+    const userspace_wire_test_module = b.createModule(.{
+        .root_source_file = b.path("src/native/task/userspace_wire.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
     const host_tests_module = b.createModule(.{
         .root_source_file = b.path("src/native_host_test.zig"),
         .target = b.graph.host,
         .optimize = optimize,
     });
+    host_tests_module.addImport("userspace_wire", userspace_wire_test_module);
     const host_tests = b.addTest(.{
         .name = "native-host-tests",
         .root_module = host_tests_module,
@@ -36,11 +42,48 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = optimize,
     });
+    spec_tests_module.addImport("userspace_wire", userspace_wire_test_module);
     const spec_tests = b.addTest(.{
         .name = "zigos-spec-tests",
         .root_module = spec_tests_module,
     });
     const run_spec_tests = b.addRunArtifact(spec_tests);
+    const userspace_descriptor_test_module = b.createModule(.{
+        .root_source_file = b.path("src/native/task/userspace_descriptor.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    userspace_descriptor_test_module.addImport("userspace_wire", userspace_wire_test_module);
+    const userspace_abi_test_module = b.createModule(.{
+        .root_source_file = b.path("src/native/core/abi.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const userspace_bootstrap_mailbox_test_module = b.createModule(.{
+        .root_source_file = b.path("src/native/task/userspace_bootstrap_mailbox.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const userspace_service_protocol_test_module = b.createModule(.{
+        .root_source_file = b.path("src/native/task/userspace_service_protocol.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    userspace_service_protocol_test_module.addImport("userspace_wire", userspace_wire_test_module);
+    const userspace_runtime_tests_module = b.createModule(.{
+        .root_source_file = b.path("src/userspace/runtime.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    userspace_runtime_tests_module.addImport("userspace_descriptor", userspace_descriptor_test_module);
+    userspace_runtime_tests_module.addImport("native_abi", userspace_abi_test_module);
+    userspace_runtime_tests_module.addImport("userspace_bootstrap_mailbox", userspace_bootstrap_mailbox_test_module);
+    userspace_runtime_tests_module.addImport("userspace_service_protocol", userspace_service_protocol_test_module);
+    const userspace_runtime_tests = b.addTest(.{
+        .name = "userspace-runtime-tests",
+        .root_module = userspace_runtime_tests_module,
+    });
+    const run_userspace_runtime_tests = b.addRunArtifact(userspace_runtime_tests);
     const userspace_images = userspace_build.addUserspaceArtifacts(b, target, optimize);
 
     const zigos_native_kernel = kernel_build.addKernelArtifact(
@@ -50,6 +93,7 @@ pub fn build(b: *std.Build) void {
         "kernel-zigos-native.elf",
         .zigos_native,
         userspace_images.archive_module,
+        userspace_images.production_manifest_module,
     );
 
     const benchmark_kernel = kernel_build.addKernelArtifact(
@@ -59,6 +103,7 @@ pub fn build(b: *std.Build) void {
         "kernel-benchmark.elf",
         .benchmark,
         userspace_images.archive_module,
+        userspace_images.production_manifest_module,
     );
 
     const kernel_step = b.step("kernel", "Build the native-only Zigos kernel");
@@ -124,8 +169,30 @@ pub fn build(b: *std.Build) void {
     const zigos_native_smoke_test_step = b.step("zigos-native-smoke-test", "Run the Zigos native bootstrap smoke test in QEMU");
     zigos_native_smoke_test_step.dependOn(&zigos_native_smoke_test_cmd.step);
 
-    const host_tests_step = b.step("host-tests", "Run host-side unit tests for native logic");
+    const driver_restart_qemu_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-zigos-native-smoke.sh",
+        zigos_native_kernel.output_path,
+        "build/driver-restart-qemu.log",
+        "build/native-store-driver-restart.img",
+    });
+    driver_restart_qemu_cmd.step.dependOn(zigos_native_kernel.install_step);
+    driver_restart_qemu_cmd.step.dependOn(userspace_images.step);
+
+    const driver_restart_qemu_step = b.step("driver-restart-qemu-test", "Run QEMU proof that a userspace driver crashes and restarts without reboot");
+    driver_restart_qemu_step.dependOn(&driver_restart_qemu_cmd.step);
+
+    const zig_test_roots_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/check_zig_test_roots.py",
+    });
+    const zig_test_roots_step = b.step("test-roots", "Check that Zig test-bearing files are reachable from build test roots");
+    zig_test_roots_step.dependOn(&zig_test_roots_cmd.step);
+
+    const host_tests_step = b.step("host-tests", "Run host-side unit tests for native logic and userspace runtime");
+    host_tests_step.dependOn(&zig_test_roots_cmd.step);
     host_tests_step.dependOn(&run_host_tests.step);
+    host_tests_step.dependOn(&run_userspace_runtime_tests.step);
 
     const fmt_check_cmd = b.addSystemCommand(&.{
         "bash",
@@ -167,6 +234,7 @@ pub fn build(b: *std.Build) void {
         "tools/check_spec_coverage.py",
     });
     run_spec_tests.step.dependOn(&spec_coverage_cmd.step);
+    run_spec_tests.step.dependOn(&zig_test_roots_cmd.step);
     const spec_tests_step = b.step("spec-tests", "Run the spec coverage gate and native spec unit tests");
     spec_tests_step.dependOn(&run_spec_tests.step);
 
@@ -197,8 +265,8 @@ pub fn build(b: *std.Build) void {
     const verify_step = b.step("verify", "Run local CI-aligned checks: lint, kernel build, host tests, and spec tests; pass -Dverify-smoke=true and/or -Dverify-benchmark=true for QEMU gates");
     verify_step.dependOn(lint_step);
     verify_step.dependOn(kernel_step);
-    verify_step.dependOn(&run_host_tests.step);
-    verify_step.dependOn(&run_spec_tests.step);
+    verify_step.dependOn(host_tests_step);
+    verify_step.dependOn(spec_tests_step);
     if (verify_smoke) verify_step.dependOn(&zigos_native_smoke_test_cmd.step);
     if (verify_benchmark) verify_step.dependOn(&benchmark_cmd.step);
 

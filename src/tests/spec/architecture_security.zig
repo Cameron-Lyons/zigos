@@ -22,6 +22,7 @@ const syscall_abi = @import("../../native/kernel_api/syscall_abi.zig");
 const syscall_surface = @import("../../native/kernel_api/syscall_surface.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const task_runtime_service = @import("../../native/task/task_runtime_service.zig");
+const userspace_service_ipc = @import("../../native/services/userspace_service_ipc.zig");
 const userspace_loader = @import("../../native/task/userspace_loader.zig");
 const userspace_manifest_signing = @import("../../native/task/userspace_manifest_signing.zig");
 
@@ -724,6 +725,7 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
 pub fn modeledKernelClaimsHaveHardEnforcementProofs() !void {
     try mmuStyleAddressSpaceValidationRejectsCrossSpaceRanges();
     try componentAbiDeclarationsCoverEveryTypedOperation();
+    try userspace_service_ipc.proveCoreServiceStartupProtocolsUseEndpointSyscalls();
 }
 
 fn mmuStyleAddressSpaceValidationRejectsCrossSpaceRanges() !void {

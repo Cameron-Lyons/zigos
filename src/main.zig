@@ -2,6 +2,7 @@ pub const kernel = @import("kernel/boot/entry.zig");
 pub const isr = @import("kernel/interrupts/isr.zig");
 pub const panic = @import("kernel/utils/builtin.zig").panic;
 pub const session_manager = @import("native/session/session_manager.zig");
+pub const production_artifact_manifest = @import("production_artifact_manifest");
 pub const storage_volume = @import("native/storage/storage_volume.zig");
 const abi = @import("native/core/abi.zig");
 const component_port = @import("native/kernel_api/component_port.zig");

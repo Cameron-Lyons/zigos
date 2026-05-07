@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 pub const std = @import("std");
 const abi = @import("native_abi");
 const mailbox = @import("userspace_bootstrap_mailbox");
+const service_protocol = @import("userspace_service_protocol");
 const userspace_descriptor = @import("userspace_descriptor");
 
 pub const Descriptor = userspace_descriptor.Descriptor;
@@ -25,6 +26,42 @@ const AccountingQueryRequest = extern struct {
     task_id: u64,
 };
 
+const EndpointFlags = packed struct(u16) {
+    local_only: bool = false,
+    service_port: bool = false,
+    carries_capability: bool = false,
+    _reserved: u13 = 0,
+};
+
+const EndpointCreateRequest = struct {
+    header: abi.RequestHeader,
+    authority_capability_id: u64,
+    owner_task_id: u64,
+    label: []const u8,
+    flags: EndpointFlags,
+};
+
+const EndpointConnectRequest = extern struct {
+    header: abi.RequestHeader,
+    endpoint_capability_id: u64,
+    peer_endpoint_capability_id: u64,
+    peer_endpoint_id: u64,
+};
+
+const EndpointSendRequest = struct {
+    header: abi.RequestHeader,
+    endpoint_capability_id: u64,
+    payload: []const u8,
+    attached_capability_id: ?u64 = null,
+    move_attached_capability: bool = false,
+};
+
+const EndpointRecvRequest = extern struct {
+    header: abi.RequestHeader,
+    endpoint_capability_id: u64,
+    receiver_task_id: u64,
+};
+
 const contract_bindings = if (builtin.target.os.tag == .freestanding)
     struct {
         extern var zigos_userspace_descriptor: Descriptor;
@@ -36,7 +73,9 @@ else
         pub var zigos_userspace_yield_counter: u32 = 0;
     };
 
-export var zigos_userspace_bootstrap: mailbox.Mailbox align(@alignOf(mailbox.Mailbox)) linksection(mailbox.SECTION_NAME) = .{};
+const mailbox_section = if (builtin.target.ofmt == .macho) "__DATA,__zigos_boot" else mailbox.SECTION_NAME;
+
+export var zigos_userspace_bootstrap: mailbox.Mailbox align(@alignOf(mailbox.Mailbox)) linksection(mailbox_section) = .{};
 
 const freestanding_trap = if (builtin.target.os.tag == .freestanding)
     struct {
@@ -128,58 +167,106 @@ fn runStartupQueries(detail: mailbox.Detail) void {
     }
 }
 
-pub const ServiceModel = struct {
-    kind: ServiceKind,
-    operation_count: u16,
-    state_hash: u64,
+fn publishServiceReady(comptime service_kind: ServiceKind, detail: mailbox.Detail) void {
+    const proof = runServiceStartupIpc(service_kind) orelse signalFault(detail, 0x21);
+    zigos_userspace_bootstrap.service_kind = @intFromEnum(service_kind);
+    zigos_userspace_bootstrap.service_ready = 1;
+    zigos_userspace_bootstrap.service_operation_count = proof.operation_count;
+    zigos_userspace_bootstrap.service_state_hash = proof.state_hash;
+    zigos_userspace_bootstrap.service_endpoint_id = proof.service_endpoint_id;
+    zigos_userspace_bootstrap.service_peer_endpoint_id = proof.peer_endpoint_id;
+    zigos_userspace_bootstrap.service_ipc_roundtrips = proof.roundtrips;
+    zigos_userspace_bootstrap.service_status_flags = @bitCast(proof.flags);
+    publishState(.service_ready, detail, proof.operation_count);
+}
+
+const ServiceStartupProof = struct {
+    operation_count: u16 = 0,
+    roundtrips: u16 = 0,
+    service_endpoint_id: u64 = 0,
+    peer_endpoint_id: u64 = 0,
+    state_hash: u64 = 0,
+    flags: mailbox.ServiceStatusFlags = .{},
 };
 
-pub fn serviceModel(comptime service_kind: ServiceKind) ServiceModel {
-    return switch (service_kind) {
-        .generic => .{
-            .kind = .generic,
-            .operation_count = 0,
-            .state_hash = hashServiceState("generic:heartbeat-only"),
-        },
-        .storage => .{
-            .kind = .storage,
-            .operation_count = 4,
-            .state_hash = hashServiceState("storage:workspace-open:object-put:snapshot:file-bridge"),
-        },
-        .sync => .{
-            .kind = .sync,
-            .operation_count = 4,
-            .state_hash = hashServiceState("sync:device-graph:vector-clock:delta-queue:conflict-record"),
-        },
-        .network => .{
-            .kind = .network,
-            .operation_count = 3,
-            .state_hash = hashServiceState("network:route-table:egress-policy:device-queue"),
-        },
-        .package => .{
-            .kind = .package,
-            .operation_count = 4,
-            .state_hash = hashServiceState("package:manifest-verify:bundle-stage:rollback-journal:update-channel"),
-        },
-        .compositor => .{
-            .kind = .compositor,
-            .operation_count = 4,
-            .state_hash = hashServiceState("compositor:surface-create:input-route:frame-commit:session-focus"),
+fn runServiceStartupIpc(comptime service_kind: ServiceKind) ?ServiceStartupProof {
+    const authority_capability_id = zigos_userspace_bootstrap.authority_capability_id;
+    const task_id = zigos_userspace_bootstrap.task_id;
+    if (authority_capability_id == 0 or task_id == 0) return null;
+
+    const service_plan = service_protocol.planFor(service_kind);
+    const service_endpoint = endpointCreate(
+        authority_capability_id,
+        task_id,
+        service_plan.endpoint_label,
+        .{ .local_only = true, .service_port = true },
+    ) orelse return null;
+    const peer_endpoint = endpointCreate(
+        authority_capability_id,
+        task_id,
+        "userspace-service-self-check",
+        .{ .local_only = true },
+    ) orelse return null;
+    _ = endpointConnect(
+        peer_endpoint.capability_id,
+        service_endpoint.capability_id,
+        service_endpoint.endpoint.endpoint_id,
+    ) orelse return null;
+
+    var proof = ServiceStartupProof{
+        .service_endpoint_id = service_endpoint.endpoint.endpoint_id,
+        .peer_endpoint_id = peer_endpoint.endpoint.endpoint_id,
+        .state_hash = service_protocol.initialStateHash(service_kind),
+        .flags = .{
+            .endpoint_created = true,
+            .loopback_connected = true,
         },
     };
-}
 
-fn publishServiceReady(comptime service_kind: ServiceKind, detail: mailbox.Detail) void {
-    const model = serviceModel(service_kind);
-    zigos_userspace_bootstrap.service_kind = @intFromEnum(model.kind);
-    zigos_userspace_bootstrap.service_ready = 1;
-    zigos_userspace_bootstrap.service_operation_count = model.operation_count;
-    zigos_userspace_bootstrap.service_state_hash = model.state_hash;
-    publishState(.service_ready, detail, model.operation_count);
-}
+    for (service_plan.slice(), 0..) |operation, index| {
+        var request_buffer: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+        const request_payload = service_protocol.encodeRequest(
+            &request_buffer,
+            service_kind,
+            operation,
+            index,
+        ) catch return null;
+        if (!endpointSend(peer_endpoint.capability_id, request_payload)) return null;
 
-fn hashServiceState(comptime text: []const u8) u64 {
-    return std.hash.Wyhash.hash(0x5A47_5345_5256_4943, text);
+        const received_request = endpointRecv(service_endpoint.capability_id, task_id) orelse return null;
+        if (received_request.present == 0) return null;
+        const received_request_len: usize = @intCast(received_request.message.payload_len);
+        const decoded_request = service_protocol.decodeRequest(
+            received_request.payload[0..received_request_len],
+        ) catch return null;
+        if (!service_protocol.requestMatchesOperation(decoded_request, service_kind, operation, index)) return null;
+        proof.flags.request_received = true;
+
+        proof.state_hash = service_protocol.foldOperation(proof.state_hash, operation, index);
+        var response_buffer: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+        const response_payload = service_protocol.encodeResponse(
+            &response_buffer,
+            decoded_request,
+            proof.state_hash,
+        ) catch return null;
+        if (!endpointSend(service_endpoint.capability_id, response_payload)) return null;
+
+        const received_response = endpointRecv(peer_endpoint.capability_id, task_id) orelse return null;
+        if (received_response.present == 0) return null;
+        const received_response_len: usize = @intCast(received_response.message.payload_len);
+        const decoded_response = service_protocol.decodeResponse(
+            received_response.payload[0..received_response_len],
+        ) catch return null;
+        if (!service_protocol.requestMatchesOperation(decoded_response, service_kind, operation, index)) return null;
+        if (decoded_response.state_hash != proof.state_hash) return null;
+        proof.flags.response_received = true;
+        proof.operation_count += 1;
+        proof.roundtrips += 1;
+    }
+
+    proof.flags.all_operations_completed = proof.operation_count == @as(u16, @intCast(service_plan.operation_count));
+    if (!proof.flags.all_operations_completed) return null;
+    return proof;
 }
 
 fn runMmuIsolationProbe(detail: mailbox.Detail) noreturn {
@@ -239,6 +326,62 @@ fn queryAccounting(authority_capability_id: u64, task_id: u64, mask: *mailbox.Re
     return response.task_id == task_id;
 }
 
+fn endpointCreate(
+    authority_capability_id: u64,
+    task_id: u64,
+    label: []const u8,
+    flags: EndpointFlags,
+) ?abi.EndpointCreateResponse {
+    var response = std.mem.zeroes(abi.EndpointCreateResponse);
+    var request = EndpointCreateRequest{
+        .header = makeHeader(.endpoint_create, nextCorrelationId(), task_id),
+        .authority_capability_id = authority_capability_id,
+        .owner_task_id = task_id,
+        .label = label,
+        .flags = flags,
+    };
+    if (trapCall(&request, &response) != .success) return null;
+    if (response.endpoint.endpoint_id == 0 or response.capability_id == 0) return null;
+    return response;
+}
+
+fn endpointConnect(
+    endpoint_capability_id: u64,
+    peer_endpoint_capability_id: u64,
+    peer_endpoint_id: u64,
+) ?abi.EndpointDescriptor {
+    var response = std.mem.zeroes(abi.EndpointDescriptor);
+    var request = EndpointConnectRequest{
+        .header = makeHeader(.endpoint_connect, nextCorrelationId(), zigos_userspace_bootstrap.task_id),
+        .endpoint_capability_id = endpoint_capability_id,
+        .peer_endpoint_capability_id = peer_endpoint_capability_id,
+        .peer_endpoint_id = peer_endpoint_id,
+    };
+    if (trapCall(&request, &response) != .success) return null;
+    if (response.peer_endpoint_id != peer_endpoint_id) return null;
+    return response;
+}
+
+fn endpointSend(endpoint_capability_id: u64, payload: []const u8) bool {
+    var request = EndpointSendRequest{
+        .header = makeHeader(.endpoint_send, nextCorrelationId(), zigos_userspace_bootstrap.task_id),
+        .endpoint_capability_id = endpoint_capability_id,
+        .payload = payload,
+    };
+    return trapCallNoResponse(&request) == .success;
+}
+
+fn endpointRecv(endpoint_capability_id: u64, task_id: u64) ?abi.EndpointRecvResponse {
+    var response = std.mem.zeroes(abi.EndpointRecvResponse);
+    var request = EndpointRecvRequest{
+        .header = makeHeader(.endpoint_recv, nextCorrelationId(), task_id),
+        .endpoint_capability_id = endpoint_capability_id,
+        .receiver_task_id = task_id,
+    };
+    if (trapCall(&request, &response) != .success) return null;
+    return response;
+}
+
 fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32) noreturn {
     const increment: u16 = @truncate(if (heartbeat_increment == 0) 1 else heartbeat_increment);
     var pulse: u16 = 4;
@@ -280,6 +423,10 @@ fn trapCall(request: anytype, response: anytype) abi.SyscallStatus {
     );
 }
 
+fn trapCallNoResponse(request: anytype) abi.SyscallStatus {
+    return freestanding_trap.call(@intFromPtr(request), 0, 0);
+}
+
 fn makeHeader(operation: abi.NativeOperation, correlation_id: u64, subject_task_id: u64) abi.RequestHeader {
     return .{
         .version = abi.ABI_VERSION,
@@ -311,19 +458,19 @@ test "fault codes stay stable for the same message" {
     try std.testing.expect(faultCode("panic") != faultCode("different"));
 }
 
-test "userspace service models expose domain-specific behavior before heartbeat" {
-    const storage = serviceModel(.storage);
-    const network = serviceModel(.network);
-    const package = serviceModel(.package);
-    const compositor = serviceModel(.compositor);
-    const sync = serviceModel(.sync);
+test "userspace service startup plans expose domain-specific endpoint operations" {
+    const storage = service_protocol.planFor(.storage);
+    const network = service_protocol.planFor(.network);
+    const package = service_protocol.planFor(.package);
+    const compositor = service_protocol.planFor(.compositor);
+    const sync = service_protocol.planFor(.sync);
 
-    try std.testing.expectEqual(ServiceKind.storage, storage.kind);
-    try std.testing.expect(storage.operation_count >= 4);
-    try std.testing.expect(network.operation_count >= 3);
-    try std.testing.expect(package.operation_count >= 4);
-    try std.testing.expect(compositor.operation_count >= 4);
-    try std.testing.expect(sync.operation_count >= 4);
-    try std.testing.expect(storage.state_hash != network.state_hash);
-    try std.testing.expect(package.state_hash != compositor.state_hash);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(ServiceKind.storage)), @as(u8, @intFromEnum(storage.kind)));
+    try std.testing.expectEqual(@as(usize, 4), storage.operation_count);
+    try std.testing.expectEqual(@as(usize, 3), network.operation_count);
+    try std.testing.expectEqual(@as(usize, 4), package.operation_count);
+    try std.testing.expectEqual(@as(usize, 4), compositor.operation_count);
+    try std.testing.expectEqual(@as(usize, 4), sync.operation_count);
+    try std.testing.expect(!std.mem.eql(u8, storage.endpoint_label, network.endpoint_label));
+    try std.testing.expect(!std.mem.eql(u8, package.operations[0].name, compositor.operations[0].name));
 }

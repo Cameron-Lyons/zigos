@@ -5,83 +5,18 @@ const component_port = @import("../kernel_api/component_port.zig");
 const device_broker = @import("../kernel_api/device_broker.zig");
 const device_inventory = @import("device_inventory.zig");
 const driver_service = @import("driver_service.zig");
+const network_driver_task = @import("network_driver_task.zig");
 const storage_driver_task = @import("storage_driver_task.zig");
 const root = @import("root");
-const link_port = if (builtin.target.os.tag == .freestanding)
+const kernel_network_claim = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/net/link_port.zig")
 else
     struct {
-        const StubNetworkDevice = struct {
-            send: *const fn ([]const u8) void,
-            getMacAddress: *const fn () [6]u8,
-        };
-        const StubEgressRequest = struct {
-            frame: []const u8,
-            source_mac: [6]u8,
-            egress_capability_id: u64,
-            network_policy_id: u64,
-        };
-        const StubEgressDecision = struct {
-            allowed: bool,
-            capability_backed: bool,
-        };
-        const StubEgressBroker = *const fn (request: StubEgressRequest) StubEgressDecision;
-        pub const NetworkDevice = StubNetworkDevice;
-
-        var active_device: ?*const StubNetworkDevice = null;
-        var egress_broker: ?StubEgressBroker = null;
-        var active_egress_capability_id: u64 = 0;
-        var active_network_policy_id: u64 = 0;
-
-        pub fn init() void {
-            active_device = null;
-            egress_broker = null;
-            active_egress_capability_id = 0;
-            active_network_policy_id = 0;
+        pub fn init() void {}
+        pub fn recordDriverClaim(_: u64, _: u64) bool {
+            return true;
         }
-
-        pub fn setNetworkDevice(device: *const StubNetworkDevice) void {
-            active_device = device;
-        }
-
-        pub fn clearNetworkDevice() void {
-            active_device = null;
-        }
-
-        pub fn hasNetworkDevice() bool {
-            return active_device != null;
-        }
-
-        pub fn setEgressBroker(broker: ?StubEgressBroker) void {
-            egress_broker = broker;
-        }
-
-        pub fn bindEgressCapability(capability_id: u64, policy_id: u64) void {
-            active_egress_capability_id = capability_id;
-            active_network_policy_id = policy_id;
-        }
-
-        pub fn clearEgressCapability() void {
-            active_egress_capability_id = 0;
-            active_network_policy_id = 0;
-        }
-
-        pub fn authorizeDriverTx(frame: []const u8) bool {
-            const device = active_device orelse return false;
-            const broker = egress_broker orelse return false;
-            const decision = broker(.{
-                .frame = frame,
-                .source_mac = device.getMacAddress(),
-                .egress_capability_id = active_egress_capability_id,
-                .network_policy_id = active_network_policy_id,
-            });
-            return decision.allowed and decision.capability_backed;
-        }
-
-        pub fn sendActiveNetworkFrame(frame: []const u8) bool {
-            if (!@This().authorizeDriverTx(frame)) return false;
-            const device = active_device orelse return false;
-            device.send(frame);
+        pub fn clearDriverClaim(_: u64) bool {
             return true;
         }
     };
@@ -90,11 +25,11 @@ const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(r
 else
     @import("../storage/storage_volume.zig");
 
-pub const NetworkDevice = link_port.NetworkDevice;
-pub const EgressRequest = if (builtin.target.os.tag == .freestanding) link_port.EgressRequest else link_port.StubEgressRequest;
-pub const EgressDecision = if (builtin.target.os.tag == .freestanding) link_port.EgressDecision else link_port.StubEgressDecision;
-pub const EgressBroker = if (builtin.target.os.tag == .freestanding) link_port.EgressBroker else link_port.StubEgressBroker;
-pub const NetworkActivator = *const fn (device_id: u64) ?*const link_port.NetworkDevice;
+pub const NetworkDevice = network_driver_task.NetworkDevice;
+pub const EgressRequest = network_driver_task.EgressRequest;
+pub const EgressDecision = network_driver_task.EgressDecision;
+pub const EgressBroker = network_driver_task.EgressBroker;
+pub const NetworkActivator = *const fn (device_id: u64) ?*const NetworkDevice;
 pub const StorageActivator = *const fn (device_id: u64) ?storage_volume.Backend;
 
 pub const StoragePublicationKind = enum(u8) {
@@ -111,7 +46,7 @@ pub const NetworkPublication = struct {
     device_id: u64,
     publisher_len: usize = 0,
     publisher: [32]u8 = [_]u8{0} ** 32,
-    network_device: ?*const link_port.NetworkDevice = null,
+    network_device: ?*const NetworkDevice = null,
     activator: ?NetworkActivator = null,
     kernel_bootstrap: bool = true,
     active_service_id: u64 = 0,
@@ -144,15 +79,15 @@ pub fn reset() void {
     published_network = null;
     published_storage = null;
     device_broker.reset();
-    link_port.init();
-    link_port.clearNetworkDevice();
+    kernel_network_claim.init();
+    network_driver_task.reset();
     storage_volume.clearAttachedBackend();
 }
 
 pub fn publishNetworkDevice(
     device_id: u64,
     publisher: []const u8,
-    network_device: *const link_port.NetworkDevice,
+    network_device: *const NetworkDevice,
     kernel_bootstrap: bool,
 ) Error!bool {
     if (kernel_bootstrap) return false;
@@ -242,31 +177,27 @@ pub fn storagePublication() ?StoragePublication {
 }
 
 pub fn hasActiveNetworkDevice() bool {
-    return link_port.hasNetworkDevice();
+    return network_driver_task.hasActiveDevice();
 }
 
 pub fn setEgressBroker(broker: ?EgressBroker) void {
-    link_port.setEgressBroker(broker);
+    network_driver_task.setEgressBroker(broker);
 }
 
 pub fn bindEgressCapability(capability_id: u64, policy_id: u64) void {
-    link_port.bindEgressCapability(capability_id, policy_id);
+    network_driver_task.bindEgressCapability(capability_id, policy_id);
 }
 
 pub fn clearEgressCapability() void {
-    link_port.clearEgressCapability();
+    network_driver_task.clearEgressCapability();
 }
 
 pub fn authorizeDriverTx(frame: []const u8) bool {
-    return link_port.authorizeDriverTx(frame);
+    return network_driver_task.authorizeDriverTx(frame);
 }
 
 pub fn sendActiveNetworkFrame(frame: []const u8) bool {
-    if (builtin.target.os.tag == .freestanding) {
-        if (!link_port.authorizeDriverTx(frame)) return false;
-        return false;
-    }
-    return link_port.sendActiveNetworkFrame(frame);
+    return network_driver_task.sendActiveFrame(frame);
 }
 
 pub fn activateNetworkDevice(device_id: u64, service_id: u64) bool {
@@ -275,8 +206,8 @@ pub fn activateNetworkDevice(device_id: u64, service_id: u64) bool {
             const activator = publication.activator orelse return false;
             publication.network_device = activator(device_id) orelse return false;
         }
-        link_port.init();
-        link_port.setNetworkDevice(publication.network_device.?);
+        if (!kernel_network_claim.recordDriverClaim(device_id, service_id)) return false;
+        if (!network_driver_task.activateDevice(publication.network_device.?, service_id)) return false;
         publication.active_service_id = service_id;
         return true;
     }
@@ -323,8 +254,8 @@ pub fn activateStorageBackend(
 pub fn deactivateNetworkDevice(service_id: u64) bool {
     if (publicationForDeactivation(NetworkPublication, &published_network, service_id)) |publication| {
         publication.active_service_id = 0;
-        link_port.init();
-        link_port.clearNetworkDevice();
+        _ = network_driver_task.deactivateDevice(service_id);
+        _ = kernel_network_claim.clearDriverClaim(service_id);
         return true;
     }
     return false;

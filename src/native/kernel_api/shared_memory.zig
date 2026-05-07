@@ -211,6 +211,15 @@ pub const Table = struct {
         return @intCast(self.mapping_index.count(task_id.raw()));
     }
 
+    pub fn hasMapping(self: *const Table, object_id: ids.SharedMemoryId, task_id: ids.TaskId) bool {
+        const object = self.findConst(object_id) orelse return false;
+        if (object.revoked) return false;
+        for (object.mapped_task_ids[0..object.mapping_count]) |mapped_task_id| {
+            if (mapped_task_id.eql(task_id)) return true;
+        }
+        return false;
+    }
+
     fn allocateObjectId(self: *Table) ids.SharedMemoryId {
         defer self.next_object_id += 1;
         return ids.sharedMemory(self.next_object_id);

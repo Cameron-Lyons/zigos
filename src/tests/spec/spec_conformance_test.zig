@@ -184,8 +184,16 @@ test "backlog gate enforces sync adapter depth" {
     try backlog_gates.syncAdapterDepthGate();
 }
 
+test "backlog gate enforces sync private overlay end-to-end" {
+    try backlog_gates.syncPrivateOverlayEndToEndGate();
+}
+
 test "backlog gate enforces component ABI depth" {
     try backlog_gates.componentAbiDepthGate();
+}
+
+test "backlog gate enforces indexed hot-path tables" {
+    try backlog_gates.indexedHotPathTablesGate();
 }
 
 test "backlog gate enforces driver boundary audit" {

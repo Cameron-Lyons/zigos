@@ -1,5 +1,6 @@
 const std = @import("std");
 const contract = @import("../session/contract.zig");
+const component_abi_schema = @import("../services/component_abi_schema.zig");
 const id_index = @import("../core/id_index.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
@@ -148,7 +149,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "app.viewer",
         .components = &.{.{ .id = "viewer", .entry = "app.viewer" }},
         .provided_interfaces = &.{.{ .name = "zigos.viewer.document" }},
-        .consumed_interfaces = &.{.{ .name = "zigos.object.workspace" }},
+        .consumed_interfaces = &.{component_abi_schema.interfaceDecl(.object_workspace)},
         .assets = &.{.{ .path = "assets/viewer/icon.svg", .content_type = "image/svg+xml" }},
         .component_class = .app_component,
         .role_tag = 0xA106,
@@ -164,7 +165,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "app.notes",
         .components = &.{.{ .id = "notes", .entry = "app.notes" }},
         .provided_interfaces = &.{.{ .name = "zigos.workspace.document" }},
-        .consumed_interfaces = &.{.{ .name = "zigos.object.workspace" }},
+        .consumed_interfaces = &.{component_abi_schema.interfaceDecl(.object_workspace)},
         .assets = &.{.{ .path = "assets/notes/icon.svg", .content_type = "image/svg+xml" }},
         .update_channel = .beta,
         .component_class = .app_component,
@@ -180,8 +181,8 @@ pub const boot_image_specs = [_]ImageSpec{
         .label = "sync",
         .entry = "app.sync",
         .components = &.{.{ .id = "sync", .entry = "app.sync" }},
-        .provided_interfaces = &.{.{ .name = "zigos.sync.replication" }},
-        .consumed_interfaces = &.{.{ .name = "zigos.object.workspace" }},
+        .provided_interfaces = &.{component_abi_schema.interfaceDecl(.sync_replication)},
+        .consumed_interfaces = &.{component_abi_schema.interfaceDecl(.object_workspace)},
         .assets = &.{.{ .path = "assets/sync/icon.svg", .content_type = "image/svg+xml" }},
         .component_class = .app_component,
         .role_tag = 0xA108,
@@ -197,7 +198,7 @@ pub const boot_image_specs = [_]ImageSpec{
         .entry = "app.capture",
         .components = &.{.{ .id = "capture", .entry = "app.capture" }},
         .provided_interfaces = &.{.{ .name = "zigos.capture.session" }},
-        .consumed_interfaces = &.{.{ .name = "zigos.media.print" }},
+        .consumed_interfaces = &.{component_abi_schema.interfaceDecl(.media_print)},
         .assets = &.{.{ .path = "assets/capture/icon.svg", .content_type = "image/svg+xml" }},
         .component_class = .app_component,
         .role_tag = 0xA109,

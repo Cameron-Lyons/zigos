@@ -1,5 +1,5 @@
 const std = @import("std");
-const fixed_table = @import("../core/fixed_table.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const copyText = native_util.copyText;
 
@@ -48,13 +48,10 @@ const DocumentSlot = struct {
     record: DocumentRecord = zeroDocument(),
 };
 
-const DocumentKey = struct {
-    workspace_id: u64,
-    object_id: u64,
-};
+const DocumentArena = indexed_arena.IndexedArenaWithKey(u64, DocumentSlot, MAX_DOCUMENTS, MAX_DOCUMENTS * 2, documentSlotKey);
 
 pub const Service = struct {
-    documents: [MAX_DOCUMENTS]DocumentSlot = [_]DocumentSlot{DocumentSlot{}} ** MAX_DOCUMENTS,
+    documents: DocumentArena = DocumentArena.init(),
 
     pub fn init() Service {
         return .{};
@@ -75,23 +72,16 @@ pub const Service = struct {
             return;
         }
 
-        if (fixed_table.firstFreeSlot(DocumentSlot, MAX_DOCUMENTS, &self.documents)) |slot| {
-            slot.in_use = true;
-            slot.record = zeroDocument();
-            slot.record.workspace_id = workspace_id;
-            slot.record.object_id = object_id;
-            slot.record.version_id = version_id;
-            slot.record.title_len = copyText(&slot.record.title, title);
-            slot.record.body_len = copyText(&slot.record.body, body);
-            return;
-        }
-        return error.DocumentTableFull;
+        const slot = self.documents.reserve(documentKey(workspace_id, object_id)) orelse return error.DocumentTableFull;
+        slot.record.workspace_id = workspace_id;
+        slot.record.object_id = object_id;
+        slot.record.version_id = version_id;
+        slot.record.title_len = copyText(&slot.record.title, title);
+        slot.record.body_len = copyText(&slot.record.body, body);
     }
 
     pub fn remove(self: *Service, workspace_id: u64, object_id: u64) bool {
-        const slot = self.findSlot(workspace_id, object_id) orelse return false;
-        slot.* = .{};
-        return true;
+        return self.documents.remove(documentKey(workspace_id, object_id));
     }
 
     pub fn query(
@@ -103,7 +93,7 @@ pub const Service = struct {
         if (needle.len == 0) return output[0..0];
 
         var count: usize = 0;
-        for (self.documents) |slot| {
+        for (self.documents.slots) |slot| {
             if (!slot.in_use) continue;
             if (!workspaceAllowed(permitted_workspaces, slot.record.workspace_id)) continue;
 
@@ -129,15 +119,23 @@ pub const Service = struct {
     }
 
     fn findSlot(self: *Service, workspace_id: u64, object_id: u64) ?*DocumentSlot {
-        return fixed_table.findSlot(DocumentSlot, MAX_DOCUMENTS, &self.documents, DocumentKey{
-            .workspace_id = workspace_id,
-            .object_id = object_id,
-        }, documentSlotMatchesObject);
+        const slot = self.documents.get(documentKey(workspace_id, object_id)) orelse return null;
+        if (slot.record.workspace_id != workspace_id or slot.record.object_id != object_id) {
+            native_util.impossibleByInvariant("indexing service document index points at the wrong document");
+        }
+        return slot;
     }
 };
 
-fn documentSlotMatchesObject(context: DocumentKey, slot: *const DocumentSlot) bool {
-    return slot.record.workspace_id == context.workspace_id and slot.record.object_id == context.object_id;
+fn documentSlotKey(slot: *const DocumentSlot) u64 {
+    return documentKey(slot.record.workspace_id, slot.record.object_id);
+}
+
+fn documentKey(workspace_id: u64, object_id: u64) u64 {
+    var bytes: [16]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..8], workspace_id, .little);
+    std.mem.writeInt(u64, bytes[8..16], object_id, .little);
+    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(0x5A47_494E_4458, &bytes));
 }
 
 fn compareResults(_: void, left: SearchResult, right: SearchResult) bool {
@@ -187,6 +185,7 @@ test "indexing service remains permission aware and updates ranked results" {
     try service.upsert(1, 100, 1, "Alpha Notes", "alpha alpha roadmap");
     try service.upsert(1, 101, 2, "Quarterly Report", "finance alpha summary");
     try service.upsert(2, 200, 1, "Private Contract", "alpha restricted");
+    try std.testing.expectEqual(@as(usize, 3), service.documents.countInUse());
 
     var results_buffer: [MAX_RESULTS]SearchResult = undefined;
     const workspace_one = [_]u64{1};
@@ -197,6 +196,7 @@ test "indexing service remains permission aware and updates ranked results" {
     try std.testing.expectEqual(@as(u64, 101), results[1].object_id);
 
     try std.testing.expect(service.remove(1, 100));
+    try std.testing.expectEqual(@as(usize, 2), service.documents.countInUse());
     const updated = service.query(&workspace_one, "alpha", &results_buffer);
     try std.testing.expectEqual(@as(usize, 1), updated.len);
     try std.testing.expectEqual(@as(u64, 101), updated[0].object_id);

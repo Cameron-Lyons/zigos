@@ -5,6 +5,7 @@ const component_port = @import("../kernel_api/component_port.zig");
 const contract = @import("contract.zig");
 const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const device_inventory = @import("../drivers/device_inventory.zig");
+const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const native_util = @import("../core/util.zig");
 const std = @import("std");
@@ -17,6 +18,7 @@ const storage_volume_mod = if (builtin.target.os.tag == .freestanding and @hasDe
 else
     @import("../storage/storage_volume.zig");
 const support = @import("session_manager_support.zig");
+const task_runtime = @import("../task/task_runtime.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 
 const common = if (builtin.target.os.tag == .freestanding)
@@ -34,7 +36,7 @@ pub fn run(
 ) bool {
     if (!bootServices(env, state, kernel_port, service_bindings)) return false;
     if (!connectClient(env, state, kernel_port, service_bindings)) return false;
-    return recordDriverRecovery(env, state, service_bindings);
+    return proveDriverCrashRestart(env, state, service_bindings);
 }
 
 pub fn bootServices(
@@ -349,15 +351,51 @@ fn connectClient(
     return true;
 }
 
-fn recordDriverRecovery(
+pub fn proveDriverCrashRestart(
     env: *const support.Environment,
     state: *const support.BootstrapState,
     service_bindings: *const support.ServiceBindings,
 ) bool {
+    const DriverRecoveryRuntime = struct {
+        tasks: *task_runtime.Runtime,
+        activations: *driver_runtime_mod.Runtime,
+        rehost_count: usize = 0,
+        deactivation_count: usize = 0,
+        activation_count: usize = 0,
+        last_task_id: u64 = 0,
+        last_process_generation: u32 = 0,
+
+        pub fn deactivate(self: *@This(), service_id: u64) bool {
+            const deactivated = self.activations.deactivate(service_id);
+            if (deactivated) self.deactivation_count += 1;
+            return deactivated;
+        }
+
+        pub fn activateAt(self: *@This(), driver: *const driver_service.DriverRecord, tick: u64) !driver_runtime_mod.ActivationRecord {
+            const task = self.tasks.find(driver.owner_task_id) orelse return error.TaskNotFound;
+            const previous_generation = task.process_generation;
+            const rehosted = try self.tasks.rehostTask(driver.owner_task_id, tick);
+            const restarted_task = self.tasks.find(driver.owner_task_id) orelse return error.TaskNotFound;
+            const activation = try self.activations.activateAt(driver, tick);
+            self.activation_count += 1;
+            self.last_task_id = driver.owner_task_id;
+            self.last_process_generation = restarted_task.process_generation;
+            if (rehosted and restarted_task.process_generation > previous_generation) {
+                self.rehost_count += 1;
+            }
+            return activation;
+        }
+    };
+
+    var recovery_runtime = DriverRecoveryRuntime{
+        .tasks = env.runtime,
+        .activations = env.driver_runtime,
+    };
+
     _ = env.supervisor.recoverDriverCrash(
         state.services.network_service.id,
         env.driver_directory,
-        env.driver_runtime,
+        &recovery_runtime,
         null,
         env.diagnostic_ledger,
         70,
@@ -368,7 +406,7 @@ fn recordDriverRecovery(
         return false;
     };
     if (env.supervisor.hasDiagnostic(state.services.network_service.id, .crash)) {
-        common.printBootMarker("ZIGOS:SERVICE_BOOT:SUPERVISOR:CRASH_RECORDED");
+        common.printBootMarker(boot_markers.service_boot_supervisor_crash_recorded);
     }
     env.runtime.audit(service_bindings.bindingFor(.network_stack).task_id, .{
         .kind = .service_restarted,
@@ -378,10 +416,21 @@ fn recordDriverRecovery(
         _ = env.supervisor.recordCrash(state.services.network_service.id, 72, bootFailureCode(err));
         return false;
     };
+    if (recovery_runtime.rehost_count == 1 and
+        recovery_runtime.deactivation_count == 1 and
+        recovery_runtime.activation_count == 1 and
+        recovery_runtime.last_process_generation >= 2)
+    {
+        common.printBootMarker(boot_markers.service_boot_driver_rehost_ok);
+    } else {
+        _ = env.supervisor.recordCrash(state.services.network_service.id, 72, bootFailureCode(error.MissingBootstrapLaunch));
+        return false;
+    }
     if (env.supervisor.hasDiagnostic(state.services.network_service.id, .restart_completed) and
         (env.driver_directory.findByService(state.services.network_service.id) orelse return false).restart_generation == 2)
     {
         common.printBootMarker(boot_markers.service_boot_supervisor_restart_ok);
+        common.printBootMarker(boot_markers.service_boot_supervisor_restart_without_reboot);
     }
     return true;
 }
