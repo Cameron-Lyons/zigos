@@ -954,6 +954,24 @@ test "indexed arena reserves reuses indexes and tracks dirty ids" {
     try std.testing.expectEqual(@as(usize, 0), arena.dirtyIds().len);
 }
 
+test "indexed arena reuses tombstoned primary index slots" {
+    const Arena = IndexedArena(TestSlot, 2, 2, testSlotId);
+    var arena = Arena.init();
+
+    var id: u64 = 1;
+    while (id <= 8) : (id += 1) {
+        const slot = arena.reserve(id).?;
+        slot.record = .{ .id = id, .owner = 7, .label = "cycle" };
+        try std.testing.expectEqual(id, arena.get(id).?.record.id);
+        try std.testing.expect(arena.remove(id));
+        arena.clearDirty();
+    }
+
+    const final_slot = arena.reserve(99).?;
+    final_slot.record = .{ .id = 99, .owner = 8, .label = "final" };
+    try std.testing.expectEqualStrings("final", arena.get(99).?.record.label);
+}
+
 test "indexed arena reserves explicit free indexes" {
     const Arena = IndexedArena(TestSlot, 4, 8, testSlotId);
     var arena = Arena.init();

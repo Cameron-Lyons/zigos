@@ -63,6 +63,11 @@ pub inline fn insert(comptime capacity: usize, table: *[capacity]Slot, id: u64, 
         index = (index + 1) % capacity;
     }
 
+    if (first_tombstone) |insert_index| {
+        compactAndInsert(capacity, table, id, slot_index, insert_index);
+        return;
+    }
+
     native_util.impossibleByInvariant("id index capacity covers all live slots");
 }
 
@@ -90,4 +95,48 @@ pub inline fn remove(comptime capacity: usize, table: *[capacity]Slot, id: u64) 
 
 pub inline fn hash(id: u64, comptime capacity: usize) usize {
     return @as(usize, @intCast((id *% 0x9E37_79B9_7F4A_7C15) % capacity));
+}
+
+inline fn compactAndInsert(
+    comptime capacity: usize,
+    table: *[capacity]Slot,
+    id: u64,
+    slot_index: usize,
+    fallback_index: usize,
+) void {
+    var compacted = emptyTable(capacity);
+    for (table.*) |entry| {
+        if (entry.state != .filled) continue;
+        insertIntoSparseTable(capacity, &compacted, entry.id, entry.slot_index, fallback_index);
+    }
+    insertIntoSparseTable(capacity, &compacted, id, slot_index, fallback_index);
+    table.* = compacted;
+}
+
+inline fn insertIntoSparseTable(
+    comptime capacity: usize,
+    table: *[capacity]Slot,
+    id: u64,
+    slot_index: usize,
+    fallback_index: usize,
+) void {
+    var index = hash(id, capacity);
+    var attempts: usize = 0;
+    while (attempts < capacity) : (attempts += 1) {
+        if (table[index].state == .empty) {
+            table[index] = .{
+                .state = .filled,
+                .id = id,
+                .slot_index = slot_index,
+            };
+            return;
+        }
+        index = (index + 1) % capacity;
+    }
+
+    table[fallback_index] = .{
+        .state = .filled,
+        .id = id,
+        .slot_index = slot_index,
+    };
 }
