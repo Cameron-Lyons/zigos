@@ -3,8 +3,6 @@ const component_port = @import("component_port.zig");
 const dispatch = @import("syscall_dispatch.zig");
 const endpoint = @import("endpoint.zig");
 
-const MAX_COMPONENT_LABEL_BYTES: usize = 48;
-
 pub fn dispatchEndpointCreate(
     port: *component_port.KernelPort,
     memory: dispatch.UserMemoryContext,
@@ -14,7 +12,7 @@ pub fn dispatchEndpointCreate(
     response_len: usize,
 ) dispatch.DispatchResult {
     var request = dispatch.readRequest(component_port.EndpointCreateRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    var label_buffer: [MAX_COMPONENT_LABEL_BYTES]u8 = undefined;
+    var label_buffer: [endpoint.MAX_ENDPOINT_LABEL_BYTES]u8 = undefined;
     request.label = dispatch.copyUserSlice(memory, request.label, &label_buffer) orelse return dispatch.invalidRequest();
     const created = component_port.invokeGenerated(.endpoint_create, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.EndpointCreateResponse{

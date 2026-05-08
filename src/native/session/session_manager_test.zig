@@ -5,6 +5,7 @@ const compositor_session = @import("../platform/compositor_session.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const immutable_base = @import("../platform/immutable_base.zig");
 const manifest = @import("../policy/manifest.zig");
+const native_ux = @import("../platform/native_ux.zig");
 const principal = @import("../core/principal.zig");
 const service_contract = @import("service_contracts.zig");
 const session_manager = @import("session_manager.zig");
@@ -291,10 +292,28 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expectEqualStrings("stable-b", immutable_base_manager.slots[immutable_base_manager.inactiveSlotIndex()].labelSlice());
 
     const ledger = session_manager.testing.updateLedgerPtr();
+    try std.testing.expect(ledger.countMatching(.{ .kind = .permission_decision }) >= 1);
+    try std.testing.expect(ledger.countMatching(.{ .kind = .capability_grant }) >= 1);
+    try std.testing.expect(ledger.countMatching(.{ .kind = .task_flow }) >= 5);
     try std.testing.expect(ledger.latestKind(.update_transition) != null);
+    try std.testing.expectEqual(event_ledger.EventKind.permission_decision, ledger.latestKind(.permission_decision).?.kind);
+    try std.testing.expectEqual(event_ledger.EventKind.capability_grant, ledger.latestKind(.capability_grant).?.kind);
     try std.testing.expectEqual(event_ledger.EventKind.sync_conflict, ledger.latestKind(.sync_conflict).?.kind);
     try std.testing.expectEqual(event_ledger.EventKind.device_trust_change, ledger.latestKind(.device_trust_change).?.kind);
     try std.testing.expectEqual(event_ledger.EventKind.driver_restart, ledger.latestKind(.driver_restart).?.kind);
+
+    var task_flow_events: [event_ledger.MAX_EVENTS]event_ledger.Event = undefined;
+    const task_flows = ledger.queryEvents(.{ .kind = .task_flow }, &task_flow_events);
+    const journey_task = session_manager.testing.findTask("notes-task").?;
+    var saw_recovery_flow = false;
+    for (task_flows) |event| {
+        if (event.detail_code == @intFromEnum(native_ux.FlowKind.recover_system)) {
+            saw_recovery_flow = true;
+            try std.testing.expectEqual(journey_task.id, event.task_id);
+            try std.testing.expectEqualStrings("recovery-environment", event.detailSlice());
+        }
+    }
+    try std.testing.expect(saw_recovery_flow);
 }
 
 test "boot is idempotent once initialized" {

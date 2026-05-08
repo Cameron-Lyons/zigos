@@ -7,7 +7,9 @@ const native_util = @import("../core/util.zig");
 pub const MAX_ENDPOINTS: usize = 32;
 pub const MAX_ENDPOINT_QUEUE: usize = 8;
 pub const MAX_MESSAGE_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
+pub const MAX_ENDPOINT_LABEL_BYTES: usize = 48;
 const ENDPOINT_INDEX_CAPACITY: usize = MAX_ENDPOINTS * 2;
+const MAX_ENDPOINT_LABEL_PAYLOAD_BYTES: usize = MAX_ENDPOINT_LABEL_BYTES - 1;
 
 pub const EndpointFlags = packed struct(u16) {
     local_only: bool = false,
@@ -35,7 +37,7 @@ pub const Endpoint = struct {
     owner_task_id: ids.TaskId,
     flags: EndpointFlags,
     label_len: usize,
-    label: [48]u8,
+    label: [MAX_ENDPOINT_LABEL_BYTES]u8,
     peer_endpoint_id: ?ids.EndpointId = null,
     queue_head: usize = 0,
     queue_len: usize = 0,
@@ -80,8 +82,8 @@ pub const Table = struct {
             .id = endpoint_id,
             .owner_task_id = owner_task_id,
             .flags = flags,
-            .label_len = @min(label.len, 47),
-            .label = [_]u8{0} ** 48,
+            .label_len = @min(label.len, MAX_ENDPOINT_LABEL_PAYLOAD_BYTES),
+            .label = [_]u8{0} ** MAX_ENDPOINT_LABEL_BYTES,
         };
         @memcpy(slot.endpoint.label[0..slot.endpoint.label_len], label[0..slot.endpoint.label_len]);
         if (!self.owner_index.append(owner_task_id.raw(), slot_index)) {
@@ -213,7 +215,7 @@ fn zeroEndpoint() Endpoint {
         .owner_task_id = ids.TaskId.zero,
         .flags = .{},
         .label_len = 0,
-        .label = [_]u8{0} ** 48,
+        .label = [_]u8{0} ** MAX_ENDPOINT_LABEL_BYTES,
     };
 }
 

@@ -36,6 +36,7 @@ pub fn bootScenarioWorld(manager: *session_boot_flow.SessionManager) void {
     );
 
     var mediator = initPolicyMediator(manager, graph.state.ids.policy_authority, graph.state.services);
+    mediator.attachLedger(manager.updateLedgerPtr());
     if (!session_service_bootstrap.bootRegistryService(&graph.env, &graph.state, graph.kernel_port, &graph.service_bindings)) {
         manager.failBoot();
         return;
