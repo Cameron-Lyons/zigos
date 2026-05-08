@@ -17,6 +17,40 @@ pub const MAGIC: u32 = 0x53544731; // STG1
 pub const WIRE_VERSION: u16 = 1;
 pub const MAX_WORKSPACE_LABEL_BYTES: usize = 48;
 
+const SESSION_AUTHORITY_SERVICE_ID: u64 = 99;
+const STORAGE_SERVICE_ID: u64 = 404;
+const STORAGE_IMAGE_ID: u64 = 401;
+const CLIENT_IMAGE_ID: u64 = 402;
+const STORAGE_TASK_CREATE_CORRELATION_ID: u64 = 101;
+const CLIENT_TASK_CREATE_CORRELATION_ID: u64 = 102;
+const STORAGE_ENDPOINT_CREATE_CORRELATION_ID: u64 = 103;
+const CLIENT_ENDPOINT_CREATE_CORRELATION_ID: u64 = 104;
+const ENDPOINT_CONNECT_CORRELATION_ID: u64 = 105;
+const STORAGE_TASK_CREATE_TICK: u64 = 10;
+const CLIENT_TASK_CREATE_TICK: u64 = 11;
+const STORAGE_ENDPOINT_CREATE_TICK: u64 = 12;
+const CLIENT_ENDPOINT_CREATE_TICK: u64 = 13;
+const ENDPOINT_CONNECT_TICK: u64 = 14;
+const SESSION_TASK_BUDGET = task_runtime.ResourceBudget{
+    .cpu_time_ticks = 10_000,
+    .memory_bytes = 4096,
+    .endpoint_slots = 8,
+    .shared_memory_bytes = 4096,
+};
+const STORAGE_TASK_BUDGET = task_runtime.ResourceBudget{
+    .cpu_time_ticks = 5_000,
+    .memory_bytes = 256 * 1024,
+    .endpoint_slots = 8,
+    .shared_memory_bytes = 16 * 1024,
+    .resource_class = .emergency_system_critical,
+};
+const CLIENT_TASK_BUDGET = task_runtime.ResourceBudget{
+    .cpu_time_ticks = 2_000,
+    .memory_bytes = 128 * 1024,
+    .endpoint_slots = 4,
+    .shared_memory_bytes = 4096,
+};
+
 pub const Error = error{
     LabelTooLong,
     MalformedRequest,
@@ -407,7 +441,7 @@ const UserspaceStorageHarness = struct {
     storage_authority_capability_id: u64 = 0,
     storage_endpoint_capability_id: u64 = 0,
     client_endpoint_capability_id: u64 = 0,
-    storage_service_id: u64 = 404,
+    storage_service_id: u64 = STORAGE_SERVICE_ID,
 
     fn init(self: *UserspaceStorageHarness) !void {
         self.checkpoint_store.resetPersistent();
@@ -423,19 +457,14 @@ const UserspaceStorageHarness = struct {
         const session_task = try self.runtime.createTask(.{
             .owner = self.session_owner,
             .component_class = .session_manager,
-            .budget = .{
-                .cpu_time_ticks = 10_000,
-                .memory_bytes = 4096,
-                .endpoint_slots = 8,
-                .shared_memory_bytes = 4096,
-            },
+            .budget = SESSION_TASK_BUDGET,
             .local_only = true,
         });
         self.session_task_id = session_task.id;
         const session_authority = try self.capabilities.mintBootRoot(.{
             .holder = self.session_owner,
             .issuer = self.policy_authority,
-            .target = .{ .kind = .service, .id = 99 },
+            .target = .{ .kind = .service, .id = SESSION_AUTHORITY_SERVICE_ID },
             .rights = .{ .service = .{
                 .task_create = true,
                 .endpoint_create = true,
@@ -456,18 +485,12 @@ const UserspaceStorageHarness = struct {
         const storage_bundle_id = service_catalog.bundleIdForServiceClass(.storage_object).?;
         const storage_image = task_runtime.syntheticUserspaceImage("workspace-storage", "zigos.object.workspace");
         const storage_task = try self.port.taskCreate(.{
-            .header = component_port.makeHeader(.task_create, 101, self.session_task_id),
+            .header = component_port.makeHeader(.task_create, STORAGE_TASK_CREATE_CORRELATION_ID, self.session_task_id),
             .authority_capability_id = self.session_authority_capability_id,
             .request = .{
                 .owner = self.storage_owner,
                 .component_class = .service_component,
-                .budget = .{
-                    .cpu_time_ticks = 5_000,
-                    .memory_bytes = 256 * 1024,
-                    .endpoint_slots = 8,
-                    .shared_memory_bytes = 16 * 1024,
-                    .resource_class = .emergency_system_critical,
-                },
+                .budget = STORAGE_TASK_BUDGET,
                 .local_only = true,
                 .initial_component = .{
                     .label = "workspace-storage",
@@ -475,29 +498,24 @@ const UserspaceStorageHarness = struct {
                 },
                 .launch = .{
                     .boundary = .userspace_process,
-                    .image_id = 401,
+                    .image_id = STORAGE_IMAGE_ID,
                     .component_abi_version = abi.ABI_VERSION,
                     .signed = true,
                     .bundle_id = storage_bundle_id,
                 },
                 .userspace_image = &storage_image,
             },
-        }, 10);
+        }, STORAGE_TASK_CREATE_TICK);
         self.storage_task_id = storage_task.task_id;
 
         const client_image = task_runtime.syntheticUserspaceImage("storage-client", "app.storage-client");
         const client_task = try self.port.taskCreate(.{
-            .header = component_port.makeHeader(.task_create, 102, self.session_task_id),
+            .header = component_port.makeHeader(.task_create, CLIENT_TASK_CREATE_CORRELATION_ID, self.session_task_id),
             .authority_capability_id = self.session_authority_capability_id,
             .request = .{
                 .owner = self.client_owner,
                 .component_class = .app_component,
-                .budget = .{
-                    .cpu_time_ticks = 2_000,
-                    .memory_bytes = 128 * 1024,
-                    .endpoint_slots = 4,
-                    .shared_memory_bytes = 4096,
-                },
+                .budget = CLIENT_TASK_BUDGET,
                 .local_only = true,
                 .initial_component = .{
                     .label = "storage-client",
@@ -505,17 +523,17 @@ const UserspaceStorageHarness = struct {
                 },
                 .launch = .{
                     .boundary = .userspace_process,
-                    .image_id = 402,
+                    .image_id = CLIENT_IMAGE_ID,
                     .component_abi_version = abi.ABI_VERSION,
                     .signed = true,
                     .bundle_id = "app.storage-client",
                 },
                 .userspace_image = &client_image,
             },
-        }, 11);
+        }, CLIENT_TASK_CREATE_TICK);
         self.client_task_id = client_task.task_id;
-        allowHostStackSyscalls(&self.runtime, self.storage_task_id);
-        allowHostStackSyscalls(&self.runtime, self.client_task_id);
+        self.runtime.allowHostPointerSyscallsForTask(self.storage_task_id);
+        self.runtime.allowHostPointerSyscallsForTask(self.client_task_id);
 
         self.storage = storage_service.Service.initWithStore(
             self.storage_service_id,
@@ -527,7 +545,7 @@ const UserspaceStorageHarness = struct {
         self.storage.checkpoint_enabled = false;
 
         const storage_endpoint = try self.port.endpointCreate(.{
-            .header = component_port.makeHeader(.endpoint_create, 103, self.session_task_id),
+            .header = component_port.makeHeader(.endpoint_create, STORAGE_ENDPOINT_CREATE_CORRELATION_ID, self.session_task_id),
             .authority_capability_id = self.session_authority_capability_id,
             .owner_task_id = self.storage_task_id,
             .label = "zigos.object.workspace",
@@ -536,24 +554,24 @@ const UserspaceStorageHarness = struct {
                 .service_port = true,
                 .carries_capability = true,
             },
-        }, 12);
+        }, STORAGE_ENDPOINT_CREATE_TICK);
         self.storage_endpoint_capability_id = storage_endpoint.capability_id;
 
         const client_endpoint = try self.port.endpointCreate(.{
-            .header = component_port.makeHeader(.endpoint_create, 104, self.session_task_id),
+            .header = component_port.makeHeader(.endpoint_create, CLIENT_ENDPOINT_CREATE_CORRELATION_ID, self.session_task_id),
             .authority_capability_id = self.session_authority_capability_id,
             .owner_task_id = self.client_task_id,
             .label = "storage-client",
             .flags = .{ .local_only = true },
-        }, 13);
+        }, CLIENT_ENDPOINT_CREATE_TICK);
         self.client_endpoint_capability_id = client_endpoint.capability_id;
 
         _ = try self.port.endpointConnect(.{
-            .header = component_port.makeHeader(.endpoint_connect, 105, self.client_task_id),
+            .header = component_port.makeHeader(.endpoint_connect, ENDPOINT_CONNECT_CORRELATION_ID, self.client_task_id),
             .endpoint_capability_id = self.client_endpoint_capability_id,
             .peer_endpoint_capability_id = self.storage_endpoint_capability_id,
             .peer_endpoint_id = storage_endpoint.endpoint.endpoint_id,
-        }, 14);
+        }, ENDPOINT_CONNECT_TICK);
 
         const storage_authority = try self.capabilities.mintBootRoot(.{
             .holder = self.client_owner,
@@ -570,7 +588,7 @@ const UserspaceStorageHarness = struct {
                 .broker_only = true,
             },
             .lease = .{
-                .issued_at_ticks = 14,
+                .issued_at_ticks = ENDPOINT_CONNECT_TICK,
                 .expires_at_ticks = std.math.maxInt(u64),
                 .renewable = false,
             },
@@ -584,11 +602,6 @@ const UserspaceStorageHarness = struct {
         try self.runtime.grantCapability(self.client_task_id, self.storage_authority_capability_id);
     }
 };
-
-fn allowHostStackSyscalls(runtime: *task_runtime.Runtime, task_id: u64) void {
-    const task = runtime.find(task_id).?;
-    runtime.findAddressSpace(task.address_space_id).?.region_count = 0;
-}
 
 test "storage userspace service handles typed create-workspace ipc over endpoint syscalls" {
     try userspaceCreateWorkspaceRoundTripProof();

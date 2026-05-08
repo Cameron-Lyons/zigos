@@ -47,7 +47,7 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
         .resource_query,
     ) orelse return error.MissingBootAuthority;
 
-    allowHostStackSyscalls(runtime, session_task.id);
+    runtime.allowHostPointerSyscallsForTask(session_task.id);
     try proveResourceAccountingSyscalls(kernel_port, runtime, session_task.id, session_authority_id);
     try proveBootedDriverPermissions(kernel_port, runtime, capability_table, driver_directory, storage_driver_task, network_service_task);
     try proveBootedSyncServicePath(
@@ -76,7 +76,7 @@ fn proveResourceAccountingSyscalls(
     const probe = try createResourceProbeTask(kernel_port, session_task_id, session_authority_id);
     try std.testing.expect(abi.taskFlagsHas(probe.flags, abi.TASK_FLAG_USERSPACE_PROCESS));
     try std.testing.expect(abi.taskFlagsHas(probe.flags, abi.TASK_FLAG_EXECUTABLE_IMAGE_MAPPED));
-    allowHostStackSyscalls(runtime, probe.task_id);
+    runtime.allowHostPointerSyscallsForTask(probe.task_id);
 
     const resources = try resourceQuery(kernel_port, session_task_id, session_authority_id, probe.task_id, 82);
     try std.testing.expectEqual(@as(u64, 1_200), resources.cpu_time_ticks);
@@ -143,12 +143,12 @@ fn proveBootedDriverPermissions(
     defer device_broker.reset();
     try std.testing.expect(device_broker.publishAtaController(storage_driver.device_id, storageGrant()));
 
-    allowHostStackSyscalls(runtime, storage_driver.owner_task_id);
+    runtime.allowHostPointerSyscallsForTask(storage_driver.owner_task_id);
     const descriptor = try expectDeviceDescribe(kernel_port, storage_driver.owner_task_id, storage_driver.authority_capability_id, 90);
     try std.testing.expectEqual(storage_driver.device_id, descriptor.device_id);
     try std.testing.expectEqual(@as(u16, 0x1F0), descriptor.base_port);
 
-    allowHostStackSyscalls(runtime, network_service_task.id);
+    runtime.allowHostPointerSyscallsForTask(network_service_task.id);
     const cross_task = deviceDescribeResult(kernel_port, network_service_task.id, storage_driver.authority_capability_id, 91);
     try std.testing.expectEqual(abi.SyscallStatus.not_found, cross_task.status);
     try std.testing.expectEqual(abi.DenialReason.capability_missing, cross_task.denial_reason);
@@ -322,7 +322,7 @@ fn proveBootedCompositorServicePath(
     session: *compositor_session.Session,
 ) !void {
     session.reset();
-    allowHostStackSyscalls(runtime, compositor_task.id);
+    runtime.allowHostPointerSyscallsForTask(compositor_task.id);
 
     const authority = try capability_table.mintBootRoot(.{
         .holder = compositor_record.owner,
@@ -789,11 +789,6 @@ fn findServiceAuthority(
         if (record.target.kind == .service and record.rights.has(right)) return capability_id;
     }
     return null;
-}
-
-fn allowHostStackSyscalls(runtime: *task_runtime.Runtime, task_id: u64) void {
-    const task = runtime.find(task_id).?;
-    runtime.findAddressSpace(task.address_space_id).?.region_count = 0;
 }
 
 fn storageGrant() storage_driver_protocol.AtaBrokerGrant {

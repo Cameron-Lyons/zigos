@@ -18,6 +18,9 @@ const userspace_loader = @import("../task/userspace_loader.zig");
 const workspace_mod = @import("../storage/workspace.zig");
 const support = @import("scenario_support.zig");
 
+const paired_device_tick: u64 = 141;
+const ux_flow_ledger_start_tick: u64 = paired_device_tick + 1;
+
 pub fn run(
     context: *support.Context,
     sync_service: *sync_service_mod.Service,
@@ -494,13 +497,13 @@ pub fn run(
         "paired-device",
         sync_state.user_root_signer,
         paired_device_signer,
-        141,
+        paired_device_tick,
     ) catch unreachable;
     context.update_ledger.recordDeviceTrustChange(
         context.session_user,
         paired_device_principal,
         true,
-        141,
+        paired_device_tick,
         "device paired",
     ) catch unreachable;
     if (sync_service.isTrustedDevice(paired_device_principal)) {
@@ -516,15 +519,24 @@ pub fn run(
         support.common.printBootMarker("ZIGOS:PLATFORM:UX:REVIEW_PERMISSION");
     }
     ux.recoverSystem(notes_task.id, context.session_user, "recovery-environment") catch unreachable;
+    recordUxFlows(context, &ux, ux_flow_ledger_start_tick);
     if (ux.flow_count == 5) {
         support.common.printBootMarker(boot_markers.platform_ux_recover_system);
     }
 
-    context.runtime_service.checkpoint(142);
+    context.runtime_service.checkpoint(ux_flow_ledger_start_tick);
     context.storage_service_instance.checkpoint_enabled = true;
     context.storage_service_instance.checkpoint();
     support.common.printBootMarker(boot_markers.task_session_ready);
     support.common.printBootMarker(boot_markers.native_ready);
+}
+
+fn recordUxFlows(context: *support.Context, ux: *const native_ux.Controller, first_tick: u64) void {
+    var index: usize = 0;
+    while (index < ux.flow_count) : (index += 1) {
+        const flow = ux.flowAtOrder(index) orelse continue;
+        context.update_ledger.recordTaskFlow(flow.*, first_tick + @as(u64, @intCast(index))) catch unreachable;
+    }
 }
 
 const ImmutableBaseWorkspaceState = struct {

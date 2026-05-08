@@ -301,8 +301,7 @@ test "syscall surface returns an explicit empty receive response when no message
         .endpoint_capability_id = created.capability_id,
         .receiver_task_id = app_task.task_id,
     };
-    const app_record = test_kernel.runtime.find(app_task.task_id).?;
-    test_kernel.runtime.findAddressSpace(app_record.address_space_id).?.region_count = 0;
+    test_kernel.runtime.allowHostPointerSyscallsForTask(app_task.task_id);
 
     const result = dispatch(
         &test_kernel.port,
