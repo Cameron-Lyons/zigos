@@ -806,53 +806,74 @@ fn testContext(operation: abi.NativeOperation, capability_id: u64, target: Kerne
     };
 }
 
-test "native kernel creates tasks endpoints and shared memory without owning service discovery" {
-    var runtime = task_runtime.Runtime.init();
-    var capabilities = capability.CapabilityTable.init();
-    var endpoints = endpoint.Table.init();
-    var shared = shared_memory.Table.init();
-    var kernel = Kernel.init(
-        .{ .kind = .policy_authority, .serial = 1 },
-        &runtime,
-        &capabilities,
-        &endpoints,
-        &shared,
-    );
+const test_policy_authority: principal.PrincipalId = .{ .kind = .policy_authority, .serial = 1 };
 
-    const session_task = try runtime.createTask(.{
-        .owner = .{ .kind = .service, .serial = 2 },
-        .component_class = .session_manager,
-        .budget = .{
-            .cpu_time_ticks = 10_000,
-            .memory_bytes = 4096,
-            .endpoint_slots = 8,
-            .shared_memory_bytes = 4096,
-        },
-        .local_only = true,
-    });
-    const authority_capability = try capabilities.mintBootRoot(.{
-        .holder = session_task.owner,
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = .{ .kind = .service, .id = 42 },
-        .rights = .{ .service = .{
-            .task_create = true,
-            .endpoint_create = true,
-            .endpoint_connect = true,
-            .endpoint_send = true,
-            .endpoint_recv = true,
-            .shared_memory_create = true,
-            .shared_memory_map = true,
-            .shared_memory_unmap = true,
-            .shared_memory_revoke = true,
-            .resource_query = true,
-            .accounting_query = true,
-            .time_query = true,
-            .ipc_peer = true,
-            .capability_query = true,
-        } },
-        .scope = .{ .local_only = true },
-        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
-    });
+const TestKernelHarness = struct {
+    runtime: task_runtime.Runtime = task_runtime.Runtime.init(),
+    capabilities: capability.CapabilityTable = capability.CapabilityTable.init(),
+    endpoints: endpoint.Table = endpoint.Table.init(),
+    shared: shared_memory.Table = shared_memory.Table.init(),
+
+    fn kernel(self: *TestKernelHarness) Kernel {
+        return Kernel.init(
+            test_policy_authority,
+            &self.runtime,
+            &self.capabilities,
+            &self.endpoints,
+            &self.shared,
+        );
+    }
+
+    fn createSessionTask(self: *TestKernelHarness) task_runtime.Error!*task_runtime.TaskRecord {
+        return self.runtime.createTask(.{
+            .owner = .{ .kind = .service, .serial = 2 },
+            .component_class = .session_manager,
+            .budget = .{
+                .cpu_time_ticks = 10_000,
+                .memory_bytes = 4096,
+                .endpoint_slots = 8,
+                .shared_memory_bytes = 4096,
+            },
+            .local_only = true,
+        });
+    }
+
+    fn mintSessionServiceAuthority(
+        self: *TestKernelHarness,
+        session_task: *const task_runtime.TaskRecord,
+        rights: capability.CapabilityRights,
+    ) capability.Error!capability.Capability {
+        return self.capabilities.mintBootRoot(.{
+            .holder = session_task.owner,
+            .issuer = test_policy_authority,
+            .target = .{ .kind = .service, .id = 42 },
+            .rights = rights,
+            .scope = .{ .local_only = true },
+            .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
+        });
+    }
+};
+
+test "native kernel creates tasks endpoints and shared memory without owning service discovery" {
+    var harness = TestKernelHarness{};
+    var kernel = harness.kernel();
+    const session_task = try harness.createSessionTask();
+    const authority_capability = try harness.mintSessionServiceAuthority(session_task, .{ .service = .{
+        .task_create = true,
+        .endpoint_create = true,
+        .endpoint_connect = true,
+        .endpoint_send = true,
+        .endpoint_recv = true,
+        .shared_memory_create = true,
+        .shared_memory_map = true,
+        .shared_memory_unmap = true,
+        .shared_memory_revoke = true,
+        .resource_query = true,
+        .accounting_query = true,
+        .time_query = true,
+        .ipc_peer = true,
+        .capability_query = true,
+    } });
 
     const workspace_storage_image = task_runtime.syntheticUserspaceImage("workspace-storage", "zigos.object.workspace");
     const example_client_image = task_runtime.syntheticUserspaceImage("example-client", "app.example.client");
@@ -982,39 +1003,12 @@ test "native kernel descriptor authorization enforces request task scope" {
 }
 
 test "native kernel rejects app and service launches without userspace image provenance" {
-    var runtime = task_runtime.Runtime.init();
-    var capabilities = capability.CapabilityTable.init();
-    var endpoints = endpoint.Table.init();
-    var shared = shared_memory.Table.init();
-    var kernel = Kernel.init(
-        .{ .kind = .policy_authority, .serial = 1 },
-        &runtime,
-        &capabilities,
-        &endpoints,
-        &shared,
-    );
-
-    const session_task = try runtime.createTask(.{
-        .owner = .{ .kind = .service, .serial = 2 },
-        .component_class = .session_manager,
-        .budget = .{
-            .cpu_time_ticks = 10_000,
-            .memory_bytes = 4096,
-            .endpoint_slots = 8,
-            .shared_memory_bytes = 4096,
-        },
-        .local_only = true,
-    });
-    const authority_capability = try capabilities.mintBootRoot(.{
-        .holder = session_task.owner,
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = .{ .kind = .service, .id = 42 },
-        .rights = .{ .service = .{
-            .task_create = true,
-        } },
-        .scope = .{ .local_only = true },
-        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
-    });
+    var harness = TestKernelHarness{};
+    var kernel = harness.kernel();
+    const session_task = try harness.createSessionTask();
+    const authority_capability = try harness.mintSessionServiceAuthority(session_task, .{ .service = .{
+        .task_create = true,
+    } });
 
     try std.testing.expectError(error.UserspaceLaunchRequired, kernel.taskCreate(testContext(.task_create, authority_capability.id, .{ .task = 0 }), .{
         .owner = .{ .kind = .app, .serial = 4 },
@@ -1047,43 +1041,16 @@ test "native kernel rejects app and service launches without userspace image pro
 }
 
 test "native kernel leaves typed service registration outside the TCB" {
-    var runtime = task_runtime.Runtime.init();
-    var capabilities = capability.CapabilityTable.init();
-    var endpoints = endpoint.Table.init();
-    var shared = shared_memory.Table.init();
-    var kernel = Kernel.init(
-        .{ .kind = .policy_authority, .serial = 1 },
-        &runtime,
-        &capabilities,
-        &endpoints,
-        &shared,
-    );
+    var harness = TestKernelHarness{};
+    var kernel = harness.kernel();
+    const session_task = try harness.createSessionTask();
+    const authority_capability = try harness.mintSessionServiceAuthority(session_task, .{ .service = .{
+        .endpoint_create = true,
+        .endpoint_connect = true,
+        .ipc_peer = true,
+    } });
 
-    const session_task = try runtime.createTask(.{
-        .owner = .{ .kind = .service, .serial = 2 },
-        .component_class = .session_manager,
-        .budget = .{
-            .cpu_time_ticks = 10_000,
-            .memory_bytes = 4096,
-            .endpoint_slots = 8,
-            .shared_memory_bytes = 4096,
-        },
-        .local_only = true,
-    });
-    const authority_capability = try capabilities.mintBootRoot(.{
-        .holder = session_task.owner,
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = .{ .kind = .service, .id = 42 },
-        .rights = .{ .service = .{
-            .endpoint_create = true,
-            .endpoint_connect = true,
-            .ipc_peer = true,
-        } },
-        .scope = .{ .local_only = true },
-        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000, .renewable = true },
-    });
-
-    const direct_service_task = try runtime.createTask(.{
+    const direct_service_task = try harness.runtime.createTask(.{
         .owner = .{ .kind = .service, .serial = 7 },
         .component_class = .service_component,
         .budget = .{

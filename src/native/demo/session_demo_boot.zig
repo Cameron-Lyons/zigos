@@ -6,6 +6,7 @@ const permission_flows = @import("permission_flows.zig");
 const permission_review_service = @import("../policy/permission_review_service.zig");
 const policy_component_port = @import("../policy/policy_component_port.zig");
 const policy_mediation = @import("../policy/policy_mediation.zig");
+const compositor_session = @import("../platform/compositor_session.zig");
 const principal = @import("../core/principal.zig");
 const review_component_port = @import("../policy/review_component_port.zig");
 const scenario_world = @import("scenario_world.zig");
@@ -45,6 +46,15 @@ pub fn bootScenarioWorld(manager: *session_boot_flow.SessionManager) void {
         graph.state.services.review_service_record.id,
         graph.state.review_service_task.id,
     );
+    var compositor_checkpoint_store = compositor_session.CheckpointStore{};
+    var compositor_service = compositor_session.Service.initWithCheckpoint(
+        graph.state.services.compositor_service.id,
+        graph.service_bindings.bindingFor(.compositor_ui_session).task_id,
+        manager.runtimePtr(),
+        manager.compositorSessionPtr(),
+        &compositor_checkpoint_store,
+    );
+    review_service.bindCompositorService(&compositor_service);
     var review_port = review_component_port.Port.init(&review_service);
     var policy_port = policy_component_port.Port.init(&mediator);
     common.printBootMarker(boot_markers.permission_review_port_ready);

@@ -716,6 +716,16 @@ test "sync service covers device graph policy replication semantics and restart 
     try std.testing.expect(try service_port.replicateDatabaseContract(service_authority, contract.id, notes_id, laptop, tablet, .relay_assisted));
     try std.testing.expectError(error.DeviceNotTrusted, service_port.replicateWorkspace(service_authority, &storage, notes_id, laptop, phone, .device_to_device));
 
+    const state_entries = try storage.entries(service.state_workspace_id);
+    var sync_record_count: usize = 0;
+    for (state_entries) |entry| {
+        const path = entry.pathSlice();
+        try std.testing.expect(!std.mem.eql(u8, path, "state/index"));
+        try std.testing.expect(!std.mem.startsWith(u8, path, "state/chunks/"));
+        if (std.mem.startsWith(u8, path, "state/v4/")) sync_record_count += 1;
+    }
+    try std.testing.expect(sync_record_count >= 10);
+
     var restarted_resident = ResidentState{};
     var restarted = try Service.initWithStorage(80, 9, sync_owner, &storage, &restarted_resident);
     var restarted_capabilities = capability.CapabilityTable.init();
@@ -890,5 +900,5 @@ test "sync service overlay session capacity is configurable" {
     const SmallService = ServiceWith(.{ .max_overlay_sessions = 2 });
     const service = SmallService.init(1, 2, .{ .kind = .service, .serial = 3 });
 
-    try std.testing.expectEqual(@as(usize, 2), service.overlay_sessions.len);
+    try std.testing.expectEqual(@as(usize, 2), service.overlaySessionCapacity());
 }

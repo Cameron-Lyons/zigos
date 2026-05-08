@@ -6,7 +6,6 @@ const component_port = @import("../kernel_api/component_port.zig");
 const contract = @import("contract.zig");
 const device_inventory = @import("../drivers/device_inventory.zig");
 const driver_service = @import("../drivers/driver_service.zig");
-const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const service_contract = @import("service_contracts.zig");
 const service_catalog = @import("service_catalog.zig");
@@ -18,6 +17,7 @@ const task_runtime = @import("../task/task_runtime.zig");
 const userspace_boot_registry = @import("../task/userspace_boot_registry.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
+const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 
 pub const Error = error{MissingBootstrapGrant} || userspace_launch.Error || userspace_boot_registry.Error || component_port.Error || driver_service.Error || service_registry.Error;
 
@@ -26,74 +26,38 @@ pub const ServiceBinding = struct {
     endpoint_id: u64,
 };
 
-pub fn launchContractService(
+pub const LaunchServiceRequest = struct {
     catalog: *userspace_loader.Catalog,
     kernel_port: *component_port.KernelPort,
     service_directory: *service_registry.Service,
     supervisor: *supervisor_mod.Supervisor,
     authority_capability_id: u64,
     controller_task_id: u64,
-    schedule_task: anytype,
+    schedule_task: *userspace_scheduler.Scheduler,
     owner: principal.PrincipalId,
     service_id: u64,
     entry: service_contract.ServiceContract,
-    correlation_base: u64,
-    now_ticks: u64,
-) Error!ServiceBinding {
-    return launchBundleService(
-        catalog,
-        kernel_port,
-        service_directory,
-        supervisor,
-        authority_capability_id,
-        controller_task_id,
-        schedule_task,
-        owner,
-        service_id,
-        try userspace_boot_registry.bundleIdForServiceClass(entry.class),
-        entry.interface,
-        entry.boot_budget,
-        entry.class,
-        rightsForGrant(entry.bootstrap_grants, .service_task_authority) orelse return error.MissingBootstrapGrant,
-        correlation_base,
-        now_ticks,
-    );
-}
+};
 
-pub fn launchBundleService(
-    catalog: *userspace_loader.Catalog,
-    kernel_port: *component_port.KernelPort,
-    service_directory: *service_registry.Service,
-    supervisor: *supervisor_mod.Supervisor,
-    authority_capability_id: u64,
-    controller_task_id: u64,
-    schedule_task: anytype,
-    owner: principal.PrincipalId,
-    service_id: u64,
-    bundle_id: []const u8,
-    interface: manifest.InterfaceDecl,
-    budget: task_runtime.ResourceBudget,
-    class: contract.ServiceClass,
-    bootstrap_rights: capability.CapabilityRights,
-    correlation_base: u64,
-    now_ticks: u64,
-) Error!ServiceBinding {
-    const service_task_id, const service_authority_capability_id = if (controller_task_id == 0) blk: {
+pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding {
+    const bundle_id = try userspace_boot_registry.bundleIdForServiceClass(request.entry.class);
+    const bootstrap_rights = rightsForGrant(request.entry.bootstrap_grants, .service_task_authority) orelse return error.MissingBootstrapGrant;
+    const service_task_id, const service_authority_capability_id = if (request.controller_task_id == 0) blk: {
         const service_task = try userspace_launch.launchRegisteredDirect(
-            catalog,
-            kernel_port.kernel.runtime,
+            request.catalog,
+            request.kernel_port.kernel.runtime,
             bundle_id,
             .{
-                .owner = owner,
-                .budget = budget,
+                .owner = request.owner,
+                .budget = request.entry.boot_budget,
                 .local_only = true,
             },
-            schedule_task,
+            request.schedule_task,
         );
-        const service_authority = try kernel_port.kernel.capability_table.mintBootRoot(.{
-            .holder = owner,
-            .issuer = kernel_port.kernel.policy_authority,
-            .target = .{ .kind = .service, .id = service_id },
+        const service_authority = try request.kernel_port.kernel.capability_table.mintBootRoot(.{
+            .holder = request.owner,
+            .issuer = request.kernel_port.kernel.policy_authority,
+            .target = .{ .kind = .service, .id = request.service_id },
             .rights = bootstrap_rights,
             .scope = .{
                 .task_id = service_task.id,
@@ -101,75 +65,75 @@ pub fn launchBundleService(
                 .broker_only = true,
             },
             .lease = .{
-                .issued_at_ticks = now_ticks,
+                .issued_at_ticks = request.entry.boot_tick,
                 .expires_at_ticks = std.math.maxInt(u64),
                 .renewable = false,
             },
             .audit = .{
                 .policy_generation = 1,
                 .source_task_id = 0,
-                .broker_service_id = service_id,
+                .broker_service_id = request.service_id,
             },
         });
-        try kernel_port.kernel.runtime.grantCapability(service_task.id, service_authority.id);
+        try request.kernel_port.kernel.runtime.grantCapability(service_task.id, service_authority.id);
         break :blk .{ service_task.id, service_authority.id };
     } else blk: {
         const service_task = try userspace_launch.launchRegisteredKernel(
-            catalog,
+            request.catalog,
             .{
-                .port = kernel_port,
-                .authority_capability_id = authority_capability_id,
-                .controller_task_id = controller_task_id,
-                .correlation_id = correlation_base,
-                .now_ticks = now_ticks,
+                .port = request.kernel_port,
+                .authority_capability_id = request.authority_capability_id,
+                .controller_task_id = request.controller_task_id,
+                .correlation_id = request.entry.boot_correlation_base,
+                .now_ticks = request.entry.boot_tick,
             },
             bundle_id,
             .{
-                .owner = owner,
-                .budget = budget,
+                .owner = request.owner,
+                .budget = request.entry.boot_budget,
                 .local_only = true,
             },
-            schedule_task,
+            request.schedule_task,
         );
         const derived_authority = try bootstrap_capabilities.deriveTaskCapability(
-            kernel_port,
-            controller_task_id,
-            authority_capability_id,
+            request.kernel_port,
+            request.controller_task_id,
+            request.authority_capability_id,
             service_task.task_id,
             bootstrap_rights,
-            correlation_base + 1,
-            now_ticks,
+            request.entry.boot_correlation_base + 1,
+            request.entry.boot_tick,
         );
         break :blk .{ service_task.task_id, derived_authority };
     };
 
-    const endpoint = try kernel_port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, correlation_base + 2, service_task_id),
+    const endpoint = try request.kernel_port.endpointCreate(.{
+        .header = component_port.makeHeader(.endpoint_create, request.entry.boot_correlation_base + 2, service_task_id),
         .authority_capability_id = service_authority_capability_id,
         .owner_task_id = service_task_id,
-        .label = interface.name,
+        .label = request.entry.interface.name,
         .flags = .{
             .local_only = true,
             .service_port = true,
         },
-    }, now_ticks);
-    if (class == .service_registry) {
-        service_directory.bindBootstrap(.{
+    }, request.entry.boot_tick);
+    if (request.entry.class == .service_registry) {
+        request.service_directory.bindBootstrap(.{
             .task_id = service_task_id,
             .endpoint_id = endpoint.endpoint.endpoint_id,
             .endpoint_capability_id = endpoint.capability_id,
         });
     }
-    const service_record = kernel_port.kernel.runtime.find(service_task_id) orelse return error.TaskNotFound;
-    try service_directory.register(
-        service_id,
+    const service_record = request.kernel_port.kernel.runtime.find(service_task_id) orelse return error.TaskNotFound;
+    try request.service_directory.register(
+        request.service_id,
         service_task_id,
         endpoint.endpoint.endpoint_id,
         endpoint.capability_id,
-        interface,
+        request.entry.interface,
         kernel_descriptors.serviceBindingFlags(service_record),
     );
-    _ = supervisor.noteContractBound(service_id, endpoint.endpoint.endpoint_id, now_ticks);
+    _ = request.supervisor.noteContractBound(request.service_id, endpoint.endpoint.endpoint_id, request.entry.boot_tick);
 
     return .{
         .task_id = service_task_id,

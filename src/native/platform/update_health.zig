@@ -185,7 +185,7 @@ fn bootActivationHealthy(manager: *immutable_base.Manager) bool {
 
 fn storageMountHealthy(storage: *const storage_service.Service, workspace_id: u64, path: []const u8) bool {
     const workspace_record = storage.findWorkspaceRecordConst(workspace_id) orelse return false;
-    if (workspace_record.generation == 0 and workspace_record.entry_count == 0) return false;
+    if (workspace_record.generation == 0 and workspace_record.entryCount() == 0) return false;
 
     const entries = storage.entries(workspace_id) catch return false;
     if (path.len == 0) return entries.len != 0 or workspace_record.generation != 0;

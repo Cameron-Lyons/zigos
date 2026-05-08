@@ -1,5 +1,4 @@
 const std = @import("std");
-const crypto_hash = @import("../core/crypto_hash.zig");
 const device_graph = @import("device_graph.zig");
 const manifest = @import("../policy/manifest.zig");
 const network_policy = @import("network_policy.zig");
@@ -19,14 +18,6 @@ pub const MAX_PRIVATE_SERVICES: usize = 4;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_TRANSPORT_FRAMES: usize = 64;
 pub const state_workspace_label = "system-sync";
-pub const state_index_path = "state/index";
-pub const state_chunk_prefix = "state/chunks/";
-pub const state_magic = "ZGSYNC1";
-pub const state_index_magic = "ZGSYNCI";
-pub const state_version: u16 = 3;
-pub const max_state_chunks: usize = workspace.MAX_WORKSPACE_ENTRIES - 1;
-pub const max_state_chunk_bytes: usize = 64 * 1024;
-pub const max_state_bytes: usize = max_state_chunks * max_state_chunk_bytes;
 pub const state_signer = signing.SignerIdentity{
     .label = "zigos-sync-state",
     .seed = [_]u8{0xA7} ** 32,
@@ -395,22 +386,13 @@ pub fn readOptionalU64(value: u64) ?u64 {
     return if (value == 0) null else value;
 }
 
-pub fn chunkPath(buffer: []u8, chunk_index: usize) Error![]const u8 {
-    return std.fmt.bufPrint(buffer, "{s}{d}", .{ state_chunk_prefix, chunk_index }) catch error.StateTooLarge;
-}
-
-pub fn indexObjectId() u64 {
-    return 0x5A_49_47_4F_53_53_59_01;
-}
-
-pub fn chunkObjectId(chunk_index: usize) u64 {
-    return 0x5A_49_47_4F_53_53_59_10 + @as(u64, @intCast(chunk_index));
-}
-
-pub fn stateDigest(bytes: []const u8) [32]u8 {
-    var hasher = crypto_hash.init();
-    hasher.update(bytes);
-    return crypto_hash.finalize(&hasher);
+pub fn databaseContractMessage(
+    buffer: []u8,
+    workspace_id: u64,
+    bundle_id: []const u8,
+    label: []const u8,
+) error{NoSpaceLeft}![]const u8 {
+    return std.fmt.bufPrint(buffer, "db-contract:{d}:{s}:{s}", .{ workspace_id, bundle_id, label }) catch error.NoSpaceLeft;
 }
 
 pub fn zeroDeviceGraphRecord() device_graph.DeviceRecord {
