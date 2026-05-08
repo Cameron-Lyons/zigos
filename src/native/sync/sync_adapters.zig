@@ -416,11 +416,14 @@ pub const DefaultChunkMediaAdapter = struct {
     fn replicate(request: ChunkReplicationRequest) Error!ChunkReplicationResult {
         const version = request.store.version(request.entry.version_id) orelse return error.VersionNotFound;
         if (version.object_type != request.entry.object_type) return error.TypeMismatch;
-        const payload = try request.store.versionPayload(version);
-        const chunk_count = @max(@as(usize, version.chunk_count), chunkCountForPayload(payload.len));
+        var cursor = try request.store.versionChunkCursor(version);
+        var chunk_count: usize = 0;
+        while (try cursor.next()) |_| {
+            chunk_count += 1;
+        }
         return .{
             .snapshot_replicated = true,
-            .replicated_chunks = chunk_count,
+            .replicated_chunks = @max(@max(@as(usize, version.chunk_count), chunk_count), chunkCountForPayload(version.payload_len)),
         };
     }
 };
@@ -438,10 +441,9 @@ pub const DefaultSecretTransferAdapter = struct {
         const object_record = request.store.object(request.object_id) orelse return error.ObjectNotFound;
         if (object_record.object_type != .secret) return error.TypeMismatch;
         const version = request.store.latestVersion(request.object_id) orelse return error.VersionNotFound;
-        const payload = try request.store.versionPayload(version);
         return .{
             .transferred = true,
-            .encrypted_payload = std.mem.startsWith(u8, payload, "enc:"),
+            .encrypted_payload = try versionStartsWith(request.store, version, "enc:"),
         };
     }
 };
@@ -486,6 +488,24 @@ fn chunkCountForPayload(payload_len: usize) usize {
     const chunk_size: usize = 128;
     if (payload_len == 0) return 0;
     return (payload_len + chunk_size - 1) / chunk_size;
+}
+
+fn versionStartsWith(
+    store: *const storage_service.Service,
+    version: *const object_store.VersionRecord,
+    prefix: []const u8,
+) Error!bool {
+    var cursor = try store.versionChunkCursor(version);
+    var prefix_buffer: [16]u8 = [_]u8{0} ** 16;
+    if (prefix.len > prefix_buffer.len) return error.PayloadTooLarge;
+    var copied: usize = 0;
+    while (copied < prefix.len) {
+        const chunk = (try cursor.next()) orelse break;
+        const copy_len = @min(prefix.len - copied, chunk.bytes.len);
+        @memcpy(prefix_buffer[copied .. copied + copy_len], chunk.bytes[0..copy_len]);
+        copied += copy_len;
+    }
+    return copied == prefix.len and std.mem.eql(u8, prefix_buffer[0..prefix.len], prefix);
 }
 
 fn sortDocumentOperations(operations: []DocumentOperation) void {

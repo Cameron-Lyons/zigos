@@ -17,6 +17,9 @@ from generate_spec_gap_matrix import GAP_MATRIX_PATH, render_gap_matrix
 
 TEST_PATTERN = re.compile(r'^\s*test\s+"([^"]+)"', re.MULTILINE)
 EVIDENCE_STATUSES = {"enforced", "modeled", "scenario", "deferred"}
+ROADMAP_STATUSES = EVIDENCE_STATUSES - {"enforced"}
+ROADMAP_PRIORITIES = {"P0", "P1", "P2"}
+ROADMAP_TEXT_FIELDS = ("focus", "graduation_proof")
 
 META_REQUIREMENT_DEPENDENCIES = {
     "REQ-DESIGN-GOALS-AND-NON-GOALS": [
@@ -53,6 +56,29 @@ def load_test_names(cache: dict[Path, set[str]], path: Path) -> set[str]:
     names = {match.group(1) for match in TEST_PATTERN.finditer(path.read_text())}
     cache[path] = names
     return names
+
+
+def validate_roadmap(errors: list[str], requirement_id: str, requirement_evidence: dict) -> bool:
+    roadmap = requirement_evidence.get("roadmap")
+    if not isinstance(roadmap, dict):
+        errors.append(
+            f"Requirement {requirement_id} is {requirement_evidence.get('status')} and must include roadmap metadata"
+        )
+        return False
+
+    priority = roadmap.get("priority")
+    if priority not in ROADMAP_PRIORITIES:
+        errors.append(
+            f"Requirement {requirement_id} roadmap priority must be one of {sorted(ROADMAP_PRIORITIES)}"
+        )
+
+    valid = True
+    for field in ROADMAP_TEXT_FIELDS:
+        value = roadmap.get(field)
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"Requirement {requirement_id} roadmap must include non-empty {field}")
+            valid = False
+    return valid and priority in ROADMAP_PRIORITIES
 
 
 def main() -> int:
@@ -155,6 +181,7 @@ def main() -> int:
     enforced_count = 0
     scenario_count = 0
     negative_test_count = 0
+    roadmap_count = 0
     for requirement_id in required_requirements:
         requirement_evidence = evidence.get(requirement_id)
         if not isinstance(requirement_evidence, dict):
@@ -172,6 +199,10 @@ def main() -> int:
             scenario_count += 1
         if status == "enforced":
             enforced_count += 1
+            if "roadmap" in requirement_evidence:
+                errors.append(
+                    f"Enforced requirement {requirement_id} should not keep roadmap metadata"
+                )
             enforcement_modules = requirement_evidence.get("enforcement_modules", [])
             if not isinstance(enforcement_modules, list) or not enforcement_modules:
                 errors.append(
@@ -232,6 +263,8 @@ def main() -> int:
                 errors.append(
                     f"Requirement {requirement_id} is {status} and must include coverage_note explaining why it is not enforced"
                 )
+            if status in ROADMAP_STATUSES and validate_roadmap(errors, requirement_id, requirement_evidence):
+                roadmap_count += 1
 
     for requirement_id, dependencies in META_REQUIREMENT_DEPENDENCIES.items():
         requirement_evidence = evidence.get(requirement_id, {})
@@ -270,7 +303,8 @@ def main() -> int:
         f"{referenced_test_count} test references, "
         f"{enforced_count} enforced requirements, "
         f"{scenario_count} scenario-only requirements, "
-        f"{negative_test_count} negative test references"
+        f"{negative_test_count} negative test references, "
+        f"{roadmap_count} roadmap requirements"
     )
     return 0
 

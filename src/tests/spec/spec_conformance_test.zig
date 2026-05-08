@@ -7,6 +7,7 @@ const drivers_storage_sync = @import("drivers_storage_sync.zig");
 const experience_and_policy_edges = @import("experience_and_policy_edges.zig");
 const platform_services = @import("platform_services.zig");
 const runtime_negative_proofs = @import("../../native/session/runtime_negative_proofs.zig");
+const service_path_proofs = @import("../../native/session/service_path_proofs.zig");
 const sync_service_test = @import("../../native/sync/sync_service_test.zig");
 const ux_and_lifecycle = @import("ux_and_lifecycle.zig");
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const capability = @import("../kernel_api/capability.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("../storage/object_store.zig");
@@ -59,7 +60,7 @@ pub const FlowRecord = struct {
 
 pub const Error = error{
     FlowTableFull,
-} || task_runtime.Error || workspace.Error || sync_service.Error;
+} || task_runtime.Error || workspace.Error || sync_service.Error || sync_service.AuthorityError;
 
 pub const Controller = struct {
     next_flow_id: u64 = 1,
@@ -94,7 +95,8 @@ pub const Controller = struct {
 
     pub fn pairDevice(
         self: *Controller,
-        sync: *sync_service.Service,
+        sync: *sync_service.SyncPort,
+        authority: sync_service.AuthorityContext,
         user: principal.PrincipalId,
         device: principal.PrincipalId,
         label: []const u8,
@@ -102,7 +104,7 @@ pub const Controller = struct {
         device_signer: signing.SignerIdentity,
         tick: u64,
     ) Error!void {
-        _ = try sync.enrollTrustedDevice(user, device, label, user_signer, device_signer, tick);
+        _ = try sync.enrollTrustedDevice(authority, user, device, label, user_signer, device_signer, tick);
         _ = try self.record(.pair_device, 0, 0, device, label, true);
     }
 
@@ -259,7 +261,33 @@ test "native ux records task workspace pairing review and recovery flows" {
     _ = try storage.commit(workspace_record.id, 11);
 
     var sync = sync_service.Service.init(931, 62, sync_owner);
-    _ = try sync.ensureUserRoot(user, "cameron", user_signer);
+    var sync_capabilities = capability.CapabilityTable.init();
+    const sync_authority_capability = try sync_capabilities.mintBootRoot(.{
+        .holder = sync_owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = sync.service_id },
+        .rights = .{ .service = .{
+            .endpoint_connect = true,
+        } },
+        .scope = .{
+            .task_id = sync.task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = 100,
+        },
+        .audit = .{},
+    });
+    var sync_port = sync_service.SyncPort.init(&sync, &sync_capabilities);
+    const sync_authority = sync_service.AuthorityContext{
+        .task_id = sync.task_id,
+        .principal = sync_owner,
+        .capability_id = sync_authority_capability.id,
+        .now_ticks = 12,
+    };
+    _ = try sync_port.ensureUserRoot(sync_authority, user, "cameron", user_signer);
 
     var controller = Controller.init();
     const task = try controller.startTask(&runtime, .{
@@ -279,7 +307,7 @@ test "native ux records task workspace pairing review and recovery flows" {
         },
     });
     const opened = try controller.openWorkspace(&storage, workspace_record.id, "documents/notes.md", user);
-    try controller.pairDevice(&sync, user, paired_device, "tablet", user_signer, device_signer, 12);
+    try controller.pairDevice(&sync_port, sync_authority, user, paired_device, "tablet", user_signer, device_signer, 12);
     try std.testing.expect(try controller.reviewPermissionRequest(task.id, user, .object_access, true));
     try controller.recoverSystem(task.id, user, "recovery-environment");
 

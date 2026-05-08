@@ -18,6 +18,12 @@ STATUS_LABELS = {
     "scenario": "Scenario",
     "deferred": "Deferred",
 }
+ROADMAP_STATUSES = {"modeled", "scenario", "deferred"}
+ROADMAP_PRIORITY_ORDER = {
+    "P0": 0,
+    "P1": 1,
+    "P2": 2,
+}
 
 
 def markdown_cell(value: str) -> str:
@@ -56,6 +62,17 @@ def evidence_detail(evidence: dict) -> str:
     if status == "enforced":
         return "Negative tests:<br>" + test_ref_list(evidence.get("negative_tests", []))
     return evidence.get("coverage_note", "_No coverage note listed_")
+
+
+def roadmap_rows(manifest: dict) -> list[tuple[str, dict, dict]]:
+    evidence_by_requirement = manifest["requirement_evidence"]
+    rows: list[tuple[int, str, dict, dict]] = []
+    for order, requirement_id in enumerate(manifest["required_requirements"]):
+        evidence = evidence_by_requirement[requirement_id]
+        if evidence["status"] in ROADMAP_STATUSES:
+            rows.append((order, requirement_id, evidence, evidence.get("roadmap", {})))
+    rows.sort(key=lambda row: (ROADMAP_PRIORITY_ORDER.get(row[3].get("priority"), 99), row[0]))
+    return [(requirement_id, evidence, roadmap) for _, requirement_id, evidence, roadmap in rows]
 
 
 def render_gap_matrix(manifest: dict | None = None) -> str:
@@ -102,11 +119,38 @@ def render_gap_matrix(manifest: dict | None = None) -> str:
         f"- Scenario: {status_counts['scenario']}",
         f"- Deferred: {status_counts['deferred']}",
         "",
-        "## Requirement Matrix",
+        "## Roadmap Focus",
         "",
-        "| Requirement | Spec section | Status | Implementation anchors | Evidence / gap |",
+        "Modeled and scenario-only rows are the active implementation roadmap. These requirements should graduate to real boot, syscall, or service-path invariants before new platform surface area is added.",
+        "",
+        "| Priority | Requirement | Status | Focus | Graduation proof |",
         "| --- | --- | --- | --- | --- |",
     ]
+
+    for requirement_id, evidence, roadmap in roadmap_rows(manifest):
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    code(roadmap.get("priority", "_missing_")),
+                    code(requirement_id),
+                    STATUS_LABELS[evidence["status"]],
+                    markdown_cell(roadmap.get("focus", "_Roadmap focus missing_")),
+                    markdown_cell(roadmap.get("graduation_proof", "_Graduation proof missing_")),
+                ]
+            )
+            + " |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Requirement Matrix",
+            "",
+            "| Requirement | Spec section | Status | Implementation anchors | Evidence / gap |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
 
     for requirement_id in manifest["required_requirements"]:
         evidence = evidence_by_requirement[requirement_id]

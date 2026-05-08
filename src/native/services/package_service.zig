@@ -1,11 +1,14 @@
 const std = @import("std");
 const manifest = @import("../policy/manifest.zig");
+const manifest_fixtures = @import("../policy/manifest_fixtures.zig");
+const capability = @import("../kernel_api/capability.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
 const bundle_digest = @import("package_service_digest.zig");
 const bundle_ops = @import("package_service_bundle_ops.zig");
 const fixed_table = @import("../core/fixed_table.zig");
 const model = @import("package_service_model.zig");
+const service_authority = @import("service_authority.zig");
 const signing = @import("../core/signing.zig");
 
 pub const MAX_INSTALLED_BUNDLES = model.MAX_INSTALLED_BUNDLES;
@@ -40,6 +43,8 @@ pub const StoredSignature = model.StoredSignature;
 pub const ResolvedManifest = model.ResolvedManifest;
 pub const BundleRevision = model.BundleRevision;
 pub const InstalledBundle = model.InstalledBundle;
+pub const AuthorityContext = service_authority.Context;
+pub const AuthorityError = service_authority.Error;
 
 pub const Error = bundle_ops.Error || error{
     BundleNotFound,
@@ -62,6 +67,8 @@ const BundleSlot = model.BundleSlot;
 const zeroBundle = model.zeroBundle;
 
 pub const Service = struct {
+    service_id: u64 = 0,
+    owner: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
     slots: [MAX_INSTALLED_BUNDLES]BundleSlot = [_]BundleSlot{BundleSlot{}} ** MAX_INSTALLED_BUNDLES,
     trust_store: principal.Keyring = principal.Keyring.init(),
 
@@ -69,7 +76,12 @@ pub const Service = struct {
         return .{};
     }
 
-    pub fn trustPublisher(
+    pub fn bind(self: *Service, service_id: u64, owner: principal.PrincipalId) void {
+        self.service_id = service_id;
+        self.owner = owner;
+    }
+
+    fn trustPublisher(
         self: *Service,
         publisher_principal: principal.PrincipalId,
         issuer: principal.PrincipalId,
@@ -79,7 +91,7 @@ pub const Service = struct {
         return self.trust_store.bindPublisher(publisher_principal, issuer, publisher, public_key);
     }
 
-    pub fn trustPolicyAuthorityRoot(
+    fn trustPolicyAuthorityRoot(
         self: *Service,
         authority: principal.PrincipalId,
         public_key: [32]u8,
@@ -87,11 +99,11 @@ pub const Service = struct {
         return self.trust_store.bindPolicyAuthorityRoot(authority, public_key);
     }
 
-    pub fn revokePublisher(self: *Service, publisher_principal: principal.PrincipalId) principal.KeyringError!void {
+    fn revokePublisher(self: *Service, publisher_principal: principal.PrincipalId) principal.KeyringError!void {
         return self.trust_store.revokePrincipal(publisher_principal);
     }
 
-    pub fn install(
+    fn install(
         self: *Service,
         request: InstallRequest,
         policy: ?*const policy_object.PolicyObject,
@@ -189,7 +201,7 @@ pub const Service = struct {
         return error.BundleTableFull;
     }
 
-    pub fn rollback(self: *Service, bundle_id: []const u8) Error!InstallResult {
+    fn rollback(self: *Service, bundle_id: []const u8) Error!InstallResult {
         const bundle = self.find(bundle_id) orelse return error.BundleNotFound;
         if (!bundle.rollbackAvailable()) return error.NoRollbackVersion;
         bundle_ops.rollback(bundle);
@@ -231,6 +243,81 @@ pub const Service = struct {
     fn findConst(self: *const Service, bundle_id: []const u8) ?*const InstalledBundle {
         const slot = fixed_table.findConstSlot(BundleSlot, MAX_INSTALLED_BUNDLES, &self.slots, bundle_id, bundleSlotMatchesId) orelse return null;
         return &slot.bundle;
+    }
+};
+
+pub const PackagePort = struct {
+    service: *Service,
+    capability_table: *const capability.CapabilityTable,
+
+    pub fn init(service: *Service, capability_table: *const capability.CapabilityTable) PackagePort {
+        return .{
+            .service = service,
+            .capability_table = capability_table,
+        };
+    }
+
+    pub fn trustPublisher(
+        self: *PackagePort,
+        authority: AuthorityContext,
+        publisher_principal: principal.PrincipalId,
+        issuer: principal.PrincipalId,
+        publisher: []const u8,
+        public_key: [32]u8,
+    ) (AuthorityError || principal.KeyringError)!*principal.PrincipalKeyRecord {
+        _ = try self.requirePackageAuthority(authority, .capability_mint);
+        return self.service.trustPublisher(publisher_principal, issuer, publisher, public_key);
+    }
+
+    pub fn trustPolicyAuthorityRoot(
+        self: *PackagePort,
+        authority: AuthorityContext,
+        policy_authority: principal.PrincipalId,
+        public_key: [32]u8,
+    ) (AuthorityError || principal.KeyringError)!*principal.PrincipalKeyRecord {
+        _ = try self.requirePackageAuthority(authority, .capability_mint);
+        return self.service.trustPolicyAuthorityRoot(policy_authority, public_key);
+    }
+
+    pub fn revokePublisher(
+        self: *PackagePort,
+        authority: AuthorityContext,
+        publisher_principal: principal.PrincipalId,
+    ) (AuthorityError || principal.KeyringError)!void {
+        _ = try self.requirePackageAuthority(authority, .capability_revoke);
+        return self.service.revokePublisher(publisher_principal);
+    }
+
+    pub fn install(
+        self: *PackagePort,
+        authority: AuthorityContext,
+        request: InstallRequest,
+        policy: ?*const policy_object.PolicyObject,
+    ) (AuthorityError || Error)!InstallResult {
+        _ = try self.requirePackageAuthority(authority, .endpoint_connect);
+        return self.service.install(request, policy);
+    }
+
+    pub fn rollback(
+        self: *PackagePort,
+        authority: AuthorityContext,
+        bundle_id: []const u8,
+    ) (AuthorityError || Error)!InstallResult {
+        _ = try self.requirePackageAuthority(authority, .endpoint_connect);
+        return self.service.rollback(bundle_id);
+    }
+
+    fn requirePackageAuthority(
+        self: *PackagePort,
+        authority: AuthorityContext,
+        required_right: capability.CapabilityRight,
+    ) AuthorityError!*const capability.Capability {
+        return service_authority.requireServiceAuthority(
+            self.capability_table,
+            self.service.service_id,
+            authority,
+            required_right,
+        );
     }
 };
 
@@ -302,6 +389,120 @@ fn trustTestPublisher(
         publisher,
         try signing.publicKey(signer_identity),
     );
+}
+
+fn mintPackageServiceAuthority(
+    capability_table: *capability.CapabilityTable,
+    service_id: u64,
+    holder: principal.PrincipalId,
+    task_id: u64,
+    rights: capability.CapabilityRights,
+) !capability.Capability {
+    return capability_table.mintBootRoot(.{
+        .holder = holder,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = service_id },
+        .rights = rights,
+        .scope = .{
+            .task_id = task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = 100,
+        },
+        .audit = .{},
+    });
+}
+
+test "package port requires service authority before install update and rollback" {
+    var service = Service.init();
+    service.bind(740, .{ .kind = .service, .serial = 740 });
+    var capabilities = capability.CapabilityTable.init();
+    var port = PackagePort.init(&service, &capabilities);
+    const actor = principal.PrincipalId{ .kind = .service, .serial = 741 };
+    const task_id: u64 = 742;
+    const signer_identity = signing.SignerIdentity{
+        .label = "package-port-signer",
+        .seed = [_]u8{0x5E} ** 32,
+    };
+    var bundle = manifest_fixtures.notesBundle();
+    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+
+    const missing_authority = AuthorityContext{
+        .task_id = task_id,
+        .principal = actor,
+        .capability_id = 0,
+        .now_ticks = 10,
+    };
+    try std.testing.expectError(error.CapabilityNotFound, port.install(missing_authority, .{
+        .bundle = bundle,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
+
+    const mint_only = try mintPackageServiceAuthority(&capabilities, service.service_id, actor, task_id, .{ .service = .{
+        .capability_mint = true,
+    } });
+    const mint_authority = AuthorityContext{
+        .task_id = task_id,
+        .principal = actor,
+        .capability_id = mint_only.id,
+        .now_ticks = 10,
+    };
+    _ = try port.trustPolicyAuthorityRoot(mint_authority, .{ .kind = .policy_authority, .serial = 1 }, [_]u8{0x51} ** 32);
+    _ = try port.trustPublisher(
+        mint_authority,
+        .{ .kind = .app, .serial = 741 },
+        .{ .kind = .policy_authority, .serial = 1 },
+        bundle.publisher,
+        try signing.publicKey(signer_identity),
+    );
+    try std.testing.expectError(error.PermissionDenied, port.install(mint_authority, .{
+        .bundle = bundle,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
+
+    const package_authority = try mintPackageServiceAuthority(&capabilities, service.service_id, actor, task_id, .{ .service = .{
+        .endpoint_connect = true,
+        .capability_revoke = true,
+    } });
+    const install_authority = AuthorityContext{
+        .task_id = task_id,
+        .principal = actor,
+        .capability_id = package_authority.id,
+        .now_ticks = 11,
+    };
+    const installed = try port.install(install_authority, .{
+        .bundle = bundle,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null);
+    try std.testing.expect(installed.installed_new);
+
+    var updated_bundle = bundle;
+    updated_bundle.version_minor = 1;
+    updated_bundle.signature = try signing.sign(signer_identity, &digestBundle(updated_bundle));
+    const updated = try port.install(install_authority, .{
+        .bundle = updated_bundle,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null);
+    try std.testing.expect(updated.rollback_available);
+    const rollback = try port.rollback(install_authority, bundle.bundle_id);
+    try std.testing.expect(rollback.updated_existing);
+
+    const wrong_target = try mintPackageServiceAuthority(&capabilities, service.service_id + 1, actor, task_id, .{ .service = .{
+        .endpoint_connect = true,
+    } });
+    try std.testing.expectError(error.CapabilityRequired, port.rollback(.{
+        .task_id = task_id,
+        .principal = actor,
+        .capability_id = wrong_target.id,
+        .now_ticks = 12,
+    }, bundle.bundle_id));
 }
 
 test "package service enforces signed manifests policy gated sources updates and rollback" {

@@ -1,8 +1,10 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const builtin = @import("builtin");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const model = @import("task_runtime_model.zig");
 const native_util = @import("../core/util.zig");
+const principal = @import("../core/principal.zig");
 const std = @import("std");
 
 pub const MAX_TASKS = model.MAX_TASKS;
@@ -44,6 +46,9 @@ pub const syntheticUserspaceImage = model.syntheticUserspaceImage;
 
 const INDEX_CAPACITY = model.INDEX_CAPACITY;
 const IdIndexSlot = model.IdIndexSlot;
+const TaskArena = model.TaskArena;
+pub const TaskHandle = model.TaskHandle;
+const TaskOwnerIndex = model.TaskOwnerIndex;
 const TaskColdRecord = model.TaskColdRecord;
 const TaskSlot = model.TaskSlot;
 const AddressSpaceSlot = model.AddressSpaceSlot;
@@ -64,6 +69,7 @@ const taskCold = model.taskCold;
 const taskColdConst = model.taskColdConst;
 const taskCapabilityIndex = model.taskCapabilityIndex;
 const taskHasCapability = model.taskHasCapability;
+const taskOwnerIndexKey = model.taskOwnerIndexKey;
 const rebuildCapabilityIndex = model.rebuildCapabilityIndex;
 const validateUserspaceImage = model.validateUserspaceImage;
 const findAddressSpaceSlot = model.findAddressSpaceSlot;
@@ -77,9 +83,9 @@ pub const Runtime = struct {
     next_address_space_id: u64 = 1,
     next_namespace_id: u64 = 1,
     next_component_id: u64 = 1,
-    task_index_slots: [INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(INDEX_CAPACITY),
     address_space_index_slots: [INDEX_CAPACITY]IdIndexSlot = emptyIndexTable(INDEX_CAPACITY),
-    tasks: [MAX_TASKS]TaskSlot = [_]TaskSlot{TaskSlot{}} ** MAX_TASKS,
+    tasks: TaskArena = TaskArena.init(),
+    task_owner_index: TaskOwnerIndex = TaskOwnerIndex.init(),
     task_cold: [MAX_TASKS]TaskColdRecord = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
     address_spaces: [MAX_TASKS]AddressSpaceSlot = [_]AddressSpaceSlot{AddressSpaceSlot{}} ** MAX_TASKS,
 
@@ -98,7 +104,9 @@ pub const Runtime = struct {
         out.next_namespace_id = self.next_namespace_id;
         out.next_component_id = self.next_component_id;
         out.task_count = 0;
-        for (self.tasks, 0..) |slot, slot_index| {
+        var slot_index: usize = 0;
+        while (slot_index < MAX_TASKS) : (slot_index += 1) {
+            const slot = self.tasks.slotAtConst(slot_index).*;
             if (!slot.in_use) continue;
             const dense_index = out.task_count;
             out.tasks[dense_index] = slot;
@@ -125,7 +133,11 @@ pub const Runtime = struct {
 
         var task_index: usize = 0;
         while (task_index < state.task_count) : (task_index += 1) {
-            self.tasks[task_index] = state.tasks[task_index];
+            const task_id = state.tasks[task_index].task.id;
+            const slot_index = self.tasks.reserveIndexAt(task_id, task_index) orelse {
+                native_util.impossibleByInvariant("task snapshot count is bounded by task arena capacity");
+            };
+            self.tasks.slotAt(slot_index).* = state.tasks[task_index];
             copyTaskCold(&self.task_cold[task_index], &state.task_cold[task_index]);
         }
 
@@ -138,19 +150,24 @@ pub const Runtime = struct {
     }
 
     pub fn rebuildIndexes(self: *Runtime) void {
-        self.task_index_slots = emptyIndexTable(INDEX_CAPACITY);
+        self.tasks.rebuildPrimaryIndex();
+        self.task_owner_index.reset();
         self.address_space_index_slots = emptyIndexTable(INDEX_CAPACITY);
 
-        for (&self.tasks, 0..) |*slot, slot_index| {
+        var slot_index: usize = 0;
+        while (slot_index < MAX_TASKS) : (slot_index += 1) {
+            const slot = self.tasks.slotAt(slot_index);
             if (!slot.in_use) continue;
             slot.task.cold_state = &self.task_cold[slot_index];
-            indexInsert(INDEX_CAPACITY, &self.task_index_slots, slot.task.id, slot_index);
+            if (!self.task_owner_index.append(taskOwnerIndexKey(slot.task.owner), slot_index)) {
+                native_util.impossibleByInvariant("task owner index capacity covers task slots");
+            }
             rebuildCapabilityIndex(&slot.task);
         }
 
-        for (self.address_spaces, 0..) |slot, slot_index| {
+        for (self.address_spaces, 0..) |slot, address_space_slot_index| {
             if (!slot.in_use) continue;
-            indexInsert(INDEX_CAPACITY, &self.address_space_index_slots, slot.address_space.id, slot_index);
+            indexInsert(INDEX_CAPACITY, &self.address_space_index_slots, slot.address_space.id, address_space_slot_index);
         }
     }
 
@@ -163,51 +180,52 @@ pub const Runtime = struct {
             try validateUserspaceImage(requested_userspace_image)
         else
             ExecutableImageSpec{};
-        for (&self.tasks, 0..) |*slot, slot_index| {
-            if (slot.in_use) continue;
-            const task_id = self.next_task_id;
-            self.next_task_id += 1;
-            const initial_component = makeExecutionComponent(self, defaultInitialComponent(request));
-            const host = try allocateHost(
-                self,
-                request.component_class,
-                task_id,
-                request.launch.image_id,
-                userspace_image,
-            );
+        const task_id = self.next_task_id;
+        const slot_index = self.tasks.reserveIndex(task_id) orelse return error.TaskTableFull;
+        errdefer _ = self.tasks.removeIndex(slot_index);
 
-            slot.in_use = true;
-            resetTaskCold(&self.task_cold[slot_index]);
-            slot.task = .{
-                .id = task_id,
-                .process_id = host.process_id,
-                .address_space_id = host.address_space_id,
-                .namespace_id = host.namespace_id,
-                .process_generation = 1,
-                .process_class = host.process_class,
-                .namespace_class = host.namespace_class,
-                .owner = request.owner,
-                .state = .active,
-                .component_class = request.component_class,
-                .execution_component_count = 1,
-                .capability_count = 0,
-                .budget = request.budget,
-                .audit_start = 0,
-                .audit_count = 0,
-                .ui_surface_id = request.ui_surface_id,
-                .resource_class = request.budget.effectiveResourceClass(),
-                .background_allowed = request.budget.background_allowed,
-                .zero_ambient_authority = true,
-                .local_only = request.local_only,
-                .launch = makeLaunchProvenance(request.launch),
-                .cold_state = &self.task_cold[slot_index],
-            };
-            self.task_cold[slot_index].userspace_image = userspace_image;
-            self.task_cold[slot_index].execution_components[0] = initial_component;
-            indexInsert(INDEX_CAPACITY, &self.task_index_slots, task_id, slot_index);
-            return &slot.task;
+        const initial_component = makeExecutionComponent(self, defaultInitialComponent(request));
+        const host = try allocateHost(
+            self,
+            request.component_class,
+            task_id,
+            request.launch.image_id,
+            userspace_image,
+        );
+
+        self.next_task_id += 1;
+        const slot = self.tasks.slotAt(slot_index);
+        resetTaskCold(&self.task_cold[slot_index]);
+        slot.task = .{
+            .id = task_id,
+            .process_id = host.process_id,
+            .address_space_id = host.address_space_id,
+            .namespace_id = host.namespace_id,
+            .process_generation = 1,
+            .process_class = host.process_class,
+            .namespace_class = host.namespace_class,
+            .owner = request.owner,
+            .state = .active,
+            .component_class = request.component_class,
+            .execution_component_count = 1,
+            .capability_count = 0,
+            .budget = request.budget,
+            .audit_start = 0,
+            .audit_count = 0,
+            .ui_surface_id = request.ui_surface_id,
+            .resource_class = request.budget.effectiveResourceClass(),
+            .background_allowed = request.budget.background_allowed,
+            .zero_ambient_authority = true,
+            .local_only = request.local_only,
+            .launch = makeLaunchProvenance(request.launch),
+            .cold_state = &self.task_cold[slot_index],
+        };
+        self.task_cold[slot_index].userspace_image = userspace_image;
+        self.task_cold[slot_index].execution_components[0] = initial_component;
+        if (!self.task_owner_index.append(taskOwnerIndexKey(slot.task.owner), slot_index)) {
+            native_util.impossibleByInvariant("task owner index capacity covers task slots");
         }
-        return error.TaskTableFull;
+        return &slot.task;
     }
 
     pub fn find(self: *Runtime, task_id: u64) ?*TaskRecord {
@@ -216,9 +234,44 @@ pub const Runtime = struct {
         return null;
     }
 
+    pub fn taskSlotCapacity(self: *const Runtime) usize {
+        _ = self;
+        return MAX_TASKS;
+    }
+
+    pub fn taskCount(self: *const Runtime) usize {
+        return self.tasks.countInUse();
+    }
+
+    pub fn taskSlotAt(self: *Runtime, slot_index: usize) *TaskSlot {
+        return self.tasks.slotAt(slot_index);
+    }
+
+    pub fn taskSlotAtConst(self: *const Runtime, slot_index: usize) *const TaskSlot {
+        return self.tasks.slotAtConst(slot_index);
+    }
+
+    pub fn taskHandle(self: *const Runtime, task_id: u64) ?TaskHandle {
+        const slot_index = self.tasks.slotIndexOf(task_id) orelse return null;
+        return self.tasks.handleForIndex(slot_index);
+    }
+
     fn findConst(self: *const Runtime, task_id: u64) ?*const TaskRecord {
         if (self.indexedTaskSlotConst(task_id)) |slot| return &slot.task;
         self.debugAssertTaskIndexMissAbsent(task_id);
+        return null;
+    }
+
+    pub fn findByOwner(self: *const Runtime, owner: principal.PrincipalId) ?*const TaskRecord {
+        const key = taskOwnerIndexKey(owner);
+        var slot_index = self.task_owner_index.head(key);
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.task_owner_index.next(slot_index)) {
+            if (slot_index >= MAX_TASKS) native_util.impossibleByInvariant("task owner index points outside task slots");
+            const slot = self.tasks.slotAtConst(slot_index);
+            if (!slot.in_use) native_util.impossibleByInvariant("task owner index points at a free slot");
+            if (slot.task.owner.eql(owner)) return &slot.task;
+        }
+        self.debugAssertOwnerIndexMissAbsent(owner);
         return null;
     }
 
@@ -258,27 +311,11 @@ pub const Runtime = struct {
     }
 
     fn indexedTaskSlot(self: *Runtime, task_id: u64) ?*TaskSlot {
-        const slot_index = indexLookup(INDEX_CAPACITY, &self.task_index_slots, task_id) orelse {
-            self.debugAssertTaskIndexMissAbsent(task_id);
-            return null;
-        };
-        if (slot_index >= self.tasks.len) native_util.impossibleByInvariant("task index points outside slots");
-        const slot = &self.tasks[slot_index];
-        if (!slot.in_use) native_util.impossibleByInvariant("task index points at a free slot");
-        if (slot.task.id != task_id) native_util.impossibleByInvariant("task index points at the wrong slot");
-        return slot;
+        return self.tasks.get(task_id);
     }
 
     fn indexedTaskSlotConst(self: *const Runtime, task_id: u64) ?*const TaskSlot {
-        const slot_index = indexLookup(INDEX_CAPACITY, &self.task_index_slots, task_id) orelse {
-            self.debugAssertTaskIndexMissAbsent(task_id);
-            return null;
-        };
-        if (slot_index >= self.tasks.len) native_util.impossibleByInvariant("task index points outside slots");
-        const slot = &self.tasks[slot_index];
-        if (!slot.in_use) native_util.impossibleByInvariant("task index points at a free slot");
-        if (slot.task.id != task_id) native_util.impossibleByInvariant("task index points at the wrong slot");
-        return slot;
+        return self.tasks.getConst(task_id);
     }
 
     pub fn noteAddressSpaceInstalled(self: *Runtime, address_space_id: u64, slot_index: usize) void {
@@ -291,7 +328,9 @@ pub const Runtime = struct {
 
     fn debugAssertIndexIntegrity(self: *const Runtime) void {
         if (!debugIndexChecksEnabled()) return;
-        for (self.tasks) |slot| {
+        var slot_index: usize = 0;
+        while (slot_index < MAX_TASKS) : (slot_index += 1) {
+            const slot = self.tasks.slotAtConst(slot_index);
             if (!slot.in_use) continue;
             _ = self.indexedTaskSlotConst(slot.task.id) orelse
                 native_util.impossibleByInvariant("task index missing a live task");
@@ -312,9 +351,22 @@ pub const Runtime = struct {
 
     fn debugAssertTaskIndexMissAbsent(self: *const Runtime, task_id: u64) void {
         if (!debugIndexChecksEnabled()) return;
-        for (self.tasks) |slot| {
+        var slot_index: usize = 0;
+        while (slot_index < MAX_TASKS) : (slot_index += 1) {
+            const slot = self.tasks.slotAtConst(slot_index);
             if (slot.in_use and slot.task.id == task_id) {
                 native_util.impossibleByInvariant("task index missed a live task");
+            }
+        }
+    }
+
+    fn debugAssertOwnerIndexMissAbsent(self: *const Runtime, owner: principal.PrincipalId) void {
+        if (!debugIndexChecksEnabled()) return;
+        var slot_index: usize = 0;
+        while (slot_index < MAX_TASKS) : (slot_index += 1) {
+            const slot = self.tasks.slotAtConst(slot_index);
+            if (slot.in_use and slot.task.owner.eql(owner)) {
+                native_util.impossibleByInvariant("task owner index missed a live task");
             }
         }
     }
@@ -540,6 +592,34 @@ test "new tasks start with zero ambient authority and no capabilities" {
     try std.testing.expect(!task.runsAsUserspaceProcess());
     try std.testing.expect(!task.hasLoadedExecutable());
     try std.testing.expectEqualStrings("", task.launchBundleIdSlice());
+}
+
+test "task runtime crosses the first task slab page with indexed handles" {
+    var runtime = Runtime.init();
+    var last_task_id: u64 = 0;
+    var last_owner = principal.PrincipalId{ .kind = .app, .serial = 0 };
+
+    var index: usize = 0;
+    while (index < model.TASK_PAGE_SIZE + 5) : (index += 1) {
+        const owner = principal.PrincipalId{ .kind = .app, .serial = @intCast(index + 1) };
+        const task = try runtime.createTask(.{
+            .owner = owner,
+            .component_class = .app_component,
+            .budget = .{
+                .cpu_time_ticks = 100,
+                .memory_bytes = 1024,
+                .endpoint_slots = 2,
+                .shared_memory_bytes = 1024,
+            },
+        });
+        last_task_id = task.id;
+        last_owner = owner;
+    }
+
+    try std.testing.expectEqual(@as(usize, model.TASK_PAGE_SIZE + 5), runtime.taskCount());
+    try std.testing.expect(runtime.find(last_task_id) != null);
+    try std.testing.expectEqual(last_task_id, runtime.findByOwner(last_owner).?.id);
+    try std.testing.expect(runtime.taskHandle(last_task_id) != null);
 }
 
 test "granting and revoking capabilities updates the task table" {

@@ -12,6 +12,7 @@ const device_syscalls = @import("device_syscalls.zig");
 
 pub const Domain = operation_metadata.Domain;
 pub const RequestCopyRule = operation_metadata.RequestCopyRule;
+pub const PortInvocation = operation_metadata.PortInvocation;
 
 pub const DispatchHandler = *const fn (
     port: *component_port.KernelPort,
@@ -25,6 +26,11 @@ pub const DispatchHandler = *const fn (
 pub const Operation = struct {
     operation: abi.NativeOperation,
     domain: Domain,
+    request_type_name: []const u8,
+    response_type_name: []const u8,
+    handler_name: []const u8,
+    port_method_name: []const u8,
+    port_invocation: PortInvocation,
     Request: type,
     Response: type,
     handler: DispatchHandler,
@@ -43,47 +49,51 @@ pub const Operation = struct {
     }
 };
 
-const Binding = struct {
-    Request: type,
-    Response: type,
-    handler: DispatchHandler,
-};
+fn requestType(comptime type_name: []const u8) type {
+    if (!@hasDecl(component_port, type_name)) {
+        @compileError("missing component-port request type " ++ type_name);
+    }
+    return @field(component_port, type_name);
+}
 
-fn bindingFor(comptime operation: abi.NativeOperation) Binding {
-    return switch (operation) {
-        .task_create => .{ .Request = component_port.TaskCreateRequest, .Response = abi.TaskDescriptor, .handler = task_syscalls.dispatchTaskCreate },
-        .task_terminate => .{ .Request = component_port.TaskTerminateRequest, .Response = abi.BoolResponse, .handler = task_syscalls.dispatchTaskTerminate },
-        .endpoint_create => .{ .Request = component_port.EndpointCreateRequest, .Response = abi.EndpointCreateResponse, .handler = endpoint_syscalls.dispatchEndpointCreate },
-        .endpoint_connect => .{ .Request = component_port.EndpointConnectRequest, .Response = abi.EndpointDescriptor, .handler = endpoint_syscalls.dispatchEndpointConnect },
-        .endpoint_send => .{ .Request = component_port.EndpointSendRequest, .Response = void, .handler = endpoint_syscalls.dispatchEndpointSend },
-        .endpoint_recv => .{ .Request = component_port.EndpointRecvRequest, .Response = abi.EndpointRecvResponse, .handler = endpoint_syscalls.dispatchEndpointRecv },
-        .capability_mint => .{ .Request = component_port.CapabilityMintRequest, .Response = abi.CapabilityDescriptor, .handler = capability_syscalls.dispatchCapabilityMint },
-        .capability_derive => .{ .Request = component_port.CapabilityDeriveRequest, .Response = abi.CapabilityDescriptor, .handler = capability_syscalls.dispatchCapabilityDerive },
-        .capability_pass => .{ .Request = component_port.CapabilityPassRequest, .Response = abi.CapabilityDescriptor, .handler = capability_syscalls.dispatchCapabilityPass },
-        .capability_revoke => .{ .Request = component_port.CapabilityRevokeRequest, .Response = void, .handler = capability_syscalls.dispatchCapabilityRevoke },
-        .capability_query => .{ .Request = component_port.CapabilityQueryRequest, .Response = abi.CapabilityDescriptor, .handler = capability_syscalls.dispatchCapabilityQuery },
-        .shared_memory_create => .{ .Request = component_port.SharedMemoryCreateRequest, .Response = abi.SharedMemoryCreateResponse, .handler = shared_memory_syscalls.dispatchSharedMemoryCreate },
-        .shared_memory_map => .{ .Request = component_port.SharedMemoryMapRequest, .Response = abi.SharedMemoryDescriptor, .handler = shared_memory_syscalls.dispatchSharedMemoryMap },
-        .shared_memory_unmap => .{ .Request = component_port.SharedMemoryUnmapRequest, .Response = abi.BoolResponse, .handler = shared_memory_syscalls.dispatchSharedMemoryUnmap },
-        .shared_memory_revoke => .{ .Request = component_port.SharedMemoryRevokeRequest, .Response = abi.SharedMemoryDescriptor, .handler = shared_memory_syscalls.dispatchSharedMemoryRevoke },
-        .time_query => .{ .Request = component_port.TimeQueryRequest, .Response = abi.TimeQueryResponse, .handler = task_syscalls.dispatchTimeQuery },
-        .resource_query => .{ .Request = component_port.ResourceQueryRequest, .Response = abi.ResourceDescriptor, .handler = task_syscalls.dispatchResourceQuery },
-        .accounting_query => .{ .Request = component_port.AccountingQueryRequest, .Response = abi.AccountingDescriptor, .handler = task_syscalls.dispatchAccountingQuery },
-        .device_describe => .{ .Request = component_port.DeviceDescribeRequest, .Response = abi.DeviceDescriptor, .handler = device_syscalls.dispatchDeviceDescribe },
-        .device_mmio_window => .{ .Request = component_port.DeviceMmioWindowRequest, .Response = abi.DeviceMmioWindowDescriptor, .handler = device_syscalls.dispatchDeviceMmioWindow },
-        .device_port_read => .{ .Request = component_port.DevicePortReadRequest, .Response = abi.DevicePortReadResponse, .handler = device_syscalls.dispatchDevicePortRead },
-        .device_port_write => .{ .Request = component_port.DevicePortWriteRequest, .Response = void, .handler = device_syscalls.dispatchDevicePortWrite },
+fn responseType(comptime type_name: []const u8) type {
+    if (std.mem.eql(u8, type_name, "void")) return void;
+    if (!@hasDecl(abi, type_name)) {
+        @compileError("missing syscall ABI response type " ++ type_name);
+    }
+    return @field(abi, type_name);
+}
+
+fn handlerForModule(comptime module: anytype, comptime handler_name: []const u8) DispatchHandler {
+    if (!@hasDecl(module, handler_name)) {
+        @compileError("missing syscall dispatch handler " ++ handler_name);
+    }
+    return @field(module, handler_name);
+}
+
+fn handlerFor(comptime descriptor: operation_metadata.Descriptor) DispatchHandler {
+    return switch (descriptor.domain) {
+        .task => handlerForModule(task_syscalls, descriptor.binding.handler_name),
+        .endpoint => handlerForModule(endpoint_syscalls, descriptor.binding.handler_name),
+        .capability => handlerForModule(capability_syscalls, descriptor.binding.handler_name),
+        .shared_memory => handlerForModule(shared_memory_syscalls, descriptor.binding.handler_name),
+        .device => handlerForModule(device_syscalls, descriptor.binding.handler_name),
     };
 }
 
 fn operationFromMetadata(comptime descriptor: operation_metadata.Descriptor) Operation {
-    const binding = bindingFor(descriptor.operation);
+    const binding = descriptor.binding;
     return .{
         .operation = descriptor.operation,
         .domain = descriptor.domain,
-        .Request = binding.Request,
-        .Response = binding.Response,
-        .handler = binding.handler,
+        .request_type_name = binding.request_type_name,
+        .response_type_name = binding.response_type_name,
+        .handler_name = binding.handler_name,
+        .port_method_name = binding.port_method_name,
+        .port_invocation = binding.port_invocation,
+        .Request = requestType(binding.request_type_name),
+        .Response = responseType(binding.response_type_name),
+        .handler = handlerFor(descriptor),
         .request_copy = descriptor.request_copy,
         .required_right = descriptor.required_right,
         .target_kind = descriptor.target_kind,
@@ -114,13 +124,26 @@ test "single syscall ABI declaration covers every native operation" {
     try std.testing.expectEqual(operation_metadata.operations.len, operations.len);
     inline for (std.meta.fields(abi.NativeOperation)) |field| {
         const operation: abi.NativeOperation = @enumFromInt(field.value);
-        const declaration = declarationFor(operation);
-        const kernel_declaration = operation_metadata.declarationFor(operation);
+        const declaration = comptime declarationFor(operation);
+        const kernel_declaration = comptime operation_metadata.declarationFor(operation);
         try std.testing.expectEqual(operation, declaration.operation);
         try std.testing.expectEqual(kernel_declaration.required_right, declaration.required_right);
         try std.testing.expectEqual(kernel_declaration.domain, declaration.domain);
         try std.testing.expectEqual(kernel_declaration.request_copy, declaration.request_copy);
+        try std.testing.expectEqualStrings(kernel_declaration.binding.request_type_name, declaration.request_type_name);
+        try std.testing.expectEqualStrings(kernel_declaration.binding.response_type_name, declaration.response_type_name);
+        try std.testing.expectEqualStrings(kernel_declaration.binding.handler_name, declaration.handler_name);
+        try std.testing.expectEqualStrings(kernel_declaration.binding.port_method_name, declaration.port_method_name);
+        try std.testing.expectEqual(kernel_declaration.binding.port_invocation, declaration.port_invocation);
         try std.testing.expect(declaration.requestSize() >= @sizeOf(abi.RequestHeader));
+        comptime {
+            if (declaration.Request != requestType(kernel_declaration.binding.request_type_name)) {
+                @compileError("request type mismatch for " ++ @tagName(operation));
+            }
+            if (declaration.Response != responseType(kernel_declaration.binding.response_type_name)) {
+                @compileError("response type mismatch for " ++ @tagName(operation));
+            }
+        }
     }
     try std.testing.expect(switch (declarationFor(.endpoint_send).target_kind) {
         .fixed => |kind| kind == .endpoint,

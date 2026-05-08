@@ -1,7 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const binary_cursor = @import("../core/binary_cursor.zig");
-const fixed_table = @import("../core/fixed_table.zig");
 const ids = @import("../core/ids.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("object_store.zig");
@@ -429,10 +428,9 @@ fn buildDeltaLog(
     for (store.dirtyVersionIds()) |version_id| {
         const version_record = store.version(version_id) orelse continue;
         if (version_record.id.raw() <= root.last_version_id) continue;
-        if (store.blob(version_record.blob_address)) |blob| {
-            try appendBlobChunks(&writer, store, blob.*);
-            try appendBlobRecord(&writer, blob.*);
-        }
+        try appendVersionPayloadChunks(&writer, store, version_record);
+        const blob = store.blob(version_record.blob_address) orelse return error.CorruptImage;
+        try appendBlobRecord(&writer, blob.*);
         try appendVersionRecord(&writer, version_record.*);
     }
 
@@ -574,11 +572,14 @@ fn appendVersionRecord(writer: *CursorWriter, record: object_store.VersionRecord
     try finishRecord(writer, header_offset);
 }
 
-fn appendBlobChunks(writer: *CursorWriter, store: *const object_store.Store, record: object_store.BlobRecord) Error!void {
-    const chunk_count: usize = @intCast(record.chunk_count);
-    for (record.chunks[0..chunk_count]) |chunk_ref| {
-        const chunk = store.chunk(chunk_ref.address) orelse return error.CorruptImage;
-        try appendChunkRecord(writer, chunk.*);
+fn appendVersionPayloadChunks(
+    writer: *CursorWriter,
+    store: *object_store.Store,
+    version_record: *const object_store.VersionRecord,
+) Error!void {
+    var cursor = store.versionChunkCursor(version_record) catch return error.CorruptImage;
+    while (cursor.next() catch return error.CorruptImage) |chunk| {
+        try appendPayloadChunkRecord(writer, chunk);
     }
 }
 
@@ -675,6 +676,14 @@ fn appendBlobRecord(writer: *CursorWriter, record: object_store.BlobRecord) Erro
 fn appendChunkRecord(writer: *CursorWriter, record: object_store.ChunkRecord) Error!void {
     const header_offset = try beginRecord(writer, .chunk_state);
     try encodeChunkBody(writer, record);
+    try finishRecord(writer, header_offset);
+}
+
+fn appendPayloadChunkRecord(writer: *CursorWriter, chunk: object_store.PayloadChunk) Error!void {
+    const header_offset = try beginRecord(writer, .chunk_state);
+    try writer.writeBytes(&chunk.address);
+    try writer.writeU16(@intCast(chunk.bytes.len));
+    try writer.writeBytes(chunk.bytes);
     try finishRecord(writer, header_offset);
 }
 
@@ -799,16 +808,15 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
     const slot_index = if (store.blobSlotIndex(address)) |existing_index|
         existing_index
     else
-        fixed_table.firstFreeSlotIndex(object_store.BlobSlot, object_store.MAX_BLOBS, &store.blobs) orelse return error.CorruptImage;
-    const slot = &store.blobs[slot_index];
-    slot.in_use = true;
+        store.reserveBlobSlot(address) orelse return error.CorruptImage;
+    const slot = store.blobSlotAt(slot_index);
     slot.blob.address = address;
     slot.blob.merkle_root = merkle_root;
     slot.blob.payload_len = payload_len;
     slot.blob.ref_count = ref_count;
     slot.blob.chunk_count = @intCast(chunk_count);
     slot.blob.chunks = chunk_refs;
-    store.blob_index.insert(indexIdForBytes(&address), slot_index);
+    slot.blob.manifest_verified = false;
 }
 
 fn applyChunkRecord(store: *object_store.Store, payload: []const u8) Error!void {
@@ -922,12 +930,16 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
         try writer.writeU16(slot.object.version_count);
     }
 
-    for (store.chunks) |slot| {
+    var chunk_slot_index: usize = 0;
+    while (chunk_slot_index < store.chunkSlotCapacity()) : (chunk_slot_index += 1) {
+        const slot = store.chunkSlotAtConst(chunk_slot_index).*;
         if (!slot.in_use) continue;
         try encodeChunkBody(&writer, slot.chunk);
     }
 
-    for (store.blobs) |slot| {
+    var blob_slot_index: usize = 0;
+    while (blob_slot_index < store.blobSlotCapacity()) : (blob_slot_index += 1) {
+        const slot = store.blobSlotAtConst(blob_slot_index).*;
         if (!slot.in_use) continue;
         try encodeBlobBody(&writer, slot.blob);
     }

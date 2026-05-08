@@ -1,7 +1,6 @@
 const std = @import("std");
 const binary_cursor = @import("../core/binary_cursor.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
-const fixed_table = @import("../core/fixed_table.zig");
 pub const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -13,8 +12,8 @@ pub const MAX_VERSIONS: usize = 512;
 pub const MAX_BLOBS: usize = 512;
 pub const PAGE_SIZE_BYTES: usize = 4096;
 pub const MAX_CHUNK_BYTES: usize = PAGE_SIZE_BYTES;
-pub const MAX_BLOB_CHUNKS: usize = 16;
-pub const MAX_CHUNKS: usize = 128;
+pub const MAX_BLOB_CHUNKS: usize = 24;
+pub const MAX_CHUNKS: usize = 192;
 pub const MAX_BLOB_BYTES: usize = MAX_CHUNK_BYTES * MAX_BLOB_CHUNKS;
 pub const MAX_PAYLOAD_BYTES: usize = MAX_BLOB_BYTES;
 pub const MAX_VERSION_PARENTS: usize = 2;
@@ -23,6 +22,9 @@ const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
 const CHUNK_INDEX_CAPACITY: usize = MAX_CHUNKS * 2;
+const BLOB_PAGE_SIZE: usize = 64;
+const BLOB_PAGE_COUNT: usize = MAX_BLOBS / BLOB_PAGE_SIZE;
+const CHUNK_PAGE_SIZE: usize = 64;
 
 pub const StoreConfig = struct {
     max_objects: usize = MAX_OBJECTS,
@@ -39,8 +41,9 @@ pub const StoreConfig = struct {
         if (config.max_chunks == 0) @compileError("object store requires at least one chunk slot");
         if (config.object_index_capacity < config.max_objects) @compileError("object index capacity must cover object slots");
         if (config.version_index_capacity < config.max_versions) @compileError("version index capacity must cover version slots");
-        if (config.blob_index_capacity < config.max_versions) @compileError("blob index capacity must cover version blobs");
+        if (config.blob_index_capacity < MAX_BLOBS) @compileError("blob index capacity must cover blob slabs");
         if (config.chunk_index_capacity < config.max_chunks) @compileError("chunk index capacity must cover chunk slots");
+        if (config.max_chunks % CHUNK_PAGE_SIZE != 0) @compileError("chunk slab capacity must be a whole number of pages");
     }
 };
 
@@ -155,6 +158,7 @@ pub const BlobRecord = struct {
     chunk_count: u16,
     chunks: [MAX_BLOB_CHUNKS]ChunkRef,
     ref_count: u16,
+    manifest_verified: bool = false,
 };
 
 pub const ChunkRecord = struct {
@@ -182,6 +186,18 @@ pub const Error = error{
     BlobNotFound,
     BlobTableFull,
     CorruptBlob,
+};
+
+pub const PayloadChunk = struct {
+    index: usize,
+    offset: usize,
+    address: ChunkAddress,
+    bytes: []const u8,
+};
+
+pub const PayloadTransferSummary = struct {
+    bytes_transferred: usize = 0,
+    chunks_transferred: usize = 0,
 };
 
 pub const SignMetadataError = error{ ContentTypeTooLong, LabelTooLong } || anyerror;
@@ -223,6 +239,7 @@ pub const BlobSlot = struct {
         .chunk_count = 0,
         .chunks = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS,
         .ref_count = 0,
+        .manifest_verified = false,
     },
 };
 
@@ -272,19 +289,47 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         const STORE_VERSION_INDEX_CAPACITY = config.version_index_capacity;
         const STORE_BLOB_INDEX_CAPACITY = config.blob_index_capacity;
         const STORE_CHUNK_INDEX_CAPACITY = config.chunk_index_capacity;
+        const STORE_CHUNK_PAGE_COUNT = config.max_chunks / CHUNK_PAGE_SIZE;
         const ObjectArena = indexed_arena.IndexedArenaWithKey(ids.ObjectId, ObjectSlot, MAX_STORE_OBJECTS, STORE_OBJECT_INDEX_CAPACITY, objectSlotId);
         const VersionArena = indexed_arena.IndexedArenaWithKey(ids.VersionId, VersionSlot, MAX_STORE_VERSIONS, STORE_VERSION_INDEX_CAPACITY, versionSlotId);
-        const BlobIndex = indexed_arena.UniqueIndex(STORE_BLOB_INDEX_CAPACITY);
-        const ChunkIndex = indexed_arena.UniqueIndex(STORE_CHUNK_INDEX_CAPACITY);
+        const BlobArena = indexed_arena.PagedIndexedArena(BlobSlot, BLOB_PAGE_SIZE, BLOB_PAGE_COUNT, STORE_BLOB_INDEX_CAPACITY, blobSlotIndexId);
+        const ChunkArena = indexed_arena.PagedIndexedArena(ChunkSlot, CHUNK_PAGE_SIZE, STORE_CHUNK_PAGE_COUNT, STORE_CHUNK_INDEX_CAPACITY, chunkSlotIndexId);
+
+        pub const VersionChunkCursor = struct {
+            store: *const Self,
+            blob: *const BlobRecord,
+            chunk_count: usize,
+            next_chunk_index: usize = 0,
+            byte_offset: usize = 0,
+
+            pub fn next(self: *VersionChunkCursor) Error!?PayloadChunk {
+                if (self.next_chunk_index >= self.chunk_count) return null;
+                const chunk_ref = self.blob.chunks[self.next_chunk_index];
+                if (chunk_ref.slot_index >= self.store.chunkSlotCapacity()) return error.CorruptBlob;
+                const chunk_slot = self.store.chunkSlotAtConst(chunk_ref.slot_index);
+                if (!chunk_slot.in_use) return error.BlobNotFound;
+                const chunk_record = &chunk_slot.chunk;
+                if (chunk_record.payload_len != chunk_ref.payload_len) return error.CorruptBlob;
+                if (!std.mem.eql(u8, &chunk_record.address, &chunk_ref.address)) return error.CorruptBlob;
+
+                const payload_chunk = PayloadChunk{
+                    .index = self.next_chunk_index,
+                    .offset = self.byte_offset,
+                    .address = chunk_ref.address,
+                    .bytes = chunk_record.chunkSlice(),
+                };
+                self.next_chunk_index += 1;
+                self.byte_offset += payload_chunk.bytes.len;
+                return payload_chunk;
+            }
+        };
 
         next_object_id: u64 = 1,
         next_version_id: u64 = 1,
         objects: ObjectArena = ObjectArena.init(),
         versions: VersionArena = VersionArena.init(),
-        blob_index: BlobIndex = BlobIndex.init(),
-        chunk_index: ChunkIndex = ChunkIndex.init(),
-        blobs: [MAX_BLOBS]BlobSlot = [_]BlobSlot{BlobSlot{}} ** MAX_BLOBS,
-        chunks: [MAX_STORE_CHUNKS]ChunkSlot = [_]ChunkSlot{ChunkSlot{}} ** MAX_STORE_CHUNKS,
+        blobs: BlobArena = BlobArena.init(),
+        chunks: ChunkArena = ChunkArena.init(),
         payload_read_buffer: [MAX_PAYLOAD_BYTES]u8 = undefined,
 
         pub fn init() Self {
@@ -296,32 +341,15 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             self.next_version_id = 1;
             self.objects.reset();
             self.versions.reset();
-            self.blob_index.reset();
-            self.chunk_index.reset();
-            for (&self.blobs) |*slot| {
-                if (!slot.in_use) continue;
-                slot.* = .{};
-            }
-            for (&self.chunks) |*slot| {
-                if (!slot.in_use) continue;
-                slot.* = .{};
-            }
+            self.blobs.reset();
+            self.chunks.reset();
         }
 
         pub fn rebuildIndexes(self: *Self) void {
             self.objects.rebuildPrimaryIndex();
             self.versions.rebuildPrimaryIndex();
-            self.blob_index.reset();
-            self.chunk_index.reset();
-
-            for (self.blobs, 0..) |slot, slot_index| {
-                if (!slot.in_use) continue;
-                self.blob_index.insert(indexIdForBytes(&slot.blob.address), slot_index);
-            }
-            for (self.chunks, 0..) |slot, slot_index| {
-                if (!slot.in_use) continue;
-                self.chunk_index.insert(indexIdForBytes(&slot.chunk.address), slot_index);
-            }
+            self.blobs.rebuildPrimaryIndex();
+            self.chunks.rebuildPrimaryIndex();
         }
 
         pub fn putVersion(self: *Self, request: PutRequest) Error!PutResult {
@@ -424,72 +452,105 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             return self.versionPayloadInto(version_record, self.payload_read_buffer[0..version_record.payload_len]);
         }
 
+        pub fn versionChunkCursor(self: *Self, version_record: *const VersionRecord) Error!VersionChunkCursor {
+            const blob_record = try self.verifiedBlobManifest(version_record);
+            return .{
+                .store = self,
+                .blob = blob_record,
+                .chunk_count = @intCast(blob_record.chunk_count),
+            };
+        }
+
+        pub fn transferVersionPayload(
+            self: *Self,
+            version_record: *const VersionRecord,
+            out: []u8,
+        ) Error!PayloadTransferSummary {
+            if (out.len < version_record.payload_len) return error.PayloadTooLarge;
+            var cursor = try self.versionChunkCursor(version_record);
+            var summary = PayloadTransferSummary{};
+            while (try cursor.next()) |payload_chunk| {
+                const next_offset = payload_chunk.offset + payload_chunk.bytes.len;
+                if (next_offset > version_record.payload_len or next_offset > out.len) return error.CorruptBlob;
+                copyBytes(out[payload_chunk.offset..next_offset], payload_chunk.bytes);
+                summary.bytes_transferred = next_offset;
+                summary.chunks_transferred += 1;
+            }
+            if (summary.bytes_transferred != version_record.payload_len) return error.CorruptBlob;
+            return summary;
+        }
+
         pub fn versionPayloadInto(
             self: *Self,
             version_record: *const VersionRecord,
             out: []u8,
         ) Error![]const u8 {
-            if (out.len < version_record.payload_len) return error.PayloadTooLarge;
-            const blob_record = self.blob(version_record.blob_address) orelse return error.BlobNotFound;
-            if (blob_record.payload_len != version_record.payload_len) return error.CorruptBlob;
-            if (!std.mem.eql(u8, &blob_record.address, &version_record.blob_address)) return error.CorruptBlob;
-            if (blob_record.chunk_count != version_record.chunk_count) return error.CorruptBlob;
-            const blob_chunk_count: usize = @intCast(blob_record.chunk_count);
-            if (!std.mem.eql(u8, &computeBlobMerkleRoot(blob_record.chunks[0..blob_chunk_count]), &blob_record.merkle_root)) {
-                return error.CorruptBlob;
-            }
-            if (!std.mem.eql(u8, &computeBlobManifestAddress(blob_record.payload_len, blob_record.chunks[0..blob_chunk_count]), &version_record.blob_address)) {
-                return error.CorruptBlob;
-            }
-
-            var write_offset: usize = 0;
-            for (blob_record.chunks[0..blob_chunk_count]) |chunk_ref| {
-                const chunk_record = self.chunk(chunk_ref.address) orelse return error.BlobNotFound;
-                if (chunk_record.payload_len != chunk_ref.payload_len) return error.CorruptBlob;
-                if (!std.mem.eql(u8, &chunk_record.address, &chunk_ref.address)) return error.CorruptBlob;
-                if (!std.mem.eql(u8, &computeChunkAddress(chunk_record.chunkSlice()), &chunk_ref.address)) return error.CorruptBlob;
-                const chunk_payload_len: usize = @intCast(chunk_record.payload_len);
-                const next_offset = write_offset + chunk_payload_len;
-                if (next_offset > version_record.payload_len or next_offset > out.len) return error.CorruptBlob;
-                copyBytes(out[write_offset..next_offset], chunk_record.chunkSlice());
-                write_offset = next_offset;
-            }
-            if (write_offset != version_record.payload_len) return error.CorruptBlob;
-            return out[0..write_offset];
+            const summary = try self.transferVersionPayload(version_record, out);
+            return out[0..summary.bytes_transferred];
         }
 
         pub fn blob(self: *const Self, address: BlobAddress) ?*const BlobRecord {
             const slot_index = self.blobSlotIndex(address) orelse return null;
-            const slot = &self.blobs[slot_index];
+            const slot = self.blobSlotAtConst(slot_index);
             return &slot.blob;
         }
 
         pub fn chunk(self: *const Self, address: ChunkAddress) ?*const ChunkRecord {
             const slot_index = self.chunkSlotIndex(address) orelse return null;
-            const slot = &self.chunks[slot_index];
+            const slot = self.chunkSlotAtConst(slot_index);
             return &slot.chunk;
         }
 
         pub fn blobSlotIndex(self: *const Self, address: BlobAddress) ?usize {
-            if (self.indexedBlobSlot(address)) |slot| {
-                return (@intFromPtr(slot) - @intFromPtr(&self.blobs[0])) / @sizeOf(BlobSlot);
-            }
-            return null;
+            const slot_index = self.blobs.slotIndexOf(indexIdForBytes(&address)) orelse return null;
+            const slot = self.blobSlotAtConst(slot_index);
+            if (!blobSlotMatchesAddress(address, slot)) native_util.impossibleByInvariant("blob address index points at the wrong blob slot");
+            return slot_index;
         }
 
         pub fn chunkSlotIndex(self: *const Self, address: ChunkAddress) ?usize {
-            if (self.indexedChunkSlot(address)) |slot| {
-                return (@intFromPtr(slot) - @intFromPtr(&self.chunks[0])) / @sizeOf(ChunkSlot);
-            }
-            return null;
+            const slot_index = self.chunks.slotIndexOf(indexIdForBytes(&address)) orelse return null;
+            const slot = self.chunkSlotAtConst(slot_index);
+            if (!chunkSlotMatchesAddress(address, slot)) native_util.impossibleByInvariant("chunk address index points at the wrong chunk slot");
+            return slot_index;
         }
 
         pub fn blobCount(self: *const Self) usize {
-            return fixed_table.countInUse(BlobSlot, MAX_BLOBS, &self.blobs);
+            return self.blobs.countInUse();
         }
 
         pub fn chunkCount(self: *const Self) usize {
-            return fixed_table.countInUse(ChunkSlot, MAX_STORE_CHUNKS, &self.chunks);
+            return self.chunks.countInUse();
+        }
+
+        pub fn blobSlotAt(self: *Self, slot_index: usize) *BlobSlot {
+            return self.blobs.slotAt(slot_index);
+        }
+
+        pub fn reserveBlobSlot(self: *Self, address: BlobAddress) ?usize {
+            return self.blobs.reserveIndex(indexIdForBytes(&address));
+        }
+
+        pub fn blobSlotAtConst(self: *const Self, slot_index: usize) *const BlobSlot {
+            return self.blobs.slotAtConst(slot_index);
+        }
+
+        pub fn chunkSlotAt(self: *Self, slot_index: usize) *ChunkSlot {
+            return self.chunks.slotAt(slot_index);
+        }
+
+        pub fn chunkSlotAtConst(self: *const Self, slot_index: usize) *const ChunkSlot {
+            return self.chunks.slotAtConst(slot_index);
+        }
+
+        pub fn blobSlotCapacity(self: *const Self) usize {
+            _ = self;
+            return MAX_BLOBS;
+        }
+
+        pub fn chunkSlotCapacity(self: *const Self) usize {
+            _ = self;
+            return MAX_STORE_CHUNKS;
         }
 
         pub fn objectCount(self: *const Self) usize {
@@ -573,21 +634,20 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const chunk_count = try self.putPayloadChunks(payload, &chunk_refs);
 
             if (self.blobSlotIndex(address)) |slot_index| {
-                const slot = &self.blobs[slot_index];
+                const slot = self.blobSlotAt(slot_index);
                 if (!blobManifestMatches(slot.blob, payload.len, chunk_refs[0..chunk_count])) return error.CorruptBlob;
                 slot.blob.ref_count +|= 1;
                 return slot_index;
             }
-            const slot_index = fixed_table.firstFreeSlotIndex(BlobSlot, MAX_BLOBS, &self.blobs) orelse return error.BlobTableFull;
-            const slot = &self.blobs[slot_index];
-            slot.in_use = true;
+            const slot_index = self.blobs.reserveIndex(indexIdForBytes(&address)) orelse return error.BlobTableFull;
+            const slot = self.blobSlotAt(slot_index);
             slot.blob.address = address;
             slot.blob.merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
             slot.blob.payload_len = payload.len;
             slot.blob.chunk_count = @intCast(chunk_count);
             slot.blob.chunks = chunk_refs;
             slot.blob.ref_count = 1;
-            self.blob_index.insert(indexIdForBytes(&address), slot_index);
+            slot.blob.manifest_verified = false;
             return slot_index;
         }
 
@@ -615,48 +675,60 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             if (payload.len > MAX_CHUNK_BYTES) return error.PayloadTooLarge;
             if (!std.mem.eql(u8, &computeChunkAddress(payload), &address)) return error.CorruptBlob;
             if (self.chunkSlotIndex(address)) |slot_index| {
-                const slot = &self.chunks[slot_index];
+                const slot = self.chunkSlotAt(slot_index);
                 if (slot.chunk.payload_len != payload.len or !std.mem.eql(u8, slot.chunk.chunkSlice(), payload)) return error.CorruptBlob;
                 return slot_index;
             }
 
-            const slot_index = fixed_table.firstFreeSlotIndex(ChunkSlot, MAX_STORE_CHUNKS, &self.chunks) orelse return error.BlobTableFull;
-            const slot = &self.chunks[slot_index];
-            slot.in_use = true;
+            const slot_index = self.chunks.reserveIndex(indexIdForBytes(&address)) orelse return error.BlobTableFull;
+            const slot = self.chunkSlotAt(slot_index);
             slot.chunk.address = address;
             slot.chunk.payload_len = @intCast(payload.len);
             @memset(slot.chunk.payload[0..], 0);
             copyBytes(slot.chunk.payload[0..payload.len], payload);
-            self.chunk_index.insert(indexIdForBytes(&address), slot_index);
             return slot_index;
         }
 
-        fn indexedBlobSlot(self: *const Self, address: BlobAddress) ?*const BlobSlot {
-            return fixed_table.findIndexedConstSlot(
-                BlobSlot,
-                MAX_BLOBS,
-                STORE_BLOB_INDEX_CAPACITY,
-                &self.blobs,
-                &self.blob_index.slots,
-                indexIdForBytes(&address),
-                blobSlotIndexId,
-                address,
-                blobSlotMatchesAddress,
-            );
+        pub fn verifiedBlobManifestCount(self: *const Self) usize {
+            var count: usize = 0;
+            var slot_index: usize = 0;
+            while (slot_index < self.blobSlotCapacity()) : (slot_index += 1) {
+                const slot = self.blobSlotAtConst(slot_index);
+                if (slot.in_use and slot.blob.manifest_verified) count += 1;
+            }
+            return count;
         }
 
-        fn indexedChunkSlot(self: *const Self, address: ChunkAddress) ?*const ChunkSlot {
-            return fixed_table.findIndexedConstSlot(
-                ChunkSlot,
-                MAX_STORE_CHUNKS,
-                STORE_CHUNK_INDEX_CAPACITY,
-                &self.chunks,
-                &self.chunk_index.slots,
-                indexIdForBytes(&address),
-                chunkSlotIndexId,
-                address,
-                chunkSlotMatchesAddress,
-            );
+        fn verifiedBlobManifest(self: *Self, version_record: *const VersionRecord) Error!*const BlobRecord {
+            if (version_record.blob_slot_index >= self.blobSlotCapacity()) return error.CorruptBlob;
+            const slot = self.blobSlotAt(version_record.blob_slot_index);
+            if (!slot.in_use) return error.BlobNotFound;
+            if (!std.mem.eql(u8, &slot.blob.address, &version_record.blob_address)) return error.CorruptBlob;
+            if (slot.blob.payload_len != version_record.payload_len) return error.CorruptBlob;
+            if (slot.blob.chunk_count != version_record.chunk_count) return error.CorruptBlob;
+
+            if (slot.blob.manifest_verified) return &slot.blob;
+
+            const blob_chunk_count: usize = @intCast(slot.blob.chunk_count);
+            if (!std.mem.eql(u8, &computeBlobMerkleRoot(slot.blob.chunks[0..blob_chunk_count]), &slot.blob.merkle_root)) {
+                return error.CorruptBlob;
+            }
+            if (!std.mem.eql(u8, &computeBlobManifestAddress(slot.blob.payload_len, slot.blob.chunks[0..blob_chunk_count]), &version_record.blob_address)) {
+                return error.CorruptBlob;
+            }
+
+            for (slot.blob.chunks[0..blob_chunk_count]) |chunk_ref| {
+                if (chunk_ref.slot_index >= self.chunkSlotCapacity()) return error.CorruptBlob;
+                const chunk_slot = self.chunkSlotAtConst(chunk_ref.slot_index);
+                if (!chunk_slot.in_use) return error.BlobNotFound;
+                const chunk_record = &chunk_slot.chunk;
+                if (chunk_record.payload_len != chunk_ref.payload_len) return error.CorruptBlob;
+                if (!std.mem.eql(u8, &chunk_record.address, &chunk_ref.address)) return error.CorruptBlob;
+                if (!std.mem.eql(u8, &computeChunkAddress(chunk_record.chunkSlice()), &chunk_ref.address)) return error.CorruptBlob;
+            }
+
+            slot.blob.manifest_verified = true;
+            return &slot.blob;
         }
 
         fn markObjectDirty(self: *Self, object_id: ids.ObjectId) void {
@@ -973,8 +1045,8 @@ test "object store indexes full blob addresses authoritatively" {
     try std.testing.expectEqual(first_slot, first_again);
     try std.testing.expectEqual(@as(usize, 2), store.blobCount());
     try std.testing.expectEqual(@as(usize, 2), store.chunkCount());
-    try std.testing.expectEqual(@as(u16, 2), store.blobs[first_slot].blob.ref_count);
-    try std.testing.expectEqual(@as(u16, 1), store.blobs[second_slot].blob.ref_count);
+    try std.testing.expectEqual(@as(u16, 2), store.blobSlotAtConst(first_slot).blob.ref_count);
+    try std.testing.expectEqual(@as(u16, 1), store.blobSlotAtConst(second_slot).blob.ref_count);
     const first_blob = store.blob(first_address).?;
     const second_blob = store.blob(second_address).?;
     try std.testing.expectEqual(@as(u16, 1), first_blob.chunk_count);
@@ -1010,6 +1082,51 @@ test "object store streams page-sized chunks into Merkle-addressed blob manifest
     const chunk_count: usize = @intCast(blob.chunk_count);
     try std.testing.expect(std.mem.eql(u8, &blob.merkle_root, &computeBlobMerkleRoot(blob.chunks[0..chunk_count])));
     try std.testing.expect(std.mem.eql(u8, &blob.address, &computeBlobManifestAddress(blob.payload_len, blob.chunks[0..chunk_count])));
+    try std.testing.expectEqual(@as(usize, 0), store.verifiedBlobManifestCount());
+
+    var cursor = try store.versionChunkCursor(version_record);
+    try std.testing.expectEqual(@as(usize, 1), store.verifiedBlobManifestCount());
+    var streamed_len: usize = 0;
+    var streamed_chunks: usize = 0;
+    while (try cursor.next()) |chunk| {
+        try std.testing.expectEqual(streamed_len, chunk.offset);
+        try std.testing.expectEqualSlices(u8, payload[chunk.offset .. chunk.offset + chunk.bytes.len], chunk.bytes);
+        streamed_len += chunk.bytes.len;
+        streamed_chunks += 1;
+    }
+    try std.testing.expectEqual(payload.len, streamed_len);
+    try std.testing.expectEqual(chunk_count, streamed_chunks);
+
+    var out: [payload.len]u8 = undefined;
+    const transferred = try store.transferVersionPayload(version_record, &out);
+    try std.testing.expectEqual(payload.len, transferred.bytes_transferred);
+    try std.testing.expectEqual(chunk_count, transferred.chunks_transferred);
+    try std.testing.expectEqualSlices(u8, &payload, out[0..transferred.bytes_transferred]);
+    try std.testing.expectEqual(@as(usize, 1), store.verifiedBlobManifestCount());
+}
+
+test "object store accepts payloads beyond the old sixteen-page ceiling" {
+    var store = Store.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-paged-storage-key",
+        .seed = [_]u8{0x47} ** 32,
+    };
+    var payload: [PAGE_SIZE_BYTES * 16 + 17]u8 = undefined;
+    for (&payload, 0..) |*byte, index| {
+        byte.* = @intCast((index * 17 + 3) & 0xFF);
+    }
+
+    const result = try store.putVersion(.{
+        .preferred_object_id = ids.object(914),
+        .object_type = .model_artifact,
+        .payload = &payload,
+        .metadata = try signMetadata(signer, "model-shard", "application/octet-stream", .model_artifact, &payload, 14),
+    });
+
+    const version_record = store.version(result.version_id).?;
+    const blob = store.blob(version_record.blob_address).?;
+    try std.testing.expectEqual(@as(u16, 17), blob.chunk_count);
+    try std.testing.expectEqual(payload.len, blob.payload_len);
 
     var out: [payload.len]u8 = undefined;
     const loaded = try store.versionPayloadInto(version_record, &out);
@@ -1031,8 +1148,8 @@ test "object store verifies blob backend corruption before serving payloads" {
     });
 
     const version_record = store.version(result.version_id).?;
-    const chunk_slot_index = store.blobs[version_record.blob_slot_index].blob.chunks[0].slot_index;
-    store.chunks[chunk_slot_index].chunk.payload[0] ^= 0xFF;
+    const chunk_slot_index = store.blobSlotAtConst(version_record.blob_slot_index).blob.chunks[0].slot_index;
+    store.chunkSlotAt(chunk_slot_index).chunk.payload[0] ^= 0xFF;
     try std.testing.expectError(error.CorruptBlob, store.versionPayload(version_record));
 }
 
@@ -1101,7 +1218,6 @@ test "object store capacity is configurable" {
         .max_versions = 1,
         .object_index_capacity = 2,
         .version_index_capacity = 2,
-        .blob_index_capacity = 2,
     });
     var store = SmallStore.init();
     const signer = signing.SignerIdentity{

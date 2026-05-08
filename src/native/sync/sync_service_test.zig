@@ -21,6 +21,121 @@ const EndToEndPolicyIds = struct {
     relay_policy_id: u64,
 };
 
+fn mintSyncServiceAuthority(
+    capability_table: *capability.CapabilityTable,
+    service: anytype,
+    holder: principal.PrincipalId,
+) !capability.Capability {
+    return mintSyncServiceAuthorityWithRights(capability_table, service, holder, .{ .service = .{
+        .endpoint_connect = true,
+    } });
+}
+
+fn mintSyncServiceAuthorityWithRights(
+    capability_table: *capability.CapabilityTable,
+    service: anytype,
+    holder: principal.PrincipalId,
+    rights: capability.CapabilityRights,
+) !capability.Capability {
+    return capability_table.mintBootRoot(.{
+        .holder = holder,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = service.service_id },
+        .rights = rights,
+        .scope = .{
+            .task_id = service.task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = 1_000,
+        },
+        .audit = .{},
+    });
+}
+
+fn syncAuthority(
+    service: anytype,
+    holder: principal.PrincipalId,
+    authority_capability: capability.Capability,
+    now_ticks: u64,
+) sync_service.AuthorityContext {
+    return .{
+        .task_id = service.task_id,
+        .principal = holder,
+        .capability_id = authority_capability.id,
+        .now_ticks = now_ticks,
+    };
+}
+
+test "sync port requires service-scoped authority before device graph mutation" {
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 820 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 821 };
+    const signer = signing.SignerIdentity{
+        .label = "sync-port-user",
+        .seed = [_]u8{0x82} ** 32,
+    };
+
+    var service = Service.init(8_200, 8_201, sync_owner);
+    var capabilities = capability.CapabilityTable.init();
+    var port = sync_service.SyncPort.init(&service, &capabilities);
+
+    try std.testing.expectError(error.CapabilityNotFound, port.ensureUserRoot(.{
+        .task_id = service.task_id,
+        .principal = sync_owner,
+        .capability_id = 0,
+        .now_ticks = 10,
+    }, user, "owner", signer));
+
+    const wrong_right = try mintSyncServiceAuthorityWithRights(&capabilities, &service, sync_owner, .{ .service = .{
+        .capability_query = true,
+    } });
+    try std.testing.expectError(error.PermissionDenied, port.ensureUserRoot(.{
+        .task_id = service.task_id,
+        .principal = sync_owner,
+        .capability_id = wrong_right.id,
+        .now_ticks = 10,
+    }, user, "owner", signer));
+
+    const valid = try mintSyncServiceAuthority(&capabilities, &service, sync_owner);
+    try std.testing.expectError(error.PermissionDenied, port.ensureUserRoot(.{
+        .task_id = service.task_id + 1,
+        .principal = sync_owner,
+        .capability_id = valid.id,
+        .now_ticks = 10,
+    }, user, "owner", signer));
+
+    const wrong_target = try capabilities.mintBootRoot(.{
+        .holder = sync_owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = service.service_id + 1 },
+        .rights = .{ .service = .{
+            .endpoint_connect = true,
+        } },
+        .scope = .{
+            .task_id = service.task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = 1_000,
+        },
+        .audit = .{},
+    });
+    try std.testing.expectError(error.CapabilityRequired, port.ensureUserRoot(.{
+        .task_id = service.task_id,
+        .principal = sync_owner,
+        .capability_id = wrong_target.id,
+        .now_ticks = 10,
+    }, user, "owner", signer));
+
+    const root = try port.ensureUserRoot(syncAuthority(&service, sync_owner, valid, 11), user, "owner", signer);
+    try std.testing.expectEqual(user, root.principal_id);
+    try std.testing.expectEqualStrings("owner", root.labelSlice());
+}
+
 pub fn deterministicTwoDeviceOverlayReplication() !void {
     var runtime = task_runtime.Runtime.init();
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 920 };
@@ -122,8 +237,17 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
     var target_resident = ResidentState{};
     var source_sync = try Service.initWithStorage(9_230, source_task.id, sync_owner, &source_storage, &source_resident);
     var target_sync = try Service.initWithStorage(9_231, target_task.id, sync_owner, &target_storage, &target_resident);
+    var source_capabilities = capability.CapabilityTable.init();
+    const source_authority_capability = try mintSyncServiceAuthority(&source_capabilities, &source_sync, sync_owner);
+    var source_port = sync_service.SyncPort.init(&source_sync, &source_capabilities);
+    const source_authority = syncAuthority(&source_sync, sync_owner, source_authority_capability, 30);
+    var target_capabilities = capability.CapabilityTable.init();
+    const target_authority_capability = try mintSyncServiceAuthority(&target_capabilities, &target_sync, sync_owner);
+    var target_port = sync_service.SyncPort.init(&target_sync, &target_capabilities);
+    const target_authority = syncAuthority(&target_sync, sync_owner, target_authority_capability, 40);
     const source_policies = try configureEndToEndSync(
-        &source_sync,
+        &source_port,
+        source_authority,
         sync_owner,
         user,
         laptop,
@@ -138,7 +262,8 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
         30,
     );
     const target_policies = try configureEndToEndSync(
-        &target_sync,
+        &target_port,
+        target_authority,
         sync_owner,
         user,
         laptop,
@@ -153,12 +278,13 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
         40,
     );
 
-    const overlay_decision = try target_sync.evaluateNetworkPolicy(target_policies.overlay_policy_id, .{
+    const overlay_decision = try target_port.evaluateNetworkPolicy(target_authority, target_policies.overlay_policy_id, .{
         .service_identity = overlay_identity,
     });
     try std.testing.expect(overlay_decision.allowed);
 
-    const source_private_session = try source_sync.openOverlaySession(
+    const source_private_session = try source_port.openOverlaySession(
+        source_authority,
         workspace_id,
         laptop,
         tablet,
@@ -173,7 +299,8 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
     try std.testing.expect(source_private_session.remote_access);
     try std.testing.expectEqualStrings(private_service, source_private_session.privateServiceSlice());
 
-    const target_private_session = try target_sync.openOverlaySession(
+    const target_private_session = try target_port.openOverlaySession(
+        target_authority,
         workspace_id,
         tablet,
         laptop,
@@ -220,8 +347,8 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
     }, laptop, tablet, "unexpected.e2e.zigos"));
     try std.testing.expectEqual(@as(usize, 1), transport.denied_sessions);
 
-    try source_sync.setReplicaVersion(workspace_id, tablet, path, source_edit.object_id, target_conflict.version_id);
-    const summary = try source_sync.replicateWorkspace(&source_storage, workspace_id, laptop, tablet, .relay_assisted);
+    try source_port.setReplicaVersion(source_authority, workspace_id, tablet, path, source_edit.object_id, target_conflict.version_id);
+    const summary = try source_port.replicateWorkspace(source_authority, &source_storage, workspace_id, laptop, tablet, .relay_assisted);
     try std.testing.expect(summary.offline_first);
     try std.testing.expect(summary.personal_e2ee);
     try std.testing.expect(summary.used_relay);
@@ -282,7 +409,7 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
     try target_storage.stagePut(target_workspace.id, replicated_path, replicated_version.object_id, replicated_version.version_id, .document);
     const replicated_generation = try target_storage.commit(target_workspace.id, 54);
     try std.testing.expect(replicated_generation > 1);
-    try target_sync.setReplicaVersion(workspace_id, laptop, replicated_path, replicated_version.object_id, replicated_version.version_id);
+    try target_port.setReplicaVersion(target_authority, workspace_id, laptop, replicated_path, replicated_version.object_id, replicated_version.version_id);
 
     const resolved = try target_storage.resolve(target_workspace.id, path);
     try std.testing.expectEqual(replicated_version.version_id, resolved.version_id);
@@ -331,7 +458,8 @@ fn createSyncServiceTask(
 }
 
 fn configureEndToEndSync(
-    service: *Service,
+    port: *sync_service.SyncPort,
+    authority: sync_service.AuthorityContext,
     sync_owner: principal.PrincipalId,
     user: principal.PrincipalId,
     laptop: principal.PrincipalId,
@@ -345,31 +473,31 @@ fn configureEndToEndSync(
     private_service: []const u8,
     tick_base: u64,
 ) !EndToEndPolicyIds {
-    _ = try service.ensureUserRoot(user, "owner", user_signer);
-    _ = try service.enrollTrustedDevice(user, laptop, "laptop", user_signer, laptop_signer, tick_base);
-    _ = try service.enrollTrustedDevice(user, tablet, "tablet", user_signer, tablet_signer, tick_base + 1);
+    _ = try port.ensureUserRoot(authority, user, "owner", user_signer);
+    _ = try port.enrollTrustedDevice(authority, user, laptop, "laptop", user_signer, laptop_signer, tick_base);
+    _ = try port.enrollTrustedDevice(authority, user, tablet, "tablet", user_signer, tablet_signer, tick_base + 1);
 
-    const local_policy = try service.createNetworkPolicy(.{
+    const local_policy = try port.createNetworkPolicy(authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_id,
         .label = "local",
         .mode = .local_network,
     });
-    const overlay_policy = try service.createNetworkPolicy(.{
+    const overlay_policy = try port.createNetworkPolicy(authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_id,
         .label = "overlay",
         .mode = .named_service_identity,
         .target = overlay_identity,
     });
-    const relay_policy = try service.createNetworkPolicy(.{
+    const relay_policy = try port.createNetworkPolicy(authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_id,
         .label = "relay",
         .mode = .named_domain,
         .target = relay_domain,
     });
-    _ = try service.configureWorkspacePolicy(.{
+    _ = try port.configureWorkspacePolicy(authority, .{
         .workspace_id = workspace_id,
         .owner = user,
         .offline_first = true,
@@ -380,8 +508,8 @@ fn configureEndToEndSync(
         .overlay_policy_id = overlay_policy.id,
         .relay_domain = relay_domain,
     });
-    _ = try service.configureOverlay(workspace_id, laptop, overlay_identity, true);
-    _ = try service.publishPrivateService(workspace_id, private_service);
+    _ = try port.configureOverlay(authority, workspace_id, laptop, overlay_identity, true);
+    _ = try port.publishPrivateService(authority, workspace_id, private_service);
     return .{
         .local_policy_id = local_policy.id,
         .overlay_policy_id = overlay_policy.id,
@@ -478,54 +606,58 @@ test "sync service covers device graph policy replication semantics and restart 
 
     var resident = ResidentState{};
     var service = try Service.initWithStorage(80, 8, sync_owner, &storage, &resident);
-    _ = try service.ensureUserRoot(user, "cameron", user_signer);
-    _ = try service.enrollTrustedDevice(user, laptop, "laptop", user_signer, laptop_signer, 20);
-    _ = try service.enrollTrustedDevice(user, tablet, "tablet", user_signer, tablet_signer, 21);
-    _ = try service.enrollTrustedDevice(user, phone, "phone", user_signer, phone_signer, 22);
-    _ = try service.rotateDeviceKey(user, tablet, user_signer, tablet_rotated_signer, 23);
-    try service.revokeTrustedDevice(user, phone, user_signer, 24);
+    var service_capabilities = capability.CapabilityTable.init();
+    const service_authority_capability = try mintSyncServiceAuthority(&service_capabilities, &service, sync_owner);
+    var service_port = sync_service.SyncPort.init(&service, &service_capabilities);
+    const service_authority = syncAuthority(&service, sync_owner, service_authority_capability, 25);
+    _ = try service_port.ensureUserRoot(service_authority, user, "cameron", user_signer);
+    _ = try service_port.enrollTrustedDevice(service_authority, user, laptop, "laptop", user_signer, laptop_signer, 20);
+    _ = try service_port.enrollTrustedDevice(service_authority, user, tablet, "tablet", user_signer, tablet_signer, 21);
+    _ = try service_port.enrollTrustedDevice(service_authority, user, phone, "phone", user_signer, phone_signer, 22);
+    _ = try service_port.rotateDeviceKey(service_authority, user, tablet, user_signer, tablet_rotated_signer, 23);
+    try service_port.revokeTrustedDevice(service_authority, user, phone, user_signer, 24);
 
-    const none_policy = try service.createNetworkPolicy(.{
+    const none_policy = try service_port.createNetworkPolicy(service_authority, .{
         .owner = sync_owner,
         .workspace_id = notes_id,
         .label = "none",
         .mode = .none,
     });
-    const local_policy = try service.createNetworkPolicy(.{
+    const local_policy = try service_port.createNetworkPolicy(service_authority, .{
         .owner = sync_owner,
         .workspace_id = notes_id,
         .label = "local",
         .mode = .local_network,
     });
-    const discovery_policy = try service.createNetworkPolicy(.{
+    const discovery_policy = try service_port.createNetworkPolicy(service_authority, .{
         .owner = sync_owner,
         .workspace_id = notes_id,
         .label = "printer-discovery",
         .mode = .local_subnet_discovery,
         .target = "printer",
     });
-    const overlay_policy = try service.createNetworkPolicy(.{
+    const overlay_policy = try service_port.createNetworkPolicy(service_authority, .{
         .owner = sync_owner,
         .workspace_id = notes_id,
         .label = "overlay",
         .mode = .named_service_identity,
         .target = "overlay.notes.sync",
     });
-    const relay_policy = try service.createNetworkPolicy(.{
+    const relay_policy = try service_port.createNetworkPolicy(service_authority, .{
         .owner = sync_owner,
         .workspace_id = notes_id,
         .label = "relay",
         .mode = .named_domain,
         .target = "relay.zigos.dev",
     });
-    const inbound_policy = try service.createNetworkPolicy(.{
+    const inbound_policy = try service_port.createNetworkPolicy(service_authority, .{
         .owner = sync_owner,
         .workspace_id = notes_id,
         .label = "collab-review",
         .mode = .inbound_collaborative_session,
         .target = "document-review/v1",
     });
-    const internet_policy = try service.createNetworkPolicy(.{
+    const internet_policy = try service_port.createNetworkPolicy(service_authority, .{
         .owner = sync_owner,
         .workspace_id = notes_id,
         .label = "internet",
@@ -533,15 +665,15 @@ test "sync service covers device graph policy replication semantics and restart 
         .explicit_internet_grant = true,
     });
 
-    try std.testing.expect(!(try service.evaluateNetworkPolicy(none_policy.id, .public_internet)).allowed);
-    try std.testing.expect((try service.evaluateNetworkPolicy(local_policy.id, .local_network)).allowed);
-    try std.testing.expect((try service.evaluateNetworkPolicy(discovery_policy.id, .{ .discovery_class = "printer" })).allowed);
-    try std.testing.expect((try service.evaluateNetworkPolicy(overlay_policy.id, .{ .service_identity = "overlay.notes.sync" })).allowed);
-    try std.testing.expect((try service.evaluateNetworkPolicy(relay_policy.id, .{ .domain = "relay.zigos.dev" })).allowed);
-    try std.testing.expect((try service.evaluateNetworkPolicy(inbound_policy.id, .{ .inbound_session_type = "document-review/v1" })).allowed);
-    try std.testing.expect((try service.evaluateNetworkPolicy(internet_policy.id, .public_internet)).allowed);
+    try std.testing.expect(!(try service_port.evaluateNetworkPolicy(service_authority, none_policy.id, .public_internet)).allowed);
+    try std.testing.expect((try service_port.evaluateNetworkPolicy(service_authority, local_policy.id, .local_network)).allowed);
+    try std.testing.expect((try service_port.evaluateNetworkPolicy(service_authority, discovery_policy.id, .{ .discovery_class = "printer" })).allowed);
+    try std.testing.expect((try service_port.evaluateNetworkPolicy(service_authority, overlay_policy.id, .{ .service_identity = "overlay.notes.sync" })).allowed);
+    try std.testing.expect((try service_port.evaluateNetworkPolicy(service_authority, relay_policy.id, .{ .domain = "relay.zigos.dev" })).allowed);
+    try std.testing.expect((try service_port.evaluateNetworkPolicy(service_authority, inbound_policy.id, .{ .inbound_session_type = "document-review/v1" })).allowed);
+    try std.testing.expect((try service_port.evaluateNetworkPolicy(service_authority, internet_policy.id, .public_internet)).allowed);
 
-    _ = try service.configureWorkspacePolicy(.{
+    _ = try service_port.configureWorkspacePolicy(service_authority, .{
         .workspace_id = notes_id,
         .owner = user,
         .offline_first = true,
@@ -552,11 +684,11 @@ test "sync service covers device graph policy replication semantics and restart 
         .overlay_policy_id = overlay_policy.id,
         .relay_domain = "relay.zigos.dev",
     });
-    _ = try service.configureOverlay(notes_id, laptop, "overlay.notes.sync", true);
-    _ = try service.publishPrivateService(notes_id, "notes.remote");
+    _ = try service_port.configureOverlay(service_authority, notes_id, laptop, "overlay.notes.sync", true);
+    _ = try service_port.publishPrivateService(service_authority, notes_id, "notes.remote");
 
-    try service.setReplicaVersion(notes_id, tablet, "documents/notes.md", notes_v1.object_id, notes_v2.version_id);
-    const summary = try service.replicateWorkspace(&storage, notes_id, laptop, tablet, .device_to_device);
+    try service_port.setReplicaVersion(service_authority, notes_id, tablet, "documents/notes.md", notes_v1.object_id, notes_v2.version_id);
+    const summary = try service_port.replicateWorkspace(service_authority, &storage, notes_id, laptop, tablet, .device_to_device);
     try std.testing.expect(summary.offline_first);
     try std.testing.expect(summary.personal_e2ee);
     try std.testing.expect(summary.used_device_to_device);
@@ -575,33 +707,37 @@ test "sync service covers device graph policy replication semantics and restart 
     try std.testing.expectEqual(SyncSemantic.mergeable_crdt, notes_frame.semantic);
     try std.testing.expectEqual(@as(usize, 1), summary.conflict_count);
     try std.testing.expect(service.findConflict(notes_id, tablet, "documents/notes.md") != null);
-    const clean_summary = try service.replicateWorkspace(&storage, notes_id, laptop, tablet, .device_to_device);
+    const clean_summary = try service_port.replicateWorkspace(service_authority, &storage, notes_id, laptop, tablet, .device_to_device);
     try std.testing.expectEqual(@as(usize, 0), clean_summary.selected_entry_count);
     try std.testing.expectEqual(@as(usize, 0), clean_summary.transport_frame_count);
 
-    try std.testing.expect(try service.transferSecretObject(&storage, notes_id, secret.object_id, laptop, tablet, .device_to_device));
-    const contract = try service.registerDatabaseContract(notes_id, "app.db.notes", "notes-db", contract_signer);
-    try std.testing.expect(try service.replicateDatabaseContract(contract.id, notes_id, laptop, tablet, .relay_assisted));
-    try std.testing.expectError(error.DeviceNotTrusted, service.replicateWorkspace(&storage, notes_id, laptop, phone, .device_to_device));
+    try std.testing.expect(try service_port.transferSecretObject(service_authority, &storage, notes_id, secret.object_id, laptop, tablet, .device_to_device));
+    const contract = try service_port.registerDatabaseContract(service_authority, notes_id, "app.db.notes", "notes-db", contract_signer);
+    try std.testing.expect(try service_port.replicateDatabaseContract(service_authority, contract.id, notes_id, laptop, tablet, .relay_assisted));
+    try std.testing.expectError(error.DeviceNotTrusted, service_port.replicateWorkspace(service_authority, &storage, notes_id, laptop, phone, .device_to_device));
 
     var restarted_resident = ResidentState{};
     var restarted = try Service.initWithStorage(80, 9, sync_owner, &storage, &restarted_resident);
+    var restarted_capabilities = capability.CapabilityTable.init();
+    const restarted_authority_capability = try mintSyncServiceAuthority(&restarted_capabilities, &restarted, sync_owner);
+    var restarted_port = sync_service.SyncPort.init(&restarted, &restarted_capabilities);
+    const restarted_authority = syncAuthority(&restarted, sync_owner, restarted_authority_capability, 35);
     try std.testing.expect(restarted.loaded_existing_state);
     try std.testing.expectEqual(@as(usize, 2), restarted.trustedDeviceCount());
     try std.testing.expect(restarted.findWorkspacePolicy(notes_id) != null);
     try std.testing.expect(restarted.findOverlay(notes_id) != null);
     try std.testing.expectEqual(notes_v1.version_id.raw(), restarted.replicaVersion(notes_id, tablet, "documents/notes.md").?);
     try std.testing.expect(restarted.findConflict(notes_id, tablet, "documents/notes.md") != null);
-    const restarted_local_policy = try restarted.createNetworkPolicy(.{
+    const restarted_local_policy = try restarted_port.createNetworkPolicy(restarted_authority, .{
         .owner = sync_owner,
         .workspace_id = notes_id,
         .label = "local",
         .mode = .local_network,
     });
     try std.testing.expectEqual(local_policy.id, restarted_local_policy.id);
-    const restarted_overlay = try restarted.publishPrivateService(notes_id, "notes.remote");
+    const restarted_overlay = try restarted_port.publishPrivateService(restarted_authority, notes_id, "notes.remote");
     try std.testing.expectEqual(@as(usize, 1), restarted_overlay.private_service_count);
-    const restarted_contract = try restarted.registerDatabaseContract(notes_id, "app.db.notes", "notes-db", contract_signer);
+    const restarted_contract = try restarted_port.registerDatabaseContract(restarted_authority, notes_id, "app.db.notes", "notes-db", contract_signer);
     try std.testing.expectEqual(contract.id, restarted_contract.id);
 
     storage_checkpoint_store.resetPersistent();
@@ -631,33 +767,37 @@ test "overlay sessions cover sync remote access private service publishing and e
     };
 
     var service = Service.init(901, 92, sync_owner);
-    _ = try service.ensureUserRoot(user, "owner", user_signer);
-    _ = try service.enrollTrustedDevice(user, laptop, "laptop", user_signer, laptop_signer, 10);
-    _ = try service.enrollTrustedDevice(user, tablet, "tablet", user_signer, tablet_signer, 11);
-    _ = try service.enrollTrustedDevice(user, phone, "phone", user_signer, phone_signer, 12);
+    var service_capabilities = capability.CapabilityTable.init();
+    const service_authority_capability = try mintSyncServiceAuthority(&service_capabilities, &service, sync_owner);
+    var service_port = sync_service.SyncPort.init(&service, &service_capabilities);
+    const service_authority = syncAuthority(&service, sync_owner, service_authority_capability, 20);
+    _ = try service_port.ensureUserRoot(service_authority, user, "owner", user_signer);
+    _ = try service_port.enrollTrustedDevice(service_authority, user, laptop, "laptop", user_signer, laptop_signer, 10);
+    _ = try service_port.enrollTrustedDevice(service_authority, user, tablet, "tablet", user_signer, tablet_signer, 11);
+    _ = try service_port.enrollTrustedDevice(service_authority, user, phone, "phone", user_signer, phone_signer, 12);
 
     const workspace_id: u64 = 4_200;
-    const local_policy = try service.createNetworkPolicy(.{
+    const local_policy = try service_port.createNetworkPolicy(service_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_id,
         .label = "local",
         .mode = .local_network,
     });
-    const overlay_policy = try service.createNetworkPolicy(.{
+    const overlay_policy = try service_port.createNetworkPolicy(service_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_id,
         .label = "overlay",
         .mode = .named_service_identity,
         .target = "overlay.workspace.sync",
     });
-    const relay_policy = try service.createNetworkPolicy(.{
+    const relay_policy = try service_port.createNetworkPolicy(service_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_id,
         .label = "relay",
         .mode = .named_domain,
         .target = "relay.zigos.dev",
     });
-    _ = try service.configureWorkspacePolicy(.{
+    _ = try service_port.configureWorkspacePolicy(service_authority, .{
         .workspace_id = workspace_id,
         .owner = user,
         .device_to_device_policy_id = local_policy.id,
@@ -666,10 +806,11 @@ test "overlay sessions cover sync remote access private service publishing and e
         .relay_domain = "relay.zigos.dev",
     });
 
-    _ = try service.configureOverlay(workspace_id, laptop, "overlay.workspace.sync", true);
-    _ = try service.publishPrivateService(workspace_id, "notes.remote");
+    _ = try service_port.configureOverlay(service_authority, workspace_id, laptop, "overlay.workspace.sync", true);
+    _ = try service_port.publishPrivateService(service_authority, workspace_id, "notes.remote");
 
-    const sync_session = try service.openOverlaySession(
+    const sync_session = try service_port.openOverlaySession(
+        service_authority,
         workspace_id,
         laptop,
         tablet,
@@ -684,10 +825,11 @@ test "overlay sessions cover sync remote access private service publishing and e
     try std.testing.expect(!sync_session.relay_encrypted);
     try std.testing.expectEqualStrings("overlay.workspace.sync", sync_session.serviceIdentitySlice());
     try std.testing.expectEqual(@as(usize, 1), service.activeOverlaySessionCount());
-    try std.testing.expect(try service.probeOverlaySession(sync_session.session_id, 14));
+    try std.testing.expect(try service_port.probeOverlaySession(service_authority, sync_session.session_id, 14));
     try std.testing.expectEqual(@as(u16, 1), service.findOverlaySession(sync_session.session_id).?.keepalive_count);
 
-    const remote_session = try service.openOverlaySession(
+    const remote_session = try service_port.openOverlaySession(
+        service_authority,
         workspace_id,
         laptop,
         tablet,
@@ -701,7 +843,8 @@ test "overlay sessions cover sync remote access private service publishing and e
     try std.testing.expect(remote_session.relay_encrypted);
     try std.testing.expectEqualStrings("relay.zigos.dev", remote_session.relayDomainSlice());
 
-    const private_service = try service.openOverlaySession(
+    const private_service = try service_port.openOverlaySession(
+        service_authority,
         workspace_id,
         tablet,
         laptop,
@@ -715,11 +858,12 @@ test "overlay sessions cover sync remote access private service publishing and e
     try std.testing.expect(private_service.relay_encrypted);
     try std.testing.expectEqualStrings("notes.remote", private_service.privateServiceSlice());
     try std.testing.expectEqual(@as(usize, 3), service.activeOverlaySessionCount());
-    try std.testing.expect(try service.closeOverlaySession(remote_session.session_id, 17));
+    try std.testing.expect(try service_port.closeOverlaySession(service_authority, remote_session.session_id, 17));
     try std.testing.expectEqual(OverlaySessionState.closed, service.findOverlaySession(remote_session.session_id).?.state);
     try std.testing.expectEqual(@as(usize, 2), service.activeOverlaySessionCount());
 
-    try std.testing.expectError(error.PrivateServiceNotPublished, service.openOverlaySession(
+    try std.testing.expectError(error.PrivateServiceNotPublished, service_port.openOverlaySession(
+        service_authority,
         workspace_id,
         laptop,
         tablet,
@@ -729,8 +873,9 @@ test "overlay sessions cover sync remote access private service publishing and e
         18,
     ));
 
-    _ = try service.configureOverlay(workspace_id, laptop, "overlay.workspace.sync", false);
-    try std.testing.expectError(error.RemoteAccessDisabled, service.openOverlaySession(
+    _ = try service_port.configureOverlay(service_authority, workspace_id, laptop, "overlay.workspace.sync", false);
+    try std.testing.expectError(error.RemoteAccessDisabled, service_port.openOverlaySession(
+        service_authority,
         workspace_id,
         laptop,
         phone,
