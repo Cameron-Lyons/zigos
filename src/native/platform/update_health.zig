@@ -2,6 +2,7 @@ const std = @import("std");
 const compositor_session = @import("compositor_session.zig");
 const event_ledger = @import("event_ledger.zig");
 const immutable_base = @import("immutable_base.zig");
+const capability = @import("../kernel_api/capability.zig");
 const contract = @import("../session/contract.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("../storage/object_store.zig");
@@ -26,6 +27,8 @@ pub const CheckRequest = struct {
 
 pub const NetworkProbe = struct {
     sync: *sync_service.Service,
+    capability_table: *const capability.CapabilityTable,
+    authority: sync_service.AuthorityContext,
     workspace_id: u64,
     source_device: principal.PrincipalId,
     target_device: principal.PrincipalId,
@@ -205,7 +208,9 @@ fn serviceStarted(supervisor: *supervisor_mod.Supervisor, service_id: u64) bool 
 
 fn networkServiceHealthy(probe: ?NetworkProbe) bool {
     const check = probe orelse return true;
-    const session = check.sync.openOverlaySession(
+    var port = sync_service.SyncPort.init(check.sync, check.capability_table);
+    const session = port.openOverlaySession(
+        check.authority,
         check.workspace_id,
         check.source_device,
         check.target_device,
@@ -214,16 +219,16 @@ fn networkServiceHealthy(probe: ?NetworkProbe) bool {
         check.private_service_label,
         check.tick,
     ) catch return false;
-    _ = check.sync.probeOverlaySession(session.session_id, check.tick + 1) catch {
-        _ = check.sync.closeOverlaySession(session.session_id, check.tick + 2) catch return false;
+    _ = port.probeOverlaySession(check.authority, session.session_id, check.tick + 1) catch {
+        _ = port.closeOverlaySession(check.authority, session.session_id, check.tick + 2) catch return false;
         return false;
     };
     const live = check.sync.findOverlaySession(session.session_id) orelse {
-        _ = check.sync.closeOverlaySession(session.session_id, check.tick + 2) catch return false;
+        _ = port.closeOverlaySession(check.authority, session.session_id, check.tick + 2) catch return false;
         return false;
     };
     const healthy = live.isActive() and live.keepalive_count != 0;
-    _ = check.sync.closeOverlaySession(session.session_id, check.tick + 2) catch return false;
+    _ = port.closeOverlaySession(check.authority, session.session_id, check.tick + 2) catch return false;
     return healthy;
 }
 
@@ -313,6 +318,7 @@ fn seedStorageProbe(
 
 fn seedNetworkProbe(
     sync: *sync_service.Service,
+    capability_table: *capability.CapabilityTable,
     workspace_id: u64,
     tick_base: u64,
 ) !NetworkProbe {
@@ -332,33 +338,61 @@ fn seedNetworkProbe(
         .seed = [_]u8{0x53} ** 32,
     };
 
-    _ = try sync.ensureUserRoot(user, "update-health", user_signer);
-    _ = try sync.enrollTrustedDevice(user, source_device, "source", user_signer, source_signer, tick_base);
-    _ = try sync.enrollTrustedDevice(user, target_device, "target", user_signer, target_signer, tick_base + 1);
+    const authority_capability = try capability_table.mintBootRoot(.{
+        .holder = sync.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = sync.service_id },
+        .rights = .{ .service = .{
+            .endpoint_connect = true,
+        } },
+        .scope = .{
+            .task_id = sync.task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = 1_000,
+        },
+        .audit = .{},
+    });
+    var port = sync_service.SyncPort.init(sync, capability_table);
+    const authority = sync_service.AuthorityContext{
+        .task_id = sync.task_id,
+        .principal = sync.owner,
+        .capability_id = authority_capability.id,
+        .now_ticks = tick_base,
+    };
 
-    const local_policy = try sync.createNetworkPolicy(.{
+    _ = try port.ensureUserRoot(authority, user, "update-health", user_signer);
+    _ = try port.enrollTrustedDevice(authority, user, source_device, "source", user_signer, source_signer, tick_base);
+    _ = try port.enrollTrustedDevice(authority, user, target_device, "target", user_signer, target_signer, tick_base + 1);
+
+    const local_policy = try port.createNetworkPolicy(authority, .{
         .owner = sync.owner,
         .workspace_id = workspace_id,
         .label = "health-local",
         .mode = .local_network,
     });
-    const overlay_policy = try sync.createNetworkPolicy(.{
+    const overlay_policy = try port.createNetworkPolicy(authority, .{
         .owner = sync.owner,
         .workspace_id = workspace_id,
         .label = "health-overlay",
         .mode = .named_service_identity,
         .target = "overlay.health.sync",
     });
-    _ = try sync.configureWorkspacePolicy(.{
+    _ = try port.configureWorkspacePolicy(authority, .{
         .workspace_id = workspace_id,
         .owner = user,
         .device_to_device_policy_id = local_policy.id,
         .overlay_policy_id = overlay_policy.id,
     });
-    _ = try sync.configureOverlay(workspace_id, source_device, "overlay.health.sync", true);
+    _ = try port.configureOverlay(authority, workspace_id, source_device, "overlay.health.sync", true);
 
     return .{
         .sync = sync,
+        .capability_table = capability_table,
+        .authority = authority,
         .workspace_id = workspace_id,
         .source_device = source_device,
         .target_device = target_device,
@@ -410,7 +444,8 @@ test "update health validates boot core storage network and ui checks and record
     const probe_workspace_id = try seedStorageProbe(&storage, owner, object_signer);
     var manager = try immutable_base.Manager.init(&storage, owner, state_signer);
     var sync = sync_service.Service.init(1_500, 401, owner);
-    const network_probe = try seedNetworkProbe(&sync, probe_workspace_id, 12);
+    var sync_capabilities = capability.CapabilityTable.init();
+    const network_probe = try seedNetworkProbe(&sync, &sync_capabilities, probe_workspace_id, 12);
     var compositor = compositor_session.Session.init();
     const ui_probe = try seedUiProbe(&compositor);
     _ = try manager.stageImage(0, "stable-a", "kernel=v1", image_signer, 11);
@@ -477,7 +512,8 @@ test "update health failures trigger rollback for each required post-activation 
     const probe_workspace_id = try seedStorageProbe(&storage, owner, object_signer);
     var manager = try immutable_base.Manager.init(&storage, owner, state_signer);
     var sync = sync_service.Service.init(1_501, 402, owner);
-    const network_probe = try seedNetworkProbe(&sync, probe_workspace_id, 20);
+    var sync_capabilities = capability.CapabilityTable.init();
+    const network_probe = try seedNetworkProbe(&sync, &sync_capabilities, probe_workspace_id, 20);
     var compositor = compositor_session.Session.init();
     const ui_probe = try seedUiProbe(&compositor);
 

@@ -60,6 +60,7 @@ pub const Error = task_runtime.Error || capability.Error || device_broker.Error 
     InvalidCapabilityTarget,
     InvalidUserspaceImage,
     PermissionDenied,
+    ResourceBudgetExceeded,
     ScopeViolation,
     UnexpectedOperation,
     UserspaceLaunchRequired,
@@ -125,6 +126,7 @@ pub const Kernel = struct {
         });
 
         const task = self.runtime.find(owner_task_id) orelse return error.TaskNotFound;
+        try self.validateEndpointBudget(owner_task_id);
         const created = try self.endpoint_table.create(ids.task(owner_task_id), label, flags);
         const endpoint_capability = try self.applySingleAutoGrant(
             .endpoint_create,
@@ -439,6 +441,7 @@ pub const Kernel = struct {
         });
 
         const task = self.runtime.find(owner_task_id) orelse return error.TaskNotFound;
+        try self.validateSharedMemoryCreateBudget(owner_task_id, size_bytes);
         const object = try self.shared_memory_table.create(ids.task(owner_task_id), size_bytes);
         const object_capability = try self.applySingleAutoGrant(
             .shared_memory_create,
@@ -466,8 +469,13 @@ pub const Kernel = struct {
         const object_capability = try self.authorizeOperation(.shared_memory_map, context, now_ticks, .{
             .request_task_id = task_id,
         });
-        try self.shared_memory_table.map(ids.sharedMemory(object_capability.target.id), ids.task(task_id));
-        return self.shared_memory_table.descriptor(ids.sharedMemory(object_capability.target.id));
+        const object_id = ids.sharedMemory(object_capability.target.id);
+        if (!self.shared_memory_table.hasMapping(object_id, ids.task(task_id))) {
+            const object_size = try self.shared_memory_table.objectSize(object_id);
+            try self.validateSharedMemoryMapBudget(task_id, object_size);
+        }
+        try self.shared_memory_table.map(object_id, ids.task(task_id));
+        return self.shared_memory_table.descriptor(object_id);
     }
 
     pub fn sharedMemoryUnmap(
@@ -709,6 +717,27 @@ pub const Kernel = struct {
             return error.CapabilityTableFull;
         }
     }
+
+    fn validateEndpointBudget(self: *Kernel, task_id: u64) Error!void {
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        if (self.endpoint_table.activeForTask(ids.task(task_id)) >= task.budget.endpoint_slots) {
+            return error.ResourceBudgetExceeded;
+        }
+    }
+
+    fn validateSharedMemoryCreateBudget(self: *Kernel, task_id: u64, size_bytes: usize) Error!void {
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        const allocated = self.shared_memory_table.liveOwnedBytesForTask(ids.task(task_id));
+        const next_allocated = std.math.add(usize, allocated, size_bytes) catch return error.ResourceBudgetExceeded;
+        if (next_allocated > task.budget.shared_memory_bytes) return error.ResourceBudgetExceeded;
+    }
+
+    fn validateSharedMemoryMapBudget(self: *Kernel, task_id: u64, size_bytes: usize) Error!void {
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        const mapped = self.shared_memory_table.liveMappedBytesForTask(ids.task(task_id));
+        const next_mapped = std.math.add(usize, mapped, size_bytes) catch return error.ResourceBudgetExceeded;
+        if (next_mapped > task.budget.shared_memory_bytes) return error.ResourceBudgetExceeded;
+    }
 };
 
 fn taskDescriptor(task: *const task_runtime.TaskRecord) abi.TaskDescriptor {
@@ -854,7 +883,7 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
             .cpu_time_ticks = 1_000,
             .memory_bytes = 1024,
             .endpoint_slots = 4,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = 4096,
             .resource_class = .batch_compute,
         },
         .local_only = true,

@@ -358,38 +358,42 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     _ = try storage.commit(workspace_record.id, 6);
 
     var sync = sync_service.Service.init(601, 61, sync_owner);
-    _ = try sync.ensureUserRoot(person, "owner", user_signer);
-    _ = try sync.enrollTrustedDevice(person, laptop, "laptop", user_signer, laptop_signer, 10);
-    _ = try sync.enrollTrustedDevice(person, tablet, "tablet", user_signer, tablet_signer, 11);
+    var sync_capabilities = capability.CapabilityTable.init();
+    const sync_capability = try spec_support.serviceAuthority(&sync_capabilities, sync.service_id, sync_owner, sync.task_id);
+    var sync_port = sync_service.SyncPort.init(&sync, &sync_capabilities);
+    const sync_authority = spec_support.serviceAuthorityContext(sync.task_id, sync_owner, sync_capability, 25);
+    _ = try sync_port.ensureUserRoot(sync_authority, person, "owner", user_signer);
+    _ = try sync_port.enrollTrustedDevice(sync_authority, person, laptop, "laptop", user_signer, laptop_signer, 10);
+    _ = try sync_port.enrollTrustedDevice(sync_authority, person, tablet, "tablet", user_signer, tablet_signer, 11);
 
-    const local_policy = try sync.createNetworkPolicy(.{
+    const local_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_id,
         .label = "local",
         .mode = .local_network,
     });
-    const discovery_policy = try sync.createNetworkPolicy(.{
+    const discovery_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_id,
         .label = "printer-discovery",
         .mode = .local_subnet_discovery,
         .target = "printer",
     });
-    const relay_policy = try sync.createNetworkPolicy(.{
+    const relay_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_id,
         .label = "relay",
         .mode = .named_domain,
         .target = "relay.spec.zigos",
     });
-    const overlay_policy = try sync.createNetworkPolicy(.{
+    const overlay_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_id,
         .label = "overlay",
         .mode = .named_service_identity,
         .target = "overlay.notes.spec",
     });
-    const inbound_policy = try sync.createNetworkPolicy(.{
+    const inbound_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_id,
         .label = "document-review",
@@ -398,7 +402,7 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     });
     const collaborator = spec_support.app(63);
     const prefixes = [_][]const u8{ "documents/", "assets/" };
-    _ = try sync.configureWorkspacePolicy(.{
+    _ = try sync_port.configureWorkspacePolicy(sync_authority, .{
         .workspace_id = workspace_id,
         .owner = person,
         .offline_first = true,
@@ -409,8 +413,8 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
         .overlay_policy_id = overlay_policy.id,
         .relay_domain = "relay.spec.zigos",
     });
-    _ = try sync.configureOverlay(workspace_id, laptop, "overlay.notes.spec", true);
-    _ = try sync.publishPrivateService(workspace_id, "notes.remote");
+    _ = try sync_port.configureOverlay(sync_authority, workspace_id, laptop, "overlay.notes.spec", true);
+    _ = try sync_port.publishPrivateService(sync_authority, workspace_id, "notes.remote");
     try storage.shareWorkspace(workspace_record.id, .{
         .principal_id = collaborator,
         .can_read = true,
@@ -441,8 +445,8 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
         .now_ticks = 50,
     }));
 
-    try sync.setReplicaVersion(workspace_id, tablet, "documents/notes.md", notes_v1.object_id, notes_v2.version_id);
-    const summary = try sync.replicateWorkspace(&storage, workspace_id, laptop, tablet, .device_to_device);
+    try sync_port.setReplicaVersion(sync_authority, workspace_id, tablet, "documents/notes.md", notes_v1.object_id, notes_v2.version_id);
+    const summary = try sync_port.replicateWorkspace(sync_authority, &storage, workspace_id, laptop, tablet, .device_to_device);
     try std.testing.expect(summary.offline_first);
     try std.testing.expect(summary.personal_e2ee);
     try std.testing.expect(summary.used_device_to_device);
@@ -457,17 +461,17 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     try std.testing.expect(sync.findConflict(workspace_id, tablet, "documents/notes.md") != null);
     try std.testing.expect(sync.isTrustedDevice(laptop));
     try std.testing.expect(sync.isTrustedDevice(tablet));
-    try std.testing.expect(try sync.transferSecretObject(&storage, workspace_id, secret.object_id, laptop, tablet, .device_to_device));
+    try std.testing.expect(try sync_port.transferSecretObject(sync_authority, &storage, workspace_id, secret.object_id, laptop, tablet, .device_to_device));
 
-    const database_contract = try sync.registerDatabaseContract(workspace_id, "app.notes.db", "notes-db", contract_signer);
-    try std.testing.expect(try sync.replicateDatabaseContract(database_contract.id, workspace_id, laptop, tablet, .relay_assisted));
-    try std.testing.expect((try sync.evaluateNetworkPolicy(local_policy.id, .local_network)).allowed);
-    try std.testing.expect((try sync.evaluateNetworkPolicy(discovery_policy.id, .{ .discovery_class = "printer" })).allowed);
-    try std.testing.expect(!(try sync.evaluateNetworkPolicy(discovery_policy.id, .{ .discovery_class = "camera" })).allowed);
-    try std.testing.expect((try sync.evaluateNetworkPolicy(relay_policy.id, .{ .domain = "relay.spec.zigos" })).allowed);
-    try std.testing.expect((try sync.evaluateNetworkPolicy(overlay_policy.id, .{ .service_identity = "overlay.notes.spec" })).allowed);
-    try std.testing.expect((try sync.evaluateNetworkPolicy(inbound_policy.id, .{ .inbound_session_type = "document-review/v1" })).allowed);
-    try std.testing.expect(!(try sync.evaluateNetworkPolicy(inbound_policy.id, .{ .inbound_session_type = "pair-screen/v1" })).allowed);
+    const database_contract = try sync_port.registerDatabaseContract(sync_authority, workspace_id, "app.notes.db", "notes-db", contract_signer);
+    try std.testing.expect(try sync_port.replicateDatabaseContract(sync_authority, database_contract.id, workspace_id, laptop, tablet, .relay_assisted));
+    try std.testing.expect((try sync_port.evaluateNetworkPolicy(sync_authority, local_policy.id, .local_network)).allowed);
+    try std.testing.expect((try sync_port.evaluateNetworkPolicy(sync_authority, discovery_policy.id, .{ .discovery_class = "printer" })).allowed);
+    try std.testing.expect(!(try sync_port.evaluateNetworkPolicy(sync_authority, discovery_policy.id, .{ .discovery_class = "camera" })).allowed);
+    try std.testing.expect((try sync_port.evaluateNetworkPolicy(sync_authority, relay_policy.id, .{ .domain = "relay.spec.zigos" })).allowed);
+    try std.testing.expect((try sync_port.evaluateNetworkPolicy(sync_authority, overlay_policy.id, .{ .service_identity = "overlay.notes.spec" })).allowed);
+    try std.testing.expect((try sync_port.evaluateNetworkPolicy(sync_authority, inbound_policy.id, .{ .inbound_session_type = "document-review/v1" })).allowed);
+    try std.testing.expect(!(try sync_port.evaluateNetworkPolicy(sync_authority, inbound_policy.id, .{ .inbound_session_type = "pair-screen/v1" })).allowed);
 
     var egress_capabilities = capability.CapabilityTable.init();
     const relay_egress_capability = try egress_capabilities.mintBootRoot(.{
@@ -573,7 +577,8 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     try std.testing.expectEqualStrings("documents/notes.md", latest_notes_frame.pathSlice());
     try std.testing.expectEqual(summary.transport_frame_count, summary.encrypted_transport_count);
 
-    const relay_session = try sync.openOverlaySession(
+    const relay_session = try sync_port.openOverlaySession(
+        sync_authority,
         workspace_id,
         laptop,
         tablet,
@@ -587,7 +592,8 @@ pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     try std.testing.expect(relay_session.remote_access);
     try std.testing.expectEqualStrings("overlay.notes.spec", relay_session.serviceIdentitySlice());
     try std.testing.expectEqualStrings("relay.spec.zigos", relay_session.relayDomainSlice());
-    try std.testing.expectError(sync_service.Error.DeviceNotTrusted, sync.openOverlaySession(
+    try std.testing.expectError(sync_service.Error.DeviceNotTrusted, sync_port.openOverlaySession(
+        sync_authority,
         workspace_id,
         laptop,
         spec_support.device(99),

@@ -2,6 +2,7 @@ const std = @import("std");
 const abi = @import("../core/abi.zig");
 const event_ledger = @import("event_ledger.zig");
 const immutable_base = @import("immutable_base.zig");
+const capability = @import("../kernel_api/capability.zig");
 const manifest = @import("../policy/manifest.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
@@ -164,8 +165,12 @@ pub const Environment = struct {
         device: principal.PrincipalId,
         signer: signing.SignerIdentity,
         tick: u64,
-    ) sync_service.Error!bool {
-        sync.revokeTrustedDevice(user, device, signer, tick) catch |err| switch (err) {
+    ) (sync_service.AuthorityError || sync_service.Error)!bool {
+        var capability_table = capability.CapabilityTable.init();
+        const authority_capability = mintRecoverySyncAuthority(&capability_table, sync, tick);
+        var port = sync_service.SyncPort.init(sync, &capability_table);
+        const authority = recoverySyncAuthority(sync, authority_capability, tick);
+        port.revokeTrustedDevice(authority, user, device, signer, tick) catch |err| switch (err) {
             error.AlreadyRevoked => {},
             else => return err,
         };
@@ -203,8 +208,12 @@ pub const Environment = struct {
         storage: *const storage_service.Service,
         workspace_id: anytype,
         device_id: principal.PrincipalId,
-    ) sync_service.Error!bool {
-        self.report.sync_metadata_repaired = try sync.repairWorkspaceMetadata(storage, object_store.ids.raw(workspace_id), device_id);
+    ) (sync_service.AuthorityError || sync_service.Error)!bool {
+        var capability_table = capability.CapabilityTable.init();
+        const authority_capability = mintRecoverySyncAuthority(&capability_table, sync, 0);
+        var port = sync_service.SyncPort.init(sync, &capability_table);
+        const authority = recoverySyncAuthority(sync, authority_capability, 0);
+        self.report.sync_metadata_repaired = try port.repairWorkspaceMetadata(authority, storage, object_store.ids.raw(workspace_id), device_id);
         return self.report.sync_metadata_repaired;
     }
 
@@ -216,12 +225,54 @@ pub const Environment = struct {
         signer: signing.SignerIdentity,
         next_signer: signing.SignerIdentity,
         tick: u64,
-    ) sync_service.Error!u32 {
-        const record = try sync.rotateDeviceKey(user, device, signer, next_signer, tick);
+    ) (sync_service.AuthorityError || sync_service.Error)!u32 {
+        var capability_table = capability.CapabilityTable.init();
+        const authority_capability = mintRecoverySyncAuthority(&capability_table, sync, tick);
+        var port = sync_service.SyncPort.init(sync, &capability_table);
+        const authority = recoverySyncAuthority(sync, authority_capability, tick);
+        const record = try port.rotateDeviceKey(authority, user, device, signer, next_signer, tick);
         self.report.device_keys_rotated = record.key_rotation_generation >= 2;
         return record.key_rotation_generation;
     }
 };
+
+fn mintRecoverySyncAuthority(
+    capability_table: *capability.CapabilityTable,
+    sync: *const sync_service.Service,
+    tick: u64,
+) capability.Capability {
+    return capability_table.mintBootRoot(.{
+        .holder = sync.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = sync.service_id },
+        .rights = .{ .service = .{
+            .endpoint_connect = true,
+        } },
+        .scope = .{
+            .task_id = sync.task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = @max(tick, 1_000),
+        },
+        .audit = .{},
+    }) catch unreachable;
+}
+
+fn recoverySyncAuthority(
+    sync: *const sync_service.Service,
+    authority_capability: capability.Capability,
+    tick: u64,
+) sync_service.AuthorityContext {
+    return .{
+        .task_id = sync.task_id,
+        .principal = sync.owner,
+        .capability_id = authority_capability.id,
+        .now_ticks = tick,
+    };
+}
 
 fn recordBreakGlassDecision(
     ledger: *event_ledger.Ledger,
@@ -302,22 +353,26 @@ test "recovery environment verifies reinstalls restores repairs and rotates" {
     const snapshot = try storage.snapshot(workspace_record.id, "baseline", object_signer);
 
     var sync = sync_service.Service.init(921, 52, sync_owner);
-    _ = try sync.ensureUserRoot(user, "cameron", user_signer);
-    _ = try sync.enrollTrustedDevice(user, primary_device, "primary", user_signer, device_signer, 14);
-    _ = try sync.enrollTrustedDevice(user, tablet, "tablet", user_signer, tablet_signer, 15);
-    const local_policy = try sync.createNetworkPolicy(.{
+    var sync_capabilities = capability.CapabilityTable.init();
+    const sync_authority_capability = mintRecoverySyncAuthority(&sync_capabilities, &sync, 16);
+    var sync_port = sync_service.SyncPort.init(&sync, &sync_capabilities);
+    const sync_authority = recoverySyncAuthority(&sync, sync_authority_capability, 16);
+    _ = try sync_port.ensureUserRoot(sync_authority, user, "cameron", user_signer);
+    _ = try sync_port.enrollTrustedDevice(sync_authority, user, primary_device, "primary", user_signer, device_signer, 14);
+    _ = try sync_port.enrollTrustedDevice(sync_authority, user, tablet, "tablet", user_signer, tablet_signer, 15);
+    const local_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_record.id.raw(),
         .label = "local-net",
         .mode = .local_network,
     });
-    _ = try sync.configureWorkspacePolicy(.{
+    _ = try sync_port.configureWorkspacePolicy(sync_authority, .{
         .workspace_id = workspace_record.id.raw(),
         .owner = user,
         .device_to_device_policy_id = local_policy.id,
     });
-    try sync.setReplicaVersion(workspace_record.id.raw(), tablet, "documents/notes.md", notes.object_id.raw(), notes.version_id.raw() + 1);
-    _ = try sync.replicateWorkspace(&storage, workspace_record.id.raw(), primary_device, tablet, .device_to_device);
+    try sync_port.setReplicaVersion(sync_authority, workspace_record.id.raw(), tablet, "documents/notes.md", notes.object_id.raw(), notes.version_id.raw() + 1);
+    _ = try sync_port.replicateWorkspace(sync_authority, &storage, workspace_record.id.raw(), primary_device, tablet, .device_to_device);
 
     var recovery = Environment.init(storage_owner);
     try std.testing.expect(try recovery.verifyAndReinstallImage(&manager, "kernel=v2", image_signer, 16));

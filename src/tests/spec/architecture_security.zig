@@ -67,13 +67,18 @@ pub fn designGoalsKeepInstallsDeclarativeAndAuthorityExplicit() !void {
     bundle.signature = try userspace_manifest_signing.signBundle(bundle);
 
     var packages = package_service.Service.init();
-    try spec_support.trustPackagePublisher(&packages, try userspace_manifest_signing.identityForPublisher(bundle.publisher), bundle.publisher);
-    _ = try packages.install(.{
+    packages.bind(8_100, spec_support.service(8_100));
+    var package_capabilities = capability.CapabilityTable.init();
+    const package_capability = try spec_support.serviceAuthority(&package_capabilities, packages.service_id, packages.owner, 8_101);
+    var package_port = package_service.PackagePort.init(&packages, &package_capabilities);
+    const package_authority = spec_support.serviceAuthorityContext(8_101, packages.owner, package_capability, 1);
+    try spec_support.trustPackagePublisher(&package_port, package_authority, try userspace_manifest_signing.identityForPublisher(bundle.publisher), bundle.publisher);
+    _ = try package_port.install(package_authority, .{
         .bundle = bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
     }, install_policy);
-    try std.testing.expectError(package_service.Error.InstallSourceDenied, packages.install(.{
+    try std.testing.expectError(package_service.Error.InstallSourceDenied, package_port.install(package_authority, .{
         .bundle = bundle,
         .source_identity = "repo:opaque-script",
         .data_schema_version = 1,

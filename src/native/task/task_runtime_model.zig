@@ -9,7 +9,9 @@ const runtime_host = @import("task_runtime_host.zig");
 const std = @import("std");
 const native_util = @import("../core/util.zig");
 
-pub const MAX_TASKS: usize = 32;
+pub const TASK_PAGE_SIZE: usize = 32;
+pub const TASK_PAGE_COUNT: usize = 4;
+pub const MAX_TASKS: usize = TASK_PAGE_SIZE * TASK_PAGE_COUNT;
 pub const MAX_TASK_CAPABILITIES: usize = 24;
 pub const MAX_TASK_COMPONENTS: usize = 8;
 pub const MAX_AUDIT_EVENTS: usize = 16;
@@ -17,6 +19,7 @@ pub const MAX_TASK_BUNDLE_ID_BYTES: usize = 64;
 pub const MAX_EXECUTABLE_SEGMENTS: usize = 8;
 pub const MAX_IMAGE_HASH_BYTES: usize = 32;
 pub const INDEX_CAPACITY: usize = MAX_TASKS * 2;
+pub const TASK_OWNER_INDEX_CAPACITY: usize = MAX_TASKS * 2;
 pub const CAPABILITY_INDEX_CAPACITY: usize = MAX_TASK_CAPABILITIES * 2;
 pub const DEFAULT_USER_STACK_TOP: u64 = 0xBFFF_F000;
 pub const DEFAULT_USER_STACK_SIZE_BYTES: usize = 64 * 1024;
@@ -322,6 +325,19 @@ pub const TaskSlot = struct {
     in_use: bool = false,
     task: TaskRecord = zeroTask(),
 };
+
+fn taskSlotId(slot: *const TaskSlot) u64 {
+    return slot.task.id;
+}
+
+pub const TaskArena = indexed_arena.PagedIndexedArena(TaskSlot, TASK_PAGE_SIZE, TASK_PAGE_COUNT, INDEX_CAPACITY, taskSlotId);
+pub const TaskHandle = TaskArena.Handle;
+pub const TaskOwnerIndex = indexed_arena.MultimapIndex(MAX_TASKS, MAX_TASKS, TASK_OWNER_INDEX_CAPACITY);
+
+pub fn taskOwnerIndexKey(owner: principal.PrincipalId) u64 {
+    const kind_bits = @as(u64, @intFromEnum(owner.kind)) + 1;
+    return indexed_arena.nonZeroKey((owner.serial *% 0x100) ^ kind_bits);
+}
 
 pub const AddressSpaceSlot = struct {
     in_use: bool = false,

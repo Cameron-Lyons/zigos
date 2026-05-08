@@ -176,6 +176,7 @@ pub fn mapError(err: anyerror) DispatchResult {
         err == error.ComponentTableFull or
         err == error.CapabilityTableFull or
         err == error.TaskTableFull or
+        err == error.ResourceBudgetExceeded or
         err == error.EndpointBusy or
         err == error.QueueFull or
         err == error.PeerNotConnected or

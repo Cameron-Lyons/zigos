@@ -11,7 +11,7 @@ pub fn dispatchSharedMemoryCreate(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.SharedMemoryCreateRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const created = port.sharedMemoryCreate(request, now_ticks) catch |err| return dispatch.mapError(err);
+    const created = component_port.invokeGenerated(.shared_memory_create, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.SharedMemoryCreateResponse{
         .object = created.object,
         .capability = created.capability,
@@ -28,7 +28,7 @@ pub fn dispatchSharedMemoryMap(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.SharedMemoryMapRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const descriptor = port.sharedMemoryMap(request, now_ticks) catch |err| return dispatch.mapError(err);
+    const descriptor = component_port.invokeGenerated(.shared_memory_map, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, descriptor);
 }
 
@@ -41,7 +41,7 @@ pub fn dispatchSharedMemoryUnmap(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.SharedMemoryUnmapRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const unmapped = port.sharedMemoryUnmap(request, now_ticks) catch |err| return dispatch.mapError(err);
+    const unmapped = component_port.invokeGenerated(.shared_memory_unmap, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.BoolResponse{
         .value = @intFromBool(unmapped),
         ._reserved = [_]u8{0} ** 7,
@@ -57,6 +57,6 @@ pub fn dispatchSharedMemoryRevoke(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.SharedMemoryRevokeRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const descriptor = port.sharedMemoryRevoke(request, now_ticks) catch |err| return dispatch.mapError(err);
+    const descriptor = component_port.invokeGenerated(.shared_memory_revoke, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, descriptor);
 }

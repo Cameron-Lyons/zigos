@@ -27,7 +27,7 @@ pub fn dispatchTaskCreate(
         &component_entry_buffer,
         &image_copy,
     )) return dispatch.invalidRequest();
-    const task = port.taskCreate(request, now_ticks) catch |err| return dispatch.mapError(err);
+    const task = component_port.invokeGenerated(.task_create, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, task);
 }
 
@@ -40,7 +40,7 @@ pub fn dispatchTaskTerminate(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.TaskTerminateRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const terminated = port.taskTerminate(request, now_ticks) catch |err| return dispatch.mapError(err);
+    const terminated = component_port.invokeGenerated(.task_terminate, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.BoolResponse{
         .value = @intFromBool(terminated),
         ._reserved = [_]u8{0} ** 7,
@@ -56,7 +56,7 @@ pub fn dispatchTimeQuery(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.TimeQueryRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const queried = port.timeQuery(request, now_ticks) catch |err| return dispatch.mapError(err);
+    const queried = component_port.invokeGenerated(.time_query, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.TimeQueryResponse{
         .now_ticks = queried,
     });
@@ -71,7 +71,7 @@ pub fn dispatchResourceQuery(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.ResourceQueryRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const descriptor = port.resourceQuery(request, now_ticks) catch |err| return dispatch.mapError(err);
+    const descriptor = component_port.invokeGenerated(.resource_query, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, descriptor);
 }
 
@@ -84,7 +84,7 @@ pub fn dispatchAccountingQuery(
     response_len: usize,
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.AccountingQueryRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const descriptor = port.accountingQuery(request, now_ticks) catch |err| return dispatch.mapError(err);
+    const descriptor = component_port.invokeGenerated(.accounting_query, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, descriptor);
 }
 
