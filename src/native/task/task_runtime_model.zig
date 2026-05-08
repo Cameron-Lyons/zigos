@@ -16,6 +16,8 @@ pub const MAX_TASK_CAPABILITIES: usize = 24;
 pub const MAX_TASK_COMPONENTS: usize = 8;
 pub const MAX_AUDIT_EVENTS: usize = 16;
 pub const MAX_TASK_BUNDLE_ID_BYTES: usize = 64;
+pub const MAX_COMPONENT_LABEL_BYTES: usize = 48;
+pub const MAX_COMPONENT_ENTRY_BYTES: usize = 64;
 pub const MAX_EXECUTABLE_SEGMENTS: usize = 8;
 pub const MAX_IMAGE_HASH_BYTES: usize = 32;
 pub const INDEX_CAPACITY: usize = MAX_TASKS * 2;
@@ -141,9 +143,9 @@ pub const ExecutionComponentRecord = struct {
     id: u64,
     substrate: ExecutionSubstrate,
     label_len: usize,
-    label: [48]u8,
+    label: [MAX_COMPONENT_LABEL_BYTES]u8,
     entry_len: usize,
-    entry: [64]u8,
+    entry: [MAX_COMPONENT_ENTRY_BYTES]u8,
 
     pub fn labelSlice(self: *const ExecutionComponentRecord) []const u8 {
         return self.label[0..self.label_len];

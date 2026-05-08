@@ -367,14 +367,9 @@ const Harness = struct {
         });
         self.service_authority_capability_id = service_authority.id;
         try self.runtime.grantCapability(self.service_task_id, self.service_authority_capability_id);
-        allowHostStackSyscalls(&self.runtime, self.service_task_id);
+        self.runtime.allowHostPointerSyscallsForTask(self.service_task_id);
     }
 };
-
-fn allowHostStackSyscalls(runtime: *task_runtime.Runtime, task_id: u64) void {
-    const task = runtime.find(task_id).?;
-    runtime.findAddressSpace(task.address_space_id).?.region_count = 0;
-}
 
 fn serviceBundle(comptime kind: ServiceKind) []const u8 {
     return switch (kind) {

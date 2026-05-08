@@ -834,20 +834,41 @@
   ],
   "requirement_evidence": {
     "REQ-DESIGN-GOALS-AND-NON-GOALS": {
-      "status": "scenario",
+      "status": "enforced",
       "enforcement_modules": [
         "tools/check_spec_coverage.py",
         "src/native/policy/policy_mediation.zig",
         "src/native/platform/immutable_base.zig",
         "src/native/sync/sync_service_impl.zig",
-        "src/native/services/compatibility_environment.zig"
+        "src/native/services/compatibility_environment.zig",
+        "src/native/session/session_manager.zig"
       ],
-      "coverage_note": "Design goals are covered by cross-subsystem scenarios, but some dependent requirements still rely on modeled evidence rather than full boot/syscall/service-path enforcement.",
-      "roadmap": {
-        "priority": "P0",
-        "focus": "Graduate dependent modeled and scenario rows before adding new platform-facing surface area.",
-        "graduation_proof": "All meta dependencies are enforced with boot, syscall, or service-path negative tests."
-      }
+      "negative_tests": [
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 1 keeps installs declarative privilege explicit and legacy access isolated"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 2.1 6.2 and 7 explicit grants are required before a task gains authority"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 5 and 14 keep the base image signed measured atomic and rollback-capable"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 9 and 10 use a trusted device graph selective sync and policy-gated networking"
+        },
+        {
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 13.3 15.2 and 15.3 keep failures explainable restartable and redacted"
+        },
+        {
+          "file": "src/native/session/session_manager_test.zig",
+          "name": "bootstrap scenario world wires storage sync recovery and policy flows explicitly"
+        }
+      ]
     },
     "REQ-ZERO-AMBIENT-AUTHORITY": {
       "status": "enforced",
@@ -1828,20 +1849,23 @@
       ]
     },
     "REQ-ZIGOS-USER-EXPERIENCE": {
-      "status": "scenario",
+      "status": "enforced",
       "enforcement_modules": [
+        "src/native/demo/session_demo_boot.zig",
+        "src/native/demo/platform_scenarios.zig",
         "src/native/platform/compositor_session.zig",
-        "src/native/platform/event_ledger.zig"
+        "src/native/platform/event_ledger.zig",
+        "src/native/session/session_manager.zig"
       ],
-      "coverage_note": "The user experience is represented by cohesive scenarios and rendered state, not yet by a real usable shell/compositor workflow.",
-      "roadmap": {
-        "priority": "P2",
-        "focus": "Prove install, sync, permissions, updates, rollback, and recovery through a booted task-oriented workflow.",
-        "graduation_proof": "End-to-end UX scenario runs against launched platform services and emits inspectable permission, sync, update, and recovery events."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/session/session_manager_test.zig",
+          "name": "bootstrap scenario world wires storage sync recovery and policy flows explicitly"
+        }
+      ]
     },
     "REQ-ONE-SENTENCE-SUMMARY": {
-      "status": "scenario",
+      "status": "enforced",
       "enforcement_modules": [
         "tools/check_spec_coverage.py",
         "src/native/kernel_api/capability.zig",
@@ -1850,12 +1874,44 @@
         "src/native/task/task_runtime_model.zig",
         "src/native/task/userspace_scheduler.zig"
       ],
-      "coverage_note": "The summary remains scenario-level until the full user experience row graduates from rendered scenarios to an end-to-end usable shell/compositor workflow.",
-      "roadmap": {
-        "priority": "P0",
-        "focus": "Keep the summary scenario-only until the end-to-end user experience requirement is enforced.",
-        "graduation_proof": "The full UX workflow is enforced and the meta-requirement gate can mark this row enforced without scenario-only dependencies."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/kernel_api/capability.zig",
+          "name": "derive rejects rights and scope escalation"
+        },
+        {
+          "file": "src/native/sync/sync_service_test.zig",
+          "name": "sync private overlay replicates end to end across two service tasks"
+        },
+        {
+          "file": "src/native/sync/device_graph.zig",
+          "name": "device graph roots user principals and manages enrollment rotation and revocation"
+        },
+        {
+          "file": "src/native/platform/immutable_base.zig",
+          "name": "immutable base verification rejects mutable signer and measurement tampering"
+        },
+        {
+          "file": "src/native/storage/storage_volume_test.zig",
+          "name": "storage volume rejects corrupted slot payloads"
+        },
+        {
+          "file": "src/native/session/runtime_negative_proofs.zig",
+          "name": "runtime negative proofs reject modeled bypasses"
+        },
+        {
+          "file": "src/native/sync/network_policy.zig",
+          "name": "network policy connections can require remote attestation and pinned service identities"
+        },
+        {
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler denies unavailable required accelerators and wakes when granted"
+        },
+        {
+          "file": "src/native/session/session_manager_test.zig",
+          "name": "bootstrap scenario world wires storage sync recovery and policy flows explicitly"
+        }
+      ]
     }
   }
 }

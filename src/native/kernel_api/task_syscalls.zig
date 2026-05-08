@@ -3,9 +3,6 @@ const component_port = @import("component_port.zig");
 const dispatch = @import("syscall_dispatch.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 
-const MAX_COMPONENT_LABEL_BYTES: usize = 48;
-const MAX_COMPONENT_ENTRY_BYTES: usize = 64;
-
 pub fn dispatchTaskCreate(
     port: *component_port.KernelPort,
     memory: dispatch.UserMemoryContext,
@@ -16,8 +13,8 @@ pub fn dispatchTaskCreate(
 ) dispatch.DispatchResult {
     var request = dispatch.readRequest(component_port.TaskCreateRequest, memory, request_addr) orelse return dispatch.invalidRequest();
     var bundle_id_buffer: [task_runtime.MAX_TASK_BUNDLE_ID_BYTES]u8 = undefined;
-    var component_label_buffer: [MAX_COMPONENT_LABEL_BYTES]u8 = undefined;
-    var component_entry_buffer: [MAX_COMPONENT_ENTRY_BYTES]u8 = undefined;
+    var component_label_buffer: [task_runtime.MAX_COMPONENT_LABEL_BYTES]u8 = undefined;
+    var component_entry_buffer: [task_runtime.MAX_COMPONENT_ENTRY_BYTES]u8 = undefined;
     var image_copy = task_runtime.ExecutableImageSpec{};
     if (!sanitizeTaskCreateRequest(
         memory,

@@ -12,6 +12,8 @@ pub const MAX_TASK_CAPABILITIES = model.MAX_TASK_CAPABILITIES;
 pub const MAX_TASK_COMPONENTS = model.MAX_TASK_COMPONENTS;
 pub const MAX_AUDIT_EVENTS = model.MAX_AUDIT_EVENTS;
 pub const MAX_TASK_BUNDLE_ID_BYTES = model.MAX_TASK_BUNDLE_ID_BYTES;
+pub const MAX_COMPONENT_LABEL_BYTES = model.MAX_COMPONENT_LABEL_BYTES;
+pub const MAX_COMPONENT_ENTRY_BYTES = model.MAX_COMPONENT_ENTRY_BYTES;
 pub const MAX_EXECUTABLE_SEGMENTS = model.MAX_EXECUTABLE_SEGMENTS;
 pub const MAX_IMAGE_HASH_BYTES = model.MAX_IMAGE_HASH_BYTES;
 pub const DEFAULT_USER_STACK_TOP = model.DEFAULT_USER_STACK_TOP;
@@ -295,6 +297,13 @@ pub const Runtime = struct {
     pub fn findAddressSpace(self: *Runtime, address_space_id: u64) ?*AddressSpaceRecord {
         const slot = findAddressSpaceSlot(self, address_space_id) orelse return null;
         return &slot.address_space;
+    }
+
+    pub fn allowHostPointerSyscallsForTask(self: *Runtime, task_id: u64) void {
+        const task = self.find(task_id).?;
+        const address_space = self.findAddressSpace(task.address_space_id).?;
+        // Host-side syscall proofs pass pointers from the native test stack.
+        address_space.region_count = 0;
     }
 
     pub fn findAddressSpaceConst(self: *const Runtime, address_space_id: u64) ?*const AddressSpaceRecord {
