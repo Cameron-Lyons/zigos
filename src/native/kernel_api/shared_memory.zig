@@ -211,6 +211,33 @@ pub const Table = struct {
         return @intCast(self.mapping_index.count(task_id.raw()));
     }
 
+    pub fn liveOwnedBytesForTask(self: *const Table, task_id: ids.TaskId) usize {
+        var total: usize = 0;
+        for (self.arena.slots) |slot| {
+            if (!slot.in_use or slot.object.revoked or !slot.object.owner_task_id.eql(task_id)) continue;
+            total = std.math.add(usize, total, slot.object.size_bytes) catch return std.math.maxInt(usize);
+        }
+        return total;
+    }
+
+    pub fn liveMappedBytesForTask(self: *const Table, task_id: ids.TaskId) usize {
+        var total: usize = 0;
+        for (self.arena.slots) |slot| {
+            if (!slot.in_use or slot.object.revoked) continue;
+            for (slot.object.mapped_task_ids[0..slot.object.mapping_count]) |mapped_task_id| {
+                if (!mapped_task_id.eql(task_id)) continue;
+                total = std.math.add(usize, total, slot.object.size_bytes) catch return std.math.maxInt(usize);
+                break;
+            }
+        }
+        return total;
+    }
+
+    pub fn objectSize(self: *const Table, object_id: ids.SharedMemoryId) Error!usize {
+        const object = self.findConst(object_id) orelse return error.SharedMemoryNotFound;
+        return object.size_bytes;
+    }
+
     pub fn hasMapping(self: *const Table, object_id: ids.SharedMemoryId, task_id: ids.TaskId) bool {
         const object = self.findConst(object_id) orelse return false;
         if (object.revoked) return false;

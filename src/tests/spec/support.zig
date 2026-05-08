@@ -3,6 +3,7 @@ const capability = @import("../../native/kernel_api/capability.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const principal = @import("../../native/core/principal.zig");
 const package_service = @import("../../native/services/package_service.zig");
+const service_authority = @import("../../native/services/service_authority.zig");
 const signing = @import("../../native/core/signing.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 
@@ -34,18 +35,63 @@ pub fn policyAuthority(serial: u64) principal.PrincipalId {
 }
 
 pub fn trustPackagePublisher(
-    packages: *package_service.Service,
+    port: *package_service.PackagePort,
+    authority: service_authority.Context,
     identity: signing.SignerIdentity,
     publisher: []const u8,
 ) !void {
     const issuer = policyAuthority(1);
-    _ = try packages.trustPolicyAuthorityRoot(issuer, [_]u8{0x5A} ** 32);
-    _ = try packages.trustPublisher(
+    _ = try port.trustPolicyAuthorityRoot(authority, issuer, [_]u8{0x5A} ** 32);
+    _ = try port.trustPublisher(
+        authority,
         .{ .kind = .app, .serial = std.hash.Wyhash.hash(0x5A47_5350_4543, publisher) },
         issuer,
         publisher,
         try signing.publicKey(identity),
     );
+}
+
+pub fn serviceAuthority(
+    capability_table: *capability.CapabilityTable,
+    service_id: u64,
+    holder: principal.PrincipalId,
+    task_id: u64,
+) !capability.Capability {
+    return capability_table.mintBootRoot(.{
+        .holder = holder,
+        .issuer = policyAuthority(1),
+        .target = .{ .kind = .service, .id = service_id },
+        .rights = .{ .service = .{
+            .endpoint_connect = true,
+            .capability_mint = true,
+            .capability_revoke = true,
+        } },
+        .scope = .{
+            .task_id = task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = true,
+        },
+        .audit = .{},
+    });
+}
+
+pub fn serviceAuthorityContext(
+    task_id: u64,
+    holder: principal.PrincipalId,
+    authority: capability.Capability,
+    now_ticks: u64,
+) service_authority.Context {
+    return .{
+        .task_id = task_id,
+        .principal = holder,
+        .capability_id = authority.id,
+        .now_ticks = now_ticks,
+    };
 }
 
 pub fn driverAuthority(

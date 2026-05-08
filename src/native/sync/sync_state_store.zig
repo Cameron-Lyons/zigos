@@ -61,7 +61,7 @@ pub fn persist(
 ) Error!void {
     var encoded: [state_support.max_state_bytes]u8 = undefined;
     const encoded_len = try state_codec.serialize(resident, encoded[0..]);
-    const chunk_count = @divFloor(encoded_len + object_store.MAX_PAYLOAD_BYTES - 1, object_store.MAX_PAYLOAD_BYTES);
+    const chunk_count = @divFloor(encoded_len + state_support.max_state_chunk_bytes - 1, state_support.max_state_chunk_bytes);
     if (chunk_count == 0 or chunk_count > state_support.max_state_chunks) return error.StateTooLarge;
 
     var chunk_dirty: [state_support.max_state_chunks]bool = [_]bool{false} ** state_support.max_state_chunks;
@@ -73,8 +73,8 @@ pub fn persist(
 
     var chunk_index: usize = 0;
     while (chunk_index < chunk_count) : (chunk_index += 1) {
-        const start = chunk_index * object_store.MAX_PAYLOAD_BYTES;
-        const end = @min(start + object_store.MAX_PAYLOAD_BYTES, encoded_len);
+        const start = chunk_index * state_support.max_state_chunk_bytes;
+        const end = @min(start + state_support.max_state_chunk_bytes, encoded_len);
         const payload = encoded[start..end];
         var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
         const path = try state_support.chunkPath(path_buffer[0..], chunk_index);
@@ -106,7 +106,7 @@ pub fn persist(
         has_chunk_changes = true;
     }
 
-    var index_payload: [object_store.MAX_PAYLOAD_BYTES]u8 = undefined;
+    var index_payload: [state_support.max_state_chunk_bytes]u8 = undefined;
     const index_bytes = try state_codec.encodeStateIndex(
         index_payload[0..],
         encoded_len,
@@ -134,8 +134,8 @@ pub fn persist(
     while (chunk_index < chunk_count) : (chunk_index += 1) {
         if (!chunk_dirty[chunk_index]) continue;
 
-        const start = chunk_index * object_store.MAX_PAYLOAD_BYTES;
-        const end = @min(start + object_store.MAX_PAYLOAD_BYTES, encoded_len);
+        const start = chunk_index * state_support.max_state_chunk_bytes;
+        const end = @min(start + state_support.max_state_chunk_bytes, encoded_len);
         const payload = encoded[start..end];
         var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
         const path = try state_support.chunkPath(path_buffer[0..], chunk_index);

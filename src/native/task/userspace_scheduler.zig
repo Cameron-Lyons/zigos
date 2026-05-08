@@ -64,6 +64,7 @@ const Slot = struct {
     task_id: u64 = 0,
     resource_class: accelerator_scheduler.ResourceClass = .foreground_interactive,
     queued_ready: bool = false,
+    prev_ready_index: usize = no_index,
     next_ready_index: usize = no_index,
     dispatch_count: u64 = 0,
     last_dispatch_tick: u64 = 0,
@@ -323,6 +324,7 @@ pub const Scheduler = struct {
 
         const queue_index = resourceClassIndex(class);
         slot.resource_class = class;
+        slot.prev_ready_index = self.ready_tails[queue_index];
         slot.next_ready_index = no_index;
         if (self.ready_tails[queue_index] == no_index) {
             self.ready_heads[queue_index] = slot_index;
@@ -343,8 +345,11 @@ pub const Scheduler = struct {
         if (slot_index >= self.slots.slots.len) return null;
 
         const slot = &self.slots.slots[slot_index];
-        self.ready_heads[queue_index] = slot.next_ready_index;
+        const next = slot.next_ready_index;
+        self.ready_heads[queue_index] = next;
         if (self.ready_heads[queue_index] == no_index) self.ready_tails[queue_index] = no_index;
+        if (next != no_index) self.slots.slots[next].prev_ready_index = no_index;
+        slot.prev_ready_index = no_index;
         slot.next_ready_index = no_index;
         if (slot.queued_ready) {
             slot.queued_ready = false;
@@ -360,27 +365,25 @@ pub const Scheduler = struct {
         if (!target.in_use or !target.queued_ready) return;
 
         const queue_index = resourceClassIndex(target.resource_class);
-        var previous: usize = no_index;
-        var current = self.ready_heads[queue_index];
-        while (current != no_index) : (current = self.slots.slots[current].next_ready_index) {
-            if (current == slot_index) {
-                const next = self.slots.slots[current].next_ready_index;
-                if (previous == no_index) {
-                    self.ready_heads[queue_index] = next;
-                } else {
-                    self.slots.slots[previous].next_ready_index = next;
-                }
-                if (self.ready_tails[queue_index] == current) self.ready_tails[queue_index] = previous;
-                target.next_ready_index = no_index;
-                target.queued_ready = false;
-                self.ready_counts[queue_index] -= 1;
-                self.ready_task_count -= 1;
-                return;
-            }
-            previous = current;
+        const previous = target.prev_ready_index;
+        const next = target.next_ready_index;
+
+        if (previous == no_index) {
+            self.ready_heads[queue_index] = next;
+        } else {
+            self.slots.slots[previous].next_ready_index = next;
         }
+        if (next == no_index) {
+            self.ready_tails[queue_index] = previous;
+        } else {
+            self.slots.slots[next].prev_ready_index = previous;
+        }
+
         target.queued_ready = false;
+        target.prev_ready_index = no_index;
         target.next_ready_index = no_index;
+        self.ready_counts[queue_index] -= 1;
+        self.ready_task_count -= 1;
     }
 
     fn selectReadyResourceClass(self: *const Scheduler, now_ticks: u64) ?accelerator_scheduler.ResourceClass {
@@ -603,6 +606,74 @@ test "userspace scheduler registers tasks through indexed arena slots" {
 
     try std.testing.expect(scheduler.registerTask(second_task.id));
     try std.testing.expectEqual(first_index, scheduler.slots.slotIndexOf(second_task.id).?);
+}
+
+test "userspace scheduler unlinks ready queue slots through prev links" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+
+    const first_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 11 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = DISPATCH_CPU_TICK_COST,
+            .memory_bytes = TEST_TASK_MEMORY_BYTES,
+            .endpoint_slots = TEST_TASK_ENDPOINT_SLOTS,
+            .shared_memory_bytes = TEST_TASK_SHARED_MEMORY_BYTES,
+        },
+        .local_only = true,
+    });
+    const second_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 12 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = DISPATCH_CPU_TICK_COST,
+            .memory_bytes = TEST_TASK_MEMORY_BYTES,
+            .endpoint_slots = TEST_TASK_ENDPOINT_SLOTS,
+            .shared_memory_bytes = TEST_TASK_SHARED_MEMORY_BYTES,
+        },
+        .local_only = true,
+    });
+    const third_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 13 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = DISPATCH_CPU_TICK_COST,
+            .memory_bytes = TEST_TASK_MEMORY_BYTES,
+            .endpoint_slots = TEST_TASK_ENDPOINT_SLOTS,
+            .shared_memory_bytes = TEST_TASK_SHARED_MEMORY_BYTES,
+        },
+        .local_only = true,
+    });
+
+    try std.testing.expect(scheduler.registerTask(first_task.id));
+    try std.testing.expect(scheduler.registerTask(second_task.id));
+    try std.testing.expect(scheduler.registerTask(third_task.id));
+
+    const first_index = scheduler.slots.slotIndexOf(first_task.id).?;
+    const second_index = scheduler.slots.slotIndexOf(second_task.id).?;
+    const third_index = scheduler.slots.slotIndexOf(third_task.id).?;
+    const queue_index = resourceClassIndex(.foreground_interactive);
+    try std.testing.expectEqual(first_index, scheduler.ready_heads[queue_index]);
+    try std.testing.expectEqual(third_index, scheduler.ready_tails[queue_index]);
+    try std.testing.expectEqual(first_index, scheduler.slots.slots[second_index].prev_ready_index);
+    try std.testing.expectEqual(third_index, scheduler.slots.slots[second_index].next_ready_index);
+
+    try std.testing.expect(scheduler.parkTaskUntilEvent(second_task.id));
+    try std.testing.expectEqual(@as(usize, 2), scheduler.readyQueueDepth(.foreground_interactive));
+    try std.testing.expectEqual(third_index, scheduler.slots.slots[first_index].next_ready_index);
+    try std.testing.expectEqual(first_index, scheduler.slots.slots[third_index].prev_ready_index);
+    try std.testing.expectEqual(no_index, scheduler.slots.slots[second_index].prev_ready_index);
+    try std.testing.expectEqual(no_index, scheduler.slots.slots[second_index].next_ready_index);
+
+    try std.testing.expect(scheduler.unregisterTask(first_task.id));
+    try std.testing.expectEqual(third_index, scheduler.ready_heads[queue_index]);
+    try std.testing.expectEqual(third_index, scheduler.ready_tails[queue_index]);
+    try std.testing.expectEqual(no_index, scheduler.slots.slots[third_index].prev_ready_index);
 }
 
 test "userspace scheduler dispatches resource ready queues by priority" {

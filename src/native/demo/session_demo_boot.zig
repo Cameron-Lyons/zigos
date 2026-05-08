@@ -24,7 +24,15 @@ else
 
 pub fn bootScenarioWorld(manager: *session_boot_flow.SessionManager) void {
     var graph = manager.beginServiceGraph() orelse return;
-    bootstrap_packages.seed(&manager.package_service_instance);
+    bootstrap_packages.seed(
+        manager.packageServicePtr(),
+        manager.capabilityTablePtr(),
+        graph.state.services.package_service.id,
+        graph.state.ids.package_service,
+        graph.state.session_task.id,
+        graph.state.ids.session_service,
+        graph.state.ids.policy_authority,
+    );
 
     var mediator = initPolicyMediator(manager, graph.state.ids.policy_authority, graph.state.services);
     if (!session_service_bootstrap.bootRegistryService(&graph.env, &graph.state, graph.kernel_port, &graph.service_bindings)) {
@@ -59,8 +67,8 @@ fn initPolicyMediator(
 ) policy_mediation.PolicyMediator {
     return policy_mediation.PolicyMediator.init(
         policy_authority,
-        &manager.capability_table,
-        manager.runtime_service.runtimePtr(),
+        manager.capabilityTablePtr(),
+        manager.runtimeServicePtr().runtimePtr(),
         .{
             .network_service_id = services.network_service.id,
             .compositor_service_id = services.compositor_service.id,
@@ -78,11 +86,11 @@ fn initReviewService(
     return permission_review_service.Service.initProfiled(
         review_service_id,
         review_task_id,
-        &manager.runtime,
+        manager.runtimePtr(),
         &[_][]const u8{},
         bootstrap_review_profile.rules[0..],
-        &manager.review_compositor_session,
-        &manager.review_ux_controller,
+        manager.compositorSessionPtr(),
+        manager.reviewUxControllerPtr(),
     );
 }
 
@@ -93,16 +101,16 @@ fn runSessionLifecycle(
     notes_review: session_support.NotesReviewState,
 ) void {
     var lifecycle_context = scenario_world.Context{
-        .capability_table = &manager.capability_table,
-        .runtime = &manager.runtime,
-        .runtime_service = &manager.runtime_service,
-        .userspace_catalog = &manager.userspace_catalog,
-        .supervisor = &manager.supervisor,
-        .compositor = &manager.review_compositor_session,
-        .driver_directory = &manager.driver_directory,
-        .storage_service_instance = &manager.storage_service_instance,
-        .storage_checkpoint_store = &manager.storage_checkpoint_store,
-        .export_package = &manager.export_package_buffer,
+        .capability_table = manager.capabilityTablePtr(),
+        .runtime = manager.runtimePtr(),
+        .runtime_service = manager.runtimeServicePtr(),
+        .userspace_catalog = manager.userspaceCatalogPtr(),
+        .supervisor = manager.supervisorPtr(),
+        .compositor = manager.compositorSessionPtr(),
+        .driver_directory = manager.driverDirectoryPtr(),
+        .storage_service_instance = manager.storageServicePtr(),
+        .storage_checkpoint_store = manager.storageCheckpointStorePtr(),
+        .export_package = manager.exportPackagePtr(),
         .policy_authority = state.ids.policy_authority,
         .session_service = state.ids.session_service,
         .session_user = state.ids.session_user,
@@ -112,13 +120,13 @@ fn runSessionLifecycle(
         .sync_service_id = state.services.sync_service.id,
         .sync_task_id = service_bindings.bindingFor(.sync_replication).task_id,
         .sync_service_principal = state.ids.sync_service,
-        .sync_resident_state = &manager.sync_resident_state,
+        .sync_resident_state = manager.syncResidentStatePtr(),
         .policy_service_id = state.services.policy_service.id,
         .network_service_id = state.services.network_service.id,
         .compositor_service_id = state.services.compositor_service.id,
         .package_service_id = state.services.package_service.id,
         .package_service_principal = state.ids.package_service,
-        .update_ledger = &manager.diagnostic_ledger,
+        .update_ledger = manager.updateLedgerPtr(),
         .notes_task_id = notes_review.task_id,
         .notes_object_capability = notes_review.object_capability,
     };

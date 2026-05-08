@@ -185,6 +185,10 @@
         {
           "file": "src/native/kernel_api/syscall_surface.zig",
           "name": "syscall surface dispatches typed task creation requests"
+        },
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ],
       "requirements": [
@@ -300,14 +304,30 @@
           "file": "src/native/policy/policy_mediation.zig",
           "name": "policy mediation maps location contacts screen capture and notification capabilities"
         },
-        {
-          "file": "src/native/policy/policy_mediation.zig",
-          "name": "policy mediation denies clipboard and screen capture without explicit grants"
-        },
-        {
-          "file": "src/native/platform/secure_secret_store.zig",
-          "name": "secure secret store returns handles by default and only exports raw when allowed"
-        }
+      {
+        "file": "src/native/policy/policy_mediation.zig",
+        "name": "policy mediation denies clipboard and screen capture without explicit grants"
+      },
+      {
+        "file": "src/native/storage/storage_service.zig",
+        "name": "storage port requires authority context for protected mutations"
+      },
+      {
+        "file": "src/native/services/package_service.zig",
+        "name": "package port requires service authority before install update and rollback"
+      },
+      {
+        "file": "src/native/sync/sync_service_test.zig",
+        "name": "sync port requires service-scoped authority before device graph mutation"
+      },
+      {
+        "file": "src/native/session/service_path_proofs.zig",
+        "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+      },
+      {
+        "file": "src/native/platform/secure_secret_store.zig",
+        "name": "secure secret store returns handles by default and only exports raw when allowed"
+      }
       ],
       "requirements": [
         "REQ-CAPABILITY-BASED-ACCESS-CONTROL",
@@ -366,6 +386,10 @@
           "name": "sync service covers device graph policy replication semantics and restart recovery"
         },
         {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
           "file": "src/native/storage/workspace.zig",
           "name": "workspace sharing acts as a mutable policy container"
         }
@@ -396,6 +420,10 @@
         {
           "file": "src/native/sync/sync_service_test.zig",
           "name": "overlay sessions cover sync remote access private service publishing and encrypted relay"
+        },
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ],
       "requirements": [
@@ -467,6 +495,10 @@
         {
           "file": "src/native/kernel_api/shared_memory.zig",
           "name": "shared memory objects label accelerator access and explicit zero-copy attachments"
+        },
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ],
       "requirements": [
@@ -490,6 +522,10 @@
         {
           "file": "src/native/drivers/driver_service.zig",
           "name": "driver services require signed least-privilege device authority"
+        },
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
           "file": "src/native/session/supervisor.zig",
@@ -790,7 +826,12 @@
         "src/native/sync/sync_service_impl.zig",
         "src/native/services/compatibility_environment.zig"
       ],
-      "coverage_note": "Design goals are covered by cross-subsystem scenarios, but some dependent requirements still rely on modeled evidence rather than full boot/syscall/service-path enforcement."
+      "coverage_note": "Design goals are covered by cross-subsystem scenarios, but some dependent requirements still rely on modeled evidence rather than full boot/syscall/service-path enforcement.",
+      "roadmap": {
+        "priority": "P0",
+        "focus": "Graduate dependent modeled and scenario rows before adding new platform-facing surface area.",
+        "graduation_proof": "All meta dependencies are enforced with boot, syscall, or service-path negative tests."
+      }
     },
     "REQ-ZERO-AMBIENT-AUTHORITY": {
       "status": "enforced",
@@ -827,6 +868,7 @@
         "src/native/drivers/driver_service.zig",
         "src/native/services/userspace_service_ipc.zig",
         "src/native/session/session_manager_boot_flow.zig",
+        "src/native/session/service_graph_builder.zig",
         "src/native/session/session_service_bootstrap.zig",
         "src/kernel/net/ethernet.zig",
         "src/kernel/net/link_port.zig",
@@ -935,10 +977,15 @@
     "REQ-TASK-MODEL": {
       "status": "enforced",
       "enforcement_modules": [
+        "src/native/core/indexed_arena.zig",
         "src/native/task/task_runtime_model.zig",
         "src/native/task/task_runtime_service.zig"
       ],
       "negative_tests": [
+        {
+          "file": "src/native/task/task_runtime.zig",
+          "name": "task runtime crosses the first task slab page with indexed handles"
+        },
         {
           "file": "src/native/task/task_runtime_service.zig",
           "name": "task runtime service refuses restart before a checkpoint exists"
@@ -976,14 +1023,24 @@
       ]
     },
     "REQ-KERNEL-REQUIREMENTS": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/kernel_api/syscall_surface.zig",
         "src/native/kernel_api/endpoint.zig",
         "src/native/kernel_api/shared_memory.zig",
-        "src/native/kernel_api/native_kernel.zig"
+        "src/native/kernel_api/native_kernel.zig",
+        "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Typed syscall, capability checks, and booted driver restart are implemented, but resource-accounting isolation is not yet proven through the real freestanding syscall path for every requirement."
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/kernel_api/syscall_surface.zig",
+          "name": "syscall surface rejects invalid request and response pointer ranges"
+        }
+      ]
     },
     "REQ-PRIVILEGE-MODEL": {
       "status": "enforced",
@@ -1008,6 +1065,7 @@
       "enforcement_modules": [
         "src/native/platform/measured_boot.zig",
         "src/native/session/session_manager_boot_flow.zig",
+        "src/native/session/trust_boot.zig",
         "src/main.zig",
         "tools/generate_userspace_archive.zig",
         "scripts/run-zigos-native-smoke.sh"
@@ -1115,12 +1173,30 @@
       ]
     },
     "REQ-CAPABILITY-BASED-ACCESS-CONTROL": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/kernel_api/capability.zig",
-        "src/native/kernel_api/native_kernel_access.zig"
+        "src/native/kernel_api/native_kernel_access.zig",
+        "src/native/services/service_authority.zig",
+        "src/native/storage/storage_service.zig",
+        "src/native/services/package_service.zig",
+        "src/native/sync/sync_service_impl.zig",
+        "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Capability table enforcement is implemented, but full protected-resource mediation is not yet proven across all real service paths."
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/sync/sync_service_test.zig",
+          "name": "sync port requires service-scoped authority before device graph mutation"
+        },
+        {
+          "file": "src/native/storage/storage_service.zig",
+          "name": "storage port requires authority context for protected mutations"
+        }
+      ]
     },
     "REQ-PERMISSION-GRANTS": {
       "status": "enforced",
@@ -1151,14 +1227,24 @@
       ]
     },
     "REQ-PROCESS-ISOLATION": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/task/task_runtime_model.zig",
         "src/native/task/userspace_executor.zig",
         "src/native/kernel_api/syscall_surface.zig",
-        "src/native/session/runtime_negative_proofs.zig"
+        "src/native/session/runtime_negative_proofs.zig",
+        "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Runtime and freestanding probes cover isolation claims, but several proofs are modeled and do not yet constitute broad process-isolation enforcement across real app/service workloads."
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/session/runtime_negative_proofs.zig",
+          "name": "runtime negative proofs reject modeled bypasses"
+        }
+      ]
     },
     "REQ-SECRETS": {
       "status": "enforced",
@@ -1175,6 +1261,7 @@
     "REQ-OBJECT-STORE": {
       "status": "enforced",
       "enforcement_modules": [
+        "src/native/core/indexed_arena.zig",
         "src/native/storage/object_store.zig",
         "src/native/storage/storage_volume.zig",
         "src/native/storage/storage_service.zig"
@@ -1187,6 +1274,10 @@
         {
           "file": "src/native/storage/object_store.zig",
           "name": "object store streams page-sized chunks into Merkle-addressed blob manifests"
+        },
+        {
+          "file": "src/native/storage/object_store.zig",
+          "name": "object store accepts payloads beyond the old sixteen-page ceiling"
         },
         {
           "file": "src/native/storage/storage_service.zig",
@@ -1258,23 +1349,44 @@
       ]
     },
     "REQ-LOCAL-FIRST-REPLICATION": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/sync/sync_service_impl.zig",
         "src/native/sync/sync_state_store.zig",
+        "src/native/sync/sync_state_support.zig",
         "src/native/sync/sync_adapters.zig",
-        "src/native/sync/sync_transport_harness.zig"
+        "src/native/sync/sync_transport_harness.zig",
+        "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Sync state, adapters, and transport harnesses model local-first behavior, but replication is not yet proven through live multi-device service execution."
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/sync/sync_service_test.zig",
+          "name": "sync private overlay replicates end to end across two service tasks"
+        }
+      ]
     },
     "REQ-SYNC-SEMANTICS": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/sync/sync_state_support.zig",
         "src/native/sync/sync_service_impl.zig",
-        "src/native/sync/sync_adapters.zig"
+        "src/native/sync/sync_adapters.zig",
+        "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "CRDT/chunk/secret/database adapters are tested in-process, but they are not yet exercised as real sync service semantics over live replication paths."
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/sync/sync_adapters.zig",
+          "name": "mergeable document adapter applies deterministic CRDT operations and rejects undersized buffers"
+        }
+      ]
     },
     "REQ-SHARING": {
       "status": "enforced",
@@ -1320,13 +1432,23 @@
       ]
     },
     "REQ-PRIVATE-OVERLAY": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/sync/sync_service_impl.zig",
         "src/native/sync/sync_transport_harness.zig",
-        "src/native/sync/network_policy.zig"
+        "src/native/sync/network_policy.zig",
+        "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Overlay sessions and relay hardening are modeled with harnesses; real encrypted overlay networking is not yet enforced end to end."
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/sync/network_policy.zig",
+          "name": "network policy connections can require remote attestation and pinned service identities"
+        }
+      ]
     },
     "REQ-TASK-FIRST-UX": {
       "status": "scenario",
@@ -1334,7 +1456,12 @@
         "src/native/platform/compositor_session.zig",
         "src/native/platform/event_ledger.zig"
       ],
-      "coverage_note": "Task-first UX is represented by compositor/session scenarios and render strings, not by a real interactive compositor path."
+      "coverage_note": "Task-first UX is represented by compositor/session scenarios and render strings, not by a real interactive compositor path.",
+      "roadmap": {
+        "priority": "P2",
+        "focus": "Replace rendered task records with a booted compositor/session workflow centered on task state.",
+        "graduation_proof": "Interactive or scripted compositor path opens task, workspace, permission, and pairing flows with structured audit records."
+      }
     },
     "REQ-WINDOWS-AND-VIEWS": {
       "status": "scenario",
@@ -1342,7 +1469,12 @@
         "src/native/platform/compositor_session.zig",
         "src/native/platform/event_ledger.zig"
       ],
-      "coverage_note": "Window/view support is scenario-rendered in the compositor model, not yet enforced by a real UI compositor."
+      "coverage_note": "Window/view support is scenario-rendered in the compositor model, not yet enforced by a real UI compositor.",
+      "roadmap": {
+        "priority": "P2",
+        "focus": "Enforce document, workspace, app panel, and fullscreen view lifecycle in the compositor service path.",
+        "graduation_proof": "Compositor service tests create, switch, deny unauthorized scraping, and recover view state after service restart."
+      }
     },
     "REQ-PERMISSION-UX": {
       "status": "enforced",
@@ -1376,9 +1508,15 @@
       "enforcement_modules": [
         "src/native/task/accelerator_scheduler.zig",
         "src/native/task/userspace_scheduler.zig",
-        "src/native/task/task_runtime_model.zig"
+        "src/native/task/task_runtime_model.zig",
+        "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Resource classes and accelerator decisions are modeled, but there is no live unified scheduler coordinating real CPU/GPU/NPU/media resources."
+      "coverage_note": "Booted syscall paths now enforce CPU, endpoint, and shared-memory budget accounting, but full live CPU/GPU/NPU/media scheduling policy is still modeled.",
+      "roadmap": {
+        "priority": "P1",
+        "focus": "Bind live userspace dispatch to CPU, GPU, NPU, media, memory, thermal, and battery policy decisions.",
+        "graduation_proof": "Scheduler tests and QEMU/spec gates show dispatch order, accelerator claims, accounting, and denial under pressure."
+      }
     },
     "REQ-SHARED-MEMORY-OBJECTS": {
       "status": "enforced",
@@ -1399,7 +1537,12 @@
         "src/native/task/accelerator_scheduler.zig",
         "src/native/task/task_runtime_model.zig"
       ],
-      "coverage_note": "Thermal and power policy decisions are covered by scheduler model tests, not live runtime scheduling enforcement."
+      "coverage_note": "Thermal and power policy decisions are covered by scheduler model tests, not live runtime scheduling enforcement.",
+      "roadmap": {
+        "priority": "P1",
+        "focus": "Make thermal and battery policy affect live task dispatch, quality degradation, and delay decisions.",
+        "graduation_proof": "Service-path scheduler tests prove foreground remains responsive while batch/background work is delayed or degraded under pressure."
+      }
     },
     "REQ-USERSPACE-DRIVERS": {
       "status": "enforced",
@@ -1435,11 +1578,22 @@
       ]
     },
     "REQ-DRIVER-PERMISSIONS": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
-        "src/native/drivers/driver_service.zig"
+        "src/native/drivers/driver_service.zig",
+        "src/native/kernel_api/device_broker.zig",
+        "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Driver authority narrowing is implemented in the driver service model, but not yet proven through real driver process launch and device operations."
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/drivers/driver_service.zig",
+          "name": "driver services reject unsigned bundles and escalated device rights"
+        }
+      ]
     },
     "REQ-DRIVER-HOT-SWAP-AND-FAILURE-RECOVERY": {
       "status": "enforced",
@@ -1447,6 +1601,7 @@
         "src/native/session/supervisor.zig",
         "src/native/drivers/driver_service.zig",
         "src/native/drivers/driver_runtime.zig",
+        "src/native/session/service_graph_builder.zig",
         "src/native/session/session_service_bootstrap.zig",
         "src/native/session/session_manager_boot_flow.zig",
         "src/native/platform/event_ledger.zig"
@@ -1472,7 +1627,8 @@
         "src/native/platform/immutable_base.zig",
         "src/native/platform/update_health.zig",
         "src/native/platform/measured_boot.zig",
-        "src/native/session/session_manager_boot_flow.zig",
+        "src/native/session/trust_boot.zig",
+        "src/native/session/native_store_mount.zig",
         "scripts/run-zigos-native-smoke.sh"
       ],
       "negative_tests": [
@@ -1639,7 +1795,12 @@
         "src/native/platform/compositor_session.zig",
         "src/native/platform/event_ledger.zig"
       ],
-      "coverage_note": "The user experience is represented by cohesive scenarios and rendered state, not yet by a real usable shell/compositor workflow."
+      "coverage_note": "The user experience is represented by cohesive scenarios and rendered state, not yet by a real usable shell/compositor workflow.",
+      "roadmap": {
+        "priority": "P2",
+        "focus": "Prove install, sync, permissions, updates, rollback, and recovery through a booted task-oriented workflow.",
+        "graduation_proof": "End-to-end UX scenario runs against launched platform services and emits inspectable permission, sync, update, and recovery events."
+      }
     },
     "REQ-ONE-SENTENCE-SUMMARY": {
       "status": "scenario",
@@ -1651,7 +1812,12 @@
         "src/native/task/task_runtime_model.zig",
         "src/native/task/accelerator_scheduler.zig"
       ],
-      "coverage_note": "The summary depends on capabilities, sync, immutable base, process isolation, networking, and resource scheduling; several of those are still modeled or scenario-only."
+      "coverage_note": "The summary depends on capabilities, sync, immutable base, process isolation, networking, and resource scheduling; several of those are still modeled or scenario-only.",
+      "roadmap": {
+        "priority": "P0",
+        "focus": "Keep the summary scenario-only until capability, sync, isolation, networking, and scheduler dependencies are enforced.",
+        "graduation_proof": "All summary dependencies are enforced and the meta-requirement gate can mark this row enforced without modeled dependencies."
+      }
     }
   }
 }

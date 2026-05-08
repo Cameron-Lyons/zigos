@@ -123,6 +123,8 @@ const SecretStoreContext = struct {
 
 const OverlaySessionContext = struct {
     service: sync_service.Service = sync_service.Service.init(930, 71, .{ .kind = .service, .serial = 33 }),
+    capability_table: capability.CapabilityTable = capability.CapabilityTable.init(),
+    authority: sync_service.AuthorityContext = zeroSyncAuthority(),
     workspace_id: u64 = 0,
     source_device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
     target_device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
@@ -133,6 +135,8 @@ const RecoveryContext = struct {
     storage: storage_service.Service = undefined,
     manager: immutable_base.Manager = undefined,
     sync: sync_service.Service = undefined,
+    sync_capabilities: capability.CapabilityTable = capability.CapabilityTable.init(),
+    sync_authority: sync_service.AuthorityContext = zeroSyncAuthority(),
     environment: recovery_environment.Environment = undefined,
     workspace_id: u64 = 0,
     snapshot_id: u64 = 0,
@@ -146,6 +150,7 @@ const UpdateHealthContext = struct {
     storage: storage_service.Service = undefined,
     manager: immutable_base.Manager = undefined,
     sync: sync_service.Service = undefined,
+    sync_capabilities: capability.CapabilityTable = capability.CapabilityTable.init(),
     compositor: compositor_session.Session = compositor_session.Session.init(),
     supervisor: supervisor_mod.Supervisor = supervisor_mod.Supervisor.init(),
     ledger: event_ledger.Ledger = event_ledger.Ledger.init(),
@@ -551,13 +556,26 @@ fn prepareTaskCheckpointFixture() void {
 
 fn prepareOverlaySessionFixture() void {
     overlay_session_context.service = sync_service.Service.init(930, 71, service(33));
+    overlay_session_context.capability_table = capability.CapabilityTable.init();
+    const sync_authority_capability = mintBenchmarkSyncAuthority(
+        &overlay_session_context.capability_table,
+        &overlay_session_context.service,
+    );
+    overlay_session_context.authority = benchmarkSyncAuthority(
+        &overlay_session_context.service,
+        sync_authority_capability,
+        10,
+    );
     overlay_session_context.workspace_id = 4_200;
     overlay_session_context.source_device = device(191);
     overlay_session_context.target_device = device(192);
 
+    var sync_port = sync_service.SyncPort.init(&overlay_session_context.service, &overlay_session_context.capability_table);
+    const authority = overlay_session_context.authority;
     const owner = user(19);
-    _ = overlay_session_context.service.ensureUserRoot(owner, "overlay-owner", signer("overlay-user", 0x61)) catch unreachable;
-    _ = overlay_session_context.service.enrollTrustedDevice(
+    _ = sync_port.ensureUserRoot(authority, owner, "overlay-owner", signer("overlay-user", 0x61)) catch unreachable;
+    _ = sync_port.enrollTrustedDevice(
+        authority,
         owner,
         overlay_session_context.source_device,
         "overlay-laptop",
@@ -565,7 +583,8 @@ fn prepareOverlaySessionFixture() void {
         signer("overlay-laptop", 0x62),
         10,
     ) catch unreachable;
-    _ = overlay_session_context.service.enrollTrustedDevice(
+    _ = sync_port.enrollTrustedDevice(
+        authority,
         owner,
         overlay_session_context.target_device,
         "overlay-tablet",
@@ -574,27 +593,27 @@ fn prepareOverlaySessionFixture() void {
         11,
     ) catch unreachable;
 
-    const local_policy = overlay_session_context.service.createNetworkPolicy(.{
+    const local_policy = sync_port.createNetworkPolicy(authority, .{
         .owner = overlay_session_context.service.owner,
         .workspace_id = overlay_session_context.workspace_id,
         .label = "overlay-local",
         .mode = .local_network,
     }) catch unreachable;
-    const overlay_policy = overlay_session_context.service.createNetworkPolicy(.{
+    const overlay_policy = sync_port.createNetworkPolicy(authority, .{
         .owner = overlay_session_context.service.owner,
         .workspace_id = overlay_session_context.workspace_id,
         .label = "overlay-service",
         .mode = .named_service_identity,
         .target = "overlay.workspace.sync",
     }) catch unreachable;
-    const relay_policy = overlay_session_context.service.createNetworkPolicy(.{
+    const relay_policy = sync_port.createNetworkPolicy(authority, .{
         .owner = overlay_session_context.service.owner,
         .workspace_id = overlay_session_context.workspace_id,
         .label = "overlay-relay",
         .mode = .named_domain,
         .target = "relay.zigos.dev",
     }) catch unreachable;
-    _ = overlay_session_context.service.configureWorkspacePolicy(.{
+    _ = sync_port.configureWorkspacePolicy(authority, .{
         .workspace_id = overlay_session_context.workspace_id,
         .owner = owner,
         .device_to_device_policy_id = local_policy.id,
@@ -602,13 +621,15 @@ fn prepareOverlaySessionFixture() void {
         .overlay_policy_id = overlay_policy.id,
         .relay_domain = "relay.zigos.dev",
     }) catch unreachable;
-    _ = overlay_session_context.service.configureOverlay(
+    _ = sync_port.configureOverlay(
+        authority,
         overlay_session_context.workspace_id,
         overlay_session_context.source_device,
         "overlay.workspace.sync",
         true,
     ) catch unreachable;
-    _ = overlay_session_context.service.publishPrivateService(
+    _ = sync_port.publishPrivateService(
+        authority,
         overlay_session_context.workspace_id,
         "notes.remote",
     ) catch unreachable;
@@ -1134,6 +1155,8 @@ fn benchmarkDenialExplanationRender(iteration: u32) u64 {
 }
 
 fn benchmarkOverlaySessionFlow(iteration: u32) u64 {
+    var sync_port = sync_service.SyncPort.init(&overlay_session_context.service, &overlay_session_context.capability_table);
+    var authority = overlay_session_context.authority;
     const usage: sync_service.OverlaySessionUse = switch (@mod(iteration, 3)) {
         0 => .sync_replication,
         1 => .remote_access,
@@ -1143,7 +1166,9 @@ fn benchmarkOverlaySessionFlow(iteration: u32) u64 {
         .sync_replication => .device_to_device,
         .remote_access, .private_service => .relay_assisted,
     };
-    const session = overlay_session_context.service.openOverlaySession(
+    authority.now_ticks = 40 + iteration;
+    const session = sync_port.openOverlaySession(
+        authority,
         overlay_session_context.workspace_id,
         overlay_session_context.source_device,
         overlay_session_context.target_device,
@@ -1152,9 +1177,11 @@ fn benchmarkOverlaySessionFlow(iteration: u32) u64 {
         if (usage == .private_service) "notes.remote" else null,
         40 + iteration,
     ) catch unreachable;
-    _ = overlay_session_context.service.probeOverlaySession(session.session_id, 41 + iteration) catch unreachable;
+    authority.now_ticks = 41 + iteration;
+    _ = sync_port.probeOverlaySession(authority, session.session_id, 41 + iteration) catch unreachable;
     const live = overlay_session_context.service.findOverlaySession(session.session_id) orelse unreachable;
-    _ = overlay_session_context.service.closeOverlaySession(session.session_id, 42 + iteration) catch unreachable;
+    authority.now_ticks = 42 + iteration;
+    _ = sync_port.closeOverlaySession(authority, session.session_id, 42 + iteration) catch unreachable;
 
     return session.session_id +
         session.overlay_id +
@@ -1367,8 +1394,21 @@ fn prepareRecoveryFixture(iteration: u32) void {
     _ = recovery_context.storage.commit(workspace_record.id, 15 + iteration) catch unreachable;
 
     recovery_context.sync = sync_service.Service.init(921, 52, sync_owner);
-    _ = recovery_context.sync.ensureUserRoot(recovery_context.user, "cameron", signer("platform-user", 0x74)) catch unreachable;
-    _ = recovery_context.sync.enrollTrustedDevice(
+    recovery_context.sync_capabilities = capability.CapabilityTable.init();
+    const sync_authority_capability = mintBenchmarkSyncAuthority(
+        &recovery_context.sync_capabilities,
+        &recovery_context.sync,
+    );
+    recovery_context.sync_authority = benchmarkSyncAuthority(
+        &recovery_context.sync,
+        sync_authority_capability,
+        16 + iteration,
+    );
+    var sync_port = sync_service.SyncPort.init(&recovery_context.sync, &recovery_context.sync_capabilities);
+    const sync_authority = recovery_context.sync_authority;
+    _ = sync_port.ensureUserRoot(sync_authority, recovery_context.user, "cameron", signer("platform-user", 0x74)) catch unreachable;
+    _ = sync_port.enrollTrustedDevice(
+        sync_authority,
         recovery_context.user,
         recovery_context.primary_device,
         "primary",
@@ -1376,7 +1416,8 @@ fn prepareRecoveryFixture(iteration: u32) void {
         signer("primary-device", 0x75),
         16 + iteration,
     ) catch unreachable;
-    _ = recovery_context.sync.enrollTrustedDevice(
+    _ = sync_port.enrollTrustedDevice(
+        sync_authority,
         recovery_context.user,
         recovery_context.tablet,
         "tablet",
@@ -1384,19 +1425,20 @@ fn prepareRecoveryFixture(iteration: u32) void {
         signer("tablet-device", 0x76),
         17 + iteration,
     ) catch unreachable;
-    const local_policy = recovery_context.sync.createNetworkPolicy(.{
+    const local_policy = sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_record.id.raw(),
         .label = "local-net",
         .mode = .local_network,
     }) catch unreachable;
-    _ = recovery_context.sync.configureWorkspacePolicy(.{
+    _ = sync_port.configureWorkspacePolicy(sync_authority, .{
         .workspace_id = workspace_record.id.raw(),
         .owner = recovery_context.user,
         .device_to_device_policy_id = local_policy.id,
         .selective_prefixes = &.{"documents/"},
     }) catch unreachable;
-    recovery_context.sync.setReplicaVersion(
+    sync_port.setReplicaVersion(
+        sync_authority,
         workspace_record.id.raw(),
         recovery_context.tablet,
         "documents/notes.md",
@@ -1423,12 +1465,14 @@ fn prepareUpdateHealthFixture(iteration: u32) void {
         signer("update-health-state", 0x31),
     ) catch unreachable;
     update_health_context.sync = sync_service.Service.init(1_500, 401, owner);
+    update_health_context.sync_capabilities = capability.CapabilityTable.init();
     update_health_context.compositor = compositor_session.Session.init();
     update_health_context.supervisor = supervisor_mod.Supervisor.init();
     update_health_context.ledger = event_ledger.Ledger.init();
 
     const network_probe = seedUpdateHealthNetworkProbe(
         &update_health_context.sync,
+        &update_health_context.sync_capabilities,
         probe_workspace_id,
         12 + iteration,
     );
@@ -1526,14 +1570,19 @@ fn seedUpdateHealthStorageProbe(
 
 fn seedUpdateHealthNetworkProbe(
     sync: *sync_service.Service,
+    capability_table: *capability.CapabilityTable,
     workspace_id: u64,
     tick_base: u64,
 ) update_health.NetworkProbe {
     const owner = user(88);
     const source_device = device(881);
     const target_device = device(882);
-    _ = sync.ensureUserRoot(owner, "update-health", signer("update-health-user", 0x51)) catch unreachable;
-    _ = sync.enrollTrustedDevice(
+    const authority_capability = mintBenchmarkSyncAuthority(capability_table, sync);
+    var port = sync_service.SyncPort.init(sync, capability_table);
+    const authority = benchmarkSyncAuthority(sync, authority_capability, tick_base);
+    _ = port.ensureUserRoot(authority, owner, "update-health", signer("update-health-user", 0x51)) catch unreachable;
+    _ = port.enrollTrustedDevice(
+        authority,
         owner,
         source_device,
         "source",
@@ -1541,7 +1590,8 @@ fn seedUpdateHealthNetworkProbe(
         signer("update-health-source", 0x52),
         tick_base,
     ) catch unreachable;
-    _ = sync.enrollTrustedDevice(
+    _ = port.enrollTrustedDevice(
+        authority,
         owner,
         target_device,
         "target",
@@ -1550,29 +1600,31 @@ fn seedUpdateHealthNetworkProbe(
         tick_base + 1,
     ) catch unreachable;
 
-    const local_policy = sync.createNetworkPolicy(.{
+    const local_policy = port.createNetworkPolicy(authority, .{
         .owner = sync.owner,
         .workspace_id = workspace_id,
         .label = "health-local",
         .mode = .local_network,
     }) catch unreachable;
-    const overlay_policy = sync.createNetworkPolicy(.{
+    const overlay_policy = port.createNetworkPolicy(authority, .{
         .owner = sync.owner,
         .workspace_id = workspace_id,
         .label = "health-overlay",
         .mode = .named_service_identity,
         .target = "overlay.health.sync",
     }) catch unreachable;
-    _ = sync.configureWorkspacePolicy(.{
+    _ = port.configureWorkspacePolicy(authority, .{
         .workspace_id = workspace_id,
         .owner = owner,
         .device_to_device_policy_id = local_policy.id,
         .overlay_policy_id = overlay_policy.id,
     }) catch unreachable;
-    _ = sync.configureOverlay(workspace_id, source_device, "overlay.health.sync", true) catch unreachable;
+    _ = port.configureOverlay(authority, workspace_id, source_device, "overlay.health.sync", true) catch unreachable;
 
     return .{
         .sync = sync,
+        .capability_table = capability_table,
+        .authority = authority,
         .workspace_id = workspace_id,
         .source_device = source_device,
         .target_device = target_device,
@@ -1599,6 +1651,53 @@ fn seedUpdateHealthUiProbe(session: *compositor_session.Session) update_health.U
     }) catch unreachable;
     _ = session.openTaskView(task, "Update Health") catch unreachable;
     return .{ .session = session };
+}
+
+fn zeroSyncAuthority() sync_service.AuthorityContext {
+    return .{
+        .task_id = 0,
+        .principal = .{ .kind = .service, .serial = 0 },
+        .capability_id = 0,
+        .now_ticks = 0,
+    };
+}
+
+fn mintBenchmarkSyncAuthority(
+    capability_table: *capability.CapabilityTable,
+    service_instance: *const sync_service.Service,
+) capability.Capability {
+    return capability_table.mintBootRoot(.{
+        .holder = service_instance.owner,
+        .issuer = policyAuthority(1),
+        .target = .{ .kind = .service, .id = service_instance.service_id },
+        .rights = .{ .service = .{
+            .endpoint_connect = true,
+        } },
+        .scope = .{
+            .task_id = service_instance.task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = false,
+        },
+        .audit = .{},
+    }) catch unreachable;
+}
+
+fn benchmarkSyncAuthority(
+    service_instance: *const sync_service.Service,
+    authority_capability: capability.Capability,
+    now_ticks: u64,
+) sync_service.AuthorityContext {
+    return .{
+        .task_id = service_instance.task_id,
+        .principal = service_instance.owner,
+        .capability_id = authority_capability.id,
+        .now_ticks = now_ticks,
+    };
 }
 
 fn mintDriverAuthority(

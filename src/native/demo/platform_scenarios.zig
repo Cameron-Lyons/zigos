@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const boot_markers = @import("../../kernel/boot/markers.zig");
+const capability = @import("../kernel_api/capability.zig");
 const contract = @import("../session/contract.zig");
 const immutable_base = @import("../platform/immutable_base.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
@@ -56,6 +57,31 @@ pub fn run(
         .serial = 4,
     };
     const paired_device_principal = principal.PrincipalId{ .kind = .device, .serial = 5 };
+    const sync_authority_capability = context.capability_table.mintBootRoot(.{
+        .holder = context.sync_service_principal,
+        .issuer = context.policy_authority,
+        .target = .{ .kind = .service, .id = context.sync_service_id },
+        .rights = .{ .service = .{
+            .endpoint_connect = true,
+        } },
+        .scope = .{
+            .task_id = context.sync_task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = 1_000,
+        },
+        .audit = .{},
+    }) catch unreachable;
+    var sync_port = sync_service_mod.SyncPort.init(sync_service, context.capability_table);
+    const sync_authority = sync_service_mod.AuthorityContext{
+        .task_id = context.sync_task_id,
+        .principal = context.sync_service_principal,
+        .capability_id = sync_authority_capability.id,
+        .now_ticks = 117,
+    };
 
     support.common.printBootMarker("ZIGOS:PLATFORM:INIT_START");
     support.common.printBootMarker("ZIGOS:PLATFORM:IMMUTABLE_BASE:LOOKUP_START");
@@ -82,6 +108,8 @@ pub fn run(
         .sync_state = sync_state,
         .core_health_service_ids = core_health_service_ids[0..],
         .local_device_principal = local_device_principal,
+        .capability_table = context.capability_table,
+        .sync_authority = sync_authority,
     };
     support.common.printBootMarker("ZIGOS:PLATFORM:INIT_READY");
     if (immutable_base_manager.activeImage() == null) {
@@ -283,7 +311,8 @@ pub fn run(
     recordMeasuredBootComparison(context, &measured_boot_record);
 
     if (sync_service.findDeviceRecord(recovery_device_principal) == null) {
-        _ = sync_service.enrollTrustedDevice(
+        _ = sync_port.enrollTrustedDevice(
+            sync_authority,
             context.session_user,
             recovery_device_principal,
             "recovery-device",
@@ -366,7 +395,7 @@ pub fn run(
     _ = restored_notes;
 
     if (sync_service.findWorkspacePolicy(storage_state.notes_workspace_id) == null) {
-        _ = sync_service.configureWorkspacePolicy(.{
+        _ = sync_port.configureWorkspacePolicy(sync_authority, .{
             .workspace_id = storage_state.notes_workspace_id,
             .owner = context.session_user,
             .offline_first = true,
@@ -465,7 +494,8 @@ pub fn run(
     }
 
     ux.pairDevice(
-        sync_service,
+        &sync_port,
+        sync_authority,
         context.session_user,
         paired_device_principal,
         "paired-device",
@@ -512,6 +542,8 @@ const ImmutableBaseWorkspaceState = struct {
 const ActivationProbeContext = struct {
     context: *support.Context,
     sync_service: *sync_service_mod.Service,
+    capability_table: *const capability.CapabilityTable,
+    sync_authority: sync_service_mod.AuthorityContext,
     storage_state: support.StorageScenarioState,
     sync_state: support.SyncScenarioState,
     core_health_service_ids: []const u64,
@@ -556,11 +588,7 @@ fn taskForOwner(
     runtime: *const task_runtime.Runtime,
     owner: principal.PrincipalId,
 ) ?*const task_runtime.TaskRecord {
-    for (&runtime.tasks) |*slot| {
-        if (!slot.in_use) continue;
-        if (slot.task.owner.eql(owner)) return &slot.task;
-    }
-    return null;
+    return runtime.findByOwner(owner);
 }
 
 fn beginValidatedActivation(
@@ -610,6 +638,8 @@ fn validateActivation(
             .ui_service_id = probe.context.compositor_service_id,
             .network_probe = .{
                 .sync = probe.sync_service,
+                .capability_table = probe.capability_table,
+                .authority = probe.sync_authority,
                 .workspace_id = probe.storage_state.notes_workspace_id,
                 .source_device = probe.local_device_principal,
                 .target_device = probe.sync_state.tablet_device_principal,

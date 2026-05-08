@@ -250,31 +250,30 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
     }
 
     context.storage_service_instance.checkpoint();
-    if (context.supervisor.recordCrash(context.storage_service_id, 94, 0x53)) {
-        _ = context.supervisor.requestRestart(context.storage_service_id, 95);
-        _ = context.runtime.rehostTask(context.storage_task_id, 95) catch unreachable;
-        context.storage_service_instance.* = if (storage_volume_mod.hasAttachedDevice())
-            storage_service_mod.Service.reloadFromAttachedVolume(
-                context.storage_service_id,
-                context.storage_task_id,
-                context.storage_service_principal,
-                context.storage_checkpoint_store,
-            )
-        else
-            storage_service_mod.Service.initWithStore(
-                context.storage_service_id,
-                context.storage_task_id,
-                context.storage_service_principal,
-                context.storage_checkpoint_store,
-            );
-        context.storage_service_instance.bindCapabilityTable(context.capability_table);
-        context.storage_service_instance.checkpoint_enabled = false;
-        _ = context.supervisor.completeRestart(context.storage_service_id, 96);
-        if (context.supervisor.hasDiagnostic(context.storage_service_id, .restart_completed) and
-            (context.storage_service_instance.resolve(notes_workspace_id, "documents/notes.md") catch unreachable).version_id.eql(notes_entry.version_id))
-        {
-            support.common.printBootMarker(boot_markers.storage_service_recovered);
-        }
+    _ = context.supervisor.recordCrash(context.storage_service_id, 94, 0x53);
+    _ = context.supervisor.requestRestart(context.storage_service_id, 95);
+    _ = context.runtime.rehostTask(context.storage_task_id, 95) catch unreachable;
+    context.storage_service_instance.* = if (storage_volume_mod.hasAttachedDevice())
+        storage_service_mod.Service.reloadFromAttachedVolume(
+            context.storage_service_id,
+            context.storage_task_id,
+            context.storage_service_principal,
+            context.storage_checkpoint_store,
+        )
+    else
+        storage_service_mod.Service.initWithStore(
+            context.storage_service_id,
+            context.storage_task_id,
+            context.storage_service_principal,
+            context.storage_checkpoint_store,
+        );
+    context.storage_service_instance.bindCapabilityTable(context.capability_table);
+    context.storage_service_instance.checkpoint_enabled = false;
+    _ = context.supervisor.completeRestart(context.storage_service_id, 96);
+    if (context.supervisor.hasDiagnostic(context.storage_service_id, .restart_completed) and
+        (context.storage_service_instance.resolve(notes_workspace_id, "documents/notes.md") catch unreachable).version_id.eql(notes_entry.version_id))
+    {
+        support.common.printBootMarker(boot_markers.storage_service_recovered);
     }
 
     const bridge_view = context.storage_service_instance.bridgeResolve(.{

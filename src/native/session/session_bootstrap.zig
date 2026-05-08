@@ -50,6 +50,9 @@ pub const CoreServices = struct {
 
 pub const Error = userspace_boot_registry.Error || supervisor_mod.Error;
 
+const boot_health_tick: u64 = 0;
+const core_service_count: usize = @typeInfo(CoreServices).@"struct".fields.len;
+
 pub fn principals() Principals {
     return .{
         .policy_authority = .{ .kind = .policy_authority, .serial = 1 },
@@ -105,19 +108,9 @@ pub fn registerCoreServices(
 
     runtime_service.bind(services.runtime_service_record.id, ids.task_runtime_service);
 
-    _ = supervisor.markHealthy(services.runtime_service_record.id, 0);
-    _ = supervisor.markHealthy(services.service_registry.id, 0);
-    _ = supervisor.markHealthy(services.policy_service.id, 0);
-    _ = supervisor.markHealthy(services.session.id, 0);
-    _ = supervisor.markHealthy(services.review_service_record.id, 0);
-    _ = supervisor.markHealthy(services.compatibility_service.id, 0);
-    _ = supervisor.markHealthy(services.network_service.id, 0);
-    _ = supervisor.markHealthy(services.compositor_service.id, 0);
-    _ = supervisor.markHealthy(services.storage_service.id, 0);
-    _ = supervisor.markHealthy(services.package_service.id, 0);
-    _ = supervisor.markHealthy(services.indexing_service.id, 0);
-    _ = supervisor.markHealthy(services.sync_service.id, 0);
-    _ = supervisor.markHealthy(services.media_service.id, 0);
+    for (coreServiceRecords(&services)) |service| {
+        _ = supervisor.markHealthy(service.id, boot_health_tick);
+    }
 
     common.printBootMarker(boot_markers.supervisor_ready);
     if (contract.serviceDescriptor(.policy_mediation).?.boundary == .userspace_service and
@@ -128,4 +121,22 @@ pub fn registerCoreServices(
     }
 
     return services;
+}
+
+fn coreServiceRecords(services: *const CoreServices) [core_service_count]*supervisor_mod.ServiceRecord {
+    return .{
+        services.runtime_service_record,
+        services.service_registry,
+        services.policy_service,
+        services.session,
+        services.review_service_record,
+        services.compatibility_service,
+        services.network_service,
+        services.compositor_service,
+        services.storage_service,
+        services.package_service,
+        services.indexing_service,
+        services.sync_service,
+        services.media_service,
+    };
 }

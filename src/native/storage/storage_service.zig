@@ -21,6 +21,14 @@ pub const SharedPayloadTransfer = struct {
     bytes: []const u8,
 };
 
+pub const SharedPayloadReadTransfer = struct {
+    table: *const shared_memory.Table,
+    object_id: ids.SharedMemoryId,
+    consumer_task_id: ids.TaskId,
+    storage_task_id: ids.TaskId,
+    bytes: []u8,
+};
+
 pub const SharedPayloadError = object_store.Error || shared_memory.Error || error{
     PermissionDenied,
     SharedMemoryNotMapped,
@@ -328,6 +336,45 @@ pub const StorageCore = struct {
         return self.store.versionPayload(version_record);
     }
 
+    pub fn versionPayloadInto(
+        self: *const Service,
+        version_record: *const object_store.VersionRecord,
+        out: []u8,
+    ) object_store.Error![]const u8 {
+        return self.store.versionPayloadInto(version_record, out);
+    }
+
+    pub fn versionChunkCursor(
+        self: *const Service,
+        version_record: *const object_store.VersionRecord,
+    ) object_store.Error!object_store.Store.VersionChunkCursor {
+        return self.store.versionChunkCursor(version_record);
+    }
+
+    pub fn transferVersionPayload(
+        self: *const Service,
+        version_record: *const object_store.VersionRecord,
+        out: []u8,
+    ) object_store.Error!object_store.PayloadTransferSummary {
+        return self.store.transferVersionPayload(version_record, out);
+    }
+
+    pub fn versionPayloadIntoSharedMemory(
+        self: *const Service,
+        version_record: *const object_store.VersionRecord,
+        transfer: SharedPayloadReadTransfer,
+    ) SharedPayloadError!object_store.PayloadTransferSummary {
+        const descriptor = try transfer.table.descriptor(transfer.object_id);
+        if (descriptor.flags != 0) return error.Revoked;
+        if (descriptor.size_bytes != transfer.bytes.len or transfer.bytes.len < version_record.payload_len) {
+            return error.SharedMemorySizeMismatch;
+        }
+        if (descriptor.owner_task_id != transfer.consumer_task_id.raw()) return error.PermissionDenied;
+        if (!transfer.table.hasMapping(transfer.object_id, transfer.consumer_task_id)) return error.SharedMemoryNotMapped;
+        if (!transfer.table.hasMapping(transfer.object_id, transfer.storage_task_id)) return error.SharedMemoryNotMapped;
+        return self.transferVersionPayload(version_record, transfer.bytes);
+    }
+
     pub fn latestVersion(self: *const Service, object_id: anytype) ?*const object_store.VersionRecord {
         return self.store.latestVersion(objectId(object_id));
     }
@@ -432,6 +479,16 @@ pub const StoragePort = struct {
     ) (AuthorityError || SharedPayloadError)!object_store.PutResult {
         _ = try self.requireStorageAuthority(authority, null, .write);
         return self.core.putVersionFromSharedMemoryRef(request, transfer);
+    }
+
+    pub fn versionPayloadIntoSharedMemory(
+        self: *StoragePort,
+        authority: AuthorityContext,
+        version_record: *const object_store.VersionRecord,
+        transfer: SharedPayloadReadTransfer,
+    ) (AuthorityError || SharedPayloadError)!object_store.PayloadTransferSummary {
+        _ = try self.requireStorageAuthority(authority, null, .read);
+        return self.core.versionPayloadIntoSharedMemory(version_record, transfer);
     }
 
     pub fn createWorkspace(self: *StoragePort, authority: AuthorityContext, request: workspace.CreateRequest) (AuthorityError || workspace.Error)!*workspace.WorkspaceRecord {
@@ -709,6 +766,21 @@ test "storage service accepts large object payloads through mapped shared memory
 
     const loaded = try service.versionPayload(service.version(result.version_id).?);
     try std.testing.expectEqualSlices(u8, &payload, loaded);
+
+    const consumer_task_id = ids.task(202);
+    var read_buffer: [payload.len]u8 = undefined;
+    const read_object = try shared.create(consumer_task_id, payload.len);
+    try shared.map(read_object.id, consumer_task_id);
+    try shared.map(read_object.id, storage_task_id);
+    const read_summary = try service.versionPayloadIntoSharedMemory(service.version(result.version_id).?, .{
+        .table = &shared,
+        .object_id = read_object.id,
+        .consumer_task_id = consumer_task_id,
+        .storage_task_id = storage_task_id,
+        .bytes = &read_buffer,
+    });
+    try std.testing.expectEqual(payload.len, read_summary.bytes_transferred);
+    try std.testing.expectEqualSlices(u8, &payload, read_buffer[0..read_summary.bytes_transferred]);
 
     const wrong_size = payload[0 .. payload.len - 1];
     try std.testing.expectError(error.SharedMemorySizeMismatch, service.putVersionFromSharedMemoryRef(&request, .{

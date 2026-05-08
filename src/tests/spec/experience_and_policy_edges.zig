@@ -1,6 +1,7 @@
 const std = @import("std");
 const spec_support = @import("support.zig");
 const accelerator_scheduler = @import("../../native/task/accelerator_scheduler.zig");
+const capability = @import("../../native/kernel_api/capability.zig");
 const compatibility_environment = @import("../../native/services/compatibility_environment.zig");
 const compositor_session = @import("../../native/platform/compositor_session.zig");
 const manifest = @import("../../native/policy/manifest.zig");
@@ -388,8 +389,13 @@ pub fn thermalPowerAndAppUpdatesStayCompatibilityAware() !void {
     try std.testing.expectEqual(accelerator_scheduler.DecisionReason.privacy_mode, privacy_sensitive.reason);
 
     var packages = package_service.Service.init();
+    packages.bind(8_200, spec_support.service(8_200));
+    var package_capabilities = capability.CapabilityTable.init();
+    const package_capability = try spec_support.serviceAuthority(&package_capabilities, packages.service_id, packages.owner, 8_201);
+    var package_port = package_service.PackagePort.init(&packages, &package_capabilities);
+    const package_authority = spec_support.serviceAuthorityContext(8_201, packages.owner, package_capability, 1);
     const signer_identity = spec_support.signer("spec.update.bundle", 0xA1);
-    try spec_support.trustPackagePublisher(&packages, signer_identity, "Example Software");
+    try spec_support.trustPackagePublisher(&package_port, package_authority, signer_identity, "Example Software");
     const interfaces = [_]manifest.InterfaceDecl{
         .{ .name = "zigos.workspace.document" },
         .{ .name = "zigos.object.workspace" },
@@ -423,7 +429,7 @@ pub fn thermalPowerAndAppUpdatesStayCompatibilityAware() !void {
     };
     try signBundle(&v1, signer_identity);
 
-    _ = try packages.install(.{
+    _ = try package_port.install(package_authority, .{
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
@@ -461,13 +467,13 @@ pub fn thermalPowerAndAppUpdatesStayCompatibilityAware() !void {
     };
     try signBundle(&v2, signer_identity);
 
-    try std.testing.expectError(package_service.Error.PermissionChangeUndeclared, packages.install(.{
+    try std.testing.expectError(package_service.Error.PermissionChangeUndeclared, package_port.install(package_authority, .{
         .bundle = v2,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
     }, null));
 
-    const updated = try packages.install(.{
+    const updated = try package_port.install(package_authority, .{
         .bundle = v2,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
@@ -481,13 +487,13 @@ pub fn thermalPowerAndAppUpdatesStayCompatibilityAware() !void {
     v3.version_minor = 2;
     try signBundle(&v3, signer_identity);
 
-    try std.testing.expectError(package_service.Error.MigrationManifestRequired, packages.install(.{
+    try std.testing.expectError(package_service.Error.MigrationManifestRequired, package_port.install(package_authority, .{
         .bundle = v3,
         .source_identity = "store:zigos",
         .data_schema_version = 2,
     }, null));
 
-    const compatible = try packages.install(.{
+    const compatible = try package_port.install(package_authority, .{
         .bundle = v3,
         .source_identity = "store:zigos",
         .data_schema_version = 2,
@@ -497,7 +503,7 @@ pub fn thermalPowerAndAppUpdatesStayCompatibilityAware() !void {
     try std.testing.expect(!compatible.migration_applied);
     try std.testing.expectEqual(@as(u32, 2), packages.find("app.notes").?.schemaVersion());
 
-    _ = try packages.rollback("app.notes");
+    _ = try package_port.rollback(package_authority, "app.notes");
     try std.testing.expectEqual(@as(u16, 1), packages.find("app.notes").?.versionMinor());
     try std.testing.expectEqual(@as(u32, 1), packages.find("app.notes").?.schemaVersion());
 }

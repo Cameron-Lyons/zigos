@@ -1,5 +1,6 @@
 const std = @import("std");
 const spec_support = @import("support.zig");
+const capability = @import("../../native/kernel_api/capability.zig");
 const compositor_session = @import("../../native/platform/compositor_session.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
 const immutable_base = @import("../../native/platform/immutable_base.zig");
@@ -154,23 +155,27 @@ pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {
     const snapshot = try storage.snapshot(workspace_record.id, "clean", object_signer);
 
     var sync = sync_service.Service.init(801, 81, sync_owner);
-    _ = try sync.ensureUserRoot(person, "owner", user_signer);
-    _ = try sync.enrollTrustedDevice(person, primary, "primary", user_signer, primary_signer, 14);
-    _ = try sync.enrollTrustedDevice(person, tablet, "tablet", user_signer, tablet_signer, 15);
+    var sync_capabilities = capability.CapabilityTable.init();
+    const sync_capability = try spec_support.serviceAuthority(&sync_capabilities, sync.service_id, sync_owner, sync.task_id);
+    var sync_port = sync_service.SyncPort.init(&sync, &sync_capabilities);
+    const sync_authority = spec_support.serviceAuthorityContext(sync.task_id, sync_owner, sync_capability, 15);
+    _ = try sync_port.ensureUserRoot(sync_authority, person, "owner", user_signer);
+    _ = try sync_port.enrollTrustedDevice(sync_authority, person, primary, "primary", user_signer, primary_signer, 14);
+    _ = try sync_port.enrollTrustedDevice(sync_authority, person, tablet, "tablet", user_signer, tablet_signer, 15);
 
-    const local_policy = try sync.createNetworkPolicy(.{
+    const local_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_record.id.raw(),
         .label = "local",
         .mode = .local_network,
     });
-    _ = try sync.configureWorkspacePolicy(.{
+    _ = try sync_port.configureWorkspacePolicy(sync_authority, .{
         .workspace_id = workspace_record.id.raw(),
         .owner = person,
         .device_to_device_policy_id = local_policy.id,
     });
-    try sync.setReplicaVersion(workspace_record.id.raw(), tablet, "documents/incident.md", notes.object_id, notes.version_id.raw() + 1);
-    _ = try sync.replicateWorkspace(&storage, workspace_record.id.raw(), primary, tablet, .device_to_device);
+    try sync_port.setReplicaVersion(sync_authority, workspace_record.id.raw(), tablet, "documents/incident.md", notes.object_id, notes.version_id.raw() + 1);
+    _ = try sync_port.replicateWorkspace(sync_authority, &storage, workspace_record.id.raw(), primary, tablet, .device_to_device);
 
     var recovery = recovery_environment.Environment.init(storage_owner);
     try std.testing.expect(try recovery.verifyAndReinstallImage(&manager, "kernel=v2", image_signer, 16));
@@ -223,29 +228,33 @@ pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
     try storage.stagePut(workspace_record.id, "documents/notes.md", probe_record.object_id, probe_record.version_id, .document);
     _ = try storage.commit(workspace_record.id, 11);
 
-    _ = try sync.ensureUserRoot(user, "owner", user_signer);
-    _ = try sync.enrollTrustedDevice(user, source_device, "source", user_signer, source_signer, 12);
-    _ = try sync.enrollTrustedDevice(user, target_device, "target", user_signer, target_signer, 13);
-    const local_policy = try sync.createNetworkPolicy(.{
+    var sync_capabilities = capability.CapabilityTable.init();
+    const sync_capability = try spec_support.serviceAuthority(&sync_capabilities, sync.service_id, owner, sync.task_id);
+    var sync_port = sync_service.SyncPort.init(&sync, &sync_capabilities);
+    const sync_authority = spec_support.serviceAuthorityContext(sync.task_id, owner, sync_capability, 13);
+    _ = try sync_port.ensureUserRoot(sync_authority, user, "owner", user_signer);
+    _ = try sync_port.enrollTrustedDevice(sync_authority, user, source_device, "source", user_signer, source_signer, 12);
+    _ = try sync_port.enrollTrustedDevice(sync_authority, user, target_device, "target", user_signer, target_signer, 13);
+    const local_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = owner,
         .workspace_id = workspace_record.id.raw(),
         .label = "health-local",
         .mode = .local_network,
     });
-    const overlay_policy = try sync.createNetworkPolicy(.{
+    const overlay_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = owner,
         .workspace_id = workspace_record.id.raw(),
         .label = "health-overlay",
         .mode = .named_service_identity,
         .target = "overlay.health.sync",
     });
-    _ = try sync.configureWorkspacePolicy(.{
+    _ = try sync_port.configureWorkspacePolicy(sync_authority, .{
         .workspace_id = workspace_record.id.raw(),
         .owner = user,
         .device_to_device_policy_id = local_policy.id,
         .overlay_policy_id = overlay_policy.id,
     });
-    _ = try sync.configureOverlay(workspace_record.id.raw(), source_device, "overlay.health.sync", true);
+    _ = try sync_port.configureOverlay(sync_authority, workspace_record.id.raw(), source_device, "overlay.health.sync", true);
 
     var ui_runtime = task_runtime.Runtime.init();
     const ui_task = try ui_runtime.createTask(.{
@@ -295,6 +304,8 @@ pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
         .ui_service_id = compositor_service.id,
         .network_probe = .{
             .sync = &sync,
+            .capability_table = &sync_capabilities,
+            .authority = sync_authority,
             .workspace_id = workspace_record.id.raw(),
             .source_device = source_device,
             .target_device = target_device,

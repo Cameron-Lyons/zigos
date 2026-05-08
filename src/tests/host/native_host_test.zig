@@ -44,6 +44,7 @@ const package_service = @import("../../native/services/package_service.zig");
 const permission_review = @import("../../native/policy/permission_review.zig");
 const permission_review_service = @import("../../native/policy/permission_review_service.zig");
 const service_bootstrap = @import("../../native/session/service_bootstrap.zig");
+const service_path_proofs = @import("../../native/session/service_path_proofs.zig");
 const policy_component_port = @import("../../native/policy/policy_component_port.zig");
 const policy_mediation = @import("../../native/policy/policy_mediation.zig");
 const policy_object = @import("../../native/policy/policy_object.zig");
@@ -138,6 +139,7 @@ test "native host root imports native subsystem suites" {
     std.testing.refAllDecls(permission_review);
     std.testing.refAllDecls(permission_review_service);
     std.testing.refAllDecls(service_bootstrap);
+    std.testing.refAllDecls(service_path_proofs);
     std.testing.refAllDecls(policy_component_port);
     std.testing.refAllDecls(policy_mediation);
     std.testing.refAllDecls(policy_object);

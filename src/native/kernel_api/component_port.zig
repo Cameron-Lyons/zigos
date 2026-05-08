@@ -417,6 +417,118 @@ pub const KernelPort = struct {
     }
 };
 
+pub const GeneratedWrapper = struct {
+    operation: abi.NativeOperation,
+    request_type_name: []const u8,
+    response_type_name: []const u8,
+    port_method_name: []const u8,
+    port_invocation: operation_metadata.PortInvocation,
+    request_size: usize,
+    wire_response_size: usize,
+};
+
+fn requestTypeForName(comptime type_name: []const u8) type {
+    if (!@hasDecl(@This(), type_name)) {
+        @compileError("missing component-port request type " ++ type_name);
+    }
+    return @field(@This(), type_name);
+}
+
+fn wireResponseTypeForName(comptime type_name: []const u8) type {
+    if (std.mem.eql(u8, type_name, "void")) return void;
+    if (!@hasDecl(abi, type_name)) {
+        @compileError("missing syscall ABI response type " ++ type_name);
+    }
+    return @field(abi, type_name);
+}
+
+pub fn PortRequest(comptime operation: abi.NativeOperation) type {
+    const descriptor = comptime operation_metadata.declarationFor(operation);
+    return requestTypeForName(descriptor.binding.request_type_name);
+}
+
+pub fn PortWireResponse(comptime operation: abi.NativeOperation) type {
+    const descriptor = comptime operation_metadata.declarationFor(operation);
+    return wireResponseTypeForName(descriptor.binding.response_type_name);
+}
+
+fn assertPortWrapperShape(comptime descriptor: operation_metadata.Descriptor) void {
+    const Request = requestTypeForName(descriptor.binding.request_type_name);
+    if (!@hasDecl(KernelPort, descriptor.binding.port_method_name)) {
+        @compileError("missing KernelPort method " ++ descriptor.binding.port_method_name);
+    }
+    const method = @field(KernelPort, descriptor.binding.port_method_name);
+    const method_info = @typeInfo(@TypeOf(method)).@"fn";
+    const expected_params: usize = switch (descriptor.binding.port_invocation) {
+        .with_now_ticks => 3,
+        .without_now_ticks => 2,
+    };
+    if (method_info.params.len != expected_params) {
+        @compileError("KernelPort method has wrong arity for " ++ @tagName(descriptor.operation));
+    }
+    if (method_info.params[0].type.? != *KernelPort) {
+        @compileError("KernelPort method has wrong receiver for " ++ @tagName(descriptor.operation));
+    }
+    if (method_info.params[1].type.? != Request) {
+        @compileError("KernelPort method has wrong request type for " ++ @tagName(descriptor.operation));
+    }
+    if (descriptor.binding.port_invocation == .with_now_ticks and method_info.params[2].type.? != u64) {
+        @compileError("KernelPort method must accept now_ticks for " ++ @tagName(descriptor.operation));
+    }
+}
+
+pub fn PortCallResult(comptime operation: abi.NativeOperation) type {
+    const descriptor = comptime operation_metadata.declarationFor(operation);
+    assertPortWrapperShape(descriptor);
+    return @typeInfo(@TypeOf(@field(KernelPort, descriptor.binding.port_method_name))).@"fn".return_type.?;
+}
+
+pub fn invokeGenerated(
+    comptime operation: abi.NativeOperation,
+    self: *KernelPort,
+    request: PortRequest(operation),
+    now_ticks: u64,
+) PortCallResult(operation) {
+    const descriptor = comptime operation_metadata.declarationFor(operation);
+    const method = @field(KernelPort, descriptor.binding.port_method_name);
+    return switch (descriptor.binding.port_invocation) {
+        .with_now_ticks => method(self, request, now_ticks),
+        .without_now_ticks => method(self, request),
+    };
+}
+
+fn generatedWrapperFromMetadata(comptime descriptor: operation_metadata.Descriptor) GeneratedWrapper {
+    assertPortWrapperShape(descriptor);
+    const Request = requestTypeForName(descriptor.binding.request_type_name);
+    const Response = wireResponseTypeForName(descriptor.binding.response_type_name);
+    return .{
+        .operation = descriptor.operation,
+        .request_type_name = descriptor.binding.request_type_name,
+        .response_type_name = descriptor.binding.response_type_name,
+        .port_method_name = descriptor.binding.port_method_name,
+        .port_invocation = descriptor.binding.port_invocation,
+        .request_size = @sizeOf(Request),
+        .wire_response_size = if (Response == void) 0 else @sizeOf(Response),
+    };
+}
+
+fn buildGeneratedWrappers() [operation_metadata.operations.len]GeneratedWrapper {
+    var table: [operation_metadata.operations.len]GeneratedWrapper = undefined;
+    inline for (operation_metadata.operations, 0..) |descriptor, index| {
+        table[index] = generatedWrapperFromMetadata(descriptor);
+    }
+    return table;
+}
+
+pub const generated_wrappers = buildGeneratedWrappers();
+
+pub fn generatedWrapperFor(comptime operation: abi.NativeOperation) GeneratedWrapper {
+    inline for (generated_wrappers) |wrapper| {
+        if (wrapper.operation == operation) return wrapper;
+    }
+    @compileError("missing generated KernelPort wrapper for " ++ @tagName(operation));
+}
+
 pub fn makeHeader(operation: abi.NativeOperation, correlation_id: u64, subject_task_id: u64) abi.RequestHeader {
     return request_header.makeHeader(abi.opcode(operation), correlation_id, subject_task_id);
 }
@@ -465,6 +577,22 @@ fn validateOptionalCallerCapability(
     }
 }
 
+test "kernel port generated wrappers cover operation metadata" {
+    try std.testing.expectEqual(operation_metadata.operations.len, generated_wrappers.len);
+    inline for (operation_metadata.operations) |descriptor| {
+        const wrapper = generatedWrapperFor(descriptor.operation);
+        try std.testing.expectEqual(descriptor.operation, wrapper.operation);
+        try std.testing.expectEqualStrings(descriptor.binding.request_type_name, wrapper.request_type_name);
+        try std.testing.expectEqualStrings(descriptor.binding.response_type_name, wrapper.response_type_name);
+        try std.testing.expectEqualStrings(descriptor.binding.port_method_name, wrapper.port_method_name);
+        try std.testing.expectEqual(descriptor.binding.port_invocation, wrapper.port_invocation);
+        try std.testing.expectEqual(@sizeOf(PortRequest(descriptor.operation)), wrapper.request_size);
+        const Response = PortWireResponse(descriptor.operation);
+        try std.testing.expectEqual(if (Response == void) @as(usize, 0) else @sizeOf(Response), wrapper.wire_response_size);
+    }
+    try std.testing.expectEqual(operation_metadata.PortInvocation.without_now_ticks, generatedWrapperFor(.capability_derive).port_invocation);
+}
+
 test "kernel port enforces operation ids and forwards typed task create requests" {
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
@@ -501,7 +629,7 @@ test "kernel port enforces operation ids and forwards typed task create requests
     try runtime.grantCapability(session_task.id, authority_capability.id);
 
     const port_test_image = task_runtime.syntheticUserspaceImage("port-test", "app.example.port-test");
-    const task = try port.taskCreate(.{
+    const task = try invokeGenerated(.task_create, &port, .{
         .header = makeHeader(.task_create, 77, session_task.id),
         .authority_capability_id = authority_capability.id,
         .request = .{

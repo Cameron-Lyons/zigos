@@ -2,6 +2,7 @@ const std = @import("std");
 const spec_support = @import("support.zig");
 const accelerator_scheduler = @import("../../native/task/accelerator_scheduler.zig");
 const background_dispatch = @import("../../native/task/background_dispatch.zig");
+const capability = @import("../../native/kernel_api/capability.zig");
 const contract = @import("../../native/session/contract.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
 const indexing_service = @import("../../native/services/indexing_service.zig");
@@ -12,6 +13,7 @@ const notification_center = @import("../../native/services/notification_center.z
 const object_store = @import("../../native/storage/object_store.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const policy_object = @import("../../native/policy/policy_object.zig");
+const principal = @import("../../native/core/principal.zig");
 const signing = @import("../../native/core/signing.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
 const sync_service = @import("../../native/sync/sync_service.zig");
@@ -28,6 +30,26 @@ const package_migration = struct {
         apply_count += 1;
     }
 };
+
+const PackageHarness = struct {
+    port: package_service.PackagePort,
+    authority: package_service.AuthorityContext,
+};
+
+fn packageHarness(
+    packages: *package_service.Service,
+    capability_table: *capability.CapabilityTable,
+    service_id: u64,
+    task_id: u64,
+    owner: principal.PrincipalId,
+) !PackageHarness {
+    packages.bind(service_id, owner);
+    const authority_capability = try spec_support.serviceAuthority(capability_table, service_id, owner, task_id);
+    return .{
+        .port = package_service.PackagePort.init(packages, capability_table),
+        .authority = spec_support.serviceAuthorityContext(task_id, owner, authority_capability, 10),
+    };
+}
 
 pub fn taskFirstUxRecordsStructuredFlows() !void {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
@@ -59,7 +81,11 @@ pub fn taskFirstUxRecordsStructuredFlows() !void {
     _ = try storage.commit(workspace_record.id, 11);
 
     var sync = sync_service.Service.init(901, 91, sync_owner);
-    _ = try sync.ensureUserRoot(person, "owner", user_signer);
+    var sync_capabilities = capability.CapabilityTable.init();
+    const sync_capability = try spec_support.serviceAuthority(&sync_capabilities, sync.service_id, sync_owner, sync.task_id);
+    var sync_port = sync_service.SyncPort.init(&sync, &sync_capabilities);
+    const sync_authority = spec_support.serviceAuthorityContext(sync.task_id, sync_owner, sync_capability, 12);
+    _ = try sync_port.ensureUserRoot(sync_authority, person, "owner", user_signer);
 
     var controller = native_ux.Controller.init();
     const task = try controller.startTask(&runtime, .{
@@ -73,7 +99,7 @@ pub fn taskFirstUxRecordsStructuredFlows() !void {
         },
     });
     const opened = try controller.openWorkspace(&storage, workspace_record.id, "documents/plan.md", person);
-    try controller.pairDevice(&sync, person, paired_device, "tablet", user_signer, device_signer, 12);
+    try controller.pairDevice(&sync_port, sync_authority, person, paired_device, "tablet", user_signer, device_signer, 12);
     try std.testing.expect(try controller.reviewPermissionRequest(task.id, person, .object_access, true));
     try controller.recoverSystem(task.id, person, "recovery-environment");
 
@@ -154,8 +180,10 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
     v1.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v1));
 
     var packages = package_service.Service.init();
-    try spec_support.trustPackagePublisher(&packages, bundle_signer, "Example Software");
-    const installed = try packages.install(.{
+    var package_capabilities = capability.CapabilityTable.init();
+    var packages_entry = try packageHarness(&packages, &package_capabilities, 9_100, 9_101, spec_support.service(9_100));
+    try spec_support.trustPackagePublisher(&packages_entry.port, packages_entry.authority, bundle_signer, "Example Software");
+    const installed = try packages_entry.port.install(packages_entry.authority, .{
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
@@ -178,8 +206,12 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
     _ = try storage.commit(workspace_record.id, 11);
 
     var sync = sync_service.Service.init(911, 97, sync_owner);
-    _ = try sync.ensureUserRoot(person, "owner", user_signer);
-    _ = try sync.enrollTrustedDevice(person, primary_device, "laptop", user_signer, primary_signer, 12);
+    var sync_capabilities = capability.CapabilityTable.init();
+    const sync_capability = try spec_support.serviceAuthority(&sync_capabilities, sync.service_id, sync_owner, sync.task_id);
+    var sync_port = sync_service.SyncPort.init(&sync, &sync_capabilities);
+    const sync_authority = spec_support.serviceAuthorityContext(sync.task_id, sync_owner, sync_capability, 13);
+    _ = try sync_port.ensureUserRoot(sync_authority, person, "owner", user_signer);
+    _ = try sync_port.enrollTrustedDevice(sync_authority, person, primary_device, "laptop", user_signer, primary_signer, 12);
 
     var runtime = task_runtime.Runtime.init();
     var controller = native_ux.Controller.init();
@@ -201,29 +233,29 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
 
     const opened = try controller.openWorkspace(&storage, workspace_record.id, "documents/plan.md", person);
     try std.testing.expectEqual(document.version_id, opened.version_id);
-    try controller.pairDevice(&sync, person, paired_device, "tablet", user_signer, paired_signer, 13);
+    try controller.pairDevice(&sync_port, sync_authority, person, paired_device, "tablet", user_signer, paired_signer, 13);
 
-    const local_policy = try sync.createNetworkPolicy(.{
+    const local_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_record.id.raw(),
         .label = "trip-local",
         .mode = .local_network,
     });
-    const overlay_policy = try sync.createNetworkPolicy(.{
+    const overlay_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_record.id.raw(),
         .label = "trip-overlay",
         .mode = .named_service_identity,
         .target = "overlay.trip.sync",
     });
-    const relay_policy = try sync.createNetworkPolicy(.{
+    const relay_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_record.id.raw(),
         .label = "trip-relay",
         .mode = .named_domain,
         .target = "relay.zigos.example",
     });
-    _ = try sync.configureWorkspacePolicy(.{
+    _ = try sync_port.configureWorkspacePolicy(sync_authority, .{
         .workspace_id = workspace_record.id.raw(),
         .owner = person,
         .offline_first = true,
@@ -234,7 +266,7 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
         .overlay_policy_id = overlay_policy.id,
         .relay_domain = "relay.zigos.example",
     });
-    _ = try sync.configureOverlay(workspace_record.id.raw(), primary_device, "overlay.trip.sync", true);
+    _ = try sync_port.configureOverlay(sync_authority, workspace_record.id.raw(), primary_device, "overlay.trip.sync", true);
 
     const review = try controller.reviewPermissionDecision(
         task.id,
@@ -250,7 +282,8 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
     try std.testing.expect(std.mem.indexOf(u8, rendered_review, "bundle=app.trip") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered_review, "decision=allow") != null);
 
-    const summary = try sync.replicateWorkspace(
+    const summary = try sync_port.replicateWorkspace(
+        sync_authority,
         &storage,
         workspace_record.id.raw(),
         primary_device,
@@ -281,14 +314,14 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
     };
     v2.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v2));
 
-    const updated = try packages.install(.{
+    const updated = try packages_entry.port.install(packages_entry.authority, .{
         .bundle = v2,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
     }, org_policy);
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(updated.rollback_available);
-    _ = try packages.rollback("app.trip");
+    _ = try packages_entry.port.rollback(packages_entry.authority, "app.trip");
     try std.testing.expectEqual(@as(u16, 0), packages.find("app.trip").?.versionMinor());
 
     try controller.recoverSystem(task.id, person, "restored previous trip planner version");
@@ -317,7 +350,9 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
 
     var packages = package_service.Service.init();
     const bundle_signer = spec_support.signer("spec.bundle.notes", 0x82);
-    try spec_support.trustPackagePublisher(&packages, bundle_signer, "Example Software");
+    var package_capabilities = capability.CapabilityTable.init();
+    var packages_entry = try packageHarness(&packages, &package_capabilities, 9_200, 9_201, spec_support.service(9_200));
+    try spec_support.trustPackagePublisher(&packages_entry.port, packages_entry.authority, bundle_signer, "Example Software");
 
     const v1_permissions = [_]manifest.PermissionRequest{
         .{
@@ -350,7 +385,7 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
     };
     v1.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v1));
 
-    const first = try packages.install(.{
+    const first = try packages_entry.port.install(packages_entry.authority, .{
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
@@ -401,7 +436,7 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
     };
     v2.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v2));
 
-    const updated = try packages.install(.{
+    const updated = try packages_entry.port.install(packages_entry.authority, .{
         .bundle = v2,
         .source_identity = "repo:corp",
         .data_schema_version = 2,
@@ -429,7 +464,7 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
     try std.testing.expect(!org_policy.screen_capture_allowed);
     try std.testing.expect(org_policy.audit_export_required);
 
-    _ = try packages.rollback("app.notes");
+    _ = try packages_entry.port.rollback(packages_entry.authority, "app.notes");
     try std.testing.expectEqual(@as(u16, 0), packages.find("app.notes").?.versionMinor());
     try std.testing.expectEqual(@as(usize, 1), packages.find("app.notes").?.componentCount());
 }
@@ -480,8 +515,10 @@ pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {
     package_bundle.signature = try signing.sign(package_signer, &package_service.digestBundle(package_bundle));
 
     var packages = package_service.Service.init();
-    try spec_support.trustPackagePublisher(&packages, package_signer, "zigos.spec");
-    _ = try packages.install(.{
+    var package_capabilities = capability.CapabilityTable.init();
+    var packages_entry = try packageHarness(&packages, &package_capabilities, 9_300, 9_301, spec_support.service(9_300));
+    try spec_support.trustPackagePublisher(&packages_entry.port, packages_entry.authority, package_signer, "zigos.spec");
+    _ = try packages_entry.port.install(packages_entry.authority, .{
         .bundle = package_bundle,
         .source_identity = "store.zigos.spec",
         .data_schema_version = 1,

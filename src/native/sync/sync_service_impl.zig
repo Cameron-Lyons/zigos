@@ -8,6 +8,7 @@ const native_util = @import("../core/util.zig");
 const network_policy = @import("network_policy.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
+const service_authority = @import("../services/service_authority.zig");
 const signing = @import("../core/signing.zig");
 const sync_adapters = @import("sync_adapters.zig");
 const state_store = @import("sync_state_store.zig");
@@ -97,6 +98,8 @@ pub const DatabaseSyncAdapter = sync_adapters.DatabaseSyncAdapter;
 pub const TransportFrame = sync_adapters.TransportFrame;
 pub const TransportQueue = sync_adapters.TransportQueue;
 pub const Error = state_support.Error;
+pub const AuthorityContext = service_authority.Context;
+pub const AuthorityError = service_authority.Error;
 
 const WorkspacePolicySlot = state_support.WorkspacePolicySlot;
 const ReplicaSlot = state_support.ReplicaSlot;
@@ -209,6 +212,238 @@ fn replicaIndexHash(key: ReplicaIndexKey) u64 {
 }
 
 pub const Service = ServiceWith(.{});
+
+pub const SyncPort = struct {
+    service: *Service,
+    capability_table: *const capability.CapabilityTable,
+
+    pub fn init(service: *Service, capability_table: *const capability.CapabilityTable) SyncPort {
+        return .{
+            .service = service,
+            .capability_table = capability_table,
+        };
+    }
+
+    pub fn ensureUserRoot(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        user_principal: principal.PrincipalId,
+        label: []const u8,
+        identity: signing.SignerIdentity,
+    ) (AuthorityError || Error)!*device_graph.UserRootRecord {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.ensureUserRoot(user_principal, label, identity);
+    }
+
+    pub fn enrollTrustedDevice(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        user_principal: principal.PrincipalId,
+        device_principal: principal.PrincipalId,
+        label: []const u8,
+        authorizer: signing.SignerIdentity,
+        device_identity: signing.SignerIdentity,
+        tick: u64,
+    ) (AuthorityError || Error)!*device_graph.DeviceRecord {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.enrollTrustedDevice(user_principal, device_principal, label, authorizer, device_identity, tick);
+    }
+
+    pub fn rotateDeviceKey(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        user_principal: principal.PrincipalId,
+        device_principal: principal.PrincipalId,
+        authorizer: signing.SignerIdentity,
+        next_device_identity: signing.SignerIdentity,
+        tick: u64,
+    ) (AuthorityError || Error)!*device_graph.DeviceRecord {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.rotateDeviceKey(user_principal, device_principal, authorizer, next_device_identity, tick);
+    }
+
+    pub fn revokeTrustedDevice(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        user_principal: principal.PrincipalId,
+        device_principal: principal.PrincipalId,
+        authorizer: signing.SignerIdentity,
+        tick: u64,
+    ) (AuthorityError || Error)!void {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.revokeTrustedDevice(user_principal, device_principal, authorizer, tick);
+    }
+
+    pub fn createNetworkPolicy(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        request: network_policy.CreateRequest,
+    ) (AuthorityError || Error)!*network_policy.PolicyRecord {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.createNetworkPolicy(request);
+    }
+
+    pub fn evaluateNetworkPolicy(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        policy_id: u64,
+        destination: network_policy.Destination,
+    ) (AuthorityError || Error)!network_policy.Decision {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.evaluateNetworkPolicy(policy_id, destination);
+    }
+
+    pub fn configureWorkspacePolicy(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        request: WorkspacePolicyRequest,
+    ) (AuthorityError || Error)!*WorkspacePolicy {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.configureWorkspacePolicy(request);
+    }
+
+    pub fn configureOverlay(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        workspace_id: u64,
+        home_device: principal.PrincipalId,
+        service_identity: []const u8,
+        remote_access_enabled: bool,
+    ) (AuthorityError || Error)!*OverlayRecord {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.configureOverlay(workspace_id, home_device, service_identity, remote_access_enabled);
+    }
+
+    pub fn publishPrivateService(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        workspace_id: u64,
+        label: []const u8,
+    ) (AuthorityError || Error)!*OverlayRecord {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.publishPrivateService(workspace_id, label);
+    }
+
+    pub fn openOverlaySession(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        workspace_id: u64,
+        from_device: principal.PrincipalId,
+        to_device: principal.PrincipalId,
+        usage: OverlaySessionUse,
+        transport: TransportMode,
+        private_service_label: ?[]const u8,
+        tick: u64,
+    ) (AuthorityError || Error)!OverlaySession {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.openOverlaySession(workspace_id, from_device, to_device, usage, transport, private_service_label, tick);
+    }
+
+    pub fn probeOverlaySession(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        session_id: u64,
+        tick: u64,
+    ) (AuthorityError || Error)!bool {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.probeOverlaySession(session_id, tick);
+    }
+
+    pub fn closeOverlaySession(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        session_id: u64,
+        tick: u64,
+    ) (AuthorityError || Error)!bool {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.closeOverlaySession(session_id, tick);
+    }
+
+    pub fn setReplicaVersion(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        workspace_id: u64,
+        device_id: principal.PrincipalId,
+        path: []const u8,
+        object_id: anytype,
+        version_id: anytype,
+    ) (AuthorityError || Error)!void {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.setReplicaVersion(workspace_id, device_id, path, object_id, version_id);
+    }
+
+    pub fn registerDatabaseContract(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        workspace_id: u64,
+        bundle_id: []const u8,
+        label: []const u8,
+        identity: signing.SignerIdentity,
+    ) (AuthorityError || Error)!*DatabaseContract {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.registerDatabaseContract(workspace_id, bundle_id, label, identity);
+    }
+
+    pub fn replicateWorkspace(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        store: *const storage_service.Service,
+        workspace_id: u64,
+        from_device: principal.PrincipalId,
+        to_device: principal.PrincipalId,
+        transport: TransportMode,
+    ) (AuthorityError || Error)!ReplicationSummary {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.replicateWorkspace(store, workspace_id, from_device, to_device, transport);
+    }
+
+    pub fn transferSecretObject(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        storage: *const storage_service.Service,
+        workspace_id: u64,
+        object_id: anytype,
+        from_device: principal.PrincipalId,
+        to_device: principal.PrincipalId,
+        transport: TransportMode,
+    ) (AuthorityError || Error)!bool {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.transferSecretObject(storage, workspace_id, object_id, from_device, to_device, transport);
+    }
+
+    pub fn replicateDatabaseContract(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        contract_id: u64,
+        workspace_id: u64,
+        from_device: principal.PrincipalId,
+        to_device: principal.PrincipalId,
+        transport: TransportMode,
+    ) (AuthorityError || Error)!bool {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.replicateDatabaseContract(contract_id, workspace_id, from_device, to_device, transport);
+    }
+
+    pub fn repairWorkspaceMetadata(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        store: *const storage_service.Service,
+        workspace_id: u64,
+        device_id: principal.PrincipalId,
+    ) (AuthorityError || Error)!bool {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.repairWorkspaceMetadata(store, workspace_id, device_id);
+    }
+
+    fn requireSyncAuthority(self: *SyncPort, authority: AuthorityContext) AuthorityError!*const capability.Capability {
+        return service_authority.requireServiceAuthority(
+            self.capability_table,
+            self.service.service_id,
+            authority,
+            .endpoint_connect,
+        );
+    }
+};
 
 pub fn ServiceWith(comptime config: ServiceConfig) type {
     config.validate();
@@ -349,7 +584,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return self.transport_queue.latestForPath(workspace_id, device_id, path);
         }
 
-        pub fn ensureUserRoot(
+        fn ensureUserRoot(
             self: *Self,
             user_principal: principal.PrincipalId,
             label: []const u8,
@@ -360,7 +595,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return root;
         }
 
-        pub fn enrollTrustedDevice(
+        fn enrollTrustedDevice(
             self: *Self,
             user_principal: principal.PrincipalId,
             device_principal: principal.PrincipalId,
@@ -374,7 +609,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return record;
         }
 
-        pub fn rotateDeviceKey(
+        fn rotateDeviceKey(
             self: *Self,
             user_principal: principal.PrincipalId,
             device_principal: principal.PrincipalId,
@@ -387,7 +622,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return record;
         }
 
-        pub fn revokeTrustedDevice(
+        fn revokeTrustedDevice(
             self: *Self,
             user_principal: principal.PrincipalId,
             device_principal: principal.PrincipalId,
@@ -402,13 +637,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return self.stateConst().graph.findDeviceConst(device_id);
         }
 
-        pub fn createNetworkPolicy(self: *Self, request: network_policy.CreateRequest) Error!*network_policy.PolicyRecord {
+        fn createNetworkPolicy(self: *Self, request: network_policy.CreateRequest) Error!*network_policy.PolicyRecord {
             const record = try self.state().network_policies.create(request);
             self.resident().markDirty();
             return record;
         }
 
-        pub fn evaluateNetworkPolicy(
+        fn evaluateNetworkPolicy(
             self: *Self,
             policy_id: u64,
             destination: network_policy.Destination,
@@ -432,7 +667,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return network_policy.EgressBroker.init(&self.state().network_policies, capability_table);
         }
 
-        pub fn configureWorkspacePolicy(
+        fn configureWorkspacePolicy(
             self: *Self,
             request: WorkspacePolicyRequest,
         ) Error!*WorkspacePolicy {
@@ -464,7 +699,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return &slot.policy;
         }
 
-        pub fn configureOverlay(
+        fn configureOverlay(
             self: *Self,
             workspace_id: u64,
             home_device: principal.PrincipalId,
@@ -485,7 +720,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return &slot.overlay;
         }
 
-        pub fn publishPrivateService(
+        fn publishPrivateService(
             self: *Self,
             workspace_id: u64,
             label: []const u8,
@@ -525,7 +760,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return count;
         }
 
-        pub fn openOverlaySession(
+        fn openOverlaySession(
             self: *Self,
             workspace_id: u64,
             from_device: principal.PrincipalId,
@@ -593,7 +828,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return session;
         }
 
-        pub fn probeOverlaySession(self: *Self, session_id: u64, tick: u64) Error!bool {
+        fn probeOverlaySession(self: *Self, session_id: u64, tick: u64) Error!bool {
             const session = self.findOverlaySession(session_id) orelse return error.OverlaySessionNotFound;
             if (session.state != .established) return false;
             session.keepalive_count += 1;
@@ -601,7 +836,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return true;
         }
 
-        pub fn closeOverlaySession(self: *Self, session_id: u64, tick: u64) Error!bool {
+        fn closeOverlaySession(self: *Self, session_id: u64, tick: u64) Error!bool {
             const session = self.findOverlaySession(session_id) orelse return error.OverlaySessionNotFound;
             if (session.state == .closed) return false;
             session.state = .closed;
@@ -609,7 +844,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return true;
         }
 
-        pub fn setReplicaVersion(
+        fn setReplicaVersion(
             self: *Self,
             workspace_id: u64,
             device_id: principal.PrincipalId,
@@ -631,7 +866,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return slot.entry.version_id;
         }
 
-        pub fn registerDatabaseContract(
+        fn registerDatabaseContract(
             self: *Self,
             workspace_id: u64,
             bundle_id: []const u8,
@@ -660,7 +895,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return &slot.contract;
         }
 
-        pub fn replicateWorkspace(
+        fn replicateWorkspace(
             self: *Self,
             store: *const storage_service.Service,
             workspace_id: u64,
@@ -680,9 +915,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
             const last_replicated_generation = self.replicaWorkspaceGeneration(workspace_id, to_device);
             const changes = try store.entryChangesSince(workspace_id, last_replicated_generation);
+            const latest_mutation_index = buildLatestMutationIndex(changes);
             for (changes, 0..) |mutation, mutation_index| {
                 const entry = mutation.entry;
-                if (hasLaterChangeForPath(changes, mutation_index, entry.pathSlice())) continue;
+                if (!latest_mutation_index.isLatest(changes, mutation_index)) continue;
                 if (!policy.matchesPath(entry.pathSlice())) {
                     summary.skipped_entry_count += 1;
                     continue;
@@ -757,7 +993,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return summary;
         }
 
-        pub fn transferSecretObject(
+        fn transferSecretObject(
             self: *Self,
             storage: *const storage_service.Service,
             workspace_id: u64,
@@ -782,7 +1018,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return result.transferred;
         }
 
-        pub fn replicateDatabaseContract(
+        fn replicateDatabaseContract(
             self: *Self,
             contract_id: u64,
             workspace_id: u64,
@@ -804,7 +1040,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return result.replicated;
         }
 
-        pub fn repairWorkspaceMetadata(
+        fn repairWorkspaceMetadata(
             self: *Self,
             store: *const storage_service.Service,
             workspace_id: u64,
@@ -1151,12 +1387,112 @@ fn classifyEntry(entry: workspace.Entry) SyncSemantic {
     };
 }
 
-fn hasLaterChangeForPath(changes: []const workspace.EntryMutation, current_index: usize, path: []const u8) bool {
-    var index = current_index + 1;
-    while (index < changes.len) : (index += 1) {
-        if (std.mem.eql(u8, changes[index].entry.pathSlice(), path)) return true;
+const LATEST_MUTATION_INDEX_CAPACITY: usize = workspace.MAX_WORKSPACE_ENTRY_MUTATIONS * 2;
+
+const LatestMutationIndexSlot = struct {
+    in_use: bool = false,
+    path_hash: u64 = 0,
+    mutation_index: usize = 0,
+};
+
+const LatestMutationIndex = struct {
+    slots: [LATEST_MUTATION_INDEX_CAPACITY]LatestMutationIndexSlot = [_]LatestMutationIndexSlot{LatestMutationIndexSlot{}} ** LATEST_MUTATION_INDEX_CAPACITY,
+
+    fn put(self: *LatestMutationIndex, changes: []const workspace.EntryMutation, mutation_index: usize) void {
+        const entry = &changes[mutation_index].entry;
+        const path_hash = entry.pathHash();
+        const path = entry.pathSlice();
+        var slot_index = latestMutationSlotStart(path_hash);
+        var probes: usize = 0;
+        while (probes < self.slots.len) : ({
+            probes += 1;
+            slot_index = (slot_index + 1) % self.slots.len;
+        }) {
+            const slot = &self.slots[slot_index];
+            if (!slot.in_use) {
+                slot.* = .{
+                    .in_use = true,
+                    .path_hash = path_hash,
+                    .mutation_index = mutation_index,
+                };
+                return;
+            }
+            if (slot.path_hash == path_hash and std.mem.eql(u8, changes[slot.mutation_index].entry.pathSlice(), path)) {
+                slot.mutation_index = mutation_index;
+                return;
+            }
+        }
+        native_util.impossibleByInvariant("latest mutation index capacity covers workspace changes");
     }
-    return false;
+
+    fn latestIndexFor(
+        self: *const LatestMutationIndex,
+        changes: []const workspace.EntryMutation,
+        path_hash: u64,
+        path: []const u8,
+    ) ?usize {
+        var slot_index = latestMutationSlotStart(path_hash);
+        var probes: usize = 0;
+        while (probes < self.slots.len) : ({
+            probes += 1;
+            slot_index = (slot_index + 1) % self.slots.len;
+        }) {
+            const slot = &self.slots[slot_index];
+            if (!slot.in_use) return null;
+            if (slot.path_hash == path_hash and std.mem.eql(u8, changes[slot.mutation_index].entry.pathSlice(), path)) {
+                return slot.mutation_index;
+            }
+        }
+        return null;
+    }
+
+    fn isLatest(self: *const LatestMutationIndex, changes: []const workspace.EntryMutation, mutation_index: usize) bool {
+        const entry = &changes[mutation_index].entry;
+        return self.latestIndexFor(changes, entry.pathHash(), entry.pathSlice()) == mutation_index;
+    }
+};
+
+fn buildLatestMutationIndex(changes: []const workspace.EntryMutation) LatestMutationIndex {
+    var index = LatestMutationIndex{};
+    for (changes, 0..) |_, mutation_index| {
+        index.put(changes, mutation_index);
+    }
+    return index;
+}
+
+fn latestMutationSlotStart(path_hash: u64) usize {
+    return @intCast(path_hash % LATEST_MUTATION_INDEX_CAPACITY);
+}
+
+test "latest mutation index tracks newest mutation per path hash" {
+    var changes: [4]workspace.EntryMutation = undefined;
+    changes[0] = .{
+        .generation = 1,
+        .entry = try workspace.Entry.init("documents/notes.md", object_store.ids.object(1), object_store.ids.version(10), .document),
+    };
+    changes[1] = .{
+        .generation = 2,
+        .entry = try workspace.Entry.init("assets/cover.jpg", object_store.ids.object(2), object_store.ids.version(20), .media_asset),
+    };
+    changes[2] = .{
+        .generation = 3,
+        .entry = try workspace.Entry.init("documents/notes.md", object_store.ids.object(1), object_store.ids.version(11), .document),
+    };
+    changes[3] = .{
+        .generation = 4,
+        .entry = try workspace.Entry.init("documents/todo.md", object_store.ids.object(3), object_store.ids.version(30), .document),
+    };
+
+    const latest_mutations = buildLatestMutationIndex(changes[0..]);
+    try std.testing.expect(!latest_mutations.isLatest(changes[0..], 0));
+    try std.testing.expect(latest_mutations.isLatest(changes[0..], 1));
+    try std.testing.expect(latest_mutations.isLatest(changes[0..], 2));
+    try std.testing.expect(latest_mutations.isLatest(changes[0..], 3));
+    try std.testing.expectEqual(@as(?usize, 2), latest_mutations.latestIndexFor(
+        changes[0..],
+        changes[0].entry.pathHash(),
+        "documents/notes.md",
+    ));
 }
 
 fn databaseContractMessage(
