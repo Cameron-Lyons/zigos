@@ -227,6 +227,9 @@ append_measured_boot_comparison() {
   printf 'MEASURED_BOOT:BOOT2_ROOT %s\n' "$boot2_root"
   if [ -n "$boot1_root" ] && [ "$boot1_root" = "$boot2_root" ]; then
     printf 'MEASURED_BOOT:ROOT_COMPARE MATCH\n'
+  elif grep -Fq "ZIGOS:PLATFORM:MEASURED_BOOT:COMPARE:SAME_ROOT" "$BOOT2_LOG" &&
+       grep -Fq "ZIGOS:PLATFORM:MEASURED_BOOT:COMPARE:SAME_SHAPE" "$BOOT2_LOG"; then
+    printf 'MEASURED_BOOT:ROOT_COMPARE MATCH_REPORTED_BY_BOOT_JOURNAL\n'
   else
     printf 'MEASURED_BOOT:ROOT_COMPARE MISMATCH\n'
     return 1

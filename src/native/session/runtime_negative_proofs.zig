@@ -252,8 +252,8 @@ pub fn driverAuthorityEscapeIsRejected() bool {
 
 pub fn rebootGrantAndRevocationStatePersists() bool {
     reboot_proof_checkpoint_store.reset();
-    reboot_proof_runtime = task_runtime.Runtime.init();
-    reboot_proof_restarted_runtime = task_runtime.Runtime.init();
+    reboot_proof_runtime.reset();
+    reboot_proof_restarted_runtime.reset();
 
     var service_instance = task_runtime_service.Service.initWithStore(&reboot_proof_runtime, &reboot_proof_checkpoint_store);
     service_instance.bind(50, service(50));

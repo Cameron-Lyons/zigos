@@ -8,7 +8,10 @@ pub const CheckpointStore = struct {
     last_checkpoint_tick: u64 = 0,
 
     pub fn reset(self: *CheckpointStore) void {
-        self.* = .{};
+        self.checkpoint_state.task_count = 0;
+        self.checkpoint_state.address_space_count = 0;
+        self.has_checkpoint = false;
+        self.last_checkpoint_tick = 0;
     }
 };
 
