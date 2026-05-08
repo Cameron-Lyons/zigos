@@ -5,9 +5,9 @@ permission.review.render_grants 300000
 network_policy.authorize_connection 15000
 background_dispatch.allowed_sync 800000
 task_runtime.checkpoint.write_restore 9000000
-accelerator_scheduler.claim_release 90000
+accelerator_scheduler.claim_release 130000
 storage.file_bridge.resolve_view 15000
-storage.workspace.commit_overlay 4000000
+storage.workspace.commit_overlay 8000000
 package_revision.rollforward_rollback 1500000
 indexing_service.query_ranked 300000
 media_print.submit_complete 200000
@@ -15,7 +15,7 @@ compatibility_environment.launch_portal 50000
 event_ledger.export_redacted 1000000
 secret_store.import_handle_export 200000
 denial_explanation.render_policy_hint 50000
-sync_service.overlay_session_flow 50000
+sync_service.overlay_session_flow 70000
 recovery_environment.reinstall_restore_repair 4500000000
 update_health.validate_pending_activation 2500000000
 driver_recovery.restart_driver 550000

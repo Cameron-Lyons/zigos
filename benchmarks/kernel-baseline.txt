@@ -5,9 +5,9 @@ permission.review.render_grants 203732.95 40
 network_policy.authorize_connection 5713.21 40
 background_dispatch.allowed_sync 498996.62 40
 task_runtime.checkpoint.write_restore 5821289.98 50
-accelerator_scheduler.claim_release 36259.31 150
+accelerator_scheduler.claim_release 104227.94 60
 storage.file_bridge.resolve_view 7183.06 90
-storage.workspace.commit_overlay 1586277.79 150
+storage.workspace.commit_overlay 7212761.78 60
 package_revision.rollforward_rollback 1151678.41 40
 indexing_service.query_ranked 202462.18 40
 media_print.submit_complete 136500.90 40
@@ -15,7 +15,7 @@ compatibility_environment.launch_portal 30609.03 50
 event_ledger.export_redacted 635582.44 60
 secret_store.import_handle_export 96904.55 60
 denial_explanation.render_policy_hint 15283.87 60
-sync_service.overlay_session_flow 21629.42 60
+sync_service.overlay_session_flow 53125.25 60
 recovery_environment.reinstall_restore_repair 2250000000.00 100
 update_health.validate_pending_activation 2317858270.00 100
 driver_recovery.restart_driver 354572.15 60
