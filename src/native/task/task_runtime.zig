@@ -97,6 +97,23 @@ pub const Runtime = struct {
         return Snapshot{};
     }
 
+    pub fn reset(self: *Runtime) void {
+        self.next_task_id = 1;
+        self.next_process_id = 1;
+        self.next_address_space_id = 1;
+        self.next_namespace_id = 1;
+        self.next_component_id = 1;
+        self.address_space_index_slots = emptyIndexTable(INDEX_CAPACITY);
+        self.tasks.reset();
+        self.task_owner_index.reset();
+        for (&self.task_cold) |*cold| {
+            cold.* = zeroTaskCold();
+        }
+        for (&self.address_spaces) |*slot| {
+            slot.* = AddressSpaceSlot{};
+        }
+    }
+
     pub fn writeSnapshot(self: *const Runtime, out: *Snapshot) void {
         out.next_task_id = self.next_task_id;
         out.next_process_id = self.next_process_id;
@@ -124,7 +141,7 @@ pub const Runtime = struct {
     }
 
     pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) void {
-        self.* = Runtime.init();
+        self.reset();
         self.next_task_id = state.next_task_id;
         self.next_process_id = state.next_process_id;
         self.next_address_space_id = state.next_address_space_id;

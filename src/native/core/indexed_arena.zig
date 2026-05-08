@@ -614,7 +614,19 @@ pub fn PagedIndexedArenaWithKey(
         }
 
         pub fn reset(self: *Self) void {
-            self.* = Self.init();
+            var slot_index: usize = 0;
+            while (slot_index < capacity) : (slot_index += 1) {
+                self.slotAt(slot_index).* = Slot{};
+                self.slot_keys[slot_index] = ids.zero(Key);
+                self.slot_generations[slot_index] = 0;
+                self.free_next[slot_index] = null;
+                self.dirty_ids[slot_index] = ids.zero(Key);
+            }
+            self.primary_index.reset();
+            self.free_head = null;
+            self.next_unclaimed_index = 0;
+            self.used_count = 0;
+            self.dirty_count = 0;
         }
 
         pub fn reserve(self: *Self, key: Key) ?*Slot {
