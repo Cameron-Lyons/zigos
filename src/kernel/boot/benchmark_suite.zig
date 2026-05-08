@@ -76,6 +76,7 @@ const NetworkPolicyContext = struct {
 const BackgroundContext = struct {
     runtime: task_runtime.Runtime = task_runtime.Runtime.init(),
     dispatcher: background_dispatch.Controller = background_dispatch.Controller.init(),
+    task_id: u64 = 0,
 };
 
 const WorkspaceCommitContext = struct {
@@ -378,6 +379,7 @@ fn prepareFixtures() void {
     prepareFileBridgeFixture();
     preparePermissionReviewFixture();
     prepareNetworkPolicyFixture();
+    prepareBackgroundFixture();
     prepareIndexingFixture();
     prepareOverlaySessionFixture();
     prepareWorkspaceCommitFixture();
@@ -454,6 +456,30 @@ fn preparePermissionReviewFixture() void {
             permission_review.parseCommand("allow lease=30") catch unreachable,
         ),
     };
+}
+
+fn prepareBackgroundFixture() void {
+    background_context.runtime = task_runtime.Runtime.init();
+    background_context.dispatcher = background_dispatch.Controller.init();
+
+    const task = background_context.runtime.createTask(.{
+        .owner = app(93),
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 10_000_000,
+            .memory_bytes = 2 * 1024 * 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 64 * 1024,
+            .background_allowed = true,
+        },
+        .ui_surface_id = 9,
+        .local_only = false,
+        .launch = .{
+            .bundle_id = background_bundle.bundle_id,
+        },
+    }) catch unreachable;
+    task.state = .active;
+    background_context.task_id = task.id;
 }
 
 fn prepareIndexingFixture() void {
@@ -854,36 +880,16 @@ fn benchmarkNetworkPolicyAuthorize(iteration: u32) u64 {
 }
 
 fn benchmarkBackgroundDispatch(iteration: u32) u64 {
-    background_context.runtime = task_runtime.Runtime.init();
-    background_context.dispatcher = background_dispatch.Controller.init();
-
-    const task = background_context.runtime.createTask(.{
-        .owner = app(93 + iteration),
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 20_000,
-            .memory_bytes = 2 * 1024 * 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 64 * 1024,
-            .background_allowed = true,
-        },
-        .ui_surface_id = 9,
-        .local_only = false,
-        .launch = .{
-            .bundle_id = background_bundle.bundle_id,
-        },
-    }) catch unreachable;
-    task.state = .active;
-
     const decision = background_context.dispatcher.dispatch(
         &background_context.runtime,
-        task.id,
+        background_context.task_id,
         background_bundle,
         "sync",
         .sync_completion,
         40 + iteration,
     ) catch unreachable;
     _ = background_context.dispatcher.complete(&background_context.runtime, decision.record_id.?) catch unreachable;
+    const task = background_context.runtime.find(background_context.task_id) orelse unreachable;
     return @intFromBool(decision.allowed) +
         decision.expected_duration_seconds +
         task.background_cpu_consumed_ticks +
