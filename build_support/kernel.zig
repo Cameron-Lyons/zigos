@@ -46,16 +46,3 @@ pub fn addKernelArtifact(
         .output_path = b.fmt("zig-out/bin/{s}", .{name}),
     };
 }
-
-pub fn createHostModule(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    root_source: []const u8,
-) *std.Build.Module {
-    return b.createModule(.{
-        .root_source_file = b.path(root_source),
-        .target = target,
-        .optimize = optimize,
-    });
-}

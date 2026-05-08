@@ -8,6 +8,7 @@ pub const Error = schema.Error;
 pub const WireHeader = schema.WireHeader;
 
 pub const InterfaceKey = schema.InterfaceKey;
+pub const InterfaceId = schema.InterfaceId;
 pub const ServiceBinding = schema.ServiceBinding;
 pub const OperationId = schema.OperationId;
 pub const OperationDecl = schema.OperationDecl;
@@ -42,8 +43,16 @@ pub fn Interface(comptime key: InterfaceKey) manifest.InterfaceDecl {
     return schema.interfaceDecl(key);
 }
 
+pub fn interfaceId(comptime key: InterfaceKey) InterfaceId {
+    return schema.interfaceId(key);
+}
+
 pub fn interfaceForService(comptime service: ServiceBinding) manifest.InterfaceDecl {
     return schema.interfaceForService(service);
+}
+
+pub fn interfaceIdForService(comptime service: ServiceBinding) InterfaceId {
+    return schema.interfaceIdForService(service);
 }
 
 pub fn Request(comptime operation_id: OperationId) type {
@@ -58,8 +67,20 @@ pub fn contractFor(interface_name: []const u8) ?*const InterfaceContract {
     return schema.contractFor(interface_name);
 }
 
+pub fn contractForId(interface_id: InterfaceId) ?*const InterfaceContract {
+    return schema.contractForId(interface_id);
+}
+
+pub fn interfaceIdForDecl(interface: manifest.InterfaceDecl) ?InterfaceId {
+    return schema.interfaceIdForDecl(interface);
+}
+
 pub fn validateInterface(interface: manifest.InterfaceDecl) Error!void {
     return schema.validateInterface(interface);
+}
+
+pub fn validateInterfaceId(interface_id: InterfaceId, interface: manifest.InterfaceDecl) Error!void {
+    return schema.validateInterfaceId(interface_id, interface);
 }
 
 pub fn validateCompatibility(provided: manifest.InterfaceDecl, requested: manifest.InterfaceDecl) Error!void {

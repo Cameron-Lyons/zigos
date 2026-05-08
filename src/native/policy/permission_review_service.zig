@@ -90,6 +90,7 @@ pub const Service = struct {
     scripted_cursor: usize = 0,
     decision_profile: []const ProfileRule = &.{},
     compositor: ?*compositor_session.Session = null,
+    compositor_service: ?*compositor_session.Service = null,
     ux: ?*native_ux.Controller = null,
 
     pub fn init(
@@ -120,6 +121,11 @@ pub const Service = struct {
         service.compositor = compositor;
         service.ux = ux;
         return service;
+    }
+
+    pub fn bindCompositorService(self: *Service, service: *compositor_session.Service) void {
+        self.compositor_service = service;
+        self.compositor = service.session;
     }
 
     pub fn initProfiled(
@@ -328,6 +334,7 @@ pub const Service = struct {
         if (review_window_id) |window_id| {
             self.updateReviewWindow(window_id, request, decision);
         }
+        if (self.compositor_service != null) return;
         const ux = self.ux orelse return;
         const task = self.runtime.find(app_task_id) orelse return;
         const flow = ux.reviewPermissionDecision(
@@ -346,6 +353,26 @@ pub const Service = struct {
     }
 
     fn ensureReviewWindow(self: *Service, app_task: *const task_runtime.TaskRecord, bundle: manifest.BundleManifest) ?u64 {
+        if (self.compositor_service) |service| {
+            const existed = service.session.findWindowForTaskBundleConst(app_task.id, bundle.bundle_id) != null;
+            const response = service.dispatch(.{
+                .operation = .review_permission,
+                .subject_task_id = app_task.id,
+                .reviewer_task_id = self.task_id,
+                .bundle_id = bundle.bundle_id,
+                .display_name = bundle.display_name,
+            });
+            if (response.status != .ok) return null;
+            const window = service.session.findWindowConst(response.window_id) orelse return response.window_id;
+            if (!existed) {
+                var buffer: [320]u8 = undefined;
+                const rendered = compositor_session.renderWindowToBuffer(&buffer, window) catch return window.id;
+                console.print(rendered);
+                console.print("\n");
+            }
+            return response.window_id;
+        }
+
         const compositor = self.compositor orelse return null;
         const existed = compositor.findWindowForTaskBundleConst(app_task.id, bundle.bundle_id) != null;
         const window = compositor.beginPermissionReview(self.task_id, app_task, bundle) catch return null;
@@ -365,6 +392,30 @@ pub const Service = struct {
         request: manifest.PermissionRequest,
     ) void {
         const window_id = review_window_id orelse return;
+        if (self.compositor_service) |service| {
+            const window = service.session.findWindowConst(window_id) orelse return;
+            const response = service.dispatch(.{
+                .operation = .review_permission,
+                .subject_task_id = window.subject_task_id,
+                .reviewer_task_id = if (window.reviewer_task_id != 0) window.reviewer_task_id else self.task_id,
+                .window_id = window_id,
+                .permission_kind = request.kind,
+                .local_only = request.local_only,
+                .required = request.required,
+                .max_lease_ticks = request.max_lease_ticks,
+                .bundle_id = bundle.bundle_id,
+                .display_name = bundle.display_name,
+                .resource = request.resource,
+            });
+            if (response.status != .ok) return;
+            const item = service.session.findReviewItemConst(window_id, request.kind, request.resource) orelse return;
+            var buffer: [512]u8 = undefined;
+            const rendered = compositor_session.renderReviewItemToBuffer(&buffer, window_id, item) catch return;
+            console.print(rendered);
+            console.print("\n");
+            return;
+        }
+
         const compositor = self.compositor orelse return;
         const item = compositor.ensureReviewItem(window_id, bundle, request) catch return;
         var buffer: [512]u8 = undefined;
@@ -379,6 +430,26 @@ pub const Service = struct {
         request: manifest.PermissionRequest,
         decision: permission_review.ReviewDecision,
     ) void {
+        if (self.compositor_service) |service| {
+            const response = service.dispatch(.{
+                .operation = .record_decision,
+                .window_id = window_id,
+                .permission_kind = request.kind,
+                .resource = request.resource,
+                .allow = decision.allow,
+                .local_only = decision.local_only,
+                .has_lease = decision.lease_ticks != null,
+                .lease_ticks = decision.lease_ticks orelse 0,
+            });
+            if (response.status != .ok) return;
+            const item = service.session.findReviewItemConst(window_id, request.kind, request.resource) orelse return;
+            var buffer: [320]u8 = undefined;
+            const rendered = compositor_session.renderDecisionToBuffer(&buffer, window_id, item) catch return;
+            console.print(rendered);
+            console.print("\n");
+            return;
+        }
+
         const compositor = self.compositor orelse return;
         const item = compositor.recordDecision(
             window_id,
@@ -486,7 +557,7 @@ test "review service rejects invalid manifests before auditing" {
     try std.testing.expectEqual(@as(usize, 0), task.audit_count);
 }
 
-test "review service uses manifest-aware scripted plans and records structured ux flows" {
+test "review service uses manifest-aware scripted plans through compositor service path" {
     var runtime = task_runtime.Runtime.init();
     const task = try runtime.createTask(.{
         .owner = .{ .kind = .user, .serial = 3 },
@@ -515,8 +586,10 @@ test "review service uses manifest-aware scripted plans and records structured u
         },
     };
     var compositor = compositor_session.Session.init();
-    var ux = native_ux.Controller.init();
-    var service = Service.initConfigured(13, 14, &runtime, &fallback_inputs, &scripted_plan, &compositor, &ux);
+    var checkpoint_store = compositor_session.CheckpointStore{};
+    var compositor_service = compositor_session.Service.initWithCheckpoint(13, 14, &runtime, &compositor, &checkpoint_store);
+    var service = Service.initConfigured(13, 14, &runtime, &fallback_inputs, &scripted_plan, &compositor, null);
+    service.bindCompositorService(&compositor_service);
     const permissions = [_]manifest.PermissionRequest{
         .{
             .kind = .object_access,
@@ -544,17 +617,13 @@ test "review service uses manifest-aware scripted plans and records structured u
 
     const grants = try service.reviewBundle(task.id, bundle, 20, &grants_buffer);
     try std.testing.expectEqual(@as(usize, 2), grants.len);
-    try std.testing.expectEqual(@as(usize, 2), ux.flow_count);
     try std.testing.expectEqual(@as(usize, 1), compositor.window_count);
     try std.testing.expectEqual(@as(usize, 2), compositor.item_count);
-    try std.testing.expectEqualStrings("Notes permission review", compositor.windows[0].titleSlice());
-    try std.testing.expectEqualStrings("app.notes", ux.flows[0].bundleIdSlice());
-    try std.testing.expectEqualStrings("workspace:notes", ux.flows[0].permissionResourceSlice());
-    try std.testing.expect(ux.flows[0].approved);
-    try std.testing.expectEqual(manifest.PermissionKind.network_egress, ux.flows[1].permission_kind);
-    try std.testing.expectEqual(@as(u64, 50), ux.flows[1].decision_lease_ticks);
-    try std.testing.expectEqual(compositor_session.DecisionState.allow, compositor.findReviewItemConst(compositor.windows[0].id, .object_access, "workspace:notes").?.decision);
-    try std.testing.expectEqualStrings("lan.sync", compositor.findReviewItemConst(compositor.windows[0].id, .network_egress, "lan.sync").?.networkPathSlice());
+    const window = compositor.windowAtOrder(0).?;
+    try std.testing.expectEqualStrings("Notes permission review", window.titleSlice());
+    try std.testing.expectEqual(compositor_session.DecisionState.allow, compositor.findReviewItemConst(window.id, .object_access, "workspace:notes").?.decision);
+    try std.testing.expectEqualStrings("lan.sync", compositor.findReviewItemConst(window.id, .network_egress, "lan.sync").?.networkPathSlice());
+    try std.testing.expect(checkpoint_store.valid);
 }
 
 test "review service renders commands from a typed decision profile" {
@@ -587,8 +656,10 @@ test "review service renders commands from a typed decision profile" {
         },
     };
     var compositor = compositor_session.Session.init();
-    var ux = native_ux.Controller.init();
-    var service = Service.initProfiled(15, 16, &runtime, &[_][]const u8{}, profile[0..], &compositor, &ux);
+    var checkpoint_store = compositor_session.CheckpointStore{};
+    var compositor_service = compositor_session.Service.initWithCheckpoint(15, 16, &runtime, &compositor, &checkpoint_store);
+    var service = Service.initProfiled(15, 16, &runtime, &[_][]const u8{}, profile[0..], &compositor, null);
+    service.bindCompositorService(&compositor_service);
     const permissions = [_]manifest.PermissionRequest{
         .{
             .kind = .object_access,
@@ -619,6 +690,6 @@ test "review service renders commands from a typed decision profile" {
     const grants = try service.reviewBundle(task.id, bundle, 25, &grants_buffer);
     try std.testing.expectEqual(@as(usize, 1), grants.len);
     try std.testing.expectEqual(@as(?u64, 425), grants[0].expires_at_ticks);
-    try std.testing.expectEqual(@as(usize, 2), ux.flow_count);
-    try std.testing.expectEqual(compositor_session.DecisionState.deny, compositor.findReviewItemConst(compositor.windows[0].id, .clipboard, "clipboard").?.decision);
+    const window = compositor.windowAtOrder(0).?;
+    try std.testing.expectEqual(compositor_session.DecisionState.deny, compositor.findReviewItemConst(window.id, .clipboard, "clipboard").?.decision);
 }

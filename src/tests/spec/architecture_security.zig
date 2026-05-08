@@ -22,6 +22,7 @@ const syscall_abi = @import("../../native/kernel_api/syscall_abi.zig");
 const syscall_surface = @import("../../native/kernel_api/syscall_surface.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const task_runtime_service = @import("../../native/task/task_runtime_service.zig");
+const typed_component_abi = @import("../../native/services/typed_component_abi.zig");
 const userspace_service_ipc = @import("../../native/services/userspace_service_ipc.zig");
 const userspace_loader = @import("../../native/task/userspace_loader.zig");
 const userspace_manifest_signing = @import("../../native/task/userspace_manifest_signing.zig");
@@ -273,22 +274,15 @@ pub fn kernelRemainsTypedAndIsolatesLegacy() !void {
     try std.testing.expect(abi.policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(abi.reviewOpcode(.review_bundle) >= 0x240);
     try std.testing.expectEqual(@as(u16, 1), abi.ABI_VERSION);
-    try registry.register(55, 7, 101, 201, .{
-        .name = "zigos.service.storage",
-        .version_major = 1,
-        .version_minor = 2,
-    }, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
-    const connection = try registry.connect(.{
-        .name = "zigos.service.storage",
-        .version_major = 1,
-        .version_minor = 1,
-    });
+    const storage_interface = typed_component_abi.interfaceForService(.storage_object);
+    try registry.register(55, 7, 101, 201, storage_interface, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
+    const connection = try registry.connect(storage_interface);
     try std.testing.expectEqual(@as(u64, 55), connection.service_id);
     try std.testing.expectEqual(@as(u64, 101), connection.endpoint_id);
-    try std.testing.expect(connection.interface_hash != 0);
+    try std.testing.expectEqual(@as(u16, @intFromEnum(typed_component_abi.interfaceIdForService(.storage_object))), connection.interface_id);
     try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
     try std.testing.expectError(service_registry.Error.VersionMismatch, registry.connect(.{
-        .name = "zigos.service.storage",
+        .name = storage_interface.name,
         .version_major = 2,
         .version_minor = 0,
     }));
@@ -718,11 +712,11 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         launched.task_id,
         service_endpoint.endpoint.endpoint_id,
         service_endpoint.capability_id,
-        .{ .name = "zigos.object.spec-storage" },
+        typed_component_abi.interfaceForService(.storage_object),
         kernel_descriptors.serviceBindingFlags(launched_record),
     );
 
-    const connection = try service_directory.connect(.{ .name = "zigos.object.spec-storage" });
+    const connection = try service_directory.connect(typed_component_abi.interfaceForService(.storage_object));
     try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
     try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE));
 }

@@ -19,6 +19,7 @@ pub const Binding = struct {
     owner_task_id: u64,
     endpoint_id: u64,
     endpoint_capability_id: u64,
+    interface_id: typed_component_abi.InterfaceId,
     interface: manifest.InterfaceDecl,
     interface_name_len: usize,
     interface_name: [MAX_INTERFACE_NAME_BYTES]u8,
@@ -42,7 +43,7 @@ const BindingSlot = struct {
     binding: Binding = zeroBinding(),
 };
 
-const BindingArena = indexed_arena.IndexedArenaWithKey(u64, BindingSlot, MAX_BINDINGS, MAX_BINDINGS * 2, bindingSlotInterfaceKey);
+const BindingArena = indexed_arena.IndexedArenaWithKey(u64, BindingSlot, MAX_BINDINGS, MAX_BINDINGS * 2, bindingSlotInterfaceIdKey);
 
 pub const Service = struct {
     bootstrap: ?BootstrapEndpoint = null,
@@ -99,16 +100,19 @@ pub const Registry = struct {
         interface: manifest.InterfaceDecl,
         flags: u16,
     ) Error!void {
-        if (!platformInterfaceAllowed(interface)) return error.UnsupportedPlatformInterface;
-        if (self.find(interface.name)) |_| return error.DuplicateInterface;
-        if (!typedContractCompatible(interface)) return error.TypedContractMismatch;
+        const interface_id = interfaceIdForRequest(interface) catch |err| switch (err) {
+            error.UnsupportedPlatformInterface => return error.UnsupportedPlatformInterface,
+            error.TypedContractMismatch => return error.TypedContractMismatch,
+        };
+        if (self.find(interface_id)) |_| return error.DuplicateInterface;
 
-        const slot_index = self.bindings.reserveIndex(interfaceNameKey(interface.name)) orelse return error.BindingTableFull;
+        const slot_index = self.bindings.reserveIndex(interfaceIdKey(interface_id)) orelse return error.BindingTableFull;
         const slot = &self.bindings.slots[slot_index];
         slot.binding.service_id = service_id;
         slot.binding.owner_task_id = owner_task_id;
         slot.binding.endpoint_id = endpoint_id;
         slot.binding.endpoint_capability_id = endpoint_capability_id;
+        slot.binding.interface_id = interface_id;
         slot.binding.interface_name_len = native_util.copyTextExact(
             slot.binding.interface_name[0..],
             interface.name,
@@ -122,24 +126,23 @@ pub const Registry = struct {
             .version_minor = interface.version_minor,
         };
         slot.binding.flags = flags;
-        if (typed_component_abi.contractFor(interface.name)) |contract| {
-            slot.binding.typed_contract_hash = contract.contract_hash;
-        }
+        slot.binding.typed_contract_hash = typed_component_abi.contractForId(interface_id).?.contract_hash;
     }
 
     pub fn connect(self: *const Registry, interface: manifest.InterfaceDecl) Error!abi.ServiceConnectionDescriptor {
-        if (!platformInterfaceAllowed(interface)) return error.UnsupportedPlatformInterface;
-        const binding = self.find(interface.name) orelse return error.InterfaceNotFound;
-        if (!typedContractCompatible(binding.interface)) return error.TypedContractMismatch;
+        const interface_id = interfaceIdForRequest(interface) catch |err| switch (err) {
+            error.UnsupportedPlatformInterface => return error.UnsupportedPlatformInterface,
+            error.TypedContractMismatch => return error.VersionMismatch,
+        };
+        const binding = self.find(interface_id) orelse return error.InterfaceNotFound;
         if (binding.interface.version_major != interface.version_major) return error.VersionMismatch;
         if (binding.interface.version_minor < interface.version_minor) return error.VersionMismatch;
-        if (!typedContractCompatible(interface)) return error.TypedContractMismatch;
 
         return .{
             .service_id = binding.service_id,
             .endpoint_id = binding.endpoint_id,
             .endpoint_capability_id = binding.endpoint_capability_id,
-            .interface_hash = hashInterface(binding.interface.name),
+            .interface_id = @intFromEnum(binding.interface_id),
             .version_major = binding.interface.version_major,
             .version_minor = binding.interface.version_minor,
             .flags = binding.flags,
@@ -150,20 +153,16 @@ pub const Registry = struct {
         return self.bindings.countInUse();
     }
 
-    fn find(self: *const Registry, name: []const u8) ?*const Binding {
-        const slot = self.bindings.getConst(interfaceNameKey(name)) orelse return null;
-        if (!bindingSlotMatchesName(name, slot)) native_util.impossibleByInvariant("service registry primary index points at the wrong binding");
+    fn find(self: *const Registry, interface_id: typed_component_abi.InterfaceId) ?*const Binding {
+        const slot = self.bindings.getConst(interfaceIdKey(interface_id)) orelse return null;
+        if (slot.binding.interface_id != interface_id) native_util.impossibleByInvariant("service registry primary index points at the wrong binding");
         return &slot.binding;
     }
 };
 
-fn bindingSlotInterfaceKey(slot: *const BindingSlot) u64 {
+fn bindingSlotInterfaceIdKey(slot: *const BindingSlot) u64 {
     if (slot.binding.interface.name.len == 0) return 0;
-    return interfaceNameKey(slot.binding.interface.name);
-}
-
-fn bindingSlotMatchesName(name: []const u8, slot: *const BindingSlot) bool {
-    return std.mem.eql(u8, slot.binding.interface.name, name);
+    return interfaceIdKey(slot.binding.interface_id);
 }
 
 fn zeroBinding() Binding {
@@ -172,6 +171,7 @@ fn zeroBinding() Binding {
         .owner_task_id = 0,
         .endpoint_id = 0,
         .endpoint_capability_id = 0,
+        .interface_id = .task_runtime,
         .interface = .{ .name = "" },
         .interface_name_len = 0,
         .interface_name = [_]u8{0} ** MAX_INTERFACE_NAME_BYTES,
@@ -180,26 +180,23 @@ fn zeroBinding() Binding {
     };
 }
 
-fn hashInterface(name: []const u8) u64 {
-    return native_util.fnv1a64(name);
+fn interfaceIdKey(interface_id: typed_component_abi.InterfaceId) u64 {
+    return indexed_arena.nonZeroKey(@intFromEnum(interface_id));
 }
 
-fn interfaceNameKey(name: []const u8) u64 {
-    return indexed_arena.nonZeroKey(hashInterface(name));
+fn interfaceIdForRequest(interface: manifest.InterfaceDecl) error{ UnsupportedPlatformInterface, TypedContractMismatch }!typed_component_abi.InterfaceId {
+    if (!platformInterfaceNameAllowed(interface.name) or interface.version_major == 0) return error.UnsupportedPlatformInterface;
+    const interface_id = typed_component_abi.interfaceIdForDecl(interface) orelse return error.UnsupportedPlatformInterface;
+    typed_component_abi.validateInterfaceId(interface_id, interface) catch return error.TypedContractMismatch;
+    return interface_id;
 }
 
-fn typedContractCompatible(interface: manifest.InterfaceDecl) bool {
-    if (typed_component_abi.contractFor(interface.name) == null) return true;
-    typed_component_abi.validateInterface(interface) catch return false;
-    return true;
-}
-
-fn platformInterfaceAllowed(interface: manifest.InterfaceDecl) bool {
-    if (interface.name.len == 0 or interface.version_major == 0) return false;
-    return !std.mem.startsWith(u8, interface.name, "zigos.internal.") and
-        !std.mem.startsWith(u8, interface.name, "kernel.") and
-        !std.mem.startsWith(u8, interface.name, "sys.") and
-        !std.mem.startsWith(u8, interface.name, "vfs.");
+fn platformInterfaceNameAllowed(name: []const u8) bool {
+    if (name.len == 0) return false;
+    return !std.mem.startsWith(u8, name, "zigos.internal.") and
+        !std.mem.startsWith(u8, name, "kernel.") and
+        !std.mem.startsWith(u8, name, "sys.") and
+        !std.mem.startsWith(u8, name, "vfs.");
 }
 
 test "service registry service requires bootstrap endpoint before discovery" {
@@ -245,7 +242,7 @@ test "service registry only connects by typed interface declaration" {
     try std.testing.expectEqual(@as(u64, 44), connection.service_id);
     try std.testing.expectEqual(@as(u64, 101), connection.endpoint_id);
     try std.testing.expectEqual(@as(u64, 201), connection.endpoint_capability_id);
-    try std.testing.expect(connection.interface_hash != 0);
+    try std.testing.expect(connection.interface_id != 0);
     try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
 }
 
@@ -267,12 +264,12 @@ test "service registry rejects duplicate interfaces and incompatible versions" {
     }));
 }
 
-test "service registry does not consume a binding slot when an interface name is too long" {
+test "service registry does not consume a binding slot for untyped interface names" {
     var registry = Registry.init();
     const too_long = "zigos.object.workspace.interface.name.that.is.definitely.longer.than.sixty.four.bytes";
     try std.testing.expect(too_long.len > MAX_INTERFACE_NAME_BYTES);
 
-    try std.testing.expectError(error.InterfaceNameTooLong, registry.register(44, 7, 101, 201, .{
+    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.register(44, 7, 101, 201, .{
         .name = too_long,
         .version_major = 1,
         .version_minor = 0,
@@ -331,7 +328,8 @@ test "service registry binds known interfaces to generated typed contracts" {
         .version_minor = 0,
     }, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
 
-    const binding = registry.find("zigos.service.registry").?;
+    const binding = registry.find(typed_component_abi.interfaceIdForService(.service_registry)).?;
+    try std.testing.expectEqual(typed_component_abi.interfaceIdForService(.service_registry), binding.interface_id);
     try std.testing.expect(binding.typed_contract_hash != 0);
 
     _ = try registry.connect(.{
@@ -353,24 +351,23 @@ test "service registry binds known interfaces to generated typed contracts" {
 
 test "service registry owns interface name bytes" {
     var registry = Registry.init();
-    var name = [_]u8{ 'z', 'i', 'g', 'o', 's', '.', 'm', 'u', 't', 'a', 'b', 'l', 'e' };
+    const storage_interface = typed_component_abi.interfaceForService(.storage_object);
+    var name_storage = [_]u8{0} ** MAX_INTERFACE_NAME_BYTES;
+    @memcpy(name_storage[0..storage_interface.name.len], storage_interface.name);
     try registry.register(44, 7, 101, 201, .{
-        .name = name[0..],
-        .version_major = 1,
-        .version_minor = 0,
+        .name = name_storage[0..storage_interface.name.len],
+        .version_major = storage_interface.version_major,
+        .version_minor = storage_interface.version_minor,
     }, 0);
 
-    @memset(name[0..], 'x');
+    @memset(name_storage[0..storage_interface.name.len], 'x');
 
-    try std.testing.expectError(error.InterfaceNotFound, registry.connect(.{
-        .name = name[0..],
+    try std.testing.expectError(error.UnsupportedPlatformInterface, registry.connect(.{
+        .name = name_storage[0..storage_interface.name.len],
         .version_major = 1,
         .version_minor = 0,
     }));
-    const connection = try registry.connect(.{
-        .name = "zigos.mutable",
-        .version_major = 1,
-        .version_minor = 0,
-    });
+    const connection = try registry.connect(storage_interface);
     try std.testing.expectEqual(@as(u64, 44), connection.service_id);
+    try std.testing.expectEqual(@as(u16, @intFromEnum(typed_component_abi.interfaceIdForService(.storage_object))), connection.interface_id);
 }

@@ -6,6 +6,7 @@ const crypto_hash = @import("../core/crypto_hash.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const immutable_base = @import("../platform/immutable_base.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
+const measured_boot_console = @import("../platform/measured_boot_console.zig");
 const native_service_registry = @import("../services/service_registry.zig");
 const native_store_mount = @import("native_store_mount.zig");
 const principal = @import("../core/principal.zig");
@@ -50,14 +51,6 @@ const native_measured_boot_storage = if (builtin.target.os.tag == .freestanding)
     }
 else
     struct {};
-
-const console = if (builtin.target.os.tag == .freestanding)
-    @import("../../kernel/utils/console.zig")
-else
-    struct {
-        pub fn print(_: []const u8) void {}
-        pub fn printChar(_: u8) void {}
-    };
 
 pub const TrustBoot = struct {
     userspace_catalog: *userspace_loader.Catalog,
@@ -171,7 +164,7 @@ pub const TrustBoot = struct {
 
         const boot = measured.finalize();
         if (!measured_boot.bootRecordMatchesManifest(&boot, &artifact_manifest)) return false;
-        printMeasurementSummary(&boot);
+        measured_boot_console.printMeasurementSummary(&boot);
         supportMeasuredBootShape(&boot);
         self.recordMeasurementComparison(&boot);
         return true;
@@ -282,7 +275,8 @@ pub const TrustBoot = struct {
             crypto_hash.updateInt(&hasher, "registry-owner-task-id", binding.owner_task_id);
             crypto_hash.updateInt(&hasher, "registry-endpoint-id", binding.endpoint_id);
             crypto_hash.updateInt(&hasher, "registry-endpoint-capability-id", binding.endpoint_capability_id);
-            crypto_hash.updateBytes(&hasher, "registry-interface", binding.interface.name);
+            crypto_hash.updateInt(&hasher, "registry-interface-id", @intFromEnum(binding.interface_id));
+            crypto_hash.updateBytes(&hasher, "registry-interface-name", binding.interface.name);
             crypto_hash.updateInt(&hasher, "registry-version-major", binding.interface.version_major);
             crypto_hash.updateInt(&hasher, "registry-version-minor", binding.interface.version_minor);
             crypto_hash.updateInt(&hasher, "registry-flags", binding.flags);
@@ -520,27 +514,4 @@ fn writeDirectMeasuredBootSector(buffer: *const [direct_measured_boot_sector_siz
         );
     }
     return root_volume.attached_backend_write(direct_measured_boot_lba, buffer.ptr, buffer.len);
-}
-
-fn printMeasurementSummary(boot: *const measured_boot.BootRecord) void {
-    console.print("ZIGOS:PLATFORM:MEASURED_BOOT:ROOT ");
-    printHexDigest(&boot.root_digest);
-    console.print("\n");
-    for (boot.records[0..boot.record_count]) |record| {
-        console.print("ZIGOS:PLATFORM:MEASURED_BOOT:RECORD ");
-        console.print(@tagName(record.kind));
-        console.print(" ");
-        console.print(record.labelSlice());
-        console.print(" ");
-        printHexDigest(&record.digest);
-        console.print("\n");
-    }
-}
-
-fn printHexDigest(digest: *const [32]u8) void {
-    const hex = "0123456789abcdef";
-    for (digest.*) |byte| {
-        console.printChar(hex[byte >> 4]);
-        console.printChar(hex[byte & 0x0f]);
-    }
 }

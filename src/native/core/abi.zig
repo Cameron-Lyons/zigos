@@ -165,7 +165,7 @@ pub const ServiceConnectionDescriptor = extern struct {
     service_id: u64,
     endpoint_id: u64,
     endpoint_capability_id: u64,
-    interface_hash: u64,
+    interface_id: u16,
     version_major: u16,
     version_minor: u16,
     flags: u16,

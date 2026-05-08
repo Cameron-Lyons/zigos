@@ -10,10 +10,6 @@ pub fn name() []const u8 {
     return @tagName(build_options.boot_profile);
 }
 
-pub fn shouldInitAcpi() bool {
-    return false;
-}
-
 pub fn shouldInitSmp() bool {
     return false;
 }

@@ -189,6 +189,7 @@ fn equivalentDatabaseContractSlotMatches(context: DatabaseContractEquivalentLook
 }
 
 const ReplicaIndex = indexed_arena.UniqueIndex(REPLICA_INDEX_CAPACITY);
+const CLOSED_OVERLAY_SESSION_KEY: u64 = 1;
 
 fn replicaIndexKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) ReplicaIndexKey {
     return .{
@@ -209,6 +210,10 @@ fn replicaIndexHash(key: ReplicaIndexKey) u64 {
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.device_id.serial);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.path_hash);
     return hash;
+}
+
+fn overlaySessionSlotId(slot: *const OverlaySessionSlot) u64 {
+    return slot.session.session_id;
 }
 
 pub const Service = ServiceWith(.{});
@@ -450,6 +455,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
     return struct {
         const Self = @This();
         const MAX_SERVICE_OVERLAY_SESSIONS = config.max_overlay_sessions;
+        const OVERLAY_SESSION_INDEX_CAPACITY: usize = MAX_SERVICE_OVERLAY_SESSIONS * 2;
+        const OverlaySessionArena = indexed_arena.IndexedArenaWithKey(u64, OverlaySessionSlot, MAX_SERVICE_OVERLAY_SESSIONS, OVERLAY_SESSION_INDEX_CAPACITY, overlaySessionSlotId);
+        const ClosedOverlaySessionIndex = indexed_arena.MultimapIndex(MAX_SERVICE_OVERLAY_SESSIONS, MAX_SERVICE_OVERLAY_SESSIONS, OVERLAY_SESSION_INDEX_CAPACITY);
 
         service_id: u64,
         task_id: u64,
@@ -461,7 +469,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         owned_resident_state: ResidentState = .{},
         replica_index: ReplicaIndex = ReplicaIndex.init(),
         next_overlay_session_id: u64 = 1,
-        overlay_sessions: [MAX_SERVICE_OVERLAY_SESSIONS]OverlaySessionSlot = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_SERVICE_OVERLAY_SESSIONS,
+        overlay_sessions: OverlaySessionArena = OverlaySessionArena.init(),
+        closed_overlay_sessions: ClosedOverlaySessionIndex = ClosedOverlaySessionIndex.init(),
+        active_overlay_session_count: usize = 0,
         mergeable_document_adapter: MergeableDocumentAdapter = sync_adapters.default_mergeable_document_adapter,
         chunk_media_adapter: ChunkMediaAdapter = sync_adapters.default_chunk_media_adapter,
         secret_transfer_adapter: SecretTransferAdapter = sync_adapters.default_secret_transfer_adapter,
@@ -476,7 +486,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .storage = null,
                 .state_workspace_id = 0,
                 .next_overlay_session_id = 1,
-                .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_SERVICE_OVERLAY_SESSIONS,
+                .overlay_sessions = OverlaySessionArena.init(),
+                .closed_overlay_sessions = ClosedOverlaySessionIndex.init(),
+                .active_overlay_session_count = 0,
                 .mergeable_document_adapter = sync_adapters.default_mergeable_document_adapter,
                 .chunk_media_adapter = sync_adapters.default_chunk_media_adapter,
                 .secret_transfer_adapter = sync_adapters.default_secret_transfer_adapter,
@@ -506,7 +518,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .state_workspace_id = 0,
                 .resident_store = resident_state,
                 .next_overlay_session_id = 1,
-                .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_SERVICE_OVERLAY_SESSIONS,
+                .overlay_sessions = OverlaySessionArena.init(),
+                .closed_overlay_sessions = ClosedOverlaySessionIndex.init(),
+                .active_overlay_session_count = 0,
                 .mergeable_document_adapter = sync_adapters.default_mergeable_document_adapter,
                 .chunk_media_adapter = sync_adapters.default_chunk_media_adapter,
                 .secret_transfer_adapter = sync_adapters.default_secret_transfer_adapter,
@@ -543,7 +557,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .state_workspace_id = workspace_id,
                 .resident_store = resident_state,
                 .next_overlay_session_id = 1,
-                .overlay_sessions = [_]OverlaySessionSlot{OverlaySessionSlot{}} ** MAX_SERVICE_OVERLAY_SESSIONS,
+                .overlay_sessions = OverlaySessionArena.init(),
+                .closed_overlay_sessions = ClosedOverlaySessionIndex.init(),
+                .active_overlay_session_count = 0,
                 .mergeable_document_adapter = sync_adapters.default_mergeable_document_adapter,
                 .chunk_media_adapter = sync_adapters.default_chunk_media_adapter,
                 .secret_transfer_adapter = sync_adapters.default_secret_transfer_adapter,
@@ -569,6 +585,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         pub fn transportFrameCount(self: *const Self) usize {
             return self.transport_queue.count();
+        }
+
+        pub fn overlaySessionCapacity(self: *const Self) usize {
+            _ = self;
+            return MAX_SERVICE_OVERLAY_SESSIONS;
         }
 
         pub fn transportFrameCountFor(self: *const Self, workspace_id: u64, device_id: principal.PrincipalId) usize {
@@ -746,18 +767,12 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         pub fn findOverlaySession(self: *Self, session_id: u64) ?*OverlaySession {
-            for (&self.overlay_sessions) |*slot| {
-                if (slot.in_use and slot.session.session_id == session_id) return &slot.session;
-            }
-            return null;
+            const slot = self.overlay_sessions.get(session_id) orelse return null;
+            return &slot.session;
         }
 
         pub fn activeOverlaySessionCount(self: *const Self) usize {
-            var count: usize = 0;
-            for (self.overlay_sessions) |slot| {
-                if (slot.in_use and slot.session.state == .established) count += 1;
-            }
-            return count;
+            return self.active_overlay_session_count;
         }
 
         fn openOverlaySession(
@@ -820,10 +835,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 session.remote_access = true;
             }
 
-            const slot = self.allocateOverlaySessionSlot() orelse return error.OverlayTableFull;
-            slot.in_use = true;
+            const slot = self.allocateOverlaySessionSlot(session.session_id) orelse return error.OverlayTableFull;
             slot.session = session;
             slot.session.state = .established;
+            self.overlay_sessions.clearDirty();
+            self.active_overlay_session_count += 1;
             session.state = .established;
             return session;
         }
@@ -837,10 +853,20 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         fn closeOverlaySession(self: *Self, session_id: u64, tick: u64) Error!bool {
-            const session = self.findOverlaySession(session_id) orelse return error.OverlaySessionNotFound;
+            const slot_index = self.overlay_sessions.slotIndexOf(session_id) orelse return error.OverlaySessionNotFound;
+            if (slot_index >= MAX_SERVICE_OVERLAY_SESSIONS) native_util.impossibleByInvariant("overlay session primary index points outside slots");
+            const session = &self.overlay_sessions.slots[slot_index].session;
             if (session.state == .closed) return false;
+            if (session.state == .established and self.active_overlay_session_count != 0) {
+                self.active_overlay_session_count -= 1;
+            }
             session.state = .closed;
             session.last_activity_tick = tick;
+            self.overlay_sessions.markDirty(session_id);
+            self.overlay_sessions.clearDirty();
+            if (!self.closed_overlay_sessions.append(CLOSED_OVERLAY_SESSION_KEY, slot_index)) {
+                native_util.impossibleByInvariant("closed overlay session index capacity covers overlay session slots");
+            }
             return true;
         }
 
@@ -874,7 +900,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             identity: signing.SignerIdentity,
         ) Error!*DatabaseContract {
             var message_buffer: [160]u8 = undefined;
-            const message = databaseContractMessage(&message_buffer, workspace_id, bundle_id, label) catch return error.InvalidContractSignature;
+            const message = state_support.databaseContractMessage(&message_buffer, workspace_id, bundle_id, label) catch return error.InvalidContractSignature;
             const signature = signing.sign(identity, message) catch return error.InvalidContractSignature;
             if (!signing.verify(signature, message)) return error.InvalidContractSignature;
 
@@ -1134,14 +1160,15 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             }
         }
 
-        fn allocateOverlaySessionSlot(self: *Self) ?*OverlaySessionSlot {
-            for (&self.overlay_sessions) |*slot| {
-                if (!slot.in_use) return slot;
-            }
-            for (&self.overlay_sessions) |*slot| {
-                if (slot.session.state == .closed) return slot;
-            }
-            return null;
+        fn allocateOverlaySessionSlot(self: *Self, session_id: u64) ?*OverlaySessionSlot {
+            if (self.overlay_sessions.reserve(session_id)) |slot| return slot;
+
+            const slot_index = self.closed_overlay_sessions.head(CLOSED_OVERLAY_SESSION_KEY);
+            if (slot_index == indexed_arena.no_index) return null;
+            if (slot_index >= MAX_SERVICE_OVERLAY_SESSIONS) native_util.impossibleByInvariant("closed overlay session index points outside slots");
+            _ = self.closed_overlay_sessions.remove(CLOSED_OVERLAY_SESSION_KEY, slot_index);
+            _ = self.overlay_sessions.removeIndex(slot_index);
+            return self.overlay_sessions.reserveAtIndex(session_id, slot_index);
         }
 
         fn nextOverlaySessionId(self: *Self) u64 {
@@ -1493,13 +1520,4 @@ test "latest mutation index tracks newest mutation per path hash" {
         changes[0].entry.pathHash(),
         "documents/notes.md",
     ));
-}
-
-fn databaseContractMessage(
-    buffer: []u8,
-    workspace_id: u64,
-    bundle_id: []const u8,
-    label: []const u8,
-) error{NoSpaceLeft}![]const u8 {
-    return std.fmt.bufPrint(buffer, "db-contract:{d}:{s}:{s}", .{ workspace_id, bundle_id, label }) catch error.NoSpaceLeft;
 }

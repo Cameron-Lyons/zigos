@@ -342,14 +342,15 @@ fn launchNativeBootstrapService(
         &self.runtime_context.runtime,
         bundle_id,
         .{
-            .owner = serviceOwner(ids, class),
+            .owner = session_bootstrap.ownerForServiceClass(ids, class) orelse return error.MissingBootstrapLaunch,
             .budget = launch.budget,
             .ui_surface_id = launch.ui_surface_id,
             .local_only = true,
         },
         &self.runtime_context.userspace_scheduler,
     ) catch |err| {
-        _ = self.service_graph_builder.supervisor.recordCrash(serviceRecord(services, class).id, launch.tick, bootFailureCode(err));
+        const record = session_bootstrap.serviceRecordForClass(services, class) orelse return error.MissingBootstrapLaunch;
+        _ = self.service_graph_builder.supervisor.recordCrash(record.id, launch.tick, bootFailureCode(err));
         return err;
     };
 }
@@ -401,42 +402,6 @@ fn catalogDeclaresGrant(class: service_catalog.ServiceClass, grant: service_cata
         if (declared == grant) return true;
     }
     return false;
-}
-
-fn serviceOwner(ids: session_bootstrap.Principals, class: service_catalog.ServiceClass) principal.PrincipalId {
-    return switch (class) {
-        .task_runtime => ids.task_runtime_service,
-        .session_manager => ids.session_service,
-        .policy_mediation => ids.policy_authority,
-        .permission_review_ui => ids.review_service,
-        .service_registry => ids.policy_authority,
-        .compatibility_portal => ids.compatibility_service,
-        .network_stack => ids.network_service,
-        .storage_object => ids.storage_service,
-        .package_install_update => ids.package_service,
-        .compositor_ui_session => ids.compositor_service,
-        .indexing_search => ids.indexing_service,
-        .sync_replication => ids.sync_service,
-        .media_print_helpers => ids.media_service,
-    };
-}
-
-fn serviceRecord(services: session_bootstrap.CoreServices, class: service_catalog.ServiceClass) *supervisor_mod.ServiceRecord {
-    return switch (class) {
-        .task_runtime => services.runtime_service_record,
-        .session_manager => services.session,
-        .policy_mediation => services.policy_service,
-        .permission_review_ui => services.review_service_record,
-        .service_registry => services.service_registry,
-        .compatibility_portal => services.compatibility_service,
-        .network_stack => services.network_service,
-        .storage_object => services.storage_service,
-        .package_install_update => services.package_service,
-        .compositor_ui_session => services.compositor_service,
-        .indexing_search => services.indexing_service,
-        .sync_replication => services.sync_service,
-        .media_print_helpers => services.media_service,
-    };
 }
 
 fn recordSessionTaskBootstrap(

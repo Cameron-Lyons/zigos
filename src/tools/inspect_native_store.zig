@@ -50,7 +50,7 @@ pub fn main(init: std.process.Init) !void {
         if (!slot.in_use) continue;
         try stdout_writer.interface.print(
             "workspace id={d} label={s} generation={d} entries={d}\n",
-            .{ slot.workspace.id, slot.workspace.labelSlice(), slot.workspace.generation, slot.workspace.entry_count },
+            .{ slot.workspace.id, slot.workspace.labelSlice(), slot.workspace.generation, slot.workspace.entryCount() },
         );
     }
 

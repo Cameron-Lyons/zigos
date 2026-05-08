@@ -4,6 +4,7 @@ const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const device_broker = @import("../kernel_api/device_broker.zig");
 const driver_service = @import("../drivers/driver_service.zig");
+const endpoint = @import("../kernel_api/endpoint.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
 const session_manager = @import("session_manager.zig");
@@ -12,6 +13,7 @@ const storage_driver_protocol = @import("../drivers/storage_driver_protocol.zig"
 const sync_service = @import("../sync/sync_service.zig");
 const syscall_surface = @import("../kernel_api/syscall_surface.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const compositor_session = @import("../platform/compositor_session.zig");
 
 pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting() !void {
     session_manager.testing.resetState();
@@ -31,6 +33,7 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
     const storage_task = session_manager.testing.findTask("workspace-storage").?;
     const storage_driver_task = session_manager.testing.findTask("storage-driver").?;
     const network_service_task = session_manager.testing.findTask("network-service").?;
+    const compositor_task = session_manager.testing.findTask("compositor-session").?;
 
     try std.testing.expect(sync_task.runsAsUserspaceProcess());
     try std.testing.expect(storage_driver_task.runsAsUserspaceProcess());
@@ -53,6 +56,14 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
         supervisor.findByClass(.sync_replication).?,
         sync_task,
         storage,
+    );
+    try proveBootedCompositorServicePath(
+        kernel_port,
+        runtime,
+        capability_table,
+        supervisor.findByClass(.compositor_ui_session).?,
+        compositor_task,
+        session_manager.testing.compositorSessionPtr(),
     );
 }
 
@@ -302,6 +313,174 @@ fn proveBootedSyncServicePath(
     try std.testing.expectError(sync_service.Error.DeviceNotTrusted, sync_port.replicateWorkspace(sync_authority, storage, workspace_id, laptop, phone, .device_to_device));
 }
 
+fn proveBootedCompositorServicePath(
+    kernel_port: *component_port.KernelPort,
+    runtime: *task_runtime.Runtime,
+    capability_table: *capability.CapabilityTable,
+    compositor_record: *const @import("supervisor.zig").ServiceRecord,
+    compositor_task: *task_runtime.TaskRecord,
+    session: *compositor_session.Session,
+) !void {
+    session.reset();
+    allowHostStackSyscalls(runtime, compositor_task.id);
+
+    const authority = try capability_table.mintBootRoot(.{
+        .holder = compositor_record.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = compositor_record.id },
+        .rights = .{ .service = .{
+            .endpoint_create = true,
+            .endpoint_connect = true,
+            .endpoint_send = true,
+            .endpoint_recv = true,
+        } },
+        .scope = .{
+            .task_id = compositor_task.id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 120,
+            .expires_at_ticks = 1_200,
+        },
+    });
+    try runtime.grantCapability(compositor_task.id, authority.id);
+
+    const service_endpoint = try expectEndpointCreateWithFlags(
+        kernel_port,
+        compositor_task.id,
+        authority.id,
+        compositor_task.id,
+        "zigos.ui.compositor",
+        .{ .local_only = true, .service_port = true },
+        121,
+    );
+    const peer_endpoint = try expectEndpointCreateWithFlags(
+        kernel_port,
+        compositor_task.id,
+        authority.id,
+        compositor_task.id,
+        "zigos.ui.client",
+        .{ .local_only = true },
+        122,
+    );
+    _ = try expectEndpointConnect(
+        kernel_port,
+        compositor_task.id,
+        peer_endpoint.capability_id,
+        service_endpoint.capability_id,
+        service_endpoint.endpoint.endpoint_id,
+        123,
+    );
+
+    var checkpoint_store = compositor_session.CheckpointStore{};
+    var service = compositor_session.Service.initWithCheckpoint(
+        compositor_record.id,
+        compositor_task.id,
+        runtime,
+        session,
+        &checkpoint_store,
+    );
+
+    var tick: u64 = 124;
+    const open_response = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
+        .operation = .open_view,
+        .view_type = .document_view,
+        .subject_task_id = compositor_task.id,
+        .workspace_id = 88_001,
+        .detail = "docs/plan",
+    }, &tick);
+    try std.testing.expectEqual(compositor_session.ServiceStatus.ok, open_response.status);
+    try std.testing.expectEqual(@as(u16, 1), open_response.visible_window_count);
+    try std.testing.expectEqual(open_response.window_id, session.active_window_id);
+
+    const missing_switch = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
+        .operation = .switch_view,
+        .window_id = 99_999,
+    }, &tick);
+    try std.testing.expectEqual(compositor_session.ServiceStatus.not_found, missing_switch.status);
+
+    const switch_response = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
+        .operation = .switch_view,
+        .window_id = open_response.window_id,
+    }, &tick);
+    try std.testing.expectEqual(compositor_session.ServiceStatus.ok, switch_response.status);
+    try std.testing.expectEqual(open_response.window_id, switch_response.active_window_id);
+
+    const review_response = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
+        .operation = .review_permission,
+        .subject_task_id = compositor_task.id,
+        .reviewer_task_id = compositor_task.id,
+        .permission_kind = .object_access,
+        .local_only = true,
+        .max_lease_ticks = 64,
+        .bundle_id = "app.svc",
+        .display_name = "Svc",
+        .resource = "ws:svc",
+    }, &tick);
+    try std.testing.expectEqual(compositor_session.ServiceStatus.ok, review_response.status);
+    try std.testing.expectEqual(@as(u16, 1), review_response.review_item_count);
+
+    const decision_response = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
+        .operation = .record_decision,
+        .window_id = review_response.window_id,
+        .permission_kind = .object_access,
+        .allow = true,
+        .local_only = true,
+        .has_lease = true,
+        .lease_ticks = 64,
+        .resource = "ws:svc",
+    }, &tick);
+    try std.testing.expectEqual(compositor_session.ServiceStatus.ok, decision_response.status);
+    try std.testing.expectEqual(compositor_session.DecisionState.allow, decision_response.decision);
+
+    session.reset();
+    try std.testing.expectEqual(@as(usize, 0), session.window_count);
+    const recover_response = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
+        .operation = .recover_state,
+    }, &tick);
+    try std.testing.expectEqual(compositor_session.ServiceStatus.ok, recover_response.status);
+    try std.testing.expect(recover_response.recovered);
+    try std.testing.expectEqual(@as(usize, 2), session.window_count);
+    try std.testing.expectEqual(@as(usize, 1), session.item_count);
+    try std.testing.expectEqual(
+        compositor_session.DecisionState.allow,
+        session.findReviewItemConst(review_response.window_id, .object_access, "ws:svc").?.decision,
+    );
+}
+
+fn compositorRoundTrip(
+    kernel_port: *component_port.KernelPort,
+    task_id: u64,
+    peer_endpoint_capability_id: u64,
+    service_endpoint_capability_id: u64,
+    service: *compositor_session.Service,
+    request: compositor_session.ServiceRequest,
+    tick: *u64,
+) !compositor_session.ServiceResponse {
+    var request_buffer: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+    const request_payload = try compositor_session.encodeRequest(&request_buffer, request);
+    try expectEndpointSend(kernel_port, task_id, peer_endpoint_capability_id, request_payload, tick.*);
+    tick.* += 1;
+
+    const received_request = try expectEndpointRecv(kernel_port, task_id, service_endpoint_capability_id, tick.*);
+    tick.* += 1;
+    try std.testing.expectEqual(@as(u8, 1), received_request.present);
+
+    var response_buffer: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+    const response_payload = try service.dispatchPayload(
+        received_request.payload[0..received_request.message.payload_len],
+        &response_buffer,
+    );
+    try expectEndpointSend(kernel_port, task_id, service_endpoint_capability_id, response_payload, tick.*);
+    tick.* += 1;
+
+    const received_response = try expectEndpointRecv(kernel_port, task_id, peer_endpoint_capability_id, tick.*);
+    tick.* += 1;
+    try std.testing.expectEqual(@as(u8, 1), received_response.present);
+    return compositor_session.decodeResponse(received_response.payload[0..received_response.message.payload_len]);
+}
+
 fn createResourceProbeTask(
     kernel_port: *component_port.KernelPort,
     session_task_id: u64,
@@ -388,8 +567,20 @@ fn expectEndpointCreate(
     label: []const u8,
     tick: u64,
 ) !abi.EndpointCreateResponse {
+    return expectEndpointCreateWithFlags(kernel_port, caller_task_id, authority_capability_id, owner_task_id, label, .{ .local_only = true }, tick);
+}
+
+fn expectEndpointCreateWithFlags(
+    kernel_port: *component_port.KernelPort,
+    caller_task_id: u64,
+    authority_capability_id: u64,
+    owner_task_id: u64,
+    label: []const u8,
+    flags: endpoint.EndpointFlags,
+    tick: u64,
+) !abi.EndpointCreateResponse {
     var response = std.mem.zeroes(abi.EndpointCreateResponse);
-    const result = endpointCreateResultInto(kernel_port, caller_task_id, authority_capability_id, owner_task_id, label, tick, &response);
+    const result = endpointCreateResultIntoWithFlags(kernel_port, caller_task_id, authority_capability_id, owner_task_id, label, flags, tick, &response);
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
     return response;
 }
@@ -415,14 +606,80 @@ fn endpointCreateResultInto(
     tick: u64,
     response: *abi.EndpointCreateResponse,
 ) syscall_surface.DispatchResult {
+    return endpointCreateResultIntoWithFlags(kernel_port, caller_task_id, authority_capability_id, owner_task_id, label, .{ .local_only = true }, tick, response);
+}
+
+fn endpointCreateResultIntoWithFlags(
+    kernel_port: *component_port.KernelPort,
+    caller_task_id: u64,
+    authority_capability_id: u64,
+    owner_task_id: u64,
+    label: []const u8,
+    flags: endpoint.EndpointFlags,
+    tick: u64,
+    response: *abi.EndpointCreateResponse,
+) syscall_surface.DispatchResult {
     const request = component_port.EndpointCreateRequest{
         .header = component_port.makeHeader(.endpoint_create, tick, caller_task_id),
         .authority_capability_id = authority_capability_id,
         .owner_task_id = owner_task_id,
         .label = label,
-        .flags = .{ .local_only = true },
+        .flags = flags,
     };
     return syscall_surface.dispatch(kernel_port, caller_task_id, tick, @intFromPtr(&request), @intFromPtr(response), @sizeOf(abi.EndpointCreateResponse));
+}
+
+fn expectEndpointConnect(
+    kernel_port: *component_port.KernelPort,
+    caller_task_id: u64,
+    endpoint_capability_id: u64,
+    peer_endpoint_capability_id: u64,
+    peer_endpoint_id: u64,
+    tick: u64,
+) !abi.EndpointDescriptor {
+    var response = std.mem.zeroes(abi.EndpointDescriptor);
+    const request = component_port.EndpointConnectRequest{
+        .header = component_port.makeHeader(.endpoint_connect, tick, caller_task_id),
+        .endpoint_capability_id = endpoint_capability_id,
+        .peer_endpoint_capability_id = peer_endpoint_capability_id,
+        .peer_endpoint_id = peer_endpoint_id,
+    };
+    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.EndpointDescriptor));
+    try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
+    return response;
+}
+
+fn expectEndpointSend(
+    kernel_port: *component_port.KernelPort,
+    caller_task_id: u64,
+    endpoint_capability_id: u64,
+    payload: []const u8,
+    tick: u64,
+) !void {
+    const request = component_port.EndpointSendRequest{
+        .header = component_port.makeHeader(.endpoint_send, tick, caller_task_id),
+        .endpoint_capability_id = endpoint_capability_id,
+        .payload = payload,
+    };
+    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, @intFromPtr(&request), 0, 0);
+    try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
+}
+
+fn expectEndpointRecv(
+    kernel_port: *component_port.KernelPort,
+    caller_task_id: u64,
+    endpoint_capability_id: u64,
+    tick: u64,
+) !abi.EndpointRecvResponse {
+    var response = std.mem.zeroes(abi.EndpointRecvResponse);
+    const request = component_port.EndpointRecvRequest{
+        .header = component_port.makeHeader(.endpoint_recv, tick, caller_task_id),
+        .endpoint_capability_id = endpoint_capability_id,
+        .receiver_task_id = caller_task_id,
+    };
+    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.EndpointRecvResponse));
+    try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
+    return response;
 }
 
 fn expectSharedMemoryCreate(

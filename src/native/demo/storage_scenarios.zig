@@ -233,7 +233,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
     })) {
         support.common.printBootMarker("ZIGOS:STORAGE:WORKSPACE:SHARING_OK");
     }
-    if (notes_workspace.entry_count == 3 and notes_workspace.generation >= 1) {
+    if (notes_workspace.entryCount() == 3 and notes_workspace.generation >= 1) {
         support.common.printBootMarker(boot_markers.storage_workspace_transaction_ok);
     }
     if (std.mem.eql(u8, baseline_snapshot_signer, "zigos-workspace-key")) {
@@ -242,7 +242,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
     if (latest_notes_version_id != notes_entry.version_id.raw()) {
         support.common.printBootMarker("ZIGOS:STORAGE:RESTORE:OK");
     }
-    if (notes_workspace.deleted_count != 0 and !notes_entry.version_id.isZero()) {
+    if (notes_workspace.deletedCount() != 0 and !notes_entry.version_id.isZero()) {
         support.common.printBootMarker("ZIGOS:STORAGE:DELETE_RECOVERY:OK");
     }
     if ((context.storage_service_instance.resolve(imported_workspace_id, "documents/notes.md") catch unreachable).version_id.eql(notes_entry.version_id)) {

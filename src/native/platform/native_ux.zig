@@ -1,5 +1,6 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("../storage/object_store.zig");
@@ -62,9 +63,19 @@ pub const Error = error{
     FlowTableFull,
 } || task_runtime.Error || workspace.Error || sync_service.Error || sync_service.AuthorityError;
 
+const FLOW_INDEX_CAPACITY: usize = MAX_FLOWS * 2;
+
+const FlowSlot = struct {
+    in_use: bool = false,
+    flow: FlowRecord = zeroFlow(),
+};
+
+const FlowArena = indexed_arena.IndexedArenaWithKey(u64, FlowSlot, MAX_FLOWS, FLOW_INDEX_CAPACITY, flowSlotId);
+
 pub const Controller = struct {
     next_flow_id: u64 = 1,
-    flows: [MAX_FLOWS]FlowRecord = [_]FlowRecord{zeroFlow()} ** MAX_FLOWS,
+    flows: FlowArena = FlowArena.init(),
+    flow_order: [MAX_FLOWS]u64 = [_]u64{0} ** MAX_FLOWS,
     flow_count: usize = 0,
 
     pub fn init() Controller {
@@ -155,6 +166,18 @@ pub const Controller = struct {
         _ = try self.record(.recover_system, task_id, 0, subject, detail, true);
     }
 
+    pub fn flowAtOrder(self: *const Controller, order_index: usize) ?*const FlowRecord {
+        if (order_index >= self.flow_count) return null;
+        const flow_id = self.flow_order[order_index];
+        const slot = self.flows.getConst(flow_id) orelse return null;
+        return &slot.flow;
+    }
+
+    pub fn flowById(self: *const Controller, flow_id: u64) ?*const FlowRecord {
+        const slot = self.flows.getConst(flow_id) orelse return null;
+        return &slot.flow;
+    }
+
     fn record(
         self: *Controller,
         kind: FlowKind,
@@ -165,9 +188,11 @@ pub const Controller = struct {
         approved: bool,
     ) Error!*FlowRecord {
         if (self.flow_count >= MAX_FLOWS) return error.FlowTableFull;
-        const flow = &self.flows[self.flow_count];
+        const flow_id = self.next_flow_id;
+        const slot = self.flows.reserve(flow_id) orelse return error.FlowTableFull;
+        const flow = &slot.flow;
         flow.* = zeroFlow();
-        flow.id = self.next_flow_id;
+        flow.id = flow_id;
         self.next_flow_id += 1;
         flow.kind = kind;
         flow.task_id = task_id;
@@ -175,6 +200,7 @@ pub const Controller = struct {
         flow.subject = subject;
         flow.approved = approved;
         flow.detail_len = copyText(&flow.detail, detail);
+        self.flow_order[self.flow_count] = flow.id;
         self.flow_count += 1;
         return flow;
     }
@@ -210,6 +236,10 @@ fn zeroFlow() FlowRecord {
         .id = 0,
         .kind = .start_task,
     };
+}
+
+fn flowSlotId(slot: *const FlowSlot) u64 {
+    return slot.flow.id;
 }
 
 fn appendText(buffer: []u8, used: *usize, text: []const u8) !void {
@@ -312,11 +342,11 @@ test "native ux records task workspace pairing review and recovery flows" {
     try controller.recoverSystem(task.id, user, "recovery-environment");
 
     try std.testing.expectEqual(@as(usize, 5), controller.flow_count);
-    try std.testing.expectEqualStrings("documents/notes.md", controller.flows[1].detailSlice());
+    try std.testing.expectEqualStrings("documents/notes.md", controller.flowAtOrder(1).?.detailSlice());
     try std.testing.expect(sync.isTrustedDevice(paired_device));
     try std.testing.expectEqual(notes.version_id, opened.version_id);
-    try std.testing.expectEqual(manifest.PermissionKind.object_access, controller.flows[3].permission_kind);
-    try std.testing.expectEqualStrings("object_access", controller.flows[3].permissionResourceSlice());
+    try std.testing.expectEqual(manifest.PermissionKind.object_access, controller.flowAtOrder(3).?.permission_kind);
+    try std.testing.expectEqualStrings("object_access", controller.flowAtOrder(3).?.permissionResourceSlice());
 
     storage_checkpoint_store.resetPersistent();
 }

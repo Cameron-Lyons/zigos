@@ -13,6 +13,37 @@ const workspace = @import("workspace.zig");
 
 pub const CheckpointStore = checkpoint_support.CheckpointStore;
 
+const FakeStorageVolumeBackend = struct {
+    var image: []u8 = &.{};
+
+    fn attach(image_buffer: []u8) void {
+        image = image_buffer;
+        storage_volume.attachBackend(.{
+            .sector_count = storage_volume.required_device_sectors,
+            .read = read,
+            .write = write,
+        });
+    }
+
+    fn read(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+        const buffer = buffer_ptr[0..buffer_len];
+        const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+        const end = start + buffer.len;
+        if (end > image.len) return false;
+        @memcpy(buffer, image[start..end]);
+        return true;
+    }
+
+    fn write(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+        const buffer = buffer_ptr[0..buffer_len];
+        const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+        const end = start + buffer.len;
+        if (end > image.len) return false;
+        @memcpy(image[start..end], buffer);
+        return true;
+    }
+};
+
 pub const SharedPayloadTransfer = struct {
     table: *const shared_memory.Table,
     object_id: ids.SharedMemoryId,
@@ -854,39 +885,13 @@ test "storage service retains authoritative object and workspace state across re
 }
 
 test "storage service reloads authoritative state from the attached volume after a cold start" {
-    const FakeBackend = struct {
-        var image: []u8 = &.{};
-
-        fn read(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
-            const buffer = buffer_ptr[0..buffer_len];
-            const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
-            const end = start + buffer.len;
-            if (end > image.len) return false;
-            @memcpy(buffer, image[start..end]);
-            return true;
-        }
-
-        fn write(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
-            const buffer = buffer_ptr[0..buffer_len];
-            const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
-            const end = start + buffer.len;
-            if (end > image.len) return false;
-            @memcpy(image[start..end], buffer);
-            return true;
-        }
-    };
-
     var checkpoint_store = CheckpointStore{};
     checkpoint_store.resetPersistent();
     defer checkpoint_store.resetPersistent();
 
     var image = [_]u8{0} ** storage_volume.image_bytes;
-    FakeBackend.image = &image;
-    storage_volume.attachBackend(.{
-        .sector_count = storage_volume.required_device_sectors,
-        .read = FakeBackend.read,
-        .write = FakeBackend.write,
-    });
+    FakeStorageVolumeBackend.attach(&image);
+    defer storage_volume.clearAttachedBackend();
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 45 };
     const signer = signing.SignerIdentity{
@@ -943,39 +948,12 @@ test "storage service reloads authoritative state from the attached volume after
 }
 
 test "storage service coalesces checkpoint writes across an explicit batch" {
-    const FakeBackend = struct {
-        var image: []u8 = &.{};
-
-        fn read(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
-            const buffer = buffer_ptr[0..buffer_len];
-            const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
-            const end = start + buffer.len;
-            if (end > image.len) return false;
-            @memcpy(buffer, image[start..end]);
-            return true;
-        }
-
-        fn write(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
-            const buffer = buffer_ptr[0..buffer_len];
-            const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
-            const end = start + buffer.len;
-            if (end > image.len) return false;
-            @memcpy(image[start..end], buffer);
-            return true;
-        }
-    };
-
     var checkpoint_store = CheckpointStore{};
     checkpoint_store.resetPersistent();
     defer checkpoint_store.resetPersistent();
 
     var image = [_]u8{0} ** storage_volume.image_bytes;
-    FakeBackend.image = &image;
-    storage_volume.attachBackend(.{
-        .sector_count = storage_volume.required_device_sectors,
-        .read = FakeBackend.read,
-        .write = FakeBackend.write,
-    });
+    FakeStorageVolumeBackend.attach(&image);
     defer storage_volume.clearAttachedBackend();
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 48 };

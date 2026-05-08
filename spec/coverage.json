@@ -457,6 +457,10 @@
           "name": "compositor session opens document workspace and full-screen task views"
         },
         {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
           "file": "src/native/policy/permission_review.zig",
           "name": "renderToBuffer includes bundle name, permission labels, and decisions"
         },
@@ -491,6 +495,18 @@
         {
           "file": "src/native/task/accelerator_scheduler.zig",
           "name": "accelerator scheduler tracks exclusive engine claims and zero-copy attachments"
+        },
+        {
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler denies unavailable required accelerators and wakes when granted"
+        },
+        {
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler delays on memory bandwidth before npu dispatch"
+        },
+        {
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler applies thermal and battery decisions to live dispatch"
         },
         {
           "file": "src/native/kernel_api/shared_memory.zig",
@@ -1451,30 +1467,39 @@
       ]
     },
     "REQ-TASK-FIRST-UX": {
-      "status": "scenario",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/compositor_session.zig",
-        "src/native/platform/event_ledger.zig"
+        "src/native/policy/permission_review_service.zig",
+        "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Task-first UX is represented by compositor/session scenarios and render strings, not by a real interactive compositor path.",
-      "roadmap": {
-        "priority": "P2",
-        "focus": "Replace rendered task records with a booted compositor/session workflow centered on task state.",
-        "graduation_proof": "Interactive or scripted compositor path opens task, workspace, permission, and pairing flows with structured audit records."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/policy/permission_review_service.zig",
+          "name": "review service uses manifest-aware scripted plans through compositor service path"
+        }
+      ]
     },
     "REQ-WINDOWS-AND-VIEWS": {
-      "status": "scenario",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/compositor_session.zig",
-        "src/native/platform/event_ledger.zig"
+        "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Window/view support is scenario-rendered in the compositor model, not yet enforced by a real UI compositor.",
-      "roadmap": {
-        "priority": "P2",
-        "focus": "Enforce document, workspace, app panel, and fullscreen view lifecycle in the compositor service path.",
-        "graduation_proof": "Compositor service tests create, switch, deny unauthorized scraping, and recover view state after service restart."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/platform/compositor_session.zig",
+          "name": "compositor service wire protocol opens switches reviews decides and recovers"
+        }
+      ]
     },
     "REQ-PERMISSION-UX": {
       "status": "enforced",
@@ -1504,19 +1529,27 @@
       ]
     },
     "REQ-UNIFIED-RESOURCE-SCHEDULER": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/task/accelerator_scheduler.zig",
         "src/native/task/userspace_scheduler.zig",
         "src/native/task/task_runtime_model.zig",
         "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Booted syscall paths now enforce CPU, endpoint, and shared-memory budget accounting, but full live CPU/GPU/NPU/media scheduling policy is still modeled.",
-      "roadmap": {
-        "priority": "P1",
-        "focus": "Bind live userspace dispatch to CPU, GPU, NPU, media, memory, thermal, and battery policy decisions.",
-        "graduation_proof": "Scheduler tests and QEMU/spec gates show dispatch order, accelerator claims, accounting, and denial under pressure."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler denies unavailable required accelerators and wakes when granted"
+        },
+        {
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler delays on memory bandwidth before npu dispatch"
+        },
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        }
+      ]
     },
     "REQ-SHARED-MEMORY-OBJECTS": {
       "status": "enforced",
@@ -1532,17 +1565,22 @@
       ]
     },
     "REQ-THERMAL-AND-POWER-POLICY": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/task/accelerator_scheduler.zig",
+        "src/native/task/userspace_scheduler.zig",
         "src/native/task/task_runtime_model.zig"
       ],
-      "coverage_note": "Thermal and power policy decisions are covered by scheduler model tests, not live runtime scheduling enforcement.",
-      "roadmap": {
-        "priority": "P1",
-        "focus": "Make thermal and battery policy affect live task dispatch, quality degradation, and delay decisions.",
-        "graduation_proof": "Service-path scheduler tests prove foreground remains responsive while batch/background work is delayed or degraded under pressure."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler applies thermal and battery decisions to live dispatch"
+        },
+        {
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler thermal pressure gates batch queues without scanning task slots"
+        }
+      ]
     },
     "REQ-USERSPACE-DRIVERS": {
       "status": "enforced",
@@ -1810,13 +1848,13 @@
         "src/native/sync/sync_service_impl.zig",
         "src/native/platform/immutable_base.zig",
         "src/native/task/task_runtime_model.zig",
-        "src/native/task/accelerator_scheduler.zig"
+        "src/native/task/userspace_scheduler.zig"
       ],
-      "coverage_note": "The summary depends on capabilities, sync, immutable base, process isolation, networking, and resource scheduling; several of those are still modeled or scenario-only.",
+      "coverage_note": "The summary remains scenario-level until the full user experience row graduates from rendered scenarios to an end-to-end usable shell/compositor workflow.",
       "roadmap": {
         "priority": "P0",
-        "focus": "Keep the summary scenario-only until capability, sync, isolation, networking, and scheduler dependencies are enforced.",
-        "graduation_proof": "All summary dependencies are enforced and the meta-requirement gate can mark this row enforced without modeled dependencies."
+        "focus": "Keep the summary scenario-only until the end-to-end user experience requirement is enforced.",
+        "graduation_proof": "The full UX workflow is enforced and the meta-requirement gate can mark this row enforced without scenario-only dependencies."
       }
     }
   }
