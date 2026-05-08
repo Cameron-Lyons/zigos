@@ -222,7 +222,9 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     var document_view_count: usize = 0;
     var workspace_view_count: usize = 0;
     var task_view_count: usize = 0;
-    for (compositor.windows[0..compositor.window_count]) |window| {
+    var window_index: usize = 0;
+    while (window_index < compositor.window_count) : (window_index += 1) {
+        const window = compositor.windowAtOrder(window_index).?;
         switch (window.view_type) {
             .app_panel => app_panel_count += 1,
             .document_view => document_view_count += 1,

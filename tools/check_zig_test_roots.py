@@ -28,9 +28,11 @@ def tracked_zig_files() -> set[Path]:
         stdout=subprocess.PIPE,
     )
     return {
-        Path(path.decode())
-        for path in result.stdout.split(b"\0")
-        if path and path.decode().endswith(".zig")
+        path
+        for raw_path in result.stdout.split(b"\0")
+        if raw_path
+        for path in (Path(raw_path.decode()),)
+        if path.suffix == ".zig" and (ROOT_DIR / path).is_file()
     }
 
 

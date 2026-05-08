@@ -2,7 +2,6 @@ const builtin = @import("builtin");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const bootstrap_capabilities = @import("bootstrap_capabilities.zig");
 const component_port = @import("../kernel_api/component_port.zig");
-const contract = @import("contract.zig");
 const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const device_inventory = @import("../drivers/device_inventory.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
@@ -10,7 +9,6 @@ const driver_service = @import("../drivers/driver_service.zig");
 const native_util = @import("../core/util.zig");
 const std = @import("std");
 const service_bootstrap = @import("service_bootstrap.zig");
-const principal = @import("../core/principal.zig");
 const service_contract = @import("service_contracts.zig");
 const root = @import("root");
 const storage_volume_mod = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
@@ -61,7 +59,7 @@ pub fn bootRegistryService(
     if (service_bindings.bindings[index].task_id != 0) return true;
     const entry = service_contract.contractForClass(.service_registry).?;
     service_bindings.bindings[index] = launchService(env, state, kernel_port, entry) catch |err| {
-        _ = env.supervisor.recordCrash(serviceId(state, entry.class), entry.boot_tick, bootFailureCode(err));
+        _ = env.supervisor.recordCrash(support.serviceId(state, entry.class), entry.boot_tick, bootFailureCode(err));
         return false;
     };
     return true;
@@ -76,7 +74,7 @@ fn launchServices(
     for (service_contract.ordered_service_contracts, 0..) |entry, index| {
         if (service_bindings.bindings[index].task_id != 0) continue;
         service_bindings.bindings[index] = launchService(env, state, kernel_port, entry) catch |err| {
-            _ = env.supervisor.recordCrash(serviceId(state, entry.class), entry.boot_tick, bootFailureCode(err));
+            _ = env.supervisor.recordCrash(support.serviceId(state, entry.class), entry.boot_tick, bootFailureCode(err));
             return false;
         };
         if (entry.class == .compatibility_portal) {
@@ -93,20 +91,18 @@ fn launchService(
     entry: service_contract.ServiceContract,
 ) service_bootstrap.Error!service_bootstrap.ServiceBinding {
     try env.runtime.grantCapability(state.session_task.id, state.session_capability.id);
-    return service_bootstrap.launchContractService(
-        env.userspace_catalog,
-        kernel_port,
-        env.service_directory,
-        env.supervisor,
-        state.session_capability.id,
-        if (entry.class == .service_registry) state.session_task.id else 0,
-        env.userspace_scheduler,
-        serviceOwner(state, entry.class),
-        serviceId(state, entry.class),
-        entry,
-        entry.boot_correlation_base,
-        entry.boot_tick,
-    );
+    return service_bootstrap.launchContractService(.{
+        .catalog = env.userspace_catalog,
+        .kernel_port = kernel_port,
+        .service_directory = env.service_directory,
+        .supervisor = env.supervisor,
+        .authority_capability_id = state.session_capability.id,
+        .controller_task_id = if (entry.class == .service_registry) state.session_task.id else 0,
+        .schedule_task = env.userspace_scheduler,
+        .owner = support.serviceOwner(state, entry.class),
+        .service_id = support.serviceId(state, entry.class),
+        .entry = entry,
+    });
 }
 
 fn activateDrivers(
@@ -316,11 +312,11 @@ fn connectClient(
             .label = entry.interface.name,
             .flags = .{ .local_only = true },
         }, 57 + @as(u64, @intCast(index))) catch |err| {
-            _ = env.supervisor.recordCrash(serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), bootFailureCode(err));
+            _ = env.supervisor.recordCrash(support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), bootFailureCode(err));
             return false;
         };
         const registry_connection = env.service_directory.connect(entry.interface) catch |err| {
-            _ = env.supervisor.recordCrash(serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), bootFailureCode(err));
+            _ = env.supervisor.recordCrash(support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), bootFailureCode(err));
             return false;
         };
         _ = kernel_port.endpointConnect(.{
@@ -329,7 +325,7 @@ fn connectClient(
             .peer_endpoint_capability_id = registry_connection.endpoint_capability_id,
             .peer_endpoint_id = binding.endpoint_id,
         }, 57 + @as(u64, @intCast(index))) catch |err| {
-            _ = env.supervisor.recordCrash(serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), bootFailureCode(err));
+            _ = env.supervisor.recordCrash(support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), bootFailureCode(err));
             return false;
         };
         env.runtime.audit(service_client_task.id, .{
@@ -337,7 +333,7 @@ fn connectClient(
             .detail = @truncate(registry_connection.service_id),
             .tick = 57 + @as(u64, @intCast(index)),
         }) catch |err| {
-            _ = env.supervisor.recordCrash(serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), bootFailureCode(err));
+            _ = env.supervisor.recordCrash(support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), bootFailureCode(err));
             return false;
         };
         const service = env.supervisor.findByClass(entry.class) orelse return false;
@@ -433,40 +429,6 @@ pub fn proveDriverCrashRestart(
         common.printBootMarker(boot_markers.service_boot_supervisor_restart_without_reboot);
     }
     return true;
-}
-
-fn serviceOwner(state: *const support.BootstrapState, class: contract.ServiceClass) principal.PrincipalId {
-    return switch (class) {
-        .service_registry => state.ids.policy_authority,
-        .policy_mediation => state.ids.policy_authority,
-        .permission_review_ui => state.ids.review_service,
-        .network_stack => state.ids.network_service,
-        .storage_object => state.ids.storage_service,
-        .package_install_update => state.ids.package_service,
-        .compositor_ui_session => state.ids.compositor_service,
-        .indexing_search => state.ids.indexing_service,
-        .sync_replication => state.ids.sync_service,
-        .media_print_helpers => state.ids.media_service,
-        .compatibility_portal => state.ids.compatibility_service,
-        else => native_util.impossibleByInvariant("only managed bootstrap service classes have service owners"),
-    };
-}
-
-fn serviceId(state: *const support.BootstrapState, class: contract.ServiceClass) u64 {
-    return switch (class) {
-        .service_registry => state.services.service_registry.id,
-        .policy_mediation => state.services.policy_service.id,
-        .permission_review_ui => state.services.review_service_record.id,
-        .network_stack => state.services.network_service.id,
-        .storage_object => state.services.storage_service.id,
-        .package_install_update => state.services.package_service.id,
-        .compositor_ui_session => state.services.compositor_service.id,
-        .indexing_search => state.services.indexing_service.id,
-        .sync_replication => state.services.sync_service.id,
-        .media_print_helpers => state.services.media_service.id,
-        .compatibility_portal => state.services.compatibility_service.id,
-        else => native_util.impossibleByInvariant("only managed bootstrap service classes have service ids"),
-    };
 }
 
 fn bootFailureCode(err: anyerror) u32 {

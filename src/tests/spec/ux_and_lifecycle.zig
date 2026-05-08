@@ -104,17 +104,17 @@ pub fn taskFirstUxRecordsStructuredFlows() !void {
     try controller.recoverSystem(task.id, person, "recovery-environment");
 
     try std.testing.expectEqual(@as(usize, 5), controller.flow_count);
-    try std.testing.expectEqual(native_ux.FlowKind.start_task, controller.flows[0].kind);
-    try std.testing.expectEqual(task.id, controller.flows[0].task_id);
-    try std.testing.expectEqual(native_ux.FlowKind.open_workspace, controller.flows[1].kind);
-    try std.testing.expectEqual(workspace_record.id.raw(), controller.flows[1].workspace_id);
-    try std.testing.expectEqualStrings("documents/plan.md", controller.flows[1].detailSlice());
+    try std.testing.expectEqual(native_ux.FlowKind.start_task, controller.flowAtOrder(0).?.kind);
+    try std.testing.expectEqual(task.id, controller.flowAtOrder(0).?.task_id);
+    try std.testing.expectEqual(native_ux.FlowKind.open_workspace, controller.flowAtOrder(1).?.kind);
+    try std.testing.expectEqual(workspace_record.id.raw(), controller.flowAtOrder(1).?.workspace_id);
+    try std.testing.expectEqualStrings("documents/plan.md", controller.flowAtOrder(1).?.detailSlice());
     try std.testing.expectEqual(document.version_id, opened.version_id);
-    try std.testing.expectEqual(native_ux.FlowKind.pair_device, controller.flows[2].kind);
+    try std.testing.expectEqual(native_ux.FlowKind.pair_device, controller.flowAtOrder(2).?.kind);
     try std.testing.expect(sync.isTrustedDevice(paired_device));
-    try std.testing.expect(controller.flows[3].approved);
-    try std.testing.expectEqual(native_ux.FlowKind.recover_system, controller.flows[4].kind);
-    try std.testing.expectEqualStrings("recovery-environment", controller.flows[4].detailSlice());
+    try std.testing.expect(controller.flowAtOrder(3).?.approved);
+    try std.testing.expectEqual(native_ux.FlowKind.recover_system, controller.flowAtOrder(4).?.kind);
+    try std.testing.expectEqualStrings("recovery-environment", controller.flowAtOrder(4).?.detailSlice());
 }
 
 pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
@@ -326,8 +326,8 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
 
     try controller.recoverSystem(task.id, person, "restored previous trip planner version");
     try std.testing.expectEqual(@as(usize, 5), controller.flow_count);
-    try std.testing.expectEqual(native_ux.FlowKind.recover_system, controller.flows[4].kind);
-    try std.testing.expectEqualStrings("restored previous trip planner version", controller.flows[4].detailSlice());
+    try std.testing.expectEqual(native_ux.FlowKind.recover_system, controller.flowAtOrder(4).?.kind);
+    try std.testing.expectEqualStrings("restored previous trip planner version", controller.flowAtOrder(4).?.detailSlice());
 }
 
 pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {

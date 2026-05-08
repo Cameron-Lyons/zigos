@@ -54,6 +54,23 @@ pub const InterfaceKey = enum(u8) {
     compat_portal,
 };
 
+pub const InterfaceId = enum(u16) {
+    task_runtime = 0x1001,
+    session_manager = 0x1002,
+    policy_mediation = 0x1003,
+    permission_review = 0x1004,
+    service_registry = 0x1005,
+    network_policy = 0x1006,
+    object_workspace = 0x1007,
+    bootstrap_workspace = 0x1008,
+    package_install = 0x1009,
+    ui_session = 0x100A,
+    index_search = 0x100B,
+    sync_replication = 0x100C,
+    media_print = 0x100D,
+    compat_portal = 0x100E,
+};
+
 pub const OperationId = enum(u16) {
     service_register = 0x0101,
     service_connect = 0x0102,
@@ -86,6 +103,7 @@ const ServiceRegisterRequestWire = extern struct {
     owner_task_id: u64,
     endpoint_id: u64,
     flags: u16,
+    interface_id: u16,
     interface_name_len: u16,
     version_major: u16,
     version_minor: u16,
@@ -93,7 +111,7 @@ const ServiceRegisterRequestWire = extern struct {
 
 const ServiceConnectionRequestWire = extern struct {
     header: WireHeader,
-    interface_name_len: u16,
+    interface_id: u16,
     version_major: u16,
     version_minor: u16,
     _reserved: u16 = 0,
@@ -159,6 +177,7 @@ const PolicyAuthorizeResponseWire = extern struct {
 };
 
 const InterfaceSpec = struct {
+    id: InterfaceId,
     key: InterfaceKey,
     name: []const u8,
     version_major: u16 = 1,
@@ -169,7 +188,11 @@ const InterfaceSpec = struct {
 };
 
 fn iface(comptime key: InterfaceKey, comptime name: []const u8) InterfaceSpec {
-    return .{ .key = key, .name = name };
+    return .{
+        .id = @field(InterfaceId, @tagName(key)),
+        .key = key,
+        .name = name,
+    };
 }
 
 pub const interface_specs = [_]InterfaceSpec{
@@ -265,6 +288,7 @@ pub const OperationDecl = struct {
 pub const MAX_OPERATIONS_PER_INTERFACE: usize = maxOperationsPerInterface();
 
 pub const InterfaceContract = struct {
+    interface_id: InterfaceId,
     interface: manifest.InterfaceDecl,
     contract_hash: u64,
     coverage_requirement_id: []const u8,
@@ -281,6 +305,7 @@ pub const InterfaceContract = struct {
 
 pub const ServiceCatalogBinding = struct {
     service: ServiceBinding,
+    interface_id: InterfaceId,
     interface: manifest.InterfaceDecl,
     coverage_requirement_id: []const u8,
 };
@@ -316,8 +341,16 @@ pub fn interfaceDecl(comptime key: InterfaceKey) manifest.InterfaceDecl {
     };
 }
 
+pub fn interfaceId(comptime key: InterfaceKey) InterfaceId {
+    return interfaceSpec(key).id;
+}
+
 pub fn interfaceForService(comptime service: ServiceBinding) manifest.InterfaceDecl {
     return interfaceDecl(serviceBindingSpec(service).interface);
+}
+
+pub fn interfaceIdForService(comptime service: ServiceBinding) InterfaceId {
+    return interfaceId(serviceBindingSpec(service).interface);
 }
 
 pub fn requestType(comptime operation_id: OperationId) type {
@@ -335,8 +368,27 @@ pub fn contractFor(interface_name: []const u8) ?*const InterfaceContract {
     return null;
 }
 
+pub fn contractForId(interface_id: InterfaceId) ?*const InterfaceContract {
+    for (&contracts) |*iface_contract| {
+        if (iface_contract.interface_id == interface_id) return iface_contract;
+    }
+    return null;
+}
+
+pub fn interfaceIdForDecl(interface: manifest.InterfaceDecl) ?InterfaceId {
+    const iface_contract = contractFor(interface.name) orelse return null;
+    return iface_contract.interface_id;
+}
+
 pub fn validateInterface(interface: manifest.InterfaceDecl) Error!void {
     const iface_contract = contractFor(interface.name) orelse return error.UnknownInterface;
+    if (iface_contract.interface.version_major != interface.version_major) return error.UnsupportedInterfaceVersion;
+    if (interface.version_minor < iface_contract.interface.version_minor) return error.UnsupportedInterfaceVersion;
+}
+
+pub fn validateInterfaceId(interface_id: InterfaceId, interface: manifest.InterfaceDecl) Error!void {
+    const iface_contract = contractForId(interface_id) orelse return error.UnknownInterface;
+    if (!std.mem.eql(u8, iface_contract.interface.name, interface.name)) return error.UnknownInterface;
     if (iface_contract.interface.version_major != interface.version_major) return error.UnsupportedInterfaceVersion;
     if (interface.version_minor < iface_contract.interface.version_minor) return error.UnsupportedInterfaceVersion;
 }
@@ -435,6 +487,7 @@ fn buildServiceCatalogBindings() [service_binding_specs.len]ServiceCatalogBindin
     inline for (service_binding_specs, 0..) |spec, index| {
         entries[index] = .{
             .service = spec.service,
+            .interface_id = interfaceId(spec.interface),
             .interface = interfaceDecl(spec.interface),
             .coverage_requirement_id = spec.coverage_requirement_id,
         };
@@ -456,6 +509,7 @@ fn buildContracts() [interface_specs.len]InterfaceContract {
 
 fn buildContract(comptime spec: InterfaceSpec) InterfaceContract {
     var result = InterfaceContract{
+        .interface_id = spec.id,
         .interface = .{
             .name = spec.name,
             .version_major = spec.version_major,
@@ -562,6 +616,10 @@ test "component ABI schema emits manifest interfaces and service catalog binding
     try std.testing.expectEqualStrings("zigos.service.registry", interfaceDecl(.service_registry).name);
     try std.testing.expectEqualStrings("zigos.service.network.policy", interfaceForService(.network_stack).name);
     try std.testing.expectEqualStrings("zigos.object.workspace", interfaceForService(.storage_object).name);
+    try std.testing.expectEqual(InterfaceId.service_registry, interfaceId(.service_registry));
+    try std.testing.expectEqual(InterfaceId.object_workspace, interfaceIdForService(.storage_object));
+    try std.testing.expectEqual(InterfaceId.object_workspace, interfaceIdForDecl(interfaceForService(.storage_object)).?);
+    try std.testing.expectEqual(InterfaceId.service_registry, contractFor(interfaceForService(.service_registry).name).?.interface_id);
     try std.testing.expect(contractFor(interfaceForService(.service_registry).name).?.contract_hash != 0);
     try std.testing.expect(contractFor(interfaceForService(.sync_replication).name).?.contract_hash != 0);
     try std.testing.expectEqual(

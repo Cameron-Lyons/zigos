@@ -26,7 +26,7 @@ pub fn init() void {
     capturePciInventory();
     console.print("Bootstrap device inventory ready!\n");
 
-    if (config.shouldInitRuntimeExtras() or config.shouldInitAcpi()) {
+    if (config.shouldInitRuntimeExtras()) {
         console.print("Deferring optional device init after PCI inventory capture...\n");
     } else {
         console.print("PCI data planes remain unpublished until userspace driver claims.\n");

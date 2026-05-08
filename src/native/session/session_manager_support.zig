@@ -10,6 +10,7 @@ const permission_review_service = @import("../policy/permission_review_service.z
 const service_bootstrap = @import("service_bootstrap.zig");
 const policy_mediation = @import("../policy/policy_mediation.zig");
 const package_service = @import("../services/package_service.zig");
+const principal = @import("../core/principal.zig");
 const session_bootstrap = @import("session_bootstrap.zig");
 const service_contract = @import("service_contracts.zig");
 const supervisor_mod = @import("supervisor.zig");
@@ -55,6 +56,18 @@ pub const ServiceBindings = struct {
         return self.bindings[service_contract.orderedIndex(class).?];
     }
 };
+
+pub fn serviceOwner(state: *const BootstrapState, class: contract.ServiceClass) principal.PrincipalId {
+    return session_bootstrap.ownerForServiceClass(state.ids, class) orelse unreachable;
+}
+
+pub fn serviceRecord(state: *const BootstrapState, class: contract.ServiceClass) *supervisor_mod.ServiceRecord {
+    return session_bootstrap.serviceRecordForClass(state.services, class) orelse unreachable;
+}
+
+pub fn serviceId(state: *const BootstrapState, class: contract.ServiceClass) u64 {
+    return serviceRecord(state, class).id;
+}
 
 pub const Environment = struct {
     capability_table: *capability.CapabilityTable,

@@ -114,6 +114,37 @@ pub const BootstrapGrantKind = enum(u8) {
     service_task_authority,
 };
 
+pub const BootstrapOwnerKey = enum(u8) {
+    policy_authority,
+    session_service,
+    network_service,
+    compositor_service,
+    storage_service,
+    review_service,
+    package_service,
+    indexing_service,
+    sync_service,
+    media_service,
+    task_runtime_service,
+    compatibility_service,
+};
+
+pub const BootstrapServiceRecordKey = enum(u8) {
+    runtime_service_record,
+    service_registry,
+    policy_service,
+    session,
+    review_service_record,
+    compatibility_service,
+    network_service,
+    compositor_service,
+    storage_service,
+    package_service,
+    indexing_service,
+    sync_service,
+    media_service,
+};
+
 pub const BootstrapLaunch = struct {
     mode: BootstrapLaunchMode,
     budget: task_runtime.ResourceBudget,
@@ -125,6 +156,8 @@ pub const BootstrapLaunch = struct {
 
 pub const ServiceCatalogEntry = struct {
     class: ServiceClass,
+    owner_key: BootstrapOwnerKey,
+    service_record_key: BootstrapServiceRecordKey,
     boundary: ServiceBoundary,
     interface: manifest.InterfaceDecl,
     required_capabilities: []const RequiredCapability = &.{},
@@ -152,6 +185,7 @@ pub const ServiceDescriptor = struct {
 
 pub const ServiceContract = struct {
     class: ServiceClass,
+    interface_id: component_abi_schema.InterfaceId,
     interface: manifest.InterfaceDecl,
     driver_class: ?driver_service.DeviceClass = null,
     description: []const u8,
@@ -163,6 +197,7 @@ pub const ServiceContract = struct {
 
 pub const PublishedNativeServiceContract = struct {
     class: ServiceClass,
+    interface_id: component_abi_schema.InterfaceId,
     interface: manifest.InterfaceDecl,
     driver_class: ?driver_service.DeviceClass = null,
     description: []const u8,
@@ -190,6 +225,8 @@ fn catalogInterface(comptime class: ServiceClass) manifest.InterfaceDecl {
 pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .task_runtime,
+        .owner_key = .task_runtime_service,
+        .service_record_key = .runtime_service_record,
         .boundary = .userspace_service,
         .interface = catalogInterface(.task_runtime),
         .required_capabilities = &.{.service_bootstrap},
@@ -199,6 +236,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .session_manager,
+        .owner_key = .session_service,
+        .service_record_key = .session,
         .boundary = .userspace_service,
         .interface = catalogInterface(.session_manager),
         .required_capabilities = &.{ .service_bootstrap, .ui_session_surface },
@@ -232,6 +271,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .policy_mediation,
+        .owner_key = .policy_authority,
+        .service_record_key = .policy_service,
         .boundary = .userspace_service,
         .interface = catalogInterface(.policy_mediation),
         .required_capabilities = &.{ .service_bootstrap, .policy_authority },
@@ -260,6 +301,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .permission_review_ui,
+        .owner_key = .review_service,
+        .service_record_key = .review_service_record,
         .boundary = .userspace_service,
         .interface = catalogInterface(.permission_review_ui),
         .required_capabilities = &.{ .service_bootstrap, .permission_review, .ui_review_surface },
@@ -292,6 +335,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .service_registry,
+        .owner_key = .policy_authority,
+        .service_record_key = .service_registry,
         .boundary = .userspace_service,
         .interface = catalogInterface(.service_registry),
         .required_capabilities = &.{ .service_bootstrap, .endpoint_registry },
@@ -324,6 +369,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .network_stack,
+        .owner_key = .network_service,
+        .service_record_key = .network_service,
         .boundary = .userspace_service,
         .interface = catalogInterface(.network_stack),
         .required_capabilities = &.{ .service_bootstrap, .unrestricted_network, .device_authority },
@@ -353,6 +400,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .storage_object,
+        .owner_key = .storage_service,
+        .service_record_key = .storage_service,
         .boundary = .userspace_service,
         .interface = catalogInterface(.storage_object),
         .required_capabilities = &.{ .service_bootstrap, .object_store_authority, .device_authority },
@@ -382,6 +431,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .package_install_update,
+        .owner_key = .package_service,
+        .service_record_key = .package_service,
         .boundary = .userspace_service,
         .interface = catalogInterface(.package_install_update),
         .required_capabilities = &.{ .service_bootstrap, .metadata_storage, .named_peer_network },
@@ -410,6 +461,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .compositor_ui_session,
+        .owner_key = .compositor_service,
+        .service_record_key = .compositor_service,
         .boundary = .userspace_service,
         .interface = catalogInterface(.compositor_ui_session),
         .required_capabilities = &.{ .service_bootstrap, .ui_session_surface, .device_authority },
@@ -439,6 +492,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .indexing_search,
+        .owner_key = .indexing_service,
+        .service_record_key = .indexing_service,
         .boundary = .userspace_service,
         .interface = catalogInterface(.indexing_search),
         .required_capabilities = &.{ .service_bootstrap, .metadata_storage },
@@ -467,6 +522,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .sync_replication,
+        .owner_key = .sync_service,
+        .service_record_key = .sync_service,
         .boundary = .userspace_service,
         .interface = catalogInterface(.sync_replication),
         .required_capabilities = &.{ .service_bootstrap, .named_peer_network, .metadata_storage, .background_execution },
@@ -495,6 +552,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .media_print_helpers,
+        .owner_key = .media_service,
+        .service_record_key = .media_service,
         .boundary = .userspace_service,
         .interface = catalogInterface(.media_print_helpers),
         .required_capabilities = &.{ .service_bootstrap, .device_authority, .background_execution },
@@ -524,6 +583,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .compatibility_portal,
+        .owner_key = .compatibility_service,
+        .service_record_key = .compatibility_service,
         .boundary = .userspace_service,
         .interface = catalogInterface(.compatibility_portal),
         .required_capabilities = &.{ .service_bootstrap, .named_peer_network, .ui_review_surface },
@@ -573,6 +634,7 @@ pub const ordered_service_contracts = blk: {
 
             derived[count_out] = .{
                 .class = entry.class,
+                .interface_id = component_abi_schema.interfaceIdForService(@field(component_abi_schema.ServiceBinding, @tagName(entry.class))),
                 .interface = entry.interface,
                 .driver_class = entry.driver_class,
                 .description = entry.description,
@@ -599,6 +661,7 @@ pub const ordered_published_native_service_contracts = blk: {
         if (entry.published_native_service) {
             derived[index] = .{
                 .class = entry.class,
+                .interface_id = component_abi_schema.interfaceIdForService(@field(component_abi_schema.ServiceBinding, @tagName(entry.class))),
                 .interface = entry.interface,
                 .driver_class = entry.driver_class,
                 .description = entry.description,
@@ -650,6 +713,16 @@ pub fn bundleIdForServiceClass(class: ServiceClass) ?[]const u8 {
 pub fn bootstrapLaunchForClass(class: ServiceClass) ?BootstrapLaunch {
     const entry = entryForClass(class) orelse return null;
     return entry.service_bootstrap;
+}
+
+pub fn bootstrapOwnerKeyForClass(class: ServiceClass) ?BootstrapOwnerKey {
+    const entry = entryForClass(class) orelse return null;
+    return entry.owner_key;
+}
+
+pub fn bootstrapServiceRecordKeyForClass(class: ServiceClass) ?BootstrapServiceRecordKey {
+    const entry = entryForClass(class) orelse return null;
+    return entry.service_record_key;
 }
 
 pub fn rightsForBootstrapGrant(kind: BootstrapGrantKind) capability.CapabilityRights {
@@ -822,6 +895,9 @@ test "service catalog derives descriptors and bootstrap contracts from one sourc
     try std.testing.expect(allowsDriverClass(.network_stack, .network_adapter));
     try std.testing.expect(!allowsDriverClass(.policy_mediation, .network_adapter));
     try std.testing.expectEqual(BootstrapLaunchMode.native_direct, bootstrapLaunchForClass(.session_manager).?.mode);
+    try std.testing.expectEqual(BootstrapOwnerKey.storage_service, bootstrapOwnerKeyForClass(.storage_object).?);
+    try std.testing.expectEqual(BootstrapServiceRecordKey.storage_service, bootstrapServiceRecordKeyForClass(.storage_object).?);
+    try std.testing.expectEqual(component_abi_schema.InterfaceId.object_workspace, serviceContractForClass(.storage_object).?.interface_id);
 }
 
 test "service catalog interfaces remain unique and dependencies point at catalog entries" {

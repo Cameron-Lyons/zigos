@@ -58,7 +58,6 @@ const data_start_byte: usize = data_start_sector * sector_size;
 const data_capacity_bytes: usize = image_bytes - data_start_byte;
 const root_magic = "ZG4LOG1";
 const root_format_version: u16 = 2;
-const max_workspace_state_bytes: usize = 64 * 1024;
 const max_replay_log_records: u16 = 128;
 const max_log_segments: u16 = 16;
 const compaction_threshold_bytes: u32 = @intCast((data_capacity_bytes * 3) / 4);
@@ -90,7 +89,6 @@ pub const Volume = struct {
     io_payload_buffer: [max_payload_bytes]u8 = undefined,
     io_log_buffer: [data_capacity_bytes]u8 = undefined,
     sector_buffer: [sector_size]u8 = [_]u8{0} ** sector_size,
-    workspace_state_buffer: [max_workspace_state_bytes]u8 = undefined,
     attached_backend_present: bool = false,
     attached_backend_sector_count: u64 = 0,
     attached_backend_read: *const fn (u64, [*]u8, usize) callconv(.c) bool = unattachedRead,
@@ -497,9 +495,32 @@ fn findWorkspaceSummary(root: RootState, workspace_id: u64) ?WorkspaceSummary {
 }
 
 fn workspaceStateHash(self: *Volume, record: *const workspace.WorkspaceRecord) Error!u64 {
-    var writer = CursorWriter{ .buffer = self.workspace_state_buffer[0..] };
-    try encodeWorkspaceBody(&writer, record.*);
-    return checksumBytes(self.workspace_state_buffer[0..writer.offset]);
+    _ = self;
+    var hash = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = hashBytes(hash, "workspace-state/v4");
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.id.raw());
+    hash = hashPrincipal(hash, record.owner);
+    hash = hashBytes(hash, record.labelSlice());
+    hash = native_util.fnv1a64AppendU32LittleEndian(hash, record.generation);
+    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.path_index.entry_count));
+    hash = hashBytes(hash, &record.path_index.root_address);
+
+    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.mutation_log.entry_mutation_count));
+    for (record.mutation_log.entry_mutations[0..record.mutation_log.entry_mutation_count]) |mutation| {
+        hash = native_util.fnv1a64AppendU32LittleEndian(hash, mutation.generation);
+        hash = hashEntry(hash, mutation.entry);
+    }
+
+    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.share_table.share_grant_count));
+    for (record.share_table.share_grants[0..record.share_table.share_grant_count]) |grant| {
+        hash = hashShareGrant(hash, grant);
+    }
+
+    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.recoverable_deletes.deleted_count));
+    for (record.recoverable_deletes.deleted_entries[0..record.recoverable_deletes.deleted_count]) |entry| {
+        hash = hashEntry(hash, entry);
+    }
+    return hash;
 }
 
 fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, log: []const u8, root: RootState) Error!void {
@@ -711,21 +732,21 @@ fn encodeWorkspaceBody(writer: *CursorWriter, record: workspace.WorkspaceRecord)
     try writePrincipal(writer, record.owner);
     try writeText(writer, record.labelSlice());
     try writer.writeU32(record.generation);
-    try writer.writeU16(@intCast(record.entry_count));
-    for (record.entries[0..record.entry_count]) |entry| {
+    try writer.writeU16(@intCast(record.path_index.entry_count));
+    for (record.path_index.entries[0..record.path_index.entry_count]) |entry| {
         try writeEntry(writer, entry);
     }
-    try writer.writeU16(@intCast(record.entry_mutation_count));
-    for (record.entry_mutations[0..record.entry_mutation_count]) |mutation| {
+    try writer.writeU16(@intCast(record.mutation_log.entry_mutation_count));
+    for (record.mutation_log.entry_mutations[0..record.mutation_log.entry_mutation_count]) |mutation| {
         try writer.writeU32(mutation.generation);
         try writeEntry(writer, mutation.entry);
     }
-    try writer.writeU16(@intCast(record.share_grant_count));
-    for (record.share_grants[0..record.share_grant_count]) |grant| {
+    try writer.writeU16(@intCast(record.share_table.share_grant_count));
+    for (record.share_table.share_grants[0..record.share_table.share_grant_count]) |grant| {
         try writeShareGrant(writer, grant);
     }
-    try writer.writeU16(@intCast(record.deleted_count));
-    for (record.deleted_entries[0..record.deleted_count]) |entry| {
+    try writer.writeU16(@intCast(record.recoverable_deletes.deleted_count));
+    for (record.recoverable_deletes.deleted_entries[0..record.recoverable_deletes.deleted_count]) |entry| {
         try writeEntry(writer, entry);
     }
 }
@@ -840,28 +861,28 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
     slot.workspace.owner = try readPrincipal(&reader);
     readTextInto(&reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
     slot.workspace.generation = try reader.readU32();
-    slot.workspace.entry_count = @intCast(try reader.readU16());
-    if (slot.workspace.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
-    for (0..slot.workspace.entry_count) |entry_index| {
-        slot.workspace.entries[entry_index] = try readEntry(&reader);
+    slot.workspace.path_index.entry_count = @intCast(try reader.readU16());
+    if (slot.workspace.path_index.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
+    for (0..slot.workspace.path_index.entry_count) |entry_index| {
+        slot.workspace.path_index.entries[entry_index] = try readEntry(&reader);
     }
-    slot.workspace.entry_mutation_count = @intCast(try reader.readU16());
-    if (slot.workspace.entry_mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
-    for (0..slot.workspace.entry_mutation_count) |mutation_index| {
-        slot.workspace.entry_mutations[mutation_index] = .{
+    slot.workspace.mutation_log.entry_mutation_count = @intCast(try reader.readU16());
+    if (slot.workspace.mutation_log.entry_mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
+    for (0..slot.workspace.mutation_log.entry_mutation_count) |mutation_index| {
+        slot.workspace.mutation_log.entry_mutations[mutation_index] = .{
             .generation = try reader.readU32(),
             .entry = try readEntry(&reader),
         };
     }
-    slot.workspace.share_grant_count = @intCast(try reader.readU16());
-    if (slot.workspace.share_grant_count > workspace.MAX_SHARE_GRANTS) return error.CorruptImage;
-    for (0..slot.workspace.share_grant_count) |grant_index| {
-        slot.workspace.share_grants[grant_index] = try readShareGrant(&reader);
+    slot.workspace.share_table.share_grant_count = @intCast(try reader.readU16());
+    if (slot.workspace.share_table.share_grant_count > workspace.MAX_SHARE_GRANTS) return error.CorruptImage;
+    for (0..slot.workspace.share_table.share_grant_count) |grant_index| {
+        slot.workspace.share_table.share_grants[grant_index] = try readShareGrant(&reader);
     }
-    slot.workspace.deleted_count = @intCast(try reader.readU16());
-    if (slot.workspace.deleted_count > workspace.MAX_RECOVERABLE_DELETES) return error.CorruptImage;
-    for (0..slot.workspace.deleted_count) |entry_index| {
-        slot.workspace.deleted_entries[entry_index] = try readEntry(&reader);
+    slot.workspace.recoverable_deletes.deleted_count = @intCast(try reader.readU16());
+    if (slot.workspace.recoverable_deletes.deleted_count > workspace.MAX_RECOVERABLE_DELETES) return error.CorruptImage;
+    for (0..slot.workspace.recoverable_deletes.deleted_count) |entry_index| {
+        slot.workspace.recoverable_deletes.deleted_entries[entry_index] = try readEntry(&reader);
     }
 }
 
@@ -968,21 +989,21 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
         try writePrincipal(&writer, slot.workspace.owner);
         try writeText(&writer, slot.workspace.labelSlice());
         try writer.writeU32(slot.workspace.generation);
-        try writer.writeU16(@intCast(slot.workspace.entry_count));
-        for (slot.workspace.entries[0..slot.workspace.entry_count]) |entry| {
+        try writer.writeU16(@intCast(slot.workspace.path_index.entry_count));
+        for (slot.workspace.path_index.entries[0..slot.workspace.path_index.entry_count]) |entry| {
             try writeEntry(&writer, entry);
         }
-        try writer.writeU16(@intCast(slot.workspace.entry_mutation_count));
-        for (slot.workspace.entry_mutations[0..slot.workspace.entry_mutation_count]) |mutation| {
+        try writer.writeU16(@intCast(slot.workspace.mutation_log.entry_mutation_count));
+        for (slot.workspace.mutation_log.entry_mutations[0..slot.workspace.mutation_log.entry_mutation_count]) |mutation| {
             try writer.writeU32(mutation.generation);
             try writeEntry(&writer, mutation.entry);
         }
-        try writer.writeU16(@intCast(slot.workspace.share_grant_count));
-        for (slot.workspace.share_grants[0..slot.workspace.share_grant_count]) |grant| {
+        try writer.writeU16(@intCast(slot.workspace.share_table.share_grant_count));
+        for (slot.workspace.share_table.share_grants[0..slot.workspace.share_table.share_grant_count]) |grant| {
             try writeShareGrant(&writer, grant);
         }
-        try writer.writeU16(@intCast(slot.workspace.deleted_count));
-        for (slot.workspace.deleted_entries[0..slot.workspace.deleted_count]) |entry| {
+        try writer.writeU16(@intCast(slot.workspace.recoverable_deletes.deleted_count));
+        for (slot.workspace.recoverable_deletes.deleted_entries[0..slot.workspace.recoverable_deletes.deleted_count]) |entry| {
             try writeEntry(&writer, entry);
         }
     }
@@ -1098,28 +1119,28 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
         slot.workspace.owner = try readPrincipal(&reader);
         readTextInto(&reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
         slot.workspace.generation = try reader.readU32();
-        slot.workspace.entry_count = @intCast(try reader.readU16());
-        if (slot.workspace.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
-        for (0..slot.workspace.entry_count) |entry_index| {
-            slot.workspace.entries[entry_index] = try readEntry(&reader);
+        slot.workspace.path_index.entry_count = @intCast(try reader.readU16());
+        if (slot.workspace.path_index.entry_count > workspace.MAX_WORKSPACE_ENTRIES) return error.CorruptImage;
+        for (0..slot.workspace.path_index.entry_count) |entry_index| {
+            slot.workspace.path_index.entries[entry_index] = try readEntry(&reader);
         }
-        slot.workspace.entry_mutation_count = @intCast(try reader.readU16());
-        if (slot.workspace.entry_mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
-        for (0..slot.workspace.entry_mutation_count) |mutation_index| {
-            slot.workspace.entry_mutations[mutation_index] = .{
+        slot.workspace.mutation_log.entry_mutation_count = @intCast(try reader.readU16());
+        if (slot.workspace.mutation_log.entry_mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
+        for (0..slot.workspace.mutation_log.entry_mutation_count) |mutation_index| {
+            slot.workspace.mutation_log.entry_mutations[mutation_index] = .{
                 .generation = try reader.readU32(),
                 .entry = try readEntry(&reader),
             };
         }
-        slot.workspace.share_grant_count = @intCast(try reader.readU16());
-        if (slot.workspace.share_grant_count > workspace.MAX_SHARE_GRANTS) return error.CorruptImage;
-        for (0..slot.workspace.share_grant_count) |grant_index| {
-            slot.workspace.share_grants[grant_index] = try readShareGrant(&reader);
+        slot.workspace.share_table.share_grant_count = @intCast(try reader.readU16());
+        if (slot.workspace.share_table.share_grant_count > workspace.MAX_SHARE_GRANTS) return error.CorruptImage;
+        for (0..slot.workspace.share_table.share_grant_count) |grant_index| {
+            slot.workspace.share_table.share_grants[grant_index] = try readShareGrant(&reader);
         }
-        slot.workspace.deleted_count = @intCast(try reader.readU16());
-        if (slot.workspace.deleted_count > workspace.MAX_RECOVERABLE_DELETES) return error.CorruptImage;
-        for (0..slot.workspace.deleted_count) |entry_index| {
-            slot.workspace.deleted_entries[entry_index] = try readEntry(&reader);
+        slot.workspace.recoverable_deletes.deleted_count = @intCast(try reader.readU16());
+        if (slot.workspace.recoverable_deletes.deleted_count > workspace.MAX_RECOVERABLE_DELETES) return error.CorruptImage;
+        for (0..slot.workspace.recoverable_deletes.deleted_count) |entry_index| {
+            slot.workspace.recoverable_deletes.deleted_entries[entry_index] = try readEntry(&reader);
         }
     }
 
@@ -1341,10 +1362,10 @@ fn snapshotCount(workspaces: *const workspace.Directory) usize {
 fn persistableWorkspaceSlot(slot: anytype) bool {
     if (!slot.in_use) return false;
     return slot.workspace.label_len <= slot.workspace.label.len and
-        slot.workspace.entry_count <= workspace.MAX_WORKSPACE_ENTRIES and
-        slot.workspace.entry_mutation_count <= workspace.MAX_WORKSPACE_ENTRY_MUTATIONS and
-        slot.workspace.share_grant_count <= workspace.MAX_SHARE_GRANTS and
-        slot.workspace.deleted_count <= workspace.MAX_RECOVERABLE_DELETES;
+        slot.workspace.path_index.entry_count <= workspace.MAX_WORKSPACE_ENTRIES and
+        slot.workspace.mutation_log.entry_mutation_count <= workspace.MAX_WORKSPACE_ENTRY_MUTATIONS and
+        slot.workspace.share_table.share_grant_count <= workspace.MAX_SHARE_GRANTS and
+        slot.workspace.recoverable_deletes.deleted_count <= workspace.MAX_RECOVERABLE_DELETES;
 }
 
 fn persistableSnapshotSlot(slot: anytype) bool {
@@ -1363,6 +1384,39 @@ fn zeroWorkspaceRecord() workspace.WorkspaceRecord {
 
 fn zeroSnapshotRecord() workspace.SnapshotRecord {
     return workspace.emptySnapshotRecord();
+}
+
+fn hashBytes(hash: u64, bytes: []const u8) u64 {
+    var next = native_util.fnv1a64AppendU32LittleEndian(hash, @intCast(bytes.len));
+    next = native_util.fnv1a64WithSeed(next, bytes);
+    return next;
+}
+
+fn hashPrincipal(hash: u64, id: principal.PrincipalId) u64 {
+    var next = native_util.fnv1a64AppendByte(hash, @intFromEnum(id.kind));
+    next = native_util.fnv1a64AppendU64LittleEndian(next, id.serial);
+    return next;
+}
+
+fn hashEntry(hash: u64, entry: workspace.Entry) u64 {
+    var next = hashBytes(hash, entry.pathSlice());
+    next = native_util.fnv1a64AppendU64LittleEndian(next, entry.object_id.raw());
+    next = native_util.fnv1a64AppendU64LittleEndian(next, entry.version_id.raw());
+    next = native_util.fnv1a64AppendByte(next, @intFromEnum(entry.object_type));
+    return next;
+}
+
+fn hashShareGrant(hash: u64, grant: workspace.ShareGrant) u64 {
+    var next = hashPrincipal(hash, grant.principal_id);
+    next = native_util.fnv1a64AppendByte(next, @intFromBool(grant.can_read));
+    next = native_util.fnv1a64AppendByte(next, @intFromBool(grant.can_write));
+    next = native_util.fnv1a64AppendByte(next, @intFromBool(grant.can_admin));
+    next = native_util.fnv1a64AppendByte(next, @intFromBool(grant.can_export));
+    next = native_util.fnv1a64AppendByte(next, @intFromEnum(grant.network_scope));
+    next = native_util.fnv1a64AppendByte(next, @intFromEnum(grant.reshare_policy));
+    next = native_util.fnv1a64AppendByte(next, @intFromEnum(grant.audit_visibility));
+    next = native_util.fnv1a64AppendU64LittleEndian(next, grant.expires_at_ticks);
+    return next;
 }
 
 fn checksumBytes(bytes: []const u8) u64 {

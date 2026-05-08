@@ -1,4 +1,5 @@
 const builtin = @import("builtin");
+const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/common.zig")
@@ -9,6 +10,7 @@ else
 const contract = @import("contract.zig");
 const principal = @import("../core/principal.zig");
 const capability = @import("../kernel_api/capability.zig");
+const service_catalog = @import("service_catalog.zig");
 const supervisor_mod = @import("supervisor.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service = @import("../task/task_runtime_service.zig");
@@ -51,7 +53,6 @@ pub const CoreServices = struct {
 pub const Error = userspace_boot_registry.Error || supervisor_mod.Error;
 
 const boot_health_tick: u64 = 0;
-const core_service_count: usize = @typeInfo(CoreServices).@"struct".fields.len;
 
 pub fn principals() Principals {
     return .{
@@ -108,7 +109,8 @@ pub fn registerCoreServices(
 
     runtime_service.bind(services.runtime_service_record.id, ids.task_runtime_service);
 
-    for (coreServiceRecords(&services)) |service| {
+    for (service_catalog.catalog) |entry| {
+        const service = serviceRecordForClass(services, entry.class) orelse unreachable;
         _ = supervisor.markHealthy(service.id, boot_health_tick);
     }
 
@@ -123,20 +125,68 @@ pub fn registerCoreServices(
     return services;
 }
 
-fn coreServiceRecords(services: *const CoreServices) [core_service_count]*supervisor_mod.ServiceRecord {
-    return .{
-        services.runtime_service_record,
-        services.service_registry,
-        services.policy_service,
-        services.session,
-        services.review_service_record,
-        services.compatibility_service,
-        services.network_service,
-        services.compositor_service,
-        services.storage_service,
-        services.package_service,
-        services.indexing_service,
-        services.sync_service,
-        services.media_service,
+pub fn ownerForServiceClass(ids: Principals, class: contract.ServiceClass) ?principal.PrincipalId {
+    const owner_key = service_catalog.bootstrapOwnerKeyForClass(class) orelse return null;
+    return principalForOwnerKey(ids, owner_key);
+}
+
+pub fn serviceRecordForClass(services: CoreServices, class: contract.ServiceClass) ?*supervisor_mod.ServiceRecord {
+    const record_key = service_catalog.bootstrapServiceRecordKeyForClass(class) orelse return null;
+    return serviceRecordForKey(services, record_key);
+}
+
+pub fn serviceIdForClass(services: CoreServices, class: contract.ServiceClass) ?u64 {
+    const service = serviceRecordForClass(services, class) orelse return null;
+    return service.id;
+}
+
+fn principalForOwnerKey(ids: Principals, owner_key: service_catalog.BootstrapOwnerKey) principal.PrincipalId {
+    return switch (owner_key) {
+        .policy_authority => ids.policy_authority,
+        .session_service => ids.session_service,
+        .network_service => ids.network_service,
+        .compositor_service => ids.compositor_service,
+        .storage_service => ids.storage_service,
+        .review_service => ids.review_service,
+        .package_service => ids.package_service,
+        .indexing_service => ids.indexing_service,
+        .sync_service => ids.sync_service,
+        .media_service => ids.media_service,
+        .task_runtime_service => ids.task_runtime_service,
+        .compatibility_service => ids.compatibility_service,
     };
+}
+
+fn serviceRecordForKey(services: CoreServices, record_key: service_catalog.BootstrapServiceRecordKey) *supervisor_mod.ServiceRecord {
+    return switch (record_key) {
+        .runtime_service_record => services.runtime_service_record,
+        .service_registry => services.service_registry,
+        .policy_service => services.policy_service,
+        .session => services.session,
+        .review_service_record => services.review_service_record,
+        .compatibility_service => services.compatibility_service,
+        .network_service => services.network_service,
+        .compositor_service => services.compositor_service,
+        .storage_service => services.storage_service,
+        .package_service => services.package_service,
+        .indexing_service => services.indexing_service,
+        .sync_service => services.sync_service,
+        .media_service => services.media_service,
+    };
+}
+
+test "bootstrap service ownership and service records resolve from service catalog wiring" {
+    var runtime = task_runtime.Runtime.init();
+    var runtime_service = task_runtime_service.Service.init(&runtime);
+    var supervisor = supervisor_mod.Supervisor.init();
+    const ids = principals();
+    const services = try registerCoreServices(&supervisor, &runtime_service, ids);
+
+    try std.testing.expectEqual(ids.storage_service, ownerForServiceClass(ids, .storage_object).?);
+    try std.testing.expectEqual(services.storage_service.id, serviceIdForClass(services, .storage_object).?);
+    for (service_catalog.catalog) |entry| {
+        const owner = ownerForServiceClass(ids, entry.class) orelse return error.TestUnexpectedResult;
+        const service = serviceRecordForClass(services, entry.class) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(owner, service.owner);
+    }
 }

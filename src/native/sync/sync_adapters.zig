@@ -1,5 +1,7 @@
 const std = @import("std");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
+const native_util = @import("../core/util.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
@@ -294,9 +296,16 @@ const TransportFrameSlot = struct {
     frame: TransportFrame = .{},
 };
 
+const TRANSPORT_FRAME_INDEX_CAPACITY: usize = MAX_TRANSPORT_FRAMES * 2;
+const TransportFrameArena = indexed_arena.IndexedArenaWithKey(u64, TransportFrameSlot, MAX_TRANSPORT_FRAMES, TRANSPORT_FRAME_INDEX_CAPACITY, transportFrameSlotId);
+const TransportFrameTargetIndex = indexed_arena.MultimapIndex(MAX_TRANSPORT_FRAMES, MAX_TRANSPORT_FRAMES, TRANSPORT_FRAME_INDEX_CAPACITY);
+const TransportFramePathIndex = indexed_arena.MultimapIndex(MAX_TRANSPORT_FRAMES, MAX_TRANSPORT_FRAMES, TRANSPORT_FRAME_INDEX_CAPACITY);
+
 pub const TransportQueue = struct {
     next_frame_id: u64 = 1,
-    frames: [MAX_TRANSPORT_FRAMES]TransportFrameSlot = [_]TransportFrameSlot{TransportFrameSlot{}} ** MAX_TRANSPORT_FRAMES,
+    frames: TransportFrameArena = TransportFrameArena.init(),
+    target_index: TransportFrameTargetIndex = TransportFrameTargetIndex.init(),
+    path_index: TransportFramePathIndex = TransportFramePathIndex.init(),
 
     pub fn init() TransportQueue {
         return .{};
@@ -307,9 +316,11 @@ pub const TransportQueue = struct {
     }
 
     pub fn enqueue(self: *TransportQueue, request: QueueFrameRequest) Error!TransportFrame {
-        const slot = self.allocateSlot() orelse return error.TransportQueueFull;
+        const frame_id = self.nextFrameId();
+        const slot_index = self.frames.reserveIndex(frame_id) orelse return error.TransportQueueFull;
+        const slot = &self.frames.slots[slot_index];
         var frame = TransportFrame{
-            .id = self.nextFrameId(),
+            .id = frame_id,
             .workspace_id = request.workspace_id,
             .object_id = request.object_id,
             .version_id = request.version_id,
@@ -320,26 +331,34 @@ pub const TransportQueue = struct {
             .encrypted = request.encrypted,
         };
         frame.path_len = copyPath(&frame.path, request.path);
-        slot.in_use = true;
         slot.frame = frame;
+        if (!self.target_index.append(transportFrameTargetKey(frame.workspace_id, frame.target_device), slot_index)) {
+            _ = self.frames.removeIndex(slot_index);
+            return error.TransportQueueFull;
+        }
+        if (!self.path_index.append(transportFramePathKey(frame.workspace_id, frame.target_device, frame.pathSlice()), slot_index)) {
+            _ = self.target_index.remove(transportFrameTargetKey(frame.workspace_id, frame.target_device), slot_index);
+            _ = self.frames.removeIndex(slot_index);
+            return error.TransportQueueFull;
+        }
         return slot.frame;
     }
 
     pub fn count(self: *const TransportQueue) usize {
-        var total: usize = 0;
-        for (self.frames) |slot| {
-            if (slot.in_use) total += 1;
-        }
-        return total;
+        return self.frames.countInUse();
     }
 
     pub fn countFor(self: *const TransportQueue, workspace_id: u64, target_device: principal.PrincipalId) usize {
         var total: usize = 0;
-        for (self.frames) |slot| {
-            if (!slot.in_use) continue;
+        var slot_index = self.target_index.head(transportFrameTargetKey(workspace_id, target_device));
+        while (slot_index != indexed_arena.no_index) {
+            if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("transport target index points outside frame slots");
+            const slot = &self.frames.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("transport target index points at a free frame");
             if (slot.frame.workspace_id == workspace_id and slot.frame.target_device.eql(target_device)) {
                 total += 1;
             }
+            slot_index = self.target_index.next(slot_index);
         }
         return total;
     }
@@ -350,24 +369,22 @@ pub const TransportQueue = struct {
         target_device: principal.PrincipalId,
         path: []const u8,
     ) ?TransportFrame {
-        var index = self.frames.len;
-        while (index > 0) {
-            index -= 1;
-            const slot = self.frames[index];
-            if (!slot.in_use) continue;
-            if (slot.frame.workspace_id != workspace_id) continue;
-            if (!slot.frame.target_device.eql(target_device)) continue;
-            if (!std.mem.eql(u8, slot.frame.pathSlice(), path)) continue;
-            return slot.frame;
+        var latest: ?TransportFrame = null;
+        var slot_index = self.path_index.head(transportFramePathKey(workspace_id, target_device, path));
+        while (slot_index != indexed_arena.no_index) {
+            if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("transport path index points outside frame slots");
+            const slot = &self.frames.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("transport path index points at a free frame");
+            if (slot.frame.workspace_id == workspace_id and
+                slot.frame.target_device.eql(target_device) and
+                std.mem.eql(u8, slot.frame.pathSlice(), path) and
+                (latest == null or slot.frame.id > latest.?.id))
+            {
+                latest = slot.frame;
+            }
+            slot_index = self.path_index.next(slot_index);
         }
-        return null;
-    }
-
-    fn allocateSlot(self: *TransportQueue) ?*TransportFrameSlot {
-        for (&self.frames) |*slot| {
-            if (!slot.in_use) return slot;
-        }
-        return null;
+        return latest;
     }
 
     fn nextFrameId(self: *TransportQueue) u64 {
@@ -375,6 +392,24 @@ pub const TransportQueue = struct {
         return self.next_frame_id;
     }
 };
+
+fn transportFrameSlotId(slot: *const TransportFrameSlot) u64 {
+    return slot.frame.id;
+}
+
+fn transportFrameTargetKey(workspace_id: u64, target_device: principal.PrincipalId) u64 {
+    var hash = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
+    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(target_device.kind));
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, target_device.serial);
+    return indexed_arena.nonZeroKey(hash);
+}
+
+fn transportFramePathKey(workspace_id: u64, target_device: principal.PrincipalId, path: []const u8) u64 {
+    var hash = transportFrameTargetKey(workspace_id, target_device);
+    hash = native_util.fnv1a64WithSeed(hash, path);
+    return indexed_arena.nonZeroKey(hash);
+}
 
 pub const DefaultMergeableDocumentAdapter = struct {
     pub fn adapter() MergeableDocumentAdapter {
@@ -458,7 +493,7 @@ pub const DefaultDatabaseSyncAdapter = struct {
         _ = request.to_device;
         if (request.contract.workspace_id != request.workspace_id) return error.InvalidContractSignature;
         var message_buffer: [160]u8 = undefined;
-        const message = databaseContractMessage(
+        const message = state_support.databaseContractMessage(
             &message_buffer,
             request.contract.workspace_id,
             request.contract.bundleIdSlice(),
@@ -556,15 +591,6 @@ fn applyDelete(operation: DocumentOperation, output: []u8, current_len: usize) E
         output[index - removed] = output[index];
     }
     return current_len - removed;
-}
-
-fn databaseContractMessage(
-    buffer: []u8,
-    workspace_id: u64,
-    bundle_id: []const u8,
-    label: []const u8,
-) error{NoSpaceLeft}![]const u8 {
-    return std.fmt.bufPrint(buffer, "db-contract:{d}:{s}:{s}", .{ workspace_id, bundle_id, label }) catch error.NoSpaceLeft;
 }
 
 test "mergeable document adapter applies deterministic CRDT operations and rejects undersized buffers" {
@@ -687,10 +713,34 @@ test "transport queue records encrypted semantic replication frames" {
         .encrypted = true,
         .path = "secrets/token",
     });
+    const latest_frame = try queue.enqueue(.{
+        .workspace_id = 42,
+        .object_id = 82,
+        .version_id = 83,
+        .source_device = .{ .kind = .device, .serial = 1 },
+        .target_device = .{ .kind = .device, .serial = 2 },
+        .transport = .relay_assisted,
+        .semantic = .secure_transfer,
+        .encrypted = true,
+        .path = "secrets/token",
+    });
+    _ = try queue.enqueue(.{
+        .workspace_id = 42,
+        .object_id = 84,
+        .version_id = 85,
+        .source_device = .{ .kind = .device, .serial = 1 },
+        .target_device = .{ .kind = .device, .serial = 3 },
+        .transport = .device_to_device,
+        .semantic = .mergeable_crdt,
+        .encrypted = true,
+        .path = "secrets/token",
+    });
 
     try std.testing.expectEqual(@as(u64, 1), frame.id);
     try std.testing.expect(frame.encrypted);
     try std.testing.expectEqual(state_support.SyncSemantic.secure_transfer, frame.semantic);
-    try std.testing.expectEqual(@as(usize, 1), queue.countFor(42, .{ .kind = .device, .serial = 2 }));
-    try std.testing.expectEqualStrings("secrets/token", queue.latestForPath(42, .{ .kind = .device, .serial = 2 }, "secrets/token").?.pathSlice());
+    try std.testing.expectEqual(@as(usize, 2), queue.countFor(42, .{ .kind = .device, .serial = 2 }));
+    const latest = queue.latestForPath(42, .{ .kind = .device, .serial = 2 }, "secrets/token").?;
+    try std.testing.expectEqual(latest_frame.id, latest.id);
+    try std.testing.expectEqualStrings("secrets/token", latest.pathSlice());
 }
