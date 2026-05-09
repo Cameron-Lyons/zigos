@@ -72,6 +72,21 @@ pub const ActivationResult = struct {
     rolled_back: bool,
 };
 
+pub const BootSelection = struct {
+    slot_index: u8,
+    object_id: u64,
+    version_id: u64,
+    activation_generation: u64,
+    rollback_generation: u64,
+    measurement: object_store.BlobAddress,
+    signer_len: usize,
+    signer: [MAX_LABEL_BYTES]u8,
+
+    pub fn signerSlice(self: *const BootSelection) []const u8 {
+        return self.signer[0..self.signer_len];
+    }
+};
+
 pub const Error = anyerror;
 
 pub const Manager = struct {
@@ -258,6 +273,21 @@ pub const Manager = struct {
         return std.mem.eql(u8, &version.blob_address, &image.measurement);
     }
 
+    pub fn selectVerifiedBootImage(self: *const Manager) Error!BootSelection {
+        const image = self.activeImage() orelse return error.ImageNotPresent;
+        if (!self.verifySlot(image.slot_index)) return error.ImageVerificationFailed;
+        return .{
+            .slot_index = image.slot_index,
+            .object_id = image.object_id,
+            .version_id = image.version_id,
+            .activation_generation = self.activation_generation,
+            .rollback_generation = self.rollback_generation,
+            .measurement = image.measurement,
+            .signer_len = image.signer_len,
+            .signer = image.signer,
+        };
+    }
+
     fn persist(self: *Manager, tick: u64) Error!void {
         var payload: [512]u8 = undefined;
         const encoded = try self.encode(payload[0..]);
@@ -440,6 +470,10 @@ test "immutable base persists signed read-only image activation and rollback met
     try std.testing.expect(!activated.rolled_back);
     try std.testing.expectEqual(@as(?usize, 1), activated.active_slot);
     try std.testing.expect(manager.verifyActiveImage());
+    const selected = try manager.selectVerifiedBootImage();
+    try std.testing.expectEqual(@as(u8, 1), selected.slot_index);
+    try std.testing.expectEqual(manager.activeImage().?.version_id, selected.version_id);
+    try std.testing.expectEqualStrings("platform-image", selected.signerSlice());
 
     var restarted_storage = storage_service.Service.initWithStore(901, 42, owner, &storage_checkpoint_store);
     var restarted = try Manager.init(&restarted_storage, owner, state_signer);
@@ -447,6 +481,7 @@ test "immutable base persists signed read-only image activation and rollback met
     try std.testing.expectEqual(@as(u8, 1), restarted.active_slot);
     try std.testing.expectEqual(@as(u64, 1), restarted.rollback_generation);
     try std.testing.expect(restarted.verifyActiveImage());
+    try std.testing.expectEqual(@as(u8, 1), (try restarted.selectVerifiedBootImage()).slot_index);
 
     storage_checkpoint_store.resetPersistent();
 }
@@ -483,6 +518,7 @@ test "immutable base verification rejects mutable signer and measurement tamperi
 
     manager.slots[0].signer[0] = 'x';
     try std.testing.expect(!manager.verifyActiveImage());
+    try std.testing.expectError(error.ImageVerificationFailed, manager.selectVerifiedBootImage());
 
     storage_checkpoint_store.resetPersistent();
 }

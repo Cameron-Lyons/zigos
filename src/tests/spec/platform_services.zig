@@ -21,13 +21,26 @@ const task_runtime = @import("../../native/task/task_runtime.zig");
 
 pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     var recorder = measured_boot.Recorder.init();
+    var artifact_manifest = measured_boot.ArtifactManifest.init(21);
     recorder.begin(21);
+    try artifact_manifest.add(.kernel, "kernel-zigos", "kernel=v3");
     try recorder.add(.kernel, "kernel-zigos", "kernel=v3");
+    try artifact_manifest.add(.base_image, "stable-b", "image=v3");
     try recorder.add(.base_image, "stable-b", "image=v3");
+    try artifact_manifest.add(.critical_service, "policy", "healthy");
+    try recorder.add(.critical_service, "policy", "healthy");
+    try artifact_manifest.add(.critical_service, "storage", "healthy");
     try recorder.add(.critical_service, "storage", "healthy");
+    try artifact_manifest.add(.critical_service, "compositor", "healthy");
+    try recorder.add(.critical_service, "compositor", "healthy");
+    try artifact_manifest.add(.critical_service, "network", "healthy");
+    try recorder.add(.critical_service, "network", "healthy");
+    try artifact_manifest.add(.policy, "org-defaults", "strict");
     try recorder.add(.policy, "org-defaults", "strict");
+    try artifact_manifest.add(.driver_set, "signed-drivers", "gpu+npu+net");
     try recorder.add(.driver_set, "signed-drivers", "gpu+npu+net");
-    const boot = recorder.finalize();
+    var boot = recorder.finalize();
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .emulator_provided);
 
     var checkpoint_store = storage_service.CheckpointStore{};
     checkpoint_store.resetPersistent();

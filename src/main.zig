@@ -38,6 +38,12 @@ pub fn bootloaderMeasurementDigest() [32]u8 {
     return crypto_hash.finalize(&hasher);
 }
 
+pub fn bootloaderSourceDigest() [32]u8 {
+    var hasher = crypto_hash.init();
+    hasher.update(@embedFile("boot/boot64.S"));
+    return crypto_hash.finalize(&hasher);
+}
+
 pub fn kernelImageDigest() [32]u8 {
     const start = @intFromPtr(&__kernel_measure_start);
     const end = @intFromPtr(&__kernel_measure_end);

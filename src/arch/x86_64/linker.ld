@@ -18,6 +18,13 @@ SECTIONS
     }
     __kernel_measure_end = .;
 
+    /* Userspace ELF bytes are covered by the signed build artifact manifest. */
+    .zigos_userspace_archive : ALIGN(4K)
+    {
+        *(.zigos_userspace_archive)
+        *(.zigos_userspace_archive.*)
+    }
+
     .data : ALIGN(4K)
     {
         *(.data)

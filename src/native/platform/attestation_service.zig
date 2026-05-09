@@ -32,6 +32,8 @@ pub const Statement = struct {
     root_label_len: usize,
     root_label: [MAX_ROOT_LABEL_BYTES]u8,
     root_digest: [32]u8,
+    root_provenance: measured_boot.RootProvenance,
+    manifest_verified: bool,
     signature: manifest.Signature,
 
     pub fn remotePartySlice(self: *const Statement) []const u8 {
@@ -47,12 +49,21 @@ pub const Statement = struct {
     }
 };
 
+pub const VerificationExpectation = struct {
+    boot: *const measured_boot.BootRecord,
+    remote_party: []const u8,
+    nonce: []const u8,
+    user_visible: bool,
+    key_origin: ?KeyOrigin = null,
+};
+
 pub const Error = error{
     NonceTooLong,
     RemotePartyTooLong,
     RootNotProvisioned,
     RootLabelTooLong,
     UserVisibilityRequired,
+    UnverifiedMeasuredRoot,
 };
 
 pub const Service = struct {
@@ -85,6 +96,7 @@ pub const Service = struct {
         signer: signing.SignerIdentity,
         user_visible: bool,
     ) !Statement {
+        if (remote_party.len != 0 and !user_visible) return error.UserVisibilityRequired;
         return self.attestInternal(boot, remote_party, nonce, signer, user_visible, .software);
     }
 
@@ -97,6 +109,7 @@ pub const Service = struct {
     ) (Error || anyerror)!Statement {
         if (!self.has_provisioned_root) return error.RootNotProvisioned;
         if (remote_party.len != 0 and !user_visible) return error.UserVisibilityRequired;
+        if (!boot.isRemoteAttestable()) return error.UnverifiedMeasuredRoot;
 
         return self.attestInternal(boot, remote_party, nonce, .{
             .label = self.rootLabelSlice(),
@@ -129,6 +142,8 @@ pub const Service = struct {
             .root_label_len = 0,
             .root_label = [_]u8{0} ** MAX_ROOT_LABEL_BYTES,
             .root_digest = boot.root_digest,
+            .root_provenance = boot.root_provenance,
+            .manifest_verified = boot.artifact_manifest_verified,
             .signature = .{},
         };
         statement.remote_party_len = native_util.copyTextExact(&statement.remote_party, remote_party) catch return error.RemotePartyTooLong;
@@ -148,6 +163,25 @@ pub const Service = struct {
     pub fn verify(statement: Statement) bool {
         const digest = statementDigest(statement);
         return signing.verify(statement.signature, &digest);
+    }
+
+    pub fn verifyForBoot(statement: Statement, expectation: VerificationExpectation) bool {
+        if (!verify(statement)) return false;
+        if (statement.generation != expectation.boot.generation) return false;
+        if (statement.record_count != expectation.boot.record_count) return false;
+        if (statement.critical_service_count != expectation.boot.countKind(.critical_service)) return false;
+        if (statement.policy_count != expectation.boot.countKind(.policy)) return false;
+        if (statement.driver_count != expectation.boot.countKind(.driver_set)) return false;
+        if (!std.mem.eql(u8, &statement.root_digest, &expectation.boot.root_digest)) return false;
+        if (statement.root_provenance != expectation.boot.root_provenance) return false;
+        if (statement.manifest_verified != expectation.boot.artifact_manifest_verified) return false;
+        if (!std.mem.eql(u8, statement.remotePartySlice(), expectation.remote_party)) return false;
+        if (!std.mem.eql(u8, statement.nonceSlice(), expectation.nonce)) return false;
+        if (statement.user_visible != expectation.user_visible) return false;
+        if (expectation.key_origin) |expected_origin| {
+            if (statement.key_origin != expected_origin) return false;
+        }
+        return true;
     }
 
     fn rootLabelSlice(self: *const Service) []const u8 {
@@ -170,7 +204,37 @@ fn statementDigest(statement: Statement) [32]u8 {
     crypto_hash.updateEnum(&hasher, "key-origin", statement.key_origin);
     crypto_hash.updateBytes(&hasher, "root-label", statement.rootLabelSlice());
     crypto_hash.updateBytes(&hasher, "root-digest", &statement.root_digest);
+    crypto_hash.updateEnum(&hasher, "root-provenance", statement.root_provenance);
+    crypto_hash.updateBool(&hasher, "manifest-verified", statement.manifest_verified);
     return crypto_hash.finalize(&hasher);
+}
+
+fn addMeasuredArtifact(
+    recorder: *measured_boot.Recorder,
+    artifact_manifest: *measured_boot.ArtifactManifest,
+    kind: measured_boot.MeasurementKind,
+    label: []const u8,
+    payload: []const u8,
+) !void {
+    try recorder.add(kind, label, payload);
+    try artifact_manifest.add(kind, label, payload);
+}
+
+fn verifiedTestBoot(generation: u64) !measured_boot.BootRecord {
+    var recorder = measured_boot.Recorder.init();
+    var artifact_manifest = measured_boot.ArtifactManifest.init(generation);
+    recorder.begin(generation);
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .kernel, "kernel-zigos", "kernel=v5");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .base_image, "stable-d", "image=v5");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "policy", "healthy");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "storage", "healthy");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "compositor", "healthy");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "network", "healthy");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .policy, "org-defaults", "strict");
+    try addMeasuredArtifact(&recorder, &artifact_manifest, .driver_set, "signed-drivers", "gpu+npu+net");
+    var boot = recorder.finalize();
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .emulator_provided);
+    return boot;
 }
 
 test "attestation service signs measured state and records user visible requests" {
@@ -209,7 +273,12 @@ test "attestation service does not count hidden requests and detects tampering" 
     const boot = recorder.finalize();
 
     var service = Service.init(.{ .kind = .device, .serial = 34 });
-    const statement = try service.attest(boot, "audit.example", "nonce-2", .{
+    try std.testing.expectError(error.UserVisibilityRequired, service.attest(boot, "audit.example", "nonce-2", .{
+        .label = "device-attest",
+        .seed = [_]u8{0x54} ** 32,
+    }, false));
+
+    const statement = try service.attest(boot, "", "nonce-2", .{
         .label = "device-attest",
         .seed = [_]u8{0x54} ** 32,
     }, false);
@@ -225,11 +294,7 @@ test "attestation service does not count hidden requests and detects tampering" 
 }
 
 test "attestation service can use a provisioned hardware-backed root for visible remote requests" {
-    var recorder = measured_boot.Recorder.init();
-    recorder.begin(14);
-    try recorder.add(.kernel, "kernel-zigos", "kernel=v5");
-    try recorder.add(.base_image, "stable-d", "image=v5");
-    const boot = recorder.finalize();
+    const boot = try verifiedTestBoot(14);
 
     var service = Service.init(.{ .kind = .device, .serial = 35 });
     try service.provisionRoot(.{
@@ -251,6 +316,53 @@ test "attestation service can use a provisioned hardware-backed root for visible
         true,
     );
     try std.testing.expect(Service.verify(statement));
+    try std.testing.expect(Service.verifyForBoot(statement, .{
+        .boot = &boot,
+        .remote_party = "attest.example",
+        .nonce = "nonce-3",
+        .user_visible = true,
+        .key_origin = .secure_enclave,
+    }));
     try std.testing.expectEqual(KeyOrigin.secure_enclave, statement.key_origin);
     try std.testing.expectEqualStrings("device-se", statement.rootLabelSlice());
+    try std.testing.expectEqual(measured_boot.RootProvenance.emulator_provided, statement.root_provenance);
+    try std.testing.expect(statement.manifest_verified);
+
+    try std.testing.expect(!Service.verifyForBoot(statement, .{
+        .boot = &boot,
+        .remote_party = "attest.example",
+        .nonce = "wrong-nonce",
+        .user_visible = true,
+        .key_origin = .secure_enclave,
+    }));
+    var wrong_provenance_boot = boot;
+    wrong_provenance_boot.root_provenance = .bootloader_provided;
+    try std.testing.expect(!Service.verifyForBoot(statement, .{
+        .boot = &wrong_provenance_boot,
+        .remote_party = "attest.example",
+        .nonce = "nonce-3",
+        .user_visible = true,
+        .key_origin = .secure_enclave,
+    }));
+}
+
+test "attestation service rejects provisioned remote attestations without a verified measured root" {
+    var recorder = measured_boot.Recorder.init();
+    recorder.begin(15);
+    try recorder.add(.kernel, "kernel-zigos", "kernel=v6");
+    try recorder.add(.base_image, "stable-e", "image=v6");
+    const boot = recorder.finalize();
+
+    var service = Service.init(.{ .kind = .device, .serial = 36 });
+    try service.provisionRoot(.{
+        .label = "device-se",
+        .seed = [_]u8{0x56} ** 32,
+    }, .secure_enclave);
+
+    try std.testing.expectError(error.UnverifiedMeasuredRoot, service.attestWithProvisionedRoot(
+        boot,
+        "attest.example",
+        "nonce-4",
+        true,
+    ));
 }

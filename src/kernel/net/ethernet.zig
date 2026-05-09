@@ -1,9 +1,19 @@
+const data_plane_boundary = @import("data_plane_boundary.zig");
+
 pub const kernel_boundary_role = "bootstrap_network_shim";
-pub const publishes_full_network_service = false;
-pub const network_data_plane_exports_fail_closed = true;
+pub const publishes_full_network_service = data_plane_boundary.publishes_full_network_service;
+pub const network_data_plane_exports_fail_closed = data_plane_boundary.network_data_plane_exports_fail_closed;
 
 pub const ETH_HEADER_SIZE = 14;
 pub const ETH_MTU = 1500;
+
+pub const DataPlaneError = data_plane_boundary.DataPlaneError;
+
+pub const DataPlaneExportRequest = struct {
+    service_id: u64,
+    device_id: u64,
+    frame_len: usize = 0,
+};
 
 pub const EtherType = enum(u16) {
     IPv4 = 0x0800,
@@ -39,4 +49,16 @@ pub fn parseInventoryFrame(packet: []const u8) ?EthernetFrameView {
         .header = header.*,
         .payload = packet[ETH_HEADER_SIZE..],
     };
+}
+
+pub fn rejectDataPlaneExport(_: DataPlaneExportRequest) DataPlaneError!void {
+    return data_plane_boundary.rejectKernelNetworkDataPlane();
+}
+
+test "kernel ethernet shim rejects data-plane export attempts" {
+    try @import("std").testing.expectError(error.KernelNetworkDataPlaneDisabled, rejectDataPlaneExport(.{
+        .service_id = 1,
+        .device_id = 0x8086_100E,
+        .frame_len = ETH_HEADER_SIZE,
+    }));
 }

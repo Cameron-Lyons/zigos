@@ -12,6 +12,7 @@ const sync_service = @import("../sync/sync_service.zig");
 const workspace = @import("../storage/workspace.zig");
 
 pub const RecoveryReport = struct {
+    recovery_boot_entered: bool = false,
     image_verified: bool = false,
     image_reinstalled: bool = false,
     image_activated: bool = false,
@@ -45,12 +46,26 @@ pub const EntrySession = struct {
     owner: principal.PrincipalId,
     action_count: usize,
     actions: []const RecoveryAction,
+    profile: BootProfile = .recovery,
+    entered_from_boot_profile: bool = false,
+    normal_session_authority: bool = false,
+    entry_tick: u64 = 0,
 
     pub fn permits(self: *const EntrySession, action: RecoveryAction) bool {
         for (self.actions) |allowed| {
             if (allowed == action) return true;
         }
         return false;
+    }
+};
+
+pub const RecoveryBootExecution = struct {
+    entry: EntrySession,
+    boot_tick: u64,
+    normal_session_authority: bool = false,
+
+    pub fn session(self: *const RecoveryBootExecution) *const EntrySession {
+        return &self.entry;
     }
 };
 
@@ -78,6 +93,13 @@ pub const EntryError = error{
     UnauthorizedRecoveryOwner,
 };
 
+pub const OperationError = error{
+    NormalSessionAuthorityNotAllowed,
+    RecoveryActionNotAllowed,
+    RecoveryOwnerMismatch,
+    RecoverySessionRequired,
+};
+
 pub const Environment = struct {
     owner: principal.PrincipalId,
     report: RecoveryReport = .{},
@@ -94,6 +116,24 @@ pub const Environment = struct {
             .owner = self.owner,
             .action_count = request.actions.len,
             .actions = request.actions,
+            .profile = request.profile,
+        };
+    }
+
+    pub fn enterRecoveryBootProfile(
+        self: *Environment,
+        request: EntryRequest,
+        tick: u64,
+    ) EntryError!RecoveryBootExecution {
+        var entry = try self.enterRecoveryMode(request);
+        entry.entered_from_boot_profile = true;
+        entry.normal_session_authority = false;
+        entry.entry_tick = tick;
+        self.report.recovery_boot_entered = true;
+        return .{
+            .entry = entry,
+            .boot_tick = tick,
+            .normal_session_authority = false,
         };
     }
 
@@ -138,11 +178,13 @@ pub const Environment = struct {
 
     pub fn verifyAndReinstallImage(
         self: *Environment,
+        session: ?*const EntrySession,
         manager: *immutable_base.Manager,
         payload: []const u8,
         signer: signing.SignerIdentity,
         tick: u64,
-    ) immutable_base.Error!bool {
+    ) (OperationError || immutable_base.Error)!bool {
+        try self.requireRecoverySession(session, .reinstall_base_image);
         const verified = manager.verifyActiveImage();
         const target_slot = manager.inactiveSlotIndex();
         _ = try manager.stageImage(target_slot, "recovery-reinstall", payload, signer, tick);
@@ -160,12 +202,14 @@ pub const Environment = struct {
 
     pub fn revokeDeviceTrust(
         self: *Environment,
+        session: ?*const EntrySession,
         sync: *sync_service.Service,
         user: principal.PrincipalId,
         device: principal.PrincipalId,
         signer: signing.SignerIdentity,
         tick: u64,
-    ) (sync_service.AuthorityError || sync_service.Error)!bool {
+    ) (OperationError || sync_service.AuthorityError || sync_service.Error)!bool {
+        try self.requireRecoverySession(session, .revoke_device_trust);
         var capability_table = capability.CapabilityTable.init();
         const authority_capability = mintRecoverySyncAuthority(&capability_table, sync, tick);
         var port = sync_service.SyncPort.init(sync, &capability_table);
@@ -180,11 +224,13 @@ pub const Environment = struct {
 
     pub fn restoreWorkspaceSnapshot(
         self: *Environment,
+        session: ?*const EntrySession,
         storage: *storage_service.Service,
         workspace_id: anytype,
         snapshot_id: anytype,
         tick: u64,
-    ) workspace.Error!bool {
+    ) (OperationError || workspace.Error)!bool {
+        try self.requireRecoverySession(session, .restore_workspace_snapshot);
         _ = try storage.restore(workspace_id, snapshot_id, tick);
         self.report.snapshot_restored = true;
         return true;
@@ -192,11 +238,13 @@ pub const Environment = struct {
 
     pub fn restoreWorkspaceExport(
         self: *Environment,
+        session: ?*const EntrySession,
         storage: *storage_service.Service,
         workspace_id: anytype,
         package: *const workspace.ExportPackage,
         tick: u64,
-    ) workspace.Error!bool {
+    ) (OperationError || workspace.Error)!bool {
+        try self.requireRecoverySession(session, .restore_workspace_export);
         _ = try storage.restoreFromExportPackage(workspace_id, package, tick);
         self.report.snapshot_restored = true;
         return true;
@@ -204,11 +252,13 @@ pub const Environment = struct {
 
     pub fn repairSyncMetadata(
         self: *Environment,
+        session: ?*const EntrySession,
         sync: *sync_service.Service,
         storage: *const storage_service.Service,
         workspace_id: anytype,
         device_id: principal.PrincipalId,
-    ) (sync_service.AuthorityError || sync_service.Error)!bool {
+    ) (OperationError || sync_service.AuthorityError || sync_service.Error)!bool {
+        try self.requireRecoverySession(session, .repair_sync_metadata);
         var capability_table = capability.CapabilityTable.init();
         const authority_capability = mintRecoverySyncAuthority(&capability_table, sync, 0);
         var port = sync_service.SyncPort.init(sync, &capability_table);
@@ -219,13 +269,15 @@ pub const Environment = struct {
 
     pub fn rotateDeviceKeys(
         self: *Environment,
+        session: ?*const EntrySession,
         sync: *sync_service.Service,
         user: principal.PrincipalId,
         device: principal.PrincipalId,
         signer: signing.SignerIdentity,
         next_signer: signing.SignerIdentity,
         tick: u64,
-    ) (sync_service.AuthorityError || sync_service.Error)!u32 {
+    ) (OperationError || sync_service.AuthorityError || sync_service.Error)!u32 {
+        try self.requireRecoverySession(session, .rotate_device_keys);
         var capability_table = capability.CapabilityTable.init();
         const authority_capability = mintRecoverySyncAuthority(&capability_table, sync, tick);
         var port = sync_service.SyncPort.init(sync, &capability_table);
@@ -233,6 +285,17 @@ pub const Environment = struct {
         const record = try port.rotateDeviceKey(authority, user, device, signer, next_signer, tick);
         self.report.device_keys_rotated = record.key_rotation_generation >= 2;
         return record.key_rotation_generation;
+    }
+
+    fn requireRecoverySession(
+        self: *const Environment,
+        session: ?*const EntrySession,
+        action: RecoveryAction,
+    ) OperationError!void {
+        const active = session orelse return error.RecoverySessionRequired;
+        if (!active.owner.eql(self.owner)) return error.RecoveryOwnerMismatch;
+        if (active.normal_session_authority) return error.NormalSessionAuthorityNotAllowed;
+        if (!active.permits(action)) return error.RecoveryActionNotAllowed;
     }
 };
 
@@ -375,12 +438,28 @@ test "recovery environment verifies reinstalls restores repairs and rotates" {
     _ = try sync_port.replicateWorkspace(sync_authority, &storage, workspace_record.id.raw(), primary_device, tablet, .device_to_device);
 
     var recovery = Environment.init(storage_owner);
-    try std.testing.expect(try recovery.verifyAndReinstallImage(&manager, "kernel=v2", image_signer, 16));
-    try std.testing.expect(try recovery.restoreWorkspaceSnapshot(&storage, workspace_record.id, snapshot.id, 17));
-    try std.testing.expect(try recovery.repairSyncMetadata(&sync, &storage, workspace_record.id, tablet));
-    try std.testing.expectEqual(@as(u32, 2), try recovery.rotateDeviceKeys(&sync, user, tablet, user_signer, tablet_rotated_signer, 18));
-    try std.testing.expect(try recovery.revokeDeviceTrust(&sync, user, tablet, user_signer, 19));
-    try std.testing.expect(try recovery.revokeDeviceTrust(&sync, user, tablet, user_signer, 20));
+    const recovery_boot = try recovery.enterRecoveryBootProfile(.{
+        .profile = .recovery,
+        .requester = storage_owner,
+        .actions = &.{
+            .reinstall_base_image,
+            .restore_workspace_snapshot,
+            .repair_sync_metadata,
+            .rotate_device_keys,
+            .revoke_device_trust,
+        },
+    }, 16);
+    try std.testing.expect(recovery_boot.entry.entered_from_boot_profile);
+    try std.testing.expect(!recovery_boot.normal_session_authority);
+    try std.testing.expect(!recovery_boot.entry.normal_session_authority);
+    try std.testing.expectEqual(@as(u64, 16), recovery_boot.boot_tick);
+    try std.testing.expect(try recovery.verifyAndReinstallImage(recovery_boot.session(), &manager, "kernel=v2", image_signer, 16));
+    try std.testing.expect(try recovery.restoreWorkspaceSnapshot(recovery_boot.session(), &storage, workspace_record.id, snapshot.id, 17));
+    try std.testing.expect(try recovery.repairSyncMetadata(recovery_boot.session(), &sync, &storage, workspace_record.id, tablet));
+    try std.testing.expectEqual(@as(u32, 2), try recovery.rotateDeviceKeys(recovery_boot.session(), &sync, user, tablet, user_signer, tablet_rotated_signer, 18));
+    try std.testing.expect(try recovery.revokeDeviceTrust(recovery_boot.session(), &sync, user, tablet, user_signer, 19));
+    try std.testing.expect(try recovery.revokeDeviceTrust(recovery_boot.session(), &sync, user, tablet, user_signer, 20));
+    try std.testing.expect(recovery.report.recovery_boot_entered);
     try std.testing.expect(recovery.report.image_verified);
     try std.testing.expect(recovery.report.image_reinstalled);
     try std.testing.expect(recovery.report.image_activated);
@@ -394,7 +473,7 @@ test "recovery environment verifies reinstalls restores repairs and rotates" {
     storage_checkpoint_store.resetPersistent();
 }
 
-test "recovery environment requires recovery profile and refuses missing repair targets" {
+test "recovery environment requires recovery session gates and refuses missing repair targets" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
     storage_checkpoint_store.resetPersistent();
 
@@ -403,6 +482,14 @@ test "recovery environment requires recovery profile and refuses missing repair 
     const user = principal.PrincipalId{ .kind = .user, .serial = 3 };
     const intruder = principal.PrincipalId{ .kind = .service, .serial = 500 };
     const untrusted_device = principal.PrincipalId{ .kind = .device, .serial = 44 };
+    const user_signer = signing.SignerIdentity{
+        .label = "negative-user",
+        .seed = [_]u8{0x91} ** 32,
+    };
+    const rotated_signer = signing.SignerIdentity{
+        .label = "negative-device-v2",
+        .seed = [_]u8{0x92} ** 32,
+    };
 
     var storage = storage_service.Service.initWithStore(922, 53, storage_owner, &storage_checkpoint_store);
     const workspace_record = try storage.createWorkspace(.{
@@ -436,9 +523,23 @@ test "recovery environment requires recovery profile and refuses missing repair 
     try std.testing.expect(entry.permits(.restore_workspace_snapshot));
     try std.testing.expect(!entry.permits(.rotate_device_keys));
 
-    try std.testing.expectError(error.SnapshotNotFound, recovery.restoreWorkspaceSnapshot(&storage, workspace_record.id, 999, 20));
+    var normal_session_entry = entry;
+    normal_session_entry.normal_session_authority = true;
+    try std.testing.expectError(error.NormalSessionAuthorityNotAllowed, recovery.restoreWorkspaceSnapshot(&normal_session_entry, &storage, workspace_record.id, 999, 20));
+    try std.testing.expectError(error.RecoverySessionRequired, recovery.restoreWorkspaceSnapshot(null, &storage, workspace_record.id, 999, 20));
+    try std.testing.expectError(error.RecoveryActionNotAllowed, recovery.rotateDeviceKeys(&entry, &sync, user, untrusted_device, user_signer, rotated_signer, 20));
+
+    const intruder_recovery = Environment.init(intruder);
+    const intruder_entry = try intruder_recovery.enterRecoveryMode(.{
+        .profile = .recovery,
+        .requester = intruder,
+        .actions = &.{.restore_workspace_snapshot},
+    });
+    try std.testing.expectError(error.RecoveryOwnerMismatch, recovery.restoreWorkspaceSnapshot(&intruder_entry, &storage, workspace_record.id, 999, 20));
+
+    try std.testing.expectError(error.SnapshotNotFound, recovery.restoreWorkspaceSnapshot(&entry, &storage, workspace_record.id, 999, 20));
     try std.testing.expect(!recovery.report.snapshot_restored);
-    try std.testing.expectError(error.DeviceNotTrusted, recovery.repairSyncMetadata(&sync, &storage, workspace_record.id, untrusted_device));
+    try std.testing.expectError(error.DeviceNotTrusted, recovery.repairSyncMetadata(&entry, &sync, &storage, workspace_record.id, untrusted_device));
     try std.testing.expect(!recovery.report.sync_metadata_repaired);
 
     storage_checkpoint_store.resetPersistent();

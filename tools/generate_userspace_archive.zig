@@ -268,11 +268,9 @@ fn writeArchive(
         \\    data: []const u8,
         \\};
         \\
-        \\pub const artifacts = [_]Artifact{
-        \\
     );
 
-    for (artifacts) |artifact| {
+    for (artifacts, 0..) |artifact, index| {
         const copied_bytes = try cwd.readFileAlloc(io, artifact.source_path, allocator, .limited(16 * 1024 * 1024));
         defer allocator.free(copied_bytes);
         const copied_path = try std.fs.path.join(allocator, &.{ output_dir, artifact.embedded_name });
@@ -282,6 +280,19 @@ fn writeArchive(
             .data = copied_bytes,
         });
 
+        try writer.print(
+            "const artifact_data_{d} align(1) linksection(\".zigos_userspace_archive\") = @embedFile(\"{f}\").*;\n",
+            .{ index, std.zig.fmtString(artifact.embedded_name) },
+        );
+    }
+
+    try writer.writeAll(
+        \\
+        \\pub const artifacts = [_]Artifact{
+        \\
+    );
+
+    for (artifacts, 0..) |artifact, index| {
         try writer.writeAll("    .{\n");
         try writer.print("        .bundle_id = \"{f}\",\n", .{std.zig.fmtString(artifact.bundle_id)});
         try writer.print("        .display_name = \"{f}\",\n", .{std.zig.fmtString(artifact.display_name)});
@@ -298,8 +309,8 @@ fn writeArchive(
         try writer.print("        .stack_size_bytes = {d},\n", .{artifact.embedded_info.executable_image.stack_size_bytes});
         try writer.print("        .file_size_bytes = {d},\n", .{artifact.embedded_info.executable_image.file_size_bytes});
         try writer.writeAll("        .file_sha256 = .{");
-        for (artifact.embedded_info.file_sha256, 0..) |byte, index| {
-            if (index != 0) try writer.writeAll(", ");
+        for (artifact.embedded_info.file_sha256, 0..) |byte, digest_index| {
+            if (digest_index != 0) try writer.writeAll(", ");
             try writer.print("0x{x:0>2}", .{byte});
         }
         try writer.writeAll("},\n");
@@ -322,7 +333,7 @@ fn writeArchive(
         }
         try writer.writeAll("        },\n");
         try writer.print("        .bootstrap_mailbox_address = 0x{x},\n", .{artifact.embedded_info.bootstrap_mailbox_address});
-        try writer.print("        .data = @embedFile(\"{f}\"),\n", .{std.zig.fmtString(artifact.embedded_name)});
+        try writer.print("        .data = &artifact_data_{d},\n", .{index});
         try writer.writeAll("    },\n");
     }
 

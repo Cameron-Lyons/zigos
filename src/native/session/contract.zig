@@ -52,5 +52,8 @@ test "native bootstrap and service bootstrap services sit behind restartable use
     try std.testing.expectEqual(UiPrivilege.review_surface, compatibility_service.isolation.ui);
     try std.testing.expect(allowsDriverClass(.network_stack, .network_adapter));
     try std.testing.expect(allowsDriverClass(.storage_object, .storage_controller));
+    try std.testing.expect(allowsDriverClass(.compositor_ui_session, .graphics_adapter));
+    try std.testing.expect(allowsDriverClass(.compositor_ui_session, .input_device));
+    try std.testing.expect(allowsDriverClass(.media_print_helpers, .audio_print_io));
     try std.testing.expect(!allowsDriverClass(.policy_mediation, .network_adapter));
 }

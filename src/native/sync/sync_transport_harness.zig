@@ -174,6 +174,27 @@ pub const Harness = struct {
         );
     }
 
+    pub fn openServiceIdentity(
+        self: *Harness,
+        broker: *network_policy.EgressBroker,
+        request: network_policy.EgressConnectionRequest,
+        source_device: principal.PrincipalId,
+        target_device: principal.PrincipalId,
+    ) Error!TransportSession {
+        switch (request.evidence.destination) {
+            .service_identity => {},
+            else => return error.EgressDenied,
+        }
+        return self.openSession(
+            broker,
+            request,
+            .device_to_device,
+            source_device,
+            target_device,
+            "",
+        );
+    }
+
     pub fn openRelay(
         self: *Harness,
         broker: *network_policy.EgressBroker,
@@ -284,6 +305,46 @@ pub const Harness = struct {
     fn nextSessionId(self: *Harness) u64 {
         defer self.next_session_id += 1;
         return self.next_session_id;
+    }
+};
+
+pub const EmulatedNativeTransport = struct {
+    harness: Harness = Harness.init(),
+    attempted_connections: usize = 0,
+    denied_before_transmit: usize = 0,
+    transmitted_packets: usize = 0,
+
+    pub fn init() EmulatedNativeTransport {
+        return .{};
+    }
+
+    pub fn openServiceIdentity(
+        self: *EmulatedNativeTransport,
+        broker: *network_policy.EgressBroker,
+        request: network_policy.EgressConnectionRequest,
+        source_device: principal.PrincipalId,
+        target_device: principal.PrincipalId,
+    ) Error!TransportSession {
+        self.attempted_connections += 1;
+        return self.harness.openServiceIdentity(
+            broker,
+            request,
+            source_device,
+            target_device,
+        ) catch |err| {
+            self.denied_before_transmit += 1;
+            return err;
+        };
+    }
+
+    pub fn send(
+        self: *EmulatedNativeTransport,
+        session: *const TransportSession,
+        plaintext: []const u8,
+    ) Error!EncryptedPacket {
+        const packet = try self.harness.encryptPacket(session, plaintext);
+        self.transmitted_packets += 1;
+        return packet;
     }
 };
 
@@ -542,4 +603,89 @@ test "encrypted transport harness binds device sessions to attested identity and
     try std.testing.expectEqual(target, packet.target_device);
     try std.testing.expectEqual(@as(usize, 2), harness.created_sessions);
     try std.testing.expectEqual(@as(usize, 1), harness.denied_sessions);
+}
+
+test "emulated native transport denies service identity before packet transmission" {
+    var policies = network_policy.Directory.init();
+    var capabilities = capability.CapabilityTable.init();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 5 };
+    const app = principal.PrincipalId{ .kind = .app, .serial = 6 };
+    const source = principal.PrincipalId{ .kind = .device, .serial = 30 };
+    const target = principal.PrincipalId{ .kind = .device, .serial = 31 };
+    const pinned_digest = [_]u8{0xC1} ** 32;
+    const wrong_digest = [_]u8{0xC2} ** 32;
+
+    const overlay = try policies.create(.{
+        .owner = owner,
+        .label = "notes-service",
+        .mode = .named_service_identity,
+        .target = "overlay.notes.sync",
+        .require_remote_attestation = true,
+        .pinned_root_digest = pinned_digest,
+    });
+    const overlay_capability = try capabilities.mintBootRoot(.{
+        .holder = app,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .network_policy, .id = overlay.id },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .scope = .{ .task_id = 44, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 20 },
+        .audit = .{},
+    });
+
+    var broker = network_policy.EgressBroker.init(&policies, &capabilities);
+    var transport = EmulatedNativeTransport.init();
+
+    try std.testing.expectError(error.EgressDenied, transport.openServiceIdentity(&broker, .{
+        .task_id = 44,
+        .principal_id = app,
+        .capability_id = overlay_capability.id,
+        .policy_id = overlay.id,
+        .evidence = .{ .destination = .{ .service_identity = "overlay.notes.sync" } },
+        .now_ticks = 5,
+    }, source, target));
+
+    try std.testing.expectError(error.EgressDenied, transport.openServiceIdentity(&broker, .{
+        .task_id = 44,
+        .principal_id = app,
+        .capability_id = overlay_capability.id,
+        .policy_id = overlay.id,
+        .evidence = .{
+            .destination = .{ .service_identity = "overlay.notes.sync" },
+            .attested = true,
+            .peer_root_digest_present = true,
+            .peer_root_digest = wrong_digest,
+        },
+        .now_ticks = 5,
+    }, source, target));
+
+    try std.testing.expectEqual(@as(usize, 2), transport.attempted_connections);
+    try std.testing.expectEqual(@as(usize, 2), transport.denied_before_transmit);
+    try std.testing.expectEqual(@as(usize, 0), transport.transmitted_packets);
+    try std.testing.expectEqual(@as(usize, 0), transport.harness.created_sessions);
+
+    const session = try transport.openServiceIdentity(&broker, .{
+        .task_id = 44,
+        .principal_id = app,
+        .capability_id = overlay_capability.id,
+        .policy_id = overlay.id,
+        .evidence = .{
+            .destination = .{ .service_identity = "overlay.notes.sync" },
+            .attested = true,
+            .peer_root_digest_present = true,
+            .peer_root_digest = pinned_digest,
+        },
+        .now_ticks = 5,
+    }, source, target);
+    try std.testing.expect(session.egress_decision.policy_decision.attestation_required);
+    try std.testing.expect(session.egress_decision.policy_decision.identity_pinned);
+
+    const packet = try transport.send(&session, "attested payload");
+    try std.testing.expect(packet.encrypted);
+    try std.testing.expect(packet.egress_allowed);
+    try std.testing.expect(!std.mem.eql(u8, packet.ciphertextSlice(), "attested payload"));
+    try std.testing.expectEqual(@as(usize, 3), transport.attempted_connections);
+    try std.testing.expectEqual(@as(usize, 2), transport.denied_before_transmit);
+    try std.testing.expectEqual(@as(usize, 1), transport.transmitted_packets);
+    try std.testing.expectEqual(@as(usize, 1), transport.harness.created_sessions);
 }

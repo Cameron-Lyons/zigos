@@ -419,6 +419,34 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
     try std.testing.expectEqual(replicated_version.version_id.raw(), target_sync.replicaVersion(workspace_id, laptop, path).?);
     try std.testing.expectEqual(source_edit.version_id.raw(), source_sync.replicaVersion(workspace_id, tablet, path).?);
 
+    var restarted_source_storage = storage_service.Service.initWithStore(9_222, 9_222, storage_owner, &source_checkpoint_store);
+    var restarted_target_storage = storage_service.Service.initWithStore(9_223, 9_223, storage_owner, &target_checkpoint_store);
+    var restarted_source_resident = ResidentState{};
+    var restarted_target_resident = ResidentState{};
+    var restarted_source_sync = try Service.initWithStorage(9_232, source_task.id, sync_owner, &restarted_source_storage, &restarted_source_resident);
+    var restarted_target_sync = try Service.initWithStorage(9_233, target_task.id, sync_owner, &restarted_target_storage, &restarted_target_resident);
+    try std.testing.expect(restarted_source_sync.loaded_existing_state);
+    try std.testing.expect(restarted_target_sync.loaded_existing_state);
+    try std.testing.expectEqual(source_edit.version_id.raw(), restarted_source_sync.replicaVersion(workspace_id, tablet, path).?);
+    try std.testing.expectEqual(replicated_version.version_id.raw(), restarted_target_sync.replicaVersion(workspace_id, laptop, path).?);
+    try std.testing.expect(restarted_source_sync.findConflict(workspace_id, tablet, path) != null);
+    try std.testing.expect(restarted_source_sync.findOverlay(workspace_id) != null);
+    try std.testing.expect(restarted_target_sync.findOverlay(workspace_id) != null);
+
+    const restarted_resolved = try restarted_target_storage.resolve(target_workspace.id, path);
+    try std.testing.expectEqual(replicated_version.version_id, restarted_resolved.version_id);
+    const restarted_target_version = restarted_target_storage.version(restarted_resolved.version_id) orelse return error.MissingTargetVersion;
+    const restarted_target_payload = try restarted_target_storage.versionPayload(restarted_target_version);
+    try std.testing.expectEqualStrings("laptop edit", restarted_target_payload);
+
+    var restarted_source_capabilities = capability.CapabilityTable.init();
+    const restarted_source_authority_capability = try mintSyncServiceAuthority(&restarted_source_capabilities, &restarted_source_sync, sync_owner);
+    var restarted_source_port = sync_service.SyncPort.init(&restarted_source_sync, &restarted_source_capabilities);
+    const restarted_source_authority = syncAuthority(&restarted_source_sync, sync_owner, restarted_source_authority_capability, 60);
+    const restarted_clean = try restarted_source_port.replicateWorkspace(restarted_source_authority, &restarted_source_storage, workspace_id, laptop, tablet, .relay_assisted);
+    try std.testing.expectEqual(@as(usize, 0), restarted_clean.selected_entry_count);
+    try std.testing.expectEqual(@as(usize, 0), restarted_clean.transport_frame_count);
+
     source_checkpoint_store.resetPersistent();
     target_checkpoint_store.resetPersistent();
 }
@@ -705,6 +733,53 @@ test "sync service covers device graph policy replication semantics and restart 
     const notes_frame = service.latestTransportFrameForPath(notes_id, tablet, "documents/notes.md").?;
     try std.testing.expect(notes_frame.encrypted);
     try std.testing.expectEqual(SyncSemantic.mergeable_crdt, notes_frame.semantic);
+    const accepted_frame = try service_port.acceptTransportFrame(service_authority, &storage, .{
+        .workspace_id = notes_id,
+        .object_id = notes_frame.object_id,
+        .version_id = notes_frame.version_id,
+        .source_device = laptop,
+        .target_device = tablet,
+        .transport = .device_to_device,
+        .semantic = .mergeable_crdt,
+        .encrypted = true,
+        .path = "documents/notes.md",
+    });
+    try std.testing.expectEqual(SyncSemantic.mergeable_crdt, accepted_frame.semantic);
+    try std.testing.expect(accepted_frame.encrypted);
+    try std.testing.expectEqual(@as(usize, 3), service.transportFrameCountFor(notes_id, tablet));
+    try std.testing.expectError(error.SyncSemanticMismatch, service_port.acceptTransportFrame(service_authority, &storage, .{
+        .workspace_id = notes_id,
+        .object_id = notes_frame.object_id,
+        .version_id = notes_frame.version_id,
+        .source_device = laptop,
+        .target_device = tablet,
+        .transport = .device_to_device,
+        .semantic = .chunked_snapshot,
+        .encrypted = true,
+        .path = "documents/notes.md",
+    }));
+    try std.testing.expectError(error.TransportDenied, service_port.acceptTransportFrame(service_authority, &storage, .{
+        .workspace_id = notes_id,
+        .object_id = notes_frame.object_id,
+        .version_id = notes_frame.version_id,
+        .source_device = laptop,
+        .target_device = tablet,
+        .transport = .device_to_device,
+        .semantic = .mergeable_crdt,
+        .encrypted = false,
+        .path = "documents/notes.md",
+    }));
+    try std.testing.expectError(error.DeviceNotTrusted, service_port.acceptTransportFrame(service_authority, &storage, .{
+        .workspace_id = notes_id,
+        .object_id = notes_frame.object_id,
+        .version_id = notes_frame.version_id,
+        .source_device = laptop,
+        .target_device = phone,
+        .transport = .device_to_device,
+        .semantic = .mergeable_crdt,
+        .encrypted = true,
+        .path = "documents/notes.md",
+    }));
     try std.testing.expectEqual(@as(usize, 1), summary.conflict_count);
     try std.testing.expect(service.findConflict(notes_id, tablet, "documents/notes.md") != null);
     const clean_summary = try service_port.replicateWorkspace(service_authority, &storage, notes_id, laptop, tablet, .device_to_device);
@@ -868,6 +943,69 @@ test "overlay sessions cover sync remote access private service publishing and e
     try std.testing.expect(private_service.relay_encrypted);
     try std.testing.expectEqualStrings("notes.remote", private_service.privateServiceSlice());
     try std.testing.expectEqual(@as(usize, 3), service.activeOverlaySessionCount());
+
+    var network_capabilities = capability.CapabilityTable.init();
+    const relay_capability = try network_capabilities.mintBootRoot(.{
+        .holder = sync_owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .network_policy, .id = relay_policy.id },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .scope = .{ .task_id = service.task_id, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    var relay_queue = sync_transport.Relay.init();
+    try std.testing.expectError(error.EgressDenied, service_port.sendOverlayRelayFrame(
+        service_authority,
+        &network_capabilities,
+        &relay_queue,
+        .{
+            .workspace_id = workspace_id,
+            .from_device = tablet,
+            .to_device = laptop,
+            .usage = .private_service,
+            .private_service_label = "notes.remote",
+            .relay_capability_id = relay_capability.id + 1,
+            .payload = "remote-open",
+            .signer = tablet_signer,
+            .tick = 17,
+        },
+    ));
+    try std.testing.expectEqual(@as(usize, 0), relay_queue.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 3), service.activeOverlaySessionCount());
+
+    const relay_exchange = try service_port.sendOverlayRelayFrame(
+        service_authority,
+        &network_capabilities,
+        &relay_queue,
+        .{
+            .workspace_id = workspace_id,
+            .from_device = tablet,
+            .to_device = laptop,
+            .usage = .private_service,
+            .private_service_label = "notes.remote",
+            .relay_capability_id = relay_capability.id,
+            .payload = "remote-open",
+            .signer = tablet_signer,
+            .tick = 18,
+        },
+    );
+    try std.testing.expect(relay_exchange.encrypted);
+    try std.testing.expect(relay_exchange.relay_encrypted);
+    try std.testing.expect(relay_exchange.remote_access);
+    try std.testing.expect(relay_exchange.egress_allowed);
+    try std.testing.expect(relay_exchange.delivered);
+    try std.testing.expectEqual(@as(usize, "remote-open".len), relay_exchange.delivered_len);
+    try std.testing.expectEqual(OverlaySessionUse.private_service, relay_exchange.usage);
+    try std.testing.expectEqualStrings("overlay.workspace.sync", relay_exchange.serviceIdentitySlice());
+    try std.testing.expectEqualStrings("relay.zigos.dev", relay_exchange.relayDomainSlice());
+    try std.testing.expectEqualStrings("notes.remote", relay_exchange.privateServiceSlice());
+    try std.testing.expectEqual(@as(usize, 1), relay_queue.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 1), relay_queue.delivered_packets);
+    try std.testing.expectEqual(@as(usize, 4), service.activeOverlaySessionCount());
+    try std.testing.expect(try service_port.closeOverlaySession(service_authority, relay_exchange.overlay_session_id, 19));
+    try std.testing.expectEqual(@as(usize, 3), service.activeOverlaySessionCount());
+
     try std.testing.expect(try service_port.closeOverlaySession(service_authority, remote_session.session_id, 17));
     try std.testing.expectEqual(OverlaySessionState.closed, service.findOverlaySession(remote_session.session_id).?.state);
     try std.testing.expectEqual(@as(usize, 2), service.activeOverlaySessionCount());

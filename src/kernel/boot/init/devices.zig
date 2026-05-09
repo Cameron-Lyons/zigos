@@ -9,9 +9,28 @@ const device_inventory = @import("../../../native/drivers/device_inventory.zig")
 const storage_driver_protocol = @import("../../../native/drivers/storage_driver_protocol.zig");
 const panic_handler = @import("../../utils/panic.zig");
 const common = @import("../common.zig");
+const data_plane_boundary = @import("data_plane_boundary.zig");
 
-pub const kernel_boundary_role = "bootstrap_device_inventory_shim";
-pub const publishes_device_data_planes = false;
+const PCI_CLASS_STORAGE_CONTROLLER: u8 = 0x01;
+const PCI_CLASS_NETWORK_ADAPTER: u8 = 0x02;
+const PCI_CLASS_GRAPHICS_ADAPTER: u8 = 0x03;
+const PCI_CLASS_MULTIMEDIA_CONTROLLER: u8 = 0x04;
+const PCI_CLASS_SIMPLE_COMMUNICATIONS_CONTROLLER: u8 = 0x07;
+const ATA_SECONDARY_BASE_PORT: u16 = 0x170;
+const ATA_PRIMARY_IRQ_LINE: u8 = 14;
+const ATA_SECONDARY_IRQ_LINE: u8 = 15;
+
+pub const kernel_boundary_role = data_plane_boundary.kernel_boundary_role;
+pub const publishes_device_data_planes = data_plane_boundary.publishes_device_data_planes;
+pub const publishes_windowing_data_plane = data_plane_boundary.publishes_windowing_data_plane;
+pub const publishes_package_data_plane = data_plane_boundary.publishes_package_data_plane;
+pub const publishes_indexing_data_plane = data_plane_boundary.publishes_indexing_data_plane;
+pub const publishes_sync_data_plane = data_plane_boundary.publishes_sync_data_plane;
+pub const rejectKernelDeviceDataPlane = data_plane_boundary.rejectKernelDeviceDataPlane;
+pub const rejectKernelSubsystemDataPlane = data_plane_boundary.rejectKernelSubsystemDataPlane;
+pub const PublicationRequest = data_plane_boundary.PublicationRequest;
+pub const SubsystemPublicationRequest = data_plane_boundary.SubsystemPublicationRequest;
+pub const DataPlaneKind = data_plane_boundary.DataPlaneKind;
 
 pub fn init() void {
     console.print("Initializing device drivers...\n");
@@ -46,19 +65,19 @@ fn captureAtaBootstrapInventory() void {
 }
 
 fn capturePciInventory() void {
-    if (pci.firstDeviceByClass(0x02)) |dev| {
+    if (pci.firstDeviceByClass(PCI_CLASS_NETWORK_ADAPTER)) |dev| {
         device_inventory.registerDetected(.network_adapter, pciDeviceId(dev), .pci_inventory, false);
     }
-    if (pci.firstDeviceByClass(0x03)) |dev| {
+    if (pci.firstDeviceByClass(PCI_CLASS_GRAPHICS_ADAPTER)) |dev| {
         device_inventory.registerDetected(.graphics_adapter, pciDeviceId(dev), .pci_inventory, false);
     }
-    if (pci.firstDeviceByClass(0x04)) |dev| {
+    if (pci.firstDeviceByClass(PCI_CLASS_MULTIMEDIA_CONTROLLER)) |dev| {
         device_inventory.registerDetected(.audio_print_io, pciDeviceId(dev), .pci_inventory, false);
-    } else if (pci.firstDeviceByClass(0x07)) |dev| {
+    } else if (pci.firstDeviceByClass(PCI_CLASS_SIMPLE_COMMUNICATIONS_CONTROLLER)) |dev| {
         device_inventory.registerDetected(.audio_print_io, pciDeviceId(dev), .pci_inventory, false);
     }
     if (!device_inventory.recordForClass(.storage_controller).detected) {
-        if (pci.firstDeviceByClass(0x01)) |dev| {
+        if (pci.firstDeviceByClass(PCI_CLASS_STORAGE_CONTROLLER)) |dev| {
             device_inventory.registerDetected(.storage_controller, pciDeviceId(dev), .pci_inventory, false);
         }
     }
@@ -80,7 +99,7 @@ fn ataBrokerGrant(drive: *const ata.ATADevice) storage_driver_protocol.AtaBroker
         .base_port = drive.base_port,
         .ctrl_port = drive.ctrl_port,
         .is_master = drive.is_master,
-        .irq_line = if (drive.base_port == 0x170) 15 else 14,
+        .irq_line = if (drive.base_port == ATA_SECONDARY_BASE_PORT) ATA_SECONDARY_IRQ_LINE else ATA_PRIMARY_IRQ_LINE,
         .sector_count = drive.sectors,
     };
 }

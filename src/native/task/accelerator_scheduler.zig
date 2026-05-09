@@ -46,6 +46,96 @@ pub const SystemState = struct {
     memory_bandwidth_units: usize = std.math.maxInt(usize),
 };
 
+pub const TelemetrySource = enum(u8) {
+    synthetic,
+    emulator,
+    boot_provider,
+    hardware,
+};
+
+pub const PlatformTelemetrySignals = struct {
+    thermal_pressure: ThermalPressure = .nominal,
+    battery_saver: bool = false,
+    privacy_mode: bool = false,
+    gpu_available: bool = true,
+    npu_available: bool = true,
+    media_available: bool = true,
+    cpu_budget_ticks: u64 = std.math.maxInt(u64),
+    memory_bandwidth_units: usize = std.math.maxInt(usize),
+};
+
+pub const TelemetrySample = struct {
+    source: TelemetrySource = .synthetic,
+    observed_tick: u64 = 0,
+    thermal_pressure: ThermalPressure = .nominal,
+    battery_saver: bool = false,
+    privacy_mode: bool = false,
+    gpu_available: bool = true,
+    npu_available: bool = true,
+    media_available: bool = true,
+    cpu_budget_ticks: u64 = std.math.maxInt(u64),
+    memory_bandwidth_units: usize = std.math.maxInt(usize),
+
+    pub fn toSystemState(self: TelemetrySample) SystemState {
+        return .{
+            .thermal_pressure = self.thermal_pressure,
+            .battery_saver = self.battery_saver,
+            .privacy_mode = self.privacy_mode,
+            .gpu_available = self.gpu_available,
+            .npu_available = self.npu_available,
+            .media_available = self.media_available,
+            .cpu_budget_ticks = self.cpu_budget_ticks,
+            .memory_bandwidth_units = self.memory_bandwidth_units,
+        };
+    }
+
+    pub fn observed(self: TelemetrySample) bool {
+        return self.source != .synthetic;
+    }
+};
+
+pub const EmulatedTelemetryDevice = struct {
+    current: TelemetrySample = .{ .source = .emulator },
+
+    pub fn init(sample: TelemetrySample) EmulatedTelemetryDevice {
+        var current = sample;
+        current.source = .emulator;
+        return .{ .current = current };
+    }
+
+    pub fn update(self: *EmulatedTelemetryDevice, sample: TelemetrySample) void {
+        var current = sample;
+        current.source = .emulator;
+        self.current = current;
+    }
+
+    pub fn read(self: *const EmulatedTelemetryDevice) TelemetrySample {
+        return self.current;
+    }
+};
+
+pub const BootedPlatformTelemetryProvider = struct {
+    boot_id: u64,
+    current: TelemetrySample = .{ .source = .boot_provider },
+    read_count: u32 = 0,
+
+    pub fn init(boot_id: u64, observed_tick: u64, signals: PlatformTelemetrySignals) BootedPlatformTelemetryProvider {
+        return .{
+            .boot_id = boot_id,
+            .current = sampleFromPlatformSignals(.boot_provider, observed_tick, signals),
+        };
+    }
+
+    pub fn observe(self: *BootedPlatformTelemetryProvider, observed_tick: u64, signals: PlatformTelemetrySignals) void {
+        self.current = sampleFromPlatformSignals(.boot_provider, observed_tick, signals);
+    }
+
+    pub fn read(self: *BootedPlatformTelemetryProvider) TelemetrySample {
+        self.read_count += 1;
+        return self.current;
+    }
+};
+
 pub const Request = struct {
     class: ResourceClass,
     wants_gpu: bool = false,
@@ -124,6 +214,8 @@ const ClaimTaskIndex = indexed_arena.MultimapIndex(MAX_ENGINE_CLAIMS, MAX_ENGINE
 
 pub const Controller = struct {
     state: SystemState = .{},
+    last_telemetry_source: TelemetrySource = .synthetic,
+    last_telemetry_observed_tick: u64 = 0,
     next_claim_id: u64 = 1,
     claims: ClaimArena = ClaimArena.init(),
     claim_task_index: ClaimTaskIndex = ClaimTaskIndex.init(),
@@ -136,6 +228,22 @@ pub const Controller = struct {
 
     pub fn configure(self: *Controller, state: SystemState) void {
         self.state = state;
+        self.last_telemetry_source = .synthetic;
+        self.last_telemetry_observed_tick = 0;
+    }
+
+    pub fn configureFromTelemetry(self: *Controller, sample: TelemetrySample) void {
+        self.state = sample.toSystemState();
+        self.last_telemetry_source = sample.source;
+        self.last_telemetry_observed_tick = sample.observed_tick;
+    }
+
+    pub fn configureFromProvider(self: *Controller, provider: anytype) void {
+        self.configureFromTelemetry(provider.read());
+    }
+
+    pub fn observedTelemetry(self: *const Controller) bool {
+        return self.last_telemetry_source != .synthetic;
     }
 
     pub fn claim(self: *Controller, request: ClaimRequest) Error!ClaimRecord {
@@ -446,6 +554,21 @@ fn preferredEngineFor(request: Request) Engine {
     return .cpu;
 }
 
+fn sampleFromPlatformSignals(source: TelemetrySource, observed_tick: u64, signals: PlatformTelemetrySignals) TelemetrySample {
+    return .{
+        .source = source,
+        .observed_tick = observed_tick,
+        .thermal_pressure = signals.thermal_pressure,
+        .battery_saver = signals.battery_saver,
+        .privacy_mode = signals.privacy_mode,
+        .gpu_available = signals.gpu_available,
+        .npu_available = signals.npu_available,
+        .media_available = signals.media_available,
+        .cpu_budget_ticks = signals.cpu_budget_ticks,
+        .memory_bandwidth_units = signals.memory_bandwidth_units,
+    };
+}
+
 fn zeroClaim() ClaimRecord {
     return .{
         .id = 0,
@@ -549,6 +672,125 @@ test "accelerator scheduler uses cpu and memory bandwidth accounting signals" {
     try std.testing.expect(!emergency.degraded);
 }
 
+test "accelerator scheduler consumes emulator telemetry samples" {
+    var controller = Controller.init();
+    var telemetry = EmulatedTelemetryDevice.init(.{
+        .source = .synthetic,
+        .observed_tick = 42,
+        .thermal_pressure = .critical,
+        .battery_saver = true,
+        .privacy_mode = true,
+        .gpu_available = true,
+        .npu_available = true,
+        .media_available = true,
+        .cpu_budget_ticks = 500,
+        .memory_bandwidth_units = 128,
+    });
+    const sample = telemetry.read();
+    try std.testing.expect(sample.observed());
+    controller.configureFromTelemetry(sample);
+    try std.testing.expect(controller.observedTelemetry());
+    try std.testing.expectEqual(TelemetrySource.emulator, controller.last_telemetry_source);
+    try std.testing.expectEqual(@as(u64, 42), controller.last_telemetry_observed_tick);
+
+    const interactive = controller.plan(.{
+        .class = .foreground_interactive,
+        .wants_gpu = true,
+        .shared_memory_bytes = 4096,
+    });
+    try std.testing.expect(!interactive.delayed);
+    try std.testing.expectEqual(Engine.gpu, interactive.engine);
+    try std.testing.expect(interactive.degraded);
+    try std.testing.expectEqual(DecisionReason.thermal_throttle, interactive.reason);
+
+    const privacy_sensitive = controller.plan(.{
+        .class = .background_light,
+        .wants_npu = true,
+        .privacy_sensitive = true,
+    });
+    try std.testing.expectEqual(Engine.cpu, privacy_sensitive.engine);
+    try std.testing.expect(privacy_sensitive.degraded);
+    try std.testing.expectEqual(DecisionReason.privacy_mode, privacy_sensitive.reason);
+
+    const memory_limited = controller.plan(.{
+        .class = .batch_compute,
+        .memory_bandwidth_units = 256,
+    });
+    try std.testing.expect(memory_limited.delayed);
+    try std.testing.expectEqual(DecisionReason.memory_bandwidth, memory_limited.reason);
+
+    telemetry.update(.{
+        .observed_tick = 43,
+        .thermal_pressure = .nominal,
+        .battery_saver = true,
+        .media_available = true,
+    });
+    controller.configureFromTelemetry(telemetry.read());
+    const media_export = controller.plan(.{
+        .class = .media_export,
+        .wants_media_engine = true,
+        .shared_memory_bytes = 8192,
+    });
+    try std.testing.expectEqual(Engine.media, media_export.engine);
+    try std.testing.expect(media_export.degraded);
+    try std.testing.expectEqual(DecisionReason.battery_preserve, media_export.reason);
+    try std.testing.expectEqual(@as(u64, 43), controller.last_telemetry_observed_tick);
+}
+
+test "accelerator scheduler consumes booted platform provider samples" {
+    var controller = Controller.init();
+    var provider = BootedPlatformTelemetryProvider.init(7, 88, .{
+        .thermal_pressure = .critical,
+        .battery_saver = true,
+        .privacy_mode = true,
+        .gpu_available = true,
+        .npu_available = true,
+        .media_available = true,
+        .cpu_budget_ticks = 1_000,
+        .memory_bandwidth_units = 32,
+    });
+
+    controller.configureFromProvider(&provider);
+    try std.testing.expect(controller.observedTelemetry());
+    try std.testing.expectEqual(TelemetrySource.boot_provider, controller.last_telemetry_source);
+    try std.testing.expectEqual(@as(u64, 88), controller.last_telemetry_observed_tick);
+    try std.testing.expectEqual(@as(u32, 1), provider.read_count);
+
+    const foreground = controller.plan(.{
+        .class = .foreground_interactive,
+        .wants_gpu = true,
+        .shared_memory_bytes = 4096,
+    });
+    try std.testing.expect(!foreground.delayed);
+    try std.testing.expectEqual(Engine.gpu, foreground.engine);
+    try std.testing.expect(foreground.degraded);
+    try std.testing.expectEqual(DecisionReason.thermal_throttle, foreground.reason);
+
+    const batch = controller.plan(.{
+        .class = .batch_compute,
+        .wants_npu = true,
+    });
+    try std.testing.expect(batch.delayed);
+    try std.testing.expectEqual(DecisionReason.thermal_throttle, batch.reason);
+
+    provider.observe(89, .{
+        .thermal_pressure = .nominal,
+        .battery_saver = true,
+        .media_available = true,
+    });
+    controller.configureFromProvider(&provider);
+    const media_export = controller.plan(.{
+        .class = .media_export,
+        .wants_media_engine = true,
+        .shared_memory_bytes = 8192,
+    });
+    try std.testing.expectEqual(Engine.media, media_export.engine);
+    try std.testing.expect(media_export.degraded);
+    try std.testing.expectEqual(DecisionReason.battery_preserve, media_export.reason);
+    try std.testing.expectEqual(@as(u64, 89), controller.last_telemetry_observed_tick);
+    try std.testing.expectEqual(@as(u32, 2), provider.read_count);
+}
+
 test "accelerator scheduler tracks exclusive engine claims and zero-copy attachments" {
     var controller = Controller.init();
     var shared = shared_memory.Table.init();
@@ -571,6 +813,10 @@ test "accelerator scheduler tracks exclusive engine claims and zero-copy attachm
     try std.testing.expectEqual(Engine.media, claim.engine);
     try std.testing.expect(claim.zero_copy);
     try std.testing.expect(try shared.isAcceleratorAttached(object.id, .media));
+    const media_mapping = try shared.acceleratorMappingDescriptor(object.id, .media);
+    try std.testing.expect(media_mapping.zero_copy);
+    try std.testing.expectEqual(object.page_base, media_mapping.page_base);
+    try std.testing.expectEqual(@as(usize, 8), media_mapping.page_count);
     try std.testing.expectEqual(@as(u16, 1), controller.activeClaimCount());
 
     try std.testing.expectError(error.EngineBusy, controller.claim(.{
@@ -598,6 +844,7 @@ test "accelerator scheduler tracks exclusive engine claims and zero-copy attachm
 
     try std.testing.expect(try controller.releaseClaim(claim.id, &shared));
     try std.testing.expect(!(try shared.isAcceleratorAttached(object.id, .media)));
+    try std.testing.expectError(error.AcceleratorNotAttached, shared.acceleratorMappingDescriptor(object.id, .media));
     try std.testing.expectEqual(@as(u16, 1), controller.activeClaimCount());
     try std.testing.expect(try controller.releaseClaim(degraded.id, null));
     try std.testing.expectEqual(@as(u16, 0), controller.activeClaimCount());

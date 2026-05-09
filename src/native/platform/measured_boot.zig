@@ -11,6 +11,16 @@ const supervisor_mod = @import("../session/supervisor.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const copyText = native_util.copyText;
 
+pub const production_artifact_manifest_signer = signing.SignerIdentity{
+    .label = "zigos-artifact-manifest",
+    .seed = [_]u8{0xB7} ** 32,
+};
+
+pub const build_artifact_manifest_signer = signing.SignerIdentity{
+    .label = "zigos-build-artifact-manifest",
+    .seed = [_]u8{0xC7} ** 32,
+};
+
 pub const MAX_RECORDS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MEASUREMENT_KIND_COUNT: usize = 5;
@@ -28,6 +38,12 @@ pub const MeasurementKind = enum(u8) {
     critical_service,
     policy,
     driver_set,
+};
+
+pub const RootProvenance = enum(u8) {
+    synthetic_host,
+    bootloader_provided,
+    emulator_provided,
 };
 
 pub const MeasurementRecord = struct {
@@ -135,10 +151,10 @@ pub const SignedArtifactManifest = struct {
     manifest: ArtifactManifest,
     signature: policy_manifest.Signature,
 
-    pub fn verify(self: *const SignedArtifactManifest) bool {
+    pub fn verify(self: *const SignedArtifactManifest, expected_signer: signing.SignerIdentity) bool {
         var payload_buffer: [2048]u8 = undefined;
         const payload = encodeArtifactManifest(self.manifest, &payload_buffer) catch return false;
-        return signing.verify(self.signature, payload) and requiredArtifactShape(&self.manifest);
+        return signing.verifyTrusted(self.signature, payload, expected_signer) and requiredArtifactShape(&self.manifest);
     }
 };
 
@@ -181,7 +197,8 @@ pub const BuildArtifactManifest = struct {
     pub fn verify(self: *const BuildArtifactManifest) bool {
         var payload_buffer: [4096]u8 = undefined;
         const payload = encodeBuildArtifactManifest(self.generation, self.entries[0..self.entry_count], &payload_buffer) catch return false;
-        return signing.verify(self.signature, payload) and requiredBuildArtifactShape(self);
+        return signing.verifyTrusted(self.signature, payload, build_artifact_manifest_signer) and
+            requiredBuildArtifactShape(self);
     }
 };
 
@@ -190,6 +207,8 @@ pub const BootRecord = struct {
     record_count: usize,
     records: [MAX_RECORDS]MeasurementRecord,
     root_digest: [32]u8,
+    root_provenance: RootProvenance = .synthetic_host,
+    artifact_manifest_verified: bool = false,
 
     pub fn countKind(self: *const BootRecord, kind: MeasurementKind) usize {
         var count: usize = 0;
@@ -197,6 +216,14 @@ pub const BootRecord = struct {
             if (record.kind == kind) count += 1;
         }
         return count;
+    }
+
+    pub fn hasVerifiedRoot(self: *const BootRecord) bool {
+        return self.artifact_manifest_verified and !std.mem.allEqual(u8, &self.root_digest, 0);
+    }
+
+    pub fn isRemoteAttestable(self: *const BootRecord) bool {
+        return self.hasVerifiedRoot() and self.root_provenance != .synthetic_host;
     }
 };
 
@@ -256,6 +283,7 @@ pub const Error = error{
     UnsupportedStateVersion,
     ManifestTooLarge,
     InvalidBuildArtifactKind,
+    ManifestMismatch,
 };
 
 pub const Recorder = struct {
@@ -334,12 +362,25 @@ pub fn signArtifactManifest(
     };
 }
 
-pub fn verifySignedArtifactManifest(signed_manifest: *const SignedArtifactManifest) bool {
-    return signed_manifest.verify();
+pub fn verifySignedArtifactManifest(
+    signed_manifest: *const SignedArtifactManifest,
+    expected_signer: signing.SignerIdentity,
+) bool {
+    return signed_manifest.verify(expected_signer);
 }
 
 pub fn verifyBuildArtifactManifest(manifest: *const BuildArtifactManifest) bool {
     return manifest.verify();
+}
+
+pub fn buildArtifactDigestMatches(
+    manifest: *const BuildArtifactManifest,
+    kind: BuildArtifactKind,
+    label: []const u8,
+    digest: *const [32]u8,
+) bool {
+    const entry = manifest.find(kind, label) orelse return false;
+    return std.mem.eql(u8, &entry.digest, digest);
 }
 
 pub fn buildArtifactEntry(kind: BuildArtifactKind, label: []const u8, digest: [32]u8) Error!BuildArtifactEntry {
@@ -401,6 +442,18 @@ pub fn bootRecordMatchesManifest(boot: *const BootRecord, artifact_manifest: *co
         if (!found) return false;
     }
     return true;
+}
+
+pub fn verifyBootRecordAgainstManifest(
+    boot: *BootRecord,
+    artifact_manifest: *const ArtifactManifest,
+    root_provenance: RootProvenance,
+) Error!void {
+    if (!requiredArtifactShape(artifact_manifest)) return error.ManifestMismatch;
+    if (!bootRecordMatchesManifest(boot, artifact_manifest)) return error.ManifestMismatch;
+    if (std.mem.allEqual(u8, &boot.root_digest, 0)) return error.ManifestMismatch;
+    boot.root_provenance = root_provenance;
+    boot.artifact_manifest_verified = true;
 }
 
 pub const MeasurementJournal = struct {
@@ -923,16 +976,28 @@ test "signed artifact manifests bind required boot artifact classes before activ
     try artifact_manifest.add(.policy, "production-policy-set", "policy-v1");
     try artifact_manifest.add(.driver_set, "production-driver-set", "drivers-v1");
 
-    const signer = signing.SignerIdentity{
-        .label = "artifact-manifest-test",
-        .seed = [_]u8{0xB7} ** 32,
-    };
-    const signed_manifest = try signArtifactManifest(artifact_manifest, signer);
-    try std.testing.expect(verifySignedArtifactManifest(&signed_manifest));
+    const signed_manifest = try signArtifactManifest(artifact_manifest, production_artifact_manifest_signer);
+    try std.testing.expect(verifySignedArtifactManifest(
+        &signed_manifest,
+        production_artifact_manifest_signer,
+    ));
 
     var tampered = signed_manifest;
     tampered.manifest.entries[0].digest[0] ^= 0xFF;
-    try std.testing.expect(!verifySignedArtifactManifest(&tampered));
+    try std.testing.expect(!verifySignedArtifactManifest(
+        &tampered,
+        production_artifact_manifest_signer,
+    ));
+
+    const wrong_signer = signing.SignerIdentity{
+        .label = "untrusted-artifact-manifest",
+        .seed = [_]u8{0xB8} ** 32,
+    };
+    const wrong_authority = try signArtifactManifest(artifact_manifest, wrong_signer);
+    try std.testing.expect(!verifySignedArtifactManifest(
+        &wrong_authority,
+        production_artifact_manifest_signer,
+    ));
 
     var boot = BootRecord{
         .generation = artifact_manifest.generation,
@@ -959,16 +1024,81 @@ test "build-generated artifact manifests verify signatures and required build ar
 
     var payload_buffer: [4096]u8 = undefined;
     const payload = try encodeBuildArtifactManifest(manifest.generation, manifest.entries[0..manifest.entry_count], &payload_buffer);
-    const signer = signing.SignerIdentity{
-        .label = "build-artifact-test",
-        .seed = [_]u8{0xC7} ** 32,
-    };
-    manifest.signature = try signing.sign(signer, payload);
+    manifest.signature = try signing.sign(build_artifact_manifest_signer, payload);
 
     try std.testing.expect(verifyBuildArtifactManifest(&manifest));
     try std.testing.expect(manifest.find(.bootloader_measurement, "multiboot-v1:zigos_native") != null);
+    try std.testing.expect(buildArtifactDigestMatches(
+        &manifest,
+        .bootloader_source,
+        "src/boot/boot64.S",
+        &[_]u8{0x10} ** 32,
+    ));
+    try std.testing.expect(buildArtifactDigestMatches(
+        &manifest,
+        .bootloader_measurement,
+        "multiboot-v1:zigos_native",
+        &[_]u8{0x11} ** 32,
+    ));
+    try std.testing.expect(!buildArtifactDigestMatches(
+        &manifest,
+        .bootloader_source,
+        "src/boot/boot64.S",
+        &[_]u8{0x12} ** 32,
+    ));
 
     var tampered = manifest;
     tampered.entries[0].digest[0] ^= 0xFF;
     try std.testing.expect(!verifyBuildArtifactManifest(&tampered));
+
+    var wrong_authority = manifest;
+    const wrong_signer = signing.SignerIdentity{
+        .label = "untrusted-build-artifact-manifest",
+        .seed = [_]u8{0xC8} ** 32,
+    };
+    wrong_authority.signature = try signing.sign(wrong_signer, payload);
+    try std.testing.expect(!verifyBuildArtifactManifest(&wrong_authority));
+}
+
+test "verified boot roots carry provenance and reject mismatched manifests" {
+    var artifact_manifest = ArtifactManifest.init(22);
+    var recorder = Recorder.init();
+    recorder.begin(22);
+
+    try artifact_manifest.add(.kernel, "kernel-zigos-native", "kernel=v6");
+    try recorder.add(.kernel, "kernel-zigos-native", "kernel=v6");
+    try artifact_manifest.add(.base_image, "stable-e", "image=v6");
+    try recorder.add(.base_image, "stable-e", "image=v6");
+    try artifact_manifest.add(.critical_service, "policy", "healthy");
+    try recorder.add(.critical_service, "policy", "healthy");
+    try artifact_manifest.add(.critical_service, "storage", "healthy");
+    try recorder.add(.critical_service, "storage", "healthy");
+    try artifact_manifest.add(.critical_service, "compositor", "healthy");
+    try recorder.add(.critical_service, "compositor", "healthy");
+    try artifact_manifest.add(.critical_service, "network", "healthy");
+    try recorder.add(.critical_service, "network", "healthy");
+    try artifact_manifest.add(.policy, "production-policy-set", "strict");
+    try recorder.add(.policy, "production-policy-set", "strict");
+    try artifact_manifest.add(.driver_set, "production-driver-set", "drivers=v6");
+    try recorder.add(.driver_set, "production-driver-set", "drivers=v6");
+
+    var boot = recorder.finalize();
+    try verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .emulator_provided);
+    try std.testing.expect(boot.hasVerifiedRoot());
+    try std.testing.expect(boot.isRemoteAttestable());
+    try std.testing.expectEqual(RootProvenance.emulator_provided, boot.root_provenance);
+
+    var synthetic_boot = recorder.finalize();
+    try verifyBootRecordAgainstManifest(&synthetic_boot, &artifact_manifest, .synthetic_host);
+    try std.testing.expect(synthetic_boot.hasVerifiedRoot());
+    try std.testing.expect(!synthetic_boot.isRemoteAttestable());
+
+    var tampered_manifest = artifact_manifest;
+    tampered_manifest.entries[0].digest[0] ^= 0xFF;
+    var rejected_boot = recorder.finalize();
+    try std.testing.expectError(
+        error.ManifestMismatch,
+        verifyBootRecordAgainstManifest(&rejected_boot, &tampered_manifest, .emulator_provided),
+    );
+    try std.testing.expect(!rejected_boot.hasVerifiedRoot());
 }

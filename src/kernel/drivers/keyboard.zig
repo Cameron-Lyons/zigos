@@ -1,5 +1,6 @@
 const vga = @import("vga.zig");
 const io = @import("../utils/io.zig");
+const device_inventory = @import("../../native/drivers/device_inventory.zig");
 
 pub const ArrowKey = enum(u8) {
     up,
@@ -245,6 +246,7 @@ fn isAlpha(ch: u8) bool {
 
 pub fn recordBootstrapInventoryOnly() void {
     kernel_input_data_plane_enabled = false;
+    device_inventory.registerDetected(.input_device, 0x8042_0001, .ps2_bootstrap, false);
     while (io.inb(KEYBOARD_STATUS_PORT) & 0x01 != 0) {
         _ = io.inb(KEYBOARD_DATA_PORT);
     }

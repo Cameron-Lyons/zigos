@@ -50,6 +50,13 @@ pub const ATAError = error{
     DriveError,
     NotFound,
     InvalidParameter,
+    KernelStorageDataPlaneDisabled,
+};
+
+pub const DataPlaneTransferRequest = struct {
+    device_id: u64,
+    lba: u64,
+    sector_count: u8,
 };
 
 pub const ATADevice = struct {
@@ -270,6 +277,18 @@ pub fn findDetectedDeviceByStableId(device_id: u64) ?*const ATADevice {
 
 pub fn stableDeviceId(device: *const ATADevice) u64 {
     return (@as(u64, device.base_port) << 8) | @as(u64, @intFromBool(device.is_master));
+}
+
+pub fn rejectKernelDataPlaneTransfer(_: DataPlaneTransferRequest) ATAError!void {
+    return error.KernelStorageDataPlaneDisabled;
+}
+
+test "kernel ATA shim rejects direct data-plane transfer attempts" {
+    try @import("std").testing.expectError(error.KernelStorageDataPlaneDisabled, rejectKernelDataPlaneTransfer(.{
+        .device_id = 0x1F001,
+        .lba = 7,
+        .sector_count = 1,
+    }));
 }
 
 fn printDriveInfo(device: *const ATADevice) void {

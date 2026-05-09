@@ -63,6 +63,33 @@ pub const Error = error{
 pub const DriverRecoveryReport = struct {
     notification_id: ?u64 = null,
     visible_impact: bool = false,
+    runtime_activation_observed: bool = false,
+    runtime_activation_generation: u32 = 0,
+    runtime_dma_domain_id: u64 = 0,
+    runtime_exclusive_claim: bool = false,
+    userspace_brokered_data_plane: bool = false,
+};
+
+pub const DriverHotSwapReport = struct {
+    notification_id: ?u64 = null,
+    visible_impact: bool = false,
+    previous_dma_domain_id: u64 = 0,
+    next_dma_domain_id: u64 = 0,
+    previous_restart_generation: u32 = 0,
+    next_restart_generation: u32 = 0,
+    runtime_activation_observed: bool = false,
+    runtime_activation_generation: u32 = 0,
+    runtime_dma_domain_id: u64 = 0,
+    runtime_exclusive_claim: bool = false,
+    userspace_brokered_data_plane: bool = false,
+};
+
+const DriverActivationObservation = struct {
+    observed: bool = false,
+    activation_generation: u32 = 0,
+    dma_domain_id: u64 = 0,
+    exclusive_claim: bool = false,
+    userspace_brokered_data_plane: bool = false,
 };
 
 const ServiceSlot = struct {
@@ -226,11 +253,7 @@ pub const Supervisor = struct {
         if (@hasDecl(@TypeOf(runtime.*), "deactivate")) {
             _ = runtime.deactivate(driver.service_id);
         }
-        if (@hasDecl(@TypeOf(runtime.*), "activateAt")) {
-            _ = try runtime.activateAt(driver, tick + 2);
-        } else {
-            _ = try runtime.activate(driver);
-        }
+        const activation = try activateRuntimeDriver(runtime, driver, tick + 2);
         _ = self.completeRestart(service_id, tick + 2);
 
         if (ledger) |recording| {
@@ -255,6 +278,78 @@ pub const Supervisor = struct {
         return .{
             .notification_id = notification_id,
             .visible_impact = visible_impact,
+            .runtime_activation_observed = activation.observed,
+            .runtime_activation_generation = activation.activation_generation,
+            .runtime_dma_domain_id = activation.dma_domain_id,
+            .runtime_exclusive_claim = activation.exclusive_claim,
+            .userspace_brokered_data_plane = activation.userspace_brokered_data_plane,
+        };
+    }
+
+    pub fn hotSwapDriver(
+        self: *Supervisor,
+        request: driver_service.SignedRegistrationRequest,
+        directory: *driver_service.Directory,
+        runtime: anytype,
+        notifications: ?*notification_center.Center,
+        ledger: ?*event_ledger.Ledger,
+        tick: u64,
+        detail: []const u8,
+    ) !DriverHotSwapReport {
+        const service = self.find(request.service_id) orelse return error.ServiceNotFound;
+        const previous = (directory.findByService(request.service_id) orelse return error.DriverNotFound).*;
+        if (!service.restartable) return error.ServiceNotRestartable;
+        if (!self.allowsDriverAttachment(request.service_id, request.device_class)) {
+            return error.DriverAttachmentDenied;
+        }
+
+        const swap_detail = if (detail.len != 0)
+            detail
+        else
+            defaultDriverRestartDetail(request.device_class);
+        const visible_impact = driverImpactIsVisible(request.device_class);
+
+        _ = self.requestRestart(request.service_id, tick);
+        if (@hasDecl(@TypeOf(runtime.*), "deactivate")) {
+            _ = runtime.deactivate(request.service_id);
+        }
+
+        const swapped = try directory.hotSwapSigned(request);
+        const activation = try activateRuntimeDriver(runtime, swapped, tick + 1);
+        _ = self.noteDriverAttached(request.service_id, request.device_class, swapped.authority_capability_id, tick + 1);
+        _ = self.completeRestart(request.service_id, tick + 1);
+
+        if (ledger) |recording| {
+            try recording.recordDriverRestart(service.class, service.owner, swapped.authority_capability_id, tick + 1, swap_detail);
+        }
+
+        var notification_id: ?u64 = null;
+        if (visible_impact) {
+            if (notifications) |center| {
+                const notification = try center.post(.{
+                    .source = service.owner,
+                    .reason = .driver_restart,
+                    .urgency = .high,
+                    .detail = swap_detail,
+                    .expires_at_ticks = tick + 100,
+                    .suppression_policy = .replace_same_source_reason,
+                });
+                notification_id = notification.id;
+            }
+        }
+
+        return .{
+            .notification_id = notification_id,
+            .visible_impact = visible_impact,
+            .previous_dma_domain_id = previous.dma_domain_id,
+            .next_dma_domain_id = swapped.dma_domain_id,
+            .previous_restart_generation = previous.restart_generation,
+            .next_restart_generation = swapped.restart_generation,
+            .runtime_activation_observed = activation.observed,
+            .runtime_activation_generation = activation.activation_generation,
+            .runtime_dma_domain_id = activation.dma_domain_id,
+            .runtime_exclusive_claim = activation.exclusive_claim,
+            .userspace_brokered_data_plane = activation.userspace_brokered_data_plane,
         };
     }
 
@@ -375,7 +470,7 @@ fn zeroDiagnostic() DiagnosticEvent {
 
 fn driverImpactIsVisible(device_class: driver_service.DeviceClass) bool {
     return switch (device_class) {
-        .graphics_adapter, .audio_print_io => true,
+        .graphics_adapter, .audio_print_io, .input_device => true,
         .network_adapter, .storage_controller => false,
     };
 }
@@ -386,6 +481,7 @@ fn defaultDriverRestartDetail(device_class: driver_service.DeviceClass) []const 
         .storage_controller => "storage driver restarted",
         .graphics_adapter => "graphics driver restarted",
         .audio_print_io => "audio or print driver restarted",
+        .input_device => "input driver restarted",
     };
 }
 
@@ -413,6 +509,37 @@ fn driverAuthority(
         },
         .audit = .{},
     });
+}
+
+fn activateRuntimeDriver(
+    runtime: anytype,
+    driver: *const driver_service.DriverRecord,
+    tick: u64,
+) !DriverActivationObservation {
+    if (@hasDecl(@TypeOf(runtime.*), "activateAt")) {
+        return observeDriverActivation(try runtime.activateAt(driver, tick));
+    }
+    return observeDriverActivation(try runtime.activate(driver));
+}
+
+fn observeDriverActivation(result: anytype) DriverActivationObservation {
+    const T = @TypeOf(result);
+    if (T == void) return .{};
+
+    var observation = DriverActivationObservation{ .observed = true };
+    if (@hasField(T, "activation_generation")) {
+        observation.activation_generation = result.activation_generation;
+    }
+    if (@hasField(T, "dma_domain_id")) {
+        observation.dma_domain_id = result.dma_domain_id;
+    }
+    if (@hasField(T, "exclusive_claim")) {
+        observation.exclusive_claim = result.exclusive_claim;
+    }
+    if (@hasField(T, "mode")) {
+        observation.userspace_brokered_data_plane = std.mem.eql(u8, @tagName(result.mode), "userspace_brokered_data_plane");
+    }
+    return observation;
 }
 
 test "supervisor registers services using the contract boundary map" {
@@ -562,4 +689,135 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
     try std.testing.expectEqual(graphics_authority.id, ledger.latestKind(.driver_restart).?.related_id);
     try std.testing.expectEqual(ServiceState.healthy, storage.state);
     try std.testing.expectEqual(@as(u32, 1), directory.findByService(storage.id).?.restart_generation);
+}
+
+test "driver hot-swap rebinds authority and restarts only the owning service" {
+    const FakeRuntime = struct {
+        const ActivationMode = enum(u8) {
+            control_only,
+            userspace_brokered_data_plane,
+        };
+        const ActivationRecord = struct {
+            activation_generation: u32,
+            dma_domain_id: u64,
+            exclusive_claim: bool,
+            mode: ActivationMode,
+        };
+
+        deactivation_count: usize = 0,
+        activation_count: usize = 0,
+        last_deactivated_service_id: u64 = 0,
+        last_activated_service_id: u64 = 0,
+        last_dma_domain_id: u64 = 0,
+
+        pub fn deactivate(self: *@This(), service_id: u64) bool {
+            self.deactivation_count += 1;
+            self.last_deactivated_service_id = service_id;
+            return true;
+        }
+
+        pub fn activateAt(self: *@This(), driver: *const driver_service.DriverRecord, _: u64) !ActivationRecord {
+            self.activation_count += 1;
+            self.last_activated_service_id = driver.service_id;
+            self.last_dma_domain_id = driver.dma_domain_id;
+            return .{
+                .activation_generation = @intCast(self.activation_count),
+                .dma_domain_id = driver.dma_domain_id,
+                .exclusive_claim = true,
+                .mode = .userspace_brokered_data_plane,
+            };
+        }
+    };
+
+    var supervisor = Supervisor.init();
+    const compositor = try supervisor.register(.compositor_ui_session, .{ .kind = .service, .serial = 21 });
+    const storage = try supervisor.register(.storage_object, .{ .kind = .service, .serial = 22 });
+    try std.testing.expect(supervisor.markHealthy(compositor.id, 1));
+    try std.testing.expect(supervisor.markHealthy(storage.id, 1));
+
+    var directory = driver_service.Directory.init();
+    var capabilities = capability.CapabilityTable.init();
+    const device_id: u64 = 0x1234_1111_0021;
+    const first_authority = try driverAuthority(
+        &capabilities,
+        compositor.owner,
+        501,
+        device_id,
+        .graphics_adapter,
+    );
+    const first_driver = try directory.registerSigned(.{
+        .service_id = compositor.id,
+        .owner_task_id = 501,
+        .device_id = device_id,
+        .device_class = .graphics_adapter,
+        .authority_capability_id = first_authority.id,
+        .capability_table = &capabilities,
+        .requester = compositor.owner,
+        .now_ticks = 1,
+        .signer = "graphics-v1",
+    });
+    const first_dma_domain = first_driver.dma_domain_id;
+    const second_authority = try driverAuthority(
+        &capabilities,
+        compositor.owner,
+        501,
+        device_id,
+        .graphics_adapter,
+    );
+
+    var runtime = FakeRuntime{};
+    var notifications = notification_center.Center.init();
+    var ledger = event_ledger.Ledger.init();
+    const report = try supervisor.hotSwapDriver(.{
+        .service_id = compositor.id,
+        .owner_task_id = 501,
+        .device_id = device_id,
+        .device_class = .graphics_adapter,
+        .authority_capability_id = second_authority.id,
+        .capability_table = &capabilities,
+        .requester = compositor.owner,
+        .now_ticks = 10,
+        .signer = "graphics-v2",
+    }, &directory, &runtime, &notifications, &ledger, 10, "display driver hot-swapped");
+
+    const swapped = directory.findByService(compositor.id).?;
+    try std.testing.expect(report.visible_impact);
+    try std.testing.expect(report.notification_id != null);
+    try std.testing.expectEqual(@as(u32, 1), report.previous_restart_generation);
+    try std.testing.expectEqual(@as(u32, 2), report.next_restart_generation);
+    try std.testing.expectEqual(first_dma_domain, report.previous_dma_domain_id);
+    try std.testing.expect(swapped.dma_domain_id != first_dma_domain);
+    try std.testing.expectEqual(swapped.dma_domain_id, report.next_dma_domain_id);
+    try std.testing.expect(report.runtime_activation_observed);
+    try std.testing.expectEqual(@as(u32, 1), report.runtime_activation_generation);
+    try std.testing.expectEqual(swapped.dma_domain_id, report.runtime_dma_domain_id);
+    try std.testing.expect(report.runtime_exclusive_claim);
+    try std.testing.expect(report.userspace_brokered_data_plane);
+    try std.testing.expectEqual(second_authority.id, swapped.authority_capability_id);
+    try std.testing.expectEqualStrings("graphics-v2", swapped.signerSlice());
+    try std.testing.expectEqual(@as(usize, 1), runtime.deactivation_count);
+    try std.testing.expectEqual(@as(usize, 1), runtime.activation_count);
+    try std.testing.expectEqual(compositor.id, runtime.last_deactivated_service_id);
+    try std.testing.expectEqual(compositor.id, runtime.last_activated_service_id);
+    try std.testing.expectEqual(swapped.dma_domain_id, runtime.last_dma_domain_id);
+    try std.testing.expectEqual(ServiceState.healthy, compositor.state);
+    try std.testing.expectEqual(@as(u16, 1), compositor.restart_count);
+    try std.testing.expectEqual(ServiceState.healthy, storage.state);
+    try std.testing.expectEqual(@as(u16, 0), storage.restart_count);
+    try std.testing.expect(supervisor.hasDiagnostic(compositor.id, .driver_attached));
+    try std.testing.expect(supervisor.hasDiagnostic(compositor.id, .restart_completed));
+    try std.testing.expectEqual(notification_center.Reason.driver_restart, notifications.latestVisible(20).?.reason);
+    try std.testing.expectEqual(second_authority.id, ledger.latestKind(.driver_restart).?.related_id);
+
+    try std.testing.expectError(error.DriverAttachmentDenied, supervisor.hotSwapDriver(.{
+        .service_id = compositor.id,
+        .owner_task_id = 501,
+        .device_id = device_id,
+        .device_class = .storage_controller,
+        .authority_capability_id = second_authority.id,
+        .capability_table = &capabilities,
+        .requester = compositor.owner,
+        .now_ticks = 11,
+        .signer = "storage-v1",
+    }, &directory, &runtime, null, null, 11, ""));
 }

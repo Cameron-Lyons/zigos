@@ -23,6 +23,7 @@ pub const CheckRequest = struct {
     ui_service_id: u64,
     network_probe: ?NetworkProbe = null,
     ui_probe: ?UiProbe = null,
+    require_service_path_probes: bool = false,
 };
 
 pub const NetworkProbe = struct {
@@ -73,9 +74,12 @@ pub fn evaluate(
     request: CheckRequest,
 ) CheckEvaluation {
     const core_services_started = countStartedServices(supervisor, request.core_service_ids);
-    const storage_probe_ok = storageMountHealthy(storage, request.storage_workspace_id, request.storage_probe_path);
-    const network_service_ok = serviceStarted(supervisor, request.network_service_id) and networkServiceHealthy(request.network_probe);
-    const ui_service_ok = serviceStarted(supervisor, request.ui_service_id) and uiServiceHealthy(request.ui_probe);
+    const storage_probe_ok = storageMountHealthy(storage, request.storage_workspace_id, request.storage_probe_path) and
+        (!request.require_service_path_probes or request.storage_probe_path.len != 0);
+    const network_service_ok = serviceStarted(supervisor, request.network_service_id) and
+        networkServiceHealthy(request.network_probe, request.require_service_path_probes);
+    const ui_service_ok = serviceStarted(supervisor, request.ui_service_id) and
+        uiServiceHealthy(request.ui_probe, request.require_service_path_probes);
     const boot_ok = bootActivationHealthy(manager);
 
     return .{
@@ -206,8 +210,8 @@ fn serviceStarted(supervisor: *supervisor_mod.Supervisor, service_id: u64) bool 
         supervisor.hasDiagnostic(service_id, .contract_bound);
 }
 
-fn networkServiceHealthy(probe: ?NetworkProbe) bool {
-    const check = probe orelse return true;
+fn networkServiceHealthy(probe: ?NetworkProbe, require_probe: bool) bool {
+    const check = probe orelse return !require_probe;
     var port = sync_service.SyncPort.init(check.sync, check.capability_table);
     const session = port.openOverlaySession(
         check.authority,
@@ -232,8 +236,8 @@ fn networkServiceHealthy(probe: ?NetworkProbe) bool {
     return healthy;
 }
 
-fn uiServiceHealthy(probe: ?UiProbe) bool {
-    const check = probe orelse return true;
+fn uiServiceHealthy(probe: ?UiProbe, require_probe: bool) bool {
+    const check = probe orelse return !require_probe;
     var buffer: [320]u8 = undefined;
     return check.session.probeVisibleWindow(&buffer);
 }
@@ -466,6 +470,7 @@ test "update health validates boot core storage network and ui checks and record
         .ui_service_id = ui_service_id,
         .network_probe = network_probe,
         .ui_probe = ui_probe,
+        .require_service_path_probes = true,
     };
 
     var ledger = event_ledger.Ledger.init();
@@ -487,6 +492,40 @@ test "update health validates boot core storage network and ui checks and record
     try std.testing.expectEqual(@as(u32, @intFromEnum(immutable_base.HealthFailure.none)), update_event.detail_code);
     try std.testing.expect(std.mem.indexOf(u8, update_event.detailSlice(), "boot=yes") != null);
     try std.testing.expect(std.mem.indexOf(u8, update_event.detailSlice(), "failure=none") != null);
+
+    const missing_network_probe = evaluate(&manager, &supervisor, &storage, .{
+        .core_service_ids = core_service_ids[0..],
+        .storage_workspace_id = probe_workspace_id,
+        .storage_probe_path = "documents/notes.md",
+        .network_service_id = network_service_id,
+        .ui_service_id = ui_service_id,
+        .ui_probe = ui_probe,
+        .require_service_path_probes = true,
+    });
+    try std.testing.expect(!missing_network_probe.report.network_ok);
+
+    const missing_ui_probe = evaluate(&manager, &supervisor, &storage, .{
+        .core_service_ids = core_service_ids[0..],
+        .storage_workspace_id = probe_workspace_id,
+        .storage_probe_path = "documents/notes.md",
+        .network_service_id = network_service_id,
+        .ui_service_id = ui_service_id,
+        .network_probe = network_probe,
+        .require_service_path_probes = true,
+    });
+    try std.testing.expect(!missing_ui_probe.report.ui_ok);
+
+    const missing_storage_path = evaluate(&manager, &supervisor, &storage, .{
+        .core_service_ids = core_service_ids[0..],
+        .storage_workspace_id = probe_workspace_id,
+        .storage_probe_path = "",
+        .network_service_id = network_service_id,
+        .ui_service_id = ui_service_id,
+        .network_probe = network_probe,
+        .ui_probe = ui_probe,
+        .require_service_path_probes = true,
+    });
+    try std.testing.expect(!missing_storage_path.report.storage_ok);
 }
 
 test "update health failures trigger rollback for each required post-activation check" {
@@ -532,6 +571,7 @@ test "update health failures trigger rollback for each required post-activation 
         .ui_service_id = ui_service_id,
         .network_probe = network_probe,
         .ui_probe = ui_probe,
+        .require_service_path_probes = true,
     };
 
     var ledger = event_ledger.Ledger.init();

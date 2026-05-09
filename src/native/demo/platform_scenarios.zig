@@ -319,7 +319,19 @@ pub fn run(
     }
 
     var recovery = recovery_environment.Environment.init(context.session_service);
+    const recovery_session = recovery.enterRecoveryMode(.{
+        .profile = .recovery,
+        .requester = context.session_service,
+        .actions = &.{
+            .reinstall_base_image,
+            .restore_workspace_export,
+            .repair_sync_metadata,
+            .rotate_device_keys,
+            .revoke_device_trust,
+        },
+    }) catch unreachable;
     if (recovery.verifyAndReinstallImage(
+        &recovery_session,
         &immutable_base_manager,
         "kernel=v2;base=reinstalled;mode=ro",
         platform_image_signer,
@@ -381,6 +393,7 @@ pub fn run(
     _ = context.storage_service_instance.commit(storage_state.notes_workspace_id, 137) catch unreachable;
     support.common.printBootMarker("ZIGOS:PLATFORM:RECOVERY:NOTES_V3_COMMIT");
     _ = recovery.restoreWorkspaceExport(
+        &recovery_session,
         context.storage_service_instance,
         storage_state.notes_workspace_id,
         context.export_package,
@@ -404,6 +417,7 @@ pub fn run(
         }) catch unreachable;
     }
     if (recovery.repairSyncMetadata(
+        &recovery_session,
         sync_service,
         context.storage_service_instance,
         storage_state.notes_workspace_id,
@@ -415,6 +429,7 @@ pub fn run(
     const recovery_device_record = sync_service.findDeviceRecord(recovery_device_principal).?;
     if (recovery_device_record.isTrusted() and recovery_device_record.key_rotation_generation < 2) {
         _ = recovery.rotateDeviceKeys(
+            &recovery_session,
             sync_service,
             context.session_user,
             recovery_device_principal,
@@ -428,6 +443,7 @@ pub fn run(
     }
     if (sync_service.isTrustedDevice(recovery_device_principal)) {
         _ = recovery.revokeDeviceTrust(
+            &recovery_session,
             sync_service,
             context.session_user,
             recovery_device_principal,

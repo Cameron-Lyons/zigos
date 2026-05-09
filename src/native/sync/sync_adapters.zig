@@ -330,7 +330,7 @@ pub const TransportQueue = struct {
             .semantic = request.semantic,
             .encrypted = request.encrypted,
         };
-        frame.path_len = copyPath(&frame.path, request.path);
+        frame.path_len = try copyPath(&frame.path, request.path);
         slot.frame = frame;
         if (!self.target_index.append(transportFrameTargetKey(frame.workspace_id, frame.target_device), slot_index)) {
             _ = self.frames.removeIndex(slot_index);
@@ -476,9 +476,10 @@ pub const DefaultSecretTransferAdapter = struct {
         const object_record = request.store.object(request.object_id) orelse return error.ObjectNotFound;
         if (object_record.object_type != .secret) return error.TypeMismatch;
         const version = request.store.latestVersion(request.object_id) orelse return error.VersionNotFound;
+        if (!(try versionStartsWith(request.store, version, "enc:"))) return error.SecretPayloadNotEncrypted;
         return .{
             .transferred = true,
-            .encrypted_payload = try versionStartsWith(request.store, version, "enc:"),
+            .encrypted_payload = true,
         };
     }
 };
@@ -512,8 +513,9 @@ pub const default_chunk_media_adapter = DefaultChunkMediaAdapter.adapter();
 pub const default_secret_transfer_adapter = DefaultSecretTransferAdapter.adapter();
 pub const default_database_sync_adapter = DefaultDatabaseSyncAdapter.adapter();
 
-fn copyPath(destination: *[workspace.MAX_ENTRY_PATH_BYTES]u8, path: []const u8) usize {
-    const len = @min(destination.len, path.len);
+fn copyPath(destination: *[workspace.MAX_ENTRY_PATH_BYTES]u8, path: []const u8) Error!usize {
+    if (path.len > destination.len) return error.PathTooLong;
+    const len = path.len;
     @memset(destination[0..], 0);
     @memcpy(destination[0..len], path[0..len]);
     return len;
@@ -700,6 +702,52 @@ test "default chunk media adapter reports concrete payload chunks" {
     try std.testing.expectEqual(@as(usize, 2), result.replicated_chunks);
 }
 
+test "secret transfer adapter refuses plaintext secret payloads" {
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 403 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 27 };
+    const tablet = principal.PrincipalId{ .kind = .device, .serial = 28 };
+    const signer = signing.SignerIdentity{
+        .label = "sync-secret-storage",
+        .seed = [_]u8{0x93} ** 32,
+    };
+    var checkpoint_store = storage_service.CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    var storage = storage_service.Service.initWithStore(403, 6, storage_owner, &checkpoint_store);
+    const plaintext_secret = try storage.putVersion(.{
+        .object_type = .secret,
+        .payload = "plain:secret",
+        .metadata = try object_store.signMetadata(signer, "plain-secret", "application/zigos-secret", .secret, "plain:secret", 1),
+    });
+
+    const adapter_value = DefaultSecretTransferAdapter.adapter();
+    try std.testing.expectError(error.SecretPayloadNotEncrypted, adapter_value.transfer(.{
+        .store = &storage,
+        .workspace_id = 99,
+        .object_id = plaintext_secret.object_id.raw(),
+        .from_device = laptop,
+        .to_device = tablet,
+        .personal_e2ee = true,
+    }));
+
+    const encrypted_secret = try storage.putVersion(.{
+        .object_type = .secret,
+        .payload = "enc:secret",
+        .metadata = try object_store.signMetadata(signer, "encrypted-secret", "application/zigos-secret", .secret, "enc:secret", 2),
+    });
+    const transferred = try adapter_value.transfer(.{
+        .store = &storage,
+        .workspace_id = 99,
+        .object_id = encrypted_secret.object_id.raw(),
+        .from_device = laptop,
+        .to_device = tablet,
+        .personal_e2ee = true,
+    });
+    try std.testing.expect(transferred.transferred);
+    try std.testing.expect(transferred.encrypted_payload);
+
+    checkpoint_store.resetPersistent();
+}
+
 test "transport queue records encrypted semantic replication frames" {
     var queue = TransportQueue.init();
     const frame = try queue.enqueue(.{
@@ -743,4 +791,17 @@ test "transport queue records encrypted semantic replication frames" {
     const latest = queue.latestForPath(42, .{ .kind = .device, .serial = 2 }, "secrets/token").?;
     try std.testing.expectEqual(latest_frame.id, latest.id);
     try std.testing.expectEqualStrings("secrets/token", latest.pathSlice());
+
+    const overlong_path: [workspace.MAX_ENTRY_PATH_BYTES + 1]u8 = [_]u8{'a'} ** (workspace.MAX_ENTRY_PATH_BYTES + 1);
+    try std.testing.expectError(error.PathTooLong, queue.enqueue(.{
+        .workspace_id = 42,
+        .object_id = 86,
+        .version_id = 87,
+        .source_device = .{ .kind = .device, .serial = 1 },
+        .target_device = .{ .kind = .device, .serial = 2 },
+        .transport = .relay_assisted,
+        .semantic = .secure_transfer,
+        .encrypted = true,
+        .path = overlong_path[0..],
+    }));
 }

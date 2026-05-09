@@ -30,6 +30,7 @@ const task_runtime_service_mod = @import("../task/task_runtime_service.zig");
 const trust_boot = @import("trust_boot.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
+const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 const workspace_mod = @import("../storage/workspace.zig");
 
 pub const BootstrapState = session_support.BootstrapState;
@@ -111,6 +112,11 @@ pub const SessionManager = struct {
 
     pub fn userspaceCatalogPtr(self: *SessionManager) *userspace_loader.Catalog {
         return &self.runtime_context.userspace_catalog;
+    }
+
+    pub fn userspaceSchedulerPtr(self: *SessionManager) *userspace_scheduler.Scheduler {
+        self.ensureConstructed();
+        return &self.runtime_context.userspace_scheduler;
     }
 
     pub fn serviceDirectoryPtr(self: *SessionManager) *native_service_registry.Service {

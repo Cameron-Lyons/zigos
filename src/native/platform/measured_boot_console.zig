@@ -13,6 +13,12 @@ pub fn printMeasurementSummary(boot: *const measured_boot.BootRecord) void {
     console.print("ZIGOS:PLATFORM:MEASURED_BOOT:ROOT ");
     printHexDigest(&boot.root_digest);
     console.print("\n");
+    console.print("ZIGOS:PLATFORM:MEASURED_BOOT:ROOT_PROVENANCE ");
+    console.print(@tagName(boot.root_provenance));
+    console.print("\n");
+    if (boot.artifact_manifest_verified) {
+        console.print("ZIGOS:PLATFORM:MEASURED_BOOT:ROOT_MANIFEST VERIFIED\n");
+    }
     for (boot.records[0..boot.record_count]) |record| {
         console.print("ZIGOS:PLATFORM:MEASURED_BOOT:RECORD ");
         console.print(@tagName(record.kind));

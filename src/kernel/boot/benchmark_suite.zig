@@ -1199,26 +1199,41 @@ fn benchmarkOverlaySessionFlow(iteration: u32) u64 {
 
 fn benchmarkRecoveryLifecycle(iteration: u32) u64 {
     prepareRecoveryFixture(iteration);
+    const recovery_session = recovery_context.environment.enterRecoveryMode(.{
+        .profile = .recovery,
+        .requester = service(4),
+        .actions = &.{
+            .reinstall_base_image,
+            .restore_workspace_snapshot,
+            .repair_sync_metadata,
+            .rotate_device_keys,
+            .revoke_device_trust,
+        },
+    }) catch unreachable;
     const payload = if ((iteration & 1) == 0) "kernel=v2" else "kernel=v3";
     const reinstalled = recovery_context.environment.verifyAndReinstallImage(
+        &recovery_session,
         &recovery_context.manager,
         payload,
         signer("platform-image", 0x72),
         16 + iteration,
     ) catch unreachable;
     const restored = recovery_context.environment.restoreWorkspaceSnapshot(
+        &recovery_session,
         &recovery_context.storage,
         recovery_context.workspace_id,
         recovery_context.snapshot_id,
         17 + iteration,
     ) catch unreachable;
     const repaired = recovery_context.environment.repairSyncMetadata(
+        &recovery_session,
         &recovery_context.sync,
         &recovery_context.storage,
         recovery_context.workspace_id,
         recovery_context.tablet,
     ) catch unreachable;
     const rotation_generation = recovery_context.environment.rotateDeviceKeys(
+        &recovery_session,
         &recovery_context.sync,
         recovery_context.user,
         recovery_context.tablet,
@@ -1227,6 +1242,7 @@ fn benchmarkRecoveryLifecycle(iteration: u32) u64 {
         18 + iteration,
     ) catch unreachable;
     const revoked = recovery_context.environment.revokeDeviceTrust(
+        &recovery_session,
         &recovery_context.sync,
         recovery_context.user,
         recovery_context.tablet,
