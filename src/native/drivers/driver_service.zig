@@ -13,6 +13,7 @@ pub const DeviceClass = enum(u8) {
     storage_controller,
     graphics_adapter,
     audio_print_io,
+    input_device,
 };
 
 pub const BootstrapTransport = enum(u8) {
@@ -102,6 +103,7 @@ pub const SignedRegistrationRequest = struct {
 pub const Error = error{
     CapabilityNotFound,
     CapabilityRevoked,
+    DriverNotFound,
     DriverTableFull,
     DuplicateServiceId,
     DuplicateDeviceBinding,
@@ -111,6 +113,7 @@ pub const Error = error{
     AuthorityHolderMismatch,
     AuthorityScopeViolation,
     InvalidBootstrapTransport,
+    InvalidHotSwapBinding,
     IommuRequired,
 };
 
@@ -162,25 +165,7 @@ pub const Directory = struct {
     }
 
     pub fn registerSigned(self: *Directory, request: SignedRegistrationRequest) Error!*DriverRecord {
-        const authority = request.capability_table.query(request.authority_capability_id) orelse return error.CapabilityNotFound;
-        if (request.signer.len == 0) return error.InvalidBundleSignature;
-        if (!request.require_iommu) return error.IommuRequired;
-        if (!request.capability_table.isUsable(authority, request.now_ticks)) return error.CapabilityRevoked;
-        if (!authority.holder.eql(request.requester)) return error.AuthorityHolderMismatch;
-        if (authority.scope.task_id) |task_id| {
-            if (task_id != request.owner_task_id) return error.AuthorityScopeViolation;
-        }
-        if (authority.target.kind != .device or authority.target.id != request.device_id) {
-            return error.InvalidAuthorityTarget;
-        }
-        if (!rightsAreSubset(authority.rights, allowedRightsFor(request.device_class))) {
-            return error.AuthorityRightsEscalation;
-        }
-        if (request.bootstrap_transport == .kernel_published_data_plane and
-            !supportsKernelPublishedTransport(request.device_class))
-        {
-            return error.InvalidBootstrapTransport;
-        }
+        const authority = try validateSignedRequest(request);
 
         if (self.findByService(request.service_id) != null) {
             return error.DuplicateServiceId;
@@ -193,24 +178,35 @@ pub const Directory = struct {
         const slot_index = fixed_table.firstFreeSlotIndex(DriverSlot, MAX_DRIVER_SERVICES, &self.slots) orelse return error.DriverTableFull;
         const slot = &self.slots[slot_index];
         slot.in_use = true;
-        slot.driver = .{
+        slot.driver = self.recordFromRequest(request, authority, 1);
+        id_index.insert(SERVICE_INDEX_CAPACITY, &self.service_index_slots, slot.driver.service_id, slot_index, "driver service id index covers driver table");
+        return &slot.driver;
+    }
+
+    pub fn hotSwap(self: *Directory, request: RegistrationRequest) Error!*DriverRecord {
+        return self.hotSwapSigned(.{
             .service_id = request.service_id,
             .owner_task_id = request.owner_task_id,
             .device_id = request.device_id,
             .device_class = request.device_class,
-            .authority_capability_id = authority.id,
-            .restart_generation = 1,
+            .authority_capability_id = request.authority_capability_id,
+            .capability_table = request.capability_table,
+            .requester = request.requester,
+            .now_ticks = request.now_ticks,
+            .signer = request.bundle.signature.signer,
             .bootstrap_transport = request.bootstrap_transport,
-            .dma_domain_id = self.allocateDmaDomainId(),
-            .dma_protection = .iommu_enforced,
-            .dma_range_count = 0,
-            .dma_ranges = [_]DmaRange{zeroDmaRange()} ** MAX_DMA_RANGES,
-            .signer_len = 0,
-            .signer = [_]u8{0} ** 32,
-        };
-        slot.driver.dma_range_count = defaultDmaRanges(slot.driver.dma_ranges[0..], request.device_class, request.device_id);
-        writeSigner(&slot.driver, request.signer);
-        id_index.insert(SERVICE_INDEX_CAPACITY, &self.service_index_slots, slot.driver.service_id, slot_index, "driver service id index covers driver table");
+            .require_iommu = request.require_iommu,
+        });
+    }
+
+    pub fn hotSwapSigned(self: *Directory, request: SignedRegistrationRequest) Error!*DriverRecord {
+        const slot = fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, request.service_id, driverSlotMatchesServiceId) orelse return error.DriverNotFound;
+        if (slot.driver.device_id != request.device_id or slot.driver.device_class != request.device_class) {
+            return error.InvalidHotSwapBinding;
+        }
+        const next_generation = slot.driver.restart_generation + 1;
+        const authority = try validateSignedRequest(request);
+        slot.driver = self.recordFromRequest(request, authority, next_generation);
         return &slot.driver;
     }
 
@@ -245,6 +241,32 @@ pub const Directory = struct {
         defer self.next_dma_domain_id += 1;
         return self.next_dma_domain_id;
     }
+
+    fn recordFromRequest(
+        self: *Directory,
+        request: SignedRegistrationRequest,
+        authority: capability.Capability,
+        restart_generation: u32,
+    ) DriverRecord {
+        var record = DriverRecord{
+            .service_id = request.service_id,
+            .owner_task_id = request.owner_task_id,
+            .device_id = request.device_id,
+            .device_class = request.device_class,
+            .authority_capability_id = authority.id,
+            .restart_generation = restart_generation,
+            .bootstrap_transport = request.bootstrap_transport,
+            .dma_domain_id = self.allocateDmaDomainId(),
+            .dma_protection = .iommu_enforced,
+            .dma_range_count = 0,
+            .dma_ranges = [_]DmaRange{zeroDmaRange()} ** MAX_DMA_RANGES,
+            .signer_len = 0,
+            .signer = [_]u8{0} ** 32,
+        };
+        record.dma_range_count = defaultDmaRanges(record.dma_ranges[0..], request.device_class, request.device_id);
+        writeSigner(&record, request.signer);
+        return record;
+    }
 };
 
 fn driverSlotServiceId(slot: *const DriverSlot) u64 {
@@ -272,20 +294,23 @@ pub fn allowedRightsFor(device_class: DeviceClass) capability.CapabilityRights {
         .audio_print_io => .{ .device = .{
             .device_use = true,
         } },
+        .input_device => .{ .device = .{
+            .device_use = true,
+        } },
     };
 }
 
 pub fn supportsKernelPublishedTransport(device_class: DeviceClass) bool {
     return switch (device_class) {
         .storage_controller => true,
-        .network_adapter, .graphics_adapter, .audio_print_io => false,
+        .network_adapter, .graphics_adapter, .audio_print_io, .input_device => false,
     };
 }
 
 pub fn kernelDriverRole(device_class: DeviceClass) KernelDriverRole {
     return switch (device_class) {
         .storage_controller => .bootstrap_broker_only,
-        .network_adapter, .graphics_adapter, .audio_print_io => .inventory_only,
+        .network_adapter, .graphics_adapter, .audio_print_io, .input_device => .inventory_only,
     };
 }
 
@@ -314,6 +339,29 @@ fn rightsAreSubset(owned: capability.CapabilityRights, allowed: capability.Capab
     return (owned_bits & ~allowed_bits) == 0;
 }
 
+fn validateSignedRequest(request: SignedRegistrationRequest) Error!capability.Capability {
+    const authority = request.capability_table.query(request.authority_capability_id) orelse return error.CapabilityNotFound;
+    if (request.signer.len == 0) return error.InvalidBundleSignature;
+    if (!request.require_iommu) return error.IommuRequired;
+    if (!request.capability_table.isUsable(authority, request.now_ticks)) return error.CapabilityRevoked;
+    if (!authority.holder.eql(request.requester)) return error.AuthorityHolderMismatch;
+    if (authority.scope.task_id) |task_id| {
+        if (task_id != request.owner_task_id) return error.AuthorityScopeViolation;
+    }
+    if (authority.target.kind != .device or authority.target.id != request.device_id) {
+        return error.InvalidAuthorityTarget;
+    }
+    if (!rightsAreSubset(authority.rights, allowedRightsFor(request.device_class))) {
+        return error.AuthorityRightsEscalation;
+    }
+    if (request.bootstrap_transport == .kernel_published_data_plane and
+        !supportsKernelPublishedTransport(request.device_class))
+    {
+        return error.InvalidBootstrapTransport;
+    }
+    return authority;
+}
+
 fn writeSigner(record: *DriverRecord, signer: []const u8) void {
     record.signer_len = @min(signer.len, record.signer.len);
     @memcpy(record.signer[0..record.signer_len], signer[0..record.signer_len]);
@@ -336,6 +384,7 @@ fn defaultDmaRanges(dest: []DmaRange, device_class: DeviceClass, device_id: u64)
             .storage_controller => 128 * 1024,
             .graphics_adapter => 16 * 1024 * 1024,
             .audio_print_io => 1024 * 1024,
+            .input_device => 256 * 1024,
         },
     };
     if (dest.len > 1 and (device_class == .network_adapter or device_class == .storage_controller)) {
@@ -424,17 +473,126 @@ test "driver services require signed least-privilege device authority" {
     try std.testing.expect(driver.dma_domain_id != 1);
 }
 
+test "driver hot-swap rebinds authority signer and dma domain" {
+    var directory = Directory.init();
+    var capabilities = capability.CapabilityTable.init();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 12 };
+    const device_id: u64 = 0x1234_1111_0044;
+    const first_authority = try capabilities.mintBootRoot(.{
+        .holder = owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = authorityTarget(device_id),
+        .rights = allowedRightsFor(.graphics_adapter),
+        .scope = .{
+            .task_id = 44,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = true,
+        },
+        .audit = .{},
+    });
+    const second_authority = try capabilities.mintBootRoot(.{
+        .holder = owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = authorityTarget(device_id),
+        .rights = allowedRightsFor(.graphics_adapter),
+        .scope = .{
+            .task_id = 44,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = true,
+        },
+        .audit = .{},
+    });
+
+    const first = try directory.registerSigned(.{
+        .service_id = 44,
+        .owner_task_id = 44,
+        .device_id = device_id,
+        .device_class = .graphics_adapter,
+        .authority_capability_id = first_authority.id,
+        .capability_table = &capabilities,
+        .requester = owner,
+        .now_ticks = 1,
+        .signer = "driver-v1",
+    });
+    const first_dma_domain = first.dma_domain_id;
+
+    const swapped = try directory.hotSwapSigned(.{
+        .service_id = 44,
+        .owner_task_id = 44,
+        .device_id = device_id,
+        .device_class = .graphics_adapter,
+        .authority_capability_id = second_authority.id,
+        .capability_table = &capabilities,
+        .requester = owner,
+        .now_ticks = 2,
+        .signer = "driver-v2",
+    });
+
+    try std.testing.expectEqual(@as(u32, 2), swapped.restart_generation);
+    try std.testing.expect(swapped.dma_domain_id != first_dma_domain);
+    try std.testing.expectEqual(second_authority.id, swapped.authority_capability_id);
+    try std.testing.expectEqualStrings("driver-v2", swapped.signerSlice());
+    try std.testing.expectEqual(swapped.service_id, directory.findByClass(.graphics_adapter).?.service_id);
+    try std.testing.expectError(error.InvalidHotSwapBinding, directory.hotSwapSigned(.{
+        .service_id = 44,
+        .owner_task_id = 44,
+        .device_id = device_id + 1,
+        .device_class = .graphics_adapter,
+        .authority_capability_id = second_authority.id,
+        .capability_table = &capabilities,
+        .requester = owner,
+        .now_ticks = 3,
+        .signer = "driver-v3",
+    }));
+    try std.testing.expectError(error.DriverNotFound, directory.hotSwapSigned(.{
+        .service_id = 45,
+        .owner_task_id = 45,
+        .device_id = device_id,
+        .device_class = .graphics_adapter,
+        .authority_capability_id = second_authority.id,
+        .capability_table = &capabilities,
+        .requester = owner,
+        .now_ticks = 3,
+        .signer = "driver-v3",
+    }));
+}
+
 test "kernel driver roles keep data planes out of kernel by default" {
     try std.testing.expectEqual(KernelDriverRole.inventory_only, kernelDriverRole(.network_adapter));
     try std.testing.expectEqual(KernelDriverRole.bootstrap_broker_only, kernelDriverRole(.storage_controller));
+    try std.testing.expectEqual(KernelDriverRole.inventory_only, kernelDriverRole(.graphics_adapter));
+    try std.testing.expectEqual(KernelDriverRole.inventory_only, kernelDriverRole(.audio_print_io));
+    try std.testing.expectEqual(KernelDriverRole.inventory_only, kernelDriverRole(.input_device));
     try std.testing.expect(requiresUserspaceDataPlane(.network_adapter));
     try std.testing.expect(requiresUserspaceDataPlane(.storage_controller));
+    try std.testing.expect(requiresUserspaceDataPlane(.graphics_adapter));
+    try std.testing.expect(requiresUserspaceDataPlane(.audio_print_io));
+    try std.testing.expect(requiresUserspaceDataPlane(.input_device));
     try std.testing.expect(!permitsKernelDataPlane(.network_adapter));
     try std.testing.expect(!permitsKernelDataPlane(.storage_controller));
+    try std.testing.expect(!permitsKernelDataPlane(.graphics_adapter));
+    try std.testing.expect(!permitsKernelDataPlane(.audio_print_io));
+    try std.testing.expect(!permitsKernelDataPlane(.input_device));
     try std.testing.expect(!supportsKernelPublishedTransport(.network_adapter));
     try std.testing.expect(supportsKernelPublishedTransport(.storage_controller));
+    try std.testing.expect(!supportsKernelPublishedTransport(.graphics_adapter));
+    try std.testing.expect(!supportsKernelPublishedTransport(.audio_print_io));
+    try std.testing.expect(!supportsKernelPublishedTransport(.input_device));
     try std.testing.expect(!permitsKernelBootstrapBroker(.network_adapter));
     try std.testing.expect(permitsKernelBootstrapBroker(.storage_controller));
+    try std.testing.expect(!permitsKernelBootstrapBroker(.graphics_adapter));
+    try std.testing.expect(!permitsKernelBootstrapBroker(.audio_print_io));
+    try std.testing.expect(!permitsKernelBootstrapBroker(.input_device));
 }
 
 test "network drivers cannot request kernel published data planes" {
@@ -641,6 +799,36 @@ test "kernel bootstrap transport is only granted to supported driver classes" {
         .authority_capability_id = graphics_authority.id,
         .capability_table = &capabilities,
         .requester = graphics_authority.holder,
+        .now_ticks = 1,
+        .bundle = bundle,
+        .bootstrap_transport = .kernel_published_data_plane,
+    }));
+
+    const input_authority = try capabilities.mintBootRoot(.{
+        .holder = .{ .kind = .service, .serial = 5 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = authorityTarget(0x8042_0001),
+        .rights = allowedRightsFor(.input_device),
+        .scope = .{
+            .task_id = 13,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = true,
+        },
+        .audit = .{},
+    });
+    try std.testing.expectError(error.InvalidBootstrapTransport, directory.register(.{
+        .service_id = 61,
+        .owner_task_id = 13,
+        .device_id = 0x8042_0001,
+        .device_class = .input_device,
+        .authority_capability_id = input_authority.id,
+        .capability_table = &capabilities,
+        .requester = input_authority.holder,
         .now_ticks = 1,
         .bundle = bundle,
         .bootstrap_transport = .kernel_published_data_plane,

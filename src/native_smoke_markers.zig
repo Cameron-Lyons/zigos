@@ -38,6 +38,7 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.platform_build_artifact_manifest_verified,
     boot_markers.platform_artifact_manifest_verified,
     boot_markers.platform_measured_boot_recorded,
+    boot_markers.platform_measured_boot_verified_root,
     boot_markers.task_session_ready,
     boot_markers.native_ready,
 };
@@ -60,6 +61,7 @@ pub const driver_restart_required = [_][]const u8{
 
 pub const ab_rollback_required = [_][]const u8{
     boot_markers.platform_immutable_base_active,
+    boot_markers.platform_immutable_base_boot_selection,
     boot_markers.platform_activation_rollback_ok,
     boot_markers.platform_ab_image_rollback_ok,
 };
@@ -92,6 +94,7 @@ test "native smoke gate requires measured boot reboot comparison markers" {
     try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_bootloader_measurement_provided));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_build_artifact_manifest_verified));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_measured_boot_recorded));
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_measured_boot_verified_root));
     try std.testing.expect(contains(&first_boot_required, boot_markers.platform_measured_boot_first));
     try std.testing.expect(contains(&cold_reboot_required, boot_markers.platform_measured_boot_same_root));
     try std.testing.expect(contains(&cold_reboot_required, boot_markers.platform_measured_boot_same_shape));

@@ -13,6 +13,7 @@ const signing = @import("../core/signing.zig");
 const sync_adapters = @import("sync_adapters.zig");
 const state_store = @import("sync_state_store.zig");
 const state_support = @import("sync_state_support.zig");
+const sync_transport = @import("sync_transport_harness.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const workspace = @import("../storage/workspace.zig");
 
@@ -87,6 +88,47 @@ pub const OverlaySession = struct {
         return self.state == .established;
     }
 };
+pub const OverlayRelayFrameRequest = struct {
+    workspace_id: u64,
+    from_device: principal.PrincipalId,
+    to_device: principal.PrincipalId,
+    usage: OverlaySessionUse,
+    private_service_label: ?[]const u8 = null,
+    relay_capability_id: u64,
+    payload: []const u8,
+    signer: signing.SignerIdentity,
+    tick: u64,
+};
+pub const OverlayRelayFrameResult = struct {
+    overlay_session_id: u64,
+    transport_session_id: u64,
+    usage: OverlaySessionUse,
+    encrypted: bool,
+    relay_encrypted: bool,
+    remote_access: bool,
+    egress_allowed: bool,
+    delivered: bool,
+    delivered_len: usize,
+    packet_digest: [32]u8,
+    service_identity_len: usize = 0,
+    service_identity: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    relay_domain_len: usize = 0,
+    relay_domain: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    private_service_len: usize = 0,
+    private_service: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+
+    pub fn serviceIdentitySlice(self: *const OverlayRelayFrameResult) []const u8 {
+        return self.service_identity[0..self.service_identity_len];
+    }
+
+    pub fn relayDomainSlice(self: *const OverlayRelayFrameResult) []const u8 {
+        return self.relay_domain[0..self.relay_domain_len];
+    }
+
+    pub fn privateServiceSlice(self: *const OverlayRelayFrameResult) []const u8 {
+        return self.private_service[0..self.private_service_len];
+    }
+};
 pub const ReplicaEntry = state_support.ReplicaEntry;
 pub const ConflictRecord = state_support.ConflictRecord;
 pub const DatabaseContract = state_support.DatabaseContract;
@@ -96,6 +138,7 @@ pub const ChunkMediaAdapter = sync_adapters.ChunkMediaAdapter;
 pub const SecretTransferAdapter = sync_adapters.SecretTransferAdapter;
 pub const DatabaseSyncAdapter = sync_adapters.DatabaseSyncAdapter;
 pub const TransportFrame = sync_adapters.TransportFrame;
+pub const TransportFrameRequest = sync_adapters.QueueFrameRequest;
 pub const TransportQueue = sync_adapters.TransportQueue;
 pub const Error = state_support.Error;
 pub const AuthorityContext = service_authority.Context;
@@ -364,6 +407,17 @@ pub const SyncPort = struct {
         return self.service.closeOverlaySession(session_id, tick);
     }
 
+    pub fn sendOverlayRelayFrame(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        network_capabilities: *const capability.CapabilityTable,
+        relay: *sync_transport.Relay,
+        request: OverlayRelayFrameRequest,
+    ) (AuthorityError || Error || sync_transport.Error)!OverlayRelayFrameResult {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.sendOverlayRelayFrame(network_capabilities, relay, request);
+    }
+
     pub fn setReplicaVersion(
         self: *SyncPort,
         authority: AuthorityContext,
@@ -400,6 +454,16 @@ pub const SyncPort = struct {
     ) (AuthorityError || Error)!ReplicationSummary {
         _ = try self.requireSyncAuthority(authority);
         return self.service.replicateWorkspace(store, workspace_id, from_device, to_device, transport);
+    }
+
+    pub fn acceptTransportFrame(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        store: *const storage_service.Service,
+        request: TransportFrameRequest,
+    ) (AuthorityError || Error)!TransportFrame {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.acceptTransportFrame(store, request);
     }
 
     pub fn transferSecretObject(
@@ -870,6 +934,61 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return true;
         }
 
+        fn sendOverlayRelayFrame(
+            self: *Self,
+            network_capabilities: *const capability.CapabilityTable,
+            relay: *sync_transport.Relay,
+            request: OverlayRelayFrameRequest,
+        ) (Error || sync_transport.Error)!OverlayRelayFrameResult {
+            const policy = self.findWorkspacePolicy(request.workspace_id) orelse return error.WorkspacePolicyNotFound;
+            const relay_policy_id = policy.relay_policy_id orelse return error.TransportDenied;
+
+            var broker = self.egressBroker(network_capabilities);
+            var transport = sync_transport.Harness.init();
+            const transport_session = try transport.openRelay(&broker, .{
+                .task_id = self.task_id,
+                .principal_id = self.owner,
+                .capability_id = request.relay_capability_id,
+                .policy_id = relay_policy_id,
+                .evidence = .{ .destination = .{ .domain = policy.relayDomainSlice() } },
+                .now_ticks = request.tick,
+            }, request.from_device, request.to_device, policy.relayDomainSlice());
+            const overlay_session = try self.openOverlaySession(
+                request.workspace_id,
+                request.from_device,
+                request.to_device,
+                request.usage,
+                .relay_assisted,
+                request.private_service_label,
+                request.tick,
+            );
+
+            const signed_frame = try transport.encryptSignedFrame(&transport_session, request.payload, request.signer);
+            try relay.submit(signed_frame.packet);
+            var delivered_buffer: [sync_transport.MAX_PACKET_BYTES]u8 = undefined;
+            const delivered = (try relay.deliverNext(&transport_session, delivered_buffer[0..])) orelse return error.RelayDeliveryMissing;
+            if (!std.mem.eql(u8, delivered, request.payload)) return error.PacketAuthenticationFailed;
+
+            var result = OverlayRelayFrameResult{
+                .overlay_session_id = overlay_session.session_id,
+                .transport_session_id = transport_session.id,
+                .usage = overlay_session.usage,
+                .encrypted = overlay_session.encrypted and signed_frame.packet.encrypted,
+                .relay_encrypted = overlay_session.relay_encrypted,
+                .remote_access = overlay_session.remote_access,
+                .egress_allowed = signed_frame.packet.egress_allowed,
+                .delivered = true,
+                .delivered_len = delivered.len,
+                .packet_digest = signed_frame.packet_digest,
+            };
+            result.service_identity_len = native_util.copyTextExact(&result.service_identity, overlay_session.serviceIdentitySlice()) catch return error.ServiceIdentityTooLong;
+            result.relay_domain_len = native_util.copyTextExact(&result.relay_domain, overlay_session.relayDomainSlice()) catch return error.NetworkTargetTooLong;
+            if (overlay_session.private_service_len != 0) {
+                result.private_service_len = native_util.copyTextExact(&result.private_service, overlay_session.privateServiceSlice()) catch return error.ServiceIdentityTooLong;
+            }
+            return result;
+        }
+
         fn setReplicaVersion(
             self: *Self,
             workspace_id: u64,
@@ -880,6 +999,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         ) Error!void {
             if (path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
             try self.setReplicaVersionForPathHash(workspace_id, device_id, path, workspace.pathHash(path), object_id, version_id, 0);
+            try self.checkpoint();
         }
 
         pub fn replicaVersion(
@@ -1017,6 +1137,50 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 try self.checkpoint();
             }
             return summary;
+        }
+
+        fn acceptTransportFrame(
+            self: *Self,
+            store: *const storage_service.Service,
+            request: TransportFrameRequest,
+        ) Error!TransportFrame {
+            try self.ensureTrustedDevices(request.source_device, request.target_device);
+            const policy = self.findWorkspacePolicy(request.workspace_id) orelse return error.WorkspacePolicyNotFound;
+            try self.authorizeTransport(policy, request.transport, null);
+            if (policy.personal_e2ee and !request.encrypted) return error.TransportDenied;
+
+            const entry = store.resolve(request.workspace_id, request.path) catch |err| switch (err) {
+                error.EntryNotFound => return error.VersionNotFound,
+                else => return err,
+            };
+            if (entry.object_id.raw() != request.object_id or entry.version_id.raw() != request.version_id) {
+                return error.VersionNotFound;
+            }
+            const expected_semantic = classifyEntry(entry);
+            if (request.semantic != expected_semantic) return error.SyncSemanticMismatch;
+
+            switch (expected_semantic) {
+                .mergeable_crdt => _ = try self.mergeable_document_adapter.merge(.{
+                    .store = store,
+                    .entry = entry,
+                    .remote_version_id = request.version_id,
+                }),
+                .chunked_snapshot => _ = try self.chunk_media_adapter.replicate(.{
+                    .store = store,
+                    .entry = entry,
+                }),
+                .secure_transfer => _ = try self.secret_transfer_adapter.transfer(.{
+                    .store = store,
+                    .workspace_id = request.workspace_id,
+                    .object_id = request.object_id,
+                    .from_device = request.source_device,
+                    .to_device = request.target_device,
+                    .personal_e2ee = policy.personal_e2ee,
+                }),
+                .transactional_contract => {},
+            }
+
+            return self.transport_queue.enqueue(request);
         }
 
         fn transferSecretObject(

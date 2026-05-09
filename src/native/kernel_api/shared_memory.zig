@@ -5,9 +5,11 @@ const indexed_arena = @import("../core/indexed_arena.zig");
 
 pub const MAX_SHARED_MEMORY_OBJECTS: usize = 24;
 pub const MAX_MAPPINGS_PER_OBJECT: usize = 8;
+pub const PAGE_SIZE: usize = 4096;
 const SHARED_MEMORY_INDEX_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * 2;
 const MAPPING_EDGE_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * MAX_MAPPINGS_PER_OBJECT;
 const MAPPING_INDEX_CAPACITY: usize = MAPPING_EDGE_CAPACITY * 2;
+const SHARED_MEMORY_BASE: u64 = 0x0000_7000_0000_0000;
 
 pub const ComputeTarget = enum(u8) {
     cpu,
@@ -41,6 +43,9 @@ pub const Object = struct {
     id: ids.SharedMemoryId,
     owner_task_id: ids.TaskId,
     size_bytes: usize,
+    page_base: u64,
+    page_count: usize,
+    label_hash: u64,
     revocation_generation: u32,
     attachment_generation: u32,
     revoked: bool,
@@ -58,9 +63,23 @@ pub const Object = struct {
     }
 };
 
+pub const MappingDescriptor = struct {
+    object_id: ids.SharedMemoryId,
+    task_id: ids.TaskId,
+    target: ?ComputeTarget = null,
+    page_base: u64,
+    page_count: usize,
+    size_bytes: usize,
+    label_hash: u64,
+    revocation_generation: u32,
+    attachment_generation: u32,
+    zero_copy: bool,
+};
+
 pub const Error = error{
     AcceleratorAccessDenied,
     AcceleratorAlreadyAttached,
+    AcceleratorNotAttached,
     AlreadyMapped,
     MappingNotFound,
     Revoked,
@@ -79,6 +98,7 @@ const MappingIndex = indexed_arena.MultimapIndex(MAPPING_EDGE_CAPACITY, MAPPING_
 
 pub const Table = struct {
     next_object_id: u64 = 1,
+    next_page_number: u64 = 1,
     arena: ObjectArena = ObjectArena.init(),
     mapping_index: MappingIndex = MappingIndex.init(),
 
@@ -96,14 +116,29 @@ pub const Table = struct {
         size_bytes: usize,
         compute_access: ComputeAccess,
     ) Error!Object {
+        return self.createLabeledWithAccess(owner_task_id, size_bytes, "", compute_access);
+    }
+
+    pub fn createLabeledWithAccess(
+        self: *Table,
+        owner_task_id: ids.TaskId,
+        size_bytes: usize,
+        label: []const u8,
+        compute_access: ComputeAccess,
+    ) Error!Object {
         if (size_bytes == 0) return error.SizeZero;
 
         const object_id = self.allocateObjectId();
+        const page_count = pageCount(size_bytes);
+        const page_base = try self.allocatePages(page_count);
         const slot = self.arena.reserve(object_id) orelse return error.TableFull;
         slot.object = .{
             .id = object_id,
             .owner_task_id = owner_task_id,
             .size_bytes = size_bytes,
+            .page_base = page_base,
+            .page_count = page_count,
+            .label_hash = labelHash(label),
             .revocation_generation = 1,
             .attachment_generation = 1,
             .revoked = false,
@@ -197,6 +232,28 @@ pub const Table = struct {
         };
     }
 
+    pub fn taskMappingDescriptor(
+        self: *const Table,
+        object_id: ids.SharedMemoryId,
+        task_id: ids.TaskId,
+    ) Error!MappingDescriptor {
+        const object = self.findConst(object_id) orelse return error.SharedMemoryNotFound;
+        if (object.revoked) return error.Revoked;
+        if (!self.hasMapping(object_id, task_id)) return error.MappingNotFound;
+        return mappingDescriptorFor(object, task_id, null, false);
+    }
+
+    pub fn acceleratorMappingDescriptor(
+        self: *const Table,
+        object_id: ids.SharedMemoryId,
+        target: ComputeTarget,
+    ) Error!MappingDescriptor {
+        const object = self.findConst(object_id) orelse return error.SharedMemoryNotFound;
+        if (object.revoked) return error.Revoked;
+        if (!object.attachedTo(target)) return error.AcceleratorNotAttached;
+        return mappingDescriptorFor(object, ids.TaskId.zero, target, true);
+    }
+
     pub fn allowsAccelerator(self: *const Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!bool {
         const object = self.findConst(object_id) orelse return error.SharedMemoryNotFound;
         return object.allowsCompute(target);
@@ -252,6 +309,14 @@ pub const Table = struct {
         return ids.sharedMemory(self.next_object_id);
     }
 
+    fn allocatePages(self: *Table, count: usize) Error!u64 {
+        const page_number = self.next_page_number;
+        const next_page_number = std.math.add(u64, page_number, @intCast(count)) catch return error.TableFull;
+        const page_offset = std.math.mul(u64, page_number, PAGE_SIZE) catch return error.TableFull;
+        self.next_page_number = next_page_number;
+        return std.math.add(u64, SHARED_MEMORY_BASE, page_offset) catch return error.TableFull;
+    }
+
     fn find(self: *Table, object_id: ids.SharedMemoryId) ?*Object {
         const slot = self.arena.get(object_id) orelse return null;
         return &slot.object;
@@ -276,6 +341,9 @@ fn zeroObject() Object {
         .id = ids.SharedMemoryId.zero,
         .owner_task_id = ids.TaskId.zero,
         .size_bytes = 0,
+        .page_base = 0,
+        .page_count = 0,
+        .label_hash = 0,
         .revocation_generation = 0,
         .attachment_generation = 0,
         .revoked = false,
@@ -283,6 +351,34 @@ fn zeroObject() Object {
         .attached_compute = ComputeAccess.empty(),
         .mapped_task_ids = [_]ids.TaskId{ids.TaskId.zero} ** MAX_MAPPINGS_PER_OBJECT,
         .mapping_count = 0,
+    };
+}
+
+fn pageCount(size_bytes: usize) usize {
+    return (size_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+}
+
+fn labelHash(label: []const u8) u64 {
+    return std.hash.Wyhash.hash(0x5A47_5348_4D45_4D00, label);
+}
+
+fn mappingDescriptorFor(
+    object: *const Object,
+    task_id: ids.TaskId,
+    target: ?ComputeTarget,
+    zero_copy: bool,
+) MappingDescriptor {
+    return .{
+        .object_id = object.id,
+        .task_id = task_id,
+        .target = target,
+        .page_base = object.page_base,
+        .page_count = object.page_count,
+        .size_bytes = object.size_bytes,
+        .label_hash = object.label_hash,
+        .revocation_generation = object.revocation_generation,
+        .attachment_generation = object.attachment_generation,
+        .zero_copy = zero_copy,
     };
 }
 
@@ -297,23 +393,32 @@ fn setComputeAccess(access: *ComputeAccess, target: ComputeTarget, value: bool) 
 
 test "shared memory objects map unmap and revoke across tasks" {
     var table = Table.init();
-    const object = try table.create(ids.task(7), 4096);
+    const object = try table.createLabeledWithAccess(ids.task(7), 4096, "ipc-ring", .{});
 
     try table.map(object.id, ids.task(7));
     try table.map(object.id, ids.task(8));
     try std.testing.expectEqual(@as(u16, 2), (try table.descriptor(object.id)).mapped_task_count);
+    const owner_mapping = try table.taskMappingDescriptor(object.id, ids.task(7));
+    const peer_mapping = try table.taskMappingDescriptor(object.id, ids.task(8));
+    try std.testing.expectEqual(object.page_base, owner_mapping.page_base);
+    try std.testing.expectEqual(owner_mapping.page_base, peer_mapping.page_base);
+    try std.testing.expectEqual(@as(usize, 1), owner_mapping.page_count);
+    try std.testing.expectEqual(object.label_hash, owner_mapping.label_hash);
+    try std.testing.expect(!owner_mapping.zero_copy);
     try std.testing.expect(try table.unmap(object.id, ids.task(8)));
+    try std.testing.expectError(error.MappingNotFound, table.taskMappingDescriptor(object.id, ids.task(8)));
 
     try table.revoke(object.id);
     const descriptor = try table.descriptor(object.id);
     try std.testing.expectEqual(@as(u16, 0), descriptor.mapped_task_count);
     try std.testing.expectEqual(@as(u16, 1), descriptor.flags);
+    try std.testing.expectError(error.Revoked, table.taskMappingDescriptor(object.id, ids.task(7)));
     try std.testing.expectError(error.Revoked, table.map(object.id, ids.task(9)));
 }
 
 test "shared memory objects label accelerator access and explicit zero-copy attachments" {
     var table = Table.init();
-    const object = try table.createWithAccess(ids.task(7), 16 * 1024, .{
+    const object = try table.createLabeledWithAccess(ids.task(7), 16 * 1024, "media-frame-buffer", .{
         .gpu = true,
         .media = true,
     });
@@ -322,12 +427,21 @@ test "shared memory objects label accelerator access and explicit zero-copy atta
     try std.testing.expect(!table.find(object.id).?.allowsCompute(.npu));
     try table.attachAccelerator(object.id, .media);
     try std.testing.expect(table.find(object.id).?.attachedTo(.media));
+    const media_mapping = try table.acceleratorMappingDescriptor(object.id, .media);
+    try std.testing.expect(media_mapping.zero_copy);
+    try std.testing.expectEqual(ComputeTarget.media, media_mapping.target.?);
+    try std.testing.expectEqual(object.page_base, media_mapping.page_base);
+    try std.testing.expectEqual(object.label_hash, media_mapping.label_hash);
     try std.testing.expectError(error.AcceleratorAccessDenied, table.attachAccelerator(object.id, .npu));
     try std.testing.expect(try table.detachAccelerator(object.id, .media));
     try std.testing.expect(!table.find(object.id).?.attachedTo(.media));
+    try std.testing.expectError(error.AcceleratorNotAttached, table.acceleratorMappingDescriptor(object.id, .media));
 
     try table.attachAccelerator(object.id, .gpu);
+    const gpu_mapping = try table.acceleratorMappingDescriptor(object.id, .gpu);
+    try std.testing.expectEqual(media_mapping.page_base, gpu_mapping.page_base);
     try table.revoke(object.id);
     try std.testing.expect(!table.find(object.id).?.attachedTo(.gpu));
+    try std.testing.expectError(error.Revoked, table.acceleratorMappingDescriptor(object.id, .gpu));
     try std.testing.expectError(error.Revoked, table.attachAccelerator(object.id, .gpu));
 }

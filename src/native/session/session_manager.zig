@@ -12,6 +12,7 @@ const storage_service = @import("../storage/storage_service.zig");
 const supervisor = @import("supervisor.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service = @import("../task/task_runtime_service.zig");
+const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 
@@ -50,6 +51,10 @@ pub const testing = struct {
 
     pub fn runtimeServicePtr() *task_runtime_service.Service {
         return default_manager.runtimeServicePtr();
+    }
+
+    pub fn userspaceSchedulerPtr() *userspace_scheduler.Scheduler {
+        return default_manager.userspaceSchedulerPtr();
     }
 
     pub fn serviceDirectoryPtr() *native_service_registry.Service {

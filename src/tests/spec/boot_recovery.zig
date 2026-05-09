@@ -178,12 +178,27 @@ pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {
     _ = try sync_port.replicateWorkspace(sync_authority, &storage, workspace_record.id.raw(), primary, tablet, .device_to_device);
 
     var recovery = recovery_environment.Environment.init(storage_owner);
-    try std.testing.expect(try recovery.verifyAndReinstallImage(&manager, "kernel=v2", image_signer, 16));
-    try std.testing.expect(try recovery.restoreWorkspaceSnapshot(&storage, workspace_record.id, snapshot.id, 17));
-    try std.testing.expect(try recovery.repairSyncMetadata(&sync, &storage, workspace_record.id, tablet));
-    try std.testing.expectEqual(@as(u32, 2), try recovery.rotateDeviceKeys(&sync, person, tablet, user_signer, rotated_tablet_signer, 18));
-    try std.testing.expect(try recovery.revokeDeviceTrust(&sync, person, tablet, user_signer, 19));
+    const recovery_boot = try recovery.enterRecoveryBootProfile(.{
+        .profile = .recovery,
+        .requester = storage_owner,
+        .actions = &.{
+            .reinstall_base_image,
+            .restore_workspace_snapshot,
+            .repair_sync_metadata,
+            .rotate_device_keys,
+            .revoke_device_trust,
+        },
+    }, 16);
+    try std.testing.expect(recovery_boot.entry.entered_from_boot_profile);
+    try std.testing.expect(!recovery_boot.normal_session_authority);
+    try std.testing.expect(!recovery_boot.entry.normal_session_authority);
+    try std.testing.expect(try recovery.verifyAndReinstallImage(recovery_boot.session(), &manager, "kernel=v2", image_signer, 16));
+    try std.testing.expect(try recovery.restoreWorkspaceSnapshot(recovery_boot.session(), &storage, workspace_record.id, snapshot.id, 17));
+    try std.testing.expect(try recovery.repairSyncMetadata(recovery_boot.session(), &sync, &storage, workspace_record.id, tablet));
+    try std.testing.expectEqual(@as(u32, 2), try recovery.rotateDeviceKeys(recovery_boot.session(), &sync, person, tablet, user_signer, rotated_tablet_signer, 18));
+    try std.testing.expect(try recovery.revokeDeviceTrust(recovery_boot.session(), &sync, person, tablet, user_signer, 19));
 
+    try std.testing.expect(recovery.report.recovery_boot_entered);
     try std.testing.expect(recovery.report.image_verified);
     try std.testing.expect(recovery.report.image_reinstalled);
     try std.testing.expect(recovery.report.snapshot_restored);

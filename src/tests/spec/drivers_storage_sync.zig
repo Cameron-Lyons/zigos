@@ -149,11 +149,49 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .now_ticks = 1,
         .bundle = bundle,
     });
+    const audio_authority = try spec_support.driverAuthority(
+        &capabilities,
+        spec_support.service(94),
+        904,
+        0x8086_2668_0001,
+        .audio_print_io,
+    );
+    const audio_driver = try directory.register(.{
+        .service_id = 94,
+        .owner_task_id = 904,
+        .device_id = 0x8086_2668_0001,
+        .device_class = .audio_print_io,
+        .authority_capability_id = audio_authority.id,
+        .capability_table = &capabilities,
+        .requester = audio_authority.holder,
+        .now_ticks = 1,
+        .bundle = bundle,
+    });
+    const input_authority = try spec_support.driverAuthority(
+        &capabilities,
+        spec_support.service(95),
+        905,
+        0x8042_0001,
+        .input_device,
+    );
+    const input_driver = try directory.register(.{
+        .service_id = 95,
+        .owner_task_id = 905,
+        .device_id = 0x8042_0001,
+        .device_class = .input_device,
+        .authority_capability_id = input_authority.id,
+        .capability_table = &capabilities,
+        .requester = input_authority.holder,
+        .now_ticks = 1,
+        .bundle = bundle,
+    });
 
     var runtime = driver_runtime_mod.Runtime.init();
     const network_activation = try runtime.activateAt(network_driver, 1);
     const storage_activation = try runtime.activateAt(storage_driver, 1);
     const graphics_activation = try runtime.activateAt(graphics_driver, 1);
+    const audio_activation = try runtime.activateAt(audio_driver, 1);
+    const input_activation = try runtime.activateAt(input_driver, 1);
 
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, network_activation.mode);
     try std.testing.expect(!network_activation.exclusive_claim);
@@ -172,13 +210,26 @@ pub fn publishedDriversActivateScopedTransports() !void {
     try std.testing.expectEqual(@as(u64, 92), bootstrap_driver_port.storagePublication().?.active_service_id);
 
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, graphics_activation.mode);
+    try std.testing.expect(!graphics_activation.exclusive_claim);
+    try std.testing.expect(graphics_driver.allowsDma(graphics_driver.dma_ranges[0].base, 4096));
+    try std.testing.expect(!graphics_driver.allowsDma(graphics_driver.dma_ranges[0].base + graphics_driver.dma_ranges[0].length - 1024, 4096));
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, audio_activation.mode);
+    try std.testing.expect(!audio_activation.exclusive_claim);
+    try std.testing.expect(audio_driver.allowsDma(audio_driver.dma_ranges[0].base, 4096));
+    try std.testing.expect(!audio_driver.allowsDma(audio_driver.dma_ranges[0].base + audio_driver.dma_ranges[0].length - 1024, 4096));
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, input_activation.mode);
+    try std.testing.expect(!input_activation.exclusive_claim);
+    try std.testing.expect(input_driver.allowsDma(input_driver.dma_ranges[0].base, 4096));
+    try std.testing.expect(!input_driver.allowsDma(input_driver.dma_ranges[0].base + input_driver.dma_ranges[0].length - 1024, 4096));
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.network_adapter).?.mode);
     try std.testing.expectEqualStrings("ata-bootstrap", runtime.findByClass(.storage_controller).?.publisherSlice());
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.graphics_adapter).?.mode);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.audio_print_io).?.mode);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.input_device).?.mode);
 
     var unsupported_network_transport_directory = driver_service.Directory.init();
     try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_network_transport_directory.register(.{
-        .service_id = 95,
+        .service_id = 96,
         .owner_task_id = 901,
         .device_id = network_device_id,
         .device_class = .network_adapter,
@@ -191,13 +242,37 @@ pub fn publishedDriversActivateScopedTransports() !void {
     }));
     var unsupported_transport_directory = driver_service.Directory.init();
     try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
-        .service_id = 94,
+        .service_id = 97,
         .owner_task_id = 903,
         .device_id = 0x1234_1111_0001,
         .device_class = .graphics_adapter,
         .authority_capability_id = graphics_authority.id,
         .capability_table = &capabilities,
         .requester = graphics_authority.holder,
+        .now_ticks = 2,
+        .bundle = bundle,
+        .bootstrap_transport = .kernel_published_data_plane,
+    }));
+    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
+        .service_id = 98,
+        .owner_task_id = 904,
+        .device_id = 0x8086_2668_0001,
+        .device_class = .audio_print_io,
+        .authority_capability_id = audio_authority.id,
+        .capability_table = &capabilities,
+        .requester = audio_authority.holder,
+        .now_ticks = 2,
+        .bundle = bundle,
+        .bootstrap_transport = .kernel_published_data_plane,
+    }));
+    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
+        .service_id = 99,
+        .owner_task_id = 905,
+        .device_id = 0x8042_0001,
+        .device_class = .input_device,
+        .authority_capability_id = input_authority.id,
+        .capability_table = &capabilities,
+        .requester = input_authority.holder,
         .now_ticks = 2,
         .bundle = bundle,
         .bootstrap_transport = .kernel_published_data_plane,

@@ -6,6 +6,7 @@ pub const DetectionSource = enum(u8) {
     synthetic,
     ata_bootstrap,
     pci_inventory,
+    ps2_bootstrap,
 };
 
 pub const DeviceRecord = struct {
@@ -69,15 +70,17 @@ pub fn sourceName(source: DetectionSource) []const u8 {
         .synthetic => "synthetic",
         .ata_bootstrap => "ata_bootstrap",
         .pci_inventory => "pci_inventory",
+        .ps2_bootstrap => "ps2_bootstrap",
     };
 }
 
-fn defaultRecords() [4]DeviceRecord {
+fn defaultRecords() [5]DeviceRecord {
     return .{
         defaultRecord(.network_adapter, 100),
         defaultRecord(.storage_controller, 200),
         defaultRecord(.graphics_adapter, 300),
         defaultRecord(.audio_print_io, 400),
+        defaultRecord(.input_device, 500),
     };
 }
 
@@ -98,6 +101,7 @@ fn recordForClassMut(device_class: driver_service.DeviceClass) *DeviceRecord {
         .storage_controller => &records[1],
         .graphics_adapter => &records[2],
         .audio_print_io => &records[3],
+        .input_device => &records[4],
     };
 }
 
@@ -106,12 +110,15 @@ test "device inventory keeps stable synthetic fallbacks until hardware is discov
 
     const network = recordForClass(.network_adapter);
     const storage = recordForClass(.storage_controller);
+    const input = recordForClass(.input_device);
 
     try std.testing.expectEqual(@as(u64, 100), network.device_id);
     try std.testing.expectEqual(@as(u64, 200), storage.device_id);
+    try std.testing.expectEqual(@as(u64, 500), input.device_id);
     try std.testing.expectEqual(DetectionSource.synthetic, network.source);
     try std.testing.expect(!network.detected);
     try std.testing.expect(!storage.kernel_bootstrap);
+    try std.testing.expect(!input.kernel_bootstrap);
 }
 
 test "device inventory records discovered hardware without overwriting the first handoff record" {

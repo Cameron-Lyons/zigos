@@ -37,6 +37,17 @@ pub fn verify(signature: manifest.Signature, message: []const u8) bool {
     return true;
 }
 
+pub fn verifyTrusted(
+    signature: manifest.Signature,
+    message: []const u8,
+    expected_identity: SignerIdentity,
+) bool {
+    if (!std.mem.eql(u8, signature.signer, expected_identity.label)) return false;
+    const expected_public_key = publicKey(expected_identity) catch return false;
+    if (!std.mem.eql(u8, signature.publicKeySlice(), &expected_public_key)) return false;
+    return verify(signature, message);
+}
+
 test "ed25519 signing produces verifiable native signatures" {
     const identity = SignerIdentity{
         .label = "zigos.test",
@@ -47,4 +58,11 @@ test "ed25519 signing produces verifiable native signatures" {
     try std.testing.expectEqualSlices(u8, &try publicKey(identity), signature.publicKeySlice());
     try std.testing.expect(verify(signature, "storage-state"));
     try std.testing.expect(!verify(signature, "sync-state"));
+    try std.testing.expect(verifyTrusted(signature, "storage-state", identity));
+
+    const wrong_identity = SignerIdentity{
+        .label = "zigos.other",
+        .seed = [_]u8{0x12} ** Ed25519.KeyPair.seed_length,
+    };
+    try std.testing.expect(!verifyTrusted(signature, "storage-state", wrong_identity));
 }

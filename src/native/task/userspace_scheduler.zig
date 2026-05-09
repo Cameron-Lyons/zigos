@@ -117,6 +117,8 @@ pub const Scheduler = struct {
     engine_denial_counts: [ENGINE_COUNT]u64 = [_]u64{0} ** ENGINE_COUNT,
     next_accelerator_claim_id: u64 = 1,
     resource_state: accelerator_scheduler.SystemState = .{},
+    resource_telemetry_source: accelerator_scheduler.TelemetrySource = .synthetic,
+    resource_telemetry_observed_tick: u64 = 0,
     last_dispatch_tick: u64 = 0,
     ready_marker_printed: bool = false,
     active_marker_printed: bool = false,
@@ -143,6 +145,8 @@ pub const Scheduler = struct {
         self.engine_denial_counts = [_]u64{0} ** ENGINE_COUNT;
         self.next_accelerator_claim_id = 1;
         self.resource_state = .{};
+        self.resource_telemetry_source = .synthetic;
+        self.resource_telemetry_observed_tick = 0;
         self.last_dispatch_tick = 0;
         self.ready_marker_printed = false;
         self.active_marker_printed = false;
@@ -169,6 +173,22 @@ pub const Scheduler = struct {
 
     pub fn configureResourceState(self: *Scheduler, state: accelerator_scheduler.SystemState) void {
         self.resource_state = state;
+        self.resource_telemetry_source = .synthetic;
+        self.resource_telemetry_observed_tick = 0;
+    }
+
+    pub fn configureResourceTelemetry(self: *Scheduler, sample: accelerator_scheduler.TelemetrySample) void {
+        self.resource_state = sample.toSystemState();
+        self.resource_telemetry_source = sample.source;
+        self.resource_telemetry_observed_tick = sample.observed_tick;
+    }
+
+    pub fn configureResourceTelemetryFromProvider(self: *Scheduler, provider: anytype) void {
+        self.configureResourceTelemetry(provider.read());
+    }
+
+    pub fn observedResourceTelemetry(self: *const Scheduler) bool {
+        return self.resource_telemetry_source != .synthetic;
     }
 
     pub fn registerTask(self: *Scheduler, task_id: u64) bool {
@@ -1210,6 +1230,11 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
     scheduler.bind(&catalog, &runtime, &capabilities);
+    var telemetry = accelerator_scheduler.EmulatedTelemetryDevice.init(.{
+        .observed_tick = 101,
+        .thermal_pressure = .critical,
+        .gpu_available = true,
+    });
 
     const foreground_image = task_runtime.syntheticUserspaceImage("thermal-ui", "app.example.thermal-ui");
     const foreground = try runtime.createTask(.{
@@ -1234,10 +1259,10 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
         .userspace_image = &foreground_image,
     });
     try std.testing.expect(scheduler.registerTask(foreground.id));
-    scheduler.configureResourceState(.{
-        .thermal_pressure = .critical,
-        .gpu_available = true,
-    });
+    scheduler.configureResourceTelemetry(telemetry.read());
+    try std.testing.expect(scheduler.observedResourceTelemetry());
+    try std.testing.expectEqual(accelerator_scheduler.TelemetrySource.emulator, scheduler.resource_telemetry_source);
+    try std.testing.expectEqual(@as(u64, 101), scheduler.resource_telemetry_observed_tick);
     try std.testing.expect(!scheduler.runNext(1));
     const foreground_slot = scheduler.slots.getConst(foreground.id).?;
     try std.testing.expectEqual(@as(u64, 1), foreground_slot.dispatch_count);
@@ -1267,10 +1292,13 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
         .userspace_image = &media_image,
     });
     try std.testing.expect(scheduler.registerTask(media_task.id));
-    scheduler.configureResourceState(.{
+    telemetry.update(.{
+        .observed_tick = 102,
         .battery_saver = true,
         .media_available = true,
     });
+    scheduler.configureResourceTelemetry(telemetry.read());
+    try std.testing.expectEqual(@as(u64, 102), scheduler.resource_telemetry_observed_tick);
     try std.testing.expect(!scheduler.runNext(2));
     const media_slot = scheduler.slots.getConst(media_task.id).?;
     try std.testing.expectEqual(@as(u64, 1), media_slot.dispatch_count);

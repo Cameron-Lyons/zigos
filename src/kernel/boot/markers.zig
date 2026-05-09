@@ -77,12 +77,14 @@ pub const storage_path_authority_deprecated = "ZIGOS:STORAGE:PATH_AUTHORITY:DEPR
 pub const sync_device_graph_rooted = "ZIGOS:SYNC:DEVICE_GRAPH:ROOTED";
 
 pub const platform_immutable_base_active = "ZIGOS:PLATFORM:IMMUTABLE_BASE:ACTIVE";
+pub const platform_immutable_base_boot_selection = "ZIGOS:PLATFORM:IMMUTABLE_BASE:BOOT_SELECTION_VERIFIED";
 pub const platform_activation_rollback_ok = "ZIGOS:PLATFORM:ACTIVATION:ROLLBACK_OK";
 pub const platform_ab_image_rollback_ok = "ZIGOS:PLATFORM:AB_IMAGE:ROLLBACK_OK";
 pub const platform_build_artifact_manifest_verified = "ZIGOS:PLATFORM:BUILD_ARTIFACT_MANIFEST:VERIFIED";
 pub const platform_bootloader_measurement_provided = "ZIGOS:PLATFORM:BOOTLOADER_MEASUREMENT:PROVIDED";
 pub const platform_artifact_manifest_verified = "ZIGOS:PLATFORM:ARTIFACT_MANIFEST:VERIFIED";
 pub const platform_measured_boot_recorded = "ZIGOS:PLATFORM:MEASURED_BOOT:RECORDED";
+pub const platform_measured_boot_verified_root = "ZIGOS:PLATFORM:MEASURED_BOOT:VERIFIED_ROOT";
 pub const platform_measured_boot_first = "ZIGOS:PLATFORM:MEASURED_BOOT:COMPARE:FIRST_BOOT";
 pub const platform_measured_boot_same_root = "ZIGOS:PLATFORM:MEASURED_BOOT:COMPARE:SAME_ROOT";
 pub const platform_measured_boot_same_shape = "ZIGOS:PLATFORM:MEASURED_BOOT:COMPARE:SAME_SHAPE";

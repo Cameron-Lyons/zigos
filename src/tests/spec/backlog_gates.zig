@@ -7,6 +7,10 @@ const driver_service = @import("../../native/drivers/driver_service.zig");
 const endpoint = @import("../../native/kernel_api/endpoint.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
 const ids = @import("../../native/core/ids.zig");
+const kernel_ata = @import("../../kernel/drivers/ata.zig");
+const kernel_data_plane_boundary = @import("../../kernel/boot/init/data_plane_boundary.zig");
+const kernel_ethernet = @import("../../kernel/net/ethernet.zig");
+const kernel_link_port = @import("../../kernel/net/link_port.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const native_kernel = @import("../../native/kernel_api/native_kernel.zig");
 const network_policy = @import("../../native/sync/network_policy.zig");
@@ -21,10 +25,6 @@ const sync_transport = @import("../../native/sync/sync_transport_harness.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const typed_component_abi = @import("../../native/services/typed_component_abi.zig");
 
-const kernel_ethernet_source = @embedFile("../../kernel/net/ethernet.zig");
-const kernel_link_port_source = @embedFile("../../kernel/net/link_port.zig");
-const kernel_ata_source = @embedFile("../../kernel/drivers/ata.zig");
-const kernel_device_init_source = @embedFile("../../kernel/boot/init/devices.zig");
 const indexed_arena_source = @embedFile("../../native/core/indexed_arena.zig");
 const service_registry_source = @embedFile("../../native/services/service_registry.zig");
 const component_abi_schema_source = @embedFile("../../native/services/component_abi_schema.zig");
@@ -345,63 +345,61 @@ pub fn driverBoundaryAuditGate() !void {
 }
 
 pub fn kernelBootstrapShimBoundaryGate() !void {
-    try expectContains(kernel_ethernet_source, "kernel_boundary_role = \"bootstrap_network_shim\"");
-    try expectContains(kernel_ethernet_source, "publishes_full_network_service = false");
-    try expectContains(kernel_ethernet_source, "network_data_plane_exports_fail_closed = true");
-    try expectContains(kernel_link_port_source, "kernel_boundary_role = \"bootstrap_network_link_shim\"");
-    try expectContains(kernel_link_port_source, "publishes_full_network_service = false");
-    try expectContains(kernel_link_port_source, "network_data_plane_exports_fail_closed = true");
-    try expectContains(kernel_ata_source, "kernel_boundary_role = \"bootstrap_storage_inventory_shim\"");
-    try expectContains(kernel_ata_source, "publishes_full_storage_service = false");
-    try expectContains(kernel_ata_source, "ata_data_plane_exports_fail_closed = true");
-    try expectContains(kernel_device_init_source, "kernel_boundary_role = \"bootstrap_device_inventory_shim\"");
-    try expectContains(kernel_device_init_source, "publishes_device_data_planes = false");
+    try std.testing.expectEqualStrings("bootstrap_network_shim", kernel_ethernet.kernel_boundary_role);
+    try std.testing.expect(!kernel_ethernet.publishes_full_network_service);
+    try std.testing.expect(kernel_ethernet.network_data_plane_exports_fail_closed);
+    try std.testing.expectError(error.KernelNetworkDataPlaneDisabled, kernel_ethernet.rejectDataPlaneExport(.{
+        .service_id = 811,
+        .device_id = 0x8086_100E_0007,
+        .frame_len = 64,
+    }));
 
-    const kernel_net_sources = [_][]const u8{
-        kernel_ethernet_source,
-        kernel_link_port_source,
-    };
-    const forbidden_network_service_tokens = [_][]const u8{
-        "pub fn connect(",
-        "pub fn listen(",
-        "pub fn accept(",
-        "pub fn bindSocket(",
-        "pub fn route",
-        "pub fn resolveDns",
-        "pub fn dhcp",
-        "pub fn sendFrame",
-        "pub fn handleRxPacket",
-        "pub fn registerHandler",
-        "pub fn setEgressBroker",
-        "pub fn bindEgressCapability",
-        "pub fn authorizeDriverTx",
-        "TcpConnection",
-        "UdpSocket",
-    };
-    for (kernel_net_sources) |source| {
-        for (forbidden_network_service_tokens) |token| {
-            try expectMissing(source, token);
-        }
-    }
+    try std.testing.expectEqualStrings("bootstrap_network_link_shim", kernel_link_port.kernel_boundary_role);
+    try std.testing.expect(!kernel_link_port.publishes_full_network_service);
+    try std.testing.expect(kernel_link_port.network_data_plane_exports_fail_closed);
+    try std.testing.expectError(error.KernelNetworkDataPlaneDisabled, kernel_link_port.rejectKernelDataPlaneTransport(.{
+        .device_id = 0x8086_100E_0007,
+        .service_id = 811,
+    }));
 
-    const forbidden_storage_service_tokens = [_][]const u8{
-        "pub fn putVersion",
-        "pub fn createWorkspace",
-        "pub fn beginTransaction",
-        "pub fn stagePut",
-        "pub fn commit",
-        "pub fn snapshot",
-        "pub fn restore",
-        "pub fn readSectors",
-        "pub fn writeSectors",
-        "READ_SECTORS",
-        "WRITE_SECTORS",
-        "CACHE_FLUSH",
+    try std.testing.expectEqualStrings("bootstrap_storage_inventory_shim", kernel_ata.kernel_boundary_role);
+    try std.testing.expect(!kernel_ata.publishes_full_storage_service);
+    try std.testing.expect(kernel_ata.ata_data_plane_exports_fail_closed);
+    try std.testing.expectError(error.KernelStorageDataPlaneDisabled, kernel_ata.rejectKernelDataPlaneTransfer(.{
+        .device_id = 0x1F001,
+        .lba = 7,
+        .sector_count = 1,
+    }));
+
+    try std.testing.expectEqualStrings("bootstrap_device_inventory_shim", kernel_data_plane_boundary.kernel_boundary_role);
+    try std.testing.expect(!kernel_data_plane_boundary.publishes_device_data_planes);
+    try std.testing.expect(!kernel_data_plane_boundary.publishes_windowing_data_plane);
+    try std.testing.expect(!kernel_data_plane_boundary.publishes_package_data_plane);
+    try std.testing.expect(!kernel_data_plane_boundary.publishes_indexing_data_plane);
+    try std.testing.expect(!kernel_data_plane_boundary.publishes_sync_data_plane);
+    try std.testing.expectError(error.KernelDeviceDataPlaneDisabled, kernel_data_plane_boundary.rejectKernelDeviceDataPlane(.{
+        .service_id = 811,
+        .device_id = 0x1F001,
+        .device_class = @intFromEnum(driver_service.DeviceClass.storage_controller),
+    }));
+    const excluded_subsystems = [_]kernel_data_plane_boundary.SubsystemPublicationRequest{
+        .{ .kind = .windowing, .service_id = 831, .owner_task_id = 841, .endpoint_id = 851 },
+        .{ .kind = .package_install, .service_id = 832, .owner_task_id = 842, .endpoint_id = 852 },
+        .{ .kind = .indexing, .service_id = 833, .owner_task_id = 843, .endpoint_id = 853 },
+        .{ .kind = .sync_replication, .service_id = 834, .owner_task_id = 844, .endpoint_id = 854 },
     };
-    for (forbidden_storage_service_tokens) |token| {
-        try expectMissing(kernel_ata_source, token);
-        try expectMissing(kernel_device_init_source, token);
+    for (excluded_subsystems) |request| {
+        try std.testing.expectError(
+            error.KernelSubsystemDataPlaneDisabled,
+            kernel_data_plane_boundary.rejectKernelSubsystemDataPlane(request),
+        );
     }
+    try std.testing.expectError(error.KernelDeviceDataPlaneDisabled, kernel_data_plane_boundary.rejectKernelSubsystemDataPlane(.{
+        .kind = .device,
+        .service_id = 835,
+        .owner_task_id = 845,
+        .endpoint_id = 855,
+    }));
 
     try bootedDriverKernelBoundaryGate();
 }

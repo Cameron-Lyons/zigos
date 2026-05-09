@@ -282,6 +282,13 @@ pub fn driverBudget(device_class: driver_service.DeviceClass) task_runtime.Resou
             .shared_memory_bytes = 16 * 1024,
             .background_allowed = false,
         },
+        .input_device => .{
+            .cpu_time_ticks = 4_000,
+            .memory_bytes = 256 * 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 16 * 1024,
+            .background_allowed = false,
+        },
     };
 }
 
@@ -306,6 +313,7 @@ fn driverSigner(device_class: driver_service.DeviceClass, bundle_id: []const u8)
         .storage_controller,
         .graphics_adapter,
         .audio_print_io,
+        .input_device,
         => "zigos-driver-key",
     };
 }

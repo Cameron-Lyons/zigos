@@ -758,6 +758,7 @@ pub fn rightsForBootstrapGrant(kind: BootstrapGrantKind) capability.CapabilityRi
 }
 
 pub fn allowsDriverClass(class: ServiceClass, device_class: driver_service.DeviceClass) bool {
+    if (class == .compositor_ui_session and device_class == .input_device) return true;
     const entry = entryForClass(class) orelse return false;
     const expected = entry.driver_class orelse return false;
     return expected == device_class;
@@ -893,6 +894,9 @@ test "service catalog derives descriptors and bootstrap contracts from one sourc
     try std.testing.expectEqualStrings(component_abi_schema.interfaceForService(.storage_object).name, entryForClass(.storage_object).?.interface.name);
     try std.testing.expectEqualStrings("zigos.system.storage-object", bundleIdForServiceClass(.storage_object).?);
     try std.testing.expect(allowsDriverClass(.network_stack, .network_adapter));
+    try std.testing.expect(allowsDriverClass(.compositor_ui_session, .graphics_adapter));
+    try std.testing.expect(allowsDriverClass(.compositor_ui_session, .input_device));
+    try std.testing.expect(allowsDriverClass(.media_print_helpers, .audio_print_io));
     try std.testing.expect(!allowsDriverClass(.policy_mediation, .network_adapter));
     try std.testing.expectEqual(BootstrapLaunchMode.native_direct, bootstrapLaunchForClass(.session_manager).?.mode);
     try std.testing.expectEqual(BootstrapOwnerKey.storage_service, bootstrapOwnerKeyForClass(.storage_object).?);
