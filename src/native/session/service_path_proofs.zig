@@ -5,6 +5,7 @@ const attestation_service = @import("../platform/attestation_service.zig");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const device_broker = @import("../kernel_api/device_broker.zig");
+const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const endpoint = @import("../kernel_api/endpoint.zig");
@@ -15,6 +16,10 @@ const kernel_data_plane_boundary = @import("../../kernel/boot/init/data_plane_bo
 const manifest = @import("../policy/manifest.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
 const native_ux = @import("../platform/native_ux.zig");
+const platform_policy_signals = @import("../platform/platform_policy_signals.zig");
+const permission_review_service = @import("../policy/permission_review_service.zig");
+const policy_mediation = @import("../policy/policy_mediation.zig");
+const rendered_shell = @import("../platform/rendered_shell.zig");
 const native_service_registry = @import("../services/service_registry.zig");
 const network_driver_task = @import("../drivers/network_driver_task.zig");
 const network_policy = @import("../sync/network_policy.zig");
@@ -32,6 +37,7 @@ const supervisor_mod = @import("supervisor.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const update_health = @import("../platform/update_health.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
+const compositor_display = @import("../platform/compositor_display.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const workspace = @import("../storage/workspace.zig");
 
@@ -320,6 +326,228 @@ fn proveBootedDriverPermissions(
     const cross_task = deviceDescribeResult(kernel_port, network_service_task.id, storage_driver.authority_capability_id, 91);
     try std.testing.expectEqual(abi.SyscallStatus.not_found, cross_task.status);
     try std.testing.expectEqual(abi.DenialReason.capability_missing, cross_task.denial_reason);
+}
+
+fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !void {
+    const BootedDriverRuntime = struct {
+        tasks: *task_runtime.Runtime,
+        activations: *driver_runtime_mod.Runtime,
+        rehost_count: usize = 0,
+        deactivation_count: usize = 0,
+        activation_count: usize = 0,
+        last_task_id: u64 = 0,
+        last_process_generation: u32 = 0,
+        last_dma_domain_id: u64 = 0,
+
+        pub fn deactivate(self: *@This(), service_id: u64) bool {
+            const deactivated = self.activations.deactivate(service_id);
+            if (deactivated) self.deactivation_count += 1;
+            return deactivated;
+        }
+
+        pub fn activateAt(self: *@This(), driver: *const driver_service.DriverRecord, tick: u64) !driver_runtime_mod.ActivationRecord {
+            const task = self.tasks.find(driver.owner_task_id) orelse return error.TaskNotFound;
+            const previous_generation = task.process_generation;
+            const rehosted = try self.tasks.rehostTask(driver.owner_task_id, tick);
+            const restarted_task = self.tasks.find(driver.owner_task_id) orelse return error.TaskNotFound;
+            const activation = try self.activations.activateAt(driver, tick);
+            self.activation_count += 1;
+            self.last_task_id = driver.owner_task_id;
+            self.last_process_generation = restarted_task.process_generation;
+            self.last_dma_domain_id = activation.dma_domain_id;
+            if (rehosted and restarted_task.process_generation > previous_generation) {
+                self.rehost_count += 1;
+            }
+            return activation;
+        }
+    };
+
+    bootstrap_driver_port.reset();
+    defer bootstrap_driver_port.reset();
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+
+    session_manager.boot();
+
+    const runtime = session_manager.testing.runtimePtr();
+    const capability_table = session_manager.system().capabilityTablePtr();
+    const supervisor = session_manager.testing.supervisorPtr();
+    const driver_directory = session_manager.testing.driverDirectoryPtr();
+    const driver_runtime = session_manager.testing.driverRuntimePtr();
+    const kernel_port = session_manager.kernelPort() orelse return error.KernelPortUnavailable;
+    const ledger = session_manager.testing.updateLedgerPtr();
+
+    const storage_service_record = supervisor.findByClass(.storage_object).?;
+    const network_service = supervisor.findByClass(.network_stack).?;
+    const session_task = session_manager.testing.findTask("session-manager").?;
+    const network_task = session_manager.testing.findTask("network-service").?;
+    const storage_driver = driver_directory.findByClass(.storage_controller).?;
+    const storage_driver_task = runtime.find(storage_driver.owner_task_id).?;
+
+    const service_count_before = session_manager.testing.countServices();
+    const task_count_before = session_manager.testing.countTasks();
+    const session_process_generation_before = session_task.process_generation;
+    const network_restart_count_before = network_service.restart_count;
+    const network_process_generation_before = network_task.process_generation;
+    const storage_restart_count_before = storage_service_record.restart_count;
+    const storage_restart_generation_before = storage_driver.restart_generation;
+    const storage_dma_before = storage_driver.dma_domain_id;
+    const storage_process_generation_before = storage_driver_task.process_generation;
+    const storage_address_space_before = storage_driver_task.address_space_id;
+
+    bootstrap_driver_port.reset();
+    try std.testing.expect(device_broker.publishAtaController(storage_driver.device_id, storageGrant()));
+    try std.testing.expect(try bootstrap_driver_port.publishStorageAtaBootstrap(
+        storage_driver.device_id,
+        "zigos.system.storage-driver",
+        false,
+    ));
+
+    const initial_activation = try driver_runtime.activateAt(storage_driver, 780);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.userspace_brokered_data_plane, initial_activation.mode);
+    try std.testing.expect(initial_activation.exclusive_claim);
+    try std.testing.expect(initial_activation.iommu_enforced);
+
+    runtime.allowHostPointerSyscallsForTask(storage_driver.owner_task_id);
+    const descriptor_before = try expectDeviceDescribe(kernel_port, storage_driver.owner_task_id, storage_driver.authority_capability_id, 781);
+    try std.testing.expectEqual(storage_driver.device_id, descriptor_before.device_id);
+    try std.testing.expectEqual(@as(u16, 0x1F0), descriptor_before.base_port);
+
+    var booted_runtime = BootedDriverRuntime{
+        .tasks = runtime,
+        .activations = driver_runtime,
+    };
+
+    const recovery = try supervisor.recoverDriverCrash(
+        storage_service_record.id,
+        driver_directory,
+        &booted_runtime,
+        null,
+        ledger,
+        790,
+        0x510,
+        "storage driver brokered crash",
+    );
+
+    const recovered_driver = driver_directory.findByClass(.storage_controller).?;
+    const recovered_task = runtime.find(recovered_driver.owner_task_id).?;
+    try std.testing.expect(!recovery.visible_impact);
+    try std.testing.expect(recovery.notification_id == null);
+    try std.testing.expect(recovery.runtime_activation_observed);
+    try std.testing.expect(recovery.runtime_activation_generation > initial_activation.activation_generation);
+    try std.testing.expectEqual(recovered_driver.dma_domain_id, recovery.runtime_dma_domain_id);
+    try std.testing.expect(recovery.runtime_exclusive_claim);
+    try std.testing.expect(recovery.userspace_brokered_data_plane);
+    try std.testing.expectEqual(@as(usize, 1), booted_runtime.deactivation_count);
+    try std.testing.expectEqual(@as(usize, 1), booted_runtime.activation_count);
+    try std.testing.expectEqual(@as(usize, 1), booted_runtime.rehost_count);
+    try std.testing.expectEqual(recovered_driver.owner_task_id, booted_runtime.last_task_id);
+    try std.testing.expectEqual(recovered_task.process_generation, booted_runtime.last_process_generation);
+    try std.testing.expectEqual(recovered_driver.dma_domain_id, booted_runtime.last_dma_domain_id);
+    try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, storage_service_record.state);
+    try std.testing.expectEqual(storage_restart_count_before + 1, storage_service_record.restart_count);
+    try std.testing.expectEqual(storage_restart_generation_before + 1, recovered_driver.restart_generation);
+    try std.testing.expect(recovered_driver.dma_domain_id != storage_dma_before);
+    try std.testing.expectEqual(storage_process_generation_before + 1, recovered_task.process_generation);
+    try std.testing.expect(runtime.findAddressSpaceConst(storage_address_space_before) == null);
+    try std.testing.expect(supervisor.hasDiagnostic(storage_service_record.id, .crash));
+    try std.testing.expect(supervisor.hasDiagnostic(storage_service_record.id, .restart_completed));
+    try std.testing.expectEqual(service_catalog.ServiceClass.storage_object, ledger.latestKind(.process_crash).?.service_class);
+    try std.testing.expectEqual(recovered_driver.authority_capability_id, ledger.latestKind(.driver_restart).?.related_id);
+    try std.testing.expectEqual(network_restart_count_before, network_service.restart_count);
+    try std.testing.expectEqual(network_process_generation_before, network_task.process_generation);
+    try std.testing.expect(session_manager.testing.isInitialized());
+    try std.testing.expectEqual(service_count_before, session_manager.testing.countServices());
+    try std.testing.expectEqual(task_count_before, session_manager.testing.countTasks());
+    try std.testing.expectEqual(session_process_generation_before, session_task.process_generation);
+
+    runtime.allowHostPointerSyscallsForTask(recovered_driver.owner_task_id);
+    const recovered_descriptor = try expectDeviceDescribe(kernel_port, recovered_driver.owner_task_id, recovered_driver.authority_capability_id, 792);
+    try std.testing.expectEqual(recovered_driver.device_id, recovered_descriptor.device_id);
+
+    const recovered_authority_id = recovered_driver.authority_capability_id;
+    const hot_swap_process_generation_before = recovered_task.process_generation;
+    const hot_swap_address_space_before = recovered_task.address_space_id;
+    const hot_swap_restart_generation_before = recovered_driver.restart_generation;
+    const hot_swap_dma_before = recovered_driver.dma_domain_id;
+    const next_authority = try capability_table.mintBootRoot(.{
+        .holder = storage_service_record.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = driver_service.authorityTarget(recovered_driver.device_id),
+        .rights = driver_service.allowedRightsFor(.storage_controller),
+        .scope = .{
+            .task_id = recovered_driver.owner_task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 800,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = false,
+        },
+        .audit = .{
+            .policy_generation = 1,
+            .source_task_id = session_task.id,
+            .broker_service_id = storage_service_record.id,
+        },
+    });
+    try runtime.grantCapability(recovered_driver.owner_task_id, next_authority.id);
+
+    const hot_swap = try supervisor.hotSwapDriver(.{
+        .service_id = storage_service_record.id,
+        .owner_task_id = recovered_driver.owner_task_id,
+        .device_id = recovered_driver.device_id,
+        .device_class = .storage_controller,
+        .authority_capability_id = next_authority.id,
+        .capability_table = capability_table,
+        .requester = storage_service_record.owner,
+        .now_ticks = 800,
+        .signer = "zigos-storage-driver-v2",
+        .bootstrap_transport = .kernel_bootstrap_broker,
+    }, driver_directory, &booted_runtime, null, ledger, 800, "storage driver hot-swapped through broker");
+
+    const swapped_driver = driver_directory.findByClass(.storage_controller).?;
+    const swapped_task = runtime.find(swapped_driver.owner_task_id).?;
+    try std.testing.expect(!hot_swap.visible_impact);
+    try std.testing.expect(hot_swap.notification_id == null);
+    try std.testing.expectEqual(hot_swap_restart_generation_before, hot_swap.previous_restart_generation);
+    try std.testing.expectEqual(hot_swap_restart_generation_before + 1, hot_swap.next_restart_generation);
+    try std.testing.expectEqual(hot_swap_dma_before, hot_swap.previous_dma_domain_id);
+    try std.testing.expect(swapped_driver.dma_domain_id != hot_swap_dma_before);
+    try std.testing.expectEqual(swapped_driver.dma_domain_id, hot_swap.next_dma_domain_id);
+    try std.testing.expect(hot_swap.runtime_activation_observed);
+    try std.testing.expect(hot_swap.runtime_activation_generation > recovery.runtime_activation_generation);
+    try std.testing.expectEqual(swapped_driver.dma_domain_id, hot_swap.runtime_dma_domain_id);
+    try std.testing.expect(hot_swap.runtime_exclusive_claim);
+    try std.testing.expect(hot_swap.userspace_brokered_data_plane);
+    try std.testing.expectEqual(next_authority.id, swapped_driver.authority_capability_id);
+    try std.testing.expect(swapped_driver.authority_capability_id != recovered_authority_id);
+    try std.testing.expectEqualStrings("zigos-storage-driver-v2", swapped_driver.signerSlice());
+    try std.testing.expect(runtime.hasCapability(swapped_driver.owner_task_id, next_authority.id));
+    try std.testing.expectEqual(hot_swap_process_generation_before + 1, swapped_task.process_generation);
+    try std.testing.expect(runtime.findAddressSpaceConst(hot_swap_address_space_before) == null);
+    try std.testing.expectEqual(@as(usize, 2), booted_runtime.deactivation_count);
+    try std.testing.expectEqual(@as(usize, 2), booted_runtime.activation_count);
+    try std.testing.expectEqual(@as(usize, 2), booted_runtime.rehost_count);
+    try std.testing.expectEqual(swapped_driver.owner_task_id, booted_runtime.last_task_id);
+    try std.testing.expectEqual(swapped_task.process_generation, booted_runtime.last_process_generation);
+    try std.testing.expectEqual(swapped_driver.dma_domain_id, booted_runtime.last_dma_domain_id);
+    try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, storage_service_record.state);
+    try std.testing.expectEqual(storage_restart_count_before + 2, storage_service_record.restart_count);
+    try std.testing.expect(supervisor.hasDiagnostic(storage_service_record.id, .driver_attached));
+    try std.testing.expect(supervisor.hasDiagnostic(storage_service_record.id, .restart_completed));
+    try std.testing.expectEqual(next_authority.id, ledger.latestKind(.driver_restart).?.related_id);
+    try std.testing.expectEqual(network_restart_count_before, network_service.restart_count);
+    try std.testing.expectEqual(network_process_generation_before, network_task.process_generation);
+    try std.testing.expectEqual(service_count_before, session_manager.testing.countServices());
+    try std.testing.expectEqual(task_count_before, session_manager.testing.countTasks());
+    try std.testing.expectEqual(session_process_generation_before, session_task.process_generation);
+
+    runtime.allowHostPointerSyscallsForTask(swapped_driver.owner_task_id);
+    const swapped_descriptor = try expectDeviceDescribe(kernel_port, swapped_driver.owner_task_id, next_authority.id, 802);
+    try std.testing.expectEqual(swapped_driver.device_id, swapped_descriptor.device_id);
+    try std.testing.expectEqual(@as(u16, 0x1F0), swapped_descriptor.base_port);
+    try std.testing.expectEqual(@as(u8, 14), swapped_descriptor.irq_line);
 }
 
 const BootedServiceBinding = struct {
@@ -1222,6 +1450,19 @@ fn proveBootedCompositorServicePath(
     const workspace_id = try seedBootedCompositorWorkspace(storage, app_owner);
     _ = try ux_controller.openWorkspace(storage, ids.workspace(workspace_id), "trip/brief.md", app_owner);
 
+    {
+        const shell_snapshot = session.snapshot();
+        defer session.restore(shell_snapshot);
+        try proveBootedRenderedTaskShell(
+            runtime,
+            storage,
+            session,
+            workspace_id,
+            app_owner,
+            compositor_task.id,
+        );
+    }
+
     const authority = try capability_table.mintBootRoot(.{
         .holder = compositor_record.owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
@@ -1281,6 +1522,12 @@ fn proveBootedCompositorServicePath(
     );
 
     var tick: u64 = 124;
+    {
+        const permission_snapshot = session.snapshot();
+        defer session.restore(permission_snapshot);
+        try proveBootedRenderedPermissionReviewSurface(runtime, &service, session, app_task.id);
+    }
+
     const document_response = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
         .operation = .open_view,
         .view_type = .document_view,
@@ -1297,6 +1544,10 @@ fn proveBootedCompositorServicePath(
     const workspace_needle = try std.fmt.bufPrint(&workspace_needle_buffer, "workspace={d}", .{workspace_id});
     try assertRenderedWindowContains(session, document_response.window_id, workspace_needle);
     try assertRenderedWindowContains(session, document_response.window_id, "detail=trip/brief.md");
+    try assertDisplayContains(session, "active_type=document_view");
+    try assertDisplayContains(session, "title=Document: trip/brief.md");
+    try assertDisplayContains(session, "surface=77");
+    try assertDisplayContains(session, workspace_needle);
 
     const workspace_response = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
         .operation = .open_view,
@@ -1308,6 +1559,8 @@ fn proveBootedCompositorServicePath(
     try std.testing.expectEqual(compositor_session.ServiceStatus.ok, workspace_response.status);
     try assertRenderedWindowContains(session, workspace_response.window_id, "type=workspace_view");
     try assertRenderedWindowContains(session, workspace_response.window_id, "detail=Trip Workspace");
+    try assertDisplayContains(session, "active_type=workspace_view");
+    try assertDisplayContains(session, "title=Workspace: Trip Workspace");
 
     const panel_response = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
         .operation = .open_view,
@@ -1319,6 +1572,8 @@ fn proveBootedCompositorServicePath(
     try std.testing.expectEqual(compositor_session.ServiceStatus.ok, panel_response.status);
     try assertRenderedWindowContains(session, panel_response.window_id, "type=app_panel");
     try assertRenderedWindowContains(session, panel_response.window_id, "modal=yes");
+    try assertDisplayContains(session, "active_type=app_panel");
+    try assertDisplayContains(session, "title=Panel: Calendar Panel");
 
     const task_response = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
         .operation = .open_view,
@@ -1330,6 +1585,8 @@ fn proveBootedCompositorServicePath(
     try std.testing.expectEqual(compositor_session.ServiceStatus.ok, task_response.status);
     try assertRenderedWindowContains(session, task_response.window_id, "type=full_screen_task_view");
     try assertRenderedWindowContains(session, task_response.window_id, "title=Task: Coordinate Trip");
+    try assertDisplayContains(session, "active_type=full_screen_task_view");
+    try assertDisplayContains(session, "title=Task: Coordinate Trip");
 
     const missing_switch = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
         .operation = .switch_view,
@@ -1343,6 +1600,8 @@ fn proveBootedCompositorServicePath(
     }, &tick);
     try std.testing.expectEqual(compositor_session.ServiceStatus.ok, switch_response.status);
     try std.testing.expectEqual(workspace_response.window_id, switch_response.active_window_id);
+    try assertDisplayContains(session, "active_type=workspace_view");
+    try assertDisplayContains(session, "title=Workspace: Trip Workspace");
 
     const object_review_response = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
         .operation = .review_permission,
@@ -1398,6 +1657,12 @@ fn proveBootedCompositorServicePath(
     }, &tick);
     try std.testing.expectEqual(compositor_session.ServiceStatus.ok, network_decision_response.status);
     try std.testing.expectEqual(compositor_session.DecisionState.deny, network_decision_response.decision);
+    try assertDisplayContains(session, "active_type=app_panel");
+    try assertDisplayContains(session, "permission kind=object_access resource=ws:trip");
+    try assertDisplayContains(session, "permission_scope object=ws:trip network=none local=yes lease=400");
+    try assertDisplayContains(session, "permission_decision kind=object_access resource=ws:trip decision=allow");
+    try assertDisplayContains(session, "permission_scope object=none network=net:trip local=no lease=80");
+    try assertDisplayContains(session, "permission_decision kind=network_egress resource=net:trip decision=deny");
 
     const object_item = session.findReviewItemConst(object_review_response.window_id, .object_access, "ws:trip") orelse return error.MissingBootedCompositorReviewItem;
     const network_item = session.findReviewItemConst(network_review_response.window_id, .network_egress, "net:trip") orelse return error.MissingBootedCompositorReviewItem;
@@ -1484,6 +1749,12 @@ fn proveBootedCompositorServicePath(
         compositor_session.DecisionState.deny,
         session.findReviewItemConst(network_review_response.window_id, .network_egress, "net:trip").?.decision,
     );
+    try assertDisplayContains(session, "type=document_view");
+    try assertDisplayContains(session, "type=workspace_view");
+    try assertDisplayContains(session, "type=app_panel");
+    try assertDisplayContains(session, "type=full_screen_task_view");
+    try assertDisplayContains(session, "permission_decision kind=object_access resource=ws:trip decision=allow");
+    try assertDisplayContains(session, "permission_decision kind=network_egress resource=net:trip decision=deny");
 }
 
 fn seedBootedCompositorWorkspace(
@@ -1514,6 +1785,148 @@ fn seedBootedCompositorWorkspace(
     return workspace_record.id.raw();
 }
 
+fn proveBootedRenderedTaskShell(
+    runtime: *task_runtime.Runtime,
+    storage: *storage_service.Service,
+    session: *compositor_session.Session,
+    workspace_id: u64,
+    app_owner: principal.PrincipalId,
+    reviewer_task_id: u64,
+) !void {
+    var ux_controller = native_ux.Controller.init();
+    var ledger = event_ledger.Ledger.init();
+    var shell = rendered_shell.Shell.init(
+        runtime,
+        &ux_controller,
+        session,
+        storage,
+        &ledger,
+        .{
+            .user = app_owner,
+            .app_owner = app_owner,
+            .reviewer_task_id = reviewer_task_id,
+            .workspace_id = workspace_id,
+            .workspace_label = "Trip Workspace",
+            .document_path = "trip/brief.md",
+            .task_label = "trip-shell",
+            .task_entry = "app.trip.shell",
+            .task_title = "Coordinate Trip",
+            .bundle_id = "app.trip",
+            .display_name = "Trip",
+            .ui_surface_id = 78,
+            .image_id = 82_002,
+        },
+    );
+
+    var render_buffer: [768]u8 = undefined;
+    const initial = try shell.render(&render_buffer);
+    try expectContains(initial, "control=start-task");
+    try expectContains(initial, "control=open-document");
+
+    try shell.click(.start_task, 152);
+    try shell.click(.open_workspace, 153);
+    try shell.click(.open_document, 154);
+    try shell.click(.open_app_panel, 155);
+    try shell.click(.focus_full_screen, 156);
+
+    const task = runtime.find(shell.taskId()) orelse return error.MissingBootedRenderedShellTask;
+    try std.testing.expect(task.runsAsUserspaceProcess());
+    try std.testing.expectEqual(@as(?u64, 78), task.ui_surface_id);
+    try std.testing.expectEqual(@as(usize, 4), session.window_count);
+    try std.testing.expectEqual(@as(usize, 1), session.item_count);
+    try std.testing.expectEqual(compositor_session.ViewType.full_screen_task_view, session.windowAtOrder(3).?.view_type);
+
+    try std.testing.expectEqual(@as(usize, 5), ledger.countMatching(.{ .kind = .task_flow }));
+    try std.testing.expectEqual(@as(usize, 4), ledger.countMatching(.{ .kind = .task_flow, .task_id = task.id }));
+    try std.testing.expectEqual(@as(usize, 3), ledger.countMatching(.{ .kind = .task_flow, .workspace_id = workspace_id }));
+
+    var export_buffer: [1024]u8 = undefined;
+    const exported = try ledger.exportText(&export_buffer, .{});
+    try expectContains(exported, "flow_kind=start_task");
+    try expectContains(exported, "flow_kind=open_workspace");
+    try expectContains(exported, "flow_kind=open_document");
+    try expectContains(exported, "flow_kind=open_app_panel");
+    try expectContains(exported, "flow_kind=focus_task");
+
+    const rendered = try shell.render(&render_buffer);
+    try expectContains(rendered, "active_type=full_screen_task_view");
+    try expectContains(rendered, "active_title=Coordinate Trip");
+    try expectContains(rendered, "task_flow_events=5");
+}
+
+fn proveBootedRenderedPermissionReviewSurface(
+    runtime: *task_runtime.Runtime,
+    compositor_service_instance: *compositor_session.Service,
+    session: *compositor_session.Session,
+    app_task_id: u64,
+) !void {
+    var review_service = permission_review_service.Service.init(
+        82_030,
+        compositor_service_instance.task_id,
+        runtime,
+        &[_][]const u8{},
+    );
+    review_service.bindCompositorService(compositor_service_instance);
+
+    var display_storage: [compositor_display.DEFAULT_STORAGE_BYTES]u8 = undefined;
+    var display = try compositor_display.Framebuffer.init(
+        &display_storage,
+        compositor_display.DEFAULT_WIDTH,
+        compositor_display.DEFAULT_HEIGHT,
+    );
+    var ledger = event_ledger.Ledger.init();
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "ws:trip",
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
+            .local_only = true,
+            .max_lease_ticks = 400,
+        },
+        .{
+            .kind = .network_egress,
+            .resource = "net:trip",
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .required = false,
+            .max_lease_ticks = 80,
+        },
+    };
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "app.trip",
+        .display_name = "Trip",
+        .publisher = "zigos.local",
+        .requested_permissions = &permissions,
+        .signature = .{
+            .format = "ed25519",
+            .signer = "booted-trip-review",
+        },
+    };
+    var grants_buffer: [permission_review_service.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+    var surface = permission_review_service.RenderedReviewSurface.init(&review_service, app_task_id, bundle, 157, &display);
+    surface.bindLedger(&ledger);
+
+    try surface.begin();
+    try expectDisplayFrameContains(&display, "active_type=app_panel");
+    try expectDisplayFrameContains(&display, "permission_scope object=ws:trip network=none local=yes lease=400");
+    try expectDisplayFrameContains(&display, "control=allow_local_requested_lease window=1 kind=object_access resource=ws:trip lease=400");
+
+    try surface.click(.allow_local_requested_lease);
+    try expectDisplayFrameContains(&display, "permission_decision kind=object_access resource=ws:trip decision=allow");
+    try expectDisplayFrameContains(&display, "permission_scope object=none network=net:trip local=no lease=80");
+    try expectDisplayFrameContains(&display, "control=deny window=1 kind=network_egress resource=net:trip");
+
+    try surface.click(.deny);
+    const grants = try surface.finish(&grants_buffer);
+    try std.testing.expectEqual(@as(usize, 1), grants.len);
+    try std.testing.expectEqual(manifest.PermissionKind.object_access, grants[0].kind);
+    try std.testing.expectEqual(@as(?u64, 557), grants[0].expires_at_ticks);
+    try expectDisplayFrameContains(&display, "permission_decision kind=network_egress resource=net:trip decision=deny");
+    try std.testing.expectEqual(@as(usize, 2), ledger.countMatching(.{ .kind = .permission_review, .task_id = app_task_id }));
+    try std.testing.expectEqual(@as(usize, 2), ledger.countMatching(.{ .kind = .permission_decision, .task_id = app_task_id }));
+    try std.testing.expectEqual(@as(usize, 1), session.window_count);
+    try std.testing.expectEqual(@as(usize, 2), session.item_count);
+}
+
 fn assertRenderedWindowContains(
     session: *const compositor_session.Session,
     window_id: u64,
@@ -1523,6 +1936,21 @@ fn assertRenderedWindowContains(
     var buffer: [512]u8 = undefined;
     const rendered = try compositor_session.renderWindowToBuffer(&buffer, window);
     try expectContains(rendered, needle);
+}
+
+fn assertDisplayContains(session: *const compositor_session.Session, needle: []const u8) !void {
+    var storage: [compositor_display.DEFAULT_STORAGE_BYTES]u8 = undefined;
+    var display = try compositor_display.Framebuffer.init(
+        &storage,
+        compositor_display.DEFAULT_WIDTH,
+        compositor_display.DEFAULT_HEIGHT,
+    );
+    try display.renderSession(session);
+    if (!display.containsText(needle)) return error.ExpectedDisplaySubstringMissing;
+}
+
+fn expectDisplayFrameContains(display: *const compositor_display.Framebuffer, needle: []const u8) !void {
+    if (!display.containsText(needle)) return error.ExpectedDisplaySubstringMissing;
 }
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
@@ -1826,7 +2254,7 @@ fn proveBootedSchedulerTelemetryProvider(
         44,
         provider_task.task_id,
         701,
-        collectBootedSchedulerLiveCounters(runtime, scheduler, .{
+        platform_policy_signals.collectLiveCounters(runtime, scheduler, .{
             .thermal_milli_celsius = 91_000,
             .battery_percent = 15,
             .battery_charging = false,
@@ -1838,7 +2266,7 @@ fn proveBootedSchedulerTelemetryProvider(
     try std.testing.expectError(error.TelemetryProviderUnauthorized, provider.observeLive(
         session_task_id,
         701,
-        collectBootedSchedulerLiveCounters(runtime, scheduler, .{}),
+        platform_policy_signals.collectLiveCounters(runtime, scheduler, .{}),
     ));
     scheduler.configureResourceTelemetryFromProvider(&provider);
     try std.testing.expect(scheduler.observedResourceTelemetry());
@@ -1891,7 +2319,7 @@ fn proveBootedSchedulerTelemetryProvider(
     }, true));
 
     const media_denials_before = scheduler.engineDenialCount(.media);
-    try provider.observeLive(provider_task.task_id, 702, collectBootedSchedulerLiveCounters(runtime, scheduler, .{
+    try provider.observeLive(provider_task.task_id, 702, platform_policy_signals.collectLiveCounters(runtime, scheduler, .{
         .thermal_milli_celsius = 45_000,
         .battery_percent = 15,
         .battery_charging = false,
@@ -1913,7 +2341,7 @@ fn proveBootedSchedulerTelemetryProvider(
     try std.testing.expectEqual(media_denials_before + 1, scheduler.engineDenialCount(.media));
     try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.media));
 
-    try provider.observeLive(provider_task.task_id, 703, collectBootedSchedulerLiveCounters(runtime, scheduler, .{
+    try provider.observeLive(provider_task.task_id, 703, platform_policy_signals.collectLiveCounters(runtime, scheduler, .{
         .thermal_milli_celsius = 45_000,
         .battery_percent = 15,
         .battery_charging = false,
@@ -1936,52 +2364,6 @@ fn proveBootedSchedulerTelemetryProvider(
     try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.media));
     try std.testing.expectEqual(@as(u32, 3), provider.live_observation_count);
     try std.testing.expectEqual(@as(u32, 3), provider.read_count);
-}
-
-const BootedPlatformSensorSnapshot = struct {
-    memory_capacity_bytes: usize = 512 * 1024 * 1024,
-    thermal_milli_celsius: u32 = 45_000,
-    battery_percent: u8 = 100,
-    battery_charging: bool = true,
-    gpu_driver_online: bool = true,
-    npu_driver_online: bool = true,
-    media_driver_online: bool = true,
-};
-
-fn collectBootedSchedulerLiveCounters(
-    runtime: *const task_runtime.Runtime,
-    scheduler: *const userspace_scheduler.Scheduler,
-    sensors: BootedPlatformSensorSnapshot,
-) accelerator_scheduler.LivePlatformCounters {
-    var counters = accelerator_scheduler.LivePlatformCounters{
-        .memory_capacity_bytes = sensors.memory_capacity_bytes,
-        .gpu_driver_online = sensors.gpu_driver_online,
-        .npu_driver_online = sensors.npu_driver_online,
-        .media_driver_online = sensors.media_driver_online,
-        .thermal_milli_celsius = sensors.thermal_milli_celsius,
-        .battery_percent = sensors.battery_percent,
-        .battery_charging = sensors.battery_charging,
-    };
-    counters.total_cpu_budget_ticks = 0;
-
-    var slot_index: usize = 0;
-    while (slot_index < runtime.taskSlotCapacity()) : (slot_index += 1) {
-        const slot = runtime.taskSlotAtConst(slot_index);
-        if (!slot.in_use) continue;
-        const task = &slot.task;
-        counters.total_cpu_budget_ticks = std.math.add(u64, counters.total_cpu_budget_ticks, task.budget.cpu_time_ticks) catch std.math.maxInt(u64);
-        counters.consumed_cpu_ticks = std.math.add(u64, counters.consumed_cpu_ticks, task.background_cpu_consumed_ticks) catch std.math.maxInt(u64);
-        counters.reserved_memory_bytes = std.math.add(usize, counters.reserved_memory_bytes, task.budget.memory_bytes) catch std.math.maxInt(usize);
-        counters.reserved_shared_memory_bytes = std.math.add(usize, counters.reserved_shared_memory_bytes, task.budget.shared_memory_bytes) catch std.math.maxInt(usize);
-
-        if (scheduler.slots.getConst(task.id)) |scheduler_slot| {
-            counters.consumed_cpu_ticks = std.math.add(u64, counters.consumed_cpu_ticks, scheduler_slot.cpu_ticks_consumed) catch std.math.maxInt(u64);
-            if (scheduler_slot.dispatch_request.privacy_sensitive) {
-                counters.privacy_sensitive_task_count += 1;
-            }
-        }
-    }
-    return counters;
 }
 
 fn parkBootedSchedulerTasks(
@@ -2614,4 +2996,8 @@ fn signer(label: []const u8, seed: u8) signing.SignerIdentity {
 
 test "booted userspace service paths prove sync driver isolation and resource accounting" {
     try bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting();
+}
+
+test "booted driver hot-swap and crash recovery rebind live brokered device authority" {
+    try proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority();
 }

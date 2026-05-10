@@ -115,8 +115,8 @@ test "boot assembles core services without running explicit scenarios" {
     };
     var base_manager = try immutable_base.Manager.init(storage_service_instance, package_service.owner, base_state_signer);
     try std.testing.expect(base_manager.loaded_existing_state);
-    try std.testing.expectEqual(@as(u64, 2), base_manager.activation_generation);
-    try std.testing.expectEqual(@as(u64, 1), base_manager.rollback_generation);
+    try std.testing.expectEqual(@as(u64, 10), base_manager.activation_generation);
+    try std.testing.expectEqual(@as(u64, 6), base_manager.rollback_generation);
     try std.testing.expectEqualStrings("stable-a", base_manager.activeImage().?.labelSlice());
     try std.testing.expectEqualStrings("stable-b", base_manager.slots[base_manager.inactiveSlotIndex()].labelSlice());
 }

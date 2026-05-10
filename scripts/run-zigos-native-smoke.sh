@@ -140,6 +140,15 @@ assert_ab_rollback_markers() {
   assert_marker_group "$log_path" ab_rollback
 }
 
+assert_base_selector_active_slot() {
+  local log_path="$1"
+  if ! grep -Fq "ZIGOS:PLATFORM:BASE_SELECTOR:ACTIVE_SLOT 0 " "$log_path"; then
+    echo "Zigos native smoke test failed: base selector did not report active slot 0 in $log_path" >&2
+    cat "$log_path" >&2
+    exit 1
+  fi
+}
+
 line_number() {
   local log_path="$1"
   local marker="$2"
@@ -240,12 +249,14 @@ run_boot "$BOOT1_LOG" reset
 assert_boot_markers "$BOOT1_LOG"
 assert_first_boot_markers "$BOOT1_LOG"
 assert_ab_rollback_markers "$BOOT1_LOG"
+assert_base_selector_active_slot "$BOOT1_LOG"
 assert_driver_restart_without_reboot "$BOOT1_LOG"
 
 run_boot "$BOOT2_LOG" preserve
 assert_boot_markers "$BOOT2_LOG"
 assert_reboot_markers "$BOOT2_LOG"
 assert_ab_rollback_markers "$BOOT2_LOG"
+assert_base_selector_active_slot "$BOOT2_LOG"
 assert_driver_restart_without_reboot "$BOOT2_LOG"
 
 {

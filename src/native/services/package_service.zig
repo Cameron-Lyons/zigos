@@ -30,6 +30,7 @@ pub const MAX_SIGNATURE_FORMAT_BYTES = model.MAX_SIGNATURE_FORMAT_BYTES;
 pub const MAX_SIGNATURE_SIGNER_BYTES = model.MAX_SIGNATURE_SIGNER_BYTES;
 pub const InstallRequest = model.InstallRequest;
 pub const InstallResult = model.InstallResult;
+pub const RemoveResult = model.RemoveResult;
 pub const MigrationContext = model.MigrationContext;
 pub const MigrationApplier = model.MigrationApplier;
 pub const StoredComponent = model.StoredComponent;
@@ -215,6 +216,17 @@ pub const Service = struct {
         };
     }
 
+    fn remove(self: *Service, bundle_id: []const u8) Error!RemoveResult {
+        const slot = fixed_table.findSlot(BundleSlot, MAX_INSTALLED_BUNDLES, &self.slots, bundle_id, bundleSlotMatchesId) orelse return error.BundleNotFound;
+        const removed_revision_count = slot.bundle.revision_count;
+        slot.in_use = false;
+        slot.bundle = zeroBundle();
+        return .{
+            .removed_existing = true,
+            .removed_revision_count = removed_revision_count,
+        };
+    }
+
     pub fn find(self: *Service, bundle_id: []const u8) ?*InstalledBundle {
         const slot = fixed_table.findSlot(BundleSlot, MAX_INSTALLED_BUNDLES, &self.slots, bundle_id, bundleSlotMatchesId) orelse return null;
         return &slot.bundle;
@@ -305,6 +317,15 @@ pub const PackagePort = struct {
     ) (AuthorityError || Error)!InstallResult {
         _ = try self.requirePackageAuthority(authority, .endpoint_connect);
         return self.service.rollback(bundle_id);
+    }
+
+    pub fn remove(
+        self: *PackagePort,
+        authority: AuthorityContext,
+        bundle_id: []const u8,
+    ) (AuthorityError || Error)!RemoveResult {
+        _ = try self.requirePackageAuthority(authority, .endpoint_connect);
+        return self.service.remove(bundle_id);
     }
 
     fn requirePackageAuthority(
@@ -416,7 +437,7 @@ fn mintPackageServiceAuthority(
     });
 }
 
-test "package port requires service authority before install update and rollback" {
+test "package port requires service authority before install update rollback and remove" {
     var service = Service.init();
     service.bind(740, .{ .kind = .service, .serial = 740 });
     var capabilities = capability.CapabilityTable.init();
@@ -493,11 +514,15 @@ test "package port requires service authority before install update and rollback
     try std.testing.expect(updated.rollback_available);
     const rollback = try port.rollback(install_authority, bundle.bundle_id);
     try std.testing.expect(rollback.updated_existing);
+    const removed = try port.remove(install_authority, bundle.bundle_id);
+    try std.testing.expect(removed.removed_existing);
+    try std.testing.expect(removed.removed_revision_count >= 1);
+    try std.testing.expect(service.find(bundle.bundle_id) == null);
 
     const wrong_target = try mintPackageServiceAuthority(&capabilities, service.service_id + 1, actor, task_id, .{ .service = .{
         .endpoint_connect = true,
     } });
-    try std.testing.expectError(error.CapabilityRequired, port.rollback(.{
+    try std.testing.expectError(error.CapabilityRequired, port.remove(.{
         .task_id = task_id,
         .principal = actor,
         .capability_id = wrong_target.id,
@@ -505,7 +530,7 @@ test "package port requires service authority before install update and rollback
     }, bundle.bundle_id));
 }
 
-test "package service enforces signed manifests policy gated sources updates and rollback" {
+test "package service enforces signed manifests policy gated sources updates rollback and remove" {
     test_migration.reset();
     var policies = policy_object.Directory.init();
     const org_policy = try policies.create(.{
@@ -679,6 +704,13 @@ test "package service enforces signed manifests policy gated sources updates and
     try std.testing.expectEqual(@as(u16, 0), rolled_back.versionMinor());
     try std.testing.expectEqual(@as(u32, 1), rolled_back.schemaVersion());
     try std.testing.expectEqual(@as(usize, 1), rolled_back.componentCount());
+
+    const removed = try service.remove("app.notes");
+    try std.testing.expect(removed.removed_existing);
+    try std.testing.expectEqual(@as(usize, 2), removed.removed_revision_count);
+    try std.testing.expect(service.find("app.notes") == null);
+    try std.testing.expectError(error.BundleNotFound, service.buildLaunchPlan("app.notes"));
+    try std.testing.expectError(error.BundleNotFound, service.remove("app.notes"));
 }
 
 test "package service rejects invalid signatures and rollback before any update" {

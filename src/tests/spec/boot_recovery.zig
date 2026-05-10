@@ -1,5 +1,6 @@
 const std = @import("std");
 const spec_support = @import("support.zig");
+const base_boot_selector = @import("../../native/platform/base_boot_selector.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
 const compositor_session = @import("../../native/platform/compositor_session.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
@@ -76,26 +77,48 @@ pub fn baseImageStaysSignedMeasuredAtomicAndRollbackCapable() !void {
 
     var storage = storage_service.Service.initWithStore(700, 70, owner, &storage_checkpoint_store);
     var manager = try immutable_base.Manager.init(&storage, owner, state_signer);
+    var selector_store = base_boot_selector.MemorySector.init();
+    var selector = base_boot_selector.Selector.init();
 
     _ = try manager.stageImage(0, "stable-a", "kernel=v1", image_signer, 10);
     const first_activation = try manager.activate(0, .{}, 11);
     try std.testing.expectEqual(@as(?usize, 0), first_activation.active_slot);
     try std.testing.expect(!first_activation.rolled_back);
     try std.testing.expect(manager.verifyActiveImage());
+    _ = try selector.bindStable(&manager, try manager.selectVerifiedBootImage(), 12);
+    try selector.persistToMemory(&selector_store);
 
     _ = try manager.stageImage(1, "stable-b", "kernel=v2", image_signer, 12);
-    const rollback = try manager.activate(1, .{
+    try manager.beginActivation(1, 13);
+    var rebooted_selector = base_boot_selector.Selector.init();
+    try rebooted_selector.loadFromMemory(&selector_store);
+    try std.testing.expect(rebooted_selector.coldRebootVerified(0, first_activation.activation_generation));
+    _ = try rebooted_selector.stageCandidate(&manager, try manager.selectVerifiedBootImage(), 13);
+    try std.testing.expectEqual(@as(u8, 1), (try rebooted_selector.selectBootCandidate(&manager)).slot_index);
+    const rollback = try manager.finalizeActivation(.{
         .network_ok = false,
-    }, 13);
+    }, 14);
+    const selector_rollback = try rebooted_selector.finalizeBoot(.{
+        .network_ok = false,
+    }, false, 14);
     try std.testing.expect(rollback.rolled_back);
+    try std.testing.expect(selector_rollback.rolled_back);
     try std.testing.expectEqual(immutable_base.HealthFailure.network, rollback.failure);
+    try std.testing.expectEqual(immutable_base.HealthFailure.network, selector_rollback.failure);
     try std.testing.expectEqual(@as(?usize, 0), rollback.active_slot);
     try std.testing.expectEqual(@as(u64, 1), rollback.rollback_generation);
+    try std.testing.expectEqual(rollback.active_slot, selector_rollback.active_slot);
+    try std.testing.expectEqual(rollback.activation_generation, selector_rollback.activation_generation);
+    try std.testing.expectEqual(rollback.rollback_generation, selector_rollback.rollback_generation);
+    try rebooted_selector.persistToMemory(&selector_store);
 
     const active = manager.activeImage().?;
     try std.testing.expectEqualStrings("stable-a", active.labelSlice());
     try std.testing.expect(manager.verifySlot(0));
     try std.testing.expect(manager.verifySlot(1));
+    var post_rollback_selector = base_boot_selector.Selector.init();
+    try post_rollback_selector.loadFromMemory(&selector_store);
+    try std.testing.expect(post_rollback_selector.coldRebootVerified(0, rollback.activation_generation));
 
     var recorder = measured_boot.Recorder.init();
     recorder.begin(rollback.activation_generation);

@@ -36,6 +36,11 @@ pub const InstallResult = struct {
     migration_applied: bool,
 };
 
+pub const RemoveResult = struct {
+    removed_existing: bool,
+    removed_revision_count: usize,
+};
+
 pub const MigrationContext = struct {
     bundle_id: []const u8,
     from_schema_version: u32,

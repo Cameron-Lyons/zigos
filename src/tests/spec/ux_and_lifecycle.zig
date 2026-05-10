@@ -325,9 +325,15 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
     try std.testing.expectEqual(@as(u16, 0), packages.find("app.trip").?.versionMinor());
 
     try controller.recoverSystem(task.id, person, "restored previous trip planner version");
-    try std.testing.expectEqual(@as(usize, 5), controller.flow_count);
+    const removed = try packages_entry.port.remove(packages_entry.authority, "app.trip");
+    try std.testing.expect(removed.removed_existing);
+    try std.testing.expect(packages.find("app.trip") == null);
+    _ = try controller.removeApp(person, "app.trip");
+    try std.testing.expectEqual(@as(usize, 6), controller.flow_count);
     try std.testing.expectEqual(native_ux.FlowKind.recover_system, controller.flowAtOrder(4).?.kind);
     try std.testing.expectEqualStrings("restored previous trip planner version", controller.flowAtOrder(4).?.detailSlice());
+    try std.testing.expectEqual(native_ux.FlowKind.remove_app, controller.flowAtOrder(5).?.kind);
+    try std.testing.expectEqualStrings("app.trip", controller.flowAtOrder(5).?.bundleIdSlice());
 }
 
 pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
@@ -467,6 +473,10 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
     _ = try packages_entry.port.rollback(packages_entry.authority, "app.notes");
     try std.testing.expectEqual(@as(u16, 0), packages.find("app.notes").?.versionMinor());
     try std.testing.expectEqual(@as(usize, 1), packages.find("app.notes").?.componentCount());
+    const removed = try packages_entry.port.remove(packages_entry.authority, "app.notes");
+    try std.testing.expect(removed.removed_existing);
+    try std.testing.expect(packages.find("app.notes") == null);
+    try std.testing.expectError(error.BundleNotFound, packages.buildLaunchPlan("app.notes"));
 }
 
 pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {

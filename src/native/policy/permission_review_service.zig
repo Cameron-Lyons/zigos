@@ -1,9 +1,12 @@
 const std = @import("std");
+const abi = @import("../core/abi.zig");
 const builtin = @import("builtin");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const manifest = @import("manifest.zig");
 const manifest_fixtures = @import("manifest_fixtures.zig");
+const compositor_display = @import("../platform/compositor_display.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
+const event_ledger = @import("../platform/event_ledger.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const permission_review = @import("permission_review.zig");
 const policy_mediation = @import("policy_mediation.zig");
@@ -55,7 +58,11 @@ else
 pub const MAX_REVIEW_DECISIONS: usize = permission_review.MAX_REVIEW_DECISIONS;
 pub const MAX_INPUT_LINE: usize = 96;
 pub const MAX_SCRIPTED_PLAN_ENTRIES: usize = 16;
-pub const Error = task_runtime.Error || manifest.ValidationError;
+pub const Error = task_runtime.Error || manifest.ValidationError || compositor_display.Error || event_ledger.Error || error{
+    ReviewComplete,
+    ReviewIncomplete,
+    ReviewWindowMissing,
+};
 
 pub const ScriptedPlanEntry = struct {
     bundle_id: []const u8,
@@ -79,6 +86,184 @@ pub const ProfileRule = struct {
     lease_mode: ProfileLeaseMode = .none,
     fixed_lease_ticks: u64 = 0,
 };
+
+pub const SurfaceControl = enum {
+    allow,
+    allow_local,
+    allow_requested_lease,
+    allow_local_requested_lease,
+    deny,
+};
+
+pub const RenderedReviewSurface = struct {
+    service: *Service,
+    app_task_id: u64,
+    bundle: manifest.BundleManifest,
+    now_ticks: u64,
+    display: *compositor_display.Framebuffer,
+    ledger: ?*event_ledger.Ledger = null,
+    review_window_id: ?u64 = null,
+    active_index: usize = 0,
+    decision_count: usize = 0,
+    decisions: [MAX_REVIEW_DECISIONS]permission_review.ReviewDecision = [_]permission_review.ReviewDecision{.{
+        .kind = .object_access,
+        .resource = "",
+        .allow = false,
+    }} ** MAX_REVIEW_DECISIONS,
+
+    pub fn init(
+        service: *Service,
+        app_task_id: u64,
+        bundle: manifest.BundleManifest,
+        now_ticks: u64,
+        display: *compositor_display.Framebuffer,
+    ) RenderedReviewSurface {
+        return .{
+            .service = service,
+            .app_task_id = app_task_id,
+            .bundle = bundle,
+            .now_ticks = now_ticks,
+            .display = display,
+        };
+    }
+
+    pub fn bindLedger(self: *RenderedReviewSurface, ledger: *event_ledger.Ledger) void {
+        self.ledger = ledger;
+    }
+
+    pub fn begin(self: *RenderedReviewSurface) Error!void {
+        try manifest.validate(self.bundle);
+        const app_task = self.service.runtime.find(self.app_task_id) orelse return error.TaskNotFound;
+        self.review_window_id = self.service.ensureReviewWindow(app_task, self.bundle) orelse return error.ReviewWindowMissing;
+        try self.service.runtime.audit(self.app_task_id, .{
+            .kind = .permission_prompted,
+            .detail = @intCast(self.bundle.requested_permissions.len),
+            .tick = self.now_ticks,
+        });
+        common.printBootMarker("ZIGOS:PERMISSION:UI:REVIEW_READY");
+        common.printBootMarker("ZIGOS:PERMISSION:UI:INPUT_LOOP");
+        try self.presentCurrentRequest();
+        try self.render();
+    }
+
+    pub fn click(self: *RenderedReviewSurface, control: SurfaceControl) Error!void {
+        if (self.active_index >= self.bundle.requested_permissions.len) return error.ReviewComplete;
+        if (self.decision_count >= self.decisions.len) return error.ReviewComplete;
+
+        const request = self.bundle.requested_permissions[self.active_index];
+        const command = commandForControl(control, request);
+        const decision = permission_review.decisionFromCommand(request, command);
+        self.service.recordDecision(self.app_task_id, self.review_window_id, self.bundle, request, decision);
+        try self.recordLedgerDecision(request, decision);
+        self.decisions[self.decision_count] = decision;
+        self.decision_count += 1;
+        self.active_index += 1;
+        if (self.active_index < self.bundle.requested_permissions.len) {
+            try self.presentCurrentRequest();
+        }
+        try self.render();
+    }
+
+    pub fn finish(
+        self: *RenderedReviewSurface,
+        output: *[MAX_REVIEW_DECISIONS]policy_mediation.UserGrant,
+    ) Error![]const policy_mediation.UserGrant {
+        if (self.active_index < self.bundle.requested_permissions.len) return error.ReviewIncomplete;
+        const reviewed_session = permission_review.initSession(
+            self.app_task_id,
+            &self.bundle,
+            self.decisions[0..self.decision_count],
+        );
+        var review_buffer: [2048]u8 = undefined;
+        const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, &self.bundle) catch unreachable;
+        console.print(rendered);
+        common.printBootMarker(boot_markers.permission_ui_review_rendered);
+
+        const grants = permission_review.decisionsToGrants(
+            &self.bundle,
+            reviewed_session.decisions[0..reviewed_session.decision_count],
+            self.now_ticks,
+            output,
+        );
+        try self.service.runtime.audit(self.app_task_id, .{
+            .kind = .permission_reviewed,
+            .detail = @intCast(grants.len),
+            .tick = self.now_ticks,
+        });
+        try self.render();
+        return grants;
+    }
+
+    pub fn render(self: *RenderedReviewSurface) Error!void {
+        const compositor = self.service.compositor orelse return error.ReviewWindowMissing;
+        try self.display.renderSession(compositor);
+    }
+
+    fn presentCurrentRequest(self: *RenderedReviewSurface) Error!void {
+        if (self.active_index >= self.bundle.requested_permissions.len) return;
+        self.service.presentReviewRequest(
+            self.review_window_id,
+            self.bundle,
+            self.bundle.requested_permissions[self.active_index],
+        );
+    }
+
+    fn recordLedgerDecision(
+        self: *RenderedReviewSurface,
+        request: manifest.PermissionRequest,
+        decision: permission_review.ReviewDecision,
+    ) Error!void {
+        const ledger = self.ledger orelse return;
+        const task = self.service.runtime.find(self.app_task_id) orelse return error.TaskNotFound;
+        const window_id = self.review_window_id orelse return error.ReviewWindowMissing;
+        const compositor = self.service.compositor orelse return error.ReviewWindowMissing;
+        const item = compositor.findReviewItemConst(window_id, request.kind, request.resource) orelse return error.ReviewWindowMissing;
+
+        var item_buffer: [512]u8 = undefined;
+        const rendered_item = compositor_session.renderReviewItemToBuffer(&item_buffer, window_id, item) catch return;
+        try ledger.recordPermissionReview(
+            task.owner,
+            task.id,
+            request.kind,
+            decision.allow,
+            self.now_ticks + @as(u64, @intCast(self.decision_count * 2)),
+            rendered_item,
+            false,
+        );
+
+        var decision_buffer: [320]u8 = undefined;
+        const rendered_decision = compositor_session.renderDecisionToBuffer(&decision_buffer, window_id, item) catch return;
+        try ledger.recordPermissionDecision(
+            task.owner,
+            task.id,
+            request.kind,
+            decision.allow,
+            if (decision.allow) abi.DenialReason.none else abi.DenialReason.policy_denied,
+            self.now_ticks + @as(u64, @intCast(self.decision_count * 2 + 1)),
+            rendered_decision,
+            false,
+        );
+    }
+};
+
+fn commandForControl(control: SurfaceControl, request: manifest.PermissionRequest) permission_review.ReviewCommand {
+    const requested_lease = if (request.max_lease_ticks == 0) null else request.max_lease_ticks;
+    return switch (control) {
+        .allow => .{ .allow = true },
+        .allow_local => .{ .allow = true, .local_only = true },
+        .allow_requested_lease => .{
+            .allow = true,
+            .local_only = request.local_only,
+            .lease_ticks = requested_lease,
+        },
+        .allow_local_requested_lease => .{
+            .allow = true,
+            .local_only = true,
+            .lease_ticks = requested_lease,
+        },
+        .deny => .{ .allow = false },
+    };
+}
 
 pub const Service = struct {
     service_id: u64,
@@ -692,4 +877,140 @@ test "review service renders commands from a typed decision profile" {
     try std.testing.expectEqual(@as(?u64, 425), grants[0].expires_at_ticks);
     const window = compositor.windowAtOrder(0).?;
     try std.testing.expectEqual(compositor_session.DecisionState.deny, compositor.findReviewItemConst(window.id, .clipboard, "clipboard").?.decision);
+}
+
+test "rendered permission review surface drives allow deny controls through compositor display and policy grants" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = 44 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 1024,
+        },
+        .ui_surface_id = 71,
+        .local_only = true,
+    });
+    var compositor = compositor_session.Session.init();
+    var checkpoint_store = compositor_session.CheckpointStore{};
+    var compositor_service = compositor_session.Service.initWithCheckpoint(45, 46, &runtime, &compositor, &checkpoint_store);
+    var service = Service.init(45, 46, &runtime, &[_][]const u8{});
+    service.bindCompositorService(&compositor_service);
+    var ledger = event_ledger.Ledger.init();
+    var display_storage: [compositor_display.DEFAULT_STORAGE_BYTES]u8 = undefined;
+    var display = try compositor_display.Framebuffer.init(
+        &display_storage,
+        compositor_display.DEFAULT_WIDTH,
+        compositor_display.DEFAULT_HEIGHT,
+    );
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:trip",
+            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
+            .local_only = true,
+            .max_lease_ticks = 400,
+        },
+        .{
+            .kind = .network_egress,
+            .resource = "net:trip",
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .required = false,
+            .max_lease_ticks = 80,
+        },
+    };
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "app.trip",
+        .display_name = "Trip",
+        .publisher = "zigos.dev",
+        .requested_permissions = &permissions,
+        .signature = .{
+            .format = "ed25519",
+            .signer = "zigos-dev-key",
+        },
+    };
+    var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+    var surface = RenderedReviewSurface.init(&service, task.id, bundle, 50, &display);
+    surface.bindLedger(&ledger);
+
+    try surface.begin();
+    try std.testing.expect(display.containsText("active_type=app_panel"));
+    try std.testing.expect(display.containsText("permission kind=object_access resource=workspace:trip"));
+    try std.testing.expect(display.containsText("permission_scope object=workspace:trip network=none local=yes lease=400"));
+    try std.testing.expect(display.containsText("control=allow_local_requested_lease window=1 kind=object_access resource=workspace:trip lease=400"));
+
+    try surface.click(.allow_local_requested_lease);
+    try std.testing.expect(display.containsText("permission_decision kind=object_access resource=workspace:trip decision=allow"));
+    try std.testing.expect(display.containsText("permission kind=network_egress resource=net:trip"));
+    try std.testing.expect(display.containsText("permission_scope object=none network=net:trip local=no lease=80"));
+    try std.testing.expect(display.containsText("control=deny window=1 kind=network_egress resource=net:trip"));
+
+    try surface.click(.deny);
+    const grants = try surface.finish(&grants_buffer);
+    try std.testing.expectEqual(@as(usize, 1), grants.len);
+    try std.testing.expectEqual(manifest.PermissionKind.object_access, grants[0].kind);
+    try std.testing.expect(grants[0].local_only);
+    try std.testing.expectEqual(@as(?u64, 450), grants[0].expires_at_ticks);
+    try std.testing.expect(display.containsText("permission_decision kind=network_egress resource=net:trip decision=deny"));
+    try std.testing.expectEqual(@as(usize, 2), ledger.countMatching(.{ .kind = .permission_review, .task_id = task.id }));
+    try std.testing.expectEqual(@as(usize, 2), ledger.countMatching(.{ .kind = .permission_decision, .task_id = task.id }));
+    try std.testing.expectEqual(task_runtime.AuditEventKind.permission_prompted, task.auditEventAt(0).?.kind);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.permission_reviewed, task.auditEventAt(1).?.kind);
+    try std.testing.expect(checkpoint_store.valid);
+}
+
+test "rendered permission review surface requires every visible decision before grants" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = 45 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 1024,
+        },
+        .local_only = true,
+    });
+    var compositor = compositor_session.Session.init();
+    var checkpoint_store = compositor_session.CheckpointStore{};
+    var compositor_service = compositor_session.Service.initWithCheckpoint(47, 48, &runtime, &compositor, &checkpoint_store);
+    var service = Service.init(47, 48, &runtime, &[_][]const u8{});
+    service.bindCompositorService(&compositor_service);
+    var display_storage: [compositor_display.DEFAULT_STORAGE_BYTES]u8 = undefined;
+    var display = try compositor_display.Framebuffer.init(
+        &display_storage,
+        compositor_display.DEFAULT_WIDTH,
+        compositor_display.DEFAULT_HEIGHT,
+    );
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .clipboard,
+            .resource = "clipboard",
+            .rights = .{ .workspace = .{ .clipboard_read = true } },
+            .required = false,
+        },
+    };
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "app.clip",
+        .display_name = "Clip",
+        .publisher = "zigos.dev",
+        .requested_permissions = &permissions,
+        .signature = .{
+            .format = "ed25519",
+            .signer = "zigos-dev-key",
+        },
+    };
+    var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+    var surface = RenderedReviewSurface.init(&service, task.id, bundle, 60, &display);
+
+    try surface.begin();
+    try std.testing.expect(display.containsText("control=deny window=1 kind=clipboard resource=clipboard"));
+    try std.testing.expectError(error.ReviewIncomplete, surface.finish(&grants_buffer));
+    try surface.click(.deny);
+    const grants = try surface.finish(&grants_buffer);
+    try std.testing.expectEqual(@as(usize, 0), grants.len);
+    try std.testing.expectError(error.ReviewComplete, surface.click(.allow));
 }
