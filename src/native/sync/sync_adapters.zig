@@ -271,6 +271,7 @@ pub const TransportFrame = struct {
     transport: state_support.TransportMode = .device_to_device,
     semantic: state_support.SyncSemantic = .mergeable_crdt,
     encrypted: bool = false,
+    workspace_generation: u32 = 0,
     path_len: usize = 0,
     path: [workspace.MAX_ENTRY_PATH_BYTES]u8 = [_]u8{0} ** workspace.MAX_ENTRY_PATH_BYTES,
 
@@ -288,6 +289,7 @@ pub const QueueFrameRequest = struct {
     transport: state_support.TransportMode,
     semantic: state_support.SyncSemantic,
     encrypted: bool,
+    workspace_generation: u32 = 0,
     path: []const u8,
 };
 
@@ -329,6 +331,7 @@ pub const TransportQueue = struct {
             .transport = request.transport,
             .semantic = request.semantic,
             .encrypted = request.encrypted,
+            .workspace_generation = request.workspace_generation,
         };
         frame.path_len = try copyPath(&frame.path, request.path);
         slot.frame = frame;

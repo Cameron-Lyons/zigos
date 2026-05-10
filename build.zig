@@ -96,6 +96,16 @@ pub fn build(b: *std.Build) void {
         userspace_images.production_manifest_module,
     );
 
+    const recovery_kernel = kernel_build.addKernelArtifact(
+        b,
+        target,
+        optimize,
+        "kernel-recovery.elf",
+        .recovery,
+        userspace_images.archive_module,
+        userspace_images.production_manifest_module,
+    );
+
     const benchmark_kernel = kernel_build.addKernelArtifact(
         b,
         target,
@@ -117,6 +127,10 @@ pub fn build(b: *std.Build) void {
     const kernel_benchmark_step = b.step("kernel-benchmark", "Build the spec-aligned native benchmark kernel");
     kernel_benchmark_step.dependOn(benchmark_kernel.install_step);
     kernel_benchmark_step.dependOn(userspace_images.step);
+
+    const kernel_recovery_step = b.step("kernel-recovery", "Build the freestanding recovery-mode kernel");
+    kernel_recovery_step.dependOn(recovery_kernel.install_step);
+    kernel_recovery_step.dependOn(userspace_images.step);
 
     const native_store_cmd = b.addSystemCommand(&.{
         "bash",
@@ -181,6 +195,18 @@ pub fn build(b: *std.Build) void {
 
     const driver_restart_qemu_step = b.step("driver-restart-qemu-test", "Run QEMU proof that a userspace driver crashes and restarts without reboot");
     driver_restart_qemu_step.dependOn(&driver_restart_qemu_cmd.step);
+
+    const recovery_qemu_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-kernel-recovery.sh",
+        recovery_kernel.output_path,
+        "build/kernel-recovery.log",
+    });
+    recovery_qemu_cmd.step.dependOn(recovery_kernel.install_step);
+    recovery_qemu_cmd.step.dependOn(userspace_images.step);
+
+    const recovery_qemu_step = b.step("recovery-qemu-test", "Run QEMU proof that the recovery profile performs break-glass repair operations");
+    recovery_qemu_step.dependOn(&recovery_qemu_cmd.step);
 
     const zig_test_roots_cmd = b.addSystemCommand(&.{
         "python3",
@@ -250,6 +276,7 @@ pub fn build(b: *std.Build) void {
     spec_smoke_cmd.step.dependOn(&run_spec_tests.step);
     const spec_conformance_step = b.step("spec-conformance", "Validate spec coverage, run native spec tests, and verify the freestanding smoke path");
     spec_conformance_step.dependOn(&spec_smoke_cmd.step);
+    spec_conformance_step.dependOn(&recovery_qemu_cmd.step);
 
     const benchmark_cmd = b.addSystemCommand(&.{
         "bash",

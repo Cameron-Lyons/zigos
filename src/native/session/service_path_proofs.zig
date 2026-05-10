@@ -1,6 +1,7 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
+const attestation_service = @import("../platform/attestation_service.zig");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const device_broker = @import("../kernel_api/device_broker.zig");
@@ -12,12 +13,16 @@ const ids = @import("../core/ids.zig");
 const immutable_base = @import("../platform/immutable_base.zig");
 const kernel_data_plane_boundary = @import("../../kernel/boot/init/data_plane_boundary.zig");
 const manifest = @import("../policy/manifest.zig");
+const measured_boot = @import("../platform/measured_boot.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const native_service_registry = @import("../services/service_registry.zig");
+const network_driver_task = @import("../drivers/network_driver_task.zig");
+const network_policy = @import("../sync/network_policy.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
 const session_manager = @import("session_manager.zig");
 const service_catalog = @import("service_catalog.zig");
+const shared_memory_mod = @import("../kernel_api/shared_memory.zig");
 const signing = @import("../core/signing.zig");
 const storage_driver_protocol = @import("../drivers/storage_driver_protocol.zig");
 const storage_service = @import("../storage/storage_service.zig");
@@ -28,6 +33,7 @@ const task_runtime = @import("../task/task_runtime.zig");
 const update_health = @import("../platform/update_health.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
+const workspace = @import("../storage/workspace.zig");
 
 pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting() !void {
     session_manager.testing.resetState();
@@ -77,11 +83,15 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
         driver_runtime,
     );
     try proveBootedSyncServicePath(
+        kernel_port,
         runtime,
         capability_table,
         supervisor.findByClass(.sync_replication).?,
         sync_task,
+        network_service_task,
         storage,
+        session_task.id,
+        session_authority_id,
     );
     try proveBootedCompositorServicePath(
         kernel_port,
@@ -101,8 +111,11 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
         session_manager.testing.compositorSessionPtr(),
     );
     try proveBootedSchedulerTelemetryProvider(
+        kernel_port,
         runtime,
         session_manager.testing.userspaceSchedulerPtr(),
+        session_task.id,
+        session_authority_id,
     );
 }
 
@@ -217,10 +230,19 @@ fn proveBootedSharedMemoryMappingRevocation(
 
     const owner_mapping = try kernel_port.kernel.shared_memory_table.taskMappingDescriptor(object_id, ids.task(owner.task_id));
     const peer_mapping = try kernel_port.kernel.shared_memory_table.taskMappingDescriptor(object_id, ids.task(peer.task_id));
+    const owner_mmu_mapping = try kernel_port.kernel.shared_memory_table.freestandingTaskMappingDescriptor(object_id, ids.task(owner.task_id));
+    const peer_mmu_mapping = try kernel_port.kernel.shared_memory_table.freestandingTaskMappingDescriptor(object_id, ids.task(peer.task_id));
     try std.testing.expectEqual(owner_mapping.page_base, peer_mapping.page_base);
     try std.testing.expectEqual(@as(usize, 1), owner_mapping.page_count);
     try std.testing.expectEqual(@as(usize, 4096), peer_mapping.size_bytes);
     try std.testing.expect(!owner_mapping.zero_copy);
+    try std.testing.expectEqual(owner_mapping.page_base, owner_mmu_mapping.physical_base);
+    try std.testing.expectEqual(owner_mmu_mapping.physical_base, peer_mmu_mapping.physical_base);
+    try std.testing.expect(owner_mmu_mapping.virtual_base != 0);
+    try std.testing.expect(peer_mmu_mapping.virtual_base != 0);
+    try std.testing.expect(owner_mmu_mapping.virtual_base != peer_mmu_mapping.virtual_base);
+    try std.testing.expect(!owner_mmu_mapping.zero_copy);
+    try std.testing.expectEqual(@as(usize, 2), kernel_port.kernel.shared_memory_table.activeFreestandingMappings(object_id));
 
     const revoked = try expectSharedMemoryRevoke(kernel_port, owner.task_id, created.capability_id, 135);
     try std.testing.expectEqual(@as(u16, 0), revoked.mapped_task_count);
@@ -233,6 +255,8 @@ fn proveBootedSharedMemoryMappingRevocation(
     try std.testing.expectEqual(abi.SyscallStatus.denied, post_revoke_map.status);
     try std.testing.expectEqual(abi.DenialReason.capability_revoked, post_revoke_map.denial_reason);
     try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.taskMappingDescriptor(object_id, ids.task(owner.task_id)));
+    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.freestandingTaskMappingDescriptor(object_id, ids.task(owner.task_id)));
+    try std.testing.expectEqual(@as(usize, 0), kernel_port.kernel.shared_memory_table.activeFreestandingMappings(object_id));
 
     const accelerated = try kernel_port.kernel.shared_memory_table.createLabeledWithAccess(ids.task(owner.task_id), 8192, "booted-accelerator", .{
         .gpu = true,
@@ -242,12 +266,23 @@ fn proveBootedSharedMemoryMappingRevocation(
     try kernel_port.kernel.shared_memory_table.attachAccelerator(accelerated.id, .gpu);
     const task_mapping = try kernel_port.kernel.shared_memory_table.taskMappingDescriptor(accelerated.id, ids.task(owner.task_id));
     const gpu_mapping = try kernel_port.kernel.shared_memory_table.acceleratorMappingDescriptor(accelerated.id, .gpu);
+    const task_mmu_mapping = try kernel_port.kernel.shared_memory_table.freestandingTaskMappingDescriptor(accelerated.id, ids.task(owner.task_id));
+    const gpu_mmu_mapping = try kernel_port.kernel.shared_memory_table.freestandingAcceleratorMappingDescriptor(accelerated.id, .gpu);
     try std.testing.expect(gpu_mapping.zero_copy);
     try std.testing.expectEqual(task_mapping.page_base, gpu_mapping.page_base);
     try std.testing.expectEqual(task_mapping.page_count, gpu_mapping.page_count);
+    try std.testing.expectEqual(task_mapping.page_base, task_mmu_mapping.physical_base);
+    try std.testing.expectEqual(task_mmu_mapping.physical_base, gpu_mmu_mapping.physical_base);
+    try std.testing.expect(task_mmu_mapping.virtual_base != gpu_mmu_mapping.virtual_base);
+    try std.testing.expect(gpu_mmu_mapping.zero_copy);
+    try std.testing.expectEqual(shared_memory_mod.ComputeTarget.gpu, gpu_mmu_mapping.target.?);
+    try std.testing.expectEqual(@as(usize, 2), kernel_port.kernel.shared_memory_table.activeFreestandingMappings(accelerated.id));
     try kernel_port.kernel.shared_memory_table.revoke(accelerated.id);
+    try std.testing.expectEqual(@as(usize, 0), kernel_port.kernel.shared_memory_table.activeFreestandingMappings(accelerated.id));
     try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.taskMappingDescriptor(accelerated.id, ids.task(owner.task_id)));
     try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.acceleratorMappingDescriptor(accelerated.id, .gpu));
+    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.freestandingTaskMappingDescriptor(accelerated.id, ids.task(owner.task_id)));
+    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.freestandingAcceleratorMappingDescriptor(accelerated.id, .gpu));
 }
 
 fn proveBootedDriverPermissions(
@@ -340,6 +375,7 @@ fn proveBootedUserspaceServiceOwnershipAndKernelBoundary(
         .{ .device_class = .network_adapter, .service_class = .network_stack },
         .{ .device_class = .storage_controller, .service_class = .storage_object },
         .{ .device_class = .graphics_adapter, .service_class = .compositor_ui_session },
+        .{ .device_class = .input_device, .service_class = .compositor_ui_session },
         .{ .device_class = .audio_print_io, .service_class = .media_print_helpers },
     };
 
@@ -361,15 +397,14 @@ fn proveBootedUserspaceServiceOwnershipAndKernelBoundary(
             .device_class = @intFromEnum(driver.device_class),
         }));
 
-        if (driver_runtime.findByClass(expectation.device_class)) |activation| {
-            try std.testing.expectEqual(driver.service_id, activation.service_id);
-            try std.testing.expectEqual(driver.device_id, activation.device_id);
-            try std.testing.expect(activation.iommu_enforced);
-            if (activation.kernel_bootstrap) {
-                try std.testing.expectEqual(driver_runtime_mod.ActivationMode.userspace_brokered_data_plane, activation.mode);
-            } else {
-                try std.testing.expect(activation.mode != .published_data_plane or activation.exclusive_claim);
-            }
+        const activation = driver_runtime.findByClass(expectation.device_class) orelse return error.MissingBootedDriverBinding;
+        try std.testing.expectEqual(driver.service_id, activation.service_id);
+        try std.testing.expectEqual(driver.device_id, activation.device_id);
+        try std.testing.expect(activation.iommu_enforced);
+        if (activation.kernel_bootstrap) {
+            try std.testing.expectEqual(driver_runtime_mod.ActivationMode.userspace_brokered_data_plane, activation.mode);
+        } else {
+            try std.testing.expect(activation.mode != .published_data_plane or activation.exclusive_claim);
         }
     }
 }
@@ -460,13 +495,19 @@ fn expectRootKernelCallerDenied(
 }
 
 fn proveBootedSyncServicePath(
+    kernel_port: *component_port.KernelPort,
     runtime: *task_runtime.Runtime,
     capability_table: *capability.CapabilityTable,
     sync_record: *const @import("supervisor.zig").ServiceRecord,
     sync_task: *task_runtime.TaskRecord,
+    network_service_task: *task_runtime.TaskRecord,
     storage: *@import("../storage/storage_service.zig").Service,
+    session_task_id: u64,
+    session_authority_id: u64,
 ) !void {
     const sync_owner = sync_record.owner;
+    const peer_owner = principal.PrincipalId{ .kind = .service, .serial = 7_008 };
+    const overlay_relay_owner = principal.PrincipalId{ .kind = .service, .serial = 7_009 };
     const user = principal.PrincipalId{ .kind = .user, .serial = 7_001 };
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 7_002 };
     const tablet = principal.PrincipalId{ .kind = .device, .serial = 7_003 };
@@ -490,6 +531,9 @@ fn proveBootedSyncServicePath(
         .target = .{ .kind = .service, .id = sync_instance.service_id },
         .rights = .{ .service = .{
             .endpoint_connect = true,
+            .endpoint_create = true,
+            .endpoint_send = true,
+            .endpoint_recv = true,
         } },
         .scope = .{
             .task_id = sync_task.id,
@@ -509,6 +553,56 @@ fn proveBootedSyncServicePath(
         .principal = sync_owner,
         .capability_id = authority.id,
         .now_ticks = 101,
+    };
+    const peer_task = try createBootedServiceTask(
+        kernel_port,
+        session_task_id,
+        session_authority_id,
+        peer_owner,
+        7_008,
+        "sync-peer-service",
+        "zigos.system.sync-service.peer",
+        111,
+    );
+    runtime.allowHostPointerSyscallsForTask(sync_task.id);
+    runtime.allowHostPointerSyscallsForTask(peer_task.task_id);
+    try std.testing.expect(runtime.processSeparated(sync_task.id, peer_task.task_id));
+
+    var peer_resident = sync_service.ResidentState{};
+    var peer_instance = try sync_service.Service.initWithStorage(
+        sync_record.id + 10_000,
+        peer_task.task_id,
+        peer_owner,
+        storage,
+        &peer_resident,
+    );
+    const peer_authority_capability = try capability_table.mintBootRoot(.{
+        .holder = peer_owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = peer_instance.service_id },
+        .rights = .{ .service = .{
+            .endpoint_connect = true,
+            .endpoint_create = true,
+            .endpoint_send = true,
+            .endpoint_recv = true,
+        } },
+        .scope = .{
+            .task_id = peer_task.task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 101,
+            .expires_at_ticks = 1_000,
+        },
+    });
+    try runtime.grantCapability(peer_task.task_id, peer_authority_capability.id);
+    var peer_port = sync_service.SyncPort.init(&peer_instance, capability_table);
+    const peer_authority = sync_service.AuthorityContext{
+        .task_id = peer_task.task_id,
+        .principal = peer_owner,
+        .capability_id = peer_authority_capability.id,
+        .now_ticks = 112,
     };
 
     const notes_v1 = try storage.putVersion(.{
@@ -536,6 +630,12 @@ fn proveBootedSyncServicePath(
         .payload = "enc:service-path-secret",
         .metadata = try object_store.signMetadata(storage_signer, "secret", "application/zigos-secret", .secret, "enc:service-path-secret", 104),
     });
+    const db_events = try storage.putVersion(.{
+        .preferred_object_id = object_store.ids.object(71_003),
+        .object_type = .event_stream,
+        .payload = "txn:service-path-event",
+        .metadata = try object_store.signMetadata(storage_signer, "db-events", "application/zigos-event-stream", .event_stream, "txn:service-path-event", 105),
+    });
 
     const workspace_record = try storage.createWorkspace(.{
         .owner = user,
@@ -544,12 +644,17 @@ fn proveBootedSyncServicePath(
     try storage.beginTransaction(workspace_record.id);
     try storage.stagePut(workspace_record.id, "documents/notes.md", notes_v2.object_id, notes_v2.version_id, .document);
     try storage.stagePut(workspace_record.id, "assets/cover.jpg", cover.object_id, cover.version_id, .media_asset);
+    try storage.stagePut(workspace_record.id, "secrets/token", secret.object_id, secret.version_id, .secret);
+    try storage.stagePut(workspace_record.id, "databases/app.notes.db/events", db_events.object_id, db_events.version_id, .event_stream);
     _ = try storage.commit(workspace_record.id, 105);
     const workspace_id = workspace_record.id.raw();
 
     _ = try sync_port.ensureUserRoot(sync_authority, user, "owner", user_signer);
     _ = try sync_port.enrollTrustedDevice(sync_authority, user, laptop, "laptop", user_signer, laptop_signer, 106);
     _ = try sync_port.enrollTrustedDevice(sync_authority, user, tablet, "tablet", user_signer, tablet_signer, 107);
+    _ = try peer_port.ensureUserRoot(peer_authority, user, "owner", user_signer);
+    _ = try peer_port.enrollTrustedDevice(peer_authority, user, laptop, "laptop", user_signer, laptop_signer, 112);
+    _ = try peer_port.enrollTrustedDevice(peer_authority, user, tablet, "tablet", user_signer, tablet_signer, 113);
     const local_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
         .workspace_id = workspace_id,
@@ -570,12 +675,39 @@ fn proveBootedSyncServicePath(
         .mode = .named_service_identity,
         .target = "overlay.service-path.notes",
     });
+    const network_attestation_root = signer("booted-network-attestation-root", 0x7B);
+    const peer_boot = try verifiedBootedNetworkPeer(7_050);
+    var peer_attestation = attestation_service.Service.init(tablet);
+    try peer_attestation.provisionRoot(network_attestation_root, .tpm);
+    const native_identity_statement = try peer_attestation.attestWithProvisionedRoot(
+        peer_boot,
+        "overlay.service-path.notes",
+        "native-net-1",
+        true,
+    );
+    try std.testing.expect(attestation_service.Service.verifyForBoot(native_identity_statement, .{
+        .boot = &peer_boot,
+        .remote_party = "overlay.service-path.notes",
+        .nonce = "native-net-1",
+        .user_visible = true,
+        .key_origin = .tpm,
+        .attestation_root = network_attestation_root,
+    }));
+    const native_identity_policy = try sync_port.createNetworkPolicy(sync_authority, .{
+        .owner = sync_owner,
+        .workspace_id = workspace_id,
+        .label = "native-service-identity",
+        .mode = .named_service_identity,
+        .target = "overlay.service-path.notes",
+        .require_remote_attestation = true,
+        .pinned_root_digest = native_identity_statement.root_digest,
+    });
     _ = try sync_port.configureWorkspacePolicy(sync_authority, .{
         .workspace_id = workspace_id,
         .owner = user,
         .offline_first = true,
         .personal_e2ee = true,
-        .selective_prefixes = &.{ "documents/", "assets/" },
+        .selective_prefixes = &.{ "documents/", "assets/", "secrets/", "databases/" },
         .device_to_device_policy_id = local_policy.id,
         .relay_policy_id = relay_policy.id,
         .overlay_policy_id = overlay_policy.id,
@@ -583,6 +715,91 @@ fn proveBootedSyncServicePath(
     });
     _ = try sync_port.configureOverlay(sync_authority, workspace_id, laptop, "overlay.service-path.notes", true);
     _ = try sync_port.publishPrivateService(sync_authority, workspace_id, "notes.remote");
+    const peer_local_policy = try peer_port.createNetworkPolicy(peer_authority, .{
+        .owner = peer_owner,
+        .workspace_id = workspace_id,
+        .label = "peer-local",
+        .mode = .local_network,
+    });
+    _ = try peer_port.configureWorkspacePolicy(peer_authority, .{
+        .workspace_id = workspace_id,
+        .owner = user,
+        .offline_first = true,
+        .personal_e2ee = true,
+        .selective_prefixes = &.{ "documents/", "assets/", "secrets/", "databases/" },
+        .device_to_device_policy_id = peer_local_policy.id,
+    });
+
+    const source_endpoint = try expectEndpointCreateWithFlags(
+        kernel_port,
+        sync_task.id,
+        authority.id,
+        sync_task.id,
+        "zigos.sync.source",
+        .{ .local_only = true, .service_port = true },
+        114,
+    );
+    const peer_endpoint = try expectEndpointCreateWithFlags(
+        kernel_port,
+        peer_task.task_id,
+        peer_authority_capability.id,
+        peer_task.task_id,
+        "zigos.sync.peer",
+        .{ .local_only = true, .service_port = true },
+        115,
+    );
+    _ = try expectEndpointConnect(
+        kernel_port,
+        sync_task.id,
+        source_endpoint.capability_id,
+        peer_endpoint.capability_id,
+        peer_endpoint.endpoint.endpoint_id,
+        116,
+    );
+    try proveBootedIdentityFirstNativeNetworkStack(
+        runtime,
+        capability_table,
+        &sync_instance,
+        network_service_task,
+        native_identity_policy.id,
+        native_identity_statement.root_digest,
+        laptop,
+        tablet,
+    );
+    const overlay_relay_task = try createBootedServiceTask(
+        kernel_port,
+        session_task_id,
+        session_authority_id,
+        overlay_relay_owner,
+        7_009,
+        "overlay-relay-service",
+        "zigos.system.overlay-relay",
+        122,
+    );
+    try std.testing.expect(runtime.processSeparated(sync_task.id, overlay_relay_task.task_id));
+    try std.testing.expect(runtime.processSeparated(peer_task.task_id, overlay_relay_task.task_id));
+    var booted_relay_service = try sync_service.transport_harness.BootedOverlayRelayService.init(
+        sync_record.id + 20_000,
+        overlay_relay_task.task_id,
+        "relay.service-path.zigos",
+    );
+    const relay_capability = try capability_table.mintBootRoot(.{
+        .holder = sync_owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .network_policy, .id = relay_policy.id },
+        .rights = .{ .network_policy = .{
+            .network_remote = true,
+        } },
+        .scope = .{
+            .task_id = sync_task.id,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 123,
+            .expires_at_ticks = 1_000,
+        },
+    });
+    try runtime.grantCapability(sync_task.id, relay_capability.id);
 
     try sync_port.setReplicaVersion(sync_authority, workspace_id, tablet, "documents/notes.md", notes_v1.object_id, cover.version_id);
     const summary = try sync_port.replicateWorkspace(sync_authority, storage, workspace_id, laptop, tablet, .device_to_device);
@@ -591,11 +808,120 @@ fn proveBootedSyncServicePath(
     try std.testing.expect(summary.used_device_to_device);
     try std.testing.expect(summary.overlay_ready);
     try std.testing.expect(summary.remote_access_ready);
-    try std.testing.expectEqual(@as(usize, 2), summary.selected_entry_count);
+    try std.testing.expectEqual(@as(usize, 4), summary.selected_entry_count);
     try std.testing.expectEqual(@as(usize, 1), summary.merged_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.snapshot_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.secret_transfer_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.transactional_count);
     try std.testing.expectEqual(@as(usize, 1), summary.conflict_count);
     try std.testing.expectEqual(summary.transport_frame_count, summary.encrypted_transport_count);
     try std.testing.expect(sync_instance.findConflict(workspace_id, tablet, "documents/notes.md") != null);
+
+    var exchange_tick: u64 = 124;
+    try exchangeSyncFrameOverNativeEndpoint(
+        kernel_port,
+        sync_task.id,
+        peer_task.task_id,
+        source_endpoint.capability_id,
+        peer_endpoint.capability_id,
+        &peer_port,
+        peer_authority,
+        storage,
+        sync_instance.latestTransportFrameForPath(workspace_id, tablet, "documents/notes.md").?,
+        &exchange_tick,
+    );
+    try exchangeSyncFrameOverNativeEndpoint(
+        kernel_port,
+        sync_task.id,
+        peer_task.task_id,
+        source_endpoint.capability_id,
+        peer_endpoint.capability_id,
+        &peer_port,
+        peer_authority,
+        storage,
+        sync_instance.latestTransportFrameForPath(workspace_id, tablet, "assets/cover.jpg").?,
+        &exchange_tick,
+    );
+    const secret_frame = sync_instance.latestTransportFrameForPath(workspace_id, tablet, "secrets/token").?;
+    try std.testing.expectEqual(sync_service.SyncSemantic.secure_transfer, secret_frame.semantic);
+    try exchangeSyncFrameOverNativeEndpoint(
+        kernel_port,
+        sync_task.id,
+        peer_task.task_id,
+        source_endpoint.capability_id,
+        peer_endpoint.capability_id,
+        &peer_port,
+        peer_authority,
+        storage,
+        secret_frame,
+        &exchange_tick,
+    );
+    const db_frame = sync_instance.latestTransportFrameForPath(workspace_id, tablet, "databases/app.notes.db/events").?;
+    try std.testing.expectEqual(sync_service.SyncSemantic.transactional_contract, db_frame.semantic);
+    try exchangeSyncFrameOverNativeEndpoint(
+        kernel_port,
+        sync_task.id,
+        peer_task.task_id,
+        source_endpoint.capability_id,
+        peer_endpoint.capability_id,
+        &peer_port,
+        peer_authority,
+        storage,
+        db_frame,
+        &exchange_tick,
+    );
+    try std.testing.expectEqual(@as(usize, 4), peer_instance.transportFrameCountFor(workspace_id, tablet));
+    try std.testing.expectEqual(notes_v2.version_id.raw(), peer_instance.replicaVersion(workspace_id, tablet, "documents/notes.md").?);
+    try std.testing.expectEqual(cover.version_id.raw(), peer_instance.replicaVersion(workspace_id, tablet, "assets/cover.jpg").?);
+    try std.testing.expectEqual(secret.version_id.raw(), peer_instance.replicaVersion(workspace_id, tablet, "secrets/token").?);
+    try std.testing.expectEqual(db_events.version_id.raw(), peer_instance.replicaVersion(workspace_id, tablet, "databases/app.notes.db/events").?);
+
+    var wrong_semantic_frame = sync_instance.latestTransportFrameForPath(workspace_id, tablet, "documents/notes.md").?;
+    wrong_semantic_frame.semantic = .chunked_snapshot;
+    try expectSyncFrameRejectedOverNativeEndpoint(
+        kernel_port,
+        sync_task.id,
+        peer_task.task_id,
+        source_endpoint.capability_id,
+        peer_endpoint.capability_id,
+        &peer_port,
+        peer_authority,
+        storage,
+        wrong_semantic_frame,
+        error.SyncSemanticMismatch,
+        &exchange_tick,
+    );
+    var plaintext_secret_frame = secret_frame;
+    plaintext_secret_frame.encrypted = false;
+    try expectSyncFrameRejectedOverNativeEndpoint(
+        kernel_port,
+        sync_task.id,
+        peer_task.task_id,
+        source_endpoint.capability_id,
+        peer_endpoint.capability_id,
+        &peer_port,
+        peer_authority,
+        storage,
+        plaintext_secret_frame,
+        error.TransportDenied,
+        &exchange_tick,
+    );
+    var revoked_target_frame = sync_instance.latestTransportFrameForPath(workspace_id, tablet, "assets/cover.jpg").?;
+    revoked_target_frame.target_device = phone;
+    try expectSyncFrameRejectedOverNativeEndpoint(
+        kernel_port,
+        sync_task.id,
+        peer_task.task_id,
+        source_endpoint.capability_id,
+        peer_endpoint.capability_id,
+        &peer_port,
+        peer_authority,
+        storage,
+        revoked_target_frame,
+        error.DeviceNotTrusted,
+        &exchange_tick,
+    );
+    try std.testing.expectEqual(@as(usize, 4), peer_instance.transportFrameCountFor(workspace_id, tablet));
 
     const relay_session = try sync_port.openOverlaySession(
         sync_authority,
@@ -605,17 +931,250 @@ fn proveBootedSyncServicePath(
         .private_service,
         .relay_assisted,
         "notes.remote",
-        108,
+        140,
     );
     try std.testing.expect(relay_session.encrypted);
     try std.testing.expect(relay_session.relay_encrypted);
     try std.testing.expectEqualStrings("notes.remote", relay_session.privateServiceSlice());
     try std.testing.expect(!(try sync_port.evaluateNetworkPolicy(sync_authority, relay_policy.id, .{ .domain = "other.service-path.zigos" })).allowed);
+    try std.testing.expectError(error.EgressDenied, sync_port.sendOverlayRelayFrameViaService(
+        sync_authority,
+        capability_table,
+        &booted_relay_service,
+        .{
+            .workspace_id = workspace_id,
+            .from_device = laptop,
+            .to_device = tablet,
+            .usage = .private_service,
+            .private_service_label = "notes.remote",
+            .relay_capability_id = relay_capability.id + 1,
+            .payload = "remote-open",
+            .signer = laptop_signer,
+            .tick = 141,
+        },
+    ));
+    try std.testing.expectEqual(@as(usize, 0), booted_relay_service.accepted_packets);
+
+    const relay_exchange = try sync_port.sendOverlayRelayFrameViaService(
+        sync_authority,
+        capability_table,
+        &booted_relay_service,
+        .{
+            .workspace_id = workspace_id,
+            .from_device = laptop,
+            .to_device = tablet,
+            .usage = .private_service,
+            .private_service_label = "notes.remote",
+            .relay_capability_id = relay_capability.id,
+            .payload = "remote-open",
+            .signer = laptop_signer,
+            .tick = 142,
+        },
+    );
+    try std.testing.expect(relay_exchange.encrypted);
+    try std.testing.expect(relay_exchange.relay_encrypted);
+    try std.testing.expect(relay_exchange.remote_access);
+    try std.testing.expect(relay_exchange.egress_allowed);
+    try std.testing.expect(relay_exchange.delivered);
+    try std.testing.expectEqual(@as(usize, "remote-open".len), relay_exchange.delivered_len);
+    try std.testing.expectEqual(sync_service.OverlaySessionUse.private_service, relay_exchange.usage);
+    try std.testing.expectEqualStrings("overlay.service-path.notes", relay_exchange.serviceIdentitySlice());
+    try std.testing.expectEqualStrings("relay.service-path.zigos", relay_exchange.relayDomainSlice());
+    try std.testing.expectEqualStrings("notes.remote", relay_exchange.privateServiceSlice());
+    try std.testing.expectEqual(@as(usize, 1), booted_relay_service.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 1), booted_relay_service.delivered_packets);
+    try std.testing.expectEqual(@as(usize, 1), booted_relay_service.relay.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 1), booted_relay_service.relay.delivered_packets);
 
     try std.testing.expect(try sync_port.transferSecretObject(sync_authority, storage, workspace_id, secret.object_id, laptop, tablet, .device_to_device));
     const contract = try sync_port.registerDatabaseContract(sync_authority, workspace_id, "app.notes.db", "notes-db", contract_signer);
     try std.testing.expect(try sync_port.replicateDatabaseContract(sync_authority, contract.id, workspace_id, laptop, tablet, .relay_assisted));
     try std.testing.expectError(sync_service.Error.DeviceNotTrusted, sync_port.replicateWorkspace(sync_authority, storage, workspace_id, laptop, phone, .device_to_device));
+
+    var restarted_source_resident = sync_service.ResidentState{};
+    var restarted_source = try sync_service.Service.initWithStorage(
+        sync_record.id,
+        sync_task.id,
+        sync_owner,
+        storage,
+        &restarted_source_resident,
+    );
+    var restarted_peer_resident = sync_service.ResidentState{};
+    var restarted_peer = try sync_service.Service.initWithStorage(
+        peer_instance.service_id,
+        peer_task.task_id,
+        peer_owner,
+        storage,
+        &restarted_peer_resident,
+    );
+    try std.testing.expect(restarted_source.loaded_existing_state);
+    try std.testing.expect(restarted_peer.loaded_existing_state);
+    try std.testing.expectEqual(notes_v2.version_id.raw(), restarted_source.replicaVersion(workspace_id, tablet, "documents/notes.md").?);
+    try std.testing.expectEqual(notes_v2.version_id.raw(), restarted_peer.replicaVersion(workspace_id, tablet, "documents/notes.md").?);
+    try std.testing.expectEqual(cover.version_id.raw(), restarted_peer.replicaVersion(workspace_id, tablet, "assets/cover.jpg").?);
+    try std.testing.expectEqual(secret.version_id.raw(), restarted_peer.replicaVersion(workspace_id, tablet, "secrets/token").?);
+    try std.testing.expectEqual(db_events.version_id.raw(), restarted_peer.replicaVersion(workspace_id, tablet, "databases/app.notes.db/events").?);
+    var restarted_peer_port = sync_service.SyncPort.init(&restarted_peer, capability_table);
+    const clean_peer_summary = try restarted_peer_port.replicateWorkspace(peer_authority, storage, workspace_id, laptop, tablet, .device_to_device);
+    try std.testing.expectEqual(@as(usize, 0), clean_peer_summary.selected_entry_count);
+    try std.testing.expectEqual(@as(usize, 0), clean_peer_summary.transport_frame_count);
+}
+
+fn proveBootedIdentityFirstNativeNetworkStack(
+    runtime: *task_runtime.Runtime,
+    capability_table: *capability.CapabilityTable,
+    sync: *sync_service.Service,
+    network_service_task: *task_runtime.TaskRecord,
+    policy_id: u64,
+    peer_root_digest: [32]u8,
+    source_device: principal.PrincipalId,
+    target_device: principal.PrincipalId,
+) !void {
+    try std.testing.expect(runtime.processSeparated(sync.task_id, network_service_task.id));
+    const policy_capability = try capability_table.mintBootRoot(.{
+        .holder = network_service_task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .network_policy, .id = policy_id },
+        .rights = .{ .network_policy = .{
+            .network_remote = true,
+        } },
+        .scope = .{
+            .task_id = network_service_task.id,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 117,
+            .expires_at_ticks = 1_000,
+        },
+    });
+    try runtime.grantCapability(network_service_task.id, policy_capability.id);
+
+    const Harness = struct {
+        var send_count: usize = 0;
+        var last_frame_len: usize = 0;
+
+        fn send(frame: []const u8) void {
+            send_count += 1;
+            last_frame_len = frame.len;
+        }
+
+        fn mac() [6]u8 {
+            return [_]u8{ 0x02, 0x5A, 0x47, 0, 0, 1 };
+        }
+    };
+    Harness.send_count = 0;
+    Harness.last_frame_len = 0;
+    network_driver_task.reset();
+    defer network_driver_task.reset();
+
+    const device = network_driver_task.NetworkDevice{
+        .send = Harness.send,
+        .getMacAddress = Harness.mac,
+    };
+    try std.testing.expect(network_driver_task.activateDevice(&device, network_service_task.id));
+
+    var broker = sync.egressBroker(capability_table);
+    var stack = network_driver_task.NativeNetworkStack.init();
+    try std.testing.expectError(error.EgressDenied, stack.openServiceIdentity(&broker, .{
+        .task_id = network_service_task.id,
+        .principal_id = network_service_task.owner,
+        .capability_id = policy_capability.id,
+        .policy_id = policy_id,
+        .evidence = .{ .destination = .{ .service_identity = "overlay.service-path.notes" } },
+        .now_ticks = 118,
+    }, source_device, target_device));
+    try std.testing.expectEqual(network_policy.EgressDecisionReason.attestation_required, stack.last_denial_reason);
+
+    try std.testing.expectError(error.EgressDenied, stack.openServiceIdentity(&broker, .{
+        .task_id = sync.task_id,
+        .principal_id = network_service_task.owner,
+        .capability_id = policy_capability.id,
+        .policy_id = policy_id,
+        .evidence = .{
+            .destination = .{ .service_identity = "overlay.service-path.notes" },
+            .attested = true,
+            .peer_root_digest_present = true,
+            .peer_root_digest = peer_root_digest,
+        },
+        .now_ticks = 119,
+    }, source_device, target_device));
+    try std.testing.expectEqual(network_policy.EgressDecisionReason.scope_violation, stack.last_denial_reason);
+
+    var wrong_root_digest = peer_root_digest;
+    wrong_root_digest[0] ^= 0xFF;
+    try std.testing.expectError(error.EgressDenied, stack.openServiceIdentity(&broker, .{
+        .task_id = network_service_task.id,
+        .principal_id = network_service_task.owner,
+        .capability_id = policy_capability.id,
+        .policy_id = policy_id,
+        .evidence = .{
+            .destination = .{ .service_identity = "overlay.service-path.notes" },
+            .attested = true,
+            .peer_root_digest_present = true,
+            .peer_root_digest = wrong_root_digest,
+        },
+        .now_ticks = 120,
+    }, source_device, target_device));
+    try std.testing.expectEqual(network_policy.EgressDecisionReason.identity_pin_mismatch, stack.last_denial_reason);
+    try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
+
+    const connection = try stack.openServiceIdentity(&broker, .{
+        .task_id = network_service_task.id,
+        .principal_id = network_service_task.owner,
+        .capability_id = policy_capability.id,
+        .policy_id = policy_id,
+        .evidence = .{
+            .destination = .{ .service_identity = "overlay.service-path.notes" },
+            .attested = true,
+            .peer_root_digest_present = true,
+            .peer_root_digest = peer_root_digest,
+        },
+        .now_ticks = 121,
+    }, source_device, target_device);
+    try std.testing.expect(connection.attestation_required);
+    try std.testing.expect(connection.identity_pinned);
+    try std.testing.expectEqualStrings("overlay.service-path.notes", connection.serviceIdentitySlice());
+
+    const frame = try stack.sendServiceIdentityFrame(&connection, "native service identity payload");
+    try std.testing.expect(frame.encrypted);
+    try std.testing.expect(frame.egress_allowed);
+    try std.testing.expect(frame.attested);
+    try std.testing.expect(frame.identity_pinned);
+    try std.testing.expect(!std.mem.eql(u8, frame.ciphertextSlice(), "native service identity payload"));
+    try std.testing.expectEqual(@as(usize, 4), stack.attempted_connections);
+    try std.testing.expectEqual(@as(usize, 3), stack.denied_before_transmit);
+    try std.testing.expectEqual(@as(usize, 1), stack.opened_connections);
+    try std.testing.expectEqual(@as(usize, 1), stack.transmitted_packets);
+    try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
+    try std.testing.expect(Harness.last_frame_len > "native service identity payload".len);
+}
+
+fn verifiedBootedNetworkPeer(generation: u64) !measured_boot.BootRecord {
+    var recorder = measured_boot.Recorder.init();
+    var artifact_manifest = measured_boot.ArtifactManifest.init(generation);
+    recorder.begin(generation);
+    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .kernel, "kernel-zigos", "kernel=network-peer");
+    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .base_image, "base-network-peer", "image=network-peer");
+    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .critical_service, "network", "healthy");
+    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .critical_service, "sync", "healthy");
+    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .critical_service, "storage", "healthy");
+    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .critical_service, "policy", "healthy");
+    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .policy, "identity-first", "strict");
+    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .driver_set, "signed-network-driver", "net");
+    var boot = recorder.finalize();
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .emulator_provided);
+    return boot;
+}
+
+fn addMeasuredNetworkArtifact(
+    recorder: *measured_boot.Recorder,
+    artifact_manifest: *measured_boot.ArtifactManifest,
+    kind: measured_boot.MeasurementKind,
+    label: []const u8,
+    payload: []const u8,
+) !void {
+    try recorder.add(kind, label, payload);
+    try artifact_manifest.add(kind, label, payload);
 }
 
 fn proveBootedCompositorServicePath(
@@ -1214,24 +1773,25 @@ fn seedBootedHealthNetworkProbe(
 }
 
 fn proveBootedSchedulerTelemetryProvider(
+    kernel_port: *component_port.KernelPort,
     runtime: *task_runtime.Runtime,
     scheduler: *userspace_scheduler.Scheduler,
+    session_task_id: u64,
+    session_authority_id: u64,
 ) !void {
     parkBootedSchedulerTasks(runtime, scheduler);
 
-    var provider = accelerator_scheduler.BootedPlatformTelemetryProvider.init(44, 140, .{
-        .thermal_pressure = .critical,
-        .gpu_available = true,
-        .media_available = true,
-        .npu_available = true,
-        .cpu_budget_ticks = 4_000,
-        .memory_bandwidth_units = 512,
-    });
-    scheduler.configureResourceTelemetryFromProvider(&provider);
-    try std.testing.expect(scheduler.observedResourceTelemetry());
-    try std.testing.expectEqual(accelerator_scheduler.TelemetrySource.boot_provider, scheduler.resource_telemetry_source);
-    try std.testing.expectEqual(@as(u64, 140), scheduler.resource_telemetry_observed_tick);
-
+    const provider_owner = principal.PrincipalId{ .kind = .service, .serial = 81_000 };
+    const provider_task = try createBootedServiceTask(
+        kernel_port,
+        session_task_id,
+        session_authority_id,
+        provider_owner,
+        81_000,
+        "platform-resource-provider",
+        "zigos.system.resource-telemetry",
+        700,
+    );
     const foreground_image = task_runtime.syntheticUserspaceImage("booted-telemetry-ui", "app.service-path.telemetry-ui");
     const foreground = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 81_001 },
@@ -1254,13 +1814,47 @@ fn proveBootedSchedulerTelemetryProvider(
         },
         .userspace_image = &foreground_image,
     });
+    try std.testing.expect(runtime.processSeparated(provider_task.task_id, foreground.id));
     try std.testing.expect(scheduler.registerTask(foreground.id));
     try std.testing.expect(scheduler.configureTaskDispatchRequest(foreground.id, .{
         .class = .foreground_interactive,
         .wants_gpu = true,
         .shared_memory_bytes = 4096,
     }, false));
-    try std.testing.expect(!scheduler.runNext(140));
+
+    var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(
+        44,
+        provider_task.task_id,
+        701,
+        collectBootedSchedulerLiveCounters(runtime, scheduler, .{
+            .thermal_milli_celsius = 91_000,
+            .battery_percent = 15,
+            .battery_charging = false,
+            .gpu_driver_online = true,
+            .npu_driver_online = false,
+            .media_driver_online = true,
+        }),
+    );
+    try std.testing.expectError(error.TelemetryProviderUnauthorized, provider.observeLive(
+        session_task_id,
+        701,
+        collectBootedSchedulerLiveCounters(runtime, scheduler, .{}),
+    ));
+    scheduler.configureResourceTelemetryFromProvider(&provider);
+    try std.testing.expect(scheduler.observedResourceTelemetry());
+    try std.testing.expectEqual(accelerator_scheduler.TelemetrySource.hardware, scheduler.resource_telemetry_source);
+    try std.testing.expectEqual(@as(u64, 701), scheduler.resource_telemetry_observed_tick);
+    try std.testing.expectEqual(accelerator_scheduler.ThermalPressure.critical, scheduler.resource_state.thermal_pressure);
+    try std.testing.expect(scheduler.resource_state.battery_saver);
+    try std.testing.expect(scheduler.resource_state.gpu_available);
+    try std.testing.expect(!scheduler.resource_state.npu_available);
+    try std.testing.expect(scheduler.resource_state.media_available);
+    try std.testing.expect(scheduler.resource_state.cpu_budget_ticks > 0);
+    try std.testing.expect(scheduler.resource_state.memory_bandwidth_units > 0);
+    try std.testing.expectEqual(@as(u32, 1), provider.live_observation_count);
+    try std.testing.expectEqual(@as(u32, 1), provider.rejected_observation_count);
+
+    try std.testing.expect(!scheduler.runNext(701));
     const foreground_slot = scheduler.slots.getConst(foreground.id).?;
     try std.testing.expectEqual(@as(u64, 1), foreground_slot.dispatch_count);
     try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, foreground_slot.last_dispatch_engine);
@@ -1288,6 +1882,7 @@ fn proveBootedSchedulerTelemetryProvider(
         },
         .userspace_image = &media_image,
     });
+    try std.testing.expect(runtime.processSeparated(provider_task.task_id, media.id));
     try std.testing.expect(scheduler.registerTask(media.id));
     try std.testing.expect(scheduler.configureTaskDispatchRequest(media.id, .{
         .class = .media_export,
@@ -1296,16 +1891,21 @@ fn proveBootedSchedulerTelemetryProvider(
     }, true));
 
     const media_denials_before = scheduler.engineDenialCount(.media);
-    provider.observe(141, .{
-        .thermal_pressure = .nominal,
-        .gpu_available = false,
-        .media_available = false,
-        .npu_available = true,
-        .cpu_budget_ticks = 4_000,
-        .memory_bandwidth_units = 512,
-    });
+    try provider.observeLive(provider_task.task_id, 702, collectBootedSchedulerLiveCounters(runtime, scheduler, .{
+        .thermal_milli_celsius = 45_000,
+        .battery_percent = 15,
+        .battery_charging = false,
+        .gpu_driver_online = false,
+        .npu_driver_online = false,
+        .media_driver_online = false,
+    }));
     scheduler.configureResourceTelemetryFromProvider(&provider);
-    try std.testing.expect(!scheduler.runNext(141));
+    try std.testing.expectEqual(@as(u64, 702), scheduler.resource_telemetry_observed_tick);
+    try std.testing.expect(scheduler.resource_state.battery_saver);
+    try std.testing.expect(!scheduler.resource_state.gpu_available);
+    try std.testing.expect(!scheduler.resource_state.npu_available);
+    try std.testing.expect(!scheduler.resource_state.media_available);
+    try std.testing.expect(!scheduler.runNext(702));
     const denied_media_slot = scheduler.slots.getConst(media.id).?;
     try std.testing.expectEqual(@as(u64, 0), denied_media_slot.dispatch_count);
     try std.testing.expectEqual(@as(u64, 1), denied_media_slot.denied_dispatch_count);
@@ -1313,22 +1913,75 @@ fn proveBootedSchedulerTelemetryProvider(
     try std.testing.expectEqual(media_denials_before + 1, scheduler.engineDenialCount(.media));
     try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.media));
 
-    provider.observe(142, .{
-        .thermal_pressure = .nominal,
-        .gpu_available = true,
-        .media_available = true,
-        .npu_available = true,
-        .cpu_budget_ticks = 4_000,
-        .memory_bandwidth_units = 512,
-    });
+    try provider.observeLive(provider_task.task_id, 703, collectBootedSchedulerLiveCounters(runtime, scheduler, .{
+        .thermal_milli_celsius = 45_000,
+        .battery_percent = 15,
+        .battery_charging = false,
+        .gpu_driver_online = true,
+        .npu_driver_online = true,
+        .media_driver_online = true,
+    }));
     scheduler.configureResourceTelemetryFromProvider(&provider);
-    try std.testing.expect(!scheduler.runNext(142));
+    try std.testing.expectEqual(@as(u64, 703), scheduler.resource_telemetry_observed_tick);
+    try std.testing.expect(scheduler.resource_state.gpu_available);
+    try std.testing.expect(scheduler.resource_state.npu_available);
+    try std.testing.expect(scheduler.resource_state.media_available);
+    try std.testing.expect(!scheduler.runNext(703));
     const dispatched_media_slot = scheduler.slots.getConst(media.id).?;
     try std.testing.expectEqual(@as(u64, 1), dispatched_media_slot.dispatch_count);
     try std.testing.expectEqual(accelerator_scheduler.Engine.media, dispatched_media_slot.last_dispatch_engine);
     try std.testing.expect(dispatched_media_slot.last_dispatch_zero_copy);
+    try std.testing.expect(dispatched_media_slot.last_dispatch_degraded);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.battery_preserve, dispatched_media_slot.last_dispatch_reason);
     try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.media));
+    try std.testing.expectEqual(@as(u32, 3), provider.live_observation_count);
     try std.testing.expectEqual(@as(u32, 3), provider.read_count);
+}
+
+const BootedPlatformSensorSnapshot = struct {
+    memory_capacity_bytes: usize = 512 * 1024 * 1024,
+    thermal_milli_celsius: u32 = 45_000,
+    battery_percent: u8 = 100,
+    battery_charging: bool = true,
+    gpu_driver_online: bool = true,
+    npu_driver_online: bool = true,
+    media_driver_online: bool = true,
+};
+
+fn collectBootedSchedulerLiveCounters(
+    runtime: *const task_runtime.Runtime,
+    scheduler: *const userspace_scheduler.Scheduler,
+    sensors: BootedPlatformSensorSnapshot,
+) accelerator_scheduler.LivePlatformCounters {
+    var counters = accelerator_scheduler.LivePlatformCounters{
+        .memory_capacity_bytes = sensors.memory_capacity_bytes,
+        .gpu_driver_online = sensors.gpu_driver_online,
+        .npu_driver_online = sensors.npu_driver_online,
+        .media_driver_online = sensors.media_driver_online,
+        .thermal_milli_celsius = sensors.thermal_milli_celsius,
+        .battery_percent = sensors.battery_percent,
+        .battery_charging = sensors.battery_charging,
+    };
+    counters.total_cpu_budget_ticks = 0;
+
+    var slot_index: usize = 0;
+    while (slot_index < runtime.taskSlotCapacity()) : (slot_index += 1) {
+        const slot = runtime.taskSlotAtConst(slot_index);
+        if (!slot.in_use) continue;
+        const task = &slot.task;
+        counters.total_cpu_budget_ticks = std.math.add(u64, counters.total_cpu_budget_ticks, task.budget.cpu_time_ticks) catch std.math.maxInt(u64);
+        counters.consumed_cpu_ticks = std.math.add(u64, counters.consumed_cpu_ticks, task.background_cpu_consumed_ticks) catch std.math.maxInt(u64);
+        counters.reserved_memory_bytes = std.math.add(usize, counters.reserved_memory_bytes, task.budget.memory_bytes) catch std.math.maxInt(usize);
+        counters.reserved_shared_memory_bytes = std.math.add(usize, counters.reserved_shared_memory_bytes, task.budget.shared_memory_bytes) catch std.math.maxInt(usize);
+
+        if (scheduler.slots.getConst(task.id)) |scheduler_slot| {
+            counters.consumed_cpu_ticks = std.math.add(u64, counters.consumed_cpu_ticks, scheduler_slot.cpu_ticks_consumed) catch std.math.maxInt(u64);
+            if (scheduler_slot.dispatch_request.privacy_sensitive) {
+                counters.privacy_sensitive_task_count += 1;
+            }
+        }
+    }
+    return counters;
 }
 
 fn parkBootedSchedulerTasks(
@@ -1375,6 +2028,143 @@ fn compositorRoundTrip(
     return compositor_session.decodeResponse(received_response.payload[0..received_response.message.payload_len]);
 }
 
+fn exchangeSyncFrameOverNativeEndpoint(
+    kernel_port: *component_port.KernelPort,
+    source_task_id: u64,
+    peer_task_id: u64,
+    source_endpoint_capability_id: u64,
+    peer_endpoint_capability_id: u64,
+    peer_port: *sync_service.SyncPort,
+    peer_authority: sync_service.AuthorityContext,
+    storage: *const storage_service.Service,
+    frame: sync_service.TransportFrame,
+    tick: *u64,
+) !void {
+    var payload_buffer: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+    const payload = try encodeSyncFrame(&payload_buffer, frame);
+    try expectEndpointSend(kernel_port, source_task_id, source_endpoint_capability_id, payload, tick.*);
+    tick.* += 1;
+
+    const received = try expectEndpointRecv(kernel_port, peer_task_id, peer_endpoint_capability_id, tick.*);
+    tick.* += 1;
+    try std.testing.expectEqual(@as(u8, 1), received.present);
+
+    var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+    const request = try decodeSyncFrame(received.payload[0..received.message.payload_len], &path_buffer);
+    const accepted = try peer_port.acceptTransportFrame(peer_authority, storage, request);
+    try std.testing.expect(accepted.encrypted);
+    try std.testing.expectEqual(frame.workspace_generation, accepted.workspace_generation);
+}
+
+fn expectSyncFrameRejectedOverNativeEndpoint(
+    kernel_port: *component_port.KernelPort,
+    source_task_id: u64,
+    peer_task_id: u64,
+    source_endpoint_capability_id: u64,
+    peer_endpoint_capability_id: u64,
+    peer_port: *sync_service.SyncPort,
+    peer_authority: sync_service.AuthorityContext,
+    storage: *const storage_service.Service,
+    frame: sync_service.TransportFrame,
+    expected_error: anyerror,
+    tick: *u64,
+) !void {
+    var payload_buffer: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+    const payload = try encodeSyncFrame(&payload_buffer, frame);
+    try expectEndpointSend(kernel_port, source_task_id, source_endpoint_capability_id, payload, tick.*);
+    tick.* += 1;
+
+    const received = try expectEndpointRecv(kernel_port, peer_task_id, peer_endpoint_capability_id, tick.*);
+    tick.* += 1;
+    try std.testing.expectEqual(@as(u8, 1), received.present);
+
+    var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+    const request = try decodeSyncFrame(received.payload[0..received.message.payload_len], &path_buffer);
+    try std.testing.expectError(expected_error, peer_port.acceptTransportFrame(peer_authority, storage, request));
+}
+
+const sync_frame_magic = [_]u8{ 'Z', 'G', 'S', 'F' };
+
+fn encodeSyncFrame(buffer: []u8, frame: sync_service.TransportFrame) ![]const u8 {
+    if (frame.source_device.kind != .device or frame.target_device.kind != .device) return error.InvalidSyncFrame;
+    const path = frame.pathSlice();
+    if (path.len > workspace.MAX_ENTRY_PATH_BYTES or path.len > std.math.maxInt(u8)) return error.InvalidSyncFrame;
+    const required_len = sync_frame_magic.len + (5 * @sizeOf(u64)) + 3 + @sizeOf(u32) + 1 + path.len;
+    if (buffer.len < required_len) return error.SyncFrameTooLarge;
+
+    var index: usize = 0;
+    @memcpy(buffer[index..][0..sync_frame_magic.len], &sync_frame_magic);
+    index += sync_frame_magic.len;
+    writeU64(buffer, &index, frame.workspace_id);
+    writeU64(buffer, &index, frame.object_id);
+    writeU64(buffer, &index, frame.version_id);
+    writeU64(buffer, &index, frame.source_device.serial);
+    writeU64(buffer, &index, frame.target_device.serial);
+    buffer[index] = @intFromEnum(frame.transport);
+    index += 1;
+    buffer[index] = @intFromEnum(frame.semantic);
+    index += 1;
+    buffer[index] = @intFromBool(frame.encrypted);
+    index += 1;
+    std.mem.writeInt(u32, buffer[index..][0..@sizeOf(u32)], frame.workspace_generation, .little);
+    index += @sizeOf(u32);
+    buffer[index] = @intCast(path.len);
+    index += 1;
+    @memcpy(buffer[index..][0..path.len], path);
+    index += path.len;
+    return buffer[0..index];
+}
+
+fn decodeSyncFrame(payload: []const u8, path_buffer: *[workspace.MAX_ENTRY_PATH_BYTES]u8) !sync_service.TransportFrameRequest {
+    const min_len = sync_frame_magic.len + (5 * @sizeOf(u64)) + 3 + @sizeOf(u32) + 1;
+    if (payload.len < min_len) return error.InvalidSyncFrame;
+    if (!std.mem.eql(u8, payload[0..sync_frame_magic.len], &sync_frame_magic)) return error.InvalidSyncFrame;
+
+    var index: usize = sync_frame_magic.len;
+    const workspace_id = readU64(payload, &index);
+    const object_id = readU64(payload, &index);
+    const version_id = readU64(payload, &index);
+    const source_serial = readU64(payload, &index);
+    const target_serial = readU64(payload, &index);
+    const transport: sync_service.TransportMode = @enumFromInt(payload[index]);
+    index += 1;
+    const semantic: sync_service.SyncSemantic = @enumFromInt(payload[index]);
+    index += 1;
+    const encrypted = payload[index] != 0;
+    index += 1;
+    const workspace_generation = std.mem.readInt(u32, payload[index..][0..@sizeOf(u32)], .little);
+    index += @sizeOf(u32);
+    const path_len = payload[index];
+    index += 1;
+    if (payload.len != index + path_len) return error.InvalidSyncFrame;
+    @memset(path_buffer[0..], 0);
+    @memcpy(path_buffer[0..path_len], payload[index..][0..path_len]);
+
+    return .{
+        .workspace_id = workspace_id,
+        .object_id = object_id,
+        .version_id = version_id,
+        .source_device = .{ .kind = .device, .serial = source_serial },
+        .target_device = .{ .kind = .device, .serial = target_serial },
+        .transport = transport,
+        .semantic = semantic,
+        .encrypted = encrypted,
+        .workspace_generation = workspace_generation,
+        .path = path_buffer[0..path_len],
+    };
+}
+
+fn writeU64(buffer: []u8, index: *usize, value: u64) void {
+    std.mem.writeInt(u64, buffer[index.*..][0..@sizeOf(u64)], value, .little);
+    index.* += @sizeOf(u64);
+}
+
+fn readU64(buffer: []const u8, index: *usize) u64 {
+    const value = std.mem.readInt(u64, buffer[index.*..][0..@sizeOf(u64)], .little);
+    index.* += @sizeOf(u64);
+    return value;
+}
+
 fn createResourceProbeTask(
     kernel_port: *component_port.KernelPort,
     session_task_id: u64,
@@ -1391,6 +2181,53 @@ fn createResourceProbeTask(
         1024,
         81,
     );
+}
+
+fn createBootedServiceTask(
+    kernel_port: *component_port.KernelPort,
+    session_task_id: u64,
+    session_authority_id: u64,
+    owner: principal.PrincipalId,
+    image_id: u64,
+    label: []const u8,
+    bundle_id: []const u8,
+    tick: u64,
+) !abi.TaskDescriptor {
+    const image = task_runtime.syntheticUserspaceImage(label, bundle_id);
+    var response = std.mem.zeroes(abi.TaskDescriptor);
+    const request = component_port.TaskCreateRequest{
+        .header = component_port.makeHeader(.task_create, tick, session_task_id),
+        .authority_capability_id = session_authority_id,
+        .request = .{
+            .owner = owner,
+            .component_class = .service_component,
+            .budget = .{
+                .cpu_time_ticks = 1_200,
+                .memory_bytes = 64 * 1024,
+                .endpoint_slots = 2,
+                .shared_memory_bytes = 4096,
+            },
+            .local_only = true,
+            .launch = .{
+                .boundary = .userspace_process,
+                .image_id = image_id,
+                .component_abi_version = abi.ABI_VERSION,
+                .signed = true,
+                .bundle_id = bundle_id,
+            },
+            .userspace_image = &image,
+        },
+    };
+    const result = syscall_surface.dispatch(
+        kernel_port,
+        session_task_id,
+        tick,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.TaskDescriptor),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
+    return response;
 }
 
 fn createBootedProbeTask(

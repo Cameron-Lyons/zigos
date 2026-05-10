@@ -23,11 +23,11 @@ pub fn shouldInitRuntimeExtras() bool {
 }
 
 pub fn shouldExitOnCompletion() bool {
-    return bootProfile() == .benchmark;
+    return bootProfile() == .benchmark or bootProfile() == .recovery;
 }
 
 pub fn shouldExitOnPanic() bool {
-    return bootProfile() == .benchmark;
+    return bootProfile() == .benchmark or bootProfile() == .recovery;
 }
 
 pub fn isNativeProfile() bool {

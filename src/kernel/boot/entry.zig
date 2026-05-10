@@ -27,6 +27,7 @@ pub fn kernelMain() void {
     common.printBootMarker(boot_markers.boot_core_ready);
     switch (config.bootProfile()) {
         .zigos_native => @import("profiles/zigos_native.zig").run(),
+        .recovery => @import("profiles/recovery.zig").run(),
         .benchmark => @import("profiles/benchmark.zig").run(),
     }
 }

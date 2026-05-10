@@ -63,6 +63,9 @@ pub const RecoveryBootExecution = struct {
     entry: EntrySession,
     boot_tick: u64,
     normal_session_authority: bool = false,
+    audited_break_glass: bool = false,
+    break_glass_approver: ?principal.PrincipalId = null,
+    approval_capability_id: u64 = 0,
 
     pub fn session(self: *const RecoveryBootExecution) *const EntrySession {
         return &self.entry;
@@ -94,6 +97,7 @@ pub const EntryError = error{
 };
 
 pub const OperationError = error{
+    RecoveryBootProfileRequired,
     NormalSessionAuthorityNotAllowed,
     RecoveryActionNotAllowed,
     RecoveryOwnerMismatch,
@@ -134,6 +138,27 @@ pub const Environment = struct {
             .entry = entry,
             .boot_tick = tick,
             .normal_session_authority = false,
+        };
+    }
+
+    pub fn enterBreakGlassRecoveryBootProfile(
+        self: *Environment,
+        ledger: *event_ledger.Ledger,
+        request: BreakGlassRequest,
+        tick: u64,
+    ) (EntryError || event_ledger.Error)!RecoveryBootExecution {
+        var break_glass = try self.enterBreakGlassRecoveryMode(ledger, request, tick);
+        break_glass.entry.entered_from_boot_profile = true;
+        break_glass.entry.normal_session_authority = false;
+        break_glass.entry.entry_tick = tick;
+        self.report.recovery_boot_entered = true;
+        return .{
+            .entry = break_glass.entry,
+            .boot_tick = tick,
+            .normal_session_authority = false,
+            .audited_break_glass = true,
+            .break_glass_approver = break_glass.approver,
+            .approval_capability_id = break_glass.approval_capability_id,
         };
     }
 
@@ -294,6 +319,7 @@ pub const Environment = struct {
     ) OperationError!void {
         const active = session orelse return error.RecoverySessionRequired;
         if (!active.owner.eql(self.owner)) return error.RecoveryOwnerMismatch;
+        if (active.profile != .recovery or !active.entered_from_boot_profile) return error.RecoveryBootProfileRequired;
         if (active.normal_session_authority) return error.NormalSessionAuthorityNotAllowed;
         if (!active.permits(action)) return error.RecoveryActionNotAllowed;
     }
@@ -473,7 +499,7 @@ test "recovery environment verifies reinstalls restores repairs and rotates" {
     storage_checkpoint_store.resetPersistent();
 }
 
-test "recovery environment requires recovery session gates and refuses missing repair targets" {
+test "recovery environment requires boot-profile recovery session gates and refuses missing repair targets" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
     storage_checkpoint_store.resetPersistent();
 
@@ -522,24 +548,31 @@ test "recovery environment requires recovery session gates and refuses missing r
     try std.testing.expectEqual(@as(usize, 2), entry.action_count);
     try std.testing.expect(entry.permits(.restore_workspace_snapshot));
     try std.testing.expect(!entry.permits(.rotate_device_keys));
+    try std.testing.expectError(error.RecoveryBootProfileRequired, recovery.restoreWorkspaceSnapshot(&entry, &storage, workspace_record.id, 999, 20));
 
-    var normal_session_entry = entry;
+    const recovery_boot = try recovery.enterRecoveryBootProfile(.{
+        .profile = .recovery,
+        .requester = storage_owner,
+        .actions = &.{ .restore_workspace_snapshot, .repair_sync_metadata },
+    }, 20);
+
+    var normal_session_entry = recovery_boot.entry;
     normal_session_entry.normal_session_authority = true;
     try std.testing.expectError(error.NormalSessionAuthorityNotAllowed, recovery.restoreWorkspaceSnapshot(&normal_session_entry, &storage, workspace_record.id, 999, 20));
     try std.testing.expectError(error.RecoverySessionRequired, recovery.restoreWorkspaceSnapshot(null, &storage, workspace_record.id, 999, 20));
-    try std.testing.expectError(error.RecoveryActionNotAllowed, recovery.rotateDeviceKeys(&entry, &sync, user, untrusted_device, user_signer, rotated_signer, 20));
+    try std.testing.expectError(error.RecoveryActionNotAllowed, recovery.rotateDeviceKeys(recovery_boot.session(), &sync, user, untrusted_device, user_signer, rotated_signer, 20));
 
-    const intruder_recovery = Environment.init(intruder);
-    const intruder_entry = try intruder_recovery.enterRecoveryMode(.{
+    var intruder_recovery = Environment.init(intruder);
+    const intruder_entry = try intruder_recovery.enterRecoveryBootProfile(.{
         .profile = .recovery,
         .requester = intruder,
         .actions = &.{.restore_workspace_snapshot},
-    });
-    try std.testing.expectError(error.RecoveryOwnerMismatch, recovery.restoreWorkspaceSnapshot(&intruder_entry, &storage, workspace_record.id, 999, 20));
+    }, 20);
+    try std.testing.expectError(error.RecoveryOwnerMismatch, recovery.restoreWorkspaceSnapshot(intruder_entry.session(), &storage, workspace_record.id, 999, 20));
 
-    try std.testing.expectError(error.SnapshotNotFound, recovery.restoreWorkspaceSnapshot(&entry, &storage, workspace_record.id, 999, 20));
+    try std.testing.expectError(error.SnapshotNotFound, recovery.restoreWorkspaceSnapshot(recovery_boot.session(), &storage, workspace_record.id, 999, 20));
     try std.testing.expect(!recovery.report.snapshot_restored);
-    try std.testing.expectError(error.DeviceNotTrusted, recovery.repairSyncMetadata(&entry, &sync, &storage, workspace_record.id, untrusted_device));
+    try std.testing.expectError(error.DeviceNotTrusted, recovery.repairSyncMetadata(recovery_boot.session(), &sync, &storage, workspace_record.id, untrusted_device));
     try std.testing.expect(!recovery.report.sync_metadata_repaired);
 
     storage_checkpoint_store.resetPersistent();
@@ -568,7 +601,7 @@ test "recovery environment audits break-glass recovery authorization" {
         .actions = &.{.restore_workspace_snapshot},
     }, 31));
 
-    const session = try recovery.enterBreakGlassRecoveryMode(&ledger, .{
+    const session = try recovery.enterBreakGlassRecoveryBootProfile(&ledger, .{
         .profile = .recovery,
         .requester = storage_owner,
         .approver = policy_authority,
@@ -577,6 +610,10 @@ test "recovery environment audits break-glass recovery authorization" {
         .actions = &.{ .restore_workspace_snapshot, .repair_sync_metadata },
     }, 32);
     try std.testing.expectEqual(@as(usize, 2), session.entry.action_count);
+    try std.testing.expect(session.entry.entered_from_boot_profile);
+    try std.testing.expect(!session.entry.normal_session_authority);
+    try std.testing.expect(session.audited_break_glass);
+    try std.testing.expectEqual(policy_authority, session.break_glass_approver.?);
     try std.testing.expectEqual(@as(u64, 501), session.approval_capability_id);
     try std.testing.expect(session.entry.permits(.repair_sync_metadata));
 

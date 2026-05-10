@@ -273,7 +273,7 @@ fn putRecord(
         else => return err,
     };
     const result = try storage.putVersion(.{
-        .preferred_object_id = object_store.ids.object(recordObjectId(path)),
+        .preferred_object_id = object_store.ids.object(recordObjectId(workspace_id, path)),
         .object_type = .blob,
         .payload = payload,
         .metadata = object_store.signMetadata(
@@ -697,8 +697,13 @@ fn isRecordPath(path: []const u8) bool {
     return std.mem.startsWith(u8, path, record_prefix);
 }
 
-fn recordObjectId(path: []const u8) u64 {
-    const value = std.hash.Wyhash.hash(0x5A47_5359_4E43_5354, path);
+fn recordObjectId(workspace_id: u64, path: []const u8) u64 {
+    var hasher = std.hash.Wyhash.init(0x5A47_5359_4E43_5354);
+    var workspace_bytes: [@sizeOf(u64)]u8 = undefined;
+    std.mem.writeInt(u64, workspace_bytes[0..], workspace_id, .little);
+    hasher.update(workspace_bytes[0..]);
+    hasher.update(path);
+    const value = hasher.final();
     return 0x8000_0000_0000_0000 | (value & 0x7FFF_FFFF_FFFF_FFFF);
 }
 

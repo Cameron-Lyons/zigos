@@ -158,7 +158,7 @@ fn activateDrivers(
         storage_driver_task.task_id,
         state.ids.storage_service,
         .storage_controller,
-        .kernel_published_data_plane,
+        .kernel_bootstrap_broker,
         "zigos.system.storage-driver",
         54,
     ) catch |err| {
@@ -179,7 +179,7 @@ fn activateDrivers(
             return false;
         }
     }
-    _ = service_bootstrap.attachDriver(
+    const graphics_driver = service_bootstrap.attachDriver(
         kernel_port,
         env.capability_table,
         env.driver_directory,
@@ -198,7 +198,26 @@ fn activateDrivers(
         _ = env.supervisor.recordCrash(state.services.compositor_service.id, 55, bootFailureCode(err));
         return false;
     };
-    _ = service_bootstrap.attachDriver(
+    const input_driver = service_bootstrap.attachDriver(
+        kernel_port,
+        env.capability_table,
+        env.driver_directory,
+        env.supervisor,
+        state.ids.policy_authority,
+        state.policy_capability.id,
+        0,
+        state.services.compositor_service.id,
+        service_bindings.bindingFor(.compositor_ui_session).task_id,
+        state.ids.compositor_service,
+        .input_device,
+        .none,
+        "zigos.system.compositor",
+        57,
+    ) catch |err| {
+        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 57, bootFailureCode(err));
+        return false;
+    };
+    const audio_driver = service_bootstrap.attachDriver(
         kernel_port,
         env.capability_table,
         env.driver_directory,
@@ -212,9 +231,9 @@ fn activateDrivers(
         .audio_print_io,
         .none,
         "zigos.system.media-print",
-        56,
+        58,
     ) catch |err| {
-        _ = env.supervisor.recordCrash(state.services.media_service.id, 56, bootFailureCode(err));
+        _ = env.supervisor.recordCrash(state.services.media_service.id, 58, bootFailureCode(err));
         return false;
     };
 
@@ -224,6 +243,18 @@ fn activateDrivers(
     };
     const storage_activation_mode = env.driver_runtime.activateModeAt(storage_driver, 54) catch |err| {
         _ = env.supervisor.recordCrash(state.services.storage_service.id, 54, bootFailureCode(err));
+        return false;
+    };
+    _ = env.driver_runtime.activateModeAt(graphics_driver, 55) catch |err| {
+        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 55, bootFailureCode(err));
+        return false;
+    };
+    _ = env.driver_runtime.activateModeAt(input_driver, 57) catch |err| {
+        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 57, bootFailureCode(err));
+        return false;
+    };
+    _ = env.driver_runtime.activateModeAt(audio_driver, 58) catch |err| {
+        _ = env.supervisor.recordCrash(state.services.media_service.id, 58, bootFailureCode(err));
         return false;
     };
     if ((network_activation_mode == .control_only or env.driver_directory.findByClass(.network_adapter) != null) and

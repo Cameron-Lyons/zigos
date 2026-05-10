@@ -129,7 +129,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .requester = storage_authority.holder,
         .now_ticks = 1,
         .bundle = bundle,
-        .bootstrap_transport = .kernel_published_data_plane,
+        .bootstrap_transport = .kernel_bootstrap_broker,
     });
     const graphics_authority = try spec_support.driverAuthority(
         &capabilities,
@@ -238,7 +238,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .requester = network_authority.holder,
         .now_ticks = 2,
         .bundle = bundle,
-        .bootstrap_transport = .kernel_published_data_plane,
+        .bootstrap_transport = .kernel_bootstrap_broker,
     }));
     var unsupported_transport_directory = driver_service.Directory.init();
     try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
@@ -251,7 +251,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .requester = graphics_authority.holder,
         .now_ticks = 2,
         .bundle = bundle,
-        .bootstrap_transport = .kernel_published_data_plane,
+        .bootstrap_transport = .kernel_bootstrap_broker,
     }));
     try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
         .service_id = 98,
@@ -263,7 +263,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .requester = audio_authority.holder,
         .now_ticks = 2,
         .bundle = bundle,
-        .bootstrap_transport = .kernel_published_data_plane,
+        .bootstrap_transport = .kernel_bootstrap_broker,
     }));
     try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
         .service_id = 99,
@@ -275,7 +275,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .requester = input_authority.holder,
         .now_ticks = 2,
         .bundle = bundle,
-        .bootstrap_transport = .kernel_published_data_plane,
+        .bootstrap_transport = .kernel_bootstrap_broker,
     }));
 }
 
