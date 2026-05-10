@@ -5,7 +5,7 @@ permission.review.render_grants 203732.95 40
 network_policy.authorize_connection 5713.21 40
 background_dispatch.allowed_sync 498996.62 40
 task_runtime.checkpoint.write_restore 5821289.98 50
-accelerator_scheduler.claim_release 104227.94 60
+accelerator_scheduler.claim_release 191647.73 40
 storage.file_bridge.resolve_view 7183.06 90
 storage.workspace.commit_overlay 7212761.78 60
 package_revision.rollforward_rollback 1151678.41 40
