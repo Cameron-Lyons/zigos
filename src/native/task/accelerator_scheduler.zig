@@ -64,6 +64,21 @@ pub const PlatformTelemetrySignals = struct {
     memory_bandwidth_units: usize = std.math.maxInt(usize),
 };
 
+pub const LivePlatformCounters = struct {
+    total_cpu_budget_ticks: u64 = std.math.maxInt(u64),
+    consumed_cpu_ticks: u64 = 0,
+    memory_capacity_bytes: usize = std.math.maxInt(usize),
+    reserved_memory_bytes: usize = 0,
+    reserved_shared_memory_bytes: usize = 0,
+    gpu_driver_online: bool = true,
+    npu_driver_online: bool = true,
+    media_driver_online: bool = true,
+    thermal_milli_celsius: u32 = 45_000,
+    battery_percent: u8 = 100,
+    battery_charging: bool = true,
+    privacy_sensitive_task_count: usize = 0,
+};
+
 pub const TelemetrySample = struct {
     source: TelemetrySource = .synthetic,
     observed_tick: u64 = 0,
@@ -116,8 +131,11 @@ pub const EmulatedTelemetryDevice = struct {
 
 pub const BootedPlatformTelemetryProvider = struct {
     boot_id: u64,
+    task_id: u64 = 0,
     current: TelemetrySample = .{ .source = .boot_provider },
     read_count: u32 = 0,
+    live_observation_count: u32 = 0,
+    rejected_observation_count: u32 = 0,
 
     pub fn init(boot_id: u64, observed_tick: u64, signals: PlatformTelemetrySignals) BootedPlatformTelemetryProvider {
         return .{
@@ -126,14 +144,47 @@ pub const BootedPlatformTelemetryProvider = struct {
         };
     }
 
+    pub fn initForBootedService(
+        boot_id: u64,
+        task_id: u64,
+        observed_tick: u64,
+        counters: LivePlatformCounters,
+    ) TelemetryError!BootedPlatformTelemetryProvider {
+        if (task_id == 0) return error.TelemetryProviderUnauthorized;
+        return .{
+            .boot_id = boot_id,
+            .task_id = task_id,
+            .current = sampleFromLivePlatformCounters(observed_tick, counters),
+            .live_observation_count = 1,
+        };
+    }
+
     pub fn observe(self: *BootedPlatformTelemetryProvider, observed_tick: u64, signals: PlatformTelemetrySignals) void {
         self.current = sampleFromPlatformSignals(.boot_provider, observed_tick, signals);
+    }
+
+    pub fn observeLive(
+        self: *BootedPlatformTelemetryProvider,
+        caller_task_id: u64,
+        observed_tick: u64,
+        counters: LivePlatformCounters,
+    ) TelemetryError!void {
+        if (self.task_id != 0 and caller_task_id != self.task_id) {
+            self.rejected_observation_count += 1;
+            return error.TelemetryProviderUnauthorized;
+        }
+        self.current = sampleFromLivePlatformCounters(observed_tick, counters);
+        self.live_observation_count += 1;
     }
 
     pub fn read(self: *BootedPlatformTelemetryProvider) TelemetrySample {
         self.read_count += 1;
         return self.current;
     }
+};
+
+pub const TelemetryError = error{
+    TelemetryProviderUnauthorized,
 };
 
 pub const Request = struct {
@@ -569,6 +620,39 @@ fn sampleFromPlatformSignals(source: TelemetrySource, observed_tick: u64, signal
     };
 }
 
+fn sampleFromLivePlatformCounters(observed_tick: u64, counters: LivePlatformCounters) TelemetrySample {
+    const reserved_bytes = std.math.add(usize, counters.reserved_memory_bytes, counters.reserved_shared_memory_bytes) catch std.math.maxInt(usize);
+    const available_memory_bytes = saturatingSubUsize(counters.memory_capacity_bytes, reserved_bytes);
+    return .{
+        .source = .hardware,
+        .observed_tick = observed_tick,
+        .thermal_pressure = thermalPressureFromMilliCelsius(counters.thermal_milli_celsius),
+        .battery_saver = !counters.battery_charging and counters.battery_percent <= 20,
+        .privacy_mode = counters.privacy_sensitive_task_count != 0,
+        .gpu_available = counters.gpu_driver_online,
+        .npu_available = counters.npu_driver_online,
+        .media_available = counters.media_driver_online,
+        .cpu_budget_ticks = saturatingSubTicks(counters.total_cpu_budget_ticks, counters.consumed_cpu_ticks),
+        .memory_bandwidth_units = available_memory_bytes / 1024,
+    };
+}
+
+fn thermalPressureFromMilliCelsius(value: u32) ThermalPressure {
+    if (value >= 90_000) return .critical;
+    if (value >= 75_000) return .elevated;
+    return .nominal;
+}
+
+fn saturatingSubTicks(value: u64, amount: u64) u64 {
+    if (amount >= value) return 0;
+    return value - amount;
+}
+
+fn saturatingSubUsize(value: usize, amount: usize) usize {
+    if (amount >= value) return 0;
+    return value - amount;
+}
+
 fn zeroClaim() ClaimRecord {
     return .{
         .id = 0,
@@ -788,6 +872,67 @@ test "accelerator scheduler consumes booted platform provider samples" {
     try std.testing.expect(media_export.degraded);
     try std.testing.expectEqual(DecisionReason.battery_preserve, media_export.reason);
     try std.testing.expectEqual(@as(u64, 89), controller.last_telemetry_observed_tick);
+    try std.testing.expectEqual(@as(u32, 2), provider.read_count);
+}
+
+test "accelerator scheduler derives hardware telemetry from booted live counters" {
+    var provider = try BootedPlatformTelemetryProvider.initForBootedService(8, 70, 100, .{
+        .total_cpu_budget_ticks = 10_000,
+        .consumed_cpu_ticks = 3_000,
+        .memory_capacity_bytes = 128 * 1024,
+        .reserved_memory_bytes = 64 * 1024,
+        .reserved_shared_memory_bytes = 16 * 1024,
+        .gpu_driver_online = true,
+        .npu_driver_online = false,
+        .media_driver_online = true,
+        .thermal_milli_celsius = 82_000,
+        .battery_percent = 15,
+        .battery_charging = false,
+        .privacy_sensitive_task_count = 1,
+    });
+    var controller = Controller.init();
+    controller.configureFromProvider(&provider);
+    try std.testing.expect(controller.observedTelemetry());
+    try std.testing.expectEqual(TelemetrySource.hardware, controller.last_telemetry_source);
+    try std.testing.expectEqual(@as(u64, 100), controller.last_telemetry_observed_tick);
+    try std.testing.expectEqual(ThermalPressure.elevated, controller.state.thermal_pressure);
+    try std.testing.expect(controller.state.battery_saver);
+    try std.testing.expect(controller.state.privacy_mode);
+    try std.testing.expect(controller.state.gpu_available);
+    try std.testing.expect(!controller.state.npu_available);
+    try std.testing.expect(controller.state.media_available);
+    try std.testing.expectEqual(@as(u64, 7_000), controller.state.cpu_budget_ticks);
+    try std.testing.expectEqual(@as(usize, 48), controller.state.memory_bandwidth_units);
+    try std.testing.expectEqual(@as(u32, 1), provider.live_observation_count);
+    try std.testing.expectEqual(@as(u32, 1), provider.read_count);
+
+    try std.testing.expectError(error.TelemetryProviderUnauthorized, provider.observeLive(71, 101, .{
+        .total_cpu_budget_ticks = 10_000,
+        .memory_capacity_bytes = 128 * 1024,
+    }));
+    try std.testing.expectEqual(@as(u32, 1), provider.rejected_observation_count);
+
+    try provider.observeLive(70, 102, .{
+        .total_cpu_budget_ticks = 10_000,
+        .consumed_cpu_ticks = 2_000,
+        .memory_capacity_bytes = 256 * 1024,
+        .reserved_memory_bytes = 64 * 1024,
+        .gpu_driver_online = true,
+        .npu_driver_online = true,
+        .media_driver_online = false,
+        .thermal_milli_celsius = 91_000,
+        .battery_percent = 80,
+        .battery_charging = true,
+    });
+    controller.configureFromProvider(&provider);
+    try std.testing.expectEqual(@as(u64, 102), controller.last_telemetry_observed_tick);
+    try std.testing.expectEqual(ThermalPressure.critical, controller.state.thermal_pressure);
+    try std.testing.expect(!controller.state.battery_saver);
+    try std.testing.expect(controller.state.npu_available);
+    try std.testing.expect(!controller.state.media_available);
+    try std.testing.expectEqual(@as(u64, 8_000), controller.state.cpu_budget_ticks);
+    try std.testing.expectEqual(@as(usize, 192), controller.state.memory_bandwidth_units);
+    try std.testing.expectEqual(@as(u32, 2), provider.live_observation_count);
     try std.testing.expectEqual(@as(u32, 2), provider.read_count);
 }
 

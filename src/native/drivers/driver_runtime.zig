@@ -50,7 +50,7 @@ const ActivationSlot = struct {
     activation: ActivationRecord = zeroActivation(),
 };
 
-const ActivationArena = indexed_arena.IndexedArena(ActivationSlot, MAX_ACTIVATIONS, SERVICE_INDEX_CAPACITY, activationSlotServiceId);
+const ActivationArena = indexed_arena.IndexedArena(ActivationSlot, MAX_ACTIVATIONS, SERVICE_INDEX_CAPACITY, activationSlotKey);
 const ActivationClassIndex = indexed_arena.UniqueIndex(SERVICE_INDEX_CAPACITY);
 
 pub const Runtime = struct {
@@ -108,7 +108,7 @@ pub const Runtime = struct {
             .network_adapter => {
                 if (bootstrap_driver_port.networkPublication()) |publication| {
                     if (publication.device_id == driver.device_id) {
-                        if (publication.kernel_bootstrap and driver.bootstrap_transport != .kernel_published_data_plane) {
+                        if (publication.kernel_bootstrap and driver.bootstrap_transport != .kernel_bootstrap_broker) {
                             return error.KernelBootstrapNotAuthorized;
                         }
                         if (bootstrap_driver_port.activateNetworkDevice(driver.device_id, driver.service_id)) {
@@ -123,7 +123,7 @@ pub const Runtime = struct {
             .storage_controller => {
                 if (bootstrap_driver_port.storagePublication()) |publication| {
                     if (publication.device_id == driver.device_id) {
-                        if (publication.kernel_bootstrap and driver.bootstrap_transport != .kernel_published_data_plane) {
+                        if (publication.kernel_bootstrap and driver.bootstrap_transport != .kernel_bootstrap_broker) {
                             return error.KernelBootstrapNotAuthorized;
                         }
                         if (bootstrap_driver_port.activateStorageBackend(
@@ -182,15 +182,15 @@ pub const Runtime = struct {
     }
 
     fn upsert(self: *Runtime, activation: ActivationRecord) Error!ActivationRecord {
-        if (self.findByServiceSlot(activation.service_id)) |slot| {
+        if (self.findByServiceClassSlot(activation.service_id, activation.device_class)) |slot| {
             self.class_index.remove(deviceClassKey(slot.activation.device_class));
             slot.activation = activation;
-            const slot_index = self.arena.slotIndexOf(activation.service_id).?;
+            const slot_index = self.arena.slotIndexOf(activationKeyFor(activation.service_id, activation.device_class)).?;
             self.class_index.insert(deviceClassKey(activation.device_class), slot_index);
             return slot.activation;
         }
 
-        const slot_index = self.arena.reserveIndex(activation.service_id) orelse return error.ActivationTableFull;
+        const slot_index = self.arena.reserveIndex(activationKeyFor(activation.service_id, activation.device_class)) orelse return error.ActivationTableFull;
         const slot = &self.arena.slots[slot_index];
         slot.activation = activation;
         self.class_index.insert(deviceClassKey(activation.device_class), slot_index);
@@ -198,7 +198,14 @@ pub const Runtime = struct {
     }
 
     fn findByServiceSlot(self: *Runtime, service_id: u64) ?*ActivationSlot {
-        return self.arena.get(service_id);
+        for (&self.arena.slots) |*slot| {
+            if (slot.in_use and slot.activation.service_id == service_id) return slot;
+        }
+        return null;
+    }
+
+    fn findByServiceClassSlot(self: *Runtime, service_id: u64, device_class: driver_service.DeviceClass) ?*ActivationSlot {
+        return self.arena.get(activationKeyFor(service_id, device_class));
     }
 
     fn nextActivationGeneration(self: *Runtime) u32 {
@@ -207,8 +214,12 @@ pub const Runtime = struct {
     }
 };
 
-fn activationSlotServiceId(slot: *const ActivationSlot) u64 {
-    return slot.activation.service_id;
+fn activationSlotKey(slot: *const ActivationSlot) u64 {
+    return activationKeyFor(slot.activation.service_id, slot.activation.device_class);
+}
+
+fn activationKeyFor(service_id: u64, device_class: driver_service.DeviceClass) u64 {
+    return service_id *% 16 + deviceClassKey(device_class);
 }
 
 fn deviceClassKey(device_class: driver_service.DeviceClass) u64 {
@@ -410,7 +421,7 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
                 .signer = "zigos-spec-driver",
             },
         },
-        .bootstrap_transport = .kernel_published_data_plane,
+        .bootstrap_transport = .kernel_bootstrap_broker,
     });
     try std.testing.expect(try bootstrap_driver_port.claimStorageAtaBootstrapInventory(driver, "zigos.system.storage-driver"));
 

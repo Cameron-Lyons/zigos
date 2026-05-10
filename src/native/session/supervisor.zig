@@ -157,8 +157,7 @@ pub const Supervisor = struct {
 
     pub fn allowsDriverAttachment(self: *const Supervisor, service_id: u64, device_class: driver_service.DeviceClass) bool {
         const service = self.findConst(service_id) orelse return false;
-        const expected = service.driver_class orelse return false;
-        return expected == device_class;
+        return contract.allowsDriverClass(service.class, device_class);
     }
 
     pub fn isolationSeparated(self: *const Supervisor, left_service_id: u64, right_service_id: u64) bool {
@@ -216,8 +215,7 @@ pub const Supervisor = struct {
         tick: u64,
     ) bool {
         const service = self.find(service_id) orelse return false;
-        const expected = service.driver_class orelse return false;
-        if (expected != device_class) return false;
+        if (!contract.allowsDriverClass(service.class, device_class)) return false;
         self.record(service.*, .driver_attached, tick, authority_capability_id, @intFromEnum(device_class));
         return true;
     }

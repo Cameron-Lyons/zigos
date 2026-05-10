@@ -225,6 +225,20 @@ pub const BootRecord = struct {
     pub fn isRemoteAttestable(self: *const BootRecord) bool {
         return self.hasVerifiedRoot() and self.root_provenance != .synthetic_host;
     }
+
+    pub fn computedRootDigest(self: *const BootRecord) ?[32]u8 {
+        if (self.record_count > MAX_RECORDS) return null;
+        var root = [_]u8{0} ** 32;
+        for (self.records[0..self.record_count], 0..) |record, index| {
+            root = hashDigest(root, record, index);
+        }
+        return root;
+    }
+
+    pub fn isInternallyConsistent(self: *const BootRecord) bool {
+        const computed = self.computedRootDigest() orelse return false;
+        return std.mem.eql(u8, &self.root_digest, &computed);
+    }
 };
 
 pub const BootSummary = struct {
@@ -284,6 +298,7 @@ pub const Error = error{
     ManifestTooLarge,
     InvalidBuildArtifactKind,
     ManifestMismatch,
+    UntrustedRootProvenance,
 };
 
 pub const Recorder = struct {
@@ -425,6 +440,8 @@ pub fn encodeBuildArtifactManifest(generation: u64, entries: []const BuildArtifa
 }
 
 pub fn bootRecordMatchesManifest(boot: *const BootRecord, artifact_manifest: *const ArtifactManifest) bool {
+    if (boot.record_count > MAX_RECORDS) return false;
+    if (artifact_manifest.entry_count > MAX_MANIFEST_ENTRIES) return false;
     if (boot.generation != artifact_manifest.generation) return false;
     if (boot.record_count != artifact_manifest.entry_count) return false;
     var matched = [_]bool{false} ** MAX_MANIFEST_ENTRIES;
@@ -452,6 +469,8 @@ pub fn verifyBootRecordAgainstManifest(
     if (!requiredArtifactShape(artifact_manifest)) return error.ManifestMismatch;
     if (!bootRecordMatchesManifest(boot, artifact_manifest)) return error.ManifestMismatch;
     if (std.mem.allEqual(u8, &boot.root_digest, 0)) return error.ManifestMismatch;
+    if (!boot.isInternallyConsistent()) return error.ManifestMismatch;
+    if (root_provenance == .synthetic_host) return error.UntrustedRootProvenance;
     boot.root_provenance = root_provenance;
     boot.artifact_manifest_verified = true;
 }
@@ -1011,7 +1030,7 @@ test "signed artifact manifests bind required boot artifact classes before activ
     try std.testing.expect(!bootRecordMatchesManifest(&boot, &artifact_manifest));
 }
 
-test "build-generated artifact manifests verify signatures and required build artifacts" {
+test "build-generated artifact manifests reject tampered bootloader source measurement and authority" {
     var manifest = BuildArtifactManifest.init(1);
     try manifest.addDigest(.bootloader_source, "src/boot/boot64.S", [_]u8{0x10} ** 32);
     try manifest.addDigest(.bootloader_measurement, "multiboot-v1:zigos_native", [_]u8{0x11} ** 32);
@@ -1046,10 +1065,18 @@ test "build-generated artifact manifests verify signatures and required build ar
         "src/boot/boot64.S",
         &[_]u8{0x12} ** 32,
     ));
+    try std.testing.expect(!buildArtifactDigestMatches(
+        &manifest,
+        .bootloader_measurement,
+        "multiboot-v1:zigos_native",
+        &[_]u8{0x12} ** 32,
+    ));
 
-    var tampered = manifest;
-    tampered.entries[0].digest[0] ^= 0xFF;
-    try std.testing.expect(!verifyBuildArtifactManifest(&tampered));
+    for (0..manifest.entry_count) |entry_index| {
+        var tampered = manifest;
+        tampered.entries[entry_index].digest[0] ^= 0xFF;
+        try std.testing.expect(!verifyBuildArtifactManifest(&tampered));
+    }
 
     var wrong_authority = manifest;
     const wrong_signer = signing.SignerIdentity{
@@ -1060,7 +1087,7 @@ test "build-generated artifact manifests verify signatures and required build ar
     try std.testing.expect(!verifyBuildArtifactManifest(&wrong_authority));
 }
 
-test "verified boot roots carry provenance and reject mismatched manifests" {
+test "verified boot chain rejects synthetic provenance and every mismatched artifact class" {
     var artifact_manifest = ArtifactManifest.init(22);
     var recorder = Recorder.init();
     recorder.begin(22);
@@ -1089,16 +1116,36 @@ test "verified boot roots carry provenance and reject mismatched manifests" {
     try std.testing.expectEqual(RootProvenance.emulator_provided, boot.root_provenance);
 
     var synthetic_boot = recorder.finalize();
-    try verifyBootRecordAgainstManifest(&synthetic_boot, &artifact_manifest, .synthetic_host);
-    try std.testing.expect(synthetic_boot.hasVerifiedRoot());
-    try std.testing.expect(!synthetic_boot.isRemoteAttestable());
+    try std.testing.expectError(
+        error.UntrustedRootProvenance,
+        verifyBootRecordAgainstManifest(&synthetic_boot, &artifact_manifest, .synthetic_host),
+    );
+    try std.testing.expect(!synthetic_boot.hasVerifiedRoot());
 
-    var tampered_manifest = artifact_manifest;
-    tampered_manifest.entries[0].digest[0] ^= 0xFF;
-    var rejected_boot = recorder.finalize();
+    var wrong_root_boot = recorder.finalize();
+    wrong_root_boot.root_digest[0] ^= 0xFF;
     try std.testing.expectError(
         error.ManifestMismatch,
-        verifyBootRecordAgainstManifest(&rejected_boot, &tampered_manifest, .emulator_provided),
+        verifyBootRecordAgainstManifest(&wrong_root_boot, &artifact_manifest, .emulator_provided),
     );
-    try std.testing.expect(!rejected_boot.hasVerifiedRoot());
+    try std.testing.expect(!wrong_root_boot.hasVerifiedRoot());
+
+    for (0..artifact_manifest.entry_count) |entry_index| {
+        var tampered_manifest = artifact_manifest;
+        tampered_manifest.entries[entry_index].digest[0] ^= 0xFF;
+        var rejected_boot = recorder.finalize();
+        try std.testing.expectError(
+            error.ManifestMismatch,
+            verifyBootRecordAgainstManifest(&rejected_boot, &tampered_manifest, .emulator_provided),
+        );
+        try std.testing.expect(!rejected_boot.hasVerifiedRoot());
+
+        var tampered_boot = recorder.finalize();
+        tampered_boot.records[entry_index].digest[0] ^= 0xAA;
+        try std.testing.expectError(
+            error.ManifestMismatch,
+            verifyBootRecordAgainstManifest(&tampered_boot, &artifact_manifest, .emulator_provided),
+        );
+        try std.testing.expect(!tampered_boot.hasVerifiedRoot());
+    }
 }

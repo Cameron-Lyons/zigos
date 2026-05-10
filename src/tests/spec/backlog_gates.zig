@@ -340,7 +340,7 @@ pub fn driverBoundaryAuditGate() !void {
         .requester = holder,
         .now_ticks = 1,
         .bundle = bundle,
-        .bootstrap_transport = .kernel_published_data_plane,
+        .bootstrap_transport = .kernel_bootstrap_broker,
     }));
 }
 

@@ -1,5 +1,6 @@
 pub const boot_start = "BOOT:START";
 pub const boot_profile_zigos_native = "BOOT:PROFILE:zigos_native";
+pub const boot_profile_recovery = "BOOT:PROFILE:recovery";
 pub const boot_profile_benchmark = "BOOT:PROFILE:benchmark";
 pub const boot_core_ready = "BOOT:CORE_READY";
 
@@ -7,6 +8,17 @@ pub const bench_start = "BENCH:START";
 pub const bench_summary_prefix = "BENCH:SUMMARY";
 pub const bench_pass = "BENCH:PASS";
 pub const bench_fail = "BENCH:FAIL";
+
+pub const recovery_start = "RECOVERY:START";
+pub const recovery_break_glass_audited = "RECOVERY:BREAK_GLASS:AUDITED";
+pub const recovery_no_normal_session_authority = "RECOVERY:NO_NORMAL_SESSION_AUTHORITY";
+pub const recovery_reinstall_ok = "RECOVERY:REINSTALL:OK";
+pub const recovery_restore_ok = "RECOVERY:RESTORE:OK";
+pub const recovery_repair_sync_ok = "RECOVERY:REPAIR_SYNC:OK";
+pub const recovery_rotate_keys_ok = "RECOVERY:ROTATE_KEYS:OK";
+pub const recovery_revoke_trust_ok = "RECOVERY:REVOKE_TRUST:OK";
+pub const recovery_pass = "RECOVERY:PASS";
+pub const recovery_fail = "RECOVERY:FAIL";
 
 pub const kernel_network_deferred = "ZIGOS:KERNEL_NETWORK:DEFERRED";
 

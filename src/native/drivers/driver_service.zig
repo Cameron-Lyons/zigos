@@ -1,12 +1,10 @@
 const std = @import("std");
 const fixed_table = @import("../core/fixed_table.zig");
-const id_index = @import("../core/id_index.zig");
 const capability = @import("../kernel_api/capability.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 
 pub const MAX_DRIVER_SERVICES: usize = 8;
-const SERVICE_INDEX_CAPACITY: usize = MAX_DRIVER_SERVICES * 2;
 
 pub const DeviceClass = enum(u8) {
     network_adapter,
@@ -18,7 +16,7 @@ pub const DeviceClass = enum(u8) {
 
 pub const BootstrapTransport = enum(u8) {
     none,
-    kernel_published_data_plane,
+    kernel_bootstrap_broker,
 };
 
 pub const KernelDriverRole = enum(u8) {
@@ -135,13 +133,16 @@ fn driverSlotMatchesBinding(context: DriverBindingLookup, slot: *const DriverSlo
     return slot.driver.device_class == context.device_class and slot.driver.device_id == context.device_id;
 }
 
+fn driverSlotMatchesServiceClass(context: DriverBindingLookup, slot: *const DriverSlot) bool {
+    return slot.driver.service_id == context.device_id and slot.driver.device_class == context.device_class;
+}
+
 fn driverSlotMatchesClass(device_class: DeviceClass, slot: *const DriverSlot) bool {
     return slot.driver.device_class == device_class;
 }
 
 pub const Directory = struct {
     next_dma_domain_id: u64 = 1,
-    service_index_slots: [SERVICE_INDEX_CAPACITY]id_index.Slot = id_index.emptyTable(SERVICE_INDEX_CAPACITY),
     slots: [MAX_DRIVER_SERVICES]DriverSlot = [_]DriverSlot{DriverSlot{}} ** MAX_DRIVER_SERVICES,
 
     pub fn init() Directory {
@@ -167,7 +168,7 @@ pub const Directory = struct {
     pub fn registerSigned(self: *Directory, request: SignedRegistrationRequest) Error!*DriverRecord {
         const authority = try validateSignedRequest(request);
 
-        if (self.findByService(request.service_id) != null) {
+        if (self.findByServiceAndClass(request.service_id, request.device_class) != null) {
             return error.DuplicateServiceId;
         }
         if (fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, DriverBindingLookup{
@@ -179,7 +180,6 @@ pub const Directory = struct {
         const slot = &self.slots[slot_index];
         slot.in_use = true;
         slot.driver = self.recordFromRequest(request, authority, 1);
-        id_index.insert(SERVICE_INDEX_CAPACITY, &self.service_index_slots, slot.driver.service_id, slot_index, "driver service id index covers driver table");
         return &slot.driver;
     }
 
@@ -200,7 +200,10 @@ pub const Directory = struct {
     }
 
     pub fn hotSwapSigned(self: *Directory, request: SignedRegistrationRequest) Error!*DriverRecord {
-        const slot = fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, request.service_id, driverSlotMatchesServiceId) orelse return error.DriverNotFound;
+        const slot = fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, DriverBindingLookup{
+            .device_class = request.device_class,
+            .device_id = request.service_id,
+        }, driverSlotMatchesServiceClass) orelse return error.DriverNotFound;
         if (slot.driver.device_id != request.device_id or slot.driver.device_class != request.device_class) {
             return error.InvalidHotSwapBinding;
         }
@@ -211,17 +214,15 @@ pub const Directory = struct {
     }
 
     pub fn findByService(self: *Directory, service_id: u64) ?*DriverRecord {
-        const slot = fixed_table.findIndexedSlot(
-            DriverSlot,
-            MAX_DRIVER_SERVICES,
-            SERVICE_INDEX_CAPACITY,
-            &self.slots,
-            &self.service_index_slots,
-            service_id,
-            driverSlotServiceId,
-            service_id,
-            driverSlotMatchesServiceId,
-        ) orelse return null;
+        const slot = fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, service_id, driverSlotMatchesServiceId) orelse return null;
+        return &slot.driver;
+    }
+
+    pub fn findByServiceAndClass(self: *Directory, service_id: u64, device_class: DeviceClass) ?*DriverRecord {
+        const slot = fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, DriverBindingLookup{
+            .device_class = device_class,
+            .device_id = service_id,
+        }, driverSlotMatchesServiceClass) orelse return null;
         return &slot.driver;
     }
 
@@ -269,10 +270,6 @@ pub const Directory = struct {
     }
 };
 
-fn driverSlotServiceId(slot: *const DriverSlot) u64 {
-    return slot.driver.service_id;
-}
-
 pub fn authorityTarget(device_id: u64) capability.CapabilityTarget {
     return .{ .kind = .device, .id = device_id };
 }
@@ -300,7 +297,7 @@ pub fn allowedRightsFor(device_class: DeviceClass) capability.CapabilityRights {
     };
 }
 
-pub fn supportsKernelPublishedTransport(device_class: DeviceClass) bool {
+pub fn supportsKernelBootstrapBroker(device_class: DeviceClass) bool {
     return switch (device_class) {
         .storage_controller => true,
         .network_adapter, .graphics_adapter, .audio_print_io, .input_device => false,
@@ -354,8 +351,8 @@ fn validateSignedRequest(request: SignedRegistrationRequest) Error!capability.Ca
     if (!rightsAreSubset(authority.rights, allowedRightsFor(request.device_class))) {
         return error.AuthorityRightsEscalation;
     }
-    if (request.bootstrap_transport == .kernel_published_data_plane and
-        !supportsKernelPublishedTransport(request.device_class))
+    if (request.bootstrap_transport == .kernel_bootstrap_broker and
+        !supportsKernelBootstrapBroker(request.device_class))
     {
         return error.InvalidBootstrapTransport;
     }
@@ -583,11 +580,11 @@ test "kernel driver roles keep data planes out of kernel by default" {
     try std.testing.expect(!permitsKernelDataPlane(.graphics_adapter));
     try std.testing.expect(!permitsKernelDataPlane(.audio_print_io));
     try std.testing.expect(!permitsKernelDataPlane(.input_device));
-    try std.testing.expect(!supportsKernelPublishedTransport(.network_adapter));
-    try std.testing.expect(supportsKernelPublishedTransport(.storage_controller));
-    try std.testing.expect(!supportsKernelPublishedTransport(.graphics_adapter));
-    try std.testing.expect(!supportsKernelPublishedTransport(.audio_print_io));
-    try std.testing.expect(!supportsKernelPublishedTransport(.input_device));
+    try std.testing.expect(!supportsKernelBootstrapBroker(.network_adapter));
+    try std.testing.expect(supportsKernelBootstrapBroker(.storage_controller));
+    try std.testing.expect(!supportsKernelBootstrapBroker(.graphics_adapter));
+    try std.testing.expect(!supportsKernelBootstrapBroker(.audio_print_io));
+    try std.testing.expect(!supportsKernelBootstrapBroker(.input_device));
     try std.testing.expect(!permitsKernelBootstrapBroker(.network_adapter));
     try std.testing.expect(permitsKernelBootstrapBroker(.storage_controller));
     try std.testing.expect(!permitsKernelBootstrapBroker(.graphics_adapter));
@@ -595,7 +592,7 @@ test "kernel driver roles keep data planes out of kernel by default" {
     try std.testing.expect(!permitsKernelBootstrapBroker(.input_device));
 }
 
-test "network drivers cannot request kernel published data planes" {
+test "network drivers cannot request kernel bootstrap broker transports" {
     var directory = Directory.init();
     var capabilities = capability.CapabilityTable.init();
     const authority = try capabilities.mintBootRoot(.{
@@ -626,11 +623,11 @@ test "network drivers cannot request kernel published data planes" {
         .requester = authority.holder,
         .now_ticks = 1,
         .signer = "zigos-spec-driver",
-        .bootstrap_transport = .kernel_published_data_plane,
+        .bootstrap_transport = .kernel_bootstrap_broker,
     }));
 }
 
-test "storage bootstrap bridge remains available for userspace storage driver claims" {
+test "storage bootstrap broker remains available for userspace storage driver claims" {
     var directory = Directory.init();
     var capabilities = capability.CapabilityTable.init();
     const authority = try capabilities.mintBootRoot(.{
@@ -661,10 +658,10 @@ test "storage bootstrap bridge remains available for userspace storage driver cl
         .requester = authority.holder,
         .now_ticks = 1,
         .signer = "zigos-spec-driver",
-        .bootstrap_transport = .kernel_published_data_plane,
+        .bootstrap_transport = .kernel_bootstrap_broker,
     });
 
-    try std.testing.expectEqual(BootstrapTransport.kernel_published_data_plane, driver.bootstrap_transport);
+    try std.testing.expectEqual(BootstrapTransport.kernel_bootstrap_broker, driver.bootstrap_transport);
 }
 
 test "driver services reject unsigned bundles and escalated device rights" {
@@ -801,7 +798,7 @@ test "kernel bootstrap transport is only granted to supported driver classes" {
         .requester = graphics_authority.holder,
         .now_ticks = 1,
         .bundle = bundle,
-        .bootstrap_transport = .kernel_published_data_plane,
+        .bootstrap_transport = .kernel_bootstrap_broker,
     }));
 
     const input_authority = try capabilities.mintBootRoot(.{
@@ -831,6 +828,6 @@ test "kernel bootstrap transport is only granted to supported driver classes" {
         .requester = input_authority.holder,
         .now_ticks = 1,
         .bundle = bundle,
-        .bootstrap_transport = .kernel_published_data_plane,
+        .bootstrap_transport = .kernel_bootstrap_broker,
     }));
 }

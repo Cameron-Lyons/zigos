@@ -418,6 +418,17 @@ pub const SyncPort = struct {
         return self.service.sendOverlayRelayFrame(network_capabilities, relay, request);
     }
 
+    pub fn sendOverlayRelayFrameViaService(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        network_capabilities: *const capability.CapabilityTable,
+        relay_service: *sync_transport.BootedOverlayRelayService,
+        request: OverlayRelayFrameRequest,
+    ) (AuthorityError || Error || sync_transport.Error)!OverlayRelayFrameResult {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.sendOverlayRelayFrameViaService(network_capabilities, relay_service, request);
+    }
+
     pub fn setReplicaVersion(
         self: *SyncPort,
         authority: AuthorityContext,
@@ -969,6 +980,53 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             const delivered = (try relay.deliverNext(&transport_session, delivered_buffer[0..])) orelse return error.RelayDeliveryMissing;
             if (!std.mem.eql(u8, delivered, request.payload)) return error.PacketAuthenticationFailed;
 
+            return overlayRelayFrameResult(overlay_session, transport_session, signed_frame, delivered.len);
+        }
+
+        fn sendOverlayRelayFrameViaService(
+            self: *Self,
+            network_capabilities: *const capability.CapabilityTable,
+            relay_service: *sync_transport.BootedOverlayRelayService,
+            request: OverlayRelayFrameRequest,
+        ) (Error || sync_transport.Error)!OverlayRelayFrameResult {
+            const policy = self.findWorkspacePolicy(request.workspace_id) orelse return error.WorkspacePolicyNotFound;
+            const relay_policy_id = policy.relay_policy_id orelse return error.TransportDenied;
+
+            var broker = self.egressBroker(network_capabilities);
+            var transport = sync_transport.Harness.init();
+            const transport_session = try transport.openRelay(&broker, .{
+                .task_id = self.task_id,
+                .principal_id = self.owner,
+                .capability_id = request.relay_capability_id,
+                .policy_id = relay_policy_id,
+                .evidence = .{ .destination = .{ .domain = policy.relayDomainSlice() } },
+                .now_ticks = request.tick,
+            }, request.from_device, request.to_device, policy.relayDomainSlice());
+            const overlay_session = try self.openOverlaySession(
+                request.workspace_id,
+                request.from_device,
+                request.to_device,
+                request.usage,
+                .relay_assisted,
+                request.private_service_label,
+                request.tick,
+            );
+
+            const signed_frame = try transport.encryptSignedFrame(&transport_session, request.payload, request.signer);
+            try relay_service.submitSignedFrame(self.task_id, &transport_session, signed_frame);
+            var delivered_buffer: [sync_transport.MAX_PACKET_BYTES]u8 = undefined;
+            const delivered = (try relay_service.deliverNext(self.task_id, &transport_session, delivered_buffer[0..])) orelse return error.RelayDeliveryMissing;
+            if (!std.mem.eql(u8, delivered, request.payload)) return error.PacketAuthenticationFailed;
+
+            return overlayRelayFrameResult(overlay_session, transport_session, signed_frame, delivered.len);
+        }
+
+        fn overlayRelayFrameResult(
+            overlay_session: OverlaySession,
+            transport_session: sync_transport.TransportSession,
+            signed_frame: sync_transport.SignedEncryptedFrame,
+            delivered_len: usize,
+        ) Error!OverlayRelayFrameResult {
             var result = OverlayRelayFrameResult{
                 .overlay_session_id = overlay_session.session_id,
                 .transport_session_id = transport_session.id,
@@ -978,7 +1036,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .remote_access = overlay_session.remote_access,
                 .egress_allowed = signed_frame.packet.egress_allowed,
                 .delivered = true,
-                .delivered_len = delivered.len,
+                .delivered_len = delivered_len,
                 .packet_digest = signed_frame.packet_digest,
             };
             result.service_identity_len = native_util.copyTextExact(&result.service_identity, overlay_session.serviceIdentitySlice()) catch return error.ServiceIdentityTooLong;
@@ -1126,6 +1184,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                     .transport = transport,
                     .semantic = semantic,
                     .encrypted = policy.personal_e2ee,
+                    .workspace_generation = mutation.generation,
                     .path = entry_path,
                 });
                 summary.transport_frame_count += 1;
@@ -1180,7 +1239,18 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 .transactional_contract => {},
             }
 
-            return self.transport_queue.enqueue(request);
+            const accepted = try self.transport_queue.enqueue(request);
+            try self.setReplicaVersionForPathHash(
+                request.workspace_id,
+                request.target_device,
+                accepted.pathSlice(),
+                workspace.pathHash(accepted.pathSlice()),
+                request.object_id,
+                request.version_id,
+                request.workspace_generation,
+            );
+            try self.checkpoint();
+            return accepted;
         }
 
         fn transferSecretObject(

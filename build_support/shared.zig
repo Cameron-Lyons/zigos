@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const BootProfile = enum {
     zigos_native,
+    recovery,
     benchmark,
 };
 

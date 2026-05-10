@@ -19,7 +19,7 @@ const userspace_launch = @import("../task/userspace_launch.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 
-pub const Error = error{MissingBootstrapGrant} || userspace_launch.Error || userspace_boot_registry.Error || component_port.Error || driver_service.Error || service_registry.Error;
+pub const Error = error{ MissingBootstrapGrant, DriverAttachmentNotAllowed } || userspace_launch.Error || userspace_boot_registry.Error || component_port.Error || driver_service.Error || service_registry.Error;
 
 pub const ServiceBinding = struct {
     task_id: u64,
@@ -157,6 +157,8 @@ pub fn attachDriver(
     driver_bundle_id: []const u8,
     now_ticks: u64,
 ) Error!*driver_service.DriverRecord {
+    if (!supervisor.allowsDriverAttachment(service_id, device_class)) return error.DriverAttachmentNotAllowed;
+
     const driver_capability_id = if (controller_task_id == 0) blk: {
         const driver_capability = try capability_table.mintBootRoot(.{
             .holder = owner,

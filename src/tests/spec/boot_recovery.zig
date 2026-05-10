@@ -177,10 +177,14 @@ pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {
     try sync_port.setReplicaVersion(sync_authority, workspace_record.id.raw(), tablet, "documents/incident.md", notes.object_id, notes.version_id.raw() + 1);
     _ = try sync_port.replicateWorkspace(sync_authority, &storage, workspace_record.id.raw(), primary, tablet, .device_to_device);
 
+    var ledger = event_ledger.Ledger.init();
     var recovery = recovery_environment.Environment.init(storage_owner);
-    const recovery_boot = try recovery.enterRecoveryBootProfile(.{
+    const recovery_boot = try recovery.enterBreakGlassRecoveryBootProfile(&ledger, .{
         .profile = .recovery,
         .requester = storage_owner,
+        .approver = spec_support.policyAuthority(50),
+        .approval_capability_id = 7_001,
+        .reason = "spec recovery boot",
         .actions = &.{
             .reinstall_base_image,
             .restore_workspace_snapshot,
@@ -192,6 +196,8 @@ pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {
     try std.testing.expect(recovery_boot.entry.entered_from_boot_profile);
     try std.testing.expect(!recovery_boot.normal_session_authority);
     try std.testing.expect(!recovery_boot.entry.normal_session_authority);
+    try std.testing.expect(recovery_boot.audited_break_glass);
+    try std.testing.expectEqual(@as(u64, 7_001), recovery_boot.approval_capability_id);
     try std.testing.expect(try recovery.verifyAndReinstallImage(recovery_boot.session(), &manager, "kernel=v2", image_signer, 16));
     try std.testing.expect(try recovery.restoreWorkspaceSnapshot(recovery_boot.session(), &storage, workspace_record.id, snapshot.id, 17));
     try std.testing.expect(try recovery.repairSyncMetadata(recovery_boot.session(), &sync, &storage, workspace_record.id, tablet));
@@ -206,6 +212,16 @@ pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {
     try std.testing.expect(recovery.report.device_keys_rotated);
     try std.testing.expect(recovery.report.device_trust_revoked);
     try std.testing.expect(!sync.isTrustedDevice(tablet));
+
+    var events: [2]event_ledger.Event = undefined;
+    const decisions = ledger.queryEvents(.{
+        .kind = .permission_decision,
+        .subject = storage_owner,
+        .include_protected_content = true,
+    }, &events);
+    try std.testing.expectEqual(@as(usize, 1), decisions.len);
+    try std.testing.expect(decisions[0].allowed);
+    try std.testing.expectEqualStrings("spec recovery boot", decisions[0].detailSlice());
 }
 
 pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {

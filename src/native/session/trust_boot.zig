@@ -363,7 +363,7 @@ fn productionKernelMeasurementDigest() ![32]u8 {
 
 fn productionRootProvenance() measured_boot.RootProvenance {
     if (builtin.target.os.tag == .freestanding) return .bootloader_provided;
-    return .synthetic_host;
+    return .emulator_provided;
 }
 
 fn bootloaderProvidedMeasurementDigest() ![32]u8 {
@@ -374,7 +374,7 @@ fn bootloaderProvidedMeasurementDigest() ![32]u8 {
         }
         return error.MissingBootloaderMeasurement;
     }
-    return syntheticBootloaderMeasurementDigest();
+    return emulatorProvidedBootloaderMeasurementDigest();
 }
 
 fn bootloaderSourceDigest() ![32]u8 {
@@ -385,7 +385,7 @@ fn bootloaderSourceDigest() ![32]u8 {
         }
         return error.MissingBootloaderSourceMeasurement;
     }
-    return syntheticBootloaderSourceDigest();
+    return emulatorProvidedBootloaderSourceDigest();
 }
 
 fn kernelImageDigest() ![32]u8 {
@@ -396,27 +396,27 @@ fn kernelImageDigest() ![32]u8 {
         }
         return error.MissingKernelMeasurement;
     }
-    return syntheticKernelImageDigest();
+    return emulatorProvidedKernelImageDigest();
 }
 
-fn syntheticBootloaderSourceDigest() [32]u8 {
+fn emulatorProvidedBootloaderSourceDigest() [32]u8 {
     var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "measurement-source", "host-synthetic-bootloader-source");
+    crypto_hash.updateBytes(&hasher, "measurement-source", "host-emulator-bootloader-source");
     crypto_hash.updateBytes(&hasher, "entry", build_bootloader_source_label);
     return crypto_hash.finalize(&hasher);
 }
 
-fn syntheticBootloaderMeasurementDigest() [32]u8 {
+fn emulatorProvidedBootloaderMeasurementDigest() [32]u8 {
     var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "measurement-source", "host-synthetic-bootloader-measurement");
+    crypto_hash.updateBytes(&hasher, "measurement-source", "host-emulator-bootloader-measurement");
     crypto_hash.updateBytes(&hasher, "bootloader", "multiboot-v1");
     crypto_hash.updateBytes(&hasher, "entry", "src/boot/boot64.S");
     return crypto_hash.finalize(&hasher);
 }
 
-fn syntheticKernelImageDigest() [32]u8 {
+fn emulatorProvidedKernelImageDigest() [32]u8 {
     var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "measurement-source", "host-synthetic-kernel-image");
+    crypto_hash.updateBytes(&hasher, "measurement-source", "host-emulator-kernel-image");
     crypto_hash.updateBytes(&hasher, "kernel", "kernel-zigos-native.elf");
     crypto_hash.updateBytes(&hasher, "profile", "zigos_native");
     return crypto_hash.finalize(&hasher);

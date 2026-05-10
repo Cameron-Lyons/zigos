@@ -66,6 +66,21 @@ pub const ab_rollback_required = [_][]const u8{
     boot_markers.platform_ab_image_rollback_ok,
 };
 
+pub const recovery_required = [_][]const u8{
+    boot_markers.boot_start,
+    boot_markers.boot_profile_recovery,
+    boot_markers.boot_core_ready,
+    boot_markers.recovery_start,
+    boot_markers.recovery_break_glass_audited,
+    boot_markers.recovery_no_normal_session_authority,
+    boot_markers.recovery_reinstall_ok,
+    boot_markers.recovery_restore_ok,
+    boot_markers.recovery_repair_sync_ok,
+    boot_markers.recovery_rotate_keys_ok,
+    boot_markers.recovery_revoke_trust_ok,
+    boot_markers.recovery_pass,
+};
+
 fn contains(group: []const []const u8, marker: []const u8) bool {
     for (group) |candidate| {
         if (std.mem.eql(u8, candidate, marker)) return true;
@@ -109,5 +124,11 @@ test "native smoke gate requires in-boot driver crash restart proof markers" {
 test "native smoke gate requires A/B image rollback proof markers" {
     for (ab_rollback_required) |marker| {
         try std.testing.expect(contains(&ab_rollback_required, marker));
+    }
+}
+
+test "native smoke gate requires freestanding recovery proof markers" {
+    for (recovery_required) |marker| {
+        try std.testing.expect(contains(&recovery_required, marker));
     }
 }

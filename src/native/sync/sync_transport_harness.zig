@@ -18,6 +18,7 @@ pub const Error = error{
     PacketAuthenticationFailed,
     PacketTargetMismatch,
     FrameSigningFailed,
+    RelayDomainTooLong,
     RelayQueueFull,
 };
 
@@ -108,6 +109,85 @@ pub const Relay = struct {
         self.next_packet_id +%= 1;
         if (self.next_packet_id == 0) self.next_packet_id = 1;
         return packet_id;
+    }
+};
+
+pub const BootedOverlayRelayService = struct {
+    service_id: u64,
+    task_id: u64,
+    relay_domain_len: usize = 0,
+    relay_domain: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
+    relay: Relay = Relay.init(),
+    accepted_packets: usize = 0,
+    delivered_packets: usize = 0,
+    rejected_packets: usize = 0,
+
+    pub fn init(service_id: u64, task_id: u64, relay_domain: []const u8) Error!BootedOverlayRelayService {
+        if (service_id == 0 or task_id == 0) return error.EgressDenied;
+        if (relay_domain.len > network_policy.MAX_TARGET_BYTES) return error.RelayDomainTooLong;
+
+        var service = BootedOverlayRelayService{
+            .service_id = service_id,
+            .task_id = task_id,
+        };
+        service.relay_domain_len = relay_domain.len;
+        @memcpy(service.relay_domain[0..relay_domain.len], relay_domain);
+        return service;
+    }
+
+    pub fn relayDomainSlice(self: *const BootedOverlayRelayService) []const u8 {
+        return self.relay_domain[0..self.relay_domain_len];
+    }
+
+    pub fn submitSignedFrame(
+        self: *BootedOverlayRelayService,
+        caller_task_id: u64,
+        session: *const TransportSession,
+        frame: SignedEncryptedFrame,
+    ) Error!void {
+        try self.authorizeCaller(caller_task_id, session);
+        if (!verifySignedFrame(&frame)) return self.reject(error.PacketAuthenticationFailed);
+        if (frame.packet.session_id != session.id or
+            frame.packet.transport != session.transport or
+            frame.packet.policy_id != session.policy_id or
+            frame.packet.capability_id != session.capability_id or
+            !frame.packet.source_device.eql(session.source_device) or
+            !frame.packet.target_device.eql(session.target_device))
+        {
+            return self.reject(error.PacketTargetMismatch);
+        }
+
+        self.relay.submit(frame.packet) catch |err| return self.reject(err);
+        self.accepted_packets += 1;
+    }
+
+    pub fn deliverNext(
+        self: *BootedOverlayRelayService,
+        caller_task_id: u64,
+        session: *const TransportSession,
+        plaintext_out: []u8,
+    ) Error!?[]const u8 {
+        try self.authorizeCaller(caller_task_id, session);
+        const delivered = self.relay.deliverNext(session, plaintext_out) catch |err| return self.reject(err);
+        if (delivered != null) self.delivered_packets += 1;
+        return delivered;
+    }
+
+    fn authorizeCaller(
+        self: *BootedOverlayRelayService,
+        caller_task_id: u64,
+        session: *const TransportSession,
+    ) Error!void {
+        if (caller_task_id == 0) return self.reject(error.EgressDenied);
+        if (session.transport != .relay_assisted) return self.reject(error.EgressDenied);
+        if (!std.mem.eql(u8, session.relayDomainSlice(), self.relayDomainSlice())) {
+            return self.reject(error.EgressDenied);
+        }
+    }
+
+    fn reject(self: *BootedOverlayRelayService, err: Error) Error {
+        self.rejected_packets += 1;
+        return err;
     }
 };
 
@@ -513,6 +593,73 @@ test "encrypted transport harness only creates sessions after egress approval" {
     }, source, target, "other.sync.example"));
     try std.testing.expectEqual(@as(usize, 1), harness.denied_sessions);
     try std.testing.expectEqual(@as(usize, 1), harness.created_sessions);
+}
+
+test "booted overlay relay service rejects unauthorized relay and target changes" {
+    var policies = network_policy.Directory.init();
+    var capabilities = capability.CapabilityTable.init();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 5 };
+    const app = principal.PrincipalId{ .kind = .app, .serial = 6 };
+    const source = principal.PrincipalId{ .kind = .device, .serial = 30 };
+    const target = principal.PrincipalId{ .kind = .device, .serial = 31 };
+    const other_target = principal.PrincipalId{ .kind = .device, .serial = 32 };
+    const signer_identity = signing.SignerIdentity{
+        .label = "booted-overlay-relay",
+        .seed = [_]u8{0x42} ** 32,
+    };
+
+    const relay_policy = try policies.create(.{
+        .owner = owner,
+        .label = "relay",
+        .mode = .named_domain,
+        .target = "relay.sync.example",
+    });
+    const relay_capability = try capabilities.mintBootRoot(.{
+        .holder = app,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .network_policy, .id = relay_policy.id },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .scope = .{ .task_id = 77, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 10 },
+        .audit = .{},
+    });
+    var broker = network_policy.EgressBroker.init(&policies, &capabilities);
+    var harness = Harness.init();
+    const session = try harness.openRelay(&broker, .{
+        .task_id = 77,
+        .principal_id = app,
+        .capability_id = relay_capability.id,
+        .policy_id = relay_policy.id,
+        .evidence = .{ .destination = .{ .domain = "relay.sync.example" } },
+        .now_ticks = 5,
+    }, source, target, "relay.sync.example");
+
+    var relay_service = try BootedOverlayRelayService.init(50, 51, "relay.sync.example");
+    const signed_frame = try harness.encryptSignedFrame(&session, "relay service frame", signer_identity);
+    try relay_service.submitSignedFrame(77, &session, signed_frame);
+    var plaintext_buffer: [MAX_PACKET_BYTES]u8 = undefined;
+    const delivered = (try relay_service.deliverNext(77, &session, plaintext_buffer[0..])).?;
+    try std.testing.expectEqualStrings("relay service frame", delivered);
+    try std.testing.expectEqualStrings("relay.sync.example", relay_service.relayDomainSlice());
+    try std.testing.expectEqual(@as(usize, 1), relay_service.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 1), relay_service.delivered_packets);
+    try std.testing.expectEqual(@as(usize, 0), relay_service.rejected_packets);
+    try std.testing.expectEqual(@as(usize, 1), relay_service.relay.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 1), relay_service.relay.delivered_packets);
+
+    var wrong_domain_service = try BootedOverlayRelayService.init(52, 53, "other.sync.example");
+    const blocked_frame = try harness.encryptSignedFrame(&session, "blocked relay", signer_identity);
+    try std.testing.expectError(error.EgressDenied, wrong_domain_service.submitSignedFrame(77, &session, blocked_frame));
+    try std.testing.expectEqual(@as(usize, 0), wrong_domain_service.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 1), wrong_domain_service.rejected_packets);
+
+    try std.testing.expectError(error.EgressDenied, relay_service.submitSignedFrame(0, &session, blocked_frame));
+    var tampered_packet = try harness.encryptPacket(&session, "target change");
+    tampered_packet.target_device = other_target;
+    const tampered_frame = try signPacket(tampered_packet, signer_identity);
+    try std.testing.expectError(error.PacketTargetMismatch, relay_service.submitSignedFrame(77, &session, tampered_frame));
+    try std.testing.expectEqual(@as(usize, 1), relay_service.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 2), relay_service.rejected_packets);
 }
 
 test "encrypted transport harness binds device sessions to attested identity and route" {

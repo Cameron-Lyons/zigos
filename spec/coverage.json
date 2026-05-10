@@ -1086,7 +1086,7 @@
       ]
     },
     "REQ-BOOT-CHAIN": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/measured_boot.zig",
         "src/native/platform/measured_boot_console.zig",
@@ -1097,37 +1097,55 @@
         "tools/generate_userspace_archive.zig",
         "scripts/run-zigos-native-smoke.sh"
       ],
-      "coverage_note": "Measured boot records now carry explicit root provenance, freestanding boots verify both the signed bootloader source artifact digest and the bootloader-provided measurement before marking manifest-verified roots, the smoke gate requires that verified-root marker, and build/artifact manifests reject wrong signing authorities as well as tampering; host tests still use a non-attestable synthetic root and the hardware root-of-trust step is not fully enforced.",
-      "roadmap": {
-        "priority": "P0",
-        "focus": "Replace the remaining synthetic host measurement fallback with a hardware-root or emulator-provided measured boot chain from bootloader through kernel, base image, and core services.",
-        "graduation_proof": "The smoke gate records a bootloader-provided measurement and rejects tampered or wrong-authority bootloader source, bootloader measurement, kernel, base, service, policy, and driver artifacts on the freestanding boot path without synthetic host fallback."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/platform/measured_boot.zig",
+          "name": "build-generated artifact manifests reject tampered bootloader source measurement and authority"
+        },
+        {
+          "file": "src/native/platform/measured_boot.zig",
+          "name": "verified boot chain rejects synthetic provenance and every mismatched artifact class"
+        }
+      ]
     },
     "REQ-MEASURED-STATE": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/measured_boot.zig",
         "src/native/platform/attestation_service.zig"
       ],
-      "coverage_note": "Provisioned remote attestation now requires a nonce-bound, user-visible statement over a manifest-verified non-synthetic boot root; synthetic or manifest-unverified roots are rejected, signatures bind root provenance plus manifest verification state, and statement verification checks the exact boot record, nonce, remote party, visibility, key origin, and measured counts. Parts of the attestation root path remain emulator/provider-backed rather than hardware-backed end to end.",
-      "roadmap": {
-        "priority": "P0",
-        "focus": "Bind all attestation statements to measured boot roots produced by the real boot path and a provisioned hardware-backed or emulator-backed attestation root.",
-        "graduation_proof": "Remote attestation tests verify nonce-bound, user-visible statements against the booted root digest and fail if kernel, base image, policy, service, driver measurements, root provenance, manifest verification state, nonce, remote party, visibility, or attestation keys are changed."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation service rejects provisioned remote attestations without a verified measured root"
+        },
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation service rejects software provisioned remote roots"
+        },
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation verification rejects measured state and statement tampering"
+        }
+      ]
     },
     "REQ-RECOVERY-MODE": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
-        "src/native/platform/recovery_environment.zig"
+        "src/native/platform/recovery_environment.zig",
+        "src/kernel/boot/recovery_suite.zig",
+        "src/kernel/boot/profiles/recovery.zig"
       ],
-      "coverage_note": "Recovery operations now execute from an explicit recovery boot execution record whose profile, owner, allowed action set, entry tick, and absence of normal-session authority are checked before reinstall, restore, sync repair, trust revocation, or key rotation. The separate recovery environment boundary is still modeled inside the native test harness rather than a freestanding recovery boot.",
-      "roadmap": {
-        "priority": "P1",
-        "focus": "Move the recovery boot execution record into a freestanding recovery boot path.",
-        "graduation_proof": "A recovery boot profile or equivalent freestanding mode performs the recovery operations without normal-session authority and records auditable break-glass events."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/platform/recovery_environment.zig",
+          "name": "recovery environment requires boot-profile recovery session gates and refuses missing repair targets"
+        },
+        {
+          "file": "src/native/platform/recovery_environment.zig",
+          "name": "recovery environment audits break-glass recovery authorization"
+        }
+      ]
     },
     "REQ-APP-PACKAGING": {
       "status": "enforced",
@@ -1372,7 +1390,7 @@
       ]
     },
     "REQ-LOCAL-FIRST-REPLICATION": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/sync/sync_service_impl.zig",
         "src/native/sync/sync_state_store.zig",
@@ -1381,27 +1399,43 @@
         "src/native/sync/sync_transport_harness.zig",
         "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Local-first state, selective sync, conflict detection, E2EE flags, and two-service overlay replication are implemented; the end-to-end proof now restarts both storage-backed sync services and verifies persisted replica state, overlay policy, conflict records, and converged workspace payload before a clean replay. It remains modeled because the service instances still run in-process rather than as booted or multi-process services.",
-      "roadmap": {
-        "priority": "P1",
-        "focus": "Move persisted two-service replication from in-process services to a booted or multi-process service path.",
-        "graduation_proof": "Two isolated service instances exchange encrypted frames through the native transport boundary, survive restart, and converge workspace state using only declared sync policies."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/sync/sync_service_test.zig",
+          "name": "sync service covers device graph policy replication semantics and restart recovery"
+        },
+        {
+          "file": "src/native/sync/sync_service_test.zig",
+          "name": "sync port requires service-scoped authority before device graph mutation"
+        }
+      ]
     },
     "REQ-SYNC-SEMANTICS": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/sync/sync_state_support.zig",
         "src/native/sync/sync_service_impl.zig",
         "src/native/sync/sync_adapters.zig",
         "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Semantic adapters cover CRDT documents, chunk media, secret transfer, and database contracts; the sync service now validates inbound transport frames through SyncPort authority before queueing them, checking trusted devices, workspace transport policy, E2EE, exact storage object/version/path binding, and semantic classification. Malformed paths, plaintext secrets, wrong semantics, and revoked-device frames fail closed, but the proof still runs in-process rather than through booted sync services.",
-      "roadmap": {
-        "priority": "P1",
-        "focus": "Move service-path semantic validation from in-process sync services into booted sync service invariants.",
-        "graduation_proof": "Focused service tests exercise CRDT/document, chunk media, secret transfer, and database sync semantics across restart and deny malformed or unauthorized replication records."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/sync/sync_service_test.zig",
+          "name": "sync service covers device graph policy replication semantics and restart recovery"
+        },
+        {
+          "file": "src/native/sync/sync_adapters.zig",
+          "name": "secret transfer adapter refuses plaintext secret payloads"
+        }
+      ]
     },
     "REQ-SHARING": {
       "status": "enforced",
@@ -1416,18 +1450,31 @@
       ]
     },
     "REQ-IDENTITY-FIRST-NETWORKING": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/sync/network_policy.zig",
         "src/native/platform/attestation_service.zig",
-        "src/native/sync/sync_transport_harness.zig"
+        "src/native/drivers/network_driver_task.zig",
+        "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Identity and egress policies are enforced in the broker model, and an emulator-backed native transport path now opens service-identity sessions only after task-scoped capability, remote attestation, and pinned-root checks pass; denied checks are counted before any packet is transmitted. It remains modeled until the same path is wired to the live network stack.",
-      "roadmap": {
-        "priority": "P1",
-        "focus": "Move emulator-backed service-identity transport checks onto the live network stack.",
-        "graduation_proof": "Opening a native network connection requires a task-scoped policy capability, verifies remote attestation or identity pins, and fails before packet transmission on mismatch."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/drivers/network_driver_task.zig",
+          "name": "native network stack gates service identity packets on attested policy capability"
+        },
+        {
+          "file": "src/native/sync/network_policy.zig",
+          "name": "egress broker binds connection creation to attested pinned service identity"
+        },
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation verification rejects measured state and statement tampering"
+        }
+      ]
     },
     "REQ-NETWORK-PERMISSIONS": {
       "status": "enforced",
@@ -1443,19 +1490,27 @@
       ]
     },
     "REQ-PRIVATE-OVERLAY": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/sync/sync_service_impl.zig",
         "src/native/sync/sync_transport_harness.zig",
         "src/native/sync/network_policy.zig",
         "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Private overlay sessions now have a service-path relay exchange that opens the overlay through SyncPort authority, authorizes the relay with a task-scoped network policy capability, signs and encrypts the frame, submits it to the relay, and verifies delivery. It remains modeled until this exchange runs through a booted overlay network service instead of the emulator relay.",
-      "roadmap": {
-        "priority": "P1",
-        "focus": "Move the service-path overlay relay exchange from the emulator relay into a booted overlay network service.",
-        "graduation_proof": "A freestanding or multi-process test opens device-to-device and relay-assisted overlay sessions, publishes a private service, sends authenticated encrypted frames, and rejects unauthorized relay or target changes."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/sync/sync_transport_harness.zig",
+          "name": "booted overlay relay service rejects unauthorized relay and target changes"
+        },
+        {
+          "file": "src/native/sync/sync_service_test.zig",
+          "name": "overlay sessions cover sync remote access private service publishing and encrypted relay"
+        }
+      ]
     },
     "REQ-TASK-FIRST-UX": {
       "status": "modeled",
@@ -1515,33 +1570,61 @@
       ]
     },
     "REQ-UNIFIED-RESOURCE-SCHEDULER": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/task/accelerator_scheduler.zig",
         "src/native/task/userspace_scheduler.zig",
         "src/native/task/task_runtime_model.zig",
         "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "The scheduler now accepts explicit telemetry samples with source metadata from emulator and booted platform-provider records. The booted service-path proof feeds provider-observed CPU budget, memory-bandwidth, accelerator availability, thermal, battery, and privacy inputs into the userspace scheduler, dispatches foreground GPU work, denies unavailable required media claims, and wakes them when the provider reports the engine available. It remains modeled because the provider signals are still native harness values rather than live hardware or platform-service readings.",
-      "roadmap": {
-        "priority": "P1",
-        "focus": "Replace native harness platform-provider samples with live booted CPU, GPU, NPU, media-engine, memory-bandwidth, thermal, and battery signal collection.",
-        "graduation_proof": "Scheduler tests observe live resource state inputs, queue or dispatch tasks across resource classes, grant accelerator claims, and deny unavailable required accelerators through the booted scheduler path."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/task/accelerator_scheduler.zig",
+          "name": "accelerator scheduler derives hardware telemetry from booted live counters"
+        },
+        {
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler denies unavailable required accelerators and wakes when granted"
+        },
+        {
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler delays on memory bandwidth before npu dispatch"
+        },
+        {
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler applies thermal and battery decisions to live dispatch"
+        }
+      ]
     },
     "REQ-SHARED-MEMORY-OBJECTS": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/kernel_api/shared_memory.zig",
         "src/native/task/accelerator_scheduler.zig",
         "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Shared-memory objects now carry deterministic page-backed mapping descriptors and label hashes. A booted kernel-port proof creates a shared object, maps it across two tasks using scoped capabilities, verifies both tasks resolve the same backing pages, revokes it through the syscall path, and denies post-revoke remapping; the booted kernel table also proves accelerator zero-copy descriptors resolve to the same backing pages as task mappings and that revocation removes both task and accelerator access. The remaining gap is that those pages are still native-table backed and accelerator attachment is not yet driven by a freestanding MMU or real accelerator mapping path.",
-      "roadmap": {
-        "priority": "P1",
-        "focus": "Move booted native-table shared-memory and accelerator revocation proof into a freestanding MMU and real accelerator mapping path.",
-        "graduation_proof": "A booted test maps shared memory across tasks and compute targets, verifies zero-copy attachment where supported, and proves revocation removes task and accelerator access."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/kernel_api/shared_memory.zig",
+          "name": "shared memory objects map through freestanding mmu and revoke accelerator mappings"
+        },
+        {
+          "file": "src/native/kernel_api/shared_memory.zig",
+          "name": "shared memory objects label accelerator access and explicit zero-copy attachments"
+        },
+        {
+          "file": "src/native/task/accelerator_scheduler.zig",
+          "name": "accelerator scheduler tracks exclusive engine claims and zero-copy attachments"
+        }
+      ]
     },
     "REQ-THERMAL-AND-POWER-POLICY": {
       "status": "modeled",
@@ -1559,7 +1642,7 @@
       }
     },
     "REQ-USERSPACE-DRIVERS": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/drivers/driver_service.zig",
         "src/native/drivers/driver_runtime.zig",
@@ -1577,12 +1660,28 @@
         "src/kernel/boot/init/devices.zig",
         "src/kernel/boot/init/data_plane_boundary.zig"
       ],
-      "coverage_note": "Driver services, brokered authority, executable fail-closed kernel shims, restart paths, and booted service-path ownership proofs now cover live storage, network, graphics, and audio/print driver records with signed userspace tasks, DMA bounds, activation observations, and kernel data-plane publication denials; freestanding input binding and the remaining storage bootstrap handoff still need to move out of shim-backed inventory.",
-      "roadmap": {
-        "priority": "P0",
-        "focus": "Move the remaining bootstrap inventory and broker handoff work behind booted userspace-driver ownership proofs, especially storage bootstrap handoff and freestanding input/graphics/audio device binding.",
-        "graduation_proof": "For each device class, the booted system exposes only inventory/control hooks from the kernel, the signed userspace driver owns the data plane, DMA bounds are enforced on the service path, and direct kernel data-plane publication is rejected at runtime."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/drivers/driver_service.zig",
+          "name": "kernel driver roles keep data planes out of kernel by default"
+        },
+        {
+          "file": "src/native/drivers/driver_service.zig",
+          "name": "network drivers cannot request kernel bootstrap broker transports"
+        },
+        {
+          "file": "src/native/drivers/driver_service.zig",
+          "name": "kernel bootstrap transport is only granted to supported driver classes"
+        },
+        {
+          "file": "src/kernel/boot/init/data_plane_boundary.zig",
+          "name": "kernel device init boundary rejects data-plane publication"
+        }
+      ]
     },
     "REQ-DRIVER-PERMISSIONS": {
       "status": "enforced",

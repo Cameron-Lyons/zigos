@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.len != 2) {
         try stderr_writer.interface.print(
-            "usage: {s} <ready|cold_boot|first_boot|cold_reboot|driver_restart|ab_rollback>\n",
+            "usage: {s} <ready|cold_boot|first_boot|cold_reboot|driver_restart|ab_rollback|recovery>\n",
             .{args[0]},
         );
         try stderr_writer.interface.flush();
@@ -40,6 +40,10 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (std.mem.eql(u8, group, "ab_rollback")) {
         for (smoke_markers.ab_rollback_required) |line| {
+            try stdout_writer.interface.print("{s}\n", .{line});
+        }
+    } else if (std.mem.eql(u8, group, "recovery")) {
+        for (smoke_markers.recovery_required) |line| {
             try stdout_writer.interface.print("{s}\n", .{line});
         }
     } else {

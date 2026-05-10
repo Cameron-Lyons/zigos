@@ -157,7 +157,7 @@ pub fn publishStorageAtaBootstrap(
 
 pub fn claimStorageAtaBootstrapInventory(driver: *const driver_service.DriverRecord, publisher: []const u8) Error!bool {
     if (driver.device_class != .storage_controller) return false;
-    if (driver.bootstrap_transport != .kernel_published_data_plane) return false;
+    if (driver.bootstrap_transport != .kernel_bootstrap_broker) return false;
 
     const inventory = device_inventory.recordForClass(.storage_controller);
     if (!inventory.detected or inventory.device_id != driver.device_id) return false;
