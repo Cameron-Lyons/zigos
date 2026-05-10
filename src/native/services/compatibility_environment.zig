@@ -1,11 +1,12 @@
 const std = @import("std");
-const fixed_table = @import("../core/fixed_table.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 
 pub const MAX_ENVIRONMENTS: usize = 8;
 pub const MAX_PORTALS_PER_ENVIRONMENT: usize = 8;
+const ENVIRONMENT_INDEX_CAPACITY: usize = MAX_ENVIRONMENTS * 2;
 
 pub const EnvironmentKind = enum(u8) {
     vm,
@@ -107,9 +108,13 @@ const EnvironmentSlot = struct {
     environment: EnvironmentRecord = zeroEnvironment(),
 };
 
+const EnvironmentIdIndex = indexed_arena.UniqueIndex(ENVIRONMENT_INDEX_CAPACITY);
+
 pub const Manager = struct {
     next_environment_id: u64 = 1,
     slots: [MAX_ENVIRONMENTS]EnvironmentSlot = [_]EnvironmentSlot{EnvironmentSlot{}} ** MAX_ENVIRONMENTS,
+    environment_id_index: EnvironmentIdIndex = EnvironmentIdIndex.init(),
+    active_count: usize = 0,
 
     pub fn init() Manager {
         return .{};
@@ -122,8 +127,10 @@ pub const Manager = struct {
         if (!request.clearly_labeled) return error.HiddenEnvironmentForbidden;
         if (!request.isolated) return error.IsolationRequired;
 
-        const slot = fixed_table.firstFreeSlot(EnvironmentSlot, MAX_ENVIRONMENTS, &self.slots) orelse return error.EnvironmentTableFull;
+        const slot_index = self.firstFreeSlotIndex() orelse return error.EnvironmentTableFull;
+        const slot = &self.slots[slot_index];
         slot.in_use = true;
+        errdefer slot.* = .{};
         slot.environment = .{
             .id = self.allocateEnvironmentId(),
             .service_id = request.service_id,
@@ -144,11 +151,19 @@ pub const Manager = struct {
         };
         slot.environment.label_len = native_util.copyTextExact(slot.environment.label[0..], request.label) catch return error.LabelTooLong;
         slot.environment.signer_len = native_util.copyTextExact(slot.environment.signer[0..], request.bundle.signature.signer) catch return error.SignerTooLong;
+        self.environment_id_index.insert(slot.environment.id, slot_index);
+        self.active_count += 1;
         return &slot.environment;
     }
 
     pub fn find(self: *Manager, environment_id: u64) ?*EnvironmentRecord {
-        const slot = fixed_table.findSlot(EnvironmentSlot, MAX_ENVIRONMENTS, &self.slots, environment_id, environmentSlotMatchesId) orelse return null;
+        if (environment_id == 0) return null;
+        const slot_index = self.environment_id_index.lookup(environment_id) orelse return null;
+        if (slot_index >= MAX_ENVIRONMENTS) native_util.impossibleByInvariant("compatibility environment id index points outside slots");
+        const slot = &self.slots[slot_index];
+        if (!slot.in_use or slot.environment.id != environment_id) {
+            native_util.impossibleByInvariant("compatibility environment id index points at the wrong environment");
+        }
         return &slot.environment;
     }
 
@@ -188,18 +203,21 @@ pub const Manager = struct {
     }
 
     pub fn environmentCount(self: *const Manager) usize {
-        return fixed_table.countInUse(EnvironmentSlot, MAX_ENVIRONMENTS, &self.slots);
+        return self.active_count;
     }
 
     fn allocateEnvironmentId(self: *Manager) u64 {
         defer self.next_environment_id += 1;
         return self.next_environment_id;
     }
-};
 
-fn environmentSlotMatchesId(environment_id: u64, slot: *const EnvironmentSlot) bool {
-    return slot.environment.id == environment_id;
-}
+    fn firstFreeSlotIndex(self: *const Manager) ?usize {
+        for (self.slots, 0..) |slot, slot_index| {
+            if (!slot.in_use) return slot_index;
+        }
+        return null;
+    }
+};
 
 fn zeroEnvironment() EnvironmentRecord {
     return .{

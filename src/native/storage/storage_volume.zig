@@ -61,6 +61,12 @@ const root_format_version: u16 = 2;
 const max_replay_log_records: u16 = 128;
 const max_log_segments: u16 = 16;
 const compaction_threshold_bytes: u32 = @intCast((data_capacity_bytes * 3) / 4);
+const log_record_kind_bytes: usize = 1;
+const log_record_payload_len_bytes: usize = 4;
+const log_record_checksum_bytes: usize = 8;
+const log_record_payload_len_offset: usize = log_record_kind_bytes;
+const log_record_checksum_offset: usize = log_record_payload_len_offset + log_record_payload_len_bytes;
+const log_record_header_len: usize = log_record_checksum_offset + log_record_checksum_bytes;
 
 const payload_magic = "ZG4STATE";
 const format_version: u16 = 6;
@@ -634,12 +640,14 @@ fn finishRecord(writer: *CursorWriter, header_offset: usize) Error!void {
     const payload_offset = header_offset + recordHeaderLen();
     const payload_len = writer.offset - payload_offset;
     const checksum = checksumBytes(writer.buffer[payload_offset..writer.offset]);
-    writeU32At(writer.buffer[header_offset + 1 .. header_offset + 5], @intCast(payload_len));
-    writeU64At(writer.buffer[header_offset + 5 .. header_offset + 13], checksum);
+    const payload_len_offset = header_offset + log_record_payload_len_offset;
+    const checksum_offset = header_offset + log_record_checksum_offset;
+    writeU32At(writer.buffer[payload_len_offset..checksum_offset], @intCast(payload_len));
+    writeU64At(writer.buffer[checksum_offset .. header_offset + recordHeaderLen()], checksum);
 }
 
 fn recordHeaderLen() usize {
-    return 1 + 4 + 8;
+    return log_record_header_len;
 }
 
 fn readRecordHeader(reader: *CursorReader) Error!LogRecordHeader {
@@ -691,12 +699,6 @@ fn encodeVersionBody(writer: *CursorWriter, record: object_store.VersionRecord) 
 fn appendBlobRecord(writer: *CursorWriter, record: object_store.BlobRecord) Error!void {
     const header_offset = try beginRecord(writer, .blob_state);
     try encodeBlobBody(writer, record);
-    try finishRecord(writer, header_offset);
-}
-
-fn appendChunkRecord(writer: *CursorWriter, record: object_store.ChunkRecord) Error!void {
-    const header_offset = try beginRecord(writer, .chunk_state);
-    try encodeChunkBody(writer, record);
     try finishRecord(writer, header_offset);
 }
 

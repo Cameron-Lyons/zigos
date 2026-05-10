@@ -28,6 +28,9 @@ else
     };
 
 pub const MAX_DEVICES: usize = 4;
+const ata_io_register_count = 8;
+const ata_control_register_index = ata_io_register_count;
+const ata_host_register_count = ata_io_register_count + 1;
 
 pub const PortWidth = abi.DevicePortWidth;
 
@@ -66,7 +69,7 @@ const ControllerSlot = struct {
         .irq_line = 0,
         .sector_count = 0,
     },
-    host_registers: [9]u32 = [_]u32{0} ** 9,
+    host_registers: [ata_host_register_count]u32 = [_]u32{0} ** ata_host_register_count,
 };
 
 var controllers: [MAX_DEVICES]ControllerSlot = [_]ControllerSlot{ControllerSlot{}} ** MAX_DEVICES;
@@ -97,7 +100,7 @@ pub fn describe(device_id: u64) Error!ControllerDescriptor {
     return .{
         .device_id = device_id,
         .base_port = slot.grant.base_port,
-        .io_port_count = 8,
+        .io_port_count = ata_io_register_count,
         .ctrl_port = slot.grant.ctrl_port,
         .is_master = slot.grant.is_master,
         .irq_line = slot.grant.irq_line,
@@ -160,10 +163,10 @@ fn findController(device_id: u64) ?*ControllerSlot {
 }
 
 fn registerIndex(slot: *const ControllerSlot, port: u16) Error!usize {
-    if (port >= slot.grant.base_port and port < slot.grant.base_port + 8) {
+    if (port >= slot.grant.base_port and port < slot.grant.base_port + ata_io_register_count) {
         return port - slot.grant.base_port;
     }
-    if (port == slot.grant.ctrl_port) return 8;
+    if (port == slot.grant.ctrl_port) return ata_control_register_index;
     return error.InvalidPort;
 }
 
@@ -180,14 +183,14 @@ test "device broker publishes ATA controllers and exposes typed port and irq met
 
     const descriptor = try describe(0x1F001);
     try std.testing.expectEqual(@as(u16, 0x1F0), descriptor.base_port);
-    try std.testing.expectEqual(@as(u16, 8), descriptor.io_port_count);
+    try std.testing.expectEqual(@as(u16, ata_io_register_count), descriptor.io_port_count);
     try std.testing.expectEqual(@as(u16, 0x3F6), descriptor.ctrl_port);
     try std.testing.expect(descriptor.is_master);
     try std.testing.expectEqual(@as(u8, 14), descriptor.irq_line);
     try std.testing.expectEqual(@as(u64, 4096), descriptor.sector_count);
 
-    try writePort(0x1F001, 0x1F0 + 7, .u8, 0x5A);
-    try std.testing.expectEqual(@as(u32, 0x5A), try readPort(0x1F001, 0x1F0 + 7, .u8));
+    try writePort(0x1F001, 0x1F0 + ata_io_register_count - 1, .u8, 0x5A);
+    try std.testing.expectEqual(@as(u32, 0x5A), try readPort(0x1F001, 0x1F0 + ata_io_register_count - 1, .u8));
     try std.testing.expectEqual(@as(u8, 14), try irqLine(0x1F001));
     try std.testing.expectError(error.UnsupportedMmioWindow, mmioWindow(0x1F001, 0));
     try std.testing.expectError(error.InvalidPort, readPort(0x1F001, 0x2F8, .u8));

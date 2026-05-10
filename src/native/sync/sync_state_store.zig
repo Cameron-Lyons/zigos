@@ -720,6 +720,7 @@ fn repairNextIds(resident: *state_support.ResidentState) void {
     }
     resident.persisted_state.next_contract_id = next_contract_id;
     resident.persisted_state.network_policies.next_policy_id = resident.nextPersistedPolicyId();
+    resident.persisted_state.network_policies.rebuildIndexes();
 }
 
 fn firstFreeUserRootIndex(resident: *const state_support.ResidentState) ?usize {

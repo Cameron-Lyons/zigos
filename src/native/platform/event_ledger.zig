@@ -725,30 +725,6 @@ pub const Ledger = struct {
         }
         try self.rebuildIndexes();
     }
-
-    fn recentEventsForPersistence(
-        self: *const Ledger,
-        buffer: *[MAX_PERSISTED_EVENTS]PersistentEvent,
-    ) []const PersistentEvent {
-        var total_in_use: usize = 0;
-        for (self.events.slots) |slot| {
-            if (slot.in_use) total_in_use += 1;
-        }
-
-        const keep = @min(total_in_use, MAX_PERSISTED_EVENTS);
-        var start = total_in_use - keep;
-        var write_index: usize = 0;
-        for (self.events.slots) |slot| {
-            if (!slot.in_use) continue;
-            if (start != 0) {
-                start -= 1;
-                continue;
-            }
-            buffer[write_index] = PersistentEvent.fromEvent(slot.event);
-            write_index += 1;
-        }
-        return buffer[0..write_index];
-    }
 };
 
 const PersistentEvent = struct {

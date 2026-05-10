@@ -1,10 +1,12 @@
 const std = @import("std");
-const fixed_table = @import("../core/fixed_table.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
+const native_util = @import("../core/util.zig");
 const capability = @import("../kernel_api/capability.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 
 pub const MAX_DRIVER_SERVICES: usize = 8;
+const DRIVER_INDEX_CAPACITY: usize = MAX_DRIVER_SERVICES * 2;
 
 pub const DeviceClass = enum(u8) {
     network_adapter,
@@ -35,9 +37,9 @@ pub const DmaRange = struct {
     length: u64,
 
     pub fn contains(self: DmaRange, address: u64, length: u64) bool {
-        if (length == 0) return false;
-        const end = address + length - 1;
-        const range_end = self.base + self.length - 1;
+        if (length == 0 or self.length == 0) return false;
+        const end = std.math.add(u64, address, length - 1) catch return false;
+        const range_end = std.math.add(u64, self.base, self.length - 1) catch return false;
         return address >= self.base and end <= range_end;
     }
 };
@@ -120,30 +122,16 @@ const DriverSlot = struct {
     driver: DriverRecord = zeroDriver(),
 };
 
-const DriverBindingLookup = struct {
-    device_class: DeviceClass,
-    device_id: u64,
-};
-
-fn driverSlotMatchesServiceId(service_id: u64, slot: *const DriverSlot) bool {
-    return slot.driver.service_id == service_id;
-}
-
-fn driverSlotMatchesBinding(context: DriverBindingLookup, slot: *const DriverSlot) bool {
-    return slot.driver.device_class == context.device_class and slot.driver.device_id == context.device_id;
-}
-
-fn driverSlotMatchesServiceClass(context: DriverBindingLookup, slot: *const DriverSlot) bool {
-    return slot.driver.service_id == context.device_id and slot.driver.device_class == context.device_class;
-}
-
-fn driverSlotMatchesClass(device_class: DeviceClass, slot: *const DriverSlot) bool {
-    return slot.driver.device_class == device_class;
-}
+const DriverServiceIndex = indexed_arena.MultimapIndex(MAX_DRIVER_SERVICES, MAX_DRIVER_SERVICES, DRIVER_INDEX_CAPACITY);
+const DriverBindingIndex = indexed_arena.UniqueIndex(DRIVER_INDEX_CAPACITY);
+const DriverClassIndex = indexed_arena.MultimapIndex(MAX_DRIVER_SERVICES, MAX_DRIVER_SERVICES, DRIVER_INDEX_CAPACITY);
 
 pub const Directory = struct {
     next_dma_domain_id: u64 = 1,
     slots: [MAX_DRIVER_SERVICES]DriverSlot = [_]DriverSlot{DriverSlot{}} ** MAX_DRIVER_SERVICES,
+    service_index: DriverServiceIndex = DriverServiceIndex.init(),
+    binding_index: DriverBindingIndex = DriverBindingIndex.init(),
+    class_index: DriverClassIndex = DriverClassIndex.init(),
 
     pub fn init() Directory {
         return .{};
@@ -168,18 +156,14 @@ pub const Directory = struct {
     pub fn registerSigned(self: *Directory, request: SignedRegistrationRequest) Error!*DriverRecord {
         const authority = try validateSignedRequest(request);
 
-        if (self.findByServiceAndClass(request.service_id, request.device_class) != null) {
-            return error.DuplicateServiceId;
-        }
-        if (fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, DriverBindingLookup{
-            .device_class = request.device_class,
-            .device_id = request.device_id,
-        }, driverSlotMatchesBinding) != null) return error.DuplicateDeviceBinding;
+        if (self.findByServiceAndClass(request.service_id, request.device_class) != null) return error.DuplicateServiceId;
+        if (self.findByBinding(request.device_class, request.device_id) != null) return error.DuplicateDeviceBinding;
 
-        const slot_index = fixed_table.firstFreeSlotIndex(DriverSlot, MAX_DRIVER_SERVICES, &self.slots) orelse return error.DriverTableFull;
+        const slot_index = self.firstFreeSlotIndex() orelse return error.DriverTableFull;
         const slot = &self.slots[slot_index];
         slot.in_use = true;
         slot.driver = self.recordFromRequest(request, authority, 1);
+        self.indexDriver(slot_index);
         return &slot.driver;
     }
 
@@ -200,10 +184,7 @@ pub const Directory = struct {
     }
 
     pub fn hotSwapSigned(self: *Directory, request: SignedRegistrationRequest) Error!*DriverRecord {
-        const slot = fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, DriverBindingLookup{
-            .device_class = request.device_class,
-            .device_id = request.service_id,
-        }, driverSlotMatchesServiceClass) orelse return error.DriverNotFound;
+        const slot = self.findSlotByServiceAndClass(request.service_id, request.device_class) orelse return error.DriverNotFound;
         if (slot.driver.device_id != request.device_id or slot.driver.device_class != request.device_class) {
             return error.InvalidHotSwapBinding;
         }
@@ -214,20 +195,33 @@ pub const Directory = struct {
     }
 
     pub fn findByService(self: *Directory, service_id: u64) ?*DriverRecord {
-        const slot = fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, service_id, driverSlotMatchesServiceId) orelse return null;
+        const slot = self.findSlotByService(service_id) orelse return null;
         return &slot.driver;
     }
 
     pub fn findByServiceAndClass(self: *Directory, service_id: u64, device_class: DeviceClass) ?*DriverRecord {
-        const slot = fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, DriverBindingLookup{
-            .device_class = device_class,
-            .device_id = service_id,
-        }, driverSlotMatchesServiceClass) orelse return null;
+        const slot = self.findSlotByServiceAndClass(service_id, device_class) orelse return null;
         return &slot.driver;
     }
 
     pub fn findByClass(self: *Directory, device_class: DeviceClass) ?*DriverRecord {
-        const slot = fixed_table.findSlot(DriverSlot, MAX_DRIVER_SERVICES, &self.slots, device_class, driverSlotMatchesClass) orelse return null;
+        var cursor = self.class_index.head(driverClassKey(device_class));
+        while (cursor != indexed_arena.no_index) : (cursor = self.class_index.next(cursor)) {
+            if (cursor >= MAX_DRIVER_SERVICES) native_util.impossibleByInvariant("driver class index points outside slots");
+            const slot = &self.slots[cursor];
+            if (!slot.in_use) native_util.impossibleByInvariant("driver class index points at a free slot");
+            if (slot.driver.device_class == device_class) return &slot.driver;
+        }
+        return null;
+    }
+
+    fn findByBinding(self: *Directory, device_class: DeviceClass, device_id: u64) ?*DriverRecord {
+        const slot_index = self.binding_index.lookup(driverBindingKey(device_class, device_id)) orelse return null;
+        if (slot_index >= MAX_DRIVER_SERVICES) native_util.impossibleByInvariant("driver binding index points outside slots");
+        const slot = &self.slots[slot_index];
+        if (!slot.in_use or slot.driver.device_class != device_class or slot.driver.device_id != device_id) {
+            native_util.impossibleByInvariant("driver binding index points at the wrong driver");
+        }
         return &slot.driver;
     }
 
@@ -241,6 +235,50 @@ pub const Directory = struct {
     fn allocateDmaDomainId(self: *Directory) u64 {
         defer self.next_dma_domain_id += 1;
         return self.next_dma_domain_id;
+    }
+
+    fn firstFreeSlotIndex(self: *const Directory) ?usize {
+        for (self.slots, 0..) |slot, slot_index| {
+            if (!slot.in_use) return slot_index;
+        }
+        return null;
+    }
+
+    fn findSlotByService(self: *Directory, service_id: u64) ?*DriverSlot {
+        if (service_id == 0) return null;
+        var cursor = self.service_index.head(service_id);
+        while (cursor != indexed_arena.no_index) : (cursor = self.service_index.next(cursor)) {
+            if (cursor >= MAX_DRIVER_SERVICES) native_util.impossibleByInvariant("driver service index points outside slots");
+            const slot = &self.slots[cursor];
+            if (!slot.in_use) native_util.impossibleByInvariant("driver service index points at a free slot");
+            if (slot.driver.service_id == service_id) return slot;
+        }
+        return null;
+    }
+
+    fn findSlotByServiceAndClass(self: *Directory, service_id: u64, device_class: DeviceClass) ?*DriverSlot {
+        if (service_id == 0) return null;
+        var cursor = self.service_index.head(service_id);
+        while (cursor != indexed_arena.no_index) : (cursor = self.service_index.next(cursor)) {
+            if (cursor >= MAX_DRIVER_SERVICES) native_util.impossibleByInvariant("driver service index points outside slots");
+            const slot = &self.slots[cursor];
+            if (!slot.in_use) native_util.impossibleByInvariant("driver service index points at a free slot");
+            if (slot.driver.service_id == service_id and slot.driver.device_class == device_class) return slot;
+        }
+        return null;
+    }
+
+    fn indexDriver(self: *Directory, slot_index: usize) void {
+        if (slot_index >= MAX_DRIVER_SERVICES) native_util.impossibleByInvariant("driver index update points outside slots");
+        const slot = &self.slots[slot_index];
+        if (!slot.in_use or slot.driver.service_id == 0) native_util.impossibleByInvariant("driver index update requires a live driver");
+        if (!self.service_index.append(slot.driver.service_id, slot_index)) {
+            native_util.impossibleByInvariant("driver service index capacity covers driver slots");
+        }
+        self.binding_index.insert(driverBindingKey(slot.driver.device_class, slot.driver.device_id), slot_index);
+        if (!self.class_index.append(driverClassKey(slot.driver.device_class), slot_index)) {
+            native_util.impossibleByInvariant("driver class index capacity covers driver slots");
+        }
     }
 
     fn recordFromRequest(
@@ -272,6 +310,17 @@ pub const Directory = struct {
 
 pub fn authorityTarget(device_id: u64) capability.CapabilityTarget {
     return .{ .kind = .device, .id = device_id };
+}
+
+fn driverBindingKey(device_class: DeviceClass, device_id: u64) u64 {
+    var bytes: [9]u8 = undefined;
+    bytes[0] = @intFromEnum(device_class);
+    std.mem.writeInt(u64, bytes[1..9], device_id, .little);
+    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(0x5A47_4452_5642_494E, &bytes));
+}
+
+fn driverClassKey(device_class: DeviceClass) u64 {
+    return @as(u64, @intFromEnum(device_class)) + 1;
 }
 
 pub fn allowedRightsFor(device_class: DeviceClass) capability.CapabilityRights {
@@ -468,6 +517,77 @@ test "driver services require signed least-privilege device authority" {
     try std.testing.expect(directory.markRestarted(44));
     try std.testing.expectEqual(@as(u32, 2), driver.restart_generation);
     try std.testing.expect(driver.dma_domain_id != 1);
+}
+
+test "driver directory indexes service binding and class lookups" {
+    var directory = Directory.init();
+    var capabilities = capability.CapabilityTable.init();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 18 };
+    const network_device_id: u64 = 0x8086_100E_0018;
+    const storage_device_id: u64 = 0x1F001;
+    const network_authority = try capabilities.mintBootRoot(.{
+        .holder = owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = authorityTarget(network_device_id),
+        .rights = allowedRightsFor(.network_adapter),
+        .scope = .{ .task_id = 18, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = std.math.maxInt(u64) },
+        .audit = .{},
+    });
+    const storage_authority = try capabilities.mintBootRoot(.{
+        .holder = owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = authorityTarget(storage_device_id),
+        .rights = allowedRightsFor(.storage_controller),
+        .scope = .{ .task_id = 19, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = std.math.maxInt(u64) },
+        .audit = .{},
+    });
+
+    _ = try directory.registerSigned(.{
+        .service_id = 18,
+        .owner_task_id = 18,
+        .device_id = network_device_id,
+        .device_class = .network_adapter,
+        .authority_capability_id = network_authority.id,
+        .capability_table = &capabilities,
+        .requester = owner,
+        .now_ticks = 1,
+        .signer = "net-driver",
+    });
+    _ = try directory.registerSigned(.{
+        .service_id = 19,
+        .owner_task_id = 19,
+        .device_id = storage_device_id,
+        .device_class = .storage_controller,
+        .authority_capability_id = storage_authority.id,
+        .capability_table = &capabilities,
+        .requester = owner,
+        .now_ticks = 1,
+        .signer = "storage-driver",
+    });
+
+    try std.testing.expectEqual(@as(u64, 18), directory.findByService(18).?.service_id);
+    try std.testing.expectEqual(@as(u64, 19), directory.findByClass(.storage_controller).?.service_id);
+    try std.testing.expect(directory.findByServiceAndClass(18, .storage_controller) == null);
+    try std.testing.expectError(error.DuplicateServiceId, directory.registerSigned(.{
+        .service_id = 18,
+        .owner_task_id = 18,
+        .device_id = network_device_id,
+        .device_class = .network_adapter,
+        .authority_capability_id = network_authority.id,
+        .capability_table = &capabilities,
+        .requester = owner,
+        .now_ticks = 2,
+        .signer = "duplicate-service",
+    }));
+}
+
+test "driver dma ranges reject overflowing spans" {
+    const range = DmaRange{ .base = 0x1000, .length = 0x1000 };
+    try std.testing.expect(range.contains(0x1000, 0x1000));
+    try std.testing.expect(!range.contains(std.math.maxInt(u64) - 7, 16));
+    try std.testing.expect(!(DmaRange{ .base = std.math.maxInt(u64) - 7, .length = 16 }).contains(std.math.maxInt(u64) - 7, 8));
 }
 
 test "driver hot-swap rebinds authority signer and dma domain" {

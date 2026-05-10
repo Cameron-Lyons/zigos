@@ -6,8 +6,9 @@ const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
 const bundle_digest = @import("package_service_digest.zig");
 const bundle_ops = @import("package_service_bundle_ops.zig");
-const fixed_table = @import("../core/fixed_table.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const model = @import("package_service_model.zig");
+const native_util = @import("../core/util.zig");
 const service_authority = @import("service_authority.zig");
 const signing = @import("../core/signing.zig");
 
@@ -65,12 +66,15 @@ pub const Error = bundle_ops.Error || error{
 pub const digestBundle = bundle_digest.digestBundle;
 
 const BundleSlot = model.BundleSlot;
+const BUNDLE_INDEX_CAPACITY: usize = MAX_INSTALLED_BUNDLES * 2;
+const BundleIndex = indexed_arena.MultimapIndex(MAX_INSTALLED_BUNDLES, MAX_INSTALLED_BUNDLES, BUNDLE_INDEX_CAPACITY);
 const zeroBundle = model.zeroBundle;
 
 pub const Service = struct {
     service_id: u64 = 0,
     owner: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
     slots: [MAX_INSTALLED_BUNDLES]BundleSlot = [_]BundleSlot{BundleSlot{}} ** MAX_INSTALLED_BUNDLES,
+    bundle_index: BundleIndex = BundleIndex.init(),
     trust_store: principal.Keyring = principal.Keyring.init(),
 
     pub fn init() Service {
@@ -180,26 +184,26 @@ pub const Service = struct {
             };
         }
 
-        if (fixed_table.firstFreeSlot(BundleSlot, MAX_INSTALLED_BUNDLES, &self.slots)) |slot| {
-            slot.in_use = true;
-            slot.bundle = zeroBundle();
-            try bundle_ops.installNew(
-                &slot.bundle,
-                request.bundle,
-                request.data_schema_version,
-                permission_digest,
-                request.migration_manifest,
-            );
-            return .{
-                .installed_new = true,
-                .updated_existing = false,
-                .permissions_changed = false,
-                .rollback_available = false,
-                .migration_applied = false,
-            };
-        }
-
-        return error.BundleTableFull;
+        const slot_index = self.firstFreeSlotIndex() orelse return error.BundleTableFull;
+        const slot = &self.slots[slot_index];
+        slot.in_use = true;
+        errdefer slot.* = .{};
+        slot.bundle = zeroBundle();
+        try bundle_ops.installNew(
+            &slot.bundle,
+            request.bundle,
+            request.data_schema_version,
+            permission_digest,
+            request.migration_manifest,
+        );
+        self.indexBundle(slot_index);
+        return .{
+            .installed_new = true,
+            .updated_existing = false,
+            .permissions_changed = false,
+            .rollback_available = false,
+            .migration_applied = false,
+        };
     }
 
     fn rollback(self: *Service, bundle_id: []const u8) Error!InstallResult {
@@ -217,8 +221,10 @@ pub const Service = struct {
     }
 
     fn remove(self: *Service, bundle_id: []const u8) Error!RemoveResult {
-        const slot = fixed_table.findSlot(BundleSlot, MAX_INSTALLED_BUNDLES, &self.slots, bundle_id, bundleSlotMatchesId) orelse return error.BundleNotFound;
+        const slot_index = self.findSlotIndex(bundle_id) orelse return error.BundleNotFound;
+        const slot = &self.slots[slot_index];
         const removed_revision_count = slot.bundle.revision_count;
+        _ = self.bundle_index.remove(bundleKey(bundle_id), slot_index);
         slot.in_use = false;
         slot.bundle = zeroBundle();
         return .{
@@ -228,7 +234,8 @@ pub const Service = struct {
     }
 
     pub fn find(self: *Service, bundle_id: []const u8) ?*InstalledBundle {
-        const slot = fixed_table.findSlot(BundleSlot, MAX_INSTALLED_BUNDLES, &self.slots, bundle_id, bundleSlotMatchesId) orelse return null;
+        const slot_index = self.findSlotIndex(bundle_id) orelse return null;
+        const slot = &self.slots[slot_index];
         return &slot.bundle;
     }
 
@@ -253,8 +260,40 @@ pub const Service = struct {
     }
 
     fn findConst(self: *const Service, bundle_id: []const u8) ?*const InstalledBundle {
-        const slot = fixed_table.findConstSlot(BundleSlot, MAX_INSTALLED_BUNDLES, &self.slots, bundle_id, bundleSlotMatchesId) orelse return null;
+        const slot_index = self.findSlotIndexConst(bundle_id) orelse return null;
+        const slot = &self.slots[slot_index];
         return &slot.bundle;
+    }
+
+    fn firstFreeSlotIndex(self: *const Service) ?usize {
+        for (self.slots, 0..) |slot, slot_index| {
+            if (!slot.in_use) return slot_index;
+        }
+        return null;
+    }
+
+    fn findSlotIndex(self: *Service, bundle_id: []const u8) ?usize {
+        return self.findSlotIndexConst(bundle_id);
+    }
+
+    fn findSlotIndexConst(self: *const Service, bundle_id: []const u8) ?usize {
+        var cursor = self.bundle_index.head(bundleKey(bundle_id));
+        while (cursor != indexed_arena.no_index) : (cursor = self.bundle_index.next(cursor)) {
+            if (cursor >= MAX_INSTALLED_BUNDLES) native_util.impossibleByInvariant("package bundle index points outside slots");
+            const slot = &self.slots[cursor];
+            if (!slot.in_use) native_util.impossibleByInvariant("package bundle index points at a free slot");
+            if (std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id)) return cursor;
+        }
+        return null;
+    }
+
+    fn indexBundle(self: *Service, slot_index: usize) void {
+        if (slot_index >= MAX_INSTALLED_BUNDLES) native_util.impossibleByInvariant("package bundle index update points outside slots");
+        const slot = &self.slots[slot_index];
+        if (!slot.in_use or slot.bundle.bundle_id_len == 0) native_util.impossibleByInvariant("package bundle index update requires a live bundle");
+        if (!self.bundle_index.append(bundleKey(slot.bundle.bundleIdSlice()), slot_index)) {
+            native_util.impossibleByInvariant("package bundle index capacity covers bundle slots");
+        }
     }
 };
 
@@ -358,8 +397,13 @@ fn publisherKeyWasRevoked(
     return false;
 }
 
-fn bundleSlotMatchesId(bundle_id: []const u8, slot: *const BundleSlot) bool {
-    return std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id);
+fn bundleKey(bundle_id: []const u8) u64 {
+    var hasher = std.hash.Wyhash.init(0x5A47_504B_4742_554E);
+    var len_bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, len_bytes[0..], bundle_id.len, .little);
+    hasher.update(len_bytes[0..]);
+    hasher.update(bundle_id);
+    return indexed_arena.nonZeroKey(hasher.final());
 }
 
 const test_migration = struct {

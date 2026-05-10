@@ -769,10 +769,6 @@ pub const Directory = struct {
         self.workspaces.markDirty(workspace_id);
     }
 
-    fn markSnapshotDirty(self: *Directory, snapshot_id: ids.SnapshotId) void {
-        self.snapshots.markDirty(snapshot_id);
-    }
-
     fn indexWorkspace(self: *Directory, slot_index: usize) void {
         const slot = &self.workspaces.slots[slot_index];
         self.workspace_owner_label_index.insert(workspaceOwnerLabelKey(slot.workspace.owner, slot.workspace.labelSlice()), slot_index);
