@@ -239,6 +239,14 @@ pub const Service = struct {
         return &slot.bundle;
     }
 
+    pub fn rebuildIndexes(self: *Service) void {
+        self.bundle_index.reset();
+        for (self.slots, 0..) |slot, slot_index| {
+            if (!slot.in_use) continue;
+            self.indexBundle(slot_index);
+        }
+    }
+
     pub fn buildLaunchPlan(self: *const Service, bundle_id: []const u8) Error!LaunchPlan {
         const bundle = self.findConst(bundle_id) orelse return error.BundleNotFound;
         const active_revision = bundle.activeRevision();
@@ -1120,6 +1128,34 @@ test "package service resolves installed manifests with stable slices" {
     try std.testing.expectEqualStrings("sync", current.requested_permissions[1].resource);
     try std.testing.expectEqualStrings("sync", current.background_tasks[0].id);
     try std.testing.expectEqualStrings("tiny-embed", current.ai_metadata.model_family);
+}
+
+test "package service indexes rebuild after persisted slots are loaded" {
+    var service = Service.init();
+    var bundle = manifest.BundleManifest{
+        .bundle_id = "app.notes",
+        .display_name = "Notes",
+        .publisher = "Example Software",
+        .components = &.{.{
+            .id = "notes",
+            .entry = "notes.main",
+        }},
+        .requested_permissions = &.{},
+        .assets = &.{},
+    };
+    const signer_identity = signing.SignerIdentity{
+        .label = "pkg-test-rebuild",
+        .seed = [_]u8{0x38} ** 32,
+    };
+    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+
+    service.slots[3].in_use = true;
+    try bundle_ops.installNew(&service.slots[3].bundle, bundle, 1, [_]u8{0x11} ** 32, "");
+    service.rebuildIndexes();
+
+    const launch_plan = try service.buildLaunchPlan("app.notes");
+    try std.testing.expectEqual(@as(usize, 1), launch_plan.component_count);
+    try std.testing.expectEqualStrings("notes.main", launch_plan.components[0].entrySlice());
 }
 
 test "package service round-trips the example writer manifest fields without widening authority" {
