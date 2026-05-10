@@ -384,6 +384,7 @@ fn prepareFixtures() void {
     prepareOverlaySessionFixture();
     prepareWorkspaceCommitFixture();
     prepareTaskCheckpointFixture();
+    preparePackageFixture();
 }
 
 fn prepareFileBridgeFixture() void {
@@ -578,6 +579,14 @@ fn prepareTaskCheckpointFixture() void {
         .detail = 1,
         .tick = 63,
     }) catch unreachable;
+}
+
+fn preparePackageFixture() void {
+    package_context.service = package_service.Service.init();
+    const slot = &package_context.service.slots[0];
+    slot.in_use = true;
+    package_service_bundle_ops.installNew(&slot.bundle, package_bundle_v1, 1, [_]u8{0x11} ** 32, "") catch unreachable;
+    package_context.service.rebuildIndexes();
 }
 
 fn prepareOverlaySessionFixture() void {
@@ -977,10 +986,7 @@ fn benchmarkWorkspaceCommitOverlay(iteration: u32) u64 {
 
 fn benchmarkPackageRevision(iteration: u32) u64 {
     _ = iteration;
-    package_context.service = package_service.Service.init();
-
     const slot = &package_context.service.slots[0];
-    slot.in_use = true;
     package_service_bundle_ops.installNew(&slot.bundle, package_bundle_v1, 1, [_]u8{0x11} ** 32, "") catch unreachable;
     package_service_bundle_ops.installRevision(
         &slot.bundle,
