@@ -253,6 +253,10 @@ pub const SessionManager = struct {
             self.failBoot();
             return null;
         }
+        if (!trust.proveProductionPostActivationHealthChecks(&graph)) {
+            self.failBoot();
+            return null;
+        }
         if (!trust.verifyProductionArtifactManifest(&graph)) {
             self.failBoot();
             return null;
@@ -279,6 +283,7 @@ pub const SessionManager = struct {
         return trust_boot.TrustBoot.init(
             &self.runtime_context,
             &self.kernel_context,
+            &self.recovery_context.review_compositor_session,
             &self.service_graph_builder,
             &self.native_store,
         );

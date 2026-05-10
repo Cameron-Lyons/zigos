@@ -37,6 +37,12 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.platform_bootloader_measurement_provided,
     boot_markers.platform_build_artifact_manifest_verified,
     boot_markers.platform_artifact_manifest_verified,
+    boot_markers.platform_health_checks_boot_rollback,
+    boot_markers.platform_health_checks_core_rollback,
+    boot_markers.platform_health_checks_storage_rollback,
+    boot_markers.platform_health_checks_network_rollback,
+    boot_markers.platform_health_checks_ui_rollback,
+    boot_markers.platform_health_checks_promote_ok,
     boot_markers.platform_measured_boot_recorded,
     boot_markers.platform_measured_boot_verified_root,
     boot_markers.task_session_ready,
@@ -46,6 +52,7 @@ pub const cold_boot_required = [_][]const u8{
 pub const cold_reboot_required = [_][]const u8{
     boot_markers.platform_measured_boot_same_root,
     boot_markers.platform_measured_boot_same_shape,
+    boot_markers.platform_base_selector_cold_reboot_slot_verified,
 };
 
 pub const first_boot_required = [_][]const u8{
@@ -64,6 +71,8 @@ pub const ab_rollback_required = [_][]const u8{
     boot_markers.platform_immutable_base_boot_selection,
     boot_markers.platform_activation_rollback_ok,
     boot_markers.platform_ab_image_rollback_ok,
+    boot_markers.platform_base_selector_active_slot_verified,
+    boot_markers.platform_base_selector_rollback_before_service,
 };
 
 pub const recovery_required = [_][]const u8{
@@ -113,6 +122,7 @@ test "native smoke gate requires measured boot reboot comparison markers" {
     try std.testing.expect(contains(&first_boot_required, boot_markers.platform_measured_boot_first));
     try std.testing.expect(contains(&cold_reboot_required, boot_markers.platform_measured_boot_same_root));
     try std.testing.expect(contains(&cold_reboot_required, boot_markers.platform_measured_boot_same_shape));
+    try std.testing.expect(contains(&cold_reboot_required, boot_markers.platform_base_selector_cold_reboot_slot_verified));
 }
 
 test "native smoke gate requires in-boot driver crash restart proof markers" {
@@ -124,6 +134,21 @@ test "native smoke gate requires in-boot driver crash restart proof markers" {
 test "native smoke gate requires A/B image rollback proof markers" {
     for (ab_rollback_required) |marker| {
         try std.testing.expect(contains(&ab_rollback_required, marker));
+    }
+}
+
+test "native smoke gate requires production post-activation health proof markers" {
+    const required = [_][]const u8{
+        boot_markers.platform_health_checks_boot_rollback,
+        boot_markers.platform_health_checks_core_rollback,
+        boot_markers.platform_health_checks_storage_rollback,
+        boot_markers.platform_health_checks_network_rollback,
+        boot_markers.platform_health_checks_ui_rollback,
+        boot_markers.platform_health_checks_promote_ok,
+    };
+
+    for (required) |marker| {
+        try std.testing.expect(contains(&cold_boot_required, marker));
     }
 }
 

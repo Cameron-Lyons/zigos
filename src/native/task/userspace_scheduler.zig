@@ -1230,12 +1230,6 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
     scheduler.bind(&catalog, &runtime, &capabilities);
-    var telemetry = accelerator_scheduler.EmulatedTelemetryDevice.init(.{
-        .observed_tick = 101,
-        .thermal_pressure = .critical,
-        .gpu_available = true,
-    });
-
     const foreground_image = task_runtime.syntheticUserspaceImage("thermal-ui", "app.example.thermal-ui");
     const foreground = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 22 },
@@ -1259,9 +1253,17 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
         .userspace_image = &foreground_image,
     });
     try std.testing.expect(scheduler.registerTask(foreground.id));
-    scheduler.configureResourceTelemetry(telemetry.read());
+    var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(22, 220, 101, .{
+        .total_cpu_budget_ticks = 10_000,
+        .memory_capacity_bytes = 512 * 1024,
+        .thermal_milli_celsius = 91_000,
+        .gpu_driver_online = true,
+        .npu_driver_online = true,
+        .media_driver_online = true,
+    });
+    scheduler.configureResourceTelemetryFromProvider(&provider);
     try std.testing.expect(scheduler.observedResourceTelemetry());
-    try std.testing.expectEqual(accelerator_scheduler.TelemetrySource.emulator, scheduler.resource_telemetry_source);
+    try std.testing.expectEqual(accelerator_scheduler.TelemetrySource.hardware, scheduler.resource_telemetry_source);
     try std.testing.expectEqual(@as(u64, 101), scheduler.resource_telemetry_observed_tick);
     try std.testing.expect(!scheduler.runNext(1));
     const foreground_slot = scheduler.slots.getConst(foreground.id).?;
@@ -1292,12 +1294,17 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
         .userspace_image = &media_image,
     });
     try std.testing.expect(scheduler.registerTask(media_task.id));
-    telemetry.update(.{
-        .observed_tick = 102,
-        .battery_saver = true,
-        .media_available = true,
+    try provider.observeLive(220, 102, .{
+        .total_cpu_budget_ticks = 10_000,
+        .memory_capacity_bytes = 512 * 1024,
+        .thermal_milli_celsius = 45_000,
+        .battery_percent = 15,
+        .battery_charging = false,
+        .gpu_driver_online = true,
+        .npu_driver_online = true,
+        .media_driver_online = true,
     });
-    scheduler.configureResourceTelemetry(telemetry.read());
+    scheduler.configureResourceTelemetryFromProvider(&provider);
     try std.testing.expectEqual(@as(u64, 102), scheduler.resource_telemetry_observed_tick);
     try std.testing.expect(!scheduler.runNext(2));
     const media_slot = scheduler.slots.getConst(media_task.id).?;

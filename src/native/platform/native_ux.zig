@@ -24,6 +24,15 @@ pub const FlowKind = enum(u8) {
     pair_device,
     review_permission_request,
     recover_system,
+    open_document,
+    open_app_panel,
+    focus_task,
+    install_app,
+    update_app,
+    rollback_app_update,
+    remove_app,
+    sync_workspace,
+    containment_denial,
 };
 
 pub const FlowRecord = struct {
@@ -102,6 +111,100 @@ pub const Controller = struct {
         const entry = try storage.resolve(workspace_id, path);
         _ = try self.record(.open_workspace, 0, object_store.ids.raw(workspace_id), owner, path, true);
         return entry;
+    }
+
+    pub fn openDocument(
+        self: *Controller,
+        storage: *storage_service.Service,
+        workspace_id: anytype,
+        path: []const u8,
+        task_id: u64,
+        owner: principal.PrincipalId,
+    ) Error!workspace.Entry {
+        const entry = try storage.resolve(workspace_id, path);
+        _ = try self.record(.open_document, task_id, object_store.ids.raw(workspace_id), owner, path, true);
+        return entry;
+    }
+
+    pub fn openAppPanel(
+        self: *Controller,
+        task_id: u64,
+        workspace_id: u64,
+        subject: principal.PrincipalId,
+        bundle_id: []const u8,
+    ) Error!*FlowRecord {
+        const flow = try self.record(.open_app_panel, task_id, workspace_id, subject, bundle_id, true);
+        flow.bundle_id_len = copyText(&flow.bundle_id, bundle_id);
+        return flow;
+    }
+
+    pub fn focusTask(
+        self: *Controller,
+        task_id: u64,
+        subject: principal.PrincipalId,
+        title: []const u8,
+    ) Error!*FlowRecord {
+        return self.record(.focus_task, task_id, 0, subject, title, true);
+    }
+
+    pub fn installApp(
+        self: *Controller,
+        subject: principal.PrincipalId,
+        bundle_id: []const u8,
+    ) Error!*FlowRecord {
+        const flow = try self.record(.install_app, 0, 0, subject, bundle_id, true);
+        flow.bundle_id_len = copyText(&flow.bundle_id, bundle_id);
+        return flow;
+    }
+
+    pub fn updateApp(
+        self: *Controller,
+        task_id: u64,
+        subject: principal.PrincipalId,
+        bundle_id: []const u8,
+    ) Error!*FlowRecord {
+        const flow = try self.record(.update_app, task_id, 0, subject, bundle_id, true);
+        flow.bundle_id_len = copyText(&flow.bundle_id, bundle_id);
+        return flow;
+    }
+
+    pub fn rollbackAppUpdate(
+        self: *Controller,
+        task_id: u64,
+        subject: principal.PrincipalId,
+        bundle_id: []const u8,
+    ) Error!*FlowRecord {
+        const flow = try self.record(.rollback_app_update, task_id, 0, subject, bundle_id, true);
+        flow.bundle_id_len = copyText(&flow.bundle_id, bundle_id);
+        return flow;
+    }
+
+    pub fn removeApp(
+        self: *Controller,
+        subject: principal.PrincipalId,
+        bundle_id: []const u8,
+    ) Error!*FlowRecord {
+        const flow = try self.record(.remove_app, 0, 0, subject, bundle_id, true);
+        flow.bundle_id_len = copyText(&flow.bundle_id, bundle_id);
+        return flow;
+    }
+
+    pub fn syncWorkspace(
+        self: *Controller,
+        workspace_id: u64,
+        subject: principal.PrincipalId,
+        detail: []const u8,
+    ) Error!*FlowRecord {
+        return self.record(.sync_workspace, 0, workspace_id, subject, detail, true);
+    }
+
+    pub fn containmentDenial(
+        self: *Controller,
+        task_id: u64,
+        subject: principal.PrincipalId,
+        detail: []const u8,
+    ) Error!*FlowRecord {
+        return self.record(.containment_denial, task_id, 0, subject, detail, false);
     }
 
     pub fn pairDevice(
@@ -378,4 +481,26 @@ test "native ux renders structured permission review decisions" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "decision=allow") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "decision_local_only=yes") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "lease=400") != null);
+}
+
+test "native ux records app lifecycle sync containment and removal flows" {
+    var controller = Controller.init();
+    const subject = principal.PrincipalId{ .kind = .user, .serial = 11 };
+
+    _ = try controller.installApp(subject, "app.trip");
+    _ = try controller.syncWorkspace(77, subject, "device-to-device");
+    _ = try controller.updateApp(44, subject, "app.trip");
+    _ = try controller.rollbackAppUpdate(44, subject, "app.trip");
+    _ = try controller.containmentDenial(44, subject, "direct host access blocked");
+    _ = try controller.removeApp(subject, "app.trip");
+
+    try std.testing.expectEqual(@as(usize, 6), controller.flow_count);
+    try std.testing.expectEqual(FlowKind.install_app, controller.flowAtOrder(0).?.kind);
+    try std.testing.expectEqualStrings("app.trip", controller.flowAtOrder(0).?.bundleIdSlice());
+    try std.testing.expectEqual(FlowKind.sync_workspace, controller.flowAtOrder(1).?.kind);
+    try std.testing.expectEqual(@as(u64, 77), controller.flowAtOrder(1).?.workspace_id);
+    try std.testing.expectEqual(FlowKind.containment_denial, controller.flowAtOrder(4).?.kind);
+    try std.testing.expect(!controller.flowAtOrder(4).?.approved);
+    try std.testing.expectEqual(FlowKind.remove_app, controller.flowAtOrder(5).?.kind);
+    try std.testing.expectEqualStrings("app.trip", controller.flowAtOrder(5).?.bundleIdSlice());
 }

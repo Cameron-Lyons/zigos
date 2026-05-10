@@ -150,6 +150,7 @@ pub const BootedPlatformTelemetryProvider = struct {
         observed_tick: u64,
         counters: LivePlatformCounters,
     ) TelemetryError!BootedPlatformTelemetryProvider {
+        if (boot_id == 0) return error.TelemetryProviderUnauthorized;
         if (task_id == 0) return error.TelemetryProviderUnauthorized;
         return .{
             .boot_id = boot_id,
@@ -159,7 +160,11 @@ pub const BootedPlatformTelemetryProvider = struct {
         };
     }
 
-    pub fn observe(self: *BootedPlatformTelemetryProvider, observed_tick: u64, signals: PlatformTelemetrySignals) void {
+    pub fn observe(self: *BootedPlatformTelemetryProvider, observed_tick: u64, signals: PlatformTelemetrySignals) TelemetryError!void {
+        if (self.task_id != 0) {
+            self.rejected_observation_count += 1;
+            return error.TelemetryProviderUnauthorized;
+        }
         self.current = sampleFromPlatformSignals(.boot_provider, observed_tick, signals);
     }
 
@@ -169,6 +174,10 @@ pub const BootedPlatformTelemetryProvider = struct {
         observed_tick: u64,
         counters: LivePlatformCounters,
     ) TelemetryError!void {
+        if (self.task_id == 0 or caller_task_id == 0) {
+            self.rejected_observation_count += 1;
+            return error.TelemetryProviderUnauthorized;
+        }
         if (self.task_id != 0 and caller_task_id != self.task_id) {
             self.rejected_observation_count += 1;
             return error.TelemetryProviderUnauthorized;
@@ -857,7 +866,7 @@ test "accelerator scheduler consumes booted platform provider samples" {
     try std.testing.expect(batch.delayed);
     try std.testing.expectEqual(DecisionReason.thermal_throttle, batch.reason);
 
-    provider.observe(89, .{
+    try provider.observe(89, .{
         .thermal_pressure = .nominal,
         .battery_saver = true,
         .media_available = true,
@@ -876,6 +885,10 @@ test "accelerator scheduler consumes booted platform provider samples" {
 }
 
 test "accelerator scheduler derives hardware telemetry from booted live counters" {
+    try std.testing.expectError(error.TelemetryProviderUnauthorized, BootedPlatformTelemetryProvider.initForBootedService(0, 70, 99, .{
+        .total_cpu_budget_ticks = 10_000,
+        .memory_capacity_bytes = 128 * 1024,
+    }));
     var provider = try BootedPlatformTelemetryProvider.initForBootedService(8, 70, 100, .{
         .total_cpu_budget_ticks = 10_000,
         .consumed_cpu_ticks = 3_000,
@@ -906,11 +919,17 @@ test "accelerator scheduler derives hardware telemetry from booted live counters
     try std.testing.expectEqual(@as(u32, 1), provider.live_observation_count);
     try std.testing.expectEqual(@as(u32, 1), provider.read_count);
 
+    try std.testing.expectError(error.TelemetryProviderUnauthorized, provider.observe(101, .{
+        .thermal_pressure = .critical,
+        .battery_saver = true,
+    }));
+    try std.testing.expectEqual(@as(u32, 1), provider.rejected_observation_count);
+
     try std.testing.expectError(error.TelemetryProviderUnauthorized, provider.observeLive(71, 101, .{
         .total_cpu_budget_ticks = 10_000,
         .memory_capacity_bytes = 128 * 1024,
     }));
-    try std.testing.expectEqual(@as(u32, 1), provider.rejected_observation_count);
+    try std.testing.expectEqual(@as(u32, 2), provider.rejected_observation_count);
 
     try provider.observeLive(70, 102, .{
         .total_cpu_budget_ticks = 10_000,
