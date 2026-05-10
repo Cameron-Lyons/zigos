@@ -130,7 +130,8 @@ pub const FreestandingMmu = struct {
     next_physical_frame: u64 = 1,
     next_task_virtual_page: u64 = 1,
     next_accelerator_virtual_page: u64 = 1,
-    mappings: [MMU_MAPPING_CAPACITY]MmuMapping = [_]MmuMapping{MmuMapping{}} ** MMU_MAPPING_CAPACITY,
+    mapping_count: usize = 0,
+    mappings: [MMU_MAPPING_CAPACITY]MmuMapping = undefined,
 
     pub fn init() FreestandingMmu {
         return .{};
@@ -151,7 +152,7 @@ pub const FreestandingMmu = struct {
         task_id: ids.TaskId,
     ) Error!FreestandingMappingDescriptor {
         if (object.revoked) return error.Revoked;
-        if (self.findActive(object.id, .task, task_id.raw()) != null) return error.AlreadyMapped;
+        if (self.findActiveIndex(object.id, .task, task_id.raw()) != null) return error.AlreadyMapped;
         const slot = self.reserveMapping() orelse return error.TableFull;
         const virtual_base = try self.allocateTaskVirtual(object.page_count);
         slot.* = mappingFromObject(object, .task, task_id.raw(), virtual_base, false);
@@ -159,8 +160,8 @@ pub const FreestandingMmu = struct {
     }
 
     pub fn unmapTask(self: *FreestandingMmu, object_id: ids.SharedMemoryId, task_id: ids.TaskId) Error!bool {
-        const slot = self.findActive(object_id, .task, task_id.raw()) orelse return false;
-        slot.in_use = false;
+        const index = self.findActiveIndex(object_id, .task, task_id.raw()) orelse return false;
+        self.removeMappingIndex(index);
         return true;
     }
 
@@ -171,7 +172,7 @@ pub const FreestandingMmu = struct {
     ) Error!FreestandingMappingDescriptor {
         if (object.revoked) return error.Revoked;
         const domain_id = acceleratorDomainId(target);
-        if (self.findActive(object.id, .accelerator, domain_id) != null) return error.AcceleratorAlreadyAttached;
+        if (self.findActiveIndex(object.id, .accelerator, domain_id) != null) return error.AcceleratorAlreadyAttached;
         const slot = self.reserveMapping() orelse return error.TableFull;
         const virtual_base = try self.allocateAcceleratorVirtual(object.page_count);
         slot.* = mappingFromObject(object, .accelerator, domain_id, virtual_base, true);
@@ -179,15 +180,19 @@ pub const FreestandingMmu = struct {
     }
 
     pub fn unmapAccelerator(self: *FreestandingMmu, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!bool {
-        const slot = self.findActive(object_id, .accelerator, acceleratorDomainId(target)) orelse return false;
-        slot.in_use = false;
+        const index = self.findActiveIndex(object_id, .accelerator, acceleratorDomainId(target)) orelse return false;
+        self.removeMappingIndex(index);
         return true;
     }
 
     pub fn revokeObject(self: *FreestandingMmu, object_id: ids.SharedMemoryId) void {
-        for (&self.mappings) |*mapping| {
-            if (!mapping.in_use or !mapping.object_id.eql(object_id)) continue;
-            mapping.revoked = true;
+        var index: usize = 0;
+        while (index < self.mapping_count) {
+            if (self.mappings[index].object_id.eql(object_id)) {
+                self.removeMappingIndex(index);
+            } else {
+                index += 1;
+            }
         }
     }
 
@@ -213,8 +218,8 @@ pub const FreestandingMmu = struct {
 
     pub fn activeMappingsForObject(self: *const FreestandingMmu, object_id: ids.SharedMemoryId) usize {
         var count: usize = 0;
-        for (self.mappings) |mapping| {
-            if (mapping.in_use and !mapping.revoked and mapping.object_id.eql(object_id)) count += 1;
+        for (self.mappings[0..self.mapping_count]) |mapping| {
+            if (!mapping.revoked and mapping.object_id.eql(object_id)) count += 1;
         }
         return count;
     }
@@ -236,21 +241,29 @@ pub const FreestandingMmu = struct {
     }
 
     fn reserveMapping(self: *FreestandingMmu) ?*MmuMapping {
-        for (&self.mappings) |*mapping| {
-            if (!mapping.in_use) return mapping;
-        }
-        return null;
+        if (self.mapping_count >= self.mappings.len) return null;
+        const slot = &self.mappings[self.mapping_count];
+        self.mapping_count += 1;
+        return slot;
     }
 
-    fn findActive(
+    fn removeMappingIndex(self: *FreestandingMmu, index: usize) void {
+        if (index >= self.mapping_count) return;
+        self.mapping_count -= 1;
+        if (index != self.mapping_count) {
+            self.mappings[index] = self.mappings[self.mapping_count];
+        }
+    }
+
+    fn findActiveIndex(
         self: *FreestandingMmu,
         object_id: ids.SharedMemoryId,
         kind: MmuMappingKind,
         domain_id: u64,
-    ) ?*MmuMapping {
-        for (&self.mappings) |*mapping| {
-            if (mapping.in_use and !mapping.revoked and mapping.object_id.eql(object_id) and mapping.kind == kind and mapping.domain_id == domain_id) {
-                return mapping;
+    ) ?usize {
+        for (self.mappings[0..self.mapping_count], 0..) |mapping, index| {
+            if (!mapping.revoked and mapping.object_id.eql(object_id) and mapping.kind == kind and mapping.domain_id == domain_id) {
+                return index;
             }
         }
         return null;
@@ -262,8 +275,8 @@ pub const FreestandingMmu = struct {
         kind: MmuMappingKind,
         domain_id: u64,
     ) ?*const MmuMapping {
-        for (&self.mappings) |*mapping| {
-            if (mapping.in_use and mapping.object_id.eql(object_id) and mapping.kind == kind and mapping.domain_id == domain_id) {
+        for (self.mappings[0..self.mapping_count]) |*mapping| {
+            if (mapping.object_id.eql(object_id) and mapping.kind == kind and mapping.domain_id == domain_id) {
                 return mapping;
             }
         }
