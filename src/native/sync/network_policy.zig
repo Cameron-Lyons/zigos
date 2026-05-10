@@ -1,12 +1,13 @@
 const std = @import("std");
-const fixed_table = @import("../core/fixed_table.zig");
 const capability = @import("../kernel_api/capability.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 
 pub const MAX_POLICIES: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_TARGET_BYTES: usize = 64;
+const POLICY_INDEX_CAPACITY: usize = MAX_POLICIES * 2;
 
 pub const PolicyMode = enum(u8) {
     none,
@@ -131,19 +132,21 @@ const PolicySlot = struct {
     policy: PolicyRecord = zeroPolicy(),
 };
 
+const PolicyIdIndex = indexed_arena.UniqueIndex(POLICY_INDEX_CAPACITY);
+const PolicyRequestIndex = indexed_arena.MultimapIndex(MAX_POLICIES, MAX_POLICIES, POLICY_INDEX_CAPACITY);
+
 pub const Directory = struct {
     next_policy_id: u64 = 1,
     policies: [MAX_POLICIES]PolicySlot = [_]PolicySlot{PolicySlot{}} ** MAX_POLICIES,
+    policy_id_index: PolicyIdIndex = PolicyIdIndex.init(),
+    request_index: PolicyRequestIndex = PolicyRequestIndex.init(),
 
     pub fn init() Directory {
         return .{};
     }
 
     pub fn reset(self: *Directory) void {
-        self.next_policy_id = 1;
-        for (&self.policies) |*slot| {
-            slot.* = .{};
-        }
+        self.* = Directory.init();
     }
 
     pub fn create(self: *Directory, request: CreateRequest) Error!*PolicyRecord {
@@ -158,11 +161,11 @@ pub const Directory = struct {
             else => {},
         }
 
-        if (fixed_table.findSlot(PolicySlot, MAX_POLICIES, &self.policies, request, policySlotMatchesRequest)) |slot| {
-            return &slot.policy;
-        }
+        const request_key = policyRequestKey(request);
+        if (self.findByRequestKey(request_key, request)) |policy| return policy;
 
-        const slot = fixed_table.firstFreeSlot(PolicySlot, MAX_POLICIES, &self.policies) orelse return error.PolicyTableFull;
+        const slot_index = self.firstFreePolicyIndex() orelse return error.PolicyTableFull;
+        const slot = &self.policies[slot_index];
         slot.in_use = true;
         slot.policy = zeroPolicy();
         slot.policy.id = self.nextPolicyId();
@@ -177,12 +180,26 @@ pub const Directory = struct {
             slot.policy.pinned_root_digest_present = true;
             slot.policy.pinned_root_digest = digest;
         }
+        self.indexPolicy(slot_index);
         return &slot.policy;
     }
 
     pub fn find(self: *Directory, policy_id: u64) ?*PolicyRecord {
-        const slot = fixed_table.findSlot(PolicySlot, MAX_POLICIES, &self.policies, policy_id, policySlotMatchesId) orelse return null;
+        if (policy_id == 0) return null;
+        const slot_index = self.policy_id_index.lookup(policy_id) orelse return null;
+        if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("network policy id index points outside slots");
+        const slot = &self.policies[slot_index];
+        if (!slot.in_use or slot.policy.id != policy_id) native_util.impossibleByInvariant("network policy id index points at the wrong policy");
         return &slot.policy;
+    }
+
+    pub fn rebuildIndexes(self: *Directory) void {
+        self.policy_id_index.reset();
+        self.request_index.reset();
+        for (self.policies, 0..) |slot, slot_index| {
+            if (!slot.in_use) continue;
+            self.indexPolicy(slot_index);
+        }
     }
 
     pub fn authorize(self: *Directory, policy_id: u64, destination: Destination) Error!Decision {
@@ -320,6 +337,39 @@ pub const Directory = struct {
         defer self.next_policy_id += 1;
         return self.next_policy_id;
     }
+
+    fn firstFreePolicyIndex(self: *const Directory) ?usize {
+        for (self.policies, 0..) |slot, slot_index| {
+            if (!slot.in_use) return slot_index;
+        }
+        return null;
+    }
+
+    fn findByRequestKey(
+        self: *Directory,
+        request_key: u64,
+        request: CreateRequest,
+    ) ?*PolicyRecord {
+        var cursor = self.request_index.head(request_key);
+        while (cursor != indexed_arena.no_index) : (cursor = self.request_index.next(cursor)) {
+            if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("network policy request index points outside slots");
+            const slot = &self.policies[cursor];
+            if (!slot.in_use) native_util.impossibleByInvariant("network policy request index points at a free slot");
+            if (policyMatchesRequest(&slot.policy, request)) return &slot.policy;
+        }
+        return null;
+    }
+
+    fn indexPolicy(self: *Directory, slot_index: usize) void {
+        if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("network policy index update points outside slots");
+        const slot = &self.policies[slot_index];
+        if (!slot.in_use or slot.policy.id == 0) native_util.impossibleByInvariant("network policy index update requires a live policy");
+        self.policy_id_index.insert(slot.policy.id, slot_index);
+        const request_key = policyRecordRequestKey(&slot.policy);
+        if (!self.request_index.append(request_key, slot_index)) {
+            native_util.impossibleByInvariant("network policy request index capacity covers policy slots");
+        }
+    }
 };
 
 pub const EgressBroker = struct {
@@ -379,14 +429,6 @@ pub const EgressBroker = struct {
     }
 };
 
-fn policySlotMatchesRequest(request: CreateRequest, slot: *const PolicySlot) bool {
-    return policyMatchesRequest(&slot.policy, request);
-}
-
-fn policySlotMatchesId(policy_id: u64, slot: *const PolicySlot) bool {
-    return slot.policy.id == policy_id;
-}
-
 fn zeroPolicy() PolicyRecord {
     return .{
         .id = 0,
@@ -404,6 +446,34 @@ fn zeroPolicy() PolicyRecord {
     };
 }
 
+fn policyRequestKey(request: CreateRequest) u64 {
+    var hasher = std.hash.Wyhash.init(0x5A47_4E45_5450_4F4C);
+    updatePrincipalHash(&hasher, request.owner);
+    updateOptionalU64Hash(&hasher, request.workspace_id);
+    updateSliceHash(&hasher, request.label);
+    updateByteHash(&hasher, @intFromEnum(request.mode));
+    updateSliceHash(&hasher, request.target);
+    updateBoolHash(&hasher, request.explicit_internet_grant);
+    updateBoolHash(&hasher, request.require_remote_attestation);
+    updateBoolHash(&hasher, request.pinned_root_digest != null);
+    if (request.pinned_root_digest) |digest| hasher.update(&digest);
+    return indexed_arena.nonZeroKey(hasher.final());
+}
+
+fn policyRecordRequestKey(policy: *const PolicyRecord) u64 {
+    var hasher = std.hash.Wyhash.init(0x5A47_4E45_5450_4F4C);
+    updatePrincipalHash(&hasher, policy.owner);
+    updateOptionalU64Hash(&hasher, policy.workspace_id);
+    updateSliceHash(&hasher, policy.labelSlice());
+    updateByteHash(&hasher, @intFromEnum(policy.mode));
+    updateSliceHash(&hasher, policy.targetSlice());
+    updateBoolHash(&hasher, policy.explicit_internet_grant);
+    updateBoolHash(&hasher, policy.require_remote_attestation);
+    updateBoolHash(&hasher, policy.pinned_root_digest_present);
+    if (policy.pinned_root_digest_present) hasher.update(&policy.pinned_root_digest);
+    return indexed_arena.nonZeroKey(hasher.final());
+}
+
 fn policyMatchesRequest(policy: *const PolicyRecord, request: CreateRequest) bool {
     if (!policy.owner.eql(request.owner)) return false;
     if (policy.workspace_id != request.workspace_id) return false;
@@ -417,6 +487,36 @@ fn policyMatchesRequest(policy: *const PolicyRecord, request: CreateRequest) boo
         return policy.pinned_root_digest_present and std.mem.eql(u8, &policy.pinned_root_digest, &digest);
     }
     return !policy.pinned_root_digest_present;
+}
+
+fn updatePrincipalHash(hasher: *std.hash.Wyhash, id: principal.PrincipalId) void {
+    updateByteHash(hasher, @intFromEnum(id.kind));
+    updateU64Hash(hasher, id.serial);
+}
+
+fn updateOptionalU64Hash(hasher: *std.hash.Wyhash, value: ?u64) void {
+    updateBoolHash(hasher, value != null);
+    updateU64Hash(hasher, value orelse 0);
+}
+
+fn updateBoolHash(hasher: *std.hash.Wyhash, value: bool) void {
+    updateByteHash(hasher, if (value) 1 else 0);
+}
+
+fn updateByteHash(hasher: *std.hash.Wyhash, value: u8) void {
+    const bytes = [_]u8{value};
+    hasher.update(&bytes);
+}
+
+fn updateU64Hash(hasher: *std.hash.Wyhash, value: u64) void {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..], value, .little);
+    hasher.update(bytes[0..]);
+}
+
+fn updateSliceHash(hasher: *std.hash.Wyhash, value: []const u8) void {
+    updateU64Hash(hasher, value.len);
+    hasher.update(value);
 }
 
 fn denyEgress(
@@ -610,6 +710,59 @@ test "network policy creation is idempotent for identical requests" {
     });
 
     try std.testing.expectEqual(first.id, second.id);
+}
+
+fn paddedLabel(text: []const u8) [MAX_LABEL_BYTES]u8 {
+    var buffer = [_]u8{0} ** MAX_LABEL_BYTES;
+    @memcpy(buffer[0..text.len], text);
+    return buffer;
+}
+
+fn paddedTarget(text: []const u8) [MAX_TARGET_BYTES]u8 {
+    var buffer = [_]u8{0} ** MAX_TARGET_BYTES;
+    @memcpy(buffer[0..text.len], text);
+    return buffer;
+}
+
+test "network policy indexes rebuild after persisted slots are loaded" {
+    var directory = Directory.init();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 12 };
+    const pinned_digest = [_]u8{0xDE} ** 32;
+
+    directory.policies[3] = .{
+        .in_use = true,
+        .policy = .{
+            .id = 44,
+            .owner = owner,
+            .workspace_id = 91,
+            .label_len = 7,
+            .label = paddedLabel("overlay"),
+            .mode = .named_service_identity,
+            .target_len = 18,
+            .target = paddedTarget("overlay.notes.sync"),
+            .explicit_internet_grant = false,
+            .require_remote_attestation = true,
+            .pinned_root_digest_present = true,
+            .pinned_root_digest = pinned_digest,
+        },
+    };
+    directory.next_policy_id = 45;
+    directory.rebuildIndexes();
+
+    const found = directory.find(44).?;
+    try std.testing.expectEqual(@as(u64, 44), found.id);
+    try std.testing.expectEqualStrings("overlay", found.labelSlice());
+
+    const duplicate = try directory.create(.{
+        .owner = owner,
+        .workspace_id = 91,
+        .label = "overlay",
+        .mode = .named_service_identity,
+        .target = "overlay.notes.sync",
+        .require_remote_attestation = true,
+        .pinned_root_digest = pinned_digest,
+    });
+    try std.testing.expectEqual(@as(u64, 44), duplicate.id);
 }
 
 test "egress broker requires a usable network policy capability before connecting" {

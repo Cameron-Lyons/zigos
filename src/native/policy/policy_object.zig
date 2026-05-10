@@ -1,6 +1,6 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
-const fixed_table = @import("../core/fixed_table.zig");
+const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("manifest.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
@@ -9,6 +9,7 @@ const signing = @import("../core/signing.zig");
 pub const MAX_POLICIES: usize = 16;
 pub const MAX_ALLOW_LIST: usize = 8;
 pub const MAX_LABEL_BYTES: usize = 64;
+const POLICY_INDEX_CAPACITY: usize = MAX_POLICIES * 2;
 
 pub const Scope = enum(u8) {
     user,
@@ -142,9 +143,14 @@ const PolicySlot = struct {
     policy: PolicyObject = zeroPolicy(),
 };
 
+const PolicyIdIndex = indexed_arena.UniqueIndex(POLICY_INDEX_CAPACITY);
+const PolicyScopeIndex = indexed_arena.MultimapIndex(MAX_POLICIES, MAX_POLICIES, POLICY_INDEX_CAPACITY);
+
 pub const Directory = struct {
     next_policy_id: u64 = 1,
     slots: [MAX_POLICIES]PolicySlot = [_]PolicySlot{PolicySlot{}} ** MAX_POLICIES,
+    policy_id_index: PolicyIdIndex = PolicyIdIndex.init(),
+    scope_index: PolicyScopeIndex = PolicyScopeIndex.init(),
 
     pub fn init() Directory {
         return .{};
@@ -158,8 +164,10 @@ pub const Directory = struct {
         if (request.allowed_install_sources.len > MAX_ALLOW_LIST) return error.TooManyInstallSources;
         if (request.allowed_sync_destinations.len > MAX_ALLOW_LIST) return error.TooManySyncDestinations;
 
-        const slot = fixed_table.firstFreeSlot(PolicySlot, MAX_POLICIES, &self.slots) orelse return error.PolicyTableFull;
+        const slot_index = self.firstFreeSlotIndex() orelse return error.PolicyTableFull;
+        const slot = &self.slots[slot_index];
         slot.in_use = true;
+        errdefer slot.* = .{};
         slot.policy = zeroPolicy();
         slot.policy.id = self.next_policy_id;
         self.next_policy_id += 1;
@@ -186,14 +194,18 @@ pub const Directory = struct {
 
         const digest = policyDigest(&slot.policy);
         slot.policy.signature = try signing.sign(signer, &digest);
+        self.indexPolicy(slot_index);
         return &slot.policy;
     }
 
     pub fn activeForScope(self: *Directory, scope: Scope, subject_id: u64) ?*PolicyObject {
         var candidate: ?*PolicyObject = null;
         var best_generation: u32 = 0;
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) continue;
+        var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
+        while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
+            if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
+            const slot = &self.slots[cursor];
+            if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
             if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
             if (slot.policy.generation < best_generation) continue;
             candidate = &slot.policy;
@@ -283,15 +295,22 @@ pub const Directory = struct {
     }
 
     fn findConst(self: *const Directory, policy_id: u64) ?*const PolicyObject {
-        const slot = fixed_table.findConstSlot(PolicySlot, MAX_POLICIES, &self.slots, policy_id, policySlotMatchesId) orelse return null;
+        if (policy_id == 0) return null;
+        const slot_index = self.policy_id_index.lookup(policy_id) orelse return null;
+        if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("policy id index points outside slots");
+        const slot = &self.slots[slot_index];
+        if (!slot.in_use or slot.policy.id != policy_id) native_util.impossibleByInvariant("policy id index points at the wrong policy");
         return &slot.policy;
     }
 
     fn activeForScopeConst(self: *const Directory, scope: Scope, subject_id: u64) ?*const PolicyObject {
         var candidate: ?*const PolicyObject = null;
         var best_generation: u32 = 0;
-        for (&self.slots) |*slot| {
-            if (!slot.in_use) continue;
+        var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
+        while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
+            if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
+            const slot = &self.slots[cursor];
+            if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
             if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
             if (slot.policy.generation < best_generation) continue;
             candidate = &slot.policy;
@@ -311,11 +330,24 @@ pub const Directory = struct {
         if (self.verify(policy.id)) return allow();
         return block(policy, .unsigned_policy);
     }
-};
 
-fn policySlotMatchesId(policy_id: u64, slot: *const PolicySlot) bool {
-    return slot.policy.id == policy_id;
-}
+    fn firstFreeSlotIndex(self: *const Directory) ?usize {
+        for (self.slots, 0..) |slot, slot_index| {
+            if (!slot.in_use) return slot_index;
+        }
+        return null;
+    }
+
+    fn indexPolicy(self: *Directory, slot_index: usize) void {
+        if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("policy index update points outside slots");
+        const slot = &self.slots[slot_index];
+        if (!slot.in_use or slot.policy.id == 0) native_util.impossibleByInvariant("policy index update requires a live policy");
+        self.policy_id_index.insert(slot.policy.id, slot_index);
+        if (!self.scope_index.append(policyScopeKey(slot.policy.scope, slot.policy.subject_id), slot_index)) {
+            native_util.impossibleByInvariant("policy scope index capacity covers policy slots");
+        }
+    }
+};
 
 const ActivePolicyIterator = struct {
     directory: *const Directory,
@@ -386,13 +418,15 @@ fn zeroPolicy() PolicyObject {
 }
 
 fn nextGeneration(self: *const Directory, scope: Scope, subject_id: u64) u32 {
-    var best: u32 = 0;
-    for (self.slots) |slot| {
-        if (!slot.in_use) continue;
-        if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
-        best = @max(best, slot.policy.generation);
-    }
-    return best + 1;
+    const active = self.activeForScopeConst(scope, subject_id) orelse return 1;
+    return active.generation + 1;
+}
+
+fn policyScopeKey(scope: Scope, subject_id: u64) u64 {
+    var bytes: [9]u8 = undefined;
+    bytes[0] = @intFromEnum(scope);
+    std.mem.writeInt(u64, bytes[1..9], subject_id, .little);
+    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(0x5A47_504F_4C53_434F, &bytes));
 }
 
 fn policyDigest(policy: *const PolicyObject) [32]u8 {

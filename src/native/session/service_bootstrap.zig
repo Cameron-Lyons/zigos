@@ -21,6 +21,9 @@ const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 
 pub const Error = error{ MissingBootstrapGrant, DriverAttachmentNotAllowed } || userspace_launch.Error || userspace_boot_registry.Error || component_port.Error || driver_service.Error || service_registry.Error;
 
+const bytes_per_kibibyte = 1024;
+const driver_endpoint_slots = 4;
+
 pub const ServiceBinding = struct {
     task_id: u64,
     endpoint_id: u64,
@@ -263,35 +266,24 @@ pub fn serviceBudget(class: contract.ServiceClass) task_runtime.ResourceBudget {
 
 pub fn driverBudget(device_class: driver_service.DeviceClass) task_runtime.ResourceBudget {
     return switch (device_class) {
-        .network_adapter, .storage_controller => .{
-            .cpu_time_ticks = 6_000,
-            .memory_bytes = 384 * 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 32 * 1024,
-            .background_allowed = false,
-        },
-        .graphics_adapter => .{
-            .cpu_time_ticks = 10_000,
-            .memory_bytes = 768 * 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 64 * 1024,
-            .background_allowed = false,
-        },
-        .audio_print_io => .{
-            .cpu_time_ticks = 4_000,
-            .memory_bytes = 256 * 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 16 * 1024,
-            .background_allowed = false,
-        },
-        .input_device => .{
-            .cpu_time_ticks = 4_000,
-            .memory_bytes = 256 * 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 16 * 1024,
-            .background_allowed = false,
-        },
+        .network_adapter, .storage_controller => driverResourceBudget(6_000, kibibytes(384), kibibytes(32)),
+        .graphics_adapter => driverResourceBudget(10_000, kibibytes(768), kibibytes(64)),
+        .audio_print_io, .input_device => driverResourceBudget(4_000, kibibytes(256), kibibytes(16)),
     };
+}
+
+fn driverResourceBudget(cpu_time_ticks: u64, memory_bytes: usize, shared_memory_bytes: usize) task_runtime.ResourceBudget {
+    return .{
+        .cpu_time_ticks = cpu_time_ticks,
+        .memory_bytes = memory_bytes,
+        .endpoint_slots = driver_endpoint_slots,
+        .shared_memory_bytes = shared_memory_bytes,
+        .background_allowed = false,
+    };
+}
+
+fn kibibytes(value: usize) usize {
+    return value * bytes_per_kibibyte;
 }
 
 pub fn contractsReady(service_directory: *const service_registry.Service) bool {

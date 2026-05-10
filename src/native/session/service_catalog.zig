@@ -816,14 +816,6 @@ fn descriptorFromEntry(entry: ServiceCatalogEntry) ServiceDescriptor {
     };
 }
 
-fn serviceBootstrapCount() usize {
-    comptime var count: usize = 0;
-    inline for (catalog) |entry| {
-        if (entry.service_bootstrap != null) count += 1;
-    }
-    return count;
-}
-
 fn kernelBootstrapCount() usize {
     comptime var count: usize = 0;
     inline for (catalog) |entry| {
