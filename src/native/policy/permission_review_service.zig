@@ -133,6 +133,7 @@ pub const RenderedReviewSurface = struct {
 
     pub fn begin(self: *RenderedReviewSurface) Error!void {
         try manifest.validate(self.bundle);
+        if (self.bundle.requested_permissions.len > self.decisions.len) return error.TooManyPermissions;
         const app_task = self.service.runtime.find(self.app_task_id) orelse return error.TaskNotFound;
         self.review_window_id = self.service.ensureReviewWindow(app_task, self.bundle) orelse return error.ReviewWindowMissing;
         try self.service.runtime.audit(self.app_task_id, .{
@@ -337,6 +338,7 @@ pub const Service = struct {
         output: *[MAX_REVIEW_DECISIONS]policy_mediation.UserGrant,
     ) Error![]const policy_mediation.UserGrant {
         try manifest.validate(bundle);
+        if (bundle.requested_permissions.len > MAX_REVIEW_DECISIONS) return error.TooManyPermissions;
         const app_task = self.runtime.find(app_task_id) orelse return error.TaskNotFound;
         const review_window_id = self.ensureReviewWindow(app_task, bundle);
         var decisions: [MAX_REVIEW_DECISIONS]permission_review.ReviewDecision = undefined;
@@ -351,7 +353,7 @@ pub const Service = struct {
         common.printBootMarker("ZIGOS:PERMISSION:UI:INPUT_LOOP");
 
         for (bundle.requested_permissions, 0..) |request, index| {
-            if (decision_count >= decisions.len) break;
+            if (decision_count >= decisions.len) return error.TooManyPermissions;
 
             self.presentReviewRequest(review_window_id, bundle, request);
             const session = permission_review.initSession(app_task_id, &bundle, decisions[0..decision_count]);
@@ -739,6 +741,49 @@ test "review service rejects invalid manifests before auditing" {
     var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
 
     try std.testing.expectError(error.MissingBackgroundPermission, service.reviewBundle(task.id, bundle, 10, &grants_buffer));
+    try std.testing.expectEqual(@as(usize, 0), task.audit_count);
+}
+
+test "review service refuses partial grants when visible decisions exceed capacity" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = 46 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 1024,
+        },
+        .local_only = true,
+    });
+    var permissions: [MAX_REVIEW_DECISIONS + 1]manifest.PermissionRequest = undefined;
+    for (&permissions) |*request| {
+        request.* = .{
+            .kind = .object_access,
+            .resource = "workspace:too-many",
+            .rights = .{ .object = .{ .object_read = true } },
+            .local_only = true,
+        };
+    }
+    const bundle = manifest.BundleManifest{
+        .bundle_id = "app.too-many",
+        .display_name = "Too Many",
+        .publisher = "zigos.dev",
+        .requested_permissions = &permissions,
+    };
+    var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+    var display_storage: [compositor_display.DEFAULT_STORAGE_BYTES]u8 = undefined;
+    var display = try compositor_display.Framebuffer.init(
+        &display_storage,
+        compositor_display.DEFAULT_WIDTH,
+        compositor_display.DEFAULT_HEIGHT,
+    );
+    var service = Service.init(49, 50, &runtime, &[_][]const u8{});
+    var surface = RenderedReviewSurface.init(&service, task.id, bundle, 70, &display);
+
+    try std.testing.expectError(error.TooManyPermissions, service.reviewBundle(task.id, bundle, 70, &grants_buffer));
+    try std.testing.expectError(error.TooManyPermissions, surface.begin());
     try std.testing.expectEqual(@as(usize, 0), task.audit_count);
 }
 

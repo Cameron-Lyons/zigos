@@ -5,6 +5,7 @@ Zigos is a native-only operating system prototype organized as a small freestand
 ## Layered System
 
 - `src/main.zig`: thin export surface that exposes `kernel_main` and the typed syscall handler
+- `src/arch/` and `src/boot/`: architecture-specific assembly, syscall trap glue, linker scripts, boot assembly, and GRUB config
 - `src/kernel/`: freestanding boot, memory, interrupt, timer, device, and low-level networking code
 - `src/native/kernel_api/`: typed kernel boundary for tasks, capabilities, endpoints, services, shared memory, and device access
 - `src/native/session/`: principal assignment, supervisor state, session manager boot flow, and ordered service bootstrap
@@ -21,6 +22,7 @@ Zigos is a native-only operating system prototype organized as a small freestand
 1. `build_support/userspace.zig` compiles every image declared in `src/native/task/userspace_registry.zig`, generates a `userspace_archive` module, and feeds that archive into the kernel build.
 2. `src/kernel/boot/entry.zig` performs freestanding bring-up and enters the selected boot profile:
    - `src/kernel/boot/profiles/zigos_native.zig` for the main native system
+   - `src/kernel/boot/profiles/recovery.zig` for break-glass recovery proof runs
    - `src/kernel/boot/profiles/benchmark.zig` for benchmark runs
 3. `src/native/session/session_bootstrap.zig` assigns the built-in principals, preloads the userspace catalog through `src/native/task/userspace_boot_registry.zig`, initializes the userspace scheduler, and registers the core service records with the supervisor.
 4. `src/native/session/session_manager_boot_flow.zig` constructs the long-lived system state: capability table, endpoint table, task runtime, userspace service registry, shared memory table, driver directory/runtime, event ledger, background dispatch, storage checkpoint state, and sync resident state.
@@ -77,11 +79,16 @@ The repository keeps architecture and spec claims tied to explicit verification 
 
 - `./scripts/zig.sh build kernel`: build the main native kernel
 - `./scripts/zig.sh build kernel-zigos-native`: build the primary native bootstrap kernel
+- `./scripts/zig.sh build kernel-recovery`: build the freestanding recovery-mode kernel
 - `./scripts/zig.sh build kernel-benchmark`: build the benchmark kernel profile
+- `./scripts/zig.sh build userspace-images`: build the embedded userspace image archive from `src/native/task/userspace_registry.zig`
+- `./scripts/zig.sh build native-store-image`: build or preserve the native storage image used by the run targets
 - `./scripts/zig.sh build host-tests`: run the thin `src/native_host_test.zig` root over `src/tests/host/`
 - `./scripts/zig.sh build spec-tests`: run `spec/coverage.json`, `tools/check_spec_coverage.py`, and the thin `src/zigos_spec_test.zig` root over `src/tests/spec/`
-- `./scripts/zig.sh build spec-conformance`: `spec-tests` plus the freestanding native smoke path
+- `./scripts/zig.sh build spec-conformance`: `spec-tests` plus the freestanding native smoke and recovery QEMU paths
 - `./scripts/zig.sh build zigos-native-smoke-test`: two-boot QEMU smoke verification through `scripts/run-zigos-native-smoke.sh`
+- `./scripts/zig.sh build driver-restart-qemu-test`: QEMU proof that a userspace driver can crash and restart without full-system reboot
+- `./scripts/zig.sh build recovery-qemu-test`: QEMU proof that the recovery profile performs break-glass repair operations
 - `./scripts/zig.sh build benchmark`: spec-aligned benchmark execution through `scripts/run-kernel-benchmark.sh`
 - `./scripts/zig.sh build iso`: bootable ISO generation through `scripts/build-grub-iso.sh`
 

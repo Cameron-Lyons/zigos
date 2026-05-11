@@ -1,5 +1,7 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
+const device_graph = @import("device_graph.zig");
+const measured_boot = @import("../platform/measured_boot.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
@@ -134,6 +136,97 @@ test "sync port requires service-scoped authority before device graph mutation" 
     const root = try port.ensureUserRoot(syncAuthority(&service, sync_owner, valid, 11), user, "owner", signer);
     try std.testing.expectEqual(user, root.principal_id);
     try std.testing.expectEqualStrings("owner", root.labelSlice());
+}
+
+test "sync service persists platform-backed device key bindings across restart" {
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 9_300 };
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 9_301 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 9_302 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 9_303 };
+    const user_signer = signing.SignerIdentity{
+        .label = "persistent-platform-user",
+        .seed = [_]u8{0x91} ** 32,
+    };
+    const laptop_signer = signing.SignerIdentity{
+        .label = "persistent-platform-laptop",
+        .seed = [_]u8{0x92} ** 32,
+    };
+    const rotated_laptop_signer = signing.SignerIdentity{
+        .label = "persistent-platform-laptop-v2",
+        .seed = [_]u8{0x93} ** 32,
+    };
+    const boot = try verifiedSyncDeviceGraphBoot(9_340, .bootloader_provided);
+    const rotated_boot = try verifiedSyncDeviceGraphBoot(9_341, .bootloader_provided);
+    const provider = device_graph.PlatformKeyBindingRequest{
+        .root = try device_graph.PlatformDeviceRoot.fromBootRecord(laptop, .secure_enclave, "laptop-secure-enclave-key", &boot),
+    };
+    const rotated_provider = device_graph.PlatformKeyBindingRequest{
+        .root = try device_graph.PlatformDeviceRoot.fromBootRecord(laptop, .tpm, "laptop-tpm-key", &rotated_boot),
+    };
+
+    var storage = storage_service.Service.initWithStore(9_310, 9_311, storage_owner, &storage_checkpoint_store);
+    var resident = ResidentState{};
+    var service = try Service.initWithStorage(9_320, 9_321, sync_owner, &storage, &resident);
+    var capabilities = capability.CapabilityTable.init();
+    var port = sync_service.SyncPort.init(&service, &capabilities);
+    const authority_capability = try mintSyncServiceAuthority(&capabilities, &service, sync_owner);
+
+    _ = try port.ensureUserRoot(syncAuthority(&service, sync_owner, authority_capability, 1), user, "owner", user_signer);
+    const enrolled = try port.enrollPlatformBackedDevice(syncAuthority(&service, sync_owner, authority_capability, 2), user, laptop, "laptop", user_signer, laptop_signer, provider, 2);
+    try std.testing.expect(enrolled.usesPlatformBackedKey());
+    try std.testing.expect(enrolled.hasBootloaderBackedPlatformRoot());
+    try std.testing.expectEqual(device_graph.DeviceKeyOrigin.secure_enclave, enrolled.device_key_origin);
+    try std.testing.expectEqualSlices(u8, boot.root_digest[0..], enrolled.platform_root_digest[0..]);
+
+    const rotated = try port.rotatePlatformBackedDeviceKey(syncAuthority(&service, sync_owner, authority_capability, 3), user, laptop, user_signer, rotated_laptop_signer, rotated_provider, 3);
+    const rotated_digest = rotated.platform_key_digest;
+    try port.revokeTrustedDevice(syncAuthority(&service, sync_owner, authority_capability, 4), user, laptop, user_signer, 4);
+
+    var restarted_resident = ResidentState{};
+    var restarted = try Service.initWithStorage(9_330, 9_331, sync_owner, &storage, &restarted_resident);
+    const restored = restarted.findDeviceRecord(laptop).?;
+    try std.testing.expect(restored.usesPlatformBackedKey());
+    try std.testing.expect(restored.hasBootloaderBackedPlatformRoot());
+    try std.testing.expectEqual(device_graph.DeviceKeyOrigin.tpm, restored.device_key_origin);
+    try std.testing.expectEqualStrings("laptop-tpm-key", restored.platformKeyLabelSlice());
+    try std.testing.expectEqualSlices(u8, rotated_digest[0..], restored.platform_key_digest[0..]);
+    try std.testing.expectEqual(@as(u64, 9_341), restored.platform_root_generation);
+    try std.testing.expectEqual(measured_boot.RootProvenance.bootloader_provided, restored.platform_root_provenance);
+    try std.testing.expectEqualSlices(u8, rotated_boot.root_digest[0..], restored.platform_root_digest[0..]);
+    try std.testing.expectEqual(@as(u32, 2), restored.key_rotation_generation);
+    try std.testing.expect(!restored.isTrusted());
+    try std.testing.expectEqual(@as(u64, 4), restored.revoked_at_ticks);
+}
+
+fn addSyncDeviceGraphMeasuredArtifact(
+    recorder: *measured_boot.Recorder,
+    artifact_manifest: *measured_boot.ArtifactManifest,
+    kind: measured_boot.MeasurementKind,
+    label: []const u8,
+    payload: []const u8,
+) !void {
+    try recorder.add(kind, label, payload);
+    try artifact_manifest.add(kind, label, payload);
+}
+
+fn verifiedSyncDeviceGraphBoot(generation: u64, provenance: measured_boot.RootProvenance) !measured_boot.BootRecord {
+    var recorder = measured_boot.Recorder.init();
+    var artifact_manifest = measured_boot.ArtifactManifest.init(generation);
+    recorder.begin(generation);
+    try addSyncDeviceGraphMeasuredArtifact(&recorder, &artifact_manifest, .kernel, "kernel-zigos", "kernel=sync-device-graph");
+    try addSyncDeviceGraphMeasuredArtifact(&recorder, &artifact_manifest, .base_image, "stable-sync-device-graph", "image=sync-device-graph");
+    try addSyncDeviceGraphMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "policy", "healthy");
+    try addSyncDeviceGraphMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "storage", "healthy");
+    try addSyncDeviceGraphMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "sync", "healthy");
+    try addSyncDeviceGraphMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "network", "healthy");
+    try addSyncDeviceGraphMeasuredArtifact(&recorder, &artifact_manifest, .policy, "sync-device-graph-policy", "strict");
+    try addSyncDeviceGraphMeasuredArtifact(&recorder, &artifact_manifest, .driver_set, "sync-device-graph-drivers", "drivers");
+    var boot = recorder.finalize();
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, provenance);
+    return boot;
 }
 
 pub fn deterministicTwoDeviceOverlayReplication() !void {
@@ -547,6 +640,225 @@ fn configureEndToEndSync(
 
 test "sync private overlay replicates end to end across two service tasks" {
     try deterministicTwoDeviceOverlayReplication();
+}
+
+test "sync service replicates payloads to peer storage through booted relay fallback" {
+    var runtime = task_runtime.Runtime.init();
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 9_500 };
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 9_501 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 9_502 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 9_503 };
+    const tablet = principal.PrincipalId{ .kind = .device, .serial = 9_504 };
+    const policy_authority = principal.PrincipalId{ .kind = .policy_authority, .serial = 9_505 };
+    const path = "documents/peer-notes.md";
+    const relay_domain = "relay.peer.zigos";
+    const overlay_identity = "overlay.peer.notes";
+    const private_service = "peer.notes.remote";
+    const object_id = object_store.ids.object(9_560);
+    const user_signer = signing.SignerIdentity{
+        .label = "peer-sync-user",
+        .seed = [_]u8{0xA1} ** 32,
+    };
+    const laptop_signer = signing.SignerIdentity{
+        .label = "peer-sync-laptop",
+        .seed = [_]u8{0xA2} ** 32,
+    };
+    const tablet_signer = signing.SignerIdentity{
+        .label = "peer-sync-tablet",
+        .seed = [_]u8{0xA3} ** 32,
+    };
+    const storage_signer = signing.SignerIdentity{
+        .label = "peer-sync-storage",
+        .seed = [_]u8{0xA4} ** 32,
+    };
+
+    const source_task = try createSyncServiceTask(&runtime, sync_owner, "peer-sync-source", "zigos.system.sync.peer.source", 9_570);
+    const target_task = try createSyncServiceTask(&runtime, sync_owner, "peer-sync-target", "zigos.system.sync.peer.target", 9_571);
+    try std.testing.expect(source_task.runsAsUserspaceProcess());
+    try std.testing.expect(target_task.runsAsUserspaceProcess());
+
+    var source_checkpoint_store = storage_service.CheckpointStore{};
+    var target_checkpoint_store = storage_service.CheckpointStore{};
+    source_checkpoint_store.resetPersistent();
+    target_checkpoint_store.resetPersistent();
+
+    var source_storage = storage_service.Service.initWithStore(9_580, 9_581, storage_owner, &source_checkpoint_store);
+    const source_base = try source_storage.putVersion(.{
+        .preferred_object_id = object_id,
+        .object_type = .document,
+        .payload = "base",
+        .metadata = try object_store.signMetadata(storage_signer, "peer-base", "text/plain", .document, "base", 1),
+    });
+    const source_edit = try source_storage.putVersion(.{
+        .preferred_object_id = object_id,
+        .object_type = .document,
+        .payload = "source edit",
+        .metadata = try object_store.signMetadata(storage_signer, "peer-source", "text/plain", .document, "source edit", 2),
+        .parent_version_id = source_base.version_id,
+    });
+    const source_workspace = try source_storage.createWorkspace(.{
+        .owner = user,
+        .label = "peer-notes",
+    });
+    try source_storage.beginTransaction(source_workspace.id);
+    try source_storage.stagePut(source_workspace.id, path, source_edit.object_id, source_edit.version_id, .document);
+    _ = try source_storage.commit(source_workspace.id, 3);
+
+    var target_storage = storage_service.Service.initWithStore(9_582, 9_583, storage_owner, &target_checkpoint_store);
+    const target_base = try target_storage.putVersion(.{
+        .preferred_object_id = object_id,
+        .object_type = .document,
+        .payload = "base",
+        .metadata = try object_store.signMetadata(storage_signer, "peer-base", "text/plain", .document, "base", 4),
+    });
+    const target_draft = try target_storage.putVersion(.{
+        .preferred_object_id = object_id,
+        .object_type = .document,
+        .payload = "tablet draft",
+        .metadata = try object_store.signMetadata(storage_signer, "peer-tablet-draft", "text/plain", .document, "tablet draft", 5),
+        .parent_version_id = target_base.version_id,
+    });
+    const target_conflict = try target_storage.putVersion(.{
+        .preferred_object_id = object_id,
+        .object_type = .document,
+        .payload = "tablet offline conflict",
+        .metadata = try object_store.signMetadata(storage_signer, "peer-tablet-conflict", "text/plain", .document, "tablet offline conflict", 6),
+        .parent_version_id = target_draft.version_id,
+    });
+    const target_workspace = try target_storage.createWorkspace(.{
+        .owner = user,
+        .label = "peer-notes",
+    });
+    try std.testing.expectEqual(source_workspace.id.raw(), target_workspace.id.raw());
+    try target_storage.beginTransaction(target_workspace.id);
+    try target_storage.stagePut(target_workspace.id, path, target_conflict.object_id, target_conflict.version_id, .document);
+    _ = try target_storage.commit(target_workspace.id, 7);
+
+    const workspace_id = source_workspace.id.raw();
+    var source_resident = ResidentState{};
+    var target_resident = ResidentState{};
+    var source_sync = try Service.initWithStorage(9_590, source_task.id, sync_owner, &source_storage, &source_resident);
+    var target_sync = try Service.initWithStorage(9_591, target_task.id, sync_owner, &target_storage, &target_resident);
+    var source_capabilities = capability.CapabilityTable.init();
+    const source_authority_capability = try mintSyncServiceAuthority(&source_capabilities, &source_sync, sync_owner);
+    var source_port = sync_service.SyncPort.init(&source_sync, &source_capabilities);
+    const source_authority = syncAuthority(&source_sync, sync_owner, source_authority_capability, 30);
+    var target_capabilities = capability.CapabilityTable.init();
+    const target_authority_capability = try mintSyncServiceAuthority(&target_capabilities, &target_sync, sync_owner);
+    var target_port = sync_service.SyncPort.init(&target_sync, &target_capabilities);
+    const target_authority = syncAuthority(&target_sync, sync_owner, target_authority_capability, 40);
+
+    const source_policies = try configureEndToEndSync(
+        &source_port,
+        source_authority,
+        sync_owner,
+        user,
+        laptop,
+        tablet,
+        user_signer,
+        laptop_signer,
+        tablet_signer,
+        workspace_id,
+        overlay_identity,
+        relay_domain,
+        private_service,
+        30,
+    );
+    _ = try configureEndToEndSync(
+        &target_port,
+        target_authority,
+        sync_owner,
+        user,
+        laptop,
+        tablet,
+        user_signer,
+        laptop_signer,
+        tablet_signer,
+        workspace_id,
+        overlay_identity,
+        relay_domain,
+        private_service,
+        40,
+    );
+
+    var network_capabilities = capability.CapabilityTable.init();
+    const relay_capability = try network_capabilities.mintBootRoot(.{
+        .holder = sync_owner,
+        .issuer = policy_authority,
+        .target = .{ .kind = .network_policy, .id = source_policies.relay_policy_id },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .scope = .{ .task_id = source_task.id, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    var relay_service = try sync_transport.BootedOverlayRelayService.init(9_600, 9_601, relay_domain);
+
+    try source_port.setReplicaVersion(source_authority, workspace_id, tablet, path, source_edit.object_id, target_conflict.version_id);
+    var denied_request = sync_service.PeerReplicationRequest{
+        .source_storage = &source_storage,
+        .target_storage = &target_storage,
+        .workspace_id = workspace_id,
+        .from_device = laptop,
+        .to_device = tablet,
+        .transport = .relay_assisted,
+        .network_capabilities = &network_capabilities,
+        .relay_service = &relay_service,
+        .relay_capability_id = relay_capability.id + 1,
+        .signer = laptop_signer,
+        .tick = 50,
+    };
+    try std.testing.expectError(error.EgressDenied, source_port.replicateWorkspaceToPeer(
+        source_authority,
+        &target_port,
+        target_authority,
+        denied_request,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), source_sync.transportFrameCountFor(workspace_id, tablet));
+    const still_offline = try target_storage.resolve(target_workspace.id, path);
+    try std.testing.expectEqual(target_conflict.version_id, still_offline.version_id);
+
+    denied_request.relay_capability_id = relay_capability.id;
+    const result = try source_port.replicateWorkspaceToPeer(
+        source_authority,
+        &target_port,
+        target_authority,
+        denied_request,
+    );
+    try std.testing.expect(result.summary.offline_first);
+    try std.testing.expect(result.summary.personal_e2ee);
+    try std.testing.expect(result.summary.used_relay);
+    try std.testing.expect(result.summary.overlay_ready);
+    try std.testing.expectEqual(@as(usize, 1), result.summary.selected_entry_count);
+    try std.testing.expectEqual(@as(usize, 1), result.summary.conflict_count);
+    try std.testing.expectEqual(@as(usize, 1), result.accepted_frame_count);
+    try std.testing.expectEqual(@as(usize, 1), result.persisted_object_count);
+    try std.testing.expectEqual(@as(usize, 1), result.relay_delivery_count);
+    try std.testing.expect(result.used_booted_relay_service);
+    try std.testing.expectEqual(@as(usize, "source edit".len), result.payload_bytes);
+    try std.testing.expectEqual(@as(usize, 1), relay_service.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 1), relay_service.delivered_packets);
+    try std.testing.expect(source_sync.findConflict(workspace_id, tablet, path) != null);
+
+    const replicated_entry = try target_storage.resolve(target_workspace.id, path);
+    const replicated_version = target_storage.version(replicated_entry.version_id) orelse return error.VersionNotFound;
+    const replicated_payload = try target_storage.versionPayload(replicated_version);
+    try std.testing.expectEqualStrings("source edit", replicated_payload);
+    try std.testing.expectEqual(target_conflict.version_id, replicated_version.previous_version_id);
+    try std.testing.expectEqual(replicated_version.id.raw(), target_sync.replicaVersion(workspace_id, tablet, path).?);
+
+    var restarted_target_storage = storage_service.Service.initWithStore(9_584, 9_585, storage_owner, &target_checkpoint_store);
+    var restarted_target_resident = ResidentState{};
+    var restarted_target_sync = try Service.initWithStorage(9_592, target_task.id, sync_owner, &restarted_target_storage, &restarted_target_resident);
+    try std.testing.expect(restarted_target_sync.loaded_existing_state);
+    const restarted_entry = try restarted_target_storage.resolve(target_workspace.id, path);
+    try std.testing.expectEqual(replicated_version.id, restarted_entry.version_id);
+    const restarted_version = restarted_target_storage.version(restarted_entry.version_id) orelse return error.VersionNotFound;
+    const restarted_payload = try restarted_target_storage.versionPayload(restarted_version);
+    try std.testing.expectEqualStrings("source edit", restarted_payload);
+    try std.testing.expectEqual(replicated_version.id.raw(), restarted_target_sync.replicaVersion(workspace_id, tablet, path).?);
+
+    source_checkpoint_store.resetPersistent();
+    target_checkpoint_store.resetPersistent();
 }
 
 test "sync service covers device graph policy replication semantics and restart recovery" {

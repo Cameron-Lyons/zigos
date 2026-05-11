@@ -26,6 +26,63 @@ else
         pub fn printBootMarker(_: []const u8) void {}
     };
 
+const BootedNetworkDataPlane = struct {
+    fn send(_: []const u8) void {}
+
+    fn getMacAddress() [6]u8 {
+        return .{ 0x02, 0x5A, 0x47, 0x00, 0x00, 0x01 };
+    }
+
+    const device = bootstrap_driver_port.NetworkDevice{
+        .send = send,
+        .getMacAddress = getMacAddress,
+    };
+
+    fn activate(device_id: u64) ?*const bootstrap_driver_port.NetworkDevice {
+        if (device_id != device_inventory.deviceIdForClass(.network_adapter)) return null;
+        return &device;
+    }
+};
+
+const BootedStorageDataPlane = struct {
+    var image = [_]u8{0} ** storage_volume_mod.image_bytes;
+
+    fn reset() void {
+        @memset(image[0..], 0);
+    }
+
+    fn read(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+        const buffer = buffer_ptr[0..buffer_len];
+        const start = @as(usize, @intCast(start_lba)) * storage_volume_mod.sector_size;
+        const end = start + buffer.len;
+        if (end > image.len) return false;
+        @memcpy(buffer, image[start..end]);
+        return true;
+    }
+
+    fn write(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+        const buffer = buffer_ptr[0..buffer_len];
+        const start = @as(usize, @intCast(start_lba)) * storage_volume_mod.sector_size;
+        const end = start + buffer.len;
+        if (end > image.len) return false;
+        @memcpy(image[start..end], buffer);
+        return true;
+    }
+
+    fn activate(device_id: u64) ?storage_volume_mod.Backend {
+        if (device_id != device_inventory.deviceIdForClass(.storage_controller)) return null;
+        return .{
+            .sector_count = storage_volume_mod.required_device_sectors,
+            .read = read,
+            .write = write,
+        };
+    }
+};
+
+pub fn resetBootedDataPlanes() void {
+    BootedStorageDataPlane.reset();
+}
+
 pub fn run(
     env: *const support.Environment,
     state: *const support.BootstrapState,
@@ -179,6 +236,18 @@ fn activateDrivers(
             return false;
         }
     }
+    if (bootstrap_driver_port.storagePublication() == null) {
+        const published_storage = bootstrap_driver_port.publishStorageActivator(
+            storage_driver.device_id,
+            "zigos.system.storage-driver",
+            BootedStorageDataPlane.activate,
+            false,
+        ) catch false;
+        if (!published_storage) {
+            _ = env.supervisor.recordCrash(state.services.storage_service.id, 54, bootFailureCode(error.InvalidBootstrapTransport));
+            return false;
+        }
+    }
     const graphics_driver = service_bootstrap.attachDriver(
         kernel_port,
         env.capability_table,
@@ -237,6 +306,22 @@ fn activateDrivers(
         return false;
     };
 
+    if (bootstrap_driver_port.networkPublication() == null) {
+        const published_network = bootstrap_driver_port.publishNetworkActivator(
+            network_driver.device_id,
+            "zigos.system.network-stack",
+            BootedNetworkDataPlane.activate,
+            false,
+        ) catch false;
+        if (!published_network) {
+            _ = env.supervisor.recordCrash(state.services.network_service.id, 53, bootFailureCode(error.InvalidBootstrapTransport));
+            return false;
+        }
+    }
+    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, graphics_driver, "zigos.system.compositor", 55)) return false;
+    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, input_driver, "zigos.system.compositor", 57)) return false;
+    if (!publishBootedDeviceDataPlane(env, state.services.media_service.id, audio_driver, "zigos.system.media-print", 58)) return false;
+
     const network_activation_mode = env.driver_runtime.activateModeAt(network_driver, 53) catch |err| {
         _ = env.supervisor.recordCrash(state.services.network_service.id, 53, bootFailureCode(err));
         return false;
@@ -257,10 +342,9 @@ fn activateDrivers(
         _ = env.supervisor.recordCrash(state.services.media_service.id, 58, bootFailureCode(err));
         return false;
     };
-    if ((network_activation_mode == .control_only or env.driver_directory.findByClass(.network_adapter) != null) and
+    if (network_activation_mode == .published_data_plane and
         (storage_activation_mode == .published_data_plane or
-            storage_activation_mode == .userspace_brokered_data_plane or
-            storage_driver.restart_generation == 1))
+            storage_activation_mode == .userspace_brokered_data_plane))
     {
         common.printBootMarker(boot_markers.service_boot_driver_service_network_ready);
     }
@@ -275,6 +359,25 @@ fn activateDrivers(
         common.printBootMarker(boot_markers.service_boot_service_contracts_ready);
     }
     return true;
+}
+
+fn publishBootedDeviceDataPlane(
+    env: *const support.Environment,
+    service_id: u64,
+    driver: *const driver_service.DriverRecord,
+    publisher: []const u8,
+    tick: u64,
+) bool {
+    const published = bootstrap_driver_port.publishDeviceDataPlane(
+        driver.device_class,
+        driver.device_id,
+        publisher,
+        false,
+    ) catch false;
+    if (published) return true;
+
+    _ = env.supervisor.recordCrash(service_id, tick, bootFailureCode(error.InvalidBootstrapTransport));
+    return false;
 }
 
 fn connectClient(

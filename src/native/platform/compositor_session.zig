@@ -5,6 +5,7 @@ const capability = @import("../kernel_api/capability.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const task_runtime_service = @import("../task/task_runtime_service.zig");
 
 const copyText = native_util.copyText;
 const yesNo = native_util.yesNo;
@@ -260,7 +261,7 @@ pub const Session = struct {
         workspace_id: u64,
         path: []const u8,
     ) Error!*WindowRecord {
-        return self.createWindow(.document_view, app_task, workspace_id, "", "Document", path, false);
+        return self.createWindow(.document_view, app_task, workspace_id, "", "", "Document", path, false);
     }
 
     pub fn openWorkspaceView(
@@ -269,7 +270,7 @@ pub const Session = struct {
         workspace_id: u64,
         label: []const u8,
     ) Error!*WindowRecord {
-        return self.createWindow(.workspace_view, app_task, workspace_id, "", "Workspace", label, false);
+        return self.createWindow(.workspace_view, app_task, workspace_id, "", "", "Workspace", label, false);
     }
 
     pub fn openTaskView(
@@ -277,7 +278,7 @@ pub const Session = struct {
         app_task: *const task_runtime.TaskRecord,
         title: []const u8,
     ) Error!*WindowRecord {
-        return self.createWindow(.full_screen_task_view, app_task, 0, "", title, "", false);
+        return self.createWindow(.full_screen_task_view, app_task, 0, "", "", title, "", false);
     }
 
     pub fn ensureReviewItem(
@@ -449,6 +450,7 @@ pub const Session = struct {
         app_task: *const task_runtime.TaskRecord,
         workspace_id: u64,
         bundle_id: []const u8,
+        display_name: []const u8,
         title_prefix: []const u8,
         detail: []const u8,
         modal: bool,
@@ -461,9 +463,9 @@ pub const Session = struct {
         window.modal = modal;
         window.workspace_id = workspace_id;
         window.bundle_id_len = copyText(&window.bundle_id, bundle_id);
+        window.display_name_len = copyText(&window.display_name, display_name);
         window.title_len = deriveWindowTitle(&window.title, title_prefix, detail);
         window.detail_len = copyText(&window.detail, detail);
-        self.indexWindowForTaskBundle(window);
         self.active_window_id = window.id;
         return window;
     }
@@ -555,7 +557,8 @@ pub const Service = struct {
                     request.view_type,
                     task,
                     request.workspace_id,
-                    "",
+                    request.bundle_id,
+                    request.display_name,
                     titlePrefixForView(request.view_type),
                     request.detail,
                     request.view_type == .app_panel,
@@ -708,13 +711,14 @@ pub fn decodeResponse(payload: []const u8) Error!ServiceResponse {
 pub fn renderWindowToBuffer(buffer: []u8, window: *const WindowRecord) ![]const u8 {
     const surface_id = window.ui_surface_id orelse 0;
     var used: usize = 0;
-    used += (try std.fmt.bufPrint(buffer[used..], "UI window: id={d} surface={d} type={s} modal={s} title={s} bundle={s}", .{
+    used += (try std.fmt.bufPrint(buffer[used..], "UI window: id={d} surface={d} type={s} modal={s} title={s} bundle={s} display={s}", .{
         window.id,
         surface_id,
         viewTypeLabel(window.view_type),
         yesNo(window.modal),
         window.titleSlice(),
         window.bundleIdSlice(),
+        window.displayNameSlice(),
     })).len;
     if (window.workspace_id != 0) {
         used += (try std.fmt.bufPrint(buffer[used..], " workspace={d}", .{window.workspace_id})).len;
@@ -785,7 +789,8 @@ fn taskBundleKey(task_id: u64, bundle_id: []const u8) u64 {
 }
 
 fn taskBundleMatches(context: anytype, slot: *const WindowSlot) bool {
-    return slot.window.subject_task_id == context.task_id and
+    return slot.window.reviewer_task_id != 0 and
+        slot.window.subject_task_id == context.task_id and
         std.mem.eql(u8, slot.window.bundleIdSlice(), context.bundle_id);
 }
 
@@ -1060,6 +1065,147 @@ test "compositor service wire protocol opens switches reviews decides and recove
     try std.testing.expect(recover_response.recovered);
     try std.testing.expectEqual(@as(usize, 2), session.window_count);
     try std.testing.expectEqual(DecisionState.allow, session.findReviewItemConst(review_response.window_id, .object_access, "ws:trip").?.decision);
+}
+
+test "task-first compositor flow persists app-linked task views and audit state" {
+    var runtime_checkpoint_store = task_runtime_service.CheckpointStore{};
+    var runtime = task_runtime.Runtime.init();
+    var runtime_service = task_runtime_service.Service.initWithStore(&runtime, &runtime_checkpoint_store);
+    runtime_service.bind(70, .{ .kind = .service, .serial = 70 });
+
+    const app_image = task_runtime.syntheticUserspaceImage("trip-task", "app.trip.coordinate");
+    const app_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 70 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 2_000,
+            .memory_bytes = 64 * 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 4 * 1024,
+        },
+        .ui_surface_id = 91,
+        .local_only = true,
+        .initial_component = .{
+            .label = "trip-task",
+            .entry = "app.trip.coordinate",
+        },
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = 70_001,
+            .component_abi_version = abi.ABI_VERSION,
+            .signed = true,
+            .bundle_id = "app.trip",
+        },
+        .userspace_image = &app_image,
+    });
+    const app_task_id = app_task.id;
+
+    var session = Session.init();
+    var compositor_checkpoint_store = CheckpointStore{};
+    var compositor_service = Service.initWithCheckpoint(71, 72, &runtime, &session, &compositor_checkpoint_store);
+
+    const task_response = compositor_service.dispatch(.{
+        .operation = .open_view,
+        .view_type = .full_screen_task_view,
+        .subject_task_id = app_task_id,
+        .workspace_id = 800,
+        .detail = "Coordinate Trip",
+    });
+    try std.testing.expectEqual(ServiceStatus.ok, task_response.status);
+
+    const document_response = compositor_service.dispatch(.{
+        .operation = .open_view,
+        .view_type = .document_view,
+        .subject_task_id = app_task_id,
+        .workspace_id = 800,
+        .detail = "trip/brief.md",
+    });
+    try std.testing.expectEqual(ServiceStatus.ok, document_response.status);
+
+    const panel_response = compositor_service.dispatch(.{
+        .operation = .open_view,
+        .view_type = .app_panel,
+        .subject_task_id = app_task_id,
+        .workspace_id = 800,
+        .bundle_id = "app.trip",
+        .display_name = "Trip",
+        .detail = "Calendar Panel",
+    });
+    try std.testing.expectEqual(ServiceStatus.ok, panel_response.status);
+    try std.testing.expectEqual(panel_response.window_id, session.active_window_id);
+
+    _ = try runtime.attachComponent(app_task_id, .{
+        .label = "calendar-panel",
+        .entry = "app.trip.calendar",
+    }, 12);
+    try runtime.audit(app_task_id, .{
+        .kind = .service_connected,
+        .detail = @intCast(panel_response.window_id),
+        .tick = 13,
+    });
+
+    const switch_response = compositor_service.dispatch(.{
+        .operation = .switch_view,
+        .window_id = task_response.window_id,
+    });
+    try std.testing.expectEqual(ServiceStatus.ok, switch_response.status);
+    try std.testing.expectEqual(task_response.window_id, switch_response.active_window_id);
+    try std.testing.expect(compositor_checkpoint_store.valid);
+    runtime_service.checkpoint(14);
+
+    const ephemeral_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 71 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 1,
+            .shared_memory_bytes = 512,
+        },
+        .local_only = true,
+    });
+    const ephemeral_task_id = ephemeral_task.id;
+
+    session.reset();
+    runtime.reset();
+    try std.testing.expect(runtime_service.restartFromCheckpoint(15));
+    const recover_response = compositor_service.dispatch(.{ .operation = .recover_state });
+    try std.testing.expectEqual(ServiceStatus.ok, recover_response.status);
+    try std.testing.expect(recover_response.recovered);
+
+    const restored_task = runtime.find(app_task_id) orelse return error.TaskNotFound;
+    try std.testing.expect(runtime.find(ephemeral_task_id) == null);
+    try std.testing.expect(restored_task.runsAsUserspaceProcess());
+    try std.testing.expectEqual(@as(?u64, 91), restored_task.ui_surface_id);
+    try std.testing.expectEqualStrings("app.trip", restored_task.launchBundleIdSlice());
+    try std.testing.expectEqual(@as(usize, 2), restored_task.execution_component_count);
+    try std.testing.expectEqualStrings("calendar-panel", restored_task.executionComponents()[1].labelSlice());
+    try std.testing.expectEqual(@as(usize, 2), restored_task.audit_count);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.component_attached, restored_task.auditEventAt(0).?.kind);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.service_connected, restored_task.auditEventAt(1).?.kind);
+
+    try std.testing.expectEqual(@as(usize, 3), session.window_count);
+    try std.testing.expectEqual(task_response.window_id, session.active_window_id);
+    const restored_task_window = session.findWindowConst(task_response.window_id) orelse return error.WindowNotFound;
+    const restored_document_window = session.findWindowConst(document_response.window_id) orelse return error.WindowNotFound;
+    const restored_panel_window = session.findWindowConst(panel_response.window_id) orelse return error.WindowNotFound;
+    try std.testing.expectEqual(app_task_id, restored_task_window.subject_task_id);
+    try std.testing.expectEqual(app_task_id, restored_document_window.subject_task_id);
+    try std.testing.expectEqual(app_task_id, restored_panel_window.subject_task_id);
+    try std.testing.expectEqual(@as(?u64, 91), restored_panel_window.ui_surface_id);
+    try std.testing.expectEqual(ViewType.full_screen_task_view, restored_task_window.view_type);
+    try std.testing.expectEqual(ViewType.document_view, restored_document_window.view_type);
+    try std.testing.expectEqual(ViewType.app_panel, restored_panel_window.view_type);
+    try std.testing.expectEqualStrings("app.trip", restored_panel_window.bundleIdSlice());
+    try std.testing.expectEqualStrings("Trip", restored_panel_window.displayNameSlice());
+
+    var render_buffer: [512]u8 = undefined;
+    const rendered_task = try renderWindowToBuffer(&render_buffer, restored_task_window);
+    try std.testing.expect(std.mem.indexOf(u8, rendered_task, "type=full_screen_task_view") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered_task, "title=Task: Coordinate Trip") != null);
+    const rendered_panel = try renderWindowToBuffer(&render_buffer, restored_panel_window);
+    try std.testing.expect(std.mem.indexOf(u8, rendered_panel, "bundle=app.trip") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered_panel, "display=Trip") != null);
 }
 
 test "compositor session creates app-panel permission review windows and cards" {

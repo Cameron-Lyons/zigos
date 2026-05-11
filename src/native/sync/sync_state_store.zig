@@ -2,6 +2,7 @@ const std = @import("std");
 const binary_cursor = @import("../core/binary_cursor.zig");
 const device_graph = @import("device_graph.zig");
 const manifest = @import("../policy/manifest.zig");
+const measured_boot = @import("../platform/measured_boot.zig");
 const network_policy = @import("network_policy.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
@@ -14,7 +15,7 @@ const CursorWriter = binary_cursor.Writer(Error, error.StateTooLarge);
 const CursorReader = binary_cursor.Reader(Error, error.CorruptState);
 
 const record_magic = "ZGSYNCR";
-const record_version: u16 = 1;
+const record_version: u16 = 3;
 const record_prefix = "state/v4/";
 const record_content_type = "application/zigos-sync-record";
 const record_metadata_label = "sync-state-record";
@@ -29,6 +30,11 @@ const RecordKind = enum(u8) {
     conflict = 6,
     database_contract = 7,
     overlay = 8,
+};
+
+const Envelope = struct {
+    version: u16,
+    kind: RecordKind,
 };
 
 const PathSet = struct {
@@ -291,10 +297,10 @@ fn putRecord(
 
 fn decodeRecordInto(resident: *state_support.ResidentState, payload: []const u8) Error!void {
     var reader = CursorReader{ .buffer = payload };
-    const kind = try readEnvelope(&reader);
-    switch (kind) {
+    const envelope = try readEnvelope(&reader);
+    switch (envelope.kind) {
         .user_root => try decodeUserRoot(resident, &reader),
-        .device => try decodeDevice(resident, &reader),
+        .device => try decodeDevice(resident, &reader, envelope.version),
         .network_policy => try decodeNetworkPolicy(resident, &reader),
         .workspace_policy => try decodeWorkspacePolicy(resident, &reader),
         .replica => try decodeReplica(resident, &reader),
@@ -330,6 +336,15 @@ fn encodeDevice(buffer: []u8, device: *const device_graph.DeviceRecord) Error![]
     try writeSignature(&writer, device.revocation_signature);
     try writer.writeU64(device.last_rotated_at_ticks);
     try writer.writeU64(device.revoked_at_ticks);
+    try writer.writeByte(@intFromEnum(device.device_key_origin));
+    try writer.writeByte(@intFromBool(device.platform_key_bound));
+    try writeText(&writer, device.platformKeyLabelSlice());
+    if (device.platform_key_bound) {
+        try writer.writeBytes(&device.platform_key_digest);
+        try writer.writeU64(device.platform_root_generation);
+        try writer.writeByte(@intFromEnum(device.platform_root_provenance));
+        try writer.writeBytes(&device.platform_root_digest);
+    }
     return buffer[0..writer.offset];
 }
 
@@ -434,7 +449,7 @@ fn decodeUserRoot(resident: *state_support.ResidentState, reader: *CursorReader)
     slot.root.root_signature = try readSignature(reader, &resident.user_root_signers[slot_index]);
 }
 
-fn decodeDevice(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
+fn decodeDevice(resident: *state_support.ResidentState, reader: *CursorReader, version: u16) Error!void {
     const slot_index = firstFreeDeviceIndex(resident) orelse return error.CorruptState;
     const slot = &resident.persisted_state.graph.devices[slot_index];
     slot.in_use = true;
@@ -452,6 +467,21 @@ fn decodeDevice(resident: *state_support.ResidentState, reader: *CursorReader) E
     slot.device.revocation_signature = try readSignature(reader, &resident.device_signature_signers[slot_index][3]);
     slot.device.last_rotated_at_ticks = try reader.readU64();
     slot.device.revoked_at_ticks = try reader.readU64();
+    if (version >= 2) {
+        slot.device.device_key_origin = try parseDeviceKeyOrigin(try reader.readByte());
+        slot.device.platform_key_bound = (try reader.readByte()) != 0;
+        try readTextInto(reader, &slot.device.platform_key_label, &slot.device.platform_key_label_len);
+        if (slot.device.platform_key_bound) {
+            try reader.readBytes(&slot.device.platform_key_digest);
+            if (version < 3) return error.CorruptState;
+            slot.device.platform_root_generation = try reader.readU64();
+            slot.device.platform_root_provenance = try parseRootProvenance(try reader.readByte());
+            try reader.readBytes(&slot.device.platform_root_digest);
+            if (!slot.device.hasBootloaderBackedPlatformRoot()) return error.CorruptState;
+        } else if (slot.device.device_key_origin != .software or slot.device.platform_key_label_len != 0) {
+            return error.CorruptState;
+        }
+    }
 }
 
 fn decodeNetworkPolicy(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
@@ -569,12 +599,16 @@ fn writeEnvelope(writer: *CursorWriter, kind: RecordKind) Error!void {
     try writer.writeByte(@intFromEnum(kind));
 }
 
-fn readEnvelope(reader: *CursorReader) Error!RecordKind {
+fn readEnvelope(reader: *CursorReader) Error!Envelope {
     var magic_buffer: [record_magic.len]u8 = undefined;
     try reader.readBytes(&magic_buffer);
     if (!std.mem.eql(u8, &magic_buffer, record_magic)) return error.CorruptState;
-    if ((try reader.readU16()) != record_version) return error.UnsupportedStateVersion;
-    return parseRecordKind(try reader.readByte());
+    const version = try reader.readU16();
+    if (version == 0 or version > record_version) return error.UnsupportedStateVersion;
+    return .{
+        .version = version,
+        .kind = try parseRecordKind(try reader.readByte()),
+    };
 }
 
 fn writePrincipal(writer: *CursorWriter, id: principal.PrincipalId) Error!void {
@@ -808,6 +842,24 @@ fn parseDeviceStatus(raw: u8) Error!device_graph.DeviceStatus {
     return switch (raw) {
         0 => .trusted,
         1 => .revoked,
+        else => error.CorruptState,
+    };
+}
+
+fn parseDeviceKeyOrigin(raw: u8) Error!device_graph.DeviceKeyOrigin {
+    return switch (raw) {
+        0 => .software,
+        1 => .secure_enclave,
+        2 => .tpm,
+        else => error.CorruptState,
+    };
+}
+
+fn parseRootProvenance(raw: u8) Error!measured_boot.RootProvenance {
+    return switch (raw) {
+        0 => .synthetic_host,
+        1 => .bootloader_provided,
+        2 => .emulator_provided,
         else => error.CorruptState,
     };
 }

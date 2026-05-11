@@ -94,7 +94,7 @@ pub const RequestHeader = extern struct {
 pub const CapabilityDescriptor = extern struct {
     capability_id: u64,
     target_id: u64,
-    rights: u32,
+    rights: u64,
     revocation_generation: u32,
     expires_at_ticks: u64,
     scope_task_id: u64,
@@ -263,16 +263,16 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
     try std.testing.expectEqual(@as(u16, 1), ABI_VERSION);
     try std.testing.expectEqual(@as(usize, 96), ENDPOINT_INLINE_BYTES);
-    try std.testing.expectEqual(@as(usize, 56), @sizeOf(CapabilityDescriptor));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(CapabilityDescriptor));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(TaskDescriptor));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ResourceDescriptor));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(DeviceDescriptor));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceMmioWindowDescriptor));
     try std.testing.expectEqual(@as(usize, 4), @sizeOf(DevicePortReadResponse));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(BoolResponse));
-    try std.testing.expectEqual(@as(usize, 104), @sizeOf(EndpointCreateResponse));
-    try std.testing.expectEqual(@as(usize, 200), @sizeOf(EndpointRecvResponse));
-    try std.testing.expectEqual(@as(usize, 96), @sizeOf(SharedMemoryCreateResponse));
+    try std.testing.expectEqual(@as(usize, 112), @sizeOf(EndpointCreateResponse));
+    try std.testing.expectEqual(@as(usize, 208), @sizeOf(EndpointRecvResponse));
+    try std.testing.expectEqual(@as(usize, 104), @sizeOf(SharedMemoryCreateResponse));
     try std.testing.expect(taskFlagsHas(TASK_FLAG_LOCAL_ONLY, TASK_FLAG_LOCAL_ONLY));
     try std.testing.expectEqual(@as(u8, 3), taskFlagsResourceClass(@as(u16, 3) << TASK_RESOURCE_CLASS_SHIFT));
     try std.testing.expect(serviceFlagsHas(SERVICE_CONNECTION_FLAG_USERSPACE_OWNER, SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));

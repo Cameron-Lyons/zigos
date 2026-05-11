@@ -1279,6 +1279,7 @@ fn parseObjectType(value: u8) Error!object_store.ObjectType {
 fn parsePrincipalKind(value: u8) Error!principal.PrincipalKind {
     return switch (value) {
         @intFromEnum(principal.PrincipalKind.user) => .user,
+        @intFromEnum(principal.PrincipalKind.team) => .team,
         @intFromEnum(principal.PrincipalKind.device) => .device,
         @intFromEnum(principal.PrincipalKind.app) => .app,
         @intFromEnum(principal.PrincipalKind.service) => .service,

@@ -96,6 +96,17 @@ pub fn networkTransportHardeningGate() !void {
     const delivered = (try relay_queue.deliverNext(&session, plaintext_buffer[0..])).?;
     try std.testing.expectEqualStrings("backlog op frame", delivered);
 
+    var booted_relay = try sync_transport.BootedOverlayRelayService.init(812, 813, "relay.backlog.example");
+    const signed_frame = try harness.encryptSignedFrame(&session, "booted relay frame", spec_support.signer("backlog.relay", 0x81));
+    try std.testing.expectError(error.EgressDenied, booted_relay.submitSignedFrame(82, &session, signed_frame));
+    try booted_relay.submitSignedFrame(81, &session, signed_frame);
+    var booted_plaintext_buffer: [sync_transport.MAX_PACKET_BYTES]u8 = undefined;
+    const booted_delivered = (try booted_relay.deliverNext(81, &session, booted_plaintext_buffer[0..])).?;
+    try std.testing.expectEqualStrings("booted relay frame", booted_delivered);
+    try std.testing.expectEqual(@as(usize, 1), booted_relay.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 1), booted_relay.delivered_packets);
+    try std.testing.expectEqual(@as(usize, 1), booted_relay.rejected_packets);
+
     try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, .{
         .task_id = 81,
         .principal_id = app,
@@ -131,10 +142,12 @@ pub fn syncPrivateOverlayEndToEndGate() !void {
     try expectContains(sync_transport_harness_source, "SignedEncryptedFrame");
     try expectContains(sync_transport_harness_source, "encryptSignedFrame");
     try expectContains(sync_transport_harness_source, "verifySignedFrame");
+    try expectContains(sync_transport_harness_source, "caller_task_id != session.task_id");
     try expectContains(sync_service_test_source, "deterministicTwoDeviceOverlayReplication");
     try expectContains(sync_service_test_source, "openOverlaySession");
     try expectContains(sync_service_test_source, "replicateWorkspace");
     try expectContains(sync_service_test_source, "relay_queue.submit");
+    try expectContains(sync_service_impl_source, "sendOverlayRelayFrameViaService");
     try sync_service_test.deterministicTwoDeviceOverlayReplication();
 }
 

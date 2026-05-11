@@ -309,6 +309,10 @@
           "name": "policy mediation denies clipboard and screen capture without explicit grants"
         },
         {
+          "file": "src/native/task/process_isolation.zig",
+          "name": "process isolation denies memory injection window clipboard and hook bypasses without visible entitlements"
+        },
+        {
           "file": "src/native/storage/storage_service.zig",
           "name": "storage port requires authority context for protected mutations"
         },
@@ -382,8 +386,20 @@
           "name": "device graph roots user principals and manages enrollment rotation and revocation"
         },
         {
+          "file": "src/native/sync/device_graph.zig",
+          "name": "device graph binds platform-backed device keys and rejects synthetic downgrade"
+        },
+        {
           "file": "src/native/sync/sync_service_test.zig",
           "name": "sync service covers device graph policy replication semantics and restart recovery"
+        },
+        {
+          "file": "src/native/sync/sync_service_test.zig",
+          "name": "sync service replicates payloads to peer storage through booted relay fallback"
+        },
+        {
+          "file": "src/native/sync/sync_service_test.zig",
+          "name": "sync service persists platform-backed device key bindings across restart"
         },
         {
           "file": "src/native/session/service_path_proofs.zig",
@@ -392,6 +408,10 @@
         {
           "file": "src/native/storage/workspace.zig",
           "name": "workspace sharing acts as a mutable policy container"
+        },
+        {
+          "file": "src/native/storage/storage_service.zig",
+          "name": "storage port derives shared workspace capabilities and blocks unauthorized reshares"
         }
       ],
       "requirements": [
@@ -416,6 +436,14 @@
         {
           "file": "src/native/sync/network_policy.zig",
           "name": "network policy connections can require remote attestation and pinned service identities"
+        },
+        {
+          "file": "src/native/drivers/network_driver_task.zig",
+          "name": "native network stack gates service identity packets on attested policy capability"
+        },
+        {
+          "file": "src/native/drivers/network_driver_task.zig",
+          "name": "native network stack requires scoped local discovery before discovery broadcast"
         },
         {
           "file": "src/native/sync/sync_service_test.zig",
@@ -457,12 +485,28 @@
           "name": "compositor session opens document workspace and full-screen task views"
         },
         {
+          "file": "src/native/platform/compositor_session.zig",
+          "name": "task-first compositor flow persists app-linked task views and audit state"
+        },
+        {
+          "file": "src/native/platform/compositor_display.zig",
+          "name": "compositor display framebuffer renders windows switching recovery and permission decisions"
+        },
+        {
           "file": "src/native/session/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
           "file": "src/native/policy/permission_review.zig",
           "name": "renderToBuffer includes bundle name, permission labels, and decisions"
+        },
+        {
+          "file": "src/native/policy/permission_review_service.zig",
+          "name": "rendered permission review surface drives allow deny controls through compositor display and policy grants"
+        },
+        {
+          "file": "src/native/policy/permission_review_service.zig",
+          "name": "review service refuses partial grants when visible decisions exceed capacity"
         },
         {
           "file": "src/native/services/notification_center.zig",
@@ -502,7 +546,7 @@
         },
         {
           "file": "src/native/task/userspace_scheduler.zig",
-          "name": "userspace scheduler denies unavailable required accelerators and wakes when granted"
+          "name": "userspace scheduler requires observed platform telemetry before waking hardware queues"
         },
         {
           "file": "src/native/task/userspace_scheduler.zig",
@@ -513,8 +557,16 @@
           "name": "userspace scheduler applies thermal and battery decisions to live dispatch"
         },
         {
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler applies booted live telemetry across every resource class"
+        },
+        {
           "file": "src/native/kernel_api/shared_memory.zig",
           "name": "shared memory objects label accelerator access and explicit zero-copy attachments"
+        },
+        {
+          "file": "src/native/kernel_api/shared_memory.zig",
+          "name": "shared memory rejects stale task and accelerator descriptors after generation changes"
         },
         {
           "file": "src/native/session/service_path_proofs.zig",
@@ -550,6 +602,10 @@
         {
           "file": "src/native/session/supervisor.zig",
           "name": "driver recovery restarts the failed driver and emits visible diagnostics only when needed"
+        },
+        {
+          "file": "src/native/drivers/driver_runtime.zig",
+          "name": "runtime deactivates only the requested driver class for shared services"
         }
       ],
       "requirements": [
@@ -651,6 +707,22 @@
         {
           "file": "src/native/policy/policy_object.zig",
           "name": "policy objects remain signed scoped and enforce enterprise controls"
+        },
+        {
+          "file": "src/native/policy/policy_example_enforcement.zig",
+          "name": "policy examples route package network removable and sync denials through subsystem gates"
+        },
+        {
+          "file": "src/native/policy/policy_example_enforcement.zig",
+          "name": "policy examples deny screen capture grants and enforce retention audit requirements"
+        },
+        {
+          "file": "src/native/policy/enterprise_management.zig",
+          "name": "enterprise management applies overrides revokes and audits organization policy"
+        },
+        {
+          "file": "src/native/policy/enterprise_management.zig",
+          "name": "enterprise management gates device trust administration through existing graph and audits it"
         }
       ],
       "requirements": [
@@ -694,8 +766,16 @@
           "name": "validate accepts a signed local-first bundle manifest"
         },
         {
+          "file": "src/native/policy/permission_review.zig",
+          "name": "permission review does not grant hidden device access for the example writer manifest"
+        },
+        {
           "file": "src/native/services/package_service.zig",
           "name": "package service round-trips the example writer manifest fields without widening authority"
+        },
+        {
+          "file": "src/native/services/package_service.zig",
+          "name": "package service rejects example writer manifest updates that widen permissions without declaration"
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
@@ -838,7 +918,7 @@
   ],
   "requirement_evidence": {
     "REQ-DESIGN-GOALS-AND-NON-GOALS": {
-      "status": "enforced",
+      "status": "modeled",
       "enforcement_modules": [
         "tools/check_spec_coverage.py",
         "src/native/policy/policy_mediation.zig",
@@ -856,28 +936,12 @@
         "src/native/platform/compositor_session.zig",
         "src/native/session/session_manager.zig"
       ],
-      "negative_tests": [
-        {
-          "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 2.1 6.2 and 7 explicit grants are required before a task gains authority"
-        },
-        {
-          "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 5 and 14 keep the base image signed measured atomic and rollback-capable"
-        },
-        {
-          "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 9 and 10 use a trusted device graph selective sync and policy-gated networking"
-        },
-        {
-          "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 13.3 15.2 and 15.3 keep failures explainable restartable and redacted"
-        },
-        {
-          "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 1 keeps installs declarative privilege explicit and legacy access isolated"
-        }
-      ]
+      "coverage_note": "Aggregate design goals and non-goals are modeled through explicit dependency checks over the underlying subsystem requirements, but this row remains a narrative summary rather than a single enforceable invariant.",
+      "roadmap": {
+        "priority": "P2",
+        "focus": "Keep this as an aggregate modeled row and split any newly testable design claim into a narrower requirement.",
+        "graduation_proof": "Each broad goal has its own requirement or explicit child invariant with implementation anchors and negative tests; this summary itself should not be marked enforced."
+      }
     },
     "REQ-ZERO-AMBIENT-AUTHORITY": {
       "status": "enforced",
@@ -1107,7 +1171,7 @@
       ]
     },
     "REQ-BOOT-CHAIN": {
-      "status": "enforced",
+      "status": "modeled",
       "enforcement_modules": [
         "src/native/platform/measured_boot.zig",
         "src/native/platform/measured_boot_console.zig",
@@ -1118,37 +1182,25 @@
         "tools/generate_userspace_archive.zig",
         "scripts/run-zigos-native-smoke.sh"
       ],
-      "negative_tests": [
-        {
-          "file": "src/native/platform/measured_boot.zig",
-          "name": "build-generated artifact manifests reject tampered bootloader source measurement and authority"
-        },
-        {
-          "file": "src/native/platform/measured_boot.zig",
-          "name": "verified boot chain rejects synthetic provenance and every mismatched artifact class"
-        }
-      ]
+      "coverage_note": "Boot records, artifact manifests, and QEMU smoke markers exist, but hardware root-of-trust and bootloader-provided measurements are still represented by emulator or build-time provenance.",
+      "roadmap": {
+        "priority": "P0",
+        "focus": "Route freestanding boot through real bootloader-provided measurements and reject tampered kernel, base image, service, policy, and driver artifacts before session startup.",
+        "graduation_proof": "A freestanding boot path consumes bootloader measurements, rejects each artifact class on mismatch, and records the verified root without synthetic or emulator provenance."
+      }
     },
     "REQ-MEASURED-STATE": {
-      "status": "enforced",
+      "status": "modeled",
       "enforcement_modules": [
         "src/native/platform/measured_boot.zig",
         "src/native/platform/attestation_service.zig"
       ],
-      "negative_tests": [
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation service rejects provisioned remote attestations without a verified measured root"
-        },
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation service rejects software provisioned remote roots"
-        },
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation verification rejects measured state and statement tampering"
-        }
-      ]
+      "coverage_note": "The measured-state data model covers kernel, base image, services, policy, and driver sets, but remote attestation and root provenance still depend on provisioned test roots or emulator-backed evidence.",
+      "roadmap": {
+        "priority": "P0",
+        "focus": "Bind measured state and attestation to freestanding boot provenance and hardware-backed or platform-backed device roots.",
+        "graduation_proof": "Remote attestation verifies a bootloader-provided measured root and rejects tampering without relying on synthetic, software, or emulator-only roots."
+      }
     },
     "REQ-RECOVERY-MODE": {
       "status": "enforced",
@@ -1188,12 +1240,27 @@
         "src/native/task/task_runtime.zig",
         "src/native/task/userspace_launch.zig",
         "src/native/task/userspace_executor.zig",
-        "src/native/session/runtime_negative_proofs.zig"
+        "src/native/kernel_api/native_kernel_access.zig",
+        "src/native/kernel_api/syscall_surface.zig",
+        "src/native/session/runtime_negative_proofs.zig",
+        "src/native/session/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
+          "file": "src/native/kernel_api/native_kernel.zig",
+          "name": "native kernel rejects app and service launches without signed userspace image provenance"
+        },
+        {
+          "file": "src/native/kernel_api/syscall_surface.zig",
+          "name": "syscall surface denies task creation without signed userspace launch provenance"
+        },
+        {
           "file": "src/native/session/runtime_negative_proofs.zig",
           "name": "runtime negative proofs reject modeled bypasses"
+        },
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
     },
@@ -1292,6 +1359,7 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/task/task_runtime_model.zig",
+        "src/native/task/process_isolation.zig",
         "src/native/task/userspace_executor.zig",
         "src/native/kernel_api/syscall_surface.zig",
         "src/native/session/runtime_negative_proofs.zig",
@@ -1299,8 +1367,12 @@
       ],
       "negative_tests": [
         {
+          "file": "src/native/task/process_isolation.zig",
+          "name": "process isolation denies memory injection window clipboard and hook bypasses without visible entitlements"
+        },
+        {
           "file": "src/native/session/service_path_proofs.zig",
-          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+          "name": "booted userspace service paths prove process isolation visible-entitlement gates"
         },
         {
           "file": "src/native/session/runtime_negative_proofs.zig",
@@ -1401,12 +1473,19 @@
     "REQ-DEVICE-GRAPH": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/sync/device_graph.zig"
+        "src/native/sync/device_graph.zig",
+        "src/native/sync/sync_service_impl.zig",
+        "src/native/sync/sync_state_store.zig",
+        "src/native/platform/measured_boot.zig"
       ],
       "negative_tests": [
         {
           "file": "src/native/sync/device_graph.zig",
-          "name": "device graph roots user principals and manages enrollment rotation and revocation"
+          "name": "device graph binds platform-backed device keys and rejects synthetic downgrade"
+        },
+        {
+          "file": "src/native/sync/sync_service_test.zig",
+          "name": "sync service persists platform-backed device key bindings across restart"
         }
       ]
     },
@@ -1417,53 +1496,49 @@
         "src/native/sync/sync_state_store.zig",
         "src/native/sync/sync_state_support.zig",
         "src/native/sync/sync_adapters.zig",
+        "src/native/sync/sync_service_test.zig",
         "src/native/sync/sync_transport_harness.zig",
         "src/native/session/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
+          "file": "src/native/sync/sync_service_test.zig",
+          "name": "sync service replicates payloads to peer storage through booted relay fallback"
+        },
+        {
           "file": "src/native/session/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
-        },
-        {
-          "file": "src/native/sync/sync_service_test.zig",
-          "name": "sync service covers device graph policy replication semantics and restart recovery"
-        },
-        {
-          "file": "src/native/sync/sync_service_test.zig",
-          "name": "sync port requires service-scoped authority before device graph mutation"
         }
       ]
     },
     "REQ-SYNC-SEMANTICS": {
-      "status": "enforced",
+      "status": "modeled",
       "enforcement_modules": [
         "src/native/sync/sync_state_support.zig",
         "src/native/sync/sync_service_impl.zig",
         "src/native/sync/sync_adapters.zig",
         "src/native/session/service_path_proofs.zig"
       ],
-      "negative_tests": [
-        {
-          "file": "src/native/session/service_path_proofs.zig",
-          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
-        },
-        {
-          "file": "src/native/sync/sync_service_test.zig",
-          "name": "sync service covers device graph policy replication semantics and restart recovery"
-        },
-        {
-          "file": "src/native/sync/sync_adapters.zig",
-          "name": "secret transfer adapter refuses plaintext secret payloads"
-        }
-      ]
+      "coverage_note": "CRDT, operation log, secret-transfer, and database-contract semantics are modeled in adapters and service tests, but not all data classes run through live app/service replication.",
+      "roadmap": {
+        "priority": "P1",
+        "focus": "Exercise each sync data class through native service IPC and booted replication paths.",
+        "graduation_proof": "Documents, large objects, secrets, and declared database state replicate through booted services with focused conflict, integrity, and secret-leak negative tests."
+      }
     },
     "REQ-SHARING": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/storage/workspace.zig"
+        "src/native/storage/workspace.zig",
+        "src/native/storage/storage_service.zig",
+        "src/native/kernel_api/capability.zig",
+        "src/native/core/principal.zig"
       ],
       "negative_tests": [
+        {
+          "file": "src/native/storage/storage_service.zig",
+          "name": "storage port derives shared workspace capabilities and blocks unauthorized reshares"
+        },
         {
           "file": "src/native/storage/workspace.zig",
           "name": "workspace sharing acts as a mutable policy container"
@@ -1480,20 +1555,16 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
-          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
-        },
-        {
           "file": "src/native/drivers/network_driver_task.zig",
           "name": "native network stack gates service identity packets on attested policy capability"
         },
         {
-          "file": "src/native/sync/network_policy.zig",
-          "name": "egress broker binds connection creation to attested pinned service identity"
+          "file": "src/native/drivers/network_driver_task.zig",
+          "name": "native network stack requires scoped local discovery before discovery broadcast"
         },
         {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation verification rejects measured state and statement tampering"
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
     },
@@ -1516,13 +1587,10 @@
         "src/native/sync/sync_service_impl.zig",
         "src/native/sync/sync_transport_harness.zig",
         "src/native/sync/network_policy.zig",
+        "src/native/drivers/network_driver_task.zig",
         "src/native/session/service_path_proofs.zig"
       ],
       "negative_tests": [
-        {
-          "file": "src/native/session/service_path_proofs.zig",
-          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
-        },
         {
           "file": "src/native/sync/sync_transport_harness.zig",
           "name": "booted overlay relay service rejects unauthorized relay and target changes"
@@ -1530,58 +1598,47 @@
         {
           "file": "src/native/sync/sync_service_test.zig",
           "name": "overlay sessions cover sync remote access private service publishing and encrypted relay"
+        },
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
     },
     "REQ-TASK-FIRST-UX": {
-      "status": "enforced",
+      "status": "modeled",
       "enforcement_modules": [
         "src/native/platform/compositor_session.zig",
+        "src/native/task/task_runtime_service.zig",
         "src/native/platform/native_ux.zig",
         "src/native/platform/rendered_shell.zig",
         "src/native/platform/event_ledger.zig",
         "src/native/policy/permission_review_service.zig",
         "src/native/session/service_path_proofs.zig"
       ],
-      "negative_tests": [
-        {
-          "file": "src/native/platform/rendered_shell.zig",
-          "name": "rendered task shell drives task workspace document panel and focus controls"
-        },
-        {
-          "file": "src/native/platform/rendered_shell.zig",
-          "name": "rendered task shell rejects out-of-order or missing workspace interactions"
-        },
-        {
-          "file": "src/native/session/service_path_proofs.zig",
-          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
-        }
-      ]
+      "coverage_note": "Task creation, app-linked task views, component attachment, audit records, and compositor/task-runtime checkpoint recovery now run through native service models and booted service-path coverage, but the final shell/input/display stack is still modeled rather than production interactive UI.",
+      "roadmap": {
+        "priority": "P2",
+        "focus": "Move modeled task-first compositor and task-runtime recovery proof into the production shell input/display stack.",
+        "graduation_proof": "A production shell flow creates, resumes, links apps to, and audits task-oriented work through real compositor input and persistent task state without relying on modeled framebuffer/service controls."
+      }
     },
     "REQ-WINDOWS-AND-VIEWS": {
-      "status": "enforced",
+      "status": "modeled",
       "enforcement_modules": [
         "src/native/platform/compositor_display.zig",
         "src/native/platform/compositor_session.zig",
         "src/native/session/service_path_proofs.zig"
       ],
-      "negative_tests": [
-        {
-          "file": "src/native/platform/compositor_display.zig",
-          "name": "compositor display framebuffer renders windows switching recovery and permission decisions"
-        },
-        {
-          "file": "src/native/platform/compositor_display.zig",
-          "name": "compositor display framebuffer rejects undersized surfaces"
-        },
-        {
-          "file": "src/native/session/service_path_proofs.zig",
-          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
-        }
-      ]
+      "coverage_note": "Document, workspace, app-panel, and full-screen views now run through compositor session, framebuffer rendering, booted service-path switching, invalid-window denial, and checkpoint restore tests, but the display/input stack is still a modeled compositor rather than a production shell.",
+      "roadmap": {
+        "priority": "P2",
+        "focus": "Move the modeled compositor session/display path into production compositor input and display services.",
+        "graduation_proof": "A production compositor flow renders and switches each view type, denies invalid surfaces, and persists task/view state across service restart."
+      }
     },
     "REQ-PERMISSION-UX": {
-      "status": "enforced",
+      "status": "modeled",
       "enforcement_modules": [
         "src/native/policy/permission_review.zig",
         "src/native/policy/permission_review_service.zig",
@@ -1590,20 +1647,12 @@
         "src/native/platform/event_ledger.zig",
         "src/native/session/service_path_proofs.zig"
       ],
-      "negative_tests": [
-        {
-          "file": "src/native/policy/permission_review_service.zig",
-          "name": "rendered permission review surface drives allow deny controls through compositor display and policy grants"
-        },
-        {
-          "file": "src/native/policy/permission_review_service.zig",
-          "name": "rendered permission review surface requires every visible decision before grants"
-        },
-        {
-          "file": "src/native/session/service_path_proofs.zig",
-          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
-        }
-      ]
+      "coverage_note": "Permission prompts, visible controls, scoped decisions, grant minting, compositor checkpoints, and event-ledger records now run through the native review service and rendered compositor surface, but the approval loop still uses a modeled framebuffer/control path rather than a production shell.",
+      "roadmap": {
+        "priority": "P1",
+        "focus": "Replace the modeled framebuffer/control path with booted compositor input and policy-service mediation for the same prompt, decision, grant, and audit invariants.",
+        "graduation_proof": "A booted permission flow shows object, duration, reason, network path, and locality; every visible decision gates the resulting capability and audit record."
+      }
     },
     "REQ-NOTIFICATIONS": {
       "status": "enforced",
@@ -1622,21 +1671,18 @@
       "enforcement_modules": [
         "src/native/task/accelerator_scheduler.zig",
         "src/native/task/userspace_scheduler.zig",
+        "src/native/platform/platform_policy_signals.zig",
         "src/native/task/task_runtime_model.zig",
         "src/native/session/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
-          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
-        },
-        {
-          "file": "src/native/task/accelerator_scheduler.zig",
-          "name": "accelerator scheduler derives hardware telemetry from booted live counters"
+          "file": "src/native/platform/platform_policy_signals.zig",
+          "name": "platform policy signals derive hardware scheduler telemetry from booted runtime state"
         },
         {
           "file": "src/native/task/userspace_scheduler.zig",
-          "name": "userspace scheduler denies unavailable required accelerators and wakes when granted"
+          "name": "userspace scheduler requires observed platform telemetry before waking hardware queues"
         },
         {
           "file": "src/native/task/userspace_scheduler.zig",
@@ -1645,6 +1691,10 @@
         {
           "file": "src/native/task/userspace_scheduler.zig",
           "name": "userspace scheduler applies thermal and battery decisions to live dispatch"
+        },
+        {
+          "file": "src/native/task/accelerator_scheduler.zig",
+          "name": "accelerator scheduler tracks exclusive engine claims and zero-copy attachments"
         }
       ]
     },
@@ -1657,20 +1707,12 @@
       ],
       "negative_tests": [
         {
+          "file": "src/native/kernel_api/shared_memory.zig",
+          "name": "shared memory rejects stale task and accelerator descriptors after generation changes"
+        },
+        {
           "file": "src/native/session/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
-        },
-        {
-          "file": "src/native/kernel_api/shared_memory.zig",
-          "name": "shared memory objects map through freestanding mmu and revoke accelerator mappings"
-        },
-        {
-          "file": "src/native/kernel_api/shared_memory.zig",
-          "name": "shared memory objects label accelerator access and explicit zero-copy attachments"
-        },
-        {
-          "file": "src/native/task/accelerator_scheduler.zig",
-          "name": "accelerator scheduler tracks exclusive engine claims and zero-copy attachments"
         }
       ]
     },
@@ -1685,10 +1727,6 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
-          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
-        },
-        {
           "file": "src/native/platform/platform_policy_signals.zig",
           "name": "platform policy signals derive hardware scheduler telemetry from booted runtime state"
         },
@@ -1698,7 +1736,11 @@
         },
         {
           "file": "src/native/task/userspace_scheduler.zig",
-          "name": "userspace scheduler applies thermal and battery decisions to live dispatch"
+          "name": "userspace scheduler requires observed platform telemetry before waking hardware queues"
+        },
+        {
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler applies booted live telemetry across every resource class"
         }
       ]
     },
@@ -1727,20 +1769,12 @@
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
-          "file": "src/native/drivers/driver_service.zig",
-          "name": "kernel driver roles keep data planes out of kernel by default"
-        },
-        {
-          "file": "src/native/drivers/driver_service.zig",
-          "name": "network drivers cannot request kernel bootstrap broker transports"
-        },
-        {
-          "file": "src/native/drivers/driver_service.zig",
-          "name": "kernel bootstrap transport is only granted to supported driver classes"
+          "file": "src/native/drivers/bootstrap_driver_port.zig",
+          "name": "kernel bootstrap cannot publish peripheral device data-plane transports directly"
         },
         {
           "file": "src/kernel/boot/init/data_plane_boundary.zig",
-          "name": "kernel device init boundary rejects data-plane publication"
+          "name": "kernel device init boundary rejects excluded subsystem data planes"
         }
       ]
     },
@@ -1785,6 +1819,10 @@
         {
           "file": "src/native/session/supervisor.zig",
           "name": "driver hot-swap rebinds authority and restarts only the owning service"
+        },
+        {
+          "file": "src/native/drivers/driver_runtime.zig",
+          "name": "runtime deactivates only the requested driver class for shared services"
         },
         {
           "file": "src/native/drivers/driver_runtime.zig",
@@ -1919,24 +1957,41 @@
     "REQ-POLICY-EXAMPLES": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/policy/policy_object.zig"
+        "src/native/policy/policy_example_enforcement.zig",
+        "src/native/policy/policy_object.zig",
+        "src/native/services/package_service.zig",
+        "src/native/sync/network_policy.zig",
+        "src/native/policy/policy_mediation.zig",
+        "src/native/platform/event_ledger.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/policy/policy_object.zig",
-          "name": "policy objects reject oversized lists and refuse authorization after tampering"
+          "file": "src/native/policy/policy_example_enforcement.zig",
+          "name": "policy examples route package network removable and sync denials through subsystem gates"
+        },
+        {
+          "file": "src/native/policy/policy_example_enforcement.zig",
+          "name": "policy examples deny screen capture grants and enforce retention audit requirements"
         }
       ]
     },
     "REQ-ENTERPRISE-SUPPORT": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/policy/policy_object.zig"
+        "src/native/policy/enterprise_management.zig",
+        "src/native/policy/policy_object.zig",
+        "src/native/policy/policy_example_enforcement.zig",
+        "src/native/platform/event_ledger.zig",
+        "src/native/sync/device_graph.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/policy/policy_object.zig",
-          "name": "policy objects reject oversized lists and refuse authorization after tampering"
+          "file": "src/native/policy/enterprise_management.zig",
+          "name": "enterprise management applies overrides revokes and audits organization policy"
+        },
+        {
+          "file": "src/native/policy/enterprise_management.zig",
+          "name": "enterprise management gates device trust administration through existing graph and audits it"
         }
       ]
     },
@@ -1973,17 +2028,22 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/policy/manifest.zig",
-        "src/native/demo/bootstrap_packages.zig"
+        "src/native/policy/permission_review.zig",
+        "src/native/services/package_service.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/policy/manifest.zig",
-          "name": "validate rejects incomplete or duplicate component declarations"
+          "file": "src/native/policy/permission_review.zig",
+          "name": "permission review does not grant hidden device access for the example writer manifest"
+        },
+        {
+          "file": "src/native/services/package_service.zig",
+          "name": "package service rejects example writer manifest updates that widen permissions without declaration"
         }
       ]
     },
     "REQ-ZIGOS-USER-EXPERIENCE": {
-      "status": "enforced",
+      "status": "modeled",
       "enforcement_modules": [
         "src/native/demo/session_demo_boot.zig",
         "src/native/demo/platform_scenarios.zig",
@@ -2000,34 +2060,18 @@
         "src/native/platform/update_health.zig",
         "src/native/services/compatibility_environment.zig",
         "src/native/platform/event_ledger.zig",
-        "src/native/session/session_manager.zig"
+        "src/native/session/session_manager.zig",
+        "src/native/session/session_manager_test.zig"
       ],
-      "coverage_note": "The experience requirement is enforced by an end-to-end rendered demo journey that drives visible controls for install, task launch, workspace/document views, permission review, device-to-device sync, reversible app update, compatibility containment denial, recovery, and package removal. The journey records each user-visible step into the event ledger, and package removal now invalidates launch plans through the package service port.",
-      "negative_tests": [
-        {
-          "file": "src/native/platform/rendered_shell.zig",
-          "name": "rendered demo journey drives install sync permission update recovery and removal controls"
-        },
-        {
-          "file": "src/native/platform/native_ux.zig",
-          "name": "native ux records app lifecycle sync containment and removal flows"
-        },
-        {
-          "file": "src/native/services/package_service.zig",
-          "name": "package service enforces signed manifests policy gated sources updates rollback and remove"
-        },
-        {
-          "file": "src/native/services/package_service.zig",
-          "name": "package port requires service authority before install update rollback and remove"
-        },
-        {
-          "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 19 user journeys keep installs sync permissions updates and recovery cohesive"
-        }
-      ]
+      "coverage_note": "Booted session-manager state and rendered shell models now exercise install, update, sync, permission review, recovery, and removal flows through native services and event-ledger records, but the final production shell and administrator UI remain modeled.",
+      "roadmap": {
+        "priority": "P2",
+        "focus": "Move the booted UX journey model into production shell and administration surfaces for install, uninstall, update, sync, permission review, recovery, and policy administration.",
+        "graduation_proof": "A production end-to-end journey exercises each stated user, developer, and administrator outcome through native services, persistent shell state, and visible UI surfaces."
+      }
     },
     "REQ-ONE-SENTENCE-SUMMARY": {
-      "status": "enforced",
+      "status": "modeled",
       "enforcement_modules": [
         "tools/check_spec_coverage.py",
         "src/native/kernel_api/capability.zig",
@@ -2042,36 +2086,12 @@
         "src/native/platform/rendered_shell.zig",
         "src/native/platform/event_ledger.zig"
       ],
-      "negative_tests": [
-        {
-          "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 2.1 6.2 and 7 explicit grants are required before a task gains authority"
-        },
-        {
-          "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 8 storage stays versioned recoverable signed and exposed through a derived file bridge"
-        },
-        {
-          "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 9 and 10 use a trusted device graph selective sync and policy-gated networking"
-        },
-        {
-          "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explicit"
-        },
-        {
-          "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible"
-        },
-        {
-          "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
-        },
-        {
-          "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 19 user journeys keep installs sync permissions updates and recovery cohesive"
-        }
-      ]
+      "coverage_note": "The summary now maps each clause to concrete enforced or modeled subsystem evidence, but it remains an aggregate health check until every dependency is independently enforced.",
+      "roadmap": {
+        "priority": "P2",
+        "focus": "Keep this aggregate tied to the capability, local-first, multi-device, immutable-core, object-storage, sandboxing, identity, and accelerator dependency statuses instead of scenario-only prose.",
+        "graduation_proof": "All underlying capability, local-first, multi-device, immutable-core, object-storage, sandboxing, identity, and accelerator requirements are independently enforced."
+      }
     }
   }
 }

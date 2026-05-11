@@ -981,6 +981,7 @@ test "accelerator scheduler tracks exclusive engine claims and zero-copy attachm
     try std.testing.expect(media_mapping.zero_copy);
     try std.testing.expectEqual(object.page_base, media_mapping.page_base);
     try std.testing.expectEqual(@as(usize, 8), media_mapping.page_count);
+    try shared.validateAcceleratorMappingDescriptor(media_mapping, .media);
     try std.testing.expectEqual(@as(u16, 1), controller.activeClaimCount());
 
     try std.testing.expectError(error.EngineBusy, controller.claim(.{
@@ -1009,6 +1010,7 @@ test "accelerator scheduler tracks exclusive engine claims and zero-copy attachm
     try std.testing.expect(try controller.releaseClaim(claim.id, &shared));
     try std.testing.expect(!(try shared.isAcceleratorAttached(object.id, .media)));
     try std.testing.expectError(error.AcceleratorNotAttached, shared.acceleratorMappingDescriptor(object.id, .media));
+    try std.testing.expectError(error.AcceleratorNotAttached, shared.validateAcceleratorMappingDescriptor(media_mapping, .media));
     try std.testing.expectEqual(@as(u16, 1), controller.activeClaimCount());
     try std.testing.expect(try controller.releaseClaim(degraded.id, null));
     try std.testing.expectEqual(@as(u16, 0), controller.activeClaimCount());

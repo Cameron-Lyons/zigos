@@ -318,7 +318,7 @@ test "syscall surface returns an explicit empty receive response when no message
     try std.testing.expectEqual(@as(u8, 0), response.has_attached_capability);
 }
 
-test "syscall surface denies task creation without userspace launch provenance" {
+test "syscall surface denies task creation without signed userspace launch provenance" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
@@ -351,6 +351,44 @@ test "syscall surface denies task creation without userspace launch provenance" 
     try std.testing.expectEqual(abi.SyscallStatus.denied, result.status);
     try std.testing.expectEqual(abi.DenialReason.policy_denied, result.denial_reason);
     try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
+
+    const unsigned_image = task_runtime.syntheticUserspaceImage("unsigned-syscall", "app.example.unsigned-syscall");
+    var unsigned_response = std.mem.zeroes(abi.TaskDescriptor);
+    const unsigned_request = component_port.TaskCreateRequest{
+        .header = component_port.makeHeader(.task_create, 92, test_kernel.session_task_id),
+        .authority_capability_id = test_kernel.authority_capability_id,
+        .request = .{
+            .owner = .{ .kind = .app, .serial = 13 },
+            .component_class = .app_component,
+            .budget = .{
+                .cpu_time_ticks = 1_000,
+                .memory_bytes = 1024,
+                .endpoint_slots = 4,
+                .shared_memory_bytes = 1024,
+            },
+            .local_only = true,
+            .launch = .{
+                .boundary = .userspace_process,
+                .image_id = 24,
+                .component_abi_version = 1,
+                .signed = false,
+                .bundle_id = "app.example.unsigned-syscall",
+            },
+            .userspace_image = &unsigned_image,
+        },
+    };
+    const unsigned_result = dispatch(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        10,
+        @intFromPtr(&unsigned_request),
+        @intFromPtr(&unsigned_response),
+        @sizeOf(abi.TaskDescriptor),
+    );
+
+    try std.testing.expectEqual(abi.SyscallStatus.denied, unsigned_result.status);
+    try std.testing.expectEqual(abi.DenialReason.policy_denied, unsigned_result.denial_reason);
+    try std.testing.expectEqual(@as(u32, 0), unsigned_result.bytes_written);
 }
 
 test "syscall surface rejects unsupported native operations" {

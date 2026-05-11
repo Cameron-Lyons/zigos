@@ -1165,66 +1165,8 @@ test "package service round-trips the example writer manifest fields without wid
         .seed = [_]u8{0x37} ** 32,
     };
     try trustTestPublisher(&service, signer_identity, "Example Software");
-    const provided_interfaces = [_]manifest.InterfaceDecl{
-        .{ .name = "writer.edit/v1" },
-    };
-    const consumed_interfaces = [_]manifest.InterfaceDecl{
-        .{ .name = "documents.open/v1" },
-        .{ .name = "export.pdf/v1" },
-    };
-    const components = [_]manifest.ExecutionComponentDecl{
-        .{ .id = "writer-ui", .entry = "com.example.writer.ui" },
-    };
-    const assets = [_]manifest.AssetDecl{
-        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
-    };
-    const permissions = [_]manifest.PermissionRequest{
-        .{
-            .kind = .object_access,
-            .resource = "workspace://report-alpha",
-            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
-            .local_only = true,
-        },
-        .{
-            .kind = .network_egress,
-            .resource = "sync.example.com",
-            .rights = .{ .network_policy = .{ .network_remote = true } },
-            .required = false,
-        },
-        .{
-            .kind = .background_execution,
-            .resource = "sync-complete",
-            .rights = .{ .task = .{ .background_run = true } },
-            .required = false,
-        },
-    };
-    const background_tasks = [_]manifest.BackgroundTaskDecl{
-        .{
-            .id = "sync-complete",
-            .trigger = .sync_completion,
-            .expected_duration_seconds = 30,
-            .budget = .{
-                .cpu_time_ticks = 100,
-                .memory_bytes = 64 * 1024,
-            },
-            .network = .none,
-            .visibility = .status_only,
-        },
-    };
 
-    var bundle = manifest.BundleManifest{
-        .bundle_id = "com.example.writer",
-        .display_name = "Writer",
-        .publisher = "Example Software",
-        .version_major = 1,
-        .version_minor = 4,
-        .provided_interfaces = &provided_interfaces,
-        .consumed_interfaces = &consumed_interfaces,
-        .components = &components,
-        .assets = &assets,
-        .requested_permissions = &permissions,
-        .background_tasks = &background_tasks,
-    };
+    var bundle = manifest_fixtures.exampleWriterBundle();
     bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
 
     _ = try service.install(.{
@@ -1251,10 +1193,55 @@ test "package service round-trips the example writer manifest fields without wid
     try std.testing.expectEqualStrings("sync-complete", current.requested_permissions[2].resource);
     try std.testing.expectEqual(@as(usize, 1), current.background_tasks.len);
     try std.testing.expectEqualStrings("sync-complete", current.background_tasks[0].id);
+    try std.testing.expectEqual(@as(u32, 30), current.background_tasks[0].expected_duration_seconds);
+    try std.testing.expectEqual(manifest.BackgroundNetworkMode.none, current.background_tasks[0].network);
+    try std.testing.expectEqual(manifest.BackgroundVisibility.status_only, current.background_tasks[0].visibility);
+    try std.testing.expectEqual(manifest.UpdateChannel.stable, current.update_channel);
 
     for (current.requested_permissions) |request| {
         try std.testing.expect(request.kind != .camera);
         try std.testing.expect(request.kind != .mic);
         try std.testing.expect(request.kind != .location);
     }
+}
+
+test "package service rejects example writer manifest updates that widen permissions without declaration" {
+    var service = Service.init();
+    const signer_identity = signing.SignerIdentity{
+        .label = "pkg-test-example-writer-update",
+        .seed = [_]u8{0x39} ** 32,
+    };
+    try trustTestPublisher(&service, signer_identity, "Example Software");
+
+    var bundle = manifest_fixtures.exampleWriterBundle();
+    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+    const installed = try service.install(.{
+        .bundle = bundle,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null);
+    try std.testing.expect(installed.installed_new);
+
+    const widened_permissions = [_]manifest.PermissionRequest{
+        manifest_fixtures.example_writer_permissions[0],
+        manifest_fixtures.example_writer_permissions[1],
+        manifest_fixtures.example_writer_permissions[2],
+        .{
+            .kind = .camera,
+            .resource = "camera.front",
+            .rights = .{ .device = .{ .device_use = true } },
+            .required = false,
+            .local_only = true,
+        },
+    };
+    var widened = manifest_fixtures.exampleWriterBundle();
+    widened.version_minor = 5;
+    widened.requested_permissions = &widened_permissions;
+    widened.signature = try signing.sign(signer_identity, &digestBundle(widened));
+
+    try std.testing.expectError(error.PermissionChangeUndeclared, service.install(.{
+        .bundle = widened,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
 }

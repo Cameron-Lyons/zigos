@@ -1,6 +1,7 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const manifest = @import("manifest.zig");
+const manifest_fixtures = @import("manifest_fixtures.zig");
 const native_util = @import("../core/util.zig");
 const policy_mediation = @import("policy_mediation.zig");
 
@@ -423,6 +424,43 @@ test "renderToBuffer includes bundle name, permission labels, and decisions" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Object access") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "decision: allow") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "decision: deny") != null);
+}
+
+test "permission review does not grant hidden device access for the example writer manifest" {
+    const bundle = manifest_fixtures.exampleWriterBundle();
+    try manifest.validate(bundle);
+    try manifest.validateApplicationPackaging(bundle);
+
+    const decisions = [_]ReviewDecision{
+        decisionFromCommand(bundle.requested_permissions[0], try parseCommand("allow local")),
+        decisionFromCommand(bundle.requested_permissions[1], try parseCommand("deny")),
+        decisionFromCommand(bundle.requested_permissions[2], try parseCommand("allow lease=30")),
+        .{
+            .kind = .camera,
+            .resource = "camera.front",
+            .allow = true,
+            .local_only = true,
+        },
+    };
+    var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+    const grants = decisionsToGrants(&bundle, &decisions, 20, &grants_buffer);
+
+    try std.testing.expectEqual(@as(usize, 2), grants.len);
+    for (grants) |grant| {
+        try std.testing.expect(grant.kind != .camera);
+        try std.testing.expect(grant.kind != .mic);
+        try std.testing.expect(grant.kind != .location);
+    }
+
+    const session = initSession(9, &bundle, &decisions);
+    var buffer: [2048]u8 = undefined;
+    const rendered = try renderToBuffer(&buffer, &session, &bundle);
+
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Permission review for Writer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Background execution") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "sync-complete") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "expected duration: 30 seconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "network: none") != null);
 }
 
 test "parseCommand accepts allow local leases and deny commands" {

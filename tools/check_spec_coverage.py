@@ -20,6 +20,23 @@ EVIDENCE_STATUSES = {"enforced", "modeled", "scenario", "deferred"}
 ROADMAP_STATUSES = EVIDENCE_STATUSES - {"enforced"}
 ROADMAP_PRIORITIES = {"P0", "P1", "P2"}
 ROADMAP_TEXT_FIELDS = ("focus", "graduation_proof")
+STATUS_POLICY = {
+    # These rows are aggregate or user-experience narratives. They can track
+    # non-enforced proof and roadmap state, but they are not single enforceable
+    # invariants.
+    "REQ-DESIGN-GOALS-AND-NON-GOALS": {"modeled", "scenario", "deferred"},
+    "REQ-TASK-FIRST-UX": {"modeled", "scenario", "deferred"},
+    "REQ-WINDOWS-AND-VIEWS": {"modeled", "scenario", "deferred"},
+    "REQ-PERMISSION-UX": {"modeled", "scenario", "deferred"},
+    "REQ-ZIGOS-USER-EXPERIENCE": {"modeled", "scenario", "deferred"},
+    "REQ-ONE-SENTENCE-SUMMARY": {"modeled", "scenario", "deferred"},
+    # These rows currently depend on emulator/synthetic hardware,
+    # in-process models, or partial subsystem integration. Keep them
+    # out of Enforced until the manifest and tests carry booted/live proof.
+    "REQ-BOOT-CHAIN": {"modeled", "scenario", "deferred"},
+    "REQ-MEASURED-STATE": {"modeled", "scenario", "deferred"},
+    "REQ-SYNC-SEMANTICS": {"modeled", "scenario", "deferred"},
+}
 
 META_REQUIREMENT_DEPENDENCIES = {
     "REQ-DESIGN-GOALS-AND-NON-GOALS": [
@@ -100,6 +117,40 @@ def validate_roadmap(errors: list[str], requirement_id: str, requirement_evidenc
             errors.append(f"Requirement {requirement_id} roadmap must include non-empty {field}")
             valid = False
     return valid and priority in ROADMAP_PRIORITIES
+
+
+def validate_meta_requirement_dependencies(
+    errors: list[str],
+    evidence: dict,
+    requirement_id: str,
+    dependencies: list[str],
+) -> None:
+    requirement_evidence = evidence.get(requirement_id, {})
+    requirement_status = requirement_evidence.get("status")
+    if requirement_status not in {"enforced", "modeled"}:
+        return
+
+    allowed_dependency_statuses = (
+        {"enforced"} if requirement_status == "enforced" else {"enforced", "modeled"}
+    )
+    expected = (
+        "enforced" if requirement_status == "enforced" else "enforced or modeled"
+    )
+
+    for dependency_id in dependencies:
+        dependency_evidence = evidence.get(dependency_id)
+        if dependency_evidence is None:
+            errors.append(
+                f"Meta requirement {requirement_id} depends on missing requirement evidence: {dependency_id}"
+            )
+            continue
+        dependency_status = dependency_evidence.get("status")
+        if dependency_status not in allowed_dependency_statuses:
+            errors.append(
+                "Meta requirement "
+                f"{requirement_id} is {requirement_status!r} but depends on "
+                f"{dependency_id}, which is {dependency_status!r}; expected {expected}"
+            )
 
 
 def main() -> int:
@@ -216,6 +267,15 @@ def main() -> int:
             )
             continue
 
+        allowed_statuses = STATUS_POLICY.get(requirement_id)
+        if allowed_statuses is not None and status not in allowed_statuses:
+            errors.append(
+                "Requirement "
+                f"{requirement_id} is {status!r}, but current evidence policy allows "
+                f"only {sorted(allowed_statuses)}"
+            )
+            continue
+
         if status == "scenario":
             scenario_count += 1
         if status == "enforced":
@@ -288,20 +348,7 @@ def main() -> int:
                 roadmap_count += 1
 
     for requirement_id, dependencies in META_REQUIREMENT_DEPENDENCIES.items():
-        requirement_evidence = evidence.get(requirement_id, {})
-        if requirement_evidence.get("status") != "enforced":
-            continue
-        for dependency_id in dependencies:
-            dependency_evidence = evidence.get(dependency_id)
-            if dependency_evidence is None:
-                errors.append(
-                    f"Meta requirement {requirement_id} depends on missing requirement evidence: {dependency_id}"
-                )
-                continue
-            if dependency_evidence.get("status") != "enforced":
-                errors.append(
-                    f"Meta requirement {requirement_id} depends on {dependency_id}, which is {dependency_evidence.get('status')!r}, not enforced"
-                )
+        validate_meta_requirement_dependencies(errors, evidence, requirement_id, dependencies)
 
     expected_gap_matrix = render_gap_matrix(manifest)
     actual_gap_matrix = GAP_MATRIX_PATH.read_text() if GAP_MATRIX_PATH.exists() else ""

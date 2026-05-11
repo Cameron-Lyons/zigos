@@ -16,9 +16,11 @@ const kernel_data_plane_boundary = @import("../../kernel/boot/init/data_plane_bo
 const manifest = @import("../policy/manifest.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
 const native_ux = @import("../platform/native_ux.zig");
+const notification_center = @import("../services/notification_center.zig");
 const platform_policy_signals = @import("../platform/platform_policy_signals.zig");
 const permission_review_service = @import("../policy/permission_review_service.zig");
 const policy_mediation = @import("../policy/policy_mediation.zig");
+const process_isolation = @import("../task/process_isolation.zig");
 const rendered_shell = @import("../platform/rendered_shell.zig");
 const native_service_registry = @import("../services/service_registry.zig");
 const network_driver_task = @import("../drivers/network_driver_task.zig");
@@ -68,6 +70,13 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
     try std.testing.expect(runtime.processSeparated(sync_task.id, storage_task.id));
     try std.testing.expect(runtime.processSeparated(sync_task.id, storage_driver_task.id));
     try std.testing.expect(runtime.processSeparated(storage_driver_task.id, storage_task.id));
+    try proveBootedProcessIsolationVisibleEntitlementGates(
+        runtime,
+        capability_table,
+        sync_task,
+        storage_task,
+        compositor_task,
+    );
 
     const session_authority_id = findServiceAuthority(
         capability_table,
@@ -248,6 +257,10 @@ fn proveBootedSharedMemoryMappingRevocation(
     try std.testing.expect(peer_mmu_mapping.virtual_base != 0);
     try std.testing.expect(owner_mmu_mapping.virtual_base != peer_mmu_mapping.virtual_base);
     try std.testing.expect(!owner_mmu_mapping.zero_copy);
+    try kernel_port.kernel.shared_memory_table.validateTaskMappingDescriptor(owner_mapping);
+    try kernel_port.kernel.shared_memory_table.validateTaskMappingDescriptor(peer_mapping);
+    try kernel_port.kernel.shared_memory_table.validateFreestandingTaskMappingDescriptor(owner_mmu_mapping);
+    try kernel_port.kernel.shared_memory_table.validateFreestandingTaskMappingDescriptor(peer_mmu_mapping);
     try std.testing.expectEqual(@as(usize, 2), kernel_port.kernel.shared_memory_table.activeFreestandingMappings(object_id));
 
     const revoked = try expectSharedMemoryRevoke(kernel_port, owner.task_id, created.capability_id, 135);
@@ -262,6 +275,8 @@ fn proveBootedSharedMemoryMappingRevocation(
     try std.testing.expectEqual(abi.DenialReason.capability_revoked, post_revoke_map.denial_reason);
     try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.taskMappingDescriptor(object_id, ids.task(owner.task_id)));
     try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.freestandingTaskMappingDescriptor(object_id, ids.task(owner.task_id)));
+    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.validateTaskMappingDescriptor(owner_mapping));
+    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.validateFreestandingTaskMappingDescriptor(owner_mmu_mapping));
     try std.testing.expectEqual(@as(usize, 0), kernel_port.kernel.shared_memory_table.activeFreestandingMappings(object_id));
 
     const accelerated = try kernel_port.kernel.shared_memory_table.createLabeledWithAccess(ids.task(owner.task_id), 8192, "booted-accelerator", .{
@@ -282,6 +297,10 @@ fn proveBootedSharedMemoryMappingRevocation(
     try std.testing.expect(task_mmu_mapping.virtual_base != gpu_mmu_mapping.virtual_base);
     try std.testing.expect(gpu_mmu_mapping.zero_copy);
     try std.testing.expectEqual(shared_memory_mod.ComputeTarget.gpu, gpu_mmu_mapping.target.?);
+    try kernel_port.kernel.shared_memory_table.validateTaskMappingDescriptor(task_mapping);
+    try kernel_port.kernel.shared_memory_table.validateAcceleratorMappingDescriptor(gpu_mapping, .gpu);
+    try kernel_port.kernel.shared_memory_table.validateFreestandingTaskMappingDescriptor(task_mmu_mapping);
+    try kernel_port.kernel.shared_memory_table.validateFreestandingAcceleratorMappingDescriptor(gpu_mmu_mapping, .gpu);
     try std.testing.expectEqual(@as(usize, 2), kernel_port.kernel.shared_memory_table.activeFreestandingMappings(accelerated.id));
     try kernel_port.kernel.shared_memory_table.revoke(accelerated.id);
     try std.testing.expectEqual(@as(usize, 0), kernel_port.kernel.shared_memory_table.activeFreestandingMappings(accelerated.id));
@@ -289,6 +308,10 @@ fn proveBootedSharedMemoryMappingRevocation(
     try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.acceleratorMappingDescriptor(accelerated.id, .gpu));
     try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.freestandingTaskMappingDescriptor(accelerated.id, ids.task(owner.task_id)));
     try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.freestandingAcceleratorMappingDescriptor(accelerated.id, .gpu));
+    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.validateTaskMappingDescriptor(task_mapping));
+    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.validateAcceleratorMappingDescriptor(gpu_mapping, .gpu));
+    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.validateFreestandingTaskMappingDescriptor(task_mmu_mapping));
+    try std.testing.expectError(error.Revoked, kernel_port.kernel.shared_memory_table.validateFreestandingAcceleratorMappingDescriptor(gpu_mmu_mapping, .gpu));
 }
 
 fn proveBootedDriverPermissions(
@@ -328,6 +351,164 @@ fn proveBootedDriverPermissions(
     try std.testing.expectEqual(abi.DenialReason.capability_missing, cross_task.denial_reason);
 }
 
+fn proveBootedProcessIsolationVisibleEntitlementGates(
+    runtime: *task_runtime.Runtime,
+    capability_table: *capability.CapabilityTable,
+    caller: *task_runtime.TaskRecord,
+    data_target: *task_runtime.TaskRecord,
+    window_target: *task_runtime.TaskRecord,
+) !void {
+    try std.testing.expect(caller.runsAsUserspaceProcess());
+    try std.testing.expect(data_target.runsAsUserspaceProcess());
+    try std.testing.expect(window_target.runsAsUserspaceProcess());
+    try std.testing.expect(runtime.processSeparated(caller.id, data_target.id));
+    try std.testing.expect(runtime.processSeparated(caller.id, window_target.id));
+
+    var broker = process_isolation.Broker.init(runtime, capability_table);
+    try std.testing.expectError(error.CapabilityNotFound, broker.authorize(.{
+        .caller_task_id = caller.id,
+        .target_task_id = data_target.id,
+        .capability_id = 90_000,
+        .operation = .inspect_memory,
+        .user_visible = true,
+        .now_ticks = 90,
+    }));
+
+    const non_visible = try mintProcessControlCapability(
+        capability_table,
+        caller,
+        data_target.id,
+        false,
+        91,
+    );
+    try runtime.grantCapability(caller.id, non_visible.id);
+    try std.testing.expectError(error.VisibleEntitlementRequired, broker.authorize(.{
+        .caller_task_id = caller.id,
+        .target_task_id = data_target.id,
+        .capability_id = non_visible.id,
+        .operation = .inject_code,
+        .user_visible = true,
+        .now_ticks = 92,
+    }));
+
+    const visible_data = try mintProcessControlCapability(
+        capability_table,
+        caller,
+        data_target.id,
+        true,
+        93,
+    );
+    try runtime.grantCapability(caller.id, visible_data.id);
+    inline for (.{ process_isolation.Operation.inspect_memory, process_isolation.Operation.inject_code }) |operation| {
+        const decision = try broker.authorize(.{
+            .caller_task_id = caller.id,
+            .target_task_id = data_target.id,
+            .capability_id = visible_data.id,
+            .operation = operation,
+            .user_visible = true,
+            .now_ticks = 94 + @intFromEnum(operation),
+        });
+        try std.testing.expect(decision.allowed);
+        try std.testing.expectEqual(data_target.id, decision.target_task_id);
+    }
+
+    const visible_window = try mintProcessControlCapability(
+        capability_table,
+        caller,
+        window_target.id,
+        true,
+        101,
+    );
+    try runtime.grantCapability(caller.id, visible_window.id);
+    const scrape_decision = try broker.authorize(.{
+        .caller_task_id = caller.id,
+        .target_task_id = window_target.id,
+        .capability_id = visible_window.id,
+        .operation = .scrape_window,
+        .user_visible = true,
+        .now_ticks = 102,
+    });
+    try std.testing.expect(scrape_decision.allowed);
+    try std.testing.expectEqual(window_target.id, scrape_decision.target_task_id);
+
+    const visible_self = try mintProcessControlCapability(
+        capability_table,
+        caller,
+        caller.id,
+        true,
+        103,
+    );
+    try runtime.grantCapability(caller.id, visible_self.id);
+    try std.testing.expectError(error.VisibleEntitlementRequired, broker.authorize(.{
+        .caller_task_id = caller.id,
+        .capability_id = visible_self.id,
+        .operation = .watch_clipboard,
+        .continuous = true,
+        .user_visible = false,
+        .now_ticks = 104,
+    }));
+    const clipboard_decision = try broker.authorize(.{
+        .caller_task_id = caller.id,
+        .capability_id = visible_self.id,
+        .operation = .watch_clipboard,
+        .continuous = true,
+        .user_visible = true,
+        .now_ticks = 105,
+    });
+    try std.testing.expect(clipboard_decision.allowed);
+    try std.testing.expectEqual(caller.id, clipboard_decision.target_task_id);
+    try std.testing.expectError(error.HiddenGlobalHookDenied, broker.authorize(.{
+        .caller_task_id = caller.id,
+        .capability_id = visible_self.id,
+        .operation = .register_global_hook,
+        .hidden = true,
+        .user_visible = true,
+        .now_ticks = 106,
+    }));
+    const hook_decision = try broker.authorize(.{
+        .caller_task_id = caller.id,
+        .capability_id = visible_self.id,
+        .operation = .register_global_hook,
+        .user_visible = true,
+        .now_ticks = 107,
+    });
+    try std.testing.expect(hook_decision.allowed);
+
+    const latest = caller.latestAuditEvent() orelse return error.MissingProcessIsolationAudit;
+    try std.testing.expectEqual(task_runtime.AuditEventKind.policy_allowed, latest.kind);
+    try std.testing.expectEqual(@as(u32, @intFromEnum(process_isolation.Operation.register_global_hook)), latest.detail);
+}
+
+fn mintProcessControlCapability(
+    capability_table: *capability.CapabilityTable,
+    caller: *const task_runtime.TaskRecord,
+    target_task_id: u64,
+    visible: bool,
+    tick: u64,
+) !capability.Capability {
+    return capability_table.mintBootRoot(.{
+        .holder = caller.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .task, .id = target_task_id },
+        .rights = .{ .task = .{ .process_control = true } },
+        .scope = .{
+            .task_id = caller.id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = tick,
+            .expires_at_ticks = 1_000,
+        },
+        .audit = .{
+            .policy_generation = 1,
+            .source_task_id = caller.id,
+            .broker_service_id = 90,
+            .user_visible_entitlement = visible,
+        },
+    });
+}
+
 fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !void {
     const BootedDriverRuntime = struct {
         tasks: *task_runtime.Runtime,
@@ -341,6 +522,12 @@ fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !void 
 
         pub fn deactivate(self: *@This(), service_id: u64) bool {
             const deactivated = self.activations.deactivate(service_id);
+            if (deactivated) self.deactivation_count += 1;
+            return deactivated;
+        }
+
+        pub fn deactivateDriver(self: *@This(), service_id: u64, device_class: driver_service.DeviceClass) bool {
+            const deactivated = self.activations.deactivateDriver(service_id, device_class);
             if (deactivated) self.deactivation_count += 1;
             return deactivated;
         }
@@ -548,6 +735,111 @@ fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !void 
     try std.testing.expectEqual(swapped_driver.device_id, swapped_descriptor.device_id);
     try std.testing.expectEqual(@as(u16, 0x1F0), swapped_descriptor.base_port);
     try std.testing.expectEqual(@as(u8, 14), swapped_descriptor.irq_line);
+
+    const compositor_service_record = supervisor.findByClass(.compositor_ui_session).?;
+    const graphics_driver = driver_directory.findByClass(.graphics_adapter).?;
+    const input_driver = driver_directory.findByClass(.input_device).?;
+    try std.testing.expect(try bootstrap_driver_port.publishDeviceDataPlane(
+        .graphics_adapter,
+        graphics_driver.device_id,
+        "zigos.system.compositor",
+        false,
+    ));
+    try std.testing.expect(try bootstrap_driver_port.publishDeviceDataPlane(
+        .input_device,
+        input_driver.device_id,
+        "zigos.system.compositor",
+        false,
+    ));
+    const graphics_reactivation = try driver_runtime.activateAt(graphics_driver, 818);
+    const input_reactivation = try driver_runtime.activateAt(input_driver, 819);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, graphics_reactivation.mode);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, input_reactivation.mode);
+    const graphics_task = runtime.find(graphics_driver.owner_task_id).?;
+    const input_activation_before = driver_runtime.findByClass(.input_device) orelse return error.MissingBootedDriverBinding;
+    const graphics_restart_count_before = compositor_service_record.restart_count;
+    const graphics_restart_generation_before = graphics_driver.restart_generation;
+    const graphics_dma_before = graphics_driver.dma_domain_id;
+    const graphics_process_generation_before = graphics_task.process_generation;
+    const graphics_address_space_before = graphics_task.address_space_id;
+    const graphics_authority = try capability_table.mintBootRoot(.{
+        .holder = compositor_service_record.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = driver_service.authorityTarget(graphics_driver.device_id),
+        .rights = driver_service.allowedRightsFor(.graphics_adapter),
+        .scope = .{
+            .task_id = graphics_driver.owner_task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 820,
+            .expires_at_ticks = std.math.maxInt(u64),
+            .renewable = false,
+        },
+        .audit = .{
+            .policy_generation = 2,
+            .source_task_id = session_task.id,
+            .broker_service_id = compositor_service_record.id,
+        },
+    });
+    try runtime.grantCapability(graphics_driver.owner_task_id, graphics_authority.id);
+
+    var notifications = notification_center.Center.init();
+    const graphics_hot_swap = try supervisor.hotSwapDriver(.{
+        .service_id = compositor_service_record.id,
+        .owner_task_id = graphics_driver.owner_task_id,
+        .device_id = graphics_driver.device_id,
+        .device_class = .graphics_adapter,
+        .authority_capability_id = graphics_authority.id,
+        .capability_table = capability_table,
+        .requester = compositor_service_record.owner,
+        .now_ticks = 820,
+        .signer = "zigos-graphics-driver-v2",
+    }, driver_directory, &booted_runtime, &notifications, ledger, 820, "graphics driver hot-swapped through compositor service");
+
+    const swapped_graphics = driver_directory.findByClass(.graphics_adapter).?;
+    const swapped_graphics_task = runtime.find(swapped_graphics.owner_task_id).?;
+    const input_activation_after = driver_runtime.findByClass(.input_device) orelse return error.MissingBootedDriverBinding;
+    try std.testing.expect(graphics_hot_swap.visible_impact);
+    try std.testing.expect(graphics_hot_swap.notification_id != null);
+    try std.testing.expectEqual(notification_center.Reason.driver_restart, notifications.latestVisible(821).?.reason);
+    try std.testing.expectEqual(graphics_restart_generation_before, graphics_hot_swap.previous_restart_generation);
+    try std.testing.expectEqual(graphics_restart_generation_before + 1, graphics_hot_swap.next_restart_generation);
+    try std.testing.expectEqual(graphics_dma_before, graphics_hot_swap.previous_dma_domain_id);
+    try std.testing.expect(swapped_graphics.dma_domain_id != graphics_dma_before);
+    try std.testing.expectEqual(swapped_graphics.dma_domain_id, graphics_hot_swap.next_dma_domain_id);
+    try std.testing.expect(graphics_hot_swap.runtime_activation_observed);
+    try std.testing.expectEqual(swapped_graphics.dma_domain_id, graphics_hot_swap.runtime_dma_domain_id);
+    try std.testing.expect(graphics_hot_swap.runtime_exclusive_claim);
+    try std.testing.expect(!graphics_hot_swap.userspace_brokered_data_plane);
+    try std.testing.expectEqual(graphics_authority.id, swapped_graphics.authority_capability_id);
+    try std.testing.expectEqualStrings("zigos-graphics-driver-v2", swapped_graphics.signerSlice());
+    try std.testing.expect(runtime.hasCapability(swapped_graphics.owner_task_id, graphics_authority.id));
+    try std.testing.expectEqual(graphics_process_generation_before + 1, swapped_graphics_task.process_generation);
+    try std.testing.expect(runtime.findAddressSpaceConst(graphics_address_space_before) == null);
+    try std.testing.expectEqual(@as(usize, 3), booted_runtime.deactivation_count);
+    try std.testing.expectEqual(@as(usize, 3), booted_runtime.activation_count);
+    try std.testing.expectEqual(@as(usize, 3), booted_runtime.rehost_count);
+    try std.testing.expectEqual(swapped_graphics.owner_task_id, booted_runtime.last_task_id);
+    try std.testing.expectEqual(swapped_graphics_task.process_generation, booted_runtime.last_process_generation);
+    try std.testing.expectEqual(swapped_graphics.dma_domain_id, booted_runtime.last_dma_domain_id);
+    try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, compositor_service_record.state);
+    try std.testing.expectEqual(graphics_restart_count_before + 1, compositor_service_record.restart_count);
+    try std.testing.expect(supervisor.hasDiagnostic(compositor_service_record.id, .driver_attached));
+    try std.testing.expect(supervisor.hasDiagnostic(compositor_service_record.id, .restart_completed));
+    try std.testing.expectEqual(graphics_authority.id, ledger.latestKind(.driver_restart).?.related_id);
+    try std.testing.expectEqual(input_driver.service_id, compositor_service_record.id);
+    try std.testing.expectEqual(input_activation_before.activation_generation, input_activation_after.activation_generation);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, input_activation_after.mode);
+    try std.testing.expect(input_activation_after.exclusive_claim);
+    try std.testing.expectEqual(compositor_service_record.id, bootstrap_driver_port.deviceDataPlanePublication(.input_device).?.active_service_id);
+    try std.testing.expectEqual(network_restart_count_before, network_service.restart_count);
+    try std.testing.expectEqual(network_process_generation_before, network_task.process_generation);
+    try std.testing.expectEqual(storage_restart_count_before + 2, storage_service_record.restart_count);
+    try std.testing.expectEqual(service_count_before, session_manager.testing.countServices());
+    try std.testing.expectEqual(task_count_before, session_manager.testing.countTasks());
+    try std.testing.expectEqual(session_process_generation_before, session_task.process_generation);
 }
 
 const BootedServiceBinding = struct {
@@ -629,11 +921,18 @@ fn proveBootedUserspaceServiceOwnershipAndKernelBoundary(
         try std.testing.expectEqual(driver.service_id, activation.service_id);
         try std.testing.expectEqual(driver.device_id, activation.device_id);
         try std.testing.expect(activation.iommu_enforced);
-        if (activation.kernel_bootstrap) {
-            try std.testing.expectEqual(driver_runtime_mod.ActivationMode.userspace_brokered_data_plane, activation.mode);
-        } else {
-            try std.testing.expect(activation.mode != .published_data_plane or activation.exclusive_claim);
+        try std.testing.expect(!activation.kernel_bootstrap);
+        try std.testing.expect(activation.exclusive_claim);
+        switch (expectation.device_class) {
+            .storage_controller => try std.testing.expect(
+                activation.mode == .published_data_plane or
+                    activation.mode == .userspace_brokered_data_plane,
+            ),
+            .network_adapter, .graphics_adapter, .audio_print_io, .input_device => {
+                try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, activation.mode);
+            },
         }
+        try std.testing.expect(activation.publisherSlice().len != 0);
     }
 }
 
@@ -903,6 +1202,13 @@ fn proveBootedSyncServicePath(
         .mode = .named_service_identity,
         .target = "overlay.service-path.notes",
     });
+    const discovery_policy = try sync_port.createNetworkPolicy(sync_authority, .{
+        .owner = sync_owner,
+        .workspace_id = workspace_id,
+        .label = "printer-discovery",
+        .mode = .local_subnet_discovery,
+        .target = "printer",
+    });
     const network_attestation_root = signer("booted-network-attestation-root", 0x7B);
     const peer_boot = try verifiedBootedNetworkPeer(7_050);
     var peer_attestation = attestation_service.Service.init(tablet);
@@ -990,6 +1296,7 @@ fn proveBootedSyncServicePath(
         &sync_instance,
         network_service_task,
         native_identity_policy.id,
+        discovery_policy.id,
         native_identity_statement.root_digest,
         laptop,
         tablet,
@@ -1254,6 +1561,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
     sync: *sync_service.Service,
     network_service_task: *task_runtime.TaskRecord,
     policy_id: u64,
+    discovery_policy_id: u64,
     peer_root_digest: [32]u8,
     source_device: principal.PrincipalId,
     target_device: principal.PrincipalId,
@@ -1375,6 +1683,65 @@ fn proveBootedIdentityFirstNativeNetworkStack(
     try std.testing.expectEqual(@as(usize, 1), stack.transmitted_packets);
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
     try std.testing.expect(Harness.last_frame_len > "native service identity payload".len);
+
+    const discovery_capability = try capability_table.mintBootRoot(.{
+        .holder = network_service_task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .network_policy, .id = discovery_policy_id },
+        .rights = .{ .network_policy = .{
+            .network_local = true,
+        } },
+        .scope = .{
+            .task_id = network_service_task.id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 122,
+            .expires_at_ticks = 1_000,
+        },
+    });
+    try runtime.grantCapability(network_service_task.id, discovery_capability.id);
+
+    var discovery_stack = network_driver_task.NativeNetworkStack.init();
+    try std.testing.expectError(error.EgressDenied, discovery_stack.openLocalDiscovery(&broker, .{
+        .task_id = network_service_task.id,
+        .principal_id = network_service_task.owner,
+        .capability_id = discovery_capability.id,
+        .policy_id = discovery_policy_id,
+        .evidence = .{ .destination = .local_network },
+        .now_ticks = 122,
+    }, source_device));
+    try std.testing.expectEqual(network_policy.EgressDecisionReason.destination_mismatch, discovery_stack.last_denial_reason);
+
+    try std.testing.expectError(error.EgressDenied, discovery_stack.openLocalDiscovery(&broker, .{
+        .task_id = network_service_task.id,
+        .principal_id = network_service_task.owner,
+        .capability_id = discovery_capability.id,
+        .policy_id = discovery_policy_id,
+        .evidence = .{ .destination = .{ .discovery_class = "camera" } },
+        .now_ticks = 123,
+    }, source_device));
+    try std.testing.expectEqual(network_policy.EgressDecisionReason.destination_mismatch, discovery_stack.last_denial_reason);
+
+    const discovery_connection = try discovery_stack.openLocalDiscovery(&broker, .{
+        .task_id = network_service_task.id,
+        .principal_id = network_service_task.owner,
+        .capability_id = discovery_capability.id,
+        .policy_id = discovery_policy_id,
+        .evidence = .{ .destination = .{ .discovery_class = "printer" } },
+        .now_ticks = 124,
+    }, source_device);
+    try std.testing.expect(discovery_connection.scoped_discovery);
+    try std.testing.expectEqualStrings("printer", discovery_connection.discoveryClassSlice());
+
+    const discovery_frame = try discovery_stack.sendLocalDiscoveryProbe(&discovery_connection, "discover-printer");
+    try std.testing.expect(discovery_frame.encrypted);
+    try std.testing.expect(discovery_frame.egress_allowed);
+    try std.testing.expect(discovery_frame.scoped_discovery);
+    try std.testing.expectEqualStrings("printer", discovery_frame.discoveryClassSlice());
+    try std.testing.expect(!std.mem.eql(u8, discovery_frame.ciphertextSlice(), "discover-printer"));
+    try std.testing.expectEqual(@as(usize, 2), Harness.send_count);
 }
 
 fn verifiedBootedNetworkPeer(generation: u64) !measured_boot.BootRecord {
@@ -1567,13 +1934,18 @@ fn proveBootedCompositorServicePath(
         .view_type = .app_panel,
         .subject_task_id = app_task.id,
         .workspace_id = workspace_id,
+        .bundle_id = "app.trip",
+        .display_name = "Trip",
         .detail = "Calendar Panel",
     }, &tick);
     try std.testing.expectEqual(compositor_session.ServiceStatus.ok, panel_response.status);
     try assertRenderedWindowContains(session, panel_response.window_id, "type=app_panel");
     try assertRenderedWindowContains(session, panel_response.window_id, "modal=yes");
+    try assertRenderedWindowContains(session, panel_response.window_id, "bundle=app.trip");
+    try assertRenderedWindowContains(session, panel_response.window_id, "display=Trip");
     try assertDisplayContains(session, "active_type=app_panel");
     try assertDisplayContains(session, "title=Panel: Calendar Panel");
+    try assertDisplayContains(session, "active_app bundle=app.trip display=Trip");
 
     const task_response = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
         .operation = .open_view,
@@ -2996,6 +3368,21 @@ fn signer(label: []const u8, seed: u8) signing.SignerIdentity {
 
 test "booted userspace service paths prove sync driver isolation and resource accounting" {
     try bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting();
+}
+
+test "booted userspace service paths prove process isolation visible-entitlement gates" {
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+
+    session_manager.boot();
+
+    try proveBootedProcessIsolationVisibleEntitlementGates(
+        session_manager.testing.runtimePtr(),
+        session_manager.system().capabilityTablePtr(),
+        session_manager.testing.findTask("sync-service").?,
+        session_manager.testing.findTask("workspace-storage").?,
+        session_manager.testing.findTask("compositor-session").?,
+    );
 }
 
 test "booted driver hot-swap and crash recovery rebind live brokered device authority" {

@@ -366,6 +366,37 @@ pub const TransportQueue = struct {
         return total;
     }
 
+    pub fn latestFrameId(self: *const TransportQueue) u64 {
+        if (self.next_frame_id == 1) return 0;
+        return self.next_frame_id - 1;
+    }
+
+    pub fn copyForSince(
+        self: *const TransportQueue,
+        workspace_id: u64,
+        target_device: principal.PrincipalId,
+        min_frame_id: u64,
+        out: []TransportFrame,
+    ) usize {
+        var copied: usize = 0;
+        var slot_index = self.target_index.head(transportFrameTargetKey(workspace_id, target_device));
+        while (slot_index != indexed_arena.no_index) {
+            if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("transport target index points outside frame slots");
+            const slot = &self.frames.slots[slot_index];
+            if (!slot.in_use) native_util.impossibleByInvariant("transport target index points at a free frame");
+            if (slot.frame.workspace_id == workspace_id and
+                slot.frame.target_device.eql(target_device) and
+                slot.frame.id > min_frame_id)
+            {
+                if (copied >= out.len) return copied;
+                out[copied] = slot.frame;
+                copied += 1;
+            }
+            slot_index = self.target_index.next(slot_index);
+        }
+        return copied;
+    }
+
     pub fn latestForPath(
         self: *const TransportQueue,
         workspace_id: u64,

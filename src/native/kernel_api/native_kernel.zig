@@ -1002,13 +1002,15 @@ test "native kernel descriptor authorization enforces request task scope" {
     try std.testing.expectError(error.ScopeViolation, kernel.resourceQuery(context, other_task.id, 10));
 }
 
-test "native kernel rejects app and service launches without userspace image provenance" {
+test "native kernel rejects app and service launches without signed userspace image provenance" {
     var harness = TestKernelHarness{};
     var kernel = harness.kernel();
     const session_task = try harness.createSessionTask();
     const authority_capability = try harness.mintSessionServiceAuthority(session_task, .{ .service = .{
         .task_create = true,
     } });
+    const unsigned_app_image = task_runtime.syntheticUserspaceImage("unsigned-app", "app.unsigned");
+    const missing_bundle_image = task_runtime.syntheticUserspaceImage("missing-bundle", "zigos.service.missing-bundle");
 
     try std.testing.expectError(error.UserspaceLaunchRequired, kernel.taskCreate(testContext(.task_create, authority_capability.id, .{ .task = 0 }), .{
         .owner = .{ .kind = .app, .serial = 4 },
@@ -1038,6 +1040,44 @@ test "native kernel rejects app and service launches without userspace image pro
             .signed = true,
         },
     }, 6));
+    try std.testing.expectError(error.InvalidUserspaceImage, kernel.taskCreate(testContext(.task_create, authority_capability.id, .{ .task = 0 }), .{
+        .owner = .{ .kind = .app, .serial = 6 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 2048,
+        },
+        .local_only = true,
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = 16,
+            .component_abi_version = 1,
+            .signed = false,
+            .bundle_id = "app.unsigned",
+        },
+        .userspace_image = &unsigned_app_image,
+    }, 7));
+    try std.testing.expectError(error.InvalidUserspaceImage, kernel.taskCreate(testContext(.task_create, authority_capability.id, .{ .task = 0 }), .{
+        .owner = .{ .kind = .service, .serial = 7 },
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 2048,
+        },
+        .local_only = true,
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = 17,
+            .component_abi_version = 1,
+            .signed = true,
+            .bundle_id = "",
+        },
+        .userspace_image = &missing_bundle_image,
+    }, 8));
 }
 
 test "native kernel leaves typed service registration outside the TCB" {

@@ -26,6 +26,7 @@ pub const MAX_DATABASE_CONTRACTS = state_support.MAX_DATABASE_CONTRACTS;
 pub const MAX_OVERLAYS = state_support.MAX_OVERLAYS;
 pub const MAX_PRIVATE_SERVICES = state_support.MAX_PRIVATE_SERVICES;
 pub const MAX_LABEL_BYTES = state_support.MAX_LABEL_BYTES;
+pub const MAX_TRANSPORT_FRAMES = state_support.MAX_TRANSPORT_FRAMES;
 pub const MAX_OVERLAY_SESSIONS: usize = 8;
 const REPLICA_INDEX_CAPACITY: usize = MAX_REPLICA_ENTRIES * 2;
 pub const ServiceConfig = struct {
@@ -133,6 +134,27 @@ pub const ReplicaEntry = state_support.ReplicaEntry;
 pub const ConflictRecord = state_support.ConflictRecord;
 pub const DatabaseContract = state_support.DatabaseContract;
 pub const ReplicationSummary = state_support.ReplicationSummary;
+pub const PeerReplicationRequest = struct {
+    source_storage: *const storage_service.Service,
+    target_storage: *storage_service.Service,
+    workspace_id: u64,
+    from_device: principal.PrincipalId,
+    to_device: principal.PrincipalId,
+    transport: TransportMode,
+    network_capabilities: ?*const capability.CapabilityTable = null,
+    relay_service: ?*sync_transport.BootedOverlayRelayService = null,
+    relay_capability_id: u64 = 0,
+    signer: signing.SignerIdentity,
+    tick: u64,
+};
+pub const PeerReplicationResult = struct {
+    summary: ReplicationSummary,
+    accepted_frame_count: usize = 0,
+    persisted_object_count: usize = 0,
+    relay_delivery_count: usize = 0,
+    payload_bytes: usize = 0,
+    used_booted_relay_service: bool = false,
+};
 pub const MergeableDocumentAdapter = sync_adapters.MergeableDocumentAdapter;
 pub const ChunkMediaAdapter = sync_adapters.ChunkMediaAdapter;
 pub const SecretTransferAdapter = sync_adapters.SecretTransferAdapter;
@@ -143,6 +165,7 @@ pub const TransportQueue = sync_adapters.TransportQueue;
 pub const Error = state_support.Error;
 pub const AuthorityContext = service_authority.Context;
 pub const AuthorityError = service_authority.Error;
+pub const PeerReplicationError = AuthorityError || Error || sync_transport.Error;
 
 const WorkspacePolicySlot = state_support.WorkspacePolicySlot;
 const ReplicaSlot = state_support.ReplicaSlot;
@@ -297,6 +320,21 @@ pub const SyncPort = struct {
         return self.service.enrollTrustedDevice(user_principal, device_principal, label, authorizer, device_identity, tick);
     }
 
+    pub fn enrollPlatformBackedDevice(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        user_principal: principal.PrincipalId,
+        device_principal: principal.PrincipalId,
+        label: []const u8,
+        authorizer: signing.SignerIdentity,
+        device_identity: signing.SignerIdentity,
+        platform_key: device_graph.PlatformKeyBindingRequest,
+        tick: u64,
+    ) (AuthorityError || Error)!*device_graph.DeviceRecord {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.enrollPlatformBackedDevice(user_principal, device_principal, label, authorizer, device_identity, platform_key, tick);
+    }
+
     pub fn rotateDeviceKey(
         self: *SyncPort,
         authority: AuthorityContext,
@@ -308,6 +346,20 @@ pub const SyncPort = struct {
     ) (AuthorityError || Error)!*device_graph.DeviceRecord {
         _ = try self.requireSyncAuthority(authority);
         return self.service.rotateDeviceKey(user_principal, device_principal, authorizer, next_device_identity, tick);
+    }
+
+    pub fn rotatePlatformBackedDeviceKey(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        user_principal: principal.PrincipalId,
+        device_principal: principal.PrincipalId,
+        authorizer: signing.SignerIdentity,
+        next_device_identity: signing.SignerIdentity,
+        platform_key: device_graph.PlatformKeyBindingRequest,
+        tick: u64,
+    ) (AuthorityError || Error)!*device_graph.DeviceRecord {
+        _ = try self.requireSyncAuthority(authority);
+        return self.service.rotatePlatformBackedDeviceKey(user_principal, device_principal, authorizer, next_device_identity, platform_key, tick);
     }
 
     pub fn revokeTrustedDevice(
@@ -467,6 +519,49 @@ pub const SyncPort = struct {
         return self.service.replicateWorkspace(store, workspace_id, from_device, to_device, transport);
     }
 
+    pub fn replicateWorkspaceToPeer(
+        self: *SyncPort,
+        authority: AuthorityContext,
+        peer: *SyncPort,
+        peer_authority: AuthorityContext,
+        request: PeerReplicationRequest,
+    ) PeerReplicationError!PeerReplicationResult {
+        _ = try self.requireSyncAuthority(authority);
+        _ = try peer.requireSyncAuthority(peer_authority);
+        try self.validatePeerReplicationRequest(request);
+
+        const starting_frame_id = self.service.latestTransportFrameId();
+        const summary = try self.service.replicateWorkspace(
+            request.source_storage,
+            request.workspace_id,
+            request.from_device,
+            request.to_device,
+            request.transport,
+        );
+
+        var result = PeerReplicationResult{ .summary = summary };
+        var frames: [MAX_TRANSPORT_FRAMES]TransportFrame = undefined;
+        const frame_count = self.service.copyTransportFramesForSince(
+            request.workspace_id,
+            request.to_device,
+            starting_frame_id,
+            frames[0..],
+        );
+        sortTransportFramesById(frames[0..frame_count]);
+
+        for (frames[0..frame_count]) |frame| {
+            const delivery = try self.replicateFramePayloadToPeer(peer, request, frame);
+            result.accepted_frame_count += 1;
+            result.persisted_object_count += 1;
+            result.payload_bytes += delivery.payload_len;
+            if (delivery.used_booted_relay_service) {
+                result.used_booted_relay_service = true;
+                result.relay_delivery_count += 1;
+            }
+        }
+        return result;
+    }
+
     pub fn acceptTransportFrame(
         self: *SyncPort,
         authority: AuthorityContext,
@@ -522,6 +617,109 @@ pub const SyncPort = struct {
             authority,
             .endpoint_connect,
         );
+    }
+
+    fn validatePeerReplicationRequest(
+        self: *SyncPort,
+        request: PeerReplicationRequest,
+    ) PeerReplicationError!void {
+        try self.service.ensureTrustedDevices(request.from_device, request.to_device);
+        const policy = self.service.findWorkspacePolicy(request.workspace_id) orelse return error.WorkspacePolicyNotFound;
+        try self.service.authorizeTransport(policy, request.transport, null);
+        if (request.transport != .relay_assisted) return;
+
+        const relay_service = request.relay_service orelse return error.TransportDenied;
+        if (!std.mem.eql(u8, relay_service.relayDomainSlice(), policy.relayDomainSlice())) {
+            return error.EgressDenied;
+        }
+        const network_capabilities = request.network_capabilities orelse return error.TransportDenied;
+        const relay_policy_id = policy.relay_policy_id orelse return error.TransportDenied;
+
+        var broker = self.service.egressBroker(network_capabilities);
+        var transport = sync_transport.Harness.init();
+        _ = try transport.openRelay(&broker, .{
+            .task_id = self.service.task_id,
+            .principal_id = self.service.owner,
+            .capability_id = request.relay_capability_id,
+            .policy_id = relay_policy_id,
+            .evidence = .{ .destination = .{ .domain = policy.relayDomainSlice() } },
+            .now_ticks = request.tick,
+        }, request.from_device, request.to_device, policy.relayDomainSlice());
+    }
+
+    const PeerFrameDelivery = struct {
+        payload_len: usize,
+        used_booted_relay_service: bool,
+    };
+
+    fn replicateFramePayloadToPeer(
+        self: *SyncPort,
+        peer: *SyncPort,
+        request: PeerReplicationRequest,
+        frame: TransportFrame,
+    ) PeerReplicationError!PeerFrameDelivery {
+        const source_version = request.source_storage.version(frame.version_id) orelse return error.VersionNotFound;
+        const payload = try request.source_storage.versionPayload(source_version);
+        var used_booted_relay_service = false;
+
+        if (request.transport == .relay_assisted) {
+            const relay_service = request.relay_service orelse return error.TransportDenied;
+            const network_capabilities = request.network_capabilities orelse return error.TransportDenied;
+            const relay_result = try self.service.sendOverlayRelayFrameViaService(network_capabilities, relay_service, .{
+                .workspace_id = request.workspace_id,
+                .from_device = request.from_device,
+                .to_device = request.to_device,
+                .usage = .sync_replication,
+                .relay_capability_id = request.relay_capability_id,
+                .payload = payload,
+                .signer = request.signer,
+                .tick = request.tick,
+            });
+            if (!relay_result.delivered or relay_result.delivered_len != payload.len) {
+                return error.RelayDeliveryMissing;
+            }
+            used_booted_relay_service = true;
+        }
+
+        const parent_version_id = if (request.target_storage.resolve(frame.workspace_id, frame.pathSlice())) |current|
+            if (current.object_id.raw() == frame.object_id) current.version_id else null
+        else |err| switch (err) {
+            error.EntryNotFound => null,
+            else => return err,
+        };
+        const persisted = try request.target_storage.putVersion(.{
+            .preferred_object_id = object_store.ids.object(frame.object_id),
+            .object_type = source_version.object_type,
+            .payload = payload,
+            .metadata = source_version.metadata,
+            .parent_version_id = parent_version_id,
+        });
+        try request.target_storage.beginTransaction(frame.workspace_id);
+        try request.target_storage.stagePut(
+            frame.workspace_id,
+            frame.pathSlice(),
+            persisted.object_id,
+            persisted.version_id,
+            source_version.object_type,
+        );
+        const generation = try request.target_storage.commit(frame.workspace_id, request.tick);
+
+        _ = try peer.service.acceptTransportFrame(request.target_storage, .{
+            .workspace_id = frame.workspace_id,
+            .object_id = persisted.object_id.raw(),
+            .version_id = persisted.version_id.raw(),
+            .source_device = frame.source_device,
+            .target_device = frame.target_device,
+            .transport = frame.transport,
+            .semantic = frame.semantic,
+            .encrypted = frame.encrypted,
+            .workspace_generation = generation,
+            .path = frame.pathSlice(),
+        });
+        return .{
+            .payload_len = payload.len,
+            .used_booted_relay_service = used_booted_relay_service,
+        };
     }
 };
 
@@ -662,6 +860,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return self.transport_queue.count();
         }
 
+        pub fn latestTransportFrameId(self: *const Self) u64 {
+            return self.transport_queue.latestFrameId();
+        }
+
         pub fn overlaySessionCapacity(self: *const Self) usize {
             _ = self;
             return MAX_SERVICE_OVERLAY_SESSIONS;
@@ -669,6 +871,16 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
         pub fn transportFrameCountFor(self: *const Self, workspace_id: u64, device_id: principal.PrincipalId) usize {
             return self.transport_queue.countFor(workspace_id, device_id);
+        }
+
+        pub fn copyTransportFramesForSince(
+            self: *const Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            min_frame_id: u64,
+            out: []TransportFrame,
+        ) usize {
+            return self.transport_queue.copyForSince(workspace_id, device_id, min_frame_id, out);
         }
 
         pub fn latestTransportFrameForPath(
@@ -705,6 +917,21 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return record;
         }
 
+        fn enrollPlatformBackedDevice(
+            self: *Self,
+            user_principal: principal.PrincipalId,
+            device_principal: principal.PrincipalId,
+            label: []const u8,
+            authorizer: signing.SignerIdentity,
+            device_identity: signing.SignerIdentity,
+            platform_key: device_graph.PlatformKeyBindingRequest,
+            tick: u64,
+        ) Error!*device_graph.DeviceRecord {
+            const record = try self.state().graph.enrollPlatformBackedDevice(user_principal, device_principal, label, authorizer, device_identity, platform_key, tick);
+            try self.checkpoint();
+            return record;
+        }
+
         fn rotateDeviceKey(
             self: *Self,
             user_principal: principal.PrincipalId,
@@ -718,6 +945,20 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return record;
         }
 
+        fn rotatePlatformBackedDeviceKey(
+            self: *Self,
+            user_principal: principal.PrincipalId,
+            device_principal: principal.PrincipalId,
+            authorizer: signing.SignerIdentity,
+            next_device_identity: signing.SignerIdentity,
+            platform_key: device_graph.PlatformKeyBindingRequest,
+            tick: u64,
+        ) Error!*device_graph.DeviceRecord {
+            const record = try self.state().graph.rotatePlatformBackedDeviceKey(user_principal, device_principal, authorizer, next_device_identity, platform_key, tick);
+            try self.checkpoint();
+            return record;
+        }
+
         fn revokeTrustedDevice(
             self: *Self,
             user_principal: principal.PrincipalId,
@@ -725,8 +966,16 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             authorizer: signing.SignerIdentity,
             tick: u64,
         ) Error!void {
+            const was_platform_backed = if (self.state().graph.findDevice(device_principal)) |record|
+                record.usesPlatformBackedKey()
+            else
+                false;
             try self.state().graph.revokeDevice(user_principal, device_principal, authorizer, tick);
-            self.resident().markDirty();
+            if (was_platform_backed) {
+                try self.checkpoint();
+            } else {
+                self.resident().markDirty();
+            }
         }
 
         pub fn findDeviceRecord(self: *const Self, device_id: principal.PrincipalId) ?*const device_graph.DeviceRecord {
@@ -1632,6 +1881,18 @@ fn signatureEql(a: manifest.Signature, b: manifest.Signature) bool {
         std.mem.eql(u8, a.publicKeySlice(), b.publicKeySlice()) and
         a.value_len == b.value_len and
         std.mem.eql(u8, a.valueSlice(), b.valueSlice());
+}
+
+fn sortTransportFramesById(frames: []TransportFrame) void {
+    var index: usize = 1;
+    while (index < frames.len) : (index += 1) {
+        const value = frames[index];
+        var insert_at = index;
+        while (insert_at > 0 and frames[insert_at - 1].id > value.id) : (insert_at -= 1) {
+            frames[insert_at] = frames[insert_at - 1];
+        }
+        frames[insert_at] = value;
+    }
 }
 
 fn classifyEntry(entry: workspace.Entry) SyncSemantic {

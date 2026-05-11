@@ -4,6 +4,7 @@ const boot_markers = @import("../../kernel/boot/markers.zig");
 const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
+const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -24,6 +25,7 @@ const native_store_mount = @import("native_store_mount.zig");
 const storage_service_mod = @import("../storage/storage_service.zig");
 const supervisor_mod = @import("supervisor.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
+const session_service_bootstrap = @import("session_service_bootstrap.zig");
 const background_dispatch = @import("../task/background_dispatch.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service_mod = @import("../task/task_runtime_service.zig");
@@ -72,6 +74,8 @@ pub const SessionManager = struct {
 
     pub fn reset(self: *SessionManager) void {
         self.* = SessionManager.init();
+        bootstrap_driver_port.reset();
+        session_service_bootstrap.resetBootedDataPlanes();
         self.ensureConstructed();
         self.runtime_context.resetScheduler();
         self.native_store.resetPersistent();

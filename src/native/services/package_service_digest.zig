@@ -66,7 +66,7 @@ pub fn digestBundle(bundle: manifest.BundleManifest) [32]u8 {
         crypto_hash.updateBytes(&hasher, "asset-content-type", asset.content_type);
     }
     for (bundle.requested_permissions, 0..) |permission, index| {
-        const rights_bits: u32 = permission.rights.toBits();
+        const rights_bits = permission.rights.toBits();
         crypto_hash.updateInt(&hasher, "permission-index", index);
         crypto_hash.updateEnum(&hasher, "permission-kind", permission.kind);
         crypto_hash.updateBytes(&hasher, "permission-resource", permission.resource);
@@ -94,7 +94,7 @@ pub fn digestBundle(bundle: manifest.BundleManifest) [32]u8 {
 pub fn permissionDigest(requests: []const manifest.PermissionRequest) [32]u8 {
     var hasher = crypto_hash.init();
     for (requests, 0..) |request, index| {
-        const rights_bits: u32 = request.rights.toBits();
+        const rights_bits = request.rights.toBits();
         crypto_hash.updateInt(&hasher, "permission-index", index);
         crypto_hash.updateEnum(&hasher, "permission-kind", request.kind);
         crypto_hash.updateBytes(&hasher, "permission-resource", request.resource);

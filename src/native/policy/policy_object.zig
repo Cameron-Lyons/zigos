@@ -43,9 +43,12 @@ pub const DecisionReason = enum(u8) {
     none,
     unsigned_policy,
     install_source_denied,
+    network_egress_denied,
     sync_destination_denied,
     removable_storage_denied,
     screen_capture_denied,
+    retention_denied,
+    audit_export_required,
 };
 
 pub const PolicyDecision = struct {
@@ -64,6 +67,7 @@ pub const CreateRequest = struct {
     install_source_mode: InstallSourceMode = .any_signed,
     allowed_install_sources: []const []const u8 = &.{},
     network_egress_mode: NetworkEgressMode = .inherit,
+    allowed_network_destinations: []const []const u8 = &.{},
     allowed_sync_destinations: []const []const u8 = &.{},
     removable_storage_allowed: bool = false,
     screen_capture_allowed: bool = false,
@@ -71,9 +75,15 @@ pub const CreateRequest = struct {
     audit_export_required: bool = false,
 };
 
+pub const RetentionAuditRequest = struct {
+    retention_days: u16,
+    audit_export_present: bool = false,
+};
+
 pub const PolicyObject = struct {
     id: u64,
     generation: u32,
+    revoked: bool,
     scope: Scope,
     subject_id: u64,
     issuer: principal.PrincipalId,
@@ -84,6 +94,9 @@ pub const PolicyObject = struct {
     allowed_install_sources: [MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8,
     allowed_install_source_lens: [MAX_ALLOW_LIST]usize,
     network_egress_mode: NetworkEgressMode,
+    allowed_network_destination_count: usize,
+    allowed_network_destinations: [MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8,
+    allowed_network_destination_lens: [MAX_ALLOW_LIST]usize,
     allowed_sync_destination_count: usize,
     allowed_sync_destinations: [MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8,
     allowed_sync_destination_lens: [MAX_ALLOW_LIST]usize,
@@ -113,6 +126,19 @@ pub const PolicyObject = struct {
         };
     }
 
+    pub fn allowsNetworkDestination(self: *const PolicyObject, destination: []const u8) bool {
+        return switch (self.network_egress_mode) {
+            .inherit, .unrestricted => true,
+            .none => false,
+            .local_only => isLocalDestination(destination),
+            .allow_list => listContains(
+                self.allowed_network_destinations[0..self.allowed_network_destination_count],
+                self.allowed_network_destination_lens[0..self.allowed_network_destination_count],
+                destination,
+            ),
+        };
+    }
+
     pub fn allowsSyncDestination(self: *const PolicyObject, destination: []const u8) bool {
         if (self.allowed_sync_destination_count == 0) {
             return switch (self.network_egress_mode) {
@@ -132,9 +158,13 @@ pub const PolicyObject = struct {
 pub const Error = error{
     InstallSourceTooLong,
     LabelTooLong,
+    NetworkDestinationTooLong,
+    PolicyAlreadyRevoked,
+    PolicyNotFound,
     PolicyTableFull,
     SyncDestinationTooLong,
     TooManyInstallSources,
+    TooManyNetworkDestinations,
     TooManySyncDestinations,
 };
 
@@ -162,6 +192,7 @@ pub const Directory = struct {
         signer: signing.SignerIdentity,
     ) (Error || anyerror)!*PolicyObject {
         if (request.allowed_install_sources.len > MAX_ALLOW_LIST) return error.TooManyInstallSources;
+        if (request.allowed_network_destinations.len > MAX_ALLOW_LIST) return error.TooManyNetworkDestinations;
         if (request.allowed_sync_destinations.len > MAX_ALLOW_LIST) return error.TooManySyncDestinations;
 
         const slot_index = self.firstFreeSlotIndex() orelse return error.PolicyTableFull;
@@ -187,6 +218,10 @@ pub const Directory = struct {
             slot.policy.allowed_install_source_lens[index] = native_util.copyTextExact(&slot.policy.allowed_install_sources[index], source_identity) catch return error.InstallSourceTooLong;
             slot.policy.allowed_install_source_count += 1;
         }
+        for (request.allowed_network_destinations, 0..) |destination, index| {
+            slot.policy.allowed_network_destination_lens[index] = native_util.copyTextExact(&slot.policy.allowed_network_destinations[index], destination) catch return error.NetworkDestinationTooLong;
+            slot.policy.allowed_network_destination_count += 1;
+        }
         for (request.allowed_sync_destinations, 0..) |destination, index| {
             slot.policy.allowed_sync_destination_lens[index] = native_util.copyTextExact(&slot.policy.allowed_sync_destinations[index], destination) catch return error.SyncDestinationTooLong;
             slot.policy.allowed_sync_destination_count += 1;
@@ -207,6 +242,7 @@ pub const Directory = struct {
             const slot = &self.slots[cursor];
             if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
             if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
+            if (slot.policy.revoked) continue;
             if (slot.policy.generation < best_generation) continue;
             candidate = &slot.policy;
             best_generation = slot.policy.generation;
@@ -218,6 +254,30 @@ pub const Directory = struct {
         const policy = self.findConst(policy_id) orelse return false;
         const digest = policyDigest(policy);
         return signing.verify(policy.signature, &digest);
+    }
+
+    pub fn revokePolicy(self: *Directory, policy_id: u64) Error!void {
+        const slot_index = self.policy_id_index.lookup(policy_id) orelse return error.PolicyNotFound;
+        if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("policy id index points outside slots");
+        const slot = &self.slots[slot_index];
+        if (!slot.in_use or slot.policy.id != policy_id) native_util.impossibleByInvariant("policy id index points at the wrong policy");
+        if (slot.policy.revoked) return error.PolicyAlreadyRevoked;
+        slot.policy.revoked = true;
+    }
+
+    pub fn revokePoliciesForScope(self: *Directory, scope: Scope, subject_id: u64) usize {
+        var revoked_count: usize = 0;
+        var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
+        while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
+            if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
+            const slot = &self.slots[cursor];
+            if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
+            if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
+            if (slot.policy.revoked) continue;
+            slot.policy.revoked = true;
+            revoked_count += 1;
+        }
+        return revoked_count;
     }
 
     pub fn installSourceAllowed(
@@ -274,6 +334,22 @@ pub const Directory = struct {
         return allow();
     }
 
+    pub fn networkEgressDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        destination: []const u8,
+    ) PolicyDecision {
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (!policy.allowsNetworkDestination(destination)) {
+                return block(policy, .network_egress_denied);
+            }
+        }
+        return allow();
+    }
+
     pub fn removableStorageDecision(self: *const Directory, subjects: SubjectSet) PolicyDecision {
         var iter = self.activePolicyIterator(subjects);
         while (iter.next()) |policy| {
@@ -290,6 +366,25 @@ pub const Directory = struct {
             const signature_decision = self.requireVerified(policy);
             if (!signature_decision.allowed) return signature_decision;
             if (!policy.screen_capture_allowed) return block(policy, .screen_capture_denied);
+        }
+        return allow();
+    }
+
+    pub fn retentionAuditDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: RetentionAuditRequest,
+    ) PolicyDecision {
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (policy.retention_days != 0 and request.retention_days > policy.retention_days) {
+                return block(policy, .retention_denied);
+            }
+            if (policy.audit_export_required and !request.audit_export_present) {
+                return block(policy, .audit_export_required);
+            }
         }
         return allow();
     }
@@ -312,6 +407,7 @@ pub const Directory = struct {
             const slot = &self.slots[cursor];
             if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
             if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
+            if (slot.policy.revoked) continue;
             if (slot.policy.generation < best_generation) continue;
             candidate = &slot.policy;
             best_generation = slot.policy.generation;
@@ -396,6 +492,7 @@ fn zeroPolicy() PolicyObject {
     return .{
         .id = 0,
         .generation = 0,
+        .revoked = false,
         .scope = .user,
         .subject_id = 0,
         .issuer = .{ .kind = .policy_authority, .serial = 0 },
@@ -406,6 +503,9 @@ fn zeroPolicy() PolicyObject {
         .allowed_install_sources = [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** MAX_ALLOW_LIST,
         .allowed_install_source_lens = [_]usize{0} ** MAX_ALLOW_LIST,
         .network_egress_mode = .inherit,
+        .allowed_network_destination_count = 0,
+        .allowed_network_destinations = [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** MAX_ALLOW_LIST,
+        .allowed_network_destination_lens = [_]usize{0} ** MAX_ALLOW_LIST,
         .allowed_sync_destination_count = 0,
         .allowed_sync_destinations = [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** MAX_ALLOW_LIST,
         .allowed_sync_destination_lens = [_]usize{0} ** MAX_ALLOW_LIST,
@@ -418,8 +518,20 @@ fn zeroPolicy() PolicyObject {
 }
 
 fn nextGeneration(self: *const Directory, scope: Scope, subject_id: u64) u32 {
-    const active = self.activeForScopeConst(scope, subject_id) orelse return 1;
-    return active.generation + 1;
+    return latestGenerationForScope(self, scope, subject_id) + 1;
+}
+
+fn latestGenerationForScope(self: *const Directory, scope: Scope, subject_id: u64) u32 {
+    var best_generation: u32 = 0;
+    var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
+    while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
+        if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
+        const slot = &self.slots[cursor];
+        if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
+        if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
+        if (slot.policy.generation > best_generation) best_generation = slot.policy.generation;
+    }
+    return best_generation;
 }
 
 fn policyScopeKey(scope: Scope, subject_id: u64) u64 {
@@ -447,6 +559,11 @@ fn policyDigest(policy: *const PolicyObject) [32]u8 {
     while (allow_index < policy.allowed_install_source_count) : (allow_index += 1) {
         crypto_hash.updateInt(&hasher, "install-source-index", allow_index);
         crypto_hash.updateBytes(&hasher, "install-source", policy.allowed_install_sources[allow_index][0..policy.allowed_install_source_lens[allow_index]]);
+    }
+    var network_index: usize = 0;
+    while (network_index < policy.allowed_network_destination_count) : (network_index += 1) {
+        crypto_hash.updateInt(&hasher, "network-destination-index", network_index);
+        crypto_hash.updateBytes(&hasher, "network-destination", policy.allowed_network_destinations[network_index][0..policy.allowed_network_destination_lens[network_index]]);
     }
     var sync_index: usize = 0;
     while (sync_index < policy.allowed_sync_destination_count) : (sync_index += 1) {

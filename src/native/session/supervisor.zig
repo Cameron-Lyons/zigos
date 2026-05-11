@@ -248,9 +248,7 @@ pub const Supervisor = struct {
 
         _ = self.requestRestart(service_id, tick + 1);
         _ = directory.markRestarted(service_id);
-        if (@hasDecl(@TypeOf(runtime.*), "deactivate")) {
-            _ = runtime.deactivate(driver.service_id);
-        }
+        _ = deactivateRuntimeDriver(runtime, driver.service_id, driver.device_class);
         const activation = try activateRuntimeDriver(runtime, driver, tick + 2);
         _ = self.completeRestart(service_id, tick + 2);
 
@@ -295,11 +293,11 @@ pub const Supervisor = struct {
         detail: []const u8,
     ) !DriverHotSwapReport {
         const service = self.find(request.service_id) orelse return error.ServiceNotFound;
-        const previous = (directory.findByService(request.service_id) orelse return error.DriverNotFound).*;
         if (!service.restartable) return error.ServiceNotRestartable;
         if (!self.allowsDriverAttachment(request.service_id, request.device_class)) {
             return error.DriverAttachmentDenied;
         }
+        const previous = (directory.findByServiceAndClass(request.service_id, request.device_class) orelse return error.DriverNotFound).*;
 
         const swap_detail = if (detail.len != 0)
             detail
@@ -308,9 +306,7 @@ pub const Supervisor = struct {
         const visible_impact = driverImpactIsVisible(request.device_class);
 
         _ = self.requestRestart(request.service_id, tick);
-        if (@hasDecl(@TypeOf(runtime.*), "deactivate")) {
-            _ = runtime.deactivate(request.service_id);
-        }
+        _ = deactivateRuntimeDriver(runtime, request.service_id, request.device_class);
 
         const swapped = try directory.hotSwapSigned(request);
         const activation = try activateRuntimeDriver(runtime, swapped, tick + 1);
@@ -518,6 +514,16 @@ fn activateRuntimeDriver(
         return observeDriverActivation(try runtime.activateAt(driver, tick));
     }
     return observeDriverActivation(try runtime.activate(driver));
+}
+
+fn deactivateRuntimeDriver(runtime: anytype, service_id: u64, device_class: driver_service.DeviceClass) bool {
+    if (@hasDecl(@TypeOf(runtime.*), "deactivateDriver")) {
+        return runtime.deactivateDriver(service_id, device_class);
+    }
+    if (@hasDecl(@TypeOf(runtime.*), "deactivate")) {
+        return runtime.deactivate(service_id);
+    }
+    return false;
 }
 
 fn observeDriverActivation(result: anytype) DriverActivationObservation {
