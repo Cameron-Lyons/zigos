@@ -45,6 +45,13 @@ pub const EventKind = enum(u8) {
     capability_revocation,
     notification,
     task_flow,
+    policy_change,
+};
+
+pub const PolicyChangeAction = enum(u8) {
+    applied,
+    overridden,
+    revoked,
 };
 
 pub const ExportOptions = struct {
@@ -434,6 +441,26 @@ pub const Ledger = struct {
             .subject = subject,
             .related_id = device_id.serial,
             .allowed = trusted,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordPolicyChange(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        policy_id: u64,
+        action: PolicyChangeAction,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        try self.append(.{
+            .kind = .policy_change,
+            .tick = tick,
+            .subject = subject,
+            .related_id = policy_id,
+            .detail_code = @intFromEnum(action),
+            .allowed = action != .revoked,
             .detail_len = clampedDetailLen(detail),
             .detail = copyTextInto(detail),
         });
@@ -931,6 +958,12 @@ fn flowKindLabel(code: u32) []const u8 {
     return @tagName(kind);
 }
 
+fn policyChangeActionLabel(code: u32) []const u8 {
+    if (code > std.math.maxInt(u8)) return "corrupt";
+    const action = std.enums.fromInt(PolicyChangeAction, @as(u8, @intCast(code))) orelse return "corrupt";
+    return @tagName(action);
+}
+
 fn kindKey(kind: EventKind) u64 {
     return @as(u64, @intFromEnum(kind)) + 1;
 }
@@ -1021,6 +1054,12 @@ fn renderTextEvent(event: Event, buffer: []u8, used: *usize) Error!void {
                 event.related_id,
                 flowKindLabel(event.detail_code),
                 yesNo(event.allowed),
+            });
+        },
+        .policy_change => {
+            try appendFmt(buffer, used, " policy={d} action={s}", .{
+                event.related_id,
+                policyChangeActionLabel(event.detail_code),
             });
         },
         else => {},

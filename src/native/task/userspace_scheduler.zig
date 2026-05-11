@@ -85,6 +85,7 @@ const Slot = struct {
     last_dispatch_reason: accelerator_scheduler.DecisionReason = .normal,
     last_dispatch_degraded: bool = false,
     last_dispatch_zero_copy: bool = false,
+    last_policy_delay_tick: u64 = 0,
     delayed_dispatch_count: u64 = 0,
     denied_dispatch_count: u64 = 0,
 };
@@ -303,6 +304,7 @@ pub const Scheduler = struct {
         engine: accelerator_scheduler.Engine,
         now_ticks: u64,
     ) ?AcceleratorClaimRecord {
+        if (!self.physicalEngineAvailable(engine)) return null;
         const claim_index = self.popAcceleratorClaimIndex(engine) orelse return null;
         const record = self.accelerator_claims.slots[claim_index].record;
         _ = self.accelerator_claims.removeIndex(claim_index);
@@ -343,7 +345,12 @@ pub const Scheduler = struct {
         const runtime = self.runtime_ptr orelse return false;
 
         while (self.ready_task_count != 0) {
-            const class = self.selectReadyResourceClass(now_ticks) orelse break;
+            const class = self.selectReadyResourceClass(now_ticks) orelse {
+                if (self.accountBlockedReadyClasses(now_ticks)) {
+                    self.last_dispatch_tick = now_ticks;
+                }
+                break;
+            };
             const index = self.popReadyIndex(class) orelse break;
             const slot = &self.slots.slots[index];
             if (!slot.in_use) continue;
@@ -520,6 +527,51 @@ pub const Scheduler = struct {
         };
     }
 
+    fn accountBlockedReadyClasses(self: *Scheduler, now_ticks: u64) bool {
+        var accounted = false;
+        for (resource_priority_order) |class| {
+            if (self.resourceClassDispatchable(class)) continue;
+            const queue_index = resourceClassIndex(class);
+            const slot_index = self.ready_heads[queue_index];
+            if (slot_index == no_index) continue;
+            if (slot_index >= self.slots.slots.len) continue;
+
+            const slot = &self.slots.slots[slot_index];
+            if (!slot.in_use or slot.last_policy_delay_tick == now_ticks) continue;
+
+            self.accountDispatchDelayed(slot, self.blockedResourceDecision(class));
+            slot.last_policy_delay_tick = now_ticks;
+            accounted = true;
+        }
+        return accounted;
+    }
+
+    fn blockedResourceDecision(
+        self: *const Scheduler,
+        class: accelerator_scheduler.ResourceClass,
+    ) accelerator_scheduler.Decision {
+        const decision = accelerator_scheduler.planWithState(
+            self.resource_state,
+            self.engineAvailability(),
+            .{ .class = class },
+        );
+        if (decision.delayed) return decision;
+        return .{
+            .class = class,
+            .engine = .cpu,
+            .delayed = true,
+            .degraded = true,
+            .zero_copy_allowed = false,
+            .reason = self.blockedResourceReason(),
+        };
+    }
+
+    fn blockedResourceReason(self: *const Scheduler) accelerator_scheduler.DecisionReason {
+        if (self.resource_state.thermal_pressure == .critical) return .thermal_throttle;
+        if (self.resource_state.battery_saver) return .battery_preserve;
+        return .normal;
+    }
+
     fn planTaskDispatch(
         self: *const Scheduler,
         slot: *const Slot,
@@ -561,8 +613,10 @@ pub const Scheduler = struct {
     fn accountDispatchDelayed(self: *Scheduler, slot: *Slot, decision: accelerator_scheduler.Decision) void {
         _ = self;
         slot.delayed_dispatch_count += 1;
+        slot.last_dispatch_engine = decision.engine;
         slot.last_dispatch_reason = decision.reason;
         slot.last_dispatch_degraded = decision.degraded;
+        slot.last_dispatch_zero_copy = decision.zero_copy_allowed;
     }
 
     fn accountDispatchDenied(
@@ -625,18 +679,18 @@ pub const Scheduler = struct {
     fn engineCurrentlyAvailable(self: *const Scheduler, engine: accelerator_scheduler.Engine) bool {
         return switch (engine) {
             .cpu => true,
-            .gpu => self.resource_state.gpu_available and self.accelerator_claim_counts[engineIndex(.gpu)] == 0,
-            .npu => self.resource_state.npu_available and self.accelerator_claim_counts[engineIndex(.npu)] == 0,
-            .media => self.resource_state.media_available and self.accelerator_claim_counts[engineIndex(.media)] == 0,
+            .gpu => self.physicalEngineAvailable(.gpu) and self.accelerator_claim_counts[engineIndex(.gpu)] == 0,
+            .npu => self.physicalEngineAvailable(.npu) and self.accelerator_claim_counts[engineIndex(.npu)] == 0,
+            .media => self.physicalEngineAvailable(.media) and self.accelerator_claim_counts[engineIndex(.media)] == 0,
         };
     }
 
     fn physicalEngineAvailable(self: *const Scheduler, engine: accelerator_scheduler.Engine) bool {
         return switch (engine) {
             .cpu => true,
-            .gpu => self.resource_state.gpu_available,
-            .npu => self.resource_state.npu_available,
-            .media => self.resource_state.media_available,
+            .gpu => self.observedResourceTelemetry() and self.resource_state.gpu_available,
+            .npu => self.observedResourceTelemetry() and self.resource_state.npu_available,
+            .media => self.observedResourceTelemetry() and self.resource_state.media_available,
         };
     }
 
@@ -831,6 +885,43 @@ fn zeroAcceleratorClaim() AcceleratorClaimRecord {
         .deadline_tick = 0,
         .shared_memory_bytes = 0,
     };
+}
+
+fn createRunnableSchedulerTask(
+    runtime: *task_runtime.Runtime,
+    serial: u64,
+    class: accelerator_scheduler.ResourceClass,
+    label: []const u8,
+    bundle_id: []const u8,
+    ui_surface_id: ?u64,
+) !*task_runtime.TaskRecord {
+    var image = task_runtime.syntheticUserspaceImage(label, bundle_id);
+    const service_task = class == .emergency_system_critical;
+    return runtime.createTask(.{
+        .owner = .{
+            .kind = if (service_task) .service else .app,
+            .serial = serial,
+        },
+        .component_class = if (service_task) .service_component else .app_component,
+        .budget = .{
+            .cpu_time_ticks = DISPATCH_CPU_TICK_COST,
+            .memory_bytes = TEST_TASK_MEMORY_BYTES,
+            .endpoint_slots = TEST_TASK_ENDPOINT_SLOTS,
+            .shared_memory_bytes = TEST_ACCELERATOR_SHARED_MEMORY_BYTES,
+            .resource_class = class,
+            .background_allowed = class == .background_light or class == .batch_compute,
+        },
+        .ui_surface_id = ui_surface_id,
+        .local_only = true,
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = serial,
+            .component_abi_version = 1,
+            .signed = true,
+            .bundle_id = bundle_id,
+        },
+        .userspace_image = &image,
+    });
 }
 
 test "userspace scheduler registers tasks through indexed arena slots" {
@@ -1095,6 +1186,16 @@ test "userspace scheduler separates accelerator claim queues from cpu ready queu
 
     try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.gpu));
     try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.media));
+    try std.testing.expect(scheduler.grantNextAcceleratorClaim(.media, 8) == null);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.media));
+
+    scheduler.configureResourceTelemetry(.{
+        .source = .emulator,
+        .observed_tick = 9,
+        .gpu_available = true,
+        .npu_available = true,
+        .media_available = true,
+    });
     const granted = scheduler.grantNextAcceleratorClaim(.media, 9).?;
     try std.testing.expectEqual(media_claim, granted.id);
     try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.gpu));
@@ -1102,7 +1203,7 @@ test "userspace scheduler separates accelerator claim queues from cpu ready queu
     try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.media_export));
 }
 
-test "userspace scheduler denies unavailable required accelerators and wakes when granted" {
+test "userspace scheduler requires observed platform telemetry before waking hardware queues" {
     var executor = userspace_executor.Executor{};
     var scheduler = Scheduler.init(&executor);
     var catalog = userspace_loader.Catalog.init();
@@ -1154,6 +1255,21 @@ test "userspace scheduler denies unavailable required accelerators and wakes whe
 
     scheduler.configureResourceState(.{ .media_available = true });
     try std.testing.expect(!scheduler.runNext(2));
+    const synthetic_slot = scheduler.slots.getConst(task.id).?;
+    try std.testing.expectEqual(@as(u64, 0), synthetic_slot.dispatch_count);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.media));
+    try std.testing.expectEqual(@as(u64, 1), scheduler.engineDenialCount(.media));
+
+    var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(2, 20, 3, .{
+        .total_cpu_budget_ticks = 10_000,
+        .memory_capacity_bytes = 512 * 1024,
+        .gpu_driver_online = false,
+        .npu_driver_online = false,
+        .media_driver_online = true,
+    });
+    scheduler.configureResourceTelemetryFromProvider(&provider);
+    try std.testing.expect(scheduler.observedResourceTelemetry());
+    try std.testing.expect(!scheduler.runNext(3));
     const dispatched_slot = scheduler.slots.getConst(task.id).?;
     try std.testing.expectEqual(@as(u64, 1), dispatched_slot.dispatch_count);
     try std.testing.expectEqual(accelerator_scheduler.Engine.media, dispatched_slot.last_dispatch_engine);
@@ -1212,10 +1328,15 @@ test "userspace scheduler delays on memory bandwidth before npu dispatch" {
     try std.testing.expectEqual(accelerator_scheduler.DecisionReason.memory_bandwidth, delayed_slot.last_dispatch_reason);
     try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.batch_compute));
 
-    scheduler.configureResourceState(.{
-        .memory_bandwidth_units = 512,
-        .npu_available = true,
+    var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(3, 21, 2, .{
+        .total_cpu_budget_ticks = 10_000,
+        .memory_capacity_bytes = 1024 * 1024,
+        .gpu_driver_online = false,
+        .npu_driver_online = true,
+        .media_driver_online = false,
     });
+    scheduler.configureResourceTelemetryFromProvider(&provider);
+    try std.testing.expect(scheduler.observedResourceTelemetry());
     try std.testing.expect(!scheduler.runNext(2));
     const dispatched_slot = scheduler.slots.getConst(task.id).?;
     try std.testing.expectEqual(@as(u64, 1), dispatched_slot.dispatch_count);
@@ -1312,6 +1433,116 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
     try std.testing.expectEqual(accelerator_scheduler.Engine.media, media_slot.last_dispatch_engine);
     try std.testing.expect(media_slot.last_dispatch_degraded);
     try std.testing.expectEqual(accelerator_scheduler.DecisionReason.battery_preserve, media_slot.last_dispatch_reason);
+}
+
+test "userspace scheduler applies booted live telemetry across every resource class" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+
+    const critical = try createRunnableSchedulerTask(&runtime, 30, .emergency_system_critical, "critical", "svc.example.critical", null);
+    const foreground = try createRunnableSchedulerTask(&runtime, 31, .foreground_interactive, "foreground", "app.example.foreground-live", 31);
+    const media = try createRunnableSchedulerTask(&runtime, 32, .media_export, "media", "app.example.media-live", null);
+    const background = try createRunnableSchedulerTask(&runtime, 33, .background_light, "background", "app.example.background-live", null);
+    const batch = try createRunnableSchedulerTask(&runtime, 34, .batch_compute, "batch", "app.example.batch-live", null);
+
+    const task_ids = [_]u64{ critical.id, foreground.id, media.id, background.id, batch.id };
+    for (task_ids) |task_id| {
+        try std.testing.expect(scheduler.registerTask(task_id));
+    }
+    try std.testing.expect(scheduler.configureTaskDispatchRequest(background.id, .{
+        .class = .background_light,
+        .wants_npu = true,
+        .privacy_sensitive = true,
+        .shared_memory_bytes = TEST_ACCELERATOR_SHARED_MEMORY_BYTES,
+    }, false));
+
+    var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(30, 300, 10, .{
+        .total_cpu_budget_ticks = 20_000,
+        .memory_capacity_bytes = 1024 * 1024,
+        .thermal_milli_celsius = 91_000,
+        .battery_percent = 80,
+        .battery_charging = true,
+        .gpu_driver_online = true,
+        .npu_driver_online = true,
+        .media_driver_online = true,
+    });
+    scheduler.configureResourceTelemetryFromProvider(&provider);
+
+    try std.testing.expect(!scheduler.runNext(10));
+    const critical_slot = scheduler.slots.getConst(critical.id).?;
+    try std.testing.expectEqual(@as(u64, 1), critical_slot.dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.normal, critical_slot.last_dispatch_reason);
+
+    try std.testing.expect(!scheduler.runNext(11));
+    const foreground_slot = scheduler.slots.getConst(foreground.id).?;
+    try std.testing.expectEqual(@as(u64, 1), foreground_slot.dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, foreground_slot.last_dispatch_engine);
+    try std.testing.expect(foreground_slot.last_dispatch_degraded);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, foreground_slot.last_dispatch_reason);
+
+    try std.testing.expect(!scheduler.runNext(12));
+    const media_slot = scheduler.slots.getConst(media.id).?;
+    try std.testing.expectEqual(@as(u64, 1), media_slot.dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, media_slot.last_dispatch_engine);
+    try std.testing.expect(media_slot.last_dispatch_degraded);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, media_slot.last_dispatch_reason);
+
+    try std.testing.expect(!scheduler.runNext(13));
+    const thermally_blocked_background = scheduler.slots.getConst(background.id).?;
+    const thermally_blocked_batch = scheduler.slots.getConst(batch.id).?;
+    try std.testing.expectEqual(@as(u64, 0), thermally_blocked_background.dispatch_count);
+    try std.testing.expectEqual(@as(u64, 1), thermally_blocked_background.delayed_dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, thermally_blocked_background.last_dispatch_reason);
+    try std.testing.expectEqual(@as(u64, 0), thermally_blocked_batch.dispatch_count);
+    try std.testing.expectEqual(@as(u64, 1), thermally_blocked_batch.delayed_dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, thermally_blocked_batch.last_dispatch_reason);
+
+    try provider.observeLive(300, 14, .{
+        .total_cpu_budget_ticks = 20_000,
+        .memory_capacity_bytes = 1024 * 1024,
+        .thermal_milli_celsius = 45_000,
+        .battery_percent = 12,
+        .battery_charging = false,
+        .gpu_driver_online = true,
+        .npu_driver_online = true,
+        .media_driver_online = true,
+        .privacy_sensitive_task_count = 1,
+    });
+    scheduler.configureResourceTelemetryFromProvider(&provider);
+
+    try std.testing.expect(!scheduler.runNext(14));
+    const privacy_limited_background = scheduler.slots.getConst(background.id).?;
+    try std.testing.expectEqual(@as(u64, 1), privacy_limited_background.dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.cpu, privacy_limited_background.last_dispatch_engine);
+    try std.testing.expect(privacy_limited_background.last_dispatch_degraded);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.privacy_mode, privacy_limited_background.last_dispatch_reason);
+
+    try std.testing.expect(!scheduler.runNext(15));
+    const battery_blocked_batch = scheduler.slots.getConst(batch.id).?;
+    try std.testing.expectEqual(@as(u64, 0), battery_blocked_batch.dispatch_count);
+    try std.testing.expectEqual(@as(u64, 2), battery_blocked_batch.delayed_dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.battery_preserve, battery_blocked_batch.last_dispatch_reason);
+
+    try provider.observeLive(300, 16, .{
+        .total_cpu_budget_ticks = 20_000,
+        .memory_capacity_bytes = 1024 * 1024,
+        .thermal_milli_celsius = 45_000,
+        .battery_percent = 80,
+        .battery_charging = true,
+        .gpu_driver_online = true,
+        .npu_driver_online = true,
+        .media_driver_online = true,
+    });
+    scheduler.configureResourceTelemetryFromProvider(&provider);
+
+    try std.testing.expect(!scheduler.runNext(16));
+    const batch_slot = scheduler.slots.getConst(batch.id).?;
+    try std.testing.expectEqual(@as(u64, 1), batch_slot.dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.npu, batch_slot.last_dispatch_engine);
 }
 
 test "userspace scheduler thermal pressure gates batch queues without scanning task slots" {

@@ -3,10 +3,12 @@
 Use the pinned toolchain and repo entrypoints:
 
 - Run Zig commands through `./scripts/zig.sh`.
-- Run host coverage with `./scripts/run-host-tests.sh`.
-- Run spec coverage and spec conformance with `./scripts/run-spec-conformance.sh`.
+- Run host coverage with `./scripts/zig.sh build host-tests`; this includes the root host suite, userspace runtime tests, and the test-root reachability check.
+- Run spec coverage without QEMU with `./scripts/zig.sh build spec-tests`.
+- Run full spec conformance with `./scripts/zig.sh build spec-conformance`; this includes spec coverage, native spec tests, the two-boot native smoke path, and the recovery QEMU proof.
+- Run driver-restart and recovery smoke proofs directly with `./scripts/zig.sh build driver-restart-qemu-test` and `./scripts/zig.sh build recovery-qemu-test` when touching those paths.
 - Run native benchmarks with `./scripts/zig.sh build benchmark` when touching performance-sensitive kernel or native-service paths.
-- Run shell lint with `bash scripts/lint-shell.sh`.
+- Run lint with `./scripts/zig.sh build lint`; use `fmt-check`, `shell-lint`, `zig-lint`, or `action-lint` for focused checks.
 
 Keep the spec contract intact:
 
@@ -25,5 +27,6 @@ Respect the architectural boundaries from the spec:
 Keep the repo tidy:
 
 - Put generated artifacts under `build/`; keep tracked build logic under `build_support/`.
+- Keep architecture assembly and linker files under `src/arch/`, and bootloader-facing files under `src/boot/`.
 - Put host-only support utilities under `tools/`, and Zig helper binaries that share `src/` imports under `src/tools/`, rather than `src/native/`.
 - Prefer small focused modules over growing import hubs and monolithic integration files.

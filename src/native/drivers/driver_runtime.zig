@@ -145,7 +145,19 @@ pub const Runtime = struct {
                     }
                 }
             },
-            else => {},
+            .graphics_adapter, .audio_print_io, .input_device => {
+                if (bootstrap_driver_port.deviceDataPlanePublication(driver.device_class)) |publication| {
+                    if (publication.device_id == driver.device_id) {
+                        if (publication.kernel_bootstrap) return error.KernelBootstrapNotAuthorized;
+                        if (bootstrap_driver_port.activateDeviceDataPlane(driver.device_class, driver.device_id, driver.service_id)) {
+                            record.mode = .published_data_plane;
+                            record.exclusive_claim = true;
+                            record.kernel_bootstrap = false;
+                            record.publisher_len = native_util.copyTextExact(record.publisher[0..], publication.publisherSlice()) catch return error.PublisherTooLong;
+                        }
+                    }
+                }
+            },
         }
 
         record.activation_generation = self.nextActivationGeneration();
@@ -165,20 +177,33 @@ pub const Runtime = struct {
     }
 
     pub fn deactivate(self: *Runtime, service_id: u64) bool {
-        if (self.findByServiceSlot(service_id)) |slot| {
-            if (slot.activation.mode != .control_only and slot.activation.exclusive_claim) {
-                const released = switch (slot.activation.device_class) {
-                    .network_adapter => bootstrap_driver_port.deactivateNetworkDevice(service_id),
-                    .storage_controller => bootstrap_driver_port.deactivateStorageBackend(service_id),
-                    else => true,
-                };
-                if (!released) return false;
-            }
-            slot.activation.mode = .control_only;
-            slot.activation.exclusive_claim = false;
-            return true;
+        var deactivated_any = false;
+        for (&self.arena.slots) |*slot| {
+            if (!slot.in_use or slot.activation.service_id != service_id) continue;
+            if (!self.deactivateSlot(slot)) return false;
+            deactivated_any = true;
         }
-        return false;
+        return deactivated_any;
+    }
+
+    pub fn deactivateDriver(self: *Runtime, service_id: u64, device_class: driver_service.DeviceClass) bool {
+        const slot = self.findByServiceClassSlot(service_id, device_class) orelse return false;
+        return self.deactivateSlot(slot);
+    }
+
+    fn deactivateSlot(self: *Runtime, slot: *ActivationSlot) bool {
+        _ = self;
+        if (slot.activation.mode != .control_only and slot.activation.exclusive_claim) {
+            const released = switch (slot.activation.device_class) {
+                .network_adapter => bootstrap_driver_port.deactivateNetworkDevice(slot.activation.service_id),
+                .storage_controller => bootstrap_driver_port.deactivateStorageBackend(slot.activation.service_id),
+                .graphics_adapter, .audio_print_io, .input_device => bootstrap_driver_port.deactivateDeviceDataPlane(slot.activation.device_class, slot.activation.service_id),
+            };
+            if (!released) return false;
+        }
+        slot.activation.mode = .control_only;
+        slot.activation.exclusive_claim = false;
+        return true;
     }
 
     fn upsert(self: *Runtime, activation: ActivationRecord) Error!ActivationRecord {
@@ -430,4 +455,72 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
     const activation = try driver_runtime.activateAt(driver, 10);
     try std.testing.expectEqual(ActivationMode.control_only, activation.mode);
     try std.testing.expect(!storage_volume.hasAttachedDevice());
+}
+
+test "runtime deactivates only the requested driver class for shared services" {
+    bootstrap_driver_port.reset();
+    defer bootstrap_driver_port.reset();
+
+    const service_id: u64 = 91;
+    const graphics_device_id: u64 = 0x1234_1111_0091;
+    const input_device_id: u64 = 0x1234_2222_0091;
+    try std.testing.expect(try bootstrap_driver_port.publishDeviceDataPlane(
+        .graphics_adapter,
+        graphics_device_id,
+        "zigos.system.compositor",
+        false,
+    ));
+    try std.testing.expect(try bootstrap_driver_port.publishDeviceDataPlane(
+        .input_device,
+        input_device_id,
+        "zigos.system.compositor",
+        false,
+    ));
+
+    const empty_dma_ranges = [_]driver_service.DmaRange{.{ .base = 0, .length = 0 }} ** driver_service.MAX_DMA_RANGES;
+    const graphics_driver = driver_service.DriverRecord{
+        .service_id = service_id,
+        .owner_task_id = 191,
+        .device_id = graphics_device_id,
+        .device_class = .graphics_adapter,
+        .authority_capability_id = 291,
+        .restart_generation = 1,
+        .bootstrap_transport = .none,
+        .dma_domain_id = 391,
+        .dma_protection = .iommu_enforced,
+        .dma_range_count = 0,
+        .dma_ranges = empty_dma_ranges,
+        .signer_len = 0,
+        .signer = [_]u8{0} ** 32,
+    };
+    const input_driver = driver_service.DriverRecord{
+        .service_id = service_id,
+        .owner_task_id = 191,
+        .device_id = input_device_id,
+        .device_class = .input_device,
+        .authority_capability_id = 292,
+        .restart_generation = 1,
+        .bootstrap_transport = .none,
+        .dma_domain_id = 392,
+        .dma_protection = .iommu_enforced,
+        .dma_range_count = 0,
+        .dma_ranges = empty_dma_ranges,
+        .signer_len = 0,
+        .signer = [_]u8{0} ** 32,
+    };
+
+    var runtime = Runtime.init();
+    const graphics_activation = try runtime.activateAt(&graphics_driver, 10);
+    const input_activation = try runtime.activateAt(&input_driver, 11);
+    try std.testing.expectEqual(ActivationMode.published_data_plane, graphics_activation.mode);
+    try std.testing.expectEqual(ActivationMode.published_data_plane, input_activation.mode);
+    try std.testing.expectEqual(service_id, bootstrap_driver_port.deviceDataPlanePublication(.graphics_adapter).?.active_service_id);
+    try std.testing.expectEqual(service_id, bootstrap_driver_port.deviceDataPlanePublication(.input_device).?.active_service_id);
+
+    try std.testing.expect(runtime.deactivateDriver(service_id, .graphics_adapter));
+    try std.testing.expectEqual(@as(u64, 0), bootstrap_driver_port.deviceDataPlanePublication(.graphics_adapter).?.active_service_id);
+    try std.testing.expectEqual(service_id, bootstrap_driver_port.deviceDataPlanePublication(.input_device).?.active_service_id);
+    try std.testing.expectEqual(ActivationMode.control_only, runtime.findByClass(.graphics_adapter).?.mode);
+    try std.testing.expectEqual(ActivationMode.published_data_plane, runtime.findByClass(.input_device).?.mode);
+    try std.testing.expect(runtime.findByClass(.input_device).?.exclusive_claim);
 }

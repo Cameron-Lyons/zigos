@@ -1,6 +1,7 @@
 const std = @import("std");
 const device_graph = @import("device_graph.zig");
 const manifest = @import("../policy/manifest.zig");
+const measured_boot = @import("../platform/measured_boot.zig");
 const network_policy = @import("network_policy.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
@@ -414,6 +415,14 @@ pub fn zeroDeviceGraphRecord() device_graph.DeviceRecord {
         .revocation_signature = .{},
         .last_rotated_at_ticks = 0,
         .revoked_at_ticks = 0,
+        .device_key_origin = .software,
+        .platform_key_bound = false,
+        .platform_key_label_len = 0,
+        .platform_key_label = [_]u8{0} ** device_graph.MAX_LABEL_BYTES,
+        .platform_key_digest = [_]u8{0} ** 32,
+        .platform_root_generation = 0,
+        .platform_root_provenance = measured_boot.RootProvenance.synthetic_host,
+        .platform_root_digest = [_]u8{0} ** 32,
     };
 }
 

@@ -75,6 +75,13 @@ pub const AuthorityContext = struct {
 
 pub const AuthorityError = file_bridge.Error;
 
+pub const SharedWorkspaceGrant = struct {
+    grant: workspace.ShareGrant,
+    capability: capability.Capability,
+};
+
+pub const ShareCapabilityError = AuthorityError || workspace.Error || capability.Error;
+
 pub const StorageCore = struct {
     service_id: u64,
     task_id: u64,
@@ -623,8 +630,70 @@ pub const StoragePort = struct {
 
     pub fn shareWorkspace(self: *StoragePort, authority: AuthorityContext, workspace_id: anytype, request: workspace.ShareRequest) (AuthorityError || workspace.Error)!void {
         const key = workspaceId(workspace_id);
-        _ = try self.requireStorageAuthority(authority, key, .write);
-        return self.core.shareWorkspace(key, request);
+        const authority_capability = try self.requireStorageAuthority(authority, key, .write);
+        if (authority_capability.target.kind != .workspace or authority_capability.target.id != key.raw()) return error.WorkspaceScopeViolation;
+        if (!authority_capability.rights.has(.capability_derive)) return error.PermissionDenied;
+
+        const record = self.core.findWorkspaceRecordConst(key) orelse return error.WorkspaceNotFound;
+        if (!shareSlotAvailable(record, request.principal_id)) return error.ShareTableFull;
+
+        var effective_grant = request;
+        effective_grant.expires_at_ticks = boundedGrantExpiry(
+            request.expires_at_ticks,
+            authority_capability.lease.expires_at_ticks,
+        );
+        try self.validateShareActor(record, authority.principal, effective_grant, authority.now_ticks);
+        return self.core.shareWorkspace(key, effective_grant);
+    }
+
+    pub fn grantWorkspaceShare(
+        self: *StoragePort,
+        capability_table: *capability.CapabilityTable,
+        authority_context: AuthorityContext,
+        workspace_id: anytype,
+        request: workspace.ShareRequest,
+    ) ShareCapabilityError!SharedWorkspaceGrant {
+        const key = workspaceId(workspace_id);
+        const authority = try self.requireStorageAuthority(authority_context, key, .write);
+        if (authority.target.kind != .workspace or authority.target.id != key.raw()) return error.WorkspaceScopeViolation;
+        if (!authority.rights.has(.capability_derive)) return error.PermissionDenied;
+
+        const record = self.core.findWorkspaceRecordConst(key) orelse return error.WorkspaceNotFound;
+        if (!shareSlotAvailable(record, request.principal_id)) return error.ShareTableFull;
+
+        var effective_grant = request;
+        effective_grant.expires_at_ticks = boundedGrantExpiry(
+            request.expires_at_ticks,
+            authority.lease.expires_at_ticks,
+        );
+        try self.validateShareActor(record, authority_context.principal, effective_grant, authority_context.now_ticks);
+
+        const derived = try capability_table.derive(.{
+            .parent_capability_id = authority.id,
+            .holder = effective_grant.principal_id,
+            .rights = workspaceRightsForGrant(effective_grant),
+            .scope = .{
+                .workspace_id = key.raw(),
+                .local_only = effective_grant.network_scope == .local_only,
+                .broker_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = authority_context.now_ticks,
+                .expires_at_ticks = effective_grant.expires_at_ticks,
+            },
+            .audit = .{
+                .policy_generation = shareAuditGeneration(record, effective_grant.principal_id),
+                .source_task_id = authority_context.task_id,
+                .broker_service_id = self.core.service_id,
+            },
+        });
+        errdefer capability_table.revokeGrant(derived.id) catch {};
+
+        try self.core.shareWorkspace(key, effective_grant);
+        return .{
+            .grant = effective_grant,
+            .capability = derived,
+        };
     }
 
     pub fn resolve(self: *StoragePort, authority: AuthorityContext, request: file_bridge.ResolveRequest) (AuthorityError || workspace.Error)!file_bridge.View {
@@ -663,6 +732,23 @@ pub const StoragePort = struct {
         if (access == .read and !authority.rights.has(.object_read)) return error.PermissionDenied;
         return authority;
     }
+
+    fn validateShareActor(
+        self: *const StoragePort,
+        record: *const workspace.WorkspaceRecord,
+        actor: principal.PrincipalId,
+        request: workspace.ShareGrant,
+        now_ticks: u64,
+    ) AuthorityError!void {
+        _ = self;
+        if (record.owner.eql(actor)) return;
+
+        const actor_grant = findGrantInRecord(record, actor) orelse return error.PermissionDenied;
+        if (!actor_grant.isActive(now_ticks)) return error.PermissionDenied;
+        if (!actor_grant.allowsNetworkScope(request.network_scope)) return error.PermissionDenied;
+        if (!actorMayReshare(actor_grant)) return error.PermissionDenied;
+        if (shareGrantEscalates(actor_grant, request)) return error.PermissionDenied;
+    }
 };
 
 fn bridgeResolveEntry(context: *const anyopaque, workspace_id: u64, path: []const u8) workspace.Error!workspace.Entry {
@@ -689,6 +775,80 @@ fn versionId(value: anytype) ids.VersionId {
 
 fn snapshotId(value: anytype) ids.SnapshotId {
     return ids.coerce(ids.SnapshotId, value);
+}
+
+fn shareSlotAvailable(record: *const workspace.WorkspaceRecord, principal_id: principal.PrincipalId) bool {
+    for (record.share_table.share_grants[0..record.share_table.share_grant_count]) |grant| {
+        if (grant.principal_id.eql(principal_id)) return true;
+    }
+    return record.share_table.share_grant_count < workspace.MAX_SHARE_GRANTS;
+}
+
+fn findGrantInRecord(record: *const workspace.WorkspaceRecord, principal_id: principal.PrincipalId) ?workspace.ShareGrant {
+    for (record.share_table.share_grants[0..record.share_table.share_grant_count]) |grant| {
+        if (grant.principal_id.eql(principal_id)) return grant;
+    }
+    return null;
+}
+
+fn boundedGrantExpiry(requested_expiry: u64, authority_expiry: u64) u64 {
+    if (requested_expiry == 0) return authority_expiry;
+    return @min(requested_expiry, authority_expiry);
+}
+
+fn workspaceRightsForGrant(grant: workspace.ShareGrant) capability.CapabilityRights {
+    return .{ .workspace = .{
+        .object_read = grant.can_read or grant.can_write or grant.can_admin or grant.can_export,
+        .object_write = grant.can_write,
+        .capability_derive = grant.can_admin or grant.reshare_policy != .owner_only,
+        .capability_query = grant.audit_visibility != .owner_only,
+    } };
+}
+
+fn actorMayReshare(grant: workspace.ShareGrant) bool {
+    return switch (grant.reshare_policy) {
+        .owner_only => false,
+        .admin_only => grant.can_admin,
+        .grantee_allowed => true,
+    };
+}
+
+fn shareGrantEscalates(actor: workspace.ShareGrant, requested: workspace.ShareGrant) bool {
+    if (requested.can_read and !actor.can_read) return true;
+    if (requested.can_write and !actor.can_write) return true;
+    if (requested.can_admin and !actor.can_admin) return true;
+    if (requested.can_export and !actor.can_export) return true;
+    if (actor.expires_at_ticks != 0 and
+        (requested.expires_at_ticks == 0 or requested.expires_at_ticks > actor.expires_at_ticks))
+    {
+        return true;
+    }
+    if (resharePolicyRank(requested.reshare_policy) > resharePolicyRank(actor.reshare_policy)) return true;
+    if (auditVisibilityRank(requested.audit_visibility) > auditVisibilityRank(actor.audit_visibility)) return true;
+    return false;
+}
+
+fn resharePolicyRank(policy: workspace.ResharePolicy) u8 {
+    return switch (policy) {
+        .owner_only => 0,
+        .admin_only => 1,
+        .grantee_allowed => 2,
+    };
+}
+
+fn auditVisibilityRank(visibility: workspace.AuditVisibility) u8 {
+    return switch (visibility) {
+        .owner_only => 0,
+        .shared_participants => 1,
+        .organization_policy => 2,
+    };
+}
+
+fn shareAuditGeneration(record: *const workspace.WorkspaceRecord, principal_id: principal.PrincipalId) u32 {
+    for (record.share_table.share_grants[0..record.share_table.share_grant_count], 0..) |grant, index| {
+        if (grant.principal_id.eql(principal_id)) return @intCast(index + 1);
+    }
+    return @intCast(record.share_table.share_grant_count + 1);
 }
 
 test "storage port requires authority context for protected mutations" {
@@ -754,6 +914,228 @@ test "storage port requires authority context for protected mutations" {
     }, .{
         .owner = actor,
         .label = "denied-task",
+    }));
+}
+
+test "storage port derives shared workspace capabilities and blocks unauthorized reshares" {
+    var checkpoint_store = CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    defer checkpoint_store.resetPersistent();
+
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 49 };
+    const owner_user = principal.PrincipalId{ .kind = .user, .serial = 40 };
+    const team = principal.PrincipalId{ .kind = .team, .serial = 41 };
+    const app = principal.PrincipalId{ .kind = .app, .serial = 42 };
+    const viewer = principal.PrincipalId{ .kind = .app, .serial = 43 };
+    const device = principal.PrincipalId{ .kind = .device, .serial = 44 };
+    var core = StorageCore.initWithStore(704, 30, storage_owner, &checkpoint_store);
+    var capabilities = capability.CapabilityTable.init();
+    var port = StoragePort.init(&core, &capabilities);
+
+    const service_writer = try capabilities.mintBootRoot(.{
+        .holder = storage_owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = core.service_id },
+        .rights = .{ .service = .{ .object_read = true, .object_write = true } },
+        .scope = .{ .task_id = 30, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    const storage_authority = AuthorityContext{
+        .task_id = 30,
+        .principal = storage_owner,
+        .capability_id = service_writer.id,
+        .now_ticks = 10,
+    };
+    const signer = signing.SignerIdentity{
+        .label = "zigos-share-storage-key",
+        .seed = [_]u8{0xB4} ** 32,
+    };
+    const object = try port.putVersion(storage_authority, .{
+        .preferred_object_id = ids.object(954),
+        .object_type = .document,
+        .payload = "shared document",
+        .metadata = try object_store.signMetadata(signer, "shared", "text/markdown", .document, "shared document", 10),
+    });
+    const notes = try port.createWorkspace(storage_authority, .{
+        .owner = owner_user,
+        .label = "shared-notes",
+    });
+    try port.beginTransaction(storage_authority, notes.id);
+    try port.stagePut(storage_authority, notes.id, "documents/shared.md", object.object_id, object.version_id, .document);
+    _ = try port.commit(storage_authority, notes.id);
+    try std.testing.expectError(error.WorkspaceScopeViolation, port.shareWorkspace(storage_authority, notes.id, .{
+        .principal_id = team,
+        .can_read = true,
+        .expires_at_ticks = 90,
+        .network_scope = .trusted_overlay,
+        .reshare_policy = .owner_only,
+        .audit_visibility = .shared_participants,
+    }));
+
+    const owner_workspace_authority = try capabilities.mintBootRoot(.{
+        .holder = owner_user,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .workspace, .id = notes.id.raw() },
+        .rights = .{ .workspace = .{
+            .object_read = true,
+            .object_write = true,
+            .capability_derive = true,
+            .capability_query = true,
+        } },
+        .scope = .{ .workspace_id = notes.id.raw(), .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    const owner_authority = AuthorityContext{
+        .task_id = 31,
+        .principal = owner_user,
+        .capability_id = owner_workspace_authority.id,
+        .now_ticks = 20,
+    };
+
+    const team_share = try port.grantWorkspaceShare(&capabilities, owner_authority, notes.id, .{
+        .principal_id = team,
+        .can_read = true,
+        .can_write = false,
+        .can_admin = false,
+        .can_export = false,
+        .expires_at_ticks = 90,
+        .network_scope = .trusted_overlay,
+        .reshare_policy = .owner_only,
+        .audit_visibility = .shared_participants,
+    });
+    try std.testing.expect(team_share.grant.principal_id.eql(team));
+    try std.testing.expectEqual(capability.CapabilityTargetKind.workspace, team_share.capability.target.kind);
+    try std.testing.expectEqual(notes.id.raw(), team_share.capability.target.id);
+    try std.testing.expect(team_share.capability.rights.has(.object_read));
+    try std.testing.expect(!team_share.capability.rights.has(.object_write));
+    try std.testing.expectEqual(core.service_id, team_share.capability.audit.broker_service_id);
+    try std.testing.expectEqual(@as(u64, 31), team_share.capability.audit.source_task_id);
+
+    const team_view = try port.resolve(.{
+        .task_id = 41,
+        .principal = team,
+        .capability_id = team_share.capability.id,
+        .now_ticks = 40,
+    }, .{
+        .workspace_id = notes.id.raw(),
+        .path = "documents/shared.md",
+        .access = .read,
+    });
+    try std.testing.expectEqual(object.object_id.raw(), team_view.object_id);
+    try std.testing.expectEqualStrings("documents/shared.md", team_view.pathSlice());
+    try std.testing.expectError(error.PermissionDenied, port.resolve(.{
+        .task_id = 41,
+        .principal = team,
+        .capability_id = team_share.capability.id,
+        .now_ticks = 40,
+    }, .{
+        .workspace_id = notes.id.raw(),
+        .path = "documents/shared.md",
+        .access = .write,
+    }));
+
+    const app_share = try port.grantWorkspaceShare(&capabilities, owner_authority, notes.id, .{
+        .principal_id = app,
+        .can_read = true,
+        .can_write = true,
+        .can_admin = true,
+        .can_export = false,
+        .expires_at_ticks = 80,
+        .network_scope = .trusted_overlay,
+        .reshare_policy = .admin_only,
+        .audit_visibility = .shared_participants,
+    });
+    try std.testing.expect(app_share.capability.rights.has(.capability_derive));
+    try std.testing.expectEqual(@as(u64, 80), app_share.capability.lease.expires_at_ticks);
+    try std.testing.expectError(error.CapabilityRevoked, port.resolve(.{
+        .task_id = 42,
+        .principal = app,
+        .capability_id = app_share.capability.id,
+        .now_ticks = 81,
+    }, .{
+        .workspace_id = notes.id.raw(),
+        .path = "documents/shared.md",
+        .access = .read,
+    }));
+
+    const app_authority = AuthorityContext{
+        .task_id = 42,
+        .principal = app,
+        .capability_id = app_share.capability.id,
+        .now_ticks = 50,
+    };
+    try std.testing.expectError(error.PermissionDenied, port.grantWorkspaceShare(&capabilities, app_authority, notes.id, .{
+        .principal_id = device,
+        .can_read = true,
+        .can_write = false,
+        .can_admin = false,
+        .can_export = true,
+        .expires_at_ticks = 70,
+        .network_scope = .trusted_overlay,
+        .reshare_policy = .owner_only,
+        .audit_visibility = .shared_participants,
+    }));
+    try std.testing.expectError(error.PermissionDenied, port.grantWorkspaceShare(&capabilities, app_authority, notes.id, .{
+        .principal_id = device,
+        .can_read = true,
+        .can_write = false,
+        .can_admin = false,
+        .can_export = false,
+        .expires_at_ticks = 70,
+        .network_scope = .relay_assisted,
+        .reshare_policy = .owner_only,
+        .audit_visibility = .shared_participants,
+    }));
+
+    const device_share = try port.grantWorkspaceShare(&capabilities, app_authority, notes.id, .{
+        .principal_id = device,
+        .can_read = true,
+        .can_write = false,
+        .can_admin = false,
+        .can_export = false,
+        .expires_at_ticks = 70,
+        .network_scope = .trusted_overlay,
+        .reshare_policy = .owner_only,
+        .audit_visibility = .shared_participants,
+    });
+    try std.testing.expect(core.workspaceHasAccess(notes.id, .{
+        .principal_id = device,
+        .network_scope = .trusted_overlay,
+        .now_ticks = 60,
+    }));
+    try std.testing.expect(!core.workspaceHasAccess(notes.id, .{
+        .principal_id = device,
+        .network_scope = .trusted_overlay,
+        .now_ticks = 71,
+    }));
+    try std.testing.expectEqual(@as(u64, 70), device_share.capability.lease.expires_at_ticks);
+    try std.testing.expect(!device_share.capability.rights.has(.capability_derive));
+
+    const viewer_share = try port.grantWorkspaceShare(&capabilities, owner_authority, notes.id, .{
+        .principal_id = viewer,
+        .can_read = true,
+        .can_write = false,
+        .can_admin = false,
+        .can_export = false,
+        .expires_at_ticks = 75,
+        .network_scope = .trusted_overlay,
+        .reshare_policy = .owner_only,
+        .audit_visibility = .owner_only,
+    });
+    try std.testing.expectError(error.PermissionDenied, port.grantWorkspaceShare(&capabilities, .{
+        .task_id = 43,
+        .principal = viewer,
+        .capability_id = viewer_share.capability.id,
+        .now_ticks = 60,
+    }, notes.id, .{
+        .principal_id = .{ .kind = .device, .serial = 45 },
+        .can_read = true,
+        .expires_at_ticks = 70,
+        .network_scope = .trusted_overlay,
+        .reshare_policy = .owner_only,
+        .audit_visibility = .owner_only,
     }));
 }
 

@@ -10,6 +10,7 @@ pub const PrincipalKind = enum(u8) {
     app,
     service,
     policy_authority,
+    team,
 };
 
 pub const PrincipalId = struct {
@@ -135,6 +136,24 @@ pub const Keyring = struct {
         return false;
     }
 
+    pub fn isPolicyAuthorityRootKey(
+        self: *const Keyring,
+        principal_id: PrincipalId,
+        public_key: [32]u8,
+    ) bool {
+        for (&self.slots) |*slot| {
+            if (slot.in_use and
+                slot.record.policy_authority_root and
+                !slot.record.revoked and
+                slot.record.principal_id.eql(principal_id) and
+                std.mem.eql(u8, slot.record.public_key[0..], public_key[0..]))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     pub fn trustedPublisherSignature(self: *const Keyring, publisher: []const u8, signature: manifest.Signature) bool {
         if (!signature.isComplete()) return false;
         for (&self.slots) |*slot| {
@@ -170,6 +189,7 @@ pub const Keyring = struct {
 pub fn kindName(kind: PrincipalKind) []const u8 {
     return switch (kind) {
         .user => "UserPrincipal",
+        .team => "TeamPrincipal",
         .device => "DevicePrincipal",
         .app => "AppPrincipal",
         .service => "ServicePrincipal",
@@ -184,6 +204,7 @@ test "principal records preserve identity and labels" {
     try std.testing.expect(record.id.eql(id));
     try std.testing.expectEqualStrings("session-manager", record.labelSlice());
     try std.testing.expectEqualStrings("ServicePrincipal", kindName(record.id.kind));
+    try std.testing.expectEqualStrings("TeamPrincipal", kindName(.team));
 }
 
 test "principal keyring binds publishers to trusted keys and supports revocation" {
@@ -196,6 +217,8 @@ test "principal keyring binds publishers to trusted keys and supports revocation
     _ = try keyring.bindPolicyAuthorityRoot(root, root_key);
     _ = try keyring.bindPublisher(publisher, root, "Example Software", publisher_key);
     try std.testing.expect(keyring.isPolicyAuthorityRoot(root));
+    try std.testing.expect(keyring.isPolicyAuthorityRootKey(root, root_key));
+    try std.testing.expect(!keyring.isPolicyAuthorityRootKey(root, publisher_key));
 
     var signature = manifest.Signature{
         .signer = "Example Software",

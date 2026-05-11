@@ -1,0 +1,309 @@
+const std = @import("std");
+const abi = @import("../core/abi.zig");
+const capability = @import("../kernel_api/capability.zig");
+const principal = @import("../core/principal.zig");
+const task_runtime = @import("task_runtime.zig");
+
+pub const Operation = enum(u8) {
+    inspect_memory,
+    inject_code,
+    scrape_window,
+    watch_clipboard,
+    register_global_hook,
+};
+
+pub const Request = struct {
+    caller_task_id: u64,
+    target_task_id: u64 = 0,
+    capability_id: u64,
+    operation: Operation,
+    user_visible: bool,
+    hidden: bool = false,
+    continuous: bool = false,
+    now_ticks: u64,
+};
+
+pub const Decision = struct {
+    allowed: bool,
+    operation: Operation,
+    caller_task_id: u64,
+    target_task_id: u64,
+    capability_id: u64,
+    reason: abi.DenialReason = .none,
+};
+
+pub const Error = task_runtime.Error || capability.Error || error{
+    HiddenGlobalHookDenied,
+    InvalidIsolationTarget,
+    PermissionDenied,
+    ScopeViolation,
+    SubjectTaskMismatch,
+    TaskNotFound,
+    VisibleEntitlementRequired,
+};
+
+pub const Broker = struct {
+    runtime: *task_runtime.Runtime,
+    capability_table: *const capability.CapabilityTable,
+
+    pub fn init(runtime: *task_runtime.Runtime, capability_table: *const capability.CapabilityTable) Broker {
+        return .{
+            .runtime = runtime,
+            .capability_table = capability_table,
+        };
+    }
+
+    pub fn authorize(self: *Broker, request: Request) Error!Decision {
+        const caller = self.runtime.find(request.caller_task_id) orelse return error.TaskNotFound;
+        const target_task_id = try requiredTargetTaskId(request);
+        _ = self.runtime.find(target_task_id) orelse return error.TaskNotFound;
+
+        if (isCrossTaskOperation(request.operation)) {
+            if (target_task_id == request.caller_task_id) {
+                try self.auditDenied(request, 0, .invalid_target);
+                return error.InvalidIsolationTarget;
+            }
+            if (!self.runtime.processSeparated(request.caller_task_id, target_task_id)) {
+                try self.auditDenied(request, 0, .scope_violation);
+                return error.ScopeViolation;
+            }
+        }
+
+        if (request.operation == .register_global_hook and request.hidden) {
+            try self.auditDenied(request, 0, .policy_denied);
+            return error.HiddenGlobalHookDenied;
+        }
+
+        const owned = self.capability_table.query(request.capability_id) orelse {
+            try self.auditDenied(request, 0, .capability_missing);
+            return error.CapabilityNotFound;
+        };
+        if (!self.capability_table.isUsable(owned, request.now_ticks)) {
+            try self.auditDenied(request, owned.id, .capability_revoked);
+            return error.CapabilityRevoked;
+        }
+        if (!self.runtime.hasCapability(request.caller_task_id, owned.id)) {
+            try self.auditDenied(request, owned.id, .capability_missing);
+            return error.CapabilityNotFound;
+        }
+        if (!caller.owner.eql(owned.holder)) {
+            try self.auditDenied(request, owned.id, .policy_denied);
+            return error.PermissionDenied;
+        }
+        if (owned.target.kind != .task or owned.target.id != target_task_id) {
+            try self.auditDenied(request, owned.id, .invalid_target);
+            return error.InvalidIsolationTarget;
+        }
+        if (!owned.rights.has(.process_control)) {
+            try self.auditDenied(request, owned.id, .policy_denied);
+            return error.PermissionDenied;
+        }
+        if (owned.scope.task_id == null or owned.scope.task_id.? != request.caller_task_id) {
+            try self.auditDenied(request, owned.id, .scope_violation);
+            return error.ScopeViolation;
+        }
+        if (!owned.audit.user_visible_entitlement or !request.user_visible) {
+            try self.auditDenied(request, owned.id, .policy_denied);
+            return error.VisibleEntitlementRequired;
+        }
+
+        try self.runtime.audit(request.caller_task_id, .{
+            .kind = .policy_allowed,
+            .capability_id = owned.id,
+            .detail = @intFromEnum(request.operation),
+            .tick = request.now_ticks,
+        });
+        return .{
+            .allowed = true,
+            .operation = request.operation,
+            .caller_task_id = request.caller_task_id,
+            .target_task_id = target_task_id,
+            .capability_id = owned.id,
+        };
+    }
+
+    fn auditDenied(self: *Broker, request: Request, capability_id: u64, reason: abi.DenialReason) task_runtime.Error!void {
+        try self.runtime.audit(request.caller_task_id, .{
+            .kind = .policy_denied,
+            .capability_id = capability_id,
+            .detail = (@as(u32, @intFromEnum(reason)) << 8) | @as(u32, @intFromEnum(request.operation)),
+            .tick = request.now_ticks,
+        });
+    }
+};
+
+fn requiredTargetTaskId(request: Request) Error!u64 {
+    return switch (request.operation) {
+        .inspect_memory, .inject_code, .scrape_window => blk: {
+            if (request.target_task_id == 0) return error.InvalidIsolationTarget;
+            break :blk request.target_task_id;
+        },
+        .watch_clipboard, .register_global_hook => if (request.target_task_id == 0)
+            request.caller_task_id
+        else
+            request.target_task_id,
+    };
+}
+
+fn isCrossTaskOperation(operation: Operation) bool {
+    return switch (operation) {
+        .inspect_memory, .inject_code, .scrape_window => true,
+        .watch_clipboard, .register_global_hook => false,
+    };
+}
+
+fn visibleProcessControlCapability(
+    table: *capability.CapabilityTable,
+    holder: principal.PrincipalId,
+    caller_task_id: u64,
+    target_task_id: u64,
+    visible: bool,
+    tick: u64,
+) !capability.Capability {
+    return table.mintBootRoot(.{
+        .holder = holder,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .task, .id = target_task_id },
+        .rights = .{ .task = .{ .process_control = true } },
+        .scope = .{
+            .task_id = caller_task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = tick,
+            .expires_at_ticks = tick + 100,
+        },
+        .audit = .{
+            .policy_generation = 1,
+            .source_task_id = caller_task_id,
+            .broker_service_id = 77,
+            .user_visible_entitlement = visible,
+        },
+    });
+}
+
+fn createApp(runtime: *task_runtime.Runtime, owner: principal.PrincipalId) !*task_runtime.TaskRecord {
+    var image = task_runtime.syntheticUserspaceImage("isolation-test", "app.process-isolation-test");
+    return runtime.createTask(.{
+        .owner = owner,
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 1_000,
+            .memory_bytes = 64 * 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 4096,
+        },
+        .local_only = true,
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = owner.serial,
+            .component_abi_version = abi.ABI_VERSION,
+            .signed = true,
+            .bundle_id = "app.process-isolation-test",
+        },
+        .userspace_image = &image,
+    });
+}
+
+test "process isolation denies memory injection window clipboard and hook bypasses without visible entitlements" {
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    var broker = Broker.init(&runtime, &capabilities);
+
+    const attacker = try createApp(&runtime, .{ .kind = .app, .serial = 501 });
+    const victim = try createApp(&runtime, .{ .kind = .app, .serial = 502 });
+    try std.testing.expect(runtime.processSeparated(attacker.id, victim.id));
+
+    try std.testing.expectError(error.CapabilityNotFound, broker.authorize(.{
+        .caller_task_id = attacker.id,
+        .target_task_id = victim.id,
+        .capability_id = 999,
+        .operation = .inspect_memory,
+        .user_visible = true,
+        .now_ticks = 10,
+    }));
+
+    const ordinary = try capabilities.mintBootRoot(.{
+        .holder = attacker.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .task, .id = victim.id },
+        .rights = .{ .task = .{ .capability_query = true } },
+        .scope = .{ .task_id = attacker.id, .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 10, .expires_at_ticks = 100 },
+        .audit = .{ .policy_generation = 1, .source_task_id = attacker.id, .broker_service_id = 77, .user_visible_entitlement = true },
+    });
+    try runtime.grantCapability(attacker.id, ordinary.id);
+    try std.testing.expectError(error.PermissionDenied, broker.authorize(.{
+        .caller_task_id = attacker.id,
+        .target_task_id = victim.id,
+        .capability_id = ordinary.id,
+        .operation = .inject_code,
+        .user_visible = true,
+        .now_ticks = 11,
+    }));
+
+    const invisible = try visibleProcessControlCapability(&capabilities, attacker.owner, attacker.id, victim.id, false, 12);
+    try runtime.grantCapability(attacker.id, invisible.id);
+    try std.testing.expectError(error.VisibleEntitlementRequired, broker.authorize(.{
+        .caller_task_id = attacker.id,
+        .target_task_id = victim.id,
+        .capability_id = invisible.id,
+        .operation = .scrape_window,
+        .user_visible = true,
+        .now_ticks = 13,
+    }));
+
+    const visible_cross_task = try visibleProcessControlCapability(&capabilities, attacker.owner, attacker.id, victim.id, true, 14);
+    try runtime.grantCapability(attacker.id, visible_cross_task.id);
+    inline for (.{ Operation.inspect_memory, Operation.inject_code, Operation.scrape_window }) |operation| {
+        const decision = try broker.authorize(.{
+            .caller_task_id = attacker.id,
+            .target_task_id = victim.id,
+            .capability_id = visible_cross_task.id,
+            .operation = operation,
+            .user_visible = true,
+            .now_ticks = 20 + @intFromEnum(operation),
+        });
+        try std.testing.expect(decision.allowed);
+        try std.testing.expectEqual(victim.id, decision.target_task_id);
+    }
+
+    const visible_self = try visibleProcessControlCapability(&capabilities, attacker.owner, attacker.id, attacker.id, true, 30);
+    try runtime.grantCapability(attacker.id, visible_self.id);
+    try std.testing.expectError(error.VisibleEntitlementRequired, broker.authorize(.{
+        .caller_task_id = attacker.id,
+        .capability_id = visible_self.id,
+        .operation = .watch_clipboard,
+        .continuous = true,
+        .user_visible = false,
+        .now_ticks = 31,
+    }));
+    try std.testing.expect((try broker.authorize(.{
+        .caller_task_id = attacker.id,
+        .capability_id = visible_self.id,
+        .operation = .watch_clipboard,
+        .continuous = true,
+        .user_visible = true,
+        .now_ticks = 32,
+    })).allowed);
+    try std.testing.expectError(error.HiddenGlobalHookDenied, broker.authorize(.{
+        .caller_task_id = attacker.id,
+        .capability_id = visible_self.id,
+        .operation = .register_global_hook,
+        .user_visible = true,
+        .hidden = true,
+        .now_ticks = 33,
+    }));
+    try std.testing.expect((try broker.authorize(.{
+        .caller_task_id = attacker.id,
+        .capability_id = visible_self.id,
+        .operation = .register_global_hook,
+        .user_visible = true,
+        .now_ticks = 34,
+    })).allowed);
+
+    const latest = attacker.latestAuditEvent().?;
+    try std.testing.expectEqual(task_runtime.AuditEventKind.policy_allowed, latest.kind);
+    try std.testing.expectEqual(@as(u32, @intFromEnum(Operation.register_global_hook)), latest.detail);
+}

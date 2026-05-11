@@ -92,6 +92,30 @@ pub fn publishedDriversActivateScopedTransports() !void {
         FakeBackend.activate,
         false,
     ));
+    try std.testing.expect(try bootstrap_driver_port.publishNetworkActivator(
+        network_device_id,
+        "e1000-userspace",
+        FakeNetworkDevice.activate,
+        false,
+    ));
+    try std.testing.expect(try bootstrap_driver_port.publishDeviceDataPlane(
+        .graphics_adapter,
+        0x1234_1111_0001,
+        "compositor-userspace",
+        false,
+    ));
+    try std.testing.expect(try bootstrap_driver_port.publishDeviceDataPlane(
+        .audio_print_io,
+        0x8086_2668_0001,
+        "media-print-userspace",
+        false,
+    ));
+    try std.testing.expect(try bootstrap_driver_port.publishDeviceDataPlane(
+        .input_device,
+        0x8042_0001,
+        "input-userspace",
+        false,
+    ));
 
     var directory = driver_service.Directory.init();
     const network_authority = try spec_support.driverAuthority(
@@ -193,13 +217,15 @@ pub fn publishedDriversActivateScopedTransports() !void {
     const audio_activation = try runtime.activateAt(audio_driver, 1);
     const input_activation = try runtime.activateAt(input_driver, 1);
 
-    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, network_activation.mode);
-    try std.testing.expect(!network_activation.exclusive_claim);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, network_activation.mode);
+    try std.testing.expect(network_activation.exclusive_claim);
     try std.testing.expect(!network_activation.kernel_bootstrap);
-    try std.testing.expectEqual(@as(usize, 0), FakeNetworkDevice.activation_count);
-    try std.testing.expect(!bootstrap_driver_port.hasActiveNetworkDevice());
-    try std.testing.expect(bootstrap_driver_port.networkPublication() == null);
+    try std.testing.expectEqualStrings("e1000-userspace", network_activation.publisherSlice());
+    try std.testing.expectEqual(@as(usize, 1), FakeNetworkDevice.activation_count);
+    try std.testing.expect(bootstrap_driver_port.hasActiveNetworkDevice());
+    try std.testing.expectEqual(@as(u64, 91), bootstrap_driver_port.networkPublication().?.active_service_id);
     try std.testing.expect(runtime.deactivate(network_driver.service_id));
+    try std.testing.expect(!bootstrap_driver_port.hasActiveNetworkDevice());
 
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, storage_activation.mode);
     try std.testing.expect(storage_activation.exclusive_claim);
@@ -209,23 +235,29 @@ pub fn publishedDriversActivateScopedTransports() !void {
     try std.testing.expect(storage_volume.hasAttachedDevice());
     try std.testing.expectEqual(@as(u64, 92), bootstrap_driver_port.storagePublication().?.active_service_id);
 
-    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, graphics_activation.mode);
-    try std.testing.expect(!graphics_activation.exclusive_claim);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, graphics_activation.mode);
+    try std.testing.expect(graphics_activation.exclusive_claim);
+    try std.testing.expectEqualStrings("compositor-userspace", graphics_activation.publisherSlice());
+    try std.testing.expectEqual(@as(u64, 93), bootstrap_driver_port.deviceDataPlanePublication(.graphics_adapter).?.active_service_id);
     try std.testing.expect(graphics_driver.allowsDma(graphics_driver.dma_ranges[0].base, 4096));
     try std.testing.expect(!graphics_driver.allowsDma(graphics_driver.dma_ranges[0].base + graphics_driver.dma_ranges[0].length - 1024, 4096));
-    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, audio_activation.mode);
-    try std.testing.expect(!audio_activation.exclusive_claim);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, audio_activation.mode);
+    try std.testing.expect(audio_activation.exclusive_claim);
+    try std.testing.expectEqualStrings("media-print-userspace", audio_activation.publisherSlice());
+    try std.testing.expectEqual(@as(u64, 94), bootstrap_driver_port.deviceDataPlanePublication(.audio_print_io).?.active_service_id);
     try std.testing.expect(audio_driver.allowsDma(audio_driver.dma_ranges[0].base, 4096));
     try std.testing.expect(!audio_driver.allowsDma(audio_driver.dma_ranges[0].base + audio_driver.dma_ranges[0].length - 1024, 4096));
-    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, input_activation.mode);
-    try std.testing.expect(!input_activation.exclusive_claim);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, input_activation.mode);
+    try std.testing.expect(input_activation.exclusive_claim);
+    try std.testing.expectEqualStrings("input-userspace", input_activation.publisherSlice());
+    try std.testing.expectEqual(@as(u64, 95), bootstrap_driver_port.deviceDataPlanePublication(.input_device).?.active_service_id);
     try std.testing.expect(input_driver.allowsDma(input_driver.dma_ranges[0].base, 4096));
     try std.testing.expect(!input_driver.allowsDma(input_driver.dma_ranges[0].base + input_driver.dma_ranges[0].length - 1024, 4096));
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.network_adapter).?.mode);
     try std.testing.expectEqualStrings("ata-bootstrap", runtime.findByClass(.storage_controller).?.publisherSlice());
-    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.graphics_adapter).?.mode);
-    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.audio_print_io).?.mode);
-    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.input_device).?.mode);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, runtime.findByClass(.graphics_adapter).?.mode);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, runtime.findByClass(.audio_print_io).?.mode);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, runtime.findByClass(.input_device).?.mode);
 
     var unsupported_network_transport_directory = driver_service.Directory.init();
     try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_network_transport_directory.register(.{

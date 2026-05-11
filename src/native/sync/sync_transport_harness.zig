@@ -178,8 +178,9 @@ pub const BootedOverlayRelayService = struct {
         caller_task_id: u64,
         session: *const TransportSession,
     ) Error!void {
-        if (caller_task_id == 0) return self.reject(error.EgressDenied);
+        if (caller_task_id == 0 or caller_task_id != session.task_id) return self.reject(error.EgressDenied);
         if (session.transport != .relay_assisted) return self.reject(error.EgressDenied);
+        if (!session.egress_decision.allowed) return self.reject(error.EgressDenied);
         if (!std.mem.eql(u8, session.relayDomainSlice(), self.relayDomainSlice())) {
             return self.reject(error.EgressDenied);
         }
@@ -211,6 +212,7 @@ fn relaySessionKey(session_id: u64, source_device: principal.PrincipalId, target
 
 pub const TransportSession = struct {
     id: u64,
+    task_id: u64,
     transport: sync_state.TransportMode,
     policy_id: u64,
     capability_id: u64,
@@ -368,6 +370,7 @@ pub const Harness = struct {
 
         var session = TransportSession{
             .id = self.nextSessionId(),
+            .task_id = request.task_id,
             .transport = transport,
             .policy_id = request.policy_id,
             .capability_id = request.capability_id,
@@ -653,13 +656,14 @@ test "booted overlay relay service rejects unauthorized relay and target changes
     try std.testing.expectEqual(@as(usize, 0), wrong_domain_service.accepted_packets);
     try std.testing.expectEqual(@as(usize, 1), wrong_domain_service.rejected_packets);
 
+    try std.testing.expectError(error.EgressDenied, relay_service.submitSignedFrame(78, &session, blocked_frame));
     try std.testing.expectError(error.EgressDenied, relay_service.submitSignedFrame(0, &session, blocked_frame));
     var tampered_packet = try harness.encryptPacket(&session, "target change");
     tampered_packet.target_device = other_target;
     const tampered_frame = try signPacket(tampered_packet, signer_identity);
     try std.testing.expectError(error.PacketTargetMismatch, relay_service.submitSignedFrame(77, &session, tampered_frame));
     try std.testing.expectEqual(@as(usize, 1), relay_service.accepted_packets);
-    try std.testing.expectEqual(@as(usize, 2), relay_service.rejected_packets);
+    try std.testing.expectEqual(@as(usize, 3), relay_service.rejected_packets);
 }
 
 test "encrypted transport harness binds device sessions to attested identity and route" {

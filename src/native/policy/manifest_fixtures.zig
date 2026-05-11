@@ -91,6 +91,58 @@ pub const sync_push_background_tasks = [_]manifest.BackgroundTaskDecl{
     },
 };
 
+pub const example_writer_components = [_]manifest.ExecutionComponentDecl{
+    .{ .id = "writer-ui", .entry = "com.example.writer.ui" },
+};
+
+pub const example_writer_provided_interfaces = [_]manifest.InterfaceDecl{
+    .{ .name = "writer.edit/v1" },
+};
+
+pub const example_writer_consumed_interfaces = [_]manifest.InterfaceDecl{
+    .{ .name = "documents.open/v1" },
+    .{ .name = "export.pdf/v1" },
+};
+
+pub const example_writer_assets = [_]manifest.AssetDecl{
+    .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+};
+
+pub const example_writer_permissions = [_]manifest.PermissionRequest{
+    .{
+        .kind = .object_access,
+        .resource = "workspace://report-alpha",
+        .rights = .{ .object = .{ .object_read = true, .object_write = true } },
+        .local_only = true,
+    },
+    .{
+        .kind = .network_egress,
+        .resource = "sync.example.com",
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .required = false,
+    },
+    .{
+        .kind = .background_execution,
+        .resource = "sync-complete",
+        .rights = .{ .task = .{ .background_run = true } },
+        .required = false,
+    },
+};
+
+pub const example_writer_background_tasks = [_]manifest.BackgroundTaskDecl{
+    .{
+        .id = "sync-complete",
+        .trigger = .sync_completion,
+        .expected_duration_seconds = 30,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 64 * 1024,
+        },
+        .network = .none,
+        .visibility = .status_only,
+    },
+};
+
 pub fn notesBundle() manifest.BundleManifest {
     return .{
         .bundle_id = "app.notes",
@@ -129,4 +181,20 @@ pub fn syncPushBundle() manifest.BundleManifest {
     var bundle = syncBundle();
     bundle.background_tasks = &sync_push_background_tasks;
     return bundle;
+}
+
+pub fn exampleWriterBundle() manifest.BundleManifest {
+    return .{
+        .bundle_id = "com.example.writer",
+        .display_name = "Writer",
+        .publisher = "Example Software",
+        .version_major = 1,
+        .version_minor = 4,
+        .provided_interfaces = &example_writer_provided_interfaces,
+        .consumed_interfaces = &example_writer_consumed_interfaces,
+        .components = &example_writer_components,
+        .assets = &example_writer_assets,
+        .requested_permissions = &example_writer_permissions,
+        .background_tasks = &example_writer_background_tasks,
+    };
 }

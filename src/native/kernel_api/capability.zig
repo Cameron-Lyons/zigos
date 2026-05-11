@@ -77,9 +77,10 @@ pub const CapabilityRight = enum(u8) {
     contacts_read,
     screen_capture,
     notification_post,
+    process_control,
 };
 
-const RightsBits = packed struct(u32) {
+const RightsBits = packed struct(u64) {
     task_create: bool = false,
     task_terminate: bool = false,
     endpoint_create: bool = false,
@@ -112,6 +113,8 @@ const RightsBits = packed struct(u32) {
     contacts_read: bool = false,
     screen_capture: bool = false,
     notification_post: bool = false,
+    process_control: bool = false,
+    _reserved: u31 = 0,
 };
 
 pub const CapabilityRights = union(CapabilityTargetKind) {
@@ -138,6 +141,7 @@ pub const CapabilityRights = union(CapabilityTargetKind) {
         accounting_query: bool = false,
         background_run: bool = false,
         notification_post: bool = false,
+        process_control: bool = false,
     };
 
     pub const EndpointRights = packed struct {
@@ -259,7 +263,7 @@ pub const CapabilityRights = union(CapabilityTargetKind) {
         return .{ .policy = bits };
     }
 
-    pub fn toBits(self: CapabilityRights) u32 {
+    pub fn toBits(self: CapabilityRights) u64 {
         return @bitCast(self.toRightsBits());
     }
 
@@ -279,7 +283,7 @@ pub const CapabilityRights = union(CapabilityTargetKind) {
         return bits;
     }
 
-    fn fromBits(kind: CapabilityTargetKind, raw_bits: u32) CapabilityRights {
+    fn fromBits(kind: CapabilityTargetKind, raw_bits: u64) CapabilityRights {
         const bits: RightsBits = @bitCast(raw_bits);
         return switch (kind) {
             .task => .{ .task = projectRights(TaskRights, bits) },
@@ -344,6 +348,7 @@ pub const AuditMetadata = struct {
     policy_generation: u32 = 0,
     source_task_id: u64 = 0,
     broker_service_id: u64 = 0,
+    user_visible_entitlement: bool = false,
 };
 
 pub const Capability = struct {

@@ -38,6 +38,19 @@ pub const StoragePublicationKind = enum(u8) {
     ata_bootstrap_bridge,
 };
 
+pub const DeviceDataPlanePublication = struct {
+    device_class: driver_service.DeviceClass = .graphics_adapter,
+    device_id: u64,
+    publisher_len: usize = 0,
+    publisher: [32]u8 = [_]u8{0} ** 32,
+    kernel_bootstrap: bool = true,
+    active_service_id: u64 = 0,
+
+    pub fn publisherSlice(self: *const DeviceDataPlanePublication) []const u8 {
+        return self.publisher[0..self.publisher_len];
+    }
+};
+
 pub const Error = error{
     PublisherTooLong,
 };
@@ -74,10 +87,12 @@ pub const StoragePublication = struct {
 
 var published_network: ?NetworkPublication = null;
 var published_storage: ?StoragePublication = null;
+var published_device_planes = [_]?DeviceDataPlanePublication{null} ** device_class_count;
 
 pub fn reset() void {
     published_network = null;
     published_storage = null;
+    published_device_planes = [_]?DeviceDataPlanePublication{null} ** device_class_count;
     device_broker.reset();
     kernel_network_claim.init();
     network_driver_task.reset();
@@ -155,6 +170,22 @@ pub fn publishStorageAtaBootstrap(
     return true;
 }
 
+pub fn publishDeviceDataPlane(
+    device_class: driver_service.DeviceClass,
+    device_id: u64,
+    publisher: []const u8,
+    kernel_bootstrap: bool,
+) Error!bool {
+    if (kernel_bootstrap) return false;
+    if (!supportsGenericDeviceDataPlane(device_class)) return false;
+    const index = deviceClassIndex(device_class);
+    if (!canPublishPublication(DeviceDataPlanePublication, published_device_planes[index], device_id)) return false;
+    var publication = try initPublication(DeviceDataPlanePublication, device_id, publisher, kernel_bootstrap);
+    publication.device_class = device_class;
+    published_device_planes[index] = publication;
+    return true;
+}
+
 pub fn claimStorageAtaBootstrapInventory(driver: *const driver_service.DriverRecord, publisher: []const u8) Error!bool {
     if (driver.device_class != .storage_controller) return false;
     if (driver.bootstrap_transport != .kernel_bootstrap_broker) return false;
@@ -174,6 +205,11 @@ pub fn networkPublication() ?NetworkPublication {
 
 pub fn storagePublication() ?StoragePublication {
     return published_storage;
+}
+
+pub fn deviceDataPlanePublication(device_class: driver_service.DeviceClass) ?DeviceDataPlanePublication {
+    if (!supportsGenericDeviceDataPlane(device_class)) return null;
+    return published_device_planes[deviceClassIndex(device_class)];
 }
 
 pub fn hasActiveNetworkDevice() bool {
@@ -208,6 +244,16 @@ pub fn activateNetworkDevice(device_id: u64, service_id: u64) bool {
         }
         if (!kernel_network_claim.recordDriverClaim(device_id, service_id)) return false;
         if (!network_driver_task.activateDevice(publication.network_device.?, service_id)) return false;
+        publication.active_service_id = service_id;
+        return true;
+    }
+    return false;
+}
+
+pub fn activateDeviceDataPlane(device_class: driver_service.DeviceClass, device_id: u64, service_id: u64) bool {
+    if (!supportsGenericDeviceDataPlane(device_class)) return false;
+    if (publicationForActivation(DeviceDataPlanePublication, &published_device_planes[deviceClassIndex(device_class)], device_id, service_id)) |publication| {
+        if (publication.device_class != device_class) return false;
         publication.active_service_id = service_id;
         return true;
     }
@@ -271,6 +317,16 @@ pub fn deactivateStorageBackend(service_id: u64) bool {
     return false;
 }
 
+pub fn deactivateDeviceDataPlane(device_class: driver_service.DeviceClass, service_id: u64) bool {
+    if (!supportsGenericDeviceDataPlane(device_class)) return false;
+    if (publicationForDeactivation(DeviceDataPlanePublication, &published_device_planes[deviceClassIndex(device_class)], service_id)) |publication| {
+        if (publication.device_class != device_class) return false;
+        publication.active_service_id = 0;
+        return true;
+    }
+    return false;
+}
+
 fn canPublishPublication(comptime T: type, publication: ?T, device_id: u64) bool {
     if (publication) |existing| {
         return existing.device_id == device_id;
@@ -302,6 +358,19 @@ fn initPublication(comptime T: type, device_id: u64, publisher: []const u8, kern
     };
     publication.publisher_len = native_util.copyTextExact(publication.publisher[0..], publisher) catch return error.PublisherTooLong;
     return publication;
+}
+
+fn supportsGenericDeviceDataPlane(device_class: driver_service.DeviceClass) bool {
+    return switch (device_class) {
+        .graphics_adapter, .audio_print_io, .input_device => true,
+        .network_adapter, .storage_controller => false,
+    };
+}
+
+const device_class_count = std.meta.fields(driver_service.DeviceClass).len;
+
+fn deviceClassIndex(device_class: driver_service.DeviceClass) usize {
+    return @intFromEnum(device_class);
 }
 
 test "driver-backed network tx fails closed without capability-backed egress decision" {
@@ -430,4 +499,27 @@ test "kernel bootstrap cannot publish storage data-plane transports directly" {
     try std.testing.expect(!(try publishStorageActivator(0x1F001, "kernel-storage", Backend.activate, true)));
     try std.testing.expect(!(try publishStorageAtaBootstrap(0x1F001, "kernel-storage", true)));
     try std.testing.expect(storagePublication() == null);
+}
+
+test "kernel bootstrap cannot publish peripheral device data-plane transports directly" {
+    if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
+
+    reset();
+    defer reset();
+
+    const peripheral_classes = [_]driver_service.DeviceClass{ .graphics_adapter, .audio_print_io, .input_device };
+    for (peripheral_classes) |device_class| {
+        try std.testing.expect(!(try publishDeviceDataPlane(device_class, @as(u64, 0x9000) + @intFromEnum(device_class), "kernel-device", true)));
+        try std.testing.expect(deviceDataPlanePublication(device_class) == null);
+    }
+
+    try std.testing.expect(!(try publishDeviceDataPlane(.network_adapter, 0x8086_100E_0001, "generic-network", false)));
+    try std.testing.expect(!(try publishDeviceDataPlane(.storage_controller, 0x1F001, "generic-storage", false)));
+
+    try std.testing.expect(try publishDeviceDataPlane(.graphics_adapter, 0x1234_1111_0001, "compositor-driver", false));
+    try std.testing.expect(!activateDeviceDataPlane(.graphics_adapter, 0x1234_1111_0002, 44));
+    try std.testing.expect(activateDeviceDataPlane(.graphics_adapter, 0x1234_1111_0001, 44));
+    try std.testing.expectEqual(@as(u64, 44), deviceDataPlanePublication(.graphics_adapter).?.active_service_id);
+    try std.testing.expect(deactivateDeviceDataPlane(.graphics_adapter, 44));
+    try std.testing.expectEqual(@as(u64, 0), deviceDataPlanePublication(.graphics_adapter).?.active_service_id);
 }

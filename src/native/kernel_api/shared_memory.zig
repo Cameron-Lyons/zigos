@@ -98,9 +98,11 @@ pub const Error = error{
     AcceleratorAlreadyAttached,
     AcceleratorNotAttached,
     AlreadyMapped,
+    MappingDescriptorMismatch,
     MappingNotFound,
     Revoked,
     SizeZero,
+    StaleMappingDescriptor,
     TableFull,
     SharedMemoryNotFound,
 };
@@ -192,6 +194,18 @@ pub const FreestandingMmu = struct {
                 self.removeMappingIndex(index);
             } else {
                 index += 1;
+            }
+        }
+    }
+
+    pub fn updateObjectAttachmentGeneration(
+        self: *FreestandingMmu,
+        object_id: ids.SharedMemoryId,
+        attachment_generation: u32,
+    ) void {
+        for (self.mappings[0..self.mapping_count]) |*mapping| {
+            if (mapping.object_id.eql(object_id)) {
+                mapping.attachment_generation = attachment_generation;
             }
         }
     }
@@ -411,11 +425,14 @@ pub const Table = struct {
         if (!object.allowsCompute(target)) return error.AcceleratorAccessDenied;
         if (object.attachedTo(target)) return error.AcceleratorAlreadyAttached;
 
+        const previous_generation = object.attachment_generation;
         setComputeAccess(&object.attached_compute, target, true);
         object.attachment_generation += 1;
+        self.mmu.updateObjectAttachmentGeneration(object_id, object.attachment_generation);
         _ = self.mmu.mapAccelerator(object, target) catch |err| {
             setComputeAccess(&object.attached_compute, target, false);
-            object.attachment_generation -= 1;
+            object.attachment_generation = previous_generation;
+            self.mmu.updateObjectAttachmentGeneration(object_id, previous_generation);
             return err;
         };
     }
@@ -424,9 +441,10 @@ pub const Table = struct {
         const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
         if (!object.attachedTo(target)) return false;
 
+        _ = try self.mmu.unmapAccelerator(object_id, target);
         setComputeAccess(&object.attached_compute, target, false);
         object.attachment_generation += 1;
-        _ = try self.mmu.unmapAccelerator(object_id, target);
+        self.mmu.updateObjectAttachmentGeneration(object_id, object.attachment_generation);
         return true;
     }
 
@@ -453,6 +471,16 @@ pub const Table = struct {
         return mappingDescriptorFor(object, task_id, null, false);
     }
 
+    pub fn validateTaskMappingDescriptor(
+        self: *const Table,
+        mapping_descriptor: MappingDescriptor,
+    ) Error!void {
+        const object = self.findConst(mapping_descriptor.object_id) orelse return error.SharedMemoryNotFound;
+        if (object.revoked) return error.Revoked;
+        if (!self.hasMapping(mapping_descriptor.object_id, mapping_descriptor.task_id)) return error.MappingNotFound;
+        try validateMappingDescriptorForObject(object, mapping_descriptor, mapping_descriptor.task_id, null, false);
+    }
+
     pub fn acceleratorMappingDescriptor(
         self: *const Table,
         object_id: ids.SharedMemoryId,
@@ -462,6 +490,23 @@ pub const Table = struct {
         if (object.revoked) return error.Revoked;
         if (!object.attachedTo(target)) return error.AcceleratorNotAttached;
         return mappingDescriptorFor(object, ids.TaskId.zero, target, true);
+    }
+
+    pub fn validateAcceleratorMappingDescriptor(
+        self: *const Table,
+        mapping_descriptor: MappingDescriptor,
+        target: ComputeTarget,
+    ) Error!void {
+        const object = self.findConst(mapping_descriptor.object_id) orelse return error.SharedMemoryNotFound;
+        if (object.revoked) return error.Revoked;
+        if (!mapping_descriptor.task_id.eql(ids.TaskId.zero) or
+            !computeTargetsEqual(mapping_descriptor.target, target) or
+            !mapping_descriptor.zero_copy)
+        {
+            return error.MappingDescriptorMismatch;
+        }
+        if (!object.attachedTo(target)) return error.AcceleratorNotAttached;
+        try validateMappingDescriptorForObject(object, mapping_descriptor, ids.TaskId.zero, target, true);
     }
 
     pub fn freestandingTaskMappingDescriptor(
@@ -474,6 +519,16 @@ pub const Table = struct {
         return self.mmu.taskMappingDescriptor(object_id, task_id);
     }
 
+    pub fn validateFreestandingTaskMappingDescriptor(
+        self: *const Table,
+        mapping_descriptor: FreestandingMappingDescriptor,
+    ) Error!void {
+        const object = self.findConst(mapping_descriptor.object_id) orelse return error.SharedMemoryNotFound;
+        if (object.revoked) return error.Revoked;
+        const current = try self.mmu.taskMappingDescriptor(mapping_descriptor.object_id, mapping_descriptor.task_id);
+        try validateFreestandingDescriptorForObject(object, current, mapping_descriptor, mapping_descriptor.task_id, null, false);
+    }
+
     pub fn freestandingAcceleratorMappingDescriptor(
         self: *const Table,
         object_id: ids.SharedMemoryId,
@@ -482,6 +537,23 @@ pub const Table = struct {
         const object = self.findConst(object_id) orelse return error.SharedMemoryNotFound;
         if (object.revoked) return error.Revoked;
         return self.mmu.acceleratorMappingDescriptor(object_id, target);
+    }
+
+    pub fn validateFreestandingAcceleratorMappingDescriptor(
+        self: *const Table,
+        mapping_descriptor: FreestandingMappingDescriptor,
+        target: ComputeTarget,
+    ) Error!void {
+        const object = self.findConst(mapping_descriptor.object_id) orelse return error.SharedMemoryNotFound;
+        if (object.revoked) return error.Revoked;
+        if (!mapping_descriptor.task_id.eql(ids.TaskId.zero) or
+            !computeTargetsEqual(mapping_descriptor.target, target) or
+            !mapping_descriptor.zero_copy)
+        {
+            return error.MappingDescriptorMismatch;
+        }
+        const current = try self.mmu.acceleratorMappingDescriptor(mapping_descriptor.object_id, target);
+        try validateFreestandingDescriptorForObject(object, current, mapping_descriptor, ids.TaskId.zero, target, true);
     }
 
     pub fn activeFreestandingMappings(self: *const Table, object_id: ids.SharedMemoryId) usize {
@@ -606,6 +678,66 @@ fn mappingDescriptorFor(
         .attachment_generation = object.attachment_generation,
         .zero_copy = zero_copy,
     };
+}
+
+fn validateMappingDescriptorForObject(
+    object: *const Object,
+    descriptor: MappingDescriptor,
+    task_id: ids.TaskId,
+    target: ?ComputeTarget,
+    zero_copy: bool,
+) Error!void {
+    if (!descriptor.object_id.eql(object.id) or
+        !descriptor.task_id.eql(task_id) or
+        !computeTargetsEqual(descriptor.target, target) or
+        descriptor.page_base != object.page_base or
+        descriptor.page_count != object.page_count or
+        descriptor.size_bytes != object.size_bytes or
+        descriptor.label_hash != object.label_hash or
+        descriptor.zero_copy != zero_copy)
+    {
+        return error.MappingDescriptorMismatch;
+    }
+    if (descriptor.revocation_generation != object.revocation_generation or
+        descriptor.attachment_generation != object.attachment_generation)
+    {
+        return error.StaleMappingDescriptor;
+    }
+}
+
+fn validateFreestandingDescriptorForObject(
+    object: *const Object,
+    current: FreestandingMappingDescriptor,
+    descriptor: FreestandingMappingDescriptor,
+    task_id: ids.TaskId,
+    target: ?ComputeTarget,
+    zero_copy: bool,
+) Error!void {
+    if (!descriptor.object_id.eql(object.id) or
+        !descriptor.task_id.eql(task_id) or
+        !computeTargetsEqual(descriptor.target, target) or
+        descriptor.virtual_base != current.virtual_base or
+        descriptor.physical_base != object.page_base or
+        descriptor.physical_base != current.physical_base or
+        descriptor.page_count != object.page_count or
+        descriptor.size_bytes != object.size_bytes or
+        descriptor.label_hash != object.label_hash or
+        descriptor.zero_copy != zero_copy)
+    {
+        return error.MappingDescriptorMismatch;
+    }
+    if (descriptor.revocation_generation != object.revocation_generation or
+        descriptor.revocation_generation != current.revocation_generation or
+        descriptor.attachment_generation != object.attachment_generation or
+        descriptor.attachment_generation != current.attachment_generation)
+    {
+        return error.StaleMappingDescriptor;
+    }
+}
+
+fn computeTargetsEqual(lhs: ?ComputeTarget, rhs: ?ComputeTarget) bool {
+    if (lhs == null or rhs == null) return lhs == null and rhs == null;
+    return lhs.? == rhs.?;
 }
 
 fn mappingFromObject(
@@ -759,4 +891,48 @@ test "shared memory objects map through freestanding mmu and revoke accelerator 
     try std.testing.expectEqual(@as(usize, 0), table.activeFreestandingMappings(object.id));
     try std.testing.expectError(error.Revoked, table.freestandingTaskMappingDescriptor(object.id, ids.task(20)));
     try std.testing.expectError(error.Revoked, table.freestandingAcceleratorMappingDescriptor(object.id, .gpu));
+}
+
+test "shared memory rejects stale task and accelerator descriptors after generation changes" {
+    var table = Table.init();
+    const object = try table.createLabeledWithAccess(ids.task(30), 16 * 1024, "service-path-frame-buffer", .{
+        .gpu = true,
+        .media = true,
+    });
+
+    try table.map(object.id, ids.task(30));
+    const task_descriptor = try table.taskMappingDescriptor(object.id, ids.task(30));
+    const task_mmu_descriptor = try table.freestandingTaskMappingDescriptor(object.id, ids.task(30));
+    try table.validateTaskMappingDescriptor(task_descriptor);
+    try table.validateFreestandingTaskMappingDescriptor(task_mmu_descriptor);
+
+    try table.attachAccelerator(object.id, .gpu);
+    const gpu_descriptor = try table.acceleratorMappingDescriptor(object.id, .gpu);
+    const gpu_mmu_descriptor = try table.freestandingAcceleratorMappingDescriptor(object.id, .gpu);
+    try table.validateAcceleratorMappingDescriptor(gpu_descriptor, .gpu);
+    try table.validateFreestandingAcceleratorMappingDescriptor(gpu_mmu_descriptor, .gpu);
+    try std.testing.expectEqual(gpu_descriptor.attachment_generation, (try table.taskMappingDescriptor(object.id, ids.task(30))).attachment_generation);
+    try std.testing.expectEqual(gpu_mmu_descriptor.attachment_generation, (try table.freestandingTaskMappingDescriptor(object.id, ids.task(30))).attachment_generation);
+    try std.testing.expectError(error.StaleMappingDescriptor, table.validateTaskMappingDescriptor(task_descriptor));
+    try std.testing.expectError(error.StaleMappingDescriptor, table.validateFreestandingTaskMappingDescriptor(task_mmu_descriptor));
+
+    var tampered = gpu_descriptor;
+    tampered.label_hash +%= 1;
+    try std.testing.expectError(error.MappingDescriptorMismatch, table.validateAcceleratorMappingDescriptor(tampered, .gpu));
+    try std.testing.expectError(error.MappingDescriptorMismatch, table.validateAcceleratorMappingDescriptor(gpu_descriptor, .media));
+
+    const refreshed_task_descriptor = try table.taskMappingDescriptor(object.id, ids.task(30));
+    const refreshed_task_mmu_descriptor = try table.freestandingTaskMappingDescriptor(object.id, ids.task(30));
+    try std.testing.expect(try table.detachAccelerator(object.id, .gpu));
+    try std.testing.expectError(error.AcceleratorNotAttached, table.validateAcceleratorMappingDescriptor(gpu_descriptor, .gpu));
+    try std.testing.expectError(error.AcceleratorNotAttached, table.validateFreestandingAcceleratorMappingDescriptor(gpu_mmu_descriptor, .gpu));
+    try std.testing.expectError(error.StaleMappingDescriptor, table.validateTaskMappingDescriptor(refreshed_task_descriptor));
+    try std.testing.expectError(error.StaleMappingDescriptor, table.validateFreestandingTaskMappingDescriptor(refreshed_task_mmu_descriptor));
+
+    const post_detach_task_descriptor = try table.taskMappingDescriptor(object.id, ids.task(30));
+    try table.revoke(object.id);
+    try std.testing.expectError(error.Revoked, table.validateTaskMappingDescriptor(post_detach_task_descriptor));
+    try std.testing.expectError(error.Revoked, table.validateAcceleratorMappingDescriptor(gpu_descriptor, .gpu));
+    try std.testing.expectError(error.Revoked, table.validateFreestandingTaskMappingDescriptor(refreshed_task_mmu_descriptor));
+    try std.testing.expectEqual(@as(usize, 0), table.activeFreestandingMappings(object.id));
 }
