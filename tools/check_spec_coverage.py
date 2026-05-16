@@ -8,6 +8,7 @@ from pathlib import Path
 from spec_coverage_lib import (
     MANIFEST_PATH,
     ROOT_DIR,
+    load_lines,
     expected_requirements_for_manifest_sections,
     expected_requirements_for_section,
     expected_headings,
@@ -15,72 +16,114 @@ from spec_coverage_lib import (
 )
 from generate_spec_gap_matrix import GAP_MATRIX_PATH, render_gap_matrix
 
-TEST_PATTERN = re.compile(r'^\s*test\s+"([^"]+)"', re.MULTILINE)
+ZIG_TEST_PATTERN = re.compile(r'^\s*test\s+"([^"]+)"', re.MULTILINE)
+PY_TEST_PATTERN = re.compile(r"^\s*def\s+(test_[A-Za-z0-9_]+)\s*\(", re.MULTILINE)
 EVIDENCE_STATUSES = {"enforced", "modeled", "scenario", "deferred"}
 ROADMAP_STATUSES = EVIDENCE_STATUSES - {"enforced"}
 ROADMAP_PRIORITIES = {"P0", "P1", "P2"}
 ROADMAP_TEXT_FIELDS = ("focus", "graduation_proof")
+SUMMARY_REQUIREMENT_ID = "REQ-ONE-SENTENCE-SUMMARY"
+SUMMARY_CLAUSE_DEPENDENCIES = (
+    (
+        "capability-based",
+        (
+            "REQ-ZERO-AMBIENT-AUTHORITY",
+            "REQ-CAPABILITY-MODEL",
+            "REQ-CAPABILITY-BASED-ACCESS-CONTROL",
+        ),
+    ),
+    (
+        "local-first",
+        (
+            "REQ-LOCAL-FIRST-REPLICATION",
+            "REQ-SYNC-SEMANTICS",
+        ),
+    ),
+    (
+        "multi-device",
+        (
+            "REQ-DEVICE-GRAPH",
+            "REQ-SHARING",
+        ),
+    ),
+    (
+        "immutable core",
+        (
+            "REQ-IMMUTABLE-BASE-SYSTEM",
+            "REQ-BASE-OS-UPDATES",
+        ),
+    ),
+    (
+        "versioned object storage",
+        (
+            "REQ-DATA-IS-VERSIONED",
+            "REQ-OBJECT-STORE",
+            "REQ-MUTABLE-STATE",
+        ),
+    ),
+    (
+        "strong sandboxing",
+        (
+            "REQ-PROCESS-ISOLATION",
+            "REQ-SECRETS",
+        ),
+    ),
+    (
+        "explicit identity",
+        (
+            "REQ-PRINCIPAL-MODEL",
+            "REQ-IDENTITY-FIRST-NETWORKING",
+        ),
+    ),
+    (
+        "first-class support for modern accelerators",
+        (
+            "REQ-UNIFIED-RESOURCE-SCHEDULER",
+            "REQ-SHARED-MEMORY-OBJECTS",
+            "REQ-THERMAL-AND-POWER-POLICY",
+        ),
+    ),
+)
+
+
+def summary_clause_dependency_ids() -> list[str]:
+    dependency_ids: list[str] = []
+    seen: set[str] = set()
+    for _, clause_dependencies in SUMMARY_CLAUSE_DEPENDENCIES:
+        for dependency_id in clause_dependencies:
+            if dependency_id in seen:
+                continue
+            dependency_ids.append(dependency_id)
+            seen.add(dependency_id)
+    return dependency_ids
+
+
 STATUS_POLICY = {
-    # These rows are aggregate or user-experience narratives. They can track
-    # non-enforced proof and roadmap state, but they are not single enforceable
-    # invariants.
+    # This top-level row is a narrative rollup. It tracks enforced child proof
+    # and roadmap state, but it is not a single enforceable invariant.
     "REQ-DESIGN-GOALS-AND-NON-GOALS": {"modeled", "scenario", "deferred"},
-    "REQ-TASK-FIRST-UX": {"modeled", "scenario", "deferred"},
-    "REQ-WINDOWS-AND-VIEWS": {"modeled", "scenario", "deferred"},
-    "REQ-PERMISSION-UX": {"modeled", "scenario", "deferred"},
-    "REQ-ZIGOS-USER-EXPERIENCE": {"modeled", "scenario", "deferred"},
-    "REQ-ONE-SENTENCE-SUMMARY": {"modeled", "scenario", "deferred"},
-    # These rows currently depend on emulator/synthetic hardware,
-    # in-process models, or partial subsystem integration. Keep them
-    # out of Enforced until the manifest and tests carry booted/live proof.
-    "REQ-BOOT-CHAIN": {"modeled", "scenario", "deferred"},
-    "REQ-MEASURED-STATE": {"modeled", "scenario", "deferred"},
-    "REQ-SYNC-SEMANTICS": {"modeled", "scenario", "deferred"},
 }
 
-META_REQUIREMENT_DEPENDENCIES = {
-    "REQ-DESIGN-GOALS-AND-NON-GOALS": [
-        "REQ-ZERO-AMBIENT-AUTHORITY",
-        "REQ-IMMUTABLE-BASE-SYSTEM",
-        "REQ-USERSPACE-SERVICES-BY-DEFAULT",
-        "REQ-DATA-IS-VERSIONED",
-        "REQ-PLATFORM-APIS-OVER-SYSTEM-INTERNALS",
-        "REQ-CAPABILITY-MODEL",
-        "REQ-KERNEL-TYPE-AND-BOUNDARY",
-        "REQ-APP-PACKAGING",
-        "REQ-CAPABILITY-BASED-ACCESS-CONTROL",
-        "REQ-PERMISSION-GRANTS",
-        "REQ-DATA-EGRESS-CONTROL",
-        "REQ-PROCESS-ISOLATION",
-        "REQ-LOCAL-FIRST-REPLICATION",
-        "REQ-SYNC-SEMANTICS",
-        "REQ-IDENTITY-FIRST-NETWORKING",
-        "REQ-APP-EXECUTION",
-        "REQ-MUTABLE-STATE",
-        "REQ-SNAPSHOTS-AND-RECOVERY",
-        "REQ-UNIFIED-RESOURCE-SCHEDULER",
-        "REQ-THERMAL-AND-POWER-POLICY",
-        "REQ-EXPLAINABLE-DENIALS",
-        "REQ-USERSPACE-DRIVERS",
-        "REQ-BASE-OS-UPDATES",
-        "REQ-STRUCTURED-EVENT-LEDGER",
-        "REQ-NATIVE-PLATFORM",
-        "REQ-LEGACY-SUPPORT",
-        "REQ-ZIGOS-USER-EXPERIENCE",
-        "REQ-ONE-SENTENCE-SUMMARY",
-    ],
-    "REQ-ONE-SENTENCE-SUMMARY": [
-        "REQ-CAPABILITY-MODEL",
-        "REQ-LOCAL-FIRST-REPLICATION",
-        "REQ-DEVICE-GRAPH",
-        "REQ-IMMUTABLE-BASE-SYSTEM",
-        "REQ-DATA-IS-VERSIONED",
-        "REQ-PROCESS-ISOLATION",
-        "REQ-IDENTITY-FIRST-NETWORKING",
-        "REQ-UNIFIED-RESOURCE-SCHEDULER",
-        "REQ-ZIGOS-USER-EXPERIENCE",
-    ],
+MODELED_META_DEPENDENCY_EXCEPTIONS = {
+    # The design-goals rollup may point at the one-sentence rollup, but every
+    # testable subsystem dependency must stay independently enforced.
+    "REQ-DESIGN-GOALS-AND-NON-GOALS": {
+        SUMMARY_REQUIREMENT_ID: {"enforced", "modeled"},
+    },
 }
+
+
+def meta_requirement_dependencies(required_requirements: list[str]) -> dict[str, list[str]]:
+    dependencies: dict[str, list[str]] = {}
+    # The design-goals row is the top-level rollup for the whole spec; deriving
+    # its children from the manifest keeps the aggregate gate from going stale
+    # when SPEC.md adds or removes concrete requirements.
+    dependencies["REQ-DESIGN-GOALS-AND-NON-GOALS"] = [
+        requirement_id
+        for requirement_id in required_requirements
+        if requirement_id != "REQ-DESIGN-GOALS-AND-NON-GOALS"
+    ]
+    return dependencies
 
 
 def load_manifest() -> dict:
@@ -91,9 +134,117 @@ def load_test_names(cache: dict[Path, set[str]], path: Path) -> set[str]:
     cached = cache.get(path)
     if cached is not None:
         return cached
-    names = {match.group(1) for match in TEST_PATTERN.finditer(path.read_text())}
+    source = path.read_text()
+    names = {match.group(1) for match in ZIG_TEST_PATTERN.finditer(source)}
+    names.update(match.group(1) for match in PY_TEST_PATTERN.finditer(source))
     cache[path] = names
     return names
+
+
+def requirement_body(blocks, requirement_id: str) -> str:
+    block = next((block for block in blocks if block.requirement_id == requirement_id), None)
+    if block is None:
+        return ""
+    lines = load_lines()
+    return "\n".join(lines[block.start_line : block.end_line])
+
+
+def validate_summary_clause_dependencies(
+    errors: list[str],
+    evidence: dict,
+    summary_text: str,
+) -> None:
+    summary_evidence = evidence.get(SUMMARY_REQUIREMENT_ID, {})
+    summary_status = summary_evidence.get("status")
+    if summary_status not in {"enforced", "modeled"}:
+        return
+
+    normalized_summary = summary_text.lower()
+    for clause, dependencies in SUMMARY_CLAUSE_DEPENDENCIES:
+        if clause.lower() not in normalized_summary:
+            errors.append(
+                f"One-sentence summary clause {clause!r} is not present in SPEC.md section 20"
+            )
+        if not dependencies:
+            errors.append(f"One-sentence summary clause {clause!r} has no dependency mapping")
+            continue
+        for dependency_id in dependencies:
+            dependency_evidence = evidence.get(dependency_id)
+            if dependency_evidence is None:
+                errors.append(
+                    "One-sentence summary clause "
+                    f"{clause!r} depends on missing requirement evidence: {dependency_id}"
+                )
+                continue
+            dependency_status = dependency_evidence.get("status")
+            if dependency_status != "enforced":
+                errors.append(
+                    "One-sentence summary clause "
+                    f"{clause!r} depends on {dependency_id}, which is "
+                    f"{dependency_status!r}; expected enforced"
+                )
+
+
+def complete_summary_text() -> str:
+    return (
+        "Zigos is a capability-based, local-first, multi-device operating system "
+        "with an immutable core, versioned object storage, strong sandboxing, "
+        "explicit identity, and first-class support for modern accelerators."
+    )
+
+
+def summary_evidence_fixture() -> dict:
+    evidence = {
+        SUMMARY_REQUIREMENT_ID: {
+            "status": "enforced",
+        }
+    }
+    for dependency_id in summary_clause_dependency_ids():
+        evidence[dependency_id] = {"status": "enforced"}
+    return evidence
+
+
+def test_summary_clause_gate_rejects_missing_or_modeled_dependencies() -> None:
+    evidence = summary_evidence_fixture()
+    evidence["REQ-LOCAL-FIRST-REPLICATION"] = {"status": "modeled"}
+    del evidence["REQ-SHARED-MEMORY-OBJECTS"]
+
+    errors: list[str] = []
+    validate_summary_clause_dependencies(errors, evidence, complete_summary_text())
+
+    assert any(
+        "REQ-LOCAL-FIRST-REPLICATION" in error and "expected enforced" in error
+        for error in errors
+    ), "summary clause gate must reject modeled dependencies"
+    assert any(
+        "REQ-SHARED-MEMORY-OBJECTS" in error and "missing requirement evidence" in error
+        for error in errors
+    ), "summary clause gate must reject missing dependencies"
+
+
+def test_summary_clause_gate_requires_current_summary_phrases() -> None:
+    errors: list[str] = []
+    validate_summary_clause_dependencies(
+        errors,
+        summary_evidence_fixture(),
+        "Zigos is an operating system.",
+    )
+
+    assert any(
+        "capability-based" in error and "not present" in error for error in errors
+    ), "summary clause gate must reject missing summary phrases"
+
+
+def run_self_tests() -> list[str]:
+    failures: list[str] = []
+    for name, candidate in sorted(globals().items()):
+        if not name.startswith("test_") or not callable(candidate):
+            continue
+        try:
+            candidate()
+        except Exception as exc:  # noqa: BLE001 - report checker self-test failures directly.
+            failures.append(f"{name}: {exc}")
+    return failures
 
 
 def validate_roadmap(errors: list[str], requirement_id: str, requirement_evidence: dict) -> bool:
@@ -130,13 +281,6 @@ def validate_meta_requirement_dependencies(
     if requirement_status not in {"enforced", "modeled"}:
         return
 
-    allowed_dependency_statuses = (
-        {"enforced"} if requirement_status == "enforced" else {"enforced", "modeled"}
-    )
-    expected = (
-        "enforced" if requirement_status == "enforced" else "enforced or modeled"
-    )
-
     for dependency_id in dependencies:
         dependency_evidence = evidence.get(dependency_id)
         if dependency_evidence is None:
@@ -145,6 +289,10 @@ def validate_meta_requirement_dependencies(
             )
             continue
         dependency_status = dependency_evidence.get("status")
+        allowed_dependency_statuses = MODELED_META_DEPENDENCY_EXCEPTIONS.get(
+            requirement_id, {}
+        ).get(dependency_id, {"enforced"})
+        expected = " or ".join(sorted(allowed_dependency_statuses))
         if dependency_status not in allowed_dependency_statuses:
             errors.append(
                 "Meta requirement "
@@ -155,6 +303,9 @@ def validate_meta_requirement_dependencies(
 
 def main() -> int:
     errors: list[str] = []
+    for failure in run_self_tests():
+        errors.append(f"Spec coverage checker self-test failed: {failure}")
+
     manifest = load_manifest()
     blocks = parse_spec_blocks()
     spec_headings = expected_headings(blocks)
@@ -347,7 +498,15 @@ def main() -> int:
             if status in ROADMAP_STATUSES and validate_roadmap(errors, requirement_id, requirement_evidence):
                 roadmap_count += 1
 
-    for requirement_id, dependencies in META_REQUIREMENT_DEPENDENCIES.items():
+    validate_summary_clause_dependencies(
+        errors,
+        evidence,
+        requirement_body(blocks, SUMMARY_REQUIREMENT_ID),
+    )
+
+    for requirement_id, dependencies in meta_requirement_dependencies(
+        required_requirements
+    ).items():
         validate_meta_requirement_dependencies(errors, evidence, requirement_id, dependencies)
 
     expected_gap_matrix = render_gap_matrix(manifest)

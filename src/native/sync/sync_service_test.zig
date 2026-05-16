@@ -201,6 +201,114 @@ test "sync service persists platform-backed device key bindings across restart" 
     try std.testing.expectEqual(@as(u64, 4), restored.revoked_at_ticks);
 }
 
+test "sync service requires database contract before transactional workspace replication" {
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
+
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 8_500 };
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8_501 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 8_502 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 8_503 };
+    const tablet = principal.PrincipalId{ .kind = .device, .serial = 8_504 };
+    const storage_signer = signing.SignerIdentity{
+        .label = "db-contract-storage",
+        .seed = [_]u8{0x91} ** 32,
+    };
+    const user_signer = signing.SignerIdentity{
+        .label = "db-contract-user",
+        .seed = [_]u8{0x92} ** 32,
+    };
+    const laptop_signer = signing.SignerIdentity{
+        .label = "db-contract-laptop",
+        .seed = [_]u8{0x93} ** 32,
+    };
+    const tablet_signer = signing.SignerIdentity{
+        .label = "db-contract-tablet",
+        .seed = [_]u8{0x94} ** 32,
+    };
+    const contract_signer = signing.SignerIdentity{
+        .label = "db-contract",
+        .seed = [_]u8{0x95} ** 32,
+    };
+
+    var storage = storage_service.Service.initWithStore(8_510, 8_511, storage_owner, &storage_checkpoint_store);
+    const document = try storage.putVersion(.{
+        .preferred_object_id = object_store.ids.object(8_520),
+        .object_type = .document,
+        .payload = "notes-v1",
+        .metadata = try object_store.signMetadata(storage_signer, "notes", "text/plain", .document, "notes-v1", 10),
+    });
+    const db_events = try storage.putVersion(.{
+        .preferred_object_id = object_store.ids.object(8_521),
+        .object_type = .event_stream,
+        .payload = "txn:insert-note",
+        .metadata = try object_store.signMetadata(storage_signer, "db-events", "application/zigos-event-stream", .event_stream, "txn:insert-note", 11),
+    });
+    const workspace_record = try storage.createWorkspace(.{
+        .owner = user,
+        .label = "db-contract-notes",
+    });
+    try storage.beginTransaction(workspace_record.id);
+    try storage.stagePut(workspace_record.id, "documents/notes.md", document.object_id, document.version_id, .document);
+    try storage.stagePut(workspace_record.id, "databases/app.notes.db/events", db_events.object_id, db_events.version_id, .event_stream);
+    _ = try storage.commit(workspace_record.id, 12);
+
+    var service = Service.init(8_530, 8_531, sync_owner);
+    var capabilities = capability.CapabilityTable.init();
+    const service_authority_capability = try mintSyncServiceAuthority(&capabilities, &service, sync_owner);
+    var port = sync_service.SyncPort.init(&service, &capabilities);
+    const authority = syncAuthority(&service, sync_owner, service_authority_capability, 20);
+    _ = try port.ensureUserRoot(authority, user, "owner", user_signer);
+    _ = try port.enrollTrustedDevice(authority, user, laptop, "laptop", user_signer, laptop_signer, 21);
+    _ = try port.enrollTrustedDevice(authority, user, tablet, "tablet", user_signer, tablet_signer, 22);
+
+    const local_policy = try port.createNetworkPolicy(authority, .{
+        .owner = sync_owner,
+        .workspace_id = workspace_record.id.raw(),
+        .label = "local",
+        .mode = .local_network,
+    });
+    _ = try port.configureWorkspacePolicy(authority, .{
+        .workspace_id = workspace_record.id.raw(),
+        .owner = user,
+        .offline_first = true,
+        .personal_e2ee = true,
+        .selective_prefixes = &.{ "documents/", "databases/" },
+        .device_to_device_policy_id = local_policy.id,
+    });
+
+    try std.testing.expectError(error.DatabaseContractNotFound, port.replicateWorkspace(
+        authority,
+        &storage,
+        workspace_record.id.raw(),
+        laptop,
+        tablet,
+        .device_to_device,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), service.transportFrameCountFor(workspace_record.id.raw(), tablet));
+    try std.testing.expect(service.replicaVersion(workspace_record.id.raw(), tablet, "documents/notes.md") == null);
+
+    _ = try port.registerDatabaseContract(authority, workspace_record.id.raw(), "app.notes.db", "notes-db", contract_signer);
+    const summary = try port.replicateWorkspace(
+        authority,
+        &storage,
+        workspace_record.id.raw(),
+        laptop,
+        tablet,
+        .device_to_device,
+    );
+    try std.testing.expectEqual(@as(usize, 2), summary.selected_entry_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.merged_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.transactional_count);
+    try std.testing.expectEqual(@as(usize, 2), summary.transport_frame_count);
+    try std.testing.expectEqual(summary.transport_frame_count, summary.encrypted_transport_count);
+    try std.testing.expectEqual(document.version_id.raw(), service.replicaVersion(workspace_record.id.raw(), tablet, "documents/notes.md").?);
+    try std.testing.expectEqual(db_events.version_id.raw(), service.replicaVersion(workspace_record.id.raw(), tablet, "databases/app.notes.db/events").?);
+    const db_frame = service.latestTransportFrameForPath(workspace_record.id.raw(), tablet, "databases/app.notes.db/events").?;
+    try std.testing.expectEqual(SyncSemantic.transactional_contract, db_frame.semantic);
+}
+
 fn addSyncDeviceGraphMeasuredArtifact(
     recorder: *measured_boot.Recorder,
     artifact_manifest: *measured_boot.ArtifactManifest,
@@ -623,7 +731,7 @@ fn configureEndToEndSync(
         .owner = user,
         .offline_first = true,
         .personal_e2ee = true,
-        .selective_prefixes = &.{"documents/"},
+        .selective_prefixes = &.{ "documents/", "assets/", "secrets/", "databases/" },
         .device_to_device_policy_id = local_policy.id,
         .relay_policy_id = relay_policy.id,
         .overlay_policy_id = overlay_policy.id,
@@ -650,11 +758,17 @@ test "sync service replicates payloads to peer storage through booted relay fall
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 9_503 };
     const tablet = principal.PrincipalId{ .kind = .device, .serial = 9_504 };
     const policy_authority = principal.PrincipalId{ .kind = .policy_authority, .serial = 9_505 };
-    const path = "documents/peer-notes.md";
+    const document_path = "documents/peer-notes.md";
+    const media_path = "assets/peer-cover.bin";
+    const secret_path = "secrets/peer-token";
+    const database_path = "databases/app.notes.db/events";
     const relay_domain = "relay.peer.zigos";
     const overlay_identity = "overlay.peer.notes";
     const private_service = "peer.notes.remote";
-    const object_id = object_store.ids.object(9_560);
+    const document_object_id = object_store.ids.object(9_560);
+    const media_object_id = object_store.ids.object(9_561);
+    const secret_object_id = object_store.ids.object(9_562);
+    const database_object_id = object_store.ids.object(9_563);
     const user_signer = signing.SignerIdentity{
         .label = "peer-sync-user",
         .seed = [_]u8{0xA1} ** 32,
@@ -671,6 +785,13 @@ test "sync service replicates payloads to peer storage through booted relay fall
         .label = "peer-sync-storage",
         .seed = [_]u8{0xA4} ** 32,
     };
+    const contract_signer = signing.SignerIdentity{
+        .label = "peer-sync-db-contract",
+        .seed = [_]u8{0xA5} ** 32,
+    };
+    const media_payload = [_]u8{0x4d} ** 5000;
+    const secret_payload = "enc:peer-secret";
+    const database_payload = "txn:insert-note";
 
     const source_task = try createSyncServiceTask(&runtime, sync_owner, "peer-sync-source", "zigos.system.sync.peer.source", 9_570);
     const target_task = try createSyncServiceTask(&runtime, sync_owner, "peer-sync-target", "zigos.system.sync.peer.target", 9_571);
@@ -684,45 +805,66 @@ test "sync service replicates payloads to peer storage through booted relay fall
 
     var source_storage = storage_service.Service.initWithStore(9_580, 9_581, storage_owner, &source_checkpoint_store);
     const source_base = try source_storage.putVersion(.{
-        .preferred_object_id = object_id,
+        .preferred_object_id = document_object_id,
         .object_type = .document,
         .payload = "base",
         .metadata = try object_store.signMetadata(storage_signer, "peer-base", "text/plain", .document, "base", 1),
     });
     const source_edit = try source_storage.putVersion(.{
-        .preferred_object_id = object_id,
+        .preferred_object_id = document_object_id,
         .object_type = .document,
         .payload = "source edit",
         .metadata = try object_store.signMetadata(storage_signer, "peer-source", "text/plain", .document, "source edit", 2),
         .parent_version_id = source_base.version_id,
+    });
+    const source_media = try source_storage.putVersion(.{
+        .preferred_object_id = media_object_id,
+        .object_type = .media_asset,
+        .payload = media_payload[0..],
+        .metadata = try object_store.signMetadata(storage_signer, "peer-cover", "application/octet-stream", .media_asset, media_payload[0..], 3),
+    });
+    const source_secret = try source_storage.putVersion(.{
+        .preferred_object_id = secret_object_id,
+        .object_type = .secret,
+        .payload = secret_payload,
+        .metadata = try object_store.signMetadata(storage_signer, "peer-secret", "application/zigos-secret", .secret, secret_payload, 4),
+    });
+    const source_database = try source_storage.putVersion(.{
+        .preferred_object_id = database_object_id,
+        .object_type = .event_stream,
+        .payload = database_payload,
+        .metadata = try object_store.signMetadata(storage_signer, "peer-db-events", "application/zigos-event-stream", .event_stream, database_payload, 5),
     });
     const source_workspace = try source_storage.createWorkspace(.{
         .owner = user,
         .label = "peer-notes",
     });
     try source_storage.beginTransaction(source_workspace.id);
-    try source_storage.stagePut(source_workspace.id, path, source_edit.object_id, source_edit.version_id, .document);
-    _ = try source_storage.commit(source_workspace.id, 3);
+    try source_storage.stagePut(source_workspace.id, document_path, source_edit.object_id, source_edit.version_id, .document);
+    try source_storage.stagePut(source_workspace.id, media_path, source_media.object_id, source_media.version_id, .media_asset);
+    try source_storage.stagePut(source_workspace.id, secret_path, source_secret.object_id, source_secret.version_id, .secret);
+    try source_storage.stagePut(source_workspace.id, database_path, source_database.object_id, source_database.version_id, .event_stream);
+    _ = try source_storage.commit(source_workspace.id, 6);
 
     var target_storage = storage_service.Service.initWithStore(9_582, 9_583, storage_owner, &target_checkpoint_store);
     const target_base = try target_storage.putVersion(.{
-        .preferred_object_id = object_id,
+        .preferred_object_id = document_object_id,
         .object_type = .document,
         .payload = "base",
-        .metadata = try object_store.signMetadata(storage_signer, "peer-base", "text/plain", .document, "base", 4),
+        .metadata = try object_store.signMetadata(storage_signer, "peer-base", "text/plain", .document, "base", 7),
     });
     const target_draft = try target_storage.putVersion(.{
-        .preferred_object_id = object_id,
+        .preferred_object_id = document_object_id,
         .object_type = .document,
         .payload = "tablet draft",
-        .metadata = try object_store.signMetadata(storage_signer, "peer-tablet-draft", "text/plain", .document, "tablet draft", 5),
+        .metadata = try object_store.signMetadata(storage_signer, "peer-tablet-draft", "text/plain", .document, "tablet draft", 8),
         .parent_version_id = target_base.version_id,
     });
     const target_conflict = try target_storage.putVersion(.{
-        .preferred_object_id = object_id,
+        .preferred_object_id = document_object_id,
         .object_type = .document,
         .payload = "tablet offline conflict",
-        .metadata = try object_store.signMetadata(storage_signer, "peer-tablet-conflict", "text/plain", .document, "tablet offline conflict", 6),
+        .metadata = try object_store.signMetadata(storage_signer, "peer-tablet-conflict", "text/plain", .document, "tablet offline conflict", 9),
         .parent_version_id = target_draft.version_id,
     });
     const target_workspace = try target_storage.createWorkspace(.{
@@ -731,8 +873,8 @@ test "sync service replicates payloads to peer storage through booted relay fall
     });
     try std.testing.expectEqual(source_workspace.id.raw(), target_workspace.id.raw());
     try target_storage.beginTransaction(target_workspace.id);
-    try target_storage.stagePut(target_workspace.id, path, target_conflict.object_id, target_conflict.version_id, .document);
-    _ = try target_storage.commit(target_workspace.id, 7);
+    try target_storage.stagePut(target_workspace.id, document_path, target_conflict.object_id, target_conflict.version_id, .document);
+    _ = try target_storage.commit(target_workspace.id, 10);
 
     const workspace_id = source_workspace.id.raw();
     var source_resident = ResidentState{};
@@ -793,7 +935,9 @@ test "sync service replicates payloads to peer storage through booted relay fall
     });
     var relay_service = try sync_transport.BootedOverlayRelayService.init(9_600, 9_601, relay_domain);
 
-    try source_port.setReplicaVersion(source_authority, workspace_id, tablet, path, source_edit.object_id, target_conflict.version_id);
+    _ = try source_port.registerDatabaseContract(source_authority, workspace_id, "app.notes.db", "notes-db", contract_signer);
+    try std.testing.expectEqual(@as(usize, 0), target_resident.databaseContractCount());
+    try source_port.setReplicaVersion(source_authority, workspace_id, tablet, document_path, source_edit.object_id, target_conflict.version_id);
     var denied_request = sync_service.PeerReplicationRequest{
         .source_storage = &source_storage,
         .target_storage = &target_storage,
@@ -814,7 +958,7 @@ test "sync service replicates payloads to peer storage through booted relay fall
         denied_request,
     ));
     try std.testing.expectEqual(@as(usize, 0), source_sync.transportFrameCountFor(workspace_id, tablet));
-    const still_offline = try target_storage.resolve(target_workspace.id, path);
+    const still_offline = try target_storage.resolve(target_workspace.id, document_path);
     try std.testing.expectEqual(target_conflict.version_id, still_offline.version_id);
 
     denied_request.relay_capability_id = relay_capability.id;
@@ -828,34 +972,67 @@ test "sync service replicates payloads to peer storage through booted relay fall
     try std.testing.expect(result.summary.personal_e2ee);
     try std.testing.expect(result.summary.used_relay);
     try std.testing.expect(result.summary.overlay_ready);
-    try std.testing.expectEqual(@as(usize, 1), result.summary.selected_entry_count);
+    try std.testing.expectEqual(@as(usize, 4), result.summary.selected_entry_count);
+    try std.testing.expectEqual(@as(usize, 1), result.summary.merged_count);
+    try std.testing.expect(result.summary.snapshot_count > 1);
+    try std.testing.expectEqual(@as(usize, 1), result.summary.secret_transfer_count);
+    try std.testing.expectEqual(@as(usize, 1), result.summary.transactional_count);
     try std.testing.expectEqual(@as(usize, 1), result.summary.conflict_count);
-    try std.testing.expectEqual(@as(usize, 1), result.accepted_frame_count);
-    try std.testing.expectEqual(@as(usize, 1), result.persisted_object_count);
-    try std.testing.expectEqual(@as(usize, 1), result.relay_delivery_count);
+    try std.testing.expectEqual(@as(usize, 4), result.accepted_frame_count);
+    try std.testing.expectEqual(@as(usize, 4), result.persisted_object_count);
+    const expected_relay_deliveries = 3 + (media_payload.len + sync_transport.MAX_PACKET_BYTES - 1) / sync_transport.MAX_PACKET_BYTES;
+    try std.testing.expectEqual(@as(usize, expected_relay_deliveries), result.relay_delivery_count);
     try std.testing.expect(result.used_booted_relay_service);
-    try std.testing.expectEqual(@as(usize, "source edit".len), result.payload_bytes);
-    try std.testing.expectEqual(@as(usize, 1), relay_service.accepted_packets);
-    try std.testing.expectEqual(@as(usize, 1), relay_service.delivered_packets);
-    try std.testing.expect(source_sync.findConflict(workspace_id, tablet, path) != null);
+    const expected_payload_bytes = "source edit".len + media_payload.len + secret_payload.len + database_payload.len;
+    try std.testing.expectEqual(@as(usize, expected_payload_bytes), result.payload_bytes);
+    try std.testing.expectEqual(@as(usize, expected_relay_deliveries), relay_service.accepted_packets);
+    try std.testing.expectEqual(@as(usize, expected_relay_deliveries), relay_service.delivered_packets);
+    try std.testing.expectEqual(@as(usize, 1), target_resident.databaseContractCount());
+    try std.testing.expect(source_sync.findConflict(workspace_id, tablet, document_path) != null);
 
-    const replicated_entry = try target_storage.resolve(target_workspace.id, path);
+    const replicated_entry = try target_storage.resolve(target_workspace.id, document_path);
     const replicated_version = target_storage.version(replicated_entry.version_id) orelse return error.VersionNotFound;
     const replicated_payload = try target_storage.versionPayload(replicated_version);
     try std.testing.expectEqualStrings("source edit", replicated_payload);
     try std.testing.expectEqual(target_conflict.version_id, replicated_version.previous_version_id);
-    try std.testing.expectEqual(replicated_version.id.raw(), target_sync.replicaVersion(workspace_id, tablet, path).?);
+    try std.testing.expectEqual(replicated_version.id.raw(), target_sync.replicaVersion(workspace_id, tablet, document_path).?);
+    try std.testing.expectEqual(SyncSemantic.mergeable_crdt, source_sync.latestTransportFrameForPath(workspace_id, tablet, document_path).?.semantic);
+
+    const replicated_media_entry = try target_storage.resolve(target_workspace.id, media_path);
+    const replicated_media_version = target_storage.version(replicated_media_entry.version_id) orelse return error.VersionNotFound;
+    const replicated_media_payload = try target_storage.versionPayload(replicated_media_version);
+    try std.testing.expectEqualSlices(u8, media_payload[0..], replicated_media_payload);
+    try std.testing.expectEqual(replicated_media_version.id.raw(), target_sync.replicaVersion(workspace_id, tablet, media_path).?);
+    try std.testing.expectEqual(SyncSemantic.chunked_snapshot, source_sync.latestTransportFrameForPath(workspace_id, tablet, media_path).?.semantic);
+
+    const replicated_secret_entry = try target_storage.resolve(target_workspace.id, secret_path);
+    const replicated_secret_version = target_storage.version(replicated_secret_entry.version_id) orelse return error.VersionNotFound;
+    const replicated_secret_payload = try target_storage.versionPayload(replicated_secret_version);
+    try std.testing.expectEqualStrings(secret_payload, replicated_secret_payload);
+    try std.testing.expectEqual(replicated_secret_version.id.raw(), target_sync.replicaVersion(workspace_id, tablet, secret_path).?);
+    try std.testing.expectEqual(SyncSemantic.secure_transfer, source_sync.latestTransportFrameForPath(workspace_id, tablet, secret_path).?.semantic);
+
+    const replicated_database_entry = try target_storage.resolve(target_workspace.id, database_path);
+    const replicated_database_version = target_storage.version(replicated_database_entry.version_id) orelse return error.VersionNotFound;
+    const replicated_database_payload = try target_storage.versionPayload(replicated_database_version);
+    try std.testing.expectEqualStrings(database_payload, replicated_database_payload);
+    try std.testing.expectEqual(replicated_database_version.id.raw(), target_sync.replicaVersion(workspace_id, tablet, database_path).?);
+    try std.testing.expectEqual(SyncSemantic.transactional_contract, source_sync.latestTransportFrameForPath(workspace_id, tablet, database_path).?.semantic);
 
     var restarted_target_storage = storage_service.Service.initWithStore(9_584, 9_585, storage_owner, &target_checkpoint_store);
     var restarted_target_resident = ResidentState{};
     var restarted_target_sync = try Service.initWithStorage(9_592, target_task.id, sync_owner, &restarted_target_storage, &restarted_target_resident);
     try std.testing.expect(restarted_target_sync.loaded_existing_state);
-    const restarted_entry = try restarted_target_storage.resolve(target_workspace.id, path);
+    try std.testing.expectEqual(@as(usize, 1), restarted_target_resident.databaseContractCount());
+    const restarted_entry = try restarted_target_storage.resolve(target_workspace.id, document_path);
     try std.testing.expectEqual(replicated_version.id, restarted_entry.version_id);
     const restarted_version = restarted_target_storage.version(restarted_entry.version_id) orelse return error.VersionNotFound;
     const restarted_payload = try restarted_target_storage.versionPayload(restarted_version);
     try std.testing.expectEqualStrings("source edit", restarted_payload);
-    try std.testing.expectEqual(replicated_version.id.raw(), restarted_target_sync.replicaVersion(workspace_id, tablet, path).?);
+    try std.testing.expectEqual(replicated_version.id.raw(), restarted_target_sync.replicaVersion(workspace_id, tablet, document_path).?);
+    try std.testing.expectEqual(replicated_media_version.id.raw(), restarted_target_sync.replicaVersion(workspace_id, tablet, media_path).?);
+    try std.testing.expectEqual(replicated_secret_version.id.raw(), restarted_target_sync.replicaVersion(workspace_id, tablet, secret_path).?);
+    try std.testing.expectEqual(replicated_database_version.id.raw(), restarted_target_sync.replicaVersion(workspace_id, tablet, database_path).?);
 
     source_checkpoint_store.resetPersistent();
     target_checkpoint_store.resetPersistent();

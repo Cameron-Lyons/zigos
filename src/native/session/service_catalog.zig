@@ -192,6 +192,7 @@ pub const ServiceContract = struct {
     boot_budget: task_runtime.ResourceBudget,
     boot_correlation_base: u64,
     boot_tick: u64,
+    ui_surface_id: ?u64,
     bootstrap_grants: []const BootstrapGrantKind,
 };
 
@@ -486,6 +487,7 @@ pub const catalog = [_]ServiceCatalogEntry{
             .budget = defaultServiceBudget(.compositor_ui_session),
             .correlation_base = 313,
             .tick = 41,
+            .ui_surface_id = 2,
             .grants = &.{.service_task_authority},
         },
         .published_native_service = true,
@@ -641,6 +643,7 @@ pub const ordered_service_contracts = blk: {
                 .boot_budget = launch.budget,
                 .boot_correlation_base = launch.correlation_base,
                 .boot_tick = launch.tick,
+                .ui_surface_id = launch.ui_surface_id,
                 .bootstrap_grants = launch.grants,
             };
             used[index] = true;
@@ -928,6 +931,10 @@ test "default service catalog keeps native services userspace restartable and ze
                 try std.testing.expect(entry.userspace_image != null);
                 try std.testing.expect(launch.grants.len != 0);
                 try std.testing.expectEqual(BootstrapGrantKind.service_task_authority, launch.grants[0]);
+            }
+            if (entry.isolation.ui == .session_surface) {
+                try std.testing.expect(launch.ui_surface_id != null);
+                try std.testing.expect(launch.ui_surface_id.? != 0);
             }
         }
     }

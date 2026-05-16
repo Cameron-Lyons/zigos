@@ -2,6 +2,7 @@ const vga = @import("../drivers/vga.zig");
 const memory = @import("memory.zig");
 const swap = @import("swap.zig");
 const panic_utils = @import("../utils/panic.zig");
+const numfmt = @import("../utils/numfmt.zig");
 
 fn isSwapped(vaddr: u32) bool {
     return swap.isSwapped(vaddr);
@@ -339,9 +340,9 @@ pub fn init() void {
     enable_paging(@intFromPtr(&kernel_page_directory));
     vga.print("Paging enabled!\n");
     vga.print("Total frames: ");
-    print_dec(total_frames);
+    numfmt.printDec(total_frames);
     vga.print(" Used frames: ");
-    print_dec(used_frames);
+    numfmt.printDec(used_frames);
     vga.print("\n");
 
     init_heap();
@@ -426,28 +427,6 @@ fn print_hex_console(value: u32, console: anytype) void {
     }
 }
 
-fn print_dec(value: u32) void {
-    if (value == 0) {
-        vga.put_char('0');
-        return;
-    }
-
-    // SAFETY: filled by the following digit extraction loop
-    var buffer: [10]u8 = undefined;
-    var i: usize = 0;
-    var n = value;
-
-    while (n > 0) : (i += 1) {
-        buffer[i] = @truncate((n % 10) + '0');
-        n /= 10;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.put_char(buffer[i]);
-    }
-}
-
 pub const KERNEL_HEAP_START: u32 = 0x10000000;
 const HEAP_START: u32 = KERNEL_HEAP_START;
 const HEAP_INITIAL_SIZE: u32 = 1024 * 1024;
@@ -486,7 +465,7 @@ pub fn init_heap() void {
     vga.print("Heap initialized at 0x");
     print_hex(heap_start);
     vga.print(" size: ");
-    print_dec(HEAP_INITIAL_SIZE);
+    numfmt.printDec(HEAP_INITIAL_SIZE);
     vga.print("\n");
 }
 

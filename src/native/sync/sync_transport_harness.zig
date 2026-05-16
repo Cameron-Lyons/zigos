@@ -100,6 +100,7 @@ pub const Relay = struct {
         const plaintext = try decryptPacket(session, slot.packet, plaintext_out);
         _ = self.session_index.remove(key, slot_index);
         _ = self.packets.removeIndex(slot_index);
+        self.packets.clearDirty();
         self.delivered_packets += 1;
         return plaintext;
     }
@@ -585,6 +586,17 @@ test "encrypted transport harness only creates sessions after egress approval" {
     try std.testing.expectEqual(@as(usize, 0), relay_queue.packets.countInUse());
     try std.testing.expectEqual(@as(usize, 1), relay_queue.accepted_packets);
     try std.testing.expectEqual(@as(usize, 1), relay_queue.delivered_packets);
+
+    const extra_packets = MAX_RELAY_PACKETS + 2;
+    var packet_index: usize = 0;
+    while (packet_index < extra_packets) : (packet_index += 1) {
+        _ = try harness.sendRelayPacket(&relay_queue, &session, "x");
+        const next = (try relay_queue.deliverNext(&session, plaintext_buffer[0..])).?;
+        try std.testing.expectEqualStrings("x", next);
+        try std.testing.expectEqual(@as(usize, 0), relay_queue.packets.countInUse());
+    }
+    try std.testing.expectEqual(@as(usize, 1 + extra_packets), relay_queue.accepted_packets);
+    try std.testing.expectEqual(@as(usize, 1 + extra_packets), relay_queue.delivered_packets);
 
     try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, .{
         .task_id = 42,

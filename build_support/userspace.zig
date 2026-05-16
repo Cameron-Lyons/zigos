@@ -15,9 +15,13 @@ pub fn addUserspaceArtifacts(
 ) ArtifactSet {
     const step = b.step("userspace-images", "Build userspace image artifacts");
     var count: usize = 0;
+    const binary_cursor_module = b.createModule(.{
+        .root_source_file = b.path("src/native/core/binary_cursor.zig"),
+    });
     const userspace_wire_module = b.createModule(.{
         .root_source_file = b.path("src/native/task/userspace_wire.zig"),
     });
+    userspace_wire_module.addImport("binary_cursor", binary_cursor_module);
     const descriptor_module = b.createModule(.{
         .root_source_file = b.path("src/native/task/userspace_descriptor.zig"),
     });

@@ -1,5 +1,6 @@
 const paging = @import("paging.zig");
 const vga = @import("../drivers/vga.zig");
+const numfmt = @import("../utils/numfmt.zig");
 
 const PAGE_SIZE = 4096;
 const SWAP_SLOT_COUNT = 8192;
@@ -62,9 +63,9 @@ pub fn init() void {
     vga.print("Swap initialized: ");
     if (backend) |active_backend| {
         const total_slots = activeSlotCount(active_backend);
-        printDec(total_slots);
+        numfmt.printDec(total_slots);
         vga.print(" slots (");
-        printDec(total_slots * PAGE_SIZE / 1024 / 1024);
+        numfmt.printDec(total_slots * PAGE_SIZE / 1024 / 1024);
         vga.print(" MB)\n");
     } else {
         vga.print("no page backend\n");
@@ -246,26 +247,4 @@ pub fn getSwapStats() SwapStats {
         .used_slots = used_slots,
         .total_slots = total_slots,
     };
-}
-
-fn printDec(value: u32) void {
-    if (value == 0) {
-        vga.put_char('0');
-        return;
-    }
-
-    // SAFETY: filled by the following digit extraction loop
-    var buffer: [10]u8 = undefined;
-    var i: usize = 0;
-    var n = value;
-
-    while (n > 0) : (i += 1) {
-        buffer[i] = @truncate((n % 10) + '0');
-        n /= 10;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.put_char(buffer[i]);
-    }
 }

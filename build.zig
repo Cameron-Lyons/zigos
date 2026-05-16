@@ -21,16 +21,23 @@ pub fn build(b: *std.Build) void {
         },
     });
     const optimize = b.standardOptimizeOption(.{});
+    const binary_cursor_test_module = b.createModule(.{
+        .root_source_file = b.path("src/native/core/binary_cursor.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
     const userspace_wire_test_module = b.createModule(.{
         .root_source_file = b.path("src/native/task/userspace_wire.zig"),
         .target = b.graph.host,
         .optimize = optimize,
     });
+    userspace_wire_test_module.addImport("binary_cursor", binary_cursor_test_module);
     const host_tests_module = b.createModule(.{
         .root_source_file = b.path("src/native_host_test.zig"),
         .target = b.graph.host,
         .optimize = optimize,
     });
+    host_tests_module.addImport("binary_cursor", binary_cursor_test_module);
     host_tests_module.addImport("userspace_wire", userspace_wire_test_module);
     const host_tests = b.addTest(.{
         .name = "native-host-tests",
@@ -42,6 +49,7 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = optimize,
     });
+    spec_tests_module.addImport("binary_cursor", binary_cursor_test_module);
     spec_tests_module.addImport("userspace_wire", userspace_wire_test_module);
     const spec_tests = b.addTest(.{
         .name = "zigos-spec-tests",

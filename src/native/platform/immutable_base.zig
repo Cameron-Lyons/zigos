@@ -1,5 +1,5 @@
 const std = @import("std");
-const binary_cursor = @import("../core/binary_cursor.zig");
+const binary_cursor = @import("binary_cursor");
 const native_util = @import("../core/util.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");

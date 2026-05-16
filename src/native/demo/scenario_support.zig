@@ -84,6 +84,33 @@ pub const SyncScenarioState = struct {
     overlay_policy_id: ?u64,
 };
 
+pub fn mintSyncAuthority(context: *Context, now_ticks: u64) sync_service_mod.AuthorityContext {
+    const authority_capability = context.capability_table.mintBootRoot(.{
+        .holder = context.sync_service_principal,
+        .issuer = context.policy_authority,
+        .target = .{ .kind = .service, .id = context.sync_service_id },
+        .rights = .{ .service = .{
+            .endpoint_connect = true,
+        } },
+        .scope = .{
+            .task_id = context.sync_task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = 0,
+            .expires_at_ticks = 1_000,
+        },
+        .audit = .{},
+    }) catch unreachable;
+    return .{
+        .task_id = context.sync_task_id,
+        .principal = context.sync_service_principal,
+        .capability_id = authority_capability.id,
+        .now_ticks = now_ticks,
+    };
+}
+
 pub fn latestInsertedVersion(storage: *const storage_service_mod.Service) ?*const object_store_mod.VersionRecord {
     return storage.latestInsertedVersion();
 }

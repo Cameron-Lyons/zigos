@@ -1,6 +1,6 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
-const binary_cursor = @import("../core/binary_cursor.zig");
+const binary_cursor = @import("binary_cursor");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const endpoint = @import("../kernel_api/endpoint.zig");

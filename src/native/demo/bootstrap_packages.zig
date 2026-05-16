@@ -155,75 +155,7 @@ fn installSync(port: *package_service.PackagePort, authority: package_service.Au
 fn installCapture(port: *package_service.PackagePort, authority: package_service.AuthorityContext, packages: *package_service.Service) void {
     if (packages.find("app.capture") != null) return;
 
-    const components = [_]manifest.ExecutionComponentDecl{
-        .{ .id = "capture", .entry = "app.capture" },
-    };
-    const provided_interfaces = [_]manifest.InterfaceDecl{
-        .{ .name = "zigos.capture.session" },
-    };
-    const consumed_interfaces = [_]manifest.InterfaceDecl{
-        .{ .name = "zigos.media.print" },
-    };
-    const assets = [_]manifest.AssetDecl{
-        .{ .path = "assets/capture/icon.svg", .content_type = "image/svg+xml" },
-    };
-    const permissions = [_]manifest.PermissionRequest{
-        .{
-            .kind = .device_access,
-            .resource = "capture.card0",
-            .rights = .{ .device = .{ .device_use = true } },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 30,
-            .target_id = 700,
-        },
-        .{
-            .kind = .camera,
-            .resource = "camera.front",
-            .rights = .{ .device = .{ .device_use = true } },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 35,
-            .target_id = 701,
-        },
-        .{
-            .kind = .mic,
-            .resource = "mic.array",
-            .rights = .{ .device = .{ .device_use = true } },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 35,
-            .target_id = 702,
-        },
-        .{
-            .kind = .sensor,
-            .resource = "sensor.lid",
-            .rights = .{ .device = .{ .sensor_read = true } },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 25,
-            .target_id = 703,
-        },
-        .{
-            .kind = .peer_ipc,
-            .resource = "zigos.peer.share",
-            .rights = .{ .endpoint = .{ .ipc_peer = true } },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 15,
-        },
-    };
-
-    var bundle = manifest.BundleManifest{
-        .bundle_id = "app.capture",
-        .display_name = "Capture",
-        .publisher = "zigos.dev",
-        .provided_interfaces = &provided_interfaces,
-        .consumed_interfaces = &consumed_interfaces,
-        .components = &components,
-        .assets = &assets,
-        .requested_permissions = &permissions,
-    };
+    var bundle = manifest_fixtures.captureBundle();
     bundle.signature = signing.sign(capture_signer, &package_service.digestBundle(bundle)) catch unreachable;
     _ = port.install(authority, .{
         .bundle = bundle,

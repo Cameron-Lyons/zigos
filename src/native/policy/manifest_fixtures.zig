@@ -91,6 +91,69 @@ pub const sync_push_background_tasks = [_]manifest.BackgroundTaskDecl{
     },
 };
 
+pub const capture_components = [_]manifest.ExecutionComponentDecl{
+    .{ .id = "capture", .entry = "app.capture" },
+};
+
+pub const capture_provided_interfaces = [_]manifest.InterfaceDecl{
+    .{ .name = "zigos.capture.session" },
+};
+
+pub const capture_consumed_interfaces = [_]manifest.InterfaceDecl{
+    .{ .name = "zigos.media.print" },
+};
+
+pub const capture_assets = [_]manifest.AssetDecl{
+    .{ .path = "assets/capture/icon.svg", .content_type = "image/svg+xml" },
+};
+
+pub const capture_permissions = [_]manifest.PermissionRequest{
+    .{
+        .kind = .device_access,
+        .resource = "capture.card0",
+        .rights = .{ .device = .{ .device_use = true } },
+        .required = false,
+        .local_only = true,
+        .max_lease_ticks = 30,
+        .target_id = 700,
+    },
+    .{
+        .kind = .camera,
+        .resource = "camera.front",
+        .rights = .{ .device = .{ .device_use = true } },
+        .required = false,
+        .local_only = true,
+        .max_lease_ticks = 35,
+        .target_id = 701,
+    },
+    .{
+        .kind = .mic,
+        .resource = "mic.array",
+        .rights = .{ .device = .{ .device_use = true } },
+        .required = false,
+        .local_only = true,
+        .max_lease_ticks = 35,
+        .target_id = 702,
+    },
+    .{
+        .kind = .sensor,
+        .resource = "sensor.lid",
+        .rights = .{ .device = .{ .sensor_read = true } },
+        .required = false,
+        .local_only = true,
+        .max_lease_ticks = 25,
+        .target_id = 703,
+    },
+    .{
+        .kind = .peer_ipc,
+        .resource = "zigos.peer.share",
+        .rights = .{ .endpoint = .{ .ipc_peer = true } },
+        .required = false,
+        .local_only = true,
+        .max_lease_ticks = 15,
+    },
+};
+
 pub const example_writer_components = [_]manifest.ExecutionComponentDecl{
     .{ .id = "writer-ui", .entry = "com.example.writer.ui" },
 };
@@ -181,6 +244,19 @@ pub fn syncPushBundle() manifest.BundleManifest {
     var bundle = syncBundle();
     bundle.background_tasks = &sync_push_background_tasks;
     return bundle;
+}
+
+pub fn captureBundle() manifest.BundleManifest {
+    return .{
+        .bundle_id = "app.capture",
+        .display_name = "Capture",
+        .publisher = "zigos.dev",
+        .provided_interfaces = &capture_provided_interfaces,
+        .consumed_interfaces = &capture_consumed_interfaces,
+        .components = &capture_components,
+        .assets = &capture_assets,
+        .requested_permissions = &capture_permissions,
+    };
 }
 
 pub fn exampleWriterBundle() manifest.BundleManifest {

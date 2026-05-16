@@ -925,6 +925,7 @@
         "src/native/platform/immutable_base.zig",
         "src/native/platform/measured_boot.zig",
         "src/native/platform/recovery_environment.zig",
+        "src/native/kernel_api/syscall_surface.zig",
         "src/native/sync/sync_service_impl.zig",
         "src/native/sync/network_policy.zig",
         "src/native/platform/platform_policy_signals.zig",
@@ -936,11 +937,11 @@
         "src/native/platform/compositor_session.zig",
         "src/native/session/session_manager.zig"
       ],
-      "coverage_note": "Aggregate design goals and non-goals are modeled through explicit dependency checks over the underlying subsystem requirements, but this row remains a narrative summary rather than a single enforceable invariant.",
+      "coverage_note": "Aggregate design goals and non-goals are modeled through a manifest-wide child dependency gate: every non-aggregate requirement must remain enforced, and the separately gated one-sentence summary is the only child that may remain modeled. This row remains a narrative summary rather than a single enforceable invariant.",
       "roadmap": {
         "priority": "P2",
-        "focus": "Keep this as an aggregate modeled row and split any newly testable design claim into a narrower requirement.",
-        "graduation_proof": "Each broad goal has its own requirement or explicit child invariant with implementation anchors and negative tests; this summary itself should not be marked enforced."
+        "focus": "Keep this as an aggregate modeled row, require every non-aggregate requirement to remain enforced, and split any newly testable design claim into a narrower requirement.",
+        "graduation_proof": "Every non-aggregate requirement has implementation anchors and negative tests; only the separately gated summary aggregate may remain modeled."
       }
     },
     "REQ-ZERO-AMBIENT-AUTHORITY": {
@@ -1171,7 +1172,7 @@
       ]
     },
     "REQ-BOOT-CHAIN": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/measured_boot.zig",
         "src/native/platform/measured_boot_console.zig",
@@ -1182,25 +1183,41 @@
         "tools/generate_userspace_archive.zig",
         "scripts/run-zigos-native-smoke.sh"
       ],
-      "coverage_note": "Boot records, artifact manifests, and QEMU smoke markers exist, but hardware root-of-trust and bootloader-provided measurements are still represented by emulator or build-time provenance.",
-      "roadmap": {
-        "priority": "P0",
-        "focus": "Route freestanding boot through real bootloader-provided measurements and reject tampered kernel, base image, service, policy, and driver artifacts before session startup.",
-        "graduation_proof": "A freestanding boot path consumes bootloader measurements, rejects each artifact class on mismatch, and records the verified root without synthetic or emulator provenance."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/platform/measured_boot.zig",
+          "name": "bootloader measurement handoff rejects unsigned manifests and tampered startup artifacts"
+        },
+        {
+          "file": "src/native/platform/measured_boot.zig",
+          "name": "verified boot chain rejects synthetic provenance and every mismatched artifact class"
+        },
+        {
+          "file": "src/native_smoke_markers.zig",
+          "name": "native smoke gate requires measured boot reboot comparison markers"
+        }
+      ]
     },
     "REQ-MEASURED-STATE": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/measured_boot.zig",
         "src/native/platform/attestation_service.zig"
       ],
-      "coverage_note": "The measured-state data model covers kernel, base image, services, policy, and driver sets, but remote attestation and root provenance still depend on provisioned test roots or emulator-backed evidence.",
-      "roadmap": {
-        "priority": "P0",
-        "focus": "Bind measured state and attestation to freestanding boot provenance and hardware-backed or platform-backed device roots.",
-        "graduation_proof": "Remote attestation verifies a bootloader-provided measured root and rejects tampering without relying on synthetic, software, or emulator-only roots."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation service can use a provisioned hardware-backed root for visible remote requests"
+        },
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation service rejects emulator measured roots for remote attestations"
+        },
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation verification rejects measured state and statement tampering"
+        }
+      ]
     },
     "REQ-RECOVERY-MODE": {
       "status": "enforced",
@@ -1512,19 +1529,28 @@
       ]
     },
     "REQ-SYNC-SEMANTICS": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/sync/sync_state_support.zig",
         "src/native/sync/sync_service_impl.zig",
         "src/native/sync/sync_adapters.zig",
+        "src/native/sync/sync_service_test.zig",
         "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "CRDT, operation log, secret-transfer, and database-contract semantics are modeled in adapters and service tests, but not all data classes run through live app/service replication.",
-      "roadmap": {
-        "priority": "P1",
-        "focus": "Exercise each sync data class through native service IPC and booted replication paths.",
-        "graduation_proof": "Documents, large objects, secrets, and declared database state replicate through booted services with focused conflict, integrity, and secret-leak negative tests."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/sync/sync_service_test.zig",
+          "name": "sync service replicates payloads to peer storage through booted relay fallback"
+        },
+        {
+          "file": "src/native/sync/sync_service_test.zig",
+          "name": "sync service requires database contract before transactional workspace replication"
+        },
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        }
+      ]
     },
     "REQ-SHARING": {
       "status": "enforced",
@@ -1606,7 +1632,7 @@
       ]
     },
     "REQ-TASK-FIRST-UX": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/compositor_session.zig",
         "src/native/task/task_runtime_service.zig",
@@ -1616,43 +1642,70 @@
         "src/native/policy/permission_review_service.zig",
         "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Task creation, app-linked task views, component attachment, audit records, and compositor/task-runtime checkpoint recovery now run through native service models and booted service-path coverage, but the final shell/input/display stack is still modeled rather than production interactive UI.",
-      "roadmap": {
-        "priority": "P2",
-        "focus": "Move modeled task-first compositor and task-runtime recovery proof into the production shell input/display stack.",
-        "graduation_proof": "A production shell flow creates, resumes, links apps to, and audits task-oriented work through real compositor input and persistent task state without relying on modeled framebuffer/service controls."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/platform/rendered_shell.zig",
+          "name": "task shell service routes controls through compositor service and recovers persistent task state"
+        },
+        {
+          "file": "src/native/platform/rendered_shell.zig",
+          "name": "task shell service rejects out-of-order controls before creating compositor state"
+        },
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        }
+      ]
     },
     "REQ-WINDOWS-AND-VIEWS": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/compositor_display.zig",
         "src/native/platform/compositor_session.zig",
+        "src/native/session/service_bootstrap.zig",
+        "src/native/session/service_catalog.zig",
         "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Document, workspace, app-panel, and full-screen views now run through compositor session, framebuffer rendering, booted service-path switching, invalid-window denial, and checkpoint restore tests, but the display/input stack is still a modeled compositor rather than a production shell.",
-      "roadmap": {
-        "priority": "P2",
-        "focus": "Move the modeled compositor session/display path into production compositor input and display services.",
-        "graduation_proof": "A production compositor flow renders and switches each view type, denies invalid surfaces, and persists task/view state across service restart."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/platform/compositor_session.zig",
+          "name": "compositor service closes task windows during app removal"
+        },
+        {
+          "file": "src/native/platform/compositor_session.zig",
+          "name": "compositor service rejects tasks without valid display surfaces"
+        },
+        {
+          "file": "src/native/platform/compositor_display.zig",
+          "name": "compositor display framebuffer rejects undersized surfaces"
+        },
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        }
+      ]
     },
     "REQ-PERMISSION-UX": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "src/native/policy/permission_review.zig",
         "src/native/policy/permission_review_service.zig",
+        "src/native/policy/policy_mediation.zig",
         "src/native/platform/compositor_display.zig",
         "src/native/platform/compositor_session.zig",
         "src/native/platform/event_ledger.zig",
         "src/native/session/service_path_proofs.zig"
       ],
-      "coverage_note": "Permission prompts, visible controls, scoped decisions, grant minting, compositor checkpoints, and event-ledger records now run through the native review service and rendered compositor surface, but the approval loop still uses a modeled framebuffer/control path rather than a production shell.",
-      "roadmap": {
-        "priority": "P1",
-        "focus": "Replace the modeled framebuffer/control path with booted compositor input and policy-service mediation for the same prompt, decision, grant, and audit invariants.",
-        "graduation_proof": "A booted permission flow shows object, duration, reason, network path, and locality; every visible decision gates the resulting capability and audit record."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/policy/permission_review_service.zig",
+          "name": "rendered permission review surface drives allow deny controls through compositor display and policy grants"
+        },
+        {
+          "file": "src/native/session/service_path_proofs.zig",
+          "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        }
+      ]
     },
     "REQ-NOTIFICATIONS": {
       "status": "enforced",
@@ -2043,38 +2096,40 @@
       ]
     },
     "REQ-ZIGOS-USER-EXPERIENCE": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
-        "src/native/demo/session_demo_boot.zig",
-        "src/native/demo/platform_scenarios.zig",
-        "src/native/services/package_service_model.zig",
+        "src/native/platform/rendered_shell.zig",
+        "src/native/platform/compositor_session.zig",
+        "src/native/platform/native_ux.zig",
+        "src/native/platform/event_ledger.zig",
         "src/native/services/package_service.zig",
         "src/native/sync/sync_service_impl.zig",
-        "src/native/policy/permission_review_service.zig",
-        "src/native/policy/policy_mediation.zig",
-        "src/native/platform/native_ux.zig",
-        "src/native/platform/compositor_display.zig",
-        "src/native/platform/compositor_session.zig",
-        "src/native/platform/rendered_shell.zig",
-        "src/native/platform/recovery_environment.zig",
-        "src/native/platform/update_health.zig",
-        "src/native/services/compatibility_environment.zig",
-        "src/native/platform/event_ledger.zig",
-        "src/native/session/session_manager.zig",
-        "src/native/session/session_manager_test.zig"
+        "src/native/policy/policy_object.zig",
+        "src/native/task/task_runtime_service.zig",
+        "src/native/storage/storage_service.zig"
       ],
-      "coverage_note": "Booted session-manager state and rendered shell models now exercise install, update, sync, permission review, recovery, and removal flows through native services and event-ledger records, but the final production shell and administrator UI remain modeled.",
-      "roadmap": {
-        "priority": "P2",
-        "focus": "Move the booted UX journey model into production shell and administration surfaces for install, uninstall, update, sync, permission review, recovery, and policy administration.",
-        "graduation_proof": "A production end-to-end journey exercises each stated user, developer, and administrator outcome through native services, persistent shell state, and visible UI surfaces."
-      }
+      "negative_tests": [
+        {
+          "file": "src/native/platform/rendered_shell.zig",
+          "name": "production journey service rejects premature controls then routes lifecycle policy device trust and recovery through service ports"
+        },
+        {
+          "file": "src/native/platform/compositor_session.zig",
+          "name": "compositor service closes task windows during app removal"
+        },
+        {
+          "file": "src/native/platform/rendered_shell.zig",
+          "name": "task shell service rejects out-of-order controls before creating compositor state"
+        }
+      ]
     },
     "REQ-ONE-SENTENCE-SUMMARY": {
-      "status": "modeled",
+      "status": "enforced",
       "enforcement_modules": [
         "tools/check_spec_coverage.py",
+        "src/native/core/principal.zig",
         "src/native/kernel_api/capability.zig",
+        "src/native/kernel_api/shared_memory.zig",
         "src/native/sync/sync_service_impl.zig",
         "src/native/sync/device_graph.zig",
         "src/native/sync/network_policy.zig",
@@ -2086,12 +2141,16 @@
         "src/native/platform/rendered_shell.zig",
         "src/native/platform/event_ledger.zig"
       ],
-      "coverage_note": "The summary now maps each clause to concrete enforced or modeled subsystem evidence, but it remains an aggregate health check until every dependency is independently enforced.",
-      "roadmap": {
-        "priority": "P2",
-        "focus": "Keep this aggregate tied to the capability, local-first, multi-device, immutable-core, object-storage, sandboxing, identity, and accelerator dependency statuses instead of scenario-only prose.",
-        "graduation_proof": "All underlying capability, local-first, multi-device, immutable-core, object-storage, sandboxing, identity, and accelerator requirements are independently enforced."
-      }
+      "negative_tests": [
+        {
+          "file": "tools/check_spec_coverage.py",
+          "name": "test_summary_clause_gate_rejects_missing_or_modeled_dependencies"
+        },
+        {
+          "file": "tools/check_spec_coverage.py",
+          "name": "test_summary_clause_gate_requires_current_summary_phrases"
+        }
+      ]
     }
   }
 }

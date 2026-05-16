@@ -1,5 +1,5 @@
 const std = @import("std");
-const binary_cursor = @import("../core/binary_cursor.zig");
+const binary_cursor = @import("binary_cursor");
 const device_graph = @import("device_graph.zig");
 const manifest = @import("../policy/manifest.zig");
 const measured_boot = @import("../platform/measured_boot.zig");

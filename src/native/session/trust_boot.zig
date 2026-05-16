@@ -375,17 +375,16 @@ pub const TrustBoot = struct {
         graph: *const service_graph_builder_mod.ServiceGraph,
     ) bool {
         const artifact_manifest = self.buildProductionArtifactManifest(graph) catch return false;
+        const signed_manifest = measured_boot.signArtifactManifest(
+            artifact_manifest,
+            measured_boot.production_artifact_manifest_signer,
+        ) catch return false;
+        if (!measured_boot.verifySignedArtifactManifest(
+            &signed_manifest,
+            measured_boot.production_artifact_manifest_signer,
+        )) return false;
         if (builtin.target.os.tag == .freestanding) {
             if (!self.verifyGeneratedProductionArtifactManifest(false)) return false;
-        } else {
-            const signed_manifest = measured_boot.signArtifactManifest(
-                artifact_manifest,
-                measured_boot.production_artifact_manifest_signer,
-            ) catch return false;
-            if (!measured_boot.verifySignedArtifactManifest(
-                &signed_manifest,
-                measured_boot.production_artifact_manifest_signer,
-            )) return false;
         }
 
         var measured = measured_boot.Recorder.init();
@@ -405,11 +404,21 @@ pub const TrustBoot = struct {
         measured.addDriverSet("production-driver-set", self.driver_directory) catch return false;
 
         var boot = measured.finalize();
-        measured_boot.verifyBootRecordAgainstManifest(
-            &boot,
-            &artifact_manifest,
-            productionRootProvenance(),
-        ) catch return false;
+        if (builtin.target.os.tag == .freestanding) {
+            const handoff = measured_boot.BootloaderMeasurementHandoff.fromBootRecord(&boot) catch return false;
+            boot = measured_boot.verifyBootloaderMeasurementHandoff(
+                &handoff,
+                &signed_manifest,
+                measured_boot.production_artifact_manifest_signer,
+            ) catch return false;
+            common.printBootMarker(boot_markers.platform_bootloader_handoff_verified);
+        } else {
+            measured_boot.verifyBootRecordAgainstManifest(
+                &boot,
+                &artifact_manifest,
+                productionRootProvenance(),
+            ) catch return false;
+        }
         measured_boot_console.printMeasurementSummary(&boot);
         supportMeasuredBootShape(&boot);
         self.recordMeasurementComparison(&boot);

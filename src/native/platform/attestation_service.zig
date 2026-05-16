@@ -238,7 +238,7 @@ fn addMeasuredArtifact(
     try artifact_manifest.add(kind, label, payload);
 }
 
-fn verifiedTestBoot(generation: u64) !measured_boot.BootRecord {
+fn verifiedTestBoot(generation: u64, root_provenance: measured_boot.RootProvenance) !measured_boot.BootRecord {
     var recorder = measured_boot.Recorder.init();
     var artifact_manifest = measured_boot.ArtifactManifest.init(generation);
     recorder.begin(generation);
@@ -251,7 +251,7 @@ fn verifiedTestBoot(generation: u64) !measured_boot.BootRecord {
     try addMeasuredArtifact(&recorder, &artifact_manifest, .policy, "org-defaults", "strict");
     try addMeasuredArtifact(&recorder, &artifact_manifest, .driver_set, "signed-drivers", "gpu+npu+net");
     var boot = recorder.finalize();
-    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .emulator_provided);
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, root_provenance);
     return boot;
 }
 
@@ -317,7 +317,7 @@ test "attestation service does not count hidden requests and detects tampering" 
 }
 
 test "attestation service can use a provisioned hardware-backed root for visible remote requests" {
-    const boot = try verifiedTestBoot(14);
+    const boot = try verifiedTestBoot(14, .bootloader_provided);
     const root_signer = signing.SignerIdentity{
         .label = "device-se",
         .seed = [_]u8{0x55} ** 32,
@@ -350,7 +350,7 @@ test "attestation service can use a provisioned hardware-backed root for visible
     }));
     try std.testing.expectEqual(KeyOrigin.secure_enclave, statement.key_origin);
     try std.testing.expectEqualStrings("device-se", statement.rootLabelSlice());
-    try std.testing.expectEqual(measured_boot.RootProvenance.emulator_provided, statement.root_provenance);
+    try std.testing.expectEqual(measured_boot.RootProvenance.bootloader_provided, statement.root_provenance);
     try std.testing.expect(statement.manifest_verified);
 
     try std.testing.expect(!Service.verifyForBoot(statement, .{
@@ -362,7 +362,7 @@ test "attestation service can use a provisioned hardware-backed root for visible
         .attestation_root = root_signer,
     }));
     var wrong_provenance_boot = boot;
-    wrong_provenance_boot.root_provenance = .bootloader_provided;
+    wrong_provenance_boot.root_provenance = .emulator_provided;
     try std.testing.expect(!Service.verifyForBoot(statement, .{
         .boot = &wrong_provenance_boot,
         .remote_party = "attest.example",
@@ -371,6 +371,25 @@ test "attestation service can use a provisioned hardware-backed root for visible
         .key_origin = .secure_enclave,
         .attestation_root = root_signer,
     }));
+}
+
+test "attestation service rejects emulator measured roots for remote attestations" {
+    const boot = try verifiedTestBoot(17, .emulator_provided);
+    try std.testing.expect(boot.hasVerifiedRoot());
+    try std.testing.expect(!boot.isRemoteAttestable());
+
+    var service = Service.init(.{ .kind = .device, .serial = 40 });
+    try service.provisionRoot(.{
+        .label = "device-tpm",
+        .seed = [_]u8{0x5A} ** 32,
+    }, .tpm);
+
+    try std.testing.expectError(error.UnverifiedMeasuredRoot, service.attestWithProvisionedRoot(
+        boot,
+        "attest.example",
+        "nonce-6",
+        true,
+    ));
 }
 
 test "attestation service rejects provisioned remote attestations without a verified measured root" {
@@ -403,7 +422,7 @@ test "attestation service rejects software provisioned remote roots" {
 }
 
 test "attestation verification rejects measured state and statement tampering" {
-    const boot = try verifiedTestBoot(16);
+    const boot = try verifiedTestBoot(16, .bootloader_provided);
     const root_signer = signing.SignerIdentity{
         .label = "device-tpm",
         .seed = [_]u8{0x58} ** 32,

@@ -345,12 +345,6 @@ fn flowSlotId(slot: *const FlowSlot) u64 {
     return slot.flow.id;
 }
 
-fn appendText(buffer: []u8, used: *usize, text: []const u8) !void {
-    if (used.* + text.len > buffer.len) return error.NoSpaceLeft;
-    @memcpy(buffer[used.*..][0..text.len], text);
-    used.* += text.len;
-}
-
 fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) !void {
     const rendered = try std.fmt.bufPrint(buffer[used.*..], fmt, args);
     used.* += rendered.len;

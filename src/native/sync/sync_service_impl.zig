@@ -556,7 +556,7 @@ pub const SyncPort = struct {
             result.payload_bytes += delivery.payload_len;
             if (delivery.used_booted_relay_service) {
                 result.used_booted_relay_service = true;
-                result.relay_delivery_count += 1;
+                result.relay_delivery_count += delivery.relay_delivery_count;
             }
         }
         return result;
@@ -649,6 +649,7 @@ pub const SyncPort = struct {
 
     const PeerFrameDelivery = struct {
         payload_len: usize,
+        relay_delivery_count: usize = 0,
         used_booted_relay_service: bool,
     };
 
@@ -661,23 +662,10 @@ pub const SyncPort = struct {
         const source_version = request.source_storage.version(frame.version_id) orelse return error.VersionNotFound;
         const payload = try request.source_storage.versionPayload(source_version);
         var used_booted_relay_service = false;
+        var relay_delivery_count: usize = 0;
 
         if (request.transport == .relay_assisted) {
-            const relay_service = request.relay_service orelse return error.TransportDenied;
-            const network_capabilities = request.network_capabilities orelse return error.TransportDenied;
-            const relay_result = try self.service.sendOverlayRelayFrameViaService(network_capabilities, relay_service, .{
-                .workspace_id = request.workspace_id,
-                .from_device = request.from_device,
-                .to_device = request.to_device,
-                .usage = .sync_replication,
-                .relay_capability_id = request.relay_capability_id,
-                .payload = payload,
-                .signer = request.signer,
-                .tick = request.tick,
-            });
-            if (!relay_result.delivered or relay_result.delivered_len != payload.len) {
-                return error.RelayDeliveryMissing;
-            }
+            relay_delivery_count = try self.relayPayloadToPeer(request, payload);
             used_booted_relay_service = true;
         }
 
@@ -687,6 +675,9 @@ pub const SyncPort = struct {
             error.EntryNotFound => null,
             else => return err,
         };
+        if (frame.semantic == .transactional_contract) {
+            try self.replicateDatabaseContractMetadataToPeer(peer, frame.workspace_id, frame.pathSlice());
+        }
         const persisted = try request.target_storage.putVersion(.{
             .preferred_object_id = object_store.ids.object(frame.object_id),
             .object_type = source_version.object_type,
@@ -718,8 +709,62 @@ pub const SyncPort = struct {
         });
         return .{
             .payload_len = payload.len,
+            .relay_delivery_count = relay_delivery_count,
             .used_booted_relay_service = used_booted_relay_service,
         };
+    }
+
+    fn relayPayloadToPeer(
+        self: *SyncPort,
+        request: PeerReplicationRequest,
+        payload: []const u8,
+    ) PeerReplicationError!usize {
+        if (payload.len == 0) {
+            return try self.relayPayloadChunkToPeer(request, payload);
+        }
+
+        var offset: usize = 0;
+        var delivery_count: usize = 0;
+        while (offset < payload.len) {
+            const end = @min(offset + sync_transport.MAX_PACKET_BYTES, payload.len);
+            delivery_count += try self.relayPayloadChunkToPeer(request, payload[offset..end]);
+            offset = end;
+        }
+        return delivery_count;
+    }
+
+    fn relayPayloadChunkToPeer(
+        self: *SyncPort,
+        request: PeerReplicationRequest,
+        payload: []const u8,
+    ) PeerReplicationError!usize {
+        const relay_service = request.relay_service orelse return error.TransportDenied;
+        const network_capabilities = request.network_capabilities orelse return error.TransportDenied;
+        const relay_result = try self.service.sendOverlayRelayFrameViaService(network_capabilities, relay_service, .{
+            .workspace_id = request.workspace_id,
+            .from_device = request.from_device,
+            .to_device = request.to_device,
+            .usage = .sync_replication,
+            .relay_capability_id = request.relay_capability_id,
+            .payload = payload,
+            .signer = request.signer,
+            .tick = request.tick,
+        });
+        if (!relay_result.delivered or relay_result.delivered_len != payload.len) {
+            return error.RelayDeliveryMissing;
+        }
+        _ = try self.service.closeOverlaySession(relay_result.overlay_session_id, request.tick);
+        return 1;
+    }
+
+    fn replicateDatabaseContractMetadataToPeer(
+        self: *SyncPort,
+        peer: *SyncPort,
+        workspace_id: u64,
+        path: []const u8,
+    ) PeerReplicationError!void {
+        const contract = self.service.findDatabaseContractForPath(workspace_id, path) orelse return error.DatabaseContractNotFound;
+        _ = try peer.service.importDatabaseContract(contract);
     }
 };
 
@@ -1348,6 +1393,26 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return &slot.contract;
         }
 
+        fn importDatabaseContract(self: *Self, source: *const DatabaseContract) Error!*DatabaseContract {
+            try validateDatabaseContractSignature(source);
+            if (self.findEquivalentDatabaseContract(
+                source.workspace_id,
+                source.bundleIdSlice(),
+                source.labelSlice(),
+                source.signature,
+            )) |existing| {
+                return existing;
+            }
+
+            const slot = self.allocateDatabaseContract() orelse return error.DatabaseContractTableFull;
+            slot.in_use = true;
+            slot.contract = source.*;
+            slot.contract.id = self.nextDatabaseContractId();
+
+            try self.checkpoint();
+            return &slot.contract;
+        }
+
         fn replicateWorkspace(
             self: *Self,
             store: *const storage_service.Service,
@@ -1369,6 +1434,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             const last_replicated_generation = self.replicaWorkspaceGeneration(workspace_id, to_device);
             const changes = try store.entryChangesSince(workspace_id, last_replicated_generation);
             const latest_mutation_index = buildLatestMutationIndex(changes);
+            try self.preflightTransactionalEntries(workspace_id, to_device, changes, latest_mutation_index, policy);
             for (changes, 0..) |mutation, mutation_index| {
                 const entry = mutation.entry;
                 if (!latest_mutation_index.isLatest(changes, mutation_index)) continue;
@@ -1422,7 +1488,16 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                         });
                         if (result.transferred) summary.secret_transfer_count += 1;
                     },
-                    .transactional_contract => summary.transactional_count += 1,
+                    .transactional_contract => {
+                        const contract = self.findDatabaseContractForEntry(workspace_id, entry) orelse return error.DatabaseContractNotFound;
+                        const result = try self.database_sync_adapter.replicate(.{
+                            .contract = contract,
+                            .workspace_id = workspace_id,
+                            .from_device = from_device,
+                            .to_device = to_device,
+                        });
+                        if (result.transactional_contract) summary.transactional_count += 1;
+                    },
                 }
                 const frame = try self.transport_queue.enqueue(.{
                     .workspace_id = workspace_id,
@@ -1485,7 +1560,15 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                     .to_device = request.target_device,
                     .personal_e2ee = policy.personal_e2ee,
                 }),
-                .transactional_contract => {},
+                .transactional_contract => {
+                    const contract = self.findDatabaseContractForEntry(request.workspace_id, entry) orelse return error.DatabaseContractNotFound;
+                    _ = try self.database_sync_adapter.replicate(.{
+                        .contract = contract,
+                        .workspace_id = request.workspace_id,
+                        .from_device = request.source_device,
+                        .to_device = request.target_device,
+                    });
+                },
             }
 
             const accepted = try self.transport_queue.enqueue(request);
@@ -1706,11 +1789,46 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return cleared;
         }
 
+        fn preflightTransactionalEntries(
+            self: *Self,
+            workspace_id: u64,
+            to_device: principal.PrincipalId,
+            changes: []const workspace.EntryMutation,
+            latest_mutation_index: LatestMutationIndex,
+            policy: *const WorkspacePolicy,
+        ) Error!void {
+            for (changes, 0..) |mutation, mutation_index| {
+                const entry = mutation.entry;
+                if (!latest_mutation_index.isLatest(changes, mutation_index)) continue;
+                if (!policy.matchesPath(entry.pathSlice())) continue;
+                if (classifyEntry(entry) != .transactional_contract) continue;
+
+                const remote_version_id = self.replicaVersionForPathHash(workspace_id, to_device, entry.pathSlice(), entry.pathHash()) orelse 0;
+                if (remote_version_id == entry.version_id.raw()) continue;
+                _ = self.findDatabaseContractForEntry(workspace_id, entry) orelse return error.DatabaseContractNotFound;
+            }
+        }
+
         fn findDatabaseContract(self: *Self, contract_id: u64) ?*DatabaseContract {
             const slot = fixed_table.findSlot(DatabaseContractSlot, MAX_DATABASE_CONTRACTS, &self.state().database_contracts, DatabaseContractLookup{
                 .id = contract_id,
             }, databaseContractSlotMatches) orelse return null;
             return &slot.contract;
+        }
+
+        fn findDatabaseContractForEntry(self: *Self, workspace_id: u64, entry: workspace.Entry) ?*DatabaseContract {
+            return self.findDatabaseContractForPath(workspace_id, entry.pathSlice());
+        }
+
+        fn findDatabaseContractForPath(self: *Self, workspace_id: u64, path: []const u8) ?*DatabaseContract {
+            const bundle_id = databaseBundleIdFromPath(path) orelse return null;
+            for (&self.state().database_contracts) |*slot| {
+                if (!slot.in_use) continue;
+                if (slot.contract.workspace_id != workspace_id) continue;
+                if (!std.mem.eql(u8, slot.contract.bundleIdSlice(), bundle_id)) continue;
+                return &slot.contract;
+            }
+            return null;
         }
 
         fn findEquivalentDatabaseContract(
@@ -1893,6 +2011,26 @@ fn sortTransportFramesById(frames: []TransportFrame) void {
         }
         frames[insert_at] = value;
     }
+}
+
+fn databaseBundleIdFromPath(path: []const u8) ?[]const u8 {
+    const prefix = "databases/";
+    if (!std.mem.startsWith(u8, path, prefix)) return null;
+    const remainder = path[prefix.len..];
+    const separator = std.mem.indexOfScalar(u8, remainder, '/') orelse return null;
+    if (separator == 0) return null;
+    return remainder[0..separator];
+}
+
+fn validateDatabaseContractSignature(contract: *const DatabaseContract) Error!void {
+    var message_buffer: [160]u8 = undefined;
+    const message = state_support.databaseContractMessage(
+        &message_buffer,
+        contract.workspace_id,
+        contract.bundleIdSlice(),
+        contract.labelSlice(),
+    ) catch return error.InvalidContractSignature;
+    if (!signing.verify(contract.signature, message)) return error.InvalidContractSignature;
 }
 
 fn classifyEntry(entry: workspace.Entry) SyncSemantic {

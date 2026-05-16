@@ -18,6 +18,12 @@ pub fn addKernelArtifact(
         .target = target,
         .optimize = optimize,
     });
+    const binary_cursor_module = b.createModule(.{
+        .root_source_file = b.path("src/native/core/binary_cursor.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    kernel_module.addImport("binary_cursor", binary_cursor_module);
     if (userspace_archive) |archive_module| {
         kernel_module.addImport("userspace_archive", archive_module);
     }

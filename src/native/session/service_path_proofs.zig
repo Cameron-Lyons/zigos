@@ -37,6 +37,7 @@ const sync_service = @import("../sync/sync_service.zig");
 const syscall_surface = @import("../kernel_api/syscall_surface.zig");
 const supervisor_mod = @import("supervisor.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const task_runtime_service = @import("../task/task_runtime_service.zig");
 const update_health = @import("../platform/update_health.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 const compositor_display = @import("../platform/compositor_display.zig");
@@ -50,6 +51,7 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
     session_manager.boot();
 
     const runtime = session_manager.testing.runtimePtr();
+    const runtime_service = session_manager.testing.runtimeServicePtr();
     const capability_table = session_manager.system().capabilityTablePtr();
     const supervisor = session_manager.testing.supervisorPtr();
     const service_directory = session_manager.testing.serviceDirectoryPtr();
@@ -67,6 +69,7 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
 
     try std.testing.expect(sync_task.runsAsUserspaceProcess());
     try std.testing.expect(storage_driver_task.runsAsUserspaceProcess());
+    try std.testing.expectEqual(@as(?u64, 2), compositor_task.ui_surface_id);
     try std.testing.expect(runtime.processSeparated(sync_task.id, storage_task.id));
     try std.testing.expect(runtime.processSeparated(sync_task.id, storage_driver_task.id));
     try std.testing.expect(runtime.processSeparated(storage_driver_task.id, storage_task.id));
@@ -113,6 +116,7 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
         runtime,
         capability_table,
         storage,
+        runtime_service,
         supervisor.findByClass(.compositor_ui_session).?,
         compositor_task,
         session_manager.testing.compositorSessionPtr(),
@@ -1263,6 +1267,9 @@ fn proveBootedSyncServicePath(
         .selective_prefixes = &.{ "documents/", "assets/", "secrets/", "databases/" },
         .device_to_device_policy_id = peer_local_policy.id,
     });
+    const source_database_contract = try sync_port.registerDatabaseContract(sync_authority, workspace_id, "app.notes.db", "notes-db", contract_signer);
+    const peer_database_contract = try peer_port.registerDatabaseContract(peer_authority, workspace_id, "app.notes.db", "notes-db", contract_signer);
+    try std.testing.expectEqual(source_database_contract.id, peer_database_contract.id);
 
     const source_endpoint = try expectEndpointCreateWithFlags(
         kernel_port,
@@ -1522,8 +1529,7 @@ fn proveBootedSyncServicePath(
     try std.testing.expectEqual(@as(usize, 1), booted_relay_service.relay.delivered_packets);
 
     try std.testing.expect(try sync_port.transferSecretObject(sync_authority, storage, workspace_id, secret.object_id, laptop, tablet, .device_to_device));
-    const contract = try sync_port.registerDatabaseContract(sync_authority, workspace_id, "app.notes.db", "notes-db", contract_signer);
-    try std.testing.expect(try sync_port.replicateDatabaseContract(sync_authority, contract.id, workspace_id, laptop, tablet, .relay_assisted));
+    try std.testing.expect(try sync_port.replicateDatabaseContract(sync_authority, source_database_contract.id, workspace_id, laptop, tablet, .relay_assisted));
     try std.testing.expectError(sync_service.Error.DeviceNotTrusted, sync_port.replicateWorkspace(sync_authority, storage, workspace_id, laptop, phone, .device_to_device));
 
     var restarted_source_resident = sync_service.ResidentState{};
@@ -1757,7 +1763,7 @@ fn verifiedBootedNetworkPeer(generation: u64) !measured_boot.BootRecord {
     try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .policy, "identity-first", "strict");
     try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .driver_set, "signed-network-driver", "net");
     var boot = recorder.finalize();
-    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .emulator_provided);
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .bootloader_provided);
     return boot;
 }
 
@@ -1777,6 +1783,7 @@ fn proveBootedCompositorServicePath(
     runtime: *task_runtime.Runtime,
     capability_table: *capability.CapabilityTable,
     storage: *storage_service.Service,
+    runtime_service: *task_runtime_service.Service,
     compositor_record: *const @import("supervisor.zig").ServiceRecord,
     compositor_task: *task_runtime.TaskRecord,
     session: *compositor_session.Session,
@@ -1816,19 +1823,6 @@ fn proveBootedCompositorServicePath(
 
     const workspace_id = try seedBootedCompositorWorkspace(storage, app_owner);
     _ = try ux_controller.openWorkspace(storage, ids.workspace(workspace_id), "trip/brief.md", app_owner);
-
-    {
-        const shell_snapshot = session.snapshot();
-        defer session.restore(shell_snapshot);
-        try proveBootedRenderedTaskShell(
-            runtime,
-            storage,
-            session,
-            workspace_id,
-            app_owner,
-            compositor_task.id,
-        );
-    }
 
     const authority = try capability_table.mintBootRoot(.{
         .holder = compositor_record.owner,
@@ -1890,10 +1884,52 @@ fn proveBootedCompositorServicePath(
 
     var tick: u64 = 124;
     {
+        const shell_snapshot = session.snapshot();
+        defer session.restore(shell_snapshot);
+        try proveBootedRenderedTaskShell(
+            kernel_port,
+            runtime_service,
+            storage,
+            &service,
+            session,
+            workspace_id,
+            app_owner,
+            compositor_task.id,
+            authority.id,
+            &tick,
+        );
+    }
+
+    {
         const permission_snapshot = session.snapshot();
         defer session.restore(permission_snapshot);
-        try proveBootedRenderedPermissionReviewSurface(runtime, &service, session, app_task.id);
+        try proveBootedRenderedPermissionReviewSurface(runtime, &service, session, app_task.id, capability_table);
     }
+
+    const headless_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 82_099 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 1,
+            .shared_memory_bytes = 512,
+        },
+        .local_only = true,
+        .initial_component = .{
+            .label = "headless-trip-helper",
+            .entry = "app.trip.headless",
+        },
+    });
+    const invalid_surface_response = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
+        .operation = .open_view,
+        .view_type = .document_view,
+        .subject_task_id = headless_task.id,
+        .workspace_id = workspace_id,
+        .detail = "trip/headless.md",
+    }, &tick);
+    try std.testing.expectEqual(compositor_session.ServiceStatus.invalid_request, invalid_surface_response.status);
+    try std.testing.expectEqual(@as(usize, 0), session.window_count);
 
     const document_response = try compositorRoundTrip(kernel_port, compositor_task.id, peer_endpoint.capability_id, service_endpoint.capability_id, &service, .{
         .operation = .open_view,
@@ -2158,19 +2194,55 @@ fn seedBootedCompositorWorkspace(
 }
 
 fn proveBootedRenderedTaskShell(
-    runtime: *task_runtime.Runtime,
+    kernel_port: *component_port.KernelPort,
+    runtime_service: *task_runtime_service.Service,
     storage: *storage_service.Service,
+    compositor_service_instance: *compositor_session.Service,
     session: *compositor_session.Session,
     workspace_id: u64,
     app_owner: principal.PrincipalId,
     reviewer_task_id: u64,
+    shell_authority_capability_id: u64,
+    tick: *u64,
 ) !void {
     var ux_controller = native_ux.Controller.init();
     var ledger = event_ledger.Ledger.init();
-    var shell = rendered_shell.Shell.init(
-        runtime,
+
+    const shell_service_endpoint = try expectEndpointCreateWithFlags(
+        kernel_port,
+        reviewer_task_id,
+        shell_authority_capability_id,
+        reviewer_task_id,
+        "zigos.ui.task-shell",
+        .{ .local_only = true, .service_port = true },
+        tick.*,
+    );
+    tick.* += 1;
+    const shell_peer_endpoint = try expectEndpointCreateWithFlags(
+        kernel_port,
+        reviewer_task_id,
+        shell_authority_capability_id,
+        reviewer_task_id,
+        "zigos.ui.task-shell.client",
+        .{ .local_only = true },
+        tick.*,
+    );
+    tick.* += 1;
+    _ = try expectEndpointConnect(
+        kernel_port,
+        reviewer_task_id,
+        shell_peer_endpoint.capability_id,
+        shell_service_endpoint.capability_id,
+        shell_service_endpoint.endpoint.endpoint_id,
+        tick.*,
+    );
+    tick.* += 1;
+
+    var shell_checkpoint_store = rendered_shell.TaskShellCheckpointStore{};
+    var shell = rendered_shell.TaskShellService.init(
+        runtime_service,
         &ux_controller,
-        session,
+        compositor_service_instance,
         storage,
         &ledger,
         .{
@@ -2188,6 +2260,7 @@ fn proveBootedRenderedTaskShell(
             .ui_surface_id = 78,
             .image_id = 82_002,
         },
+        &shell_checkpoint_store,
     );
 
     var render_buffer: [768]u8 = undefined;
@@ -2195,13 +2268,38 @@ fn proveBootedRenderedTaskShell(
     try expectContains(initial, "control=start-task");
     try expectContains(initial, "control=open-document");
 
-    try shell.click(.start_task, 152);
-    try shell.click(.open_workspace, 153);
-    try shell.click(.open_document, 154);
-    try shell.click(.open_app_panel, 155);
-    try shell.click(.focus_full_screen, 156);
+    const start = try taskShellRoundTrip(kernel_port, reviewer_task_id, shell_peer_endpoint.capability_id, shell_service_endpoint.capability_id, &shell, .{
+        .operation = .click,
+        .control = .start_task,
+        .tick = 152,
+    }, tick);
+    try std.testing.expectEqual(rendered_shell.TaskShellStatus.ok, start.status);
+    const workspace_response = try taskShellRoundTrip(kernel_port, reviewer_task_id, shell_peer_endpoint.capability_id, shell_service_endpoint.capability_id, &shell, .{
+        .operation = .click,
+        .control = .open_workspace,
+        .tick = 153,
+    }, tick);
+    try std.testing.expectEqual(rendered_shell.TaskShellStatus.ok, workspace_response.status);
+    const document_response = try taskShellRoundTrip(kernel_port, reviewer_task_id, shell_peer_endpoint.capability_id, shell_service_endpoint.capability_id, &shell, .{
+        .operation = .click,
+        .control = .open_document,
+        .tick = 154,
+    }, tick);
+    try std.testing.expectEqual(rendered_shell.TaskShellStatus.ok, document_response.status);
+    const panel_response = try taskShellRoundTrip(kernel_port, reviewer_task_id, shell_peer_endpoint.capability_id, shell_service_endpoint.capability_id, &shell, .{
+        .operation = .click,
+        .control = .open_app_panel,
+        .tick = 155,
+    }, tick);
+    try std.testing.expectEqual(rendered_shell.TaskShellStatus.ok, panel_response.status);
+    const focus = try taskShellRoundTrip(kernel_port, reviewer_task_id, shell_peer_endpoint.capability_id, shell_service_endpoint.capability_id, &shell, .{
+        .operation = .click,
+        .control = .focus_full_screen,
+        .tick = 156,
+    }, tick);
+    try std.testing.expectEqual(rendered_shell.TaskShellStatus.ok, focus.status);
 
-    const task = runtime.find(shell.taskId()) orelse return error.MissingBootedRenderedShellTask;
+    const task = runtime_service.runtimePtr().find(focus.task_id) orelse return error.MissingBootedRenderedShellTask;
     try std.testing.expect(task.runsAsUserspaceProcess());
     try std.testing.expectEqual(@as(?u64, 78), task.ui_surface_id);
     try std.testing.expectEqual(@as(usize, 4), session.window_count);
@@ -2222,8 +2320,22 @@ fn proveBootedRenderedTaskShell(
 
     const rendered = try shell.render(&render_buffer);
     try expectContains(rendered, "active_type=full_screen_task_view");
-    try expectContains(rendered, "active_title=Coordinate Trip");
+    try expectContains(rendered, "active_title=Task: Coordinate Trip");
     try expectContains(rendered, "task_flow_events=5");
+
+    session.reset();
+    try std.testing.expect(runtime_service.restartFromCheckpoint(tick.*));
+    tick.* += 1;
+    const recovered = try taskShellRoundTrip(kernel_port, reviewer_task_id, shell_peer_endpoint.capability_id, shell_service_endpoint.capability_id, &shell, .{
+        .operation = .recover_state,
+        .tick = 157,
+    }, tick);
+    try std.testing.expectEqual(rendered_shell.TaskShellStatus.ok, recovered.status);
+    try std.testing.expect(recovered.recovered);
+    try std.testing.expectEqual(task.id, recovered.task_id);
+    try std.testing.expect(runtime_service.runtimePtr().find(task.id) != null);
+    try std.testing.expectEqual(@as(usize, 4), session.window_count);
+    try std.testing.expectEqual(session.windowAtOrder(3).?.id, session.active_window_id);
 }
 
 fn proveBootedRenderedPermissionReviewSurface(
@@ -2231,6 +2343,7 @@ fn proveBootedRenderedPermissionReviewSurface(
     compositor_service_instance: *compositor_session.Service,
     session: *compositor_session.Session,
     app_task_id: u64,
+    capability_table: *capability.CapabilityTable,
 ) !void {
     var review_service = permission_review_service.Service.init(
         82_030,
@@ -2293,8 +2406,42 @@ fn proveBootedRenderedPermissionReviewSurface(
     try std.testing.expectEqual(manifest.PermissionKind.object_access, grants[0].kind);
     try std.testing.expectEqual(@as(?u64, 557), grants[0].expires_at_ticks);
     try expectDisplayFrameContains(&display, "permission_decision kind=network_egress resource=net:trip decision=deny");
+
+    var mediator = policy_mediation.PolicyMediator.init(
+        .{ .kind = .policy_authority, .serial = 82_030 },
+        capability_table,
+        runtime,
+        .{
+            .network_service_id = 82_031,
+            .compositor_service_id = compositor_service_instance.service_id,
+            .policy_service_id = 82_032,
+            .service_registry_id = 82_033,
+        },
+    );
+    mediator.attachLedger(&ledger);
+    const summary = try mediator.applyManifest(app_task_id, bundle, grants, 158);
+
+    try std.testing.expectEqual(@as(usize, 1), summary.granted_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.denied_count);
+    try std.testing.expectEqual(@as(usize, 0), summary.required_denials);
+    const object_decision = summary.decisionForKind(.object_access).?;
+    try std.testing.expect(object_decision.allowed);
+    try std.testing.expect(object_decision.local_only);
+    try std.testing.expectEqual(@as(u64, 557), object_decision.expires_at_ticks);
+    const object_capability = capability_table.query(object_decision.capability_id.?).?;
+    try std.testing.expect(runtime.hasCapability(app_task_id, object_capability.id));
+    try std.testing.expectEqual(capability.CapabilityTargetKind.object, object_capability.target.kind);
+    try std.testing.expectEqual(@as(?u64, app_task_id), object_capability.scope.task_id);
+    try std.testing.expect(object_capability.scope.local_only);
+    try std.testing.expect(object_capability.scope.broker_only);
+    try std.testing.expectEqual(@as(u64, 557), object_capability.lease.expires_at_ticks);
+    const network_decision = summary.decisionForKind(.network_egress).?;
+    try std.testing.expect(!network_decision.allowed);
+    try std.testing.expectEqual(abi.DenialReason.policy_denied, network_decision.reason);
+    try std.testing.expect(network_decision.capability_id == null);
     try std.testing.expectEqual(@as(usize, 2), ledger.countMatching(.{ .kind = .permission_review, .task_id = app_task_id }));
-    try std.testing.expectEqual(@as(usize, 2), ledger.countMatching(.{ .kind = .permission_decision, .task_id = app_task_id }));
+    try std.testing.expectEqual(@as(usize, 4), ledger.countMatching(.{ .kind = .permission_decision, .task_id = app_task_id }));
+    try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .kind = .capability_grant, .task_id = app_task_id }));
     try std.testing.expectEqual(@as(usize, 1), session.window_count);
     try std.testing.expectEqual(@as(usize, 2), session.item_count);
 }
@@ -2780,6 +2927,38 @@ fn compositorRoundTrip(
     tick.* += 1;
     try std.testing.expectEqual(@as(u8, 1), received_response.present);
     return compositor_session.decodeResponse(received_response.payload[0..received_response.message.payload_len]);
+}
+
+fn taskShellRoundTrip(
+    kernel_port: *component_port.KernelPort,
+    task_id: u64,
+    peer_endpoint_capability_id: u64,
+    service_endpoint_capability_id: u64,
+    service: *rendered_shell.TaskShellService,
+    request: rendered_shell.TaskShellRequest,
+    tick: *u64,
+) !rendered_shell.TaskShellResponse {
+    var request_buffer: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+    const request_payload = try rendered_shell.encodeTaskShellRequest(&request_buffer, request);
+    try expectEndpointSend(kernel_port, task_id, peer_endpoint_capability_id, request_payload, tick.*);
+    tick.* += 1;
+
+    const received_request = try expectEndpointRecv(kernel_port, task_id, service_endpoint_capability_id, tick.*);
+    tick.* += 1;
+    try std.testing.expectEqual(@as(u8, 1), received_request.present);
+
+    var response_buffer: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+    const response_payload = try service.dispatchPayload(
+        received_request.payload[0..received_request.message.payload_len],
+        &response_buffer,
+    );
+    try expectEndpointSend(kernel_port, task_id, service_endpoint_capability_id, response_payload, tick.*);
+    tick.* += 1;
+
+    const received_response = try expectEndpointRecv(kernel_port, task_id, peer_endpoint_capability_id, tick.*);
+    tick.* += 1;
+    try std.testing.expectEqual(@as(u8, 1), received_response.present);
+    return rendered_shell.decodeTaskShellResponse(received_response.payload[0..received_response.message.payload_len]);
 }
 
 fn exchangeSyncFrameOverNativeEndpoint(

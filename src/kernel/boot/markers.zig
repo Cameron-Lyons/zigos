@@ -103,6 +103,7 @@ pub const platform_health_checks_ui_rollback = "ZIGOS:PLATFORM:HEALTH_CHECKS:UI_
 pub const platform_health_checks_promote_ok = "ZIGOS:PLATFORM:HEALTH_CHECKS:PROMOTE_OK";
 pub const platform_build_artifact_manifest_verified = "ZIGOS:PLATFORM:BUILD_ARTIFACT_MANIFEST:VERIFIED";
 pub const platform_bootloader_measurement_provided = "ZIGOS:PLATFORM:BOOTLOADER_MEASUREMENT:PROVIDED";
+pub const platform_bootloader_handoff_verified = "ZIGOS:PLATFORM:BOOTLOADER_HANDOFF:VERIFIED";
 pub const platform_artifact_manifest_verified = "ZIGOS:PLATFORM:ARTIFACT_MANIFEST:VERIFIED";
 pub const platform_measured_boot_recorded = "ZIGOS:PLATFORM:MEASURED_BOOT:RECORDED";
 pub const platform_measured_boot_verified_root = "ZIGOS:PLATFORM:MEASURED_BOOT:VERIFIED_ROOT";

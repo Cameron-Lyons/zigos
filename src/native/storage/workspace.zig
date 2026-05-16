@@ -1,5 +1,5 @@
 const std = @import("std");
-const binary_cursor = @import("../core/binary_cursor.zig");
+const binary_cursor = @import("binary_cursor");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const id_index = @import("../core/id_index.zig");
 const ids = @import("../core/ids.zig");
