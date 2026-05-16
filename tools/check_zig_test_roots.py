@@ -16,6 +16,7 @@ TEST_ROOTS = (
 TEST_PATTERN = re.compile(r'^\s*test\s+"', re.MULTILINE)
 IMPORT_PATTERN = re.compile(r'@import\("([^"]+)"\)')
 NAMED_IMPORTS = {
+    "binary_cursor": Path("src/native/core/binary_cursor.zig"),
     "userspace_wire": Path("src/native/task/userspace_wire.zig"),
 }
 

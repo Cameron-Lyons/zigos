@@ -36,6 +36,7 @@ pub const cold_boot_required = [_][]const u8{
     "ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY",
     boot_markers.platform_bootloader_measurement_provided,
     boot_markers.platform_build_artifact_manifest_verified,
+    boot_markers.platform_bootloader_handoff_verified,
     boot_markers.platform_artifact_manifest_verified,
     boot_markers.platform_health_checks_boot_rollback,
     boot_markers.platform_health_checks_core_rollback,
@@ -117,6 +118,7 @@ test "native smoke gate requires runtime isolation proof markers" {
 test "native smoke gate requires measured boot reboot comparison markers" {
     try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_bootloader_measurement_provided));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_build_artifact_manifest_verified));
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_bootloader_handoff_verified));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_measured_boot_recorded));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_measured_boot_verified_root));
     try std.testing.expect(contains(&first_boot_required, boot_markers.platform_measured_boot_first));

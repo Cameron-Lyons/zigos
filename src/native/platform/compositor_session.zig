@@ -115,6 +115,7 @@ pub const Error = error{
     ReviewItemNotFound,
     ReviewItemTableFull,
     TaskNotFound,
+    InvalidSurface,
     MalformedRequest,
     RequestTooLarge,
     ResponseTooLarge,
@@ -147,6 +148,7 @@ pub const Operation = enum(u8) {
     review_permission = 3,
     record_decision = 4,
     recover_state = 5,
+    close_task_windows = 6,
 };
 
 pub const ServiceStatus = enum(u8) {
@@ -234,6 +236,7 @@ pub const Session = struct {
         app_task: *const task_runtime.TaskRecord,
         bundle: manifest.BundleManifest,
     ) Error!*WindowRecord {
+        const surface_id = try requireTaskSurface(app_task);
         if (self.findWindowForTaskBundle(app_task.id, bundle.bundle_id)) |window| {
             return window;
         }
@@ -241,7 +244,7 @@ pub const Session = struct {
         const window = try self.allocateWindow();
         window.reviewer_task_id = reviewer_task_id;
         window.subject_task_id = app_task.id;
-        window.ui_surface_id = app_task.ui_surface_id;
+        window.ui_surface_id = surface_id;
         window.view_type = .app_panel;
         window.visible = true;
         window.modal = true;
@@ -411,6 +414,37 @@ pub const Session = struct {
         return count;
     }
 
+    pub fn closeWindowsForTask(self: *Session, task_id: u64) usize {
+        if (task_id == 0) return 0;
+
+        var closed: usize = 0;
+        var order_index: usize = 0;
+        while (order_index < self.window_count) {
+            const window_id = self.window_order[order_index];
+            const window = self.findWindow(window_id) orelse {
+                self.removeWindowOrderAt(order_index);
+                continue;
+            };
+            if (window.subject_task_id != task_id) {
+                order_index += 1;
+                continue;
+            }
+
+            self.removeReviewItemsForWindow(window.id);
+            if (window.bundle_id_len != 0) {
+                self.task_bundle_index.remove(taskBundleKey(window.subject_task_id, window.bundleIdSlice()));
+            }
+            _ = self.windows.remove(window.id);
+            self.removeWindowOrderAt(order_index);
+            closed += 1;
+        }
+
+        if (self.findWindowConst(self.active_window_id) == null) {
+            self.active_window_id = self.firstVisibleWindowId();
+        }
+        return closed;
+    }
+
     pub fn switchView(self: *Session, window_id: u64) Error!*WindowRecord {
         const window = self.findWindow(window_id) orelse return error.WindowNotFound;
         window.visible = true;
@@ -455,9 +489,10 @@ pub const Session = struct {
         detail: []const u8,
         modal: bool,
     ) Error!*WindowRecord {
+        const surface_id = try requireTaskSurface(app_task);
         const window = try self.allocateWindow();
         window.subject_task_id = app_task.id;
-        window.ui_surface_id = app_task.ui_surface_id;
+        window.ui_surface_id = surface_id;
         window.view_type = view_type;
         window.visible = true;
         window.modal = modal;
@@ -485,6 +520,52 @@ pub const Session = struct {
     fn indexWindowForTaskBundle(self: *Session, window: *const WindowRecord) void {
         if (window.subject_task_id == 0 or window.bundle_id_len == 0) return;
         self.task_bundle_index.insert(taskBundleKey(window.subject_task_id, window.bundleIdSlice()), self.windows.slotIndexOf(window.id).?);
+    }
+
+    fn removeReviewItemsForWindow(self: *Session, window_id: u64) void {
+        var order_index: usize = 0;
+        while (order_index < self.item_count) {
+            const key = self.item_order[order_index];
+            const slot = self.items.get(key) orelse {
+                self.removeItemOrderAt(order_index);
+                continue;
+            };
+            if (slot.item.window_id != window_id) {
+                order_index += 1;
+                continue;
+            }
+
+            _ = self.items.remove(key);
+            self.removeItemOrderAt(order_index);
+        }
+    }
+
+    fn removeWindowOrderAt(self: *Session, order_index: usize) void {
+        if (order_index >= self.window_count) return;
+        var index = order_index;
+        while (index + 1 < self.window_count) : (index += 1) {
+            self.window_order[index] = self.window_order[index + 1];
+        }
+        self.window_count -= 1;
+        self.window_order[self.window_count] = 0;
+    }
+
+    fn removeItemOrderAt(self: *Session, order_index: usize) void {
+        if (order_index >= self.item_count) return;
+        var index = order_index;
+        while (index + 1 < self.item_count) : (index += 1) {
+            self.item_order[index] = self.item_order[index + 1];
+        }
+        self.item_count -= 1;
+        self.item_order[self.item_count] = 0;
+    }
+
+    fn firstVisibleWindowId(self: *const Session) u64 {
+        for (self.window_order[0..self.window_count]) |window_id| {
+            const window = self.findWindowConst(window_id) orelse continue;
+            if (window.visible) return window.id;
+        }
+        return 0;
     }
 };
 
@@ -600,6 +681,9 @@ pub const Service = struct {
                 if (!store.valid) return error.RecoveryStateMissing;
                 self.session.restore(store.snapshot);
                 response.recovered = true;
+            },
+            .close_task_windows => {
+                _ = self.session.closeWindowsForTask(request.subject_task_id);
             },
         }
     }
@@ -843,8 +927,14 @@ fn statusForError(err: Error) ServiceStatus {
         error.WindowNotFound, error.ReviewItemNotFound, error.TaskNotFound => .not_found,
         error.WindowTableFull, error.ReviewItemTableFull => .table_full,
         error.RecoveryStateMissing => .recovery_missing,
-        error.MalformedRequest, error.RequestTooLarge, error.ResponseTooLarge => .invalid_request,
+        error.InvalidSurface, error.MalformedRequest, error.RequestTooLarge, error.ResponseTooLarge => .invalid_request,
     };
+}
+
+fn requireTaskSurface(app_task: *const task_runtime.TaskRecord) Error!u64 {
+    const surface_id = app_task.ui_surface_id orelse return error.InvalidSurface;
+    if (surface_id == 0) return error.InvalidSurface;
+    return surface_id;
 }
 
 fn requestFlags(request: ServiceRequest) u8 {
@@ -1067,6 +1157,133 @@ test "compositor service wire protocol opens switches reviews decides and recove
     try std.testing.expectEqual(DecisionState.allow, session.findReviewItemConst(review_response.window_id, .object_access, "ws:trip").?.decision);
 }
 
+test "compositor service closes task windows during app removal" {
+    var runtime = task_runtime.Runtime.init();
+    const app_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 24 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 1024,
+        },
+        .ui_surface_id = 24,
+        .local_only = true,
+    });
+    var session = Session.init();
+    var checkpoint_store = CheckpointStore{};
+    var service = Service.initWithCheckpoint(64, 65, &runtime, &session, &checkpoint_store);
+
+    try std.testing.expectEqual(ServiceStatus.ok, service.dispatch(.{
+        .operation = .open_view,
+        .view_type = .workspace_view,
+        .subject_task_id = app_task.id,
+        .workspace_id = 24,
+        .detail = "Trip Workspace",
+    }).status);
+    try std.testing.expectEqual(ServiceStatus.ok, service.dispatch(.{
+        .operation = .open_view,
+        .view_type = .document_view,
+        .subject_task_id = app_task.id,
+        .workspace_id = 24,
+        .detail = "trip.md",
+    }).status);
+    const review_response = service.dispatch(.{
+        .operation = .review_permission,
+        .subject_task_id = app_task.id,
+        .reviewer_task_id = 65,
+        .permission_kind = .object_access,
+        .local_only = true,
+        .max_lease_ticks = 30,
+        .bundle_id = "app.trip.remove",
+        .display_name = "Trip",
+        .resource = "workspace:trip",
+    });
+    try std.testing.expectEqual(ServiceStatus.ok, review_response.status);
+    try std.testing.expectEqual(@as(usize, 3), session.window_count);
+    try std.testing.expectEqual(@as(usize, 1), session.item_count);
+    try std.testing.expect(session.findWindowForTaskBundleConst(app_task.id, "app.trip.remove") != null);
+
+    const close_response = service.dispatch(.{
+        .operation = .close_task_windows,
+        .subject_task_id = app_task.id,
+    });
+    try std.testing.expectEqual(ServiceStatus.ok, close_response.status);
+    try std.testing.expectEqual(@as(u16, 0), close_response.visible_window_count);
+    try std.testing.expectEqual(@as(u16, 0), close_response.review_item_count);
+    try std.testing.expectEqual(@as(usize, 0), session.window_count);
+    try std.testing.expectEqual(@as(usize, 0), session.item_count);
+    try std.testing.expectEqual(@as(u64, 0), session.active_window_id);
+    try std.testing.expect(session.findWindowForTaskBundleConst(app_task.id, "app.trip.remove") == null);
+    try std.testing.expect(checkpoint_store.valid);
+
+    const reopened = service.dispatch(.{
+        .operation = .open_view,
+        .view_type = .workspace_view,
+        .subject_task_id = app_task.id,
+        .workspace_id = 24,
+        .detail = "Trip Workspace",
+    });
+    try std.testing.expectEqual(ServiceStatus.ok, reopened.status);
+    try std.testing.expectEqual(@as(usize, 1), session.window_count);
+    try std.testing.expectEqual(@as(u16, 1), reopened.visible_window_count);
+}
+
+test "compositor service rejects tasks without valid display surfaces" {
+    var runtime = task_runtime.Runtime.init();
+    const headless_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 21 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 2,
+            .shared_memory_bytes = 1024,
+        },
+        .local_only = true,
+    });
+    const zero_surface_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 22 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = 1024,
+            .endpoint_slots = 2,
+            .shared_memory_bytes = 1024,
+        },
+        .ui_surface_id = 0,
+        .local_only = true,
+    });
+    var session = Session.init();
+    var checkpoint_store = CheckpointStore{};
+    var service = Service.initWithCheckpoint(60, 61, &runtime, &session, &checkpoint_store);
+
+    const headless_response = service.dispatch(.{
+        .operation = .open_view,
+        .view_type = .document_view,
+        .subject_task_id = headless_task.id,
+        .workspace_id = 7,
+        .detail = "headless.md",
+    });
+    try std.testing.expectEqual(ServiceStatus.invalid_request, headless_response.status);
+    try std.testing.expectEqual(@as(usize, 0), session.window_count);
+    try std.testing.expect(!checkpoint_store.valid);
+
+    const zero_surface_response = service.dispatch(.{
+        .operation = .review_permission,
+        .subject_task_id = zero_surface_task.id,
+        .reviewer_task_id = 61,
+        .permission_kind = .object_access,
+        .bundle_id = "app.zero",
+        .display_name = "Zero",
+        .resource = "ws:zero",
+    });
+    try std.testing.expectEqual(ServiceStatus.invalid_request, zero_surface_response.status);
+    try std.testing.expectEqual(@as(usize, 0), session.window_count);
+    try std.testing.expectError(error.InvalidSurface, session.openTaskView(headless_task, "Missing Surface"));
+}
+
 test "task-first compositor flow persists app-linked task views and audit state" {
     var runtime_checkpoint_store = task_runtime_service.CheckpointStore{};
     var runtime = task_runtime.Runtime.init();
@@ -1209,6 +1426,8 @@ test "task-first compositor flow persists app-linked task views and audit state"
 }
 
 test "compositor session creates app-panel permission review windows and cards" {
+    const manifest_fixtures = @import("../policy/manifest_fixtures.zig");
+
     var runtime = task_runtime.Runtime.init();
     const app_task = try runtime.createTask(.{
         .owner = .{ .kind = .user, .serial = 1 },
@@ -1226,29 +1445,9 @@ test "compositor session creates app-panel permission review windows and cards" 
             .entry = "app.notes",
         },
     });
-    const permissions = [_]manifest.PermissionRequest{
-        .{
-            .kind = .object_access,
-            .resource = "workspace:notes",
-            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
-            .local_only = true,
-            .max_lease_ticks = 400,
-        },
-        .{
-            .kind = .network_egress,
-            .resource = "lan.sync",
-            .rights = .{ .network_policy = .{ .network_local = true } },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 50,
-        },
-    };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.notes",
-        .display_name = "Notes",
-        .publisher = "zigos.dev",
-        .requested_permissions = &permissions,
-    };
+    const permissions = manifest_fixtures.notes_permissions[0..2];
+    var bundle = manifest_fixtures.notesBundle();
+    bundle.requested_permissions = permissions;
 
     var session = Session.init();
     const window = try session.beginPermissionReview(6, app_task, bundle);

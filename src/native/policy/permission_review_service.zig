@@ -2,6 +2,7 @@ const std = @import("std");
 const abi = @import("../core/abi.zig");
 const builtin = @import("builtin");
 const boot_markers = @import("../../kernel/boot/markers.zig");
+const capability = @import("../kernel_api/capability.zig");
 const manifest = @import("manifest.zig");
 const manifest_fixtures = @import("manifest_fixtures.zig");
 const compositor_display = @import("../platform/compositor_display.zig");
@@ -798,6 +799,7 @@ test "review service uses manifest-aware scripted plans through compositor servi
             .endpoint_slots = 4,
             .shared_memory_bytes = 1024,
         },
+        .ui_surface_id = 33,
         .local_only = true,
     });
     const fallback_inputs = [_][]const u8{"deny"};
@@ -820,29 +822,8 @@ test "review service uses manifest-aware scripted plans through compositor servi
     var compositor_service = compositor_session.Service.initWithCheckpoint(13, 14, &runtime, &compositor, &checkpoint_store);
     var service = Service.initConfigured(13, 14, &runtime, &fallback_inputs, &scripted_plan, &compositor, null);
     service.bindCompositorService(&compositor_service);
-    const permissions = [_]manifest.PermissionRequest{
-        .{
-            .kind = .object_access,
-            .resource = "workspace:notes",
-            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
-            .local_only = true,
-            .max_lease_ticks = 400,
-        },
-        .{
-            .kind = .network_egress,
-            .resource = "lan.sync",
-            .rights = .{ .network_policy = .{ .network_local = true } },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 50,
-        },
-    };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.notes",
-        .display_name = "Notes",
-        .publisher = "zigos.dev",
-        .requested_permissions = &permissions,
-    };
+    var bundle = manifest_fixtures.notesBundle();
+    bundle.requested_permissions = manifest_fixtures.notes_permissions[0..2];
     var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
 
     const grants = try service.reviewBundle(task.id, bundle, 20, &grants_buffer);
@@ -867,6 +848,7 @@ test "review service renders commands from a typed decision profile" {
             .endpoint_slots = 4,
             .shared_memory_bytes = 1024,
         },
+        .ui_surface_id = 34,
         .local_only = true,
     });
     const profile = [_]ProfileRule{
@@ -1001,8 +983,49 @@ test "rendered permission review surface drives allow deny controls through comp
     try std.testing.expect(display.containsText("permission_decision kind=network_egress resource=net:trip decision=deny"));
     try std.testing.expectEqual(@as(usize, 2), ledger.countMatching(.{ .kind = .permission_review, .task_id = task.id }));
     try std.testing.expectEqual(@as(usize, 2), ledger.countMatching(.{ .kind = .permission_decision, .task_id = task.id }));
+
+    var capability_table = capability.CapabilityTable.init();
+    var mediator = policy_mediation.PolicyMediator.init(
+        .{ .kind = .policy_authority, .serial = 45 },
+        &capability_table,
+        &runtime,
+        .{
+            .network_service_id = 45_001,
+            .compositor_service_id = compositor_service.service_id,
+            .policy_service_id = 45_002,
+            .service_registry_id = 45_003,
+        },
+    );
+    mediator.attachLedger(&ledger);
+    const summary = try mediator.applyManifest(task.id, bundle, grants, 55);
+
+    try std.testing.expectEqual(@as(usize, 1), summary.granted_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.denied_count);
+    try std.testing.expectEqual(@as(usize, 0), summary.required_denials);
+    try std.testing.expectEqual(task_runtime.TaskState.active, task.state);
+    const object_decision = summary.decisionForKind(.object_access).?;
+    try std.testing.expect(object_decision.allowed);
+    try std.testing.expect(object_decision.local_only);
+    try std.testing.expectEqual(@as(u64, 450), object_decision.expires_at_ticks);
+    const object_capability = capability_table.query(object_decision.capability_id.?).?;
+    try std.testing.expect(runtime.hasCapability(task.id, object_capability.id));
+    try std.testing.expectEqual(capability.CapabilityTargetKind.object, object_capability.target.kind);
+    try std.testing.expect(object_capability.rights.has(.object_read));
+    try std.testing.expect(object_capability.rights.has(.object_write));
+    try std.testing.expectEqual(@as(?u64, task.id), object_capability.scope.task_id);
+    try std.testing.expect(object_capability.scope.local_only);
+    try std.testing.expect(object_capability.scope.broker_only);
+    try std.testing.expectEqual(@as(u64, 450), object_capability.lease.expires_at_ticks);
+    const network_decision = summary.decisionForKind(.network_egress).?;
+    try std.testing.expect(!network_decision.allowed);
+    try std.testing.expectEqual(abi.DenialReason.policy_denied, network_decision.reason);
+    try std.testing.expect(network_decision.capability_id == null);
+    try std.testing.expectEqual(@as(usize, 4), ledger.countMatching(.{ .kind = .permission_decision, .task_id = task.id }));
+    try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .kind = .capability_grant, .task_id = task.id }));
     try std.testing.expectEqual(task_runtime.AuditEventKind.permission_prompted, task.auditEventAt(0).?.kind);
     try std.testing.expectEqual(task_runtime.AuditEventKind.permission_reviewed, task.auditEventAt(1).?.kind);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.policy_allowed, task.auditEventAt(2).?.kind);
+    try std.testing.expectEqual(task_runtime.AuditEventKind.policy_denied, task.auditEventAt(3).?.kind);
     try std.testing.expect(checkpoint_store.valid);
 }
 
@@ -1017,6 +1040,7 @@ test "rendered permission review surface requires every visible decision before 
             .endpoint_slots = 4,
             .shared_memory_bytes = 1024,
         },
+        .ui_surface_id = 74,
         .local_only = true,
     });
     var compositor = compositor_session.Session.init();

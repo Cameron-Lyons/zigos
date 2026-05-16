@@ -40,7 +40,7 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     try artifact_manifest.add(.driver_set, "signed-drivers", "gpu+npu+net");
     try recorder.add(.driver_set, "signed-drivers", "gpu+npu+net");
     var boot = recorder.finalize();
-    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .emulator_provided);
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .bootloader_provided);
 
     var checkpoint_store = storage_service.CheckpointStore{};
     checkpoint_store.resetPersistent();

@@ -1,5 +1,6 @@
 const vga = @import("../drivers/vga.zig");
 const io = @import("../utils/io.zig");
+const numfmt = @import("../utils/numfmt.zig");
 
 const PIT_CHANNEL0 = 0x40;
 const PIT_COMMAND = 0x43;
@@ -8,8 +9,6 @@ const PIT_COMMAND_RATE_GENERATOR = 0x36;
 const LOW_BYTE_MASK: u32 = 0xFF;
 const BYTE_BITS: u4 = 8;
 const MAX_SLEEPERS = 128;
-const DECIMAL_BASE: u32 = 10;
-const U32_DECIMAL_DIGITS: usize = 10;
 
 pub const TICKS_PER_SECOND: u64 = 100;
 pub const DEFAULT_FREQUENCY_HZ: u32 = @intCast(TICKS_PER_SECOND);
@@ -28,7 +27,7 @@ var sleep_lock: u32 = 0;
 
 pub fn init(frequency_hz: u32) void {
     vga.print("Initializing PIT timer at ");
-    print_number(frequency_hz);
+    numfmt.printDec(frequency_hz);
     vga.print(" Hz...\n");
 
     ticks = 0;
@@ -89,46 +88,4 @@ pub fn sleep(milliseconds: u32) void {
 
     const ticks_to_wait = millisecondsToTicksCeil(milliseconds);
     sleepCurrentTicks(ticks_to_wait);
-}
-
-fn print_number(num: u32) void {
-    if (num == 0) {
-        vga.put_char('0');
-        return;
-    }
-
-    // SAFETY: filled by the following digit extraction loop
-    var digits: [U32_DECIMAL_DIGITS]u8 = undefined;
-    var i: usize = 0;
-    var n = num;
-
-    while (n > 0) : (n /= DECIMAL_BASE) {
-        digits[i] = @as(u8, @truncate(n % DECIMAL_BASE)) + '0';
-        i += 1;
-    }
-
-    while (i > 0) {
-        i -= 1;
-        vga.put_char(digits[i]);
-    }
-}
-
-fn disableInterrupts() u32 {
-    var flags: u32 = undefined;
-    asm volatile (
-        \\pushfl
-        \\popl %[flags]
-        \\cli
-        : [flags] "=r" (flags),
-    );
-    return flags;
-}
-
-fn restoreInterrupts(flags: u32) void {
-    asm volatile (
-        \\pushl %[flags]
-        \\popfl
-        :
-        : [flags] "r" (flags),
-    );
 }

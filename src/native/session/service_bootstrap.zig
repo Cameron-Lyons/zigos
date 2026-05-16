@@ -53,6 +53,7 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
             .{
                 .owner = request.owner,
                 .budget = request.entry.boot_budget,
+                .ui_surface_id = request.entry.ui_surface_id,
                 .local_only = true,
             },
             request.schedule_task,
@@ -94,6 +95,7 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
             .{
                 .owner = request.owner,
                 .budget = request.entry.boot_budget,
+                .ui_surface_id = request.entry.ui_surface_id,
                 .local_only = true,
             },
             request.schedule_task,

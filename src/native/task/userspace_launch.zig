@@ -1,7 +1,6 @@
 const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
 const manifest = @import("../policy/manifest.zig");
-const native_util = @import("../core/util.zig");
 const package_service = @import("../services/package_service.zig");
 const registry = @import("userspace_registry.zig");
 const task_runtime = @import("task_runtime.zig");

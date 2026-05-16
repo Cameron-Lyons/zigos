@@ -784,6 +784,8 @@ test "policy mediation validates manifests before granting capabilities" {
 }
 
 test "policy mediation covers device camera mic sensor and peer ipc permissions" {
+    const manifest_fixtures = @import("manifest_fixtures.zig");
+
     var capability_table = capability.CapabilityTable.init();
     var runtime = task_runtime.Runtime.init();
     const task = try runtime.createTask(.{
@@ -809,58 +811,7 @@ test "policy mediation covers device camera mic sensor and peer ipc permissions"
         },
     );
 
-    const requests = [_]manifest.PermissionRequest{
-        .{
-            .kind = .device_access,
-            .resource = "capture.card0",
-            .rights = .{ .device = .{ .device_use = true } },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 30,
-            .target_id = 700,
-        },
-        .{
-            .kind = .camera,
-            .resource = "camera.front",
-            .rights = .{ .device = .{ .device_use = true } },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 35,
-            .target_id = 701,
-        },
-        .{
-            .kind = .mic,
-            .resource = "mic.array",
-            .rights = .{ .device = .{ .device_use = true } },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 35,
-            .target_id = 702,
-        },
-        .{
-            .kind = .sensor,
-            .resource = "sensor.lid",
-            .rights = .{ .device = .{ .sensor_read = true } },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 25,
-            .target_id = 703,
-        },
-        .{
-            .kind = .peer_ipc,
-            .resource = "zigos.peer.share",
-            .rights = .{ .endpoint = .{ .ipc_peer = true } },
-            .required = false,
-            .local_only = true,
-            .max_lease_ticks = 15,
-        },
-    };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.capture",
-        .display_name = "Capture",
-        .publisher = "zigos.dev",
-        .requested_permissions = &requests,
-    };
+    const bundle = manifest_fixtures.captureBundle();
     const grants = [_]UserGrant{
         .{ .kind = .device_access, .resource = "capture.card0", .local_only = true, .expires_at_ticks = 50 },
         .{ .kind = .camera, .resource = "camera.front", .local_only = true, .expires_at_ticks = 45 },

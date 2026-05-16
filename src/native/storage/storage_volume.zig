@@ -1,6 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const binary_cursor = @import("../core/binary_cursor.zig");
+const binary_cursor = @import("binary_cursor");
 const ids = @import("../core/ids.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("object_store.zig");
@@ -923,11 +923,6 @@ fn findSnapshotConst(workspaces: *const workspace.Directory, snapshot_id: ids.Sn
         if (slot.in_use and slot.snapshot.id.eql(snapshot_id)) return &slot.snapshot;
     }
     return null;
-}
-
-fn indexIdForBytes(bytes: []const u8) u64 {
-    const id = native_util.fnv1a64(bytes);
-    return if (id == 0) 1 else id;
 }
 
 fn serializeState(store: *const object_store.Store, workspaces: *const workspace.Directory, buffer: []u8) Error!usize {
