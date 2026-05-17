@@ -184,7 +184,10 @@ pub const Scheduler = struct {
         self.resource_telemetry_observed_tick = sample.observed_tick;
     }
 
-    pub fn configureResourceTelemetryFromProvider(self: *Scheduler, provider: anytype) void {
+    pub fn configureResourceTelemetryFromProvider(
+        self: *Scheduler,
+        provider: accelerator_scheduler.TelemetryProvider,
+    ) void {
         self.configureResourceTelemetry(provider.read());
     }
 
@@ -1267,7 +1270,7 @@ test "userspace scheduler requires observed platform telemetry before waking har
         .npu_driver_online = false,
         .media_driver_online = true,
     });
-    scheduler.configureResourceTelemetryFromProvider(&provider);
+    scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expect(scheduler.observedResourceTelemetry());
     try std.testing.expect(!scheduler.runNext(3));
     const dispatched_slot = scheduler.slots.getConst(task.id).?;
@@ -1335,7 +1338,7 @@ test "userspace scheduler delays on memory bandwidth before npu dispatch" {
         .npu_driver_online = true,
         .media_driver_online = false,
     });
-    scheduler.configureResourceTelemetryFromProvider(&provider);
+    scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expect(scheduler.observedResourceTelemetry());
     try std.testing.expect(!scheduler.runNext(2));
     const dispatched_slot = scheduler.slots.getConst(task.id).?;
@@ -1382,7 +1385,7 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
         .npu_driver_online = true,
         .media_driver_online = true,
     });
-    scheduler.configureResourceTelemetryFromProvider(&provider);
+    scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expect(scheduler.observedResourceTelemetry());
     try std.testing.expectEqual(accelerator_scheduler.TelemetrySource.hardware, scheduler.resource_telemetry_source);
     try std.testing.expectEqual(@as(u64, 101), scheduler.resource_telemetry_observed_tick);
@@ -1425,7 +1428,7 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
         .npu_driver_online = true,
         .media_driver_online = true,
     });
-    scheduler.configureResourceTelemetryFromProvider(&provider);
+    scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expectEqual(@as(u64, 102), scheduler.resource_telemetry_observed_tick);
     try std.testing.expect(!scheduler.runNext(2));
     const media_slot = scheduler.slots.getConst(media_task.id).?;
@@ -1470,7 +1473,7 @@ test "userspace scheduler applies booted live telemetry across every resource cl
         .npu_driver_online = true,
         .media_driver_online = true,
     });
-    scheduler.configureResourceTelemetryFromProvider(&provider);
+    scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
 
     try std.testing.expect(!scheduler.runNext(10));
     const critical_slot = scheduler.slots.getConst(critical.id).?;
@@ -1512,7 +1515,7 @@ test "userspace scheduler applies booted live telemetry across every resource cl
         .media_driver_online = true,
         .privacy_sensitive_task_count = 1,
     });
-    scheduler.configureResourceTelemetryFromProvider(&provider);
+    scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
 
     try std.testing.expect(!scheduler.runNext(14));
     const privacy_limited_background = scheduler.slots.getConst(background.id).?;
@@ -1537,7 +1540,7 @@ test "userspace scheduler applies booted live telemetry across every resource cl
         .npu_driver_online = true,
         .media_driver_online = true,
     });
-    scheduler.configureResourceTelemetryFromProvider(&provider);
+    scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
 
     try std.testing.expect(!scheduler.runNext(16));
     const batch_slot = scheduler.slots.getConst(batch.id).?;

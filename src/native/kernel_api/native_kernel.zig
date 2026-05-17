@@ -875,7 +875,9 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
         .capability_query = true,
     } });
 
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const workspace_storage_image = task_runtime.syntheticUserspaceImage("workspace-storage", "zigos.object.workspace");
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const example_client_image = task_runtime.syntheticUserspaceImage("example-client", "app.example.client");
     const service_task_desc = try kernel.taskCreate(testContext(.task_create, authority_capability.id, .{ .task = 0 }), .{
         .owner = .{ .kind = .service, .serial = 3 },
@@ -1009,7 +1011,9 @@ test "native kernel rejects app and service launches without signed userspace im
     const authority_capability = try harness.mintSessionServiceAuthority(session_task, .{ .service = .{
         .task_create = true,
     } });
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const unsigned_app_image = task_runtime.syntheticUserspaceImage("unsigned-app", "app.unsigned");
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const missing_bundle_image = task_runtime.syntheticUserspaceImage("missing-bundle", "zigos.service.missing-bundle");
 
     try std.testing.expectError(error.UserspaceLaunchRequired, kernel.taskCreate(testContext(.task_create, authority_capability.id, .{ .task = 0 }), .{
@@ -1258,6 +1262,7 @@ test "native kernel brokers device metadata and port io through device capabilit
         &shared,
     );
 
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const storage_driver_test_image = task_runtime.syntheticUserspaceImage(
         "storage-driver-test",
         "zigos.system.storage-driver",

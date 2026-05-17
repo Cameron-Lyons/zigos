@@ -2,6 +2,7 @@ const std = @import("std");
 const abi = @import("../../native/core/abi.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
 const compositor_session = @import("../../native/platform/compositor_session.zig");
+const device_broker = @import("../../native/kernel_api/device_broker.zig");
 const driver_runtime = @import("../../native/drivers/driver_runtime.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const endpoint = @import("../../native/kernel_api/endpoint.zig");
@@ -355,6 +356,153 @@ pub fn driverBoundaryAuditGate() !void {
         .bundle = bundle,
         .bootstrap_transport = .kernel_bootstrap_broker,
     }));
+
+    try deviceBrokerNegativeAuthorityGate();
+}
+
+fn deviceBrokerNegativeAuthorityGate() !void {
+    const device_id: u64 = 0x0000_1F00_00C1;
+
+    device_broker.reset();
+    defer device_broker.reset();
+    try std.testing.expect(device_broker.publishAtaController(device_id, .{
+        .base_port = 0x1F0,
+        .ctrl_port = 0x3F6,
+        .is_master = true,
+        .irq_line = 14,
+        .sector_count = 4096,
+    }));
+
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    var endpoints = endpoint.Table.init();
+    var shared = shared_memory.Table.init();
+    var kernel = native_kernel.Kernel.init(
+        spec_support.policyAuthority(1),
+        &runtime,
+        &capabilities,
+        &endpoints,
+        &shared,
+    );
+
+    const driver_task = try runtime.createTask(.{
+        .owner = spec_support.service(813),
+        .component_class = .service_component,
+        .budget = spec_support.defaultBudget(false),
+        .local_only = true,
+    });
+    const untrusted_task = try runtime.createTask(.{
+        .owner = spec_support.app(814),
+        .component_class = .app_component,
+        .budget = spec_support.defaultBudget(false),
+        .local_only = true,
+    });
+    const device_authority = try mintBrokeredDeviceAuthority(
+        &capabilities,
+        driver_task.owner,
+        driver_task.id,
+        device_id,
+        10,
+        100,
+    );
+    try runtime.grantCapability(driver_task.id, device_authority.id);
+
+    try kernel.devicePortWrite(
+        kernelContext(driver_task.id, .device_port_write, device_authority.id, .{ .device = device_id }),
+        0x1F0 + 7,
+        .u8,
+        0x5A,
+        12,
+    );
+    try std.testing.expectEqual(@as(u32, 0x5A), try kernel.devicePortRead(
+        kernelContext(driver_task.id, .device_port_read, device_authority.id, .{ .device = device_id }),
+        0x1F0 + 7,
+        .u8,
+        12,
+    ));
+
+    try std.testing.expectError(error.CapabilityNotFound, kernel.deviceDescribe(
+        kernelContext(untrusted_task.id, .device_describe, device_authority.id, .{ .device = device_id }),
+        12,
+    ));
+    try std.testing.expectError(error.InvalidPort, kernel.devicePortRead(
+        kernelContext(driver_task.id, .device_port_read, device_authority.id, .{ .device = device_id }),
+        0x2F8,
+        .u8,
+        12,
+    ));
+
+    const expired_authority = try mintBrokeredDeviceAuthority(
+        &capabilities,
+        driver_task.owner,
+        driver_task.id,
+        device_id,
+        1,
+        2,
+    );
+    try runtime.grantCapability(driver_task.id, expired_authority.id);
+    try std.testing.expectError(error.CapabilityRevoked, kernel.deviceDescribe(
+        kernelContext(driver_task.id, .device_describe, expired_authority.id, .{ .device = device_id }),
+        3,
+    ));
+
+    const restart_generation_authority = try mintBrokeredDeviceAuthority(
+        &capabilities,
+        driver_task.owner,
+        driver_task.id,
+        device_id,
+        20,
+        100,
+    );
+    try capabilities.revokeTargetAuthority(restart_generation_authority.id);
+    try std.testing.expectError(error.CapabilityRevoked, kernel.devicePortRead(
+        kernelContext(driver_task.id, .device_port_read, device_authority.id, .{ .device = device_id }),
+        0x1F0 + 7,
+        .u8,
+        20,
+    ));
+
+    const rebound_authority = try mintBrokeredDeviceAuthority(
+        &capabilities,
+        driver_task.owner,
+        driver_task.id,
+        device_id,
+        20,
+        100,
+    );
+    try runtime.grantCapability(driver_task.id, rebound_authority.id);
+    const rebound_descriptor = try kernel.deviceDescribe(
+        kernelContext(driver_task.id, .device_describe, rebound_authority.id, .{ .device = device_id }),
+        20,
+    );
+    try std.testing.expectEqual(device_id, rebound_descriptor.device_id);
+}
+
+fn mintBrokeredDeviceAuthority(
+    capabilities: *capability.CapabilityTable,
+    holder: principal.PrincipalId,
+    task_id: u64,
+    device_id: u64,
+    issued_at_ticks: u64,
+    expires_at_ticks: u64,
+) capability.Error!capability.Capability {
+    return capabilities.mintBootRoot(.{
+        .holder = holder,
+        .issuer = spec_support.policyAuthority(1),
+        .target = driver_service.authorityTarget(device_id),
+        .rights = driver_service.allowedRightsFor(.storage_controller),
+        .scope = .{
+            .task_id = task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = issued_at_ticks,
+            .expires_at_ticks = expires_at_ticks,
+            .renewable = true,
+        },
+        .audit = .{},
+    });
 }
 
 pub fn kernelBootstrapShimBoundaryGate() !void {

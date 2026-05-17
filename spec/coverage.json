@@ -104,9 +104,7 @@
           "name": "spec 1 keeps installs declarative privilege explicit and legacy access isolated"
         }
       ],
-      "requirements": [
-        "REQ-DESIGN-GOALS-AND-NON-GOALS"
-      ]
+      "requirements": []
     },
     {
       "id": "2",
@@ -854,7 +852,6 @@
     }
   ],
   "required_requirements": [
-    "REQ-DESIGN-GOALS-AND-NON-GOALS",
     "REQ-ZERO-AMBIENT-AUTHORITY",
     "REQ-IMMUTABLE-BASE-SYSTEM",
     "REQ-USERSPACE-SERVICES-BY-DEFAULT",
@@ -917,33 +914,6 @@
     "REQ-ONE-SENTENCE-SUMMARY"
   ],
   "requirement_evidence": {
-    "REQ-DESIGN-GOALS-AND-NON-GOALS": {
-      "status": "modeled",
-      "enforcement_modules": [
-        "tools/check_spec_coverage.py",
-        "src/native/policy/policy_mediation.zig",
-        "src/native/platform/immutable_base.zig",
-        "src/native/platform/measured_boot.zig",
-        "src/native/platform/recovery_environment.zig",
-        "src/native/kernel_api/syscall_surface.zig",
-        "src/native/sync/sync_service_impl.zig",
-        "src/native/sync/network_policy.zig",
-        "src/native/platform/platform_policy_signals.zig",
-        "src/native/task/task_runtime_model.zig",
-        "src/native/task/userspace_scheduler.zig",
-        "src/native/drivers/driver_service.zig",
-        "src/native/services/compatibility_environment.zig",
-        "src/native/services/package_service.zig",
-        "src/native/platform/compositor_session.zig",
-        "src/native/session/session_manager.zig"
-      ],
-      "coverage_note": "Aggregate design goals and non-goals are modeled through a manifest-wide child dependency gate: every non-aggregate requirement must remain enforced, and the separately gated one-sentence summary is the only child that may remain modeled. This row remains a narrative summary rather than a single enforceable invariant.",
-      "roadmap": {
-        "priority": "P2",
-        "focus": "Keep this as an aggregate modeled row, require every non-aggregate requirement to remain enforced, and split any newly testable design claim into a narrower requirement.",
-        "graduation_proof": "Every non-aggregate requirement has implementation anchors and negative tests; only the separately gated summary aggregate may remain modeled."
-      }
-    },
     "REQ-ZERO-AMBIENT-AUTHORITY": {
       "status": "enforced",
       "enforcement_modules": [

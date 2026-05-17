@@ -272,6 +272,13 @@ pub fn build(b: *std.Build) void {
     const spec_tests_step = b.step("spec-tests", "Run the spec coverage gate and native spec unit tests");
     spec_tests_step.dependOn(&run_spec_tests.step);
 
+    const prod_readiness_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/check_production_readiness.py",
+    });
+    const prod_readiness_step = b.step("prod-readiness", "Validate the production-readiness manifest and generated matrix");
+    prod_readiness_step.dependOn(&prod_readiness_cmd.step);
+
     const spec_smoke_cmd = b.addSystemCommand(&.{
         "bash",
         "scripts/run-zigos-native-smoke.sh",
@@ -297,11 +304,12 @@ pub fn build(b: *std.Build) void {
     const benchmark_step = b.step("benchmark", "Build and run the spec-aligned native benchmark suite in QEMU");
     benchmark_step.dependOn(&benchmark_cmd.step);
 
-    const verify_step = b.step("verify", "Run local CI-aligned checks: lint, kernel build, host tests, and spec tests; pass -Dverify-smoke=true and/or -Dverify-benchmark=true for QEMU gates");
+    const verify_step = b.step("verify", "Run local CI-aligned checks: lint, kernel build, host tests, spec tests, and production-readiness checks; pass -Dverify-smoke=true and/or -Dverify-benchmark=true for QEMU gates");
     verify_step.dependOn(lint_step);
     verify_step.dependOn(kernel_step);
     verify_step.dependOn(host_tests_step);
     verify_step.dependOn(spec_tests_step);
+    verify_step.dependOn(prod_readiness_step);
     if (verify_smoke) verify_step.dependOn(&zigos_native_smoke_test_cmd.step);
     if (verify_benchmark) verify_step.dependOn(&benchmark_cmd.step);
 

@@ -628,6 +628,7 @@ test "kernel port enforces operation ids and forwards typed task create requests
     });
     try runtime.grantCapability(session_task.id, authority_capability.id);
 
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const port_test_image = task_runtime.syntheticUserspaceImage("port-test", "app.example.port-test");
     const task = try invokeGenerated(.task_create, &port, .{
         .header = makeHeader(.task_create, 77, session_task.id),
@@ -704,6 +705,7 @@ test "kernel port validates and forwards typed device broker requests" {
     );
     var port = KernelPort.init(&kernel);
 
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const kernel_port_device_image = task_runtime.syntheticUserspaceImage(
         "kernel-port-device-test",
         "zigos.system.storage-driver",

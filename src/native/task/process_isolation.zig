@@ -184,6 +184,7 @@ fn visibleProcessControlCapability(
 }
 
 fn createApp(runtime: *task_runtime.Runtime, owner: principal.PrincipalId) !*task_runtime.TaskRecord {
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     var image = task_runtime.syntheticUserspaceImage("isolation-test", "app.process-isolation-test");
     return runtime.createTask(.{
         .owner = owner,

@@ -18,15 +18,17 @@ Current baseline commands:
 
 ## Status Legend
 
-- **Enforced**: the invariant is implemented in native code and exercised by focused tests or adversarial tests listed in `coverage.json`.
+- **Enforced**: the invariant is implemented in native code and exercised by focused tests or adversarial tests listed in `coverage.json`; this is a repository/prototype evidence status, not a production-readiness claim.
 - **Modeled**: implementation exists, but part of the requirement is still represented by prototype state, synthetic hardware, harnessed transport, or in-process model tests.
 - **Scenario**: behavior is primarily demonstrated through scenario flows, smoke flows, rendered UX/control-plane records, or broad integration stories.
 - **Deferred**: the requirement is mostly a design claim or future integration point.
 
+Rows that depend on hardware roots, live multi-device sync, real resource scheduling, or userspace driver proof depth should be treated as prototype-conformant unless their evidence names real boot, syscall, or service-path proof depth.
+
 ## Evidence Summary
 
 - Enforced: 60
-- Modeled: 1
+- Modeled: 0
 - Scenario: 0
 - Deferred: 0
 
@@ -34,15 +36,12 @@ Current baseline commands:
 
 Modeled and scenario-only rows are the active implementation roadmap. These requirements should graduate to real boot, syscall, or service-path invariants before new platform surface area is added.
 
-| Priority | Requirement | Status | Focus | Graduation proof |
-| --- | --- | --- | --- | --- |
-| `P2` | `REQ-DESIGN-GOALS-AND-NON-GOALS` | Modeled | Keep this as an aggregate modeled row, require every non-aggregate requirement to remain enforced, and split any newly testable design claim into a narrower requirement. | Every non-aggregate requirement has implementation anchors and negative tests; only the separately gated summary aggregate may remain modeled. |
+No roadmap rows are listed in the manifest.
 
 ## Requirement Matrix
 
 | Requirement | Spec section | Status | Implementation anchors | Evidence / gap |
 | --- | --- | --- | --- | --- |
-| `REQ-DESIGN-GOALS-AND-NON-GOALS` | 1. Design goals | Modeled | `tools/check_spec_coverage.py`<br>`src/native/policy/policy_mediation.zig`<br>`src/native/platform/immutable_base.zig`<br>`src/native/platform/measured_boot.zig`<br>`src/native/platform/recovery_environment.zig`<br>`src/native/kernel_api/syscall_surface.zig`<br>`src/native/sync/sync_service_impl.zig`<br>`src/native/sync/network_policy.zig`<br>`src/native/platform/platform_policy_signals.zig`<br>`src/native/task/task_runtime_model.zig`<br>`src/native/task/userspace_scheduler.zig`<br>`src/native/drivers/driver_service.zig`<br>`src/native/services/compatibility_environment.zig`<br>`src/native/services/package_service.zig`<br>`src/native/platform/compositor_session.zig`<br>`src/native/session/session_manager.zig` | Aggregate design goals and non-goals are modeled through a manifest-wide child dependency gate: every non-aggregate requirement must remain enforced, and the separately gated one-sentence summary is the only child that may remain modeled. This row remains a narrative summary rather than a single enforceable invariant. |
 | `REQ-ZERO-AMBIENT-AUTHORITY` | 2. Core architectural principles | Enforced | `src/native/task/task_runtime.zig`<br>`src/native/policy/policy_mediation.zig`<br>`src/native/kernel_api/native_kernel.zig` | Negative tests:<br>`src/native/policy/policy_mediation.zig`: policy mediation denies zero-authority requests without user grants |
 | `REQ-IMMUTABLE-BASE-SYSTEM` | 2. Core architectural principles | Enforced | `src/native/platform/immutable_base.zig`<br>`src/native/platform/update_health.zig` | Negative tests:<br>`src/native/platform/immutable_base.zig`: immutable base verification rejects mutable signer and measurement tampering |
 | `REQ-USERSPACE-SERVICES-BY-DEFAULT` | 2. Core architectural principles | Enforced | `src/native/session/service_catalog.zig`<br>`src/native/session/contract.zig`<br>`src/native/drivers/driver_service.zig`<br>`src/native/services/userspace_service_ipc.zig`<br>`src/native/session/session_manager_boot_flow.zig`<br>`src/native/session/service_graph_builder.zig`<br>`src/native/session/session_service_bootstrap.zig`<br>`src/native/session/service_path_proofs.zig`<br>`src/kernel/net/ethernet.zig`<br>`src/kernel/net/link_port.zig`<br>`src/kernel/drivers/ata.zig`<br>`src/kernel/boot/init/devices.zig`<br>`src/kernel/boot/init/data_plane_boundary.zig` | Negative tests:<br>`src/native/session/service_path_proofs.zig`: booted userspace service paths prove sync driver isolation and resource accounting<br>`src/kernel/boot/init/data_plane_boundary.zig`: kernel device init boundary rejects excluded subsystem data planes |

@@ -17,6 +17,99 @@ pub const Snapshot = struct {
     media_driver_online: bool = true,
 };
 
+pub const HostFakeTelemetryProvider = struct {
+    current: accelerator_scheduler.TelemetrySample = .{ .source = .emulator },
+    read_count: u32 = 0,
+
+    pub const telemetry_descriptor = accelerator_scheduler.TelemetryProviderDescriptor{
+        .name = "host-fake-platform-telemetry",
+        .role = .test_only,
+    };
+
+    pub fn init(sample: accelerator_scheduler.TelemetrySample) HostFakeTelemetryProvider {
+        var current = sample;
+        current.source = .emulator;
+        return .{ .current = current };
+    }
+
+    pub fn update(self: *HostFakeTelemetryProvider, sample: accelerator_scheduler.TelemetrySample) void {
+        var current = sample;
+        current.source = .emulator;
+        self.current = current;
+    }
+
+    pub fn telemetryProvider(self: *HostFakeTelemetryProvider) accelerator_scheduler.TelemetryProvider {
+        return accelerator_scheduler.TelemetryProvider.init(
+            HostFakeTelemetryProvider,
+            self,
+            telemetry_descriptor,
+        );
+    }
+
+    pub fn read(self: *HostFakeTelemetryProvider) accelerator_scheduler.TelemetrySample {
+        self.read_count += 1;
+        return self.current;
+    }
+};
+
+pub const FreestandingPlatformTelemetryProvider = struct {
+    booted: accelerator_scheduler.BootedPlatformTelemetryProvider,
+
+    pub const telemetry_descriptor = accelerator_scheduler.TelemetryProviderDescriptor{
+        .name = "freestanding-platform-telemetry",
+        .role = .production,
+    };
+
+    pub fn initForBootedService(
+        boot_id: u64,
+        task_id: u64,
+        observed_tick: u64,
+        counters: accelerator_scheduler.LivePlatformCounters,
+    ) accelerator_scheduler.TelemetryError!FreestandingPlatformTelemetryProvider {
+        return .{
+            .booted = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(
+                boot_id,
+                task_id,
+                observed_tick,
+                counters,
+            ),
+        };
+    }
+
+    pub fn observeLive(
+        self: *FreestandingPlatformTelemetryProvider,
+        caller_task_id: u64,
+        observed_tick: u64,
+        counters: accelerator_scheduler.LivePlatformCounters,
+    ) accelerator_scheduler.TelemetryError!void {
+        try self.booted.observeLive(caller_task_id, observed_tick, counters);
+    }
+
+    pub fn telemetryProvider(self: *FreestandingPlatformTelemetryProvider) accelerator_scheduler.TelemetryProvider {
+        return accelerator_scheduler.TelemetryProvider.init(
+            FreestandingPlatformTelemetryProvider,
+            self,
+            telemetry_descriptor,
+        );
+    }
+
+    pub fn read(self: *FreestandingPlatformTelemetryProvider) accelerator_scheduler.TelemetrySample {
+        return self.booted.read();
+    }
+
+    pub fn liveObservationCount(self: *const FreestandingPlatformTelemetryProvider) u32 {
+        return self.booted.live_observation_count;
+    }
+
+    pub fn rejectedObservationCount(self: *const FreestandingPlatformTelemetryProvider) u32 {
+        return self.booted.rejected_observation_count;
+    }
+
+    pub fn readCount(self: *const FreestandingPlatformTelemetryProvider) u32 {
+        return self.booted.read_count;
+    }
+};
+
 pub fn collectLiveCounters(
     runtime: *const task_runtime.Runtime,
     scheduler: *const userspace_scheduler.Scheduler,
@@ -134,12 +227,50 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
     try std.testing.expectEqual(@as(usize, 12 * 1024), counters.reserved_shared_memory_bytes);
     try std.testing.expectEqual(@as(usize, 1), counters.privacy_sensitive_task_count);
 
-    var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(91, 91_000, 30, counters);
+    var provider = try FreestandingPlatformTelemetryProvider.initForBootedService(91, 91_000, 30, counters);
+    const provider_interface = provider.telemetryProvider();
+    try std.testing.expect(!provider_interface.testOnly());
+    try std.testing.expectEqual(accelerator_scheduler.TelemetryProviderRole.production, provider_interface.descriptor.role);
     var controller = accelerator_scheduler.Controller.init();
-    controller.configureFromProvider(&provider);
+    controller.configureFromProvider(provider_interface);
     try std.testing.expectEqual(accelerator_scheduler.TelemetrySource.hardware, controller.last_telemetry_source);
     try std.testing.expectEqual(accelerator_scheduler.ThermalPressure.critical, controller.state.thermal_pressure);
     try std.testing.expect(controller.state.battery_saver);
     try std.testing.expect(controller.state.privacy_mode);
     try std.testing.expect(!controller.state.npu_available);
+}
+
+test "platform telemetry providers expose test-only host fake and production freestanding boundaries" {
+    var host_fake = HostFakeTelemetryProvider.init(.{
+        .source = .synthetic,
+        .observed_tick = 5,
+        .thermal_pressure = .critical,
+        .battery_saver = true,
+    });
+    const host_provider = host_fake.telemetryProvider();
+    try std.testing.expect(host_provider.testOnly());
+    try std.testing.expectEqual(accelerator_scheduler.TelemetryProviderRole.test_only, host_provider.descriptor.role);
+    const host_sample = host_provider.read();
+    try std.testing.expectEqual(accelerator_scheduler.TelemetrySource.emulator, host_sample.source);
+    try std.testing.expectEqual(@as(u64, 5), host_sample.observed_tick);
+    try std.testing.expectEqual(@as(u32, 1), host_fake.read_count);
+
+    var freestanding = try FreestandingPlatformTelemetryProvider.initForBootedService(5, 50, 6, .{
+        .total_cpu_budget_ticks = 2_000,
+        .consumed_cpu_ticks = 500,
+        .memory_capacity_bytes = 128 * 1024,
+        .thermal_milli_celsius = 76_000,
+        .battery_percent = 90,
+        .battery_charging = true,
+    });
+    const freestanding_provider = freestanding.telemetryProvider();
+    try std.testing.expect(!freestanding_provider.testOnly());
+    try std.testing.expectEqual(accelerator_scheduler.TelemetryProviderRole.production, freestanding_provider.descriptor.role);
+    const freestanding_sample = freestanding_provider.read();
+    try std.testing.expectEqual(accelerator_scheduler.TelemetrySource.hardware, freestanding_sample.source);
+    try std.testing.expectEqual(accelerator_scheduler.ThermalPressure.elevated, freestanding_sample.thermal_pressure);
+    try std.testing.expectEqual(@as(u64, 6), freestanding_sample.observed_tick);
+    try std.testing.expectEqual(@as(u32, 1), freestanding.readCount());
+    try std.testing.expectEqual(@as(u32, 1), freestanding.liveObservationCount());
+    try std.testing.expectEqual(@as(u32, 0), freestanding.rejectedObservationCount());
 }

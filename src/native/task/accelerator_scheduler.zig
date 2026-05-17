@@ -53,6 +53,47 @@ pub const TelemetrySource = enum(u8) {
     hardware,
 };
 
+pub const TelemetryProviderRole = enum(u8) {
+    production,
+    test_only,
+};
+
+pub const TelemetryProviderDescriptor = struct {
+    name: []const u8,
+    role: TelemetryProviderRole,
+};
+
+pub const TelemetryProvider = struct {
+    context: *anyopaque,
+    descriptor: TelemetryProviderDescriptor,
+    read_fn: *const fn (*anyopaque) TelemetrySample,
+
+    pub fn init(
+        comptime Provider: type,
+        provider: *Provider,
+        descriptor: TelemetryProviderDescriptor,
+    ) TelemetryProvider {
+        return .{
+            .context = @ptrCast(provider),
+            .descriptor = descriptor,
+            .read_fn = struct {
+                fn read(context: *anyopaque) TelemetrySample {
+                    const typed_provider: *Provider = @ptrCast(@alignCast(context));
+                    return typed_provider.read();
+                }
+            }.read,
+        };
+    }
+
+    pub fn read(self: TelemetryProvider) TelemetrySample {
+        return self.read_fn(self.context);
+    }
+
+    pub fn testOnly(self: TelemetryProvider) bool {
+        return self.descriptor.role == .test_only;
+    }
+};
+
 pub const PlatformTelemetrySignals = struct {
     thermal_pressure: ThermalPressure = .nominal,
     battery_saver: bool = false,
@@ -111,6 +152,12 @@ pub const TelemetrySample = struct {
 
 pub const EmulatedTelemetryDevice = struct {
     current: TelemetrySample = .{ .source = .emulator },
+    read_count: u32 = 0,
+
+    pub const telemetry_descriptor = TelemetryProviderDescriptor{
+        .name = "emulated-telemetry-device",
+        .role = .test_only,
+    };
 
     pub fn init(sample: TelemetrySample) EmulatedTelemetryDevice {
         var current = sample;
@@ -124,7 +171,12 @@ pub const EmulatedTelemetryDevice = struct {
         self.current = current;
     }
 
-    pub fn read(self: *const EmulatedTelemetryDevice) TelemetrySample {
+    pub fn telemetryProvider(self: *EmulatedTelemetryDevice) TelemetryProvider {
+        return TelemetryProvider.init(EmulatedTelemetryDevice, self, telemetry_descriptor);
+    }
+
+    pub fn read(self: *EmulatedTelemetryDevice) TelemetrySample {
+        self.read_count += 1;
         return self.current;
     }
 };
@@ -136,6 +188,11 @@ pub const BootedPlatformTelemetryProvider = struct {
     read_count: u32 = 0,
     live_observation_count: u32 = 0,
     rejected_observation_count: u32 = 0,
+
+    pub const telemetry_descriptor = TelemetryProviderDescriptor{
+        .name = "booted-platform-telemetry-provider",
+        .role = .production,
+    };
 
     pub fn init(boot_id: u64, observed_tick: u64, signals: PlatformTelemetrySignals) BootedPlatformTelemetryProvider {
         return .{
@@ -184,6 +241,10 @@ pub const BootedPlatformTelemetryProvider = struct {
         }
         self.current = sampleFromLivePlatformCounters(observed_tick, counters);
         self.live_observation_count += 1;
+    }
+
+    pub fn telemetryProvider(self: *BootedPlatformTelemetryProvider) TelemetryProvider {
+        return TelemetryProvider.init(BootedPlatformTelemetryProvider, self, telemetry_descriptor);
     }
 
     pub fn read(self: *BootedPlatformTelemetryProvider) TelemetrySample {
@@ -298,7 +359,7 @@ pub const Controller = struct {
         self.last_telemetry_observed_tick = sample.observed_tick;
     }
 
-    pub fn configureFromProvider(self: *Controller, provider: anytype) void {
+    pub fn configureFromProvider(self: *Controller, provider: TelemetryProvider) void {
         self.configureFromTelemetry(provider.read());
     }
 
@@ -779,12 +840,16 @@ test "accelerator scheduler consumes emulator telemetry samples" {
         .cpu_budget_ticks = 500,
         .memory_bandwidth_units = 128,
     });
-    const sample = telemetry.read();
+    const telemetry_provider = telemetry.telemetryProvider();
+    try std.testing.expect(telemetry_provider.testOnly());
+    try std.testing.expectEqual(TelemetryProviderRole.test_only, telemetry_provider.descriptor.role);
+    const sample = telemetry_provider.read();
     try std.testing.expect(sample.observed());
     controller.configureFromTelemetry(sample);
     try std.testing.expect(controller.observedTelemetry());
     try std.testing.expectEqual(TelemetrySource.emulator, controller.last_telemetry_source);
     try std.testing.expectEqual(@as(u64, 42), controller.last_telemetry_observed_tick);
+    try std.testing.expectEqual(@as(u32, 1), telemetry.read_count);
 
     const interactive = controller.plan(.{
         .class = .foreground_interactive,
@@ -818,7 +883,7 @@ test "accelerator scheduler consumes emulator telemetry samples" {
         .battery_saver = true,
         .media_available = true,
     });
-    controller.configureFromTelemetry(telemetry.read());
+    controller.configureFromProvider(telemetry.telemetryProvider());
     const media_export = controller.plan(.{
         .class = .media_export,
         .wants_media_engine = true,
@@ -843,7 +908,10 @@ test "accelerator scheduler consumes booted platform provider samples" {
         .memory_bandwidth_units = 32,
     });
 
-    controller.configureFromProvider(&provider);
+    const provider_interface = provider.telemetryProvider();
+    try std.testing.expect(!provider_interface.testOnly());
+    try std.testing.expectEqual(TelemetryProviderRole.production, provider_interface.descriptor.role);
+    controller.configureFromProvider(provider_interface);
     try std.testing.expect(controller.observedTelemetry());
     try std.testing.expectEqual(TelemetrySource.boot_provider, controller.last_telemetry_source);
     try std.testing.expectEqual(@as(u64, 88), controller.last_telemetry_observed_tick);
@@ -871,7 +939,7 @@ test "accelerator scheduler consumes booted platform provider samples" {
         .battery_saver = true,
         .media_available = true,
     });
-    controller.configureFromProvider(&provider);
+    controller.configureFromProvider(provider.telemetryProvider());
     const media_export = controller.plan(.{
         .class = .media_export,
         .wants_media_engine = true,
@@ -904,7 +972,7 @@ test "accelerator scheduler derives hardware telemetry from booted live counters
         .privacy_sensitive_task_count = 1,
     });
     var controller = Controller.init();
-    controller.configureFromProvider(&provider);
+    controller.configureFromProvider(provider.telemetryProvider());
     try std.testing.expect(controller.observedTelemetry());
     try std.testing.expectEqual(TelemetrySource.hardware, controller.last_telemetry_source);
     try std.testing.expectEqual(@as(u64, 100), controller.last_telemetry_observed_tick);
@@ -943,7 +1011,7 @@ test "accelerator scheduler derives hardware telemetry from booted live counters
         .battery_percent = 80,
         .battery_charging = true,
     });
-    controller.configureFromProvider(&provider);
+    controller.configureFromProvider(provider.telemetryProvider());
     try std.testing.expectEqual(@as(u64, 102), controller.last_telemetry_observed_tick);
     try std.testing.expectEqual(ThermalPressure.critical, controller.state.thermal_pressure);
     try std.testing.expect(!controller.state.battery_saver);
