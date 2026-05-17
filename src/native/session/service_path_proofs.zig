@@ -1214,9 +1214,11 @@ fn proveBootedSyncServicePath(
         .target = "printer",
     });
     const network_attestation_root = signer("booted-network-attestation-root", 0x7B);
+    var network_attestation_provider = attestation_service.FakeTpmRootProvider.init(network_attestation_root);
+    const network_attestation_identity = try network_attestation_provider.publicIdentity();
     const peer_boot = try verifiedBootedNetworkPeer(7_050);
     var peer_attestation = attestation_service.Service.init(tablet);
-    try peer_attestation.provisionRoot(network_attestation_root, .tpm);
+    try peer_attestation.provisionRootProvider(network_attestation_provider.provider());
     const native_identity_statement = try peer_attestation.attestWithProvisionedRoot(
         peer_boot,
         "overlay.service-path.notes",
@@ -1229,7 +1231,7 @@ fn proveBootedSyncServicePath(
         .nonce = "native-net-1",
         .user_visible = true,
         .key_origin = .tpm,
-        .attestation_root = network_attestation_root,
+        .attestation_root = network_attestation_identity,
     }));
     const native_identity_policy = try sync_port.createNetworkPolicy(sync_authority, .{
         .owner = sync_owner,
@@ -1792,6 +1794,7 @@ fn proveBootedCompositorServicePath(
     runtime.allowHostPointerSyscallsForTask(compositor_task.id);
 
     const app_owner = principal.PrincipalId{ .kind = .app, .serial = 82_001 };
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const app_image = task_runtime.syntheticUserspaceImage("trip-coordinator", "app.trip");
     var ux_controller = native_ux.Controller.init();
     const app_task = try ux_controller.startTask(runtime, .{
@@ -2739,6 +2742,7 @@ fn proveBootedSchedulerTelemetryProvider(
         "zigos.system.resource-telemetry",
         700,
     );
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const foreground_image = task_runtime.syntheticUserspaceImage("booted-telemetry-ui", "app.service-path.telemetry-ui");
     const foreground = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 81_001 },
@@ -2769,7 +2773,7 @@ fn proveBootedSchedulerTelemetryProvider(
         .shared_memory_bytes = 4096,
     }, false));
 
-    var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(
+    var provider = try platform_policy_signals.FreestandingPlatformTelemetryProvider.initForBootedService(
         44,
         provider_task.task_id,
         701,
@@ -2787,7 +2791,7 @@ fn proveBootedSchedulerTelemetryProvider(
         701,
         platform_policy_signals.collectLiveCounters(runtime, scheduler, .{}),
     ));
-    scheduler.configureResourceTelemetryFromProvider(&provider);
+    scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expect(scheduler.observedResourceTelemetry());
     try std.testing.expectEqual(accelerator_scheduler.TelemetrySource.hardware, scheduler.resource_telemetry_source);
     try std.testing.expectEqual(@as(u64, 701), scheduler.resource_telemetry_observed_tick);
@@ -2798,8 +2802,8 @@ fn proveBootedSchedulerTelemetryProvider(
     try std.testing.expect(scheduler.resource_state.media_available);
     try std.testing.expect(scheduler.resource_state.cpu_budget_ticks > 0);
     try std.testing.expect(scheduler.resource_state.memory_bandwidth_units > 0);
-    try std.testing.expectEqual(@as(u32, 1), provider.live_observation_count);
-    try std.testing.expectEqual(@as(u32, 1), provider.rejected_observation_count);
+    try std.testing.expectEqual(@as(u32, 1), provider.liveObservationCount());
+    try std.testing.expectEqual(@as(u32, 1), provider.rejectedObservationCount());
 
     try std.testing.expect(!scheduler.runNext(701));
     const foreground_slot = scheduler.slots.getConst(foreground.id).?;
@@ -2808,6 +2812,7 @@ fn proveBootedSchedulerTelemetryProvider(
     try std.testing.expect(foreground_slot.last_dispatch_degraded);
     try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, foreground_slot.last_dispatch_reason);
 
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const media_image = task_runtime.syntheticUserspaceImage("booted-telemetry-media", "app.service-path.telemetry-media");
     const media = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 81_002 },
@@ -2846,7 +2851,7 @@ fn proveBootedSchedulerTelemetryProvider(
         .npu_driver_online = false,
         .media_driver_online = false,
     }));
-    scheduler.configureResourceTelemetryFromProvider(&provider);
+    scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expectEqual(@as(u64, 702), scheduler.resource_telemetry_observed_tick);
     try std.testing.expect(scheduler.resource_state.battery_saver);
     try std.testing.expect(!scheduler.resource_state.gpu_available);
@@ -2868,7 +2873,7 @@ fn proveBootedSchedulerTelemetryProvider(
         .npu_driver_online = true,
         .media_driver_online = true,
     }));
-    scheduler.configureResourceTelemetryFromProvider(&provider);
+    scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expectEqual(@as(u64, 703), scheduler.resource_telemetry_observed_tick);
     try std.testing.expect(scheduler.resource_state.gpu_available);
     try std.testing.expect(scheduler.resource_state.npu_available);
@@ -2881,8 +2886,8 @@ fn proveBootedSchedulerTelemetryProvider(
     try std.testing.expect(dispatched_media_slot.last_dispatch_degraded);
     try std.testing.expectEqual(accelerator_scheduler.DecisionReason.battery_preserve, dispatched_media_slot.last_dispatch_reason);
     try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.media));
-    try std.testing.expectEqual(@as(u32, 3), provider.live_observation_count);
-    try std.testing.expectEqual(@as(u32, 3), provider.read_count);
+    try std.testing.expectEqual(@as(u32, 3), provider.liveObservationCount());
+    try std.testing.expectEqual(@as(u32, 3), provider.readCount());
 }
 
 fn parkBootedSchedulerTasks(
@@ -3126,6 +3131,7 @@ fn createBootedServiceTask(
     bundle_id: []const u8,
     tick: u64,
 ) !abi.TaskDescriptor {
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const image = task_runtime.syntheticUserspaceImage(label, bundle_id);
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const request = component_port.TaskCreateRequest{
@@ -3174,6 +3180,7 @@ fn createBootedProbeTask(
     shared_memory_bytes: usize,
     tick: u64,
 ) !abi.TaskDescriptor {
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const image = task_runtime.syntheticUserspaceImage(label, bundle_id);
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const request = component_port.TaskCreateRequest{

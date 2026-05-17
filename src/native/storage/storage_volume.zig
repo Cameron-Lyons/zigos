@@ -71,6 +71,112 @@ const log_record_header_len: usize = log_record_checksum_offset + log_record_che
 const payload_magic = "ZG4STATE";
 const format_version: u16 = 6;
 
+pub const ProductCapacityEnvelope = struct {
+    volume_image_bytes: usize,
+    required_device_sectors: u64,
+    max_volume_log_bytes: usize,
+    max_object_payload_bytes: usize,
+    max_object_records: usize,
+    max_version_records: usize,
+    max_blob_records: usize,
+    max_blob_chunks_per_payload: usize,
+    max_chunk_records: usize,
+    max_chunk_bytes: usize,
+    max_workspaces: usize,
+    max_workspace_entries_per_workspace: usize,
+    max_snapshots: usize,
+    max_replay_log_records: usize,
+    max_log_segments: usize,
+};
+
+pub const OverLimitWriteBehavior = enum(u8) {
+    reject_without_partial_persistence,
+};
+
+pub const QuotaLimit = enum(u8) {
+    object_payload_bytes,
+    object_records,
+    version_records,
+    blob_records,
+    chunk_records,
+    workspaces,
+    workspace_entries,
+    snapshots,
+
+    pub fn userVisibleCode(self: QuotaLimit) []const u8 {
+        return switch (self) {
+            .object_payload_bytes => "storage.quota.object_payload_bytes",
+            .object_records => "storage.quota.object_records",
+            .version_records => "storage.quota.version_records",
+            .blob_records => "storage.quota.blob_records",
+            .chunk_records => "storage.quota.chunk_records",
+            .workspaces => "storage.quota.workspaces",
+            .workspace_entries => "storage.quota.workspace_entries",
+            .snapshots => "storage.quota.snapshots",
+        };
+    }
+};
+
+pub const ProductCapacityUsage = struct {
+    object_payload_bytes: usize = 0,
+    object_records: usize = 0,
+    version_records: usize = 0,
+    blob_records: usize = 0,
+    chunk_records: usize = 0,
+    workspaces: usize = 0,
+    max_workspace_entries: usize = 0,
+    snapshots: usize = 0,
+};
+
+pub const QuotaRejection = struct {
+    limit: QuotaLimit,
+    used: usize,
+    requested: usize,
+    allowed: usize,
+
+    pub fn userVisibleCode(self: QuotaRejection) []const u8 {
+        return self.limit.userVisibleCode();
+    }
+};
+
+pub const ProductQuotaPolicy = struct {
+    envelope: ProductCapacityEnvelope,
+    over_limit_write_behavior: OverLimitWriteBehavior,
+    persistence_error: Error,
+    retry_requires_freeing_space: bool,
+};
+
+pub const first_supported_capacity_envelope = ProductCapacityEnvelope{
+    .volume_image_bytes = image_bytes,
+    .required_device_sectors = required_device_sectors,
+    .max_volume_log_bytes = data_capacity_bytes,
+    .max_object_payload_bytes = object_store.MAX_PAYLOAD_BYTES,
+    .max_object_records = object_store.MAX_OBJECTS,
+    .max_version_records = object_store.MAX_VERSIONS,
+    .max_blob_records = object_store.MAX_BLOBS,
+    .max_blob_chunks_per_payload = object_store.MAX_BLOB_CHUNKS,
+    .max_chunk_records = object_store.MAX_CHUNKS,
+    .max_chunk_bytes = object_store.MAX_CHUNK_BYTES,
+    .max_workspaces = workspace.MAX_WORKSPACES,
+    .max_workspace_entries_per_workspace = workspace.MAX_WORKSPACE_ENTRIES,
+    .max_snapshots = workspace.MAX_SNAPSHOTS,
+    .max_replay_log_records = max_replay_log_records,
+    .max_log_segments = max_log_segments,
+};
+
+pub fn productCapacityEnvelope() ProductCapacityEnvelope {
+    return first_supported_capacity_envelope;
+}
+
+pub fn productQuotaPolicy() ProductQuotaPolicy {
+    return .{
+        .envelope = first_supported_capacity_envelope,
+        .over_limit_write_behavior = .reject_without_partial_persistence,
+        .persistence_error = error.NoSpaceLeft,
+        .retry_requires_freeing_space = true,
+    };
+}
+
 pub const Error = error{
     ChecksumMismatch,
     CorruptImage,
@@ -177,6 +283,7 @@ pub const Volume = struct {
         if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_capacity_bytes) return false;
         if (!readAttachedBytes(self, data_start_byte, self.io_log_buffer[0..loaded.root.log_bytes])) return false;
         replayLog(self, store, workspaces, self.io_log_buffer[0..loaded.root.log_bytes], loaded.root) catch return false;
+        ensureWithinProductCapacityEnvelope(store, workspaces) catch return false;
         store.clearDirty();
         workspaces.clearDirty();
         return true;
@@ -202,6 +309,7 @@ pub const Volume = struct {
         if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_capacity_bytes) return error.CorruptImage;
         @memcpy(self.io_log_buffer[0..loaded.root.log_bytes], image[data_start_byte .. data_start_byte + loaded.root.log_bytes]);
         try replayLog(self, store, workspaces, self.io_log_buffer[0..loaded.root.log_bytes], loaded.root);
+        try ensureWithinProductCapacityEnvelope(store, workspaces);
         store.clearDirty();
         workspaces.clearDirty();
         return loaded.root.generation;
@@ -340,6 +448,7 @@ fn saveIncremental(
     workspaces: *workspace.Directory,
     writer: anytype,
 ) Error!PersistResult {
+    try ensureWithinProductCapacityEnvelope(store, workspaces);
     const current_generation = if (current) |loaded| loaded.root.generation else 0;
     const delta = if (current) |loaded|
         try buildDeltaLog(self, self.io_log_buffer[0..], loaded.root, store, workspaces)
@@ -390,6 +499,92 @@ fn appendLogFits(root: RootState, delta: BuiltLog) bool {
     if (@as(u32, root.log_record_count) + delta.record_count > max_replay_log_records) return false;
     if (@as(u32, root.log_segment_count) + delta.segment_count > max_log_segments) return false;
     return true;
+}
+
+pub fn ensureWithinProductCapacityEnvelope(store: *const object_store.Store, workspaces: *const workspace.Directory) Error!void {
+    if (quotaRejectionForCurrentState(store, workspaces) != null) {
+        return error.NoSpaceLeft;
+    }
+
+    const envelope = first_supported_capacity_envelope;
+    for (workspaces.workspaces.slots) |slot| {
+        if (!slot.in_use) continue;
+        if (!persistableWorkspaceSlot(slot)) return error.NoSpaceLeft;
+        if (slot.workspace.path_index.entry_count > envelope.max_workspace_entries_per_workspace) return error.NoSpaceLeft;
+    }
+
+    for (workspaces.snapshots.slots) |slot| {
+        if (!slot.in_use) continue;
+        if (!persistableSnapshotSlot(slot)) return error.NoSpaceLeft;
+        if (slot.snapshot.entry_count > envelope.max_workspace_entries_per_workspace) return error.NoSpaceLeft;
+    }
+}
+
+pub fn productCapacityUsage(store: *const object_store.Store, workspaces: *const workspace.Directory) ProductCapacityUsage {
+    var usage = ProductCapacityUsage{
+        .object_records = store.objectCount(),
+        .version_records = store.versionCount(),
+        .blob_records = store.blobCount(),
+        .chunk_records = store.chunkCount(),
+        .workspaces = workspaceCount(workspaces),
+        .snapshots = snapshotCount(workspaces),
+    };
+
+    for (workspaces.workspaces.slots) |slot| {
+        if (!persistableWorkspaceSlot(slot)) continue;
+        usage.max_workspace_entries = @max(usage.max_workspace_entries, slot.workspace.path_index.entry_count);
+    }
+    for (workspaces.snapshots.slots) |slot| {
+        if (!persistableSnapshotSlot(slot)) continue;
+        usage.max_workspace_entries = @max(usage.max_workspace_entries, slot.snapshot.entry_count);
+    }
+
+    return usage;
+}
+
+pub fn quotaRejectionForCurrentState(
+    store: *const object_store.Store,
+    workspaces: *const workspace.Directory,
+) ?QuotaRejection {
+    return quotaRejectionForUsage(productCapacityUsage(store, workspaces));
+}
+
+pub fn quotaRejectionForUsage(usage: ProductCapacityUsage) ?QuotaRejection {
+    const envelope = first_supported_capacity_envelope;
+    if (usage.object_payload_bytes > envelope.max_object_payload_bytes) {
+        return quotaRejection(.object_payload_bytes, usage.object_payload_bytes, envelope.max_object_payload_bytes);
+    }
+    if (usage.object_records > envelope.max_object_records) {
+        return quotaRejection(.object_records, usage.object_records, envelope.max_object_records);
+    }
+    if (usage.version_records > envelope.max_version_records) {
+        return quotaRejection(.version_records, usage.version_records, envelope.max_version_records);
+    }
+    if (usage.blob_records > envelope.max_blob_records) {
+        return quotaRejection(.blob_records, usage.blob_records, envelope.max_blob_records);
+    }
+    if (usage.chunk_records > envelope.max_chunk_records) {
+        return quotaRejection(.chunk_records, usage.chunk_records, envelope.max_chunk_records);
+    }
+    if (usage.workspaces > envelope.max_workspaces) {
+        return quotaRejection(.workspaces, usage.workspaces, envelope.max_workspaces);
+    }
+    if (usage.max_workspace_entries > envelope.max_workspace_entries_per_workspace) {
+        return quotaRejection(.workspace_entries, usage.max_workspace_entries, envelope.max_workspace_entries_per_workspace);
+    }
+    if (usage.snapshots > envelope.max_snapshots) {
+        return quotaRejection(.snapshots, usage.snapshots, envelope.max_snapshots);
+    }
+    return null;
+}
+
+fn quotaRejection(limit: QuotaLimit, requested: usize, allowed: usize) QuotaRejection {
+    return .{
+        .limit = limit,
+        .used = requested,
+        .requested = requested,
+        .allowed = allowed,
+    };
 }
 
 fn writeBytes(writer: anytype, offset: usize, bytes: []const u8) Error!void {
@@ -1645,5 +1840,23 @@ pub const testing = struct {
 
     pub fn corruptDataByte(image: []u8, offset: usize) void {
         image[data_start_byte + offset] ^= 0xFF;
+    }
+
+    pub fn recordHeaderBytes() usize {
+        return recordHeaderLen();
+    }
+
+    pub fn forceLatestImageRootLogBytes(image: []u8, log_bytes: u32) Error!void {
+        const loaded = (try findLatestImageRoot(image)) orelse return error.CorruptImage;
+        var root = loaded.root;
+        root.log_bytes = log_bytes;
+        try writeImageRoot(image, loaded.sector_index, root);
+    }
+
+    pub fn forceLatestImageRootLogRecordCount(image: []u8, log_record_count: u16) Error!void {
+        const loaded = (try findLatestImageRoot(image)) orelse return error.CorruptImage;
+        var root = loaded.root;
+        root.log_record_count = log_record_count;
+        try writeImageRoot(image, loaded.sector_index, root);
     }
 };

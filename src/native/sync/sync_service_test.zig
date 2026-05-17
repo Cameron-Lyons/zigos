@@ -659,6 +659,7 @@ fn createSyncServiceTask(
     bundle_id: []const u8,
     image_id: u64,
 ) !*task_runtime.TaskRecord {
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const image = task_runtime.syntheticUserspaceImage(label, bundle_id);
     return runtime.createTask(.{
         .owner = owner,

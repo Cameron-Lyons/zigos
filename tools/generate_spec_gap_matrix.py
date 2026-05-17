@@ -86,6 +86,8 @@ def render_gap_matrix(manifest: dict | None = None) -> str:
         for requirement_id in manifest["required_requirements"]
     )
 
+    roadmap = roadmap_rows(manifest)
+
     lines = [
         "# Zigos Spec Gap Matrix",
         "",
@@ -107,10 +109,12 @@ def render_gap_matrix(manifest: dict | None = None) -> str:
         "",
         "## Status Legend",
         "",
-        "- **Enforced**: the invariant is implemented in native code and exercised by focused tests or adversarial tests listed in `coverage.json`.",
+        "- **Enforced**: the invariant is implemented in native code and exercised by focused tests or adversarial tests listed in `coverage.json`; this is a repository/prototype evidence status, not a production-readiness claim.",
         "- **Modeled**: implementation exists, but part of the requirement is still represented by prototype state, synthetic hardware, harnessed transport, or in-process model tests.",
         "- **Scenario**: behavior is primarily demonstrated through scenario flows, smoke flows, rendered UX/control-plane records, or broad integration stories.",
         "- **Deferred**: the requirement is mostly a design claim or future integration point.",
+        "",
+        "Rows that depend on hardware roots, live multi-device sync, real resource scheduling, or userspace driver proof depth should be treated as prototype-conformant unless their evidence names real boot, syscall, or service-path proof depth.",
         "",
         "## Evidence Summary",
         "",
@@ -123,24 +127,31 @@ def render_gap_matrix(manifest: dict | None = None) -> str:
         "",
         "Modeled and scenario-only rows are the active implementation roadmap. These requirements should graduate to real boot, syscall, or service-path invariants before new platform surface area is added.",
         "",
-        "| Priority | Requirement | Status | Focus | Graduation proof |",
-        "| --- | --- | --- | --- | --- |",
     ]
 
-    for requirement_id, evidence, roadmap in roadmap_rows(manifest):
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    code(roadmap.get("priority", "_missing_")),
-                    code(requirement_id),
-                    STATUS_LABELS[evidence["status"]],
-                    markdown_cell(roadmap.get("focus", "_Roadmap focus missing_")),
-                    markdown_cell(roadmap.get("graduation_proof", "_Graduation proof missing_")),
-                ]
-            )
-            + " |"
+    if roadmap:
+        lines.extend(
+            [
+                "| Priority | Requirement | Status | Focus | Graduation proof |",
+                "| --- | --- | --- | --- | --- |",
+            ]
         )
+        for requirement_id, evidence, roadmap_item in roadmap:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        code(roadmap_item.get("priority", "_missing_")),
+                        code(requirement_id),
+                        STATUS_LABELS[evidence["status"]],
+                        markdown_cell(roadmap_item.get("focus", "_Roadmap focus missing_")),
+                        markdown_cell(roadmap_item.get("graduation_proof", "_Graduation proof missing_")),
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("No roadmap rows are listed in the manifest.")
 
     lines.extend(
         [

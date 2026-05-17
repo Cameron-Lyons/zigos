@@ -11,9 +11,11 @@ This repository treats the Zigos v0.1 clean-slate OS spec as its explicit confor
 - [SPEC.md](SPEC.md): design goals, platform model, and conformance target
 - [ARCHITECTURE.md](ARCHITECTURE.md): how the current code maps onto the spec
 - [SPEC_GAP_MATRIX.md](SPEC_GAP_MATRIX.md): generated requirement status and evidence backlog
+- [PROD_READINESS_MATRIX.md](PROD_READINESS_MATRIX.md): generated production-readiness backlog for prototype-sensitive slices
 - [CONTRIBUTING.md](CONTRIBUTING.md): repo conventions and verification expectations
 
 `SPEC_GAP_MATRIX.md` is generated from `spec/coverage.json`; update the manifest and regenerate the matrix instead of editing it by hand.
+`PROD_READINESS_MATRIX.md` is generated from `spec/production_readiness.json`; keep production-readiness status there instead of overloading spec conformance evidence.
 
 The native kernel surface is intentionally small:
 
@@ -43,7 +45,7 @@ Use the pinned Zig toolchain and repo entrypoints:
 - Zig `0.16.0` exactly
 - `nasm`
 - `qemu-system-x86_64`
-- Python 3 for spec coverage checks
+- Python 3 for spec coverage and production-readiness checks
 - ShellCheck for `zig build lint` and `zig build verify`
 - Optional: `zlint` and `actionlint`; local hooks run them when installed, or require them with `ZIGOS_REQUIRE_ZLINT=1` / `ZIGOS_REQUIRE_ACTIONLINT=1`
 
@@ -127,6 +129,9 @@ Targets that boot or package the system build the current userspace image archiv
 # Run the spec coverage gate and native spec unit tests without QEMU smoke
 ./scripts/zig.sh build spec-tests
 
+# Validate production-readiness tracking without changing spec conformance status
+./scripts/zig.sh build prod-readiness
+
 # Include optional QEMU gates in the verify target
 ./scripts/zig.sh build -Dverify-smoke=true -Dverify-benchmark=true verify
 
@@ -156,6 +161,8 @@ The smoke test uses `build/native-store-smoke.img` and validates the expected na
 
 Repo-level conformance is checked through the thin root `src/zigos_spec_test.zig`, which delegates to the suites under `src/tests/spec/`; the section-to-test contract is enforced by `spec/coverage.json` and `tools/check_spec_coverage.py`, with stable `REQ-*` anchors in `SPEC.md` driving the manifest instead of line-by-line prose claims. `SPEC_GAP_MATRIX.md` is generated from that manifest by `tools/generate_spec_gap_matrix.py`, and the coverage check rejects stale matrix output. `Enforced` requirements in the manifest must name implementation modules and adversarial or negative tests; modeled and scenario-only requirements stay explicitly marked until they earn that evidence. The `spec-conformance` target also runs the native two-boot QEMU smoke harness and the recovery-mode QEMU proof, so the repo-level gate is not host-only.
 
+Production readiness is tracked separately in `spec/production_readiness.json`, rendered as `PROD_READINESS_MATRIX.md`, and validated by `tools/check_production_readiness.py`. This keeps a requirement's repository conformance status separate from the work needed to remove synthetic hardware, harnessed transport, emulator roots, scale limits, and model-only proof gaps.
+
 The main verification entrypoints are:
 
 - `./scripts/zig.sh build verify`
@@ -165,6 +172,7 @@ The main verification entrypoints are:
 - `./scripts/zig.sh build kernel-recovery`
 - `./scripts/zig.sh build host-tests`
 - `./scripts/zig.sh build spec-tests`
+- `./scripts/zig.sh build prod-readiness`
 - `./scripts/zig.sh build spec-conformance`
 - `./scripts/zig.sh build zigos-native-smoke-test`
 - `./scripts/zig.sh build driver-restart-qemu-test`
@@ -193,6 +201,7 @@ Host-side native tests enter through `src/native_host_test.zig` and delegate to 
 - `build_support/`: build helpers for kernel artifacts, embedded userspace images, and shared build paths
 - `benchmarks/`: benchmark baselines and threshold files used by the QEMU benchmark gate
 - `spec/coverage.json`: executable mapping from `SPEC.md` requirements to implementation and test evidence
+- `spec/production_readiness.json`: production-readiness tracks for enforced requirements that still need real-hardware, scale, fault, or operational proof
 - `scripts/`: repo entrypoints for setup, build, run, and verification
 - `tools/`: host-side support utilities such as spec coverage checks
 - `.github/`: CI workflows and shared setup action
@@ -201,7 +210,7 @@ Host-side native tests enter through `src/native_host_test.zig` and delegate to 
 
 The repository no longer builds or ships the old POSIX-like shell, POSIX-style syscall ABI, or VFS-rooted userland pipeline. Legacy support is modeled as explicit compatibility environments rather than as part of the native platform.
 
-For the current requirement status, use [SPEC_GAP_MATRIX.md](SPEC_GAP_MATRIX.md); it is generated from `spec/coverage.json` and separates enforced behavior from modeled or scenario-only evidence.
+For the current requirement status, use [SPEC_GAP_MATRIX.md](SPEC_GAP_MATRIX.md); it is generated from `spec/coverage.json` and separates enforced behavior from modeled or scenario-only evidence. For prototype-to-production planning, use [PROD_READINESS_MATRIX.md](PROD_READINESS_MATRIX.md); it is generated from `spec/production_readiness.json`.
 
 - `./scripts/zig.sh build kernel`
 - `./scripts/zig.sh build spec-conformance`

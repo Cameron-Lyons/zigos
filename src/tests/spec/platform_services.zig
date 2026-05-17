@@ -61,7 +61,8 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     try std.testing.expect(restarted_journal.latestMatches(&boot));
 
     var attestation = attestation_service.Service.init(spec_support.device(99));
-    try attestation.provisionRoot(spec_support.signer("spec.attest.device", 0x91), .secure_enclave);
+    var attestation_root = attestation_service.FakeSecureEnclaveRootProvider.init(spec_support.signer("spec.attest.device", 0x91));
+    try attestation.provisionRootProvider(attestation_root.provider());
     const statement = try attestation.attestWithProvisionedRoot(boot, "attest.example", "nonce-7", true);
     try std.testing.expect(attestation_service.Service.verify(statement));
     try std.testing.expect(statement.user_visible);

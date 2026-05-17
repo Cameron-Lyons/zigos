@@ -483,6 +483,7 @@ const UserspaceStorageHarness = struct {
         try self.runtime.grantCapability(self.session_task_id, self.session_authority_capability_id);
 
         const storage_bundle_id = service_catalog.bundleIdForServiceClass(.storage_object).?;
+        // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
         const storage_image = task_runtime.syntheticUserspaceImage("workspace-storage", "zigos.object.workspace");
         const storage_task = try self.port.taskCreate(.{
             .header = component_port.makeHeader(.task_create, STORAGE_TASK_CREATE_CORRELATION_ID, self.session_task_id),
@@ -508,6 +509,7 @@ const UserspaceStorageHarness = struct {
         }, STORAGE_TASK_CREATE_TICK);
         self.storage_task_id = storage_task.task_id;
 
+        // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
         const client_image = task_runtime.syntheticUserspaceImage("storage-client", "app.storage-client");
         const client_task = try self.port.taskCreate(.{
             .header = component_port.makeHeader(.task_create, CLIENT_TASK_CREATE_CORRELATION_ID, self.session_task_id),

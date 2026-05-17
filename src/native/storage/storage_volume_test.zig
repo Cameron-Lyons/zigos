@@ -9,6 +9,60 @@ const image_bytes = storage_volume.image_bytes;
 const saveToImage = storage_volume.saveToImage;
 const loadFromImage = storage_volume.loadFromImage;
 
+test "storage volume exposes the first supported product capacity envelope" {
+    const envelope = storage_volume.productCapacityEnvelope();
+
+    try std.testing.expectEqual(storage_volume.image_bytes, envelope.volume_image_bytes);
+    try std.testing.expectEqual(storage_volume.required_device_sectors, envelope.required_device_sectors);
+    try std.testing.expectEqual(object_store.MAX_PAYLOAD_BYTES, envelope.max_object_payload_bytes);
+    try std.testing.expectEqual(object_store.MAX_OBJECTS, envelope.max_object_records);
+    try std.testing.expectEqual(object_store.MAX_VERSIONS, envelope.max_version_records);
+    try std.testing.expectEqual(object_store.MAX_BLOBS, envelope.max_blob_records);
+    try std.testing.expectEqual(object_store.MAX_BLOB_CHUNKS, envelope.max_blob_chunks_per_payload);
+    try std.testing.expectEqual(object_store.MAX_CHUNKS, envelope.max_chunk_records);
+    try std.testing.expectEqual(object_store.MAX_CHUNK_BYTES, envelope.max_chunk_bytes);
+    try std.testing.expectEqual(workspace.MAX_WORKSPACES, envelope.max_workspaces);
+    try std.testing.expectEqual(workspace.MAX_WORKSPACE_ENTRIES, envelope.max_workspace_entries_per_workspace);
+    try std.testing.expectEqual(workspace.MAX_SNAPSHOTS, envelope.max_snapshots);
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    try storage_volume.ensureWithinProductCapacityEnvelope(&store, &workspaces);
+}
+
+test "storage quota policy rejects writes above the first supported envelope" {
+    const policy = storage_volume.productQuotaPolicy();
+
+    try std.testing.expectEqual(storage_volume.OverLimitWriteBehavior.reject_without_partial_persistence, policy.over_limit_write_behavior);
+    try std.testing.expect(policy.persistence_error == error.NoSpaceLeft);
+    try std.testing.expect(policy.retry_requires_freeing_space);
+    try std.testing.expectEqual(storage_volume.productCapacityEnvelope().max_object_records, policy.envelope.max_object_records);
+
+    const payload_rejection = storage_volume.quotaRejectionForUsage(.{
+        .object_payload_bytes = object_store.MAX_PAYLOAD_BYTES + 1,
+    }).?;
+    try std.testing.expectEqual(storage_volume.QuotaLimit.object_payload_bytes, payload_rejection.limit);
+    try std.testing.expectEqual(object_store.MAX_PAYLOAD_BYTES + 1, payload_rejection.used);
+    try std.testing.expectEqual(object_store.MAX_PAYLOAD_BYTES, payload_rejection.allowed);
+    try std.testing.expectEqualStrings("storage.quota.object_payload_bytes", payload_rejection.userVisibleCode());
+
+    const object_rejection = storage_volume.quotaRejectionForUsage(.{
+        .object_records = object_store.MAX_OBJECTS + 1,
+    }).?;
+    try std.testing.expectEqual(storage_volume.QuotaLimit.object_records, object_rejection.limit);
+    try std.testing.expectEqualStrings("storage.quota.object_records", object_rejection.userVisibleCode());
+
+    const workspace_rejection = storage_volume.quotaRejectionForUsage(.{
+        .max_workspace_entries = workspace.MAX_WORKSPACE_ENTRIES + 1,
+    }).?;
+    try std.testing.expectEqual(storage_volume.QuotaLimit.workspace_entries, workspace_rejection.limit);
+    try std.testing.expectEqualStrings("storage.quota.workspace_entries", workspace_rejection.userVisibleCode());
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    try std.testing.expect(storage_volume.quotaRejectionForCurrentState(&store, &workspaces) == null);
+}
+
 test "storage volume image reloads the latest persisted state across slot generations" {
     const image = try std.testing.allocator.alloc(u8, image_bytes);
     defer std.testing.allocator.free(image);
@@ -273,6 +327,64 @@ test "storage volume rejects corrupted slot payloads" {
     });
     _ = try saveToImage(image, &store, &workspaces);
     storage_volume.testing.corruptDataByte(image, 3);
+
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    try std.testing.expectError(error.CorruptImage, loadFromImage(image, &loaded_store, &loaded_workspaces));
+}
+
+test "storage volume rejects root log metadata that does not match replayed records" {
+    const image = try std.testing.allocator.alloc(u8, image_bytes);
+    defer std.testing.allocator.free(image);
+    @memset(image, 0);
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0x76} ** 32,
+    };
+    _ = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(902),
+        .object_type = .document,
+        .payload = "root-log",
+        .metadata = try object_store.signMetadata(signer, "root-log", "text/plain", .document, "root-log", 14),
+    });
+    _ = try saveToImage(image, &store, &workspaces);
+
+    try storage_volume.testing.forceLatestImageRootLogRecordCount(
+        image,
+        (try storage_volume.testing.latestImageLogRecordCount(image)) + 1,
+    );
+
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    try std.testing.expectError(error.CorruptImage, loadFromImage(image, &loaded_store, &loaded_workspaces));
+}
+
+test "storage volume rejects torn records referenced by a valid root" {
+    const image = try std.testing.allocator.alloc(u8, image_bytes);
+    defer std.testing.allocator.free(image);
+    @memset(image, 0);
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0x77} ** 32,
+    };
+    _ = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(903),
+        .object_type = .document,
+        .payload = "torn-record",
+        .metadata = try object_store.signMetadata(signer, "torn-record", "text/plain", .document, "torn-record", 15),
+    });
+    _ = try saveToImage(image, &store, &workspaces);
+
+    try storage_volume.testing.forceLatestImageRootLogBytes(
+        image,
+        @intCast(storage_volume.testing.recordHeaderBytes() + 1),
+    );
 
     var loaded_store = object_store.Store.init();
     var loaded_workspaces = workspace.Directory.init();

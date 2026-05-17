@@ -3,14 +3,30 @@ const manifest = @import("../policy/manifest.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
 
+pub const SEED_BYTES = Ed25519.KeyPair.seed_length;
+pub const PUBLIC_KEY_BYTES = Ed25519.PublicKey.encoded_length;
+pub const SIGNATURE_BYTES = Ed25519.Signature.encoded_length;
+
 pub const SignerIdentity = struct {
     label: []const u8,
-    seed: [Ed25519.KeyPair.seed_length]u8,
+    seed: [SEED_BYTES]u8,
 };
 
-pub fn publicKey(identity: SignerIdentity) ![Ed25519.PublicKey.encoded_length]u8 {
+pub const PublicIdentity = struct {
+    label: []const u8,
+    public_key: [PUBLIC_KEY_BYTES]u8,
+};
+
+pub fn publicKey(identity: SignerIdentity) ![PUBLIC_KEY_BYTES]u8 {
     const key_pair = try Ed25519.KeyPair.generateDeterministic(identity.seed);
     return key_pair.public_key.toBytes();
+}
+
+pub fn publicIdentity(identity: SignerIdentity) !PublicIdentity {
+    return .{
+        .label = identity.label,
+        .public_key = try publicKey(identity),
+    };
 }
 
 pub fn sign(identity: SignerIdentity, message: []const u8) !manifest.Signature {
@@ -42,8 +58,20 @@ pub fn verifyTrusted(
     message: []const u8,
     expected_identity: SignerIdentity,
 ) bool {
+    return verifyTrustedPublicKey(
+        signature,
+        message,
+        publicIdentity(expected_identity) catch return false,
+    );
+}
+
+pub fn verifyTrustedPublicKey(
+    signature: manifest.Signature,
+    message: []const u8,
+    expected_identity: PublicIdentity,
+) bool {
     if (!std.mem.eql(u8, signature.signer, expected_identity.label)) return false;
-    const expected_public_key = publicKey(expected_identity) catch return false;
+    const expected_public_key = expected_identity.public_key;
     if (!std.mem.eql(u8, signature.publicKeySlice(), &expected_public_key)) return false;
     return verify(signature, message);
 }
@@ -59,6 +87,7 @@ test "ed25519 signing produces verifiable native signatures" {
     try std.testing.expect(verify(signature, "storage-state"));
     try std.testing.expect(!verify(signature, "sync-state"));
     try std.testing.expect(verifyTrusted(signature, "storage-state", identity));
+    try std.testing.expect(verifyTrustedPublicKey(signature, "storage-state", try publicIdentity(identity)));
 
     const wrong_identity = SignerIdentity{
         .label = "zigos.other",

@@ -2,7 +2,6 @@
 
 Hypothetical clean-slate operating system spec, v0.1
 
-<!-- REQ: REQ-DESIGN-GOALS-AND-NON-GOALS -->
 ## 1. Design goals
 
 Zigos is designed for how computers are actually used in 2026:

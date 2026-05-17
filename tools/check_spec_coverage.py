@@ -98,34 +98,6 @@ def summary_clause_dependency_ids() -> list[str]:
     return dependency_ids
 
 
-STATUS_POLICY = {
-    # This top-level row is a narrative rollup. It tracks enforced child proof
-    # and roadmap state, but it is not a single enforceable invariant.
-    "REQ-DESIGN-GOALS-AND-NON-GOALS": {"modeled", "scenario", "deferred"},
-}
-
-MODELED_META_DEPENDENCY_EXCEPTIONS = {
-    # The design-goals rollup may point at the one-sentence rollup, but every
-    # testable subsystem dependency must stay independently enforced.
-    "REQ-DESIGN-GOALS-AND-NON-GOALS": {
-        SUMMARY_REQUIREMENT_ID: {"enforced", "modeled"},
-    },
-}
-
-
-def meta_requirement_dependencies(required_requirements: list[str]) -> dict[str, list[str]]:
-    dependencies: dict[str, list[str]] = {}
-    # The design-goals row is the top-level rollup for the whole spec; deriving
-    # its children from the manifest keeps the aggregate gate from going stale
-    # when SPEC.md adds or removes concrete requirements.
-    dependencies["REQ-DESIGN-GOALS-AND-NON-GOALS"] = [
-        requirement_id
-        for requirement_id in required_requirements
-        if requirement_id != "REQ-DESIGN-GOALS-AND-NON-GOALS"
-    ]
-    return dependencies
-
-
 def load_manifest() -> dict:
     return json.loads(MANIFEST_PATH.read_text())
 
@@ -270,37 +242,6 @@ def validate_roadmap(errors: list[str], requirement_id: str, requirement_evidenc
     return valid and priority in ROADMAP_PRIORITIES
 
 
-def validate_meta_requirement_dependencies(
-    errors: list[str],
-    evidence: dict,
-    requirement_id: str,
-    dependencies: list[str],
-) -> None:
-    requirement_evidence = evidence.get(requirement_id, {})
-    requirement_status = requirement_evidence.get("status")
-    if requirement_status not in {"enforced", "modeled"}:
-        return
-
-    for dependency_id in dependencies:
-        dependency_evidence = evidence.get(dependency_id)
-        if dependency_evidence is None:
-            errors.append(
-                f"Meta requirement {requirement_id} depends on missing requirement evidence: {dependency_id}"
-            )
-            continue
-        dependency_status = dependency_evidence.get("status")
-        allowed_dependency_statuses = MODELED_META_DEPENDENCY_EXCEPTIONS.get(
-            requirement_id, {}
-        ).get(dependency_id, {"enforced"})
-        expected = " or ".join(sorted(allowed_dependency_statuses))
-        if dependency_status not in allowed_dependency_statuses:
-            errors.append(
-                "Meta requirement "
-                f"{requirement_id} is {requirement_status!r} but depends on "
-                f"{dependency_id}, which is {dependency_status!r}; expected {expected}"
-            )
-
-
 def main() -> int:
     errors: list[str] = []
     for failure in run_self_tests():
@@ -418,15 +359,6 @@ def main() -> int:
             )
             continue
 
-        allowed_statuses = STATUS_POLICY.get(requirement_id)
-        if allowed_statuses is not None and status not in allowed_statuses:
-            errors.append(
-                "Requirement "
-                f"{requirement_id} is {status!r}, but current evidence policy allows "
-                f"only {sorted(allowed_statuses)}"
-            )
-            continue
-
         if status == "scenario":
             scenario_count += 1
         if status == "enforced":
@@ -503,11 +435,6 @@ def main() -> int:
         evidence,
         requirement_body(blocks, SUMMARY_REQUIREMENT_ID),
     )
-
-    for requirement_id, dependencies in meta_requirement_dependencies(
-        required_requirements
-    ).items():
-        validate_meta_requirement_dependencies(errors, evidence, requirement_id, dependencies)
 
     expected_gap_matrix = render_gap_matrix(manifest)
     actual_gap_matrix = GAP_MATRIX_PATH.read_text() if GAP_MATRIX_PATH.exists() else ""

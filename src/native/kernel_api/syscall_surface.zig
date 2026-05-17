@@ -213,6 +213,7 @@ test "syscall surface dispatches typed task creation requests" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const syscall_test_image = task_runtime.syntheticUserspaceImage("syscall-test", "app.example.syscall");
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const request = component_port.TaskCreateRequest{
@@ -263,6 +264,7 @@ test "syscall surface returns an explicit empty receive response when no message
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const empty_queue_image = task_runtime.syntheticUserspaceImage("empty-queue", "app.example.empty-queue");
     const app_task = try test_kernel.port.taskCreate(.{
         .header = component_port.makeHeader(.task_create, 88, test_kernel.session_task_id),
@@ -352,6 +354,7 @@ test "syscall surface denies task creation without signed userspace launch prove
     try std.testing.expectEqual(abi.DenialReason.policy_denied, result.denial_reason);
     try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
 
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const unsigned_image = task_runtime.syntheticUserspaceImage("unsigned-syscall", "app.example.unsigned-syscall");
     var unsigned_response = std.mem.zeroes(abi.TaskDescriptor);
     const unsigned_request = component_port.TaskCreateRequest{
@@ -433,6 +436,7 @@ test "syscall surface rejects spoofed subject task ids" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
+    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
     const spoofed_subject_image = task_runtime.syntheticUserspaceImage(
         "spoofed-subject",
         "app.example.spoofed-subject",
