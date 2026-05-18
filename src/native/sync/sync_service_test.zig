@@ -4,6 +4,7 @@ const device_graph = @import("device_graph.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
+const generated_image_fixtures = if (@import("builtin").is_test) @import("../task/generated_image_fixtures.zig") else struct {};
 const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const sync_service = @import("sync_service_impl.zig");
@@ -659,8 +660,7 @@ fn createSyncServiceTask(
     bundle_id: []const u8,
     image_id: u64,
 ) !*task_runtime.TaskRecord {
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const image = task_runtime.syntheticUserspaceImage(label, bundle_id);
+    const image = try generated_image_fixtures.syncServiceImage();
     return runtime.createTask(.{
         .owner = owner,
         .component_class = .service_component,

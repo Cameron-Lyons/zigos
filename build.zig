@@ -93,6 +93,10 @@ pub fn build(b: *std.Build) void {
     });
     const run_userspace_runtime_tests = b.addRunArtifact(userspace_runtime_tests);
     const userspace_images = userspace_build.addUserspaceArtifacts(b, target, optimize);
+    host_tests_module.addImport("userspace_archive", userspace_images.archive_module);
+    host_tests_module.addImport("production_artifact_manifest", userspace_images.production_manifest_module);
+    spec_tests_module.addImport("userspace_archive", userspace_images.archive_module);
+    spec_tests_module.addImport("production_artifact_manifest", userspace_images.production_manifest_module);
 
     const zigos_native_kernel = kernel_build.addKernelArtifact(
         b,
@@ -100,6 +104,29 @@ pub fn build(b: *std.Build) void {
         optimize,
         "kernel-zigos-native.elf",
         .zigos_native,
+        .none,
+        userspace_images.archive_module,
+        userspace_images.production_manifest_module,
+    );
+
+    const zigos_native_tampered_artifact_manifest_kernel = kernel_build.addKernelArtifact(
+        b,
+        target,
+        optimize,
+        "kernel-zigos-native-tampered-artifact-manifest.elf",
+        .zigos_native,
+        .tampered_artifact_manifest,
+        userspace_images.archive_module,
+        userspace_images.production_manifest_module,
+    );
+
+    const zigos_native_rollback_slot_failure_kernel = kernel_build.addKernelArtifact(
+        b,
+        target,
+        optimize,
+        "kernel-zigos-native-rollback-slot-failure.elf",
+        .zigos_native,
+        .rollback_slot_failure,
         userspace_images.archive_module,
         userspace_images.production_manifest_module,
     );
@@ -110,6 +137,7 @@ pub fn build(b: *std.Build) void {
         optimize,
         "kernel-recovery.elf",
         .recovery,
+        .none,
         userspace_images.archive_module,
         userspace_images.production_manifest_module,
     );
@@ -120,6 +148,7 @@ pub fn build(b: *std.Build) void {
         optimize,
         "kernel-benchmark.elf",
         .benchmark,
+        .none,
         userspace_images.archive_module,
         userspace_images.production_manifest_module,
     );
@@ -188,8 +217,32 @@ pub fn build(b: *std.Build) void {
     zigos_native_smoke_test_cmd.step.dependOn(zigos_native_kernel.install_step);
     zigos_native_smoke_test_cmd.step.dependOn(userspace_images.step);
 
+    const tampered_artifact_manifest_smoke_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-zigos-native-smoke.sh",
+        zigos_native_tampered_artifact_manifest_kernel.output_path,
+        "build/zigos-native-tampered-artifact-manifest.log",
+        "build/native-store-tampered-artifact-manifest.img",
+        "tampered_artifact_manifest",
+    });
+    tampered_artifact_manifest_smoke_cmd.step.dependOn(zigos_native_tampered_artifact_manifest_kernel.install_step);
+    tampered_artifact_manifest_smoke_cmd.step.dependOn(userspace_images.step);
+
+    const rollback_slot_failure_smoke_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-zigos-native-smoke.sh",
+        zigos_native_rollback_slot_failure_kernel.output_path,
+        "build/zigos-native-rollback-slot-failure.log",
+        "build/native-store-rollback-slot-failure.img",
+        "rollback_slot_failure",
+    });
+    rollback_slot_failure_smoke_cmd.step.dependOn(zigos_native_rollback_slot_failure_kernel.install_step);
+    rollback_slot_failure_smoke_cmd.step.dependOn(userspace_images.step);
+
     const zigos_native_smoke_test_step = b.step("zigos-native-smoke-test", "Run the Zigos native bootstrap smoke test in QEMU");
     zigos_native_smoke_test_step.dependOn(&zigos_native_smoke_test_cmd.step);
+    zigos_native_smoke_test_step.dependOn(&tampered_artifact_manifest_smoke_cmd.step);
+    zigos_native_smoke_test_step.dependOn(&rollback_slot_failure_smoke_cmd.step);
 
     const driver_restart_qemu_cmd = b.addSystemCommand(&.{
         "bash",
@@ -197,6 +250,7 @@ pub fn build(b: *std.Build) void {
         zigos_native_kernel.output_path,
         "build/driver-restart-qemu.log",
         "build/native-store-driver-restart.img",
+        "driver_restart",
     });
     driver_restart_qemu_cmd.step.dependOn(zigos_native_kernel.install_step);
     driver_restart_qemu_cmd.step.dependOn(userspace_images.step);
@@ -291,6 +345,8 @@ pub fn build(b: *std.Build) void {
     spec_smoke_cmd.step.dependOn(&run_spec_tests.step);
     const spec_conformance_step = b.step("spec-conformance", "Validate spec coverage, run native spec tests, and verify the freestanding smoke path");
     spec_conformance_step.dependOn(&spec_smoke_cmd.step);
+    spec_conformance_step.dependOn(&tampered_artifact_manifest_smoke_cmd.step);
+    spec_conformance_step.dependOn(&rollback_slot_failure_smoke_cmd.step);
     spec_conformance_step.dependOn(&recovery_qemu_cmd.step);
 
     const benchmark_cmd = b.addSystemCommand(&.{
@@ -310,7 +366,7 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(host_tests_step);
     verify_step.dependOn(spec_tests_step);
     verify_step.dependOn(prod_readiness_step);
-    if (verify_smoke) verify_step.dependOn(&zigos_native_smoke_test_cmd.step);
+    if (verify_smoke) verify_step.dependOn(zigos_native_smoke_test_step);
     if (verify_benchmark) verify_step.dependOn(&benchmark_cmd.step);
 
     const iso_cmd = b.addSystemCommand(&.{

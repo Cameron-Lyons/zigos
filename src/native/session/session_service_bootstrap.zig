@@ -6,6 +6,7 @@ const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const device_inventory = @import("../drivers/device_inventory.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
+const storage_driver_task_mod = @import("../drivers/storage_driver_task.zig");
 const native_util = @import("../core/util.zig");
 const std = @import("std");
 const service_bootstrap = @import("service_bootstrap.zig");
@@ -26,6 +27,11 @@ else
         pub fn printBootMarker(_: []const u8) void {}
     };
 
+const storage_restart_scratch_lba: u64 = storage_volume_mod.required_device_sectors + 16;
+const storage_restart_probe_sectors: u64 = 2;
+const booted_storage_sector_count: u64 = storage_restart_scratch_lba + storage_restart_probe_sectors;
+const booted_storage_image_bytes: usize = @as(usize, @intCast(booted_storage_sector_count)) * storage_volume_mod.sector_size;
+
 const BootedNetworkDataPlane = struct {
     fn send(_: []const u8) void {}
 
@@ -45,7 +51,7 @@ const BootedNetworkDataPlane = struct {
 };
 
 const BootedStorageDataPlane = struct {
-    var image = [_]u8{0} ** storage_volume_mod.image_bytes;
+    var image = [_]u8{0} ** booted_storage_image_bytes;
 
     fn reset() void {
         @memset(image[0..], 0);
@@ -72,10 +78,102 @@ const BootedStorageDataPlane = struct {
     fn activate(device_id: u64) ?storage_volume_mod.Backend {
         if (device_id != device_inventory.deviceIdForClass(.storage_controller)) return null;
         return .{
-            .sector_count = storage_volume_mod.required_device_sectors,
+            .sector_count = booted_storage_sector_count,
             .read = read,
             .write = write,
         };
+    }
+};
+
+const StorageRestartProbe = struct {
+    old_session: ?storage_driver_task_mod.AtaControllerSession = null,
+    stale_access_rejected: bool = false,
+
+    fn verifyBeforeRestart(self: *@This(), service_id: u64) bool {
+        var expected: [storage_volume_mod.sector_size]u8 = undefined;
+        var readback: [storage_volume_mod.sector_size]u8 = undefined;
+        fillPattern(expected[0..], "zigos-storage-before-restart", 0x21);
+        @memset(readback[0..], 0);
+
+        if (!bootstrap_driver_port.activeStorageWrite(service_id, storage_restart_scratch_lba, expected[0..])) return false;
+        if (!bootstrap_driver_port.activeStorageRead(service_id, storage_restart_scratch_lba, readback[0..])) return false;
+        if (!std.mem.eql(u8, expected[0..], readback[0..])) return false;
+
+        self.old_session = bootstrap_driver_port.activeStorageAtaSession(service_id);
+        if (builtin.target.os.tag == .freestanding and self.old_session == null) return false;
+        return true;
+    }
+
+    fn rejectStaleAccessAfterGenerationChange(self: *@This()) bool {
+        var session = self.old_session orelse {
+            self.stale_access_rejected = builtin.target.os.tag != .freestanding;
+            return self.stale_access_rejected;
+        };
+        var stale_read: [storage_volume_mod.sector_size]u8 = undefined;
+        self.stale_access_rejected = !storage_driver_task_mod.readAtaBootstrapSession(&session, storage_restart_scratch_lba, stale_read[0..]);
+        return self.stale_access_rejected;
+    }
+
+    fn verifyAfterRestart(_: *@This(), service_id: u64) bool {
+        var before_expected: [storage_volume_mod.sector_size]u8 = undefined;
+        var after_expected: [storage_volume_mod.sector_size]u8 = undefined;
+        var readback: [storage_volume_mod.sector_size]u8 = undefined;
+        fillPattern(before_expected[0..], "zigos-storage-before-restart", 0x21);
+        fillPattern(after_expected[0..], "zigos-storage-after-restart", 0x4B);
+        @memset(readback[0..], 0);
+
+        if (!bootstrap_driver_port.activeStorageRead(service_id, storage_restart_scratch_lba, readback[0..])) return false;
+        if (!std.mem.eql(u8, before_expected[0..], readback[0..])) return false;
+
+        @memset(readback[0..], 0);
+        if (!bootstrap_driver_port.activeStorageWrite(service_id, storage_restart_scratch_lba + 1, after_expected[0..])) return false;
+        if (!bootstrap_driver_port.activeStorageRead(service_id, storage_restart_scratch_lba + 1, readback[0..])) return false;
+        return std.mem.eql(u8, after_expected[0..], readback[0..]);
+    }
+
+    fn fillPattern(buffer: []u8, label: []const u8, salt: u8) void {
+        for (buffer, 0..) |*byte, index| {
+            byte.* = @as(u8, @truncate((index * 31) + salt));
+        }
+        const label_len = @min(buffer.len, label.len);
+        @memcpy(buffer[0..label_len], label[0..label_len]);
+    }
+};
+
+const DriverRecoveryRuntime = struct {
+    tasks: *task_runtime.Runtime,
+    activations: *driver_runtime_mod.Runtime,
+    rehost_count: usize = 0,
+    deactivation_count: usize = 0,
+    activation_count: usize = 0,
+    last_task_id: u64 = 0,
+    last_process_generation: u32 = 0,
+    storage_probe: ?*StorageRestartProbe = null,
+
+    pub fn deactivate(self: *@This(), service_id: u64) bool {
+        const deactivated = self.activations.deactivate(service_id);
+        if (deactivated) self.deactivation_count += 1;
+        return deactivated;
+    }
+
+    pub fn activateAt(self: *@This(), driver: *const driver_service.DriverRecord, tick: u64) !driver_runtime_mod.ActivationRecord {
+        const task = self.tasks.find(driver.owner_task_id) orelse return error.TaskNotFound;
+        const previous_generation = task.process_generation;
+        const rehosted = try self.tasks.rehostTask(driver.owner_task_id, tick);
+        const restarted_task = self.tasks.find(driver.owner_task_id) orelse return error.TaskNotFound;
+        if (driver.device_class == .storage_controller) {
+            if (self.storage_probe) |probe| {
+                if (!probe.rejectStaleAccessAfterGenerationChange()) return error.StaleStorageAccessNotRejected;
+            }
+        }
+        const activation = try self.activations.activateAt(driver, tick);
+        self.activation_count += 1;
+        self.last_task_id = driver.owner_task_id;
+        self.last_process_generation = restarted_task.process_generation;
+        if (rehosted and restarted_task.process_generation > previous_generation) {
+            self.rehost_count += 1;
+        }
+        return activation;
     }
 };
 
@@ -486,37 +584,6 @@ pub fn proveDriverCrashRestart(
     state: *const support.BootstrapState,
     service_bindings: *const support.ServiceBindings,
 ) bool {
-    const DriverRecoveryRuntime = struct {
-        tasks: *task_runtime.Runtime,
-        activations: *driver_runtime_mod.Runtime,
-        rehost_count: usize = 0,
-        deactivation_count: usize = 0,
-        activation_count: usize = 0,
-        last_task_id: u64 = 0,
-        last_process_generation: u32 = 0,
-
-        pub fn deactivate(self: *@This(), service_id: u64) bool {
-            const deactivated = self.activations.deactivate(service_id);
-            if (deactivated) self.deactivation_count += 1;
-            return deactivated;
-        }
-
-        pub fn activateAt(self: *@This(), driver: *const driver_service.DriverRecord, tick: u64) !driver_runtime_mod.ActivationRecord {
-            const task = self.tasks.find(driver.owner_task_id) orelse return error.TaskNotFound;
-            const previous_generation = task.process_generation;
-            const rehosted = try self.tasks.rehostTask(driver.owner_task_id, tick);
-            const restarted_task = self.tasks.find(driver.owner_task_id) orelse return error.TaskNotFound;
-            const activation = try self.activations.activateAt(driver, tick);
-            self.activation_count += 1;
-            self.last_task_id = driver.owner_task_id;
-            self.last_process_generation = restarted_task.process_generation;
-            if (rehosted and restarted_task.process_generation > previous_generation) {
-                self.rehost_count += 1;
-            }
-            return activation;
-        }
-    };
-
     var recovery_runtime = DriverRecoveryRuntime{
         .tasks = env.runtime,
         .activations = env.driver_runtime,
@@ -562,6 +629,60 @@ pub fn proveDriverCrashRestart(
         common.printBootMarker(boot_markers.service_boot_supervisor_restart_ok);
         common.printBootMarker(boot_markers.service_boot_supervisor_restart_without_reboot);
     }
+
+    return proveStorageDriverRestartIo(env, state);
+}
+
+pub fn proveStorageDriverRestartIo(
+    env: *const support.Environment,
+    state: *const support.BootstrapState,
+) bool {
+    var storage_probe = StorageRestartProbe{};
+    if (!storage_probe.verifyBeforeRestart(state.services.storage_service.id)) {
+        _ = env.supervisor.recordCrash(state.services.storage_service.id, 80, bootFailureCode(error.MissingBootstrapLaunch));
+        return false;
+    }
+    common.printBootMarker(boot_markers.service_boot_storage_io_before_restart_ok);
+
+    var recovery_runtime = DriverRecoveryRuntime{
+        .tasks = env.runtime,
+        .activations = env.driver_runtime,
+        .storage_probe = &storage_probe,
+    };
+    const storage_recovery = env.supervisor.recoverDriverCrash(
+        state.services.storage_service.id,
+        env.driver_directory,
+        &recovery_runtime,
+        null,
+        env.diagnostic_ledger,
+        81,
+        0x57,
+        "storage driver restarted",
+    ) catch |err| {
+        _ = env.supervisor.recordCrash(state.services.storage_service.id, 81, bootFailureCode(err));
+        return false;
+    };
+
+    const storage_driver = env.driver_directory.findByService(state.services.storage_service.id) orelse return false;
+    const expected_storage_data_plane = storage_recovery.userspace_brokered_data_plane or builtin.target.os.tag != .freestanding;
+    if (!storage_probe.stale_access_rejected or
+        !storage_recovery.runtime_activation_observed or
+        !storage_recovery.runtime_exclusive_claim or
+        !expected_storage_data_plane or
+        recovery_runtime.last_task_id != storage_driver.owner_task_id or
+        recovery_runtime.last_process_generation < 2 or
+        storage_driver.restart_generation != 2)
+    {
+        _ = env.supervisor.recordCrash(state.services.storage_service.id, 83, bootFailureCode(error.MissingBootstrapLaunch));
+        return false;
+    }
+    common.printBootMarker(boot_markers.service_boot_storage_stale_access_rejected);
+
+    if (!storage_probe.verifyAfterRestart(state.services.storage_service.id)) {
+        _ = env.supervisor.recordCrash(state.services.storage_service.id, 84, bootFailureCode(error.MissingBootstrapLaunch));
+        return false;
+    }
+    common.printBootMarker(boot_markers.service_boot_storage_io_after_restart_ok);
     return true;
 }
 

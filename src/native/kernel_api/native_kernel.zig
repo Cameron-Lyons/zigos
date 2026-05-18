@@ -8,6 +8,7 @@ const ids = @import("../core/ids.zig");
 const kernel_access = @import("native_kernel_access.zig");
 const kernel_descriptors = @import("native_kernel_descriptors.zig");
 const operation_metadata = @import("operation_metadata.zig");
+const generated_image_fixtures = if (@import("builtin").is_test) @import("../task/generated_image_fixtures.zig") else struct {};
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const shared_memory = @import("shared_memory.zig");
@@ -875,10 +876,8 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
         .capability_query = true,
     } });
 
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const workspace_storage_image = task_runtime.syntheticUserspaceImage("workspace-storage", "zigos.object.workspace");
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const example_client_image = task_runtime.syntheticUserspaceImage("example-client", "app.example.client");
+    const workspace_storage_image = try generated_image_fixtures.workspaceStorageImage();
+    const example_client_image = try generated_image_fixtures.serviceClientImage();
     const service_task_desc = try kernel.taskCreate(testContext(.task_create, authority_capability.id, .{ .task = 0 }), .{
         .owner = .{ .kind = .service, .serial = 3 },
         .component_class = .service_component,
@@ -1011,10 +1010,8 @@ test "native kernel rejects app and service launches without signed userspace im
     const authority_capability = try harness.mintSessionServiceAuthority(session_task, .{ .service = .{
         .task_create = true,
     } });
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const unsigned_app_image = task_runtime.syntheticUserspaceImage("unsigned-app", "app.unsigned");
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const missing_bundle_image = task_runtime.syntheticUserspaceImage("missing-bundle", "zigos.service.missing-bundle");
+    const unsigned_app_image = try generated_image_fixtures.appImage();
+    const missing_bundle_image = try generated_image_fixtures.serviceImage();
 
     try std.testing.expectError(error.UserspaceLaunchRequired, kernel.taskCreate(testContext(.task_create, authority_capability.id, .{ .task = 0 }), .{
         .owner = .{ .kind = .app, .serial = 4 },
@@ -1262,11 +1259,7 @@ test "native kernel brokers device metadata and port io through device capabilit
         &shared,
     );
 
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const storage_driver_test_image = task_runtime.syntheticUserspaceImage(
-        "storage-driver-test",
-        "zigos.system.storage-driver",
-    );
+    const storage_driver_test_image = try generated_image_fixtures.storageDriverImage();
     const driver_task = try runtime.createTask(.{
         .owner = .{ .kind = .service, .serial = 4 },
         .component_class = .service_component,

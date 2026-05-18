@@ -9,6 +9,7 @@ const native_kernel = @import("../kernel_api/native_kernel.zig");
 const principal = @import("../core/principal.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
 const syscall_surface = @import("../kernel_api/syscall_surface.zig");
+const generated_image_fixtures = if (@import("builtin").is_test) @import("../task/generated_image_fixtures.zig") else struct {};
 const task_runtime = @import("../task/task_runtime.zig");
 const service_protocol = @import("../task/userspace_service_protocol.zig");
 
@@ -315,8 +316,7 @@ const Harness = struct {
         self.session_authority_capability_id = session_authority.id;
         try self.runtime.grantCapability(self.session_task_id, self.session_authority_capability_id);
 
-        // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-        const image = task_runtime.syntheticUserspaceImage(serviceLabel(kind), serviceEntry(kind));
+        const image = try generated_image_fixtures.imageByBundleId(serviceBundle(kind));
         const service_task = try self.port.taskCreate(.{
             .header = component_port.makeHeader(.task_create, nextCorrelationId(), self.session_task_id),
             .authority_capability_id = self.session_authority_capability_id,

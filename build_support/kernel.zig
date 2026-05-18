@@ -7,13 +7,19 @@ pub fn addKernelArtifact(
     optimize: std.builtin.OptimizeMode,
     name: []const u8,
     boot_profile: shared.BootProfile,
+    smoke_fault_mode: shared.SmokeFaultMode,
     userspace_archive: ?*std.Build.Module,
     production_manifest: ?*std.Build.Module,
 ) shared.KernelArtifact {
     const options = b.addOptions();
     options.addOption(shared.BootProfile, "boot_profile", boot_profile);
+    options.addOption(shared.SmokeFaultMode, "smoke_fault_mode", smoke_fault_mode);
+    const module_name = if (smoke_fault_mode == .none)
+        b.fmt("kernel-{s}", .{@tagName(boot_profile)})
+    else
+        b.fmt("kernel-{s}-{s}", .{ @tagName(boot_profile), @tagName(smoke_fault_mode) });
 
-    const kernel_module = b.addModule(b.fmt("kernel-{s}", .{@tagName(boot_profile)}), .{
+    const kernel_module = b.addModule(module_name, .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,

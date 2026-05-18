@@ -1,6 +1,7 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
+const generated_image_fixtures = if (@import("builtin").is_test) @import("generated_image_fixtures.zig") else struct {};
 const principal = @import("../core/principal.zig");
 const task_runtime = @import("task_runtime.zig");
 
@@ -184,8 +185,7 @@ fn visibleProcessControlCapability(
 }
 
 fn createApp(runtime: *task_runtime.Runtime, owner: principal.PrincipalId) !*task_runtime.TaskRecord {
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    var image = task_runtime.syntheticUserspaceImage("isolation-test", "app.process-isolation-test");
+    const image = try generated_image_fixtures.appImage();
     return runtime.createTask(.{
         .owner = owner,
         .component_class = .app_component,

@@ -159,6 +159,22 @@ pub const TrustBoot = struct {
         if (boot_candidate.slot_index != 1) return false;
         if (!persistPersistentBaseSelector(&selector)) return false;
 
+        if (smokeFaultModeIs("rollback_slot_failure")) {
+            base_manager.slots[0].measurement[0] ^= 0xA5;
+            const rejected_rollback = base_manager.finalizeActivation(.{ .network_ok = false }, 74) catch return false;
+            const rejected_selector = selector.finalizeBoot(.{ .network_ok = false }, false, 74) catch return false;
+            if (!rejected_rollback.rolled_back or rejected_rollback.active_slot == null or rejected_rollback.active_slot.? != 0) return false;
+            if (!rejected_selector.rolled_back or rejected_selector.active_slot == null or rejected_selector.active_slot.? != 0) return false;
+            if (base_manager.verifyActiveImage()) return false;
+            if (base_manager.selectVerifiedBootImage()) |_| {
+                return false;
+            } else |err| {
+                if (err != error.ImageVerificationFailed) return false;
+            }
+            common.printBootMarker(boot_markers.platform_base_selector_rollback_slot_failure_rejected);
+            return false;
+        }
+
         const rolled_back = base_manager.finalizeActivation(.{ .network_ok = false }, 74) catch return false;
         const selector_rollback = selector.finalizeBoot(.{ .network_ok = false }, false, 74) catch return false;
         if (!rolled_back.rolled_back) return false;
@@ -406,6 +422,23 @@ pub const TrustBoot = struct {
         var boot = measured.finalize();
         if (builtin.target.os.tag == .freestanding) {
             const handoff = measured_boot.BootloaderMeasurementHandoff.fromBootRecord(&boot) catch return false;
+            if (smokeFaultModeIs("tampered_artifact_manifest")) {
+                var tampered_manifest = signed_manifest;
+                tampered_manifest.manifest.entries[0].digest[0] ^= 0x5A;
+                if (measured_boot.verifyBootloaderMeasurementHandoff(
+                    &handoff,
+                    &tampered_manifest,
+                    measured_boot.production_artifact_manifest_signer,
+                )) |_| {
+                    return false;
+                } else |err| switch (err) {
+                    error.UntrustedArtifactManifest, error.ManifestMismatch => {
+                        common.printBootMarker(boot_markers.platform_artifact_manifest_tamper_rejected);
+                        return false;
+                    },
+                    else => return false,
+                }
+            }
             boot = measured_boot.verifyBootloaderMeasurementHandoff(
                 &handoff,
                 &signed_manifest,
@@ -845,6 +878,12 @@ fn hashCapability(hasher: *crypto_hash.Hasher, tag: []const u8, cap: *const capa
     crypto_hash.updateInt(hasher, "capability-policy-generation", cap.audit.policy_generation);
     crypto_hash.updateInt(hasher, "capability-source-task-id", cap.audit.source_task_id);
     crypto_hash.updateInt(hasher, "capability-broker-service-id", cap.audit.broker_service_id);
+}
+
+fn smokeFaultModeIs(comptime mode_name: []const u8) bool {
+    if (builtin.target.os.tag != .freestanding) return false;
+    const config = @import("../../kernel/config.zig");
+    return std.mem.eql(u8, @tagName(config.smokeFaultMode()), mode_name);
 }
 
 fn supportMeasuredBootShape(boot: *const measured_boot.BootRecord) void {

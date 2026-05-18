@@ -418,6 +418,47 @@ pub fn buildArtifactDigestMatches(
     return std.mem.eql(u8, &entry.digest, digest);
 }
 
+pub fn generatedUserspaceArchiveMatchesManifest(manifest: *const BuildArtifactManifest) bool {
+    if (!@import("builtin").is_test) return false;
+    const generated_archive = @import("userspace_archive");
+
+    if (manifest.countKind(.userspace_image) != generated_archive.artifacts.len) return false;
+    for (generated_archive.artifacts) |artifact| {
+        if (artifact.data.len == 0) return false;
+        if (!artifact.signed) return false;
+        if (artifact.file_size_bytes != artifact.data.len) return false;
+
+        const digest = rawSha256(artifact.data);
+        if (!std.mem.eql(u8, &digest, &artifact.file_sha256)) return false;
+        if (!buildArtifactDigestMatches(manifest, .userspace_image, artifact.bundle_id, &digest)) return false;
+    }
+
+    return true;
+}
+
+pub fn generatedProductionArtifactManifestMatchesUserspaceArchive() !void {
+    if (!@import("builtin").is_test) return;
+    const generated_manifest = @import("production_artifact_manifest");
+    const generated_archive = @import("userspace_archive");
+
+    var manifest = try buildArtifactManifestFromGenerated(generated_manifest);
+    try std.testing.expect(verifyBuildArtifactManifest(&manifest));
+    try std.testing.expectEqual(generated_archive.artifacts.len, manifest.countKind(.userspace_image));
+    try std.testing.expect(generatedUserspaceArchiveMatchesManifest(&manifest));
+
+    var stale_digest = manifest;
+    const stale_index = firstBuildArtifactIndex(&stale_digest, .userspace_image) orelse return error.ManifestMismatch;
+    stale_digest.entries[stale_index].digest[0] ^= 0x33;
+    try signBuildArtifactManifestForTest(&stale_digest);
+    try std.testing.expect(verifyBuildArtifactManifest(&stale_digest));
+    try std.testing.expect(!generatedUserspaceArchiveMatchesManifest(&stale_digest));
+
+    var missing_entry = manifest;
+    try removeBuildArtifactEntry(&missing_entry, stale_index);
+    try signBuildArtifactManifestForTest(&missing_entry);
+    try std.testing.expect(!generatedUserspaceArchiveMatchesManifest(&missing_entry));
+}
+
 pub fn buildArtifactEntry(kind: BuildArtifactKind, label: []const u8, digest: [32]u8) Error!BuildArtifactEntry {
     var entry = zeroBuildArtifactEntry();
     entry.kind = kind;
@@ -441,6 +482,12 @@ pub fn buildArtifactManifestFromGenerated(comptime generated: anytype) Error!Bui
         .value = generated.signature_value,
     };
     return manifest;
+}
+
+fn signBuildArtifactManifestForTest(manifest: *BuildArtifactManifest) !void {
+    var payload_buffer: [4096]u8 = undefined;
+    const payload = try encodeBuildArtifactManifest(manifest.generation, manifest.entries[0..manifest.entry_count], &payload_buffer);
+    manifest.signature = try signing.sign(build_artifact_manifest_signer, payload);
 }
 
 pub fn encodeBuildArtifactManifest(generation: u64, entries: []const BuildArtifactEntry, buffer: []u8) Error![]const u8 {
@@ -628,6 +675,31 @@ fn hashMeasurement(kind: MeasurementKind, label: []const u8, payload: []const u8
     crypto_hash.updateBytes(&hasher, "label", label);
     crypto_hash.updateBytes(&hasher, "payload", payload);
     return crypto_hash.finalize(&hasher);
+}
+
+fn rawSha256(bytes: []const u8) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(bytes);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+fn firstBuildArtifactIndex(manifest: *const BuildArtifactManifest, kind: BuildArtifactKind) ?usize {
+    for (manifest.entries[0..manifest.entry_count], 0..) |entry, index| {
+        if (entry.kind == kind) return index;
+    }
+    return null;
+}
+
+fn removeBuildArtifactEntry(manifest: *BuildArtifactManifest, index: usize) Error!void {
+    if (index >= manifest.entry_count) return error.ManifestMismatch;
+    var cursor = index;
+    while (cursor + 1 < manifest.entry_count) : (cursor += 1) {
+        manifest.entries[cursor] = manifest.entries[cursor + 1];
+    }
+    manifest.entry_count -= 1;
+    manifest.entries[manifest.entry_count] = zeroBuildArtifactEntry();
 }
 
 const CriticalServiceMeasurementPayload = [64]u8;
@@ -1124,6 +1196,10 @@ test "build-generated artifact manifests reject tampered bootloader source measu
     };
     wrong_authority.signature = try signing.sign(wrong_signer, payload);
     try std.testing.expect(!verifyBuildArtifactManifest(&wrong_authority));
+}
+
+test "build-generated production artifact manifest matches embedded userspace archive" {
+    try generatedProductionArtifactManifestMatchesUserspaceArchive();
 }
 
 test "bootloader measurement handoff rejects unsigned manifests and tampered startup artifacts" {

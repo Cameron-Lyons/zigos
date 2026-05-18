@@ -9,9 +9,22 @@ MARKER_TOOL="${ROOT_DIR}/src/print_native_smoke_markers.zig"
 KERNEL_PATH="${1:?kernel path required}"
 LOG_PATH="${2:?serial log path required}"
 NATIVE_STORE_IMAGE="${3:?native store image path required}"
+MODE="${4:-full}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
 ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-180}"
 ZIGOS_READY_MARKER="$("$ZIG" run "$MARKER_TOOL" -- ready)"
+DRIVER_RESTART_DONE_MARKER="ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_IO_AFTER_RESTART_OK"
+ARTIFACT_MANIFEST_TAMPER_REJECTED_MARKER="ZIGOS:PLATFORM:ARTIFACT_MANIFEST:TAMPER_REJECTED"
+ROLLBACK_SLOT_FAILURE_REJECTED_MARKER="ZIGOS:PLATFORM:BASE_SELECTOR:ROLLBACK_SLOT_REJECTED"
+VALIDATION_MARKER="$ZIGOS_READY_MARKER"
+
+if [ "$MODE" = "driver_restart" ]; then
+  VALIDATION_MARKER="$DRIVER_RESTART_DONE_MARKER"
+elif [ "$MODE" = "tampered_artifact_manifest" ]; then
+  VALIDATION_MARKER="$ARTIFACT_MANIFEST_TAMPER_REJECTED_MARKER"
+elif [ "$MODE" = "rollback_slot_failure" ]; then
+  VALIDATION_MARKER="$ROLLBACK_SLOT_FAILURE_REJECTED_MARKER"
+fi
 
 BASE_LOG_PATH="${LOG_PATH%.log}"
 BOOT1_LOG="${BASE_LOG_PATH}.boot1.log"
@@ -56,7 +69,7 @@ run_boot() {
   qemu_pid=$!
 
   while kill -0 "$qemu_pid" >/dev/null 2>&1; do
-    if [ -s "$log_path" ] && grep -Fq "$ZIGOS_READY_MARKER" "$log_path"; then
+    if [ -s "$log_path" ] && grep -Fq "$VALIDATION_MARKER" "$log_path"; then
       ready_seen=1
       sleep 1
       kill -TERM "$qemu_pid" >/dev/null 2>&1 || true
@@ -95,8 +108,8 @@ run_boot() {
     echo "Timed idle after validation boot: $log_path" >/dev/null
   fi
 
-  if [ "$ready_seen" -eq 0 ] && ! grep -Fq "$ZIGOS_READY_MARKER" "$log_path"; then
-    echo "Zigos native smoke test failed: ready marker '$ZIGOS_READY_MARKER' not observed in $log_path" >&2
+  if [ "$ready_seen" -eq 0 ] && ! grep -Fq "$VALIDATION_MARKER" "$log_path"; then
+    echo "Zigos native smoke test failed: validation marker '$VALIDATION_MARKER' not observed in $log_path" >&2
     cat "$log_path" >&2
     if [ -s "$qemu_error_log" ]; then
       cat "$qemu_error_log" >&2
@@ -149,6 +162,22 @@ assert_base_selector_active_slot() {
   fi
 }
 
+assert_no_ready_marker() {
+  local log_path="$1"
+  if grep -Fq "$ZIGOS_READY_MARKER" "$log_path"; then
+    echo "Zigos native smoke test failed: negative run reached ready marker in $log_path" >&2
+    cat "$log_path" >&2
+    exit 1
+  fi
+}
+
+assert_negative_boot_rejected() {
+  local log_path="$1"
+  local group="$2"
+  assert_marker_group "$log_path" "$group"
+  assert_no_ready_marker "$log_path"
+}
+
 line_number() {
   local log_path="$1"
   local marker="$2"
@@ -162,6 +191,9 @@ assert_driver_restart_without_reboot() {
   local rehost_marker
   local restart_marker
   local no_reboot_marker
+  local storage_before_marker
+  local storage_stale_marker
+  local storage_after_marker
   local ready_marker
   local boot_count
   local boot_line
@@ -169,6 +201,9 @@ assert_driver_restart_without_reboot() {
   local rehost_line
   local restart_line
   local no_reboot_line
+  local storage_before_line
+  local storage_stale_line
+  local storage_after_line
   local ready_line
 
   assert_marker_group "$log_path" driver_restart
@@ -177,7 +212,10 @@ assert_driver_restart_without_reboot() {
   rehost_marker="ZIGOS:SERVICE_BOOT:DRIVER:REHOST_OK"
   restart_marker="ZIGOS:SERVICE_BOOT:SUPERVISOR:RESTART_OK"
   no_reboot_marker="ZIGOS:SERVICE_BOOT:SUPERVISOR:RESTART_WITHOUT_REBOOT"
-  ready_marker="$ZIGOS_READY_MARKER"
+  storage_before_marker="ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_IO_BEFORE_RESTART_OK"
+  storage_stale_marker="ZIGOS:SERVICE_BOOT:DRIVER:STALE_ACCESS_REJECTED"
+  storage_after_marker="ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_IO_AFTER_RESTART_OK"
+  ready_marker="$VALIDATION_MARKER"
 
   boot_count="$(grep -Fc "$boot_marker" "$log_path")"
   if [ "$boot_count" -ne 1 ]; then
@@ -191,13 +229,24 @@ assert_driver_restart_without_reboot() {
   rehost_line="$(line_number "$log_path" "$rehost_marker")"
   restart_line="$(line_number "$log_path" "$restart_marker")"
   no_reboot_line="$(line_number "$log_path" "$no_reboot_marker")"
+  storage_before_line="$(line_number "$log_path" "$storage_before_marker")"
+  storage_stale_line="$(line_number "$log_path" "$storage_stale_marker")"
+  storage_after_line="$(line_number "$log_path" "$storage_after_marker")"
   ready_line="$(line_number "$log_path" "$ready_marker")"
 
   if [ "$boot_line" -ge "$crash_line" ] ||
      [ "$crash_line" -ge "$rehost_line" ] ||
      [ "$rehost_line" -ge "$restart_line" ] ||
      [ "$restart_line" -ge "$no_reboot_line" ] ||
-     [ "$no_reboot_line" -ge "$ready_line" ]; then
+     [ "$no_reboot_line" -ge "$storage_before_line" ] ||
+     [ "$storage_before_line" -ge "$storage_stale_line" ] ||
+     [ "$storage_stale_line" -ge "$storage_after_line" ]; then
+    echo "Zigos native smoke test failed: driver restart proof markers are out of order in $log_path" >&2
+    cat "$log_path" >&2
+    exit 1
+  fi
+
+  if [ "$MODE" = "full" ] && [ "$storage_after_line" -ge "$ready_line" ]; then
     echo "Zigos native smoke test failed: driver restart proof markers are out of order in $log_path" >&2
     cat "$log_path" >&2
     exit 1
@@ -245,26 +294,52 @@ append_measured_boot_comparison() {
   fi
 }
 
-run_boot "$BOOT1_LOG" reset
-assert_boot_markers "$BOOT1_LOG"
-assert_first_boot_markers "$BOOT1_LOG"
-assert_ab_rollback_markers "$BOOT1_LOG"
-assert_base_selector_active_slot "$BOOT1_LOG"
-assert_driver_restart_without_reboot "$BOOT1_LOG"
+case "$MODE" in
+  full)
+    run_boot "$BOOT1_LOG" reset
+    assert_boot_markers "$BOOT1_LOG"
+    assert_first_boot_markers "$BOOT1_LOG"
+    assert_ab_rollback_markers "$BOOT1_LOG"
+    assert_base_selector_active_slot "$BOOT1_LOG"
+    assert_driver_restart_without_reboot "$BOOT1_LOG"
 
-run_boot "$BOOT2_LOG" preserve
-assert_boot_markers "$BOOT2_LOG"
-assert_reboot_markers "$BOOT2_LOG"
-assert_ab_rollback_markers "$BOOT2_LOG"
-assert_base_selector_active_slot "$BOOT2_LOG"
-assert_driver_restart_without_reboot "$BOOT2_LOG"
+    run_boot "$BOOT2_LOG" preserve
+    assert_boot_markers "$BOOT2_LOG"
+    assert_reboot_markers "$BOOT2_LOG"
+    assert_ab_rollback_markers "$BOOT2_LOG"
+    assert_base_selector_active_slot "$BOOT2_LOG"
+    assert_driver_restart_without_reboot "$BOOT2_LOG"
 
-{
-  cat "$BOOT1_LOG"
-  printf '\n=== COLD REBOOT ===\n'
-  cat "$BOOT2_LOG"
-  append_measured_boot_comparison
-  append_build_artifact_measurements
-} >"$LOG_PATH"
+    {
+      cat "$BOOT1_LOG"
+      printf '\n=== COLD REBOOT ===\n'
+      cat "$BOOT2_LOG"
+      append_measured_boot_comparison
+      append_build_artifact_measurements
+    } >"$LOG_PATH"
 
-echo "Zigos native smoke test passed across cold reboot. Logs: $LOG_PATH"
+    echo "Zigos native smoke test passed across cold reboot. Logs: $LOG_PATH"
+    ;;
+  driver_restart)
+    run_boot "$BOOT1_LOG" reset
+    assert_driver_restart_without_reboot "$BOOT1_LOG"
+    cat "$BOOT1_LOG" >"$LOG_PATH"
+    echo "Zigos driver restart QEMU test passed. Logs: $LOG_PATH"
+    ;;
+  tampered_artifact_manifest)
+    run_boot "$BOOT1_LOG" reset
+    assert_negative_boot_rejected "$BOOT1_LOG" tampered_artifact_manifest
+    cat "$BOOT1_LOG" >"$LOG_PATH"
+    echo "Zigos tampered artifact manifest negative smoke test passed. Logs: $LOG_PATH"
+    ;;
+  rollback_slot_failure)
+    run_boot "$BOOT1_LOG" reset
+    assert_negative_boot_rejected "$BOOT1_LOG" rollback_slot_failure
+    cat "$BOOT1_LOG" >"$LOG_PATH"
+    echo "Zigos rollback-slot failure negative smoke test passed. Logs: $LOG_PATH"
+    ;;
+  *)
+    echo "Unknown smoke mode '$MODE'" >&2
+    exit 1
+    ;;
+esac
