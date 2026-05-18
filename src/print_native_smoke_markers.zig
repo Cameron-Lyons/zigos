@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.len != 2) {
         try stderr_writer.interface.print(
-            "usage: {s} <ready|cold_boot|first_boot|cold_reboot|driver_restart|ab_rollback|recovery>\n",
+            "usage: {s} <ready|cold_boot|first_boot|cold_reboot|driver_restart|ab_rollback|tampered_artifact_manifest|rollback_slot_failure|recovery>\n",
             .{args[0]},
         );
         try stderr_writer.interface.flush();
@@ -40,6 +40,14 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (std.mem.eql(u8, group, "ab_rollback")) {
         for (smoke_markers.ab_rollback_required) |line| {
+            try stdout_writer.interface.print("{s}\n", .{line});
+        }
+    } else if (std.mem.eql(u8, group, "tampered_artifact_manifest")) {
+        for (smoke_markers.tampered_artifact_manifest_required) |line| {
+            try stdout_writer.interface.print("{s}\n", .{line});
+        }
+    } else if (std.mem.eql(u8, group, "rollback_slot_failure")) {
+        for (smoke_markers.rollback_slot_failure_required) |line| {
             try stdout_writer.interface.print("{s}\n", .{line});
         }
     } else if (std.mem.eql(u8, group, "recovery")) {

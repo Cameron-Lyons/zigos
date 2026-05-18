@@ -7,6 +7,7 @@ const endpoint = @import("../kernel_api/endpoint.zig");
 const native_kernel = @import("../kernel_api/native_kernel.zig");
 const principal = @import("../core/principal.zig");
 const service_catalog = @import("../session/service_catalog.zig");
+const generated_image_fixtures = if (@import("builtin").is_test) @import("../task/generated_image_fixtures.zig") else struct {};
 const shared_memory = @import("../kernel_api/shared_memory.zig");
 const storage_service = @import("storage_service.zig");
 const syscall_surface = @import("../kernel_api/syscall_surface.zig");
@@ -483,8 +484,7 @@ const UserspaceStorageHarness = struct {
         try self.runtime.grantCapability(self.session_task_id, self.session_authority_capability_id);
 
         const storage_bundle_id = service_catalog.bundleIdForServiceClass(.storage_object).?;
-        // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-        const storage_image = task_runtime.syntheticUserspaceImage("workspace-storage", "zigos.object.workspace");
+        const storage_image = try generated_image_fixtures.storageServiceImage();
         const storage_task = try self.port.taskCreate(.{
             .header = component_port.makeHeader(.task_create, STORAGE_TASK_CREATE_CORRELATION_ID, self.session_task_id),
             .authority_capability_id = self.session_authority_capability_id,
@@ -509,8 +509,7 @@ const UserspaceStorageHarness = struct {
         }, STORAGE_TASK_CREATE_TICK);
         self.storage_task_id = storage_task.task_id;
 
-        // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-        const client_image = task_runtime.syntheticUserspaceImage("storage-client", "app.storage-client");
+        const client_image = try generated_image_fixtures.serviceClientImage();
         const client_task = try self.port.taskCreate(.{
             .header = component_port.makeHeader(.task_create, CLIENT_TASK_CREATE_CORRELATION_ID, self.session_task_id),
             .authority_capability_id = self.session_authority_capability_id,

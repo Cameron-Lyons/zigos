@@ -6,6 +6,12 @@ pub const BootProfile = enum {
     benchmark,
 };
 
+pub const SmokeFaultMode = enum {
+    none,
+    tampered_artifact_manifest,
+    rollback_slot_failure,
+};
+
 pub const KernelArtifact = struct {
     compile_step: *std.Build.Step.Compile,
     install_step: *std.Build.Step,

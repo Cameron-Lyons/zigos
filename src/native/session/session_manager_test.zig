@@ -65,11 +65,11 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, audio_activation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, input_activation.mode);
     try std.testing.expectEqual(@as(u16, 1), network_service.restart_count);
-    try std.testing.expectEqual(@as(u16, 0), storage_service.restart_count);
+    try std.testing.expectEqual(@as(u16, 1), storage_service.restart_count);
     try std.testing.expectEqual(@as(u16, 0), sync_service.restart_count);
 
     try std.testing.expectEqual(@as(u32, 2), driver_directory.findByClass(.network_adapter).?.restart_generation);
-    try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.storage_controller).?.restart_generation);
+    try std.testing.expectEqual(@as(u32, 2), driver_directory.findByClass(.storage_controller).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.graphics_adapter).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.audio_print_io).?.restart_generation);
 
@@ -177,11 +177,11 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, audio_activation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, input_activation.mode);
     try std.testing.expectEqual(@as(u16, 1), network_service.restart_count);
-    try std.testing.expectEqual(@as(u16, 1), storage_service.restart_count);
+    try std.testing.expectEqual(@as(u16, 2), storage_service.restart_count);
     try std.testing.expectEqual(@as(u16, 1), sync_service.restart_count);
 
     try std.testing.expectEqual(@as(u32, 2), driver_directory.findByClass(.network_adapter).?.restart_generation);
-    try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.storage_controller).?.restart_generation);
+    try std.testing.expectEqual(@as(u32, 2), driver_directory.findByClass(.storage_controller).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.graphics_adapter).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.audio_print_io).?.restart_generation);
 

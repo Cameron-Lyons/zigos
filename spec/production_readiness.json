@@ -74,22 +74,23 @@
       "current_evidence": [
         "Freestanding boot records can be verified against signed artifact manifests and compared across native smoke boots.",
         "Remote attestation refuses emulator-rooted measured state and requires a provisioned non-software root.",
-        "A/B base selection, rollback, and post-activation health markers are covered by host and QEMU smoke evidence."
+        "A/B base selection, rollback, and post-activation health markers are covered by host and QEMU smoke evidence.",
+        "The native smoke target now includes negative QEMU runs that reject a tampered boot artifact manifest and a rollback target whose slot measurement no longer verifies before the boot can reach native-ready."
       ],
       "production_gaps": [
         "Host evidence still uses emulator-provided measurement fallbacks, and attestation root material is represented by software signer identities.",
         "There is no hardware-backed provisioning, rotation, revocation, or verifier protocol boundary for TPM or secure-enclave roots.",
-        "Release artifact signing and bootloader measurement handoff are not yet tied to an operational key-management story."
+        "Release artifact signing and bootloader measurement handoff now have smoke-level tamper rejection, but are not yet tied to an operational key-management story."
       ],
       "graduation_criteria": [
         "Introduce a hardware-root abstraction that supports TPM and secure enclave backed quote/sign operations without exposing root seed material.",
         "Add verifier-facing attestation request and response records with nonce, remote party, policy visibility, key rotation, and revocation tests.",
-        "Gate release images on signed build manifests and QEMU tamper tests for kernel, bootloader measurement, userspace image, policy, driver set, and rollback slots."
+        "Broaden release-image tamper gates from manifest-level and rollback-slot smoke faults to direct kernel, bootloader measurement, userspace image, policy, and driver-set mutation cases under operational signing keys."
       ],
       "next_actions": [
         "Split software signer provisioning out of attestation_service into a test-only provider.",
         "Add a production root provider interface and a fake TPM provider used only by adversarial tests.",
-        "Extend the smoke harness with explicit tampered artifact manifest and rollback-slot failure runs."
+        "Extend the smoke tamper fixtures from manifest-level mutation to direct per-artifact kernel, userspace, policy, and driver-set mutations."
       ],
       "verification_commands": [
         "./scripts/zig.sh build spec-conformance",

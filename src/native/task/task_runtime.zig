@@ -1,5 +1,6 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const builtin = @import("builtin");
+const generated_image_fixtures = if (builtin.is_test) @import("generated_image_fixtures.zig") else struct {};
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const model = @import("task_runtime_model.zig");
@@ -726,7 +727,7 @@ test "explicit resource classes override the default task classification" {
 
 test "userspace launch provenance is recorded for explicit image launches" {
     var runtime = Runtime.init();
-    const notes_image = syntheticUserspaceImage("notes", "app.notes");
+    const notes_image = try generated_image_fixtures.imageByBundleId("app.notes");
     const task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 12 },
         .component_class = .app_component,
@@ -761,7 +762,7 @@ test "userspace launch provenance is recorded for explicit image launches" {
 
 test "userspace tasks materialize executable mappings in their address spaces" {
     var runtime = Runtime.init();
-    const workspace_storage_image = syntheticUserspaceImage("workspace-storage", "zigos.object.workspace");
+    const workspace_storage_image = try generated_image_fixtures.storageServiceImage();
     const task = try runtime.createTask(.{
         .owner = .{ .kind = .service, .serial = 13 },
         .component_class = .service_component,
@@ -894,7 +895,7 @@ test "tasks are isolated in separate process address space and namespace hosts a
 
 test "rehosting a userspace task rebuilds the mapped executable state" {
     var runtime = Runtime.init();
-    const sync_service_image = syntheticUserspaceImage("sync-service", "zigos.sync.workspace");
+    const sync_service_image = try generated_image_fixtures.syncServiceImage();
     const task = try runtime.createTask(.{
         .owner = .{ .kind = .service, .serial = 14 },
         .component_class = .service_component,
@@ -907,7 +908,7 @@ test "rehosting a userspace task rebuilds the mapped executable state" {
         .local_only = true,
         .initial_component = .{
             .label = "sync-service",
-            .entry = "zigos.sync.workspace",
+            .entry = "zigos.sync.replication",
         },
         .launch = .{
             .boundary = .userspace_process,

@@ -10,6 +10,7 @@ const device_inventory = @import("../../native/drivers/device_inventory.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const kernel_descriptors = @import("../../native/kernel_api/native_kernel_descriptors.zig");
+const generated_image_fixtures = @import("../../native/task/generated_image_fixtures.zig");
 const native_kernel = @import("../../native/kernel_api/native_kernel.zig");
 const native_util = @import("../../native/core/util.zig");
 const package_service = @import("../../native/services/package_service.zig");
@@ -589,6 +590,8 @@ fn invariantTargetKindsDisambiguateHashedIds() !void {
 }
 
 pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
+    try generated_image_fixtures.expectReaderRejectsInvalidGeneratedRecords();
+
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
     var endpoints = @import("../../native/kernel_api/endpoint.zig").Table.init();

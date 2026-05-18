@@ -36,6 +36,7 @@ const storage_service = @import("../storage/storage_service.zig");
 const sync_service = @import("../sync/sync_service.zig");
 const syscall_surface = @import("../kernel_api/syscall_surface.zig");
 const supervisor_mod = @import("supervisor.zig");
+const generated_image_fixtures = if (@import("builtin").is_test) @import("../task/generated_image_fixtures.zig") else struct {};
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service = @import("../task/task_runtime_service.zig");
 const update_health = @import("../platform/update_health.zig");
@@ -1794,8 +1795,7 @@ fn proveBootedCompositorServicePath(
     runtime.allowHostPointerSyscallsForTask(compositor_task.id);
 
     const app_owner = principal.PrincipalId{ .kind = .app, .serial = 82_001 };
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const app_image = task_runtime.syntheticUserspaceImage("trip-coordinator", "app.trip");
+    const app_image = try generated_image_fixtures.appImage();
     var ux_controller = native_ux.Controller.init();
     const app_task = try ux_controller.startTask(runtime, .{
         .owner = app_owner,
@@ -2742,8 +2742,7 @@ fn proveBootedSchedulerTelemetryProvider(
         "zigos.system.resource-telemetry",
         700,
     );
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const foreground_image = task_runtime.syntheticUserspaceImage("booted-telemetry-ui", "app.service-path.telemetry-ui");
+    const foreground_image = try generated_image_fixtures.appImage();
     const foreground = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 81_001 },
         .component_class = .app_component,
@@ -2812,8 +2811,7 @@ fn proveBootedSchedulerTelemetryProvider(
     try std.testing.expect(foreground_slot.last_dispatch_degraded);
     try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, foreground_slot.last_dispatch_reason);
 
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const media_image = task_runtime.syntheticUserspaceImage("booted-telemetry-media", "app.service-path.telemetry-media");
+    const media_image = try generated_image_fixtures.appImage();
     const media = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 81_002 },
         .component_class = .app_component,
@@ -3131,8 +3129,7 @@ fn createBootedServiceTask(
     bundle_id: []const u8,
     tick: u64,
 ) !abi.TaskDescriptor {
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const image = task_runtime.syntheticUserspaceImage(label, bundle_id);
+    const image = try generated_image_fixtures.serviceImage();
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const request = component_port.TaskCreateRequest{
         .header = component_port.makeHeader(.task_create, tick, session_task_id),
@@ -3147,6 +3144,10 @@ fn createBootedServiceTask(
                 .shared_memory_bytes = 4096,
             },
             .local_only = true,
+            .initial_component = .{
+                .label = label,
+                .entry = bundle_id,
+            },
             .launch = .{
                 .boundary = .userspace_process,
                 .image_id = image_id,
@@ -3180,8 +3181,7 @@ fn createBootedProbeTask(
     shared_memory_bytes: usize,
     tick: u64,
 ) !abi.TaskDescriptor {
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const image = task_runtime.syntheticUserspaceImage(label, bundle_id);
+    const image = try generated_image_fixtures.appImage();
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const request = component_port.TaskCreateRequest{
         .header = component_port.makeHeader(.task_create, tick, session_task_id),
@@ -3196,6 +3196,10 @@ fn createBootedProbeTask(
                 .shared_memory_bytes = shared_memory_bytes,
             },
             .local_only = true,
+            .initial_component = .{
+                .label = label,
+                .entry = bundle_id,
+            },
             .launch = .{
                 .boundary = .userspace_process,
                 .image_id = image_id,

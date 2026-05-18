@@ -1,9 +1,14 @@
 const build_options = @import("build_options");
 
 pub const BootProfile = @TypeOf(build_options.boot_profile);
+pub const SmokeFaultMode = @TypeOf(build_options.smoke_fault_mode);
 
 pub fn bootProfile() BootProfile {
     return build_options.boot_profile;
+}
+
+pub fn smokeFaultMode() SmokeFaultMode {
+    return build_options.smoke_fault_mode;
 }
 
 pub fn name() []const u8 {

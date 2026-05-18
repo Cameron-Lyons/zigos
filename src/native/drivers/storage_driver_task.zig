@@ -41,6 +41,7 @@ pub const AtaDriverError = error{
     DriveError,
     InvalidParameter,
     BrokerUnavailable,
+    StaleGeneration,
 };
 
 pub const AtaControllerSession = struct {
@@ -51,6 +52,7 @@ pub const AtaControllerSession = struct {
     is_master: bool,
     irq_line: u8,
     sector_count: u64,
+    process_generation: u32,
 };
 
 const ReadContext = struct {
@@ -81,6 +83,7 @@ pub fn establishAtaBootstrapSession(
     var client = device_broker_client.Client.init(kernel_port, authority_capability_id, task_id, now_ticks);
     const descriptor = client.describe() catch return null;
     if (descriptor.device_id != device_id) return null;
+    const task = kernel_port.kernel.runtime.find(task_id) orelse return null;
 
     return .{
         .client = client,
@@ -90,11 +93,22 @@ pub fn establishAtaBootstrapSession(
         .is_master = (descriptor.flags & abi.DEVICE_DESCRIPTOR_FLAG_ATA_MASTER) != 0,
         .irq_line = descriptor.irq_line,
         .sector_count = descriptor.sector_count,
+        .process_generation = task.process_generation,
     };
 }
 
 pub fn attachAtaBootstrapSession(session: *AtaControllerSession) void {
     storage_volume.attachAtaBootstrapDevice(@ptrCast(session), session.sector_count);
+}
+
+pub fn readAtaBootstrapSession(session: *AtaControllerSession, start_lba: u64, buffer: []u8) bool {
+    const context = ReadContext{ .session = session };
+    return storage_volume_backend.transferReadRange(start_lba, buffer, &context);
+}
+
+pub fn writeAtaBootstrapSession(session: *AtaControllerSession, start_lba: u64, buffer: []const u8) bool {
+    const context = WriteContext{ .session = session };
+    return storage_volume_backend.transferWriteRange(start_lba, buffer, &context);
 }
 
 export fn zigosStorageBootstrapAtaRead(
@@ -104,8 +118,7 @@ export fn zigosStorageBootstrapAtaRead(
     buffer_len: usize,
 ) callconv(.c) bool {
     const session: *AtaControllerSession = @ptrCast(@alignCast(@constCast(device_ptr)));
-    const context = ReadContext{ .session = session };
-    return storage_volume_backend.transferReadRange(start_lba, buffer_ptr[0..buffer_len], &context);
+    return readAtaBootstrapSession(session, start_lba, buffer_ptr[0..buffer_len]);
 }
 
 export fn zigosStorageBootstrapAtaWrite(
@@ -115,8 +128,7 @@ export fn zigosStorageBootstrapAtaWrite(
     buffer_len: usize,
 ) callconv(.c) bool {
     const session: *AtaControllerSession = @ptrCast(@alignCast(@constCast(device_ptr)));
-    const context = WriteContext{ .session = session };
-    return storage_volume_backend.transferWriteRange(start_lba, buffer_ptr[0..buffer_len], &context);
+    return writeAtaBootstrapSession(session, start_lba, buffer_ptr[0..buffer_len]);
 }
 
 fn readSectors(session: *AtaControllerSession, lba: u64, count: u8, buffer: []u8) AtaDriverError!void {
@@ -195,19 +207,28 @@ fn waitDataReady(session: *AtaControllerSession) AtaDriverError!void {
 }
 
 fn readPortU8(session: *AtaControllerSession, port: u16) AtaDriverError!u8 {
+    try requireCurrentGeneration(session);
     return @truncate(session.client.readPort(port, .u8) catch return error.BrokerUnavailable);
 }
 
 fn readPortU16(session: *AtaControllerSession, port: u16) AtaDriverError!u16 {
+    try requireCurrentGeneration(session);
     return @truncate(session.client.readPort(port, .u16) catch return error.BrokerUnavailable);
 }
 
 fn writePortU8(session: *AtaControllerSession, port: u16, value: u8) AtaDriverError!void {
+    try requireCurrentGeneration(session);
     session.client.writePort(port, .u8, value) catch return error.BrokerUnavailable;
 }
 
 fn writePortU16(session: *AtaControllerSession, port: u16, value: u16) AtaDriverError!void {
+    try requireCurrentGeneration(session);
     session.client.writePort(port, .u16, value) catch return error.BrokerUnavailable;
+}
+
+fn requireCurrentGeneration(session: *AtaControllerSession) AtaDriverError!void {
+    const task = session.client.kernel_port.kernel.runtime.find(session.client.task_id) orelse return error.BrokerUnavailable;
+    if (task.process_generation != session.process_generation) return error.StaleGeneration;
 }
 
 test "storage driver task attaches only through the kernel device broker" {

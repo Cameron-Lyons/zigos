@@ -230,6 +230,12 @@ fn writeArchive(
     const writer = &aw.writer;
 
     try writer.writeAll(
+        \\const builtin = @import("builtin");
+        \\const userspace_archive_section = switch (builtin.target.ofmt) {
+        \\    .macho => "__DATA,zigos_userspace",
+        \\    else => ".zigos_userspace_archive",
+        \\};
+        \\
         \\pub const SegmentAccess = packed struct(u8) {
         \\    read: bool = true,
         \\    write: bool = false,
@@ -281,7 +287,7 @@ fn writeArchive(
         });
 
         try writer.print(
-            "const artifact_data_{d} align(1) linksection(\".zigos_userspace_archive\") = @embedFile(\"{f}\").*;\n",
+            "const artifact_data_{d} align(1) linksection(userspace_archive_section) = @embedFile(\"{f}\").*;\n",
             .{ index, std.zig.fmtString(artifact.embedded_name) },
         );
     }

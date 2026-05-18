@@ -317,6 +317,44 @@ pub fn deactivateStorageBackend(service_id: u64) bool {
     return false;
 }
 
+pub fn activeStorageRead(service_id: u64, start_lba: u64, buffer: []u8) bool {
+    const publication = publicationForActiveStorage(service_id) orelse return false;
+    return switch (publication.kind) {
+        .ata_bootstrap_bridge => blk: {
+            if (publication.ata_session) |*session| {
+                break :blk storage_driver_task.readAtaBootstrapSession(session, start_lba, buffer);
+            }
+            break :blk false;
+        },
+        .backend, .activator => blk: {
+            const backend = publication.backend orelse return false;
+            break :blk backend.read(start_lba, buffer.ptr, buffer.len);
+        },
+    };
+}
+
+pub fn activeStorageWrite(service_id: u64, start_lba: u64, buffer: []const u8) bool {
+    const publication = publicationForActiveStorage(service_id) orelse return false;
+    return switch (publication.kind) {
+        .ata_bootstrap_bridge => blk: {
+            if (publication.ata_session) |*session| {
+                break :blk storage_driver_task.writeAtaBootstrapSession(session, start_lba, buffer);
+            }
+            break :blk false;
+        },
+        .backend, .activator => blk: {
+            const backend = publication.backend orelse return false;
+            break :blk backend.write(start_lba, buffer.ptr, buffer.len);
+        },
+    };
+}
+
+pub fn activeStorageAtaSession(service_id: u64) ?storage_driver_task.AtaControllerSession {
+    const publication = publicationForActiveStorage(service_id) orelse return null;
+    if (publication.kind != .ata_bootstrap_bridge) return null;
+    return publication.ata_session;
+}
+
 pub fn deactivateDeviceDataPlane(device_class: driver_service.DeviceClass, service_id: u64) bool {
     if (!supportsGenericDeviceDataPlane(device_class)) return false;
     if (publicationForDeactivation(DeviceDataPlanePublication, &published_device_planes[deviceClassIndex(device_class)], service_id)) |publication| {
@@ -347,6 +385,13 @@ fn publicationForDeactivation(comptime T: type, publication: *?T, service_id: u6
     if (publication.*) |*published| {
         if (published.active_service_id != service_id) return null;
         return published;
+    }
+    return null;
+}
+
+fn publicationForActiveStorage(service_id: u64) ?*StoragePublication {
+    if (published_storage) |*publication| {
+        if (publication.active_service_id == service_id) return publication;
     }
     return null;
 }

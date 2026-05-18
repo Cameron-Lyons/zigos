@@ -33,6 +33,9 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.service_boot_driver_rehost_ok,
     boot_markers.service_boot_supervisor_restart_ok,
     boot_markers.service_boot_supervisor_restart_without_reboot,
+    boot_markers.service_boot_storage_io_before_restart_ok,
+    boot_markers.service_boot_storage_stale_access_rejected,
+    boot_markers.service_boot_storage_io_after_restart_ok,
     "ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY",
     boot_markers.platform_bootloader_measurement_provided,
     boot_markers.platform_build_artifact_manifest_verified,
@@ -65,6 +68,9 @@ pub const driver_restart_required = [_][]const u8{
     boot_markers.service_boot_driver_rehost_ok,
     boot_markers.service_boot_supervisor_restart_ok,
     boot_markers.service_boot_supervisor_restart_without_reboot,
+    boot_markers.service_boot_storage_io_before_restart_ok,
+    boot_markers.service_boot_storage_stale_access_rejected,
+    boot_markers.service_boot_storage_io_after_restart_ok,
 };
 
 pub const ab_rollback_required = [_][]const u8{
@@ -74,6 +80,18 @@ pub const ab_rollback_required = [_][]const u8{
     boot_markers.platform_ab_image_rollback_ok,
     boot_markers.platform_base_selector_active_slot_verified,
     boot_markers.platform_base_selector_rollback_before_service,
+};
+
+pub const tampered_artifact_manifest_required = [_][]const u8{
+    boot_markers.boot_start,
+    boot_markers.boot_profile_zigos_native,
+    boot_markers.platform_artifact_manifest_tamper_rejected,
+};
+
+pub const rollback_slot_failure_required = [_][]const u8{
+    boot_markers.boot_start,
+    boot_markers.boot_profile_zigos_native,
+    boot_markers.platform_base_selector_rollback_slot_failure_rejected,
 };
 
 pub const recovery_required = [_][]const u8{
@@ -137,6 +155,11 @@ test "native smoke gate requires A/B image rollback proof markers" {
     for (ab_rollback_required) |marker| {
         try std.testing.expect(contains(&ab_rollback_required, marker));
     }
+}
+
+test "native smoke gate requires boot attestation negative proof markers" {
+    try std.testing.expect(contains(&tampered_artifact_manifest_required, boot_markers.platform_artifact_manifest_tamper_rejected));
+    try std.testing.expect(contains(&rollback_slot_failure_required, boot_markers.platform_base_selector_rollback_slot_failure_rejected));
 }
 
 test "native smoke gate requires production post-activation health proof markers" {

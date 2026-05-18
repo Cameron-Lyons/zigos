@@ -137,6 +137,7 @@ pub fn baseImageStaysSignedMeasuredAtomicAndRollbackCapable() !void {
     try std.testing.expectEqual(@as(usize, 1), boot.countKind(.policy));
     try std.testing.expectEqual(@as(usize, 1), boot.countKind(.driver_set));
     try std.testing.expect(!std.mem.allEqual(u8, &boot.root_digest, 0));
+    try measured_boot.generatedProductionArtifactManifestMatchesUserspaceArchive();
 }
 
 pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {

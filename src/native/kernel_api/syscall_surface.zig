@@ -4,6 +4,7 @@ const abi = @import("../core/abi.zig");
 const capability = @import("capability.zig");
 const component_port = @import("component_port.zig");
 const endpoint = @import("endpoint.zig");
+const generated_image_fixtures = if (@import("builtin").is_test) @import("../task/generated_image_fixtures.zig") else struct {};
 const operation_metadata = @import("operation_metadata.zig");
 const native_kernel = @import("native_kernel.zig");
 const shared_memory = @import("shared_memory.zig");
@@ -213,8 +214,7 @@ test "syscall surface dispatches typed task creation requests" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const syscall_test_image = task_runtime.syntheticUserspaceImage("syscall-test", "app.example.syscall");
+    const syscall_test_image = try generated_image_fixtures.appImage();
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const request = component_port.TaskCreateRequest{
         .header = component_port.makeHeader(.task_create, 77, test_kernel.session_task_id),
@@ -264,8 +264,7 @@ test "syscall surface returns an explicit empty receive response when no message
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const empty_queue_image = task_runtime.syntheticUserspaceImage("empty-queue", "app.example.empty-queue");
+    const empty_queue_image = try generated_image_fixtures.appImage();
     const app_task = try test_kernel.port.taskCreate(.{
         .header = component_port.makeHeader(.task_create, 88, test_kernel.session_task_id),
         .authority_capability_id = test_kernel.authority_capability_id,
@@ -354,8 +353,7 @@ test "syscall surface denies task creation without signed userspace launch prove
     try std.testing.expectEqual(abi.DenialReason.policy_denied, result.denial_reason);
     try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
 
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const unsigned_image = task_runtime.syntheticUserspaceImage("unsigned-syscall", "app.example.unsigned-syscall");
+    const unsigned_image = try generated_image_fixtures.appImage();
     var unsigned_response = std.mem.zeroes(abi.TaskDescriptor);
     const unsigned_request = component_port.TaskCreateRequest{
         .header = component_port.makeHeader(.task_create, 92, test_kernel.session_task_id),
@@ -436,11 +434,7 @@ test "syscall surface rejects spoofed subject task ids" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
-    // prod-readiness: model-only synthetic-userspace-image; replace with a generated fixture before launch provenance graduation.
-    const spoofed_subject_image = task_runtime.syntheticUserspaceImage(
-        "spoofed-subject",
-        "app.example.spoofed-subject",
-    );
+    const spoofed_subject_image = try generated_image_fixtures.appImage();
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const request = component_port.TaskCreateRequest{
         .header = component_port.makeHeader(.task_create, 92, test_kernel.session_task_id + 1),
