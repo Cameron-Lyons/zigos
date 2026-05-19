@@ -969,7 +969,7 @@ fn kindKey(kind: EventKind) u64 {
 }
 
 fn subjectKey(subject: principal.PrincipalId) u64 {
-    var hash: u64 = 0xCBF2_9CE4_8422_2325;
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
     hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(subject.kind));
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, subject.serial);
     return indexed_arena.nonZeroKey(hash);

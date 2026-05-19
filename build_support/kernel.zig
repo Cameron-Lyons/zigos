@@ -1,5 +1,135 @@
 const std = @import("std");
 const shared = @import("shared.zig");
+const userspace_build = @import("userspace.zig");
+
+pub const KernelArtifacts = struct {
+    zigos_native: shared.KernelArtifact,
+    zigos_native_tampered_artifact_manifest: shared.KernelArtifact,
+    zigos_native_rollback_slot_failure: shared.KernelArtifact,
+    recovery: shared.KernelArtifact,
+    benchmark: shared.KernelArtifact,
+};
+
+pub const KernelSteps = struct {
+    kernel: *std.Build.Step,
+    zigos_native: *std.Build.Step,
+    benchmark: *std.Build.Step,
+    recovery: *std.Build.Step,
+};
+
+pub fn addKernelProfiles(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    userspace_images: userspace_build.ArtifactSet,
+) KernelArtifacts {
+    return .{
+        .zigos_native = addKernelArtifact(
+            b,
+            target,
+            optimize,
+            "kernel-zigos-native.elf",
+            .zigos_native,
+            .none,
+            userspace_images.archive_module,
+            userspace_images.production_manifest_module,
+        ),
+        .zigos_native_tampered_artifact_manifest = addKernelArtifact(
+            b,
+            target,
+            optimize,
+            "kernel-zigos-native-tampered-artifact-manifest.elf",
+            .zigos_native,
+            .tampered_artifact_manifest,
+            userspace_images.archive_module,
+            userspace_images.production_manifest_module,
+        ),
+        .zigos_native_rollback_slot_failure = addKernelArtifact(
+            b,
+            target,
+            optimize,
+            "kernel-zigos-native-rollback-slot-failure.elf",
+            .zigos_native,
+            .rollback_slot_failure,
+            userspace_images.archive_module,
+            userspace_images.production_manifest_module,
+        ),
+        .recovery = addKernelArtifact(
+            b,
+            target,
+            optimize,
+            "kernel-recovery.elf",
+            .recovery,
+            .none,
+            userspace_images.archive_module,
+            userspace_images.production_manifest_module,
+        ),
+        .benchmark = addKernelArtifact(
+            b,
+            target,
+            optimize,
+            "kernel-benchmark.elf",
+            .benchmark,
+            .none,
+            userspace_images.archive_module,
+            userspace_images.production_manifest_module,
+        ),
+    };
+}
+
+pub fn addKernelProfileSteps(
+    b: *std.Build,
+    kernels: KernelArtifacts,
+    userspace_images: userspace_build.ArtifactSet,
+) KernelSteps {
+    const kernel_step = addKernelInstallStep(
+        b,
+        "kernel",
+        "Build the native-only Zigos kernel",
+        kernels.zigos_native,
+        userspace_images.step,
+    );
+    const zigos_native_step = addKernelInstallStep(
+        b,
+        "kernel-zigos-native",
+        "Build the Zigos native bootstrap kernel",
+        kernels.zigos_native,
+        userspace_images.step,
+    );
+    const benchmark_step = addKernelInstallStep(
+        b,
+        "kernel-benchmark",
+        "Build the spec-aligned native benchmark kernel",
+        kernels.benchmark,
+        userspace_images.step,
+    );
+    const recovery_step = addKernelInstallStep(
+        b,
+        "kernel-recovery",
+        "Build the freestanding recovery-mode kernel",
+        kernels.recovery,
+        userspace_images.step,
+    );
+    return .{
+        .kernel = kernel_step,
+        .zigos_native = zigos_native_step,
+        .benchmark = benchmark_step,
+        .recovery = recovery_step,
+    };
+}
+
+fn addKernelInstallStep(
+    b: *std.Build,
+    name: []const u8,
+    description: []const u8,
+    kernel: shared.KernelArtifact,
+    userspace_step: *std.Build.Step,
+) *std.Build.Step {
+    const step = b.step(name, description);
+    step.dependOn(kernel.install_step);
+    step.dependOn(userspace_step);
+    return step;
+}
 
 pub fn addKernelArtifact(
     b: *std.Build,

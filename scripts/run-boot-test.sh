@@ -1,38 +1,20 @@
 #!/usr/bin/env bash
-set -eu
+set -euo pipefail
+
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
+
+# shellcheck source=scripts/qemu-harness.sh
+source "$ROOT_DIR/scripts/qemu-harness.sh"
 
 ISO_PATH="${1:?iso path required}"
 LOG_PATH="${2:?serial log path required}"
-QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
 BOOT_TEST_SECONDS="${BOOT_TEST_SECONDS:-12}"
-
-if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
-  echo "QEMU binary '$QEMU_BIN' not found. Set QEMU_BIN or install QEMU." >&2
-  exit 1
-fi
 
 mkdir -p "$(dirname "$LOG_PATH")"
 rm -f "$LOG_PATH"
 
-"$QEMU_BIN" \
-  -cdrom "$ISO_PATH" \
-  -boot d \
-  -m 256M \
-  -display none \
-  -serial "file:$LOG_PATH" \
-  -monitor none \
-  -no-reboot \
-  -no-shutdown \
-  >/dev/null 2>&1 &
-QEMU_PID=$!
-
-sleep "$BOOT_TEST_SECONDS"
-if kill -0 "$QEMU_PID" >/dev/null 2>&1; then
-  kill -TERM "$QEMU_PID" >/dev/null 2>&1 || true
-  sleep 1
-  kill -KILL "$QEMU_PID" >/dev/null 2>&1 || true
-fi
-wait "$QEMU_PID" >/dev/null 2>&1 || true
+qemu_harness_run_cdrom_for_seconds "$ISO_PATH" "$LOG_PATH" "$BOOT_TEST_SECONDS"
 
 if [ ! -s "$LOG_PATH" ]; then
   echo "Boot test failed: no serial output at $LOG_PATH" >&2

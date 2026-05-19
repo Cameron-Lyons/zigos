@@ -21,6 +21,7 @@ const WORKSPACE_INDEX_CAPACITY: usize = MAX_WORKSPACES * 2;
 const SNAPSHOT_INDEX_CAPACITY: usize = MAX_SNAPSHOTS * 2;
 const ENTRY_INDEX_CAPACITY: usize = MAX_WORKSPACE_ENTRIES * 2;
 pub const SnapshotRootAddress = [32]u8;
+const snapshot_message_buffer_bytes: usize = 4096;
 
 pub const Entry = struct {
     path_len: usize = 0,
@@ -286,7 +287,7 @@ fn workspaceLabelKey(label: []const u8) u64 {
 }
 
 fn workspaceOwnerLabelKey(owner: principal.PrincipalId, label: []const u8) u64 {
-    var hash: u64 = 0xCBF2_9CE4_8422_2325;
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
     hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(owner.kind));
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, owner.serial);
     hash = native_util.fnv1a64WithSeed(hash, label);
@@ -294,7 +295,7 @@ fn workspaceOwnerLabelKey(owner: principal.PrincipalId, label: []const u8) u64 {
 }
 
 fn snapshotLabelKey(workspace_id: ids.WorkspaceId, label: []const u8) u64 {
-    var hash: u64 = 0xCBF2_9CE4_8422_2325;
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id.raw());
     hash = native_util.fnv1a64WithSeed(hash, label);
     return indexed_arena.nonZeroKey(hash);
@@ -954,7 +955,7 @@ fn clearEntries(entries: *[MAX_WORKSPACE_ENTRIES]Entry) void {
 
 fn signSnapshotRecord(snapshot: *SnapshotRecord, entries: []const Entry, identity: signing.SignerIdentity) !void {
     snapshot.root_address = workspaceRootAddress(entries);
-    var message_buffer: [4096]u8 = undefined;
+    var message_buffer: [snapshot_message_buffer_bytes]u8 = undefined;
     const message = try snapshotMessage(
         &message_buffer,
         "snapshot",
@@ -971,7 +972,7 @@ fn verifySnapshotRecord(snapshot: *const SnapshotRecord, entries: []const Entry)
     if (!snapshot.signature.isPresent()) return false;
     const root_address = workspaceRootAddress(entries);
     if (!std.mem.eql(u8, &snapshot.root_address, &root_address)) return false;
-    var message_buffer: [4096]u8 = undefined;
+    var message_buffer: [snapshot_message_buffer_bytes]u8 = undefined;
     const message = snapshotMessage(
         &message_buffer,
         "snapshot",
@@ -986,7 +987,7 @@ fn verifySnapshotRecord(snapshot: *const SnapshotRecord, entries: []const Entry)
 
 fn signExportPackage(package: *ExportPackage, identity: signing.SignerIdentity) !void {
     package.root_address = workspaceRootAddress(package.entries[0..package.entry_count]);
-    var message_buffer: [4096]u8 = undefined;
+    var message_buffer: [snapshot_message_buffer_bytes]u8 = undefined;
     const message = try snapshotMessage(
         &message_buffer,
         "export",
@@ -1005,7 +1006,7 @@ fn verifyExportPackage(package: *const ExportPackage) bool {
     if (!signature.isPresent()) return false;
     const root_address = workspaceRootAddress(package.entries[0..package.entry_count]);
     if (!std.mem.eql(u8, &package.root_address, &root_address)) return false;
-    var message_buffer: [4096]u8 = undefined;
+    var message_buffer: [snapshot_message_buffer_bytes]u8 = undefined;
     const message = snapshotMessage(
         &message_buffer,
         "export",

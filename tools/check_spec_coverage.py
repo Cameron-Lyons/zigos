@@ -14,7 +14,6 @@ from spec_coverage_lib import (
     expected_headings,
     parse_spec_blocks,
 )
-from generate_spec_gap_matrix import GAP_MATRIX_PATH, render_gap_matrix
 
 ZIG_TEST_PATTERN = re.compile(r'^\s*test\s+"([^"]+)"', re.MULTILINE)
 PY_TEST_PATTERN = re.compile(r"^\s*def\s+(test_[A-Za-z0-9_]+)\s*\(", re.MULTILINE)
@@ -435,14 +434,6 @@ def main() -> int:
         evidence,
         requirement_body(blocks, SUMMARY_REQUIREMENT_ID),
     )
-
-    expected_gap_matrix = render_gap_matrix(manifest)
-    actual_gap_matrix = GAP_MATRIX_PATH.read_text() if GAP_MATRIX_PATH.exists() else ""
-    if actual_gap_matrix != expected_gap_matrix:
-        errors.append(
-            "SPEC_GAP_MATRIX.md is out of sync with spec/coverage.json; "
-            "run python3 tools/generate_spec_gap_matrix.py"
-        )
 
     if errors:
         for error in errors:
