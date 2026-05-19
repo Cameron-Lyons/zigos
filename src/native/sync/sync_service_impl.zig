@@ -270,7 +270,7 @@ fn replicaIndexLookupKey(workspace_id: u64, device_id: principal.PrincipalId, pa
 }
 
 fn replicaIndexHash(key: ReplicaIndexKey) u64 {
-    var hash: u64 = 0xCBF2_9CE4_8422_2325;
+    var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.workspace_id);
     hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(key.device_id.kind));
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, key.device_id.serial);

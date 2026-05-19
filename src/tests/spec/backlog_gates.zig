@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("../../native/core/abi.zig");
+const architecture_gates = @import("../../native/architecture_gates.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
 const compositor_session = @import("../../native/platform/compositor_session.zig");
 const device_broker = @import("../../native/kernel_api/device_broker.zig");
@@ -25,28 +26,6 @@ const sync_service_test = @import("../../native/sync/sync_service_test.zig");
 const sync_transport = @import("../../native/sync/sync_transport_harness.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const typed_component_abi = @import("../../native/services/typed_component_abi.zig");
-
-const indexed_arena_source = @embedFile("../../native/core/indexed_arena.zig");
-const service_registry_source = @embedFile("../../native/services/service_registry.zig");
-const component_abi_schema_source = @embedFile("../../native/services/component_abi_schema.zig");
-const service_bootstrap_source = @embedFile("../../native/session/service_bootstrap.zig");
-const service_catalog_source = @embedFile("../../native/session/service_catalog.zig");
-const session_bootstrap_source = @embedFile("../../native/session/session_bootstrap.zig");
-const session_manager_boot_flow_source = @embedFile("../../native/session/session_manager_boot_flow.zig");
-const session_service_bootstrap_source = @embedFile("../../native/session/session_service_bootstrap.zig");
-const userspace_scheduler_source = @embedFile("../../native/task/userspace_scheduler.zig");
-const accelerator_scheduler_source = @embedFile("../../native/task/accelerator_scheduler.zig");
-const indexing_service_source = @embedFile("../../native/services/indexing_service.zig");
-const event_ledger_source = @embedFile("../../native/platform/event_ledger.zig");
-const native_ux_source = @embedFile("../../native/platform/native_ux.zig");
-const compositor_session_source = @embedFile("../../native/platform/compositor_session.zig");
-const sync_service_impl_source = @embedFile("../../native/sync/sync_service_impl.zig");
-const sync_adapters_source = @embedFile("../../native/sync/sync_adapters.zig");
-const sync_state_store_source = @embedFile("../../native/sync/sync_state_store.zig");
-const sync_service_test_source = @embedFile("../../native/sync/sync_service_test.zig");
-const sync_transport_harness_source = @embedFile("../../native/sync/sync_transport_harness.zig");
-const workspace_source = @embedFile("../../native/storage/workspace.zig");
-const storage_volume_source = @embedFile("../../native/storage/storage_volume.zig");
 
 pub fn isolationProofDepthGate() !void {
     try std.testing.expect(runtime_negative_proofs.processIsolationBlocksForeignSharedMemory());
@@ -140,15 +119,7 @@ pub fn syncAdapterDepthGate() !void {
 }
 
 pub fn syncPrivateOverlayEndToEndGate() !void {
-    try expectContains(sync_transport_harness_source, "SignedEncryptedFrame");
-    try expectContains(sync_transport_harness_source, "encryptSignedFrame");
-    try expectContains(sync_transport_harness_source, "verifySignedFrame");
-    try expectContains(sync_transport_harness_source, "caller_task_id != session.task_id");
-    try expectContains(sync_service_test_source, "deterministicTwoDeviceOverlayReplication");
-    try expectContains(sync_service_test_source, "openOverlaySession");
-    try expectContains(sync_service_test_source, "replicateWorkspace");
-    try expectContains(sync_service_test_source, "relay_queue.submit");
-    try expectContains(sync_service_impl_source, "sendOverlayRelayFrameViaService");
+    try expectAllMetadataTrue(architecture_gates.sync_private_overlay);
     try sync_service_test.deterministicTwoDeviceOverlayReplication();
 }
 
@@ -194,127 +165,7 @@ pub fn componentAbiDepthGate() !void {
 }
 
 pub fn indexedHotPathTablesGate() !void {
-    try expectContains(indexed_arena_source, "used_count");
-    try expectContains(indexed_arena_source, "return self.used_count");
-
-    try expectContains(service_registry_source, "BindingArena");
-    try expectContains(service_registry_source, "bindings: BindingArena");
-    try expectContains(component_abi_schema_source, "pub const InterfaceId");
-    try expectContains(component_abi_schema_source, "interface_id: InterfaceId");
-    try expectContains(component_abi_schema_source, "interfaceIdForService");
-    try expectContains(service_registry_source, "interface_id: typed_component_abi.InterfaceId");
-    try expectContains(service_registry_source, "interfaceIdForRequest");
-    try expectContains(service_registry_source, "interfaceIdKey");
-    try expectMissing(service_registry_source, "fixed_table");
-    try expectMissing(service_registry_source, "firstFreeSlot");
-    try expectMissing(service_registry_source, "hashInterface");
-    try expectMissing(service_registry_source, "interfaceNameKey");
-    try expectMissing(service_registry_source, "interface_hash");
-
-    try expectContains(userspace_scheduler_source, "SchedulerSlotArena");
-    try expectContains(userspace_scheduler_source, "slots: SchedulerSlotArena");
-    try expectContains(userspace_scheduler_source, "ready_heads");
-    try expectContains(userspace_scheduler_source, "selectReadyResourceClass");
-    try expectContains(userspace_scheduler_source, "wakeTask");
-    try expectContains(userspace_scheduler_source, "refillTaskBudget");
-    try expectContains(userspace_scheduler_source, "deadline_tick");
-    try expectContains(userspace_scheduler_source, "configureResourceState");
-    try expectContains(userspace_scheduler_source, "accelerator_claim_heads");
-    try expectContains(userspace_scheduler_source, "grantNextAcceleratorClaim");
-    try expectMissing(userspace_scheduler_source, "fixed_table");
-    try expectMissing(userspace_scheduler_source, "firstFreeSlot");
-    try expectMissing(userspace_scheduler_source, "next_index");
-    try expectMissing(userspace_scheduler_source, "while (attempts < self.slots.slots.len)");
-
-    try expectContains(accelerator_scheduler_source, "ClaimArena");
-    try expectContains(accelerator_scheduler_source, "claims: ClaimArena");
-    try expectContains(accelerator_scheduler_source, "ClaimTaskIndex");
-    try expectContains(accelerator_scheduler_source, "claim_task_index");
-    try expectMissing(accelerator_scheduler_source, "claims: [MAX_ENGINE_CLAIMS]");
-    try expectMissing(accelerator_scheduler_source, "for (&self.claims)");
-    try expectMissing(accelerator_scheduler_source, "for (self.claims)");
-
-    try expectContains(indexing_service_source, "DocumentArena");
-    try expectContains(indexing_service_source, "documents: DocumentArena");
-    try expectMissing(indexing_service_source, "fixed_table");
-    try expectMissing(indexing_service_source, "firstFreeSlot");
-
-    try expectContains(event_ledger_source, "EventArena");
-    try expectContains(event_ledger_source, "kind_index");
-    try expectContains(event_ledger_source, "subject_index");
-    try expectContains(event_ledger_source, "task_index");
-    try expectContains(event_ledger_source, "visitIndex");
-
-    try expectContains(compositor_session_source, "WindowArena");
-    try expectContains(compositor_session_source, "ReviewItemArena");
-    try expectContains(compositor_session_source, "windows: WindowArena");
-    try expectContains(compositor_session_source, "items: ReviewItemArena");
-    try expectMissing(compositor_session_source, "windows: [MAX_WINDOWS]");
-    try expectMissing(compositor_session_source, "items: [MAX_REVIEW_ITEMS]");
-
-    try expectContains(native_ux_source, "FlowArena");
-    try expectContains(native_ux_source, "flows: FlowArena");
-    try expectContains(native_ux_source, "flowAtOrder");
-    try expectMissing(native_ux_source, "flows: [MAX_FLOWS]");
-    try expectMissing(native_ux_source, "for (&self.flows)");
-    try expectMissing(native_ux_source, "for (self.flows)");
-
-    try expectContains(sync_transport_harness_source, "RelayPacketArena");
-    try expectContains(sync_transport_harness_source, "RelaySessionIndex");
-    try expectMissing(sync_transport_harness_source, "for (&self.packets)");
-
-    try expectContains(sync_service_impl_source, "OverlaySessionArena");
-    try expectContains(sync_service_impl_source, "overlay_sessions: OverlaySessionArena");
-    try expectContains(sync_service_impl_source, "closed_overlay_sessions");
-    try expectContains(sync_service_impl_source, "active_overlay_session_count");
-    try expectMissing(sync_service_impl_source, "overlay_sessions: [MAX_SERVICE_OVERLAY_SESSIONS]");
-    try expectMissing(sync_service_impl_source, "for (&self.overlay_sessions)");
-    try expectMissing(sync_service_impl_source, "for (self.overlay_sessions)");
-
-    try expectContains(sync_adapters_source, "TransportFrameArena");
-    try expectContains(sync_adapters_source, "TransportFrameTargetIndex");
-    try expectContains(sync_adapters_source, "TransportFramePathIndex");
-    try expectContains(sync_adapters_source, "frames: TransportFrameArena");
-    try expectMissing(sync_adapters_source, "frames: [MAX_TRANSPORT_FRAMES]");
-    try expectMissing(sync_adapters_source, "for (&self.frames)");
-    try expectMissing(sync_adapters_source, "for (self.frames)");
-
-    try expectContains(sync_state_store_source, "record_prefix = \"state/v4/\"");
-    try expectContains(sync_state_store_source, "putRecord");
-    try expectContains(sync_state_store_source, "deleteStaleRecords");
-    try expectContains(sync_state_store_source, "storage.entries");
-    try expectMissing(sync_state_store_source, "state_codec");
-    try expectMissing(sync_state_store_source, "state_codec.serialize");
-    try expectMissing(sync_state_store_source, "decodeStateIndex");
-    try expectMissing(sync_state_store_source, "max_state_bytes");
-    try expectMissing(sync_state_store_source, "chunk_dirty");
-
-    try expectContains(workspace_source, "WorkspacePathIndex");
-    try expectContains(workspace_source, "path_index: WorkspacePathIndex");
-    try expectContains(workspace_source, "mutation_log: WorkspaceMutationLog");
-    try expectContains(workspace_source, "share_table: WorkspaceShareTable");
-    try expectContains(workspace_source, "staging: WorkspaceStagingState");
-    try expectContains(workspace_source, "recoverable_deletes: RecoverableDeleteLog");
-    try expectContains(workspace_source, "leaf_hashes");
-    try expectContains(workspace_source, "root_address = workspace.path_index.root_address");
-    try expectContains(workspace_source, "findIndexedEntryPath");
-    try expectContains(workspace_source, "rebuildPathMerkle");
-    try expectContains(storage_volume_source, "workspace-state/v4");
-    try expectContains(storage_volume_source, "hashBytes(hash, &record.path_index.root_address)");
-    try expectMissing(storage_volume_source, "workspace_state_buffer");
-    try expectMissing(storage_volume_source, "max_workspace_state_bytes");
-
-    try expectContains(service_catalog_source, "owner_key: BootstrapOwnerKey");
-    try expectContains(service_catalog_source, "service_record_key: BootstrapServiceRecordKey");
-    try expectContains(session_bootstrap_source, "ownerForServiceClass");
-    try expectContains(session_bootstrap_source, "serviceRecordForClass");
-    try expectContains(session_bootstrap_source, "for (service_catalog.catalog)");
-    try expectContains(service_bootstrap_source, "pub const LaunchServiceRequest");
-    try expectContains(session_service_bootstrap_source, "launchContractService(.{");
-    try expectMissing(session_manager_boot_flow_source, "fn serviceOwner");
-    try expectMissing(session_manager_boot_flow_source, "fn serviceRecord");
-    try expectMissing(session_service_bootstrap_source, "fn serviceOwner");
-    try expectMissing(session_service_bootstrap_source, "fn serviceId");
+    try expectAllMetadataTrue(architecture_gates.indexed_hot_path_tables);
 }
 
 pub fn driverBoundaryAuditGate() !void {
@@ -1022,12 +873,15 @@ test "backlog gates enforce UX rendering" {
     try uxRenderingGate();
 }
 
-fn expectContains(haystack: []const u8, needle: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null);
-}
-
-fn expectMissing(haystack: []const u8, needle: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, haystack, needle) == null);
+fn expectAllMetadataTrue(metadata: anytype) !void {
+    inline for (std.meta.fields(@TypeOf(metadata))) |field| {
+        const value = @field(metadata, field.name);
+        switch (@typeInfo(@TypeOf(value))) {
+            .bool => try std.testing.expect(value),
+            .@"struct" => try expectAllMetadataTrue(value),
+            else => @compileError("architecture gate metadata must contain only booleans or nested structs"),
+        }
+    }
 }
 
 fn kernelContext(

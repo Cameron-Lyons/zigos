@@ -3,13 +3,42 @@
 Use the pinned toolchain and repo entrypoints:
 
 - Run Zig commands through `./scripts/zig.sh`.
-- Run host coverage with `./scripts/zig.sh build host-tests`; this includes the root host suite, userspace runtime tests, and the test-root reachability check.
-- Run spec coverage without QEMU with `./scripts/zig.sh build spec-tests`.
-- Run production-readiness tracking checks with `./scripts/zig.sh build prod-readiness`.
-- Run full spec conformance with `./scripts/zig.sh build spec-conformance`; this includes spec coverage, native spec tests, the two-boot native smoke path, and the recovery QEMU proof.
-- Run driver-restart and recovery smoke proofs directly with `./scripts/zig.sh build driver-restart-qemu-test` and `./scripts/zig.sh build recovery-qemu-test` when touching those paths.
-- Run native benchmarks with `./scripts/zig.sh build benchmark` when touching performance-sensitive kernel or native-service paths.
-- Run lint with `./scripts/zig.sh build lint`; use `fmt-check`, `shell-lint`, `zig-lint`, or `action-lint` for focused checks.
+
+## Verification Matrix
+
+| Command | Use it when |
+| --- | --- |
+| `./scripts/zig.sh build verify` | You want the default local gate: lint, kernel build, host tests, spec tests, and production-readiness checks. |
+| `./scripts/zig.sh build -Dverify-smoke=true -Dverify-benchmark=true verify` | You want `verify` plus the QEMU native smoke and benchmark gates. |
+| `./scripts/zig.sh build lint` | You only need local lint checks: Zig formatting, optional zlint, ShellCheck, and optional actionlint. |
+| `./scripts/zig.sh build fmt-check` | You only need tracked Zig formatting checks. |
+| `./scripts/zig.sh build shell-lint` | You only need ShellCheck over repository shell scripts. |
+| `./scripts/zig.sh build zig-lint` | You only need optional zlint over Zig sources. |
+| `./scripts/zig.sh build action-lint` | You only need optional actionlint over GitHub workflows. |
+| `./scripts/zig.sh build test-roots` | You need to confirm Zig test-bearing files are reachable from the build test roots. |
+| `./scripts/zig.sh build kernel` | You need the default native kernel and embedded userspace archive. |
+| `./scripts/zig.sh build kernel-zigos-native` | You need the native bootstrap kernel profile. |
+| `./scripts/zig.sh build kernel-recovery` | You need the freestanding recovery kernel profile. |
+| `./scripts/zig.sh build kernel-benchmark` | You need the benchmark kernel profile. |
+| `./scripts/zig.sh build host-tests` | You need host coverage; this includes the root host suite, userspace runtime tests, and test-root reachability. |
+| `./scripts/zig.sh build spec-tests` | You need spec coverage and native spec tests without QEMU. |
+| `./scripts/zig.sh build prod-readiness` | You need production-readiness tracking checks without changing spec conformance status. |
+| `./scripts/zig.sh build spec-conformance` | You need spec coverage, native spec tests, the two-boot native smoke path, and the recovery QEMU proof. |
+| `./scripts/zig.sh build zigos-native-smoke-test` | You need the native cold-reboot smoke test across two QEMU boots. |
+| `./scripts/zig.sh build driver-restart-qemu-test` | You touched userspace driver restart, broker rebinding, or crash recovery paths. |
+| `./scripts/zig.sh build recovery-qemu-test` | You touched recovery-mode boot, repair, or break-glass flows. |
+| `./scripts/zig.sh build benchmark` | You touched performance-sensitive kernel or native-service paths. |
+
+## Build And Cleanup Commands
+
+| Command | Use it when |
+| --- | --- |
+| `./scripts/zig.sh build userspace-images` | You need only the embedded userspace image artifacts. |
+| `./scripts/zig.sh build native-store-image` | You need to build or preserve the native storage image used by run targets. |
+| `./scripts/zig.sh build iso` | You need a bootable ISO at `build/os.iso`. |
+| `./test_kernel.sh` | You want the release-fast smoke-test convenience wrapper. |
+| `./scripts/zig.sh build clean` | You want to remove local build outputs and Zig caches. |
+| `./scripts/zig.sh build -Dclean-dry-run=true clean` | You want to inspect what `clean` would remove. |
 
 Keep the spec contract intact:
 

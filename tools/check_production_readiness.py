@@ -2,20 +2,32 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
 
-from generate_prod_readiness_matrix import (
-    PROD_READINESS_MATRIX_PATH,
-    load_coverage_manifest,
-    load_prod_manifest,
-    render_prod_readiness_matrix,
-    validate_prod_readiness_manifest,
+from spec_coverage_lib import MANIFEST_PATH, ROOT_DIR
+
+
+PROD_READINESS_MANIFEST_PATH = ROOT_DIR / "spec" / "production_readiness.json"
+STATUS_LABELS = {
+    "prod_ready": "Prod Ready",
+    "prod_candidate": "Prod Candidate",
+    "prototype": "Prototype",
+    "blocked": "Blocked",
+}
+PRIORITIES = {"P0", "P1", "P2"}
+LIST_FIELDS = (
+    "requirements",
+    "implementation_anchors",
+    "current_evidence",
+    "production_gaps",
+    "graduation_criteria",
+    "next_actions",
+    "verification_commands",
 )
-from spec_coverage_lib import ROOT_DIR
-
-
+OPTIONAL_LIST_FIELDS = ("capacity_envelope",)
 MODEL_ONLY_SYNTHETIC_IMAGE_MARKER = "prod-readiness: model-only synthetic-userspace-image"
 SYNTHETIC_IMAGE_PATTERN = re.compile(r"\b(?:task_runtime\.)?syntheticUserspaceImage\s*\(")
 SYNTHETIC_IMAGE_MARKER_LOOKBACK_LINES = 1
@@ -29,6 +41,118 @@ CRITICAL_SYNTHETIC_IMAGE_PATHS = (
     Path("src/native/sync/sync_service_test.zig"),
     Path("src/native/task/process_isolation.zig"),
 )
+
+
+def load_prod_manifest() -> dict:
+    return json.loads(PROD_READINESS_MANIFEST_PATH.read_text())
+
+
+def load_coverage_manifest() -> dict:
+    return json.loads(MANIFEST_PATH.read_text())
+
+
+def validate_prod_readiness_manifest(prod_manifest: dict, coverage_manifest: dict) -> list[str]:
+    errors: list[str] = []
+    if prod_manifest.get("schema_version") != 1:
+        errors.append("production_readiness.json schema_version must be 1")
+    if prod_manifest.get("source_coverage_manifest") != "spec/coverage.json":
+        errors.append("production_readiness.json source_coverage_manifest must be spec/coverage.json")
+
+    required_requirements = set(coverage_manifest.get("required_requirements", []))
+    requirement_evidence = coverage_manifest.get("requirement_evidence", {})
+    tracks = prod_manifest.get("tracks")
+    if not isinstance(tracks, list) or not tracks:
+        errors.append("production_readiness.json must include at least one track")
+        return errors
+
+    seen_track_ids: set[str] = set()
+    for index, track in enumerate(tracks):
+        if not isinstance(track, dict):
+            errors.append(f"Production readiness track at index {index} must be an object")
+            continue
+
+        track_id = track.get("id")
+        if not isinstance(track_id, str) or not track_id.strip():
+            errors.append(f"Production readiness track at index {index} must include id")
+            track_id = f"<track-{index}>"
+        elif track_id in seen_track_ids:
+            errors.append(f"Duplicate production readiness track id: {track_id}")
+        seen_track_ids.add(track_id)
+
+        title = track.get("title")
+        if not isinstance(title, str) or not title.strip():
+            errors.append(f"Production readiness track {track_id} must include title")
+
+        priority = track.get("priority")
+        if priority not in PRIORITIES:
+            errors.append(
+                f"Production readiness track {track_id} priority must be one of {sorted(PRIORITIES)}"
+            )
+
+        status = track.get("status")
+        if status not in STATUS_LABELS:
+            errors.append(
+                f"Production readiness track {track_id} status must be one of {sorted(STATUS_LABELS)}"
+            )
+
+        for field in LIST_FIELDS:
+            values = track.get(field)
+            if field == "production_gaps" and status == "prod_ready":
+                if not isinstance(values, list):
+                    errors.append(f"Production readiness track {track_id} must include production_gaps")
+                    continue
+            elif not isinstance(values, list) or not values:
+                errors.append(
+                    f"Production readiness track {track_id} must include non-empty {field}"
+                )
+                continue
+            for value in values:
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(
+                        f"Production readiness track {track_id} has an empty or non-string {field} entry"
+                    )
+
+        for field in OPTIONAL_LIST_FIELDS:
+            values = track.get(field, [])
+            if values is None:
+                continue
+            if not isinstance(values, list):
+                errors.append(
+                    f"Production readiness track {track_id} optional {field} must be a list when present"
+                )
+                continue
+            for value in values:
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(
+                        f"Production readiness track {track_id} has an empty or non-string {field} entry"
+                    )
+
+        for requirement_id in track.get("requirements", []):
+            if requirement_id not in required_requirements:
+                errors.append(
+                    f"Production readiness track {track_id} references unknown requirement: {requirement_id}"
+                )
+                continue
+            evidence = requirement_evidence.get(requirement_id, {})
+            if evidence.get("status") != "enforced":
+                errors.append(
+                    f"Production readiness track {track_id} references {requirement_id}, "
+                    f"which is {evidence.get('status')!r}; production tracks require spec-enforced requirements"
+                )
+
+        for anchor in track.get("implementation_anchors", []):
+            path = ROOT_DIR / anchor
+            if not path.exists():
+                errors.append(
+                    f"Production readiness track {track_id} references missing implementation anchor: {anchor}"
+                )
+
+        if status == "prod_ready" and track.get("production_gaps"):
+            errors.append(
+                f"Production readiness track {track_id} is prod_ready but still lists production_gaps"
+            )
+
+    return errors
 
 
 def source_line_has_model_only_marker(lines: list[str], line_index: int) -> bool:
@@ -116,15 +240,6 @@ def main() -> int:
     coverage_manifest = load_coverage_manifest()
     errors.extend(validate_prod_readiness_manifest(prod_manifest, coverage_manifest))
     validate_synthetic_userspace_image_markers(errors)
-
-    if not errors:
-        expected = render_prod_readiness_matrix(prod_manifest, coverage_manifest)
-        actual = PROD_READINESS_MATRIX_PATH.read_text() if PROD_READINESS_MATRIX_PATH.exists() else ""
-        if actual != expected:
-            errors.append(
-                "PROD_READINESS_MATRIX.md is out of sync with spec/production_readiness.json; "
-                "run python3 tools/generate_prod_readiness_matrix.py"
-            )
 
     if errors:
         for error in errors:

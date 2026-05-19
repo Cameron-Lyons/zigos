@@ -6,16 +6,14 @@ Zigos is a native-only operating system prototype written in Zig. The current tr
 
 ## Current Focus
 
-This repository treats the Zigos v0.1 clean-slate OS spec as its explicit conformance target. The spec, architecture notes, generated gap matrix, and contribution guidance live here:
+This repository treats the Zigos v0.1 clean-slate OS spec as its explicit conformance target. The spec, architecture notes, and contribution guidance live here:
 
 - [SPEC.md](SPEC.md): design goals, platform model, and conformance target
 - [ARCHITECTURE.md](ARCHITECTURE.md): how the current code maps onto the spec
-- [SPEC_GAP_MATRIX.md](SPEC_GAP_MATRIX.md): generated requirement status and evidence backlog
-- [PROD_READINESS_MATRIX.md](PROD_READINESS_MATRIX.md): generated production-readiness backlog for prototype-sensitive slices
 - [CONTRIBUTING.md](CONTRIBUTING.md): repo conventions and verification expectations
 
-`SPEC_GAP_MATRIX.md` is generated from `spec/coverage.json`; update the manifest and regenerate the matrix instead of editing it by hand.
-`PROD_READINESS_MATRIX.md` is generated from `spec/production_readiness.json`; keep production-readiness status there instead of overloading spec conformance evidence.
+Requirement status lives in `spec/coverage.json`.
+Production-readiness status lives in `spec/production_readiness.json`; keep production-readiness status there instead of overloading spec conformance evidence.
 
 The native kernel surface is intentionally small:
 
@@ -99,85 +97,29 @@ Targets that boot or package the system build the current userspace image archiv
 ## Common Commands
 
 ```bash
-# Build only the embedded userspace image artifacts
-./scripts/zig.sh build userspace-images
-
-# Build or preserve the native storage image used by run targets
-./scripts/zig.sh build native-store-image
-
-# Build explicit kernel profiles
-./scripts/zig.sh build kernel-zigos-native
-./scripts/zig.sh build kernel-recovery
-./scripts/zig.sh build kernel-benchmark
-
-# Run host-side native tests
-./scripts/zig.sh build host-tests
-
-# Run CI-aligned local lint, kernel build, and host/spec tests
+# Run CI-aligned local lint, kernel build, host tests, spec tests, and readiness checks
 ./scripts/zig.sh build verify
 
-# Run local lint only
-./scripts/zig.sh build lint
-
-# Run individual lint/check slices
-./scripts/zig.sh build fmt-check
-./scripts/zig.sh build shell-lint
-./scripts/zig.sh build zig-lint
-./scripts/zig.sh build action-lint
-./scripts/zig.sh build test-roots
+# Run host-side native and userspace runtime tests
+./scripts/zig.sh build host-tests
 
 # Run the spec coverage gate and native spec unit tests without QEMU smoke
 ./scripts/zig.sh build spec-tests
 
-# Validate production-readiness tracking without changing spec conformance status
-./scripts/zig.sh build prod-readiness
-
-# Include optional QEMU gates in the verify target
-./scripts/zig.sh build -Dverify-smoke=true -Dverify-benchmark=true verify
-
 # Run spec coverage, native spec tests, smoke verification, and recovery verification
 ./scripts/zig.sh build spec-conformance
 
-# Run the native cold-reboot smoke test across two QEMU boots
-./scripts/zig.sh build zigos-native-smoke-test
-
-# Run focused QEMU proofs
-./scripts/zig.sh build driver-restart-qemu-test
-./scripts/zig.sh build recovery-qemu-test
-
-# Run the spec-aligned native benchmark suite in QEMU
-./scripts/zig.sh build benchmark
-
-# Release-fast convenience wrapper for the smoke test
-./test_kernel.sh
-
-# Build a bootable ISO at build/os.iso
-./scripts/zig.sh build iso
+# Remove local build outputs and Zig caches
+./scripts/zig.sh build clean
 ```
 
-The smoke test uses `build/native-store-smoke.img` and validates the expected native bootstrap markers across two boots.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full verification matrix, QEMU smoke targets, benchmark gates, lint slices, and cleanup dry-run command.
 
 ## Verification Model
 
-Repo-level conformance is checked through the thin root `src/zigos_spec_test.zig`, which delegates to the suites under `src/tests/spec/`; the section-to-test contract is enforced by `spec/coverage.json` and `tools/check_spec_coverage.py`, with stable `REQ-*` anchors in `SPEC.md` driving the manifest instead of line-by-line prose claims. `SPEC_GAP_MATRIX.md` is generated from that manifest by `tools/generate_spec_gap_matrix.py`, and the coverage check rejects stale matrix output. `Enforced` requirements in the manifest must name implementation modules and adversarial or negative tests; modeled and scenario-only requirements stay explicitly marked until they earn that evidence. The `spec-conformance` target also runs the native two-boot QEMU smoke harness and the recovery-mode QEMU proof, so the repo-level gate is not host-only.
+Repo-level conformance is checked through the thin root `src/zigos_spec_test.zig`, which delegates to the suites under `src/tests/spec/`; the section-to-test contract is enforced by `spec/coverage.json` and `tools/check_spec_coverage.py`, with stable `REQ-*` anchors in `SPEC.md` driving the manifest instead of line-by-line prose claims. `Enforced` requirements in the manifest must name implementation modules and adversarial or negative tests; modeled and scenario-only requirements stay explicitly marked until they earn that evidence. The full local verification matrix lives in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Production readiness is tracked separately in `spec/production_readiness.json`, rendered as `PROD_READINESS_MATRIX.md`, and validated by `tools/check_production_readiness.py`. This keeps a requirement's repository conformance status separate from the work needed to remove synthetic hardware, harnessed transport, emulator roots, scale limits, and model-only proof gaps.
-
-The main verification entrypoints are:
-
-- `./scripts/zig.sh build verify`
-- `./scripts/zig.sh build -Dverify-smoke=true -Dverify-benchmark=true verify`
-- `./scripts/zig.sh build lint`
-- `./scripts/zig.sh build kernel`
-- `./scripts/zig.sh build kernel-recovery`
-- `./scripts/zig.sh build host-tests`
-- `./scripts/zig.sh build spec-tests`
-- `./scripts/zig.sh build prod-readiness`
-- `./scripts/zig.sh build spec-conformance`
-- `./scripts/zig.sh build zigos-native-smoke-test`
-- `./scripts/zig.sh build driver-restart-qemu-test`
-- `./scripts/zig.sh build recovery-qemu-test`
-- `./scripts/zig.sh build benchmark`
+Production readiness is tracked separately in `spec/production_readiness.json` and validated by `tools/check_production_readiness.py`. This keeps a requirement's repository conformance status separate from the work needed to remove synthetic hardware, harnessed transport, emulator roots, scale limits, and model-only proof gaps.
 
 Host-side native tests enter through `src/native_host_test.zig` and delegate to `src/tests/host/`. Deeper subsystem coverage lives beside each native module under `src/native/`.
 
@@ -210,15 +152,7 @@ Host-side native tests enter through `src/native_host_test.zig` and delegate to 
 
 The repository no longer builds or ships the old POSIX-like shell, POSIX-style syscall ABI, or VFS-rooted userland pipeline. Legacy support is modeled as explicit compatibility environments rather than as part of the native platform.
 
-For the current requirement status, use [SPEC_GAP_MATRIX.md](SPEC_GAP_MATRIX.md); it is generated from `spec/coverage.json` and separates enforced behavior from modeled or scenario-only evidence. For prototype-to-production planning, use [PROD_READINESS_MATRIX.md](PROD_READINESS_MATRIX.md); it is generated from `spec/production_readiness.json`.
-
-- `./scripts/zig.sh build kernel`
-- `./scripts/zig.sh build spec-conformance`
-- `./scripts/zig.sh build host-tests`
-- `./scripts/zig.sh build zigos-native-smoke-test`
-- `./scripts/zig.sh build recovery-qemu-test`
-- `./scripts/zig.sh build driver-restart-qemu-test`
-- `./scripts/zig.sh build benchmark`
+For the current requirement status, use `spec/coverage.json`; it separates enforced behavior from modeled or scenario-only evidence. For prototype-to-production planning, use `spec/production_readiness.json`.
 
 Storage-volume persistence remains covered by host-side native tests through `src/native/storage/storage_volume.zig`.
-The remaining freestanding entry surface is the native typed syscall dispatcher plus the native-only verification targets above.
+The remaining freestanding entry surface is the native typed syscall dispatcher plus the native-only verification targets documented in [CONTRIBUTING.md](CONTRIBUTING.md).
