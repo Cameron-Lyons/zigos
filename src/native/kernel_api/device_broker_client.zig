@@ -3,6 +3,7 @@ const component_port = @import("component_port.zig");
 
 pub const Error = component_port.Error || error{
     KernelPortUnavailable,
+    StaleGeneration,
     TrapConflict,
     TrapDenied,
     TrapFailed,
@@ -16,6 +17,7 @@ pub const Client = struct {
     authority_capability_id: u64,
     task_id: u64,
     now_ticks: u64,
+    process_generation: u32,
     next_correlation_id: u64 = 1,
 
     pub fn init(
@@ -29,10 +31,12 @@ pub const Client = struct {
             .authority_capability_id = authority_capability_id,
             .task_id = task_id,
             .now_ticks = now_ticks,
+            .process_generation = if (kernel_port.kernel.runtime.find(task_id)) |task| task.process_generation else 0,
         };
     }
 
     pub fn describe(self: *Client) Error!abi.DeviceDescriptor {
+        try self.requireCurrentGeneration();
         return self.kernel_port.deviceDescribe(.{
             .header = component_port.makeHeader(.device_describe, self.nextCorrelationId(), self.task_id),
             .device_capability_id = self.authority_capability_id,
@@ -40,6 +44,7 @@ pub const Client = struct {
     }
 
     pub fn mmioWindow(self: *Client, window_index: u8) Error!abi.DeviceMmioWindowDescriptor {
+        try self.requireCurrentGeneration();
         return self.kernel_port.deviceMmioWindow(.{
             .header = component_port.makeHeader(.device_mmio_window, self.nextCorrelationId(), self.task_id),
             .device_capability_id = self.authority_capability_id,
@@ -48,6 +53,7 @@ pub const Client = struct {
     }
 
     pub fn readPort(self: *Client, port: u16, width: abi.DevicePortWidth) Error!u32 {
+        try self.requireCurrentGeneration();
         return self.kernel_port.devicePortRead(.{
             .header = component_port.makeHeader(.device_port_read, self.nextCorrelationId(), self.task_id),
             .device_capability_id = self.authority_capability_id,
@@ -57,6 +63,7 @@ pub const Client = struct {
     }
 
     pub fn writePort(self: *Client, port: u16, width: abi.DevicePortWidth, value: u32) Error!void {
+        try self.requireCurrentGeneration();
         return self.kernel_port.devicePortWrite(.{
             .header = component_port.makeHeader(.device_port_write, self.nextCorrelationId(), self.task_id),
             .device_capability_id = self.authority_capability_id,
@@ -69,5 +76,10 @@ pub const Client = struct {
     fn nextCorrelationId(self: *Client) u64 {
         defer self.next_correlation_id += 1;
         return self.next_correlation_id;
+    }
+
+    fn requireCurrentGeneration(self: *const Client) Error!void {
+        const task = self.kernel_port.kernel.runtime.find(self.task_id) orelse return error.KernelPortUnavailable;
+        if (task.process_generation != self.process_generation) return error.StaleGeneration;
     }
 };

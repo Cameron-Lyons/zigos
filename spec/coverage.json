@@ -78,6 +78,7 @@
     "19. What using Zigos would feel like",
     "20. One-sentence summary"
   ],
+  "one_sentence_summary": "Zigos is a capability-based, local-first, multi-device operating system with an immutable core, versioned object storage, strong sandboxing, explicit identity, and first-class support for modern accelerators.",
   "sections": [
     {
       "id": "1",
@@ -2096,7 +2097,7 @@
     "REQ-ONE-SENTENCE-SUMMARY": {
       "status": "enforced",
       "enforcement_modules": [
-        "tools/check_spec_coverage.py",
+        "tools/check_spec_coverage.zig",
         "src/native/core/principal.zig",
         "src/native/kernel_api/capability.zig",
         "src/native/kernel_api/shared_memory.zig",
@@ -2113,11 +2114,11 @@
       ],
       "negative_tests": [
         {
-          "file": "tools/check_spec_coverage.py",
+          "file": "tools/check_spec_coverage.zig",
           "name": "test_summary_clause_gate_rejects_missing_or_modeled_dependencies"
         },
         {
-          "file": "tools/check_spec_coverage.py",
+          "file": "tools/check_spec_coverage.zig",
           "name": "test_summary_clause_gate_requires_current_summary_phrases"
         }
       ]

@@ -75,7 +75,7 @@
         "Freestanding boot records can be verified against signed artifact manifests and compared across native smoke boots.",
         "Remote attestation refuses emulator-rooted measured state and requires a provisioned non-software root.",
         "A/B base selection, rollback, and post-activation health markers are covered by host and QEMU smoke evidence.",
-        "The native smoke target now includes negative QEMU runs that reject a tampered boot artifact manifest and a rollback target whose slot measurement no longer verifies before the boot can reach native-ready."
+        "The native smoke target now includes negative QEMU runs that reject a tampered boot artifact manifest, direct kernel/userspace-image/policy/driver-set measurement tampering, and a rollback target whose slot measurement no longer verifies before the boot can reach native-ready."
       ],
       "production_gaps": [
         "Host evidence still uses emulator-provided measurement fallbacks, and attestation root material is represented by software signer identities.",
@@ -85,12 +85,12 @@
       "graduation_criteria": [
         "Introduce a hardware-root abstraction that supports TPM and secure enclave backed quote/sign operations without exposing root seed material.",
         "Add verifier-facing attestation request and response records with nonce, remote party, policy visibility, key rotation, and revocation tests.",
-        "Broaden release-image tamper gates from manifest-level and rollback-slot smoke faults to direct kernel, bootloader measurement, userspace image, policy, and driver-set mutation cases under operational signing keys."
+        "Broaden release-image tamper gates from smoke fixtures to direct bootloader measurement mutation cases under operational signing keys."
       ],
       "next_actions": [
         "Split software signer provisioning out of attestation_service into a test-only provider.",
         "Add a production root provider interface and a fake TPM provider used only by adversarial tests.",
-        "Extend the smoke tamper fixtures from manifest-level mutation to direct per-artifact kernel, userspace, policy, and driver-set mutations."
+        "Add a direct bootloader-measurement mutation fixture and bind the smoke signing path to the production root-provider abstraction."
       ],
       "verification_commands": [
         "./scripts/zig.sh build spec-conformance",
@@ -212,13 +212,13 @@
       "current_evidence": [
         "Driver registration checks signed bundles, device-class authority, IOMMU-backed DMA range metadata, and restart generations.",
         "Storage driver tasks attach through the kernel device broker and the ATA bootstrap path exports read/write bridges for freestanding volume access.",
-        "The driver boundary spec gate exercises brokered ATA port I/O and rejects stale task authority, expired leases, invalid ports, and post-restart target generation mismatches.",
-        "QEMU driver restart proof exists for hot-swap and authority rebinding behavior."
+        "The driver boundary spec gate exercises brokered ATA read/write I/O and rejects stale task authority, stale broker sessions, expired leases, invalid ports, and post-restart target generation mismatches.",
+        "QEMU driver restart proof performs broker-mediated storage reads and writes before and after restart, rejects stale authority and stale DMA/port access after generation change, and gates the new broker session rebind."
       ],
       "production_gaps": [
         "Only the bootstrap storage path has concrete hardware-like data-plane depth; other driver classes remain inventory, policy, or publication proofs.",
         "IOMMU and DMA isolation are represented as native policy records rather than hardware programming and fault evidence.",
-        "Failure evidence needs real device I/O under driver restart, timeout, partial transfer, and broker revocation."
+        "Failure evidence still needs timeout, partial transfer, and explicit broker revocation cases beyond the driver restart generation-change path."
       ],
       "graduation_criteria": [
         "Add broker-mediated data-plane tests for at least storage and network that run in QEMU and prove no kernel direct publication for excluded subsystems.",
@@ -226,7 +226,7 @@
         "Gate driver restart on active I/O recovery, broker revocation, rebind, and no stale DMA or port access after generation change."
       ],
       "next_actions": [
-        "Extend driver-restart-qemu-test to perform storage reads and writes before and after restart.",
+        "Add timeout, partial transfer, and explicit broker revocation cases to the storage driver data-plane gates.",
         "Create a production-target note that defines whether first support is ATA PIO only or broader device class coverage."
       ],
       "verification_commands": [

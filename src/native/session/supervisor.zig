@@ -309,6 +309,12 @@ pub const Supervisor = struct {
         _ = deactivateRuntimeDriver(runtime, request.service_id, request.device_class);
 
         const swapped = try directory.hotSwapSigned(request);
+        if (previous.authority_capability_id != request.authority_capability_id and
+            !revokeRuntimeCapability(runtime, previous.owner_task_id, previous.authority_capability_id))
+        {
+            return error.CapabilityRevokeFailed;
+        }
+
         const activation = try activateRuntimeDriver(runtime, swapped, tick + 1);
         _ = self.noteDriverAttached(request.service_id, request.device_class, swapped.authority_capability_id, tick + 1);
         _ = self.completeRestart(request.service_id, tick + 1);
@@ -524,6 +530,13 @@ fn deactivateRuntimeDriver(runtime: anytype, service_id: u64, device_class: driv
         return runtime.deactivate(service_id);
     }
     return false;
+}
+
+fn revokeRuntimeCapability(runtime: anytype, task_id: u64, capability_id: u64) bool {
+    if (@hasDecl(@TypeOf(runtime.*), "revokeCapability")) {
+        return runtime.revokeCapability(task_id, capability_id) catch false;
+    }
+    return true;
 }
 
 fn observeDriverActivation(result: anytype) DriverActivationObservation {

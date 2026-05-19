@@ -3,6 +3,7 @@ const abi = @import("../../native/core/abi.zig");
 const architecture_gates = @import("../../native/architecture_gates.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
 const compositor_session = @import("../../native/platform/compositor_session.zig");
+const component_port = @import("../../native/kernel_api/component_port.zig");
 const device_broker = @import("../../native/kernel_api/device_broker.zig");
 const driver_runtime = @import("../../native/drivers/driver_runtime.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
@@ -20,6 +21,8 @@ const principal = @import("../../native/core/principal.zig");
 const runtime_negative_proofs = @import("../../native/session/runtime_negative_proofs.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const spec_support = @import("support.zig");
+const storage_driver_task = @import("../../native/drivers/storage_driver_task.zig");
+const storage_volume = @import("../../native/storage/storage_volume.zig");
 const supervisor = @import("../../native/session/supervisor.zig");
 const sync_adapters = @import("../../native/sync/sync_adapters.zig");
 const sync_service_test = @import("../../native/sync/sync_service_test.zig");
@@ -235,6 +238,7 @@ fn deviceBrokerNegativeAuthorityGate() !void {
         &endpoints,
         &shared,
     );
+    var kernel_port = component_port.KernelPort.init(&kernel);
 
     const driver_task = try runtime.createTask(.{
         .owner = spec_support.service(813),
@@ -271,6 +275,23 @@ fn deviceBrokerNegativeAuthorityGate() !void {
         .u8,
         12,
     ));
+
+    var brokered_session = storage_driver_task.establishAtaBootstrapSession(
+        &kernel_port,
+        device_id,
+        device_authority.id,
+        driver_task.id,
+        0xD170,
+        12,
+    ) orelse return error.MissingBootedDriverBinding;
+    try expectBrokeredStorageSessionWriteRead(&brokered_session, 8, "broker-before-rehost", 0x62);
+    const stale_session = brokered_session;
+    try std.testing.expect(try runtime.rehostTask(driver_task.id, 13));
+    try std.testing.expect(storage_driver_task.staleAuthorityRejectedAfterGenerationChange(&stale_session));
+    try std.testing.expect(storage_driver_task.staleDmaPortAccessRejectedAfterGenerationChange(&stale_session));
+    var stale_read: [storage_volume.sector_size]u8 = undefined;
+    var stale_session_copy = stale_session;
+    try std.testing.expect(!storage_driver_task.readAtaBootstrapSession(&stale_session_copy, 8, stale_read[0..]));
 
     try std.testing.expectError(error.CapabilityNotFound, kernel.deviceDescribe(
         kernelContext(untrusted_task.id, .device_describe, device_authority.id, .{ .device = device_id }),
@@ -327,6 +348,17 @@ fn deviceBrokerNegativeAuthorityGate() !void {
         20,
     );
     try std.testing.expectEqual(device_id, rebound_descriptor.device_id);
+    var rebound_session = storage_driver_task.establishAtaBootstrapSession(
+        &kernel_port,
+        device_id,
+        rebound_authority.id,
+        driver_task.id,
+        0xD171,
+        20,
+    ) orelse return error.MissingBootedDriverBinding;
+    try std.testing.expectEqual(@as(u64, 0xD171), rebound_session.dma_domain_id);
+    try std.testing.expect(rebound_session.process_generation > stale_session.process_generation);
+    try expectBrokeredStorageSessionWriteRead(&rebound_session, 9, "broker-after-rebind", 0x73);
 }
 
 fn mintBrokeredDeviceAuthority(
@@ -354,6 +386,29 @@ fn mintBrokeredDeviceAuthority(
         },
         .audit = .{},
     });
+}
+
+fn expectBrokeredStorageSessionWriteRead(
+    session: *storage_driver_task.AtaControllerSession,
+    lba: u64,
+    label: []const u8,
+    salt: u8,
+) !void {
+    var expected: [storage_volume.sector_size]u8 = undefined;
+    var readback: [storage_volume.sector_size]u8 = undefined;
+    fillStoragePattern(expected[0..], label, salt);
+    @memset(readback[0..], 0);
+    try std.testing.expect(storage_driver_task.writeAtaBootstrapSession(session, lba, expected[0..]));
+    try std.testing.expect(storage_driver_task.readAtaBootstrapSession(session, lba, readback[0..]));
+    try std.testing.expect(std.mem.eql(u8, expected[0..], readback[0..]));
+}
+
+fn fillStoragePattern(buffer: []u8, label: []const u8, salt: u8) void {
+    for (buffer, 0..) |*byte, index| {
+        byte.* = @as(u8, @truncate((index * 13) + salt));
+    }
+    const label_len = @min(buffer.len, label.len);
+    @memcpy(buffer[0..label_len], label[0..label_len]);
 }
 
 pub fn kernelBootstrapShimBoundaryGate() !void {

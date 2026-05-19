@@ -34,7 +34,10 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.service_boot_supervisor_restart_ok,
     boot_markers.service_boot_supervisor_restart_without_reboot,
     boot_markers.service_boot_storage_io_before_restart_ok,
+    boot_markers.service_boot_storage_stale_authority_rejected,
+    boot_markers.service_boot_storage_stale_dma_port_rejected,
     boot_markers.service_boot_storage_stale_access_rejected,
+    boot_markers.service_boot_storage_rebind_ok,
     boot_markers.service_boot_storage_io_after_restart_ok,
     "ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY",
     boot_markers.platform_bootloader_measurement_provided,
@@ -69,7 +72,10 @@ pub const driver_restart_required = [_][]const u8{
     boot_markers.service_boot_supervisor_restart_ok,
     boot_markers.service_boot_supervisor_restart_without_reboot,
     boot_markers.service_boot_storage_io_before_restart_ok,
+    boot_markers.service_boot_storage_stale_authority_rejected,
+    boot_markers.service_boot_storage_stale_dma_port_rejected,
     boot_markers.service_boot_storage_stale_access_rejected,
+    boot_markers.service_boot_storage_rebind_ok,
     boot_markers.service_boot_storage_io_after_restart_ok,
 };
 
@@ -88,10 +94,47 @@ pub const tampered_artifact_manifest_required = [_][]const u8{
     boot_markers.platform_artifact_manifest_tamper_rejected,
 };
 
+pub const tampered_kernel_required = [_][]const u8{
+    boot_markers.boot_start,
+    boot_markers.boot_profile_zigos_native,
+    boot_markers.platform_artifact_kernel_tamper_rejected,
+};
+
+pub const tampered_userspace_image_required = [_][]const u8{
+    boot_markers.boot_start,
+    boot_markers.boot_profile_zigos_native,
+    boot_markers.platform_artifact_userspace_image_tamper_rejected,
+};
+
+pub const tampered_policy_required = [_][]const u8{
+    boot_markers.boot_start,
+    boot_markers.boot_profile_zigos_native,
+    boot_markers.platform_artifact_policy_tamper_rejected,
+};
+
+pub const tampered_driver_set_required = [_][]const u8{
+    boot_markers.boot_start,
+    boot_markers.boot_profile_zigos_native,
+    boot_markers.platform_artifact_driver_set_tamper_rejected,
+};
+
 pub const rollback_slot_failure_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
     boot_markers.platform_base_selector_rollback_slot_failure_rejected,
+};
+
+pub const storage_durability_required = [_][]const u8{
+    boot_markers.boot_start,
+    boot_markers.boot_profile_zigos_native,
+    boot_markers.boot_core_ready,
+    boot_markers.storage_durability_start,
+    boot_markers.storage_durability_baseline_checkpointed,
+    boot_markers.storage_durability_interrupted_write_staged,
+    boot_markers.storage_durability_interrupted_boot_recovered,
+    boot_markers.storage_durability_final_checkpointed,
+    boot_markers.storage_durability_bad_root_slot_fallback,
+    boot_markers.storage_durability_deterministic_recovery,
 };
 
 pub const recovery_required = [_][]const u8{
@@ -152,14 +195,27 @@ test "native smoke gate requires in-boot driver crash restart proof markers" {
 }
 
 test "native smoke gate requires A/B image rollback proof markers" {
-    for (ab_rollback_required) |marker| {
-        try std.testing.expect(contains(&ab_rollback_required, marker));
-    }
+    try std.testing.expect(contains(&ab_rollback_required, boot_markers.platform_immutable_base_active));
+    try std.testing.expect(contains(&ab_rollback_required, boot_markers.platform_activation_rollback_ok));
+    try std.testing.expect(contains(&ab_rollback_required, boot_markers.platform_ab_image_rollback_ok));
+    try std.testing.expect(contains(&ab_rollback_required, boot_markers.platform_base_selector_rollback_before_service));
 }
 
 test "native smoke gate requires boot attestation negative proof markers" {
     try std.testing.expect(contains(&tampered_artifact_manifest_required, boot_markers.platform_artifact_manifest_tamper_rejected));
+    try std.testing.expect(contains(&tampered_kernel_required, boot_markers.platform_artifact_kernel_tamper_rejected));
+    try std.testing.expect(contains(&tampered_userspace_image_required, boot_markers.platform_artifact_userspace_image_tamper_rejected));
+    try std.testing.expect(contains(&tampered_policy_required, boot_markers.platform_artifact_policy_tamper_rejected));
+    try std.testing.expect(contains(&tampered_driver_set_required, boot_markers.platform_artifact_driver_set_tamper_rejected));
     try std.testing.expect(contains(&rollback_slot_failure_required, boot_markers.platform_base_selector_rollback_slot_failure_rejected));
+}
+
+test "native smoke gate requires focused storage durability proof markers" {
+    try std.testing.expect(contains(&storage_durability_required, boot_markers.storage_durability_start));
+    try std.testing.expect(contains(&storage_durability_required, boot_markers.storage_durability_baseline_checkpointed));
+    try std.testing.expect(contains(&storage_durability_required, boot_markers.storage_durability_interrupted_write_staged));
+    try std.testing.expect(contains(&storage_durability_required, boot_markers.storage_durability_bad_root_slot_fallback));
+    try std.testing.expect(contains(&storage_durability_required, boot_markers.storage_durability_deterministic_recovery));
 }
 
 test "native smoke gate requires production post-activation health proof markers" {

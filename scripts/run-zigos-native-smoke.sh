@@ -15,19 +15,36 @@ NATIVE_STORE_IMAGE="${3:?native store image path required}"
 MODE="${4:-full}"
 ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-180}"
 NATIVE_STORE_SIZE_MIB="${NATIVE_STORE_SIZE_MIB:-8}"
-ZIGOS_READY_MARKER="$("$ZIG" run "$MARKER_TOOL" -- ready)"
-DRIVER_RESTART_DONE_MARKER="ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_IO_AFTER_RESTART_OK"
-ARTIFACT_MANIFEST_TAMPER_REJECTED_MARKER="ZIGOS:PLATFORM:ARTIFACT_MANIFEST:TAMPER_REJECTED"
-ROLLBACK_SLOT_FAILURE_REJECTED_MARKER="ZIGOS:PLATFORM:BASE_SELECTOR:ROLLBACK_SLOT_REJECTED"
-VALIDATION_MARKER="$ZIGOS_READY_MARKER"
 
-if [ "$MODE" = "driver_restart" ]; then
-  VALIDATION_MARKER="$DRIVER_RESTART_DONE_MARKER"
-elif [ "$MODE" = "tampered_artifact_manifest" ]; then
-  VALIDATION_MARKER="$ARTIFACT_MANIFEST_TAMPER_REJECTED_MARKER"
-elif [ "$MODE" = "rollback_slot_failure" ]; then
-  VALIDATION_MARKER="$ROLLBACK_SLOT_FAILURE_REJECTED_MARKER"
-fi
+last_marker_for_group() {
+  local group="$1"
+  "$ZIG" run "$MARKER_TOOL" -- "$group" | awk 'NF { marker = $0 } END { if (marker == "") exit 1; print marker }'
+}
+
+first_marker_for_group() {
+  local group="$1"
+  "$ZIG" run "$MARKER_TOOL" -- "$group" | awk 'NF { print; found = 1; exit } END { if (!found) exit 1 }'
+}
+
+validation_marker_for_mode() {
+  local mode="$1"
+  case "$mode" in
+    full)
+      last_marker_for_group ready
+      ;;
+    driver_restart | tampered_artifact_manifest | tampered_kernel | tampered_userspace_image | tampered_policy | tampered_driver_set | rollback_slot_failure)
+      last_marker_for_group "$mode"
+      ;;
+    *)
+      echo "Unknown smoke mode '$mode'" >&2
+      return 1
+      ;;
+  esac
+}
+
+BOOT_START_MARKER="$(first_marker_for_group cold_boot)"
+ZIGOS_READY_MARKER="$(last_marker_for_group ready)"
+VALIDATION_MARKER="$(validation_marker_for_mode "$MODE")"
 
 BASE_LOG_PATH="${LOG_PATH%.log}"
 BOOT1_LOG="${BASE_LOG_PATH}.boot1.log"
@@ -137,34 +154,16 @@ line_number() {
 assert_driver_restart_without_reboot() {
   local log_path="$1"
   local boot_marker
-  local crash_marker
-  local rehost_marker
-  local restart_marker
-  local no_reboot_marker
-  local storage_before_marker
-  local storage_stale_marker
-  local storage_after_marker
   local ready_marker
   local boot_count
-  local boot_line
-  local crash_line
-  local rehost_line
-  local restart_line
-  local no_reboot_line
-  local storage_before_line
-  local storage_stale_line
+  local previous_line
+  local marker
+  local marker_line
   local storage_after_line
   local ready_line
 
   assert_marker_group "$log_path" driver_restart
-  boot_marker="BOOT:START"
-  crash_marker="ZIGOS:SERVICE_BOOT:SUPERVISOR:CRASH_RECORDED"
-  rehost_marker="ZIGOS:SERVICE_BOOT:DRIVER:REHOST_OK"
-  restart_marker="ZIGOS:SERVICE_BOOT:SUPERVISOR:RESTART_OK"
-  no_reboot_marker="ZIGOS:SERVICE_BOOT:SUPERVISOR:RESTART_WITHOUT_REBOOT"
-  storage_before_marker="ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_IO_BEFORE_RESTART_OK"
-  storage_stale_marker="ZIGOS:SERVICE_BOOT:DRIVER:STALE_ACCESS_REJECTED"
-  storage_after_marker="ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_IO_AFTER_RESTART_OK"
+  boot_marker="$BOOT_START_MARKER"
   ready_marker="$VALIDATION_MARKER"
 
   boot_count="$(grep -Fc "$boot_marker" "$log_path")"
@@ -174,27 +173,19 @@ assert_driver_restart_without_reboot() {
     exit 1
   fi
 
-  boot_line="$(line_number "$log_path" "$boot_marker")"
-  crash_line="$(line_number "$log_path" "$crash_marker")"
-  rehost_line="$(line_number "$log_path" "$rehost_marker")"
-  restart_line="$(line_number "$log_path" "$restart_marker")"
-  no_reboot_line="$(line_number "$log_path" "$no_reboot_marker")"
-  storage_before_line="$(line_number "$log_path" "$storage_before_marker")"
-  storage_stale_line="$(line_number "$log_path" "$storage_stale_marker")"
-  storage_after_line="$(line_number "$log_path" "$storage_after_marker")"
+  previous_line="$(line_number "$log_path" "$boot_marker")"
+  while IFS= read -r marker; do
+    [ -n "$marker" ] || continue
+    marker_line="$(line_number "$log_path" "$marker")"
+    if [ "$previous_line" -ge "$marker_line" ]; then
+      echo "Zigos native smoke test failed: driver restart proof markers are out of order in $log_path" >&2
+      cat "$log_path" >&2
+      exit 1
+    fi
+    previous_line="$marker_line"
+  done < <("$ZIG" run "$MARKER_TOOL" -- driver_restart)
+  storage_after_line="$previous_line"
   ready_line="$(line_number "$log_path" "$ready_marker")"
-
-  if [ "$boot_line" -ge "$crash_line" ] ||
-     [ "$crash_line" -ge "$rehost_line" ] ||
-     [ "$rehost_line" -ge "$restart_line" ] ||
-     [ "$restart_line" -ge "$no_reboot_line" ] ||
-     [ "$no_reboot_line" -ge "$storage_before_line" ] ||
-     [ "$storage_before_line" -ge "$storage_stale_line" ] ||
-     [ "$storage_stale_line" -ge "$storage_after_line" ]; then
-    echo "Zigos native smoke test failed: driver restart proof markers are out of order in $log_path" >&2
-    cat "$log_path" >&2
-    exit 1
-  fi
 
   if [ "$MODE" = "full" ] && [ "$storage_after_line" -ge "$ready_line" ]; then
     echo "Zigos native smoke test failed: driver restart proof markers are out of order in $log_path" >&2
@@ -244,6 +235,27 @@ append_measured_boot_comparison() {
   fi
 }
 
+smoke_mode_label() {
+  local mode="$1"
+  case "$mode" in
+    tampered_artifact_manifest) printf 'tampered artifact manifest' ;;
+    tampered_kernel) printf 'tampered kernel' ;;
+    tampered_userspace_image) printf 'tampered userspace image' ;;
+    tampered_policy) printf 'tampered policy' ;;
+    tampered_driver_set) printf 'tampered driver-set' ;;
+    rollback_slot_failure) printf 'rollback-slot failure' ;;
+    *) printf '%s' "$mode" ;;
+  esac
+}
+
+run_negative_boot() {
+  local group="$1"
+  run_boot "$BOOT1_LOG" reset
+  assert_negative_boot_rejected "$BOOT1_LOG" "$group"
+  cat "$BOOT1_LOG" >"$LOG_PATH"
+  echo "Zigos $(smoke_mode_label "$group") negative smoke test passed. Logs: $LOG_PATH"
+}
+
 case "$MODE" in
   full)
     run_boot "$BOOT1_LOG" reset
@@ -276,17 +288,8 @@ case "$MODE" in
     cat "$BOOT1_LOG" >"$LOG_PATH"
     echo "Zigos driver restart QEMU test passed. Logs: $LOG_PATH"
     ;;
-  tampered_artifact_manifest)
-    run_boot "$BOOT1_LOG" reset
-    assert_negative_boot_rejected "$BOOT1_LOG" tampered_artifact_manifest
-    cat "$BOOT1_LOG" >"$LOG_PATH"
-    echo "Zigos tampered artifact manifest negative smoke test passed. Logs: $LOG_PATH"
-    ;;
-  rollback_slot_failure)
-    run_boot "$BOOT1_LOG" reset
-    assert_negative_boot_rejected "$BOOT1_LOG" rollback_slot_failure
-    cat "$BOOT1_LOG" >"$LOG_PATH"
-    echo "Zigos rollback-slot failure negative smoke test passed. Logs: $LOG_PATH"
+  tampered_artifact_manifest | tampered_kernel | tampered_userspace_image | tampered_policy | tampered_driver_set | rollback_slot_failure)
+    run_negative_boot "$MODE"
     ;;
   *)
     echo "Unknown smoke mode '$MODE'" >&2

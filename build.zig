@@ -50,28 +50,18 @@ pub fn build(b: *std.Build) void {
         .full,
     );
 
-    const tampered_artifact_manifest_smoke_cmd = qemu_build.addNativeSmokeCommand(
-        b,
-        kernels.zigos_native_tampered_artifact_manifest,
-        userspace_images,
-        "build/zigos-native-tampered-artifact-manifest.log",
-        "build/native-store-tampered-artifact-manifest.img",
-        .tampered_artifact_manifest,
-    );
-
-    const rollback_slot_failure_smoke_cmd = qemu_build.addNativeSmokeCommand(
-        b,
-        kernels.zigos_native_rollback_slot_failure,
-        userspace_images,
-        "build/zigos-native-rollback-slot-failure.log",
-        "build/native-store-rollback-slot-failure.img",
-        .rollback_slot_failure,
-    );
+    const negative_smoke_cmds = [_]*std.Build.Step.Run{
+        qemu_build.addNativeFaultSmokeCommand(b, kernels.zigos_native_tampered_artifact_manifest, userspace_images, .tampered_artifact_manifest),
+        qemu_build.addNativeFaultSmokeCommand(b, kernels.zigos_native_tampered_kernel, userspace_images, .tampered_kernel),
+        qemu_build.addNativeFaultSmokeCommand(b, kernels.zigos_native_tampered_userspace_image, userspace_images, .tampered_userspace_image),
+        qemu_build.addNativeFaultSmokeCommand(b, kernels.zigos_native_tampered_policy, userspace_images, .tampered_policy),
+        qemu_build.addNativeFaultSmokeCommand(b, kernels.zigos_native_tampered_driver_set, userspace_images, .tampered_driver_set),
+        qemu_build.addNativeFaultSmokeCommand(b, kernels.zigos_native_rollback_slot_failure, userspace_images, .rollback_slot_failure),
+    };
 
     const zigos_native_smoke_test_step = b.step("zigos-native-smoke-test", "Run the Zigos native bootstrap smoke test in QEMU");
     zigos_native_smoke_test_step.dependOn(&zigos_native_smoke_test_cmd.step);
-    zigos_native_smoke_test_step.dependOn(&tampered_artifact_manifest_smoke_cmd.step);
-    zigos_native_smoke_test_step.dependOn(&rollback_slot_failure_smoke_cmd.step);
+    dependOnRunCommands(zigos_native_smoke_test_step, &negative_smoke_cmds);
 
     const driver_restart_qemu_cmd = qemu_build.addNativeSmokeCommand(
         b,
@@ -85,11 +75,19 @@ pub fn build(b: *std.Build) void {
     const driver_restart_qemu_step = b.step("driver-restart-qemu-test", "Run QEMU proof that a userspace driver crashes and restarts without reboot");
     driver_restart_qemu_step.dependOn(&driver_restart_qemu_cmd.step);
 
+    const storage_durability_qemu_cmd = qemu_build.addStorageDurabilityQemuCommand(
+        b,
+        kernels.zigos_native_storage_durability,
+        userspace_images,
+    );
+    const storage_durability_qemu_step = b.step("storage-durability-qemu-test", "Run focused QEMU storage durability proof across forced reboots and one bad root slot");
+    storage_durability_qemu_step.dependOn(&storage_durability_qemu_cmd.step);
+
     const recovery_qemu_cmd = qemu_build.addRecoveryQemuCommand(b, kernels.recovery, userspace_images);
     const recovery_qemu_step = b.step("recovery-qemu-test", "Run QEMU proof that the recovery profile performs break-glass repair operations");
     recovery_qemu_step.dependOn(&recovery_qemu_cmd.step);
 
-    const check_steps = checks_build.addCheckSteps(b, test_artifacts);
+    const check_steps = checks_build.addCheckSteps(b, optimize, test_artifacts);
     const spec_smoke_cmd = qemu_build.addNativeSmokeCommand(
         b,
         kernels.zigos_native,
@@ -101,8 +99,7 @@ pub fn build(b: *std.Build) void {
     spec_smoke_cmd.step.dependOn(check_steps.spec_tests);
     const spec_conformance_step = b.step("spec-conformance", "Validate spec coverage, run native spec tests, and verify the freestanding smoke path");
     spec_conformance_step.dependOn(&spec_smoke_cmd.step);
-    spec_conformance_step.dependOn(&tampered_artifact_manifest_smoke_cmd.step);
-    spec_conformance_step.dependOn(&rollback_slot_failure_smoke_cmd.step);
+    dependOnRunCommands(spec_conformance_step, &negative_smoke_cmds);
     spec_conformance_step.dependOn(&recovery_qemu_cmd.step);
 
     const benchmark_cmd = qemu_build.addBenchmarkCommand(b, kernels.benchmark, userspace_images);
@@ -122,6 +119,12 @@ pub fn build(b: *std.Build) void {
     const iso_cmd = qemu_build.addIsoCommand(b, kernels.zigos_native, userspace_images);
     const iso_step = b.step("iso", "Build a bootable native-only ISO");
     iso_step.dependOn(&iso_cmd.step);
+}
+
+fn dependOnRunCommands(step: *std.Build.Step, commands: []const *std.Build.Step.Run) void {
+    for (commands) |command| {
+        step.dependOn(&command.step);
+    }
 }
 
 fn enforceZigVersion() void {

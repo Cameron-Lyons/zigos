@@ -6,12 +6,29 @@ pub const NativeSmokeMode = enum {
     full,
     driver_restart,
     tampered_artifact_manifest,
+    tampered_kernel,
+    tampered_userspace_image,
+    tampered_policy,
+    tampered_driver_set,
     rollback_slot_failure,
 
     fn arg(self: NativeSmokeMode) ?[]const u8 {
         return switch (self) {
             .full => null,
             else => @tagName(self),
+        };
+    }
+
+    fn fileStem(self: NativeSmokeMode) []const u8 {
+        return switch (self) {
+            .full => "full",
+            .driver_restart => "driver-restart",
+            .tampered_artifact_manifest => "tampered-artifact-manifest",
+            .tampered_kernel => "tampered-kernel",
+            .tampered_userspace_image => "tampered-userspace-image",
+            .tampered_policy => "tampered-policy",
+            .tampered_driver_set => "tampered-driver-set",
+            .rollback_slot_failure => "rollback-slot-failure",
         };
     }
 };
@@ -98,6 +115,24 @@ pub fn addNativeSmokeCommand(
     return command;
 }
 
+pub fn addNativeFaultSmokeCommand(
+    b: *std.Build,
+    kernel: shared.KernelArtifact,
+    userspace_images: userspace_build.ArtifactSet,
+    mode: NativeSmokeMode,
+) *std.Build.Step.Run {
+    std.debug.assert(mode != .full and mode != .driver_restart);
+    const file_stem = mode.fileStem();
+    return addNativeSmokeCommand(
+        b,
+        kernel,
+        userspace_images,
+        b.fmt("build/zigos-native-{s}.log", .{file_stem}),
+        b.fmt("build/native-store-{s}.img", .{file_stem}),
+        mode,
+    );
+}
+
 pub fn addRecoveryQemuCommand(
     b: *std.Build,
     kernel: shared.KernelArtifact,
@@ -108,6 +143,23 @@ pub fn addRecoveryQemuCommand(
         "scripts/run-kernel-recovery.sh",
         kernel.output_path,
         "build/kernel-recovery.log",
+    });
+    command.step.dependOn(kernel.install_step);
+    command.step.dependOn(userspace_images.step);
+    return command;
+}
+
+pub fn addStorageDurabilityQemuCommand(
+    b: *std.Build,
+    kernel: shared.KernelArtifact,
+    userspace_images: userspace_build.ArtifactSet,
+) *std.Build.Step.Run {
+    const command = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-storage-durability-qemu.sh",
+        kernel.output_path,
+        "build/storage-durability-qemu.log",
+        "build/native-store-storage-durability.img",
     });
     command.step.dependOn(kernel.install_step);
     command.step.dependOn(userspace_images.step);
