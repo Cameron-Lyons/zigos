@@ -11,12 +11,10 @@ pub const CheckSteps = struct {
 
 pub fn addCheckSteps(
     b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
     test_artifacts: tests_build.TestArtifacts,
 ) CheckSteps {
-    const zig_test_roots_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/check_zig_test_roots.py",
-    });
+    const zig_test_roots_cmd = addHostToolRun(b, optimize, "check-zig-test-roots", "tools/check_zig_test_roots.zig");
     const zig_test_roots_step = b.step("test-roots", "Check that Zig test-bearing files are reachable from build test roots");
     zig_test_roots_step.dependOn(&zig_test_roots_cmd.step);
 
@@ -60,19 +58,13 @@ pub fn addCheckSteps(
     lint_step.dependOn(&shell_lint_cmd.step);
     lint_step.dependOn(&action_lint_cmd.step);
 
-    const spec_coverage_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/check_spec_coverage.py",
-    });
+    const spec_coverage_cmd = addHostToolRun(b, optimize, "check-spec-coverage", "tools/check_spec_coverage.zig");
     test_artifacts.run_spec_tests.step.dependOn(&spec_coverage_cmd.step);
     test_artifacts.run_spec_tests.step.dependOn(&zig_test_roots_cmd.step);
     const spec_tests_step = b.step("spec-tests", "Run the spec coverage gate and native spec unit tests");
     spec_tests_step.dependOn(&test_artifacts.run_spec_tests.step);
 
-    const prod_readiness_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/check_production_readiness.py",
-    });
+    const prod_readiness_cmd = addHostToolRun(b, optimize, "check-production-readiness", "tools/check_production_readiness.zig");
     const prod_readiness_step = b.step("prod-readiness", "Validate the production-readiness manifest and generated matrix");
     prod_readiness_step.dependOn(&prod_readiness_cmd.step);
 
@@ -83,6 +75,25 @@ pub fn addCheckSteps(
         .prod_readiness = prod_readiness_step,
         .lint = lint_step,
     };
+}
+
+fn addHostToolRun(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+    name: []const u8,
+    source_path: []const u8,
+) *std.Build.Step.Run {
+    const tool = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(source_path),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const run = b.addRunArtifact(tool);
+    run.setCwd(b.path("."));
+    return run;
 }
 
 pub fn addVerifyStep(

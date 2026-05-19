@@ -42,9 +42,9 @@ Use the pinned toolchain and repo entrypoints:
 
 Keep the spec contract intact:
 
-- Treat `SPEC.md` as the architecture contract and `spec/coverage.json` as the coverage manifest.
+- Treat `spec/coverage.json` as the architecture and coverage contract.
 - Treat `spec/production_readiness.json` as the separate manifest for prototype-to-production work; do not encode production readiness by weakening or overloading spec conformance status.
-- Keep the hidden `<!-- REQ: ... -->` anchors in `SPEC.md` stable when editing prose so coverage mappings do not churn.
+- Keep requirement ids stable when editing manifest prose or mappings so coverage references do not churn.
 - If you add, rename, or split spec tests, keep the test names and coverage references aligned.
 - Prefer expanding tests and coverage before changing requirement anchors or architecture claims.
 

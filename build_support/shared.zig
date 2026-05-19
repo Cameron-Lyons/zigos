@@ -9,7 +9,12 @@ pub const BootProfile = enum {
 pub const SmokeFaultMode = enum {
     none,
     tampered_artifact_manifest,
+    tampered_kernel,
+    tampered_userspace_image,
+    tampered_policy,
+    tampered_driver_set,
     rollback_slot_failure,
+    storage_durability,
 };
 
 pub const KernelArtifact = struct {

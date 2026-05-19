@@ -439,6 +439,10 @@ pub const TrustBoot = struct {
                     else => return false,
                 }
             }
+            if (directArtifactTamperFixture()) |fixture| {
+                if (!rejectDirectArtifactTamper(&handoff, &signed_manifest, fixture.kind, fixture.marker)) return false;
+                return false;
+            }
             boot = measured_boot.verifyBootloaderMeasurementHandoff(
                 &handoff,
                 &signed_manifest,
@@ -884,6 +888,78 @@ fn smokeFaultModeIs(comptime mode_name: []const u8) bool {
     if (builtin.target.os.tag != .freestanding) return false;
     const config = @import("../../kernel/config.zig");
     return std.mem.eql(u8, @tagName(config.smokeFaultMode()), mode_name);
+}
+
+const DirectArtifactTamperFixture = struct {
+    mode_name: []const u8,
+    kind: measured_boot.MeasurementKind,
+    marker: []const u8,
+};
+
+const direct_artifact_tamper_fixtures = [_]DirectArtifactTamperFixture{
+    .{
+        .mode_name = "tampered_kernel",
+        .kind = .kernel,
+        .marker = boot_markers.platform_artifact_kernel_tamper_rejected,
+    },
+    .{
+        .mode_name = "tampered_userspace_image",
+        .kind = .critical_service,
+        .marker = boot_markers.platform_artifact_userspace_image_tamper_rejected,
+    },
+    .{
+        .mode_name = "tampered_policy",
+        .kind = .policy,
+        .marker = boot_markers.platform_artifact_policy_tamper_rejected,
+    },
+    .{
+        .mode_name = "tampered_driver_set",
+        .kind = .driver_set,
+        .marker = boot_markers.platform_artifact_driver_set_tamper_rejected,
+    },
+};
+
+fn directArtifactTamperFixture() ?DirectArtifactTamperFixture {
+    inline for (direct_artifact_tamper_fixtures) |fixture| {
+        if (smokeFaultModeIs(fixture.mode_name)) return fixture;
+    }
+    return null;
+}
+
+fn rejectDirectArtifactTamper(
+    handoff: *const measured_boot.BootloaderMeasurementHandoff,
+    signed_manifest: *const measured_boot.SignedArtifactManifest,
+    kind: measured_boot.MeasurementKind,
+    marker: []const u8,
+) bool {
+    var tampered_handoff = handoff.*;
+    if (!tamperFirstHandoffRecord(&tampered_handoff, kind)) return false;
+
+    if (measured_boot.verifyBootloaderMeasurementHandoff(
+        &tampered_handoff,
+        signed_manifest,
+        measured_boot.production_artifact_manifest_signer,
+    )) |_| {
+        return false;
+    } else |err| switch (err) {
+        error.ManifestMismatch => {
+            common.printBootMarker(marker);
+            return true;
+        },
+        else => return false,
+    }
+}
+
+fn tamperFirstHandoffRecord(
+    handoff: *measured_boot.BootloaderMeasurementHandoff,
+    kind: measured_boot.MeasurementKind,
+) bool {
+    for (handoff.records[0..handoff.record_count]) |*record| {
+        if (record.kind != kind) continue;
+        record.digest[0] ^= 0xA7;
+        return true;
+    }
+    return false;
 }
 
 fn supportMeasuredBootShape(boot: *const measured_boot.BootRecord) void {

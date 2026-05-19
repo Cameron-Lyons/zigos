@@ -131,6 +131,7 @@ pub const Runtime = struct {
                             driver.service_id,
                             driver.authority_capability_id,
                             driver.owner_task_id,
+                            driver.dma_domain_id,
                             now_ticks,
                             self.kernel_port,
                         )) {

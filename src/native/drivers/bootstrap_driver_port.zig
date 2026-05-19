@@ -265,6 +265,7 @@ pub fn activateStorageBackend(
     service_id: u64,
     authority_capability_id: u64,
     owner_task_id: u64,
+    dma_domain_id: u64,
     now_ticks: u64,
     kernel_port: ?*component_port.KernelPort,
 ) bool {
@@ -278,6 +279,7 @@ pub fn activateStorageBackend(
                         device_id,
                         authority_capability_id,
                         owner_task_id,
+                        dma_domain_id,
                         now_ticks,
                     ) orelse return false;
                 }
@@ -347,6 +349,24 @@ pub fn activeStorageWrite(service_id: u64, start_lba: u64, buffer: []const u8) b
             break :blk backend.write(start_lba, buffer.ptr, buffer.len);
         },
     };
+}
+
+pub fn activeBrokeredStorageRead(service_id: u64, start_lba: u64, buffer: []u8) bool {
+    const publication = publicationForActiveStorage(service_id) orelse return false;
+    if (publication.kind != .ata_bootstrap_bridge) return false;
+    if (publication.ata_session) |*session| {
+        return storage_driver_task.readAtaBootstrapSession(session, start_lba, buffer);
+    }
+    return false;
+}
+
+pub fn activeBrokeredStorageWrite(service_id: u64, start_lba: u64, buffer: []const u8) bool {
+    const publication = publicationForActiveStorage(service_id) orelse return false;
+    if (publication.kind != .ata_bootstrap_bridge) return false;
+    if (publication.ata_session) |*session| {
+        return storage_driver_task.writeAtaBootstrapSession(session, start_lba, buffer);
+    }
+    return false;
 }
 
 pub fn activeStorageAtaSession(service_id: u64) ?storage_driver_task.AtaControllerSession {

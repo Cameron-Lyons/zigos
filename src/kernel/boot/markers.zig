@@ -76,7 +76,10 @@ pub const service_boot_driver_rehost_ok = "ZIGOS:SERVICE_BOOT:DRIVER:REHOST_OK";
 pub const service_boot_supervisor_restart_ok = "ZIGOS:SERVICE_BOOT:SUPERVISOR:RESTART_OK";
 pub const service_boot_supervisor_restart_without_reboot = "ZIGOS:SERVICE_BOOT:SUPERVISOR:RESTART_WITHOUT_REBOOT";
 pub const service_boot_storage_io_before_restart_ok = "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_IO_BEFORE_RESTART_OK";
+pub const service_boot_storage_stale_authority_rejected = "ZIGOS:SERVICE_BOOT:DRIVER:STALE_AUTHORITY_REJECTED";
+pub const service_boot_storage_stale_dma_port_rejected = "ZIGOS:SERVICE_BOOT:DRIVER:STALE_DMA_PORT_REJECTED";
 pub const service_boot_storage_stale_access_rejected = "ZIGOS:SERVICE_BOOT:DRIVER:STALE_ACCESS_REJECTED";
+pub const service_boot_storage_rebind_ok = "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_REBIND_OK";
 pub const service_boot_storage_io_after_restart_ok = "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_IO_AFTER_RESTART_OK";
 
 pub const storage_object_store_ready = "ZIGOS:STORAGE:OBJECT_STORE:READY";
@@ -88,6 +91,13 @@ pub const storage_reload_latest_version_done = "ZIGOS:STORAGE:RELOAD:LATEST_VERS
 pub const storage_service_recovered = "ZIGOS:STORAGE:STORAGE_SERVICE:RECOVERED";
 pub const storage_file_bridge_derived = "ZIGOS:STORAGE:FILE_BRIDGE:DERIVED";
 pub const storage_path_authority_deprecated = "ZIGOS:STORAGE:PATH_AUTHORITY:DEPRECATED";
+pub const storage_durability_start = "ZIGOS:STORAGE:DURABILITY:START";
+pub const storage_durability_baseline_checkpointed = "ZIGOS:STORAGE:DURABILITY:BASELINE_CHECKPOINTED";
+pub const storage_durability_interrupted_write_staged = "ZIGOS:STORAGE:DURABILITY:INTERRUPTED_WRITE_STAGED";
+pub const storage_durability_interrupted_boot_recovered = "ZIGOS:STORAGE:DURABILITY:INTERRUPTED_BOOT_RECOVERED";
+pub const storage_durability_final_checkpointed = "ZIGOS:STORAGE:DURABILITY:FINAL_CHECKPOINTED";
+pub const storage_durability_bad_root_slot_fallback = "ZIGOS:STORAGE:DURABILITY:BAD_ROOT_SLOT_FALLBACK_OK";
+pub const storage_durability_deterministic_recovery = "ZIGOS:STORAGE:DURABILITY:DETERMINISTIC_RECOVERY_OK";
 
 pub const sync_device_graph_rooted = "ZIGOS:SYNC:DEVICE_GRAPH:ROOTED";
 
@@ -109,6 +119,10 @@ pub const platform_bootloader_measurement_provided = "ZIGOS:PLATFORM:BOOTLOADER_
 pub const platform_bootloader_handoff_verified = "ZIGOS:PLATFORM:BOOTLOADER_HANDOFF:VERIFIED";
 pub const platform_artifact_manifest_verified = "ZIGOS:PLATFORM:ARTIFACT_MANIFEST:VERIFIED";
 pub const platform_artifact_manifest_tamper_rejected = "ZIGOS:PLATFORM:ARTIFACT_MANIFEST:TAMPER_REJECTED";
+pub const platform_artifact_kernel_tamper_rejected = "ZIGOS:PLATFORM:ARTIFACT:KERNEL_TAMPER_REJECTED";
+pub const platform_artifact_userspace_image_tamper_rejected = "ZIGOS:PLATFORM:ARTIFACT:USERSPACE_IMAGE_TAMPER_REJECTED";
+pub const platform_artifact_policy_tamper_rejected = "ZIGOS:PLATFORM:ARTIFACT:POLICY_TAMPER_REJECTED";
+pub const platform_artifact_driver_set_tamper_rejected = "ZIGOS:PLATFORM:ARTIFACT:DRIVER_SET_TAMPER_REJECTED";
 pub const platform_base_selector_rollback_slot_failure_rejected = "ZIGOS:PLATFORM:BASE_SELECTOR:ROLLBACK_SLOT_REJECTED";
 pub const platform_measured_boot_recorded = "ZIGOS:PLATFORM:MEASURED_BOOT:RECORDED";
 pub const platform_measured_boot_verified_root = "ZIGOS:PLATFORM:MEASURED_BOOT:VERIFIED_ROOT";

@@ -17,67 +17,22 @@ const storage_service = @import("../storage/storage_service.zig");
 const sync_service = @import("../sync/sync_service.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service = @import("../task/task_runtime_service.zig");
+const rendered_shell_model = @import("rendered_shell/model.zig");
+const task_shell_wire = @import("rendered_shell/task_shell_wire.zig");
 const yesNo = native_util.yesNo;
 
-pub const Control = enum {
-    start_task,
-    open_workspace,
-    open_document,
-    open_app_panel,
-    focus_full_screen,
-};
-
-pub const JourneyControl = enum {
-    install_app,
-    start_task,
-    open_workspace,
-    open_document,
-    open_app_panel,
-    review_permission,
-    sync_workspace,
-    update_app,
-    rollback_update,
-    containment_denial,
-    recover_system,
-    remove_app,
-};
-
-pub const Config = struct {
-    user: principal.PrincipalId,
-    app_owner: principal.PrincipalId,
-    reviewer_task_id: u64 = 0,
-    workspace_id: u64,
-    workspace_label: []const u8,
-    document_path: []const u8,
-    task_label: []const u8,
-    task_entry: []const u8,
-    task_title: []const u8,
-    bundle_id: []const u8,
-    display_name: []const u8,
-    ui_surface_id: u64,
-    image_id: u64,
-};
-
-pub const JourneyConfig = struct {
-    user: principal.PrincipalId,
-    app_owner: principal.PrincipalId,
-    reviewer_task_id: u64,
-    workspace_id: u64,
-    workspace_label: []const u8,
-    document_path: []const u8,
-    task_label: []const u8,
-    task_entry: []const u8,
-    task_title: []const u8,
-    bundle_id: []const u8,
-    display_name: []const u8,
-    source_identity: []const u8,
-    install_bundle: manifest.BundleManifest,
-    update_bundle: manifest.BundleManifest,
-    ui_surface_id: u64,
-    image_id: u64,
-    sync_from_device: principal.PrincipalId,
-    sync_to_device: principal.PrincipalId,
-};
+pub const Control = rendered_shell_model.Control;
+pub const JourneyControl = rendered_shell_model.JourneyControl;
+pub const Config = rendered_shell_model.Config;
+pub const JourneyConfig = rendered_shell_model.JourneyConfig;
+pub const TaskShellOperation = task_shell_wire.TaskShellOperation;
+pub const TaskShellStatus = task_shell_wire.TaskShellStatus;
+pub const TaskShellRequest = task_shell_wire.TaskShellRequest;
+pub const TaskShellResponse = task_shell_wire.TaskShellResponse;
+pub const encodeTaskShellRequest = task_shell_wire.encodeRequest;
+pub const decodeTaskShellRequest = task_shell_wire.decodeRequest;
+pub const encodeTaskShellResponse = task_shell_wire.encodeResponse;
+pub const decodeTaskShellResponse = task_shell_wire.decodeResponse;
 
 pub const Shell = struct {
     runtime: *task_runtime.Runtime,
@@ -265,40 +220,6 @@ pub const Shell = struct {
     }
 };
 
-pub const TaskShellOperation = enum(u8) {
-    click = 1,
-    recover_state = 2,
-};
-
-pub const TaskShellStatus = enum(u8) {
-    ok = 0,
-    invalid_order = 1,
-    not_found = 2,
-    compositor_rejected = 3,
-    recovery_missing = 4,
-    invalid_request = 5,
-    malformed_request = 6,
-    request_too_large = 7,
-    response_too_large = 8,
-};
-
-pub const TaskShellRequest = struct {
-    operation: TaskShellOperation,
-    control: Control = .start_task,
-    tick: u64 = 0,
-};
-
-pub const TaskShellResponse = struct {
-    operation: TaskShellOperation,
-    control: Control,
-    status: TaskShellStatus = .ok,
-    recovered: bool = false,
-    task_id: u64 = 0,
-    active_window_id: u64 = 0,
-    visible_window_count: u16 = 0,
-    task_flow_events: u16 = 0,
-};
-
 pub const TaskShellState = struct {
     task_id: u64 = 0,
     workspace_opened: bool = false,
@@ -351,7 +272,7 @@ pub const TaskShellService = struct {
     pub fn dispatch(self: *TaskShellService, request: TaskShellRequest) TaskShellResponse {
         var response = self.responseFor(request);
         self.apply(request, &response) catch |err| {
-            response.status = statusForTaskShellError(err);
+            response.status = task_shell_wire.statusForError(err);
         };
         self.refreshResponse(&response);
         return response;
@@ -586,138 +507,6 @@ pub const TaskShellService = struct {
         response.task_flow_events = @intCast(self.ledger.countMatching(.{ .kind = .task_flow }));
     }
 };
-
-const TASK_SHELL_MAGIC_REQUEST = [_]u8{ 'Z', 'S', 'H', '1' };
-const TASK_SHELL_MAGIC_RESPONSE = [_]u8{ 'Z', 'S', 'R', '1' };
-
-pub fn encodeTaskShellRequest(buffer: []u8, request: TaskShellRequest) ![]const u8 {
-    var used: usize = 0;
-    try shellWriteBytes(buffer, &used, &TASK_SHELL_MAGIC_REQUEST);
-    try shellWriteByte(buffer, &used, @intFromEnum(request.operation));
-    try shellWriteByte(buffer, &used, @intFromEnum(request.control));
-    try shellWriteU64(buffer, &used, request.tick);
-    return buffer[0..used];
-}
-
-pub fn decodeTaskShellRequest(payload: []const u8) !TaskShellRequest {
-    var cursor: usize = 0;
-    if (!std.mem.eql(u8, try shellReadBytes(payload, &cursor, 4), &TASK_SHELL_MAGIC_REQUEST)) return error.MalformedRequest;
-    const operation = std.enums.fromInt(TaskShellOperation, try shellReadByte(payload, &cursor)) orelse return error.MalformedRequest;
-    const control = std.enums.fromInt(Control, try shellReadByte(payload, &cursor)) orelse return error.MalformedRequest;
-    const tick = try shellReadU64(payload, &cursor);
-    if (cursor != payload.len) return error.MalformedRequest;
-    return .{
-        .operation = operation,
-        .control = control,
-        .tick = tick,
-    };
-}
-
-pub fn encodeTaskShellResponse(buffer: []u8, response: TaskShellResponse) ![]const u8 {
-    var used: usize = 0;
-    try shellWriteBytes(buffer, &used, &TASK_SHELL_MAGIC_RESPONSE);
-    try shellWriteByte(buffer, &used, @intFromEnum(response.operation));
-    try shellWriteByte(buffer, &used, @intFromEnum(response.control));
-    try shellWriteByte(buffer, &used, @intFromEnum(response.status));
-    try shellWriteByte(buffer, &used, if (response.recovered) 1 else 0);
-    try shellWriteU64(buffer, &used, response.task_id);
-    try shellWriteU64(buffer, &used, response.active_window_id);
-    try shellWriteU16(buffer, &used, response.visible_window_count);
-    try shellWriteU16(buffer, &used, response.task_flow_events);
-    return buffer[0..used];
-}
-
-pub fn decodeTaskShellResponse(payload: []const u8) !TaskShellResponse {
-    var cursor: usize = 0;
-    if (!std.mem.eql(u8, try shellReadBytes(payload, &cursor, 4), &TASK_SHELL_MAGIC_RESPONSE)) return error.MalformedRequest;
-    const operation = std.enums.fromInt(TaskShellOperation, try shellReadByte(payload, &cursor)) orelse return error.MalformedRequest;
-    const control = std.enums.fromInt(Control, try shellReadByte(payload, &cursor)) orelse return error.MalformedRequest;
-    const status = std.enums.fromInt(TaskShellStatus, try shellReadByte(payload, &cursor)) orelse return error.MalformedRequest;
-    const recovered = (try shellReadByte(payload, &cursor)) != 0;
-    const task_id = try shellReadU64(payload, &cursor);
-    const active_window_id = try shellReadU64(payload, &cursor);
-    const visible_window_count = try shellReadU16(payload, &cursor);
-    const task_flow_events = try shellReadU16(payload, &cursor);
-    if (cursor != payload.len) return error.MalformedRequest;
-    return .{
-        .operation = operation,
-        .control = control,
-        .status = status,
-        .recovered = recovered,
-        .task_id = task_id,
-        .active_window_id = active_window_id,
-        .visible_window_count = visible_window_count,
-        .task_flow_events = task_flow_events,
-    };
-}
-
-fn statusForTaskShellError(err: anyerror) TaskShellStatus {
-    return switch (err) {
-        error.TaskRequired,
-        error.TaskAlreadyStarted,
-        error.WorkspaceRequired,
-        error.DocumentRequired,
-        error.AppPanelRequired,
-        => .invalid_order,
-        error.EntryNotFound,
-        error.TaskNotFound,
-        => .not_found,
-        error.CompositorRejected => .compositor_rejected,
-        error.RecoveryStateMissing => .recovery_missing,
-        error.MalformedRequest => .malformed_request,
-        error.RequestTooLarge => .request_too_large,
-        error.ResponseTooLarge => .response_too_large,
-        else => .invalid_request,
-    };
-}
-
-fn shellWriteByte(buffer: []u8, used: *usize, value: u8) !void {
-    if (used.* + 1 > buffer.len) return error.RequestTooLarge;
-    buffer[used.*] = value;
-    used.* += 1;
-}
-
-fn shellWriteBytes(buffer: []u8, used: *usize, bytes: []const u8) !void {
-    if (used.* + bytes.len > buffer.len) return error.RequestTooLarge;
-    @memcpy(buffer[used.* .. used.* + bytes.len], bytes);
-    used.* += bytes.len;
-}
-
-fn shellWriteU16(buffer: []u8, used: *usize, value: u16) !void {
-    if (used.* + 2 > buffer.len) return error.ResponseTooLarge;
-    std.mem.writeInt(u16, buffer[used.*..][0..2], value, .little);
-    used.* += 2;
-}
-
-fn shellWriteU64(buffer: []u8, used: *usize, value: u64) !void {
-    if (used.* + 8 > buffer.len) return error.RequestTooLarge;
-    std.mem.writeInt(u64, buffer[used.*..][0..8], value, .little);
-    used.* += 8;
-}
-
-fn shellReadByte(buffer: []const u8, cursor: *usize) !u8 {
-    if (cursor.* + 1 > buffer.len) return error.MalformedRequest;
-    defer cursor.* += 1;
-    return buffer[cursor.*];
-}
-
-fn shellReadBytes(buffer: []const u8, cursor: *usize, len: usize) ![]const u8 {
-    if (cursor.* + len > buffer.len) return error.MalformedRequest;
-    defer cursor.* += len;
-    return buffer[cursor.* .. cursor.* + len];
-}
-
-fn shellReadU16(buffer: []const u8, cursor: *usize) !u16 {
-    if (cursor.* + 2 > buffer.len) return error.MalformedRequest;
-    defer cursor.* += 2;
-    return std.mem.readInt(u16, buffer[cursor.*..][0..2], .little);
-}
-
-fn shellReadU64(buffer: []const u8, cursor: *usize) !u64 {
-    if (cursor.* + 8 > buffer.len) return error.MalformedRequest;
-    defer cursor.* += 8;
-    return std.mem.readInt(u64, buffer[cursor.*..][0..8], .little);
-}
 
 pub const JourneySurface = struct {
     runtime: *task_runtime.Runtime,

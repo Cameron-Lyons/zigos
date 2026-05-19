@@ -22,6 +22,7 @@ const service_catalog = @import("service_catalog.zig");
 const service_graph_builder = @import("service_graph_builder.zig");
 const session_support = @import("session_manager_support.zig");
 const native_store_mount = @import("native_store_mount.zig");
+const storage_durability_qemu = @import("../storage/storage_durability_qemu.zig");
 const storage_service_mod = @import("../storage/storage_service.zig");
 const supervisor_mod = @import("supervisor.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
@@ -193,6 +194,10 @@ pub const SessionManager = struct {
     }
 
     pub fn boot(self: *SessionManager) void {
+        if (smokeFaultModeIs("storage_durability")) {
+            self.bootStorageDurabilityProof();
+            return;
+        }
         const graph = self.buildProductionServiceGraph() orelse return;
         var trust = self.trustBoot();
         if (!trust.recordProductionMeasuredBoot(&graph)) {
@@ -214,6 +219,24 @@ pub const SessionManager = struct {
         common.printBootMarker(boot_markers.task_session_ready);
         common.printBootMarker(boot_markers.native_ready);
         printReadyBanner();
+    }
+
+    fn bootStorageDurabilityProof(self: *SessionManager) void {
+        var graph = self.beginServiceGraph() orelse return;
+        if (!session_service_bootstrap.bootServices(
+            &graph.env,
+            &graph.state,
+            graph.kernel_port,
+            &graph.service_bindings,
+        )) {
+            self.failBoot();
+            return;
+        }
+        self.bindProductionStorageService(&graph);
+        if (!storage_durability_qemu.run(&self.native_store.storage_service_instance)) {
+            self.failBoot();
+            return;
+        }
     }
 
     pub fn beginServiceGraph(self: *SessionManager) ?ServiceGraph {
@@ -493,4 +516,10 @@ fn printNumber(value: u64) void {
 
 fn bootFailureCode(err: anyerror) u32 {
     return @truncate(native_util.fnv1a64(@errorName(err)));
+}
+
+fn smokeFaultModeIs(comptime mode_name: []const u8) bool {
+    if (builtin.target.os.tag != .freestanding) return false;
+    const config = @import("../../kernel/config.zig");
+    return std.mem.eql(u8, @tagName(config.smokeFaultMode()), mode_name);
 }

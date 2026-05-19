@@ -53,6 +53,7 @@ pub const AtaControllerSession = struct {
     irq_line: u8,
     sector_count: u64,
     process_generation: u32,
+    dma_domain_id: u64,
 };
 
 const ReadContext = struct {
@@ -78,6 +79,7 @@ pub fn establishAtaBootstrapSession(
     device_id: u64,
     authority_capability_id: u64,
     task_id: u64,
+    dma_domain_id: u64,
     now_ticks: u64,
 ) ?AtaControllerSession {
     var client = device_broker_client.Client.init(kernel_port, authority_capability_id, task_id, now_ticks);
@@ -94,6 +96,7 @@ pub fn establishAtaBootstrapSession(
         .irq_line = descriptor.irq_line,
         .sector_count = descriptor.sector_count,
         .process_generation = task.process_generation,
+        .dma_domain_id = dma_domain_id,
     };
 }
 
@@ -109,6 +112,18 @@ pub fn readAtaBootstrapSession(session: *AtaControllerSession, start_lba: u64, b
 pub fn writeAtaBootstrapSession(session: *AtaControllerSession, start_lba: u64, buffer: []const u8) bool {
     const context = WriteContext{ .session = session };
     return storage_volume_backend.transferWriteRange(start_lba, buffer, &context);
+}
+
+pub fn staleAuthorityRejectedAfterGenerationChange(session: *const AtaControllerSession) bool {
+    var stale_session = session.*;
+    _ = stale_session.client.describe() catch |err| return err == error.StaleGeneration;
+    return false;
+}
+
+pub fn staleDmaPortAccessRejectedAfterGenerationChange(session: *const AtaControllerSession) bool {
+    var stale_session = session.*;
+    _ = stale_session.client.readPort(stale_session.base_port + ATA_REG_STATUS, .u8) catch |err| return err == error.StaleGeneration;
+    return false;
 }
 
 export fn zigosStorageBootstrapAtaRead(
@@ -300,7 +315,7 @@ test "storage driver task attaches only through the kernel device broker" {
     try runtime.grantCapability(driver_task.id, device_capability.id);
 
     try std.testing.expect(
-        establishAtaBootstrapSession(&kernel_port, 0x1F001, device_capability.id, driver_task.id, 9) == null,
+        establishAtaBootstrapSession(&kernel_port, 0x1F001, device_capability.id, driver_task.id, 11, 9) == null,
     );
 
     try std.testing.expect(device_broker.publishAtaController(0x1F001, .{
@@ -310,7 +325,7 @@ test "storage driver task attaches only through the kernel device broker" {
         .irq_line = 14,
         .sector_count = storage_volume.required_device_sectors,
     }));
-    var session = establishAtaBootstrapSession(&kernel_port, 0x1F001, device_capability.id, driver_task.id, 9).?;
+    var session = establishAtaBootstrapSession(&kernel_port, 0x1F001, device_capability.id, driver_task.id, 11, 9).?;
     attachAtaBootstrapSession(&session);
     try std.testing.expect(storage_volume.hasAttachedDevice());
 }
