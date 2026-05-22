@@ -1,3 +1,0 @@
-const impl = @import("proofs/service_path_proofs_driver_recovery.zig");
-
-pub const proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority = impl.proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority;
