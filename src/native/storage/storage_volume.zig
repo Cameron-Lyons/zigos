@@ -1,76 +1,41 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const binary_cursor = @import("binary_cursor");
 const ids = @import("../core/ids.zig");
-const native_util = @import("../core/util.zig");
 const object_store = @import("object_store.zig");
 const principal = @import("../core/principal.zig");
+const volume_backend = @import("volume/backend.zig");
 const volume_capacity = @import("volume/capacity.zig");
+const volume_errors = @import("volume/errors.zig");
+const volume_hashing = @import("volume/hashing.zig");
+const volume_layout = @import("volume/layout.zig");
+const volume_log = @import("volume/log.zig");
+const volume_quota = @import("volume/quota.zig");
+const volume_root_slot = @import("volume/root_slot.zig");
 const workspace = @import("workspace.zig");
 
-const ata_bridge = if (builtin.target.os.tag == .freestanding)
-    struct {
-        extern fn zigosStorageBootstrapAtaRead(
-            device: *const anyopaque,
-            start_lba: u64,
-            buffer_ptr: [*]u8,
-            buffer_len: usize,
-        ) callconv(.c) bool;
+pub const sector_size = volume_layout.sector_size;
+pub const slot_sectors = volume_layout.slot_sectors;
+pub const slot_count = volume_layout.slot_count;
+pub const header_sectors = volume_layout.header_sectors;
+pub const payload_sectors = volume_layout.payload_sectors;
+pub const slot_bytes = volume_layout.slot_bytes;
+pub const image_bytes = volume_layout.image_bytes;
+pub const max_payload_bytes = volume_layout.max_payload_bytes;
+pub const required_device_sectors = volume_layout.required_device_sectors;
+pub const max_signer_bytes = volume_layout.max_signer_bytes;
 
-        extern fn zigosStorageBootstrapAtaWrite(
-            device: *const anyopaque,
-            start_lba: u64,
-            buffer_ptr: [*]const u8,
-            buffer_len: usize,
-        ) callconv(.c) bool;
+const data_start_byte = volume_layout.data_start_byte;
+const data_capacity_bytes = volume_layout.data_capacity_bytes;
+const max_replay_log_records = volume_layout.max_replay_log_records;
+const max_log_segments = volume_layout.max_log_segments;
+const compaction_threshold_bytes = volume_layout.compaction_threshold_bytes;
+const payload_magic = volume_layout.payload_magic;
+const format_version = volume_layout.format_version;
 
-        pub fn read(device: *const anyopaque, start_lba: u64, buffer: []u8) bool {
-            return zigosStorageBootstrapAtaRead(device, start_lba, buffer.ptr, buffer.len);
-        }
-
-        pub fn write(device: *const anyopaque, start_lba: u64, buffer: []const u8) bool {
-            return zigosStorageBootstrapAtaWrite(device, start_lba, buffer.ptr, buffer.len);
-        }
-    }
-else
-    struct {
-        pub fn read(_: *const anyopaque, _: u64, _: []u8) bool {
-            return false;
-        }
-
-        pub fn write(_: *const anyopaque, _: u64, _: []const u8) bool {
-            return false;
-        }
-    };
-
-pub const sector_size: usize = 512;
-pub const slot_sectors: u32 = 512;
-pub const slot_count: u32 = 2;
-pub const header_sectors: u32 = 1;
-pub const payload_sectors: u32 = slot_sectors - header_sectors;
-pub const slot_bytes: usize = slot_sectors * sector_size;
-pub const image_bytes: usize = slot_count * slot_bytes;
-pub const max_payload_bytes: usize = payload_sectors * sector_size;
-pub const required_device_sectors: u64 = slot_count * slot_sectors;
-pub const max_signer_bytes: usize = 48;
-const root_sector_count: u32 = 2;
-const data_start_sector: u32 = root_sector_count;
-const data_start_byte: usize = data_start_sector * sector_size;
-const data_capacity_bytes: usize = image_bytes - data_start_byte;
-const root_magic = "ZG4LOG1";
-const root_format_version: u16 = 2;
-const max_replay_log_records: u16 = 128;
-const max_log_segments: u16 = 16;
-const compaction_threshold_bytes: u32 = @intCast((data_capacity_bytes * 3) / 4);
-const log_record_kind_bytes: usize = 1;
-const log_record_payload_len_bytes: usize = 4;
-const log_record_checksum_bytes: usize = 8;
-const log_record_payload_len_offset: usize = log_record_kind_bytes;
-const log_record_checksum_offset: usize = log_record_payload_len_offset + log_record_payload_len_bytes;
-const log_record_header_len: usize = log_record_checksum_offset + log_record_checksum_bytes;
-
-const payload_magic = "ZG4STATE";
-const format_version: u16 = 6;
+const workspaceCount = volume_quota.workspaceCount;
+const snapshotCount = volume_quota.snapshotCount;
+const persistableWorkspaceSlot = volume_quota.persistableWorkspaceSlot;
+const persistableSnapshotSlot = volume_quota.persistableSnapshotSlot;
 
 pub const ProductCapacityEnvelope = volume_capacity.ProductCapacityEnvelope;
 pub const OverLimitWriteBehavior = volume_capacity.OverLimitWriteBehavior;
@@ -85,23 +50,7 @@ pub const ProductQuotaPolicy = struct {
     retry_requires_freeing_space: bool,
 };
 
-pub const first_supported_capacity_envelope = ProductCapacityEnvelope{
-    .volume_image_bytes = image_bytes,
-    .required_device_sectors = required_device_sectors,
-    .max_volume_log_bytes = data_capacity_bytes,
-    .max_object_payload_bytes = object_store.MAX_PAYLOAD_BYTES,
-    .max_object_records = object_store.MAX_OBJECTS,
-    .max_version_records = object_store.MAX_VERSIONS,
-    .max_blob_records = object_store.MAX_BLOBS,
-    .max_blob_chunks_per_payload = object_store.MAX_BLOB_CHUNKS,
-    .max_chunk_records = object_store.MAX_CHUNKS,
-    .max_chunk_bytes = object_store.MAX_CHUNK_BYTES,
-    .max_workspaces = workspace.MAX_WORKSPACES,
-    .max_workspace_entries_per_workspace = workspace.MAX_WORKSPACE_ENTRIES,
-    .max_snapshots = workspace.MAX_SNAPSHOTS,
-    .max_replay_log_records = max_replay_log_records,
-    .max_log_segments = max_log_segments,
-};
+pub const first_supported_capacity_envelope = volume_quota.first_supported_capacity_envelope;
 
 pub fn productCapacityEnvelope() ProductCapacityEnvelope {
     return first_supported_capacity_envelope;
@@ -116,25 +65,13 @@ pub fn productQuotaPolicy() ProductQuotaPolicy {
     };
 }
 
-pub const Error = error{
-    ChecksumMismatch,
-    CorruptImage,
-    ImageTooSmall,
-    InvalidSignatureEncoding,
-    MissingCheckpoint,
-    NoSpaceLeft,
-    UnsupportedVersion,
-};
+pub const Error = volume_errors.Error;
 
 pub const PersistResult = struct {
     generation: u64,
 };
 
-pub const Backend = struct {
-    sector_count: u64,
-    read: *const fn (start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool,
-    write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
-};
+pub const Backend = volume_backend.Backend;
 
 pub const Volume = struct {
     io_payload_buffer: [max_payload_bytes]u8 = undefined,
@@ -142,9 +79,9 @@ pub const Volume = struct {
     sector_buffer: [sector_size]u8 = [_]u8{0} ** sector_size,
     attached_backend_present: bool = false,
     attached_backend_sector_count: u64 = 0,
-    attached_backend_read: *const fn (u64, [*]u8, usize) callconv(.c) bool = unattachedRead,
-    attached_backend_write: *const fn (u64, [*]const u8, usize) callconv(.c) bool = unattachedWrite,
-    attached_backend_kind: AttachedBackendKind = .none,
+    attached_backend_read: *const fn (u64, [*]u8, usize) callconv(.c) bool = volume_backend.unattachedRead,
+    attached_backend_write: *const fn (u64, [*]const u8, usize) callconv(.c) bool = volume_backend.unattachedWrite,
+    attached_backend_kind: volume_backend.AttachedBackendKind = .none,
     attached_ata_device: ?*const anyopaque = null,
     version_signers: [object_store.MAX_VERSIONS][max_signer_bytes]u8 =
         [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** object_store.MAX_VERSIONS,
@@ -176,8 +113,8 @@ pub const Volume = struct {
     pub fn attachAtaBootstrapDevice(self: *Volume, device: *const anyopaque, sector_count: u64) void {
         self.attached_backend_present = true;
         self.attached_backend_sector_count = sector_count;
-        self.attached_backend_read = unattachedRead;
-        self.attached_backend_write = unattachedWrite;
+        self.attached_backend_read = volume_backend.unattachedRead;
+        self.attached_backend_write = volume_backend.unattachedWrite;
         self.attached_backend_kind = .ata_bootstrap;
         self.attached_ata_device = device;
     }
@@ -185,8 +122,8 @@ pub const Volume = struct {
     pub fn clearAttachedBackend(self: *Volume) void {
         self.attached_backend_present = false;
         self.attached_backend_sector_count = 0;
-        self.attached_backend_read = unattachedRead;
-        self.attached_backend_write = unattachedWrite;
+        self.attached_backend_read = volume_backend.unattachedRead;
+        self.attached_backend_write = volume_backend.unattachedWrite;
         self.attached_backend_kind = .none;
         self.attached_ata_device = null;
     }
@@ -205,22 +142,16 @@ pub const Volume = struct {
     }
 
     pub fn clearAttachedVolume(self: *Volume) void {
-        if (!self.hasAttachedDevice()) return;
-        if (self.attached_backend_sector_count < required_device_sectors) return;
-        @memset(self.sector_buffer[0..], 0);
-        var sector_index: u32 = 0;
-        while (sector_index < root_sector_count) : (sector_index += 1) {
-            if (!writeAttachedRange(self, sector_index, self.sector_buffer[0..])) return;
-        }
+        volume_backend.clearAttachedVolume(self);
     }
 
     pub fn loadFromVolume(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory) bool {
         if (!self.hasAttachedDevice()) return false;
         if (self.attached_backend_sector_count < required_device_sectors) return false;
 
-        const loaded = (findLatestBackendRoot(self) catch return false) orelse return false;
+        const loaded = (volume_root_slot.findLatestBackendRoot(self) catch return false) orelse return false;
         if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_capacity_bytes) return false;
-        if (!readAttachedBytes(self, data_start_byte, self.io_log_buffer[0..loaded.root.log_bytes])) return false;
+        if (!volume_backend.readAttachedBytes(self, data_start_byte, self.io_log_buffer[0..loaded.root.log_bytes])) return false;
         replayLog(self, store, workspaces, self.io_log_buffer[0..loaded.root.log_bytes], loaded.root) catch return false;
         ensureWithinProductCapacityEnvelope(store, workspaces) catch return false;
         store.clearDirty();
@@ -232,19 +163,19 @@ pub const Volume = struct {
         if (!self.hasAttachedDevice()) return .{ .generation = 0 };
         if (self.attached_backend_sector_count < required_device_sectors) return error.ImageTooSmall;
 
-        const current = findLatestBackendRoot(self) catch null;
+        const current = volume_root_slot.findLatestBackendRoot(self) catch null;
         return saveIncremental(self, current, store, workspaces, BackendWriteFns{ .volume = self });
     }
 
     pub fn saveToImage(self: *Volume, image: []u8, store: *object_store.Store, workspaces: *workspace.Directory) !PersistResult {
         if (image.len < image_bytes) return error.ImageTooSmall;
-        const current = findLatestImageRoot(image) catch null;
+        const current = volume_root_slot.findLatestImageRoot(image) catch null;
         return saveIncremental(self, current, store, workspaces, ImageWriteFns{ .image = image });
     }
 
     pub fn loadFromImage(self: *Volume, image: []const u8, store: *object_store.Store, workspaces: *workspace.Directory) !u64 {
         if (image.len < image_bytes) return error.ImageTooSmall;
-        const loaded = (try findLatestImageRoot(image)) orelse return error.CorruptImage;
+        const loaded = (try volume_root_slot.findLatestImageRoot(image)) orelse return error.CorruptImage;
         if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_capacity_bytes) return error.CorruptImage;
         @memcpy(self.io_log_buffer[0..loaded.root.log_bytes], image[data_start_byte .. data_start_byte + loaded.root.log_bytes]);
         try replayLog(self, store, workspaces, self.io_log_buffer[0..loaded.root.log_bytes], loaded.root);
@@ -261,73 +192,13 @@ pub fn defaultVolume() *Volume {
     return &default_volume;
 }
 
-fn unattachedRead(_: u64, _: [*]u8, _: usize) callconv(.c) bool {
-    return false;
-}
-
-fn unattachedWrite(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
-    return false;
-}
-
 const CursorWriter = binary_cursor.Writer(Error, error.NoSpaceLeft);
 const CursorReader = binary_cursor.Reader(Error, error.CorruptImage);
 
-const WorkspaceSummary = struct {
-    id: u64 = 0,
-    generation: u32 = 0,
-    state_hash: u64 = 0,
-};
-
-const RootState = struct {
-    generation: u64 = 0,
-    log_bytes: u32 = 0,
-    next_object_id: u64 = 1,
-    next_version_id: u64 = 1,
-    next_workspace_id: u64 = 1,
-    next_snapshot_id: u64 = 1,
-    last_version_id: u64 = 0,
-    last_snapshot_id: u64 = 0,
-    log_record_count: u16 = 0,
-    log_segment_count: u16 = 0,
-    compacted_generation: u64 = 0,
-    workspace_summary_count: usize = 0,
-    workspace_summaries: [workspace.MAX_WORKSPACES]WorkspaceSummary =
-        [_]WorkspaceSummary{WorkspaceSummary{}} ** workspace.MAX_WORKSPACES,
-};
-
-const LoadedRoot = struct {
-    sector_index: u32,
-    root: RootState,
-};
-
-const LogRecordKind = enum(u8) {
-    checkpoint = 1,
-    object_state = 2,
-    version_state = 3,
-    workspace_state = 4,
-    snapshot_state = 5,
-    blob_state = 6,
-    chunk_state = 7,
-    segment_boundary = 8,
-};
-
-const LogRecordHeader = struct {
-    kind: LogRecordKind,
-    payload_len: u32,
-    checksum: u64,
-};
-
-const BuiltLog = struct {
-    bytes_len: usize = 0,
-    record_count: u16 = 0,
-    segment_count: u16 = 0,
-};
-
-const AttachedBackendKind = enum(u8) {
-    none,
-    generic,
-    ata_bootstrap,
-};
+const WorkspaceSummary = volume_root_slot.WorkspaceSummary;
+const RootState = volume_root_slot.RootState;
+const LoadedRoot = volume_root_slot.LoadedRoot;
+const BuiltLog = volume_log.BuiltLog;
 
 pub fn attachBackend(backend: Backend) void {
     default_volume.attachBackend(backend);
@@ -390,7 +261,7 @@ fn saveIncremental(
     try ensureWithinProductCapacityEnvelope(store, workspaces);
     const current_generation = if (current) |loaded| loaded.root.generation else 0;
     const delta = if (current) |loaded|
-        try buildDeltaLog(self, self.io_log_buffer[0..], loaded.root, store, workspaces)
+        try buildDeltaLog(self.io_log_buffer[0..], loaded.root, store, workspaces)
     else
         BuiltLog{};
 
@@ -403,11 +274,11 @@ fn saveIncremental(
     if (current != null and appendLogFits(current.?.root, delta)) {
         const next_generation = current_generation + 1;
         const next_log_bytes = current.?.root.log_bytes + @as(u32, @intCast(delta.bytes_len));
-        var next_root = try buildRootState(self, next_generation, next_log_bytes, store, workspaces);
+        var next_root = try buildRootState(next_generation, next_log_bytes, store, workspaces);
         next_root.log_record_count = current.?.root.log_record_count + delta.record_count;
         next_root.log_segment_count = current.?.root.log_segment_count + delta.segment_count;
         next_root.compacted_generation = current.?.root.compacted_generation;
-        const next_root_sector = nextRootSector(current);
+        const next_root_sector = volume_root_slot.nextRootSector(current);
         try writeBytes(writer, data_start_byte + current.?.root.log_bytes, self.io_log_buffer[0..delta.bytes_len]);
         try writeRoot(writer, next_root_sector, next_root);
         store.clearDirty();
@@ -417,14 +288,14 @@ fn saveIncremental(
 
     const checkpoint_payload_len = try serializeState(store, workspaces, self.io_payload_buffer[0..]);
     var log_writer = CursorWriter{ .buffer = self.io_log_buffer[0..] };
-    try appendRecordPayload(&log_writer, .checkpoint, self.io_payload_buffer[0..checkpoint_payload_len]);
+    try volume_log.appendRecordPayload(&log_writer, .checkpoint, self.io_payload_buffer[0..checkpoint_payload_len]);
 
     const next_generation = current_generation + 1;
-    var next_root = try buildRootState(self, next_generation, @intCast(log_writer.offset), store, workspaces);
+    var next_root = try buildRootState(next_generation, @intCast(log_writer.offset), store, workspaces);
     next_root.log_record_count = 1;
     next_root.log_segment_count = 0;
     next_root.compacted_generation = next_generation;
-    const next_root_sector = nextRootSector(current);
+    const next_root_sector = volume_root_slot.nextRootSector(current);
     try writeBytes(writer, data_start_byte, self.io_log_buffer[0..log_writer.offset]);
     try writeRoot(writer, next_root_sector, next_root);
     store.clearDirty();
@@ -460,70 +331,18 @@ pub fn ensureWithinProductCapacityEnvelope(store: *const object_store.Store, wor
 }
 
 pub fn productCapacityUsage(store: *const object_store.Store, workspaces: *const workspace.Directory) ProductCapacityUsage {
-    var usage = ProductCapacityUsage{
-        .object_records = store.objectCount(),
-        .version_records = store.versionCount(),
-        .blob_records = store.blobCount(),
-        .chunk_records = store.chunkCount(),
-        .workspaces = workspaceCount(workspaces),
-        .snapshots = snapshotCount(workspaces),
-    };
-
-    for (workspaces.workspaces.slots) |slot| {
-        if (!persistableWorkspaceSlot(slot)) continue;
-        usage.max_workspace_entries = @max(usage.max_workspace_entries, slot.workspace.path_index.entry_count);
-    }
-    for (workspaces.snapshots.slots) |slot| {
-        if (!persistableSnapshotSlot(slot)) continue;
-        usage.max_workspace_entries = @max(usage.max_workspace_entries, slot.snapshot.entry_count);
-    }
-
-    return usage;
+    return volume_quota.productCapacityUsage(store, workspaces);
 }
 
 pub fn quotaRejectionForCurrentState(
     store: *const object_store.Store,
     workspaces: *const workspace.Directory,
 ) ?QuotaRejection {
-    return quotaRejectionForUsage(productCapacityUsage(store, workspaces));
+    return volume_quota.quotaRejectionForCurrentState(store, workspaces, first_supported_capacity_envelope);
 }
 
 pub fn quotaRejectionForUsage(usage: ProductCapacityUsage) ?QuotaRejection {
-    const envelope = first_supported_capacity_envelope;
-    if (usage.object_payload_bytes > envelope.max_object_payload_bytes) {
-        return quotaRejection(.object_payload_bytes, usage.object_payload_bytes, envelope.max_object_payload_bytes);
-    }
-    if (usage.object_records > envelope.max_object_records) {
-        return quotaRejection(.object_records, usage.object_records, envelope.max_object_records);
-    }
-    if (usage.version_records > envelope.max_version_records) {
-        return quotaRejection(.version_records, usage.version_records, envelope.max_version_records);
-    }
-    if (usage.blob_records > envelope.max_blob_records) {
-        return quotaRejection(.blob_records, usage.blob_records, envelope.max_blob_records);
-    }
-    if (usage.chunk_records > envelope.max_chunk_records) {
-        return quotaRejection(.chunk_records, usage.chunk_records, envelope.max_chunk_records);
-    }
-    if (usage.workspaces > envelope.max_workspaces) {
-        return quotaRejection(.workspaces, usage.workspaces, envelope.max_workspaces);
-    }
-    if (usage.max_workspace_entries > envelope.max_workspace_entries_per_workspace) {
-        return quotaRejection(.workspace_entries, usage.max_workspace_entries, envelope.max_workspace_entries_per_workspace);
-    }
-    if (usage.snapshots > envelope.max_snapshots) {
-        return quotaRejection(.snapshots, usage.snapshots, envelope.max_snapshots);
-    }
-    return null;
-}
-
-fn quotaRejection(limit: QuotaLimit, requested: usize, allowed: usize) QuotaRejection {
-    return .{
-        .limit = limit,
-        .used = requested,
-        .requested = requested,
-        .allowed = allowed,
-    };
+    return volume_quota.quotaRejectionForUsage(usage, first_supported_capacity_envelope);
 }
 
 fn writeBytes(writer: anytype, offset: usize, bytes: []const u8) Error!void {
@@ -533,7 +352,7 @@ fn writeBytes(writer: anytype, offset: usize, bytes: []const u8) Error!void {
             @memcpy(writer.image[offset .. offset + bytes.len], bytes);
         },
         BackendWriteFns => {
-            if (!writeAttachedBytes(writer.volume, offset, bytes)) return error.CorruptImage;
+            if (!volume_backend.writeAttachedBytes(writer.volume, offset, bytes)) return error.CorruptImage;
         },
         else => @compileError("unsupported incremental writer"),
     }
@@ -541,21 +360,20 @@ fn writeBytes(writer: anytype, offset: usize, bytes: []const u8) Error!void {
 
 fn writeRoot(writer: anytype, sector_index: u32, root: RootState) Error!void {
     switch (@TypeOf(writer)) {
-        ImageWriteFns => try writeImageRoot(writer.image, sector_index, root),
-        BackendWriteFns => try writeBackendRoot(writer.volume, sector_index, root),
+        ImageWriteFns => try volume_root_slot.writeImageRoot(writer.image, sector_index, root),
+        BackendWriteFns => try volume_root_slot.writeBackendRoot(writer.volume, sector_index, root),
         else => @compileError("unsupported root writer"),
     }
 }
 
 fn buildDeltaLog(
-    self: *Volume,
     buffer: []u8,
     root: RootState,
     store: *object_store.Store,
     workspaces: *workspace.Directory,
 ) Error!BuiltLog {
     var writer = CursorWriter{ .buffer = buffer };
-    try appendRecordPayload(&writer, .segment_boundary, &.{});
+    try volume_log.appendRecordPayload(&writer, .segment_boundary, &.{});
 
     for (store.dirtyObjectIds()) |object_id| {
         const object_record = store.object(object_id) orelse continue;
@@ -575,7 +393,7 @@ fn buildDeltaLog(
     for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
         const workspace_record = workspaces.findConst(workspace_id) orelse continue;
         const summary = findWorkspaceSummary(root, workspace_record.id.raw());
-        const state_hash = try workspaceStateHash(self, workspace_record);
+        const state_hash = try volume_hashing.workspaceStateHash(workspace_record);
         if (summary) |persisted| {
             if (persisted.generation == workspace_record.generation and persisted.state_hash == state_hash) continue;
         }
@@ -588,7 +406,7 @@ fn buildDeltaLog(
         try appendSnapshotRecord(&writer, snapshot_record.*);
     }
 
-    if (writer.offset == recordHeaderLen()) return .{};
+    if (writer.offset == volume_log.recordHeaderLen()) return .{};
     return .{
         .bytes_len = writer.offset,
         .record_count = countLogRecords(buffer[0..writer.offset]) catch return error.CorruptImage,
@@ -597,7 +415,6 @@ fn buildDeltaLog(
 }
 
 fn buildRootState(
-    self: *Volume,
     generation: u64,
     log_bytes: u32,
     store: *const object_store.Store,
@@ -618,7 +435,7 @@ fn buildRootState(
         root.workspace_summaries[root.workspace_summary_count] = .{
             .id = slot.workspace.id.raw(),
             .generation = slot.workspace.generation,
-            .state_hash = try workspaceStateHash(self, &slot.workspace),
+            .state_hash = try volume_hashing.workspaceStateHash(&slot.workspace),
         };
         root.workspace_summary_count += 1;
     }
@@ -634,35 +451,6 @@ fn findWorkspaceSummary(root: RootState, workspace_id: u64) ?WorkspaceSummary {
     return null;
 }
 
-fn workspaceStateHash(self: *Volume, record: *const workspace.WorkspaceRecord) Error!u64 {
-    _ = self;
-    var hash = native_util.FNV1A_64_OFFSET_BASIS;
-    hash = hashBytes(hash, "workspace-state/v4");
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.id.raw());
-    hash = hashPrincipal(hash, record.owner);
-    hash = hashBytes(hash, record.labelSlice());
-    hash = native_util.fnv1a64AppendU32LittleEndian(hash, record.generation);
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.path_index.entry_count));
-    hash = hashBytes(hash, &record.path_index.root_address);
-
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.mutation_log.entry_mutation_count));
-    for (record.mutation_log.entry_mutations[0..record.mutation_log.entry_mutation_count]) |mutation| {
-        hash = native_util.fnv1a64AppendU32LittleEndian(hash, mutation.generation);
-        hash = hashEntry(hash, mutation.entry);
-    }
-
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.share_table.share_grant_count));
-    for (record.share_table.share_grants[0..record.share_table.share_grant_count]) |grant| {
-        hash = hashShareGrant(hash, grant);
-    }
-
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.recoverable_deletes.deleted_count));
-    for (record.recoverable_deletes.deleted_entries[0..record.recoverable_deletes.deleted_count]) |entry| {
-        hash = hashEntry(hash, entry);
-    }
-    return hash;
-}
-
 fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, log: []const u8, root: RootState) Error!void {
     store.reset();
     workspaces.reset();
@@ -674,9 +462,9 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
     var replayed_records: u16 = 0;
     var replayed_segments: u16 = 0;
     while (reader.offset < reader.buffer.len) {
-        const header = try readRecordHeader(&reader);
+        const header = try volume_log.readRecordHeader(&reader);
         const payload = try reader.readSlice(header.payload_len);
-        if (checksumBytes(payload) != header.checksum) return error.ChecksumMismatch;
+        if (volume_hashing.checksumBytes(payload) != header.checksum) return error.ChecksumMismatch;
         replayed_records += 1;
         if (replayed_records > max_replay_log_records) return error.CorruptImage;
 
@@ -714,7 +502,7 @@ fn countLogRecords(log: []const u8) Error!u16 {
     var reader = CursorReader{ .buffer = log };
     var count: u16 = 0;
     while (reader.offset < reader.buffer.len) {
-        const header = try readRecordHeader(&reader);
+        const header = try volume_log.readRecordHeader(&reader);
         _ = try reader.readSlice(header.payload_len);
         count += 1;
     }
@@ -722,15 +510,15 @@ fn countLogRecords(log: []const u8) Error!u16 {
 }
 
 fn appendObjectRecord(writer: *CursorWriter, record: object_store.ObjectRecord) Error!void {
-    const header_offset = try beginRecord(writer, .object_state);
+    const header_offset = try volume_log.beginRecord(writer, .object_state);
     try encodeObjectBody(writer, record);
-    try finishRecord(writer, header_offset);
+    try volume_log.finishRecord(writer, header_offset);
 }
 
 fn appendVersionRecord(writer: *CursorWriter, record: object_store.VersionRecord) Error!void {
-    const header_offset = try beginRecord(writer, .version_state);
+    const header_offset = try volume_log.beginRecord(writer, .version_state);
     try encodeVersionBody(writer, record);
-    try finishRecord(writer, header_offset);
+    try volume_log.finishRecord(writer, header_offset);
 }
 
 fn appendVersionPayloadChunks(
@@ -745,65 +533,15 @@ fn appendVersionPayloadChunks(
 }
 
 fn appendWorkspaceRecord(writer: *CursorWriter, record: workspace.WorkspaceRecord) Error!void {
-    const header_offset = try beginRecord(writer, .workspace_state);
+    const header_offset = try volume_log.beginRecord(writer, .workspace_state);
     try encodeWorkspaceBody(writer, record);
-    try finishRecord(writer, header_offset);
+    try volume_log.finishRecord(writer, header_offset);
 }
 
 fn appendSnapshotRecord(writer: *CursorWriter, record: workspace.SnapshotRecord) Error!void {
-    const header_offset = try beginRecord(writer, .snapshot_state);
+    const header_offset = try volume_log.beginRecord(writer, .snapshot_state);
     try encodeSnapshotBody(writer, record);
-    try finishRecord(writer, header_offset);
-}
-
-fn appendRecordPayload(writer: *CursorWriter, kind: LogRecordKind, payload: []const u8) Error!void {
-    const header_offset = try beginRecord(writer, kind);
-    try writer.writeBytes(payload);
-    try finishRecord(writer, header_offset);
-}
-
-fn beginRecord(writer: *CursorWriter, kind: LogRecordKind) Error!usize {
-    const header_offset = writer.offset;
-    try writer.writeByte(@intFromEnum(kind));
-    try writer.writeU32(0);
-    try writer.writeU64(0);
-    return header_offset;
-}
-
-fn finishRecord(writer: *CursorWriter, header_offset: usize) Error!void {
-    const payload_offset = header_offset + recordHeaderLen();
-    const payload_len = writer.offset - payload_offset;
-    const checksum = checksumBytes(writer.buffer[payload_offset..writer.offset]);
-    const payload_len_offset = header_offset + log_record_payload_len_offset;
-    const checksum_offset = header_offset + log_record_checksum_offset;
-    writeU32At(writer.buffer[payload_len_offset..checksum_offset], @intCast(payload_len));
-    writeU64At(writer.buffer[checksum_offset .. header_offset + recordHeaderLen()], checksum);
-}
-
-fn recordHeaderLen() usize {
-    return log_record_header_len;
-}
-
-fn readRecordHeader(reader: *CursorReader) Error!LogRecordHeader {
-    return .{
-        .kind = try parseLogRecordKind(try reader.readByte()),
-        .payload_len = try reader.readU32(),
-        .checksum = try reader.readU64(),
-    };
-}
-
-fn parseLogRecordKind(value: u8) Error!LogRecordKind {
-    return switch (value) {
-        @intFromEnum(LogRecordKind.checkpoint) => .checkpoint,
-        @intFromEnum(LogRecordKind.object_state) => .object_state,
-        @intFromEnum(LogRecordKind.version_state) => .version_state,
-        @intFromEnum(LogRecordKind.workspace_state) => .workspace_state,
-        @intFromEnum(LogRecordKind.snapshot_state) => .snapshot_state,
-        @intFromEnum(LogRecordKind.blob_state) => .blob_state,
-        @intFromEnum(LogRecordKind.chunk_state) => .chunk_state,
-        @intFromEnum(LogRecordKind.segment_boundary) => .segment_boundary,
-        else => error.CorruptImage,
-    };
+    try volume_log.finishRecord(writer, header_offset);
 }
 
 fn encodeObjectBody(writer: *CursorWriter, record: object_store.ObjectRecord) Error!void {
@@ -831,17 +569,17 @@ fn encodeVersionBody(writer: *CursorWriter, record: object_store.VersionRecord) 
 }
 
 fn appendBlobRecord(writer: *CursorWriter, record: object_store.BlobRecord) Error!void {
-    const header_offset = try beginRecord(writer, .blob_state);
+    const header_offset = try volume_log.beginRecord(writer, .blob_state);
     try encodeBlobBody(writer, record);
-    try finishRecord(writer, header_offset);
+    try volume_log.finishRecord(writer, header_offset);
 }
 
 fn appendPayloadChunkRecord(writer: *CursorWriter, chunk: object_store.PayloadChunk) Error!void {
-    const header_offset = try beginRecord(writer, .chunk_state);
+    const header_offset = try volume_log.beginRecord(writer, .chunk_state);
     try writer.writeBytes(&chunk.address);
     try writer.writeU16(@intCast(chunk.bytes.len));
     try writer.writeBytes(chunk.bytes);
-    try finishRecord(writer, header_offset);
+    try volume_log.finishRecord(writer, header_offset);
 }
 
 fn encodeBlobBody(writer: *CursorWriter, record: object_store.BlobRecord) Error!void {
@@ -1475,37 +1213,6 @@ fn readShareGrant(reader: *CursorReader) Error!workspace.ShareGrant {
     };
 }
 
-fn workspaceCount(workspaces: *const workspace.Directory) usize {
-    var count: usize = 0;
-    for (workspaces.workspaces.slots) |slot| {
-        if (persistableWorkspaceSlot(slot)) count += 1;
-    }
-    return count;
-}
-
-fn snapshotCount(workspaces: *const workspace.Directory) usize {
-    var count: usize = 0;
-    for (workspaces.snapshots.slots) |slot| {
-        if (persistableSnapshotSlot(slot)) count += 1;
-    }
-    return count;
-}
-
-fn persistableWorkspaceSlot(slot: anytype) bool {
-    if (!slot.in_use) return false;
-    return slot.workspace.label_len <= slot.workspace.label.len and
-        slot.workspace.path_index.entry_count <= workspace.MAX_WORKSPACE_ENTRIES and
-        slot.workspace.mutation_log.entry_mutation_count <= workspace.MAX_WORKSPACE_ENTRY_MUTATIONS and
-        slot.workspace.share_table.share_grant_count <= workspace.MAX_SHARE_GRANTS and
-        slot.workspace.recoverable_deletes.deleted_count <= workspace.MAX_RECOVERABLE_DELETES;
-}
-
-fn persistableSnapshotSlot(slot: anytype) bool {
-    if (!slot.in_use) return false;
-    return slot.snapshot.label_len <= slot.snapshot.label.len and
-        slot.snapshot.entry_count <= workspace.MAX_WORKSPACE_ENTRIES;
-}
-
 fn findBlobSlotIndex(store: *const object_store.Store, address: object_store.BlobAddress) ?usize {
     return store.blobSlotIndex(address);
 }
@@ -1518,263 +1225,21 @@ fn zeroSnapshotRecord() workspace.SnapshotRecord {
     return workspace.emptySnapshotRecord();
 }
 
-fn hashBytes(hash: u64, bytes: []const u8) u64 {
-    var next = native_util.fnv1a64AppendU32LittleEndian(hash, @intCast(bytes.len));
-    next = native_util.fnv1a64WithSeed(next, bytes);
-    return next;
-}
-
-fn hashPrincipal(hash: u64, id: principal.PrincipalId) u64 {
-    var next = native_util.fnv1a64AppendByte(hash, @intFromEnum(id.kind));
-    next = native_util.fnv1a64AppendU64LittleEndian(next, id.serial);
-    return next;
-}
-
-fn hashEntry(hash: u64, entry: workspace.Entry) u64 {
-    var next = hashBytes(hash, entry.pathSlice());
-    next = native_util.fnv1a64AppendU64LittleEndian(next, entry.object_id.raw());
-    next = native_util.fnv1a64AppendU64LittleEndian(next, entry.version_id.raw());
-    next = native_util.fnv1a64AppendByte(next, @intFromEnum(entry.object_type));
-    return next;
-}
-
-fn hashShareGrant(hash: u64, grant: workspace.ShareGrant) u64 {
-    var next = hashPrincipal(hash, grant.principal_id);
-    next = native_util.fnv1a64AppendByte(next, @intFromBool(grant.can_read));
-    next = native_util.fnv1a64AppendByte(next, @intFromBool(grant.can_write));
-    next = native_util.fnv1a64AppendByte(next, @intFromBool(grant.can_admin));
-    next = native_util.fnv1a64AppendByte(next, @intFromBool(grant.can_export));
-    next = native_util.fnv1a64AppendByte(next, @intFromEnum(grant.network_scope));
-    next = native_util.fnv1a64AppendByte(next, @intFromEnum(grant.reshare_policy));
-    next = native_util.fnv1a64AppendByte(next, @intFromEnum(grant.audit_visibility));
-    next = native_util.fnv1a64AppendU64LittleEndian(next, grant.expires_at_ticks);
-    return next;
-}
-
-fn checksumBytes(bytes: []const u8) u64 {
-    return native_util.fnv1a64(bytes);
-}
-
-fn nextRootSector(current: ?LoadedRoot) u32 {
-    return if (current) |loaded|
-        if (loaded.sector_index == 0) 1 else 0
-    else
-        0;
-}
-
-fn findLatestImageRoot(image: []const u8) Error!?LoadedRoot {
-    var best: ?LoadedRoot = null;
-    var sector_index: u32 = 0;
-    while (sector_index < root_sector_count) : (sector_index += 1) {
-        const root = readImageRoot(image, sector_index) catch continue;
-        if (best == null or root.root.generation > best.?.root.generation) {
-            best = root;
-        }
-    }
-    return best;
-}
-
-fn findLatestBackendRoot(
-    self: *Volume,
-) Error!?LoadedRoot {
-    var best: ?LoadedRoot = null;
-    var sector_index: u32 = 0;
-    while (sector_index < root_sector_count) : (sector_index += 1) {
-        const root = readBackendRoot(self, sector_index) catch continue;
-        if (best == null or root.root.generation > best.?.root.generation) {
-            best = root;
-        }
-    }
-    return best;
-}
-
-fn readImageRoot(image: []const u8, sector_index: u32) Error!LoadedRoot {
-    const offset = @as(usize, sector_index) * sector_size;
-    if (offset + sector_size > image.len) return error.ImageTooSmall;
-    return .{
-        .sector_index = sector_index,
-        .root = try parseRoot(image[offset .. offset + sector_size]),
-    };
-}
-
-fn writeImageRoot(image: []u8, sector_index: u32, root: RootState) Error!void {
-    const offset = @as(usize, sector_index) * sector_size;
-    if (offset + sector_size > image.len) return error.ImageTooSmall;
-    try encodeRoot(image[offset .. offset + sector_size], root);
-}
-
-fn readBackendRoot(self: *Volume, sector_index: u32) Error!LoadedRoot {
-    @memset(self.sector_buffer[0..], 0);
-    if (!readAttachedRange(self, sector_index, self.sector_buffer[0..])) return error.CorruptImage;
-    return .{
-        .sector_index = sector_index,
-        .root = try parseRoot(self.sector_buffer[0..]),
-    };
-}
-
-fn writeBackendRoot(self: *Volume, sector_index: u32, root: RootState) Error!void {
-    @memset(self.sector_buffer[0..], 0);
-    try encodeRoot(self.sector_buffer[0..], root);
-    if (!writeAttachedRange(self, sector_index, self.sector_buffer[0..])) return error.CorruptImage;
-}
-
-fn encodeRoot(buffer: []u8, root: RootState) Error!void {
-    var writer = CursorWriter{ .buffer = buffer };
-    try writer.writeBytes(root_magic);
-    try writer.writeU16(root_format_version);
-    try writer.writeU64(root.generation);
-    try writer.writeU32(root.log_bytes);
-    try writer.writeU64(root.next_object_id);
-    try writer.writeU64(root.next_version_id);
-    try writer.writeU64(root.next_workspace_id);
-    try writer.writeU64(root.next_snapshot_id);
-    try writer.writeU64(root.last_version_id);
-    try writer.writeU64(root.last_snapshot_id);
-    try writer.writeU16(root.log_record_count);
-    try writer.writeU16(root.log_segment_count);
-    try writer.writeU64(root.compacted_generation);
-    try writer.writeU16(@intCast(root.workspace_summary_count));
-    for (root.workspace_summaries[0..root.workspace_summary_count]) |summary| {
-        try writer.writeU64(summary.id);
-        try writer.writeU32(summary.generation);
-        try writer.writeU64(summary.state_hash);
-    }
-    const checksum = checksumBytes(buffer[0..writer.offset]);
-    try writer.writeU64(checksum);
-}
-
-fn parseRoot(buffer: []const u8) Error!RootState {
-    var reader = CursorReader{ .buffer = buffer };
-    var magic: [root_magic.len]u8 = undefined;
-    try reader.readBytes(&magic);
-    if (!std.mem.eql(u8, &magic, root_magic)) return error.CorruptImage;
-    if ((try reader.readU16()) != root_format_version) return error.UnsupportedVersion;
-
-    var root = RootState{
-        .generation = try reader.readU64(),
-        .log_bytes = try reader.readU32(),
-        .next_object_id = try reader.readU64(),
-        .next_version_id = try reader.readU64(),
-        .next_workspace_id = try reader.readU64(),
-        .next_snapshot_id = try reader.readU64(),
-        .last_version_id = try reader.readU64(),
-        .last_snapshot_id = try reader.readU64(),
-    };
-    root.log_record_count = try reader.readU16();
-    root.log_segment_count = try reader.readU16();
-    root.compacted_generation = try reader.readU64();
-    root.workspace_summary_count = try reader.readU16();
-    if (root.workspace_summary_count > root.workspace_summaries.len) return error.CorruptImage;
-    for (0..root.workspace_summary_count) |index| {
-        root.workspace_summaries[index] = .{
-            .id = try reader.readU64(),
-            .generation = try reader.readU32(),
-            .state_hash = try reader.readU64(),
-        };
-    }
-    if (root.log_bytes > data_capacity_bytes) return error.CorruptImage;
-    if (root.log_record_count == 0 or root.log_record_count > max_replay_log_records) return error.CorruptImage;
-    if (root.log_segment_count > max_log_segments) return error.CorruptImage;
-    const checksum_offset = reader.offset;
-    const checksum = try reader.readU64();
-    if (checksum != checksumBytes(buffer[0..checksum_offset])) return error.ChecksumMismatch;
-    return root;
-}
-
-fn writeAttachedBytes(self: *Volume, offset: usize, bytes: []const u8) bool {
-    if (offset + bytes.len > image_bytes) return false;
-    var remaining = bytes.len;
-    var cursor: usize = 0;
-    while (remaining > 0) {
-        const absolute_offset = offset + cursor;
-        const sector_index = absolute_offset / sector_size;
-        const sector_offset = absolute_offset % sector_size;
-        const chunk_len = @min(remaining, sector_size - sector_offset);
-
-        if (sector_offset == 0 and chunk_len == sector_size) {
-            if (!writeAttachedRange(self, @intCast(sector_index), bytes[cursor .. cursor + chunk_len])) return false;
-        } else {
-            if (!readAttachedRange(self, @intCast(sector_index), self.sector_buffer[0..])) return false;
-            @memcpy(self.sector_buffer[sector_offset .. sector_offset + chunk_len], bytes[cursor .. cursor + chunk_len]);
-            if (!writeAttachedRange(self, @intCast(sector_index), self.sector_buffer[0..])) return false;
-        }
-
-        cursor += chunk_len;
-        remaining -= chunk_len;
-    }
-    return true;
-}
-
-fn readAttachedBytes(self: *Volume, offset: usize, buffer: []u8) bool {
-    if (offset + buffer.len > image_bytes) return false;
-    var remaining = buffer.len;
-    var cursor: usize = 0;
-    while (remaining > 0) {
-        const absolute_offset = offset + cursor;
-        const sector_index = absolute_offset / sector_size;
-        const sector_offset = absolute_offset % sector_size;
-        const chunk_len = @min(remaining, sector_size - sector_offset);
-        if (!readAttachedRange(self, @intCast(sector_index), self.sector_buffer[0..])) return false;
-        @memcpy(buffer[cursor .. cursor + chunk_len], self.sector_buffer[sector_offset .. sector_offset + chunk_len]);
-        cursor += chunk_len;
-        remaining -= chunk_len;
-    }
-    return true;
-}
-
-fn writeU32At(buffer: []u8, value: u32) void {
-    var bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &bytes, value, .little);
-    @memcpy(buffer[0..4], &bytes);
-}
-
-fn writeU64At(buffer: []u8, value: u64) void {
-    var bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, &bytes, value, .little);
-    @memcpy(buffer[0..8], &bytes);
-}
-
-fn readAttachedRange(self: *Volume, start_lba: u64, buffer: []u8) bool {
-    return switch (self.attached_backend_kind) {
-        .none => false,
-        .generic => self.attached_backend_read(start_lba, buffer.ptr, buffer.len),
-        .ata_bootstrap => ataReadRange(self, start_lba, buffer),
-    };
-}
-
-fn writeAttachedRange(self: *Volume, start_lba: u64, buffer: []const u8) bool {
-    return switch (self.attached_backend_kind) {
-        .none => false,
-        .generic => self.attached_backend_write(start_lba, buffer.ptr, buffer.len),
-        .ata_bootstrap => ataWriteRange(self, start_lba, buffer),
-    };
-}
-
-fn ataReadRange(self: *Volume, start_lba: u64, buffer: []u8) bool {
-    const device = self.attached_ata_device orelse return false;
-    return ata_bridge.read(device, start_lba, buffer);
-}
-
-fn ataWriteRange(self: *Volume, start_lba: u64, buffer: []const u8) bool {
-    const device = self.attached_ata_device orelse return false;
-    return ata_bridge.write(device, start_lba, buffer);
-}
-
 pub const testing = struct {
     pub fn latestImageLogBytes(image: []const u8) Error!u32 {
-        return (try findLatestImageRoot(image)).?.root.log_bytes;
+        return (try volume_root_slot.findLatestImageRoot(image)).?.root.log_bytes;
     }
 
     pub fn latestImageLogRecordCount(image: []const u8) Error!u16 {
-        return (try findLatestImageRoot(image)).?.root.log_record_count;
+        return (try volume_root_slot.findLatestImageRoot(image)).?.root.log_record_count;
     }
 
     pub fn latestImageLogSegmentCount(image: []const u8) Error!u16 {
-        return (try findLatestImageRoot(image)).?.root.log_segment_count;
+        return (try volume_root_slot.findLatestImageRoot(image)).?.root.log_segment_count;
     }
 
     pub fn latestImageCompactedGeneration(image: []const u8) Error!u64 {
-        return (try findLatestImageRoot(image)).?.root.compacted_generation;
+        return (try volume_root_slot.findLatestImageRoot(image)).?.root.compacted_generation;
     }
 
     pub fn corruptDataByte(image: []u8, offset: usize) void {
@@ -1782,20 +1247,20 @@ pub const testing = struct {
     }
 
     pub fn recordHeaderBytes() usize {
-        return recordHeaderLen();
+        return volume_log.recordHeaderLen();
     }
 
     pub fn forceLatestImageRootLogBytes(image: []u8, log_bytes: u32) Error!void {
-        const loaded = (try findLatestImageRoot(image)) orelse return error.CorruptImage;
+        const loaded = (try volume_root_slot.findLatestImageRoot(image)) orelse return error.CorruptImage;
         var root = loaded.root;
         root.log_bytes = log_bytes;
-        try writeImageRoot(image, loaded.sector_index, root);
+        try volume_root_slot.writeImageRoot(image, loaded.sector_index, root);
     }
 
     pub fn forceLatestImageRootLogRecordCount(image: []u8, log_record_count: u16) Error!void {
-        const loaded = (try findLatestImageRoot(image)) orelse return error.CorruptImage;
+        const loaded = (try volume_root_slot.findLatestImageRoot(image)) orelse return error.CorruptImage;
         var root = loaded.root;
         root.log_record_count = log_record_count;
-        try writeImageRoot(image, loaded.sector_index, root);
+        try volume_root_slot.writeImageRoot(image, loaded.sector_index, root);
     }
 };

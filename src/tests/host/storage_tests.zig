@@ -8,6 +8,7 @@ const storage_volume = @import("../../native/storage/storage_volume.zig");
 const storage_volume_backend = @import("../../native/storage/storage_volume_backend.zig");
 const storage_volume_test = @import("../../native/storage/storage_volume_test.zig");
 const workspace = @import("../../native/storage/workspace.zig");
+const workspace_test = @import("../../native/storage/workspace_test.zig");
 
 test "storage host tests import native storage modules" {
     std.testing.refAllDecls(file_bridge);
@@ -18,4 +19,5 @@ test "storage host tests import native storage modules" {
     std.testing.refAllDecls(storage_volume_backend);
     std.testing.refAllDecls(storage_volume_test);
     std.testing.refAllDecls(workspace);
+    std.testing.refAllDecls(workspace_test);
 }

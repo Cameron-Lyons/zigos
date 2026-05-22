@@ -312,7 +312,7 @@
           "name": "process isolation denies memory injection window clipboard and hook bypasses without visible entitlements"
         },
         {
-          "file": "src/native/storage/storage_service.zig",
+          "file": "src/native/storage/storage_service/tests.zig",
           "name": "storage port requires authority context for protected mutations"
         },
         {
@@ -349,11 +349,11 @@
           "name": "spec 8 storage stays versioned recoverable signed and exposed through a derived file bridge"
         },
         {
-          "file": "src/native/storage/object_store.zig",
+          "file": "src/native/storage/object_store/tests.zig",
           "name": "object store keeps immutable signed versions with stable version addresses"
         },
         {
-          "file": "src/native/storage/workspace.zig",
+          "file": "src/native/storage/workspace_test.zig",
           "name": "workspace transactions, snapshot restore, delete recovery, and signed export import work"
         },
         {
@@ -405,11 +405,11 @@
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
-          "file": "src/native/storage/workspace.zig",
+          "file": "src/native/storage/workspace_test.zig",
           "name": "workspace sharing acts as a mutable policy container"
         },
         {
-          "file": "src/native/storage/storage_service.zig",
+          "file": "src/native/storage/storage_service/tests.zig",
           "name": "storage port derives shared workspace capabilities and blocks unauthorized reshares"
         }
       ],
@@ -1036,7 +1036,7 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/storage/object_store.zig",
+          "file": "src/native/storage/object_store/tests.zig",
           "name": "object store supports every native object type and rejects unsigned metadata"
         }
       ]
@@ -1049,7 +1049,7 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/storage/workspace.zig",
+          "file": "src/native/storage/workspace_test.zig",
           "name": "workspace restore rejects tampered signed snapshots"
         }
       ]
@@ -1310,7 +1310,7 @@
           "name": "sync port requires service-scoped authority before device graph mutation"
         },
         {
-          "file": "src/native/storage/storage_service.zig",
+          "file": "src/native/storage/storage_service/tests.zig",
           "name": "storage port requires authority context for protected mutations"
         }
       ]
@@ -1390,19 +1390,19 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/storage/object_store.zig",
+          "file": "src/native/storage/object_store/tests.zig",
           "name": "object store verifies blob backend corruption before serving payloads"
         },
         {
-          "file": "src/native/storage/object_store.zig",
+          "file": "src/native/storage/object_store/tests.zig",
           "name": "object store streams page-sized chunks into Merkle-addressed blob manifests"
         },
         {
-          "file": "src/native/storage/object_store.zig",
+          "file": "src/native/storage/object_store/tests.zig",
           "name": "object store accepts payloads beyond the old sixteen-page ceiling"
         },
         {
-          "file": "src/native/storage/storage_service.zig",
+          "file": "src/native/storage/storage_service/tests.zig",
           "name": "storage service accepts large object payloads through mapped shared memory transfer"
         },
         {
@@ -1428,7 +1428,7 @@
           "name": "document operation log merges CRDT operations idempotently with vector clocks"
         },
         {
-          "file": "src/native/storage/workspace.zig",
+          "file": "src/native/storage/workspace_test.zig",
           "name": "workspace restore rejects tampered signed snapshots"
         }
       ]
@@ -1453,7 +1453,7 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/storage/workspace.zig",
+          "file": "src/native/storage/workspace_test.zig",
           "name": "workspace restore rejects tampered signed snapshots"
         }
       ]
@@ -1533,11 +1533,11 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/storage/storage_service.zig",
+          "file": "src/native/storage/storage_service/tests.zig",
           "name": "storage port derives shared workspace capabilities and blocks unauthorized reshares"
         },
         {
-          "file": "src/native/storage/workspace.zig",
+          "file": "src/native/storage/workspace_test.zig",
           "name": "workspace sharing acts as a mutable policy container"
         }
       ]
@@ -1608,18 +1608,19 @@
         "src/native/platform/compositor_session.zig",
         "src/native/task/task_runtime_service.zig",
         "src/native/platform/native_ux.zig",
-        "src/native/platform/rendered_shell.zig",
+        "src/native/platform/rendered_shell/task_shell_service.zig",
+        "src/native/platform/rendered_shell/shell.zig",
         "src/native/platform/event_ledger.zig",
         "src/native/policy/permission_review_service.zig",
         "src/native/session/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/platform/rendered_shell.zig",
+          "file": "src/native/platform/rendered_shell/tests.zig",
           "name": "task shell service routes controls through compositor service and recovers persistent task state"
         },
         {
-          "file": "src/native/platform/rendered_shell.zig",
+          "file": "src/native/platform/rendered_shell/tests.zig",
           "name": "task shell service rejects out-of-order controls before creating compositor state"
         },
         {
@@ -2069,7 +2070,9 @@
     "REQ-ZIGOS-USER-EXPERIENCE": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/platform/rendered_shell.zig",
+        "src/native/platform/rendered_shell/production_journey.zig",
+        "src/native/platform/rendered_shell/journey_surface.zig",
+        "src/native/platform/rendered_shell/task_shell_service.zig",
         "src/native/platform/compositor_session.zig",
         "src/native/platform/native_ux.zig",
         "src/native/platform/event_ledger.zig",
@@ -2081,7 +2084,7 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/platform/rendered_shell.zig",
+          "file": "src/native/platform/rendered_shell/tests.zig",
           "name": "production journey service rejects premature controls then routes lifecycle policy device trust and recovery through service ports"
         },
         {
@@ -2089,7 +2092,7 @@
           "name": "compositor service closes task windows during app removal"
         },
         {
-          "file": "src/native/platform/rendered_shell.zig",
+          "file": "src/native/platform/rendered_shell/tests.zig",
           "name": "task shell service rejects out-of-order controls before creating compositor state"
         }
       ]
