@@ -23,7 +23,7 @@ last_marker_for_group() {
 
 first_marker_for_group() {
   local group="$1"
-  "$ZIG" run "$MARKER_TOOL" -- "$group" | awk 'NF { print; found = 1; exit } END { if (!found) exit 1 }'
+  "$ZIG" run "$MARKER_TOOL" -- "$group" | awk 'NF && !found { marker = $0; found = 1 } END { if (!found) exit 1; print marker }'
 }
 
 validation_marker_for_mode() {
@@ -148,7 +148,7 @@ assert_negative_boot_rejected() {
 line_number() {
   local log_path="$1"
   local marker="$2"
-  grep -Fn "$marker" "$log_path" | head -n1 | cut -d: -f1
+  awk -v marker="$marker" 'index($0, marker) { print NR; exit }' "$log_path"
 }
 
 assert_driver_restart_without_reboot() {
