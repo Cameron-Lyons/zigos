@@ -1,6 +1,311 @@
 {
   "schema_version": 1,
   "source_coverage_manifest": "spec/coverage.json",
+  "secure_by_design_release_gate": {
+    "id": "secure-by-design-release-gate",
+    "title": "Secure-by-design release gate",
+    "release_status": "blocked",
+    "external_bar": {
+      "name": "CISA Product Security Bad Practices",
+      "url": "https://www.cisa.gov/resources-tools/resources/product-security-bad-practices",
+      "last_reviewed": "2026-05-23"
+    },
+    "policy_artifacts": [
+      "SECURITY.md"
+    ],
+    "controls": [
+      {
+        "id": "fuzzing",
+        "status": "partial",
+        "release_blocking": true,
+        "scope": [
+          "Coverage-guided fuzzing must exercise parsers, storage log replay, userspace image metadata, sync frames, capability messages, and kernel/user ABI decoding before release."
+        ],
+        "implementation_anchors": [
+          "src/tests/spec/adversarial_security.zig",
+          "src/native/core/binary_cursor.zig",
+          "src/native/storage/storage_volume.zig",
+          "src/native/kernel_api/syscall_dispatch.zig"
+        ],
+        "current_evidence": [
+          "Adversarial spec tests reject malformed manifests, corrupted storage logs, stale metadata, and bypass attempts."
+        ],
+        "open_gaps": [
+          "Coverage-guided fuzz harnesses and corpus minimization are not wired into a repeatable release target."
+        ],
+        "graduation_criteria": [
+          "Add release-running fuzz harnesses with checked seed corpora, sanitizer-compatible host builds where available, crash deduplication, and regression fixtures for every accepted crash."
+        ],
+        "verification_commands": [
+          "./scripts/zig.sh build spec-tests",
+          "./scripts/zig.sh build host-tests"
+        ],
+        "cisa_alignment": [
+          "Treat exploit-prone input handling as a manufacturer-owned defect class and block release when parser fuzz evidence is absent."
+        ]
+      },
+      {
+        "id": "fault-injection",
+        "status": "partial",
+        "release_blocking": true,
+        "scope": [
+          "Fault injection must cover boot artifact tamper, rollback failure, power loss, torn writes, storage driver crash/rebind, recovery repair, and sync transport disruption."
+        ],
+        "implementation_anchors": [
+          "build.zig",
+          "build_support/qemu.zig",
+          "scripts/run-storage-durability-qemu.sh",
+          "scripts/run-kernel-recovery.sh",
+          "src/tests/spec/backlog_gates.zig"
+        ],
+        "current_evidence": [
+          "QEMU smoke paths include tampered artifacts, rollback-slot failure, recovery proof, storage durability, and driver restart gates."
+        ],
+        "open_gaps": [
+          "Fault campaigns are focused fixtures rather than randomized or matrixed failure injection across all release profiles."
+        ],
+        "graduation_criteria": [
+          "Promote storage, driver, recovery, sync, and boot fault campaigns into a release matrix with deterministic seeds, artifacts, and failure triage records."
+        ],
+        "verification_commands": [
+          "./scripts/zig.sh build zigos-native-smoke-test",
+          "./scripts/zig.sh build storage-durability-qemu-test",
+          "./scripts/zig.sh build driver-restart-qemu-test",
+          "./scripts/zig.sh build recovery-qemu-test"
+        ],
+        "cisa_alignment": [
+          "Exercise secure-by-default behavior under failure instead of depending on customer recovery workarounds."
+        ]
+      },
+      {
+        "id": "reproducible-builds",
+        "status": "blocked",
+        "release_blocking": true,
+        "scope": [
+          "Release artifacts must be buildable from pinned inputs with deterministic outputs or documented, bounded nondeterminism."
+        ],
+        "implementation_anchors": [
+          "build.zig",
+          "mise.toml",
+          "scripts/zig.sh",
+          "scripts/clean-build.sh"
+        ],
+        "current_evidence": [
+          "The repository pins the Zig toolchain entrypoint and keeps generated artifacts under build outputs."
+        ],
+        "open_gaps": [
+          "There is no release target that performs clean rebuild comparison, records environment inputs, or proves deterministic ISO/kernel/userspace archive bytes."
+        ],
+        "graduation_criteria": [
+          "Add a reproducible-build release target that performs two clean builds, compares artifact digests, records toolchain and environment metadata, and explains accepted nondeterminism."
+        ],
+        "verification_commands": [
+          "./scripts/zig.sh build clean",
+          "./scripts/zig.sh build iso"
+        ],
+        "cisa_alignment": [
+          "Support supply-chain transparency and reduce unverified build inputs before customer distribution."
+        ]
+      },
+      {
+        "id": "sbom-provenance",
+        "status": "partial",
+        "release_blocking": true,
+        "scope": [
+          "Every release artifact must carry machine-readable SBOM data, source provenance, signer identity, measured boot inputs, and customer-verifiable digest records."
+        ],
+        "implementation_anchors": [
+          "tools/generate_userspace_archive.zig",
+          "src/native/platform/measured_boot.zig",
+          "src/native/task/userspace_manifest_signing.zig",
+          "src/tools/zigos_sign.zig"
+        ],
+        "current_evidence": [
+          "Userspace archives, boot measurements, signed bundle state, and launch provenance are modeled and tested."
+        ],
+        "open_gaps": [
+          "Machine-readable SBOM generation, release provenance attestations, and customer-facing verification bundles are not yet emitted by the release flow."
+        ],
+        "graduation_criteria": [
+          "Generate SPDX or CycloneDX SBOMs plus provenance attestations for kernels, userspace archives, tools, and ISO outputs; verify them in release tests."
+        ],
+        "verification_commands": [
+          "./scripts/zig.sh build userspace-images",
+          "./scripts/zig.sh build signing-cli",
+          "./scripts/zig.sh build prod-readiness"
+        ],
+        "cisa_alignment": [
+          "Maintain SBOMs and transparent vulnerability/exploitability records for first- and third-party software."
+        ]
+      },
+      {
+        "id": "threat-model-tests",
+        "status": "partial",
+        "release_blocking": true,
+        "scope": [
+          "Threat-model tests must cover explicit authority, privilege boundaries, boot trust, recovery, policy mediation, storage integrity, sync trust, diagnostics privacy, and driver isolation."
+        ],
+        "implementation_anchors": [
+          "spec/coverage.json",
+          "src/tests/spec/spec_conformance_test.zig",
+          "src/tests/spec/adversarial_security.zig",
+          "src/tests/spec/architecture_security.zig",
+          "src/tests/spec/backlog_gates.zig"
+        ],
+        "current_evidence": [
+          "Spec conformance and adversarial tests already encode revoked capability, expired lease, malformed manifest, corrupted log, rollback, and bypass threats."
+        ],
+        "open_gaps": [
+          "The threat model is test-backed but not yet published as a reviewer-facing matrix with threat IDs, abuse cases, mitigations, and residual-risk owners."
+        ],
+        "graduation_criteria": [
+          "Publish a threat-model matrix and require every P0/P1 release track to list abuse cases, mitigations, negative tests, and residual-risk decisions."
+        ],
+        "verification_commands": [
+          "./scripts/zig.sh build spec-tests",
+          "./scripts/zig.sh build spec-conformance"
+        ],
+        "cisa_alignment": [
+          "Make security properties measurable across the product lifecycle and prevent dangerous defaults from shipping silently."
+        ]
+      },
+      {
+        "id": "memory-safety-audits",
+        "status": "blocked",
+        "release_blocking": true,
+        "scope": [
+          "Unsafe Zig and kernel-adjacent sections must be inventoried, reviewed, minimized, and bound by tests before release, especially pointer casts, integer-pointer conversion, inline assembly, packed ABI structs, and user memory copies."
+        ],
+        "implementation_anchors": [
+          "src/kernel",
+          "src/arch",
+          "src/native/kernel_api/syscall_dispatch.zig",
+          "src/native/drivers/storage_driver_task.zig"
+        ],
+        "current_evidence": [
+          "The kernel and native syscall paths centralize many low-level boundaries and have targeted negative tests around user memory and brokered devices."
+        ],
+        "open_gaps": [
+          "There is no published memory-safety roadmap, unsafe-surface inventory, or required reviewer signoff for kernel and ABI pointer manipulation."
+        ],
+        "graduation_criteria": [
+          "Add an unsafe-surface inventory, required audit owner, reviewer checklist, and tests for every user-memory copy, pointer conversion, inline assembly block, and kernel allocator invariant."
+        ],
+        "verification_commands": [
+          "./scripts/zig.sh build host-tests",
+          "./scripts/zig.sh build spec-tests",
+          "./scripts/zig.sh build test-roots"
+        ],
+        "cisa_alignment": [
+          "Treat memory-safety roadmaps and migration/mitigation evidence as mandatory for unsafe or kernel-adjacent code."
+        ]
+      },
+      {
+        "id": "crash-dump-redaction",
+        "status": "partial",
+        "release_blocking": true,
+        "scope": [
+          "Crash dumps, event-ledger exports, remote diagnostics, and support bundles must redact secrets, private object names, personal content, capability tokens, and raw memory by default."
+        ],
+        "implementation_anchors": [
+          "src/native/platform/event_ledger.zig",
+          "src/native/platform/event_ledger_test.zig",
+          "src/native/session/supervisor.zig",
+          "src/tests/spec/platform_services.zig"
+        ],
+        "current_evidence": [
+          "Event-ledger, supervisor, and spec tests verify redacted diagnostics for crashes, permission decisions, and remote shares."
+        ],
+        "open_gaps": [
+          "Raw crash dump capture policy, memory dump deny-by-default behavior, and support-bundle export review are not yet separate release gates."
+        ],
+        "graduation_criteria": [
+          "Add explicit crash dump policy tests for raw memory capture denial, opt-in scoped diagnostics, capability token scrubbing, and reproducible redaction fixtures."
+        ],
+        "verification_commands": [
+          "./scripts/zig.sh build host-tests",
+          "./scripts/zig.sh build spec-tests"
+        ],
+        "cisa_alignment": [
+          "Keep security-sensitive telemetry safe by default and avoid shifting diagnostic privacy risk to customers."
+        ]
+      },
+      {
+        "id": "vulnerability-disclosure",
+        "status": "blocked",
+        "release_blocking": true,
+        "scope": [
+          "A release must have a published vulnerability disclosure policy, private intake channel, triage SLA, CVE/CWE handling process, coordinated disclosure rules, and security update commitments."
+        ],
+        "implementation_anchors": [
+          "SECURITY.md",
+          "CONTRIBUTING.md"
+        ],
+        "current_evidence": [
+          "SECURITY.md documents the disclosure workflow and marks private intake configuration as a public-release blocker."
+        ],
+        "open_gaps": [
+          "The project still needs an operational monitored private reporting channel and CNA/CVE issuance path before public release."
+        ],
+        "graduation_criteria": [
+          "Configure and publish the private intake channel, define maintainers on rotation, document CVE issuance ownership, and test the end-to-end disclosure workflow before release."
+        ],
+        "verification_commands": [
+          "./scripts/zig.sh build prod-readiness"
+        ],
+        "cisa_alignment": [
+          "Avoid the CISA bad practice of shipping without a scoped vulnerability disclosure policy and timely CVE/CWE process."
+        ]
+      }
+    ]
+  },
+  "first_hardware_target": {
+    "id": "intel-nuc11tnki5",
+    "vendor": "Intel",
+    "product": "NUC 11 Pro Kit",
+    "sku": "NUC11TNKi5",
+    "status": "hardware_required",
+    "selection_reason": "Single commodity x86_64 UEFI target with ACPI, integrated display output, USB xHCI input path, M.2 NVMe storage, and wired Intel I225-LM Ethernet so the first hardware proof does not depend on Wi-Fi or dongles.",
+    "boot_medium": "UEFI GRUB ISO or USB image built from build/os.iso.",
+    "serial_capture": "Real-machine serial, framebuffer capture, or HDMI capture logs archived under build/hardware-proofs/nuc11tnki5/ and checked by scripts/check-nuc11tnki5-hardware-proof.sh.",
+    "required_subsystems": [
+      "uefi_boot",
+      "acpi_tables",
+      "apic_timer",
+      "framebuffer_gop",
+      "usb_input_xhci",
+      "nvme_block",
+      "network_i225_lm",
+      "suspend_resume",
+      "crash_recovery"
+    ],
+    "reference_artifacts": [
+      "src/native/platform/hardware_target.zig",
+      "spec/hardware/nuc11tnki5-required-markers.txt",
+      "scripts/check-nuc11tnki5-hardware-proof.sh",
+      "scripts/run-uefi-boot-test.sh"
+    ],
+    "qemu_preflight_commands": [
+      "./scripts/zig.sh build iso",
+      "./scripts/zig.sh build uefi-qemu-test",
+      "./scripts/zig.sh build zigos-native-smoke-test",
+      "./scripts/zig.sh build storage-durability-qemu-test",
+      "./scripts/zig.sh build driver-restart-qemu-test",
+      "./scripts/zig.sh build recovery-qemu-test"
+    ],
+    "hardware_exit_criteria": [
+      "Ten cold UEFI boots and ten warm reboots reach native-ready on the NUC11TNKi5 without panic, hang, or firmware fallback.",
+      "ACPI table discovery, APIC timer calibration, GOP framebuffer output, USB xHCI keyboard input, NVMe read/write, and Intel I225-LM transmit/receive each emit the required hardware target marker.",
+      "Twenty suspend/resume cycles preserve timer, framebuffer, USB input, NVMe, and network usability.",
+      "Ten induced crash-recovery cycles preserve the native store and produce redacted recovery diagnostics.",
+      "Every hardware proof bundle includes serial output, firmware settings, power-cycle notes, and the exact kernel/userspace artifact digests."
+    ],
+    "current_hardware_evidence": [],
+    "open_gaps": [
+      "No NUC11TNKi5 serial log has been captured from real hardware yet.",
+      "UEFI handoff, ACPI parsing, APIC timer calibration, GOP framebuffer ownership, xHCI input, NVMe, Intel I225-LM, suspend/resume, and crash recovery still need real-device implementation and proof markers."
+    ]
+  },
   "tracks": [
     {
       "id": "storage-object-store-durability",
@@ -67,6 +372,8 @@
         "src/native/platform/attestation_service.zig",
         "src/native/platform/base_boot_selector.zig",
         "src/native/platform/update_health.zig",
+        "src/native/core/signing.zig",
+        "src/tools/zigos_sign.zig",
         "src/native/session/trust_boot.zig",
         "src/native_smoke_markers.zig",
         "scripts/run-zigos-native-smoke.sh"
@@ -75,27 +382,116 @@
         "Freestanding boot records can be verified against signed artifact manifests and compared across native smoke boots.",
         "Remote attestation refuses emulator-rooted measured state and requires a provisioned non-software root.",
         "A/B base selection, rollback, and post-activation health markers are covered by host and QEMU smoke evidence.",
-        "The native smoke target now includes negative QEMU runs that reject a tampered boot artifact manifest, direct kernel/userspace-image/policy/driver-set measurement tampering, and a rollback target whose slot measurement no longer verifies before the boot can reach native-ready."
+        "The native smoke target now includes negative QEMU runs that reject a tampered boot artifact manifest, direct kernel/userspace-image/policy/driver-set measurement tampering, and a rollback target whose slot measurement no longer verifies before the boot can reach native-ready.",
+        "The signature envelope and signing CLI now support both Ed25519 and an Ed25519+ML-DSA-65 hybrid preview profile with fail-closed verification for unsupported formats.",
+        "A signature-provider boundary and registry now report provider profile, release eligibility, and fail-closed profile mismatches so production Ed25519, ML-DSA, or hybrid providers can be swapped in without changing manifest storage layouts.",
+        "Userspace package signatures, boot artifact manifest signatures, generated archive signatures, and attestation statement signatures now route through the default provider registry instead of directly selecting raw Ed25519 operations.",
+        "Demo seed packages, SDK simulator release bundles, rendered-shell journeys, package-service fixtures, and spec release fixtures now select the Ed25519 provider explicitly where they model release signing behavior."
       ],
       "production_gaps": [
         "Host evidence still uses emulator-provided measurement fallbacks, and attestation root material is represented by software signer identities.",
         "There is no hardware-backed provisioning, rotation, revocation, or verifier protocol boundary for TPM or secure-enclave roots.",
+        "The Ed25519+ML-DSA-65 hybrid profile is a bounded preview commitment for envelope and policy plumbing, not a FIPS 204 ML-DSA implementation.",
         "Release artifact signing and bootloader measurement handoff now have smoke-level tamper rejection, but are not yet tied to an operational key-management story."
       ],
       "graduation_criteria": [
         "Introduce a hardware-root abstraction that supports TPM and secure enclave backed quote/sign operations without exposing root seed material.",
         "Add verifier-facing attestation request and response records with nonce, remote party, policy visibility, key rotation, and revocation tests.",
+        "Replace the hybrid preview commitment with an audited FIPS 204 ML-DSA provider or an explicitly documented production cryptographic provider boundary.",
         "Broaden release-image tamper gates from smoke fixtures to direct bootloader measurement mutation cases under operational signing keys."
       ],
       "next_actions": [
         "Split software signer provisioning out of attestation_service into a test-only provider.",
         "Add a production root provider interface and a fake TPM provider used only by adversarial tests.",
+        "Move explicit software-provider release fixtures onto operational key provisioning once the hardware-backed root and release key-management interfaces exist.",
         "Add a direct bootloader-measurement mutation fixture and bind the smoke signing path to the production root-provider abstraction."
       ],
       "verification_commands": [
         "./scripts/zig.sh build spec-conformance",
         "./scripts/zig.sh build zigos-native-smoke-test",
         "./scripts/zig.sh build recovery-qemu-test"
+      ]
+    },
+    {
+      "id": "first-hardware-target-nuc11tnki5",
+      "title": "First real hardware target: Intel NUC11TNKi5",
+      "priority": "P0",
+      "status": "blocked",
+      "requirements": [
+        "REQ-KERNEL-REQUIREMENTS",
+        "REQ-BOOT-CHAIN",
+        "REQ-MEASURED-STATE",
+        "REQ-USERSPACE-DRIVERS",
+        "REQ-DRIVER-HOT-SWAP-AND-FAILURE-RECOVERY",
+        "REQ-THERMAL-AND-POWER-POLICY",
+        "REQ-HEALTH-CHECKS"
+      ],
+      "implementation_anchors": [
+        "src/native/platform/hardware_target.zig",
+        "spec/hardware/nuc11tnki5-required-markers.txt",
+        "scripts/check-nuc11tnki5-hardware-proof.sh",
+        "scripts/run-uefi-boot-test.sh",
+        "scripts/build-grub-iso.sh",
+        "scripts/qemu-harness.sh",
+        "src/kernel/platform/acpi.zig",
+        "src/kernel/platform/apic.zig",
+        "src/kernel/platform/fadt.zig",
+        "src/kernel/platform/framebuffer.zig",
+        "src/kernel/platform/crash_record.zig",
+        "src/kernel/boot/init/devices.zig",
+        "src/kernel/drivers/pci.zig",
+        "src/kernel/drivers/nvme.zig",
+        "src/kernel/drivers/intel_i225.zig",
+        "src/kernel/drivers/xhci.zig"
+      ],
+      "current_evidence": [
+        "The first supported hardware target is pinned to Intel NUC 11 Pro Kit NUC11TNKi5 instead of a generic PC-compatible bucket.",
+        "The target contract enumerates UEFI boot, ACPI tables, APIC timer, GOP framebuffer, USB xHCI input, NVMe block I/O, Intel I225-LM network, suspend/resume, and crash recovery as required hardware markers.",
+        "The build exposes an OVMF-backed uefi-qemu-test preflight for the ISO path before attempting the same image on the NUC firmware.",
+        "The kernel tree now has a tested ACPI RSDP parser and aligned scanner as the first non-invasive ACPI building block for the target.",
+        "The kernel tree now has a tested MADT parser that summarizes local APIC, I/O APIC, interrupt-source override, x2APIC, and PC-AT compatibility data before APIC timer bring-up.",
+        "The kernel tree now has a tested FADT parser for PM control blocks, SCI interrupt, PM timer, and reset register plumbing needed before suspend/resume work.",
+        "The kernel tree now has a tested UEFI GOP-style linear framebuffer descriptor validator with stride, buffer-size, pixel-format, and text-grid checks.",
+        "The kernel tree now has a bounded crash-record format with checksum validation and redacted summary output for later persistent crash recovery.",
+        "PCI inventory helpers now identify NVMe controllers and the Intel I225-LM network controller required by the NUC target.",
+        "The kernel tree now has a tested NVMe inventory shim with controller-capability parsing, admin-queue validation, and fail-closed data-plane transfer behavior.",
+        "The kernel tree now has a tested Intel I225-LM inventory shim with RX/TX ring-plan validation and fail-closed kernel transmit behavior.",
+        "The kernel tree now has a tested xHCI input inventory shim with controller-capability parsing, command/event ring validation, and fail-closed USB input report behavior.",
+        "Production readiness rejects QEMU-only evidence for this target; hardware proof requires captured real-machine logs, firmware settings, power-cycle notes, and repeated cold boot, reboot, suspend/resume, storage, network, and crash-recovery cycles."
+      ],
+      "production_gaps": [
+        "The repo does not yet emit the NUC11TNKi5 hardware markers from a real boot.",
+        "UEFI handoff still depends on the GRUB ISO path and has not been proven on the selected NUC firmware.",
+        "The ACPI RSDP parser is tested but not wired to a UEFI or BIOS memory-map handoff during boot.",
+        "The MADT parser is tested but not wired to local APIC, I/O APIC, or APIC timer programming during boot.",
+        "The FADT parser is tested but not wired to ACPI sleep-state discovery, wake, or reset execution.",
+        "The framebuffer descriptor validator is tested but not wired to the bootloader's GOP framebuffer handoff during boot.",
+        "Crash record formatting is tested but not persisted before reboot or consumed by recovery boot.",
+        "PCI target identification, NVMe controller queue validation, and Intel I225-LM ring planning are tested, but NVMe read/write and Intel I225-LM packet I/O drivers are not implemented.",
+        "xHCI capability parsing and ring validation are tested, but USB HID keyboard enumeration and input reports are not implemented.",
+        "Suspend/resume and crash recovery need real-device implementations and logs."
+      ],
+      "graduation_criteria": [
+        "Boot the NUC11TNKi5 from a UEFI USB image built from the repo and archive the serial/framebuffer proof bundle.",
+        "Emit and verify every marker in spec/hardware/nuc11tnki5-required-markers.txt from real hardware.",
+        "Pass the minimum cycle counts encoded by hardware_target.first_supported_target without panic, hang, unredacted crash data, or persistence loss.",
+        "Keep QEMU smoke, storage durability, driver restart, recovery, and spec gates green before accepting hardware proof as production evidence."
+      ],
+      "next_actions": [
+        "Make build/os.iso boot reliably through the NUC11TNKi5 UEFI firmware and record firmware settings.",
+        "Add ACPI table discovery and APIC timer proof markers before replacing PIT/PIC assumptions on the target.",
+        "Add GOP framebuffer, xHCI keyboard, NVMe, and Intel I225-LM userspace-driver proof markers.",
+        "Add suspend/resume and induced crash-recovery loops to the NUC proof runbook."
+      ],
+      "verification_commands": [
+        "./scripts/zig.sh build prod-readiness",
+        "./scripts/zig.sh build spec-tests",
+        "./scripts/zig.sh build uefi-qemu-test",
+        "./scripts/zig.sh build zigos-native-smoke-test",
+        "./scripts/zig.sh build storage-durability-qemu-test",
+        "./scripts/zig.sh build driver-restart-qemu-test",
+        "./scripts/zig.sh build recovery-qemu-test",
+        "scripts/check-nuc11tnki5-hardware-proof.sh build/hardware-proofs/nuc11tnki5/serial.log"
       ]
     },
     {
@@ -203,6 +599,7 @@
       "implementation_anchors": [
         "src/native/drivers/driver_service.zig",
         "src/native/drivers/driver_runtime.zig",
+        "src/native/drivers/network_driver_task.zig",
         "src/native/drivers/storage_driver_task.zig",
         "src/native/kernel_api/device_broker.zig",
         "src/native/session/service_path_proofs.zig",
@@ -210,24 +607,26 @@
         "src/kernel/boot/init/data_plane_boundary.zig"
       ],
       "current_evidence": [
-        "Driver registration checks signed bundles, device-class authority, IOMMU-backed DMA range metadata, and restart generations.",
-        "Storage driver tasks attach through the kernel device broker and the ATA bootstrap path exports read/write bridges for freestanding volume access.",
-        "The driver boundary spec gate exercises brokered ATA read/write I/O and rejects stale task authority, stale broker sessions, expired leases, invalid ports, and post-restart target generation mismatches.",
+        "Driver registration checks signed bundles, device-class authority, DMA range metadata, restart generations, and a constrained first target of brokered programmed-I/O ATA rather than bus-master DMA.",
+        "Storage driver tasks attach through the kernel device broker and the ATA bootstrap path exports checked read/write bridges for freestanding volume access.",
+        "The driver boundary spec gate exercises brokered ATA read/write I/O and rejects stale task authority, stale broker sessions, expired leases, invalid ports, explicit broker revocation, and post-restart target generation mismatches.",
+        "The storage data-plane gate covers timeout propagation, active-I/O restart, and partial-transfer recovery by proving incomplete ATA writes are discarded before a restarted userspace driver reissues I/O.",
+        "The native network driver path reauthorizes brokered service-identity sends through the egress broker, so revoked network-policy capabilities stop already-open userspace network paths before transmit.",
         "QEMU driver restart proof performs broker-mediated storage reads and writes before and after restart, rejects stale authority and stale DMA/port access after generation change, and gates the new broker session rebind."
       ],
       "production_gaps": [
         "Only the bootstrap storage path has concrete hardware-like data-plane depth; other driver classes remain inventory, policy, or publication proofs.",
-        "IOMMU and DMA isolation are represented as native policy records rather than hardware programming and fault evidence.",
-        "Failure evidence still needs timeout, partial transfer, and explicit broker revocation cases beyond the driver restart generation-change path."
+        "IOMMU and DMA isolation are represented as native policy records and a constrained programmed-I/O first target rather than hardware programming and fault evidence.",
+        "The timeout, partial-transfer, and explicit revocation cases are host spec gates; QEMU coverage still centers on brokered restart and rebind."
       ],
       "graduation_criteria": [
         "Add broker-mediated data-plane tests for at least storage and network that run in QEMU and prove no kernel direct publication for excluded subsystems.",
-        "Add DMA/IOMMU programming interfaces or explicitly constrain the first production target to brokered programmed-I/O storage.",
+        "Add DMA/IOMMU programming interfaces before broadening the first production target beyond brokered programmed-I/O storage.",
         "Gate driver restart on active I/O recovery, broker revocation, rebind, and no stale DMA or port access after generation change."
       ],
       "next_actions": [
-        "Add timeout, partial transfer, and explicit broker revocation cases to the storage driver data-plane gates.",
-        "Create a production-target note that defines whether first support is ATA PIO only or broader device class coverage."
+        "Move timeout, partial transfer, and explicit broker revocation proofs into the focused QEMU driver restart gate.",
+        "Define the hardware IOMMU programming interface required before enabling bus-master DMA targets."
       ],
       "verification_commands": [
         "./scripts/zig.sh build driver-restart-qemu-test",

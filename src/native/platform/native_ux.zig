@@ -32,6 +32,7 @@ pub const FlowKind = enum(u8) {
     rollback_app_update,
     remove_app,
     sync_workspace,
+    sync_conflict_review,
     containment_denial,
 };
 
@@ -196,6 +197,15 @@ pub const Controller = struct {
         detail: []const u8,
     ) Error!*FlowRecord {
         return self.record(.sync_workspace, 0, workspace_id, subject, detail, true);
+    }
+
+    pub fn syncConflictReview(
+        self: *Controller,
+        workspace_id: u64,
+        subject: principal.PrincipalId,
+        detail: []const u8,
+    ) Error!*FlowRecord {
+        return self.record(.sync_conflict_review, 0, workspace_id, subject, detail, false);
     }
 
     pub fn containmentDenial(
@@ -483,18 +493,21 @@ test "native ux records app lifecycle sync containment and removal flows" {
 
     _ = try controller.installApp(subject, "app.trip");
     _ = try controller.syncWorkspace(77, subject, "device-to-device");
+    _ = try controller.syncConflictReview(77, subject, "1 conflict");
     _ = try controller.updateApp(44, subject, "app.trip");
     _ = try controller.rollbackAppUpdate(44, subject, "app.trip");
     _ = try controller.containmentDenial(44, subject, "direct host access blocked");
     _ = try controller.removeApp(subject, "app.trip");
 
-    try std.testing.expectEqual(@as(usize, 6), controller.flow_count);
+    try std.testing.expectEqual(@as(usize, 7), controller.flow_count);
     try std.testing.expectEqual(FlowKind.install_app, controller.flowAtOrder(0).?.kind);
     try std.testing.expectEqualStrings("app.trip", controller.flowAtOrder(0).?.bundleIdSlice());
     try std.testing.expectEqual(FlowKind.sync_workspace, controller.flowAtOrder(1).?.kind);
     try std.testing.expectEqual(@as(u64, 77), controller.flowAtOrder(1).?.workspace_id);
-    try std.testing.expectEqual(FlowKind.containment_denial, controller.flowAtOrder(4).?.kind);
-    try std.testing.expect(!controller.flowAtOrder(4).?.approved);
-    try std.testing.expectEqual(FlowKind.remove_app, controller.flowAtOrder(5).?.kind);
-    try std.testing.expectEqualStrings("app.trip", controller.flowAtOrder(5).?.bundleIdSlice());
+    try std.testing.expectEqual(FlowKind.sync_conflict_review, controller.flowAtOrder(2).?.kind);
+    try std.testing.expect(!controller.flowAtOrder(2).?.approved);
+    try std.testing.expectEqual(FlowKind.containment_denial, controller.flowAtOrder(5).?.kind);
+    try std.testing.expect(!controller.flowAtOrder(5).?.approved);
+    try std.testing.expectEqual(FlowKind.remove_app, controller.flowAtOrder(6).?.kind);
+    try std.testing.expectEqualStrings("app.trip", controller.flowAtOrder(6).?.bundleIdSlice());
 }

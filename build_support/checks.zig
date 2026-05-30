@@ -65,7 +65,7 @@ pub fn addCheckSteps(
     spec_tests_step.dependOn(&test_artifacts.run_spec_tests.step);
 
     const prod_readiness_cmd = addHostToolRun(b, optimize, "check-production-readiness", "tools/check_production_readiness.zig");
-    const prod_readiness_step = b.step("prod-readiness", "Validate the production-readiness manifest and generated matrix");
+    const prod_readiness_step = b.step("prod-readiness", "Validate production-readiness tracking and the secure-by-design release gate");
     prod_readiness_step.dependOn(&prod_readiness_cmd.step);
 
     return .{

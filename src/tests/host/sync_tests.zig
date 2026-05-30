@@ -5,7 +5,7 @@ const network_policy = @import("../../native/sync/network_policy.zig");
 const sync_adapters = @import("../../native/sync/sync_adapters.zig");
 const sync_service = @import("../../native/sync/sync_service.zig");
 const sync_service_test = @import("../../native/sync/sync_service_test.zig");
-const sync_transport_harness = @import("../../native/sync/sync_transport_harness.zig");
+const sync_transport = @import("../../native/sync/sync_transport.zig");
 
 test "sync host tests import native sync modules" {
     std.testing.refAllDecls(device_graph);
@@ -13,5 +13,5 @@ test "sync host tests import native sync modules" {
     std.testing.refAllDecls(sync_adapters);
     std.testing.refAllDecls(sync_service);
     std.testing.refAllDecls(sync_service_test);
-    std.testing.refAllDecls(sync_transport_harness);
+    std.testing.refAllDecls(sync_transport);
 }

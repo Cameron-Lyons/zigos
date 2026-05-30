@@ -1,9 +1,9 @@
 const std = @import("std");
 const elf = std.elf;
-const elf_image_inspector = @import("elf_image_inspector");
+const native_archive_deps = @import("native_archive_deps");
+const elf_image_inspector = native_archive_deps;
+const signing = native_archive_deps;
 const userspace_descriptor = @import("userspace_descriptor");
-
-const Ed25519 = std.crypto.sign.Ed25519;
 
 const EmbeddedInfo = elf_image_inspector.Inspection;
 
@@ -36,10 +36,10 @@ const BuildArtifactEntry = struct {
 };
 
 const BuildArtifactSignature = struct {
-    format: []const u8 = "ed25519",
+    format: []const u8 = signing.SIGNATURE_FORMAT_ED25519,
     signer: []const u8 = "",
-    public_key: [Ed25519.PublicKey.encoded_length]u8 = [_]u8{0} ** Ed25519.PublicKey.encoded_length,
-    value: [Ed25519.Signature.encoded_length]u8 = [_]u8{0} ** Ed25519.Signature.encoded_length,
+    public_key: [signing.ED25519_PUBLIC_KEY_BYTES]u8 = [_]u8{0} ** signing.ED25519_PUBLIC_KEY_BYTES,
+    value: [signing.ED25519_SIGNATURE_BYTES]u8 = [_]u8{0} ** signing.ED25519_SIGNATURE_BYTES,
 };
 
 const BuildArtifactManifest = struct {
@@ -68,8 +68,10 @@ const BuildArtifactManifest = struct {
 };
 
 const build_manifest_generation: u64 = 1;
-const build_manifest_signer_label = "zigos-build-artifact-manifest";
-const build_manifest_signer_seed = [_]u8{0xC7} ** 32;
+const build_manifest_signer = signing.SignerIdentity{
+    .label = "zigos-build-artifact-manifest",
+    .seed = [_]u8{0xC7} ** 32,
+};
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -446,13 +448,12 @@ fn signBuildArtifactManifest(manifest: *BuildArtifactManifest) !void {
         manifest.entries[0..manifest.entry_count],
         &payload_buffer,
     );
-    const key_pair = try Ed25519.KeyPair.generateDeterministic(build_manifest_signer_seed);
-    const signature = try key_pair.sign(payload, null);
+    const signature = try signing.signWithDefaultRegistry(.ed25519, build_manifest_signer, payload);
     manifest.signature = .{
-        .format = "ed25519",
-        .signer = build_manifest_signer_label,
-        .public_key = key_pair.public_key.toBytes(),
-        .value = signature.toBytes(),
+        .format = signature.format,
+        .signer = signature.signer,
+        .public_key = signature.ed25519PublicKeySlice()[0..signing.ED25519_PUBLIC_KEY_BYTES].*,
+        .value = signature.ed25519SignatureSlice()[0..signing.ED25519_SIGNATURE_BYTES].*,
     };
 }
 

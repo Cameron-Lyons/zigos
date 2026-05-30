@@ -9,24 +9,37 @@ const driver_runtime = @import("../../native/drivers/driver_runtime.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const endpoint = @import("../../native/kernel_api/endpoint.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
+const hardware_target = @import("../../native/platform/hardware_target.zig");
 const ids = @import("../../native/core/ids.zig");
+const intel_i225 = @import("../../kernel/drivers/intel_i225.zig");
+const kernel_crash_record = @import("../../kernel/platform/crash_record.zig");
 const kernel_ata = @import("../../kernel/drivers/ata.zig");
+const kernel_acpi = @import("../../kernel/platform/acpi.zig");
+const kernel_apic = @import("../../kernel/platform/apic.zig");
 const kernel_data_plane_boundary = @import("../../kernel/boot/init/data_plane_boundary.zig");
+const kernel_fadt = @import("../../kernel/platform/fadt.zig");
+const kernel_framebuffer = @import("../../kernel/platform/framebuffer.zig");
 const kernel_ethernet = @import("../../kernel/net/ethernet.zig");
 const kernel_link_port = @import("../../kernel/net/link_port.zig");
+const kernel_nvme = @import("../../kernel/drivers/nvme.zig");
+const kernel_pci = @import("../../kernel/drivers/pci.zig");
 const manifest = @import("../../native/policy/manifest.zig");
+const native_app_sdk = @import("../../native/sdk/native_app_sdk.zig");
 const native_kernel = @import("../../native/kernel_api/native_kernel.zig");
+const network_driver_task = @import("../../native/drivers/network_driver_task.zig");
 const network_policy = @import("../../native/sync/network_policy.zig");
+const kernel_xhci = @import("../../kernel/drivers/xhci.zig");
 const principal = @import("../../native/core/principal.zig");
 const runtime_negative_proofs = @import("../../native/session/runtime_negative_proofs.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const spec_support = @import("support.zig");
+const storage_driver_protocol = @import("../../native/drivers/storage_driver_protocol.zig");
 const storage_driver_task = @import("../../native/drivers/storage_driver_task.zig");
 const storage_volume = @import("../../native/storage/storage_volume.zig");
 const supervisor = @import("../../native/session/supervisor.zig");
 const sync_adapters = @import("../../native/sync/sync_adapters.zig");
 const sync_service_test = @import("../../native/sync/sync_service_test.zig");
-const sync_transport = @import("../../native/sync/sync_transport_harness.zig");
+const sync_transport = @import("../../native/sync/sync_transport.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const typed_component_abi = @import("../../native/services/typed_component_abi.zig");
 
@@ -130,6 +143,7 @@ pub fn componentAbiDepthGate() !void {
     const iface = typed_component_abi.Interface(.service_registry);
     try std.testing.expectEqual(typed_component_abi.coverage_references.len, typed_component_abi.coverageReferenceCountForRequirement("REQ-COMPONENT-MODEL"));
     try std.testing.expectEqualStrings("zigos.object.workspace", typed_component_abi.interfaceForService(.storage_object).name);
+    try std.testing.expectEqualStrings("zigos.package.install", typed_component_abi.interfaceForService(.package_install_update).name);
 
     var header = typed_component_abi.WireHeader{
         .interface_major = 1,
@@ -165,10 +179,130 @@ pub fn componentAbiDepthGate() !void {
         @sizeOf(typed_component_abi.ServiceConnectionRequest),
         @sizeOf(typed_component_abi.ServiceConnectionResponse),
     ));
+
+    const package_iface = typed_component_abi.Interface(.package_install);
+    const rollback_header = typed_component_abi.WireHeader{
+        .interface_major = package_iface.version_major,
+        .interface_minor = package_iface.version_minor,
+        .operation = @intFromEnum(typed_component_abi.OperationId.package_rollback),
+        .request_len = @sizeOf(typed_component_abi.PackageRollbackRequest),
+        .response_len = @sizeOf(typed_component_abi.PackageRollbackResponse),
+        .correlation_id = 902,
+        .subject_task_id = 78,
+    };
+    try typed_component_abi.validateMessage(
+        package_iface,
+        .package_rollback,
+        rollback_header,
+        @sizeOf(typed_component_abi.PackageRollbackRequest),
+        @sizeOf(typed_component_abi.PackageRollbackResponse),
+    );
+
+    var sim = native_app_sdk.simulator.Simulator.init();
+    const generated = try sim.parseAndGenerate(native_app_sdk.example_apps.writer_idl);
+    try std.testing.expect(std.mem.indexOf(u8, generated.slice(), "writer_edit") != null);
+
+    const writer = native_app_sdk.example_apps.writer();
+    _ = try sim.install(.{
+        .bundle = writer.bundle,
+        .signer = writer.signer,
+        .data_schema_version = writer.data_schema_version,
+    });
+    var updated_writer = writer.bundle;
+    updated_writer.version_minor += 1;
+    _ = try sim.install(.{
+        .bundle = updated_writer,
+        .signer = writer.signer,
+        .data_schema_version = writer.data_schema_version,
+        .retains_data_compatibility = true,
+    });
+    _ = try sim.rollback(writer.bundle.bundle_id);
+
+    const legacy = native_app_sdk.example_apps.legacyEditor();
+    const compat = try sim.launchCompatibility(.{
+        .bundle = legacy.bundle,
+        .signer = legacy.signer,
+        .label = "Legacy Editor",
+    });
+    try std.testing.expect(compat.isolated);
+    try std.testing.expect(compat.portal_only_host_access);
+    try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.package_installed));
+    try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.package_updated));
+    try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.package_rolled_back));
+    try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.compatibility_launched));
 }
 
 pub fn indexedHotPathTablesGate() !void {
     try expectAllMetadataTrue(architecture_gates.indexed_hot_path_tables);
+}
+
+pub fn firstHardwareTargetGate() !void {
+    const target = &hardware_target.first_supported_target;
+    try std.testing.expectEqualStrings("intel-nuc11tnki5", target.id);
+    try std.testing.expectEqualStrings("NUC11TNKi5", target.sku);
+    try std.testing.expectEqualStrings("Intel Ethernet Controller I225-LM", target.network);
+    try std.testing.expect(hardware_target.coversRequiredSubsystems(target));
+    try std.testing.expectEqual(target.required_subsystems.len, target.required_markers.len);
+    try std.testing.expect(kernel_acpi.signatureMatches("RSD PTR "));
+    try std.testing.expectEqual(kernel_apic.EntryType.io_apic, kernel_apic.EntryType.fromByte(1));
+    try std.testing.expect(kernel_pci.isIntelI225Lm(.{
+        .bus = 0,
+        .device = 31,
+        .function = 6,
+        .vendor_id = kernel_pci.PCI_VENDOR_INTEL,
+        .device_id = kernel_pci.PCI_DEVICE_INTEL_I225_LM,
+        .class_code = kernel_pci.PCI_CLASS_NETWORK_ADAPTER,
+        .subclass = 0,
+        .prog_if = 0,
+        .bar0 = 0,
+        .bar1 = 0,
+        .bar2 = 0,
+        .bar3 = 0,
+        .bar4 = 0,
+        .bar5 = 0,
+    }));
+    try std.testing.expectEqual(@as(u32, 64), (kernel_nvme.ControllerCapabilities{ .raw = (@as(u64, 63) | (@as(u64, 1) << 37)) }).maxQueueEntries());
+    try intel_i225.validateRingPlan(.{
+        .rx_descriptors = 256,
+        .tx_descriptors = 256,
+        .rx_ring_address = 0x1000,
+        .tx_ring_address = 0x2000,
+    });
+    try kernel_xhci.validateRingPlan(.{
+        .command_ring_trbs = 64,
+        .event_ring_trbs = 64,
+        .command_ring_address = 0x1000,
+        .event_ring_address = 0x2000,
+    });
+    _ = try kernel_framebuffer.validate(.{
+        .physical_address = 0x8000_0000,
+        .width = 1920,
+        .height = 1080,
+        .pixels_per_scan_line = 1920,
+        .format = .bgrx8888,
+        .buffer_bytes = 1920 * 1080 * 4,
+    });
+
+    const qemu_only = hardware_target.EvidenceSummary{
+        .target_id = target.id,
+        .qemu_boots = 100,
+        .serial_log_captured = true,
+    };
+    try std.testing.expect(!hardware_target.hardwareProofSatisfied(target, qemu_only));
+
+    const complete_hardware_evidence = hardware_target.EvidenceSummary{
+        .target_id = target.id,
+        .hardware_cold_boots = target.proof_minimums.cold_boots,
+        .hardware_warm_reboots = target.proof_minimums.warm_reboots,
+        .storage_write_read_cycles = target.proof_minimums.storage_write_read_cycles,
+        .network_frame_cycles = target.proof_minimums.network_frame_cycles,
+        .suspend_resume_cycles = target.proof_minimums.suspend_resume_cycles,
+        .crash_recovery_cycles = target.proof_minimums.crash_recovery_cycles,
+        .serial_log_captured = true,
+        .firmware_settings_captured = true,
+        .power_cycle_notes_captured = true,
+    };
+    try std.testing.expect(hardware_target.hardwareProofSatisfied(target, complete_hardware_evidence));
 }
 
 pub fn driverBoundaryAuditGate() !void {
@@ -212,20 +346,22 @@ pub fn driverBoundaryAuditGate() !void {
     }));
 
     try deviceBrokerNegativeAuthorityGate();
+    try networkDriverBrokerRevocationGate();
 }
 
 fn deviceBrokerNegativeAuthorityGate() !void {
     const device_id: u64 = 0x0000_1F00_00C1;
-
-    device_broker.reset();
-    defer device_broker.reset();
-    try std.testing.expect(device_broker.publishAtaController(device_id, .{
+    const ata_grant = storage_driver_protocol.AtaBrokerGrant{
         .base_port = 0x1F0,
         .ctrl_port = 0x3F6,
         .is_master = true,
         .irq_line = 14,
         .sector_count = 4096,
-    }));
+    };
+
+    device_broker.reset();
+    defer device_broker.reset();
+    try std.testing.expect(device_broker.publishAtaController(device_id, ata_grant));
 
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
@@ -284,7 +420,41 @@ fn deviceBrokerNegativeAuthorityGate() !void {
         0xD170,
         12,
     ) orelse return error.MissingBootedDriverBinding;
+    try std.testing.expect(storage_driver_task.constrainedProgrammedIoFirstTarget(&brokered_session));
+    try std.testing.expectEqual(device_broker.DmaIsolationMode.programmed_io_only, brokered_session.dma_isolation.mode);
+    try std.testing.expect(!brokered_session.dma_isolation.hardware_iommu_programmed);
+    try std.testing.expect(!brokered_session.dma_isolation.bus_master_dma_enabled);
+
     try expectBrokeredStorageSessionWriteRead(&brokered_session, 8, "broker-before-rehost", 0x62);
+
+    var timeout_read: [storage_volume.sector_size]u8 = undefined;
+    try kernel.devicePortWrite(
+        kernelContext(driver_task.id, .device_port_write, device_authority.id, .{ .device = device_id }),
+        0x1F0 + 7,
+        .u8,
+        0x80,
+        12,
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        storage_driver_task.readAtaBootstrapSessionChecked(&brokered_session, 8, timeout_read[0..]),
+    );
+    try std.testing.expect(device_broker.publishAtaController(device_id, ata_grant));
+
+    var active_io_before: [storage_volume.sector_size]u8 = undefined;
+    var active_io_attempted: [storage_volume.sector_size]u8 = undefined;
+    fillStoragePattern(active_io_before[0..], "active-io-before", 0x44);
+    fillStoragePattern(active_io_attempted[0..], "active-io-partial", 0x55);
+    try std.testing.expect(storage_driver_task.writeAtaBootstrapSession(&brokered_session, 10, active_io_before[0..]));
+    try beginPartialBrokeredAtaWrite(
+        &kernel,
+        driver_task.id,
+        device_authority.id,
+        device_id,
+        10,
+        active_io_attempted[0 .. storage_volume.sector_size / 2],
+        12,
+    );
     const stale_session = brokered_session;
     try std.testing.expect(try runtime.rehostTask(driver_task.id, 13));
     try std.testing.expect(storage_driver_task.staleAuthorityRejectedAfterGenerationChange(&stale_session));
@@ -358,7 +528,42 @@ fn deviceBrokerNegativeAuthorityGate() !void {
     ) orelse return error.MissingBootedDriverBinding;
     try std.testing.expectEqual(@as(u64, 0xD171), rebound_session.dma_domain_id);
     try std.testing.expect(rebound_session.process_generation > stale_session.process_generation);
+    try std.testing.expect(storage_driver_task.constrainedProgrammedIoFirstTarget(&rebound_session));
+
+    var active_io_readback: [storage_volume.sector_size]u8 = undefined;
+    try storage_driver_task.readAtaBootstrapSessionChecked(&rebound_session, 10, active_io_readback[0..]);
+    try std.testing.expect(std.mem.eql(u8, active_io_before[0..], active_io_readback[0..]));
+    try storage_driver_task.writeAtaBootstrapSessionChecked(&rebound_session, 10, active_io_attempted[0..]);
+    @memset(active_io_readback[0..], 0);
+    try storage_driver_task.readAtaBootstrapSessionChecked(&rebound_session, 10, active_io_readback[0..]);
+    try std.testing.expect(std.mem.eql(u8, active_io_attempted[0..], active_io_readback[0..]));
+
     try expectBrokeredStorageSessionWriteRead(&rebound_session, 9, "broker-after-rebind", 0x73);
+
+    const broker_generation_before_revoke = rebound_session.client.broker_generation;
+    var revoked_read: [storage_volume.sector_size]u8 = undefined;
+    try std.testing.expect(device_broker.revokeAtaController(device_id));
+    try std.testing.expectError(
+        error.BrokerRevoked,
+        storage_driver_task.readAtaBootstrapSessionChecked(&rebound_session, 9, revoked_read[0..]),
+    );
+    try std.testing.expect(device_broker.publishAtaController(device_id, ata_grant));
+    var stale_broker_session = rebound_session;
+    try std.testing.expectError(
+        error.StaleBrokerSession,
+        storage_driver_task.readAtaBootstrapSessionChecked(&stale_broker_session, 9, revoked_read[0..]),
+    );
+
+    var republished_session = storage_driver_task.establishAtaBootstrapSession(
+        &kernel_port,
+        device_id,
+        rebound_authority.id,
+        driver_task.id,
+        0xD172,
+        21,
+    ) orelse return error.MissingBootedDriverBinding;
+    try std.testing.expect(republished_session.client.broker_generation != broker_generation_before_revoke);
+    try expectBrokeredStorageSessionWriteRead(&republished_session, 11, "broker-after-revoke", 0x84);
 }
 
 fn mintBrokeredDeviceAuthority(
@@ -411,6 +616,155 @@ fn fillStoragePattern(buffer: []u8, label: []const u8, salt: u8) void {
     @memcpy(buffer[0..label_len], label[0..label_len]);
 }
 
+fn beginPartialBrokeredAtaWrite(
+    kernel: *native_kernel.Kernel,
+    task_id: u64,
+    capability_id: u64,
+    device_id: u64,
+    lba: u64,
+    bytes: []const u8,
+    now_ticks: u64,
+) !void {
+    if (bytes.len == 0 or bytes.len % @sizeOf(u16) != 0 or bytes.len >= storage_volume.sector_size) {
+        return error.InvalidParameter;
+    }
+
+    const base_port: u16 = 0x1F0;
+    const drive_select_master: u8 = 0xE0;
+    const lba28_head_mask: u64 = 0x0F;
+    try kernel.devicePortWrite(
+        kernelContext(task_id, .device_port_write, capability_id, .{ .device = device_id }),
+        base_port + 6,
+        .u8,
+        drive_select_master | @as(u8, @intCast((lba >> 24) & lba28_head_mask)),
+        now_ticks,
+    );
+    try kernel.devicePortWrite(
+        kernelContext(task_id, .device_port_write, capability_id, .{ .device = device_id }),
+        base_port + 2,
+        .u8,
+        1,
+        now_ticks,
+    );
+    try kernel.devicePortWrite(
+        kernelContext(task_id, .device_port_write, capability_id, .{ .device = device_id }),
+        base_port + 3,
+        .u8,
+        @as(u8, @truncate(lba)),
+        now_ticks,
+    );
+    try kernel.devicePortWrite(
+        kernelContext(task_id, .device_port_write, capability_id, .{ .device = device_id }),
+        base_port + 4,
+        .u8,
+        @as(u8, @truncate(lba >> 8)),
+        now_ticks,
+    );
+    try kernel.devicePortWrite(
+        kernelContext(task_id, .device_port_write, capability_id, .{ .device = device_id }),
+        base_port + 5,
+        .u8,
+        @as(u8, @truncate(lba >> 16)),
+        now_ticks,
+    );
+    try kernel.devicePortWrite(
+        kernelContext(task_id, .device_port_write, capability_id, .{ .device = device_id }),
+        base_port + 7,
+        .u8,
+        0x30,
+        now_ticks,
+    );
+
+    var offset: usize = 0;
+    while (offset < bytes.len) : (offset += @sizeOf(u16)) {
+        const word = @as(u16, bytes[offset]) | (@as(u16, bytes[offset + 1]) << 8);
+        try kernel.devicePortWrite(
+            kernelContext(task_id, .device_port_write, capability_id, .{ .device = device_id }),
+            base_port,
+            .u16,
+            @as(u32, word),
+            now_ticks,
+        );
+    }
+}
+
+fn networkDriverBrokerRevocationGate() !void {
+    const Harness = struct {
+        var send_count: usize = 0;
+
+        fn send(_: []const u8) void {
+            send_count += 1;
+        }
+
+        fn mac() [6]u8 {
+            return [_]u8{ 0x02, 0x81, 0x10, 0x0E, 0x00, 0x07 };
+        }
+    };
+
+    Harness.send_count = 0;
+    network_driver_task.reset();
+    defer network_driver_task.reset();
+
+    const service_owner = spec_support.service(880);
+    const source_device = spec_support.device(881);
+    const target_device = spec_support.device(882);
+    const network_device = network_driver_task.NetworkDevice{
+        .send = Harness.send,
+        .getMacAddress = Harness.mac,
+    };
+    try std.testing.expect(network_driver_task.activateDevice(&network_device, 880));
+
+    var policies = network_policy.Directory.init();
+    var capabilities = capability.CapabilityTable.init();
+    const policy = try policies.create(.{
+        .owner = service_owner,
+        .label = "driver-egress",
+        .mode = .named_service_identity,
+        .target = "storage-sync.driver.zigos",
+    });
+    const egress_capability = try capabilities.mintBootRoot(.{
+        .holder = service_owner,
+        .issuer = spec_support.policyAuthority(1),
+        .target = .{ .kind = .network_policy, .id = policy.id },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .scope = .{ .task_id = 880, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    const revocation_trigger = try capabilities.mintBootRoot(.{
+        .holder = service_owner,
+        .issuer = spec_support.policyAuthority(1),
+        .target = .{ .kind = .network_policy, .id = policy.id },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .scope = .{ .task_id = 880, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+
+    var broker = network_policy.EgressBroker.init(&policies, &capabilities);
+    var stack = network_driver_task.NativeNetworkStack.init();
+    const connection = try stack.openServiceIdentity(&broker, .{
+        .task_id = 880,
+        .principal_id = service_owner,
+        .capability_id = egress_capability.id,
+        .policy_id = policy.id,
+        .evidence = .{ .destination = .{ .service_identity = "storage-sync.driver.zigos" } },
+        .now_ticks = 10,
+    }, source_device, target_device);
+
+    const first_frame = try stack.sendServiceIdentityFrameBrokered(&broker, &connection, "brokered network payload", 11);
+    try std.testing.expect(first_frame.egress_allowed);
+    try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
+
+    try capabilities.revokeTargetAuthority(revocation_trigger.id);
+    try std.testing.expectError(
+        error.EgressDenied,
+        stack.sendServiceIdentityFrameBrokered(&broker, &connection, "revoked network payload", 12),
+    );
+    try std.testing.expectEqual(network_policy.EgressDecisionReason.capability_revoked, stack.last_denial_reason);
+    try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
+}
+
 pub fn kernelBootstrapShimBoundaryGate() !void {
     try std.testing.expectEqualStrings("bootstrap_network_shim", kernel_ethernet.kernel_boundary_role);
     try std.testing.expect(!kernel_ethernet.publishes_full_network_service);
@@ -429,11 +783,40 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
         .service_id = 811,
     }));
 
+    try std.testing.expectEqualStrings("bootstrap_i225_lm_inventory_shim", intel_i225.kernel_boundary_role);
+    try std.testing.expect(!intel_i225.publishes_full_network_service);
+    try std.testing.expect(intel_i225.network_data_plane_exports_fail_closed);
+    try std.testing.expectError(error.KernelNetworkDataPlaneDisabled, intel_i225.rejectKernelTransmit(.{
+        .device_id = 0x8086_15F2_0000,
+        .frame_len = 64,
+    }));
+
+    try std.testing.expectEqualStrings("bootstrap_xhci_input_inventory_shim", kernel_xhci.kernel_boundary_role);
+    try std.testing.expect(!kernel_xhci.publishes_full_input_service);
+    try std.testing.expect(kernel_xhci.usb_input_data_plane_exports_fail_closed);
+    try std.testing.expectError(error.KernelUsbInputDataPlaneDisabled, kernel_xhci.rejectKernelInputReport(.{
+        .device_id = 0x8086_A0ED_0000,
+        .report_len = 8,
+    }));
+    try std.testing.expectError(error.BadSignature, kernel_fadt.parseFadt(&[_]u8{0} ** kernel_fadt.MIN_FADT_PM_LENGTH));
+    const crash = try kernel_crash_record.init(.panic, 1, 2, 3, 4, "target proof crash");
+    try kernel_crash_record.validate(crash);
+
     try std.testing.expectEqualStrings("bootstrap_storage_inventory_shim", kernel_ata.kernel_boundary_role);
     try std.testing.expect(!kernel_ata.publishes_full_storage_service);
     try std.testing.expect(kernel_ata.ata_data_plane_exports_fail_closed);
     try std.testing.expectError(error.KernelStorageDataPlaneDisabled, kernel_ata.rejectKernelDataPlaneTransfer(.{
         .device_id = 0x1F001,
+        .lba = 7,
+        .sector_count = 1,
+    }));
+
+    try std.testing.expectEqualStrings("bootstrap_nvme_inventory_shim", kernel_nvme.kernel_boundary_role);
+    try std.testing.expect(!kernel_nvme.publishes_full_storage_service);
+    try std.testing.expect(kernel_nvme.nvme_data_plane_exports_fail_closed);
+    try std.testing.expectError(error.KernelStorageDataPlaneDisabled, kernel_nvme.rejectKernelDataPlaneTransfer(.{
+        .device_id = 0x8086_15F2_0000,
+        .namespace_id = 1,
         .lba = 7,
         .sector_count = 1,
     }));

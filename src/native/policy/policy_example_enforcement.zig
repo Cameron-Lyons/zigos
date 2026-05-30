@@ -211,7 +211,7 @@ test "policy examples route package network removable and sync denials through s
     };
     try trustPublisher(&package_port, package_authority, package_signer, "zigos.dev");
     var bundle = manifest_fixtures.notesBundle();
-    bundle.signature = try signing.sign(package_signer, &package_service.digestBundle(bundle));
+    bundle.signature = try signing.signWithDefaultRegistry(.ed25519, package_signer, &package_service.digestBundle(bundle));
 
     try std.testing.expectError(error.InstallSourceDenied, installPackage(&package_port, package_authority, .{
         .bundle = bundle,

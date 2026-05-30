@@ -52,10 +52,24 @@ const ata_lba1_shift: u6 = 8;
 const ata_lba2_shift: u6 = 16;
 const ata_lba3_shift: u6 = 24;
 const ata_sector_count_zero_value: u16 = 256;
+const ata_max_sector_transfer_count: usize = 256;
 const host_storage_sectors: usize = if (builtin.target.os.tag == .freestanding) 1 else 8192;
 const host_storage_bytes = host_storage_sectors * ata_sector_size;
+const host_write_staging_bytes = ata_max_sector_transfer_count * ata_sector_size;
 
 pub const PortWidth = abi.DevicePortWidth;
+
+pub const DmaIsolationMode = enum(u8) {
+    programmed_io_only,
+};
+
+pub const DmaIsolationStatus = struct {
+    device_id: u64,
+    dma_domain_id: u64,
+    mode: DmaIsolationMode,
+    hardware_iommu_programmed: bool,
+    bus_master_dma_enabled: bool,
+};
 
 pub const MmioWindow = struct {
     base: u64,
@@ -104,6 +118,8 @@ const ControllerSlot = struct {
     transfer_lba: u64 = 0,
     transfer_sector_count: u16 = 0,
     transfer_byte_offset: usize = 0,
+    broker_generation: u32 = 1,
+    host_write_staging: [host_write_staging_bytes]u8 = [_]u8{0} ** host_write_staging_bytes,
 };
 
 var controllers: [MAX_DEVICES]ControllerSlot = [_]ControllerSlot{ControllerSlot{}} ** MAX_DEVICES;
@@ -114,8 +130,10 @@ pub fn reset() void {
 
 pub fn publishAtaController(device_id: u64, grant: storage_driver_protocol.AtaBrokerGrant) bool {
     if (device_id == 0) return false;
-    if (findController(device_id)) |slot| {
+    if (findControllerSlot(device_id)) |slot| {
+        slot.in_use = true;
         slot.grant = grant;
+        slot.host_registers = [_]u32{0} ** slot.host_registers.len;
         finishHostTransfer(slot);
         return true;
     }
@@ -124,11 +142,38 @@ pub fn publishAtaController(device_id: u64, grant: storage_driver_protocol.AtaBr
         slot.in_use = true;
         slot.device_id = device_id;
         slot.grant = grant;
+        slot.broker_generation = 1;
         slot.host_registers = [_]u32{0} ** slot.host_registers.len;
         finishHostTransfer(slot);
         return true;
     }
     return false;
+}
+
+pub fn revokeAtaController(device_id: u64) bool {
+    const slot = findController(device_id) orelse return false;
+    finishHostTransfer(slot);
+    slot.in_use = false;
+    slot.host_registers = [_]u32{0} ** slot.host_registers.len;
+    slot.broker_generation +%= 1;
+    if (slot.broker_generation == 0) slot.broker_generation = 1;
+    return true;
+}
+
+pub fn brokerGeneration(device_id: u64) ?u32 {
+    const slot = findController(device_id) orelse return null;
+    return slot.broker_generation;
+}
+
+pub fn dmaIsolationStatus(device_id: u64, dma_domain_id: u64) Error!DmaIsolationStatus {
+    _ = findController(device_id) orelse return error.DeviceNotFound;
+    return .{
+        .device_id = device_id,
+        .dma_domain_id = dma_domain_id,
+        .mode = .programmed_io_only,
+        .hardware_iommu_programmed = false,
+        .bus_master_dma_enabled = false,
+    };
 }
 
 pub fn describe(device_id: u64) Error!ControllerDescriptor {
@@ -186,6 +231,13 @@ pub fn writePort(device_id: u64, port: u16, width: PortWidth, value: u32) Error!
 fn findController(device_id: u64) ?*ControllerSlot {
     for (&controllers) |*slot| {
         if (slot.in_use and slot.device_id == device_id) return slot;
+    }
+    return null;
+}
+
+fn findControllerSlot(device_id: u64) ?*ControllerSlot {
+    for (&controllers) |*slot| {
+        if (slot.device_id == device_id) return slot;
     }
     return null;
 }
@@ -283,11 +335,11 @@ fn readHostTransferData(slot: *ControllerSlot, width: PortWidth) u32 {
 }
 
 fn writeHostTransferData(slot: *ControllerSlot, width: PortWidth, value: u32) void {
-    const offset = hostTransferOffset(slot);
+    const offset = slot.transfer_byte_offset;
     switch (width) {
-        .u8 => slot.host_storage[offset] = @truncate(value),
-        .u16 => std.mem.writeInt(u16, slot.host_storage[offset..][0..2], @truncate(value), .little),
-        .u32 => std.mem.writeInt(u32, slot.host_storage[offset..][0..4], value, .little),
+        .u8 => slot.host_write_staging[offset] = @truncate(value),
+        .u16 => std.mem.writeInt(u16, slot.host_write_staging[offset..][0..2], @truncate(value), .little),
+        .u32 => std.mem.writeInt(u32, slot.host_write_staging[offset..][0..4], value, .little),
     }
     advanceHostTransfer(slot, widthByteCount(width));
 }
@@ -295,12 +347,25 @@ fn writeHostTransferData(slot: *ControllerSlot, width: PortWidth, value: u32) vo
 fn advanceHostTransfer(slot: *ControllerSlot, byte_count: usize) void {
     slot.transfer_byte_offset += byte_count;
     if (slot.transfer_byte_offset >= @as(usize, slot.transfer_sector_count) * ata_sector_size) {
-        finishHostTransfer(slot);
+        completeHostTransfer(slot);
     }
 }
 
+fn completeHostTransfer(slot: *ControllerSlot) void {
+    if (slot.transfer_kind == .write) {
+        const offset = hostTransferBaseOffset(slot);
+        const len = @as(usize, slot.transfer_sector_count) * ata_sector_size;
+        @memcpy(slot.host_storage[offset..][0..len], slot.host_write_staging[0..len]);
+    }
+    finishHostTransfer(slot);
+}
+
 fn hostTransferOffset(slot: *const ControllerSlot) usize {
-    return @as(usize, @intCast(slot.transfer_lba)) * ata_sector_size + slot.transfer_byte_offset;
+    return hostTransferBaseOffset(slot) + slot.transfer_byte_offset;
+}
+
+fn hostTransferBaseOffset(slot: *const ControllerSlot) usize {
+    return @as(usize, @intCast(slot.transfer_lba)) * ata_sector_size;
 }
 
 fn hostTransferInRange(slot: *const ControllerSlot, lba: u64, sector_count: u16) bool {

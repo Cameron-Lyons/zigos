@@ -160,7 +160,7 @@ pub const Keyring = struct {
             if (!slot.in_use or slot.record.revoked) continue;
             if (slot.record.publisher_len == 0) continue;
             if (!std.mem.eql(u8, slot.record.publisherSlice(), publisher)) continue;
-            if (!std.mem.eql(u8, slot.record.public_key[0..], signature.publicKeySlice())) continue;
+            if (!std.mem.eql(u8, slot.record.public_key[0..], signature.ed25519PublicKeySlice())) continue;
             return true;
         }
         return false;
@@ -225,8 +225,8 @@ test "principal keyring binds publishers to trusted keys and supports revocation
         .public_key_len = 32,
         .value_len = 64,
     };
-    signature.public_key = publisher_key;
-    signature.value = [_]u8{0xC3} ** 64;
+    @memcpy(signature.public_key[0..publisher_key.len], publisher_key[0..]);
+    @memset(signature.value[0..manifest.ED25519_SIGNATURE_BYTES], 0xC3);
     try std.testing.expect(keyring.trustedPublisherSignature("Example Software", signature));
 
     try keyring.revokePrincipal(publisher);

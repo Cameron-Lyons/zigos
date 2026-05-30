@@ -22,11 +22,12 @@ Use the pinned toolchain and repo entrypoints:
 | `./scripts/zig.sh build kernel-benchmark` | You need the benchmark kernel profile. |
 | `./scripts/zig.sh build host-tests` | You need host coverage; this includes the root host suite, userspace runtime tests, and test-root reachability. |
 | `./scripts/zig.sh build spec-tests` | You need spec coverage and native spec tests without QEMU. |
-| `./scripts/zig.sh build prod-readiness` | You need production-readiness tracking checks without changing spec conformance status. |
+| `./scripts/zig.sh build prod-readiness` | You need production-readiness and secure-by-design release-gate checks without changing spec conformance status. |
 | `./scripts/zig.sh build spec-conformance` | You need spec coverage, native spec tests, the two-boot native smoke path, and the recovery QEMU proof. |
 | `./scripts/zig.sh build zigos-native-smoke-test` | You need the native cold-reboot smoke test across two QEMU boots. |
 | `./scripts/zig.sh build driver-restart-qemu-test` | You touched userspace driver restart, broker rebinding, or crash recovery paths. |
 | `./scripts/zig.sh build recovery-qemu-test` | You touched recovery-mode boot, repair, or break-glass flows. |
+| `./scripts/zig.sh build uefi-qemu-test` | You touched ISO, GRUB, UEFI handoff, or first-hardware-target boot evidence. |
 | `./scripts/zig.sh build benchmark` | You touched performance-sensitive kernel or native-service paths. |
 
 ## Build And Cleanup Commands
@@ -44,6 +45,8 @@ Keep the spec contract intact:
 
 - Treat `spec/coverage.json` as the architecture and coverage contract.
 - Treat `spec/production_readiness.json` as the separate manifest for prototype-to-production work; do not encode production readiness by weakening or overloading spec conformance status.
+- Keep `first_hardware_target` pinned to one real machine until it is boringly reliable. The current target is `intel-nuc11tnki5`; QEMU can be preflight evidence, but production readiness requires real hardware logs checked by `scripts/check-nuc11tnki5-hardware-proof.sh`.
+- Keep the secure-by-design release gate in `spec/production_readiness.json` complete and release-blocking. Updates that touch parsing, boot, storage, sync, kernel/user ABI, drivers, diagnostics, or release tooling should consider fuzzing, fault injection, reproducible builds, SBOM/provenance, threat-model tests, memory-safety audits, crash dump redaction, and the disclosure process in `SECURITY.md`.
 - Keep requirement ids stable when editing manifest prose or mappings so coverage references do not churn.
 - If you add, rename, or split spec tests, keep the test names and coverage references aligned.
 - Prefer expanding tests and coverage before changing requirement anchors or architecture claims.

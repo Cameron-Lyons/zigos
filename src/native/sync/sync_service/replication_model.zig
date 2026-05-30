@@ -2,7 +2,7 @@ const capability = @import("../../kernel_api/capability.zig");
 const principal = @import("../../core/principal.zig");
 const signing = @import("../../core/signing.zig");
 const state_support = @import("../sync_state_support.zig");
-const sync_transport = @import("../sync_transport_harness.zig");
+const sync_transport = @import("../sync_transport.zig");
 const storage_service = @import("../../storage/storage_service.zig");
 
 pub const TransportMode = state_support.TransportMode;

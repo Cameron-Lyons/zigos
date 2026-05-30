@@ -36,8 +36,8 @@ pub fn addUserspaceArtifacts(
         .root_source_file = b.path("src/native/task/userspace_service_protocol.zig"),
     });
     service_protocol_module.addImport("userspace_wire", userspace_wire_module);
-    const elf_image_inspector_module = b.createModule(.{
-        .root_source_file = b.path("src/native_elf_image_inspector.zig"),
+    const native_archive_deps_module = b.createModule(.{
+        .root_source_file = b.path("src/native/archive_generator_deps.zig"),
     });
     const runtime_module = b.createModule(.{
         .root_source_file = b.path("src/userspace/runtime.zig"),
@@ -57,7 +57,7 @@ pub fn addUserspaceArtifacts(
         }),
     });
     archive_generator.root_module.addImport("userspace_descriptor", descriptor_module);
-    archive_generator.root_module.addImport("elf_image_inspector", elf_image_inspector_module);
+    archive_generator.root_module.addImport("native_archive_deps", native_archive_deps_module);
     const archive_run = b.addRunArtifact(archive_generator);
     const archive_dir = archive_run.addOutputDirectoryArg("userspace-archive");
     const archive_source = archive_dir.path(b, "userspace_archive.zig");

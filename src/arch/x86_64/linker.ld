@@ -10,11 +10,13 @@ SECTIONS
     {
         *(.multiboot)
         *(.text)
+        *(.text.*)
     }
 
     .rodata : ALIGN(4K)
     {
         *(.rodata)
+        *(.rodata.*)
     }
     __kernel_measure_end = .;
 
@@ -28,12 +30,14 @@ SECTIONS
     .data : ALIGN(4K)
     {
         *(.data)
+        *(.data.*)
     }
 
     .bss : ALIGN(4K)
     {
         *(COMMON)
         *(.bss)
+        *(.bss.*)
     }
 
     __kernel_end = .;

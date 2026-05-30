@@ -55,6 +55,16 @@ test "object store keeps immutable signed versions with stable version addresses
     try std.testing.expectEqual(@as(u8, 1), store.version(second.version_id).?.parent_count);
     try std.testing.expectEqual(first.version_id, store.version(second.version_id).?.parent_version_ids[0]);
     try std.testing.expectEqualStrings("zigos-storage-key", store.latestVersion(first.object_id).?.metadata.signature.signer);
+    const object = store.object(first.object_id).?;
+    try std.testing.expect(object.isPrimaryUserDataModel());
+    try std.testing.expectEqual(@as(u64, 10), object.provenance.created_at_ticks);
+    try std.testing.expectEqual(@as(u64, 11), object.provenance.updated_at_ticks);
+    try std.testing.expectEqual(@as(u16, 2), object.snapshot_state.snapshot_count);
+    try std.testing.expectEqual(second.version_id, object.snapshot_state.latest_snapshot_version_id);
+    try std.testing.expectEqual(second.version_id, object.sync_state.last_synced_version_id);
+    try std.testing.expect(object.sharing_policy.requires_explicit_file_bridge_grant);
+    try std.testing.expect(object.sharing_policy.export_only_file_bridge);
+    try std.testing.expectEqual(first.version_id, object.recovery_history.latest_recoverable_version_id);
 }
 
 test "signed metadata rejects overlong labels instead of truncating" {

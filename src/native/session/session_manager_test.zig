@@ -244,6 +244,7 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
             .document_view => document_view_count += 1,
             .workspace_view => workspace_view_count += 1,
             .full_screen_task_view => task_view_count += 1,
+            .sync_conflict_review => app_panel_count += 1,
         }
     }
     try std.testing.expectEqual(compositor_session.ViewType.app_panel, notes_review.view_type);

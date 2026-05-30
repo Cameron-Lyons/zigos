@@ -393,7 +393,7 @@ pub fn signArtifactManifest(
     const payload = try encodeArtifactManifest(artifact_manifest, &payload_buffer);
     return .{
         .manifest = artifact_manifest,
-        .signature = try signing.sign(identity, payload),
+        .signature = try signing.signWithDefaultRegistry(.ed25519, identity, payload),
     };
 }
 
@@ -473,21 +473,22 @@ pub fn buildArtifactManifestFromGenerated(comptime generated: anytype) Error!Bui
         const kind = std.enums.fromInt(BuildArtifactKind, entry.kind) orelse return error.InvalidBuildArtifactKind;
         try manifest.addDigest(kind, entry.label, entry.digest);
     }
-    manifest.signature = .{
+    var signature = policy_manifest.Signature{
         .format = generated.signature_format,
         .signer = generated.signature_signer,
         .public_key_len = generated.signature_public_key.len,
-        .public_key = generated.signature_public_key,
         .value_len = generated.signature_value.len,
-        .value = generated.signature_value,
     };
+    @memcpy(signature.public_key[0..generated.signature_public_key.len], generated.signature_public_key[0..]);
+    @memcpy(signature.value[0..generated.signature_value.len], generated.signature_value[0..]);
+    manifest.signature = signature;
     return manifest;
 }
 
 fn signBuildArtifactManifestForTest(manifest: *BuildArtifactManifest) !void {
     var payload_buffer: [4096]u8 = undefined;
     const payload = try encodeBuildArtifactManifest(manifest.generation, manifest.entries[0..manifest.entry_count], &payload_buffer);
-    manifest.signature = try signing.sign(build_artifact_manifest_signer, payload);
+    manifest.signature = try signing.signWithDefaultRegistry(.ed25519, build_artifact_manifest_signer, payload);
 }
 
 pub fn encodeBuildArtifactManifest(generation: u64, entries: []const BuildArtifactEntry, buffer: []u8) Error![]const u8 {
@@ -1154,7 +1155,7 @@ test "build-generated artifact manifests reject tampered bootloader source measu
 
     var payload_buffer: [4096]u8 = undefined;
     const payload = try encodeBuildArtifactManifest(manifest.generation, manifest.entries[0..manifest.entry_count], &payload_buffer);
-    manifest.signature = try signing.sign(build_artifact_manifest_signer, payload);
+    manifest.signature = try signing.signWithDefaultRegistry(.ed25519, build_artifact_manifest_signer, payload);
 
     try std.testing.expect(verifyBuildArtifactManifest(&manifest));
     try std.testing.expect(manifest.find(.bootloader_measurement, "multiboot-v1:zigos_native") != null);
@@ -1194,7 +1195,7 @@ test "build-generated artifact manifests reject tampered bootloader source measu
         .label = "untrusted-build-artifact-manifest",
         .seed = [_]u8{0xC8} ** 32,
     };
-    wrong_authority.signature = try signing.sign(wrong_signer, payload);
+    wrong_authority.signature = try signing.signWithDefaultRegistry(.ed25519, wrong_signer, payload);
     try std.testing.expect(!verifyBuildArtifactManifest(&wrong_authority));
 }
 

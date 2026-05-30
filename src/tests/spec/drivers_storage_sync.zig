@@ -4,6 +4,7 @@ const bootstrap_driver_port = @import("../../native/drivers/bootstrap_driver_por
 const capability = @import("../../native/kernel_api/capability.zig");
 const driver_runtime_mod = @import("../../native/drivers/driver_runtime.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
+const file_bridge = @import("../../native/storage/file_bridge.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const network_policy = @import("../../native/sync/network_policy.zig");
 const object_store = @import("../../native/storage/object_store.zig");
@@ -362,6 +363,11 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     try std.testing.expectEqual(draft_v2.version_id, recovered.version_id);
     try std.testing.expectEqual(@as(usize, 1), storage.objectCount());
     try std.testing.expectEqual(@as(usize, 2), storage.versionCount());
+    const report_object = storage.object(draft_v2.object_id).?;
+    try std.testing.expect(report_object.isPrimaryUserDataModel());
+    try std.testing.expect(report_object.sharing_policy.export_only_file_bridge);
+    try std.testing.expectEqual(draft_v2.version_id, report_object.snapshot_state.latest_snapshot_version_id);
+    try std.testing.expectEqual(draft_v2.version_id, report_object.sync_state.last_synced_version_id);
 
     const exported = try storage.exportSnapshot(workspace_record.id, baseline.id, storage_signer);
     const imported = try storage.importWorkspace(spec_support.user(3), "report-import", exported, 7);
@@ -399,10 +405,21 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
         .now_ticks = 8,
     });
     try std.testing.expect(!view.authoritative);
+    try std.testing.expect(view.export_only);
     try std.testing.expect(view.readable);
-    try std.testing.expect(view.writable);
+    try std.testing.expect(!view.writable);
     try std.testing.expectEqualStrings("documents/report.md", view.pathSlice());
     try std.testing.expectEqual(draft_v2.version_id.raw(), view.version_id);
+    try std.testing.expectError(file_bridge.Error.PermissionDenied, storage.bridgeResolve(.{
+        .workspace_id = workspace_record.id.raw(),
+        .path = "/documents/report.md",
+        .access = .write,
+    }, .{
+        .task_id = 88,
+        .principal = workspace_capability.holder,
+        .capability_id = workspace_capability.id,
+        .now_ticks = 8,
+    }));
 }
 
 pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {

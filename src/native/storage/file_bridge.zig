@@ -20,6 +20,7 @@ pub const ResolveRequest = struct {
 
 pub const View = struct {
     authoritative: bool = false,
+    export_only: bool = true,
     workspace_id: u64,
     object_id: u64,
     version_id: u64,
@@ -98,6 +99,7 @@ pub const Bridge = struct {
         }
 
         const wants_write = request.access == .write;
+        if (wants_write) return error.PermissionDenied;
         if (wants_write and !authority.rights.has(.object_write)) return error.PermissionDenied;
         if (!wants_write and !authority.rights.has(.object_read)) return error.PermissionDenied;
 
@@ -121,7 +123,7 @@ pub const Bridge = struct {
             .version_id = entry.version_id.raw(),
             .object_type = entry.object_type,
             .readable = authority.rights.has(.object_read),
-            .writable = authority.rights.has(.object_write),
+            .writable = false,
             .path_len = 0,
             .path = [_]u8{0} ** 96,
         };
@@ -203,6 +205,8 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
         .access = .read,
     }, read_capability.holder, read_capability.id, 30);
     try std.testing.expect(!view.authoritative);
+    try std.testing.expect(view.export_only);
+    try std.testing.expect(!view.writable);
     try std.testing.expectEqualStrings("documents/notes.md", view.pathSlice());
     try std.testing.expectEqual(object.version_id.raw(), view.version_id);
 

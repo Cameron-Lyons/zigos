@@ -25,6 +25,9 @@ pub const WorkspacePutVersionRequest = schema.requestType(.workspace_put_version
 pub const WorkspaceResolveRequest = schema.requestType(.workspace_resolve);
 pub const NetworkAuthorizeRequest = schema.requestType(.network_authorize);
 pub const PolicyAuthorizeRequest = schema.requestType(.policy_authorize);
+pub const PackageInstallRequest = schema.requestType(.package_install);
+pub const PackageUpdateRequest = schema.requestType(.package_update);
+pub const PackageRollbackRequest = schema.requestType(.package_rollback);
 
 pub const ServiceRegisterResponse = schema.responseType(.service_register);
 pub const ServiceConnectionResponse = schema.responseType(.service_connect);
@@ -33,6 +36,9 @@ pub const WorkspacePutVersionResponse = schema.responseType(.workspace_put_versi
 pub const WorkspaceResolveResponse = schema.responseType(.workspace_resolve);
 pub const NetworkAuthorizeResponse = schema.responseType(.network_authorize);
 pub const PolicyAuthorizeResponse = schema.responseType(.policy_authorize);
+pub const PackageInstallResponse = schema.responseType(.package_install);
+pub const PackageUpdateResponse = schema.responseType(.package_update);
+pub const PackageRollbackResponse = schema.responseType(.package_rollback);
 
 pub const contracts = schema.contracts;
 pub const manifest_interfaces = schema.manifest_interfaces;
@@ -107,9 +113,13 @@ test "typed component ABI derives operation IDs, wire types, and validators from
     try std.testing.expect(registry.operation(.service_register) != null);
     try validateInterface(Interface(.object_workspace));
     try std.testing.expectEqual(@as(u16, 0x0102), @intFromEnum(OperationId.service_connect));
+    try std.testing.expectEqual(@as(u16, 0x0603), @intFromEnum(OperationId.package_rollback));
     try std.testing.expectEqual(@sizeOf(ServiceConnectionRequest), @sizeOf(Request(.service_connect)));
     try std.testing.expectEqual(@sizeOf(ServiceConnectionResponse), @sizeOf(Response(.service_connect)));
+    try std.testing.expectEqual(@sizeOf(PackageRollbackRequest), @sizeOf(Request(.package_rollback)));
+    try std.testing.expectEqual(@sizeOf(PackageRollbackResponse), @sizeOf(Response(.package_rollback)));
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(WorkspacePutVersionRequest))), contractFor("zigos.object.workspace").?.operation(.workspace_put_version).?.request_size);
+    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(PackageUpdateRequest))), contractFor("zigos.package.install").?.operation(.package_update).?.request_size);
 }
 
 test "typed component ABI rejects incompatible interfaces and malformed messages" {
@@ -164,4 +174,22 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         @sizeOf(ServiceConnectionRequest),
         @sizeOf(ServiceConnectionResponse),
     ));
+
+    const package_iface = Interface(.package_install);
+    const package_header = WireHeader{
+        .interface_major = package_iface.version_major,
+        .interface_minor = package_iface.version_minor,
+        .operation = @intFromEnum(OperationId.package_rollback),
+        .request_len = @sizeOf(PackageRollbackRequest),
+        .response_len = @sizeOf(PackageRollbackResponse),
+        .correlation_id = 902,
+        .subject_task_id = 78,
+    };
+    try validateMessage(
+        package_iface,
+        .package_rollback,
+        package_header,
+        @sizeOf(PackageRollbackRequest),
+        @sizeOf(PackageRollbackResponse),
+    );
 }

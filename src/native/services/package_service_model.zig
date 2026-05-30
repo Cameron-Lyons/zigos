@@ -149,9 +149,9 @@ pub const StoredSignature = struct {
     signer_len: usize = 0,
     signer: [MAX_SIGNATURE_SIGNER_BYTES]u8 = [_]u8{0} ** MAX_SIGNATURE_SIGNER_BYTES,
     public_key_len: usize = 0,
-    public_key: [32]u8 = [_]u8{0} ** 32,
+    public_key: [manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES]u8 = [_]u8{0} ** manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES,
     value_len: usize = 0,
-    value: [64]u8 = [_]u8{0} ** 64,
+    value: [manifest.MAX_SIGNATURE_VALUE_BYTES]u8 = [_]u8{0} ** manifest.MAX_SIGNATURE_VALUE_BYTES,
 
     pub fn formatSlice(self: *const StoredSignature) []const u8 {
         return self.format[0..self.format_len];

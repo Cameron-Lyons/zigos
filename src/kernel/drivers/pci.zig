@@ -21,6 +21,13 @@ pub const PCIDevice = struct {
     bar5: u32,
 };
 
+pub const PCI_CLASS_STORAGE_CONTROLLER: u8 = 0x01;
+pub const PCI_SUBCLASS_NVM: u8 = 0x08;
+pub const PCI_PROG_IF_NVME: u8 = 0x02;
+pub const PCI_CLASS_NETWORK_ADAPTER: u8 = 0x02;
+pub const PCI_VENDOR_INTEL: u16 = 0x8086;
+pub const PCI_DEVICE_INTEL_I225_LM: u16 = 0x15F2;
+
 pub fn readConfig(bus: u8, device: u8, func: u8, offset: u8) u32 {
     const address = @as(u32, 0x80000000) |
         (@as(u32, bus) << 16) |
@@ -124,6 +131,54 @@ pub fn firstDeviceByClass(class_code: u8) ?PCIDevice {
     }
 
     return null;
+}
+
+pub fn firstDeviceByClassSubclassProgIf(class_code: u8, subclass: u8, prog_if: u8) ?PCIDevice {
+    var bus: u16 = 0;
+    while (bus < 256) : (bus += 1) {
+        var device: u8 = 0;
+        while (device < 32) : (device += 1) {
+            var func: u8 = 0;
+            while (func < 8) : (func += 1) {
+                if (checkDevice(@intCast(bus), device, func)) |pci_device| {
+                    if (matchesClass(pci_device, class_code, subclass, prog_if)) {
+                        return pci_device;
+                    }
+
+                    if (func == 0) {
+                        const header_type = readConfig(@intCast(bus), device, 0, 0x0C);
+                        if ((header_type & 0x80) == 0) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return null;
+}
+
+pub fn firstNvmeController() ?PCIDevice {
+    return firstDeviceByClassSubclassProgIf(PCI_CLASS_STORAGE_CONTROLLER, PCI_SUBCLASS_NVM, PCI_PROG_IF_NVME);
+}
+
+pub fn firstIntelI225Lm() ?PCIDevice {
+    return findDevice(PCI_VENDOR_INTEL, PCI_DEVICE_INTEL_I225_LM);
+}
+
+pub fn matchesClass(device_info: PCIDevice, class_code: u8, subclass: u8, prog_if: u8) bool {
+    return device_info.class_code == class_code and
+        device_info.subclass == subclass and
+        device_info.prog_if == prog_if;
+}
+
+pub fn isNvmeController(device_info: PCIDevice) bool {
+    return matchesClass(device_info, PCI_CLASS_STORAGE_CONTROLLER, PCI_SUBCLASS_NVM, PCI_PROG_IF_NVME);
+}
+
+pub fn isIntelI225Lm(device_info: PCIDevice) bool {
+    return device_info.vendor_id == PCI_VENDOR_INTEL and device_info.device_id == PCI_DEVICE_INTEL_I225_LM;
 }
 
 pub fn stableDeviceId(device_info: PCIDevice) u64 {
@@ -238,6 +293,41 @@ pub fn writeConfigWord(bus: u8, device: u8, func: u8, offset: u8, value: u16) vo
     const mask = ~(@as(u32, 0xFFFF) << shift);
     const new_data = (old_data & mask) | (@as(u32, value) << shift);
     writeConfig(bus, device, func, offset, new_data);
+}
+
+fn syntheticPciDevice(vendor_id: u16, device_id: u16, class_code: u8, subclass: u8, prog_if: u8) PCIDevice {
+    return .{
+        .bus = 0,
+        .device = 0,
+        .function = 0,
+        .vendor_id = vendor_id,
+        .device_id = device_id,
+        .class_code = class_code,
+        .subclass = subclass,
+        .prog_if = prog_if,
+        .bar0 = 0,
+        .bar1 = 0,
+        .bar2 = 0,
+        .bar3 = 0,
+        .bar4 = 0,
+        .bar5 = 0,
+    };
+}
+
+test "PCI helpers identify NVMe controllers" {
+    const nvme = syntheticPciDevice(0x144D, 0xA80A, PCI_CLASS_STORAGE_CONTROLLER, PCI_SUBCLASS_NVM, PCI_PROG_IF_NVME);
+    try @import("std").testing.expect(isNvmeController(nvme));
+
+    const ahci = syntheticPciDevice(0x8086, 0x2922, PCI_CLASS_STORAGE_CONTROLLER, 0x06, 0x01);
+    try @import("std").testing.expect(!isNvmeController(ahci));
+}
+
+test "PCI helpers identify Intel I225-LM network controller" {
+    const i225_lm = syntheticPciDevice(PCI_VENDOR_INTEL, PCI_DEVICE_INTEL_I225_LM, PCI_CLASS_NETWORK_ADAPTER, 0, 0);
+    try @import("std").testing.expect(isIntelI225Lm(i225_lm));
+
+    const e1000 = syntheticPciDevice(PCI_VENDOR_INTEL, 0x100E, PCI_CLASS_NETWORK_ADAPTER, 0, 0);
+    try @import("std").testing.expect(!isIntelI225Lm(e1000));
 }
 
 pub fn writeConfigDword(bus: u8, device: u8, func: u8, offset: u8, value: u32) void {

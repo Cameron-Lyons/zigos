@@ -8,7 +8,7 @@ const generated_image_fixtures = if (@import("builtin").is_test) @import("../tas
 const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const sync_service = @import("sync_service_impl.zig");
-const sync_transport = @import("sync_transport_harness.zig");
+const sync_transport = @import("sync_transport.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 
 const OverlaySessionState = sync_service.OverlaySessionState;
@@ -308,6 +308,159 @@ test "sync service requires database contract before transactional workspace rep
     try std.testing.expectEqual(db_events.version_id.raw(), service.replicaVersion(workspace_record.id.raw(), tablet, "databases/app.notes.db/events").?);
     const db_frame = service.latestTransportFrameForPath(workspace_record.id.raw(), tablet, "databases/app.notes.db/events").?;
     try std.testing.expectEqual(SyncSemantic.transactional_contract, db_frame.semantic);
+}
+
+test "sync service persists durable transport queues and enforces replay and workspace sharing policy" {
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
+
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 8_700 };
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8_701 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 8_702 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 8_703 };
+    const tablet = principal.PrincipalId{ .kind = .device, .serial = 8_704 };
+    const storage_signer = signing.SignerIdentity{
+        .label = "durable-queue-storage",
+        .seed = [_]u8{0xB1} ** 32,
+    };
+    const user_signer = signing.SignerIdentity{
+        .label = "durable-queue-user",
+        .seed = [_]u8{0xB2} ** 32,
+    };
+    const laptop_signer = signing.SignerIdentity{
+        .label = "durable-queue-laptop",
+        .seed = [_]u8{0xB3} ** 32,
+    };
+    const tablet_signer = signing.SignerIdentity{
+        .label = "durable-queue-tablet",
+        .seed = [_]u8{0xB4} ** 32,
+    };
+    const path = "documents/queue.md";
+
+    var storage = storage_service.Service.initWithStore(8_710, 8_711, storage_owner, &storage_checkpoint_store);
+    const version = try storage.putVersion(.{
+        .preferred_object_id = object_store.ids.object(8_720),
+        .object_type = .document,
+        .payload = "queue v1",
+        .metadata = try object_store.signMetadata(storage_signer, "queue-v1", "text/plain", .document, "queue v1", 10),
+    });
+    const workspace_record = try storage.createWorkspace(.{
+        .owner = user,
+        .label = "durable-queue-notes",
+    });
+    try storage.beginTransaction(workspace_record.id);
+    try storage.stagePut(workspace_record.id, path, version.object_id, version.version_id, .document);
+    _ = try storage.commit(workspace_record.id, 11);
+
+    var resident = ResidentState{};
+    var service = try Service.initWithStorage(8_730, 8_731, sync_owner, &storage, &resident);
+    var capabilities = capability.CapabilityTable.init();
+    const authority_capability = try mintSyncServiceAuthority(&capabilities, &service, sync_owner);
+    var port = sync_service.SyncPort.init(&service, &capabilities);
+    const authority = syncAuthority(&service, sync_owner, authority_capability, 20);
+    _ = try port.ensureUserRoot(authority, user, "owner", user_signer);
+    _ = try port.enrollTrustedDevice(authority, user, laptop, "laptop", user_signer, laptop_signer, 21);
+    _ = try port.enrollTrustedDevice(authority, user, tablet, "tablet", user_signer, tablet_signer, 22);
+    const local_policy = try port.createNetworkPolicy(authority, .{
+        .owner = sync_owner,
+        .workspace_id = workspace_record.id.raw(),
+        .label = "local",
+        .mode = .local_network,
+    });
+    _ = try port.configureWorkspacePolicy(authority, .{
+        .workspace_id = workspace_record.id.raw(),
+        .owner = user,
+        .offline_first = true,
+        .personal_e2ee = true,
+        .require_shared_access = true,
+        .selective_prefixes = &.{"documents/"},
+        .device_to_device_policy_id = local_policy.id,
+    });
+
+    try std.testing.expectError(error.TransportDenied, port.replicateWorkspace(
+        authority,
+        &storage,
+        workspace_record.id.raw(),
+        laptop,
+        tablet,
+        .device_to_device,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), service.transportFrameCountFor(workspace_record.id.raw(), tablet));
+
+    try storage.shareWorkspace(workspace_record.id, .{
+        .principal_id = tablet,
+        .can_read = true,
+        .expires_at_ticks = 19,
+        .network_scope = .local_only,
+    });
+    try std.testing.expectError(error.TransportDenied, port.replicateWorkspace(
+        authority,
+        &storage,
+        workspace_record.id.raw(),
+        laptop,
+        tablet,
+        .device_to_device,
+    ));
+
+    try storage.shareWorkspace(workspace_record.id, .{
+        .principal_id = tablet,
+        .can_read = true,
+        .network_scope = .local_only,
+    });
+    const summary = try port.replicateWorkspace(
+        authority,
+        &storage,
+        workspace_record.id.raw(),
+        laptop,
+        tablet,
+        .device_to_device,
+    );
+    try std.testing.expectEqual(@as(usize, 1), summary.selected_entry_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.transport_frame_count);
+    try std.testing.expectEqual(@as(usize, 1), resident.outboundTransportFrameCount());
+
+    const outbound = service.latestTransportFrameForPath(workspace_record.id.raw(), tablet, path).?;
+    var request = sync_service.TransportFrameRequest{
+        .source_frame_id = outbound.id,
+        .workspace_id = workspace_record.id.raw(),
+        .object_id = outbound.object_id,
+        .version_id = outbound.version_id,
+        .source_device = laptop,
+        .target_device = tablet,
+        .transport = .device_to_device,
+        .semantic = .mergeable_crdt,
+        .encrypted = true,
+        .workspace_generation = outbound.workspace_generation,
+        .path = path,
+    };
+    const accepted = try port.acceptTransportFrame(authority, &storage, request);
+    try std.testing.expectEqual(outbound.id, accepted.source_frame_id);
+    try std.testing.expectEqual(@as(usize, 2), service.transportFrameCountFor(workspace_record.id.raw(), tablet));
+
+    const duplicate = try port.acceptTransportFrame(authority, &storage, request);
+    try std.testing.expectEqual(accepted.id, duplicate.id);
+    try std.testing.expectEqual(@as(usize, 2), service.transportFrameCountFor(workspace_record.id.raw(), tablet));
+
+    request.source_frame_id = 100;
+    _ = try port.acceptTransportFrame(authority, &storage, request);
+    request.source_frame_id = 2;
+    try std.testing.expectError(error.TransportReplayRejected, port.acceptTransportFrame(authority, &storage, request));
+
+    var restarted_resident = ResidentState{};
+    var restarted = try Service.initWithStorage(8_740, 8_741, sync_owner, &storage, &restarted_resident);
+    try std.testing.expect(restarted.loaded_existing_state);
+    try std.testing.expectEqual(@as(usize, 1), restarted_resident.outboundTransportFrameCount());
+    try std.testing.expectEqual(@as(usize, 2), restarted_resident.inboundTransportFrameCount());
+    try std.testing.expectEqual(@as(usize, 3), restarted.transportFrameCountFor(workspace_record.id.raw(), tablet));
+
+    var saw_duplicate_count = false;
+    for (restarted_resident.persisted_state.inbound_transport_frames) |slot| {
+        if (!slot.in_use or slot.frame.source_frame_id != outbound.id) continue;
+        try std.testing.expectEqual(@as(u16, 1), slot.duplicate_count);
+        saw_duplicate_count = true;
+    }
+    try std.testing.expect(saw_duplicate_count);
 }
 
 fn addSyncDeviceGraphMeasuredArtifact(
@@ -990,6 +1143,13 @@ test "sync service replicates payloads to peer storage through booted relay fall
     try std.testing.expectEqual(@as(usize, expected_relay_deliveries), relay_service.delivered_packets);
     try std.testing.expectEqual(@as(usize, 1), target_resident.databaseContractCount());
     try std.testing.expect(source_sync.findConflict(workspace_id, tablet, document_path) != null);
+    var pending_after_ack: [sync_service.MAX_TRANSPORT_FRAMES]sync_service.TransportFrame = undefined;
+    try std.testing.expectEqual(@as(usize, 0), source_sync.copyTransportFramesForSince(
+        workspace_id,
+        tablet,
+        0,
+        pending_after_ack[0..],
+    ));
 
     const replicated_entry = try target_storage.resolve(target_workspace.id, document_path);
     const replicated_version = target_storage.version(replicated_entry.version_id) orelse return error.VersionNotFound;

@@ -18,6 +18,7 @@ pub const MAX_OVERLAYS: usize = 4;
 pub const MAX_PRIVATE_SERVICES: usize = 4;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_TRANSPORT_FRAMES: usize = 64;
+pub const TRANSPORT_REPLAY_WINDOW: u64 = 32;
 pub const state_workspace_label = "system-sync";
 pub const state_signer = signing.SignerIdentity{
     .label = "zigos-sync-state",
@@ -41,6 +42,7 @@ pub const WorkspacePolicyRequest = struct {
     owner: principal.PrincipalId,
     offline_first: bool = true,
     personal_e2ee: bool = true,
+    require_shared_access: bool = false,
     selective_prefixes: []const []const u8 = &.{},
     device_to_device_policy_id: ?u64 = null,
     relay_policy_id: ?u64 = null,
@@ -53,6 +55,7 @@ pub const WorkspacePolicy = struct {
     owner: principal.PrincipalId,
     offline_first: bool,
     personal_e2ee: bool,
+    require_shared_access: bool,
     selective_prefix_count: usize,
     selective_prefixes: [MAX_SELECTIVE_PREFIXES][MAX_PREFIX_BYTES]u8,
     selective_prefix_lens: [MAX_SELECTIVE_PREFIXES]usize,
@@ -177,6 +180,52 @@ pub const ReplicationSummary = struct {
     encrypted_transport_count: usize = 0,
 };
 
+pub const TransportQueueKind = enum(u8) {
+    outbound,
+    inbound,
+};
+
+pub const TransportFrame = struct {
+    id: u64 = 0,
+    source_frame_id: u64 = 0,
+    workspace_id: u64 = 0,
+    object_id: u64 = 0,
+    version_id: u64 = 0,
+    source_device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
+    target_device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
+    transport: TransportMode = .device_to_device,
+    semantic: SyncSemantic = .mergeable_crdt,
+    encrypted: bool = false,
+    workspace_generation: u32 = 0,
+    path_len: usize = 0,
+    path: [workspace.MAX_ENTRY_PATH_BYTES]u8 = [_]u8{0} ** workspace.MAX_ENTRY_PATH_BYTES,
+
+    pub fn pathSlice(self: *const TransportFrame) []const u8 {
+        return self.path[0..self.path_len];
+    }
+};
+
+pub const TransportFrameRequest = struct {
+    source_frame_id: u64 = 0,
+    workspace_id: u64,
+    object_id: u64,
+    version_id: u64,
+    source_device: principal.PrincipalId,
+    target_device: principal.PrincipalId,
+    transport: TransportMode,
+    semantic: SyncSemantic,
+    encrypted: bool,
+    workspace_generation: u32 = 0,
+    path: []const u8,
+};
+
+pub const DurableTransportFrameSlot = struct {
+    in_use: bool = false,
+    acked: bool = false,
+    duplicate_count: u16 = 0,
+    frame: TransportFrame = .{},
+};
+
 pub const Error = error{
     BundleIdTooLong,
     ConflictTableFull,
@@ -207,7 +256,9 @@ pub const Error = error{
     TooManySelectivePrefixes,
     ServiceIdentityTooLong,
     TransportDenied,
+    TransportDuplicateFrame,
     TransportQueueFull,
+    TransportReplayRejected,
     TooManyDocumentOperations,
     DocumentOperationLogFull,
     UnsupportedStateVersion,
@@ -250,10 +301,14 @@ pub const PersistentState = struct {
     conflicts: [MAX_CONFLICTS]ConflictSlot = [_]ConflictSlot{ConflictSlot{}} ** MAX_CONFLICTS,
     database_contracts: [MAX_DATABASE_CONTRACTS]DatabaseContractSlot = [_]DatabaseContractSlot{DatabaseContractSlot{}} ** MAX_DATABASE_CONTRACTS,
     overlays: [MAX_OVERLAYS]OverlaySlot = [_]OverlaySlot{OverlaySlot{}} ** MAX_OVERLAYS,
+    next_transport_frame_id: u64 = 1,
+    outbound_transport_frames: [MAX_TRANSPORT_FRAMES]DurableTransportFrameSlot = [_]DurableTransportFrameSlot{DurableTransportFrameSlot{}} ** MAX_TRANSPORT_FRAMES,
+    inbound_transport_frames: [MAX_TRANSPORT_FRAMES]DurableTransportFrameSlot = [_]DurableTransportFrameSlot{DurableTransportFrameSlot{}} ** MAX_TRANSPORT_FRAMES,
 
     pub fn reset(self: *PersistentState) void {
         self.next_overlay_id = 1;
         self.next_contract_id = 1;
+        self.next_transport_frame_id = 1;
         self.graph.reset();
         self.network_policies.reset();
         for (&self.workspace_policies) |*slot| {
@@ -269,6 +324,12 @@ pub const PersistentState = struct {
             slot.* = .{};
         }
         for (&self.overlays) |*slot| {
+            slot.* = .{};
+        }
+        for (&self.outbound_transport_frames) |*slot| {
+            slot.* = .{};
+        }
+        for (&self.inbound_transport_frames) |*slot| {
             slot.* = .{};
         }
     }
@@ -365,6 +426,22 @@ pub const ResidentState = struct {
         return count;
     }
 
+    pub fn outboundTransportFrameCount(self: *const ResidentState) usize {
+        var count: usize = 0;
+        for (self.persisted_state.outbound_transport_frames) |slot| {
+            if (slot.in_use) count += 1;
+        }
+        return count;
+    }
+
+    pub fn inboundTransportFrameCount(self: *const ResidentState) usize {
+        var count: usize = 0;
+        for (self.persisted_state.inbound_transport_frames) |slot| {
+            if (slot.in_use) count += 1;
+        }
+        return count;
+    }
+
     pub fn nextPersistedPolicyId(self: *const ResidentState) u64 {
         var next_id: u64 = 1;
         for (self.persisted_state.network_policies.policies) |slot| {
@@ -432,6 +509,7 @@ pub fn zeroWorkspacePolicy() WorkspacePolicy {
         .owner = .{ .kind = .user, .serial = 0 },
         .offline_first = true,
         .personal_e2ee = true,
+        .require_shared_access = false,
         .selective_prefix_count = 0,
         .selective_prefixes = [_][MAX_PREFIX_BYTES]u8{[_]u8{0} ** MAX_PREFIX_BYTES} ** MAX_SELECTIVE_PREFIXES,
         .selective_prefix_lens = [_]usize{0} ** MAX_SELECTIVE_PREFIXES,
@@ -492,4 +570,11 @@ pub fn zeroDatabaseContract() DatabaseContract {
         .label = [_]u8{0} ** MAX_LABEL_BYTES,
         .signature = .{},
     };
+}
+
+pub fn copyTransportPath(destination: *[workspace.MAX_ENTRY_PATH_BYTES]u8, path: []const u8) Error!usize {
+    if (path.len > destination.len) return error.PathTooLong;
+    @memset(destination[0..], 0);
+    @memcpy(destination[0..path.len], path);
+    return path.len;
 }

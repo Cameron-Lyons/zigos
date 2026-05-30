@@ -79,6 +79,9 @@ pub const OperationId = enum(u16) {
     workspace_resolve = 0x0302,
     network_authorize = 0x0401,
     policy_authorize = 0x0501,
+    package_install = 0x0601,
+    package_update = 0x0602,
+    package_rollback = 0x0603,
 };
 
 pub const ServiceBinding = enum(u8) {
@@ -151,6 +154,32 @@ const PolicyAuthorizeRequestWire = extern struct {
     resource_len: u16,
 };
 
+const PackageInstallRequestWire = extern struct {
+    header: WireHeader,
+    bundle_digest: [32]u8,
+    bundle_id_len: u16,
+    source_identity_len: u16,
+    schema_version: u32,
+    flags: u32,
+};
+
+const PackageUpdateRequestWire = extern struct {
+    header: WireHeader,
+    bundle_digest: [32]u8,
+    bundle_id_len: u16,
+    source_identity_len: u16,
+    from_schema_version: u32,
+    to_schema_version: u32,
+    migration_manifest_len: u16,
+    flags: u16,
+};
+
+const PackageRollbackRequestWire = extern struct {
+    header: WireHeader,
+    bundle_id_len: u16,
+    _reserved: u16 = 0,
+};
+
 const ServiceRegisterResponseWire = extern struct {
     accepted: u32,
 };
@@ -174,6 +203,14 @@ const NetworkAuthorizeResponseWire = extern struct {
 const PolicyAuthorizeResponseWire = extern struct {
     allowed: u32,
     denial_reason: u16,
+};
+
+const PackageLifecycleResponseWire = extern struct {
+    installed_new: u32,
+    updated_existing: u32,
+    permissions_changed: u32,
+    rollback_available: u32,
+    migration_applied: u32,
 };
 
 const InterfaceSpec = struct {
@@ -247,6 +284,9 @@ pub const operation_specs = [_]OperationSpec{
     op(.object_workspace, .workspace_resolve, "resolve", WorkspaceResolveRequestWire, WorkspaceResolveResponseWire),
     op(.network_policy, .network_authorize, "authorize", NetworkAuthorizeRequestWire, NetworkAuthorizeResponseWire),
     op(.policy_mediation, .policy_authorize, "authorize", PolicyAuthorizeRequestWire, PolicyAuthorizeResponseWire),
+    op(.package_install, .package_install, "install", PackageInstallRequestWire, PackageLifecycleResponseWire),
+    op(.package_install, .package_update, "update", PackageUpdateRequestWire, PackageLifecycleResponseWire),
+    op(.package_install, .package_rollback, "rollback", PackageRollbackRequestWire, PackageLifecycleResponseWire),
 };
 
 const ServiceBindingSpec = struct {
@@ -618,8 +658,10 @@ test "component ABI schema emits manifest interfaces and service catalog binding
     try std.testing.expectEqualStrings("zigos.object.workspace", interfaceForService(.storage_object).name);
     try std.testing.expectEqual(InterfaceId.service_registry, interfaceId(.service_registry));
     try std.testing.expectEqual(InterfaceId.object_workspace, interfaceIdForService(.storage_object));
+    try std.testing.expectEqual(InterfaceId.package_install, interfaceIdForService(.package_install_update));
     try std.testing.expectEqual(InterfaceId.object_workspace, interfaceIdForDecl(interfaceForService(.storage_object)).?);
     try std.testing.expectEqual(InterfaceId.service_registry, contractFor(interfaceForService(.service_registry).name).?.interface_id);
+    try std.testing.expect(contractFor(interfaceForService(.package_install_update).name).?.operation(.package_rollback) != null);
     try std.testing.expect(contractFor(interfaceForService(.service_registry).name).?.contract_hash != 0);
     try std.testing.expect(contractFor(interfaceForService(.sync_replication).name).?.contract_hash != 0);
     try std.testing.expectEqual(

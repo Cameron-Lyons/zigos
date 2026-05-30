@@ -8,9 +8,10 @@ const service_authority = @import("../../services/service_authority.zig");
 const signing = @import("../../core/signing.zig");
 const state_support = @import("../sync_state_support.zig");
 const sync_adapters = @import("../sync_adapters.zig");
-const sync_transport = @import("../sync_transport_harness.zig");
+const sync_transport = @import("../sync_transport.zig");
 const storage_service = @import("../../storage/storage_service.zig");
 const transport_frames = @import("transport_frames.zig");
+const workspace = @import("../../storage/workspace.zig");
 
 pub const MAX_TRANSPORT_FRAMES = state_support.MAX_TRANSPORT_FRAMES;
 pub const Error = state_support.Error;
@@ -267,6 +268,8 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             transport: TransportMode,
         ) (AuthorityError || Error)!ReplicationSummary {
             _ = try self.requireSyncAuthority(authority);
+            const policy = self.service.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
+            try self.authorizeWorkspaceShare(store, policy, to_device, transport, authority.now_ticks);
             return self.service.replicateWorkspace(store, workspace_id, from_device, to_device, transport);
         }
 
@@ -305,6 +308,7 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
                 result.accepted_frame_count += 1;
                 result.persisted_object_count += 1;
                 result.payload_bytes += delivery.payload_len;
+                _ = try self.service.ackOutboundTransportFrame(frame.id);
                 if (delivery.used_booted_relay_service) {
                     result.used_booted_relay_service = true;
                     result.relay_delivery_count += delivery.relay_delivery_count;
@@ -320,6 +324,8 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             request: TransportFrameRequest,
         ) (AuthorityError || Error)!TransportFrame {
             _ = try self.requireSyncAuthority(authority);
+            const policy = self.service.findWorkspacePolicy(request.workspace_id) orelse return error.WorkspacePolicyNotFound;
+            try self.authorizeWorkspaceShare(store, policy, request.target_device, request.transport, authority.now_ticks);
             return self.service.acceptTransportFrame(store, request);
         }
 
@@ -377,6 +383,7 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             try self.service.ensureTrustedDevices(request.from_device, request.to_device);
             const policy = self.service.findWorkspacePolicy(request.workspace_id) orelse return error.WorkspacePolicyNotFound;
             try self.service.authorizeTransport(policy, request.transport, null);
+            try self.authorizeWorkspaceShare(request.source_storage, policy, request.to_device, request.transport, request.tick);
             if (request.transport != .relay_assisted) return;
 
             const relay_service = request.relay_service orelse return error.TransportDenied;
@@ -396,6 +403,30 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
                 .evidence = .{ .destination = .{ .domain = policy.relayDomainSlice() } },
                 .now_ticks = request.tick,
             }, request.from_device, request.to_device, policy.relayDomainSlice());
+        }
+
+        fn authorizeWorkspaceShare(
+            self: *Self,
+            store: *const storage_service.Service,
+            policy: *const WorkspacePolicy,
+            target_device: principal.PrincipalId,
+            transport: TransportMode,
+            now_ticks: u64,
+        ) Error!void {
+            _ = self;
+            if (!policy.require_shared_access) return;
+            if (!store.workspaceHasAccess(policy.workspace_id, .{
+                .principal_id = target_device,
+                .network_scope = shareNetworkScopeForTransport(transport),
+                .now_ticks = now_ticks,
+            })) return error.TransportDenied;
+        }
+
+        fn shareNetworkScopeForTransport(transport: TransportMode) workspace.ShareNetworkScope {
+            return switch (transport) {
+                .device_to_device => .local_only,
+                .relay_assisted => .relay_assisted,
+            };
         }
 
         const PeerFrameDelivery = struct {
@@ -447,6 +478,7 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             const generation = try request.target_storage.commit(frame.workspace_id, request.tick);
 
             _ = try peer.service.acceptTransportFrame(request.target_storage, .{
+                .source_frame_id = frame.id,
                 .workspace_id = frame.workspace_id,
                 .object_id = persisted.object_id.raw(),
                 .version_id = persisted.version_id.raw(),

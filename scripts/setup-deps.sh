@@ -13,6 +13,29 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+find_ovmf_code() {
+  local path
+
+  for path in \
+    "${OVMF_CODE:-}" \
+    /usr/share/OVMF/OVMF_CODE.fd \
+    /usr/share/OVMF/OVMF_CODE_4M.fd \
+    /usr/share/edk2/ovmf/OVMF_CODE.fd \
+    /usr/share/edk2/ovmf/OVMF_CODE_4M.fd \
+    /usr/share/edk2/x64/OVMF_CODE.fd \
+    /usr/share/qemu/edk2-x86_64-code.fd \
+    /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+    /usr/local/share/qemu/edk2-x86_64-code.fd; do
+    [ -n "$path" ] || continue
+    if [ -f "$path" ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 sudo_cmd() {
   if [ "${EUID}" -eq 0 ]; then
     printf ''
@@ -44,7 +67,7 @@ install_apt() {
 
   log "Installing dependencies with apt..."
   ${s} apt-get update
-  ${s} apt-get install -y nasm qemu-system-x86 qemu-system-i386 grub-common grub-pc-bin dosfstools e2fsprogs xorriso mtools
+  ${s} apt-get install -y nasm qemu-system-x86 qemu-system-i386 ovmf grub-common grub-pc-bin dosfstools e2fsprogs xorriso mtools
 
   if ! have_cmd zig; then
     if ! ${s} apt-get install -y zig; then
@@ -58,7 +81,7 @@ install_dnf() {
   s="$(sudo_cmd)"
 
   log "Installing dependencies with dnf..."
-  ${s} dnf install -y zig nasm qemu-system-x86 grub2-tools grub2-tools-extra dosfstools e2fsprogs xorriso mtools
+  ${s} dnf install -y zig nasm qemu-system-x86 edk2-ovmf grub2-tools grub2-tools-extra dosfstools e2fsprogs xorriso mtools
 }
 
 install_pacman() {
@@ -66,7 +89,7 @@ install_pacman() {
   s="$(sudo_cmd)"
 
   log "Installing dependencies with pacman..."
-  ${s} pacman -Sy --noconfirm zig nasm grub dosfstools e2fsprogs xorriso mtools
+  ${s} pacman -Sy --noconfirm zig nasm grub edk2-ovmf dosfstools e2fsprogs xorriso mtools
 
   if ! ${s} pacman -S --noconfirm qemu-full; then
     if ! ${s} pacman -S --noconfirm qemu-desktop; then
@@ -100,6 +123,14 @@ verify_tools() {
   done
   if [ -z "${grub_cmd}" ]; then
     log "Missing GRUB mkrescue command."
+    missing=1
+  fi
+
+  local ovmf_code=""
+  if ovmf_code="$(find_ovmf_code)"; then
+    log "Using OVMF firmware: ${ovmf_code}"
+  else
+    log "Missing OVMF firmware. Install OVMF/edk2-ovmf or set OVMF_CODE for uefi-qemu-test."
     missing=1
   fi
 

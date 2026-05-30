@@ -32,8 +32,10 @@ and service-driven.
   domain, and storage I/O works after restart.
 - `spec/coverage.json` currently records 60 required requirements and marks all
   60 as `enforced`.
-- `spec/production_readiness.json` currently tracks six production-readiness
-  workstreams: two `prod_candidate` tracks and four `prototype` tracks.
+- `spec/production_readiness.json` currently pins one first hardware target
+  (`intel-nuc11tnki5`) and tracks seven production-readiness workstreams: two
+  `prod_candidate` tracks, four `prototype` tracks, and one blocked real
+  hardware track.
 
 The spec contract is now the machine-readable manifest in
 `spec/coverage.json`; this checkout does not require a separate prose spec
@@ -101,6 +103,7 @@ Use the pinned toolchain and repo entrypoints:
 - Zig `0.16.0` exactly
 - `nasm`
 - `qemu-system-x86_64`
+- OVMF or edk2-ovmf firmware for `uefi-qemu-test`
 - ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses
   them when available
@@ -174,12 +177,13 @@ Useful verification targets:
 | `./scripts/zig.sh build lint` | Runs Zig formatting, optional zlint, ShellCheck, and optional actionlint. |
 | `./scripts/zig.sh build host-tests` | Runs host-side native logic and userspace runtime tests. |
 | `./scripts/zig.sh build test-roots` | Checks that Zig files with tests are reachable from the build roots. |
-| `./scripts/zig.sh build prod-readiness` | Validates `spec/production_readiness.json` and production-readiness source markers. |
+| `./scripts/zig.sh build prod-readiness` | Validates `spec/production_readiness.json`, secure-by-design release-gate coverage, and production-readiness source markers. |
 | `./scripts/zig.sh build spec-tests` | Runs the spec coverage gate and native spec tests. |
 | `./scripts/zig.sh build zigos-native-smoke-test` | Runs native QEMU smoke proofs, including tampered manifest, direct artifact tamper, and rollback-slot failure variants. |
 | `./scripts/zig.sh build driver-restart-qemu-test` | Proves userspace storage driver restart and rebinding without reboot. |
 | `./scripts/zig.sh build storage-durability-qemu-test` | Reuses one native-store image across forced reboots and proves storage recovery after an interrupted boot and one bad root slot. |
 | `./scripts/zig.sh build recovery-qemu-test` | Proves the recovery profile can perform break-glass repair operations. |
+| `./scripts/zig.sh build uefi-qemu-test` | Boots `build/os.iso` through OVMF as the UEFI preflight for the first hardware target. |
 | `./scripts/zig.sh build benchmark` | Runs the native benchmark suite and checks thresholds. |
 | `./scripts/zig.sh build verify` | Runs the CI-aligned local gate: lint, kernel build, host tests, spec tests, and production-readiness checks. |
 
@@ -201,12 +205,30 @@ implementation anchors and test evidence. The production-readiness manifest in
 enforced prototype behavior toward production proof, such as real hardware,
 fault injection, scale, transport, and operational validation.
 
+The secure-by-design release gate is part of the production-readiness manifest
+and is validated by `./scripts/zig.sh build prod-readiness`. Public releases are
+blocked until fuzzing, fault injection, reproducible builds, SBOM/provenance,
+threat-model tests, memory-safety audits for unsafe Zig and kernel sections,
+crash dump redaction, and the vulnerability disclosure process in `SECURITY.md`
+are satisfied.
+
+The first real hardware target is Intel NUC 11 Pro Kit `NUC11TNKi5`. QEMU proof
+runs remain required preflight evidence, but they do not satisfy the hardware
+target gate. Real-machine proof must cover UEFI boot, ACPI, APIC/timer, GOP
+framebuffer, USB xHCI input, NVMe block I/O, Intel I225-LM networking,
+suspend/resume, and crash recovery. Required serial markers live in
+`spec/hardware/nuc11tnki5-required-markers.txt`, and captured logs can be
+checked with `scripts/check-nuc11tnki5-hardware-proof.sh`. The UEFI preflight
+entrypoint is `./scripts/zig.sh build uefi-qemu-test`; set `OVMF_CODE` and
+optionally `OVMF_VARS` if the firmware is not installed in a standard path.
+
 QEMU proof runs are script-backed:
 
 - `scripts/run-zigos-native-smoke.sh`
 - `scripts/run-storage-durability-qemu.sh`
 - `scripts/run-kernel-recovery.sh`
 - `scripts/run-kernel-benchmark.sh`
+- `scripts/run-uefi-boot-test.sh`
 - `scripts/qemu-harness.sh`
 
 Shared boot marker expectations live in `src/native_smoke_markers.zig` and

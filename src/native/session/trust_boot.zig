@@ -3,6 +3,7 @@ const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const base_boot_selector = @import("../platform/base_boot_selector.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
@@ -613,7 +614,7 @@ pub const TrustBoot = struct {
             .label = "zigos-measured-boot-state",
             .seed = [_]u8{0xA6} ** 32,
         };
-        const direct_previous = loadDirectMeasuredBootSummary();
+        const direct_previous = loadDirectMeasuredBootSummary(self.native_store.storage_service_instance.service_id);
         var journal = measured_boot.MeasurementJournal.init(
             &self.native_store.storage_service_instance,
             session_bootstrap.principals().package_service,
@@ -630,7 +631,7 @@ pub const TrustBoot = struct {
                     std.mem.eql(u16, &previous.kind_counts, &current_summary.kind_counts);
             }
         }
-        _ = storeDirectMeasuredBootSummary(current_summary);
+        _ = storeDirectMeasuredBootSummary(self.native_store.storage_service_instance.service_id, current_summary);
         self.native_store.checkpoint();
         if (comparison.previous == null) {
             common.printBootMarker(boot_markers.platform_measured_boot_first);
@@ -988,10 +989,10 @@ const direct_measured_boot_generation_offset: usize = 8;
 const direct_measured_boot_kind_counts_offset: usize = 16;
 const direct_measured_boot_root_digest_offset: usize = 32;
 
-fn loadDirectMeasuredBootSummary() ?measured_boot.BootSummary {
+fn loadDirectMeasuredBootSummary(storage_service_id: u64) ?measured_boot.BootSummary {
     if (builtin.target.os.tag != .freestanding) return null;
     var sector = [_]u8{0} ** direct_measured_boot_sector_size;
-    if (!readDirectMeasuredBootSector(&sector)) return null;
+    if (!readDirectMeasuredBootSector(storage_service_id, &sector)) return null;
     if (!std.mem.eql(u8, sector[direct_measured_boot_magic_offset..][0..direct_measured_boot_magic.len], direct_measured_boot_magic)) return null;
     if (std.mem.readInt(u16, sector[direct_measured_boot_version_offset..][0..@sizeOf(u16)], .little) != direct_measured_boot_version) return null;
 
@@ -1011,7 +1012,7 @@ fn loadDirectMeasuredBootSummary() ?measured_boot.BootSummary {
     return summary;
 }
 
-fn storeDirectMeasuredBootSummary(summary: measured_boot.BootSummary) bool {
+fn storeDirectMeasuredBootSummary(storage_service_id: u64, summary: measured_boot.BootSummary) bool {
     if (builtin.target.os.tag != .freestanding) return false;
     var sector = [_]u8{0} ** direct_measured_boot_sector_size;
     @memcpy(sector[direct_measured_boot_magic_offset..][0..direct_measured_boot_magic.len], direct_measured_boot_magic);
@@ -1024,10 +1025,12 @@ fn storeDirectMeasuredBootSummary(summary: measured_boot.BootSummary) bool {
         offset += 2;
     }
     @memcpy(sector[direct_measured_boot_root_digest_offset..][0..summary.root_digest.len], &summary.root_digest);
-    return writeDirectMeasuredBootSector(&sector);
+    return writeDirectMeasuredBootSector(storage_service_id, &sector);
 }
 
-fn readDirectMeasuredBootSector(buffer: *[direct_measured_boot_sector_size]u8) bool {
+fn readDirectMeasuredBootSector(storage_service_id: u64, buffer: *[direct_measured_boot_sector_size]u8) bool {
+    if (bootstrap_driver_port.activeStorageRead(storage_service_id, direct_measured_boot_lba, buffer[0..])) return true;
+
     const root = @import("root");
     if (!@hasDecl(root, "storage_volume")) return false;
     const root_volume = root.storage_volume.defaultVolume();
@@ -1043,7 +1046,9 @@ fn readDirectMeasuredBootSector(buffer: *[direct_measured_boot_sector_size]u8) b
     return root_volume.attached_backend_read(direct_measured_boot_lba, buffer.ptr, buffer.len);
 }
 
-fn writeDirectMeasuredBootSector(buffer: *const [direct_measured_boot_sector_size]u8) bool {
+fn writeDirectMeasuredBootSector(storage_service_id: u64, buffer: *const [direct_measured_boot_sector_size]u8) bool {
+    if (bootstrap_driver_port.activeStorageWrite(storage_service_id, direct_measured_boot_lba, buffer[0..])) return true;
+
     const root = @import("root");
     if (!@hasDecl(root, "storage_volume")) return false;
     const root_volume = root.storage_volume.defaultVolume();

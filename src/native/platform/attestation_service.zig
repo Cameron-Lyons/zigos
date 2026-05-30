@@ -96,7 +96,7 @@ pub const FakeTpmRootProvider = struct {
 
     pub fn sign(self: *FakeTpmRootProvider, digest: []const u8) !manifest.Signature {
         self.sign_count += 1;
-        return signing.sign(self.signer, digest);
+        return signing.signWithDefaultRegistry(.ed25519, self.signer, digest);
     }
 
     pub fn publicIdentity(self: *const FakeTpmRootProvider) !signing.PublicIdentity {
@@ -126,7 +126,7 @@ pub const FakeSecureEnclaveRootProvider = struct {
 
     pub fn sign(self: *FakeSecureEnclaveRootProvider, digest: []const u8) !manifest.Signature {
         self.sign_count += 1;
-        return signing.sign(self.signer, digest);
+        return signing.signWithDefaultRegistry(.ed25519, self.signer, digest);
     }
 
     pub fn publicIdentity(self: *const FakeSecureEnclaveRootProvider) !signing.PublicIdentity {
@@ -154,7 +154,7 @@ pub const TestSoftwareRootProvider = struct {
     }
 
     pub fn sign(self: *TestSoftwareRootProvider, digest: []const u8) !manifest.Signature {
-        return signing.sign(self.signer, digest);
+        return signing.signWithDefaultRegistry(.ed25519, self.signer, digest);
     }
 };
 
@@ -278,7 +278,7 @@ pub const Service = struct {
     ) !Statement {
         var statement = try self.buildStatement(boot, remote_party, nonce, signer.label, user_visible, origin);
         const digest = statementDigest(statement);
-        statement.signature = try signing.sign(signer, &digest);
+        statement.signature = try signing.signWithDefaultRegistry(.ed25519, signer, &digest);
         return statement;
     }
 
@@ -339,12 +339,12 @@ pub const Service = struct {
 
     pub fn verify(statement: Statement) bool {
         const digest = statementDigest(statement);
-        return signing.verify(statement.signature, &digest);
+        return signing.verifyWithDefaultRegistry(statement.signature, &digest);
     }
 
     pub fn verifyForBoot(statement: Statement, expectation: VerificationExpectation) bool {
         const digest = statementDigest(statement);
-        if (!signing.verify(statement.signature, &digest)) return false;
+        if (!signing.verifyWithDefaultRegistry(statement.signature, &digest)) return false;
         if (!expectation.boot.isRemoteAttestable()) return false;
         if (!expectation.boot.isInternallyConsistent()) return false;
         if (!isBackedRootOrigin(statement.key_origin)) return false;
