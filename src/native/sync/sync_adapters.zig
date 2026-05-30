@@ -261,37 +261,8 @@ pub const DatabaseSyncAdapter = struct {
     }
 };
 
-pub const TransportFrame = struct {
-    id: u64 = 0,
-    workspace_id: u64 = 0,
-    object_id: u64 = 0,
-    version_id: u64 = 0,
-    source_device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
-    target_device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
-    transport: state_support.TransportMode = .device_to_device,
-    semantic: state_support.SyncSemantic = .mergeable_crdt,
-    encrypted: bool = false,
-    workspace_generation: u32 = 0,
-    path_len: usize = 0,
-    path: [workspace.MAX_ENTRY_PATH_BYTES]u8 = [_]u8{0} ** workspace.MAX_ENTRY_PATH_BYTES,
-
-    pub fn pathSlice(self: *const TransportFrame) []const u8 {
-        return self.path[0..self.path_len];
-    }
-};
-
-pub const QueueFrameRequest = struct {
-    workspace_id: u64,
-    object_id: u64,
-    version_id: u64,
-    source_device: principal.PrincipalId,
-    target_device: principal.PrincipalId,
-    transport: state_support.TransportMode,
-    semantic: state_support.SyncSemantic,
-    encrypted: bool,
-    workspace_generation: u32 = 0,
-    path: []const u8,
-};
+pub const TransportFrame = state_support.TransportFrame;
+pub const QueueFrameRequest = state_support.TransportFrameRequest;
 
 const TransportFrameSlot = struct {
     in_use: bool = false,
@@ -323,6 +294,7 @@ pub const TransportQueue = struct {
         const slot = &self.frames.slots[slot_index];
         var frame = TransportFrame{
             .id = frame_id,
+            .source_frame_id = if (request.source_frame_id == 0) frame_id else request.source_frame_id,
             .workspace_id = request.workspace_id,
             .object_id = request.object_id,
             .version_id = request.version_id,

@@ -24,6 +24,14 @@ const capture_signer = signing.SignerIdentity{
     .seed = [_]u8{0x44} ** 32,
 };
 
+fn signDemoReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) manifest.Signature {
+    return signing.signWithDefaultRegistry(
+        .ed25519,
+        identity,
+        &package_service.digestBundle(bundle),
+    ) catch unreachable;
+}
+
 pub fn seed(
     packages: *package_service.Service,
     capability_table: *capability.CapabilityTable,
@@ -120,7 +128,7 @@ fn installViewer(port: *package_service.PackagePort, authority: package_service.
         .assets = &assets,
         .requested_permissions = &permissions,
     };
-    bundle.signature = signing.sign(viewer_signer, &package_service.digestBundle(bundle)) catch unreachable;
+    bundle.signature = signDemoReleaseBundle(viewer_signer, bundle);
     _ = port.install(authority, .{
         .bundle = bundle,
         .source_identity = store_source,
@@ -132,7 +140,7 @@ fn installNotes(port: *package_service.PackagePort, authority: package_service.A
     if (packages.find("app.notes") != null) return;
 
     var bundle = manifest_fixtures.notesBundle();
-    bundle.signature = signing.sign(notes_signer, &package_service.digestBundle(bundle)) catch unreachable;
+    bundle.signature = signDemoReleaseBundle(notes_signer, bundle);
     _ = port.install(authority, .{
         .bundle = bundle,
         .source_identity = store_source,
@@ -144,7 +152,7 @@ fn installSync(port: *package_service.PackagePort, authority: package_service.Au
     if (packages.find("app.sync") != null) return;
 
     var bundle = manifest_fixtures.syncBundle();
-    bundle.signature = signing.sign(sync_signer, &package_service.digestBundle(bundle)) catch unreachable;
+    bundle.signature = signDemoReleaseBundle(sync_signer, bundle);
     _ = port.install(authority, .{
         .bundle = bundle,
         .source_identity = store_source,
@@ -156,7 +164,7 @@ fn installCapture(port: *package_service.PackagePort, authority: package_service
     if (packages.find("app.capture") != null) return;
 
     var bundle = manifest_fixtures.captureBundle();
-    bundle.signature = signing.sign(capture_signer, &package_service.digestBundle(bundle)) catch unreachable;
+    bundle.signature = signDemoReleaseBundle(capture_signer, bundle);
     _ = port.install(authority, .{
         .bundle = bundle,
         .source_identity = store_source,

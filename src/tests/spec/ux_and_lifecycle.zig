@@ -177,7 +177,7 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
         .assets = &assets,
         .requested_permissions = &v1_permissions,
     };
-    v1.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v1));
+    v1.signature = try spec_support.signReleaseBundle(v1, bundle_signer);
 
     var packages = package_service.Service.init();
     var package_capabilities = capability.CapabilityTable.init();
@@ -312,7 +312,7 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
         .assets = &v2_assets,
         .requested_permissions = &v1_permissions,
     };
-    v2.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v2));
+    v2.signature = try spec_support.signReleaseBundle(v2, bundle_signer);
 
     const updated = try packages_entry.port.install(packages_entry.authority, .{
         .bundle = v2,
@@ -389,7 +389,7 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
         .assets = &v1_assets,
         .requested_permissions = &v1_permissions,
     };
-    v1.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v1));
+    v1.signature = try spec_support.signReleaseBundle(v1, bundle_signer);
 
     const first = try packages_entry.port.install(packages_entry.authority, .{
         .bundle = v1,
@@ -440,7 +440,7 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
         .assets = &v2_assets,
         .requested_permissions = &v2_permissions,
     };
-    v2.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v2));
+    v2.signature = try spec_support.signReleaseBundle(v2, bundle_signer);
 
     const updated = try packages_entry.port.install(packages_entry.authority, .{
         .bundle = v2,
@@ -522,7 +522,7 @@ pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {
         .update_channel = .stable,
     };
     const package_signer = spec_support.signer("spec.background.bundle", 0x79);
-    package_bundle.signature = try signing.sign(package_signer, &package_service.digestBundle(package_bundle));
+    package_bundle.signature = try spec_support.signReleaseBundle(package_bundle, package_signer);
 
     var packages = package_service.Service.init();
     var package_capabilities = capability.CapabilityTable.init();

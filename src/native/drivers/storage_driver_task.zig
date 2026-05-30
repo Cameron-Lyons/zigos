@@ -2,13 +2,17 @@ const std = @import("std");
 const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
 const component_port = @import("../kernel_api/component_port.zig");
+const device_broker = @import("../kernel_api/device_broker.zig");
 const device_broker_client = @import("../kernel_api/device_broker_client.zig");
 const root = @import("root");
 const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
     root.storage_volume
 else
     @import("../storage/storage_volume.zig");
-const storage_volume_backend = @import("../storage/storage_volume_backend.zig");
+const x86 = if (builtin.target.os.tag == .freestanding)
+    @import("../../arch/x86.zig")
+else
+    struct {};
 
 const ATA_REG_DATA: u16 = 0;
 const ATA_REG_SECCOUNT: u16 = 2;
@@ -40,7 +44,9 @@ pub const AtaDriverError = error{
     Timeout,
     DriveError,
     InvalidParameter,
+    BrokerRevoked,
     BrokerUnavailable,
+    StaleBrokerSession,
     StaleGeneration,
 };
 
@@ -54,24 +60,7 @@ pub const AtaControllerSession = struct {
     sector_count: u64,
     process_generation: u32,
     dma_domain_id: u64,
-};
-
-const ReadContext = struct {
-    session: *const AtaControllerSession,
-
-    pub fn read(self: *const @This(), lba: u64, sector_count: u8, buffer: []u8) bool {
-        readSectors(@constCast(self.session), lba, sector_count, buffer) catch return false;
-        return true;
-    }
-};
-
-const WriteContext = struct {
-    session: *const AtaControllerSession,
-
-    pub fn write(self: *const @This(), lba: u64, sector_count: u8, buffer: []const u8) bool {
-        writeSectors(@constCast(self.session), lba, sector_count, buffer) catch return false;
-        return true;
-    }
+    dma_isolation: device_broker.DmaIsolationStatus,
 };
 
 pub fn establishAtaBootstrapSession(
@@ -86,6 +75,7 @@ pub fn establishAtaBootstrapSession(
     const descriptor = client.describe() catch return null;
     if (descriptor.device_id != device_id) return null;
     const task = kernel_port.kernel.runtime.find(task_id) orelse return null;
+    const dma_isolation = device_broker.dmaIsolationStatus(device_id, dma_domain_id) catch return null;
 
     return .{
         .client = client,
@@ -97,6 +87,7 @@ pub fn establishAtaBootstrapSession(
         .sector_count = descriptor.sector_count,
         .process_generation = task.process_generation,
         .dma_domain_id = dma_domain_id,
+        .dma_isolation = dma_isolation,
     };
 }
 
@@ -105,13 +96,27 @@ pub fn attachAtaBootstrapSession(session: *AtaControllerSession) void {
 }
 
 pub fn readAtaBootstrapSession(session: *AtaControllerSession, start_lba: u64, buffer: []u8) bool {
-    const context = ReadContext{ .session = session };
-    return storage_volume_backend.transferReadRange(start_lba, buffer, &context);
+    readAtaBootstrapSessionChecked(session, start_lba, buffer) catch return false;
+    return true;
 }
 
 pub fn writeAtaBootstrapSession(session: *AtaControllerSession, start_lba: u64, buffer: []const u8) bool {
-    const context = WriteContext{ .session = session };
-    return storage_volume_backend.transferWriteRange(start_lba, buffer, &context);
+    writeAtaBootstrapSessionChecked(session, start_lba, buffer) catch return false;
+    return true;
+}
+
+pub fn readAtaBootstrapSessionChecked(session: *AtaControllerSession, start_lba: u64, buffer: []u8) AtaDriverError!void {
+    try transferReadRangeChecked(session, start_lba, buffer);
+}
+
+pub fn writeAtaBootstrapSessionChecked(session: *AtaControllerSession, start_lba: u64, buffer: []const u8) AtaDriverError!void {
+    try transferWriteRangeChecked(session, start_lba, buffer);
+}
+
+pub fn constrainedProgrammedIoFirstTarget(session: *const AtaControllerSession) bool {
+    return session.dma_isolation.mode == .programmed_io_only and
+        !session.dma_isolation.hardware_iommu_programmed and
+        !session.dma_isolation.bus_master_dma_enabled;
 }
 
 pub fn staleAuthorityRejectedAfterGenerationChange(session: *const AtaControllerSession) bool {
@@ -165,6 +170,21 @@ fn readSectors(session: *AtaControllerSession, lba: u64, count: u8, buffer: []u8
     }
 }
 
+fn transferReadRangeChecked(session: *AtaControllerSession, start_lba: u64, buffer: []u8) AtaDriverError!void {
+    if (buffer.len == 0 or buffer.len % storage_volume.sector_size != 0) return error.InvalidParameter;
+
+    var offset: usize = 0;
+    var lba = start_lba;
+    while (offset < buffer.len) {
+        const remaining_sectors = (buffer.len - offset) / storage_volume.sector_size;
+        const chunk_sectors: u8 = @intCast(@min(remaining_sectors, @as(usize, ATA_MAX_SECTOR_TRANSFER)));
+        const chunk_len = @as(usize, chunk_sectors) * storage_volume.sector_size;
+        try readSectors(session, lba, chunk_sectors, buffer[offset .. offset + chunk_len]);
+        lba += chunk_sectors;
+        offset += chunk_len;
+    }
+}
+
 fn writeSectors(session: *AtaControllerSession, lba: u64, count: u8, buffer: []const u8) AtaDriverError!void {
     if (count == 0 or count > ATA_MAX_SECTOR_TRANSFER) return error.InvalidParameter;
     if (buffer.len < @as(usize, count) * storage_volume.sector_size) return error.InvalidParameter;
@@ -187,6 +207,21 @@ fn writeSectors(session: *AtaControllerSession, lba: u64, count: u8, buffer: []c
     try waitDriveReady(session);
 }
 
+fn transferWriteRangeChecked(session: *AtaControllerSession, start_lba: u64, buffer: []const u8) AtaDriverError!void {
+    if (buffer.len == 0 or buffer.len % storage_volume.sector_size != 0) return error.InvalidParameter;
+
+    var offset: usize = 0;
+    var lba = start_lba;
+    while (offset < buffer.len) {
+        const remaining_sectors = (buffer.len - offset) / storage_volume.sector_size;
+        const chunk_sectors: u8 = @intCast(@min(remaining_sectors, @as(usize, ATA_MAX_SECTOR_TRANSFER)));
+        const chunk_len = @as(usize, chunk_sectors) * storage_volume.sector_size;
+        try writeSectors(session, lba, chunk_sectors, buffer[offset .. offset + chunk_len]);
+        lba += chunk_sectors;
+        offset += chunk_len;
+    }
+}
+
 fn issueLba28Command(session: *AtaControllerSession, lba: u64, count: u8, command: u8) AtaDriverError!void {
     const drive_select = if (session.is_master) ATA_DRIVE_SELECT_MASTER else ATA_DRIVE_SELECT_SLAVE;
     try writePortU8(session, session.base_port + ATA_REG_DRIVE, drive_select | @as(u8, @intCast((lba >> 24) & ATA_LBA28_HEAD_MASK)));
@@ -205,8 +240,8 @@ fn waitDriveReady(session: *AtaControllerSession) AtaDriverError!void {
     var timeout: u32 = ATA_POLL_LIMIT;
     while (timeout > 0) : (timeout -= 1) {
         const status = try readPortU8(session, session.base_port + ATA_REG_STATUS);
-        if ((status & ATA_SR_BSY) == 0) return;
         if ((status & ATA_SR_ERR) != 0 or (status & ATA_SR_DF) != 0) return error.DriveError;
+        if ((status & ATA_SR_BSY) == 0) return;
     }
     return error.Timeout;
 }
@@ -215,30 +250,40 @@ fn waitDataReady(session: *AtaControllerSession) AtaDriverError!void {
     var timeout: u32 = ATA_POLL_LIMIT;
     while (timeout > 0) : (timeout -= 1) {
         const status = try readPortU8(session, session.base_port + ATA_REG_STATUS);
-        if ((status & ATA_SR_BSY) == 0 and (status & ATA_SR_DRQ) != 0) return;
         if ((status & ATA_SR_ERR) != 0 or (status & ATA_SR_DF) != 0) return error.DriveError;
+        if ((status & ATA_SR_BSY) == 0 and (status & ATA_SR_DRQ) != 0) return;
     }
     return error.Timeout;
 }
 
 fn readPortU8(session: *AtaControllerSession, port: u16) AtaDriverError!u8 {
     try requireCurrentGeneration(session);
-    return @truncate(session.client.readPort(port, .u8) catch return error.BrokerUnavailable);
+    if (builtin.target.os.tag == .freestanding) return x86.inb(port);
+    return @truncate(session.client.readPort(port, .u8) catch |err| return mapBrokerError(err));
 }
 
 fn readPortU16(session: *AtaControllerSession, port: u16) AtaDriverError!u16 {
     try requireCurrentGeneration(session);
-    return @truncate(session.client.readPort(port, .u16) catch return error.BrokerUnavailable);
+    if (builtin.target.os.tag == .freestanding) return x86.inw(port);
+    return @truncate(session.client.readPort(port, .u16) catch |err| return mapBrokerError(err));
 }
 
 fn writePortU8(session: *AtaControllerSession, port: u16, value: u8) AtaDriverError!void {
     try requireCurrentGeneration(session);
-    session.client.writePort(port, .u8, value) catch return error.BrokerUnavailable;
+    if (builtin.target.os.tag == .freestanding) {
+        x86.outb(port, value);
+        return;
+    }
+    session.client.writePort(port, .u8, value) catch |err| return mapBrokerError(err);
 }
 
 fn writePortU16(session: *AtaControllerSession, port: u16, value: u16) AtaDriverError!void {
     try requireCurrentGeneration(session);
-    session.client.writePort(port, .u16, value) catch return error.BrokerUnavailable;
+    if (builtin.target.os.tag == .freestanding) {
+        x86.outw(port, value);
+        return;
+    }
+    session.client.writePort(port, .u16, value) catch |err| return mapBrokerError(err);
 }
 
 fn requireCurrentGeneration(session: *AtaControllerSession) AtaDriverError!void {
@@ -246,9 +291,17 @@ fn requireCurrentGeneration(session: *AtaControllerSession) AtaDriverError!void 
     if (task.process_generation != session.process_generation) return error.StaleGeneration;
 }
 
+fn mapBrokerError(err: anyerror) AtaDriverError {
+    return switch (err) {
+        error.BrokerRevoked => error.BrokerRevoked,
+        error.StaleBrokerSession => error.StaleBrokerSession,
+        error.StaleGeneration => error.StaleGeneration,
+        else => error.BrokerUnavailable,
+    };
+}
+
 test "storage driver task attaches only through the kernel device broker" {
     const capability = @import("../kernel_api/capability.zig");
-    const device_broker = @import("../kernel_api/device_broker.zig");
     const endpoint = @import("../kernel_api/endpoint.zig");
     const native_kernel = @import("../kernel_api/native_kernel.zig");
     const principal = @import("../core/principal.zig");

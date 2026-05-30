@@ -9,6 +9,7 @@ const event_ledger_test = @import("../../native/platform/event_ledger_test.zig")
 const immutable_base = @import("../../native/platform/immutable_base.zig");
 const measured_boot = @import("../../native/platform/measured_boot.zig");
 const native_ux = @import("../../native/platform/native_ux.zig");
+const os_identity = @import("../../native/platform/os_identity.zig");
 const platform_policy_signals = @import("../../native/platform/platform_policy_signals.zig");
 const recovery_environment = @import("../../native/platform/recovery_environment.zig");
 const rendered_shell = @import("../../native/platform/rendered_shell.zig");
@@ -25,6 +26,7 @@ test "platform host tests import native platform modules" {
     std.testing.refAllDecls(immutable_base);
     std.testing.refAllDecls(measured_boot);
     std.testing.refAllDecls(native_ux);
+    std.testing.refAllDecls(os_identity);
     std.testing.refAllDecls(platform_policy_signals);
     std.testing.refAllDecls(recovery_environment);
     std.testing.refAllDecls(rendered_shell);

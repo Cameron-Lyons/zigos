@@ -38,6 +38,18 @@ pub fn build(b: *std.Build) void {
     const kernels = kernel_build.addKernelProfiles(b, target, optimize, userspace_images);
     const kernel_steps = kernel_build.addKernelProfileSteps(b, kernels, userspace_images);
 
+    const signing_cli = b.addExecutable(.{
+        .name = "zigos-sign",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/zigos_sign_main.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const signing_cli_install = b.addInstallArtifact(signing_cli, .{});
+    const signing_cli_step = b.step("signing-cli", "Build the native app manifest signing CLI");
+    signing_cli_step.dependOn(&signing_cli_install.step);
+
     const native_store = qemu_build.addNativeStoreImageStep(b);
     _ = qemu_build.addNativeRunSteps(b, kernels.zigos_native, userspace_images, native_store);
 
@@ -83,6 +95,14 @@ pub fn build(b: *std.Build) void {
     const storage_durability_qemu_step = b.step("storage-durability-qemu-test", "Run focused QEMU storage durability proof across forced reboots and one bad root slot");
     storage_durability_qemu_step.dependOn(&storage_durability_qemu_cmd.step);
 
+    const sync_two_node_qemu_cmd = qemu_build.addSyncTwoNodeQemuCommand(
+        b,
+        kernels.zigos_native,
+        userspace_images,
+    );
+    const sync_two_node_qemu_step = b.step("sync-two-node-qemu-test", "Run two QEMU native nodes with socket-backed sync transport");
+    sync_two_node_qemu_step.dependOn(&sync_two_node_qemu_cmd.step);
+
     const recovery_qemu_cmd = qemu_build.addRecoveryQemuCommand(b, kernels.recovery, userspace_images);
     const recovery_qemu_step = b.step("recovery-qemu-test", "Run QEMU proof that the recovery profile performs break-glass repair operations");
     recovery_qemu_step.dependOn(&recovery_qemu_cmd.step);
@@ -119,6 +139,10 @@ pub fn build(b: *std.Build) void {
     const iso_cmd = qemu_build.addIsoCommand(b, kernels.zigos_native, userspace_images);
     const iso_step = b.step("iso", "Build a bootable native-only ISO");
     iso_step.dependOn(&iso_cmd.step);
+
+    const uefi_qemu_cmd = qemu_build.addUefiQemuCommand(b, iso_cmd);
+    const uefi_qemu_step = b.step("uefi-qemu-test", "Run the ISO through an OVMF UEFI boot preflight in QEMU");
+    uefi_qemu_step.dependOn(&uefi_qemu_cmd.step);
 }
 
 fn dependOnRunCommands(step: *std.Build.Step, commands: []const *std.Build.Step.Run) void {

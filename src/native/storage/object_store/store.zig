@@ -128,6 +128,49 @@ pub const ObjectRecord = struct {
     object_type: ObjectType,
     latest_version_id: ids.VersionId,
     version_count: u16,
+    provenance: ObjectProvenance = .{},
+    snapshot_state: ObjectSnapshotState = .{},
+    sync_state: ObjectSyncState = .{},
+    sharing_policy: ObjectSharingPolicy = .{},
+    recovery_history: ObjectRecoveryHistory = .{},
+
+    pub fn isPrimaryUserDataModel(self: *const ObjectRecord) bool {
+        return self.provenance.latest_version_addressed and
+            self.snapshot_state.snapshot_count > 0 and
+            self.sync_state.version_watermark >= self.version_count and
+            self.sharing_policy.requires_explicit_file_bridge_grant and
+            self.recovery_history.recoverable;
+    }
+};
+
+pub const ObjectProvenance = struct {
+    created_at_ticks: u64 = 0,
+    updated_at_ticks: u64 = 0,
+    creator_signature: manifest.Signature = .{},
+    latest_version_addressed: bool = false,
+};
+
+pub const ObjectSnapshotState = struct {
+    snapshot_count: u16 = 0,
+    latest_snapshot_version_id: ids.VersionId = ids.VersionId.zero,
+};
+
+pub const ObjectSyncState = struct {
+    sync_generation: u32 = 0,
+    version_watermark: u16 = 0,
+    last_synced_version_id: ids.VersionId = ids.VersionId.zero,
+};
+
+pub const ObjectSharingPolicy = struct {
+    policy_generation: u32 = 1,
+    requires_explicit_file_bridge_grant: bool = true,
+    export_only_file_bridge: bool = true,
+};
+
+pub const ObjectRecoveryHistory = struct {
+    recovery_generation: u32 = 0,
+    recoverable: bool = true,
+    latest_recoverable_version_id: ids.VersionId = ids.VersionId.zero,
 };
 
 pub const VersionRecord = struct {
@@ -419,6 +462,19 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
             object_record.latest_version_id = version_id;
             object_record.version_count += 1;
+            object_record.provenance.updated_at_ticks = request.metadata.created_at_ticks;
+            if (!object_record.provenance.creator_signature.isPresent()) {
+                object_record.provenance.created_at_ticks = request.metadata.created_at_ticks;
+                object_record.provenance.creator_signature = request.metadata.signature;
+            }
+            object_record.provenance.latest_version_addressed = true;
+            object_record.snapshot_state.snapshot_count += 1;
+            object_record.snapshot_state.latest_snapshot_version_id = version_id;
+            object_record.sync_state.sync_generation += 1;
+            object_record.sync_state.version_watermark = object_record.version_count;
+            object_record.sync_state.last_synced_version_id = version_id;
+            object_record.recovery_history.recovery_generation += 1;
+            object_record.recovery_history.latest_recoverable_version_id = previous_version_id;
             self.markObjectDirty(object_record.id);
             self.markVersionDirty(version_id);
 

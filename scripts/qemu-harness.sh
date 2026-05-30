@@ -44,7 +44,16 @@ qemu_harness_load_extra_args() {
 
 qemu_harness_drive_arg() {
   local image_path="${1:?drive image path required}"
-  printf 'file=%s,if=ide,format=raw,index=0,id=disk0\n' "$image_path"
+  printf 'file=%s,if=ide,format=raw,index=0,id=disk0,cache=writethrough\n' "$image_path"
+}
+
+qemu_harness_append_native_store_drive() {
+  local image_path="${1:?drive image path required}"
+
+  QEMU_HARNESS_COMMAND+=(
+    -drive "file=$image_path,if=none,format=raw,id=disk0,cache=writethrough"
+    -device "ide-hd,drive=disk0,bus=ide.0,unit=0"
+  )
 }
 
 qemu_harness_build_kernel_command() {
@@ -100,6 +109,111 @@ qemu_harness_build_cdrom_command() {
     -no-reboot
     -no-shutdown
   )
+  if [ "${#QEMU_HARNESS_EXTRA_ARGS[@]}" -gt 0 ]; then
+    QEMU_HARNESS_COMMAND+=("${QEMU_HARNESS_EXTRA_ARGS[@]}")
+  fi
+}
+
+qemu_harness_find_ovmf_code() {
+  local path
+
+  if [ -n "${OVMF_CODE:-}" ]; then
+    if [ -f "$OVMF_CODE" ]; then
+      printf '%s\n' "$OVMF_CODE"
+      return 0
+    fi
+    echo "OVMF_CODE is set but does not exist: $OVMF_CODE" >&2
+    return 1
+  fi
+
+  for path in \
+    /usr/share/OVMF/OVMF_CODE.fd \
+    /usr/share/OVMF/OVMF_CODE_4M.fd \
+    /usr/share/edk2/ovmf/OVMF_CODE.fd \
+    /usr/share/edk2/ovmf/OVMF_CODE_4M.fd \
+    /usr/share/edk2/x64/OVMF_CODE.fd \
+    /usr/share/qemu/edk2-x86_64-code.fd \
+    /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+    /usr/local/share/qemu/edk2-x86_64-code.fd; do
+    if [ -f "$path" ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+
+  echo "No OVMF firmware found. Set OVMF_CODE or install OVMF/edk2-ovmf." >&2
+  return 1
+}
+
+qemu_harness_find_ovmf_vars() {
+  local path
+
+  if [ -n "${OVMF_VARS:-}" ]; then
+    if [ -f "$OVMF_VARS" ]; then
+      printf '%s\n' "$OVMF_VARS"
+      return 0
+    fi
+    echo "OVMF_VARS is set but does not exist: $OVMF_VARS" >&2
+    return 1
+  fi
+
+  for path in \
+    /usr/share/OVMF/OVMF_VARS.fd \
+    /usr/share/OVMF/OVMF_VARS_4M.fd \
+    /usr/share/edk2/ovmf/OVMF_VARS.fd \
+    /usr/share/edk2/ovmf/OVMF_VARS_4M.fd \
+    /usr/share/edk2/x64/OVMF_VARS.fd \
+    /usr/share/qemu/edk2-x86_64-vars.fd \
+    /usr/share/qemu/edk2-i386-vars.fd \
+    /opt/homebrew/share/qemu/edk2-x86_64-vars.fd \
+    /opt/homebrew/share/qemu/edk2-i386-vars.fd \
+    /usr/local/share/qemu/edk2-x86_64-vars.fd \
+    /usr/local/share/qemu/edk2-i386-vars.fd; do
+    if [ -f "$path" ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+qemu_harness_build_uefi_cdrom_command() {
+  local iso_path="${1:?ISO path required}"
+  local memory_size="${2:?QEMU memory size required}"
+  local serial_target="${3:?serial target required}"
+  local ovmf_code
+  local ovmf_vars
+  local ovmf_vars_copy
+
+  qemu_harness_require_binary
+  qemu_harness_load_extra_args
+  ovmf_code="$(qemu_harness_find_ovmf_code)"
+
+  QEMU_HARNESS_COMMAND=(
+    "$(qemu_harness_binary)"
+    -machine q35
+    -m "$memory_size"
+    -display none
+    -serial "$serial_target"
+    -monitor none
+    -no-reboot
+    -no-shutdown
+  )
+
+  if ovmf_vars="$(qemu_harness_find_ovmf_vars)"; then
+    ovmf_vars_copy="${QEMU_OVMF_VARS_COPY:-build/ovmf-vars.fd}"
+    mkdir -p "$(dirname "$ovmf_vars_copy")"
+    cp "$ovmf_vars" "$ovmf_vars_copy"
+    QEMU_HARNESS_COMMAND+=(
+      -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code"
+      -drive "if=pflash,format=raw,file=$ovmf_vars_copy"
+    )
+  else
+    QEMU_HARNESS_COMMAND+=(-bios "$ovmf_code")
+  fi
+
+  QEMU_HARNESS_COMMAND+=(-cdrom "$iso_path" -boot d)
   if [ "${#QEMU_HARNESS_EXTRA_ARGS[@]}" -gt 0 ]; then
     QEMU_HARNESS_COMMAND+=("${QEMU_HARNESS_EXTRA_ARGS[@]}")
   fi
@@ -166,8 +280,8 @@ qemu_harness_run_native_store() {
     "$serial_target" \
     no \
     yes \
-    -drive "$(qemu_harness_drive_arg "$store_image")" \
     "$@"
+  qemu_harness_append_native_store_drive "$store_image"
   qemu_harness_run_command "$qemu_log_path"
 }
 
@@ -180,8 +294,15 @@ qemu_harness_print_qemu_log() {
 
 qemu_harness_stop_qemu() {
   local qemu_pid="${1:?QEMU pid required}"
+  local remaining="${QEMU_STOP_GRACE_SECONDS:-10}"
   kill -TERM "$qemu_pid" >/dev/null 2>&1 || true
-  sleep 1
+  while [ "$remaining" -gt 0 ]; do
+    if ! kill -0 "$qemu_pid" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    remaining=$((remaining - 1))
+  done
   kill -KILL "$qemu_pid" >/dev/null 2>&1 || true
 }
 
@@ -196,6 +317,7 @@ qemu_harness_run_native_store_until_marker() {
   local qemu_pid
   local elapsed=0
   local marker_seen=0
+  local marker_stop_delay="${QEMU_MARKER_STOP_DELAY:-1}"
 
   mkdir -p "$(dirname "$serial_log_path")"
   rm -f "$serial_log_path"
@@ -207,8 +329,8 @@ qemu_harness_run_native_store_until_marker() {
     "$memory_size" \
     "file:$serial_log_path" \
     yes \
-    no \
-    -drive "$(qemu_harness_drive_arg "$store_image")"
+    no
+  qemu_harness_append_native_store_drive "$store_image"
 
   "${QEMU_HARNESS_COMMAND[@]}" >"$qemu_log_path" 2>&1 &
   qemu_pid=$!
@@ -216,7 +338,7 @@ qemu_harness_run_native_store_until_marker() {
   while kill -0 "$qemu_pid" >/dev/null 2>&1; do
     if [ -s "$serial_log_path" ] && grep -Fq "$validation_marker" "$serial_log_path"; then
       marker_seen=1
-      sleep 1
+      sleep "$marker_stop_delay"
       qemu_harness_stop_qemu "$qemu_pid"
       break
     fi
@@ -267,6 +389,30 @@ qemu_harness_run_cdrom_for_seconds() {
   wait "$qemu_pid" >/dev/null 2>&1 || true
 }
 
+qemu_harness_run_uefi_cdrom_for_seconds() {
+  local iso_path="${1:?ISO path required}"
+  local serial_log_path="${2:?serial log path required}"
+  local timeout_seconds="${3:?timeout seconds required}"
+  local memory_size="${4:-$(qemu_harness_default_memory)}"
+  local qemu_log_path
+  local qemu_pid
+
+  mkdir -p "$(dirname "$serial_log_path")"
+  rm -f "$serial_log_path"
+  qemu_log_path="${serial_log_path%.log}.qemu.log"
+  rm -f "$qemu_log_path"
+
+  qemu_harness_build_uefi_cdrom_command "$iso_path" "$memory_size" "file:$serial_log_path"
+  "${QEMU_HARNESS_COMMAND[@]}" >"$qemu_log_path" 2>&1 &
+  qemu_pid=$!
+
+  sleep "$timeout_seconds"
+  if kill -0 "$qemu_pid" >/dev/null 2>&1; then
+    qemu_harness_stop_qemu "$qemu_pid"
+  fi
+  wait "$qemu_pid" >/dev/null 2>&1 || true
+}
+
 qemu_harness_main() {
   local command="${1:-}"
   case "$command" in
@@ -278,8 +424,12 @@ qemu_harness_main() {
       shift
       qemu_harness_run_native_store "$@"
       ;;
+    uefi-cdrom)
+      shift
+      qemu_harness_run_uefi_cdrom_for_seconds "$@"
+      ;;
     *)
-      echo "usage: $0 {kernel|native-store} ..." >&2
+      echo "usage: $0 {kernel|native-store|uefi-cdrom} ..." >&2
       return 2
       ;;
   esac

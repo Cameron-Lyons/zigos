@@ -34,6 +34,8 @@ pub const Error = error{
 
 pub const NativeServiceIdentityConnection = struct {
     id: u64,
+    task_id: u64,
+    principal_id: principal.PrincipalId,
     policy_id: u64,
     capability_id: u64,
     source_device: principal.PrincipalId,
@@ -44,6 +46,7 @@ pub const NativeServiceIdentityConnection = struct {
     peer_root_digest: [32]u8,
     key: [32]u8,
     attested: bool,
+    peer_root_digest_present: bool,
     attestation_required: bool,
     identity_pinned: bool,
     egress_decision: network_policy.EgressDecision,
@@ -73,6 +76,8 @@ pub const NativeServiceIdentityFrame = struct {
 
 pub const NativeLocalDiscoveryConnection = struct {
     id: u64,
+    task_id: u64,
+    principal_id: principal.PrincipalId,
     policy_id: u64,
     capability_id: u64,
     source_device: principal.PrincipalId,
@@ -141,6 +146,8 @@ pub const NativeNetworkStack = struct {
 
         var connection = NativeServiceIdentityConnection{
             .id = self.nextConnectionId(),
+            .task_id = request.task_id,
+            .principal_id = request.principal_id,
             .policy_id = request.policy_id,
             .capability_id = request.capability_id,
             .source_device = source_device,
@@ -149,6 +156,7 @@ pub const NativeNetworkStack = struct {
             .peer_root_digest = request.evidence.peer_root_digest,
             .key = undefined,
             .attested = request.evidence.attested,
+            .peer_root_digest_present = request.evidence.peer_root_digest_present,
             .attestation_required = decision.policy_decision.attestation_required,
             .identity_pinned = decision.policy_decision.identity_pinned,
             .egress_decision = decision,
@@ -180,6 +188,8 @@ pub const NativeNetworkStack = struct {
 
         var connection = NativeLocalDiscoveryConnection{
             .id = self.nextConnectionId(),
+            .task_id = request.task_id,
+            .principal_id = request.principal_id,
             .policy_id = request.policy_id,
             .capability_id = request.capability_id,
             .source_device = source_device,
@@ -227,6 +237,31 @@ pub const NativeNetworkStack = struct {
         return frame;
     }
 
+    pub fn sendServiceIdentityFrameBrokered(
+        self: *NativeNetworkStack,
+        broker: *network_policy.EgressBroker,
+        connection: *const NativeServiceIdentityConnection,
+        payload: []const u8,
+        now_ticks: u64,
+    ) Error!NativeServiceIdentityFrame {
+        const decision = broker.connect(.{
+            .task_id = connection.task_id,
+            .principal_id = connection.principal_id,
+            .capability_id = connection.capability_id,
+            .policy_id = connection.policy_id,
+            .evidence = .{
+                .destination = .{ .service_identity = connection.serviceIdentitySlice() },
+                .attested = connection.attested,
+                .peer_root_digest_present = connection.peer_root_digest_present,
+                .peer_root_digest = connection.peer_root_digest,
+            },
+            .now_ticks = now_ticks,
+        }) catch return self.denySend(.policy_denied);
+        if (!decision.allowed) return self.denySend(decision.reason);
+
+        return self.sendServiceIdentityFrame(connection, payload);
+    }
+
     pub fn sendLocalDiscoveryProbe(
         self: *NativeNetworkStack,
         connection: *const NativeLocalDiscoveryConnection,
@@ -259,7 +294,33 @@ pub const NativeNetworkStack = struct {
         return frame;
     }
 
+    pub fn sendLocalDiscoveryProbeBrokered(
+        self: *NativeNetworkStack,
+        broker: *network_policy.EgressBroker,
+        connection: *const NativeLocalDiscoveryConnection,
+        payload: []const u8,
+        now_ticks: u64,
+    ) Error!NativeLocalDiscoveryFrame {
+        const decision = broker.connect(.{
+            .task_id = connection.task_id,
+            .principal_id = connection.principal_id,
+            .capability_id = connection.capability_id,
+            .policy_id = connection.policy_id,
+            .evidence = .{ .destination = .{ .discovery_class = connection.discoveryClassSlice() } },
+            .now_ticks = now_ticks,
+        }) catch return self.denySend(.policy_denied);
+        if (!decision.allowed) return self.denySend(decision.reason);
+
+        return self.sendLocalDiscoveryProbe(connection, payload);
+    }
+
     fn denyOpen(self: *NativeNetworkStack, reason: network_policy.EgressDecisionReason) Error {
+        self.denied_before_transmit += 1;
+        self.last_denial_reason = reason;
+        return error.EgressDenied;
+    }
+
+    fn denySend(self: *NativeNetworkStack, reason: network_policy.EgressDecisionReason) Error {
         self.denied_before_transmit += 1;
         self.last_denial_reason = reason;
         return error.EgressDenied;

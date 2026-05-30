@@ -7,7 +7,7 @@ multiboot_header:
 
 .section .bss
 .align 16
-.equ BOOT_STACK_SIZE, 262144
+.equ BOOT_STACK_SIZE, 1048576
 stack_bottom:
     /* The native session bootstrap now carries substantial typed runtime and
        crypto state before the scheduler hands off to later tasks. Keep the

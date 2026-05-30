@@ -2,7 +2,7 @@ const std = @import("std");
 const capability = @import("../../kernel_api/capability.zig");
 const native_util = @import("../../core/util.zig");
 const state_support = @import("../sync_state_support.zig");
-const sync_transport = @import("../sync_transport_harness.zig");
+const sync_transport = @import("../sync_transport.zig");
 const overlay_model = @import("overlay.zig");
 
 pub const Error = state_support.Error;

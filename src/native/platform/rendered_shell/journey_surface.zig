@@ -1,3 +1,4 @@
+const std = @import("std");
 const abi = @import("../../core/abi.zig");
 const compatibility_environment = @import("../../services/compatibility_environment.zig");
 const compositor_session = @import("../compositor_session.zig");
@@ -245,6 +246,7 @@ pub const JourneySurface = struct {
     }
 
     fn syncWorkspace(self: *JourneySurface, tick: u64) !void {
+        const task = try self.requireTask();
         const summary = try self.sync.replicateWorkspace(
             self.sync_authority,
             self.storage,
@@ -255,6 +257,12 @@ pub const JourneySurface = struct {
         );
         if (!summary.offline_first or !summary.personal_e2ee or !summary.used_device_to_device) return error.SyncPolicyMissing;
         _ = try self.ux.syncWorkspace(self.config.workspace_id, self.config.user, "device-to-device");
+        if (summary.conflict_count != 0) {
+            var detail_buffer: [96]u8 = undefined;
+            const detail = std.fmt.bufPrint(&detail_buffer, "sync conflicts: {d}", .{summary.conflict_count}) catch "sync conflicts";
+            _ = try self.compositor.openSyncConflictReview(task, self.config.workspace_id, detail);
+            _ = try self.ux.syncConflictReview(self.config.workspace_id, self.config.user, detail);
+        }
         self.synced = true;
         try self.recordPendingTaskFlows(tick);
     }

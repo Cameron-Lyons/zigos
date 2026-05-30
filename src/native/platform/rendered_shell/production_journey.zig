@@ -1,3 +1,4 @@
+const std = @import("std");
 const abi = @import("../../core/abi.zig");
 const compositor_session = @import("../compositor_session.zig");
 const event_ledger = @import("../event_ledger.zig");
@@ -417,6 +418,7 @@ pub const ProductionJourneyService = struct {
         if (!self.device_trusted or !self.sync.service.isTrustedDevice(self.config.sync_to_device)) {
             return error.DeviceTrustRequired;
         }
+        const task = try self.requireTask();
         const decision = self.policies.syncDestinationDecision(.{
             .user_id = self.config.user.serial,
             .device_id = self.config.sync_to_device.serial,
@@ -437,6 +439,18 @@ pub const ProductionJourneyService = struct {
             return error.SyncPolicyMissing;
         }
         _ = try self.ux.syncWorkspace(self.config.workspace_id, self.config.user, "device-to-device");
+        if (summary.conflict_count != 0) {
+            var detail_buffer: [96]u8 = undefined;
+            const detail = std.fmt.bufPrint(&detail_buffer, "sync conflicts: {d}", .{summary.conflict_count}) catch "sync conflicts";
+            _ = try self.dispatchCompositor(.{
+                .operation = .open_view,
+                .view_type = .sync_conflict_review,
+                .subject_task_id = task.id,
+                .workspace_id = self.config.workspace_id,
+                .detail = detail,
+            });
+            _ = try self.ux.syncConflictReview(self.config.workspace_id, self.config.user, detail);
+        }
         self.synced = true;
         try self.recordPendingTaskFlows(tick);
     }

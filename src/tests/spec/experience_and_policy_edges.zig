@@ -17,7 +17,7 @@ fn expectContains(haystack: []const u8, needle: []const u8) !void {
 }
 
 fn signBundle(bundle: *manifest.BundleManifest, signer_identity: signing.SignerIdentity) !void {
-    bundle.signature = try signing.sign(signer_identity, &package_service.digestBundle(bundle.*));
+    bundle.signature = try spec_support.signReleaseBundle(bundle.*, signer_identity);
 }
 
 fn expectEnvironment(

@@ -1,6 +1,7 @@
 const std = @import("std");
 const capability = @import("../../native/kernel_api/capability.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
+const manifest = @import("../../native/policy/manifest.zig");
 const principal = @import("../../native/core/principal.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const service_authority = @import("../../native/services/service_authority.zig");
@@ -12,6 +13,14 @@ pub fn signer(label: []const u8, fill: u8) signing.SignerIdentity {
         .label = label,
         .seed = [_]u8{fill} ** 32,
     };
+}
+
+pub fn signReleaseBundle(bundle: manifest.BundleManifest, identity: signing.SignerIdentity) !manifest.Signature {
+    return signing.signWithDefaultRegistry(
+        .ed25519,
+        identity,
+        &package_service.digestBundle(bundle),
+    );
 }
 
 pub fn user(serial: u64) principal.PrincipalId {

@@ -6,6 +6,7 @@ const compositor_session = @import("../compositor_session.zig");
 const event_ledger = @import("../event_ledger.zig");
 const manifest = @import("../../policy/manifest.zig");
 const native_ux = @import("../native_ux.zig");
+const notification_center = @import("../../services/notification_center.zig");
 const object_store = @import("../../storage/object_store.zig");
 const package_service = @import("../../services/package_service.zig");
 const policy_object = @import("../../policy/policy_object.zig");
@@ -15,6 +16,8 @@ const storage_service = @import("../../storage/storage_service.zig");
 const sync_service = @import("../../sync/sync_service.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
 const task_runtime_service = @import("../../task/task_runtime_service.zig");
+const humane_shell = @import("humane_shell.zig");
+const humane_shell_wire = @import("humane_shell_wire.zig");
 const journey_surface = @import("journey_surface.zig");
 const model = @import("model.zig");
 const production_journey = @import("production_journey.zig");
@@ -24,6 +27,10 @@ const task_shell_wire = @import("task_shell_wire.zig");
 
 const Config = model.Config;
 const Control = model.Control;
+const HumaneShell = humane_shell.HumaneShell;
+const HumaneShellCheckpointStore = humane_shell.HumaneShellCheckpointStore;
+const HumaneShellControl = humane_shell.HumaneShellControl;
+const HumaneShellStatus = humane_shell.HumaneShellStatus;
 const JourneySurface = journey_surface.JourneySurface;
 const ProductionJourneyService = production_journey.ProductionJourneyService;
 const ProductionJourneyStatus = production_journey.ProductionJourneyStatus;
@@ -66,6 +73,14 @@ fn seedShellWorkspace(storage: *storage_service.Service, owner: principal.Princi
     try storage.stagePut(workspace_record.id, path, document.object_id, document.version_id, .document);
     _ = try storage.commit(workspace_record.id, 11);
     return workspace_record.id.raw();
+}
+
+fn signReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) !manifest.Signature {
+    return signing.signWithDefaultRegistry(
+        .ed25519,
+        identity,
+        &package_service.digestBundle(bundle),
+    );
 }
 
 fn mintRenderedShellServiceAuthority(
@@ -195,7 +210,7 @@ test "rendered demo journey drives install sync permission update recovery and r
         .assets = &v1_assets,
         .requested_permissions = &permissions,
     };
-    v1.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v1));
+    v1.signature = try signReleaseBundle(bundle_signer, v1);
     var v2 = manifest.BundleManifest{
         .bundle_id = "app.trip",
         .display_name = "Trip Planner",
@@ -208,7 +223,7 @@ test "rendered demo journey drives install sync permission update recovery and r
         .assets = &v2_assets,
         .requested_permissions = &permissions,
     };
-    v2.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v2));
+    v2.signature = try signReleaseBundle(bundle_signer, v2);
 
     var package_capabilities = capability.CapabilityTable.init();
     var packages_service = package_service.Service.init();
@@ -260,6 +275,7 @@ test "rendered demo journey drives install sync permission update recovery and r
         .selective_prefixes = &.{"documents/"},
         .device_to_device_policy_id = local_policy.id,
     });
+    try sync_port.setReplicaVersion(sync_authority, workspace_id, paired_device, document_path, 92_001, 99_001);
 
     var runtime = task_runtime.Runtime.init();
     var ux = native_ux.Controller.init();
@@ -319,14 +335,15 @@ test "rendered demo journey drives install sync permission update recovery and r
 
     try std.testing.expect(packages_service.find("app.trip") == null);
     try std.testing.expectError(error.AppNotInstalled, journey.click(.start_task, 32));
-    try std.testing.expectEqual(@as(usize, 12), ledger.countMatching(.{ .kind = .task_flow }));
-    try std.testing.expectEqual(@as(usize, 3), compositor.window_count);
+    try std.testing.expectEqual(@as(usize, 13), ledger.countMatching(.{ .kind = .task_flow }));
+    try std.testing.expectEqual(@as(usize, 4), compositor.window_count);
     try std.testing.expectEqual(compositor_session.ViewType.app_panel, compositor.windowAtOrder(2).?.view_type);
+    try std.testing.expectEqual(compositor_session.ViewType.sync_conflict_review, compositor.windowAtOrder(3).?.view_type);
 
     const rendered = try journey.render(&render_buffer);
     try expectContains(rendered, "control=remove-app state=done");
     try expectContains(rendered, "package installed=yes updated=yes rolled_back=yes removed=yes");
-    try expectContains(rendered, "task_flow_events=12");
+    try expectContains(rendered, "task_flow_events=13");
 
     var export_buffer: [4096]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
@@ -337,6 +354,7 @@ test "rendered demo journey drives install sync permission update recovery and r
     try expectContains(exported, "flow_kind=open_app_panel");
     try expectContains(exported, "flow_kind=review_permission_request");
     try expectContains(exported, "flow_kind=sync_workspace");
+    try expectContains(exported, "flow_kind=sync_conflict_review");
     try expectContains(exported, "flow_kind=update_app");
     try expectContains(exported, "flow_kind=rollback_app_update");
     try expectContains(exported, "flow_kind=containment_denial");
@@ -413,7 +431,7 @@ test "production journey service rejects premature controls then routes lifecycl
         .assets = &v1_assets,
         .requested_permissions = &permissions,
     };
-    v1.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v1));
+    v1.signature = try signReleaseBundle(bundle_signer, v1);
     var v2 = manifest.BundleManifest{
         .bundle_id = "app.trip.production",
         .display_name = "Trip Planner",
@@ -426,7 +444,7 @@ test "production journey service rejects premature controls then routes lifecycl
         .assets = &v2_assets,
         .requested_permissions = &permissions,
     };
-    v2.signature = try signing.sign(bundle_signer, &package_service.digestBundle(v2));
+    v2.signature = try signReleaseBundle(bundle_signer, v2);
 
     var package_capabilities = capability.CapabilityTable.init();
     var packages_service = package_service.Service.init();
@@ -738,6 +756,222 @@ test "task shell service routes controls through compositor service and recovers
     try expectContains(rendered, "active_type=full_screen_task_view");
     try expectContains(rendered, "active_title=Task: Plan Trip");
     try expectContains(rendered, "task_flow_events=5");
+}
+
+test "humane shell composes task-first review pairing snapshots diagnostics notifications keyboard and recovery" {
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
+
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 98 };
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 981 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 98 };
+    const paired_device = principal.PrincipalId{ .kind = .device, .serial = 982 };
+    const document_path = "documents/plan.md";
+    const user_signer = signing.SignerIdentity{
+        .label = "humane-shell-user",
+        .seed = [_]u8{0xb1} ** 32,
+    };
+    const device_signer = signing.SignerIdentity{
+        .label = "humane-shell-device",
+        .seed = [_]u8{0xb2} ** 32,
+    };
+    const snapshot_signer = signing.SignerIdentity{
+        .label = "humane-shell-snapshot",
+        .seed = [_]u8{0xb3} ** 32,
+    };
+
+    var runtime_checkpoint_store = task_runtime_service.CheckpointStore{};
+    var runtime = task_runtime.Runtime.init();
+    var runtime_service = task_runtime_service.Service.initWithStore(&runtime, &runtime_checkpoint_store);
+    runtime_service.bind(9_800, .{ .kind = .service, .serial = 9_800 });
+
+    var storage = storage_service.Service.initWithStore(980, 981, storage_owner, &storage_checkpoint_store);
+    const workspace_id = try seedShellWorkspace(&storage, user, document_path);
+
+    var sync = sync_service.Service.init(9_810, 9_811, sync_owner);
+    var sync_capabilities = capability.CapabilityTable.init();
+    const sync_capability = try mintRenderedShellServiceAuthority(&sync_capabilities, sync.service_id, sync_owner, sync.task_id);
+    var sync_port = sync_service.SyncPort.init(&sync, &sync_capabilities);
+    const sync_authority = sync_service.AuthorityContext{
+        .task_id = sync.task_id,
+        .principal = sync_owner,
+        .capability_id = sync_capability.id,
+        .now_ticks = 12,
+    };
+    _ = try sync_port.ensureUserRoot(sync_authority, user, "owner", user_signer);
+
+    var ux = native_ux.Controller.init();
+    var compositor = compositor_session.Session.init();
+    var compositor_checkpoint_store = compositor_session.CheckpointStore{};
+    var compositor_service = compositor_session.Service.initWithCheckpoint(
+        9_820,
+        9_821,
+        &runtime,
+        &compositor,
+        &compositor_checkpoint_store,
+    );
+    var notifications = notification_center.Center.init();
+    var ledger = event_ledger.Ledger.init();
+    var shell_checkpoint_store = HumaneShellCheckpointStore{};
+    const config = humane_shell.HumaneShellConfig{
+        .user = user,
+        .app_owner = user,
+        .reviewer_task_id = 79,
+        .workspace_id = workspace_id,
+        .workspace_label = "Trip Workspace",
+        .document_path = document_path,
+        .task_label = "trip-planner",
+        .task_entry = "app.trip.ui",
+        .task_title = "Plan Trip",
+        .bundle_id = "app.trip.humane",
+        .display_name = "Trip Planner",
+        .ui_surface_id = 98,
+        .image_id = 98_001,
+        .paired_device = paired_device,
+        .device_label = "tablet",
+        .user_signer = user_signer,
+        .device_signer = device_signer,
+        .snapshot_label = "before-trip-edit",
+        .snapshot_signer = snapshot_signer,
+    };
+    const accessibility = humane_shell.AccessibilityProfile{
+        .high_contrast = true,
+    };
+    var shell = HumaneShell.init(
+        &runtime_service,
+        &ux,
+        &compositor_service,
+        &storage,
+        &sync_port,
+        sync_authority,
+        &notifications,
+        &ledger,
+        config,
+        accessibility,
+        &shell_checkpoint_store,
+    );
+
+    var render_buffer: [4096]u8 = undefined;
+    const initial = try shell.render(&render_buffer);
+    try expectContains(initial, "task_first=yes");
+    try expectContains(initial, "accessibility keyboard=yes screen_reader=yes visible_focus=yes reduce_motion=yes high_contrast=yes");
+    try expectContains(initial, "keyboard next=Tab previous=Shift+Tab activate=Enter");
+    try expectContains(initial, "control=open-workspace state=blocked");
+    try expectContains(initial, "shortcut=W label=Open workspace reason=task required next=start task");
+    try expectContains(initial, "label=Deny requested permission and explain why");
+    const initial_workspace_guidance = shell.controlGuidance(.open_workspace);
+    try std.testing.expectEqual(humane_shell.ControlState.blocked, initial_workspace_guidance.state);
+    try std.testing.expectEqualStrings("task required", initial_workspace_guidance.blocked_reason);
+    try std.testing.expectEqualStrings("start task", initial_workspace_guidance.next_action);
+
+    const missing_recovery = shell.dispatch(.{ .control = .recover_state, .tick = 18 });
+    try std.testing.expectEqual(HumaneShellStatus.recovery_missing, missing_recovery.status);
+    const blocked_workspace = shell.dispatch(.{ .control = .open_workspace, .tick = 19 });
+    try std.testing.expectEqual(HumaneShellStatus.invalid_order, blocked_workspace.status);
+    try std.testing.expectEqual(@as(u64, 0), blocked_workspace.task_id);
+
+    var request_buffer: [128]u8 = undefined;
+    var response_buffer: [128]u8 = undefined;
+    try std.testing.expectError(error.MalformedRequest, humane_shell_wire.decodeRequest("bad"));
+    try std.testing.expectError(error.RequestTooLarge, humane_shell_wire.encodeRequest(request_buffer[0..4], .{}));
+    const next_payload = try humane_shell_wire.encodeRequest(&request_buffer, .{ .operation = .keyboard, .keyboard = .next, .tick = 20 });
+    const decoded_next_request = try humane_shell_wire.decodeRequest(next_payload);
+    try std.testing.expectEqual(humane_shell.HumaneShellOperation.keyboard, decoded_next_request.operation);
+    try std.testing.expectEqual(humane_shell.KeyboardIntent.next, decoded_next_request.keyboard);
+    const next_focus = try humane_shell_wire.decodeResponse(try humane_shell_wire.dispatchPayload(&shell, next_payload, &response_buffer));
+    try std.testing.expectEqual(HumaneShellStatus.ok, next_focus.status);
+    try std.testing.expectEqual(HumaneShellControl.open_workspace, next_focus.focused_control);
+    const previous_focus = shell.dispatch(.{ .operation = .keyboard, .keyboard = .previous, .tick = 21 });
+    try std.testing.expectEqual(HumaneShellStatus.ok, previous_focus.status);
+    try std.testing.expectEqual(HumaneShellControl.start_task, previous_focus.focused_control);
+    const start_response = shell.dispatch(.{ .operation = .keyboard, .keyboard = .activate, .tick = 22 });
+    try std.testing.expectEqual(HumaneShellStatus.ok, start_response.status);
+    const task_id = start_response.task_id;
+    try std.testing.expect(task_id != 0);
+
+    try shell.click(.open_workspace, 23);
+    try shell.click(.open_document, 24);
+    try shell.click(.review_permission, 25);
+    try shell.click(.deny_permission, 26);
+    const denied_allow_guidance = shell.controlGuidance(.allow_permission);
+    try std.testing.expectEqual(humane_shell.ControlState.blocked, denied_allow_guidance.state);
+    try std.testing.expectEqualStrings("permission already decided", denied_allow_guidance.blocked_reason);
+    try std.testing.expectEqualStrings("continue", denied_allow_guidance.next_action);
+    const missing_snapshot = shell.dispatch(.{ .control = .rollback_snapshot, .tick = 27 });
+    try std.testing.expectEqual(HumaneShellStatus.invalid_order, missing_snapshot.status);
+    try std.testing.expectEqual(@as(u64, 0), missing_snapshot.snapshot_id);
+    const rollback_guidance = shell.controlGuidance(.rollback_snapshot);
+    try std.testing.expectEqual(humane_shell.ControlState.blocked, rollback_guidance.state);
+    try std.testing.expectEqualStrings("snapshot required", rollback_guidance.blocked_reason);
+    try std.testing.expectEqualStrings("create snapshot", rollback_guidance.next_action);
+    try shell.click(.pair_device, 28);
+    try shell.click(.create_snapshot, 29);
+    try shell.click(.rollback_snapshot, 30);
+    try shell.click(.run_diagnostics, 31);
+    const notify_payload = try humane_shell_wire.encodeRequest(&request_buffer, .{ .control = .post_notification, .tick = 32 });
+    const notify_response = try humane_shell_wire.decodeResponse(try humane_shell_wire.dispatchPayload(&shell, notify_payload, &response_buffer));
+    try std.testing.expectEqual(HumaneShellStatus.ok, notify_response.status);
+    try std.testing.expectEqual(@as(u16, 4), notify_response.notification_events);
+    try std.testing.expectError(error.ResponseTooLarge, humane_shell_wire.encodeResponse(response_buffer[0..4], notify_response));
+
+    try std.testing.expect(sync.isTrustedDevice(paired_device));
+    try std.testing.expect(shell.state.snapshot_id != 0);
+    try std.testing.expect(shell.state.remote_diagnostics_require_opt_in);
+    try std.testing.expectEqual(@as(usize, 6), ledger.countMatching(.{ .kind = .task_flow }));
+    try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .kind = .permission_review }));
+    try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .kind = .permission_decision }));
+    try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .kind = .device_trust_change }));
+    try std.testing.expectEqual(@as(usize, 4), ledger.countMatching(.{ .kind = .notification }));
+
+    const rendered = try shell.render(&render_buffer);
+    try expectContains(rendered, "control=deny-permission state=done");
+    try expectContains(rendered, "control=allow-permission state=blocked");
+    try expectContains(rendered, "reason=permission already decided next=continue");
+    try expectContains(rendered, "permission reviewed=yes denied=yes");
+    try expectContains(rendered, "denial reason=policy_denied policy=user-grant-policy missing=object-access-capability approval=yes retry_safe=no");
+    try expectContains(rendered, "device paired=yes trusted=yes label=tablet");
+    try expectContains(rendered, "snapshot id=");
+    try expectContains(rendered, "label=before-trip-edit restored=yes");
+    try expectContains(rendered, "diagnostics ran=yes");
+    try expectContains(rendered, "remote_share_requires_opt_in=yes");
+    try expectContains(rendered, "notification id=");
+    try expectContains(rendered, "reason=policy_notice detail=shell status available");
+    try expectContains(rendered, "recovery checkpoint=yes recovered=no");
+
+    var restarted_runtime = task_runtime.Runtime.init();
+    var restarted_runtime_service = task_runtime_service.Service.initWithStore(&restarted_runtime, &runtime_checkpoint_store);
+    restarted_runtime_service.bind(9_800, .{ .kind = .service, .serial = 9_800 });
+    var restarted_compositor = compositor_session.Session.init();
+    var restarted_compositor_service = compositor_session.Service.initWithCheckpoint(
+        9_820,
+        9_821,
+        &restarted_runtime,
+        &restarted_compositor,
+        &compositor_checkpoint_store,
+    );
+    var restarted_shell = HumaneShell.init(
+        &restarted_runtime_service,
+        &ux,
+        &restarted_compositor_service,
+        &storage,
+        &sync_port,
+        sync_authority,
+        &notifications,
+        &ledger,
+        config,
+        accessibility,
+        &shell_checkpoint_store,
+    );
+    try restarted_shell.click(.recover_state, 40);
+    try std.testing.expect(restarted_runtime.find(task_id) != null);
+    try std.testing.expectEqual(@as(usize, 3), restarted_compositor.window_count);
+    try std.testing.expectEqual(@as(usize, 7), ledger.countMatching(.{ .kind = .task_flow }));
+
+    const recovered = try restarted_shell.render(&render_buffer);
+    try expectContains(recovered, "recovery checkpoint=yes recovered=yes");
+    try expectContains(recovered, "task_flow_events=7");
+    try expectContains(recovered, "active_type=app_panel");
 }
 
 test "rendered task shell rejects out-of-order or missing workspace interactions" {

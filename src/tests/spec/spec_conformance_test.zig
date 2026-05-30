@@ -197,6 +197,10 @@ test "backlog gate enforces indexed hot-path tables" {
     try backlog_gates.indexedHotPathTablesGate();
 }
 
+test "backlog gate pins the first real hardware target" {
+    try backlog_gates.firstHardwareTargetGate();
+}
+
 test "backlog gate enforces driver boundary audit" {
     try backlog_gates.driverBoundaryAuditGate();
 }

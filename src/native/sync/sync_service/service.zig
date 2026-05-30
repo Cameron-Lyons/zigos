@@ -13,7 +13,7 @@ const signing = @import("../../core/signing.zig");
 const sync_adapters = @import("../sync_adapters.zig");
 const state_store = @import("../sync_state_store.zig");
 const state_support = @import("../sync_state_support.zig");
-const sync_transport = @import("../sync_transport_harness.zig");
+const sync_transport = @import("../sync_transport.zig");
 const storage_service = @import("../../storage/storage_service.zig");
 const workspace = @import("../../storage/workspace.zig");
 const sync_contracts = @import("contracts.zig");
@@ -70,7 +70,9 @@ const ReplicaSlot = state_support.ReplicaSlot;
 const ConflictSlot = state_support.ConflictSlot;
 const DatabaseContractSlot = state_support.DatabaseContractSlot;
 const OverlaySlot = state_support.OverlaySlot;
+const DurableTransportFrameSlot = state_support.DurableTransportFrameSlot;
 const PersistentState = state_support.PersistentState;
+const TransportQueueKind = state_support.TransportQueueKind;
 pub const ResidentState = state_support.ResidentState;
 const zeroConflict = state_support.zeroConflict;
 const zeroDatabaseContract = state_support.zeroDatabaseContract;
@@ -222,11 +224,12 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         pub fn transportFrameCount(self: *const Self) usize {
-            return self.transport_queue.count();
+            return self.transportFrameSlotCount(.outbound) + self.transportFrameSlotCount(.inbound);
         }
 
         pub fn latestTransportFrameId(self: *const Self) u64 {
-            return self.transport_queue.latestFrameId();
+            const next_id = self.stateConst().next_transport_frame_id;
+            return if (next_id == 1) 0 else next_id - 1;
         }
 
         pub fn overlaySessionCapacity(self: *const Self) usize {
@@ -235,7 +238,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         pub fn transportFrameCountFor(self: *const Self, workspace_id: u64, device_id: principal.PrincipalId) usize {
-            return self.transport_queue.countFor(workspace_id, device_id);
+            return self.transportFrameSlotCountFor(.outbound, workspace_id, device_id) +
+                self.transportFrameSlotCountFor(.inbound, workspace_id, device_id);
         }
 
         pub fn copyTransportFramesForSince(
@@ -245,7 +249,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             min_frame_id: u64,
             out: []TransportFrame,
         ) usize {
-            return self.transport_queue.copyForSince(workspace_id, device_id, min_frame_id, out);
+            return self.copyTransportFrameSlotsForSince(.outbound, workspace_id, device_id, min_frame_id, out);
         }
 
         pub fn latestTransportFrameForPath(
@@ -254,7 +258,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             device_id: principal.PrincipalId,
             path: []const u8,
         ) ?TransportFrame {
-            return self.transport_queue.latestForPath(workspace_id, device_id, path);
+            const outbound = self.latestTransportFrameSlotForPath(.outbound, workspace_id, device_id, path);
+            const inbound = self.latestTransportFrameSlotForPath(.inbound, workspace_id, device_id, path);
+            if (outbound == null) return inbound;
+            if (inbound == null) return outbound;
+            return if (outbound.?.id >= inbound.?.id) outbound else inbound;
         }
 
         pub fn ensureUserRoot(
@@ -390,6 +398,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.policy.owner = request.owner;
             slot.policy.offline_first = request.offline_first;
             slot.policy.personal_e2ee = request.personal_e2ee;
+            slot.policy.require_shared_access = request.require_shared_access;
             slot.policy.device_to_device_policy_id = request.device_to_device_policy_id;
             slot.policy.relay_policy_id = request.relay_policy_id;
             slot.policy.overlay_policy_id = request.overlay_policy_id;
@@ -665,6 +674,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             };
 
             try self.authorizeTransport(policy, transport, &summary);
+            try self.authorizeWorkspaceShare(store, policy, to_device, transport);
             try self.evaluateOverlay(policy, workspace_id, &summary);
 
             const last_replicated_generation = self.replicaWorkspaceGeneration(workspace_id, to_device);
@@ -698,7 +708,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                     remote_version_id,
                     &summary,
                 );
-                const frame = try self.transport_queue.enqueue(.{
+                const frame = try self.enqueueTransportFrame(.outbound, .{
                     .workspace_id = workspace_id,
                     .object_id = entry.object_id.raw(),
                     .version_id = entry.version_id.raw(),
@@ -729,7 +739,13 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             try self.ensureTrustedDevices(request.source_device, request.target_device);
             const policy = self.findWorkspacePolicy(request.workspace_id) orelse return error.WorkspacePolicyNotFound;
             try self.authorizeTransport(policy, request.transport, null);
+            try self.authorizeWorkspaceShare(store, policy, request.target_device, request.transport);
             if (policy.personal_e2ee and !request.encrypted) return error.TransportDenied;
+            if (self.findDuplicateInboundFrame(request)) |duplicate| {
+                try self.recordDuplicateInboundFrame(duplicate.frame.id);
+                return duplicate.frame;
+            }
+            if (self.replayWindowRejects(request)) return error.TransportReplayRejected;
 
             const entry = store.resolve(request.workspace_id, request.path) catch |err| switch (err) {
                 error.EntryNotFound => return error.VersionNotFound,
@@ -743,7 +759,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
             try replication_ops.applyInboundSemantic(self, store, entry, request, policy, expected_semantic);
 
-            const accepted = try self.transport_queue.enqueue(request);
+            const accepted = try self.enqueueTransportFrame(.inbound, request);
             try self.setReplicaVersionForPathHash(
                 request.workspace_id,
                 request.target_device,
@@ -755,6 +771,17 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             );
             try self.checkpoint();
             return accepted;
+        }
+
+        pub fn ackOutboundTransportFrame(self: *Self, frame_id: u64) Error!bool {
+            for (&self.state().outbound_transport_frames) |*slot| {
+                if (!slot.in_use or slot.frame.id != frame_id) continue;
+                if (slot.acked) return false;
+                slot.acked = true;
+                try self.checkpoint();
+                return true;
+            }
+            return false;
         }
 
         pub fn transferSecretObject(
@@ -875,6 +902,30 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                     if (summary) |value| value.used_relay = true;
                 },
             }
+        }
+
+        fn authorizeWorkspaceShare(
+            self: *Self,
+            store: *const storage_service.Service,
+            policy: *const WorkspacePolicy,
+            target_device: principal.PrincipalId,
+            transport: TransportMode,
+        ) Error!void {
+            _ = self;
+            if (!policy.require_shared_access) return;
+            const scope = shareNetworkScopeForTransport(transport);
+            if (!store.workspaceHasAccess(policy.workspace_id, .{
+                .principal_id = target_device,
+                .network_scope = scope,
+                .now_ticks = 0,
+            })) return error.TransportDenied;
+        }
+
+        fn shareNetworkScopeForTransport(transport: TransportMode) workspace.ShareNetworkScope {
+            return switch (transport) {
+                .device_to_device => .local_only,
+                .relay_assisted => .relay_assisted,
+            };
         }
 
         fn evaluateOverlay(
@@ -1144,6 +1195,151 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         fn nextDatabaseContractId(self: *Self) u64 {
             defer self.state().next_contract_id += 1;
             return self.stateConst().next_contract_id;
+        }
+
+        fn enqueueTransportFrame(self: *Self, queue_kind: TransportQueueKind, request: TransportFrameRequest) Error!TransportFrame {
+            const slot = self.allocateTransportFrameSlot(queue_kind) orelse return error.TransportQueueFull;
+            const frame_id = self.nextTransportFrameId();
+            slot.* = .{};
+            slot.in_use = true;
+            slot.frame = .{
+                .id = frame_id,
+                .source_frame_id = if (request.source_frame_id == 0) frame_id else request.source_frame_id,
+                .workspace_id = request.workspace_id,
+                .object_id = request.object_id,
+                .version_id = request.version_id,
+                .source_device = request.source_device,
+                .target_device = request.target_device,
+                .transport = request.transport,
+                .semantic = request.semantic,
+                .encrypted = request.encrypted,
+                .workspace_generation = request.workspace_generation,
+            };
+            slot.frame.path_len = try state_support.copyTransportPath(&slot.frame.path, request.path);
+            self.resident().markDirty();
+            return slot.frame;
+        }
+
+        fn nextTransportFrameId(self: *Self) u64 {
+            const frame_id = self.stateConst().next_transport_frame_id;
+            self.state().next_transport_frame_id +%= 1;
+            if (self.stateConst().next_transport_frame_id == 0) self.state().next_transport_frame_id = 1;
+            return frame_id;
+        }
+
+        fn allocateTransportFrameSlot(self: *Self, queue_kind: TransportQueueKind) ?*DurableTransportFrameSlot {
+            for (self.transportFrameSlots(queue_kind)) |*slot| {
+                if (!slot.in_use) return slot;
+            }
+            return null;
+        }
+
+        fn transportFrameSlotCount(self: *const Self, queue_kind: TransportQueueKind) usize {
+            var count: usize = 0;
+            for (self.transportFrameSlotsConst(queue_kind)) |slot| {
+                if (slot.in_use) count += 1;
+            }
+            return count;
+        }
+
+        fn transportFrameSlotCountFor(self: *const Self, queue_kind: TransportQueueKind, workspace_id: u64, target_device: principal.PrincipalId) usize {
+            var count: usize = 0;
+            for (self.transportFrameSlotsConst(queue_kind)) |slot| {
+                if (!slot.in_use) continue;
+                if (slot.frame.workspace_id == workspace_id and slot.frame.target_device.eql(target_device)) {
+                    count += 1;
+                }
+            }
+            return count;
+        }
+
+        fn copyTransportFrameSlotsForSince(
+            self: *const Self,
+            queue_kind: TransportQueueKind,
+            workspace_id: u64,
+            target_device: principal.PrincipalId,
+            min_frame_id: u64,
+            out: []TransportFrame,
+        ) usize {
+            var copied: usize = 0;
+            for (self.transportFrameSlotsConst(queue_kind)) |slot| {
+                if (!slot.in_use or slot.acked) continue;
+                if (slot.frame.workspace_id != workspace_id or !slot.frame.target_device.eql(target_device)) continue;
+                if (slot.frame.id <= min_frame_id) continue;
+                if (copied >= out.len) return copied;
+                out[copied] = slot.frame;
+                copied += 1;
+            }
+            return copied;
+        }
+
+        fn latestTransportFrameSlotForPath(
+            self: *const Self,
+            queue_kind: TransportQueueKind,
+            workspace_id: u64,
+            target_device: principal.PrincipalId,
+            path: []const u8,
+        ) ?TransportFrame {
+            var latest: ?TransportFrame = null;
+            for (self.transportFrameSlotsConst(queue_kind)) |slot| {
+                if (!slot.in_use) continue;
+                if (slot.frame.workspace_id != workspace_id or !slot.frame.target_device.eql(target_device)) continue;
+                if (!std.mem.eql(u8, slot.frame.pathSlice(), path)) continue;
+                if (latest == null or slot.frame.id > latest.?.id) latest = slot.frame;
+            }
+            return latest;
+        }
+
+        fn findDuplicateInboundFrame(self: *Self, request: TransportFrameRequest) ?*DurableTransportFrameSlot {
+            if (request.source_frame_id == 0) return null;
+            for (&self.state().inbound_transport_frames) |*slot| {
+                if (!slot.in_use) continue;
+                if (slot.frame.source_frame_id != request.source_frame_id) continue;
+                if (slot.frame.workspace_id != request.workspace_id) continue;
+                if (!slot.frame.source_device.eql(request.source_device)) continue;
+                if (!slot.frame.target_device.eql(request.target_device)) continue;
+                return slot;
+            }
+            return null;
+        }
+
+        fn recordDuplicateInboundFrame(self: *Self, frame_id: u64) Error!void {
+            for (&self.state().inbound_transport_frames) |*slot| {
+                if (!slot.in_use or slot.frame.id != frame_id) continue;
+                if (slot.duplicate_count != std.math.maxInt(u16)) {
+                    slot.duplicate_count += 1;
+                }
+                try self.checkpoint();
+                return;
+            }
+        }
+
+        fn replayWindowRejects(self: *const Self, request: TransportFrameRequest) bool {
+            if (request.source_frame_id == 0) return false;
+            var latest_source_frame_id: u64 = 0;
+            for (self.stateConst().inbound_transport_frames) |slot| {
+                if (!slot.in_use) continue;
+                if (slot.frame.workspace_id != request.workspace_id) continue;
+                if (!slot.frame.source_device.eql(request.source_device)) continue;
+                if (!slot.frame.target_device.eql(request.target_device)) continue;
+                latest_source_frame_id = @max(latest_source_frame_id, slot.frame.source_frame_id);
+            }
+            if (latest_source_frame_id < state_support.TRANSPORT_REPLAY_WINDOW) return false;
+            return request.source_frame_id + state_support.TRANSPORT_REPLAY_WINDOW <= latest_source_frame_id;
+        }
+
+        fn transportFrameSlots(self: *Self, queue_kind: TransportQueueKind) []DurableTransportFrameSlot {
+            return switch (queue_kind) {
+                .outbound => self.state().outbound_transport_frames[0..],
+                .inbound => self.state().inbound_transport_frames[0..],
+            };
+        }
+
+        fn transportFrameSlotsConst(self: *const Self, queue_kind: TransportQueueKind) []const DurableTransportFrameSlot {
+            return switch (queue_kind) {
+                .outbound => self.stateConst().outbound_transport_frames[0..],
+                .inbound => self.stateConst().inbound_transport_frames[0..],
+            };
         }
 
         fn resident(self: *Self) *ResidentState {

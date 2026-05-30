@@ -283,7 +283,11 @@ pub fn activateStorageBackend(
                         now_ticks,
                     ) orelse return false;
                 }
-                storage_driver_task.attachAtaBootstrapSession(&publication.ata_session.?);
+                if (publication.ata_session) |*session| {
+                    storage_driver_task.attachAtaBootstrapSession(session);
+                } else {
+                    return false;
+                }
             },
             .backend, .activator => {
                 if (publication.backend == null) {

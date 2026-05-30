@@ -11,6 +11,8 @@ const ATA_SECONDARY_BASE: u16 = 0x170;
 const ATA_SECONDARY_CTRL: u16 = 0x376;
 
 const ATA_REG_DATA: u16 = 0;
+const ATA_REG_SECCOUNT: u16 = 2;
+const ATA_REG_LBA0: u16 = 3;
 const ATA_REG_LBA1: u16 = 4;
 const ATA_REG_LBA2: u16 = 5;
 const ATA_REG_DRIVE: u16 = 6;
@@ -160,6 +162,11 @@ fn detectDrive(device: *ATADevice) void {
         _ = x86.inb(device.ctrl_port);
     }
 
+    if (!waitNotBusy(device)) return;
+    x86.outb(device.base_port + ATA_REG_SECCOUNT, 0);
+    x86.outb(device.base_port + ATA_REG_LBA0, 0);
+    x86.outb(device.base_port + ATA_REG_LBA1, 0);
+    x86.outb(device.base_port + ATA_REG_LBA2, 0);
     x86.outb(device.base_port + ATA_REG_COMMAND, ATA_CMD_IDENTIFY);
 
     const status = x86.inb(device.base_port + ATA_REG_STATUS);
@@ -191,8 +198,6 @@ fn detectDrive(device: *ATADevice) void {
         word.* = x86.inw(device.base_port + ATA_REG_DATA);
     }
 
-    device.present = true;
-
     if ((buffer[ATA_IDENTIFY_LBA_WORD] & ATA_IDENTIFY_LBA_SUPPORTED) != 0) {
         device.supports_lba = true;
     }
@@ -201,14 +206,22 @@ fn detectDrive(device: *ATADevice) void {
         device.supports_lba48 = true;
     }
 
-    if (device.supports_lba48) {
-        device.sectors = @as(u64, buffer[ATA_IDENTIFY_LBA48_SECTORS_WORD]) |
+    const lba28_sectors = if (device.supports_lba)
+        @as(u64, buffer[ATA_IDENTIFY_LBA28_SECTORS_WORD]) |
+            (@as(u64, buffer[ATA_IDENTIFY_LBA28_SECTORS_WORD + 1]) << 16)
+    else
+        0;
+    const lba48_sectors = if (device.supports_lba48)
+        @as(u64, buffer[ATA_IDENTIFY_LBA48_SECTORS_WORD]) |
             (@as(u64, buffer[ATA_IDENTIFY_LBA48_SECTORS_WORD + 1]) << 16) |
             (@as(u64, buffer[ATA_IDENTIFY_LBA48_SECTORS_WORD + 2]) << 32) |
-            (@as(u64, buffer[ATA_IDENTIFY_LBA48_SECTORS_WORD + 3]) << 48);
-    } else if (device.supports_lba) {
-        device.sectors = @as(u64, buffer[ATA_IDENTIFY_LBA28_SECTORS_WORD]) | (@as(u64, buffer[ATA_IDENTIFY_LBA28_SECTORS_WORD + 1]) << 16);
-    }
+            (@as(u64, buffer[ATA_IDENTIFY_LBA48_SECTORS_WORD + 3]) << 48)
+    else
+        0;
+    device.sectors = if (lba48_sectors != 0) lba48_sectors else lba28_sectors;
+    if (device.sectors == 0) return;
+
+    device.present = true;
 
     var model_idx: usize = 0;
     for (ATA_IDENTIFY_MODEL_WORD_START..ATA_IDENTIFY_MODEL_WORD_END) |i| {
@@ -227,6 +240,16 @@ fn detectDrive(device: *ATADevice) void {
         serial_idx += 1;
     }
     device.serial[ATA_SERIAL_BYTES] = 0;
+}
+
+fn waitNotBusy(device: *const ATADevice) bool {
+    var remaining: u32 = 100_000;
+    while (remaining > 0) : (remaining -= 1) {
+        const status = x86.inb(device.base_port + ATA_REG_STATUS);
+        if (status == 0) return true;
+        if ((status & ATA_SR_BSY) == 0) return true;
+    }
+    return false;
 }
 
 pub fn getPrimaryMaster() ?*const ATADevice {

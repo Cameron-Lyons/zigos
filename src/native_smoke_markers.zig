@@ -137,6 +137,16 @@ pub const storage_durability_required = [_][]const u8{
     boot_markers.storage_durability_deterministic_recovery,
 };
 
+pub const sync_two_node_required = [_][]const u8{
+    boot_markers.boot_start,
+    boot_markers.boot_profile_zigos_native,
+    boot_markers.transport_native_kernel_ready,
+    "ZIGOS:SYNC:SYNC:DEVICE_TO_DEVICE",
+    "ZIGOS:SYNC:SYNC:RELAY",
+    "ZIGOS:SYNC:SYNC_SERVICE:RECOVERED",
+    boot_markers.native_ready,
+};
+
 pub const recovery_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_recovery,
@@ -216,6 +226,13 @@ test "native smoke gate requires focused storage durability proof markers" {
     try std.testing.expect(contains(&storage_durability_required, boot_markers.storage_durability_interrupted_write_staged));
     try std.testing.expect(contains(&storage_durability_required, boot_markers.storage_durability_bad_root_slot_fallback));
     try std.testing.expect(contains(&storage_durability_required, boot_markers.storage_durability_deterministic_recovery));
+}
+
+test "native smoke gate requires two-node sync transport proof markers" {
+    try std.testing.expect(contains(&sync_two_node_required, boot_markers.transport_native_kernel_ready));
+    try std.testing.expect(contains(&sync_two_node_required, "ZIGOS:SYNC:SYNC:DEVICE_TO_DEVICE"));
+    try std.testing.expect(contains(&sync_two_node_required, "ZIGOS:SYNC:SYNC:RELAY"));
+    try std.testing.expect(contains(&sync_two_node_required, "ZIGOS:SYNC:SYNC_SERVICE:RECOVERED"));
 }
 
 test "native smoke gate requires production post-activation health proof markers" {

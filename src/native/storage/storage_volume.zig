@@ -85,6 +85,8 @@ pub const Volume = struct {
     attached_ata_device: ?*const anyopaque = null,
     version_signers: [object_store.MAX_VERSIONS][max_signer_bytes]u8 =
         [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** object_store.MAX_VERSIONS,
+    object_signers: [object_store.MAX_OBJECTS][max_signer_bytes]u8 =
+        [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** object_store.MAX_OBJECTS,
     snapshot_signers: [workspace.MAX_SNAPSHOTS][max_signer_bytes]u8 =
         [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** workspace.MAX_SNAPSHOTS,
 
@@ -478,7 +480,7 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
                 replayed_segments += 1;
                 if (replayed_segments > max_log_segments) return error.CorruptImage;
             },
-            .object_state => try applyObjectRecord(store, payload),
+            .object_state => try applyObjectRecord(self, store, payload),
             .chunk_state => try applyChunkRecord(store, payload),
             .blob_state => try applyBlobRecord(store, payload),
             .version_state => try applyVersionRecord(self, store, payload),
@@ -549,6 +551,21 @@ fn encodeObjectBody(writer: *CursorWriter, record: object_store.ObjectRecord) Er
     try writer.writeByte(@intFromEnum(record.object_type));
     try writer.writeU64(record.latest_version_id.raw());
     try writer.writeU16(record.version_count);
+    try writer.writeU64(record.provenance.created_at_ticks);
+    try writer.writeU64(record.provenance.updated_at_ticks);
+    try writeSignature(writer, record.provenance.creator_signature);
+    try writer.writeByte(if (record.provenance.latest_version_addressed) 1 else 0);
+    try writer.writeU16(record.snapshot_state.snapshot_count);
+    try writer.writeU64(record.snapshot_state.latest_snapshot_version_id.raw());
+    try writer.writeU32(record.sync_state.sync_generation);
+    try writer.writeU16(record.sync_state.version_watermark);
+    try writer.writeU64(record.sync_state.last_synced_version_id.raw());
+    try writer.writeU32(record.sharing_policy.policy_generation);
+    try writer.writeByte(if (record.sharing_policy.requires_explicit_file_bridge_grant) 1 else 0);
+    try writer.writeByte(if (record.sharing_policy.export_only_file_bridge) 1 else 0);
+    try writer.writeU32(record.recovery_history.recovery_generation);
+    try writer.writeByte(if (record.recovery_history.recoverable) 1 else 0);
+    try writer.writeU64(record.recovery_history.latest_recoverable_version_id.raw());
 }
 
 fn encodeVersionBody(writer: *CursorWriter, record: object_store.VersionRecord) Error!void {
@@ -635,27 +652,21 @@ fn encodeSnapshotBody(writer: *CursorWriter, record: workspace.SnapshotRecord) E
     try writer.writeU16(@intCast(record.entry_count));
 }
 
-fn applyObjectRecord(store: *object_store.Store, payload: []const u8) Error!void {
+fn applyObjectRecord(self: *Volume, store: *object_store.Store, payload: []const u8) Error!void {
     var reader = CursorReader{ .buffer = payload };
     const object_id = ids.object(try reader.readU64());
+    const slot_index = store.objects.slotIndexOf(object_id) orelse store.objects.reserveIndex(object_id) orelse return error.CorruptImage;
     const object_type = try parseObjectType(try reader.readByte());
     const latest_version_id = ids.version(try reader.readU64());
     const version_count = try reader.readU16();
-
-    if (store.object(object_id)) |record| {
-        record.object_type = object_type;
-        record.latest_version_id = latest_version_id;
-        record.version_count = version_count;
-        return;
-    }
-
-    const slot = store.objects.reserve(object_id) orelse return error.CorruptImage;
-    slot.object = .{
+    var object_record = object_store.ObjectRecord{
         .id = object_id,
         .object_type = object_type,
         .latest_version_id = latest_version_id,
         .version_count = version_count,
     };
+    try readObjectUserDataTail(&reader, &object_record, &self.object_signers[slot_index]);
+    store.objects.slots[slot_index].object = object_record;
 }
 
 fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []const u8) Error!void {
@@ -814,10 +825,7 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
 
     for (store.objects.slots) |slot| {
         if (!slot.in_use) continue;
-        try writer.writeU64(slot.object.id.raw());
-        try writer.writeByte(@intFromEnum(slot.object.object_type));
-        try writer.writeU64(slot.object.latest_version_id.raw());
-        try writer.writeU16(slot.object.version_count);
+        try encodeObjectBody(&writer, slot.object);
     }
 
     var chunk_slot_index: usize = 0;
@@ -924,11 +932,13 @@ fn deserializeState(self: *Volume, store: *object_store.Store, workspaces: *work
 
     for (0..@as(usize, object_count)) |_| {
         const object_id = ids.object(try reader.readU64());
-        const slot = store.objects.reserve(object_id) orelse return error.CorruptImage;
+        const slot_index = store.objects.reserveIndex(object_id) orelse return error.CorruptImage;
+        const slot = &store.objects.slots[slot_index];
         slot.object.id = object_id;
         slot.object.object_type = try parseObjectType(try reader.readByte());
         slot.object.latest_version_id = ids.version(try reader.readU64());
         slot.object.version_count = try reader.readU16();
+        try readObjectUserDataTail(&reader, &slot.object, &self.object_signers[slot_index]);
     }
 
     for (0..@as(usize, chunk_count)) |_| {
@@ -1045,6 +1055,28 @@ fn readMetadata(reader: *CursorReader, signer_storage: *[max_signer_bytes]u8) Er
     metadata.created_at_ticks = try reader.readU64();
     metadata.signature = try readSignature(reader, signer_storage);
     return metadata;
+}
+
+fn readObjectUserDataTail(
+    reader: *CursorReader,
+    record: *object_store.ObjectRecord,
+    signer_storage: *[max_signer_bytes]u8,
+) Error!void {
+    record.provenance.created_at_ticks = try reader.readU64();
+    record.provenance.updated_at_ticks = try reader.readU64();
+    record.provenance.creator_signature = try readSignature(reader, signer_storage);
+    record.provenance.latest_version_addressed = (try reader.readByte()) != 0;
+    record.snapshot_state.snapshot_count = try reader.readU16();
+    record.snapshot_state.latest_snapshot_version_id = ids.version(try reader.readU64());
+    record.sync_state.sync_generation = try reader.readU32();
+    record.sync_state.version_watermark = try reader.readU16();
+    record.sync_state.last_synced_version_id = ids.version(try reader.readU64());
+    record.sharing_policy.policy_generation = try reader.readU32();
+    record.sharing_policy.requires_explicit_file_bridge_grant = (try reader.readByte()) != 0;
+    record.sharing_policy.export_only_file_bridge = (try reader.readByte()) != 0;
+    record.recovery_history.recovery_generation = try reader.readU32();
+    record.recovery_history.recoverable = (try reader.readByte()) != 0;
+    record.recovery_history.latest_recoverable_version_id = ids.version(try reader.readU64());
 }
 
 fn writeSignature(writer: *CursorWriter, signature: anytype) Error!void {

@@ -24,6 +24,7 @@ pub const ViewType = enum(u8) {
     workspace_view,
     app_panel,
     full_screen_task_view,
+    sync_conflict_review,
 };
 
 pub const DecisionState = enum(u8) {
@@ -282,6 +283,15 @@ pub const Session = struct {
         title: []const u8,
     ) Error!*WindowRecord {
         return self.createWindow(.full_screen_task_view, app_task, 0, "", "", title, "", false);
+    }
+
+    pub fn openSyncConflictReview(
+        self: *Session,
+        app_task: *const task_runtime.TaskRecord,
+        workspace_id: u64,
+        detail: []const u8,
+    ) Error!*WindowRecord {
+        return self.createWindow(.sync_conflict_review, app_task, workspace_id, "", "", "Sync conflicts", detail, true);
     }
 
     pub fn ensureReviewItem(
@@ -642,7 +652,7 @@ pub const Service = struct {
                     request.display_name,
                     titlePrefixForView(request.view_type),
                     request.detail,
-                    request.view_type == .app_panel,
+                    request.view_type == .app_panel or request.view_type == .sync_conflict_review,
                 );
                 response.window_id = window.id;
             },
@@ -919,6 +929,7 @@ fn titlePrefixForView(view_type: ViewType) []const u8 {
         .workspace_view => "Workspace",
         .app_panel => "Panel",
         .full_screen_task_view => "Task",
+        .sync_conflict_review => "Sync conflicts",
     };
 }
 
@@ -1065,6 +1076,7 @@ fn viewTypeLabel(view_type: ViewType) []const u8 {
         .workspace_view => "workspace_view",
         .app_panel => "app_panel",
         .full_screen_task_view => "full_screen_task_view",
+        .sync_conflict_review => "sync_conflict_review",
     };
 }
 

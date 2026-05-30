@@ -1007,12 +1007,17 @@
       "enforcement_modules": [
         "src/native/core/principal.zig",
         "src/native/core/signing.zig",
-        "src/native/sync/device_graph.zig"
+        "src/native/sync/device_graph.zig",
+        "src/native/platform/os_identity.zig"
       ],
       "negative_tests": [
         {
           "file": "src/native/platform/attestation_service.zig",
           "name": "attestation service does not count hidden requests and detects tampering"
+        },
+        {
+          "file": "src/native/platform/os_identity.zig",
+          "name": "os identity creates passkey credentials and rejects phishing origins"
         }
       ]
     },
@@ -1371,12 +1376,17 @@
     "REQ-SECRETS": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/platform/secure_secret_store.zig"
+        "src/native/platform/secure_secret_store.zig",
+        "src/native/platform/os_identity.zig"
       ],
       "negative_tests": [
         {
           "file": "src/native/platform/secure_secret_store.zig",
           "name": "secure secret store reports missing handles and oversized secrets"
+        },
+        {
+          "file": "src/native/platform/os_identity.zig",
+          "name": "os identity requires fresh local unlock and primary device for device-bound credentials"
         }
       ]
     },
@@ -1464,7 +1474,8 @@
         "src/native/sync/device_graph.zig",
         "src/native/sync/sync_service_impl.zig",
         "src/native/sync/sync_state_store.zig",
-        "src/native/platform/measured_boot.zig"
+        "src/native/platform/measured_boot.zig",
+        "src/native/platform/os_identity.zig"
       ],
       "negative_tests": [
         {
@@ -1474,6 +1485,10 @@
         {
           "file": "src/native/sync/sync_service_test.zig",
           "name": "sync service persists platform-backed device key bindings across restart"
+        },
+        {
+          "file": "src/native/platform/os_identity.zig",
+          "name": "os identity recovers synced credentials through trusted device graph"
         }
       ]
     },
@@ -1547,6 +1562,7 @@
       "enforcement_modules": [
         "src/native/sync/network_policy.zig",
         "src/native/platform/attestation_service.zig",
+        "src/native/platform/os_identity.zig",
         "src/native/drivers/network_driver_task.zig",
         "src/native/session/service_path_proofs.zig"
       ],
@@ -1562,6 +1578,10 @@
         {
           "file": "src/native/session/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
+        },
+        {
+          "file": "src/native/platform/os_identity.zig",
+          "name": "os identity creates passkey credentials and rejects phishing origins"
         }
       ]
     },

@@ -166,6 +166,24 @@ pub fn addStorageDurabilityQemuCommand(
     return command;
 }
 
+pub fn addSyncTwoNodeQemuCommand(
+    b: *std.Build,
+    kernel: shared.KernelArtifact,
+    userspace_images: userspace_build.ArtifactSet,
+) *std.Build.Step.Run {
+    const command = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-sync-two-node-qemu.sh",
+        kernel.output_path,
+        "build/sync-two-node-qemu.log",
+        "build/native-store-sync-node-a.img",
+        "build/native-store-sync-node-b.img",
+    });
+    command.step.dependOn(kernel.install_step);
+    command.step.dependOn(userspace_images.step);
+    return command;
+}
+
 pub fn addBenchmarkCommand(
     b: *std.Build,
     kernel: shared.KernelArtifact,
@@ -196,5 +214,19 @@ pub fn addIsoCommand(
     });
     command.step.dependOn(kernel.install_step);
     command.step.dependOn(userspace_images.step);
+    return command;
+}
+
+pub fn addUefiQemuCommand(
+    b: *std.Build,
+    iso_command: *std.Build.Step.Run,
+) *std.Build.Step.Run {
+    const command = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-uefi-boot-test.sh",
+        "build/os.iso",
+        "build/uefi-boot-qemu.log",
+    });
+    command.step.dependOn(&iso_command.step);
     return command;
 }

@@ -117,7 +117,7 @@ pub const Service = struct {
         try manifest.validateApplicationPackaging(request.bundle);
         try bundle_ops.validateInstallTarget(InstalledBundle, request.bundle, request.migration_manifest);
         const digest = bundle_digest.digestBundle(request.bundle);
-        if (!signing.verify(request.bundle.signature, &digest)) {
+        if (!signing.verifyWithDefaultRegistry(request.bundle.signature, &digest)) {
             return error.InvalidManifestSignature;
         }
         const trusted = self.trust_store.trustedPublisherSignature(request.bundle.publisher, request.bundle.signature);
@@ -489,6 +489,14 @@ fn mintPackageServiceAuthority(
     });
 }
 
+fn signTestReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) !manifest.Signature {
+    return signing.signWithDefaultRegistry(
+        .ed25519,
+        identity,
+        &digestBundle(bundle),
+    );
+}
+
 test "package port requires service authority before install update rollback and remove" {
     var service = Service.init();
     service.bind(740, .{ .kind = .service, .serial = 740 });
@@ -501,7 +509,7 @@ test "package port requires service authority before install update rollback and
         .seed = [_]u8{0x5E} ** 32,
     };
     var bundle = manifest_fixtures.notesBundle();
-    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+    bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
 
     const missing_authority = AuthorityContext{
         .task_id = task_id,
@@ -557,7 +565,7 @@ test "package port requires service authority before install update rollback and
 
     var updated_bundle = bundle;
     updated_bundle.version_minor = 1;
-    updated_bundle.signature = try signing.sign(signer_identity, &digestBundle(updated_bundle));
+    updated_bundle.signature = try signTestReleaseBundle(signer_identity, updated_bundle);
     const updated = try port.install(install_authority, .{
         .bundle = updated_bundle,
         .source_identity = "store:zigos",
@@ -632,7 +640,7 @@ test "package service enforces signed manifests policy gated sources updates rol
         .requested_permissions = &v1_permissions,
         .update_channel = .stable,
     };
-    v1.signature = try signing.sign(bundle_key, &digestBundle(v1));
+    v1.signature = try signTestReleaseBundle(bundle_key, v1);
 
     var service = Service.init();
     try trustTestPublisher(&service, bundle_key, "Example Software");
@@ -689,7 +697,7 @@ test "package service enforces signed manifests policy gated sources updates rol
         .requested_permissions = &v2_permissions,
         .update_channel = .stable,
     };
-    v2.signature = try signing.sign(bundle_key, &digestBundle(v2));
+    v2.signature = try signTestReleaseBundle(bundle_key, v2);
 
     try std.testing.expectError(error.PermissionChangeUndeclared, service.install(.{
         .bundle = v2,
@@ -799,7 +807,7 @@ test "package service rejects invalid signatures and rollback before any update"
         .assets = &assets,
         .requested_permissions = &permissions,
     };
-    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+    bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
 
     var tampered = bundle;
     tampered.publisher = "Malicious Fork";
@@ -837,7 +845,7 @@ test "package service rejects untrusted self-signed and revoked publisher bundle
         .components = &components,
         .assets = &assets,
     };
-    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+    bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
 
     var service = Service.init();
     try std.testing.expectError(error.UntrustedManifestSigner, service.install(.{
@@ -887,7 +895,7 @@ test "package service rejects oversized manifests instead of truncating stored m
         },
         .assets = &assets,
     };
-    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+    bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
 
     try std.testing.expectError(error.BundleIdTooLong, service.install(.{
         .bundle = bundle,
@@ -896,7 +904,7 @@ test "package service rejects oversized manifests instead of truncating stored m
 
     const long_migration_manifest = [_]u8{'m'} ** (MAX_LABEL_BYTES + 1);
     bundle.bundle_id = "app.notes";
-    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+    bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
     try std.testing.expectError(error.MigrationManifestTooLong, service.install(.{
         .bundle = bundle,
         .source_identity = "store:zigos",
@@ -940,7 +948,7 @@ test "package service treats lease and target scope changes as declared permissi
         .assets = &assets,
         .requested_permissions = &v1_permissions,
     };
-    v1.signature = try signing.sign(signer_identity, &digestBundle(v1));
+    v1.signature = try signTestReleaseBundle(signer_identity, v1);
 
     _ = try service.install(.{
         .bundle = v1,
@@ -971,7 +979,7 @@ test "package service treats lease and target scope changes as declared permissi
         .assets = &assets,
         .requested_permissions = &v2_permissions,
     };
-    v2.signature = try signing.sign(signer_identity, &digestBundle(v2));
+    v2.signature = try signTestReleaseBundle(signer_identity, v2);
 
     try std.testing.expectError(error.PermissionChangeUndeclared, service.install(.{
         .bundle = v2,
@@ -1024,7 +1032,7 @@ test "package service accepts compatible schema updates without a migration mani
         .assets = &assets,
         .requested_permissions = &permissions,
     };
-    v1.signature = try signing.sign(signer_identity, &digestBundle(v1));
+    v1.signature = try signTestReleaseBundle(signer_identity, v1);
     _ = try service.install(.{
         .bundle = v1,
         .source_identity = "store:zigos",
@@ -1033,7 +1041,7 @@ test "package service accepts compatible schema updates without a migration mani
 
     var v2 = v1;
     v2.version_minor = 1;
-    v2.signature = try signing.sign(signer_identity, &digestBundle(v2));
+    v2.signature = try signTestReleaseBundle(signer_identity, v2);
 
     const updated = try service.install(.{
         .bundle = v2,
@@ -1108,7 +1116,7 @@ test "package service resolves installed manifests with stable slices" {
             .offline_required = true,
         },
     };
-    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+    bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
 
     _ = try service.install(.{
         .bundle = bundle,
@@ -1147,7 +1155,7 @@ test "package service indexes rebuild after persisted slots are loaded" {
         .label = "pkg-test-rebuild",
         .seed = [_]u8{0x38} ** 32,
     };
-    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+    bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
 
     service.slots[3].in_use = true;
     try bundle_ops.installNew(&service.slots[3].bundle, bundle, 1, [_]u8{0x11} ** 32, "");
@@ -1167,7 +1175,7 @@ test "package service round-trips the example writer manifest fields without wid
     try trustTestPublisher(&service, signer_identity, "Example Software");
 
     var bundle = manifest_fixtures.exampleWriterBundle();
-    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+    bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
 
     _ = try service.install(.{
         .bundle = bundle,
@@ -1214,7 +1222,7 @@ test "package service rejects example writer manifest updates that widen permiss
     try trustTestPublisher(&service, signer_identity, "Example Software");
 
     var bundle = manifest_fixtures.exampleWriterBundle();
-    bundle.signature = try signing.sign(signer_identity, &digestBundle(bundle));
+    bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
     const installed = try service.install(.{
         .bundle = bundle,
         .source_identity = "store:zigos",
@@ -1237,7 +1245,7 @@ test "package service rejects example writer manifest updates that widen permiss
     var widened = manifest_fixtures.exampleWriterBundle();
     widened.version_minor = 5;
     widened.requested_permissions = &widened_permissions;
-    widened.signature = try signing.sign(signer_identity, &digestBundle(widened));
+    widened.signature = try signTestReleaseBundle(signer_identity, widened);
 
     try std.testing.expectError(error.PermissionChangeUndeclared, service.install(.{
         .bundle = widened,

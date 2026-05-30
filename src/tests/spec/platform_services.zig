@@ -7,12 +7,14 @@ const denial_explanation = @import("../../native/policy/denial_explanation.zig")
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
+const device_graph = @import("../../native/sync/device_graph.zig");
 const ids = @import("../../native/core/ids.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const measured_boot = @import("../../native/platform/measured_boot.zig");
 const native_ux = @import("../../native/platform/native_ux.zig");
 const network_policy = @import("../../native/sync/network_policy.zig");
 const notification_center = @import("../../native/services/notification_center.zig");
+const os_identity = @import("../../native/platform/os_identity.zig");
 const secure_secret_store = @import("../../native/platform/secure_secret_store.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
@@ -77,6 +79,49 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     try std.testing.expect(!imported.resident_material);
     try std.testing.expect(imported.sealed_digest_present);
     try std.testing.expectError(secure_secret_store.Error.RawExportDenied, secrets.exportRaw(handle.id));
+
+    var graph = device_graph.Graph.init();
+    const passkey_user = spec_support.user(19);
+    const passkey_device = spec_support.device(190);
+    const passkey_user_signer = spec_support.signer("spec.passkey.user", 0xA8);
+    const passkey_device_signer = spec_support.signer("spec.passkey.device", 0xA9);
+    const passkey_credential_signer = spec_support.signer("spec.passkey.credential", 0xAA);
+    _ = try graph.ensureUserRoot(passkey_user, "passkey-owner", passkey_user_signer);
+    _ = try graph.enrollDevice(passkey_user, passkey_device, "laptop", passkey_user_signer, passkey_device_signer, 6);
+    var identities = os_identity.Store.init();
+    const passkey = try identities.registerCredential(&graph, &secrets, .{
+        .owner = passkey_user,
+        .device = passkey_device,
+        .relying_party_id = "zigos.dev",
+        .label = "default-passkey",
+        .scope = .synced,
+        .credential_identity = passkey_credential_signer,
+        .tick = 7,
+    });
+    const unlock = try os_identity.createLocalUnlockProof(passkey_user, passkey_device, "zigos.dev", "spec-nonce", .biometric, 8, 12, passkey_device_signer);
+    const passkey_assertion = try identities.assertCredential(&graph, .{
+        .credential_id = passkey.id,
+        .device = passkey_device,
+        .relying_party_id = "zigos.dev",
+        .origin = "https://zigos.dev",
+        .challenge = "spec-nonce",
+        .local_unlock = unlock,
+        .credential_identity = passkey_credential_signer,
+        .tick = 9,
+    });
+    try std.testing.expect(passkey.isRecoverableThroughDeviceGraph());
+    try std.testing.expect(passkey_assertion.local_unlock_verified);
+    try std.testing.expect(passkey_assertion.phishing_resistant);
+    try std.testing.expectError(error.PhishingOriginRejected, identities.assertCredential(&graph, .{
+        .credential_id = passkey.id,
+        .device = passkey_device,
+        .relying_party_id = "zigos.dev",
+        .origin = "https://zigos.dev.evil.test",
+        .challenge = "spec-nonce",
+        .local_unlock = unlock,
+        .credential_identity = passkey_credential_signer,
+        .tick = 10,
+    }));
 
     var policy_directory = network_policy.Directory.init();
     const peer_policy = try policy_directory.create(.{
