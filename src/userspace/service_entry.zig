@@ -3,9 +3,15 @@ const build_options = @import("build_options");
 const userspace_descriptor = @import("userspace_descriptor");
 const runtime = @import("userspace_runtime");
 
-pub fn Main(comptime service_kind: runtime.ServiceKind) type {
+pub const EntryMode = union(enum) {
+    contract,
+    service: runtime.ServiceKind,
+};
+
+pub fn Main(comptime mode: EntryMode) type {
     return struct {
         pub const Descriptor = userspace_descriptor.Descriptor;
+        pub const descriptor_section = userspace_descriptor.ELF_SECTION_NAME;
 
         pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, addr: ?usize) noreturn {
             runtime.panic(msg, trace, addr);
@@ -16,7 +22,10 @@ pub fn Main(comptime service_kind: runtime.ServiceKind) type {
         }
 
         pub fn main() callconv(.c) noreturn {
-            runtime.zigos_userspace_service_main(service_kind);
+            switch (mode) {
+                .contract => runtime.zigos_userspace_contract_main(),
+                .service => |service_kind| runtime.zigos_userspace_service_main(service_kind),
+            }
         }
 
         pub fn initDescriptor() Descriptor {

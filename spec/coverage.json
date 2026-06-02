@@ -1302,7 +1302,7 @@
         "src/native/services/service_authority.zig",
         "src/native/storage/storage_service.zig",
         "src/native/services/package_service.zig",
-        "src/native/sync/sync_service_impl.zig",
+        "src/native/sync/sync_service.zig",
         "src/native/session/service_path_proofs.zig"
       ],
       "negative_tests": [
@@ -1339,7 +1339,7 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/sync/network_policy.zig",
-        "src/native/sync/sync_service_impl.zig"
+        "src/native/sync/sync_service.zig"
       ],
       "negative_tests": [
         {
@@ -1472,7 +1472,7 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/sync/device_graph.zig",
-        "src/native/sync/sync_service_impl.zig",
+        "src/native/sync/sync_service.zig",
         "src/native/sync/sync_state_store.zig",
         "src/native/platform/measured_boot.zig",
         "src/native/platform/os_identity.zig"
@@ -1495,7 +1495,7 @@
     "REQ-LOCAL-FIRST-REPLICATION": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/sync/sync_service_impl.zig",
+        "src/native/sync/sync_service.zig",
         "src/native/sync/sync_state_store.zig",
         "src/native/sync/sync_state_support.zig",
         "src/native/sync/sync_adapters.zig",
@@ -1518,7 +1518,7 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/sync/sync_state_support.zig",
-        "src/native/sync/sync_service_impl.zig",
+        "src/native/sync/sync_service.zig",
         "src/native/sync/sync_adapters.zig",
         "src/native/sync/sync_service_test.zig",
         "src/native/session/service_path_proofs.zig"
@@ -1589,7 +1589,7 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/sync/network_policy.zig",
-        "src/native/sync/sync_service_impl.zig"
+        "src/native/sync/sync_service.zig"
       ],
       "negative_tests": [
         {
@@ -1601,7 +1601,7 @@
     "REQ-PRIVATE-OVERLAY": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/sync/sync_service_impl.zig",
+        "src/native/sync/sync_service.zig",
         "src/native/sync/sync_transport_harness.zig",
         "src/native/sync/network_policy.zig",
         "src/native/drivers/network_driver_task.zig",
@@ -2097,7 +2097,7 @@
         "src/native/platform/native_ux.zig",
         "src/native/platform/event_ledger.zig",
         "src/native/services/package_service.zig",
-        "src/native/sync/sync_service_impl.zig",
+        "src/native/sync/sync_service.zig",
         "src/native/policy/policy_object.zig",
         "src/native/task/task_runtime_service.zig",
         "src/native/storage/storage_service.zig"
@@ -2124,7 +2124,7 @@
         "src/native/core/principal.zig",
         "src/native/kernel_api/capability.zig",
         "src/native/kernel_api/shared_memory.zig",
-        "src/native/sync/sync_service_impl.zig",
+        "src/native/sync/sync_service.zig",
         "src/native/sync/device_graph.zig",
         "src/native/sync/network_policy.zig",
         "src/native/platform/immutable_base.zig",

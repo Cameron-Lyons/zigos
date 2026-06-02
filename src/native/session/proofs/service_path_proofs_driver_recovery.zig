@@ -196,21 +196,13 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     const hot_swap_address_space_before = recovered_task.address_space_id;
     const hot_swap_restart_generation_before = recovered_driver.restart_generation;
     const hot_swap_dma_before = recovered_driver.dma_domain_id;
-    const next_authority = try capability_table.mintBootRoot(.{
+    const next_authority = try driver_service.mintDriverAuthority(capability_table, .{
         .holder = storage_service_record.owner,
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = driver_service.authorityTarget(recovered_driver.device_id),
-        .rights = driver_service.allowedRightsFor(.storage_controller),
-        .scope = .{
-            .task_id = recovered_driver.owner_task_id,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 800,
-            .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = false,
-        },
+        .task_id = recovered_driver.owner_task_id,
+        .device_id = recovered_driver.device_id,
+        .device_class = .storage_controller,
+        .issued_at_ticks = 800,
+        .renewable = false,
         .audit = .{
             .policy_generation = 1,
             .source_task_id = session_task.id,
@@ -314,21 +306,13 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     const graphics_dma_before = graphics_driver.dma_domain_id;
     const graphics_process_generation_before = graphics_task.process_generation;
     const graphics_address_space_before = graphics_task.address_space_id;
-    const graphics_authority = try capability_table.mintBootRoot(.{
+    const graphics_authority = try driver_service.mintDriverAuthority(capability_table, .{
         .holder = compositor_service_record.owner,
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = driver_service.authorityTarget(graphics_driver.device_id),
-        .rights = driver_service.allowedRightsFor(.graphics_adapter),
-        .scope = .{
-            .task_id = graphics_driver.owner_task_id,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 820,
-            .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = false,
-        },
+        .task_id = graphics_driver.owner_task_id,
+        .device_id = graphics_driver.device_id,
+        .device_class = .graphics_adapter,
+        .issued_at_ticks = 820,
+        .renewable = false,
         .audit = .{
             .policy_generation = 2,
             .source_task_id = session_task.id,
