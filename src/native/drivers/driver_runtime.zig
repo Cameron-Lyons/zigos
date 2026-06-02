@@ -300,22 +300,11 @@ test "kernel bootstrap cannot publish network data-plane transports" {
     var directory = driver_service.Directory.init();
     const capability = @import("../kernel_api/capability.zig");
     var capabilities = capability.CapabilityTable.init();
-    const driver_authority = try capabilities.mintBootRoot(.{
+    const driver_authority = try driver_service.mintDriverAuthority(&capabilities, .{
         .holder = .{ .kind = .service, .serial = 91 },
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = driver_service.authorityTarget(0x8086_100E_0001),
-        .rights = driver_service.allowedRightsFor(.network_adapter),
-        .scope = .{
-            .task_id = 901,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = true,
-        },
-        .audit = .{},
+        .task_id = 901,
+        .device_id = 0x8086_100E_0001,
+        .device_class = .network_adapter,
     });
     const driver = try directory.register(.{
         .service_id = 91,
@@ -409,22 +398,14 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
         },
         .userspace_image = &storage_driver_lease_image,
     });
-    const device_capability = try capabilities.mintBootRoot(.{
+    const device_capability = try driver_service.mintDriverAuthority(&capabilities, .{
         .holder = driver_task.owner,
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = .{ .kind = .device, .id = device_id },
-        .rights = driver_service.allowedRightsFor(.storage_controller),
-        .scope = .{
-            .task_id = driver_task.id,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 1,
-            .expires_at_ticks = 5,
-            .renewable = false,
-        },
-        .audit = .{},
+        .task_id = driver_task.id,
+        .device_id = device_id,
+        .device_class = .storage_controller,
+        .issued_at_ticks = 1,
+        .expires_at_ticks = 5,
+        .renewable = false,
     });
     try runtime.grantCapability(driver_task.id, device_capability.id);
 

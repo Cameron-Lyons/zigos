@@ -45,3 +45,5 @@ pub const ResidentState = impl.ResidentState;
 pub const Service = impl.Service;
 pub const ServiceWith = impl.ServiceWith;
 pub const SyncPort = impl.SyncPort;
+pub const mintEndpointConnectAuthority = impl.mintEndpointConnectAuthority;
+pub const authorityContext = impl.authorityContext;

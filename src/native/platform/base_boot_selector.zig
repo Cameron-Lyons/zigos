@@ -4,6 +4,7 @@ const immutable_base = @import("immutable_base.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
+const volume_backend = @import("../storage/volume/backend.zig");
 
 pub const sector_lba: u64 = 1792;
 pub const sector_size: usize = 512;
@@ -25,25 +26,6 @@ const rollback_generation_offset: usize = 24;
 const last_tick_offset: usize = 32;
 const active_selection_offset: usize = 48;
 const pending_selection_offset: usize = active_selection_offset + selection_record_size;
-
-const root_storage = if (builtin.target.os.tag == .freestanding)
-    struct {
-        extern fn zigosStorageBootstrapAtaRead(
-            device: *const anyopaque,
-            start_lba: u64,
-            buffer_ptr: [*]u8,
-            buffer_len: usize,
-        ) callconv(.c) bool;
-
-        extern fn zigosStorageBootstrapAtaWrite(
-            device: *const anyopaque,
-            start_lba: u64,
-            buffer_ptr: [*]const u8,
-            buffer_len: usize,
-        ) callconv(.c) bool;
-    }
-else
-    struct {};
 
 pub const Error = error{
     ActivationSlotMismatch,
@@ -407,7 +389,7 @@ fn readRootVolumeSector(buffer: *[sector_size]u8) bool {
     if (!root_volume.hasAttachedDevice()) return false;
     if (root_volume.attached_backend_sector_count <= sector_lba) return false;
     if (root_volume.attached_ata_device) |device| {
-        return root_storage.zigosStorageBootstrapAtaRead(device, sector_lba, buffer.ptr, buffer.len);
+        return volume_backend.readAtaBootstrap(device, sector_lba, buffer[0..]);
     }
     return root_volume.attached_backend_read(sector_lba, buffer.ptr, buffer.len);
 }
@@ -420,7 +402,7 @@ fn writeRootVolumeSector(buffer: *const [sector_size]u8) bool {
     if (!root_volume.hasAttachedDevice()) return false;
     if (root_volume.attached_backend_sector_count <= sector_lba) return false;
     if (root_volume.attached_ata_device) |device| {
-        return root_storage.zigosStorageBootstrapAtaWrite(device, sector_lba, buffer.ptr, buffer.len);
+        return volume_backend.writeAtaBootstrap(device, sector_lba, buffer[0..]);
     }
     return root_volume.attached_backend_write(sector_lba, buffer.ptr, buffer.len);
 }

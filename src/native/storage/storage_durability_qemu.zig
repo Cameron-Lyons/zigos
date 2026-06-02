@@ -7,25 +7,7 @@ const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_service = @import("storage_service.zig");
 const storage_volume = @import("storage_volume.zig");
-
-const root_storage = if (builtin.target.os.tag == .freestanding)
-    struct {
-        extern fn zigosStorageBootstrapAtaRead(
-            device: *const anyopaque,
-            start_lba: u64,
-            buffer_ptr: [*]u8,
-            buffer_len: usize,
-        ) callconv(.c) bool;
-
-        extern fn zigosStorageBootstrapAtaWrite(
-            device: *const anyopaque,
-            start_lba: u64,
-            buffer_ptr: [*]const u8,
-            buffer_len: usize,
-        ) callconv(.c) bool;
-    }
-else
-    struct {};
+const volume_backend = @import("volume/backend.zig");
 
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/common.zig")
@@ -229,7 +211,7 @@ fn readProofSector(buffer: *[proof_sector_size]u8) bool {
     if (!root_volume.hasAttachedDevice()) return false;
     if (root_volume.attached_backend_sector_count <= proof_lba) return false;
     if (root_volume.attached_ata_device) |device| {
-        return root_storage.zigosStorageBootstrapAtaRead(device, proof_lba, buffer.ptr, buffer.len);
+        return volume_backend.readAtaBootstrap(device, proof_lba, buffer[0..]);
     }
     return root_volume.attached_backend_read(proof_lba, buffer.ptr, buffer.len);
 }
@@ -242,7 +224,7 @@ fn writeProofSector(buffer: *const [proof_sector_size]u8) bool {
     if (!root_volume.hasAttachedDevice()) return false;
     if (root_volume.attached_backend_sector_count <= proof_lba) return false;
     if (root_volume.attached_ata_device) |device| {
-        return root_storage.zigosStorageBootstrapAtaWrite(device, proof_lba, buffer.ptr, buffer.len);
+        return volume_backend.writeAtaBootstrap(device, proof_lba, buffer[0..]);
     }
     return root_volume.attached_backend_write(proof_lba, buffer.ptr, buffer.len);
 }

@@ -56,6 +56,14 @@ pub fn unattachedWrite(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
     return false;
 }
 
+pub fn readAtaBootstrap(device: *const anyopaque, start_lba: u64, buffer: []u8) bool {
+    return ata_bridge.read(device, start_lba, buffer);
+}
+
+pub fn writeAtaBootstrap(device: *const anyopaque, start_lba: u64, buffer: []const u8) bool {
+    return ata_bridge.write(device, start_lba, buffer);
+}
+
 pub fn clearAttachedVolume(volume: anytype) void {
     if (!volume.hasAttachedDevice()) return;
     if (volume.attached_backend_sector_count < volume_layout.required_device_sectors) return;
@@ -125,10 +133,10 @@ pub fn writeAttachedRange(volume: anytype, start_lba: u64, buffer: []const u8) b
 
 fn ataReadRange(volume: anytype, start_lba: u64, buffer: []u8) bool {
     const device = volume.attached_ata_device orelse return false;
-    return ata_bridge.read(device, start_lba, buffer);
+    return readAtaBootstrap(device, start_lba, buffer);
 }
 
 fn ataWriteRange(volume: anytype, start_lba: u64, buffer: []const u8) bool {
     const device = volume.attached_ata_device orelse return false;
-    return ata_bridge.write(device, start_lba, buffer);
+    return writeAtaBootstrap(device, start_lba, buffer);
 }

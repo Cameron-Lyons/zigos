@@ -23,6 +23,7 @@ const sync_service = @import("../sync/sync_service.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const update_health = @import("../platform/update_health.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
+const volume_backend = @import("../storage/volume/backend.zig");
 
 const build_bootloader_source_label = "src/boot/boot64.S";
 const build_bootloader_measurement_label = "multiboot-v1:zigos_native";
@@ -46,25 +47,6 @@ else
     struct {
         pub fn print(_: []const u8) void {}
     };
-
-const native_measured_boot_storage = if (builtin.target.os.tag == .freestanding)
-    struct {
-        extern fn zigosStorageBootstrapAtaRead(
-            device: *const anyopaque,
-            start_lba: u64,
-            buffer_ptr: [*]u8,
-            buffer_len: usize,
-        ) callconv(.c) bool;
-
-        extern fn zigosStorageBootstrapAtaWrite(
-            device: *const anyopaque,
-            start_lba: u64,
-            buffer_ptr: [*]const u8,
-            buffer_len: usize,
-        ) callconv(.c) bool;
-    }
-else
-    struct {};
 
 pub const TrustBoot = struct {
     runtime: *task_runtime.Runtime,
@@ -667,30 +649,9 @@ pub const TrustBoot = struct {
             .seed = [_]u8{0xB6} ** 32,
         };
 
-        const authority_capability = try self.capability_table.mintBootRoot(.{
-            .holder = sync.owner,
-            .issuer = .{ .kind = .policy_authority, .serial = 1 },
-            .target = .{ .kind = .service, .id = sync.service_id },
-            .rights = .{ .service = .{
-                .endpoint_connect = true,
-            } },
-            .scope = .{
-                .task_id = sync.task_id,
-                .local_only = true,
-                .broker_only = true,
-            },
-            .lease = .{
-                .issued_at_ticks = tick_base,
-                .expires_at_ticks = tick_base + 1_000,
-            },
-        });
+        const authority_capability = try sync_service.mintEndpointConnectAuthority(self.capability_table, sync, tick_base, tick_base + 1_000);
         var port = sync_service.SyncPort.init(sync, self.capability_table);
-        const authority = sync_service.AuthorityContext{
-            .task_id = sync.task_id,
-            .principal = sync.owner,
-            .capability_id = authority_capability.id,
-            .now_ticks = tick_base,
-        };
+        const authority = sync_service.authorityContext(sync, authority_capability, tick_base);
 
         _ = try port.ensureUserRoot(authority, user, "production-health", user_signer);
         _ = try port.enrollTrustedDevice(authority, user, source_device, "source", user_signer, source_signer, tick_base + 1);
@@ -1036,12 +997,7 @@ fn readDirectMeasuredBootSector(storage_service_id: u64, buffer: *[direct_measur
     const root_volume = root.storage_volume.defaultVolume();
     if (!root_volume.hasAttachedDevice()) return false;
     if (root_volume.attached_ata_device) |device| {
-        return native_measured_boot_storage.zigosStorageBootstrapAtaRead(
-            device,
-            direct_measured_boot_lba,
-            buffer.ptr,
-            buffer.len,
-        );
+        return volume_backend.readAtaBootstrap(device, direct_measured_boot_lba, buffer[0..]);
     }
     return root_volume.attached_backend_read(direct_measured_boot_lba, buffer.ptr, buffer.len);
 }
@@ -1054,12 +1010,7 @@ fn writeDirectMeasuredBootSector(storage_service_id: u64, buffer: *const [direct
     const root_volume = root.storage_volume.defaultVolume();
     if (!root_volume.hasAttachedDevice()) return false;
     if (root_volume.attached_ata_device) |device| {
-        return native_measured_boot_storage.zigosStorageBootstrapAtaWrite(
-            device,
-            direct_measured_boot_lba,
-            buffer.ptr,
-            buffer.len,
-        );
+        return volume_backend.writeAtaBootstrap(device, direct_measured_boot_lba, buffer[0..]);
     }
     return root_volume.attached_backend_write(direct_measured_boot_lba, buffer.ptr, buffer.len);
 }
