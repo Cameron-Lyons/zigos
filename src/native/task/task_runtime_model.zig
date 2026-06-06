@@ -482,6 +482,31 @@ pub fn copyTaskCold(dest: *TaskColdRecord, src: *const TaskColdRecord) void {
     copyBytes(std.mem.asBytes(dest), std.mem.asBytes(src));
 }
 
+pub fn copyTaskColdForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, task: *const TaskRecord) void {
+    copySlots(ExecutionComponentRecord, dest.execution_components[0..task.execution_component_count], src.execution_components[0..task.execution_component_count]);
+    copySlots(u64, dest.capability_ids[0..task.capability_count], src.capability_ids[0..task.capability_count]);
+    dest.capability_index = src.capability_index;
+    copyAuditTrailForTask(dest, src, task);
+    copyProvenanceTrailForTask(dest, src, task);
+    dest.userspace_image = src.userspace_image;
+}
+
+fn copyAuditTrailForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, task: *const TaskRecord) void {
+    var index: usize = 0;
+    while (index < task.audit_count) : (index += 1) {
+        const slot_index = (task.audit_start + index) % MAX_AUDIT_EVENTS;
+        dest.audit_trail[slot_index] = src.audit_trail[slot_index];
+    }
+}
+
+fn copyProvenanceTrailForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, task: *const TaskRecord) void {
+    var index: usize = 0;
+    while (index < task.provenance_count) : (index += 1) {
+        const slot_index = (task.provenance_start + index) % MAX_TASK_PROVENANCE_EVENTS;
+        dest.provenance_trail[slot_index] = src.provenance_trail[slot_index];
+    }
+}
+
 pub fn taskCold(task: *TaskRecord) *TaskColdRecord {
     return task.cold_state orelse native_util.impossibleByInvariant("active task records are bound to cold state storage");
 }
@@ -495,7 +520,7 @@ pub fn copyTaskColdStates(task_slots: []const TaskSlot, dest: []TaskColdRecord, 
     while (index < dest.len) : (index += 1) {
         resetTaskCold(&dest[index]);
         if (index >= task_slots.len or !task_slots[index].in_use) continue;
-        copyTaskCold(&dest[index], &src[index]);
+        copyTaskColdForTask(&dest[index], &src[index], &task_slots[index].task);
     }
 }
 

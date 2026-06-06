@@ -64,7 +64,7 @@ const saturatingSub = model.saturatingSub;
 const emptyIndexTable = model.emptyIndexTable;
 const zeroTaskCold = model.zeroTaskCold;
 const resetTaskCold = model.resetTaskCold;
-const copyTaskCold = model.copyTaskCold;
+const copyTaskColdForTask = model.copyTaskColdForTask;
 const copyTaskColdStates = model.copyTaskColdStates;
 const bindTaskColdStates = model.bindTaskColdStates;
 const copySlots = model.copySlots;
@@ -133,7 +133,7 @@ pub const Runtime = struct {
             if (!slot.in_use) continue;
             const dense_index = out.task_count;
             out.tasks[dense_index] = slot;
-            copyTaskCold(&out.task_cold[dense_index], &self.task_cold[slot_index]);
+            copyTaskColdForTask(&out.task_cold[dense_index], &self.task_cold[slot_index], &slot.task);
             out.task_count += 1;
         }
         bindTaskColdStates(out.tasks[0..out.task_count], out.task_cold[0..out.task_count]);
@@ -147,7 +147,7 @@ pub const Runtime = struct {
     }
 
     pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) void {
-        self.reset();
+        self.resetForSnapshotRestore();
         self.next_task_id = state.next_task_id;
         self.next_process_id = state.next_process_id;
         self.next_address_space_id = state.next_address_space_id;
@@ -161,7 +161,7 @@ pub const Runtime = struct {
                 native_util.impossibleByInvariant("task snapshot count is bounded by task arena capacity");
             };
             self.tasks.slotAt(slot_index).* = state.tasks[task_index];
-            copyTaskCold(&self.task_cold[task_index], &state.task_cold[task_index]);
+            copyTaskColdForTask(&self.task_cold[task_index], &state.task_cold[task_index], &state.tasks[task_index].task);
         }
 
         var address_space_index: usize = 0;
@@ -170,6 +170,20 @@ pub const Runtime = struct {
         }
         self.rebuildIndexes();
         self.debugAssertIndexIntegrity();
+    }
+
+    fn resetForSnapshotRestore(self: *Runtime) void {
+        self.next_task_id = 1;
+        self.next_process_id = 1;
+        self.next_address_space_id = 1;
+        self.next_namespace_id = 1;
+        self.next_component_id = 1;
+        self.address_space_index_slots = emptyIndexTable(INDEX_CAPACITY);
+        self.tasks.reset();
+        self.task_owner_index.reset();
+        for (&self.address_spaces) |*slot| {
+            slot.* = AddressSpaceSlot{};
+        }
     }
 
     pub fn rebuildIndexes(self: *Runtime) void {
@@ -802,9 +816,12 @@ test "restoring a snapshot rebuilds authoritative indexes" {
     var restored = Runtime.init();
     restored.restoreFromSnapshot(&snapshot);
 
-    try std.testing.expect(restored.find(task_id) != null);
+    const restored_task = restored.find(task_id).?;
     try std.testing.expect(restored.findAddressSpaceConst(address_space_id) != null);
     try std.testing.expect(restored.hasCapability(task_id, 91));
+    try std.testing.expectEqual(@as(usize, 2), restored_task.provenance_count);
+    try std.testing.expectEqual(debug_contract.ProvenanceKind.capability_grant, restored_task.latestProvenanceEvent().?.kind);
+    try std.testing.expectEqual(@as(u64, 91), restored_task.latestProvenanceEvent().?.capability_id);
 }
 
 test "explicit resource classes override the default task classification" {
