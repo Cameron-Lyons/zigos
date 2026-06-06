@@ -236,9 +236,9 @@ pub const Environment = struct {
     ) (OperationError || sync_service.AuthorityError || sync_service.Error)!bool {
         try self.requireRecoverySession(session, .revoke_device_trust);
         var capability_table = capability.CapabilityTable.init();
-        const authority_capability = mintRecoverySyncAuthority(&capability_table, sync, tick);
+        const authority_capability = sync_service.mintEndpointConnectAuthority(&capability_table, sync, 0, @max(tick, 1_000)) catch unreachable;
         var port = sync_service.SyncPort.init(sync, &capability_table);
-        const authority = recoverySyncAuthority(sync, authority_capability, tick);
+        const authority = sync_service.authorityContext(sync, authority_capability, tick);
         port.revokeTrustedDevice(authority, user, device, signer, tick) catch |err| switch (err) {
             error.AlreadyRevoked => {},
             else => return err,
@@ -285,9 +285,9 @@ pub const Environment = struct {
     ) (OperationError || sync_service.AuthorityError || sync_service.Error)!bool {
         try self.requireRecoverySession(session, .repair_sync_metadata);
         var capability_table = capability.CapabilityTable.init();
-        const authority_capability = mintRecoverySyncAuthority(&capability_table, sync, 0);
+        const authority_capability = sync_service.mintEndpointConnectAuthority(&capability_table, sync, 0, 1_000) catch unreachable;
         var port = sync_service.SyncPort.init(sync, &capability_table);
-        const authority = recoverySyncAuthority(sync, authority_capability, 0);
+        const authority = sync_service.authorityContext(sync, authority_capability, 0);
         self.report.sync_metadata_repaired = try port.repairWorkspaceMetadata(authority, storage, object_store.ids.raw(workspace_id), device_id);
         return self.report.sync_metadata_repaired;
     }
@@ -304,9 +304,9 @@ pub const Environment = struct {
     ) (OperationError || sync_service.AuthorityError || sync_service.Error)!u32 {
         try self.requireRecoverySession(session, .rotate_device_keys);
         var capability_table = capability.CapabilityTable.init();
-        const authority_capability = mintRecoverySyncAuthority(&capability_table, sync, tick);
+        const authority_capability = sync_service.mintEndpointConnectAuthority(&capability_table, sync, 0, @max(tick, 1_000)) catch unreachable;
         var port = sync_service.SyncPort.init(sync, &capability_table);
-        const authority = recoverySyncAuthority(sync, authority_capability, tick);
+        const authority = sync_service.authorityContext(sync, authority_capability, tick);
         const record = try port.rotateDeviceKey(authority, user, device, signer, next_signer, tick);
         self.report.device_keys_rotated = record.key_rotation_generation >= 2;
         return record.key_rotation_generation;
@@ -324,44 +324,6 @@ pub const Environment = struct {
         if (!active.permits(action)) return error.RecoveryActionNotAllowed;
     }
 };
-
-fn mintRecoverySyncAuthority(
-    capability_table: *capability.CapabilityTable,
-    sync: *const sync_service.Service,
-    tick: u64,
-) capability.Capability {
-    return capability_table.mintBootRoot(.{
-        .holder = sync.owner,
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = .{ .kind = .service, .id = sync.service_id },
-        .rights = .{ .service = .{
-            .endpoint_connect = true,
-        } },
-        .scope = .{
-            .task_id = sync.task_id,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = @max(tick, 1_000),
-        },
-        .audit = .{},
-    }) catch unreachable;
-}
-
-fn recoverySyncAuthority(
-    sync: *const sync_service.Service,
-    authority_capability: capability.Capability,
-    tick: u64,
-) sync_service.AuthorityContext {
-    return .{
-        .task_id = sync.task_id,
-        .principal = sync.owner,
-        .capability_id = authority_capability.id,
-        .now_ticks = tick,
-    };
-}
 
 fn recordBreakGlassDecision(
     ledger: *event_ledger.Ledger,
@@ -443,9 +405,9 @@ test "recovery environment verifies reinstalls restores repairs and rotates" {
 
     var sync = sync_service.Service.init(921, 52, sync_owner);
     var sync_capabilities = capability.CapabilityTable.init();
-    const sync_authority_capability = mintRecoverySyncAuthority(&sync_capabilities, &sync, 16);
+    const sync_authority_capability = try sync_service.mintEndpointConnectAuthority(&sync_capabilities, &sync, 0, 1_000);
     var sync_port = sync_service.SyncPort.init(&sync, &sync_capabilities);
-    const sync_authority = recoverySyncAuthority(&sync, sync_authority_capability, 16);
+    const sync_authority = sync_service.authorityContext(&sync, sync_authority_capability, 16);
     _ = try sync_port.ensureUserRoot(sync_authority, user, "cameron", user_signer);
     _ = try sync_port.enrollTrustedDevice(sync_authority, user, primary_device, "primary", user_signer, device_signer, 14);
     _ = try sync_port.enrollTrustedDevice(sync_authority, user, tablet, "tablet", user_signer, tablet_signer, 15);

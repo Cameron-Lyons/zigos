@@ -346,6 +346,41 @@ pub fn allowedRightsFor(device_class: DeviceClass) capability.CapabilityRights {
     };
 }
 
+pub const DriverAuthorityRequest = struct {
+    holder: principal.PrincipalId,
+    task_id: u64,
+    device_id: u64,
+    device_class: DeviceClass,
+    issued_at_ticks: u64 = 0,
+    expires_at_ticks: u64 = std.math.maxInt(u64),
+    renewable: bool = true,
+    local_only: bool = true,
+    audit: capability.AuditMetadata = .{},
+};
+
+pub fn mintDriverAuthority(
+    capability_table: *capability.CapabilityTable,
+    request: DriverAuthorityRequest,
+) capability.Error!capability.Capability {
+    return capability_table.mintBootRoot(.{
+        .holder = request.holder,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = authorityTarget(request.device_id),
+        .rights = allowedRightsFor(request.device_class),
+        .scope = .{
+            .task_id = request.task_id,
+            .local_only = request.local_only,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = request.issued_at_ticks,
+            .expires_at_ticks = request.expires_at_ticks,
+            .renewable = request.renewable,
+        },
+        .audit = request.audit,
+    });
+}
+
 pub fn supportsKernelBootstrapBroker(device_class: DeviceClass) bool {
     return switch (device_class) {
         .storage_controller => true,
@@ -477,22 +512,11 @@ test "driver services require signed least-privilege device authority" {
             .signer = "zigos-driver-key",
         },
     };
-    const authority = try capabilities.mintBootRoot(.{
+    const authority = try mintDriverAuthority(&capabilities, .{
         .holder = .{ .kind = .service, .serial = 2 },
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = authorityTarget(100),
-        .rights = allowedRightsFor(.network_adapter),
-        .scope = .{
-            .task_id = 7,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = true,
-        },
-        .audit = .{},
+        .task_id = 7,
+        .device_id = 100,
+        .device_class = .network_adapter,
     });
 
     const driver = try directory.register(.{
@@ -525,23 +549,21 @@ test "driver directory indexes service binding and class lookups" {
     const owner = principal.PrincipalId{ .kind = .service, .serial = 18 };
     const network_device_id: u64 = 0x8086_100E_0018;
     const storage_device_id: u64 = 0x1F001;
-    const network_authority = try capabilities.mintBootRoot(.{
+    const network_authority = try mintDriverAuthority(&capabilities, .{
         .holder = owner,
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = authorityTarget(network_device_id),
-        .rights = allowedRightsFor(.network_adapter),
-        .scope = .{ .task_id = 18, .broker_only = true },
-        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = std.math.maxInt(u64) },
-        .audit = .{},
+        .task_id = 18,
+        .device_id = network_device_id,
+        .device_class = .network_adapter,
+        .renewable = false,
+        .local_only = false,
     });
-    const storage_authority = try capabilities.mintBootRoot(.{
+    const storage_authority = try mintDriverAuthority(&capabilities, .{
         .holder = owner,
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = authorityTarget(storage_device_id),
-        .rights = allowedRightsFor(.storage_controller),
-        .scope = .{ .task_id = 19, .broker_only = true },
-        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = std.math.maxInt(u64) },
-        .audit = .{},
+        .task_id = 19,
+        .device_id = storage_device_id,
+        .device_class = .storage_controller,
+        .renewable = false,
+        .local_only = false,
     });
 
     _ = try directory.registerSigned(.{
@@ -595,39 +617,17 @@ test "driver hot-swap rebinds authority signer and dma domain" {
     var capabilities = capability.CapabilityTable.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 12 };
     const device_id: u64 = 0x1234_1111_0044;
-    const first_authority = try capabilities.mintBootRoot(.{
+    const first_authority = try mintDriverAuthority(&capabilities, .{
         .holder = owner,
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = authorityTarget(device_id),
-        .rights = allowedRightsFor(.graphics_adapter),
-        .scope = .{
-            .task_id = 44,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = true,
-        },
-        .audit = .{},
+        .task_id = 44,
+        .device_id = device_id,
+        .device_class = .graphics_adapter,
     });
-    const second_authority = try capabilities.mintBootRoot(.{
+    const second_authority = try mintDriverAuthority(&capabilities, .{
         .holder = owner,
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = authorityTarget(device_id),
-        .rights = allowedRightsFor(.graphics_adapter),
-        .scope = .{
-            .task_id = 44,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = true,
-        },
-        .audit = .{},
+        .task_id = 44,
+        .device_id = device_id,
+        .device_class = .graphics_adapter,
     });
 
     const first = try directory.registerSigned(.{
@@ -715,22 +715,11 @@ test "kernel driver roles keep data planes out of kernel by default" {
 test "network drivers cannot request kernel bootstrap broker transports" {
     var directory = Directory.init();
     var capabilities = capability.CapabilityTable.init();
-    const authority = try capabilities.mintBootRoot(.{
+    const authority = try mintDriverAuthority(&capabilities, .{
         .holder = .{ .kind = .service, .serial = 91 },
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = authorityTarget(0x8086_100E_0001),
-        .rights = allowedRightsFor(.network_adapter),
-        .scope = .{
-            .task_id = 901,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = true,
-        },
-        .audit = .{},
+        .task_id = 901,
+        .device_id = 0x8086_100E_0001,
+        .device_class = .network_adapter,
     });
 
     try std.testing.expectError(error.InvalidBootstrapTransport, directory.registerSigned(.{
@@ -750,22 +739,11 @@ test "network drivers cannot request kernel bootstrap broker transports" {
 test "storage bootstrap broker remains available for userspace storage driver claims" {
     var directory = Directory.init();
     var capabilities = capability.CapabilityTable.init();
-    const authority = try capabilities.mintBootRoot(.{
+    const authority = try mintDriverAuthority(&capabilities, .{
         .holder = .{ .kind = .service, .serial = 92 },
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = authorityTarget(0x0000_1F00_0001),
-        .rights = allowedRightsFor(.storage_controller),
-        .scope = .{
-            .task_id = 902,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = true,
-        },
-        .audit = .{},
+        .task_id = 902,
+        .device_id = 0x0000_1F00_0001,
+        .device_class = .storage_controller,
     });
 
     const driver = try directory.registerSigned(.{
@@ -848,21 +826,12 @@ test "driver services reject unsigned bundles and escalated device rights" {
         .bundle = signed_bundle,
     }));
 
-    const storage_authority = try capabilities.mintBootRoot(.{
+    const storage_authority = try mintDriverAuthority(&capabilities, .{
         .holder = .{ .kind = .service, .serial = 3 },
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = authorityTarget(200),
-        .rights = allowedRightsFor(.storage_controller),
-        .scope = .{
-            .task_id = 9,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = std.math.maxInt(u64),
-        },
-        .audit = .{},
+        .task_id = 9,
+        .device_id = 200,
+        .device_class = .storage_controller,
+        .renewable = false,
     });
     try std.testing.expectError(error.IommuRequired, directory.register(.{
         .service_id = 52,
@@ -890,22 +859,11 @@ test "kernel bootstrap transport is only granted to supported driver classes" {
             .signer = "zigos-spec-driver",
         },
     };
-    const graphics_authority = try capabilities.mintBootRoot(.{
+    const graphics_authority = try mintDriverAuthority(&capabilities, .{
         .holder = .{ .kind = .service, .serial = 4 },
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = authorityTarget(0x1234_1111_0001),
-        .rights = allowedRightsFor(.graphics_adapter),
-        .scope = .{
-            .task_id = 12,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = true,
-        },
-        .audit = .{},
+        .task_id = 12,
+        .device_id = 0x1234_1111_0001,
+        .device_class = .graphics_adapter,
     });
 
     try std.testing.expectError(error.InvalidBootstrapTransport, directory.register(.{
@@ -921,22 +879,11 @@ test "kernel bootstrap transport is only granted to supported driver classes" {
         .bootstrap_transport = .kernel_bootstrap_broker,
     }));
 
-    const input_authority = try capabilities.mintBootRoot(.{
+    const input_authority = try mintDriverAuthority(&capabilities, .{
         .holder = .{ .kind = .service, .serial = 5 },
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = authorityTarget(0x8042_0001),
-        .rights = allowedRightsFor(.input_device),
-        .scope = .{
-            .task_id = 13,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = true,
-        },
-        .audit = .{},
+        .task_id = 13,
+        .device_id = 0x8042_0001,
+        .device_class = .input_device,
     });
     try std.testing.expectError(error.InvalidBootstrapTransport, directory.register(.{
         .service_id = 61,

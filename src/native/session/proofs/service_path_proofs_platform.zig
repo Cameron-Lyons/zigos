@@ -205,30 +205,9 @@ fn seedBootedHealthNetworkProbe(
     const source_signer = signer("booted-health-source", 0x76);
     const target_signer = signer("booted-health-target", 0x77);
 
-    const authority_capability = try capability_table.mintBootRoot(.{
-        .holder = sync.owner,
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = .{ .kind = .service, .id = sync.service_id },
-        .rights = .{ .service = .{
-            .endpoint_connect = true,
-        } },
-        .scope = .{
-            .task_id = sync.task_id,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = tick_base,
-            .expires_at_ticks = tick_base + 1_000,
-        },
-    });
+    const authority_capability = try sync_service.mintEndpointConnectAuthority(capability_table, sync, tick_base, tick_base + 1_000);
     var port = sync_service.SyncPort.init(sync, capability_table);
-    const authority = sync_service.AuthorityContext{
-        .task_id = sync.task_id,
-        .principal = sync.owner,
-        .capability_id = authority_capability.id,
-        .now_ticks = tick_base,
-    };
+    const authority = sync_service.authorityContext(sync, authority_capability, tick_base);
 
     _ = try port.ensureUserRoot(authority, user, "booted-health", user_signer);
     _ = try port.enrollTrustedDevice(authority, user, source_device, "source", user_signer, source_signer, tick_base + 1);

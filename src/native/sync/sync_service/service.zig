@@ -92,6 +92,45 @@ pub const Service = ServiceWith(.{});
 const sync_port = @import("port.zig");
 pub const SyncPort = sync_port.SyncPortWith(Service);
 
+pub fn mintEndpointConnectAuthority(
+    capability_table: *capability.CapabilityTable,
+    sync: *const Service,
+    issued_at_ticks: u64,
+    expires_at_ticks: u64,
+) !capability.Capability {
+    return capability_table.mintBootRoot(.{
+        .holder = sync.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = sync.service_id },
+        .rights = .{ .service = .{
+            .endpoint_connect = true,
+        } },
+        .scope = .{
+            .task_id = sync.task_id,
+            .local_only = true,
+            .broker_only = true,
+        },
+        .lease = .{
+            .issued_at_ticks = issued_at_ticks,
+            .expires_at_ticks = expires_at_ticks,
+        },
+        .audit = .{},
+    });
+}
+
+pub fn authorityContext(
+    sync: *const Service,
+    authority_capability: capability.Capability,
+    now_ticks: u64,
+) AuthorityContext {
+    return .{
+        .task_id = sync.task_id,
+        .principal = sync.owner,
+        .capability_id = authority_capability.id,
+        .now_ticks = now_ticks,
+    };
+}
+
 pub fn ServiceWith(comptime config: ServiceConfig) type {
     config.validate();
     return struct {

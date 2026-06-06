@@ -659,7 +659,7 @@
       ],
       "implementation_anchors": [
         "src/native/sync/device_graph.zig",
-        "src/native/sync/sync_service_impl.zig",
+        "src/native/sync/sync_service.zig",
         "src/native/sync/sync_state_store.zig",
         "src/native/sync/sync_transport_harness.zig",
         "src/native/sync/network_policy.zig",

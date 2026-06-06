@@ -1,5 +1,4 @@
 const std = @import("std");
-const abi = @import("../../core/abi.zig");
 const compositor_session = @import("../compositor_session.zig");
 const event_ledger = @import("../event_ledger.zig");
 const ids = @import("../../core/ids.zig");
@@ -14,6 +13,7 @@ const sync_service = @import("../../sync/sync_service.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
 const task_runtime_service = @import("../../task/task_runtime_service.zig");
 const rendering = @import("rendering.zig");
+const task_launch = @import("task_launch.zig");
 
 const appendFmt = rendering.appendFmt;
 const renderControl = rendering.renderControl;
@@ -301,31 +301,7 @@ pub const ProductionJourneyService = struct {
     fn startTask(self: *ProductionJourneyService, tick: u64) !void {
         if (!self.installed or self.removed) return error.AppNotInstalled;
         if (self.task_id != 0) return error.TaskAlreadyStarted;
-        const image = task_runtime.syntheticUserspaceImage(self.config.task_label, self.config.task_entry);
-        const task = try self.ux.startTask(self.runtime_service.runtimePtr(), .{
-            .owner = self.config.app_owner,
-            .component_class = .app_component,
-            .budget = .{
-                .cpu_time_ticks = 1_200,
-                .memory_bytes = 64 * 1024,
-                .endpoint_slots = 2,
-                .shared_memory_bytes = 4096,
-            },
-            .ui_surface_id = self.config.ui_surface_id,
-            .local_only = true,
-            .initial_component = .{
-                .label = self.config.task_label,
-                .entry = self.config.task_entry,
-            },
-            .launch = .{
-                .boundary = .userspace_process,
-                .image_id = self.config.image_id,
-                .component_abi_version = abi.ABI_VERSION,
-                .signed = true,
-                .bundle_id = self.config.bundle_id,
-            },
-            .userspace_image = &image,
-        });
+        const task = try task_launch.startConfiguredTask(self.ux, self.runtime_service.runtimePtr(), self.config);
         self.task_id = task.id;
         try self.recordPendingTaskFlows(tick);
     }
