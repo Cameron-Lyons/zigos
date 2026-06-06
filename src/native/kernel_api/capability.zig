@@ -370,12 +370,6 @@ pub const Capability = struct {
     }
 };
 
-fn finalizeTraceId(record: *Capability) void {
-    if (record.audit.trace_id == 0) {
-        record.audit.trace_id = computeCapabilityTraceId(record.*);
-    }
-}
-
 fn computeCapabilityTraceId(record: Capability) u64 {
     var hash = native_util.FNV1A_64_OFFSET_BASIS;
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.id);
@@ -570,7 +564,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         fn mintFromGrantPlan(self: *Self, request: MintRequest) Error!Capability {
             if (!rightsAreValidForTarget(request.target, request.rights)) return error.InvalidCapabilityRights;
             const target_generation_index = try self.ensureTargetGenerationIndex(request.target);
-            var record = Capability{
+            const record = Capability{
                 .id = self.allocateCapabilityId(),
                 .holder = request.holder,
                 .issuer = request.issuer,
@@ -581,7 +575,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .revocation_generation = self.targetGenerationAt(target_generation_index).generation,
                 .audit = request.audit,
             };
-            finalizeTraceId(&record);
             return self.insert(record, target_generation_index);
         }
 
@@ -597,7 +590,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 
             var audit = request.audit;
             if (audit.parent_trace_id == 0) audit.parent_trace_id = parent.traceId();
-            var record = Capability{
+            const record = Capability{
                 .id = self.allocateCapabilityId(),
                 .holder = request.holder,
                 .issuer = parent.holder,
@@ -608,7 +601,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .revocation_generation = parent.revocation_generation,
                 .audit = audit,
             };
-            finalizeTraceId(&record);
             return self.insert(record, parent_slot.target_generation_index);
         }
 
@@ -622,7 +614,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 
             var audit = request.audit;
             if (audit.parent_trace_id == 0) audit.parent_trace_id = original.traceId();
-            var record = Capability{
+            const record = Capability{
                 .id = self.allocateCapabilityId(),
                 .holder = request.new_holder,
                 .issuer = original.issuer,
@@ -633,7 +625,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .revocation_generation = original.revocation_generation,
                 .audit = audit,
             };
-            finalizeTraceId(&record);
             const passed = try self.insert(record, original_slot.target_generation_index);
 
             if (request.revoke_source) {
@@ -782,7 +773,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             for (plan.slice(), 0..) |entry, index| {
                 const capability_id = self.allocateCapabilityId();
                 if (capability_id == 0) native_util.impossibleByInvariant("capability allocator never returns the reserved zero id");
-                var granted_capability = Capability{
+                const granted_capability = Capability{
                     .id = capability_id,
                     .holder = entry.request.holder,
                     .issuer = entry.request.issuer,
@@ -793,7 +784,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                     .revocation_generation = self.targetGenerationAt(reservation.target_generation_indexes[index]).generation,
                     .audit = entry.request.audit,
                 };
-                finalizeTraceId(&granted_capability);
                 const slot_index = reservation.slot_indexes[index];
                 self.claimReservedSlot(slot_index);
                 self.slots[slot_index] = .{
