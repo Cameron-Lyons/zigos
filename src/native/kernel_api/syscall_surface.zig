@@ -3,6 +3,7 @@ const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
 const abi = @import("../core/abi.zig");
 const capability = @import("capability.zig");
 const component_port = @import("component_port.zig");
+const debug_contract = @import("../security/debug_contract.zig");
 const endpoint = @import("endpoint.zig");
 const generated_image_fixtures = if (@import("builtin").is_test) @import("../task/generated_image_fixtures.zig") else struct {};
 const operation_metadata = @import("operation_metadata.zig");
@@ -77,28 +78,71 @@ pub fn dispatch(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    if (caller_task_id == 0) return .{
-        .status = .denied,
-        .denial_reason = .scope_violation,
-    };
+    if (caller_task_id == 0) return syscall_dispatch.explainedFailure(
+        .denied,
+        .scope_violation,
+        "syscall-dispatch",
+        "subject-task",
+        caller_task_id,
+        0,
+        null,
+        0,
+        now_ticks,
+    );
     const memory = syscall_dispatch.UserMemoryContext.init(port, caller_task_id);
-    const header = syscall_dispatch.readRequest(abi.RequestHeader, memory, request_addr) orelse return .{
-        .status = .invalid_request_pointer,
-    };
-    if (header.version != abi.ABI_VERSION) return .{
-        .status = .unsupported_abi_version,
-    };
-    if (header.subject_task_id == 0 or header.subject_task_id != caller_task_id) return .{
-        .status = .denied,
-        .denial_reason = .scope_violation,
-    };
+    const header = syscall_dispatch.readRequest(abi.RequestHeader, memory, request_addr) orelse return syscall_dispatch.explainedFailure(
+        .invalid_request_pointer,
+        .invalid_target,
+        "syscall-dispatch",
+        "request-header",
+        caller_task_id,
+        0,
+        null,
+        0,
+        now_ticks,
+    );
+    if (header.version != abi.ABI_VERSION) return syscall_dispatch.explainedFailure(
+        .unsupported_abi_version,
+        .unsupported_operation,
+        "syscall-dispatch",
+        "native-abi-version",
+        caller_task_id,
+        0,
+        null,
+        header.version,
+        now_ticks,
+    );
+    if (header.subject_task_id == 0 or header.subject_task_id != caller_task_id) return syscall_dispatch.explainedFailure(
+        .denied,
+        .scope_violation,
+        "syscall-dispatch",
+        "matching-subject-task",
+        caller_task_id,
+        0,
+        .task,
+        header.subject_task_id,
+        now_ticks,
+    );
 
-    const descriptor = syscallDescriptorFromOpcode(header.operation) orelse return .{
-        .status = .unsupported_operation,
-        .denial_reason = .unsupported_operation,
-    };
+    const descriptor = syscallDescriptorFromOpcode(header.operation) orelse return syscall_dispatch.explainedFailure(
+        .unsupported_operation,
+        .unsupported_operation,
+        "unsupported-operation",
+        "declared-native-operation",
+        caller_task_id,
+        0,
+        null,
+        header.operation,
+        now_ticks,
+    );
 
-    return descriptor.handler(port, memory, now_ticks, request_addr, response_addr, response_len);
+    return syscall_dispatch.withSyscallContract(
+        descriptor.handler(port, memory, now_ticks, request_addr, response_addr, response_len),
+        descriptor.operation,
+        descriptor.required_right,
+        caller_task_id,
+        now_ticks,
+    );
 }
 
 fn syscallDescriptorFromOpcode(opcode: u16) ?*const SyscallDescriptor {
@@ -253,11 +297,35 @@ test "syscall surface dispatches typed task creation requests" {
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
     try std.testing.expectEqual(@as(u32, @sizeOf(abi.TaskDescriptor)), result.bytes_written);
     try std.testing.expectEqual(abi.DenialReason.none, result.denial_reason);
+    try std.testing.expectEqual(debug_contract.ProvenanceKind.syscall, result.provenance.kind);
+    try std.testing.expectEqual(debug_contract.Decision.allowed, result.provenance.decision);
+    try std.testing.expect(result.provenance.trace_id != 0);
     try std.testing.expect(response.task_id != 0);
     try std.testing.expectEqual(@as(u16, @intFromEnum(task_runtime.ComponentClass.app_component)), response.component_class);
     try std.testing.expect(abi.taskFlagsHas(response.flags, abi.TASK_FLAG_USERSPACE_PROCESS));
     try std.testing.expect(abi.taskFlagsHas(response.flags, abi.TASK_FLAG_EXECUTABLE_IMAGE_MAPPED));
     try std.testing.expectEqual(@as(u8, @intFromEnum(accelerator_scheduler.ResourceClass.batch_compute)), abi.taskFlagsResourceClass(response.flags));
+}
+
+test "syscall surface explains preflight request failures" {
+    var test_kernel = TestKernel{};
+    try test_kernel.init();
+
+    const result = dispatch(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        5,
+        0,
+        0,
+        0,
+    );
+
+    try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, result.status);
+    try std.testing.expectEqual(abi.DenialReason.invalid_target, result.denial_reason);
+    try std.testing.expectEqual(abi.DenialReason.invalid_target, result.explanation.reason);
+    try std.testing.expectEqual(debug_contract.ProvenanceKind.syscall, result.provenance.kind);
+    try std.testing.expectEqual(debug_contract.Decision.denied, result.provenance.decision);
+    try std.testing.expect(result.provenance.trace_id != 0);
 }
 
 test "syscall surface returns an explicit empty receive response when no message is queued" {
@@ -351,6 +419,9 @@ test "syscall surface denies task creation without signed userspace launch prove
 
     try std.testing.expectEqual(abi.SyscallStatus.denied, result.status);
     try std.testing.expectEqual(abi.DenialReason.policy_denied, result.denial_reason);
+    try std.testing.expectEqual(abi.DenialReason.policy_denied, result.explanation.reason);
+    try std.testing.expectEqualStrings("task_create", result.explanation.operationSlice());
+    try std.testing.expect(result.explanation.fingerprint != 0);
     try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
 
     const unsigned_image = try generated_image_fixtures.appImage();

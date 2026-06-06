@@ -1,0 +1,878 @@
+const std = @import("std");
+const common = @import("check_common");
+
+const abi = @import("native/core/abi.zig");
+const binary_cursor = @import("binary_cursor");
+const capability = @import("native/kernel_api/capability.zig");
+const crash_record = @import("kernel/platform/crash_record.zig");
+const elf_image_inspector = @import("native/task/elf_image_inspector.zig");
+const object_store = @import("native/storage/object_store.zig");
+const request_header = @import("native/core/request_header.zig");
+const storage_volume = @import("native/storage/storage_volume.zig");
+const sync_state_store = @import("native/sync/sync_state_store.zig");
+const syscall_dispatch = @import("native/kernel_api/syscall_dispatch.zig");
+const userspace_descriptor = @import("native/task/userspace_descriptor.zig");
+const workspace = @import("native/storage/workspace.zig");
+
+const FUZZ_CORPUS_PATH = "spec/release_security/fuzz_corpus.json";
+const RELEASE_ARTIFACTS_PATH = "spec/release_security/release_artifacts.json";
+const THREAT_MODEL_PATH = "spec/release_security/threat_model.json";
+const MEMORY_SAFETY_INVENTORY_PATH = "spec/release_security/memory_safety_inventory.json";
+const CRASH_DUMP_REDACTION_PATH = "spec/release_security/crash_dump_redaction.json";
+const VULNERABILITY_DISCLOSURE_PATH = "spec/release_security/vulnerability_disclosure.json";
+const SECURITY_POLICY_PATH = "SECURITY.md";
+
+const REQUIRED_HARNESS_IDS = [_][]const u8{
+    "binary-cursor",
+    "userspace-descriptor",
+    "elf-image-metadata",
+    "storage-volume-image",
+    "sync-record",
+    "capability-message",
+    "syscall-abi",
+};
+
+const REQUIRED_THREAT_DOMAINS = [_][]const u8{
+    "explicit-authority",
+    "privilege-boundaries",
+    "boot-trust",
+    "recovery",
+    "policy-mediation",
+    "storage-integrity",
+    "sync-trust",
+    "diagnostics-privacy",
+    "driver-isolation",
+};
+
+const UNSAFE_SCAN_PATTERNS = [_][]const u8{
+    "@ptrFromInt",
+    "@intFromPtr",
+    "@ptrCast",
+    "@alignCast",
+    "asm",
+    "extern struct",
+    "packed struct",
+    "volatile",
+    "allowzero",
+    "@fieldParentPtr",
+    "@atomic",
+};
+
+const REDACTION_MARKERS = [_][]const u8{
+    "secret",
+    "token",
+    "capability",
+    "private",
+    "raw-memory",
+    "raw memory",
+    "object:",
+    "workspace:",
+};
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    var errors = std.ArrayList([]const u8).empty;
+    var summary = GateSummary{};
+
+    try validateFuzzCorpus(allocator, io, &errors, &summary);
+    try validateReleaseArtifacts(allocator, io, &errors);
+    try validateThreatModel(allocator, io, &errors);
+    try validateMemorySafetyInventory(allocator, gpa, io, &errors, &summary);
+    try validateCrashDumpRedaction(allocator, io, &errors);
+    try validateVulnerabilityDisclosure(allocator, io, &errors);
+
+    if (errors.items.len > 0) {
+        common.printErrors(errors.items);
+        std.process.exit(1);
+    }
+
+    try common.printStdout(
+        io,
+        "Release security gate OK: {d} fuzz cases, {d} unsafe source files audited\n",
+        .{ summary.fuzz_cases, summary.unsafe_paths },
+    );
+}
+
+const GateSummary = struct {
+    fuzz_cases: usize = 0,
+    unsafe_paths: usize = 0,
+};
+
+fn validateFuzzCorpus(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+    summary: *GateSummary,
+) !void {
+    const root = try parseJsonFile(allocator, io, errors, FUZZ_CORPUS_PATH) orelse return;
+    const min_mutations = try expectPositiveIntegerField(
+        allocator,
+        errors,
+        root,
+        "fuzz corpus",
+        "minimum_mutations_per_seed",
+    ) orelse 0;
+    if (min_mutations < 64) {
+        try common.addError(errors, allocator, "fuzz corpus minimum_mutations_per_seed must be at least 64", .{});
+    }
+
+    const harnesses_value = common.field(root, "harnesses") orelse {
+        try common.addError(errors, allocator, "fuzz corpus must include harnesses", .{});
+        return;
+    };
+    const harnesses = switch (harnesses_value) {
+        .array => |array| array.items,
+        else => {
+            try common.addError(errors, allocator, "fuzz corpus harnesses must be an array", .{});
+            return;
+        },
+    };
+
+    var seen = std.StringHashMap(void).init(allocator);
+    for (harnesses, 0..) |harness, index| {
+        if (harness != .object) {
+            try common.addError(errors, allocator, "fuzz harness at index {d} must be an object", .{index});
+            continue;
+        }
+        const id = try common.expectStringField(allocator, errors, harness, "fuzz harness", "id") orelse continue;
+        const gop = try seen.getOrPut(id);
+        if (gop.found_existing) {
+            try common.addError(errors, allocator, "duplicate fuzz harness id: {s}", .{id});
+        }
+        if (!isOneOf(id, &REQUIRED_HARNESS_IDS)) {
+            try common.addError(errors, allocator, "unsupported fuzz harness id: {s}", .{id});
+        }
+
+        const target_anchor = try common.expectStringField(allocator, errors, harness, id, "target_anchor") orelse "";
+        if (target_anchor.len > 0 and !common.pathExists(io, target_anchor)) {
+            try common.addError(errors, allocator, "fuzz harness {s} target_anchor is missing: {s}", .{ id, target_anchor });
+        }
+        _ = try common.expectStringField(allocator, errors, harness, id, "scope");
+
+        const seeds = try common.collectStringArray(
+            allocator,
+            errors,
+            common.field(harness, "seeds"),
+            try std.fmt.allocPrint(allocator, "fuzz harness {s} seeds", .{id}),
+            true,
+        );
+        if (seeds.len < 3) {
+            try common.addError(errors, allocator, "fuzz harness {s} must include at least three seeds", .{id});
+        }
+        for (seeds) |seed_hex| {
+            const seed = try decodeHex(allocator, errors, id, seed_hex);
+            if (seed.len == 0) continue;
+            try runHarnessMutations(id, seed, min_mutations, summary);
+        }
+    }
+
+    for (REQUIRED_HARNESS_IDS) |required| {
+        if (!seen.contains(required)) {
+            try common.addError(errors, allocator, "fuzz corpus missing harness: {s}", .{required});
+        }
+    }
+}
+
+fn runHarnessMutations(
+    id: []const u8,
+    seed: []const u8,
+    min_mutations: u64,
+    summary: *GateSummary,
+) !void {
+    var mutated: [8192]u8 = undefined;
+
+    runFuzzHarness(id, seed);
+    summary.fuzz_cases += 1;
+
+    var mutation_index: u64 = 0;
+    while (mutation_index < min_mutations) : (mutation_index += 1) {
+        var len = @min(seed.len, mutated.len);
+        @memcpy(mutated[0..len], seed[0..len]);
+        if (len == 0) {
+            mutated[0] = @intCast(mutation_index & 0xff);
+            len = 1;
+        }
+
+        const position: usize = @intCast(mutation_index % len);
+        switch (mutation_index % 6) {
+            0 => mutated[position] ^= @as(u8, 1) << @as(u3, @intCast(mutation_index & 7)),
+            1 => mutated[position] = @intCast((mutation_index *% 37) & 0xff),
+            2 => if (len < mutated.len) {
+                mutated[len] = @intCast((mutation_index *% 131) & 0xff);
+                len += 1;
+            },
+            3 => len = @max(@as(usize, 1), len / 2),
+            4 => @memset(mutated[0..len], @intCast((mutation_index *% 17) & 0xff)),
+            else => {
+                var byte_index: usize = 0;
+                while (byte_index < len) : (byte_index += 1) {
+                    mutated[byte_index] +%= @intCast((mutation_index + byte_index) & 0xff);
+                }
+            },
+        }
+        runFuzzHarness(id, mutated[0..len]);
+        summary.fuzz_cases += 1;
+    }
+}
+
+fn runFuzzHarness(id: []const u8, input: []const u8) void {
+    if (std.mem.eql(u8, id, "binary-cursor")) return fuzzBinaryCursor(input);
+    if (std.mem.eql(u8, id, "userspace-descriptor")) return fuzzUserspaceDescriptor(input);
+    if (std.mem.eql(u8, id, "elf-image-metadata")) return fuzzElfImageMetadata(input);
+    if (std.mem.eql(u8, id, "storage-volume-image")) return fuzzStorageVolumeImage(input);
+    if (std.mem.eql(u8, id, "sync-record")) return fuzzSyncRecord(input);
+    if (std.mem.eql(u8, id, "capability-message")) return fuzzCapabilityMessage(input);
+    if (std.mem.eql(u8, id, "syscall-abi")) return fuzzSyscallAbi(input);
+}
+
+fn fuzzBinaryCursor(input: []const u8) void {
+    const Error = error{Corrupt};
+    const Reader = binary_cursor.Reader(Error, error.Corrupt);
+    var reader = Reader{ .buffer = input };
+    _ = reader.readByte() catch {};
+    _ = reader.readU16() catch {};
+    _ = reader.readU32() catch {};
+    _ = reader.readU64() catch {};
+    _ = reader.readSlice(@min(@as(usize, 3), input.len)) catch {};
+}
+
+fn fuzzUserspaceDescriptor(input: []const u8) void {
+    var descriptor = std.mem.zeroes(userspace_descriptor.Descriptor);
+    const bytes = std.mem.asBytes(&descriptor);
+    @memcpy(bytes[0..@min(bytes.len, input.len)], input[0..@min(bytes.len, input.len)]);
+    userspace_descriptor.validate(&descriptor) catch {};
+}
+
+fn fuzzElfImageMetadata(input: []const u8) void {
+    _ = elf_image_inspector.inspect(input) catch {};
+}
+
+fn fuzzStorageVolumeImage(input: []const u8) void {
+    var image = [_]u8{0} ** storage_volume.image_bytes;
+    @memcpy(image[0..@min(image.len, input.len)], input[0..@min(image.len, input.len)]);
+    var volume = storage_volume.Volume.init();
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    _ = volume.loadFromImage(image[0..], &store, &workspaces) catch {};
+}
+
+fn fuzzSyncRecord(input: []const u8) void {
+    sync_state_store.validateRecordPayloadForReleaseGate(input) catch {};
+}
+
+fn fuzzCapabilityMessage(input: []const u8) void {
+    const kind_fields = std.meta.fields(capability.CapabilityTargetKind);
+    const right_fields = std.meta.fields(capability.CapabilityRight);
+    const kind_value: u8 = if (input.len > 0) input[0] else 0;
+    const right_value: u8 = if (input.len > 1) input[1] else 0;
+    const kind: capability.CapabilityTargetKind = @enumFromInt(kind_value % kind_fields.len);
+    const right: capability.CapabilityRight = @enumFromInt(right_value % right_fields.len);
+    const rights = capability.CapabilityRights.single(right).retarget(kind);
+    _ = rights.has(right);
+    _ = rights.containsAll(rights);
+    _ = rights.intersects(capability.CapabilityRights.single(right).retarget(kind));
+}
+
+fn fuzzSyscallAbi(input: []const u8) void {
+    var header = abi.RequestHeader{
+        .operation = abi.opcode(.task_create),
+        .correlation_id = 0,
+        .subject_task_id = 0,
+    };
+    const header_bytes = std.mem.asBytes(&header);
+    @memcpy(header_bytes[0..@min(header_bytes.len, input.len)], input[0..@min(header_bytes.len, input.len)]);
+    request_header.validateHeader(header, abi.opcode(.task_create)) catch {};
+    request_header.validateSubjectTask(header, 1) catch {};
+
+    const Error = error{Corrupt};
+    const Reader = binary_cursor.Reader(Error, error.Corrupt);
+    var reader = Reader{ .buffer = input };
+    const raw_addr = reader.readU64() catch 0;
+    const raw_len = reader.readU64() catch 0;
+    const raw_alignment = reader.readU16() catch 1;
+    const alignment: usize = @max(@as(usize, 1), @as(usize, raw_alignment % 64));
+    const memory = syscall_dispatch.UserMemoryContext{ .address_space = null };
+    _ = syscall_dispatch.validateUserRange(memory, @intCast(raw_addr), @intCast(raw_len), alignment, .read);
+    _ = syscall_dispatch.validateUserRange(memory, @intCast(raw_addr), @intCast(raw_len), alignment, .write);
+    _ = syscall_dispatch.mapError(error.PermissionDenied);
+}
+
+fn validateReleaseArtifacts(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const root = try parseJsonFile(allocator, io, errors, RELEASE_ARTIFACTS_PATH) orelse return;
+    const generator = try common.expectStringField(allocator, errors, root, "release artifacts", "generator") orelse "";
+    if (generator.len > 0 and !common.pathExists(io, generator)) {
+        try common.addError(errors, allocator, "release artifact generator is missing: {s}", .{generator});
+    }
+    const repro_checker = try common.expectStringField(allocator, errors, root, "release artifacts", "reproducible_build_checker") orelse "";
+    if (repro_checker.len > 0 and !common.pathExists(io, repro_checker)) {
+        try common.addError(errors, allocator, "reproducible build checker is missing: {s}", .{repro_checker});
+    }
+    const sbom_format = try common.expectStringField(allocator, errors, root, "release artifacts", "sbom_format") orelse "";
+    if (!std.mem.eql(u8, sbom_format, "SPDX-2.3")) {
+        try common.addError(errors, allocator, "release artifacts must require SPDX-2.3 SBOM output", .{});
+    }
+    const provenance_format = try common.expectStringField(allocator, errors, root, "release artifacts", "provenance_format") orelse "";
+    if (std.mem.indexOf(u8, provenance_format, "in-toto") == null or std.mem.indexOf(u8, provenance_format, "SLSA") == null) {
+        try common.addError(errors, allocator, "release artifacts must require in-toto/SLSA provenance output", .{});
+    }
+    try expectStringValue(allocator, errors, root, "release artifacts", "provenance_predicate_type", "https://slsa.dev/provenance/v1");
+    const envelope_format = try common.expectStringField(allocator, errors, root, "release artifacts", "attestation_envelope_format") orelse "";
+    if (std.mem.indexOf(u8, envelope_format, "DSSE") == null) {
+        try common.addError(errors, allocator, "release artifacts must require DSSE attestation envelopes", .{});
+    }
+    try expectStringValue(allocator, errors, root, "release artifacts", "attestation_payload_type", "application/vnd.in-toto+json");
+
+    const release_signing = try common.expectObjectField(allocator, errors, root, "release artifacts", "release_signing") orelse return;
+    const provider_boundary = try common.expectStringField(allocator, errors, release_signing, "release signing", "provider_boundary") orelse "";
+    if (std.mem.indexOf(u8, provider_boundary, "HSM") == null and std.mem.indexOf(u8, provider_boundary, "KMS") == null) {
+        try common.addError(errors, allocator, "release signing provider_boundary must name an HSM or KMS provider boundary", .{});
+    }
+    if (!common.containsAsciiIgnoreCase(provider_boundary, "key handle") or
+        !common.containsAsciiIgnoreCase(provider_boundary, "never seed material"))
+    {
+        try common.addError(errors, allocator, "release signing provider_boundary must describe key-handle-only access and no seed material in release code", .{});
+    }
+    try expectTrueBoolField(allocator, errors, release_signing, "release signing", "hardware_backed_required");
+    try expectTrueBoolField(allocator, errors, release_signing, "release signing", "rotation_required");
+    try expectTrueBoolField(allocator, errors, release_signing, "release signing", "revocation_required");
+    try expectTrueBoolField(allocator, errors, release_signing, "release signing", "customer_verifiable_required");
+    const hybrid_status = try common.expectStringField(allocator, errors, release_signing, "release signing", "hybrid_ml_dsa_status") orelse "";
+    if (std.mem.indexOf(u8, hybrid_status, "preview") == null or
+        std.mem.indexOf(u8, hybrid_status, "not a production FIPS 204") == null)
+    {
+        try common.addError(errors, allocator, "release signing hybrid_ml_dsa_status must state that the hybrid ML-DSA path is preview-only and not production FIPS 204", .{});
+    }
+    const verifier_protocols = try common.collectStringArray(
+        allocator,
+        errors,
+        common.field(release_signing, "verifier_protocols"),
+        "release signing verifier_protocols",
+        true,
+    );
+    const required_verifier_protocol_terms = [_][]const u8{ "artifact-digests", "DSSE", "SLSA", "release-keyring", "revoked", "reproducible-build" };
+    for (required_verifier_protocol_terms) |term| {
+        if (!stringArrayContainsSubstring(verifier_protocols, term)) {
+            try common.addError(errors, allocator, "release signing verifier_protocols must cover {s}", .{term});
+        }
+    }
+    const trusted_key_material = try common.collectStringArray(
+        allocator,
+        errors,
+        common.field(release_signing, "trusted_key_material"),
+        "release signing trusted_key_material",
+        true,
+    );
+    for (trusted_key_material) |path| {
+        if (!common.pathExists(io, path)) {
+            try common.addError(errors, allocator, "release signing references missing trusted key material: {s}", .{path});
+        }
+    }
+
+    const artifacts_value = common.field(root, "release_artifacts") orelse {
+        try common.addError(errors, allocator, "release_artifacts must be present", .{});
+        return;
+    };
+    const artifacts = switch (artifacts_value) {
+        .array => |array| array.items,
+        else => {
+            try common.addError(errors, allocator, "release_artifacts must be an array", .{});
+            return;
+        },
+    };
+    if (artifacts.len < 4) {
+        try common.addError(errors, allocator, "release_artifacts must cover kernel, userspace, ISO, and policy artifacts", .{});
+    }
+    for (artifacts, 0..) |artifact, index| {
+        if (artifact != .object) {
+            try common.addError(errors, allocator, "release artifact at index {d} must be an object", .{index});
+            continue;
+        }
+        const id = try common.expectStringField(allocator, errors, artifact, "release artifact", "id") orelse "<unknown>";
+        _ = try common.expectStringField(allocator, errors, artifact, id, "path");
+        _ = try common.expectStringField(allocator, errors, artifact, id, "kind");
+        try expectTrueBoolField(allocator, errors, artifact, id, "digest_required");
+        try expectTrueBoolField(allocator, errors, artifact, id, "sbom_required");
+        try expectTrueBoolField(allocator, errors, artifact, id, "provenance_required");
+        try expectTrueBoolField(allocator, errors, artifact, id, "dsse_required");
+        try expectTrueBoolField(allocator, errors, artifact, id, "reproducible_required");
+        try expectTrueBoolField(allocator, errors, artifact, id, "customer_verifiable");
+    }
+
+    const customer_bundle = try common.collectStringArray(
+        allocator,
+        errors,
+        common.field(root, "customer_verification_bundle"),
+        "release artifacts customer_verification_bundle",
+        true,
+    );
+    const required_customer_bundle_artifacts = [_][]const u8{
+        "build/release-security/artifact-digests.sha256",
+        "build/release-security/sbom.spdx.json",
+        "build/release-security/provenance.intoto.jsonl",
+        "build/release-security/provenance.dsse.intoto.jsonl",
+        "build/release-security/customer-verification-policy.json",
+        "build/release-security/release-keyring.json",
+        "build/release-security/revoked-release-keys.json",
+        "build/release-security/reproducible-build.json",
+    };
+    for (required_customer_bundle_artifacts) |artifact| {
+        if (!stringArrayContains(customer_bundle, artifact)) {
+            try common.addError(errors, allocator, "customer_verification_bundle must include {s}", .{artifact});
+        }
+    }
+}
+
+fn validateThreatModel(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const root = try parseJsonFile(allocator, io, errors, THREAT_MODEL_PATH) orelse return;
+    const required_domains = try common.collectStringArray(
+        allocator,
+        errors,
+        common.field(root, "required_domains"),
+        "threat model required_domains",
+        true,
+    );
+    var required_domain_set = try common.collectUniqueStrings(allocator, errors, required_domains, "threat model required domain");
+    for (REQUIRED_THREAT_DOMAINS) |domain| {
+        if (!required_domain_set.contains(domain)) {
+            try common.addError(errors, allocator, "threat model missing required domain: {s}", .{domain});
+        }
+    }
+
+    const threats_value = common.field(root, "threats") orelse {
+        try common.addError(errors, allocator, "threat model must include threats", .{});
+        return;
+    };
+    const threats = switch (threats_value) {
+        .array => |array| array.items,
+        else => {
+            try common.addError(errors, allocator, "threat model threats must be an array", .{});
+            return;
+        },
+    };
+    var covered_domains = std.StringHashMap(void).init(allocator);
+    for (threats, 0..) |threat, index| {
+        if (threat != .object) {
+            try common.addError(errors, allocator, "threat at index {d} must be an object", .{index});
+            continue;
+        }
+        const id = try common.expectStringField(allocator, errors, threat, "threat", "id") orelse "<unknown>";
+        const domain = try common.expectStringField(allocator, errors, threat, id, "domain") orelse "";
+        if (domain.len > 0) {
+            if (!required_domain_set.contains(domain)) {
+                try common.addError(errors, allocator, "threat {s} references unsupported domain: {s}", .{ id, domain });
+            }
+            try covered_domains.put(domain, {});
+        }
+        _ = try common.expectStringField(allocator, errors, threat, id, "abuse_case");
+        _ = try common.expectStringField(allocator, errors, threat, id, "mitigation");
+        _ = try common.expectStringField(allocator, errors, threat, id, "residual_risk_owner");
+        _ = try common.expectStringField(allocator, errors, threat, id, "residual_risk_decision");
+        const tests = try common.collectStringArray(
+            allocator,
+            errors,
+            common.field(threat, "negative_tests"),
+            try std.fmt.allocPrint(allocator, "threat {s} negative_tests", .{id}),
+            true,
+        );
+        for (tests) |test_path| {
+            if (!common.pathExists(io, test_path)) {
+                try common.addError(errors, allocator, "threat {s} references missing negative test artifact: {s}", .{ id, test_path });
+            }
+        }
+    }
+    for (REQUIRED_THREAT_DOMAINS) |domain| {
+        if (!covered_domains.contains(domain)) {
+            try common.addError(errors, allocator, "threat model has no threat covering required domain: {s}", .{domain});
+        }
+    }
+}
+
+fn validateMemorySafetyInventory(
+    allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+    summary: *GateSummary,
+) !void {
+    const root = try parseJsonFile(allocator, io, errors, MEMORY_SAFETY_INVENTORY_PATH) orelse return;
+    const scan_patterns = try common.collectStringArray(
+        allocator,
+        errors,
+        common.field(root, "scan_patterns"),
+        "memory safety inventory scan_patterns",
+        true,
+    );
+    var scan_pattern_set = try common.collectUniqueStrings(allocator, errors, scan_patterns, "memory safety scan pattern");
+    for (UNSAFE_SCAN_PATTERNS) |pattern| {
+        if (!scan_pattern_set.contains(pattern)) {
+            try common.addError(errors, allocator, "memory safety inventory missing scan pattern: {s}", .{pattern});
+        }
+    }
+
+    const required_review_state = try common.expectStringField(allocator, errors, root, "memory safety inventory", "required_review_state") orelse "";
+    const entries_value = common.field(root, "unsafe_surface_inventory") orelse {
+        try common.addError(errors, allocator, "memory safety inventory must include unsafe_surface_inventory", .{});
+        return;
+    };
+    const entries = switch (entries_value) {
+        .array => |array| array.items,
+        else => {
+            try common.addError(errors, allocator, "memory safety inventory unsafe_surface_inventory must be an array", .{});
+            return;
+        },
+    };
+
+    var covered_paths = std.StringHashMap(void).init(allocator);
+    for (entries, 0..) |entry, index| {
+        if (entry != .object) {
+            try common.addError(errors, allocator, "memory safety inventory entry at index {d} must be an object", .{index});
+            continue;
+        }
+        const path = try common.expectStringField(allocator, errors, entry, "memory safety inventory entry", "path") orelse continue;
+        if (!common.pathExists(io, path)) {
+            try common.addError(errors, allocator, "memory safety inventory references missing path: {s}", .{path});
+        }
+        const gop = try covered_paths.getOrPut(path);
+        if (gop.found_existing) {
+            try common.addError(errors, allocator, "duplicate memory safety inventory path: {s}", .{path});
+        }
+        const review_state = try common.expectStringField(allocator, errors, entry, path, "review_state") orelse "";
+        if (required_review_state.len > 0 and !std.mem.eql(u8, review_state, required_review_state)) {
+            try common.addError(errors, allocator, "memory safety inventory path {s} review_state must be {s}", .{ path, required_review_state });
+        }
+        _ = try common.expectStringField(allocator, errors, entry, path, "owner");
+        _ = try common.collectStringArray(allocator, errors, common.field(entry, "categories"), path, true);
+        _ = try common.collectStringArray(allocator, errors, common.field(entry, "mitigations"), path, true);
+        _ = try common.collectStringArray(allocator, errors, common.field(entry, "tests"), path, true);
+    }
+
+    const unsafe_paths = try collectUnsafeSourcePaths(allocator, gpa, io);
+    var it = unsafe_paths.iterator();
+    while (it.next()) |entry| {
+        summary.unsafe_paths += 1;
+        const path = entry.key_ptr.*;
+        if (!covered_paths.contains(path)) {
+            try common.addError(errors, allocator, "unsafe source path lacks memory safety inventory coverage: {s}", .{path});
+        }
+    }
+}
+
+fn collectUnsafeSourcePaths(
+    allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+) !std.StringHashMap(void) {
+    const result = try std.process.run(gpa, io, .{
+        .argv = &.{ "git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "src", "tools", "build_support" },
+        .stdout_limit = .limited(common.child_stdout_max_bytes),
+        .stderr_limit = .limited(common.child_stderr_max_bytes),
+    });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| if (code != 0) {
+            std.debug.print("{s}", .{result.stderr});
+            return error.GitLsFilesFailed;
+        },
+        else => return error.GitLsFilesFailed,
+    }
+
+    var unsafe_paths = std.StringHashMap(void).init(allocator);
+    var parts = std.mem.splitScalar(u8, result.stdout, 0);
+    while (parts.next()) |path| {
+        if (path.len == 0 or !std.mem.endsWith(u8, path, ".zig")) continue;
+        if (!common.pathExists(io, path)) continue;
+        const source = try common.readFileAlloc(allocator, io, path, common.source_file_max_bytes);
+        for (UNSAFE_SCAN_PATTERNS) |pattern| {
+            if (std.mem.indexOf(u8, source, pattern) != null) {
+                try unsafe_paths.put(try allocator.dupe(u8, path), {});
+                break;
+            }
+        }
+    }
+    return unsafe_paths;
+}
+
+fn validateCrashDumpRedaction(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const root = try parseJsonFile(allocator, io, errors, CRASH_DUMP_REDACTION_PATH) orelse return;
+    const default_policy = try common.expectObjectField(allocator, errors, root, "crash dump redaction", "default_policy") orelse return;
+    try expectStringValue(allocator, errors, default_policy, "default_policy", "raw_memory_capture", "deny");
+    try expectStringValue(allocator, errors, default_policy, "default_policy", "capability_token_export", "deny");
+    try expectStringValue(allocator, errors, default_policy, "default_policy", "private_object_name_export", "deny");
+    try expectStringValue(allocator, errors, default_policy, "default_policy", "personal_content_export", "deny");
+    try expectStringValue(allocator, errors, default_policy, "default_policy", "support_bundle_review", "required");
+    try expectStringValue(allocator, errors, default_policy, "default_policy", "scoped_diagnostics_opt_in", "required");
+
+    const markers = try common.collectStringArray(
+        allocator,
+        errors,
+        common.field(root, "redaction_markers"),
+        "crash dump redaction markers",
+        true,
+    );
+    var marker_set = try common.collectUniqueStrings(allocator, errors, markers, "crash dump redaction marker");
+    for (REDACTION_MARKERS) |marker| {
+        if (!marker_set.contains(marker)) {
+            try common.addError(errors, allocator, "crash dump redaction policy missing marker: {s}", .{marker});
+        }
+    }
+
+    const fixtures_value = common.field(root, "fixtures") orelse {
+        try common.addError(errors, allocator, "crash dump redaction policy must include fixtures", .{});
+        return;
+    };
+    const fixtures = switch (fixtures_value) {
+        .array => |array| array.items,
+        else => {
+            try common.addError(errors, allocator, "crash dump redaction fixtures must be an array", .{});
+            return;
+        },
+    };
+    for (fixtures, 0..) |fixture, index| {
+        if (fixture != .object) {
+            try common.addError(errors, allocator, "crash dump redaction fixture at index {d} must be an object", .{index});
+            continue;
+        }
+        const input_reason = try common.expectStringField(allocator, errors, fixture, "crash dump redaction fixture", "input_reason") orelse continue;
+        const record = crash_record.init(.panic, 7, 11, 0x1234, 0x5678, input_reason) catch {
+            try common.addError(errors, allocator, "crash dump redaction fixture reason is too long: {s}", .{input_reason});
+            continue;
+        };
+        var buffer: [256]u8 = undefined;
+        const summary = crash_record.redactedSummary(record, buffer[0..]);
+        const must_contain = try common.collectStringArray(
+            allocator,
+            errors,
+            common.field(fixture, "must_contain"),
+            "crash dump redaction fixture must_contain",
+            true,
+        );
+        for (must_contain) |needle| {
+            if (std.mem.indexOf(u8, summary, needle) == null) {
+                try common.addError(errors, allocator, "crash redaction summary for '{s}' must contain '{s}'", .{ input_reason, needle });
+            }
+        }
+        const must_not_contain = try common.collectStringArray(
+            allocator,
+            errors,
+            common.field(fixture, "must_not_contain"),
+            "crash dump redaction fixture must_not_contain",
+            false,
+        );
+        for (must_not_contain) |needle| {
+            if (std.mem.indexOf(u8, summary, needle) != null) {
+                try common.addError(errors, allocator, "crash redaction summary for '{s}' must not contain '{s}'", .{ input_reason, needle });
+            }
+        }
+    }
+}
+
+fn validateVulnerabilityDisclosure(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const root = try parseJsonFile(allocator, io, errors, VULNERABILITY_DISCLOSURE_PATH) orelse return;
+    const policy_artifact = try common.expectStringField(allocator, errors, root, "vulnerability disclosure", "policy_artifact") orelse "";
+    if (!std.mem.eql(u8, policy_artifact, SECURITY_POLICY_PATH)) {
+        try common.addError(errors, allocator, "vulnerability disclosure policy_artifact must be SECURITY.md", .{});
+    }
+    if (!common.pathExists(io, SECURITY_POLICY_PATH)) {
+        try common.addError(errors, allocator, "SECURITY.md is missing", .{});
+        return;
+    }
+    const security_policy = try common.readFileAlloc(allocator, io, SECURITY_POLICY_PATH, common.source_file_max_bytes);
+
+    const primary = try common.expectObjectField(allocator, errors, root, "vulnerability disclosure", "primary_private_intake") orelse return;
+    const primary_url = try common.expectStringField(allocator, errors, primary, "primary private intake", "url") orelse "";
+    if (primary_url.len > 0 and std.mem.indexOf(u8, security_policy, primary_url) == null) {
+        try common.addError(errors, allocator, "SECURITY.md must publish primary private intake URL: {s}", .{primary_url});
+    }
+    _ = try common.collectStringArray(allocator, errors, common.field(primary, "monitored_by"), "primary private intake monitored_by", true);
+    const ack_sla = try expectPositiveIntegerField(allocator, errors, primary, "primary private intake", "acknowledgement_sla_business_days") orelse 0;
+    const triage_sla = try expectPositiveIntegerField(allocator, errors, primary, "primary private intake", "triage_sla_business_days") orelse 0;
+    if (ack_sla > 3 or triage_sla > 10) {
+        try common.addError(errors, allocator, "vulnerability disclosure SLA must acknowledge within 3 business days and triage within 10", .{});
+    }
+
+    const backup = try common.expectObjectField(allocator, errors, root, "vulnerability disclosure", "backup_private_intake") orelse return;
+    const backup_address = try common.expectStringField(allocator, errors, backup, "backup private intake", "address") orelse "";
+    if (backup_address.len > 0 and std.mem.indexOf(u8, security_policy, backup_address) == null) {
+        try common.addError(errors, allocator, "SECURITY.md must publish backup private intake address: {s}", .{backup_address});
+    }
+
+    const cve = try common.expectObjectField(allocator, errors, root, "vulnerability disclosure", "cve_cwe_handling") orelse return;
+    _ = try common.expectStringField(allocator, errors, cve, "cve_cwe_handling", "owner");
+    _ = try common.expectStringField(allocator, errors, cve, "cve_cwe_handling", "cve_issuance_path");
+    try expectTrueBoolField(allocator, errors, cve, "cve_cwe_handling", "cwe_required");
+    try expectTrueBoolField(allocator, errors, cve, "cve_cwe_handling", "coordinated_disclosure_required");
+    _ = try common.expectStringField(allocator, errors, cve, "cve_cwe_handling", "security_update_commitment");
+
+    const workflow_test = try common.expectObjectField(allocator, errors, root, "vulnerability disclosure", "workflow_test") orelse return;
+    try expectTrueBoolField(allocator, errors, workflow_test, "workflow_test", "dry_run_required");
+    _ = try common.expectStringField(allocator, errors, workflow_test, "workflow_test", "dry_run_artifact");
+    const required_steps = try common.collectStringArray(allocator, errors, common.field(workflow_test, "required_steps"), "workflow_test required_steps", true);
+    if (required_steps.len < 6) {
+        try common.addError(errors, allocator, "vulnerability disclosure workflow_test must cover report, ack, triage, CWE, advisory, and fix decision", .{});
+    }
+
+    const required_policy_text = [_][]const u8{
+        "3 business days",
+        "10 business days",
+        "CVE",
+        "CWE",
+        "coordinated disclosure",
+    };
+    for (required_policy_text) |needle| {
+        if (std.mem.indexOf(u8, security_policy, needle) == null) {
+            try common.addError(errors, allocator, "SECURITY.md must include vulnerability disclosure text: {s}", .{needle});
+        }
+    }
+}
+
+fn parseJsonFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+    path: []const u8,
+) !?std.json.Value {
+    if (!common.pathExists(io, path)) {
+        try common.addError(errors, allocator, "release security artifact is missing: {s}", .{path});
+        return null;
+    }
+    const source = try common.readFileAlloc(allocator, io, path, common.source_file_max_bytes);
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, source, .{}) catch |err| {
+        try common.addError(errors, allocator, "release security artifact is not valid JSON: {s}: {s}", .{ path, @errorName(err) });
+        return null;
+    };
+    return parsed.value;
+}
+
+fn decodeHex(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    context: []const u8,
+    hex: []const u8,
+) ![]const u8 {
+    if (hex.len % 2 != 0) {
+        try common.addError(errors, allocator, "hex seed for {s} must have even length: {s}", .{ context, hex });
+        return &.{};
+    }
+    var bytes = try allocator.alloc(u8, hex.len / 2);
+    var index: usize = 0;
+    while (index < bytes.len) : (index += 1) {
+        const high = hexValue(hex[index * 2]) orelse {
+            try common.addError(errors, allocator, "hex seed for {s} has invalid digit: {s}", .{ context, hex });
+            return &.{};
+        };
+        const low = hexValue(hex[index * 2 + 1]) orelse {
+            try common.addError(errors, allocator, "hex seed for {s} has invalid digit: {s}", .{ context, hex });
+            return &.{};
+        };
+        bytes[index] = (high << 4) | low;
+    }
+    return bytes;
+}
+
+fn hexValue(byte: u8) ?u8 {
+    if (byte >= '0' and byte <= '9') return byte - '0';
+    if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10;
+    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
+    return null;
+}
+
+fn expectPositiveIntegerField(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    object: std.json.Value,
+    context: []const u8,
+    name: []const u8,
+) !?u64 {
+    const value = common.field(object, name) orelse {
+        try common.addError(errors, allocator, "{s} must include {s}", .{ context, name });
+        return null;
+    };
+    return switch (value) {
+        .integer => |number| if (number > 0) @intCast(number) else blk: {
+            try common.addError(errors, allocator, "{s} {s} must be positive", .{ context, name });
+            break :blk null;
+        },
+        else => {
+            try common.addError(errors, allocator, "{s} {s} must be an integer", .{ context, name });
+            return null;
+        },
+    };
+}
+
+fn expectTrueBoolField(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    object: std.json.Value,
+    context: []const u8,
+    name: []const u8,
+) !void {
+    const value = common.field(object, name) orelse {
+        try common.addError(errors, allocator, "{s} must include {s}", .{ context, name });
+        return;
+    };
+    switch (value) {
+        .bool => |flag| if (!flag) {
+            try common.addError(errors, allocator, "{s} {s} must be true", .{ context, name });
+        },
+        else => try common.addError(errors, allocator, "{s} {s} must be a bool", .{ context, name }),
+    }
+}
+
+fn expectStringValue(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    object: std.json.Value,
+    context: []const u8,
+    name: []const u8,
+    expected: []const u8,
+) !void {
+    const actual = try common.expectStringField(allocator, errors, object, context, name) orelse return;
+    if (!std.mem.eql(u8, actual, expected)) {
+        try common.addError(errors, allocator, "{s} {s} must be {s}", .{ context, name, expected });
+    }
+}
+
+fn isOneOf(value: []const u8, allowed: []const []const u8) bool {
+    for (allowed) |candidate| {
+        if (std.mem.eql(u8, value, candidate)) return true;
+    }
+    return false;
+}
+
+fn stringArrayContains(values: []const []const u8, expected: []const u8) bool {
+    for (values) |value| {
+        if (std.mem.eql(u8, value, expected)) return true;
+    }
+    return false;
+}
+
+fn stringArrayContainsSubstring(values: []const []const u8, needle: []const u8) bool {
+    for (values) |value| {
+        if (std.mem.indexOf(u8, value, needle) != null) return true;
+    }
+    return false;
+}

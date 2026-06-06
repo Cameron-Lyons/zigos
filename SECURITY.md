@@ -1,8 +1,9 @@
 # Security Policy
 
 Zigos treats secure-by-design readiness as a release gate. A public release is
-blocked until the secure-by-design controls in `spec/production_readiness.json`
-are complete or an explicitly documented residual-risk exception is approved.
+blocked unless the secure-by-design controls in
+`spec/production_readiness.json` are complete or an explicitly documented
+residual-risk exception is approved.
 
 ## Supported Scope
 
@@ -16,10 +17,19 @@ Security fixes should target `main` unless a release branch exists.
 
 Do not report suspected vulnerabilities in public issues.
 
-Before a public release, maintainers must configure at least one monitored
-private intake channel, such as GitHub private vulnerability reporting or a
-dedicated security mailbox, and record that channel here. Shipping without that
-private channel is a release blocker.
+Use the primary private intake channel:
+
+- GitHub private vulnerability reporting:
+  https://github.com/Cameron-Lyons/zigos/security/advisories/new
+
+Use the backup private intake channel if GitHub private reporting is
+unavailable:
+
+- security@zigos.dev
+
+The `release-security-review` owner monitors both channels for release-bound
+security reports and dry-runs the workflow through
+`build/release-security/vulnerability-disclosure-dry-run.json`.
 
 Reports should include:
 
@@ -41,6 +51,11 @@ customer-facing advisory, CVE issuance path where applicable, and a CWE field in
 the public record. Valid reports should be fixed in the supported branch or
 clearly documented as not exploitable in Zigos.
 
+CVE issuance is owned by `release-security-review` through GitHub Security
+Advisory CVE request when applicable, or coordinated CNA handoff before public
+advisory publication. CWE classification is required for public advisories and
+not-exploitable decisions.
+
 ## Good-Faith Research
 
 Good-faith research that follows this policy is authorized for the covered
@@ -53,9 +68,15 @@ of exploit details before coordinated disclosure.
 
 The following are release blockers:
 
-- No monitored private vulnerability reporting channel.
-- No owner for CVE/CWE publication and advisory handling.
-- Missing fuzzing, fault-injection, reproducible-build, SBOM/provenance,
-  threat-model, memory-safety-audit, or crash-dump-redaction evidence.
+- Private vulnerability reporting channel or backup mailbox unavailable.
+- No active owner for CVE/CWE publication and advisory handling.
+- Missing passing evidence from `./scripts/zig.sh build release-security-gate`.
+- Release provenance not signed through a hardware-backed HSM or KMS provider
+  with published keyring, rotation metadata, and revocation metadata.
+- Customer verification bundle missing artifact digests, SPDX SBOM, DSSE
+  in-toto/SLSA provenance, release keyring, revoked key list, or reproducible
+  build evidence.
+- Treating the `ed25519+ml-dsa65` hybrid preview profile as a production
+  FIPS 204 ML-DSA implementation.
 - Any crash dump or diagnostic export path that includes secrets, capability
   tokens, private content, or raw memory by default.

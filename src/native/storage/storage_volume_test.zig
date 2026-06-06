@@ -11,6 +11,7 @@ const loadFromImage = storage_volume.loadFromImage;
 
 test "storage volume exposes the first supported product capacity envelope" {
     const envelope = storage_volume.productCapacityEnvelope();
+    const legacy = storage_volume.legacy_demo_capacity_envelope;
 
     try std.testing.expectEqual(storage_volume.image_bytes, envelope.volume_image_bytes);
     try std.testing.expectEqual(storage_volume.required_device_sectors, envelope.required_device_sectors);
@@ -24,6 +25,14 @@ test "storage volume exposes the first supported product capacity envelope" {
     try std.testing.expectEqual(workspace.MAX_WORKSPACES, envelope.max_workspaces);
     try std.testing.expectEqual(workspace.MAX_WORKSPACE_ENTRIES, envelope.max_workspace_entries_per_workspace);
     try std.testing.expectEqual(workspace.MAX_SNAPSHOTS, envelope.max_snapshots);
+    try std.testing.expect(envelope.volume_image_bytes > legacy.volume_image_bytes);
+    try std.testing.expect(envelope.max_object_records > legacy.max_object_records);
+    try std.testing.expect(envelope.max_version_records > legacy.max_version_records);
+    try std.testing.expect(envelope.max_blob_records > legacy.max_blob_records);
+    try std.testing.expect(envelope.max_chunk_records > legacy.max_chunk_records);
+    try std.testing.expect(envelope.max_object_payload_bytes > legacy.max_object_payload_bytes);
+    try std.testing.expect(envelope.max_replay_log_records > legacy.max_replay_log_records);
+    try std.testing.expect(envelope.max_log_segments > legacy.max_log_segments);
 
     var store = object_store.Store.init();
     var workspaces = workspace.Directory.init();
@@ -36,7 +45,9 @@ test "storage quota policy rejects writes above the first supported envelope" {
     try std.testing.expectEqual(storage_volume.OverLimitWriteBehavior.reject_without_partial_persistence, policy.over_limit_write_behavior);
     try std.testing.expect(policy.persistence_error == error.NoSpaceLeft);
     try std.testing.expect(policy.retry_requires_freeing_space);
+    try std.testing.expect(policy.legacy_demo_images_loadable);
     try std.testing.expectEqual(storage_volume.productCapacityEnvelope().max_object_records, policy.envelope.max_object_records);
+    try std.testing.expectEqual(storage_volume.legacy_demo_capacity_envelope.volume_image_bytes, policy.legacy_migration_envelope.volume_image_bytes);
 
     const payload_rejection = storage_volume.quotaRejectionForUsage(.{
         .object_payload_bytes = object_store.MAX_PAYLOAD_BYTES + 1,
@@ -61,6 +72,81 @@ test "storage quota policy rejects writes above the first supported envelope" {
     var store = object_store.Store.init();
     var workspaces = workspace.Directory.init();
     try std.testing.expect(storage_volume.quotaRejectionForCurrentState(&store, &workspaces) == null);
+
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0x78} ** 32,
+    };
+    const payload = "quota-observed-payload";
+    _ = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(904),
+        .object_type = .document,
+        .payload = payload,
+        .metadata = try object_store.signMetadata(signer, "quota", "text/plain", .document, payload, 16),
+    });
+    const usage = storage_volume.productCapacityUsage(&store, &workspaces);
+    try std.testing.expectEqual(payload.len, usage.object_payload_bytes);
+    try storage_volume.ensureWithinProductCapacityEnvelope(&store, &workspaces);
+}
+
+test "storage volume migrates legacy demo-sized images into the larger product envelope" {
+    const allocator = std.testing.allocator;
+    const image = try std.testing.allocator.alloc(u8, image_bytes);
+    defer std.testing.allocator.free(image);
+    @memset(image, 0);
+
+    const store = try allocator.create(object_store.Store);
+    defer allocator.destroy(store);
+    const workspaces = try allocator.create(workspace.Directory);
+    defer allocator.destroy(workspaces);
+    store.* = object_store.Store.init();
+    workspaces.* = workspace.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0x79} ** 32,
+    };
+    _ = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(905),
+        .object_type = .document,
+        .payload = "legacy-demo-state",
+        .metadata = try object_store.signMetadata(signer, "legacy", "text/plain", .document, "legacy-demo-state", 17),
+    });
+    _ = try saveToImage(image, store, workspaces);
+
+    const legacy_image = image[0..storage_volume.legacy_demo_capacity_envelope.volume_image_bytes];
+    const loaded_store = try allocator.create(object_store.Store);
+    defer allocator.destroy(loaded_store);
+    const loaded_workspaces = try allocator.create(workspace.Directory);
+    defer allocator.destroy(loaded_workspaces);
+    loaded_store.* = object_store.Store.init();
+    loaded_workspaces.* = workspace.Directory.init();
+    const loaded_generation = try loadFromImage(legacy_image, loaded_store, loaded_workspaces);
+    try std.testing.expectEqual(@as(u64, 1), loaded_generation);
+    try std.testing.expectEqualStrings("legacy-demo-state", try loaded_store.versionPayload(loaded_store.latestVersion(905).?));
+
+    const upgraded_image = try std.testing.allocator.alloc(u8, image_bytes);
+    defer std.testing.allocator.free(upgraded_image);
+    @memset(upgraded_image, 0);
+    @memcpy(upgraded_image[0..legacy_image.len], legacy_image);
+    const upgraded = try loaded_store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(905),
+        .object_type = .document,
+        .payload = "upgraded-envelope-state",
+        .metadata = try object_store.signMetadata(signer, "legacy", "text/plain", .document, "upgraded-envelope-state", 18),
+        .parent_version_id = loaded_store.latestVersion(905).?.id,
+    });
+    const migrated_generation = try saveToImage(upgraded_image, loaded_store, loaded_workspaces);
+    try std.testing.expect(migrated_generation.generation > loaded_generation);
+
+    const migrated_store = try allocator.create(object_store.Store);
+    defer allocator.destroy(migrated_store);
+    const migrated_workspaces = try allocator.create(workspace.Directory);
+    defer allocator.destroy(migrated_workspaces);
+    migrated_store.* = object_store.Store.init();
+    migrated_workspaces.* = workspace.Directory.init();
+    _ = try loadFromImage(upgraded_image, migrated_store, migrated_workspaces);
+    try std.testing.expectEqual(upgraded.version_id, migrated_store.latestVersion(905).?.id);
+    try std.testing.expectEqualStrings("upgraded-envelope-state", try migrated_store.versionPayload(migrated_store.latestVersion(905).?));
 }
 
 test "storage volume image reloads the latest persisted state across slot generations" {
@@ -159,7 +245,8 @@ test "storage volume compacts segmented logs and reloads page-sized blob payload
     _ = try saveToImage(image, &store, &workspaces);
 
     var previous_version_id = object_store.ids.VersionId.zero;
-    for (0..20) |index| {
+    const compaction_mutations = @as(usize, storage_volume.testing.maxReplayLogSegments()) + 4;
+    for (0..compaction_mutations) |index| {
         var payload_buffer: [32]u8 = undefined;
         const payload = try std.fmt.bufPrint(&payload_buffer, "delta-{d}", .{index});
         const result = try store.putVersion(.{
@@ -244,8 +331,8 @@ test "storage volume instances keep image reload state isolated" {
     defer allocator.destroy(first_volume);
     const second_volume = try allocator.create(Volume);
     defer allocator.destroy(second_volume);
-    first_volume.* = Volume.init();
-    second_volume.* = Volume.init();
+    first_volume.reset();
+    second_volume.reset();
     const first_image = try std.testing.allocator.alloc(u8, image_bytes);
     defer std.testing.allocator.free(first_image);
     const second_image = try std.testing.allocator.alloc(u8, image_bytes);
@@ -389,4 +476,124 @@ test "storage volume rejects torn records referenced by a valid root" {
     var loaded_store = object_store.Store.init();
     var loaded_workspaces = workspace.Directory.init();
     try std.testing.expectError(error.CorruptImage, loadFromImage(image, &loaded_store, &loaded_workspaces));
+}
+
+test "storage volume ignores power-loss data writes that happen before root commit" {
+    const image = try std.testing.allocator.alloc(u8, image_bytes);
+    defer std.testing.allocator.free(image);
+    const interrupted = try std.testing.allocator.alloc(u8, image_bytes);
+    defer std.testing.allocator.free(interrupted);
+    @memset(image, 0);
+    @memset(interrupted, 0);
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0x7A} ** 32,
+    };
+    const first = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(906),
+        .object_type = .document,
+        .payload = "committed-before-power-loss",
+        .metadata = try object_store.signMetadata(signer, "power", "text/plain", .document, "committed-before-power-loss", 19),
+    });
+    const generation_one = try saveToImage(image, &store, &workspaces);
+    try std.testing.expectEqual(@as(u64, 1), generation_one.generation);
+    @memcpy(interrupted, image);
+
+    _ = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(906),
+        .object_type = .document,
+        .payload = "dirty-during-power-loss",
+        .metadata = try object_store.signMetadata(signer, "power", "text/plain", .document, "dirty-during-power-loss", 20),
+        .parent_version_id = first.version_id,
+    });
+    _ = try saveToImage(interrupted, &store, &workspaces);
+
+    @memcpy(image[storage_volume.sector_size * 2 ..], interrupted[storage_volume.sector_size * 2 ..]);
+
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    const loaded_generation = try loadFromImage(image, &loaded_store, &loaded_workspaces);
+    try std.testing.expectEqual(generation_one.generation, loaded_generation);
+    try std.testing.expectEqual(first.version_id, loaded_store.latestVersion(906).?.id);
+    try std.testing.expectEqualStrings("committed-before-power-loss", try loaded_store.versionPayload(loaded_store.latestVersion(906).?));
+}
+
+test "storage volume falls back when a partial-sector corruption hits only the newest log generation" {
+    const image = try std.testing.allocator.alloc(u8, image_bytes);
+    defer std.testing.allocator.free(image);
+    @memset(image, 0);
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0x7B} ** 32,
+    };
+    const first = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(907),
+        .object_type = .document,
+        .payload = "sector-safe-v1",
+        .metadata = try object_store.signMetadata(signer, "sector", "text/plain", .document, "sector-safe-v1", 21),
+    });
+    const generation_one = try saveToImage(image, &store, &workspaces);
+    const first_log_bytes = try storage_volume.testing.latestImageLogBytes(image);
+
+    _ = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(907),
+        .object_type = .document,
+        .payload = "sector-corrupted-v2",
+        .metadata = try object_store.signMetadata(signer, "sector", "text/plain", .document, "sector-corrupted-v2", 22),
+        .parent_version_id = first.version_id,
+    });
+    const generation_two = try saveToImage(image, &store, &workspaces);
+    try std.testing.expect(generation_two.generation > generation_one.generation);
+    storage_volume.testing.corruptDataByte(image, @as(usize, first_log_bytes) + storage_volume.testing.recordHeaderBytes());
+
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    const loaded_generation = try loadFromImage(image, &loaded_store, &loaded_workspaces);
+    try std.testing.expectEqual(generation_one.generation, loaded_generation);
+    try std.testing.expectEqual(first.version_id, loaded_store.latestVersion(907).?.id);
+    try std.testing.expectEqualStrings("sector-safe-v1", try loaded_store.versionPayload(loaded_store.latestVersion(907).?));
+}
+
+test "storage volume gates long-running replay by compacting before record and segment limits" {
+    const image = try std.testing.allocator.alloc(u8, image_bytes);
+    defer std.testing.allocator.free(image);
+    @memset(image, 0);
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "zigos-storage-key",
+        .seed = [_]u8{0x7C} ** 32,
+    };
+
+    var previous_version_id = object_store.ids.VersionId.zero;
+    const iterations = @as(usize, storage_volume.testing.maxReplayLogSegments()) * 2 + 10;
+    for (0..iterations) |index| {
+        const payload = "stable-long-run-payload";
+        const result = try store.putVersion(.{
+            .preferred_object_id = object_store.ids.object(908),
+            .object_type = .event_stream,
+            .payload = payload,
+            .metadata = try object_store.signMetadata(signer, "long-run", "text/plain", .event_stream, payload, 30 + @as(u64, @intCast(index))),
+            .parent_version_id = if (previous_version_id.isZero()) null else previous_version_id,
+        });
+        previous_version_id = result.version_id;
+        _ = try saveToImage(image, &store, &workspaces);
+        try std.testing.expect((try storage_volume.testing.latestImageLogRecordCount(image)) <= storage_volume.testing.maxReplayLogRecords());
+        try std.testing.expect((try storage_volume.testing.latestImageLogSegmentCount(image)) <= storage_volume.testing.maxReplayLogSegments());
+    }
+
+    try std.testing.expect((try storage_volume.testing.latestImageCompactedGeneration(image)) > storage_volume.testing.maxReplayLogSegments());
+
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    _ = try loadFromImage(image, &loaded_store, &loaded_workspaces);
+    try std.testing.expectEqual(previous_version_id, loaded_store.latestVersion(908).?.id);
+    try std.testing.expectEqual(@as(usize, iterations), loaded_store.versionCount());
 }

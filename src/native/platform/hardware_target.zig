@@ -12,6 +12,12 @@ pub const Subsystem = enum {
     crash_recovery,
 };
 
+pub const EvidenceSource = enum {
+    unknown,
+    qemu,
+    real_hardware,
+};
+
 pub const ProofMinimums = struct {
     cold_boots: u16,
     warm_reboots: u16,
@@ -23,6 +29,7 @@ pub const ProofMinimums = struct {
 
 pub const EvidenceSummary = struct {
     target_id: []const u8,
+    source: EvidenceSource = .unknown,
     qemu_boots: u16 = 0,
     hardware_cold_boots: u16 = 0,
     hardware_warm_reboots: u16 = 0,
@@ -31,8 +38,10 @@ pub const EvidenceSummary = struct {
     suspend_resume_cycles: u16 = 0,
     crash_recovery_cycles: u16 = 0,
     serial_log_captured: bool = false,
+    required_markers_captured: bool = false,
     firmware_settings_captured: bool = false,
     power_cycle_notes_captured: bool = false,
+    artifact_digests_captured: bool = false,
 };
 
 pub const Target = struct {
@@ -61,16 +70,26 @@ pub const required_subsystems = [_]Subsystem{
     .crash_recovery,
 };
 
+pub const nuc11tnki5_marker_prefix = "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5";
+
 pub const nuc11tnki5_markers = [_][]const u8{
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UEFI_BOOT:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_TABLES:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:APIC_TIMER:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:FRAMEBUFFER_GOP:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:USB_INPUT_XHCI:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NVME_BLOCK:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NETWORK_I225_LM:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SUSPEND_RESUME:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:CRASH_RECOVERY:PASS",
+    nuc11tnki5_marker_prefix ++ ":UEFI_BOOT:PASS",
+    nuc11tnki5_marker_prefix ++ ":ACPI_TABLES:PASS",
+    nuc11tnki5_marker_prefix ++ ":APIC_TIMER:PASS",
+    nuc11tnki5_marker_prefix ++ ":FRAMEBUFFER_GOP:PASS",
+    nuc11tnki5_marker_prefix ++ ":USB_INPUT_XHCI:PASS",
+    nuc11tnki5_marker_prefix ++ ":NVME_BLOCK:PASS",
+    nuc11tnki5_marker_prefix ++ ":NETWORK_I225_LM:PASS",
+    nuc11tnki5_marker_prefix ++ ":SUSPEND_RESUME:PASS",
+    nuc11tnki5_marker_prefix ++ ":CRASH_RECOVERY:PASS",
+};
+
+pub const nuc11tnki5_proof_metadata_markers = [_][]const u8{
+    nuc11tnki5_marker_prefix ++ ":EVIDENCE_SOURCE:REAL_HARDWARE",
+    nuc11tnki5_marker_prefix ++ ":BOARD_SKU:NUC11TNKi5",
+    nuc11tnki5_marker_prefix ++ ":FIRMWARE_SETTINGS:RECORDED",
+    nuc11tnki5_marker_prefix ++ ":POWER_CYCLE_NOTES:RECORDED",
+    nuc11tnki5_marker_prefix ++ ":ARTIFACT_DIGESTS:RECORDED",
 };
 
 pub const first_supported_target = Target{
@@ -94,6 +113,38 @@ pub const first_supported_target = Target{
     },
 };
 
+pub const CounterMarker = struct {
+    marker_prefix: []const u8,
+    minimum: u16,
+};
+
+pub const nuc11tnki5_counter_markers = [_]CounterMarker{
+    .{
+        .marker_prefix = nuc11tnki5_marker_prefix ++ ":COLD_BOOTS:",
+        .minimum = first_supported_target.proof_minimums.cold_boots,
+    },
+    .{
+        .marker_prefix = nuc11tnki5_marker_prefix ++ ":WARM_REBOOTS:",
+        .minimum = first_supported_target.proof_minimums.warm_reboots,
+    },
+    .{
+        .marker_prefix = nuc11tnki5_marker_prefix ++ ":STORAGE_WRITE_READ_CYCLES:",
+        .minimum = first_supported_target.proof_minimums.storage_write_read_cycles,
+    },
+    .{
+        .marker_prefix = nuc11tnki5_marker_prefix ++ ":NETWORK_FRAME_CYCLES:",
+        .minimum = first_supported_target.proof_minimums.network_frame_cycles,
+    },
+    .{
+        .marker_prefix = nuc11tnki5_marker_prefix ++ ":SUSPEND_RESUME_CYCLES:",
+        .minimum = first_supported_target.proof_minimums.suspend_resume_cycles,
+    },
+    .{
+        .marker_prefix = nuc11tnki5_marker_prefix ++ ":CRASH_RECOVERY_CYCLES:",
+        .minimum = first_supported_target.proof_minimums.crash_recovery_cycles,
+    },
+};
+
 pub fn coversSubsystem(target: *const Target, subsystem: Subsystem) bool {
     for (target.required_subsystems) |candidate| {
         if (candidate == subsystem) return true;
@@ -110,9 +161,12 @@ pub fn coversRequiredSubsystems(target: *const Target) bool {
 
 pub fn hardwareProofSatisfied(target: *const Target, evidence: EvidenceSummary) bool {
     return std.mem.eql(u8, evidence.target_id, target.id) and
+        evidence.source == .real_hardware and
         evidence.serial_log_captured and
+        evidence.required_markers_captured and
         evidence.firmware_settings_captured and
         evidence.power_cycle_notes_captured and
+        evidence.artifact_digests_captured and
         evidence.hardware_cold_boots >= target.proof_minimums.cold_boots and
         evidence.hardware_warm_reboots >= target.proof_minimums.warm_reboots and
         evidence.storage_write_read_cycles >= target.proof_minimums.storage_write_read_cycles and

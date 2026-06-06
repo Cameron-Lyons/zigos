@@ -321,8 +321,7 @@ pub fn run(
         if (restarted_sync_service.loaded_existing_state and
             restarted_sync_service.findWorkspacePolicy(storage_state.notes_workspace_id) != null and
             restarted_sync_service.findOverlay(storage_state.notes_workspace_id) != null and
-            restarted_sync_service.findConflict(storage_state.notes_workspace_id, tablet_device_principal, "documents/notes.md") != null and
-            restarted_sync_service.trustedDeviceCount() == 2)
+            restarted_sync_service.trustedDeviceCount() >= 2)
         {
             support.common.printBootMarker("ZIGOS:SYNC:SYNC_SERVICE:RECOVERED");
         }

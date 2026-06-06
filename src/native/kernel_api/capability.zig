@@ -348,6 +348,8 @@ pub const AuditMetadata = struct {
     policy_generation: u32 = 0,
     source_task_id: u64 = 0,
     broker_service_id: u64 = 0,
+    trace_id: u64 = 0,
+    parent_trace_id: u64 = 0,
     user_visible_entitlement: bool = false,
 };
 
@@ -361,7 +363,41 @@ pub const Capability = struct {
     lease: CapabilityLease,
     revocation_generation: u32,
     audit: AuditMetadata,
+
+    pub fn traceId(self: Capability) u64 {
+        if (self.audit.trace_id != 0) return self.audit.trace_id;
+        return computeCapabilityTraceId(self);
+    }
 };
+
+fn finalizeTraceId(record: *Capability) void {
+    if (record.audit.trace_id == 0) {
+        record.audit.trace_id = computeCapabilityTraceId(record.*);
+    }
+}
+
+fn computeCapabilityTraceId(record: Capability) u64 {
+    var hash = native_util.FNV1A_64_OFFSET_BASIS;
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.id);
+    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(record.holder.kind));
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.holder.serial);
+    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(record.issuer.kind));
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.issuer.serial);
+    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(record.target.kind));
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.target.id);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.rights.toBits());
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.scope.task_id orelse 0);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.scope.workspace_id orelse 0);
+    hash = native_util.fnv1a64AppendByte(hash, @intFromBool(record.scope.local_only));
+    hash = native_util.fnv1a64AppendByte(hash, @intFromBool(record.scope.broker_only));
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.lease.issued_at_ticks);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.lease.expires_at_ticks);
+    hash = native_util.fnv1a64AppendU32LittleEndian(hash, record.audit.policy_generation);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.audit.source_task_id);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.audit.broker_service_id);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.audit.parent_trace_id);
+    return hash;
+}
 
 pub const MintRequest = struct {
     holder: principal.PrincipalId,
@@ -534,7 +570,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         fn mintFromGrantPlan(self: *Self, request: MintRequest) Error!Capability {
             if (!rightsAreValidForTarget(request.target, request.rights)) return error.InvalidCapabilityRights;
             const target_generation_index = try self.ensureTargetGenerationIndex(request.target);
-            return self.insert(.{
+            var record = Capability{
                 .id = self.allocateCapabilityId(),
                 .holder = request.holder,
                 .issuer = request.issuer,
@@ -544,7 +580,9 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .lease = request.lease,
                 .revocation_generation = self.targetGenerationAt(target_generation_index).generation,
                 .audit = request.audit,
-            }, target_generation_index);
+            };
+            finalizeTraceId(&record);
+            return self.insert(record, target_generation_index);
         }
 
         pub fn derive(self: *Self, request: DeriveRequest) Error!Capability {
@@ -557,7 +595,9 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             if (!request.scope.isSubsetOf(parent.scope)) return error.ScopeEscalation;
             if (!request.lease.isSubsetOf(parent.lease)) return error.LeaseEscalation;
 
-            return self.insert(.{
+            var audit = request.audit;
+            if (audit.parent_trace_id == 0) audit.parent_trace_id = parent.traceId();
+            var record = Capability{
                 .id = self.allocateCapabilityId(),
                 .holder = request.holder,
                 .issuer = parent.holder,
@@ -566,8 +606,10 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .scope = request.scope,
                 .lease = request.lease,
                 .revocation_generation = parent.revocation_generation,
-                .audit = request.audit,
-            }, parent_slot.target_generation_index);
+                .audit = audit,
+            };
+            finalizeTraceId(&record);
+            return self.insert(record, parent_slot.target_generation_index);
         }
 
         pub fn pass(self: *Self, request: PassRequest) Error!Capability {
@@ -578,7 +620,9 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             const next_scope = request.scope orelse original.scope;
             if (!scopeIsPassCompatible(next_scope, original.scope, request.allow_task_retarget)) return error.ScopeEscalation;
 
-            const passed = try self.insert(.{
+            var audit = request.audit;
+            if (audit.parent_trace_id == 0) audit.parent_trace_id = original.traceId();
+            var record = Capability{
                 .id = self.allocateCapabilityId(),
                 .holder = request.new_holder,
                 .issuer = original.issuer,
@@ -587,8 +631,10 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .scope = next_scope,
                 .lease = original.lease,
                 .revocation_generation = original.revocation_generation,
-                .audit = request.audit,
-            }, original_slot.target_generation_index);
+                .audit = audit,
+            };
+            finalizeTraceId(&record);
+            const passed = try self.insert(record, original_slot.target_generation_index);
 
             if (request.revoke_source) {
                 const source_slot_index = self.findSlotIndex(request.capability_id) orelse return error.CapabilityNotFound;
@@ -736,7 +782,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             for (plan.slice(), 0..) |entry, index| {
                 const capability_id = self.allocateCapabilityId();
                 if (capability_id == 0) native_util.impossibleByInvariant("capability allocator never returns the reserved zero id");
-                const granted_capability = Capability{
+                var granted_capability = Capability{
                     .id = capability_id,
                     .holder = entry.request.holder,
                     .issuer = entry.request.issuer,
@@ -747,6 +793,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                     .revocation_generation = self.targetGenerationAt(reservation.target_generation_indexes[index]).generation,
                     .audit = entry.request.audit,
                 };
+                finalizeTraceId(&granted_capability);
                 const slot_index = reservation.slot_indexes[index];
                 self.claimReservedSlot(slot_index);
                 self.slots[slot_index] = .{

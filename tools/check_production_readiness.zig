@@ -40,10 +40,48 @@ const FIRST_HARDWARE_TARGET_REQUIRED_SUBSYSTEMS = [_][]const u8{
     "suspend_resume",
     "crash_recovery",
 };
+const FIRST_HARDWARE_TARGET_REQUIRED_MARKERS = [_][]const u8{
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UEFI_BOOT:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_TABLES:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:APIC_TIMER:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:FRAMEBUFFER_GOP:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:USB_INPUT_XHCI:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NVME_BLOCK:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NETWORK_I225_LM:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SUSPEND_RESUME:PASS",
+    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:CRASH_RECOVERY:PASS",
+};
+const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
+    "ZIGOS:USERSPACE:ARTIFACTS:READY",
+    "ZIGOS:USERSPACE:SCHEDULER:READY",
+    "ZIGOS:USERSPACE:EXEC_PROBE:OK",
+    "ZIGOS:USERSPACE:RESUME:OK",
+    "ZIGOS:SERVICE_BOOT:SERVICE_CONTRACTS:READY",
+    "ZIGOS:SERVICE_BOOT:IPC_CONNECT:ALL_OK",
+    "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_REBIND_OK",
+    "ZIGOS:PERMISSION:REVIEW_PORT:READY",
+    "ZIGOS:PERMISSION:POLICY_PORT:READY",
+    "ZIGOS:PERMISSION:UI:REVIEW_RENDERED",
+    "ZIGOS:PERMISSION:LEASE:EXPIRED",
+    "ZIGOS:SYNC:DEVICE_GRAPH:ROOTED",
+    "ZIGOS:SYNC:SYNC:DEVICE_TO_DEVICE",
+    "ZIGOS:SYNC:SYNC:RELAY",
+    "ZIGOS:SYNC:SYNC_SERVICE:RECOVERED",
+    "ZIGOS:PLATFORM:ACTIVATION:ROLLBACK_OK",
+    "ZIGOS:PLATFORM:BASE_SELECTOR:ROLLBACK_BEFORE_SERVICE",
+    "ZIGOS:PLATFORM:HEALTH_CHECKS:STORAGE_ROLLBACK",
+};
+const FIRST_HARDWARE_TARGET_REQUIRED_REFERENCE_ARTIFACTS = [_][]const u8{
+    "src/native/platform/hardware_target.zig",
+    "spec/hardware/nuc11tnki5-required-markers.txt",
+    "spec/hardware/nuc11tnki5-proof-bundle.md",
+    "scripts/check-nuc11tnki5-hardware-proof.sh",
+};
 const FIRST_HARDWARE_TARGET_LIST_FIELDS = [_][]const u8{
     "required_subsystems",
     "reference_artifacts",
     "qemu_preflight_commands",
+    "proof_bundle_requirements",
     "hardware_exit_criteria",
 };
 const SECURE_BY_DESIGN_CONTROL_LIST_FIELDS = [_][]const u8{
@@ -433,11 +471,19 @@ fn validateFirstHardwareTarget(
         "first_hardware_target reference_artifacts",
         true,
     );
+    var reference_artifact_set = try common.collectUniqueStrings(allocator, errors, reference_artifacts, "first hardware target reference artifact");
+    for (FIRST_HARDWARE_TARGET_REQUIRED_REFERENCE_ARTIFACTS) |required_artifact| {
+        if (!reference_artifact_set.contains(required_artifact)) {
+            try common.addError(errors, allocator, "first_hardware_target missing required reference artifact: {s}", .{required_artifact});
+        }
+    }
     for (reference_artifacts) |artifact| {
         if (!common.pathExists(io, artifact)) {
             try common.addError(errors, allocator, "first_hardware_target references missing artifact: {s}", .{artifact});
         }
     }
+    try validateNuc11tnki5MarkerFile(allocator, io, errors);
+    try validateNuc11tnki5ProofChecker(allocator, io, errors);
 
     const current_hardware_evidence = try common.collectStringArray(
         allocator,
@@ -468,6 +514,62 @@ fn validateFirstHardwareTarget(
     }
     if (!std.mem.eql(u8, status, "hardware_passed") and open_gaps.len == 0) {
         try common.addError(errors, allocator, "first_hardware_target must list open_gaps until hardware_passed", .{});
+    }
+}
+
+fn validateNuc11tnki5MarkerFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const marker_path = "spec/hardware/nuc11tnki5-required-markers.txt";
+    if (!common.pathExists(io, marker_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 marker file is missing: {s}", .{marker_path});
+        return;
+    }
+    const source = try common.readFileAlloc(allocator, io, marker_path, common.source_file_max_bytes);
+    for (FIRST_HARDWARE_TARGET_REQUIRED_MARKERS) |marker| {
+        if (std.mem.indexOf(u8, source, marker) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 marker file is missing required marker: {s}", .{marker});
+        }
+    }
+    for (FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS) |marker| {
+        if (std.mem.indexOf(u8, source, marker) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 marker file is missing required booted proof marker: {s}", .{marker});
+        }
+    }
+}
+
+fn validateNuc11tnki5ProofChecker(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const checker_path = "scripts/check-nuc11tnki5-hardware-proof.sh";
+    if (!common.pathExists(io, checker_path)) {
+        try common.addError(errors, allocator, "NUC11TNKi5 proof checker is missing: {s}", .{checker_path});
+        return;
+    }
+    const source = try common.readFileAlloc(allocator, io, checker_path, common.source_file_max_bytes);
+    const required_snippets = [_][]const u8{
+        "EVIDENCE_SOURCE:REAL_HARDWARE",
+        "BOARD_SKU:NUC11TNKi5",
+        "FIRMWARE_SETTINGS:RECORDED",
+        "POWER_CYCLE_NOTES:RECORDED",
+        "ARTIFACT_DIGESTS:RECORDED",
+        "COLD_BOOTS",
+        "WARM_REBOOTS",
+        "STORAGE_WRITE_READ_CYCLES",
+        "NETWORK_FRAME_CYCLES",
+        "SUSPEND_RESUME_CYCLES",
+        "CRASH_RECOVERY_CYCLES",
+        "artifact-digests.sha256",
+        "QEMU",
+    };
+    for (required_snippets) |snippet| {
+        if (std.mem.indexOf(u8, source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 proof checker must enforce snippet: {s}", .{snippet});
+        }
     }
 }
 

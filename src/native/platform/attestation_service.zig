@@ -10,6 +10,8 @@ const signing = @import("../core/signing.zig");
 pub const MAX_REMOTE_PARTY_BYTES: usize = 64;
 pub const MAX_NONCE_BYTES: usize = 32;
 pub const MAX_ROOT_LABEL_BYTES: usize = 48;
+pub const MAX_ROOT_KEY_ID_BYTES: usize = 64;
+pub const MAX_REVOKED_ROOT_GENERATIONS: usize = 8;
 
 pub const KeyOrigin = enum(u8) {
     software,
@@ -26,6 +28,11 @@ pub const RootProviderDescriptor = struct {
     name: []const u8,
     role: RootProviderRole,
     origin: KeyOrigin,
+    key_id: []const u8,
+    key_generation: u64,
+    hardware_backed: bool = true,
+    rotation_supported: bool = true,
+    revocation_supported: bool = true,
 };
 
 pub const RootProvider = struct {
@@ -65,6 +72,14 @@ pub const RootProvider = struct {
         return self.descriptor.origin;
     }
 
+    pub fn keyId(self: RootProvider) []const u8 {
+        return self.descriptor.key_id;
+    }
+
+    pub fn keyGeneration(self: RootProvider) u64 {
+        return self.descriptor.key_generation;
+    }
+
     pub fn sign(self: RootProvider, digest: []const u8) anyerror!manifest.Signature {
         return self.sign_fn(self.context, digest);
     }
@@ -76,10 +91,15 @@ pub const RootProvider = struct {
 
 pub const FakeTpmRootProvider = struct {
     signer: signing.SignerIdentity,
+    key_generation: u64 = 1,
     sign_count: usize = 0,
 
     pub fn init(signer: signing.SignerIdentity) FakeTpmRootProvider {
         return .{ .signer = signer };
+    }
+
+    pub fn initGeneration(signer: signing.SignerIdentity, key_generation: u64) FakeTpmRootProvider {
+        return .{ .signer = signer, .key_generation = key_generation };
     }
 
     pub fn provider(self: *FakeTpmRootProvider) RootProvider {
@@ -87,6 +107,8 @@ pub const FakeTpmRootProvider = struct {
             .name = "fake-tpm-root-provider",
             .role = .test_only,
             .origin = .tpm,
+            .key_id = self.signer.label,
+            .key_generation = self.key_generation,
         });
     }
 
@@ -106,10 +128,15 @@ pub const FakeTpmRootProvider = struct {
 
 pub const FakeSecureEnclaveRootProvider = struct {
     signer: signing.SignerIdentity,
+    key_generation: u64 = 1,
     sign_count: usize = 0,
 
     pub fn init(signer: signing.SignerIdentity) FakeSecureEnclaveRootProvider {
         return .{ .signer = signer };
+    }
+
+    pub fn initGeneration(signer: signing.SignerIdentity, key_generation: u64) FakeSecureEnclaveRootProvider {
+        return .{ .signer = signer, .key_generation = key_generation };
     }
 
     pub fn provider(self: *FakeSecureEnclaveRootProvider) RootProvider {
@@ -117,6 +144,8 @@ pub const FakeSecureEnclaveRootProvider = struct {
             .name = "fake-secure-enclave-root-provider",
             .role = .test_only,
             .origin = .secure_enclave,
+            .key_id = self.signer.label,
+            .key_generation = self.key_generation,
         });
     }
 
@@ -146,6 +175,9 @@ pub const TestSoftwareRootProvider = struct {
             .name = "test-software-root-provider",
             .role = .test_only,
             .origin = .software,
+            .key_id = self.signer.label,
+            .key_generation = 1,
+            .hardware_backed = false,
         });
     }
 
@@ -173,6 +205,9 @@ pub const Statement = struct {
     key_origin: KeyOrigin,
     root_label_len: usize,
     root_label: [MAX_ROOT_LABEL_BYTES]u8,
+    root_key_id_len: usize,
+    root_key_id: [MAX_ROOT_KEY_ID_BYTES]u8,
+    root_key_generation: u64,
     root_digest: [32]u8,
     root_provenance: measured_boot.RootProvenance,
     manifest_verified: bool,
@@ -189,6 +224,10 @@ pub const Statement = struct {
     pub fn rootLabelSlice(self: *const Statement) []const u8 {
         return self.root_label[0..self.root_label_len];
     }
+
+    pub fn rootKeyIdSlice(self: *const Statement) []const u8 {
+        return self.root_key_id[0..self.root_key_id_len];
+    }
 };
 
 pub const VerificationExpectation = struct {
@@ -197,6 +236,9 @@ pub const VerificationExpectation = struct {
     nonce: []const u8,
     user_visible: bool,
     key_origin: ?KeyOrigin = null,
+    root_key_id: []const u8 = "",
+    minimum_root_generation: u64 = 0,
+    revoked_root_generations: []const u64 = &.{},
     attestation_root: ?signing.PublicIdentity = null,
 };
 
@@ -207,6 +249,10 @@ pub const Error = error{
     RootLabelTooLong,
     TestRootProviderRejected,
     UnbackedAttestationRoot,
+    RootLifecycleUnsupported,
+    StaleRootGeneration,
+    RootGenerationRevoked,
+    RevocationListFull,
     UserVisibilityRequired,
     UnverifiedMeasuredRoot,
 };
@@ -220,6 +266,11 @@ pub const Service = struct {
     root_origin: KeyOrigin = .software,
     root_label_len: usize = 0,
     root_label: [MAX_ROOT_LABEL_BYTES]u8 = [_]u8{0} ** MAX_ROOT_LABEL_BYTES,
+    root_key_id_len: usize = 0,
+    root_key_id: [MAX_ROOT_KEY_ID_BYTES]u8 = [_]u8{0} ** MAX_ROOT_KEY_ID_BYTES,
+    root_key_generation: u64 = 0,
+    revoked_root_generation_count: usize = 0,
+    revoked_root_generations: [MAX_REVOKED_ROOT_GENERATIONS]u64 = [_]u64{0} ** MAX_REVOKED_ROOT_GENERATIONS,
     root_provider: ?RootProvider = null,
     allow_test_root_providers: bool = builtin.is_test,
 
@@ -228,12 +279,38 @@ pub const Service = struct {
     }
 
     pub fn provisionRootProvider(self: *Service, provider: RootProvider) Error!void {
-        if (!isBackedRootOrigin(provider.origin())) return error.UnbackedAttestationRoot;
+        if (!isBackedRootOrigin(provider.origin()) or !provider.descriptor.hardware_backed) return error.UnbackedAttestationRoot;
+        if (!provider.descriptor.rotation_supported or !provider.descriptor.revocation_supported) return error.RootLifecycleUnsupported;
         if (provider.testOnly() and !self.allow_test_root_providers) return error.TestRootProviderRejected;
+        if (self.isRootGenerationRevoked(provider.keyGeneration())) return error.RootGenerationRevoked;
         self.has_provisioned_root = true;
         self.root_origin = provider.origin();
         self.root_label_len = native_util.copyTextExact(&self.root_label, provider.label()) catch return error.RootLabelTooLong;
+        self.root_key_id_len = native_util.copyTextExact(&self.root_key_id, provider.keyId()) catch return error.RootLabelTooLong;
+        self.root_key_generation = provider.keyGeneration();
         self.root_provider = provider;
+    }
+
+    pub fn rotateRootProvider(self: *Service, provider: RootProvider) Error!void {
+        if (self.has_provisioned_root and provider.keyGeneration() <= self.root_key_generation) {
+            return error.StaleRootGeneration;
+        }
+        try self.provisionRootProvider(provider);
+    }
+
+    pub fn revokeRootGeneration(self: *Service, generation: u64) Error!void {
+        if (self.isRootGenerationRevoked(generation)) return;
+        if (self.revoked_root_generation_count >= self.revoked_root_generations.len) return error.RevocationListFull;
+        self.revoked_root_generations[self.revoked_root_generation_count] = generation;
+        self.revoked_root_generation_count += 1;
+    }
+
+    pub fn isRootGenerationRevoked(self: *const Service, generation: u64) bool {
+        var index: usize = 0;
+        while (index < self.revoked_root_generation_count) : (index += 1) {
+            if (self.revoked_root_generations[index] == generation) return true;
+        }
+        return false;
     }
 
     pub fn attest(
@@ -260,6 +337,7 @@ pub const Service = struct {
         const provider = self.root_provider orelse return error.RootNotProvisioned;
         if (!isBackedRootOrigin(provider.origin())) return error.UnbackedAttestationRoot;
         if (provider.origin() != self.root_origin) return error.UnbackedAttestationRoot;
+        if (self.isRootGenerationRevoked(provider.keyGeneration())) return error.RootGenerationRevoked;
         if (remote_party.len != 0 and !user_visible) return error.UserVisibilityRequired;
         if (!boot.isRemoteAttestable()) return error.UnverifiedMeasuredRoot;
         if (!boot.isInternallyConsistent()) return error.UnverifiedMeasuredRoot;
@@ -276,7 +354,7 @@ pub const Service = struct {
         user_visible: bool,
         origin: KeyOrigin,
     ) !Statement {
-        var statement = try self.buildStatement(boot, remote_party, nonce, signer.label, user_visible, origin);
+        var statement = try self.buildStatement(boot, remote_party, nonce, signer.label, signer.label, 0, user_visible, origin);
         const digest = statementDigest(statement);
         statement.signature = try signing.signWithDefaultRegistry(.ed25519, signer, &digest);
         return statement;
@@ -290,7 +368,16 @@ pub const Service = struct {
         provider: RootProvider,
         user_visible: bool,
     ) !Statement {
-        var statement = try self.buildStatement(boot, remote_party, nonce, self.rootLabelSlice(), user_visible, provider.origin());
+        var statement = try self.buildStatement(
+            boot,
+            remote_party,
+            nonce,
+            self.rootLabelSlice(),
+            self.rootKeyIdSlice(),
+            provider.keyGeneration(),
+            user_visible,
+            provider.origin(),
+        );
         const digest = statementDigest(statement);
         statement.signature = try provider.sign(&digest);
         return statement;
@@ -302,6 +389,8 @@ pub const Service = struct {
         remote_party: []const u8,
         nonce: []const u8,
         root_label: []const u8,
+        root_key_id: []const u8,
+        root_key_generation: u64,
         user_visible: bool,
         origin: KeyOrigin,
     ) !Statement {
@@ -320,6 +409,9 @@ pub const Service = struct {
             .key_origin = origin,
             .root_label_len = 0,
             .root_label = [_]u8{0} ** MAX_ROOT_LABEL_BYTES,
+            .root_key_id_len = 0,
+            .root_key_id = [_]u8{0} ** MAX_ROOT_KEY_ID_BYTES,
+            .root_key_generation = root_key_generation,
             .root_digest = boot.root_digest,
             .root_provenance = boot.root_provenance,
             .manifest_verified = boot.artifact_manifest_verified,
@@ -328,6 +420,7 @@ pub const Service = struct {
         statement.remote_party_len = native_util.copyTextExact(&statement.remote_party, remote_party) catch return error.RemotePartyTooLong;
         statement.nonce_len = native_util.copyTextExact(&statement.nonce, nonce) catch return error.NonceTooLong;
         statement.root_label_len = native_util.copyTextExact(&statement.root_label, root_label) catch return error.RootLabelTooLong;
+        statement.root_key_id_len = native_util.copyTextExact(&statement.root_key_id, root_key_id) catch return error.RootLabelTooLong;
 
         if (user_visible) {
             self.visible_request_count += 1;
@@ -362,6 +455,11 @@ pub const Service = struct {
         if (expectation.key_origin) |expected_origin| {
             if (statement.key_origin != expected_origin) return false;
         }
+        if (expectation.root_key_id.len != 0 and !std.mem.eql(u8, statement.rootKeyIdSlice(), expectation.root_key_id)) return false;
+        if (expectation.minimum_root_generation != 0 and statement.root_key_generation < expectation.minimum_root_generation) return false;
+        for (expectation.revoked_root_generations) |revoked_generation| {
+            if (statement.root_key_generation == revoked_generation) return false;
+        }
         if (expectation.attestation_root) |expected_root| {
             if (!std.mem.eql(u8, statement.rootLabelSlice(), expected_root.label)) return false;
             if (!signing.verifyTrustedPublicKey(statement.signature, &digest, expected_root)) return false;
@@ -371,6 +469,10 @@ pub const Service = struct {
 
     fn rootLabelSlice(self: *const Service) []const u8 {
         return self.root_label[0..self.root_label_len];
+    }
+
+    fn rootKeyIdSlice(self: *const Service) []const u8 {
+        return self.root_key_id[0..self.root_key_id_len];
     }
 };
 
@@ -392,6 +494,8 @@ fn statementDigest(statement: Statement) [32]u8 {
     crypto_hash.updateBytes(&hasher, "nonce", statement.nonceSlice());
     crypto_hash.updateEnum(&hasher, "key-origin", statement.key_origin);
     crypto_hash.updateBytes(&hasher, "root-label", statement.rootLabelSlice());
+    crypto_hash.updateBytes(&hasher, "root-key-id", statement.rootKeyIdSlice());
+    crypto_hash.updateInt(&hasher, "root-key-generation", statement.root_key_generation);
     crypto_hash.updateBytes(&hasher, "root-digest", &statement.root_digest);
     crypto_hash.updateEnum(&hasher, "root-provenance", statement.root_provenance);
     crypto_hash.updateBool(&hasher, "manifest-verified", statement.manifest_verified);
@@ -523,11 +627,15 @@ test "attestation service can use a provisioned hardware-backed root for visible
         .nonce = "nonce-3",
         .user_visible = true,
         .key_origin = .secure_enclave,
+        .root_key_id = "device-se",
+        .minimum_root_generation = 1,
         .attestation_root = root_identity,
     }));
     try std.testing.expectEqual(@as(usize, 1), root_provider.sign_count);
     try std.testing.expectEqual(KeyOrigin.secure_enclave, statement.key_origin);
     try std.testing.expectEqualStrings("device-se", statement.rootLabelSlice());
+    try std.testing.expectEqualStrings("device-se", statement.rootKeyIdSlice());
+    try std.testing.expectEqual(@as(u64, 1), statement.root_key_generation);
     try std.testing.expectEqual(measured_boot.RootProvenance.bootloader_provided, statement.root_provenance);
     try std.testing.expect(statement.manifest_verified);
 
@@ -547,8 +655,85 @@ test "attestation service can use a provisioned hardware-backed root for visible
         .nonce = "nonce-3",
         .user_visible = true,
         .key_origin = .secure_enclave,
+        .root_key_id = "device-se",
+        .minimum_root_generation = 1,
         .attestation_root = root_identity,
     }));
+}
+
+test "attestation verifier rejects revoked root generations after rotation" {
+    const boot = try verifiedTestBoot(18, .bootloader_provided);
+    var v1_provider = FakeTpmRootProvider.initGeneration(.{
+        .label = "device-tpm-v1",
+        .seed = [_]u8{0x5C} ** 32,
+    }, 1);
+    var v2_provider = FakeTpmRootProvider.initGeneration(.{
+        .label = "device-tpm-v2",
+        .seed = [_]u8{0x5D} ** 32,
+    }, 2);
+    const v1_identity = try v1_provider.publicIdentity();
+    const v2_identity = try v2_provider.publicIdentity();
+
+    var service = Service.init(.{ .kind = .device, .serial = 42 });
+    try service.provisionRootProvider(v1_provider.provider());
+    const v1_statement = try service.attestWithProvisionedRoot(
+        boot,
+        "attest.example",
+        "nonce-7",
+        true,
+    );
+    try std.testing.expect(Service.verifyForBoot(v1_statement, .{
+        .boot = &boot,
+        .remote_party = "attest.example",
+        .nonce = "nonce-7",
+        .user_visible = true,
+        .key_origin = .tpm,
+        .root_key_id = "device-tpm-v1",
+        .minimum_root_generation = 1,
+        .attestation_root = v1_identity,
+    }));
+
+    try std.testing.expectError(error.StaleRootGeneration, service.rotateRootProvider(v1_provider.provider()));
+    try service.rotateRootProvider(v2_provider.provider());
+    try service.revokeRootGeneration(1);
+
+    try std.testing.expect(!Service.verifyForBoot(v1_statement, .{
+        .boot = &boot,
+        .remote_party = "attest.example",
+        .nonce = "nonce-7",
+        .user_visible = true,
+        .key_origin = .tpm,
+        .root_key_id = "device-tpm-v1",
+        .minimum_root_generation = 1,
+        .revoked_root_generations = &.{1},
+        .attestation_root = v1_identity,
+    }));
+
+    const v2_statement = try service.attestWithProvisionedRoot(
+        boot,
+        "attest.example",
+        "nonce-8",
+        true,
+    );
+    try std.testing.expect(Service.verifyForBoot(v2_statement, .{
+        .boot = &boot,
+        .remote_party = "attest.example",
+        .nonce = "nonce-8",
+        .user_visible = true,
+        .key_origin = .tpm,
+        .root_key_id = "device-tpm-v2",
+        .minimum_root_generation = 2,
+        .revoked_root_generations = &.{1},
+        .attestation_root = v2_identity,
+    }));
+
+    try service.revokeRootGeneration(2);
+    try std.testing.expectError(error.RootGenerationRevoked, service.attestWithProvisionedRoot(
+        boot,
+        "attest.example",
+        "nonce-9",
+        true,
+    ));
 }
 
 test "attestation service rejects emulator measured roots for remote attestations" {

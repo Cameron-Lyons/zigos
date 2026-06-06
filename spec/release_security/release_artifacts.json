@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "sbom_format": "SPDX-2.3",
+  "provenance_format": "in-toto Statement v1 with SLSA provenance predicate",
+  "provenance_predicate_type": "https://slsa.dev/provenance/v1",
+  "attestation_envelope_format": "DSSE v1 carrying application/vnd.in-toto+json payloads",
+  "attestation_payload_type": "application/vnd.in-toto+json",
+  "generator": "scripts/generate-release-sbom-provenance.sh",
+  "reproducible_build_checker": "scripts/check-reproducible-build.sh",
+  "output_directory": "build/release-security",
+  "release_signing": {
+    "provider_boundary": "offline HSM or cloud KMS signing provider; release code receives key handles only, never seed material",
+    "hardware_backed_required": true,
+    "rotation_required": true,
+    "revocation_required": true,
+    "customer_verifiable_required": true,
+    "hybrid_ml_dsa_status": "ed25519+ml-dsa65 is preview-only envelope plumbing and is not a production FIPS 204 ML-DSA implementation",
+    "verifier_protocols": [
+      "verify artifact-digests.sha256 against downloaded artifacts",
+      "verify DSSE signatures over application/vnd.in-toto+json payloads before parsing provenance",
+      "verify SLSA provenance predicate type and subject digests",
+      "verify release-keyring.json key ids, custody, generation, and not-after bounds",
+      "reject revoked key ids or generations listed in revoked-release-keys.json",
+      "compare reproducible-build.json and reproducible-artifact-digests.sha256 against the release digest manifest"
+    ],
+    "trusted_key_material": [
+      "spec/release_security/release_keyring.json",
+      "spec/release_security/revoked_release_keys.json"
+    ]
+  },
+  "release_artifacts": [
+    {
+      "id": "kernel-zigos-native",
+      "path": "zig-out/bin/kernel-zigos-native.elf",
+      "kind": "kernel",
+      "digest_required": true,
+      "sbom_required": true,
+      "provenance_required": true,
+      "dsse_required": true,
+      "reproducible_required": true,
+      "customer_verifiable": true
+    },
+    {
+      "id": "zigos-sign",
+      "path": "zig-out/bin/zigos-sign",
+      "kind": "release-tool",
+      "digest_required": true,
+      "sbom_required": true,
+      "provenance_required": true,
+      "dsse_required": true,
+      "reproducible_required": true,
+      "customer_verifiable": true
+    },
+    {
+      "id": "bootable-iso",
+      "path": "build/os.iso",
+      "kind": "boot-image",
+      "digest_required": true,
+      "sbom_required": true,
+      "provenance_required": true,
+      "dsse_required": true,
+      "reproducible_required": true,
+      "customer_verifiable": true
+    },
+    {
+      "id": "userspace-images",
+      "path": "zig-out/bin",
+      "kind": "userspace-image-set",
+      "digest_required": true,
+      "sbom_required": true,
+      "provenance_required": true,
+      "dsse_required": true,
+      "reproducible_required": true,
+      "customer_verifiable": true
+    },
+    {
+      "id": "production-readiness-manifest",
+      "path": "spec/production_readiness.json",
+      "kind": "policy-manifest",
+      "digest_required": true,
+      "sbom_required": true,
+      "provenance_required": true,
+      "dsse_required": true,
+      "reproducible_required": true,
+      "customer_verifiable": true
+    },
+    {
+      "id": "release-keyring",
+      "path": "spec/release_security/release_keyring.json",
+      "kind": "verification-policy",
+      "digest_required": true,
+      "sbom_required": true,
+      "provenance_required": true,
+      "dsse_required": true,
+      "reproducible_required": true,
+      "customer_verifiable": true
+    },
+    {
+      "id": "revoked-release-keys",
+      "path": "spec/release_security/revoked_release_keys.json",
+      "kind": "verification-policy",
+      "digest_required": true,
+      "sbom_required": true,
+      "provenance_required": true,
+      "dsse_required": true,
+      "reproducible_required": true,
+      "customer_verifiable": true
+    }
+  ],
+  "customer_verification_bundle": [
+    "build/release-security/artifact-digests.sha256",
+    "build/release-security/sbom.spdx.json",
+    "build/release-security/provenance.intoto.jsonl",
+    "build/release-security/provenance.dsse.intoto.jsonl",
+    "build/release-security/customer-verification-policy.json",
+    "build/release-security/release-keyring.json",
+    "build/release-security/revoked-release-keys.json",
+    "build/release-security/reproducible-build.json"
+  ]
+}

@@ -22,6 +22,7 @@ const workspace = @import("../../../native/storage/workspace.zig");
 const file_bridge = @import("../../../native/storage/file_bridge.zig");
 const object_store = @import("../../../native/storage/object_store.zig");
 const storage_service = @import("../../../native/storage/storage_service.zig");
+const storage_volume = @import("../../../native/storage/storage_volume.zig");
 const package_service = @import("../../../native/services/package_service.zig");
 const package_service_bundle_ops = @import("../../../native/services/package_service_bundle_ops.zig");
 const indexing_service = @import("../../../native/services/indexing_service.zig");
@@ -82,6 +83,14 @@ const BackgroundContext = struct {
 const WorkspaceCommitContext = struct {
     baseline: workspace.Directory = workspace.Directory.init(),
     workspace_id: ids.WorkspaceId = ids.WorkspaceId.zero,
+};
+
+const StorageVolumeContext = struct {
+    volume: storage_volume.Volume = storage_volume.Volume.init(),
+    seed_image: [storage_volume.image_bytes]u8 = [_]u8{0} ** storage_volume.image_bytes,
+    store: object_store.Store = object_store.Store.init(),
+    workspaces: workspace.Directory = workspace.Directory.init(),
+    prepared: bool = false,
 };
 
 const TaskCheckpointContext = struct {
@@ -170,6 +179,8 @@ const cases = [_]BenchmarkCase{
     .{ .name = "accelerator_scheduler.claim_release", .iterations = 25_000, .runIteration = benchmarkAcceleratorClaimRelease },
     .{ .name = "storage.file_bridge.resolve_view", .iterations = 40_000, .runIteration = benchmarkFileBridgeResolve },
     .{ .name = "storage.workspace.commit_overlay", .iterations = 12_000, .runIteration = benchmarkWorkspaceCommitOverlay },
+    .{ .name = "storage.volume.replay_segmented_log", .iterations = 24, .runIteration = benchmarkStorageVolumeReplaySegmentedLog },
+    .{ .name = "storage.volume.compact_checkpoint", .iterations = 1, .runIteration = benchmarkStorageVolumeCompactCheckpoint },
     .{ .name = "package_revision.rollforward_rollback", .iterations = 20_000, .runIteration = benchmarkPackageRevision },
     .{ .name = "indexing_service.query_ranked", .iterations = 20_000, .runIteration = benchmarkIndexingQuery },
     .{ .name = "media_print.submit_complete", .iterations = 8_000, .runIteration = benchmarkMediaPrintSubmitComplete },
@@ -344,6 +355,7 @@ var event_ledger_buffer: [2048]u8 = undefined;
 var denial_explanation_buffer: [192]u8 = undefined;
 
 var file_bridge_context = FileBridgeContext{};
+var storage_volume_context = StorageVolumeContext{};
 var permission_review_context = PermissionReviewContext{};
 var network_policy_context = NetworkPolicyContext{};
 var background_context = BackgroundContext{};
@@ -503,6 +515,36 @@ fn prepareWorkspaceCommitFixture() void {
     workspace_commit_context.baseline.stagePut(notes.id, "assets/cover.jpg", ids.object(902), ids.version(903), .media_asset) catch unreachable;
     workspace_commit_context.baseline.stagePut(notes.id, "collections/inbox", ids.object(904), ids.version(905), .collection) catch unreachable;
     _ = workspace_commit_context.baseline.commit(notes.id, 10) catch unreachable;
+}
+
+fn prepareStorageVolumeFixture() void {
+    if (storage_volume_context.prepared) return;
+
+    const owner = app(0xBEE0);
+    const record = storage_volume_context.workspaces.create(.{
+        .owner = owner,
+        .label = "volume-bench",
+    }) catch unreachable;
+    const workspace_id = record.id;
+    const save_count = @as(usize, storage_volume.replay_gate_segments) + 1;
+    for (0..save_count) |index| {
+        storage_volume_context.workspaces.beginTransaction(workspace_id) catch unreachable;
+        storage_volume_context.workspaces.stagePut(
+            workspace_id,
+            "benchmarks/storage-volume.md",
+            ids.object(0xBEE0),
+            ids.version(900 + @as(u64, @intCast(index))),
+            .document,
+        ) catch unreachable;
+        _ = storage_volume_context.workspaces.commit(workspace_id, 800 + @as(u64, @intCast(index))) catch unreachable;
+        _ = storage_volume_context.volume.saveToImage(
+            storage_volume_context.seed_image[0..],
+            &storage_volume_context.store,
+            &storage_volume_context.workspaces,
+        ) catch unreachable;
+    }
+
+    storage_volume_context.prepared = true;
 }
 
 fn prepareTaskCheckpointFixture() void {
@@ -982,6 +1024,47 @@ fn benchmarkWorkspaceCommitOverlay(iteration: u32) u64 {
     const plan = directory.resolve(workspace_id, "documents/plan.md") catch unreachable;
     const draft = directory.resolve(workspace_id, "documents/draft.md") catch unreachable;
     return generation + entries.len + plan.version_id.raw() + draft.object_id.raw();
+}
+
+fn benchmarkStorageVolumeReplaySegmentedLog(iteration: u32) u64 {
+    _ = iteration;
+    prepareStorageVolumeFixture();
+
+    const generation = storage_volume_context.volume.loadFromImage(
+        storage_volume_context.seed_image[0..],
+        &storage_volume_context.store,
+        &storage_volume_context.workspaces,
+    ) catch unreachable;
+    const record = storage_volume_context.workspaces.findOwned(app(0xBEE0), "volume-bench") orelse unreachable;
+    return generation + record.generation + record.entryCount();
+}
+
+fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
+    prepareStorageVolumeFixture();
+    _ = storage_volume_context.volume.loadFromImage(
+        storage_volume_context.seed_image[0..],
+        &storage_volume_context.store,
+        &storage_volume_context.workspaces,
+    ) catch unreachable;
+    const record = storage_volume_context.workspaces.findOwned(app(0xBEE0), "volume-bench") orelse unreachable;
+    storage_volume_context.workspaces.beginTransaction(record.id) catch unreachable;
+    storage_volume_context.workspaces.stagePut(
+        record.id,
+        "benchmarks/storage-volume.md",
+        ids.object(0xBEE0),
+        ids.version(10_000 + @as(u64, iteration)),
+        .document,
+    ) catch unreachable;
+    _ = storage_volume_context.workspaces.commit(record.id, 10_000 + @as(u64, iteration)) catch unreachable;
+
+    const before_compacted = storage_volume.testing.latestImageCompactedGeneration(storage_volume_context.seed_image[0..]) catch unreachable;
+    const result = storage_volume_context.volume.saveToImage(
+        storage_volume_context.seed_image[0..],
+        &storage_volume_context.store,
+        &storage_volume_context.workspaces,
+    ) catch unreachable;
+    const after_compacted = storage_volume.testing.latestImageCompactedGeneration(storage_volume_context.seed_image[0..]) catch unreachable;
+    return result.generation + after_compacted - before_compacted + record.generation;
 }
 
 fn benchmarkPackageRevision(iteration: u32) u64 {

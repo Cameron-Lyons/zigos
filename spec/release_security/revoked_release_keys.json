@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "generated_from": "release-security-review",
+  "revoked_keys": [],
+  "revoked_generations": [],
+  "verification_rule": "reject any DSSE signature whose key id or key generation appears in this file"
+}

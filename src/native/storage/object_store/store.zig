@@ -7,13 +7,13 @@ const manifest = @import("../../policy/manifest.zig");
 const native_util = @import("../../core/util.zig");
 const signing = @import("../../core/signing.zig");
 
-pub const MAX_OBJECTS: usize = 128;
-pub const MAX_VERSIONS: usize = 512;
-pub const MAX_BLOBS: usize = 512;
+pub const MAX_OBJECTS: usize = 192;
+pub const MAX_VERSIONS: usize = 768;
+pub const MAX_BLOBS: usize = 640;
 pub const PAGE_SIZE_BYTES: usize = 4096;
 pub const MAX_CHUNK_BYTES: usize = PAGE_SIZE_BYTES;
-pub const MAX_BLOB_CHUNKS: usize = 24;
-pub const MAX_CHUNKS: usize = 192;
+pub const MAX_BLOB_CHUNKS: usize = 28;
+pub const MAX_CHUNKS: usize = 224;
 pub const MAX_BLOB_BYTES: usize = MAX_CHUNK_BYTES * MAX_BLOB_CHUNKS;
 pub const MAX_PAYLOAD_BYTES: usize = MAX_BLOB_BYTES;
 pub const MAX_VERSION_PARENTS: usize = 2;
@@ -23,12 +23,12 @@ const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
 const CHUNK_INDEX_CAPACITY: usize = MAX_CHUNKS * 2;
 const BLOB_PAGE_SIZE: usize = 64;
-const BLOB_PAGE_COUNT: usize = MAX_BLOBS / BLOB_PAGE_SIZE;
-const CHUNK_PAGE_SIZE: usize = 64;
+const CHUNK_PAGE_SIZE: usize = 32;
 
 pub const StoreConfig = struct {
     max_objects: usize = MAX_OBJECTS,
     max_versions: usize = MAX_VERSIONS,
+    max_blobs: usize = MAX_BLOBS,
     max_chunks: usize = MAX_CHUNKS,
     object_index_capacity: usize = OBJECT_INDEX_CAPACITY,
     version_index_capacity: usize = VERSION_INDEX_CAPACITY,
@@ -38,11 +38,13 @@ pub const StoreConfig = struct {
     pub fn validate(comptime config: StoreConfig) void {
         if (config.max_objects == 0) @compileError("object store requires at least one object slot");
         if (config.max_versions == 0) @compileError("object store requires at least one version slot");
+        if (config.max_blobs == 0) @compileError("object store requires at least one blob slot");
         if (config.max_chunks == 0) @compileError("object store requires at least one chunk slot");
         if (config.object_index_capacity < config.max_objects) @compileError("object index capacity must cover object slots");
         if (config.version_index_capacity < config.max_versions) @compileError("version index capacity must cover version slots");
-        if (config.blob_index_capacity < MAX_BLOBS) @compileError("blob index capacity must cover blob slabs");
+        if (config.blob_index_capacity < config.max_blobs) @compileError("blob index capacity must cover blob slabs");
         if (config.chunk_index_capacity < config.max_chunks) @compileError("chunk index capacity must cover chunk slots");
+        if (config.max_blobs % BLOB_PAGE_SIZE != 0) @compileError("blob slab capacity must be a whole number of pages");
         if (config.max_chunks % CHUNK_PAGE_SIZE != 0) @compileError("chunk slab capacity must be a whole number of pages");
     }
 };
@@ -327,15 +329,17 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         const Self = @This();
         const MAX_STORE_OBJECTS = config.max_objects;
         const MAX_STORE_VERSIONS = config.max_versions;
+        const MAX_STORE_BLOBS = config.max_blobs;
         const MAX_STORE_CHUNKS = config.max_chunks;
         const STORE_OBJECT_INDEX_CAPACITY = config.object_index_capacity;
         const STORE_VERSION_INDEX_CAPACITY = config.version_index_capacity;
         const STORE_BLOB_INDEX_CAPACITY = config.blob_index_capacity;
         const STORE_CHUNK_INDEX_CAPACITY = config.chunk_index_capacity;
+        const STORE_BLOB_PAGE_COUNT = config.max_blobs / BLOB_PAGE_SIZE;
         const STORE_CHUNK_PAGE_COUNT = config.max_chunks / CHUNK_PAGE_SIZE;
         const ObjectArena = indexed_arena.IndexedArenaWithKey(ids.ObjectId, ObjectSlot, MAX_STORE_OBJECTS, STORE_OBJECT_INDEX_CAPACITY, objectSlotId);
         const VersionArena = indexed_arena.IndexedArenaWithKey(ids.VersionId, VersionSlot, MAX_STORE_VERSIONS, STORE_VERSION_INDEX_CAPACITY, versionSlotId);
-        const BlobArena = indexed_arena.PagedIndexedArena(BlobSlot, BLOB_PAGE_SIZE, BLOB_PAGE_COUNT, STORE_BLOB_INDEX_CAPACITY, blobSlotIndexId);
+        const BlobArena = indexed_arena.PagedIndexedArena(BlobSlot, BLOB_PAGE_SIZE, STORE_BLOB_PAGE_COUNT, STORE_BLOB_INDEX_CAPACITY, blobSlotIndexId);
         const ChunkArena = indexed_arena.PagedIndexedArena(ChunkSlot, CHUNK_PAGE_SIZE, STORE_CHUNK_PAGE_COUNT, STORE_CHUNK_INDEX_CAPACITY, chunkSlotIndexId);
 
         pub const VersionChunkCursor = struct {
@@ -601,7 +605,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
         pub fn blobSlotCapacity(self: *const Self) usize {
             _ = self;
-            return MAX_BLOBS;
+            return MAX_STORE_BLOBS;
         }
 
         pub fn chunkSlotCapacity(self: *const Self) usize {

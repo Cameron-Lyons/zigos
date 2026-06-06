@@ -1,4 +1,5 @@
 const std = @import("std");
+const debug_contract = @import("../security/debug_contract.zig");
 const typed_component_abi = @import("../services/typed_component_abi.zig");
 const native_util = @import("../core/util.zig");
 
@@ -13,7 +14,17 @@ pub const EventKind = enum(u8) {
     package_rolled_back,
     package_removed,
     compatibility_launched,
+    permission_review_rendered,
+    native_app_launched,
+    native_app_suspended,
+    native_app_resumed,
+    native_app_stopped,
     abi_message_checked,
+    capability_trace,
+    denial_explained,
+    launch_provenance,
+    service_call_provenance,
+    crash_report,
     breakpoint_hit,
 };
 
@@ -110,6 +121,41 @@ pub const Session = struct {
         try self.record(.breakpoint_hit, tick, label, "developer-breakpoint", true);
     }
 
+    pub fn recordProvenance(self: *Session, tick: u64, provenance_record: debug_contract.ProvenanceRecord) Error!void {
+        var detail_buffer: [MAX_LABEL_BYTES]u8 = undefined;
+        const detail = std.fmt.bufPrint(
+            &detail_buffer,
+            "trace=0x{x} task={d} decision={s} reason={s}",
+            .{
+                provenance_record.trace_id,
+                provenance_record.task_id,
+                @tagName(provenance_record.decision),
+                @tagName(provenance_record.denial.reason),
+            },
+        ) catch return error.DebugOutputTooLong;
+        try self.record(
+            eventKindForProvenance(provenance_record.kind),
+            tick,
+            provenance_record.operationSlice(),
+            detail,
+            provenance_record.decision == .allowed,
+        );
+    }
+
+    pub fn recordDenial(self: *Session, tick: u64, explanation: debug_contract.DenialExplanation) Error!void {
+        var detail_buffer: [MAX_LABEL_BYTES]u8 = undefined;
+        const detail = std.fmt.bufPrint(
+            &detail_buffer,
+            "fingerprint=0x{x} reason={s} policy={s}",
+            .{
+                explanation.fingerprint,
+                @tagName(explanation.reason),
+                explanation.blockingPolicySlice(),
+            },
+        ) catch return error.DebugOutputTooLong;
+        try self.record(.denial_explained, tick, explanation.operationSlice(), detail, false);
+    }
+
     pub fn exportText(self: *const Session, output: []u8) Error![]const u8 {
         var cursor: usize = 0;
         for (self.events[0..self.event_count]) |event| {
@@ -129,6 +175,16 @@ pub const Session = struct {
         return output[0..cursor];
     }
 };
+
+fn eventKindForProvenance(kind: debug_contract.ProvenanceKind) EventKind {
+    return switch (kind) {
+        .launch => .launch_provenance,
+        .service_call => .service_call_provenance,
+        .crash_report => .crash_report,
+        .capability_grant, .capability_revoke => .capability_trace,
+        else => .abi_message_checked,
+    };
+}
 
 fn appendFmt(output: []u8, cursor: *usize, comptime fmt: []const u8, args: anytype) Error!void {
     const written = std.fmt.bufPrint(output[cursor.*..], fmt, args) catch return error.DebugOutputTooLong;
@@ -157,11 +213,35 @@ test "debugger records ABI checks and exports a redaction-safe trace" {
         @sizeOf(typed_component_abi.PackageRollbackResponse),
     );
     try session.hitBreakpoint(11, "after-rollback");
+    const denied = debug_contract.explainDenied(.policy_denied, "open-camera", "camera", 9, 0, .device, 3);
+    try session.recordDenial(12, denied);
+    try session.recordProvenance(13, debug_contract.provenance(
+        .service_call,
+        .denied,
+        13,
+        9,
+        22,
+        0,
+        .service,
+        22,
+        "media-open",
+        "camera",
+        denied,
+        0,
+    ));
+    try session.recordProvenance(14, debug_contract.crashReportProvenance(9, 22, 14, 0xCA11, 1, 0xBEEF, true));
     try std.testing.expectEqual(@as(usize, 1), session.countKind(.abi_message_checked));
     try std.testing.expectEqual(@as(usize, 1), session.countKind(.breakpoint_hit));
+    try std.testing.expectEqual(@as(usize, 1), session.countKind(.denial_explained));
+    try std.testing.expectEqual(@as(usize, 1), session.countKind(.service_call_provenance));
+    try std.testing.expectEqual(@as(usize, 1), session.countKind(.crash_report));
 
-    var output: [512]u8 = undefined;
+    var output: [1024]u8 = undefined;
     const text = try session.exportText(&output);
     try std.testing.expect(std.mem.indexOf(u8, text, "kind=abi_message_checked") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "after-rollback") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "kind=denial_explained") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "fingerprint=0x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "kind=service_call_provenance") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "kind=crash_report") != null);
 }

@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "owner": "release-security-review",
+  "required_domains": [
+    "explicit-authority",
+    "privilege-boundaries",
+    "boot-trust",
+    "recovery",
+    "policy-mediation",
+    "storage-integrity",
+    "sync-trust",
+    "diagnostics-privacy",
+    "driver-isolation"
+  ],
+  "threats": [
+    {
+      "id": "TM-001",
+      "domain": "explicit-authority",
+      "abuse_case": "A task reuses a revoked or expired capability to reach a service after its authority changed.",
+      "mitigation": "Capability tables carry revocation generations, leases, scope checks, and explicit rights projections.",
+      "negative_tests": ["src/tests/spec/adversarial_security.zig", "src/tests/spec/architecture_security.zig"],
+      "residual_risk_owner": "kernel-api-owner",
+      "residual_risk_decision": "accepted-for-release-with-generation-and-lease-tests"
+    },
+    {
+      "id": "TM-002",
+      "domain": "privilege-boundaries",
+      "abuse_case": "A component bypasses typed component ports or native kernel mediation to obtain ambient process authority.",
+      "mitigation": "The native syscall surface, service contracts, and userspace launch provenance reject unsigned or synthetic launch paths.",
+      "negative_tests": ["src/tests/spec/spec_conformance_test.zig", "src/native/kernel_api/syscall_surface.zig"],
+      "residual_risk_owner": "session-runtime-owner",
+      "residual_risk_decision": "accepted-for-release-with-signed-launch-provenance"
+    },
+    {
+      "id": "TM-003",
+      "domain": "boot-trust",
+      "abuse_case": "A boot artifact, policy, driver set, or userspace image is modified after signing.",
+      "mitigation": "Measured boot records bind every artifact digest and QEMU negative profiles fail closed on tamper.",
+      "negative_tests": ["src/native/platform/measured_boot.zig", "scripts/run-zigos-native-smoke.sh"],
+      "residual_risk_owner": "boot-chain-owner",
+      "residual_risk_decision": "accepted-for-release-with-manifest-tamper-smoke-gates"
+    },
+    {
+      "id": "TM-004",
+      "domain": "recovery",
+      "abuse_case": "A rollback, interrupted write, or crash recovery path loses persistent state or exposes unredacted diagnostics.",
+      "mitigation": "Recovery, storage durability, root-slot corruption, and crash record gates require deterministic recovery and redacted summaries.",
+      "negative_tests": ["scripts/run-storage-durability-qemu.sh", "scripts/run-kernel-recovery.sh", "src/kernel/platform/crash_record.zig"],
+      "residual_risk_owner": "recovery-owner",
+      "residual_risk_decision": "accepted-for-release-with-qemu-storage-and-redaction-gates"
+    },
+    {
+      "id": "TM-005",
+      "domain": "policy-mediation",
+      "abuse_case": "A service or app hides a sensitive action behind a stale policy decision or missing denial explanation.",
+      "mitigation": "Policy mediation, denial explanations, event ledger records, and permission review services record explicit decisions.",
+      "negative_tests": ["src/tests/host/policy_tests.zig", "src/tests/spec/experience_and_policy_edges.zig"],
+      "residual_risk_owner": "policy-owner",
+      "residual_risk_decision": "accepted-for-release-with-user-visible-denial-records"
+    },
+    {
+      "id": "TM-006",
+      "domain": "storage-integrity",
+      "abuse_case": "Malformed storage logs, oversized payloads, or torn records corrupt object or workspace state.",
+      "mitigation": "Storage volume replay validates root slots, checksums, payload bounds, segment counts, and quota behavior.",
+      "negative_tests": ["src/native/storage/storage_volume_test.zig", "src/tests/spec/adversarial_security.zig"],
+      "residual_risk_owner": "storage-owner",
+      "residual_risk_decision": "accepted-for-release-with-fuzz-and-durability-gates"
+    },
+    {
+      "id": "TM-007",
+      "domain": "sync-trust",
+      "abuse_case": "A remote node replays, duplicates, or redirects sync frames without a trusted platform root.",
+      "mitigation": "Device graph enrollment, durable transport frames, private overlay policy, and replay rejection are test backed.",
+      "negative_tests": ["src/native/sync/sync_service_test.zig", "scripts/run-sync-two-node-qemu.sh"],
+      "residual_risk_owner": "sync-owner",
+      "residual_risk_decision": "accepted-for-release-with-two-node-and-fuzzed-record-gates"
+    },
+    {
+      "id": "TM-008",
+      "domain": "diagnostics-privacy",
+      "abuse_case": "Crash dumps or support bundles include secrets, capability tokens, raw memory, or private object names by default.",
+      "mitigation": "Crash summaries redact sensitive reason strings and the release policy denies raw memory capture by default.",
+      "negative_tests": ["src/kernel/platform/crash_record.zig", "src/native/platform/event_ledger.zig"],
+      "residual_risk_owner": "diagnostics-owner",
+      "residual_risk_decision": "accepted-for-release-with-support-bundle-redaction-gate"
+    },
+    {
+      "id": "TM-009",
+      "domain": "driver-isolation",
+      "abuse_case": "A restarted userspace driver keeps stale broker authority, DMA metadata, or port access.",
+      "mitigation": "Driver restart proofs reject stale authority, stale DMA/port access, and rebind fresh broker sessions by generation.",
+      "negative_tests": ["src/native/session/proofs/service_path_proofs_driver_recovery.zig", "scripts/run-zigos-native-smoke.sh"],
+      "residual_risk_owner": "driver-owner",
+      "residual_risk_decision": "accepted-for-release-with-driver-restart-qemu-gate"
+    }
+  ]
+}

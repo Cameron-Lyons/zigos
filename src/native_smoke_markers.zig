@@ -12,6 +12,8 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.tcb_defined,
     boot_markers.userspace_scheduler_ready,
     boot_markers.userspace_artifacts_ready,
+    boot_markers.userspace_exec_probe_ok,
+    boot_markers.userspace_resume_ok,
     boot_markers.transport_native_kernel_ready,
     boot_markers.transport_no_root,
     boot_markers.transport_component_abi_ready,
@@ -39,7 +41,24 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.service_boot_storage_stale_access_rejected,
     boot_markers.service_boot_storage_rebind_ok,
     boot_markers.service_boot_storage_io_after_restart_ok,
+    boot_markers.service_boot_ipc_connect_all_ok,
     "ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY",
+    boot_markers.permission_review_port_ready,
+    boot_markers.permission_policy_port_ready,
+    boot_markers.permission_manifest_valid,
+    boot_markers.permission_zero_authority_deny_network,
+    boot_markers.permission_zero_authority_deny_clipboard,
+    boot_markers.permission_grant_object_local,
+    boot_markers.permission_grant_network_local,
+    boot_markers.permission_deny_clipboard,
+    boot_markers.permission_elf_substrate_ok,
+    boot_markers.permission_grant_device_local,
+    boot_markers.permission_grant_camera,
+    boot_markers.permission_deny_mic,
+    boot_markers.permission_grant_sensor_local,
+    boot_markers.permission_grant_peer_ipc_local,
+    boot_markers.permission_lease_expired,
+    boot_markers.permission_ui_review_rendered,
     boot_markers.platform_bootloader_measurement_provided,
     boot_markers.platform_build_artifact_manifest_verified,
     boot_markers.platform_bootloader_handoff_verified,
@@ -79,6 +98,39 @@ pub const driver_restart_required = [_][]const u8{
     boot_markers.service_boot_storage_io_after_restart_ok,
 };
 
+pub const service_startup_required = [_][]const u8{
+    boot_markers.userspace_artifacts_ready,
+    boot_markers.userspace_scheduler_ready,
+    boot_markers.userspace_exec_probe_ok,
+    boot_markers.userspace_resume_ok,
+    boot_markers.transport_native_kernel_ready,
+    boot_markers.transport_component_abi_ready,
+    boot_markers.service_boot_service_contracts_ready,
+    boot_markers.service_boot_ipc_connect_all_ok,
+    "ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY",
+};
+
+pub const permission_review_required = [_][]const u8{
+    boot_markers.permission_ui_service_ready,
+    boot_markers.permission_ui_service_task_ready,
+    boot_markers.permission_review_port_ready,
+    boot_markers.permission_policy_port_ready,
+    boot_markers.permission_manifest_valid,
+    boot_markers.permission_zero_authority_deny_network,
+    boot_markers.permission_zero_authority_deny_clipboard,
+    boot_markers.permission_grant_object_local,
+    boot_markers.permission_grant_network_local,
+    boot_markers.permission_deny_clipboard,
+    boot_markers.permission_elf_substrate_ok,
+    boot_markers.permission_grant_device_local,
+    boot_markers.permission_grant_camera,
+    boot_markers.permission_deny_mic,
+    boot_markers.permission_grant_sensor_local,
+    boot_markers.permission_grant_peer_ipc_local,
+    boot_markers.permission_lease_expired,
+    boot_markers.permission_ui_review_rendered,
+};
+
 pub const ab_rollback_required = [_][]const u8{
     boot_markers.platform_immutable_base_active,
     boot_markers.platform_immutable_base_boot_selection,
@@ -86,6 +138,21 @@ pub const ab_rollback_required = [_][]const u8{
     boot_markers.platform_ab_image_rollback_ok,
     boot_markers.platform_base_selector_active_slot_verified,
     boot_markers.platform_base_selector_rollback_before_service,
+};
+
+pub const update_rollback_required = [_][]const u8{
+    boot_markers.platform_immutable_base_active,
+    boot_markers.platform_immutable_base_boot_selection,
+    boot_markers.platform_activation_rollback_ok,
+    boot_markers.platform_ab_image_rollback_ok,
+    boot_markers.platform_base_selector_active_slot_verified,
+    boot_markers.platform_base_selector_rollback_before_service,
+    boot_markers.platform_health_checks_boot_rollback,
+    boot_markers.platform_health_checks_core_rollback,
+    boot_markers.platform_health_checks_storage_rollback,
+    boot_markers.platform_health_checks_network_rollback,
+    boot_markers.platform_health_checks_ui_rollback,
+    boot_markers.platform_health_checks_promote_ok,
 };
 
 pub const tampered_artifact_manifest_required = [_][]const u8{
@@ -141,8 +208,17 @@ pub const sync_two_node_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
     boot_markers.transport_native_kernel_ready,
+    boot_markers.sync_device_graph_rooted,
+    "ZIGOS:SYNC:DEVICE_ENROLL:OK",
+    "ZIGOS:SYNC:KEY_ROTATION:OK",
+    "ZIGOS:SYNC:DEVICE_REVOKE:OK",
+    "ZIGOS:SYNC:NETWORK_POLICY:LOCAL",
+    "ZIGOS:SYNC:SYNC_POLICY:OFFLINE_FIRST",
+    "ZIGOS:SYNC:SYNC_POLICY:E2EE_PERSONAL",
+    "ZIGOS:SYNC:SYNC_POLICY:SELECTIVE",
     "ZIGOS:SYNC:SYNC:DEVICE_TO_DEVICE",
     "ZIGOS:SYNC:SYNC:RELAY",
+    "ZIGOS:SYNC:DEVICE_REVOKE:ENFORCED",
     "ZIGOS:SYNC:SYNC_SERVICE:RECOVERED",
     boot_markers.native_ready,
 };
@@ -204,11 +280,29 @@ test "native smoke gate requires in-boot driver crash restart proof markers" {
     }
 }
 
+test "native smoke gate requires booted service startup proof markers" {
+    for (service_startup_required) |marker| {
+        try std.testing.expect(contains(&cold_boot_required, marker));
+    }
+}
+
+test "native smoke gate requires booted permission review proof markers" {
+    for (permission_review_required) |marker| {
+        try std.testing.expect(contains(&cold_boot_required, marker));
+    }
+}
+
 test "native smoke gate requires A/B image rollback proof markers" {
     try std.testing.expect(contains(&ab_rollback_required, boot_markers.platform_immutable_base_active));
     try std.testing.expect(contains(&ab_rollback_required, boot_markers.platform_activation_rollback_ok));
     try std.testing.expect(contains(&ab_rollback_required, boot_markers.platform_ab_image_rollback_ok));
     try std.testing.expect(contains(&ab_rollback_required, boot_markers.platform_base_selector_rollback_before_service));
+}
+
+test "native smoke gate requires update rollback proof markers" {
+    for (update_rollback_required) |marker| {
+        try std.testing.expect(contains(&cold_boot_required, marker) or contains(&ab_rollback_required, marker));
+    }
 }
 
 test "native smoke gate requires boot attestation negative proof markers" {

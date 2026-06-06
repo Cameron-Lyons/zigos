@@ -10,6 +10,7 @@ const storage_service = @import("../storage/storage_service.zig");
 const sync_service = @import("sync_service_impl.zig");
 const sync_transport = @import("sync_transport.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const workspace = @import("../storage/workspace.zig");
 
 const OverlaySessionState = sync_service.OverlaySessionState;
 const OverlaySessionUse = sync_service.OverlaySessionUse;
@@ -461,6 +462,149 @@ test "sync service persists durable transport queues and enforces replay and wor
         saw_duplicate_count = true;
     }
     try std.testing.expect(saw_duplicate_count);
+}
+
+test "sync service treats per-object shares and conflict review as local-first primitives" {
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
+
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 8_800 };
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8_801 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 8_802 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 8_803 };
+    const tablet = principal.PrincipalId{ .kind = .device, .serial = 8_804 };
+    const storage_signer = signing.SignerIdentity{
+        .label = "object-share-storage",
+        .seed = [_]u8{0xD1} ** 32,
+    };
+    const user_signer = signing.SignerIdentity{
+        .label = "object-share-user",
+        .seed = [_]u8{0xD2} ** 32,
+    };
+    const laptop_signer = signing.SignerIdentity{
+        .label = "object-share-laptop",
+        .seed = [_]u8{0xD3} ** 32,
+    };
+    const tablet_signer = signing.SignerIdentity{
+        .label = "object-share-tablet",
+        .seed = [_]u8{0xD4} ** 32,
+    };
+    const notes_path = "documents/shared.md";
+    const private_path = "documents/private.md";
+
+    var storage = storage_service.Service.initWithStore(8_810, 8_811, storage_owner, &storage_checkpoint_store);
+    const notes_v1 = try storage.putVersion(.{
+        .preferred_object_id = object_store.ids.object(8_820),
+        .object_type = .document,
+        .payload = "base",
+        .metadata = try object_store.signMetadata(storage_signer, "notes-v1", "text/plain", .document, "base", 10),
+    });
+    const notes_v2 = try storage.putVersion(.{
+        .preferred_object_id = notes_v1.object_id,
+        .object_type = .document,
+        .payload = "laptop edit",
+        .metadata = try object_store.signMetadata(storage_signer, "notes-v2", "text/plain", .document, "laptop edit", 11),
+        .parent_version_id = notes_v1.version_id,
+    });
+    const tablet_offline = try storage.putVersion(.{
+        .preferred_object_id = object_store.ids.object(8_822),
+        .object_type = .document,
+        .payload = "tablet offline edit",
+        .metadata = try object_store.signMetadata(storage_signer, "notes-tablet", "text/plain", .document, "tablet offline edit", 12),
+    });
+    const private = try storage.putVersion(.{
+        .preferred_object_id = object_store.ids.object(8_821),
+        .object_type = .document,
+        .payload = "private",
+        .metadata = try object_store.signMetadata(storage_signer, "private", "text/plain", .document, "private", 13),
+    });
+    const workspace_record = try storage.createWorkspace(.{
+        .owner = user,
+        .label = "object-share-notes",
+    });
+    try storage.beginTransaction(workspace_record.id);
+    try storage.stagePut(workspace_record.id, notes_path, notes_v2.object_id, notes_v2.version_id, .document);
+    try storage.stagePut(workspace_record.id, private_path, private.object_id, private.version_id, .document);
+    _ = try storage.commit(workspace_record.id, 14);
+    const scoped_share = try (workspace.ShareGrant{
+        .principal_id = tablet,
+        .can_read = true,
+        .network_scope = .local_only,
+        .audit_visibility = .shared_participants,
+    }).withObjectScope(notes_v2.object_id, notes_path);
+    try storage.shareWorkspace(workspace_record.id, scoped_share);
+
+    var resident = ResidentState{};
+    var service = try Service.initWithStorage(8_830, 8_831, sync_owner, &storage, &resident);
+    var capabilities = capability.CapabilityTable.init();
+    const authority_capability = try mintSyncServiceAuthority(&capabilities, &service, sync_owner);
+    var port = sync_service.SyncPort.init(&service, &capabilities);
+    const authority = syncAuthority(&service, sync_owner, authority_capability, 20);
+    _ = try port.ensureUserRoot(authority, user, "owner", user_signer);
+    _ = try port.enrollTrustedDevice(authority, user, laptop, "laptop", user_signer, laptop_signer, 21);
+    _ = try port.enrollTrustedDevice(authority, user, tablet, "tablet", user_signer, tablet_signer, 22);
+    const local_policy = try port.createNetworkPolicy(authority, .{
+        .owner = sync_owner,
+        .workspace_id = workspace_record.id.raw(),
+        .label = "local",
+        .mode = .local_network,
+    });
+    _ = try port.configureWorkspacePolicy(authority, .{
+        .workspace_id = workspace_record.id.raw(),
+        .owner = user,
+        .offline_first = true,
+        .personal_e2ee = true,
+        .require_shared_access = true,
+        .selective_prefixes = &.{"documents/"},
+        .device_to_device_policy_id = local_policy.id,
+    });
+
+    try port.setReplicaVersion(authority, workspace_record.id.raw(), tablet, notes_path, notes_v2.object_id, tablet_offline.version_id);
+    const summary = try port.replicateWorkspace(
+        authority,
+        &storage,
+        workspace_record.id.raw(),
+        laptop,
+        tablet,
+        .device_to_device,
+    );
+    try std.testing.expectEqual(@as(usize, 1), summary.selected_entry_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.skipped_entry_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.share_denied_entry_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.conflict_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.transport_frame_count);
+    try std.testing.expect(service.latestTransportFrameForPath(workspace_record.id.raw(), tablet, private_path) == null);
+
+    try std.testing.expectError(error.TransportDenied, port.acceptTransportFrame(authority, &storage, .{
+        .workspace_id = workspace_record.id.raw(),
+        .object_id = private.object_id.raw(),
+        .version_id = private.version_id.raw(),
+        .source_device = laptop,
+        .target_device = tablet,
+        .transport = .device_to_device,
+        .semantic = .mergeable_crdt,
+        .encrypted = true,
+        .path = private_path,
+    }));
+
+    const review = try port.reviewConflict(authority, workspace_record.id.raw(), tablet, notes_path);
+    try std.testing.expect(!review.resolved);
+    try std.testing.expectEqualStrings(notes_path, review.pathSlice());
+    try std.testing.expectEqual(notes_v2.version_id.raw(), review.local_version_id);
+    try std.testing.expectEqual(tablet_offline.version_id.raw(), review.remote_version_id);
+
+    const resolved = try port.resolveConflict(authority, workspace_record.id.raw(), tablet, notes_path, .accept_remote);
+    try std.testing.expect(resolved.resolved);
+    try std.testing.expectEqual(sync_service.ConflictReviewDecision.accept_remote, resolved.decision);
+    try std.testing.expect(service.findConflict(workspace_record.id.raw(), tablet, notes_path) == null);
+    try std.testing.expectEqual(tablet_offline.version_id.raw(), service.replicaVersion(workspace_record.id.raw(), tablet, notes_path).?);
+
+    var restarted_resident = ResidentState{};
+    var restarted = try Service.initWithStorage(8_840, 8_841, sync_owner, &storage, &restarted_resident);
+    try std.testing.expect(restarted.loaded_existing_state);
+    try std.testing.expect(restarted.findConflict(workspace_record.id.raw(), tablet, notes_path) == null);
+    try std.testing.expectEqual(tablet_offline.version_id.raw(), restarted.replicaVersion(workspace_record.id.raw(), tablet, notes_path).?);
 }
 
 fn addSyncDeviceGraphMeasuredArtifact(

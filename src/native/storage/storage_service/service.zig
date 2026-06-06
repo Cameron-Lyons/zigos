@@ -1,10 +1,13 @@
+const abi = @import("../../core/abi.zig");
 const capability = @import("../../kernel_api/capability.zig");
+const debug_contract = @import("../../security/debug_contract.zig");
 const file_bridge = @import("../file_bridge.zig");
 const object_store = @import("../object_store.zig");
 const checkpoint_support = @import("../storage_service_checkpoint.zig");
 const ids = @import("../../core/ids.zig");
 const native_util = @import("../../core/util.zig");
 const principal = @import("../../core/principal.zig");
+const service_authority = @import("../../services/service_authority.zig");
 const shared_memory = @import("../../kernel_api/shared_memory.zig");
 const signing = @import("../../core/signing.zig");
 const workspace = @import("../workspace.zig");
@@ -33,12 +36,7 @@ pub const SharedPayloadError = object_store.Error || shared_memory.Error || erro
     SharedMemorySizeMismatch,
 };
 
-pub const AuthorityContext = struct {
-    task_id: u64,
-    principal: principal.PrincipalId,
-    capability_id: u64,
-    now_ticks: u64,
-};
+pub const AuthorityContext = service_authority.Context;
 
 pub const AuthorityError = file_bridge.Error;
 
@@ -419,6 +417,10 @@ pub const StorageCore = struct {
         return self.workspaces.hasAccess(workspaceId(workspace_id), request);
     }
 
+    pub fn workspaceHasAnyAccess(self: *const Service, workspace_id: anytype, request: workspace.AccessRequest) bool {
+        return self.workspaces.hasAnyAccess(workspaceId(workspace_id), request);
+    }
+
     pub fn workspaceCanReshare(
         self: *const Service,
         workspace_id: anytype,
@@ -664,9 +666,34 @@ pub const StoragePort = struct {
     }
 
     pub fn resolve(self: *StoragePort, authority: AuthorityContext, request: file_bridge.ResolveRequest) (AuthorityError || workspace.Error)!file_bridge.View {
-        _ = try self.requireStorageAuthority(authority, ids.workspace(request.workspace_id), request.access);
+        const workspace_id = ids.workspace(request.workspace_id);
+        const storage_authority = try self.requireStorageAuthority(authority, workspace_id, request.access);
+        if (storage_authority.target.kind == .workspace) {
+            try self.requireGrantScopeForResolve(authority, request);
+        }
         var bridge = file_bridge.Bridge.init(self.core, self.capability_table, bridgeResolveEntry, bridgeHasVersion);
         return bridge.resolve(request, authority.principal, authority.capability_id, authority.now_ticks);
+    }
+
+    fn requireGrantScopeForResolve(
+        self: *const StoragePort,
+        authority: AuthorityContext,
+        request: file_bridge.ResolveRequest,
+    ) (AuthorityError || workspace.Error)!void {
+        const workspace_id = ids.workspace(request.workspace_id);
+        const record = self.core.findWorkspaceRecordConst(workspace_id) orelse return error.WorkspaceNotFound;
+        if (record.owner.eql(authority.principal)) return;
+
+        const path = normalizeFileBridgePath(request.path);
+        const entry = try self.core.resolve(workspace_id, path);
+        if (!self.core.workspaceHasAccess(workspace_id, .{
+            .principal_id = authority.principal,
+            .object_id = entry.object_id,
+            .path = entry.pathSlice(),
+            .wants_write = request.access == .write,
+            .network_scope = .local_only,
+            .now_ticks = authority.now_ticks,
+        })) return error.PermissionDenied;
     }
 
     fn requireStorageAuthority(
@@ -675,28 +702,159 @@ pub const StoragePort = struct {
         workspace_id: ?ids.WorkspaceId,
         access: file_bridge.AccessMode,
     ) AuthorityError!*const capability.Capability {
+        const required_right: capability.CapabilityRight = if (access == .write) .object_write else .object_read;
         const authority = self.capability_table.requireUsable(authority_context.capability_id, authority_context.now_ticks) catch |err| switch (err) {
-            error.CapabilityNotFound => return error.CapabilityNotFound,
-            error.CapabilityRevoked => return error.CapabilityRevoked,
+            error.CapabilityNotFound => {
+                writeStorageTrace(
+                    authority_context,
+                    self.core.service_id,
+                    required_right,
+                    null,
+                    0,
+                    .denied,
+                    .capability_missing,
+                );
+                return error.CapabilityNotFound;
+            },
+            error.CapabilityRevoked => {
+                writeStorageTrace(
+                    authority_context,
+                    self.core.service_id,
+                    required_right,
+                    null,
+                    0,
+                    .denied,
+                    .capability_revoked,
+                );
+                return error.CapabilityRevoked;
+            },
             else => native_util.impossibleByInvariantError("storage authority lookup only reports not-found or revoked capabilities", err),
         };
-        if (!authority.holder.eql(authority_context.principal)) return error.PermissionDenied;
+        if (!authority.holder.eql(authority_context.principal)) {
+            writeStorageTrace(
+                authority_context,
+                self.core.service_id,
+                required_right,
+                authority.target.kind,
+                authority.target.id,
+                .denied,
+                .policy_denied,
+            );
+            return error.PermissionDenied;
+        }
         if (authority.scope.task_id) |scoped_task_id| {
-            if (scoped_task_id != authority_context.task_id) return error.PermissionDenied;
+            if (scoped_task_id != authority_context.task_id) {
+                writeStorageTrace(
+                    authority_context,
+                    self.core.service_id,
+                    required_right,
+                    authority.target.kind,
+                    authority.target.id,
+                    .denied,
+                    .scope_violation,
+                );
+                return error.PermissionDenied;
+            }
         }
         if (workspace_id) |requested_workspace_id| {
             if (authority.scope.workspace_id) |scoped_workspace_id| {
-                if (scoped_workspace_id != requested_workspace_id.raw()) return error.WorkspaceScopeViolation;
+                if (scoped_workspace_id != requested_workspace_id.raw()) {
+                    writeStorageTrace(
+                        authority_context,
+                        self.core.service_id,
+                        required_right,
+                        .workspace,
+                        requested_workspace_id.raw(),
+                        .denied,
+                        .scope_violation,
+                    );
+                    return error.WorkspaceScopeViolation;
+                }
             }
         }
         switch (authority.target.kind) {
-            .service => if (authority.target.id != self.core.service_id) return error.CapabilityRequired,
-            .workspace => if (workspace_id == null or authority.target.id != workspace_id.?.raw()) return error.WorkspaceScopeViolation,
-            .object => if (access == .write) return error.PermissionDenied,
-            else => return error.CapabilityRequired,
+            .service => if (authority.target.id != self.core.service_id) {
+                writeStorageTrace(
+                    authority_context,
+                    self.core.service_id,
+                    required_right,
+                    authority.target.kind,
+                    authority.target.id,
+                    .denied,
+                    .invalid_target,
+                );
+                return error.CapabilityRequired;
+            },
+            .workspace => if (workspace_id == null or authority.target.id != workspace_id.?.raw()) {
+                writeStorageTrace(
+                    authority_context,
+                    self.core.service_id,
+                    required_right,
+                    authority.target.kind,
+                    authority.target.id,
+                    .denied,
+                    .scope_violation,
+                );
+                return error.WorkspaceScopeViolation;
+            },
+            .object => if (access == .write) {
+                writeStorageTrace(
+                    authority_context,
+                    self.core.service_id,
+                    required_right,
+                    authority.target.kind,
+                    authority.target.id,
+                    .denied,
+                    .policy_denied,
+                );
+                return error.PermissionDenied;
+            },
+            else => {
+                writeStorageTrace(
+                    authority_context,
+                    self.core.service_id,
+                    required_right,
+                    authority.target.kind,
+                    authority.target.id,
+                    .denied,
+                    .invalid_target,
+                );
+                return error.CapabilityRequired;
+            },
         }
-        if (access == .write and !authority.rights.has(.object_write)) return error.PermissionDenied;
-        if (access == .read and !authority.rights.has(.object_read)) return error.PermissionDenied;
+        if (access == .write and !authority.rights.has(.object_write)) {
+            writeStorageTrace(
+                authority_context,
+                self.core.service_id,
+                required_right,
+                authority.target.kind,
+                authority.target.id,
+                .denied,
+                .policy_denied,
+            );
+            return error.PermissionDenied;
+        }
+        if (access == .read and !authority.rights.has(.object_read)) {
+            writeStorageTrace(
+                authority_context,
+                self.core.service_id,
+                required_right,
+                authority.target.kind,
+                authority.target.id,
+                .denied,
+                .policy_denied,
+            );
+            return error.PermissionDenied;
+        }
+        writeStorageTrace(
+            authority_context,
+            self.core.service_id,
+            required_right,
+            authority.target.kind,
+            authority.target.id,
+            .allowed,
+            .none,
+        );
         return authority;
     }
 
@@ -718,6 +876,45 @@ pub const StoragePort = struct {
     }
 };
 
+fn writeStorageTrace(
+    authority_context: AuthorityContext,
+    service_id: u64,
+    required_right: capability.CapabilityRight,
+    target_kind: ?capability.CapabilityTargetKind,
+    target_id: u64,
+    decision: debug_contract.Decision,
+    reason: abi.DenialReason,
+) void {
+    if (authority_context.trace) |trace| {
+        const explanation = if (decision == .denied)
+            debug_contract.explainDenied(
+                reason,
+                authority_context.operation,
+                @tagName(required_right),
+                authority_context.task_id,
+                authority_context.capability_id,
+                target_kind,
+                target_id,
+            )
+        else
+            debug_contract.DenialExplanation{};
+        trace.* = debug_contract.provenance(
+            .service_call,
+            decision,
+            authority_context.now_ticks,
+            authority_context.task_id,
+            service_id,
+            authority_context.capability_id,
+            target_kind,
+            target_id,
+            authority_context.operation,
+            @tagName(required_right),
+            explanation,
+            0,
+        );
+    }
+}
+
 fn bridgeResolveEntry(context: *const anyopaque, workspace_id: u64, path: []const u8) workspace.Error!workspace.Entry {
     const service: *const StorageCore = @ptrCast(@alignCast(context));
     return service.resolve(ids.workspace(workspace_id), path);
@@ -730,6 +927,11 @@ fn bridgeHasVersion(context: *const anyopaque, version_id: u64) bool {
 
 fn workspaceId(value: anytype) ids.WorkspaceId {
     return ids.coerce(ids.WorkspaceId, value);
+}
+
+fn normalizeFileBridgePath(path: []const u8) []const u8 {
+    if (path.len != 0 and path[0] == '/') return path[1..];
+    return path;
 }
 
 fn objectId(value: anytype) ids.ObjectId {

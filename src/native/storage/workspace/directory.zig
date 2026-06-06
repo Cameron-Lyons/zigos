@@ -86,10 +86,21 @@ pub const ShareGrant = struct {
     can_write: bool = false,
     can_admin: bool = false,
     can_export: bool = false,
+    scope_object_id: ids.ObjectId = ids.ObjectId.zero,
+    scope_path_len: usize = 0,
+    scope_path: [MAX_ENTRY_PATH_BYTES]u8 = [_]u8{0} ** MAX_ENTRY_PATH_BYTES,
     expires_at_ticks: u64 = 0,
     network_scope: ShareNetworkScope = .local_only,
     reshare_policy: ResharePolicy = .owner_only,
     audit_visibility: AuditVisibility = .owner_only,
+
+    pub fn withObjectScope(self: ShareGrant, object_id: ids.ObjectId, path: []const u8) Error!ShareGrant {
+        var grant = self;
+        grant.scope_object_id = object_id;
+        @memset(grant.scope_path[0..], 0);
+        grant.scope_path_len = native_util.copyTextExact(&grant.scope_path, path) catch return error.PathTooLong;
+        return grant;
+    }
 
     pub fn isActive(self: ShareGrant, now_ticks: u64) bool {
         return self.expires_at_ticks == 0 or now_ticks <= self.expires_at_ticks;
@@ -98,12 +109,29 @@ pub const ShareGrant = struct {
     pub fn allowsNetworkScope(self: ShareGrant, requested: ShareNetworkScope) bool {
         return workspace_sharing.networkScopeRank(requested) <= workspace_sharing.networkScopeRank(self.network_scope);
     }
+
+    pub fn isObjectScoped(self: ShareGrant) bool {
+        return !self.scope_object_id.isZero() or self.scope_path_len != 0;
+    }
+
+    pub fn scopePathSlice(self: *const ShareGrant) []const u8 {
+        return self.scope_path[0..@min(self.scope_path_len, self.scope_path.len)];
+    }
+
+    pub fn allowsObject(self: ShareGrant, object_id: ids.ObjectId, path: []const u8) bool {
+        if (!self.isObjectScoped()) return true;
+        if (!self.scope_object_id.isZero() and (object_id.isZero() or !self.scope_object_id.eql(object_id))) return false;
+        if (self.scope_path_len != 0 and (path.len == 0 or !std.mem.eql(u8, self.scopePathSlice(), path))) return false;
+        return true;
+    }
 };
 
 pub const ShareRequest = ShareGrant;
 
 pub const AccessRequest = struct {
     principal_id: principal.PrincipalId,
+    object_id: ids.ObjectId = ids.ObjectId.zero,
+    path: []const u8 = "",
     wants_write: bool = false,
     wants_export: bool = false,
     wants_admin: bool = false,
@@ -520,6 +548,21 @@ pub const Directory = struct {
     }
 
     pub fn hasAccess(self: *const Directory, workspace_id: ids.WorkspaceId, request: AccessRequest) bool {
+        const workspace = self.lookupConst(workspace_id) orelse return false;
+        if (workspace.owner.eql(request.principal_id)) return true;
+
+        const grant = self.findShareGrant(workspace_id, request.principal_id) orelse return false;
+        if (!grant.isActive(request.now_ticks)) return false;
+        if (!grant.allowsNetworkScope(request.network_scope)) return false;
+        if (!grant.allowsObject(request.object_id, request.path)) return false;
+        if (request.wants_admin and !grant.can_admin) return false;
+        if (request.wants_write and !grant.can_write) return false;
+        if (request.wants_export and !grant.can_export) return false;
+        if (!request.wants_write and !request.wants_admin and !grant.can_read) return false;
+        return true;
+    }
+
+    pub fn hasAnyAccess(self: *const Directory, workspace_id: ids.WorkspaceId, request: AccessRequest) bool {
         const workspace = self.lookupConst(workspace_id) orelse return false;
         if (workspace.owner.eql(request.principal_id)) return true;
 

@@ -344,6 +344,12 @@ fn decodeRecordInto(resident: *state_support.ResidentState, payload: []const u8)
     if (reader.offset != payload.len) return error.CorruptState;
 }
 
+pub fn validateRecordPayloadForReleaseGate(payload: []const u8) Error!void {
+    var resident = state_support.ResidentState{};
+    resident.resetForServiceInit();
+    try decodeRecordInto(&resident, payload);
+}
+
 fn encodeUserRoot(buffer: []u8, root: *const device_graph.UserRootRecord) Error![]const u8 {
     var writer = CursorWriter{ .buffer = buffer };
     try writeEnvelope(&writer, .user_root);

@@ -300,8 +300,12 @@ test "object store capacity is configurable" {
     const SmallStore = StoreWith(.{
         .max_objects = 1,
         .max_versions = 1,
+        .max_blobs = 64,
+        .max_chunks = 64,
         .object_index_capacity = 2,
         .version_index_capacity = 2,
+        .blob_index_capacity = 128,
+        .chunk_index_capacity = 128,
     });
     var store = SmallStore.init();
     const signer = signing.SignerIdentity{
@@ -322,4 +326,6 @@ test "object store capacity is configurable" {
         .payload = "two",
         .metadata = try signMetadata(signer, "two", "text/plain", .document, "two", 2),
     }));
+    try std.testing.expectEqual(@as(usize, 64), store.blobSlotCapacity());
+    try std.testing.expectEqual(@as(usize, 64), store.chunkSlotCapacity());
 }

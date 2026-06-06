@@ -26,6 +26,10 @@ and service-driven.
 - The native service layer under `src/native/` contains the current principal,
   capability, syscall, task runtime, session, driver, storage, sync, policy,
   platform, and demo proof code.
+- Local-first sync is modeled as core OS behavior: trusted device graph,
+  durable inbound/outbound frame queues, replay rejection, offline edits,
+  explicit conflict review, object-scoped sharing, revocation enforcement, and
+  two-node QEMU proof runs with separate native stores.
 - The driver restart proof now checks that storage I/O works before restart,
   stale authority is rejected after a process-generation change, stale DMA port
   access is rejected, a replacement storage session rebinds with a new DMA
@@ -36,6 +40,12 @@ and service-driven.
   (`intel-nuc11tnki5`) and tracks seven production-readiness workstreams: two
   `prod_candidate` tracks, four `prototype` tracks, and one blocked real
   hardware track.
+- The secure-by-design release gate is currently `blocked` on operational
+  release signing: the workflow now requires hardware-backed HSM/KMS key
+  custody, rotation/revocation metadata, DSSE in-toto/SLSA provenance, and a
+  customer verification bundle. The `ed25519+ml-dsa65` path remains a preview,
+  not a production FIPS 204 implementation. The separate first-hardware-target
+  gate still requires real NUC11TNKi5 evidence.
 
 The spec contract is now the machine-readable manifest in
 `spec/coverage.json`; this checkout does not require a separate prose spec
@@ -178,6 +188,10 @@ Useful verification targets:
 | `./scripts/zig.sh build host-tests` | Runs host-side native logic and userspace runtime tests. |
 | `./scripts/zig.sh build test-roots` | Checks that Zig files with tests are reachable from the build roots. |
 | `./scripts/zig.sh build prod-readiness` | Validates `spec/production_readiness.json`, secure-by-design release-gate coverage, and production-readiness source markers. |
+| `./scripts/zig.sh build release-security-check` | Runs release-security fuzzing, unsafe-surface inventory, threat-model, crash-redaction, SBOM/provenance source, and disclosure source gates. |
+| `./scripts/zig.sh build release-sbom-provenance` | Builds release artifacts and emits `build/release-security/artifact-digests.sha256`, SPDX SBOM, in-toto/SLSA provenance, and disclosure dry-run output. |
+| `./scripts/zig.sh build reproducible-build-check` | Builds release artifacts twice in isolated tracked-workspace copies and compares artifact digests. |
+| `./scripts/zig.sh build release-security-gate` | Runs the public-release security gate: fast release-security checks, host/spec tests, reproducible builds, SBOM/provenance, and QEMU security/fault proofs. |
 | `./scripts/zig.sh build spec-tests` | Runs the spec coverage gate and native spec tests. |
 | `./scripts/zig.sh build zigos-native-smoke-test` | Runs native QEMU smoke proofs, including tampered manifest, direct artifact tamper, and rollback-slot failure variants. |
 | `./scripts/zig.sh build driver-restart-qemu-test` | Proves userspace storage driver restart and rebinding without reboot. |
@@ -206,11 +220,15 @@ enforced prototype behavior toward production proof, such as real hardware,
 fault injection, scale, transport, and operational validation.
 
 The secure-by-design release gate is part of the production-readiness manifest
-and is validated by `./scripts/zig.sh build prod-readiness`. Public releases are
-blocked until fuzzing, fault injection, reproducible builds, SBOM/provenance,
-threat-model tests, memory-safety audits for unsafe Zig and kernel sections,
-crash dump redaction, and the vulnerability disclosure process in `SECURITY.md`
-are satisfied.
+and is validated by `./scripts/zig.sh build prod-readiness`, which also runs the
+fast `release-security-check` gate. Public security releases must pass
+`./scripts/zig.sh build release-security-gate`, covering fuzzing, fault
+injection, reproducible builds, DSSE-wrapped SBOM/provenance, threat-model
+tests, memory-safety audits for unsafe Zig and kernel sections, crash dump
+redaction, and the vulnerability disclosure process in `SECURITY.md`. Release
+provenance is not production-eligible until signed by hardware-backed release
+keys with published keyring, rotation, revocation, and customer verifier
+metadata.
 
 The first real hardware target is Intel NUC 11 Pro Kit `NUC11TNKi5`. QEMU proof
 runs remain required preflight evidence, but they do not satisfy the hardware
@@ -218,9 +236,14 @@ target gate. Real-machine proof must cover UEFI boot, ACPI, APIC/timer, GOP
 framebuffer, USB xHCI input, NVMe block I/O, Intel I225-LM networking,
 suspend/resume, and crash recovery. Required serial markers live in
 `spec/hardware/nuc11tnki5-required-markers.txt`, and captured logs can be
-checked with `scripts/check-nuc11tnki5-hardware-proof.sh`. The UEFI preflight
-entrypoint is `./scripts/zig.sh build uefi-qemu-test`; set `OVMF_CODE` and
-optionally `OVMF_VARS` if the firmware is not installed in a standard path.
+checked with `scripts/check-nuc11tnki5-hardware-proof.sh`. A complete proof is
+a directory described by `spec/hardware/nuc11tnki5-proof-bundle.md`, with
+`serial.log`, `firmware-settings.txt`, `power-cycle-notes.txt`, and
+`artifact-digests.sha256`. The checker rejects emulator-sourced logs and
+requires the real-hardware metadata markers plus the target cycle counters. The
+UEFI preflight entrypoint is `./scripts/zig.sh build uefi-qemu-test`; set
+`OVMF_CODE` and optionally `OVMF_VARS` if the firmware is not installed in a
+standard path.
 
 QEMU proof runs are script-backed:
 

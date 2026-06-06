@@ -1,5 +1,5 @@
 pub const sector_size: usize = 512;
-pub const slot_sectors: u32 = 512;
+pub const slot_sectors: u32 = 768;
 pub const slot_count: u32 = 2;
 pub const header_sectors: u32 = 1;
 pub const payload_sectors: u32 = slot_sectors - header_sectors;
@@ -16,8 +16,8 @@ pub const data_capacity_bytes: usize = image_bytes - data_start_byte;
 
 pub const root_magic = "ZG4LOG1";
 pub const root_format_version: u16 = 2;
-pub const max_replay_log_records: u16 = 128;
-pub const max_log_segments: u16 = 16;
+pub const max_replay_log_records: u16 = 512;
+pub const max_log_segments: u16 = 64;
 pub const compaction_threshold_bytes: u32 = @intCast((data_capacity_bytes * 3) / 4);
 
 pub const log_record_kind_bytes: usize = 1;
@@ -28,4 +28,4 @@ pub const log_record_checksum_offset: usize = log_record_payload_len_offset + lo
 pub const log_record_header_len: usize = log_record_checksum_offset + log_record_checksum_bytes;
 
 pub const payload_magic = "ZG4STATE";
-pub const format_version: u16 = 7;
+pub const format_version: u16 = 8;
