@@ -49,6 +49,8 @@ pub const OverlayRelayFrameRequest = overlay_model.OverlayRelayFrameRequest;
 pub const OverlayRelayFrameResult = overlay_model.OverlayRelayFrameResult;
 pub const ReplicaEntry = state_support.ReplicaEntry;
 pub const ConflictRecord = state_support.ConflictRecord;
+pub const ConflictReviewDecision = state_support.ConflictReviewDecision;
+pub const ConflictReviewRecord = state_support.ConflictReviewRecord;
 pub const DatabaseContract = state_support.DatabaseContract;
 pub const ReplicationSummary = state_support.ReplicationSummary;
 pub const PeerReplicationRequest = replication_model.PeerReplicationRequest;
@@ -713,7 +715,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             };
 
             try self.authorizeTransport(policy, transport, &summary);
-            try self.authorizeWorkspaceShare(store, policy, to_device, transport);
+            try self.authorizeWorkspaceAnyShare(store, policy, to_device, transport);
             try self.evaluateOverlay(policy, workspace_id, &summary);
 
             const last_replicated_generation = self.replicaWorkspaceGeneration(workspace_id, to_device);
@@ -725,6 +727,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 if (!latest_mutation_index.isLatest(changes, mutation_index)) continue;
                 if (!policy.matchesPath(entry.pathSlice())) {
                     summary.skipped_entry_count += 1;
+                    continue;
+                }
+                if (!self.workspaceEntryShareAllowed(store, policy, to_device, transport, entry)) {
+                    summary.skipped_entry_count += 1;
+                    summary.share_denied_entry_count += 1;
                     continue;
                 }
 
@@ -778,7 +785,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             try self.ensureTrustedDevices(request.source_device, request.target_device);
             const policy = self.findWorkspacePolicy(request.workspace_id) orelse return error.WorkspacePolicyNotFound;
             try self.authorizeTransport(policy, request.transport, null);
-            try self.authorizeWorkspaceShare(store, policy, request.target_device, request.transport);
+            try self.authorizeWorkspaceFrameShare(store, policy, request);
             if (policy.personal_e2ee and !request.encrypted) return error.TransportDenied;
             if (self.findDuplicateInboundFrame(request)) |duplicate| {
                 try self.recordDuplicateInboundFrame(duplicate.frame.id);
@@ -899,15 +906,48 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             device_id: principal.PrincipalId,
             path: []const u8,
         ) ?*ConflictRecord {
-            const raw_workspace_id = object_store.ids.raw(workspace_id);
-            for (&self.state().conflicts) |*slot| {
-                if (!slot.in_use) continue;
-                if (slot.conflict.workspace_id != raw_workspace_id) continue;
-                if (!slot.conflict.device_id.eql(device_id)) continue;
-                if (!std.mem.eql(u8, slot.conflict.pathSlice(), path)) continue;
-                return &slot.conflict;
-            }
-            return null;
+            const slot = self.findConflictSlot(object_store.ids.raw(workspace_id), device_id, path) orelse return null;
+            return &slot.conflict;
+        }
+
+        pub fn reviewConflict(
+            self: *Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            path: []const u8,
+        ) Error!ConflictReviewRecord {
+            const slot = self.findConflictSlot(workspace_id, device_id, path) orelse return error.ConflictNotFound;
+            return conflictReviewRecord(&slot.conflict, .keep_local, false);
+        }
+
+        pub fn resolveConflict(
+            self: *Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            path: []const u8,
+            decision: ConflictReviewDecision,
+        ) Error!ConflictReviewRecord {
+            const slot = self.findConflictSlot(workspace_id, device_id, path) orelse return error.ConflictNotFound;
+            const conflict = slot.conflict;
+            const selected_version_id = switch (decision) {
+                .keep_local, .keep_both => conflict.local_version_id,
+                .accept_remote => blk: {
+                    if (conflict.remote_version_id == 0) return error.VersionNotFound;
+                    break :blk conflict.remote_version_id;
+                },
+            };
+            try self.setReplicaVersionForPathHash(
+                conflict.workspace_id,
+                conflict.device_id,
+                conflict.pathSlice(),
+                workspace.pathHash(conflict.pathSlice()),
+                conflict.object_id,
+                selected_version_id,
+                0,
+            );
+            slot.* = .{};
+            try self.checkpoint();
+            return conflictReviewRecord(&conflict, decision, true);
         }
 
         pub fn isTrustedDevice(self: *const Self, device_id: principal.PrincipalId) bool {
@@ -943,7 +983,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             }
         }
 
-        fn authorizeWorkspaceShare(
+        fn authorizeWorkspaceAnyShare(
             self: *Self,
             store: *const storage_service.Service,
             policy: *const WorkspacePolicy,
@@ -953,9 +993,45 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             _ = self;
             if (!policy.require_shared_access) return;
             const scope = shareNetworkScopeForTransport(transport);
-            if (!store.workspaceHasAccess(policy.workspace_id, .{
+            if (!store.workspaceHasAnyAccess(policy.workspace_id, .{
                 .principal_id = target_device,
                 .network_scope = scope,
+                .now_ticks = 0,
+            })) return error.TransportDenied;
+        }
+
+        fn workspaceEntryShareAllowed(
+            self: *Self,
+            store: *const storage_service.Service,
+            policy: *const WorkspacePolicy,
+            target_device: principal.PrincipalId,
+            transport: TransportMode,
+            entry: workspace.Entry,
+        ) bool {
+            _ = self;
+            if (!policy.require_shared_access) return true;
+            return store.workspaceHasAccess(policy.workspace_id, .{
+                .principal_id = target_device,
+                .object_id = entry.object_id,
+                .path = entry.pathSlice(),
+                .network_scope = shareNetworkScopeForTransport(transport),
+                .now_ticks = 0,
+            });
+        }
+
+        fn authorizeWorkspaceFrameShare(
+            self: *Self,
+            store: *const storage_service.Service,
+            policy: *const WorkspacePolicy,
+            request: TransportFrameRequest,
+        ) Error!void {
+            _ = self;
+            if (!policy.require_shared_access) return;
+            if (!store.workspaceHasAccess(policy.workspace_id, .{
+                .principal_id = request.target_device,
+                .object_id = object_store.ids.object(request.object_id),
+                .path = request.path,
+                .network_scope = shareNetworkScopeForTransport(request.transport),
                 .now_ticks = 0,
             })) return error.TransportDenied;
         }
@@ -1014,7 +1090,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             remote_version_id: u64,
             semantic: SyncSemantic,
         ) Error!void {
-            const slot = self.allocateConflict() orelse return error.ConflictTableFull;
+            const slot = self.findConflictSlot(workspace_id, device_id, path) orelse self.allocateConflict() orelse return error.ConflictTableFull;
             slot.in_use = true;
             slot.conflict = zeroConflict();
             slot.conflict.workspace_id = workspace_id;
@@ -1049,6 +1125,41 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             }
             if (cleared) self.resident().markDirty();
             return cleared;
+        }
+
+        fn findConflictSlot(
+            self: *Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            path: []const u8,
+        ) ?*ConflictSlot {
+            for (&self.state().conflicts) |*slot| {
+                if (!slot.in_use) continue;
+                if (slot.conflict.workspace_id != workspace_id) continue;
+                if (!slot.conflict.device_id.eql(device_id)) continue;
+                if (!std.mem.eql(u8, slot.conflict.pathSlice(), path)) continue;
+                return slot;
+            }
+            return null;
+        }
+
+        fn conflictReviewRecord(
+            conflict: *const ConflictRecord,
+            decision: ConflictReviewDecision,
+            resolved: bool,
+        ) ConflictReviewRecord {
+            return .{
+                .workspace_id = conflict.workspace_id,
+                .device_id = conflict.device_id,
+                .object_id = conflict.object_id,
+                .path_len = conflict.path_len,
+                .path = conflict.path,
+                .local_version_id = conflict.local_version_id,
+                .remote_version_id = conflict.remote_version_id,
+                .semantic = conflict.semantic,
+                .decision = decision,
+                .resolved = resolved,
+            };
         }
 
         fn preflightTransactionalEntries(

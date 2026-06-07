@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "minimum_mutations_per_seed": 96,
+  "harnesses": [
+    {
+      "id": "binary-cursor",
+      "target_anchor": "src/native/core/binary_cursor.zig",
+      "scope": "Little-endian bounded cursor reads used by storage, sync, and userspace wire formats.",
+      "seeds": [
+        "00",
+        "0102030405060708",
+        "ffffffffffffffffffffffff",
+        "5a49474f530200000000000000"
+      ]
+    },
+    {
+      "id": "userspace-descriptor",
+      "target_anchor": "src/native/task/userspace_descriptor.zig",
+      "scope": "Embedded userspace image descriptor metadata and fixed-size identity fields.",
+      "seeds": [
+        "534f475a0200010000000000010000000300000016000f000f0015000c0001000000",
+        "0000000000000000",
+        "ffffffffffffffffffffffffffffffff",
+        "534f475affff0100010000000100000003000000ffff000000000000000000000000"
+      ]
+    },
+    {
+      "id": "elf-image-metadata",
+      "target_anchor": "src/native/task/elf_image_inspector.zig",
+      "scope": "Freestanding ELF32 userspace image header, program-header table, and loadable segment metadata.",
+      "seeds": [
+        "7f454c46010101000000000000000000020003000100000000100000340000000000000000000000340020000100000000000000",
+        "7f454c4602010100",
+        "7f454c4601010100ffffffffffffffffffffffffffffffff",
+        "00000000000000000000000000000000"
+      ]
+    },
+    {
+      "id": "storage-volume-image",
+      "target_anchor": "src/native/storage/storage_volume.zig",
+      "scope": "Storage root slots, replay-log length fields, checksums, payload records, and volume image loading.",
+      "seeds": [
+        "5a47344c4f473102000100000000000000000400000200000000000000020000000000000003000000000000000000000000000000010001000000000000000000000000",
+        "5a47344c4f4731",
+        "00000000000000000000000000000000",
+        "ffffffffffffffffffffffffffffffffffffffffffffffff"
+      ]
+    },
+    {
+      "id": "sync-record",
+      "target_anchor": "src/native/sync/sync_state_store.zig",
+      "scope": "Durable sync records, transport frame queues, principals, strings, semantic enums, and replay boundaries.",
+      "seeds": [
+        "5a4753594e435204000901000000000000000000000000000000000000000000",
+        "5a4753594e4352ffff09",
+        "5a4753594e43520400ff",
+        "00000000000000000000000000000000"
+      ]
+    },
+    {
+      "id": "capability-message",
+      "target_anchor": "src/native/kernel_api/capability.zig",
+      "scope": "Capability target kinds, rights bit projections, intersection checks, and retargeted capability messages.",
+      "seeds": [
+        "0000000000000000",
+        "0102030405060708",
+        "ffffffffffffffff",
+        "2000000000000000"
+      ]
+    },
+    {
+      "id": "syscall-abi",
+      "target_anchor": "src/native/kernel_api/syscall_dispatch.zig",
+      "scope": "Native request header decoding, operation validation, user pointer range, overflow, and alignment checks.",
+      "seeds": [
+        "010000010000000001000000000000000200000000000000",
+        "ffffffffff00000000000000000000000000000000000000",
+        "00000000000000000000000000000000",
+        "000001000000000000000000000000000000000000000000"
+      ]
+    }
+  ]
+}

@@ -1,7 +1,9 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const abi = @import("../core/abi.zig");
+const capability = @import("capability.zig");
 const component_port = @import("component_port.zig");
+const debug_contract = @import("../security/debug_contract.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 
 const USER_POINTER_FLOOR: usize = 0x10000;
@@ -11,6 +13,8 @@ pub const DispatchResult = struct {
     status: abi.SyscallStatus,
     bytes_written: u32 = 0,
     denial_reason: abi.DenialReason = .none,
+    explanation: debug_contract.DenialExplanation = .{},
+    provenance: debug_contract.ProvenanceRecord = .{},
 };
 
 pub const UserMemoryAccess = enum {
@@ -114,6 +118,103 @@ pub fn success() DispatchResult {
 
 pub fn invalidRequest() DispatchResult {
     return .{ .status = .invalid_request_pointer };
+}
+
+pub fn explainedFailure(
+    status: abi.SyscallStatus,
+    reason: abi.DenialReason,
+    operation: []const u8,
+    required_authority: []const u8,
+    subject_task_id: u64,
+    capability_id: u64,
+    target_kind: ?capability.CapabilityTargetKind,
+    target_id: u64,
+    now_ticks: u64,
+) DispatchResult {
+    const explanation = debug_contract.explainDenied(
+        reason,
+        operation,
+        required_authority,
+        subject_task_id,
+        capability_id,
+        target_kind,
+        target_id,
+    );
+    return .{
+        .status = status,
+        .denial_reason = reason,
+        .explanation = explanation,
+        .provenance = debug_contract.provenance(
+            .syscall,
+            .denied,
+            now_ticks,
+            subject_task_id,
+            0,
+            capability_id,
+            target_kind,
+            target_id,
+            operation,
+            required_authority,
+            explanation,
+            0,
+        ),
+    };
+}
+
+pub fn withSyscallContract(
+    result: DispatchResult,
+    operation: abi.NativeOperation,
+    required_right: capability.CapabilityRight,
+    caller_task_id: u64,
+    now_ticks: u64,
+) DispatchResult {
+    var out = result;
+    const success_status = out.status == .success;
+    const decision: debug_contract.Decision = if (success_status) .allowed else .denied;
+    if (!success_status and out.denial_reason == .none) {
+        out.denial_reason = defaultDenialReasonForStatus(out.status);
+    }
+    if (!success_status and out.denial_reason != .none and out.explanation.reason == .none) {
+        out.explanation = debug_contract.explainDenied(
+            out.denial_reason,
+            @tagName(operation),
+            @tagName(required_right),
+            caller_task_id,
+            0,
+            null,
+            0,
+        );
+    }
+    if (out.provenance.kind == .none) {
+        out.provenance = debug_contract.syscallProvenance(
+            decision,
+            now_ticks,
+            caller_task_id,
+            operation,
+            required_right,
+            out.denial_reason,
+        );
+    }
+    return out;
+}
+
+fn defaultDenialReasonForStatus(status: abi.SyscallStatus) abi.DenialReason {
+    return switch (status) {
+        .success => .none,
+        .unavailable,
+        .unsupported_operation,
+        .unsupported_abi_version,
+        .internal_error,
+        => .unsupported_operation,
+        .invalid_request_pointer,
+        .invalid_response_buffer,
+        .not_found,
+        => .invalid_target,
+        .buffer_too_small,
+        .conflict,
+        => .budget_exhausted,
+        .denied => .policy_denied,
+    };
 }
 
 pub fn mapError(err: anyerror) DispatchResult {

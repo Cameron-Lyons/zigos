@@ -199,37 +199,47 @@ pub fn componentAbiDepthGate() !void {
     );
 
     var sim = native_app_sdk.simulator.Simulator.init();
-    const generated = try sim.parseAndGenerate(native_app_sdk.example_apps.writer_idl);
-    try std.testing.expect(std.mem.indexOf(u8, generated.slice(), "writer_edit") != null);
+    const suite = native_app_sdk.example_apps.firstPartySuite();
+    for (suite) |package| {
+        const compiled = try native_app_sdk.app_platform.compile(package);
+        try std.testing.expect(compiled.operationCount() >= 4);
+        const generated = try sim.parseAndGenerate(package.idl_source);
+        try std.testing.expect(std.mem.indexOf(u8, generated.slice(), "OperationDescriptor") != null);
+        const review = try sim.reviewPermissions(.{
+            .bundle = package.bundle,
+            .signer = package.signer,
+        }, &.{});
+        try std.testing.expect(review.grant_count >= manifest.requiredPermissionCount(package.bundle));
+        _ = try sim.install(.{
+            .bundle = package.bundle,
+            .signer = package.signer,
+            .data_schema_version = package.data_schema_version,
+        });
+        const launched = try sim.launchNativeApp(package.bundle.bundle_id);
+        try std.testing.expect(launched.signed_provenance);
+        try std.testing.expect(launched.component_count >= 3);
+        try std.testing.expect(launched.background_allowed);
+        try std.testing.expectEqual(task_runtime.TaskState.active, launched.state);
+        try std.testing.expect(try sim.suspendNativeApp(launched.task_id));
+        try std.testing.expect(try sim.resumeNativeApp(launched.task_id));
+    }
 
-    const writer = native_app_sdk.example_apps.writer();
-    _ = try sim.install(.{
-        .bundle = writer.bundle,
-        .signer = writer.signer,
-        .data_schema_version = writer.data_schema_version,
-    });
-    var updated_writer = writer.bundle;
+    var updated_writer = suite[0].bundle;
     updated_writer.version_minor += 1;
     _ = try sim.install(.{
         .bundle = updated_writer,
-        .signer = writer.signer,
-        .data_schema_version = writer.data_schema_version,
+        .signer = suite[0].signer,
+        .data_schema_version = suite[0].data_schema_version,
         .retains_data_compatibility = true,
     });
-    _ = try sim.rollback(writer.bundle.bundle_id);
+    _ = try sim.rollback(suite[0].bundle.bundle_id);
 
-    const legacy = native_app_sdk.example_apps.legacyEditor();
-    const compat = try sim.launchCompatibility(.{
-        .bundle = legacy.bundle,
-        .signer = legacy.signer,
-        .label = "Legacy Editor",
-    });
-    try std.testing.expect(compat.isolated);
-    try std.testing.expect(compat.portal_only_host_access);
-    try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.package_installed));
+    try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.package_installed));
     try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.package_updated));
     try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.package_rolled_back));
-    try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.compatibility_launched));
+    try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.permission_review_rendered));
+    try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_launched));
+    try std.testing.expectEqual(@as(usize, 0), sim.debug.countKind(.compatibility_launched));
 }
 
 pub fn indexedHotPathTablesGate() !void {
@@ -243,6 +253,19 @@ pub fn firstHardwareTargetGate() !void {
     try std.testing.expectEqualStrings("Intel Ethernet Controller I225-LM", target.network);
     try std.testing.expect(hardware_target.coversRequiredSubsystems(target));
     try std.testing.expectEqual(target.required_subsystems.len, target.required_markers.len);
+    try std.testing.expect(containsString(
+        hardware_target.nuc11tnki5_proof_metadata_markers[0..],
+        hardware_target.nuc11tnki5_marker_prefix ++ ":EVIDENCE_SOURCE:REAL_HARDWARE",
+    ));
+    try std.testing.expect(containsString(
+        hardware_target.nuc11tnki5_proof_metadata_markers[0..],
+        hardware_target.nuc11tnki5_marker_prefix ++ ":ARTIFACT_DIGESTS:RECORDED",
+    ));
+    try std.testing.expectEqual(@as(usize, 6), hardware_target.nuc11tnki5_counter_markers.len);
+    for (hardware_target.nuc11tnki5_counter_markers) |counter_marker| {
+        try std.testing.expect(std.mem.startsWith(u8, counter_marker.marker_prefix, hardware_target.nuc11tnki5_marker_prefix));
+        try std.testing.expect(counter_marker.minimum > 0);
+    }
     try std.testing.expect(kernel_acpi.signatureMatches("RSD PTR "));
     try std.testing.expectEqual(kernel_apic.EntryType.io_apic, kernel_apic.EntryType.fromByte(1));
     try std.testing.expect(kernel_pci.isIntelI225Lm(.{
@@ -285,13 +308,19 @@ pub fn firstHardwareTargetGate() !void {
 
     const qemu_only = hardware_target.EvidenceSummary{
         .target_id = target.id,
+        .source = .qemu,
         .qemu_boots = 100,
         .serial_log_captured = true,
+        .required_markers_captured = true,
+        .firmware_settings_captured = true,
+        .power_cycle_notes_captured = true,
+        .artifact_digests_captured = true,
     };
     try std.testing.expect(!hardware_target.hardwareProofSatisfied(target, qemu_only));
 
-    const complete_hardware_evidence = hardware_target.EvidenceSummary{
+    const markerless_real_hardware = hardware_target.EvidenceSummary{
         .target_id = target.id,
+        .source = .real_hardware,
         .hardware_cold_boots = target.proof_minimums.cold_boots,
         .hardware_warm_reboots = target.proof_minimums.warm_reboots,
         .storage_write_read_cycles = target.proof_minimums.storage_write_read_cycles,
@@ -301,6 +330,24 @@ pub fn firstHardwareTargetGate() !void {
         .serial_log_captured = true,
         .firmware_settings_captured = true,
         .power_cycle_notes_captured = true,
+        .artifact_digests_captured = true,
+    };
+    try std.testing.expect(!hardware_target.hardwareProofSatisfied(target, markerless_real_hardware));
+
+    const complete_hardware_evidence = hardware_target.EvidenceSummary{
+        .target_id = target.id,
+        .source = .real_hardware,
+        .hardware_cold_boots = target.proof_minimums.cold_boots,
+        .hardware_warm_reboots = target.proof_minimums.warm_reboots,
+        .storage_write_read_cycles = target.proof_minimums.storage_write_read_cycles,
+        .network_frame_cycles = target.proof_minimums.network_frame_cycles,
+        .suspend_resume_cycles = target.proof_minimums.suspend_resume_cycles,
+        .crash_recovery_cycles = target.proof_minimums.crash_recovery_cycles,
+        .serial_log_captured = true,
+        .required_markers_captured = true,
+        .firmware_settings_captured = true,
+        .power_cycle_notes_captured = true,
+        .artifact_digests_captured = true,
     };
     try std.testing.expect(hardware_target.hardwareProofSatisfied(target, complete_hardware_evidence));
 }
@@ -1320,6 +1367,13 @@ fn expectAllMetadataTrue(metadata: anytype) !void {
             else => @compileError("architecture gate metadata must contain only booleans or nested structs"),
         }
     }
+}
+
+fn containsString(values: []const []const u8, needle: []const u8) bool {
+    for (values) |value| {
+        if (std.mem.eql(u8, value, needle)) return true;
+    }
+    return false;
 }
 
 fn kernelContext(

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "default_policy": {
+    "raw_memory_capture": "deny",
+    "capability_token_export": "deny",
+    "private_object_name_export": "deny",
+    "personal_content_export": "deny",
+    "support_bundle_review": "required",
+    "scoped_diagnostics_opt_in": "required"
+  },
+  "redaction_markers": [
+    "secret",
+    "token",
+    "capability",
+    "private",
+    "raw-memory",
+    "raw memory",
+    "object:",
+    "workspace:"
+  ],
+  "fixtures": [
+    {
+      "input_reason": "panic before ready",
+      "must_contain": ["panic before ready"],
+      "must_not_contain": ["[redacted]"]
+    },
+    {
+      "input_reason": "capability token secret=abc raw-memory page",
+      "must_contain": ["[redacted]"],
+      "must_not_contain": ["secret=abc", "capability token", "raw-memory page"]
+    },
+    {
+      "input_reason": "private object:customer-profile workspace:home",
+      "must_contain": ["[redacted]"],
+      "must_not_contain": ["customer-profile", "workspace:home"]
+    }
+  ]
+}

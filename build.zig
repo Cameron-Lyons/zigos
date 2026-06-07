@@ -143,6 +143,38 @@ pub fn build(b: *std.Build) void {
     const uefi_qemu_cmd = qemu_build.addUefiQemuCommand(b, iso_cmd);
     const uefi_qemu_step = b.step("uefi-qemu-test", "Run the ISO through an OVMF UEFI boot preflight in QEMU");
     uefi_qemu_step.dependOn(&uefi_qemu_cmd.step);
+
+    const release_sbom_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/generate-release-sbom-provenance.sh",
+        "build/release-security",
+    });
+    release_sbom_cmd.step.dependOn(&iso_cmd.step);
+    release_sbom_cmd.step.dependOn(&signing_cli_install.step);
+    release_sbom_cmd.step.dependOn(userspace_images.step);
+    const release_sbom_step = b.step("release-sbom-provenance", "Generate release SPDX SBOM, artifact digests, DSSE in-toto/SLSA provenance, keyring/revocation metadata, customer verification policy, and disclosure dry-run bundle");
+    release_sbom_step.dependOn(&release_sbom_cmd.step);
+
+    const reproducible_build_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/check-reproducible-build.sh",
+        "build/release-security",
+    });
+    const reproducible_build_step = b.step("reproducible-build-check", "Build release artifacts twice in isolated tracked-workspace copies and compare digests");
+    reproducible_build_step.dependOn(&reproducible_build_cmd.step);
+
+    const release_security_gate_step = b.step("release-security-gate", "Run the public-release security gate: fuzz, reproducibility, SBOM/provenance, audits, redaction, disclosure, and QEMU fault proofs");
+    release_security_gate_step.dependOn(check_steps.prod_readiness);
+    release_security_gate_step.dependOn(check_steps.host_tests);
+    release_security_gate_step.dependOn(check_steps.spec_tests);
+    release_security_gate_step.dependOn(release_sbom_step);
+    release_security_gate_step.dependOn(reproducible_build_step);
+    release_security_gate_step.dependOn(zigos_native_smoke_test_step);
+    release_security_gate_step.dependOn(storage_durability_qemu_step);
+    release_security_gate_step.dependOn(driver_restart_qemu_step);
+    release_security_gate_step.dependOn(recovery_qemu_step);
+    release_security_gate_step.dependOn(sync_two_node_qemu_step);
+    release_security_gate_step.dependOn(uefi_qemu_step);
 }
 
 fn dependOnRunCommands(step: *std.Build.Step, commands: []const *std.Build.Step.Run) void {

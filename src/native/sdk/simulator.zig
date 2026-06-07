@@ -5,14 +5,19 @@ const debugger = @import("debugger.zig");
 const idl = @import("idl.zig");
 const manifest = @import("../policy/manifest.zig");
 const package_service = @import("../services/package_service.zig");
+const permission_review = @import("../policy/permission_review.zig");
+const policy_mediation = @import("../policy/policy_mediation.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
+const task_runtime = @import("../task/task_runtime.zig");
 
 pub const SDK_PACKAGE_SERVICE_ID: u64 = 60_001;
 pub const SDK_TASK_ID: u64 = 60_002;
 pub const SDK_ACTOR = principal.PrincipalId{ .kind = .service, .serial = 60_003 };
 pub const SDK_POLICY_AUTHORITY = principal.PrincipalId{ .kind = .policy_authority, .serial = 60_004 };
 pub const SDK_PACKAGE_OWNER = principal.PrincipalId{ .kind = .service, .serial = 60_005 };
+pub const SDK_FIRST_APP_SURFACE_ID: u64 = 61_000;
+pub const MAX_PERMISSION_REVIEW_TEXT: usize = 4096;
 
 pub const DevPackage = struct {
     bundle: manifest.BundleManifest,
@@ -33,6 +38,34 @@ pub const CompatibilityLaunch = struct {
     network_class: compatibility_environment.NetworkClass = .none,
 };
 
+pub const PermissionReviewResult = struct {
+    request_count: usize = 0,
+    grant_count: usize = 0,
+    review_len: usize = 0,
+    review_text: [MAX_PERMISSION_REVIEW_TEXT]u8 = [_]u8{0} ** MAX_PERMISSION_REVIEW_TEXT,
+    grants: [permission_review.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant =
+        [_]policy_mediation.UserGrant{.{ .kind = .object_access }} ** permission_review.MAX_REVIEW_DECISIONS,
+
+    pub fn textSlice(self: *const PermissionReviewResult) []const u8 {
+        return self.review_text[0..self.review_len];
+    }
+
+    pub fn grantSlice(self: *const PermissionReviewResult) []const policy_mediation.UserGrant {
+        return self.grants[0..self.grant_count];
+    }
+};
+
+pub const LaunchResult = struct {
+    task_id: u64,
+    component_count: usize,
+    asset_count: usize,
+    permission_count: usize,
+    signed_provenance: bool,
+    background_allowed: bool,
+    local_only: bool,
+    state: task_runtime.TaskState,
+};
+
 fn signSdkReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) !manifest.Signature {
     return signing.signWithDefaultRegistry(
         .ed25519,
@@ -45,9 +78,11 @@ pub const Simulator = struct {
     packages: package_service.Service = package_service.Service.init(),
     capabilities: capability.CapabilityTable = capability.CapabilityTable.init(),
     compatibility: compatibility_environment.Manager = compatibility_environment.Manager.init(),
+    runtime: task_runtime.Runtime = task_runtime.Runtime.init(),
     debug: debugger.Session = debugger.Session.init(),
     authority_capability_id: u64 = 0,
     now_ticks: u64 = 1,
+    next_ui_surface_id: u64 = SDK_FIRST_APP_SURFACE_ID,
     bootstrapped: bool = false,
 
     pub fn init() Simulator {
@@ -117,6 +152,135 @@ pub const Simulator = struct {
             true,
         );
         return result;
+    }
+
+    pub fn reviewPermissions(
+        self: *Simulator,
+        package: DevPackage,
+        commands: []const permission_review.ReviewCommand,
+    ) !PermissionReviewResult {
+        try manifest.validate(package.bundle);
+        var decisions = [_]permission_review.ReviewDecision{.{
+            .kind = .object_access,
+            .resource = "",
+            .allow = false,
+        }} ** permission_review.MAX_REVIEW_DECISIONS;
+        var decision_count: usize = 0;
+        for (package.bundle.requested_permissions, 0..) |request, index| {
+            if (decision_count >= decisions.len) return error.TooManyPermissions;
+            const command = if (index < commands.len)
+                commands[index]
+            else
+                defaultReviewCommand(request);
+            decisions[decision_count] = permission_review.decisionFromCommand(request, command);
+            decision_count += 1;
+        }
+
+        const session = permission_review.initSession(
+            SDK_TASK_ID,
+            &package.bundle,
+            decisions[0..decision_count],
+        );
+        var result = PermissionReviewResult{
+            .request_count = package.bundle.requested_permissions.len,
+        };
+        const rendered = try permission_review.renderToBuffer(
+            &result.review_text,
+            &session,
+            &package.bundle,
+        );
+        result.review_len = rendered.len;
+        const grants = permission_review.decisionsToGrants(
+            &package.bundle,
+            session.decisions[0..session.decision_count],
+            self.now_ticks,
+            &result.grants,
+        );
+        result.grant_count = grants.len;
+        try self.debug.record(
+            .permission_review_rendered,
+            self.advanceClock(),
+            package.bundle.bundle_id,
+            package.bundle.display_name,
+            true,
+        );
+        return result;
+    }
+
+    pub fn launchNativeApp(self: *Simulator, bundle_id: []const u8) !LaunchResult {
+        try self.bootstrap();
+        const launch_plan = try self.packages.buildLaunchPlan(bundle_id);
+        if (launch_plan.component_count == 0) return error.MissingExecutableComponent;
+
+        var resolved = emptyResolvedManifest();
+        const bundle = try self.packages.resolveCurrentManifest(bundle_id, &resolved);
+        const first_component = launch_plan.components[0];
+        const task = try self.runtime.createTask(.{
+            .owner = appPrincipal(bundle.bundle_id),
+            .component_class = .app_component,
+            .budget = budgetForBundle(bundle),
+            .ui_surface_id = self.nextSurfaceId(),
+            .local_only = bundleIsLocalOnly(bundle),
+            .initial_component = componentSpec(first_component),
+            .launch = .{
+                .boundary = .direct_request,
+                .image_id = appImageId(bundle),
+                .component_abi_version = 1,
+                .signed = bundle.signature.isComplete(),
+                .bundle_id = bundle.bundle_id,
+            },
+        });
+
+        var component_index: usize = 1;
+        while (component_index < launch_plan.component_count) : (component_index += 1) {
+            _ = try self.runtime.attachComponent(
+                task.id,
+                componentSpec(launch_plan.components[component_index]),
+                self.advanceClock(),
+            );
+        }
+
+        try self.debug.record(
+            .native_app_launched,
+            self.advanceClock(),
+            bundle.bundle_id,
+            bundle.display_name,
+            true,
+        );
+        return .{
+            .task_id = task.id,
+            .component_count = launch_plan.component_count,
+            .asset_count = launch_plan.asset_count,
+            .permission_count = bundle.requested_permissions.len,
+            .signed_provenance = task.launch.signed,
+            .background_allowed = task.background_allowed,
+            .local_only = task.local_only,
+            .state = task.state,
+        };
+    }
+
+    pub fn suspendNativeApp(self: *Simulator, task_id: u64) !bool {
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        if (task.state != .active) return false;
+        task.state = .suspended;
+        try self.debug.record(.native_app_suspended, self.advanceClock(), task.launchBundleIdSlice(), "suspend", true);
+        return true;
+    }
+
+    pub fn resumeNativeApp(self: *Simulator, task_id: u64) !bool {
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        if (task.state != .suspended) return false;
+        task.state = .active;
+        try self.debug.record(.native_app_resumed, self.advanceClock(), task.launchBundleIdSlice(), "resume", true);
+        return true;
+    }
+
+    pub fn stopNativeApp(self: *Simulator, task_id: u64) !bool {
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        const bundle_id = task.launchBundleIdSlice();
+        const stopped = try self.runtime.terminateTask(task_id, self.advanceClock());
+        try self.debug.record(.native_app_stopped, self.advanceClock(), bundle_id, "stop", stopped);
+        return stopped;
     }
 
     pub fn rollback(self: *Simulator, bundle_id: []const u8) !package_service.InstallResult {
@@ -189,37 +353,23 @@ pub const Simulator = struct {
         defer self.now_ticks += 1;
         return self.now_ticks;
     }
+
+    fn nextSurfaceId(self: *Simulator) u64 {
+        defer self.next_ui_surface_id += 1;
+        return self.next_ui_surface_id;
+    }
 };
 
-test "SDK simulator installs updates rolls back and debugs example packages" {
-    const examples = @import("example_apps.zig");
+fn defaultReviewCommand(request: manifest.PermissionRequest) permission_review.ReviewCommand {
+    return .{
+        .allow = true,
+        .local_only = request.local_only,
+        .lease_ticks = if (request.max_lease_ticks == 0) null else request.max_lease_ticks,
+    };
+}
 
-    var sim = Simulator.init();
-    const generated = try sim.parseAndGenerate(examples.writer_idl);
-    try std.testing.expect(std.mem.indexOf(u8, generated.slice(), "writer_edit") != null);
-
-    const writer = examples.writer();
-    const first = try sim.install(.{
-        .bundle = writer.bundle,
-        .signer = writer.signer,
-        .data_schema_version = writer.data_schema_version,
-    });
-    try std.testing.expect(first.installed_new);
-
-    var updated_bundle = writer.bundle;
-    updated_bundle.version_minor += 1;
-    const updated = try sim.install(.{
-        .bundle = updated_bundle,
-        .signer = writer.signer,
-        .data_schema_version = writer.data_schema_version,
-        .retains_data_compatibility = true,
-    });
-    try std.testing.expect(updated.updated_existing);
-    try std.testing.expect(updated.rollback_available);
-
-    const rolled_back = try sim.rollback(writer.bundle.bundle_id);
-    try std.testing.expect(rolled_back.updated_existing);
-    var resolved = package_service.ResolvedManifest{
+fn emptyResolvedManifest() package_service.ResolvedManifest {
+    return .{
         .provided_interfaces = undefined,
         .consumed_interfaces = undefined,
         .components = undefined,
@@ -229,9 +379,145 @@ test "SDK simulator installs updates rolls back and debugs example packages" {
         .ai_metadata = .{},
         .signature = .{},
     };
-    const current = try sim.resolveCurrentManifest(writer.bundle.bundle_id, &resolved);
-    try std.testing.expectEqual(writer.bundle.version_minor, current.version_minor);
+}
 
+fn appPrincipal(bundle_id: []const u8) principal.PrincipalId {
+    return .{
+        .kind = .app,
+        .serial = std.hash.Wyhash.hash(0x5A47_4150_505F_4944, bundle_id),
+    };
+}
+
+fn appImageId(bundle: manifest.BundleManifest) u64 {
+    var hasher = std.hash.Wyhash.init(0x5A47_4150_505F_494D);
+    hasher.update(bundle.bundle_id);
+    hasher.update(bundle.display_name);
+    var version_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u16, version_bytes[0..2], bundle.version_major, .little);
+    std.mem.writeInt(u16, version_bytes[2..4], bundle.version_minor, .little);
+    hasher.update(&version_bytes);
+    const image_id = hasher.final();
+    return if (image_id == 0) 1 else image_id;
+}
+
+fn componentSpec(component: package_service.StoredComponent) task_runtime.ExecutionComponentSpec {
+    return .{
+        .substrate = switch (component.abi) {
+            .typed_component_v1 => .typed_component_abi,
+            .native_sandbox => .early_elf_runner,
+        },
+        .label = component.idSlice(),
+        .entry = component.entrySlice(),
+    };
+}
+
+fn budgetForBundle(bundle: manifest.BundleManifest) task_runtime.ResourceBudget {
+    var cpu_time_ticks: u64 = 12_000;
+    var memory_bytes: usize = 2 * 1024 * 1024 + bundle.components.len * 128 * 1024;
+    var shared_memory_bytes: usize = 256 * 1024;
+    for (bundle.background_tasks) |task| {
+        cpu_time_ticks += task.budget.cpu_time_ticks;
+        memory_bytes += task.budget.memory_bytes;
+        shared_memory_bytes += task.budget.shared_memory_bytes;
+    }
+
+    return .{
+        .cpu_time_ticks = cpu_time_ticks,
+        .memory_bytes = memory_bytes,
+        .endpoint_slots = @intCast(8 + bundle.components.len + bundle.consumed_interfaces.len + bundle.provided_interfaces.len),
+        .shared_memory_bytes = shared_memory_bytes,
+        .background_allowed = bundle.background_tasks.len != 0,
+    };
+}
+
+fn bundleIsLocalOnly(bundle: manifest.BundleManifest) bool {
+    for (bundle.requested_permissions) |request| {
+        if (request.kind == .network_egress and request.rights.has(.network_remote)) return false;
+    }
+    return true;
+}
+
+test "SDK simulator installs updates rolls back launches and debugs native first party apps" {
+    const app_platform = @import("app_platform.zig");
+    const examples = @import("example_apps.zig");
+
+    var sim = Simulator.init();
+    const suite = examples.firstPartySuite();
+    var launched_task_ids = [_]u64{0} ** suite.len;
+
+    for (suite, 0..) |package, index| {
+        const compiled = try app_platform.compile(package);
+        try std.testing.expect(compiled.operationCount() >= 4);
+
+        const generated = try sim.parseAndGenerate(package.idl_source);
+        try std.testing.expect(std.mem.indexOf(u8, generated.slice(), "OperationDescriptor") != null);
+
+        const review = try sim.reviewPermissions(.{
+            .bundle = package.bundle,
+            .signer = package.signer,
+        }, &.{});
+        try std.testing.expectEqual(package.bundle.requested_permissions.len, review.request_count);
+        try std.testing.expect(review.grant_count >= manifest.requiredPermissionCount(package.bundle));
+        try std.testing.expect(std.mem.indexOf(u8, review.textSlice(), package.bundle.display_name) != null);
+
+        const installed = try sim.install(.{
+            .bundle = package.bundle,
+            .signer = package.signer,
+            .data_schema_version = package.data_schema_version,
+        });
+        try std.testing.expect(installed.installed_new);
+
+        const launched = try sim.launchNativeApp(package.bundle.bundle_id);
+        launched_task_ids[index] = launched.task_id;
+        try std.testing.expectEqual(package.bundle.components.len, launched.component_count);
+        try std.testing.expectEqual(package.bundle.assets.len, launched.asset_count);
+        try std.testing.expect(launched.signed_provenance);
+        try std.testing.expect(launched.background_allowed);
+        try std.testing.expect(launched.local_only);
+        try std.testing.expectEqual(task_runtime.TaskState.active, launched.state);
+
+        try std.testing.expect(try sim.suspendNativeApp(launched.task_id));
+        try std.testing.expectEqual(task_runtime.TaskState.suspended, sim.runtime.find(launched.task_id).?.state);
+        try std.testing.expect(try sim.resumeNativeApp(launched.task_id));
+        try std.testing.expectEqual(task_runtime.TaskState.active, sim.runtime.find(launched.task_id).?.state);
+    }
+
+    var updated_bundle = suite[0].bundle;
+    updated_bundle.version_minor += 1;
+    const updated = try sim.install(.{
+        .bundle = updated_bundle,
+        .signer = suite[0].signer,
+        .data_schema_version = suite[0].data_schema_version,
+        .retains_data_compatibility = true,
+    });
+    try std.testing.expect(updated.updated_existing);
+    try std.testing.expect(updated.rollback_available);
+
+    const rolled_back = try sim.rollback(suite[0].bundle.bundle_id);
+    try std.testing.expect(rolled_back.updated_existing);
+    var resolved = emptyResolvedManifest();
+    const current = try sim.resolveCurrentManifest(suite[0].bundle.bundle_id, &resolved);
+    try std.testing.expectEqual(suite[0].bundle.version_minor, current.version_minor);
+
+    for (launched_task_ids) |task_id| {
+        try std.testing.expect(try sim.stopNativeApp(task_id));
+        try std.testing.expectEqual(task_runtime.TaskState.terminated, sim.runtime.find(task_id).?.state);
+    }
+
+    try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.package_installed));
+    try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.package_updated));
+    try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.package_rolled_back));
+    try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.permission_review_rendered));
+    try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_launched));
+    try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_suspended));
+    try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_resumed));
+    try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_stopped));
+}
+
+test "SDK simulator keeps compatibility launches isolated from native app proof path" {
+    const examples = @import("example_apps.zig");
+
+    var sim = Simulator.init();
     const legacy = examples.legacyEditor();
     const environment = try sim.launchCompatibility(.{
         .bundle = legacy.bundle,
@@ -240,9 +526,5 @@ test "SDK simulator installs updates rolls back and debugs example packages" {
     });
     try std.testing.expect(environment.isolated);
     try std.testing.expect(environment.portal_only_host_access);
-
-    try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.package_installed));
-    try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.package_updated));
-    try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.package_rolled_back));
     try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.compatibility_launched));
 }

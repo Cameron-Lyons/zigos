@@ -23,6 +23,8 @@ pub const image_bytes = volume_layout.image_bytes;
 pub const max_payload_bytes = volume_layout.max_payload_bytes;
 pub const required_device_sectors = volume_layout.required_device_sectors;
 pub const max_signer_bytes = volume_layout.max_signer_bytes;
+pub const replay_gate_records = volume_layout.max_replay_log_records;
+pub const replay_gate_segments = volume_layout.max_log_segments;
 
 const data_start_byte = volume_layout.data_start_byte;
 const data_capacity_bytes = volume_layout.data_capacity_bytes;
@@ -45,11 +47,14 @@ pub const QuotaRejection = volume_capacity.QuotaRejection;
 
 pub const ProductQuotaPolicy = struct {
     envelope: ProductCapacityEnvelope,
+    legacy_migration_envelope: ProductCapacityEnvelope,
     over_limit_write_behavior: OverLimitWriteBehavior,
     persistence_error: Error,
     retry_requires_freeing_space: bool,
+    legacy_demo_images_loadable: bool,
 };
 
+pub const legacy_demo_capacity_envelope = volume_quota.legacy_demo_capacity_envelope;
 pub const first_supported_capacity_envelope = volume_quota.first_supported_capacity_envelope;
 
 pub fn productCapacityEnvelope() ProductCapacityEnvelope {
@@ -59,9 +64,11 @@ pub fn productCapacityEnvelope() ProductCapacityEnvelope {
 pub fn productQuotaPolicy() ProductQuotaPolicy {
     return .{
         .envelope = first_supported_capacity_envelope,
+        .legacy_migration_envelope = legacy_demo_capacity_envelope,
         .over_limit_write_behavior = .reject_without_partial_persistence,
         .persistence_error = error.NoSpaceLeft,
         .retry_requires_freeing_space = true,
+        .legacy_demo_images_loadable = true,
     };
 }
 
@@ -91,7 +98,22 @@ pub const Volume = struct {
         [_][max_signer_bytes]u8{[_]u8{0} ** max_signer_bytes} ** workspace.MAX_SNAPSHOTS,
 
     pub fn init() Volume {
-        return .{};
+        var volume: Volume = undefined;
+        volume.reset();
+        return volume;
+    }
+
+    pub fn reset(self: *Volume) void {
+        @memset(self.sector_buffer[0..], 0);
+        self.attached_backend_present = false;
+        self.attached_backend_sector_count = 0;
+        self.attached_backend_read = volume_backend.unattachedRead;
+        self.attached_backend_write = volume_backend.unattachedWrite;
+        self.attached_backend_kind = .none;
+        self.attached_ata_device = null;
+        @memset(std.mem.sliceAsBytes(self.version_signers[0..]), 0);
+        @memset(std.mem.sliceAsBytes(self.object_signers[0..]), 0);
+        @memset(std.mem.sliceAsBytes(self.snapshot_signers[0..]), 0);
     }
 
     pub fn attachBackend(self: *Volume, backend: Backend) void {
@@ -151,14 +173,7 @@ pub const Volume = struct {
         if (!self.hasAttachedDevice()) return false;
         if (self.attached_backend_sector_count < required_device_sectors) return false;
 
-        const loaded = (volume_root_slot.findLatestBackendRoot(self) catch return false) orelse return false;
-        if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_capacity_bytes) return false;
-        if (!volume_backend.readAttachedBytes(self, data_start_byte, self.io_log_buffer[0..loaded.root.log_bytes])) return false;
-        replayLog(self, store, workspaces, self.io_log_buffer[0..loaded.root.log_bytes], loaded.root) catch return false;
-        ensureWithinProductCapacityEnvelope(store, workspaces) catch return false;
-        store.clearDirty();
-        workspaces.clearDirty();
-        return true;
+        return loadLatestValidBackendRoot(self, store, workspaces) catch false;
     }
 
     pub fn saveToVolume(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory) !PersistResult {
@@ -176,15 +191,8 @@ pub const Volume = struct {
     }
 
     pub fn loadFromImage(self: *Volume, image: []const u8, store: *object_store.Store, workspaces: *workspace.Directory) !u64 {
-        if (image.len < image_bytes) return error.ImageTooSmall;
-        const loaded = (try volume_root_slot.findLatestImageRoot(image)) orelse return error.CorruptImage;
-        if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_capacity_bytes) return error.CorruptImage;
-        @memcpy(self.io_log_buffer[0..loaded.root.log_bytes], image[data_start_byte .. data_start_byte + loaded.root.log_bytes]);
-        try replayLog(self, store, workspaces, self.io_log_buffer[0..loaded.root.log_bytes], loaded.root);
-        try ensureWithinProductCapacityEnvelope(store, workspaces);
-        store.clearDirty();
-        workspaces.clearDirty();
-        return loaded.root.generation;
+        if (image.len < legacy_demo_capacity_envelope.volume_image_bytes) return error.ImageTooSmall;
+        return try loadLatestValidImageRoot(self, image, store, workspaces);
     }
 };
 
@@ -311,6 +319,108 @@ fn appendLogFits(root: RootState, delta: BuiltLog) bool {
     if (@as(u32, root.log_record_count) + delta.record_count > max_replay_log_records) return false;
     if (@as(u32, root.log_segment_count) + delta.segment_count > max_log_segments) return false;
     return true;
+}
+
+fn loadLatestValidImageRoot(
+    self: *Volume,
+    image: []const u8,
+    store: *object_store.Store,
+    workspaces: *workspace.Directory,
+) Error!u64 {
+    var roots: [volume_layout.root_sector_count]?LoadedRoot = [_]?LoadedRoot{null} ** volume_layout.root_sector_count;
+    var root_count: usize = 0;
+    var sector_index: u32 = 0;
+    while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
+        roots[root_count] = volume_root_slot.readImageRoot(image, sector_index) catch continue;
+        root_count += 1;
+    }
+    if (root_count == 0) return error.CorruptImage;
+
+    var last_error: ?Error = null;
+    while (takeNewestRoot(&roots, root_count)) |loaded| {
+        return loadImageRootCandidate(self, image, store, workspaces, loaded) catch |err| {
+            last_error = err;
+            continue;
+        };
+    }
+
+    store.reset();
+    workspaces.reset();
+    return last_error orelse error.CorruptImage;
+}
+
+fn loadLatestValidBackendRoot(
+    self: *Volume,
+    store: *object_store.Store,
+    workspaces: *workspace.Directory,
+) Error!bool {
+    var roots: [volume_layout.root_sector_count]?LoadedRoot = [_]?LoadedRoot{null} ** volume_layout.root_sector_count;
+    var root_count: usize = 0;
+    var sector_index: u32 = 0;
+    while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
+        roots[root_count] = volume_root_slot.readBackendRoot(self, sector_index) catch continue;
+        root_count += 1;
+    }
+    if (root_count == 0) return error.CorruptImage;
+
+    var last_error: ?Error = null;
+    while (takeNewestRoot(&roots, root_count)) |loaded| {
+        loadBackendRootCandidate(self, store, workspaces, loaded) catch |err| {
+            last_error = err;
+            continue;
+        };
+        return true;
+    }
+
+    store.reset();
+    workspaces.reset();
+    return last_error orelse error.CorruptImage;
+}
+
+fn takeNewestRoot(roots: []?LoadedRoot, root_count: usize) ?LoadedRoot {
+    var best_index: ?usize = null;
+    var index: usize = 0;
+    while (index < root_count) : (index += 1) {
+        const loaded = roots[index] orelse continue;
+        if (best_index == null or loaded.root.generation > roots[best_index.?].?.root.generation) {
+            best_index = index;
+        }
+    }
+    const selected_index = best_index orelse return null;
+    const loaded = roots[selected_index].?;
+    roots[selected_index] = null;
+    return loaded;
+}
+
+fn loadImageRootCandidate(
+    self: *Volume,
+    image: []const u8,
+    store: *object_store.Store,
+    workspaces: *workspace.Directory,
+    loaded: LoadedRoot,
+) Error!u64 {
+    if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_capacity_bytes) return error.CorruptImage;
+    if (data_start_byte + loaded.root.log_bytes > image.len) return error.CorruptImage;
+    @memcpy(self.io_log_buffer[0..loaded.root.log_bytes], image[data_start_byte .. data_start_byte + loaded.root.log_bytes]);
+    try replayLog(self, store, workspaces, self.io_log_buffer[0..loaded.root.log_bytes], loaded.root);
+    try ensureWithinProductCapacityEnvelope(store, workspaces);
+    store.clearDirty();
+    workspaces.clearDirty();
+    return loaded.root.generation;
+}
+
+fn loadBackendRootCandidate(
+    self: *Volume,
+    store: *object_store.Store,
+    workspaces: *workspace.Directory,
+    loaded: LoadedRoot,
+) Error!void {
+    if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_capacity_bytes) return error.CorruptImage;
+    if (!volume_backend.readAttachedBytes(self, data_start_byte, self.io_log_buffer[0..loaded.root.log_bytes])) return error.CorruptImage;
+    try replayLog(self, store, workspaces, self.io_log_buffer[0..loaded.root.log_bytes], loaded.root);
+    try ensureWithinProductCapacityEnvelope(store, workspaces);
+    store.clearDirty();
+    workspaces.clearDirty();
 }
 
 pub fn ensureWithinProductCapacityEnvelope(store: *const object_store.Store, workspaces: *const workspace.Directory) Error!void {
@@ -1227,12 +1337,14 @@ fn writeShareGrant(writer: *CursorWriter, grant: workspace.ShareGrant) Error!voi
     try writer.writeByte(@intFromEnum(grant.reshare_policy));
     try writer.writeByte(@intFromEnum(grant.audit_visibility));
     try writer.writeU64(grant.expires_at_ticks);
+    try writer.writeU64(grant.scope_object_id.raw());
+    try writeText(writer, grant.scopePathSlice());
 }
 
 fn readShareGrant(reader: *CursorReader) Error!workspace.ShareGrant {
     const principal_id = try readPrincipal(reader);
     const flags = try reader.readByte();
-    return .{
+    var grant = workspace.ShareGrant{
         .principal_id = principal_id,
         .can_read = (flags & (1 << 0)) != 0,
         .can_write = (flags & (1 << 1)) != 0,
@@ -1243,6 +1355,9 @@ fn readShareGrant(reader: *CursorReader) Error!workspace.ShareGrant {
         .audit_visibility = try parseAuditVisibility(try reader.readByte()),
         .expires_at_ticks = try reader.readU64(),
     };
+    grant.scope_object_id = ids.object(try reader.readU64());
+    readTextInto(reader, &grant.scope_path, &grant.scope_path_len) catch return error.CorruptImage;
+    return grant;
 }
 
 fn findBlobSlotIndex(store: *const object_store.Store, address: object_store.BlobAddress) ?usize {
@@ -1280,6 +1395,14 @@ pub const testing = struct {
 
     pub fn recordHeaderBytes() usize {
         return volume_log.recordHeaderLen();
+    }
+
+    pub fn maxReplayLogRecords() u16 {
+        return max_replay_log_records;
+    }
+
+    pub fn maxReplayLogSegments() u16 {
+        return max_log_segments;
     }
 
     pub fn forceLatestImageRootLogBytes(image: []u8, log_bytes: u32) Error!void {

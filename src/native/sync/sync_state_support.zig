@@ -143,6 +143,29 @@ pub const ConflictRecord = struct {
     }
 };
 
+pub const ConflictReviewDecision = enum(u8) {
+    keep_local,
+    accept_remote,
+    keep_both,
+};
+
+pub const ConflictReviewRecord = struct {
+    workspace_id: u64,
+    device_id: principal.PrincipalId,
+    object_id: u64,
+    path_len: usize,
+    path: [workspace.MAX_ENTRY_PATH_BYTES]u8,
+    local_version_id: u64,
+    remote_version_id: u64,
+    semantic: SyncSemantic,
+    decision: ConflictReviewDecision,
+    resolved: bool,
+
+    pub fn pathSlice(self: *const ConflictReviewRecord) []const u8 {
+        return self.path[0..self.path_len];
+    }
+};
+
 pub const DatabaseContract = struct {
     id: u64,
     workspace_id: u64,
@@ -164,6 +187,7 @@ pub const DatabaseContract = struct {
 pub const ReplicationSummary = struct {
     selected_entry_count: usize = 0,
     skipped_entry_count: usize = 0,
+    share_denied_entry_count: usize = 0,
     merged_count: usize = 0,
     snapshot_count: usize = 0,
     secret_transfer_count: usize = 0,
@@ -228,6 +252,7 @@ pub const DurableTransportFrameSlot = struct {
 
 pub const Error = error{
     BundleIdTooLong,
+    ConflictNotFound,
     ConflictTableFull,
     CorruptState,
     DatabaseContractNotFound,

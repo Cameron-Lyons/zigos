@@ -106,9 +106,14 @@ fn printSignature(
     var public_key_hex: [manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES * 2]u8 = undefined;
     var signature_hex: [manifest.MAX_SIGNATURE_VALUE_BYTES * 2]u8 = undefined;
     try writer.print(
-        "provider={s}\nrelease_eligible={s}\nformat={s}\nsigner={s}\npublic_key={s}\nsignature={s}\n",
+        "provider={s}\nrole={s}\nprovider_boundary={s}\ncustody={s}\nverifier_protocol={s}\nfips_204={s}\nrelease_eligible={s}\nformat={s}\nsigner={s}\npublic_key={s}\nsignature={s}\n",
         .{
             provider.descriptor.name,
+            @tagName(provider.descriptor.role),
+            @tagName(provider.descriptor.provider_boundary),
+            @tagName(provider.descriptor.custody),
+            @tagName(provider.descriptor.verifier_protocol),
+            @tagName(provider.descriptor.fips_204),
             if (provider.releaseEligible()) "yes" else "no",
             signature.format,
             signature.signer,

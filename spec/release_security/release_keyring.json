@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "purpose": "Customer verifier trust roots for release DSSE attestations",
+  "public_release_allowed": false,
+  "required_provider_boundary": "offline HSM or cloud KMS release signing provider",
+  "keys": [
+    {
+      "key_id": "zigos-release-signing-required",
+      "status": "required-not-configured",
+      "algorithm": "ed25519",
+      "custody": "hardware-or-kms-required",
+      "hardware_backed": true,
+      "generation": 1,
+      "not_before": "TBD",
+      "not_after": "TBD",
+      "public_key": "TBD",
+      "rotation_policy": "new release key generation before not_after or immediately after suspected exposure",
+      "revocation_source": "spec/release_security/revoked_release_keys.json"
+    }
+  ],
+  "preview_profiles": [
+    {
+      "profile": "ed25519+ml-dsa65",
+      "status": "preview-only",
+      "release_allowed": false,
+      "fips_204_status": "not a production FIPS 204 ML-DSA implementation"
+    }
+  ]
+}

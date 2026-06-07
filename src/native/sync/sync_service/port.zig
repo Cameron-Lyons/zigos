@@ -24,6 +24,8 @@ pub const WorkspacePolicy = state_support.WorkspacePolicy;
 pub const OverlayRecord = state_support.OverlayRecord;
 pub const DatabaseContract = state_support.DatabaseContract;
 pub const ReplicationSummary = state_support.ReplicationSummary;
+pub const ConflictReviewDecision = state_support.ConflictReviewDecision;
+pub const ConflictReviewRecord = state_support.ConflictReviewRecord;
 pub const TransportFrame = sync_adapters.TransportFrame;
 pub const TransportFrameRequest = sync_adapters.QueueFrameRequest;
 pub const OverlaySession = @import("overlay.zig").OverlaySession;
@@ -269,7 +271,7 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
         ) (AuthorityError || Error)!ReplicationSummary {
             _ = try self.requireSyncAuthority(authority);
             const policy = self.service.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
-            try self.authorizeWorkspaceShare(store, policy, to_device, transport, authority.now_ticks);
+            try self.authorizeWorkspaceAnyShare(store, policy, to_device, transport, authority.now_ticks);
             return self.service.replicateWorkspace(store, workspace_id, from_device, to_device, transport);
         }
 
@@ -325,7 +327,7 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
         ) (AuthorityError || Error)!TransportFrame {
             _ = try self.requireSyncAuthority(authority);
             const policy = self.service.findWorkspacePolicy(request.workspace_id) orelse return error.WorkspacePolicyNotFound;
-            try self.authorizeWorkspaceShare(store, policy, request.target_device, request.transport, authority.now_ticks);
+            try self.authorizeWorkspaceFrameShare(store, policy, request, authority.now_ticks);
             return self.service.acceptTransportFrame(store, request);
         }
 
@@ -367,6 +369,29 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             return self.service.repairWorkspaceMetadata(store, workspace_id, device_id);
         }
 
+        pub fn reviewConflict(
+            self: *Self,
+            authority: AuthorityContext,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            path: []const u8,
+        ) (AuthorityError || Error)!ConflictReviewRecord {
+            _ = try self.requireSyncAuthority(authority);
+            return self.service.reviewConflict(workspace_id, device_id, path);
+        }
+
+        pub fn resolveConflict(
+            self: *Self,
+            authority: AuthorityContext,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            path: []const u8,
+            decision: ConflictReviewDecision,
+        ) (AuthorityError || Error)!ConflictReviewRecord {
+            _ = try self.requireSyncAuthority(authority);
+            return self.service.resolveConflict(workspace_id, device_id, path, decision);
+        }
+
         fn requireSyncAuthority(self: *Self, authority: AuthorityContext) AuthorityError!*const capability.Capability {
             return service_authority.requireServiceAuthority(
                 self.capability_table,
@@ -383,7 +408,7 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             try self.service.ensureTrustedDevices(request.from_device, request.to_device);
             const policy = self.service.findWorkspacePolicy(request.workspace_id) orelse return error.WorkspacePolicyNotFound;
             try self.service.authorizeTransport(policy, request.transport, null);
-            try self.authorizeWorkspaceShare(request.source_storage, policy, request.to_device, request.transport, request.tick);
+            try self.authorizeWorkspaceAnyShare(request.source_storage, policy, request.to_device, request.transport, request.tick);
             if (request.transport != .relay_assisted) return;
 
             const relay_service = request.relay_service orelse return error.TransportDenied;
@@ -405,7 +430,7 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             }, request.from_device, request.to_device, policy.relayDomainSlice());
         }
 
-        fn authorizeWorkspaceShare(
+        fn authorizeWorkspaceAnyShare(
             self: *Self,
             store: *const storage_service.Service,
             policy: *const WorkspacePolicy,
@@ -415,9 +440,27 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
         ) Error!void {
             _ = self;
             if (!policy.require_shared_access) return;
-            if (!store.workspaceHasAccess(policy.workspace_id, .{
+            if (!store.workspaceHasAnyAccess(policy.workspace_id, .{
                 .principal_id = target_device,
                 .network_scope = shareNetworkScopeForTransport(transport),
+                .now_ticks = now_ticks,
+            })) return error.TransportDenied;
+        }
+
+        fn authorizeWorkspaceFrameShare(
+            self: *Self,
+            store: *const storage_service.Service,
+            policy: *const WorkspacePolicy,
+            request: TransportFrameRequest,
+            now_ticks: u64,
+        ) Error!void {
+            _ = self;
+            if (!policy.require_shared_access) return;
+            if (!store.workspaceHasAccess(policy.workspace_id, .{
+                .principal_id = request.target_device,
+                .object_id = object_store.ids.object(request.object_id),
+                .path = request.path,
+                .network_scope = shareNetworkScopeForTransport(request.transport),
                 .now_ticks = now_ticks,
             })) return error.TransportDenied;
         }

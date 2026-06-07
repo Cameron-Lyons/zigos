@@ -8,6 +8,8 @@ task_runtime.checkpoint.write_restore 9000000
 accelerator_scheduler.claim_release 230000
 storage.file_bridge.resolve_view 15000
 storage.workspace.commit_overlay 11000000
+storage.volume.replay_segmented_log 500000000
+storage.volume.compact_checkpoint 1200000000
 package_revision.rollforward_rollback 1500000
 indexing_service.query_ranked 300000
 media_print.submit_complete 200000

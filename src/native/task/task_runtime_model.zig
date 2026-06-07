@@ -1,5 +1,6 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const builtin = @import("builtin");
+const debug_contract = @import("../security/debug_contract.zig");
 const launch_helpers = @import("task_runtime_launch.zig");
 const id_index = @import("../core/id_index.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
@@ -15,6 +16,7 @@ pub const MAX_TASKS: usize = TASK_PAGE_SIZE * TASK_PAGE_COUNT;
 pub const MAX_TASK_CAPABILITIES: usize = 24;
 pub const MAX_TASK_COMPONENTS: usize = 8;
 pub const MAX_AUDIT_EVENTS: usize = 16;
+pub const MAX_TASK_PROVENANCE_EVENTS: usize = 24;
 pub const MAX_TASK_BUNDLE_ID_BYTES: usize = 64;
 pub const MAX_COMPONENT_LABEL_BYTES: usize = 48;
 pub const MAX_COMPONENT_ENTRY_BYTES: usize = 64;
@@ -195,6 +197,8 @@ pub const AuditEvent = struct {
     tick: u64 = 0,
 };
 
+pub const ProvenanceRecord = debug_contract.ProvenanceRecord;
+
 pub const LaunchProvenanceSpec = struct {
     boundary: LaunchBoundary = .direct_request,
     image_id: u64 = 0,
@@ -235,6 +239,7 @@ pub const TaskColdRecord = struct {
     capability_ids: [MAX_TASK_CAPABILITIES]u64 = [_]u64{0} ** MAX_TASK_CAPABILITIES,
     capability_index: CapabilityIndex = CapabilityIndex.init(),
     audit_trail: [MAX_AUDIT_EVENTS]AuditEvent = [_]AuditEvent{AuditEvent{ .kind = .created }} ** MAX_AUDIT_EVENTS,
+    provenance_trail: [MAX_TASK_PROVENANCE_EVENTS]ProvenanceRecord = [_]ProvenanceRecord{ProvenanceRecord{}} ** MAX_TASK_PROVENANCE_EVENTS,
     userspace_image: ExecutableImageSpec = .{},
 };
 
@@ -254,6 +259,8 @@ pub const TaskRecord = struct {
     budget: ResourceBudget,
     audit_start: usize,
     audit_count: usize,
+    provenance_start: usize,
+    provenance_count: usize,
     ui_surface_id: ?u64,
     resource_class: accelerator_scheduler.ResourceClass,
     background_allowed: bool,
@@ -311,6 +318,16 @@ pub const TaskRecord = struct {
     pub fn latestAuditEvent(self: *const TaskRecord) ?AuditEvent {
         if (self.audit_count == 0) return null;
         return self.auditEventAt(self.audit_count - 1);
+    }
+
+    pub fn provenanceEventAt(self: *const TaskRecord, index: usize) ?ProvenanceRecord {
+        if (index >= self.provenance_count) return null;
+        return taskColdConst(self).provenance_trail[(self.provenance_start + index) % MAX_TASK_PROVENANCE_EVENTS];
+    }
+
+    pub fn latestProvenanceEvent(self: *const TaskRecord) ?ProvenanceRecord {
+        if (self.provenance_count == 0) return null;
+        return self.provenanceEventAt(self.provenance_count - 1);
     }
 };
 
@@ -384,6 +401,8 @@ pub fn zeroTask() TaskRecord {
         },
         .audit_start = 0,
         .audit_count = 0,
+        .provenance_start = 0,
+        .provenance_count = 0,
         .ui_surface_id = null,
         .resource_class = .foreground_interactive,
         .background_allowed = false,
@@ -463,6 +482,31 @@ pub fn copyTaskCold(dest: *TaskColdRecord, src: *const TaskColdRecord) void {
     copyBytes(std.mem.asBytes(dest), std.mem.asBytes(src));
 }
 
+pub fn copyTaskColdForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, task: *const TaskRecord) void {
+    copySlots(ExecutionComponentRecord, dest.execution_components[0..task.execution_component_count], src.execution_components[0..task.execution_component_count]);
+    copySlots(u64, dest.capability_ids[0..task.capability_count], src.capability_ids[0..task.capability_count]);
+    dest.capability_index = src.capability_index;
+    copyAuditTrailForTask(dest, src, task);
+    copyProvenanceTrailForTask(dest, src, task);
+    dest.userspace_image = src.userspace_image;
+}
+
+fn copyAuditTrailForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, task: *const TaskRecord) void {
+    var index: usize = 0;
+    while (index < task.audit_count) : (index += 1) {
+        const slot_index = (task.audit_start + index) % MAX_AUDIT_EVENTS;
+        dest.audit_trail[slot_index] = src.audit_trail[slot_index];
+    }
+}
+
+fn copyProvenanceTrailForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, task: *const TaskRecord) void {
+    var index: usize = 0;
+    while (index < task.provenance_count) : (index += 1) {
+        const slot_index = (task.provenance_start + index) % MAX_TASK_PROVENANCE_EVENTS;
+        dest.provenance_trail[slot_index] = src.provenance_trail[slot_index];
+    }
+}
+
 pub fn taskCold(task: *TaskRecord) *TaskColdRecord {
     return task.cold_state orelse native_util.impossibleByInvariant("active task records are bound to cold state storage");
 }
@@ -476,7 +520,7 @@ pub fn copyTaskColdStates(task_slots: []const TaskSlot, dest: []TaskColdRecord, 
     while (index < dest.len) : (index += 1) {
         resetTaskCold(&dest[index]);
         if (index >= task_slots.len or !task_slots[index].in_use) continue;
-        copyTaskCold(&dest[index], &src[index]);
+        copyTaskColdForTask(&dest[index], &src[index], &task_slots[index].task);
     }
 }
 

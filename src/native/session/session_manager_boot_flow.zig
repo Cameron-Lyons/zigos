@@ -5,6 +5,7 @@ const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
+const booted_evidence = @import("booted_evidence.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -213,6 +214,10 @@ pub const SessionManager = struct {
             &self.runtime_context.runtime,
             &self.runtime_context.userspace_scheduler,
         )) {
+            self.failBoot();
+            return;
+        }
+        if (builtin.target.os.tag == .freestanding and !booted_evidence.runProduction(self, &graph)) {
             self.failBoot();
             return;
         }

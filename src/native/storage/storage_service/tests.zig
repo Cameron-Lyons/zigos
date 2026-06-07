@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const capability = @import("../../kernel_api/capability.zig");
+const debug_contract = @import("../../security/debug_contract.zig");
 const ids = @import("../../core/ids.zig");
 const object_store = @import("../object_store.zig");
 const principal = @import("../../core/principal.zig");
@@ -87,30 +88,48 @@ test "storage port requires authority context for protected mutations" {
         .metadata = try object_store.signMetadata(signer, "authorized", "text/plain", .document, "authorized", 10),
     };
 
+    var read_only_trace = debug_contract.ProvenanceRecord{};
     try std.testing.expectError(error.PermissionDenied, port.putVersion(.{
         .task_id = 20,
         .principal = actor,
         .capability_id = read_only.id,
         .now_ticks = 10,
+        .operation = "storage-put-version",
+        .trace = &read_only_trace,
     }, request));
+    try std.testing.expectEqual(debug_contract.ProvenanceKind.service_call, read_only_trace.kind);
+    try std.testing.expectEqual(debug_contract.Decision.denied, read_only_trace.decision);
+    try std.testing.expectEqualStrings("storage-put-version", read_only_trace.operationSlice());
+    try std.testing.expectEqualStrings("object_write", read_only_trace.detailSlice());
+    try std.testing.expect(read_only_trace.denial.fingerprint != 0);
 
+    var allowed_trace = debug_contract.ProvenanceRecord{};
     const result = try port.putVersion(.{
         .task_id = 20,
         .principal = actor,
         .capability_id = writer.id,
         .now_ticks = 10,
+        .operation = "storage-put-version",
+        .trace = &allowed_trace,
     }, request);
     try std.testing.expectEqual(ids.object(953), result.object_id);
+    try std.testing.expectEqual(debug_contract.Decision.allowed, allowed_trace.decision);
+    try std.testing.expectEqual(@as(u64, core.service_id), allowed_trace.service_id);
 
+    var scope_trace = debug_contract.ProvenanceRecord{};
     try std.testing.expectError(error.PermissionDenied, port.createWorkspace(.{
         .task_id = 21,
         .principal = actor,
         .capability_id = writer.id,
         .now_ticks = 10,
+        .operation = "storage-create-workspace",
+        .trace = &scope_trace,
     }, .{
         .owner = actor,
         .label = "denied-task",
     }));
+    try std.testing.expectEqual(debug_contract.Decision.denied, scope_trace.decision);
+    try std.testing.expectEqualStrings("task-scope-policy", scope_trace.denial.blockingPolicySlice());
 }
 
 test "storage port derives shared workspace capabilities and blocks unauthorized reshares" {
@@ -333,6 +352,128 @@ test "storage port derives shared workspace capabilities and blocks unauthorized
         .reshare_policy = .owner_only,
         .audit_visibility = .owner_only,
     }));
+}
+
+test "storage service enforces durable object-scoped workspace shares" {
+    var checkpoint_store = CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    defer checkpoint_store.resetPersistent();
+
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 149 };
+    const owner_user = principal.PrincipalId{ .kind = .user, .serial = 140 };
+    const viewer = principal.PrincipalId{ .kind = .app, .serial = 141 };
+    var core = StorageCore.initWithStore(804, 130, storage_owner, &checkpoint_store);
+    var capabilities = capability.CapabilityTable.init();
+    var port = StoragePort.init(&core, &capabilities);
+
+    const service_writer = try capabilities.mintBootRoot(.{
+        .holder = storage_owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = core.service_id },
+        .rights = .{ .service = .{ .object_read = true, .object_write = true } },
+        .scope = .{ .task_id = 130, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    const storage_authority = AuthorityContext{
+        .task_id = 130,
+        .principal = storage_owner,
+        .capability_id = service_writer.id,
+        .now_ticks = 10,
+    };
+    const signer = signing.SignerIdentity{
+        .label = "zigos-object-share-storage-key",
+        .seed = [_]u8{0xC4} ** 32,
+    };
+    const shared = try port.putVersion(storage_authority, .{
+        .preferred_object_id = ids.object(1_054),
+        .object_type = .document,
+        .payload = "shared document",
+        .metadata = try object_store.signMetadata(signer, "shared", "text/markdown", .document, "shared document", 10),
+    });
+    const private = try port.putVersion(storage_authority, .{
+        .preferred_object_id = ids.object(1_055),
+        .object_type = .document,
+        .payload = "private document",
+        .metadata = try object_store.signMetadata(signer, "private", "text/markdown", .document, "private document", 11),
+    });
+    const notes = try port.createWorkspace(storage_authority, .{
+        .owner = owner_user,
+        .label = "object-shared-notes",
+    });
+    try port.beginTransaction(storage_authority, notes.id);
+    try port.stagePut(storage_authority, notes.id, "documents/shared.md", shared.object_id, shared.version_id, .document);
+    try port.stagePut(storage_authority, notes.id, "documents/private.md", private.object_id, private.version_id, .document);
+    _ = try port.commit(storage_authority, notes.id);
+
+    const owner_workspace_authority = try capabilities.mintBootRoot(.{
+        .holder = owner_user,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .workspace, .id = notes.id.raw() },
+        .rights = .{ .workspace = .{
+            .object_read = true,
+            .object_write = true,
+            .capability_derive = true,
+            .capability_query = true,
+        } },
+        .scope = .{ .workspace_id = notes.id.raw(), .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    const owner_authority = AuthorityContext{
+        .task_id = 131,
+        .principal = owner_user,
+        .capability_id = owner_workspace_authority.id,
+        .now_ticks = 20,
+    };
+    const scoped_request = try (workspace.ShareGrant{
+        .principal_id = viewer,
+        .can_read = true,
+        .network_scope = .local_only,
+        .audit_visibility = .shared_participants,
+    }).withObjectScope(shared.object_id, "documents/shared.md");
+    const scoped_share = try port.grantWorkspaceShare(&capabilities, owner_authority, notes.id, scoped_request);
+    try std.testing.expect(scoped_share.grant.isObjectScoped());
+    try std.testing.expectEqual(shared.object_id, scoped_share.grant.scope_object_id);
+    try std.testing.expectEqualStrings("documents/shared.md", scoped_share.grant.scopePathSlice());
+
+    const viewer_authority = AuthorityContext{
+        .task_id = 141,
+        .principal = viewer,
+        .capability_id = scoped_share.capability.id,
+        .now_ticks = 30,
+    };
+    const shared_view = try port.resolve(viewer_authority, .{
+        .workspace_id = notes.id.raw(),
+        .path = "documents/shared.md",
+        .access = .read,
+    });
+    try std.testing.expectEqual(shared.object_id.raw(), shared_view.object_id);
+    try std.testing.expectError(error.PermissionDenied, port.resolve(viewer_authority, .{
+        .workspace_id = notes.id.raw(),
+        .path = "documents/private.md",
+        .access = .read,
+    }));
+    try std.testing.expect(core.workspaceHasAccess(notes.id, .{
+        .principal_id = viewer,
+        .object_id = shared.object_id,
+        .path = "documents/shared.md",
+        .network_scope = .local_only,
+        .now_ticks = 30,
+    }));
+    try std.testing.expect(!core.workspaceHasAccess(notes.id, .{
+        .principal_id = viewer,
+        .object_id = private.object_id,
+        .path = "documents/private.md",
+        .network_scope = .local_only,
+        .now_ticks = 30,
+    }));
+
+    const reloaded = StorageCore.initWithStore(805, 132, storage_owner, &checkpoint_store);
+    const restored = reloaded.findShareGrant(notes.id, viewer).?;
+    try std.testing.expect(restored.isObjectScoped());
+    try std.testing.expectEqual(shared.object_id, restored.scope_object_id);
+    try std.testing.expectEqualStrings("documents/shared.md", restored.scopePathSlice());
 }
 
 test "storage service accepts large object payloads through mapped shared memory transfer" {

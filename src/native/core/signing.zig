@@ -23,23 +23,77 @@ pub const SignatureProviderRole = enum {
     test_only,
 };
 
+pub const SignatureKeyCustody = enum {
+    software_seed,
+    hardware_security_module,
+    cloud_kms,
+    tpm,
+    secure_enclave,
+};
+
+pub const SignatureProviderBoundary = enum {
+    local_software,
+    offline_hsm,
+    cloud_kms,
+    platform_tpm,
+    secure_enclave,
+};
+
+pub const SignatureVerifierProtocol = enum {
+    local_manifest,
+    dsse_in_toto_slsa,
+};
+
+pub const Fips204Implementation = enum {
+    not_applicable,
+    preview_commitment,
+    validated_provider,
+};
+
 pub const SignatureProviderDescriptor = struct {
     name: []const u8,
     profile: SignatureProfile,
     role: SignatureProviderRole,
+    provider_boundary: SignatureProviderBoundary = .local_software,
+    custody: SignatureKeyCustody = .software_seed,
     hardware_backed: bool = false,
+    rotation_supported: bool = false,
+    revocation_supported: bool = false,
+    customer_verifiable: bool = false,
+    verifier_protocol: SignatureVerifierProtocol = .local_manifest,
+    fips_204: Fips204Implementation = .not_applicable,
     fips_validated: bool = false,
 
     pub fn format(self: SignatureProviderDescriptor) []const u8 {
         return formatForProfile(self.profile);
     }
 
+    pub fn hasOperationalCustody(self: SignatureProviderDescriptor) bool {
+        return self.hardware_backed and self.custody != .software_seed;
+    }
+
+    pub fn hasReleaseProviderBoundary(self: SignatureProviderDescriptor) bool {
+        return switch (self.provider_boundary) {
+            .offline_hsm, .cloud_kms => true,
+            .local_software, .platform_tpm, .secure_enclave => false,
+        };
+    }
+
+    pub fn hasLifecycleControls(self: SignatureProviderDescriptor) bool {
+        return self.rotation_supported and self.revocation_supported;
+    }
+
     pub fn releaseEligible(self: SignatureProviderDescriptor) bool {
-        return self.role == .production and
-            switch (self.profile) {
-                .ed25519 => true,
-                .ed25519_ml_dsa65_hybrid_preview => self.fips_validated,
-            };
+        if (self.role != .production) return false;
+        if (!self.hasReleaseProviderBoundary()) return false;
+        if (!self.hasOperationalCustody()) return false;
+        if (!self.hasLifecycleControls()) return false;
+        if (!self.customer_verifiable) return false;
+        if (self.verifier_protocol != .dsse_in_toto_slsa) return false;
+        return switch (self.profile) {
+            .ed25519 => self.fips_204 != .preview_commitment,
+            .ed25519_ml_dsa65_hybrid_preview => false,
+        };
     }
 };
 
@@ -152,7 +206,8 @@ pub const SoftwareEd25519Provider = struct {
     pub const descriptor = SignatureProviderDescriptor{
         .name = "software-ed25519",
         .profile = .ed25519,
-        .role = .production,
+        .role = .test_only,
+        .custody = .software_seed,
     };
 
     pub fn provider(self: *SoftwareEd25519Provider) SignatureProvider {
@@ -175,6 +230,8 @@ pub const HybridPreviewProvider = struct {
         .name = "software-ed25519-ml-dsa65-preview",
         .profile = .ed25519_ml_dsa65_hybrid_preview,
         .role = .preview,
+        .custody = .software_seed,
+        .fips_204 = .preview_commitment,
     };
 
     pub fn provider(self: *HybridPreviewProvider) SignatureProvider {
@@ -412,8 +469,13 @@ test "signature providers expose release eligibility and reject mismatched profi
     var hybrid_provider_impl = HybridPreviewProvider{};
     const hybrid_provider = hybrid_provider_impl.provider();
 
-    try std.testing.expect(ed25519_provider.releaseEligible());
+    try std.testing.expect(!ed25519_provider.releaseEligible());
     try std.testing.expect(!hybrid_provider.releaseEligible());
+    try std.testing.expectEqual(SignatureProviderRole.test_only, ed25519_provider.descriptor.role);
+    try std.testing.expectEqual(SignatureProviderRole.preview, hybrid_provider.descriptor.role);
+    try std.testing.expectEqual(SignatureProviderBoundary.local_software, ed25519_provider.descriptor.provider_boundary);
+    try std.testing.expectEqual(SignatureProviderBoundary.local_software, hybrid_provider.descriptor.provider_boundary);
+    try std.testing.expectEqual(Fips204Implementation.preview_commitment, hybrid_provider.descriptor.fips_204);
     try std.testing.expectEqualStrings(manifest.SIGNATURE_FORMAT_ED25519, ed25519_provider.descriptor.format());
     try std.testing.expectEqualStrings(manifest.SIGNATURE_FORMAT_ED25519_ML_DSA65, hybrid_provider.descriptor.format());
 
@@ -424,6 +486,49 @@ test "signature providers expose release eligibility and reject mismatched profi
     try std.testing.expect(hybrid_provider.verify(hybrid_signature, "provider-message"));
     try std.testing.expect(!ed25519_provider.verify(hybrid_signature, "provider-message"));
     try std.testing.expect(!hybrid_provider.verify(ed25519_signature, "provider-message"));
+}
+
+test "release eligibility requires hardware custody lifecycle controls and verifier protocol" {
+    const local_fixture = SignatureProviderDescriptor{
+        .name = "local-fixture",
+        .profile = .ed25519,
+        .role = .production,
+        .custody = .software_seed,
+        .hardware_backed = false,
+        .rotation_supported = true,
+        .revocation_supported = true,
+        .customer_verifiable = true,
+        .verifier_protocol = .dsse_in_toto_slsa,
+    };
+    try std.testing.expect(!local_fixture.releaseEligible());
+
+    const operational = SignatureProviderDescriptor{
+        .name = "release-hsm-ed25519",
+        .profile = .ed25519,
+        .role = .production,
+        .provider_boundary = .offline_hsm,
+        .custody = .hardware_security_module,
+        .hardware_backed = true,
+        .rotation_supported = true,
+        .revocation_supported = true,
+        .customer_verifiable = true,
+        .verifier_protocol = .dsse_in_toto_slsa,
+    };
+    try std.testing.expect(operational.releaseEligible());
+
+    var no_provider_boundary = operational;
+    no_provider_boundary.provider_boundary = .local_software;
+    try std.testing.expect(!no_provider_boundary.releaseEligible());
+
+    var no_rotation = operational;
+    no_rotation.rotation_supported = false;
+    try std.testing.expect(!no_rotation.releaseEligible());
+
+    var preview_hybrid = operational;
+    preview_hybrid.profile = .ed25519_ml_dsa65_hybrid_preview;
+    preview_hybrid.fips_204 = .preview_commitment;
+    preview_hybrid.fips_validated = true;
+    try std.testing.expect(!preview_hybrid.releaseEligible());
 }
 
 test "signature provider fails closed when implementation returns the wrong profile" {
@@ -473,7 +578,7 @@ test "signature provider registry selects providers by profile and release eligi
 
     try std.testing.expect(registry.find(.ed25519) != null);
     try std.testing.expect(registry.find(.ed25519_ml_dsa65_hybrid_preview) != null);
-    try std.testing.expect(registry.findReleaseEligible(.ed25519) != null);
+    try std.testing.expect(registry.findReleaseEligible(.ed25519) == null);
     try std.testing.expect(registry.findReleaseEligible(.ed25519_ml_dsa65_hybrid_preview) == null);
 
     const ed25519_signature = try registry.sign(.ed25519, identity, "registry-message");

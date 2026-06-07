@@ -5,7 +5,7 @@ const workspace = @import("../workspace.zig");
 
 pub fn workspaceStateHash(record: *const workspace.WorkspaceRecord) volume_errors.Error!u64 {
     var hash = native_util.FNV1A_64_OFFSET_BASIS;
-    hash = hashBytes(hash, "workspace-state/v4");
+    hash = hashBytes(hash, "workspace-state/v5");
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.id.raw());
     hash = hashPrincipal(hash, record.owner);
     hash = hashBytes(hash, record.labelSlice());
@@ -65,5 +65,7 @@ fn hashShareGrant(hash: u64, grant: workspace.ShareGrant) u64 {
     next = native_util.fnv1a64AppendByte(next, @intFromEnum(grant.reshare_policy));
     next = native_util.fnv1a64AppendByte(next, @intFromEnum(grant.audit_visibility));
     next = native_util.fnv1a64AppendU64LittleEndian(next, grant.expires_at_ticks);
+    next = native_util.fnv1a64AppendU64LittleEndian(next, grant.scope_object_id.raw());
+    next = hashBytes(next, grant.scopePathSlice());
     return next;
 }

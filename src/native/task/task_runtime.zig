@@ -1,5 +1,6 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const builtin = @import("builtin");
+const debug_contract = @import("../security/debug_contract.zig");
 const generated_image_fixtures = if (builtin.is_test) @import("generated_image_fixtures.zig") else struct {};
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -12,6 +13,7 @@ pub const MAX_TASKS = model.MAX_TASKS;
 pub const MAX_TASK_CAPABILITIES = model.MAX_TASK_CAPABILITIES;
 pub const MAX_TASK_COMPONENTS = model.MAX_TASK_COMPONENTS;
 pub const MAX_AUDIT_EVENTS = model.MAX_AUDIT_EVENTS;
+pub const MAX_TASK_PROVENANCE_EVENTS = model.MAX_TASK_PROVENANCE_EVENTS;
 pub const MAX_TASK_BUNDLE_ID_BYTES = model.MAX_TASK_BUNDLE_ID_BYTES;
 pub const MAX_COMPONENT_LABEL_BYTES = model.MAX_COMPONENT_LABEL_BYTES;
 pub const MAX_COMPONENT_ENTRY_BYTES = model.MAX_COMPONENT_ENTRY_BYTES;
@@ -39,6 +41,7 @@ pub const ExecutionComponentRecord = model.ExecutionComponentRecord;
 pub const ResourceBudget = model.ResourceBudget;
 pub const AuditEventKind = model.AuditEventKind;
 pub const AuditEvent = model.AuditEvent;
+pub const ProvenanceRecord = model.ProvenanceRecord;
 pub const LaunchProvenanceSpec = model.LaunchProvenanceSpec;
 pub const LaunchProvenanceRecord = model.LaunchProvenanceRecord;
 pub const TaskCreateRequest = model.TaskCreateRequest;
@@ -61,7 +64,7 @@ const saturatingSub = model.saturatingSub;
 const emptyIndexTable = model.emptyIndexTable;
 const zeroTaskCold = model.zeroTaskCold;
 const resetTaskCold = model.resetTaskCold;
-const copyTaskCold = model.copyTaskCold;
+const copyTaskColdForTask = model.copyTaskColdForTask;
 const copyTaskColdStates = model.copyTaskColdStates;
 const bindTaskColdStates = model.bindTaskColdStates;
 const copySlots = model.copySlots;
@@ -130,7 +133,7 @@ pub const Runtime = struct {
             if (!slot.in_use) continue;
             const dense_index = out.task_count;
             out.tasks[dense_index] = slot;
-            copyTaskCold(&out.task_cold[dense_index], &self.task_cold[slot_index]);
+            copyTaskColdForTask(&out.task_cold[dense_index], &self.task_cold[slot_index], &slot.task);
             out.task_count += 1;
         }
         bindTaskColdStates(out.tasks[0..out.task_count], out.task_cold[0..out.task_count]);
@@ -144,7 +147,7 @@ pub const Runtime = struct {
     }
 
     pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) void {
-        self.reset();
+        self.resetForSnapshotRestore();
         self.next_task_id = state.next_task_id;
         self.next_process_id = state.next_process_id;
         self.next_address_space_id = state.next_address_space_id;
@@ -158,7 +161,7 @@ pub const Runtime = struct {
                 native_util.impossibleByInvariant("task snapshot count is bounded by task arena capacity");
             };
             self.tasks.slotAt(slot_index).* = state.tasks[task_index];
-            copyTaskCold(&self.task_cold[task_index], &state.task_cold[task_index]);
+            copyTaskColdForTask(&self.task_cold[task_index], &state.task_cold[task_index], &state.tasks[task_index].task);
         }
 
         var address_space_index: usize = 0;
@@ -167,6 +170,20 @@ pub const Runtime = struct {
         }
         self.rebuildIndexes();
         self.debugAssertIndexIntegrity();
+    }
+
+    fn resetForSnapshotRestore(self: *Runtime) void {
+        self.next_task_id = 1;
+        self.next_process_id = 1;
+        self.next_address_space_id = 1;
+        self.next_namespace_id = 1;
+        self.next_component_id = 1;
+        self.address_space_index_slots = emptyIndexTable(INDEX_CAPACITY);
+        self.tasks.reset();
+        self.task_owner_index.reset();
+        for (&self.address_spaces) |*slot| {
+            slot.* = AddressSpaceSlot{};
+        }
     }
 
     pub fn rebuildIndexes(self: *Runtime) void {
@@ -232,6 +249,8 @@ pub const Runtime = struct {
             .budget = request.budget,
             .audit_start = 0,
             .audit_count = 0,
+            .provenance_start = 0,
+            .provenance_count = 0,
             .ui_surface_id = request.ui_surface_id,
             .resource_class = request.budget.effectiveResourceClass(),
             .background_allowed = request.budget.background_allowed,
@@ -242,6 +261,14 @@ pub const Runtime = struct {
         };
         self.task_cold[slot_index].userspace_image = userspace_image;
         self.task_cold[slot_index].execution_components[0] = initial_component;
+        appendProvenanceToTask(&slot.task, debug_contract.launchProvenance(
+            task_id,
+            0,
+            request.launch.image_id,
+            request.launch.signed,
+            @tagName(request.launch.boundary),
+            request.launch.bundle_id,
+        ));
         if (!self.task_owner_index.append(taskOwnerIndexKey(slot.task.owner), slot_index)) {
             native_util.impossibleByInvariant("task owner index capacity covers task slots");
         }
@@ -415,6 +442,7 @@ pub const Runtime = struct {
         cold.capability_ids[task.capability_count] = capability_id;
         cold.capability_index.insert(capability_id, task.capability_count);
         task.capability_count += 1;
+        appendProvenanceToTask(task, debug_contract.capabilityGrantProvenance(task_id, capability_id, 0));
     }
 
     pub fn hasCapability(self: *const Runtime, task_id: u64, capability_id: u64) bool {
@@ -458,6 +486,7 @@ pub const Runtime = struct {
 
             task.capability_count -= 1;
             cold.capability_ids[task.capability_count] = 0;
+            appendProvenanceToTask(task, debug_contract.capabilityRevokeProvenance(task_id, capability_id, 0));
             return true;
         }
 
@@ -490,6 +519,14 @@ pub const Runtime = struct {
         task.process_class = host.process_class;
         task.namespace_class = host.namespace_class;
         task.process_generation += 1;
+        appendProvenanceToTask(task, debug_contract.launchProvenance(
+            task_id,
+            tick,
+            task.launch.image_id,
+            task.launch.signed,
+            "service-restart",
+            task.launchBundleIdSlice(),
+        ));
         try self.audit(task_id, .{
             .kind = .service_restarted,
             .detail = @truncate(task.process_generation),
@@ -510,6 +547,33 @@ pub const Runtime = struct {
 
         cold.audit_trail[task.audit_start] = event;
         task.audit_start = (task.audit_start + 1) % MAX_AUDIT_EVENTS;
+    }
+
+    pub fn recordProvenance(self: *Runtime, task_id: u64, event: ProvenanceRecord) Error!void {
+        const task = self.find(task_id) orelse return error.TaskNotFound;
+        appendProvenanceToTask(task, event);
+    }
+
+    pub fn recordCrashReport(
+        self: *Runtime,
+        task_id: u64,
+        service_id: u64,
+        tick: u64,
+        crash_code: u32,
+        redaction_policy_version: u16,
+        reason_fingerprint: u64,
+        redacted: bool,
+    ) Error!void {
+        const task = self.find(task_id) orelse return error.TaskNotFound;
+        appendProvenanceToTask(task, debug_contract.crashReportProvenance(
+            task_id,
+            service_id,
+            tick,
+            crash_code,
+            redaction_policy_version,
+            reason_fingerprint,
+            redacted,
+        ));
     }
 
     pub fn canReserveBackgroundWork(
@@ -589,6 +653,19 @@ fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
 }
 
+fn appendProvenanceToTask(task: *TaskRecord, event: ProvenanceRecord) void {
+    const cold = taskCold(task);
+    if (task.provenance_count < MAX_TASK_PROVENANCE_EVENTS) {
+        const slot_index = (task.provenance_start + task.provenance_count) % MAX_TASK_PROVENANCE_EVENTS;
+        cold.provenance_trail[slot_index] = event;
+        task.provenance_count += 1;
+        return;
+    }
+
+    cold.provenance_trail[task.provenance_start] = event;
+    task.provenance_start = (task.provenance_start + 1) % MAX_TASK_PROVENANCE_EVENTS;
+}
+
 test "new tasks start with zero ambient authority and no capabilities" {
     var runtime = Runtime.init();
     const task = try runtime.createTask(.{
@@ -619,6 +696,9 @@ test "new tasks start with zero ambient authority and no capabilities" {
     try std.testing.expect(!task.runsAsUserspaceProcess());
     try std.testing.expect(!task.hasLoadedExecutable());
     try std.testing.expectEqualStrings("", task.launchBundleIdSlice());
+    try std.testing.expectEqual(@as(usize, 1), task.provenance_count);
+    try std.testing.expectEqual(debug_contract.ProvenanceKind.launch, task.provenanceEventAt(0).?.kind);
+    try std.testing.expectEqual(debug_contract.Decision.allowed, task.provenanceEventAt(0).?.decision);
 }
 
 test "task runtime crosses the first task slab page with indexed handles" {
@@ -667,6 +747,9 @@ test "granting and revoking capabilities updates the task table" {
     try runtime.grantCapability(task.id, 12);
     try runtime.grantCapability(task.id, 13);
     try std.testing.expectEqual(@as(usize, 3), task.capability_count);
+    try std.testing.expectEqual(@as(usize, 4), task.provenance_count);
+    try std.testing.expectEqual(debug_contract.ProvenanceKind.capability_grant, task.latestProvenanceEvent().?.kind);
+    try std.testing.expectEqual(@as(u64, 13), task.latestProvenanceEvent().?.capability_id);
     try std.testing.expectEqual(accelerator_scheduler.ResourceClass.background_light, task.resourceClass());
 
     try std.testing.expect(try runtime.revokeCapability(task.id, 12));
@@ -675,7 +758,39 @@ test "granting and revoking capabilities updates the task table" {
     try std.testing.expect(!runtime.hasCapability(task.id, 12));
     try std.testing.expect(runtime.hasCapability(task.id, 13));
     try std.testing.expectEqual(@as(u64, 13), task.capabilityIds()[1]);
+    try std.testing.expectEqual(debug_contract.ProvenanceKind.capability_revoke, task.latestProvenanceEvent().?.kind);
+    try std.testing.expectEqual(@as(u64, 12), task.latestProvenanceEvent().?.capability_id);
     try std.testing.expect(!try runtime.revokeCapability(task.id, 99));
+}
+
+test "task runtime records redacted crash report provenance" {
+    var runtime = Runtime.init();
+    const service_image = try generated_image_fixtures.storageServiceImage();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .service, .serial = 30 },
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 3_000,
+            .memory_bytes = 4096,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 8192,
+        },
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = 51,
+            .component_abi_version = 1,
+            .signed = true,
+            .bundle_id = "zigos.system.crash-provenance",
+        },
+        .userspace_image = &service_image,
+    });
+
+    try runtime.recordCrashReport(task.id, 704, 77, 0xCA11, 1, 0xFEED, true);
+    const latest = task.latestProvenanceEvent().?;
+    try std.testing.expectEqual(debug_contract.ProvenanceKind.crash_report, latest.kind);
+    try std.testing.expectEqual(@as(u64, 704), latest.service_id);
+    try std.testing.expect(std.mem.indexOf(u8, latest.detailSlice(), "redacted=yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, latest.detailSlice(), "reason_fingerprint=0xfeed") != null);
 }
 
 test "restoring a snapshot rebuilds authoritative indexes" {
@@ -701,9 +816,12 @@ test "restoring a snapshot rebuilds authoritative indexes" {
     var restored = Runtime.init();
     restored.restoreFromSnapshot(&snapshot);
 
-    try std.testing.expect(restored.find(task_id) != null);
+    const restored_task = restored.find(task_id).?;
     try std.testing.expect(restored.findAddressSpaceConst(address_space_id) != null);
     try std.testing.expect(restored.hasCapability(task_id, 91));
+    try std.testing.expectEqual(@as(usize, 2), restored_task.provenance_count);
+    try std.testing.expectEqual(debug_contract.ProvenanceKind.capability_grant, restored_task.latestProvenanceEvent().?.kind);
+    try std.testing.expectEqual(@as(u64, 91), restored_task.latestProvenanceEvent().?.capability_id);
 }
 
 test "explicit resource classes override the default task classification" {
@@ -758,6 +876,9 @@ test "userspace launch provenance is recorded for explicit image launches" {
     try std.testing.expect(task.launch.signed);
     try std.testing.expect(task.hasLoadedExecutable());
     try std.testing.expectEqualStrings("app.notes", task.launchBundleIdSlice());
+    try std.testing.expectEqual(debug_contract.ProvenanceKind.launch, task.latestProvenanceEvent().?.kind);
+    try std.testing.expectEqual(@as(u64, 44), task.latestProvenanceEvent().?.artifact_id);
+    try std.testing.expect(task.latestProvenanceEvent().?.trace_id != 0);
 }
 
 test "userspace tasks materialize executable mappings in their address spaces" {

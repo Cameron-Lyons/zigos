@@ -2,6 +2,7 @@ const std = @import("std");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
 const abi = @import("../core/abi.zig");
 const capability = @import("capability.zig");
+const debug_contract = @import("../security/debug_contract.zig");
 const device_broker = @import("device_broker.zig");
 const endpoint = @import("endpoint.zig");
 const ids = @import("../core/ids.zig");
@@ -32,6 +33,8 @@ pub const SharedMemoryCreateResult = struct {
     capability: abi.CapabilityDescriptor,
     capability_id: u64,
 };
+
+pub const AuthorityGraphEdge = debug_contract.AuthorityGraphEdge;
 
 pub const KernelTarget = union(enum) {
     none,
@@ -607,6 +610,23 @@ pub const Kernel = struct {
         }
     }
 
+    pub fn taskAuthorityGraph(
+        self: *Kernel,
+        task_id: u64,
+        now_ticks: u64,
+        output: []AuthorityGraphEdge,
+    ) Error![]AuthorityGraphEdge {
+        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
+        var count: usize = 0;
+        for (task.capabilityIds()) |capability_id| {
+            if (count >= output.len) break;
+            const owned = self.capability_table.query(capability_id) orelse continue;
+            output[count] = debug_contract.authorityGraphEdge(task_id, owned, now_ticks);
+            count += 1;
+        }
+        return output[0..count];
+    }
+
     fn requireCapability(
         self: *Kernel,
         capability_id: u64,
@@ -1174,6 +1194,21 @@ test "capability mint query revoke and task termination are exposed by the nativ
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100, .renewable = false },
     }, 10);
     try std.testing.expectEqual(@as(u64, 55), minted.target_id);
+
+    var graph_edges: [4]AuthorityGraphEdge = undefined;
+    const graph = try kernel.taskAuthorityGraph(target_task.id, 10, &graph_edges);
+    try std.testing.expectEqual(@as(usize, 2), graph.len);
+    var found_minted = false;
+    for (graph) |edge| {
+        if (edge.capability_id == minted.capability_id) {
+            found_minted = true;
+            try std.testing.expectEqual(capability.CapabilityTargetKind.object, edge.target_kind);
+            try std.testing.expectEqual(@as(u64, 55), edge.target_id);
+            try std.testing.expect(edge.trace_id != 0);
+            try std.testing.expect(edge.usable);
+        }
+    }
+    try std.testing.expect(found_minted);
 
     var unowned_query = testContext(.capability_query, admin_capability.id, .{ .capability = minted.capability_id });
     unowned_query.caller_task_id = target_task.id;

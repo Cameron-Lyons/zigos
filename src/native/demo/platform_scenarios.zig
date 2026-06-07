@@ -520,8 +520,6 @@ pub fn run(
     context.runtime_service.checkpoint(ux_flow_ledger_start_tick);
     context.storage_service_instance.checkpoint_enabled = true;
     context.storage_service_instance.checkpoint();
-    support.common.printBootMarker(boot_markers.task_session_ready);
-    support.common.printBootMarker(boot_markers.native_ready);
 }
 
 fn recordUxFlows(context: *support.Context, ux: *const native_ux.Controller, first_tick: u64) void {

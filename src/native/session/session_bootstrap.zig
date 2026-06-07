@@ -83,6 +83,7 @@ pub fn initializeUserspace(
     scheduler.bind(catalog, runtime, capability_table);
     if (catalog.imageCount() != 0) {
         common.printBootMarker(boot_markers.userspace_artifacts_ready);
+        common.printBootMarker(boot_markers.userspace_scheduler_ready);
     }
 }
 

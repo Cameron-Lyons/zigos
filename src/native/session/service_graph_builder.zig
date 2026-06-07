@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const component_port = @import("../kernel_api/component_port.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
@@ -58,21 +59,32 @@ pub const Builder = struct {
         const env_snapshot = graph.env;
         const state_snapshot = graph.state;
         self.service_bindings = ServiceBindings.init();
-        if (!session_service_bootstrap.bootServices(
-            &env_snapshot,
-            &state_snapshot,
-            graph.kernel_port,
-            &self.service_bindings,
-        )) {
-            return false;
-        }
+        const booted = if (builtin.target.os.tag == .freestanding)
+            session_service_bootstrap.run(
+                &env_snapshot,
+                &state_snapshot,
+                graph.kernel_port,
+                &self.service_bindings,
+            )
+        else blk: {
+            if (!session_service_bootstrap.bootServices(
+                &env_snapshot,
+                &state_snapshot,
+                graph.kernel_port,
+                &self.service_bindings,
+            )) {
+                break :blk false;
+            }
+            break :blk session_service_bootstrap.proveDriverCrashRestart(
+                &env_snapshot,
+                &state_snapshot,
+                &self.service_bindings,
+            );
+        };
+        if (!booted) return false;
         graph.env = env_snapshot;
         graph.state = state_snapshot;
         graph.service_bindings = self.service_bindings;
-        return session_service_bootstrap.proveDriverCrashRestart(
-            &graph.env,
-            &graph.state,
-            &graph.service_bindings,
-        );
+        return true;
     }
 };

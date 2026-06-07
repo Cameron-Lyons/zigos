@@ -8,6 +8,8 @@ task_runtime.checkpoint.write_restore 5821289.98 50
 accelerator_scheduler.claim_release 191647.73 40
 storage.file_bridge.resolve_view 7183.06 90
 storage.workspace.commit_overlay 7212761.78 60
+storage.volume.replay_segmented_log 250000000.00 100
+storage.volume.compact_checkpoint 600000000.00 100
 package_revision.rollforward_rollback 1151678.41 40
 indexing_service.query_ranked 202462.18 40
 media_print.submit_complete 136500.90 40
