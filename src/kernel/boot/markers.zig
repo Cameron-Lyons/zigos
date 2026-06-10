@@ -69,6 +69,7 @@ pub const permission_grant_peer_ipc_local = "ZIGOS:PERMISSION:GRANT:PEER_IPC_LOC
 pub const permission_lease_expired = "ZIGOS:PERMISSION:LEASE:EXPIRED";
 
 pub const service_boot_driver_service_network_ready = "ZIGOS:SERVICE_BOOT:DRIVER_SERVICE:NETWORK_READY";
+pub const service_boot_driver_service_storage_ready = "ZIGOS:SERVICE_BOOT:DRIVER_SERVICE:STORAGE_READY";
 pub const service_boot_service_contracts_ready = "ZIGOS:SERVICE_BOOT:SERVICE_CONTRACTS:READY";
 pub const service_boot_ipc_connect_all_ok = "ZIGOS:SERVICE_BOOT:IPC_CONNECT:ALL_OK";
 pub const service_boot_supervisor_crash_recorded = "ZIGOS:SERVICE_BOOT:SUPERVISOR:CRASH_RECORDED";

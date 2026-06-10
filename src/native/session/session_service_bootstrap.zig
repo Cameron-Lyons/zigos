@@ -512,7 +512,7 @@ fn activateDrivers(
         storage_activation_mode == .userspace_brokered_data_plane) and
         storage_volume_mod.hasAttachedDevice())
     {
-        common.printBootMarker("ZIGOS:SERVICE_BOOT:DRIVER_SERVICE:STORAGE_READY");
+        common.printBootMarker(boot_markers.service_boot_driver_service_storage_ready);
     }
 
     if (service_bootstrap.contractsReady(env.service_directory)) {
