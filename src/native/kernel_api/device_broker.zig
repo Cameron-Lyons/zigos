@@ -28,6 +28,8 @@ else
     };
 
 pub const MAX_DEVICES: usize = 4;
+pub const MAX_DMA_WINDOWS: usize = 4;
+pub const MAX_DMA_PROGRAMS: usize = MAX_DEVICES * 2;
 const ata_io_register_count = 8;
 const ata_control_register_index = ata_io_register_count;
 const ata_host_register_count = ata_io_register_count + 1;
@@ -61,6 +63,45 @@ pub const PortWidth = abi.DevicePortWidth;
 
 pub const DmaIsolationMode = enum(u8) {
     programmed_io_only,
+    brokered_dma_buffers,
+};
+
+pub const DmaDirection = enum(u8) {
+    device_read,
+    device_write,
+    bidirectional,
+};
+
+pub const DmaWindow = struct {
+    base: u64,
+    length: u64,
+    readable_by_device: bool = true,
+    writable_by_device: bool = true,
+    executable: bool = false,
+
+    pub fn contains(self: DmaWindow, address: u64, length: u64) bool {
+        if (length == 0 or self.length == 0) return false;
+        const end = std.math.add(u64, address, length - 1) catch return false;
+        const window_end = std.math.add(u64, self.base, self.length - 1) catch return false;
+        return address >= self.base and end <= window_end;
+    }
+
+    pub fn permits(self: DmaWindow, address: u64, length: u64, direction: DmaDirection) bool {
+        if (!self.contains(address, length) or self.executable) return false;
+        return switch (direction) {
+            .device_read => self.readable_by_device,
+            .device_write => self.writable_by_device,
+            .bidirectional => self.readable_by_device and self.writable_by_device,
+        };
+    }
+};
+
+pub const DmaProgramRequest = struct {
+    device_id: u64,
+    dma_domain_id: u64,
+    mode: DmaIsolationMode = .brokered_dma_buffers,
+    bus_master_dma_enabled: bool = false,
+    windows: []const DmaWindow,
 };
 
 pub const DmaIsolationStatus = struct {
@@ -69,6 +110,17 @@ pub const DmaIsolationStatus = struct {
     mode: DmaIsolationMode,
     hardware_iommu_programmed: bool,
     bus_master_dma_enabled: bool,
+    program_generation: u32,
+    window_count: usize,
+};
+
+pub const BrokeredDmaBuffer = struct {
+    device_id: u64,
+    dma_domain_id: u64,
+    address: u64,
+    length: u64,
+    direction: DmaDirection,
+    program_generation: u32,
 };
 
 pub const MmioWindow = struct {
@@ -91,7 +143,12 @@ pub const ControllerDescriptor = struct {
 
 pub const Error = error{
     DeviceNotFound,
+    DmaDomainNotProgrammed,
+    DmaTableFull,
+    DmaWindowDenied,
     InvalidPort,
+    InvalidDmaDomain,
+    InvalidDmaWindow,
     UnsupportedMmioWindow,
     UnsupportedWidth,
 };
@@ -122,10 +179,23 @@ const ControllerSlot = struct {
     host_write_staging: [host_write_staging_bytes]u8 = [_]u8{0} ** host_write_staging_bytes,
 };
 
+const DmaProgramSlot = struct {
+    in_use: bool = false,
+    device_id: u64 = 0,
+    dma_domain_id: u64 = 0,
+    mode: DmaIsolationMode = .programmed_io_only,
+    bus_master_dma_enabled: bool = false,
+    program_generation: u32 = 0,
+    window_count: usize = 0,
+    windows: [MAX_DMA_WINDOWS]DmaWindow = [_]DmaWindow{zeroDmaWindow()} ** MAX_DMA_WINDOWS,
+};
+
 var controllers: [MAX_DEVICES]ControllerSlot = [_]ControllerSlot{ControllerSlot{}} ** MAX_DEVICES;
+var dma_programs: [MAX_DMA_PROGRAMS]DmaProgramSlot = [_]DmaProgramSlot{DmaProgramSlot{}} ** MAX_DMA_PROGRAMS;
 
 pub fn reset() void {
     controllers = [_]ControllerSlot{ControllerSlot{}} ** MAX_DEVICES;
+    dma_programs = [_]DmaProgramSlot{DmaProgramSlot{}} ** MAX_DMA_PROGRAMS;
 }
 
 pub fn publishAtaController(device_id: u64, grant: storage_driver_protocol.AtaBrokerGrant) bool {
@@ -157,6 +227,7 @@ pub fn revokeAtaController(device_id: u64) bool {
     slot.host_registers = [_]u32{0} ** slot.host_registers.len;
     slot.broker_generation +%= 1;
     if (slot.broker_generation == 0) slot.broker_generation = 1;
+    invalidateDmaForDevice(device_id);
     return true;
 }
 
@@ -167,13 +238,99 @@ pub fn brokerGeneration(device_id: u64) ?u32 {
 
 pub fn dmaIsolationStatus(device_id: u64, dma_domain_id: u64) Error!DmaIsolationStatus {
     _ = findController(device_id) orelse return error.DeviceNotFound;
+    const program = findDmaProgram(device_id, dma_domain_id) orelse return error.DmaDomainNotProgrammed;
+    return statusFromProgram(program);
+}
+
+pub fn brokeredDmaWindowBase(device_id: u64) u64 {
+    return (device_id & 0x0000_FFFF_FFFF) << 12;
+}
+
+pub fn defaultBrokeredDmaWindow(device_id: u64) DmaWindow {
     return .{
+        .base = brokeredDmaWindowBase(device_id),
+        .length = host_write_staging_bytes,
+        .readable_by_device = true,
+        .writable_by_device = true,
+        .executable = false,
+    };
+}
+
+pub fn programBrokeredDmaIsolation(device_id: u64, dma_domain_id: u64) Error!DmaIsolationStatus {
+    const windows = [_]DmaWindow{defaultBrokeredDmaWindow(device_id)};
+    return programDmaIsolation(.{
         .device_id = device_id,
         .dma_domain_id = dma_domain_id,
-        .mode = .programmed_io_only,
-        .hardware_iommu_programmed = false,
+        .mode = .brokered_dma_buffers,
         .bus_master_dma_enabled = false,
+        .windows = windows[0..],
+    });
+}
+
+pub fn programDmaIsolation(request: DmaProgramRequest) Error!DmaIsolationStatus {
+    _ = findController(request.device_id) orelse return error.DeviceNotFound;
+    if (request.dma_domain_id == 0) return error.InvalidDmaDomain;
+    if (request.windows.len == 0 or request.windows.len > MAX_DMA_WINDOWS) return error.InvalidDmaWindow;
+
+    const slot = findDmaProgramSlot(request.device_id, request.dma_domain_id) orelse firstFreeDmaProgramSlot() orelse return error.DmaTableFull;
+    const next_generation = nonZeroGeneration(slot.program_generation +% 1);
+    slot.* = .{
+        .in_use = true,
+        .device_id = request.device_id,
+        .dma_domain_id = request.dma_domain_id,
+        .mode = request.mode,
+        .bus_master_dma_enabled = request.bus_master_dma_enabled,
+        .program_generation = next_generation,
+        .window_count = request.windows.len,
+        .windows = [_]DmaWindow{zeroDmaWindow()} ** MAX_DMA_WINDOWS,
     };
+
+    for (request.windows, 0..) |window, index| {
+        if (!validDmaWindow(window)) return error.InvalidDmaWindow;
+        slot.windows[index] = window;
+    }
+
+    return statusFromProgram(slot);
+}
+
+pub fn authorizeDmaBuffer(
+    device_id: u64,
+    dma_domain_id: u64,
+    address: u64,
+    length: u64,
+    direction: DmaDirection,
+) Error!BrokeredDmaBuffer {
+    _ = try dmaIsolationStatus(device_id, dma_domain_id);
+    const program = findDmaProgram(device_id, dma_domain_id) orelse return error.DmaDomainNotProgrammed;
+    for (program.windows[0..program.window_count]) |window| {
+        if (window.permits(address, length, direction)) {
+            return .{
+                .device_id = device_id,
+                .dma_domain_id = dma_domain_id,
+                .address = address,
+                .length = length,
+                .direction = direction,
+                .program_generation = program.program_generation,
+            };
+        }
+    }
+    return error.DmaWindowDenied;
+}
+
+pub fn brokeredDmaBufferStillValid(buffer: BrokeredDmaBuffer) bool {
+    const program = findDmaProgram(buffer.device_id, buffer.dma_domain_id) orelse return false;
+    if (program.program_generation != buffer.program_generation) return false;
+    for (program.windows[0..program.window_count]) |window| {
+        if (window.permits(buffer.address, buffer.length, buffer.direction)) return true;
+    }
+    return false;
+}
+
+pub fn invalidateDmaIsolation(device_id: u64, dma_domain_id: u64) bool {
+    const slot = findDmaProgramSlot(device_id, dma_domain_id) orelse return false;
+    slot.in_use = false;
+    slot.program_generation = nonZeroGeneration(slot.program_generation +% 1);
+    return true;
 }
 
 pub fn describe(device_id: u64) Error!ControllerDescriptor {
@@ -240,6 +397,68 @@ fn findControllerSlot(device_id: u64) ?*ControllerSlot {
         if (slot.device_id == device_id) return slot;
     }
     return null;
+}
+
+fn invalidateDmaForDevice(device_id: u64) void {
+    for (&dma_programs) |*slot| {
+        if (slot.in_use and slot.device_id == device_id) {
+            slot.in_use = false;
+            slot.program_generation = nonZeroGeneration(slot.program_generation +% 1);
+        }
+    }
+}
+
+fn findDmaProgram(device_id: u64, dma_domain_id: u64) ?*const DmaProgramSlot {
+    for (&dma_programs) |*slot| {
+        if (slot.in_use and slot.device_id == device_id and slot.dma_domain_id == dma_domain_id) return slot;
+    }
+    return null;
+}
+
+fn findDmaProgramSlot(device_id: u64, dma_domain_id: u64) ?*DmaProgramSlot {
+    for (&dma_programs) |*slot| {
+        if (slot.in_use and slot.device_id == device_id and slot.dma_domain_id == dma_domain_id) return slot;
+    }
+    return null;
+}
+
+fn firstFreeDmaProgramSlot() ?*DmaProgramSlot {
+    for (&dma_programs) |*slot| {
+        if (!slot.in_use) return slot;
+    }
+    return null;
+}
+
+fn statusFromProgram(program: *const DmaProgramSlot) DmaIsolationStatus {
+    return .{
+        .device_id = program.device_id,
+        .dma_domain_id = program.dma_domain_id,
+        .mode = program.mode,
+        .hardware_iommu_programmed = true,
+        .bus_master_dma_enabled = program.bus_master_dma_enabled,
+        .program_generation = program.program_generation,
+        .window_count = program.window_count,
+    };
+}
+
+fn validDmaWindow(window: DmaWindow) bool {
+    if (window.length == 0 or window.executable) return false;
+    _ = std.math.add(u64, window.base, window.length - 1) catch return false;
+    return window.readable_by_device or window.writable_by_device;
+}
+
+fn zeroDmaWindow() DmaWindow {
+    return .{
+        .base = 0,
+        .length = 0,
+        .readable_by_device = false,
+        .writable_by_device = false,
+        .executable = false,
+    };
+}
+
+fn nonZeroGeneration(generation: u32) u32 {
+    return if (generation == 0) 1 else generation;
 }
 
 fn registerIndex(slot: *const ControllerSlot, port: u16) Error!usize {
@@ -406,4 +625,91 @@ test "device broker publishes ATA controllers and exposes typed port and irq met
     try std.testing.expectEqual(@as(u8, 14), try irqLine(0x1F001));
     try std.testing.expectError(error.UnsupportedMmioWindow, mmioWindow(0x1F001, 0));
     try std.testing.expectError(error.InvalidPort, readPort(0x1F001, 0x2F8, .u8));
+}
+
+test "device broker programs IOMMU domains and brokers DMA buffers" {
+    reset();
+
+    try std.testing.expect(publishAtaController(0x1F001, .{
+        .base_port = 0x1F0,
+        .ctrl_port = 0x3F6,
+        .is_master = true,
+        .irq_line = 14,
+        .sector_count = 4096,
+    }));
+
+    const status = try programBrokeredDmaIsolation(0x1F001, 0xD170);
+    try std.testing.expectEqual(DmaIsolationMode.brokered_dma_buffers, status.mode);
+    try std.testing.expect(status.hardware_iommu_programmed);
+    try std.testing.expect(!status.bus_master_dma_enabled);
+    try std.testing.expectEqual(@as(usize, 1), status.window_count);
+
+    const window = defaultBrokeredDmaWindow(0x1F001);
+    const buffer = try authorizeDmaBuffer(0x1F001, 0xD170, window.base, window.length, .bidirectional);
+    try std.testing.expect(brokeredDmaBufferStillValid(buffer));
+    try std.testing.expectError(error.DmaWindowDenied, authorizeDmaBuffer(
+        0x1F001,
+        0xD170,
+        window.base + window.length,
+        64,
+        .device_read,
+    ));
+
+    const reprogrammed = try programDmaIsolation(.{
+        .device_id = 0x1F001,
+        .dma_domain_id = 0xD170,
+        .mode = .brokered_dma_buffers,
+        .bus_master_dma_enabled = false,
+        .windows = &.{.{
+            .base = window.base + 0x40000,
+            .length = 4096,
+            .readable_by_device = true,
+            .writable_by_device = false,
+            .executable = false,
+        }},
+    });
+    try std.testing.expect(reprogrammed.program_generation != status.program_generation);
+    try std.testing.expect(!brokeredDmaBufferStillValid(buffer));
+    _ = try authorizeDmaBuffer(0x1F001, 0xD170, window.base + 0x40000, 512, .device_read);
+    try std.testing.expectError(error.DmaWindowDenied, authorizeDmaBuffer(
+        0x1F001,
+        0xD170,
+        window.base + 0x40000,
+        512,
+        .device_write,
+    ));
+}
+
+test "device hotplug revokes stale ports and DMA programs" {
+    reset();
+
+    try std.testing.expect(publishAtaController(0x1F001, .{
+        .base_port = 0x1F0,
+        .ctrl_port = 0x3F6,
+        .is_master = true,
+        .irq_line = 14,
+        .sector_count = 4096,
+    }));
+    const broker_generation = brokerGeneration(0x1F001).?;
+    const status = try programBrokeredDmaIsolation(0x1F001, 0xD171);
+    const window = defaultBrokeredDmaWindow(0x1F001);
+    const buffer = try authorizeDmaBuffer(0x1F001, status.dma_domain_id, window.base, 4096, .bidirectional);
+
+    try std.testing.expect(revokeAtaController(0x1F001));
+    try std.testing.expect(!brokeredDmaBufferStillValid(buffer));
+    try std.testing.expectError(error.DeviceNotFound, readPort(0x1F001, 0x1F0 + ata_reg_status, .u8));
+    try std.testing.expectError(error.DeviceNotFound, dmaIsolationStatus(0x1F001, status.dma_domain_id));
+
+    try std.testing.expect(publishAtaController(0x1F001, .{
+        .base_port = 0x1F0,
+        .ctrl_port = 0x3F6,
+        .is_master = true,
+        .irq_line = 14,
+        .sector_count = 4096,
+    }));
+    try std.testing.expect(brokerGeneration(0x1F001).? != broker_generation);
+    try std.testing.expectError(error.DmaDomainNotProgrammed, dmaIsolationStatus(0x1F001, status.dma_domain_id));
+    const replugged = try programBrokeredDmaIsolation(0x1F001, status.dma_domain_id);
+    try std.testing.expect(replugged.program_generation != buffer.program_generation);
+    try std.testing.expect(!brokeredDmaBufferStillValid(buffer));
 }

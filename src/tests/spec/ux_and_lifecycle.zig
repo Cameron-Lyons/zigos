@@ -19,18 +19,6 @@ const storage_service = @import("../../native/storage/storage_service.zig");
 const sync_service = @import("../../native/sync/sync_service.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 
-const package_migration = struct {
-    var apply_count: usize = 0;
-
-    fn reset() void {
-        apply_count = 0;
-    }
-
-    fn apply(_: package_service.MigrationContext) anyerror!void {
-        apply_count += 1;
-    }
-};
-
 const PackageHarness = struct {
     port: package_service.PackagePort,
     authority: package_service.AuthorityContext,
@@ -337,7 +325,6 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
 }
 
 pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
-    package_migration.reset();
     var policies = policy_object.Directory.init();
     const org_policy = try policies.create(.{
         .scope = .organization,
@@ -418,7 +405,7 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
     };
     const v2_components = [_]manifest.ExecutionComponentDecl{
         .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
-        .{ .id = "notes-sync", .entry = "zigos.notes.sync", .abi = .native_sandbox },
+        .{ .id = "notes-sync", .entry = "zigos.notes.sync" },
     };
     const v2_interfaces = [_]manifest.InterfaceDecl{
         .{ .name = "zigos.workspace.document" },
@@ -446,15 +433,11 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
         .bundle = v2,
         .source_identity = "repo:corp",
         .data_schema_version = 2,
-        .migration_manifest = "schema:1->2;notes-v2-migration",
         .declared_permission_change = true,
-        .migration_applier = package_migration.apply,
     }, org_policy);
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(updated.permissions_changed);
     try std.testing.expect(updated.rollback_available);
-    try std.testing.expect(updated.migration_applied);
-    try std.testing.expectEqual(@as(usize, 1), package_migration.apply_count);
 
     const installed = packages.find("app.notes").?;
     try std.testing.expectEqual(@as(u16, 1), installed.versionMajor());

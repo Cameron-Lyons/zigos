@@ -1,6 +1,5 @@
 const std = @import("std");
 
-const compatibility_environment = @import("../../native/services/compatibility_environment.zig");
 const component_abi_schema = @import("../../native/services/component_abi_schema.zig");
 const indexing_service = @import("../../native/services/indexing_service.zig");
 const media_print_service = @import("../../native/services/media_print_service.zig");
@@ -12,7 +11,6 @@ const typed_component_abi = @import("../../native/services/typed_component_abi.z
 const userspace_service_ipc = @import("../../native/services/userspace_service_ipc.zig");
 
 test "service host tests import native service modules" {
-    std.testing.refAllDecls(compatibility_environment);
     std.testing.refAllDecls(component_abi_schema);
     std.testing.refAllDecls(indexing_service);
     std.testing.refAllDecls(media_print_service);

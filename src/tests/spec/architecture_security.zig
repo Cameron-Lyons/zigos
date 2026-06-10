@@ -2,7 +2,6 @@ const std = @import("std");
 const spec_support = @import("support.zig");
 const abi = @import("../../native/core/abi.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
-const compatibility_environment = @import("../../native/services/compatibility_environment.zig");
 const component_port = @import("../../native/kernel_api/component_port.zig");
 const contract = @import("../../native/session/contract.zig");
 const device_graph = @import("../../native/sync/device_graph.zig");
@@ -86,34 +85,19 @@ pub fn designGoalsKeepInstallsDeclarativeAndAuthorityExplicit() !void {
         .data_schema_version = 1,
     }, install_policy));
 
-    var compatibility_manager = compatibility_environment.Manager.init();
-    var legacy_bundle = manifest.BundleManifest{
-        .bundle_id = "compat.legacy.writer",
-        .display_name = "Legacy Writer",
-        .publisher = "zigos.spec",
+    const untyped_components = [_]manifest.ExecutionComponentDecl{
+        .{ .id = "writer-bridge", .entry = "app.writer.bridge", .abi = .native_sandbox },
     };
-    legacy_bundle.signature = try userspace_manifest_signing.signBundle(legacy_bundle);
-
-    try std.testing.expectError(compatibility_environment.Error.DirectHostAccessForbidden, compatibility_manager.launch(.{
-        .service_id = 141,
-        .owner = spec_support.user(41),
-        .kind = .remote_application_session,
-        .label = "Legacy Writer Remote Session",
-        .bundle = legacy_bundle,
-        .portal_only_host_access = false,
-    }));
-
-    const environment = try compatibility_manager.launch(.{
-        .service_id = 142,
-        .owner = spec_support.user(41),
-        .kind = .remote_application_session,
-        .label = "Legacy Writer Remote Session",
-        .bundle = legacy_bundle,
-        .network_class = .named_service_only,
-    });
-    try std.testing.expect(environment.isolated);
-    try std.testing.expect(environment.clearly_labeled);
-    try std.testing.expect(environment.portal_only_host_access);
+    var untyped_bundle = bundle;
+    untyped_bundle.bundle_id = "app.writer.bridge";
+    untyped_bundle.display_name = "Writer Bridge";
+    untyped_bundle.components = &untyped_components;
+    untyped_bundle.signature = try userspace_manifest_signing.signBundle(untyped_bundle);
+    try std.testing.expectError(error.UntypedApplicationComponent, package_port.install(package_authority, .{
+        .bundle = untyped_bundle,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, install_policy));
 }
 
 pub fn explicitGrantsRequireAuthority() !void {
@@ -233,7 +217,7 @@ pub fn capabilityLatticePreservesSecurityInvariants() !void {
     try invariantTargetKindsDisambiguateHashedIds();
 }
 
-pub fn kernelRemainsTypedAndIsolatesLegacy() !void {
+pub fn kernelRemainsTypedAndNativeOnly() !void {
     var registry = service_registry.Service.initWithBootstrap(.{
         .task_id = 1,
         .endpoint_id = 1,
@@ -250,18 +234,15 @@ pub fn kernelRemainsTypedAndIsolatesLegacy() !void {
     const compositor = contract.serviceDescriptor(.compositor_ui_session).?;
     const session = contract.serviceDescriptor(.session_manager).?;
     const registry_service = contract.serviceDescriptor(.service_registry).?;
-    const compatibility_service = contract.serviceDescriptor(.compatibility_portal).?;
     try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, runtime_descriptor.boundary);
     try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, session.boundary);
     try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, registry_service.boundary);
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, compatibility_service.boundary);
     try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, network.boundary);
     try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, storage.boundary);
     try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, compositor.boundary);
     try std.testing.expect(runtime_descriptor.restartable);
     try std.testing.expect(session.restartable);
     try std.testing.expect(registry_service.restartable);
-    try std.testing.expect(compatibility_service.restartable);
     try std.testing.expect(network.restartable);
     try std.testing.expect(storage.restartable);
     try std.testing.expect(compositor.restartable);
@@ -331,8 +312,8 @@ pub fn kernelRemainsTypedAndIsolatesLegacy() !void {
         .budget = spec_support.defaultBudget(false),
         .local_only = true,
         .initial_component = .{
-            .label = "legacy-launcher",
-            .entry = "app.legacy.launcher",
+            .label = "typed-launcher",
+            .entry = "app.typed.launcher",
         },
     });
     runtime_service_instance.checkpoint(12);
@@ -350,44 +331,19 @@ pub fn kernelRemainsTypedAndIsolatesLegacy() !void {
     try std.testing.expectEqual(@as(u32, 1), runtime_service_instance.restart_generation);
     try std.testing.expect(runtime.find(2) == null);
 
-    var compatibility_manager = compatibility_environment.Manager.init();
-    const compatibility_bundle = manifest.BundleManifest{
-        .bundle_id = "compat.legacy.accounting",
-        .display_name = "Legacy Accounting",
+    const typed_bundle = manifest.BundleManifest{
+        .bundle_id = "app.accounting",
+        .display_name = "Accounting",
         .publisher = "zigos.spec",
+        .provided_interfaces = &.{.{ .name = "zigos.accounting.ledger" }},
+        .components = &.{.{ .id = "accounting-ui", .entry = "app.accounting.ui" }},
+        .assets = &.{.{ .path = "assets/accounting/icon.svg", .content_type = "image/svg+xml" }},
         .signature = .{
             .format = "ed25519",
-            .signer = "zigos-spec-compat",
+            .signer = "zigos-spec-app",
         },
     };
-    const legacy_environment = try compatibility_manager.launch(.{
-        .service_id = 88,
-        .owner = spec_support.user(7),
-        .kind = .remote_application_session,
-        .label = "Legacy Accounting Remote Session",
-        .bundle = compatibility_bundle,
-        .network_class = .named_service_only,
-    });
-    try std.testing.expect(legacy_environment.isolated);
-    try std.testing.expect(legacy_environment.clearly_labeled);
-    try std.testing.expect(legacy_environment.portal_only_host_access);
-    try std.testing.expect(legacy_environment.limited_host_integration);
-    try compatibility_manager.grantPortal(legacy_environment.id, .{
-        .kind = .file_import,
-        .capability_id = 401,
-        .read_only = true,
-        .expires_at_ticks = 99,
-    });
-    try std.testing.expect(legacy_environment.hasPortal(.file_import));
-    try std.testing.expectEqual(@as(usize, 1), compatibility_manager.environmentCount());
-    try std.testing.expectError(compatibility_environment.Error.DirectHostAccessForbidden, compatibility_manager.launch(.{
-        .service_id = 89,
-        .owner = spec_support.user(7),
-        .kind = .container,
-        .label = "Uncontained Legacy Tool",
-        .bundle = compatibility_bundle,
-        .portal_only_host_access = false,
-    }));
+    try manifest.validateApplicationPackaging(typed_bundle);
 }
 
 fn invariantNoRightsEscalationThroughDeriveOrPass() !void {

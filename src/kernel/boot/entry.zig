@@ -7,6 +7,7 @@ const boot_markers = @import("markers.zig");
 const init_core = @import("init/core.zig");
 const init_devices = @import("init/devices.zig");
 const init_runtime = @import("init/runtime.zig");
+const hardware_proof = @import("../platform/hardware_proof.zig");
 
 pub fn kernelMain() void {
     x86.enableSse();
@@ -17,6 +18,7 @@ pub fn kernelMain() void {
     common.printBootProfile();
     console.print("Welcome to Zigos!\n");
     console.print("A minimal operating system written in Zig\n");
+    hardware_proof.captureEarlyBootEvidence();
 
     init_core.init();
     init_devices.init();

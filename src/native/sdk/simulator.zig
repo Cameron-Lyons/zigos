@@ -1,6 +1,5 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
-const compatibility_environment = @import("../services/compatibility_environment.zig");
 const debugger = @import("debugger.zig");
 const idl = @import("idl.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -24,18 +23,7 @@ pub const DevPackage = struct {
     signer: signing.SignerIdentity,
     source_identity: []const u8 = "sdk:local",
     data_schema_version: u32 = 1,
-    migration_manifest: []const u8 = "",
     declared_permission_change: bool = false,
-    retains_data_compatibility: bool = false,
-    migration_applier: ?package_service.MigrationApplier = null,
-};
-
-pub const CompatibilityLaunch = struct {
-    bundle: manifest.BundleManifest,
-    signer: signing.SignerIdentity,
-    label: []const u8,
-    kind: compatibility_environment.EnvironmentKind = .emulation_layer,
-    network_class: compatibility_environment.NetworkClass = .none,
 };
 
 pub const PermissionReviewResult = struct {
@@ -77,7 +65,6 @@ fn signSdkReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.Bundl
 pub const Simulator = struct {
     packages: package_service.Service = package_service.Service.init(),
     capabilities: capability.CapabilityTable = capability.CapabilityTable.init(),
-    compatibility: compatibility_environment.Manager = compatibility_environment.Manager.init(),
     runtime: task_runtime.Runtime = task_runtime.Runtime.init(),
     debug: debugger.Session = debugger.Session.init(),
     authority_capability_id: u64 = 0,
@@ -139,10 +126,7 @@ pub const Simulator = struct {
             .bundle = signed_bundle,
             .source_identity = package.source_identity,
             .data_schema_version = package.data_schema_version,
-            .migration_manifest = package.migration_manifest,
             .declared_permission_change = package.declared_permission_change,
-            .retains_data_compatibility = package.retains_data_compatibility,
-            .migration_applier = package.migration_applier,
         }, null);
         try self.debug.record(
             if (result.installed_new) .package_installed else .package_updated,
@@ -297,24 +281,6 @@ pub const Simulator = struct {
         const result = try port.remove(self.authority(), bundle_id);
         try self.debug.record(.package_removed, self.advanceClock(), bundle_id, "remove", true);
         return result;
-    }
-
-    pub fn launchCompatibility(
-        self: *Simulator,
-        request: CompatibilityLaunch,
-    ) !*compatibility_environment.EnvironmentRecord {
-        var signed_bundle = request.bundle;
-        signed_bundle.signature = try signSdkReleaseBundle(request.signer, signed_bundle);
-        const environment = try self.compatibility.launch(.{
-            .service_id = SDK_PACKAGE_SERVICE_ID,
-            .owner = SDK_ACTOR,
-            .kind = request.kind,
-            .label = request.label,
-            .bundle = signed_bundle,
-            .network_class = request.network_class,
-        });
-        try self.debug.record(.compatibility_launched, self.advanceClock(), signed_bundle.bundle_id, request.label, true);
-        return environment;
     }
 
     pub fn resolveCurrentManifest(
@@ -488,7 +454,6 @@ test "SDK simulator installs updates rolls back launches and debugs native first
         .bundle = updated_bundle,
         .signer = suite[0].signer,
         .data_schema_version = suite[0].data_schema_version,
-        .retains_data_compatibility = true,
     });
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(updated.rollback_available);
@@ -512,19 +477,4 @@ test "SDK simulator installs updates rolls back launches and debugs native first
     try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_suspended));
     try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_resumed));
     try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_stopped));
-}
-
-test "SDK simulator keeps compatibility launches isolated from native app proof path" {
-    const examples = @import("example_apps.zig");
-
-    var sim = Simulator.init();
-    const legacy = examples.legacyEditor();
-    const environment = try sim.launchCompatibility(.{
-        .bundle = legacy.bundle,
-        .signer = legacy.signer,
-        .label = "Legacy Editor",
-    });
-    try std.testing.expect(environment.isolated);
-    try std.testing.expect(environment.portal_only_host_access);
-    try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.compatibility_launched));
 }

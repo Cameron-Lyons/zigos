@@ -328,11 +328,11 @@ pub const StorageCore = struct {
     }
 
     pub fn object(self: *const Service, object_id: anytype) ?*const object_store.ObjectRecord {
-        return self.store.object(objectId(object_id));
+        return self.store.objectConst(objectId(object_id));
     }
 
     pub fn version(self: *const Service, version_id: anytype) ?*const object_store.VersionRecord {
-        return self.store.version(versionId(version_id));
+        return self.store.versionConst(versionId(version_id));
     }
 
     pub fn versionPayload(self: *const Service, version_record: *const object_store.VersionRecord) object_store.Error![]const u8 {
@@ -379,7 +379,32 @@ pub const StorageCore = struct {
     }
 
     pub fn latestVersion(self: *const Service, object_id: anytype) ?*const object_store.VersionRecord {
-        return self.store.latestVersion(objectId(object_id));
+        return self.store.latestVersionConst(objectId(object_id));
+    }
+
+    pub fn queryObjects(
+        self: *const Service,
+        query: object_store.ObjectQuery,
+        output: []object_store.ObjectQueryResult,
+    ) []const object_store.ObjectQueryResult {
+        return self.store.queryObjects(query, output);
+    }
+
+    pub fn objectHistory(
+        self: *const Service,
+        object_id: anytype,
+        output: []object_store.ObjectHistoryEntry,
+    ) object_store.Error![]const object_store.ObjectHistoryEntry {
+        return self.store.objectHistory(objectId(object_id), output);
+    }
+
+    pub fn findEntryForObject(self: *const Service, workspace_id: anytype, object_id: anytype) workspace.Error!workspace.Entry {
+        const entries_slice = try self.entries(workspace_id);
+        const key = objectId(object_id);
+        for (entries_slice) |entry| {
+            if (entry.object_id.eql(key)) return entry;
+        }
+        return error.EntryNotFound;
     }
 
     pub fn latestInsertedVersion(self: *const Service) ?*const object_store.VersionRecord {
@@ -665,6 +690,81 @@ pub const StoragePort = struct {
         };
     }
 
+    pub fn grantObjectShare(
+        self: *StoragePort,
+        capability_table: *capability.CapabilityTable,
+        authority_context: AuthorityContext,
+        workspace_id: anytype,
+        object_id: anytype,
+        request: workspace.ShareRequest,
+    ) ShareCapabilityError!SharedWorkspaceGrant {
+        const workspace_key = workspaceId(workspace_id);
+        const object_key = objectId(object_id);
+        const authority = try self.requireStorageAuthority(authority_context, workspace_key, .write);
+        if (authority.target.kind != .workspace or authority.target.id != workspace_key.raw()) return error.WorkspaceScopeViolation;
+        if (!authority.rights.has(.capability_derive)) return error.PermissionDenied;
+
+        const record = self.core.findWorkspaceRecordConst(workspace_key) orelse return error.WorkspaceNotFound;
+        if (!shareSlotAvailable(record, request.principal_id)) return error.ShareTableFull;
+        const entry = try self.core.findEntryForObject(workspace_key, object_key);
+
+        var effective_grant = try request.withObjectScope(object_key, entry.pathSlice());
+        effective_grant.expires_at_ticks = boundedGrantExpiry(
+            request.expires_at_ticks,
+            authority.lease.expires_at_ticks,
+        );
+        try self.validateShareActor(record, authority_context.principal, effective_grant, authority_context.now_ticks);
+
+        const derived = try capability_table.mintBootRoot(.{
+            .holder = effective_grant.principal_id,
+            .issuer = authority_context.principal,
+            .target = .{ .kind = .object, .id = object_key.raw() },
+            .rights = objectRightsForGrant(effective_grant),
+            .scope = .{
+                .workspace_id = workspace_key.raw(),
+                .local_only = effective_grant.network_scope == .local_only,
+                .broker_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = authority_context.now_ticks,
+                .expires_at_ticks = effective_grant.expires_at_ticks,
+            },
+            .audit = .{
+                .policy_generation = shareAuditGeneration(record, effective_grant.principal_id),
+                .source_task_id = authority_context.task_id,
+                .broker_service_id = self.core.service_id,
+                .parent_trace_id = authority.traceId(),
+            },
+        });
+        errdefer capability_table.revokeGrant(derived.id) catch {};
+
+        try self.core.shareWorkspace(workspace_key, effective_grant);
+        return .{
+            .grant = effective_grant,
+            .capability = derived,
+        };
+    }
+
+    pub fn queryObjects(
+        self: *StoragePort,
+        authority: AuthorityContext,
+        query: object_store.ObjectQuery,
+        output: []object_store.ObjectQueryResult,
+    ) AuthorityError![]const object_store.ObjectQueryResult {
+        _ = try self.requireStorageAuthority(authority, null, .read);
+        return self.core.queryObjects(query, output);
+    }
+
+    pub fn objectHistory(
+        self: *StoragePort,
+        authority: AuthorityContext,
+        object_id: anytype,
+        output: []object_store.ObjectHistoryEntry,
+    ) (AuthorityError || object_store.Error)![]const object_store.ObjectHistoryEntry {
+        _ = try self.requireObjectAuthority(authority, objectId(object_id), .read);
+        return self.core.objectHistory(object_id, output);
+    }
+
     pub fn resolve(self: *StoragePort, authority: AuthorityContext, request: file_bridge.ResolveRequest) (AuthorityError || workspace.Error)!file_bridge.View {
         const workspace_id = ids.workspace(request.workspace_id);
         const storage_authority = try self.requireStorageAuthority(authority, workspace_id, request.access);
@@ -694,6 +794,18 @@ pub const StoragePort = struct {
             .network_scope = .local_only,
             .now_ticks = authority.now_ticks,
         })) return error.PermissionDenied;
+    }
+
+    fn requireObjectAuthority(
+        self: *const StoragePort,
+        authority_context: AuthorityContext,
+        object_id: ids.ObjectId,
+        access: file_bridge.AccessMode,
+    ) AuthorityError!*const capability.Capability {
+        const authority = try self.requireStorageAuthority(authority_context, null, access);
+        if (authority.target.kind == .object and authority.target.id != object_id.raw()) return error.PermissionDenied;
+        if (authority.target.kind != .object and authority.target.kind != .service) return error.CapabilityRequired;
+        return authority;
     }
 
     fn requireStorageAuthority(
@@ -971,6 +1083,16 @@ fn workspaceRightsForGrant(grant: workspace.ShareGrant) capability.CapabilityRig
         .object_write = grant.can_write,
         .capability_derive = grant.can_admin or grant.reshare_policy != .owner_only,
         .capability_query = grant.audit_visibility != .owner_only,
+    } };
+}
+
+fn objectRightsForGrant(grant: workspace.ShareGrant) capability.CapabilityRights {
+    return .{ .object = .{
+        .object_read = grant.can_read or grant.can_write or grant.can_admin or grant.can_export,
+        .object_write = grant.can_write,
+        .capability_derive = grant.can_admin or grant.reshare_policy != .owner_only,
+        .capability_query = grant.audit_visibility != .owner_only,
+        .capability_pass = grant.reshare_policy == .grantee_allowed,
     } };
 }
 

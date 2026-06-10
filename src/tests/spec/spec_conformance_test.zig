@@ -23,7 +23,7 @@ const spec_cases = [_]SpecCase{
     .{ .run = architecture_security.designGoalsKeepInstallsDeclarativeAndAuthorityExplicit },
     .{ .run = architecture_security.explicitGrantsRequireAuthority },
     .{ .run = architecture_security.capabilityLatticePreservesSecurityInvariants },
-    .{ .run = architecture_security.kernelRemainsTypedAndIsolatesLegacy },
+    .{ .run = architecture_security.kernelRemainsTypedAndNativeOnly },
     .{ .run = architecture_security.kernelMediatedLaunchesCarryUserspaceProvenance },
     .{ .run = architecture_security.modeledKernelClaimsHaveHardEnforcementProofs },
     .{ .run = drivers_storage_sync.publishedDriversActivateScopedTransports },
@@ -35,11 +35,11 @@ const spec_cases = [_]SpecCase{
     .{ .run = ux_and_lifecycle.backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled },
     .{ .run = ux_and_lifecycle.taskFirstUxRecordsStructuredFlows },
     .{ .run = experience_and_policy_edges.permissionReviewsAndSharingStayScopedAndInspectable },
-    .{ .run = experience_and_policy_edges.taskViewsAndCompatibilityEnvironmentsStayExplicit },
+    .{ .run = experience_and_policy_edges.taskViewsAndNativeComponentsStayExplicit },
     .{ .run = ux_and_lifecycle.packageLifecycleStaysDeclarativeSignedAndPolicyScoped },
     .{ .run = ux_and_lifecycle.structuredServicesAndDiagnosticsStayRedacted },
     .{ .run = platform_services.attestationSecretsAndAcceleratorPolicyStayExplicit },
-    .{ .run = experience_and_policy_edges.thermalPowerAndAppUpdatesStayCompatibilityAware },
+    .{ .run = experience_and_policy_edges.thermalPowerAndAppUpdatesStayExplicit },
     .{ .run = architecture_security.principalIdentityAndAdministrativeScopeStaySplit },
     .{ .run = platform_services.failuresStayExplainableRestartableAndRedacted },
     .{ .run = ux_and_lifecycle.userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive },
@@ -49,7 +49,7 @@ fn runSpecCase(index: usize) !void {
     try spec_cases[index].run();
 }
 
-test "spec 1 keeps installs declarative privilege explicit and legacy access isolated" {
+test "spec 1 keeps installs declarative privilege explicit and app components typed" {
     try runSpecCase(0);
 }
 
@@ -61,7 +61,7 @@ test "spec 4 and 7 preserve capability lattice security invariants" {
     try runSpecCase(2);
 }
 
-test "spec 4 6.3 13 and 17 keep the kernel typed minimal and route legacy support through isolated portals" {
+test "spec 4 6.3 and 13 keep the kernel typed minimal and native-only" {
     try runSpecCase(3);
 }
 
@@ -109,7 +109,7 @@ test "spec 7.2 9.4 and 11.3 keep grants inspectable, scoped, and user-visible" {
     try runSpecCase(14);
 }
 
-test "spec 11.2 and 17.2 keep task views and compatibility environments explicit" {
+test "spec 11.2 keeps task views and native app components explicit" {
     try runSpecCase(15);
 }
 
@@ -125,7 +125,7 @@ test "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explic
     try runSpecCase(18);
 }
 
-test "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible" {
+test "spec 12.3 and 14.3 preserve responsiveness while native app updates stay explicit and reversible" {
     try runSpecCase(19);
 }
 

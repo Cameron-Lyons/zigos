@@ -380,6 +380,17 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             return self.service.reviewConflict(workspace_id, device_id, path);
         }
 
+        pub fn reviewConflictForObject(
+            self: *Self,
+            authority: AuthorityContext,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            object_id: anytype,
+        ) (AuthorityError || Error)!ConflictReviewRecord {
+            _ = try self.requireSyncAuthority(authority);
+            return self.service.reviewConflictForObject(workspace_id, device_id, object_id);
+        }
+
         pub fn resolveConflict(
             self: *Self,
             authority: AuthorityContext,
@@ -390,6 +401,18 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
         ) (AuthorityError || Error)!ConflictReviewRecord {
             _ = try self.requireSyncAuthority(authority);
             return self.service.resolveConflict(workspace_id, device_id, path, decision);
+        }
+
+        pub fn resolveConflictForObject(
+            self: *Self,
+            authority: AuthorityContext,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            object_id: anytype,
+            decision: ConflictReviewDecision,
+        ) (AuthorityError || Error)!ConflictReviewRecord {
+            _ = try self.requireSyncAuthority(authority);
+            return self.service.resolveConflictForObject(workspace_id, device_id, object_id, decision);
         }
 
         fn requireSyncAuthority(self: *Self, authority: AuthorityContext) AuthorityError!*const capability.Capability {

@@ -58,8 +58,8 @@ pub fn main(init: std.process.Init) !void {
 fn printUsage(writer: anytype) !void {
     try writer.print(
         \\usage:
-        \\  zigos-sign sign-example writer|viewer|legacy
-        \\  zigos-sign verify-example writer|viewer|legacy
+        \\  zigos-sign sign-example writer|viewer|zigos-writer|zigos-workbench|zigos-studio
+        \\  zigos-sign verify-example writer|viewer|zigos-writer|zigos-workbench|zigos-studio
         \\  zigos-sign sign-digest <label> <seed-hex-64> <digest-hex-64>
         \\  zigos-sign sign-hybrid-digest <label> <seed-hex-64> <digest-hex-64>
         \\

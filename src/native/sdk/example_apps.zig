@@ -9,7 +9,6 @@ pub const ExampleKind = enum(u8) {
     first_party_writer,
     first_party_workbench,
     first_party_studio,
-    legacy_editor,
 };
 
 pub const ExamplePackage = struct {
@@ -28,11 +27,6 @@ pub const writer_signer = signing.SignerIdentity{
 pub const viewer_signer = signing.SignerIdentity{
     .label = "example.viewer.bundle",
     .seed = [_]u8{0xA2} ** signing.SEED_BYTES,
-};
-
-pub const legacy_editor_signer = signing.SignerIdentity{
-    .label = "example.legacy.bundle",
-    .seed = [_]u8{0xA3} ** signing.SEED_BYTES,
 };
 
 pub const first_party_writer_signer = signing.SignerIdentity{
@@ -63,12 +57,6 @@ pub const viewer_idl =
     \\operation annotate 48 8
 ;
 
-pub const legacy_editor_idl =
-    \\interface compat.portal 1.0
-    \\operation open_uri 32 8
-    \\operation file_import 40 8
-;
-
 pub const first_party_writer_idl =
     \\interface zigos.writer.document 1.0
     \\operation open_workspace_document 64 16
@@ -96,7 +84,7 @@ pub const first_party_studio_idl =
 
 const first_party_writer_components = [_]manifest.ExecutionComponentDecl{
     .{ .id = "writer-ui", .entry = "app.zigos.writer.ui" },
-    .{ .id = "writer-indexer", .entry = "app.zigos.writer.indexer", .abi = .native_sandbox },
+    .{ .id = "writer-indexer", .entry = "app.zigos.writer.indexer" },
     .{ .id = "writer-export", .entry = "app.zigos.writer.export" },
 };
 
@@ -173,8 +161,8 @@ const first_party_writer_background_tasks = [_]manifest.BackgroundTaskDecl{
 
 const first_party_workbench_components = [_]manifest.ExecutionComponentDecl{
     .{ .id = "workbench-ui", .entry = "app.zigos.workbench.ui" },
-    .{ .id = "idl-compiler", .entry = "app.zigos.workbench.idl", .abi = .native_sandbox },
-    .{ .id = "sim-runner", .entry = "app.zigos.workbench.simulator", .abi = .native_sandbox },
+    .{ .id = "idl-compiler", .entry = "app.zigos.workbench.idl" },
+    .{ .id = "sim-runner", .entry = "app.zigos.workbench.simulator" },
     .{ .id = "debug-inspector", .entry = "app.zigos.workbench.debug" },
 };
 
@@ -244,8 +232,8 @@ const first_party_workbench_background_tasks = [_]manifest.BackgroundTaskDecl{
 
 const first_party_studio_components = [_]manifest.ExecutionComponentDecl{
     .{ .id = "studio-ui", .entry = "app.zigos.studio.ui" },
-    .{ .id = "capture-engine", .entry = "app.zigos.studio.capture", .abi = .native_sandbox },
-    .{ .id = "media-export", .entry = "app.zigos.studio.export", .abi = .native_sandbox },
+    .{ .id = "capture-engine", .entry = "app.zigos.studio.capture" },
+    .{ .id = "media-export", .entry = "app.zigos.studio.export" },
 };
 
 const first_party_studio_provided_interfaces = [_]manifest.InterfaceDecl{
@@ -362,18 +350,6 @@ const viewer_permissions = [_]manifest.PermissionRequest{
     },
 };
 
-const legacy_components = [_]manifest.ExecutionComponentDecl{
-    .{ .id = "legacy-editor", .entry = "compat.portal.launcher" },
-};
-
-const legacy_consumed_interfaces = [_]manifest.InterfaceDecl{
-    .{ .name = "zigos.compat.portal" },
-};
-
-const legacy_assets = [_]manifest.AssetDecl{
-    .{ .path = "assets/legacy-editor/icon.svg", .content_type = "image/svg+xml" },
-};
-
 pub fn writer() ExamplePackage {
     return .{
         .kind = .writer,
@@ -480,37 +456,16 @@ pub fn firstPartySuite() [3]ExamplePackage {
     };
 }
 
-pub fn legacyEditor() ExamplePackage {
-    return .{
-        .kind = .legacy_editor,
-        .bundle = .{
-            .bundle_id = "compat.example.legacy-editor",
-            .display_name = "Legacy Editor",
-            .publisher = "Example Software",
-            .provided_interfaces = &.{},
-            .consumed_interfaces = &legacy_consumed_interfaces,
-            .components = &legacy_components,
-            .assets = &legacy_assets,
-            .requested_permissions = &.{},
-            .update_channel = .pinned,
-        },
-        .signer = legacy_editor_signer,
-        .data_schema_version = 1,
-        .idl_source = legacy_editor_idl,
-    };
-}
-
 pub fn byName(name: []const u8) ?ExamplePackage {
     if (std.mem.eql(u8, name, "writer")) return writer();
     if (std.mem.eql(u8, name, "viewer")) return viewer();
     if (std.mem.eql(u8, name, "zigos-writer") or std.mem.eql(u8, name, "first-party-writer")) return firstPartyWriter();
     if (std.mem.eql(u8, name, "zigos-workbench") or std.mem.eql(u8, name, "workbench")) return firstPartyWorkbench();
     if (std.mem.eql(u8, name, "zigos-studio") or std.mem.eql(u8, name, "studio")) return firstPartyStudio();
-    if (std.mem.eql(u8, name, "legacy") or std.mem.eql(u8, name, "legacy-editor")) return legacyEditor();
     return null;
 }
 
-test "example apps are complete app or compatibility manifests" {
+test "example apps are complete signed typed app manifests" {
     const first_party = firstPartySuite();
     const packages = [_]ExamplePackage{
         writer(),
@@ -518,16 +473,18 @@ test "example apps are complete app or compatibility manifests" {
         first_party[0],
         first_party[1],
         first_party[2],
-        legacyEditor(),
     };
     for (packages) |package| {
         try manifest.validate(package.bundle);
         try manifest.validateApplicationPackaging(package.bundle);
         try std.testing.expect(package.idl_source.len != 0);
+        for (package.bundle.components) |component| {
+            try std.testing.expectEqual(manifest.ComponentAbi.typed_component_v1, component.abi);
+        }
     }
 }
 
-test "first party apps prove native app platform surfaces without compatibility portals" {
+test "first party apps prove signed typed native app platform surfaces" {
     for (firstPartySuite()) |package| {
         try std.testing.expect(!std.mem.startsWith(u8, package.bundle.bundle_id, "compat."));
         try std.testing.expect(package.bundle.components.len >= 3);

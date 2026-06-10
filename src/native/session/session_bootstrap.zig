@@ -31,7 +31,6 @@ pub const Principals = struct {
     sync_service: principal.PrincipalId,
     media_service: principal.PrincipalId,
     task_runtime_service: principal.PrincipalId,
-    compatibility_service: principal.PrincipalId,
 };
 
 pub const CoreServices = struct {
@@ -40,7 +39,6 @@ pub const CoreServices = struct {
     policy_service: *supervisor_mod.ServiceRecord,
     session: *supervisor_mod.ServiceRecord,
     review_service_record: *supervisor_mod.ServiceRecord,
-    compatibility_service: *supervisor_mod.ServiceRecord,
     network_service: *supervisor_mod.ServiceRecord,
     compositor_service: *supervisor_mod.ServiceRecord,
     storage_service: *supervisor_mod.ServiceRecord,
@@ -68,7 +66,6 @@ pub fn principals() Principals {
         .sync_service = .{ .kind = .service, .serial = 8 },
         .media_service = .{ .kind = .service, .serial = 9 },
         .task_runtime_service = .{ .kind = .service, .serial = 10 },
-        .compatibility_service = .{ .kind = .service, .serial = 11 },
     };
 }
 
@@ -98,7 +95,6 @@ pub fn registerCoreServices(
         .policy_service = try supervisor.register(.policy_mediation, ids.policy_authority),
         .session = try supervisor.register(.session_manager, ids.session_service),
         .review_service_record = try supervisor.register(.permission_review_ui, ids.review_service),
-        .compatibility_service = try supervisor.register(.compatibility_portal, ids.compatibility_service),
         .network_service = try supervisor.register(.network_stack, ids.network_service),
         .compositor_service = try supervisor.register(.compositor_ui_session, ids.compositor_service),
         .storage_service = try supervisor.register(.storage_object, ids.storage_service),
@@ -154,7 +150,6 @@ fn principalForOwnerKey(ids: Principals, owner_key: service_catalog.BootstrapOwn
         .sync_service => ids.sync_service,
         .media_service => ids.media_service,
         .task_runtime_service => ids.task_runtime_service,
-        .compatibility_service => ids.compatibility_service,
     };
 }
 
@@ -165,7 +160,6 @@ fn serviceRecordForKey(services: CoreServices, record_key: service_catalog.Boots
         .policy_service => services.policy_service,
         .session => services.session,
         .review_service_record => services.review_service_record,
-        .compatibility_service => services.compatibility_service,
         .network_service => services.network_service,
         .compositor_service => services.compositor_service,
         .storage_service => services.storage_service,

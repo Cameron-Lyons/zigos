@@ -5,7 +5,6 @@ const compositor_session = @import("../platform/compositor_session.zig");
 const driver_runtime = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
-const manifest = @import("../policy/manifest.zig");
 const native_service_registry = @import("../services/service_registry.zig");
 const package_service = @import("../services/package_service.zig");
 const storage_service = @import("../storage/storage_service.zig");
@@ -95,10 +94,6 @@ pub const testing = struct {
 
     pub fn updateLedgerPtr() *event_ledger.Ledger {
         return default_manager.updateLedgerPtr();
-    }
-
-    pub fn compatibilityPortalInterface() manifest.InterfaceDecl {
-        return default_manager.compatibilityPortalInterface();
     }
 };
 

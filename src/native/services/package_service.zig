@@ -32,8 +32,6 @@ pub const MAX_SIGNATURE_SIGNER_BYTES = model.MAX_SIGNATURE_SIGNER_BYTES;
 pub const InstallRequest = model.InstallRequest;
 pub const InstallResult = model.InstallResult;
 pub const RemoveResult = model.RemoveResult;
-pub const MigrationContext = model.MigrationContext;
-pub const MigrationApplier = model.MigrationApplier;
 pub const StoredComponent = model.StoredComponent;
 pub const StoredAsset = model.StoredAsset;
 pub const LaunchPlan = model.LaunchPlan;
@@ -55,12 +53,9 @@ pub const Error = bundle_ops.Error || error{
     InvalidManifestSignature,
     UntrustedManifestSigner,
     PublisherKeyRevoked,
-    MigrationManifestRequired,
-    MigrationHandlerRequired,
-    MigrationApplyFailed,
-    InvalidMigrationManifest,
     NoRollbackVersion,
     PermissionChangeUndeclared,
+    SchemaChangeRequiresExplicitVersion,
 };
 
 pub const digestBundle = bundle_digest.digestBundle;
@@ -115,7 +110,7 @@ pub const Service = struct {
     ) Error!InstallResult {
         try manifest.validate(request.bundle);
         try manifest.validateApplicationPackaging(request.bundle);
-        try bundle_ops.validateInstallTarget(InstalledBundle, request.bundle, request.migration_manifest);
+        try bundle_ops.validateInstallTarget(InstalledBundle, request.bundle);
         const digest = bundle_digest.digestBundle(request.bundle);
         if (!signing.verifyWithDefaultRegistry(request.bundle.signature, &digest)) {
             return error.InvalidManifestSignature;
@@ -139,32 +134,11 @@ pub const Service = struct {
             const active_revision = bundle.activeRevision();
             const permissions_changed = !std.mem.eql(u8, &active_revision.permission_digest, &permission_digest);
             const schema_changed = request.data_schema_version != active_revision.schema_version;
-            var migration_applied = false;
             if (permissions_changed and !request.declared_permission_change) {
                 return error.PermissionChangeUndeclared;
             }
-            if (schema_changed and request.migration_manifest.len == 0 and !request.retains_data_compatibility) {
-                return error.MigrationManifestRequired;
-            }
-            if (request.migration_manifest.len != 0) {
-                try bundle_digest.validateMigrationManifest(
-                    Error,
-                    request.migration_manifest,
-                    active_revision.schema_version,
-                    request.data_schema_version,
-                );
-                const migration_applier = request.migration_applier orelse return error.MigrationHandlerRequired;
-                migration_applier(.{
-                    .bundle_id = request.bundle.bundle_id,
-                    .from_schema_version = active_revision.schema_version,
-                    .to_schema_version = request.data_schema_version,
-                    .migration_manifest = request.migration_manifest,
-                    .previous_version_major = active_revision.version_major,
-                    .previous_version_minor = active_revision.version_minor,
-                    .next_version_major = request.bundle.version_major,
-                    .next_version_minor = request.bundle.version_minor,
-                }) catch return error.MigrationApplyFailed;
-                migration_applied = true;
+            if (schema_changed and request.bundle.version_minor == active_revision.version_minor and request.bundle.version_major == active_revision.version_major) {
+                return error.SchemaChangeRequiresExplicitVersion;
             }
 
             try bundle_ops.installRevision(
@@ -172,7 +146,6 @@ pub const Service = struct {
                 request.bundle,
                 request.data_schema_version,
                 permission_digest,
-                request.migration_manifest,
             );
 
             return .{
@@ -180,7 +153,6 @@ pub const Service = struct {
                 .updated_existing = true,
                 .permissions_changed = permissions_changed,
                 .rollback_available = bundle.rollbackAvailable(),
-                .migration_applied = migration_applied,
             };
         }
 
@@ -194,7 +166,6 @@ pub const Service = struct {
             request.bundle,
             request.data_schema_version,
             permission_digest,
-            request.migration_manifest,
         );
         self.indexBundle(slot_index);
         return .{
@@ -202,7 +173,6 @@ pub const Service = struct {
             .updated_existing = false,
             .permissions_changed = false,
             .rollback_available = false,
-            .migration_applied = false,
         };
     }
 
@@ -216,7 +186,6 @@ pub const Service = struct {
             .updated_existing = true,
             .permissions_changed = true,
             .rollback_available = bundle.rollbackAvailable(),
-            .migration_applied = false,
         };
     }
 
@@ -414,39 +383,6 @@ fn bundleKey(bundle_id: []const u8) u64 {
     return indexed_arena.nonZeroKey(hasher.final());
 }
 
-const test_migration = struct {
-    var apply_count: usize = 0;
-    var last_context: MigrationContext = .{
-        .bundle_id = "",
-        .from_schema_version = 0,
-        .to_schema_version = 0,
-        .migration_manifest = "",
-        .previous_version_major = 0,
-        .previous_version_minor = 0,
-        .next_version_major = 0,
-        .next_version_minor = 0,
-    };
-
-    fn reset() void {
-        apply_count = 0;
-        last_context = .{
-            .bundle_id = "",
-            .from_schema_version = 0,
-            .to_schema_version = 0,
-            .migration_manifest = "",
-            .previous_version_major = 0,
-            .previous_version_minor = 0,
-            .next_version_major = 0,
-            .next_version_minor = 0,
-        };
-    }
-
-    fn apply(context: MigrationContext) anyerror!void {
-        apply_count += 1;
-        last_context = context;
-    }
-};
-
 fn trustTestPublisher(
     service: *Service,
     signer_identity: signing.SignerIdentity,
@@ -591,7 +527,6 @@ test "package port requires service authority before install update rollback and
 }
 
 test "package service enforces signed manifests policy gated sources updates rollback and remove" {
-    test_migration.reset();
     var policies = policy_object.Directory.init();
     const org_policy = try policies.create(.{
         .scope = .organization,
@@ -674,7 +609,7 @@ test "package service enforces signed manifests policy gated sources updates rol
     };
     const v2_components = [_]manifest.ExecutionComponentDecl{
         .{ .id = "notes-ui", .entry = "zigos.notes.ui" },
-        .{ .id = "notes-sync", .entry = "zigos.notes.sync", .abi = .native_sandbox },
+        .{ .id = "notes-sync", .entry = "zigos.notes.sync" },
     };
     const v2_interfaces = [_]manifest.InterfaceDecl{
         .{ .name = "zigos.workspace.document" },
@@ -705,45 +640,15 @@ test "package service enforces signed manifests policy gated sources updates rol
         .data_schema_version = 2,
     }, org_policy));
 
-    try std.testing.expectError(error.MigrationManifestRequired, service.install(.{
-        .bundle = v2,
-        .source_identity = "repo:corp",
-        .data_schema_version = 2,
-        .declared_permission_change = true,
-    }, org_policy));
-
-    try std.testing.expectError(error.InvalidMigrationManifest, service.install(.{
-        .bundle = v2,
-        .source_identity = "repo:corp",
-        .data_schema_version = 2,
-        .migration_manifest = "notes-v2-migration",
-        .declared_permission_change = true,
-    }, org_policy));
-
-    try std.testing.expectError(error.MigrationHandlerRequired, service.install(.{
-        .bundle = v2,
-        .source_identity = "repo:corp",
-        .data_schema_version = 2,
-        .migration_manifest = "schema:1->2;notes-v2-migration",
-        .declared_permission_change = true,
-    }, org_policy));
-
     const updated = try service.install(.{
         .bundle = v2,
         .source_identity = "repo:corp",
         .data_schema_version = 2,
-        .migration_manifest = "schema:1->2;notes-v2-migration",
         .declared_permission_change = true,
-        .migration_applier = test_migration.apply,
     }, org_policy);
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(updated.permissions_changed);
     try std.testing.expect(updated.rollback_available);
-    try std.testing.expect(updated.migration_applied);
-    try std.testing.expectEqual(@as(usize, 1), test_migration.apply_count);
-    try std.testing.expectEqual(@as(u32, 1), test_migration.last_context.from_schema_version);
-    try std.testing.expectEqual(@as(u32, 2), test_migration.last_context.to_schema_version);
-    try std.testing.expectEqualStrings("schema:1->2;notes-v2-migration", test_migration.last_context.migration_manifest);
 
     const installed = service.find("app.notes").?;
     try std.testing.expectEqual(@as(u16, 1), installed.versionMajor());
@@ -902,13 +807,17 @@ test "package service rejects oversized manifests instead of truncating stored m
         .source_identity = "store:zigos",
     }, null));
 
-    const long_migration_manifest = [_]u8{'m'} ** (MAX_LABEL_BYTES + 1);
     bundle.bundle_id = "app.notes";
     bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
-    try std.testing.expectError(error.MigrationManifestTooLong, service.install(.{
-        .bundle = bundle,
+    const oversized_components = [_]manifest.ExecutionComponentDecl{
+        .{ .id = long_bundle_id[0..], .entry = "zigos.notes.ui" },
+    };
+    var oversized_component_bundle = bundle;
+    oversized_component_bundle.components = &oversized_components;
+    oversized_component_bundle.signature = try signTestReleaseBundle(signer_identity, oversized_component_bundle);
+    try std.testing.expectError(error.ComponentIdTooLong, service.install(.{
+        .bundle = oversized_component_bundle,
         .source_identity = "store:zigos",
-        .migration_manifest = long_migration_manifest[0..],
     }, null));
 }
 
@@ -995,10 +904,9 @@ test "package service treats lease and target scope changes as declared permissi
     }, null);
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(updated.permissions_changed);
-    try std.testing.expect(!updated.migration_applied);
 }
 
-test "package service accepts compatible schema updates without a migration manifest" {
+test "package service requires schema changes to carry an explicit signed version" {
     var service = Service.init();
     const signer_identity = signing.SignerIdentity{
         .label = "pkg-test-compat",
@@ -1039,6 +947,14 @@ test "package service accepts compatible schema updates without a migration mani
         .data_schema_version = 1,
     }, null);
 
+    var hidden_schema_change = v1;
+    hidden_schema_change.signature = try signTestReleaseBundle(signer_identity, hidden_schema_change);
+    try std.testing.expectError(error.SchemaChangeRequiresExplicitVersion, service.install(.{
+        .bundle = hidden_schema_change,
+        .source_identity = "store:zigos",
+        .data_schema_version = 2,
+    }, null));
+
     var v2 = v1;
     v2.version_minor = 1;
     v2.signature = try signTestReleaseBundle(signer_identity, v2);
@@ -1047,10 +963,8 @@ test "package service accepts compatible schema updates without a migration mani
         .bundle = v2,
         .source_identity = "store:zigos",
         .data_schema_version = 2,
-        .retains_data_compatibility = true,
     }, null);
     try std.testing.expect(updated.updated_existing);
-    try std.testing.expect(!updated.migration_applied);
     try std.testing.expectEqual(@as(u32, 2), service.find("app.notes").?.schemaVersion());
 }
 
@@ -1158,7 +1072,7 @@ test "package service indexes rebuild after persisted slots are loaded" {
     bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
 
     service.slots[3].in_use = true;
-    try bundle_ops.installNew(&service.slots[3].bundle, bundle, 1, [_]u8{0x11} ** 32, "");
+    try bundle_ops.installNew(&service.slots[3].bundle, bundle, 1, [_]u8{0x11} ** 32);
     service.rebuildIndexes();
 
     const launch_plan = try service.buildLaunchPlan("app.notes");

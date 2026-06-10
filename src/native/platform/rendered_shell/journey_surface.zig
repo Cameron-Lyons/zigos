@@ -1,5 +1,4 @@
 const std = @import("std");
-const compatibility_environment = @import("../../services/compatibility_environment.zig");
 const compositor_session = @import("../compositor_session.zig");
 const event_ledger = @import("../event_ledger.zig");
 const ids = @import("../../core/ids.zig");
@@ -29,7 +28,6 @@ pub const JourneySurface = struct {
     package_authority: package_service.AuthorityContext,
     sync: *sync_service.SyncPort,
     sync_authority: sync_service.AuthorityContext,
-    compatibility: *compatibility_environment.Manager,
     ledger: *event_ledger.Ledger,
     config: JourneyConfig,
     task_id: u64 = 0,
@@ -62,7 +60,6 @@ pub const JourneySurface = struct {
         package_authority: package_service.AuthorityContext,
         sync: *sync_service.SyncPort,
         sync_authority: sync_service.AuthorityContext,
-        compatibility: *compatibility_environment.Manager,
         ledger: *event_ledger.Ledger,
         config: JourneyConfig,
     ) JourneySurface {
@@ -75,7 +72,6 @@ pub const JourneySurface = struct {
             .package_authority = package_authority,
             .sync = sync,
             .sync_authority = sync_authority,
-            .compatibility = compatibility,
             .ledger = ledger,
             .config = config,
             .next_ledger_flow_order = ux.flow_count,
@@ -248,7 +244,6 @@ pub const JourneySurface = struct {
             .bundle = self.config.update_bundle,
             .source_identity = self.config.source_identity,
             .data_schema_version = 1,
-            .retains_data_compatibility = true,
         }, null);
         if (!updated.updated_existing or !updated.rollback_available) return error.AppNotInstalled;
         _ = try self.ux.updateApp(self.task_id, self.config.user, self.config.bundle_id);
@@ -265,20 +260,25 @@ pub const JourneySurface = struct {
     }
 
     fn containmentDenial(self: *JourneySurface, tick: u64) !void {
-        if (self.compatibility.launch(.{
-            .service_id = 900,
-            .owner = self.config.user,
-            .kind = .container,
-            .label = "Legacy Trip Importer",
-            .bundle = self.config.install_bundle,
-            .portal_only_host_access = false,
-        })) |_| {
+        const untyped_components = [_]manifest.ExecutionComponentDecl{
+            .{ .id = "trip-importer", .entry = "app.trip.importer", .abi = .native_sandbox },
+        };
+        var denied_bundle = self.config.install_bundle;
+        denied_bundle.bundle_id = "app.trip.importer";
+        denied_bundle.display_name = "Trip Importer";
+        denied_bundle.components = &untyped_components;
+        denied_bundle.signature = .{};
+        if (self.packages.install(self.package_authority, .{
+            .bundle = denied_bundle,
+            .source_identity = self.config.source_identity,
+            .data_schema_version = 1,
+        }, null)) |_| {
             return error.ContainmentBypassAccepted;
         } else |err| switch (err) {
-            error.DirectHostAccessForbidden => {},
+            error.UntypedApplicationComponent => {},
             else => return err,
         }
-        _ = try self.ux.containmentDenial(self.task_id, self.config.user, "direct host access blocked");
+        _ = try self.ux.containmentDenial(self.task_id, self.config.user, "untyped native component blocked");
         self.containment_blocked = true;
         try self.recordPendingTaskFlows(tick);
     }

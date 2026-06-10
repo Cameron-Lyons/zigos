@@ -32,7 +32,6 @@ test "native bootstrap and service bootstrap services sit behind restartable use
     const runtime = serviceDescriptor(.task_runtime).?;
     const session = serviceDescriptor(.session_manager).?;
     const registry = serviceDescriptor(.service_registry).?;
-    const compatibility_service = serviceDescriptor(.compatibility_portal).?;
     const network = serviceDescriptor(.network_stack).?;
     const storage = serviceDescriptor(.storage_object).?;
     const policy = serviceDescriptor(.policy_mediation).?;
@@ -40,16 +39,13 @@ test "native bootstrap and service bootstrap services sit behind restartable use
     try std.testing.expectEqual(ServiceBoundary.userspace_service, runtime.boundary);
     try std.testing.expectEqual(ServiceBoundary.userspace_service, session.boundary);
     try std.testing.expectEqual(ServiceBoundary.userspace_service, registry.boundary);
-    try std.testing.expectEqual(ServiceBoundary.userspace_service, compatibility_service.boundary);
     try std.testing.expectEqual(ServiceBoundary.userspace_service, network.boundary);
     try std.testing.expectEqual(ServiceBoundary.userspace_service, storage.boundary);
     try std.testing.expectEqual(ServiceBoundary.userspace_service, policy.boundary);
     try std.testing.expect(runtime.restartable);
-    try std.testing.expect(compatibility_service.restartable);
     try std.testing.expect(runtime.isolation.namespace_isolated);
     try std.testing.expectEqual(NetworkPrivilege.unrestricted_brokered, network.isolation.network);
     try std.testing.expectEqual(StoragePrivilege.object_store_authority, storage.isolation.storage);
-    try std.testing.expectEqual(UiPrivilege.review_surface, compatibility_service.isolation.ui);
     try std.testing.expect(allowsDriverClass(.network_stack, .network_adapter));
     try std.testing.expect(allowsDriverClass(.storage_object, .storage_controller));
     try std.testing.expect(allowsDriverClass(.compositor_ui_session, .graphics_adapter));

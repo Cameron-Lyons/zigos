@@ -910,6 +910,24 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return &slot.conflict;
         }
 
+        pub fn findConflictForObject(
+            self: *Self,
+            workspace_id: anytype,
+            device_id: principal.PrincipalId,
+            object_id: anytype,
+        ) ?*ConflictRecord {
+            const workspace_key = object_store.ids.raw(workspace_id);
+            const object_key = object_store.ids.raw(object_id);
+            for (&self.state().conflicts) |*slot| {
+                if (!slot.in_use) continue;
+                if (slot.conflict.workspace_id != workspace_key) continue;
+                if (!slot.conflict.device_id.eql(device_id)) continue;
+                if (slot.conflict.object_id != object_key) continue;
+                return &slot.conflict;
+            }
+            return null;
+        }
+
         pub fn reviewConflict(
             self: *Self,
             workspace_id: u64,
@@ -918,6 +936,16 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         ) Error!ConflictReviewRecord {
             const slot = self.findConflictSlot(workspace_id, device_id, path) orelse return error.ConflictNotFound;
             return conflictReviewRecord(&slot.conflict, .keep_local, false);
+        }
+
+        pub fn reviewConflictForObject(
+            self: *Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            object_id: anytype,
+        ) Error!ConflictReviewRecord {
+            const conflict = self.findConflictForObject(workspace_id, device_id, object_id) orelse return error.ConflictNotFound;
+            return conflictReviewRecord(conflict, .keep_local, false);
         }
 
         pub fn resolveConflict(
@@ -948,6 +976,17 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             slot.* = .{};
             try self.checkpoint();
             return conflictReviewRecord(&conflict, decision, true);
+        }
+
+        pub fn resolveConflictForObject(
+            self: *Self,
+            workspace_id: u64,
+            device_id: principal.PrincipalId,
+            object_id: anytype,
+            decision: ConflictReviewDecision,
+        ) Error!ConflictReviewRecord {
+            const conflict = self.findConflictForObject(workspace_id, device_id, object_id) orelse return error.ConflictNotFound;
+            return self.resolveConflict(conflict.workspace_id, conflict.device_id, conflict.pathSlice(), decision);
         }
 
         pub fn isTrustedDevice(self: *const Self, device_id: principal.PrincipalId) bool {

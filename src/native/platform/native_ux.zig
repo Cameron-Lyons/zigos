@@ -34,6 +34,7 @@ pub const FlowKind = enum(u8) {
     sync_workspace,
     sync_conflict_review,
     containment_denial,
+    share_document,
 };
 
 pub const FlowRecord = struct {
@@ -206,6 +207,16 @@ pub const Controller = struct {
         detail: []const u8,
     ) Error!*FlowRecord {
         return self.record(.sync_conflict_review, 0, workspace_id, subject, detail, false);
+    }
+
+    pub fn shareDocument(
+        self: *Controller,
+        workspace_id: u64,
+        task_id: u64,
+        recipient: principal.PrincipalId,
+        detail: []const u8,
+    ) Error!*FlowRecord {
+        return self.record(.share_document, task_id, workspace_id, recipient, detail, true);
     }
 
     pub fn containmentDenial(

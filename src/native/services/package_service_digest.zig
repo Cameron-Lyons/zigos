@@ -1,34 +1,5 @@
-const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const manifest = @import("../policy/manifest.zig");
-
-pub fn validateMigrationManifest(
-    ErrorSet: type,
-    migration_manifest: []const u8,
-    from_schema_version: u32,
-    to_schema_version: u32,
-) ErrorSet!void {
-    if (!std.mem.startsWith(u8, migration_manifest, "schema:")) {
-        return error.InvalidMigrationManifest;
-    }
-
-    const payload = migration_manifest["schema:".len..];
-    const separator = std.mem.indexOfScalar(u8, payload, ';') orelse return error.InvalidMigrationManifest;
-    const mapping = payload[0..separator];
-    const summary = payload[separator + 1 ..];
-    if (summary.len == 0) return error.InvalidMigrationManifest;
-
-    const arrow = std.mem.indexOf(u8, mapping, "->") orelse return error.InvalidMigrationManifest;
-    const from_text = mapping[0..arrow];
-    const to_text = mapping[arrow + 2 ..];
-    if (from_text.len == 0 or to_text.len == 0) return error.InvalidMigrationManifest;
-
-    const declared_from = std.fmt.parseInt(u32, from_text, 10) catch return error.InvalidMigrationManifest;
-    const declared_to = std.fmt.parseInt(u32, to_text, 10) catch return error.InvalidMigrationManifest;
-    if (declared_from != from_schema_version or declared_to != to_schema_version) {
-        return error.InvalidMigrationManifest;
-    }
-}
 
 pub fn digestBundle(bundle: manifest.BundleManifest) [32]u8 {
     var hasher = crypto_hash.init();

@@ -90,10 +90,14 @@ const StorageRestartProbe = struct {
     old_authority_capability_id: u64 = 0,
     old_process_generation: u32 = 0,
     old_dma_domain_id: u64 = 0,
+    old_dma_domain_programmed: bool = false,
+    old_brokered_dma_buffer_ready: bool = false,
     stale_authority_rejected: bool = false,
     stale_dma_port_access_rejected: bool = false,
     stale_access_rejected: bool = false,
     rebind_observed: bool = false,
+    rebound_dma_domain_programmed: bool = false,
+    rebound_brokered_dma_buffer_ready: bool = false,
 
     fn verifyBeforeRestart(self: *@This(), service_id: u64) bool {
         var expected: [storage_volume_mod.sector_size]u8 = undefined;
@@ -111,8 +115,14 @@ const StorageRestartProbe = struct {
             self.old_process_generation = session.process_generation;
             self.old_dma_domain_id = session.dma_domain_id;
             if (self.old_authority_capability_id == 0 or self.old_process_generation == 0 or self.old_dma_domain_id == 0) return false;
+            self.old_dma_domain_programmed = storage_driver_task_mod.constrainedProgrammedIoFirstTarget(&session);
+            self.old_brokered_dma_buffer_ready = storage_driver_task_mod.brokeredDmaBufferReady(&session);
         }
         if (builtin.target.os.tag == .freestanding and self.old_session == null) return false;
+        if (builtin.target.os.tag != .freestanding and self.old_session == null) {
+            self.old_dma_domain_programmed = true;
+            self.old_brokered_dma_buffer_ready = true;
+        }
         return true;
     }
 
@@ -136,6 +146,8 @@ const StorageRestartProbe = struct {
     fn verifyReboundSession(self: *@This(), service_id: u64, driver: *const driver_service.DriverRecord) bool {
         const session = bootstrap_driver_port.activeStorageAtaSession(service_id) orelse {
             self.rebind_observed = builtin.target.os.tag != .freestanding;
+            self.rebound_dma_domain_programmed = self.rebind_observed;
+            self.rebound_brokered_dma_buffer_ready = self.rebind_observed;
             return self.rebind_observed;
         };
         if (session.client.authority_capability_id != driver.authority_capability_id) return false;
@@ -144,6 +156,9 @@ const StorageRestartProbe = struct {
         if (session.process_generation <= self.old_process_generation) return false;
         if (session.dma_domain_id != driver.dma_domain_id) return false;
         if (session.dma_domain_id == self.old_dma_domain_id) return false;
+        self.rebound_dma_domain_programmed = storage_driver_task_mod.constrainedProgrammedIoFirstTarget(&session);
+        self.rebound_brokered_dma_buffer_ready = storage_driver_task_mod.brokeredDmaBufferReady(&session);
+        if (!self.rebound_dma_domain_programmed or !self.rebound_brokered_dma_buffer_ready) return false;
         self.rebind_observed = true;
         return true;
     }
@@ -282,9 +297,6 @@ fn launchServices(
             _ = env.supervisor.recordCrash(support.serviceId(state, entry.class), entry.boot_tick, bootFailureCode(err));
             return false;
         };
-        if (entry.class == .compatibility_portal) {
-            common.printBootMarker("ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY");
-        }
     }
     return true;
 }
@@ -718,6 +730,8 @@ pub fn proveStorageDriverRestartIo(
     if (!storage_probe.stale_authority_rejected or
         !storage_probe.stale_dma_port_access_rejected or
         !storage_probe.stale_access_rejected or
+        !storage_probe.old_dma_domain_programmed or
+        !storage_probe.old_brokered_dma_buffer_ready or
         !storage_recovery.runtime_activation_observed or
         !storage_recovery.runtime_exclusive_claim or
         !expected_storage_data_plane or
@@ -728,11 +742,16 @@ pub fn proveStorageDriverRestartIo(
         _ = env.supervisor.recordCrash(state.services.storage_service.id, 83, bootFailureCode(error.MissingBootstrapLaunch));
         return false;
     }
+    common.printBootMarker(boot_markers.service_boot_storage_dma_domain_programmed);
+    common.printBootMarker(boot_markers.service_boot_storage_brokered_dma_buffer_ok);
     common.printBootMarker(boot_markers.service_boot_storage_stale_authority_rejected);
     common.printBootMarker(boot_markers.service_boot_storage_stale_dma_port_rejected);
     common.printBootMarker(boot_markers.service_boot_storage_stale_access_rejected);
 
-    if (!storage_probe.verifyReboundSession(state.services.storage_service.id, storage_driver)) {
+    if (!storage_probe.verifyReboundSession(state.services.storage_service.id, storage_driver) or
+        !storage_probe.rebound_dma_domain_programmed or
+        !storage_probe.rebound_brokered_dma_buffer_ready)
+    {
         _ = env.supervisor.recordCrash(state.services.storage_service.id, 84, bootFailureCode(error.MissingBootstrapLaunch));
         return false;
     }

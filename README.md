@@ -2,16 +2,18 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Zigos is a native-only operating system prototype written in Zig. The current
-tree builds a freestanding x86 kernel, embeds a catalog of native userspace
-service and component images, boots under QEMU with a dedicated native storage
-image, and verifies capability, service, storage, recovery, and production
-readiness behavior through Zig tests plus QEMU proof runs.
+Zigos is a native-only operating system prototype written in Zig, currently
+focused on proving one narrow daily-driver slice for notes and documents before
+trying to become a general desktop OS. The current tree builds a freestanding
+x86 kernel, embeds a catalog of native userspace service and component images,
+boots under QEMU with a dedicated native storage image, and verifies capability,
+service, storage, recovery, and production readiness behavior through Zig tests
+plus QEMU proof runs.
 
-The project is no longer organized around a POSIX shell, POSIX syscall ABI, or
-VFS-rooted userland. Compatibility is modeled as an explicit native service
-boundary, while the primary platform model is capability-first, task-scoped,
-and service-driven.
+The project is not organized around a POSIX shell, POSIX syscall ABI, or
+VFS-rooted userland. The platform model is capability-first, task-scoped,
+service-driven, and based on signed typed components with explicit capability
+requests.
 
 ## Current State
 
@@ -26,20 +28,25 @@ and service-driven.
 - The native service layer under `src/native/` contains the current principal,
   capability, syscall, task runtime, session, driver, storage, sync, policy,
   platform, and demo proof code.
+- The first daily-driver slice is Notes/docs: signed native package install,
+  workspace and document open, local permission review, object-scoped sharing,
+  local-first sync, update rollback, recovery, and package removal are exercised
+  together by the rendered-shell production journey.
 - Local-first sync is modeled as core OS behavior: trusted device graph,
   durable inbound/outbound frame queues, replay rejection, offline edits,
   explicit conflict review, object-scoped sharing, revocation enforcement, and
   two-node QEMU proof runs with separate native stores.
 - The driver restart proof now checks that storage I/O works before restart,
-  stale authority is rejected after a process-generation change, stale DMA port
-  access is rejected, a replacement storage session rebinds with a new DMA
-  domain, and storage I/O works after restart.
+  the storage driver has a programmed DMA domain and brokered DMA buffer, stale
+  authority/DMA/port access is rejected after a process-generation change, a
+  replacement storage session rebinds with a new DMA domain, and storage I/O
+  works after restart.
 - `spec/coverage.json` currently records 60 required requirements and marks all
   60 as `enforced`.
 - `spec/production_readiness.json` currently pins one first hardware target
-  (`intel-nuc11tnki5`) and tracks seven production-readiness workstreams: two
-  `prod_candidate` tracks, four `prototype` tracks, and one blocked real
-  hardware track.
+  (`intel-nuc11tnki5`) and tracks nine production-readiness workstreams: one
+  `prod_ready` track, three `prod_candidate` tracks, four `prototype` tracks,
+  and one blocked real hardware track.
 - The secure-by-design release gate is currently `blocked` on operational
   release signing: the workflow now requires hardware-backed HSM/KMS key
   custody, rotation/revocation metadata, DSSE in-toto/SLSA provenance, and a
@@ -72,8 +79,8 @@ The native layer is organized around services. Session bootstrap constructs the
 service graph, binds bootstrap capabilities, starts supervised userspace
 services, and proves service-path behavior for storage, compositor, sync,
 syscall, and driver-recovery flows. Policy, storage, sync, platform, package,
-notification, indexing, media/print, and compatibility behavior live as native
-services under `src/native/`. Userspace code under `src/userspace/` provides the
+notification, indexing, and media/print behavior live as native services under
+`src/native/`. Userspace code under `src/userspace/` provides the
 freestanding runtime and entry points for those embedded service images.
 
 Verification is part of the architecture rather than a separate afterthought.
@@ -84,15 +91,19 @@ observable boot markers.
 
 ## Design Decisions
 
-- Native-only userspace is the primary platform model. POSIX compatibility is
-  treated as an explicit service boundary, not as the organizing ABI for the
-  system.
+- Native-only userspace is the platform model. Apps are signed typed components
+  with explicit interfaces and capability requests, not compatibility-wrapped
+  foreign binaries.
+- The product path starts with one daily-driver Notes/docs slice. Storage, sync,
+  sharing, recovery, updates, and package install must become excellent there
+  before Zigos broadens into a general desktop environment.
 - Capabilities are the unit of authority. Tasks receive scoped capabilities and
   communicate through typed endpoints, component ports, shared memory, and
   service contracts instead of ambient global namespaces.
 - Services are supervised and restart-aware. Driver and service paths include
-  generation checks, authority rebinding, stale-port rejection, and recovery
-  proofs so restart behavior is modeled as a first-class lifecycle.
+  generation checks, authority rebinding, brokered DMA-buffer invalidation,
+  stale-port rejection, and recovery proofs so restart behavior is modeled as a
+  first-class lifecycle.
 - Userspace artifacts are build-time inputs to the kernel profile. The generated
   image archive and artifact manifest make boot contents explicit, measurable,
   and testable.
@@ -286,8 +297,7 @@ Shared boot marker expectations live in `src/native_smoke_markers.zig` and
 - `src/native/platform/`: measured boot, attestation, recovery, update health,
   event ledger, compositor/session UX, rendered shell, and platform signals.
 - `src/native/services/`: service registry, service authority, package service,
-  typed component ABI, notifications, indexing, media/print, and compatibility
-  service models.
+  typed component ABI, notifications, indexing, and media/print service models.
 - `src/native/demo/`: seeded scenario-world flows and demo bootstrap packages.
 - `src/userspace/`: freestanding service/component entry points, runtime, and
   linker script for embedded userspace images.

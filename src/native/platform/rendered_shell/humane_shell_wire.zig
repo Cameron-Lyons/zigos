@@ -13,6 +13,9 @@ const RESPONSE_MAGIC = [_]u8{ 'Z', 'H', 'R', '1' };
 const response_flag_permission_reviewed: u8 = 0x01;
 const response_flag_permission_denied: u8 = 0x02;
 const response_flag_recovered: u8 = 0x04;
+const response_flag_object_shared: u8 = 0x08;
+const response_flag_object_conflict_reviewed: u8 = 0x10;
+const response_flag_object_conflict_resolved: u8 = 0x20;
 
 pub fn encodeRequest(buffer: []u8, request: humane_shell.HumaneShellRequest) Error![]const u8 {
     var used: usize = 0;
@@ -51,9 +54,13 @@ pub fn encodeResponse(buffer: []u8, response: humane_shell.HumaneShellResponse) 
     try writeU64(buffer, &used, response.task_id, error.ResponseTooLarge);
     try writeU64(buffer, &used, response.active_window_id, error.ResponseTooLarge);
     try writeU64(buffer, &used, response.snapshot_id, error.ResponseTooLarge);
+    try writeU64(buffer, &used, response.selected_object_id, error.ResponseTooLarge);
+    try writeU64(buffer, &used, response.object_capability_id, error.ResponseTooLarge);
     try writeU16(buffer, &used, response.visible_window_count, error.ResponseTooLarge);
     try writeU16(buffer, &used, response.task_flow_events, error.ResponseTooLarge);
     try writeU16(buffer, &used, response.notification_events, error.ResponseTooLarge);
+    try writeU16(buffer, &used, response.object_query_count, error.ResponseTooLarge);
+    try writeU16(buffer, &used, response.object_history_count, error.ResponseTooLarge);
     return buffer[0..used];
 }
 
@@ -68,9 +75,13 @@ pub fn decodeResponse(payload: []const u8) Error!humane_shell.HumaneShellRespons
     const task_id = try readU64(payload, &cursor);
     const active_window_id = try readU64(payload, &cursor);
     const snapshot_id = try readU64(payload, &cursor);
+    const selected_object_id = try readU64(payload, &cursor);
+    const object_capability_id = try readU64(payload, &cursor);
     const visible_window_count = try readU16(payload, &cursor);
     const task_flow_events = try readU16(payload, &cursor);
     const notification_events = try readU16(payload, &cursor);
+    const object_query_count = try readU16(payload, &cursor);
+    const object_history_count = try readU16(payload, &cursor);
     if (cursor != payload.len) return error.MalformedRequest;
     return .{
         .operation = operation,
@@ -86,6 +97,13 @@ pub fn decodeResponse(payload: []const u8) Error!humane_shell.HumaneShellRespons
         .permission_denied = (flags & response_flag_permission_denied) != 0,
         .snapshot_id = snapshot_id,
         .recovered = (flags & response_flag_recovered) != 0,
+        .selected_object_id = selected_object_id,
+        .object_query_count = object_query_count,
+        .object_history_count = object_history_count,
+        .object_capability_id = object_capability_id,
+        .object_shared = (flags & response_flag_object_shared) != 0,
+        .object_conflict_reviewed = (flags & response_flag_object_conflict_reviewed) != 0,
+        .object_conflict_resolved = (flags & response_flag_object_conflict_resolved) != 0,
     };
 }
 
@@ -104,6 +122,9 @@ fn responseFlags(response: humane_shell.HumaneShellResponse) u8 {
     if (response.permission_reviewed) flags |= response_flag_permission_reviewed;
     if (response.permission_denied) flags |= response_flag_permission_denied;
     if (response.recovered) flags |= response_flag_recovered;
+    if (response.object_shared) flags |= response_flag_object_shared;
+    if (response.object_conflict_reviewed) flags |= response_flag_object_conflict_reviewed;
+    if (response.object_conflict_resolved) flags |= response_flag_object_conflict_resolved;
     return flags;
 }
 

@@ -1122,11 +1122,11 @@ test "native kernel leaves typed service registration outside the TCB" {
         },
         .local_only = true,
         .initial_component = .{
-            .label = "legacy-service",
-            .entry = "zigos.legacy.service",
+            .label = "direct-service",
+            .entry = "zigos.direct.service",
         },
     });
-    _ = try kernel.endpointCreate(testContext(.endpoint_create, authority_capability.id, .{ .task = direct_service_task.id }), direct_service_task.id, "zigos.legacy.service", .{
+    _ = try kernel.endpointCreate(testContext(.endpoint_create, authority_capability.id, .{ .task = direct_service_task.id }), direct_service_task.id, "zigos.direct.service", .{
         .local_only = true,
         .service_port = true,
     }, 5);

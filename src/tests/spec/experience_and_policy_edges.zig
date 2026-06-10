@@ -2,7 +2,6 @@ const std = @import("std");
 const spec_support = @import("support.zig");
 const accelerator_scheduler = @import("../../native/task/accelerator_scheduler.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
-const compatibility_environment = @import("../../native/services/compatibility_environment.zig");
 const compositor_session = @import("../../native/platform/compositor_session.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const package_service = @import("../../native/services/package_service.zig");
@@ -18,19 +17,6 @@ fn expectContains(haystack: []const u8, needle: []const u8) !void {
 
 fn signBundle(bundle: *manifest.BundleManifest, signer_identity: signing.SignerIdentity) !void {
     bundle.signature = try spec_support.signReleaseBundle(bundle.*, signer_identity);
-}
-
-fn expectEnvironment(
-    environment: *const compatibility_environment.EnvironmentRecord,
-    expected_kind: compatibility_environment.EnvironmentKind,
-    expected_label: []const u8,
-) !void {
-    try std.testing.expectEqual(expected_kind, environment.kind);
-    try std.testing.expect(environment.isolated);
-    try std.testing.expect(environment.clearly_labeled);
-    try std.testing.expect(environment.portal_only_host_access);
-    try std.testing.expect(environment.limited_host_integration);
-    try std.testing.expectEqualStrings(expected_label, environment.labelSlice());
 }
 
 pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
@@ -209,7 +195,7 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
     }));
 }
 
-pub fn taskViewsAndCompatibilityEnvironmentsStayExplicit() !void {
+pub fn taskViewsAndNativeComponentsStayExplicit() !void {
     var runtime = task_runtime.Runtime.init();
     const task = try runtime.createTask(.{
         .owner = spec_support.app(210),
@@ -218,8 +204,8 @@ pub fn taskViewsAndCompatibilityEnvironmentsStayExplicit() !void {
         .ui_surface_id = 21,
         .local_only = true,
         .initial_component = .{
-            .label = "legacy-workbench",
-            .entry = "app.legacy.workbench",
+            .label = "workbench",
+            .entry = "app.workbench",
         },
     });
 
@@ -247,90 +233,22 @@ pub fn taskViewsAndCompatibilityEnvironmentsStayExplicit() !void {
     try expectContains(rendered_fullscreen, "type=full_screen_task_view");
     try expectContains(rendered_fullscreen, "title=Focus Mode");
 
-    var manager = compatibility_environment.Manager.init();
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "compat.legacy.toolbox",
-        .display_name = "Legacy Toolbox",
-        .publisher = "zigos.spec",
-        .signature = .{
-            .format = "ed25519",
-            .signer = "zigos-spec-compat",
-        },
-    };
-
-    const vm = try manager.launch(.{
-        .service_id = 401,
-        .owner = spec_support.user(21),
-        .kind = .vm,
-        .label = "Legacy VM",
-        .bundle = bundle,
-        .network_class = .restricted_internet,
-    });
-    const container = try manager.launch(.{
-        .service_id = 402,
-        .owner = spec_support.user(21),
-        .kind = .container,
-        .label = "Legacy Container",
-        .bundle = bundle,
-        .network_class = .local_only,
-    });
-    const emulation = try manager.launch(.{
-        .service_id = 403,
-        .owner = spec_support.user(21),
-        .kind = .emulation_layer,
-        .label = "Legacy Emulator",
-        .bundle = bundle,
-        .network_class = .none,
-    });
-    const remote = try manager.launch(.{
-        .service_id = 404,
-        .owner = spec_support.user(21),
-        .kind = .remote_application_session,
-        .label = "Legacy Remote App",
-        .bundle = bundle,
-        .network_class = .named_service_only,
-    });
-
-    try expectEnvironment(vm, .vm, "Legacy VM");
-    try expectEnvironment(container, .container, "Legacy Container");
-    try expectEnvironment(emulation, .emulation_layer, "Legacy Emulator");
-    try expectEnvironment(remote, .remote_application_session, "Legacy Remote App");
-    try std.testing.expectEqual(@as(usize, 4), manager.environmentCount());
-
-    try manager.grantPortal(vm.id, .{
-        .kind = .file_import,
-        .capability_id = 1,
-        .expires_at_ticks = 40,
-    });
-    try manager.grantPortal(container.id, .{
-        .kind = .clipboard_bridge,
-        .capability_id = 2,
-        .read_only = false,
-        .expires_at_ticks = 50,
-    });
-    try manager.grantPortal(emulation.id, .{
-        .kind = .open_uri,
-        .capability_id = 3,
-        .expires_at_ticks = 60,
-    });
-    try manager.grantPortal(remote.id, .{
-        .kind = .collaboration_session,
-        .capability_id = 4,
-        .expires_at_ticks = 70,
-    });
-
-    try std.testing.expect(vm.hasPortal(.file_import));
-    try std.testing.expect(container.hasPortal(.clipboard_bridge));
-    try std.testing.expect(emulation.hasPortal(.open_uri));
-    try std.testing.expect(remote.hasPortal(.collaboration_session));
-    try std.testing.expectEqual(@as(usize, 2), manager.revokeExpiredPortals(55));
-    try std.testing.expect(!vm.hasPortal(.file_import));
-    try std.testing.expect(!container.hasPortal(.clipboard_bridge));
-    try std.testing.expect(emulation.hasPortal(.open_uri));
-    try std.testing.expect(remote.hasPortal(.collaboration_session));
+    const renderer = try runtime.attachComponent(task.id, .{
+        .substrate = .typed_component_abi,
+        .label = "workbench-renderer",
+        .entry = "app.workbench.renderer",
+    }, 31);
+    const indexer = try runtime.attachComponent(task.id, .{
+        .substrate = .typed_component_abi,
+        .label = "workbench-indexer",
+        .entry = "app.workbench.indexer",
+    }, 32);
+    try std.testing.expectEqual(task_runtime.ExecutionSubstrate.typed_component_abi, renderer.substrate);
+    try std.testing.expectEqual(task_runtime.ExecutionSubstrate.typed_component_abi, indexer.substrate);
+    try std.testing.expectEqual(@as(usize, 3), task.execution_component_count);
 }
 
-pub fn thermalPowerAndAppUpdatesStayCompatibilityAware() !void {
+pub fn thermalPowerAndAppUpdatesStayExplicit() !void {
     var scheduler = accelerator_scheduler.Controller.init();
     scheduler.configure(.{
         .thermal_pressure = .critical,
@@ -487,8 +405,11 @@ pub fn thermalPowerAndAppUpdatesStayCompatibilityAware() !void {
     v3.version_minor = 2;
     try signBundle(&v3, signer_identity);
 
-    try std.testing.expectError(package_service.Error.MigrationManifestRequired, package_port.install(package_authority, .{
-        .bundle = v3,
+    var hidden_schema_change = v2;
+    hidden_schema_change.version_minor = 1;
+    try signBundle(&hidden_schema_change, signer_identity);
+    try std.testing.expectError(package_service.Error.SchemaChangeRequiresExplicitVersion, package_port.install(package_authority, .{
+        .bundle = hidden_schema_change,
         .source_identity = "store:zigos",
         .data_schema_version = 2,
     }, null));
@@ -497,10 +418,8 @@ pub fn thermalPowerAndAppUpdatesStayCompatibilityAware() !void {
         .bundle = v3,
         .source_identity = "store:zigos",
         .data_schema_version = 2,
-        .retains_data_compatibility = true,
     }, null);
     try std.testing.expect(compatible.updated_existing);
-    try std.testing.expect(!compatible.migration_applied);
     try std.testing.expectEqual(@as(u32, 2), packages.find("app.notes").?.schemaVersion());
 
     _ = try package_port.rollback(package_authority, "app.notes");
