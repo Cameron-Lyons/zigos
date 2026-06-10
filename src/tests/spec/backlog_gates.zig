@@ -19,10 +19,13 @@ const kernel_apic = @import("../../kernel/platform/apic.zig");
 const kernel_data_plane_boundary = @import("../../kernel/boot/init/data_plane_boundary.zig");
 const kernel_fadt = @import("../../kernel/platform/fadt.zig");
 const kernel_framebuffer = @import("../../kernel/platform/framebuffer.zig");
+const kernel_handoff = @import("../../kernel/boot/handoff.zig");
+const kernel_hardware_proof = @import("../../kernel/platform/hardware_proof.zig");
 const kernel_ethernet = @import("../../kernel/net/ethernet.zig");
 const kernel_link_port = @import("../../kernel/net/link_port.zig");
 const kernel_nvme = @import("../../kernel/drivers/nvme.zig");
 const kernel_pci = @import("../../kernel/drivers/pci.zig");
+const kernel_smbios = @import("../../kernel/platform/smbios.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const native_app_sdk = @import("../../native/sdk/native_app_sdk.zig");
 const native_kernel = @import("../../native/kernel_api/native_kernel.zig");
@@ -230,7 +233,6 @@ pub fn componentAbiDepthGate() !void {
         .bundle = updated_writer,
         .signer = suite[0].signer,
         .data_schema_version = suite[0].data_schema_version,
-        .retains_data_compatibility = true,
     });
     _ = try sim.rollback(suite[0].bundle.bundle_id);
 
@@ -239,7 +241,6 @@ pub fn componentAbiDepthGate() !void {
     try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.package_rolled_back));
     try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.permission_review_rendered));
     try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_launched));
-    try std.testing.expectEqual(@as(usize, 0), sim.debug.countKind(.compatibility_launched));
 }
 
 pub fn indexedHotPathTablesGate() !void {
@@ -284,6 +285,40 @@ pub fn firstHardwareTargetGate() !void {
         .bar4 = 0,
         .bar5 = 0,
     }));
+    try std.testing.expect(kernel_pci.isXhciController(.{
+        .bus = 0,
+        .device = 20,
+        .function = 0,
+        .vendor_id = kernel_pci.PCI_VENDOR_INTEL,
+        .device_id = 0xA0ED,
+        .class_code = kernel_pci.PCI_CLASS_SERIAL_BUS_CONTROLLER,
+        .subclass = kernel_pci.PCI_SUBCLASS_USB,
+        .prog_if = kernel_pci.PCI_PROG_IF_XHCI,
+        .bar0 = 0,
+        .bar1 = 0,
+        .bar2 = 0,
+        .bar3 = 0,
+        .bar4 = 0,
+        .bar5 = 0,
+    }));
+    var mmap = [_]u8{0} ** 24;
+    mmap[0] = 20;
+    mmap[4] = 0;
+    mmap[5] = 0;
+    mmap[6] = 0x10;
+    mmap[12] = 0;
+    mmap[13] = 0;
+    mmap[14] = 0x20;
+    mmap[20] = 1;
+    const memory_map = try kernel_handoff.parseMemoryMapSummary(mmap[0..]);
+    try std.testing.expect(memory_map.hasUsableMemory());
+    const nuc_smbios_table = [_]u8{
+        1,   8,   1,   0,   1,   2,   0,   0,
+        'I', 'n', 't', 'e', 'l', 0,   'N', 'U',
+        'C', '1', '1', 'T', 'N', 'K', 'i', '5',
+        0,   0,
+    };
+    try std.testing.expect(kernel_smbios.tableContainsTargetSku(nuc_smbios_table[0..], 1, kernel_smbios.NUC11TNKI5_SKU));
     try std.testing.expectEqual(@as(u32, 64), (kernel_nvme.ControllerCapabilities{ .raw = (@as(u64, 63) | (@as(u64, 1) << 37)) }).maxQueueEntries());
     try intel_i225.validateRingPlan(.{
         .rx_descriptors = 256,
@@ -350,6 +385,47 @@ pub fn firstHardwareTargetGate() !void {
         .artifact_digests_captured = true,
     };
     try std.testing.expect(hardware_target.hardwareProofSatisfied(target, complete_hardware_evidence));
+
+    const composed_partial = kernel_hardware_proof.ProbeFacts{
+        .real_target_sku = true,
+        .multiboot_handoff = true,
+        .memory_map = true,
+        .framebuffer_gop = true,
+        .acpi_rsdp = true,
+        .acpi_madt = true,
+        .acpi_fadt = true,
+        .apic_timer = true,
+        .xhci_controller = true,
+        .nvme_controller = true,
+        .i225_lm_controller = true,
+    };
+    try std.testing.expect(composed_partial.uefiBootReady());
+    try std.testing.expect(composed_partial.acpiTablesReady());
+    try std.testing.expect(!kernel_hardware_proof.allSubsystemMarkersReady(composed_partial));
+    try std.testing.expect(!hardware_target.hardwareProofSatisfied(target, kernel_hardware_proof.evaluateEvidence(composed_partial)));
+
+    const composed_complete = kernel_hardware_proof.ProbeFacts{
+        .real_target_sku = true,
+        .multiboot_handoff = true,
+        .memory_map = true,
+        .framebuffer_gop = true,
+        .acpi_rsdp = true,
+        .acpi_madt = true,
+        .acpi_fadt = true,
+        .apic_timer = true,
+        .xhci_controller = true,
+        .xhci_keyboard_input = true,
+        .nvme_controller = true,
+        .i225_lm_controller = true,
+        .cold_boots = target.proof_minimums.cold_boots,
+        .warm_reboots = target.proof_minimums.warm_reboots,
+        .storage_write_read_cycles = target.proof_minimums.storage_write_read_cycles,
+        .network_frame_cycles = target.proof_minimums.network_frame_cycles,
+        .suspend_resume_cycles = target.proof_minimums.suspend_resume_cycles,
+        .crash_recovery_cycles = target.proof_minimums.crash_recovery_cycles,
+    };
+    try std.testing.expect(kernel_hardware_proof.allSubsystemMarkersReady(composed_complete));
+    try std.testing.expect(hardware_target.hardwareProofSatisfied(target, kernel_hardware_proof.evaluateEvidence(composed_complete)));
 }
 
 pub fn driverBoundaryAuditGate() !void {
@@ -459,6 +535,10 @@ fn deviceBrokerNegativeAuthorityGate() !void {
         12,
     ));
 
+    const initial_dma_program = try device_broker.programBrokeredDmaIsolation(device_id, 0xD170);
+    try std.testing.expect(initial_dma_program.hardware_iommu_programmed);
+    try std.testing.expectEqual(device_broker.DmaIsolationMode.brokered_dma_buffers, initial_dma_program.mode);
+    try std.testing.expect(!initial_dma_program.bus_master_dma_enabled);
     var brokered_session = storage_driver_task.establishAtaBootstrapSession(
         &kernel_port,
         device_id,
@@ -468,9 +548,10 @@ fn deviceBrokerNegativeAuthorityGate() !void {
         12,
     ) orelse return error.MissingBootedDriverBinding;
     try std.testing.expect(storage_driver_task.constrainedProgrammedIoFirstTarget(&brokered_session));
-    try std.testing.expectEqual(device_broker.DmaIsolationMode.programmed_io_only, brokered_session.dma_isolation.mode);
-    try std.testing.expect(!brokered_session.dma_isolation.hardware_iommu_programmed);
+    try std.testing.expectEqual(device_broker.DmaIsolationMode.brokered_dma_buffers, brokered_session.dma_isolation.mode);
+    try std.testing.expect(brokered_session.dma_isolation.hardware_iommu_programmed);
     try std.testing.expect(!brokered_session.dma_isolation.bus_master_dma_enabled);
+    try std.testing.expect(storage_driver_task.brokeredDmaBufferReady(&brokered_session));
 
     try expectBrokeredStorageSessionWriteRead(&brokered_session, 8, "broker-before-rehost", 0x62);
 
@@ -504,8 +585,10 @@ fn deviceBrokerNegativeAuthorityGate() !void {
     );
     const stale_session = brokered_session;
     try std.testing.expect(try runtime.rehostTask(driver_task.id, 13));
+    try std.testing.expect(device_broker.invalidateDmaIsolation(device_id, stale_session.dma_domain_id));
     try std.testing.expect(storage_driver_task.staleAuthorityRejectedAfterGenerationChange(&stale_session));
     try std.testing.expect(storage_driver_task.staleDmaPortAccessRejectedAfterGenerationChange(&stale_session));
+    try std.testing.expect(storage_driver_task.staleBrokeredDmaBufferRejectedAfterGenerationChange(&stale_session));
     var stale_read: [storage_volume.sector_size]u8 = undefined;
     var stale_session_copy = stale_session;
     try std.testing.expect(!storage_driver_task.readAtaBootstrapSession(&stale_session_copy, 8, stale_read[0..]));
@@ -560,6 +643,8 @@ fn deviceBrokerNegativeAuthorityGate() !void {
         100,
     );
     try runtime.grantCapability(driver_task.id, rebound_authority.id);
+    const rebound_dma_program = try device_broker.programBrokeredDmaIsolation(device_id, 0xD171);
+    try std.testing.expect(rebound_dma_program.dma_domain_id != initial_dma_program.dma_domain_id);
     const rebound_descriptor = try kernel.deviceDescribe(
         kernelContext(driver_task.id, .device_describe, rebound_authority.id, .{ .device = device_id }),
         20,
@@ -576,6 +661,7 @@ fn deviceBrokerNegativeAuthorityGate() !void {
     try std.testing.expectEqual(@as(u64, 0xD171), rebound_session.dma_domain_id);
     try std.testing.expect(rebound_session.process_generation > stale_session.process_generation);
     try std.testing.expect(storage_driver_task.constrainedProgrammedIoFirstTarget(&rebound_session));
+    try std.testing.expect(storage_driver_task.brokeredDmaBufferReady(&rebound_session));
 
     var active_io_readback: [storage_volume.sector_size]u8 = undefined;
     try storage_driver_task.readAtaBootstrapSessionChecked(&rebound_session, 10, active_io_readback[0..]);
@@ -594,6 +680,7 @@ fn deviceBrokerNegativeAuthorityGate() !void {
         error.BrokerRevoked,
         storage_driver_task.readAtaBootstrapSessionChecked(&rebound_session, 9, revoked_read[0..]),
     );
+    try std.testing.expect(!storage_driver_task.brokeredDmaBufferReady(&rebound_session));
     try std.testing.expect(device_broker.publishAtaController(device_id, ata_grant));
     var stale_broker_session = rebound_session;
     try std.testing.expectError(
@@ -601,6 +688,7 @@ fn deviceBrokerNegativeAuthorityGate() !void {
         storage_driver_task.readAtaBootstrapSessionChecked(&stale_broker_session, 9, revoked_read[0..]),
     );
 
+    _ = try device_broker.programBrokeredDmaIsolation(device_id, 0xD172);
     var republished_session = storage_driver_task.establishAtaBootstrapSession(
         &kernel_port,
         device_id,
@@ -610,6 +698,7 @@ fn deviceBrokerNegativeAuthorityGate() !void {
         21,
     ) orelse return error.MissingBootedDriverBinding;
     try std.testing.expect(republished_session.client.broker_generation != broker_generation_before_revoke);
+    try std.testing.expect(storage_driver_task.brokeredDmaBufferReady(&republished_session));
     try expectBrokeredStorageSessionWriteRead(&republished_session, 11, "broker-after-revoke", 0x84);
 }
 

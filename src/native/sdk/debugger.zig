@@ -13,7 +13,6 @@ pub const EventKind = enum(u8) {
     package_updated,
     package_rolled_back,
     package_removed,
-    compatibility_launched,
     permission_review_rendered,
     native_app_launched,
     native_app_suspended,

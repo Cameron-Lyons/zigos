@@ -177,11 +177,6 @@ pub const SessionManager = struct {
         return &self.recovery_context.diagnostic_ledger;
     }
 
-    pub fn compatibilityPortalInterface(self: *const SessionManager) manifest.InterfaceDecl {
-        _ = self;
-        return session_support.compatibility_portal_interface;
-    }
-
     pub fn kernelPort(self: *SessionManager) ?*component_port.KernelPort {
         return self.kernel_context.port();
     }

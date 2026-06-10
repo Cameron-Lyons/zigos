@@ -850,7 +850,7 @@ test "catalog rejects unsigned bundles and missing declared components for users
         },
     }));
 
-    try std.testing.expectError(error.InitialComponentAbiMismatch, catalog.register(.{
+    try std.testing.expectError(error.UntypedApplicationComponent, catalog.register(.{
         .bundle = blk: {
             var bundle = manifest.BundleManifest{
                 .bundle_id = "app.abi-mismatch",

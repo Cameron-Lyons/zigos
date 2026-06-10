@@ -13,7 +13,6 @@ storage.volume.compact_checkpoint 1200000000
 package_revision.rollforward_rollback 1500000
 indexing_service.query_ranked 300000
 media_print.submit_complete 200000
-compatibility_environment.launch_portal 50000
 event_ledger.export_redacted 1000000
 secret_store.import_handle_export 200000
 denial_explanation.render_policy_hint 50000

@@ -22,10 +22,7 @@ pub const InstallRequest = struct {
     bundle: manifest.BundleManifest,
     source_identity: []const u8,
     data_schema_version: u32 = 1,
-    migration_manifest: []const u8 = "",
     declared_permission_change: bool = false,
-    retains_data_compatibility: bool = false,
-    migration_applier: ?MigrationApplier = null,
 };
 
 pub const InstallResult = struct {
@@ -33,26 +30,12 @@ pub const InstallResult = struct {
     updated_existing: bool,
     permissions_changed: bool,
     rollback_available: bool,
-    migration_applied: bool,
 };
 
 pub const RemoveResult = struct {
     removed_existing: bool,
     removed_revision_count: usize,
 };
-
-pub const MigrationContext = struct {
-    bundle_id: []const u8,
-    from_schema_version: u32,
-    to_schema_version: u32,
-    migration_manifest: []const u8,
-    previous_version_major: u16,
-    previous_version_minor: u16,
-    next_version_major: u16,
-    next_version_minor: u16,
-};
-
-pub const MigrationApplier = *const fn (context: MigrationContext) anyerror!void;
 
 pub const StoredComponent = struct {
     id_len: usize = 0,
@@ -216,8 +199,6 @@ pub const InstalledBundle = struct {
     active_revision_slot: u8,
     rollback_revision_slot: ?u8,
     revisions: [2]BundleRevision,
-    last_migration_manifest_len: usize,
-    last_migration_manifest: [MAX_LABEL_BYTES]u8,
 
     pub fn bundleIdSlice(self: *const InstalledBundle) []const u8 {
         return self.bundle_id[0..self.bundle_id_len];
@@ -287,8 +268,6 @@ pub fn zeroBundle() InstalledBundle {
         .active_revision_slot = 0,
         .rollback_revision_slot = null,
         .revisions = [_]BundleRevision{zeroBundleRevision()} ** 2,
-        .last_migration_manifest_len = 0,
-        .last_migration_manifest = [_]u8{0} ** MAX_LABEL_BYTES,
     };
 }
 

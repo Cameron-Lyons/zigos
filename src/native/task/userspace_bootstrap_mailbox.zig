@@ -12,7 +12,6 @@ const FLAG_STORAGE_BOUNDARY: u32 = 1 << 4;
 const FLAG_NETWORK_BOUNDARY: u32 = 1 << 5;
 const FLAG_POLICY_BOUNDARY: u32 = 1 << 6;
 const FLAG_DRIVER_BOUNDARY: u32 = 1 << 7;
-const FLAG_COMPATIBILITY_BOUNDARY: u32 = 1 << 8;
 const FLAG_MMU_PROOF_PROBE: u32 = 1 << 9;
 
 const COMPONENT_CLASS_SESSION_MANAGER: u8 = 0;
@@ -47,7 +46,6 @@ pub const Detail = enum(u8) {
     ui = 6,
     background = 7,
     policy = 8,
-    compatibility = 9,
     driver = 10,
     proof = 11,
 };
@@ -95,7 +93,6 @@ pub fn classifyDetail(component_class: u8, contract_flags: u32) Detail {
     if ((contract_flags & FLAG_DRIVER_BOUNDARY) != 0) return .driver;
     if ((contract_flags & FLAG_STORAGE_BOUNDARY) != 0) return .storage;
     if ((contract_flags & FLAG_POLICY_BOUNDARY) != 0) return .policy;
-    if ((contract_flags & FLAG_COMPATIBILITY_BOUNDARY) != 0) return .compatibility;
     if ((contract_flags & FLAG_MMU_PROOF_PROBE) != 0) return .proof;
     if ((contract_flags & FLAG_OWNS_UI_SURFACE) != 0) return .ui;
     if ((contract_flags & FLAG_BACKGROUND_ELIGIBLE) != 0) return .background;

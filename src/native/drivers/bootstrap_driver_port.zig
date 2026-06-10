@@ -274,6 +274,7 @@ pub fn activateStorageBackend(
             .ata_bootstrap_bridge => {
                 const bound_kernel_port = kernel_port orelse return false;
                 if (publication.ata_session == null) {
+                    _ = device_broker.programBrokeredDmaIsolation(device_id, dma_domain_id) catch return false;
                     publication.ata_session = storage_driver_task.establishAtaBootstrapSession(
                         bound_kernel_port,
                         device_id,

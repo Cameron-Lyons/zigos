@@ -20,8 +20,9 @@ files:
 `serial.log` must include every subsystem and booted production-evidence marker
 from `nuc11tnki5-required-markers.txt` as exact lines. The booted evidence
 section covers generated userspace startup, service IPC, permission review,
-sync replication/restart, driver restart/rebind, and update rollback health
-checks from the same real hardware run. The log must also include these
+sync replication/restart, driver restart/rebind with programmed DMA-domain and
+brokered-buffer evidence, and update rollback health checks from the same real
+hardware run. The log must also include these
 metadata markers:
 
 ```text

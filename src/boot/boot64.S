@@ -1,9 +1,15 @@
 .section .multiboot
 .align 4
+.equ MULTIBOOT_MAGIC, 0x1BADB002
+.equ MULTIBOOT_FLAGS, 0x00000007
 multiboot_header:
-    .long 0x1BADB002
-    .long 0x00
-    .long -(0x1BADB002 + 0x00)
+    .long MULTIBOOT_MAGIC
+    .long MULTIBOOT_FLAGS
+    .long -(MULTIBOOT_MAGIC + MULTIBOOT_FLAGS)
+    .long 0
+    .long 0
+    .long 0
+    .long 32
 
 .section .bss
 .align 16
@@ -18,8 +24,12 @@ stack_top:
 .section .text
 .global _start
 .extern kernel_main
+.extern zigos_multiboot_magic
+.extern zigos_multiboot_info_addr
 
 _start:
+    mov %eax, zigos_multiboot_magic
+    mov %ebx, zigos_multiboot_info_addr
     mov $stack_top, %esp
     call kernel_main
     

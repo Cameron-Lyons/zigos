@@ -1,4 +1,5 @@
 const builtin = @import("builtin");
+const booted_system = @import("rendered_shell/booted_system.zig");
 const humane_shell = @import("rendered_shell/humane_shell.zig");
 const humane_shell_wire = @import("rendered_shell/humane_shell_wire.zig");
 const journey_surface = @import("rendered_shell/journey_surface.zig");
@@ -12,6 +13,13 @@ pub const Control = model.Control;
 pub const JourneyControl = model.JourneyControl;
 pub const Config = model.Config;
 pub const JourneyConfig = model.JourneyConfig;
+
+pub const BootedSystemBootPhase = booted_system.BootPhase;
+pub const BootedSystemPermissionPromptState = booted_system.PermissionPromptState;
+pub const BootedSystemInputKind = booted_system.InputKind;
+pub const BootedSystemInput = booted_system.ShellInput;
+pub const BootedSystemInputResult = booted_system.InputResult;
+pub const BootedSystem = booted_system.BootedSystem;
 
 pub const HumaneShellControl = humane_shell.HumaneShellControl;
 pub const HumaneShellKeyboardIntent = humane_shell.KeyboardIntent;

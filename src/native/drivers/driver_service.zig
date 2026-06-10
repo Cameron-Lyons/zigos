@@ -2,6 +2,7 @@ const std = @import("std");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const capability = @import("../kernel_api/capability.zig");
+const device_broker = @import("../kernel_api/device_broker.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 
@@ -189,7 +190,9 @@ pub const Directory = struct {
             return error.InvalidHotSwapBinding;
         }
         const next_generation = slot.driver.restart_generation + 1;
+        const previous_dma_domain_id = slot.driver.dma_domain_id;
         const authority = try validateSignedRequest(request);
+        _ = device_broker.invalidateDmaIsolation(slot.driver.device_id, previous_dma_domain_id);
         slot.driver = self.recordFromRequest(request, authority, next_generation);
         return &slot.driver;
     }
@@ -227,6 +230,7 @@ pub const Directory = struct {
 
     pub fn markRestarted(self: *Directory, service_id: u64) bool {
         const driver = self.findByService(service_id) orelse return false;
+        _ = device_broker.invalidateDmaIsolation(driver.device_id, driver.dma_domain_id);
         driver.restart_generation += 1;
         driver.dma_domain_id = self.allocateDmaDomainId();
         return true;

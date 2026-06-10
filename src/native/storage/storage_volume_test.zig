@@ -11,7 +11,6 @@ const loadFromImage = storage_volume.loadFromImage;
 
 test "storage volume exposes the first supported product capacity envelope" {
     const envelope = storage_volume.productCapacityEnvelope();
-    const legacy = storage_volume.legacy_demo_capacity_envelope;
 
     try std.testing.expectEqual(storage_volume.image_bytes, envelope.volume_image_bytes);
     try std.testing.expectEqual(storage_volume.required_device_sectors, envelope.required_device_sectors);
@@ -25,14 +24,6 @@ test "storage volume exposes the first supported product capacity envelope" {
     try std.testing.expectEqual(workspace.MAX_WORKSPACES, envelope.max_workspaces);
     try std.testing.expectEqual(workspace.MAX_WORKSPACE_ENTRIES, envelope.max_workspace_entries_per_workspace);
     try std.testing.expectEqual(workspace.MAX_SNAPSHOTS, envelope.max_snapshots);
-    try std.testing.expect(envelope.volume_image_bytes > legacy.volume_image_bytes);
-    try std.testing.expect(envelope.max_object_records > legacy.max_object_records);
-    try std.testing.expect(envelope.max_version_records > legacy.max_version_records);
-    try std.testing.expect(envelope.max_blob_records > legacy.max_blob_records);
-    try std.testing.expect(envelope.max_chunk_records > legacy.max_chunk_records);
-    try std.testing.expect(envelope.max_object_payload_bytes > legacy.max_object_payload_bytes);
-    try std.testing.expect(envelope.max_replay_log_records > legacy.max_replay_log_records);
-    try std.testing.expect(envelope.max_log_segments > legacy.max_log_segments);
 
     var store = object_store.Store.init();
     var workspaces = workspace.Directory.init();
@@ -45,9 +36,7 @@ test "storage quota policy rejects writes above the first supported envelope" {
     try std.testing.expectEqual(storage_volume.OverLimitWriteBehavior.reject_without_partial_persistence, policy.over_limit_write_behavior);
     try std.testing.expect(policy.persistence_error == error.NoSpaceLeft);
     try std.testing.expect(policy.retry_requires_freeing_space);
-    try std.testing.expect(policy.legacy_demo_images_loadable);
     try std.testing.expectEqual(storage_volume.productCapacityEnvelope().max_object_records, policy.envelope.max_object_records);
-    try std.testing.expectEqual(storage_volume.legacy_demo_capacity_envelope.volume_image_bytes, policy.legacy_migration_envelope.volume_image_bytes);
 
     const payload_rejection = storage_volume.quotaRejectionForUsage(.{
         .object_payload_bytes = object_store.MAX_PAYLOAD_BYTES + 1,
@@ -87,66 +76,6 @@ test "storage quota policy rejects writes above the first supported envelope" {
     const usage = storage_volume.productCapacityUsage(&store, &workspaces);
     try std.testing.expectEqual(payload.len, usage.object_payload_bytes);
     try storage_volume.ensureWithinProductCapacityEnvelope(&store, &workspaces);
-}
-
-test "storage volume migrates legacy demo-sized images into the larger product envelope" {
-    const allocator = std.testing.allocator;
-    const image = try std.testing.allocator.alloc(u8, image_bytes);
-    defer std.testing.allocator.free(image);
-    @memset(image, 0);
-
-    const store = try allocator.create(object_store.Store);
-    defer allocator.destroy(store);
-    const workspaces = try allocator.create(workspace.Directory);
-    defer allocator.destroy(workspaces);
-    store.* = object_store.Store.init();
-    workspaces.* = workspace.Directory.init();
-    const signer = signing.SignerIdentity{
-        .label = "zigos-storage-key",
-        .seed = [_]u8{0x79} ** 32,
-    };
-    _ = try store.putVersion(.{
-        .preferred_object_id = object_store.ids.object(905),
-        .object_type = .document,
-        .payload = "legacy-demo-state",
-        .metadata = try object_store.signMetadata(signer, "legacy", "text/plain", .document, "legacy-demo-state", 17),
-    });
-    _ = try saveToImage(image, store, workspaces);
-
-    const legacy_image = image[0..storage_volume.legacy_demo_capacity_envelope.volume_image_bytes];
-    const loaded_store = try allocator.create(object_store.Store);
-    defer allocator.destroy(loaded_store);
-    const loaded_workspaces = try allocator.create(workspace.Directory);
-    defer allocator.destroy(loaded_workspaces);
-    loaded_store.* = object_store.Store.init();
-    loaded_workspaces.* = workspace.Directory.init();
-    const loaded_generation = try loadFromImage(legacy_image, loaded_store, loaded_workspaces);
-    try std.testing.expectEqual(@as(u64, 1), loaded_generation);
-    try std.testing.expectEqualStrings("legacy-demo-state", try loaded_store.versionPayload(loaded_store.latestVersion(905).?));
-
-    const upgraded_image = try std.testing.allocator.alloc(u8, image_bytes);
-    defer std.testing.allocator.free(upgraded_image);
-    @memset(upgraded_image, 0);
-    @memcpy(upgraded_image[0..legacy_image.len], legacy_image);
-    const upgraded = try loaded_store.putVersion(.{
-        .preferred_object_id = object_store.ids.object(905),
-        .object_type = .document,
-        .payload = "upgraded-envelope-state",
-        .metadata = try object_store.signMetadata(signer, "legacy", "text/plain", .document, "upgraded-envelope-state", 18),
-        .parent_version_id = loaded_store.latestVersion(905).?.id,
-    });
-    const migrated_generation = try saveToImage(upgraded_image, loaded_store, loaded_workspaces);
-    try std.testing.expect(migrated_generation.generation > loaded_generation);
-
-    const migrated_store = try allocator.create(object_store.Store);
-    defer allocator.destroy(migrated_store);
-    const migrated_workspaces = try allocator.create(workspace.Directory);
-    defer allocator.destroy(migrated_workspaces);
-    migrated_store.* = object_store.Store.init();
-    migrated_workspaces.* = workspace.Directory.init();
-    _ = try loadFromImage(upgraded_image, migrated_store, migrated_workspaces);
-    try std.testing.expectEqual(upgraded.version_id, migrated_store.latestVersion(905).?.id);
-    try std.testing.expectEqualStrings("upgraded-envelope-state", try migrated_store.versionPayload(migrated_store.latestVersion(905).?));
 }
 
 test "storage volume image reloads the latest persisted state across slot generations" {

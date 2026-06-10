@@ -15,7 +15,6 @@ pub const FLAG_STORAGE_BOUNDARY: u32 = 1 << 4;
 pub const FLAG_NETWORK_BOUNDARY: u32 = 1 << 5;
 pub const FLAG_POLICY_BOUNDARY: u32 = 1 << 6;
 pub const FLAG_DRIVER_BOUNDARY: u32 = 1 << 7;
-pub const FLAG_COMPATIBILITY_BOUNDARY: u32 = 1 << 8;
 pub const FLAG_MMU_PROOF_PROBE: u32 = 1 << 9;
 
 pub const ComponentClass = enum(u8) {
@@ -226,7 +225,6 @@ pub const boot_image_specs = [_]ImageSpec{
     serviceImageSpec(.indexing_search, .service_component),
     serviceImageSpec(.sync_replication, .service_component),
     serviceImageSpec(.media_print_helpers, .service_component),
-    serviceImageSpec(.compatibility_portal, .service_component),
     .{
         .bundle_id = "zigos.system.service-client",
         .artifact_name = "userspace-service-client.elf",

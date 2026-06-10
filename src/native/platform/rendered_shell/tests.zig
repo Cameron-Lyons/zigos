@@ -1,7 +1,6 @@
 const std = @import("std");
 const abi = @import("../../core/abi.zig");
 const capability = @import("../../kernel_api/capability.zig");
-const compatibility_environment = @import("../../services/compatibility_environment.zig");
 const compositor_session = @import("../compositor_session.zig");
 const event_ledger = @import("../event_ledger.zig");
 const manifest = @import("../../policy/manifest.zig");
@@ -16,6 +15,7 @@ const storage_service = @import("../../storage/storage_service.zig");
 const sync_service = @import("../../sync/sync_service.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
 const task_runtime_service = @import("../../task/task_runtime_service.zig");
+const booted_system = @import("booted_system.zig");
 const humane_shell = @import("humane_shell.zig");
 const humane_shell_wire = @import("humane_shell_wire.zig");
 const journey_surface = @import("journey_surface.zig");
@@ -31,6 +31,8 @@ const HumaneShell = humane_shell.HumaneShell;
 const HumaneShellCheckpointStore = humane_shell.HumaneShellCheckpointStore;
 const HumaneShellControl = humane_shell.HumaneShellControl;
 const HumaneShellStatus = humane_shell.HumaneShellStatus;
+const BootedSystem = booted_system.BootedSystem;
+const ShellInput = booted_system.ShellInput;
 const JourneySurface = journey_surface.JourneySurface;
 const ProductionJourneyService = production_journey.ProductionJourneyService;
 const ProductionJourneyStatus = production_journey.ProductionJourneyStatus;
@@ -280,7 +282,6 @@ test "rendered demo journey drives install sync permission update recovery and r
     var runtime = task_runtime.Runtime.init();
     var ux = native_ux.Controller.init();
     var compositor = compositor_session.Session.init();
-    var compatibility = compatibility_environment.Manager.init();
     var ledger = event_ledger.Ledger.init();
     var journey = JourneySurface.init(
         &runtime,
@@ -291,7 +292,6 @@ test "rendered demo journey drives install sync permission update recovery and r
         package_authority,
         &sync_port,
         sync_authority,
-        &compatibility,
         &ledger,
         .{
             .user = user,
@@ -374,7 +374,8 @@ test "production journey service rejects premature controls then routes lifecycl
     const admin = principal.PrincipalId{ .kind = .policy_authority, .serial = 97 };
     const primary_device = principal.PrincipalId{ .kind = .device, .serial = 971 };
     const paired_device = principal.PrincipalId{ .kind = .device, .serial = 972 };
-    const document_path = "documents/plan.md";
+    const collaborator = principal.PrincipalId{ .kind = .user, .serial = 973 };
+    const document_path = "documents/notes.md";
     const bundle_signer = signing.SignerIdentity{
         .label = "production-journey-bundle",
         .seed = [_]u8{0xa1} ** 32,
@@ -403,7 +404,7 @@ test "production journey service rejects premature controls then routes lifecycl
         .{ .name = "zigos.object.workspace" },
     };
     const components = [_]manifest.ExecutionComponentDecl{
-        .{ .id = "trip-ui", .entry = "app.trip.ui" },
+        .{ .id = "notes-ui", .entry = "app.notes.ui" },
     };
     const v1_assets = [_]manifest.AssetDecl{
         .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
@@ -415,15 +416,15 @@ test "production journey service rejects premature controls then routes lifecycl
     const permissions = [_]manifest.PermissionRequest{
         .{
             .kind = .object_access,
-            .resource = "documents/plan.md",
+            .resource = "documents/notes.md",
             .rights = .{ .object = .{ .object_read = true, .object_write = true } },
             .local_only = true,
             .max_lease_ticks = 240,
         },
     };
     var v1 = manifest.BundleManifest{
-        .bundle_id = "app.trip.production",
-        .display_name = "Trip Planner",
+        .bundle_id = "app.notes.daily",
+        .display_name = "Notes",
         .publisher = "Example Software",
         .provided_interfaces = &provided_interfaces,
         .consumed_interfaces = &consumed_interfaces,
@@ -433,8 +434,8 @@ test "production journey service rejects premature controls then routes lifecycl
     };
     v1.signature = try signReleaseBundle(bundle_signer, v1);
     var v2 = manifest.BundleManifest{
-        .bundle_id = "app.trip.production",
-        .display_name = "Trip Planner",
+        .bundle_id = "app.notes.daily",
+        .display_name = "Notes",
         .publisher = "Example Software",
         .version_major = 1,
         .version_minor = 1,
@@ -514,13 +515,13 @@ test "production journey service rejects premature controls then routes lifecycl
             .organization_id = 97,
             .reviewer_task_id = 78,
             .workspace_id = workspace_id,
-            .workspace_label = "Trip Workspace",
+            .workspace_label = "Notes Workspace",
             .document_path = document_path,
-            .task_label = "trip-planner",
-            .task_entry = "app.trip.ui",
-            .task_title = "Plan Trip",
-            .bundle_id = "app.trip.production",
-            .display_name = "Trip Planner",
+            .task_label = "notes",
+            .task_entry = "app.notes.ui",
+            .task_title = "Notes",
+            .bundle_id = "app.notes.daily",
+            .display_name = "Notes",
             .source_identity = "store:zigos",
             .sync_destination = "relay.production.zigos",
             .device_label = "tablet",
@@ -529,6 +530,7 @@ test "production journey service rejects premature controls then routes lifecycl
             .update_bundle = v2,
             .ui_surface_id = 97,
             .image_id = 97_001,
+            .share_principal = collaborator,
             .sync_from_device = primary_device,
             .sync_to_device = paired_device,
             .policy_signer = policy_signer,
@@ -564,30 +566,41 @@ test "production journey service rejects premature controls then routes lifecycl
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .review_permission, .tick = 26 }).status);
     try std.testing.expectEqual(@as(usize, 3), compositor.window_count);
     try std.testing.expectEqual(compositor_session.ViewType.app_panel, compositor.windowAtOrder(2).?.view_type);
-    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .sync_workspace, .tick = 27 }).status);
-    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .update_app, .tick = 28 }).status);
-    try std.testing.expectEqual(@as(u16, 1), packages_service.find("app.trip.production").?.versionMinor());
-    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .rollback_update, .tick = 29 }).status);
-    try std.testing.expectEqual(@as(u16, 0), packages_service.find("app.trip.production").?.versionMinor());
-    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .recover_system, .tick = 30 }).status);
-    const remove_response = journey.dispatch(.{ .control = .remove_app, .tick = 31 });
+    try std.testing.expectEqual(ProductionJourneyStatus.invalid_order, journey.dispatch(.{ .control = .sync_workspace, .tick = 27 }).status);
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .share_document, .tick = 27 }).status);
+    const shared_entry = try storage.resolve(workspace_id, document_path);
+    try std.testing.expect(storage.workspaceHasAccess(workspace_id, .{
+        .principal_id = collaborator,
+        .object_id = shared_entry.object_id,
+        .path = shared_entry.pathSlice(),
+        .wants_write = true,
+        .network_scope = .trusted_overlay,
+        .now_ticks = 27,
+    }));
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .sync_workspace, .tick = 28 }).status);
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .update_app, .tick = 29 }).status);
+    try std.testing.expectEqual(@as(u16, 1), packages_service.find("app.notes.daily").?.versionMinor());
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .rollback_update, .tick = 30 }).status);
+    try std.testing.expectEqual(@as(u16, 0), packages_service.find("app.notes.daily").?.versionMinor());
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .recover_system, .tick = 31 }).status);
+    const remove_response = journey.dispatch(.{ .control = .remove_app, .tick = 32 });
     try std.testing.expectEqual(ProductionJourneyStatus.ok, remove_response.status);
     try std.testing.expectEqual(@as(u64, 0), remove_response.task_id);
     try std.testing.expectEqual(@as(u16, 0), remove_response.visible_window_count);
-    try std.testing.expect(packages_service.find("app.trip.production") == null);
+    try std.testing.expect(packages_service.find("app.notes.daily") == null);
     try std.testing.expectEqual(task_runtime.TaskState.terminated, runtime.find(started_task_id).?.state);
     try std.testing.expectEqual(@as(usize, 0), compositor.window_count);
     try std.testing.expectEqual(@as(usize, 0), compositor.item_count);
     try std.testing.expectEqual(@as(u64, 0), compositor.active_window_id);
-    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .revoke_device, .tick = 32 }).status);
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .revoke_device, .tick = 33 }).status);
     try std.testing.expect(!sync.isTrustedDevice(paired_device));
-    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .revoke_policy, .tick = 33 }).status);
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .revoke_policy, .tick = 34 }).status);
     try std.testing.expectEqual(
         ProductionJourneyStatus.policy_rejected,
-        journey.dispatch(.{ .control = .install_app, .tick = 34 }).status,
+        journey.dispatch(.{ .control = .install_app, .tick = 35 }).status,
     );
 
-    try std.testing.expectEqual(@as(usize, 11), ledger.countMatching(.{ .kind = .task_flow }));
+    try std.testing.expectEqual(@as(usize, 12), ledger.countMatching(.{ .kind = .task_flow }));
     try std.testing.expectEqual(@as(usize, 2), ledger.countMatching(.{ .kind = .policy_change }));
     try std.testing.expectEqual(@as(usize, 3), ledger.countMatching(.{ .kind = .device_trust_change }));
     try std.testing.expect(runtime_checkpoint_store.has_checkpoint);
@@ -596,17 +609,19 @@ test "production journey service rejects premature controls then routes lifecycl
     var render_buffer: [2048]u8 = undefined;
     const rendered = try journey.render(&render_buffer);
     try expectContains(rendered, "control=apply-policy state=done");
+    try expectContains(rendered, "control=share-document state=done");
     try expectContains(rendered, "control=remove-app state=done");
     try expectContains(rendered, "control=revoke-policy state=done");
-    try expectContains(rendered, "task=0 bundle=app.trip.production");
+    try expectContains(rendered, "task=0 bundle=app.notes.daily");
     try expectContains(rendered, "visible_windows=0");
-    try expectContains(rendered, "task_flow_events=11");
+    try expectContains(rendered, "task_flow_events=12");
 
     var export_buffer: [4096]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try expectContains(exported, "kind=policy_change");
     try expectContains(exported, "kind=device_trust_change");
     try expectContains(exported, "flow_kind=review_permission_request");
+    try expectContains(exported, "flow_kind=share_document");
     try expectContains(exported, "flow_kind=recover_system");
 }
 
@@ -972,6 +987,310 @@ test "humane shell composes task-first review pairing snapshots diagnostics noti
     try expectContains(recovered, "recovery checkpoint=yes recovered=yes");
     try expectContains(recovered, "task_flow_events=7");
     try expectContains(recovered, "active_type=app_panel");
+}
+
+test "humane shell exposes object-native query history sharing capabilities and conflict review" {
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
+
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 100 };
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 1_001 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 100 };
+    const paired_device = principal.PrincipalId{ .kind = .device, .serial = 1_002 };
+    const document_path = "exports/plan.md";
+    const user_signer = signing.SignerIdentity{
+        .label = "object-shell-user",
+        .seed = [_]u8{0xd1} ** 32,
+    };
+    const device_signer = signing.SignerIdentity{
+        .label = "object-shell-device",
+        .seed = [_]u8{0xd2} ** 32,
+    };
+    const snapshot_signer = signing.SignerIdentity{
+        .label = "object-shell-snapshot",
+        .seed = [_]u8{0xd3} ** 32,
+    };
+
+    var runtime_checkpoint_store = task_runtime_service.CheckpointStore{};
+    var runtime = task_runtime.Runtime.init();
+    var runtime_service = task_runtime_service.Service.initWithStore(&runtime, &runtime_checkpoint_store);
+    runtime_service.bind(10_000, .{ .kind = .service, .serial = 10_000 });
+
+    var storage = storage_service.Service.initWithStore(10_001, 10_002, storage_owner, &storage_checkpoint_store);
+    const workspace_id = try seedShellWorkspace(&storage, user, document_path);
+
+    var sync = sync_service.Service.init(10_010, 10_011, sync_owner);
+    var sync_capabilities = capability.CapabilityTable.init();
+    const sync_capability = try mintRenderedShellServiceAuthority(&sync_capabilities, sync.service_id, sync_owner, sync.task_id);
+    var sync_port = sync_service.SyncPort.init(&sync, &sync_capabilities);
+    const sync_authority = sync_service.AuthorityContext{
+        .task_id = sync.task_id,
+        .principal = sync_owner,
+        .capability_id = sync_capability.id,
+        .now_ticks = 12,
+    };
+    try sync.recordConflict(
+        workspace_id,
+        paired_device,
+        92_001,
+        document_path,
+        storage.latestVersion(92_001).?.id.raw(),
+        88_001,
+        .mergeable_crdt,
+    );
+
+    var object_capabilities = capability.CapabilityTable.init();
+    var ux = native_ux.Controller.init();
+    var compositor = compositor_session.Session.init();
+    var compositor_checkpoint_store = compositor_session.CheckpointStore{};
+    var compositor_service = compositor_session.Service.initWithCheckpoint(
+        10_020,
+        10_021,
+        &runtime,
+        &compositor,
+        &compositor_checkpoint_store,
+    );
+    var notifications = notification_center.Center.init();
+    var ledger = event_ledger.Ledger.init();
+    var shell_checkpoint_store = HumaneShellCheckpointStore{};
+    const config = humane_shell.HumaneShellConfig{
+        .user = user,
+        .app_owner = user,
+        .reviewer_task_id = 81,
+        .workspace_id = workspace_id,
+        .workspace_label = "Object Workspace",
+        .document_path = document_path,
+        .task_label = "object-planner",
+        .task_entry = "app.object.ui",
+        .task_title = "Object Plan",
+        .bundle_id = "app.object.shell",
+        .display_name = "Object Planner",
+        .ui_surface_id = 100,
+        .image_id = 100_001,
+        .object_query_label = "rendered shell",
+        .object_capability_table = &object_capabilities,
+        .paired_device = paired_device,
+        .device_label = "tablet",
+        .user_signer = user_signer,
+        .device_signer = device_signer,
+        .snapshot_signer = snapshot_signer,
+    };
+    var shell = HumaneShell.init(
+        &runtime_service,
+        &ux,
+        &compositor_service,
+        &storage,
+        &sync_port,
+        sync_authority,
+        &notifications,
+        &ledger,
+        config,
+        .{},
+        &shell_checkpoint_store,
+    );
+
+    try shell.click(.start_task, 20);
+    const query_response = shell.dispatch(.{ .control = .query_objects, .tick = 21 });
+    try std.testing.expectEqual(HumaneShellStatus.ok, query_response.status);
+    try std.testing.expectEqual(@as(u16, 1), query_response.object_query_count);
+    try std.testing.expectEqual(@as(u64, 92_001), query_response.selected_object_id);
+
+    try shell.click(.open_object, 22);
+    try shell.click(.show_object_history, 23);
+    try shell.click(.mint_object_capability, 24);
+    try shell.click(.share_object, 25);
+    try shell.click(.review_object_conflict, 26);
+
+    try std.testing.expect(shell.state.object_opened);
+    try std.testing.expectEqual(@as(u16, 1), shell.state.object_history_count);
+    try std.testing.expect(shell.state.object_capability_id != 0);
+    try std.testing.expect(shell.state.object_shared);
+    try std.testing.expect(shell.state.object_conflict_reviewed);
+    try std.testing.expect(shell.state.object_conflict_resolved);
+    var minted_buffer: [2]capability.Capability = undefined;
+    const minted_object_caps = object_capabilities.queryByTarget(.{ .kind = .object, .id = 92_001 }, &minted_buffer);
+    try std.testing.expectEqual(@as(usize, 1), minted_object_caps.len);
+    try std.testing.expectEqual(capability.CapabilityTargetKind.object, minted_object_caps[0].target.kind);
+    try std.testing.expect(storage.findShareGrant(workspace_id, paired_device).?.isObjectScoped());
+    try std.testing.expect(sync.findConflictForObject(workspace_id, paired_device, 92_001) == null);
+    try std.testing.expectEqual(compositor_session.ViewType.sync_conflict_review, compositor.windowAtOrder(1).?.view_type);
+
+    var render_buffer: [8192]u8 = undefined;
+    const rendered = try shell.render(&render_buffer);
+    try expectContains(rendered, "object_model first_class=yes file_bridge=export-import-only");
+    try expectContains(rendered, "object_query count=1 selected=92001 opened=yes capability=");
+    try expectContains(rendered, "object[0] id=92001");
+    try expectContains(rendered, "object_history count=1");
+    try expectContains(rendered, "object_conflict reviewed=yes resolved=yes");
+}
+
+test "booted rendered system runs input loop compositor prompts task switching recovery and readable errors" {
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
+
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 99 };
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 991 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 99 };
+    const paired_device = principal.PrincipalId{ .kind = .device, .serial = 992 };
+    const document_path = "documents/plan.md";
+    const user_signer = signing.SignerIdentity{
+        .label = "booted-shell-user",
+        .seed = [_]u8{0xc1} ** 32,
+    };
+    const device_signer = signing.SignerIdentity{
+        .label = "booted-shell-device",
+        .seed = [_]u8{0xc2} ** 32,
+    };
+    const snapshot_signer = signing.SignerIdentity{
+        .label = "booted-shell-snapshot",
+        .seed = [_]u8{0xc3} ** 32,
+    };
+
+    var runtime_checkpoint_store = task_runtime_service.CheckpointStore{};
+    var runtime = task_runtime.Runtime.init();
+    var runtime_service = task_runtime_service.Service.initWithStore(&runtime, &runtime_checkpoint_store);
+    runtime_service.bind(9_900, .{ .kind = .service, .serial = 9_900 });
+
+    var storage = storage_service.Service.initWithStore(990, 991, storage_owner, &storage_checkpoint_store);
+    const workspace_id = try seedShellWorkspace(&storage, user, document_path);
+
+    var sync = sync_service.Service.init(9_910, 9_911, sync_owner);
+    var sync_capabilities = capability.CapabilityTable.init();
+    const sync_capability = try mintRenderedShellServiceAuthority(&sync_capabilities, sync.service_id, sync_owner, sync.task_id);
+    var sync_port = sync_service.SyncPort.init(&sync, &sync_capabilities);
+    const sync_authority = sync_service.AuthorityContext{
+        .task_id = sync.task_id,
+        .principal = sync_owner,
+        .capability_id = sync_capability.id,
+        .now_ticks = 12,
+    };
+    _ = try sync_port.ensureUserRoot(sync_authority, user, "owner", user_signer);
+
+    var ux = native_ux.Controller.init();
+    var compositor = compositor_session.Session.init();
+    var compositor_checkpoint_store = compositor_session.CheckpointStore{};
+    var compositor_service = compositor_session.Service.initWithCheckpoint(
+        9_920,
+        9_921,
+        &runtime,
+        &compositor,
+        &compositor_checkpoint_store,
+    );
+    var notifications = notification_center.Center.init();
+    var ledger = event_ledger.Ledger.init();
+    var shell_checkpoint_store = HumaneShellCheckpointStore{};
+    const config = humane_shell.HumaneShellConfig{
+        .user = user,
+        .app_owner = user,
+        .reviewer_task_id = 80,
+        .workspace_id = workspace_id,
+        .workspace_label = "Trip Workspace",
+        .document_path = document_path,
+        .task_label = "trip-planner",
+        .task_entry = "app.trip.ui",
+        .task_title = "Plan Trip",
+        .bundle_id = "app.trip.booted",
+        .display_name = "Trip Planner",
+        .ui_surface_id = 99,
+        .image_id = 99_001,
+        .paired_device = paired_device,
+        .device_label = "tablet",
+        .user_signer = user_signer,
+        .device_signer = device_signer,
+        .snapshot_label = "before-booted-recovery",
+        .snapshot_signer = snapshot_signer,
+    };
+    const accessibility = humane_shell.AccessibilityProfile{
+        .visible_focus = true,
+        .reduce_motion = true,
+        .high_contrast = true,
+    };
+    var shell = HumaneShell.init(
+        &runtime_service,
+        &ux,
+        &compositor_service,
+        &storage,
+        &sync_port,
+        sync_authority,
+        &notifications,
+        &ledger,
+        config,
+        accessibility,
+        &shell_checkpoint_store,
+    );
+    var system = BootedSystem.init(&shell);
+
+    var render_buffer: [8192]u8 = undefined;
+    const cold = try system.render(&render_buffer);
+    try expectContains(cold, "boot_phase=cold input_loop=stopped");
+
+    const preboot = system.dispatchInput(.{ .kind = .open_workspace, .tick = 9 });
+    try std.testing.expect(!preboot.accepted);
+    try std.testing.expectEqual(HumaneShellStatus.invalid_order, preboot.status);
+    const preboot_rendered = try system.render(&render_buffer);
+    try expectContains(preboot_rendered, "error_surface visible=yes status=invalid_order");
+    try expectContains(preboot_rendered, "summary=action blocked by current shell state");
+
+    const booted = system.dispatchInput(.{ .kind = .boot, .tick = 10 });
+    try std.testing.expect(booted.accepted);
+    try std.testing.expectEqual(booted_system.BootPhase.running, booted.phase);
+    const blocked = system.dispatchInput(.{ .kind = .open_workspace, .tick = 11 });
+    try std.testing.expect(!blocked.accepted);
+    try std.testing.expectEqual(HumaneShellStatus.invalid_order, blocked.status);
+    const blocked_rendered = try system.render(&render_buffer);
+    try expectContains(blocked_rendered, "cause=task required next=start task");
+
+    const inputs = [_]ShellInput{
+        .{ .kind = .start_task, .tick = 12 },
+        .{ .kind = .open_workspace, .tick = 13 },
+        .{ .kind = .open_document, .tick = 14 },
+        .{ .kind = .review_permission, .tick = 15 },
+    };
+    const reviewed = system.runInputLoop(&inputs);
+    try std.testing.expect(reviewed.accepted);
+    try std.testing.expectEqual(@as(u16, 3), reviewed.visible_window_count);
+    try std.testing.expectEqual(compositor.windowAtOrder(2).?.id, reviewed.active_window_id);
+    try std.testing.expectEqual(compositor_session.ViewType.app_panel, compositor.windowAtOrder(2).?.view_type);
+
+    const review_rendered = try system.render(&render_buffer);
+    try expectContains(review_rendered, "boot_phase=running input_loop=running");
+    try expectContains(review_rendered, "accessibility keyboard=yes screen_reader=yes visible_focus=yes reduce_motion=yes high_contrast=yes");
+    try expectContains(review_rendered, "window[2] id=3 type=app_panel active=yes modal=yes");
+    try expectContains(review_rendered, "permission_prompt state=pending window=3 decision=pending resource=documents/plan.md local_only=yes lease_ticks=240");
+    try expectContains(review_rendered, "notifications active=1");
+    try expectContains(review_rendered, "error_surface visible=no status=ok");
+
+    const switched = system.dispatchInput(.{ .kind = .task_switch_next, .tick = 16 });
+    try std.testing.expect(switched.accepted);
+    try std.testing.expectEqual(compositor.windowAtOrder(0).?.id, switched.active_window_id);
+    const switched_rendered = try system.render(&render_buffer);
+    try expectContains(switched_rendered, "task_switcher visible=yes index=0 active_window=1");
+    try expectContains(switched_rendered, "window[0] id=1 type=workspace_view active=yes");
+
+    const denied = system.dispatchInput(.{ .kind = .deny_permission, .tick = 17 });
+    try std.testing.expect(denied.accepted);
+    const denied_rendered = try system.render(&render_buffer);
+    try expectContains(denied_rendered, "permission_prompt state=denied window=3 decision=deny resource=documents/plan.md");
+    try expectContains(denied_rendered, "permission_error reason=policy_denied policy=user-grant-policy missing=object-access-capability");
+
+    const recovery_opened = system.dispatchInput(.{ .kind = .show_recovery, .tick = 18 });
+    try std.testing.expect(recovery_opened.accepted);
+    try std.testing.expectEqual(booted_system.BootPhase.recovery, recovery_opened.phase);
+    try std.testing.expect(system.dispatchInput(.{ .kind = .create_snapshot, .tick = 19 }).accepted);
+    try std.testing.expect(system.dispatchInput(.{ .kind = .run_diagnostics, .tick = 20 }).accepted);
+    const recovered = system.dispatchInput(.{ .kind = .recover_state, .tick = 21 });
+    try std.testing.expect(recovered.accepted);
+    try std.testing.expectEqual(booted_system.BootPhase.recovery, recovered.phase);
+    try std.testing.expectEqual(@as(u32, 1), runtime_service.restart_generation);
+
+    const recovered_rendered = try system.render(&render_buffer);
+    try expectContains(recovered_rendered, "recovery_ui visible=yes checkpoint=yes recovered=yes runtime_checkpoint=yes restart_generation=1");
+    try expectContains(recovered_rendered, "notifications active=");
+    try expectContains(recovered_rendered, "latest_id=");
+    try expectContains(recovered_rendered, "detail=local diagnostics ready");
+    try expectContains(recovered_rendered, "error_surface visible=no status=ok");
 }
 
 test "rendered task shell rejects out-of-order or missing workspace interactions" {

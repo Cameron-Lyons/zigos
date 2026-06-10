@@ -25,6 +25,9 @@ pub const PCI_CLASS_STORAGE_CONTROLLER: u8 = 0x01;
 pub const PCI_SUBCLASS_NVM: u8 = 0x08;
 pub const PCI_PROG_IF_NVME: u8 = 0x02;
 pub const PCI_CLASS_NETWORK_ADAPTER: u8 = 0x02;
+pub const PCI_CLASS_SERIAL_BUS_CONTROLLER: u8 = 0x0C;
+pub const PCI_SUBCLASS_USB: u8 = 0x03;
+pub const PCI_PROG_IF_XHCI: u8 = 0x30;
 pub const PCI_VENDOR_INTEL: u16 = 0x8086;
 pub const PCI_DEVICE_INTEL_I225_LM: u16 = 0x15F2;
 
@@ -167,6 +170,10 @@ pub fn firstIntelI225Lm() ?PCIDevice {
     return findDevice(PCI_VENDOR_INTEL, PCI_DEVICE_INTEL_I225_LM);
 }
 
+pub fn firstXhciController() ?PCIDevice {
+    return firstDeviceByClassSubclassProgIf(PCI_CLASS_SERIAL_BUS_CONTROLLER, PCI_SUBCLASS_USB, PCI_PROG_IF_XHCI);
+}
+
 pub fn matchesClass(device_info: PCIDevice, class_code: u8, subclass: u8, prog_if: u8) bool {
     return device_info.class_code == class_code and
         device_info.subclass == subclass and
@@ -179,6 +186,10 @@ pub fn isNvmeController(device_info: PCIDevice) bool {
 
 pub fn isIntelI225Lm(device_info: PCIDevice) bool {
     return device_info.vendor_id == PCI_VENDOR_INTEL and device_info.device_id == PCI_DEVICE_INTEL_I225_LM;
+}
+
+pub fn isXhciController(device_info: PCIDevice) bool {
+    return matchesClass(device_info, PCI_CLASS_SERIAL_BUS_CONTROLLER, PCI_SUBCLASS_USB, PCI_PROG_IF_XHCI);
 }
 
 pub fn stableDeviceId(device_info: PCIDevice) u64 {
@@ -328,6 +339,14 @@ test "PCI helpers identify Intel I225-LM network controller" {
 
     const e1000 = syntheticPciDevice(PCI_VENDOR_INTEL, 0x100E, PCI_CLASS_NETWORK_ADAPTER, 0, 0);
     try @import("std").testing.expect(!isIntelI225Lm(e1000));
+}
+
+test "PCI helpers identify xHCI USB controllers" {
+    const xhci = syntheticPciDevice(PCI_VENDOR_INTEL, 0xA0ED, PCI_CLASS_SERIAL_BUS_CONTROLLER, PCI_SUBCLASS_USB, PCI_PROG_IF_XHCI);
+    try @import("std").testing.expect(isXhciController(xhci));
+
+    const ehci = syntheticPciDevice(PCI_VENDOR_INTEL, 0x1E26, PCI_CLASS_SERIAL_BUS_CONTROLLER, PCI_SUBCLASS_USB, 0x20);
+    try @import("std").testing.expect(!isXhciController(ehci));
 }
 
 pub fn writeConfigDword(bus: u8, device: u8, func: u8, offset: u8, value: u32) void {

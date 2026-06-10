@@ -28,7 +28,6 @@ const package_service_bundle_ops = @import("../../../native/services/package_ser
 const indexing_service = @import("../../../native/services/indexing_service.zig");
 const notification_center = @import("../../../native/services/notification_center.zig");
 const media_print_service = @import("../../../native/services/media_print_service.zig");
-const compatibility_environment = @import("../../../native/services/compatibility_environment.zig");
 const compositor_session = @import("../../../native/platform/compositor_session.zig");
 const event_ledger = @import("../../../native/platform/event_ledger.zig");
 const immutable_base = @import("../../../native/platform/immutable_base.zig");
@@ -117,10 +116,6 @@ const MediaContext = struct {
     service: media_print_service.Service = media_print_service.Service.init(),
 };
 
-const CompatibilityContext = struct {
-    manager: compatibility_environment.Manager = compatibility_environment.Manager.init(),
-};
-
 const EventLedgerContext = struct {
     ledger: event_ledger.Ledger = event_ledger.Ledger.init(),
 };
@@ -184,7 +179,6 @@ const cases = [_]BenchmarkCase{
     .{ .name = "package_revision.rollforward_rollback", .iterations = 20_000, .runIteration = benchmarkPackageRevision },
     .{ .name = "indexing_service.query_ranked", .iterations = 20_000, .runIteration = benchmarkIndexingQuery },
     .{ .name = "media_print.submit_complete", .iterations = 8_000, .runIteration = benchmarkMediaPrintSubmitComplete },
-    .{ .name = "compatibility_environment.launch_portal", .iterations = 12_000, .runIteration = benchmarkCompatibilityLaunchPortal },
     .{ .name = "event_ledger.export_redacted", .iterations = 4_000, .runIteration = benchmarkEventLedgerExport },
     .{ .name = "secret_store.import_handle_export", .iterations = 20_000, .runIteration = benchmarkSecretStoreImportHandleExport },
     .{ .name = "denial_explanation.render_policy_hint", .iterations = 32_000, .runIteration = benchmarkDenialExplanationRender },
@@ -340,15 +334,6 @@ const package_bundle_v2 = manifest.BundleManifest{
     },
 };
 
-const compatibility_bundle = manifest.BundleManifest{
-    .bundle_id = "app.legacy.workbench",
-    .display_name = "Legacy Workbench",
-    .publisher = "Example Software",
-    .signature = .{
-        .signer = "bench-compat",
-    },
-};
-
 var permission_review_buffer: [2048]u8 = undefined;
 var permission_review_grants: [permission_review.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
 var event_ledger_buffer: [2048]u8 = undefined;
@@ -364,7 +349,6 @@ var task_checkpoint_context = TaskCheckpointContext{};
 var package_context = PackageContext{};
 var indexing_context = IndexingContext{};
 var media_context = MediaContext{};
-var compatibility_context = CompatibilityContext{};
 var event_ledger_context = EventLedgerContext{};
 var secret_store_context = SecretStoreContext{};
 var overlay_session_context = OverlaySessionContext{};
@@ -627,7 +611,7 @@ fn preparePackageFixture() void {
     package_context.service = package_service.Service.init();
     const slot = &package_context.service.slots[0];
     slot.in_use = true;
-    package_service_bundle_ops.installNew(&slot.bundle, package_bundle_v1, 1, [_]u8{0x11} ** 32, "") catch unreachable;
+    package_service_bundle_ops.installNew(&slot.bundle, package_bundle_v1, 1, [_]u8{0x11} ** 32) catch unreachable;
     package_context.service.rebuildIndexes();
 }
 
@@ -1070,13 +1054,12 @@ fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
 fn benchmarkPackageRevision(iteration: u32) u64 {
     _ = iteration;
     const slot = &package_context.service.slots[0];
-    package_service_bundle_ops.installNew(&slot.bundle, package_bundle_v1, 1, [_]u8{0x11} ** 32, "") catch unreachable;
+    package_service_bundle_ops.installNew(&slot.bundle, package_bundle_v1, 1, [_]u8{0x11} ** 32) catch unreachable;
     package_service_bundle_ops.installRevision(
         &slot.bundle,
         package_bundle_v2,
         2,
         [_]u8{0x22} ** 32,
-        "schema:1->2;notes-v2-migration",
     ) catch unreachable;
     const active = package_service_bundle_ops.resolveActiveManifest(&slot.bundle, &package_context.resolved);
     const launch_plan = package_context.service.buildLaunchPlan("app.notes") catch unreachable;
@@ -1135,34 +1118,6 @@ fn benchmarkMediaPrintSubmitComplete(iteration: u32) u64 {
         print_job.id +
         @intFromEnum(export_job.engine) +
         media_context.notifications.activeCount(31 + iteration);
-}
-
-fn benchmarkCompatibilityLaunchPortal(iteration: u32) u64 {
-    compatibility_context.manager = compatibility_environment.Manager.init();
-    const env = compatibility_context.manager.launch(.{
-        .service_id = 900 + iteration,
-        .owner = app(210 + iteration),
-        .kind = .container,
-        .label = "legacy-workbench",
-        .bundle = compatibility_bundle,
-        .network_class = .named_service_only,
-    }) catch unreachable;
-    compatibility_context.manager.grantPortal(env.id, .{
-        .kind = .file_import,
-        .capability_id = 700 + iteration,
-        .expires_at_ticks = 100,
-    }) catch unreachable;
-    compatibility_context.manager.grantPortal(env.id, .{
-        .kind = .open_uri,
-        .capability_id = 800 + iteration,
-        .read_only = false,
-        .expires_at_ticks = 20,
-    }) catch unreachable;
-    const revoked = compatibility_context.manager.revokeExpiredPortals(50 + iteration);
-    return env.id +
-        env.portal_count +
-        revoked +
-        @intFromBool(env.hasPortal(.file_import));
 }
 
 fn benchmarkEventLedgerExport(iteration: u32) u64 {

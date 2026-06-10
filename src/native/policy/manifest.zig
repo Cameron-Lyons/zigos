@@ -237,6 +237,7 @@ pub const ValidationError = error{
     TooManyComponents,
     ComponentIdEmpty,
     ComponentEntryEmpty,
+    UntypedApplicationComponent,
     ComponentIdTooLong,
     ComponentEntryTooLong,
     DuplicateComponentId,
@@ -295,6 +296,9 @@ pub fn validateApplicationPackaging(bundle: BundleManifest) ValidationError!void
         return error.MissingInterfaceDefinition;
     }
     if (bundle.assets.len == 0) return error.MissingAsset;
+    for (bundle.components) |component| {
+        if (component.abi != .typed_component_v1) return error.UntypedApplicationComponent;
+    }
 }
 
 pub fn hasPermission(bundle: BundleManifest, kind: PermissionKind) bool {
@@ -498,6 +502,19 @@ test "validate accepts a signed local-first bundle manifest" {
     try validate(bundle);
     try std.testing.expectEqual(@as(usize, 1), requiredPermissionCount(bundle));
     try validateApplicationPackaging(bundle);
+}
+
+test "example app packaging requires typed components" {
+    const bundle = BundleManifest{
+        .bundle_id = "app.untyped",
+        .display_name = "Untyped",
+        .publisher = "zigos.dev",
+        .provided_interfaces = &.{.{ .name = "zigos.untyped.example" }},
+        .components = &.{.{ .id = "untyped-main", .entry = "app.untyped.main", .abi = .native_sandbox }},
+        .assets = &.{.{ .path = "assets/untyped/icon.svg", .content_type = "image/svg+xml" }},
+    };
+
+    try std.testing.expectError(error.UntypedApplicationComponent, validateApplicationPackaging(bundle));
 }
 
 test "validate rejects background execution permissions without task metadata" {

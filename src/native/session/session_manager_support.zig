@@ -20,7 +20,6 @@ const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 
 pub const bootstrap_storage_interface = component_abi_schema.interfaceDecl(.bootstrap_workspace);
-pub const compatibility_portal_interface = component_abi_schema.interfaceForService(.compatibility_portal);
 
 pub const BootstrapState = struct {
     ids: session_bootstrap.Principals,

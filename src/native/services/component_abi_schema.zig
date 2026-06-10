@@ -51,7 +51,6 @@ pub const InterfaceKey = enum(u8) {
     index_search,
     sync_replication,
     media_print,
-    compat_portal,
 };
 
 pub const InterfaceId = enum(u16) {
@@ -68,7 +67,6 @@ pub const InterfaceId = enum(u16) {
     index_search = 0x100B,
     sync_replication = 0x100C,
     media_print = 0x100D,
-    compat_portal = 0x100E,
 };
 
 pub const OperationId = enum(u16) {
@@ -90,7 +88,6 @@ pub const ServiceBinding = enum(u8) {
     policy_mediation,
     permission_review_ui,
     service_registry,
-    compatibility_portal,
     network_stack,
     storage_object,
     package_install_update,
@@ -170,7 +167,6 @@ const PackageUpdateRequestWire = extern struct {
     source_identity_len: u16,
     from_schema_version: u32,
     to_schema_version: u32,
-    migration_manifest_len: u16,
     flags: u16,
 };
 
@@ -210,7 +206,6 @@ const PackageLifecycleResponseWire = extern struct {
     updated_existing: u32,
     permissions_changed: u32,
     rollback_available: u32,
-    migration_applied: u32,
 };
 
 const InterfaceSpec = struct {
@@ -246,7 +241,6 @@ pub const interface_specs = [_]InterfaceSpec{
     iface(.index_search, "zigos.index.search"),
     iface(.sync_replication, "zigos.sync.replication"),
     iface(.media_print, "zigos.media.print"),
-    iface(.compat_portal, "zigos.compat.portal"),
 };
 
 const OperationSpec = struct {
@@ -307,7 +301,6 @@ pub const service_binding_specs = [_]ServiceBindingSpec{
     binding(.policy_mediation, .policy_mediation),
     binding(.permission_review_ui, .permission_review),
     binding(.service_registry, .service_registry),
-    binding(.compatibility_portal, .compat_portal),
     binding(.network_stack, .network_policy),
     binding(.storage_object, .object_workspace),
     binding(.package_install_update, .package_install),

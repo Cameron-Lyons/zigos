@@ -13,7 +13,6 @@ storage.volume.compact_checkpoint 600000000.00 100
 package_revision.rollforward_rollback 1151678.41 40
 indexing_service.query_ranked 202462.18 40
 media_print.submit_complete 136500.90 40
-compatibility_environment.launch_portal 30609.03 50
 event_ledger.export_redacted 635582.44 60
 secret_store.import_handle_export 96904.55 75
 denial_explanation.render_policy_hint 15283.87 60

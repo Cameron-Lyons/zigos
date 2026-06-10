@@ -1,4 +1,5 @@
 const std = @import("std");
+const capability = @import("../../kernel_api/capability.zig");
 const compositor_session = @import("../compositor_session.zig");
 const denial_explanation = @import("../../policy/denial_explanation.zig");
 const event_ledger = @import("../event_ledger.zig");
@@ -7,22 +8,33 @@ const manifest = @import("../../policy/manifest.zig");
 const native_util = @import("../../core/util.zig");
 const native_ux = @import("../native_ux.zig");
 const notification_center = @import("../../services/notification_center.zig");
+const object_store = @import("../../storage/object_store.zig");
 const principal = @import("../../core/principal.zig");
 const signing = @import("../../core/signing.zig");
 const storage_service = @import("../../storage/storage_service.zig");
 const sync_service = @import("../../sync/sync_service.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
 const task_runtime_service = @import("../../task/task_runtime_service.zig");
+const workspace = @import("../../storage/workspace.zig");
 const rendering = @import("rendering.zig");
 const task_launch = @import("task_launch.zig");
 
 const appendFmt = rendering.appendFmt;
 const yesNo = native_util.yesNo;
 
+pub const MAX_SHELL_OBJECT_RESULTS: usize = 4;
+pub const MAX_SHELL_OBJECT_HISTORY: usize = 4;
+
 pub const HumaneShellControl = enum(u8) {
     start_task,
     open_workspace,
     open_document,
+    query_objects,
+    open_object,
+    show_object_history,
+    mint_object_capability,
+    share_object,
+    review_object_conflict,
     review_permission,
     allow_permission,
     deny_permission,
@@ -95,6 +107,13 @@ pub const HumaneShellResponse = struct {
     permission_denied: bool = false,
     snapshot_id: u64 = 0,
     recovered: bool = false,
+    selected_object_id: u64 = 0,
+    object_query_count: u16 = 0,
+    object_history_count: u16 = 0,
+    object_capability_id: u64 = 0,
+    object_shared: bool = false,
+    object_conflict_reviewed: bool = false,
+    object_conflict_resolved: bool = false,
 };
 
 pub const AccessibilityProfile = struct {
@@ -119,6 +138,10 @@ pub const HumaneShellConfig = struct {
     display_name: []const u8,
     ui_surface_id: u64,
     image_id: u64,
+    object_query_label: []const u8 = "",
+    object_share_principal: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
+    object_conflict_device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
+    object_capability_table: ?*capability.CapabilityTable = null,
     permission_request: manifest.PermissionRequest = .{
         .kind = .object_access,
         .resource = "",
@@ -148,6 +171,19 @@ pub const HumaneShellState = struct {
     diagnostics_event_count: usize = 0,
     notification_id: u64 = 0,
     recovered: bool = false,
+    object_query_count: u16 = 0,
+    object_query_ids: [MAX_SHELL_OBJECT_RESULTS]u64 = [_]u64{0} ** MAX_SHELL_OBJECT_RESULTS,
+    selected_object_id: u64 = 0,
+    selected_version_id: u64 = 0,
+    object_opened: bool = false,
+    object_history_count: u16 = 0,
+    object_history_versions: [MAX_SHELL_OBJECT_HISTORY]u64 = [_]u64{0} ** MAX_SHELL_OBJECT_HISTORY,
+    object_capability_id: u64 = 0,
+    object_shared: bool = false,
+    object_conflict_reviewed: bool = false,
+    object_conflict_resolved: bool = false,
+    object_conflict_local_version_id: u64 = 0,
+    object_conflict_remote_version_id: u64 = 0,
     remote_diagnostics_require_opt_in: bool = true,
     focus_index: usize = 0,
     last_tick: u64 = 0,
@@ -168,6 +204,12 @@ pub const control_order = [_]HumaneShellControl{
     .start_task,
     .open_workspace,
     .open_document,
+    .query_objects,
+    .open_object,
+    .show_object_history,
+    .mint_object_capability,
+    .share_object,
+    .review_object_conflict,
     .review_permission,
     .allow_permission,
     .deny_permission,
@@ -245,6 +287,12 @@ pub const HumaneShell = struct {
             .start_task => try self.startTask(tick),
             .open_workspace => try self.openWorkspace(tick),
             .open_document => try self.openDocument(tick),
+            .query_objects => try self.queryObjects(),
+            .open_object => try self.openObject(tick),
+            .show_object_history => try self.showObjectHistory(),
+            .mint_object_capability => try self.mintObjectCapability(tick),
+            .share_object => try self.shareObject(),
+            .review_object_conflict => try self.reviewObjectConflict(tick),
             .review_permission => try self.reviewPermission(tick),
             .allow_permission => try self.decidePermission(true, tick),
             .deny_permission => try self.decidePermission(false, tick),
@@ -327,6 +375,42 @@ pub const HumaneShell = struct {
             self.config.workspace_id,
             self.config.document_path,
         });
+        try appendFmt(buffer, &used, "object_model first_class=yes file_bridge=export-import-only\n", .{});
+        try appendFmt(buffer, &used, "object_query count={d} selected={d} opened={s} capability={d} shared={s}\n", .{
+            self.state.object_query_count,
+            self.state.selected_object_id,
+            yesNo(self.state.object_opened),
+            self.state.object_capability_id,
+            yesNo(self.state.object_shared),
+        });
+        var object_index: usize = 0;
+        while (object_index < @as(usize, @intCast(self.state.object_query_count)) and object_index < MAX_SHELL_OBJECT_RESULTS) : (object_index += 1) {
+            const object_id = self.state.object_query_ids[object_index];
+            const latest = self.storage.latestVersion(object_id);
+            const version_id = if (latest) |version| version.id.raw() else 0;
+            const label = if (latest) |version| version.metadata.labelSlice() else "missing";
+            try appendFmt(buffer, &used, "object[{d}] id={d} version={d} label={s}\n", .{
+                object_index,
+                object_id,
+                version_id,
+                label,
+            });
+        }
+        try appendFmt(buffer, &used, "object_history count={d}", .{self.state.object_history_count});
+        var history_index: usize = 0;
+        while (history_index < @as(usize, @intCast(self.state.object_history_count)) and history_index < MAX_SHELL_OBJECT_HISTORY) : (history_index += 1) {
+            try appendFmt(buffer, &used, " v{d}={d}", .{
+                history_index,
+                self.state.object_history_versions[history_index],
+            });
+        }
+        try appendFmt(buffer, &used, "\n", .{});
+        try appendFmt(buffer, &used, "object_conflict reviewed={s} resolved={s} local={d} remote={d}\n", .{
+            yesNo(self.state.object_conflict_reviewed),
+            yesNo(self.state.object_conflict_resolved),
+            self.state.object_conflict_local_version_id,
+            self.state.object_conflict_remote_version_id,
+        });
         try appendFmt(buffer, &used, "active_window={d} active_type={s} active_title={s} visible_windows={d}\n", .{
             session.active_window_id,
             active_type,
@@ -386,6 +470,12 @@ pub const HumaneShell = struct {
             .start_task => if (self.state.task_id == 0) .ready else .done,
             .open_workspace => if (self.state.workspace_opened) .done else if (self.state.task_id == 0) .blocked else .ready,
             .open_document => if (self.state.document_opened) .done else if (!self.state.workspace_opened) .blocked else .ready,
+            .query_objects => if (self.state.object_query_count != 0) .done else .ready,
+            .open_object => if (self.state.object_opened) .done else if (self.state.selected_object_id == 0 and self.state.object_query_count == 0) .ready else .ready,
+            .show_object_history => if (self.state.object_history_count != 0) .done else if (self.state.selected_object_id == 0) .blocked else .ready,
+            .mint_object_capability => if (self.state.object_capability_id != 0) .done else if (self.state.selected_object_id == 0) .blocked else .ready,
+            .share_object => if (self.state.object_shared) .done else if (self.state.selected_object_id == 0) .blocked else .ready,
+            .review_object_conflict => if (self.state.object_conflict_reviewed) .done else if (self.state.selected_object_id == 0) .blocked else .ready,
             .review_permission => if (self.state.review_window_id != 0) .done else if (!self.state.document_opened) .blocked else .ready,
             .allow_permission => if (self.state.permission_reviewed and !self.state.permission_denied)
                 .done
@@ -453,6 +543,135 @@ pub const HumaneShell = struct {
             .detail = self.config.document_path,
         });
         self.state.document_opened = true;
+        try self.recordPendingTaskFlows(tick);
+    }
+
+    fn queryObjects(self: *HumaneShell) !void {
+        var results_buffer: [MAX_SHELL_OBJECT_RESULTS]object_store.ObjectQueryResult = undefined;
+        const results = self.storage.queryObjects(.{
+            .object_type = .document,
+            .label_contains = self.config.object_query_label,
+        }, &results_buffer);
+        self.clearObjectQueryState();
+        if (results.len == 0) return error.ObjectMissing;
+        self.state.object_query_count = @intCast(results.len);
+        for (results, 0..) |result, index| {
+            self.state.object_query_ids[index] = result.object_id.raw();
+        }
+        self.state.selected_object_id = results[0].object_id.raw();
+        self.state.selected_version_id = results[0].latest_version_id.raw();
+    }
+
+    fn openObject(self: *HumaneShell, tick: u64) !void {
+        const task = try self.requireTask();
+        if (self.state.selected_object_id == 0) try self.queryObjects();
+        const latest = self.storage.latestVersion(self.state.selected_object_id) orelse return error.ObjectMissing;
+        var detail_buffer: [64]u8 = undefined;
+        const detail = std.fmt.bufPrint(&detail_buffer, "object:{d}", .{self.state.selected_object_id}) catch "object";
+        _ = try self.dispatchCompositor(.{
+            .operation = .open_view,
+            .view_type = .document_view,
+            .subject_task_id = task.id,
+            .workspace_id = self.config.workspace_id,
+            .detail = detail,
+        });
+        self.state.selected_version_id = latest.id.raw();
+        self.state.object_opened = true;
+        self.state.document_opened = true;
+        try self.recordPendingTaskFlows(tick);
+    }
+
+    fn showObjectHistory(self: *HumaneShell) !void {
+        if (self.state.selected_object_id == 0) return error.ObjectMissing;
+        var history_buffer: [MAX_SHELL_OBJECT_HISTORY]object_store.ObjectHistoryEntry = undefined;
+        const history = try self.storage.objectHistory(self.state.selected_object_id, &history_buffer);
+        if (history.len == 0) return error.ObjectMissing;
+        self.state.object_history_count = @intCast(history.len);
+        @memset(self.state.object_history_versions[0..], 0);
+        for (history, 0..) |entry, index| {
+            self.state.object_history_versions[index] = entry.version_id.raw();
+        }
+    }
+
+    fn mintObjectCapability(self: *HumaneShell, tick: u64) !void {
+        if (self.state.selected_object_id == 0) return error.ObjectMissing;
+        const table = self.config.object_capability_table orelse return error.CapabilityRequired;
+        const minted = try table.mintBootRoot(.{
+            .holder = self.config.user,
+            .issuer = .{ .kind = .policy_authority, .serial = 1 },
+            .target = .{ .kind = .object, .id = self.state.selected_object_id },
+            .rights = .{ .object = .{
+                .object_read = true,
+                .object_write = true,
+                .capability_query = true,
+                .capability_pass = true,
+            } },
+            .scope = .{
+                .task_id = self.state.task_id,
+                .workspace_id = self.config.workspace_id,
+                .local_only = true,
+                .broker_only = true,
+            },
+            .lease = .{
+                .issued_at_ticks = tick,
+                .expires_at_ticks = tick + self.permissionRequest().max_lease_ticks,
+            },
+            .audit = .{
+                .source_task_id = self.state.task_id,
+                .broker_service_id = self.storage.service_id,
+                .user_visible_entitlement = true,
+            },
+        });
+        self.state.object_capability_id = minted.id;
+    }
+
+    fn shareObject(self: *HumaneShell) !void {
+        if (self.state.selected_object_id == 0) return error.ObjectMissing;
+        const grantee = self.objectSharePrincipal();
+        const entry = try self.storage.findEntryForObject(ids.workspace(self.config.workspace_id), ids.object(self.state.selected_object_id));
+        const grant = try (workspace.ShareGrant{
+            .principal_id = grantee,
+            .can_read = true,
+            .can_write = false,
+            .can_admin = false,
+            .can_export = false,
+            .network_scope = .local_only,
+            .audit_visibility = .shared_participants,
+        }).withObjectScope(entry.object_id, entry.pathSlice());
+        try self.storage.shareWorkspace(ids.workspace(self.config.workspace_id), grant);
+        self.state.object_shared = true;
+    }
+
+    fn reviewObjectConflict(self: *HumaneShell, tick: u64) !void {
+        const task = try self.requireTask();
+        if (self.state.selected_object_id == 0) return error.ObjectMissing;
+        const review = try self.sync.reviewConflictForObject(
+            self.sync_authority,
+            self.config.workspace_id,
+            self.objectConflictDevice(),
+            self.state.selected_object_id,
+        );
+        var detail_buffer: [96]u8 = undefined;
+        const detail = std.fmt.bufPrint(&detail_buffer, "object conflict: {d}", .{review.object_id}) catch "object conflict";
+        _ = try self.dispatchCompositor(.{
+            .operation = .open_view,
+            .view_type = .sync_conflict_review,
+            .subject_task_id = task.id,
+            .workspace_id = self.config.workspace_id,
+            .detail = detail,
+        });
+        _ = try self.ux.syncConflictReview(self.config.workspace_id, self.config.user, detail);
+        const resolved = try self.sync.resolveConflictForObject(
+            self.sync_authority,
+            self.config.workspace_id,
+            self.objectConflictDevice(),
+            self.state.selected_object_id,
+            .keep_local,
+        );
+        self.state.object_conflict_reviewed = true;
+        self.state.object_conflict_resolved = resolved.resolved;
+        self.state.object_conflict_local_version_id = review.local_version_id;
+        self.state.object_conflict_remote_version_id = review.remote_version_id;
         try self.recordPendingTaskFlows(tick);
     }
 
@@ -669,6 +888,13 @@ pub const HumaneShell = struct {
         response.permission_denied = self.state.permission_denied;
         response.snapshot_id = self.state.snapshot_id;
         response.recovered = self.state.recovered;
+        response.selected_object_id = self.state.selected_object_id;
+        response.object_query_count = self.state.object_query_count;
+        response.object_history_count = self.state.object_history_count;
+        response.object_capability_id = self.state.object_capability_id;
+        response.object_shared = self.state.object_shared;
+        response.object_conflict_reviewed = self.state.object_conflict_reviewed;
+        response.object_conflict_resolved = self.state.object_conflict_resolved;
     }
 
     fn focusNext(self: *HumaneShell) void {
@@ -678,6 +904,32 @@ pub const HumaneShell = struct {
     fn focusPrevious(self: *HumaneShell) void {
         self.state.focus_index = (self.state.focus_index + control_order.len - 1) % control_order.len;
     }
+
+    fn clearObjectQueryState(self: *HumaneShell) void {
+        self.state.object_query_count = 0;
+        self.state.selected_object_id = 0;
+        self.state.selected_version_id = 0;
+        self.state.object_opened = false;
+        self.state.object_history_count = 0;
+        self.state.object_capability_id = 0;
+        self.state.object_shared = false;
+        self.state.object_conflict_reviewed = false;
+        self.state.object_conflict_resolved = false;
+        self.state.object_conflict_local_version_id = 0;
+        self.state.object_conflict_remote_version_id = 0;
+        @memset(self.state.object_query_ids[0..], 0);
+        @memset(self.state.object_history_versions[0..], 0);
+    }
+
+    fn objectSharePrincipal(self: *const HumaneShell) principal.PrincipalId {
+        if (self.config.object_share_principal.serial != 0) return self.config.object_share_principal;
+        return self.config.paired_device;
+    }
+
+    fn objectConflictDevice(self: *const HumaneShell) principal.PrincipalId {
+        if (self.config.object_conflict_device.serial != 0) return self.config.object_conflict_device;
+        return self.config.paired_device;
+    }
 };
 
 pub fn controlName(control: HumaneShellControl) []const u8 {
@@ -685,6 +937,12 @@ pub fn controlName(control: HumaneShellControl) []const u8 {
         .start_task => "start-task",
         .open_workspace => "open-workspace",
         .open_document => "open-document",
+        .query_objects => "query-objects",
+        .open_object => "open-object",
+        .show_object_history => "show-object-history",
+        .mint_object_capability => "mint-object-capability",
+        .share_object => "share-object",
+        .review_object_conflict => "review-object-conflict",
         .review_permission => "review-permission",
         .allow_permission => "allow-permission",
         .deny_permission => "deny-permission",
@@ -715,6 +973,7 @@ pub fn statusForError(err: anyerror) HumaneShellStatus {
         error.SnapshotNotFound,
         error.TaskNotFound,
         error.ObjectMissing,
+        error.ConflictNotFound,
         => .not_found,
         error.PermissionDenied,
         error.CapabilityRequired,
@@ -742,6 +1001,12 @@ fn shortcutForControl(control: HumaneShellControl) []const u8 {
         .start_task => "Enter",
         .open_workspace => "W",
         .open_document => "D",
+        .query_objects => "Q",
+        .open_object => "O",
+        .show_object_history => "H",
+        .mint_object_capability => "C",
+        .share_object => "X",
+        .review_object_conflict => "V",
         .review_permission => "R",
         .allow_permission => "A",
         .deny_permission => "N",
@@ -761,6 +1026,11 @@ fn blockedReason(shell: *const HumaneShell, control: HumaneShellControl, state: 
     return switch (control) {
         .open_workspace => "task required",
         .open_document => "workspace required",
+        .show_object_history,
+        .mint_object_capability,
+        .share_object,
+        .review_object_conflict,
+        => "object required",
         .review_permission => "document required",
         .allow_permission, .deny_permission => if (shell.state.permission_reviewed)
             "permission already decided"
@@ -778,6 +1048,11 @@ fn nextAction(shell: *const HumaneShell, control: HumaneShellControl, state: Con
         return switch (control) {
             .open_workspace => "start task",
             .open_document => "open workspace",
+            .show_object_history,
+            .mint_object_capability,
+            .share_object,
+            .review_object_conflict,
+            => "query objects",
             .review_permission => "open document",
             .allow_permission, .deny_permission => if (shell.state.permission_reviewed)
                 "continue"
@@ -792,6 +1067,12 @@ fn nextAction(shell: *const HumaneShell, control: HumaneShellControl, state: Con
         .start_task => "launch task",
         .open_workspace => "show workspace",
         .open_document => "show document",
+        .query_objects => "query object store",
+        .open_object => "open object",
+        .show_object_history => "show object history",
+        .mint_object_capability => "mint object capability",
+        .share_object => "share selected object",
+        .review_object_conflict => "review object conflict",
         .review_permission => "open review",
         .allow_permission => "allow request",
         .deny_permission => "deny with explanation",
@@ -811,6 +1092,12 @@ fn accessibleLabel(control: HumaneShellControl) []const u8 {
         .start_task => "Start task",
         .open_workspace => "Open workspace",
         .open_document => "Open document",
+        .query_objects => "Query object store",
+        .open_object => "Open selected object",
+        .show_object_history => "Show object history",
+        .mint_object_capability => "Mint object capability",
+        .share_object => "Share selected object",
+        .review_object_conflict => "Review object conflict",
         .review_permission => "Review permission request",
         .allow_permission => "Allow requested permission",
         .deny_permission => "Deny requested permission and explain why",

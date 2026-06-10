@@ -9,6 +9,7 @@ const policy_object = @import("../../policy/policy_object.zig");
 const principal = @import("../../core/principal.zig");
 const signing = @import("../../core/signing.zig");
 const storage_service = @import("../../storage/storage_service.zig");
+const workspace = @import("../../storage/workspace.zig");
 const sync_service = @import("../../sync/sync_service.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
 const task_runtime_service = @import("../../task/task_runtime_service.zig");
@@ -26,6 +27,7 @@ pub const ProductionJourneyControl = enum {
     open_workspace,
     open_document,
     review_permission,
+    share_document,
     sync_workspace,
     update_app,
     rollback_update,
@@ -68,6 +70,7 @@ pub const ProductionJourneyConfig = struct {
     update_bundle: manifest.BundleManifest,
     ui_surface_id: u64,
     image_id: u64,
+    share_principal: principal.PrincipalId,
     sync_from_device: principal.PrincipalId,
     sync_to_device: principal.PrincipalId,
     policy_signer: signing.SignerIdentity,
@@ -111,6 +114,7 @@ pub const ProductionJourneyService = struct {
     workspace_opened: bool = false,
     document_opened: bool = false,
     permission_reviewed: bool = false,
+    document_shared: bool = false,
     device_trusted: bool = false,
     sync_configured: bool = false,
     synced: bool = false,
@@ -174,6 +178,7 @@ pub const ProductionJourneyService = struct {
         try renderControl(buffer, &used, "open-workspace", self.workspace_opened);
         try renderControl(buffer, &used, "open-document", self.document_opened);
         try renderControl(buffer, &used, "review-permission", self.permission_reviewed);
+        try renderControl(buffer, &used, "share-document", self.document_shared);
         try renderControl(buffer, &used, "sync-workspace", self.synced);
         try renderControl(buffer, &used, "update-app", self.updated);
         try renderControl(buffer, &used, "rollback-update", self.rolled_back);
@@ -205,6 +210,7 @@ pub const ProductionJourneyService = struct {
             .open_workspace => try self.openWorkspace(tick),
             .open_document => try self.openDocument(tick),
             .review_permission => try self.reviewPermission(tick),
+            .share_document => try self.shareDocument(tick),
             .sync_workspace => try self.syncWorkspace(tick),
             .update_app => try self.updateApp(tick),
             .rollback_update => try self.rollbackUpdate(tick),
@@ -389,12 +395,51 @@ pub const ProductionJourneyService = struct {
         try self.recordPendingTaskFlows(tick);
     }
 
+    fn shareDocument(self: *ProductionJourneyService, tick: u64) !void {
+        const task = try self.requireTask();
+        if (!self.document_opened or !self.permission_reviewed) return error.DocumentRequired;
+
+        const workspace_id = ids.workspace(self.config.workspace_id);
+        const entry = try self.storage.resolve(workspace_id, self.config.document_path);
+        var grant = workspace.ShareRequest{
+            .principal_id = self.config.share_principal,
+            .can_read = true,
+            .can_write = true,
+            .can_export = false,
+            .expires_at_ticks = tick + 480,
+            .network_scope = .trusted_overlay,
+            .reshare_policy = .owner_only,
+            .audit_visibility = .shared_participants,
+        };
+        grant = try grant.withObjectScope(entry.object_id, entry.pathSlice());
+        try self.storage.shareWorkspace(workspace_id, grant);
+
+        if (!self.storage.workspaceHasAccess(workspace_id, .{
+            .principal_id = self.config.share_principal,
+            .object_id = entry.object_id,
+            .path = entry.pathSlice(),
+            .wants_write = true,
+            .network_scope = .trusted_overlay,
+            .now_ticks = tick,
+        })) return error.ShareRejected;
+
+        _ = try self.ux.shareDocument(
+            self.config.workspace_id,
+            task.id,
+            self.config.share_principal,
+            self.config.document_path,
+        );
+        self.document_shared = true;
+        try self.recordPendingTaskFlows(tick);
+    }
+
     fn syncWorkspace(self: *ProductionJourneyService, tick: u64) !void {
         _ = try self.requireActivePolicy();
         if (!self.device_trusted or !self.sync.service.isTrustedDevice(self.config.sync_to_device)) {
             return error.DeviceTrustRequired;
         }
         const task = try self.requireTask();
+        if (!self.document_shared) return error.DocumentShareRequired;
         const decision = self.policies.syncDestinationDecision(.{
             .user_id = self.config.user.serial,
             .device_id = self.config.sync_to_device.serial,
@@ -438,7 +483,6 @@ pub const ProductionJourneyService = struct {
             .bundle = self.config.update_bundle,
             .source_identity = self.config.source_identity,
             .data_schema_version = 1,
-            .retains_data_compatibility = true,
         }, policy);
         if (!updated_result.updated_existing or !updated_result.rollback_available) return error.AppNotInstalled;
         _ = try self.ux.updateApp(self.task_id, self.config.user, self.config.bundle_id);
@@ -614,9 +658,16 @@ fn statusForProductionJourneyError(err: anyerror) ProductionJourneyStatus {
         error.TaskAlreadyStarted,
         error.WorkspaceRequired,
         error.DocumentRequired,
+        error.DocumentShareRequired,
         => .invalid_order,
         error.CompositorRejected => .compositor_rejected,
         error.RecoveryStateMissing => .recovery_missing,
+        error.EntryNotFound,
+        error.PathTooLong,
+        error.ShareRejected,
+        error.ShareTableFull,
+        error.WorkspaceNotFound,
+        => .invalid_request,
         else => .invalid_request,
     };
 }

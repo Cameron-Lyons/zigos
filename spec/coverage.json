@@ -71,9 +71,8 @@
     "16.1 Policy objects",
     "16.2 Policy examples",
     "16.3 Enterprise support",
-    "17. Compatibility strategy",
+    "17. Native platform strategy",
     "17.1 Native platform",
-    "17.2 Legacy support",
     "18. Example application manifest",
     "19. What using Zigos would feel like",
     "20. One-sentence summary"
@@ -102,7 +101,7 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 1 keeps installs declarative privilege explicit and legacy access isolated"
+          "name": "spec 1 keeps installs declarative privilege explicit and app components typed"
         }
       ],
       "requirements": []
@@ -167,7 +166,7 @@
       "tests": [
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 4 6.3 13 and 17 keep the kernel typed minimal and route legacy support through isolated portals"
+          "name": "spec 4 6.3 and 13 keep the kernel typed minimal and native-only"
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
@@ -257,7 +256,7 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
+          "name": "spec 12.3 and 14.3 preserve responsiveness while native app updates stay explicit and reversible"
         },
         {
           "file": "src/native/policy/manifest.zig",
@@ -473,7 +472,7 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 11.2 and 17.2 keep task views and compatibility environments explicit"
+          "name": "spec 11.2 keeps task views and native app components explicit"
         },
         {
           "file": "src/native/platform/native_ux.zig",
@@ -533,7 +532,7 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
+          "name": "spec 12.3 and 14.3 preserve responsiveness while native app updates stay explicit and reversible"
         },
         {
           "file": "src/native/task/accelerator_scheduler.zig",
@@ -584,7 +583,7 @@
       "tests": [
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 4 6.3 13 and 17 keep the kernel typed minimal and route legacy support through isolated portals"
+          "name": "spec 4 6.3 and 13 keep the kernel typed minimal and native-only"
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
@@ -631,7 +630,7 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
+          "name": "spec 12.3 and 14.3 preserve responsiveness while native app updates stay explicit and reversible"
         },
         {
           "file": "src/native/platform/immutable_base.zig",
@@ -732,28 +731,27 @@
     },
     {
       "id": "17",
-      "heading": "17. Compatibility strategy",
+      "heading": "17. Native platform strategy",
       "tests": [
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 4 6.3 13 and 17 keep the kernel typed minimal and route legacy support through isolated portals"
+          "name": "spec 4 6.3 and 13 keep the kernel typed minimal and native-only"
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 11.2 and 17.2 keep task views and compatibility environments explicit"
+          "name": "spec 11.2 keeps task views and native app components explicit"
         },
         {
-          "file": "src/native/services/compatibility_environment.zig",
-          "name": "compatibility environments stay isolated labeled and portal-only"
+          "file": "src/native/policy/manifest.zig",
+          "name": "example app packaging requires typed components"
         },
         {
-          "file": "src/native/services/compatibility_environment.zig",
-          "name": "compatibility environments reject unsigned hidden or host-integrated launches"
+          "file": "src/tests/spec/spec_conformance_test.zig",
+          "name": "spec 1 keeps installs declarative privilege explicit and app components typed"
         }
       ],
       "requirements": [
-        "REQ-NATIVE-PLATFORM",
-        "REQ-LEGACY-SUPPORT"
+        "REQ-NATIVE-PLATFORM"
       ]
     },
     {
@@ -807,7 +805,7 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
+          "name": "spec 12.3 and 14.3 preserve responsiveness while native app updates stay explicit and reversible"
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
@@ -844,7 +842,7 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 12.3 and 14.3 preserve responsiveness while app updates stay explicit and reversible"
+          "name": "spec 12.3 and 14.3 preserve responsiveness while native app updates stay explicit and reversible"
         }
       ],
       "requirements": [
@@ -909,7 +907,6 @@
     "REQ-POLICY-EXAMPLES",
     "REQ-ENTERPRISE-SUPPORT",
     "REQ-NATIVE-PLATFORM",
-    "REQ-LEGACY-SUPPORT",
     "REQ-EXAMPLE-APPLICATION-MANIFEST",
     "REQ-ZIGOS-USER-EXPERIENCE",
     "REQ-ONE-SENTENCE-SUMMARY"
@@ -2043,29 +2040,17 @@
     "REQ-NATIVE-PLATFORM": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/services/compatibility_environment.zig",
+        "src/native/policy/manifest.zig",
         "src/native/services/service_registry.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/services/compatibility_environment.zig",
-          "name": "compatibility environments reject unsigned hidden or host-integrated launches"
+          "file": "src/native/policy/manifest.zig",
+          "name": "example app packaging requires typed components"
         },
         {
           "file": "src/native/services/service_registry.zig",
           "name": "service registry rejects internal interface names and unversioned API bypasses"
-        }
-      ]
-    },
-    "REQ-LEGACY-SUPPORT": {
-      "status": "enforced",
-      "enforcement_modules": [
-        "src/native/services/compatibility_environment.zig"
-      ],
-      "negative_tests": [
-        {
-          "file": "src/native/services/compatibility_environment.zig",
-          "name": "compatibility environments reject unsigned hidden or host-integrated launches"
         }
       ]
     },

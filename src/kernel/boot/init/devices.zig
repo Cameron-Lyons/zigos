@@ -10,6 +10,7 @@ const storage_driver_protocol = @import("../../../native/drivers/storage_driver_
 const panic_handler = @import("../../utils/panic.zig");
 const common = @import("../common.zig");
 const data_plane_boundary = @import("data_plane_boundary.zig");
+const hardware_proof = @import("../../platform/hardware_proof.zig");
 
 const PCI_CLASS_STORAGE_CONTROLLER: u8 = 0x01;
 const PCI_CLASS_NETWORK_ADAPTER: u8 = 0x02;
@@ -43,6 +44,7 @@ pub fn init() void {
     ata.init();
     captureAtaBootstrapInventory();
     capturePciInventory();
+    hardware_proof.capturePciEvidence();
     console.print("Bootstrap device inventory ready!\n");
 
     if (config.shouldInitRuntimeExtras()) {

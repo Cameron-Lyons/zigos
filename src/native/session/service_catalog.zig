@@ -22,7 +22,6 @@ pub const ServiceClass = enum(u8) {
     policy_mediation,
     permission_review_ui,
     service_registry,
-    compatibility_portal,
     network_stack,
     storage_object,
     package_install_update,
@@ -126,7 +125,6 @@ pub const BootstrapOwnerKey = enum(u8) {
     sync_service,
     media_service,
     task_runtime_service,
-    compatibility_service,
 };
 
 pub const BootstrapServiceRecordKey = enum(u8) {
@@ -135,7 +133,6 @@ pub const BootstrapServiceRecordKey = enum(u8) {
     policy_service,
     session,
     review_service_record,
-    compatibility_service,
     network_service,
     compositor_service,
     storage_service,
@@ -583,35 +580,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .published_native_service = true,
     },
-    .{
-        .class = .compatibility_portal,
-        .owner_key = .compatibility_service,
-        .service_record_key = .compatibility_service,
-        .boundary = .userspace_service,
-        .interface = catalogInterface(.compatibility_portal),
-        .required_capabilities = &.{ .service_bootstrap, .named_peer_network, .ui_review_surface },
-        .dependencies = &.{ .policy_mediation, .network_stack, .compositor_ui_session },
-        .restart_policy = .supervised_restart,
-        .isolation = .{ .namespace_isolated = true, .network = .named_peer_brokered, .ui = .review_surface },
-        .userspace_image = .{
-            .bundle_id = "zigos.system.compatibility-portal",
-            .artifact_name = "userspace-compatibility-portal.elf",
-            .display_name = "Compatibility Portal",
-            .label = "compatibility-portal",
-            .entry = "zigos.compat.portal",
-            .role_tag = 0xA113,
-            .heartbeat_increment = 19,
-            .contract_flags = (1 << 0) | (1 << 8),
-        },
-        .description = "isolated compatibility portal service",
-        .service_bootstrap = .{
-            .mode = .kernel_contract,
-            .budget = defaultServiceBudget(.compatibility_portal),
-            .correlation_base = 325,
-            .tick = 51,
-            .grants = &.{.service_task_authority},
-        },
-    },
 };
 
 pub const default_services = blk: {
@@ -798,7 +766,6 @@ pub fn serviceName(class: ServiceClass) []const u8 {
         .policy_mediation => "policy_mediation",
         .permission_review_ui => "permission_review_ui",
         .service_registry => "service_registry",
-        .compatibility_portal => "compatibility_portal",
         .network_stack => "network_stack",
         .storage_object => "storage_object",
         .package_install_update => "package_install_update",
@@ -879,12 +846,12 @@ fn publishedNativeServiceCount() usize {
 
 test "service catalog derives descriptors and bootstrap contracts from one source" {
     try std.testing.expectEqual(@as(usize, catalog.len), default_services.len);
-    try std.testing.expectEqual(@as(usize, 10), ordered_service_contracts.len);
+    try std.testing.expectEqual(@as(usize, 9), ordered_service_contracts.len);
     try std.testing.expectEqual(@as(usize, 8), ordered_published_native_service_contracts.len);
     try std.testing.expectEqual(component_abi_schema.service_catalog_bindings.len, catalog.len);
     try std.testing.expectEqual(ServiceClass.service_registry, ordered_service_contracts[0].class);
     try std.testing.expectEqual(ServiceClass.policy_mediation, ordered_service_contracts[1].class);
-    try std.testing.expectEqual(ServiceClass.compatibility_portal, ordered_service_contracts[9].class);
+    try std.testing.expectEqual(ServiceClass.media_print_helpers, ordered_service_contracts[8].class);
     try std.testing.expectEqual(ServiceClass.media_print_helpers, ordered_published_native_service_contracts[7].class);
     try std.testing.expectEqualStrings(component_abi_schema.interfaceForService(.storage_object).name, entryForClass(.storage_object).?.interface.name);
     try std.testing.expectEqualStrings("zigos.system.storage-object", bundleIdForServiceClass(.storage_object).?);

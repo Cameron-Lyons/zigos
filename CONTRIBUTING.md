@@ -60,7 +60,7 @@ Respect the architectural boundaries from the spec:
 - Keep the kernel typed and minimal.
 - Keep drivers, networking, storage, sync, policy, and recovery logic in restartable user-space services.
 - Preserve the first-class model concepts: principals, capabilities, objects, workspaces, and tasks.
-- Do not reintroduce ambient authority, direct host integration for compatibility environments, or authoritative file-path APIs in place of object/workspace mediation.
+- Do not reintroduce ambient authority, compatibility portal paths, direct host integration, or authoritative file-path APIs in place of object/workspace mediation.
 
 Keep the repo tidy:
 

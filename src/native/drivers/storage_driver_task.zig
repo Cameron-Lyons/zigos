@@ -61,6 +61,7 @@ pub const AtaControllerSession = struct {
     process_generation: u32,
     dma_domain_id: u64,
     dma_isolation: device_broker.DmaIsolationStatus,
+    brokered_dma_buffer: device_broker.BrokeredDmaBuffer,
 };
 
 pub fn establishAtaBootstrapSession(
@@ -76,6 +77,14 @@ pub fn establishAtaBootstrapSession(
     if (descriptor.device_id != device_id) return null;
     const task = kernel_port.kernel.runtime.find(task_id) orelse return null;
     const dma_isolation = device_broker.dmaIsolationStatus(device_id, dma_domain_id) catch return null;
+    const brokered_dma_window = device_broker.defaultBrokeredDmaWindow(device_id);
+    const brokered_dma_buffer = device_broker.authorizeDmaBuffer(
+        device_id,
+        dma_domain_id,
+        brokered_dma_window.base,
+        brokered_dma_window.length,
+        .bidirectional,
+    ) catch return null;
 
     return .{
         .client = client,
@@ -88,6 +97,7 @@ pub fn establishAtaBootstrapSession(
         .process_generation = task.process_generation,
         .dma_domain_id = dma_domain_id,
         .dma_isolation = dma_isolation,
+        .brokered_dma_buffer = brokered_dma_buffer,
     };
 }
 
@@ -114,9 +124,14 @@ pub fn writeAtaBootstrapSessionChecked(session: *AtaControllerSession, start_lba
 }
 
 pub fn constrainedProgrammedIoFirstTarget(session: *const AtaControllerSession) bool {
-    return session.dma_isolation.mode == .programmed_io_only and
-        !session.dma_isolation.hardware_iommu_programmed and
-        !session.dma_isolation.bus_master_dma_enabled;
+    return session.dma_isolation.mode == .brokered_dma_buffers and
+        session.dma_isolation.hardware_iommu_programmed and
+        !session.dma_isolation.bus_master_dma_enabled and
+        brokeredDmaBufferReady(session);
+}
+
+pub fn brokeredDmaBufferReady(session: *const AtaControllerSession) bool {
+    return device_broker.brokeredDmaBufferStillValid(session.brokered_dma_buffer);
 }
 
 pub fn staleAuthorityRejectedAfterGenerationChange(session: *const AtaControllerSession) bool {
@@ -129,6 +144,10 @@ pub fn staleDmaPortAccessRejectedAfterGenerationChange(session: *const AtaContro
     var stale_session = session.*;
     _ = stale_session.client.readPort(stale_session.base_port + ATA_REG_STATUS, .u8) catch |err| return err == error.StaleGeneration;
     return false;
+}
+
+pub fn staleBrokeredDmaBufferRejectedAfterGenerationChange(session: *const AtaControllerSession) bool {
+    return !device_broker.brokeredDmaBufferStillValid(session.brokered_dma_buffer);
 }
 
 export fn zigosStorageBootstrapAtaRead(
@@ -378,7 +397,10 @@ test "storage driver task attaches only through the kernel device broker" {
         .irq_line = 14,
         .sector_count = storage_volume.required_device_sectors,
     }));
+    _ = try device_broker.programBrokeredDmaIsolation(0x1F001, 11);
     var session = establishAtaBootstrapSession(&kernel_port, 0x1F001, device_capability.id, driver_task.id, 11, 9).?;
+    try std.testing.expect(constrainedProgrammedIoFirstTarget(&session));
+    try std.testing.expect(brokeredDmaBufferReady(&session));
     attachAtaBootstrapSession(&session);
     try std.testing.expect(storage_volume.hasAttachedDevice());
 }

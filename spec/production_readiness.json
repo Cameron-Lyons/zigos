@@ -320,6 +320,9 @@
     ],
     "reference_artifacts": [
       "src/native/platform/hardware_target.zig",
+      "src/kernel/boot/handoff.zig",
+      "src/kernel/platform/hardware_proof.zig",
+      "src/kernel/platform/smbios.zig",
       "spec/hardware/nuc11tnki5-required-markers.txt",
       "spec/hardware/nuc11tnki5-proof-bundle.md",
       "scripts/check-nuc11tnki5-hardware-proof.sh",
@@ -352,7 +355,8 @@
     "current_hardware_evidence": [],
     "open_gaps": [
       "No NUC11TNKi5 serial log has been captured from real hardware yet.",
-      "UEFI handoff, ACPI parsing, APIC timer calibration, GOP framebuffer ownership, xHCI input, NVMe, Intel I225-LM, suspend/resume, crash recovery, and booted production-evidence proof markers still need real-device implementation and capture."
+      "The kernel now preserves the GRUB Multiboot handoff, requests a 32-bit framebuffer, validates memory-map and GOP framebuffer descriptors, scans SMBIOS for the NUC11TNKi5 SKU, and composes early ACPI/MADT/FADT/APIC evidence, but those paths have not been captured from the selected NUC firmware.",
+      "xHCI keyboard input reports, NVMe read/write cycles, Intel I225-LM transmit/receive cycles, suspend/resume loops, induced crash-recovery loops, and booted production-evidence markers still need real-device execution and capture."
     ]
   },
   "tracks": [
@@ -492,6 +496,9 @@
         "src/kernel/platform/apic.zig",
         "src/kernel/platform/fadt.zig",
         "src/kernel/platform/framebuffer.zig",
+        "src/kernel/platform/hardware_proof.zig",
+        "src/kernel/platform/smbios.zig",
+        "src/kernel/boot/handoff.zig",
         "src/kernel/platform/crash_record.zig",
         "src/kernel/boot/init/devices.zig",
         "src/kernel/drivers/pci.zig",
@@ -503,7 +510,10 @@
         "The first supported hardware target is pinned to Intel NUC 11 Pro Kit NUC11TNKi5 instead of a generic PC-compatible bucket.",
         "The target contract enumerates UEFI boot, ACPI tables, APIC timer, GOP framebuffer, USB xHCI input, NVMe block I/O, Intel I225-LM network, suspend/resume, and crash recovery as required hardware markers.",
         "The build exposes an OVMF-backed uefi-qemu-test preflight for the ISO path before attempting the same image on the NUC firmware.",
+        "The Multiboot entry path now preserves bootloader magic and info pointers, asks GRUB to keep a 32-bit framebuffer payload, and exposes tested memory-map and framebuffer handoff parsers for runtime proof capture.",
+        "The kernel tree now has a tested SMBIOS scanner/parser that can match the NUC11TNKi5 SKU from real firmware tables before emitting real-hardware source or board markers.",
         "The kernel tree now has a tested ACPI RSDP parser and aligned scanner as the first non-invasive ACPI building block for the target.",
+        "The ACPI parser now validates SDT headers and XSDT/RSDT root-table entries so the hardware proof path can require MADT and FADT presence instead of a standalone RSDP checksum.",
         "The kernel tree now has a tested MADT parser that summarizes local APIC, I/O APIC, interrupt-source override, x2APIC, and PC-AT compatibility data before APIC timer bring-up.",
         "The kernel tree now has a tested FADT parser for PM control blocks, SCI interrupt, PM timer, and reset register plumbing needed before suspend/resume work.",
         "The kernel tree now has a tested UEFI GOP-style linear framebuffer descriptor validator with stride, buffer-size, pixel-format, and text-grid checks.",
@@ -512,16 +522,15 @@
         "The kernel tree now has a tested NVMe inventory shim with controller-capability parsing, admin-queue validation, and fail-closed data-plane transfer behavior.",
         "The kernel tree now has a tested Intel I225-LM inventory shim with RX/TX ring-plan validation and fail-closed kernel transmit behavior.",
         "The kernel tree now has a tested xHCI input inventory shim with controller-capability parsing, command/event ring validation, and fail-closed USB input report behavior.",
+        "A composed kernel hardware-proof module now gates NUC markers on real SKU evidence, Multiboot memory-map and GOP framebuffer handoff, ACPI MADT/FADT discovery, APIC timer readiness evidence, xHCI input evidence, NVMe and I225 cycle counts, suspend/resume counts, and redacted crash-recovery counts.",
         "The NUC11TNKi5 proof bundle contract now requires real-hardware source metadata, sidecar firmware settings, power-cycle notes, artifact digests, all subsystem PASS markers, all booted production-evidence markers, and minimum cold-boot, reboot, storage, network, suspend/resume, and crash-recovery counters.",
         "Production readiness rejects QEMU-only evidence for this target; hardware proof requires captured real-machine logs, firmware settings, power-cycle notes, booted service/sync/driver/permission/update markers, and repeated cold boot, reboot, suspend/resume, storage, network, and crash-recovery cycles."
       ],
       "production_gaps": [
-        "The repo does not yet emit the NUC11TNKi5 hardware markers from a real boot.",
+        "The repo can now emit early NUC11TNKi5 proof markers only when the corresponding firmware/handoff facts are present, but no real NUC11TNKi5 boot log has been captured.",
         "UEFI handoff still depends on the GRUB ISO path and has not been proven on the selected NUC firmware.",
-        "The ACPI RSDP parser is tested but not wired to a UEFI or BIOS memory-map handoff during boot.",
-        "The MADT parser is tested but not wired to local APIC, I/O APIC, or APIC timer programming during boot.",
-        "The FADT parser is tested but not wired to ACPI sleep-state discovery, wake, or reset execution.",
-        "The framebuffer descriptor validator is tested but not wired to the bootloader's GOP framebuffer handoff during boot.",
+        "ACPI RSDP, XSDT/RSDT, MADT, and FADT discovery are wired into early boot proof capture, but APIC timer programming remains proof-readiness evidence rather than interrupt-driven timer replacement.",
+        "The framebuffer descriptor validator is wired to Multiboot/GOP-style framebuffer handoff, but real GOP ownership and rendering still need capture on HDMI/framebuffer output.",
         "Crash record formatting is tested but not persisted before reboot or consumed by recovery boot.",
         "PCI target identification, NVMe controller queue validation, and Intel I225-LM ring planning are tested, but NVMe read/write and Intel I225-LM packet I/O drivers are not implemented.",
         "xHCI capability parsing and ring validation are tested, but USB HID keyboard enumeration and input reports are not implemented.",
@@ -535,8 +544,8 @@
       ],
       "next_actions": [
         "Make build/os.iso boot reliably through the NUC11TNKi5 UEFI firmware and record firmware settings.",
-        "Add ACPI table discovery and APIC timer proof markers before replacing PIT/PIC assumptions on the target.",
-        "Add GOP framebuffer, xHCI keyboard, NVMe, and Intel I225-LM userspace-driver proof markers.",
+        "Capture the new Multiboot memory-map, SMBIOS SKU, ACPI table, APIC timer-readiness, and GOP framebuffer proof markers from the NUC11TNKi5 firmware.",
+        "Add xHCI keyboard, NVMe read/write, and Intel I225-LM packet I/O implementations that record real cycle counters before emitting PASS markers.",
         "Add suspend/resume and induced crash-recovery loops to the NUC proof runbook.",
         "Capture service startup, permission review, sync, driver restart, and update rollback markers in the NUC proof run."
       ],
@@ -693,6 +702,57 @@
       ]
     },
     {
+      "id": "notes-docs-daily-driver-slice",
+      "title": "Notes and docs daily-driver slice",
+      "priority": "P0",
+      "status": "prod_candidate",
+      "requirements": [
+        "REQ-APP-EXECUTION",
+        "REQ-PERMISSION-UX",
+        "REQ-SHARING",
+        "REQ-LOCAL-FIRST-REPLICATION",
+        "REQ-SNAPSHOTS-AND-RECOVERY",
+        "REQ-BASE-OS-UPDATES"
+      ],
+      "implementation_anchors": [
+        "src/native/platform/rendered_shell/production_journey.zig",
+        "src/native/platform/rendered_shell/tests.zig",
+        "src/native/platform/native_ux.zig",
+        "src/native/services/package_service.zig",
+        "src/native/storage/storage_service.zig",
+        "src/native/sync/sync_service.zig",
+        "src/native/task/task_runtime_service.zig"
+      ],
+      "current_evidence": [
+        "The rendered-shell production journey is now scoped to one Notes app daily-driver path rather than a generic desktop expansion path.",
+        "The journey installs a signed native Notes package, starts its native component, opens a notes workspace and document, reviews the local object-access permission, grants an object-scoped collaborative share, syncs only after sharing, updates and rolls back the package, recovers shell/runtime state, removes the package, and revokes device and policy authority.",
+        "The share step writes a concrete trusted-overlay, object-scoped workspace grant and verifies the collaborator can read and write the shared note before sync proceeds.",
+        "Task-flow ledger evidence now includes share_document alongside install_app, open_workspace, open_document, review_permission_request, sync_workspace, update_app, rollback_app_update, recover_system, and remove_app."
+      ],
+      "production_gaps": [
+        "The slice proof is still a host/service journey; the same ordered path is not yet a booted QEMU marker group or real-hardware capture.",
+        "The Notes editor behavior is represented by document open, permission review, share, and sync service state rather than text input/editing through a booted UI loop.",
+        "Native package install/update proof uses signed manifest state and package-service lifecycle rather than loading a realistic Notes app asset bundle through a public store channel."
+      ],
+      "graduation_criteria": [
+        "Keep the first daily-driver scenario narrow: Notes app install, notes workspace/document use, explicit permission review, object-scoped sharing, local-first sync, update rollback, recovery, and package removal.",
+        "Promote the ordered host journey into QEMU native smoke markers before broadening desktop surface area.",
+        "Require the same journey markers in the NUC11TNKi5 hardware proof bundle before calling the slice production-ready."
+      ],
+      "next_actions": [
+        "Add booted native smoke markers for the Notes package install/open/share/sync/update/recover path.",
+        "Route a minimal text edit through the booted shell input loop and assert the edited note survives sync and recovery.",
+        "Capture the complete Notes daily-driver marker group in build/hardware-proofs/nuc11tnki5/serial.log."
+      ],
+      "verification_commands": [
+        "./scripts/zig.sh build host-tests",
+        "./scripts/zig.sh build spec-tests",
+        "./scripts/zig.sh build prod-readiness",
+        "./scripts/zig.sh build zigos-native-smoke-test",
+        "scripts/check-nuc11tnki5-hardware-proof.sh build/hardware-proofs/nuc11tnki5"
+      ]
+    },
+    {
       "id": "userspace-driver-data-path",
       "title": "Userspace driver data-plane depth",
       "priority": "P1",
@@ -714,27 +774,27 @@
         "src/kernel/boot/init/data_plane_boundary.zig"
       ],
       "current_evidence": [
-        "Driver registration checks signed bundles, device-class authority, DMA range metadata, restart generations, and a constrained first target of brokered programmed-I/O ATA rather than bus-master DMA.",
+        "Driver registration checks signed bundles, device-class authority, DMA range metadata, restart generations, and a constrained first target of brokered programmed-I/O ATA with programmed DMA domains rather than bus-master DMA.",
         "Storage driver tasks attach through the kernel device broker and the ATA bootstrap path exports checked read/write bridges for freestanding volume access.",
-        "The driver boundary spec gate exercises brokered ATA read/write I/O and rejects stale task authority, stale broker sessions, expired leases, invalid ports, explicit broker revocation, and post-restart target generation mismatches.",
+        "The driver boundary spec gate exercises brokered ATA read/write I/O, programs an IOMMU-style DMA domain, authorizes brokered DMA buffers, and rejects stale task authority, stale DMA buffers, stale broker sessions, expired leases, invalid ports, explicit broker revocation, and post-restart target generation mismatches.",
         "The storage data-plane gate covers timeout propagation, active-I/O restart, and partial-transfer recovery by proving incomplete ATA writes are discarded before a restarted userspace driver reissues I/O.",
         "The native network driver path reauthorizes brokered service-identity sends through the egress broker, so revoked network-policy capabilities stop already-open userspace network paths before transmit.",
-        "QEMU driver restart proof performs broker-mediated storage reads and writes before and after restart, rejects stale authority and stale DMA/port access after generation change, gates the new broker session rebind, and is now required by the real-hardware proof marker contract."
+        "QEMU driver restart proof performs broker-mediated storage reads and writes before and after restart, rejects stale authority, stale DMA buffer, and stale port access after generation change, gates the new broker session rebind, and is now required by the real-hardware proof marker contract."
       ],
       "production_gaps": [
         "Only the bootstrap storage path has concrete hardware-like data-plane depth; other driver classes remain inventory, policy, or publication proofs.",
-        "IOMMU and DMA isolation are represented as native policy records and a constrained programmed-I/O first target rather than hardware programming and fault evidence.",
+        "IOMMU and DMA isolation now have executable native programming and brokered-buffer evidence, but not real VT-d/AMD-Vi page-table programming or device fault capture.",
         "The timeout, partial-transfer, and explicit revocation cases are host spec gates; QEMU coverage now gates brokered restart and rebind while hardware packet/block I/O evidence is still pending."
       ],
       "graduation_criteria": [
         "Add broker-mediated data-plane tests for at least storage and network that run in QEMU and prove no kernel direct publication for excluded subsystems.",
-        "Add DMA/IOMMU programming interfaces before broadening the first production target beyond brokered programmed-I/O storage.",
+        "Replace the native IOMMU model with real hardware programming and fault evidence before broadening the first production target beyond brokered programmed-I/O storage.",
         "Gate driver restart on active I/O recovery, broker revocation, rebind, and no stale DMA or port access after generation change."
       ],
       "next_actions": [
         "Move timeout, partial transfer, and explicit broker revocation proofs into the focused QEMU driver restart gate.",
-        "Define the hardware IOMMU programming interface required before enabling bus-master DMA targets.",
-        "Capture the driver restart/rebind marker group in the NUC11TNKi5 hardware proof bundle."
+        "Bind the native DMA-domain model to real VT-d/AMD-Vi programming and archive device-fault evidence before enabling bus-master DMA targets.",
+        "Capture the expanded driver restart/rebind marker group, including DMA-domain and brokered-buffer markers, in the NUC11TNKi5 hardware proof bundle."
       ],
       "verification_commands": [
         "./scripts/zig.sh build driver-restart-qemu-test",

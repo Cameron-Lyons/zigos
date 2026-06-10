@@ -17,6 +17,8 @@ pub const MAX_CHUNKS: usize = 224;
 pub const MAX_BLOB_BYTES: usize = MAX_CHUNK_BYTES * MAX_BLOB_CHUNKS;
 pub const MAX_PAYLOAD_BYTES: usize = MAX_BLOB_BYTES;
 pub const MAX_VERSION_PARENTS: usize = 2;
+pub const MAX_OBJECT_QUERY_RESULTS: usize = 16;
+pub const MAX_OBJECT_HISTORY_RESULTS: usize = 16;
 const MAX_METADATA_MESSAGE_BYTES: usize = 256;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
@@ -123,6 +125,56 @@ pub const PutResult = struct {
     blob_address: BlobAddress,
     version_address: VersionAddress,
     new_object: bool,
+};
+
+pub const ObjectQuery = struct {
+    object_type: ?ObjectType = null,
+    label_contains: []const u8 = "",
+    content_type: []const u8 = "",
+    updated_since_ticks: u64 = 0,
+};
+
+pub const ObjectQueryResult = struct {
+    object_id: ids.ObjectId = ids.ObjectId.zero,
+    latest_version_id: ids.VersionId = ids.VersionId.zero,
+    object_type: ObjectType = .blob,
+    version_count: u16 = 0,
+    snapshot_count: u16 = 0,
+    updated_at_ticks: u64 = 0,
+    label_len: usize = 0,
+    label: [48]u8 = [_]u8{0} ** 48,
+    content_type_len: usize = 0,
+    content_type: [64]u8 = [_]u8{0} ** 64,
+
+    pub fn labelSlice(self: *const ObjectQueryResult) []const u8 {
+        return self.label[0..@min(self.label_len, self.label.len)];
+    }
+
+    pub fn contentTypeSlice(self: *const ObjectQueryResult) []const u8 {
+        return self.content_type[0..@min(self.content_type_len, self.content_type.len)];
+    }
+};
+
+pub const ObjectHistoryEntry = struct {
+    object_id: ids.ObjectId = ids.ObjectId.zero,
+    version_id: ids.VersionId = ids.VersionId.zero,
+    previous_version_id: ids.VersionId = ids.VersionId.zero,
+    parent_count: u8 = 0,
+    object_type: ObjectType = .blob,
+    payload_len: usize = 0,
+    created_at_ticks: u64 = 0,
+    label_len: usize = 0,
+    label: [48]u8 = [_]u8{0} ** 48,
+    content_type_len: usize = 0,
+    content_type: [64]u8 = [_]u8{0} ** 64,
+
+    pub fn labelSlice(self: *const ObjectHistoryEntry) []const u8 {
+        return self.label[0..@min(self.label_len, self.label.len)];
+    }
+
+    pub fn contentTypeSlice(self: *const ObjectHistoryEntry) []const u8 {
+        return self.content_type[0..@min(self.content_type_len, self.content_type.len)];
+    }
 };
 
 pub const ObjectRecord = struct {
@@ -496,8 +548,18 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             return &slot.object;
         }
 
+        pub fn objectConst(self: *const Self, object_id: anytype) ?*const ObjectRecord {
+            const slot = self.objects.getConst(ids.coerce(ids.ObjectId, object_id)) orelse return null;
+            return &slot.object;
+        }
+
         pub fn version(self: *Self, version_id: anytype) ?*VersionRecord {
             const slot = self.versions.get(ids.coerce(ids.VersionId, version_id)) orelse return null;
+            return &slot.version;
+        }
+
+        pub fn versionConst(self: *const Self, version_id: anytype) ?*const VersionRecord {
+            const slot = self.versions.getConst(ids.coerce(ids.VersionId, version_id)) orelse return null;
             return &slot.version;
         }
 
@@ -505,6 +567,53 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const object_record = self.object(object_id) orelse return null;
             if (object_record.latest_version_id.isZero()) return null;
             return self.version(object_record.latest_version_id);
+        }
+
+        pub fn latestVersionConst(self: *const Self, object_id: anytype) ?*const VersionRecord {
+            const object_record = self.objectConst(object_id) orelse return null;
+            if (object_record.latest_version_id.isZero()) return null;
+            return self.versionConst(object_record.latest_version_id);
+        }
+
+        pub fn queryObjects(
+            self: *const Self,
+            query: ObjectQuery,
+            output: []ObjectQueryResult,
+        ) []const ObjectQueryResult {
+            var count: usize = 0;
+            for (self.objects.slots) |slot| {
+                if (!slot.in_use) continue;
+                const object_record = &slot.object;
+                if (query.object_type) |object_type| {
+                    if (object_record.object_type != object_type) continue;
+                }
+                if (object_record.provenance.updated_at_ticks < query.updated_since_ticks) continue;
+                const latest = self.versionConst(object_record.latest_version_id) orelse continue;
+                if (query.content_type.len != 0 and !std.mem.eql(u8, latest.metadata.contentTypeSlice(), query.content_type)) continue;
+                if (query.label_contains.len != 0 and indexOfFold(latest.metadata.labelSlice(), query.label_contains) == null) continue;
+                if (count >= output.len) break;
+                output[count] = queryResultFor(object_record, latest);
+                count += 1;
+            }
+            std.sort.heap(ObjectQueryResult, output[0..count], {}, compareObjectQueryResults);
+            return output[0..count];
+        }
+
+        pub fn objectHistory(
+            self: *const Self,
+            object_id: anytype,
+            output: []ObjectHistoryEntry,
+        ) Error![]const ObjectHistoryEntry {
+            const object_record = self.objectConst(object_id) orelse return error.ObjectNotFound;
+            var count: usize = 0;
+            var current_version_id = object_record.latest_version_id;
+            while (!current_version_id.isZero() and count < output.len) {
+                const version_record = self.versionConst(current_version_id) orelse return error.VersionNotFound;
+                output[count] = historyEntryFor(version_record);
+                count += 1;
+                current_version_id = version_record.previous_version_id;
+            }
+            return output[0..count];
         }
 
         pub fn versionPayload(self: *Self, version_record: *const VersionRecord) Error![]const u8 {
@@ -822,6 +931,61 @@ fn copyBytes(dest: []u8, src: []const u8) void {
     while (index < len) : (index += 1) {
         dest[index] = src[index];
     }
+}
+
+fn queryResultFor(object_record: *const ObjectRecord, latest: *const VersionRecord) ObjectQueryResult {
+    var result = ObjectQueryResult{
+        .object_id = object_record.id,
+        .latest_version_id = object_record.latest_version_id,
+        .object_type = object_record.object_type,
+        .version_count = object_record.version_count,
+        .snapshot_count = object_record.snapshot_state.snapshot_count,
+        .updated_at_ticks = object_record.provenance.updated_at_ticks,
+    };
+    result.label_len = latest.metadata.label_len;
+    result.label = latest.metadata.label;
+    result.content_type_len = latest.metadata.content_type_len;
+    result.content_type = latest.metadata.content_type;
+    return result;
+}
+
+fn historyEntryFor(version_record: *const VersionRecord) ObjectHistoryEntry {
+    var entry = ObjectHistoryEntry{
+        .object_id = version_record.object_id,
+        .version_id = version_record.id,
+        .previous_version_id = version_record.previous_version_id,
+        .parent_count = version_record.parent_count,
+        .object_type = version_record.object_type,
+        .payload_len = version_record.payload_len,
+        .created_at_ticks = version_record.metadata.created_at_ticks,
+    };
+    entry.label_len = version_record.metadata.label_len;
+    entry.label = version_record.metadata.label;
+    entry.content_type_len = version_record.metadata.content_type_len;
+    entry.content_type = version_record.metadata.content_type;
+    return entry;
+}
+
+fn compareObjectQueryResults(_: void, left: ObjectQueryResult, right: ObjectQueryResult) bool {
+    if (left.updated_at_ticks == right.updated_at_ticks) return left.object_id.raw() < right.object_id.raw();
+    return left.updated_at_ticks > right.updated_at_ticks;
+}
+
+fn indexOfFold(haystack: []const u8, needle: []const u8) ?usize {
+    if (needle.len == 0) return 0;
+    if (needle.len > haystack.len) return null;
+    var index: usize = 0;
+    while (index + needle.len <= haystack.len) : (index += 1) {
+        var matches = true;
+        for (needle, 0..) |needle_byte, offset| {
+            if (std.ascii.toLower(haystack[index + offset]) != std.ascii.toLower(needle_byte)) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches) return index;
+    }
+    return null;
 }
 
 fn writeMetadata(dest: *SignedMetadata, src: *const SignedMetadata) void {

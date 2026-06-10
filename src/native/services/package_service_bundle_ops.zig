@@ -3,14 +3,11 @@ const native_util = @import("../core/util.zig");
 
 const copyTextExact = native_util.copyTextExact;
 
-pub const Error = manifest.ValidationError || error{
-    MigrationManifestTooLong,
-};
+pub const Error = manifest.ValidationError;
 
 pub fn validateInstallTarget(
     comptime InstalledBundleType: type,
     bundle: manifest.BundleManifest,
-    migration_manifest: []const u8,
 ) Error!void {
     const RevisionType = arrayFieldChildType(InstalledBundleType, "revisions");
     const StoredComponentType = arrayFieldChildType(RevisionType, "components");
@@ -54,10 +51,6 @@ pub fn validateInstallTarget(
     for (bundle.background_tasks) |task| {
         try validateTextLen(task.id, arrayFieldLen(StoredBackgroundTaskType, "id"), error.BackgroundTaskIdTooLong);
     }
-
-    if (migration_manifest.len > arrayFieldLen(InstalledBundleType, "last_migration_manifest")) {
-        return error.MigrationManifestTooLong;
-    }
 }
 
 pub fn installNew(
@@ -65,10 +58,9 @@ pub fn installNew(
     source: manifest.BundleManifest,
     data_schema_version: u32,
     permission_digest: [32]u8,
-    migration_manifest: []const u8,
 ) Error!void {
     const BundleType = storageType(@TypeOf(bundle));
-    try validateInstallTarget(BundleType, source, migration_manifest);
+    try validateInstallTarget(BundleType, source);
 
     bundle.bundle_id_len = copyTextExact(&bundle.bundle_id, source.bundle_id) catch return error.BundleIdTooLong;
     bundle.revision_count = 1;
@@ -76,7 +68,6 @@ pub fn installNew(
     bundle.active_revision_slot = 0;
     bundle.rollback_revision_slot = null;
     try writeRevision(&bundle.revisions[0], source, data_schema_version, permission_digest, 1);
-    bundle.last_migration_manifest_len = copyTextExact(&bundle.last_migration_manifest, migration_manifest) catch return error.MigrationManifestTooLong;
 }
 
 pub fn installRevision(
@@ -84,10 +75,9 @@ pub fn installRevision(
     source: manifest.BundleManifest,
     data_schema_version: u32,
     permission_digest: [32]u8,
-    migration_manifest: []const u8,
 ) Error!void {
     const BundleType = storageType(@TypeOf(bundle));
-    try validateInstallTarget(BundleType, source, migration_manifest);
+    try validateInstallTarget(BundleType, source);
 
     const target_slot = bundle.inactiveRevisionSlot();
     try writeRevision(&bundle.revisions[target_slot], source, data_schema_version, permission_digest, bundle.next_revision_id);
@@ -99,7 +89,6 @@ pub fn installRevision(
     }
     bundle.rollback_revision_slot = bundle.active_revision_slot;
     bundle.active_revision_slot = target_slot;
-    bundle.last_migration_manifest_len = copyTextExact(&bundle.last_migration_manifest, migration_manifest) catch return error.MigrationManifestTooLong;
 }
 
 pub fn rollback(bundle: anytype) void {

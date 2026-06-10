@@ -47,14 +47,11 @@ pub const QuotaRejection = volume_capacity.QuotaRejection;
 
 pub const ProductQuotaPolicy = struct {
     envelope: ProductCapacityEnvelope,
-    legacy_migration_envelope: ProductCapacityEnvelope,
     over_limit_write_behavior: OverLimitWriteBehavior,
     persistence_error: Error,
     retry_requires_freeing_space: bool,
-    legacy_demo_images_loadable: bool,
 };
 
-pub const legacy_demo_capacity_envelope = volume_quota.legacy_demo_capacity_envelope;
 pub const first_supported_capacity_envelope = volume_quota.first_supported_capacity_envelope;
 
 pub fn productCapacityEnvelope() ProductCapacityEnvelope {
@@ -64,11 +61,9 @@ pub fn productCapacityEnvelope() ProductCapacityEnvelope {
 pub fn productQuotaPolicy() ProductQuotaPolicy {
     return .{
         .envelope = first_supported_capacity_envelope,
-        .legacy_migration_envelope = legacy_demo_capacity_envelope,
         .over_limit_write_behavior = .reject_without_partial_persistence,
         .persistence_error = error.NoSpaceLeft,
         .retry_requires_freeing_space = true,
-        .legacy_demo_images_loadable = true,
     };
 }
 
@@ -191,7 +186,7 @@ pub const Volume = struct {
     }
 
     pub fn loadFromImage(self: *Volume, image: []const u8, store: *object_store.Store, workspaces: *workspace.Directory) !u64 {
-        if (image.len < legacy_demo_capacity_envelope.volume_image_bytes) return error.ImageTooSmall;
+        if (image.len < image_bytes) return error.ImageTooSmall;
         return try loadLatestValidImageRoot(self, image, store, workspaces);
     }
 };

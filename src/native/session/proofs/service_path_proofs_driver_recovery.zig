@@ -170,6 +170,7 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
 
     try std.testing.expect(storage_driver_task_mod.staleAuthorityRejectedAfterGenerationChange(&stale_crash_session));
     try std.testing.expect(storage_driver_task_mod.staleDmaPortAccessRejectedAfterGenerationChange(&stale_crash_session));
+    try std.testing.expect(storage_driver_task_mod.staleBrokeredDmaBufferRejectedAfterGenerationChange(&stale_crash_session));
     var stale_crash_session_copy = stale_crash_session;
     var stale_crash_read: [storage_volume.sector_size]u8 = undefined;
     try std.testing.expect(!storage_driver_task_mod.readAtaBootstrapSession(
@@ -265,6 +266,7 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expectError(error.CapabilityNotFound, stale_authority_client.describe());
     try std.testing.expect(storage_driver_task_mod.staleAuthorityRejectedAfterGenerationChange(&stale_hot_swap_session));
     try std.testing.expect(storage_driver_task_mod.staleDmaPortAccessRejectedAfterGenerationChange(&stale_hot_swap_session));
+    try std.testing.expect(storage_driver_task_mod.staleBrokeredDmaBufferRejectedAfterGenerationChange(&stale_hot_swap_session));
 
     runtime.allowHostPointerSyscallsForTask(swapped_driver.owner_task_id);
     const swapped_descriptor = try expectDeviceDescribe(kernel_port, swapped_driver.owner_task_id, next_authority.id, 802);
@@ -407,6 +409,8 @@ fn proveReboundStorageSession(
     try std.testing.expect(session.process_generation > old_process_generation);
     try std.testing.expectEqual(driver.dma_domain_id, session.dma_domain_id);
     try std.testing.expect(session.dma_domain_id != old_dma_domain_id);
+    try std.testing.expect(storage_driver_task_mod.constrainedProgrammedIoFirstTarget(&session));
+    try std.testing.expect(storage_driver_task_mod.brokeredDmaBufferReady(&session));
 }
 
 fn fillStoragePattern(buffer: []u8, label: []const u8, salt: u8) void {

@@ -476,6 +476,116 @@ test "storage service enforces durable object-scoped workspace shares" {
     try std.testing.expectEqualStrings("documents/shared.md", restored.scopePathSlice());
 }
 
+test "storage port queries object history and grants object capabilities" {
+    var checkpoint_store = CheckpointStore{};
+    checkpoint_store.resetPersistent();
+    defer checkpoint_store.resetPersistent();
+
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 151 };
+    const owner_user = principal.PrincipalId{ .kind = .user, .serial = 151 };
+    const reviewer = principal.PrincipalId{ .kind = .app, .serial = 152 };
+    var core = StorageCore.initWithStore(806, 151, storage_owner, &checkpoint_store);
+    var capabilities = capability.CapabilityTable.init();
+    var port = StoragePort.init(&core, &capabilities);
+
+    const service_writer = try capabilities.mintBootRoot(.{
+        .holder = storage_owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = core.service_id },
+        .rights = .{ .service = .{ .object_read = true, .object_write = true } },
+        .scope = .{ .task_id = 151, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    const storage_authority = AuthorityContext{
+        .task_id = 151,
+        .principal = storage_owner,
+        .capability_id = service_writer.id,
+        .now_ticks = 10,
+    };
+    const signer = signing.SignerIdentity{
+        .label = "zigos-object-query-storage-key",
+        .seed = [_]u8{0xC8} ** 32,
+    };
+    const first = try port.putVersion(storage_authority, .{
+        .preferred_object_id = ids.object(1_060),
+        .object_type = .document,
+        .payload = "object draft v1",
+        .metadata = try object_store.signMetadata(signer, "Object Draft", "text/markdown", .document, "object draft v1", 10),
+    });
+    const second = try port.putVersion(storage_authority, .{
+        .preferred_object_id = ids.object(1_060),
+        .object_type = .document,
+        .payload = "object draft v2",
+        .metadata = try object_store.signMetadata(signer, "Object Draft", "text/markdown", .document, "object draft v2", 11),
+        .parent_version_id = first.version_id,
+    });
+    const workspace_record = try port.createWorkspace(storage_authority, .{
+        .owner = owner_user,
+        .label = "object-native",
+    });
+    try port.beginTransaction(storage_authority, workspace_record.id);
+    try port.stagePut(storage_authority, workspace_record.id, "exports/object-draft.md", second.object_id, second.version_id, .document);
+    _ = try port.commit(storage_authority, workspace_record.id);
+
+    var query_buffer: [object_store.MAX_OBJECT_QUERY_RESULTS]object_store.ObjectQueryResult = undefined;
+    const query_results = try port.queryObjects(storage_authority, .{
+        .object_type = .document,
+        .label_contains = "draft",
+    }, &query_buffer);
+    try std.testing.expectEqual(@as(usize, 1), query_results.len);
+    try std.testing.expectEqual(second.object_id, query_results[0].object_id);
+    try std.testing.expectEqual(second.version_id, query_results[0].latest_version_id);
+    try std.testing.expectEqualStrings("Object Draft", query_results[0].labelSlice());
+
+    const owner_workspace_authority = try capabilities.mintBootRoot(.{
+        .holder = owner_user,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .workspace, .id = workspace_record.id.raw() },
+        .rights = .{ .workspace = .{
+            .object_read = true,
+            .object_write = true,
+            .capability_derive = true,
+            .capability_query = true,
+        } },
+        .scope = .{ .workspace_id = workspace_record.id.raw(), .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    const object_share = try port.grantObjectShare(&capabilities, .{
+        .task_id = 152,
+        .principal = owner_user,
+        .capability_id = owner_workspace_authority.id,
+        .now_ticks = 20,
+    }, workspace_record.id, second.object_id, .{
+        .principal_id = reviewer,
+        .can_read = true,
+        .can_write = false,
+        .can_export = false,
+        .expires_at_ticks = 80,
+        .network_scope = .local_only,
+        .reshare_policy = .owner_only,
+        .audit_visibility = .shared_participants,
+    });
+    try std.testing.expectEqual(capability.CapabilityTargetKind.object, object_share.capability.target.kind);
+    try std.testing.expectEqual(second.object_id.raw(), object_share.capability.target.id);
+    try std.testing.expect(object_share.capability.rights.has(.object_read));
+    try std.testing.expect(!object_share.capability.rights.has(.object_write));
+    try std.testing.expect(object_share.grant.isObjectScoped());
+
+    var history_buffer: [object_store.MAX_OBJECT_HISTORY_RESULTS]object_store.ObjectHistoryEntry = undefined;
+    const history = try port.objectHistory(.{
+        .task_id = 153,
+        .principal = reviewer,
+        .capability_id = object_share.capability.id,
+        .now_ticks = 30,
+    }, second.object_id, &history_buffer);
+    try std.testing.expectEqual(@as(usize, 2), history.len);
+    try std.testing.expectEqual(second.version_id, history[0].version_id);
+    try std.testing.expectEqual(first.version_id, history[1].version_id);
+    try std.testing.expectEqualStrings("Object Draft", history[0].labelSlice());
+}
+
 test "storage service accepts large object payloads through mapped shared memory transfer" {
     var checkpoint_store = CheckpointStore{};
     checkpoint_store.resetPersistent();

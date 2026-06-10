@@ -8,24 +8,6 @@ pub const ProductCapacityUsage = volume_capacity.ProductCapacityUsage;
 pub const QuotaLimit = volume_capacity.QuotaLimit;
 pub const QuotaRejection = volume_capacity.QuotaRejection;
 
-pub const legacy_demo_capacity_envelope = ProductCapacityEnvelope{
-    .volume_image_bytes = 524288,
-    .required_device_sectors = 1024,
-    .max_volume_log_bytes = 523264,
-    .max_object_payload_bytes = 98304,
-    .max_object_records = 128,
-    .max_version_records = 512,
-    .max_blob_records = 512,
-    .max_blob_chunks_per_payload = 24,
-    .max_chunk_records = 192,
-    .max_chunk_bytes = object_store.PAGE_SIZE_BYTES,
-    .max_workspaces = workspace.MAX_WORKSPACES,
-    .max_workspace_entries_per_workspace = workspace.MAX_WORKSPACE_ENTRIES,
-    .max_snapshots = workspace.MAX_SNAPSHOTS,
-    .max_replay_log_records = 128,
-    .max_log_segments = 16,
-};
-
 pub const first_supported_capacity_envelope = ProductCapacityEnvelope{
     .volume_image_bytes = volume_layout.image_bytes,
     .required_device_sectors = volume_layout.required_device_sectors,
