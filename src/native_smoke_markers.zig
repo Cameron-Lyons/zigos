@@ -30,6 +30,7 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.permission_ui_service_ready,
     boot_markers.permission_ui_service_task_ready,
     boot_markers.service_boot_driver_service_network_ready,
+    boot_markers.service_boot_driver_service_storage_ready,
     boot_markers.service_boot_service_contracts_ready,
     boot_markers.service_boot_supervisor_crash_recorded,
     boot_markers.service_boot_driver_rehost_ok,
@@ -44,7 +45,6 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.service_boot_storage_rebind_ok,
     boot_markers.service_boot_storage_io_after_restart_ok,
     boot_markers.service_boot_ipc_connect_all_ok,
-    "ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY",
     boot_markers.permission_review_port_ready,
     boot_markers.permission_policy_port_ready,
     boot_markers.permission_manifest_valid,
@@ -109,9 +109,10 @@ pub const service_startup_required = [_][]const u8{
     boot_markers.userspace_resume_ok,
     boot_markers.transport_native_kernel_ready,
     boot_markers.transport_component_abi_ready,
+    boot_markers.service_boot_driver_service_network_ready,
+    boot_markers.service_boot_driver_service_storage_ready,
     boot_markers.service_boot_service_contracts_ready,
     boot_markers.service_boot_ipc_connect_all_ok,
-    "ZIGOS:SERVICE_BOOT:COMPAT_PORTAL:READY",
 };
 
 pub const permission_review_required = [_][]const u8{
