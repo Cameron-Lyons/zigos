@@ -48,6 +48,9 @@ write_digest_manifest() {
   if [ -f "$tree/zig-out/bin/zigos-sign" ]; then
     files+=("zig-out/bin/zigos-sign")
   fi
+  if [ -f "$tree/zig-out/bin/zigos-verify-release" ]; then
+    files+=("zig-out/bin/zigos-verify-release")
+  fi
   if [ -f "$tree/build/os.iso" ]; then
     files+=("build/os.iso")
   fi
@@ -79,7 +82,7 @@ build_copy() {
   local tree="${1:?tree required}"
   (
     cd "$tree"
-    ./scripts/zig.sh build iso signing-cli
+    ./scripts/zig.sh build iso signing-cli verify-release-cli
   )
 }
 

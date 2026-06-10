@@ -4,6 +4,7 @@ const capability = @import("../../kernel_api/capability.zig");
 const compositor_session = @import("../compositor_session.zig");
 const event_ledger = @import("../event_ledger.zig");
 const manifest = @import("../../policy/manifest.zig");
+const manifest_fixtures = @import("../../policy/manifest_fixtures.zig");
 const native_ux = @import("../native_ux.zig");
 const notification_center = @import("../../services/notification_center.zig");
 const object_store = @import("../../storage/object_store.zig");
@@ -1291,6 +1292,241 @@ test "booted rendered system runs input loop compositor prompts task switching r
     try expectContains(recovered_rendered, "latest_id=");
     try expectContains(recovered_rendered, "detail=local diagnostics ready");
     try expectContains(recovered_rendered, "error_surface visible=no status=ok");
+}
+
+test "booted notes docs loop edits shares syncs reviews rollback recovery and removes package" {
+    var storage_checkpoint_store = storage_service.CheckpointStore{};
+    storage_checkpoint_store.resetPersistent();
+    defer storage_checkpoint_store.resetPersistent();
+
+    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 110 };
+    const package_owner = principal.PrincipalId{ .kind = .service, .serial = 111 };
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 112 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 110 };
+    const primary_device = principal.PrincipalId{ .kind = .device, .serial = 1_101 };
+    const paired_device = principal.PrincipalId{ .kind = .device, .serial = 1_102 };
+    const document_path = "documents/notes.md";
+    const notes_signer = signing.SignerIdentity{
+        .label = "booted-notes-bundle",
+        .seed = [_]u8{0xe1} ** 32,
+    };
+    const user_signer = signing.SignerIdentity{
+        .label = "booted-notes-user",
+        .seed = [_]u8{0xe2} ** 32,
+    };
+    const primary_signer = signing.SignerIdentity{
+        .label = "booted-notes-primary",
+        .seed = [_]u8{0xe3} ** 32,
+    };
+    const paired_signer = signing.SignerIdentity{
+        .label = "booted-notes-paired",
+        .seed = [_]u8{0xe4} ** 32,
+    };
+    const snapshot_signer = signing.SignerIdentity{
+        .label = "booted-notes-snapshot",
+        .seed = [_]u8{0xe5} ** 32,
+    };
+
+    var package_capabilities = capability.CapabilityTable.init();
+    var packages_service = package_service.Service.init();
+    packages_service.bind(11_100, package_owner);
+    var package_port = package_service.PackagePort.init(&packages_service, &package_capabilities);
+    const package_capability = try mintRenderedShellServiceAuthority(&package_capabilities, packages_service.service_id, package_owner, 11_101);
+    const package_authority = package_service.AuthorityContext{
+        .task_id = 11_101,
+        .principal = package_owner,
+        .capability_id = package_capability.id,
+        .now_ticks = 10,
+    };
+    _ = try package_port.trustPolicyAuthorityRoot(package_authority, .{ .kind = .policy_authority, .serial = 1 }, [_]u8{0x5A} ** 32);
+    _ = try package_port.trustPublisher(
+        package_authority,
+        .{ .kind = .app, .serial = 11_102 },
+        .{ .kind = .policy_authority, .serial = 1 },
+        "zigos.dev",
+        try signing.publicKey(notes_signer),
+    );
+    var notes_bundle = manifest_fixtures.notesBundle();
+    notes_bundle.signature = try signReleaseBundle(notes_signer, notes_bundle);
+    _ = try package_port.install(package_authority, .{
+        .bundle = notes_bundle,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null);
+    try std.testing.expect(packages_service.find("app.notes") != null);
+
+    var storage = storage_service.Service.initWithStore(11_110, 11_111, storage_owner, &storage_checkpoint_store);
+    const workspace_id = try seedShellWorkspace(&storage, user, document_path);
+    const original_entry = try storage.resolve(workspace_id, document_path);
+    const original_version_id = original_entry.version_id.raw();
+
+    var sync = sync_service.Service.init(11_120, 11_121, sync_owner);
+    var sync_capabilities = capability.CapabilityTable.init();
+    const sync_capability = try mintRenderedShellServiceAuthority(&sync_capabilities, sync.service_id, sync_owner, sync.task_id);
+    var sync_port = sync_service.SyncPort.init(&sync, &sync_capabilities);
+    const sync_authority = sync_service.AuthorityContext{
+        .task_id = sync.task_id,
+        .principal = sync_owner,
+        .capability_id = sync_capability.id,
+        .now_ticks = 12,
+    };
+    _ = try sync_port.ensureUserRoot(sync_authority, user, "owner", user_signer);
+    _ = try sync_port.enrollTrustedDevice(sync_authority, user, primary_device, "laptop", user_signer, primary_signer, 12);
+    _ = try sync_port.enrollTrustedDevice(sync_authority, user, paired_device, "tablet", user_signer, paired_signer, 13);
+    const local_policy = try sync_port.createNetworkPolicy(sync_authority, .{
+        .owner = sync_owner,
+        .workspace_id = workspace_id,
+        .label = "notes-local",
+        .mode = .local_network,
+    });
+    _ = try sync_port.configureWorkspacePolicy(sync_authority, .{
+        .workspace_id = workspace_id,
+        .owner = user,
+        .offline_first = true,
+        .personal_e2ee = true,
+        .require_shared_access = true,
+        .selective_prefixes = &.{"documents/"},
+        .device_to_device_policy_id = local_policy.id,
+    });
+
+    var runtime_checkpoint_store = task_runtime_service.CheckpointStore{};
+    var runtime = task_runtime.Runtime.init();
+    var runtime_service = task_runtime_service.Service.initWithStore(&runtime, &runtime_checkpoint_store);
+    runtime_service.bind(11_130, .{ .kind = .service, .serial = 11_130 });
+    var ux = native_ux.Controller.init();
+    var compositor = compositor_session.Session.init();
+    var compositor_checkpoint_store = compositor_session.CheckpointStore{};
+    var compositor_service = compositor_session.Service.initWithCheckpoint(
+        11_131,
+        11_132,
+        &runtime,
+        &compositor,
+        &compositor_checkpoint_store,
+    );
+    var notifications = notification_center.Center.init();
+    var ledger = event_ledger.Ledger.init();
+    var shell_checkpoint_store = HumaneShellCheckpointStore{};
+    const config = humane_shell.HumaneShellConfig{
+        .user = user,
+        .app_owner = user,
+        .reviewer_task_id = 83,
+        .workspace_id = workspace_id,
+        .workspace_label = "Notes Workspace",
+        .document_path = document_path,
+        .task_label = "notes",
+        .task_entry = "app.notes",
+        .task_title = "Notes",
+        .bundle_id = "app.notes",
+        .display_name = "Notes",
+        .ui_surface_id = 110,
+        .image_id = 110_001,
+        .object_query_label = document_path,
+        .sync_from_device = primary_device,
+        .sync_to_device = paired_device,
+        .package_port = &package_port,
+        .package_authority = package_authority,
+        .paired_device = paired_device,
+        .device_label = "tablet",
+        .user_signer = user_signer,
+        .device_signer = paired_signer,
+        .snapshot_label = "before-notes-edit",
+        .snapshot_signer = snapshot_signer,
+    };
+    var shell = HumaneShell.init(
+        &runtime_service,
+        &ux,
+        &compositor_service,
+        &storage,
+        &sync_port,
+        sync_authority,
+        &notifications,
+        &ledger,
+        config,
+        .{},
+        &shell_checkpoint_store,
+    );
+    var system = BootedSystem.init(&shell);
+
+    try std.testing.expect(system.dispatchInput(.{ .kind = .boot, .tick = 20 }).accepted);
+    try std.testing.expect(system.dispatchInput(.{ .kind = .start_task, .tick = 21 }).accepted);
+    const task_id = shell.state.task_id;
+    try std.testing.expect(task_id != 0);
+    try std.testing.expect(system.dispatchInput(.{ .kind = .open_workspace, .tick = 22 }).accepted);
+    try std.testing.expect(system.dispatchInput(.{ .kind = .open_document, .tick = 23 }).accepted);
+    try std.testing.expectEqual(original_version_id, shell.state.document_version_id);
+    try std.testing.expect(system.dispatchInput(.{ .kind = .create_snapshot, .tick = 24 }).accepted);
+
+    const edited = system.dispatchInput(.{
+        .kind = .text_input,
+        .tick = 25,
+        .text = "booted notes edit: product feels tangible",
+    });
+    try std.testing.expect(edited.accepted);
+    try std.testing.expect(shell.state.document_edited);
+    try std.testing.expect(shell.state.document_version_id != original_version_id);
+
+    try std.testing.expect(system.dispatchInput(.{ .kind = .query_objects, .tick = 26 }).accepted);
+    try std.testing.expect(system.dispatchInput(.{ .kind = .show_object_history, .tick = 27 }).accepted);
+    try std.testing.expectEqual(@as(u16, 2), shell.state.object_history_count);
+    try std.testing.expect(system.dispatchInput(.{ .kind = .share_object, .tick = 28 }).accepted);
+    try std.testing.expect(storage.findShareGrant(workspace_id, paired_device).?.isObjectScoped());
+
+    const synced = system.dispatchInput(.{ .kind = .sync_document, .tick = 29 });
+    try std.testing.expect(synced.accepted);
+    try std.testing.expect(shell.state.document_synced);
+    try std.testing.expectEqual(@as(u16, 1), shell.state.sync_selected_entries);
+    try std.testing.expectEqual(@as(u16, 1), shell.state.sync_transport_frames);
+
+    try sync.recordConflict(
+        workspace_id,
+        paired_device,
+        shell.state.selected_object_id,
+        document_path,
+        shell.state.document_version_id,
+        shell.state.document_version_id + 1_000,
+        .mergeable_crdt,
+    );
+    try std.testing.expect(system.dispatchInput(.{ .kind = .review_object_conflict, .tick = 30 }).accepted);
+    try std.testing.expect(shell.state.object_conflict_reviewed);
+    try std.testing.expect(shell.state.object_conflict_resolved);
+    try std.testing.expect(sync.findConflictForObject(workspace_id, paired_device, shell.state.selected_object_id) == null);
+
+    try std.testing.expect(system.dispatchInput(.{ .kind = .rollback_snapshot, .tick = 31 }).accepted);
+    try std.testing.expect(shell.state.snapshot_restored);
+    try std.testing.expectEqual(original_version_id, shell.state.document_version_id);
+
+    const recovered = system.dispatchInput(.{ .kind = .recover_state, .tick = 32 });
+    try std.testing.expect(recovered.accepted);
+    try std.testing.expect(shell.state.recovered);
+    try std.testing.expectEqual(@as(u32, 1), runtime_service.restart_generation);
+
+    const removed = system.dispatchInput(.{ .kind = .remove_package, .tick = 33 });
+    try std.testing.expect(removed.accepted);
+    try std.testing.expect(shell.state.package_removed);
+    try std.testing.expect(packages_service.find("app.notes") == null);
+    try std.testing.expectEqual(task_runtime.TaskState.terminated, runtime.find(task_id).?.state);
+    try std.testing.expectEqual(@as(usize, 0), compositor.visibleWindowCount());
+
+    var render_buffer: [8192]u8 = undefined;
+    const rendered = try system.render(&render_buffer);
+    try expectContains(rendered, "document_loop opened=no edited=no version=");
+    try expectContains(rendered, "synced=no sync_selected=1 frames=1 conflicts=0 object_shared=yes conflict_reviewed=yes package_removed=yes");
+    try expectContains(rendered, "recovery_ui visible=yes checkpoint=yes recovered=yes");
+    try expectContains(rendered, "compositor active_window=0");
+
+    var shell_render_buffer: [8192]u8 = undefined;
+    const shell_rendered = try shell.render(&shell_render_buffer);
+    try expectContains(shell_rendered, "package bundle=app.notes removed=yes removed_revisions=1");
+    try expectContains(shell_rendered, "snapshot id=");
+    try expectContains(shell_rendered, "label=before-notes-edit restored=yes");
+
+    var export_buffer: [4096]u8 = undefined;
+    const exported = try ledger.exportText(&export_buffer, .{});
+    try expectContains(exported, "flow_kind=edit_document");
+    try expectContains(exported, "flow_kind=share_document");
+    try expectContains(exported, "flow_kind=sync_workspace");
+    try expectContains(exported, "flow_kind=sync_conflict_review");
+    try expectContains(exported, "flow_kind=remove_app");
 }
 
 test "rendered task shell rejects out-of-order or missing workspace interactions" {

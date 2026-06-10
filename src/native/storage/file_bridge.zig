@@ -12,6 +12,8 @@ pub const AccessMode = enum(u8) {
     write,
 };
 
+pub const MAX_BRIDGE_PATH_BYTES: usize = workspace.MAX_ENTRY_PATH_BYTES;
+
 pub const ResolveRequest = struct {
     workspace_id: u64,
     path: []const u8,
@@ -28,7 +30,7 @@ pub const View = struct {
     readable: bool,
     writable: bool,
     path_len: usize,
-    path: [96]u8,
+    path: [MAX_BRIDGE_PATH_BYTES]u8,
 
     pub fn pathSlice(self: *const View) []const u8 {
         return self.path[0..self.path_len];
@@ -40,6 +42,8 @@ pub const Error = error{
     CapabilityNotFound,
     CapabilityRevoked,
     ObjectMissing,
+    PathAuthorityRejected,
+    PathSyntaxInvalid,
     PathTooLong,
     PathNotFound,
     PermissionDenied,
@@ -81,7 +85,11 @@ pub const Bridge = struct {
         authority_capability_id: u64,
         now_ticks: u64,
     ) Error!View {
-        const normalized_path = normalizePath(request.path);
+        const bridge_path = validateBridgePath(request.path) catch |err| switch (err) {
+            error.PathAuthorityRejected => return error.PathAuthorityRejected,
+            error.PathSyntaxInvalid => return error.PathSyntaxInvalid,
+            error.PathTooLong => return error.PathTooLong,
+        };
         const authority = self.capability_table.requireUsable(authority_capability_id, now_ticks) catch |err| switch (err) {
             error.CapabilityNotFound => return error.CapabilityNotFound,
             error.CapabilityRevoked => return error.CapabilityRevoked,
@@ -99,16 +107,17 @@ pub const Bridge = struct {
         }
 
         const wants_write = request.access == .write;
+        // File bridges are derived views. Mutations must go through storage objects
+        // and workspace transactions, never through a bridge path.
         if (wants_write) return error.PermissionDenied;
-        if (wants_write and !authority.rights.has(.object_write)) return error.PermissionDenied;
         if (!wants_write and !authority.rights.has(.object_read)) return error.PermissionDenied;
 
         const entry = switch (authority.target.kind) {
             .workspace => blk: {
-                break :blk self.resolve_entry(self.context, request.workspace_id, normalized_path) catch return error.PathNotFound;
+                break :blk self.resolve_entry(self.context, request.workspace_id, bridge_path) catch return error.PathNotFound;
             },
             .object => blk: {
-                const resolved = self.resolve_entry(self.context, request.workspace_id, normalized_path) catch return error.PermissionDenied;
+                const resolved = self.resolve_entry(self.context, request.workspace_id, bridge_path) catch return error.PermissionDenied;
                 if (authority.target.id != resolved.object_id.raw()) return error.PermissionDenied;
                 break :blk resolved;
             },
@@ -125,16 +134,42 @@ pub const Bridge = struct {
             .readable = authority.rights.has(.object_read),
             .writable = false,
             .path_len = 0,
-            .path = [_]u8{0} ** 96,
+            .path = [_]u8{0} ** MAX_BRIDGE_PATH_BYTES,
         };
-        view.path_len = native_util.copyTextExact(&view.path, normalized_path) catch return error.PathTooLong;
+        view.path_len = native_util.copyTextExact(&view.path, bridge_path) catch return error.PathTooLong;
         return view;
     }
 };
 
-fn normalizePath(path: []const u8) []const u8 {
-    if (path.len != 0 and path[0] == '/') return path[1..];
+pub fn validateBridgePath(path: []const u8) error{ PathAuthorityRejected, PathSyntaxInvalid, PathTooLong }![]const u8 {
+    if (path.len == 0) return error.PathSyntaxInvalid;
+    if (path.len > MAX_BRIDGE_PATH_BYTES) return error.PathTooLong;
+    if (path[0] == '/' or path[0] == '~') return error.PathAuthorityRejected;
+    if (looksLikeDrivePath(path)) return error.PathAuthorityRejected;
+
+    var segment_start: usize = 0;
+    for (path, 0..) |byte, index| {
+        switch (byte) {
+            0, '\\' => return error.PathAuthorityRejected,
+            '/' => {
+                if (!validBridgeSegment(path[segment_start..index])) return error.PathSyntaxInvalid;
+                segment_start = index + 1;
+            },
+            else => {},
+        }
+    }
+    if (!validBridgeSegment(path[segment_start..])) return error.PathSyntaxInvalid;
     return path;
+}
+
+fn validBridgeSegment(segment: []const u8) bool {
+    if (segment.len == 0) return false;
+    if (std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return false;
+    return true;
+}
+
+fn looksLikeDrivePath(path: []const u8) bool {
+    return path.len >= 2 and std.ascii.isAlphabetic(path[0]) and path[1] == ':';
 }
 
 test "file bridge is derived, permission-aware, and non-authoritative" {
@@ -201,7 +236,7 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
     });
     const view = try bridge.resolve(.{
         .workspace_id = notes.id.raw(),
-        .path = "/documents/notes.md",
+        .path = "documents/notes.md",
         .access = .read,
     }, read_capability.holder, read_capability.id, 30);
     try std.testing.expect(!view.authoritative);
@@ -209,6 +244,37 @@ test "file bridge is derived, permission-aware, and non-authoritative" {
     try std.testing.expect(!view.writable);
     try std.testing.expectEqualStrings("documents/notes.md", view.pathSlice());
     try std.testing.expectEqual(object.version_id.raw(), view.version_id);
+
+    try std.testing.expectError(error.PathAuthorityRejected, bridge.resolve(.{
+        .workspace_id = notes.id.raw(),
+        .path = "/documents/notes.md",
+        .access = .read,
+    }, read_capability.holder, read_capability.id, 30));
+    try std.testing.expectError(error.PathAuthorityRejected, bridge.resolve(.{
+        .workspace_id = notes.id.raw(),
+        .path = "~/documents/notes.md",
+        .access = .read,
+    }, read_capability.holder, read_capability.id, 30));
+    try std.testing.expectError(error.PathAuthorityRejected, bridge.resolve(.{
+        .workspace_id = notes.id.raw(),
+        .path = "C:\\Users\\writer\\notes.md",
+        .access = .read,
+    }, read_capability.holder, read_capability.id, 30));
+    try std.testing.expectError(error.PathSyntaxInvalid, bridge.resolve(.{
+        .workspace_id = notes.id.raw(),
+        .path = "../documents/notes.md",
+        .access = .read,
+    }, read_capability.holder, read_capability.id, 30));
+    try std.testing.expectError(error.PathSyntaxInvalid, bridge.resolve(.{
+        .workspace_id = notes.id.raw(),
+        .path = "documents//notes.md",
+        .access = .read,
+    }, read_capability.holder, read_capability.id, 30));
+    try std.testing.expectError(error.PathSyntaxInvalid, bridge.resolve(.{
+        .workspace_id = notes.id.raw(),
+        .path = "",
+        .access = .read,
+    }, read_capability.holder, read_capability.id, 30));
 
     try std.testing.expectError(error.PermissionDenied, bridge.resolve(.{
         .workspace_id = notes.id.raw(),

@@ -121,9 +121,10 @@ test "event ledger indexes structured queries by kind subject and task" {
     try std.testing.expectEqual(@as(usize, 2), protected.len);
     try std.testing.expectEqualStrings("alice protected", protected[0].detailSlice());
 
-    var export_buffer: [1024]u8 = undefined;
+    var export_buffer: [2048]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "#1 tick=10 kind=permission_decision") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "blocked_help=\"Blocked: This app") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "detail=redacted") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "detail=alice protected") == null);
 }

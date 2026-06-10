@@ -321,6 +321,9 @@ pub const StorageCore = struct {
             error.CapabilityRequired => return error.CapabilityRequired,
             error.CapabilityRevoked => return error.CapabilityRevoked,
             error.ObjectMissing => return error.ObjectMissing,
+            error.PathAuthorityRejected => return error.PathAuthorityRejected,
+            error.PathSyntaxInvalid => return error.PathSyntaxInvalid,
+            error.PathTooLong => return error.PathTooLong,
             error.PermissionDenied => return error.PermissionDenied,
             error.WorkspaceScopeViolation => return error.WorkspaceScopeViolation,
             else => return error.PathNotFound,
@@ -767,6 +770,7 @@ pub const StoragePort = struct {
 
     pub fn resolve(self: *StoragePort, authority: AuthorityContext, request: file_bridge.ResolveRequest) (AuthorityError || workspace.Error)!file_bridge.View {
         const workspace_id = ids.workspace(request.workspace_id);
+        _ = try file_bridge.validateBridgePath(request.path);
         const storage_authority = try self.requireStorageAuthority(authority, workspace_id, request.access);
         if (storage_authority.target.kind == .workspace) {
             try self.requireGrantScopeForResolve(authority, request);
@@ -784,7 +788,7 @@ pub const StoragePort = struct {
         const record = self.core.findWorkspaceRecordConst(workspace_id) orelse return error.WorkspaceNotFound;
         if (record.owner.eql(authority.principal)) return;
 
-        const path = normalizeFileBridgePath(request.path);
+        const path = try file_bridge.validateBridgePath(request.path);
         const entry = try self.core.resolve(workspace_id, path);
         if (!self.core.workspaceHasAccess(workspace_id, .{
             .principal_id = authority.principal,
@@ -1039,11 +1043,6 @@ fn bridgeHasVersion(context: *const anyopaque, version_id: u64) bool {
 
 fn workspaceId(value: anytype) ids.WorkspaceId {
     return ids.coerce(ids.WorkspaceId, value);
-}
-
-fn normalizeFileBridgePath(path: []const u8) []const u8 {
-    if (path.len != 0 and path[0] == '/') return path[1..];
-    return path;
 }
 
 fn objectId(value: anytype) ids.ObjectId {

@@ -23,6 +23,7 @@ for marker in \
   "BOOT:PROFILE:benchmark" \
   "BOOT:CORE_READY" \
   "BENCH:START" \
+  "BENCH:QUALITY_SUMMARY" \
   "BENCH:SUMMARY" \
   "BENCH:PASS"
 do
@@ -40,5 +41,6 @@ if grep -Eqi "panic|KERNEL PANIC|System Halted|BENCH:FAIL" "$LOG_PATH"; then
 fi
 
 bash "$ROOT_DIR/scripts/check-kernel-benchmark-thresholds.sh" "$LOG_PATH"
+bash "$ROOT_DIR/scripts/check-kernel-benchmark-quality-gates.sh" "$LOG_PATH"
 bash "$ROOT_DIR/scripts/check-kernel-benchmark-baseline.sh" "$LOG_PATH"
 echo "Kernel benchmark run passed. Log: $LOG_PATH"

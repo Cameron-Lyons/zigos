@@ -305,7 +305,7 @@ pub const TransportQueue = struct {
             .encrypted = request.encrypted,
             .workspace_generation = request.workspace_generation,
         };
-        frame.path_len = try copyPath(&frame.path, request.path);
+        frame.path_len = try state_support.copyTransportPath(&frame.path, request.path);
         slot.frame = frame;
         if (!self.target_index.append(transportFrameTargetKey(frame.workspace_id, frame.target_device), slot_index)) {
             _ = self.frames.removeIndex(slot_index);
@@ -518,14 +518,6 @@ pub const default_mergeable_document_adapter = DefaultMergeableDocumentAdapter.a
 pub const default_chunk_media_adapter = DefaultChunkMediaAdapter.adapter();
 pub const default_secret_transfer_adapter = DefaultSecretTransferAdapter.adapter();
 pub const default_database_sync_adapter = DefaultDatabaseSyncAdapter.adapter();
-
-fn copyPath(destination: *[workspace.MAX_ENTRY_PATH_BYTES]u8, path: []const u8) Error!usize {
-    if (path.len > destination.len) return error.PathTooLong;
-    const len = path.len;
-    @memset(destination[0..], 0);
-    @memcpy(destination[0..len], path[0..len]);
-    return len;
-}
 
 fn chunkCountForPayload(payload_len: usize) usize {
     const chunk_size: usize = 128;

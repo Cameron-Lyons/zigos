@@ -1,5 +1,6 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
+const humane_permissions = @import("humane_permissions.zig");
 const manifest = @import("manifest.zig");
 const manifest_fixtures = @import("manifest_fixtures.zig");
 const native_util = @import("../core/util.zig");
@@ -204,6 +205,9 @@ fn appendRequest(
 
     var rights_buffer: [160]u8 = undefined;
     try appendFmt(buffer, used, "    rights: {s}\n", .{rightsSummary(request.rights, &rights_buffer)});
+    var scope_buffer: [320]u8 = undefined;
+    const scope_summary = humane_permissions.renderRequestScopeToBuffer(&scope_buffer, request) catch "Scope: unavailable";
+    try appendFmt(buffer, used, "    {s}\n", .{scope_summary});
     try appendFmt(buffer, used, "    required: {s} local_only: {s}\n", .{
         yesNo(request.required),
         yesNo(request.local_only),
@@ -231,10 +235,13 @@ fn appendRequest(
         if (!decision.allow) {
             try appendText(buffer, used, "    decision: deny\n");
         } else if (decision.lease_ticks) |lease_ticks| {
+            var expiry_buffer: [96]u8 = undefined;
+            const expiry = humane_permissions.requestedLeaseLabel(&expiry_buffer, lease_ticks) catch "custom lease";
             try appendFmt(buffer, used, "    decision: allow local_only={s} lease={d} ticks\n", .{
                 yesNo(decision.local_only),
                 lease_ticks,
             });
+            try appendFmt(buffer, used, "    decision lease summary: {s}\n", .{expiry});
         } else {
             try appendFmt(buffer, used, "    decision: allow local_only={s}\n", .{yesNo(decision.local_only)});
         }
@@ -424,6 +431,8 @@ test "renderToBuffer includes bundle name, permission labels, and decisions" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Object access") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "decision: allow") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "decision: deny") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Scope: this object on this device") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "revoke: remove this app from the object's share sheet") != null);
 }
 
 test "permission review does not grant hidden device access for the example writer manifest" {
@@ -537,7 +546,7 @@ test "renderToBuffer labels expanded location contacts screen capture and notifi
         .{ .kind = .location, .resource = "location.current", .allow = true },
     };
     const session = initSession(44, &bundle, &decisions);
-    var buffer: [1024]u8 = undefined;
+    var buffer: [2048]u8 = undefined;
     const rendered = try renderToBuffer(&buffer, &session, &bundle);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Location") != null);

@@ -112,10 +112,7 @@ pub const Runtime = struct {
                             return error.KernelBootstrapNotAuthorized;
                         }
                         if (bootstrap_driver_port.activateNetworkDevice(driver.device_id, driver.service_id)) {
-                            record.mode = .published_data_plane;
-                            record.exclusive_claim = true;
-                            record.kernel_bootstrap = publication.kernel_bootstrap;
-                            record.publisher_len = native_util.copyTextExact(record.publisher[0..], publication.publisherSlice()) catch return error.PublisherTooLong;
+                            try recordPublishedActivation(&record, .published_data_plane, publication);
                         }
                     }
                 }
@@ -139,9 +136,7 @@ pub const Runtime = struct {
                                 .userspace_brokered_data_plane
                             else
                                 .published_data_plane;
-                            record.exclusive_claim = true;
-                            record.kernel_bootstrap = publication.kernel_bootstrap;
-                            record.publisher_len = native_util.copyTextExact(record.publisher[0..], publication.publisherSlice()) catch return error.PublisherTooLong;
+                            try recordPublishedActivation(&record, record.mode, publication);
                         }
                     }
                 }
@@ -151,10 +146,7 @@ pub const Runtime = struct {
                     if (publication.device_id == driver.device_id) {
                         if (publication.kernel_bootstrap) return error.KernelBootstrapNotAuthorized;
                         if (bootstrap_driver_port.activateDeviceDataPlane(driver.device_class, driver.device_id, driver.service_id)) {
-                            record.mode = .published_data_plane;
-                            record.exclusive_claim = true;
-                            record.kernel_bootstrap = false;
-                            record.publisher_len = native_util.copyTextExact(record.publisher[0..], publication.publisherSlice()) catch return error.PublisherTooLong;
+                            try recordPublishedActivation(&record, .published_data_plane, publication);
                         }
                     }
                 }
@@ -246,6 +238,13 @@ fn activationSlotKey(slot: *const ActivationSlot) u64 {
 
 fn activationKeyFor(service_id: u64, device_class: driver_service.DeviceClass) u64 {
     return service_id *% 16 + deviceClassKey(device_class);
+}
+
+fn recordPublishedActivation(record: *ActivationRecord, mode: ActivationMode, publication: anytype) Error!void {
+    record.mode = mode;
+    record.exclusive_claim = true;
+    record.kernel_bootstrap = publication.kernel_bootstrap;
+    record.publisher_len = native_util.copyTextExact(record.publisher[0..], publication.publisherSlice()) catch return error.PublisherTooLong;
 }
 
 fn deviceClassKey(device_class: driver_service.DeviceClass) u64 {
@@ -437,6 +436,114 @@ test "runtime uses the activation tick when claiming storage bootstrap authority
     const activation = try driver_runtime.activateAt(driver, 10);
     try std.testing.expectEqual(ActivationMode.control_only, activation.mode);
     try std.testing.expect(!storage_volume.hasAttachedDevice());
+}
+
+test "runtime treats driver restart after active storage I/O as a normal invariant" {
+    const capability = @import("../kernel_api/capability.zig");
+    const principal = @import("../core/principal.zig");
+
+    const FakeBackend = struct {
+        var image: []u8 = &.{};
+        var activation_count: usize = 0;
+
+        fn read(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+            const buffer = buffer_ptr[0..buffer_len];
+            const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+            const end = start + buffer.len;
+            if (end > image.len) return false;
+            @memcpy(buffer, image[start..end]);
+            return true;
+        }
+
+        fn write(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+            const buffer = buffer_ptr[0..buffer_len];
+            const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
+            const end = start + buffer.len;
+            if (end > image.len) return false;
+            @memcpy(image[start..end], buffer);
+            return true;
+        }
+
+        fn activate(device_id: u64) ?storage_volume.Backend {
+            if (device_id != 0x0000_1F00_00A1) return null;
+            activation_count += 1;
+            return .{
+                .sector_count = storage_volume.required_device_sectors,
+                .read = read,
+                .write = write,
+            };
+        }
+    };
+
+    bootstrap_driver_port.reset();
+    defer bootstrap_driver_port.reset();
+    storage_volume.clearAttachedBackend();
+    defer storage_volume.clearAttachedBackend();
+
+    var image = [_]u8{0} ** storage_volume.image_bytes;
+    FakeBackend.image = &image;
+    FakeBackend.activation_count = 0;
+
+    const device_id: u64 = 0x0000_1F00_00A1;
+    const service_id: u64 = 301;
+    const task_id: u64 = 3_001;
+    try std.testing.expect(try bootstrap_driver_port.publishStorageActivator(
+        device_id,
+        "nvme-userspace",
+        FakeBackend.activate,
+        false,
+    ));
+
+    var capabilities = capability.CapabilityTable.init();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = service_id };
+    const authority = try driver_service.mintDriverAuthority(&capabilities, .{
+        .holder = owner,
+        .task_id = task_id,
+        .device_id = device_id,
+        .device_class = .storage_controller,
+    });
+    var directory = driver_service.Directory.init();
+    const driver = try directory.registerSigned(.{
+        .service_id = service_id,
+        .owner_task_id = task_id,
+        .device_id = device_id,
+        .device_class = .storage_controller,
+        .authority_capability_id = authority.id,
+        .capability_table = &capabilities,
+        .requester = owner,
+        .now_ticks = 1,
+        .signer = "zigos-storage-driver",
+    });
+
+    var runtime = Runtime.init();
+    const activation = try runtime.activateAt(driver, 1);
+    try std.testing.expectEqual(ActivationMode.published_data_plane, activation.mode);
+    try std.testing.expectEqual(@as(usize, 1), FakeBackend.activation_count);
+
+    var before_restart = [_]u8{0x44} ** storage_volume.sector_size;
+    const before_label = "before-restart";
+    @memcpy(before_restart[0..before_label.len], before_label);
+    try std.testing.expect(bootstrap_driver_port.activeStorageWrite(service_id, 4, before_restart[0..]));
+
+    const previous_dma_domain = driver.dma_domain_id;
+    try std.testing.expect(runtime.deactivate(service_id));
+    try std.testing.expect(directory.markRestarted(service_id));
+    try std.testing.expect(driver.dma_domain_id != previous_dma_domain);
+    const restarted = try runtime.activateAt(driver, 2);
+    try std.testing.expectEqual(ActivationMode.published_data_plane, restarted.mode);
+    try std.testing.expectEqual(@as(u32, 2), driver.restart_generation);
+
+    var readback = [_]u8{0} ** storage_volume.sector_size;
+    try std.testing.expect(bootstrap_driver_port.activeStorageRead(service_id, 4, readback[0..]));
+    try std.testing.expect(std.mem.eql(u8, before_restart[0..], readback[0..]));
+
+    var after_restart = [_]u8{0x55} ** storage_volume.sector_size;
+    const after_label = "after-restart";
+    @memcpy(after_restart[0..after_label.len], after_label);
+    try std.testing.expect(bootstrap_driver_port.activeStorageWrite(service_id, 4, after_restart[0..]));
+    @memset(readback[0..], 0);
+    try std.testing.expect(bootstrap_driver_port.activeStorageRead(service_id, 4, readback[0..]));
+    try std.testing.expect(std.mem.eql(u8, after_restart[0..], readback[0..]));
 }
 
 test "runtime deactivates only the requested driver class for shared services" {

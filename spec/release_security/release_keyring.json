@@ -2,17 +2,19 @@
   "schema_version": 1,
   "purpose": "Customer verifier trust roots for release DSSE attestations",
   "public_release_allowed": false,
-  "required_provider_boundary": "offline HSM or cloud KMS release signing provider",
+  "required_provider_boundary": "hardware-backed TPM, secure enclave, offline HSM, or cloud KMS release signing provider",
+  "required_dsse_signature_message": "DSSE v1 pre-authentication encoding over payloadType and payload",
   "keys": [
     {
       "key_id": "zigos-release-signing-required",
       "status": "required-not-configured",
       "algorithm": "ed25519",
-      "custody": "hardware-or-kms-required",
+      "custody": "tpm-secure-enclave-hsm-or-kms-required",
       "hardware_backed": true,
       "generation": 1,
       "not_before": "TBD",
       "not_after": "TBD",
+      "public_key_encoding": "hex-ed25519-raw",
       "public_key": "TBD",
       "rotation_policy": "new release key generation before not_after or immediately after suspected exposure",
       "revocation_source": "spec/release_security/revoked_release_keys.json"

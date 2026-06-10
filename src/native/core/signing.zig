@@ -74,8 +74,8 @@ pub const SignatureProviderDescriptor = struct {
 
     pub fn hasReleaseProviderBoundary(self: SignatureProviderDescriptor) bool {
         return switch (self.provider_boundary) {
-            .offline_hsm, .cloud_kms => true,
-            .local_software, .platform_tpm, .secure_enclave => false,
+            .offline_hsm, .cloud_kms, .platform_tpm, .secure_enclave => true,
+            .local_software => false,
         };
     }
 
@@ -94,6 +94,67 @@ pub const SignatureProviderDescriptor = struct {
             .ed25519 => self.fips_204 != .preview_commitment,
             .ed25519_ml_dsa65_hybrid_preview => false,
         };
+    }
+};
+
+pub const ReleaseRootKeyHandle = struct {
+    key_id: []const u8,
+    label: []const u8,
+    public_key: [PUBLIC_KEY_BYTES]u8,
+    generation: u32,
+    provider_boundary: SignatureProviderBoundary,
+    custody: SignatureKeyCustody,
+};
+
+pub const ExternalReleaseProvider = struct {
+    descriptor: SignatureProviderDescriptor,
+    key: ReleaseRootKeyHandle,
+    context: *anyopaque,
+    sign_fn: *const fn (*anyopaque, ReleaseRootKeyHandle, []const u8) anyerror![SIGNATURE_BYTES]u8,
+
+    pub fn init(
+        descriptor: SignatureProviderDescriptor,
+        key: ReleaseRootKeyHandle,
+        context: *anyopaque,
+        sign_fn: *const fn (*anyopaque, ReleaseRootKeyHandle, []const u8) anyerror![SIGNATURE_BYTES]u8,
+    ) !ExternalReleaseProvider {
+        if (!descriptor.releaseEligible()) return error.ReleaseProviderNotEligible;
+        if (descriptor.profile != .ed25519) return error.ReleaseProviderUnsupportedProfile;
+        if (key.generation == 0) return error.ReleaseKeyGenerationInvalid;
+        if (key.key_id.len == 0 or key.label.len == 0) return error.ReleaseKeyIdentityMissing;
+        if (key.provider_boundary != descriptor.provider_boundary) return error.ReleaseProviderBoundaryMismatch;
+        if (key.custody != descriptor.custody) return error.ReleaseProviderCustodyMismatch;
+        return .{
+            .descriptor = descriptor,
+            .key = key,
+            .context = context,
+            .sign_fn = sign_fn,
+        };
+    }
+
+    pub fn provider(self: *ExternalReleaseProvider) SignatureProvider {
+        return SignatureProvider.init(ExternalReleaseProvider, self, self.descriptor);
+    }
+
+    pub fn sign(self: *ExternalReleaseProvider, identity: SignerIdentity, message: []const u8) !manifest.Signature {
+        if (!std.mem.eql(u8, identity.label, self.key.label)) return error.ReleaseKeyIdentityMismatch;
+        const signature_bytes = try self.sign_fn(self.context, self.key, message);
+        var result = manifest.Signature{
+            .format = manifest.SIGNATURE_FORMAT_ED25519,
+            .signer = self.key.label,
+            .public_key_len = PUBLIC_KEY_BYTES,
+            .value_len = SIGNATURE_BYTES,
+        };
+        @memcpy(result.public_key[0..PUBLIC_KEY_BYTES], &self.key.public_key);
+        @memcpy(result.value[0..SIGNATURE_BYTES], &signature_bytes);
+        return result;
+    }
+
+    pub fn verify(self: *ExternalReleaseProvider, signature: manifest.Signature, message: []const u8) bool {
+        if (!std.mem.eql(u8, signature.format, manifest.SIGNATURE_FORMAT_ED25519)) return false;
+        if (!std.mem.eql(u8, signature.signer, self.key.label)) return false;
+        if (!std.mem.eql(u8, signature.ed25519PublicKeySlice(), &self.key.public_key)) return false;
+        return verifySignature(signature, message);
     }
 };
 
@@ -516,6 +577,18 @@ test "release eligibility requires hardware custody lifecycle controls and verif
     };
     try std.testing.expect(operational.releaseEligible());
 
+    var tpm_operational = operational;
+    tpm_operational.name = "release-tpm-ed25519";
+    tpm_operational.provider_boundary = .platform_tpm;
+    tpm_operational.custody = .tpm;
+    try std.testing.expect(tpm_operational.releaseEligible());
+
+    var enclave_operational = operational;
+    enclave_operational.name = "release-secure-enclave-ed25519";
+    enclave_operational.provider_boundary = .secure_enclave;
+    enclave_operational.custody = .secure_enclave;
+    try std.testing.expect(enclave_operational.releaseEligible());
+
     var no_provider_boundary = operational;
     no_provider_boundary.provider_boundary = .local_software;
     try std.testing.expect(!no_provider_boundary.releaseEligible());
@@ -529,6 +602,63 @@ test "release eligibility requires hardware custody lifecycle controls and verif
     preview_hybrid.fips_204 = .preview_commitment;
     preview_hybrid.fips_validated = true;
     try std.testing.expect(!preview_hybrid.releaseEligible());
+}
+
+test "external release provider uses key handles instead of software signer seeds" {
+    const SigningBackend = struct {
+        seed: [SEED_BYTES]u8,
+
+        fn sign(context: *anyopaque, key: ReleaseRootKeyHandle, message: []const u8) ![SIGNATURE_BYTES]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const key_pair = try Ed25519.KeyPair.generateDeterministic(self.seed);
+            try std.testing.expectEqualSlices(u8, &key.public_key, &key_pair.public_key.toBytes());
+            return (try key_pair.sign(message, null)).toBytes();
+        }
+    };
+
+    const root_identity = SignerIdentity{
+        .label = "zigos.release.root",
+        .seed = [_]u8{0x71} ** Ed25519.KeyPair.seed_length,
+    };
+    var backend = SigningBackend{ .seed = root_identity.seed };
+    var provider_impl = try ExternalReleaseProvider.init(
+        .{
+            .name = "release-kms-ed25519",
+            .profile = .ed25519,
+            .role = .production,
+            .provider_boundary = .cloud_kms,
+            .custody = .cloud_kms,
+            .hardware_backed = true,
+            .rotation_supported = true,
+            .revocation_supported = true,
+            .customer_verifiable = true,
+            .verifier_protocol = .dsse_in_toto_slsa,
+        },
+        .{
+            .key_id = "kms://zigos/release/root/1",
+            .label = root_identity.label,
+            .public_key = try publicKey(root_identity),
+            .generation = 1,
+            .provider_boundary = .cloud_kms,
+            .custody = .cloud_kms,
+        },
+        &backend,
+        SigningBackend.sign,
+    );
+    const provider = provider_impl.provider();
+    try std.testing.expect(provider.releaseEligible());
+
+    const software_fixture_identity = SignerIdentity{
+        .label = root_identity.label,
+        .seed = [_]u8{0x72} ** Ed25519.KeyPair.seed_length,
+    };
+    const signature = try provider.sign(software_fixture_identity, "release-dsse-pae");
+    try std.testing.expect(provider.verify(signature, "release-dsse-pae"));
+    try std.testing.expect(!provider.verify(signature, "tampered-release-dsse-pae"));
+
+    var tampered_public_key = signature;
+    tampered_public_key.public_key[0] ^= 0x80;
+    try std.testing.expect(!provider.verify(tampered_public_key, "release-dsse-pae"));
 }
 
 test "signature provider fails closed when implementation returns the wrong profile" {

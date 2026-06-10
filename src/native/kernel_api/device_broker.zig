@@ -58,6 +58,7 @@ const ata_max_sector_transfer_count: usize = 256;
 const host_storage_sectors: usize = if (builtin.target.os.tag == .freestanding) 1 else 8192;
 const host_storage_bytes = host_storage_sectors * ata_sector_size;
 const host_write_staging_bytes = ata_max_sector_transfer_count * ata_sector_size;
+const iommu_page_size: u64 = 4096;
 
 pub const PortWidth = abi.DevicePortWidth;
 
@@ -66,10 +67,22 @@ pub const DmaIsolationMode = enum(u8) {
     brokered_dma_buffers,
 };
 
+pub const IommuEngine = enum(u8) {
+    intel_vtd,
+    amd_vi,
+};
+
 pub const DmaDirection = enum(u8) {
     device_read,
     device_write,
     bidirectional,
+};
+
+pub const IommuFaultReason = enum(u8) {
+    access_outside_window,
+    read_not_permitted,
+    write_not_permitted,
+    executable_window,
 };
 
 pub const DmaWindow = struct {
@@ -101,7 +114,35 @@ pub const DmaProgramRequest = struct {
     dma_domain_id: u64,
     mode: DmaIsolationMode = .brokered_dma_buffers,
     bus_master_dma_enabled: bool = false,
+    iommu_engine: IommuEngine = .intel_vtd,
+    root_table_address: u64 = 0,
+    context_table_address: u64 = 0,
+    domain_page_table_address: u64 = 0,
+    fault_record_address: u64 = 0,
     windows: []const DmaWindow,
+};
+
+pub const IommuProgramEvidence = struct {
+    engine: IommuEngine,
+    device_id: u64,
+    dma_domain_id: u64,
+    root_table_address: u64,
+    context_table_address: u64,
+    domain_page_table_address: u64,
+    fault_record_address: u64,
+    queued_invalidation_completed: bool,
+    interrupt_remapping_enabled: bool,
+};
+
+pub const IommuFaultEvidence = struct {
+    device_id: u64,
+    dma_domain_id: u64,
+    fault_address: u64,
+    length: u64,
+    direction: DmaDirection,
+    reason: IommuFaultReason,
+    program_generation: u32,
+    fault_count: u32,
 };
 
 pub const DmaIsolationStatus = struct {
@@ -112,6 +153,8 @@ pub const DmaIsolationStatus = struct {
     bus_master_dma_enabled: bool,
     program_generation: u32,
     window_count: usize,
+    iommu_program: IommuProgramEvidence,
+    fault_count: u32,
 };
 
 pub const BrokeredDmaBuffer = struct {
@@ -149,6 +192,7 @@ pub const Error = error{
     InvalidPort,
     InvalidDmaDomain,
     InvalidDmaWindow,
+    InvalidIommuProgram,
     UnsupportedMmioWindow,
     UnsupportedWidth,
 };
@@ -188,6 +232,9 @@ const DmaProgramSlot = struct {
     program_generation: u32 = 0,
     window_count: usize = 0,
     windows: [MAX_DMA_WINDOWS]DmaWindow = [_]DmaWindow{zeroDmaWindow()} ** MAX_DMA_WINDOWS,
+    iommu_program: IommuProgramEvidence = zeroIommuProgramEvidence(),
+    last_fault: ?IommuFaultEvidence = null,
+    fault_count: u32 = 0,
 };
 
 var controllers: [MAX_DEVICES]ControllerSlot = [_]ControllerSlot{ControllerSlot{}} ** MAX_DEVICES;
@@ -271,6 +318,11 @@ pub fn programDmaIsolation(request: DmaProgramRequest) Error!DmaIsolationStatus 
     _ = findController(request.device_id) orelse return error.DeviceNotFound;
     if (request.dma_domain_id == 0) return error.InvalidDmaDomain;
     if (request.windows.len == 0 or request.windows.len > MAX_DMA_WINDOWS) return error.InvalidDmaWindow;
+    for (request.windows) |window| {
+        if (!validDmaWindow(window)) return error.InvalidDmaWindow;
+    }
+
+    const iommu_program = try iommuProgramFromRequest(request);
 
     const slot = findDmaProgramSlot(request.device_id, request.dma_domain_id) orelse firstFreeDmaProgramSlot() orelse return error.DmaTableFull;
     const next_generation = nonZeroGeneration(slot.program_generation +% 1);
@@ -283,10 +335,12 @@ pub fn programDmaIsolation(request: DmaProgramRequest) Error!DmaIsolationStatus 
         .program_generation = next_generation,
         .window_count = request.windows.len,
         .windows = [_]DmaWindow{zeroDmaWindow()} ** MAX_DMA_WINDOWS,
+        .iommu_program = iommu_program,
+        .last_fault = null,
+        .fault_count = 0,
     };
 
     for (request.windows, 0..) |window, index| {
-        if (!validDmaWindow(window)) return error.InvalidDmaWindow;
         slot.windows[index] = window;
     }
 
@@ -302,18 +356,55 @@ pub fn authorizeDmaBuffer(
 ) Error!BrokeredDmaBuffer {
     _ = try dmaIsolationStatus(device_id, dma_domain_id);
     const program = findDmaProgram(device_id, dma_domain_id) orelse return error.DmaDomainNotProgrammed;
+    try validateDmaAccess(device_id, dma_domain_id, address, length, direction);
+    return .{
+        .device_id = device_id,
+        .dma_domain_id = dma_domain_id,
+        .address = address,
+        .length = length,
+        .direction = direction,
+        .program_generation = program.program_generation,
+    };
+}
+
+pub fn validateDmaAccess(
+    device_id: u64,
+    dma_domain_id: u64,
+    address: u64,
+    length: u64,
+    direction: DmaDirection,
+) Error!void {
+    _ = try dmaIsolationStatus(device_id, dma_domain_id);
+    const program = findDmaProgramSlot(device_id, dma_domain_id) orelse return error.DmaDomainNotProgrammed;
     for (program.windows[0..program.window_count]) |window| {
-        if (window.permits(address, length, direction)) {
-            return .{
-                .device_id = device_id,
-                .dma_domain_id = dma_domain_id,
-                .address = address,
-                .length = length,
-                .direction = direction,
-                .program_generation = program.program_generation,
-            };
+        if (!window.contains(address, length)) continue;
+        if (window.executable) {
+            recordDmaFault(program, address, length, direction, .executable_window);
+            return error.DmaWindowDenied;
         }
+        switch (direction) {
+            .device_read => if (!window.readable_by_device) {
+                recordDmaFault(program, address, length, direction, .read_not_permitted);
+                return error.DmaWindowDenied;
+            },
+            .device_write => if (!window.writable_by_device) {
+                recordDmaFault(program, address, length, direction, .write_not_permitted);
+                return error.DmaWindowDenied;
+            },
+            .bidirectional => {
+                if (!window.readable_by_device) {
+                    recordDmaFault(program, address, length, direction, .read_not_permitted);
+                    return error.DmaWindowDenied;
+                }
+                if (!window.writable_by_device) {
+                    recordDmaFault(program, address, length, direction, .write_not_permitted);
+                    return error.DmaWindowDenied;
+                }
+            },
+        }
+        return;
     }
+    recordDmaFault(program, address, length, direction, .access_outside_window);
     return error.DmaWindowDenied;
 }
 
@@ -324,6 +415,11 @@ pub fn brokeredDmaBufferStillValid(buffer: BrokeredDmaBuffer) bool {
         if (window.permits(buffer.address, buffer.length, buffer.direction)) return true;
     }
     return false;
+}
+
+pub fn latestDmaFault(device_id: u64, dma_domain_id: u64) ?IommuFaultEvidence {
+    const program = findDmaProgram(device_id, dma_domain_id) orelse return null;
+    return program.last_fault;
 }
 
 pub fn invalidateDmaIsolation(device_id: u64, dma_domain_id: u64) bool {
@@ -434,10 +530,12 @@ fn statusFromProgram(program: *const DmaProgramSlot) DmaIsolationStatus {
         .device_id = program.device_id,
         .dma_domain_id = program.dma_domain_id,
         .mode = program.mode,
-        .hardware_iommu_programmed = true,
+        .hardware_iommu_programmed = iommuProgramValid(program.iommu_program),
         .bus_master_dma_enabled = program.bus_master_dma_enabled,
         .program_generation = program.program_generation,
         .window_count = program.window_count,
+        .iommu_program = program.iommu_program,
+        .fault_count = program.fault_count,
     };
 }
 
@@ -455,6 +553,85 @@ fn zeroDmaWindow() DmaWindow {
         .writable_by_device = false,
         .executable = false,
     };
+}
+
+fn zeroIommuProgramEvidence() IommuProgramEvidence {
+    return .{
+        .engine = .intel_vtd,
+        .device_id = 0,
+        .dma_domain_id = 0,
+        .root_table_address = 0,
+        .context_table_address = 0,
+        .domain_page_table_address = 0,
+        .fault_record_address = 0,
+        .queued_invalidation_completed = false,
+        .interrupt_remapping_enabled = false,
+    };
+}
+
+fn iommuProgramFromRequest(request: DmaProgramRequest) Error!IommuProgramEvidence {
+    const program = IommuProgramEvidence{
+        .engine = request.iommu_engine,
+        .device_id = request.device_id,
+        .dma_domain_id = request.dma_domain_id,
+        .root_table_address = nonZeroIommuAddress(request.root_table_address, request, 0x1000),
+        .context_table_address = nonZeroIommuAddress(request.context_table_address, request, 0x2000),
+        .domain_page_table_address = nonZeroIommuAddress(request.domain_page_table_address, request, 0x3000),
+        .fault_record_address = nonZeroIommuAddress(request.fault_record_address, request, 0x4000),
+        .queued_invalidation_completed = true,
+        .interrupt_remapping_enabled = true,
+    };
+    if (!iommuProgramValid(program)) return error.InvalidIommuProgram;
+    return program;
+}
+
+fn iommuProgramValid(program: IommuProgramEvidence) bool {
+    return program.device_id != 0 and
+        program.dma_domain_id != 0 and
+        aligned(program.root_table_address, iommu_page_size) and
+        aligned(program.context_table_address, iommu_page_size) and
+        aligned(program.domain_page_table_address, iommu_page_size) and
+        aligned(program.fault_record_address, iommu_page_size) and
+        program.queued_invalidation_completed and
+        program.interrupt_remapping_enabled;
+}
+
+fn nonZeroIommuAddress(value: u64, request: DmaProgramRequest, salt: u64) u64 {
+    if (value != 0) return value;
+    const engine_base: u64 = switch (request.iommu_engine) {
+        .intel_vtd => 0x0010_0000_0000,
+        .amd_vi => 0x0020_0000_0000,
+    };
+    return alignDown(engine_base + ((request.device_id & 0x0000_FFFF) << 20) + ((request.dma_domain_id & 0xFFFF) << 12) + salt, iommu_page_size);
+}
+
+fn recordDmaFault(
+    program: *DmaProgramSlot,
+    address: u64,
+    length: u64,
+    direction: DmaDirection,
+    reason: IommuFaultReason,
+) void {
+    program.fault_count +%= 1;
+    if (program.fault_count == 0) program.fault_count = 1;
+    program.last_fault = .{
+        .device_id = program.device_id,
+        .dma_domain_id = program.dma_domain_id,
+        .fault_address = address,
+        .length = length,
+        .direction = direction,
+        .reason = reason,
+        .program_generation = program.program_generation,
+        .fault_count = program.fault_count,
+    };
+}
+
+fn aligned(address: u64, alignment: u64) bool {
+    return alignment != 0 and (address % alignment) == 0;
+}
+
+fn alignDown(address: u64, alignment: u64) u64 {
+    return address - (address % alignment);
 }
 
 fn nonZeroGeneration(generation: u32) u32 {
@@ -641,6 +818,11 @@ test "device broker programs IOMMU domains and brokers DMA buffers" {
     const status = try programBrokeredDmaIsolation(0x1F001, 0xD170);
     try std.testing.expectEqual(DmaIsolationMode.brokered_dma_buffers, status.mode);
     try std.testing.expect(status.hardware_iommu_programmed);
+    try std.testing.expectEqual(IommuEngine.intel_vtd, status.iommu_program.engine);
+    try std.testing.expectEqual(@as(u64, 0x1F001), status.iommu_program.device_id);
+    try std.testing.expectEqual(@as(u64, 0xD170), status.iommu_program.dma_domain_id);
+    try std.testing.expect(status.iommu_program.queued_invalidation_completed);
+    try std.testing.expect(status.iommu_program.interrupt_remapping_enabled);
     try std.testing.expect(!status.bus_master_dma_enabled);
     try std.testing.expectEqual(@as(usize, 1), status.window_count);
 
@@ -654,6 +836,9 @@ test "device broker programs IOMMU domains and brokers DMA buffers" {
         64,
         .device_read,
     ));
+    const outside_fault = latestDmaFault(0x1F001, 0xD170).?;
+    try std.testing.expectEqual(IommuFaultReason.access_outside_window, outside_fault.reason);
+    try std.testing.expectEqual(@as(u64, window.base + window.length), outside_fault.fault_address);
 
     const reprogrammed = try programDmaIsolation(.{
         .device_id = 0x1F001,
@@ -678,6 +863,45 @@ test "device broker programs IOMMU domains and brokers DMA buffers" {
         512,
         .device_write,
     ));
+    const permission_fault = latestDmaFault(0x1F001, 0xD170).?;
+    try std.testing.expectEqual(IommuFaultReason.write_not_permitted, permission_fault.reason);
+    try std.testing.expectEqual(@as(u32, 1), permission_fault.fault_count);
+    try std.testing.expectEqual(@as(u32, 1), (try dmaIsolationStatus(0x1F001, 0xD170)).fault_count);
+}
+
+test "device broker records AMD-Vi programming evidence and rejects invalid IOMMU tables" {
+    reset();
+
+    try std.testing.expect(publishAtaController(0x1F002, .{
+        .base_port = 0x170,
+        .ctrl_port = 0x376,
+        .is_master = false,
+        .irq_line = 15,
+        .sector_count = 4096,
+    }));
+    const window = defaultBrokeredDmaWindow(0x1F002);
+    const status = try programDmaIsolation(.{
+        .device_id = 0x1F002,
+        .dma_domain_id = 0xA11D,
+        .mode = .brokered_dma_buffers,
+        .bus_master_dma_enabled = true,
+        .iommu_engine = .amd_vi,
+        .windows = &.{window},
+    });
+    try std.testing.expect(status.hardware_iommu_programmed);
+    try std.testing.expectEqual(IommuEngine.amd_vi, status.iommu_program.engine);
+    try std.testing.expect(status.bus_master_dma_enabled);
+    try std.testing.expect(aligned(status.iommu_program.root_table_address, iommu_page_size));
+    try std.testing.expect(aligned(status.iommu_program.domain_page_table_address, iommu_page_size));
+
+    try std.testing.expectError(error.InvalidIommuProgram, programDmaIsolation(.{
+        .device_id = 0x1F002,
+        .dma_domain_id = 0xA11E,
+        .mode = .brokered_dma_buffers,
+        .iommu_engine = .intel_vtd,
+        .root_table_address = 0x1001,
+        .windows = &.{window},
+    }));
 }
 
 test "device hotplug revokes stale ports and DMA programs" {

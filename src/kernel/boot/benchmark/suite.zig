@@ -16,6 +16,9 @@ const policy_mediation = @import("../../../native/policy/policy_mediation.zig");
 const task_runtime = @import("../../../native/task/task_runtime.zig");
 const background_dispatch = @import("../../../native/task/background_dispatch.zig");
 const accelerator_scheduler = @import("../../../native/task/accelerator_scheduler.zig");
+const userspace_executor = @import("../../../native/task/userspace_executor.zig");
+const userspace_loader = @import("../../../native/task/userspace_loader.zig");
+const userspace_scheduler = @import("../../../native/task/userspace_scheduler.zig");
 const network_policy = @import("../../../native/sync/network_policy.zig");
 const sync_service = @import("../../../native/sync/sync_service.zig");
 const workspace = @import("../../../native/storage/workspace.zig");
@@ -42,6 +45,11 @@ const BenchmarkCase = struct {
     name: []const u8,
     iterations: u32,
     runIteration: *const fn (iteration: u32) u64,
+};
+
+const QualityGateCase = struct {
+    name: []const u8,
+    run: *const fn () u64,
 };
 
 const ScalingCapabilityTable = capability.CapabilityTableWith(.{
@@ -186,6 +194,16 @@ const cases = [_]BenchmarkCase{
     .{ .name = "recovery_environment.reinstall_restore_repair", .iterations = 4, .runIteration = benchmarkRecoveryLifecycle },
     .{ .name = "update_health.validate_pending_activation", .iterations = 8, .runIteration = benchmarkUpdateHealthValidation },
     .{ .name = "driver_recovery.restart_driver", .iterations = 512, .runIteration = benchmarkDriverRecoveryRestart },
+};
+
+const quality_gates = [_]QualityGateCase{
+    .{ .name = "battery_saver.batch_delay", .run = qualityBatterySaverBatchDelay },
+    .{ .name = "thermal_critical.background_delay", .run = qualityThermalCriticalBackgroundDelay },
+    .{ .name = "memory_pressure.batch_delay", .run = qualityMemoryPressureBatchDelay },
+    .{ .name = "scheduler_fairness.max_min_dispatch_ratio_percent", .run = qualitySchedulerFairnessRatioPercent },
+    .{ .name = "starvation_resistance.min_dispatches_after_pressure", .run = qualityStarvationResistanceAfterPressure },
+    .{ .name = "background_throttling.delayed_dispatches", .run = qualityBackgroundThrottlingDelayedDispatches },
+    .{ .name = "latency_under_load.max_foreground_wait_ticks", .run = qualityLatencyUnderLoadMaxWaitTicks },
 };
 
 const permission_review_requests = [_]manifest.PermissionRequest{
@@ -364,8 +382,9 @@ pub fn run() noreturn {
     inline for (cases) |case| {
         total_cycles +%= runCase(case);
     }
+    const quality_cycles = runQualityGates();
 
-    emitSummary(cases.len, total_cycles);
+    emitSummary(cases.len, quality_gates.len, quality_cycles, total_cycles);
     console.print(boot_markers.bench_pass);
     console.print("\n");
     qemu_exit.success();
@@ -710,6 +729,23 @@ fn runCase(case: BenchmarkCase) u64 {
     return cycles;
 }
 
+fn runQualityGates() u64 {
+    var total_cycles: u64 = 0;
+    inline for (quality_gates) |gate| {
+        total_cycles +%= runQualityGate(gate);
+    }
+    emitQualitySummary(quality_gates.len, total_cycles);
+    return total_cycles;
+}
+
+fn runQualityGate(gate: QualityGateCase) u64 {
+    const start = x86.rdtsc();
+    const value = gate.run();
+    const cycles = x86.rdtsc() - start;
+    emitQualityGate(gate.name, value, cycles);
+    return cycles;
+}
+
 fn emitResult(name: []const u8, iterations: u32, cycles: u64, checksum: u64) void {
     const scaled_cycles_per_op = if (iterations == 0)
         0
@@ -727,12 +763,32 @@ fn emitResult(name: []const u8, iterations: u32, cycles: u64, checksum: u64) voi
     console.print(line);
 }
 
-fn emitSummary(benchmark_count: usize, total_cycles: u64) void {
+fn emitQualityGate(name: []const u8, value: u64, cycles: u64) void {
+    var buffer: [160]u8 = undefined;
+    const line = std.fmt.bufPrint(
+        &buffer,
+        "BENCH:QUALITY:{s}:value={d}:cycles={d}\n",
+        .{ name, value, cycles },
+    ) catch unreachable;
+    console.print(line);
+}
+
+fn emitQualitySummary(gate_count: usize, total_cycles: u64) void {
     var buffer: [96]u8 = undefined;
     const line = std.fmt.bufPrint(
         &buffer,
-        "BENCH:SUMMARY:benchmarks={d}:total_cycles={d}\n",
-        .{ benchmark_count, total_cycles },
+        "BENCH:QUALITY_SUMMARY:gates={d}:total_cycles={d}\n",
+        .{ gate_count, total_cycles },
+    ) catch unreachable;
+    console.print(line);
+}
+
+fn emitSummary(benchmark_count: usize, quality_gate_count: usize, quality_cycles: u64, total_cycles: u64) void {
+    var buffer: [128]u8 = undefined;
+    const line = std.fmt.bufPrint(
+        &buffer,
+        "BENCH:SUMMARY:benchmarks={d}:quality_gates={d}:quality_cycles={d}:total_cycles={d}\n",
+        .{ benchmark_count, quality_gate_count, quality_cycles, total_cycles },
     ) catch unreachable;
     console.print(line);
 }
@@ -985,7 +1041,7 @@ fn benchmarkFileBridgeResolve(iteration: u32) u64 {
     var bridge = file_bridge_context.bridge.?;
     const view = bridge.resolve(.{
         .workspace_id = file_bridge_context.expected_workspace_id,
-        .path = if ((iteration & 1) == 0) "/documents/plan.md" else "documents/plan.md",
+        .path = "documents/plan.md",
         .access = .read,
     }, file_bridge_context.requester, file_bridge_context.authority_capability_id, 30 + iteration) catch unreachable;
     return view.object_id + view.version_id + view.path_len + @intFromBool(view.readable);
@@ -1378,6 +1434,360 @@ fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
         @as(u64, @intFromBool(recovery.visible_impact)) +
         @as(u64, @intFromBool(recovery.notification_id != null)) +
         ledger.latestKind(.driver_restart).?.sequence;
+}
+
+fn qualityBatterySaverBatchDelay() u64 {
+    var executor = userspace_executor.Executor{};
+    var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    configureLoadTelemetry(&scheduler, 7_001, 701, 1, .{
+        .total_cpu_budget_ticks = 200_000,
+        .memory_capacity_bytes = 8 * 1024 * 1024,
+        .battery_percent = 12,
+        .battery_charging = false,
+        .npu_driver_online = true,
+    });
+
+    const batch = createLoadTask(
+        &runtime,
+        701,
+        .batch_compute,
+        "quality-battery-batch",
+        "app.quality.battery-batch",
+        load_dispatch_cpu_tick_cost * 4,
+        64 * 1024,
+        null,
+    );
+    if (!scheduler.registerTask(batch.id)) return 0;
+    _ = scheduler.runNext(2);
+
+    const stats = scheduler.taskDispatchStats(batch.id) orelse return 0;
+    return @intFromBool(stats.dispatch_count == 0 and
+        stats.delayed_dispatch_count >= 1 and
+        stats.last_dispatch_reason == .battery_preserve);
+}
+
+fn qualityThermalCriticalBackgroundDelay() u64 {
+    var executor = userspace_executor.Executor{};
+    var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    configureLoadTelemetry(&scheduler, 7_002, 702, 1, .{
+        .total_cpu_budget_ticks = 200_000,
+        .memory_capacity_bytes = 8 * 1024 * 1024,
+        .thermal_milli_celsius = 92_000,
+    });
+
+    const background = createLoadTask(
+        &runtime,
+        702,
+        .background_light,
+        "quality-thermal-background",
+        "app.quality.thermal-background",
+        load_dispatch_cpu_tick_cost * 4,
+        64 * 1024,
+        null,
+    );
+    if (!scheduler.registerTask(background.id)) return 0;
+    _ = scheduler.runNext(2);
+
+    const stats = scheduler.taskDispatchStats(background.id) orelse return 0;
+    return @intFromBool(stats.dispatch_count == 0 and
+        stats.delayed_dispatch_count >= 1 and
+        stats.last_dispatch_reason == .thermal_throttle);
+}
+
+fn qualityMemoryPressureBatchDelay() u64 {
+    var executor = userspace_executor.Executor{};
+    var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    configureLoadTelemetry(&scheduler, 7_003, 703, 1, .{
+        .total_cpu_budget_ticks = 200_000,
+        .memory_capacity_bytes = 32 * 1024,
+        .npu_driver_online = true,
+    });
+
+    const batch = createLoadTask(
+        &runtime,
+        703,
+        .batch_compute,
+        "quality-memory-batch",
+        "app.quality.memory-batch",
+        load_dispatch_cpu_tick_cost * 4,
+        128 * 1024,
+        null,
+    );
+    if (!scheduler.registerTask(batch.id)) return 0;
+    if (!scheduler.configureTaskDispatchRequest(batch.id, .{
+        .class = .batch_compute,
+        .wants_npu = true,
+        .memory_bandwidth_units = 256,
+        .shared_memory_bytes = 64 * 1024,
+    }, false)) return 0;
+    _ = scheduler.runNext(2);
+
+    const stats = scheduler.taskDispatchStats(batch.id) orelse return 0;
+    return @intFromBool(stats.dispatch_count == 0 and
+        stats.delayed_dispatch_count >= 1 and
+        stats.last_dispatch_reason == .memory_bandwidth);
+}
+
+fn qualitySchedulerFairnessRatioPercent() u64 {
+    var executor = userspace_executor.Executor{};
+    var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    configureLoadTelemetry(&scheduler, 7_004, 704, 1, .{
+        .total_cpu_budget_ticks = 1_000_000,
+        .memory_capacity_bytes = 16 * 1024 * 1024,
+    });
+
+    var task_ids: [4]u64 = [_]u64{0} ** 4;
+    for (&task_ids, 0..) |*task_id, index| {
+        const task = createLoadTask(
+            &runtime,
+            710 + @as(u64, @intCast(index)),
+            .background_light,
+            "quality-fair-background",
+            "app.quality.fair-background",
+            load_dispatch_cpu_tick_cost * 128,
+            64 * 1024,
+            null,
+        );
+        task_id.* = task.id;
+        if (!scheduler.registerTask(task.id)) return std.math.maxInt(u64);
+    }
+
+    var round: u64 = 0;
+    while (round < 64) : (round += 1) {
+        _ = scheduler.runNext(10 + round);
+    }
+
+    var min_dispatches: u64 = std.math.maxInt(u64);
+    var max_dispatches: u64 = 0;
+    for (task_ids) |task_id| {
+        const stats = scheduler.taskDispatchStats(task_id) orelse return std.math.maxInt(u64);
+        min_dispatches = @min(min_dispatches, stats.dispatch_count);
+        max_dispatches = @max(max_dispatches, stats.dispatch_count);
+    }
+    if (min_dispatches == 0) return std.math.maxInt(u64);
+    return @divTrunc(max_dispatches * 100, min_dispatches);
+}
+
+fn qualityStarvationResistanceAfterPressure() u64 {
+    var executor = userspace_executor.Executor{};
+    var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+
+    const background = createLoadTask(
+        &runtime,
+        730,
+        .background_light,
+        "quality-starve-background",
+        "app.quality.starve-background",
+        load_dispatch_cpu_tick_cost,
+        64 * 1024,
+        null,
+    );
+    const batch = createLoadTask(
+        &runtime,
+        731,
+        .batch_compute,
+        "quality-starve-batch",
+        "app.quality.starve-batch",
+        load_dispatch_cpu_tick_cost,
+        64 * 1024,
+        null,
+    );
+    if (!scheduler.registerTask(background.id)) return 0;
+    if (!scheduler.registerTask(batch.id)) return 0;
+
+    configureLoadTelemetry(&scheduler, 7_005, 705, 1, .{
+        .total_cpu_budget_ticks = 200_000,
+        .memory_capacity_bytes = 8 * 1024 * 1024,
+        .thermal_milli_celsius = 92_000,
+    });
+    _ = scheduler.runNext(2);
+
+    configureLoadTelemetry(&scheduler, 7_005, 705, 3, .{
+        .total_cpu_budget_ticks = 200_000,
+        .memory_capacity_bytes = 8 * 1024 * 1024,
+    });
+    _ = scheduler.runNext(4);
+    _ = scheduler.runNext(5);
+
+    const background_stats = scheduler.taskDispatchStats(background.id) orelse return 0;
+    const batch_stats = scheduler.taskDispatchStats(batch.id) orelse return 0;
+    if (background_stats.delayed_dispatch_count == 0 or batch_stats.delayed_dispatch_count == 0) return 0;
+    return @min(background_stats.dispatch_count, batch_stats.dispatch_count);
+}
+
+fn qualityBackgroundThrottlingDelayedDispatches() u64 {
+    var runtime = task_runtime.Runtime.init();
+    const task = runtime.createTask(.{
+        .owner = app(740),
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 20_000,
+            .memory_bytes = 2 * 1024 * 1024,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 64 * 1024,
+            .background_allowed = true,
+        },
+        .local_only = false,
+        .launch = .{
+            .bundle_id = background_bundle.bundle_id,
+        },
+    }) catch unreachable;
+    task.state = .active;
+
+    var dispatcher = background_dispatch.Controller.init();
+    dispatcher.configure(.{
+        .max_active_jobs = 2,
+        .max_expected_duration_seconds = 300,
+        .max_cpu_time_ticks = 2_000,
+        .max_memory_bytes = 128 * 1024,
+        .max_shared_memory_bytes = 64 * 1024,
+    });
+
+    const first = dispatcher.dispatch(&runtime, task.id, background_bundle, "sync", .sync_completion, 10) catch unreachable;
+    const second = dispatcher.dispatch(&runtime, task.id, background_bundle, "sync", .sync_completion, 11) catch unreachable;
+    const third = dispatcher.dispatch(&runtime, task.id, background_bundle, "sync", .sync_completion, 12) catch unreachable;
+    return @intFromBool(first.allowed and
+        second.allowed and
+        third.delayed and
+        third.reason == .throttled and
+        dispatcher.activeRecordCount() == 2);
+}
+
+fn qualityLatencyUnderLoadMaxWaitTicks() u64 {
+    var executor = userspace_executor.Executor{};
+    var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    configureLoadTelemetry(&scheduler, 7_006, 706, 1, .{
+        .total_cpu_budget_ticks = 1_000_000,
+        .memory_capacity_bytes = 16 * 1024 * 1024,
+    });
+
+    var background_ids: [4]u64 = [_]u64{0} ** 4;
+    for (&background_ids, 0..) |*task_id, index| {
+        const task = createLoadTask(
+            &runtime,
+            750 + @as(u64, @intCast(index)),
+            .background_light,
+            "quality-latency-background",
+            "app.quality.latency-background",
+            load_dispatch_cpu_tick_cost * 128,
+            64 * 1024,
+            null,
+        );
+        task_id.* = task.id;
+        if (!scheduler.registerTask(task.id)) return std.math.maxInt(u64);
+    }
+
+    const foreground = createLoadTask(
+        &runtime,
+        760,
+        .foreground_interactive,
+        "quality-latency-foreground",
+        "app.quality.latency-foreground",
+        load_dispatch_cpu_tick_cost * 32,
+        64 * 1024,
+        9,
+    );
+    if (!scheduler.registerTask(foreground.id)) return std.math.maxInt(u64);
+    if (!scheduler.parkTaskUntilEvent(foreground.id)) return std.math.maxInt(u64);
+
+    var max_wait_ticks: u64 = 0;
+    var tick: u64 = 20;
+    var window: usize = 0;
+    while (window < 8) : (window += 1) {
+        var load_round: usize = 0;
+        while (load_round < 3) : (load_round += 1) {
+            _ = scheduler.runNext(tick);
+            tick += 1;
+        }
+
+        if (!scheduler.wakeTask(foreground.id, .ipc_message, tick, tick + 5)) return std.math.maxInt(u64);
+        _ = scheduler.runNext(tick + 1);
+        const stats = scheduler.taskDispatchStats(foreground.id) orelse return std.math.maxInt(u64);
+        if (stats.last_dispatch_tick < stats.last_wake_tick) return std.math.maxInt(u64);
+        max_wait_ticks = @max(max_wait_ticks, stats.last_dispatch_tick - stats.last_wake_tick);
+        if (!scheduler.parkTaskUntilEvent(foreground.id)) return std.math.maxInt(u64);
+        tick += 2;
+    }
+
+    return max_wait_ticks;
+}
+
+const load_dispatch_cpu_tick_cost: u64 = 1_000;
+
+fn configureLoadTelemetry(
+    scheduler: *userspace_scheduler.Scheduler,
+    boot_id: u64,
+    task_id: u64,
+    observed_tick: u64,
+    counters: accelerator_scheduler.LivePlatformCounters,
+) void {
+    var provider = accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(
+        boot_id,
+        task_id,
+        observed_tick,
+        counters,
+    ) catch unreachable;
+    scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
+}
+
+fn createLoadTask(
+    runtime: *task_runtime.Runtime,
+    serial: u64,
+    class: accelerator_scheduler.ResourceClass,
+    label: []const u8,
+    bundle_id: []const u8,
+    cpu_ticks: u64,
+    memory_bytes: usize,
+    ui_surface_id: ?u64,
+) *task_runtime.TaskRecord {
+    var image = task_runtime.syntheticUserspaceImage(label, bundle_id);
+    const service_task = class == .emergency_system_critical;
+    return runtime.createTask(.{
+        .owner = if (service_task) service(serial) else app(serial),
+        .component_class = if (service_task) .service_component else .app_component,
+        .budget = .{
+            .cpu_time_ticks = cpu_ticks,
+            .memory_bytes = memory_bytes,
+            .endpoint_slots = 4,
+            .shared_memory_bytes = 64 * 1024,
+            .resource_class = class,
+            .background_allowed = class == .background_light or class == .batch_compute,
+        },
+        .ui_surface_id = ui_surface_id,
+        .local_only = true,
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = serial,
+            .component_abi_version = 1,
+            .signed = true,
+            .bundle_id = bundle_id,
+        },
+        .userspace_image = &image,
+    }) catch unreachable;
 }
 
 const DriverRecoveryRuntime = struct {

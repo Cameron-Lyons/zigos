@@ -2,6 +2,7 @@ const std = @import("std");
 
 const capability = @import("../../kernel_api/capability.zig");
 const debug_contract = @import("../../security/debug_contract.zig");
+const humane_permissions = @import("../../policy/humane_permissions.zig");
 const ids = @import("../../core/ids.zig");
 const object_store = @import("../object_store.zig");
 const principal = @import("../../core/principal.zig");
@@ -572,6 +573,16 @@ test "storage port queries object history and grants object capabilities" {
     try std.testing.expect(object_share.capability.rights.has(.object_read));
     try std.testing.expect(!object_share.capability.rights.has(.object_write));
     try std.testing.expect(object_share.grant.isObjectScoped());
+    var share_sheet_buffer: [360]u8 = undefined;
+    const share_sheet = try humane_permissions.renderShareSheetToBuffer(
+        &share_sheet_buffer,
+        workspace_record.id.raw(),
+        object_share.grant,
+        30,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, share_sheet, "one object (exports/object-draft.md)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, share_sheet, "recipient=app:152") != null);
+    try std.testing.expect(std.mem.indexOf(u8, share_sheet, "this device only") != null);
 
     var history_buffer: [object_store.MAX_OBJECT_HISTORY_RESULTS]object_store.ObjectHistoryEntry = undefined;
     const history = try port.objectHistory(.{

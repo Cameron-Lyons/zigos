@@ -278,7 +278,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
 
     const bridge_view = context.storage_service_instance.bridgeResolve(.{
         .workspace_id = notes_workspace_id,
-        .path = "/documents/notes.md",
+        .path = "documents/notes.md",
         .access = .read,
     }, .{
         .task_id = context.notes_task_id,
@@ -292,34 +292,17 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
         support.common.printBootMarker(boot_markers.storage_file_bridge_derived);
     }
 
-    const invalid_path_capability = context.capability_table.mintBootRoot(.{
-        .holder = context.session_user,
-        .issuer = context.policy_authority,
-        .target = .{ .kind = .service, .id = context.storage_service_id },
-        .rights = .{ .service = .{} },
-        .scope = .{
-            .workspace_id = notes_workspace_id,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 0,
-            .expires_at_ticks = std.math.maxInt(u64),
-            .renewable = false,
-        },
-        .audit = .{},
-    }) catch unreachable;
     if (context.storage_service_instance.bridgeResolve(.{
         .workspace_id = notes_workspace_id,
-        .path = "documents/notes.md",
+        .path = "/documents/notes.md",
         .access = .read,
     }, .{
-        .task_id = context.storage_task_id,
-        .principal = context.session_user,
-        .capability_id = invalid_path_capability.id,
+        .task_id = context.notes_task_id,
+        .principal = context.notes_object_capability.holder,
+        .capability_id = context.notes_object_capability.id,
         .now_ticks = 94,
     })) |_| {} else |err| {
-        if (err == error.CapabilityRequired) {
+        if (err == error.PathAuthorityRejected) {
             support.common.printBootMarker(boot_markers.storage_path_authority_deprecated);
         }
     }

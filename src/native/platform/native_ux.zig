@@ -1,5 +1,6 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
+const humane_permissions = @import("../policy/humane_permissions.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
@@ -25,6 +26,7 @@ pub const FlowKind = enum(u8) {
     review_permission_request,
     recover_system,
     open_document,
+    edit_document,
     open_app_panel,
     focus_task,
     install_app,
@@ -126,6 +128,16 @@ pub const Controller = struct {
         const entry = try storage.resolve(workspace_id, path);
         _ = try self.record(.open_document, task_id, object_store.ids.raw(workspace_id), owner, path, true);
         return entry;
+    }
+
+    pub fn editDocument(
+        self: *Controller,
+        workspace_id: u64,
+        task_id: u64,
+        subject: principal.PrincipalId,
+        detail: []const u8,
+    ) Error!*FlowRecord {
+        return self.record(.edit_document, task_id, workspace_id, subject, detail, true);
     }
 
     pub fn openAppPanel(
@@ -346,11 +358,15 @@ pub fn renderReviewFlowToBuffer(buffer: []u8, flow: *const FlowRecord) ![]const 
         yesNo(flow.permission_required),
         yesNo(flow.permission_local_only),
     });
+    try appendFmt(buffer, &used, " scope={s}", .{
+        humane_permissions.scopeSummaryLabel(flow.permission_kind, flow.permission_local_only or flow.decision_local_only),
+    });
     if (flow.approved) {
         try appendFmt(buffer, &used, " decision_local_only={s}", .{yesNo(flow.decision_local_only)});
         if (flow.decision_has_lease) {
             try appendFmt(buffer, &used, " lease={d}", .{flow.decision_lease_ticks});
         }
+        try appendFmt(buffer, &used, " revoke_hint={s}", .{humane_permissions.revocationHint(flow.permission_kind)});
     }
     return buffer[0..used];
 }
@@ -487,15 +503,17 @@ test "native ux renders structured permission review decisions" {
         true,
         400,
     );
-    var buffer: [256]u8 = undefined;
+    var buffer: [384]u8 = undefined;
     const rendered = try renderReviewFlowToBuffer(&buffer, flow);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "bundle=app.notes") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "kind=object_access") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "resource=workspace:notes") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "decision=allow") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "scope=this object on this device") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "decision_local_only=yes") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "lease=400") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "revoke_hint=remove this app from the object's share sheet") != null);
 }
 
 test "native ux records app lifecycle sync containment and removal flows" {

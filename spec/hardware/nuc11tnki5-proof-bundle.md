@@ -7,8 +7,12 @@ not be archived as NUC11TNKi5 hardware proof.
 Archive a completed run under `build/hardware-proofs/nuc11tnki5/` with these
 files:
 
+- `proof-manifest.txt`: key/value manifest tying the bundle to
+  `intel-nuc11tnki5`, `NUC11TNKi5`, `real_hardware`, `serial.log`, the sidecar
+  files, the marker contract, the repo commit, capture time, and operator.
 - `serial.log`: concatenated serial output, framebuffer transcription, or HDMI
-  capture transcript from the Intel NUC 11 Pro Kit `NUC11TNKi5`.
+  capture transcript from the Intel NUC 11 Pro Kit `NUC11TNKi5`, plus the
+  finalized operator metadata marker lines after the sidecars are filled.
 - `firmware-settings.txt`: BIOS/UEFI version, boot mode, Secure Boot state,
   storage mode, wake/suspend settings, and any changed firmware options.
 - `power-cycle-notes.txt`: operator notes for the ten cold boots, ten warm
@@ -28,6 +32,7 @@ metadata markers:
 ```text
 ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:EVIDENCE_SOURCE:REAL_HARDWARE
 ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:BOARD_SKU:NUC11TNKi5
+ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:PROOF_MANIFEST:RECORDED
 ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:FIRMWARE_SETTINGS:RECORDED
 ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:POWER_CYCLE_NOTES:RECORDED
 ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ARTIFACT_DIGESTS:RECORDED
@@ -44,6 +49,18 @@ ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NETWORK_FRAME_CYCLES:100
 ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SUSPEND_RESUME_CYCLES:20
 ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:CRASH_RECOVERY_CYCLES:10
 ```
+
+Prepare the bundle skeleton and exact artifact digests with:
+
+```bash
+scripts/prepare-nuc11tnki5-hardware-proof.sh --build
+```
+
+The preparation script writes TODO-bearing sidecar templates on purpose. The
+checker rejects placeholders, missing `proof-manifest.txt` fields, low sidecar
+counters, emulator/OVMF/QEMU text, and artifact digest manifests that omit the
+boot ISO, native kernel, required userspace service images, production
+readiness manifest, or marker contract.
 
 Validate the completed bundle with:
 

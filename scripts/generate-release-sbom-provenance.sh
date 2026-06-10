@@ -21,8 +21,35 @@ sha256_file() {
   fi
 }
 
+file_size_bytes() {
+  local file="${1:?file required}"
+  wc -c < "$file" | tr -d ' '
+}
+
 base64_no_wrap() {
   base64 | tr -d '\n'
+}
+
+dsse_payload_type="application/vnd.in-toto+json"
+
+sign_dsse_statement() {
+  local statement="${1:?statement required}"
+  if [ -n "${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}" ]; then
+    {
+      printf 'DSSEv1 %d %s %d ' "${#dsse_payload_type}" "$dsse_payload_type" "${#statement}"
+      printf '%s' "$statement"
+    } | bash -c "$ZIGOS_RELEASE_DSSE_SIGN_COMMAND" | tr -d '\n'
+    return
+  fi
+  if [ -n "${ZIGOS_RELEASE_DSSE_PAE_SIGNATURE_B64:-}" ]; then
+    printf '%s' "$ZIGOS_RELEASE_DSSE_PAE_SIGNATURE_B64"
+    return
+  fi
+  if [ -n "${ZIGOS_RELEASE_DSSE_SIGNATURE_B64:-}" ]; then
+    printf '%s' "$ZIGOS_RELEASE_DSSE_SIGNATURE_B64"
+    return
+  fi
+  printf '%s' 'UNSIGNED_LOCAL_PREVIEW_REQUIRES_HARDWARE_RELEASE_SIGNING' | base64_no_wrap
 }
 
 artifact_files=()
@@ -43,6 +70,7 @@ add_artifact_path() {
 
 add_artifact_path "zig-out/bin/kernel-zigos-native.elf"
 add_artifact_path "zig-out/bin/zigos-sign"
+add_artifact_path "zig-out/bin/zigos-verify-release"
 add_artifact_path "build/os.iso"
 add_artifact_path "zig-out/bin"
 add_artifact_path "spec/production_readiness.json"
@@ -69,10 +97,30 @@ done < "$sorted_artifacts"
 rm -f -- "$sorted_artifacts"
 
 digests_path="$OUTPUT_PATH/artifact-digests.sha256"
+measurements_path="$OUTPUT_PATH/artifact-measurements.json"
 : > "$digests_path"
 for file in "${artifact_files[@]}"; do
   printf '%s  %s\n' "$(sha256_file "$ROOT_DIR/$file")" "$file" >> "$digests_path"
 done
+
+{
+  printf '{\n'
+  printf '  "schema_version": 1,\n'
+  printf '  "measurement_algorithm": "sha256",\n'
+  printf '  "artifacts": [\n'
+  first=1
+  for file in "${artifact_files[@]}"; do
+    digest="$(sha256_file "$ROOT_DIR/$file")"
+    size_bytes="$(file_size_bytes "$ROOT_DIR/$file")"
+    if [ "$first" -eq 0 ]; then
+      printf ',\n'
+    fi
+    first=0
+    printf '    {"path": "%s", "sha256": "%s", "size_bytes": %s}' "$(json_escape "$file")" "$digest" "$size_bytes"
+  done
+  printf '\n  ]\n'
+  printf '}\n'
+} > "$measurements_path"
 
 repo_url="$(git -C "$ROOT_DIR" config --get remote.origin.url 2>/dev/null || printf 'NOASSERTION')"
 commit_sha="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf 'NOASSERTION')"
@@ -127,26 +175,30 @@ dsse_provenance_path="$OUTPUT_PATH/provenance.dsse.intoto.jsonl"
 : > "$provenance_path"
 : > "$dsse_provenance_path"
 release_key_id="${ZIGOS_RELEASE_SIGNING_KEY_ID:-zigos-release-signing-required}"
-release_signature_b64="${ZIGOS_RELEASE_DSSE_SIGNATURE_B64:-$(printf '%s' 'UNSIGNED_LOCAL_PREVIEW_REQUIRES_HARDWARE_RELEASE_SIGNING' | base64_no_wrap)}"
 for file in "${artifact_files[@]}"; do
   digest="$(sha256_file "$ROOT_DIR/$file")"
   escaped_file="$(json_escape "$file")"
   statement="{\"_type\":\"https://in-toto.io/Statement/v1\",\"subject\":[{\"name\":\"$escaped_file\",\"digest\":{\"sha256\":\"$digest\"}}],\"predicateType\":\"https://slsa.dev/provenance/v1\",\"predicate\":{\"buildDefinition\":{\"buildType\":\"https://github.com/Cameron-Lyons/zigos/release-security-gate\",\"externalParameters\":{\"repository\":\"$(json_escape "$repo_url")\",\"commit\":\"$(json_escape "$commit_sha")\",\"zigVersion\":\"$(json_escape "$zig_version")\"}},\"runDetails\":{\"builder\":{\"id\":\"zigos-local-release-security-gate\"},\"metadata\":{\"invocationId\":\"$created_utc\",\"startedOn\":\"$created_utc\",\"dirtyWorkspaceFileCount\":$dirty_count}}}}"
   printf '%s\n' "$statement" >> "$provenance_path"
   payload_b64="$(printf '%s' "$statement" | base64_no_wrap)"
+  release_signature_b64="$(sign_dsse_statement "$statement")"
   cat >> "$dsse_provenance_path" <<EOF
-{"payloadType":"application/vnd.in-toto+json","payload":"$payload_b64","signatures":[{"keyid":"$(json_escape "$release_key_id")","sig":"$release_signature_b64"}]}
+{"payloadType":"$dsse_payload_type","payload":"$payload_b64","signatures":[{"keyid":"$(json_escape "$release_key_id")","sig":"$release_signature_b64"}]}
 EOF
 done
 
 public_release_allowed=false
 release_key_status="required-not-configured"
 release_public_key="${ZIGOS_RELEASE_SIGNING_PUBLIC_KEY:-TBD}"
-release_custody="${ZIGOS_RELEASE_SIGNING_CUSTODY:-hardware-or-kms-required}"
+release_public_key_encoding="${ZIGOS_RELEASE_SIGNING_PUBLIC_KEY_ENCODING:-hex-ed25519-raw}"
+release_custody="${ZIGOS_RELEASE_SIGNING_CUSTODY:-tpm-secure-enclave-hsm-or-kms-required}"
+release_provider_boundary="${ZIGOS_RELEASE_SIGNING_PROVIDER_BOUNDARY:-hardware-backed TPM, secure enclave, offline HSM, or cloud KMS release signing provider}"
 release_generation="${ZIGOS_RELEASE_SIGNING_GENERATION:-1}"
 release_not_before="${ZIGOS_RELEASE_SIGNING_NOT_BEFORE:-TBD}"
 release_not_after="${ZIGOS_RELEASE_SIGNING_NOT_AFTER:-TBD}"
-if [ "${ZIGOS_RELEASE_HARDWARE_BACKED:-}" = "true" ] && [ -n "${ZIGOS_RELEASE_DSSE_SIGNATURE_B64:-}" ]; then
+if [ "${ZIGOS_RELEASE_HARDWARE_BACKED:-}" = "true" ] &&
+   [ -n "${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}" ] &&
+   [ "$release_public_key" != "TBD" ]; then
   public_release_allowed=true
   release_key_status="active"
 fi
@@ -156,7 +208,8 @@ cat > "$OUTPUT_PATH/release-keyring.json" <<EOF
   "schema_version": 1,
   "generated_at": "$created_utc",
   "public_release_allowed": $public_release_allowed,
-  "required_provider_boundary": "offline HSM or cloud KMS release signing provider",
+  "required_provider_boundary": "$(json_escape "$release_provider_boundary")",
+  "required_dsse_signature_message": "DSSE v1 pre-authentication encoding over payloadType and payload",
   "keys": [
     {
       "key_id": "$(json_escape "$release_key_id")",
@@ -167,6 +220,7 @@ cat > "$OUTPUT_PATH/release-keyring.json" <<EOF
       "generation": $release_generation,
       "not_before": "$(json_escape "$release_not_before")",
       "not_after": "$(json_escape "$release_not_after")",
+      "public_key_encoding": "$(json_escape "$release_public_key_encoding")",
       "public_key": "$(json_escape "$release_public_key")",
       "rotation_policy": "new release key generation before not_after or immediately after suspected exposure",
       "revocation_source": "$OUTPUT_DIR/revoked-release-keys.json"
@@ -190,6 +244,7 @@ cat > "$OUTPUT_PATH/customer-verification-policy.json" <<EOF
   "schema_version": 1,
   "generated_at": "$created_utc",
   "artifact_digest_manifest": "$OUTPUT_DIR/artifact-digests.sha256",
+  "artifact_measurements": "$OUTPUT_DIR/artifact-measurements.json",
   "spdx_sbom": "$OUTPUT_DIR/sbom.spdx.json",
   "provenance_statements": "$OUTPUT_DIR/provenance.intoto.jsonl",
   "dsse_provenance": "$OUTPUT_DIR/provenance.dsse.intoto.jsonl",
@@ -202,10 +257,12 @@ cat > "$OUTPUT_PATH/customer-verification-policy.json" <<EOF
   "reject_unsigned_local_preview": true,
   "verification_steps": [
     "Compare each downloaded artifact SHA-256 digest with artifact-digests.sha256.",
-    "Verify every DSSE signature in provenance.dsse.intoto.jsonl against release-keyring.json before parsing payloads.",
+    "Verify every DSSE signature in provenance.dsse.intoto.jsonl against release-keyring.json before parsing payloads; signatures cover the DSSE v1 pre-authentication encoding.",
     "Reject signatures from key ids or generations listed in revoked-release-keys.json.",
     "Verify each decoded in-toto Statement has predicateType https://slsa.dev/provenance/v1 and subject digests matching artifact-digests.sha256.",
+    "Compare artifact-measurements.json size and digest measurements against downloaded artifacts.",
     "Compare reproducible-build.json and reproducible-artifact-digests.sha256 against the release digest manifest.",
+    "Run zig-out/bin/zigos-verify-release build/release-security . before trusting a downloaded release.",
     "Reject ed25519+ml-dsa65 as a production FIPS 204 signal; it is preview-only until replaced by a validated ML-DSA provider."
   ]
 }

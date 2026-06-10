@@ -3,5 +3,9 @@
   "generated_from": "release-security-review",
   "revoked_keys": [],
   "revoked_generations": [],
+  "entry_formats": {
+    "revoked_keys": "array of key ids or objects with key_id and reason",
+    "revoked_generations": "array of key_id:generation strings or objects with key_id, generation, and reason"
+  },
   "verification_rule": "reject any DSSE signature whose key id or key generation appears in this file"
 }

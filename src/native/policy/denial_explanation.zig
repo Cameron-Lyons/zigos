@@ -52,6 +52,35 @@ pub fn renderToBuffer(buffer: []u8, explanation: Explanation) RenderError![]cons
     }) catch error.NoSpaceLeft;
 }
 
+pub fn renderUserHelpToBuffer(
+    buffer: []u8,
+    display_name: []const u8,
+    kind: manifest.PermissionKind,
+    resource: []const u8,
+    explanation: Explanation,
+) RenderError![]const u8 {
+    var used: usize = 0;
+    try appendFmt(buffer, &used, "Blocked: {s} could not {s}", .{
+        display_name,
+        actionLabel(kind),
+    });
+    if (resource.len != 0) {
+        try appendFmt(buffer, &used, " for {s}", .{resource});
+    }
+    try appendFmt(buffer, &used, " because {s}. Missing: {s}. ", .{
+        plainReason(explanation.reason),
+        humanCapabilityLabel(kind),
+    });
+    if (explanation.user_approval_can_resolve) {
+        try appendText(buffer, &used, "Open Permission Review to grant a narrower scope or keep it blocked.");
+    } else if (explanation.retry_safe) {
+        try appendText(buffer, &used, "It is safe to try again after activity quiets down.");
+    } else {
+        try appendText(buffer, &used, "This needs a different app route or administrator policy change.");
+    }
+    return buffer[0..used];
+}
+
 fn capabilityLabel(kind: manifest.PermissionKind) []const u8 {
     return switch (kind) {
         .object_access => "object-access-capability",
@@ -70,6 +99,24 @@ fn capabilityLabel(kind: manifest.PermissionKind) []const u8 {
     };
 }
 
+fn humanCapabilityLabel(kind: manifest.PermissionKind) []const u8 {
+    return switch (kind) {
+        .object_access => "object access",
+        .network_egress => "network access",
+        .device_access => "device access",
+        .clipboard => "clipboard access",
+        .camera => "camera access",
+        .mic => "microphone access",
+        .sensor => "sensor access",
+        .location => "location access",
+        .contacts => "contacts access",
+        .screen_capture => "screen capture",
+        .notification_post => "notification access",
+        .background_execution => "background activity",
+        .peer_ipc => "peer task connection",
+    };
+}
+
 fn policyLabel(reason: abi.DenialReason, kind: manifest.PermissionKind) []const u8 {
     _ = kind;
     return switch (reason) {
@@ -83,6 +130,39 @@ fn policyLabel(reason: abi.DenialReason, kind: manifest.PermissionKind) []const 
         .budget_exhausted => "resource-budget-policy",
         .interface_not_found => "service-registry-policy",
         .unsupported_operation => "abi-surface-policy",
+    };
+}
+
+fn actionLabel(kind: manifest.PermissionKind) []const u8 {
+    return switch (kind) {
+        .object_access => "open or change the object",
+        .network_egress => "connect to the network path",
+        .device_access => "use the device",
+        .clipboard => "use the clipboard",
+        .camera => "use the camera",
+        .mic => "use the microphone",
+        .sensor => "read the sensor",
+        .location => "read location",
+        .contacts => "read contacts",
+        .screen_capture => "capture the screen",
+        .notification_post => "post notifications",
+        .background_execution => "run in the background",
+        .peer_ipc => "connect to another task",
+    };
+}
+
+fn plainReason(reason: abi.DenialReason) []const u8 {
+    return switch (reason) {
+        .none => "nothing was blocked",
+        .invalid_target => "the target did not match the approved route",
+        .capability_missing => "no permission grant was found",
+        .capability_revoked => "the permission was revoked",
+        .capability_expired => "the permission expired",
+        .scope_violation => "the request was outside the approved scope",
+        .policy_denied => "the permission was not granted",
+        .budget_exhausted => "the background budget is exhausted",
+        .interface_not_found => "the requested service is not available",
+        .unsupported_operation => "this operation is not supported here",
     };
 }
 
@@ -105,6 +185,17 @@ fn retrySafe(reason: abi.DenialReason) bool {
     };
 }
 
+fn appendText(buffer: []u8, used: *usize, text: []const u8) RenderError!void {
+    if (used.* + text.len > buffer.len) return error.NoSpaceLeft;
+    @memcpy(buffer[used.*..][0..text.len], text);
+    used.* += text.len;
+}
+
+fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) RenderError!void {
+    const rendered = std.fmt.bufPrint(buffer[used.*..], fmt, args) catch return error.NoSpaceLeft;
+    used.* += rendered.len;
+}
+
 test "permission denials explain blocking policy capability approval and retry hints" {
     const denied = forPermissionDecision(.network_egress, .policy_denied);
     try std.testing.expectEqualStrings("user-grant-policy", denied.policySlice());
@@ -117,4 +208,14 @@ test "permission denials explain blocking policy capability approval and retry h
     try std.testing.expectEqualStrings("background-execution-capability", throttled.missingCapabilitySlice());
     try std.testing.expect(!throttled.user_approval_can_resolve);
     try std.testing.expect(throttled.retry_safe);
+}
+
+test "permission denials render a user readable blocked explanation" {
+    const denied = forPermissionDecision(.network_egress, .policy_denied);
+    var buffer: [256]u8 = undefined;
+    const rendered = try renderUserHelpToBuffer(&buffer, "Notes", .network_egress, "relay.zigos.dev", denied);
+
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Blocked: Notes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "not granted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Permission Review") != null);
 }

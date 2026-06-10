@@ -53,6 +53,45 @@ pub fn isolationProofDepthGate() !void {
 }
 
 pub fn networkTransportHardeningGate() !void {
+    const Driver = struct {
+        var send_count: usize = 0;
+        var last_frame_len: usize = 0;
+        var expected_network_policy_id: u64 = 0;
+        var expected_egress_capability_id: u64 = 0;
+        var last_frame: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = [_]u8{0} ** network_driver_task.MAX_NATIVE_FRAME_BYTES;
+
+        fn send(frame: []const u8) void {
+            send_count += 1;
+            last_frame_len = frame.len;
+            @memcpy(last_frame[0..frame.len], frame);
+        }
+
+        fn mac() [6]u8 {
+            return [_]u8{ 0x02, 0x70, 0x71, 0x72, 0x73, 0x74 };
+        }
+
+        fn broker(request: network_driver_task.EgressRequest) network_driver_task.EgressDecision {
+            return .{
+                .allowed = request.network_policy_id == expected_network_policy_id,
+                .capability_backed = request.egress_capability_id == expected_egress_capability_id,
+            };
+        }
+    };
+
+    Driver.send_count = 0;
+    Driver.last_frame_len = 0;
+    Driver.expected_network_policy_id = 0;
+    Driver.expected_egress_capability_id = 0;
+    network_driver_task.reset();
+    defer network_driver_task.reset();
+
+    const device = network_driver_task.NetworkDevice{
+        .send = Driver.send,
+        .getMacAddress = Driver.mac,
+    };
+    try std.testing.expect(network_driver_task.activateDevice(&device, 709));
+    network_driver_task.setEgressBroker(Driver.broker);
+
     var policies = network_policy.Directory.init();
     var capabilities = capability.CapabilityTable.init();
     const owner = spec_support.service(701);
@@ -74,46 +113,59 @@ pub fn networkTransportHardeningGate() !void {
         .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 20 },
         .audit = .{},
     });
+    Driver.expected_network_policy_id = relay.id;
+    Driver.expected_egress_capability_id = relay_capability.id;
+    network_driver_task.bindEgressCapability(relay_capability.id, relay.id);
 
     var broker = network_policy.EgressBroker.init(&policies, &capabilities);
-    var harness = sync_transport.Harness.init();
-    const session = try harness.openRelay(&broker, .{
+    var native_transport = sync_transport.NativeTransportService.init();
+    var connection = try native_transport.openRelay(&broker, .{
         .task_id = 81,
         .principal_id = app,
         .capability_id = relay_capability.id,
         .policy_id = relay.id,
         .evidence = .{ .destination = .{ .domain = "relay.backlog.example" } },
         .now_ticks = 10,
-    }, source, target, "relay.backlog.example");
-    const packet = try harness.encryptPacket(&session, "backlog transport frame");
-    try std.testing.expect(packet.encrypted);
-    try std.testing.expect(!std.mem.eql(u8, packet.ciphertextSlice(), "backlog transport frame"));
+    }, 81, 82, source, target, "relay.backlog.example");
+    const signed_delivery = try native_transport.sendSigned(&connection, "backlog transport frame", spec_support.signer("backlog.native", 0x80));
+    try std.testing.expect(signed_delivery.endpoint_delivered);
+    try std.testing.expect(signed_delivery.network_delivered);
+    try std.testing.expectEqual(@as(usize, 1), Driver.send_count);
+    const captured = try native_transport.assertLastCapturedFrame(.{
+        .session_id = connection.session.id,
+        .sequence = signed_delivery.sequence,
+        .transport = .relay_assisted,
+        .source_device = source,
+        .target_device = target,
+        .policy_id = relay.id,
+        .capability_id = relay_capability.id,
+        .forbidden_plaintext = "backlog transport frame",
+    });
+    try std.testing.expectEqual(sync_transport.NativeTransportAbi.version, captured.abi_version);
+    try std.testing.expectEqualSlices(u8, native_transport.capture.last().?.slice(), Driver.last_frame[0..Driver.last_frame_len]);
+    try std.testing.expectEqualStrings("backlog transport frame", (try native_transport.receive(&connection)).payload());
 
-    var relay_queue = sync_transport.Relay.init();
-    _ = try harness.sendRelayPacket(&relay_queue, &session, "backlog op frame");
-    var plaintext_buffer: [sync_transport.MAX_PACKET_BYTES]u8 = undefined;
-    const delivered = (try relay_queue.deliverNext(&session, plaintext_buffer[0..])).?;
-    try std.testing.expectEqualStrings("backlog op frame", delivered);
-
-    var booted_relay = try sync_transport.BootedOverlayRelayService.init(812, 813, "relay.backlog.example");
-    const signed_frame = try harness.encryptSignedFrame(&session, "booted relay frame", spec_support.signer("backlog.relay", 0x81));
-    try std.testing.expectError(error.EgressDenied, booted_relay.submitSignedFrame(82, &session, signed_frame));
-    try booted_relay.submitSignedFrame(81, &session, signed_frame);
+    var booted_relay = try sync_transport.BootedOverlayRelayService.init(812, 81, "relay.backlog.example");
+    native_transport.disconnect(&connection);
+    const fallback = try native_transport.sendWithRelayFallback(&connection, &booted_relay, "booted relay frame", spec_support.signer("backlog.relay", 0x81));
+    try std.testing.expect(fallback.relay_fallback);
+    try std.testing.expect(!fallback.endpoint_delivered);
+    try std.testing.expect(!fallback.network_delivered);
     var booted_plaintext_buffer: [sync_transport.MAX_PACKET_BYTES]u8 = undefined;
-    const booted_delivered = (try booted_relay.deliverNext(81, &session, booted_plaintext_buffer[0..])).?;
+    const booted_delivered = (try booted_relay.deliverNext(81, &connection.session, booted_plaintext_buffer[0..])).?;
     try std.testing.expectEqualStrings("booted relay frame", booted_delivered);
     try std.testing.expectEqual(@as(usize, 1), booted_relay.accepted_packets);
     try std.testing.expectEqual(@as(usize, 1), booted_relay.delivered_packets);
-    try std.testing.expectEqual(@as(usize, 1), booted_relay.rejected_packets);
+    try std.testing.expectEqual(@as(usize, 0), booted_relay.rejected_packets);
 
-    try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, .{
+    try std.testing.expectError(error.EgressDenied, native_transport.openRelay(&broker, .{
         .task_id = 81,
         .principal_id = app,
         .capability_id = relay_capability.id,
         .policy_id = relay.id,
         .evidence = .{ .destination = .{ .domain = "unexpected.backlog.example" } },
         .now_ticks = 10,
-    }, source, target, "relay.backlog.example"));
+    }, 81, 82, source, target, "relay.backlog.example"));
 }
 
 pub fn syncAdapterDepthGate() !void {
@@ -260,6 +312,10 @@ pub fn firstHardwareTargetGate() !void {
     ));
     try std.testing.expect(containsString(
         hardware_target.nuc11tnki5_proof_metadata_markers[0..],
+        hardware_target.nuc11tnki5_marker_prefix ++ ":PROOF_MANIFEST:RECORDED",
+    ));
+    try std.testing.expect(containsString(
+        hardware_target.nuc11tnki5_proof_metadata_markers[0..],
         hardware_target.nuc11tnki5_marker_prefix ++ ":ARTIFACT_DIGESTS:RECORDED",
     ));
     try std.testing.expectEqual(@as(usize, 6), hardware_target.nuc11tnki5_counter_markers.len);
@@ -362,6 +418,7 @@ pub fn firstHardwareTargetGate() !void {
         .network_frame_cycles = target.proof_minimums.network_frame_cycles,
         .suspend_resume_cycles = target.proof_minimums.suspend_resume_cycles,
         .crash_recovery_cycles = target.proof_minimums.crash_recovery_cycles,
+        .proof_manifest_captured = true,
         .serial_log_captured = true,
         .firmware_settings_captured = true,
         .power_cycle_notes_captured = true,
@@ -378,6 +435,7 @@ pub fn firstHardwareTargetGate() !void {
         .network_frame_cycles = target.proof_minimums.network_frame_cycles,
         .suspend_resume_cycles = target.proof_minimums.suspend_resume_cycles,
         .crash_recovery_cycles = target.proof_minimums.crash_recovery_cycles,
+        .proof_manifest_captured = true,
         .serial_log_captured = true,
         .required_markers_captured = true,
         .firmware_settings_captured = true,
@@ -425,7 +483,17 @@ pub fn firstHardwareTargetGate() !void {
         .crash_recovery_cycles = target.proof_minimums.crash_recovery_cycles,
     };
     try std.testing.expect(kernel_hardware_proof.allSubsystemMarkersReady(composed_complete));
-    try std.testing.expect(hardware_target.hardwareProofSatisfied(target, kernel_hardware_proof.evaluateEvidence(composed_complete)));
+    const runtime_evidence = kernel_hardware_proof.evaluateEvidence(composed_complete);
+    try std.testing.expect(runtime_evidence.required_markers_captured);
+    try std.testing.expect(!hardware_target.hardwareProofSatisfied(target, runtime_evidence));
+
+    var archived_evidence = runtime_evidence;
+    archived_evidence.proof_manifest_captured = true;
+    archived_evidence.serial_log_captured = true;
+    archived_evidence.firmware_settings_captured = true;
+    archived_evidence.power_cycle_notes_captured = true;
+    archived_evidence.artifact_digests_captured = true;
+    try std.testing.expect(hardware_target.hardwareProofSatisfied(target, archived_evidence));
 }
 
 pub fn driverBoundaryAuditGate() !void {
@@ -537,6 +605,9 @@ fn deviceBrokerNegativeAuthorityGate() !void {
 
     const initial_dma_program = try device_broker.programBrokeredDmaIsolation(device_id, 0xD170);
     try std.testing.expect(initial_dma_program.hardware_iommu_programmed);
+    try std.testing.expectEqual(device_broker.IommuEngine.intel_vtd, initial_dma_program.iommu_program.engine);
+    try std.testing.expect(initial_dma_program.iommu_program.queued_invalidation_completed);
+    try std.testing.expect(initial_dma_program.iommu_program.interrupt_remapping_enabled);
     try std.testing.expectEqual(device_broker.DmaIsolationMode.brokered_dma_buffers, initial_dma_program.mode);
     try std.testing.expect(!initial_dma_program.bus_master_dma_enabled);
     var brokered_session = storage_driver_task.establishAtaBootstrapSession(
@@ -552,6 +623,17 @@ fn deviceBrokerNegativeAuthorityGate() !void {
     try std.testing.expect(brokered_session.dma_isolation.hardware_iommu_programmed);
     try std.testing.expect(!brokered_session.dma_isolation.bus_master_dma_enabled);
     try std.testing.expect(storage_driver_task.brokeredDmaBufferReady(&brokered_session));
+    const brokered_dma_window = device_broker.defaultBrokeredDmaWindow(device_id);
+    try std.testing.expectError(error.DmaWindowDenied, device_broker.validateDmaAccess(
+        device_id,
+        brokered_session.dma_domain_id,
+        brokered_dma_window.base + brokered_dma_window.length,
+        64,
+        .device_read,
+    ));
+    const dma_fault = device_broker.latestDmaFault(device_id, brokered_session.dma_domain_id).?;
+    try std.testing.expectEqual(device_broker.IommuFaultReason.access_outside_window, dma_fault.reason);
+    try std.testing.expectEqual(brokered_session.dma_isolation.program_generation, dma_fault.program_generation);
 
     try expectBrokeredStorageSessionWriteRead(&brokered_session, 8, "broker-before-rehost", 0x62);
 
@@ -645,6 +727,8 @@ fn deviceBrokerNegativeAuthorityGate() !void {
     try runtime.grantCapability(driver_task.id, rebound_authority.id);
     const rebound_dma_program = try device_broker.programBrokeredDmaIsolation(device_id, 0xD171);
     try std.testing.expect(rebound_dma_program.dma_domain_id != initial_dma_program.dma_domain_id);
+    try std.testing.expect(rebound_dma_program.hardware_iommu_programmed);
+    try std.testing.expect(rebound_dma_program.iommu_program.domain_page_table_address != initial_dma_program.iommu_program.domain_page_table_address);
     const rebound_descriptor = try kernel.deviceDescribe(
         kernelContext(driver_task.id, .device_describe, rebound_authority.id, .{ .device = device_id }),
         20,
@@ -926,6 +1010,18 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
         .device_id = 0x8086_15F2_0000,
         .frame_len = 64,
     }));
+    var i225_adapter = try intel_i225.SoftwareAdapter.init(.{
+        .rx_descriptors = 256,
+        .tx_descriptors = 256,
+        .rx_ring_address = 0x1000,
+        .tx_ring_address = 0x2000,
+    }, .{ 0x02, 0x15, 0xF2, 0, 0, 7 });
+    var tx_frame = [_]u8{0xC1} ** intel_i225.MIN_ETHERNET_FRAME_BYTES;
+    @memcpy(tx_frame[6..12], &i225_adapter.mac_address);
+    const tx_completion = try i225_adapter.transmit(tx_frame[0..]);
+    try std.testing.expect(tx_completion.descriptor_done);
+    try std.testing.expectEqual(@as(u32, 1), i225_adapter.tx_tail);
+    try std.testing.expect(std.mem.eql(u8, tx_frame[0..], i225_adapter.lastTransmitSlice()));
 
     try std.testing.expectEqualStrings("bootstrap_xhci_input_inventory_shim", kernel_xhci.kernel_boundary_role);
     try std.testing.expect(!kernel_xhci.publishes_full_input_service);
@@ -934,6 +1030,16 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
         .device_id = 0x8086_A0ED_0000,
         .report_len = 8,
     }));
+    var hid_controller = try kernel_xhci.HidController.init(.{
+        .command_ring_trbs = 64,
+        .event_ring_trbs = 64,
+        .command_ring_address = 0x1000,
+        .event_ring_address = 0x2000,
+    });
+    try hid_controller.enqueueInterruptReport(try kernel_xhci.bootKeyboardReport(0x8086_A0ED_0000, 1, 0x02, &.{0x04}));
+    const input_report = try hid_controller.pollHidReport();
+    try std.testing.expectEqual(@as(u8, 0x02), input_report.modifiers());
+    try std.testing.expectEqual(@as(u8, 0x04), input_report.keySlots()[0]);
     try std.testing.expectError(error.BadSignature, kernel_fadt.parseFadt(&[_]u8{0} ** kernel_fadt.MIN_FADT_PM_LENGTH));
     const crash = try kernel_crash_record.init(.panic, 1, 2, 3, 4, "target proof crash");
     try kernel_crash_record.validate(crash);
@@ -956,6 +1062,21 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
         .lba = 7,
         .sector_count = 1,
     }));
+    const nvme_capabilities = kernel_nvme.ControllerCapabilities{ .raw = (@as(u64, 63) | (@as(u64, 1) << 37)) };
+    var nvme_image = [_]u8{0} ** (kernel_nvme.SECTOR_BYTES * 4);
+    var namespaces = [_]kernel_nvme.Namespace{.{
+        .id = 1,
+        .sector_count = 4,
+        .image = nvme_image[0..],
+    }};
+    var nvme_controller = try kernel_nvme.Controller.init(nvme_capabilities, namespaces[0..], 32);
+    var nvme_write = [_]u8{0x91} ** kernel_nvme.SECTOR_BYTES;
+    @memcpy(nvme_write[0..4], "NVMe");
+    _ = try nvme_controller.write(1, 2, nvme_write[0..]);
+    var nvme_read = [_]u8{0} ** kernel_nvme.SECTOR_BYTES;
+    const nvme_completion = try nvme_controller.read(1, 2, nvme_read[0..]);
+    try std.testing.expectEqual(@as(u16, 2), nvme_completion.command_id);
+    try std.testing.expect(std.mem.eql(u8, nvme_write[0..], nvme_read[0..]));
 
     try std.testing.expectEqualStrings("bootstrap_device_inventory_shim", kernel_data_plane_boundary.kernel_boundary_role);
     try std.testing.expect(!kernel_data_plane_boundary.publishes_device_data_planes);

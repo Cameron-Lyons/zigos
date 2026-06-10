@@ -396,7 +396,7 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     });
     const view = try storage.bridgeResolve(.{
         .workspace_id = workspace_record.id.raw(),
-        .path = "/documents/report.md",
+        .path = "documents/report.md",
         .access = .read,
     }, .{
         .task_id = 88,
@@ -410,9 +410,39 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     try std.testing.expect(!view.writable);
     try std.testing.expectEqualStrings("documents/report.md", view.pathSlice());
     try std.testing.expectEqual(draft_v2.version_id.raw(), view.version_id);
-    try std.testing.expectError(file_bridge.Error.PermissionDenied, storage.bridgeResolve(.{
+    try std.testing.expectError(file_bridge.Error.PathAuthorityRejected, storage.bridgeResolve(.{
         .workspace_id = workspace_record.id.raw(),
         .path = "/documents/report.md",
+        .access = .read,
+    }, .{
+        .task_id = 88,
+        .principal = workspace_capability.holder,
+        .capability_id = workspace_capability.id,
+        .now_ticks = 8,
+    }));
+    try std.testing.expectError(file_bridge.Error.PathAuthorityRejected, storage.bridgeResolve(.{
+        .workspace_id = workspace_record.id.raw(),
+        .path = "~/documents/report.md",
+        .access = .read,
+    }, .{
+        .task_id = 88,
+        .principal = workspace_capability.holder,
+        .capability_id = workspace_capability.id,
+        .now_ticks = 8,
+    }));
+    try std.testing.expectError(file_bridge.Error.PathSyntaxInvalid, storage.bridgeResolve(.{
+        .workspace_id = workspace_record.id.raw(),
+        .path = "../documents/report.md",
+        .access = .read,
+    }, .{
+        .task_id = 88,
+        .principal = workspace_capability.holder,
+        .capability_id = workspace_capability.id,
+        .now_ticks = 8,
+    }));
+    try std.testing.expectError(file_bridge.Error.PermissionDenied, storage.bridgeResolve(.{
+        .workspace_id = workspace_record.id.raw(),
+        .path = "documents/report.md",
         .access = .write,
     }, .{
         .task_id = 88,
