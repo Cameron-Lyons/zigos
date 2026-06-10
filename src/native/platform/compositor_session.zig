@@ -2,6 +2,7 @@ const std = @import("std");
 const abi = @import("../core/abi.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const capability = @import("../kernel_api/capability.zig");
+const humane_permissions = @import("../policy/humane_permissions.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -844,6 +845,13 @@ pub fn renderReviewItemToBuffer(
     if (item.requested_lease_ticks != 0) {
         used += (try std.fmt.bufPrint(buffer[used..], " requested_lease={d}", .{item.requested_lease_ticks})).len;
     }
+    var lease_buffer: [96]u8 = undefined;
+    const lease_summary = humane_permissions.requestedLeaseLabel(&lease_buffer, item.requested_lease_ticks) catch "unavailable";
+    used += (try std.fmt.bufPrint(buffer[used..], " grant_scope={s} lease_summary={s} revoke_hint={s}", .{
+        humane_permissions.scopeSummaryLabel(item.kind, item.requested_local_only),
+        lease_summary,
+        humane_permissions.revocationHint(item.kind),
+    })).len;
     return buffer[0..used];
 }
 
@@ -864,6 +872,7 @@ pub fn renderDecisionToBuffer(
         if (item.decision_has_lease) {
             used += (try std.fmt.bufPrint(buffer[used..], " decision_lease={d}", .{item.decision_lease_ticks})).len;
         }
+        used += (try std.fmt.bufPrint(buffer[used..], " revoke_hint={s}", .{humane_permissions.revocationHint(item.kind)})).len;
     }
     return buffer[0..used];
 }
@@ -1484,7 +1493,10 @@ test "compositor session creates app-panel permission review windows and cards" 
 
     try std.testing.expect(std.mem.indexOf(u8, header, "type=app_panel") != null);
     try std.testing.expect(std.mem.indexOf(u8, item, "why=Notes needs access to local task objects") != null);
+    try std.testing.expect(std.mem.indexOf(u8, item, "grant_scope=this object on this device") != null);
+    try std.testing.expect(std.mem.indexOf(u8, item, "lease_summary=up to 400 ticks") != null);
     try std.testing.expect(std.mem.indexOf(u8, decision, "decision=allow") != null);
+    try std.testing.expect(std.mem.indexOf(u8, decision, "revoke_hint=remove this app from the object's share sheet") != null);
 }
 
 test "compositor session reuses an existing window for repeated bundle review" {

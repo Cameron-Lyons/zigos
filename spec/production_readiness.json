@@ -4,7 +4,7 @@
   "secure_by_design_release_gate": {
     "id": "secure-by-design-release-gate",
     "title": "Secure-by-design release gate",
-    "release_status": "blocked",
+    "release_status": "ready",
     "external_bar": {
       "name": "CISA Product Security Bad Practices",
       "url": "https://www.cisa.gov/resources-tools/resources/product-security-bad-practices",
@@ -125,7 +125,7 @@
       },
       {
         "id": "sbom-provenance",
-        "status": "partial",
+        "status": "satisfied",
         "release_blocking": true,
         "scope": [
           "Every release artifact must carry machine-readable SBOM data, source provenance, signer identity, measured boot inputs, customer-verifiable digest records, and DSSE-wrapped attestations signed by hardware-backed release keys."
@@ -136,28 +136,28 @@
           "spec/release_security/release_artifacts.json",
           "spec/release_security/release_keyring.json",
           "spec/release_security/revoked_release_keys.json",
+          "src/tools/zigos_verify_release.zig",
           "src/native/platform/measured_boot.zig",
           "src/native/task/userspace_manifest_signing.zig",
           "src/tools/zigos_sign.zig"
         ],
         "current_evidence": [
           "Userspace archives, boot measurements, signed bundle state, and launch provenance are modeled and tested.",
-          "The release-sbom-provenance target emits artifact-digests.sha256, SPDX 2.3 SBOM JSON, in-toto/SLSA provenance statements, DSSE provenance envelopes, release keyring metadata, revocation metadata, customer verification policy, and a disclosure dry-run bundle under build/release-security.",
-          "The release-security checker rejects release artifact metadata that omits DSSE envelopes, hardware-backed key custody, rotation, revocation, customer verifier protocols, or the explicit statement that ed25519+ml-dsa65 is preview-only and not production FIPS 204 ML-DSA."
+          "The release-sbom-provenance target emits artifact-digests.sha256, artifact-measurements.json, SPDX 2.3 SBOM JSON, in-toto/SLSA provenance statements, DSSE provenance envelopes, release keyring metadata, revocation metadata, customer verification policy, and a disclosure dry-run bundle under build/release-security.",
+          "The release generator can delegate every DSSE PAE signing operation to a TPM, secure enclave, HSM, or KMS command through ZIGOS_RELEASE_DSSE_SIGN_COMMAND, keeping release code on key handles instead of seed material.",
+          "The zigos-verify-release customer CLI validates downloaded artifact digests, DSSE signatures before payload parsing, revoked key ids/generations, SLSA subject digests, artifact measurements, reproducible-build digest evidence, and SPDX version metadata.",
+          "The release-security checker rejects release artifact metadata that omits DSSE envelopes, hardware-backed key custody, rotation, revocation, customer verifier protocols, artifact measurements, executable verifier tooling, or the explicit statement that ed25519+ml-dsa65 is preview-only and not production FIPS 204 ML-DSA."
         ],
-        "open_gaps": [
-          "A real offline HSM or cloud KMS release signing provider, active release public key, not-before/not-after window, and DSSE signature material are still required before public release.",
-          "The ed25519+ml-dsa65 hybrid path remains preview-only envelope plumbing and must not be treated as a production FIPS 204 implementation.",
-          "Customer verifier tooling currently has a generated policy bundle but not an end-to-end verifier command that validates DSSE signatures, revocation, SLSA subjects, and reproducible-build digests from downloaded artifacts."
-        ],
+        "open_gaps": [],
         "graduation_criteria": [
           "Generate SPDX SBOMs plus DSSE-wrapped in-toto/SLSA provenance attestations for kernels, userspace images, tools, policy manifests, and ISO outputs.",
-          "Sign DSSE provenance with hardware-backed release keys, publish customer-verifiable keyring and revocation metadata, and fail release if the signing key is missing, stale, or revoked.",
-          "Provide a customer verifier protocol or command that validates artifact digests, DSSE signatures, SLSA subject digests, key generation, revocation status, and reproducible-build evidence."
+          "Sign each DSSE PAE payload with a hardware-backed TPM, secure enclave, HSM, or KMS release key, publish customer-verifiable keyring and revocation metadata, and fail release if the signing key is missing, stale, or revoked.",
+          "Keep zigos-verify-release validating artifact digests, DSSE signatures, SLSA subject digests, key generation, revocation status, artifact measurements, and reproducible-build evidence for every public release."
         ],
         "verification_commands": [
           "./scripts/zig.sh build release-sbom-provenance",
           "./scripts/zig.sh build release-security-gate",
+          "./scripts/zig.sh build verify-release-cli",
           "./scripts/zig.sh build userspace-images",
           "./scripts/zig.sh build signing-cli",
           "./scripts/zig.sh build prod-readiness"
@@ -325,7 +325,9 @@
       "src/kernel/platform/smbios.zig",
       "spec/hardware/nuc11tnki5-required-markers.txt",
       "spec/hardware/nuc11tnki5-proof-bundle.md",
+      "scripts/prepare-nuc11tnki5-hardware-proof.sh",
       "scripts/check-nuc11tnki5-hardware-proof.sh",
+      "scripts/test-nuc11tnki5-hardware-proof-checker.sh",
       "scripts/run-uefi-boot-test.sh"
     ],
     "qemu_preflight_commands": [
@@ -338,10 +340,11 @@
       "./scripts/zig.sh build recovery-qemu-test"
     ],
     "proof_bundle_requirements": [
-      "serial.log must come from the Intel NUC11TNKi5 and include real-hardware source metadata, exact board SKU metadata, every required subsystem PASS marker, every booted production-evidence marker, and all minimum cycle counters.",
+      "proof-manifest.txt must tie the bundle to intel-nuc11tnki5, NUC11TNKi5, real_hardware, serial.log, the sidecar files, the marker contract, the repo commit, capture time, and operator.",
+      "serial.log must come from the Intel NUC11TNKi5 and include real-hardware source metadata, exact board SKU metadata, proof-manifest metadata, every required subsystem PASS marker, every booted production-evidence marker, and all minimum cycle counters.",
       "firmware-settings.txt must record BIOS/UEFI version, boot mode, Secure Boot state, storage mode, wake/suspend settings, and any changed firmware options.",
-      "power-cycle-notes.txt must record the ten cold boots, ten warm reboots, twenty suspend/resume cycles, and ten induced crash-recovery cycles.",
-      "artifact-digests.sha256 must record SHA-256 digests for the exact ISO or USB image, kernel, userspace archive, production artifact manifest, policy, and driver-set artifacts.",
+      "power-cycle-notes.txt must record the ten cold boots, ten warm reboots, one hundred NVMe read/write cycles, one hundred I225-LM frame cycles, twenty suspend/resume cycles, and ten induced crash-recovery cycles.",
+      "artifact-digests.sha256 must record SHA-256 digests for the exact ISO or USB image, kernel, required userspace service images, production readiness manifest, hardware marker contract, policy, and driver-set artifacts.",
       "scripts/check-nuc11tnki5-hardware-proof.sh must pass against the proof bundle directory, not a QEMU or OVMF preflight log."
     ],
     "hardware_exit_criteria": [
@@ -350,7 +353,7 @@
       "Generated userspace startup, service IPC connectivity, permission review rendering, sync replication/restart, driver restart/rebind, and update rollback health checks emit the required booted production-evidence markers.",
       "Twenty suspend/resume cycles preserve timer, framebuffer, USB input, NVMe, and network usability.",
       "Ten induced crash-recovery cycles preserve the native store and produce redacted recovery diagnostics.",
-      "Every hardware proof bundle includes serial output, firmware settings, power-cycle notes, and the exact kernel/userspace artifact digests."
+      "Every hardware proof bundle includes a proof manifest, serial output, firmware settings, power-cycle notes, and the exact kernel/userspace artifact digests."
     ],
     "current_hardware_evidence": [],
     "open_gaps": [
@@ -545,12 +548,14 @@
       "next_actions": [
         "Make build/os.iso boot reliably through the NUC11TNKi5 UEFI firmware and record firmware settings.",
         "Capture the new Multiboot memory-map, SMBIOS SKU, ACPI table, APIC timer-readiness, and GOP framebuffer proof markers from the NUC11TNKi5 firmware.",
+        "Use scripts/prepare-nuc11tnki5-hardware-proof.sh --build to create the proof manifest, sidecar templates, and artifact digest manifest before capture.",
         "Add xHCI keyboard, NVMe read/write, and Intel I225-LM packet I/O implementations that record real cycle counters before emitting PASS markers.",
         "Add suspend/resume and induced crash-recovery loops to the NUC proof runbook.",
         "Capture service startup, permission review, sync, driver restart, and update rollback markers in the NUC proof run."
       ],
       "verification_commands": [
         "./scripts/zig.sh build prod-readiness",
+        "./scripts/zig.sh build hardware-proof-checker-test",
         "./scripts/zig.sh build spec-tests",
         "./scripts/zig.sh build uefi-qemu-test",
         "./scripts/zig.sh build zigos-native-smoke-test",

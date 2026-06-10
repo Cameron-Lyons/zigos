@@ -50,6 +50,18 @@ pub fn build(b: *std.Build) void {
     const signing_cli_step = b.step("signing-cli", "Build the native app manifest signing CLI");
     signing_cli_step.dependOn(&signing_cli_install.step);
 
+    const verify_release_cli = b.addExecutable(.{
+        .name = "zigos-verify-release",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/zigos_verify_release_main.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const verify_release_cli_install = b.addInstallArtifact(verify_release_cli, .{});
+    const verify_release_cli_step = b.step("verify-release-cli", "Build the customer release verification CLI");
+    verify_release_cli_step.dependOn(&verify_release_cli_install.step);
+
     const native_store = qemu_build.addNativeStoreImageStep(b);
     _ = qemu_build.addNativeRunSteps(b, kernels.zigos_native, userspace_images, native_store);
 
@@ -151,8 +163,9 @@ pub fn build(b: *std.Build) void {
     });
     release_sbom_cmd.step.dependOn(&iso_cmd.step);
     release_sbom_cmd.step.dependOn(&signing_cli_install.step);
+    release_sbom_cmd.step.dependOn(&verify_release_cli_install.step);
     release_sbom_cmd.step.dependOn(userspace_images.step);
-    const release_sbom_step = b.step("release-sbom-provenance", "Generate release SPDX SBOM, artifact digests, DSSE in-toto/SLSA provenance, keyring/revocation metadata, customer verification policy, and disclosure dry-run bundle");
+    const release_sbom_step = b.step("release-sbom-provenance", "Generate release SPDX SBOM, artifact digests, artifact measurements, DSSE in-toto/SLSA provenance, keyring/revocation metadata, customer verification policy, and disclosure dry-run bundle");
     release_sbom_step.dependOn(&release_sbom_cmd.step);
 
     const reproducible_build_cmd = b.addSystemCommand(&.{

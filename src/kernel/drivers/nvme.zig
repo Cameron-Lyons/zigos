@@ -6,6 +6,7 @@ pub const nvme_data_plane_exports_fail_closed = true;
 
 pub const DEFAULT_PAGE_SIZE: u64 = 4096;
 pub const DOORBELL_REGISTER_BYTES: u32 = 4;
+pub const SECTOR_BYTES: usize = 512;
 
 pub const Error = error{
     KernelStorageDataPlaneDisabled,
@@ -14,6 +15,10 @@ pub const Error = error{
     QueueTooLarge,
     QueueAddressUnaligned,
     PageSizeUnsupported,
+    QueueNotReady,
+    NamespaceNotFound,
+    TransferOutOfRange,
+    BufferSizeInvalid,
 };
 
 pub const DataPlaneTransferRequest = struct {
@@ -66,6 +71,86 @@ pub const AdminQueuePlan = struct {
     page_size_bytes: u64 = DEFAULT_PAGE_SIZE,
 };
 
+pub const CompletionStatus = enum(u8) {
+    success,
+};
+
+pub const IoCompletion = struct {
+    command_id: u16,
+    namespace_id: u32,
+    lba: u64,
+    sector_count: u16,
+    status: CompletionStatus,
+    submission_tail: u16,
+    completion_head: u16,
+};
+
+pub const Namespace = struct {
+    id: u32,
+    sector_count: u64,
+    image: []u8,
+};
+
+pub const Controller = struct {
+    capabilities: ControllerCapabilities,
+    namespaces: []Namespace,
+    queue_depth: u16,
+    next_command_id: u16 = 1,
+    submission_tail: u16 = 0,
+    completion_head: u16 = 0,
+
+    pub fn init(capabilities: ControllerCapabilities, namespaces: []Namespace, queue_depth: u16) Error!Controller {
+        try validateQueueEntries(capabilities, queue_depth);
+        if (!capabilities.supportsNvmCommandSet()) return error.UnsupportedCommandSet;
+        return .{
+            .capabilities = capabilities,
+            .namespaces = namespaces,
+            .queue_depth = queue_depth,
+        };
+    }
+
+    pub fn read(self: *Controller, namespace_id: u32, lba: u64, buffer: []u8) Error!IoCompletion {
+        const sectors = try sectorCountForBuffer(buffer.len);
+        const target_namespace = try self.namespace(namespace_id);
+        const offset = try transferOffset(target_namespace, lba, sectors);
+        @memcpy(buffer, target_namespace.image[offset..][0..buffer.len]);
+        return self.completeIo(namespace_id, lba, sectors);
+    }
+
+    pub fn write(self: *Controller, namespace_id: u32, lba: u64, buffer: []const u8) Error!IoCompletion {
+        const sectors = try sectorCountForBuffer(buffer.len);
+        const target_namespace = try self.namespace(namespace_id);
+        const offset = try transferOffset(target_namespace, lba, sectors);
+        @memcpy(target_namespace.image[offset..][0..buffer.len], buffer);
+        return self.completeIo(namespace_id, lba, sectors);
+    }
+
+    fn namespace(self: *Controller, namespace_id: u32) Error!*Namespace {
+        for (self.namespaces) |*candidate| {
+            if (candidate.id == namespace_id) return candidate;
+        }
+        return error.NamespaceNotFound;
+    }
+
+    fn completeIo(self: *Controller, namespace_id: u32, lba: u64, sectors: u16) Error!IoCompletion {
+        if (self.queue_depth < 2) return error.QueueNotReady;
+        const command_id = self.next_command_id;
+        self.next_command_id +%= 1;
+        if (self.next_command_id == 0) self.next_command_id = 1;
+        self.submission_tail = nextQueueIndex(self.submission_tail, self.queue_depth);
+        self.completion_head = nextQueueIndex(self.completion_head, self.queue_depth);
+        return .{
+            .command_id = command_id,
+            .namespace_id = namespace_id,
+            .lba = lba,
+            .sector_count = sectors,
+            .status = .success,
+            .submission_tail = self.submission_tail,
+            .completion_head = self.completion_head,
+        };
+    }
+};
+
 pub fn validateAdminQueuePlan(capabilities: ControllerCapabilities, plan: AdminQueuePlan) Error!void {
     if (!capabilities.supportsNvmCommandSet()) return error.UnsupportedCommandSet;
     if (plan.page_size_bytes < capabilities.minPageSizeBytes() or
@@ -87,6 +172,27 @@ pub fn rejectKernelDataPlaneTransfer(_: DataPlaneTransferRequest) Error!void {
 fn validateQueueEntries(capabilities: ControllerCapabilities, entries: u32) Error!void {
     if (entries < 2) return error.QueueTooSmall;
     if (entries > capabilities.maxQueueEntries()) return error.QueueTooLarge;
+}
+
+fn sectorCountForBuffer(buffer_len: usize) Error!u16 {
+    if (buffer_len == 0 or (buffer_len % SECTOR_BYTES) != 0) return error.BufferSizeInvalid;
+    const sectors = buffer_len / SECTOR_BYTES;
+    if (sectors == 0 or sectors > std.math.maxInt(u16)) return error.BufferSizeInvalid;
+    return @intCast(sectors);
+}
+
+fn transferOffset(namespace: *const Namespace, lba: u64, sectors: u16) Error!usize {
+    if (sectors == 0 or lba >= namespace.sector_count or @as(u64, sectors) > namespace.sector_count - lba) {
+        return error.TransferOutOfRange;
+    }
+    const byte_offset = lba * SECTOR_BYTES;
+    const byte_len = @as(u64, sectors) * SECTOR_BYTES;
+    if (byte_offset + byte_len > namespace.image.len) return error.TransferOutOfRange;
+    return @intCast(byte_offset);
+}
+
+fn nextQueueIndex(index: u16, depth: u16) u16 {
+    return @intCast((@as(u32, index) + 1) % @as(u32, depth));
 }
 
 fn aligned(address: u64, alignment: u64) bool {
@@ -162,4 +268,42 @@ test "NVMe kernel shim rejects direct data-plane transfer attempts" {
         .lba = 7,
         .sector_count = 1,
     }));
+}
+
+test "NVMe userspace controller path writes reads and completes queue entries" {
+    const cap = makeCapabilities(63, 0, true, 0, 0);
+    var image = [_]u8{0} ** (SECTOR_BYTES * 8);
+    var namespaces = [_]Namespace{.{
+        .id = 1,
+        .sector_count = 8,
+        .image = image[0..],
+    }};
+    var controller = try Controller.init(cap, namespaces[0..], 32);
+    var write_buffer = [_]u8{0xA5} ** SECTOR_BYTES;
+    @memcpy(write_buffer[0..4], "nvme");
+    const write_completion = try controller.write(1, 3, write_buffer[0..]);
+    try std.testing.expectEqual(CompletionStatus.success, write_completion.status);
+    try std.testing.expectEqual(@as(u16, 1), write_completion.command_id);
+    try std.testing.expectEqual(@as(u16, 1), write_completion.submission_tail);
+
+    var read_buffer = [_]u8{0} ** SECTOR_BYTES;
+    const read_completion = try controller.read(1, 3, read_buffer[0..]);
+    try std.testing.expectEqual(@as(u16, 2), read_completion.command_id);
+    try std.testing.expectEqual(@as(u16, 2), read_completion.completion_head);
+    try std.testing.expect(std.mem.eql(u8, write_buffer[0..], read_buffer[0..]));
+}
+
+test "NVMe userspace controller path rejects bad namespace geometry" {
+    const cap = makeCapabilities(63, 0, true, 0, 0);
+    var image = [_]u8{0} ** (SECTOR_BYTES * 2);
+    var namespaces = [_]Namespace{.{
+        .id = 7,
+        .sector_count = 2,
+        .image = image[0..],
+    }};
+    var controller = try Controller.init(cap, namespaces[0..], 16);
+    var buffer = [_]u8{0} ** SECTOR_BYTES;
+    try std.testing.expectError(error.NamespaceNotFound, controller.read(8, 0, buffer[0..]));
+    try std.testing.expectError(error.TransferOutOfRange, controller.read(7, 2, buffer[0..]));
+    try std.testing.expectError(error.BufferSizeInvalid, controller.write(7, 0, buffer[0..17]));
 }

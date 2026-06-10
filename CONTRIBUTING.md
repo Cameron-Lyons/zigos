@@ -16,6 +16,7 @@ Use the pinned toolchain and repo entrypoints:
 | `./scripts/zig.sh build zig-lint` | You only need optional zlint over Zig sources. |
 | `./scripts/zig.sh build action-lint` | You only need optional actionlint over GitHub workflows. |
 | `./scripts/zig.sh build test-roots` | You need to confirm Zig test-bearing files are reachable from the build test roots. |
+| `./scripts/zig.sh build hardware-proof-checker-test` | You changed the NUC11TNKi5 proof-bundle checker or bundle contract. |
 | `./scripts/zig.sh build kernel` | You need the default native kernel and embedded userspace archive. |
 | `./scripts/zig.sh build kernel-zigos-native` | You need the native bootstrap kernel profile. |
 | `./scripts/zig.sh build kernel-recovery` | You need the freestanding recovery kernel profile. |
@@ -37,7 +38,8 @@ Use the pinned toolchain and repo entrypoints:
 | Command | Use it when |
 | --- | --- |
 | `./scripts/zig.sh build userspace-images` | You need only the embedded userspace image artifacts. |
-| `./scripts/zig.sh build release-sbom-provenance` | You need the release artifact digest, SPDX SBOM, in-toto/SLSA provenance, DSSE envelope, keyring/revocation metadata, customer verification policy, and disclosure dry-run bundle under `build/release-security/`. |
+| `./scripts/zig.sh build release-sbom-provenance` | You need the release artifact digest, artifact measurements, SPDX SBOM, in-toto/SLSA provenance, DSSE envelope, keyring/revocation metadata, customer verification policy, and disclosure dry-run bundle under `build/release-security/`. |
+| `./scripts/zig.sh build verify-release-cli` | You need the customer verifier binary that checks DSSE signatures, revocation, SLSA subjects, reproducible-build digests, and artifact measurements. |
 | `./scripts/zig.sh build reproducible-build-check` | You need a two-build digest comparison for release artifacts in isolated tracked-workspace copies. |
 | `./scripts/zig.sh build native-store-image` | You need to build or preserve the native storage image used by run targets. |
 | `./scripts/zig.sh build iso` | You need a bootable ISO at `build/os.iso`. |
@@ -50,7 +52,8 @@ Keep the spec contract intact:
 - Treat `spec/coverage.json` as the architecture and coverage contract.
 - Treat `spec/production_readiness.json` as the separate manifest for prototype-to-production work; do not encode production readiness by weakening or overloading spec conformance status.
 - Keep `first_hardware_target` pinned to one real machine until it is boringly reliable. The current target is `intel-nuc11tnki5`; QEMU can be preflight evidence, but production readiness requires a real hardware proof bundle checked by `scripts/check-nuc11tnki5-hardware-proof.sh build/hardware-proofs/nuc11tnki5`.
-- Keep the secure-by-design release gate in `spec/production_readiness.json` complete, release-blocking, and backed by `./scripts/zig.sh build release-security-check`. Updates that touch parsing, boot, storage, sync, kernel/user ABI, drivers, diagnostics, crypto, or release tooling should consider fuzzing, fault injection, reproducible builds, DSSE SBOM/provenance, hardware-backed release keys, rotation/revocation, customer verifier metadata, threat-model tests, memory-safety audits, crash dump redaction, and the disclosure process in `SECURITY.md`.
+- Prepare the NUC proof bundle with `scripts/prepare-nuc11tnki5-hardware-proof.sh --build`; the checker rejects unfinished sidecar templates, QEMU/OVMF logs, missing `proof-manifest.txt` fields, low cycle counts, and missing boot/kernel/userspace artifact digests.
+- Keep the secure-by-design release gate in `spec/production_readiness.json` complete, release-blocking, and backed by `./scripts/zig.sh build release-security-check`. Updates that touch parsing, boot, storage, sync, kernel/user ABI, drivers, diagnostics, crypto, or release tooling should consider fuzzing, fault injection, reproducible builds, DSSE SBOM/provenance, hardware-backed TPM/secure-enclave/HSM/KMS release keys, rotation/revocation, `zigos-verify-release` customer verifier coverage, artifact measurements, threat-model tests, memory-safety audits, crash dump redaction, and the disclosure process in `SECURITY.md`.
 - Keep requirement ids stable when editing manifest prose or mappings so coverage references do not churn.
 - If you add, rename, or split spec tests, keep the test names and coverage references aligned.
 - Prefer expanding tests and coverage before changing requirement anchors or architecture claims.

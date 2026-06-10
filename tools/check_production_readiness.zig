@@ -75,7 +75,9 @@ const FIRST_HARDWARE_TARGET_REQUIRED_REFERENCE_ARTIFACTS = [_][]const u8{
     "src/native/platform/hardware_target.zig",
     "spec/hardware/nuc11tnki5-required-markers.txt",
     "spec/hardware/nuc11tnki5-proof-bundle.md",
+    "scripts/prepare-nuc11tnki5-hardware-proof.sh",
     "scripts/check-nuc11tnki5-hardware-proof.sh",
+    "scripts/test-nuc11tnki5-hardware-proof-checker.sh",
 };
 const FIRST_HARDWARE_TARGET_LIST_FIELDS = [_][]const u8{
     "required_subsystems",
@@ -554,9 +556,14 @@ fn validateNuc11tnki5ProofChecker(
     const required_snippets = [_][]const u8{
         "EVIDENCE_SOURCE:REAL_HARDWARE",
         "BOARD_SKU:NUC11TNKi5",
+        "PROOF_MANIFEST:RECORDED",
         "FIRMWARE_SETTINGS:RECORDED",
         "POWER_CYCLE_NOTES:RECORDED",
         "ARTIFACT_DIGESTS:RECORDED",
+        "proof-manifest.txt",
+        "target_id",
+        "captured_at_utc",
+        "repo_commit",
         "COLD_BOOTS",
         "WARM_REBOOTS",
         "STORAGE_WRITE_READ_CYCLES",
@@ -564,6 +571,9 @@ fn validateNuc11tnki5ProofChecker(
         "SUSPEND_RESUME_CYCLES",
         "CRASH_RECOVERY_CYCLES",
         "artifact-digests.sha256",
+        "zig-out/bin/kernel-zigos-native.elf",
+        "zig-out/bin/userspace-policy-mediation.elf",
+        "zig-out/bin/userspace-storage-driver.elf",
         "QEMU",
     };
     for (required_snippets) |snippet| {

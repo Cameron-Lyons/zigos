@@ -37,6 +37,7 @@ pub const EvidenceSummary = struct {
     network_frame_cycles: u16 = 0,
     suspend_resume_cycles: u16 = 0,
     crash_recovery_cycles: u16 = 0,
+    proof_manifest_captured: bool = false,
     serial_log_captured: bool = false,
     required_markers_captured: bool = false,
     firmware_settings_captured: bool = false,
@@ -87,6 +88,7 @@ pub const nuc11tnki5_markers = [_][]const u8{
 pub const nuc11tnki5_proof_metadata_markers = [_][]const u8{
     nuc11tnki5_marker_prefix ++ ":EVIDENCE_SOURCE:REAL_HARDWARE",
     nuc11tnki5_marker_prefix ++ ":BOARD_SKU:NUC11TNKi5",
+    nuc11tnki5_marker_prefix ++ ":PROOF_MANIFEST:RECORDED",
     nuc11tnki5_marker_prefix ++ ":FIRMWARE_SETTINGS:RECORDED",
     nuc11tnki5_marker_prefix ++ ":POWER_CYCLE_NOTES:RECORDED",
     nuc11tnki5_marker_prefix ++ ":ARTIFACT_DIGESTS:RECORDED",
@@ -162,6 +164,7 @@ pub fn coversRequiredSubsystems(target: *const Target) bool {
 pub fn hardwareProofSatisfied(target: *const Target, evidence: EvidenceSummary) bool {
     return std.mem.eql(u8, evidence.target_id, target.id) and
         evidence.source == .real_hardware and
+        evidence.proof_manifest_captured and
         evidence.serial_log_captured and
         evidence.required_markers_captured and
         evidence.firmware_settings_captured and

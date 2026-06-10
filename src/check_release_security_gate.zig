@@ -317,6 +317,18 @@ fn validateReleaseArtifacts(
     if (repro_checker.len > 0 and !common.pathExists(io, repro_checker)) {
         try common.addError(errors, allocator, "reproducible build checker is missing: {s}", .{repro_checker});
     }
+    const customer_verifier_source = try common.expectStringField(allocator, errors, root, "release artifacts", "customer_verifier_source") orelse "";
+    if (customer_verifier_source.len > 0 and !common.pathExists(io, customer_verifier_source)) {
+        try common.addError(errors, allocator, "customer verifier source is missing: {s}", .{customer_verifier_source});
+    }
+    const customer_verifier_command = try common.expectStringField(allocator, errors, root, "release artifacts", "customer_verifier_command") orelse "";
+    if (std.mem.indexOf(u8, customer_verifier_command, "zigos-verify-release") == null) {
+        try common.addError(errors, allocator, "release artifacts customer_verifier_command must run zigos-verify-release", .{});
+    }
+    const artifact_measurements = try common.expectStringField(allocator, errors, root, "release artifacts", "artifact_measurements") orelse "";
+    if (std.mem.indexOf(u8, artifact_measurements, "artifact-measurements.json") == null) {
+        try common.addError(errors, allocator, "release artifacts must declare artifact-measurements.json output", .{});
+    }
     const sbom_format = try common.expectStringField(allocator, errors, root, "release artifacts", "sbom_format") orelse "";
     if (!std.mem.eql(u8, sbom_format, "SPDX-2.3")) {
         try common.addError(errors, allocator, "release artifacts must require SPDX-2.3 SBOM output", .{});
@@ -334,8 +346,8 @@ fn validateReleaseArtifacts(
 
     const release_signing = try common.expectObjectField(allocator, errors, root, "release artifacts", "release_signing") orelse return;
     const provider_boundary = try common.expectStringField(allocator, errors, release_signing, "release signing", "provider_boundary") orelse "";
-    if (std.mem.indexOf(u8, provider_boundary, "HSM") == null and std.mem.indexOf(u8, provider_boundary, "KMS") == null) {
-        try common.addError(errors, allocator, "release signing provider_boundary must name an HSM or KMS provider boundary", .{});
+    if (!containsHardwareReleaseBoundary(provider_boundary)) {
+        try common.addError(errors, allocator, "release signing provider_boundary must name a TPM, secure enclave, HSM, or KMS provider boundary", .{});
     }
     if (!common.containsAsciiIgnoreCase(provider_boundary, "key handle") or
         !common.containsAsciiIgnoreCase(provider_boundary, "never seed material"))
@@ -359,7 +371,16 @@ fn validateReleaseArtifacts(
         "release signing verifier_protocols",
         true,
     );
-    const required_verifier_protocol_terms = [_][]const u8{ "artifact-digests", "DSSE", "SLSA", "release-keyring", "revoked", "reproducible-build" };
+    const required_verifier_protocol_terms = [_][]const u8{
+        "artifact-digests",
+        "DSSE",
+        "SLSA",
+        "release-keyring",
+        "revoked",
+        "artifact-measurements",
+        "reproducible-build",
+        "zigos-verify-release",
+    };
     for (required_verifier_protocol_terms) |term| {
         if (!stringArrayContainsSubstring(verifier_protocols, term)) {
             try common.addError(errors, allocator, "release signing verifier_protocols must cover {s}", .{term});
@@ -417,6 +438,7 @@ fn validateReleaseArtifacts(
     );
     const required_customer_bundle_artifacts = [_][]const u8{
         "build/release-security/artifact-digests.sha256",
+        "build/release-security/artifact-measurements.json",
         "build/release-security/sbom.spdx.json",
         "build/release-security/provenance.intoto.jsonl",
         "build/release-security/provenance.dsse.intoto.jsonl",
@@ -424,6 +446,7 @@ fn validateReleaseArtifacts(
         "build/release-security/release-keyring.json",
         "build/release-security/revoked-release-keys.json",
         "build/release-security/reproducible-build.json",
+        "zig-out/bin/zigos-verify-release",
     };
     for (required_customer_bundle_artifacts) |artifact| {
         if (!stringArrayContains(customer_bundle, artifact)) {
@@ -875,4 +898,11 @@ fn stringArrayContainsSubstring(values: []const []const u8, needle: []const u8) 
         if (std.mem.indexOf(u8, value, needle) != null) return true;
     }
     return false;
+}
+
+fn containsHardwareReleaseBoundary(value: []const u8) bool {
+    return common.containsAsciiIgnoreCase(value, "tpm") or
+        common.containsAsciiIgnoreCase(value, "secure enclave") or
+        common.containsAsciiIgnoreCase(value, "hsm") or
+        common.containsAsciiIgnoreCase(value, "kms");
 }

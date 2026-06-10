@@ -7,9 +7,12 @@
   "attestation_payload_type": "application/vnd.in-toto+json",
   "generator": "scripts/generate-release-sbom-provenance.sh",
   "reproducible_build_checker": "scripts/check-reproducible-build.sh",
+  "customer_verifier_source": "src/tools/zigos_verify_release.zig",
+  "customer_verifier_command": "zig-out/bin/zigos-verify-release build/release-security .",
+  "artifact_measurements": "build/release-security/artifact-measurements.json",
   "output_directory": "build/release-security",
   "release_signing": {
-    "provider_boundary": "offline HSM or cloud KMS signing provider; release code receives key handles only, never seed material",
+    "provider_boundary": "TPM, secure enclave, offline HSM, or cloud KMS signing provider; release code receives key handles only, never seed material",
     "hardware_backed_required": true,
     "rotation_required": true,
     "revocation_required": true,
@@ -21,7 +24,9 @@
       "verify SLSA provenance predicate type and subject digests",
       "verify release-keyring.json key ids, custody, generation, and not-after bounds",
       "reject revoked key ids or generations listed in revoked-release-keys.json",
-      "compare reproducible-build.json and reproducible-artifact-digests.sha256 against the release digest manifest"
+      "compare artifact-measurements.json size and digest measurements against downloaded artifacts",
+      "compare reproducible-build.json and reproducible-artifact-digests.sha256 against the release digest manifest",
+      "run zigos-verify-release over the downloaded release bundle before trusting artifact measurements or SLSA provenance"
     ],
     "trusted_key_material": [
       "spec/release_security/release_keyring.json",
@@ -44,6 +49,17 @@
       "id": "zigos-sign",
       "path": "zig-out/bin/zigos-sign",
       "kind": "release-tool",
+      "digest_required": true,
+      "sbom_required": true,
+      "provenance_required": true,
+      "dsse_required": true,
+      "reproducible_required": true,
+      "customer_verifiable": true
+    },
+    {
+      "id": "zigos-verify-release",
+      "path": "zig-out/bin/zigos-verify-release",
+      "kind": "customer-verifier",
       "digest_required": true,
       "sbom_required": true,
       "provenance_required": true,
@@ -109,12 +125,14 @@
   ],
   "customer_verification_bundle": [
     "build/release-security/artifact-digests.sha256",
+    "build/release-security/artifact-measurements.json",
     "build/release-security/sbom.spdx.json",
     "build/release-security/provenance.intoto.jsonl",
     "build/release-security/provenance.dsse.intoto.jsonl",
     "build/release-security/customer-verification-policy.json",
     "build/release-security/release-keyring.json",
     "build/release-security/revoked-release-keys.json",
-    "build/release-security/reproducible-build.json"
+    "build/release-security/reproducible-build.json",
+    "zig-out/bin/zigos-verify-release"
   ]
 }

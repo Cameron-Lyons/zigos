@@ -5,6 +5,7 @@ const background_dispatch = @import("../../native/task/background_dispatch.zig")
 const capability = @import("../../native/kernel_api/capability.zig");
 const contract = @import("../../native/session/contract.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
+const humane_permissions = @import("../../native/policy/humane_permissions.zig");
 const indexing_service = @import("../../native/services/indexing_service.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const media_print_service = @import("../../native/services/media_print_service.zig");
@@ -568,6 +569,12 @@ pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {
     try std.testing.expectEqual(manifest.BackgroundNetworkMode.local_network_only, task.last_background_network);
     try std.testing.expectEqual(manifest.BackgroundVisibility.status_only, task.last_background_visibility);
     try std.testing.expectEqual(task_runtime.AuditEventKind.background_dispatched, task.latestAuditEvent().?.kind);
+
+    var activity_buffer: [384]u8 = undefined;
+    const latest_activity = try humane_permissions.renderBackgroundActivityToBuffer(&activity_buffer, dispatcher.latestRecord().?);
+    try std.testing.expect(std.mem.indexOf(u8, latest_activity, "Background activity") != null);
+    try std.testing.expect(std.mem.indexOf(u8, latest_activity, "state=waiting") != null);
+    try std.testing.expect(std.mem.indexOf(u8, latest_activity, "visible=status only") != null);
 }
 
 pub fn structuredServicesAndDiagnosticsStayRedacted() !void {
@@ -622,4 +629,5 @@ pub fn structuredServicesAndDiagnosticsStayRedacted() !void {
     try std.testing.expect(std.mem.indexOf(u8, redacted, "policy=user-grant-policy") != null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "missing=screen-capture-capability") != null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "approval=yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "blocked_help=\"Blocked: This app") != null);
 }

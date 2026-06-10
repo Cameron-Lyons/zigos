@@ -66,8 +66,16 @@ pub fn addCheckSteps(
     spec_tests_step.dependOn(&test_artifacts.run_spec_tests.step);
 
     const prod_readiness_cmd = addHostToolRun(b, optimize, "check-production-readiness", "tools/check_production_readiness.zig");
+    const hardware_proof_checker_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/test-nuc11tnki5-hardware-proof-checker.sh",
+    });
+    const hardware_proof_checker_step = b.step("hardware-proof-checker-test", "Exercise the NUC11TNKi5 proof-bundle checker with synthetic pass/fail fixtures");
+    hardware_proof_checker_step.dependOn(&hardware_proof_checker_cmd.step);
+
     const prod_readiness_step = b.step("prod-readiness", "Validate production-readiness tracking and the secure-by-design release gate");
     prod_readiness_step.dependOn(&prod_readiness_cmd.step);
+    prod_readiness_step.dependOn(&hardware_proof_checker_cmd.step);
 
     const release_security_cmd = addReleaseSecurityGateRun(b, optimize);
     const release_security_step = b.step("release-security-check", "Run release-security fuzz, audit, redaction, SBOM/provenance, threat-model, and disclosure source gates");

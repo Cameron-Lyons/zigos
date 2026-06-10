@@ -35,6 +35,14 @@ pub const InputKind = enum(u8) {
     start_task,
     open_workspace,
     open_document,
+    text_input,
+    edit_document,
+    sync_document,
+    query_objects,
+    open_object,
+    show_object_history,
+    share_object,
+    review_object_conflict,
     review_permission,
     allow_permission,
     deny_permission,
@@ -44,6 +52,7 @@ pub const InputKind = enum(u8) {
     run_diagnostics,
     post_notification,
     recover_state,
+    remove_package,
     task_switch_next,
     task_switch_previous,
     show_recovery,
@@ -53,6 +62,7 @@ pub const InputKind = enum(u8) {
 pub const ShellInput = struct {
     kind: InputKind,
     tick: u64 = 0,
+    text: []const u8 = "",
 };
 
 pub const InputResult = struct {
@@ -134,6 +144,14 @@ pub const BootedSystem = struct {
                     .tick = input.tick,
                 }, control);
             },
+            .text_input,
+            .edit_document,
+            => return self.dispatchHumaneInput(input, .{
+                .operation = .click,
+                .control = .edit_document,
+                .tick = input.tick,
+                .text = input.text,
+            }, .edit_document),
             .task_switch_next => {
                 self.switchActiveWindow(.next) catch |err| {
                     self.setError(statusForBootError(err), .start_task);
@@ -249,6 +267,19 @@ pub const BootedSystem = struct {
             review_resource,
             yesNo(review_local_only),
             review_lease_ticks,
+        });
+        try appendFmt(buffer, &used, "document_loop opened={s} edited={s} version={d} bytes={d} synced={s} sync_selected={d} frames={d} conflicts={d} object_shared={s} conflict_reviewed={s} package_removed={s}\n", .{
+            yesNo(self.shell.state.document_opened),
+            yesNo(self.shell.state.document_edited),
+            self.shell.state.document_version_id,
+            self.shell.state.document_text_len,
+            yesNo(self.shell.state.document_synced),
+            self.shell.state.sync_selected_entries,
+            self.shell.state.sync_transport_frames,
+            self.shell.state.sync_conflicts,
+            yesNo(self.shell.state.object_shared),
+            yesNo(self.shell.state.object_conflict_reviewed),
+            yesNo(self.shell.state.package_removed),
         });
         if (self.shell.state.permission_denied) {
             try appendFmt(buffer, &used, "permission_error reason={s} policy={s} missing={s} approval={s} retry_safe={s}\n", .{
@@ -441,6 +472,13 @@ fn controlForInput(kind: InputKind) ?HumaneShellControl {
         .start_task => .start_task,
         .open_workspace => .open_workspace,
         .open_document => .open_document,
+        .edit_document, .text_input => .edit_document,
+        .sync_document => .sync_document,
+        .query_objects => .query_objects,
+        .open_object => .open_object,
+        .show_object_history => .show_object_history,
+        .share_object => .share_object,
+        .review_object_conflict => .review_object_conflict,
         .review_permission => .review_permission,
         .allow_permission => .allow_permission,
         .deny_permission => .deny_permission,
@@ -450,6 +488,7 @@ fn controlForInput(kind: InputKind) ?HumaneShellControl {
         .run_diagnostics => .run_diagnostics,
         .post_notification => .post_notification,
         .recover_state => .recover_state,
+        .remove_package => .remove_package,
         else => null,
     };
 }

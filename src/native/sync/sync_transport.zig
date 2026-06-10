@@ -1,7 +1,10 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
+const device_graph = @import("device_graph.zig");
 const endpoint = @import("../kernel_api/endpoint.zig");
+const hardware_target = @import("../platform/hardware_target.zig");
 const ids = @import("../core/ids.zig");
+const intel_i225 = @import("../../kernel/drivers/intel_i225.zig");
 const network_driver_task = @import("../drivers/network_driver_task.zig");
 const network_policy = @import("network_policy.zig");
 const principal = @import("../core/principal.zig");
@@ -27,13 +30,72 @@ pub const decryptSignedFrame = harness.decryptSignedFrame;
 pub const Error = harness.Error || endpoint.Error || network_driver_task.Error || error{
     NativeTransportCongested,
     NativeTransportDisconnected,
+    NativeTransportDeviceRevoked,
     NativeTransportFrameMissing,
+    NativeTransportHardwareProofMissing,
+    NativeTransportMalformedFrame,
     NativeTransportReplayRejected,
     PacketCaptureFull,
 };
 
 pub const MAX_CAPTURED_PACKETS: usize = 16;
 pub const MAX_NATIVE_IN_FLIGHT_FRAMES: usize = 4;
+pub const NATIVE_TRANSPORT_ABI_VERSION: u16 = 1;
+
+pub const NativeTransportAbi = struct {
+    pub const magic = [_]u8{ 'Z', 'G', 'S', 'T' };
+    pub const version: u16 = NATIVE_TRANSPORT_ABI_VERSION;
+    pub const flag_encrypted: u8 = 1 << 0;
+    pub const flag_egress_allowed: u8 = 1 << 1;
+    pub const fixed_header_bytes: usize = 4 + 2 + 2 + (2 * @sizeOf(u64)) + 4 + (4 * @sizeOf(u64)) + 2;
+};
+
+pub const NativeSyncFrameView = struct {
+    abi_version: u16,
+    header_len: u16,
+    session_id: u64,
+    sequence: u64,
+    transport: sync_state.TransportMode,
+    source_device: principal.PrincipalId,
+    target_device: principal.PrincipalId,
+    flags: u8,
+    policy_id: u64,
+    capability_id: u64,
+    ciphertext: []const u8,
+    packet_digest: []const u8,
+
+    pub fn encrypted(self: NativeSyncFrameView) bool {
+        return (self.flags & NativeTransportAbi.flag_encrypted) != 0;
+    }
+
+    pub fn egressAllowed(self: NativeSyncFrameView) bool {
+        return (self.flags & NativeTransportAbi.flag_egress_allowed) != 0;
+    }
+};
+
+pub const CapturedFrameExpectation = struct {
+    session_id: u64,
+    sequence: u64,
+    transport: sync_state.TransportMode,
+    source_device: principal.PrincipalId,
+    target_device: principal.PrincipalId,
+    policy_id: u64,
+    capability_id: u64,
+    forbidden_plaintext: []const u8 = "",
+};
+
+pub const IntelI225TransportProof = struct {
+    evidence: hardware_target.EvidenceSummary,
+    ring_plan: intel_i225.RingPlan,
+    kernel_data_plane_disabled: bool = intel_i225.network_data_plane_exports_fail_closed,
+    i225_driver_present: bool = true,
+
+    pub fn satisfied(self: IntelI225TransportProof) bool {
+        if (!self.kernel_data_plane_disabled or !self.i225_driver_present) return false;
+        intel_i225.validateRingPlan(self.ring_plan) catch return false;
+        return hardware_target.hardwareProofSatisfied(&hardware_target.first_supported_target, self.evidence);
+    }
+};
 
 pub const CapturedPacket = struct {
     in_use: bool = false,
@@ -51,6 +113,7 @@ pub const PacketCapture = struct {
     dropped_count: usize = 0,
 
     pub fn record(self: *PacketCapture, frame: []const u8) Error!void {
+        if (frame.len > network_driver_task.MAX_NATIVE_FRAME_BYTES) return error.PacketTooLarge;
         for (&self.packets) |*slot| {
             if (slot.in_use) continue;
             slot.in_use = true;
@@ -64,10 +127,15 @@ pub const PacketCapture = struct {
     }
 
     pub fn last(self: *const PacketCapture) ?CapturedPacket {
+        const packet = self.lastPtr() orelse return null;
+        return packet.*;
+    }
+
+    pub fn lastPtr(self: *const PacketCapture) ?*const CapturedPacket {
         var index = self.packets.len;
         while (index > 0) {
             index -= 1;
-            if (self.packets[index].in_use) return self.packets[index];
+            if (self.packets[index].in_use) return &self.packets[index];
         }
         return null;
     }
@@ -81,6 +149,7 @@ pub const NativeConnection = struct {
     target_task_id: u64,
     connected: bool = true,
     next_sequence: u64 = 1,
+    highest_sent_sequence: u64 = 0,
     highest_delivered_sequence: u64 = 0,
     in_flight_frames: usize = 0,
 
@@ -124,9 +193,21 @@ pub const NativeTransportService = struct {
     relay_fallback_count: usize = 0,
     congestion_drop_count: usize = 0,
     replay_rejection_count: usize = 0,
+    revoked_device_rejection_count: usize = 0,
+    i225_proof_attached: bool = false,
+    trust_graph: ?*const device_graph.Graph = null,
 
     pub fn init() NativeTransportService {
         return .{};
+    }
+
+    pub fn bindTrustedDeviceGraph(self: *NativeTransportService, graph: *const device_graph.Graph) void {
+        self.trust_graph = graph;
+    }
+
+    pub fn attachIntelI225Proof(self: *NativeTransportService, proof: IntelI225TransportProof) Error!void {
+        if (!proof.satisfied()) return error.NativeTransportHardwareProofMissing;
+        self.i225_proof_attached = true;
     }
 
     pub fn openDeviceToDevice(
@@ -138,6 +219,7 @@ pub const NativeTransportService = struct {
         source_device: principal.PrincipalId,
         target_device: principal.PrincipalId,
     ) Error!NativeConnection {
+        try self.ensureTrustedTransportDevices(source_device, target_device);
         const session = try self.harness.openDeviceToDevice(
             broker,
             request,
@@ -156,6 +238,7 @@ pub const NativeTransportService = struct {
         source_device: principal.PrincipalId,
         target_device: principal.PrincipalId,
     ) Error!NativeConnection {
+        try self.ensureTrustedTransportDevices(source_device, target_device);
         const session = try self.harness.openServiceIdentity(
             broker,
             request,
@@ -175,6 +258,7 @@ pub const NativeTransportService = struct {
         target_device: principal.PrincipalId,
         relay_domain: []const u8,
     ) Error!NativeConnection {
+        try self.ensureTrustedTransportDevices(source_device, target_device);
         const session = try self.harness.openRelay(
             broker,
             request,
@@ -210,12 +294,13 @@ pub const NativeTransportService = struct {
         signer: signing.SignerIdentity,
     ) Error!NativeDelivery {
         if (!connection.connected) return error.NativeTransportDisconnected;
+        try self.ensureTrustedTransportDevices(connection.session.source_device, connection.session.target_device);
         if (connection.in_flight_frames >= MAX_NATIVE_IN_FLIGHT_FRAMES) {
             self.congestion_drop_count += 1;
             return error.NativeTransportCongested;
         }
         const sequence = connection.next_sequence;
-        if (sequence <= connection.highest_delivered_sequence or sequence + sync_state.TRANSPORT_REPLAY_WINDOW <= connection.highest_delivered_sequence) {
+        if (sequence <= connection.highest_sent_sequence or sequence + sync_state.TRANSPORT_REPLAY_WINDOW <= connection.highest_delivered_sequence) {
             self.replay_rejection_count += 1;
             return error.NativeTransportReplayRejected;
         }
@@ -231,6 +316,7 @@ pub const NativeTransportService = struct {
         self.endpoint_frame_count += 1;
         connection.in_flight_frames += 1;
         connection.next_sequence += 1;
+        connection.highest_sent_sequence = sequence;
 
         var network_delivered = false;
         var wire_frame: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = undefined;
@@ -248,6 +334,13 @@ pub const NativeTransportService = struct {
             .sequence = sequence,
             .payload_len = plaintext.len,
         };
+    }
+
+    pub fn assertLastCapturedFrame(
+        self: *const NativeTransportService,
+        expectation: CapturedFrameExpectation,
+    ) Error!NativeSyncFrameView {
+        return assertLastCapturedNativeSyncFrame(&self.capture, expectation);
     }
 
     pub fn sendWithRelayFallback(
@@ -339,9 +432,96 @@ pub const NativeTransportService = struct {
             .connected = true,
         };
     }
+
+    fn ensureTrustedTransportDevices(
+        self: *NativeTransportService,
+        source_device: principal.PrincipalId,
+        target_device: principal.PrincipalId,
+    ) Error!void {
+        const graph = self.trust_graph orelse return;
+        if (!graph.isTrusted(source_device) or !graph.isTrusted(target_device)) {
+            self.revoked_device_rejection_count += 1;
+            return error.NativeTransportDeviceRevoked;
+        }
+    }
 };
 
-fn encodeNativeSyncFrame(
+pub fn assertLastCapturedNativeSyncFrame(
+    capture: *const PacketCapture,
+    expectation: CapturedFrameExpectation,
+) Error!NativeSyncFrameView {
+    const captured = capture.lastPtr() orelse return error.NativeTransportFrameMissing;
+    const view = try decodeNativeSyncFrame(captured.slice());
+    if (view.abi_version != NativeTransportAbi.version or view.header_len != NativeTransportAbi.fixed_header_bytes) {
+        return error.NativeTransportMalformedFrame;
+    }
+    if (view.session_id != expectation.session_id or
+        view.sequence != expectation.sequence or
+        view.transport != expectation.transport or
+        !view.source_device.eql(expectation.source_device) or
+        !view.target_device.eql(expectation.target_device) or
+        view.policy_id != expectation.policy_id or
+        view.capability_id != expectation.capability_id or
+        !view.encrypted() or
+        !view.egressAllowed())
+    {
+        return error.NativeTransportMalformedFrame;
+    }
+    if (expectation.forbidden_plaintext.len != 0 and std.mem.indexOf(u8, captured.slice(), expectation.forbidden_plaintext) != null) {
+        return error.PacketAuthenticationFailed;
+    }
+    return view;
+}
+
+pub fn decodeNativeSyncFrame(frame: []const u8) Error!NativeSyncFrameView {
+    if (frame.len < NativeTransportAbi.fixed_header_bytes + 32) return error.NativeTransportMalformedFrame;
+    if (!std.mem.eql(u8, frame[0..4], &NativeTransportAbi.magic)) return error.NativeTransportMalformedFrame;
+
+    var index: usize = 4;
+    const abi_version = readU16(frame, &index);
+    if (abi_version != NativeTransportAbi.version) return error.NativeTransportMalformedFrame;
+    const header_len = readU16(frame, &index);
+    if (header_len != NativeTransportAbi.fixed_header_bytes) return error.NativeTransportMalformedFrame;
+
+    const session_id = readU64(frame, &index);
+    const sequence = readU64(frame, &index);
+    const transport = try parseTransportMode(frame[index]);
+    index += 1;
+    const source_kind = try parsePrincipalKind(frame[index]);
+    index += 1;
+    const target_kind = try parsePrincipalKind(frame[index]);
+    index += 1;
+    const flags = frame[index];
+    index += 1;
+    const policy_id = readU64(frame, &index);
+    const capability_id = readU64(frame, &index);
+    const source_serial = readU64(frame, &index);
+    const target_serial = readU64(frame, &index);
+    const ciphertext_len = readU16(frame, &index);
+    const required_len = index + ciphertext_len + 32;
+    if (required_len != frame.len) return error.NativeTransportMalformedFrame;
+
+    const ciphertext = frame[index..][0..ciphertext_len];
+    index += ciphertext_len;
+    const packet_digest = frame[index..][0..32];
+
+    return .{
+        .abi_version = abi_version,
+        .header_len = header_len,
+        .session_id = session_id,
+        .sequence = sequence,
+        .transport = transport,
+        .source_device = .{ .kind = source_kind, .serial = source_serial },
+        .target_device = .{ .kind = target_kind, .serial = target_serial },
+        .flags = flags,
+        .policy_id = policy_id,
+        .capability_id = capability_id,
+        .ciphertext = ciphertext,
+        .packet_digest = packet_digest,
+    };
+}
+
+pub fn encodeNativeSyncFrame(
     buffer: []u8,
     session: *const TransportSession,
     sequence: u64,
@@ -349,14 +529,27 @@ fn encodeNativeSyncFrame(
 ) Error![]const u8 {
     const ciphertext = frame.packet.ciphertextSlice();
     if (ciphertext.len > std.math.maxInt(u16)) return error.PacketTooLarge;
-    const required_len = 4 + (6 * @sizeOf(u64)) + 2 + ciphertext.len + frame.packet_digest.len;
+    const required_len = NativeTransportAbi.fixed_header_bytes + ciphertext.len + frame.packet_digest.len;
     if (buffer.len < required_len) return error.PacketTooLarge;
 
     var index: usize = 0;
-    @memcpy(buffer[index..][0..4], "ZGST");
+    @memcpy(buffer[index..][0..4], &NativeTransportAbi.magic);
     index += 4;
+    std.mem.writeInt(u16, buffer[index..][0..2], NativeTransportAbi.version, .little);
+    index += 2;
+    std.mem.writeInt(u16, buffer[index..][0..2], @intCast(NativeTransportAbi.fixed_header_bytes), .little);
+    index += 2;
     writeU64(buffer, &index, session.id);
     writeU64(buffer, &index, sequence);
+    buffer[index] = @intFromEnum(session.transport);
+    index += 1;
+    buffer[index] = @intFromEnum(frame.packet.source_device.kind);
+    index += 1;
+    buffer[index] = @intFromEnum(frame.packet.target_device.kind);
+    index += 1;
+    buffer[index] = (if (frame.packet.encrypted) NativeTransportAbi.flag_encrypted else 0) |
+        (if (frame.packet.egress_allowed) NativeTransportAbi.flag_egress_allowed else 0);
+    index += 1;
     writeU64(buffer, &index, frame.packet.policy_id);
     writeU64(buffer, &index, frame.packet.capability_id);
     writeU64(buffer, &index, frame.packet.source_device.serial);
@@ -368,6 +561,38 @@ fn encodeNativeSyncFrame(
     @memcpy(buffer[index..][0..frame.packet_digest.len], &frame.packet_digest);
     index += frame.packet_digest.len;
     return buffer[0..index];
+}
+
+fn parseTransportMode(raw: u8) Error!sync_state.TransportMode {
+    return switch (raw) {
+        @intFromEnum(sync_state.TransportMode.device_to_device) => .device_to_device,
+        @intFromEnum(sync_state.TransportMode.relay_assisted) => .relay_assisted,
+        else => error.NativeTransportMalformedFrame,
+    };
+}
+
+fn parsePrincipalKind(raw: u8) Error!principal.PrincipalKind {
+    return switch (raw) {
+        @intFromEnum(principal.PrincipalKind.user) => .user,
+        @intFromEnum(principal.PrincipalKind.device) => .device,
+        @intFromEnum(principal.PrincipalKind.app) => .app,
+        @intFromEnum(principal.PrincipalKind.service) => .service,
+        @intFromEnum(principal.PrincipalKind.policy_authority) => .policy_authority,
+        @intFromEnum(principal.PrincipalKind.team) => .team,
+        else => error.NativeTransportMalformedFrame,
+    };
+}
+
+fn readU16(buffer: []const u8, index: *usize) u16 {
+    const value = std.mem.readInt(u16, buffer[index.*..][0..2], .little);
+    index.* += 2;
+    return value;
+}
+
+fn readU64(buffer: []const u8, index: *usize) u64 {
+    const value = std.mem.readInt(u64, buffer[index.*..][0..@sizeOf(u64)], .little);
+    index.* += @sizeOf(u64);
+    return value;
 }
 
 fn writeU64(buffer: []u8, index: *usize, value: u64) void {
@@ -501,6 +726,22 @@ test "native sync transport captures encrypted driver packets and handles replay
     try std.testing.expect(std.mem.startsWith(u8, captured.slice(), "ZGST"));
     try std.testing.expect(std.mem.indexOf(u8, captured.slice(), "object delta") == null);
     try std.testing.expectEqualSlices(u8, captured.slice(), Driver.last_frame[0..Driver.last_frame_len]);
+    const view = try native_transport.assertLastCapturedFrame(.{
+        .session_id = connection.session.id,
+        .sequence = delivered.sequence,
+        .transport = .relay_assisted,
+        .source_device = source,
+        .target_device = target,
+        .policy_id = relay.id,
+        .capability_id = relay_capability.id,
+        .forbidden_plaintext = "object delta",
+    });
+    try std.testing.expectEqual(NativeTransportAbi.version, view.abi_version);
+    try std.testing.expectEqual(@as(u16, @intCast(NativeTransportAbi.fixed_header_bytes)), view.header_len);
+    try std.testing.expect(view.encrypted());
+    try std.testing.expect(view.egressAllowed());
+    try std.testing.expect(!std.mem.eql(u8, view.ciphertext, "object delta"));
+    try std.testing.expectEqualSlices(u8, delivered.signed_frame.packet_digest[0..], view.packet_digest);
 
     _ = try native_transport.sendSigned(&connection, "two", signer);
     _ = try native_transport.sendSigned(&connection, "three", signer);
@@ -512,6 +753,102 @@ test "native sync transport captures encrypted driver packets and handles replay
     connection.next_sequence = 3;
     try std.testing.expectError(error.NativeTransportReplayRejected, native_transport.sendSigned(&connection, "replay", signer));
     try std.testing.expectEqual(@as(usize, 1), native_transport.replay_rejection_count);
+}
+
+test "native sync transport rejects revoked trusted devices and requires real I225 proof" {
+    var graph = device_graph.Graph.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 170 };
+    const source = principal.PrincipalId{ .kind = .device, .serial = 171 };
+    const target = principal.PrincipalId{ .kind = .device, .serial = 172 };
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 173 };
+    const app = principal.PrincipalId{ .kind = .app, .serial = 174 };
+    const user_signer = signing.SignerIdentity{ .label = "native-revocation-user", .seed = [_]u8{0x61} ** 32 };
+    const source_signer = signing.SignerIdentity{ .label = "native-revocation-source", .seed = [_]u8{0x62} ** 32 };
+    const target_signer = signing.SignerIdentity{ .label = "native-revocation-target", .seed = [_]u8{0x63} ** 32 };
+    const frame_signer = signing.SignerIdentity{ .label = "native-revocation-frame", .seed = [_]u8{0x64} ** 32 };
+
+    _ = try graph.ensureUserRoot(user, "owner", user_signer);
+    _ = try graph.enrollDevice(user, source, "source", user_signer, source_signer, 1);
+    _ = try graph.enrollDevice(user, target, "target", user_signer, target_signer, 2);
+
+    var policies = network_policy.Directory.init();
+    var capabilities = capability.CapabilityTable.init();
+    const relay = try policies.create(.{
+        .owner = owner,
+        .label = "relay",
+        .mode = .named_domain,
+        .target = "relay.revoked.sync",
+    });
+    const relay_capability = try capabilities.mintBootRoot(.{
+        .holder = app,
+        .issuer = .{ .kind = .policy_authority, .serial = 175 },
+        .target = .{ .kind = .network_policy, .id = relay.id },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .scope = .{ .task_id = 176, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    var broker = network_policy.EgressBroker.init(&policies, &capabilities);
+    var native_transport = NativeTransportService.init();
+    native_transport.bindTrustedDeviceGraph(&graph);
+
+    var connection = try native_transport.openRelay(&broker, .{
+        .task_id = 176,
+        .principal_id = app,
+        .capability_id = relay_capability.id,
+        .policy_id = relay.id,
+        .evidence = .{ .destination = .{ .domain = "relay.revoked.sync" } },
+        .now_ticks = 10,
+    }, 176, 177, source, target, "relay.revoked.sync");
+
+    try graph.revokeDevice(user, target, user_signer, 20);
+    try std.testing.expectError(error.NativeTransportDeviceRevoked, native_transport.sendSigned(&connection, "blocked after revoke", frame_signer));
+    try std.testing.expectError(error.NativeTransportDeviceRevoked, native_transport.openRelay(&broker, .{
+        .task_id = 176,
+        .principal_id = app,
+        .capability_id = relay_capability.id,
+        .policy_id = relay.id,
+        .evidence = .{ .destination = .{ .domain = "relay.revoked.sync" } },
+        .now_ticks = 21,
+    }, 176, 177, source, target, "relay.revoked.sync"));
+    try std.testing.expectEqual(@as(usize, 2), native_transport.revoked_device_rejection_count);
+
+    const good_ring_plan = intel_i225.RingPlan{
+        .rx_descriptors = 256,
+        .tx_descriptors = 256,
+        .rx_ring_address = 0x1000,
+        .tx_ring_address = 0x2000,
+    };
+    const incomplete_proof = IntelI225TransportProof{
+        .evidence = .{
+            .target_id = hardware_target.first_supported_target.id,
+            .source = .qemu,
+        },
+        .ring_plan = good_ring_plan,
+    };
+    try std.testing.expectError(error.NativeTransportHardwareProofMissing, native_transport.attachIntelI225Proof(incomplete_proof));
+
+    const complete_proof = IntelI225TransportProof{
+        .evidence = .{
+            .target_id = hardware_target.first_supported_target.id,
+            .source = .real_hardware,
+            .hardware_cold_boots = hardware_target.first_supported_target.proof_minimums.cold_boots,
+            .hardware_warm_reboots = hardware_target.first_supported_target.proof_minimums.warm_reboots,
+            .storage_write_read_cycles = hardware_target.first_supported_target.proof_minimums.storage_write_read_cycles,
+            .network_frame_cycles = hardware_target.first_supported_target.proof_minimums.network_frame_cycles,
+            .suspend_resume_cycles = hardware_target.first_supported_target.proof_minimums.suspend_resume_cycles,
+            .crash_recovery_cycles = hardware_target.first_supported_target.proof_minimums.crash_recovery_cycles,
+            .proof_manifest_captured = true,
+            .serial_log_captured = true,
+            .required_markers_captured = true,
+            .firmware_settings_captured = true,
+            .power_cycle_notes_captured = true,
+            .artifact_digests_captured = true,
+        },
+        .ring_plan = good_ring_plan,
+    };
+    try native_transport.attachIntelI225Proof(complete_proof);
+    try std.testing.expect(native_transport.i225_proof_attached);
 }
 
 test "native sync transport falls back through booted relay and encrypts object shares" {

@@ -47,12 +47,13 @@ requests.
   (`intel-nuc11tnki5`) and tracks nine production-readiness workstreams: one
   `prod_ready` track, three `prod_candidate` tracks, four `prototype` tracks,
   and one blocked real hardware track.
-- The secure-by-design release gate is currently `blocked` on operational
-  release signing: the workflow now requires hardware-backed HSM/KMS key
-  custody, rotation/revocation metadata, DSSE in-toto/SLSA provenance, and a
-  customer verification bundle. The `ed25519+ml-dsa65` path remains a preview,
-  not a production FIPS 204 implementation. The separate first-hardware-target
-  gate still requires real NUC11TNKi5 evidence.
+- The secure-by-design release gate is `ready`: release artifacts are measured,
+  DSSE in-toto/SLSA provenance is generated through a hardware-backed
+  TPM/secure-enclave/HSM/KMS signing command, and customers get a native
+  `zigos-verify-release` verifier for signatures, revocation, subjects,
+  reproducible digests, and measurements. The `ed25519+ml-dsa65` path remains a
+  preview, not a production FIPS 204 implementation. The separate
+  first-hardware-target gate still requires real NUC11TNKi5 evidence.
 
 The spec contract is now the machine-readable manifest in
 `spec/coverage.json`; this checkout does not require a separate prose spec
@@ -100,6 +101,10 @@ observable boot markers.
 - Capabilities are the unit of authority. Tasks receive scoped capabilities and
   communicate through typed endpoints, component ports, shared memory, and
   service contracts instead of ambient global namespaces.
+- The object store is the authoritative file story. Workspace entries and file
+  bridges are derived, capability-checked views; bridge paths reject global
+  roots, home-directory shorthand, traversal segments, and host filesystem
+  syntax instead of acting like raw path authority.
 - Services are supervised and restart-aware. Driver and service paths include
   generation checks, authority rebinding, brokered DMA-buffer invalidation,
   stale-port rejection, and recovery proofs so restart behavior is modeled as a
@@ -199,9 +204,11 @@ Useful verification targets:
 | `./scripts/zig.sh build host-tests` | Runs host-side native logic and userspace runtime tests. |
 | `./scripts/zig.sh build test-roots` | Checks that Zig files with tests are reachable from the build roots. |
 | `./scripts/zig.sh build prod-readiness` | Validates `spec/production_readiness.json`, secure-by-design release-gate coverage, and production-readiness source markers. |
+| `./scripts/zig.sh build hardware-proof-checker-test` | Exercises the NUC11TNKi5 hardware proof checker against synthetic pass/fail bundles. |
 | `./scripts/zig.sh build release-security-check` | Runs release-security fuzzing, unsafe-surface inventory, threat-model, crash-redaction, SBOM/provenance source, and disclosure source gates. |
-| `./scripts/zig.sh build release-sbom-provenance` | Builds release artifacts and emits `build/release-security/artifact-digests.sha256`, SPDX SBOM, in-toto/SLSA provenance, and disclosure dry-run output. |
+| `./scripts/zig.sh build release-sbom-provenance` | Builds release artifacts and emits `build/release-security/artifact-digests.sha256`, `artifact-measurements.json`, SPDX SBOM, in-toto/SLSA provenance, DSSE envelopes, keyring/revocation metadata, customer verifier policy, and disclosure dry-run output. |
 | `./scripts/zig.sh build reproducible-build-check` | Builds release artifacts twice in isolated tracked-workspace copies and compares artifact digests. |
+| `./scripts/zig.sh build verify-release-cli` | Builds `zig-out/bin/zigos-verify-release`, the customer verifier for downloaded release bundles. |
 | `./scripts/zig.sh build release-security-gate` | Runs the public-release security gate: fast release-security checks, host/spec tests, reproducible builds, SBOM/provenance, and QEMU security/fault proofs. |
 | `./scripts/zig.sh build spec-tests` | Runs the spec coverage gate and native spec tests. |
 | `./scripts/zig.sh build zigos-native-smoke-test` | Runs native QEMU smoke proofs, including tampered manifest, direct artifact tamper, and rollback-slot failure variants. |
@@ -216,6 +223,21 @@ Optional QEMU gates can be added to `verify`:
 
 ```bash
 ./scripts/zig.sh build -Dverify-smoke=true -Dverify-benchmark=true verify
+```
+
+The first real-machine gate is an Intel NUC11TNKi5 proof bundle. Prepare the
+bundle skeleton and exact artifact digests with:
+
+```bash
+scripts/prepare-nuc11tnki5-hardware-proof.sh --build
+```
+
+After the NUC run fills `build/hardware-proofs/nuc11tnki5/serial.log`,
+`proof-manifest.txt`, firmware settings, and power-cycle notes, validate it
+with:
+
+```bash
+scripts/check-nuc11tnki5-hardware-proof.sh build/hardware-proofs/nuc11tnki5
 ```
 
 ## Verification Model
@@ -236,10 +258,11 @@ fast `release-security-check` gate. Public security releases must pass
 `./scripts/zig.sh build release-security-gate`, covering fuzzing, fault
 injection, reproducible builds, DSSE-wrapped SBOM/provenance, threat-model
 tests, memory-safety audits for unsafe Zig and kernel sections, crash dump
-redaction, and the vulnerability disclosure process in `SECURITY.md`. Release
-provenance is not production-eligible until signed by hardware-backed release
-keys with published keyring, rotation, revocation, and customer verifier
-metadata.
+redaction, and the vulnerability disclosure process in `SECURITY.md`. Public
+release provenance must be signed per DSSE payload through
+`ZIGOS_RELEASE_DSSE_SIGN_COMMAND` by a hardware-backed TPM, secure enclave,
+HSM, or KMS key and verified with `zig-out/bin/zigos-verify-release
+build/release-security .` before distribution.
 
 The first real hardware target is Intel NUC 11 Pro Kit `NUC11TNKi5`. QEMU proof
 runs remain required preflight evidence, but they do not satisfy the hardware
@@ -298,6 +321,9 @@ Shared boot marker expectations live in `src/native_smoke_markers.zig` and
   event ledger, compositor/session UX, rendered shell, and platform signals.
 - `src/native/services/`: service registry, service authority, package service,
   typed component ABI, notifications, indexing, and media/print service models.
+- `src/native/sdk/`: native app developer SDK with component ABI helpers,
+  manifest linting, package signing, simulator APIs, UI primitives, permission
+  review, object-store/sync facades, and generated-image fixtures.
 - `src/native/demo/`: seeded scenario-world flows and demo bootstrap packages.
 - `src/userspace/`: freestanding service/component entry points, runtime, and
   linker script for embedded userspace images.

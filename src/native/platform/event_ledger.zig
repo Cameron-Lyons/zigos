@@ -1023,6 +1023,19 @@ fn renderTextEvent(event: Event, buffer: []u8, used: *usize) Error!void {
                 yesNo(event.user_approval_can_resolve),
                 yesNo(event.retry_safe),
             });
+            var blocked_buffer: [256]u8 = undefined;
+            const blocked = denial_explanation.renderUserHelpToBuffer(
+                &blocked_buffer,
+                "This app",
+                permission_kind,
+                event.detailSlice(),
+                .{
+                    .reason = event.denial_reason,
+                    .user_approval_can_resolve = event.user_approval_can_resolve,
+                    .retry_safe = event.retry_safe,
+                },
+            ) catch "Blocked: open Permission Review for details.";
+            try appendFmt(buffer, used, " blocked_help=\"{s}\"", .{blocked});
         }
     }
     switch (event.kind) {

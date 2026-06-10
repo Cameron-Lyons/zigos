@@ -361,7 +361,7 @@ pub const Service = struct {
             var prompt_buffer: [512]u8 = undefined;
             const prompt = permission_review.renderRequestToBuffer(&prompt_buffer, &session, &bundle, index) catch unreachable;
             console.print(prompt);
-            console.print("    command: allow [local] [lease=<ticks>] | deny\n");
+            console.print("    command: allow [local] [lease=<ticks>] | deny (revokable later)\n");
 
             while (true) {
                 var input_buffer: [MAX_INPUT_LINE]u8 = undefined;

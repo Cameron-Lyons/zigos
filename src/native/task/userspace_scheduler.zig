@@ -60,6 +60,25 @@ pub const AcceleratorClaimRecord = struct {
     shared_memory_bytes: usize,
 };
 
+pub const TaskDispatchStats = struct {
+    task_id: u64,
+    resource_class: accelerator_scheduler.ResourceClass,
+    queued_ready: bool,
+    dispatch_count: u64,
+    delayed_dispatch_count: u64,
+    denied_dispatch_count: u64,
+    missed_deadline_count: u64,
+    last_dispatch_tick: u64,
+    last_wake_tick: u64,
+    wake_event_count: u64,
+    cpu_ticks_consumed: u64,
+    memory_bandwidth_consumed_units: usize,
+    last_dispatch_engine: accelerator_scheduler.Engine,
+    last_dispatch_reason: accelerator_scheduler.DecisionReason,
+    last_dispatch_degraded: bool,
+    last_dispatch_zero_copy: bool,
+};
+
 const Slot = struct {
     in_use: bool = false,
     task_id: u64 = 0,
@@ -276,6 +295,28 @@ pub const Scheduler = struct {
 
     pub fn readyQueueDepth(self: *const Scheduler, class: accelerator_scheduler.ResourceClass) usize {
         return self.ready_counts[resourceClassIndex(class)];
+    }
+
+    pub fn taskDispatchStats(self: *const Scheduler, task_id: u64) ?TaskDispatchStats {
+        const slot = self.slots.getConst(task_id) orelse return null;
+        return .{
+            .task_id = slot.task_id,
+            .resource_class = slot.resource_class,
+            .queued_ready = slot.queued_ready,
+            .dispatch_count = slot.dispatch_count,
+            .delayed_dispatch_count = slot.delayed_dispatch_count,
+            .denied_dispatch_count = slot.denied_dispatch_count,
+            .missed_deadline_count = slot.missed_deadline_count,
+            .last_dispatch_tick = slot.last_dispatch_tick,
+            .last_wake_tick = slot.last_wake_tick,
+            .wake_event_count = slot.wake_event_count,
+            .cpu_ticks_consumed = slot.cpu_ticks_consumed,
+            .memory_bandwidth_consumed_units = slot.memory_bandwidth_consumed_units,
+            .last_dispatch_engine = slot.last_dispatch_engine,
+            .last_dispatch_reason = slot.last_dispatch_reason,
+            .last_dispatch_degraded = slot.last_dispatch_degraded,
+            .last_dispatch_zero_copy = slot.last_dispatch_zero_copy,
+        };
     }
 
     pub fn enqueueAcceleratorClaim(self: *Scheduler, request: AcceleratorClaimRequest) ?u64 {

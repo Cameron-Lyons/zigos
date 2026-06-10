@@ -3,6 +3,7 @@ const std = @import("std");
 const bootstrap_review_profile = @import("../../native/policy/bootstrap_review_profile.zig");
 const denial_explanation = @import("../../native/policy/denial_explanation.zig");
 const enterprise_management = @import("../../native/policy/enterprise_management.zig");
+const humane_permissions = @import("../../native/policy/humane_permissions.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const permission_review = @import("../../native/policy/permission_review.zig");
 const permission_review_service = @import("../../native/policy/permission_review_service.zig");
@@ -16,6 +17,7 @@ test "policy host tests import native policy modules" {
     std.testing.refAllDecls(bootstrap_review_profile);
     std.testing.refAllDecls(denial_explanation);
     std.testing.refAllDecls(enterprise_management);
+    std.testing.refAllDecls(humane_permissions);
     std.testing.refAllDecls(manifest);
     std.testing.refAllDecls(permission_review);
     std.testing.refAllDecls(permission_review_service);

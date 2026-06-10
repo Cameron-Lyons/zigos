@@ -9,6 +9,7 @@ const native_util = @import("../../core/util.zig");
 const native_ux = @import("../native_ux.zig");
 const notification_center = @import("../../services/notification_center.zig");
 const object_store = @import("../../storage/object_store.zig");
+const package_service = @import("../../services/package_service.zig");
 const principal = @import("../../core/principal.zig");
 const signing = @import("../../core/signing.zig");
 const storage_service = @import("../../storage/storage_service.zig");
@@ -24,11 +25,14 @@ const yesNo = native_util.yesNo;
 
 pub const MAX_SHELL_OBJECT_RESULTS: usize = 4;
 pub const MAX_SHELL_OBJECT_HISTORY: usize = 4;
+pub const MAX_SHELL_TEXT_INPUT_BYTES: usize = 160;
 
 pub const HumaneShellControl = enum(u8) {
     start_task,
     open_workspace,
     open_document,
+    edit_document,
+    sync_document,
     query_objects,
     open_object,
     show_object_history,
@@ -44,6 +48,7 @@ pub const HumaneShellControl = enum(u8) {
     run_diagnostics,
     post_notification,
     recover_state,
+    remove_package,
     focus_next,
     focus_previous,
 };
@@ -91,6 +96,7 @@ pub const HumaneShellRequest = struct {
     control: HumaneShellControl = .start_task,
     keyboard: KeyboardIntent = .activate,
     tick: u64 = 0,
+    text: []const u8 = "",
 };
 
 pub const HumaneShellResponse = struct {
@@ -107,6 +113,9 @@ pub const HumaneShellResponse = struct {
     permission_denied: bool = false,
     snapshot_id: u64 = 0,
     recovered: bool = false,
+    document_version_id: u64 = 0,
+    document_edited: bool = false,
+    document_synced: bool = false,
     selected_object_id: u64 = 0,
     object_query_count: u16 = 0,
     object_history_count: u16 = 0,
@@ -114,6 +123,7 @@ pub const HumaneShellResponse = struct {
     object_shared: bool = false,
     object_conflict_reviewed: bool = false,
     object_conflict_resolved: bool = false,
+    package_removed: bool = false,
 };
 
 pub const AccessibilityProfile = struct {
@@ -141,7 +151,16 @@ pub const HumaneShellConfig = struct {
     object_query_label: []const u8 = "",
     object_share_principal: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
     object_conflict_device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
+    sync_from_device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
+    sync_to_device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
     object_capability_table: ?*capability.CapabilityTable = null,
+    package_port: ?*package_service.PackagePort = null,
+    package_authority: package_service.AuthorityContext = .{
+        .task_id = 0,
+        .principal = .{ .kind = .service, .serial = 0 },
+        .capability_id = 0,
+        .now_ticks = 0,
+    },
     permission_request: manifest.PermissionRequest = .{
         .kind = .object_access,
         .resource = "",
@@ -155,6 +174,10 @@ pub const HumaneShellConfig = struct {
     device_signer: signing.SignerIdentity,
     snapshot_label: []const u8 = "humane-shell-snapshot",
     snapshot_signer: signing.SignerIdentity,
+    document_edit_signer: signing.SignerIdentity = .{
+        .label = "humane-shell-document-edit",
+        .seed = [_]u8{0x4e} ** 32,
+    },
 };
 
 pub const HumaneShellState = struct {
@@ -184,6 +207,18 @@ pub const HumaneShellState = struct {
     object_conflict_resolved: bool = false,
     object_conflict_local_version_id: u64 = 0,
     object_conflict_remote_version_id: u64 = 0,
+    document_version_id: u64 = 0,
+    document_previous_version_id: u64 = 0,
+    document_text_len: usize = 0,
+    document_text: [MAX_SHELL_TEXT_INPUT_BYTES]u8 = [_]u8{0} ** MAX_SHELL_TEXT_INPUT_BYTES,
+    document_edit_count: u16 = 0,
+    document_edited: bool = false,
+    document_synced: bool = false,
+    sync_selected_entries: u16 = 0,
+    sync_transport_frames: u16 = 0,
+    sync_conflicts: u16 = 0,
+    package_removed: bool = false,
+    package_removed_revision_count: u16 = 0,
     remote_diagnostics_require_opt_in: bool = true,
     focus_index: usize = 0,
     last_tick: u64 = 0,
@@ -204,6 +239,8 @@ pub const control_order = [_]HumaneShellControl{
     .start_task,
     .open_workspace,
     .open_document,
+    .edit_document,
+    .sync_document,
     .query_objects,
     .open_object,
     .show_object_history,
@@ -219,6 +256,7 @@ pub const control_order = [_]HumaneShellControl{
     .run_diagnostics,
     .post_notification,
     .recover_state,
+    .remove_package,
 };
 
 pub const HumaneShell = struct {
@@ -270,7 +308,7 @@ pub const HumaneShell = struct {
             .control = request.control,
         };
         switch (request.operation) {
-            .click => self.click(request.control, request.tick) catch |err| {
+            .click => self.clickWithText(request.control, request.tick, request.text) catch |err| {
                 response.status = statusForError(err);
             },
             .keyboard => self.handleKeyboard(request.keyboard, request.tick) catch |err| {
@@ -282,16 +320,22 @@ pub const HumaneShell = struct {
     }
 
     pub fn click(self: *HumaneShell, control: HumaneShellControl, tick: u64) !void {
+        try self.clickWithText(control, tick, "");
+    }
+
+    fn clickWithText(self: *HumaneShell, control: HumaneShellControl, tick: u64, text: []const u8) !void {
         self.state.last_tick = tick;
         switch (control) {
             .start_task => try self.startTask(tick),
             .open_workspace => try self.openWorkspace(tick),
             .open_document => try self.openDocument(tick),
+            .edit_document => try self.editDocument(text, tick),
+            .sync_document => try self.syncDocument(tick),
             .query_objects => try self.queryObjects(),
             .open_object => try self.openObject(tick),
             .show_object_history => try self.showObjectHistory(),
             .mint_object_capability => try self.mintObjectCapability(tick),
-            .share_object => try self.shareObject(),
+            .share_object => try self.shareObject(tick),
             .review_object_conflict => try self.reviewObjectConflict(tick),
             .review_permission => try self.reviewPermission(tick),
             .allow_permission => try self.decidePermission(true, tick),
@@ -302,6 +346,7 @@ pub const HumaneShell = struct {
             .run_diagnostics => try self.runDiagnostics(tick),
             .post_notification => try self.postShellNotification(tick, "shell status available"),
             .recover_state => try self.recoverState(tick),
+            .remove_package => try self.removePackage(tick),
             .focus_next => self.focusNext(),
             .focus_previous => self.focusPrevious(),
         }
@@ -374,6 +419,26 @@ pub const HumaneShell = struct {
             self.state.task_id,
             self.config.workspace_id,
             self.config.document_path,
+        });
+        try appendFmt(buffer, &used, "document_editor opened={s} edited={s} version={d} previous={d} bytes={d} edit_count={d} synced={s} sync_selected={d} frames={d} conflicts={d}\n", .{
+            yesNo(self.state.document_opened),
+            yesNo(self.state.document_edited),
+            self.state.document_version_id,
+            self.state.document_previous_version_id,
+            self.state.document_text_len,
+            self.state.document_edit_count,
+            yesNo(self.state.document_synced),
+            self.state.sync_selected_entries,
+            self.state.sync_transport_frames,
+            self.state.sync_conflicts,
+        });
+        if (self.state.document_text_len != 0) {
+            try appendFmt(buffer, &used, "document_text={s}\n", .{self.documentTextSlice()});
+        }
+        try appendFmt(buffer, &used, "package bundle={s} removed={s} removed_revisions={d}\n", .{
+            self.config.bundle_id,
+            yesNo(self.state.package_removed),
+            self.state.package_removed_revision_count,
         });
         try appendFmt(buffer, &used, "object_model first_class=yes file_bridge=export-import-only\n", .{});
         try appendFmt(buffer, &used, "object_query count={d} selected={d} opened={s} capability={d} shared={s}\n", .{
@@ -470,6 +535,8 @@ pub const HumaneShell = struct {
             .start_task => if (self.state.task_id == 0) .ready else .done,
             .open_workspace => if (self.state.workspace_opened) .done else if (self.state.task_id == 0) .blocked else .ready,
             .open_document => if (self.state.document_opened) .done else if (!self.state.workspace_opened) .blocked else .ready,
+            .edit_document => if (!self.state.document_opened) .blocked else .ready,
+            .sync_document => if (self.state.document_synced) .done else if (!self.state.document_edited) .blocked else if (!self.hasSyncRoute()) .blocked else .ready,
             .query_objects => if (self.state.object_query_count != 0) .done else .ready,
             .open_object => if (self.state.object_opened) .done else if (self.state.selected_object_id == 0 and self.state.object_query_count == 0) .ready else .ready,
             .show_object_history => if (self.state.object_history_count != 0) .done else if (self.state.selected_object_id == 0) .blocked else .ready,
@@ -495,6 +562,7 @@ pub const HumaneShell = struct {
             .run_diagnostics => if (self.state.diagnostics_ran) .done else .ready,
             .post_notification => if (self.state.notification_id != 0) .done else .ready,
             .recover_state => if (self.state.recovered) .done else if (!self.checkpoint_store.valid) .blocked else .ready,
+            .remove_package => if (self.state.package_removed) .done else if (self.config.package_port == null) .blocked else .ready,
             .focus_next, .focus_previous => .ready,
         };
     }
@@ -528,13 +596,14 @@ pub const HumaneShell = struct {
     fn openDocument(self: *HumaneShell, tick: u64) !void {
         const task = try self.requireTask();
         if (!self.state.workspace_opened) return error.WorkspaceRequired;
-        _ = try self.ux.openDocument(
+        const entry = try self.ux.openDocument(
             self.storage,
             ids.workspace(self.config.workspace_id),
             self.config.document_path,
             task.id,
             self.config.user,
         );
+        try self.loadDocumentEntry(entry);
         _ = try self.dispatchCompositor(.{
             .operation = .open_view,
             .view_type = .document_view,
@@ -543,6 +612,89 @@ pub const HumaneShell = struct {
             .detail = self.config.document_path,
         });
         self.state.document_opened = true;
+        try self.recordPendingTaskFlows(tick);
+    }
+
+    fn editDocument(self: *HumaneShell, text: []const u8, tick: u64) !void {
+        const task = try self.requireTask();
+        if (!self.state.document_opened) return error.DocumentRequired;
+        if (text.len == 0) return error.TextInputRequired;
+        if (text.len > MAX_SHELL_TEXT_INPUT_BYTES) return error.TextInputTooLarge;
+
+        const entry = try self.storage.resolve(ids.workspace(self.config.workspace_id), self.config.document_path);
+        const latest = self.storage.latestVersion(entry.object_id) orelse return error.ObjectMissing;
+        const edited = try self.storage.putVersion(.{
+            .preferred_object_id = entry.object_id,
+            .object_type = .document,
+            .payload = text,
+            .metadata = try object_store.signMetadata(
+                self.config.document_edit_signer,
+                self.config.document_path,
+                "text/markdown",
+                .document,
+                text,
+                tick,
+            ),
+            .parent_version_id = latest.id,
+        });
+        try self.storage.beginTransaction(ids.workspace(self.config.workspace_id));
+        try self.storage.stagePut(ids.workspace(self.config.workspace_id), self.config.document_path, edited.object_id, edited.version_id, .document);
+        _ = try self.storage.commit(ids.workspace(self.config.workspace_id), tick);
+
+        self.copyDocumentText(text);
+        self.state.document_previous_version_id = latest.id.raw();
+        self.state.document_version_id = edited.version_id.raw();
+        self.state.selected_object_id = edited.object_id.raw();
+        self.state.selected_version_id = edited.version_id.raw();
+        self.state.object_opened = true;
+        self.state.object_history_count = 0;
+        self.state.object_conflict_reviewed = false;
+        self.state.object_conflict_resolved = false;
+        self.state.object_conflict_local_version_id = 0;
+        self.state.object_conflict_remote_version_id = 0;
+        self.state.document_edit_count += 1;
+        self.state.document_edited = true;
+        self.state.document_synced = false;
+        self.state.sync_selected_entries = 0;
+        self.state.sync_transport_frames = 0;
+        self.state.sync_conflicts = 0;
+
+        _ = try self.ux.editDocument(self.config.workspace_id, task.id, self.config.user, self.config.document_path);
+        try self.recordPendingTaskFlows(tick);
+    }
+
+    fn syncDocument(self: *HumaneShell, tick: u64) !void {
+        if (!self.state.document_edited) return error.DocumentEditRequired;
+        const task = try self.requireTask();
+        const source = self.syncSourceDevice();
+        const target = self.syncTargetDevice();
+        if (source.serial == 0 or target.serial == 0) return error.SyncPathRequired;
+        const summary = try self.sync.replicateWorkspace(
+            self.sync_authority,
+            self.storage,
+            self.config.workspace_id,
+            source,
+            target,
+            .device_to_device,
+        );
+        if (!summary.used_device_to_device) return error.SyncPolicyMissing;
+        _ = try self.ux.syncWorkspace(self.config.workspace_id, self.config.user, "document device-to-device");
+        self.state.document_synced = true;
+        self.state.sync_selected_entries = saturatingU16(summary.selected_entry_count);
+        self.state.sync_transport_frames = saturatingU16(summary.transport_frame_count);
+        self.state.sync_conflicts = saturatingU16(summary.conflict_count);
+        if (summary.conflict_count != 0) {
+            var detail_buffer: [96]u8 = undefined;
+            const detail = std.fmt.bufPrint(&detail_buffer, "sync conflicts: {d}", .{summary.conflict_count}) catch "sync conflicts";
+            _ = try self.dispatchCompositor(.{
+                .operation = .open_view,
+                .view_type = .sync_conflict_review,
+                .subject_task_id = task.id,
+                .workspace_id = self.config.workspace_id,
+                .detail = detail,
+            });
+            _ = try self.ux.syncConflictReview(self.config.workspace_id, self.config.user, detail);
+        }
         try self.recordPendingTaskFlows(tick);
     }
 
@@ -575,6 +727,7 @@ pub const HumaneShell = struct {
             .workspace_id = self.config.workspace_id,
             .detail = detail,
         });
+        try self.loadLatestDocumentVersion(latest);
         self.state.selected_version_id = latest.id.raw();
         self.state.object_opened = true;
         self.state.document_opened = true;
@@ -625,7 +778,8 @@ pub const HumaneShell = struct {
         self.state.object_capability_id = minted.id;
     }
 
-    fn shareObject(self: *HumaneShell) !void {
+    fn shareObject(self: *HumaneShell, tick: u64) !void {
+        const task = try self.requireTask();
         if (self.state.selected_object_id == 0) return error.ObjectMissing;
         const grantee = self.objectSharePrincipal();
         const entry = try self.storage.findEntryForObject(ids.workspace(self.config.workspace_id), ids.object(self.state.selected_object_id));
@@ -640,6 +794,8 @@ pub const HumaneShell = struct {
         }).withObjectScope(entry.object_id, entry.pathSlice());
         try self.storage.shareWorkspace(ids.workspace(self.config.workspace_id), grant);
         self.state.object_shared = true;
+        _ = try self.ux.shareDocument(self.config.workspace_id, task.id, grantee, entry.pathSlice());
+        try self.recordPendingTaskFlows(tick);
     }
 
     fn reviewObjectConflict(self: *HumaneShell, tick: u64) !void {
@@ -785,7 +941,11 @@ pub const HumaneShell = struct {
             ids.snapshot(self.state.snapshot_id),
             tick,
         );
+        const entry = try self.storage.resolve(ids.workspace(self.config.workspace_id), self.config.document_path);
+        try self.loadDocumentEntry(entry);
         self.state.snapshot_restored = true;
+        self.state.document_edited = false;
+        self.state.document_synced = false;
         try self.postNotification(tick, .policy_notice, .normal, "workspace restored from snapshot");
     }
 
@@ -842,6 +1002,29 @@ pub const HumaneShell = struct {
         try self.recordPendingTaskFlows(tick);
     }
 
+    fn removePackage(self: *HumaneShell, tick: u64) !void {
+        if (self.state.package_removed) return error.AppNotInstalled;
+        const port = self.config.package_port orelse return error.PackageServiceRequired;
+        const removed = try port.remove(self.config.package_authority, self.config.bundle_id);
+        if (!removed.removed_existing) return error.AppNotInstalled;
+        const removed_task_id = self.state.task_id;
+        if (removed_task_id != 0) {
+            _ = try self.runtime_service.runtimePtr().terminateTask(removed_task_id, tick);
+            _ = try self.dispatchCompositor(.{
+                .operation = .close_task_windows,
+                .subject_task_id = removed_task_id,
+            });
+        }
+        _ = try self.ux.removeApp(self.config.user, self.config.bundle_id);
+        self.state.package_removed = true;
+        self.state.package_removed_revision_count = saturatingU16(removed.removed_revision_count);
+        self.state.task_id = 0;
+        self.state.workspace_opened = false;
+        self.state.document_opened = false;
+        self.state.review_window_id = 0;
+        try self.recordPendingTaskFlows(tick);
+    }
+
     fn requireTask(self: *HumaneShell) !*task_runtime.TaskRecord {
         if (self.state.task_id == 0) return error.TaskRequired;
         return self.runtime_service.runtimePtr().find(self.state.task_id) orelse error.TaskRequired;
@@ -888,6 +1071,9 @@ pub const HumaneShell = struct {
         response.permission_denied = self.state.permission_denied;
         response.snapshot_id = self.state.snapshot_id;
         response.recovered = self.state.recovered;
+        response.document_version_id = self.state.document_version_id;
+        response.document_edited = self.state.document_edited;
+        response.document_synced = self.state.document_synced;
         response.selected_object_id = self.state.selected_object_id;
         response.object_query_count = self.state.object_query_count;
         response.object_history_count = self.state.object_history_count;
@@ -895,6 +1081,7 @@ pub const HumaneShell = struct {
         response.object_shared = self.state.object_shared;
         response.object_conflict_reviewed = self.state.object_conflict_reviewed;
         response.object_conflict_resolved = self.state.object_conflict_resolved;
+        response.package_removed = self.state.package_removed;
     }
 
     fn focusNext(self: *HumaneShell) void {
@@ -903,6 +1090,46 @@ pub const HumaneShell = struct {
 
     fn focusPrevious(self: *HumaneShell) void {
         self.state.focus_index = (self.state.focus_index + control_order.len - 1) % control_order.len;
+    }
+
+    fn loadDocumentEntry(self: *HumaneShell, entry: workspace.Entry) !void {
+        const version = self.storage.version(entry.version_id) orelse return error.ObjectMissing;
+        try self.loadLatestDocumentVersion(version);
+        self.state.selected_object_id = entry.object_id.raw();
+        self.state.selected_version_id = entry.version_id.raw();
+    }
+
+    fn loadLatestDocumentVersion(self: *HumaneShell, version: *const object_store.VersionRecord) !void {
+        const payload = try self.storage.versionPayload(version);
+        self.copyDocumentText(payload);
+        self.state.document_version_id = version.id.raw();
+        self.state.document_previous_version_id = version.previous_version_id.raw();
+    }
+
+    fn copyDocumentText(self: *HumaneShell, text: []const u8) void {
+        @memset(self.state.document_text[0..], 0);
+        const len = @min(text.len, self.state.document_text.len);
+        if (len != 0) @memcpy(self.state.document_text[0..len], text[0..len]);
+        self.state.document_text_len = len;
+    }
+
+    fn documentTextSlice(self: *const HumaneShell) []const u8 {
+        return self.state.document_text[0..self.state.document_text_len];
+    }
+
+    fn hasSyncRoute(self: *const HumaneShell) bool {
+        const source = self.syncSourceDevice();
+        const target = self.syncTargetDevice();
+        return source.serial != 0 and target.serial != 0;
+    }
+
+    fn syncSourceDevice(self: *const HumaneShell) principal.PrincipalId {
+        return self.config.sync_from_device;
+    }
+
+    fn syncTargetDevice(self: *const HumaneShell) principal.PrincipalId {
+        if (self.config.sync_to_device.serial != 0) return self.config.sync_to_device;
+        return self.config.paired_device;
     }
 
     fn clearObjectQueryState(self: *HumaneShell) void {
@@ -937,6 +1164,8 @@ pub fn controlName(control: HumaneShellControl) []const u8 {
         .start_task => "start-task",
         .open_workspace => "open-workspace",
         .open_document => "open-document",
+        .edit_document => "edit-document",
+        .sync_document => "sync-document",
         .query_objects => "query-objects",
         .open_object => "open-object",
         .show_object_history => "show-object-history",
@@ -952,6 +1181,7 @@ pub fn controlName(control: HumaneShellControl) []const u8 {
         .run_diagnostics => "run-diagnostics",
         .post_notification => "post-notification",
         .recover_state => "recover-state",
+        .remove_package => "remove-package",
         .focus_next => "focus-next",
         .focus_previous => "focus-previous",
     };
@@ -967,6 +1197,10 @@ pub fn statusForError(err: anyerror) HumaneShellStatus {
         error.DeviceAlreadyPaired,
         error.SnapshotAlreadyCreated,
         error.SnapshotRequired,
+        error.TextInputRequired,
+        error.DocumentEditRequired,
+        error.SyncPathRequired,
+        error.PackageServiceRequired,
         => .invalid_order,
         error.EntryNotFound,
         error.WorkspaceNotFound,
@@ -974,6 +1208,8 @@ pub fn statusForError(err: anyerror) HumaneShellStatus {
         error.TaskNotFound,
         error.ObjectMissing,
         error.ConflictNotFound,
+        error.BundleNotFound,
+        error.AppNotInstalled,
         => .not_found,
         error.PermissionDenied,
         error.CapabilityRequired,
@@ -986,6 +1222,9 @@ pub fn statusForError(err: anyerror) HumaneShellStatus {
         error.UserRootNotFound,
         error.AuthorityRequired,
         error.AuthorityScopeViolation,
+        error.TransportDenied,
+        error.WorkspacePolicyNotFound,
+        error.SyncPolicyMissing,
         => .sync_rejected,
         error.CompositorRejected => .compositor_rejected,
         error.ConsentRequired,
@@ -1001,6 +1240,8 @@ fn shortcutForControl(control: HumaneShellControl) []const u8 {
         .start_task => "Enter",
         .open_workspace => "W",
         .open_document => "D",
+        .edit_document => "T",
+        .sync_document => "Y",
         .query_objects => "Q",
         .open_object => "O",
         .show_object_history => "H",
@@ -1016,6 +1257,7 @@ fn shortcutForControl(control: HumaneShellControl) []const u8 {
         .run_diagnostics => "G",
         .post_notification => "O",
         .recover_state => "Ctrl+R",
+        .remove_package => "Del",
         .focus_next => "Tab",
         .focus_previous => "Shift+Tab",
     };
@@ -1026,6 +1268,11 @@ fn blockedReason(shell: *const HumaneShell, control: HumaneShellControl, state: 
     return switch (control) {
         .open_workspace => "task required",
         .open_document => "workspace required",
+        .edit_document => "document required",
+        .sync_document => if (!shell.state.document_edited)
+            "document edit required"
+        else
+            "sync route required",
         .show_object_history,
         .mint_object_capability,
         .share_object,
@@ -1038,6 +1285,7 @@ fn blockedReason(shell: *const HumaneShell, control: HumaneShellControl, state: 
             "permission review required",
         .rollback_snapshot => "snapshot required",
         .recover_state => "checkpoint required",
+        .remove_package => "package service required",
         else => "control unavailable",
     };
 }
@@ -1048,6 +1296,11 @@ fn nextAction(shell: *const HumaneShell, control: HumaneShellControl, state: Con
         return switch (control) {
             .open_workspace => "start task",
             .open_document => "open workspace",
+            .edit_document => "open document",
+            .sync_document => if (!shell.state.document_edited)
+                "edit document"
+            else
+                "configure sync route",
             .show_object_history,
             .mint_object_capability,
             .share_object,
@@ -1060,6 +1313,7 @@ fn nextAction(shell: *const HumaneShell, control: HumaneShellControl, state: Con
                 "review permission",
             .rollback_snapshot => "create snapshot",
             .recover_state => "complete a checkpointed action",
+            .remove_package => "attach package service",
             else => "resolve prerequisite",
         };
     }
@@ -1067,6 +1321,8 @@ fn nextAction(shell: *const HumaneShell, control: HumaneShellControl, state: Con
         .start_task => "launch task",
         .open_workspace => "show workspace",
         .open_document => "show document",
+        .edit_document => "write typed document text",
+        .sync_document => "sync document",
         .query_objects => "query object store",
         .open_object => "open object",
         .show_object_history => "show object history",
@@ -1082,6 +1338,7 @@ fn nextAction(shell: *const HumaneShell, control: HumaneShellControl, state: Con
         .run_diagnostics => "run local diagnostics",
         .post_notification => "post notification",
         .recover_state => "restore checkpoint",
+        .remove_package => "remove package",
         .focus_next => "move focus forward",
         .focus_previous => "move focus backward",
     };
@@ -1092,6 +1349,8 @@ fn accessibleLabel(control: HumaneShellControl) []const u8 {
         .start_task => "Start task",
         .open_workspace => "Open workspace",
         .open_document => "Open document",
+        .edit_document => "Edit document text",
+        .sync_document => "Sync document",
         .query_objects => "Query object store",
         .open_object => "Open selected object",
         .show_object_history => "Show object history",
@@ -1107,7 +1366,12 @@ fn accessibleLabel(control: HumaneShellControl) []const u8 {
         .run_diagnostics => "Run local diagnostics",
         .post_notification => "Post shell notification",
         .recover_state => "Recover shell state",
+        .remove_package => "Remove package",
         .focus_next => "Move focus to next control",
         .focus_previous => "Move focus to previous control",
     };
+}
+
+fn saturatingU16(value: usize) u16 {
+    return @intCast(@min(value, std.math.maxInt(u16)));
 }

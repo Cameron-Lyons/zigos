@@ -100,11 +100,7 @@ pub fn evaluateEvidence(probe: ProbeFacts) hardware_target.EvidenceSummary {
         .network_frame_cycles = probe.network_frame_cycles,
         .suspend_resume_cycles = probe.suspend_resume_cycles,
         .crash_recovery_cycles = probe.crash_recovery_cycles,
-        .serial_log_captured = true,
         .required_markers_captured = allSubsystemMarkersReady(probe),
-        .firmware_settings_captured = probe.real_target_sku,
-        .power_cycle_notes_captured = countersReady(probe),
-        .artifact_digests_captured = probe.real_target_sku,
     };
 }
 
@@ -392,7 +388,17 @@ test "hardware proof requires composed NUC subsystem evidence" {
         .crash_recovery_cycles = target.proof_minimums.crash_recovery_cycles,
     };
     try std.testing.expect(allSubsystemMarkersReady(complete));
-    try std.testing.expect(hardware_target.hardwareProofSatisfied(target, evaluateEvidence(complete)));
+    const runtime_evidence = evaluateEvidence(complete);
+    try std.testing.expect(runtime_evidence.required_markers_captured);
+    try std.testing.expect(!hardware_target.hardwareProofSatisfied(target, runtime_evidence));
+
+    var archived_evidence = runtime_evidence;
+    archived_evidence.proof_manifest_captured = true;
+    archived_evidence.serial_log_captured = true;
+    archived_evidence.firmware_settings_captured = true;
+    archived_evidence.power_cycle_notes_captured = true;
+    archived_evidence.artifact_digests_captured = true;
+    try std.testing.expect(hardware_target.hardwareProofSatisfied(target, archived_evidence));
 }
 
 test "hardware proof redacted crash records count toward crash recovery evidence" {

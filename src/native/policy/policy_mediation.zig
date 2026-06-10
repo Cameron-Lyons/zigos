@@ -2,6 +2,7 @@ const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
 const denial_explanation = @import("denial_explanation.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
+const humane_permissions = @import("humane_permissions.zig");
 const manifest = @import("manifest.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
@@ -587,6 +588,17 @@ test "policy mediation grants local-only object and network capabilities" {
     try std.testing.expect(!runtime.hasCapability(task.id, revoked_capability_id));
     try std.testing.expect(capability_table.query(revoked_capability_id) == null);
     try std.testing.expectEqual(event_ledger.EventKind.capability_revocation, ledger.latestKind(.capability_revocation).?.kind);
+    var revoke_buffer: [240]u8 = undefined;
+    const revoke_receipt = try humane_permissions.renderRevocationReceiptToBuffer(
+        &revoke_buffer,
+        revoked_capability_id,
+        .network_egress,
+        "lan.sync",
+        20,
+        "network grant revoked",
+    );
+    try std.testing.expect(std.mem.indexOf(u8, revoke_receipt, "is off now") != null);
+    try std.testing.expect(std.mem.indexOf(u8, revoke_receipt, "approve a new permission review") != null);
 }
 
 test "policy mediation rolls back minted capability when task attachment fails" {

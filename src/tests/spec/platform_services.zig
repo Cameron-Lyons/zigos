@@ -297,6 +297,7 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
     const exported = try ledger.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "redacted") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "policy=user-grant-policy") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "blocked_help=\"Blocked: This app") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "service=storage_object") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "detail=storage driver restarted") != null);
     try std.testing.expectEqual(contract.ServiceClass.storage_object, ledger.latestKind(.process_crash).?.service_class);

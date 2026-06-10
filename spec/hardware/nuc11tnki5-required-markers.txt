@@ -1,7 +1,7 @@
 # Required serial markers for the first real hardware target.
 # These must come from an Intel NUC 11 Pro Kit NUC11TNKi5 boot, not QEMU.
-# The proof checker also requires metadata markers, cycle counters, firmware
-# settings, power-cycle notes, and artifact digests described in
+# The proof checker also requires proof-manifest metadata, cycle counters,
+# firmware settings, power-cycle notes, and artifact digests described in
 # nuc11tnki5-proof-bundle.md.
 ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UEFI_BOOT:PASS
 ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_TABLES:PASS
