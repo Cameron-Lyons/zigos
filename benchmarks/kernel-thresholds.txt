@@ -6,7 +6,7 @@ network_policy.authorize_connection 15000
 background_dispatch.allowed_sync 800000
 task_runtime.checkpoint.write_restore 9000000
 accelerator_scheduler.claim_release 230000
-storage.file_bridge.resolve_view 15000
+storage.file_bridge.resolve_view 22000
 storage.workspace.commit_overlay 11000000
 storage.volume.replay_segmented_log 500000000
 storage.volume.compact_checkpoint 1200000000
