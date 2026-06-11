@@ -176,7 +176,7 @@ pub const RenderedReviewSurface = struct {
             &self.bundle,
             self.decisions[0..self.decision_count],
         );
-        var review_buffer: [2048]u8 = undefined;
+        var review_buffer: [4096]u8 = undefined;
         const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, &self.bundle) catch unreachable;
         console.print(rendered);
         common.printBootMarker(boot_markers.permission_ui_review_rendered);
@@ -379,7 +379,7 @@ pub const Service = struct {
         }
 
         const reviewed_session = permission_review.initSession(app_task_id, &bundle, decisions[0..decision_count]);
-        var review_buffer: [2048]u8 = undefined;
+        var review_buffer: [4096]u8 = undefined;
         const rendered = permission_review.renderToBuffer(&review_buffer, &reviewed_session, &bundle) catch unreachable;
         console.print(rendered);
         common.printBootMarker(boot_markers.permission_ui_review_rendered);
@@ -696,6 +696,10 @@ test "review service retries invalid commands clamps leases and records audits" 
             .resource = "relay.zigos.dev",
             .rights = .{ .network_policy = .{ .network_remote = true } },
             .required = false,
+            .egress_intent = .{
+                .kind = .call_service,
+                .service = "relay.zigos.dev",
+            },
         },
     };
     const bundle = manifest.BundleManifest{
@@ -946,6 +950,10 @@ test "rendered permission review surface drives allow deny controls through comp
             .rights = .{ .network_policy = .{ .network_remote = true } },
             .required = false,
             .max_lease_ticks = 80,
+            .egress_intent = .{
+                .kind = .call_service,
+                .service = "trip.remote",
+            },
         },
     };
     const bundle = manifest.BundleManifest{

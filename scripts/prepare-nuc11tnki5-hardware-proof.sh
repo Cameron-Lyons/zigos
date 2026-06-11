@@ -56,6 +56,7 @@ REQUIRED_ARTIFACTS=(
   "zig-out/bin/userspace-storage-driver.elf"
   "zig-out/bin/userspace-sync-service.elf"
   "spec/production_readiness.json"
+  "spec/release_security/release_artifacts.json"
   "spec/hardware/nuc11tnki5-required-markers.txt"
 )
 
@@ -146,6 +147,8 @@ storage_write_read_cycles=0
 network_frame_cycles=0
 suspend_resume_cycles=0
 crash_recovery_cycles=0
+crash_record_persistence_cycles=0
+update_rollback_cycles=0
 notes=TODO-record-observed-hangs-panics-retries-and-recovery-behavior
 EOF
 

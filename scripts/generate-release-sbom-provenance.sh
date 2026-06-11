@@ -196,6 +196,14 @@ release_provider_boundary="${ZIGOS_RELEASE_SIGNING_PROVIDER_BOUNDARY:-hardware-b
 release_generation="${ZIGOS_RELEASE_SIGNING_GENERATION:-1}"
 release_not_before="${ZIGOS_RELEASE_SIGNING_NOT_BEFORE:-TBD}"
 release_not_after="${ZIGOS_RELEASE_SIGNING_NOT_AFTER:-TBD}"
+release_pqc_mode="${ZIGOS_RELEASE_PQC_MODE:-shadow}"
+case "$release_pqc_mode" in
+  shadow|canary|required) ;;
+  *)
+    echo "ZIGOS_RELEASE_PQC_MODE must be shadow, canary, or required" >&2
+    exit 1
+    ;;
+esac
 if [ "${ZIGOS_RELEASE_HARDWARE_BACKED:-}" = "true" ] &&
    [ -n "${ZIGOS_RELEASE_DSSE_SIGN_COMMAND:-}" ] &&
    [ "$release_public_key" != "TBD" ]; then
@@ -210,6 +218,37 @@ cat > "$OUTPUT_PATH/release-keyring.json" <<EOF
   "public_release_allowed": $public_release_allowed,
   "required_provider_boundary": "$(json_escape "$release_provider_boundary")",
   "required_dsse_signature_message": "DSSE v1 pre-authentication encoding over payloadType and payload",
+  "post_quantum_policy": {
+    "mode": "$(json_escape "$release_pqc_mode")",
+    "fips_validated_required": true,
+    "fips_140_validation_required": true,
+    "production_signature_algorithm": "ml-dsa-65",
+    "key_establishment_algorithm": "ml-kem-768",
+    "backup_signature_algorithm": "slh-dsa-sha2-128s",
+    "hybrid_transition": "Ed25519 remains the classical DSSE baseline during migration; ed25519+ml-dsa65 stays preview-only and never satisfies production FIPS 204 ML-DSA; required mode needs a separately verified ML-DSA signature from a validated provider.",
+    "standards": [
+      {
+        "fips": "FIPS 203",
+        "algorithm": "ML-KEM",
+        "scope": "key establishment and transport encryption only"
+      },
+      {
+        "fips": "FIPS 204",
+        "algorithm": "ML-DSA",
+        "scope": "release, update, package, and attestation signatures when production PQC is required"
+      },
+      {
+        "fips": "FIPS 205",
+        "algorithm": "SLH-DSA",
+        "scope": "hash-based signature diversity for long-lived offline roots and emergency recovery policy"
+      }
+    ],
+    "rollout": [
+      "shadow: emit policy and verifier measurements while Ed25519 DSSE remains required",
+      "canary: dual-sign selected release channels with Ed25519 and validated ML-DSA, failing closed on malformed PQC signatures",
+      "required: require zigos-verify-release to verify ML-DSA signatures from FIPS-validated providers before accepting public releases"
+    ]
+  },
   "keys": [
     {
       "key_id": "$(json_escape "$release_key_id")",
@@ -224,6 +263,19 @@ cat > "$OUTPUT_PATH/release-keyring.json" <<EOF
       "public_key": "$(json_escape "$release_public_key")",
       "rotation_policy": "new release key generation before not_after or immediately after suspected exposure",
       "revocation_source": "$OUTPUT_DIR/revoked-release-keys.json"
+    }
+  ],
+  "production_pqc_profiles": [
+    {
+      "profile": "ml-dsa-65",
+      "status": "provider-required-not-configured",
+      "release_allowed": false,
+      "fips_standard": "FIPS 204",
+      "fips_validation_required": true,
+      "fips_140_validated_module_required": true,
+      "public_key_encoding": "hex-ml-dsa-65-raw",
+      "signature_encoding": "base64-ml-dsa-65-raw",
+      "verifier_status": "zigos-verify-release fails closed until a validated ML-DSA provider is linked"
     }
   ],
   "preview_profiles": [
@@ -254,15 +306,25 @@ cat > "$OUTPUT_PATH/customer-verification-policy.json" <<EOF
   "required_predicate_type": "https://slsa.dev/provenance/v1",
   "required_payload_type": "application/vnd.in-toto+json",
   "require_hardware_backed_release_key": true,
+  "post_quantum_policy": {
+    "mode": "$(json_escape "$release_pqc_mode")",
+    "production_signature_algorithm": "ml-dsa-65",
+    "key_establishment_algorithm": "ml-kem-768",
+    "backup_signature_algorithm": "slh-dsa-sha2-128s",
+    "fips_validated_required": true,
+    "fips_140_validation_required": true
+  },
   "reject_unsigned_local_preview": true,
   "verification_steps": [
     "Compare each downloaded artifact SHA-256 digest with artifact-digests.sha256.",
     "Verify every DSSE signature in provenance.dsse.intoto.jsonl against release-keyring.json before parsing payloads; signatures cover the DSSE v1 pre-authentication encoding.",
+    "Verify release-keyring.json post_quantum_policy covers FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 205 SLH-DSA, FIPS-validated provider requirements, hybrid transition, and measured rollout.",
     "Reject signatures from key ids or generations listed in revoked-release-keys.json.",
     "Verify each decoded in-toto Statement has predicateType https://slsa.dev/provenance/v1 and subject digests matching artifact-digests.sha256.",
     "Compare artifact-measurements.json size and digest measurements against downloaded artifacts.",
     "Compare reproducible-build.json and reproducible-artifact-digests.sha256 against the release digest manifest.",
     "Run zig-out/bin/zigos-verify-release build/release-security . before trusting a downloaded release.",
+    "Reject required ML-DSA rollout unless zigos-verify-release verifies a production ML-DSA signature from a validated provider.",
     "Reject ed25519+ml-dsa65 as a production FIPS 204 signal; it is preview-only until replaced by a validated ML-DSA provider."
   ]
 }

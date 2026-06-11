@@ -23,6 +23,34 @@ pub const PermissionKind = enum(u8) {
     peer_ipc,
 };
 
+pub const DataEgressIntentKind = enum(u8) {
+    unspecified,
+    sync_object,
+    call_service,
+    publish_event,
+};
+
+pub const DataEgressIntent = struct {
+    kind: DataEgressIntentKind = .unspecified,
+    object: []const u8 = "",
+    principal: []const u8 = "",
+    service: []const u8 = "",
+    event_type: []const u8 = "",
+
+    pub fn declared(self: DataEgressIntent) bool {
+        return self.kind != .unspecified;
+    }
+
+    pub fn complete(self: DataEgressIntent) bool {
+        return switch (self.kind) {
+            .unspecified => false,
+            .sync_object => self.object.len != 0 and self.principal.len != 0,
+            .call_service => self.service.len != 0,
+            .publish_event => self.event_type.len != 0,
+        };
+    }
+};
+
 pub const PermissionRequest = struct {
     kind: PermissionKind,
     resource: []const u8,
@@ -31,6 +59,7 @@ pub const PermissionRequest = struct {
     local_only: bool = false,
     max_lease_ticks: u64 = 0,
     target_id: u64 = 0,
+    egress_intent: DataEgressIntent = .{},
 };
 
 pub const BackgroundTrigger = enum(u8) {
@@ -119,10 +148,13 @@ pub const UpdateChannel = enum(u8) {
 
 pub const SIGNATURE_FORMAT_ED25519 = "ed25519";
 pub const SIGNATURE_FORMAT_ED25519_ML_DSA65 = "ed25519+ml-dsa65";
+pub const SIGNATURE_FORMAT_ML_DSA65 = "ml-dsa-65";
 pub const ED25519_PUBLIC_KEY_BYTES: usize = 32;
 pub const ED25519_SIGNATURE_BYTES: usize = 64;
 pub const ML_DSA65_PREVIEW_PUBLIC_COMMITMENT_BYTES: usize = 32;
 pub const ML_DSA65_PREVIEW_SIGNATURE_BINDING_BYTES: usize = 32;
+pub const ML_DSA65_PUBLIC_KEY_BYTES: usize = 1952;
+pub const ML_DSA65_SIGNATURE_BYTES: usize = 3309;
 pub const HYBRID_PUBLIC_KEY_BYTES: usize = ED25519_PUBLIC_KEY_BYTES + ML_DSA65_PREVIEW_PUBLIC_COMMITMENT_BYTES;
 pub const HYBRID_SIGNATURE_BYTES: usize = ED25519_SIGNATURE_BYTES + ML_DSA65_PREVIEW_SIGNATURE_BINDING_BYTES;
 pub const MAX_SIGNATURE_PUBLIC_KEY_BYTES: usize = HYBRID_PUBLIC_KEY_BYTES;
@@ -259,6 +291,8 @@ pub const ValidationError = error{
     BackgroundPermissionMissingRunRight,
     BackgroundPermissionMissingTask,
     DuplicateBackgroundTaskId,
+    MissingDataEgressIntent,
+    IncompleteDataEgressIntent,
     AiModelFamilyTooLong,
     LocalOnlyAiRequiresLocalNetwork,
     SignatureFormatTooLong,
@@ -278,6 +312,7 @@ pub fn validate(bundle: BundleManifest) ValidationError!void {
     }
     try validateComponents(bundle);
     try validateBackgroundTasks(bundle);
+    try validateDataEgressRequests(bundle);
 
     if (bundle.ai_metadata.locality == .local_only) {
         for (bundle.requested_permissions) |request| {
@@ -286,6 +321,16 @@ pub fn validate(bundle: BundleManifest) ValidationError!void {
                 return error.LocalOnlyAiRequiresLocalNetwork;
             }
         }
+    }
+}
+
+fn validateDataEgressRequests(bundle: BundleManifest) ValidationError!void {
+    if (!requiresApplicationPackaging(bundle.bundle_id)) return;
+
+    for (bundle.requested_permissions) |request| {
+        if (request.kind != .network_egress) continue;
+        if (!request.egress_intent.declared()) return error.MissingDataEgressIntent;
+        if (!request.egress_intent.complete()) return error.IncompleteDataEgressIntent;
     }
 }
 
@@ -416,6 +461,10 @@ test "validate requires local-only AI manifests to keep network requests local" 
             .resource = "internet",
             .rights = .{ .network_policy = .{ .network_remote = true } },
             .local_only = false,
+            .egress_intent = .{
+                .kind = .call_service,
+                .service = "remote.model",
+            },
         },
     };
     const bundle = BundleManifest{
@@ -433,6 +482,42 @@ test "validate requires local-only AI manifests to keep network requests local" 
     try std.testing.expectError(error.LocalOnlyAiRequiresLocalNetwork, validate(bundle));
 }
 
+test "validate requires app data egress to declare sync call or publish intent" {
+    const raw_network_requests = [_]PermissionRequest{
+        .{
+            .kind = .network_egress,
+            .resource = "internet",
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .required = false,
+        },
+    };
+    try std.testing.expectError(error.MissingDataEgressIntent, validate(.{
+        .bundle_id = "app.raw-network",
+        .display_name = "Raw Network",
+        .publisher = "zigos.dev",
+        .requested_permissions = &raw_network_requests,
+    }));
+
+    const incomplete_sync_requests = [_]PermissionRequest{
+        .{
+            .kind = .network_egress,
+            .resource = "lan.sync",
+            .rights = .{ .network_policy = .{ .network_local = true } },
+            .required = false,
+            .egress_intent = .{
+                .kind = .sync_object,
+                .object = "workspace:notes",
+            },
+        },
+    };
+    try std.testing.expectError(error.IncompleteDataEgressIntent, validate(.{
+        .bundle_id = "app.incomplete-sync",
+        .display_name = "Incomplete Sync",
+        .publisher = "zigos.dev",
+        .requested_permissions = &incomplete_sync_requests,
+    }));
+}
+
 test "validate accepts a signed local-first bundle manifest" {
     const requests = [_]PermissionRequest{
         .{
@@ -447,6 +532,11 @@ test "validate accepts a signed local-first bundle manifest" {
             .rights = .{ .network_policy = .{ .network_local = true } },
             .required = false,
             .local_only = true,
+            .egress_intent = .{
+                .kind = .sync_object,
+                .object = "workspace:notes",
+                .principal = "trusted-devices",
+            },
         },
         .{
             .kind = .background_execution,

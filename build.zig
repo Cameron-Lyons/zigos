@@ -24,6 +24,7 @@ pub fn build(b: *std.Build) void {
 
     const verify_smoke = b.option(bool, "verify-smoke", "Include the QEMU native smoke test in `zig build verify`") orelse false;
     const verify_benchmark = b.option(bool, "verify-benchmark", "Include the QEMU benchmark suite in `zig build verify`") orelse false;
+    const hardware_proof_dir = b.option([]const u8, "hardware-proof-dir", "Path to the completed NUC11TNKi5 hardware proof bundle") orelse "build/hardware-proofs/nuc11tnki5";
 
     const target = b.standardTargetOptions(.{
         .default_target = .{
@@ -156,6 +157,14 @@ pub fn build(b: *std.Build) void {
     const uefi_qemu_step = b.step("uefi-qemu-test", "Run the ISO through an OVMF UEFI boot preflight in QEMU");
     uefi_qemu_step.dependOn(&uefi_qemu_cmd.step);
 
+    const hardware_proof_cmd = b.addSystemCommand(&.{
+        "bash",
+        "scripts/check-nuc11tnki5-hardware-proof.sh",
+        hardware_proof_dir,
+    });
+    const hardware_proof_step = b.step("hardware-proof", "Validate the completed NUC11TNKi5 real-hardware proof bundle");
+    hardware_proof_step.dependOn(&hardware_proof_cmd.step);
+
     const release_sbom_cmd = b.addSystemCommand(&.{
         "bash",
         "scripts/generate-release-sbom-provenance.sh",
@@ -176,7 +185,7 @@ pub fn build(b: *std.Build) void {
     const reproducible_build_step = b.step("reproducible-build-check", "Build release artifacts twice in isolated tracked-workspace copies and compare digests");
     reproducible_build_step.dependOn(&reproducible_build_cmd.step);
 
-    const release_security_gate_step = b.step("release-security-gate", "Run the public-release security gate: fuzz, reproducibility, SBOM/provenance, audits, redaction, disclosure, and QEMU fault proofs");
+    const release_security_gate_step = b.step("release-security-gate", "Run the public-release security gate: fuzz, reproducibility, SBOM/provenance, audits, redaction, disclosure, QEMU fault proofs, and real NUC hardware proof");
     release_security_gate_step.dependOn(check_steps.prod_readiness);
     release_security_gate_step.dependOn(check_steps.host_tests);
     release_security_gate_step.dependOn(check_steps.spec_tests);
@@ -188,6 +197,7 @@ pub fn build(b: *std.Build) void {
     release_security_gate_step.dependOn(recovery_qemu_step);
     release_security_gate_step.dependOn(sync_two_node_qemu_step);
     release_security_gate_step.dependOn(uefi_qemu_step);
+    release_security_gate_step.dependOn(hardware_proof_step);
 }
 
 fn dependOnRunCommands(step: *std.Build.Step, commands: []const *std.Build.Step.Run) void {

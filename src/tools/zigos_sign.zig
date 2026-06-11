@@ -47,6 +47,9 @@ pub fn main(init: std.process.Init) !void {
         const seed = try decodeFixed(signing.SEED_BYTES, args[3]);
         const digest = try decodeFixed(32, args[4]);
         try printSignature(&stdout_writer.interface, args[2], seed, digest, .ed25519_ml_dsa65_hybrid_preview);
+    } else if (std.mem.eql(u8, args[1], "provider-policy")) {
+        if (args.len != 2) return error.UnknownCommand;
+        try printProviderPolicy(&stdout_writer.interface);
     } else {
         try printUsage(&stdout_writer.interface);
         return error.UnknownCommand;
@@ -62,6 +65,7 @@ fn printUsage(writer: anytype) !void {
         \\  zigos-sign verify-example writer|viewer|zigos-writer|zigos-workbench|zigos-studio
         \\  zigos-sign sign-digest <label> <seed-hex-64> <digest-hex-64>
         \\  zigos-sign sign-hybrid-digest <label> <seed-hex-64> <digest-hex-64>
+        \\  zigos-sign provider-policy
         \\
     , .{});
 }
@@ -106,14 +110,18 @@ fn printSignature(
     var public_key_hex: [manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES * 2]u8 = undefined;
     var signature_hex: [manifest.MAX_SIGNATURE_VALUE_BYTES * 2]u8 = undefined;
     try writer.print(
-        "provider={s}\nrole={s}\nprovider_boundary={s}\ncustody={s}\nverifier_protocol={s}\nfips_204={s}\nrelease_eligible={s}\nformat={s}\nsigner={s}\npublic_key={s}\nsignature={s}\n",
+        "provider={s}\nrole={s}\nprovider_boundary={s}\ncustody={s}\nverifier_protocol={s}\nfips_standard={s}\npost_quantum_algorithm={s}\nfips_204={s}\nfips_140_validated_module={s}\nvalidation_certificate={s}\nrelease_eligible={s}\nformat={s}\nsigner={s}\npublic_key={s}\nsignature={s}\n",
         .{
             provider.descriptor.name,
             @tagName(provider.descriptor.role),
             @tagName(provider.descriptor.provider_boundary),
             @tagName(provider.descriptor.custody),
             @tagName(provider.descriptor.verifier_protocol),
+            @tagName(provider.descriptor.fips_standard),
+            @tagName(provider.descriptor.post_quantum_algorithm),
             @tagName(provider.descriptor.fips_204),
+            if (provider.descriptor.fips_140_validated_module) "yes" else "no",
+            provider.descriptor.validation_certificate,
             if (provider.releaseEligible()) "yes" else "no",
             signature.format,
             signature.signer,
@@ -121,6 +129,28 @@ fn printSignature(
             try encodeHex(signature.valueSlice(), &signature_hex),
         },
     );
+}
+
+fn printProviderPolicy(writer: anytype) !void {
+    var ed25519_provider_impl = signing.SoftwareEd25519Provider{};
+    var hybrid_provider_impl = signing.HybridPreviewProvider{};
+    var registry = signing.SignatureProviderRegistry.init();
+    try registry.register(ed25519_provider_impl.provider());
+    try registry.register(hybrid_provider_impl.provider());
+
+    try writer.print(
+        \\standards=FIPS 203 ML-KEM key establishment; FIPS 204 ML-DSA signatures; FIPS 205 SLH-DSA hash-based signature fallback
+        \\hybrid_transition=ed25519 remains the classical DSSE baseline; ed25519+ml-dsa65 is preview-only; production PQC requires a separate ml-dsa-65 FIPS 204 provider
+        \\default_ed25519_release_eligible={s}
+        \\default_hybrid_release_eligible={s}
+        \\production_ml_dsa_profile=ml-dsa-65
+        \\production_ml_dsa_required_boundary=hardware key handle through TPM, secure enclave, HSM, or KMS backed by a FIPS 140 validated module
+        \\production_ml_dsa_required_metadata=FIPS 204 algorithm, ML-DSA-65 parameter set, validation certificate, rotation, revocation, DSSE verifier support
+        \\
+    , .{
+        if ((registry.find(.ed25519) orelse unreachable).releaseEligible()) "yes" else "no",
+        if ((registry.find(.ed25519_ml_dsa65_hybrid_preview) orelse unreachable).releaseEligible()) "yes" else "no",
+    });
 }
 
 pub fn encodeHex(bytes: []const u8, output: []u8) Error![]const u8 {

@@ -13,6 +13,7 @@ const Ledger = event_ledger.Ledger;
 test "event ledger exports structured redacted diagnostics and audit history" {
     var ledger = Ledger.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 7 };
+    const app_subject = principal.PrincipalId{ .kind = .app, .serial = 8 };
     const service_subject = principal.PrincipalId{ .kind = .service, .serial = 9 };
     const device_subject = principal.PrincipalId{ .kind = .device, .serial = 42 };
 
@@ -22,6 +23,7 @@ test "event ledger exports structured redacted diagnostics and audit history" {
     try ledger.recordUpdateTransition(service_subject, 1, .boot, true, 23, "rolled back to stable-a");
     try ledger.recordSyncConflict(user, 5, 24, "documents/tax-return.pdf conflict", true);
     try ledger.recordDeviceTrustChange(user, device_subject, false, 25, "device revoked");
+    try ledger.recordSuspiciousAppBehavior(app_subject, 33, 26, 9001, "contacts plus network burst", true);
 
     var buffer: [2048]u8 = undefined;
     const exported = try ledger.exportText(&buffer, .{});
@@ -31,10 +33,28 @@ test "event ledger exports structured redacted diagnostics and audit history" {
     try std.testing.expect(std.mem.indexOf(u8, exported, "device=42 trusted=no") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "policy=user-grant-policy") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "approval=yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "app_behavior=suspicious") != null);
 
     const full = try ledger.exportText(&buffer, .{ .include_protected_content = true });
     try std.testing.expect(std.mem.indexOf(u8, full, "tax-return.pdf") != null);
     try std.testing.expectEqual(EventKind.device_trust_change, ledger.latestKind(.device_trust_change).?.kind);
+
+    var summary_buffer: [768]u8 = undefined;
+    const summary = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "user_visible=yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "privacy=redacted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "evidence_of_intrusion_capable=yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "capability_denials=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "crashes=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "driver_restarts=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "suspicious_app_behavior=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "sync_conflicts=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "device_trust_changes=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "device_trust_revocations=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "update_health_events=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "update_rollbacks=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "protected_details_redacted=3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "contacts plus network burst") == null);
 }
 
 test "event ledger requires explicit opt-in before remote sharing personal device diagnostics" {
@@ -127,6 +147,30 @@ test "event ledger indexes structured queries by kind subject and task" {
     try std.testing.expect(std.mem.indexOf(u8, exported, "blocked_help=\"Blocked: This app") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "detail=redacted") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "detail=alice protected") == null);
+}
+
+test "event ledger renders what an app knows about a document" {
+    var ledger = Ledger.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 303 };
+    const task_id: u64 = 77;
+    const document = "workspace://trip/documents/plan.md";
+
+    try ledger.recordPermissionReview(user, task_id, .object_access, true, 10, "review resource=workspace://trip/documents/plan.md", false);
+    try ledger.recordCapabilityGrant(user, task_id, 700, .object_access, 11, "Permission receipt: granted Object access for workspace://trip/documents/plan.md; data leaves: none; revoke: Permission Review");
+    try ledger.recordCapabilityGrant(user, task_id, 701, .network_egress, 12, "Permission receipt: data leaves: sync object workspace://trip/documents/plan.md with trusted-devices; revoke: Permission Review");
+
+    var buffer: [512]u8 = undefined;
+    const before_revoke = try ledger.renderAppDocumentKnowledgeToBuffer(&buffer, task_id, document);
+    try std.testing.expect(std.mem.indexOf(u8, before_revoke, "knows=yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, before_revoke, "active_grants=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, before_revoke, "egress_routes=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, before_revoke, "data_can_leave=yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, before_revoke, "object_capability=700") != null);
+
+    try ledger.recordCapabilityRevocation(user, task_id, 700, .object_access, 13, "revoked from Permission Review");
+    const after_revoke = try ledger.renderAppDocumentKnowledgeToBuffer(&buffer, task_id, document);
+    try std.testing.expect(std.mem.indexOf(u8, after_revoke, "active_grants=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after_revoke, "revoked=1") != null);
 }
 
 test "event ledger persists history across restart" {

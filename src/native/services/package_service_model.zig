@@ -95,9 +95,34 @@ pub const StoredPermission = struct {
     local_only: bool = false,
     max_lease_ticks: u64 = 0,
     target_id: u64 = 0,
+    egress_intent_kind: manifest.DataEgressIntentKind = .unspecified,
+    egress_object_len: usize = 0,
+    egress_object: [MAX_PERMISSION_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_RESOURCE_BYTES,
+    egress_principal_len: usize = 0,
+    egress_principal: [MAX_PERMISSION_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_RESOURCE_BYTES,
+    egress_service_len: usize = 0,
+    egress_service: [MAX_PERMISSION_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_RESOURCE_BYTES,
+    egress_event_type_len: usize = 0,
+    egress_event_type: [MAX_PERMISSION_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_RESOURCE_BYTES,
 
     pub fn resourceSlice(self: *const StoredPermission) []const u8 {
         return self.resource[0..self.resource_len];
+    }
+
+    pub fn egressObjectSlice(self: *const StoredPermission) []const u8 {
+        return self.egress_object[0..self.egress_object_len];
+    }
+
+    pub fn egressPrincipalSlice(self: *const StoredPermission) []const u8 {
+        return self.egress_principal[0..self.egress_principal_len];
+    }
+
+    pub fn egressServiceSlice(self: *const StoredPermission) []const u8 {
+        return self.egress_service[0..self.egress_service_len];
+    }
+
+    pub fn egressEventTypeSlice(self: *const StoredPermission) []const u8 {
+        return self.egress_event_type[0..self.egress_event_type_len];
     }
 };
 

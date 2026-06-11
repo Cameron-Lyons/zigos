@@ -470,7 +470,7 @@ fn zeroDiagnostic() DiagnosticEvent {
 
 fn driverImpactIsVisible(device_class: driver_service.DeviceClass) bool {
     return switch (device_class) {
-        .graphics_adapter, .audio_print_io, .input_device => true,
+        .usb_controller, .graphics_adapter, .audio_print_io, .input_device, .compositor_policy => true,
         .network_adapter, .storage_controller => false,
     };
 }
@@ -479,9 +479,11 @@ fn defaultDriverRestartDetail(device_class: driver_service.DeviceClass) []const 
     return switch (device_class) {
         .network_adapter => "network driver restarted",
         .storage_controller => "storage driver restarted",
+        .usb_controller => "usb controller driver restarted",
         .graphics_adapter => "graphics driver restarted",
         .audio_print_io => "audio or print driver restarted",
         .input_device => "input driver restarted",
+        .compositor_policy => "compositor device policy restarted",
     };
 }
 

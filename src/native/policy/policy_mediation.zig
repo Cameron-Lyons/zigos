@@ -198,13 +198,25 @@ pub const PolicyMediator = struct {
         });
         try self.recordDecision(decision.owner, decision.task_id, decision.request, true, .none, now_ticks);
         if (self.ledger) |ledger| {
+            const task = self.runtime.find(decision.task_id) orelse return error.TaskNotFound;
+            var receipt_buffer: [512]u8 = undefined;
+            const grant_receipt = humane_permissions.renderPermissionReceiptToBuffer(&receipt_buffer, .{
+                .task_id = decision.task_id,
+                .bundle_id = task.launchBundleIdSlice(),
+                .display_name = taskDisplayName(task),
+                .capability_id = capability_id,
+                .request = decision.request,
+                .local_only = decision.local_only,
+                .expires_at_ticks = if (decision.lease_end == std.math.maxInt(u64)) null else decision.lease_end,
+                .why = "matching user grant authorized by policy",
+            }, now_ticks) catch decision.request.resource;
             try ledger.recordCapabilityGrant(
                 decision.owner,
                 decision.task_id,
                 capability_id,
                 decision.request.kind,
                 now_ticks,
-                decision.request.resource,
+                grant_receipt,
             );
         }
 
@@ -467,6 +479,13 @@ fn resourceId(resource: []const u8) u64 {
     return native_util.fnv1a64(resource);
 }
 
+fn taskDisplayName(task: *const task_runtime.TaskRecord) []const u8 {
+    const components = task.executionComponents();
+    if (components.len != 0 and components[0].labelSlice().len != 0) return components[0].labelSlice();
+    if (task.launchBundleIdSlice().len != 0) return task.launchBundleIdSlice();
+    return "app";
+}
+
 const std = @import("std");
 
 test "policy mediation denies zero-authority requests without user grants" {
@@ -556,6 +575,11 @@ test "policy mediation grants local-only object and network capabilities" {
             .required = false,
             .local_only = true,
             .max_lease_ticks = 25,
+            .egress_intent = .{
+                .kind = .sync_object,
+                .object = "workspace:notes",
+                .principal = "trusted-devices",
+            },
         },
     };
     const bundle = manifest.BundleManifest{
@@ -582,9 +606,12 @@ test "policy mediation grants local-only object and network capabilities" {
     try std.testing.expectEqual(resourceId("lan.sync"), network_capability.target.id);
     try std.testing.expect(ledger.latestKind(.permission_decision).?.allowed);
     try std.testing.expectEqual(abi.DenialReason.none, ledger.latestKind(.permission_decision).?.denial_reason);
+    try std.testing.expect(std.mem.indexOf(u8, ledger.latestKind(.capability_grant).?.detailSlice(), "Permission receipt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ledger.latestKind(.capability_grant).?.detailSlice(), "capability=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ledger.latestKind(.capability_grant).?.detailSlice(), "revoke:") != null);
 
     const revoked_capability_id = summary.decisionForKind(.network_egress).?.capability_id.?;
-    try std.testing.expect(try mediator.revokeGrantedCapability(task.id, revoked_capability_id, .network_egress, 20, "network grant revoked"));
+    try std.testing.expect(try mediator.revokeGrantedCapability(task.id, revoked_capability_id, .network_egress, 20, "data route grant revoked"));
     try std.testing.expect(!runtime.hasCapability(task.id, revoked_capability_id));
     try std.testing.expect(capability_table.query(revoked_capability_id) == null);
     try std.testing.expectEqual(event_ledger.EventKind.capability_revocation, ledger.latestKind(.capability_revocation).?.kind);
@@ -595,7 +622,7 @@ test "policy mediation grants local-only object and network capabilities" {
         .network_egress,
         "lan.sync",
         20,
-        "network grant revoked",
+        "data route grant revoked",
     );
     try std.testing.expect(std.mem.indexOf(u8, revoke_receipt, "is off now") != null);
     try std.testing.expect(std.mem.indexOf(u8, revoke_receipt, "approve a new permission review") != null);

@@ -14,6 +14,8 @@ MIN_STORAGE_WRITE_READ_CYCLES=100
 MIN_NETWORK_FRAME_CYCLES=100
 MIN_SUSPEND_RESUME_CYCLES=20
 MIN_CRASH_RECOVERY_CYCLES=10
+MIN_CRASH_RECORD_PERSISTENCE_CYCLES=10
+MIN_UPDATE_ROLLBACK_CYCLES=10
 
 if [ -d "$PROOF_PATH" ]; then
   BUNDLE_DIR="$PROOF_PATH"
@@ -38,6 +40,7 @@ REQUIRED_ARTIFACT_DIGEST_PATHS=(
   "zig-out/bin/userspace-storage-driver.elf"
   "zig-out/bin/userspace-sync-service.elf"
   "spec/production_readiness.json"
+  "spec/release_security/release_artifacts.json"
   "spec/hardware/nuc11tnki5-required-markers.txt"
 )
 
@@ -195,6 +198,11 @@ require_key_matches "$PROOF_MANIFEST_PATH" "proof manifest" "prepared_at_utc" '^
 require_key_matches "$PROOF_MANIFEST_PATH" "proof manifest" "captured_at_utc" '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
 require_key_present "$PROOF_MANIFEST_PATH" "proof manifest" "operator"
 require_key_matches "$PROOF_MANIFEST_PATH" "proof manifest" "repo_commit" '^[0-9a-fA-F]{40}$'
+expected_repo_commit="${ZIGOS_EXPECTED_REPO_COMMIT:-$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)}"
+if [ -n "$expected_repo_commit" ]; then
+  require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "repo_commit" "$expected_repo_commit"
+fi
+require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "repo_dirty_files" "0"
 
 if grep -Eqi 'panic|KERNEL PANIC|System Halted|(^|:)FAIL($|:)|ZIGOS:.*:FAIL' "$LOG_PATH"; then
   fail "panic or failure text found in $LOG_PATH"
@@ -235,6 +243,8 @@ require_counter_at_least "STORAGE_WRITE_READ_CYCLES" "$MIN_STORAGE_WRITE_READ_CY
 require_counter_at_least "NETWORK_FRAME_CYCLES" "$MIN_NETWORK_FRAME_CYCLES"
 require_counter_at_least "SUSPEND_RESUME_CYCLES" "$MIN_SUSPEND_RESUME_CYCLES"
 require_counter_at_least "CRASH_RECOVERY_CYCLES" "$MIN_CRASH_RECOVERY_CYCLES"
+require_counter_at_least "CRASH_RECORD_PERSISTENCE_CYCLES" "$MIN_CRASH_RECORD_PERSISTENCE_CYCLES"
+require_counter_at_least "UPDATE_ROLLBACK_CYCLES" "$MIN_UPDATE_ROLLBACK_CYCLES"
 
 require_completed_text_file "$FIRMWARE_SETTINGS_PATH" "firmware settings"
 require_key_value "$FIRMWARE_SETTINGS_PATH" "firmware settings" "target_id" "intel-nuc11tnki5"
@@ -256,6 +266,8 @@ require_sidecar_counter_at_least "$POWER_CYCLE_NOTES_PATH" "power-cycle notes" "
 require_sidecar_counter_at_least "$POWER_CYCLE_NOTES_PATH" "power-cycle notes" "network_frame_cycles" "$MIN_NETWORK_FRAME_CYCLES"
 require_sidecar_counter_at_least "$POWER_CYCLE_NOTES_PATH" "power-cycle notes" "suspend_resume_cycles" "$MIN_SUSPEND_RESUME_CYCLES"
 require_sidecar_counter_at_least "$POWER_CYCLE_NOTES_PATH" "power-cycle notes" "crash_recovery_cycles" "$MIN_CRASH_RECOVERY_CYCLES"
+require_sidecar_counter_at_least "$POWER_CYCLE_NOTES_PATH" "power-cycle notes" "crash_record_persistence_cycles" "$MIN_CRASH_RECORD_PERSISTENCE_CYCLES"
+require_sidecar_counter_at_least "$POWER_CYCLE_NOTES_PATH" "power-cycle notes" "update_rollback_cycles" "$MIN_UPDATE_ROLLBACK_CYCLES"
 
 require_completed_text_file "$ARTIFACT_DIGESTS_PATH" "artifact digests"
 

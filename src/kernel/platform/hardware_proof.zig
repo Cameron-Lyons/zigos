@@ -32,6 +32,8 @@ pub const ProbeFacts = struct {
     network_frame_cycles: u16 = 0,
     suspend_resume_cycles: u16 = 0,
     crash_recovery_cycles: u16 = 0,
+    crash_record_persistence_cycles: u16 = 0,
+    update_rollback_cycles: u16 = 0,
 
     pub fn uefiBootReady(self: ProbeFacts) bool {
         return self.real_target_sku and self.multiboot_handoff and self.memory_map and self.framebuffer_gop;
@@ -56,6 +58,14 @@ pub const ProbeFacts = struct {
     pub fn crashRecoveryReady(self: ProbeFacts) bool {
         return self.crash_recovery_cycles >= hardware_target.first_supported_target.proof_minimums.crash_recovery_cycles;
     }
+
+    pub fn crashRecordPersistenceReady(self: ProbeFacts) bool {
+        return self.crash_record_persistence_cycles >= hardware_target.first_supported_target.proof_minimums.crash_record_persistence_cycles;
+    }
+
+    pub fn updateRollbackReady(self: ProbeFacts) bool {
+        return self.update_rollback_cycles >= hardware_target.first_supported_target.proof_minimums.update_rollback_cycles;
+    }
 };
 
 const PrintedMarkers = struct {
@@ -76,6 +86,8 @@ const PrintedMarkers = struct {
     network_cycles: bool = false,
     suspend_cycles: bool = false,
     crash_cycles: bool = false,
+    crash_record_persistence_cycles: bool = false,
+    update_rollback_cycles: bool = false,
 };
 
 var facts = ProbeFacts{};
@@ -100,6 +112,8 @@ pub fn evaluateEvidence(probe: ProbeFacts) hardware_target.EvidenceSummary {
         .network_frame_cycles = probe.network_frame_cycles,
         .suspend_resume_cycles = probe.suspend_resume_cycles,
         .crash_recovery_cycles = probe.crash_recovery_cycles,
+        .crash_record_persistence_cycles = probe.crash_record_persistence_cycles,
+        .update_rollback_cycles = probe.update_rollback_cycles,
         .required_markers_captured = allSubsystemMarkersReady(probe),
     };
 }
@@ -113,7 +127,9 @@ pub fn allSubsystemMarkersReady(probe: ProbeFacts) bool {
         probe.nvmeBlockReady() and
         probe.i225PacketIoReady() and
         probe.suspendResumeReady() and
-        probe.crashRecoveryReady();
+        probe.crashRecoveryReady() and
+        probe.crashRecordPersistenceReady() and
+        probe.updateRollbackReady();
 }
 
 pub fn countersReady(probe: ProbeFacts) bool {
@@ -123,7 +139,9 @@ pub fn countersReady(probe: ProbeFacts) bool {
         probe.storage_write_read_cycles >= minimums.storage_write_read_cycles and
         probe.network_frame_cycles >= minimums.network_frame_cycles and
         probe.suspend_resume_cycles >= minimums.suspend_resume_cycles and
-        probe.crash_recovery_cycles >= minimums.crash_recovery_cycles;
+        probe.crash_recovery_cycles >= minimums.crash_recovery_cycles and
+        probe.crash_record_persistence_cycles >= minimums.crash_record_persistence_cycles and
+        probe.update_rollback_cycles >= minimums.update_rollback_cycles;
 }
 
 pub fn captureEarlyBootEvidence() void {
@@ -178,6 +196,16 @@ pub fn recordSuspendResumeCycles(cycles: u16) void {
 
 pub fn recordCrashRecoveryCycles(cycles: u16) void {
     facts.crash_recovery_cycles = @max(facts.crash_recovery_cycles, cycles);
+    printNewMarkers();
+}
+
+pub fn recordCrashRecordPersistenceCycles(cycles: u16) void {
+    facts.crash_record_persistence_cycles = @max(facts.crash_record_persistence_cycles, cycles);
+    printNewMarkers();
+}
+
+pub fn recordUpdateRollbackCycles(cycles: u16) void {
+    facts.update_rollback_cycles = @max(facts.update_rollback_cycles, cycles);
     printNewMarkers();
 }
 
@@ -306,6 +334,14 @@ fn printCounters() void {
         printCounter("CRASH_RECOVERY_CYCLES", facts.crash_recovery_cycles);
         printed.crash_cycles = true;
     }
+    if (facts.crash_record_persistence_cycles >= minimums.crash_record_persistence_cycles and !printed.crash_record_persistence_cycles) {
+        printCounter("CRASH_RECORD_PERSISTENCE_CYCLES", facts.crash_record_persistence_cycles);
+        printed.crash_record_persistence_cycles = true;
+    }
+    if (facts.update_rollback_cycles >= minimums.update_rollback_cycles and !printed.update_rollback_cycles) {
+        printCounter("UPDATE_ROLLBACK_CYCLES", facts.update_rollback_cycles);
+        printed.update_rollback_cycles = true;
+    }
 }
 
 fn printMarker(marker: []const u8) void {
@@ -386,6 +422,8 @@ test "hardware proof requires composed NUC subsystem evidence" {
         .network_frame_cycles = target.proof_minimums.network_frame_cycles,
         .suspend_resume_cycles = target.proof_minimums.suspend_resume_cycles,
         .crash_recovery_cycles = target.proof_minimums.crash_recovery_cycles,
+        .crash_record_persistence_cycles = target.proof_minimums.crash_record_persistence_cycles,
+        .update_rollback_cycles = target.proof_minimums.update_rollback_cycles,
     };
     try std.testing.expect(allSubsystemMarkersReady(complete));
     const runtime_evidence = evaluateEvidence(complete);
@@ -401,7 +439,7 @@ test "hardware proof requires composed NUC subsystem evidence" {
     try std.testing.expect(hardware_target.hardwareProofSatisfied(target, archived_evidence));
 }
 
-test "hardware proof redacted crash records count toward crash recovery evidence" {
+test "hardware proof redacted crash records count toward crash recovery and persistence evidence" {
     const record = try crash_record.init(.watchdog, 77, 88, 0x1234, 0x5678, "capability token leaked");
     var report_buffer: [256]u8 = undefined;
     const report = crash_record.redactedReport(record, report_buffer[0..]);
@@ -409,5 +447,7 @@ test "hardware proof redacted crash records count toward crash recovery evidence
 
     var probe = ProbeFacts{};
     probe.crash_recovery_cycles = hardware_target.first_supported_target.proof_minimums.crash_recovery_cycles;
+    probe.crash_record_persistence_cycles = hardware_target.first_supported_target.proof_minimums.crash_record_persistence_cycles;
     try std.testing.expect(probe.crashRecoveryReady());
+    try std.testing.expect(probe.crashRecordPersistenceReady());
 }

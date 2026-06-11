@@ -102,7 +102,7 @@ fn capabilityLabel(kind: manifest.PermissionKind) []const u8 {
 fn humanCapabilityLabel(kind: manifest.PermissionKind) []const u8 {
     return switch (kind) {
         .object_access => "object access",
-        .network_egress => "network access",
+        .network_egress => "data egress",
         .device_access => "device access",
         .clipboard => "clipboard access",
         .camera => "camera access",
@@ -136,7 +136,7 @@ fn policyLabel(reason: abi.DenialReason, kind: manifest.PermissionKind) []const 
 fn actionLabel(kind: manifest.PermissionKind) []const u8 {
     return switch (kind) {
         .object_access => "open or change the object",
-        .network_egress => "connect to the network path",
+        .network_egress => "send data through the approved route",
         .device_access => "use the device",
         .clipboard => "use the clipboard",
         .camera => "use the camera",

@@ -1,14 +1,21 @@
 const std = @import("std");
+const app_platform = @import("app_platform.zig");
 const capability = @import("../kernel_api/capability.zig");
 const debugger = @import("debugger.zig");
+const example_apps = @import("example_apps.zig");
 const idl = @import("idl.zig");
+const manifest_linter = @import("manifest_linter.zig");
 const manifest = @import("../policy/manifest.zig");
+const object_store_api = @import("object_store_api.zig");
 const package_service = @import("../services/package_service.zig");
+const permissions = @import("permissions.zig");
 const permission_review = @import("../policy/permission_review.zig");
 const policy_mediation = @import("../policy/policy_mediation.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
+const sync_api = @import("sync_api.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const ui = @import("ui.zig");
 
 pub const SDK_PACKAGE_SERVICE_ID: u64 = 60_001;
 pub const SDK_TASK_ID: u64 = 60_002;
@@ -52,6 +59,33 @@ pub const LaunchResult = struct {
     background_allowed: bool,
     local_only: bool,
     state: task_runtime.TaskState,
+};
+
+pub const NativeAppHarnessResult = struct {
+    interface_count: usize = 0,
+    operation_count: usize = 0,
+    record_count: usize = 0,
+    native_declaration_count: usize = 0,
+    lint_issue_count: usize = 0,
+    permission_grant_count: usize = 0,
+    task_id: u64 = 0,
+    object_id: u64 = 0,
+    version_id: u64 = 0,
+    synced_version: ?u64 = null,
+    accessibility_issue_count: usize = 0,
+    signed_provenance: bool = false,
+    local_first: bool = false,
+
+    pub fn completedNativeLoop(self: *const NativeAppHarnessResult) bool {
+        return self.interface_count != 0 and
+            self.operation_count != 0 and
+            self.record_count != 0 and
+            self.native_declaration_count != 0 and
+            self.signed_provenance and
+            self.local_first and
+            self.synced_version != null and
+            self.accessibility_issue_count == 0;
+    }
 };
 
 fn signSdkReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) !manifest.Signature {
@@ -113,6 +147,56 @@ pub const Simulator = struct {
         const generated = try idl.generate(&document);
         try self.debug.record(.codegen_emitted, self.advanceClock(), "idl", "zig-bindings", true);
         return generated;
+    }
+
+    pub fn runNativeAppHarness(self: *Simulator, package: example_apps.ExamplePackage) !NativeAppHarnessResult {
+        const compiled = try app_platform.compile(package);
+        const lint = manifest_linter.lintWithIdl(package.bundle, package.idl_source);
+        if (lint.hasErrors()) return error.ManifestLintFailed;
+
+        var permission_harness = permissions.Harness.init(SDK_TASK_ID, &package.bundle);
+        const permission_result = try permission_harness.run();
+        if (!permission_result.allRequiredGranted()) return error.PermissionHarnessDeniedRequired;
+
+        _ = try self.install(.{
+            .bundle = package.bundle,
+            .signer = package.signer,
+            .data_schema_version = package.data_schema_version,
+        });
+        const launched = try self.launchNativeApp(package.bundle.bundle_id);
+
+        var objects = object_store_api.Client.init(package.signer);
+        const object = try objects.putDocumentObject("simulator-native-object.md", "text/markdown", "# Native SDK");
+        const updated = try objects.compareAndUpdate(object, "# Native SDK\n\nLocal-first state");
+
+        var sync = sync_api.DevNode.init();
+        const workspace = try sync.openLocalFirstWorkspace(launched.task_id, &.{"documents/"});
+        try sync.publishObject(workspace, "documents/simulator-native-object.md", updated);
+
+        const title = ui.heading(1, package.bundle.display_name, 1);
+        var save = ui.iconButton(2, "Save", "save", .primary);
+        save.hint = "Save local object state";
+        const sync_status = ui.status(3, "Sync status", "Local first");
+        const tools = ui.toolbar(4, &.{&save});
+        const root_stack = ui.stack(5, &.{ &tools, &title, &sync_status });
+        const root = ui.window(6, "Native App Harness", &.{&root_stack});
+        const accessibility = ui.audit(&root);
+
+        return .{
+            .interface_count = compiled.interfaceCount(),
+            .operation_count = compiled.operationCount(),
+            .record_count = compiled.document.record_count,
+            .native_declaration_count = compiled.document.nativeDeclarationCount(),
+            .lint_issue_count = lint.issue_count,
+            .permission_grant_count = permission_result.plan.grantSlice().len,
+            .task_id = launched.task_id,
+            .object_id = updated.object_id.raw(),
+            .version_id = updated.version_id.raw(),
+            .synced_version = sync.replicaVersionFor(workspace, "documents/simulator-native-object.md"),
+            .accessibility_issue_count = accessibility.issue_count,
+            .signed_provenance = launched.signed_provenance,
+            .local_first = launched.local_only and workspace.offline_first,
+        };
     }
 
     pub fn install(self: *Simulator, package: DevPackage) !package_service.InstallResult {
@@ -404,7 +488,6 @@ fn bundleIsLocalOnly(bundle: manifest.BundleManifest) bool {
 }
 
 test "SDK simulator installs updates rolls back launches and debugs native first party apps" {
-    const app_platform = @import("app_platform.zig");
     const examples = @import("example_apps.zig");
 
     var sim = Simulator.init();
@@ -477,4 +560,16 @@ test "SDK simulator installs updates rolls back launches and debugs native first
     try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_suspended));
     try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_resumed));
     try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_stopped));
+}
+
+test "SDK simulator runs a radically native app harness without POSIX" {
+    const examples = @import("example_apps.zig");
+
+    var sim = Simulator.init();
+    const result = try sim.runNativeAppHarness(examples.firstPartyWriter());
+    try std.testing.expect(result.completedNativeLoop());
+    try std.testing.expect(result.lint_issue_count >= 1);
+    try std.testing.expect(result.permission_grant_count >= 1);
+    try std.testing.expect(result.object_id != 0);
+    try std.testing.expectEqual(result.version_id, result.synced_version.?);
 }

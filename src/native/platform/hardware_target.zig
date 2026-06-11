@@ -8,8 +8,11 @@ pub const Subsystem = enum {
     usb_input_xhci,
     nvme_block,
     network_i225_lm,
+    compositor_framebuffer,
     suspend_resume,
     crash_recovery,
+    crash_persistence,
+    update_rollback_power_cycle,
 };
 
 pub const EvidenceSource = enum {
@@ -25,6 +28,8 @@ pub const ProofMinimums = struct {
     network_frame_cycles: u16,
     suspend_resume_cycles: u16,
     crash_recovery_cycles: u16,
+    crash_record_persistence_cycles: u16,
+    update_rollback_cycles: u16,
 };
 
 pub const EvidenceSummary = struct {
@@ -37,6 +42,8 @@ pub const EvidenceSummary = struct {
     network_frame_cycles: u16 = 0,
     suspend_resume_cycles: u16 = 0,
     crash_recovery_cycles: u16 = 0,
+    crash_record_persistence_cycles: u16 = 0,
+    update_rollback_cycles: u16 = 0,
     proof_manifest_captured: bool = false,
     serial_log_captured: bool = false,
     required_markers_captured: bool = false,
@@ -67,8 +74,11 @@ pub const required_subsystems = [_]Subsystem{
     .usb_input_xhci,
     .nvme_block,
     .network_i225_lm,
+    .compositor_framebuffer,
     .suspend_resume,
     .crash_recovery,
+    .crash_persistence,
+    .update_rollback_power_cycle,
 };
 
 pub const nuc11tnki5_marker_prefix = "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5";
@@ -112,6 +122,8 @@ pub const first_supported_target = Target{
         .network_frame_cycles = 100,
         .suspend_resume_cycles = 20,
         .crash_recovery_cycles = 10,
+        .crash_record_persistence_cycles = 10,
+        .update_rollback_cycles = 10,
     },
 };
 
@@ -145,6 +157,14 @@ pub const nuc11tnki5_counter_markers = [_]CounterMarker{
         .marker_prefix = nuc11tnki5_marker_prefix ++ ":CRASH_RECOVERY_CYCLES:",
         .minimum = first_supported_target.proof_minimums.crash_recovery_cycles,
     },
+    .{
+        .marker_prefix = nuc11tnki5_marker_prefix ++ ":CRASH_RECORD_PERSISTENCE_CYCLES:",
+        .minimum = first_supported_target.proof_minimums.crash_record_persistence_cycles,
+    },
+    .{
+        .marker_prefix = nuc11tnki5_marker_prefix ++ ":UPDATE_ROLLBACK_CYCLES:",
+        .minimum = first_supported_target.proof_minimums.update_rollback_cycles,
+    },
 };
 
 pub fn coversSubsystem(target: *const Target, subsystem: Subsystem) bool {
@@ -175,5 +195,7 @@ pub fn hardwareProofSatisfied(target: *const Target, evidence: EvidenceSummary) 
         evidence.storage_write_read_cycles >= target.proof_minimums.storage_write_read_cycles and
         evidence.network_frame_cycles >= target.proof_minimums.network_frame_cycles and
         evidence.suspend_resume_cycles >= target.proof_minimums.suspend_resume_cycles and
-        evidence.crash_recovery_cycles >= target.proof_minimums.crash_recovery_cycles;
+        evidence.crash_recovery_cycles >= target.proof_minimums.crash_recovery_cycles and
+        evidence.crash_record_persistence_cycles >= target.proof_minimums.crash_record_persistence_cycles and
+        evidence.update_rollback_cycles >= target.proof_minimums.update_rollback_cycles;
 }

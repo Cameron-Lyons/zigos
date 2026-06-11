@@ -7,6 +7,7 @@ pub const DetectionSource = enum(u8) {
     ata_bootstrap,
     pci_inventory,
     ps2_bootstrap,
+    xhci_inventory,
 };
 
 pub const DeviceRecord = struct {
@@ -71,16 +72,21 @@ pub fn sourceName(source: DetectionSource) []const u8 {
         .ata_bootstrap => "ata_bootstrap",
         .pci_inventory => "pci_inventory",
         .ps2_bootstrap => "ps2_bootstrap",
+        .xhci_inventory => "xhci_inventory",
     };
 }
 
-fn defaultRecords() [5]DeviceRecord {
+const device_class_count = std.meta.fields(driver_service.DeviceClass).len;
+
+fn defaultRecords() [device_class_count]DeviceRecord {
     return .{
         defaultRecord(.network_adapter, 100),
         defaultRecord(.storage_controller, 200),
-        defaultRecord(.graphics_adapter, 300),
-        defaultRecord(.audio_print_io, 400),
-        defaultRecord(.input_device, 500),
+        defaultRecord(.usb_controller, 300),
+        defaultRecord(.graphics_adapter, 400),
+        defaultRecord(.audio_print_io, 500),
+        defaultRecord(.input_device, 600),
+        defaultRecord(.compositor_policy, 700),
     };
 }
 
@@ -99,9 +105,11 @@ fn recordForClassMut(device_class: driver_service.DeviceClass) *DeviceRecord {
     return switch (device_class) {
         .network_adapter => &records[0],
         .storage_controller => &records[1],
-        .graphics_adapter => &records[2],
-        .audio_print_io => &records[3],
-        .input_device => &records[4],
+        .usb_controller => &records[2],
+        .graphics_adapter => &records[3],
+        .audio_print_io => &records[4],
+        .input_device => &records[5],
+        .compositor_policy => &records[6],
     };
 }
 
@@ -110,14 +118,17 @@ test "device inventory keeps stable synthetic fallbacks until hardware is discov
 
     const network = recordForClass(.network_adapter);
     const storage = recordForClass(.storage_controller);
+    const usb = recordForClass(.usb_controller);
     const input = recordForClass(.input_device);
 
     try std.testing.expectEqual(@as(u64, 100), network.device_id);
     try std.testing.expectEqual(@as(u64, 200), storage.device_id);
-    try std.testing.expectEqual(@as(u64, 500), input.device_id);
+    try std.testing.expectEqual(@as(u64, 300), usb.device_id);
+    try std.testing.expectEqual(@as(u64, 600), input.device_id);
     try std.testing.expectEqual(DetectionSource.synthetic, network.source);
     try std.testing.expect(!network.detected);
     try std.testing.expect(!storage.kernel_bootstrap);
+    try std.testing.expect(!usb.kernel_bootstrap);
     try std.testing.expect(!input.kernel_bootstrap);
 }
 
@@ -134,9 +145,11 @@ test "device inventory records discovered hardware without overwriting the first
     });
     registerDetected(.network_adapter, 0x8086100E0001, .pci_inventory, false);
     registerDetected(.network_adapter, 0xDEADBEEF, .pci_inventory, false);
+    registerDetected(.usb_controller, 0x8086A0ED, .xhci_inventory, false);
 
     const storage = recordForClass(.storage_controller);
     const network = recordForClass(.network_adapter);
+    const usb = recordForClass(.usb_controller);
 
     try std.testing.expectEqual(@as(u64, 0x1F001), storage.device_id);
     try std.testing.expectEqual(DetectionSource.ata_bootstrap, storage.source);
@@ -149,4 +162,9 @@ test "device inventory records discovered hardware without overwriting the first
     try std.testing.expectEqual(DetectionSource.pci_inventory, network.source);
     try std.testing.expect(network.detected);
     try std.testing.expect(!network.kernel_bootstrap);
+
+    try std.testing.expectEqual(@as(u64, 0x8086A0ED), usb.device_id);
+    try std.testing.expectEqual(DetectionSource.xhci_inventory, usb.source);
+    try std.testing.expect(usb.detected);
+    try std.testing.expect(!usb.kernel_bootstrap);
 }

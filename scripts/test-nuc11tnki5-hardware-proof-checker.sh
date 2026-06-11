@@ -12,7 +12,9 @@ trap 'rm -rf -- "$TMP_ROOT"' EXIT
 
 write_manifest() {
   local dir="$1"
-  cat > "$dir/proof-manifest.txt" <<'EOF'
+  local repo_commit
+  repo_commit="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  cat > "$dir/proof-manifest.txt" <<EOF
 target_id=intel-nuc11tnki5
 board_sku=NUC11TNKi5
 evidence_source=real_hardware
@@ -24,7 +26,7 @@ required_markers=spec/hardware/nuc11tnki5-required-markers.txt
 prepared_at_utc=2026-06-10T00:00:00Z
 captured_at_utc=2026-06-10T01:00:00Z
 operator=checker-self-test
-repo_commit=0000000000000000000000000000000000000000
+repo_commit=$repo_commit
 repo_dirty_files=0
 EOF
 }
@@ -56,6 +58,8 @@ storage_write_read_cycles=100
 network_frame_cycles=100
 suspend_resume_cycles=20
 crash_recovery_cycles=10
+crash_record_persistence_cycles=10
+update_rollback_cycles=10
 notes=synthetic checker fixture only
 EOF
 }
@@ -72,7 +76,8 @@ ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff  zig-out/bin/us
 1111111111111111111111111111111111111111111111111111111111111111  zig-out/bin/userspace-storage-driver.elf
 2222222222222222222222222222222222222222222222222222222222222222  zig-out/bin/userspace-sync-service.elf
 3333333333333333333333333333333333333333333333333333333333333333  spec/production_readiness.json
-4444444444444444444444444444444444444444444444444444444444444444  spec/hardware/nuc11tnki5-required-markers.txt
+4444444444444444444444444444444444444444444444444444444444444444  spec/release_security/release_artifacts.json
+5555555555555555555555555555555555555555555555555555555555555555  spec/hardware/nuc11tnki5-required-markers.txt
 EOF
 }
 
@@ -92,6 +97,8 @@ write_serial_log() {
     printf '%s:NETWORK_FRAME_CYCLES:100\n' "$TARGET_PREFIX"
     printf '%s:SUSPEND_RESUME_CYCLES:20\n' "$TARGET_PREFIX"
     printf '%s:CRASH_RECOVERY_CYCLES:10\n' "$TARGET_PREFIX"
+    printf '%s:CRASH_RECORD_PERSISTENCE_CYCLES:10\n' "$TARGET_PREFIX"
+    printf '%s:UPDATE_ROLLBACK_CYCLES:10\n' "$TARGET_PREFIX"
   } > "$dir/serial.log"
 }
 
@@ -142,5 +149,15 @@ make_valid_bundle "$missing_digest_bundle"
 grep -v 'zig-out/bin/userspace-storage-driver.elf' "$missing_digest_bundle/artifact-digests.sha256" > "$missing_digest_bundle/artifact-digests.next"
 mv "$missing_digest_bundle/artifact-digests.next" "$missing_digest_bundle/artifact-digests.sha256"
 expect_fail "$missing_digest_bundle"
+
+stale_commit_bundle="$TMP_ROOT/stale-commit"
+make_valid_bundle "$stale_commit_bundle"
+sed -i.bak 's/^repo_commit=.*/repo_commit=0000000000000000000000000000000000000000/' "$stale_commit_bundle/proof-manifest.txt"
+expect_fail "$stale_commit_bundle"
+
+dirty_repo_bundle="$TMP_ROOT/dirty-repo"
+make_valid_bundle "$dirty_repo_bundle"
+sed -i.bak 's/^repo_dirty_files=0/repo_dirty_files=1/' "$dirty_repo_bundle/proof-manifest.txt"
+expect_fail "$dirty_repo_bundle"
 
 printf 'NUC11TNKi5 hardware proof checker self-test OK\n'

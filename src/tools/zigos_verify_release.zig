@@ -7,6 +7,7 @@ const max_release_metadata_bytes: usize = 16 * 1024 * 1024;
 const max_artifact_bytes: usize = 1024 * 1024 * 1024;
 const sha256_hex_len: usize = 64;
 const ed25519_public_key_hex_len: usize = Ed25519.PublicKey.encoded_length * 2;
+const ml_dsa65_public_key_hex_len: usize = 1952 * 2;
 
 pub const VerifyOptions = struct {
     require_public_release: bool = true,
@@ -16,9 +17,20 @@ pub const VerificationSummary = struct {
     artifacts: usize = 0,
     dsse_envelopes: usize = 0,
     dsse_signatures: usize = 0,
+    pqc_signatures: usize = 0,
     slsa_subjects: usize = 0,
     measurements: usize = 0,
     reproducible_digests: usize = 0,
+};
+
+const PqcRolloutMode = enum {
+    shadow,
+    canary,
+    required,
+};
+
+const PostQuantumPolicy = struct {
+    mode: PqcRolloutMode,
 };
 
 const ActualArtifact = struct {
@@ -28,7 +40,8 @@ const ActualArtifact = struct {
 
 const ReleaseKey = struct {
     key_id: []const u8,
-    public_key: [Ed25519.PublicKey.encoded_length]u8,
+    algorithm: []const u8,
+    public_key: [Ed25519.PublicKey.encoded_length]u8 = [_]u8{0} ** Ed25519.PublicKey.encoded_length,
     generation: u64,
     status: []const u8,
     custody: []const u8,
@@ -63,11 +76,12 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     try stdout_writer.interface.print(
-        "Release verification OK: {d} artifacts, {d} DSSE envelopes, {d} signatures, {d} SLSA subjects, {d} measurements, {d} reproducible digests\n",
+        "Release verification OK: {d} artifacts, {d} DSSE envelopes, {d} signatures, {d} PQC signatures, {d} SLSA subjects, {d} measurements, {d} reproducible digests\n",
         .{
             summary.artifacts,
             summary.dsse_envelopes,
             summary.dsse_signatures,
+            summary.pqc_signatures,
             summary.slsa_subjects,
             summary.measurements,
             summary.reproducible_digests,
@@ -85,7 +99,9 @@ fn printUsage(io: std.Io) !void {
         \\
         \\Verifies artifact digests, DSSE in-toto/SLSA provenance, release key
         \\revocation metadata, artifact measurements, and reproducible-build
-        \\digests for a downloaded Zigos release bundle.
+        \\digests for a downloaded Zigos release bundle. Post-quantum keyring
+        \\policy is enforced fail-closed: required ML-DSA rollout needs a
+        \\validated verifier provider.
         \\
     , .{});
     try stdout_writer.interface.flush();
@@ -108,7 +124,7 @@ pub fn verifyReleaseBundle(
     try verifyArtifactFiles(allocator, io, artifact_root, &expected_digests, &actual_artifacts, &summary);
 
     const keyring = try parseJsonFile(allocator, io, try joinPath(allocator, release_dir, "release-keyring.json"));
-    try validateKeyringPolicy(keyring, options);
+    const pqc_policy = try validateKeyringPolicy(keyring, options);
     const revoked = try parseJsonFile(allocator, io, try joinPath(allocator, release_dir, "revoked-release-keys.json"));
 
     try verifyDsseProvenance(
@@ -117,6 +133,7 @@ pub fn verifyReleaseBundle(
         try joinPath(allocator, release_dir, "provenance.dsse.intoto.jsonl"),
         keyring,
         revoked,
+        pqc_policy,
         &expected_digests,
         &summary,
     );
@@ -190,7 +207,7 @@ fn verifyArtifactFiles(
     }
 }
 
-fn validateKeyringPolicy(keyring: std.json.Value, options: VerifyOptions) !void {
+fn validateKeyringPolicy(keyring: std.json.Value, options: VerifyOptions) !PostQuantumPolicy {
     if (try boolField(keyring, "public_release_allowed")) |allowed| {
         if (options.require_public_release and !allowed) return error.PublicReleaseNotAllowedByKeyring;
     } else return error.KeyringMissingPublicReleasePolicy;
@@ -200,6 +217,63 @@ fn validateKeyringPolicy(keyring: std.json.Value, options: VerifyOptions) !void 
 
     const keys = try arrayField(keyring, "keys");
     if (keys.len == 0) return error.KeyringHasNoKeys;
+
+    return validatePostQuantumPolicy(keyring);
+}
+
+fn validatePostQuantumPolicy(keyring: std.json.Value) !PostQuantumPolicy {
+    const policy = try objectField(keyring, "post_quantum_policy");
+    const mode_text = try stringField(policy, "mode");
+    const mode = parsePqcRolloutMode(mode_text) orelse return error.InvalidPqcRolloutMode;
+
+    if (!((try boolField(policy, "fips_validated_required")) orelse false)) return error.PqcPolicyMustRequireFipsValidation;
+    if (!((try boolField(policy, "fips_140_validation_required")) orelse false)) return error.PqcPolicyMustRequireValidatedModule;
+    if (!containsAsciiIgnoreCase(try stringField(policy, "production_signature_algorithm"), "ml-dsa")) {
+        return error.PqcPolicyMissingMlDsaSignaturePath;
+    }
+    if (!containsAsciiIgnoreCase(try stringField(policy, "key_establishment_algorithm"), "ml-kem")) {
+        return error.PqcPolicyMissingMlKemPath;
+    }
+    if (!containsAsciiIgnoreCase(try stringField(policy, "backup_signature_algorithm"), "slh-dsa")) {
+        return error.PqcPolicyMissingSlhDsaPath;
+    }
+    const hybrid_transition = try stringField(policy, "hybrid_transition");
+    if (!containsAsciiIgnoreCase(hybrid_transition, "ed25519+ml-dsa65") or
+        !containsAsciiIgnoreCase(hybrid_transition, "preview"))
+    {
+        return error.PqcPolicyMissingHybridPreviewBoundary;
+    }
+
+    const standards = try arrayField(policy, "standards");
+    var has_fips_203 = false;
+    var has_fips_204 = false;
+    var has_fips_205 = false;
+    for (standards) |standard| {
+        const fips = try stringField(standard, "fips");
+        const algorithm = try stringField(standard, "algorithm");
+        if (std.mem.eql(u8, fips, "FIPS 203") and containsAsciiIgnoreCase(algorithm, "ML-KEM")) has_fips_203 = true;
+        if (std.mem.eql(u8, fips, "FIPS 204") and containsAsciiIgnoreCase(algorithm, "ML-DSA")) has_fips_204 = true;
+        if (std.mem.eql(u8, fips, "FIPS 205") and containsAsciiIgnoreCase(algorithm, "SLH-DSA")) has_fips_205 = true;
+    }
+    if (!has_fips_203 or !has_fips_204 or !has_fips_205) return error.PqcPolicyMissingNistStandards;
+
+    const rollout = try arrayField(policy, "rollout");
+    if (rollout.len < 3) return error.PqcPolicyMissingMeasuredRollout;
+    if (!stringValueArrayContainsSubstring(rollout, "shadow") or
+        !stringValueArrayContainsSubstring(rollout, "canary") or
+        !stringValueArrayContainsSubstring(rollout, "required"))
+    {
+        return error.PqcPolicyMissingMeasuredRollout;
+    }
+
+    return .{ .mode = mode };
+}
+
+fn parsePqcRolloutMode(value: []const u8) ?PqcRolloutMode {
+    if (std.mem.eql(u8, value, "shadow")) return .shadow;
+    if (std.mem.eql(u8, value, "canary")) return .canary;
+    if (std.mem.eql(u8, value, "required")) return .required;
+    return null;
 }
 
 fn verifyDsseProvenance(
@@ -208,6 +282,7 @@ fn verifyDsseProvenance(
     dsse_path: []const u8,
     keyring: std.json.Value,
     revoked: std.json.Value,
+    pqc_policy: PostQuantumPolicy,
     expected_digests: *const std.StringHashMap([]const u8),
     summary: *VerificationSummary,
 ) !void {
@@ -226,15 +301,20 @@ fn verifyDsseProvenance(
         const signatures = try arrayField(envelope, "signatures");
         if (signatures.len == 0) return error.DsseEnvelopeMissingSignatures;
 
+        var envelope_pqc_signatures: usize = 0;
         for (signatures) |signature_value| {
             const key_id = try stringField(signature_value, "keyid");
             const key = try releaseKeyForId(allocator, keyring, key_id);
             try rejectRevokedKey(revoked, key);
             const signature_bytes = try decodeBase64Alloc(allocator, try stringField(signature_value, "sig"));
-            if (signature_bytes.len != Ed25519.Signature.encoded_length) return error.InvalidEd25519SignatureLength;
-            try verifyEd25519(key.public_key, signature_bytes[0..Ed25519.Signature.encoded_length].*, pae);
+            try verifyReleaseSignature(key, signature_bytes, pae);
             summary.dsse_signatures += 1;
+            if (isMlDsa65Algorithm(key.algorithm)) {
+                summary.pqc_signatures += 1;
+                envelope_pqc_signatures += 1;
+            }
         }
+        if (pqc_policy.mode == .required and envelope_pqc_signatures == 0) return error.PqcSignatureRequired;
 
         try verifySlsaStatement(allocator, payload, expected_digests, &seen_subjects, summary);
         summary.dsse_envelopes += 1;
@@ -333,16 +413,39 @@ fn releaseKeyForId(allocator: std.mem.Allocator, keyring: std.json.Value, key_id
         const status = try stringField(key_value, "status");
         if (!std.mem.eql(u8, status, "active")) return error.ReleaseKeyNotActive;
         const algorithm = try stringField(key_value, "algorithm");
-        if (!std.mem.eql(u8, algorithm, "ed25519")) return error.UnsupportedReleaseKeyAlgorithm;
-        const encoding = try stringField(key_value, "public_key_encoding");
-        if (!std.mem.eql(u8, encoding, "hex-ed25519-raw")) return error.UnsupportedReleaseKeyEncoding;
-        const public_key = try decodeFixedHex(Ed25519.PublicKey.encoded_length, try stringField(key_value, "public_key"));
         const custody = try stringField(key_value, "custody");
         const hardware_backed = (try boolField(key_value, "hardware_backed")) orelse return error.ReleaseKeyMissingHardwareFlag;
         if (!hardware_backed) return error.ReleaseKeyNotHardwareBacked;
         if (!containsTrustBoundary(custody)) return error.ReleaseKeyCustodyNotHardwareBacked;
+
+        const encoding = try stringField(key_value, "public_key_encoding");
+        const public_key_hex = try stringField(key_value, "public_key");
+        var public_key: [Ed25519.PublicKey.encoded_length]u8 = [_]u8{0} ** Ed25519.PublicKey.encoded_length;
+        if (std.mem.eql(u8, algorithm, "ed25519")) {
+            if (!std.mem.eql(u8, encoding, "hex-ed25519-raw")) return error.UnsupportedReleaseKeyEncoding;
+            public_key = try decodeFixedHex(Ed25519.PublicKey.encoded_length, public_key_hex);
+        } else if (isMlDsa65Algorithm(algorithm)) {
+            if (!std.mem.eql(u8, encoding, "hex-ml-dsa-65-raw")) return error.UnsupportedReleaseKeyEncoding;
+            if (public_key_hex.len != ml_dsa65_public_key_hex_len) return error.InvalidMlDsaPublicKeyLength;
+            if (!isHexText(public_key_hex)) return error.InvalidHexDigit;
+            if (!std.mem.eql(u8, try stringField(key_value, "fips_standard"), "FIPS 204")) {
+                return error.ReleaseKeyMissingFipsValidation;
+            }
+            if (!containsAsciiIgnoreCase(try stringField(key_value, "fips_validation"), "validated")) {
+                return error.ReleaseKeyMissingFipsValidation;
+            }
+            if (!((try boolField(key_value, "fips_140_validated_module")) orelse false)) {
+                return error.ReleaseKeyMissingFipsValidation;
+            }
+            const validation_certificate = try stringField(key_value, "validation_certificate");
+            if (validation_certificate.len == 0 or std.mem.eql(u8, validation_certificate, "TBD")) {
+                return error.ReleaseKeyMissingFipsValidation;
+            }
+        } else return error.UnsupportedReleaseKeyAlgorithm;
+
         return .{
             .key_id = try allocator.dupe(u8, key_id),
+            .algorithm = algorithm,
             .public_key = public_key,
             .generation = @intCast(try integerField(key_value, "generation")),
             .status = status,
@@ -351,6 +454,19 @@ fn releaseKeyForId(allocator: std.mem.Allocator, keyring: std.json.Value, key_id
         };
     }
     return error.ReleaseKeyNotFound;
+}
+
+fn verifyReleaseSignature(key: ReleaseKey, signature_bytes: []const u8, message: []const u8) !void {
+    if (std.mem.eql(u8, key.algorithm, "ed25519")) {
+        if (signature_bytes.len != Ed25519.Signature.encoded_length) return error.InvalidEd25519SignatureLength;
+        try verifyEd25519(key.public_key, signature_bytes[0..Ed25519.Signature.encoded_length].*, message);
+        return;
+    }
+    if (isMlDsa65Algorithm(key.algorithm)) {
+        if (signature_bytes.len != 3309) return error.InvalidMlDsaSignatureLength;
+        return error.PqcVerifierUnavailable;
+    }
+    return error.UnsupportedReleaseKeyAlgorithm;
 }
 
 fn rejectRevokedKey(revoked: std.json.Value, key: ReleaseKey) !void {
@@ -479,10 +595,7 @@ fn decodeFixedHex(comptime len: usize, hex: []const u8) ![len]u8 {
 
 fn isSha256Hex(value: []const u8) bool {
     if (value.len != sha256_hex_len) return false;
-    for (value) |byte| {
-        if (hexValue(byte) == null) return false;
-    }
-    return true;
+    return isHexText(value);
 }
 
 fn hexValue(byte: u8) ?u8 {
@@ -506,6 +619,26 @@ fn containsTrustBoundary(value: []const u8) bool {
         containsAsciiIgnoreCase(value, "secure enclave") or
         containsAsciiIgnoreCase(value, "hsm") or
         containsAsciiIgnoreCase(value, "kms");
+}
+
+fn isMlDsa65Algorithm(value: []const u8) bool {
+    return std.mem.eql(u8, value, "ml-dsa-65") or
+        std.mem.eql(u8, value, "ml-dsa-65-fips204");
+}
+
+fn isHexText(value: []const u8) bool {
+    for (value) |byte| {
+        if (hexValue(byte) == null) return false;
+    }
+    return true;
+}
+
+fn stringValueArrayContainsSubstring(values: []std.json.Value, needle: []const u8) bool {
+    for (values) |value| switch (value) {
+        .string => |text| if (containsAsciiIgnoreCase(text, needle)) return true,
+        else => {},
+    };
+    return false;
 }
 
 fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
@@ -581,7 +714,7 @@ test "customer release verifier accepts DSSE SLSA provenance measurements and re
     const allocator = arena_state.allocator();
     const root_path = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
     defer allocator.free(root_path);
-    try writeValidFixture(allocator, tmp.dir, "fixture-artifact", false);
+    try writeValidFixture(allocator, tmp.dir, "fixture-artifact", false, "shadow");
 
     const summary = try verifyReleaseBundle(allocator, std.testing.io, root_path, root_path, .{});
     try std.testing.expectEqual(@as(usize, 1), summary.artifacts);
@@ -601,10 +734,27 @@ test "customer release verifier rejects revoked DSSE keys" {
     const allocator = arena_state.allocator();
     const root_path = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
     defer allocator.free(root_path);
-    try writeValidFixture(allocator, tmp.dir, "fixture-artifact", true);
+    try writeValidFixture(allocator, tmp.dir, "fixture-artifact", true, "shadow");
 
     try std.testing.expectError(
         error.ReleaseKeyRevoked,
+        verifyReleaseBundle(allocator, std.testing.io, root_path, root_path, .{}),
+    );
+}
+
+test "customer release verifier requires ML-DSA signatures when PQC rollout is required" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const root_path = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+    defer allocator.free(root_path);
+    try writeValidFixture(allocator, tmp.dir, "fixture-artifact", false, "required");
+
+    try std.testing.expectError(
+        error.PqcSignatureRequired,
         verifyReleaseBundle(allocator, std.testing.io, root_path, root_path, .{}),
     );
 }
@@ -614,6 +764,7 @@ fn writeValidFixture(
     dir: std.Io.Dir,
     artifact_path: []const u8,
     revoked: bool,
+    pqc_mode: []const u8,
 ) !void {
     const artifact_bytes = "bootable release bytes";
     try dir.writeFile(std.testing.io, .{ .sub_path = artifact_path, .data = artifact_bytes });
@@ -639,8 +790,8 @@ fn writeValidFixture(
     const public_key_hex = try hexAlloc(allocator, &public_key);
     const keyring_json = try std.fmt.allocPrint(
         allocator,
-        "{{\"schema_version\":1,\"public_release_allowed\":true,\"required_provider_boundary\":\"cloud KMS release signing provider\",\"keys\":[{{\"key_id\":\"fixture-key\",\"status\":\"active\",\"algorithm\":\"ed25519\",\"custody\":\"cloud_kms\",\"hardware_backed\":true,\"generation\":7,\"public_key_encoding\":\"hex-ed25519-raw\",\"public_key\":\"{s}\"}}]}}\n",
-        .{public_key_hex},
+        "{{\"schema_version\":1,\"public_release_allowed\":true,\"required_provider_boundary\":\"cloud KMS release signing provider\",\"post_quantum_policy\":{{\"mode\":\"{s}\",\"fips_validated_required\":true,\"fips_140_validation_required\":true,\"production_signature_algorithm\":\"ml-dsa-65\",\"key_establishment_algorithm\":\"ml-kem-768\",\"backup_signature_algorithm\":\"slh-dsa-sha2-128s\",\"hybrid_transition\":\"ed25519 remains required; ed25519+ml-dsa65 is preview-only and never satisfies production FIPS 204 ML-DSA\",\"standards\":[{{\"fips\":\"FIPS 203\",\"algorithm\":\"ML-KEM\",\"scope\":\"key establishment\"}},{{\"fips\":\"FIPS 204\",\"algorithm\":\"ML-DSA\",\"scope\":\"digital signatures\"}},{{\"fips\":\"FIPS 205\",\"algorithm\":\"SLH-DSA\",\"scope\":\"hash-based signature fallback\"}}],\"rollout\":[\"shadow verifier measurement\",\"canary dual-signature release\",\"required public-release ML-DSA verification\"]}},\"keys\":[{{\"key_id\":\"fixture-key\",\"status\":\"active\",\"algorithm\":\"ed25519\",\"custody\":\"cloud_kms\",\"hardware_backed\":true,\"generation\":7,\"public_key_encoding\":\"hex-ed25519-raw\",\"public_key\":\"{s}\"}}]}}\n",
+        .{ pqc_mode, public_key_hex },
     );
     try dir.writeFile(std.testing.io, .{ .sub_path = "release-keyring.json", .data = keyring_json });
 

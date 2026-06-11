@@ -71,6 +71,8 @@ The following are release blockers:
 - Private vulnerability reporting channel or backup mailbox unavailable.
 - No active owner for CVE/CWE publication and advisory handling.
 - Missing passing evidence from `./scripts/zig.sh build release-security-gate`.
+- Missing current-commit `NUC11TNKi5` real-hardware proof from
+  `./scripts/zig.sh build hardware-proof`.
 - Release provenance not signed through a hardware-backed HSM or KMS provider
   with published keyring, rotation metadata, and revocation metadata.
 - Customer verification bundle missing artifact digests, SPDX SBOM, DSSE
@@ -78,5 +80,9 @@ The following are release blockers:
   build evidence.
 - Treating the `ed25519+ml-dsa65` hybrid preview profile as a production
   FIPS 204 ML-DSA implementation.
+- Public release keyring missing post-quantum policy for FIPS 203 ML-KEM,
+  FIPS 204 ML-DSA, FIPS 205 SLH-DSA, FIPS-validated provider requirements,
+  hybrid transition, measured rollout, or fail-closed verifier behavior for
+  required ML-DSA signatures.
 - Any crash dump or diagnostic export path that includes secrets, capability
   tokens, private content, or raw memory by default.

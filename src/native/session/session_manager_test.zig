@@ -47,9 +47,11 @@ test "boot assembles core services without running explicit scenarios" {
     const package_service = supervisor.findByClass(.package_install_update).?;
     const network_activation = driver_runtime.findByClass(.network_adapter).?;
     const storage_activation = driver_runtime.findByClass(.storage_controller).?;
+    const usb_activation = driver_runtime.findByClass(.usb_controller).?;
     const graphics_activation = driver_runtime.findByClass(.graphics_adapter).?;
     const audio_activation = driver_runtime.findByClass(.audio_print_io).?;
     const input_activation = driver_runtime.findByClass(.input_device).?;
+    const compositor_policy_activation = driver_runtime.findByClass(.compositor_policy).?;
     try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, runtime_service_record.state);
     try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, network_service.state);
     try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, storage_service.state);
@@ -58,17 +60,21 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expectEqual(@as(u32, 0), runtime_service.restart_generation);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, network_activation.mode);
     try std.testing.expect(storage_activation.mode == .published_data_plane or storage_activation.mode == .userspace_brokered_data_plane);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, usb_activation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, graphics_activation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, audio_activation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, input_activation.mode);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, compositor_policy_activation.mode);
     try std.testing.expectEqual(@as(u16, 1), network_service.restart_count);
     try std.testing.expectEqual(@as(u16, 1), storage_service.restart_count);
     try std.testing.expectEqual(@as(u16, 0), sync_service.restart_count);
 
     try std.testing.expectEqual(@as(u32, 2), driver_directory.findByClass(.network_adapter).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 2), driver_directory.findByClass(.storage_controller).?.restart_generation);
+    try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.usb_controller).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.graphics_adapter).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.audio_print_io).?.restart_generation);
+    try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.compositor_policy).?.restart_generation);
 
     for (service_contract.ordered_service_contracts) |entry| {
         const descriptor = service_contract.contractForClass(entry.class).?;
@@ -149,9 +155,11 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     const sync_service = supervisor.findByClass(.sync_replication).?;
     const network_activation = driver_runtime.findByClass(.network_adapter).?;
     const storage_activation = driver_runtime.findByClass(.storage_controller).?;
+    const usb_activation = driver_runtime.findByClass(.usb_controller).?;
     const graphics_activation = driver_runtime.findByClass(.graphics_adapter).?;
     const audio_activation = driver_runtime.findByClass(.audio_print_io).?;
     const input_activation = driver_runtime.findByClass(.input_device).?;
+    const compositor_policy_activation = driver_runtime.findByClass(.compositor_policy).?;
     try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, runtime_service_record.state);
     try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, network_service.state);
     try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, storage_service.state);
@@ -160,17 +168,21 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expectEqual(@as(u32, 0), runtime_service.restart_generation);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, network_activation.mode);
     try std.testing.expect(storage_activation.mode == .published_data_plane or storage_activation.mode == .userspace_brokered_data_plane);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, usb_activation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, graphics_activation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, audio_activation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, input_activation.mode);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, compositor_policy_activation.mode);
     try std.testing.expectEqual(@as(u16, 1), network_service.restart_count);
     try std.testing.expectEqual(@as(u16, 2), storage_service.restart_count);
     try std.testing.expectEqual(@as(u16, 1), sync_service.restart_count);
 
     try std.testing.expectEqual(@as(u32, 2), driver_directory.findByClass(.network_adapter).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 2), driver_directory.findByClass(.storage_controller).?.restart_generation);
+    try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.usb_controller).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.graphics_adapter).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.audio_print_io).?.restart_generation);
+    try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.compositor_policy).?.restart_generation);
 
     const service_classes = [_]contract.ServiceClass{
         .package_install_update,

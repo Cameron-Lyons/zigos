@@ -62,6 +62,7 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         &compositor_checkpoint_store,
     );
     review_service.bindCompositorService(&compositor_service);
+    common.printBootMarker(boot_markers.compositor_service_ready);
 
     var review_port = review_component_port.Port.init(&review_service);
     var policy_port = policy_component_port.Port.init(&mediator);
@@ -75,6 +76,13 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         &review_port,
         &policy_port,
     );
+    const compositor = manager.compositorSessionPtr();
+    if (compositor.visibleWindowCount() > 0) {
+        common.printBootMarker(boot_markers.compositor_framebuffer_presented);
+    }
+    if (compositor.item_count > 0) {
+        common.printBootMarker(boot_markers.compositor_permission_review_rendered);
+    }
 
     if (manager.storageServicePtr().findWorkspace(graph.state.ids.session_user, "notes-workspace") != null) {
         return true;

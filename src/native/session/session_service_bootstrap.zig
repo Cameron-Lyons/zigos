@@ -427,6 +427,25 @@ fn activateDrivers(
         _ = env.supervisor.recordCrash(state.services.compositor_service.id, 55, bootFailureCode(err));
         return false;
     };
+    const usb_driver = service_bootstrap.attachDriver(
+        kernel_port,
+        env.capability_table,
+        env.driver_directory,
+        env.supervisor,
+        state.ids.policy_authority,
+        state.policy_capability.id,
+        0,
+        state.services.compositor_service.id,
+        service_bindings.bindingFor(.compositor_ui_session).task_id,
+        state.ids.compositor_service,
+        .usb_controller,
+        .none,
+        "zigos.system.compositor",
+        56,
+    ) catch |err| {
+        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 56, bootFailureCode(err));
+        return false;
+    };
     const input_driver = service_bootstrap.attachDriver(
         kernel_port,
         env.capability_table,
@@ -465,6 +484,25 @@ fn activateDrivers(
         _ = env.supervisor.recordCrash(state.services.media_service.id, 58, bootFailureCode(err));
         return false;
     };
+    const compositor_policy_driver = service_bootstrap.attachDriver(
+        kernel_port,
+        env.capability_table,
+        env.driver_directory,
+        env.supervisor,
+        state.ids.policy_authority,
+        state.policy_capability.id,
+        0,
+        state.services.compositor_service.id,
+        service_bindings.bindingFor(.compositor_ui_session).task_id,
+        state.ids.compositor_service,
+        .compositor_policy,
+        .none,
+        "zigos.system.compositor",
+        59,
+    ) catch |err| {
+        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 59, bootFailureCode(err));
+        return false;
+    };
 
     if (bootstrap_driver_port.networkPublication() == null) {
         const published_network = bootstrap_driver_port.publishNetworkActivator(
@@ -479,8 +517,10 @@ fn activateDrivers(
         }
     }
     if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, graphics_driver, "zigos.system.compositor", 55)) return false;
+    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, usb_driver, "zigos.system.compositor", 56)) return false;
     if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, input_driver, "zigos.system.compositor", 57)) return false;
     if (!publishBootedDeviceDataPlane(env, state.services.media_service.id, audio_driver, "zigos.system.media-print", 58)) return false;
+    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, compositor_policy_driver, "zigos.system.compositor", 59)) return false;
 
     const network_activation_mode = env.driver_runtime.activateModeAt(network_driver, 53) catch |err| {
         _ = env.supervisor.recordCrash(state.services.network_service.id, 53, bootFailureCode(err));
@@ -494,12 +534,20 @@ fn activateDrivers(
         _ = env.supervisor.recordCrash(state.services.compositor_service.id, 55, bootFailureCode(err));
         return false;
     };
+    _ = env.driver_runtime.activateModeAt(usb_driver, 56) catch |err| {
+        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 56, bootFailureCode(err));
+        return false;
+    };
     _ = env.driver_runtime.activateModeAt(input_driver, 57) catch |err| {
         _ = env.supervisor.recordCrash(state.services.compositor_service.id, 57, bootFailureCode(err));
         return false;
     };
     _ = env.driver_runtime.activateModeAt(audio_driver, 58) catch |err| {
         _ = env.supervisor.recordCrash(state.services.media_service.id, 58, bootFailureCode(err));
+        return false;
+    };
+    _ = env.driver_runtime.activateModeAt(compositor_policy_driver, 59) catch |err| {
+        _ = env.supervisor.recordCrash(state.services.compositor_service.id, 59, bootFailureCode(err));
         return false;
     };
     if (network_activation_mode == .published_data_plane and

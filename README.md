@@ -36,24 +36,32 @@ requests.
   durable inbound/outbound frame queues, replay rejection, offline edits,
   explicit conflict review, object-scoped sharing, revocation enforcement, and
   two-node QEMU proof runs with separate native stores.
+- The driver model treats storage, network, USB controllers, GPU/display,
+  media/print, input, and compositor-facing device policy as restartable
+  userspace claims behind capability-scoped IOMMU DMA domains or brokered DMA
+  buffers. Kernel device code is limited to bootstrap inventory shims and the
+  storage bootstrap broker needed to hand early block devices to userspace.
 - The driver restart proof now checks that storage I/O works before restart,
   the storage driver has a programmed DMA domain and brokered DMA buffer, stale
   authority/DMA/port access is rejected after a process-generation change, a
   replacement storage session rebinds with a new DMA domain, and storage I/O
   works after restart.
-- `spec/coverage.json` currently records 60 required requirements and marks all
-  60 as `enforced`.
+- `spec/coverage.json` currently records 59 required requirements and marks all
+  59 as `enforced`.
 - `spec/production_readiness.json` currently pins one first hardware target
   (`intel-nuc11tnki5`) and tracks nine production-readiness workstreams: one
   `prod_ready` track, three `prod_candidate` tracks, four `prototype` tracks,
   and one blocked real hardware track.
-- The secure-by-design release gate is `ready`: release artifacts are measured,
-  DSSE in-toto/SLSA provenance is generated through a hardware-backed
+- The secure-by-design release gate is `blocked` until the real NUC11TNKi5
+  hardware proof bundle passes. Release artifacts are measured, DSSE
+  in-toto/SLSA provenance is generated through a hardware-backed
   TPM/secure-enclave/HSM/KMS signing command, and customers get a native
   `zigos-verify-release` verifier for signatures, revocation, subjects,
-  reproducible digests, and measurements. The `ed25519+ml-dsa65` path remains a
-  preview, not a production FIPS 204 implementation. The separate
-  first-hardware-target gate still requires real NUC11TNKi5 evidence.
+  reproducible digests, measurements, and post-quantum rollout policy. The
+  `ed25519+ml-dsa65` path remains a preview, not a production FIPS 204
+  implementation; production PQC is represented by a separate ML-DSA-65
+  provider boundary with FIPS validation metadata and fail-closed verifier
+  requirements.
 
 The spec contract is now the machine-readable manifest in
 `spec/coverage.json`; this checkout does not require a separate prose spec
@@ -70,11 +78,13 @@ archive, measured against a production artifact manifest, and loaded by the
 native task runtime.
 
 The kernel owns low-level platform concerns: boot setup, interrupts, timers,
-memory protection, basic devices, typed syscall dispatch, and data-plane
-boundaries for drivers and networking. The native kernel API exposes those
-facilities through explicit capabilities, endpoints, shared memory objects,
-device broker calls, component ports, and operation descriptors rather than a
-POSIX syscall table.
+memory protection, bootstrap console/inventory shims, typed syscall dispatch,
+and data-plane exclusion boundaries for devices and subsystems. Storage,
+network, USB, GPU/display, media/print, input, and compositor-facing device
+policy live as restartable userspace driver/service claims behind IOMMU DMA
+domains, brokered DMA buffers, explicit capabilities, endpoints, shared memory
+objects, device broker calls, component ports, and operation descriptors rather
+than a POSIX syscall table or legacy kernel-driver surface.
 
 The native layer is organized around services. Session bootstrap constructs the
 service graph, binds bootstrap capabilities, starts supervised userspace
@@ -101,10 +111,23 @@ observable boot markers.
 - Capabilities are the unit of authority. Tasks receive scoped capabilities and
   communicate through typed endpoints, component ports, shared memory, and
   service contracts instead of ambient global namespaces.
-- The object store is the authoritative file story. Workspace entries and file
-  bridges are derived, capability-checked views; bridge paths reject global
-  roots, home-directory shorthand, traversal segments, and host filesystem
-  syntax instead of acting like raw path authority.
+- Identity is passwordless and device-bound. Zigos models
+  [FIDO-style passkeys](https://fidoalliance.org/passkeys/), recovery keys,
+  hardware roots, and threshold recovery; administration is delegated through
+  scoped capability bundles rather than a root or superuser account.
+- Objects, not files, are the primary user-data model. Every native user-data
+  object is typed, versioned, signed, capability-scoped, sync-aware,
+  history-bearing, and share-policy-aware; workspace entries and file bridges
+  are import/export projections rather than raw path authority.
+- Networking is modeled as data egress, not app-owned sockets. Apps request to
+  sync an object with a principal, call a named service, or publish a declared
+  event type; raw sockets and packet I/O stay behind privileged driver and
+  service boundaries.
+- Userspace drivers are the rule, not the exception. Kernel-side device code is
+  limited to discovery, fail-closed bootstrap shims, and broker hooks; storage,
+  network, USB, GPU/display, media/print, input, and compositor-facing policy
+  must bind through signed restartable userspace services with explicit device
+  authority and IOMMU/brokered DMA.
 - Services are supervised and restart-aware. Driver and service paths include
   generation checks, authority rebinding, brokered DMA-buffer invalidation,
   stale-port rejection, and recovery proofs so restart behavior is modeled as a
@@ -209,7 +232,8 @@ Useful verification targets:
 | `./scripts/zig.sh build release-sbom-provenance` | Builds release artifacts and emits `build/release-security/artifact-digests.sha256`, `artifact-measurements.json`, SPDX SBOM, in-toto/SLSA provenance, DSSE envelopes, keyring/revocation metadata, customer verifier policy, and disclosure dry-run output. |
 | `./scripts/zig.sh build reproducible-build-check` | Builds release artifacts twice in isolated tracked-workspace copies and compares artifact digests. |
 | `./scripts/zig.sh build verify-release-cli` | Builds `zig-out/bin/zigos-verify-release`, the customer verifier for downloaded release bundles. |
-| `./scripts/zig.sh build release-security-gate` | Runs the public-release security gate: fast release-security checks, host/spec tests, reproducible builds, SBOM/provenance, and QEMU security/fault proofs. |
+| `./scripts/zig.sh build hardware-proof` | Validates the completed `build/hardware-proofs/nuc11tnki5` real-hardware proof bundle. |
+| `./scripts/zig.sh build release-security-gate` | Runs the public-release security gate: fast release-security checks, host/spec tests, reproducible builds, SBOM/provenance, QEMU security/fault proofs, and the real NUC hardware proof. |
 | `./scripts/zig.sh build spec-tests` | Runs the spec coverage gate and native spec tests. |
 | `./scripts/zig.sh build zigos-native-smoke-test` | Runs native QEMU smoke proofs, including tampered manifest, direct artifact tamper, and rollback-slot failure variants. |
 | `./scripts/zig.sh build driver-restart-qemu-test` | Proves userspace storage driver restart and rebinding without reboot. |
@@ -240,6 +264,9 @@ with:
 scripts/check-nuc11tnki5-hardware-proof.sh build/hardware-proofs/nuc11tnki5
 ```
 
+The same check is exposed as `./scripts/zig.sh build hardware-proof` and is a
+hard dependency of `./scripts/zig.sh build release-security-gate`.
+
 ## Verification Model
 
 Host-side native tests enter through `src/native_host_test.zig` and delegate to
@@ -258,23 +285,34 @@ fast `release-security-check` gate. Public security releases must pass
 `./scripts/zig.sh build release-security-gate`, covering fuzzing, fault
 injection, reproducible builds, DSSE-wrapped SBOM/provenance, threat-model
 tests, memory-safety audits for unsafe Zig and kernel sections, crash dump
-redaction, and the vulnerability disclosure process in `SECURITY.md`. Public
-release provenance must be signed per DSSE payload through
+redaction, the vulnerability disclosure process in `SECURITY.md`, and the
+completed NUC11TNKi5 real-hardware proof bundle. Public release provenance must
+be signed per DSSE payload through
 `ZIGOS_RELEASE_DSSE_SIGN_COMMAND` by a hardware-backed TPM, secure enclave,
 HSM, or KMS key and verified with `zig-out/bin/zigos-verify-release
 build/release-security .` before distribution.
+The release keyring also carries the 2026 PQC transition policy: FIPS 203
+ML-KEM is reserved for key establishment, FIPS 204 ML-DSA is the production
+signature path once a validated provider is linked, and FIPS 205 SLH-DSA is the
+hash-based diversity path for long-lived or recovery roots. `ZIGOS_RELEASE_PQC_MODE`
+defaults to `shadow` and may move through `canary` to `required`; required mode
+is rejected unless the verifier can validate production ML-DSA signatures from
+the published keyring.
 
 The first real hardware target is Intel NUC 11 Pro Kit `NUC11TNKi5`. QEMU proof
 runs remain required preflight evidence, but they do not satisfy the hardware
 target gate. Real-machine proof must cover UEFI boot, ACPI, APIC/timer, GOP
 framebuffer, USB xHCI input, NVMe block I/O, Intel I225-LM networking,
-suspend/resume, and crash recovery. Required serial markers live in
+suspend/resume, compositor framebuffer presentation, crash recovery,
+crash-record persistence, and update rollback across power cycles. Required
+serial markers live in
 `spec/hardware/nuc11tnki5-required-markers.txt`, and captured logs can be
 checked with `scripts/check-nuc11tnki5-hardware-proof.sh`. A complete proof is
 a directory described by `spec/hardware/nuc11tnki5-proof-bundle.md`, with
 `serial.log`, `firmware-settings.txt`, `power-cycle-notes.txt`, and
 `artifact-digests.sha256`. The checker rejects emulator-sourced logs and
-requires the real-hardware metadata markers plus the target cycle counters. The
+requires the real-hardware metadata markers, the current repo commit,
+`repo_dirty_files=0`, and the target cycle counters. The
 UEFI preflight entrypoint is `./scripts/zig.sh build uefi-qemu-test`; set
 `OVMF_CODE` and optionally `OVMF_VARS` if the firmware is not installed in a
 standard path.
@@ -322,8 +360,9 @@ Shared boot marker expectations live in `src/native_smoke_markers.zig` and
 - `src/native/services/`: service registry, service authority, package service,
   typed component ABI, notifications, indexing, and media/print service models.
 - `src/native/sdk/`: native app developer SDK with component ABI helpers,
-  manifest linting, package signing, simulator APIs, UI primitives, permission
-  review, object-store/sync facades, and generated-image fixtures.
+  typed IDL/codegen, manifest linting, package signing, simulator APIs,
+  UI/accessibility primitives, permission review harnesses, object-store/sync
+  facades, and generated-image fixtures.
 - `src/native/demo/`: seeded scenario-world flows and demo bootstrap packages.
 - `src/userspace/`: freestanding service/component entry points, runtime, and
   linker script for embedded userspace images.

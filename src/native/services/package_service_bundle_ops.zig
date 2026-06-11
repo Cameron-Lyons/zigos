@@ -47,6 +47,10 @@ pub fn validateInstallTarget(
     }
     for (bundle.requested_permissions) |permission| {
         try validateTextLen(permission.resource, arrayFieldLen(StoredPermissionType, "resource"), error.PermissionResourceTooLong);
+        try validateTextLen(permission.egress_intent.object, arrayFieldLen(StoredPermissionType, "egress_object"), error.PermissionResourceTooLong);
+        try validateTextLen(permission.egress_intent.principal, arrayFieldLen(StoredPermissionType, "egress_principal"), error.PermissionResourceTooLong);
+        try validateTextLen(permission.egress_intent.service, arrayFieldLen(StoredPermissionType, "egress_service"), error.PermissionResourceTooLong);
+        try validateTextLen(permission.egress_intent.event_type, arrayFieldLen(StoredPermissionType, "egress_event_type"), error.PermissionResourceTooLong);
     }
     for (bundle.background_tasks) |task| {
         try validateTextLen(task.id, arrayFieldLen(StoredBackgroundTaskType, "id"), error.BackgroundTaskIdTooLong);
@@ -151,6 +155,13 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
             .local_only = stored.local_only,
             .max_lease_ticks = stored.max_lease_ticks,
             .target_id = stored.target_id,
+            .egress_intent = .{
+                .kind = stored.egress_intent_kind,
+                .object = stored.egressObjectSlice(),
+                .principal = stored.egressPrincipalSlice(),
+                .service = stored.egressServiceSlice(),
+                .event_type = stored.egressEventTypeSlice(),
+            },
         };
     }
 
@@ -262,6 +273,11 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
         revision.requested_permissions[permission_index].local_only = permission.local_only;
         revision.requested_permissions[permission_index].max_lease_ticks = permission.max_lease_ticks;
         revision.requested_permissions[permission_index].target_id = permission.target_id;
+        revision.requested_permissions[permission_index].egress_intent_kind = permission.egress_intent.kind;
+        revision.requested_permissions[permission_index].egress_object_len = copyTextExact(&revision.requested_permissions[permission_index].egress_object, permission.egress_intent.object) catch return error.PermissionResourceTooLong;
+        revision.requested_permissions[permission_index].egress_principal_len = copyTextExact(&revision.requested_permissions[permission_index].egress_principal, permission.egress_intent.principal) catch return error.PermissionResourceTooLong;
+        revision.requested_permissions[permission_index].egress_service_len = copyTextExact(&revision.requested_permissions[permission_index].egress_service, permission.egress_intent.service) catch return error.PermissionResourceTooLong;
+        revision.requested_permissions[permission_index].egress_event_type_len = copyTextExact(&revision.requested_permissions[permission_index].egress_event_type, permission.egress_intent.event_type) catch return error.PermissionResourceTooLong;
     }
 
     if (source.background_tasks.len > revision.background_tasks.len) return error.TooManyBackgroundTasks;

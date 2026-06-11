@@ -4,6 +4,37 @@
   "public_release_allowed": false,
   "required_provider_boundary": "hardware-backed TPM, secure enclave, offline HSM, or cloud KMS release signing provider",
   "required_dsse_signature_message": "DSSE v1 pre-authentication encoding over payloadType and payload",
+  "post_quantum_policy": {
+    "mode": "shadow",
+    "fips_validated_required": true,
+    "fips_140_validation_required": true,
+    "production_signature_algorithm": "ml-dsa-65",
+    "key_establishment_algorithm": "ml-kem-768",
+    "backup_signature_algorithm": "slh-dsa-sha2-128s",
+    "hybrid_transition": "Ed25519 remains the classical DSSE baseline during migration; ed25519+ml-dsa65 stays preview-only and never satisfies production FIPS 204 ML-DSA; required mode needs a separately verified ML-DSA signature from a validated provider.",
+    "standards": [
+      {
+        "fips": "FIPS 203",
+        "algorithm": "ML-KEM",
+        "scope": "key establishment and transport encryption only"
+      },
+      {
+        "fips": "FIPS 204",
+        "algorithm": "ML-DSA",
+        "scope": "release, update, package, and attestation signatures when production PQC is required"
+      },
+      {
+        "fips": "FIPS 205",
+        "algorithm": "SLH-DSA",
+        "scope": "hash-based signature diversity for long-lived offline roots and emergency recovery policy"
+      }
+    ],
+    "rollout": [
+      "shadow: emit policy and verifier measurements while Ed25519 DSSE remains required",
+      "canary: dual-sign selected release channels with Ed25519 and validated ML-DSA, failing closed on malformed PQC signatures",
+      "required: require zigos-verify-release to verify ML-DSA signatures from FIPS-validated providers before accepting public releases"
+    ]
+  },
   "keys": [
     {
       "key_id": "zigos-release-signing-required",
@@ -18,6 +49,19 @@
       "public_key": "TBD",
       "rotation_policy": "new release key generation before not_after or immediately after suspected exposure",
       "revocation_source": "spec/release_security/revoked_release_keys.json"
+    }
+  ],
+  "production_pqc_profiles": [
+    {
+      "profile": "ml-dsa-65",
+      "status": "provider-required-not-configured",
+      "release_allowed": false,
+      "fips_standard": "FIPS 204",
+      "fips_validation_required": true,
+      "fips_140_validated_module_required": true,
+      "public_key_encoding": "hex-ml-dsa-65-raw",
+      "signature_encoding": "base64-ml-dsa-65-raw",
+      "verifier_status": "zigos-verify-release fails closed until a validated ML-DSA provider is linked"
     }
   ],
   "preview_profiles": [

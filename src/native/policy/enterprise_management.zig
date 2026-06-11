@@ -7,14 +7,42 @@ const signing = @import("../core/signing.zig");
 
 pub const Error = policy_object.Error || device_graph.Error || event_ledger.Error || error{
     NoActiveOrganizationPolicy,
+    UnauthorizedCapability,
     SigningFailed,
     UnauthorizedAuthority,
     WrongOrganizationScope,
 };
 
+pub const AdminOperation = enum {
+    apply_organization_policy,
+    override_organization_policy,
+    revoke_organization_policy,
+    enroll_managed_device,
+    revoke_managed_device,
+};
+
+pub const AdminCapabilityBundle = struct {
+    apply_organization_policy: bool = false,
+    override_organization_policy: bool = false,
+    revoke_organization_policy: bool = false,
+    enroll_managed_device: bool = false,
+    revoke_managed_device: bool = false,
+
+    pub fn permits(self: AdminCapabilityBundle, operation: AdminOperation) bool {
+        return switch (operation) {
+            .apply_organization_policy => self.apply_organization_policy,
+            .override_organization_policy => self.override_organization_policy,
+            .revoke_organization_policy => self.revoke_organization_policy,
+            .enroll_managed_device => self.enroll_managed_device,
+            .revoke_managed_device => self.revoke_managed_device,
+        };
+    }
+};
+
 pub const AdminSession = struct {
     organization_id: u64,
     authority: principal.PrincipalId,
+    capabilities: AdminCapabilityBundle = .{},
 };
 
 pub const Manager = struct {
@@ -66,7 +94,7 @@ pub const Manager = struct {
         authority_signer: signing.SignerIdentity,
         tick: u64,
     ) Error!usize {
-        try self.requireAuthority(session, authority_signer);
+        try self.requireAuthority(session, authority_signer, .revoke_organization_policy);
         const active_policy = self.policies.activeForScope(.organization, self.organization_id) orelse
             return error.NoActiveOrganizationPolicy;
         const active_policy_id = active_policy.id;
@@ -93,7 +121,7 @@ pub const Manager = struct {
         device_identity: signing.SignerIdentity,
         tick: u64,
     ) Error!*device_graph.DeviceRecord {
-        try self.requireAuthority(session, authority_signer);
+        try self.requireAuthority(session, authority_signer, .enroll_managed_device);
         const device = try self.devices.enrollDevice(
             user_principal,
             device_principal,
@@ -121,7 +149,7 @@ pub const Manager = struct {
         user_authorizer: signing.SignerIdentity,
         tick: u64,
     ) Error!void {
-        try self.requireAuthority(session, authority_signer);
+        try self.requireAuthority(session, authority_signer, .revoke_managed_device);
         try self.devices.revokeDevice(user_principal, device_principal, user_authorizer, tick);
         try self.ledger.recordDeviceTrustChange(
             session.authority,
@@ -141,7 +169,12 @@ pub const Manager = struct {
         action: event_ledger.PolicyChangeAction,
         require_existing: bool,
     ) Error!*policy_object.PolicyObject {
-        try self.requireAuthority(session, authority_signer);
+        const operation: AdminOperation = switch (action) {
+            .applied => .apply_organization_policy,
+            .overridden => .override_organization_policy,
+            .revoked => .revoke_organization_policy,
+        };
+        try self.requireAuthority(session, authority_signer, operation);
         try self.requireOrganizationPolicyRequest(session, request);
         if (require_existing and self.policies.activeForScope(.organization, self.organization_id) == null) {
             return error.NoActiveOrganizationPolicy;
@@ -161,6 +194,7 @@ pub const Manager = struct {
         self: *const Manager,
         session: AdminSession,
         authority_signer: signing.SignerIdentity,
+        operation: AdminOperation,
     ) Error!void {
         if (session.organization_id != self.organization_id) return error.WrongOrganizationScope;
         if (session.authority.kind != .policy_authority) return error.UnauthorizedAuthority;
@@ -168,6 +202,7 @@ pub const Manager = struct {
         if (!self.authority_roots.isPolicyAuthorityRootKey(session.authority, public_key)) {
             return error.UnauthorizedAuthority;
         }
+        if (!session.capabilities.permits(operation)) return error.UnauthorizedCapability;
     }
 
     fn requireOrganizationPolicyRequest(
@@ -214,7 +249,20 @@ test "enterprise management applies overrides revokes and audits organization po
     var devices = device_graph.Graph.init();
     var ledger = event_ledger.Ledger.init();
     var manager = Manager.init(42, &roots, &policies, &devices, &ledger);
-    const session = AdminSession{ .organization_id = 42, .authority = authority };
+    const apply_only_session = AdminSession{
+        .organization_id = 42,
+        .authority = authority,
+        .capabilities = .{ .apply_organization_policy = true },
+    };
+    const session = AdminSession{
+        .organization_id = 42,
+        .authority = authority,
+        .capabilities = .{
+            .apply_organization_policy = true,
+            .override_organization_policy = true,
+            .revoke_organization_policy = true,
+        },
+    };
     const subjects = policy_object.SubjectSet{ .organization_id = 42 };
 
     const untrusted_signer = signing.SignerIdentity{
@@ -228,7 +276,7 @@ test "enterprise management applies overrides revokes and audits organization po
         .label = "denied",
     }, untrusted_signer, 1));
 
-    const baseline = try manager.applyOrganizationPolicy(session, .{
+    const baseline = try manager.applyOrganizationPolicy(apply_only_session, .{
         .scope = .organization,
         .subject_id = 42,
         .issuer = authority,
@@ -247,6 +295,14 @@ test "enterprise management applies overrides revokes and audits organization po
         event_ledger.PolicyChangeAction,
         @as(u8, @intCast(ledger.latestKind(.policy_change).?.detail_code)),
     ).?);
+
+    try std.testing.expectError(error.UnauthorizedCapability, manager.overrideOrganizationPolicy(apply_only_session, .{
+        .scope = .organization,
+        .subject_id = 42,
+        .issuer = authority,
+        .label = "not-delegated",
+        .install_source_mode = .platform_store_only,
+    }, authority_signer, 15));
 
     const override = try manager.overrideOrganizationPolicy(session, .{
         .scope = .organization,
@@ -310,6 +366,7 @@ test "enterprise management gates device trust administration through existing g
     const wrong_session = AdminSession{
         .organization_id = 77,
         .authority = .{ .kind = .policy_authority, .serial = 78 },
+        .capabilities = .{ .enroll_managed_device = true },
     };
     try std.testing.expectError(error.UnauthorizedAuthority, manager.enrollManagedDevice(
         wrong_session,
@@ -322,9 +379,21 @@ test "enterprise management gates device trust administration through existing g
         10,
     ));
 
-    const session = AdminSession{ .organization_id = 77, .authority = authority };
+    const enroll_session = AdminSession{
+        .organization_id = 77,
+        .authority = authority,
+        .capabilities = .{ .enroll_managed_device = true },
+    };
+    const session = AdminSession{
+        .organization_id = 77,
+        .authority = authority,
+        .capabilities = .{
+            .enroll_managed_device = true,
+            .revoke_managed_device = true,
+        },
+    };
     const enrolled = try manager.enrollManagedDevice(
-        session,
+        enroll_session,
         authority_signer,
         user,
         laptop,
@@ -337,6 +406,15 @@ test "enterprise management gates device trust administration through existing g
     try std.testing.expect(devices.isTrusted(laptop));
     try std.testing.expectEqual(event_ledger.EventKind.device_trust_change, ledger.latestKind(.device_trust_change).?.kind);
     try std.testing.expect(ledger.latestKind(.device_trust_change).?.allowed);
+
+    try std.testing.expectError(error.UnauthorizedCapability, manager.revokeManagedDevice(
+        enroll_session,
+        authority_signer,
+        user,
+        laptop,
+        user_signer,
+        25,
+    ));
 
     try manager.revokeManagedDevice(session, authority_signer, user, laptop, user_signer, 30);
     try std.testing.expect(!devices.isTrusted(laptop));

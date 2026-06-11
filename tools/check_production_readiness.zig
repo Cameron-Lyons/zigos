@@ -37,8 +37,11 @@ const FIRST_HARDWARE_TARGET_REQUIRED_SUBSYSTEMS = [_][]const u8{
     "usb_input_xhci",
     "nvme_block",
     "network_i225_lm",
+    "compositor_framebuffer",
     "suspend_resume",
     "crash_recovery",
+    "crash_persistence",
+    "update_rollback_power_cycle",
 };
 const FIRST_HARDWARE_TARGET_REQUIRED_MARKERS = [_][]const u8{
     "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UEFI_BOOT:PASS",
@@ -59,6 +62,9 @@ const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
     "ZIGOS:SERVICE_BOOT:SERVICE_CONTRACTS:READY",
     "ZIGOS:SERVICE_BOOT:IPC_CONNECT:ALL_OK",
     "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_REBIND_OK",
+    "ZIGOS:COMPOSITOR:SERVICE:READY",
+    "ZIGOS:COMPOSITOR:FRAMEBUFFER:PRESENTED",
+    "ZIGOS:COMPOSITOR:PERMISSION_REVIEW:RENDERED",
     "ZIGOS:PERMISSION:REVIEW_PORT:READY",
     "ZIGOS:PERMISSION:POLICY_PORT:READY",
     "ZIGOS:PERMISSION:UI:REVIEW_RENDERED",
@@ -70,6 +76,8 @@ const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
     "ZIGOS:PLATFORM:ACTIVATION:ROLLBACK_OK",
     "ZIGOS:PLATFORM:BASE_SELECTOR:ROLLBACK_BEFORE_SERVICE",
     "ZIGOS:PLATFORM:HEALTH_CHECKS:STORAGE_ROLLBACK",
+    "ZIGOS:PLATFORM:CRASH_RECORD:PERSISTED",
+    "ZIGOS:PLATFORM:UPDATE_ROLLBACK:POWER_CYCLE_OK",
 };
 const FIRST_HARDWARE_TARGET_REQUIRED_REFERENCE_ARTIFACTS = [_][]const u8{
     "src/native/platform/hardware_target.zig",
@@ -265,12 +273,24 @@ fn validateSecureByDesignReleaseGate(
         }
     }
 
+    const hardware_gate_blocked = firstHardwareTargetBlocksRelease(prod_manifest);
     if (!missing_required_control and std.mem.eql(u8, release_status, "ready") and satisfied_controls != controls.len) {
         try common.addError(errors, allocator, "secure_by_design_release_gate cannot be ready until every control status is satisfied", .{});
     }
-    if (!missing_required_control and std.mem.eql(u8, release_status, "blocked") and controls.len > 0 and satisfied_controls == controls.len) {
+    if (!missing_required_control and std.mem.eql(u8, release_status, "ready") and hardware_gate_blocked) {
+        try common.addError(errors, allocator, "secure_by_design_release_gate cannot be ready until first_hardware_target status is hardware_passed", .{});
+    }
+    if (!missing_required_control and std.mem.eql(u8, release_status, "blocked") and controls.len > 0 and satisfied_controls == controls.len and !hardware_gate_blocked) {
         try common.addError(errors, allocator, "secure_by_design_release_gate is blocked but every control is satisfied", .{});
     }
+}
+
+fn firstHardwareTargetBlocksRelease(prod_manifest: std.json.Value) bool {
+    const target = common.field(prod_manifest, "first_hardware_target") orelse return true;
+    if (target != .object) return true;
+    const status = common.field(target, "status") orelse return true;
+    if (status != .string) return true;
+    return !std.mem.eql(u8, status.string, "hardware_passed");
 }
 
 fn validateSecureByDesignControl(
@@ -564,16 +584,22 @@ fn validateNuc11tnki5ProofChecker(
         "target_id",
         "captured_at_utc",
         "repo_commit",
+        "ZIGOS_EXPECTED_REPO_COMMIT",
+        "git -C \"$ROOT_DIR\" rev-parse HEAD",
         "COLD_BOOTS",
         "WARM_REBOOTS",
         "STORAGE_WRITE_READ_CYCLES",
         "NETWORK_FRAME_CYCLES",
         "SUSPEND_RESUME_CYCLES",
         "CRASH_RECOVERY_CYCLES",
+        "CRASH_RECORD_PERSISTENCE_CYCLES",
+        "UPDATE_ROLLBACK_CYCLES",
+        "repo_dirty_files",
         "artifact-digests.sha256",
         "zig-out/bin/kernel-zigos-native.elf",
         "zig-out/bin/userspace-policy-mediation.elf",
         "zig-out/bin/userspace-storage-driver.elf",
+        "spec/release_security/release_artifacts.json",
         "QEMU",
     };
     for (required_snippets) |snippet| {

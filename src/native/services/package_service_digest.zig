@@ -46,6 +46,11 @@ pub fn digestBundle(bundle: manifest.BundleManifest) [32]u8 {
         crypto_hash.updateBool(&hasher, "permission-local-only", permission.local_only);
         crypto_hash.updateInt(&hasher, "permission-max-lease", permission.max_lease_ticks);
         crypto_hash.updateInt(&hasher, "permission-target-id", permission.target_id);
+        crypto_hash.updateEnum(&hasher, "permission-egress-intent-kind", permission.egress_intent.kind);
+        crypto_hash.updateBytes(&hasher, "permission-egress-object", permission.egress_intent.object);
+        crypto_hash.updateBytes(&hasher, "permission-egress-principal", permission.egress_intent.principal);
+        crypto_hash.updateBytes(&hasher, "permission-egress-service", permission.egress_intent.service);
+        crypto_hash.updateBytes(&hasher, "permission-egress-event-type", permission.egress_intent.event_type);
     }
     for (bundle.background_tasks, 0..) |task, index| {
         crypto_hash.updateInt(&hasher, "background-index", index);
@@ -74,6 +79,11 @@ pub fn permissionDigest(requests: []const manifest.PermissionRequest) [32]u8 {
         crypto_hash.updateBool(&hasher, "permission-local-only", request.local_only);
         crypto_hash.updateInt(&hasher, "permission-max-lease", request.max_lease_ticks);
         crypto_hash.updateInt(&hasher, "permission-target-id", request.target_id);
+        crypto_hash.updateEnum(&hasher, "permission-egress-intent-kind", request.egress_intent.kind);
+        crypto_hash.updateBytes(&hasher, "permission-egress-object", request.egress_intent.object);
+        crypto_hash.updateBytes(&hasher, "permission-egress-principal", request.egress_intent.principal);
+        crypto_hash.updateBytes(&hasher, "permission-egress-service", request.egress_intent.service);
+        crypto_hash.updateBytes(&hasher, "permission-egress-event-type", request.egress_intent.event_type);
     }
     return crypto_hash.finalize(&hasher);
 }

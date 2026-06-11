@@ -31,6 +31,11 @@ pub const notes_permissions = [_]manifest.PermissionRequest{
         .required = false,
         .local_only = true,
         .max_lease_ticks = 50,
+        .egress_intent = .{
+            .kind = .sync_object,
+            .object = "workspace:notes",
+            .principal = "trusted-devices",
+        },
     },
     .{
         .kind = .clipboard,
@@ -183,6 +188,10 @@ pub const example_writer_permissions = [_]manifest.PermissionRequest{
         .resource = "sync.example.com",
         .rights = .{ .network_policy = .{ .network_remote = true } },
         .required = false,
+        .egress_intent = .{
+            .kind = .call_service,
+            .service = "com.example.writer.sync",
+        },
     },
     .{
         .kind = .background_execution,

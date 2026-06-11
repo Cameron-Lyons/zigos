@@ -40,6 +40,10 @@ pub const permission_review_port_ready = "ZIGOS:PERMISSION:REVIEW_PORT:READY";
 pub const permission_policy_port_ready = "ZIGOS:PERMISSION:POLICY_PORT:READY";
 pub const permission_ui_review_rendered = "ZIGOS:PERMISSION:UI:REVIEW_RENDERED";
 
+pub const compositor_service_ready = "ZIGOS:COMPOSITOR:SERVICE:READY";
+pub const compositor_framebuffer_presented = "ZIGOS:COMPOSITOR:FRAMEBUFFER:PRESENTED";
+pub const compositor_permission_review_rendered = "ZIGOS:COMPOSITOR:PERMISSION_REVIEW:RENDERED";
+
 pub const transport_native_kernel_ready = "ZIGOS:TRANSPORT:NATIVE_KERNEL:READY";
 pub const transport_no_root = "ZIGOS:TRANSPORT:NO_ROOT";
 pub const transport_component_abi_ready = "ZIGOS:TRANSPORT:COMPONENT_ABI:READY";
@@ -117,6 +121,8 @@ pub const platform_health_checks_storage_rollback = "ZIGOS:PLATFORM:HEALTH_CHECK
 pub const platform_health_checks_network_rollback = "ZIGOS:PLATFORM:HEALTH_CHECKS:NETWORK_ROLLBACK";
 pub const platform_health_checks_ui_rollback = "ZIGOS:PLATFORM:HEALTH_CHECKS:UI_ROLLBACK";
 pub const platform_health_checks_promote_ok = "ZIGOS:PLATFORM:HEALTH_CHECKS:PROMOTE_OK";
+pub const platform_crash_record_persisted = "ZIGOS:PLATFORM:CRASH_RECORD:PERSISTED";
+pub const platform_update_rollback_power_cycle_ok = "ZIGOS:PLATFORM:UPDATE_ROLLBACK:POWER_CYCLE_OK";
 pub const platform_build_artifact_manifest_verified = "ZIGOS:PLATFORM:BUILD_ARTIFACT_MANIFEST:VERIFIED";
 pub const platform_bootloader_measurement_provided = "ZIGOS:PLATFORM:BOOTLOADER_MEASUREMENT:PROVIDED";
 pub const platform_bootloader_handoff_verified = "ZIGOS:PLATFORM:BOOTLOADER_HANDOFF:VERIFIED";

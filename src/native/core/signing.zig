@@ -8,13 +8,17 @@ pub const PUBLIC_KEY_BYTES = Ed25519.PublicKey.encoded_length;
 pub const SIGNATURE_BYTES = Ed25519.Signature.encoded_length;
 pub const SIGNATURE_FORMAT_ED25519 = manifest.SIGNATURE_FORMAT_ED25519;
 pub const SIGNATURE_FORMAT_ED25519_ML_DSA65 = manifest.SIGNATURE_FORMAT_ED25519_ML_DSA65;
+pub const SIGNATURE_FORMAT_ML_DSA65 = manifest.SIGNATURE_FORMAT_ML_DSA65;
 pub const ED25519_PUBLIC_KEY_BYTES = manifest.ED25519_PUBLIC_KEY_BYTES;
 pub const ED25519_SIGNATURE_BYTES = manifest.ED25519_SIGNATURE_BYTES;
-pub const MAX_SIGNATURE_PROVIDERS: usize = 4;
+pub const ML_DSA65_PUBLIC_KEY_BYTES = manifest.ML_DSA65_PUBLIC_KEY_BYTES;
+pub const ML_DSA65_SIGNATURE_BYTES = manifest.ML_DSA65_SIGNATURE_BYTES;
+pub const MAX_SIGNATURE_PROVIDERS: usize = 6;
 
 pub const SignatureProfile = enum {
     ed25519,
     ed25519_ml_dsa65_hybrid_preview,
+    ml_dsa65_fips204,
 };
 
 pub const SignatureProviderRole = enum {
@@ -44,6 +48,20 @@ pub const SignatureVerifierProtocol = enum {
     dsse_in_toto_slsa,
 };
 
+pub const FipsStandard = enum {
+    not_applicable,
+    fips_203,
+    fips_204,
+    fips_205,
+};
+
+pub const PostQuantumAlgorithm = enum {
+    not_applicable,
+    ml_kem_768,
+    ml_dsa_65,
+    slh_dsa_sha2_128s,
+};
+
 pub const Fips204Implementation = enum {
     not_applicable,
     preview_commitment,
@@ -61,8 +79,12 @@ pub const SignatureProviderDescriptor = struct {
     revocation_supported: bool = false,
     customer_verifiable: bool = false,
     verifier_protocol: SignatureVerifierProtocol = .local_manifest,
+    fips_standard: FipsStandard = .not_applicable,
+    post_quantum_algorithm: PostQuantumAlgorithm = .not_applicable,
     fips_204: Fips204Implementation = .not_applicable,
     fips_validated: bool = false,
+    fips_140_validated_module: bool = false,
+    validation_certificate: []const u8 = "",
 
     pub fn format(self: SignatureProviderDescriptor) []const u8 {
         return formatForProfile(self.profile);
@@ -91,8 +113,15 @@ pub const SignatureProviderDescriptor = struct {
         if (!self.customer_verifiable) return false;
         if (self.verifier_protocol != .dsse_in_toto_slsa) return false;
         return switch (self.profile) {
-            .ed25519 => self.fips_204 != .preview_commitment,
+            .ed25519 => self.fips_204 != .preview_commitment and
+                self.post_quantum_algorithm == .not_applicable,
             .ed25519_ml_dsa65_hybrid_preview => false,
+            .ml_dsa65_fips204 => self.fips_standard == .fips_204 and
+                self.post_quantum_algorithm == .ml_dsa_65 and
+                self.fips_204 == .validated_provider and
+                self.fips_validated and
+                self.fips_140_validated_module and
+                self.validation_certificate.len != 0,
         };
     }
 };
@@ -104,6 +133,28 @@ pub const ReleaseRootKeyHandle = struct {
     generation: u32,
     provider_boundary: SignatureProviderBoundary,
     custody: SignatureKeyCustody,
+};
+
+pub const MlDsaReleaseRootKeyHandle = struct {
+    key_id: []const u8,
+    label: []const u8,
+    public_key: [ML_DSA65_PUBLIC_KEY_BYTES]u8,
+    generation: u32,
+    provider_boundary: SignatureProviderBoundary,
+    custody: SignatureKeyCustody,
+    validation_certificate: []const u8,
+};
+
+pub const MlDsaSignatureEnvelope = struct {
+    format: []const u8 = manifest.SIGNATURE_FORMAT_ML_DSA65,
+    signer: []const u8,
+    public_key: [ML_DSA65_PUBLIC_KEY_BYTES]u8,
+    value: [ML_DSA65_SIGNATURE_BYTES]u8,
+
+    pub fn isComplete(self: MlDsaSignatureEnvelope) bool {
+        return std.mem.eql(u8, self.format, manifest.SIGNATURE_FORMAT_ML_DSA65) and
+            self.signer.len != 0;
+    }
 };
 
 pub const ExternalReleaseProvider = struct {
@@ -155,6 +206,61 @@ pub const ExternalReleaseProvider = struct {
         if (!std.mem.eql(u8, signature.signer, self.key.label)) return false;
         if (!std.mem.eql(u8, signature.ed25519PublicKeySlice(), &self.key.public_key)) return false;
         return verifySignature(signature, message);
+    }
+};
+
+pub const ExternalMlDsaReleaseProvider = struct {
+    descriptor: SignatureProviderDescriptor,
+    key: MlDsaReleaseRootKeyHandle,
+    context: *anyopaque,
+    sign_fn: *const fn (*anyopaque, MlDsaReleaseRootKeyHandle, []const u8) anyerror![ML_DSA65_SIGNATURE_BYTES]u8,
+    verify_fn: *const fn (*anyopaque, MlDsaReleaseRootKeyHandle, []const u8, [ML_DSA65_SIGNATURE_BYTES]u8) bool,
+
+    pub fn init(
+        descriptor: SignatureProviderDescriptor,
+        key: MlDsaReleaseRootKeyHandle,
+        context: *anyopaque,
+        sign_fn: *const fn (*anyopaque, MlDsaReleaseRootKeyHandle, []const u8) anyerror![ML_DSA65_SIGNATURE_BYTES]u8,
+        verify_fn: *const fn (*anyopaque, MlDsaReleaseRootKeyHandle, []const u8, [ML_DSA65_SIGNATURE_BYTES]u8) bool,
+    ) !ExternalMlDsaReleaseProvider {
+        if (!descriptor.releaseEligible()) return error.ReleaseProviderNotEligible;
+        if (descriptor.profile != .ml_dsa65_fips204) return error.ReleaseProviderUnsupportedProfile;
+        if (key.generation == 0) return error.ReleaseKeyGenerationInvalid;
+        if (key.key_id.len == 0 or key.label.len == 0) return error.ReleaseKeyIdentityMissing;
+        if (key.provider_boundary != descriptor.provider_boundary) return error.ReleaseProviderBoundaryMismatch;
+        if (key.custody != descriptor.custody) return error.ReleaseProviderCustodyMismatch;
+        if (!std.mem.eql(u8, key.validation_certificate, descriptor.validation_certificate)) {
+            return error.ReleaseProviderValidationMismatch;
+        }
+        return .{
+            .descriptor = descriptor,
+            .key = key,
+            .context = context,
+            .sign_fn = sign_fn,
+            .verify_fn = verify_fn,
+        };
+    }
+
+    pub fn releaseEligible(self: ExternalMlDsaReleaseProvider) bool {
+        return self.descriptor.releaseEligible();
+    }
+
+    pub fn sign(self: *ExternalMlDsaReleaseProvider, identity: SignerIdentity, message: []const u8) !MlDsaSignatureEnvelope {
+        if (!std.mem.eql(u8, identity.label, self.key.label)) return error.ReleaseKeyIdentityMismatch;
+        const signature_bytes = try self.sign_fn(self.context, self.key, message);
+        return .{
+            .format = manifest.SIGNATURE_FORMAT_ML_DSA65,
+            .signer = self.key.label,
+            .public_key = self.key.public_key,
+            .value = signature_bytes,
+        };
+    }
+
+    pub fn verify(self: *ExternalMlDsaReleaseProvider, signature: MlDsaSignatureEnvelope, message: []const u8) bool {
+        if (!std.mem.eql(u8, signature.format, manifest.SIGNATURE_FORMAT_ML_DSA65)) return false;
+        if (!std.mem.eql(u8, signature.signer, self.key.label)) return false;
+        if (!std.mem.eql(u8, &signature.public_key, &self.key.public_key)) return false;
+        return self.verify_fn(self.context, self.key, message, signature.value);
     }
 };
 
@@ -338,6 +444,8 @@ pub fn signWithDefaultRegistry(
 }
 
 pub fn signWithProfile(identity: SignerIdentity, message: []const u8, profile: SignatureProfile) !manifest.Signature {
+    if (profile == .ml_dsa65_fips204) return error.SignatureProviderUnavailable;
+
     const key_pair = try Ed25519.KeyPair.generateDeterministic(identity.seed);
     const signature = try key_pair.sign(message, null);
     const public_key = key_pair.public_key.toBytes();
@@ -390,6 +498,7 @@ fn verifySignature(signature: manifest.Signature, message: []const u8) bool {
         );
         return std.mem.eql(u8, signature.hybridPostQuantumBindingSlice(), &expected_signature_binding);
     }
+    if (std.mem.eql(u8, signature.format, manifest.SIGNATURE_FORMAT_ML_DSA65)) return false;
     return false;
 }
 
@@ -430,12 +539,14 @@ fn formatForProfile(profile: SignatureProfile) []const u8 {
     return switch (profile) {
         .ed25519 => manifest.SIGNATURE_FORMAT_ED25519,
         .ed25519_ml_dsa65_hybrid_preview => manifest.SIGNATURE_FORMAT_ED25519_ML_DSA65,
+        .ml_dsa65_fips204 => manifest.SIGNATURE_FORMAT_ML_DSA65,
     };
 }
 
 pub fn profileForFormat(format: []const u8) ?SignatureProfile {
     if (std.mem.eql(u8, format, manifest.SIGNATURE_FORMAT_ED25519)) return .ed25519;
     if (std.mem.eql(u8, format, manifest.SIGNATURE_FORMAT_ED25519_ML_DSA65)) return .ed25519_ml_dsa65_hybrid_preview;
+    if (std.mem.eql(u8, format, manifest.SIGNATURE_FORMAT_ML_DSA65)) return .ml_dsa65_fips204;
     return null;
 }
 
@@ -539,6 +650,7 @@ test "signature providers expose release eligibility and reject mismatched profi
     try std.testing.expectEqual(Fips204Implementation.preview_commitment, hybrid_provider.descriptor.fips_204);
     try std.testing.expectEqualStrings(manifest.SIGNATURE_FORMAT_ED25519, ed25519_provider.descriptor.format());
     try std.testing.expectEqualStrings(manifest.SIGNATURE_FORMAT_ED25519_ML_DSA65, hybrid_provider.descriptor.format());
+    try std.testing.expectEqual(SignatureProfile.ml_dsa65_fips204, profileForFormat(manifest.SIGNATURE_FORMAT_ML_DSA65).?);
 
     const ed25519_signature = try ed25519_provider.sign(identity, "provider-message");
     const hybrid_signature = try hybrid_provider.sign(identity, "provider-message");
@@ -602,6 +714,23 @@ test "release eligibility requires hardware custody lifecycle controls and verif
     preview_hybrid.fips_204 = .preview_commitment;
     preview_hybrid.fips_validated = true;
     try std.testing.expect(!preview_hybrid.releaseEligible());
+
+    var pqc_without_validation = operational;
+    pqc_without_validation.name = "release-hsm-ml-dsa65-unvalidated";
+    pqc_without_validation.profile = .ml_dsa65_fips204;
+    pqc_without_validation.fips_standard = .fips_204;
+    pqc_without_validation.post_quantum_algorithm = .ml_dsa_65;
+    pqc_without_validation.fips_204 = .validated_provider;
+    pqc_without_validation.fips_validated = true;
+    pqc_without_validation.fips_140_validated_module = false;
+    pqc_without_validation.validation_certificate = "CMVP-TBD";
+    try std.testing.expect(!pqc_without_validation.releaseEligible());
+
+    var validated_pqc = pqc_without_validation;
+    validated_pqc.name = "release-hsm-ml-dsa65";
+    validated_pqc.fips_140_validated_module = true;
+    validated_pqc.validation_certificate = "CMVP-ML-DSA65-0001";
+    try std.testing.expect(validated_pqc.releaseEligible());
 }
 
 test "external release provider uses key handles instead of software signer seeds" {
@@ -661,6 +790,94 @@ test "external release provider uses key handles instead of software signer seed
     try std.testing.expect(!provider.verify(tampered_public_key, "release-dsse-pae"));
 }
 
+test "external ML-DSA release provider requires a validated FIPS 204 boundary" {
+    const PqcBackend = struct {
+        fn signatureFor(key: MlDsaReleaseRootKeyHandle, message: []const u8) [ML_DSA65_SIGNATURE_BYTES]u8 {
+            var digest: [32]u8 = undefined;
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            hasher.update("zigos.external-ml-dsa-provider-test");
+            hasher.update(key.key_id);
+            hasher.update(key.validation_certificate);
+            hasher.update(key.public_key[0..]);
+            hasher.update(message);
+            hasher.final(&digest);
+
+            var output: [ML_DSA65_SIGNATURE_BYTES]u8 = undefined;
+            for (&output, 0..) |*byte, index| {
+                byte.* = digest[index % digest.len] ^ @as(u8, @intCast(index & 0xff));
+            }
+            return output;
+        }
+
+        fn sign(context: *anyopaque, key: MlDsaReleaseRootKeyHandle, message: []const u8) ![ML_DSA65_SIGNATURE_BYTES]u8 {
+            _ = context;
+            return signatureFor(key, message);
+        }
+
+        fn verify(
+            context: *anyopaque,
+            key: MlDsaReleaseRootKeyHandle,
+            message: []const u8,
+            signature: [ML_DSA65_SIGNATURE_BYTES]u8,
+        ) bool {
+            _ = context;
+            const expected = signatureFor(key, message);
+            return std.mem.eql(u8, &signature, &expected);
+        }
+    };
+
+    const descriptor = SignatureProviderDescriptor{
+        .name = "release-hsm-ml-dsa65",
+        .profile = .ml_dsa65_fips204,
+        .role = .production,
+        .provider_boundary = .offline_hsm,
+        .custody = .hardware_security_module,
+        .hardware_backed = true,
+        .rotation_supported = true,
+        .revocation_supported = true,
+        .customer_verifiable = true,
+        .verifier_protocol = .dsse_in_toto_slsa,
+        .fips_standard = .fips_204,
+        .post_quantum_algorithm = .ml_dsa_65,
+        .fips_204 = .validated_provider,
+        .fips_validated = true,
+        .fips_140_validated_module = true,
+        .validation_certificate = "CMVP-ML-DSA65-0001",
+    };
+    var backend = PqcBackend{};
+    var provider_impl = try ExternalMlDsaReleaseProvider.init(
+        descriptor,
+        .{
+            .key_id = "hsm://zigos/release/ml-dsa65/1",
+            .label = "zigos.release.ml-dsa65",
+            .public_key = [_]u8{0xa5} ** ML_DSA65_PUBLIC_KEY_BYTES,
+            .generation = 1,
+            .provider_boundary = .offline_hsm,
+            .custody = .hardware_security_module,
+            .validation_certificate = descriptor.validation_certificate,
+        },
+        &backend,
+        PqcBackend.sign,
+        PqcBackend.verify,
+    );
+    try std.testing.expect(provider_impl.releaseEligible());
+
+    const identity = SignerIdentity{
+        .label = "zigos.release.ml-dsa65",
+        .seed = [_]u8{0x7a} ** Ed25519.KeyPair.seed_length,
+    };
+    const signature = try provider_impl.sign(identity, "release-dsse-pae");
+    try std.testing.expect(signature.isComplete());
+    try std.testing.expectEqual(@as(usize, ML_DSA65_PUBLIC_KEY_BYTES), signature.public_key.len);
+    try std.testing.expectEqual(@as(usize, ML_DSA65_SIGNATURE_BYTES), signature.value.len);
+    try std.testing.expect(provider_impl.verify(signature, "release-dsse-pae"));
+    try std.testing.expect(!provider_impl.verify(signature, "tampered-release-dsse-pae"));
+
+    var tampered = signature;
+    tampered.value[0] ^= 0x01;
+    try std.testing.expect(!provider_impl.verify(tampered, "release-dsse-pae"));
+}
+
 test "signature provider fails closed when implementation returns the wrong profile" {
     const BadProvider = struct {
         fn provider(self: *@This()) SignatureProvider {
@@ -708,8 +925,11 @@ test "signature provider registry selects providers by profile and release eligi
 
     try std.testing.expect(registry.find(.ed25519) != null);
     try std.testing.expect(registry.find(.ed25519_ml_dsa65_hybrid_preview) != null);
+    try std.testing.expect(registry.find(.ml_dsa65_fips204) == null);
     try std.testing.expect(registry.findReleaseEligible(.ed25519) == null);
     try std.testing.expect(registry.findReleaseEligible(.ed25519_ml_dsa65_hybrid_preview) == null);
+    try std.testing.expect(registry.findReleaseEligible(.ml_dsa65_fips204) == null);
+    try std.testing.expectError(error.SignatureProviderUnavailable, registry.sign(.ml_dsa65_fips204, identity, "registry-message"));
 
     const ed25519_signature = try registry.sign(.ed25519, identity, "registry-message");
     const hybrid_signature = try registry.sign(.ed25519_ml_dsa65_hybrid_preview, identity, "registry-message");

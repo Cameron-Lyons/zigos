@@ -401,6 +401,13 @@ pub const StorageCore = struct {
         return self.store.objectHistory(objectId(object_id), output);
     }
 
+    pub fn objectOperatingModel(
+        self: *const Service,
+        object_id: anytype,
+    ) object_store.Error!object_store.ObjectOperatingModel {
+        return self.store.objectOperatingModel(objectId(object_id));
+    }
+
     pub fn findEntryForObject(self: *const Service, workspace_id: anytype, object_id: anytype) workspace.Error!workspace.Entry {
         const entries_slice = try self.entries(workspace_id);
         const key = objectId(object_id);
@@ -766,6 +773,15 @@ pub const StoragePort = struct {
     ) (AuthorityError || object_store.Error)![]const object_store.ObjectHistoryEntry {
         _ = try self.requireObjectAuthority(authority, objectId(object_id), .read);
         return self.core.objectHistory(object_id, output);
+    }
+
+    pub fn objectOperatingModel(
+        self: *StoragePort,
+        authority: AuthorityContext,
+        object_id: anytype,
+    ) (AuthorityError || object_store.Error)!object_store.ObjectOperatingModel {
+        _ = try self.requireObjectAuthority(authority, objectId(object_id), .read);
+        return self.core.objectOperatingModel(object_id);
     }
 
     pub fn resolve(self: *StoragePort, authority: AuthorityContext, request: file_bridge.ResolveRequest) (AuthorityError || workspace.Error)!file_bridge.View {

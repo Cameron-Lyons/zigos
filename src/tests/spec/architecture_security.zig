@@ -135,6 +135,11 @@ pub fn explicitGrantsRequireAuthority() !void {
             .required = false,
             .local_only = true,
             .max_lease_ticks = 50,
+            .egress_intent = .{
+                .kind = .sync_object,
+                .object = "workspace://report-alpha/documents/report.md",
+                .principal = "trusted-devices",
+            },
         },
     };
     const bundle = manifest.BundleManifest{
@@ -251,8 +256,10 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expectEqual(contract.StoragePrivilege.object_store_authority, storage.isolation.storage);
     try std.testing.expect(contract.allowsDriverClass(.network_stack, .network_adapter));
     try std.testing.expect(contract.allowsDriverClass(.storage_object, .storage_controller));
+    try std.testing.expect(contract.allowsDriverClass(.compositor_ui_session, .usb_controller));
     try std.testing.expect(contract.allowsDriverClass(.compositor_ui_session, .graphics_adapter));
     try std.testing.expect(contract.allowsDriverClass(.compositor_ui_session, .input_device));
+    try std.testing.expect(contract.allowsDriverClass(.compositor_ui_session, .compositor_policy));
     try std.testing.expect(contract.allowsDriverClass(.media_print_helpers, .audio_print_io));
 
     try std.testing.expect(abi.opcode(.task_create) >= 0x100);
@@ -273,24 +280,34 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     }));
 
     const network_rights = driver_service.allowedRightsFor(.network_adapter);
+    const usb_rights = driver_service.allowedRightsFor(.usb_controller);
     const audio_rights = driver_service.allowedRightsFor(.audio_print_io);
     const input_rights = driver_service.allowedRightsFor(.input_device);
+    const compositor_policy_rights = driver_service.allowedRightsFor(.compositor_policy);
     try std.testing.expect(network_rights.has(.device_use));
     try std.testing.expect(network_rights.has(.network_local));
     try std.testing.expect(!network_rights.has(.network_remote));
+    try std.testing.expect(usb_rights.has(.device_use));
+    try std.testing.expect(!usb_rights.has(.network_local));
+    try std.testing.expect(!usb_rights.has(.object_write));
     try std.testing.expect(audio_rights.has(.device_use));
     try std.testing.expect(!audio_rights.has(.network_local));
     try std.testing.expect(!audio_rights.has(.object_write));
     try std.testing.expect(input_rights.has(.device_use));
     try std.testing.expect(!input_rights.has(.network_local));
     try std.testing.expect(!input_rights.has(.object_write));
+    try std.testing.expect(compositor_policy_rights.has(.device_use));
+    try std.testing.expect(!compositor_policy_rights.has(.network_local));
+    try std.testing.expect(!compositor_policy_rights.has(.object_write));
 
     device_inventory.reset();
     device_inventory.registerDetected(.storage_controller, 0x1F001, .ata_bootstrap, true);
     device_inventory.registerDetected(.network_adapter, 0x8086100E0001, .pci_inventory, false);
+    device_inventory.registerDetected(.usb_controller, 0x8086A0ED0001, .xhci_inventory, false);
     device_inventory.registerDetected(.input_device, 0x8042_0001, .ps2_bootstrap, false);
     const storage_handoff = device_inventory.recordForClass(.storage_controller);
     const network_handoff = device_inventory.recordForClass(.network_adapter);
+    const usb_handoff = device_inventory.recordForClass(.usb_controller);
     const input_handoff = device_inventory.recordForClass(.input_device);
     try std.testing.expect(storage_handoff.detected);
     try std.testing.expect(storage_handoff.kernel_bootstrap);
@@ -298,6 +315,9 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expect(network_handoff.detected);
     try std.testing.expect(!network_handoff.kernel_bootstrap);
     try std.testing.expectEqualStrings("pci_inventory", device_inventory.sourceName(network_handoff.source));
+    try std.testing.expect(usb_handoff.detected);
+    try std.testing.expect(!usb_handoff.kernel_bootstrap);
+    try std.testing.expectEqualStrings("xhci_inventory", device_inventory.sourceName(usb_handoff.source));
     try std.testing.expect(input_handoff.detected);
     try std.testing.expect(!input_handoff.kernel_bootstrap);
     try std.testing.expectEqualStrings("ps2_bootstrap", device_inventory.sourceName(input_handoff.source));
