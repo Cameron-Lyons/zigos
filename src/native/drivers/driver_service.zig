@@ -12,9 +12,11 @@ const DRIVER_INDEX_CAPACITY: usize = MAX_DRIVER_SERVICES * 2;
 pub const DeviceClass = enum(u8) {
     network_adapter,
     storage_controller,
+    usb_controller,
     graphics_adapter,
     audio_print_io,
     input_device,
+    compositor_policy,
 };
 
 pub const BootstrapTransport = enum(u8) {
@@ -338,6 +340,9 @@ pub fn allowedRightsFor(device_class: DeviceClass) capability.CapabilityRights {
             .object_read = true,
             .object_write = true,
         } },
+        .usb_controller => .{ .device = .{
+            .device_use = true,
+        } },
         .graphics_adapter => .{ .device = .{
             .device_use = true,
         } },
@@ -345,6 +350,9 @@ pub fn allowedRightsFor(device_class: DeviceClass) capability.CapabilityRights {
             .device_use = true,
         } },
         .input_device => .{ .device = .{
+            .device_use = true,
+        } },
+        .compositor_policy => .{ .device = .{
             .device_use = true,
         } },
     };
@@ -388,14 +396,26 @@ pub fn mintDriverAuthority(
 pub fn supportsKernelBootstrapBroker(device_class: DeviceClass) bool {
     return switch (device_class) {
         .storage_controller => true,
-        .network_adapter, .graphics_adapter, .audio_print_io, .input_device => false,
+        .network_adapter,
+        .usb_controller,
+        .graphics_adapter,
+        .audio_print_io,
+        .input_device,
+        .compositor_policy,
+        => false,
     };
 }
 
 pub fn kernelDriverRole(device_class: DeviceClass) KernelDriverRole {
     return switch (device_class) {
         .storage_controller => .bootstrap_broker_only,
-        .network_adapter, .graphics_adapter, .audio_print_io, .input_device => .inventory_only,
+        .network_adapter,
+        .usb_controller,
+        .graphics_adapter,
+        .audio_print_io,
+        .input_device,
+        .compositor_policy,
+        => .inventory_only,
     };
 }
 
@@ -467,9 +487,11 @@ fn defaultDmaRanges(dest: []DmaRange, device_class: DeviceClass, device_id: u64)
         .length = switch (device_class) {
             .network_adapter => 64 * 1024,
             .storage_controller => 128 * 1024,
+            .usb_controller => 2 * 1024 * 1024,
             .graphics_adapter => 16 * 1024 * 1024,
             .audio_print_io => 1024 * 1024,
             .input_device => 256 * 1024,
+            .compositor_policy => 512 * 1024,
         },
     };
     if (dest.len > 1 and (device_class == .network_adapter or device_class == .storage_controller)) {
@@ -691,29 +713,39 @@ test "driver hot-swap rebinds authority signer and dma domain" {
 test "kernel driver roles keep data planes out of kernel by default" {
     try std.testing.expectEqual(KernelDriverRole.inventory_only, kernelDriverRole(.network_adapter));
     try std.testing.expectEqual(KernelDriverRole.bootstrap_broker_only, kernelDriverRole(.storage_controller));
+    try std.testing.expectEqual(KernelDriverRole.inventory_only, kernelDriverRole(.usb_controller));
     try std.testing.expectEqual(KernelDriverRole.inventory_only, kernelDriverRole(.graphics_adapter));
     try std.testing.expectEqual(KernelDriverRole.inventory_only, kernelDriverRole(.audio_print_io));
     try std.testing.expectEqual(KernelDriverRole.inventory_only, kernelDriverRole(.input_device));
+    try std.testing.expectEqual(KernelDriverRole.inventory_only, kernelDriverRole(.compositor_policy));
     try std.testing.expect(requiresUserspaceDataPlane(.network_adapter));
     try std.testing.expect(requiresUserspaceDataPlane(.storage_controller));
+    try std.testing.expect(requiresUserspaceDataPlane(.usb_controller));
     try std.testing.expect(requiresUserspaceDataPlane(.graphics_adapter));
     try std.testing.expect(requiresUserspaceDataPlane(.audio_print_io));
     try std.testing.expect(requiresUserspaceDataPlane(.input_device));
+    try std.testing.expect(requiresUserspaceDataPlane(.compositor_policy));
     try std.testing.expect(!permitsKernelDataPlane(.network_adapter));
     try std.testing.expect(!permitsKernelDataPlane(.storage_controller));
+    try std.testing.expect(!permitsKernelDataPlane(.usb_controller));
     try std.testing.expect(!permitsKernelDataPlane(.graphics_adapter));
     try std.testing.expect(!permitsKernelDataPlane(.audio_print_io));
     try std.testing.expect(!permitsKernelDataPlane(.input_device));
+    try std.testing.expect(!permitsKernelDataPlane(.compositor_policy));
     try std.testing.expect(!supportsKernelBootstrapBroker(.network_adapter));
     try std.testing.expect(supportsKernelBootstrapBroker(.storage_controller));
+    try std.testing.expect(!supportsKernelBootstrapBroker(.usb_controller));
     try std.testing.expect(!supportsKernelBootstrapBroker(.graphics_adapter));
     try std.testing.expect(!supportsKernelBootstrapBroker(.audio_print_io));
     try std.testing.expect(!supportsKernelBootstrapBroker(.input_device));
+    try std.testing.expect(!supportsKernelBootstrapBroker(.compositor_policy));
     try std.testing.expect(!permitsKernelBootstrapBroker(.network_adapter));
     try std.testing.expect(permitsKernelBootstrapBroker(.storage_controller));
+    try std.testing.expect(!permitsKernelBootstrapBroker(.usb_controller));
     try std.testing.expect(!permitsKernelBootstrapBroker(.graphics_adapter));
     try std.testing.expect(!permitsKernelBootstrapBroker(.audio_print_io));
     try std.testing.expect(!permitsKernelBootstrapBroker(.input_device));
+    try std.testing.expect(!permitsKernelBootstrapBroker(.compositor_policy));
 }
 
 test "network drivers cannot request kernel bootstrap broker transports" {

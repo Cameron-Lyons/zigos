@@ -7,8 +7,35 @@ pub const ObjectType = object_store.ObjectType;
 pub const PutResult = object_store.PutResult;
 pub const ObjectQueryResult = object_store.ObjectQueryResult;
 pub const ObjectHistoryEntry = object_store.ObjectHistoryEntry;
+pub const ObjectOperatingModel = object_store.ObjectOperatingModel;
 pub const Error = object_store.Error || error{
     ObjectPayloadUnavailable,
+    StaleObjectVersion,
+    LabelTooLong,
+    ContentTypeTooLong,
+};
+
+pub const ObjectHandle = struct {
+    object_id: object_store.ids.ObjectId,
+    version_id: object_store.ids.VersionId,
+    object_type: ObjectType,
+    label_len: usize = 0,
+    label: [48]u8 = [_]u8{0} ** 48,
+    content_type_len: usize = 0,
+    content_type: [64]u8 = [_]u8{0} ** 64,
+
+    pub fn labelSlice(self: *const ObjectHandle) []const u8 {
+        return self.label[0..self.label_len];
+    }
+
+    pub fn contentTypeSlice(self: *const ObjectHandle) []const u8 {
+        return self.content_type[0..self.content_type_len];
+    }
+};
+
+pub const LoadedObject = struct {
+    handle: ObjectHandle,
+    payload: []const u8,
 };
 
 pub const Client = struct {
@@ -24,8 +51,29 @@ pub const Client = struct {
         return self.put(.document, label, content_type, payload, null);
     }
 
+    pub fn putDocumentObject(self: *Client, label: []const u8, content_type: []const u8, payload: []const u8) !ObjectHandle {
+        const result = try self.putDocument(label, content_type, payload);
+        return handleFromPut(result, .document, label, content_type);
+    }
+
     pub fn putMedia(self: *Client, label: []const u8, content_type: []const u8, payload: []const u8) !PutResult {
         return self.put(.media_asset, label, content_type, payload, null);
+    }
+
+    pub fn putMediaObject(self: *Client, label: []const u8, content_type: []const u8, payload: []const u8) !ObjectHandle {
+        const result = try self.putMedia(label, content_type, payload);
+        return handleFromPut(result, .media_asset, label, content_type);
+    }
+
+    pub fn putObject(
+        self: *Client,
+        object_type: ObjectType,
+        label: []const u8,
+        content_type: []const u8,
+        payload: []const u8,
+    ) !ObjectHandle {
+        const result = try self.put(object_type, label, content_type, payload, null);
+        return handleFromPut(result, object_type, label, content_type);
     }
 
     pub fn update(
@@ -38,9 +86,35 @@ pub const Client = struct {
         return self.put(.document, label, content_type, payload, previous.version_id);
     }
 
+    pub fn compareAndUpdate(
+        self: *Client,
+        previous: ObjectHandle,
+        payload: []const u8,
+    ) !ObjectHandle {
+        const latest = self.store.latestVersion(previous.object_id) orelse return error.ObjectNotFound;
+        if (!latest.id.eql(previous.version_id)) return error.StaleObjectVersion;
+        const result = try self.put(
+            previous.object_type,
+            previous.labelSlice(),
+            previous.contentTypeSlice(),
+            payload,
+            previous.version_id,
+        );
+        return handleFromPut(result, previous.object_type, previous.labelSlice(), previous.contentTypeSlice());
+    }
+
     pub fn latestPayload(self: *Client, object_id: anytype) ![]const u8 {
         const latest = self.store.latestVersion(object_id) orelse return error.ObjectNotFound;
         return self.store.versionPayload(latest);
+    }
+
+    pub fn load(self: *Client, handle: ObjectHandle) !LoadedObject {
+        const latest = self.store.latestVersion(handle.object_id) orelse return error.ObjectNotFound;
+        const current = try handleFromVersion(latest);
+        return .{
+            .handle = current,
+            .payload = try self.store.versionPayload(latest),
+        };
     }
 
     pub fn queryByLabel(self: *Client, label: []const u8, out: []ObjectQueryResult) []const ObjectQueryResult {
@@ -49,6 +123,10 @@ pub const Client = struct {
 
     pub fn history(self: *Client, object_id: anytype, out: []ObjectHistoryEntry) ![]const ObjectHistoryEntry {
         return self.store.objectHistory(object_id, out);
+    }
+
+    pub fn operatingModel(self: *Client, object_id: anytype) !ObjectOperatingModel {
+        return self.store.objectOperatingModel(object_id);
     }
 
     fn put(
@@ -81,6 +159,39 @@ pub const Client = struct {
     }
 };
 
+fn handleFromPut(
+    result: PutResult,
+    object_type: ObjectType,
+    label: []const u8,
+    content_type: []const u8,
+) Error!ObjectHandle {
+    var handle = ObjectHandle{
+        .object_id = result.object_id,
+        .version_id = result.version_id,
+        .object_type = object_type,
+    };
+    handle.label_len = copyText(&handle.label, label) catch return error.LabelTooLong;
+    handle.content_type_len = copyText(&handle.content_type, content_type) catch return error.ContentTypeTooLong;
+    return handle;
+}
+
+fn handleFromVersion(version: *const object_store.VersionRecord) Error!ObjectHandle {
+    var handle = ObjectHandle{
+        .object_id = version.object_id,
+        .version_id = version.id,
+        .object_type = version.object_type,
+    };
+    handle.label_len = copyText(&handle.label, version.metadata.labelSlice()) catch return error.LabelTooLong;
+    handle.content_type_len = copyText(&handle.content_type, version.metadata.contentTypeSlice()) catch return error.ContentTypeTooLong;
+    return handle;
+}
+
+fn copyText(dest: []u8, source: []const u8) error{TextTooLong}!usize {
+    if (source.len > dest.len) return error.TextTooLong;
+    @memcpy(dest[0..source.len], source);
+    return source.len;
+}
+
 test "object-store SDK stores signed versions and queries developer fixtures" {
     const identity = signing.SignerIdentity{
         .label = "sdk.object-store",
@@ -101,4 +212,17 @@ test "object-store SDK stores signed versions and queries developer fixtures" {
     var history_entries: [4]ObjectHistoryEntry = undefined;
     const entries = try client.history(first.object_id, &history_entries);
     try std.testing.expectEqual(@as(usize, 2), entries.len);
+
+    const model = try client.operatingModel(first.object_id);
+    try std.testing.expect(model.isWholeOsObject());
+    try std.testing.expectEqual(ObjectType.document, model.object_type);
+    try std.testing.expectEqual(second.version_id, model.latest_version_id);
+    try std.testing.expectEqual(object_store.FileBridgePolicy.import_export_only, model.file_bridge_policy);
+
+    const handle = try client.putDocumentObject("typed-note.md", "text/markdown", "# Typed");
+    const updated = try client.compareAndUpdate(handle, "# Typed\n\nNative handle");
+    const loaded = try client.load(updated);
+    try std.testing.expectEqual(updated.version_id, loaded.handle.version_id);
+    try std.testing.expectEqualStrings("# Typed\n\nNative handle", loaded.payload);
+    try std.testing.expectError(error.StaleObjectVersion, client.compareAndUpdate(handle, "# stale"));
 }

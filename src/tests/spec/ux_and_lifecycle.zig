@@ -622,7 +622,8 @@ pub fn structuredServicesAndDiagnosticsStayRedacted() !void {
     try ledger.recordPermissionDecision(spec_support.user(8), 503, .screen_capture, false, .policy_denied, 31, "screen capture blocked", true);
     try ledger.recordDriverRestart(contract.ServiceClass.media_print_helpers, spec_support.service(71), 9, 32, "printer helper restart");
     try ledger.recordSyncConflict(spec_support.user(8), 11, 33, "documents/itinerary.md conflict", true);
-    var export_buffer: [1024]u8 = undefined;
+    try ledger.recordSuspiciousAppBehavior(spec_support.app(8), 503, 34, 0xBAD1, "clipboard scrape then network", true);
+    var export_buffer: [1536]u8 = undefined;
     const redacted = try ledger.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, redacted, "redacted") != null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "media_print_helpers") != null);
@@ -630,4 +631,16 @@ pub fn structuredServicesAndDiagnosticsStayRedacted() !void {
     try std.testing.expect(std.mem.indexOf(u8, redacted, "missing=screen-capture-capability") != null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "approval=yes") != null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "blocked_help=\"Blocked: This app") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "app_behavior=suspicious") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "clipboard scrape then network") == null);
+
+    var summary_buffer: [768]u8 = undefined;
+    const summary = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "diagnostics user_visible=yes privacy=redacted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "capability_denials=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "driver_restarts=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "suspicious_app_behavior=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "sync_conflicts=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "protected_details_redacted=3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "clipboard scrape then network") == null);
 }

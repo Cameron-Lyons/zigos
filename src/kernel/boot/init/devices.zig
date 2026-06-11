@@ -73,6 +73,13 @@ fn capturePciInventory() void {
     if (pci.firstDeviceByClass(PCI_CLASS_GRAPHICS_ADAPTER)) |dev| {
         device_inventory.registerDetected(.graphics_adapter, pciDeviceId(dev), .pci_inventory, false);
     }
+    if (pci.firstDeviceByClassSubclassProgIf(
+        pci.PCI_CLASS_SERIAL_BUS_CONTROLLER,
+        pci.PCI_SUBCLASS_USB,
+        pci.PCI_PROG_IF_XHCI,
+    )) |dev| {
+        device_inventory.registerDetected(.usb_controller, pciDeviceId(dev), .xhci_inventory, false);
+    }
     if (pci.firstDeviceByClass(PCI_CLASS_MULTIMEDIA_CONTROLLER)) |dev| {
         device_inventory.registerDetected(.audio_print_io, pciDeviceId(dev), .pci_inventory, false);
     } else if (pci.firstDeviceByClass(PCI_CLASS_SIMPLE_COMMUNICATIONS_CONTROLLER)) |dev| {

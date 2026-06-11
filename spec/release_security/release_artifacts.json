@@ -18,12 +18,45 @@
     "revocation_required": true,
     "customer_verifiable_required": true,
     "hybrid_ml_dsa_status": "ed25519+ml-dsa65 is preview-only envelope plumbing and is not a production FIPS 204 ML-DSA implementation",
+    "post_quantum_policy": {
+      "mode": "shadow",
+      "fips_validated_required": true,
+      "fips_140_validation_required": true,
+      "production_signature_algorithm": "ml-dsa-65",
+      "key_establishment_algorithm": "ml-kem-768",
+      "backup_signature_algorithm": "slh-dsa-sha2-128s",
+      "hybrid_transition": "Ed25519 remains the classical DSSE baseline during migration; ed25519+ml-dsa65 stays preview-only and never satisfies production FIPS 204 ML-DSA; public required mode needs a separately verified ML-DSA signature from a validated provider.",
+      "standards": [
+        {
+          "fips": "FIPS 203",
+          "algorithm": "ML-KEM",
+          "scope": "key establishment and transport encryption only"
+        },
+        {
+          "fips": "FIPS 204",
+          "algorithm": "ML-DSA",
+          "scope": "release, update, package, and attestation signatures when production PQC is required"
+        },
+        {
+          "fips": "FIPS 205",
+          "algorithm": "SLH-DSA",
+          "scope": "hash-based signature diversity for long-lived offline roots and emergency recovery policy"
+        }
+      ],
+      "rollout": [
+        "shadow: emit policy and verifier measurements while Ed25519 DSSE remains required",
+        "canary: dual-sign selected release channels with Ed25519 and validated ML-DSA, failing closed on malformed PQC signatures",
+        "required: require zigos-verify-release to verify ML-DSA signatures from FIPS-validated providers before accepting public releases"
+      ]
+    },
     "verifier_protocols": [
       "verify artifact-digests.sha256 against downloaded artifacts",
       "verify DSSE signatures over application/vnd.in-toto+json payloads before parsing provenance",
+      "verify release-keyring.json post_quantum_policy covers FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 205 SLH-DSA, FIPS-validated provider requirements, hybrid transition, and measured rollout",
       "verify SLSA provenance predicate type and subject digests",
       "verify release-keyring.json key ids, custody, generation, and not-after bounds",
       "reject revoked key ids or generations listed in revoked-release-keys.json",
+      "reject required ML-DSA rollout unless zigos-verify-release verifies a production ML-DSA signature from a validated provider",
       "compare artifact-measurements.json size and digest measurements against downloaded artifacts",
       "compare reproducible-build.json and reproducible-artifact-digests.sha256 against the release digest manifest",
       "run zigos-verify-release over the downloaded release bundle before trusting artifact measurements or SLSA provenance"

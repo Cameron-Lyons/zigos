@@ -303,6 +303,11 @@ pub const BootedSystem = struct {
                 self.shell.notifications.activeCount(self.last_tick),
             });
         }
+        if (self.shell.state.diagnostics_ran) {
+            var diagnostics_buffer: [768]u8 = undefined;
+            const diagnostics = try self.shell.ledger.renderUserVisibleDiagnosticsToBuffer(&diagnostics_buffer);
+            try appendFmt(buffer, &used, "{s}\n", .{diagnostics});
+        }
         try appendFmt(buffer, &used, "recovery_ui visible={s} checkpoint={s} recovered={s} runtime_checkpoint={s} restart_generation={d}\n", .{
             yesNo(self.recovery_visible),
             yesNo(self.shell.checkpoint_store.valid),

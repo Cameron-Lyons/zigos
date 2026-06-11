@@ -65,8 +65,10 @@ pub fn proveBootedUserspaceServiceOwnershipAndKernelBoundary(
     }{
         .{ .device_class = .network_adapter, .service_class = .network_stack },
         .{ .device_class = .storage_controller, .service_class = .storage_object },
+        .{ .device_class = .usb_controller, .service_class = .compositor_ui_session },
         .{ .device_class = .graphics_adapter, .service_class = .compositor_ui_session },
         .{ .device_class = .input_device, .service_class = .compositor_ui_session },
+        .{ .device_class = .compositor_policy, .service_class = .compositor_ui_session },
         .{ .device_class = .audio_print_io, .service_class = .media_print_helpers },
     };
 
@@ -99,7 +101,13 @@ pub fn proveBootedUserspaceServiceOwnershipAndKernelBoundary(
                 activation.mode == .published_data_plane or
                     activation.mode == .userspace_brokered_data_plane,
             ),
-            .network_adapter, .graphics_adapter, .audio_print_io, .input_device => {
+            .network_adapter,
+            .usb_controller,
+            .graphics_adapter,
+            .audio_print_io,
+            .input_device,
+            .compositor_policy,
+            => {
                 try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, activation.mode);
             },
         }

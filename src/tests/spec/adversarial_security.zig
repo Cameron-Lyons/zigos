@@ -197,6 +197,10 @@ pub fn malformedManifestsStayRejected() !void {
             .resource = "remote.model",
             .rights = .{ .network_policy = .{ .network_remote = true } },
             .local_only = false,
+            .egress_intent = .{
+                .kind = .call_service,
+                .service = "remote.model",
+            },
         },
     };
     try std.testing.expectError(error.LocalOnlyAiRequiresLocalNetwork, manifest.validate(.{

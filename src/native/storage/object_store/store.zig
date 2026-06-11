@@ -177,6 +177,56 @@ pub const ObjectHistoryEntry = struct {
     }
 };
 
+pub const ObjectAccessModel = enum(u8) {
+    capability_scoped,
+};
+
+pub const ObjectSyncPolicy = enum(u8) {
+    local_first_selective,
+};
+
+pub const ObjectHistoryPolicy = enum(u8) {
+    signed_version_chain,
+};
+
+pub const FileBridgePolicy = enum(u8) {
+    import_export_only,
+};
+
+pub const ObjectOperatingModel = struct {
+    object_id: ids.ObjectId = ids.ObjectId.zero,
+    object_type: ObjectType = .blob,
+    latest_version_id: ids.VersionId = ids.VersionId.zero,
+    version_count: u16 = 0,
+    typed: bool = false,
+    signed: bool = false,
+    versioned: bool = false,
+    access_model: ObjectAccessModel = .capability_scoped,
+    sync_policy: ObjectSyncPolicy = .local_first_selective,
+    history_policy: ObjectHistoryPolicy = .signed_version_chain,
+    file_bridge_policy: FileBridgePolicy = .import_export_only,
+    sync_generation: u32 = 0,
+    sharing_policy_generation: u32 = 0,
+    has_history: bool = false,
+    has_sync_policy: bool = false,
+    has_sharing_policy: bool = false,
+    recoverable: bool = false,
+
+    pub fn isWholeOsObject(self: *const ObjectOperatingModel) bool {
+        return self.typed and
+            self.signed and
+            self.versioned and
+            self.access_model == .capability_scoped and
+            self.sync_policy == .local_first_selective and
+            self.history_policy == .signed_version_chain and
+            self.file_bridge_policy == .import_export_only and
+            self.has_history and
+            self.has_sync_policy and
+            self.has_sharing_policy and
+            self.recoverable;
+    }
+};
+
 pub const ObjectRecord = struct {
     id: ids.ObjectId,
     object_type: ObjectType,
@@ -189,11 +239,26 @@ pub const ObjectRecord = struct {
     recovery_history: ObjectRecoveryHistory = .{},
 
     pub fn isPrimaryUserDataModel(self: *const ObjectRecord) bool {
-        return self.provenance.latest_version_addressed and
-            self.snapshot_state.snapshot_count > 0 and
-            self.sync_state.version_watermark >= self.version_count and
-            self.sharing_policy.requires_explicit_file_bridge_grant and
-            self.recovery_history.recoverable;
+        const model = self.operatingModel();
+        return model.isWholeOsObject();
+    }
+
+    pub fn operatingModel(self: *const ObjectRecord) ObjectOperatingModel {
+        return .{
+            .object_id = self.id,
+            .object_type = self.object_type,
+            .latest_version_id = self.latest_version_id,
+            .version_count = self.version_count,
+            .typed = true,
+            .signed = self.provenance.creator_signature.isPresent() and self.provenance.latest_version_addressed,
+            .versioned = self.version_count > 0 and !self.latest_version_id.isZero(),
+            .sync_generation = self.sync_state.sync_generation,
+            .sharing_policy_generation = self.sharing_policy.policy_generation,
+            .has_history = self.snapshot_state.snapshot_count >= self.version_count and !self.snapshot_state.latest_snapshot_version_id.isZero(),
+            .has_sync_policy = self.sync_state.version_watermark >= self.version_count and !self.sync_state.last_synced_version_id.isZero(),
+            .has_sharing_policy = self.sharing_policy.requires_explicit_file_bridge_grant and self.sharing_policy.export_only_file_bridge,
+            .recoverable = self.recovery_history.recoverable,
+        };
     }
 };
 
@@ -614,6 +679,14 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 current_version_id = version_record.previous_version_id;
             }
             return output[0..count];
+        }
+
+        pub fn objectOperatingModel(self: *const Self, object_id: anytype) Error!ObjectOperatingModel {
+            const object_record = self.objectConst(object_id) orelse return error.ObjectNotFound;
+            var model = object_record.operatingModel();
+            const latest = self.versionConst(object_record.latest_version_id) orelse return error.VersionNotFound;
+            model.signed = model.signed and latest.metadata.isSigned();
+            return model;
         }
 
         pub fn versionPayload(self: *Self, version_record: *const VersionRecord) Error![]const u8 {

@@ -319,6 +319,10 @@ test "compositor display framebuffer renders windows switching recovery and perm
         .rights = .{ .network_policy = .{} },
         .local_only = false,
         .max_lease_ticks = 80,
+        .egress_intent = .{
+            .kind = .call_service,
+            .service = "trip.remote",
+        },
     };
     _ = try session.ensureReviewItem(review_window.id, bundle, object_request);
     _ = try session.ensureReviewItem(review_window.id, bundle, network_request);

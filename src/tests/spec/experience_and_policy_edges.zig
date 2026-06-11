@@ -3,6 +3,7 @@ const spec_support = @import("support.zig");
 const accelerator_scheduler = @import("../../native/task/accelerator_scheduler.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
 const compositor_session = @import("../../native/platform/compositor_session.zig");
+const event_ledger = @import("../../native/platform/event_ledger.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const permission_review = @import("../../native/policy/permission_review.zig");
@@ -77,6 +78,11 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
             } },
             .required = false,
             .max_lease_ticks = 60,
+            .egress_intent = .{
+                .kind = .sync_object,
+                .object = "workspace://trip/documents/plan.md",
+                .principal = "trusted-devices",
+            },
         },
     };
     const bundle = manifest.BundleManifest{
@@ -109,12 +115,14 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
     try std.testing.expectEqual(@as(?u64, 80), grants[1].expires_at_ticks);
 
     var review_session = permission_review.initSession(app_task.id, &bundle, &decisions);
-    var summary_buffer: [2048]u8 = undefined;
+    var summary_buffer: [4096]u8 = undefined;
     const rendered_summary = try permission_review.renderToBuffer(&summary_buffer, &review_session, &bundle);
     try expectContains(rendered_summary, "Permission review for Trip Planner [app.trip]");
     try expectContains(rendered_summary, "requested lease: 400 ticks");
     try expectContains(rendered_summary, "decision: allow local_only=yes lease=200 ticks");
     try expectContains(rendered_summary, "decision: allow local_only=no lease=30 ticks");
+    try expectContains(rendered_summary, "receipt: granted=Object access");
+    try expectContains(rendered_summary, "data_leaves=sync object workspace://trip/documents/plan.md with trusted-devices");
 
     var session = compositor_session.Session.init();
     const window = try session.beginPermissionReview(reviewer.id, app_task, bundle);
@@ -134,6 +142,7 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
     try expectContains(rendered_object_item, "why=Trip Planner needs access to local task objects");
     try expectContains(rendered_object_item, "object_scope=workspace://trip/documents/plan.md");
     try expectContains(rendered_object_item, "network_path=none");
+    try expectContains(rendered_object_item, "data_leaves=none");
     try expectContains(rendered_object_item, "requested_local_only=yes");
     try expectContains(rendered_object_item, "requested_lease=400");
 
@@ -141,12 +150,52 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
     try expectContains(rendered_network_item, "resource=https://api.example.com");
     try expectContains(rendered_network_item, "object_scope=none");
     try expectContains(rendered_network_item, "network_path=https://api.example.com");
+    try expectContains(rendered_network_item, "data_leaves=https://api.example.com");
 
     const decision_item = try session.recordDecision(window.id, requests[0], true, true, 200);
     const rendered_decision = try compositor_session.renderDecisionToBuffer(&ui_buffer, window.id, decision_item);
     try expectContains(rendered_decision, "decision=allow");
     try expectContains(rendered_decision, "decision_local_only=yes");
     try expectContains(rendered_decision, "decision_lease=200");
+
+    var capability_table = capability.CapabilityTable.init();
+    var ledger = event_ledger.Ledger.init();
+    var mediator = policy_mediation.PolicyMediator.init(
+        spec_support.policyAuthority(1),
+        &capability_table,
+        &runtime,
+        .{
+            .network_service_id = 900,
+            .compositor_service_id = 901,
+            .policy_service_id = 902,
+            .service_registry_id = 903,
+        },
+    );
+    mediator.attachLedger(&ledger);
+    const activation = try mediator.applyManifest(app_task.id, bundle, grants, 55);
+    try std.testing.expectEqual(@as(usize, 2), activation.granted_count);
+    try expectContains(ledger.latestKind(.capability_grant).?.detailSlice(), "Permission receipt");
+    try expectContains(ledger.latestKind(.capability_grant).?.detailSlice(), "data leaves: sync object workspace://trip/documents/plan.md with trusted-devices");
+
+    var knowledge_buffer: [512]u8 = undefined;
+    const knowledge = try ledger.renderAppDocumentKnowledgeToBuffer(&knowledge_buffer, app_task.id, "workspace://trip/documents/plan.md");
+    try expectContains(knowledge, "knows=yes");
+    try expectContains(knowledge, "active_grants=1");
+    try expectContains(knowledge, "egress_routes=1");
+    try expectContains(knowledge, "data_can_leave=yes");
+    try expectContains(knowledge, "revoke=Permission Review can revoke listed capability ids");
+
+    const object_capability_id = activation.decisionForKind(.object_access).?.capability_id.?;
+    try std.testing.expect(try mediator.revokeGrantedCapability(
+        app_task.id,
+        object_capability_id,
+        .object_access,
+        90,
+        "workspace://trip/documents/plan.md revoked from Permission Review",
+    ));
+    const knowledge_after_revoke = try ledger.renderAppDocumentKnowledgeToBuffer(&knowledge_buffer, app_task.id, "workspace://trip/documents/plan.md");
+    try expectContains(knowledge_after_revoke, "active_grants=0");
+    try expectContains(knowledge_after_revoke, "revoked=1");
 
     var directory = workspace.Directory.init();
     const trip_workspace = try directory.create(.{

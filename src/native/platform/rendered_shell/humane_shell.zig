@@ -511,6 +511,11 @@ pub const HumaneShell = struct {
             self.state.diagnostics_event_count,
             yesNo(self.state.remote_diagnostics_require_opt_in),
         });
+        if (self.state.diagnostics_ran) {
+            var diagnostics_buffer: [768]u8 = undefined;
+            const diagnostics = try self.ledger.renderUserVisibleDiagnosticsToBuffer(&diagnostics_buffer);
+            try appendFmt(buffer, &used, "{s}\n", .{diagnostics});
+        }
         const latest = self.notifications.latestVisible(self.state.last_tick);
         if (latest) |notification| {
             try appendFmt(buffer, &used, "notification id={d} reason={s} detail={s}\n", .{

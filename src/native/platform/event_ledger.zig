@@ -17,7 +17,7 @@ const copyText = native_util.copyText;
 const yesNo = native_util.yesNo;
 
 pub const MAX_EVENTS: usize = 64;
-pub const MAX_DETAIL_BYTES: usize = 96;
+pub const MAX_DETAIL_BYTES: usize = 512;
 pub const state_workspace_label = "system-diagnostics";
 
 const MAX_PERSISTED_EVENTS: usize = MAX_EVENTS;
@@ -46,6 +46,7 @@ pub const EventKind = enum(u8) {
     notification,
     task_flow,
     policy_change,
+    suspicious_app_behavior,
 };
 
 pub const PolicyChangeAction = enum(u8) {
@@ -70,6 +71,31 @@ pub const RemoteShareOptions = struct {
     include_protected_content: bool = false,
     personal_device: bool = true,
     user_opted_in: bool = false,
+};
+
+pub const DiagnosticSummary = struct {
+    total_events: usize = 0,
+    protected_details_redacted: usize = 0,
+    capability_denials: usize = 0,
+    crashes: usize = 0,
+    driver_restarts: usize = 0,
+    suspicious_app_behavior: usize = 0,
+    sync_conflicts: usize = 0,
+    device_trust_changes: usize = 0,
+    device_trust_revocations: usize = 0,
+    update_health_events: usize = 0,
+    update_rollbacks: usize = 0,
+    latest_tick: u64 = 0,
+
+    pub fn evidenceEventCount(self: DiagnosticSummary) usize {
+        return self.capability_denials +
+            self.crashes +
+            self.driver_restarts +
+            self.suspicious_app_behavior +
+            self.sync_conflicts +
+            self.device_trust_changes +
+            self.update_health_events;
+    }
 };
 
 pub const Event = struct {
@@ -349,6 +375,27 @@ pub const Ledger = struct {
         });
     }
 
+    pub fn recordSuspiciousAppBehavior(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        tick: u64,
+        code: u32,
+        detail: []const u8,
+        protected: bool,
+    ) Error!void {
+        try self.append(.{
+            .kind = .suspicious_app_behavior,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .detail_code = code,
+            .detail_protected = protected,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
     pub fn recordProcessCrash(
         self: *Ledger,
         service_class: contract.ServiceClass,
@@ -503,6 +550,140 @@ pub const Ledger = struct {
         return self.exportText(buffer, .{
             .include_protected_content = options.include_protected_content,
         });
+    }
+
+    pub fn userVisibleDiagnosticSummary(self: *const Ledger) DiagnosticSummary {
+        var summary = DiagnosticSummary{};
+        for (self.events.slots) |slot| {
+            if (!slot.in_use) continue;
+            const event = slot.event;
+            summary.total_events += 1;
+            summary.latest_tick = @max(summary.latest_tick, event.tick);
+            if (event.detail_protected) summary.protected_details_redacted += 1;
+
+            switch (event.kind) {
+                .permission_decision => {
+                    if (!event.allowed) summary.capability_denials += 1;
+                },
+                .process_crash => summary.crashes += 1,
+                .driver_restart => summary.driver_restarts += 1,
+                .suspicious_app_behavior => summary.suspicious_app_behavior += 1,
+                .sync_conflict => summary.sync_conflicts += 1,
+                .device_trust_change => {
+                    summary.device_trust_changes += 1;
+                    if (!event.allowed) summary.device_trust_revocations += 1;
+                },
+                .update_transition => {
+                    summary.update_health_events += 1;
+                    if (!event.allowed) summary.update_rollbacks += 1;
+                },
+                else => {},
+            }
+        }
+        return summary;
+    }
+
+    pub fn renderUserVisibleDiagnosticsToBuffer(self: *const Ledger, buffer: []u8) Error![]const u8 {
+        const summary = self.userVisibleDiagnosticSummary();
+        const evidence_events = summary.evidenceEventCount();
+        var used: usize = 0;
+        try appendFmt(buffer, &used, "diagnostics user_visible=yes privacy=redacted evidence_of_intrusion_capable=yes total_events={d} evidence_events={d} evidence_present={s} protected_details_redacted={d} latest_tick={d}\n", .{
+            summary.total_events,
+            evidence_events,
+            yesNo(evidence_events != 0),
+            summary.protected_details_redacted,
+            summary.latest_tick,
+        });
+        try appendFmt(buffer, &used, "diagnostic_evidence capability_denials={d} crashes={d} driver_restarts={d} suspicious_app_behavior={d} sync_conflicts={d} device_trust_changes={d} device_trust_revocations={d} update_health_events={d} update_rollbacks={d}", .{
+            summary.capability_denials,
+            summary.crashes,
+            summary.driver_restarts,
+            summary.suspicious_app_behavior,
+            summary.sync_conflicts,
+            summary.device_trust_changes,
+            summary.device_trust_revocations,
+            summary.update_health_events,
+            summary.update_rollbacks,
+        });
+        return buffer[0..used];
+    }
+
+    pub fn renderAppDocumentKnowledgeToBuffer(
+        self: *const Ledger,
+        buffer: []u8,
+        task_id: u64,
+        document_resource: []const u8,
+    ) Error![]const u8 {
+        var prompt_count: usize = 0;
+        var object_grant_count: usize = 0;
+        var egress_route_count: usize = 0;
+        var grant_ids: [MAX_EVENTS]u64 = [_]u64{0} ** MAX_EVENTS;
+        var grant_id_count: usize = 0;
+        var latest_object_capability: u64 = 0;
+        var latest_egress_capability: u64 = 0;
+
+        for (self.events.slots) |slot| {
+            if (!slot.in_use) continue;
+            const event = slot.event;
+            if (event.task_id != task_id) continue;
+            if (!eventMentionsDocument(event, document_resource)) continue;
+
+            switch (event.kind) {
+                .permission_review, .permission_decision => prompt_count += 1,
+                .capability_grant => {
+                    if (event.permission_kind) |permission_kind| {
+                        switch (permission_kind) {
+                            .object_access, .contacts => {
+                                object_grant_count += 1;
+                                latest_object_capability = event.related_id;
+                                if (grant_id_count < grant_ids.len) {
+                                    grant_ids[grant_id_count] = event.related_id;
+                                    grant_id_count += 1;
+                                }
+                            },
+                            .network_egress => {
+                                egress_route_count += 1;
+                                latest_egress_capability = event.related_id;
+                            },
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+
+        var revoked_count: usize = 0;
+        for (self.events.slots) |slot| {
+            if (!slot.in_use) continue;
+            const event = slot.event;
+            if (event.task_id != task_id or event.kind != .capability_revocation) continue;
+            if (!containsCapabilityId(grant_ids[0..grant_id_count], event.related_id)) continue;
+            revoked_count += 1;
+        }
+
+        const active_grants = if (revoked_count >= object_grant_count) 0 else object_grant_count - revoked_count;
+        const knows = prompt_count != 0 or object_grant_count != 0 or egress_route_count != 0;
+        var used: usize = 0;
+        try appendFmt(buffer, &used, "App document knowledge: task={d} document={s} knows={s} prompts={d} object_grants={d} active_grants={d} revoked={d} egress_routes={d} data_can_leave={s}", .{
+            task_id,
+            document_resource,
+            yesNo(knows),
+            prompt_count,
+            object_grant_count,
+            active_grants,
+            revoked_count,
+            egress_route_count,
+            yesNo(egress_route_count != 0),
+        });
+        if (latest_object_capability != 0) {
+            try appendFmt(buffer, &used, " object_capability={d}", .{latest_object_capability});
+        }
+        if (latest_egress_capability != 0) {
+            try appendFmt(buffer, &used, " egress_capability={d}", .{latest_egress_capability});
+        }
+        try appendFmt(buffer, &used, " revoke=Permission Review can revoke listed capability ids", .{});
+        return buffer[0..used];
     }
 
     pub fn absorb(self: *Ledger, source: *const Ledger) Error!void {
@@ -834,8 +1015,8 @@ const PersistentEventRecord = extern struct {
     flags: u8 = 0,
     policy_label_len: u8 = 0,
     missing_capability_len: u8 = 0,
-    detail_len: u8 = 0,
-    _reserved: [6]u8 = [_]u8{0} ** 6,
+    detail_len: u16 = 0,
+    _reserved: [5]u8 = [_]u8{0} ** 5,
     tick: u64 = 0,
     subject_serial: u64 = 0,
     task_id: u64 = 0,
@@ -995,6 +1176,17 @@ fn matchesQuery(event: Event, query: Query) bool {
     return true;
 }
 
+fn eventMentionsDocument(event: Event, document_resource: []const u8) bool {
+    return document_resource.len != 0 and std.mem.indexOf(u8, event.detailSlice(), document_resource) != null;
+}
+
+fn containsCapabilityId(capability_ids: []const u64, capability_id: u64) bool {
+    for (capability_ids) |candidate| {
+        if (candidate == capability_id) return true;
+    }
+    return false;
+}
+
 fn redactedForQuery(event: Event, query: Query) Event {
     if (!event.detail_protected or query.include_protected_content) return event;
     var redacted = event;
@@ -1074,6 +1266,9 @@ fn renderTextEvent(event: Event, buffer: []u8, used: *usize) Error!void {
                 event.related_id,
                 policyChangeActionLabel(event.detail_code),
             });
+        },
+        .suspicious_app_behavior => {
+            try appendFmt(buffer, used, " app_behavior=suspicious", .{});
         },
         else => {},
     }

@@ -432,7 +432,12 @@ fn initPublication(comptime T: type, device_id: u64, publisher: []const u8, kern
 
 fn supportsGenericDeviceDataPlane(device_class: driver_service.DeviceClass) bool {
     return switch (device_class) {
-        .graphics_adapter, .audio_print_io, .input_device => true,
+        .usb_controller,
+        .graphics_adapter,
+        .audio_print_io,
+        .input_device,
+        .compositor_policy,
+        => true,
         .network_adapter, .storage_controller => false,
     };
 }
@@ -577,7 +582,13 @@ test "kernel bootstrap cannot publish peripheral device data-plane transports di
     reset();
     defer reset();
 
-    const peripheral_classes = [_]driver_service.DeviceClass{ .graphics_adapter, .audio_print_io, .input_device };
+    const peripheral_classes = [_]driver_service.DeviceClass{
+        .usb_controller,
+        .graphics_adapter,
+        .audio_print_io,
+        .input_device,
+        .compositor_policy,
+    };
     for (peripheral_classes) |device_class| {
         try std.testing.expect(!(try publishDeviceDataPlane(device_class, @as(u64, 0x9000) + @intFromEnum(device_class), "kernel-device", true)));
         try std.testing.expect(deviceDataPlanePublication(device_class) == null);

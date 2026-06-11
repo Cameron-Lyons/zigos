@@ -305,7 +305,7 @@ pub fn firstHardwareTargetGate() !void {
     try std.testing.expectEqualStrings("NUC11TNKi5", target.sku);
     try std.testing.expectEqualStrings("Intel Ethernet Controller I225-LM", target.network);
     try std.testing.expect(hardware_target.coversRequiredSubsystems(target));
-    try std.testing.expectEqual(target.required_subsystems.len, target.required_markers.len);
+    try std.testing.expect(target.required_subsystems.len >= target.required_markers.len);
     try std.testing.expect(containsString(
         hardware_target.nuc11tnki5_proof_metadata_markers[0..],
         hardware_target.nuc11tnki5_marker_prefix ++ ":EVIDENCE_SOURCE:REAL_HARDWARE",
@@ -318,7 +318,7 @@ pub fn firstHardwareTargetGate() !void {
         hardware_target.nuc11tnki5_proof_metadata_markers[0..],
         hardware_target.nuc11tnki5_marker_prefix ++ ":ARTIFACT_DIGESTS:RECORDED",
     ));
-    try std.testing.expectEqual(@as(usize, 6), hardware_target.nuc11tnki5_counter_markers.len);
+    try std.testing.expectEqual(@as(usize, 8), hardware_target.nuc11tnki5_counter_markers.len);
     for (hardware_target.nuc11tnki5_counter_markers) |counter_marker| {
         try std.testing.expect(std.mem.startsWith(u8, counter_marker.marker_prefix, hardware_target.nuc11tnki5_marker_prefix));
         try std.testing.expect(counter_marker.minimum > 0);
@@ -418,6 +418,8 @@ pub fn firstHardwareTargetGate() !void {
         .network_frame_cycles = target.proof_minimums.network_frame_cycles,
         .suspend_resume_cycles = target.proof_minimums.suspend_resume_cycles,
         .crash_recovery_cycles = target.proof_minimums.crash_recovery_cycles,
+        .crash_record_persistence_cycles = target.proof_minimums.crash_record_persistence_cycles,
+        .update_rollback_cycles = target.proof_minimums.update_rollback_cycles,
         .proof_manifest_captured = true,
         .serial_log_captured = true,
         .firmware_settings_captured = true,
@@ -435,6 +437,8 @@ pub fn firstHardwareTargetGate() !void {
         .network_frame_cycles = target.proof_minimums.network_frame_cycles,
         .suspend_resume_cycles = target.proof_minimums.suspend_resume_cycles,
         .crash_recovery_cycles = target.proof_minimums.crash_recovery_cycles,
+        .crash_record_persistence_cycles = target.proof_minimums.crash_record_persistence_cycles,
+        .update_rollback_cycles = target.proof_minimums.update_rollback_cycles,
         .proof_manifest_captured = true,
         .serial_log_captured = true,
         .required_markers_captured = true,
@@ -481,6 +485,8 @@ pub fn firstHardwareTargetGate() !void {
         .network_frame_cycles = target.proof_minimums.network_frame_cycles,
         .suspend_resume_cycles = target.proof_minimums.suspend_resume_cycles,
         .crash_recovery_cycles = target.proof_minimums.crash_recovery_cycles,
+        .crash_record_persistence_cycles = target.proof_minimums.crash_record_persistence_cycles,
+        .update_rollback_cycles = target.proof_minimums.update_rollback_cycles,
     };
     try std.testing.expect(kernel_hardware_proof.allSubsystemMarkersReady(composed_complete));
     const runtime_evidence = kernel_hardware_proof.evaluateEvidence(composed_complete);

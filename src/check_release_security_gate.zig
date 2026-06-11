@@ -16,6 +16,7 @@ const workspace = @import("native/storage/workspace.zig");
 
 const FUZZ_CORPUS_PATH = "spec/release_security/fuzz_corpus.json";
 const RELEASE_ARTIFACTS_PATH = "spec/release_security/release_artifacts.json";
+const RELEASE_KEYRING_PATH = "spec/release_security/release_keyring.json";
 const THREAT_MODEL_PATH = "spec/release_security/threat_model.json";
 const MEMORY_SAFETY_INVENTORY_PATH = "spec/release_security/memory_safety_inventory.json";
 const CRASH_DUMP_REDACTION_PATH = "spec/release_security/crash_dump_redaction.json";
@@ -82,6 +83,7 @@ pub fn main(init: std.process.Init) !void {
 
     try validateFuzzCorpus(allocator, io, &errors, &summary);
     try validateReleaseArtifacts(allocator, io, &errors);
+    try validateReleaseKeyring(allocator, io, &errors);
     try validateThreatModel(allocator, io, &errors);
     try validateMemorySafetyInventory(allocator, gpa, io, &errors, &summary);
     try validateCrashDumpRedaction(allocator, io, &errors);
@@ -364,6 +366,8 @@ fn validateReleaseArtifacts(
     {
         try common.addError(errors, allocator, "release signing hybrid_ml_dsa_status must state that the hybrid ML-DSA path is preview-only and not production FIPS 204", .{});
     }
+    const post_quantum_policy = try common.expectObjectField(allocator, errors, release_signing, "release signing", "post_quantum_policy") orelse return;
+    try validatePostQuantumReleasePolicy(allocator, errors, post_quantum_policy);
     const verifier_protocols = try common.collectStringArray(
         allocator,
         errors,
@@ -375,8 +379,16 @@ fn validateReleaseArtifacts(
         "artifact-digests",
         "DSSE",
         "SLSA",
+        "post_quantum_policy",
+        "FIPS 203",
+        "ML-KEM",
+        "FIPS 204",
+        "ML-DSA",
+        "FIPS 205",
+        "SLH-DSA",
         "release-keyring",
         "revoked",
+        "required ML-DSA",
         "artifact-measurements",
         "reproducible-build",
         "zigos-verify-release",
@@ -452,6 +464,75 @@ fn validateReleaseArtifacts(
         if (!stringArrayContains(customer_bundle, artifact)) {
             try common.addError(errors, allocator, "customer_verification_bundle must include {s}", .{artifact});
         }
+    }
+}
+
+fn validateReleaseKeyring(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const root = try parseJsonFile(allocator, io, errors, RELEASE_KEYRING_PATH) orelse return;
+    const policy = try common.expectObjectField(allocator, errors, root, "release keyring", "post_quantum_policy") orelse return;
+    try validatePostQuantumReleasePolicy(allocator, errors, policy);
+
+    const production_profiles_value = common.field(root, "production_pqc_profiles") orelse {
+        try common.addError(errors, allocator, "release keyring must include production_pqc_profiles", .{});
+        return;
+    };
+    const production_profiles = switch (production_profiles_value) {
+        .array => |array| array.items,
+        else => {
+            try common.addError(errors, allocator, "release keyring production_pqc_profiles must be an array", .{});
+            return;
+        },
+    };
+    var has_ml_dsa65 = false;
+    for (production_profiles, 0..) |profile, index| {
+        if (profile != .object) {
+            try common.addError(errors, allocator, "release keyring production_pqc_profiles entry {d} must be an object", .{index});
+            continue;
+        }
+        const name = try common.expectStringField(allocator, errors, profile, "release keyring production_pqc_profile", "profile") orelse "";
+        if (!std.mem.eql(u8, name, "ml-dsa-65")) continue;
+        has_ml_dsa65 = true;
+        try expectStringValue(allocator, errors, profile, "release keyring production_pqc_profile ml-dsa-65", "fips_standard", "FIPS 204");
+        try expectFalseBoolField(allocator, errors, profile, "release keyring production_pqc_profile ml-dsa-65", "release_allowed");
+        try expectTrueBoolField(allocator, errors, profile, "release keyring production_pqc_profile ml-dsa-65", "fips_validation_required");
+        try expectTrueBoolField(allocator, errors, profile, "release keyring production_pqc_profile ml-dsa-65", "fips_140_validated_module_required");
+    }
+    if (!has_ml_dsa65) {
+        try common.addError(errors, allocator, "release keyring production_pqc_profiles must include ml-dsa-65", .{});
+    }
+
+    const preview_profiles_value = common.field(root, "preview_profiles") orelse {
+        try common.addError(errors, allocator, "release keyring must include preview_profiles", .{});
+        return;
+    };
+    const preview_profiles = switch (preview_profiles_value) {
+        .array => |array| array.items,
+        else => {
+            try common.addError(errors, allocator, "release keyring preview_profiles must be an array", .{});
+            return;
+        },
+    };
+    var has_hybrid_preview = false;
+    for (preview_profiles, 0..) |profile, index| {
+        if (profile != .object) {
+            try common.addError(errors, allocator, "release keyring preview_profiles entry {d} must be an object", .{index});
+            continue;
+        }
+        const name = try common.expectStringField(allocator, errors, profile, "release keyring preview_profile", "profile") orelse "";
+        if (!std.mem.eql(u8, name, "ed25519+ml-dsa65")) continue;
+        has_hybrid_preview = true;
+        try expectFalseBoolField(allocator, errors, profile, "release keyring preview_profile ed25519+ml-dsa65", "release_allowed");
+        const fips_204_status = try common.expectStringField(allocator, errors, profile, "release keyring preview_profile ed25519+ml-dsa65", "fips_204_status") orelse "";
+        if (!common.containsAsciiIgnoreCase(fips_204_status, "not a production")) {
+            try common.addError(errors, allocator, "release keyring preview profile must reject ed25519+ml-dsa65 as production FIPS 204", .{});
+        }
+    }
+    if (!has_hybrid_preview) {
+        try common.addError(errors, allocator, "release keyring preview_profiles must include ed25519+ml-dsa65", .{});
     }
 }
 
@@ -772,6 +853,84 @@ fn validateVulnerabilityDisclosure(
     }
 }
 
+fn validatePostQuantumReleasePolicy(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    policy: std.json.Value,
+) !void {
+    const mode = try common.expectStringField(allocator, errors, policy, "release signing post_quantum_policy", "mode") orelse "";
+    const allowed_modes = [_][]const u8{ "shadow", "canary", "required" };
+    if (mode.len > 0 and !isOneOf(mode, &allowed_modes)) {
+        try common.addError(errors, allocator, "release signing post_quantum_policy mode must be shadow, canary, or required", .{});
+    }
+    try expectTrueBoolField(allocator, errors, policy, "release signing post_quantum_policy", "fips_validated_required");
+    try expectTrueBoolField(allocator, errors, policy, "release signing post_quantum_policy", "fips_140_validation_required");
+
+    const production_signature = try common.expectStringField(allocator, errors, policy, "release signing post_quantum_policy", "production_signature_algorithm") orelse "";
+    if (!common.containsAsciiIgnoreCase(production_signature, "ml-dsa")) {
+        try common.addError(errors, allocator, "release signing post_quantum_policy production_signature_algorithm must name ML-DSA", .{});
+    }
+    const key_establishment = try common.expectStringField(allocator, errors, policy, "release signing post_quantum_policy", "key_establishment_algorithm") orelse "";
+    if (!common.containsAsciiIgnoreCase(key_establishment, "ml-kem")) {
+        try common.addError(errors, allocator, "release signing post_quantum_policy key_establishment_algorithm must name ML-KEM", .{});
+    }
+    const backup_signature = try common.expectStringField(allocator, errors, policy, "release signing post_quantum_policy", "backup_signature_algorithm") orelse "";
+    if (!common.containsAsciiIgnoreCase(backup_signature, "slh-dsa")) {
+        try common.addError(errors, allocator, "release signing post_quantum_policy backup_signature_algorithm must name SLH-DSA", .{});
+    }
+    const hybrid_transition = try common.expectStringField(allocator, errors, policy, "release signing post_quantum_policy", "hybrid_transition") orelse "";
+    if (!common.containsAsciiIgnoreCase(hybrid_transition, "ed25519+ml-dsa65") or
+        !common.containsAsciiIgnoreCase(hybrid_transition, "preview") or
+        !common.containsAsciiIgnoreCase(hybrid_transition, "FIPS 204"))
+    {
+        try common.addError(errors, allocator, "release signing post_quantum_policy hybrid_transition must keep ed25519+ml-dsa65 preview-only and separate from production FIPS 204 ML-DSA", .{});
+    }
+
+    const standards_value = common.field(policy, "standards") orelse {
+        try common.addError(errors, allocator, "release signing post_quantum_policy must include standards", .{});
+        return;
+    };
+    const standards = switch (standards_value) {
+        .array => |array| array.items,
+        else => {
+            try common.addError(errors, allocator, "release signing post_quantum_policy standards must be an array", .{});
+            return;
+        },
+    };
+    var has_fips_203 = false;
+    var has_fips_204 = false;
+    var has_fips_205 = false;
+    for (standards, 0..) |standard, index| {
+        if (standard != .object) {
+            try common.addError(errors, allocator, "release signing post_quantum_policy standard at index {d} must be an object", .{index});
+            continue;
+        }
+        const fips = try common.expectStringField(allocator, errors, standard, "release signing post_quantum_policy standard", "fips") orelse "";
+        const algorithm = try common.expectStringField(allocator, errors, standard, "release signing post_quantum_policy standard", "algorithm") orelse "";
+        if (std.mem.eql(u8, fips, "FIPS 203") and common.containsAsciiIgnoreCase(algorithm, "ML-KEM")) has_fips_203 = true;
+        if (std.mem.eql(u8, fips, "FIPS 204") and common.containsAsciiIgnoreCase(algorithm, "ML-DSA")) has_fips_204 = true;
+        if (std.mem.eql(u8, fips, "FIPS 205") and common.containsAsciiIgnoreCase(algorithm, "SLH-DSA")) has_fips_205 = true;
+    }
+    if (!has_fips_203 or !has_fips_204 or !has_fips_205) {
+        try common.addError(errors, allocator, "release signing post_quantum_policy standards must cover FIPS 203 ML-KEM, FIPS 204 ML-DSA, and FIPS 205 SLH-DSA", .{});
+    }
+
+    const rollout = try common.collectStringArray(
+        allocator,
+        errors,
+        common.field(policy, "rollout"),
+        "release signing post_quantum_policy rollout",
+        true,
+    );
+    if (rollout.len < 3 or
+        !stringArrayContainsSubstring(rollout, "shadow") or
+        !stringArrayContainsSubstring(rollout, "canary") or
+        !stringArrayContainsSubstring(rollout, "required"))
+    {
+        try common.addError(errors, allocator, "release signing post_quantum_policy rollout must include shadow, canary, and required phases", .{});
+    }
+}
+
 fn parseJsonFile(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -860,6 +1019,25 @@ fn expectTrueBoolField(
     switch (value) {
         .bool => |flag| if (!flag) {
             try common.addError(errors, allocator, "{s} {s} must be true", .{ context, name });
+        },
+        else => try common.addError(errors, allocator, "{s} {s} must be a bool", .{ context, name }),
+    }
+}
+
+fn expectFalseBoolField(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    object: std.json.Value,
+    context: []const u8,
+    name: []const u8,
+) !void {
+    const value = common.field(object, name) orelse {
+        try common.addError(errors, allocator, "{s} must include {s}", .{ context, name });
+        return;
+    };
+    switch (value) {
+        .bool => |flag| if (flag) {
+            try common.addError(errors, allocator, "{s} {s} must be false", .{ context, name });
         },
         else => try common.addError(errors, allocator, "{s} {s} must be a bool", .{ context, name }),
     }

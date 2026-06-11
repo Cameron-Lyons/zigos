@@ -16,15 +16,33 @@ pub const GrantScope = struct {
     expires_at_ticks: ?u64 = null,
 };
 
+pub const PermissionReceipt = struct {
+    task_id: u64 = 0,
+    bundle_id: []const u8 = "",
+    display_name: []const u8 = "",
+    capability_id: u64 = 0,
+    request: manifest.PermissionRequest,
+    local_only: bool = false,
+    expires_at_ticks: ?u64 = null,
+    why: []const u8 = "",
+};
+
 pub fn renderRequestScopeToBuffer(
     buffer: []u8,
     request: manifest.PermissionRequest,
 ) RenderError![]const u8 {
     var used: usize = 0;
-    try appendFmt(buffer, &used, "Scope: {s}; rights: ", .{scopeSummaryLabel(request.kind, request.local_only)});
+    try appendFmt(buffer, &used, "Scope: {s}", .{scopeSummaryLabel(request.kind, request.local_only)});
+    if (request.kind == .network_egress and request.egress_intent.declared()) {
+        try appendText(buffer, &used, "; intent: ");
+        try appendDataEgressIntent(buffer, &used, request.egress_intent);
+    }
+    try appendText(buffer, &used, "; rights: ");
     try appendRights(buffer, &used, request.rights);
     try appendText(buffer, &used, "; lease: ");
     try appendRequestedLease(buffer, &used, request.max_lease_ticks);
+    try appendText(buffer, &used, "; data leaves: ");
+    try appendDataLeaving(buffer, &used, request);
     try appendFmt(buffer, &used, "; revoke: {s}", .{revocationHint(request.kind)});
     return buffer[0..used];
 }
@@ -46,6 +64,45 @@ pub fn renderGrantScopeToBuffer(
     try appendText(buffer, &used, "; expiry: ");
     try appendExpiry(buffer, &used, grant.expires_at_ticks, now_ticks);
     try appendFmt(buffer, &used, "; revoke: {s}", .{revocationHint(request.kind)});
+    return buffer[0..used];
+}
+
+pub fn renderPermissionReceiptToBuffer(
+    buffer: []u8,
+    receipt: PermissionReceipt,
+    now_ticks: u64,
+) RenderError![]const u8 {
+    var used: usize = 0;
+    const app_label = if (receipt.display_name.len != 0) receipt.display_name else if (receipt.bundle_id.len != 0) receipt.bundle_id else "app";
+    const local_only = receipt.request.local_only or receipt.local_only;
+    try appendFmt(buffer, &used, "Permission receipt: app={s}", .{app_label});
+    if (receipt.bundle_id.len != 0) {
+        try appendFmt(buffer, &used, " bundle={s}", .{receipt.bundle_id});
+    }
+    if (receipt.task_id != 0) {
+        try appendFmt(buffer, &used, " task={d}", .{receipt.task_id});
+    }
+    if (receipt.capability_id != 0) {
+        try appendFmt(buffer, &used, " capability={d}", .{receipt.capability_id});
+    }
+    try appendFmt(buffer, &used, "; granted: {s} for {s}; rights: ", .{
+        permissionLabel(receipt.request.kind),
+        receipt.request.resource,
+    });
+    try appendRights(buffer, &used, receipt.request.rights);
+    try appendText(buffer, &used, "; why: ");
+    if (receipt.why.len != 0) {
+        try appendText(buffer, &used, receipt.why);
+    } else {
+        try appendPermissionReason(buffer, &used, app_label, receipt.request);
+    }
+    try appendText(buffer, &used, "; duration: ");
+    try appendExpiry(buffer, &used, receipt.expires_at_ticks, now_ticks);
+    try appendFmt(buffer, &used, "; scope: {s}; data leaves: ", .{
+        scopeSummaryLabel(receipt.request.kind, local_only),
+    });
+    try appendDataLeaving(buffer, &used, receipt.request);
+    try appendFmt(buffer, &used, "; revoke: {s}", .{revocationHint(receipt.request.kind)});
     return buffer[0..used];
 }
 
@@ -145,7 +202,7 @@ pub fn scopeSummaryLabel(kind: manifest.PermissionKind, local_only: bool) []cons
     return switch (kind) {
         .object_access => if (local_only) "this object on this device" else "this object wherever the workspace is shared",
         .contacts => if (local_only) "selected contacts on this device" else "selected contacts wherever the workspace is shared",
-        .network_egress => if (local_only) "local network path only" else "named network path only",
+        .network_egress => if (local_only) "local data route only" else "named data route only",
         .device_access => "selected hardware device only",
         .clipboard => "clipboard for this task",
         .camera => "selected camera only",
@@ -174,7 +231,7 @@ pub fn expiryLabel(buffer: []u8, expires_at_ticks: ?u64, now_ticks: u64) RenderE
 pub fn revocationHint(kind: manifest.PermissionKind) []const u8 {
     return switch (kind) {
         .object_access, .contacts => "remove this app from the object's share sheet",
-        .network_egress => "turn off the network grant in Permission Review",
+        .network_egress => "turn off the data route grant in Permission Review",
         .device_access, .camera, .mic, .sensor, .location, .screen_capture => "turn off the device grant in Permission Review",
         .clipboard => "turn off clipboard access in Permission Review",
         .notification_post => "mute or revoke notifications in Permission Review",
@@ -259,7 +316,7 @@ fn appendPrincipal(buffer: []u8, used: *usize, id: principal.PrincipalId) Render
 fn permissionLabel(kind: manifest.PermissionKind) []const u8 {
     return switch (kind) {
         .object_access => "Object access",
-        .network_egress => "Network access",
+        .network_egress => "Data egress",
         .device_access => "Device access",
         .clipboard => "Clipboard access",
         .camera => "Camera access",
@@ -343,6 +400,57 @@ fn backgroundNetworkLabel(mode: manifest.BackgroundNetworkMode) []const u8 {
     };
 }
 
+fn appendDataEgressIntent(buffer: []u8, used: *usize, intent: manifest.DataEgressIntent) RenderError!void {
+    switch (intent.kind) {
+        .unspecified => try appendText(buffer, used, "unspecified data egress"),
+        .sync_object => try appendFmt(buffer, used, "sync object {s} with {s}", .{
+            intent.object,
+            intent.principal,
+        }),
+        .call_service => try appendFmt(buffer, used, "call service {s}", .{intent.service}),
+        .publish_event => try appendFmt(buffer, used, "publish event {s}", .{intent.event_type}),
+    }
+}
+
+fn appendDataLeaving(buffer: []u8, used: *usize, request: manifest.PermissionRequest) RenderError!void {
+    if (request.kind == .network_egress) {
+        if (request.egress_intent.declared()) {
+            try appendDataEgressIntent(buffer, used, request.egress_intent);
+        } else {
+            try appendFmt(buffer, used, "network route {s}", .{request.resource});
+        }
+        return;
+    }
+
+    try appendText(buffer, used, "none");
+}
+
+fn appendPermissionReason(
+    buffer: []u8,
+    used: *usize,
+    display_name: []const u8,
+    request: manifest.PermissionRequest,
+) RenderError!void {
+    switch (request.kind) {
+        .object_access => try appendFmt(buffer, used, "{s} can read or write this object in the current task", .{display_name}),
+        .network_egress => if (request.egress_intent.declared())
+            try appendDataEgressIntent(buffer, used, request.egress_intent)
+        else
+            try appendFmt(buffer, used, "{s} can use this approved data route", .{display_name}),
+        .device_access => try appendFmt(buffer, used, "{s} can use the selected hardware device", .{display_name}),
+        .clipboard => try appendFmt(buffer, used, "{s} can use clipboard content in this task", .{display_name}),
+        .camera => try appendFmt(buffer, used, "{s} can use the selected camera", .{display_name}),
+        .mic => try appendFmt(buffer, used, "{s} can use the selected microphone", .{display_name}),
+        .sensor => try appendFmt(buffer, used, "{s} can read the selected sensor", .{display_name}),
+        .location => try appendFmt(buffer, used, "{s} can read the current location", .{display_name}),
+        .contacts => try appendFmt(buffer, used, "{s} can read selected contacts", .{display_name}),
+        .screen_capture => try appendFmt(buffer, used, "{s} can capture the visible screen", .{display_name}),
+        .notification_post => try appendFmt(buffer, used, "{s} can post task notifications", .{display_name}),
+        .background_execution => try appendFmt(buffer, used, "{s} can run the declared background job", .{display_name}),
+        .peer_ipc => try appendFmt(buffer, used, "{s} can connect to the named peer task", .{display_name}),
+    }
+}
+
 fn backgroundVisibilityLabel(visibility: manifest.BackgroundVisibility) []const u8 {
     return switch (visibility) {
         .unspecified => "not declared",
@@ -371,6 +479,10 @@ test "humane grant scopes explain scope expiry and revocation" {
         .rights = .{ .network_policy = .{ .network_remote = true } },
         .required = false,
         .max_lease_ticks = 80,
+        .egress_intent = .{
+            .kind = .call_service,
+            .service = "relay.zigos.dev",
+        },
     };
     const grant = GrantScope{
         .resource = "relay.zigos.dev",
@@ -379,10 +491,40 @@ test "humane grant scopes explain scope expiry and revocation" {
     var buffer: [320]u8 = undefined;
     const rendered = try renderGrantScopeToBuffer(&buffer, request, grant, 100);
 
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "named network path only") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "named data route only") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "remote network") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "20 ticks left") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "turn off the network grant") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "turn off the data route grant") != null);
+}
+
+test "humane permission receipts include grant reason duration egress and revocation" {
+    const request = manifest.PermissionRequest{
+        .kind = .network_egress,
+        .resource = "relay.zigos.dev",
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .max_lease_ticks = 80,
+        .egress_intent = .{
+            .kind = .sync_object,
+            .object = "workspace://trip/documents/plan.md",
+            .principal = "trusted-devices",
+        },
+    };
+    var buffer: [512]u8 = undefined;
+    const rendered = try renderPermissionReceiptToBuffer(&buffer, .{
+        .task_id = 42,
+        .bundle_id = "app.trip",
+        .display_name = "Trip Planner",
+        .capability_id = 99,
+        .request = request,
+        .expires_at_ticks = 180,
+        .why = "user approved Permission Review",
+    }, 100);
+
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "granted: Data egress") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "why: user approved Permission Review") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "80 ticks left") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "data leaves: sync object workspace://trip/documents/plan.md with trusted-devices") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "revoke: turn off the data route grant") != null);
 }
 
 test "humane share sheets describe object scoped grants" {
@@ -426,7 +568,7 @@ test "humane background activity and revocation receipts are user readable" {
     try std.testing.expect(std.mem.indexOf(u8, activity, "local network only") != null);
 
     var revoked_buffer: [240]u8 = undefined;
-    const revoked = try renderRevocationReceiptToBuffer(&revoked_buffer, 9, .network_egress, "relay.zigos.dev", 77, "network grant revoked");
+    const revoked = try renderRevocationReceiptToBuffer(&revoked_buffer, 9, .network_egress, "relay.zigos.dev", 77, "data route grant revoked");
     try std.testing.expect(std.mem.indexOf(u8, revoked, "is off now") != null);
     try std.testing.expect(std.mem.indexOf(u8, revoked, "approve a new permission review") != null);
 }

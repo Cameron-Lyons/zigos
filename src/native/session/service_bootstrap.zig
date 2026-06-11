@@ -269,8 +269,10 @@ pub fn serviceBudget(class: contract.ServiceClass) task_runtime.ResourceBudget {
 pub fn driverBudget(device_class: driver_service.DeviceClass) task_runtime.ResourceBudget {
     return switch (device_class) {
         .network_adapter, .storage_controller => driverResourceBudget(6_000, kibibytes(384), kibibytes(32)),
+        .usb_controller => driverResourceBudget(6_000, kibibytes(384), kibibytes(32)),
         .graphics_adapter => driverResourceBudget(10_000, kibibytes(768), kibibytes(64)),
         .audio_print_io, .input_device => driverResourceBudget(4_000, kibibytes(256), kibibytes(16)),
+        .compositor_policy => driverResourceBudget(4_000, kibibytes(256), kibibytes(16)),
     };
 }
 
@@ -307,9 +309,11 @@ fn driverSigner(device_class: driver_service.DeviceClass, bundle_id: []const u8)
     return switch (device_class) {
         .network_adapter,
         .storage_controller,
+        .usb_controller,
         .graphics_adapter,
         .audio_print_io,
         .input_device,
+        .compositor_policy,
         => "zigos-driver-key",
     };
 }

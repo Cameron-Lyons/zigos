@@ -573,6 +573,18 @@ test "storage port queries object history and grants object capabilities" {
     try std.testing.expect(object_share.capability.rights.has(.object_read));
     try std.testing.expect(!object_share.capability.rights.has(.object_write));
     try std.testing.expect(object_share.grant.isObjectScoped());
+    const reviewer_authority = AuthorityContext{
+        .task_id = 153,
+        .principal = reviewer,
+        .capability_id = object_share.capability.id,
+        .now_ticks = 30,
+    };
+    const model = try port.objectOperatingModel(reviewer_authority, second.object_id);
+    try std.testing.expect(model.isWholeOsObject());
+    try std.testing.expectEqual(object_store.ObjectAccessModel.capability_scoped, model.access_model);
+    try std.testing.expectEqual(object_store.ObjectHistoryPolicy.signed_version_chain, model.history_policy);
+    try std.testing.expectEqual(object_store.ObjectSyncPolicy.local_first_selective, model.sync_policy);
+    try std.testing.expectEqual(object_store.FileBridgePolicy.import_export_only, model.file_bridge_policy);
     var share_sheet_buffer: [360]u8 = undefined;
     const share_sheet = try humane_permissions.renderShareSheetToBuffer(
         &share_sheet_buffer,
@@ -585,12 +597,7 @@ test "storage port queries object history and grants object capabilities" {
     try std.testing.expect(std.mem.indexOf(u8, share_sheet, "this device only") != null);
 
     var history_buffer: [object_store.MAX_OBJECT_HISTORY_RESULTS]object_store.ObjectHistoryEntry = undefined;
-    const history = try port.objectHistory(.{
-        .task_id = 153,
-        .principal = reviewer,
-        .capability_id = object_share.capability.id,
-        .now_ticks = 30,
-    }, second.object_id, &history_buffer);
+    const history = try port.objectHistory(reviewer_authority, second.object_id, &history_buffer);
     try std.testing.expectEqual(@as(usize, 2), history.len);
     try std.testing.expectEqual(second.version_id, history[0].version_id);
     try std.testing.expectEqual(first.version_id, history[1].version_id);

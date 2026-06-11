@@ -109,6 +109,11 @@ fn installViewer(port: *package_service.PackagePort, authority: package_service.
             .required = false,
             .local_only = true,
             .max_lease_ticks = 20,
+            .egress_intent = .{
+                .kind = .sync_object,
+                .object = "workspace://viewer",
+                .principal = "trusted-devices",
+            },
         },
         .{
             .kind = .clipboard,

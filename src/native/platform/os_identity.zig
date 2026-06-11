@@ -71,12 +71,19 @@ pub const AssertionRequest = struct {
     tick: u64,
 };
 
+pub const RecoveryApproval = struct {
+    device: principal.PrincipalId,
+    local_unlock: LocalUnlockProof,
+};
+
 pub const RecoveryRequest = struct {
     credential_id: u64,
     recovery_device: principal.PrincipalId,
     relying_party_id: []const u8,
     challenge: []const u8,
     local_unlock: LocalUnlockProof,
+    threshold: usize = 1,
+    approvals: []const RecoveryApproval = &.{},
     replacement_credential_identity: signing.SignerIdentity,
     tick: u64,
 };
@@ -167,6 +174,8 @@ pub const Error = error{
     LocalUnlockRequired,
     OriginTooLong,
     PhishingOriginRejected,
+    RecoveryApprovalDuplicate,
+    RecoveryThresholdNotMet,
     RelyingPartyTooLong,
 } || secure_secret_store.Error || device_graph.Error;
 
@@ -292,8 +301,7 @@ pub const Store = struct {
         try requireActiveCredential(credential);
         if (!credential.isRecoverableThroughDeviceGraph()) return error.DeviceBoundRecoveryDenied;
         if (!std.mem.eql(u8, credential.relyingPartySlice(), request.relying_party_id)) return error.PhishingOriginRejected;
-        _ = try requireTrustedDeviceForOwner(graph, credential.owner, request.recovery_device);
-        try verifyLocalUnlock(graph, credential, request.recovery_device, request.local_unlock, request.challenge, request.tick);
+        try verifyRecoveryThreshold(graph, credential, request);
 
         const secret = try secrets.importSecret(
             credential.owner,
@@ -424,6 +432,64 @@ fn requireCredentialDevice(
     if (credential.scope == .device_bound and !credential.primary_device.eql(device)) {
         return error.DeviceBoundCredentialWrongDevice;
     }
+}
+
+fn verifyRecoveryThreshold(
+    graph: *const device_graph.Graph,
+    credential: *const CredentialRecord,
+    request: RecoveryRequest,
+) Error!void {
+    if (request.threshold == 0) return error.RecoveryThresholdNotMet;
+
+    var trusted_devices: [device_graph.MAX_DEVICES]principal.PrincipalId = undefined;
+    var trusted_device_count: usize = 0;
+
+    try verifyRecoveryApproval(
+        graph,
+        credential,
+        request.recovery_device,
+        request.local_unlock,
+        request.challenge,
+        request.tick,
+    );
+    trusted_devices[trusted_device_count] = request.recovery_device;
+    trusted_device_count += 1;
+
+    for (request.approvals) |approval| {
+        if (containsPrincipal(trusted_devices[0..trusted_device_count], approval.device)) return error.RecoveryApprovalDuplicate;
+        try verifyRecoveryApproval(
+            graph,
+            credential,
+            approval.device,
+            approval.local_unlock,
+            request.challenge,
+            request.tick,
+        );
+        if (trusted_device_count >= trusted_devices.len) return error.RecoveryThresholdNotMet;
+        trusted_devices[trusted_device_count] = approval.device;
+        trusted_device_count += 1;
+    }
+
+    if (trusted_device_count < request.threshold) return error.RecoveryThresholdNotMet;
+}
+
+fn verifyRecoveryApproval(
+    graph: *const device_graph.Graph,
+    credential: *const CredentialRecord,
+    device: principal.PrincipalId,
+    unlock: LocalUnlockProof,
+    challenge: []const u8,
+    tick: u64,
+) Error!void {
+    _ = try requireTrustedDeviceForOwner(graph, credential.owner, device);
+    try verifyLocalUnlock(graph, credential, device, unlock, challenge, tick);
+}
+
+fn containsPrincipal(haystack: []const principal.PrincipalId, needle: principal.PrincipalId) bool {
+    for (haystack) |candidate| {
+        if (candidate.eql(needle)) return true;
+    }
+    return false;
 }
 
 fn requireTrustedDeviceForOwner(
@@ -558,6 +624,8 @@ fn hostEnd(rest: []const u8) usize {
 }
 
 test "os identity creates passkey credentials and rejects phishing origins" {
+    try std.testing.expect(std.meta.stringToEnum(UnlockMethod, "password") == null);
+
     var graph = device_graph.Graph.init();
     var secrets = secure_secret_store.Store.init();
     var identities = Store.init();
@@ -681,12 +749,32 @@ test "os identity recovers synced credentials through trusted device graph" {
     });
 
     const recovery_unlock = try createLocalUnlockProof(user, phone, "zigos.dev", "recover-1", .recovery_key, 5, 10, phone_identity);
+    try std.testing.expectError(error.RecoveryThresholdNotMet, identities.recoverCredential(&graph, &secrets, .{
+        .credential_id = synced.id,
+        .recovery_device = phone,
+        .relying_party_id = "zigos.dev",
+        .challenge = "recover-1",
+        .local_unlock = recovery_unlock,
+        .threshold = 2,
+        .replacement_credential_identity = replacement_credential_identity,
+        .tick = 6,
+    }));
+
+    const laptop_recovery_unlock = try createLocalUnlockProof(user, laptop, "zigos.dev", "recover-1", .recovery_key, 5, 10, laptop_identity);
+    const approvals = [_]RecoveryApproval{
+        .{
+            .device = laptop,
+            .local_unlock = laptop_recovery_unlock,
+        },
+    };
     const recovered = try identities.recoverCredential(&graph, &secrets, .{
         .credential_id = synced.id,
         .recovery_device = phone,
         .relying_party_id = "zigos.dev",
         .challenge = "recover-1",
         .local_unlock = recovery_unlock,
+        .threshold = 2,
+        .approvals = &approvals,
         .replacement_credential_identity = replacement_credential_identity,
         .tick = 6,
     });

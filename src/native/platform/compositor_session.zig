@@ -179,6 +179,7 @@ pub const ServiceRequest = struct {
     display_name: []const u8 = "",
     resource: []const u8 = "",
     detail: []const u8 = "",
+    egress_intent: manifest.DataEgressIntent = .{},
 };
 
 pub const ServiceResponse = struct {
@@ -723,6 +724,11 @@ pub fn encodeRequest(buffer: []u8, request: ServiceRequest) Error![]const u8 {
     try writeText(buffer, &used, request.display_name);
     try writeText(buffer, &used, request.resource);
     try writeText(buffer, &used, request.detail);
+    try writeByte(buffer, &used, @intFromEnum(request.egress_intent.kind));
+    try writeText(buffer, &used, request.egress_intent.object);
+    try writeText(buffer, &used, request.egress_intent.principal);
+    try writeText(buffer, &used, request.egress_intent.service);
+    try writeText(buffer, &used, request.egress_intent.event_type);
     return buffer[0..used];
 }
 
@@ -743,6 +749,11 @@ pub fn decodeRequest(payload: []const u8) Error!ServiceRequest {
     const display_name = try readText(payload, &cursor);
     const resource = try readText(payload, &cursor);
     const detail = try readText(payload, &cursor);
+    const egress_intent_kind = std.enums.fromInt(manifest.DataEgressIntentKind, try readByte(payload, &cursor)) orelse return error.MalformedRequest;
+    const egress_intent_object = try readText(payload, &cursor);
+    const egress_intent_principal = try readText(payload, &cursor);
+    const egress_intent_service = try readText(payload, &cursor);
+    const egress_intent_event_type = try readText(payload, &cursor);
     if (cursor != payload.len) return error.MalformedRequest;
     return .{
         .operation = operation,
@@ -762,6 +773,13 @@ pub fn decodeRequest(payload: []const u8) Error!ServiceRequest {
         .display_name = display_name,
         .resource = resource,
         .detail = detail,
+        .egress_intent = .{
+            .kind = egress_intent_kind,
+            .object = egress_intent_object,
+            .principal = egress_intent_principal,
+            .service = egress_intent_service,
+            .event_type = egress_intent_event_type,
+        },
     };
 }
 
@@ -831,8 +849,12 @@ pub fn renderReviewItemToBuffer(
 ) ![]const u8 {
     const object_scope = if (item.object_scope_len == 0) "none" else item.objectScopeSlice();
     const network_path = if (item.network_path_len == 0) "none" else item.networkPathSlice();
+    const data_leaves = if (item.kind == .network_egress and item.network_path_len != 0)
+        network_path
+    else
+        "none";
     var used: usize = 0;
-    used += (try std.fmt.bufPrint(buffer[used..], "UI card: window={d} kind={s} label={s} resource={s} why={s} object_scope={s} network_path={s} requested_local_only={s}", .{
+    used += (try std.fmt.bufPrint(buffer[used..], "UI card: window={d} kind={s} label={s} resource={s} why={s} object_scope={s} network_path={s} data_leaves={s} requested_local_only={s}", .{
         window_id,
         @tagName(item.kind),
         item.labelSlice(),
@@ -840,6 +862,7 @@ pub fn renderReviewItemToBuffer(
         item.reasonSlice(),
         object_scope,
         network_path,
+        data_leaves,
         yesNo(item.requested_local_only),
     })).len;
     if (item.requested_lease_ticks != 0) {
@@ -918,6 +941,7 @@ fn permissionRequestFromService(request: ServiceRequest) manifest.PermissionRequ
         .required = request.required,
         .local_only = request.local_only,
         .max_lease_ticks = request.max_lease_ticks,
+        .egress_intent = request.egress_intent,
     };
 }
 
@@ -1029,7 +1053,10 @@ fn deriveReason(buffer: *[MAX_REASON_BYTES]u8, bundle: manifest.BundleManifest, 
     const display_name = bundle.display_name;
     const rendered = switch (request.kind) {
         .object_access => std.fmt.bufPrint(buffer, "{s} needs access to local task objects for read and write operations", .{display_name}),
-        .network_egress => std.fmt.bufPrint(buffer, "{s} needs the named network path to exchange task data", .{display_name}),
+        .network_egress => if (request.egress_intent.declared())
+            deriveDataEgressReason(buffer, display_name, request.egress_intent)
+        else
+            std.fmt.bufPrint(buffer, "{s} needs an approved data route for task data egress", .{display_name}),
         .device_access => std.fmt.bufPrint(buffer, "{s} needs direct device access for the selected hardware target", .{display_name}),
         .clipboard => std.fmt.bufPrint(buffer, "{s} needs clipboard access to import or export user content", .{display_name}),
         .camera => std.fmt.bufPrint(buffer, "{s} needs camera access to capture video input", .{display_name}),
@@ -1056,7 +1083,7 @@ fn deriveNetworkPath(buffer: *[MAX_RESOURCE_BYTES]u8, request: manifest.Permissi
 fn permissionLabel(kind: manifest.PermissionKind) []const u8 {
     return switch (kind) {
         .object_access => "Object access",
-        .network_egress => "Network egress",
+        .network_egress => "Data egress",
         .device_access => "Device access",
         .clipboard => "Clipboard",
         .camera => "Camera",
@@ -1068,6 +1095,29 @@ fn permissionLabel(kind: manifest.PermissionKind) []const u8 {
         .notification_post => "Notification posting",
         .background_execution => "Background execution",
         .peer_ipc => "Peer IPC",
+    };
+}
+
+fn deriveDataEgressReason(
+    buffer: *[MAX_REASON_BYTES]u8,
+    display_name: []const u8,
+    intent: manifest.DataEgressIntent,
+) error{NoSpaceLeft}![]u8 {
+    return switch (intent.kind) {
+        .unspecified => std.fmt.bufPrint(buffer, "{s} needs an approved data route for task data egress", .{display_name}),
+        .sync_object => std.fmt.bufPrint(buffer, "{s} needs to sync {s} with {s}", .{
+            display_name,
+            intent.object,
+            intent.principal,
+        }),
+        .call_service => std.fmt.bufPrint(buffer, "{s} needs to call service {s}", .{
+            display_name,
+            intent.service,
+        }),
+        .publish_event => std.fmt.bufPrint(buffer, "{s} needs to publish event {s}", .{
+            display_name,
+            intent.event_type,
+        }),
     };
 }
 

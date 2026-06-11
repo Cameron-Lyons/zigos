@@ -100,6 +100,12 @@ pub fn publishedDriversActivateScopedTransports() !void {
         false,
     ));
     try std.testing.expect(try bootstrap_driver_port.publishDeviceDataPlane(
+        .usb_controller,
+        0x8086_A0ED_0001,
+        "usb-userspace",
+        false,
+    ));
+    try std.testing.expect(try bootstrap_driver_port.publishDeviceDataPlane(
         .graphics_adapter,
         0x1234_1111_0001,
         "compositor-userspace",
@@ -115,6 +121,12 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .input_device,
         0x8042_0001,
         "input-userspace",
+        false,
+    ));
+    try std.testing.expect(try bootstrap_driver_port.publishDeviceDataPlane(
+        .compositor_policy,
+        0xC0DE_C0DE_0001,
+        "compositor-policy-userspace",
         false,
     ));
 
@@ -174,6 +186,24 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .now_ticks = 1,
         .bundle = bundle,
     });
+    const usb_authority = try spec_support.driverAuthority(
+        &capabilities,
+        spec_support.service(96),
+        906,
+        0x8086_A0ED_0001,
+        .usb_controller,
+    );
+    const usb_driver = try directory.register(.{
+        .service_id = 96,
+        .owner_task_id = 906,
+        .device_id = 0x8086_A0ED_0001,
+        .device_class = .usb_controller,
+        .authority_capability_id = usb_authority.id,
+        .capability_table = &capabilities,
+        .requester = usb_authority.holder,
+        .now_ticks = 1,
+        .bundle = bundle,
+    });
     const audio_authority = try spec_support.driverAuthority(
         &capabilities,
         spec_support.service(94),
@@ -210,13 +240,33 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .now_ticks = 1,
         .bundle = bundle,
     });
+    const compositor_policy_authority = try spec_support.driverAuthority(
+        &capabilities,
+        spec_support.service(97),
+        907,
+        0xC0DE_C0DE_0001,
+        .compositor_policy,
+    );
+    const compositor_policy_driver = try directory.register(.{
+        .service_id = 97,
+        .owner_task_id = 907,
+        .device_id = 0xC0DE_C0DE_0001,
+        .device_class = .compositor_policy,
+        .authority_capability_id = compositor_policy_authority.id,
+        .capability_table = &capabilities,
+        .requester = compositor_policy_authority.holder,
+        .now_ticks = 1,
+        .bundle = bundle,
+    });
 
     var runtime = driver_runtime_mod.Runtime.init();
     const network_activation = try runtime.activateAt(network_driver, 1);
     const storage_activation = try runtime.activateAt(storage_driver, 1);
     const graphics_activation = try runtime.activateAt(graphics_driver, 1);
+    const usb_activation = try runtime.activateAt(usb_driver, 1);
     const audio_activation = try runtime.activateAt(audio_driver, 1);
     const input_activation = try runtime.activateAt(input_driver, 1);
+    const compositor_policy_activation = try runtime.activateAt(compositor_policy_driver, 1);
 
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, network_activation.mode);
     try std.testing.expect(network_activation.exclusive_claim);
@@ -242,6 +292,12 @@ pub fn publishedDriversActivateScopedTransports() !void {
     try std.testing.expectEqual(@as(u64, 93), bootstrap_driver_port.deviceDataPlanePublication(.graphics_adapter).?.active_service_id);
     try std.testing.expect(graphics_driver.allowsDma(graphics_driver.dma_ranges[0].base, 4096));
     try std.testing.expect(!graphics_driver.allowsDma(graphics_driver.dma_ranges[0].base + graphics_driver.dma_ranges[0].length - 1024, 4096));
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, usb_activation.mode);
+    try std.testing.expect(usb_activation.exclusive_claim);
+    try std.testing.expectEqualStrings("usb-userspace", usb_activation.publisherSlice());
+    try std.testing.expectEqual(@as(u64, 96), bootstrap_driver_port.deviceDataPlanePublication(.usb_controller).?.active_service_id);
+    try std.testing.expect(usb_driver.allowsDma(usb_driver.dma_ranges[0].base, 4096));
+    try std.testing.expect(!usb_driver.allowsDma(usb_driver.dma_ranges[0].base + usb_driver.dma_ranges[0].length - 1024, 4096));
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, audio_activation.mode);
     try std.testing.expect(audio_activation.exclusive_claim);
     try std.testing.expectEqualStrings("media-print-userspace", audio_activation.publisherSlice());
@@ -254,11 +310,19 @@ pub fn publishedDriversActivateScopedTransports() !void {
     try std.testing.expectEqual(@as(u64, 95), bootstrap_driver_port.deviceDataPlanePublication(.input_device).?.active_service_id);
     try std.testing.expect(input_driver.allowsDma(input_driver.dma_ranges[0].base, 4096));
     try std.testing.expect(!input_driver.allowsDma(input_driver.dma_ranges[0].base + input_driver.dma_ranges[0].length - 1024, 4096));
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, compositor_policy_activation.mode);
+    try std.testing.expect(compositor_policy_activation.exclusive_claim);
+    try std.testing.expectEqualStrings("compositor-policy-userspace", compositor_policy_activation.publisherSlice());
+    try std.testing.expectEqual(@as(u64, 97), bootstrap_driver_port.deviceDataPlanePublication(.compositor_policy).?.active_service_id);
+    try std.testing.expect(compositor_policy_driver.allowsDma(compositor_policy_driver.dma_ranges[0].base, 4096));
+    try std.testing.expect(!compositor_policy_driver.allowsDma(compositor_policy_driver.dma_ranges[0].base + compositor_policy_driver.dma_ranges[0].length - 1024, 4096));
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.network_adapter).?.mode);
     try std.testing.expectEqualStrings("ata-bootstrap", runtime.findByClass(.storage_controller).?.publisherSlice());
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, runtime.findByClass(.usb_controller).?.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, runtime.findByClass(.graphics_adapter).?.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, runtime.findByClass(.audio_print_io).?.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, runtime.findByClass(.input_device).?.mode);
+    try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, runtime.findByClass(.compositor_policy).?.mode);
 
     var unsupported_network_transport_directory = driver_service.Directory.init();
     try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_network_transport_directory.register(.{
@@ -274,6 +338,18 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .bootstrap_transport = .kernel_bootstrap_broker,
     }));
     var unsupported_transport_directory = driver_service.Directory.init();
+    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
+        .service_id = 97,
+        .owner_task_id = 906,
+        .device_id = 0x8086_A0ED_0001,
+        .device_class = .usb_controller,
+        .authority_capability_id = usb_authority.id,
+        .capability_table = &capabilities,
+        .requester = usb_authority.holder,
+        .now_ticks = 2,
+        .bundle = bundle,
+        .bootstrap_transport = .kernel_bootstrap_broker,
+    }));
     try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
         .service_id = 97,
         .owner_task_id = 903,
@@ -294,6 +370,18 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .authority_capability_id = audio_authority.id,
         .capability_table = &capabilities,
         .requester = audio_authority.holder,
+        .now_ticks = 2,
+        .bundle = bundle,
+        .bootstrap_transport = .kernel_bootstrap_broker,
+    }));
+    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
+        .service_id = 100,
+        .owner_task_id = 907,
+        .device_id = 0xC0DE_C0DE_0001,
+        .device_class = .compositor_policy,
+        .authority_capability_id = compositor_policy_authority.id,
+        .capability_table = &capabilities,
+        .requester = compositor_policy_authority.holder,
         .now_ticks = 2,
         .bundle = bundle,
         .bootstrap_transport = .kernel_bootstrap_broker,
@@ -365,6 +453,12 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     try std.testing.expectEqual(@as(usize, 2), storage.versionCount());
     const report_object = storage.object(draft_v2.object_id).?;
     try std.testing.expect(report_object.isPrimaryUserDataModel());
+    const report_model = try storage.objectOperatingModel(draft_v2.object_id);
+    try std.testing.expect(report_model.isWholeOsObject());
+    try std.testing.expectEqual(object_store.ObjectAccessModel.capability_scoped, report_model.access_model);
+    try std.testing.expectEqual(object_store.ObjectSyncPolicy.local_first_selective, report_model.sync_policy);
+    try std.testing.expectEqual(object_store.ObjectHistoryPolicy.signed_version_chain, report_model.history_policy);
+    try std.testing.expectEqual(object_store.FileBridgePolicy.import_export_only, report_model.file_bridge_policy);
     try std.testing.expect(report_object.sharing_policy.export_only_file_bridge);
     try std.testing.expectEqual(draft_v2.version_id, report_object.snapshot_state.latest_snapshot_version_id);
     try std.testing.expectEqual(draft_v2.version_id, report_object.sync_state.last_synced_version_id);

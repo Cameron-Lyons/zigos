@@ -285,6 +285,10 @@ pub fn proveBootedCompositorServicePath(
         .bundle_id = "app.trip",
         .display_name = "Trip",
         .resource = "net:trip",
+        .egress_intent = .{
+            .kind = .call_service,
+            .service = "trip.remote",
+        },
     }, &tick);
     try std.testing.expectEqual(compositor_session.ServiceStatus.ok, network_review_response.status);
     try std.testing.expectEqual(object_review_response.window_id, network_review_response.window_id);
@@ -332,7 +336,7 @@ pub fn proveBootedCompositorServicePath(
     try expectContains(object_card, "requested_local_only=yes");
     try expectContains(object_card, "requested_lease=400");
     const network_card = try compositor_session.renderReviewItemToBuffer(&network_card_buffer, network_review_response.window_id, network_item);
-    try expectContains(network_card, "why=Trip needs the named network path");
+    try expectContains(network_card, "why=Trip needs to call service trip.remote");
     try expectContains(network_card, "object_scope=none");
     try expectContains(network_card, "network_path=net:trip");
     try expectContains(network_card, "requested_lease=80");
@@ -621,6 +625,10 @@ fn proveBootedRenderedPermissionReviewSurface(
             .rights = .{ .network_policy = .{ .network_remote = true } },
             .required = false,
             .max_lease_ticks = 80,
+            .egress_intent = .{
+                .kind = .call_service,
+                .service = "trip.remote",
+            },
         },
     };
     const bundle = manifest.BundleManifest{

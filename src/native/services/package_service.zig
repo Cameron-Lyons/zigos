@@ -605,6 +605,10 @@ test "package service enforces signed manifests policy gated sources updates rol
             .resource = "relay.notes.example",
             .rights = .{ .network_policy = .{ .network_remote = true } },
             .required = false,
+            .egress_intent = .{
+                .kind = .call_service,
+                .service = "notes.relay.sync",
+            },
         },
     };
     const v2_components = [_]manifest.ExecutionComponentDecl{
@@ -656,6 +660,10 @@ test "package service enforces signed manifests policy gated sources updates rol
     try std.testing.expectEqual(@as(u32, 2), installed.schemaVersion());
     try std.testing.expectEqual(@as(usize, 2), installed.componentCount());
     try std.testing.expectEqualStrings("zigos.notes.sync", installed.componentAt(1).entrySlice());
+    var resolved: ResolvedManifest = undefined;
+    const resolved_v2 = try service.resolveCurrentManifest("app.notes", &resolved);
+    try std.testing.expectEqual(manifest.DataEgressIntentKind.call_service, resolved_v2.requested_permissions[1].egress_intent.kind);
+    try std.testing.expectEqualStrings("notes.relay.sync", resolved_v2.requested_permissions[1].egress_intent.service);
 
     const launch_plan = try service.buildLaunchPlan("app.notes");
     try std.testing.expectEqual(@as(usize, 2), launch_plan.component_count);

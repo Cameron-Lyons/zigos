@@ -564,27 +564,42 @@ test "production journey service rejects premature controls then routes lifecycl
     try std.testing.expect(started_task_id != 0);
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .open_workspace, .tick = 24 }).status);
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .open_document, .tick = 25 }).status);
-    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .review_permission, .tick = 26 }).status);
+    const before_edit = try storage.resolve(workspace_id, document_path);
+    try std.testing.expectEqual(ProductionJourneyStatus.invalid_order, journey.dispatch(.{ .control = .sync_workspace, .tick = 26 }).status);
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .edit_document, .tick = 26 }).status);
+    const edited_entry = try storage.resolve(workspace_id, document_path);
+    try std.testing.expectEqual(before_edit.object_id, edited_entry.object_id);
+    try std.testing.expect(!before_edit.version_id.eql(edited_entry.version_id));
+    try std.testing.expectEqual(edited_entry.version_id.raw(), journey.document_version_id);
+    try std.testing.expectEqual(before_edit.version_id.raw(), journey.document_previous_version_id);
+    try std.testing.expectEqualStrings(journey.config.edit_payload, try storage.versionPayload(storage.version(edited_entry.version_id).?));
+    try std.testing.expect(storage_checkpoint_store.has_persisted_state);
+    try std.testing.expect(storage_checkpoint_store.checkpointHealthy());
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .review_permission, .tick = 27 }).status);
     try std.testing.expectEqual(@as(usize, 3), compositor.window_count);
     try std.testing.expectEqual(compositor_session.ViewType.app_panel, compositor.windowAtOrder(2).?.view_type);
-    try std.testing.expectEqual(ProductionJourneyStatus.invalid_order, journey.dispatch(.{ .control = .sync_workspace, .tick = 27 }).status);
-    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .share_document, .tick = 27 }).status);
+    try std.testing.expectEqual(ProductionJourneyStatus.invalid_order, journey.dispatch(.{ .control = .sync_workspace, .tick = 28 }).status);
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .share_document, .tick = 28 }).status);
     const shared_entry = try storage.resolve(workspace_id, document_path);
+    try std.testing.expectEqual(edited_entry.version_id, shared_entry.version_id);
     try std.testing.expect(storage.workspaceHasAccess(workspace_id, .{
         .principal_id = collaborator,
         .object_id = shared_entry.object_id,
         .path = shared_entry.pathSlice(),
         .wants_write = true,
         .network_scope = .trusted_overlay,
-        .now_ticks = 27,
+        .now_ticks = 28,
     }));
-    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .sync_workspace, .tick = 28 }).status);
-    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .update_app, .tick = 29 }).status);
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .sync_workspace, .tick = 29 }).status);
+    try std.testing.expectEqual(edited_entry.version_id.raw(), sync.replicaVersion(workspace_id, paired_device, document_path).?);
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .update_app, .tick = 30 }).status);
     try std.testing.expectEqual(@as(u16, 1), packages_service.find("app.notes.daily").?.versionMinor());
-    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .rollback_update, .tick = 30 }).status);
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .rollback_update, .tick = 31 }).status);
     try std.testing.expectEqual(@as(u16, 0), packages_service.find("app.notes.daily").?.versionMinor());
-    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .recover_system, .tick = 31 }).status);
-    const remove_response = journey.dispatch(.{ .control = .remove_app, .tick = 32 });
+    try std.testing.expectEqual(edited_entry.version_id, (try storage.resolve(workspace_id, document_path)).version_id);
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .recover_system, .tick = 32 }).status);
+    try std.testing.expectEqual(edited_entry.version_id, (try storage.resolve(workspace_id, document_path)).version_id);
+    const remove_response = journey.dispatch(.{ .control = .remove_app, .tick = 33 });
     try std.testing.expectEqual(ProductionJourneyStatus.ok, remove_response.status);
     try std.testing.expectEqual(@as(u64, 0), remove_response.task_id);
     try std.testing.expectEqual(@as(u16, 0), remove_response.visible_window_count);
@@ -593,15 +608,16 @@ test "production journey service rejects premature controls then routes lifecycl
     try std.testing.expectEqual(@as(usize, 0), compositor.window_count);
     try std.testing.expectEqual(@as(usize, 0), compositor.item_count);
     try std.testing.expectEqual(@as(u64, 0), compositor.active_window_id);
-    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .revoke_device, .tick = 33 }).status);
+    try std.testing.expectEqual(edited_entry.version_id, (try storage.resolve(workspace_id, document_path)).version_id);
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .revoke_device, .tick = 34 }).status);
     try std.testing.expect(!sync.isTrustedDevice(paired_device));
-    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .revoke_policy, .tick = 34 }).status);
+    try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .revoke_policy, .tick = 35 }).status);
     try std.testing.expectEqual(
         ProductionJourneyStatus.policy_rejected,
-        journey.dispatch(.{ .control = .install_app, .tick = 35 }).status,
+        journey.dispatch(.{ .control = .install_app, .tick = 36 }).status,
     );
 
-    try std.testing.expectEqual(@as(usize, 12), ledger.countMatching(.{ .kind = .task_flow }));
+    try std.testing.expectEqual(@as(usize, 13), ledger.countMatching(.{ .kind = .task_flow }));
     try std.testing.expectEqual(@as(usize, 2), ledger.countMatching(.{ .kind = .policy_change }));
     try std.testing.expectEqual(@as(usize, 3), ledger.countMatching(.{ .kind = .device_trust_change }));
     try std.testing.expect(runtime_checkpoint_store.has_checkpoint);
@@ -610,18 +626,22 @@ test "production journey service rejects premature controls then routes lifecycl
     var render_buffer: [2048]u8 = undefined;
     const rendered = try journey.render(&render_buffer);
     try expectContains(rendered, "control=apply-policy state=done");
+    try expectContains(rendered, "control=edit-document state=done");
     try expectContains(rendered, "control=share-document state=done");
     try expectContains(rendered, "control=remove-app state=done");
     try expectContains(rendered, "control=revoke-policy state=done");
+    try expectContains(rendered, "document object=");
+    try expectContains(rendered, "edited=yes");
     try expectContains(rendered, "task=0 bundle=app.notes.daily");
     try expectContains(rendered, "visible_windows=0");
-    try expectContains(rendered, "task_flow_events=12");
+    try expectContains(rendered, "task_flow_events=13");
 
     var export_buffer: [4096]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try expectContains(exported, "kind=policy_change");
     try expectContains(exported, "kind=device_trust_change");
     try expectContains(exported, "flow_kind=review_permission_request");
+    try expectContains(exported, "flow_kind=edit_document");
     try expectContains(exported, "flow_kind=share_document");
     try expectContains(exported, "flow_kind=recover_system");
 }
@@ -868,7 +888,7 @@ test "humane shell composes task-first review pairing snapshots diagnostics noti
         &shell_checkpoint_store,
     );
 
-    var render_buffer: [4096]u8 = undefined;
+    var render_buffer: [8192]u8 = undefined;
     const initial = try shell.render(&render_buffer);
     try expectContains(initial, "task_first=yes");
     try expectContains(initial, "accessibility keyboard=yes screen_reader=yes visible_focus=yes reduce_motion=yes high_contrast=yes");
@@ -951,6 +971,8 @@ test "humane shell composes task-first review pairing snapshots diagnostics noti
     try expectContains(rendered, "label=before-trip-edit restored=yes");
     try expectContains(rendered, "diagnostics ran=yes");
     try expectContains(rendered, "remote_share_requires_opt_in=yes");
+    try expectContains(rendered, "diagnostics user_visible=yes privacy=redacted evidence_of_intrusion_capable=yes");
+    try expectContains(rendered, "diagnostic_evidence capability_denials=1");
     try expectContains(rendered, "notification id=");
     try expectContains(rendered, "reason=policy_notice detail=shell status available");
     try expectContains(rendered, "recovery checkpoint=yes recovered=no");
@@ -1291,6 +1313,8 @@ test "booted rendered system runs input loop compositor prompts task switching r
     try expectContains(recovered_rendered, "notifications active=");
     try expectContains(recovered_rendered, "latest_id=");
     try expectContains(recovered_rendered, "detail=local diagnostics ready");
+    try expectContains(recovered_rendered, "diagnostics user_visible=yes privacy=redacted evidence_of_intrusion_capable=yes");
+    try expectContains(recovered_rendered, "diagnostic_evidence capability_denials=1");
     try expectContains(recovered_rendered, "error_surface visible=no status=ok");
 }
 

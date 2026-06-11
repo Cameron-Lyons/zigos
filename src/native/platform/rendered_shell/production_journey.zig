@@ -4,6 +4,7 @@ const event_ledger = @import("../event_ledger.zig");
 const ids = @import("../../core/ids.zig");
 const manifest = @import("../../policy/manifest.zig");
 const native_ux = @import("../native_ux.zig");
+const object_store = @import("../../storage/object_store.zig");
 const package_service = @import("../../services/package_service.zig");
 const policy_object = @import("../../policy/policy_object.zig");
 const principal = @import("../../core/principal.zig");
@@ -26,6 +27,7 @@ pub const ProductionJourneyControl = enum {
     start_task,
     open_workspace,
     open_document,
+    edit_document,
     review_permission,
     share_document,
     sync_workspace,
@@ -62,6 +64,7 @@ pub const ProductionJourneyConfig = struct {
     task_title: []const u8,
     bundle_id: []const u8,
     display_name: []const u8,
+    edit_payload: []const u8 = "Daily notes edit saved from real text input",
     source_identity: []const u8,
     sync_destination: []const u8,
     device_label: []const u8,
@@ -113,6 +116,11 @@ pub const ProductionJourneyService = struct {
     installed: bool = false,
     workspace_opened: bool = false,
     document_opened: bool = false,
+    document_edited: bool = false,
+    document_object_id: u64 = 0,
+    document_previous_version_id: u64 = 0,
+    document_version_id: u64 = 0,
+    document_payload_bytes: usize = 0,
     permission_reviewed: bool = false,
     document_shared: bool = false,
     device_trusted: bool = false,
@@ -177,6 +185,7 @@ pub const ProductionJourneyService = struct {
         try renderControl(buffer, &used, "start-task", self.task_id != 0);
         try renderControl(buffer, &used, "open-workspace", self.workspace_opened);
         try renderControl(buffer, &used, "open-document", self.document_opened);
+        try renderControl(buffer, &used, "edit-document", self.document_edited);
         try renderControl(buffer, &used, "review-permission", self.permission_reviewed);
         try renderControl(buffer, &used, "share-document", self.document_shared);
         try renderControl(buffer, &used, "sync-workspace", self.synced);
@@ -191,6 +200,13 @@ pub const ProductionJourneyService = struct {
             self.config.bundle_id,
             self.config.workspace_id,
             self.policy_id,
+        });
+        try appendFmt(buffer, &used, "document object={d} previous_version={d} version={d} bytes={d} edited={s}\n", .{
+            self.document_object_id,
+            self.document_previous_version_id,
+            self.document_version_id,
+            self.document_payload_bytes,
+            if (self.document_edited) "yes" else "no",
         });
         try appendFmt(buffer, &used, "visible_windows={d} task_flow_events={d} policy_events={d} device_trust_events={d}\n", .{
             session.visibleWindowCount(),
@@ -209,6 +225,7 @@ pub const ProductionJourneyService = struct {
             .start_task => try self.startTask(tick),
             .open_workspace => try self.openWorkspace(tick),
             .open_document => try self.openDocument(tick),
+            .edit_document => try self.editDocument(tick),
             .review_permission => try self.reviewPermission(tick),
             .share_document => try self.shareDocument(tick),
             .sync_workspace => try self.syncWorkspace(tick),
@@ -334,13 +351,16 @@ pub const ProductionJourneyService = struct {
     fn openDocument(self: *ProductionJourneyService, tick: u64) !void {
         const task = try self.requireTask();
         if (!self.workspace_opened) return error.WorkspaceRequired;
-        _ = try self.ux.openDocument(
+        const entry = try self.ux.openDocument(
             self.storage,
             ids.workspace(self.config.workspace_id),
             self.config.document_path,
             task.id,
             self.config.user,
         );
+        self.document_object_id = entry.object_id.raw();
+        self.document_version_id = entry.version_id.raw();
+        self.document_payload_bytes = if (self.storage.latestVersion(entry.object_id)) |version| version.payload_len else 0;
         _ = try self.dispatchCompositor(.{
             .operation = .open_view,
             .view_type = .document_view,
@@ -349,6 +369,42 @@ pub const ProductionJourneyService = struct {
             .detail = self.config.document_path,
         });
         self.document_opened = true;
+        try self.recordPendingTaskFlows(tick);
+    }
+
+    fn editDocument(self: *ProductionJourneyService, tick: u64) !void {
+        const task = try self.requireTask();
+        if (!self.document_opened) return error.DocumentRequired;
+        if (self.config.edit_payload.len == 0) return error.DocumentEditRequired;
+
+        const workspace_id = ids.workspace(self.config.workspace_id);
+        const entry = try self.storage.resolve(workspace_id, self.config.document_path);
+        const latest = self.storage.latestVersion(entry.object_id) orelse return error.ObjectMissing;
+        const edited = try self.storage.putVersion(.{
+            .preferred_object_id = entry.object_id,
+            .object_type = .document,
+            .payload = self.config.edit_payload,
+            .metadata = try object_store.signMetadata(
+                self.config.user_signer,
+                self.config.document_path,
+                "text/markdown",
+                .document,
+                self.config.edit_payload,
+                tick,
+            ),
+            .parent_version_id = latest.id,
+        });
+        try self.storage.beginTransaction(workspace_id);
+        try self.storage.stagePut(workspace_id, self.config.document_path, edited.object_id, edited.version_id, .document);
+        _ = try self.storage.commit(workspace_id, tick);
+
+        _ = try self.ux.editDocument(self.config.workspace_id, task.id, self.config.user, self.config.document_path);
+        self.document_object_id = edited.object_id.raw();
+        self.document_previous_version_id = latest.id.raw();
+        self.document_version_id = edited.version_id.raw();
+        self.document_payload_bytes = self.config.edit_payload.len;
+        self.document_edited = true;
+        self.synced = false;
         try self.recordPendingTaskFlows(tick);
     }
 
@@ -439,6 +495,7 @@ pub const ProductionJourneyService = struct {
             return error.DeviceTrustRequired;
         }
         const task = try self.requireTask();
+        if (!self.document_edited) return error.DocumentEditRequired;
         if (!self.document_shared) return error.DocumentShareRequired;
         const decision = self.policies.syncDestinationDecision(.{
             .user_id = self.config.user.serial,
@@ -658,6 +715,7 @@ fn statusForProductionJourneyError(err: anyerror) ProductionJourneyStatus {
         error.TaskAlreadyStarted,
         error.WorkspaceRequired,
         error.DocumentRequired,
+        error.DocumentEditRequired,
         error.DocumentShareRequired,
         => .invalid_order,
         error.CompositorRejected => .compositor_rejected,
@@ -665,6 +723,7 @@ fn statusForProductionJourneyError(err: anyerror) ProductionJourneyStatus {
         error.EntryNotFound,
         error.PathTooLong,
         error.ShareRejected,
+        error.ObjectMissing,
         error.ShareTableFull,
         error.WorkspaceNotFound,
         => .invalid_request,

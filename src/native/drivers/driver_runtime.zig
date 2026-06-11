@@ -141,7 +141,7 @@ pub const Runtime = struct {
                     }
                 }
             },
-            .graphics_adapter, .audio_print_io, .input_device => {
+            .usb_controller, .graphics_adapter, .audio_print_io, .input_device, .compositor_policy => {
                 if (bootstrap_driver_port.deviceDataPlanePublication(driver.device_class)) |publication| {
                     if (publication.device_id == driver.device_id) {
                         if (publication.kernel_bootstrap) return error.KernelBootstrapNotAuthorized;
@@ -190,7 +190,7 @@ pub const Runtime = struct {
             const released = switch (slot.activation.device_class) {
                 .network_adapter => bootstrap_driver_port.deactivateNetworkDevice(slot.activation.service_id),
                 .storage_controller => bootstrap_driver_port.deactivateStorageBackend(slot.activation.service_id),
-                .graphics_adapter, .audio_print_io, .input_device => bootstrap_driver_port.deactivateDeviceDataPlane(slot.activation.device_class, slot.activation.service_id),
+                .usb_controller, .graphics_adapter, .audio_print_io, .input_device, .compositor_policy => bootstrap_driver_port.deactivateDeviceDataPlane(slot.activation.device_class, slot.activation.service_id),
             };
             if (!released) return false;
         }

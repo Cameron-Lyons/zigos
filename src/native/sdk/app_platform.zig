@@ -8,6 +8,7 @@ const signing = @import("../core/signing.zig");
 pub const Error = idl.Error || manifest.ValidationError || error{
     PackageMissingIdl,
     IdlInterfaceNotDeclaredInManifest,
+    IdlNativeDeclarationsMissing,
 };
 
 pub const CompiledPackage = struct {
@@ -38,6 +39,8 @@ pub fn compile(package: example_apps.ExamplePackage) Error!CompiledPackage {
     try manifest.validateApplicationPackaging(package.bundle);
 
     const document = try idl.parse(package.idl_source);
+    if (!document.allOperationsTyped()) return error.UntypedOperation;
+    if (document.nativeDeclarationCount() == 0) return error.IdlNativeDeclarationsMissing;
     for (document.interfaces[0..document.interface_count]) |*interface| {
         if (!bundleDeclaresInterface(package.bundle, interface.manifestDecl())) {
             return error.IdlInterfaceNotDeclaredInManifest;

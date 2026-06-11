@@ -838,6 +838,8 @@ test "native sync transport rejects revoked trusted devices and requires real I2
             .network_frame_cycles = hardware_target.first_supported_target.proof_minimums.network_frame_cycles,
             .suspend_resume_cycles = hardware_target.first_supported_target.proof_minimums.suspend_resume_cycles,
             .crash_recovery_cycles = hardware_target.first_supported_target.proof_minimums.crash_recovery_cycles,
+            .crash_record_persistence_cycles = hardware_target.first_supported_target.proof_minimums.crash_record_persistence_cycles,
+            .update_rollback_cycles = hardware_target.first_supported_target.proof_minimums.update_rollback_cycles,
             .proof_manifest_captured = true,
             .serial_log_captured = true,
             .required_markers_captured = true,

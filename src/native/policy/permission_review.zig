@@ -208,6 +208,10 @@ fn appendRequest(
     var scope_buffer: [320]u8 = undefined;
     const scope_summary = humane_permissions.renderRequestScopeToBuffer(&scope_buffer, request) catch "Scope: unavailable";
     try appendFmt(buffer, used, "    {s}\n", .{scope_summary});
+    if (request.kind == .network_egress and request.egress_intent.declared()) {
+        var intent_buffer: [180]u8 = undefined;
+        try appendFmt(buffer, used, "    data egress intent: {s}\n", .{dataEgressIntentSummary(request.egress_intent, &intent_buffer)});
+    }
     try appendFmt(buffer, used, "    required: {s} local_only: {s}\n", .{
         yesNo(request.required),
         yesNo(request.local_only),
@@ -245,15 +249,42 @@ fn appendRequest(
         } else {
             try appendFmt(buffer, used, "    decision: allow local_only={s}\n", .{yesNo(decision.local_only)});
         }
+        if (decision.allow) {
+            try appendCompactReceipt(buffer, used, request, decision);
+        }
     } else {
         try appendText(buffer, used, "    decision: pending\n");
     }
 }
 
+fn appendCompactReceipt(
+    buffer: []u8,
+    used: *usize,
+    request: manifest.PermissionRequest,
+    decision: ReviewDecision,
+) !void {
+    try appendFmt(buffer, used, "    receipt: granted={s} duration=", .{permissionLabel(request.kind)});
+    if (decision.lease_ticks) |lease_ticks| {
+        try appendFmt(buffer, used, "{d} ticks", .{lease_ticks});
+    } else if (request.max_lease_ticks != 0) {
+        try appendFmt(buffer, used, "up to {d} ticks", .{request.max_lease_ticks});
+    } else {
+        try appendText(buffer, used, "until revoked");
+    }
+    try appendText(buffer, used, " data_leaves=");
+    if (request.kind == .network_egress) {
+        var intent_buffer: [180]u8 = undefined;
+        try appendText(buffer, used, dataEgressIntentSummary(request.egress_intent, &intent_buffer));
+    } else {
+        try appendText(buffer, used, "none");
+    }
+    try appendText(buffer, used, " revoke=Permission Review\n");
+}
+
 fn permissionLabel(kind: manifest.PermissionKind) []const u8 {
     return switch (kind) {
         .object_access => "Object access",
-        .network_egress => "Network egress",
+        .network_egress => "Data egress",
         .device_access => "Device access",
         .clipboard => "Clipboard",
         .camera => "Camera",
@@ -265,6 +296,18 @@ fn permissionLabel(kind: manifest.PermissionKind) []const u8 {
         .notification_post => "Notification posting",
         .background_execution => "Background execution",
         .peer_ipc => "Peer IPC",
+    };
+}
+
+fn dataEgressIntentSummary(intent: manifest.DataEgressIntent, buffer: *[180]u8) []const u8 {
+    return switch (intent.kind) {
+        .unspecified => "unspecified data egress",
+        .sync_object => std.fmt.bufPrint(buffer, "sync object {s} with {s}", .{
+            intent.object,
+            intent.principal,
+        }) catch "sync object",
+        .call_service => std.fmt.bufPrint(buffer, "call service {s}", .{intent.service}) catch "call service",
+        .publish_event => std.fmt.bufPrint(buffer, "publish event {s}", .{intent.event_type}) catch "publish event",
     };
 }
 
@@ -362,6 +405,11 @@ test "decisionsToGrants clamps lease duration to the manifest request" {
             .required = false,
             .local_only = true,
             .max_lease_ticks = 50,
+            .egress_intent = .{
+                .kind = .sync_object,
+                .object = "workspace:notes",
+                .principal = "trusted-devices",
+            },
         },
     };
     const bundle = manifest.BundleManifest{
@@ -431,6 +479,8 @@ test "renderToBuffer includes bundle name, permission labels, and decisions" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Object access") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "decision: allow") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "decision: deny") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "receipt: granted=Object access") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "data_leaves=none") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Scope: this object on this device") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "revoke: remove this app from the object's share sheet") != null);
 }
@@ -493,6 +543,11 @@ test "renderRequestToBuffer marks undecided requests as pending" {
             .required = false,
             .local_only = true,
             .max_lease_ticks = 50,
+            .egress_intent = .{
+                .kind = .sync_object,
+                .object = "workspace:notes",
+                .principal = "trusted-devices",
+            },
         },
     };
     const bundle = manifest.BundleManifest{
@@ -506,7 +561,8 @@ test "renderRequestToBuffer marks undecided requests as pending" {
     var buffer: [512]u8 = undefined;
     const rendered = try renderRequestToBuffer(&buffer, &session, &bundle, 0);
 
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "Network egress") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Data egress") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "sync object workspace:notes with trusted-devices") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "decision: pending") != null);
 }
 
