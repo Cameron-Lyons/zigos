@@ -533,11 +533,12 @@ pub const Ledger = struct {
 
     pub fn exportText(self: *const Ledger, buffer: []u8, options: ExportOptions) Error![]const u8 {
         var used: usize = 0;
-        var records: [MAX_EVENTS]Event = undefined;
-        const events = self.queryEvents(.{
-            .include_protected_content = options.include_protected_content,
-        }, &records);
-        for (events) |event| try renderTextEvent(event, buffer, &used);
+        var index: usize = 0;
+        while (index < self.events.slots.len) : (index += 1) {
+            const slot = &self.events.slots[index];
+            if (!slot.in_use) continue;
+            try renderTextEvent(&slot.event, buffer, &used, options.include_protected_content);
+        }
         return buffer[0..used];
     }
 
@@ -554,9 +555,9 @@ pub const Ledger = struct {
 
     pub fn userVisibleDiagnosticSummary(self: *const Ledger) DiagnosticSummary {
         var summary = DiagnosticSummary{};
-        for (self.events.slots) |slot| {
+        for (&self.events.slots) |*slot| {
             if (!slot.in_use) continue;
-            const event = slot.event;
+            const event = &slot.event;
             summary.total_events += 1;
             summary.latest_tick = @max(summary.latest_tick, event.tick);
             if (event.detail_protected) summary.protected_details_redacted += 1;
@@ -622,9 +623,9 @@ pub const Ledger = struct {
         var latest_object_capability: u64 = 0;
         var latest_egress_capability: u64 = 0;
 
-        for (self.events.slots) |slot| {
+        for (&self.events.slots) |*slot| {
             if (!slot.in_use) continue;
-            const event = slot.event;
+            const event = &slot.event;
             if (event.task_id != task_id) continue;
             if (!eventMentionsDocument(event, document_resource)) continue;
 
@@ -654,9 +655,9 @@ pub const Ledger = struct {
         }
 
         var revoked_count: usize = 0;
-        for (self.events.slots) |slot| {
+        for (&self.events.slots) |*slot| {
             if (!slot.in_use) continue;
-            const event = slot.event;
+            const event = &slot.event;
             if (event.task_id != task_id or event.kind != .capability_revocation) continue;
             if (!containsCapabilityId(grant_ids[0..grant_id_count], event.related_id)) continue;
             revoked_count += 1;
@@ -752,11 +753,11 @@ pub const Ledger = struct {
             return;
         }
 
-        for (self.events.slots) |slot| {
+        for (&self.events.slots) |*slot| {
             if (!slot.in_use) continue;
-            if (!matchesQuery(slot.event, query)) continue;
+            if (!matchesQuery(&slot.event, query)) continue;
             if (count.* >= limit) break;
-            if (output) |records| records[count.*] = redactedForQuery(slot.event, query);
+            if (output) |records| records[count.*] = redactedForQuery(&slot.event, query);
             count.* += 1;
         }
     }
@@ -772,9 +773,9 @@ pub const Ledger = struct {
     ) void {
         var cursor = index.head(key);
         while (cursor != indexed_arena.no_index and count.* < limit) : (cursor = index.next(cursor)) {
-            const slot = self.events.slots[cursor];
-            if (!slot.in_use or !matchesQuery(slot.event, query)) continue;
-            if (output) |records| records[count.*] = redactedForQuery(slot.event, query);
+            const slot = &self.events.slots[cursor];
+            if (!slot.in_use or !matchesQuery(&slot.event, query)) continue;
+            if (output) |records| records[count.*] = redactedForQuery(&slot.event, query);
             count.* += 1;
         }
     }
@@ -1160,7 +1161,7 @@ fn taskKey(task_id: u64) u64 {
     return indexed_arena.nonZeroKey(task_id);
 }
 
-fn matchesQuery(event: Event, query: Query) bool {
+fn matchesQuery(event: *const Event, query: Query) bool {
     if (query.kind) |kind| {
         if (event.kind != kind) return false;
     }
@@ -1176,7 +1177,7 @@ fn matchesQuery(event: Event, query: Query) bool {
     return true;
 }
 
-fn eventMentionsDocument(event: Event, document_resource: []const u8) bool {
+fn eventMentionsDocument(event: *const Event, document_resource: []const u8) bool {
     return document_resource.len != 0 and std.mem.indexOf(u8, event.detailSlice(), document_resource) != null;
 }
 
@@ -1187,14 +1188,15 @@ fn containsCapabilityId(capability_ids: []const u64, capability_id: u64) bool {
     return false;
 }
 
-fn redactedForQuery(event: Event, query: Query) Event {
-    if (!event.detail_protected or query.include_protected_content) return event;
-    var redacted = event;
+fn redactedForQuery(event: *const Event, query: Query) Event {
+    if (!event.detail_protected or query.include_protected_content) return event.*;
+    var redacted = event.*;
     redacted.detail_len = copyText(&redacted.detail, "redacted");
     return redacted;
 }
 
-fn renderTextEvent(event: Event, buffer: []u8, used: *usize) Error!void {
+fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_protected_content: bool) Error!void {
+    const detail = exportDetailSlice(event, include_protected_content);
     try appendFmt(buffer, used, "#{d} tick={d} kind={s} subject={s}:{d}", .{
         event.sequence,
         event.tick,
@@ -1220,7 +1222,7 @@ fn renderTextEvent(event: Event, buffer: []u8, used: *usize) Error!void {
                 &blocked_buffer,
                 "This app",
                 permission_kind,
-                event.detailSlice(),
+                detail,
                 .{
                     .reason = event.denial_reason,
                     .user_approval_can_resolve = event.user_approval_can_resolve,
@@ -1284,7 +1286,12 @@ fn renderTextEvent(event: Event, buffer: []u8, used: *usize) Error!void {
     if (event.kind == .process_crash or event.kind == .driver_restart) {
         try appendFmt(buffer, used, " service={s}", .{@tagName(event.service_class)});
     }
-    try appendFmt(buffer, used, " detail={s}\n", .{event.detailSlice()});
+    try appendFmt(buffer, used, " detail={s}\n", .{detail});
+}
+
+fn exportDetailSlice(event: *const Event, include_protected_content: bool) []const u8 {
+    if (event.detail_protected and !include_protected_content) return "redacted";
+    return event.detailSlice();
 }
 
 fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) Error!void {
