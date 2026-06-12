@@ -404,15 +404,13 @@ pub const Ledger = struct {
         code: u32,
         detail: []const u8,
     ) Error!void {
-        const event = Event{
-            .kind = .process_crash,
-            .tick = tick,
-            .subject = service_subject,
-            .service_class = service_class,
-            .detail_code = code,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
-        };
+        var event = zeroEvent();
+        event.kind = .process_crash;
+        event.tick = tick;
+        event.subject = service_subject;
+        event.service_class = service_class;
+        event.detail_code = code;
+        event.detail_len = copyText(&event.detail, detail);
         try self.appendEvent(&event);
     }
 
@@ -424,15 +422,13 @@ pub const Ledger = struct {
         tick: u64,
         detail: []const u8,
     ) Error!void {
-        const event = Event{
-            .kind = .driver_restart,
-            .tick = tick,
-            .subject = service_subject,
-            .service_class = service_class,
-            .related_id = device_capability_id,
-            .detail_len = clampedDetailLen(detail),
-            .detail = copyTextInto(detail),
-        };
+        var event = zeroEvent();
+        event.kind = .driver_restart;
+        event.tick = tick;
+        event.subject = service_subject;
+        event.service_class = service_class;
+        event.related_id = device_capability_id;
+        event.detail_len = copyText(&event.detail, detail);
         try self.appendEvent(&event);
     }
 
