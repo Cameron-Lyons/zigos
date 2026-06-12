@@ -404,7 +404,7 @@ pub const Ledger = struct {
         code: u32,
         detail: []const u8,
     ) Error!void {
-        try self.append(.{
+        const event = Event{
             .kind = .process_crash,
             .tick = tick,
             .subject = service_subject,
@@ -412,7 +412,8 @@ pub const Ledger = struct {
             .detail_code = code,
             .detail_len = clampedDetailLen(detail),
             .detail = copyTextInto(detail),
-        });
+        };
+        try self.appendEvent(&event);
     }
 
     pub fn recordDriverRestart(
@@ -423,7 +424,7 @@ pub const Ledger = struct {
         tick: u64,
         detail: []const u8,
     ) Error!void {
-        try self.append(.{
+        const event = Event{
             .kind = .driver_restart,
             .tick = tick,
             .subject = service_subject,
@@ -431,7 +432,8 @@ pub const Ledger = struct {
             .related_id = device_capability_id,
             .detail_len = clampedDetailLen(detail),
             .detail = copyTextInto(detail),
-        });
+        };
+        try self.appendEvent(&event);
     }
 
     pub fn recordUpdateTransition(
@@ -514,9 +516,14 @@ pub const Ledger = struct {
     }
 
     pub fn latestKind(self: *const Ledger, kind: EventKind) ?Event {
+        const event = self.latestKindPtr(kind) orelse return null;
+        return event.*;
+    }
+
+    pub fn latestKindPtr(self: *const Ledger, kind: EventKind) ?*const Event {
         const tail = self.kind_index.tail(kindKey(kind));
         if (tail == indexed_arena.no_index) return null;
-        return self.events.slots[tail].event;
+        return &self.events.slots[tail].event;
     }
 
     pub fn queryEvents(self: *const Ledger, query: Query, output: []Event) []Event {
@@ -697,10 +704,14 @@ pub const Ledger = struct {
     }
 
     fn append(self: *Ledger, event: Event) Error!void {
+        try self.appendEvent(&event);
+    }
+
+    fn appendEvent(self: *Ledger, event: *const Event) Error!void {
         const sequence = self.next_sequence;
         const event_index = self.events.reserveIndex(sequence) orelse return error.EventTableFull;
         const slot = &self.events.slots[event_index];
-        slot.event = event;
+        slot.event = event.*;
         slot.event.sequence = sequence;
         self.next_sequence += 1;
         self.indexEvent(event_index) catch |err| {
@@ -711,7 +722,7 @@ pub const Ledger = struct {
         if (self.persistence_batch_depth == 0) {
             try self.persistRange(slot.event.sequence, slot.event.sequence, slot.event.tick);
         } else {
-            self.markPendingPersistence(slot.event);
+            self.markPendingPersistence(&slot.event);
         }
     }
 
@@ -781,7 +792,7 @@ pub const Ledger = struct {
     }
 
     fn indexEvent(self: *Ledger, event_index: usize) Error!void {
-        const event = self.events.slots[event_index].event;
+        const event = &self.events.slots[event_index].event;
         if (!self.kind_index.append(kindKey(event.kind), event_index)) return error.EventTableFull;
         if (!self.subject_index.append(subjectKey(event.subject), event_index)) return error.EventTableFull;
         if (event.task_id != 0 and !self.task_index.append(taskKey(event.task_id), event_index)) return error.EventTableFull;
@@ -798,7 +809,7 @@ pub const Ledger = struct {
         }
     }
 
-    fn markPendingPersistence(self: *Ledger, event: Event) void {
+    fn markPendingPersistence(self: *Ledger, event: *const Event) void {
         if (self.storage == null) return;
         if (self.pending_persist_count == 0) {
             self.pending_persist_first_sequence = event.sequence;
