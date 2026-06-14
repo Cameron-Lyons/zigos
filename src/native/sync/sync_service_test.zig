@@ -10,14 +10,17 @@ const storage_service = @import("../storage/storage_service.zig");
 const sync_service = @import("sync_service.zig");
 const sync_transport = @import("sync_transport.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
 const workspace = @import("../storage/workspace.zig");
 
+const addSyncDeviceGraphMeasuredArtifact = measured_boot.addMeasuredArtifact;
 const OverlaySessionState = sync_service.OverlaySessionState;
 const OverlaySessionUse = sync_service.OverlaySessionUse;
 const ResidentState = sync_service.ResidentState;
 const Service = sync_service.Service;
 const ServiceWith = sync_service.ServiceWith;
 const SyncSemantic = sync_service.SyncSemantic;
+const PEER_SYNC_MEDIA_PAYLOAD_BYTES: usize = 5000;
 
 const EndToEndPolicyIds = struct {
     local_policy_id: u64,
@@ -78,7 +81,7 @@ test "sync port requires service-scoped authority before device graph mutation" 
     const user = principal.PrincipalId{ .kind = .user, .serial = 821 };
     const signer = signing.SignerIdentity{
         .label = "sync-port-user",
-        .seed = [_]u8{0x82} ** 32,
+        .seed = signing.seedFromByte(0x82),
     };
 
     var service = Service.init(8_200, 8_201, sync_owner);
@@ -150,15 +153,15 @@ test "sync service persists platform-backed device key bindings across restart" 
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 9_303 };
     const user_signer = signing.SignerIdentity{
         .label = "persistent-platform-user",
-        .seed = [_]u8{0x91} ** 32,
+        .seed = signing.seedFromByte(0x91),
     };
     const laptop_signer = signing.SignerIdentity{
         .label = "persistent-platform-laptop",
-        .seed = [_]u8{0x92} ** 32,
+        .seed = signing.seedFromByte(0x92),
     };
     const rotated_laptop_signer = signing.SignerIdentity{
         .label = "persistent-platform-laptop-v2",
-        .seed = [_]u8{0x93} ** 32,
+        .seed = signing.seedFromByte(0x93),
     };
     const boot = try verifiedSyncDeviceGraphBoot(9_340, .bootloader_provided);
     const rotated_boot = try verifiedSyncDeviceGraphBoot(9_341, .bootloader_provided);
@@ -215,23 +218,23 @@ test "sync service requires database contract before transactional workspace rep
     const tablet = principal.PrincipalId{ .kind = .device, .serial = 8_504 };
     const storage_signer = signing.SignerIdentity{
         .label = "db-contract-storage",
-        .seed = [_]u8{0x91} ** 32,
+        .seed = signing.seedFromByte(0x91),
     };
     const user_signer = signing.SignerIdentity{
         .label = "db-contract-user",
-        .seed = [_]u8{0x92} ** 32,
+        .seed = signing.seedFromByte(0x92),
     };
     const laptop_signer = signing.SignerIdentity{
         .label = "db-contract-laptop",
-        .seed = [_]u8{0x93} ** 32,
+        .seed = signing.seedFromByte(0x93),
     };
     const tablet_signer = signing.SignerIdentity{
         .label = "db-contract-tablet",
-        .seed = [_]u8{0x94} ** 32,
+        .seed = signing.seedFromByte(0x94),
     };
     const contract_signer = signing.SignerIdentity{
         .label = "db-contract",
-        .seed = [_]u8{0x95} ** 32,
+        .seed = signing.seedFromByte(0x95),
     };
 
     var storage = storage_service.Service.initWithStore(8_510, 8_511, storage_owner, &storage_checkpoint_store);
@@ -323,19 +326,19 @@ test "sync service persists durable transport queues and enforces replay and wor
     const tablet = principal.PrincipalId{ .kind = .device, .serial = 8_704 };
     const storage_signer = signing.SignerIdentity{
         .label = "durable-queue-storage",
-        .seed = [_]u8{0xB1} ** 32,
+        .seed = signing.seedFromByte(0xB1),
     };
     const user_signer = signing.SignerIdentity{
         .label = "durable-queue-user",
-        .seed = [_]u8{0xB2} ** 32,
+        .seed = signing.seedFromByte(0xB2),
     };
     const laptop_signer = signing.SignerIdentity{
         .label = "durable-queue-laptop",
-        .seed = [_]u8{0xB3} ** 32,
+        .seed = signing.seedFromByte(0xB3),
     };
     const tablet_signer = signing.SignerIdentity{
         .label = "durable-queue-tablet",
-        .seed = [_]u8{0xB4} ** 32,
+        .seed = signing.seedFromByte(0xB4),
     };
     const path = "documents/queue.md";
 
@@ -476,19 +479,19 @@ test "sync service treats per-object shares and conflict review as local-first p
     const tablet = principal.PrincipalId{ .kind = .device, .serial = 8_804 };
     const storage_signer = signing.SignerIdentity{
         .label = "object-share-storage",
-        .seed = [_]u8{0xD1} ** 32,
+        .seed = signing.seedFromByte(0xD1),
     };
     const user_signer = signing.SignerIdentity{
         .label = "object-share-user",
-        .seed = [_]u8{0xD2} ** 32,
+        .seed = signing.seedFromByte(0xD2),
     };
     const laptop_signer = signing.SignerIdentity{
         .label = "object-share-laptop",
-        .seed = [_]u8{0xD3} ** 32,
+        .seed = signing.seedFromByte(0xD3),
     };
     const tablet_signer = signing.SignerIdentity{
         .label = "object-share-tablet",
-        .seed = [_]u8{0xD4} ** 32,
+        .seed = signing.seedFromByte(0xD4),
     };
     const notes_path = "documents/shared.md";
     const private_path = "documents/private.md";
@@ -607,17 +610,6 @@ test "sync service treats per-object shares and conflict review as local-first p
     try std.testing.expectEqual(tablet_offline.version_id.raw(), restarted.replicaVersion(workspace_record.id.raw(), tablet, notes_path).?);
 }
 
-fn addSyncDeviceGraphMeasuredArtifact(
-    recorder: *measured_boot.Recorder,
-    artifact_manifest: *measured_boot.ArtifactManifest,
-    kind: measured_boot.MeasurementKind,
-    label: []const u8,
-    payload: []const u8,
-) !void {
-    try recorder.add(kind, label, payload);
-    try artifact_manifest.add(kind, label, payload);
-}
-
 fn verifiedSyncDeviceGraphBoot(generation: u64, provenance: measured_boot.RootProvenance) !measured_boot.BootRecord {
     var recorder = measured_boot.Recorder.init();
     var artifact_manifest = measured_boot.ArtifactManifest.init(generation);
@@ -650,19 +642,19 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
     const object_id = object_store.ids.object(9_100);
     const user_signer = signing.SignerIdentity{
         .label = "sync-e2e-user",
-        .seed = [_]u8{0x71} ** 32,
+        .seed = signing.seedFromByte(0x71),
     };
     const laptop_signer = signing.SignerIdentity{
         .label = "sync-e2e-laptop",
-        .seed = [_]u8{0x72} ** 32,
+        .seed = signing.seedFromByte(0x72),
     };
     const tablet_signer = signing.SignerIdentity{
         .label = "sync-e2e-tablet",
-        .seed = [_]u8{0x73} ** 32,
+        .seed = signing.seedFromByte(0x73),
     };
     const storage_signer = signing.SignerIdentity{
         .label = "sync-e2e-storage",
-        .seed = [_]u8{0x74} ** 32,
+        .seed = signing.seedFromByte(0x74),
     };
 
     const source_task = try createSyncServiceTask(&runtime, sync_owner, "sync-source", "zigos.system.sync.source", 9_210);
@@ -963,9 +955,9 @@ fn createSyncServiceTask(
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 2_000,
-            .memory_bytes = 128 * 1024,
+            .memory_bytes = units.kibibytes(128),
             .endpoint_slots = 8,
-            .shared_memory_bytes = 32 * 1024,
+            .shared_memory_bytes = units.kibibytes(32),
             .background_allowed = true,
         },
         .local_only = true,
@@ -1069,25 +1061,25 @@ test "sync service replicates payloads to peer storage through booted relay fall
     const database_object_id = object_store.ids.object(9_563);
     const user_signer = signing.SignerIdentity{
         .label = "peer-sync-user",
-        .seed = [_]u8{0xA1} ** 32,
+        .seed = signing.seedFromByte(0xA1),
     };
     const laptop_signer = signing.SignerIdentity{
         .label = "peer-sync-laptop",
-        .seed = [_]u8{0xA2} ** 32,
+        .seed = signing.seedFromByte(0xA2),
     };
     const tablet_signer = signing.SignerIdentity{
         .label = "peer-sync-tablet",
-        .seed = [_]u8{0xA3} ** 32,
+        .seed = signing.seedFromByte(0xA3),
     };
     const storage_signer = signing.SignerIdentity{
         .label = "peer-sync-storage",
-        .seed = [_]u8{0xA4} ** 32,
+        .seed = signing.seedFromByte(0xA4),
     };
     const contract_signer = signing.SignerIdentity{
         .label = "peer-sync-db-contract",
-        .seed = [_]u8{0xA5} ** 32,
+        .seed = signing.seedFromByte(0xA5),
     };
-    const media_payload = [_]u8{0x4d} ** 5000;
+    const media_payload = [_]u8{0x4d} ** PEER_SYNC_MEDIA_PAYLOAD_BYTES;
     const secret_payload = "enc:peer-secret";
     const database_payload = "txn:insert-note";
 
@@ -1355,31 +1347,31 @@ test "sync service covers device graph policy replication semantics and restart 
     const phone = principal.PrincipalId{ .kind = .device, .serial = 13 };
     const storage_signer = signing.SignerIdentity{
         .label = "storage-signer",
-        .seed = [_]u8{0x51} ** 32,
+        .seed = signing.seedFromByte(0x51),
     };
     const user_signer = signing.SignerIdentity{
         .label = "user-root",
-        .seed = [_]u8{0x52} ** 32,
+        .seed = signing.seedFromByte(0x52),
     };
     const laptop_signer = signing.SignerIdentity{
         .label = "laptop",
-        .seed = [_]u8{0x53} ** 32,
+        .seed = signing.seedFromByte(0x53),
     };
     const tablet_signer = signing.SignerIdentity{
         .label = "tablet",
-        .seed = [_]u8{0x54} ** 32,
+        .seed = signing.seedFromByte(0x54),
     };
     const tablet_rotated_signer = signing.SignerIdentity{
         .label = "tablet-v2",
-        .seed = [_]u8{0x55} ** 32,
+        .seed = signing.seedFromByte(0x55),
     };
     const phone_signer = signing.SignerIdentity{
         .label = "phone",
-        .seed = [_]u8{0x56} ** 32,
+        .seed = signing.seedFromByte(0x56),
     };
     const contract_signer = signing.SignerIdentity{
         .label = "db-sync",
-        .seed = [_]u8{0x57} ** 32,
+        .seed = signing.seedFromByte(0x57),
     };
 
     var storage = storage_service.Service.initWithStore(40, 4, storage_owner, &storage_checkpoint_store);
@@ -1630,19 +1622,19 @@ test "overlay sessions cover sync remote access private service publishing and e
     const phone = principal.PrincipalId{ .kind = .device, .serial = 193 };
     const user_signer = signing.SignerIdentity{
         .label = "overlay-user",
-        .seed = [_]u8{0x61} ** 32,
+        .seed = signing.seedFromByte(0x61),
     };
     const laptop_signer = signing.SignerIdentity{
         .label = "overlay-laptop",
-        .seed = [_]u8{0x62} ** 32,
+        .seed = signing.seedFromByte(0x62),
     };
     const tablet_signer = signing.SignerIdentity{
         .label = "overlay-tablet",
-        .seed = [_]u8{0x63} ** 32,
+        .seed = signing.seedFromByte(0x63),
     };
     const phone_signer = signing.SignerIdentity{
         .label = "overlay-phone",
-        .seed = [_]u8{0x64} ** 32,
+        .seed = signing.seedFromByte(0x64),
     };
 
     var service = Service.init(901, 92, sync_owner);

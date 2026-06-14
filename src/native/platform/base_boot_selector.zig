@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const immutable_base = @import("immutable_base.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
@@ -359,7 +360,7 @@ fn decodeSelection(bytes: []const u8) Error!immutable_base.BootSelection {
     const signer_len = bytes[1];
     if (signer_len > immutable_base.MAX_LABEL_BYTES) return error.CorruptSelectorRecord;
 
-    var measurement = [_]u8{0} ** 32;
+    var measurement = crypto_hash.zero_digest;
     var signer = [_]u8{0} ** immutable_base.MAX_LABEL_BYTES;
     @memcpy(&measurement, bytes[40..72]);
     @memcpy(signer[0..signer_len], bytes[72..][0..signer_len]);
@@ -415,11 +416,11 @@ test "freestanding base boot selector promotes and rolls back signed artifacts a
     const owner = principal.PrincipalId{ .kind = .service, .serial = 71 };
     const state_signer = signing.SignerIdentity{
         .label = "selector-state",
-        .seed = [_]u8{0x71} ** 32,
+        .seed = signing.seedFromByte(0x71),
     };
     const image_signer = signing.SignerIdentity{
         .label = "selector-image",
-        .seed = [_]u8{0x72} ** 32,
+        .seed = signing.seedFromByte(0x72),
     };
 
     var storage = storage_service.Service.initWithStore(971, 81, owner, &storage_checkpoint_store);
@@ -491,11 +492,11 @@ test "base boot selector rejects tampered manager slot before boot handoff" {
     const owner = principal.PrincipalId{ .kind = .service, .serial = 72 };
     const state_signer = signing.SignerIdentity{
         .label = "selector-state",
-        .seed = [_]u8{0x73} ** 32,
+        .seed = signing.seedFromByte(0x73),
     };
     const image_signer = signing.SignerIdentity{
         .label = "selector-image",
-        .seed = [_]u8{0x74} ** 32,
+        .seed = signing.seedFromByte(0x74),
     };
 
     var storage = storage_service.Service.initWithStore(972, 82, owner, &storage_checkpoint_store);

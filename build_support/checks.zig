@@ -1,4 +1,5 @@
 const std = @import("std");
+const native_modules = @import("native_modules.zig");
 const tests_build = @import("tests.zig");
 
 pub const CheckSteps = struct {
@@ -118,13 +119,7 @@ fn addReleaseSecurityGateRun(
     const check_common_module = b.createModule(.{
         .root_source_file = b.path("tools/check_common.zig"),
     });
-    const binary_cursor_module = b.createModule(.{
-        .root_source_file = b.path("src/native/core/binary_cursor.zig"),
-    });
-    const userspace_wire_module = b.createModule(.{
-        .root_source_file = b.path("src/native/task/userspace_wire.zig"),
-    });
-    userspace_wire_module.addImport("binary_cursor", binary_cursor_module);
+    const wire = native_modules.addWireModules(b);
 
     const tool = b.addExecutable(.{
         .name = "check-release-security-gate",
@@ -135,8 +130,8 @@ fn addReleaseSecurityGateRun(
         }),
     });
     tool.root_module.addImport("check_common", check_common_module);
-    tool.root_module.addImport("binary_cursor", binary_cursor_module);
-    tool.root_module.addImport("userspace_wire", userspace_wire_module);
+    tool.root_module.addImport("binary_cursor", wire.binary_cursor);
+    tool.root_module.addImport("userspace_wire", wire.userspace_wire);
 
     const run = b.addRunArtifact(tool);
     run.setCwd(b.path("."));

@@ -10,6 +10,11 @@ pub const MAX_RING_DESCRIPTORS: u32 = 4096;
 pub const RING_ALIGNMENT_BYTES: u64 = 128;
 pub const MIN_ETHERNET_FRAME_BYTES: usize = 60;
 pub const MAX_ETHERNET_FRAME_BYTES: usize = 1518;
+const RING_DESCRIPTOR_GRANULARITY: u32 = 8;
+const TEST_RING_DESCRIPTORS: u32 = 256;
+const TEST_RX_RING_ADDRESS: u64 = 0x1000;
+const TEST_TX_RING_ADDRESS: u64 = 0x2000;
+const TEST_UNALIGNED_RING_ADDRESS: u64 = TEST_RX_RING_ADDRESS + 1;
 
 pub const Error = error{
     KernelNetworkDataPlaneDisabled,
@@ -127,7 +132,7 @@ pub fn rejectKernelTransmit(_: TransmitRequest) Error!void {
 fn validateDescriptorCount(count: u32) Error!void {
     if (count < MIN_RING_DESCRIPTORS) return error.RingTooSmall;
     if (count > MAX_RING_DESCRIPTORS) return error.RingTooLarge;
-    if ((count % 8) != 0) return error.RingCountInvalid;
+    if ((count % RING_DESCRIPTOR_GRANULARITY) != 0) return error.RingCountInvalid;
 }
 
 fn validateFrameLength(frame_len: usize) Error!void {
@@ -145,34 +150,34 @@ fn aligned(address: u64, alignment: u64) bool {
 
 test "Intel I225-LM ring plan validates descriptor geometry" {
     try validateRingPlan(.{
-        .rx_descriptors = 256,
-        .tx_descriptors = 256,
-        .rx_ring_address = 0x1000,
-        .tx_ring_address = 0x2000,
+        .rx_descriptors = TEST_RING_DESCRIPTORS,
+        .tx_descriptors = TEST_RING_DESCRIPTORS,
+        .rx_ring_address = TEST_RX_RING_ADDRESS,
+        .tx_ring_address = TEST_TX_RING_ADDRESS,
     });
-    try std.testing.expectEqual(@as(u32, 4096), try ringBytes(256));
+    try std.testing.expectEqual(DESCRIPTOR_BYTES * TEST_RING_DESCRIPTORS, try ringBytes(TEST_RING_DESCRIPTORS));
 }
 
 test "Intel I225-LM ring plan rejects unsafe geometry" {
     try std.testing.expectError(error.RingTooSmall, validateRingPlan(.{
         .rx_descriptors = 32,
-        .tx_descriptors = 256,
-        .rx_ring_address = 0x1000,
-        .tx_ring_address = 0x2000,
+        .tx_descriptors = TEST_RING_DESCRIPTORS,
+        .rx_ring_address = TEST_RX_RING_ADDRESS,
+        .tx_ring_address = TEST_TX_RING_ADDRESS,
     }));
 
     try std.testing.expectError(error.RingCountInvalid, validateRingPlan(.{
         .rx_descriptors = 66,
-        .tx_descriptors = 256,
-        .rx_ring_address = 0x1000,
-        .tx_ring_address = 0x2000,
+        .tx_descriptors = TEST_RING_DESCRIPTORS,
+        .rx_ring_address = TEST_RX_RING_ADDRESS,
+        .tx_ring_address = TEST_TX_RING_ADDRESS,
     }));
 
     try std.testing.expectError(error.RingAddressUnaligned, validateRingPlan(.{
-        .rx_descriptors = 256,
-        .tx_descriptors = 256,
-        .rx_ring_address = 0x1001,
-        .tx_ring_address = 0x2000,
+        .rx_descriptors = TEST_RING_DESCRIPTORS,
+        .tx_descriptors = TEST_RING_DESCRIPTORS,
+        .rx_ring_address = TEST_UNALIGNED_RING_ADDRESS,
+        .tx_ring_address = TEST_TX_RING_ADDRESS,
     }));
 }
 
@@ -185,10 +190,10 @@ test "Intel I225-LM kernel shim rejects direct network transmit attempts" {
 
 test "Intel I225-LM software adapter transmits and receives descriptor-backed frames" {
     var adapter = try SoftwareAdapter.init(.{
-        .rx_descriptors = 256,
-        .tx_descriptors = 256,
-        .rx_ring_address = 0x1000,
-        .tx_ring_address = 0x2000,
+        .rx_descriptors = TEST_RING_DESCRIPTORS,
+        .tx_descriptors = TEST_RING_DESCRIPTORS,
+        .rx_ring_address = TEST_RX_RING_ADDRESS,
+        .tx_ring_address = TEST_TX_RING_ADDRESS,
     }, .{ 0x02, 0x15, 0xF2, 0, 0, 1 });
     var tx_frame = [_]u8{0xAB} ** MIN_ETHERNET_FRAME_BYTES;
     const broadcast = [_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
@@ -216,8 +221,8 @@ test "Intel I225-LM software adapter rejects invalid frame flow" {
     var adapter = try SoftwareAdapter.init(.{
         .rx_descriptors = 64,
         .tx_descriptors = 64,
-        .rx_ring_address = 0x1000,
-        .tx_ring_address = 0x2000,
+        .rx_ring_address = TEST_RX_RING_ADDRESS,
+        .tx_ring_address = TEST_TX_RING_ADDRESS,
     }, .{ 0x02, 0x15, 0xF2, 0, 0, 2 });
     var too_small = [_]u8{0} ** (MIN_ETHERNET_FRAME_BYTES - 1);
     try std.testing.expectError(error.FrameTooSmall, adapter.transmit(too_small[0..]));

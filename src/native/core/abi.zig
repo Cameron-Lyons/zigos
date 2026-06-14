@@ -174,6 +174,8 @@ pub const ServiceConnectionDescriptor = extern struct {
 pub const DEVICE_DESCRIPTOR_FLAG_ATA_MASTER: u16 = 1 << 0;
 pub const MMIO_WINDOW_FLAG_WRITABLE: u16 = 1 << 0;
 pub const MMIO_WINDOW_FLAG_EXECUTABLE: u16 = 1 << 1;
+pub const DEVICE_MMIO_WINDOW_RESERVED_BYTES: usize = 6;
+pub const BOOL_RESPONSE_RESERVED_BYTES: usize = 7;
 
 pub const DevicePortWidth = enum(u8) {
     u8 = 1,
@@ -196,7 +198,7 @@ pub const DeviceMmioWindowDescriptor = extern struct {
     base: u64,
     length: u64,
     flags: u16,
-    _reserved: [6]u8,
+    _reserved: [DEVICE_MMIO_WINDOW_RESERVED_BYTES]u8,
 };
 
 pub const DevicePortReadResponse = extern struct {
@@ -205,8 +207,15 @@ pub const DevicePortReadResponse = extern struct {
 
 pub const BoolResponse = extern struct {
     value: u8,
-    _reserved: [7]u8,
+    _reserved: [BOOL_RESPONSE_RESERVED_BYTES]u8,
 };
+
+pub fn boolResponse(value: bool) BoolResponse {
+    return .{
+        .value = @intFromBool(value),
+        ._reserved = [_]u8{0} ** BOOL_RESPONSE_RESERVED_BYTES,
+    };
+}
 
 pub const TimeQueryResponse = extern struct {
     now_ticks: u64,

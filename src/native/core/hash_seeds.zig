@@ -1,0 +1,15 @@
+pub const package_bundle_key: u64 = 0x5A47_504B_4742_554E;
+pub const package_test_publisher: u64 = 0x5A47_5445_5354;
+pub const package_spec_publisher: u64 = 0x5A47_5350_4543;
+pub const package_policy_example_publisher: u64 = 0x5A47_504F_4C45;
+pub const package_sdk_publisher: u64 = 0x5A47_5344_4B50;
+pub const sdk_app_principal: u64 = 0x5A47_4150_505F_4944;
+pub const sdk_app_image: u64 = 0x5A47_4150_505F_494D;
+pub const principal_key_fingerprint: u64 = 0x5A47_5052_494E_4349;
+pub const policy_scope_key: u64 = 0x5A47_504F_4C53_434F;
+pub const network_policy_request_key: u64 = 0x5A47_4E45_5450_4F4C;
+pub const sync_state_record_key: u64 = 0x5A47_5359_4E43_5354;
+pub const sync_relay_session_key: u64 = 0x5A47_5245_4C41_59;
+pub const driver_binding_key: u64 = 0x5A47_4452_5642_494E;
+pub const document_index_key: u64 = 0x5A47_494E_4458;
+pub const shared_memory_label_key: u64 = 0x5A47_5348_4D45_4D00;

@@ -6,6 +6,7 @@ const copyText = native_util.copyText;
 const yesNo = native_util.yesNo;
 
 pub const MAX_LABEL_BYTES: usize = 48;
+const USER_HELP_BUFFER_BYTES: usize = 256;
 
 pub const Explanation = struct {
     reason: abi.DenialReason = .none,
@@ -212,7 +213,7 @@ test "permission denials explain blocking policy capability approval and retry h
 
 test "permission denials render a user readable blocked explanation" {
     const denied = forPermissionDecision(.network_egress, .policy_denied);
-    var buffer: [256]u8 = undefined;
+    var buffer: [USER_HELP_BUFFER_BYTES]u8 = undefined;
     const rendered = try renderUserHelpToBuffer(&buffer, "Notes", .network_egress, "relay.zigos.dev", denied);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Blocked: Notes") != null);

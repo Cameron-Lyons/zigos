@@ -1,7 +1,10 @@
 const std = @import("std");
+const hash_seeds = @import("hash_seeds.zig");
 const manifest = @import("../policy/manifest.zig");
+const signing = @import("signing.zig");
 
 pub const MAX_PRINCIPAL_KEYS = 32;
+pub const MAX_PRINCIPAL_LABEL_BYTES = 48;
 pub const MAX_PUBLISHER_BYTES = 64;
 
 pub const PrincipalKind = enum(u8) {
@@ -17,21 +20,31 @@ pub const PrincipalId = struct {
     kind: PrincipalKind,
     serial: u64,
 
+    pub const key_bytes: usize = @sizeOf(PrincipalKind) + @sizeOf(u64);
+
     pub fn eql(self: PrincipalId, other: PrincipalId) bool {
         return self.kind == other.kind and self.serial == other.serial;
+    }
+
+    pub fn keyBytes(self: PrincipalId) [key_bytes]u8 {
+        const serial_offset = @sizeOf(PrincipalKind);
+        var bytes: [key_bytes]u8 = undefined;
+        bytes[0] = @intFromEnum(self.kind);
+        std.mem.writeInt(u64, bytes[serial_offset..][0..@sizeOf(u64)], self.serial, .little);
+        return bytes;
     }
 };
 
 pub const PrincipalRecord = struct {
     id: PrincipalId,
     label_len: usize,
-    label: [48]u8,
+    label: [MAX_PRINCIPAL_LABEL_BYTES]u8,
 
     pub fn init(id: PrincipalId, label: []const u8) PrincipalRecord {
         var record = PrincipalRecord{
             .id = id,
-            .label_len = @min(label.len, 47),
-            .label = [_]u8{0} ** 48,
+            .label_len = @min(label.len, MAX_PRINCIPAL_LABEL_BYTES - 1),
+            .label = [_]u8{0} ** MAX_PRINCIPAL_LABEL_BYTES,
         };
         @memcpy(record.label[0..record.label_len], label[0..record.label_len]);
         return record;
@@ -45,7 +58,7 @@ pub const PrincipalRecord = struct {
 pub const PrincipalKeyRecord = struct {
     principal_id: PrincipalId,
     issuer: PrincipalId,
-    public_key: [32]u8,
+    public_key: signing.PublicKey,
     publisher_len: usize = 0,
     publisher: [MAX_PUBLISHER_BYTES]u8 = [_]u8{0} ** MAX_PUBLISHER_BYTES,
     policy_authority_root: bool = false,
@@ -57,7 +70,7 @@ pub const PrincipalKeyRecord = struct {
     }
 
     pub fn fingerprint(self: *const PrincipalKeyRecord) u64 {
-        return std.hash.Wyhash.hash(0x5A47_5052_494E_4349, &self.public_key);
+        return std.hash.Wyhash.hash(hash_seeds.principal_key_fingerprint, &self.public_key);
     }
 };
 
@@ -83,7 +96,7 @@ pub const Keyring = struct {
     pub fn bindPolicyAuthorityRoot(
         self: *Keyring,
         principal_id: PrincipalId,
-        public_key: [32]u8,
+        public_key: signing.PublicKey,
     ) KeyringError!*PrincipalKeyRecord {
         return self.put(.{
             .principal_id = principal_id,
@@ -98,7 +111,7 @@ pub const Keyring = struct {
         principal_id: PrincipalId,
         issuer: PrincipalId,
         publisher: []const u8,
-        public_key: [32]u8,
+        public_key: signing.PublicKey,
     ) KeyringError!*PrincipalKeyRecord {
         if (publisher.len == 0) return error.EmptyPublisher;
         if (publisher.len > MAX_PUBLISHER_BYTES) return error.PublisherTooLong;
@@ -139,7 +152,7 @@ pub const Keyring = struct {
     pub fn isPolicyAuthorityRootKey(
         self: *const Keyring,
         principal_id: PrincipalId,
-        public_key: [32]u8,
+        public_key: signing.PublicKey,
     ) bool {
         for (&self.slots) |*slot| {
             if (slot.in_use and
@@ -211,8 +224,8 @@ test "principal keyring binds publishers to trusted keys and supports revocation
     var keyring = Keyring.init();
     const root = PrincipalId{ .kind = .policy_authority, .serial = 1 };
     const publisher = PrincipalId{ .kind = .app, .serial = 7 };
-    const root_key = [_]u8{0xA1} ** 32;
-    const publisher_key = [_]u8{0xB2} ** 32;
+    const root_key = signing.publicKeyFromByte(0xA1);
+    const publisher_key = signing.publicKeyFromByte(0xB2);
 
     _ = try keyring.bindPolicyAuthorityRoot(root, root_key);
     _ = try keyring.bindPublisher(publisher, root, "Example Software", publisher_key);

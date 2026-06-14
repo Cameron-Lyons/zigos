@@ -4,11 +4,15 @@ const denial_explanation = @import("denial_explanation.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const humane_permissions = @import("humane_permissions.zig");
 const manifest = @import("manifest.zig");
+const manifest_fixtures = @import("manifest_fixtures.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
 
 pub const MAX_PERMISSION_DECISIONS: usize = 16;
+const PERMISSION_RECEIPT_BUFFER_BYTES: usize = 512;
+const REVOCATION_RECEIPT_BUFFER_BYTES: usize = 240;
 
 pub const ServiceTargets = struct {
     network_service_id: u64,
@@ -199,7 +203,7 @@ pub const PolicyMediator = struct {
         try self.recordDecision(decision.owner, decision.task_id, decision.request, true, .none, now_ticks);
         if (self.ledger) |ledger| {
             const task = self.runtime.find(decision.task_id) orelse return error.TaskNotFound;
-            var receipt_buffer: [512]u8 = undefined;
+            var receipt_buffer: [PERMISSION_RECEIPT_BUFFER_BYTES]u8 = undefined;
             const grant_receipt = humane_permissions.renderPermissionReceiptToBuffer(&receipt_buffer, .{
                 .task_id = decision.task_id,
                 .bundle_id = task.launchBundleIdSlice(),
@@ -486,22 +490,30 @@ fn taskDisplayName(task: *const task_runtime.TaskRecord) []const u8 {
     return "app";
 }
 
+fn createMediationTestTask(
+    runtime: *task_runtime.Runtime,
+    owner_serial: u64,
+    local_only: bool,
+) !*task_runtime.TaskRecord {
+    return runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = owner_serial },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = units.kibibytes(1),
+            .endpoint_slots = 4,
+            .shared_memory_bytes = units.kibibytes(1),
+        },
+        .local_only = local_only,
+    });
+}
+
 const std = @import("std");
 
 test "policy mediation denies zero-authority requests without user grants" {
     var capability_table = capability.CapabilityTable.init();
     var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 1 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
-        .local_only = true,
-    });
+    const task = try createMediationTestTask(&runtime, 1, true);
     var mediator = PolicyMediator.init(
         .{ .kind = .policy_authority, .serial = 1 },
         &capability_table,
@@ -541,9 +553,9 @@ test "policy mediation grants local-only object and network capabilities" {
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 2048,
+            .memory_bytes = units.kibibytes(2),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = units.kibibytes(2),
         },
         .local_only = true,
     });
@@ -582,12 +594,7 @@ test "policy mediation grants local-only object and network capabilities" {
             },
         },
     };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.notes",
-        .display_name = "Notes",
-        .publisher = "zigos.dev",
-        .requested_permissions = &requests,
-    };
+    const bundle = manifest_fixtures.basicNotesBundle(&requests);
     const grants = [_]UserGrant{
         .{ .kind = .object_access, .resource = "workspace:notes", .local_only = true, .expires_at_ticks = 200 },
         .{ .kind = .network_egress, .resource = "lan.sync", .local_only = true, .expires_at_ticks = 40 },
@@ -615,7 +622,7 @@ test "policy mediation grants local-only object and network capabilities" {
     try std.testing.expect(!runtime.hasCapability(task.id, revoked_capability_id));
     try std.testing.expect(capability_table.query(revoked_capability_id) == null);
     try std.testing.expectEqual(event_ledger.EventKind.capability_revocation, ledger.latestKind(.capability_revocation).?.kind);
-    var revoke_buffer: [240]u8 = undefined;
+    var revoke_buffer: [REVOCATION_RECEIPT_BUFFER_BYTES]u8 = undefined;
     const revoke_receipt = try humane_permissions.renderRevocationReceiptToBuffer(
         &revoke_buffer,
         revoked_capability_id,
@@ -631,16 +638,7 @@ test "policy mediation grants local-only object and network capabilities" {
 test "policy mediation rolls back minted capability when task attachment fails" {
     var capability_table = capability.CapabilityTable.init();
     var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 20 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
-    });
+    const task = try createMediationTestTask(&runtime, 20, false);
     var existing_id: u64 = 10;
     while (existing_id < 10 + task_runtime.MAX_TASK_CAPABILITIES) : (existing_id += 1) {
         try runtime.grantCapability(task.id, existing_id);
@@ -678,9 +676,9 @@ test "policy mediation suspends tasks when required background permission is den
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 2048,
+            .memory_bytes = units.kibibytes(2),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = units.kibibytes(2),
             .background_allowed = false,
         },
     });
@@ -710,7 +708,7 @@ test "policy mediation suspends tasks when required background permission is den
             .expected_duration_seconds = 30,
             .budget = .{
                 .cpu_time_ticks = 100,
-                .memory_bytes = 1024,
+                .memory_bytes = units.kibibytes(1),
             },
             .network = .local_network_only,
             .visibility = .status_only,
@@ -740,16 +738,7 @@ test "policy mediation suspends tasks when required background permission is den
 test "policy mediation reports expired grants" {
     var capability_table = capability.CapabilityTable.init();
     var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 4 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
-    });
+    const task = try createMediationTestTask(&runtime, 4, false);
     var mediator = PolicyMediator.init(
         .{ .kind = .policy_authority, .serial = 1 },
         &capability_table,
@@ -778,16 +767,7 @@ test "policy mediation reports expired grants" {
 test "policy mediation validates manifests before granting capabilities" {
     var capability_table = capability.CapabilityTable.init();
     var runtime = task_runtime.Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 5 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
-    });
+    const task = try createMediationTestTask(&runtime, 5, false);
     var mediator = PolicyMediator.init(
         .{ .kind = .policy_authority, .serial = 1 },
         &capability_table,
@@ -807,7 +787,7 @@ test "policy mediation validates manifests before granting capabilities" {
             .expected_duration_seconds = 30,
             .budget = .{
                 .cpu_time_ticks = 100,
-                .memory_bytes = 1024,
+                .memory_bytes = units.kibibytes(1),
             },
         },
     };
@@ -823,8 +803,6 @@ test "policy mediation validates manifests before granting capabilities" {
 }
 
 test "policy mediation covers device camera mic sensor and peer ipc permissions" {
-    const manifest_fixtures = @import("manifest_fixtures.zig");
-
     var capability_table = capability.CapabilityTable.init();
     var runtime = task_runtime.Runtime.init();
     const task = try runtime.createTask(.{
@@ -832,9 +810,9 @@ test "policy mediation covers device camera mic sensor and peer ipc permissions"
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 2048,
+            .memory_bytes = units.kibibytes(2),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = units.kibibytes(2),
         },
         .local_only = true,
     });
@@ -891,9 +869,9 @@ test "policy mediation maps location contacts screen capture and notification ca
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 2048,
+            .memory_bytes = units.kibibytes(2),
             .endpoint_slots = 8,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = units.kibibytes(2),
         },
         .local_only = true,
     });
@@ -980,9 +958,9 @@ test "policy mediation denies clipboard and screen capture without explicit gran
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 2048,
+            .memory_bytes = units.kibibytes(2),
             .endpoint_slots = 8,
-            .shared_memory_bytes = 2048,
+            .shared_memory_bytes = units.kibibytes(2),
         },
         .local_only = true,
     });

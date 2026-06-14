@@ -13,6 +13,7 @@ const x86 = if (builtin.target.os.tag == .freestanding)
     @import("../../arch/x86.zig")
 else
     struct {};
+const units = @import("../core/units.zig");
 
 const ATA_REG_DATA: u16 = 0;
 const ATA_REG_SECCOUNT: u16 = 2;
@@ -354,9 +355,9 @@ test "storage driver task attaches only through the kernel device broker" {
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .local_only = true,
         .launch = .{

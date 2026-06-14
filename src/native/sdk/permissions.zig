@@ -6,6 +6,7 @@ const policy_mediation = @import("../policy/policy_mediation.zig");
 const ui = @import("ui.zig");
 
 pub const MAX_REVIEW_NODES: usize = permission_review.MAX_REVIEW_DECISIONS + 4;
+pub const MAX_REVIEW_TEXT_BYTES: usize = ui.MAX_RENDER_BYTES;
 pub const ReviewCommand = permission_review.ReviewCommand;
 pub const ReviewDecision = permission_review.ReviewDecision;
 pub const UserGrant = policy_mediation.UserGrant;
@@ -218,7 +219,7 @@ test "permission SDK builds grants and a native UI review tree" {
     const plan = try buildReviewPlan(77, &package.bundle, &.{});
     try @import("std").testing.expect(plan.grant_count >= manifest.requiredPermissionCount(package.bundle));
 
-    var text_buffer: [4096]u8 = undefined;
+    var text_buffer: [MAX_REVIEW_TEXT_BYTES]u8 = undefined;
     const rendered_text = try renderReviewText(&plan, &package.bundle, &text_buffer);
     try @import("std").testing.expect(@import("std").mem.indexOf(u8, rendered_text, "Zigos Studio") != null);
 

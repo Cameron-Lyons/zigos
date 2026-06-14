@@ -4,6 +4,7 @@ const ids = @import("../core/ids.zig");
 const object_store = @import("object_store.zig");
 const signing = @import("../core/signing.zig");
 const workspace_model = @import("workspace.zig");
+const workspace_merkle = @import("workspace/merkle.zig");
 
 const AuditVisibility = workspace_model.AuditVisibility;
 const Directory = workspace_model.Directory;
@@ -18,7 +19,7 @@ test "workspace transactions, snapshot restore, delete recovery, and signed expo
     var store = object_store.Store.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x61} ** 32,
+        .seed = signing.seedFromByte(0x61),
     };
     const first = try store.putVersion(.{
         .preferred_object_id = ids.object(900),
@@ -45,14 +46,14 @@ test "workspace transactions, snapshot restore, delete recovery, and signed expo
 
     const snapshot_identity = signing.SignerIdentity{
         .label = "zigos-workspace-key",
-        .seed = [_]u8{0x62} ** 32,
+        .seed = signing.seedFromByte(0x62),
     };
     const export_identity = signing.SignerIdentity{
         .label = "zigos-export-key",
-        .seed = [_]u8{0x63} ** 32,
+        .seed = signing.seedFromByte(0x63),
     };
     const baseline = try directory.snapshot(workspace.id, "baseline", snapshot_identity);
-    try std.testing.expect(!std.mem.eql(u8, &baseline.root_address, &[_]u8{0} ** 32));
+    try std.testing.expect(!std.mem.eql(u8, &baseline.root_address, &workspace_merkle.zeroRootAddress()));
     try directory.beginTransaction(workspace.id);
     try directory.stagePut(workspace.id, "documents/notes.md", second.object_id, second.version_id, .document);
     try std.testing.expectEqual(@as(u32, 2), try directory.commit(workspace.id, 21));
@@ -98,11 +99,11 @@ test "workspace can restore the original workspace from a signed export package"
     var store = object_store.Store.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x64} ** 32,
+        .seed = signing.seedFromByte(0x64),
     };
     const export_signer = signing.SignerIdentity{
         .label = "zigos-export-key",
-        .seed = [_]u8{0x65} ** 32,
+        .seed = signing.seedFromByte(0x65),
     };
 
     const first = try store.putVersion(.{
@@ -208,7 +209,7 @@ test "workspace path index keeps cached root and lookups current" {
 
     const signer = signing.SignerIdentity{
         .label = "zigos-workspace-key",
-        .seed = [_]u8{0x68} ** 32,
+        .seed = signing.seedFromByte(0x68),
     };
     const snapshot_record = try directory.snapshot(workspace.id, "indexed", signer);
     try std.testing.expectEqual(record_after_put.rootAddress(), snapshot_record.root_address);
@@ -233,7 +234,7 @@ test "workspace snapshots and exports must stay signed" {
     });
     try std.testing.expectError(error.UnsignedSnapshot, directory.snapshot(workspace.id, "baseline", .{
         .label = "",
-        .seed = [_]u8{0} ** 32,
+        .seed = signing.seedFromByte(0),
     }));
 
     const package = ExportPackage{
@@ -241,13 +242,13 @@ test "workspace snapshots and exports must stay signed" {
         .snapshot_id = ids.SnapshotId.zero,
         .generation = 0,
         .label_len = 0,
-        .label = [_]u8{0} ** 48,
-        .root_address = [_]u8{0} ** 32,
+        .label = [_]u8{0} ** workspace_model.MAX_WORKSPACE_LABEL_BYTES,
+        .root_address = workspace_merkle.zeroRootAddress(),
         .signature = .{},
         .signature_format_len = 0,
-        .signature_format_storage = [_]u8{0} ** 16,
+        .signature_format_storage = [_]u8{0} ** workspace_model.MAX_EXPORT_SIGNATURE_FORMAT_BYTES,
         .signature_signer_len = 0,
-        .signature_signer_storage = [_]u8{0} ** 48,
+        .signature_signer_storage = [_]u8{0} ** workspace_model.MAX_EXPORT_SIGNATURE_SIGNER_BYTES,
         .entry_count = 0,
         .entries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
     };
@@ -258,11 +259,11 @@ test "export packages keep self-contained signature state across copies" {
     var store = object_store.Store.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x66} ** 32,
+        .seed = signing.seedFromByte(0x66),
     };
     const export_signer = signing.SignerIdentity{
         .label = "zigos-export-key",
-        .seed = [_]u8{0x67} ** 32,
+        .seed = signing.seedFromByte(0x67),
     };
 
     const first = try store.putVersion(.{
@@ -354,7 +355,7 @@ test "workspace restore rejects tampered signed snapshots" {
     var store = object_store.Store.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x64} ** 32,
+        .seed = signing.seedFromByte(0x64),
     };
     const object = try store.putVersion(.{
         .preferred_object_id = ids.object(901),
@@ -374,7 +375,7 @@ test "workspace restore rejects tampered signed snapshots" {
 
     const snapshot = try directory.snapshot(notes.id, "baseline", .{
         .label = "zigos-workspace-key",
-        .seed = [_]u8{0x65} ** 32,
+        .seed = signing.seedFromByte(0x65),
     });
     snapshot.generation += 1;
     try std.testing.expectError(error.InvalidSignature, directory.restore(notes.id, snapshot.id, 12));

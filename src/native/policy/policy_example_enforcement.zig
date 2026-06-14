@@ -2,6 +2,7 @@ const std = @import("std");
 const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
+const hash_seeds = @import("../core/hash_seeds.zig");
 const manifest = @import("manifest.zig");
 const manifest_fixtures = @import("manifest_fixtures.zig");
 const network_policy = @import("../sync/network_policy.zig");
@@ -11,6 +12,9 @@ const policy_object = @import("policy_object.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
+
+const LEDGER_EXPORT_BUFFER_BYTES: usize = units.kibibytes(1);
 
 pub const Error = package_service.AuthorityError || package_service.Error || network_policy.Error || policy_mediation.Error || event_ledger.Error || error{
     PolicyDenied,
@@ -161,10 +165,10 @@ fn trustPublisher(
     publisher: []const u8,
 ) !void {
     const issuer = principal.PrincipalId{ .kind = .policy_authority, .serial = 1 };
-    _ = try port.trustPolicyAuthorityRoot(authority, issuer, [_]u8{0x51} ** 32);
+    _ = try port.trustPolicyAuthorityRoot(authority, issuer, signing.publicKeyFromByte(0x51));
     _ = try port.trustPublisher(
         authority,
-        .{ .kind = .app, .serial = std.hash.Wyhash.hash(0x5A47_504F_4C45, publisher) },
+        .{ .kind = .app, .serial = std.hash.Wyhash.hash(hash_seeds.package_policy_example_publisher, publisher) },
         issuer,
         publisher,
         try signing.publicKey(identity),
@@ -190,7 +194,7 @@ test "policy examples route package network removable and sync denials through s
         .audit_export_required = true,
     }, .{
         .label = "example-policy-key",
-        .seed = [_]u8{0x88} ** 32,
+        .seed = signing.seedFromByte(0x88),
     });
 
     var package_capabilities = capability.CapabilityTable.init();
@@ -207,7 +211,7 @@ test "policy examples route package network removable and sync denials through s
     };
     const package_signer = signing.SignerIdentity{
         .label = "example-package-signer",
-        .seed = [_]u8{0x89} ** 32,
+        .seed = signing.seedFromByte(0x89),
     };
     try trustPublisher(&package_port, package_authority, package_signer, "zigos.dev");
     var bundle = manifest_fixtures.notesBundle();
@@ -291,7 +295,7 @@ test "policy examples deny screen capture grants and enforce retention audit req
         .audit_export_required = true,
     }, .{
         .label = "capture-policy-key",
-        .seed = [_]u8{0x90} ** 32,
+        .seed = signing.seedFromByte(0x90),
     });
 
     var capability_table = capability.CapabilityTable.init();
@@ -301,9 +305,9 @@ test "policy examples deny screen capture grants and enforce retention audit req
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 2048,
+            .memory_bytes = units.kibibytes(2),
             .endpoint_slots = 2,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .local_only = true,
     });
@@ -351,7 +355,7 @@ test "policy examples deny screen capture grants and enforce retention audit req
         "screen capture blocked by organization policy",
         true,
     );
-    var export_buffer: [1024]u8 = undefined;
+    var export_buffer: [LEDGER_EXPORT_BUFFER_BYTES]u8 = undefined;
 
     const retention_denied = policies.retentionAuditDecision(subjects, .{
         .retention_days = 90,

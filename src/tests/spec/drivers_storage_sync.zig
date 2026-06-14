@@ -14,6 +14,9 @@ const storage_volume = @import("../../native/storage/storage_volume.zig");
 const sync_service = @import("../../native/sync/sync_service.zig");
 const workspace = @import("../../native/storage/workspace.zig");
 
+const DMA_PROBE_BYTES: u64 = 4096;
+const DMA_TAIL_PROBE_OFFSET_BYTES: u64 = 1024;
+
 pub fn publishedDriversActivateScopedTransports() !void {
     var capabilities = capability.CapabilityTable.init();
     const FakeNetworkDevice = struct {
@@ -82,7 +85,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .display_name = "Published Driver Runtime",
         .publisher = "zigos.spec",
         .signature = .{
-            .format = "ed25519",
+            .format = manifest.SIGNATURE_FORMAT_ED25519,
             .signer = "zigos-spec-driver",
         },
     };
@@ -290,32 +293,32 @@ pub fn publishedDriversActivateScopedTransports() !void {
     try std.testing.expect(graphics_activation.exclusive_claim);
     try std.testing.expectEqualStrings("compositor-userspace", graphics_activation.publisherSlice());
     try std.testing.expectEqual(@as(u64, 93), bootstrap_driver_port.deviceDataPlanePublication(.graphics_adapter).?.active_service_id);
-    try std.testing.expect(graphics_driver.allowsDma(graphics_driver.dma_ranges[0].base, 4096));
-    try std.testing.expect(!graphics_driver.allowsDma(graphics_driver.dma_ranges[0].base + graphics_driver.dma_ranges[0].length - 1024, 4096));
+    try std.testing.expect(graphics_driver.allowsDma(graphics_driver.dma_ranges[0].base, DMA_PROBE_BYTES));
+    try std.testing.expect(!graphics_driver.allowsDma(graphics_driver.dma_ranges[0].base + graphics_driver.dma_ranges[0].length - DMA_TAIL_PROBE_OFFSET_BYTES, DMA_PROBE_BYTES));
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, usb_activation.mode);
     try std.testing.expect(usb_activation.exclusive_claim);
     try std.testing.expectEqualStrings("usb-userspace", usb_activation.publisherSlice());
     try std.testing.expectEqual(@as(u64, 96), bootstrap_driver_port.deviceDataPlanePublication(.usb_controller).?.active_service_id);
-    try std.testing.expect(usb_driver.allowsDma(usb_driver.dma_ranges[0].base, 4096));
-    try std.testing.expect(!usb_driver.allowsDma(usb_driver.dma_ranges[0].base + usb_driver.dma_ranges[0].length - 1024, 4096));
+    try std.testing.expect(usb_driver.allowsDma(usb_driver.dma_ranges[0].base, DMA_PROBE_BYTES));
+    try std.testing.expect(!usb_driver.allowsDma(usb_driver.dma_ranges[0].base + usb_driver.dma_ranges[0].length - DMA_TAIL_PROBE_OFFSET_BYTES, DMA_PROBE_BYTES));
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, audio_activation.mode);
     try std.testing.expect(audio_activation.exclusive_claim);
     try std.testing.expectEqualStrings("media-print-userspace", audio_activation.publisherSlice());
     try std.testing.expectEqual(@as(u64, 94), bootstrap_driver_port.deviceDataPlanePublication(.audio_print_io).?.active_service_id);
-    try std.testing.expect(audio_driver.allowsDma(audio_driver.dma_ranges[0].base, 4096));
-    try std.testing.expect(!audio_driver.allowsDma(audio_driver.dma_ranges[0].base + audio_driver.dma_ranges[0].length - 1024, 4096));
+    try std.testing.expect(audio_driver.allowsDma(audio_driver.dma_ranges[0].base, DMA_PROBE_BYTES));
+    try std.testing.expect(!audio_driver.allowsDma(audio_driver.dma_ranges[0].base + audio_driver.dma_ranges[0].length - DMA_TAIL_PROBE_OFFSET_BYTES, DMA_PROBE_BYTES));
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, input_activation.mode);
     try std.testing.expect(input_activation.exclusive_claim);
     try std.testing.expectEqualStrings("input-userspace", input_activation.publisherSlice());
     try std.testing.expectEqual(@as(u64, 95), bootstrap_driver_port.deviceDataPlanePublication(.input_device).?.active_service_id);
-    try std.testing.expect(input_driver.allowsDma(input_driver.dma_ranges[0].base, 4096));
-    try std.testing.expect(!input_driver.allowsDma(input_driver.dma_ranges[0].base + input_driver.dma_ranges[0].length - 1024, 4096));
+    try std.testing.expect(input_driver.allowsDma(input_driver.dma_ranges[0].base, DMA_PROBE_BYTES));
+    try std.testing.expect(!input_driver.allowsDma(input_driver.dma_ranges[0].base + input_driver.dma_ranges[0].length - DMA_TAIL_PROBE_OFFSET_BYTES, DMA_PROBE_BYTES));
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, compositor_policy_activation.mode);
     try std.testing.expect(compositor_policy_activation.exclusive_claim);
     try std.testing.expectEqualStrings("compositor-policy-userspace", compositor_policy_activation.publisherSlice());
     try std.testing.expectEqual(@as(u64, 97), bootstrap_driver_port.deviceDataPlanePublication(.compositor_policy).?.active_service_id);
-    try std.testing.expect(compositor_policy_driver.allowsDma(compositor_policy_driver.dma_ranges[0].base, 4096));
-    try std.testing.expect(!compositor_policy_driver.allowsDma(compositor_policy_driver.dma_ranges[0].base + compositor_policy_driver.dma_ranges[0].length - 1024, 4096));
+    try std.testing.expect(compositor_policy_driver.allowsDma(compositor_policy_driver.dma_ranges[0].base, DMA_PROBE_BYTES));
+    try std.testing.expect(!compositor_policy_driver.allowsDma(compositor_policy_driver.dma_ranges[0].base + compositor_policy_driver.dma_ranges[0].length - DMA_TAIL_PROBE_OFFSET_BYTES, DMA_PROBE_BYTES));
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.control_only, runtime.findByClass(.network_adapter).?.mode);
     try std.testing.expectEqualStrings("ata-bootstrap", runtime.findByClass(.storage_controller).?.publisherSlice());
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, runtime.findByClass(.usb_controller).?.mode);

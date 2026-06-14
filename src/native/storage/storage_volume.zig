@@ -33,6 +33,10 @@ const max_log_segments = volume_layout.max_log_segments;
 const compaction_threshold_bytes = volume_layout.compaction_threshold_bytes;
 const payload_magic = volume_layout.payload_magic;
 const format_version = volume_layout.format_version;
+const share_grant_flag_read: u8 = 1 << 0;
+const share_grant_flag_write: u8 = 1 << 1;
+const share_grant_flag_export: u8 = 1 << 2;
+const share_grant_flag_admin: u8 = 1 << 3;
 
 const workspaceCount = volume_quota.workspaceCount;
 const snapshotCount = volume_quota.snapshotCount;
@@ -1214,7 +1218,7 @@ fn readSignature(reader: *CursorReader, signer_storage: *[max_signer_bytes]u8) E
     try reader.readBytes(signer_storage[0..signer_len]);
 
     var signature = manifest.Signature{
-        .format = "ed25519",
+        .format = manifest.SIGNATURE_FORMAT_ED25519,
         .signer = signer_storage[0..signer_len],
     };
     signature.public_key_len = try reader.readU16();
@@ -1323,10 +1327,10 @@ fn parseAuditVisibility(value: u8) Error!workspace.AuditVisibility {
 fn writeShareGrant(writer: *CursorWriter, grant: workspace.ShareGrant) Error!void {
     try writePrincipal(writer, grant.principal_id);
     var flags: u8 = 0;
-    if (grant.can_read) flags |= 1 << 0;
-    if (grant.can_write) flags |= 1 << 1;
-    if (grant.can_export) flags |= 1 << 2;
-    if (grant.can_admin) flags |= 1 << 3;
+    if (grant.can_read) flags |= share_grant_flag_read;
+    if (grant.can_write) flags |= share_grant_flag_write;
+    if (grant.can_export) flags |= share_grant_flag_export;
+    if (grant.can_admin) flags |= share_grant_flag_admin;
     try writer.writeByte(flags);
     try writer.writeByte(@intFromEnum(grant.network_scope));
     try writer.writeByte(@intFromEnum(grant.reshare_policy));
@@ -1341,10 +1345,10 @@ fn readShareGrant(reader: *CursorReader) Error!workspace.ShareGrant {
     const flags = try reader.readByte();
     var grant = workspace.ShareGrant{
         .principal_id = principal_id,
-        .can_read = (flags & (1 << 0)) != 0,
-        .can_write = (flags & (1 << 1)) != 0,
-        .can_export = (flags & (1 << 2)) != 0,
-        .can_admin = (flags & (1 << 3)) != 0,
+        .can_read = (flags & share_grant_flag_read) != 0,
+        .can_write = (flags & share_grant_flag_write) != 0,
+        .can_export = (flags & share_grant_flag_export) != 0,
+        .can_admin = (flags & share_grant_flag_admin) != 0,
         .network_scope = try parseShareNetworkScope(try reader.readByte()),
         .reshare_policy = try parseResharePolicy(try reader.readByte()),
         .audit_visibility = try parseAuditVisibility(try reader.readByte()),

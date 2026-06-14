@@ -19,6 +19,12 @@ const signing = @import("../../native/core/signing.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
 const sync_service = @import("../../native/sync/sync_service.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
+const units = @import("../../native/core/units.zig");
+
+const REVIEW_FLOW_BUFFER_BYTES: usize = 512;
+const BACKGROUND_ACTIVITY_BUFFER_BYTES: usize = 384;
+const DIAGNOSTIC_EXPORT_BUFFER_BYTES: usize = units.kibibytes(1) + 512;
+const DIAGNOSTIC_SUMMARY_BUFFER_BYTES: usize = 768;
 
 const PackageHarness = struct {
     port: package_service.PackagePort,
@@ -266,7 +272,7 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
         true,
         120,
     );
-    var review_buffer: [512]u8 = undefined;
+    var review_buffer: [REVIEW_FLOW_BUFFER_BYTES]u8 = undefined;
     const rendered_review = try native_ux.renderReviewFlowToBuffer(&review_buffer, review);
     try std.testing.expect(std.mem.indexOf(u8, rendered_review, "bundle=app.trip") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered_review, "decision=allow") != null);
@@ -484,14 +490,14 @@ pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {
         .{ .kind = .background_execution, .resource = "policy", .rights = .{ .task = .{ .background_run = true } } },
     };
     const background_tasks = [_]manifest.BackgroundTaskDecl{
-        .{ .id = "schedule", .trigger = .user_approved_scheduled_job, .expected_duration_seconds = 30, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = 64 * 1024 }, .network = .none, .visibility = .status_only },
-        .{ .id = "push", .trigger = .push_event, .expected_duration_seconds = 20, .budget = .{ .cpu_time_ticks = 900, .memory_bytes = 48 * 1024 }, .network = .named_service_identities, .visibility = .hidden },
-        .{ .id = "change", .trigger = .local_object_change, .expected_duration_seconds = 15, .budget = .{ .cpu_time_ticks = 800, .memory_bytes = 32 * 1024 }, .network = .none, .visibility = .audit_only },
-        .{ .id = "proximity", .trigger = .device_proximity, .expected_duration_seconds = 10, .budget = .{ .cpu_time_ticks = 700, .memory_bytes = 24 * 1024 }, .network = .none, .visibility = .user_visible },
-        .{ .id = "sensor", .trigger = .sensor_rule, .expected_duration_seconds = 25, .budget = .{ .cpu_time_ticks = 750, .memory_bytes = 32 * 1024 }, .network = .none, .visibility = .status_only },
-        .{ .id = "sync", .trigger = .sync_completion, .expected_duration_seconds = 40, .budget = .{ .cpu_time_ticks = 1_100, .memory_bytes = 96 * 1024 }, .network = .local_network_only, .visibility = .status_only },
-        .{ .id = "media", .trigger = .media_export_completion, .expected_duration_seconds = 35, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = 48 * 1024 }, .network = .named_domains, .visibility = .status_only },
-        .{ .id = "policy", .trigger = .organization_policy_task, .expected_duration_seconds = 45, .budget = .{ .cpu_time_ticks = 1_200, .memory_bytes = 80 * 1024 }, .network = .none, .visibility = .audit_only },
+        .{ .id = "schedule", .trigger = .user_approved_scheduled_job, .expected_duration_seconds = 30, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = units.kibibytes(64) }, .network = .none, .visibility = .status_only },
+        .{ .id = "push", .trigger = .push_event, .expected_duration_seconds = 20, .budget = .{ .cpu_time_ticks = 900, .memory_bytes = units.kibibytes(48) }, .network = .named_service_identities, .visibility = .hidden },
+        .{ .id = "change", .trigger = .local_object_change, .expected_duration_seconds = 15, .budget = .{ .cpu_time_ticks = 800, .memory_bytes = units.kibibytes(32) }, .network = .none, .visibility = .audit_only },
+        .{ .id = "proximity", .trigger = .device_proximity, .expected_duration_seconds = 10, .budget = .{ .cpu_time_ticks = 700, .memory_bytes = units.kibibytes(24) }, .network = .none, .visibility = .user_visible },
+        .{ .id = "sensor", .trigger = .sensor_rule, .expected_duration_seconds = 25, .budget = .{ .cpu_time_ticks = 750, .memory_bytes = units.kibibytes(32) }, .network = .none, .visibility = .status_only },
+        .{ .id = "sync", .trigger = .sync_completion, .expected_duration_seconds = 40, .budget = .{ .cpu_time_ticks = 1_100, .memory_bytes = units.kibibytes(96) }, .network = .local_network_only, .visibility = .status_only },
+        .{ .id = "media", .trigger = .media_export_completion, .expected_duration_seconds = 35, .budget = .{ .cpu_time_ticks = 1_000, .memory_bytes = units.kibibytes(48) }, .network = .named_domains, .visibility = .status_only },
+        .{ .id = "policy", .trigger = .organization_policy_task, .expected_duration_seconds = 45, .budget = .{ .cpu_time_ticks = 1_200, .memory_bytes = units.kibibytes(80) }, .network = .none, .visibility = .audit_only },
     };
 
     var package_bundle = manifest.BundleManifest{
@@ -527,9 +533,9 @@ pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 20_000,
-            .memory_bytes = 2 * 1024 * 1024,
+            .memory_bytes = units.mebibytes(2),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 64 * 1024,
+            .shared_memory_bytes = units.kibibytes(64),
             .background_allowed = true,
         },
         .ui_surface_id = 9,
@@ -538,7 +544,6 @@ pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {
             .bundle_id = "app.background.spec",
         },
     });
-    task.state = .active;
 
     var dispatcher = background_dispatch.Controller.init();
     for (installed_bundle.background_tasks) |background_task| {
@@ -570,7 +575,7 @@ pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {
     try std.testing.expectEqual(manifest.BackgroundVisibility.status_only, task.last_background_visibility);
     try std.testing.expectEqual(task_runtime.AuditEventKind.background_dispatched, task.latestAuditEvent().?.kind);
 
-    var activity_buffer: [384]u8 = undefined;
+    var activity_buffer: [BACKGROUND_ACTIVITY_BUFFER_BYTES]u8 = undefined;
     const latest_activity = try humane_permissions.renderBackgroundActivityToBuffer(&activity_buffer, dispatcher.latestRecord().?);
     try std.testing.expect(std.mem.indexOf(u8, latest_activity, "Background activity") != null);
     try std.testing.expect(std.mem.indexOf(u8, latest_activity, "state=waiting") != null);
@@ -623,7 +628,7 @@ pub fn structuredServicesAndDiagnosticsStayRedacted() !void {
     try ledger.recordDriverRestart(contract.ServiceClass.media_print_helpers, spec_support.service(71), 9, 32, "printer helper restart");
     try ledger.recordSyncConflict(spec_support.user(8), 11, 33, "documents/itinerary.md conflict", true);
     try ledger.recordSuspiciousAppBehavior(spec_support.app(8), 503, 34, 0xBAD1, "clipboard scrape then network", true);
-    var export_buffer: [1536]u8 = undefined;
+    var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
     const redacted = try ledger.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, redacted, "redacted") != null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "media_print_helpers") != null);
@@ -634,7 +639,7 @@ pub fn structuredServicesAndDiagnosticsStayRedacted() !void {
     try std.testing.expect(std.mem.indexOf(u8, redacted, "app_behavior=suspicious") != null);
     try std.testing.expect(std.mem.indexOf(u8, redacted, "clipboard scrape then network") == null);
 
-    var summary_buffer: [768]u8 = undefined;
+    var summary_buffer: [DIAGNOSTIC_SUMMARY_BUFFER_BYTES]u8 = undefined;
     const summary = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
     try std.testing.expect(std.mem.indexOf(u8, summary, "diagnostics user_visible=yes privacy=redacted") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "capability_denials=1") != null);

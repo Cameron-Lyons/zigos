@@ -1,6 +1,8 @@
 const std = @import("std");
 const binary_cursor = @import("binary_cursor");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const device_graph = @import("device_graph.zig");
+const hash_seeds = @import("../core/hash_seeds.zig");
 const manifest = @import("../policy/manifest.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
 const network_policy = @import("network_policy.zig");
@@ -554,7 +556,7 @@ fn decodeNetworkPolicy(resident: *state_support.ResidentState, reader: *CursorRe
         .explicit_internet_grant = false,
         .require_remote_attestation = false,
         .pinned_root_digest_present = false,
-        .pinned_root_digest = [_]u8{0} ** 32,
+        .pinned_root_digest = crypto_hash.zero_digest,
     };
     const workspace_id = try reader.readU64();
     slot.policy.workspace_id = if (workspace_id == 0) null else workspace_id;
@@ -760,7 +762,7 @@ fn readSignature(reader: *CursorReader, signer_storage: *[state_support.MAX_LABE
     if ((try reader.readByte()) == 0) return .{};
 
     var signature = manifest.Signature{
-        .format = "ed25519",
+        .format = manifest.SIGNATURE_FORMAT_ED25519,
         .signer = signer_storage[0..0],
     };
     var signer_len: usize = 0;
@@ -844,7 +846,7 @@ fn isRecordPath(path: []const u8) bool {
 }
 
 fn recordObjectId(workspace_id: u64, path: []const u8) u64 {
-    var hasher = std.hash.Wyhash.init(0x5A47_5359_4E43_5354);
+    var hasher = std.hash.Wyhash.init(hash_seeds.sync_state_record_key);
     var workspace_bytes: [@sizeOf(u64)]u8 = undefined;
     std.mem.writeInt(u64, workspace_bytes[0..], workspace_id, .little);
     hasher.update(workspace_bytes[0..]);

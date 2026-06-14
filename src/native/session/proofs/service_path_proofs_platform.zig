@@ -10,11 +10,13 @@ const object_store = @import("../../storage/object_store.zig");
 const platform_policy_signals = @import("../../platform/platform_policy_signals.zig");
 const principal = @import("../../core/principal.zig");
 const session_manager = @import("../session_manager.zig");
+const shared_memory = @import("../../kernel_api/shared_memory.zig");
 const signing = @import("../../core/signing.zig");
 const storage_service = @import("../../storage/storage_service.zig");
 const sync_service = @import("../../sync/sync_service.zig");
 const supervisor_mod = @import("../supervisor.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
+const units = @import("../../core/units.zig");
 const update_health = @import("../../platform/update_health.zig");
 const userspace_scheduler = @import("../../task/userspace_scheduler.zig");
 const compositor_session = @import("../../platform/compositor_session.zig");
@@ -22,6 +24,8 @@ const common = @import("service_path_proofs_common.zig");
 
 const createBootedServiceTask = common.createBootedServiceTask;
 const signer = common.signer;
+const LEDGER_EXPORT_BUFFER_BYTES: usize = units.kibibytes(2);
+const FAILURE_NEEDLE_BUFFER_BYTES: usize = 48;
 
 pub fn proveBootedPostActivationHealthChecks(
     runtime: *task_runtime.Runtime,
@@ -153,10 +157,10 @@ pub fn proveBootedPostActivationHealthChecks(
     try std.testing.expectEqual(@as(u64, cases.len), success.activation.rollback_generation);
     try std.testing.expect(manager.verifyActiveImage());
 
-    var export_buffer: [2048]u8 = undefined;
+    var export_buffer: [LEDGER_EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     for (cases) |case| {
-        var needle_buffer: [48]u8 = undefined;
+        var needle_buffer: [FAILURE_NEEDLE_BUFFER_BYTES]u8 = undefined;
         const needle = try std.fmt.bufPrint(&needle_buffer, "failure={s}", .{@tagName(case.expected)});
         try std.testing.expect(std.mem.indexOf(u8, exported, needle) != null);
     }
@@ -271,9 +275,9 @@ pub fn proveBootedSchedulerTelemetryProvider(
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 64 * 1024,
+            .memory_bytes = units.kibibytes(64),
             .endpoint_slots = 1,
-            .shared_memory_bytes = 4096,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE,
             .resource_class = .foreground_interactive,
         },
         .ui_surface_id = 44,
@@ -292,7 +296,7 @@ pub fn proveBootedSchedulerTelemetryProvider(
     try std.testing.expect(scheduler.configureTaskDispatchRequest(foreground.id, .{
         .class = .foreground_interactive,
         .wants_gpu = true,
-        .shared_memory_bytes = 4096,
+        .shared_memory_bytes = shared_memory.PAGE_SIZE,
     }, false));
 
     var provider = try platform_policy_signals.FreestandingPlatformTelemetryProvider.initForBootedService(
@@ -340,9 +344,9 @@ pub fn proveBootedSchedulerTelemetryProvider(
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 2_000,
-            .memory_bytes = 64 * 1024,
+            .memory_bytes = units.kibibytes(64),
             .endpoint_slots = 1,
-            .shared_memory_bytes = 8192,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE * 2,
             .resource_class = .media_export,
         },
         .local_only = true,
@@ -360,7 +364,7 @@ pub fn proveBootedSchedulerTelemetryProvider(
     try std.testing.expect(scheduler.configureTaskDispatchRequest(media.id, .{
         .class = .media_export,
         .wants_media_engine = true,
-        .shared_memory_bytes = 8192,
+        .shared_memory_bytes = shared_memory.PAGE_SIZE * 2,
     }, true));
 
     const media_denials_before = scheduler.engineDenialCount(.media);

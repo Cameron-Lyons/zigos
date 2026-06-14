@@ -1,13 +1,16 @@
 const std = @import("std");
 const compositor_session = @import("compositor_session.zig");
 const principal = @import("../core/principal.zig");
+const shared_memory = @import("../kernel_api/shared_memory.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
 
 pub const DEFAULT_WIDTH: usize = 160;
 pub const DEFAULT_HEIGHT: usize = 72;
 pub const DEFAULT_STORAGE_BYTES: usize = DEFAULT_WIDTH * DEFAULT_HEIGHT;
 pub const MIN_WIDTH: usize = 64;
 pub const MIN_HEIGHT: usize = 16;
+const DISPLAY_LINE_BUFFER_BYTES: usize = 512;
 
 pub const Error = error{
     ActiveWindowMissing,
@@ -227,7 +230,7 @@ pub const Framebuffer = struct {
     }
 
     fn drawFmt(self: *Framebuffer, cursor: *usize, comptime fmt: []const u8, args: anytype) Error!void {
-        var line_buffer: [512]u8 = undefined;
+        var line_buffer: [DISPLAY_LINE_BUFFER_BYTES]u8 = undefined;
         const rendered = try std.fmt.bufPrint(&line_buffer, fmt, args);
         try self.drawText(cursor, rendered);
     }
@@ -269,9 +272,9 @@ fn makeAppTask(runtime: *task_runtime.Runtime) !*task_runtime.TaskRecord {
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 64 * 1024,
+            .memory_bytes = units.kibibytes(64),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 4096,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE,
         },
         .ui_surface_id = 31,
         .local_only = true,

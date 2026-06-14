@@ -19,22 +19,22 @@ pub fn Writer(comptime ErrorSet: type, comptime full_error: ErrorSet) type {
             self.offset += bytes.len;
         }
 
-        pub fn writeU16(self: *Self, value: u16) ErrorSet!void {
-            var bytes: [2]u8 = undefined;
-            std.mem.writeInt(u16, &bytes, value, .little);
+        fn writeInt(self: *Self, comptime T: type, value: T) ErrorSet!void {
+            var bytes: [@sizeOf(T)]u8 = undefined;
+            std.mem.writeInt(T, &bytes, value, .little);
             try self.writeBytes(&bytes);
+        }
+
+        pub fn writeU16(self: *Self, value: u16) ErrorSet!void {
+            try self.writeInt(u16, value);
         }
 
         pub fn writeU32(self: *Self, value: u32) ErrorSet!void {
-            var bytes: [4]u8 = undefined;
-            std.mem.writeInt(u32, &bytes, value, .little);
-            try self.writeBytes(&bytes);
+            try self.writeInt(u32, value);
         }
 
         pub fn writeU64(self: *Self, value: u64) ErrorSet!void {
-            var bytes: [8]u8 = undefined;
-            std.mem.writeInt(u64, &bytes, value, .little);
-            try self.writeBytes(&bytes);
+            try self.writeInt(u64, value);
         }
     };
 }
@@ -66,22 +66,30 @@ pub fn Reader(comptime ErrorSet: type, comptime corrupt_error: ErrorSet) type {
             return slice;
         }
 
-        pub fn readU16(self: *Self) ErrorSet!u16 {
-            var bytes: [2]u8 = undefined;
+        pub fn remaining(self: *const Self) usize {
+            return self.buffer.len - self.offset;
+        }
+
+        pub fn eof(self: *const Self) bool {
+            return self.remaining() == 0;
+        }
+
+        fn readInt(self: *Self, comptime T: type) ErrorSet!T {
+            var bytes: [@sizeOf(T)]u8 = undefined;
             try self.readBytes(&bytes);
-            return std.mem.readInt(u16, &bytes, .little);
+            return std.mem.readInt(T, &bytes, .little);
+        }
+
+        pub fn readU16(self: *Self) ErrorSet!u16 {
+            return self.readInt(u16);
         }
 
         pub fn readU32(self: *Self) ErrorSet!u32 {
-            var bytes: [4]u8 = undefined;
-            try self.readBytes(&bytes);
-            return std.mem.readInt(u32, &bytes, .little);
+            return self.readInt(u32);
         }
 
         pub fn readU64(self: *Self) ErrorSet!u64 {
-            var bytes: [8]u8 = undefined;
-            try self.readBytes(&bytes);
-            return std.mem.readInt(u64, &bytes, .little);
+            return self.readInt(u64);
         }
     };
 }

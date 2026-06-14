@@ -12,7 +12,7 @@ pub const SigningFlow = struct {
 
 pub const SignedPackage = struct {
     bundle: manifest.BundleManifest,
-    digest: [32]u8,
+    digest: package_service.Digest,
     lint: manifest_linter.Report,
 
     pub fn verify(self: *const SignedPackage) bool {
@@ -20,7 +20,7 @@ pub const SignedPackage = struct {
     }
 };
 
-pub fn digest(bundle: manifest.BundleManifest) [32]u8 {
+pub fn digest(bundle: manifest.BundleManifest) package_service.Digest {
     return package_service.digestBundle(bundle);
 }
 

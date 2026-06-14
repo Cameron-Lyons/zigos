@@ -1,14 +1,22 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const hex = @import("../core/hex.zig");
 const manifest = @import("../policy/manifest.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 
+const addDeviceGraphMeasuredArtifact = measured_boot.addMeasuredArtifact;
+
 pub const MAX_USER_ROOTS: usize = 4;
 pub const MAX_DEVICES: usize = 8;
 pub const MAX_LABEL_BYTES: usize = 48;
+const ROOT_MESSAGE_BUFFER_BYTES: usize = 128;
+const DEVICE_MESSAGE_BUFFER_BYTES: usize = 192;
+const ENROLLMENT_MESSAGE_BUFFER_BYTES: usize = 256;
+const ROTATION_MESSAGE_BUFFER_BYTES: usize = 256;
+const REVOCATION_MESSAGE_BUFFER_BYTES: usize = 160;
 
 pub const DeviceStatus = enum(u8) {
     trusted,
@@ -26,7 +34,7 @@ pub const PlatformDeviceRoot = struct {
     device_principal: principal.PrincipalId,
     boot_generation: u64,
     root_provenance: measured_boot.RootProvenance,
-    root_digest: [32]u8,
+    root_digest: crypto_hash.Digest,
     label_len: usize,
     label: [MAX_LABEL_BYTES]u8,
 
@@ -93,10 +101,10 @@ pub const DeviceRecord = struct {
     platform_key_bound: bool = false,
     platform_key_label_len: usize = 0,
     platform_key_label: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
-    platform_key_digest: [32]u8 = [_]u8{0} ** 32,
+    platform_key_digest: crypto_hash.Digest = crypto_hash.zero_digest,
     platform_root_generation: u64 = 0,
     platform_root_provenance: measured_boot.RootProvenance = .synthetic_host,
-    platform_root_digest: [32]u8 = [_]u8{0} ** 32,
+    platform_root_digest: crypto_hash.Digest = crypto_hash.zero_digest,
 
     pub fn labelSlice(self: *const DeviceRecord) []const u8 {
         return self.label[0..self.label_len];
@@ -183,7 +191,7 @@ pub const Graph = struct {
         root.principal_id = user_principal;
         root.label_len = native_util.copyTextExact(&root.label, label) catch return error.LabelTooLong;
 
-        var message_buffer: [128]u8 = undefined;
+        var message_buffer: [ROOT_MESSAGE_BUFFER_BYTES]u8 = undefined;
         const message = rootMessage(&message_buffer, user_principal, label) catch return error.InvalidRootSignature;
         root.root_signature = signing.sign(identity, message) catch return error.InvalidRootSignature;
         if (!signing.verify(root.root_signature, message)) return error.InvalidRootSignature;
@@ -244,7 +252,7 @@ pub const Graph = struct {
         device.label_len = native_util.copyTextExact(&device.label, label) catch return error.LabelTooLong;
         device.overlay_id = overlay_id;
 
-        var device_message_buffer: [192]u8 = undefined;
+        var device_message_buffer: [DEVICE_MESSAGE_BUFFER_BYTES]u8 = undefined;
         const device_message = deviceMessage(
             &device_message_buffer,
             device_principal,
@@ -258,7 +266,7 @@ pub const Graph = struct {
             applyPlatformKeyBinding(&device, try buildPlatformKeyBinding(device_principal, device_identity, device.device_signature, binding_request));
         }
 
-        var enrollment_message_buffer: [256]u8 = undefined;
+        var enrollment_message_buffer: [ENROLLMENT_MESSAGE_BUFFER_BYTES]u8 = undefined;
         const enrollment_message = enrollmentMessage(
             &enrollment_message_buffer,
             user_principal,
@@ -316,7 +324,7 @@ pub const Graph = struct {
         if (record.usesPlatformBackedKey() and platform_key == null) return error.PlatformKeyDowngradeDenied;
 
         const next_generation = record.key_rotation_generation + 1;
-        var device_message_buffer: [192]u8 = undefined;
+        var device_message_buffer: [DEVICE_MESSAGE_BUFFER_BYTES]u8 = undefined;
         const device_message = deviceMessage(
             &device_message_buffer,
             device_principal,
@@ -331,7 +339,7 @@ pub const Graph = struct {
         else
             null;
 
-        var rotation_message_buffer: [256]u8 = undefined;
+        var rotation_message_buffer: [ROTATION_MESSAGE_BUFFER_BYTES]u8 = undefined;
         const rotation_message = rotationMessage(
             &rotation_message_buffer,
             user_principal,
@@ -367,7 +375,7 @@ pub const Graph = struct {
         const record = self.findDevice(device_principal) orelse return error.DeviceNotFound;
         if (record.status == .revoked) return error.AlreadyRevoked;
 
-        var message_buffer: [160]u8 = undefined;
+        var message_buffer: [REVOCATION_MESSAGE_BUFFER_BYTES]u8 = undefined;
         const message = revocationMessage(
             &message_buffer,
             user_principal,
@@ -467,10 +475,10 @@ fn zeroDevice() DeviceRecord {
         .platform_key_bound = false,
         .platform_key_label_len = 0,
         .platform_key_label = [_]u8{0} ** MAX_LABEL_BYTES,
-        .platform_key_digest = [_]u8{0} ** 32,
+        .platform_key_digest = crypto_hash.zero_digest,
         .platform_root_generation = 0,
         .platform_root_provenance = .synthetic_host,
-        .platform_root_digest = [_]u8{0} ** 32,
+        .platform_root_digest = crypto_hash.zero_digest,
     };
 }
 
@@ -478,10 +486,10 @@ const ResolvedPlatformKeyBinding = struct {
     origin: DeviceKeyOrigin,
     label_len: usize,
     label: [MAX_LABEL_BYTES]u8,
-    digest: [32]u8,
+    digest: crypto_hash.Digest,
     root_generation: u64,
     root_provenance: measured_boot.RootProvenance,
-    root_digest: [32]u8,
+    root_digest: crypto_hash.Digest,
 };
 
 fn buildPlatformKeyBinding(
@@ -542,8 +550,8 @@ fn platformKeyBindingDigest(
     origin: DeviceKeyOrigin,
     label: []const u8,
     public_key: []const u8,
-    sealed_digest: *const [32]u8,
-) [32]u8 {
+    sealed_digest: *const crypto_hash.Digest,
+) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateEnum(&hasher, "device-kind", device_principal.kind);
     crypto_hash.updateInt(&hasher, "device-serial", device_principal.serial);
@@ -559,7 +567,7 @@ fn platformRootSealDigest(
     root: *const PlatformDeviceRoot,
     public_key: []const u8,
     device_signature: []const u8,
-) [32]u8 {
+) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateEnum(&hasher, "device-kind", device_principal.kind);
     crypto_hash.updateInt(&hasher, "device-serial", device_principal.serial);
@@ -643,20 +651,8 @@ fn revocationMessage(
 }
 
 fn appendHex(buffer: []u8, offset: usize, bytes: []const u8) error{NoSpaceLeft}![]const u8 {
-    if (offset + (bytes.len * 2) > buffer.len) return error.NoSpaceLeft;
-    var cursor = offset;
-    for (bytes) |byte| {
-        const high = byte >> 4;
-        const low = byte & 0x0F;
-        buffer[cursor] = hexDigit(high);
-        buffer[cursor + 1] = hexDigit(low);
-        cursor += 2;
-    }
-    return buffer[0..cursor];
-}
-
-fn hexDigit(value: u8) u8 {
-    return if (value < 10) '0' + value else 'a' + (value - 10);
+    const encoded = hex.encodeLower(bytes, buffer[offset..]) catch return error.NoSpaceLeft;
+    return buffer[0 .. offset + encoded.len];
 }
 
 fn deriveOverlayId(device_principal: principal.PrincipalId, label: []const u8) u64 {
@@ -676,19 +672,19 @@ test "device graph roots user principals and manages enrollment rotation and rev
     const tablet = principal.PrincipalId{ .kind = .device, .serial = 12 };
     const user_identity = signing.SignerIdentity{
         .label = "zigos-user-root",
-        .seed = [_]u8{0x41} ** 32,
+        .seed = signing.seedFromByte(0x41),
     };
     const laptop_identity = signing.SignerIdentity{
         .label = "laptop-device",
-        .seed = [_]u8{0x42} ** 32,
+        .seed = signing.seedFromByte(0x42),
     };
     const tablet_identity = signing.SignerIdentity{
         .label = "tablet-device",
-        .seed = [_]u8{0x43} ** 32,
+        .seed = signing.seedFromByte(0x43),
     };
     const rotated_tablet_identity = signing.SignerIdentity{
         .label = "tablet-device-v2",
-        .seed = [_]u8{0x44} ** 32,
+        .seed = signing.seedFromByte(0x44),
     };
 
     const root = try graph.ensureUserRoot(user, "cameron", user_identity);
@@ -720,15 +716,15 @@ test "device graph binds platform-backed device keys and rejects synthetic downg
     const phone = principal.PrincipalId{ .kind = .device, .serial = 112 };
     const user_identity = signing.SignerIdentity{
         .label = "platform-user-root",
-        .seed = [_]u8{0x61} ** 32,
+        .seed = signing.seedFromByte(0x61),
     };
     const laptop_identity = signing.SignerIdentity{
         .label = "laptop-platform-key",
-        .seed = [_]u8{0x62} ** 32,
+        .seed = signing.seedFromByte(0x62),
     };
     const rotated_laptop_identity = signing.SignerIdentity{
         .label = "laptop-platform-key-v2",
-        .seed = [_]u8{0x63} ** 32,
+        .seed = signing.seedFromByte(0x63),
     };
     const boot = try verifiedDeviceGraphBoot(61, .bootloader_provided);
     const rotated_boot = try verifiedDeviceGraphBoot(62, .bootloader_provided);
@@ -771,17 +767,6 @@ test "device graph binds platform-backed device keys and rejects synthetic downg
     try std.testing.expectEqualSlices(u8, rotated_boot.root_digest[0..], rotated.platform_root_digest[0..]);
     try std.testing.expect(!std.mem.eql(u8, first_digest[0..], rotated.platform_key_digest[0..]));
     try std.testing.expectEqual(@as(u32, 2), rotated.key_rotation_generation);
-}
-
-fn addDeviceGraphMeasuredArtifact(
-    recorder: *measured_boot.Recorder,
-    artifact_manifest: *measured_boot.ArtifactManifest,
-    kind: measured_boot.MeasurementKind,
-    label: []const u8,
-    payload: []const u8,
-) !void {
-    try recorder.add(kind, label, payload);
-    try artifact_manifest.add(kind, label, payload);
 }
 
 fn verifiedDeviceGraphBoot(generation: u64, provenance: measured_boot.RootProvenance) !measured_boot.BootRecord {

@@ -5,9 +5,11 @@ const capability = @import("../../kernel_api/capability.zig");
 const component_port = @import("../../kernel_api/component_port.zig");
 const driver_service = @import("../../drivers/driver_service.zig");
 const endpoint = @import("../../kernel_api/endpoint.zig");
+const manifest = @import("../../policy/manifest.zig");
 const native_kernel = @import("../../kernel_api/native_kernel.zig");
 const principal = @import("../../core/principal.zig");
 const shared_memory = @import("../../kernel_api/shared_memory.zig");
+const units = @import("../../core/units.zig");
 const userspace_bootstrap_mailbox = @import("../../task/userspace_bootstrap_mailbox.zig");
 const userspace_loader = @import("../../task/userspace_loader.zig");
 const userspace_scheduler = @import("../../task/userspace_scheduler.zig");
@@ -121,7 +123,7 @@ pub fn processIsolationBlocksForeignSharedMemory() bool {
         .header = component_port.makeHeader(.shared_memory_create, 1, owner.id),
         .authority_capability_id = authority.id,
         .owner_task_id = owner.id,
-        .size_bytes = 4096,
+        .size_bytes = shared_memory.PAGE_SIZE,
     }, 1) catch return false;
 
     _ = port.sharedMemoryMap(.{
@@ -244,7 +246,7 @@ pub fn driverAuthorityEscapeIsRejected() bool {
             .bundle_id = "zigos.system.audio-driver",
             .display_name = "Audio Driver",
             .publisher = "zigos.spec",
-            .signature = .{ .format = "ed25519", .signer = "zigos-spec-driver" },
+            .signature = .{ .format = manifest.SIGNATURE_FORMAT_ED25519, .signer = "zigos-spec-driver" },
         },
     }) catch |err| return err == error.AuthorityRightsEscalation;
     return false;
@@ -281,9 +283,9 @@ pub fn rebootGrantAndRevocationStatePersists() bool {
 fn budget() task_runtime.ResourceBudget {
     return .{
         .cpu_time_ticks = 10_000,
-        .memory_bytes = 256 * 1024,
+        .memory_bytes = units.kibibytes(256),
         .endpoint_slots = 8,
-        .shared_memory_bytes = 16 * 1024,
+        .shared_memory_bytes = units.kibibytes(16),
         .background_allowed = false,
     };
 }

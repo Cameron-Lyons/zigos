@@ -1,4 +1,5 @@
 const std = @import("std");
+const native_modules = @import("native_modules.zig");
 const registry = @import("../src/native/task/userspace_registry.zig");
 
 pub const ArtifactSet = struct {
@@ -15,39 +16,10 @@ pub fn addUserspaceArtifacts(
 ) ArtifactSet {
     const step = b.step("userspace-images", "Build userspace image artifacts");
     var count: usize = 0;
-    const binary_cursor_module = b.createModule(.{
-        .root_source_file = b.path("src/native/core/binary_cursor.zig"),
-    });
-    const userspace_wire_module = b.createModule(.{
-        .root_source_file = b.path("src/native/task/userspace_wire.zig"),
-    });
-    userspace_wire_module.addImport("binary_cursor", binary_cursor_module);
-    const descriptor_module = b.createModule(.{
-        .root_source_file = b.path("src/native/task/userspace_descriptor.zig"),
-    });
-    descriptor_module.addImport("userspace_wire", userspace_wire_module);
-    const abi_module = b.createModule(.{
-        .root_source_file = b.path("src/native/core/abi.zig"),
-    });
-    const bootstrap_mailbox_module = b.createModule(.{
-        .root_source_file = b.path("src/native/task/userspace_bootstrap_mailbox.zig"),
-    });
-    const service_protocol_module = b.createModule(.{
-        .root_source_file = b.path("src/native/task/userspace_service_protocol.zig"),
-    });
-    service_protocol_module.addImport("userspace_wire", userspace_wire_module);
+    const userspace_modules = native_modules.addUserspaceRuntimeModules(b, target, optimize);
     const native_archive_deps_module = b.createModule(.{
         .root_source_file = b.path("src/native/archive_generator_deps.zig"),
     });
-    const runtime_module = b.createModule(.{
-        .root_source_file = b.path("src/userspace/runtime.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    runtime_module.addImport("userspace_descriptor", descriptor_module);
-    runtime_module.addImport("native_abi", abi_module);
-    runtime_module.addImport("userspace_bootstrap_mailbox", bootstrap_mailbox_module);
-    runtime_module.addImport("userspace_service_protocol", service_protocol_module);
     const archive_generator = b.addExecutable(.{
         .name = "userspace-archive-generator",
         .root_module = b.createModule(.{
@@ -56,7 +28,7 @@ pub fn addUserspaceArtifacts(
             .optimize = .ReleaseSafe,
         }),
     });
-    archive_generator.root_module.addImport("userspace_descriptor", descriptor_module);
+    archive_generator.root_module.addImport("userspace_descriptor", userspace_modules.descriptor);
     archive_generator.root_module.addImport("native_archive_deps", native_archive_deps_module);
     const archive_run = b.addRunArtifact(archive_generator);
     const archive_dir = archive_run.addOutputDirectoryArg("userspace-archive");
@@ -86,8 +58,8 @@ pub fn addUserspaceArtifacts(
         });
         module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
         module.addOptions("build_options", options);
-        module.addImport("userspace_descriptor", descriptor_module);
-        module.addImport("userspace_runtime", runtime_module);
+        module.addImport("userspace_descriptor", userspace_modules.descriptor);
+        module.addImport("userspace_runtime", userspace_modules.runtime);
 
         const artifact = b.addExecutable(.{
             .name = spec.artifact_name,

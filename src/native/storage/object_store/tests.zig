@@ -25,7 +25,7 @@ test "object store keeps immutable signed versions with stable version addresses
     var store = Store.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x21} ** 32,
+        .seed = signing.seedFromByte(0x21),
     };
     const metadata_v1 = try signMetadata(signer, "notes", "text/markdown", .document, "hello", 10);
     const metadata_v2 = try signMetadata(signer, "notes", "text/markdown", .document, "hello, world", 11);
@@ -87,7 +87,7 @@ test "object store keeps immutable signed versions with stable version addresses
 test "signed metadata rejects overlong labels instead of truncating" {
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x29} ** 32,
+        .seed = signing.seedFromByte(0x29),
     };
     try std.testing.expectError(
         error.LabelTooLong,
@@ -106,7 +106,7 @@ test "object store splits blob and version addresses" {
     var store = Store.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x44} ** 32,
+        .seed = signing.seedFromByte(0x44),
     };
     const metadata_v1 = try signMetadata(signer, "notes-a", "text/plain", .document, "same", 10);
     const metadata_v2 = try signMetadata(signer, "notes-b", "text/plain", .document, "same", 11);
@@ -160,7 +160,7 @@ test "object store streams page-sized chunks into Merkle-addressed blob manifest
     var store = Store.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-large-storage-key",
-        .seed = [_]u8{0x46} ** 32,
+        .seed = signing.seedFromByte(0x46),
     };
     var payload: [PAGE_SIZE_BYTES * 3 + 17]u8 = undefined;
     for (&payload, 0..) |*byte, index| {
@@ -210,7 +210,7 @@ test "object store accepts payloads beyond the old sixteen-page ceiling" {
     var store = Store.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-paged-storage-key",
-        .seed = [_]u8{0x47} ** 32,
+        .seed = signing.seedFromByte(0x47),
     };
     var payload: [PAGE_SIZE_BYTES * 16 + 17]u8 = undefined;
     for (&payload, 0..) |*byte, index| {
@@ -238,7 +238,7 @@ test "object store verifies blob backend corruption before serving payloads" {
     var store = Store.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x45} ** 32,
+        .seed = signing.seedFromByte(0x45),
     };
 
     const result = try store.putVersion(.{
@@ -258,7 +258,7 @@ test "object store supports every native object type and rejects unsigned metada
     var store = Store.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x34} ** 32,
+        .seed = signing.seedFromByte(0x34),
     };
     const object_types = [_]ObjectType{
         .blob,
@@ -300,7 +300,7 @@ test "object store rejects tampered metadata signatures" {
     var store = Store.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x55} ** 32,
+        .seed = signing.seedFromByte(0x55),
     };
     var metadata = try signMetadata(signer, "notes", "text/markdown", .document, "hello", 10);
     metadata.created_at_ticks = 11;
@@ -327,7 +327,7 @@ test "object store capacity is configurable" {
     var store = SmallStore.init();
     const signer = signing.SignerIdentity{
         .label = "small-store",
-        .seed = [_]u8{0x66} ** 32,
+        .seed = signing.seedFromByte(0x66),
     };
 
     _ = try store.putVersion(.{

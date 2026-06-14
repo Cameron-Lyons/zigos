@@ -4,6 +4,7 @@ const capability = @import("../kernel_api/capability.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const task_runtime = @import("task_runtime.zig");
+const units = @import("../core/units.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_loader = @import("userspace_loader.zig");
 
@@ -60,6 +61,7 @@ else
 const PAGE_SIZE: usize = 4096;
 const USERSPACE_TRAP_VECTOR: u8 = 129;
 const PAGE_FAULT_VECTOR: u8 = 14;
+const USERSPACE_KERNEL_STACK_BYTES: usize = units.kibibytes(16);
 const MAPPING_INDEX_CAPACITY: usize = task_runtime.MAX_TASKS * 2;
 const MappingIndex = indexed_arena.UniqueIndex(MAPPING_INDEX_CAPACITY);
 
@@ -114,7 +116,7 @@ pub const Executor = struct {
     user_page_fault_count: u64 = 0,
     mappings: [task_runtime.MAX_TASKS]MappingEntry = [_]MappingEntry{MappingEntry{}} ** task_runtime.MAX_TASKS,
     mapping_index: MappingIndex = MappingIndex.init(),
-    userspace_kernel_stack: [16 * 1024]u8 align(16) = [_]u8{0} ** (16 * 1024),
+    userspace_kernel_stack: [USERSPACE_KERNEL_STACK_BYTES]u8 align(16) = [_]u8{0} ** USERSPACE_KERNEL_STACK_BYTES,
 
     pub fn init(self: *Executor) void {
         if (builtin.target.os.tag != .freestanding) return;
@@ -287,7 +289,7 @@ pub const Executor = struct {
             .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.boot),
             .detail = @intFromEnum(userspace_bootstrap_mailbox.classifyDetail(@intFromEnum(task.component_class), image.contract_flags)),
             .fault_code = 0,
-            ._reserved0 = [_]u8{0} ** 3,
+            ._reserved0 = [_]u8{0} ** userspace_bootstrap_mailbox.MAILBOX_RESERVED_BYTES,
             .authority_capability_id = bootstrap.capability_id,
             .task_id = task.id,
             .service_id = bootstrap.service_id,

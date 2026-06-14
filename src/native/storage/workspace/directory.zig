@@ -17,7 +17,10 @@ pub const MAX_WORKSPACE_ENTRY_MUTATIONS: usize = MAX_WORKSPACE_ENTRIES * 2;
 pub const MAX_SNAPSHOTS: usize = 16;
 pub const MAX_RECOVERABLE_DELETES: usize = 24;
 pub const MAX_ENTRY_PATH_BYTES: usize = 96;
+pub const MAX_WORKSPACE_LABEL_BYTES: usize = 48;
 pub const MAX_SHARE_GRANTS: usize = 8;
+pub const MAX_EXPORT_SIGNATURE_FORMAT_BYTES: usize = 16;
+pub const MAX_EXPORT_SIGNATURE_SIGNER_BYTES: usize = MAX_WORKSPACE_LABEL_BYTES;
 const WORKSPACE_INDEX_CAPACITY: usize = MAX_WORKSPACES * 2;
 const SNAPSHOT_INDEX_CAPACITY: usize = MAX_SNAPSHOTS * 2;
 const ENTRY_INDEX_CAPACITY: usize = MAX_WORKSPACE_ENTRIES * 2;
@@ -144,7 +147,7 @@ pub const SnapshotRecord = struct {
     workspace_id: ids.WorkspaceId,
     generation: u32,
     label_len: usize,
-    label: [48]u8,
+    label: [MAX_WORKSPACE_LABEL_BYTES]u8,
     root_address: SnapshotRootAddress,
     signature: manifest.Signature = .{},
     entry_count: usize,
@@ -163,13 +166,13 @@ pub const ExportPackage = struct {
     snapshot_id: ids.SnapshotId,
     generation: u32,
     label_len: usize,
-    label: [48]u8,
+    label: [MAX_WORKSPACE_LABEL_BYTES]u8,
     root_address: SnapshotRootAddress,
     signature: manifest.Signature = .{},
     signature_format_len: usize = 0,
-    signature_format_storage: [16]u8 = [_]u8{0} ** 16,
+    signature_format_storage: [MAX_EXPORT_SIGNATURE_FORMAT_BYTES]u8 = [_]u8{0} ** MAX_EXPORT_SIGNATURE_FORMAT_BYTES,
     signature_signer_len: usize = 0,
-    signature_signer_storage: [48]u8 = [_]u8{0} ** 48,
+    signature_signer_storage: [MAX_EXPORT_SIGNATURE_SIGNER_BYTES]u8 = [_]u8{0} ** MAX_EXPORT_SIGNATURE_SIGNER_BYTES,
     entry_count: usize,
     entries: [MAX_WORKSPACE_ENTRIES]Entry,
 
@@ -220,7 +223,7 @@ pub const WorkspaceRecord = struct {
     id: ids.WorkspaceId,
     owner: principal.PrincipalId,
     label_len: usize,
-    label: [48]u8,
+    label: [MAX_WORKSPACE_LABEL_BYTES]u8,
     generation: u32,
     path_index: WorkspacePathIndex,
     mutation_log: WorkspaceMutationLog,
@@ -378,7 +381,7 @@ pub const Directory = struct {
     }
 
     pub fn createRef(self: *Directory, request: *const CreateRequest) Error!*WorkspaceRecord {
-        var label: [48]u8 = [_]u8{0} ** 48;
+        var label: [MAX_WORKSPACE_LABEL_BYTES]u8 = [_]u8{0} ** MAX_WORKSPACE_LABEL_BYTES;
         const label_len = native_util.copyTextExact(&label, request.label) catch return error.LabelTooLong;
         const workspace_id = ids.workspace(self.next_workspace_id);
         const slot_index = self.workspaces.reserveIndex(workspace_id) orelse return error.WorkspaceTableFull;
@@ -615,7 +618,7 @@ pub const Directory = struct {
     ) Error!*SnapshotRecord {
         if (identity.label.len == 0) return error.UnsignedSnapshot;
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
-        var label_copy: [48]u8 = [_]u8{0} ** 48;
+        var label_copy: [MAX_WORKSPACE_LABEL_BYTES]u8 = [_]u8{0} ** MAX_WORKSPACE_LABEL_BYTES;
         const label_len = native_util.copyTextExact(&label_copy, label) catch return error.LabelTooLong;
 
         const snapshot_id = ids.snapshot(self.next_snapshot_id);
@@ -886,7 +889,7 @@ fn zeroWorkspace() WorkspaceRecord {
         .id = ids.WorkspaceId.zero,
         .owner = .{ .kind = .service, .serial = 0 },
         .label_len = 0,
-        .label = [_]u8{0} ** 48,
+        .label = [_]u8{0} ** MAX_WORKSPACE_LABEL_BYTES,
         .generation = 0,
         .path_index = .{},
         .mutation_log = .{},
@@ -914,8 +917,8 @@ fn zeroSnapshot() SnapshotRecord {
         .workspace_id = ids.WorkspaceId.zero,
         .generation = 0,
         .label_len = 0,
-        .label = [_]u8{0} ** 48,
-        .root_address = [_]u8{0} ** 32,
+        .label = [_]u8{0} ** MAX_WORKSPACE_LABEL_BYTES,
+        .root_address = workspace_merkle.zeroRootAddress(),
         .signature = .{},
         .entry_count = 0,
     };
@@ -931,13 +934,13 @@ fn zeroExportPackage() ExportPackage {
         .snapshot_id = ids.SnapshotId.zero,
         .generation = 0,
         .label_len = 0,
-        .label = [_]u8{0} ** 48,
-        .root_address = [_]u8{0} ** 32,
+        .label = [_]u8{0} ** MAX_WORKSPACE_LABEL_BYTES,
+        .root_address = workspace_merkle.zeroRootAddress(),
         .signature = .{},
         .signature_format_len = 0,
-        .signature_format_storage = [_]u8{0} ** 16,
+        .signature_format_storage = [_]u8{0} ** MAX_EXPORT_SIGNATURE_FORMAT_BYTES,
         .signature_signer_len = 0,
-        .signature_signer_storage = [_]u8{0} ** 48,
+        .signature_signer_storage = [_]u8{0} ** MAX_EXPORT_SIGNATURE_SIGNER_BYTES,
         .entry_count = 0,
         .entries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
     };

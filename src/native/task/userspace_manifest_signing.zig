@@ -19,19 +19,19 @@ pub fn identityForPublisher(publisher: []const u8) error{UnknownPublisherIdentit
     if (std.mem.eql(u8, publisher, "zigos.system")) {
         return .{
             .label = "zigos-system-key",
-            .seed = [_]u8{0x91} ** 32,
+            .seed = signing.seedFromByte(0x91),
         };
     }
     if (std.mem.eql(u8, publisher, "zigos.dev")) {
         return .{
             .label = "zigos-dev-key",
-            .seed = [_]u8{0x92} ** 32,
+            .seed = signing.seedFromByte(0x92),
         };
     }
     if (std.mem.eql(u8, publisher, "zigos.spec")) {
         return .{
             .label = "zigos-spec-key",
-            .seed = [_]u8{0x93} ** 32,
+            .seed = signing.seedFromByte(0x93),
         };
     }
     return error.UnknownPublisherIdentity;

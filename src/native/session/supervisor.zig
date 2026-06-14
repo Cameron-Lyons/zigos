@@ -641,7 +641,7 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
         .display_name = "Driver Runtime",
         .publisher = "zigos.spec",
         .signature = .{
-            .format = "ed25519",
+            .format = manifest.SIGNATURE_FORMAT_ED25519,
             .signer = "zigos-driver-key",
         },
     };

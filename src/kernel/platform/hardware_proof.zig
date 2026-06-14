@@ -254,7 +254,7 @@ fn physicalTableBytes(physical_address: u64) ?[]const u8 {
     if (physical_address == 0 or physical_address > max_address - acpi.SDT_HEADER_LENGTH) return null;
     const address: usize = @intCast(physical_address);
     const header_bytes = @as([*]const u8, @ptrFromInt(address))[0..acpi.SDT_HEADER_LENGTH];
-    const length = readU32Le(header_bytes[4..8]);
+    const length: usize = @intCast(acpi.sdtLengthFromHeader(header_bytes) catch return null);
     if (length < acpi.SDT_HEADER_LENGTH or length > MAX_ACPI_TABLE_BYTES) return null;
     return @as([*]const u8, @ptrFromInt(address))[0..length];
 }
@@ -376,13 +376,6 @@ fn printDec(value: u16) void {
     }
 }
 
-fn readU32Le(bytes: []const u8) u32 {
-    return @as(u32, bytes[0]) |
-        (@as(u32, bytes[1]) << 8) |
-        (@as(u32, bytes[2]) << 16) |
-        (@as(u32, bytes[3]) << 24);
-}
-
 test "hardware proof requires composed NUC subsystem evidence" {
     const target = &hardware_target.first_supported_target;
     const partial = ProbeFacts{
@@ -441,7 +434,7 @@ test "hardware proof requires composed NUC subsystem evidence" {
 
 test "hardware proof redacted crash records count toward crash recovery and persistence evidence" {
     const record = try crash_record.init(.watchdog, 77, 88, 0x1234, 0x5678, "capability token leaked");
-    var report_buffer: [256]u8 = undefined;
+    var report_buffer: [crash_record.REDACTED_REPORT_BUFFER_BYTES]u8 = undefined;
     const report = crash_record.redactedReport(record, report_buffer[0..]);
     try std.testing.expect(std.mem.indexOf(u8, report, "redacted=yes") != null);
 

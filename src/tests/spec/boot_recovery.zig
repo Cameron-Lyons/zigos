@@ -12,7 +12,10 @@ const supervisor = @import("../../native/session/supervisor.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
 const sync_service = @import("../../native/sync/sync_service.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
+const units = @import("../../native/core/units.zig");
 const update_health = @import("../../native/platform/update_health.zig");
+
+const LEDGER_EXPORT_BUFFER_BYTES: usize = units.kibibytes(2);
 
 const PendingActivationFailureCase = struct {
     expected_failure: immutable_base.HealthFailure,
@@ -317,9 +320,9 @@ pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 64 * 1024,
+            .memory_bytes = units.kibibytes(64),
             .endpoint_slots = 2,
-            .shared_memory_bytes = 4 * 1024,
+            .shared_memory_bytes = units.kibibytes(4),
         },
         .ui_surface_id = 7,
         .initial_component = .{
@@ -433,7 +436,7 @@ pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
     try std.testing.expectEqual(@as(?usize, 1), success.activation.active_slot);
     try std.testing.expectEqual(@as(u64, 5), success.activation.rollback_generation);
 
-    var export_buffer: [2048]u8 = undefined;
+    var export_buffer: [LEDGER_EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=update_transition") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "failure=boot") != null);

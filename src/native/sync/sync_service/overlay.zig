@@ -1,3 +1,4 @@
+const crypto_hash = @import("../../core/crypto_hash.zig");
 const principal = @import("../../core/principal.zig");
 const signing = @import("../../core/signing.zig");
 const state_support = @import("../sync_state_support.zig");
@@ -87,7 +88,7 @@ pub const OverlayRelayFrameResult = struct {
     egress_allowed: bool,
     delivered: bool,
     delivered_len: usize,
-    packet_digest: [32]u8,
+    packet_digest: crypto_hash.Digest,
     service_identity_len: usize = 0,
     service_identity: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
     relay_domain_len: usize = 0,

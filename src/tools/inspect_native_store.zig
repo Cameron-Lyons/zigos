@@ -1,7 +1,11 @@
 const std = @import("std");
 const object_store = @import("../native/storage/object_store.zig");
 const storage_volume = @import("../native/storage/storage_volume.zig");
+const units = @import("../native/core/units.zig");
 const workspace = @import("../native/storage/workspace.zig");
+
+const max_store_image_bytes: usize = units.mebibytes(16);
+const stdout_buffer_bytes: usize = units.kibibytes(4);
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -9,9 +13,9 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     const image_path = if (args.len > 1) args[1] else "build/native-store-smoke.img";
-    const image = try std.Io.Dir.cwd().readFileAlloc(io, image_path, allocator, .limited(16 * 1024 * 1024));
+    const image = try std.Io.Dir.cwd().readFileAlloc(io, image_path, allocator, .limited(max_store_image_bytes));
     defer allocator.free(image);
-    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_buffer: [stdout_buffer_bytes]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
 
     var store = object_store.Store.init();

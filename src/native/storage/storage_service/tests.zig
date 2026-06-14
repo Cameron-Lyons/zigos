@@ -17,6 +17,7 @@ const CheckpointStore = storage_service.CheckpointStore;
 const Service = storage_service.Service;
 const StorageCore = storage_service.StorageCore;
 const StoragePort = storage_service.StoragePort;
+const SHARE_SHEET_TEST_BUFFER_BYTES: usize = 360;
 
 const FakeStorageVolumeBackend = struct {
     var image: []u8 = &.{};
@@ -80,7 +81,7 @@ test "storage port requires authority context for protected mutations" {
     });
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0xA7} ** 32,
+        .seed = signing.seedFromByte(0xA7),
     };
     const request = object_store.PutRequest{
         .preferred_object_id = ids.object(953),
@@ -165,7 +166,7 @@ test "storage port derives shared workspace capabilities and blocks unauthorized
     };
     const signer = signing.SignerIdentity{
         .label = "zigos-share-storage-key",
-        .seed = [_]u8{0xB4} ** 32,
+        .seed = signing.seedFromByte(0xB4),
     };
     const object = try port.putVersion(storage_authority, .{
         .preferred_object_id = ids.object(954),
@@ -384,7 +385,7 @@ test "storage service enforces durable object-scoped workspace shares" {
     };
     const signer = signing.SignerIdentity{
         .label = "zigos-object-share-storage-key",
-        .seed = [_]u8{0xC4} ** 32,
+        .seed = signing.seedFromByte(0xC4),
     };
     const shared = try port.putVersion(storage_authority, .{
         .preferred_object_id = ids.object(1_054),
@@ -506,7 +507,7 @@ test "storage port queries object history and grants object capabilities" {
     };
     const signer = signing.SignerIdentity{
         .label = "zigos-object-query-storage-key",
-        .seed = [_]u8{0xC8} ** 32,
+        .seed = signing.seedFromByte(0xC8),
     };
     const first = try port.putVersion(storage_authority, .{
         .preferred_object_id = ids.object(1_060),
@@ -585,7 +586,7 @@ test "storage port queries object history and grants object capabilities" {
     try std.testing.expectEqual(object_store.ObjectHistoryPolicy.signed_version_chain, model.history_policy);
     try std.testing.expectEqual(object_store.ObjectSyncPolicy.local_first_selective, model.sync_policy);
     try std.testing.expectEqual(object_store.FileBridgePolicy.import_export_only, model.file_bridge_policy);
-    var share_sheet_buffer: [360]u8 = undefined;
+    var share_sheet_buffer: [SHARE_SHEET_TEST_BUFFER_BYTES]u8 = undefined;
     const share_sheet = try humane_permissions.renderShareSheetToBuffer(
         &share_sheet_buffer,
         workspace_record.id.raw(),
@@ -614,7 +615,7 @@ test "storage service accepts large object payloads through mapped shared memory
     const storage_task_id = ids.task(201);
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0xA8} ** 32,
+        .seed = signing.seedFromByte(0xA8),
     };
 
     var payload: [object_store.PAGE_SIZE_BYTES * 2 + 33]u8 = undefined;
@@ -677,7 +678,7 @@ test "storage service retains authoritative object and workspace state across re
     const owner = principal.PrincipalId{ .kind = .service, .serial = 44 };
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0xA4} ** 32,
+        .seed = signing.seedFromByte(0xA4),
     };
 
     var first = Service.initWithStore(700, 17, owner, &checkpoint_store);
@@ -743,7 +744,7 @@ test "storage service reloads authoritative state from the attached volume after
     const owner = principal.PrincipalId{ .kind = .service, .serial = 45 };
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0xA5} ** 32,
+        .seed = signing.seedFromByte(0xA5),
     };
 
     var first = Service.initWithStore(701, 17, owner, &checkpoint_store);
@@ -806,7 +807,7 @@ test "storage service coalesces checkpoint writes across an explicit batch" {
     const owner = principal.PrincipalId{ .kind = .service, .serial = 48 };
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0xA8} ** 32,
+        .seed = signing.seedFromByte(0xA8),
     };
 
     var service = Service.initWithStore(704, 21, owner, &checkpoint_store);
@@ -863,7 +864,7 @@ test "storage service records checkpoint flush failures" {
     var service = Service.initWithStore(702, 19, .{ .kind = .service, .serial = 46 }, &checkpoint_store);
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0xA6} ** 32,
+        .seed = signing.seedFromByte(0xA6),
     };
     _ = try service.putVersion(.{
         .preferred_object_id = ids.object(952),

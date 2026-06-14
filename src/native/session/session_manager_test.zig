@@ -114,7 +114,7 @@ test "boot assembles core services without running explicit scenarios" {
 
     const base_state_signer = signing.SignerIdentity{
         .label = "zigos-base-state",
-        .seed = [_]u8{0xA1} ** 32,
+        .seed = signing.seedFromByte(0xA1),
     };
     var base_manager = try immutable_base.Manager.init(storage_service_instance, package_service.owner, base_state_signer);
     try std.testing.expect(base_manager.loaded_existing_state);
@@ -287,7 +287,7 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
 
     const state_signer = signing.SignerIdentity{
         .label = "zigos-base-state",
-        .seed = [_]u8{0xA1} ** 32,
+        .seed = signing.seedFromByte(0xA1),
     };
     const package_service = supervisor.findByClass(.package_install_update).?;
     var immutable_base_manager = try immutable_base.Manager.init(storage_service_instance, package_service.owner, state_signer);

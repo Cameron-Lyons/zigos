@@ -3,6 +3,8 @@ const manifest = @import("../../policy/manifest.zig");
 const signing = @import("../../core/signing.zig");
 const state_support = @import("../sync_state_support.zig");
 
+const DATABASE_CONTRACT_MESSAGE_BUFFER_BYTES: usize = 160;
+
 pub fn signatureEql(a: manifest.Signature, b: manifest.Signature) bool {
     return std.mem.eql(u8, a.format, b.format) and
         std.mem.eql(u8, a.signer, b.signer) and
@@ -22,7 +24,7 @@ pub fn databaseBundleIdFromPath(path: []const u8) ?[]const u8 {
 }
 
 pub fn validateDatabaseContractSignature(contract: *const state_support.DatabaseContract) state_support.Error!void {
-    var message_buffer: [160]u8 = undefined;
+    var message_buffer: [DATABASE_CONTRACT_MESSAGE_BUFFER_BYTES]u8 = undefined;
     const message = state_support.databaseContractMessage(
         &message_buffer,
         contract.workspace_id,

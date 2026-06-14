@@ -3,6 +3,8 @@
 Use the pinned toolchain and repo entrypoints:
 
 - Run Zig commands through `./scripts/zig.sh`.
+- `zlint` and `actionlint` are optional for local focused runs, but CI requires
+  both through `ZIGOS_REQUIRE_ZLINT=1` and `ZIGOS_REQUIRE_ACTIONLINT=1`.
 
 ## Verification Matrix
 

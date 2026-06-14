@@ -46,6 +46,14 @@ const ATA_IDENTIFY_LBA_SUPPORTED: u16 = 0x200;
 const ATA_IDENTIFY_LBA48_SUPPORTED: u16 = 0x400;
 const LOW_BYTE_MASK: u16 = 0xFF;
 const BYTE_BITS: u6 = 8;
+const WORD_BITS: u6 = 16;
+const DWORD_BITS: u6 = 32;
+const QWORD_HIGH_BITS: u6 = 48;
+const DRIVE_SELECT_SHIFT = 8;
+const WAIT_NOT_BUSY_POLLS: u32 = 100_000;
+const BYTES_PER_KIB: u64 = 1024;
+const BYTES_PER_MIB: u64 = BYTES_PER_KIB * 1024;
+const BYTES_PER_GIB: u64 = BYTES_PER_MIB * 1024;
 
 pub const ATAError = error{
     Timeout,
@@ -85,56 +93,16 @@ var secondary_slave: ATADevice = undefined;
 pub fn init() void {
     vga.print("  - Detecting ATA drives...\n");
 
-    primary_master = ATADevice{
-        .present = false,
-        .base_port = ATA_PRIMARY_BASE,
-        .ctrl_port = ATA_PRIMARY_CTRL,
-        .is_master = true,
-        .sectors = 0,
-        .model = [_]u8{0} ** ATA_MODEL_BUFFER_BYTES,
-        .serial = [_]u8{0} ** ATA_SERIAL_BUFFER_BYTES,
-        .supports_lba = false,
-        .supports_lba48 = false,
-    };
+    primary_master = emptyDevice(ATA_PRIMARY_BASE, ATA_PRIMARY_CTRL, true);
     detectDrive(&primary_master);
 
-    primary_slave = ATADevice{
-        .present = false,
-        .base_port = ATA_PRIMARY_BASE,
-        .ctrl_port = ATA_PRIMARY_CTRL,
-        .is_master = false,
-        .sectors = 0,
-        .model = [_]u8{0} ** ATA_MODEL_BUFFER_BYTES,
-        .serial = [_]u8{0} ** ATA_SERIAL_BUFFER_BYTES,
-        .supports_lba = false,
-        .supports_lba48 = false,
-    };
+    primary_slave = emptyDevice(ATA_PRIMARY_BASE, ATA_PRIMARY_CTRL, false);
     detectDrive(&primary_slave);
 
-    secondary_master = ATADevice{
-        .present = false,
-        .base_port = ATA_SECONDARY_BASE,
-        .ctrl_port = ATA_SECONDARY_CTRL,
-        .is_master = true,
-        .sectors = 0,
-        .model = [_]u8{0} ** ATA_MODEL_BUFFER_BYTES,
-        .serial = [_]u8{0} ** ATA_SERIAL_BUFFER_BYTES,
-        .supports_lba = false,
-        .supports_lba48 = false,
-    };
+    secondary_master = emptyDevice(ATA_SECONDARY_BASE, ATA_SECONDARY_CTRL, true);
     detectDrive(&secondary_master);
 
-    secondary_slave = ATADevice{
-        .present = false,
-        .base_port = ATA_SECONDARY_BASE,
-        .ctrl_port = ATA_SECONDARY_CTRL,
-        .is_master = false,
-        .sectors = 0,
-        .model = [_]u8{0} ** ATA_MODEL_BUFFER_BYTES,
-        .serial = [_]u8{0} ** ATA_SERIAL_BUFFER_BYTES,
-        .supports_lba = false,
-        .supports_lba48 = false,
-    };
+    secondary_slave = emptyDevice(ATA_SECONDARY_BASE, ATA_SECONDARY_CTRL, false);
     detectDrive(&secondary_slave);
 
     if (primary_master.present) {
@@ -153,6 +121,20 @@ pub fn init() void {
         vga.print("    Secondary Slave: ");
         printDriveInfo(&secondary_slave);
     }
+}
+
+fn emptyDevice(base_port: u16, ctrl_port: u16, is_master: bool) ATADevice {
+    return .{
+        .present = false,
+        .base_port = base_port,
+        .ctrl_port = ctrl_port,
+        .is_master = is_master,
+        .sectors = 0,
+        .model = [_]u8{0} ** ATA_MODEL_BUFFER_BYTES,
+        .serial = [_]u8{0} ** ATA_SERIAL_BUFFER_BYTES,
+        .supports_lba = false,
+        .supports_lba48 = false,
+    };
 }
 
 fn detectDrive(device: *ATADevice) void {
@@ -206,44 +188,44 @@ fn detectDrive(device: *ATADevice) void {
         device.supports_lba48 = true;
     }
 
-    const lba28_sectors = if (device.supports_lba)
-        @as(u64, buffer[ATA_IDENTIFY_LBA28_SECTORS_WORD]) |
-            (@as(u64, buffer[ATA_IDENTIFY_LBA28_SECTORS_WORD + 1]) << 16)
-    else
-        0;
-    const lba48_sectors = if (device.supports_lba48)
-        @as(u64, buffer[ATA_IDENTIFY_LBA48_SECTORS_WORD]) |
-            (@as(u64, buffer[ATA_IDENTIFY_LBA48_SECTORS_WORD + 1]) << 16) |
-            (@as(u64, buffer[ATA_IDENTIFY_LBA48_SECTORS_WORD + 2]) << 32) |
-            (@as(u64, buffer[ATA_IDENTIFY_LBA48_SECTORS_WORD + 3]) << 48)
-    else
-        0;
+    const lba28_sectors = if (device.supports_lba) identifyU32(&buffer, ATA_IDENTIFY_LBA28_SECTORS_WORD) else 0;
+    const lba48_sectors = if (device.supports_lba48) identifyU64(&buffer, ATA_IDENTIFY_LBA48_SECTORS_WORD) else 0;
     device.sectors = if (lba48_sectors != 0) lba48_sectors else lba28_sectors;
     if (device.sectors == 0) return;
 
     device.present = true;
 
-    var model_idx: usize = 0;
-    for (ATA_IDENTIFY_MODEL_WORD_START..ATA_IDENTIFY_MODEL_WORD_END) |i| {
-        device.model[model_idx] = @as(u8, @intCast((buffer[i] >> BYTE_BITS) & LOW_BYTE_MASK));
-        model_idx += 1;
-        device.model[model_idx] = @as(u8, @intCast(buffer[i] & LOW_BYTE_MASK));
-        model_idx += 1;
-    }
+    copyIdentifyText(device.model[0..ATA_MODEL_BYTES], &buffer, ATA_IDENTIFY_MODEL_WORD_START, ATA_IDENTIFY_MODEL_WORD_END);
     device.model[ATA_MODEL_BYTES] = 0;
 
-    var serial_idx: usize = 0;
-    for (ATA_IDENTIFY_SERIAL_WORD_START..ATA_IDENTIFY_SERIAL_WORD_END) |i| {
-        device.serial[serial_idx] = @as(u8, @intCast((buffer[i] >> BYTE_BITS) & LOW_BYTE_MASK));
-        serial_idx += 1;
-        device.serial[serial_idx] = @as(u8, @intCast(buffer[i] & LOW_BYTE_MASK));
-        serial_idx += 1;
-    }
+    copyIdentifyText(device.serial[0..ATA_SERIAL_BYTES], &buffer, ATA_IDENTIFY_SERIAL_WORD_START, ATA_IDENTIFY_SERIAL_WORD_END);
     device.serial[ATA_SERIAL_BYTES] = 0;
 }
 
+fn identifyU32(buffer: *const [ATA_IDENTIFY_WORDS]u16, start_word: usize) u64 {
+    return @as(u64, buffer[start_word]) |
+        (@as(u64, buffer[start_word + 1]) << WORD_BITS);
+}
+
+fn identifyU64(buffer: *const [ATA_IDENTIFY_WORDS]u16, start_word: usize) u64 {
+    return @as(u64, buffer[start_word]) |
+        (@as(u64, buffer[start_word + 1]) << WORD_BITS) |
+        (@as(u64, buffer[start_word + 2]) << DWORD_BITS) |
+        (@as(u64, buffer[start_word + 3]) << QWORD_HIGH_BITS);
+}
+
+fn copyIdentifyText(dest: []u8, buffer: *const [ATA_IDENTIFY_WORDS]u16, start_word: usize, end_word: usize) void {
+    var dest_index: usize = 0;
+    for (start_word..end_word) |word_index| {
+        dest[dest_index] = @as(u8, @intCast((buffer[word_index] >> BYTE_BITS) & LOW_BYTE_MASK));
+        dest_index += 1;
+        dest[dest_index] = @as(u8, @intCast(buffer[word_index] & LOW_BYTE_MASK));
+        dest_index += 1;
+    }
+}
+
 fn waitNotBusy(device: *const ATADevice) bool {
-    var remaining: u32 = 100_000;
+    var remaining: u32 = WAIT_NOT_BUSY_POLLS;
     while (remaining > 0) : (remaining -= 1) {
         const status = x86.inb(device.base_port + ATA_REG_STATUS);
         if (status == 0) return true;
@@ -299,7 +281,7 @@ pub fn findDetectedDeviceByStableId(device_id: u64) ?*const ATADevice {
 }
 
 pub fn stableDeviceId(device: *const ATADevice) u64 {
-    return (@as(u64, device.base_port) << 8) | @as(u64, @intFromBool(device.is_master));
+    return (@as(u64, device.base_port) << DRIVE_SELECT_SHIFT) | @as(u64, @intFromBool(device.is_master));
 }
 
 pub fn rejectKernelDataPlaneTransfer(_: DataPlaneTransferRequest) ATAError!void {
@@ -326,14 +308,14 @@ fn printDriveInfo(device: *const ATADevice) void {
 }
 
 fn printSize(bytes: u64) void {
-    if (bytes >= 1024 * 1024 * 1024) {
-        printNumber(bytes / (1024 * 1024 * 1024));
+    if (bytes >= BYTES_PER_GIB) {
+        printNumber(bytes / BYTES_PER_GIB);
         vga.print(" GB");
-    } else if (bytes >= 1024 * 1024) {
-        printNumber(bytes / (1024 * 1024));
+    } else if (bytes >= BYTES_PER_MIB) {
+        printNumber(bytes / BYTES_PER_MIB);
         vga.print(" MB");
-    } else if (bytes >= 1024) {
-        printNumber(bytes / 1024);
+    } else if (bytes >= BYTES_PER_KIB) {
+        printNumber(bytes / BYTES_PER_KIB);
         vga.print(" KB");
     } else {
         printNumber(bytes);
@@ -348,7 +330,8 @@ fn printNumber(num: u64) void {
     }
 
     // SAFETY: filled by the following digit extraction loop
-    var buffer: [20]u8 = undefined;
+    const DECIMAL_U64_BUFFER_BYTES: usize = 20;
+    var buffer: [DECIMAL_U64_BUFFER_BYTES]u8 = undefined;
     var i: usize = 0;
     var n = num;
 

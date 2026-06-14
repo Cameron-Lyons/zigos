@@ -1,5 +1,6 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const hash_seeds = @import("../core/hash_seeds.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("manifest.zig");
 const native_util = @import("../core/util.zig");
@@ -535,13 +536,15 @@ fn latestGenerationForScope(self: *const Directory, scope: Scope, subject_id: u6
 }
 
 fn policyScopeKey(scope: Scope, subject_id: u64) u64 {
-    var bytes: [9]u8 = undefined;
+    const subject_id_offset = @sizeOf(Scope);
+    const policy_scope_key_bytes = subject_id_offset + @sizeOf(u64);
+    var bytes: [policy_scope_key_bytes]u8 = undefined;
     bytes[0] = @intFromEnum(scope);
-    std.mem.writeInt(u64, bytes[1..9], subject_id, .little);
-    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(0x5A47_504F_4C53_434F, &bytes));
+    std.mem.writeInt(u64, bytes[subject_id_offset..][0..@sizeOf(u64)], subject_id, .little);
+    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(hash_seeds.policy_scope_key, &bytes));
 }
 
-fn policyDigest(policy: *const PolicyObject) [32]u8 {
+fn policyDigest(policy: *const PolicyObject) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateEnum(&hasher, "scope", policy.scope);
     crypto_hash.updateEnum(&hasher, "issuer-kind", policy.issuer.kind);
@@ -603,7 +606,7 @@ test "policy objects remain signed scoped and enforce enterprise controls" {
         .audit_export_required = true,
     }, .{
         .label = "corp-policy-key",
-        .seed = [_]u8{0x81} ** 32,
+        .seed = signing.seedFromByte(0x81),
     });
 
     try std.testing.expectEqual(@as(u32, 1), policy.generation);
@@ -627,7 +630,7 @@ test "policy objects remain signed scoped and enforce enterprise controls" {
         .allowed_install_sources = &.{"store:zigos"},
     }, .{
         .label = "corp-policy-key",
-        .seed = [_]u8{0x81} ** 32,
+        .seed = signing.seedFromByte(0x81),
     });
     const latest = directory.activeForScope(.organization, 77).?;
     try std.testing.expectEqual(@as(u32, 2), latest.generation);
@@ -639,7 +642,7 @@ test "policy directory composes active user device workspace and organization po
     var directory = Directory.init();
     const signer = signing.SignerIdentity{
         .label = "policy-compose-key",
-        .seed = [_]u8{0x83} ** 32,
+        .seed = signing.seedFromByte(0x83),
     };
     const org_policy = try directory.create(.{
         .scope = .organization,
@@ -741,7 +744,7 @@ test "policy objects reject oversized lists and refuse authorization after tampe
         .allowed_install_sources = &too_many,
     }, .{
         .label = "policy-key",
-        .seed = [_]u8{0x52} ** 32,
+        .seed = signing.seedFromByte(0x52),
     }));
 
     const policy = try directory.create(.{
@@ -753,7 +756,7 @@ test "policy objects reject oversized lists and refuse authorization after tampe
         .allowed_install_sources = &.{"store:zigos"},
     }, .{
         .label = "device-policy-key",
-        .seed = [_]u8{0x53} ** 32,
+        .seed = signing.seedFromByte(0x53),
     });
     try std.testing.expect(directory.verify(policy.id));
 

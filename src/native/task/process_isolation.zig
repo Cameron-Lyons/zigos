@@ -3,7 +3,9 @@ const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
 const generated_image_fixtures = if (@import("builtin").is_test) @import("generated_image_fixtures.zig") else struct {};
 const principal = @import("../core/principal.zig");
+const shared_memory = @import("../kernel_api/shared_memory.zig");
 const task_runtime = @import("task_runtime.zig");
+const units = @import("../core/units.zig");
 
 pub const Operation = enum(u8) {
     inspect_memory,
@@ -191,9 +193,9 @@ fn createApp(runtime: *task_runtime.Runtime, owner: principal.PrincipalId) !*tas
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 64 * 1024,
+            .memory_bytes = units.kibibytes(64),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 4096,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE,
         },
         .local_only = true,
         .launch = .{

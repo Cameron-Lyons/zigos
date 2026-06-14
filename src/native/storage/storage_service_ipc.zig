@@ -12,6 +12,7 @@ const shared_memory = @import("../kernel_api/shared_memory.zig");
 const storage_service = @import("storage_service.zig");
 const syscall_surface = @import("../kernel_api/syscall_surface.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
 const workspace = @import("workspace.zig");
 
 pub const MAGIC: u32 = 0x53544731; // STG1
@@ -34,22 +35,22 @@ const CLIENT_ENDPOINT_CREATE_TICK: u64 = 13;
 const ENDPOINT_CONNECT_TICK: u64 = 14;
 const SESSION_TASK_BUDGET = task_runtime.ResourceBudget{
     .cpu_time_ticks = 10_000,
-    .memory_bytes = 4096,
+    .memory_bytes = shared_memory.PAGE_SIZE,
     .endpoint_slots = 8,
-    .shared_memory_bytes = 4096,
+    .shared_memory_bytes = shared_memory.PAGE_SIZE,
 };
 const STORAGE_TASK_BUDGET = task_runtime.ResourceBudget{
     .cpu_time_ticks = 5_000,
-    .memory_bytes = 256 * 1024,
+    .memory_bytes = units.kibibytes(256),
     .endpoint_slots = 8,
-    .shared_memory_bytes = 16 * 1024,
+    .shared_memory_bytes = units.kibibytes(16),
     .resource_class = .emergency_system_critical,
 };
 const CLIENT_TASK_BUDGET = task_runtime.ResourceBudget{
     .cpu_time_ticks = 2_000,
-    .memory_bytes = 128 * 1024,
+    .memory_bytes = units.kibibytes(128),
     .endpoint_slots = 4,
-    .shared_memory_bytes = 4096,
+    .shared_memory_bytes = shared_memory.PAGE_SIZE,
 };
 
 pub const Error = error{

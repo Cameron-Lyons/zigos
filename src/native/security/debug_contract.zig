@@ -6,6 +6,7 @@ const principal = @import("../core/principal.zig");
 
 pub const MAX_LABEL_BYTES: usize = 64;
 pub const MAX_DETAIL_BYTES: usize = 96;
+const DENIAL_RENDER_TEST_BUFFER_BYTES: usize = 256;
 
 pub const Decision = enum(u8) {
     allowed,
@@ -478,7 +479,7 @@ test "denial explanations render deterministic why-denied metadata" {
     try std.testing.expectEqual(first.fingerprint, second.fingerprint);
     try std.testing.expect(first.user_action_available);
 
-    var buffer: [256]u8 = undefined;
+    var buffer: [DENIAL_RENDER_TEST_BUFFER_BYTES]u8 = undefined;
     const text = first.render(&buffer);
     try std.testing.expect(std.mem.indexOf(u8, text, "reason=scope_violation") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "policy=task-scope-policy") != null);

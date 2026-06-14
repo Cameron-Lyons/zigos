@@ -1,18 +1,20 @@
 pub const SECTION_NAME = ".zigos_userspace_bootstrap";
 pub const VERSION: u16 = 1;
+pub const MAILBOX_RESERVED_BYTES: usize = 3;
 pub const MMU_ISOLATION_PROOF_ROLE_TAG: u32 = 0xA116;
 pub const FOREIGN_SHARED_MEMORY_PROBE_ADDR: u32 = 0x7000_0000;
 pub const PROOF_SYSCALL_POINTER_DENIED_PULSE: u16 = 0x41;
 pub const PROOF_FOREIGN_MEMORY_ACCESS_FAULT_CODE: u8 = 0x72;
 
-const FLAG_OWNS_UI_SURFACE: u32 = 1 << 1;
-const FLAG_PERMISSION_REVIEW: u32 = 1 << 2;
-const FLAG_BACKGROUND_ELIGIBLE: u32 = 1 << 3;
-const FLAG_STORAGE_BOUNDARY: u32 = 1 << 4;
-const FLAG_NETWORK_BOUNDARY: u32 = 1 << 5;
-const FLAG_POLICY_BOUNDARY: u32 = 1 << 6;
-const FLAG_DRIVER_BOUNDARY: u32 = 1 << 7;
-const FLAG_MMU_PROOF_PROBE: u32 = 1 << 9;
+const userspace_flags = @import("userspace_flags.zig");
+const FLAG_OWNS_UI_SURFACE = userspace_flags.FLAG_OWNS_UI_SURFACE;
+const FLAG_PERMISSION_REVIEW = userspace_flags.FLAG_PERMISSION_REVIEW;
+const FLAG_BACKGROUND_ELIGIBLE = userspace_flags.FLAG_BACKGROUND_ELIGIBLE;
+const FLAG_STORAGE_BOUNDARY = userspace_flags.FLAG_STORAGE_BOUNDARY;
+const FLAG_NETWORK_BOUNDARY = userspace_flags.FLAG_NETWORK_BOUNDARY;
+const FLAG_POLICY_BOUNDARY = userspace_flags.FLAG_POLICY_BOUNDARY;
+const FLAG_DRIVER_BOUNDARY = userspace_flags.FLAG_DRIVER_BOUNDARY;
+const FLAG_MMU_PROOF_PROBE = userspace_flags.FLAG_MMU_PROOF_PROBE;
 
 const COMPONENT_CLASS_SESSION_MANAGER: u8 = 0;
 const COMPONENT_CLASS_APP_COMPONENT: u8 = 1;
@@ -71,7 +73,7 @@ pub const Mailbox = extern struct {
     stage: u8 = @intFromEnum(Stage.boot),
     detail: u8 = @intFromEnum(Detail.unknown),
     fault_code: u8 = 0,
-    _reserved0: [3]u8 = [_]u8{0} ** 3,
+    _reserved0: [MAILBOX_RESERVED_BYTES]u8 = [_]u8{0} ** MAILBOX_RESERVED_BYTES,
     authority_capability_id: u64 = 0,
     task_id: u64 = 0,
     service_id: u64 = 0,

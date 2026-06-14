@@ -9,6 +9,7 @@ const driver_service = @import("../drivers/driver_service.zig");
 const principal = @import("../core/principal.zig");
 const service_contract = @import("service_contracts.zig");
 const service_catalog = @import("service_catalog.zig");
+const units = @import("../core/units.zig");
 const native_util = @import("../core/util.zig");
 const service_registry = @import("../services/service_registry.zig");
 const kernel_descriptors = @import("../kernel_api/native_kernel_descriptors.zig");
@@ -21,8 +22,8 @@ const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 
 pub const Error = error{ MissingBootstrapGrant, DriverAttachmentNotAllowed } || userspace_launch.Error || userspace_boot_registry.Error || component_port.Error || driver_service.Error || service_registry.Error;
 
-const bytes_per_kibibyte = 1024;
 const driver_endpoint_slots = 4;
+const kibibytes = units.kibibytes;
 
 pub const ServiceBinding = struct {
     task_id: u64,
@@ -284,10 +285,6 @@ fn driverResourceBudget(cpu_time_ticks: u64, memory_bytes: usize, shared_memory_
         .shared_memory_bytes = shared_memory_bytes,
         .background_allowed = false,
     };
-}
-
-fn kibibytes(value: usize) usize {
-    return value * bytes_per_kibibyte;
 }
 
 pub fn contractsReady(service_directory: *const service_registry.Service) bool {

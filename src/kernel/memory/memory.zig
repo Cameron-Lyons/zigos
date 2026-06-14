@@ -2,12 +2,13 @@ const vga = @import("../drivers/vga.zig");
 const swap = @import("swap.zig");
 const numfmt = @import("../utils/numfmt.zig");
 
-const HEAP_SIZE: usize = 16 * 1024 * 1024;
+const BYTES_PER_MIB: usize = 1024 * 1024;
+const HEAP_SIZE: usize = 16 * BYTES_PER_MIB;
 const MIN_BLOCK_SIZE: usize = 16;
 const BLOCK_ALIGNMENT: usize = 16;
 
 const PAGE_SIZE: usize = 4096;
-const MAX_PHYSICAL_MEMORY: usize = 128 * 1024 * 1024;
+const MAX_PHYSICAL_MEMORY: usize = 128 * BYTES_PER_MIB;
 extern var __kernel_end: u8;
 
 fn alignUp(addr: usize, alignment: usize) usize {
@@ -66,7 +67,7 @@ pub fn init() void {
     vga.print("Heap start: 0x");
     numfmt.printHex(@intFromPtr(heap_start));
     vga.print("\nHeap size: ");
-    numfmt.printDec(HEAP_SIZE / 1024 / 1024);
+    numfmt.printDec(HEAP_SIZE / BYTES_PER_MIB);
     vga.print(" MB\n");
 }
 

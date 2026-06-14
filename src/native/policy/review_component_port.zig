@@ -5,6 +5,8 @@ const manifest_fixtures = @import("manifest_fixtures.zig");
 const permission_review_service = @import("permission_review_service.zig");
 const policy_mediation = @import("policy_mediation.zig");
 const request_header = @import("../core/request_header.zig");
+const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
 
 pub const Error = error{
     SubjectTaskRequired,
@@ -50,19 +52,23 @@ fn validateSubjectTask(header: abi.RequestHeader, task_id: u64) Error!void {
     try request_header.validateSubjectTask(header, task_id);
 }
 
-test "review port validates headers and returns reviewed grants" {
-    var runtime = @import("../task/task_runtime.zig").Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 1 },
+fn createReviewPortTestTask(runtime: *task_runtime.Runtime, owner_serial: u64) !*task_runtime.TaskRecord {
+    return runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = owner_serial },
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .local_only = true,
     });
+}
+
+test "review port validates headers and returns reviewed grants" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try createReviewPortTestTask(&runtime, 1);
     const scripted_inputs = [_][]const u8{"allow local lease=25"};
     var service = permission_review_service.Service.init(5, 6, &runtime, &scripted_inputs);
     var port = Port.init(&service);
@@ -75,12 +81,7 @@ test "review port validates headers and returns reviewed grants" {
             .max_lease_ticks = 50,
         },
     };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.notes",
-        .display_name = "Notes",
-        .publisher = "zigos.dev",
-        .requested_permissions = &permissions,
-    };
+    const bundle = manifest_fixtures.basicNotesBundle(&permissions);
     var grants_buffer: [permission_review_service.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
 
     const grants = try port.reviewBundle(.{
@@ -106,18 +107,8 @@ test "review port validates headers and returns reviewed grants" {
 }
 
 test "review port rejects invalid manifests before entering the review loop" {
-    var runtime = @import("../task/task_runtime.zig").Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 2 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
-        .local_only = true,
-    });
+    var runtime = task_runtime.Runtime.init();
+    const task = try createReviewPortTestTask(&runtime, 2);
     const scripted_inputs = [_][]const u8{"allow"};
     var service = permission_review_service.Service.init(5, 6, &runtime, &scripted_inputs);
     var port = Port.init(&service);

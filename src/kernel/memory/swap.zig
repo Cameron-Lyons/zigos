@@ -3,7 +3,15 @@ const vga = @import("../drivers/vga.zig");
 const numfmt = @import("../utils/numfmt.zig");
 
 const PAGE_SIZE = 4096;
+const PAGE_SHIFT = 12;
+const PAGE_DIRECTORY_SHIFT = 22;
+const PAGE_TABLE_ENTRIES = 1024;
+const PAGE_TABLE_INDEX_MASK: u32 = PAGE_TABLE_ENTRIES - 1;
+const PAGE_OFFSET_MASK: u32 = PAGE_SIZE - 1;
+const SWAP_BITMAP_WORD_BITS = 32;
 const SWAP_SLOT_COUNT = 8192;
+const SWAP_BITMAP_WORDS = SWAP_SLOT_COUNT / SWAP_BITMAP_WORD_BITS;
+const BYTES_PER_MIB = 1024 * 1024;
 
 const SwapFlags = struct {
     const PRESENT: u8 = 1 << 0;
@@ -30,7 +38,7 @@ pub const Backend = struct {
 };
 
 var swap_table: [SWAP_SLOT_COUNT]SwapEntry = [_]SwapEntry{SwapEntry{ .slot = 0, .flags = 0 }} ** SWAP_SLOT_COUNT;
-var swap_bitmap: [SWAP_SLOT_COUNT / 32]u32 = [_]u32{0} ** (SWAP_SLOT_COUNT / 32);
+var swap_bitmap: [SWAP_BITMAP_WORDS]u32 = [_]u32{0} ** SWAP_BITMAP_WORDS;
 var used_swap_slots: u32 = 0;
 var clock_hand: u32 = 0;
 var initialized: bool = false;
@@ -65,7 +73,7 @@ pub fn init() void {
         const total_slots = activeSlotCount(active_backend);
         numfmt.printDec(total_slots);
         vga.print(" slots (");
-        numfmt.printDec(total_slots * PAGE_SIZE / 1024 / 1024);
+        numfmt.printDec(total_slots * PAGE_SIZE / BYTES_PER_MIB);
         vga.print(" MB)\n");
     } else {
         vga.print("no page backend\n");
@@ -82,24 +90,23 @@ fn allocSwapSlotRange(start_word: u32, end_word: u32) ?u32 {
             swap_bitmap[i] |= mask;
             used_swap_slots += 1;
             swap_search_word_hint = i;
-            return i * 32 + bit;
+            return i * SWAP_BITMAP_WORD_BITS + bit;
         }
     }
     return null;
 }
 
 fn allocSwapSlot() ?u32 {
-    const bitmap_words = SWAP_SLOT_COUNT / 32;
-    if (swap_search_word_hint >= bitmap_words) {
+    if (swap_search_word_hint >= SWAP_BITMAP_WORDS) {
         swap_search_word_hint = 0;
     }
-    return allocSwapSlotRange(swap_search_word_hint, bitmap_words) orelse
+    return allocSwapSlotRange(swap_search_word_hint, SWAP_BITMAP_WORDS) orelse
         allocSwapSlotRange(0, swap_search_word_hint);
 }
 
 fn freeSwapSlot(slot: u32) void {
-    const idx = slot / 32;
-    const offset: u5 = @truncate(slot % 32);
+    const idx = slot / SWAP_BITMAP_WORD_BITS;
+    const offset: u5 = @truncate(slot % SWAP_BITMAP_WORD_BITS);
     const mask = @as(u32, 1) << offset;
     if ((swap_bitmap[idx] & mask) != 0) {
         swap_bitmap[idx] &= ~mask;
@@ -130,6 +137,18 @@ fn heapTableIndex(aligned_addr: u32) u32 {
     return (aligned_addr - paging.KERNEL_HEAP_START) / PAGE_SIZE;
 }
 
+fn pageDirectoryIndex(vaddr: u32) u32 {
+    return vaddr >> PAGE_DIRECTORY_SHIFT;
+}
+
+fn pageTableIndex(vaddr: u32) u32 {
+    return (vaddr >> PAGE_SHIFT) & PAGE_TABLE_INDEX_MASK;
+}
+
+fn pageAlignedAddress(vaddr: u32) u32 {
+    return vaddr & ~PAGE_OFFSET_MASK;
+}
+
 pub fn clockAlgorithm() ?u32 {
     const heap_start = paging.KERNEL_HEAP_START;
     const heap_max = paging.KERNEL_HEAP_START + paging.KERNEL_HEAP_MAX_SIZE;
@@ -142,13 +161,13 @@ pub fn clockAlgorithm() ?u32 {
 
         if (!paging.is_page_present(vaddr)) continue;
 
-        const page_dir_index = vaddr >> 22;
-        const page_table_index = (vaddr >> 12) & 0x3FF;
+        const page_dir_index = pageDirectoryIndex(vaddr);
+        const page_table_index = pageTableIndex(vaddr);
 
         const pd = paging.getCurrentPageDirectory();
         if (!pd[page_dir_index].present) continue;
 
-        const table_addr = @as(usize, pd[page_dir_index].address) << 12;
+        const table_addr = @as(usize, pd[page_dir_index].address) << PAGE_SHIFT;
         const table: *paging.PageTable = @ptrFromInt(table_addr);
         const entry = &table[page_table_index];
 
@@ -167,7 +186,7 @@ pub fn swapOut(vaddr: u32) !void {
     if (!initialized) return error.NotInitialized;
     if (backend == null) return error.SwapBackendUnavailable;
 
-    const aligned_addr = vaddr & ~@as(u32, PAGE_SIZE - 1);
+    const aligned_addr = pageAlignedAddress(vaddr);
 
     if (!paging.is_page_present(aligned_addr)) return error.PageNotPresent;
 
@@ -194,7 +213,7 @@ pub fn swapIn(vaddr: u32) !void {
     if (!initialized) return error.NotInitialized;
     if (backend == null) return error.SwapBackendUnavailable;
 
-    const aligned_addr = vaddr & ~@as(u32, PAGE_SIZE - 1);
+    const aligned_addr = pageAlignedAddress(vaddr);
     const table_index = heapTableIndex(aligned_addr);
 
     if (table_index >= SWAP_SLOT_COUNT) return error.InvalidAddress;
@@ -220,7 +239,7 @@ pub fn swapIn(vaddr: u32) !void {
 }
 
 pub fn isSwapped(vaddr: u32) bool {
-    const aligned_addr = vaddr & ~@as(u32, PAGE_SIZE - 1);
+    const aligned_addr = pageAlignedAddress(vaddr);
     if (aligned_addr < paging.KERNEL_HEAP_START) return false;
 
     const table_index = heapTableIndex(aligned_addr);

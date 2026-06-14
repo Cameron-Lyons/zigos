@@ -14,6 +14,9 @@ pub const MAX_TRANSPORT_FRAMES = state_support.MAX_TRANSPORT_FRAMES;
 pub const MAX_DOCUMENT_OPERATIONS: usize = 16;
 pub const MAX_DOCUMENT_OPERATION_TEXT_BYTES: usize = 64;
 pub const MAX_DOCUMENT_VECTOR_CLOCKS: usize = 8;
+const DATABASE_CONTRACT_MESSAGE_BUFFER_BYTES: usize = 160;
+const DOCUMENT_MERGE_TEST_BUFFER_BYTES: usize = 96;
+const DOCUMENT_LOG_MERGE_TEST_BUFFER_BYTES: usize = 128;
 
 pub const DocumentOperationKind = enum(u8) {
     insert,
@@ -499,7 +502,7 @@ pub const DefaultDatabaseSyncAdapter = struct {
         _ = request.from_device;
         _ = request.to_device;
         if (request.contract.workspace_id != request.workspace_id) return error.InvalidContractSignature;
-        var message_buffer: [160]u8 = undefined;
+        var message_buffer: [DATABASE_CONTRACT_MESSAGE_BUFFER_BYTES]u8 = undefined;
         const message = state_support.databaseContractMessage(
             &message_buffer,
             request.contract.workspace_id,
@@ -519,10 +522,13 @@ pub const default_chunk_media_adapter = DefaultChunkMediaAdapter.adapter();
 pub const default_secret_transfer_adapter = DefaultSecretTransferAdapter.adapter();
 pub const default_database_sync_adapter = DefaultDatabaseSyncAdapter.adapter();
 
+const PAYLOAD_CHUNK_BYTES: usize = 128;
+const VERSION_PREFIX_BUFFER_BYTES: usize = 16;
+const SMALL_DOCUMENT_MERGE_BUFFER_BYTES: usize = 8;
+
 fn chunkCountForPayload(payload_len: usize) usize {
-    const chunk_size: usize = 128;
     if (payload_len == 0) return 0;
-    return (payload_len + chunk_size - 1) / chunk_size;
+    return (payload_len + PAYLOAD_CHUNK_BYTES - 1) / PAYLOAD_CHUNK_BYTES;
 }
 
 fn versionStartsWith(
@@ -531,7 +537,7 @@ fn versionStartsWith(
     prefix: []const u8,
 ) Error!bool {
     var cursor = try store.versionChunkCursor(version);
-    var prefix_buffer: [16]u8 = [_]u8{0} ** 16;
+    var prefix_buffer: [VERSION_PREFIX_BUFFER_BYTES]u8 = [_]u8{0} ** VERSION_PREFIX_BUFFER_BYTES;
     if (prefix.len > prefix_buffer.len) return error.PayloadTooLarge;
     var copied: usize = 0;
     while (copied < prefix.len) {
@@ -599,7 +605,7 @@ test "mergeable document adapter applies deterministic CRDT operations and rejec
     const tablet = principal.PrincipalId{ .kind = .device, .serial = 8 };
     const signer = signing.SignerIdentity{
         .label = "sync-crdt-storage",
-        .seed = [_]u8{0x92} ** 32,
+        .seed = signing.seedFromByte(0x92),
     };
     var checkpoint_store = storage_service.CheckpointStore{};
     checkpoint_store.resetPersistent();
@@ -616,7 +622,7 @@ test "mergeable document adapter applies deterministic CRDT operations and rejec
     const remote_operations = [_]DocumentOperation{
         try DocumentOperation.insert(5, " and tablet", tablet, 1),
     };
-    var merge_buffer: [96]u8 = undefined;
+    var merge_buffer: [DOCUMENT_MERGE_TEST_BUFFER_BYTES]u8 = undefined;
     const adapter_value = DefaultMergeableDocumentAdapter.adapter();
     const result = try adapter_value.merge(.{
         .store = &storage,
@@ -630,7 +636,7 @@ test "mergeable document adapter applies deterministic CRDT operations and rejec
     try std.testing.expect(!result.conflict);
     try std.testing.expectEqualStrings("hello from laptop and tablet", merge_buffer[0..result.merged_document_len]);
 
-    var replay_buffer: [96]u8 = undefined;
+    var replay_buffer: [DOCUMENT_MERGE_TEST_BUFFER_BYTES]u8 = undefined;
     const replayed = try applyMergeableDocumentOperations(
         "hello",
         remote_operations[0..],
@@ -639,7 +645,7 @@ test "mergeable document adapter applies deterministic CRDT operations and rejec
     );
     try std.testing.expectEqualStrings(merge_buffer[0..result.merged_document_len], replayed);
 
-    var small_buffer: [8]u8 = undefined;
+    var small_buffer: [SMALL_DOCUMENT_MERGE_BUFFER_BYTES]u8 = undefined;
     try std.testing.expectError(error.DocumentBufferTooSmall, applyMergeableDocumentOperations(
         "hello",
         local_operations[0..],
@@ -663,14 +669,14 @@ test "document operation log merges CRDT operations idempotently with vector clo
     try tablet_log.append(DocumentOperation.remove(0, 0, tablet, 2));
 
     var merged_log = DocumentOperationLog{};
-    var merge_buffer: [128]u8 = undefined;
+    var merge_buffer: [DOCUMENT_LOG_MERGE_TEST_BUFFER_BYTES]u8 = undefined;
     const merged = try mergeDocumentOperationLogs("hello ", &laptop_log, &tablet_log, &merged_log, merge_buffer[0..]);
     try std.testing.expectEqualStrings("hello from tablet todayfrom laptop ", merged);
     try std.testing.expectEqual(@as(u64, 2), merged_log.clockFor(laptop));
     try std.testing.expectEqual(@as(u64, 2), merged_log.clockFor(tablet));
 
     try merged_log.mergeFrom(&tablet_log);
-    var replay_buffer: [128]u8 = undefined;
+    var replay_buffer: [DOCUMENT_LOG_MERGE_TEST_BUFFER_BYTES]u8 = undefined;
     const replayed = try merged_log.apply("hello ", replay_buffer[0..]);
     try std.testing.expectEqualStrings(merged, replayed);
 
@@ -681,15 +687,16 @@ test "default chunk media adapter reports concrete payload chunks" {
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 401 };
     const signer = signing.SignerIdentity{
         .label = "sync-adapter-storage",
-        .seed = [_]u8{0x91} ** 32,
+        .seed = signing.seedFromByte(0x91),
     };
     var checkpoint_store = storage_service.CheckpointStore{};
     checkpoint_store.resetPersistent();
     var storage = storage_service.Service.initWithStore(401, 4, storage_owner, &checkpoint_store);
+    const media_payload = "0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789";
     const media = try storage.putVersion(.{
         .object_type = .media_asset,
-        .payload = "0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789",
-        .metadata = try object_store.signMetadata(signer, "clip", "video/raw", .media_asset, "0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789", 1),
+        .payload = media_payload,
+        .metadata = try object_store.signMetadata(signer, "clip", "video/raw", .media_asset, media_payload, 1),
     });
     const adapter_value = DefaultChunkMediaAdapter.adapter();
     const result = try adapter_value.replicate(.{
@@ -706,7 +713,7 @@ test "secret transfer adapter refuses plaintext secret payloads" {
     const tablet = principal.PrincipalId{ .kind = .device, .serial = 28 };
     const signer = signing.SignerIdentity{
         .label = "sync-secret-storage",
-        .seed = [_]u8{0x93} ** 32,
+        .seed = signing.seedFromByte(0x93),
     };
     var checkpoint_store = storage_service.CheckpointStore{};
     checkpoint_store.resetPersistent();

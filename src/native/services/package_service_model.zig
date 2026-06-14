@@ -1,3 +1,4 @@
+const crypto_hash = @import("../core/crypto_hash.zig");
 const manifest = @import("../policy/manifest.zig");
 
 pub const MAX_INSTALLED_BUNDLES: usize = 16;
@@ -17,6 +18,7 @@ pub const MAX_BACKGROUND_TASK_ID_BYTES: usize = 48;
 pub const MAX_MODEL_FAMILY_BYTES: usize = 48;
 pub const MAX_SIGNATURE_FORMAT_BYTES: usize = 16;
 pub const MAX_SIGNATURE_SIGNER_BYTES: usize = 64;
+pub const MAX_REVISIONS_PER_BUNDLE: usize = 2;
 
 pub const InstallRequest = struct {
     bundle: manifest.BundleManifest,
@@ -190,7 +192,7 @@ pub const BundleRevision = struct {
     version_major: u16 = 0,
     version_minor: u16 = 0,
     channel: manifest.UpdateChannel = .stable,
-    permission_digest: [32]u8 = [_]u8{0} ** 32,
+    permission_digest: crypto_hash.Digest = crypto_hash.zero_digest,
     schema_version: u32 = 0,
     component_count: usize = 0,
     components: [MAX_COMPONENTS_PER_BUNDLE]StoredComponent = [_]StoredComponent{zeroStoredComponent()} ** MAX_COMPONENTS_PER_BUNDLE,
@@ -292,7 +294,7 @@ pub fn zeroBundle() InstalledBundle {
         .next_revision_id = 1,
         .active_revision_slot = 0,
         .rollback_revision_slot = null,
-        .revisions = [_]BundleRevision{zeroBundleRevision()} ** 2,
+        .revisions = [_]BundleRevision{zeroBundleRevision()} ** MAX_REVISIONS_PER_BUNDLE,
     };
 }
 

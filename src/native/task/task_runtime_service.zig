@@ -1,6 +1,7 @@
 const std = @import("std");
 const principal = @import("../core/principal.zig");
 const task_runtime = @import("task_runtime.zig");
+const units = @import("../core/units.zig");
 
 pub const CheckpointStore = struct {
     checkpoint_state: task_runtime.Snapshot = task_runtime.Runtime.initSnapshot(),
@@ -98,9 +99,9 @@ test "task runtime service restores checkpointed task state on restart" {
     const owner = principal.PrincipalId{ .kind = .app, .serial = 7 };
     const budget = task_runtime.ResourceBudget{
         .cpu_time_ticks = 4_000,
-        .memory_bytes = 128 * 1024,
+        .memory_bytes = units.kibibytes(128),
         .endpoint_slots = 4,
-        .shared_memory_bytes = 8 * 1024,
+        .shared_memory_bytes = units.kibibytes(8),
         .background_allowed = false,
     };
     const baseline = try runtime.createTask(.{
@@ -150,9 +151,9 @@ test "task runtime service can restore a persisted checkpoint after service re-i
     const owner = principal.PrincipalId{ .kind = .app, .serial = 8 };
     const budget = task_runtime.ResourceBudget{
         .cpu_time_ticks = 2_000,
-        .memory_bytes = 64 * 1024,
+        .memory_bytes = units.kibibytes(64),
         .endpoint_slots = 4,
-        .shared_memory_bytes = 4 * 1024,
+        .shared_memory_bytes = units.kibibytes(4),
         .background_allowed = false,
     };
     const task = try checkpointed_runtime.createTask(.{

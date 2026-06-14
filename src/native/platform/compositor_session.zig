@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
+const binary_cursor = @import("binary_cursor");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const capability = @import("../kernel_api/capability.zig");
 const humane_permissions = @import("../policy/humane_permissions.zig");
@@ -7,6 +8,7 @@ const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service = @import("../task/task_runtime_service.zig");
+const units = @import("../core/units.zig");
 
 const copyText = native_util.copyText;
 const yesNo = native_util.yesNo;
@@ -19,6 +21,7 @@ pub const MAX_REASON_BYTES: usize = 128;
 pub const MAX_RESOURCE_BYTES: usize = 96;
 pub const MAX_WINDOW_DETAIL_BYTES: usize = 96;
 pub const SERVICE_ENDPOINT_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
+const LEASE_SUMMARY_BUFFER_BYTES: usize = 96;
 
 pub const ViewType = enum(u8) {
     document_view,
@@ -128,6 +131,9 @@ const WINDOW_INDEX_CAPACITY: usize = MAX_WINDOWS * 2;
 const REVIEW_ITEM_INDEX_CAPACITY: usize = MAX_REVIEW_ITEMS * 2;
 const WIRE_MAGIC_REQUEST = [_]u8{ 'Z', 'U', 'X', '1' };
 const WIRE_MAGIC_RESPONSE = [_]u8{ 'Z', 'U', 'R', '1' };
+const RequestWriter = binary_cursor.Writer(Error, error.RequestTooLarge);
+const ResponseWriter = binary_cursor.Writer(Error, error.ResponseTooLarge);
+const WireReader = binary_cursor.Reader(Error, error.MalformedRequest);
 
 const WindowSlot = struct {
     in_use: bool = false,
@@ -708,53 +714,53 @@ pub const Service = struct {
 };
 
 pub fn encodeRequest(buffer: []u8, request: ServiceRequest) Error![]const u8 {
-    var used: usize = 0;
-    try writeBytes(buffer, &used, &WIRE_MAGIC_REQUEST);
-    try writeByte(buffer, &used, @intFromEnum(request.operation));
-    try writeByte(buffer, &used, @intFromEnum(request.view_type));
-    try writeByte(buffer, &used, @intFromEnum(request.permission_kind));
-    try writeByte(buffer, &used, requestFlags(request));
-    try writeU64(buffer, &used, request.subject_task_id);
-    try writeU64(buffer, &used, request.reviewer_task_id);
-    try writeU64(buffer, &used, request.window_id);
-    try writeU64(buffer, &used, request.workspace_id);
-    try writeU64(buffer, &used, request.lease_ticks);
-    try writeU64(buffer, &used, request.max_lease_ticks);
-    try writeText(buffer, &used, request.bundle_id);
-    try writeText(buffer, &used, request.display_name);
-    try writeText(buffer, &used, request.resource);
-    try writeText(buffer, &used, request.detail);
-    try writeByte(buffer, &used, @intFromEnum(request.egress_intent.kind));
-    try writeText(buffer, &used, request.egress_intent.object);
-    try writeText(buffer, &used, request.egress_intent.principal);
-    try writeText(buffer, &used, request.egress_intent.service);
-    try writeText(buffer, &used, request.egress_intent.event_type);
-    return buffer[0..used];
+    var writer = RequestWriter{ .buffer = buffer };
+    try writer.writeBytes(&WIRE_MAGIC_REQUEST);
+    try writer.writeByte(@intFromEnum(request.operation));
+    try writer.writeByte(@intFromEnum(request.view_type));
+    try writer.writeByte(@intFromEnum(request.permission_kind));
+    try writer.writeByte(requestFlags(request));
+    try writer.writeU64(request.subject_task_id);
+    try writer.writeU64(request.reviewer_task_id);
+    try writer.writeU64(request.window_id);
+    try writer.writeU64(request.workspace_id);
+    try writer.writeU64(request.lease_ticks);
+    try writer.writeU64(request.max_lease_ticks);
+    try writeText(&writer, request.bundle_id);
+    try writeText(&writer, request.display_name);
+    try writeText(&writer, request.resource);
+    try writeText(&writer, request.detail);
+    try writer.writeByte(@intFromEnum(request.egress_intent.kind));
+    try writeText(&writer, request.egress_intent.object);
+    try writeText(&writer, request.egress_intent.principal);
+    try writeText(&writer, request.egress_intent.service);
+    try writeText(&writer, request.egress_intent.event_type);
+    return buffer[0..writer.offset];
 }
 
 pub fn decodeRequest(payload: []const u8) Error!ServiceRequest {
-    var cursor: usize = 0;
-    if (!std.mem.eql(u8, try readBytes(payload, &cursor, 4), &WIRE_MAGIC_REQUEST)) return error.MalformedRequest;
-    const operation = std.enums.fromInt(Operation, try readByte(payload, &cursor)) orelse return error.MalformedRequest;
-    const view_type = std.enums.fromInt(ViewType, try readByte(payload, &cursor)) orelse return error.MalformedRequest;
-    const permission_kind = std.enums.fromInt(manifest.PermissionKind, try readByte(payload, &cursor)) orelse return error.MalformedRequest;
-    const flags = try readByte(payload, &cursor);
-    const subject_task_id = try readU64(payload, &cursor);
-    const reviewer_task_id = try readU64(payload, &cursor);
-    const window_id = try readU64(payload, &cursor);
-    const workspace_id = try readU64(payload, &cursor);
-    const lease_ticks = try readU64(payload, &cursor);
-    const max_lease_ticks = try readU64(payload, &cursor);
-    const bundle_id = try readText(payload, &cursor);
-    const display_name = try readText(payload, &cursor);
-    const resource = try readText(payload, &cursor);
-    const detail = try readText(payload, &cursor);
-    const egress_intent_kind = std.enums.fromInt(manifest.DataEgressIntentKind, try readByte(payload, &cursor)) orelse return error.MalformedRequest;
-    const egress_intent_object = try readText(payload, &cursor);
-    const egress_intent_principal = try readText(payload, &cursor);
-    const egress_intent_service = try readText(payload, &cursor);
-    const egress_intent_event_type = try readText(payload, &cursor);
-    if (cursor != payload.len) return error.MalformedRequest;
+    var reader = WireReader{ .buffer = payload };
+    if (!std.mem.eql(u8, try reader.readSlice(WIRE_MAGIC_REQUEST.len), &WIRE_MAGIC_REQUEST)) return error.MalformedRequest;
+    const operation = std.enums.fromInt(Operation, try reader.readByte()) orelse return error.MalformedRequest;
+    const view_type = std.enums.fromInt(ViewType, try reader.readByte()) orelse return error.MalformedRequest;
+    const permission_kind = std.enums.fromInt(manifest.PermissionKind, try reader.readByte()) orelse return error.MalformedRequest;
+    const flags = try reader.readByte();
+    const subject_task_id = try reader.readU64();
+    const reviewer_task_id = try reader.readU64();
+    const window_id = try reader.readU64();
+    const workspace_id = try reader.readU64();
+    const lease_ticks = try reader.readU64();
+    const max_lease_ticks = try reader.readU64();
+    const bundle_id = try readText(&reader);
+    const display_name = try readText(&reader);
+    const resource = try readText(&reader);
+    const detail = try readText(&reader);
+    const egress_intent_kind = std.enums.fromInt(manifest.DataEgressIntentKind, try reader.readByte()) orelse return error.MalformedRequest;
+    const egress_intent_object = try readText(&reader);
+    const egress_intent_principal = try readText(&reader);
+    const egress_intent_service = try readText(&reader);
+    const egress_intent_event_type = try readText(&reader);
+    if (!reader.eof()) return error.MalformedRequest;
     return .{
         .operation = operation,
         .view_type = view_type,
@@ -784,31 +790,31 @@ pub fn decodeRequest(payload: []const u8) Error!ServiceRequest {
 }
 
 pub fn encodeResponse(buffer: []u8, response: ServiceResponse) Error![]const u8 {
-    var used: usize = 0;
-    try writeBytes(buffer, &used, &WIRE_MAGIC_RESPONSE);
-    try writeByte(buffer, &used, @intFromEnum(response.operation));
-    try writeByte(buffer, &used, @intFromEnum(response.status));
-    try writeByte(buffer, &used, @intFromEnum(response.decision));
-    try writeByte(buffer, &used, if (response.recovered) 1 else 0);
-    try writeU64(buffer, &used, response.window_id);
-    try writeU64(buffer, &used, response.active_window_id);
-    try writeU16(buffer, &used, response.visible_window_count);
-    try writeU16(buffer, &used, response.review_item_count);
-    return buffer[0..used];
+    var writer = ResponseWriter{ .buffer = buffer };
+    try writer.writeBytes(&WIRE_MAGIC_RESPONSE);
+    try writer.writeByte(@intFromEnum(response.operation));
+    try writer.writeByte(@intFromEnum(response.status));
+    try writer.writeByte(@intFromEnum(response.decision));
+    try writer.writeByte(if (response.recovered) 1 else 0);
+    try writer.writeU64(response.window_id);
+    try writer.writeU64(response.active_window_id);
+    try writer.writeU16(response.visible_window_count);
+    try writer.writeU16(response.review_item_count);
+    return buffer[0..writer.offset];
 }
 
 pub fn decodeResponse(payload: []const u8) Error!ServiceResponse {
-    var cursor: usize = 0;
-    if (!std.mem.eql(u8, try readBytes(payload, &cursor, 4), &WIRE_MAGIC_RESPONSE)) return error.MalformedRequest;
-    const operation = std.enums.fromInt(Operation, try readByte(payload, &cursor)) orelse return error.MalformedRequest;
-    const status = std.enums.fromInt(ServiceStatus, try readByte(payload, &cursor)) orelse return error.MalformedRequest;
-    const decision = std.enums.fromInt(DecisionState, try readByte(payload, &cursor)) orelse return error.MalformedRequest;
-    const recovered = (try readByte(payload, &cursor)) != 0;
-    const window_id = try readU64(payload, &cursor);
-    const active_window_id = try readU64(payload, &cursor);
-    const visible_window_count = try readU16(payload, &cursor);
-    const review_item_count = try readU16(payload, &cursor);
-    if (cursor != payload.len) return error.MalformedRequest;
+    var reader = WireReader{ .buffer = payload };
+    if (!std.mem.eql(u8, try reader.readSlice(WIRE_MAGIC_RESPONSE.len), &WIRE_MAGIC_RESPONSE)) return error.MalformedRequest;
+    const operation = std.enums.fromInt(Operation, try reader.readByte()) orelse return error.MalformedRequest;
+    const status = std.enums.fromInt(ServiceStatus, try reader.readByte()) orelse return error.MalformedRequest;
+    const decision = std.enums.fromInt(DecisionState, try reader.readByte()) orelse return error.MalformedRequest;
+    const recovered = (try reader.readByte()) != 0;
+    const window_id = try reader.readU64();
+    const active_window_id = try reader.readU64();
+    const visible_window_count = try reader.readU16();
+    const review_item_count = try reader.readU16();
+    if (!reader.eof()) return error.MalformedRequest;
     return .{
         .operation = operation,
         .status = status,
@@ -868,7 +874,7 @@ pub fn renderReviewItemToBuffer(
     if (item.requested_lease_ticks != 0) {
         used += (try std.fmt.bufPrint(buffer[used..], " requested_lease={d}", .{item.requested_lease_ticks})).len;
     }
-    var lease_buffer: [96]u8 = undefined;
+    var lease_buffer: [LEASE_SUMMARY_BUFFER_BYTES]u8 = undefined;
     const lease_summary = humane_permissions.requestedLeaseLabel(&lease_buffer, item.requested_lease_ticks) catch "unavailable";
     used += (try std.fmt.bufPrint(buffer[used..], " grant_scope={s} lease_summary={s} revoke_hint={s}", .{
         humane_permissions.scopeSummaryLabel(item.kind, item.requested_local_only),
@@ -990,63 +996,15 @@ fn requestFlags(request: ServiceRequest) u8 {
     return flags;
 }
 
-fn writeByte(buffer: []u8, used: *usize, value: u8) Error!void {
-    if (used.* + 1 > buffer.len) return error.RequestTooLarge;
-    buffer[used.*] = value;
-    used.* += 1;
-}
-
-fn writeBytes(buffer: []u8, used: *usize, bytes: []const u8) Error!void {
-    if (used.* + bytes.len > buffer.len) return error.RequestTooLarge;
-    @memcpy(buffer[used.* .. used.* + bytes.len], bytes);
-    used.* += bytes.len;
-}
-
-fn writeU16(buffer: []u8, used: *usize, value: u16) Error!void {
-    if (used.* + 2 > buffer.len) return error.ResponseTooLarge;
-    std.mem.writeInt(u16, buffer[used.*..][0..2], value, .little);
-    used.* += 2;
-}
-
-fn writeU64(buffer: []u8, used: *usize, value: u64) Error!void {
-    if (used.* + 8 > buffer.len) return error.RequestTooLarge;
-    std.mem.writeInt(u64, buffer[used.*..][0..8], value, .little);
-    used.* += 8;
-}
-
-fn writeText(buffer: []u8, used: *usize, text: []const u8) Error!void {
+fn writeText(writer: *RequestWriter, text: []const u8) Error!void {
     if (text.len > std.math.maxInt(u8)) return error.RequestTooLarge;
-    try writeByte(buffer, used, @intCast(text.len));
-    try writeBytes(buffer, used, text);
+    try writer.writeByte(@intCast(text.len));
+    try writer.writeBytes(text);
 }
 
-fn readByte(buffer: []const u8, cursor: *usize) Error!u8 {
-    if (cursor.* + 1 > buffer.len) return error.MalformedRequest;
-    defer cursor.* += 1;
-    return buffer[cursor.*];
-}
-
-fn readBytes(buffer: []const u8, cursor: *usize, len: usize) Error![]const u8 {
-    if (cursor.* + len > buffer.len) return error.MalformedRequest;
-    defer cursor.* += len;
-    return buffer[cursor.* .. cursor.* + len];
-}
-
-fn readU16(buffer: []const u8, cursor: *usize) Error!u16 {
-    if (cursor.* + 2 > buffer.len) return error.MalformedRequest;
-    defer cursor.* += 2;
-    return std.mem.readInt(u16, buffer[cursor.*..][0..2], .little);
-}
-
-fn readU64(buffer: []const u8, cursor: *usize) Error!u64 {
-    if (cursor.* + 8 > buffer.len) return error.MalformedRequest;
-    defer cursor.* += 8;
-    return std.mem.readInt(u64, buffer[cursor.*..][0..8], .little);
-}
-
-fn readText(buffer: []const u8, cursor: *usize) Error![]const u8 {
-    const len = try readByte(buffer, cursor);
-    return readBytes(buffer, cursor, len);
+fn readText(reader: *WireReader) Error![]const u8 {
+    const len = try reader.readByte();
+    return reader.readSlice(len);
 }
 
 fn deriveReason(buffer: *[MAX_REASON_BYTES]u8, bundle: manifest.BundleManifest, request: manifest.PermissionRequest) usize {
@@ -1155,17 +1113,28 @@ fn zeroItem() ReviewItemRecord {
     return .{};
 }
 
+fn compositorTestBudget(endpoint_slots: u16) task_runtime.ResourceBudget {
+    return .{
+        .cpu_time_ticks = 100,
+        .memory_bytes = units.kibibytes(1),
+        .endpoint_slots = endpoint_slots,
+        .shared_memory_bytes = units.kibibytes(1),
+    };
+}
+
+const EPHEMERAL_TEST_SHARED_MEMORY_BYTES: usize = 512;
+const TEST_WINDOW_RENDER_BUFFER_BYTES: usize = 512;
+const TEST_REVIEW_HEADER_BUFFER_BYTES: usize = 256;
+const TEST_REVIEW_ITEM_BUFFER_BYTES: usize = 512;
+const TEST_REVIEW_DECISION_BUFFER_BYTES: usize = 256;
+const TEST_COMPACT_RENDER_BUFFER_BYTES: usize = 320;
+
 test "compositor service wire protocol opens switches reviews decides and recovers" {
     var runtime = task_runtime.Runtime.init();
     const app_task = try runtime.createTask(.{
         .owner = .{ .kind = .user, .serial = 9 },
         .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
+        .budget = compositorTestBudget(4),
         .ui_surface_id = 12,
         .local_only = true,
     });
@@ -1233,12 +1202,7 @@ test "compositor service closes task windows during app removal" {
     const app_task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 24 },
         .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
+        .budget = compositorTestBudget(4),
         .ui_surface_id = 24,
         .local_only = true,
     });
@@ -1306,23 +1270,13 @@ test "compositor service rejects tasks without valid display surfaces" {
     const headless_task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 21 },
         .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 2,
-            .shared_memory_bytes = 1024,
-        },
+        .budget = compositorTestBudget(2),
         .local_only = true,
     });
     const zero_surface_task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 22 },
         .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 2,
-            .shared_memory_bytes = 1024,
-        },
+        .budget = compositorTestBudget(2),
         .ui_surface_id = 0,
         .local_only = true,
     });
@@ -1367,9 +1321,9 @@ test "task-first compositor flow persists app-linked task views and audit state"
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 2_000,
-            .memory_bytes = 64 * 1024,
+            .memory_bytes = units.kibibytes(64),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 4 * 1024,
+            .shared_memory_bytes = units.kibibytes(4),
         },
         .ui_surface_id = 91,
         .local_only = true,
@@ -1446,9 +1400,9 @@ test "task-first compositor flow persists app-linked task views and audit state"
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 1,
-            .shared_memory_bytes = 512,
+            .shared_memory_bytes = EPHEMERAL_TEST_SHARED_MEMORY_BYTES,
         },
         .local_only = true,
     });
@@ -1487,7 +1441,7 @@ test "task-first compositor flow persists app-linked task views and audit state"
     try std.testing.expectEqualStrings("app.trip", restored_panel_window.bundleIdSlice());
     try std.testing.expectEqualStrings("Trip", restored_panel_window.displayNameSlice());
 
-    var render_buffer: [512]u8 = undefined;
+    var render_buffer: [TEST_WINDOW_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered_task = try renderWindowToBuffer(&render_buffer, restored_task_window);
     try std.testing.expect(std.mem.indexOf(u8, rendered_task, "type=full_screen_task_view") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered_task, "title=Task: Coordinate Trip") != null);
@@ -1503,12 +1457,7 @@ test "compositor session creates app-panel permission review windows and cards" 
     const app_task = try runtime.createTask(.{
         .owner = .{ .kind = .user, .serial = 1 },
         .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
+        .budget = compositorTestBudget(4),
         .ui_surface_id = 3,
         .local_only = true,
         .initial_component = .{
@@ -1534,9 +1483,9 @@ test "compositor session creates app-panel permission review windows and cards" 
     _ = try session.recordDecision(window.id, permissions[0], true, true, 400);
     try std.testing.expectEqual(DecisionState.allow, session.findReviewItemConst(window.id, .object_access, "workspace:notes").?.decision);
 
-    var header_buffer: [256]u8 = undefined;
-    var item_buffer: [512]u8 = undefined;
-    var decision_buffer: [256]u8 = undefined;
+    var header_buffer: [TEST_REVIEW_HEADER_BUFFER_BYTES]u8 = undefined;
+    var item_buffer: [TEST_REVIEW_ITEM_BUFFER_BYTES]u8 = undefined;
+    var decision_buffer: [TEST_REVIEW_DECISION_BUFFER_BYTES]u8 = undefined;
     const header = try renderWindowToBuffer(&header_buffer, window);
     const item = try renderReviewItemToBuffer(&item_buffer, window.id, object_item);
     const decision = try renderDecisionToBuffer(&decision_buffer, window.id, object_item);
@@ -1554,12 +1503,7 @@ test "compositor session reuses an existing window for repeated bundle review" {
     const app_task = try runtime.createTask(.{
         .owner = .{ .kind = .user, .serial = 2 },
         .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
+        .budget = compositorTestBudget(4),
         .ui_surface_id = 5,
         .local_only = true,
     });
@@ -1582,12 +1526,7 @@ test "compositor session opens document workspace and full-screen task views" {
     const app_task = try runtime.createTask(.{
         .owner = .{ .kind = .user, .serial = 3 },
         .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
+        .budget = compositorTestBudget(4),
         .ui_surface_id = 7,
         .local_only = true,
         .initial_component = .{
@@ -1609,7 +1548,7 @@ test "compositor session opens document workspace and full-screen task views" {
     try std.testing.expectEqual(ViewType.full_screen_task_view, fullscreen.view_type);
     try std.testing.expectEqualStrings("Edit Media Project", fullscreen.titleSlice());
 
-    var buffer: [320]u8 = undefined;
+    var buffer: [TEST_COMPACT_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered = try renderWindowToBuffer(&buffer, document);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "type=document_view") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "detail=documents/plan.md") != null);

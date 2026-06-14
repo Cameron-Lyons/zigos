@@ -6,16 +6,17 @@ const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const service_catalog = @import("../session/service_catalog.zig");
 const userspace_mailbox = @import("userspace_bootstrap_mailbox.zig");
+const userspace_flags = @import("userspace_flags.zig");
 
-pub const FLAG_SYSTEM_BUNDLE: u32 = 1 << 0;
-pub const FLAG_OWNS_UI_SURFACE: u32 = 1 << 1;
-pub const FLAG_PERMISSION_REVIEW: u32 = 1 << 2;
-pub const FLAG_BACKGROUND_ELIGIBLE: u32 = 1 << 3;
-pub const FLAG_STORAGE_BOUNDARY: u32 = 1 << 4;
-pub const FLAG_NETWORK_BOUNDARY: u32 = 1 << 5;
-pub const FLAG_POLICY_BOUNDARY: u32 = 1 << 6;
-pub const FLAG_DRIVER_BOUNDARY: u32 = 1 << 7;
-pub const FLAG_MMU_PROOF_PROBE: u32 = 1 << 9;
+pub const FLAG_SYSTEM_BUNDLE = userspace_flags.FLAG_SYSTEM_BUNDLE;
+pub const FLAG_OWNS_UI_SURFACE = userspace_flags.FLAG_OWNS_UI_SURFACE;
+pub const FLAG_PERMISSION_REVIEW = userspace_flags.FLAG_PERMISSION_REVIEW;
+pub const FLAG_BACKGROUND_ELIGIBLE = userspace_flags.FLAG_BACKGROUND_ELIGIBLE;
+pub const FLAG_STORAGE_BOUNDARY = userspace_flags.FLAG_STORAGE_BOUNDARY;
+pub const FLAG_NETWORK_BOUNDARY = userspace_flags.FLAG_NETWORK_BOUNDARY;
+pub const FLAG_POLICY_BOUNDARY = userspace_flags.FLAG_POLICY_BOUNDARY;
+pub const FLAG_DRIVER_BOUNDARY = userspace_flags.FLAG_DRIVER_BOUNDARY;
+pub const FLAG_MMU_PROOF_PROBE = userspace_flags.FLAG_MMU_PROOF_PROBE;
 
 pub const ComponentClass = enum(u8) {
     session_manager,
@@ -52,13 +53,32 @@ pub const ImageSpec = struct {
     signed: bool = true,
 };
 
+const StandaloneImageSpec = struct {
+    bundle_id: []const u8,
+    artifact_name: []const u8,
+    source_path: []const u8 = "src/userspace/component_main.zig",
+    display_name: []const u8,
+    publisher: []const u8 = "zigos.system",
+    label: []const u8,
+    entry: []const u8,
+    provided_interfaces: []const manifest.InterfaceDecl = &.{},
+    consumed_interfaces: []const manifest.InterfaceDecl = &.{},
+    assets: []const manifest.AssetDecl = &.{},
+    update_channel: manifest.UpdateChannel = .stable,
+    component_class: ComponentClass = .app_component,
+    role_tag: u32,
+    heartbeat_increment: u32,
+    contract_flags: u32 = 0,
+    signed: bool = true,
+};
+
 fn serviceImageSpec(class: contract.ServiceClass, component_class: ComponentClass) ImageSpec {
     const entry = service_catalog.entryForClass(class).?;
     const image = entry.userspace_image.?;
     return .{
         .bundle_id = image.bundle_id,
         .artifact_name = image.artifact_name,
-        .source_path = serviceSourcePath(class),
+        .source_path = image.source_path,
         .display_name = image.display_name,
         .publisher = image.publisher,
         .label = image.label,
@@ -70,30 +90,29 @@ fn serviceImageSpec(class: contract.ServiceClass, component_class: ComponentClas
         .heartbeat_increment = image.heartbeat_increment,
         .contract_flags = image.contract_flags,
         .service_class = class,
-        .service_kind = serviceKindForClass(class),
+        .service_kind = image.service_kind,
     };
 }
 
-fn serviceSourcePath(class: contract.ServiceClass) []const u8 {
-    return switch (class) {
-        .network_stack,
-        .storage_object,
-        .package_install_update,
-        .compositor_ui_session,
-        .sync_replication,
-        => "src/userspace/service_main.zig",
-        else => "src/userspace/component_main.zig",
-    };
-}
-
-fn serviceKindForClass(class: contract.ServiceClass) userspace_mailbox.ServiceKind {
-    return switch (class) {
-        .network_stack => .network,
-        .storage_object => .storage,
-        .package_install_update => .package,
-        .compositor_ui_session => .compositor,
-        .sync_replication => .sync,
-        else => .generic,
+fn standaloneImageSpec(spec: StandaloneImageSpec) ImageSpec {
+    return .{
+        .bundle_id = spec.bundle_id,
+        .artifact_name = spec.artifact_name,
+        .source_path = spec.source_path,
+        .display_name = spec.display_name,
+        .publisher = spec.publisher,
+        .label = spec.label,
+        .entry = spec.entry,
+        .components = &.{.{ .id = spec.label, .entry = spec.entry }},
+        .provided_interfaces = spec.provided_interfaces,
+        .consumed_interfaces = spec.consumed_interfaces,
+        .assets = spec.assets,
+        .update_channel = spec.update_channel,
+        .component_class = spec.component_class,
+        .role_tag = spec.role_tag,
+        .heartbeat_increment = spec.heartbeat_increment,
+        .contract_flags = spec.contract_flags,
+        .signed = spec.signed,
     };
 }
 
@@ -101,156 +120,132 @@ pub const boot_image_specs = [_]ImageSpec{
     serviceImageSpec(.session_manager, .session_manager),
     serviceImageSpec(.permission_review_ui, .service_component),
     serviceImageSpec(.service_registry, .service_component),
-    .{
+    standaloneImageSpec(.{
         .bundle_id = "zigos.system.workspace-storage",
         .artifact_name = "userspace-workspace-storage.elf",
         .display_name = "Workspace Storage",
-        .publisher = "zigos.system",
         .label = "workspace-storage",
         .entry = "zigos.bootstrap.workspace",
-        .components = &.{.{ .id = "workspace-storage", .entry = "zigos.bootstrap.workspace" }},
         .component_class = .service_component,
         .role_tag = 0xA103,
         .heartbeat_increment = 3,
         .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_STORAGE_BOUNDARY,
-    },
-    .{
+    }),
+    standaloneImageSpec(.{
         .bundle_id = "zigos.system.transport-probe",
         .artifact_name = "userspace-transport-probe.elf",
         .display_name = "Transport Probe",
-        .publisher = "zigos.system",
         .label = "transport-probe",
         .entry = "app.transport.probe",
-        .components = &.{.{ .id = "transport-probe", .entry = "app.transport.probe" }},
-        .component_class = .app_component,
         .role_tag = 0xA104,
         .heartbeat_increment = 4,
         .contract_flags = FLAG_OWNS_UI_SURFACE,
-    },
-    .{
+    }),
+    standaloneImageSpec(.{
         .bundle_id = "zigos.system.termination-probe",
         .artifact_name = "userspace-termination-probe.elf",
         .display_name = "Termination Probe",
-        .publisher = "zigos.system",
         .label = "termination-probe",
         .entry = "app.termination.probe",
-        .components = &.{.{ .id = "termination-probe", .entry = "app.termination.probe" }},
-        .component_class = .app_component,
         .role_tag = 0xA105,
         .heartbeat_increment = 5,
-    },
-    .{
+    }),
+    standaloneImageSpec(.{
         .bundle_id = "app.viewer",
         .artifact_name = "userspace-viewer.elf",
         .display_name = "Viewer",
         .publisher = "zigos.dev",
         .label = "viewer",
         .entry = "app.viewer",
-        .components = &.{.{ .id = "viewer", .entry = "app.viewer" }},
         .provided_interfaces = &.{.{ .name = "zigos.viewer.document" }},
         .consumed_interfaces = &.{component_abi_schema.interfaceDecl(.object_workspace)},
         .assets = &.{.{ .path = "assets/viewer/icon.svg", .content_type = "image/svg+xml" }},
-        .component_class = .app_component,
         .role_tag = 0xA106,
         .heartbeat_increment = 6,
         .contract_flags = FLAG_OWNS_UI_SURFACE,
-    },
-    .{
+    }),
+    standaloneImageSpec(.{
         .bundle_id = "app.notes",
         .artifact_name = "userspace-notes.elf",
         .display_name = "Notes",
         .publisher = "zigos.dev",
         .label = "notes",
         .entry = "app.notes",
-        .components = &.{.{ .id = "notes", .entry = "app.notes" }},
         .provided_interfaces = &.{.{ .name = "zigos.workspace.document" }},
         .consumed_interfaces = &.{component_abi_schema.interfaceDecl(.object_workspace)},
         .assets = &.{.{ .path = "assets/notes/icon.svg", .content_type = "image/svg+xml" }},
         .update_channel = .beta,
-        .component_class = .app_component,
         .role_tag = 0xA107,
         .heartbeat_increment = 7,
         .contract_flags = FLAG_OWNS_UI_SURFACE,
-    },
-    .{
+    }),
+    standaloneImageSpec(.{
         .bundle_id = "app.sync",
         .artifact_name = "userspace-sync.elf",
         .display_name = "Sync",
         .publisher = "zigos.dev",
         .label = "sync",
         .entry = "app.sync",
-        .components = &.{.{ .id = "sync", .entry = "app.sync" }},
         .provided_interfaces = &.{component_abi_schema.interfaceDecl(.sync_replication)},
         .consumed_interfaces = &.{component_abi_schema.interfaceDecl(.object_workspace)},
         .assets = &.{.{ .path = "assets/sync/icon.svg", .content_type = "image/svg+xml" }},
-        .component_class = .app_component,
         .role_tag = 0xA108,
         .heartbeat_increment = 8,
         .contract_flags = FLAG_BACKGROUND_ELIGIBLE,
-    },
-    .{
+    }),
+    standaloneImageSpec(.{
         .bundle_id = "app.capture",
         .artifact_name = "userspace-capture.elf",
         .display_name = "Capture",
         .publisher = "zigos.dev",
         .label = "capture",
         .entry = "app.capture",
-        .components = &.{.{ .id = "capture", .entry = "app.capture" }},
         .provided_interfaces = &.{.{ .name = "zigos.capture.session" }},
         .consumed_interfaces = &.{component_abi_schema.interfaceDecl(.media_print)},
         .assets = &.{.{ .path = "assets/capture/icon.svg", .content_type = "image/svg+xml" }},
-        .component_class = .app_component,
         .role_tag = 0xA109,
         .heartbeat_increment = 9,
         .contract_flags = FLAG_OWNS_UI_SURFACE,
-    },
+    }),
     serviceImageSpec(.policy_mediation, .service_component),
     serviceImageSpec(.network_stack, .service_component),
     serviceImageSpec(.storage_object, .service_component),
-    .{
+    standaloneImageSpec(.{
         .bundle_id = "zigos.system.storage-driver",
         .artifact_name = "userspace-storage-driver.elf",
         .display_name = "Storage Driver",
-        .publisher = "zigos.system",
         .label = "storage-driver",
         .entry = "zigos.driver.storage",
-        .components = &.{.{ .id = "storage-driver", .entry = "zigos.driver.storage" }},
         .component_class = .service_component,
         .role_tag = 0xA10D,
         .heartbeat_increment = 13,
         .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_DRIVER_BOUNDARY | FLAG_STORAGE_BOUNDARY,
-    },
+    }),
     serviceImageSpec(.package_install_update, .service_component),
     serviceImageSpec(.compositor_ui_session, .service_component),
     serviceImageSpec(.indexing_search, .service_component),
     serviceImageSpec(.sync_replication, .service_component),
     serviceImageSpec(.media_print_helpers, .service_component),
-    .{
+    standaloneImageSpec(.{
         .bundle_id = "zigos.system.service-client",
         .artifact_name = "userspace-service-client.elf",
         .display_name = "Service Client",
-        .publisher = "zigos.system",
         .label = "service-client",
         .entry = "app.service.client",
-        .components = &.{.{ .id = "service-client", .entry = "app.service.client" }},
-        .component_class = .app_component,
         .role_tag = 0xA114,
         .heartbeat_increment = 20,
         .contract_flags = FLAG_OWNS_UI_SURFACE,
-    },
-    .{
+    }),
+    standaloneImageSpec(.{
         .bundle_id = "zigos.proof.mmu-isolation",
         .artifact_name = "userspace-mmu-isolation-proof.elf",
         .display_name = "MMU Isolation Proof",
-        .publisher = "zigos.system",
         .label = "mmu-isolation-proof",
         .entry = "zigos.proof.mmu-isolation",
-        .components = &.{.{ .id = "mmu-isolation-proof", .entry = "zigos.proof.mmu-isolation" }},
-        .component_class = .app_component,
         .role_tag = userspace_mailbox.MMU_ISOLATION_PROOF_ROLE_TAG,
         .heartbeat_increment = 22,
         .contract_flags = FLAG_MMU_PROOF_PROBE,
-    },
+    }),
 };
 
 const BUNDLE_INDEX_CAPACITY: usize = boot_image_specs.len * 2;

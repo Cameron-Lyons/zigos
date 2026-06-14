@@ -10,6 +10,7 @@ const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const sync_service = @import("../sync/sync_service.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
 const workspace = @import("../storage/workspace.zig");
 const copyText = native_util.copyText;
 const yesNo = native_util.yesNo;
@@ -18,6 +19,7 @@ pub const MAX_FLOWS: usize = 16;
 pub const MAX_DETAIL_BYTES: usize = 128;
 pub const MAX_BUNDLE_ID_BYTES: usize = 64;
 pub const MAX_PERMISSION_RESOURCE_BYTES: usize = 96;
+const REVIEW_FLOW_TEST_BUFFER_BYTES: usize = 384;
 
 pub const FlowKind = enum(u8) {
     start_task,
@@ -397,15 +399,15 @@ test "native ux records task workspace pairing review and recovery flows" {
     const paired_device = principal.PrincipalId{ .kind = .device, .serial = 31 };
     const object_signer = signing.SignerIdentity{
         .label = "platform-storage",
-        .seed = [_]u8{0x81} ** 32,
+        .seed = signing.seedFromByte(0x81),
     };
     const user_signer = signing.SignerIdentity{
         .label = "platform-user",
-        .seed = [_]u8{0x82} ** 32,
+        .seed = signing.seedFromByte(0x82),
     };
     const device_signer = signing.SignerIdentity{
         .label = "platform-device",
-        .seed = [_]u8{0x83} ** 32,
+        .seed = signing.seedFromByte(0x83),
     };
 
     var runtime = task_runtime.Runtime.init();
@@ -459,9 +461,9 @@ test "native ux records task workspace pairing review and recovery flows" {
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 4_000,
-            .memory_bytes = 256 * 1024,
+            .memory_bytes = units.kibibytes(256),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 8 * 1024,
+            .shared_memory_bytes = units.kibibytes(8),
             .background_allowed = false,
         },
         .local_only = true,
@@ -503,7 +505,7 @@ test "native ux renders structured permission review decisions" {
         true,
         400,
     );
-    var buffer: [384]u8 = undefined;
+    var buffer: [REVIEW_FLOW_TEST_BUFFER_BYTES]u8 = undefined;
     const rendered = try renderReviewFlowToBuffer(&buffer, flow);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "bundle=app.notes") != null);

@@ -74,6 +74,6 @@ pub fn mmioWindowDescriptor(window: device_broker.MmioWindow) abi.DeviceMmioWind
         .base = window.base,
         .length = window.length,
         .flags = flags,
-        ._reserved = [_]u8{0} ** 6,
+        ._reserved = [_]u8{0} ** abi.DEVICE_MMIO_WINDOW_RESERVED_BYTES,
     };
 }

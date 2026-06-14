@@ -1,13 +1,27 @@
 const std = @import("std");
+const ascii = @import("../kernel/utils/ascii.zig");
+const hex = @import("../native/core/hex.zig");
+const manifest = @import("../native/policy/manifest.zig");
+const units = @import("../native/core/units.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const containsAsciiIgnoreCase = ascii.containsIgnoreCase;
 
-const max_release_metadata_bytes: usize = 16 * 1024 * 1024;
-const max_artifact_bytes: usize = 1024 * 1024 * 1024;
-const sha256_hex_len: usize = 64;
-const ed25519_public_key_hex_len: usize = Ed25519.PublicKey.encoded_length * 2;
-const ml_dsa65_public_key_hex_len: usize = 1952 * 2;
+const max_release_metadata_bytes: usize = units.mebibytes(16);
+const max_artifact_bytes: usize = units.gibibytes(1);
+const stdout_buffer_bytes: usize = units.kibibytes(1);
+const revoked_generation_key_buffer_bytes: usize = 128;
+const sha256_hex_len: usize = hex.encodedLen(Sha256.digest_length);
+const ed25519_public_key_hex_len: usize = hex.encodedLen(Ed25519.PublicKey.encoded_length);
+const ml_dsa65_public_key_hex_len: usize = hex.encodedLen(manifest.ML_DSA65_PUBLIC_KEY_BYTES);
+const release_key_algorithm_ed25519 = "ed25519";
+const release_key_algorithm_ml_dsa65 = "ml-dsa-65";
+const release_key_algorithm_ml_dsa65_fips204 = "ml-dsa-65-fips204";
+const release_key_encoding_ed25519 = "hex-ed25519-raw";
+const release_key_encoding_ml_dsa65 = "hex-ml-dsa-65-raw";
+const fips_204_standard = "FIPS 204";
+const fips_validation_text = "validated";
 
 pub const VerifyOptions = struct {
     require_public_release: bool = true,
@@ -73,7 +87,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
 
-    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_buffer: [stdout_buffer_bytes]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     try stdout_writer.interface.print(
         "Release verification OK: {d} artifacts, {d} DSSE envelopes, {d} signatures, {d} PQC signatures, {d} SLSA subjects, {d} measurements, {d} reproducible digests\n",
@@ -91,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn printUsage(io: std.Io) !void {
-    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_buffer: [stdout_buffer_bytes]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     try stdout_writer.interface.print(
         \\usage:
@@ -421,17 +435,17 @@ fn releaseKeyForId(allocator: std.mem.Allocator, keyring: std.json.Value, key_id
         const encoding = try stringField(key_value, "public_key_encoding");
         const public_key_hex = try stringField(key_value, "public_key");
         var public_key: [Ed25519.PublicKey.encoded_length]u8 = [_]u8{0} ** Ed25519.PublicKey.encoded_length;
-        if (std.mem.eql(u8, algorithm, "ed25519")) {
-            if (!std.mem.eql(u8, encoding, "hex-ed25519-raw")) return error.UnsupportedReleaseKeyEncoding;
-            public_key = try decodeFixedHex(Ed25519.PublicKey.encoded_length, public_key_hex);
+        if (std.mem.eql(u8, algorithm, release_key_algorithm_ed25519)) {
+            if (!std.mem.eql(u8, encoding, release_key_encoding_ed25519)) return error.UnsupportedReleaseKeyEncoding;
+            public_key = try hex.decodeFixed(Ed25519.PublicKey.encoded_length, public_key_hex);
         } else if (isMlDsa65Algorithm(algorithm)) {
-            if (!std.mem.eql(u8, encoding, "hex-ml-dsa-65-raw")) return error.UnsupportedReleaseKeyEncoding;
+            if (!std.mem.eql(u8, encoding, release_key_encoding_ml_dsa65)) return error.UnsupportedReleaseKeyEncoding;
             if (public_key_hex.len != ml_dsa65_public_key_hex_len) return error.InvalidMlDsaPublicKeyLength;
-            if (!isHexText(public_key_hex)) return error.InvalidHexDigit;
-            if (!std.mem.eql(u8, try stringField(key_value, "fips_standard"), "FIPS 204")) {
+            if (!hex.isText(public_key_hex)) return error.InvalidHexDigit;
+            if (!std.mem.eql(u8, try stringField(key_value, "fips_standard"), fips_204_standard)) {
                 return error.ReleaseKeyMissingFipsValidation;
             }
-            if (!containsAsciiIgnoreCase(try stringField(key_value, "fips_validation"), "validated")) {
+            if (!containsAsciiIgnoreCase(try stringField(key_value, "fips_validation"), fips_validation_text)) {
                 return error.ReleaseKeyMissingFipsValidation;
             }
             if (!((try boolField(key_value, "fips_140_validated_module")) orelse false)) {
@@ -457,7 +471,7 @@ fn releaseKeyForId(allocator: std.mem.Allocator, keyring: std.json.Value, key_id
 }
 
 fn verifyReleaseSignature(key: ReleaseKey, signature_bytes: []const u8, message: []const u8) !void {
-    if (std.mem.eql(u8, key.algorithm, "ed25519")) {
+    if (std.mem.eql(u8, key.algorithm, release_key_algorithm_ed25519)) {
         if (signature_bytes.len != Ed25519.Signature.encoded_length) return error.InvalidEd25519SignatureLength;
         try verifyEd25519(key.public_key, signature_bytes[0..Ed25519.Signature.encoded_length].*, message);
         return;
@@ -491,7 +505,7 @@ fn revokedGenerationContains(root: std.json.Value, key_id: []const u8, generatio
     const revoked_generations = try arrayField(root, "revoked_generations");
     for (revoked_generations) |entry| switch (entry) {
         .string => |text| {
-            var buffer: [128]u8 = undefined;
+            var buffer: [revoked_generation_key_buffer_bytes]u8 = undefined;
             const expected = try std.fmt.bufPrint(&buffer, "{s}:{d}", .{ key_id, generation });
             if (std.mem.eql(u8, text, expected)) return true;
         },
@@ -552,20 +566,9 @@ fn sha256HexAlloc(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {
 }
 
 fn hexAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
-    const output = try allocator.alloc(u8, bytes.len * 2);
-    _ = encodeHex(bytes, output);
+    const output = try allocator.alloc(u8, hex.encodedLen(bytes.len));
+    _ = try hex.encodeLower(bytes, output);
     return output;
-}
-
-fn encodeHex(bytes: []const u8, output: []u8) []const u8 {
-    const digits = "0123456789abcdef";
-    var cursor: usize = 0;
-    for (bytes) |byte| {
-        output[cursor] = digits[byte >> 4];
-        output[cursor + 1] = digits[byte & 0x0f];
-        cursor += 2;
-    }
-    return output[0..cursor];
 }
 
 fn decodeBase64Alloc(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
@@ -581,28 +584,9 @@ fn encodeBase64Alloc(allocator: std.mem.Allocator, bytes: []const u8) ![]const u
     return std.base64.standard.Encoder.encode(output, bytes);
 }
 
-fn decodeFixedHex(comptime len: usize, hex: []const u8) ![len]u8 {
-    if (hex.len != len * 2) return error.InvalidHexLength;
-    var result: [len]u8 = undefined;
-    var index: usize = 0;
-    while (index < len) : (index += 1) {
-        const high = hexValue(hex[index * 2]) orelse return error.InvalidHexDigit;
-        const low = hexValue(hex[index * 2 + 1]) orelse return error.InvalidHexDigit;
-        result[index] = (high << 4) | low;
-    }
-    return result;
-}
-
 fn isSha256Hex(value: []const u8) bool {
     if (value.len != sha256_hex_len) return false;
-    return isHexText(value);
-}
-
-fn hexValue(byte: u8) ?u8 {
-    if (byte >= '0' and byte <= '9') return byte - '0';
-    if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10;
-    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
-    return null;
+    return hex.isText(value);
 }
 
 fn validateRelativeArtifactPath(path: []const u8) !void {
@@ -622,15 +606,8 @@ fn containsTrustBoundary(value: []const u8) bool {
 }
 
 fn isMlDsa65Algorithm(value: []const u8) bool {
-    return std.mem.eql(u8, value, "ml-dsa-65") or
-        std.mem.eql(u8, value, "ml-dsa-65-fips204");
-}
-
-fn isHexText(value: []const u8) bool {
-    for (value) |byte| {
-        if (hexValue(byte) == null) return false;
-    }
-    return true;
+    return std.mem.eql(u8, value, release_key_algorithm_ml_dsa65) or
+        std.mem.eql(u8, value, release_key_algorithm_ml_dsa65_fips204);
 }
 
 fn stringValueArrayContainsSubstring(values: []std.json.Value, needle: []const u8) bool {
@@ -638,23 +615,6 @@ fn stringValueArrayContainsSubstring(values: []std.json.Value, needle: []const u
         .string => |text| if (containsAsciiIgnoreCase(text, needle)) return true,
         else => {},
     };
-    return false;
-}
-
-fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
-    var offset: usize = 0;
-    while (offset + needle.len <= haystack.len) : (offset += 1) {
-        var matched = true;
-        for (needle, 0..) |needle_byte, index| {
-            if (std.ascii.toLower(haystack[offset + index]) != std.ascii.toLower(needle_byte)) {
-                matched = false;
-                break;
-            }
-        }
-        if (matched) return true;
-    }
     return false;
 }
 

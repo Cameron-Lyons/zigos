@@ -3,6 +3,39 @@ const vga = @import("vga.zig");
 
 const CONFIG_ADDRESS = 0xCF8;
 const CONFIG_DATA = 0xCFC;
+const CONFIG_ADDRESS_ENABLE: u32 = 0x8000_0000;
+const CONFIG_BUS_SHIFT = 16;
+const CONFIG_DEVICE_SHIFT = 11;
+const CONFIG_FUNCTION_SHIFT = 8;
+const CONFIG_DWORD_ALIGNMENT_MASK: u8 = 0xFC;
+
+const PCI_MAX_BUS_COUNT: u16 = 256;
+const PCI_MAX_DEVICE_COUNT: u8 = 32;
+const PCI_MAX_FUNCTION_COUNT: u8 = 8;
+const PCI_VENDOR_DEVICE_OFFSET: u8 = 0x00;
+const PCI_CLASS_INFO_OFFSET: u8 = 0x08;
+const PCI_HEADER_TYPE_OFFSET: u8 = 0x0E;
+const PCI_BAR0_OFFSET: u8 = 0x10;
+const PCI_BAR1_OFFSET: u8 = 0x14;
+const PCI_BAR2_OFFSET: u8 = 0x18;
+const PCI_BAR3_OFFSET: u8 = 0x1C;
+const PCI_BAR4_OFFSET: u8 = 0x20;
+const PCI_BAR5_OFFSET: u8 = 0x24;
+
+const PCI_ABSENT_VENDOR_ID: u16 = 0xFFFF;
+const PCI_MULTI_FUNCTION_FLAG: u8 = 0x80;
+const PCI_U8_MASK: u32 = 0xFF;
+const PCI_U16_MASK: u32 = 0xFFFF;
+const BITS_PER_BYTE: u5 = 8;
+const U16_HIGH_BYTE_SHIFT = 8;
+const PCI_DEVICE_ID_SHIFT = 16;
+const PCI_CLASS_CODE_SHIFT = 24;
+const PCI_SUBCLASS_SHIFT = 16;
+const PCI_PROG_IF_SHIFT = 8;
+const STABLE_VENDOR_ID_SHIFT = 32;
+const STABLE_DEVICE_ID_SHIFT = 16;
+const STABLE_BUS_SHIFT = 8;
+const STABLE_DEVICE_SHIFT = 3;
 
 pub const PCIDevice = struct {
     bus: u8,
@@ -31,38 +64,34 @@ pub const PCI_PROG_IF_XHCI: u8 = 0x30;
 pub const PCI_VENDOR_INTEL: u16 = 0x8086;
 pub const PCI_DEVICE_INTEL_I225_LM: u16 = 0x15F2;
 
-pub fn readConfig(bus: u8, device: u8, func: u8, offset: u8) u32 {
-    const address = @as(u32, 0x80000000) |
-        (@as(u32, bus) << 16) |
-        (@as(u32, device) << 11) |
-        (@as(u32, func) << 8) |
-        (@as(u32, offset) & 0xFC);
+fn configAddress(bus: u8, device: u8, func: u8, offset: u8) u32 {
+    return CONFIG_ADDRESS_ENABLE |
+        (@as(u32, bus) << CONFIG_BUS_SHIFT) |
+        (@as(u32, device) << CONFIG_DEVICE_SHIFT) |
+        (@as(u32, func) << CONFIG_FUNCTION_SHIFT) |
+        (@as(u32, offset) & CONFIG_DWORD_ALIGNMENT_MASK);
+}
 
-    io.outl(CONFIG_ADDRESS, address);
+pub fn readConfig(bus: u8, device: u8, func: u8, offset: u8) u32 {
+    io.outl(CONFIG_ADDRESS, configAddress(bus, device, func, offset));
     return io.inl(CONFIG_DATA);
 }
 
 pub fn writeConfig(bus: u8, device: u8, func: u8, offset: u8, value: u32) void {
-    const address = @as(u32, 0x80000000) |
-        (@as(u32, bus) << 16) |
-        (@as(u32, device) << 11) |
-        (@as(u32, func) << 8) |
-        (@as(u32, offset) & 0xFC);
-
-    io.outl(CONFIG_ADDRESS, address);
+    io.outl(CONFIG_ADDRESS, configAddress(bus, device, func, offset));
     io.outl(CONFIG_DATA, value);
 }
 
 pub fn checkDevice(bus: u8, device: u8, func: u8) ?PCIDevice {
-    const vendor_device = readConfig(bus, device, func, 0x00);
-    const vendor_id: u16 = @intCast(vendor_device & 0xFFFF);
+    const vendor_device = readConfig(bus, device, func, PCI_VENDOR_DEVICE_OFFSET);
+    const vendor_id: u16 = @intCast(vendor_device & PCI_U16_MASK);
 
-    if (vendor_id == 0xFFFF) {
+    if (vendor_id == PCI_ABSENT_VENDOR_ID) {
         return null;
     }
 
-    const device_id: u16 = @intCast((vendor_device >> 16) & 0xFFFF);
-    const class_info = readConfig(bus, device, func, 0x08);
+    const device_id: u16 = @intCast((vendor_device >> PCI_DEVICE_ID_SHIFT) & PCI_U16_MASK);
+    const class_info = readConfig(bus, device, func, PCI_CLASS_INFO_OFFSET);
 
     const pci_device = PCIDevice{
         .bus = bus,
@@ -70,96 +99,102 @@ pub fn checkDevice(bus: u8, device: u8, func: u8) ?PCIDevice {
         .function = func,
         .vendor_id = vendor_id,
         .device_id = device_id,
-        .class_code = @intCast((class_info >> 24) & 0xFF),
-        .subclass = @intCast((class_info >> 16) & 0xFF),
-        .prog_if = @intCast((class_info >> 8) & 0xFF),
-        .bar0 = readConfig(bus, device, func, 0x10),
-        .bar1 = readConfig(bus, device, func, 0x14),
-        .bar2 = readConfig(bus, device, func, 0x18),
-        .bar3 = readConfig(bus, device, func, 0x1C),
-        .bar4 = readConfig(bus, device, func, 0x20),
-        .bar5 = readConfig(bus, device, func, 0x24),
+        .class_code = @intCast((class_info >> PCI_CLASS_CODE_SHIFT) & PCI_U8_MASK),
+        .subclass = @intCast((class_info >> PCI_SUBCLASS_SHIFT) & PCI_U8_MASK),
+        .prog_if = @intCast((class_info >> PCI_PROG_IF_SHIFT) & PCI_U8_MASK),
+        .bar0 = readConfig(bus, device, func, PCI_BAR0_OFFSET),
+        .bar1 = readConfig(bus, device, func, PCI_BAR1_OFFSET),
+        .bar2 = readConfig(bus, device, func, PCI_BAR2_OFFSET),
+        .bar3 = readConfig(bus, device, func, PCI_BAR3_OFFSET),
+        .bar4 = readConfig(bus, device, func, PCI_BAR4_OFFSET),
+        .bar5 = readConfig(bus, device, func, PCI_BAR5_OFFSET),
     };
 
     return pci_device;
 }
 
-pub fn findDevice(vendor_id: u16, device_id: u16) ?PCIDevice {
+const VendorDeviceQuery = struct {
+    vendor_id: u16,
+    device_id: u16,
+};
+
+const ClassQuery = struct {
+    class_code: u8,
+};
+
+const ClassSubclassProgIfQuery = struct {
+    class_code: u8,
+    subclass: u8,
+    prog_if: u8,
+};
+
+const StableIdQuery = struct {
+    device_id: u64,
+};
+
+fn matchesVendorDevice(query: VendorDeviceQuery, device_info: PCIDevice) bool {
+    return device_info.vendor_id == query.vendor_id and device_info.device_id == query.device_id;
+}
+
+fn matchesClassOnly(query: ClassQuery, device_info: PCIDevice) bool {
+    return device_info.class_code == query.class_code;
+}
+
+fn matchesClassSubclassProgIfQuery(query: ClassSubclassProgIfQuery, device_info: PCIDevice) bool {
+    return matchesClass(device_info, query.class_code, query.subclass, query.prog_if);
+}
+
+fn matchesStableId(query: StableIdQuery, device_info: PCIDevice) bool {
+    return stableDeviceId(device_info) == query.device_id;
+}
+
+fn deviceHasMultipleFunctions(bus: u8, device: u8) bool {
+    return (readConfigByte(bus, device, 0, PCI_HEADER_TYPE_OFFSET) & PCI_MULTI_FUNCTION_FLAG) != 0;
+}
+
+fn firstMatchingDevice(
+    comptime Query: type,
+    query: Query,
+    comptime matches: fn (Query, PCIDevice) bool,
+) ?PCIDevice {
     var bus: u16 = 0;
-    while (bus < 256) : (bus += 1) {
+    while (bus < PCI_MAX_BUS_COUNT) : (bus += 1) {
         var device: u8 = 0;
-        while (device < 32) : (device += 1) {
+        while (device < PCI_MAX_DEVICE_COUNT) : (device += 1) {
             var func: u8 = 0;
-            while (func < 8) : (func += 1) {
+            while (func < PCI_MAX_FUNCTION_COUNT) : (func += 1) {
                 if (checkDevice(@intCast(bus), device, func)) |pci_device| {
-                    if (pci_device.vendor_id == vendor_id and pci_device.device_id == device_id) {
+                    if (matches(query, pci_device)) {
                         return pci_device;
                     }
 
-                    if (func == 0) {
-                        const header_type = readConfig(@intCast(bus), device, 0, 0x0C);
-                        if ((header_type & 0x80) == 0) {
-                            break;
-                        }
-                    }
+                    if (func == 0 and !deviceHasMultipleFunctions(@intCast(bus), device)) break;
                 }
             }
         }
     }
 
     return null;
+}
+
+pub fn findDevice(vendor_id: u16, device_id: u16) ?PCIDevice {
+    return firstMatchingDevice(
+        VendorDeviceQuery,
+        .{ .vendor_id = vendor_id, .device_id = device_id },
+        matchesVendorDevice,
+    );
 }
 
 pub fn firstDeviceByClass(class_code: u8) ?PCIDevice {
-    var bus: u16 = 0;
-    while (bus < 256) : (bus += 1) {
-        var device: u8 = 0;
-        while (device < 32) : (device += 1) {
-            var func: u8 = 0;
-            while (func < 8) : (func += 1) {
-                if (checkDevice(@intCast(bus), device, func)) |pci_device| {
-                    if (pci_device.class_code == class_code) {
-                        return pci_device;
-                    }
-
-                    if (func == 0) {
-                        const header_type = readConfig(@intCast(bus), device, 0, 0x0C);
-                        if ((header_type & 0x80) == 0) {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return null;
+    return firstMatchingDevice(ClassQuery, .{ .class_code = class_code }, matchesClassOnly);
 }
 
 pub fn firstDeviceByClassSubclassProgIf(class_code: u8, subclass: u8, prog_if: u8) ?PCIDevice {
-    var bus: u16 = 0;
-    while (bus < 256) : (bus += 1) {
-        var device: u8 = 0;
-        while (device < 32) : (device += 1) {
-            var func: u8 = 0;
-            while (func < 8) : (func += 1) {
-                if (checkDevice(@intCast(bus), device, func)) |pci_device| {
-                    if (matchesClass(pci_device, class_code, subclass, prog_if)) {
-                        return pci_device;
-                    }
-
-                    if (func == 0) {
-                        const header_type = readConfig(@intCast(bus), device, 0, 0x0C);
-                        if ((header_type & 0x80) == 0) {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return null;
+    return firstMatchingDevice(
+        ClassSubclassProgIfQuery,
+        .{ .class_code = class_code, .subclass = subclass, .prog_if = prog_if },
+        matchesClassSubclassProgIfQuery,
+    );
 }
 
 pub fn firstNvmeController() ?PCIDevice {
@@ -193,46 +228,26 @@ pub fn isXhciController(device_info: PCIDevice) bool {
 }
 
 pub fn stableDeviceId(device_info: PCIDevice) u64 {
-    return (@as(u64, device_info.vendor_id) << 32) |
-        (@as(u64, device_info.device_id) << 16) |
-        (@as(u64, device_info.bus) << 8) |
-        (@as(u64, device_info.device) << 3) |
+    return (@as(u64, device_info.vendor_id) << STABLE_VENDOR_ID_SHIFT) |
+        (@as(u64, device_info.device_id) << STABLE_DEVICE_ID_SHIFT) |
+        (@as(u64, device_info.bus) << STABLE_BUS_SHIFT) |
+        (@as(u64, device_info.device) << STABLE_DEVICE_SHIFT) |
         @as(u64, device_info.function);
 }
 
 pub fn findDeviceByStableId(target_device_id: u64) ?PCIDevice {
-    var bus: u16 = 0;
-    while (bus < 256) : (bus += 1) {
-        var device: u8 = 0;
-        while (device < 32) : (device += 1) {
-            var func: u8 = 0;
-            while (func < 8) : (func += 1) {
-                if (checkDevice(@intCast(bus), device, func)) |pci_device| {
-                    if (stableDeviceId(pci_device) == target_device_id) return pci_device;
-
-                    if (func == 0) {
-                        const header_type = readConfig(@intCast(bus), device, 0, 0x0C);
-                        if ((header_type & 0x80) == 0) {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return null;
+    return firstMatchingDevice(StableIdQuery, .{ .device_id = target_device_id }, matchesStableId);
 }
 
 pub fn scanBus() void {
     vga.print("Scanning PCI bus...\n");
 
     var bus: u16 = 0;
-    while (bus < 256) : (bus += 1) {
+    while (bus < PCI_MAX_BUS_COUNT) : (bus += 1) {
         var device: u8 = 0;
-        while (device < 32) : (device += 1) {
+        while (device < PCI_MAX_DEVICE_COUNT) : (device += 1) {
             var func: u8 = 0;
-            while (func < 8) : (func += 1) {
+            while (func < PCI_MAX_FUNCTION_COUNT) : (func += 1) {
                 if (checkDevice(@intCast(bus), device, func)) |pci_device| {
                     vga.print("PCI ");
                     printHex8(@intCast(bus));
@@ -250,12 +265,7 @@ pub fn scanBus() void {
                     printHex8(pci_device.subclass);
                     vga.print("\n");
 
-                    if (func == 0) {
-                        const header_type = readConfig(@intCast(bus), device, 0, 0x0C) >> 16;
-                        if ((header_type & 0x80) == 0) {
-                            break;
-                        }
-                    }
+                    if (func == 0 and !deviceHasMultipleFunctions(@intCast(bus), device)) break;
                 }
             }
         }
@@ -270,19 +280,19 @@ fn printHex8(value: u8) void {
 }
 
 fn printHex16(value: u16) void {
-    printHex8(@intCast((value >> 8) & 0xFF));
-    printHex8(@intCast(value & 0xFF));
+    printHex8(@intCast((value >> U16_HIGH_BYTE_SHIFT) & PCI_U8_MASK));
+    printHex8(@intCast(value & PCI_U8_MASK));
 }
 
 pub fn readConfigByte(bus: u8, device: u8, func: u8, offset: u8) u8 {
     const data = readConfig(bus, device, func, offset);
-    const shift: u5 = @intCast((offset & 3) * 8);
+    const shift: u5 = @intCast((offset & 3) * BITS_PER_BYTE);
     return @as(u8, @truncate(data >> shift));
 }
 
 pub fn readConfigWord(bus: u8, device: u8, func: u8, offset: u8) u16 {
     const data = readConfig(bus, device, func, offset);
-    const shift: u5 = @intCast((offset & 2) * 8);
+    const shift: u5 = @intCast((offset & 2) * BITS_PER_BYTE);
     return @as(u16, @truncate(data >> shift));
 }
 
@@ -292,16 +302,16 @@ pub fn readConfigDword(bus: u8, device: u8, func: u8, offset: u8) u32 {
 
 pub fn writeConfigByte(bus: u8, device: u8, func: u8, offset: u8, value: u8) void {
     const old_data = readConfig(bus, device, func, offset);
-    const shift = (offset & 3) * 8;
-    const mask = ~(@as(u32, 0xFF) << shift);
+    const shift = (offset & 3) * BITS_PER_BYTE;
+    const mask = ~(PCI_U8_MASK << shift);
     const new_data = (old_data & mask) | (@as(u32, value) << shift);
     writeConfig(bus, device, func, offset, new_data);
 }
 
 pub fn writeConfigWord(bus: u8, device: u8, func: u8, offset: u8, value: u16) void {
     const old_data = readConfig(bus, device, func, offset);
-    const shift: u5 = @intCast((offset & 2) * 8);
-    const mask = ~(@as(u32, 0xFFFF) << shift);
+    const shift: u5 = @intCast((offset & 2) * BITS_PER_BYTE);
+    const mask = ~(PCI_U16_MASK << shift);
     const new_data = (old_data & mask) | (@as(u32, value) << shift);
     writeConfig(bus, device, func, offset, new_data);
 }

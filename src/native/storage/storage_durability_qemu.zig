@@ -38,7 +38,7 @@ const interrupted_object_id = object_store.ids.object(0xD00D_0002);
 const final_object_id = object_store.ids.object(0xD00D_0003);
 const signer = signing.SignerIdentity{
     .label = "zigos-storage-durability",
-    .seed = [_]u8{0xD4} ** 32,
+    .seed = signing.seedFromByte(0xD4),
 };
 
 const Phase = enum(u8) {

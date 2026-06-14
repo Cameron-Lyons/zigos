@@ -8,6 +8,7 @@ const Volume = storage_volume.Volume;
 const image_bytes = storage_volume.image_bytes;
 const saveToImage = storage_volume.saveToImage;
 const loadFromImage = storage_volume.loadFromImage;
+const DELTA_PAYLOAD_BUFFER_BYTES: usize = 32;
 
 test "storage volume exposes the first supported product capacity envelope" {
     const envelope = storage_volume.productCapacityEnvelope();
@@ -64,7 +65,7 @@ test "storage quota policy rejects writes above the first supported envelope" {
 
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x78} ** 32,
+        .seed = signing.seedFromByte(0x78),
     };
     const payload = "quota-observed-payload";
     _ = try store.putVersion(.{
@@ -87,7 +88,7 @@ test "storage volume image reloads the latest persisted state across slot genera
     var workspaces = workspace.Directory.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x71} ** 32,
+        .seed = signing.seedFromByte(0x71),
     };
     const first = try store.putVersion(.{
         .preferred_object_id = object_store.ids.object(900),
@@ -158,7 +159,7 @@ test "storage volume compacts segmented logs and reloads page-sized blob payload
     var workspaces = workspace.Directory.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x75} ** 32,
+        .seed = signing.seedFromByte(0x75),
     };
 
     var large_payload: [object_store.PAGE_SIZE_BYTES * 2 + 19]u8 = undefined;
@@ -176,7 +177,7 @@ test "storage volume compacts segmented logs and reloads page-sized blob payload
     var previous_version_id = object_store.ids.VersionId.zero;
     const compaction_mutations = @as(usize, storage_volume.testing.maxReplayLogSegments()) + 4;
     for (0..compaction_mutations) |index| {
-        var payload_buffer: [32]u8 = undefined;
+        var payload_buffer: [DELTA_PAYLOAD_BUFFER_BYTES]u8 = undefined;
         const payload = try std.fmt.bufPrint(&payload_buffer, "delta-{d}", .{index});
         const result = try store.putVersion(.{
             .preferred_object_id = object_store.ids.object(941),
@@ -212,7 +213,7 @@ test "storage volume persists workspace snapshot roots through entry mutations" 
     var workspaces = workspace.Directory.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x74} ** 32,
+        .seed = signing.seedFromByte(0x74),
     };
     const first = try store.putVersion(.{
         .preferred_object_id = object_store.ids.object(930),
@@ -271,7 +272,7 @@ test "storage volume instances keep image reload state isolated" {
 
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x73} ** 32,
+        .seed = signing.seedFromByte(0x73),
     };
 
     const first_store = try allocator.create(object_store.Store);
@@ -333,7 +334,7 @@ test "storage volume rejects corrupted slot payloads" {
     var workspaces = workspace.Directory.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x72} ** 32,
+        .seed = signing.seedFromByte(0x72),
     };
     _ = try store.putVersion(.{
         .preferred_object_id = object_store.ids.object(901),
@@ -358,7 +359,7 @@ test "storage volume rejects root log metadata that does not match replayed reco
     var workspaces = workspace.Directory.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x76} ** 32,
+        .seed = signing.seedFromByte(0x76),
     };
     _ = try store.putVersion(.{
         .preferred_object_id = object_store.ids.object(902),
@@ -387,7 +388,7 @@ test "storage volume rejects torn records referenced by a valid root" {
     var workspaces = workspace.Directory.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x77} ** 32,
+        .seed = signing.seedFromByte(0x77),
     };
     _ = try store.putVersion(.{
         .preferred_object_id = object_store.ids.object(903),
@@ -419,7 +420,7 @@ test "storage volume ignores power-loss data writes that happen before root comm
     var workspaces = workspace.Directory.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x7A} ** 32,
+        .seed = signing.seedFromByte(0x7A),
     };
     const first = try store.putVersion(.{
         .preferred_object_id = object_store.ids.object(906),
@@ -459,7 +460,7 @@ test "storage volume falls back when a partial-sector corruption hits only the n
     var workspaces = workspace.Directory.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x7B} ** 32,
+        .seed = signing.seedFromByte(0x7B),
     };
     const first = try store.putVersion(.{
         .preferred_object_id = object_store.ids.object(907),
@@ -498,7 +499,7 @@ test "storage volume gates long-running replay by compacting before record and s
     var workspaces = workspace.Directory.init();
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-key",
-        .seed = [_]u8{0x7C} ** 32,
+        .seed = signing.seedFromByte(0x7C),
     };
 
     var previous_version_id = object_store.ids.VersionId.zero;

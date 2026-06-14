@@ -8,9 +8,14 @@ const manifest = @import("../../native/policy/manifest.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const permission_review = @import("../../native/policy/permission_review.zig");
 const policy_mediation = @import("../../native/policy/policy_mediation.zig");
+const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const signing = @import("../../native/core/signing.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const workspace = @import("../../native/storage/workspace.zig");
+
+const REVIEW_SUMMARY_BUFFER_BYTES: usize = 4096;
+const COMPOSITOR_RENDER_BUFFER_BYTES: usize = 512;
+const DOCUMENT_KNOWLEDGE_BUFFER_BYTES: usize = 512;
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
     try std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null);
@@ -91,7 +96,7 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
         .publisher = "zigos.spec",
         .requested_permissions = &requests,
         .signature = .{
-            .format = "ed25519",
+            .format = manifest.SIGNATURE_FORMAT_ED25519,
             .signer = "zigos-spec-trip",
         },
     };
@@ -115,7 +120,7 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
     try std.testing.expectEqual(@as(?u64, 80), grants[1].expires_at_ticks);
 
     var review_session = permission_review.initSession(app_task.id, &bundle, &decisions);
-    var summary_buffer: [4096]u8 = undefined;
+    var summary_buffer: [REVIEW_SUMMARY_BUFFER_BYTES]u8 = undefined;
     const rendered_summary = try permission_review.renderToBuffer(&summary_buffer, &review_session, &bundle);
     try expectContains(rendered_summary, "Permission review for Trip Planner [app.trip]");
     try expectContains(rendered_summary, "requested lease: 400 ticks");
@@ -128,7 +133,7 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
     const window = try session.beginPermissionReview(reviewer.id, app_task, bundle);
     try std.testing.expectEqual(compositor_session.ViewType.app_panel, window.view_type);
 
-    var ui_buffer: [512]u8 = undefined;
+    var ui_buffer: [COMPOSITOR_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered_window = try compositor_session.renderWindowToBuffer(&ui_buffer, window);
     try expectContains(rendered_window, "type=app_panel");
     try expectContains(rendered_window, "title=Trip Planner permission review");
@@ -177,7 +182,7 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
     try expectContains(ledger.latestKind(.capability_grant).?.detailSlice(), "Permission receipt");
     try expectContains(ledger.latestKind(.capability_grant).?.detailSlice(), "data leaves: sync object workspace://trip/documents/plan.md with trusted-devices");
 
-    var knowledge_buffer: [512]u8 = undefined;
+    var knowledge_buffer: [DOCUMENT_KNOWLEDGE_BUFFER_BYTES]u8 = undefined;
     const knowledge = try ledger.renderAppDocumentKnowledgeToBuffer(&knowledge_buffer, app_task.id, "workspace://trip/documents/plan.md");
     try expectContains(knowledge, "knows=yes");
     try expectContains(knowledge, "active_grants=1");
@@ -267,7 +272,7 @@ pub fn taskViewsAndNativeComponentsStayExplicit() !void {
     try std.testing.expectEqual(compositor_session.ViewType.workspace_view, workspace_window.view_type);
     try std.testing.expectEqual(compositor_session.ViewType.full_screen_task_view, fullscreen_window.view_type);
 
-    var render_buffer: [512]u8 = undefined;
+    var render_buffer: [COMPOSITOR_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered_document = try compositor_session.renderWindowToBuffer(&render_buffer, document_window);
     try expectContains(rendered_document, "type=document_view");
     try expectContains(rendered_document, "workspace=91");
@@ -311,7 +316,7 @@ pub fn thermalPowerAndAppUpdatesStayExplicit() !void {
     const interactive = scheduler.plan(.{
         .class = .foreground_interactive,
         .wants_gpu = true,
-        .shared_memory_bytes = 4096,
+        .shared_memory_bytes = shared_memory.PAGE_SIZE,
     });
     try std.testing.expect(!interactive.delayed);
     try std.testing.expect(interactive.degraded);
@@ -338,7 +343,7 @@ pub fn thermalPowerAndAppUpdatesStayExplicit() !void {
     const media_export = scheduler.plan(.{
         .class = .media_export,
         .wants_media_engine = true,
-        .shared_memory_bytes = 4096,
+        .shared_memory_bytes = shared_memory.PAGE_SIZE,
     });
     try std.testing.expect(!media_export.delayed);
     try std.testing.expect(media_export.degraded);

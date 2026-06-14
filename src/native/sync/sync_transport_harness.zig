@@ -1,6 +1,7 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const hash_seeds = @import("../core/hash_seeds.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
@@ -31,7 +32,7 @@ pub const EncryptedPacket = struct {
     target_device: principal.PrincipalId,
     ciphertext_len: usize,
     ciphertext: [MAX_PACKET_BYTES]u8,
-    payload_digest: [32]u8,
+    payload_digest: crypto_hash.Digest,
     encrypted: bool,
     egress_allowed: bool,
 
@@ -42,7 +43,7 @@ pub const EncryptedPacket = struct {
 
 pub const SignedEncryptedFrame = struct {
     packet: EncryptedPacket,
-    packet_digest: [32]u8,
+    packet_digest: crypto_hash.Digest,
     signature: manifest.Signature,
 };
 
@@ -202,13 +203,18 @@ fn relayPacketSessionKey(packet: EncryptedPacket) u64 {
 }
 
 fn relaySessionKey(session_id: u64, source_device: principal.PrincipalId, target_device: principal.PrincipalId) u64 {
-    var bytes: [26]u8 = undefined;
-    std.mem.writeInt(u64, bytes[0..8], session_id, .little);
-    bytes[8] = @intFromEnum(source_device.kind);
-    std.mem.writeInt(u64, bytes[9..17], source_device.serial, .little);
-    bytes[17] = @intFromEnum(target_device.kind);
-    std.mem.writeInt(u64, bytes[18..26], target_device.serial, .little);
-    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(0x5A47_5245_4C41_59, &bytes));
+    const session_id_offset = 0;
+    const source_offset = session_id_offset + @sizeOf(u64);
+    const target_offset = source_offset + principal.PrincipalId.key_bytes;
+    const relay_session_key_bytes = target_offset + principal.PrincipalId.key_bytes;
+
+    const source_bytes = source_device.keyBytes();
+    const target_bytes = target_device.keyBytes();
+    var bytes: [relay_session_key_bytes]u8 = undefined;
+    std.mem.writeInt(u64, bytes[session_id_offset..][0..@sizeOf(u64)], session_id, .little);
+    @memcpy(bytes[source_offset..][0..principal.PrincipalId.key_bytes], &source_bytes);
+    @memcpy(bytes[target_offset..][0..principal.PrincipalId.key_bytes], &target_bytes);
+    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(hash_seeds.sync_relay_session_key, &bytes));
 }
 
 pub const TransportSession = struct {
@@ -221,7 +227,7 @@ pub const TransportSession = struct {
     target_device: principal.PrincipalId,
     relay_domain_len: usize = 0,
     relay_domain: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
-    key: [32]u8,
+    key: crypto_hash.Digest,
     egress_decision: network_policy.EgressDecision,
 
     pub fn relayDomainSlice(self: *const TransportSession) []const u8 {
@@ -456,7 +462,7 @@ fn deriveSessionKey(
     source_device: principal.PrincipalId,
     target_device: principal.PrincipalId,
     relay_domain: []const u8,
-) [32]u8 {
+) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateEnum(&hasher, "transport", transport);
     crypto_hash.updateInt(&hasher, "policy", request.policy_id);
@@ -470,7 +476,7 @@ fn deriveSessionKey(
     return crypto_hash.finalize(&hasher);
 }
 
-fn digestPayload(session: *const TransportSession, plaintext: []const u8) [32]u8 {
+fn digestPayload(session: *const TransportSession, plaintext: []const u8) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateInt(&hasher, "session", session.id);
     crypto_hash.updateBytes(&hasher, "key", &session.key);
@@ -478,7 +484,7 @@ fn digestPayload(session: *const TransportSession, plaintext: []const u8) [32]u8
     return crypto_hash.finalize(&hasher);
 }
 
-fn packetDigest(packet: EncryptedPacket) [32]u8 {
+fn packetDigest(packet: EncryptedPacket) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateInt(&hasher, "session", packet.session_id);
     crypto_hash.updateEnum(&hasher, "transport", packet.transport);
@@ -494,9 +500,7 @@ fn packetDigest(packet: EncryptedPacket) [32]u8 {
 }
 
 fn updatePrincipal(hasher: *crypto_hash.Hasher, tag: []const u8, value: principal.PrincipalId) void {
-    var bytes: [9]u8 = undefined;
-    bytes[0] = @intFromEnum(value.kind);
-    std.mem.writeInt(u64, bytes[1..9], value.serial, .little);
+    const bytes = value.keyBytes();
     crypto_hash.updateBytes(hasher, tag, &bytes);
 }
 
@@ -620,7 +624,7 @@ test "booted overlay relay service rejects unauthorized relay and target changes
     const other_target = principal.PrincipalId{ .kind = .device, .serial = 32 };
     const signer_identity = signing.SignerIdentity{
         .label = "booted-overlay-relay",
-        .seed = [_]u8{0x42} ** 32,
+        .seed = signing.seedFromByte(0x42),
     };
 
     const relay_policy = try policies.create(.{
@@ -686,7 +690,7 @@ test "encrypted transport harness binds device sessions to attested identity and
     const source = principal.PrincipalId{ .kind = .device, .serial = 20 };
     const target = principal.PrincipalId{ .kind = .device, .serial = 21 };
     const other_target = principal.PrincipalId{ .kind = .device, .serial = 22 };
-    const pinned_digest = [_]u8{0xA5} ** 32;
+    const pinned_digest = crypto_hash.digestFromByte(0xA5);
     const local = try policies.create(.{
         .owner = owner,
         .label = "local-pinned",
@@ -775,8 +779,8 @@ test "emulated native transport denies service identity before packet transmissi
     const app = principal.PrincipalId{ .kind = .app, .serial = 6 };
     const source = principal.PrincipalId{ .kind = .device, .serial = 30 };
     const target = principal.PrincipalId{ .kind = .device, .serial = 31 };
-    const pinned_digest = [_]u8{0xC1} ** 32;
-    const wrong_digest = [_]u8{0xC2} ** 32;
+    const pinned_digest = crypto_hash.digestFromByte(0xC1);
+    const wrong_digest = crypto_hash.digestFromByte(0xC2);
 
     const overlay = try policies.create(.{
         .owner = owner,

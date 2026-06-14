@@ -27,6 +27,13 @@ const state_entry_path = "state/event-ledger";
 const event_entry_prefix = "events/";
 const persistent_header_magic: u32 = 0x454C4731;
 const permission_kind_none: u8 = 0xFF;
+const DENIAL_HELP_BUFFER_BYTES: usize = 256;
+const PERSISTENT_EVENT_RESERVED_BYTES: usize = 5;
+const PERSISTENT_EVENT_TAIL_RESERVED_BYTES: usize = 4;
+const persistent_event_flag_allowed: u8 = 1 << 0;
+const persistent_event_flag_user_approval_can_resolve: u8 = 1 << 1;
+const persistent_event_flag_retry_safe: u8 = 1 << 2;
+const persistent_event_flag_detail_protected: u8 = 1 << 3;
 
 const PersistentHeader = extern struct {
     magic: u32 = persistent_header_magic,
@@ -168,7 +175,7 @@ pub const Ledger = struct {
     owner: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
     state_signer: signing.SignerIdentity = .{
         .label = "",
-        .seed = [_]u8{0} ** 32,
+        .seed = signing.seedFromByte(0),
     },
     workspace_id: u64 = 0,
     loaded_existing_state: bool = false,
@@ -1024,14 +1031,14 @@ const PersistentEventRecord = extern struct {
     policy_label_len: u8 = 0,
     missing_capability_len: u8 = 0,
     detail_len: u16 = 0,
-    _reserved: [5]u8 = [_]u8{0} ** 5,
+    _reserved: [PERSISTENT_EVENT_RESERVED_BYTES]u8 = [_]u8{0} ** PERSISTENT_EVENT_RESERVED_BYTES,
     tick: u64 = 0,
     subject_serial: u64 = 0,
     task_id: u64 = 0,
     workspace_id: u64 = 0,
     related_id: u64 = 0,
     detail_code: u32 = 0,
-    _tail_reserved: [4]u8 = [_]u8{0} ** 4,
+    _tail_reserved: [PERSISTENT_EVENT_TAIL_RESERVED_BYTES]u8 = [_]u8{0} ** PERSISTENT_EVENT_TAIL_RESERVED_BYTES,
     policy_label: [MAX_PERSISTED_LABEL_BYTES]u8 = [_]u8{0} ** MAX_PERSISTED_LABEL_BYTES,
     missing_capability: [MAX_PERSISTED_LABEL_BYTES]u8 = [_]u8{0} ** MAX_PERSISTED_LABEL_BYTES,
     detail: [MAX_PERSISTED_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_PERSISTED_DETAIL_BYTES,
@@ -1057,10 +1064,10 @@ const PersistentEventRecord = extern struct {
             .missing_capability = event.missing_capability,
             .detail = event.detail,
         };
-        if (event.allowed) record.flags |= 1 << 0;
-        if (event.user_approval_can_resolve) record.flags |= 1 << 1;
-        if (event.retry_safe) record.flags |= 1 << 2;
-        if (event.detail_protected) record.flags |= 1 << 3;
+        if (event.allowed) record.flags |= persistent_event_flag_allowed;
+        if (event.user_approval_can_resolve) record.flags |= persistent_event_flag_user_approval_can_resolve;
+        if (event.retry_safe) record.flags |= persistent_event_flag_retry_safe;
+        if (event.detail_protected) record.flags |= persistent_event_flag_detail_protected;
         return record;
     }
 
@@ -1082,11 +1089,11 @@ const PersistentEventRecord = extern struct {
             null
         else
             (std.enums.fromInt(manifest.PermissionKind, self.permission_kind) orelse return error.CorruptState);
-        event.allowed = (self.flags & (1 << 0)) != 0;
+        event.allowed = (self.flags & persistent_event_flag_allowed) != 0;
         event.denial_reason = std.enums.fromInt(abi.DenialReason, self.denial_reason) orelse return error.CorruptState;
-        event.user_approval_can_resolve = (self.flags & (1 << 1)) != 0;
-        event.retry_safe = (self.flags & (1 << 2)) != 0;
-        event.detail_protected = (self.flags & (1 << 3)) != 0;
+        event.user_approval_can_resolve = (self.flags & persistent_event_flag_user_approval_can_resolve) != 0;
+        event.retry_safe = (self.flags & persistent_event_flag_retry_safe) != 0;
+        event.detail_protected = (self.flags & persistent_event_flag_detail_protected) != 0;
         event.policy_label_len = @min(@as(usize, self.policy_label_len), MAX_PERSISTED_LABEL_BYTES);
         event.missing_capability_len = @min(@as(usize, self.missing_capability_len), MAX_PERSISTED_LABEL_BYTES);
         event.detail_len = @min(@as(usize, self.detail_len), MAX_PERSISTED_DETAIL_BYTES);
@@ -1224,7 +1231,7 @@ fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_prot
                 yesNo(event.user_approval_can_resolve),
                 yesNo(event.retry_safe),
             });
-            var blocked_buffer: [256]u8 = undefined;
+            var blocked_buffer: [DENIAL_HELP_BUFFER_BYTES]u8 = undefined;
             const blocked = denial_explanation.renderUserHelpToBuffer(
                 &blocked_buffer,
                 "This app",

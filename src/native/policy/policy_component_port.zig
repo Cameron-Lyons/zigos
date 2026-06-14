@@ -4,6 +4,8 @@ const manifest = @import("manifest.zig");
 const manifest_fixtures = @import("manifest_fixtures.zig");
 const policy_mediation = @import("policy_mediation.zig");
 const request_header = @import("../core/request_header.zig");
+const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
 
 pub const Error = policy_mediation.Error || error{
     SubjectTaskRequired,
@@ -66,20 +68,24 @@ fn validateSubjectTask(header: abi.RequestHeader, task_id: u64) Error!void {
     try request_header.validateSubjectTask(header, task_id);
 }
 
-test "policy port validates headers and forwards apply manifest requests" {
-    var capability_table = @import("../kernel_api/capability.zig").CapabilityTable.init();
-    var runtime = @import("../task/task_runtime.zig").Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 2 },
+fn createPolicyPortTestTask(runtime: *task_runtime.Runtime, owner_serial: u64) !*task_runtime.TaskRecord {
+    return runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = owner_serial },
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
+            .shared_memory_bytes = units.kibibytes(1),
         },
         .local_only = true,
     });
+}
+
+test "policy port validates headers and forwards apply manifest requests" {
+    var capability_table = @import("../kernel_api/capability.zig").CapabilityTable.init();
+    var runtime = task_runtime.Runtime.init();
+    const task = try createPolicyPortTestTask(&runtime, 2);
     var mediator = policy_mediation.PolicyMediator.init(
         .{ .kind = .policy_authority, .serial = 1 },
         &capability_table,
@@ -101,12 +107,7 @@ test "policy port validates headers and forwards apply manifest requests" {
             .max_lease_ticks = 20,
         },
     };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.notes",
-        .display_name = "Notes",
-        .publisher = "zigos.dev",
-        .requested_permissions = &permissions,
-    };
+    const bundle = manifest_fixtures.basicNotesBundle(&permissions);
     const grants = [_]policy_mediation.UserGrant{
         .{
             .kind = .object_access,
@@ -136,18 +137,8 @@ test "policy port validates headers and forwards apply manifest requests" {
 
 test "policy port rejects invalid manifests before mediation" {
     var capability_table = @import("../kernel_api/capability.zig").CapabilityTable.init();
-    var runtime = @import("../task/task_runtime.zig").Runtime.init();
-    const task = try runtime.createTask(.{
-        .owner = .{ .kind = .user, .serial = 3 },
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
-            .endpoint_slots = 4,
-            .shared_memory_bytes = 1024,
-        },
-        .local_only = true,
-    });
+    var runtime = task_runtime.Runtime.init();
+    const task = try createPolicyPortTestTask(&runtime, 3);
     var mediator = policy_mediation.PolicyMediator.init(
         .{ .kind = .policy_authority, .serial = 1 },
         &capability_table,

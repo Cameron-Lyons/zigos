@@ -7,6 +7,8 @@ const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 
+const addMeasuredArtifact = measured_boot.addMeasuredArtifact;
+
 pub const MAX_REMOTE_PARTY_BYTES: usize = 64;
 pub const MAX_NONCE_BYTES: usize = 32;
 pub const MAX_ROOT_LABEL_BYTES: usize = 48;
@@ -208,7 +210,7 @@ pub const Statement = struct {
     root_key_id_len: usize,
     root_key_id: [MAX_ROOT_KEY_ID_BYTES]u8,
     root_key_generation: u64,
-    root_digest: [32]u8,
+    root_digest: crypto_hash.Digest,
     root_provenance: measured_boot.RootProvenance,
     manifest_verified: bool,
     signature: manifest.Signature,
@@ -480,7 +482,7 @@ fn isBackedRootOrigin(origin: KeyOrigin) bool {
     return origin != .software;
 }
 
-fn statementDigest(statement: Statement) [32]u8 {
+fn statementDigest(statement: Statement) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateEnum(&hasher, "device-kind", statement.device.kind);
     crypto_hash.updateInt(&hasher, "device-serial", statement.device.serial);
@@ -500,17 +502,6 @@ fn statementDigest(statement: Statement) [32]u8 {
     crypto_hash.updateEnum(&hasher, "root-provenance", statement.root_provenance);
     crypto_hash.updateBool(&hasher, "manifest-verified", statement.manifest_verified);
     return crypto_hash.finalize(&hasher);
-}
-
-fn addMeasuredArtifact(
-    recorder: *measured_boot.Recorder,
-    artifact_manifest: *measured_boot.ArtifactManifest,
-    kind: measured_boot.MeasurementKind,
-    label: []const u8,
-    payload: []const u8,
-) !void {
-    try recorder.add(kind, label, payload);
-    try artifact_manifest.add(kind, label, payload);
 }
 
 fn verifiedTestBoot(generation: u64, root_provenance: measured_boot.RootProvenance) !measured_boot.BootRecord {
@@ -543,12 +534,12 @@ test "attestation service signs measured state and records user visible requests
     var service = Service.init(.{ .kind = .device, .serial = 33 });
     try std.testing.expectError(error.RootNotProvisioned, service.attest(boot, "attest.example", "nonce-1", .{
         .label = "device-attest",
-        .seed = [_]u8{0x51} ** 32,
+        .seed = signing.seedFromByte(0x51),
     }, true));
 
     const statement = try service.attest(boot, "", "nonce-1", .{
         .label = "device-attest",
-        .seed = [_]u8{0x51} ** 32,
+        .seed = signing.seedFromByte(0x51),
     }, true);
 
     try std.testing.expectEqual(@as(u64, 12), statement.generation);
@@ -573,12 +564,12 @@ test "attestation service does not count hidden requests and detects tampering" 
     var service = Service.init(.{ .kind = .device, .serial = 34 });
     try std.testing.expectError(error.UserVisibilityRequired, service.attest(boot, "audit.example", "nonce-2", .{
         .label = "device-attest",
-        .seed = [_]u8{0x54} ** 32,
+        .seed = signing.seedFromByte(0x54),
     }, false));
 
     const statement = try service.attest(boot, "", "nonce-2", .{
         .label = "device-attest",
-        .seed = [_]u8{0x54} ** 32,
+        .seed = signing.seedFromByte(0x54),
     }, false);
 
     try std.testing.expect(!statement.user_visible);
@@ -595,7 +586,7 @@ test "attestation service can use a provisioned hardware-backed root for visible
     const boot = try verifiedTestBoot(14, .bootloader_provided);
     const root_signer = signing.SignerIdentity{
         .label = "device-se",
-        .seed = [_]u8{0x55} ** 32,
+        .seed = signing.seedFromByte(0x55),
     };
     var root_provider = FakeSecureEnclaveRootProvider.init(root_signer);
     const provider = root_provider.provider();
@@ -665,11 +656,11 @@ test "attestation verifier rejects revoked root generations after rotation" {
     const boot = try verifiedTestBoot(18, .bootloader_provided);
     var v1_provider = FakeTpmRootProvider.initGeneration(.{
         .label = "device-tpm-v1",
-        .seed = [_]u8{0x5C} ** 32,
+        .seed = signing.seedFromByte(0x5C),
     }, 1);
     var v2_provider = FakeTpmRootProvider.initGeneration(.{
         .label = "device-tpm-v2",
-        .seed = [_]u8{0x5D} ** 32,
+        .seed = signing.seedFromByte(0x5D),
     }, 2);
     const v1_identity = try v1_provider.publicIdentity();
     const v2_identity = try v2_provider.publicIdentity();
@@ -744,7 +735,7 @@ test "attestation service rejects emulator measured roots for remote attestation
     var service = Service.init(.{ .kind = .device, .serial = 40 });
     var root_provider = FakeTpmRootProvider.init(.{
         .label = "device-tpm",
-        .seed = [_]u8{0x5A} ** 32,
+        .seed = signing.seedFromByte(0x5A),
     });
     try service.provisionRootProvider(root_provider.provider());
 
@@ -766,7 +757,7 @@ test "attestation service rejects provisioned remote attestations without a veri
     var service = Service.init(.{ .kind = .device, .serial = 36 });
     var root_provider = FakeSecureEnclaveRootProvider.init(.{
         .label = "device-se",
-        .seed = [_]u8{0x56} ** 32,
+        .seed = signing.seedFromByte(0x56),
     });
     try service.provisionRootProvider(root_provider.provider());
 
@@ -782,7 +773,7 @@ test "attestation service rejects software provisioned remote roots" {
     var service = Service.init(.{ .kind = .device, .serial = 37 });
     var software_provider = TestSoftwareRootProvider.init(.{
         .label = "software-root",
-        .seed = [_]u8{0x57} ** 32,
+        .seed = signing.seedFromByte(0x57),
     });
     const provider = software_provider.provider();
     try std.testing.expect(provider.testOnly());
@@ -794,7 +785,7 @@ test "attestation service gates fake hardware root providers to tests" {
     service.allow_test_root_providers = false;
     var root_provider = FakeTpmRootProvider.init(.{
         .label = "fake-tpm",
-        .seed = [_]u8{0x5B} ** 32,
+        .seed = signing.seedFromByte(0x5B),
     });
     const provider = root_provider.provider();
 
@@ -806,7 +797,7 @@ test "attestation verification rejects measured state and statement tampering" {
     const boot = try verifiedTestBoot(16, .bootloader_provided);
     const root_signer = signing.SignerIdentity{
         .label = "device-tpm",
-        .seed = [_]u8{0x58} ** 32,
+        .seed = signing.seedFromByte(0x58),
     };
     var root_provider = FakeTpmRootProvider.init(root_signer);
     const root_identity = try root_provider.publicIdentity();
@@ -901,7 +892,7 @@ test "attestation verification rejects measured state and statement tampering" {
     var wrong_key_service = Service.init(.{ .kind = .device, .serial = 39 });
     var wrong_key_provider = FakeTpmRootProvider.init(.{
         .label = "device-tpm",
-        .seed = [_]u8{0x59} ** 32,
+        .seed = signing.seedFromByte(0x59),
     });
     try wrong_key_service.provisionRootProvider(wrong_key_provider.provider());
     const wrong_key_statement = try wrong_key_service.attestWithProvisionedRoot(

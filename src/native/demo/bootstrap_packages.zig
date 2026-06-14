@@ -9,19 +9,19 @@ const store_source = "store:zigos";
 
 const viewer_signer = signing.SignerIdentity{
     .label = "zigos.viewer.bundle",
-    .seed = [_]u8{0x41} ** 32,
+    .seed = signing.seedFromByte(0x41),
 };
 const notes_signer = signing.SignerIdentity{
     .label = "zigos.notes.bundle",
-    .seed = [_]u8{0x42} ** 32,
+    .seed = signing.seedFromByte(0x42),
 };
 const sync_signer = signing.SignerIdentity{
     .label = "zigos.sync.bundle",
-    .seed = [_]u8{0x43} ** 32,
+    .seed = signing.seedFromByte(0x43),
 };
 const capture_signer = signing.SignerIdentity{
     .label = "zigos.capture.bundle",
-    .seed = [_]u8{0x44} ** 32,
+    .seed = signing.seedFromByte(0x44),
 };
 
 fn signDemoReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) manifest.Signature {
@@ -79,7 +79,7 @@ pub fn seed(
 
 fn trustDemoPublishers(port: *package_service.PackagePort, authority: package_service.AuthorityContext) void {
     const issuer = principal.PrincipalId{ .kind = .policy_authority, .serial = 1 };
-    _ = port.trustPolicyAuthorityRoot(authority, issuer, [_]u8{0x5A} ** 32) catch unreachable;
+    _ = port.trustPolicyAuthorityRoot(authority, issuer, signing.publicKeyFromByte(0x5A)) catch unreachable;
     _ = port.trustPublisher(authority, .{ .kind = .app, .serial = 41 }, issuer, "zigos.dev", signing.publicKey(viewer_signer) catch unreachable) catch unreachable;
     _ = port.trustPublisher(authority, .{ .kind = .app, .serial = 42 }, issuer, "zigos.dev", signing.publicKey(notes_signer) catch unreachable) catch unreachable;
     _ = port.trustPublisher(authority, .{ .kind = .app, .serial = 43 }, issuer, "zigos.dev", signing.publicKey(sync_signer) catch unreachable) catch unreachable;

@@ -1,3 +1,4 @@
+const crypto_hash = @import("../core/crypto_hash.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 
@@ -61,7 +62,7 @@ pub fn installNew(
     bundle: anytype,
     source: manifest.BundleManifest,
     data_schema_version: u32,
-    permission_digest: [32]u8,
+    permission_digest: crypto_hash.Digest,
 ) Error!void {
     const BundleType = storageType(@TypeOf(bundle));
     try validateInstallTarget(BundleType, source);
@@ -78,7 +79,7 @@ pub fn installRevision(
     bundle: anytype,
     source: manifest.BundleManifest,
     data_schema_version: u32,
-    permission_digest: [32]u8,
+    permission_digest: crypto_hash.Digest,
 ) Error!void {
     const BundleType = storageType(@TypeOf(bundle));
     try validateInstallTarget(BundleType, source);
@@ -214,7 +215,7 @@ fn writeRevision(
     revision: anytype,
     source: manifest.BundleManifest,
     data_schema_version: u32,
-    permission_digest: [32]u8,
+    permission_digest: crypto_hash.Digest,
     revision_id: u32,
 ) Error!void {
     revision.revision_id = revision_id;

@@ -15,10 +15,18 @@ pub const PROT_EXEC = 0x4;
 pub const PROT_USER = 0x8;
 
 const PAGE_SIZE: usize = 0x1000;
+const PAGE_SIZE_U32: u32 = 0x1000;
 const PAGE_MASK: usize = PAGE_SIZE - 1;
+const USER_POINTER_MAX: usize = 0xFFFF_FFFF;
+const KERNEL_PROTECTION_END: u32 = 0xFFFF_FFFF;
+const LAST_KERNEL_PAGE_START: u32 = 0xFFFF_F000;
 
 pub fn verifyUserPointer(ptr: usize, size: usize) bool {
-    if (ptr > 0xFFFFFFFF - size) {
+    if (size > USER_POINTER_MAX) {
+        return false;
+    }
+
+    if (ptr > USER_POINTER_MAX - size) {
         return false;
     }
 
@@ -164,12 +172,12 @@ fn restoreInterrupts(flags: u32) void {
 
 pub fn protectKernelMemory() void {
     var addr: u32 = KERNEL_BASE;
-    while (addr < 0xFFFFFFFF) : (addr += 0x1000) {
+    while (addr < KERNEL_PROTECTION_END) : (addr += PAGE_SIZE_U32) {
         if (paging.get_physical_address(addr)) |phys| {
             paging.mapPage(addr, phys, paging.PAGE_PRESENT | paging.PAGE_WRITABLE);
         }
 
-        if (addr == 0xFFFFF000) break;
+        if (addr == LAST_KERNEL_PAGE_START) break;
     }
 
     vga.print("Kernel memory protected\n");

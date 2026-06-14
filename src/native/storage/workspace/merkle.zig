@@ -1,9 +1,9 @@
 const crypto_hash = @import("../../core/crypto_hash.zig");
 
-pub const RootAddress = [32]u8;
+pub const RootAddress = crypto_hash.Digest;
 
 pub fn zeroRootAddress() RootAddress {
-    return [_]u8{0} ** 32;
+    return crypto_hash.zero_digest;
 }
 
 pub fn rootAddress(entries: anytype) RootAddress {

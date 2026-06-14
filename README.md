@@ -205,43 +205,24 @@ registry before they consume the kernel artifact.
 
 ## Build And Verification
 
-Useful build targets:
+The most common local gate is:
 
-| Command | What it does |
-| --- | --- |
-| `./scripts/zig.sh build userspace-images` | Builds freestanding userspace ELF images and the generated image archive. |
-| `./scripts/zig.sh build kernel` | Builds the default native-only kernel profile. |
-| `./scripts/zig.sh build kernel-zigos-native` | Builds the native bootstrap kernel profile. |
-| `./scripts/zig.sh build kernel-recovery` | Builds the freestanding recovery-mode kernel profile. |
-| `./scripts/zig.sh build kernel-benchmark` | Builds the benchmark kernel profile. |
-| `./scripts/zig.sh build native-store-image` | Builds or preserves `build/native-store.img`. |
-| `./scripts/zig.sh build iso` | Builds a bootable ISO at `build/os.iso`. |
-| `./scripts/zig.sh build clean` | Removes generated build outputs and Zig caches. |
-| `./scripts/zig.sh build -Dclean-dry-run=true clean` | Prints the cleanup set without deleting files. |
+```bash
+./scripts/zig.sh build verify
+```
 
-Useful verification targets:
+The most common build artifacts are:
 
-| Command | What it does |
-| --- | --- |
-| `./scripts/zig.sh build lint` | Runs Zig formatting, optional zlint, ShellCheck, and optional actionlint. |
-| `./scripts/zig.sh build host-tests` | Runs host-side native logic and userspace runtime tests. |
-| `./scripts/zig.sh build test-roots` | Checks that Zig files with tests are reachable from the build roots. |
-| `./scripts/zig.sh build prod-readiness` | Validates `spec/production_readiness.json`, secure-by-design release-gate coverage, and production-readiness source markers. |
-| `./scripts/zig.sh build hardware-proof-checker-test` | Exercises the NUC11TNKi5 hardware proof checker against synthetic pass/fail bundles. |
-| `./scripts/zig.sh build release-security-check` | Runs release-security fuzzing, unsafe-surface inventory, threat-model, crash-redaction, SBOM/provenance source, and disclosure source gates. |
-| `./scripts/zig.sh build release-sbom-provenance` | Builds release artifacts and emits `build/release-security/artifact-digests.sha256`, `artifact-measurements.json`, SPDX SBOM, in-toto/SLSA provenance, DSSE envelopes, keyring/revocation metadata, customer verifier policy, and disclosure dry-run output. |
-| `./scripts/zig.sh build reproducible-build-check` | Builds release artifacts twice in isolated tracked-workspace copies and compares artifact digests. |
-| `./scripts/zig.sh build verify-release-cli` | Builds `zig-out/bin/zigos-verify-release`, the customer verifier for downloaded release bundles. |
-| `./scripts/zig.sh build hardware-proof` | Validates the completed `build/hardware-proofs/nuc11tnki5` real-hardware proof bundle. |
-| `./scripts/zig.sh build release-security-gate` | Runs the public-release security gate: fast release-security checks, host/spec tests, reproducible builds, SBOM/provenance, QEMU security/fault proofs, and the real NUC hardware proof. |
-| `./scripts/zig.sh build spec-tests` | Runs the spec coverage gate and native spec tests. |
-| `./scripts/zig.sh build zigos-native-smoke-test` | Runs native QEMU smoke proofs, including tampered manifest, direct artifact tamper, and rollback-slot failure variants. |
-| `./scripts/zig.sh build driver-restart-qemu-test` | Proves userspace storage driver restart and rebinding without reboot. |
-| `./scripts/zig.sh build storage-durability-qemu-test` | Reuses one native-store image across forced reboots and proves storage recovery after an interrupted boot and one bad root slot. |
-| `./scripts/zig.sh build recovery-qemu-test` | Proves the recovery profile can perform break-glass repair operations. |
-| `./scripts/zig.sh build uefi-qemu-test` | Boots `build/os.iso` through OVMF as the UEFI preflight for the first hardware target. |
-| `./scripts/zig.sh build benchmark` | Runs the native benchmark suite and checks thresholds. |
-| `./scripts/zig.sh build verify` | Runs the CI-aligned local gate: lint, kernel build, host tests, spec tests, and production-readiness checks. |
+```bash
+./scripts/zig.sh build userspace-images
+./scripts/zig.sh build kernel
+./scripts/zig.sh build native-store-image
+./scripts/zig.sh build iso
+```
+
+The full target matrix lives in `CONTRIBUTING.md`, which is the source of truth
+for when to use focused checks such as `host-tests`, `spec-tests`,
+`release-security-check`, QEMU proofs, and release gates.
 
 Optional QEMU gates can be added to `verify`:
 

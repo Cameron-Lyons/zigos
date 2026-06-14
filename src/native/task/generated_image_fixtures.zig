@@ -1,5 +1,6 @@
 const std = @import("std");
 const archive = @import("userspace_archive");
+const crypto_hash = @import("../core/crypto_hash.zig");
 const elf_image_inspector = @import("elf_image_inspector.zig");
 const launch_helpers = @import("task_runtime_launch.zig");
 const task_runtime = @import("task_runtime_model.zig");
@@ -101,7 +102,7 @@ pub fn expectReaderRejectsInvalidGeneratedRecords() !void {
     try std.testing.expectError(error.InvalidElfHeader, validateArtifact(truncated));
 
     var stale_metadata = archive.artifacts[0];
-    stale_metadata.entry_point +%= 0x1000;
+    stale_metadata.entry_point +%= launch_helpers.SYNTHETIC_SEGMENT_ALIGNMENT;
     try std.testing.expectError(error.GeneratedImageMetadataMismatch, validateArtifact(stale_metadata));
 }
 
@@ -173,10 +174,10 @@ fn executableImagesEqual(
     return true;
 }
 
-fn rawSha256(bytes: []const u8) [32]u8 {
+fn rawSha256(bytes: []const u8) crypto_hash.Digest {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(bytes);
-    var digest: [32]u8 = undefined;
+    var digest: crypto_hash.Digest = undefined;
     hasher.final(&digest);
     return digest;
 }

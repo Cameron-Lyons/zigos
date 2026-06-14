@@ -1,12 +1,15 @@
 const std = @import("std");
+const hash_seeds = @import("../core/hash_seeds.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const capability = @import("../kernel_api/capability.zig");
 const device_broker = @import("../kernel_api/device_broker.zig");
 const manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
+const units = @import("../core/units.zig");
 
 pub const MAX_DRIVER_SERVICES: usize = 8;
+pub const MAX_SIGNER_BYTES: usize = 32;
 const DRIVER_INDEX_CAPACITY: usize = MAX_DRIVER_SERVICES * 2;
 
 pub const DeviceClass = enum(u8) {
@@ -30,6 +33,15 @@ pub const KernelDriverRole = enum(u8) {
 };
 
 pub const MAX_DMA_RANGES: usize = 4;
+const DEFAULT_NETWORK_DMA_WINDOW_BYTES: u64 = units.kibibytes(64);
+const DEFAULT_STORAGE_DMA_WINDOW_BYTES: u64 = units.kibibytes(128);
+const DEFAULT_USB_DMA_WINDOW_BYTES: u64 = units.mebibytes(2);
+const DEFAULT_GRAPHICS_DMA_WINDOW_BYTES: u64 = units.mebibytes(16);
+const DEFAULT_AUDIO_PRINT_DMA_WINDOW_BYTES: u64 = units.mebibytes(1);
+const DEFAULT_INPUT_DMA_WINDOW_BYTES: u64 = units.kibibytes(256);
+const DEFAULT_COMPOSITOR_DMA_WINDOW_BYTES: u64 = units.kibibytes(512);
+const DMA_TEST_PAGE_BASE: u64 = 0x1000;
+const DMA_TEST_PAGE_BYTES: u64 = 4096;
 
 pub const DmaProtection = enum(u8) {
     iommu_enforced,
@@ -60,7 +72,7 @@ pub const DriverRecord = struct {
     dma_range_count: usize,
     dma_ranges: [MAX_DMA_RANGES]DmaRange,
     signer_len: usize,
-    signer: [32]u8,
+    signer: [MAX_SIGNER_BYTES]u8,
 
     pub fn signerSlice(self: *const DriverRecord) []const u8 {
         return self.signer[0..self.signer_len];
@@ -306,7 +318,7 @@ pub const Directory = struct {
             .dma_range_count = 0,
             .dma_ranges = [_]DmaRange{zeroDmaRange()} ** MAX_DMA_RANGES,
             .signer_len = 0,
-            .signer = [_]u8{0} ** 32,
+            .signer = [_]u8{0} ** MAX_SIGNER_BYTES,
         };
         record.dma_range_count = defaultDmaRanges(record.dma_ranges[0..], request.device_class, request.device_id);
         writeSigner(&record, request.signer);
@@ -319,10 +331,12 @@ pub fn authorityTarget(device_id: u64) capability.CapabilityTarget {
 }
 
 fn driverBindingKey(device_class: DeviceClass, device_id: u64) u64 {
-    var bytes: [9]u8 = undefined;
+    const device_id_offset = @sizeOf(DeviceClass);
+    const driver_binding_key_bytes = device_id_offset + @sizeOf(u64);
+    var bytes: [driver_binding_key_bytes]u8 = undefined;
     bytes[0] = @intFromEnum(device_class);
-    std.mem.writeInt(u64, bytes[1..9], device_id, .little);
-    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(0x5A47_4452_5642_494E, &bytes));
+    std.mem.writeInt(u64, bytes[device_id_offset..][0..@sizeOf(u64)], device_id, .little);
+    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(hash_seeds.driver_binding_key, &bytes));
 }
 
 fn driverClassKey(device_class: DeviceClass) u64 {
@@ -485,13 +499,13 @@ fn defaultDmaRanges(dest: []DmaRange, device_class: DeviceClass, device_id: u64)
     dest[0] = .{
         .base = base,
         .length = switch (device_class) {
-            .network_adapter => 64 * 1024,
-            .storage_controller => 128 * 1024,
-            .usb_controller => 2 * 1024 * 1024,
-            .graphics_adapter => 16 * 1024 * 1024,
-            .audio_print_io => 1024 * 1024,
-            .input_device => 256 * 1024,
-            .compositor_policy => 512 * 1024,
+            .network_adapter => DEFAULT_NETWORK_DMA_WINDOW_BYTES,
+            .storage_controller => DEFAULT_STORAGE_DMA_WINDOW_BYTES,
+            .usb_controller => DEFAULT_USB_DMA_WINDOW_BYTES,
+            .graphics_adapter => DEFAULT_GRAPHICS_DMA_WINDOW_BYTES,
+            .audio_print_io => DEFAULT_AUDIO_PRINT_DMA_WINDOW_BYTES,
+            .input_device => DEFAULT_INPUT_DMA_WINDOW_BYTES,
+            .compositor_policy => DEFAULT_COMPOSITOR_DMA_WINDOW_BYTES,
         },
     };
     if (dest.len > 1 and (device_class == .network_adapter or device_class == .storage_controller)) {
@@ -522,7 +536,7 @@ fn zeroDriver() DriverRecord {
         .dma_range_count = 0,
         .dma_ranges = [_]DmaRange{zeroDmaRange()} ** MAX_DMA_RANGES,
         .signer_len = 0,
-        .signer = [_]u8{0} ** 32,
+        .signer = [_]u8{0} ** MAX_SIGNER_BYTES,
     };
 }
 
@@ -534,7 +548,7 @@ test "driver services require signed least-privilege device authority" {
         .display_name = "Network Driver",
         .publisher = "zigos.dev",
         .signature = .{
-            .format = "ed25519",
+            .format = manifest.SIGNATURE_FORMAT_ED25519,
             .signer = "zigos-driver-key",
         },
     };
@@ -562,7 +576,7 @@ test "driver services require signed least-privilege device authority" {
     try std.testing.expect(driver.dma_domain_id != 0);
     try std.testing.expectEqual(DmaProtection.iommu_enforced, driver.dma_protection);
     try std.testing.expect(driver.dma_range_count >= 1);
-    try std.testing.expect(driver.allowsDma(driver.dma_ranges[0].base, 4096));
+    try std.testing.expect(driver.allowsDma(driver.dma_ranges[0].base, DMA_TEST_PAGE_BYTES));
     try std.testing.expectEqual(BootstrapTransport.none, driver.bootstrap_transport);
     try std.testing.expect(directory.markRestarted(44));
     try std.testing.expectEqual(@as(u32, 2), driver.restart_generation);
@@ -632,8 +646,8 @@ test "driver directory indexes service binding and class lookups" {
 }
 
 test "driver dma ranges reject overflowing spans" {
-    const range = DmaRange{ .base = 0x1000, .length = 0x1000 };
-    try std.testing.expect(range.contains(0x1000, 0x1000));
+    const range = DmaRange{ .base = DMA_TEST_PAGE_BASE, .length = DMA_TEST_PAGE_BYTES };
+    try std.testing.expect(range.contains(DMA_TEST_PAGE_BASE, DMA_TEST_PAGE_BYTES));
     try std.testing.expect(!range.contains(std.math.maxInt(u64) - 7, 16));
     try std.testing.expect(!(DmaRange{ .base = std.math.maxInt(u64) - 7, .length = 16 }).contains(std.math.maxInt(u64) - 7, 8));
 }
@@ -845,7 +859,7 @@ test "driver services reject unsigned bundles and escalated device rights" {
         .display_name = "Storage Driver",
         .publisher = "zigos.dev",
         .signature = .{
-            .format = "ed25519",
+            .format = manifest.SIGNATURE_FORMAT_ED25519,
             .signer = "zigos-driver-key",
         },
     };
@@ -891,7 +905,7 @@ test "kernel bootstrap transport is only granted to supported driver classes" {
         .display_name = "Graphics Driver Runtime",
         .publisher = "zigos.spec",
         .signature = .{
-            .format = "ed25519",
+            .format = manifest.SIGNATURE_FORMAT_ED25519,
             .signer = "zigos-spec-driver",
         },
     };

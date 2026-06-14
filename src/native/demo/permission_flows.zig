@@ -8,6 +8,7 @@ const policy_mediation = @import("../policy/policy_mediation.zig");
 const review_component_port = @import("../policy/review_component_port.zig");
 const package_service = @import("../services/package_service.zig");
 const support = @import("../session/session_manager_support.zig");
+const units = @import("../core/units.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 
 const common = if (builtin.target.os.tag == .freestanding)
@@ -62,9 +63,9 @@ fn runViewerPermissionFlow(
             .owner = state.ids.session_user,
             .budget = .{
                 .cpu_time_ticks = 15_000,
-                .memory_bytes = 2 * 1024 * 1024,
+                .memory_bytes = units.mebibytes(2),
                 .endpoint_slots = 8,
-                .shared_memory_bytes = 64 * 1024,
+                .shared_memory_bytes = units.kibibytes(64),
                 .background_allowed = false,
             },
             .ui_surface_id = 2,
@@ -111,9 +112,9 @@ fn runNotesPermissionFlow(
             .owner = state.ids.session_user,
             .budget = .{
                 .cpu_time_ticks = 30_000,
-                .memory_bytes = 4 * 1024 * 1024,
+                .memory_bytes = units.mebibytes(4),
                 .endpoint_slots = 8,
-                .shared_memory_bytes = 128 * 1024,
+                .shared_memory_bytes = units.kibibytes(128),
                 .background_allowed = false,
             },
             .ui_surface_id = 3,
@@ -198,9 +199,9 @@ fn runSyncPermissionFlow(
             .owner = state.ids.session_user,
             .budget = .{
                 .cpu_time_ticks = 20_000,
-                .memory_bytes = 2 * 1024 * 1024,
+                .memory_bytes = units.mebibytes(2),
                 .endpoint_slots = 4,
-                .shared_memory_bytes = 64 * 1024,
+                .shared_memory_bytes = units.kibibytes(64),
                 .background_allowed = true,
             },
             .ui_surface_id = 4,
@@ -265,9 +266,9 @@ fn runCapturePermissionFlow(
             .owner = state.ids.session_user,
             .budget = .{
                 .cpu_time_ticks = 20_000,
-                .memory_bytes = 2 * 1024 * 1024,
+                .memory_bytes = units.mebibytes(2),
                 .endpoint_slots = 4,
-                .shared_memory_bytes = 64 * 1024,
+                .shared_memory_bytes = units.kibibytes(64),
                 .background_allowed = false,
             },
             .ui_surface_id = 5,

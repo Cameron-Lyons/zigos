@@ -11,9 +11,13 @@ const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const sync_service = @import("../sync/sync_service.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
 const supervisor_mod = @import("../session/supervisor.zig");
 
 const yesNo = native_util.yesNo;
+const TRANSITION_DETAIL_BUFFER_BYTES: usize = 160;
+const UI_PROBE_BUFFER_BYTES: usize = 320;
+const LEDGER_EXPORT_BUFFER_BYTES: usize = units.kibibytes(2);
 
 pub const CheckRequest = struct {
     core_service_ids: []const u64,
@@ -45,11 +49,12 @@ pub const UiProbe = struct {
 
 const boot_witness_entry_path = "state/boot-success";
 const boot_witness_magic: u32 = 0x42575431;
+const boot_witness_reserved_bytes: usize = 3;
 
 const BootWitness = extern struct {
     magic: u32 = boot_witness_magic,
     slot_index: u8 = 0,
-    _reserved: [3]u8 = [_]u8{0} ** 3,
+    _reserved: [boot_witness_reserved_bytes]u8 = [_]u8{0} ** boot_witness_reserved_bytes,
     activation_generation: u64 = 0,
     tick: u64 = 0,
 };
@@ -113,7 +118,7 @@ pub fn validatePendingActivation(
     const activation = try manager.finalizeActivation(evaluation.report, tick);
 
     if (ledger) |recording| {
-        var detail_buffer: [160]u8 = undefined;
+        var detail_buffer: [TRANSITION_DETAIL_BUFFER_BYTES]u8 = undefined;
         const detail = renderTransitionDetail(
             &detail_buffer,
             @as(usize, candidate_slot_index),
@@ -238,7 +243,7 @@ fn networkServiceHealthy(probe: ?NetworkProbe, require_probe: bool) bool {
 
 fn uiServiceHealthy(probe: ?UiProbe, require_probe: bool) bool {
     const check = probe orelse return !require_probe;
-    var buffer: [320]u8 = undefined;
+    var buffer: [UI_PROBE_BUFFER_BYTES]u8 = undefined;
     return check.session.probeVisibleWindow(&buffer);
 }
 
@@ -331,15 +336,15 @@ fn seedNetworkProbe(
     const target_device = principal.PrincipalId{ .kind = .device, .serial = 882 };
     const user_signer = signing.SignerIdentity{
         .label = "update-health-user",
-        .seed = [_]u8{0x51} ** 32,
+        .seed = signing.seedFromByte(0x51),
     };
     const source_signer = signing.SignerIdentity{
         .label = "update-health-source",
-        .seed = [_]u8{0x52} ** 32,
+        .seed = signing.seedFromByte(0x52),
     };
     const target_signer = signing.SignerIdentity{
         .label = "update-health-target",
-        .seed = [_]u8{0x53} ** 32,
+        .seed = signing.seedFromByte(0x53),
     };
 
     const authority_capability = try sync_service.mintEndpointConnectAuthority(capability_table, sync, 0, 1_000);
@@ -389,9 +394,9 @@ fn seedUiProbe(session: *compositor_session.Session) !UiProbe {
         .component_class = .service_component,
         .budget = .{
             .cpu_time_ticks = 1_000,
-            .memory_bytes = 64 * 1024,
+            .memory_bytes = units.kibibytes(64),
             .endpoint_slots = 2,
-            .shared_memory_bytes = 4 * 1024,
+            .shared_memory_bytes = units.kibibytes(4),
         },
         .ui_surface_id = 3,
         .initial_component = .{
@@ -411,15 +416,15 @@ test "update health validates boot core storage network and ui checks and record
     const owner = principal.PrincipalId{ .kind = .service, .serial = 70 };
     const state_signer = signing.SignerIdentity{
         .label = "update-health-state",
-        .seed = [_]u8{0x31} ** 32,
+        .seed = signing.seedFromByte(0x31),
     };
     const image_signer = signing.SignerIdentity{
         .label = "update-health-image",
-        .seed = [_]u8{0x32} ** 32,
+        .seed = signing.seedFromByte(0x32),
     };
     const object_signer = signing.SignerIdentity{
         .label = "update-health-object",
-        .seed = [_]u8{0x33} ** 32,
+        .seed = signing.seedFromByte(0x33),
     };
 
     var storage = storage_service.Service.initWithStore(1_001, 201, owner, &storage_checkpoint_store);
@@ -514,15 +519,15 @@ test "update health failures trigger rollback for each required post-activation 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 71 };
     const state_signer = signing.SignerIdentity{
         .label = "update-health-state-v2",
-        .seed = [_]u8{0x41} ** 32,
+        .seed = signing.seedFromByte(0x41),
     };
     const image_signer = signing.SignerIdentity{
         .label = "update-health-image-v2",
-        .seed = [_]u8{0x42} ** 32,
+        .seed = signing.seedFromByte(0x42),
     };
     const object_signer = signing.SignerIdentity{
         .label = "update-health-object-v2",
-        .seed = [_]u8{0x43} ** 32,
+        .seed = signing.seedFromByte(0x43),
     };
 
     var storage = storage_service.Service.initWithStore(1_002, 202, owner, &storage_checkpoint_store);
@@ -613,7 +618,7 @@ test "update health failures trigger rollback for each required post-activation 
     try std.testing.expect(manager.verifyActiveImage());
     try std.testing.expectEqual(@as(u64, 5), success.activation.rollback_generation);
 
-    var export_buffer: [2048]u8 = undefined;
+    var export_buffer: [LEDGER_EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try std.testing.expect(std.mem.indexOf(u8, exported, "failure=boot") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "failure=core_service") != null);

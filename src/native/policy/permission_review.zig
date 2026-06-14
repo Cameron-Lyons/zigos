@@ -5,8 +5,15 @@ const manifest = @import("manifest.zig");
 const manifest_fixtures = @import("manifest_fixtures.zig");
 const native_util = @import("../core/util.zig");
 const policy_mediation = @import("policy_mediation.zig");
+const units = @import("../core/units.zig");
 
 const yesNo = native_util.yesNo;
+const RIGHTS_SUMMARY_BUFFER_BYTES: usize = 160;
+const SCOPE_SUMMARY_BUFFER_BYTES: usize = 320;
+const EGRESS_INTENT_BUFFER_BYTES: usize = 180;
+const LEASE_SUMMARY_BUFFER_BYTES: usize = 96;
+const REVIEW_RENDER_BUFFER_BYTES: usize = units.kibibytes(2);
+const REVIEW_REQUEST_BUFFER_BYTES: usize = 512;
 
 pub const MAX_REVIEW_DECISIONS: usize = policy_mediation.MAX_PERMISSION_DECISIONS;
 
@@ -203,13 +210,13 @@ fn appendRequest(
         request.resource,
     });
 
-    var rights_buffer: [160]u8 = undefined;
+    var rights_buffer: [RIGHTS_SUMMARY_BUFFER_BYTES]u8 = undefined;
     try appendFmt(buffer, used, "    rights: {s}\n", .{rightsSummary(request.rights, &rights_buffer)});
-    var scope_buffer: [320]u8 = undefined;
+    var scope_buffer: [SCOPE_SUMMARY_BUFFER_BYTES]u8 = undefined;
     const scope_summary = humane_permissions.renderRequestScopeToBuffer(&scope_buffer, request) catch "Scope: unavailable";
     try appendFmt(buffer, used, "    {s}\n", .{scope_summary});
     if (request.kind == .network_egress and request.egress_intent.declared()) {
-        var intent_buffer: [180]u8 = undefined;
+        var intent_buffer: [EGRESS_INTENT_BUFFER_BYTES]u8 = undefined;
         try appendFmt(buffer, used, "    data egress intent: {s}\n", .{dataEgressIntentSummary(request.egress_intent, &intent_buffer)});
     }
     try appendFmt(buffer, used, "    required: {s} local_only: {s}\n", .{
@@ -239,7 +246,7 @@ fn appendRequest(
         if (!decision.allow) {
             try appendText(buffer, used, "    decision: deny\n");
         } else if (decision.lease_ticks) |lease_ticks| {
-            var expiry_buffer: [96]u8 = undefined;
+            var expiry_buffer: [LEASE_SUMMARY_BUFFER_BYTES]u8 = undefined;
             const expiry = humane_permissions.requestedLeaseLabel(&expiry_buffer, lease_ticks) catch "custom lease";
             try appendFmt(buffer, used, "    decision: allow local_only={s} lease={d} ticks\n", .{
                 yesNo(decision.local_only),
@@ -273,7 +280,7 @@ fn appendCompactReceipt(
     }
     try appendText(buffer, used, " data_leaves=");
     if (request.kind == .network_egress) {
-        var intent_buffer: [180]u8 = undefined;
+        var intent_buffer: [EGRESS_INTENT_BUFFER_BYTES]u8 = undefined;
         try appendText(buffer, used, dataEgressIntentSummary(request.egress_intent, &intent_buffer));
     } else {
         try appendText(buffer, used, "none");
@@ -299,7 +306,7 @@ fn permissionLabel(kind: manifest.PermissionKind) []const u8 {
     };
 }
 
-fn dataEgressIntentSummary(intent: manifest.DataEgressIntent, buffer: *[180]u8) []const u8 {
+fn dataEgressIntentSummary(intent: manifest.DataEgressIntent, buffer: *[EGRESS_INTENT_BUFFER_BYTES]u8) []const u8 {
     return switch (intent.kind) {
         .unspecified => "unspecified data egress",
         .sync_object => std.fmt.bufPrint(buffer, "sync object {s} with {s}", .{
@@ -345,7 +352,7 @@ fn backgroundVisibilityLabel(visibility: manifest.BackgroundVisibility) []const 
     };
 }
 
-fn rightsSummary(rights: capability.CapabilityRights, buffer: *[160]u8) []const u8 {
+fn rightsSummary(rights: capability.CapabilityRights, buffer: *[RIGHTS_SUMMARY_BUFFER_BYTES]u8) []const u8 {
     var used: usize = 0;
     var first = true;
 
@@ -370,7 +377,7 @@ fn rightsSummary(rights: capability.CapabilityRights, buffer: *[160]u8) []const 
     return buffer[0..used];
 }
 
-fn appendRight(buffer: *[160]u8, used: *usize, first: *bool, enabled: bool, label: []const u8) !void {
+fn appendRight(buffer: *[RIGHTS_SUMMARY_BUFFER_BYTES]u8, used: *usize, first: *bool, enabled: bool, label: []const u8) !void {
     if (!enabled) return;
     if (!first.*) try appendText(buffer, used, ", ");
     try appendText(buffer, used, label);
@@ -412,12 +419,7 @@ test "decisionsToGrants clamps lease duration to the manifest request" {
             },
         },
     };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.notes",
-        .display_name = "Notes",
-        .publisher = "zigos.dev",
-        .requested_permissions = &permissions,
-    };
+    const bundle = manifest_fixtures.basicNotesBundle(&permissions);
     const decisions = [_]ReviewDecision{
         .{
             .kind = .network_egress,
@@ -450,12 +452,7 @@ test "renderToBuffer includes bundle name, permission labels, and decisions" {
             .required = false,
         },
     };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.notes",
-        .display_name = "Notes",
-        .publisher = "zigos.dev",
-        .requested_permissions = &permissions,
-    };
+    const bundle = manifest_fixtures.basicNotesBundle(&permissions);
     const decisions = [_]ReviewDecision{
         .{
             .kind = .object_access,
@@ -472,7 +469,7 @@ test "renderToBuffer includes bundle name, permission labels, and decisions" {
     };
     const session = initSession(3, &bundle, &decisions);
 
-    var buffer: [2048]u8 = undefined;
+    var buffer: [REVIEW_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered = try renderToBuffer(&buffer, &session, &bundle);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Permission review for Notes") != null);
@@ -512,7 +509,7 @@ test "permission review does not grant hidden device access for the example writ
     }
 
     const session = initSession(9, &bundle, &decisions);
-    var buffer: [2048]u8 = undefined;
+    var buffer: [REVIEW_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered = try renderToBuffer(&buffer, &session, &bundle);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Permission review for Writer") != null);
@@ -550,15 +547,10 @@ test "renderRequestToBuffer marks undecided requests as pending" {
             },
         },
     };
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "app.notes",
-        .display_name = "Notes",
-        .publisher = "zigos.dev",
-        .requested_permissions = &permissions,
-    };
+    const bundle = manifest_fixtures.basicNotesBundle(&permissions);
     const session = initSession(4, &bundle, &.{});
 
-    var buffer: [512]u8 = undefined;
+    var buffer: [REVIEW_REQUEST_BUFFER_BYTES]u8 = undefined;
     const rendered = try renderRequestToBuffer(&buffer, &session, &bundle, 0);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Data egress") != null);
@@ -602,7 +594,7 @@ test "renderToBuffer labels expanded location contacts screen capture and notifi
         .{ .kind = .location, .resource = "location.current", .allow = true },
     };
     const session = initSession(44, &bundle, &decisions);
-    var buffer: [2048]u8 = undefined;
+    var buffer: [REVIEW_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered = try renderToBuffer(&buffer, &session, &bundle);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Location") != null);

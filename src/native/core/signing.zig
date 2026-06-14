@@ -1,4 +1,5 @@
 const std = @import("std");
+const crypto_hash = @import("crypto_hash.zig");
 const manifest = @import("../policy/manifest.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
@@ -6,6 +7,8 @@ const Ed25519 = std.crypto.sign.Ed25519;
 pub const SEED_BYTES = Ed25519.KeyPair.seed_length;
 pub const PUBLIC_KEY_BYTES = Ed25519.PublicKey.encoded_length;
 pub const SIGNATURE_BYTES = Ed25519.Signature.encoded_length;
+pub const Seed = [SEED_BYTES]u8;
+pub const PublicKey = [PUBLIC_KEY_BYTES]u8;
 pub const SIGNATURE_FORMAT_ED25519 = manifest.SIGNATURE_FORMAT_ED25519;
 pub const SIGNATURE_FORMAT_ED25519_ML_DSA65 = manifest.SIGNATURE_FORMAT_ED25519_ML_DSA65;
 pub const SIGNATURE_FORMAT_ML_DSA65 = manifest.SIGNATURE_FORMAT_ML_DSA65;
@@ -129,7 +132,7 @@ pub const SignatureProviderDescriptor = struct {
 pub const ReleaseRootKeyHandle = struct {
     key_id: []const u8,
     label: []const u8,
-    public_key: [PUBLIC_KEY_BYTES]u8,
+    public_key: PublicKey,
     generation: u32,
     provider_boundary: SignatureProviderBoundary,
     custody: SignatureKeyCustody,
@@ -266,12 +269,20 @@ pub const ExternalMlDsaReleaseProvider = struct {
 
 pub const SignerIdentity = struct {
     label: []const u8,
-    seed: [SEED_BYTES]u8,
+    seed: Seed,
 };
+
+pub fn seedFromByte(byte: u8) Seed {
+    return [_]u8{byte} ** SEED_BYTES;
+}
+
+pub fn publicKeyFromByte(byte: u8) PublicKey {
+    return [_]u8{byte} ** PUBLIC_KEY_BYTES;
+}
 
 pub const PublicIdentity = struct {
     label: []const u8,
-    public_key: [PUBLIC_KEY_BYTES]u8,
+    public_key: PublicKey,
 };
 
 pub const SignatureProvider = struct {
@@ -416,7 +427,7 @@ pub const HybridPreviewProvider = struct {
     }
 };
 
-pub fn publicKey(identity: SignerIdentity) ![PUBLIC_KEY_BYTES]u8 {
+pub fn publicKey(identity: SignerIdentity) !PublicKey {
     const key_pair = try Ed25519.KeyPair.generateDeterministic(identity.seed);
     return key_pair.public_key.toBytes();
 }
@@ -592,7 +603,7 @@ fn hybridSignatureBinding(
 test "ed25519 signing produces verifiable native signatures" {
     const identity = SignerIdentity{
         .label = "zigos.test",
-        .seed = [_]u8{0x11} ** Ed25519.KeyPair.seed_length,
+        .seed = seedFromByte(0x11),
     };
     const signature = try sign(identity, "storage-state");
     try std.testing.expect(signature.isComplete());
@@ -604,7 +615,7 @@ test "ed25519 signing produces verifiable native signatures" {
 
     const wrong_identity = SignerIdentity{
         .label = "zigos.other",
-        .seed = [_]u8{0x12} ** Ed25519.KeyPair.seed_length,
+        .seed = seedFromByte(0x12),
     };
     try std.testing.expect(!verifyTrusted(signature, "storage-state", wrong_identity));
 }
@@ -612,7 +623,7 @@ test "ed25519 signing produces verifiable native signatures" {
 test "hybrid post-quantum preview signatures bind ed25519 signatures to a second verification slot" {
     const identity = SignerIdentity{
         .label = "zigos.hybrid",
-        .seed = [_]u8{0x51} ** Ed25519.KeyPair.seed_length,
+        .seed = seedFromByte(0x51),
     };
     var signature = try signWithProfile(identity, "release-artifact", .ed25519_ml_dsa65_hybrid_preview);
 
@@ -634,7 +645,7 @@ test "hybrid post-quantum preview signatures bind ed25519 signatures to a second
 test "signature providers expose release eligibility and reject mismatched profiles" {
     const identity = SignerIdentity{
         .label = "zigos.provider",
-        .seed = [_]u8{0x61} ** Ed25519.KeyPair.seed_length,
+        .seed = seedFromByte(0x61),
     };
     var ed25519_provider_impl = SoftwareEd25519Provider{};
     const ed25519_provider = ed25519_provider_impl.provider();
@@ -735,7 +746,7 @@ test "release eligibility requires hardware custody lifecycle controls and verif
 
 test "external release provider uses key handles instead of software signer seeds" {
     const SigningBackend = struct {
-        seed: [SEED_BYTES]u8,
+        seed: Seed,
 
         fn sign(context: *anyopaque, key: ReleaseRootKeyHandle, message: []const u8) ![SIGNATURE_BYTES]u8 {
             const self: *@This() = @ptrCast(@alignCast(context));
@@ -747,7 +758,7 @@ test "external release provider uses key handles instead of software signer seed
 
     const root_identity = SignerIdentity{
         .label = "zigos.release.root",
-        .seed = [_]u8{0x71} ** Ed25519.KeyPair.seed_length,
+        .seed = seedFromByte(0x71),
     };
     var backend = SigningBackend{ .seed = root_identity.seed };
     var provider_impl = try ExternalReleaseProvider.init(
@@ -779,7 +790,7 @@ test "external release provider uses key handles instead of software signer seed
 
     const software_fixture_identity = SignerIdentity{
         .label = root_identity.label,
-        .seed = [_]u8{0x72} ** Ed25519.KeyPair.seed_length,
+        .seed = seedFromByte(0x72),
     };
     const signature = try provider.sign(software_fixture_identity, "release-dsse-pae");
     try std.testing.expect(provider.verify(signature, "release-dsse-pae"));
@@ -793,14 +804,13 @@ test "external release provider uses key handles instead of software signer seed
 test "external ML-DSA release provider requires a validated FIPS 204 boundary" {
     const PqcBackend = struct {
         fn signatureFor(key: MlDsaReleaseRootKeyHandle, message: []const u8) [ML_DSA65_SIGNATURE_BYTES]u8 {
-            var digest: [32]u8 = undefined;
-            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            var hasher = crypto_hash.init();
             hasher.update("zigos.external-ml-dsa-provider-test");
             hasher.update(key.key_id);
             hasher.update(key.validation_certificate);
             hasher.update(key.public_key[0..]);
             hasher.update(message);
-            hasher.final(&digest);
+            const digest = crypto_hash.finalize(&hasher);
 
             var output: [ML_DSA65_SIGNATURE_BYTES]u8 = undefined;
             for (&output, 0..) |*byte, index| {
@@ -864,7 +874,7 @@ test "external ML-DSA release provider requires a validated FIPS 204 boundary" {
 
     const identity = SignerIdentity{
         .label = "zigos.release.ml-dsa65",
-        .seed = [_]u8{0x7a} ** Ed25519.KeyPair.seed_length,
+        .seed = seedFromByte(0x7a),
     };
     const signature = try provider_impl.sign(identity, "release-dsse-pae");
     try std.testing.expect(signature.isComplete());
@@ -903,7 +913,7 @@ test "signature provider fails closed when implementation returns the wrong prof
     const bad_provider = bad_provider_impl.provider();
     const identity = SignerIdentity{
         .label = "zigos.bad-provider",
-        .seed = [_]u8{0x62} ** Ed25519.KeyPair.seed_length,
+        .seed = seedFromByte(0x62),
     };
 
     try std.testing.expectError(
@@ -915,7 +925,7 @@ test "signature provider fails closed when implementation returns the wrong prof
 test "signature provider registry selects providers by profile and release eligibility" {
     const identity = SignerIdentity{
         .label = "zigos.registry",
-        .seed = [_]u8{0x63} ** Ed25519.KeyPair.seed_length,
+        .seed = seedFromByte(0x63),
     };
     var ed25519_provider_impl = SoftwareEd25519Provider{};
     var hybrid_provider_impl = HybridPreviewProvider{};

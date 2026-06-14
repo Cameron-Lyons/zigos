@@ -102,9 +102,9 @@ pub const CredentialRecord = struct {
     label_len: usize,
     label: [MAX_LABEL_BYTES]u8,
     secret_id: u64,
-    sealed_secret_digest: [32]u8,
+    sealed_secret_digest: crypto_hash.Digest,
     credential_public_key: [signing.PUBLIC_KEY_BYTES]u8,
-    credential_digest: [32]u8,
+    credential_digest: crypto_hash.Digest,
     credential_generation: u32 = 1,
     assertion_count: u64 = 0,
     created_at_ticks: u64,
@@ -522,9 +522,9 @@ fn zeroCredential() CredentialRecord {
         .label_len = 0,
         .label = [_]u8{0} ** MAX_LABEL_BYTES,
         .secret_id = 0,
-        .sealed_secret_digest = [_]u8{0} ** 32,
+        .sealed_secret_digest = crypto_hash.zero_digest,
         .credential_public_key = [_]u8{0} ** signing.PUBLIC_KEY_BYTES,
-        .credential_digest = [_]u8{0} ** 32,
+        .credential_digest = crypto_hash.zero_digest,
         .credential_generation = 1,
         .assertion_count = 0,
         .created_at_ticks = 0,
@@ -540,9 +540,9 @@ fn credentialDigest(
     scope: CredentialScope,
     relying_party_id: []const u8,
     public_key: *const [signing.PUBLIC_KEY_BYTES]u8,
-    sealed_secret_digest: *const [32]u8,
+    sealed_secret_digest: *const crypto_hash.Digest,
     generation: u32,
-) [32]u8 {
+) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateEnum(&hasher, "owner-kind", owner.kind);
     crypto_hash.updateInt(&hasher, "owner-serial", owner.serial);
@@ -564,7 +564,7 @@ fn localUnlockDigest(
     method: UnlockMethod,
     issued_at_ticks: u64,
     expires_at_ticks: u64,
-) [32]u8 {
+) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateEnum(&hasher, "owner-kind", owner.kind);
     crypto_hash.updateInt(&hasher, "owner-serial", owner.serial);
@@ -586,7 +586,7 @@ fn assertionDigest(
     relying_party_id: []const u8,
     origin: []const u8,
     challenge: []const u8,
-) [32]u8 {
+) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateInt(&hasher, "credential-id", credential_id);
     crypto_hash.updateEnum(&hasher, "owner-kind", owner.kind);
@@ -633,15 +633,15 @@ test "os identity creates passkey credentials and rejects phishing origins" {
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 711 };
     const user_identity = signing.SignerIdentity{
         .label = "passkey-user",
-        .seed = [_]u8{0xA1} ** signing.SEED_BYTES,
+        .seed = signing.seedFromByte(0xA1),
     };
     const laptop_identity = signing.SignerIdentity{
         .label = "passkey-laptop",
-        .seed = [_]u8{0xA2} ** signing.SEED_BYTES,
+        .seed = signing.seedFromByte(0xA2),
     };
     const credential_identity = signing.SignerIdentity{
         .label = "accounts.example-passkey",
-        .seed = [_]u8{0xA3} ** signing.SEED_BYTES,
+        .seed = signing.seedFromByte(0xA3),
     };
 
     _ = try graph.ensureUserRoot(user, "owner", user_identity);
@@ -706,23 +706,23 @@ test "os identity recovers synced credentials through trusted device graph" {
     const phone = principal.PrincipalId{ .kind = .device, .serial = 812 };
     const user_identity = signing.SignerIdentity{
         .label = "recover-user",
-        .seed = [_]u8{0xB1} ** signing.SEED_BYTES,
+        .seed = signing.seedFromByte(0xB1),
     };
     const laptop_identity = signing.SignerIdentity{
         .label = "recover-laptop",
-        .seed = [_]u8{0xB2} ** signing.SEED_BYTES,
+        .seed = signing.seedFromByte(0xB2),
     };
     const phone_identity = signing.SignerIdentity{
         .label = "recover-phone",
-        .seed = [_]u8{0xB3} ** signing.SEED_BYTES,
+        .seed = signing.seedFromByte(0xB3),
     };
     const first_credential_identity = signing.SignerIdentity{
         .label = "recover-passkey-v1",
-        .seed = [_]u8{0xB4} ** signing.SEED_BYTES,
+        .seed = signing.seedFromByte(0xB4),
     };
     const replacement_credential_identity = signing.SignerIdentity{
         .label = "recover-passkey-v2",
-        .seed = [_]u8{0xB5} ** signing.SEED_BYTES,
+        .seed = signing.seedFromByte(0xB5),
     };
 
     _ = try graph.ensureUserRoot(user, "owner", user_identity);
@@ -817,19 +817,19 @@ test "os identity requires fresh local unlock and primary device for device-boun
     const phone = principal.PrincipalId{ .kind = .device, .serial = 912 };
     const user_identity = signing.SignerIdentity{
         .label = "bound-user",
-        .seed = [_]u8{0xC1} ** signing.SEED_BYTES,
+        .seed = signing.seedFromByte(0xC1),
     };
     const laptop_identity = signing.SignerIdentity{
         .label = "bound-laptop",
-        .seed = [_]u8{0xC2} ** signing.SEED_BYTES,
+        .seed = signing.seedFromByte(0xC2),
     };
     const phone_identity = signing.SignerIdentity{
         .label = "bound-phone",
-        .seed = [_]u8{0xC3} ** signing.SEED_BYTES,
+        .seed = signing.seedFromByte(0xC3),
     };
     const credential_identity = signing.SignerIdentity{
         .label = "bound-passkey",
-        .seed = [_]u8{0xC4} ** signing.SEED_BYTES,
+        .seed = signing.seedFromByte(0xC4),
     };
 
     _ = try graph.ensureUserRoot(user, "owner", user_identity);

@@ -217,7 +217,7 @@ pub export fn isrHandler(regs: *Registers) void {
 pub const InterruptFrame = Registers;
 pub const InterruptHandler = *const fn (regs: *InterruptFrame) void;
 
-var custom_handlers: [256]?InterruptHandler = [_]?InterruptHandler{null} ** 256;
+var custom_handlers: [idt.IDT_ENTRIES]?InterruptHandler = [_]?InterruptHandler{null} ** idt.IDT_ENTRIES;
 
 pub fn registerHandler(vector: u8, handler: InterruptHandler) void {
     custom_handlers[vector] = handler;

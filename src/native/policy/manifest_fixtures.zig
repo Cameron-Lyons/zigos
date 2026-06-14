@@ -1,4 +1,5 @@
 const manifest = @import("manifest.zig");
+const units = @import("../core/units.zig");
 
 pub const notes_components = [_]manifest.ExecutionComponentDecl{
     .{ .id = "notes", .entry = "app.notes" },
@@ -76,8 +77,8 @@ pub const sync_completion_background_tasks = [_]manifest.BackgroundTaskDecl{
         .expected_duration_seconds = 30,
         .budget = .{
             .cpu_time_ticks = 2_000,
-            .memory_bytes = 128 * 1024,
-            .shared_memory_bytes = 8 * 1024,
+            .memory_bytes = units.kibibytes(128),
+            .shared_memory_bytes = units.kibibytes(8),
         },
         .network = .local_network_only,
         .visibility = .status_only,
@@ -91,7 +92,7 @@ pub const sync_push_background_tasks = [_]manifest.BackgroundTaskDecl{
         .expected_duration_seconds = 30,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
         },
     },
 };
@@ -208,7 +209,7 @@ pub const example_writer_background_tasks = [_]manifest.BackgroundTaskDecl{
         .expected_duration_seconds = 30,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 64 * 1024,
+            .memory_bytes = units.kibibytes(64),
         },
         .network = .none,
         .visibility = .status_only,
@@ -231,6 +232,15 @@ pub fn notesBundle() manifest.BundleManifest {
             .offline_required = true,
         },
         .update_channel = .beta,
+    };
+}
+
+pub fn basicNotesBundle(requested_permissions: []const manifest.PermissionRequest) manifest.BundleManifest {
+    return .{
+        .bundle_id = "app.notes",
+        .display_name = "Notes",
+        .publisher = "zigos.dev",
+        .requested_permissions = requested_permissions,
     };
 }
 

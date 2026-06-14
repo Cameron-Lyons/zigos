@@ -12,10 +12,12 @@ const shared_memory = @import("shared_memory.zig");
 const syscall_abi = @import("syscall_abi.zig");
 const syscall_dispatch = @import("syscall_dispatch.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const units = @import("../core/units.zig");
 
 pub const DispatchResult = syscall_dispatch.DispatchResult;
 pub const UserMemoryAccess = syscall_dispatch.UserMemoryAccess;
 pub const validateAddressSpaceRange = syscall_dispatch.validateAddressSpaceRange;
+const TEST_ATA_SECTOR_COUNT: u64 = 2048;
 
 const DispatchHandler = *const fn (
     port: *component_port.KernelPort,
@@ -218,9 +220,9 @@ const TestKernel = struct {
             .component_class = .session_manager,
             .budget = .{
                 .cpu_time_ticks = 10_000,
-                .memory_bytes = 4096,
+                .memory_bytes = shared_memory.PAGE_SIZE,
                 .endpoint_slots = 8,
-                .shared_memory_bytes = 4096,
+                .shared_memory_bytes = shared_memory.PAGE_SIZE,
             },
             .local_only = true,
         });
@@ -268,9 +270,9 @@ test "syscall surface dispatches typed task creation requests" {
             .component_class = .app_component,
             .budget = .{
                 .cpu_time_ticks = 1_000,
-                .memory_bytes = 1024,
+                .memory_bytes = units.kibibytes(1),
                 .endpoint_slots = 4,
-                .shared_memory_bytes = 1024,
+                .shared_memory_bytes = units.kibibytes(1),
                 .resource_class = .batch_compute,
             },
             .local_only = true,
@@ -341,9 +343,9 @@ test "syscall surface returns an explicit empty receive response when no message
             .component_class = .app_component,
             .budget = .{
                 .cpu_time_ticks = 1_000,
-                .memory_bytes = 1024,
+                .memory_bytes = units.kibibytes(1),
                 .endpoint_slots = 4,
-                .shared_memory_bytes = 1024,
+                .shared_memory_bytes = units.kibibytes(1),
             },
             .local_only = true,
             .launch = .{
@@ -400,9 +402,9 @@ test "syscall surface denies task creation without signed userspace launch prove
             .component_class = .app_component,
             .budget = .{
                 .cpu_time_ticks = 1_000,
-                .memory_bytes = 1024,
+                .memory_bytes = units.kibibytes(1),
                 .endpoint_slots = 4,
-                .shared_memory_bytes = 1024,
+                .shared_memory_bytes = units.kibibytes(1),
             },
             .local_only = true,
         },
@@ -434,9 +436,9 @@ test "syscall surface denies task creation without signed userspace launch prove
             .component_class = .app_component,
             .budget = .{
                 .cpu_time_ticks = 1_000,
-                .memory_bytes = 1024,
+                .memory_bytes = units.kibibytes(1),
                 .endpoint_slots = 4,
-                .shared_memory_bytes = 1024,
+                .shared_memory_bytes = units.kibibytes(1),
             },
             .local_only = true,
             .launch = .{
@@ -515,9 +517,9 @@ test "syscall surface rejects spoofed subject task ids" {
             .component_class = .app_component,
             .budget = .{
                 .cpu_time_ticks = 1_000,
-                .memory_bytes = 1024,
+                .memory_bytes = units.kibibytes(1),
                 .endpoint_slots = 4,
-                .shared_memory_bytes = 1024,
+                .shared_memory_bytes = units.kibibytes(1),
             },
             .local_only = true,
             .launch = .{
@@ -588,9 +590,9 @@ test "syscall surface copies and bounds embedded user buffers" {
             .component_class = .app_component,
             .budget = .{
                 .cpu_time_ticks = 1_000,
-                .memory_bytes = 1024,
+                .memory_bytes = units.kibibytes(1),
                 .endpoint_slots = 4,
-                .shared_memory_bytes = 1024,
+                .shared_memory_bytes = units.kibibytes(1),
             },
             .local_only = true,
             .userspace_image = bad_image_ptr,
@@ -689,7 +691,7 @@ test "syscall surface dispatches typed device broker requests" {
         .ctrl_port = 0x3F6,
         .is_master = true,
         .irq_line = 14,
-        .sector_count = 2048,
+        .sector_count = TEST_ATA_SECTOR_COUNT,
     }));
 
     const describe_request = component_port.DeviceDescribeRequest{

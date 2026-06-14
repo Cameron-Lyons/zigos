@@ -1,13 +1,21 @@
 const std = @import("std");
 
 pub const Hasher = std.crypto.hash.sha2.Sha256;
+pub const digest_bytes: usize = 32;
+pub const hex_digest_bytes: usize = digest_bytes * 2;
+pub const Digest = [digest_bytes]u8;
+pub const zero_digest: Digest = [_]u8{0} ** digest_bytes;
+
+pub fn digestFromByte(byte: u8) Digest {
+    return [_]u8{byte} ** digest_bytes;
+}
 
 pub fn init() Hasher {
     return Hasher.init(.{});
 }
 
-pub fn finalize(hasher: *Hasher) [32]u8 {
-    var digest: [32]u8 = undefined;
+pub fn finalize(hasher: *Hasher) Digest {
+    var digest: Digest = undefined;
     hasher.final(&digest);
     return digest;
 }

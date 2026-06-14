@@ -48,6 +48,21 @@ pub const USER_CODE_SEG = 0x18;
 pub const USER_DATA_SEG = 0x20;
 pub const TSS_SEG = 0x28;
 
+const NULL_DESCRIPTOR_INDEX = 0;
+const KERNEL_CODE_DESCRIPTOR_INDEX = 1;
+const KERNEL_DATA_DESCRIPTOR_INDEX = 2;
+const USER_CODE_DESCRIPTOR_INDEX = 3;
+const USER_DATA_DESCRIPTOR_INDEX = 4;
+const TSS_DESCRIPTOR_INDEX = 5;
+const FLAT_SEGMENT_LIMIT: u32 = 0xFFFFF;
+const FIELD_U16_MASK: u32 = 0xFFFF;
+const FIELD_U8_MASK: u32 = 0xFF;
+const LIMIT_HIGH_NIBBLE_MASK: u32 = 0x0F;
+const GRANULARITY_FLAGS_MASK: u8 = 0xF0;
+const U16_SHIFT = 16;
+const U24_SHIFT = 24;
+const USER_RPL: u16 = 0x3;
+
 const PRESENT = 0x80;
 const DPL_USER = 0x60;
 const SEGMENT = 0x10;
@@ -69,17 +84,17 @@ extern fn gdt_flush(gdt_ptr: *const GdtPtr) void;
 extern fn tss_flush() void;
 
 pub fn init() void {
-    setGdtEntry(0, 0, 0, 0, 0);
+    setGdtEntry(NULL_DESCRIPTOR_INDEX, 0, 0, 0, 0);
 
-    setGdtEntry(1, 0, 0xFFFFF, PRESENT | SEGMENT | EXECUTABLE | RW, GRANULARITY | SIZE_32);
+    setGdtEntry(KERNEL_CODE_DESCRIPTOR_INDEX, 0, FLAT_SEGMENT_LIMIT, PRESENT | SEGMENT | EXECUTABLE | RW, GRANULARITY | SIZE_32);
 
-    setGdtEntry(2, 0, 0xFFFFF, PRESENT | SEGMENT | RW, GRANULARITY | SIZE_32);
+    setGdtEntry(KERNEL_DATA_DESCRIPTOR_INDEX, 0, FLAT_SEGMENT_LIMIT, PRESENT | SEGMENT | RW, GRANULARITY | SIZE_32);
 
-    setGdtEntry(3, 0, 0xFFFFF, PRESENT | DPL_USER | SEGMENT | EXECUTABLE | RW, GRANULARITY | SIZE_32);
+    setGdtEntry(USER_CODE_DESCRIPTOR_INDEX, 0, FLAT_SEGMENT_LIMIT, PRESENT | DPL_USER | SEGMENT | EXECUTABLE | RW, GRANULARITY | SIZE_32);
 
-    setGdtEntry(4, 0, 0xFFFFF, PRESENT | DPL_USER | SEGMENT | RW, GRANULARITY | SIZE_32);
+    setGdtEntry(USER_DATA_DESCRIPTOR_INDEX, 0, FLAT_SEGMENT_LIMIT, PRESENT | DPL_USER | SEGMENT | RW, GRANULARITY | SIZE_32);
 
-    writeTss(5, KERNEL_DATA_SEG, 0);
+    writeTss(TSS_DESCRIPTOR_INDEX, KERNEL_DATA_SEG, 0);
 
     gdt_ptr.limit = @sizeOf(@TypeOf(gdt)) - 1;
     gdt_ptr.base = @intFromPtr(&gdt);
@@ -89,14 +104,14 @@ pub fn init() void {
 }
 
 fn setGdtEntry(num: usize, base: u32, limit: u32, access: u8, gran: u8) void {
-    gdt[num].base_low = @truncate(base & 0xFFFF);
-    gdt[num].base_middle = @truncate((base >> 16) & 0xFF);
-    gdt[num].base_high = @truncate((base >> 24) & 0xFF);
+    gdt[num].base_low = @truncate(base & FIELD_U16_MASK);
+    gdt[num].base_middle = @truncate((base >> U16_SHIFT) & FIELD_U8_MASK);
+    gdt[num].base_high = @truncate((base >> U24_SHIFT) & FIELD_U8_MASK);
 
-    gdt[num].limit_low = @truncate(limit & 0xFFFF);
-    gdt[num].granularity = @truncate((limit >> 16) & 0x0F);
+    gdt[num].limit_low = @truncate(limit & FIELD_U16_MASK);
+    gdt[num].granularity = @truncate((limit >> U16_SHIFT) & LIMIT_HIGH_NIBBLE_MASK);
 
-    gdt[num].granularity |= gran & 0xF0;
+    gdt[num].granularity |= gran & GRANULARITY_FLAGS_MASK;
     gdt[num].access = access;
 }
 
@@ -111,11 +126,11 @@ fn writeTss(num: usize, ss0: u16, esp0: u32) void {
     tss.ss0 = ss0;
     tss.esp0 = esp0;
 
-    tss.cs = KERNEL_CODE_SEG | 0x3;
-    tss.ds = KERNEL_DATA_SEG | 0x3;
-    tss.es = KERNEL_DATA_SEG | 0x3;
-    tss.fs = KERNEL_DATA_SEG | 0x3;
-    tss.gs = KERNEL_DATA_SEG | 0x3;
+    tss.cs = KERNEL_CODE_SEG | USER_RPL;
+    tss.ds = KERNEL_DATA_SEG | USER_RPL;
+    tss.es = KERNEL_DATA_SEG | USER_RPL;
+    tss.fs = KERNEL_DATA_SEG | USER_RPL;
+    tss.gs = KERNEL_DATA_SEG | USER_RPL;
 }
 
 pub fn setKernelStack(stack: u32) void {

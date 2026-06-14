@@ -12,6 +12,8 @@ const permission_review_service = @import("../../policy/permission_review_servic
 const policy_mediation = @import("../../policy/policy_mediation.zig");
 const principal = @import("../../core/principal.zig");
 const rendered_shell = @import("../../platform/rendered_shell.zig");
+const shared_memory = @import("../../kernel_api/shared_memory.zig");
+const units = @import("../../core/units.zig");
 const storage_service = @import("../../storage/storage_service.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
 const task_runtime_service = @import("../../task/task_runtime_service.zig");
@@ -24,6 +26,13 @@ const expectEndpointCreateWithFlags = common.expectEndpointCreateWithFlags;
 const expectEndpointRecv = common.expectEndpointRecv;
 const expectEndpointSend = common.expectEndpointSend;
 const signer = common.signer;
+const HEADLESS_TEST_SHARED_MEMORY_BYTES: usize = 512;
+const REVIEW_CARD_BUFFER_BYTES: usize = 512;
+const REVIEW_DECISION_BUFFER_BYTES: usize = 256;
+const SHELL_RENDER_BUFFER_BYTES: usize = 768;
+const LEDGER_EXPORT_BUFFER_BYTES: usize = units.kibibytes(1);
+const WINDOW_RENDER_BUFFER_BYTES: usize = 512;
+const WORKSPACE_NEEDLE_BUFFER_BYTES: usize = 32;
 
 pub fn proveBootedCompositorServicePath(
     kernel_port: *component_port.KernelPort,
@@ -46,9 +55,9 @@ pub fn proveBootedCompositorServicePath(
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 1_200,
-            .memory_bytes = 64 * 1024,
+            .memory_bytes = units.kibibytes(64),
             .endpoint_slots = 2,
-            .shared_memory_bytes = 4096,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE,
         },
         .ui_surface_id = 77,
         .local_only = true,
@@ -158,9 +167,9 @@ pub fn proveBootedCompositorServicePath(
         .component_class = .app_component,
         .budget = .{
             .cpu_time_ticks = 100,
-            .memory_bytes = 1024,
+            .memory_bytes = units.kibibytes(1),
             .endpoint_slots = 1,
-            .shared_memory_bytes = 512,
+            .shared_memory_bytes = HEADLESS_TEST_SHARED_MEMORY_BYTES,
         },
         .local_only = true,
         .initial_component = .{
@@ -190,7 +199,7 @@ pub fn proveBootedCompositorServicePath(
     try std.testing.expectEqual(document_response.window_id, session.active_window_id);
     try assertRenderedWindowContains(session, document_response.window_id, "type=document_view");
     try assertRenderedWindowContains(session, document_response.window_id, "surface=77");
-    var workspace_needle_buffer: [32]u8 = undefined;
+    var workspace_needle_buffer: [WORKSPACE_NEEDLE_BUFFER_BYTES]u8 = undefined;
     const workspace_needle = try std.fmt.bufPrint(&workspace_needle_buffer, "workspace={d}", .{workspace_id});
     try assertRenderedWindowContains(session, document_response.window_id, workspace_needle);
     try assertRenderedWindowContains(session, document_response.window_id, "detail=trip/brief.md");
@@ -325,10 +334,10 @@ pub fn proveBootedCompositorServicePath(
 
     const object_item = session.findReviewItemConst(object_review_response.window_id, .object_access, "ws:trip") orelse return error.MissingBootedCompositorReviewItem;
     const network_item = session.findReviewItemConst(network_review_response.window_id, .network_egress, "net:trip") orelse return error.MissingBootedCompositorReviewItem;
-    var object_card_buffer: [512]u8 = undefined;
-    var network_card_buffer: [512]u8 = undefined;
-    var object_decision_buffer: [256]u8 = undefined;
-    var network_decision_buffer: [256]u8 = undefined;
+    var object_card_buffer: [REVIEW_CARD_BUFFER_BYTES]u8 = undefined;
+    var network_card_buffer: [REVIEW_CARD_BUFFER_BYTES]u8 = undefined;
+    var object_decision_buffer: [REVIEW_DECISION_BUFFER_BYTES]u8 = undefined;
+    var network_decision_buffer: [REVIEW_DECISION_BUFFER_BYTES]u8 = undefined;
     const object_card = try compositor_session.renderReviewItemToBuffer(&object_card_buffer, object_review_response.window_id, object_item);
     try expectContains(object_card, "why=Trip needs access to local task objects");
     try expectContains(object_card, "object_scope=ws:trip");
@@ -514,7 +523,7 @@ fn proveBootedRenderedTaskShell(
         &shell_checkpoint_store,
     );
 
-    var render_buffer: [768]u8 = undefined;
+    var render_buffer: [SHELL_RENDER_BUFFER_BYTES]u8 = undefined;
     const initial = try shell.render(&render_buffer);
     try expectContains(initial, "control=start-task");
     try expectContains(initial, "control=open-document");
@@ -561,7 +570,7 @@ fn proveBootedRenderedTaskShell(
     try std.testing.expectEqual(@as(usize, 4), ledger.countMatching(.{ .kind = .task_flow, .task_id = task.id }));
     try std.testing.expectEqual(@as(usize, 3), ledger.countMatching(.{ .kind = .task_flow, .workspace_id = workspace_id }));
 
-    var export_buffer: [1024]u8 = undefined;
+    var export_buffer: [LEDGER_EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
     try expectContains(exported, "flow_kind=start_task");
     try expectContains(exported, "flow_kind=open_workspace");
@@ -637,7 +646,7 @@ fn proveBootedRenderedPermissionReviewSurface(
         .publisher = "zigos.local",
         .requested_permissions = &permissions,
         .signature = .{
-            .format = "ed25519",
+            .format = manifest.SIGNATURE_FORMAT_ED25519,
             .signer = "booted-trip-review",
         },
     };
@@ -707,7 +716,7 @@ fn assertRenderedWindowContains(
     needle: []const u8,
 ) !void {
     const window = session.findWindowConst(window_id) orelse return error.MissingBootedCompositorWindow;
-    var buffer: [512]u8 = undefined;
+    var buffer: [WINDOW_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered = try compositor_session.renderWindowToBuffer(&buffer, window);
     try expectContains(rendered, needle);
 }

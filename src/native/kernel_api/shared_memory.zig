@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
+const hash_seeds = @import("../core/hash_seeds.zig");
 const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 
@@ -657,7 +658,7 @@ fn pageCount(size_bytes: usize) usize {
 }
 
 fn labelHash(label: []const u8) u64 {
-    return std.hash.Wyhash.hash(0x5A47_5348_4D45_4D00, label);
+    return std.hash.Wyhash.hash(hash_seeds.shared_memory_label_key, label);
 }
 
 fn mappingDescriptorFor(
@@ -830,7 +831,7 @@ test "shared memory objects map unmap and revoke across tasks" {
 
 test "shared memory objects label accelerator access and explicit zero-copy attachments" {
     var table = Table.init();
-    const object = try table.createLabeledWithAccess(ids.task(7), 16 * 1024, "media-frame-buffer", .{
+    const object = try table.createLabeledWithAccess(ids.task(7), PAGE_SIZE * 4, "media-frame-buffer", .{
         .gpu = true,
         .media = true,
     });
@@ -860,7 +861,7 @@ test "shared memory objects label accelerator access and explicit zero-copy atta
 
 test "shared memory objects map through freestanding mmu and revoke accelerator mappings" {
     var table = Table.init();
-    const object = try table.createLabeledWithAccess(ids.task(20), 8192, "mmu-frame-buffer", .{
+    const object = try table.createLabeledWithAccess(ids.task(20), PAGE_SIZE * 2, "mmu-frame-buffer", .{
         .gpu = true,
         .media = true,
     });
@@ -895,7 +896,7 @@ test "shared memory objects map through freestanding mmu and revoke accelerator 
 
 test "shared memory rejects stale task and accelerator descriptors after generation changes" {
     var table = Table.init();
-    const object = try table.createLabeledWithAccess(ids.task(30), 16 * 1024, "service-path-frame-buffer", .{
+    const object = try table.createLabeledWithAccess(ids.task(30), PAGE_SIZE * 4, "service-path-frame-buffer", .{
         .gpu = true,
         .media = true,
     });

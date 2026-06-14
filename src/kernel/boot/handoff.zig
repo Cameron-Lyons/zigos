@@ -1,5 +1,11 @@
 const std = @import("std");
 const framebuffer = @import("../platform/framebuffer.zig");
+const endian = @import("../utils/endian.zig");
+
+const readU32Le = endian.readU32Le;
+const readU64Le = endian.readU64Le;
+const writeU32Le = endian.writeU32Le;
+const writeU64Le = endian.writeU64Le;
 
 pub const MULTIBOOT_BOOTLOADER_MAGIC: u32 = 0x2BAD_B002;
 
@@ -11,6 +17,7 @@ const FLAG_FRAMEBUFFER: u32 = 1 << 12;
 const FRAMEBUFFER_RGB_COLOR_INFO_BYTES: usize = 6;
 const INFO_MIN_BYTES: usize = 110 + FRAMEBUFFER_RGB_COLOR_INFO_BYTES;
 const MAX_CMDLINE_BYTES: usize = 512;
+const MULTIBOOT_MMAP_ENTRY_BYTES: usize = 24;
 
 pub export var zigos_multiboot_magic: u32 = 0;
 pub export var zigos_multiboot_info_addr: u32 = 0;
@@ -190,52 +197,16 @@ fn reservedMask(rgb: [FRAMEBUFFER_RGB_COLOR_INFO_BYTES]u8) u32 {
     return ~(red | green | blue);
 }
 
-fn readU32Le(bytes: []const u8) u32 {
-    return @as(u32, bytes[0]) |
-        (@as(u32, bytes[1]) << 8) |
-        (@as(u32, bytes[2]) << 16) |
-        (@as(u32, bytes[3]) << 24);
-}
-
-fn readU64Le(bytes: []const u8) u64 {
-    return @as(u64, bytes[0]) |
-        (@as(u64, bytes[1]) << 8) |
-        (@as(u64, bytes[2]) << 16) |
-        (@as(u64, bytes[3]) << 24) |
-        (@as(u64, bytes[4]) << 32) |
-        (@as(u64, bytes[5]) << 40) |
-        (@as(u64, bytes[6]) << 48) |
-        (@as(u64, bytes[7]) << 56);
-}
-
-fn writeU32Le(bytes: []u8, value: u32) void {
-    bytes[0] = @truncate(value);
-    bytes[1] = @truncate(value >> 8);
-    bytes[2] = @truncate(value >> 16);
-    bytes[3] = @truncate(value >> 24);
-}
-
-fn writeU64Le(bytes: []u8, value: u64) void {
-    bytes[0] = @truncate(value);
-    bytes[1] = @truncate(value >> 8);
-    bytes[2] = @truncate(value >> 16);
-    bytes[3] = @truncate(value >> 24);
-    bytes[4] = @truncate(value >> 32);
-    bytes[5] = @truncate(value >> 40);
-    bytes[6] = @truncate(value >> 48);
-    bytes[7] = @truncate(value >> 56);
-}
-
 fn appendMemoryMapEntry(bytes: []u8, offset: usize, base: u64, length: u64, kind: u32) usize {
     writeU32Le(bytes[offset .. offset + 4], 20);
     writeU64Le(bytes[offset + 4 .. offset + 12], base);
     writeU64Le(bytes[offset + 12 .. offset + 20], length);
     writeU32Le(bytes[offset + 20 .. offset + 24], kind);
-    return offset + 24;
+    return offset + MULTIBOOT_MMAP_ENTRY_BYTES;
 }
 
 test "multiboot handoff parses memory map summary" {
-    var mmap = [_]u8{0} ** 48;
+    var mmap = [_]u8{0} ** (MULTIBOOT_MMAP_ENTRY_BYTES * 2);
     var offset = appendMemoryMapEntry(mmap[0..], 0, 0x100000, 0x2000000, 1);
     offset = appendMemoryMapEntry(mmap[0..], offset, 0x3000000, 0x1000, 3);
     try std.testing.expectEqual(@as(usize, mmap.len), offset);

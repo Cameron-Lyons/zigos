@@ -1,11 +1,18 @@
 const std = @import("std");
 const elf = std.elf;
 const native_archive_deps = @import("native_archive_deps");
+const crypto_hash = native_archive_deps.crypto_hash;
 const elf_image_inspector = native_archive_deps;
+const hex = native_archive_deps.hex;
 const signing = native_archive_deps;
+const units = native_archive_deps.units;
 const userspace_descriptor = @import("userspace_descriptor");
 
 const EmbeddedInfo = elf_image_inspector.Inspection;
+const max_userspace_image_bytes: usize = units.mebibytes(16);
+const max_bootloader_source_bytes: usize = units.mebibytes(1);
+const max_build_artifact_entries: usize = 32;
+const build_artifact_manifest_payload_buffer_bytes: usize = units.kibibytes(4);
 
 const Artifact = struct {
     source_path: []const u8,
@@ -32,7 +39,7 @@ const BuildArtifactKind = enum(u8) {
 const BuildArtifactEntry = struct {
     kind: BuildArtifactKind,
     label: []const u8,
-    digest: [32]u8,
+    digest: crypto_hash.Digest,
 };
 
 const BuildArtifactSignature = struct {
@@ -45,18 +52,18 @@ const BuildArtifactSignature = struct {
 const BuildArtifactManifest = struct {
     generation: u64,
     entry_count: usize = 0,
-    entries: [32]BuildArtifactEntry = [_]BuildArtifactEntry{.{
+    entries: [max_build_artifact_entries]BuildArtifactEntry = [_]BuildArtifactEntry{.{
         .kind = .bootloader_source,
         .label = "",
-        .digest = [_]u8{0} ** 32,
-    }} ** 32,
+        .digest = crypto_hash.zero_digest,
+    }} ** max_build_artifact_entries,
     signature: BuildArtifactSignature = .{},
 
     fn init(generation: u64) BuildArtifactManifest {
         return .{ .generation = generation };
     }
 
-    fn addDigest(self: *BuildArtifactManifest, kind: BuildArtifactKind, label: []const u8, digest: [32]u8) !void {
+    fn addDigest(self: *BuildArtifactManifest, kind: BuildArtifactKind, label: []const u8, digest: crypto_hash.Digest) !void {
         if (self.entry_count >= self.entries.len) return error.RecordTableFull;
         self.entries[self.entry_count] = .{
             .kind = kind,
@@ -70,7 +77,7 @@ const BuildArtifactManifest = struct {
 const build_manifest_generation: u64 = 1;
 const build_manifest_signer = signing.SignerIdentity{
     .label = "zigos-build-artifact-manifest",
-    .seed = [_]u8{0xC7} ** 32,
+    .seed = signing.seedFromByte(0xC7),
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -107,7 +114,7 @@ fn parseArtifact(
     io: std.Io,
     path: []const u8,
 ) !Artifact {
-    const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(16 * 1024 * 1024));
+    const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_userspace_image_bytes));
     defer allocator.free(bytes);
 
     const header = try readStruct(elf.Elf32_Ehdr, bytes, 0);
@@ -279,7 +286,7 @@ fn writeArchive(
     );
 
     for (artifacts, 0..) |artifact, index| {
-        const copied_bytes = try cwd.readFileAlloc(io, artifact.source_path, allocator, .limited(16 * 1024 * 1024));
+        const copied_bytes = try cwd.readFileAlloc(io, artifact.source_path, allocator, .limited(max_userspace_image_bytes));
         defer allocator.free(copied_bytes);
         const copied_path = try std.fs.path.join(allocator, &.{ output_dir, artifact.embedded_name });
         defer allocator.free(copied_path);
@@ -364,7 +371,7 @@ fn writeProductionArtifactManifest(
     artifacts: []const Artifact,
 ) !void {
     var build_manifest = BuildArtifactManifest.init(build_manifest_generation);
-    const bootloader_bytes = try cwd.readFileAlloc(io, bootloader_path, allocator, .limited(1024 * 1024));
+    const bootloader_bytes = try cwd.readFileAlloc(io, bootloader_path, allocator, .limited(max_bootloader_source_bytes));
     defer allocator.free(bootloader_bytes);
 
     try build_manifest.addDigest(.bootloader_source, "src/boot/boot64.S", rawSha256(bootloader_bytes));
@@ -423,26 +430,22 @@ fn bootloaderMeasurementLabel(boot_profile: []const u8) []const u8 {
     return "multiboot-v1:zigos_native";
 }
 
-fn bootloaderMeasurementDigest(boot_profile: []const u8) [32]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    updateTaggedBytes(&hasher, "bootloader", "multiboot-v1");
-    updateTaggedBytes(&hasher, "boot-profile", boot_profile);
-    updateTaggedBytes(&hasher, "entry-assembly", "src/boot/boot64.S");
-    var digest: [32]u8 = undefined;
-    hasher.final(&digest);
-    return digest;
+fn bootloaderMeasurementDigest(boot_profile: []const u8) crypto_hash.Digest {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "bootloader", "multiboot-v1");
+    crypto_hash.updateBytes(&hasher, "boot-profile", boot_profile);
+    crypto_hash.updateBytes(&hasher, "entry-assembly", "src/boot/boot64.S");
+    return crypto_hash.finalize(&hasher);
 }
 
-fn rawSha256(bytes: []const u8) [32]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+fn rawSha256(bytes: []const u8) crypto_hash.Digest {
+    var hasher = crypto_hash.init();
     hasher.update(bytes);
-    var digest: [32]u8 = undefined;
-    hasher.final(&digest);
-    return digest;
+    return crypto_hash.finalize(&hasher);
 }
 
 fn signBuildArtifactManifest(manifest: *BuildArtifactManifest) !void {
-    var payload_buffer: [4096]u8 = undefined;
+    var payload_buffer: [build_artifact_manifest_payload_buffer_bytes]u8 = undefined;
     const payload = try encodeBuildArtifactManifest(
         manifest.generation,
         manifest.entries[0..manifest.entry_count],
@@ -475,29 +478,11 @@ fn appendFormat(buffer: []u8, offset: usize, comptime fmt: []const u8, args: any
     return offset + text.len;
 }
 
-fn appendHexDigest(buffer: []u8, offset: usize, digest: *const [32]u8) !usize {
-    const hex = "0123456789abcdef";
-    if (offset + 64 > buffer.len) return error.ManifestTooLarge;
-    var cursor = offset;
-    for (digest.*) |byte| {
-        buffer[cursor] = hex[byte >> 4];
-        buffer[cursor + 1] = hex[byte & 0x0f];
-        cursor += 2;
-    }
-    return cursor;
-}
-
-fn updateTaggedBytes(hasher: *std.crypto.hash.sha2.Sha256, tag: []const u8, bytes: []const u8) void {
-    updateU64(hasher, @intCast(tag.len));
-    hasher.update(tag);
-    updateU64(hasher, @intCast(bytes.len));
-    hasher.update(bytes);
-}
-
-fn updateU64(hasher: *std.crypto.hash.sha2.Sha256, value: u64) void {
-    var buffer: [8]u8 = undefined;
-    std.mem.writeInt(u64, &buffer, value, .little);
-    hasher.update(&buffer);
+fn appendHexDigest(buffer: []u8, offset: usize, digest: *const crypto_hash.Digest) !usize {
+    const output_len = crypto_hash.hex_digest_bytes;
+    if (offset + output_len > buffer.len) return error.ManifestTooLarge;
+    _ = hex.encodeLower(digest, buffer[offset..][0..output_len]) catch return error.ManifestTooLarge;
+    return offset + output_len;
 }
 
 fn writeByteArray(writer: anytype, bytes: []const u8) !void {

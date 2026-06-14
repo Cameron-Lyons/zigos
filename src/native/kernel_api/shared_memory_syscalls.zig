@@ -42,10 +42,7 @@ pub fn dispatchSharedMemoryUnmap(
 ) dispatch.DispatchResult {
     const request = dispatch.readRequest(component_port.SharedMemoryUnmapRequest, memory, request_addr) orelse return dispatch.invalidRequest();
     const unmapped = component_port.invokeGenerated(.shared_memory_unmap, port, request, now_ticks) catch |err| return dispatch.mapError(err);
-    return dispatch.writeResponse(memory, response_addr, response_len, abi.BoolResponse{
-        .value = @intFromBool(unmapped),
-        ._reserved = [_]u8{0} ** 7,
-    });
+    return dispatch.writeResponse(memory, response_addr, response_len, abi.boolResponse(unmapped));
 }
 
 pub fn dispatchSharedMemoryRevoke(

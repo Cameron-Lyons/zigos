@@ -14,27 +14,27 @@ pub fn run(
     const phone_device_principal = principal.PrincipalId{ .kind = .device, .serial = 3 };
     const user_root_signer = signing.SignerIdentity{
         .label = "zigos-user-root",
-        .seed = [_]u8{0x91} ** 32,
+        .seed = signing.seedFromByte(0x91),
     };
     const local_device_signer = signing.SignerIdentity{
         .label = "local-device",
-        .seed = [_]u8{0x92} ** 32,
+        .seed = signing.seedFromByte(0x92),
     };
     const tablet_device_signer = signing.SignerIdentity{
         .label = "tablet-device",
-        .seed = [_]u8{0x93} ** 32,
+        .seed = signing.seedFromByte(0x93),
     };
     const tablet_rotated_signer = signing.SignerIdentity{
         .label = "tablet-device-v2",
-        .seed = [_]u8{0x94} ** 32,
+        .seed = signing.seedFromByte(0x94),
     };
     const phone_device_signer = signing.SignerIdentity{
         .label = "phone-device",
-        .seed = [_]u8{0x95} ** 32,
+        .seed = signing.seedFromByte(0x95),
     };
     const database_contract_signer = signing.SignerIdentity{
         .label = "zigos-db-sync",
-        .seed = [_]u8{0x96} ** 32,
+        .seed = signing.seedFromByte(0x96),
     };
     var sync_port = sync_service_mod.SyncPort.init(sync_service, context.capability_table);
     const sync_authority = support.mintSyncAuthority(context, 100);

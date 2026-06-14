@@ -79,13 +79,13 @@ fn parseRecordKind(value: u8) Error!RecordKind {
 }
 
 fn writeU32At(buffer: []u8, value: u32) void {
-    var bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &bytes, value, .little);
-    @memcpy(buffer[0..4], &bytes);
+    writeIntAt(u32, buffer, value);
 }
 
 fn writeU64At(buffer: []u8, value: u64) void {
-    var bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, &bytes, value, .little);
-    @memcpy(buffer[0..8], &bytes);
+    writeIntAt(u64, buffer, value);
+}
+
+fn writeIntAt(comptime T: type, buffer: []u8, value: T) void {
+    std.mem.writeInt(T, buffer[0..@sizeOf(T)], value, .little);
 }
