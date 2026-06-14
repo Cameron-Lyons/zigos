@@ -12,7 +12,7 @@ const EventKind = event_ledger.EventKind;
 const Ledger = event_ledger.Ledger;
 const DIAGNOSTIC_EXPORT_BUFFER_BYTES = units.kibibytes(2);
 const REMOTE_SHARE_BUFFER_BYTES = units.kibibytes(1);
-const USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES: usize = 768;
+const USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES: usize = 1024;
 const DOCUMENT_KNOWLEDGE_BUFFER_BYTES: usize = 512;
 const DETAIL_PAYLOAD_BUFFER_BYTES: usize = 96;
 const QUERY_EVENT_RECORD_CAPACITY: usize = 4;
@@ -84,6 +84,99 @@ test "event ledger requires explicit opt-in before remote sharing personal devic
         .include_protected_content = true,
     });
     try std.testing.expect(std.mem.indexOf(u8, managed, "payroll.xlsx") != null);
+}
+
+test "event ledger records AI inference as protected diagnostic evidence" {
+    var ledger = Ledger.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 21 };
+
+    try ledger.recordAiInference(user, 2101, false, true, false, 70, "prompt mentions private note title");
+    try ledger.recordAiInference(user, 2101, true, false, false, 71, "local model summarized object");
+
+    var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
+    const redacted = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=ai_inference") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "redacted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "private note title") == null);
+
+    const full = try ledger.exportText(&export_buffer, .{ .include_protected_content = true });
+    try std.testing.expect(std.mem.indexOf(u8, full, "private note title") != null);
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    try std.testing.expectEqual(@as(usize, 2), summary.ai_inference_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.ai_remote_denials);
+    try std.testing.expectEqual(@as(usize, 2), summary.protected_details_redacted);
+
+    var summary_buffer: [USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES]u8 = undefined;
+    const rendered = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "ai_inference_events=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "ai_remote_denials=1") != null);
+}
+
+test "event ledger records private egress and privacy budgets as redacted evidence" {
+    var ledger = Ledger.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 22 };
+
+    try ledger.recordDataEgress(user, 2201, .private_user_data, 2048, false, 80, "workspace://notes/private.md");
+    try ledger.recordPrivacyBudget(user, 2201, false, 81, "private egress budget exhausted");
+
+    var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
+    const redacted = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=data_egress") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=privacy_budget") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "private.md") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "budget exhausted") == null);
+
+    const full = try ledger.exportText(&export_buffer, .{ .include_protected_content = true });
+    try std.testing.expect(std.mem.indexOf(u8, full, "private.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, full, "budget exhausted") != null);
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    try std.testing.expectEqual(@as(usize, 1), summary.data_egress_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.private_egress_denials);
+    try std.testing.expectEqual(@as(usize, 1), summary.privacy_budget_events);
+    try std.testing.expectEqual(@as(usize, 2), summary.protected_details_redacted);
+
+    var summary_buffer: [USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES]u8 = undefined;
+    const rendered = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "data_egress_events=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "private_egress_denials=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "privacy_budget_events=1") != null);
+}
+
+test "event ledger records retention leases and consent receipts as redacted evidence" {
+    var ledger = Ledger.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 23 };
+
+    try ledger.recordRetentionPolicy(user, 2301, 30, true, 90, "retain private capture for 30 days", true);
+    try ledger.recordPermissionLease(user, 2301, .camera, .issued, 300, 91, "camera lease issued for scan", true);
+    try ledger.recordPermissionLease(user, 2301, .camera, .expired, 300, 92, "camera lease expired", true);
+    try ledger.recordConsentReceipt(user, 2301, 7001, .recorded, 93, "consent for document scan");
+    try ledger.recordConsentReceipt(user, 2301, 7001, .revoked, 94, "consent revoked");
+
+    var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
+    const redacted = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=retention_policy") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=permission_lease") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=consent_receipt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "document scan") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "redacted") != null);
+
+    const full = try ledger.exportText(&export_buffer, .{ .include_protected_content = true });
+    try std.testing.expect(std.mem.indexOf(u8, full, "document scan") != null);
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    try std.testing.expectEqual(@as(usize, 1), summary.retention_policy_events);
+    try std.testing.expectEqual(@as(usize, 2), summary.permission_lease_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.permission_lease_expirations);
+    try std.testing.expectEqual(@as(usize, 2), summary.consent_receipt_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.consent_receipt_revocations);
+
+    var summary_buffer: [USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES]u8 = undefined;
+    const rendered = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "retention_policy_events=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "permission_lease_expirations=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "consent_receipt_revocations=1") != null);
 }
 
 test "event ledger remote sharing scrubs protected diagnostics unless explicitly included" {

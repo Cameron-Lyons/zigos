@@ -11,6 +11,8 @@ const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const supervisor_mod = @import("../session/supervisor.zig");
 const units = @import("../core/units.zig");
+const elf_image_inspector = @import("../task/elf_image_inspector.zig");
+const userspace_boot_registry = @import("../task/userspace_boot_registry.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const copyText = native_util.copyText;
 
@@ -445,15 +447,27 @@ pub fn generatedUserspaceArchiveMatchesManifest(manifest: *const BuildArtifactMa
 
     if (manifest.countKind(.userspace_image) != generated_archive.artifacts.len) return false;
     for (generated_archive.artifacts) |artifact| {
-        if (artifact.data.len == 0) return false;
-        if (!artifact.signed) return false;
-        if (artifact.file_size_bytes != artifact.data.len) return false;
-
-        const digest = rawSha256(artifact.data);
-        if (!std.mem.eql(u8, &digest, &artifact.file_sha256)) return false;
-        if (!buildArtifactDigestMatches(manifest, .userspace_image, artifact.bundle_id, &digest)) return false;
+        if (!generatedArtifactMatchesManifest(manifest, artifact)) return false;
     }
 
+    return true;
+}
+
+fn generatedArtifactMatchesManifest(manifest: *const BuildArtifactManifest, artifact: anytype) bool {
+    const spec = userspace_boot_registry.find(artifact.bundle_id) orelse return false;
+    userspace_boot_registry.validateGeneratedArtifactMatchesSpec(spec, artifact) catch return false;
+    if (artifact.data.len == 0) return false;
+    if (!artifact.signed) return false;
+    if (artifact.file_size_bytes != artifact.data.len) return false;
+
+    const digest = rawSha256(artifact.data);
+    if (!std.mem.eql(u8, &digest, &artifact.file_sha256)) return false;
+    if (!buildArtifactDigestMatches(manifest, .userspace_image, artifact.bundle_id, &digest)) return false;
+
+    const inspection = elf_image_inspector.inspect(artifact.data) catch return false;
+    if (artifact.entry_point != inspection.entry_point) return false;
+    if (artifact.bootstrap_mailbox_address != inspection.bootstrap_mailbox_address) return false;
+    if (artifact.segment_count != inspection.executable_image.segment_count) return false;
     return true;
 }
 
@@ -478,6 +492,14 @@ pub fn generatedProductionArtifactManifestMatchesUserspaceArchive() !void {
     try removeBuildArtifactEntry(&missing_entry, stale_index);
     try signBuildArtifactManifestForTest(&missing_entry);
     try std.testing.expect(!generatedUserspaceArchiveMatchesManifest(&missing_entry));
+
+    var stale_metadata = generated_archive.artifacts[0];
+    stale_metadata.entry_point +%= 0x1000;
+    try std.testing.expect(!generatedArtifactMatchesManifest(&manifest, stale_metadata));
+
+    var stale_registry_identity = generated_archive.artifacts[0];
+    stale_registry_identity.publisher = "stale.publisher";
+    try std.testing.expect(!generatedArtifactMatchesManifest(&manifest, stale_registry_identity));
 }
 
 pub fn buildArtifactEntry(kind: BuildArtifactKind, label: []const u8, digest: crypto_hash.Digest) Error!BuildArtifactEntry {

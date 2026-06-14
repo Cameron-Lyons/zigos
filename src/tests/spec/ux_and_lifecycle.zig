@@ -438,7 +438,7 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
 
     const updated = try packages_entry.port.install(packages_entry.authority, .{
         .bundle = v2,
-        .source_identity = "repo:corp",
+        .source_identity = "store:zigos",
         .data_schema_version = 2,
         .declared_permission_change = true,
     }, org_policy);

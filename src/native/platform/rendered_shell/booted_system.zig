@@ -282,6 +282,9 @@ pub const BootedSystem = struct {
             yesNo(self.shell.state.object_conflict_reviewed),
             yesNo(self.shell.state.package_removed),
         });
+        if (self.shell.state.document_text_len != 0) {
+            try appendFmt(buffer, &used, "document_text={s}\n", .{self.shell.documentTextSlice()});
+        }
         if (self.shell.state.permission_denied) {
             try appendFmt(buffer, &used, "permission_error reason={s} policy={s} missing={s} approval={s} retry_safe={s}\n", .{
                 @tagName(self.shell.state.last_denial.reason),

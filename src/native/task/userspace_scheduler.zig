@@ -986,6 +986,26 @@ fn createRunnableSchedulerTask(
     bundle_id: []const u8,
     ui_surface_id: ?u64,
 ) !*task_runtime.TaskRecord {
+    return createRunnableSchedulerTaskWithBudget(
+        runtime,
+        serial,
+        class,
+        label,
+        bundle_id,
+        ui_surface_id,
+        DISPATCH_CPU_TICK_COST,
+    );
+}
+
+fn createRunnableSchedulerTaskWithBudget(
+    runtime: *task_runtime.Runtime,
+    serial: u64,
+    class: accelerator_scheduler.ResourceClass,
+    label: []const u8,
+    bundle_id: []const u8,
+    ui_surface_id: ?u64,
+    cpu_time_ticks: u64,
+) !*task_runtime.TaskRecord {
     var image = task_runtime.syntheticUserspaceImage(label, bundle_id);
     const service_task = class == .emergency_system_critical;
     return runtime.createTask(.{
@@ -995,7 +1015,7 @@ fn createRunnableSchedulerTask(
         },
         .component_class = if (service_task) .service_component else .app_component,
         .budget = .{
-            .cpu_time_ticks = DISPATCH_CPU_TICK_COST,
+            .cpu_time_ticks = cpu_time_ticks,
             .memory_bytes = TEST_TASK_MEMORY_BYTES,
             .endpoint_slots = TEST_TASK_ENDPOINT_SLOTS,
             .shared_memory_bytes = TEST_ACCELERATOR_SHARED_MEMORY_BYTES,
@@ -1736,6 +1756,83 @@ test "userspace scheduler applies booted live telemetry across every resource cl
     const batch_slot = scheduler.slots.getConst(batch.id).?;
     try std.testing.expectEqual(@as(u64, 1), batch_slot.dispatch_count);
     try std.testing.expectEqual(accelerator_scheduler.Engine.npu, batch_slot.last_dispatch_engine);
+}
+
+test "userspace scheduler sustained load gate bounds background and batch starvation" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 1,
+        .gpu_available = true,
+        .npu_available = true,
+        .media_available = true,
+        .cpu_budget_ticks = DISPATCH_CPU_TICK_COST * 256,
+        .memory_bandwidth_units = 1024,
+    });
+
+    const foreground = try createRunnableSchedulerTaskWithBudget(
+        &runtime,
+        240,
+        .foreground_interactive,
+        "sustained-foreground",
+        "app.example.sustained-foreground",
+        240,
+        DISPATCH_CPU_TICK_COST * 160,
+    );
+    const background = try createRunnableSchedulerTaskWithBudget(
+        &runtime,
+        241,
+        .background_light,
+        "sustained-background",
+        "app.example.sustained-background",
+        null,
+        DISPATCH_CPU_TICK_COST * 8,
+    );
+    const batch = try createRunnableSchedulerTaskWithBudget(
+        &runtime,
+        242,
+        .batch_compute,
+        "sustained-batch",
+        "app.example.sustained-batch",
+        null,
+        DISPATCH_CPU_TICK_COST * 8,
+    );
+
+    try std.testing.expect(scheduler.registerTask(foreground.id));
+    try std.testing.expect(scheduler.registerTask(background.id));
+    try std.testing.expect(scheduler.registerTask(batch.id));
+
+    var first_background_dispatch_tick: u64 = 0;
+    var first_batch_dispatch_tick: u64 = 0;
+    var now_ticks: u64 = 1_000;
+    while (now_ticks <= BATCH_DEADLINE_DELTA_TICKS + 2_000) : (now_ticks += 1_000) {
+        _ = scheduler.runNext(now_ticks);
+        const background_stats = scheduler.taskDispatchStats(background.id).?;
+        const batch_stats = scheduler.taskDispatchStats(batch.id).?;
+        if (first_background_dispatch_tick == 0 and background_stats.dispatch_count != 0) {
+            first_background_dispatch_tick = background_stats.last_dispatch_tick;
+        }
+        if (first_batch_dispatch_tick == 0 and batch_stats.dispatch_count != 0) {
+            first_batch_dispatch_tick = batch_stats.last_dispatch_tick;
+        }
+    }
+
+    const foreground_stats = scheduler.taskDispatchStats(foreground.id).?;
+    const background_stats = scheduler.taskDispatchStats(background.id).?;
+    const batch_stats = scheduler.taskDispatchStats(batch.id).?;
+    try std.testing.expect(foreground_stats.dispatch_count > background_stats.dispatch_count);
+    try std.testing.expect(background_stats.dispatch_count > 0);
+    try std.testing.expect(batch_stats.dispatch_count > 0);
+    try std.testing.expect(first_background_dispatch_tick <= BACKGROUND_DEADLINE_DELTA_TICKS);
+    try std.testing.expect(first_batch_dispatch_tick <= BATCH_DEADLINE_DELTA_TICKS + 1_000);
+    try std.testing.expectEqual(@as(u64, 0), background_stats.missed_deadline_count);
+    try std.testing.expectEqual(@as(u64, 1), batch_stats.missed_deadline_count);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.npu, batch_stats.last_dispatch_engine);
 }
 
 test "userspace scheduler thermal pressure gates batch queues without scanning task slots" {

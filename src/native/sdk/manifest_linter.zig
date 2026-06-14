@@ -22,6 +22,11 @@ pub const Code = enum(u8) {
     optional_permission,
     background_budget,
     local_first,
+    sensitive_permission_reason,
+    sensitive_remote_egress,
+    sensitive_permission_purpose,
+    sensitive_permission_retention,
+    sensitive_permission_lease,
     idl_parse,
     idl_untyped_operation,
     idl_interface_missing_manifest,
@@ -29,6 +34,7 @@ pub const Code = enum(u8) {
     idl_object_permission_missing,
     idl_sync_permission_missing,
     posix_dependency,
+    compat_dependency,
 };
 
 pub const Issue = struct {
@@ -98,9 +104,24 @@ pub fn lint(bundle: manifest.BundleManifest) Report {
             report.add(.info, .optional_permission, "optional permission will be presented as skippable in review");
         }
         if (request.local_only) local_permission_count += 1;
+        if (manifest.dangerousPermissionKind(request.kind) and request.user_visible_reason.len == 0) {
+            report.add(.warning, .sensitive_permission_reason, "dangerous permissions should include user-visible reason text");
+        }
+        if (manifest.isSensitive(request.sensitivity) and request.purpose == .unspecified) {
+            report.add(.warning, .sensitive_permission_purpose, "sensitive permissions should declare a specific purpose");
+        }
+        if (manifest.isSensitive(request.sensitivity) and request.retention_days == 0) {
+            report.add(.warning, .sensitive_permission_retention, "sensitive permissions should declare retention days");
+        }
+        if (manifest.isSensitive(request.sensitivity) and manifest.dangerousPermissionKind(request.kind) and request.max_lease_ticks == 0) {
+            report.add(.warning, .sensitive_permission_lease, "sensitive device permissions should be lease bounded");
+        }
         if (request.kind == .network_egress) {
             if (!request.egress_intent.declared() or !request.egress_intent.complete()) {
                 report.add(.err, .data_egress_intent, "network_egress must declare sync_object, call_service, or publish_event intent");
+            }
+            if (manifest.isSensitive(request.sensitivity) and request.rights.has(.network_remote)) {
+                report.add(.warning, .sensitive_remote_egress, request.resource);
             }
             if (request.rights.has(.network_remote)) {
                 report.add(.warning, .broad_network, request.resource);
@@ -162,6 +183,9 @@ pub fn lintWithIdl(bundle: manifest.BundleManifest, idl_source: []const u8) Repo
     if (mentionsPosix(bundle) or std.mem.indexOf(u8, idl_source, "posix") != null or std.mem.indexOf(u8, idl_source, "POSIX") != null) {
         report.add(.err, .posix_dependency, "native apps must use declared services instead of POSIX escape hatches");
     }
+    if (mentionsCompat(bundle) or std.mem.indexOf(u8, idl_source, "compat.") != null) {
+        report.add(.err, .compat_dependency, "compatibility wrappers must be replaced with native typed components");
+    }
 
     return report;
 }
@@ -214,6 +238,14 @@ fn mentionsPosix(bundle: manifest.BundleManifest) bool {
     return false;
 }
 
+fn mentionsCompat(bundle: manifest.BundleManifest) bool {
+    if (std.mem.startsWith(u8, bundle.bundle_id, "compat.") or std.mem.indexOf(u8, bundle.bundle_id, ".compat.") != null) return true;
+    for (bundle.components) |component| {
+        if (std.mem.startsWith(u8, component.entry, "compat.") or std.mem.indexOf(u8, component.entry, ".compat.") != null) return true;
+    }
+    return false;
+}
+
 test "manifest linter explains SDK packaging problems without stopping at the first issue" {
     const report = lint(.{
         .bundle_id = "app.empty",
@@ -237,4 +269,61 @@ test "manifest linter validates typed native IDL package contracts" {
     );
     try std.testing.expect(untyped.hasErrors());
     try std.testing.expect(untyped.count(.err) >= 1);
+}
+
+test "manifest linter rejects compatibility wrapper packages" {
+    const compat_components = [_]manifest.ExecutionComponentDecl{
+        .{ .id = "main", .entry = "compat.posix.main" },
+    };
+    const compat_interfaces = [_]manifest.InterfaceDecl{
+        .{ .name = "zigos.object.workspace" },
+    };
+    const compat_assets = [_]manifest.AssetDecl{
+        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
+    };
+    const report = lintWithIdl(.{
+        .bundle_id = "compat.posix",
+        .display_name = "Compat POSIX",
+        .publisher = "zigos.dev",
+        .components = &compat_components,
+        .provided_interfaces = &compat_interfaces,
+        .assets = &compat_assets,
+    },
+        \\interface zigos.object.workspace 1.0
+        \\native object workspace:notes
+    );
+
+    try std.testing.expect(report.hasErrors());
+    try std.testing.expect(report.count(.err) >= 1);
+}
+
+test "manifest linter highlights sensitive permission explanations and remote egress" {
+    const permissions = [_]manifest.PermissionRequest{
+        .{
+            .kind = .camera,
+            .resource = "camera.front",
+            .rights = .{ .device = .{} },
+            .local_only = true,
+            .sensitivity = .private_user_data,
+        },
+        .{
+            .kind = .network_egress,
+            .resource = "relay.private",
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .sensitivity = .private_user_data,
+            .egress_intent = .{
+                .kind = .call_service,
+                .service = "private.relay",
+            },
+        },
+    };
+    const report = lint(.{
+        .bundle_id = "app.private-tools",
+        .display_name = "Private Tools",
+        .publisher = "zigos.dev",
+        .requested_permissions = &permissions,
+    });
+
+    try std.testing.expect(report.hasErrors());
+    try std.testing.expect(report.count(.warning) >= 2);
 }

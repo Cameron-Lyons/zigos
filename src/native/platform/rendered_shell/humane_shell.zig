@@ -1119,7 +1119,7 @@ pub const HumaneShell = struct {
         self.state.document_text_len = len;
     }
 
-    fn documentTextSlice(self: *const HumaneShell) []const u8 {
+    pub fn documentTextSlice(self: *const HumaneShell) []const u8 {
         return self.state.document_text[0..self.state.document_text_len];
     }
 

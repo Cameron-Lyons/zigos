@@ -13,11 +13,13 @@ pub const MAX_INTERFACES_PER_BUNDLE: usize = 8;
 pub const MAX_INTERFACE_NAME_BYTES: usize = 64;
 pub const MAX_PERMISSIONS_PER_BUNDLE: usize = 16;
 pub const MAX_PERMISSION_RESOURCE_BYTES: usize = 96;
+pub const MAX_PERMISSION_REASON_BYTES: usize = 128;
 pub const MAX_BACKGROUND_TASKS_PER_BUNDLE: usize = 8;
 pub const MAX_BACKGROUND_TASK_ID_BYTES: usize = 48;
 pub const MAX_MODEL_FAMILY_BYTES: usize = 48;
 pub const MAX_SIGNATURE_FORMAT_BYTES: usize = 16;
 pub const MAX_SIGNATURE_SIGNER_BYTES: usize = 64;
+pub const MAX_INSTALL_SOURCE_BYTES: usize = 96;
 pub const MAX_REVISIONS_PER_BUNDLE: usize = 2;
 
 pub const InstallRequest = struct {
@@ -98,6 +100,11 @@ pub const StoredPermission = struct {
     max_lease_ticks: u64 = 0,
     target_id: u64 = 0,
     egress_intent_kind: manifest.DataEgressIntentKind = .unspecified,
+    sensitivity: manifest.DataSensitivity = .internal_data,
+    purpose: manifest.PermissionPurpose = .unspecified,
+    retention_days: u16 = 0,
+    user_visible_reason_len: usize = 0,
+    user_visible_reason: [MAX_PERMISSION_REASON_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_REASON_BYTES,
     egress_object_len: usize = 0,
     egress_object: [MAX_PERMISSION_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_PERMISSION_RESOURCE_BYTES,
     egress_principal_len: usize = 0,
@@ -109,6 +116,10 @@ pub const StoredPermission = struct {
 
     pub fn resourceSlice(self: *const StoredPermission) []const u8 {
         return self.resource[0..self.resource_len];
+    }
+
+    pub fn userVisibleReasonSlice(self: *const StoredPermission) []const u8 {
+        return self.user_visible_reason[0..self.user_visible_reason_len];
     }
 
     pub fn egressObjectSlice(self: *const StoredPermission) []const u8 {
@@ -147,6 +158,10 @@ pub const StoredAiMetadata = struct {
     model_family: [MAX_MODEL_FAMILY_BYTES]u8 = [_]u8{0} ** MAX_MODEL_FAMILY_BYTES,
     locality: manifest.AiLocality = .inherit_task,
     offline_required: bool = false,
+    private_context: bool = false,
+    training_allowed: bool = false,
+    max_context_bytes: usize = 0,
+    audit_prompt_use: bool = false,
 
     pub fn modelFamilySlice(self: *const StoredAiMetadata) []const u8 {
         return self.model_family[0..self.model_family_len];
@@ -170,6 +185,17 @@ pub const StoredSignature = struct {
     pub fn signerSlice(self: *const StoredSignature) []const u8 {
         return self.signer[0..self.signer_len];
     }
+
+    pub fn toManifest(self: *const StoredSignature) manifest.Signature {
+        return .{
+            .format = self.formatSlice(),
+            .signer = self.signerSlice(),
+            .public_key_len = self.public_key_len,
+            .public_key = self.public_key,
+            .value_len = self.value_len,
+            .value = self.value,
+        };
+    }
 };
 
 pub const ResolvedManifest = struct {
@@ -189,6 +215,8 @@ pub const BundleRevision = struct {
     display_name: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
     publisher_len: usize = 0,
     publisher: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    source_identity_len: usize = 0,
+    source_identity: [MAX_INSTALL_SOURCE_BYTES]u8 = [_]u8{0} ** MAX_INSTALL_SOURCE_BYTES,
     version_major: u16 = 0,
     version_minor: u16 = 0,
     channel: manifest.UpdateChannel = .stable,
@@ -215,6 +243,10 @@ pub const BundleRevision = struct {
 
     pub fn publisherSlice(self: *const BundleRevision) []const u8 {
         return self.publisher[0..self.publisher_len];
+    }
+
+    pub fn sourceIdentitySlice(self: *const BundleRevision) []const u8 {
+        return self.source_identity[0..self.source_identity_len];
     }
 };
 
@@ -254,6 +286,10 @@ pub const InstalledBundle = struct {
 
     pub fn publisherSlice(self: *const InstalledBundle) []const u8 {
         return self.activeRevision().publisherSlice();
+    }
+
+    pub fn sourceIdentitySlice(self: *const InstalledBundle) []const u8 {
+        return self.activeRevision().sourceIdentitySlice();
     }
 
     pub fn inactiveRevisionSlot(self: *const InstalledBundle) u8 {

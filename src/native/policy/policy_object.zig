@@ -48,6 +48,19 @@ pub const DecisionReason = enum(u8) {
     sync_destination_denied,
     removable_storage_denied,
     screen_capture_denied,
+    clipboard_denied,
+    camera_denied,
+    microphone_denied,
+    location_denied,
+    contacts_denied,
+    sensor_denied,
+    peer_ipc_denied,
+    remote_ai_denied,
+    ai_training_denied,
+    ai_context_denied,
+    private_egress_budget_denied,
+    permission_retention_denied,
+    permission_lease_denied,
     retention_denied,
     audit_export_required,
 };
@@ -72,6 +85,20 @@ pub const CreateRequest = struct {
     allowed_sync_destinations: []const []const u8 = &.{},
     removable_storage_allowed: bool = false,
     screen_capture_allowed: bool = false,
+    clipboard_allowed: bool = false,
+    camera_allowed: bool = false,
+    microphone_allowed: bool = false,
+    location_allowed: bool = false,
+    contacts_allowed: bool = false,
+    sensors_allowed: bool = false,
+    peer_ipc_allowed: bool = false,
+    remote_ai_allowed: bool = false,
+    ai_training_allowed: bool = false,
+    max_ai_context_bytes: usize = 0,
+    max_remote_private_egress_bytes: usize = 0,
+    max_sensitive_retention_days: u16 = 0,
+    max_permission_lease_ticks: u64 = 0,
+    require_sensitive_permission_lease: bool = false,
     retention_days: u16 = 0,
     audit_export_required: bool = false,
 };
@@ -79,6 +106,24 @@ pub const CreateRequest = struct {
 pub const RetentionAuditRequest = struct {
     retention_days: u16,
     audit_export_present: bool = false,
+};
+
+pub const AiUseRequest = struct {
+    remote_model: bool = false,
+    training_user_content: bool = false,
+    context_bytes: usize = 0,
+};
+
+pub const SensitiveEgressRequest = struct {
+    sensitivity: manifest.DataSensitivity = .internal_data,
+    remote_bytes: usize = 0,
+};
+
+pub const PermissionUseRequest = struct {
+    kind: manifest.PermissionKind,
+    sensitivity: manifest.DataSensitivity = .internal_data,
+    retention_days: u16 = 0,
+    lease_ticks: u64 = 0,
 };
 
 pub const PolicyObject = struct {
@@ -103,6 +148,20 @@ pub const PolicyObject = struct {
     allowed_sync_destination_lens: [MAX_ALLOW_LIST]usize,
     removable_storage_allowed: bool,
     screen_capture_allowed: bool,
+    clipboard_allowed: bool,
+    camera_allowed: bool,
+    microphone_allowed: bool,
+    location_allowed: bool,
+    contacts_allowed: bool,
+    sensors_allowed: bool,
+    peer_ipc_allowed: bool,
+    remote_ai_allowed: bool,
+    ai_training_allowed: bool,
+    max_ai_context_bytes: usize,
+    max_remote_private_egress_bytes: usize,
+    max_sensitive_retention_days: u16,
+    max_permission_lease_ticks: u64,
+    require_sensitive_permission_lease: bool,
     retention_days: u16,
     audit_export_required: bool,
     signature: manifest.Signature,
@@ -212,6 +271,20 @@ pub const Directory = struct {
         slot.policy.network_egress_mode = request.network_egress_mode;
         slot.policy.removable_storage_allowed = request.removable_storage_allowed;
         slot.policy.screen_capture_allowed = request.screen_capture_allowed;
+        slot.policy.clipboard_allowed = request.clipboard_allowed;
+        slot.policy.camera_allowed = request.camera_allowed;
+        slot.policy.microphone_allowed = request.microphone_allowed;
+        slot.policy.location_allowed = request.location_allowed;
+        slot.policy.contacts_allowed = request.contacts_allowed;
+        slot.policy.sensors_allowed = request.sensors_allowed;
+        slot.policy.peer_ipc_allowed = request.peer_ipc_allowed;
+        slot.policy.remote_ai_allowed = request.remote_ai_allowed;
+        slot.policy.ai_training_allowed = request.ai_training_allowed;
+        slot.policy.max_ai_context_bytes = request.max_ai_context_bytes;
+        slot.policy.max_remote_private_egress_bytes = request.max_remote_private_egress_bytes;
+        slot.policy.max_sensitive_retention_days = request.max_sensitive_retention_days;
+        slot.policy.max_permission_lease_ticks = request.max_permission_lease_ticks;
+        slot.policy.require_sensitive_permission_lease = request.require_sensitive_permission_lease;
         slot.policy.retention_days = request.retention_days;
         slot.policy.audit_export_required = request.audit_export_required;
 
@@ -371,6 +444,86 @@ pub const Directory = struct {
         return allow();
     }
 
+    pub fn permissionKindDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        kind: manifest.PermissionKind,
+    ) PolicyDecision {
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (!policyAllowsPermissionKind(policy, kind)) {
+                return block(policy, permissionKindDenialReason(kind));
+            }
+        }
+        return allow();
+    }
+
+    pub fn aiUseDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: AiUseRequest,
+    ) PolicyDecision {
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (request.remote_model and !policy.remote_ai_allowed) return block(policy, .remote_ai_denied);
+            if (request.training_user_content and !policy.ai_training_allowed) return block(policy, .ai_training_denied);
+            if (policy.max_ai_context_bytes != 0 and request.context_bytes > policy.max_ai_context_bytes) {
+                return block(policy, .ai_context_denied);
+            }
+        }
+        return allow();
+    }
+
+    pub fn sensitiveEgressDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: SensitiveEgressRequest,
+    ) PolicyDecision {
+        if (!manifest.isSensitive(request.sensitivity)) return allow();
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (policy.max_remote_private_egress_bytes != 0 and request.remote_bytes > policy.max_remote_private_egress_bytes) {
+                return block(policy, .private_egress_budget_denied);
+            }
+        }
+        return allow();
+    }
+
+    pub fn permissionUseDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: PermissionUseRequest,
+    ) PolicyDecision {
+        if (!manifest.isSensitive(request.sensitivity)) return allow();
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (policy.max_sensitive_retention_days != 0 and request.retention_days > policy.max_sensitive_retention_days) {
+                return block(policy, .permission_retention_denied);
+            }
+            if (manifest.dangerousPermissionKind(request.kind) and
+                policy.require_sensitive_permission_lease and
+                request.lease_ticks == 0)
+            {
+                return block(policy, .permission_lease_denied);
+            }
+            if (manifest.dangerousPermissionKind(request.kind) and
+                policy.max_permission_lease_ticks != 0 and
+                request.lease_ticks > policy.max_permission_lease_ticks)
+            {
+                return block(policy, .permission_lease_denied);
+            }
+        }
+        return allow();
+    }
+
     pub fn retentionAuditDecision(
         self: *const Directory,
         subjects: SubjectSet,
@@ -489,6 +642,34 @@ fn block(policy: *const PolicyObject, reason: DecisionReason) PolicyDecision {
     };
 }
 
+fn policyAllowsPermissionKind(policy: *const PolicyObject, kind: manifest.PermissionKind) bool {
+    return switch (kind) {
+        .clipboard => policy.clipboard_allowed,
+        .camera => policy.camera_allowed,
+        .mic => policy.microphone_allowed,
+        .location => policy.location_allowed,
+        .contacts => policy.contacts_allowed,
+        .sensor => policy.sensors_allowed,
+        .screen_capture => policy.screen_capture_allowed,
+        .peer_ipc => policy.peer_ipc_allowed,
+        else => true,
+    };
+}
+
+fn permissionKindDenialReason(kind: manifest.PermissionKind) DecisionReason {
+    return switch (kind) {
+        .clipboard => .clipboard_denied,
+        .camera => .camera_denied,
+        .mic => .microphone_denied,
+        .location => .location_denied,
+        .contacts => .contacts_denied,
+        .sensor => .sensor_denied,
+        .screen_capture => .screen_capture_denied,
+        .peer_ipc => .peer_ipc_denied,
+        else => .none,
+    };
+}
+
 fn zeroPolicy() PolicyObject {
     return .{
         .id = 0,
@@ -512,6 +693,20 @@ fn zeroPolicy() PolicyObject {
         .allowed_sync_destination_lens = [_]usize{0} ** MAX_ALLOW_LIST,
         .removable_storage_allowed = false,
         .screen_capture_allowed = false,
+        .clipboard_allowed = false,
+        .camera_allowed = false,
+        .microphone_allowed = false,
+        .location_allowed = false,
+        .contacts_allowed = false,
+        .sensors_allowed = false,
+        .peer_ipc_allowed = false,
+        .remote_ai_allowed = false,
+        .ai_training_allowed = false,
+        .max_ai_context_bytes = 0,
+        .max_remote_private_egress_bytes = 0,
+        .max_sensitive_retention_days = 0,
+        .max_permission_lease_ticks = 0,
+        .require_sensitive_permission_lease = false,
         .retention_days = 0,
         .audit_export_required = false,
         .signature = .{},
@@ -555,6 +750,20 @@ fn policyDigest(policy: *const PolicyObject) crypto_hash.Digest {
     crypto_hash.updateEnum(&hasher, "network-egress-mode", policy.network_egress_mode);
     crypto_hash.updateBool(&hasher, "removable-storage-allowed", policy.removable_storage_allowed);
     crypto_hash.updateBool(&hasher, "screen-capture-allowed", policy.screen_capture_allowed);
+    crypto_hash.updateBool(&hasher, "clipboard-allowed", policy.clipboard_allowed);
+    crypto_hash.updateBool(&hasher, "camera-allowed", policy.camera_allowed);
+    crypto_hash.updateBool(&hasher, "microphone-allowed", policy.microphone_allowed);
+    crypto_hash.updateBool(&hasher, "location-allowed", policy.location_allowed);
+    crypto_hash.updateBool(&hasher, "contacts-allowed", policy.contacts_allowed);
+    crypto_hash.updateBool(&hasher, "sensors-allowed", policy.sensors_allowed);
+    crypto_hash.updateBool(&hasher, "peer-ipc-allowed", policy.peer_ipc_allowed);
+    crypto_hash.updateBool(&hasher, "remote-ai-allowed", policy.remote_ai_allowed);
+    crypto_hash.updateBool(&hasher, "ai-training-allowed", policy.ai_training_allowed);
+    crypto_hash.updateInt(&hasher, "max-ai-context-bytes", policy.max_ai_context_bytes);
+    crypto_hash.updateInt(&hasher, "max-remote-private-egress-bytes", policy.max_remote_private_egress_bytes);
+    crypto_hash.updateInt(&hasher, "max-sensitive-retention-days", policy.max_sensitive_retention_days);
+    crypto_hash.updateInt(&hasher, "max-permission-lease-ticks", policy.max_permission_lease_ticks);
+    crypto_hash.updateBool(&hasher, "require-sensitive-permission-lease", policy.require_sensitive_permission_lease);
     crypto_hash.updateInt(&hasher, "retention-days", policy.retention_days);
     crypto_hash.updateBool(&hasher, "audit-export-required", policy.audit_export_required);
 
@@ -602,6 +811,9 @@ test "policy objects remain signed scoped and enforce enterprise controls" {
         .allowed_sync_destinations = &.{ "relay.corp.example", "overlay.corp.example" },
         .removable_storage_allowed = false,
         .screen_capture_allowed = true,
+        .remote_ai_allowed = false,
+        .ai_training_allowed = false,
+        .max_ai_context_bytes = 4096,
         .retention_days = 365,
         .audit_export_required = true,
     }, .{
@@ -618,6 +830,9 @@ test "policy objects remain signed scoped and enforce enterprise controls" {
     try std.testing.expect(!directory.syncDestinationAllowed(.organization, 77, "relay.personal.example"));
     try std.testing.expect(!policy.removable_storage_allowed);
     try std.testing.expect(policy.screen_capture_allowed);
+    try std.testing.expect(!policy.remote_ai_allowed);
+    try std.testing.expect(!policy.ai_training_allowed);
+    try std.testing.expectEqual(@as(usize, 4096), policy.max_ai_context_bytes);
     try std.testing.expect(policy.audit_export_required);
     try std.testing.expectEqual(@as(u16, 365), policy.retention_days);
 
@@ -654,6 +869,9 @@ test "policy directory composes active user device workspace and organization po
         .network_egress_mode = .allow_list,
         .allowed_sync_destinations = &.{"relay.corp.example"},
         .screen_capture_allowed = false,
+        .remote_ai_allowed = false,
+        .ai_training_allowed = false,
+        .max_ai_context_bytes = 4096,
     }, signer);
     _ = try directory.create(.{
         .scope = .user,
@@ -664,6 +882,9 @@ test "policy directory composes active user device workspace and organization po
         .network_egress_mode = .inherit,
         .removable_storage_allowed = true,
         .screen_capture_allowed = true,
+        .remote_ai_allowed = true,
+        .ai_training_allowed = false,
+        .max_ai_context_bytes = 2048,
     }, signer);
     const device_policy = try directory.create(.{
         .scope = .device,
@@ -674,6 +895,8 @@ test "policy directory composes active user device workspace and organization po
         .allowed_install_sources = &.{"store:zigos"},
         .removable_storage_allowed = false,
         .screen_capture_allowed = true,
+        .remote_ai_allowed = true,
+        .ai_training_allowed = true,
     }, signer);
     _ = try directory.create(.{
         .scope = .workspace,
@@ -684,6 +907,9 @@ test "policy directory composes active user device workspace and organization po
         .allowed_sync_destinations = &.{ "relay.corp.example", "overlay.project.example" },
         .removable_storage_allowed = true,
         .screen_capture_allowed = true,
+        .remote_ai_allowed = true,
+        .ai_training_allowed = true,
+        .max_ai_context_bytes = 1024,
     }, signer);
 
     const subjects = SubjectSet{
@@ -716,6 +942,34 @@ test "policy directory composes active user device workspace and organization po
     try std.testing.expect(!screen_decision.allowed);
     try std.testing.expectEqual(org_policy.id, screen_decision.blocking_policy_id);
 
+    const remote_ai_decision = directory.aiUseDecision(subjects, .{
+        .remote_model = true,
+        .context_bytes = 512,
+    });
+    try std.testing.expect(!remote_ai_decision.allowed);
+    try std.testing.expectEqual(DecisionReason.remote_ai_denied, remote_ai_decision.reason);
+    try std.testing.expectEqual(Scope.organization, remote_ai_decision.blocking_scope.?);
+
+    const training_decision = directory.aiUseDecision(subjects, .{
+        .training_user_content = true,
+        .context_bytes = 512,
+    });
+    try std.testing.expect(!training_decision.allowed);
+    try std.testing.expectEqual(DecisionReason.ai_training_denied, training_decision.reason);
+    try std.testing.expectEqual(Scope.organization, training_decision.blocking_scope.?);
+
+    const context_decision = directory.aiUseDecision(subjects, .{
+        .context_bytes = 2_048,
+    });
+    try std.testing.expect(!context_decision.allowed);
+    try std.testing.expectEqual(DecisionReason.ai_context_denied, context_decision.reason);
+    try std.testing.expectEqual(Scope.workspace, context_decision.blocking_scope.?);
+
+    const local_small_ai_decision = directory.aiUseDecision(subjects, .{
+        .context_bytes = 512,
+    });
+    try std.testing.expect(local_small_ai_decision.allowed);
+
     const tightened_org = try directory.create(.{
         .scope = .organization,
         .subject_id = 7,
@@ -729,6 +983,152 @@ test "policy directory composes active user device workspace and organization po
     try std.testing.expect(!next_overlay_decision.allowed);
     try std.testing.expectEqual(tightened_org.id, next_overlay_decision.blocking_policy_id);
     try std.testing.expectEqual(@as(u32, 2), next_overlay_decision.blocking_generation);
+}
+
+test "policy directory gates sensitive device permissions and private egress budgets" {
+    var directory = Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "privacy-policy-key",
+        .seed = signing.seedFromByte(0x84),
+    };
+    const org_policy = try directory.create(.{
+        .scope = .organization,
+        .subject_id = 88,
+        .issuer = .{ .kind = .policy_authority, .serial = 88 },
+        .label = "privacy-baseline",
+        .camera_allowed = false,
+        .microphone_allowed = false,
+        .location_allowed = false,
+        .contacts_allowed = false,
+        .sensors_allowed = false,
+        .clipboard_allowed = false,
+        .peer_ipc_allowed = false,
+        .max_remote_private_egress_bytes = 1024,
+    }, signer);
+    _ = try directory.create(.{
+        .scope = .user,
+        .subject_id = 880,
+        .issuer = .{ .kind = .policy_authority, .serial = 89 },
+        .label = "user-local-tools",
+        .camera_allowed = true,
+        .microphone_allowed = true,
+        .location_allowed = true,
+        .contacts_allowed = true,
+        .sensors_allowed = true,
+        .clipboard_allowed = true,
+        .peer_ipc_allowed = true,
+        .max_remote_private_egress_bytes = 4096,
+    }, signer);
+
+    const subjects = SubjectSet{
+        .user_id = 880,
+        .organization_id = 88,
+    };
+    const camera_decision = directory.permissionKindDecision(subjects, .camera);
+    try std.testing.expect(!camera_decision.allowed);
+    try std.testing.expectEqual(DecisionReason.camera_denied, camera_decision.reason);
+    try std.testing.expectEqual(org_policy.id, camera_decision.blocking_policy_id);
+
+    const clipboard_decision = directory.permissionKindDecision(subjects, .clipboard);
+    try std.testing.expect(!clipboard_decision.allowed);
+    try std.testing.expectEqual(DecisionReason.clipboard_denied, clipboard_decision.reason);
+
+    const object_decision = directory.permissionKindDecision(subjects, .object_access);
+    try std.testing.expect(object_decision.allowed);
+
+    const small_private = directory.sensitiveEgressDecision(subjects, .{
+        .sensitivity = .private_user_data,
+        .remote_bytes = 512,
+    });
+    try std.testing.expect(small_private.allowed);
+
+    const large_private = directory.sensitiveEgressDecision(subjects, .{
+        .sensitivity = .private_user_data,
+        .remote_bytes = 2048,
+    });
+    try std.testing.expect(!large_private.allowed);
+    try std.testing.expectEqual(DecisionReason.private_egress_budget_denied, large_private.reason);
+    try std.testing.expectEqual(Scope.organization, large_private.blocking_scope.?);
+
+    const large_internal = directory.sensitiveEgressDecision(subjects, .{
+        .sensitivity = .internal_data,
+        .remote_bytes = 65_536,
+    });
+    try std.testing.expect(large_internal.allowed);
+}
+
+test "policy directory gates sensitive permission retention and leases" {
+    var directory = Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "permission-lifecycle-key",
+        .seed = signing.seedFromByte(0x85),
+    };
+    const org_policy = try directory.create(.{
+        .scope = .organization,
+        .subject_id = 89,
+        .issuer = .{ .kind = .policy_authority, .serial = 90 },
+        .label = "sensitive-lifecycle",
+        .max_sensitive_retention_days = 30,
+        .max_permission_lease_ticks = 600,
+        .require_sensitive_permission_lease = true,
+        .camera_allowed = true,
+    }, signer);
+    _ = try directory.create(.{
+        .scope = .user,
+        .subject_id = 891,
+        .issuer = .{ .kind = .policy_authority, .serial = 91 },
+        .label = "user-lifecycle",
+        .max_sensitive_retention_days = 90,
+        .max_permission_lease_ticks = 1200,
+        .require_sensitive_permission_lease = false,
+        .camera_allowed = true,
+    }, signer);
+
+    const subjects = SubjectSet{
+        .user_id = 891,
+        .organization_id = 89,
+    };
+    const allowed = directory.permissionUseDecision(subjects, .{
+        .kind = .camera,
+        .sensitivity = .private_user_data,
+        .retention_days = 7,
+        .lease_ticks = 300,
+    });
+    try std.testing.expect(allowed.allowed);
+
+    const retention_denied = directory.permissionUseDecision(subjects, .{
+        .kind = .camera,
+        .sensitivity = .private_user_data,
+        .retention_days = 45,
+        .lease_ticks = 300,
+    });
+    try std.testing.expect(!retention_denied.allowed);
+    try std.testing.expectEqual(DecisionReason.permission_retention_denied, retention_denied.reason);
+    try std.testing.expectEqual(org_policy.id, retention_denied.blocking_policy_id);
+
+    const missing_lease = directory.permissionUseDecision(subjects, .{
+        .kind = .camera,
+        .sensitivity = .private_user_data,
+        .retention_days = 7,
+    });
+    try std.testing.expect(!missing_lease.allowed);
+    try std.testing.expectEqual(DecisionReason.permission_lease_denied, missing_lease.reason);
+
+    const long_lease = directory.permissionUseDecision(subjects, .{
+        .kind = .camera,
+        .sensitivity = .private_user_data,
+        .retention_days = 7,
+        .lease_ticks = 900,
+    });
+    try std.testing.expect(!long_lease.allowed);
+    try std.testing.expectEqual(DecisionReason.permission_lease_denied, long_lease.reason);
+
+    const public_unbounded = directory.permissionUseDecision(subjects, .{
+        .kind = .camera,
+        .sensitivity = .public_data,
+        .retention_days = 365,
+    });
+    try std.testing.expect(public_unbounded.allowed);
 }
 
 test "policy objects reject oversized lists and refuse authorization after tampering" {

@@ -141,5 +141,13 @@ pub const platform_measured_boot_same_shape = "ZIGOS:PLATFORM:MEASURED_BOOT:COMP
 pub const platform_recovery_verify_reinstall = "ZIGOS:PLATFORM:RECOVERY:VERIFY_REINSTALL";
 pub const platform_ux_recover_system = "ZIGOS:PLATFORM:UX:RECOVER_SYSTEM";
 
+pub const notes_daily_driver_install_open_ok = "ZIGOS:NOTES_DAILY:INSTALL_OPEN:OK";
+pub const notes_daily_driver_edit_saved_ok = "ZIGOS:NOTES_DAILY:EDIT_SAVED:OK";
+pub const notes_daily_driver_share_sync_ok = "ZIGOS:NOTES_DAILY:SHARE_SYNC:OK";
+pub const notes_daily_driver_update_rollback_ok = "ZIGOS:NOTES_DAILY:UPDATE_ROLLBACK:OK";
+pub const notes_daily_driver_recovery_remove_ok = "ZIGOS:NOTES_DAILY:RECOVERY_REMOVE:OK";
+pub const notes_daily_driver_authority_revoked_ok = "ZIGOS:NOTES_DAILY:AUTHORITY_REVOKED:OK";
+pub const notes_daily_driver_complete = "ZIGOS:NOTES_DAILY:COMPLETE";
+
 pub const task_session_ready = "ZIGOS:TASK:SESSION_READY";
 pub const native_ready = "ZIGOS:NATIVE:READY";

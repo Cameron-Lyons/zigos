@@ -14,6 +14,8 @@ pub const MAX_NONCE_BYTES: usize = 32;
 pub const MAX_ROOT_LABEL_BYTES: usize = 48;
 pub const MAX_ROOT_KEY_ID_BYTES: usize = 64;
 pub const MAX_REVOKED_ROOT_GENERATIONS: usize = 8;
+pub const MIN_REMOTE_NONCE_BYTES: usize = 16;
+pub const MAX_REMOTE_NONCE_HISTORY: usize = 8;
 
 pub const KeyOrigin = enum(u8) {
     software,
@@ -248,15 +250,20 @@ pub const Error = error{
     NonceTooLong,
     RemotePartyTooLong,
     RootNotProvisioned,
+    RootIdentityMissing,
     RootLabelTooLong,
     TestRootProviderRejected,
     UnbackedAttestationRoot,
     RootLifecycleUnsupported,
+    InvalidRootGeneration,
     StaleRootGeneration,
     RootGenerationRevoked,
     RevocationListFull,
     UserVisibilityRequired,
     UnverifiedMeasuredRoot,
+    RemoteNonceMissing,
+    RemoteNonceTooShort,
+    RemoteNonceReplay,
 };
 
 pub const Service = struct {
@@ -264,6 +271,10 @@ pub const Service = struct {
     visible_request_count: usize = 0,
     last_remote_party_len: usize = 0,
     last_remote_party: [MAX_REMOTE_PARTY_BYTES]u8 = [_]u8{0} ** MAX_REMOTE_PARTY_BYTES,
+    last_remote_nonce_len: usize = 0,
+    last_remote_nonce: [MAX_NONCE_BYTES]u8 = [_]u8{0} ** MAX_NONCE_BYTES,
+    remote_nonce_history_count: usize = 0,
+    remote_nonce_history: [MAX_REMOTE_NONCE_HISTORY]crypto_hash.Digest = [_]crypto_hash.Digest{crypto_hash.zero_digest} ** MAX_REMOTE_NONCE_HISTORY,
     has_provisioned_root: bool = false,
     root_origin: KeyOrigin = .software,
     root_label_len: usize = 0,
@@ -283,6 +294,8 @@ pub const Service = struct {
     pub fn provisionRootProvider(self: *Service, provider: RootProvider) Error!void {
         if (!isBackedRootOrigin(provider.origin()) or !provider.descriptor.hardware_backed) return error.UnbackedAttestationRoot;
         if (!provider.descriptor.rotation_supported or !provider.descriptor.revocation_supported) return error.RootLifecycleUnsupported;
+        if (provider.keyGeneration() == 0) return error.InvalidRootGeneration;
+        if (provider.label().len == 0 or provider.keyId().len == 0) return error.RootIdentityMissing;
         if (provider.testOnly() and !self.allow_test_root_providers) return error.TestRootProviderRejected;
         if (self.isRootGenerationRevoked(provider.keyGeneration())) return error.RootGenerationRevoked;
         self.has_provisioned_root = true;
@@ -340,11 +353,28 @@ pub const Service = struct {
         if (!isBackedRootOrigin(provider.origin())) return error.UnbackedAttestationRoot;
         if (provider.origin() != self.root_origin) return error.UnbackedAttestationRoot;
         if (self.isRootGenerationRevoked(provider.keyGeneration())) return error.RootGenerationRevoked;
-        if (remote_party.len != 0 and !user_visible) return error.UserVisibilityRequired;
+        try self.validateRemoteChallenge(remote_party, nonce, user_visible);
         if (!boot.isRemoteAttestable()) return error.UnverifiedMeasuredRoot;
         if (!boot.isInternallyConsistent()) return error.UnverifiedMeasuredRoot;
 
         return self.attestWithProviderInternal(boot, remote_party, nonce, provider, user_visible);
+    }
+
+    fn validateRemoteChallenge(
+        self: *const Service,
+        remote_party: []const u8,
+        nonce: []const u8,
+        user_visible: bool,
+    ) Error!void {
+        if (remote_party.len == 0) return;
+        if (!user_visible) return error.UserVisibilityRequired;
+        if (nonce.len == 0) return error.RemoteNonceMissing;
+        if (nonce.len < MIN_REMOTE_NONCE_BYTES) return error.RemoteNonceTooShort;
+        const digest = remoteChallengeDigest(remote_party, nonce);
+        var index: usize = 0;
+        while (index < self.remote_nonce_history_count) : (index += 1) {
+            if (std.mem.eql(u8, &self.remote_nonce_history[index], &digest)) return error.RemoteNonceReplay;
+        }
     }
 
     fn attestInternal(
@@ -427,9 +457,24 @@ pub const Service = struct {
         if (user_visible) {
             self.visible_request_count += 1;
             self.last_remote_party_len = native_util.copyTextExact(&self.last_remote_party, remote_party) catch return error.RemotePartyTooLong;
+            if (remote_party.len != 0) {
+                self.last_remote_nonce_len = native_util.copyTextExact(&self.last_remote_nonce, nonce) catch return error.NonceTooLong;
+                self.rememberRemoteChallenge(remote_party, nonce);
+            }
         }
 
         return statement;
+    }
+
+    fn rememberRemoteChallenge(self: *Service, remote_party: []const u8, nonce: []const u8) void {
+        const digest = remoteChallengeDigest(remote_party, nonce);
+        if (self.remote_nonce_history_count < self.remote_nonce_history.len) {
+            self.remote_nonce_history[self.remote_nonce_history_count] = digest;
+            self.remote_nonce_history_count += 1;
+            return;
+        }
+        std.mem.copyForwards(crypto_hash.Digest, self.remote_nonce_history[0 .. self.remote_nonce_history.len - 1], self.remote_nonce_history[1..]);
+        self.remote_nonce_history[self.remote_nonce_history.len - 1] = digest;
     }
 
     pub fn verify(statement: Statement) bool {
@@ -501,6 +546,13 @@ fn statementDigest(statement: Statement) crypto_hash.Digest {
     crypto_hash.updateBytes(&hasher, "root-digest", &statement.root_digest);
     crypto_hash.updateEnum(&hasher, "root-provenance", statement.root_provenance);
     crypto_hash.updateBool(&hasher, "manifest-verified", statement.manifest_verified);
+    return crypto_hash.finalize(&hasher);
+}
+
+fn remoteChallengeDigest(remote_party: []const u8, nonce: []const u8) crypto_hash.Digest {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "remote-party", remote_party);
+    crypto_hash.updateBytes(&hasher, "nonce", nonce);
     return crypto_hash.finalize(&hasher);
 }
 
@@ -608,21 +660,45 @@ test "attestation service can use a provisioned hardware-backed root for visible
     const statement = try service.attestWithProvisionedRoot(
         boot,
         "attest.example",
-        "nonce-3",
+        "remote-nonce-0003",
         true,
     );
     try std.testing.expect(Service.verify(statement));
     try std.testing.expect(Service.verifyForBoot(statement, .{
         .boot = &boot,
         .remote_party = "attest.example",
-        .nonce = "nonce-3",
+        .nonce = "remote-nonce-0003",
         .user_visible = true,
         .key_origin = .secure_enclave,
         .root_key_id = "device-se",
         .minimum_root_generation = 1,
         .attestation_root = root_identity,
     }));
-    try std.testing.expectEqual(@as(usize, 1), root_provider.sign_count);
+    try std.testing.expectError(error.RemoteNonceReplay, service.attestWithProvisionedRoot(
+        boot,
+        "attest.example",
+        "remote-nonce-0003",
+        true,
+    ));
+    _ = try service.attestWithProvisionedRoot(
+        boot,
+        "attest.example",
+        "remote-nonce-0004",
+        true,
+    );
+    try std.testing.expectError(error.RemoteNonceReplay, service.attestWithProvisionedRoot(
+        boot,
+        "attest.example",
+        "remote-nonce-0003",
+        true,
+    ));
+    try std.testing.expectError(error.RemoteNonceTooShort, service.attestWithProvisionedRoot(
+        boot,
+        "attest.example",
+        "nonce-3",
+        true,
+    ));
+    try std.testing.expectEqual(@as(usize, 2), root_provider.sign_count);
     try std.testing.expectEqual(KeyOrigin.secure_enclave, statement.key_origin);
     try std.testing.expectEqualStrings("device-se", statement.rootLabelSlice());
     try std.testing.expectEqualStrings("device-se", statement.rootKeyIdSlice());
@@ -643,7 +719,7 @@ test "attestation service can use a provisioned hardware-backed root for visible
     try std.testing.expect(!Service.verifyForBoot(statement, .{
         .boot = &wrong_provenance_boot,
         .remote_party = "attest.example",
-        .nonce = "nonce-3",
+        .nonce = "remote-nonce-0003",
         .user_visible = true,
         .key_origin = .secure_enclave,
         .root_key_id = "device-se",
@@ -670,13 +746,13 @@ test "attestation verifier rejects revoked root generations after rotation" {
     const v1_statement = try service.attestWithProvisionedRoot(
         boot,
         "attest.example",
-        "nonce-7",
+        "remote-nonce-0007",
         true,
     );
     try std.testing.expect(Service.verifyForBoot(v1_statement, .{
         .boot = &boot,
         .remote_party = "attest.example",
-        .nonce = "nonce-7",
+        .nonce = "remote-nonce-0007",
         .user_visible = true,
         .key_origin = .tpm,
         .root_key_id = "device-tpm-v1",
@@ -691,7 +767,7 @@ test "attestation verifier rejects revoked root generations after rotation" {
     try std.testing.expect(!Service.verifyForBoot(v1_statement, .{
         .boot = &boot,
         .remote_party = "attest.example",
-        .nonce = "nonce-7",
+        .nonce = "remote-nonce-0007",
         .user_visible = true,
         .key_origin = .tpm,
         .root_key_id = "device-tpm-v1",
@@ -703,13 +779,13 @@ test "attestation verifier rejects revoked root generations after rotation" {
     const v2_statement = try service.attestWithProvisionedRoot(
         boot,
         "attest.example",
-        "nonce-8",
+        "remote-nonce-0008",
         true,
     );
     try std.testing.expect(Service.verifyForBoot(v2_statement, .{
         .boot = &boot,
         .remote_party = "attest.example",
-        .nonce = "nonce-8",
+        .nonce = "remote-nonce-0008",
         .user_visible = true,
         .key_origin = .tpm,
         .root_key_id = "device-tpm-v2",
@@ -722,7 +798,7 @@ test "attestation verifier rejects revoked root generations after rotation" {
     try std.testing.expectError(error.RootGenerationRevoked, service.attestWithProvisionedRoot(
         boot,
         "attest.example",
-        "nonce-9",
+        "remote-nonce-0009",
         true,
     ));
 }
@@ -742,7 +818,7 @@ test "attestation service rejects emulator measured roots for remote attestation
     try std.testing.expectError(error.UnverifiedMeasuredRoot, service.attestWithProvisionedRoot(
         boot,
         "attest.example",
-        "nonce-6",
+        "remote-nonce-0006",
         true,
     ));
 }
@@ -764,7 +840,7 @@ test "attestation service rejects provisioned remote attestations without a veri
     try std.testing.expectError(error.UnverifiedMeasuredRoot, service.attestWithProvisionedRoot(
         boot,
         "attest.example",
-        "nonce-4",
+        "remote-nonce-0004",
         true,
     ));
 }
@@ -793,6 +869,26 @@ test "attestation service gates fake hardware root providers to tests" {
     try std.testing.expectError(error.TestRootProviderRejected, service.provisionRootProvider(provider));
 }
 
+test "attestation service rejects generation zero root providers" {
+    var service = Service.init(.{ .kind = .device, .serial = 43 });
+    var root_provider = FakeTpmRootProvider.initGeneration(.{
+        .label = "device-tpm-zero",
+        .seed = signing.seedFromByte(0x5E),
+    }, 0);
+
+    try std.testing.expectError(error.InvalidRootGeneration, service.provisionRootProvider(root_provider.provider()));
+}
+
+test "attestation service rejects anonymous root providers" {
+    var service = Service.init(.{ .kind = .device, .serial = 44 });
+    var root_provider = FakeTpmRootProvider.initGeneration(.{
+        .label = "",
+        .seed = signing.seedFromByte(0x5F),
+    }, 1);
+
+    try std.testing.expectError(error.RootIdentityMissing, service.provisionRootProvider(root_provider.provider()));
+}
+
 test "attestation verification rejects measured state and statement tampering" {
     const boot = try verifiedTestBoot(16, .bootloader_provided);
     const root_signer = signing.SignerIdentity{
@@ -807,13 +903,13 @@ test "attestation verification rejects measured state and statement tampering" {
     const statement = try service.attestWithProvisionedRoot(
         boot,
         "attest.example",
-        "nonce-5",
+        "remote-nonce-0005",
         true,
     );
     const expectation = VerificationExpectation{
         .boot = &boot,
         .remote_party = "attest.example",
-        .nonce = "nonce-5",
+        .nonce = "remote-nonce-0005",
         .user_visible = true,
         .key_origin = .tpm,
         .attestation_root = root_identity,
@@ -827,7 +923,7 @@ test "attestation verification rejects measured state and statement tampering" {
         try std.testing.expect(!Service.verifyForBoot(statement, .{
             .boot = &tampered_boot,
             .remote_party = "attest.example",
-            .nonce = "nonce-5",
+            .nonce = "remote-nonce-0005",
             .user_visible = true,
             .key_origin = .tpm,
             .attestation_root = root_identity,
@@ -839,7 +935,7 @@ test "attestation verification rejects measured state and statement tampering" {
     try std.testing.expect(!Service.verifyForBoot(statement, .{
         .boot = &tampered_root,
         .remote_party = "attest.example",
-        .nonce = "nonce-5",
+        .nonce = "remote-nonce-0005",
         .user_visible = true,
         .key_origin = .tpm,
         .attestation_root = root_identity,
@@ -850,7 +946,7 @@ test "attestation verification rejects measured state and statement tampering" {
     try std.testing.expect(!Service.verifyForBoot(statement, .{
         .boot = &tampered_manifest_state,
         .remote_party = "attest.example",
-        .nonce = "nonce-5",
+        .nonce = "remote-nonce-0005",
         .user_visible = true,
         .key_origin = .tpm,
         .attestation_root = root_identity,
@@ -859,7 +955,7 @@ test "attestation verification rejects measured state and statement tampering" {
     try std.testing.expect(!Service.verifyForBoot(statement, .{
         .boot = &boot,
         .remote_party = "other.example",
-        .nonce = "nonce-5",
+        .nonce = "remote-nonce-0005",
         .user_visible = true,
         .key_origin = .tpm,
         .attestation_root = root_identity,
@@ -875,7 +971,7 @@ test "attestation verification rejects measured state and statement tampering" {
     try std.testing.expect(!Service.verifyForBoot(statement, .{
         .boot = &boot,
         .remote_party = "attest.example",
-        .nonce = "nonce-5",
+        .nonce = "remote-nonce-0005",
         .user_visible = false,
         .key_origin = .tpm,
         .attestation_root = root_identity,
@@ -883,7 +979,7 @@ test "attestation verification rejects measured state and statement tampering" {
     try std.testing.expect(!Service.verifyForBoot(statement, .{
         .boot = &boot,
         .remote_party = "attest.example",
-        .nonce = "nonce-5",
+        .nonce = "remote-nonce-0005",
         .user_visible = true,
         .key_origin = .secure_enclave,
         .attestation_root = root_identity,
@@ -898,7 +994,7 @@ test "attestation verification rejects measured state and statement tampering" {
     const wrong_key_statement = try wrong_key_service.attestWithProvisionedRoot(
         boot,
         "attest.example",
-        "nonce-5",
+        "remote-nonce-0005",
         true,
     );
     try std.testing.expect(!Service.verifyForBoot(wrong_key_statement, expectation));

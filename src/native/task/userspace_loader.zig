@@ -36,6 +36,7 @@ pub const Error = manifest.ValidationError || component_port.Error || task_runti
     EmptyLabel,
     EmptyEntry,
     EmbeddedArtifactRequired,
+    EmbeddedArtifactMetadataMismatch,
     InvalidElfHeader,
     InvalidElfMagic,
     InvalidLoadableSegment,
@@ -185,6 +186,7 @@ pub const Catalog = struct {
         request: EmbeddedImageRegisterRequest,
         embedded_info: EmbeddedElfInfo,
     ) Error!*const ImageRecord {
+        try validateEmbeddedElfInfo(request.elf_bytes, embedded_info);
         return self.registerWithEmbeddedElf(.{
             .bundle = request.bundle,
             .component_class = request.component_class,
@@ -457,6 +459,49 @@ fn imageMatchesRequest(
         std.mem.eql(u8, existing.entrySlice(), request.initial_component.entry);
 }
 
+fn validateEmbeddedElfInfo(
+    elf_bytes: []const u8,
+    embedded_info: EmbeddedElfInfo,
+) Error!void {
+    const inspected = try elf_image_inspector.inspect(elf_bytes);
+    if (inspected.entry_point != embedded_info.entry_point) return error.EmbeddedArtifactMetadataMismatch;
+    if (inspected.loadable_segment_count != embedded_info.loadable_segment_count) return error.EmbeddedArtifactMetadataMismatch;
+    if (inspected.byte_len != embedded_info.byte_len) return error.EmbeddedArtifactMetadataMismatch;
+    if (inspected.bootstrap_mailbox_address != embedded_info.bootstrap_mailbox_address) return error.EmbeddedArtifactMetadataMismatch;
+    if (!std.mem.eql(u8, &inspected.file_sha256, &embedded_info.file_sha256)) return error.EmbeddedArtifactMetadataMismatch;
+    if (!executableImagesEqual(inspected.executable_image, embedded_info.executable_image)) {
+        return error.EmbeddedArtifactMetadataMismatch;
+    }
+}
+
+fn executableImagesEqual(
+    lhs: task_runtime.ExecutableImageSpec,
+    rhs: task_runtime.ExecutableImageSpec,
+) bool {
+    if (lhs.entry_point != rhs.entry_point) return false;
+    if (lhs.stack_top != rhs.stack_top) return false;
+    if (lhs.stack_size_bytes != rhs.stack_size_bytes) return false;
+    if (lhs.file_size_bytes != rhs.file_size_bytes) return false;
+    if (!std.mem.eql(u8, &lhs.file_sha256, &rhs.file_sha256)) return false;
+    if (lhs.segment_count != rhs.segment_count) return false;
+
+    var index: usize = 0;
+    while (index < lhs.segment_count) : (index += 1) {
+        const left = lhs.segments[index];
+        const right = rhs.segments[index];
+        if (left.virtual_address != right.virtual_address) return false;
+        if (left.file_offset != right.file_offset) return false;
+        if (left.file_size != right.file_size) return false;
+        if (left.memory_size != right.memory_size) return false;
+        if (left.alignment != right.alignment) return false;
+        if (left.access.read != right.access.read) return false;
+        if (left.access.write != right.access.write) return false;
+        if (left.access.execute != right.access.execute) return false;
+    }
+
+    return true;
+}
+
 fn componentAbiVersion(substrate: task_runtime.ExecutionSubstrate) u16 {
     return switch (substrate) {
         .typed_component_abi => 1,
@@ -722,6 +767,78 @@ test "catalog stores embedded elf metadata for registered userspace artifacts" {
     try std.testing.expectEqual(@as(usize, 1), image.executable_image.segment_count);
     try std.testing.expectEqual(@as(u32, 0xA10F), image.role_tag);
     try std.testing.expectEqual(@as(u32, 15), image.heartbeat_increment);
+}
+
+test "catalog rejects generated artifact metadata that no longer matches embedded elf bytes" {
+    const bytes = makeSyntheticElf32ForTest(0x404000, 3, 2);
+    const components = [_]manifest.ExecutionComponentDecl{
+        .{ .id = "provenance-check", .entry = "zigos.provenance.check" },
+    };
+    var bundle = manifest.BundleManifest{
+        .bundle_id = "zigos.system.provenance-check",
+        .display_name = "Provenance Check",
+        .publisher = "zigos.system",
+        .components = &components,
+    };
+    bundle.signature = try userspace_manifest_signing.signBundle(bundle);
+    const request = EmbeddedImageRegisterRequest{
+        .bundle = bundle,
+        .component_class = .service_component,
+        .initial_component = .{
+            .label = "provenance-check",
+            .entry = "zigos.provenance.check",
+        },
+        .role_tag = 0xA120,
+        .heartbeat_increment = 32,
+        .contract_flags = 0x11,
+        .elf_bytes = &bytes,
+    };
+    const valid_info = try elf_image_inspector.inspect(&bytes);
+
+    var valid_catalog = Catalog.init();
+    _ = try valid_catalog.registerEmbeddedArtifactWithInfo(request, valid_info);
+
+    var stale_digest = valid_info;
+    stale_digest.file_sha256[0] = stale_digest.file_sha256[0] ^ 0x5A;
+    var digest_catalog = Catalog.init();
+    try std.testing.expectError(
+        error.EmbeddedArtifactMetadataMismatch,
+        digest_catalog.registerEmbeddedArtifactWithInfo(request, stale_digest),
+    );
+
+    var stale_entry = valid_info;
+    stale_entry.entry_point += SYNTHETIC_ELF_SEGMENT_ALIGNMENT;
+    var entry_catalog = Catalog.init();
+    try std.testing.expectError(
+        error.EmbeddedArtifactMetadataMismatch,
+        entry_catalog.registerEmbeddedArtifactWithInfo(request, stale_entry),
+    );
+
+    var stale_segment = valid_info;
+    stale_segment.executable_image.segments[0].file_size += 1;
+    var segment_catalog = Catalog.init();
+    try std.testing.expectError(
+        error.EmbeddedArtifactMetadataMismatch,
+        segment_catalog.registerEmbeddedArtifactWithInfo(request, stale_segment),
+    );
+
+    var missing_bytes_request = request;
+    missing_bytes_request.elf_bytes = "";
+    var missing_catalog = Catalog.init();
+    try std.testing.expectError(
+        error.InvalidElfHeader,
+        missing_catalog.registerEmbeddedArtifactWithInfo(missing_bytes_request, valid_info),
+    );
+
+    var malformed_bytes = bytes;
+    malformed_bytes[0] = 0;
+    var malformed_request = request;
+    malformed_request.elf_bytes = &malformed_bytes;
+    var malformed_catalog = Catalog.init();
+    try std.testing.expectError(
+        error.InvalidElfMagic,
+        malformed_catalog.registerEmbeddedArtifactWithInfo(malformed_request, valid_info),
+    );
 }
 
 test "catalog preserves exact-limit identity and component labels without truncation" {

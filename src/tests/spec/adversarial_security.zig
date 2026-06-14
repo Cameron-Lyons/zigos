@@ -7,6 +7,7 @@ const endpoint = @import("../../native/kernel_api/endpoint.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const native_kernel = @import("../../native/kernel_api/native_kernel.zig");
 const object_store = @import("../../native/storage/object_store.zig");
+const package_service = @import("../../native/services/package_service.zig");
 const storage_volume = @import("../../native/storage/storage_volume.zig");
 const supervisor = @import("../../native/session/supervisor.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
@@ -345,6 +346,69 @@ pub fn downgradeAndRollbackAttacksNeedFreshSignedMetadata() !void {
     var replayed_rollback = signed_v2;
     replayed_rollback.update_channel = .pinned;
     try std.testing.expect(!userspace_manifest_signing.verifyBundle(replayed_rollback));
+
+    var service = package_service.Service.init();
+    service.bind(861, spec_support.service(861));
+    var capabilities = capability.CapabilityTable.init();
+    var port = package_service.PackagePort.init(&service, &capabilities);
+    const actor = spec_support.service(862);
+    const authority_capability = try spec_support.serviceAuthority(&capabilities, service.service_id, actor, 863);
+    const authority = spec_support.serviceAuthorityContext(863, actor, authority_capability, 10);
+    const zigos_spec_identity = try userspace_manifest_signing.identityForPublisher("zigos.spec");
+    const zigos_dev_identity = try userspace_manifest_signing.identityForPublisher("zigos.dev");
+    try spec_support.trustPackagePublisher(&port, authority, zigos_spec_identity, "zigos.spec");
+    try spec_support.trustPackagePublisher(&port, authority, zigos_dev_identity, "zigos.dev");
+
+    _ = try port.install(authority, .{
+        .bundle = signed_v2,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null);
+
+    var freshly_signed_downgrade = signed_v2;
+    freshly_signed_downgrade.version_major = 1;
+    freshly_signed_downgrade.version_minor = 9;
+    freshly_signed_downgrade.signature = try userspace_manifest_signing.signBundle(freshly_signed_downgrade);
+    try std.testing.expectError(package_service.Error.VersionRegressionRejected, port.install(authority, .{
+        .bundle = freshly_signed_downgrade,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
+
+    try std.testing.expectError(package_service.Error.VersionReplayRejected, port.install(authority, .{
+        .bundle = signed_v2,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
+
+    var freshly_signed_channel_drift = signed_v2;
+    freshly_signed_channel_drift.version_major = 3;
+    freshly_signed_channel_drift.update_channel = .pinned;
+    freshly_signed_channel_drift.signature = try userspace_manifest_signing.signBundle(freshly_signed_channel_drift);
+    try std.testing.expectError(package_service.Error.UpdateChannelChanged, port.install(authority, .{
+        .bundle = freshly_signed_channel_drift,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
+
+    var freshly_signed_source_drift = signed_v2;
+    freshly_signed_source_drift.version_major = 3;
+    freshly_signed_source_drift.signature = try userspace_manifest_signing.signBundle(freshly_signed_source_drift);
+    try std.testing.expectError(package_service.Error.UpdateSourceChanged, port.install(authority, .{
+        .bundle = freshly_signed_source_drift,
+        .source_identity = "repo:mirror",
+        .data_schema_version = 1,
+    }, null));
+
+    var freshly_signed_publisher_drift = signed_v2;
+    freshly_signed_publisher_drift.publisher = "zigos.dev";
+    freshly_signed_publisher_drift.version_major = 3;
+    freshly_signed_publisher_drift.signature = try userspace_manifest_signing.signBundle(freshly_signed_publisher_drift);
+    try std.testing.expectError(package_service.Error.PublisherChanged, port.install(authority, .{
+        .bundle = freshly_signed_publisher_drift,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
 }
 
 fn mintServiceAuthority(

@@ -222,13 +222,13 @@ pub fn proveBootedSyncServicePath(
     const native_identity_statement = try peer_attestation.attestWithProvisionedRoot(
         peer_boot,
         "overlay.service-path.notes",
-        "native-net-1",
+        "native-net-00001",
         true,
     );
     try std.testing.expect(attestation_service.Service.verifyForBoot(native_identity_statement, .{
         .boot = &peer_boot,
         .remote_party = "overlay.service-path.notes",
-        .nonce = "native-net-1",
+        .nonce = "native-net-00001",
         .user_visible = true,
         .key_origin = .tpm,
         .attestation_root = network_attestation_identity,

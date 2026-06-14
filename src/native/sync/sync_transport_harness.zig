@@ -15,6 +15,7 @@ pub const MAX_RELAY_PACKETS: usize = 16;
 
 pub const Error = error{
     EgressDenied,
+    PacketEmpty,
     PacketTooLarge,
     PacketAuthenticationFailed,
     PacketTargetMismatch,
@@ -69,6 +70,8 @@ pub const Relay = struct {
 
     pub fn submit(self: *Relay, packet: EncryptedPacket) Error!void {
         if (!packet.encrypted or !packet.egress_allowed) return error.EgressDenied;
+        if (packet.ciphertext_len == 0) return error.PacketEmpty;
+        if (packet.ciphertext_len > packet.ciphertext.len) return error.PacketTooLarge;
         const packet_id = self.nextPacketId();
         const slot_index = self.packets.reserveIndex(packet_id) orelse return error.RelayQueueFull;
         const slot = &self.packets.slots[slot_index];
@@ -292,6 +295,7 @@ pub const Harness = struct {
         target_device: principal.PrincipalId,
         relay_domain: []const u8,
     ) Error!TransportSession {
+        if (relay_domain.len > network_policy.MAX_TARGET_BYTES) return error.RelayDomainTooLong;
         switch (request.evidence.destination) {
             .domain => |domain| {
                 if (!std.mem.eql(u8, domain, relay_domain)) return error.EgressDenied;
@@ -313,6 +317,8 @@ pub const Harness = struct {
         session: *const TransportSession,
         plaintext: []const u8,
     ) Error!EncryptedPacket {
+        try validateSessionForCrypto(session);
+        if (plaintext.len == 0) return error.PacketEmpty;
         if (plaintext.len > MAX_PACKET_BYTES) return error.PacketTooLarge;
 
         var packet = EncryptedPacket{
@@ -366,6 +372,10 @@ pub const Harness = struct {
         target_device: principal.PrincipalId,
         relay_domain: []const u8,
     ) Error!TransportSession {
+        validateSessionRequest(request, source_device, target_device, relay_domain) catch |err| {
+            if (err == error.EgressDenied) self.denied_sessions += 1;
+            return err;
+        };
         const decision = broker.connect(request) catch {
             self.denied_sessions += 1;
             return error.EgressDenied;
@@ -393,8 +403,11 @@ pub const Harness = struct {
     }
 
     fn nextSessionId(self: *Harness) u64 {
-        defer self.next_session_id += 1;
-        return self.next_session_id;
+        if (self.next_session_id == 0) self.next_session_id = 1;
+        const session_id = self.next_session_id;
+        self.next_session_id +%= 1;
+        if (self.next_session_id == 0) self.next_session_id = 1;
+        return session_id;
     }
 };
 
@@ -484,7 +497,7 @@ fn digestPayload(session: *const TransportSession, plaintext: []const u8) crypto
     return crypto_hash.finalize(&hasher);
 }
 
-fn packetDigest(packet: EncryptedPacket) crypto_hash.Digest {
+pub fn packetDigest(packet: EncryptedPacket) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateInt(&hasher, "session", packet.session_id);
     crypto_hash.updateEnum(&hasher, "transport", packet.transport);
@@ -504,14 +517,51 @@ fn updatePrincipal(hasher: *crypto_hash.Hasher, tag: []const u8, value: principa
     crypto_hash.updateBytes(hasher, tag, &bytes);
 }
 
+fn validateSessionRequest(
+    request: network_policy.EgressConnectionRequest,
+    source_device: principal.PrincipalId,
+    target_device: principal.PrincipalId,
+    relay_domain: []const u8,
+) Error!void {
+    if (request.task_id == 0 or request.policy_id == 0 or request.capability_id == 0) {
+        return error.EgressDenied;
+    }
+    if (relay_domain.len > network_policy.MAX_TARGET_BYTES) return error.RelayDomainTooLong;
+    try validateDevicePair(source_device, target_device);
+}
+
+fn validateSessionForCrypto(session: *const TransportSession) Error!void {
+    if (session.id == 0 or session.task_id == 0 or session.policy_id == 0 or session.capability_id == 0) {
+        return error.EgressDenied;
+    }
+    if (!session.egress_decision.allowed) return error.EgressDenied;
+    if (session.relay_domain_len > network_policy.MAX_TARGET_BYTES) return error.RelayDomainTooLong;
+    try validateDevicePair(session.source_device, session.target_device);
+}
+
+fn validateDevicePair(source_device: principal.PrincipalId, target_device: principal.PrincipalId) Error!void {
+    if (source_device.kind != .device or target_device.kind != .device) return error.EgressDenied;
+    if (source_device.serial == 0 or target_device.serial == 0) return error.EgressDenied;
+    if (source_device.eql(target_device)) return error.EgressDenied;
+}
+
 fn decryptPacket(
     session: *const TransportSession,
     packet: EncryptedPacket,
     plaintext_out: []u8,
 ) Error![]const u8 {
-    if (!packet.target_device.eql(session.target_device) or !packet.source_device.eql(session.source_device)) {
+    try validateSessionForCrypto(session);
+    if (!packet.encrypted or !packet.egress_allowed) return error.EgressDenied;
+    if (packet.session_id != session.id or
+        packet.transport != session.transport or
+        packet.policy_id != session.policy_id or
+        packet.capability_id != session.capability_id or
+        !packet.target_device.eql(session.target_device) or
+        !packet.source_device.eql(session.source_device))
+    {
         return error.PacketTargetMismatch;
     }
+    if (packet.ciphertext_len > packet.ciphertext.len) return error.PacketTooLarge;
     if (packet.ciphertext_len > plaintext_out.len) return error.PacketTooLarge;
     var index: usize = 0;
     while (index < packet.ciphertext_len) : (index += 1) {
@@ -567,19 +617,31 @@ test "encrypted transport harness only creates sessions after egress approval" {
     var broker = network_policy.EgressBroker.init(&policies, &capabilities);
     var harness = Harness.init();
 
-    const session = try harness.openRelay(&broker, .{
+    const relay_request = network_policy.EgressConnectionRequest{
         .task_id = 42,
         .principal_id = app,
         .capability_id = relay_capability.id,
         .policy_id = relay.id,
         .evidence = .{ .destination = .{ .domain = "relay.sync.example" } },
         .now_ticks = 5,
-    }, source, target, "relay.sync.example");
+    };
+
+    const session = try harness.openRelay(&broker, relay_request, source, target, "relay.sync.example");
     const packet = try harness.encryptPacket(&session, "sync payload");
     try std.testing.expect(packet.encrypted);
     try std.testing.expect(packet.egress_allowed);
     try std.testing.expect(!std.mem.eql(u8, packet.ciphertextSlice(), "sync payload"));
     try std.testing.expectEqual(@as(usize, 1), harness.created_sessions);
+
+    var zero_id_session = session;
+    zero_id_session.id = 0;
+    try std.testing.expectError(error.EgressDenied, harness.encryptPacket(&zero_id_session, "bad session"));
+    var denied_session = session;
+    denied_session.egress_decision.allowed = false;
+    try std.testing.expectError(error.EgressDenied, harness.encryptPacket(&denied_session, "bad session"));
+    var invalid_source_session = session;
+    invalid_source_session.source_device = app;
+    try std.testing.expectError(error.EgressDenied, harness.encryptPacket(&invalid_source_session, "bad session"));
 
     var relay_queue = Relay.init();
     _ = try harness.sendRelayPacket(&relay_queue, &session, "relay op log");
@@ -612,6 +674,29 @@ test "encrypted transport harness only creates sessions after egress approval" {
     }, source, target, "other.sync.example"));
     try std.testing.expectEqual(@as(usize, 1), harness.denied_sessions);
     try std.testing.expectEqual(@as(usize, 1), harness.created_sessions);
+
+    var zero_task_request = relay_request;
+    zero_task_request.task_id = 0;
+    try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, zero_task_request, source, target, "relay.sync.example"));
+    var zero_policy_request = relay_request;
+    zero_policy_request.policy_id = 0;
+    try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, zero_policy_request, source, target, "relay.sync.example"));
+    var zero_capability_request = relay_request;
+    zero_capability_request.capability_id = 0;
+    try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, zero_capability_request, source, target, "relay.sync.example"));
+
+    try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, relay_request, app, target, "relay.sync.example"));
+    try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, relay_request, source, .{ .kind = .device, .serial = 0 }, "relay.sync.example"));
+    try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, relay_request, source, source, "relay.sync.example"));
+    const long_relay_domain = [_]u8{'r'} ** (network_policy.MAX_TARGET_BYTES + 1);
+    try std.testing.expectError(error.RelayDomainTooLong, harness.openRelay(&broker, relay_request, source, target, &long_relay_domain));
+
+    var wrapping_harness = Harness.init();
+    wrapping_harness.next_session_id = std.math.maxInt(u64);
+    const last_session = try wrapping_harness.openRelay(&broker, relay_request, source, target, "relay.sync.example");
+    const wrapped_session = try wrapping_harness.openRelay(&broker, relay_request, source, target, "relay.sync.example");
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), last_session.id);
+    try std.testing.expectEqual(@as(u64, 1), wrapped_session.id);
 }
 
 test "booted overlay relay service rejects unauthorized relay and target changes" {
@@ -671,6 +756,12 @@ test "booted overlay relay service rejects unauthorized relay and target changes
     try std.testing.expectError(error.EgressDenied, wrong_domain_service.submitSignedFrame(77, &session, blocked_frame));
     try std.testing.expectEqual(@as(usize, 0), wrong_domain_service.accepted_packets);
     try std.testing.expectEqual(@as(usize, 1), wrong_domain_service.rejected_packets);
+
+    try std.testing.expectError(error.PacketEmpty, harness.encryptSignedFrame(&session, "", signer_identity));
+    var empty_packet = signed_frame.packet;
+    empty_packet.ciphertext_len = 0;
+    try std.testing.expectError(error.PacketEmpty, relay_service.relay.submit(empty_packet));
+    try std.testing.expectEqual(@as(usize, 0), relay_service.rejected_packets);
 
     try std.testing.expectError(error.EgressDenied, relay_service.submitSignedFrame(78, &session, blocked_frame));
     try std.testing.expectError(error.EgressDenied, relay_service.submitSignedFrame(0, &session, blocked_frame));
@@ -768,6 +859,30 @@ test "encrypted transport harness binds device sessions to attested identity and
     try std.testing.expect(packet.encrypted);
     try std.testing.expectEqual(source, packet.source_device);
     try std.testing.expectEqual(target, packet.target_device);
+
+    var plaintext_buffer: [MAX_PACKET_BYTES]u8 = undefined;
+    var forged_packet = packet;
+    forged_packet.session_id += 1;
+    try std.testing.expectError(error.PacketTargetMismatch, decryptForSession(&session, forged_packet, plaintext_buffer[0..]));
+    forged_packet = packet;
+    forged_packet.transport = .relay_assisted;
+    try std.testing.expectError(error.PacketTargetMismatch, decryptForSession(&session, forged_packet, plaintext_buffer[0..]));
+    forged_packet = packet;
+    forged_packet.policy_id += 1;
+    try std.testing.expectError(error.PacketTargetMismatch, decryptForSession(&session, forged_packet, plaintext_buffer[0..]));
+    forged_packet = packet;
+    forged_packet.capability_id += 1;
+    try std.testing.expectError(error.PacketTargetMismatch, decryptForSession(&session, forged_packet, plaintext_buffer[0..]));
+    forged_packet = packet;
+    forged_packet.source_device = other_target;
+    try std.testing.expectError(error.PacketTargetMismatch, decryptForSession(&session, forged_packet, plaintext_buffer[0..]));
+    forged_packet = packet;
+    forged_packet.encrypted = false;
+    try std.testing.expectError(error.EgressDenied, decryptForSession(&session, forged_packet, plaintext_buffer[0..]));
+    forged_packet = packet;
+    forged_packet.ciphertext_len = MAX_PACKET_BYTES + 1;
+    try std.testing.expectError(error.PacketTooLarge, decryptForSession(&session, forged_packet, plaintext_buffer[0..]));
+
     try std.testing.expectEqual(@as(usize, 2), harness.created_sessions);
     try std.testing.expectEqual(@as(usize, 1), harness.denied_sessions);
 }

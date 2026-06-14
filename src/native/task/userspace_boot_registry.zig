@@ -18,6 +18,10 @@ const SignBundleReturn = @typeInfo(@TypeOf(userspace_manifest_signing.signBundle
 const SigningError = @typeInfo(SignBundleReturn).error_union.error_set;
 
 pub const Error = userspace_loader.Error || SigningError || error{
+    GeneratedArtifactContractMismatch,
+    GeneratedArtifactIdentityMismatch,
+    GeneratedArtifactSegmentCountInvalid,
+    GeneratedArtifactSignatureMismatch,
     UnsupportedServiceClass,
     UnknownBundleId,
 };
@@ -62,8 +66,9 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
         const archive = @import("userspace_archive");
         inline for (archive.artifacts) |artifact| {
             const spec = find(artifact.bundle_id) orelse return error.UnknownBundleId;
+            try validateGeneratedArtifactMatchesSpec(spec, artifact);
             const bundle = try bundleForSpec(spec);
-            const embedded_info = embeddedElfInfoFromArtifact(artifact);
+            const embedded_info = try embeddedElfInfoFromArtifact(artifact);
             _ = catalog.registerEmbeddedArtifactWithInfo(.{
                 .bundle = bundle,
                 .component_class = componentClassForSpec(spec),
@@ -92,6 +97,28 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
             .heartbeat_increment = spec.heartbeat_increment,
             .contract_flags = spec.contract_flags,
         });
+    }
+}
+
+pub fn validateGeneratedArtifactMatchesSpec(spec: *const registry.ImageSpec, artifact: anytype) Error!void {
+    if (!std.mem.eql(u8, artifact.bundle_id, spec.bundle_id) or
+        !std.mem.eql(u8, artifact.display_name, spec.display_name) or
+        !std.mem.eql(u8, artifact.publisher, spec.publisher) or
+        !std.mem.eql(u8, artifact.label, spec.label) or
+        !std.mem.eql(u8, artifact.entry, spec.entry) or
+        artifact.component_class != @intFromEnum(spec.component_class))
+    {
+        return error.GeneratedArtifactIdentityMismatch;
+    }
+    if (artifact.signed != spec.signed) return error.GeneratedArtifactSignatureMismatch;
+    if (artifact.role_tag != spec.role_tag or
+        artifact.heartbeat_increment != spec.heartbeat_increment or
+        artifact.contract_flags != spec.contract_flags)
+    {
+        return error.GeneratedArtifactContractMismatch;
+    }
+    if (artifact.segment_count > task_runtime.MAX_EXECUTABLE_SEGMENTS) {
+        return error.GeneratedArtifactSegmentCountInvalid;
     }
 }
 
@@ -134,18 +161,24 @@ fn componentClassForSpec(spec: *const registry.ImageSpec) task_runtime.Component
     };
 }
 
-fn embeddedElfInfoFromArtifact(artifact: anytype) userspace_loader.EmbeddedElfInfo {
+fn embeddedElfInfoFromArtifact(artifact: anytype) Error!userspace_loader.EmbeddedElfInfo {
+    if (artifact.segment_count > task_runtime.MAX_EXECUTABLE_SEGMENTS) {
+        return error.GeneratedArtifactSegmentCountInvalid;
+    }
     return .{
         .entry_point = artifact.entry_point,
         .loadable_segment_count = @intCast(artifact.segment_count),
         .byte_len = artifact.file_size_bytes,
         .bootstrap_mailbox_address = artifact.bootstrap_mailbox_address,
         .file_sha256 = artifact.file_sha256,
-        .executable_image = executableImageFromArtifact(artifact),
+        .executable_image = try executableImageFromArtifact(artifact),
     };
 }
 
-fn executableImageFromArtifact(artifact: anytype) task_runtime.ExecutableImageSpec {
+fn executableImageFromArtifact(artifact: anytype) Error!task_runtime.ExecutableImageSpec {
+    if (artifact.segment_count > task_runtime.MAX_EXECUTABLE_SEGMENTS) {
+        return error.GeneratedArtifactSegmentCountInvalid;
+    }
     var executable_image = task_runtime.ExecutableImageSpec{
         .entry_point = artifact.entry_point,
         .stack_top = artifact.stack_top,
@@ -191,4 +224,59 @@ test "boot registry definitions are unique and preload a userspace catalog" {
     try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager").?.hasTypedContract());
     try std.testing.expect(catalog.findByBundleId("app.capture").?.hasTypedContract());
     try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager").?.bundle_signed);
+}
+
+test "boot registry rejects generated archive records that diverge from registry specs" {
+    const archive = @import("userspace_archive");
+    try std.testing.expect(archive.artifacts.len > 0);
+    const spec = find(archive.artifacts[0].bundle_id) orelse return error.UnknownBundleId;
+
+    try validateGeneratedArtifactMatchesSpec(spec, archive.artifacts[0]);
+    _ = try embeddedElfInfoFromArtifact(archive.artifacts[0]);
+
+    var stale_bundle_id = archive.artifacts[0];
+    stale_bundle_id.bundle_id = "zigos.system.stale-generated-record";
+    try std.testing.expectError(
+        error.GeneratedArtifactIdentityMismatch,
+        validateGeneratedArtifactMatchesSpec(spec, stale_bundle_id),
+    );
+
+    var stale_display_name = archive.artifacts[0];
+    stale_display_name.display_name = "Stale Display Name";
+    try std.testing.expectError(
+        error.GeneratedArtifactIdentityMismatch,
+        validateGeneratedArtifactMatchesSpec(spec, stale_display_name),
+    );
+
+    var unsigned = archive.artifacts[0];
+    unsigned.signed = !spec.signed;
+    try std.testing.expectError(
+        error.GeneratedArtifactSignatureMismatch,
+        validateGeneratedArtifactMatchesSpec(spec, unsigned),
+    );
+
+    var stale_contract = archive.artifacts[0];
+    stale_contract.role_tag +%= 1;
+    try std.testing.expectError(
+        error.GeneratedArtifactContractMismatch,
+        validateGeneratedArtifactMatchesSpec(spec, stale_contract),
+    );
+
+    var stale_component_class = archive.artifacts[0];
+    stale_component_class.component_class +%= 1;
+    try std.testing.expectError(
+        error.GeneratedArtifactIdentityMismatch,
+        validateGeneratedArtifactMatchesSpec(spec, stale_component_class),
+    );
+
+    var too_many_segments = archive.artifacts[0];
+    too_many_segments.segment_count = task_runtime.MAX_EXECUTABLE_SEGMENTS + 1;
+    try std.testing.expectError(
+        error.GeneratedArtifactSegmentCountInvalid,
+        validateGeneratedArtifactMatchesSpec(spec, too_many_segments),
+    );
+    try std.testing.expectError(
+        error.GeneratedArtifactSegmentCountInvalid,
+        embeddedElfInfoFromArtifact(too_many_segments),
+    );
 }

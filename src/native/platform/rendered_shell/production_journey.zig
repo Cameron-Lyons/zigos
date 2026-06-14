@@ -1,4 +1,5 @@
 const std = @import("std");
+const boot_markers = @import("../../../kernel/boot/markers.zig");
 const compositor_session = @import("../compositor_session.zig");
 const event_ledger = @import("../event_ledger.zig");
 const ids = @import("../../core/ids.zig");
@@ -98,6 +99,24 @@ pub const ProductionJourneyResponse = struct {
     device_trust_events: u16 = 0,
 };
 
+pub const ProductionJourneyMarkerSnapshot = struct {
+    install_open: bool = false,
+    edit_saved: bool = false,
+    share_sync: bool = false,
+    update_rollback: bool = false,
+    recovery_remove: bool = false,
+    authority_revoked: bool = false,
+
+    pub fn complete(self: ProductionJourneyMarkerSnapshot) bool {
+        return self.install_open and
+            self.edit_saved and
+            self.share_sync and
+            self.update_rollback and
+            self.recovery_remove and
+            self.authority_revoked;
+    }
+};
+
 pub const ProductionJourneyService = struct {
     runtime_service: *task_runtime_service.Service,
     ux: *native_ux.Controller,
@@ -132,6 +151,12 @@ pub const ProductionJourneyService = struct {
     removed: bool = false,
     device_revoked: bool = false,
     policy_revoked: bool = false,
+    marker_install_open: bool = false,
+    marker_edit_saved: bool = false,
+    marker_share_sync: bool = false,
+    marker_update_rollback: bool = false,
+    marker_recovery_remove: bool = false,
+    marker_authority_revoked: bool = false,
     next_ledger_flow_order: usize = 0,
 
     pub fn init(
@@ -214,6 +239,41 @@ pub const ProductionJourneyService = struct {
             self.ledger.countMatching(.{ .kind = .policy_change }),
             self.ledger.countMatching(.{ .kind = .device_trust_change }),
         });
+        const markers = self.markerSnapshot();
+        try appendFmt(buffer, &used, "notes_daily_driver complete={s}\n", .{
+            if (markers.complete()) "yes" else "no",
+        });
+        try appendMarkerIf(buffer, &used, markers.install_open, boot_markers.notes_daily_driver_install_open_ok);
+        try appendMarkerIf(buffer, &used, markers.edit_saved, boot_markers.notes_daily_driver_edit_saved_ok);
+        try appendMarkerIf(buffer, &used, markers.share_sync, boot_markers.notes_daily_driver_share_sync_ok);
+        try appendMarkerIf(buffer, &used, markers.update_rollback, boot_markers.notes_daily_driver_update_rollback_ok);
+        try appendMarkerIf(buffer, &used, markers.recovery_remove, boot_markers.notes_daily_driver_recovery_remove_ok);
+        try appendMarkerIf(buffer, &used, markers.authority_revoked, boot_markers.notes_daily_driver_authority_revoked_ok);
+        try appendMarkerIf(buffer, &used, markers.complete(), boot_markers.notes_daily_driver_complete);
+        return buffer[0..used];
+    }
+
+    pub fn markerSnapshot(self: *const ProductionJourneyService) ProductionJourneyMarkerSnapshot {
+        return .{
+            .install_open = self.marker_install_open,
+            .edit_saved = self.marker_edit_saved,
+            .share_sync = self.marker_share_sync,
+            .update_rollback = self.marker_update_rollback,
+            .recovery_remove = self.marker_recovery_remove,
+            .authority_revoked = self.marker_authority_revoked,
+        };
+    }
+
+    pub fn renderMarkerContract(self: *const ProductionJourneyService, buffer: []u8) ![]const u8 {
+        const snapshot = self.markerSnapshot();
+        var used: usize = 0;
+        try appendMarkerIf(buffer, &used, snapshot.install_open, boot_markers.notes_daily_driver_install_open_ok);
+        try appendMarkerIf(buffer, &used, snapshot.edit_saved, boot_markers.notes_daily_driver_edit_saved_ok);
+        try appendMarkerIf(buffer, &used, snapshot.share_sync, boot_markers.notes_daily_driver_share_sync_ok);
+        try appendMarkerIf(buffer, &used, snapshot.update_rollback, boot_markers.notes_daily_driver_update_rollback_ok);
+        try appendMarkerIf(buffer, &used, snapshot.recovery_remove, boot_markers.notes_daily_driver_recovery_remove_ok);
+        try appendMarkerIf(buffer, &used, snapshot.authority_revoked, boot_markers.notes_daily_driver_authority_revoked_ok);
+        try appendMarkerIf(buffer, &used, snapshot.complete(), boot_markers.notes_daily_driver_complete);
         return buffer[0..used];
     }
 
@@ -369,6 +429,7 @@ pub const ProductionJourneyService = struct {
             .detail = self.config.document_path,
         });
         self.document_opened = true;
+        self.marker_install_open = self.installed and self.workspace_opened and self.document_opened and self.task_id != 0;
         try self.recordPendingTaskFlows(tick);
     }
 
@@ -405,6 +466,7 @@ pub const ProductionJourneyService = struct {
         self.document_payload_bytes = self.config.edit_payload.len;
         self.document_edited = true;
         self.synced = false;
+        self.marker_edit_saved = self.document_edited and self.document_previous_version_id != 0 and self.document_payload_bytes != 0;
         try self.recordPendingTaskFlows(tick);
     }
 
@@ -530,6 +592,7 @@ pub const ProductionJourneyService = struct {
             _ = try self.ux.syncConflictReview(self.config.workspace_id, self.config.user, detail);
         }
         self.synced = true;
+        self.marker_share_sync = self.document_shared and self.synced and self.document_version_id != 0;
         try self.recordPendingTaskFlows(tick);
     }
 
@@ -553,6 +616,7 @@ pub const ProductionJourneyService = struct {
         if (!rolled_back_result.updated_existing) return error.NoRollbackVersion;
         _ = try self.ux.rollbackAppUpdate(self.task_id, self.config.user, self.config.bundle_id);
         self.rolled_back = true;
+        self.marker_update_rollback = self.updated and self.rolled_back;
         try self.recordPendingTaskFlows(tick);
     }
 
@@ -587,6 +651,7 @@ pub const ProductionJourneyService = struct {
         }
         _ = try self.ux.removeApp(self.config.user, self.config.bundle_id);
         self.removed = true;
+        self.marker_recovery_remove = self.recovered and self.removed;
         try self.recordPendingTaskFlows(tick);
     }
 
@@ -608,6 +673,7 @@ pub const ProductionJourneyService = struct {
         );
         self.device_revoked = true;
         self.device_trusted = false;
+        self.marker_authority_revoked = self.device_revoked and self.policy_revoked;
     }
 
     fn revokePolicy(self: *ProductionJourneyService, tick: u64) !void {
@@ -615,6 +681,7 @@ pub const ProductionJourneyService = struct {
         try self.policies.revokePolicy(self.policy_id);
         try self.ledger.recordPolicyChange(self.config.admin, self.policy_id, .revoked, tick, self.config.policy_label);
         self.policy_revoked = true;
+        self.marker_authority_revoked = self.device_revoked and self.policy_revoked;
     }
 
     fn requireTask(self: *ProductionJourneyService) !*task_runtime.TaskRecord {
@@ -688,6 +755,10 @@ pub const ProductionJourneyService = struct {
     }
 };
 
+fn appendMarkerIf(buffer: []u8, used: *usize, enabled: bool, marker: []const u8) !void {
+    if (enabled) try appendFmt(buffer, used, "{s}\n", .{marker});
+}
+
 fn statusForProductionJourneyError(err: anyerror) ProductionJourneyStatus {
     return switch (err) {
         error.PolicyRequired,
@@ -697,12 +768,20 @@ fn statusForProductionJourneyError(err: anyerror) ProductionJourneyStatus {
         error.AppAlreadyInstalled,
         error.AppNotInstalled,
         error.BundleNotFound,
+        error.InstallSourceMissing,
+        error.InvalidDataSchemaVersion,
         error.InstallSourceDenied,
         error.InvalidManifestSignature,
         error.UntrustedManifestSigner,
         error.PublisherKeyRevoked,
         error.NoRollbackVersion,
         error.PermissionChangeUndeclared,
+        error.PublisherChanged,
+        error.UpdateChannelChanged,
+        error.UpdateSourceChanged,
+        error.SchemaVersionRegressionRejected,
+        error.VersionRegressionRejected,
+        error.VersionReplayRejected,
         => .package_rejected,
         error.DeviceTrustRequired,
         error.SyncPolicyMissing,
