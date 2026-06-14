@@ -271,6 +271,93 @@ test "event ledger records retention leases and consent receipts as redacted evi
     try std.testing.expect(std.mem.indexOf(u8, rendered, "consent_receipt_revocations=1") != null);
 }
 
+test "event ledger records agent delegation as redacted diagnostic evidence" {
+    var ledger = Ledger.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 27 };
+
+    try ledger.recordAgentDelegation(user, 2701, true, 3, 0, true, true, 110, "agent organized private notes locally");
+    try ledger.recordAgentDelegation(user, 2701, false, 5, 2, false, true, 111, "agent remote action denied for customer plan");
+
+    var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
+    const redacted = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=agent_delegation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "customer plan") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "redacted") != null);
+
+    const full = try ledger.exportText(&export_buffer, .{ .include_protected_content = true });
+    try std.testing.expect(std.mem.indexOf(u8, full, "agent organized private notes locally") != null);
+    try std.testing.expect(std.mem.indexOf(u8, full, "agent remote action denied") != null);
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    try std.testing.expectEqual(@as(usize, 2), summary.agent_delegation_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.agent_delegation_denials);
+    try std.testing.expectEqual(@as(usize, 1), summary.agent_remote_call_events);
+    try std.testing.expectEqual(@as(usize, 2), summary.protected_details_redacted);
+
+    var summary_buffer: [USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES]u8 = undefined;
+    const rendered = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "agent_delegation_events=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "agent_delegation_denials=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "agent_remote_call_events=1") != null);
+}
+
+test "event ledger records attention policy as redacted diagnostic evidence" {
+    var ledger = Ledger.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 28 };
+
+    try ledger.recordAttentionDecision(user, 2801, true, false, 1, 0, 120, "passive status notice allowed");
+    try ledger.recordAttentionDecision(user, 2801, false, true, 3, 1, 121, "agent tried to interrupt quiet hours");
+
+    var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
+    const redacted = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=attention_policy") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "interruptive=yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "active_visible=3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "quiet hours") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "redacted") != null);
+
+    const full = try ledger.exportText(&export_buffer, .{ .include_protected_content = true });
+    try std.testing.expect(std.mem.indexOf(u8, full, "agent tried to interrupt quiet hours") != null);
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    try std.testing.expectEqual(@as(usize, 2), summary.attention_policy_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.attention_interruptions_denied);
+    try std.testing.expectEqual(@as(usize, 2), summary.protected_details_redacted);
+
+    var summary_buffer: [USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES]u8 = undefined;
+    const rendered = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "attention_policy_events=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "attention_interruptions_denied=1") != null);
+}
+
+test "event ledger records accessibility profile as redacted diagnostic evidence" {
+    var ledger = Ledger.init();
+    const user = principal.PrincipalId{ .kind = .user, .serial = 29 };
+
+    try ledger.recordAccessibilityProfile(user, 2901, false, true, false, true, true, 130, "keyboard navigation missing for tremor profile");
+    try ledger.recordAccessibilityProfile(user, 2901, true, true, true, true, true, 131, "profile applied");
+
+    var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
+    const redacted = try ledger.exportText(&export_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "kind=accessibility_profile") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "accessibility screen_reader=yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "tremor profile") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redacted, "redacted") != null);
+
+    const full = try ledger.exportText(&export_buffer, .{ .include_protected_content = true });
+    try std.testing.expect(std.mem.indexOf(u8, full, "tremor profile") != null);
+
+    const summary = ledger.userVisibleDiagnosticSummary();
+    try std.testing.expectEqual(@as(usize, 2), summary.accessibility_profile_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.accessibility_denials);
+    try std.testing.expectEqual(@as(usize, 2), summary.protected_details_redacted);
+
+    var summary_buffer: [USER_DIAGNOSTIC_SUMMARY_BUFFER_BYTES]u8 = undefined;
+    const rendered = try ledger.renderUserVisibleDiagnosticsToBuffer(&summary_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "accessibility_profile_events=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "accessibility_denials=1") != null);
+}
+
 test "event ledger remote sharing scrubs protected diagnostics unless explicitly included" {
     var ledger = Ledger.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 18 };
@@ -363,6 +450,13 @@ test "event ledger renders what an app knows about a document" {
     const after_revoke = try ledger.renderAppDocumentKnowledgeToBuffer(&buffer, task_id, document);
     try std.testing.expect(std.mem.indexOf(u8, after_revoke, "active_grants=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, after_revoke, "revoked=1") != null);
+
+    try ledger.recordCapabilityGrant(user, task_id, 702, .object_access, 14, "Permission receipt: granted Object access for workspace://trip/documents/plan.md; data leaves: none; revoke: Permission Review");
+    try ledger.recordCapabilityRevocation(user, task_id, 702, .object_access, 15, "revoked without restating the document path");
+    const implicit_revoke = try ledger.renderAppDocumentKnowledgeToBuffer(&buffer, task_id, document);
+    try std.testing.expect(std.mem.indexOf(u8, implicit_revoke, "object_grants=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, implicit_revoke, "active_grants=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, implicit_revoke, "revoked=2") != null);
 }
 
 test "event ledger persists history across restart" {

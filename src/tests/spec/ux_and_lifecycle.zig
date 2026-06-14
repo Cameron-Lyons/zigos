@@ -344,6 +344,11 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
         .allowed_sync_destinations = &.{"relay.corp.example"},
         .removable_storage_allowed = false,
         .screen_capture_allowed = false,
+        .require_adaptive_ui = true,
+        .require_screen_reader_support = true,
+        .require_keyboard_navigation = true,
+        .require_reduced_motion_support = true,
+        .require_high_contrast_support = true,
         .retention_days = 180,
         .audit_export_required = true,
     }, spec_support.signer("spec.policy.org", 0x81));
@@ -433,6 +438,14 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
         .components = &v2_components,
         .assets = &v2_assets,
         .requested_permissions = &v2_permissions,
+        .accessibility = .{
+            .adaptive_ui = true,
+            .supports_screen_reader = true,
+            .supports_keyboard_navigation = true,
+            .supports_reduced_motion = true,
+            .supports_high_contrast = true,
+            .profile_notes = "notes adapts to the user's accessibility profile",
+        },
     };
     v2.signature = try spec_support.signReleaseBundle(v2, bundle_signer);
 
@@ -452,6 +465,14 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
     try std.testing.expectEqual(@as(u32, 2), installed.schemaVersion());
     try std.testing.expectEqual(@as(usize, 2), installed.componentCount());
     try std.testing.expectEqualStrings("zigos.notes.sync", installed.componentAt(1).entrySlice());
+    var resolved_notes: package_service.ResolvedManifest = undefined;
+    const resolved_v2 = try packages.resolveCurrentManifest("app.notes", &resolved_notes);
+    try std.testing.expect(resolved_v2.accessibility.adaptive_ui);
+    try std.testing.expect(resolved_v2.accessibility.supports_screen_reader);
+    try std.testing.expect(resolved_v2.accessibility.supports_keyboard_navigation);
+    try std.testing.expect(resolved_v2.accessibility.supports_reduced_motion);
+    try std.testing.expect(resolved_v2.accessibility.supports_high_contrast);
+    try std.testing.expectEqualStrings("notes adapts to the user's accessibility profile", resolved_v2.accessibility.profile_notes);
     const launch_plan = try packages.buildLaunchPlan("app.notes");
     try std.testing.expectEqual(@as(usize, 2), launch_plan.component_count);
     try std.testing.expectEqual(@as(usize, 2), launch_plan.asset_count);
@@ -459,6 +480,29 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
     try std.testing.expect(!org_policy.removable_storage_allowed);
     try std.testing.expect(!org_policy.screen_capture_allowed);
     try std.testing.expect(org_policy.audit_export_required);
+    const accessibility_allowed = policies.accessibilityDecision(.{ .organization_id = 1 }, .{
+        .adaptive_ui = true,
+        .screen_reader_supported = true,
+        .keyboard_navigation = true,
+        .reduced_motion_supported = true,
+        .high_contrast_supported = true,
+    });
+    try std.testing.expect(accessibility_allowed.allowed);
+    const inaccessible = policies.accessibilityDecision(.{ .organization_id = 1 }, .{
+        .adaptive_ui = true,
+        .screen_reader_supported = true,
+        .reduced_motion_supported = true,
+        .high_contrast_supported = true,
+    });
+    try std.testing.expect(!inaccessible.allowed);
+    try std.testing.expectEqual(policy_object.DecisionReason.accessibility_keyboard_navigation_denied, inaccessible.reason);
+
+    var ledger = event_ledger.Ledger.init();
+    try ledger.recordAccessibilityProfile(spec_support.user(42), 9_201, accessibility_allowed.allowed, true, true, true, true, 44, "notes accessibility profile applied");
+    var diagnostics_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;
+    const diagnostics = try ledger.exportText(&diagnostics_buffer, .{});
+    try std.testing.expect(std.mem.indexOf(u8, diagnostics, "kind=accessibility_profile") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diagnostics, "profile applied") == null);
 
     _ = try packages_entry.port.rollback(packages_entry.authority, "app.notes");
     try std.testing.expectEqual(@as(u16, 0), packages.find("app.notes").?.versionMinor());

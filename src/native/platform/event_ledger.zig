@@ -64,6 +64,9 @@ pub const EventKind = enum(u8) {
     retention_policy,
     permission_lease,
     consent_receipt,
+    agent_delegation,
+    attention_policy,
+    accessibility_profile,
 };
 
 pub const PolicyChangeAction = enum(u8) {
@@ -132,6 +135,13 @@ pub const DiagnosticSummary = struct {
     permission_lease_expirations: usize = 0,
     consent_receipt_events: usize = 0,
     consent_receipt_revocations: usize = 0,
+    agent_delegation_events: usize = 0,
+    agent_delegation_denials: usize = 0,
+    agent_remote_call_events: usize = 0,
+    attention_policy_events: usize = 0,
+    attention_interruptions_denied: usize = 0,
+    accessibility_profile_events: usize = 0,
+    accessibility_denials: usize = 0,
     latest_tick: u64 = 0,
 
     pub fn evidenceEventCount(self: DiagnosticSummary) usize {
@@ -151,7 +161,10 @@ pub const DiagnosticSummary = struct {
             self.data_deletion_events +
             self.retention_policy_events +
             self.permission_lease_events +
-            self.consent_receipt_events;
+            self.consent_receipt_events +
+            self.agent_delegation_events +
+            self.attention_policy_events +
+            self.accessibility_profile_events;
     }
 };
 
@@ -813,6 +826,93 @@ pub const Ledger = struct {
         });
     }
 
+    pub fn recordAgentDelegation(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        allowed: bool,
+        autonomous_actions: u16,
+        remote_calls: u16,
+        user_confirmed: bool,
+        audit_enabled: bool,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        var code: u32 = 0;
+        if (user_confirmed) code |= 1;
+        if (audit_enabled) code |= 2;
+        try self.append(.{
+            .kind = .agent_delegation,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .related_id = remote_calls,
+            .detail_code = (@as(u32, autonomous_actions) << 16) | code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordAttentionDecision(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        allowed: bool,
+        interruptive: bool,
+        active_visible: u16,
+        active_interruptions: u16,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        const active_visible_code: u32 = @min(@as(u32, active_visible), @as(u32, 0x7fff));
+        const active_interruptions_code = @as(u32, active_interruptions);
+        var code: u32 = (active_visible_code << @as(u5, 16)) | active_interruptions_code;
+        if (interruptive) code |= @as(u32, 1) << @as(u5, 31);
+        try self.append(.{
+            .kind = .attention_policy,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .detail_code = code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordAccessibilityProfile(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        allowed: bool,
+        screen_reader: bool,
+        keyboard_navigation: bool,
+        reduced_motion: bool,
+        high_contrast: bool,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        var code: u32 = 0;
+        if (screen_reader) code |= 1;
+        if (keyboard_navigation) code |= 2;
+        if (reduced_motion) code |= 4;
+        if (high_contrast) code |= 8;
+        try self.append(.{
+            .kind = .accessibility_profile,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .detail_code = code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
     pub fn latestKind(self: *const Ledger, kind: EventKind) ?Event {
         const event = self.latestKindPtr(kind) orelse return null;
         return event.*;
@@ -920,6 +1020,21 @@ pub const Ledger = struct {
                     summary.consent_receipt_events += 1;
                     if (event.detail_code == @intFromEnum(ConsentReceiptAction.revoked)) summary.consent_receipt_revocations += 1;
                 },
+                .agent_delegation => {
+                    summary.agent_delegation_events += 1;
+                    if (!event.allowed) summary.agent_delegation_denials += 1;
+                    if (event.related_id != 0) summary.agent_remote_call_events += 1;
+                },
+                .attention_policy => {
+                    summary.attention_policy_events += 1;
+                    if (!event.allowed and (event.detail_code & (@as(u32, 1) << @as(u5, 31))) != 0) {
+                        summary.attention_interruptions_denied += 1;
+                    }
+                },
+                .accessibility_profile => {
+                    summary.accessibility_profile_events += 1;
+                    if (!event.allowed) summary.accessibility_denials += 1;
+                },
                 else => {},
             }
         }
@@ -937,7 +1052,7 @@ pub const Ledger = struct {
             summary.protected_details_redacted,
             summary.latest_tick,
         });
-        try appendFmt(buffer, &used, "diagnostic_evidence capability_denials={d} crashes={d} driver_restarts={d} suspicious_app_behavior={d} session_posture_events={d} session_posture_denials={d} sync_conflicts={d} device_trust_changes={d} device_trust_revocations={d} update_health_events={d} update_rollbacks={d} ai_inference_events={d} ai_remote_denials={d} ai_model_attestations={d} ai_model_rejections={d} data_egress_events={d} private_egress_denials={d} privacy_budget_events={d} data_export_events={d} data_export_denials={d} data_deletion_events={d} data_deletion_denials={d} data_deletion_receipts={d} retention_policy_events={d} permission_lease_events={d} permission_lease_expirations={d} consent_receipt_events={d} consent_receipt_revocations={d}", .{
+        try appendFmt(buffer, &used, "diagnostic_evidence capability_denials={d} crashes={d} driver_restarts={d} suspicious_app_behavior={d} session_posture_events={d} session_posture_denials={d} sync_conflicts={d} device_trust_changes={d} device_trust_revocations={d} update_health_events={d} update_rollbacks={d} ai_inference_events={d} ai_remote_denials={d} ai_model_attestations={d} ai_model_rejections={d} data_egress_events={d} private_egress_denials={d} privacy_budget_events={d} data_export_events={d} data_export_denials={d} data_deletion_events={d} data_deletion_denials={d} data_deletion_receipts={d} retention_policy_events={d} permission_lease_events={d} permission_lease_expirations={d} consent_receipt_events={d} consent_receipt_revocations={d} agent_delegation_events={d} agent_delegation_denials={d} agent_remote_call_events={d}", .{
             summary.capability_denials,
             summary.crashes,
             summary.driver_restarts,
@@ -966,6 +1081,17 @@ pub const Ledger = struct {
             summary.permission_lease_expirations,
             summary.consent_receipt_events,
             summary.consent_receipt_revocations,
+            summary.agent_delegation_events,
+            summary.agent_delegation_denials,
+            summary.agent_remote_call_events,
+        });
+        try appendFmt(buffer, &used, " attention_policy_events={d} attention_interruptions_denied={d}", .{
+            summary.attention_policy_events,
+            summary.attention_interruptions_denied,
+        });
+        try appendFmt(buffer, &used, " accessibility_profile_events={d} accessibility_denials={d}", .{
+            summary.accessibility_profile_events,
+            summary.accessibility_denials,
         });
         return buffer[0..used];
     }
@@ -981,18 +1107,28 @@ pub const Ledger = struct {
         var egress_route_count: usize = 0;
         var grant_ids: [MAX_EVENTS]u64 = [_]u64{0} ** MAX_EVENTS;
         var grant_id_count: usize = 0;
+        var revocation_ids: [MAX_EVENTS]u64 = [_]u64{0} ** MAX_EVENTS;
+        var revocation_id_count: usize = 0;
         var latest_object_capability: u64 = 0;
         var latest_egress_capability: u64 = 0;
 
-        for (&self.events.slots) |*slot| {
-            if (!slot.in_use) continue;
-            const event = &slot.event;
+        var task_cursor = self.task_index.head(taskKey(task_id));
+        while (task_cursor != indexed_arena.no_index) : (task_cursor = self.task_index.next(task_cursor)) {
+            const event = self.taskIndexedEvent(task_cursor);
             if (event.task_id != task_id) continue;
-            if (!eventMentionsDocument(event, document_resource)) continue;
 
             switch (event.kind) {
-                .permission_review, .permission_decision => prompt_count += 1,
+                .capability_revocation => {
+                    if (revocation_id_count < revocation_ids.len) {
+                        revocation_ids[revocation_id_count] = event.related_id;
+                        revocation_id_count += 1;
+                    }
+                },
+                .permission_review, .permission_decision => {
+                    if (eventMentionsDocument(event, document_resource)) prompt_count += 1;
+                },
                 .capability_grant => {
+                    if (!eventMentionsDocument(event, document_resource)) continue;
                     if (event.permission_kind) |permission_kind| {
                         switch (permission_kind) {
                             .object_access, .contacts => {
@@ -1016,11 +1152,8 @@ pub const Ledger = struct {
         }
 
         var revoked_count: usize = 0;
-        for (&self.events.slots) |*slot| {
-            if (!slot.in_use) continue;
-            const event = &slot.event;
-            if (event.task_id != task_id or event.kind != .capability_revocation) continue;
-            if (!containsCapabilityId(grant_ids[0..grant_id_count], event.related_id)) continue;
+        for (revocation_ids[0..revocation_id_count]) |revoked_id| {
+            if (!containsCapabilityId(grant_ids[0..grant_id_count], revoked_id)) continue;
             revoked_count += 1;
         }
 
@@ -1143,6 +1276,13 @@ pub const Ledger = struct {
             if (output) |records| records[count.*] = redactedForQuery(&slot.event, query);
             count.* += 1;
         }
+    }
+
+    fn taskIndexedEvent(self: *const Ledger, cursor: usize) *const Event {
+        if (cursor >= self.events.slots.len) native_util.impossibleByInvariant("event task index points outside slots");
+        const slot = &self.events.slots[cursor];
+        if (!slot.in_use) native_util.impossibleByInvariant("event task index points at a free slot");
+        return &slot.event;
     }
 
     fn indexEvent(self: *Ledger, event_index: usize) Error!void {
@@ -1632,6 +1772,23 @@ fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_prot
             try appendFmt(buffer, used, " policy={d} action={s}", .{
                 event.related_id,
                 policyChangeActionLabel(event.detail_code),
+            });
+        },
+        .attention_policy => {
+            try appendFmt(buffer, used, " attention_policy interruptive={s} active_visible={d} active_interruptions={d} allowed={s}", .{
+                yesNo((event.detail_code & (@as(u32, 1) << @as(u5, 31))) != 0),
+                (event.detail_code >> @as(u5, 16)) & 0x7fff,
+                event.detail_code & 0xffff,
+                yesNo(event.allowed),
+            });
+        },
+        .accessibility_profile => {
+            try appendFmt(buffer, used, " accessibility screen_reader={s} keyboard={s} reduced_motion={s} high_contrast={s} allowed={s}", .{
+                yesNo((event.detail_code & 1) != 0),
+                yesNo((event.detail_code & 2) != 0),
+                yesNo((event.detail_code & 4) != 0),
+                yesNo((event.detail_code & 8) != 0),
+                yesNo(event.allowed),
             });
         },
         .suspicious_app_behavior => {

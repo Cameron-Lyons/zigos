@@ -7,6 +7,8 @@ pub const MAX_AI_MODEL_DIGEST_BYTES: usize = 96;
 pub const MAX_AI_MODEL_SOURCE_BYTES: usize = 96;
 pub const MAX_SUPPLY_CHAIN_DIGEST_BYTES: usize = 96;
 pub const MAX_BUILD_PROVENANCE_IDENTITY_BYTES: usize = 96;
+pub const MAX_AGENT_PURPOSE_BYTES: usize = 128;
+pub const MAX_ACCESSIBILITY_PROFILE_BYTES: usize = 128;
 
 pub const InterfaceDecl = struct {
     name: []const u8,
@@ -73,6 +75,24 @@ pub const SupplyChainDecl = struct {
     build_provenance_identity: []const u8 = "",
     reproducible_build: bool = false,
     trusted_builder: bool = false,
+};
+
+pub const AgentDelegationDecl = struct {
+    enabled: bool = false,
+    purpose: []const u8 = "",
+    max_autonomous_actions: u16 = 0,
+    max_remote_calls: u16 = 0,
+    user_confirmation_required: bool = true,
+    audit_required: bool = true,
+};
+
+pub const AccessibilityDecl = struct {
+    adaptive_ui: bool = false,
+    supports_screen_reader: bool = false,
+    supports_keyboard_navigation: bool = false,
+    supports_reduced_motion: bool = false,
+    supports_high_contrast: bool = false,
+    profile_notes: []const u8 = "",
 };
 
 pub const DataEgressIntent = struct {
@@ -306,6 +326,8 @@ pub const BundleManifest = struct {
     ai_metadata: AiMetadata = .{},
     data_rights: DataRightsDecl = .{},
     supply_chain: SupplyChainDecl = .{},
+    agent_delegation: AgentDelegationDecl = .{},
+    accessibility: AccessibilityDecl = .{},
     update_channel: UpdateChannel = .stable,
     signature: Signature = .{},
 };
@@ -372,6 +394,15 @@ pub const ValidationError = error{
     ReproducibleBuildRequiresSourceArchive,
     ReproducibleBuildRequiresBuildRecipe,
     TrustedBuilderRequiresIdentity,
+    AgentDelegationPurposeMissing,
+    AgentDelegationPurposeTooLong,
+    AgentDelegationActionBudgetMissing,
+    AgentDelegationAuditRequired,
+    AgentDelegationNeedsConfirmation,
+    AccessibilityProfileTooLong,
+    AccessibilityKeyboardNavigationMissing,
+    AccessibilityScreenReaderMissing,
+    AccessibilityReducedMotionMissing,
     AiModelFamilyTooLong,
     AiModelDigestMissing,
     AiModelDigestTooLong,
@@ -403,6 +434,8 @@ pub fn validate(bundle: BundleManifest) ValidationError!void {
     try validatePermissionPrivacy(bundle);
     try validateDataRights(bundle);
     try validateSupplyChain(bundle);
+    try validateAgentDelegation(bundle);
+    try validateAccessibility(bundle);
     try validateBackgroundTasks(bundle);
     try validateDataEgressRequests(bundle);
     try validateAiMetadata(bundle);
@@ -432,6 +465,25 @@ fn validateSupplyChain(bundle: BundleManifest) ValidationError!void {
     if (bundle.supply_chain.trusted_builder and bundle.supply_chain.build_provenance_identity.len == 0) {
         return error.TrustedBuilderRequiresIdentity;
     }
+}
+
+fn validateAgentDelegation(bundle: BundleManifest) ValidationError!void {
+    if (bundle.agent_delegation.purpose.len > MAX_AGENT_PURPOSE_BYTES) return error.AgentDelegationPurposeTooLong;
+    if (!bundle.agent_delegation.enabled) return;
+    if (bundle.agent_delegation.purpose.len == 0) return error.AgentDelegationPurposeMissing;
+    if (bundle.agent_delegation.max_autonomous_actions == 0) return error.AgentDelegationActionBudgetMissing;
+    if (!bundle.agent_delegation.audit_required) return error.AgentDelegationAuditRequired;
+    if (!bundle.agent_delegation.user_confirmation_required and bundle.agent_delegation.max_remote_calls != 0) {
+        return error.AgentDelegationNeedsConfirmation;
+    }
+}
+
+fn validateAccessibility(bundle: BundleManifest) ValidationError!void {
+    if (bundle.accessibility.profile_notes.len > MAX_ACCESSIBILITY_PROFILE_BYTES) return error.AccessibilityProfileTooLong;
+    if (!bundle.accessibility.adaptive_ui) return;
+    if (!bundle.accessibility.supports_keyboard_navigation) return error.AccessibilityKeyboardNavigationMissing;
+    if (!bundle.accessibility.supports_screen_reader) return error.AccessibilityScreenReaderMissing;
+    if (!bundle.accessibility.supports_reduced_motion) return error.AccessibilityReducedMotionMissing;
 }
 
 fn validateAiMetadata(bundle: BundleManifest) ValidationError!void {
@@ -1301,6 +1353,112 @@ test "validate gates package supply chain reproducibility metadata" {
             .build_provenance_identity = "builder:zigos/release",
             .reproducible_build = true,
             .trusted_builder = true,
+        },
+    });
+}
+
+test "validate gates agent delegation behind bounded audited consent" {
+    try std.testing.expectError(error.AgentDelegationPurposeMissing, validate(.{
+        .bundle_id = "app.agent",
+        .display_name = "Agent",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .max_autonomous_actions = 4,
+        },
+    }));
+    try std.testing.expectError(error.AgentDelegationActionBudgetMissing, validate(.{
+        .bundle_id = "app.agent",
+        .display_name = "Agent",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Organize incoming notes",
+        },
+    }));
+    try std.testing.expectError(error.AgentDelegationAuditRequired, validate(.{
+        .bundle_id = "app.agent",
+        .display_name = "Agent",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Organize incoming notes",
+            .max_autonomous_actions = 4,
+            .audit_required = false,
+        },
+    }));
+    try std.testing.expectError(error.AgentDelegationNeedsConfirmation, validate(.{
+        .bundle_id = "app.agent",
+        .display_name = "Agent",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Summarize shared documents",
+            .max_autonomous_actions = 4,
+            .max_remote_calls = 1,
+            .user_confirmation_required = false,
+        },
+    }));
+    try validate(.{
+        .bundle_id = "app.agent",
+        .display_name = "Agent",
+        .publisher = "zigos.dev",
+        .agent_delegation = .{
+            .enabled = true,
+            .purpose = "Organize incoming notes",
+            .max_autonomous_actions = 4,
+            .max_remote_calls = 0,
+            .user_confirmation_required = true,
+            .audit_required = true,
+        },
+    });
+}
+
+test "validate gates adaptive UI declarations behind concrete accessibility support" {
+    try std.testing.expectError(error.AccessibilityKeyboardNavigationMissing, validate(.{
+        .bundle_id = "app.reader",
+        .display_name = "Reader",
+        .publisher = "zigos.dev",
+        .accessibility = .{
+            .adaptive_ui = true,
+            .supports_screen_reader = true,
+            .supports_reduced_motion = true,
+        },
+    }));
+
+    try std.testing.expectError(error.AccessibilityScreenReaderMissing, validate(.{
+        .bundle_id = "app.reader",
+        .display_name = "Reader",
+        .publisher = "zigos.dev",
+        .accessibility = .{
+            .adaptive_ui = true,
+            .supports_keyboard_navigation = true,
+            .supports_reduced_motion = true,
+        },
+    }));
+
+    try std.testing.expectError(error.AccessibilityReducedMotionMissing, validate(.{
+        .bundle_id = "app.reader",
+        .display_name = "Reader",
+        .publisher = "zigos.dev",
+        .accessibility = .{
+            .adaptive_ui = true,
+            .supports_keyboard_navigation = true,
+            .supports_screen_reader = true,
+        },
+    }));
+
+    try validate(.{
+        .bundle_id = "app.reader",
+        .display_name = "Reader",
+        .publisher = "zigos.dev",
+        .accessibility = .{
+            .adaptive_ui = true,
+            .supports_keyboard_navigation = true,
+            .supports_screen_reader = true,
+            .supports_reduced_motion = true,
+            .supports_high_contrast = true,
+            .profile_notes = "honors user accessibility profile",
         },
     });
 }

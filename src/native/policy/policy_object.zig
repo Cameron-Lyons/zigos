@@ -69,10 +69,24 @@ pub const DecisionReason = enum(u8) {
     package_reproducibility_denied,
     package_builder_denied,
     package_vulnerability_scan_denied,
+    agent_delegation_denied,
+    agent_action_budget_denied,
+    agent_remote_call_denied,
+    agent_confirmation_required,
+    agent_audit_required,
     private_egress_budget_denied,
     data_export_denied,
     data_deletion_denied,
     data_deletion_receipt_denied,
+    attention_quiet_denied,
+    attention_visible_budget_denied,
+    attention_interruption_budget_denied,
+    attention_critical_denied,
+    accessibility_adaptive_ui_denied,
+    accessibility_screen_reader_denied,
+    accessibility_keyboard_navigation_denied,
+    accessibility_reduced_motion_denied,
+    accessibility_high_contrast_denied,
     permission_retention_denied,
     permission_lease_denied,
     retention_denied,
@@ -120,11 +134,25 @@ pub const CreateRequest = struct {
     require_reproducible_package_build: bool = false,
     require_trusted_package_builder: bool = false,
     require_vulnerability_scan: bool = false,
+    agent_delegation_allowed: bool = false,
+    max_agent_actions_per_session: u16 = 0,
+    max_agent_remote_calls_per_session: u16 = 0,
+    require_agent_user_confirmation: bool = true,
+    require_agent_audit: bool = true,
     max_remote_private_egress_bytes: usize = 0,
     data_export_allowed: bool = false,
     data_deletion_allowed: bool = false,
     require_data_deletion_receipt: bool = false,
     max_data_export_bytes: usize = 0,
+    quiet_until_tick: u64 = 0,
+    max_visible_notifications: u16 = 0,
+    max_interruptive_notifications: u16 = 0,
+    allow_critical_interruption: bool = true,
+    require_adaptive_ui: bool = false,
+    require_screen_reader_support: bool = false,
+    require_keyboard_navigation: bool = false,
+    require_reduced_motion_support: bool = false,
+    require_high_contrast_support: bool = false,
     max_sensitive_retention_days: u16 = 0,
     max_permission_lease_ticks: u64 = 0,
     require_sensitive_permission_lease: bool = false,
@@ -179,6 +207,30 @@ pub const DataRightsRequest = struct {
     deletion_receipt_present: bool = false,
 };
 
+pub const AttentionRequest = struct {
+    now_tick: u64 = 0,
+    visible_notifications: u16 = 0,
+    interruptive_notifications: u16 = 0,
+    requests_interruption: bool = false,
+    critical: bool = false,
+};
+
+pub const AccessibilityRequest = struct {
+    adaptive_ui: bool = false,
+    screen_reader_supported: bool = false,
+    keyboard_navigation: bool = false,
+    reduced_motion_supported: bool = false,
+    high_contrast_supported: bool = false,
+};
+
+pub const AgentDelegationRequest = struct {
+    enabled: bool = false,
+    autonomous_actions: u16 = 0,
+    remote_calls: u16 = 0,
+    user_confirmed: bool = false,
+    audit_enabled: bool = false,
+};
+
 pub const PermissionUseRequest = struct {
     kind: manifest.PermissionKind,
     sensitivity: manifest.DataSensitivity = .internal_data,
@@ -229,11 +281,25 @@ pub const PolicyObject = struct {
     require_reproducible_package_build: bool,
     require_trusted_package_builder: bool,
     require_vulnerability_scan: bool,
+    agent_delegation_allowed: bool,
+    max_agent_actions_per_session: u16,
+    max_agent_remote_calls_per_session: u16,
+    require_agent_user_confirmation: bool,
+    require_agent_audit: bool,
     max_remote_private_egress_bytes: usize,
     data_export_allowed: bool,
     data_deletion_allowed: bool,
     require_data_deletion_receipt: bool,
     max_data_export_bytes: usize,
+    quiet_until_tick: u64,
+    max_visible_notifications: u16,
+    max_interruptive_notifications: u16,
+    allow_critical_interruption: bool,
+    require_adaptive_ui: bool,
+    require_screen_reader_support: bool,
+    require_keyboard_navigation: bool,
+    require_reduced_motion_support: bool,
+    require_high_contrast_support: bool,
     max_sensitive_retention_days: u16,
     max_permission_lease_ticks: u64,
     require_sensitive_permission_lease: bool,
@@ -383,11 +449,25 @@ pub const Directory = struct {
         slot.policy.require_reproducible_package_build = request.require_reproducible_package_build;
         slot.policy.require_trusted_package_builder = request.require_trusted_package_builder;
         slot.policy.require_vulnerability_scan = request.require_vulnerability_scan;
+        slot.policy.agent_delegation_allowed = request.agent_delegation_allowed;
+        slot.policy.max_agent_actions_per_session = request.max_agent_actions_per_session;
+        slot.policy.max_agent_remote_calls_per_session = request.max_agent_remote_calls_per_session;
+        slot.policy.require_agent_user_confirmation = request.require_agent_user_confirmation;
+        slot.policy.require_agent_audit = request.require_agent_audit;
         slot.policy.max_remote_private_egress_bytes = request.max_remote_private_egress_bytes;
         slot.policy.data_export_allowed = request.data_export_allowed;
         slot.policy.data_deletion_allowed = request.data_deletion_allowed;
         slot.policy.require_data_deletion_receipt = request.require_data_deletion_receipt;
         slot.policy.max_data_export_bytes = request.max_data_export_bytes;
+        slot.policy.quiet_until_tick = request.quiet_until_tick;
+        slot.policy.max_visible_notifications = request.max_visible_notifications;
+        slot.policy.max_interruptive_notifications = request.max_interruptive_notifications;
+        slot.policy.allow_critical_interruption = request.allow_critical_interruption;
+        slot.policy.require_adaptive_ui = request.require_adaptive_ui;
+        slot.policy.require_screen_reader_support = request.require_screen_reader_support;
+        slot.policy.require_keyboard_navigation = request.require_keyboard_navigation;
+        slot.policy.require_reduced_motion_support = request.require_reduced_motion_support;
+        slot.policy.require_high_contrast_support = request.require_high_contrast_support;
         slot.policy.max_sensitive_retention_days = request.max_sensitive_retention_days;
         slot.policy.max_permission_lease_ticks = request.max_permission_lease_ticks;
         slot.policy.require_sensitive_permission_lease = request.require_sensitive_permission_lease;
@@ -508,6 +588,33 @@ pub const Directory = struct {
             const signature_decision = self.requireVerified(policy);
             if (!signature_decision.allowed) return signature_decision;
             if (policy.packageProvenanceDenial(request)) |reason| return block(policy, reason);
+        }
+        return allow();
+    }
+
+    pub fn agentDelegationDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: AgentDelegationRequest,
+    ) PolicyDecision {
+        if (!request.enabled) return allow();
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (!policy.agent_delegation_allowed) return block(policy, .agent_delegation_denied);
+            if (policy.max_agent_actions_per_session != 0 and request.autonomous_actions > policy.max_agent_actions_per_session) {
+                return block(policy, .agent_action_budget_denied);
+            }
+            if (policy.max_agent_remote_calls_per_session != 0 and request.remote_calls > policy.max_agent_remote_calls_per_session) {
+                return block(policy, .agent_remote_call_denied);
+            }
+            if (request.remote_calls != 0 and policy.require_agent_user_confirmation and !request.user_confirmed) {
+                return block(policy, .agent_confirmation_required);
+            }
+            if (policy.require_agent_audit and !request.audit_enabled) {
+                return block(policy, .agent_audit_required);
+            }
         }
         return allow();
     }
@@ -673,6 +780,58 @@ pub const Directory = struct {
                     }
                 },
             }
+        }
+        return allow();
+    }
+
+    pub fn attentionDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: AttentionRequest,
+    ) PolicyDecision {
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (request.critical and !policy.allow_critical_interruption) {
+                return block(policy, .attention_critical_denied);
+            }
+            if (request.requests_interruption and
+                !request.critical and
+                policy.quiet_until_tick != 0 and
+                request.now_tick < policy.quiet_until_tick)
+            {
+                return block(policy, .attention_quiet_denied);
+            }
+            if (policy.max_visible_notifications != 0 and
+                request.visible_notifications >= policy.max_visible_notifications)
+            {
+                return block(policy, .attention_visible_budget_denied);
+            }
+            if (request.requests_interruption and
+                policy.max_interruptive_notifications != 0 and
+                request.interruptive_notifications >= policy.max_interruptive_notifications)
+            {
+                return block(policy, .attention_interruption_budget_denied);
+            }
+        }
+        return allow();
+    }
+
+    pub fn accessibilityDecision(
+        self: *const Directory,
+        subjects: SubjectSet,
+        request: AccessibilityRequest,
+    ) PolicyDecision {
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (policy.require_adaptive_ui and !request.adaptive_ui) return block(policy, .accessibility_adaptive_ui_denied);
+            if (policy.require_screen_reader_support and !request.screen_reader_supported) return block(policy, .accessibility_screen_reader_denied);
+            if (policy.require_keyboard_navigation and !request.keyboard_navigation) return block(policy, .accessibility_keyboard_navigation_denied);
+            if (policy.require_reduced_motion_support and !request.reduced_motion_supported) return block(policy, .accessibility_reduced_motion_denied);
+            if (policy.require_high_contrast_support and !request.high_contrast_supported) return block(policy, .accessibility_high_contrast_denied);
         }
         return allow();
     }
@@ -896,11 +1055,25 @@ fn zeroPolicy() PolicyObject {
         .require_reproducible_package_build = false,
         .require_trusted_package_builder = false,
         .require_vulnerability_scan = false,
+        .agent_delegation_allowed = false,
+        .max_agent_actions_per_session = 0,
+        .max_agent_remote_calls_per_session = 0,
+        .require_agent_user_confirmation = true,
+        .require_agent_audit = true,
         .max_remote_private_egress_bytes = 0,
         .data_export_allowed = false,
         .data_deletion_allowed = false,
         .require_data_deletion_receipt = false,
         .max_data_export_bytes = 0,
+        .quiet_until_tick = 0,
+        .max_visible_notifications = 0,
+        .max_interruptive_notifications = 0,
+        .allow_critical_interruption = true,
+        .require_adaptive_ui = false,
+        .require_screen_reader_support = false,
+        .require_keyboard_navigation = false,
+        .require_reduced_motion_support = false,
+        .require_high_contrast_support = false,
         .max_sensitive_retention_days = 0,
         .max_permission_lease_ticks = 0,
         .require_sensitive_permission_lease = false,
@@ -968,11 +1141,25 @@ fn policyDigest(policy: *const PolicyObject) crypto_hash.Digest {
     crypto_hash.updateBool(&hasher, "require-reproducible-package-build", policy.require_reproducible_package_build);
     crypto_hash.updateBool(&hasher, "require-trusted-package-builder", policy.require_trusted_package_builder);
     crypto_hash.updateBool(&hasher, "require-vulnerability-scan", policy.require_vulnerability_scan);
+    crypto_hash.updateBool(&hasher, "agent-delegation-allowed", policy.agent_delegation_allowed);
+    crypto_hash.updateInt(&hasher, "max-agent-actions-per-session", policy.max_agent_actions_per_session);
+    crypto_hash.updateInt(&hasher, "max-agent-remote-calls-per-session", policy.max_agent_remote_calls_per_session);
+    crypto_hash.updateBool(&hasher, "require-agent-user-confirmation", policy.require_agent_user_confirmation);
+    crypto_hash.updateBool(&hasher, "require-agent-audit", policy.require_agent_audit);
     crypto_hash.updateInt(&hasher, "max-remote-private-egress-bytes", policy.max_remote_private_egress_bytes);
     crypto_hash.updateBool(&hasher, "data-export-allowed", policy.data_export_allowed);
     crypto_hash.updateBool(&hasher, "data-deletion-allowed", policy.data_deletion_allowed);
     crypto_hash.updateBool(&hasher, "require-data-deletion-receipt", policy.require_data_deletion_receipt);
     crypto_hash.updateInt(&hasher, "max-data-export-bytes", policy.max_data_export_bytes);
+    crypto_hash.updateInt(&hasher, "quiet-until-tick", policy.quiet_until_tick);
+    crypto_hash.updateInt(&hasher, "max-visible-notifications", policy.max_visible_notifications);
+    crypto_hash.updateInt(&hasher, "max-interruptive-notifications", policy.max_interruptive_notifications);
+    crypto_hash.updateBool(&hasher, "allow-critical-interruption", policy.allow_critical_interruption);
+    crypto_hash.updateBool(&hasher, "require-adaptive-ui", policy.require_adaptive_ui);
+    crypto_hash.updateBool(&hasher, "require-screen-reader-support", policy.require_screen_reader_support);
+    crypto_hash.updateBool(&hasher, "require-keyboard-navigation", policy.require_keyboard_navigation);
+    crypto_hash.updateBool(&hasher, "require-reduced-motion-support", policy.require_reduced_motion_support);
+    crypto_hash.updateBool(&hasher, "require-high-contrast-support", policy.require_high_contrast_support);
     crypto_hash.updateInt(&hasher, "max-sensitive-retention-days", policy.max_sensitive_retention_days);
     crypto_hash.updateInt(&hasher, "max-permission-lease-ticks", policy.max_permission_lease_ticks);
     crypto_hash.updateBool(&hasher, "require-sensitive-permission-lease", policy.require_sensitive_permission_lease);
@@ -1472,6 +1659,241 @@ test "policy directory gates package supply chain posture" {
     });
     try std.testing.expect(!missing_scan.allowed);
     try std.testing.expectEqual(DecisionReason.package_vulnerability_scan_denied, missing_scan.reason);
+}
+
+test "policy directory gates agent delegation budgets confirmation and audit" {
+    var directory = Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "agent-policy-key",
+        .seed = signing.seedFromByte(0x8B),
+    };
+    const org_policy = try directory.create(.{
+        .scope = .organization,
+        .subject_id = 95,
+        .issuer = .{ .kind = .policy_authority, .serial = 98 },
+        .label = "bounded-agent-delegation",
+        .agent_delegation_allowed = true,
+        .max_agent_actions_per_session = 8,
+        .max_agent_remote_calls_per_session = 1,
+        .require_agent_user_confirmation = true,
+        .require_agent_audit = true,
+    }, signer);
+
+    const subjects = SubjectSet{
+        .organization_id = 95,
+    };
+    const allowed = directory.agentDelegationDecision(subjects, .{
+        .enabled = true,
+        .autonomous_actions = 4,
+        .remote_calls = 1,
+        .user_confirmed = true,
+        .audit_enabled = true,
+    });
+    try std.testing.expect(allowed.allowed);
+
+    const too_many_actions = directory.agentDelegationDecision(subjects, .{
+        .enabled = true,
+        .autonomous_actions = 9,
+        .remote_calls = 1,
+        .user_confirmed = true,
+        .audit_enabled = true,
+    });
+    try std.testing.expect(!too_many_actions.allowed);
+    try std.testing.expectEqual(DecisionReason.agent_action_budget_denied, too_many_actions.reason);
+    try std.testing.expectEqual(org_policy.id, too_many_actions.blocking_policy_id);
+
+    const too_many_remote_calls = directory.agentDelegationDecision(subjects, .{
+        .enabled = true,
+        .autonomous_actions = 4,
+        .remote_calls = 2,
+        .user_confirmed = true,
+        .audit_enabled = true,
+    });
+    try std.testing.expect(!too_many_remote_calls.allowed);
+    try std.testing.expectEqual(DecisionReason.agent_remote_call_denied, too_many_remote_calls.reason);
+
+    const missing_confirmation = directory.agentDelegationDecision(subjects, .{
+        .enabled = true,
+        .autonomous_actions = 4,
+        .remote_calls = 1,
+        .audit_enabled = true,
+    });
+    try std.testing.expect(!missing_confirmation.allowed);
+    try std.testing.expectEqual(DecisionReason.agent_confirmation_required, missing_confirmation.reason);
+
+    const missing_audit = directory.agentDelegationDecision(subjects, .{
+        .enabled = true,
+        .autonomous_actions = 4,
+        .remote_calls = 0,
+        .user_confirmed = true,
+    });
+    try std.testing.expect(!missing_audit.allowed);
+    try std.testing.expectEqual(DecisionReason.agent_audit_required, missing_audit.reason);
+
+    var locked_directory = Directory.init();
+    _ = try locked_directory.create(.{
+        .scope = .organization,
+        .subject_id = 96,
+        .issuer = .{ .kind = .policy_authority, .serial = 99 },
+        .label = "no-agent-delegation",
+        .agent_delegation_allowed = false,
+    }, signer);
+    const locked = locked_directory.agentDelegationDecision(.{ .organization_id = 96 }, .{
+        .enabled = true,
+        .autonomous_actions = 1,
+        .audit_enabled = true,
+    });
+    try std.testing.expect(!locked.allowed);
+    try std.testing.expectEqual(DecisionReason.agent_delegation_denied, locked.reason);
+}
+
+test "policy directory gates user attention budgets and quiet hours" {
+    var directory = Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "attention-policy-key",
+        .seed = signing.seedFromByte(0x8C),
+    };
+    const org_policy = try directory.create(.{
+        .scope = .organization,
+        .subject_id = 97,
+        .issuer = .{ .kind = .policy_authority, .serial = 100 },
+        .label = "attention-baseline",
+        .quiet_until_tick = 500,
+        .max_visible_notifications = 3,
+        .max_interruptive_notifications = 1,
+        .allow_critical_interruption = false,
+    }, signer);
+    _ = try directory.create(.{
+        .scope = .user,
+        .subject_id = 970,
+        .issuer = .{ .kind = .policy_authority, .serial = 101 },
+        .label = "user-attention",
+        .quiet_until_tick = 0,
+        .max_visible_notifications = 6,
+        .max_interruptive_notifications = 2,
+        .allow_critical_interruption = true,
+    }, signer);
+
+    const subjects = SubjectSet{
+        .user_id = 970,
+        .organization_id = 97,
+    };
+    const passive = directory.attentionDecision(subjects, .{
+        .now_tick = 300,
+        .visible_notifications = 1,
+    });
+    try std.testing.expect(passive.allowed);
+
+    const quiet = directory.attentionDecision(subjects, .{
+        .now_tick = 300,
+        .visible_notifications = 1,
+        .requests_interruption = true,
+    });
+    try std.testing.expect(!quiet.allowed);
+    try std.testing.expectEqual(DecisionReason.attention_quiet_denied, quiet.reason);
+    try std.testing.expectEqual(org_policy.id, quiet.blocking_policy_id);
+
+    const visible_budget = directory.attentionDecision(subjects, .{
+        .now_tick = 600,
+        .visible_notifications = 3,
+    });
+    try std.testing.expect(!visible_budget.allowed);
+    try std.testing.expectEqual(DecisionReason.attention_visible_budget_denied, visible_budget.reason);
+
+    const interruption_budget = directory.attentionDecision(subjects, .{
+        .now_tick = 600,
+        .visible_notifications = 1,
+        .interruptive_notifications = 1,
+        .requests_interruption = true,
+    });
+    try std.testing.expect(!interruption_budget.allowed);
+    try std.testing.expectEqual(DecisionReason.attention_interruption_budget_denied, interruption_budget.reason);
+
+    const critical = directory.attentionDecision(subjects, .{
+        .now_tick = 600,
+        .visible_notifications = 1,
+        .requests_interruption = true,
+        .critical = true,
+    });
+    try std.testing.expect(!critical.allowed);
+    try std.testing.expectEqual(DecisionReason.attention_critical_denied, critical.reason);
+}
+
+test "policy directory gates accessibility profile requirements" {
+    var directory = Directory.init();
+    const signer = signing.SignerIdentity{
+        .label = "accessibility-policy-key",
+        .seed = signing.seedFromByte(0x8D),
+    };
+    const org_policy = try directory.create(.{
+        .scope = .organization,
+        .subject_id = 98,
+        .issuer = .{ .kind = .policy_authority, .serial = 102 },
+        .label = "accessible-ui-baseline",
+        .require_adaptive_ui = true,
+        .require_screen_reader_support = true,
+        .require_keyboard_navigation = true,
+        .require_reduced_motion_support = true,
+        .require_high_contrast_support = true,
+    }, signer);
+
+    const subjects = SubjectSet{
+        .organization_id = 98,
+    };
+    const allowed = directory.accessibilityDecision(subjects, .{
+        .adaptive_ui = true,
+        .screen_reader_supported = true,
+        .keyboard_navigation = true,
+        .reduced_motion_supported = true,
+        .high_contrast_supported = true,
+    });
+    try std.testing.expect(allowed.allowed);
+
+    const missing_adaptive = directory.accessibilityDecision(subjects, .{
+        .screen_reader_supported = true,
+        .keyboard_navigation = true,
+        .reduced_motion_supported = true,
+        .high_contrast_supported = true,
+    });
+    try std.testing.expect(!missing_adaptive.allowed);
+    try std.testing.expectEqual(DecisionReason.accessibility_adaptive_ui_denied, missing_adaptive.reason);
+    try std.testing.expectEqual(org_policy.id, missing_adaptive.blocking_policy_id);
+
+    const missing_screen_reader = directory.accessibilityDecision(subjects, .{
+        .adaptive_ui = true,
+        .keyboard_navigation = true,
+        .reduced_motion_supported = true,
+        .high_contrast_supported = true,
+    });
+    try std.testing.expect(!missing_screen_reader.allowed);
+    try std.testing.expectEqual(DecisionReason.accessibility_screen_reader_denied, missing_screen_reader.reason);
+
+    const missing_keyboard = directory.accessibilityDecision(subjects, .{
+        .adaptive_ui = true,
+        .screen_reader_supported = true,
+        .reduced_motion_supported = true,
+        .high_contrast_supported = true,
+    });
+    try std.testing.expect(!missing_keyboard.allowed);
+    try std.testing.expectEqual(DecisionReason.accessibility_keyboard_navigation_denied, missing_keyboard.reason);
+
+    const missing_reduced_motion = directory.accessibilityDecision(subjects, .{
+        .adaptive_ui = true,
+        .screen_reader_supported = true,
+        .keyboard_navigation = true,
+        .high_contrast_supported = true,
+    });
+    try std.testing.expect(!missing_reduced_motion.allowed);
+    try std.testing.expectEqual(DecisionReason.accessibility_reduced_motion_denied, missing_reduced_motion.reason);
+
+    const missing_high_contrast = directory.accessibilityDecision(subjects, .{
+        .adaptive_ui = true,
+        .screen_reader_supported = true,
+        .keyboard_navigation = true,
+        .reduced_motion_supported = true,
+    });
+    try std.testing.expect(!missing_high_contrast.allowed);
+    try std.testing.expectEqual(DecisionReason.accessibility_high_contrast_denied, missing_high_contrast.reason);
 }
 
 test "policy directory gates sensitive data export deletion and receipts" {

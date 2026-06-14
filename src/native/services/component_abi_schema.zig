@@ -60,6 +60,8 @@ pub const InterfaceKey = enum(u8) {
     permission_lease,
     data_rights,
     identity_session,
+    agent_delegation,
+    accessibility_profile,
 };
 
 pub const InterfaceId = enum(u16) {
@@ -84,6 +86,8 @@ pub const InterfaceId = enum(u16) {
     permission_lease = 0x1013,
     data_rights = 0x1014,
     identity_session = 0x1015,
+    agent_delegation = 0x1016,
+    accessibility_profile = 0x1017,
 };
 
 pub const OperationId = enum(u16) {
@@ -117,6 +121,12 @@ pub const OperationId = enum(u16) {
     identity_session_authorize = 0x0E01,
     identity_session_step_up = 0x0E02,
     identity_session_revoke = 0x0E03,
+    agent_authorize = 0x0F01,
+    agent_record_action = 0x0F02,
+    agent_revoke = 0x0F03,
+    accessibility_profile_get = 0x1001,
+    accessibility_profile_apply = 0x1002,
+    accessibility_profile_audit = 0x1003,
 };
 
 pub const ServiceBinding = enum(u8) {
@@ -361,6 +371,51 @@ const IdentitySessionRevokeRequestWire = extern struct {
     _reserved: u16 = 0,
 };
 
+const AgentAuthorizeRequestWire = extern struct {
+    header: WireHeader,
+    autonomous_actions: u16,
+    remote_calls: u16,
+    flags: u16,
+    purpose_len: u16,
+};
+
+const AgentRecordActionRequestWire = extern struct {
+    header: WireHeader,
+    delegation_id: u64,
+    action_count: u16,
+    remote_call_count: u16,
+    flags: u16,
+    detail_len: u16,
+};
+
+const AgentRevokeRequestWire = extern struct {
+    header: WireHeader,
+    delegation_id: u64,
+    reason: u16,
+    _reserved: u16 = 0,
+};
+
+const AccessibilityProfileGetRequestWire = extern struct {
+    header: WireHeader,
+    subject_id: u64,
+};
+
+const AccessibilityProfileApplyRequestWire = extern struct {
+    header: WireHeader,
+    subject_id: u64,
+    flags: u32,
+    profile_notes_len: u16,
+    _reserved: u16 = 0,
+};
+
+const AccessibilityProfileAuditRequestWire = extern struct {
+    header: WireHeader,
+    subject_id: u64,
+    flags: u32,
+    decision_reason: u16,
+    _reserved: u16 = 0,
+};
+
 const ServiceRegisterResponseWire = extern struct {
     accepted: u32,
 };
@@ -458,6 +513,22 @@ const IdentitySessionResponseWire = extern struct {
     expires_at_tick: u64,
 };
 
+const AgentDelegationResponseWire = extern struct {
+    accepted: u32,
+    reason: u16,
+    _reserved: u16 = 0,
+    delegation_id: u64,
+    remaining_actions: u16,
+    remaining_remote_calls: u16,
+};
+
+const AccessibilityProfileResponseWire = extern struct {
+    accepted: u32,
+    reason: u16,
+    flags: u32,
+    profile_generation: u64,
+};
+
 const InterfaceSpec = struct {
     id: InterfaceId,
     key: InterfaceKey,
@@ -499,6 +570,8 @@ pub const interface_specs = [_]InterfaceSpec{
     iface(.permission_lease, "zigos.permission.lease"),
     iface(.data_rights, "zigos.data.rights"),
     iface(.identity_session, "zigos.identity.session"),
+    iface(.agent_delegation, "zigos.agent.delegation"),
+    iface(.accessibility_profile, "zigos.accessibility.profile"),
 };
 
 const OperationSpec = struct {
@@ -559,6 +632,12 @@ pub const operation_specs = [_]OperationSpec{
     op(.identity_session, .identity_session_authorize, "authorize", IdentitySessionAuthorizeRequestWire, IdentitySessionResponseWire),
     op(.identity_session, .identity_session_step_up, "step_up", IdentitySessionStepUpRequestWire, IdentitySessionResponseWire),
     op(.identity_session, .identity_session_revoke, "revoke", IdentitySessionRevokeRequestWire, IdentitySessionResponseWire),
+    op(.agent_delegation, .agent_authorize, "authorize", AgentAuthorizeRequestWire, AgentDelegationResponseWire),
+    op(.agent_delegation, .agent_record_action, "record_action", AgentRecordActionRequestWire, AgentDelegationResponseWire),
+    op(.agent_delegation, .agent_revoke, "revoke", AgentRevokeRequestWire, AgentDelegationResponseWire),
+    op(.accessibility_profile, .accessibility_profile_get, "get_profile", AccessibilityProfileGetRequestWire, AccessibilityProfileResponseWire),
+    op(.accessibility_profile, .accessibility_profile_apply, "apply_profile", AccessibilityProfileApplyRequestWire, AccessibilityProfileResponseWire),
+    op(.accessibility_profile, .accessibility_profile_audit, "audit_profile", AccessibilityProfileAuditRequestWire, AccessibilityProfileResponseWire),
 };
 
 const ServiceBindingSpec = struct {
@@ -811,7 +890,7 @@ fn buildServiceCatalogBindings() [service_binding_specs.len]ServiceCatalogBindin
 }
 
 fn buildContracts() [interface_specs.len]InterfaceContract {
-    @setEvalBranchQuota(16384);
+    @setEvalBranchQuota(32768);
     var result: [interface_specs.len]InterfaceContract = undefined;
     inline for (interface_specs, 0..) |spec, index| {
         result[index] = buildContract(spec);
@@ -843,7 +922,7 @@ fn buildContract(comptime spec: InterfaceSpec) InterfaceContract {
 }
 
 fn hashContract(comptime spec: InterfaceSpec) u64 {
-    @setEvalBranchQuota(8192);
+    @setEvalBranchQuota(32768);
     var hash = native_util.fnv1a64(spec.name);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, spec.version_major);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, spec.version_minor);
@@ -942,6 +1021,8 @@ test "component ABI schema emits manifest interfaces and service catalog binding
     try std.testing.expect(contractFor("zigos.permission.lease").?.operation(.permission_lease_issue) != null);
     try std.testing.expect(contractFor("zigos.data.rights").?.operation(.data_delete_receipt) != null);
     try std.testing.expect(contractFor("zigos.identity.session").?.operation(.identity_session_authorize) != null);
+    try std.testing.expect(contractFor("zigos.agent.delegation").?.operation(.agent_authorize) != null);
+    try std.testing.expect(contractFor("zigos.accessibility.profile").?.operation(.accessibility_profile_apply) != null);
     try std.testing.expect(contractFor(interfaceForService(.service_registry).name).?.contract_hash != 0);
     try std.testing.expect(contractFor(interfaceForService(.sync_replication).name).?.contract_hash != 0);
     try std.testing.expectEqual(

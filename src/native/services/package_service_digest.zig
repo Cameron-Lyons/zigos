@@ -32,6 +32,18 @@ pub fn digestBundle(bundle: manifest.BundleManifest) Digest {
     crypto_hash.updateBytes(&hasher, "supply-chain-build-provenance-identity", bundle.supply_chain.build_provenance_identity);
     crypto_hash.updateBool(&hasher, "supply-chain-reproducible-build", bundle.supply_chain.reproducible_build);
     crypto_hash.updateBool(&hasher, "supply-chain-trusted-builder", bundle.supply_chain.trusted_builder);
+    crypto_hash.updateBool(&hasher, "agent-delegation-enabled", bundle.agent_delegation.enabled);
+    crypto_hash.updateBytes(&hasher, "agent-delegation-purpose", bundle.agent_delegation.purpose);
+    crypto_hash.updateInt(&hasher, "agent-delegation-max-actions", bundle.agent_delegation.max_autonomous_actions);
+    crypto_hash.updateInt(&hasher, "agent-delegation-max-remote-calls", bundle.agent_delegation.max_remote_calls);
+    crypto_hash.updateBool(&hasher, "agent-delegation-user-confirmation", bundle.agent_delegation.user_confirmation_required);
+    crypto_hash.updateBool(&hasher, "agent-delegation-audit-required", bundle.agent_delegation.audit_required);
+    crypto_hash.updateBool(&hasher, "accessibility-adaptive-ui", bundle.accessibility.adaptive_ui);
+    crypto_hash.updateBool(&hasher, "accessibility-screen-reader", bundle.accessibility.supports_screen_reader);
+    crypto_hash.updateBool(&hasher, "accessibility-keyboard-navigation", bundle.accessibility.supports_keyboard_navigation);
+    crypto_hash.updateBool(&hasher, "accessibility-reduced-motion", bundle.accessibility.supports_reduced_motion);
+    crypto_hash.updateBool(&hasher, "accessibility-high-contrast", bundle.accessibility.supports_high_contrast);
+    crypto_hash.updateBytes(&hasher, "accessibility-profile-notes", bundle.accessibility.profile_notes);
 
     for (bundle.provided_interfaces, 0..) |interface, index| {
         crypto_hash.updateInt(&hasher, "provided-index", index);
