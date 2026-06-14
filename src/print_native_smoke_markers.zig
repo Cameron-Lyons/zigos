@@ -29,6 +29,7 @@ const marker_groups = [_]MarkerGroup{
     .{ .name = "rollback_slot_failure", .markers = &smoke_markers.rollback_slot_failure_required },
     .{ .name = "storage_durability", .markers = &smoke_markers.storage_durability_required },
     .{ .name = "sync_two_node", .markers = &smoke_markers.sync_two_node_required },
+    .{ .name = "notes_daily_driver", .markers = &smoke_markers.notes_daily_driver_required },
     .{ .name = "recovery", .markers = &smoke_markers.recovery_required },
 };
 

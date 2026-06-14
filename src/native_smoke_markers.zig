@@ -228,6 +228,16 @@ pub const sync_two_node_required = [_][]const u8{
     boot_markers.native_ready,
 };
 
+pub const notes_daily_driver_required = [_][]const u8{
+    boot_markers.notes_daily_driver_install_open_ok,
+    boot_markers.notes_daily_driver_edit_saved_ok,
+    boot_markers.notes_daily_driver_share_sync_ok,
+    boot_markers.notes_daily_driver_update_rollback_ok,
+    boot_markers.notes_daily_driver_recovery_remove_ok,
+    boot_markers.notes_daily_driver_authority_revoked_ok,
+    boot_markers.notes_daily_driver_complete,
+};
+
 pub const recovery_required = [_][]const u8{
     boot_markers.boot_start,
     boot_markers.boot_profile_recovery,
@@ -332,6 +342,16 @@ test "native smoke gate requires two-node sync transport proof markers" {
     try std.testing.expect(contains(&sync_two_node_required, "ZIGOS:SYNC:SYNC:DEVICE_TO_DEVICE"));
     try std.testing.expect(contains(&sync_two_node_required, "ZIGOS:SYNC:SYNC:RELAY"));
     try std.testing.expect(contains(&sync_two_node_required, "ZIGOS:SYNC:SYNC_SERVICE:RECOVERED"));
+}
+
+test "native smoke marker contract includes the Notes daily-driver proof path" {
+    try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_install_open_ok));
+    try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_edit_saved_ok));
+    try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_share_sync_ok));
+    try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_update_rollback_ok));
+    try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_recovery_remove_ok));
+    try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_authority_revoked_ok));
+    try std.testing.expect(contains(&notes_daily_driver_required, boot_markers.notes_daily_driver_complete));
 }
 
 test "native smoke gate requires production post-activation health proof markers" {

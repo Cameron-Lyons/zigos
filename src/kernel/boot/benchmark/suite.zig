@@ -129,6 +129,8 @@ const TaskCheckpointContext = struct {
 
 const PackageContext = struct {
     service: package_service.Service = package_service.Service.init(),
+    signed_v1: manifest.BundleManifest = package_bundle_v1,
+    signed_v2: manifest.BundleManifest = package_bundle_v2,
     resolved: package_service.ResolvedManifest = undefined,
 };
 
@@ -374,6 +376,14 @@ const package_bundle_v2 = manifest.BundleManifest{
         .signer = "bench-package",
     },
 };
+
+const package_signer_identity = signing.SignerIdentity{
+    .label = "bench-package",
+    .seed = signing.seedFromByte(0x45),
+};
+
+const package_policy_authority = principal.PrincipalId{ .kind = .policy_authority, .serial = 45 };
+const package_publisher_principal = principal.PrincipalId{ .kind = .app, .serial = 45 };
 
 var permission_review_buffer: [PERMISSION_REVIEW_BENCH_BUFFER_BYTES]u8 = undefined;
 var permission_review_grants: [permission_review.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
@@ -650,10 +660,36 @@ fn prepareTaskCheckpointFixture() void {
 
 fn preparePackageFixture() void {
     package_context.service = package_service.Service.init();
+    package_context.signed_v1 = signedPackageBundle(package_bundle_v1);
+    package_context.signed_v2 = signedPackageBundle(package_bundle_v2);
+    trustBenchmarkPackagePublisher(&package_context.service);
     const slot = &package_context.service.slots[0];
     slot.in_use = true;
-    package_service_bundle_ops.installNew(&slot.bundle, package_bundle_v1, 1, crypto_hash.digestFromByte(0x11)) catch unreachable;
+    package_service_bundle_ops.installNew(&slot.bundle, package_context.signed_v1, "store:zigos", 1, crypto_hash.digestFromByte(0x11)) catch unreachable;
     package_context.service.rebuildIndexes();
+}
+
+fn trustBenchmarkPackagePublisher(service_ref: *package_service.Service) void {
+    _ = service_ref.trust_store.bindPolicyAuthorityRoot(
+        package_policy_authority,
+        signing.publicKeyFromByte(0x51),
+    ) catch unreachable;
+    _ = service_ref.trust_store.bindPublisher(
+        package_publisher_principal,
+        package_policy_authority,
+        package_bundle_v1.publisher,
+        signing.publicKey(package_signer_identity) catch unreachable,
+    ) catch unreachable;
+}
+
+fn signedPackageBundle(template: manifest.BundleManifest) manifest.BundleManifest {
+    var bundle = template;
+    bundle.signature = signing.signWithDefaultRegistry(
+        .ed25519,
+        package_signer_identity,
+        &package_service.digestBundle(bundle),
+    ) catch unreachable;
+    return bundle;
 }
 
 fn prepareOverlaySessionFixture() void {
@@ -1085,10 +1121,11 @@ fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
 fn benchmarkPackageRevision(iteration: u32) u64 {
     _ = iteration;
     const slot = &package_context.service.slots[0];
-    package_service_bundle_ops.installNew(&slot.bundle, package_bundle_v1, 1, crypto_hash.digestFromByte(0x11)) catch unreachable;
+    package_service_bundle_ops.installNew(&slot.bundle, package_context.signed_v1, "store:zigos", 1, crypto_hash.digestFromByte(0x11)) catch unreachable;
     package_service_bundle_ops.installRevision(
         &slot.bundle,
-        package_bundle_v2,
+        package_context.signed_v2,
+        "store:zigos",
         2,
         crypto_hash.digestFromByte(0x22),
     ) catch unreachable;

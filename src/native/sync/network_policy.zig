@@ -90,6 +90,7 @@ pub const ConnectionEvidence = struct {
 
 pub const EgressDecisionReason = enum(u8) {
     none,
+    invalid_request,
     capability_missing,
     capability_revoked,
     holder_mismatch,
@@ -382,6 +383,9 @@ pub const EgressBroker = struct {
     }
 
     pub fn connect(self: *EgressBroker, request: EgressConnectionRequest) Error!EgressDecision {
+        if (request.now_ticks == 0 or request.task_id == 0 or request.principal_id.serial == 0) {
+            return denyEgress(request, .invalid_request, .{ .allowed = false });
+        }
         const presented = self.capabilities.requireUsable(request.capability_id, request.now_ticks) catch |err| switch (err) {
             error.CapabilityNotFound => return denyEgress(request, .capability_missing, .{ .allowed = false }),
             error.CapabilityRevoked => return denyEgress(request, .capability_revoked, .{ .allowed = false }),
@@ -890,6 +894,39 @@ test "egress broker requires a usable network policy capability before connectin
     });
     try std.testing.expect(allowed.allowed);
     try std.testing.expectEqual(PolicyMode.named_domain, allowed.policy_decision.matched_mode);
+
+    const zero_tick = try broker.connect(.{
+        .task_id = 701,
+        .principal_id = app,
+        .capability_id = remote_capability.id,
+        .policy_id = relay.id,
+        .evidence = .{ .destination = .{ .domain = "relay.zigos.dev" } },
+        .now_ticks = 0,
+    });
+    try std.testing.expect(!zero_tick.allowed);
+    try std.testing.expectEqual(EgressDecisionReason.invalid_request, zero_tick.reason);
+
+    const zero_task = try broker.connect(.{
+        .task_id = 0,
+        .principal_id = app,
+        .capability_id = remote_capability.id,
+        .policy_id = relay.id,
+        .evidence = .{ .destination = .{ .domain = "relay.zigos.dev" } },
+        .now_ticks = 10,
+    });
+    try std.testing.expect(!zero_task.allowed);
+    try std.testing.expectEqual(EgressDecisionReason.invalid_request, zero_task.reason);
+
+    const zero_principal = try broker.connect(.{
+        .task_id = 701,
+        .principal_id = .{ .kind = .app, .serial = 0 },
+        .capability_id = remote_capability.id,
+        .policy_id = relay.id,
+        .evidence = .{ .destination = .{ .domain = "relay.zigos.dev" } },
+        .now_ticks = 10,
+    });
+    try std.testing.expect(!zero_principal.allowed);
+    try std.testing.expectEqual(EgressDecisionReason.invalid_request, zero_principal.reason);
 
     const wrong_domain = try broker.connect(.{
         .task_id = 701,

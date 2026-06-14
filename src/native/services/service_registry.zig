@@ -30,6 +30,9 @@ pub const Binding = struct {
 pub const Error = error{
     BindingTableFull,
     DuplicateInterface,
+    InvalidBootstrapEndpoint,
+    InvalidBindingEndpoint,
+    InvalidServiceFlags,
     InterfaceNotFound,
     InterfaceNameTooLong,
     VersionMismatch,
@@ -70,12 +73,12 @@ pub const Service = struct {
         interface: manifest.InterfaceDecl,
         flags: u16,
     ) Error!void {
-        if (self.bootstrap == null) return error.RegistryNotBootstrapped;
+        try validateBootstrap(self.bootstrap);
         return self.registry.register(service_id, owner_task_id, endpoint_id, endpoint_capability_id, interface, flags);
     }
 
     pub fn connect(self: *const Service, interface: manifest.InterfaceDecl) Error!abi.ServiceConnectionDescriptor {
-        if (self.bootstrap == null) return error.RegistryNotBootstrapped;
+        try validateBootstrap(self.bootstrap);
         return self.registry.connect(interface);
     }
 
@@ -83,6 +86,13 @@ pub const Service = struct {
         return self.registry.bindingCount();
     }
 };
+
+fn validateBootstrap(bootstrap: ?BootstrapEndpoint) Error!void {
+    const endpoint = bootstrap orelse return error.RegistryNotBootstrapped;
+    if (endpoint.task_id == 0 or endpoint.endpoint_id == 0 or endpoint.endpoint_capability_id == 0) {
+        return error.InvalidBootstrapEndpoint;
+    }
+}
 
 pub const Registry = struct {
     bindings: BindingArena = BindingArena.init(),
@@ -100,6 +110,11 @@ pub const Registry = struct {
         interface: manifest.InterfaceDecl,
         flags: u16,
     ) Error!void {
+        if (service_id == 0 or owner_task_id == 0 or endpoint_id == 0 or endpoint_capability_id == 0) {
+            return error.InvalidBindingEndpoint;
+        }
+        const known_flags = abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER | abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE;
+        if ((flags & ~known_flags) != 0) return error.InvalidServiceFlags;
         const interface_id = interfaceIdForRequest(interface) catch |err| switch (err) {
             error.UnsupportedPlatformInterface => return error.UnsupportedPlatformInterface,
             error.TypedContractMismatch => return error.TypedContractMismatch,
@@ -206,6 +221,15 @@ test "service registry service requires bootstrap endpoint before discovery" {
     }, 0));
 
     service.bindBootstrap(.{
+        .task_id = 0,
+        .endpoint_id = 99,
+        .endpoint_capability_id = 123,
+    });
+    try std.testing.expectError(error.InvalidBootstrapEndpoint, service.connect(.{
+        .name = "zigos.object.workspace",
+    }));
+
+    service.bindBootstrap(.{
         .task_id = 2,
         .endpoint_id = 99,
         .endpoint_capability_id = 123,
@@ -248,6 +272,22 @@ test "service registry only connects by typed interface declaration" {
 
 test "service registry rejects duplicate interfaces and incompatible versions" {
     var registry = Registry.init();
+    try std.testing.expectError(error.InvalidBindingEndpoint, registry.register(0, 7, 101, 201, .{
+        .name = "zigos.object.workspace",
+        .version_major = 1,
+        .version_minor = 0,
+    }, 0));
+    try std.testing.expectError(error.InvalidBindingEndpoint, registry.register(44, 0, 101, 201, .{
+        .name = "zigos.object.workspace",
+        .version_major = 1,
+        .version_minor = 0,
+    }, 0));
+    try std.testing.expectError(error.InvalidServiceFlags, registry.register(44, 7, 101, 201, .{
+        .name = "zigos.object.workspace",
+        .version_major = 1,
+        .version_minor = 0,
+    }, 0x8000));
+    try std.testing.expectEqual(@as(usize, 0), registry.bindingCount());
     try registry.register(44, 7, 101, 201, .{
         .name = "zigos.object.workspace",
         .version_major = 1,
@@ -282,6 +322,68 @@ test "service registry does not consume a binding slot for untyped interface nam
         .version_minor = 0,
     }, 0);
     try std.testing.expectEqual(@as(usize, 1), registry.bindingCount());
+}
+
+test "service registry binds native AI inference through typed ABI" {
+    var registry = Registry.init();
+    try registry.register(91, 8, 191, 291, .{
+        .name = "zigos.ai.inference",
+        .version_major = 1,
+        .version_minor = 0,
+    }, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER | abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE);
+
+    const connection = try registry.connect(.{
+        .name = "zigos.ai.inference",
+        .version_major = 1,
+        .version_minor = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 91), connection.service_id);
+    try std.testing.expectEqual(@intFromEnum(typed_component_abi.InterfaceId.ai_inference), connection.interface_id);
+    try std.testing.expect(abi.serviceFlagsHas(connection.flags, abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE));
+}
+
+test "service registry binds privacy and diagnostics contracts through typed ABI" {
+    var registry = Registry.init();
+    try registry.register(92, 9, 192, 292, typed_component_abi.Interface(.privacy_budget), abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
+    try registry.register(93, 10, 193, 293, typed_component_abi.Interface(.diagnostics_export), abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE);
+
+    const privacy = try registry.connect(.{
+        .name = "zigos.privacy.budget",
+        .version_major = 1,
+        .version_minor = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 92), privacy.service_id);
+    try std.testing.expectEqual(@intFromEnum(typed_component_abi.InterfaceId.privacy_budget), privacy.interface_id);
+
+    const diagnostics = try registry.connect(.{
+        .name = "zigos.diagnostics.export",
+        .version_major = 1,
+        .version_minor = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 93), diagnostics.service_id);
+    try std.testing.expectEqual(@intFromEnum(typed_component_abi.InterfaceId.diagnostics_export), diagnostics.interface_id);
+}
+
+test "service registry binds consent and permission lease contracts through typed ABI" {
+    var registry = Registry.init();
+    try registry.register(94, 11, 194, 294, typed_component_abi.Interface(.consent_receipts), abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER);
+    try registry.register(95, 12, 195, 295, typed_component_abi.Interface(.permission_lease), abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE);
+
+    const consent = try registry.connect(.{
+        .name = "zigos.consent.receipts",
+        .version_major = 1,
+        .version_minor = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 94), consent.service_id);
+    try std.testing.expectEqual(@intFromEnum(typed_component_abi.InterfaceId.consent_receipts), consent.interface_id);
+
+    const lease = try registry.connect(.{
+        .name = "zigos.permission.lease",
+        .version_major = 1,
+        .version_minor = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 95), lease.service_id);
+    try std.testing.expectEqual(@intFromEnum(typed_component_abi.InterfaceId.permission_lease), lease.interface_id);
 }
 
 test "service registry rejects internal interface names and unversioned API bypasses" {

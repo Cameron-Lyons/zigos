@@ -4,7 +4,9 @@ const native_util = @import("../core/util.zig");
 
 const copyTextExact = native_util.copyTextExact;
 
-pub const Error = manifest.ValidationError;
+pub const Error = manifest.ValidationError || error{
+    InstallSourceTooLong,
+};
 
 pub fn validateInstallTarget(
     comptime InstalledBundleType: type,
@@ -49,6 +51,7 @@ pub fn validateInstallTarget(
     }
     for (bundle.requested_permissions) |permission| {
         try validateTextLen(permission.resource, arrayFieldLen(StoredPermissionType, "resource"), error.PermissionResourceTooLong);
+        try validateTextLen(permission.user_visible_reason, arrayFieldLen(StoredPermissionType, "user_visible_reason"), error.PermissionReasonTooLong);
         try validateTextLen(permission.egress_intent.object, arrayFieldLen(StoredPermissionType, "egress_object"), error.PermissionResourceTooLong);
         try validateTextLen(permission.egress_intent.principal, arrayFieldLen(StoredPermissionType, "egress_principal"), error.PermissionResourceTooLong);
         try validateTextLen(permission.egress_intent.service, arrayFieldLen(StoredPermissionType, "egress_service"), error.PermissionResourceTooLong);
@@ -62,6 +65,7 @@ pub fn validateInstallTarget(
 pub fn installNew(
     bundle: anytype,
     source: manifest.BundleManifest,
+    source_identity: []const u8,
     data_schema_version: u32,
     permission_digest: crypto_hash.Digest,
 ) Error!void {
@@ -73,12 +77,13 @@ pub fn installNew(
     bundle.next_revision_id = 2;
     bundle.active_revision_slot = 0;
     bundle.rollback_revision_slot = null;
-    try writeRevision(&bundle.revisions[0], source, data_schema_version, permission_digest, 1);
+    try writeRevision(&bundle.revisions[0], source, source_identity, data_schema_version, permission_digest, 1);
 }
 
 pub fn installRevision(
     bundle: anytype,
     source: manifest.BundleManifest,
+    source_identity: []const u8,
     data_schema_version: u32,
     permission_digest: crypto_hash.Digest,
 ) Error!void {
@@ -86,7 +91,7 @@ pub fn installRevision(
     try validateInstallTarget(BundleType, source);
 
     const target_slot = bundle.inactiveRevisionSlot();
-    try writeRevision(&bundle.revisions[target_slot], source, data_schema_version, permission_digest, bundle.next_revision_id);
+    try writeRevision(&bundle.revisions[target_slot], source, source_identity, data_schema_version, permission_digest, bundle.next_revision_id);
     bundle.next_revision_id += 1;
     if (bundle.revision_count == 0) {
         bundle.revision_count = 1;
@@ -106,6 +111,7 @@ pub fn rollback(bundle: anytype) void {
 
 pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.BundleManifest {
     const revision = bundle.activeRevision();
+    clearResolvedManifest(resolved);
 
     var index: usize = 0;
     while (index < revision.provided_interface_count) : (index += 1) {
@@ -157,6 +163,10 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
             .local_only = stored.local_only,
             .max_lease_ticks = stored.max_lease_ticks,
             .target_id = stored.target_id,
+            .sensitivity = stored.sensitivity,
+            .purpose = stored.purpose,
+            .retention_days = stored.retention_days,
+            .user_visible_reason = stored.userVisibleReasonSlice(),
             .egress_intent = .{
                 .kind = stored.egress_intent_kind,
                 .object = stored.egressObjectSlice(),
@@ -184,6 +194,10 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
         .model_family = revision.ai_metadata.modelFamilySlice(),
         .locality = revision.ai_metadata.locality,
         .offline_required = revision.ai_metadata.offline_required,
+        .private_context = revision.ai_metadata.private_context,
+        .training_allowed = revision.ai_metadata.training_allowed,
+        .max_context_bytes = revision.ai_metadata.max_context_bytes,
+        .audit_prompt_use = revision.ai_metadata.audit_prompt_use,
     };
     resolved.signature = .{
         .format = revision.signature.formatSlice(),
@@ -212,9 +226,29 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
     };
 }
 
+fn clearResolvedManifest(resolved: anytype) void {
+    resolved.provided_interfaces = [_]manifest.InterfaceDecl{.{ .name = "" }} ** resolved.provided_interfaces.len;
+    resolved.consumed_interfaces = [_]manifest.InterfaceDecl{.{ .name = "" }} ** resolved.consumed_interfaces.len;
+    resolved.components = [_]manifest.ExecutionComponentDecl{.{ .id = "", .entry = "" }} ** resolved.components.len;
+    resolved.assets = [_]manifest.AssetDecl{.{ .path = "", .content_type = "" }} ** resolved.assets.len;
+    resolved.requested_permissions = [_]manifest.PermissionRequest{.{
+        .kind = .object_access,
+        .resource = "",
+        .rights = .{ .policy = .{} },
+    }} ** resolved.requested_permissions.len;
+    resolved.background_tasks = [_]manifest.BackgroundTaskDecl{.{
+        .id = "",
+        .trigger = .user_approved_scheduled_job,
+        .expected_duration_seconds = 0,
+    }} ** resolved.background_tasks.len;
+    resolved.ai_metadata = .{};
+    resolved.signature = .{};
+}
+
 fn writeRevision(
     revision: anytype,
     source: manifest.BundleManifest,
+    source_identity: []const u8,
     data_schema_version: u32,
     permission_digest: crypto_hash.Digest,
     revision_id: u32,
@@ -222,6 +256,7 @@ fn writeRevision(
     revision.revision_id = revision_id;
     revision.display_name_len = copyTextExact(&revision.display_name, source.display_name) catch return error.DisplayNameTooLong;
     revision.publisher_len = copyTextExact(&revision.publisher, source.publisher) catch return error.PublisherTooLong;
+    revision.source_identity_len = copyTextExact(&revision.source_identity, source_identity) catch return error.InstallSourceTooLong;
     revision.version_major = source.version_major;
     revision.version_minor = source.version_minor;
     revision.channel = source.update_channel;
@@ -275,6 +310,10 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
         revision.requested_permissions[permission_index].local_only = permission.local_only;
         revision.requested_permissions[permission_index].max_lease_ticks = permission.max_lease_ticks;
         revision.requested_permissions[permission_index].target_id = permission.target_id;
+        revision.requested_permissions[permission_index].sensitivity = permission.sensitivity;
+        revision.requested_permissions[permission_index].purpose = permission.purpose;
+        revision.requested_permissions[permission_index].retention_days = permission.retention_days;
+        revision.requested_permissions[permission_index].user_visible_reason_len = copyTextExact(&revision.requested_permissions[permission_index].user_visible_reason, permission.user_visible_reason) catch return error.PermissionReasonTooLong;
         revision.requested_permissions[permission_index].egress_intent_kind = permission.egress_intent.kind;
         revision.requested_permissions[permission_index].egress_object_len = copyTextExact(&revision.requested_permissions[permission_index].egress_object, permission.egress_intent.object) catch return error.PermissionResourceTooLong;
         revision.requested_permissions[permission_index].egress_principal_len = copyTextExact(&revision.requested_permissions[permission_index].egress_principal, permission.egress_intent.principal) catch return error.PermissionResourceTooLong;
@@ -297,6 +336,10 @@ fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Err
     revision.ai_metadata.model_family_len = copyTextExact(&revision.ai_metadata.model_family, source.ai_metadata.model_family) catch return error.AiModelFamilyTooLong;
     revision.ai_metadata.locality = source.ai_metadata.locality;
     revision.ai_metadata.offline_required = source.ai_metadata.offline_required;
+    revision.ai_metadata.private_context = source.ai_metadata.private_context;
+    revision.ai_metadata.training_allowed = source.ai_metadata.training_allowed;
+    revision.ai_metadata.max_context_bytes = source.ai_metadata.max_context_bytes;
+    revision.ai_metadata.audit_prompt_use = source.ai_metadata.audit_prompt_use;
 
     revision.signature = .{};
     revision.signature.format_len = copyTextExact(&revision.signature.format, source.signature.format) catch return error.SignatureFormatTooLong;

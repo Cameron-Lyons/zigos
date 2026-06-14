@@ -31,6 +31,26 @@ pub const DataEgressIntentKind = enum(u8) {
     publish_event,
 };
 
+pub const DataSensitivity = enum(u8) {
+    public_data,
+    internal_data,
+    private_user_data,
+    secret_user_data,
+};
+
+pub const PermissionPurpose = enum(u8) {
+    unspecified,
+    user_requested_action,
+    document_editing,
+    communication,
+    media_capture,
+    accessibility,
+    health,
+    finance,
+    security,
+    development,
+};
+
 pub const DataEgressIntent = struct {
     kind: DataEgressIntentKind = .unspecified,
     object: []const u8 = "",
@@ -61,6 +81,10 @@ pub const PermissionRequest = struct {
     max_lease_ticks: u64 = 0,
     target_id: u64 = 0,
     egress_intent: DataEgressIntent = .{},
+    sensitivity: DataSensitivity = .internal_data,
+    user_visible_reason: []const u8 = "",
+    purpose: PermissionPurpose = .unspecified,
+    retention_days: u16 = 0,
 };
 
 pub const BackgroundTrigger = enum(u8) {
@@ -122,6 +146,10 @@ pub const AiMetadata = struct {
     model_family: []const u8 = "",
     locality: AiLocality = .inherit_task,
     offline_required: bool = false,
+    private_context: bool = false,
+    training_allowed: bool = false,
+    max_context_bytes: usize = 0,
+    audit_prompt_use: bool = false,
 };
 
 pub const ComponentAbi = enum(u8) {
@@ -279,6 +307,7 @@ pub const ValidationError = error{
     AssetContentTypeTooLong,
     TooManyPermissions,
     PermissionResourceTooLong,
+    PermissionReasonTooLong,
     MissingBackgroundPermission,
     MissingBackgroundTask,
     TooManyBackgroundTasks,
@@ -297,8 +326,19 @@ pub const ValidationError = error{
     PermissionRightsTargetMismatch,
     LocalOnlyPermissionRequestsRemoteNetwork,
     DuplicatePermissionRequest,
+    SensitiveRemoteEgressRequiresIntent,
+    SecretPermissionMustStayLocal,
+    SensitivePermissionRequiresReason,
+    SensitivePermissionRequiresPurpose,
+    SensitivePermissionRequiresRetention,
+    SensitiveRetentionTooLong,
+    SecretRetentionTooLong,
+    SensitivePermissionRequiresLease,
     AiModelFamilyTooLong,
     LocalOnlyAiRequiresLocalNetwork,
+    OfflineAiRequiresLocalModel,
+    AiTrainingRequiresAudit,
+    AiContextTooLarge,
     SignatureFormatTooLong,
     SignatureSignerTooLong,
 };
@@ -317,9 +357,13 @@ pub fn validate(bundle: BundleManifest) ValidationError!void {
     try validateComponents(bundle);
     try validatePermissionRights(bundle);
     try validateDuplicatePermissions(bundle);
+    try validatePermissionPrivacy(bundle);
     try validateBackgroundTasks(bundle);
     try validateDataEgressRequests(bundle);
+    try validateAiMetadata(bundle);
+}
 
+fn validateAiMetadata(bundle: BundleManifest) ValidationError!void {
     if (bundle.ai_metadata.locality == .local_only) {
         for (bundle.requested_permissions) |request| {
             if (request.kind != .network_egress) continue;
@@ -327,6 +371,17 @@ pub fn validate(bundle: BundleManifest) ValidationError!void {
                 return error.LocalOnlyAiRequiresLocalNetwork;
             }
         }
+    }
+    if (bundle.ai_metadata.offline_required and
+        (bundle.ai_metadata.model_family.len == 0 or bundle.ai_metadata.locality != .local_only))
+    {
+        return error.OfflineAiRequiresLocalModel;
+    }
+    if (bundle.ai_metadata.training_allowed and !bundle.ai_metadata.audit_prompt_use) {
+        return error.AiTrainingRequiresAudit;
+    }
+    if (bundle.ai_metadata.max_context_bytes > units.mebibytes(64)) {
+        return error.AiContextTooLarge;
     }
 }
 
@@ -361,6 +416,39 @@ fn validateDuplicatePermissions(bundle: BundleManifest) ValidationError!void {
     }
 }
 
+fn validatePermissionPrivacy(bundle: BundleManifest) ValidationError!void {
+    for (bundle.requested_permissions) |request| {
+        if (request.sensitivity == .secret_user_data and !request.local_only) {
+            return error.SecretPermissionMustStayLocal;
+        }
+        if (isSensitive(request.sensitivity) and dangerousPermissionKind(request.kind) and request.user_visible_reason.len == 0) {
+            return error.SensitivePermissionRequiresReason;
+        }
+        if (isSensitive(request.sensitivity) and
+            request.kind == .network_egress and
+            request.rights.has(.network_remote) and
+            (!request.egress_intent.declared() or !request.egress_intent.complete()))
+        {
+            return error.SensitiveRemoteEgressRequiresIntent;
+        }
+        if (isSensitive(request.sensitivity) and request.purpose == .unspecified) {
+            return error.SensitivePermissionRequiresPurpose;
+        }
+        if (isSensitive(request.sensitivity) and request.retention_days == 0) {
+            return error.SensitivePermissionRequiresRetention;
+        }
+        if (isSensitive(request.sensitivity) and request.retention_days > 365) {
+            return error.SensitiveRetentionTooLong;
+        }
+        if (request.sensitivity == .secret_user_data and request.retention_days > 30) {
+            return error.SecretRetentionTooLong;
+        }
+        if (isSensitive(request.sensitivity) and dangerousPermissionKind(request.kind) and request.max_lease_ticks == 0) {
+            return error.SensitivePermissionRequiresLease;
+        }
+    }
+}
+
 fn permissionRightsTargetCompatible(request: PermissionRequest) bool {
     const target_kind = std.meta.activeTag(request.rights);
     return switch (request.kind) {
@@ -372,6 +460,28 @@ fn permissionRightsTargetCompatible(request: PermissionRequest) bool {
         .notification_post => target_kind == .service or target_kind == .workspace or target_kind == .policy or target_kind == .task,
         .background_execution => target_kind == .task or target_kind == .policy,
         .peer_ipc => target_kind == .endpoint or target_kind == .service,
+    };
+}
+
+pub fn isSensitive(sensitivity: DataSensitivity) bool {
+    return switch (sensitivity) {
+        .public_data, .internal_data => false,
+        .private_user_data, .secret_user_data => true,
+    };
+}
+
+pub fn dangerousPermissionKind(kind: PermissionKind) bool {
+    return switch (kind) {
+        .camera,
+        .mic,
+        .sensor,
+        .location,
+        .contacts,
+        .screen_capture,
+        .clipboard,
+        .peer_ipc,
+        => true,
+        else => false,
     };
 }
 
@@ -467,8 +577,7 @@ pub fn isApplicationBundle(bundle_id: []const u8) bool {
 
 pub fn isReservedPlatformBundle(bundle_id: []const u8) bool {
     return std.mem.startsWith(u8, bundle_id, "zigos.") or
-        std.mem.startsWith(u8, bundle_id, "svc.") or
-        std.mem.startsWith(u8, bundle_id, "compat.");
+        std.mem.startsWith(u8, bundle_id, "svc.");
 }
 
 test "validate rejects background tasks without explicit background permission" {
@@ -521,6 +630,53 @@ test "validate requires local-only AI manifests to keep network requests local" 
     };
 
     try std.testing.expectError(error.LocalOnlyAiRequiresLocalNetwork, validate(bundle));
+}
+
+test "validate requires offline AI manifests to name a local model" {
+    try std.testing.expectError(error.OfflineAiRequiresLocalModel, validate(.{
+        .bundle_id = "app.offline-ai",
+        .display_name = "Offline AI",
+        .publisher = "zigos.dev",
+        .ai_metadata = .{
+            .offline_required = true,
+        },
+    }));
+
+    try std.testing.expectError(error.OfflineAiRequiresLocalModel, validate(.{
+        .bundle_id = "app.remote-offline-ai",
+        .display_name = "Remote Offline AI",
+        .publisher = "zigos.dev",
+        .ai_metadata = .{
+            .model_family = "tiny-local",
+            .locality = .remote_allowed,
+            .offline_required = true,
+        },
+    }));
+}
+
+test "validate requires AI training audit and bounded context" {
+    try std.testing.expectError(error.AiTrainingRequiresAudit, validate(.{
+        .bundle_id = "app.training-ai",
+        .display_name = "Training AI",
+        .publisher = "zigos.dev",
+        .ai_metadata = .{
+            .model_family = "tiny-local",
+            .locality = .local_only,
+            .training_allowed = true,
+        },
+    }));
+
+    try std.testing.expectError(error.AiContextTooLarge, validate(.{
+        .bundle_id = "app.huge-context-ai",
+        .display_name = "Huge Context AI",
+        .publisher = "zigos.dev",
+        .ai_metadata = .{
+            .model_family = "tiny-local",
+            .locality = .local_only,
+            .private_context = true,
+            .max_context_bytes = units.mebibytes(65),
+        },
+    }));
 }
 
 test "validate requires app data egress to declare sync call or publish intent" {
@@ -614,6 +770,177 @@ test "validate rejects local-only requests that ask for remote network authority
     }));
 }
 
+test "validate requires sensitive permissions to declare reason and egress shape" {
+    const secret_camera = [_]PermissionRequest{
+        .{
+            .kind = .camera,
+            .resource = "camera.front",
+            .rights = .{ .device = .{} },
+            .sensitivity = .secret_user_data,
+        },
+    };
+    try std.testing.expectError(error.SecretPermissionMustStayLocal, validate(.{
+        .bundle_id = "app.secret-camera",
+        .display_name = "Secret Camera",
+        .publisher = "zigos.dev",
+        .requested_permissions = &secret_camera,
+    }));
+
+    const private_camera_without_reason = [_]PermissionRequest{
+        .{
+            .kind = .camera,
+            .resource = "camera.front",
+            .rights = .{ .device = .{} },
+            .local_only = true,
+            .sensitivity = .private_user_data,
+        },
+    };
+    try std.testing.expectError(error.SensitivePermissionRequiresReason, validate(.{
+        .bundle_id = "app.private-camera",
+        .display_name = "Private Camera",
+        .publisher = "zigos.dev",
+        .requested_permissions = &private_camera_without_reason,
+    }));
+
+    const private_remote_without_intent = [_]PermissionRequest{
+        .{
+            .kind = .network_egress,
+            .resource = "relay.private",
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .sensitivity = .private_user_data,
+        },
+    };
+    try std.testing.expectError(error.SensitiveRemoteEgressRequiresIntent, validate(.{
+        .bundle_id = "zigos.private-relay",
+        .display_name = "Private Relay",
+        .publisher = "zigos.dev",
+        .requested_permissions = &private_remote_without_intent,
+    }));
+
+    const private_remote_with_intent = [_]PermissionRequest{
+        .{
+            .kind = .network_egress,
+            .resource = "relay.private",
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .sensitivity = .private_user_data,
+            .user_visible_reason = "Sync private notes with trusted relay",
+            .purpose = .document_editing,
+            .retention_days = 30,
+            .egress_intent = .{
+                .kind = .sync_object,
+                .object = "workspace:notes",
+                .principal = "trusted-relay",
+            },
+        },
+    };
+    try validate(.{
+        .bundle_id = "zigos.private-relay",
+        .display_name = "Private Relay",
+        .publisher = "zigos.dev",
+        .requested_permissions = &private_remote_with_intent,
+    });
+}
+
+test "validate requires sensitive permission purpose retention and bounded leases" {
+    const missing_purpose = [_]PermissionRequest{
+        .{
+            .kind = .network_egress,
+            .resource = "relay.private",
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .sensitivity = .private_user_data,
+            .retention_days = 30,
+            .egress_intent = .{
+                .kind = .call_service,
+                .service = "private.relay",
+            },
+        },
+    };
+    try std.testing.expectError(error.SensitivePermissionRequiresPurpose, validate(.{
+        .bundle_id = "zigos.private-relay",
+        .display_name = "Private Relay",
+        .publisher = "zigos.dev",
+        .requested_permissions = &missing_purpose,
+    }));
+
+    const missing_retention = [_]PermissionRequest{
+        .{
+            .kind = .network_egress,
+            .resource = "relay.private",
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .sensitivity = .private_user_data,
+            .purpose = .document_editing,
+            .egress_intent = .{
+                .kind = .call_service,
+                .service = "private.relay",
+            },
+        },
+    };
+    try std.testing.expectError(error.SensitivePermissionRequiresRetention, validate(.{
+        .bundle_id = "zigos.private-relay",
+        .display_name = "Private Relay",
+        .publisher = "zigos.dev",
+        .requested_permissions = &missing_retention,
+    }));
+
+    const long_retention = [_]PermissionRequest{
+        .{
+            .kind = .network_egress,
+            .resource = "relay.private",
+            .rights = .{ .network_policy = .{ .network_remote = true } },
+            .sensitivity = .private_user_data,
+            .purpose = .document_editing,
+            .retention_days = 366,
+            .egress_intent = .{
+                .kind = .call_service,
+                .service = "private.relay",
+            },
+        },
+    };
+    try std.testing.expectError(error.SensitiveRetentionTooLong, validate(.{
+        .bundle_id = "zigos.private-relay",
+        .display_name = "Private Relay",
+        .publisher = "zigos.dev",
+        .requested_permissions = &long_retention,
+    }));
+
+    const secret_too_long = [_]PermissionRequest{
+        .{
+            .kind = .object_access,
+            .resource = "workspace:secrets",
+            .rights = .{ .object = .{ .object_read = true } },
+            .local_only = true,
+            .sensitivity = .secret_user_data,
+            .purpose = .security,
+            .retention_days = 31,
+        },
+    };
+    try std.testing.expectError(error.SecretRetentionTooLong, validate(.{
+        .bundle_id = "zigos.secret-vault",
+        .display_name = "Secret Vault",
+        .publisher = "zigos.dev",
+        .requested_permissions = &secret_too_long,
+    }));
+
+    const camera_without_lease = [_]PermissionRequest{
+        .{
+            .kind = .camera,
+            .resource = "camera.front",
+            .rights = .{ .device = .{} },
+            .local_only = true,
+            .sensitivity = .private_user_data,
+            .user_visible_reason = "Join a local video call",
+            .purpose = .communication,
+            .retention_days = 1,
+        },
+    };
+    try std.testing.expectError(error.SensitivePermissionRequiresLease, validate(.{
+        .bundle_id = "app.camera",
+        .display_name = "Camera",
+        .publisher = "zigos.dev",
+        .requested_permissions = &camera_without_lease,
+    }));
+}
+
 test "validate rejects duplicate permission requests" {
     const requests = [_]PermissionRequest{
         .{
@@ -703,6 +1030,9 @@ test "validate accepts a signed local-first bundle manifest" {
             .model_family = "tiny-embed",
             .locality = .local_only,
             .offline_required = true,
+            .private_context = true,
+            .max_context_bytes = units.mebibytes(2),
+            .audit_prompt_use = true,
         },
         .update_channel = .beta,
         .signature = .{
@@ -714,6 +1044,16 @@ test "validate accepts a signed local-first bundle manifest" {
     try validate(bundle);
     try std.testing.expectEqual(@as(usize, 1), requiredPermissionCount(bundle));
     try validateApplicationPackaging(bundle);
+}
+
+test "compatibility namespaces are not reserved platform packages" {
+    try std.testing.expect(!isReservedPlatformBundle("compat.posix"));
+    try std.testing.expect(requiresApplicationPackaging("compat.posix"));
+    try std.testing.expectError(error.MissingExecutableComponent, validateApplicationPackaging(.{
+        .bundle_id = "compat.posix",
+        .display_name = "Compat POSIX",
+        .publisher = "zigos.dev",
+    }));
 }
 
 test "example app packaging requires typed components" {

@@ -140,6 +140,8 @@ pub fn networkTransportHardeningGate() !void {
     const captured = try native_transport.assertLastCapturedFrame(.{
         .session_id = connection.session.id,
         .sequence = signed_delivery.sequence,
+        .source_task_id = connection.source_task_id,
+        .target_task_id = connection.target_task_id,
         .transport = .relay_assisted,
         .source_device = source,
         .target_device = target,

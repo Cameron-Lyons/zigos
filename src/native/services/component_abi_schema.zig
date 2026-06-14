@@ -52,6 +52,11 @@ pub const InterfaceKey = enum(u8) {
     index_search,
     sync_replication,
     media_print,
+    ai_inference,
+    privacy_budget,
+    diagnostics_export,
+    consent_receipts,
+    permission_lease,
 };
 
 pub const InterfaceId = enum(u16) {
@@ -68,6 +73,11 @@ pub const InterfaceId = enum(u16) {
     index_search = 0x100B,
     sync_replication = 0x100C,
     media_print = 0x100D,
+    ai_inference = 0x100E,
+    privacy_budget = 0x100F,
+    diagnostics_export = 0x1010,
+    consent_receipts = 0x1011,
+    permission_lease = 0x1012,
 };
 
 pub const OperationId = enum(u16) {
@@ -81,6 +91,17 @@ pub const OperationId = enum(u16) {
     package_install = 0x0601,
     package_update = 0x0602,
     package_rollback = 0x0603,
+    ai_authorize = 0x0701,
+    ai_run_local = 0x0702,
+    privacy_authorize_egress = 0x0801,
+    privacy_query_budget = 0x0802,
+    diagnostics_prepare_export = 0x0901,
+    diagnostics_share_remote = 0x0902,
+    consent_record = 0x0A01,
+    consent_revoke = 0x0A02,
+    permission_lease_issue = 0x0B01,
+    permission_lease_renew = 0x0B02,
+    permission_lease_expire = 0x0B03,
 };
 
 pub const ServiceBinding = enum(u8) {
@@ -177,6 +198,84 @@ const PackageRollbackRequestWire = extern struct {
     _reserved: u16 = 0,
 };
 
+const AiAuthorizeRequestWire = extern struct {
+    header: WireHeader,
+    model_family_len: u16,
+    context_bytes: u32,
+    flags: u16,
+};
+
+const AiRunLocalRequestWire = extern struct {
+    header: WireHeader,
+    model_family_len: u16,
+    prompt_bytes: u32,
+    context_bytes: u32,
+    flags: u16,
+};
+
+const PrivacyAuthorizeEgressRequestWire = extern struct {
+    header: WireHeader,
+    policy_id: u64,
+    remote_bytes: u64,
+    sensitivity: u16,
+    flags: u16,
+};
+
+const PrivacyQueryBudgetRequestWire = extern struct {
+    header: WireHeader,
+    window_ticks: u64,
+    sensitivity: u16,
+    _reserved: u16 = 0,
+};
+
+const DiagnosticsPrepareExportRequestWire = extern struct {
+    header: WireHeader,
+    max_bytes: u32,
+    include_protected_content: u32,
+};
+
+const DiagnosticsShareRemoteRequestWire = extern struct {
+    header: WireHeader,
+    user_opted_in: u32,
+    include_protected_content: u32,
+};
+
+const ConsentRecordRequestWire = extern struct {
+    header: WireHeader,
+    receipt_id: u64,
+    permission_kind: u16,
+    purpose: u16,
+    retention_days: u16,
+    _reserved: u16 = 0,
+};
+
+const ConsentRevokeRequestWire = extern struct {
+    header: WireHeader,
+    receipt_id: u64,
+    reason: u16,
+    _reserved: u16 = 0,
+};
+
+const PermissionLeaseIssueRequestWire = extern struct {
+    header: WireHeader,
+    permission_kind: u16,
+    sensitivity: u16,
+    lease_ticks: u64,
+};
+
+const PermissionLeaseRenewRequestWire = extern struct {
+    header: WireHeader,
+    lease_id: u64,
+    lease_ticks: u64,
+};
+
+const PermissionLeaseExpireRequestWire = extern struct {
+    header: WireHeader,
+    lease_id: u64,
+    reason: u16,
+    _reserved: u16 = 0,
+};
+
 const ServiceRegisterResponseWire = extern struct {
     accepted: u32,
 };
@@ -207,6 +306,47 @@ const PackageLifecycleResponseWire = extern struct {
     updated_existing: u32,
     permissions_changed: u32,
     rollback_available: u32,
+};
+
+const AiAuthorizeResponseWire = extern struct {
+    allowed: u32,
+    reason: u16,
+    max_context_bytes: u32,
+};
+
+const AiRunLocalResponseWire = extern struct {
+    accepted: u32,
+    output_bytes: u32,
+    local_model: u32,
+};
+
+const PrivacyAuthorizeEgressResponseWire = extern struct {
+    allowed: u32,
+    reason: u16,
+    _reserved: u16 = 0,
+    remaining_bytes: u64,
+};
+
+const PrivacyQueryBudgetResponseWire = extern struct {
+    remaining_bytes: u64,
+    reset_tick: u64,
+};
+
+const DiagnosticsExportResponseWire = extern struct {
+    accepted: u32,
+    reason: u16,
+    export_bytes: u32,
+};
+
+const ConsentReceiptResponseWire = extern struct {
+    accepted: u32,
+    receipt_id: u64,
+};
+
+const PermissionLeaseResponseWire = extern struct {
+    accepted: u32,
+    lease_id: u64,
+    expires_at_tick: u64,
 };
 
 const InterfaceSpec = struct {
@@ -242,6 +382,11 @@ pub const interface_specs = [_]InterfaceSpec{
     iface(.index_search, "zigos.index.search"),
     iface(.sync_replication, "zigos.sync.replication"),
     iface(.media_print, "zigos.media.print"),
+    iface(.ai_inference, "zigos.ai.inference"),
+    iface(.privacy_budget, "zigos.privacy.budget"),
+    iface(.diagnostics_export, "zigos.diagnostics.export"),
+    iface(.consent_receipts, "zigos.consent.receipts"),
+    iface(.permission_lease, "zigos.permission.lease"),
 };
 
 const OperationSpec = struct {
@@ -282,6 +427,17 @@ pub const operation_specs = [_]OperationSpec{
     op(.package_install, .package_install, "install", PackageInstallRequestWire, PackageLifecycleResponseWire),
     op(.package_install, .package_update, "update", PackageUpdateRequestWire, PackageLifecycleResponseWire),
     op(.package_install, .package_rollback, "rollback", PackageRollbackRequestWire, PackageLifecycleResponseWire),
+    op(.ai_inference, .ai_authorize, "authorize", AiAuthorizeRequestWire, AiAuthorizeResponseWire),
+    op(.ai_inference, .ai_run_local, "run_local", AiRunLocalRequestWire, AiRunLocalResponseWire),
+    op(.privacy_budget, .privacy_authorize_egress, "authorize_egress", PrivacyAuthorizeEgressRequestWire, PrivacyAuthorizeEgressResponseWire),
+    op(.privacy_budget, .privacy_query_budget, "query_budget", PrivacyQueryBudgetRequestWire, PrivacyQueryBudgetResponseWire),
+    op(.diagnostics_export, .diagnostics_prepare_export, "prepare_export", DiagnosticsPrepareExportRequestWire, DiagnosticsExportResponseWire),
+    op(.diagnostics_export, .diagnostics_share_remote, "share_remote", DiagnosticsShareRemoteRequestWire, DiagnosticsExportResponseWire),
+    op(.consent_receipts, .consent_record, "record", ConsentRecordRequestWire, ConsentReceiptResponseWire),
+    op(.consent_receipts, .consent_revoke, "revoke", ConsentRevokeRequestWire, ConsentReceiptResponseWire),
+    op(.permission_lease, .permission_lease_issue, "issue", PermissionLeaseIssueRequestWire, PermissionLeaseResponseWire),
+    op(.permission_lease, .permission_lease_renew, "renew", PermissionLeaseRenewRequestWire, PermissionLeaseResponseWire),
+    op(.permission_lease, .permission_lease_expire, "expire", PermissionLeaseExpireRequestWire, PermissionLeaseResponseWire),
 };
 
 const ServiceBindingSpec = struct {
@@ -534,6 +690,7 @@ fn buildServiceCatalogBindings() [service_binding_specs.len]ServiceCatalogBindin
 }
 
 fn buildContracts() [interface_specs.len]InterfaceContract {
+    @setEvalBranchQuota(16384);
     var result: [interface_specs.len]InterfaceContract = undefined;
     inline for (interface_specs, 0..) |spec, index| {
         result[index] = buildContract(spec);
@@ -565,7 +722,7 @@ fn buildContract(comptime spec: InterfaceSpec) InterfaceContract {
 }
 
 fn hashContract(comptime spec: InterfaceSpec) u64 {
-    @setEvalBranchQuota(4096);
+    @setEvalBranchQuota(8192);
     var hash = native_util.fnv1a64(spec.name);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, spec.version_major);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, spec.version_minor);
@@ -656,6 +813,11 @@ test "component ABI schema emits manifest interfaces and service catalog binding
     try std.testing.expectEqual(InterfaceId.object_workspace, interfaceIdForDecl(interfaceForService(.storage_object)).?);
     try std.testing.expectEqual(InterfaceId.service_registry, contractFor(interfaceForService(.service_registry).name).?.interface_id);
     try std.testing.expect(contractFor(interfaceForService(.package_install_update).name).?.operation(.package_rollback) != null);
+    try std.testing.expect(contractFor("zigos.ai.inference").?.operation(.ai_run_local) != null);
+    try std.testing.expect(contractFor("zigos.privacy.budget").?.operation(.privacy_authorize_egress) != null);
+    try std.testing.expect(contractFor("zigos.diagnostics.export").?.operation(.diagnostics_share_remote) != null);
+    try std.testing.expect(contractFor("zigos.consent.receipts").?.operation(.consent_record) != null);
+    try std.testing.expect(contractFor("zigos.permission.lease").?.operation(.permission_lease_issue) != null);
     try std.testing.expect(contractFor(interfaceForService(.service_registry).name).?.contract_hash != 0);
     try std.testing.expect(contractFor(interfaceForService(.sync_replication).name).?.contract_hash != 0);
     try std.testing.expectEqual(

@@ -54,11 +54,28 @@ pub const EventKind = enum(u8) {
     task_flow,
     policy_change,
     suspicious_app_behavior,
+    ai_inference,
+    data_egress,
+    privacy_budget,
+    retention_policy,
+    permission_lease,
+    consent_receipt,
 };
 
 pub const PolicyChangeAction = enum(u8) {
     applied,
     overridden,
+    revoked,
+};
+
+pub const PermissionLeaseAction = enum(u8) {
+    issued,
+    renewed,
+    expired,
+};
+
+pub const ConsentReceiptAction = enum(u8) {
+    recorded,
     revoked,
 };
 
@@ -92,6 +109,16 @@ pub const DiagnosticSummary = struct {
     device_trust_revocations: usize = 0,
     update_health_events: usize = 0,
     update_rollbacks: usize = 0,
+    ai_inference_events: usize = 0,
+    ai_remote_denials: usize = 0,
+    data_egress_events: usize = 0,
+    private_egress_denials: usize = 0,
+    privacy_budget_events: usize = 0,
+    retention_policy_events: usize = 0,
+    permission_lease_events: usize = 0,
+    permission_lease_expirations: usize = 0,
+    consent_receipt_events: usize = 0,
+    consent_receipt_revocations: usize = 0,
     latest_tick: u64 = 0,
 
     pub fn evidenceEventCount(self: DiagnosticSummary) usize {
@@ -101,7 +128,13 @@ pub const DiagnosticSummary = struct {
             self.suspicious_app_behavior +
             self.sync_conflicts +
             self.device_trust_changes +
-            self.update_health_events;
+            self.update_health_events +
+            self.ai_inference_events +
+            self.data_egress_events +
+            self.privacy_budget_events +
+            self.retention_policy_events +
+            self.permission_lease_events +
+            self.consent_receipt_events;
     }
 };
 
@@ -518,6 +551,148 @@ pub const Ledger = struct {
         });
     }
 
+    pub fn recordAiInference(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        allowed: bool,
+        remote_model: bool,
+        training_user_content: bool,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        var code: u32 = 0;
+        if (remote_model) code |= 1;
+        if (training_user_content) code |= 2;
+        try self.append(.{
+            .kind = .ai_inference,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .detail_code = code,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordDataEgress(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        sensitivity: manifest.DataSensitivity,
+        remote_bytes: usize,
+        allowed: bool,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        try self.append(.{
+            .kind = .data_egress,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .related_id = remote_bytes,
+            .detail_code = @intFromEnum(sensitivity),
+            .allowed = allowed,
+            .detail_protected = manifest.isSensitive(sensitivity),
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordPrivacyBudget(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        allowed: bool,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        try self.append(.{
+            .kind = .privacy_budget,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .allowed = allowed,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordRetentionPolicy(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        retention_days: u16,
+        allowed: bool,
+        tick: u64,
+        detail: []const u8,
+        protected: bool,
+    ) Error!void {
+        try self.append(.{
+            .kind = .retention_policy,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .detail_code = retention_days,
+            .allowed = allowed,
+            .detail_protected = protected,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordPermissionLease(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        permission_kind: manifest.PermissionKind,
+        action: PermissionLeaseAction,
+        lease_ticks: u64,
+        tick: u64,
+        detail: []const u8,
+        protected: bool,
+    ) Error!void {
+        try self.append(.{
+            .kind = .permission_lease,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .related_id = lease_ticks,
+            .detail_code = @intFromEnum(action),
+            .permission_kind = permission_kind,
+            .allowed = action != .expired,
+            .detail_protected = protected,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
+    pub fn recordConsentReceipt(
+        self: *Ledger,
+        subject: principal.PrincipalId,
+        task_id: u64,
+        receipt_id: u64,
+        action: ConsentReceiptAction,
+        tick: u64,
+        detail: []const u8,
+    ) Error!void {
+        try self.append(.{
+            .kind = .consent_receipt,
+            .tick = tick,
+            .subject = subject,
+            .task_id = task_id,
+            .related_id = receipt_id,
+            .detail_code = @intFromEnum(action),
+            .allowed = action != .revoked,
+            .detail_protected = true,
+            .detail_len = clampedDetailLen(detail),
+            .detail = copyTextInto(detail),
+        });
+    }
+
     pub fn latestKind(self: *const Ledger, kind: EventKind) ?Event {
         const event = self.latestKindPtr(kind) orelse return null;
         return event.*;
@@ -588,6 +763,26 @@ pub const Ledger = struct {
                     summary.update_health_events += 1;
                     if (!event.allowed) summary.update_rollbacks += 1;
                 },
+                .ai_inference => {
+                    summary.ai_inference_events += 1;
+                    if (!event.allowed and (event.detail_code & 1) != 0) summary.ai_remote_denials += 1;
+                },
+                .data_egress => {
+                    summary.data_egress_events += 1;
+                    if (!event.allowed and manifest.isSensitive(std.enums.fromInt(manifest.DataSensitivity, @as(u8, @intCast(event.detail_code))) orelse .internal_data)) {
+                        summary.private_egress_denials += 1;
+                    }
+                },
+                .privacy_budget => summary.privacy_budget_events += 1,
+                .retention_policy => summary.retention_policy_events += 1,
+                .permission_lease => {
+                    summary.permission_lease_events += 1;
+                    if (event.detail_code == @intFromEnum(PermissionLeaseAction.expired)) summary.permission_lease_expirations += 1;
+                },
+                .consent_receipt => {
+                    summary.consent_receipt_events += 1;
+                    if (event.detail_code == @intFromEnum(ConsentReceiptAction.revoked)) summary.consent_receipt_revocations += 1;
+                },
                 else => {},
             }
         }
@@ -605,7 +800,7 @@ pub const Ledger = struct {
             summary.protected_details_redacted,
             summary.latest_tick,
         });
-        try appendFmt(buffer, &used, "diagnostic_evidence capability_denials={d} crashes={d} driver_restarts={d} suspicious_app_behavior={d} sync_conflicts={d} device_trust_changes={d} device_trust_revocations={d} update_health_events={d} update_rollbacks={d}", .{
+        try appendFmt(buffer, &used, "diagnostic_evidence capability_denials={d} crashes={d} driver_restarts={d} suspicious_app_behavior={d} sync_conflicts={d} device_trust_changes={d} device_trust_revocations={d} update_health_events={d} update_rollbacks={d} ai_inference_events={d} ai_remote_denials={d} data_egress_events={d} private_egress_denials={d} privacy_budget_events={d} retention_policy_events={d} permission_lease_events={d} permission_lease_expirations={d} consent_receipt_events={d} consent_receipt_revocations={d}", .{
             summary.capability_denials,
             summary.crashes,
             summary.driver_restarts,
@@ -615,6 +810,16 @@ pub const Ledger = struct {
             summary.device_trust_revocations,
             summary.update_health_events,
             summary.update_rollbacks,
+            summary.ai_inference_events,
+            summary.ai_remote_denials,
+            summary.data_egress_events,
+            summary.private_egress_denials,
+            summary.privacy_budget_events,
+            summary.retention_policy_events,
+            summary.permission_lease_events,
+            summary.permission_lease_expirations,
+            summary.consent_receipt_events,
+            summary.consent_receipt_revocations,
         });
         return buffer[0..used];
     }

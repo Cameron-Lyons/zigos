@@ -72,7 +72,8 @@
           "src/tests/spec/backlog_gates.zig"
         ],
         "current_evidence": [
-          "QEMU smoke paths include service startup, permission review, tampered artifacts, rollback-slot failure, recovery proof, storage durability, sync two-node, and driver restart gates.",
+        "QEMU smoke paths include service startup, permission review, tampered artifacts, rollback-slot failure, recovery proof, storage durability, sync two-node, and driver restart gates.",
+        "Recovery entry now rejects duplicate action lists and zero boot ticks, while break-glass recovery requires bounded single-line audit reasons before recording approval.",
           "The public release-security-gate target aggregates native smoke tamper profiles, storage durability, driver restart, recovery, sync two-node, UEFI QEMU preflight, and the real NUC11TNKi5 hardware proof checker into the release matrix."
         ],
         "open_gaps": [],
@@ -436,6 +437,7 @@
         "src/native/platform/base_boot_selector.zig",
         "src/native/platform/update_health.zig",
         "src/native/core/signing.zig",
+        "src/native/services/package_service.zig",
         "src/tools/zigos_sign.zig",
         "src/native/session/trust_boot.zig",
         "src/native_smoke_markers.zig",
@@ -448,9 +450,11 @@
         "The native smoke target now includes negative QEMU runs that reject a tampered boot artifact manifest, direct kernel/userspace-image/policy/driver-set measurement tampering, and a rollback target whose slot measurement no longer verifies before the boot can reach native-ready.",
         "The signature envelope and signing CLI now support Ed25519, an Ed25519+ML-DSA-65 hybrid preview profile, and a provider-backed production ML-DSA-65 FIPS 204 profile with full-size signature storage and fail-closed verification for unsupported formats.",
         "A signature-provider boundary and registry now report provider profile, key custody, hardware-backed release eligibility, lifecycle controls, customer-verifier protocol, FIPS 204/FIPS 140 validation metadata, and fail-closed profile mismatches so production Ed25519 or validated ML-DSA providers can be swapped in without changing manifest storage layouts.",
-        "Attestation statements carry verifier-visible hardware root key ids and generations, and verifier expectations can reject stale or revoked generations after provider rotation.",
+        "Attestation statements carry verifier-visible nonempty hardware root key ids and nonzero generations, verifier expectations can reject stale or revoked generations after provider rotation, and visible remote attestations now require fresh bounded challenge nonces with bounded replay-cache rejection before signing.",
         "Userspace package signatures, boot artifact manifest signatures, generated archive signatures, and attestation statement signatures now route through the default provider registry instead of directly selecting raw Ed25519 operations.",
-        "Demo seed packages, SDK simulator release bundles, rendered-shell journeys, package-service fixtures, and spec release fixtures now select the Ed25519 provider explicitly where they model release signing behavior."
+        "Demo seed packages, SDK simulator release bundles, rendered-shell journeys, package-service fixtures, and spec release fixtures now select the Ed25519 provider explicitly where they model release signing behavior.",
+        "Package-service update gates now reject exact signed replay, active-version regression, publisher drift, update-channel drift, update-source drift, schema-version regression, empty install sources, oversized install source identities, and invalid data schema versions, including adversarial spec coverage for freshly signed downgrade metadata.",
+        "Installed package launch plans, resolved active manifests, and rollback targets now fail closed when the package publisher key has been revoked, so revocation blocks both future updates and already-installed code paths."
       ],
       "production_gaps": [
         "Host evidence still uses emulator-provided measurement fallbacks, and attestation root material is represented by software signer identities.",
@@ -586,6 +590,7 @@
         "src/native/task/task_runtime_launch.zig",
         "src/native/task/userspace_loader.zig",
         "src/native/task/userspace_registry.zig",
+        "src/native/task/generated_image_fixtures.zig",
         "src/native/task/userspace_executor.zig",
         "src/native/kernel_api/syscall_surface.zig",
         "tools/generate_userspace_archive.zig"
@@ -595,22 +600,22 @@
         "Launch provenance, component ABI metadata, signed bundle state, and syscall-dispatched task creation are enforced in native modules.",
         "Negative tests reject unsigned userspace launches and modeled runtime bypasses.",
         "The production-readiness gate rejects unmarked syntheticUserspaceImage fixtures in critical launch and service test paths; existing synthetic fixtures are marked model-only.",
-        "The QEMU native smoke gate now requires generated userspace artifacts, scheduler binding, userspace exec/resume probes, service contract registration, service IPC connectivity, and driver restart markers before native-ready."
+        "The catalog registration path now rejects generated userspace artifacts when embedded ELF bytes are missing or malformed, when precomputed digests no longer match, or when generated ELF metadata and manifest state become stale.",
+        "The QEMU native smoke gate now requires generated userspace artifacts, scheduler binding, userspace exec/resume probes, service contract registration, service IPC connectivity, and driver restart markers before native-ready.",
+        "The service registry now rejects invalid bootstrap endpoints, zero binding identifiers, and unknown service connection flags before registering typed interfaces."
       ],
       "production_gaps": [
         "Many host tests still rely on syntheticUserspaceImage records instead of built image descriptors.",
-        "The production archive path needs negative tests for missing image bytes, mismatched digest, bad ELF metadata, and stale generated manifests.",
         "Real-hardware proof still needs to capture the booted userspace startup and service IPC markers from the NUC11TNKi5."
       ],
       "graduation_criteria": [
         "Replace critical launch-path synthetic image tests with fixtures derived from generated userspace image artifacts.",
-        "Add stale, truncated, unsigned, and digest-mismatched userspace archive tests to the spec gate.",
+        "Keep stale, truncated, unsigned, missing-byte, malformed-ELF, and digest-mismatched userspace archive tests in the spec and host gates.",
         "Keep the QEMU service-startup proof exercising generated-image boot, mailbox, descriptor validation, syscall query, service IPC, fault, and restart paths before native-ready."
       ],
       "next_actions": [
         "Create a small generated-image fixture reader for host tests.",
         "Replace the marked model-only launch and service synthetic fixtures with generated userspace image fixtures.",
-        "Extend userspace archive generation tests around production_artifact_manifest.zig.",
         "Capture the service-startup marker group in the NUC11TNKi5 hardware proof bundle."
       ],
       "verification_commands": [
@@ -641,6 +646,7 @@
       ],
       "current_evidence": [
         "Freestanding QEMU boots now run the permission review flow before native-ready using generated app packages, the permission review service task, compositor-backed review rendering, policy mediation, and explicit grant/deny markers.",
+        "Permission review service paths reject zero audit ticks, oversized scripted commands, and rendered-surface controls before the review window exists, so profiled review flows remain bounded and auditable.",
         "The native smoke marker contract requires review-port readiness, policy-port readiness, rendered review output, zero-authority denials, local grants, explicit device/media decisions, and lease expiry evidence.",
         "The NUC11TNKi5 hardware proof marker file requires the same permission review markers from real hardware serial output."
       ],
@@ -680,13 +686,15 @@
         "src/native/sync/device_graph.zig",
         "src/native/sync/sync_service.zig",
         "src/native/sync/sync_state_store.zig",
+        "src/native/sync/sync_transport.zig",
         "src/native/sync/sync_transport_harness.zig",
         "src/native/sync/network_policy.zig",
         "src/native/sync/sync_service_test.zig"
       ],
       "current_evidence": [
         "Sync state covers device graph enrollment, durable inbound/outbound frame queues, replay rejection, selective policy, per-object sharing, CRDT merge semantics, secret transfer markers, transactional database contracts, and explicit conflict review/resolution.",
-        "The overlay relay service rejects unauthorized relay use and target changes in harnessed tests.",
+        "The overlay relay service rejects unauthorized relay use, target changes, empty encrypted packets, malformed zero-tick/zero-task egress requests, and relay fallback re-checks revoked device trust before enqueueing failed native sends across both disconnected/congested and post-send network-failure paths.",
+        "Native sync transport ABI v3 host tests now bind captured frames to source and target task ids, require payload digests on the wire, reject zero or malformed frame headers, reject non-device or same-device endpoints, enforce packet/session metadata before encoding, reject invalid task ids before endpoint allocation, preflight packet-capture capacity before endpoint or driver side effects, and fail closed on mutated encrypted packet metadata during decrypt.",
         "End-to-end host tests replicate document, media, secret, and database payloads between two service tasks through a booted relay fallback model, and prove object-scoped grants skip private entries while offline conflicts stay reviewable.",
         "The two-node QEMU gate boots separate native nodes with separate native-store images and now requires booted device graph, policy, device-to-device, relay, revoked-device, and persisted sync-service restart markers on each node."
       ],
@@ -701,9 +709,9 @@
         "Bind remote device sessions to production attestation roots or explicitly mark them local-lab only."
       ],
       "next_actions": [
-        "Define the transport service ABI and move packet submission out of the harness module.",
+        "Promote the native sync ABI v3 packet-capture checks into the two-QEMU sync harness once the network driver task owns real frames.",
         "Promote conflict review and object-scoped sync grants into the rendered shell review surface.",
-        "Extend the two-QEMU sync harness with packet-capture assertions once the network driver task owns real frames."
+        "Bind remote device sessions to production attestation roots instead of local-lab signer fixtures."
       ],
       "verification_commands": [
         "./scripts/zig.sh build sync-two-node-qemu-test",
@@ -731,17 +739,22 @@
         "src/native/services/package_service.zig",
         "src/native/storage/storage_service.zig",
         "src/native/sync/sync_service.zig",
-        "src/native/task/task_runtime_service.zig"
+        "src/native/task/task_runtime_service.zig",
+        "src/native_smoke_markers.zig",
+        "spec/hardware/nuc11tnki5-required-markers.txt"
       ],
       "current_evidence": [
         "The rendered-shell production journey is now scoped to one Notes app daily-driver path rather than a generic desktop expansion path.",
         "The journey installs a signed native Notes package, starts its native component, opens a notes workspace and document, reviews the local object-access permission, grants an object-scoped collaborative share, syncs only after sharing, updates and rolls back the package, recovers shell/runtime state, removes the package, and revokes device and policy authority.",
         "The share step writes a concrete trusted-overlay, object-scoped workspace grant and verifies the collaborator can read and write the shared note before sync proceeds.",
-        "Task-flow ledger evidence now includes share_document alongside install_app, open_workspace, open_document, review_permission_request, sync_workspace, update_app, rollback_app_update, recover_system, and remove_app."
+        "Task-flow ledger evidence now includes share_document alongside install_app, open_workspace, open_document, review_permission_request, sync_workspace, update_app, rollback_app_update, recover_system, and remove_app.",
+        "The package-service lifecycle used by the journey now requires nonempty bounded install sources, nonzero monotonic data schema versions, monotonic active updates, stable publisher identity, stable update channels, and stable update sources before an installed Notes package can be replaced.",
+        "The host journey now renders an ordered Notes daily-driver marker contract directly in the production journey surface for install/open, edit persistence, share/sync, update rollback, recovery/removal, authority revocation, and complete-path proof; the same marker set is listed in the native-smoke marker registry and the NUC11TNKi5 hardware marker contract.",
+        "The booted shell input loop now renders typed document text, syncs the edited note, recovers runtime state while preserving the edit, and then continues through rollback, recovery, and package removal."
       ],
       "production_gaps": [
-        "The slice proof is still a host/service journey; the same ordered path is not yet a booted QEMU marker group or real-hardware capture.",
-        "The Notes editor behavior is represented by document open, permission review, share, and sync service state rather than text input/editing through a booted UI loop.",
+        "The slice proof is still a host/service journey with a marker contract; the same ordered path is not yet emitted by a booted QEMU scenario or captured on real hardware.",
+        "The Notes editor behavior now includes a booted text input and recovery loop, but the proof is still host-backed rather than a native QEMU or real-hardware interactive path.",
         "Native package install/update proof uses signed manifest state and package-service lifecycle rather than loading a realistic Notes app asset bundle through a public store channel."
       ],
       "graduation_criteria": [
@@ -750,8 +763,8 @@
         "Require the same journey markers in the NUC11TNKi5 hardware proof bundle before calling the slice production-ready."
       ],
       "next_actions": [
-        "Add booted native smoke markers for the Notes package install/open/share/sync/update/recover path.",
-        "Route a minimal text edit through the booted shell input loop and assert the edited note survives sync and recovery.",
+        "Wire the Notes daily-driver marker contract into a booted native smoke scenario that emits the ordered markers before native-ready.",
+        "Promote the booted text edit, sync, and recovery proof into a QEMU native smoke scenario.",
         "Capture the complete Notes daily-driver marker group in build/hardware-proofs/nuc11tnki5/serial.log."
       ],
       "verification_commands": [
@@ -832,16 +845,17 @@
         "Scheduler decisions account for resource class, engine availability, thermal pressure, battery saver, privacy mode, CPU budget, memory bandwidth, and zero-copy shared memory.",
         "Booted provider tests derive hardware-source telemetry from live runtime counters instead of purely synthetic state.",
         "Telemetry now flows through an explicit provider boundary with test-only host fakes and production freestanding provider descriptors.",
-        "Negative tests require observed telemetry before waking hardware queues."
+        "Negative tests require observed telemetry before waking hardware queues.",
+        "A sustained-load scheduler regression gate keeps foreground work continuously ready while proving background and batch classes still dispatch within bounded deadline windows instead of starving."
       ],
       "production_gaps": [
         "The freestanding provider is still assembled from native runtime counters and test-provided platform fields, not real ACPI, battery, thermal, GPU, NPU, or media driver sources.",
-        "There is no scheduler latency, fairness, starvation, or thermal regression gate under sustained load.",
+        "The scheduler has host starvation/fairness coverage, but the sustained-load latency, background throttling, and thermal/battery policy checks are not yet promoted into the QEMU benchmark gate.",
         "Accelerator availability is represented by booleans rather than device queue ownership and completion interrupts."
       ],
       "graduation_criteria": [
         "Introduce platform telemetry providers for the first supported target and mark emulator-only providers as test-only.",
-        "Add benchmark gates for scheduler latency, fairness across resource classes, background throttling, and thermal/battery policy transitions.",
+        "Promote scheduler latency, fairness across resource classes, background throttling, and thermal/battery policy transitions from host regression tests into benchmark gates.",
         "Tie accelerator claims to brokered device queues or explicitly limit production support to CPU/media classes."
       ],
       "next_actions": [

@@ -11,6 +11,8 @@ const storage_service = @import("../storage/storage_service.zig");
 const sync_service = @import("../sync/sync_service.zig");
 const workspace = @import("../storage/workspace.zig");
 
+pub const MAX_BREAK_GLASS_REASON_BYTES: usize = 160;
+
 pub const RecoveryReport = struct {
     recovery_boot_entered: bool = false,
     image_verified: bool = false,
@@ -91,8 +93,12 @@ pub const EntryError = error{
     BreakGlassApprovalRequired,
     BreakGlassApproverRequired,
     BreakGlassReasonRequired,
+    BreakGlassReasonInvalid,
+    BreakGlassReasonTooLong,
+    DuplicateRecoveryAction,
     RecoveryActionRequired,
     RecoveryProfileRequired,
+    RecoveryTickRequired,
     UnauthorizedRecoveryOwner,
 };
 
@@ -116,6 +122,7 @@ pub const Environment = struct {
         if (request.profile != .recovery) return error.RecoveryProfileRequired;
         if (!request.requester.eql(self.owner)) return error.UnauthorizedRecoveryOwner;
         if (request.actions.len == 0) return error.RecoveryActionRequired;
+        try validateUniqueRecoveryActions(request.actions);
         return .{
             .owner = self.owner,
             .action_count = request.actions.len,
@@ -129,6 +136,7 @@ pub const Environment = struct {
         request: EntryRequest,
         tick: u64,
     ) EntryError!RecoveryBootExecution {
+        if (tick == 0) return error.RecoveryTickRequired;
         var entry = try self.enterRecoveryMode(request);
         entry.entered_from_boot_profile = true;
         entry.normal_session_authority = false;
@@ -147,6 +155,7 @@ pub const Environment = struct {
         request: BreakGlassRequest,
         tick: u64,
     ) (EntryError || event_ledger.Error)!RecoveryBootExecution {
+        if (tick == 0) return error.RecoveryTickRequired;
         var break_glass = try self.enterBreakGlassRecoveryMode(ledger, request, tick);
         break_glass.entry.entered_from_boot_profile = true;
         break_glass.entry.normal_session_authority = false;
@@ -187,6 +196,14 @@ pub const Environment = struct {
         if (request.reason.len == 0) {
             try recordBreakGlassDecision(ledger, request, false, "break-glass reason required", tick);
             return error.BreakGlassReasonRequired;
+        }
+        if (request.reason.len > MAX_BREAK_GLASS_REASON_BYTES) {
+            try recordBreakGlassDecision(ledger, request, false, "break-glass reason too long", tick);
+            return error.BreakGlassReasonTooLong;
+        }
+        if (!breakGlassReasonIsAuditSafe(request.reason)) {
+            try recordBreakGlassDecision(ledger, request, false, "break-glass reason contains invalid audit text", tick);
+            return error.BreakGlassReasonInvalid;
         }
         const entry = try self.enterRecoveryMode(.{
             .profile = request.profile,
@@ -342,6 +359,21 @@ fn recordBreakGlassDecision(
         detail,
         true,
     );
+}
+
+fn breakGlassReasonIsAuditSafe(reason: []const u8) bool {
+    for (reason) |byte| {
+        if (byte < 0x20 or byte > 0x7E) return false;
+    }
+    return true;
+}
+
+fn validateUniqueRecoveryActions(actions: []const RecoveryAction) EntryError!void {
+    for (actions, 0..) |action, action_index| {
+        for (actions[action_index + 1 ..]) |other| {
+            if (action == other) return error.DuplicateRecoveryAction;
+        }
+    }
 }
 
 test "recovery environment verifies reinstalls restores repairs and rotates" {
@@ -501,6 +533,11 @@ test "recovery environment requires boot-profile recovery session gates and refu
         .profile = .recovery,
         .requester = storage_owner,
     }));
+    try std.testing.expectError(error.DuplicateRecoveryAction, recovery.enterRecoveryMode(.{
+        .profile = .recovery,
+        .requester = storage_owner,
+        .actions = &.{ .restore_workspace_snapshot, .restore_workspace_snapshot },
+    }));
 
     const entry = try recovery.enterRecoveryMode(.{
         .profile = .recovery,
@@ -517,6 +554,11 @@ test "recovery environment requires boot-profile recovery session gates and refu
         .requester = storage_owner,
         .actions = &.{ .restore_workspace_snapshot, .repair_sync_metadata },
     }, 20);
+    try std.testing.expectError(error.RecoveryTickRequired, recovery.enterRecoveryBootProfile(.{
+        .profile = .recovery,
+        .requester = storage_owner,
+        .actions = &.{.restore_workspace_snapshot},
+    }, 0));
 
     var normal_session_entry = recovery_boot.entry;
     normal_session_entry.normal_session_authority = true;
@@ -562,6 +604,31 @@ test "recovery environment audits break-glass recovery authorization" {
         .reason = "disk repair",
         .actions = &.{.restore_workspace_snapshot},
     }, 31));
+    const oversized_reason = [_]u8{'r'} ** (MAX_BREAK_GLASS_REASON_BYTES + 1);
+    try std.testing.expectError(error.BreakGlassReasonTooLong, recovery.enterBreakGlassRecoveryMode(&ledger, .{
+        .profile = .recovery,
+        .requester = storage_owner,
+        .approver = policy_authority,
+        .approval_capability_id = 501,
+        .reason = oversized_reason[0..],
+        .actions = &.{.restore_workspace_snapshot},
+    }, 32));
+    try std.testing.expectError(error.BreakGlassReasonInvalid, recovery.enterBreakGlassRecoveryMode(&ledger, .{
+        .profile = .recovery,
+        .requester = storage_owner,
+        .approver = policy_authority,
+        .approval_capability_id = 501,
+        .reason = "disk repair\nsecond line",
+        .actions = &.{.restore_workspace_snapshot},
+    }, 33));
+    try std.testing.expectError(error.RecoveryTickRequired, recovery.enterBreakGlassRecoveryBootProfile(&ledger, .{
+        .profile = .recovery,
+        .requester = storage_owner,
+        .approver = policy_authority,
+        .approval_capability_id = 501,
+        .reason = "disk repair",
+        .actions = &.{.restore_workspace_snapshot},
+    }, 0));
 
     const session = try recovery.enterBreakGlassRecoveryBootProfile(&ledger, .{
         .profile = .recovery,
@@ -570,7 +637,7 @@ test "recovery environment audits break-glass recovery authorization" {
         .approval_capability_id = 501,
         .reason = "disk repair",
         .actions = &.{ .restore_workspace_snapshot, .repair_sync_metadata },
-    }, 32);
+    }, 34);
     try std.testing.expectEqual(@as(usize, 2), session.entry.action_count);
     try std.testing.expect(session.entry.entered_from_boot_profile);
     try std.testing.expect(!session.entry.normal_session_authority);
@@ -579,19 +646,23 @@ test "recovery environment audits break-glass recovery authorization" {
     try std.testing.expectEqual(@as(u64, 501), session.approval_capability_id);
     try std.testing.expect(session.entry.permits(.repair_sync_metadata));
 
-    var events: [4]event_ledger.Event = undefined;
+    var events: [6]event_ledger.Event = undefined;
     const decisions = ledger.queryEvents(.{
         .kind = .permission_decision,
         .subject = storage_owner,
         .include_protected_content = true,
     }, &events);
-    try std.testing.expectEqual(@as(usize, 3), decisions.len);
+    try std.testing.expectEqual(@as(usize, 5), decisions.len);
     try std.testing.expect(!decisions[0].allowed);
     try std.testing.expectEqual(abi.DenialReason.policy_denied, decisions[0].denial_reason);
     try std.testing.expectEqualStrings("break-glass approver must be policy authority", decisions[0].detailSlice());
     try std.testing.expect(!decisions[1].allowed);
     try std.testing.expectEqualStrings("break-glass approval capability required", decisions[1].detailSlice());
-    try std.testing.expect(decisions[2].allowed);
-    try std.testing.expectEqual(manifest.PermissionKind.device_access, decisions[2].permission_kind.?);
-    try std.testing.expectEqualStrings("disk repair", decisions[2].detailSlice());
+    try std.testing.expect(!decisions[2].allowed);
+    try std.testing.expectEqualStrings("break-glass reason too long", decisions[2].detailSlice());
+    try std.testing.expect(!decisions[3].allowed);
+    try std.testing.expectEqualStrings("break-glass reason contains invalid audit text", decisions[3].detailSlice());
+    try std.testing.expect(decisions[4].allowed);
+    try std.testing.expectEqual(manifest.PermissionKind.device_access, decisions[4].permission_kind.?);
+    try std.testing.expectEqualStrings("disk repair", decisions[4].detailSlice());
 }

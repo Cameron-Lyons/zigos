@@ -68,8 +68,10 @@ pub const MAX_REVIEW_DECISIONS: usize = permission_review.MAX_REVIEW_DECISIONS;
 pub const MAX_INPUT_LINE: usize = 96;
 pub const MAX_SCRIPTED_PLAN_ENTRIES: usize = 16;
 pub const Error = task_runtime.Error || manifest.ValidationError || compositor_display.Error || event_ledger.Error || error{
+    ReviewCommandTooLong,
     ReviewComplete,
     ReviewIncomplete,
+    ReviewTickRequired,
     ReviewWindowMissing,
 };
 
@@ -141,6 +143,7 @@ pub const RenderedReviewSurface = struct {
     }
 
     pub fn begin(self: *RenderedReviewSurface) Error!void {
+        if (self.now_ticks == 0) return error.ReviewTickRequired;
         try manifest.validate(self.bundle);
         if (self.bundle.requested_permissions.len > self.decisions.len) return error.TooManyPermissions;
         const app_task = self.service.runtime.find(self.app_task_id) orelse return error.TaskNotFound;
@@ -157,6 +160,7 @@ pub const RenderedReviewSurface = struct {
     }
 
     pub fn click(self: *RenderedReviewSurface, control: SurfaceControl) Error!void {
+        if (self.review_window_id == null) return error.ReviewWindowMissing;
         if (self.active_index >= self.bundle.requested_permissions.len) return error.ReviewComplete;
         if (self.decision_count >= self.decisions.len) return error.ReviewComplete;
 
@@ -178,6 +182,7 @@ pub const RenderedReviewSurface = struct {
         self: *RenderedReviewSurface,
         output: *[MAX_REVIEW_DECISIONS]policy_mediation.UserGrant,
     ) Error![]const policy_mediation.UserGrant {
+        if (self.review_window_id == null) return error.ReviewWindowMissing;
         if (self.active_index < self.bundle.requested_permissions.len) return error.ReviewIncomplete;
         const reviewed_session = permission_review.initSession(
             self.app_task_id,
@@ -346,6 +351,7 @@ pub const Service = struct {
         now_ticks: u64,
         output: *[MAX_REVIEW_DECISIONS]policy_mediation.UserGrant,
     ) Error![]const policy_mediation.UserGrant {
+        if (now_ticks == 0) return error.ReviewTickRequired;
         try manifest.validate(bundle);
         if (bundle.requested_permissions.len > MAX_REVIEW_DECISIONS) return error.TooManyPermissions;
         const app_task = self.runtime.find(app_task_id) orelse return error.TaskNotFound;
@@ -374,6 +380,7 @@ pub const Service = struct {
             while (true) {
                 var input_buffer: [MAX_INPUT_LINE]u8 = undefined;
                 const line = self.readCommandLine(&input_buffer, bundle, request);
+                if (line.len > MAX_INPUT_LINE) return error.ReviewCommandTooLong;
                 const command = permission_review.parseCommand(line) catch {
                     console.print("    invalid command; expected allow [local] [lease=<ticks>] or deny\n");
                     continue;
@@ -751,6 +758,30 @@ test "review service rejects invalid manifests before auditing" {
     try std.testing.expectEqual(@as(usize, 0), task.audit_count);
 }
 
+test "review service rejects zero audit ticks before prompting" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try createReviewTestTask(&runtime, 3, null);
+    const scripted_inputs = [_][]const u8{"allow"};
+    var service = Service.init(13, 14, &runtime, &scripted_inputs);
+    const bundle = manifest_fixtures.notesBundle();
+    var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+
+    try std.testing.expectError(error.ReviewTickRequired, service.reviewBundle(task.id, bundle, 0, &grants_buffer));
+    try std.testing.expectEqual(@as(usize, 0), task.audit_count);
+}
+
+test "review service rejects oversized scripted commands" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try createReviewTestTask(&runtime, 4, null);
+    const oversized = [_]u8{'a'} ** (MAX_INPUT_LINE + 1);
+    const scripted_inputs = [_][]const u8{oversized[0..]};
+    var service = Service.init(15, 16, &runtime, &scripted_inputs);
+    const bundle = manifest_fixtures.notesBundle();
+    var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+
+    try std.testing.expectError(error.ReviewCommandTooLong, service.reviewBundle(task.id, bundle, 10, &grants_buffer));
+}
+
 test "review service refuses partial grants when visible decisions exceed capacity" {
     var runtime = task_runtime.Runtime.init();
     const task = try createReviewTestTask(&runtime, 46, null);
@@ -940,8 +971,12 @@ test "rendered permission review surface drives allow deny controls through comp
         },
     };
     var grants_buffer: [MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
+    var zero_tick_surface = RenderedReviewSurface.init(&service, task.id, bundle, 0, &display);
+    try std.testing.expectError(error.ReviewTickRequired, zero_tick_surface.begin());
     var surface = RenderedReviewSurface.init(&service, task.id, bundle, 50, &display);
     surface.bindLedger(&ledger);
+    try std.testing.expectError(error.ReviewWindowMissing, surface.click(.allow));
+    try std.testing.expectError(error.ReviewWindowMissing, surface.finish(&grants_buffer));
 
     try surface.begin();
     try std.testing.expect(display.containsText("active_type=app_panel"));

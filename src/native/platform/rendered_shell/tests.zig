@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi = @import("../../core/abi.zig");
+const boot_markers = @import("../../../kernel/boot/markers.zig");
 const capability = @import("../../kernel_api/capability.zig");
 const compositor_session = @import("../compositor_session.zig");
 const event_ledger = @import("../event_ledger.zig");
@@ -56,6 +57,10 @@ const encodeTaskShellRequest = task_shell_wire.encodeRequest;
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
     if (std.mem.indexOf(u8, haystack, needle) == null) return error.ExpectedSubstringMissing;
+}
+
+fn expectNotContains(haystack: []const u8, needle: []const u8) !void {
+    if (std.mem.indexOf(u8, haystack, needle) != null) return error.UnexpectedSubstringPresent;
 }
 
 fn seedShellWorkspace(storage: *storage_service.Service, owner: principal.PrincipalId, path: []const u8) !u64 {
@@ -572,9 +577,18 @@ test "production journey service rejects premature controls then routes lifecycl
     try std.testing.expect(started_task_id != 0);
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .open_workspace, .tick = 24 }).status);
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .open_document, .tick = 25 }).status);
+    var marker_buffer: [SMALL_EXPORT_BUFFER_BYTES]u8 = undefined;
+    const opened_markers = try journey.renderMarkerContract(&marker_buffer);
+    try expectContains(opened_markers, boot_markers.notes_daily_driver_install_open_ok);
+    try expectNotContains(opened_markers, boot_markers.notes_daily_driver_edit_saved_ok);
+
     const before_edit = try storage.resolve(workspace_id, document_path);
     try std.testing.expectEqual(ProductionJourneyStatus.invalid_order, journey.dispatch(.{ .control = .sync_workspace, .tick = 26 }).status);
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .edit_document, .tick = 26 }).status);
+    const edited_markers = try journey.renderMarkerContract(&marker_buffer);
+    try expectContains(edited_markers, boot_markers.notes_daily_driver_edit_saved_ok);
+    try expectNotContains(edited_markers, boot_markers.notes_daily_driver_share_sync_ok);
+
     const edited_entry = try storage.resolve(workspace_id, document_path);
     try std.testing.expectEqual(before_edit.object_id, edited_entry.object_id);
     try std.testing.expect(!before_edit.version_id.eql(edited_entry.version_id));
@@ -599,10 +613,18 @@ test "production journey service rejects premature controls then routes lifecycl
         .now_ticks = 28,
     }));
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .sync_workspace, .tick = 29 }).status);
+    const synced_markers = try journey.renderMarkerContract(&marker_buffer);
+    try expectContains(synced_markers, boot_markers.notes_daily_driver_share_sync_ok);
+    try expectNotContains(synced_markers, boot_markers.notes_daily_driver_update_rollback_ok);
+
     try std.testing.expectEqual(edited_entry.version_id.raw(), sync.replicaVersion(workspace_id, paired_device, document_path).?);
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .update_app, .tick = 30 }).status);
     try std.testing.expectEqual(@as(u16, 1), packages_service.find("app.notes.daily").?.versionMinor());
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .rollback_update, .tick = 31 }).status);
+    const rolled_back_markers = try journey.renderMarkerContract(&marker_buffer);
+    try expectContains(rolled_back_markers, boot_markers.notes_daily_driver_update_rollback_ok);
+    try expectNotContains(rolled_back_markers, boot_markers.notes_daily_driver_recovery_remove_ok);
+
     try std.testing.expectEqual(@as(u16, 0), packages_service.find("app.notes.daily").?.versionMinor());
     try std.testing.expectEqual(edited_entry.version_id, (try storage.resolve(workspace_id, document_path)).version_id);
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .recover_system, .tick = 32 }).status);
@@ -617,9 +639,22 @@ test "production journey service rejects premature controls then routes lifecycl
     try std.testing.expectEqual(@as(usize, 0), compositor.item_count);
     try std.testing.expectEqual(@as(u64, 0), compositor.active_window_id);
     try std.testing.expectEqual(edited_entry.version_id, (try storage.resolve(workspace_id, document_path)).version_id);
+    const removed_markers = try journey.renderMarkerContract(&marker_buffer);
+    try expectContains(removed_markers, boot_markers.notes_daily_driver_recovery_remove_ok);
+    try expectNotContains(removed_markers, boot_markers.notes_daily_driver_authority_revoked_ok);
+
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .revoke_device, .tick = 34 }).status);
     try std.testing.expect(!sync.isTrustedDevice(paired_device));
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .revoke_policy, .tick = 35 }).status);
+    const complete_markers = try journey.renderMarkerContract(&marker_buffer);
+    try expectContains(complete_markers, boot_markers.notes_daily_driver_install_open_ok);
+    try expectContains(complete_markers, boot_markers.notes_daily_driver_edit_saved_ok);
+    try expectContains(complete_markers, boot_markers.notes_daily_driver_share_sync_ok);
+    try expectContains(complete_markers, boot_markers.notes_daily_driver_update_rollback_ok);
+    try expectContains(complete_markers, boot_markers.notes_daily_driver_recovery_remove_ok);
+    try expectContains(complete_markers, boot_markers.notes_daily_driver_authority_revoked_ok);
+    try expectContains(complete_markers, boot_markers.notes_daily_driver_complete);
+
     try std.testing.expectEqual(
         ProductionJourneyStatus.policy_rejected,
         journey.dispatch(.{ .control = .install_app, .tick = 36 }).status,
@@ -643,6 +678,8 @@ test "production journey service rejects premature controls then routes lifecycl
     try expectContains(rendered, "task=0 bundle=app.notes.daily");
     try expectContains(rendered, "visible_windows=0");
     try expectContains(rendered, "task_flow_events=13");
+    try expectContains(rendered, "notes_daily_driver complete=yes");
+    try expectContains(rendered, boot_markers.notes_daily_driver_complete);
 
     var export_buffer: [EXPORT_BUFFER_BYTES]u8 = undefined;
     const exported = try ledger.exportText(&export_buffer, .{});
@@ -1509,6 +1546,16 @@ test "booted notes docs loop edits shares syncs reviews rollback recovery and re
     try std.testing.expectEqual(@as(u16, 1), shell.state.sync_selected_entries);
     try std.testing.expectEqual(@as(u16, 1), shell.state.sync_transport_frames);
 
+    var render_buffer: [FULL_RENDER_BUFFER_BYTES]u8 = undefined;
+    const synced_rendered = try system.render(&render_buffer);
+    try expectContains(synced_rendered, "document_text=booted notes edit: product feels tangible");
+
+    const recovered_after_sync = system.dispatchInput(.{ .kind = .recover_state, .tick = 30 });
+    try std.testing.expect(recovered_after_sync.accepted);
+    try std.testing.expect(shell.state.recovered);
+    try std.testing.expectEqual(@as(u32, 1), runtime_service.restart_generation);
+    try std.testing.expectEqualStrings("booted notes edit: product feels tangible", shell.documentTextSlice());
+
     try sync.recordConflict(
         workspace_id,
         paired_device,
@@ -1518,28 +1565,27 @@ test "booted notes docs loop edits shares syncs reviews rollback recovery and re
         shell.state.document_version_id + 1_000,
         .mergeable_crdt,
     );
-    try std.testing.expect(system.dispatchInput(.{ .kind = .review_object_conflict, .tick = 30 }).accepted);
+    try std.testing.expect(system.dispatchInput(.{ .kind = .review_object_conflict, .tick = 31 }).accepted);
     try std.testing.expect(shell.state.object_conflict_reviewed);
     try std.testing.expect(shell.state.object_conflict_resolved);
     try std.testing.expect(sync.findConflictForObject(workspace_id, paired_device, shell.state.selected_object_id) == null);
 
-    try std.testing.expect(system.dispatchInput(.{ .kind = .rollback_snapshot, .tick = 31 }).accepted);
+    try std.testing.expect(system.dispatchInput(.{ .kind = .rollback_snapshot, .tick = 32 }).accepted);
     try std.testing.expect(shell.state.snapshot_restored);
     try std.testing.expectEqual(original_version_id, shell.state.document_version_id);
 
-    const recovered = system.dispatchInput(.{ .kind = .recover_state, .tick = 32 });
+    const recovered = system.dispatchInput(.{ .kind = .recover_state, .tick = 33 });
     try std.testing.expect(recovered.accepted);
     try std.testing.expect(shell.state.recovered);
-    try std.testing.expectEqual(@as(u32, 1), runtime_service.restart_generation);
+    try std.testing.expectEqual(@as(u32, 2), runtime_service.restart_generation);
 
-    const removed = system.dispatchInput(.{ .kind = .remove_package, .tick = 33 });
+    const removed = system.dispatchInput(.{ .kind = .remove_package, .tick = 34 });
     try std.testing.expect(removed.accepted);
     try std.testing.expect(shell.state.package_removed);
     try std.testing.expect(packages_service.find("app.notes") == null);
     try std.testing.expectEqual(task_runtime.TaskState.terminated, runtime.find(task_id).?.state);
     try std.testing.expectEqual(@as(usize, 0), compositor.visibleWindowCount());
 
-    var render_buffer: [FULL_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered = try system.render(&render_buffer);
     try expectContains(rendered, "document_loop opened=no edited=no version=");
     try expectContains(rendered, "synced=no sync_selected=1 frames=1 conflicts=0 object_shared=yes conflict_reviewed=yes package_removed=yes");

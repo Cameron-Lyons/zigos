@@ -14,6 +14,10 @@ pub fn digestBundle(bundle: manifest.BundleManifest) Digest {
     crypto_hash.updateBytes(&hasher, "ai-model-family", bundle.ai_metadata.model_family);
     crypto_hash.updateEnum(&hasher, "ai-locality", bundle.ai_metadata.locality);
     crypto_hash.updateBool(&hasher, "ai-offline-required", bundle.ai_metadata.offline_required);
+    crypto_hash.updateBool(&hasher, "ai-private-context", bundle.ai_metadata.private_context);
+    crypto_hash.updateBool(&hasher, "ai-training-allowed", bundle.ai_metadata.training_allowed);
+    crypto_hash.updateInt(&hasher, "ai-max-context-bytes", bundle.ai_metadata.max_context_bytes);
+    crypto_hash.updateBool(&hasher, "ai-audit-prompt-use", bundle.ai_metadata.audit_prompt_use);
 
     for (bundle.provided_interfaces, 0..) |interface, index| {
         crypto_hash.updateInt(&hasher, "provided-index", index);
@@ -48,6 +52,10 @@ pub fn digestBundle(bundle: manifest.BundleManifest) Digest {
         crypto_hash.updateBool(&hasher, "permission-local-only", permission.local_only);
         crypto_hash.updateInt(&hasher, "permission-max-lease", permission.max_lease_ticks);
         crypto_hash.updateInt(&hasher, "permission-target-id", permission.target_id);
+        crypto_hash.updateEnum(&hasher, "permission-sensitivity", permission.sensitivity);
+        crypto_hash.updateEnum(&hasher, "permission-purpose", permission.purpose);
+        crypto_hash.updateInt(&hasher, "permission-retention-days", permission.retention_days);
+        crypto_hash.updateBytes(&hasher, "permission-user-visible-reason", permission.user_visible_reason);
         crypto_hash.updateEnum(&hasher, "permission-egress-intent-kind", permission.egress_intent.kind);
         crypto_hash.updateBytes(&hasher, "permission-egress-object", permission.egress_intent.object);
         crypto_hash.updateBytes(&hasher, "permission-egress-principal", permission.egress_intent.principal);
@@ -81,6 +89,10 @@ pub fn permissionDigest(requests: []const manifest.PermissionRequest) Digest {
         crypto_hash.updateBool(&hasher, "permission-local-only", request.local_only);
         crypto_hash.updateInt(&hasher, "permission-max-lease", request.max_lease_ticks);
         crypto_hash.updateInt(&hasher, "permission-target-id", request.target_id);
+        crypto_hash.updateEnum(&hasher, "permission-sensitivity", request.sensitivity);
+        crypto_hash.updateEnum(&hasher, "permission-purpose", request.purpose);
+        crypto_hash.updateInt(&hasher, "permission-retention-days", request.retention_days);
+        crypto_hash.updateBytes(&hasher, "permission-user-visible-reason", request.user_visible_reason);
         crypto_hash.updateEnum(&hasher, "permission-egress-intent-kind", request.egress_intent.kind);
         crypto_hash.updateBytes(&hasher, "permission-egress-object", request.egress_intent.object);
         crypto_hash.updateBytes(&hasher, "permission-egress-principal", request.egress_intent.principal);

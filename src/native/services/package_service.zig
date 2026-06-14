@@ -32,6 +32,7 @@ pub const MAX_BACKGROUND_TASK_ID_BYTES = model.MAX_BACKGROUND_TASK_ID_BYTES;
 pub const MAX_MODEL_FAMILY_BYTES = model.MAX_MODEL_FAMILY_BYTES;
 pub const MAX_SIGNATURE_FORMAT_BYTES = model.MAX_SIGNATURE_FORMAT_BYTES;
 pub const MAX_SIGNATURE_SIGNER_BYTES = model.MAX_SIGNATURE_SIGNER_BYTES;
+pub const MAX_INSTALL_SOURCE_BYTES = model.MAX_INSTALL_SOURCE_BYTES;
 pub const InstallRequest = model.InstallRequest;
 pub const InstallResult = model.InstallResult;
 pub const RemoveResult = model.RemoveResult;
@@ -53,13 +54,22 @@ pub const Digest = bundle_digest.Digest;
 pub const Error = bundle_ops.Error || error{
     BundleNotFound,
     BundleTableFull,
+    InstallSourceMissing,
+    InstallSourceInvalid,
+    InvalidDataSchemaVersion,
     InstallSourceDenied,
     InvalidManifestSignature,
     UntrustedManifestSigner,
     PublisherKeyRevoked,
     NoRollbackVersion,
     PermissionChangeUndeclared,
+    PublisherChanged,
     SchemaChangeRequiresExplicitVersion,
+    SchemaVersionRegressionRejected,
+    UpdateChannelChanged,
+    UpdateSourceChanged,
+    VersionRegressionRejected,
+    VersionReplayRejected,
 };
 
 pub const digestBundle = bundle_digest.digestBundle;
@@ -112,6 +122,7 @@ pub const Service = struct {
         request: InstallRequest,
         policy: ?*const policy_object.PolicyObject,
     ) Error!InstallResult {
+        try validateInstallRequestShape(request);
         try manifest.validate(request.bundle);
         try manifest.validateApplicationPackaging(request.bundle);
         try bundle_ops.validateInstallTarget(InstalledBundle, request.bundle);
@@ -144,10 +155,15 @@ pub const Service = struct {
             if (schema_changed and request.bundle.version_minor == active_revision.version_minor and request.bundle.version_major == active_revision.version_major) {
                 return error.SchemaChangeRequiresExplicitVersion;
             }
+            try validateRevisionTransition(active_revision, request.bundle, request.data_schema_version);
+            if (!std.mem.eql(u8, active_revision.sourceIdentitySlice(), request.source_identity)) {
+                return error.UpdateSourceChanged;
+            }
 
             try bundle_ops.installRevision(
                 bundle,
                 request.bundle,
+                request.source_identity,
                 request.data_schema_version,
                 permission_digest,
             );
@@ -168,6 +184,7 @@ pub const Service = struct {
         try bundle_ops.installNew(
             &slot.bundle,
             request.bundle,
+            request.source_identity,
             request.data_schema_version,
             permission_digest,
         );
@@ -182,15 +199,31 @@ pub const Service = struct {
 
     fn rollback(self: *Service, bundle_id: []const u8) Error!InstallResult {
         const bundle = self.find(bundle_id) orelse return error.BundleNotFound;
-        if (!bundle.rollbackAvailable()) return error.NoRollbackVersion;
+        const rollback_revision = bundle.rollbackRevision() orelse return error.NoRollbackVersion;
+        try self.validateRollbackRevisionTrusted(rollback_revision);
+        const active_revision = bundle.activeRevision();
+        const permissions_changed = !std.mem.eql(u8, &active_revision.permission_digest, &rollback_revision.permission_digest);
         bundle_ops.rollback(bundle);
 
         return .{
             .installed_new = false,
             .updated_existing = true,
-            .permissions_changed = true,
+            .permissions_changed = permissions_changed,
             .rollback_available = bundle.rollbackAvailable(),
         };
+    }
+
+    fn validateRollbackRevisionTrusted(self: *const Service, revision: *const BundleRevision) Error!void {
+        return self.validateRevisionTrusted(revision);
+    }
+
+    fn validateRevisionTrusted(self: *const Service, revision: *const BundleRevision) Error!void {
+        const signature = revision.signature.toManifest();
+        if (self.trust_store.trustedPublisherSignature(revision.publisherSlice(), signature)) return;
+        if (publisherKeyWasRevoked(&self.trust_store, revision.publisherSlice(), signature)) {
+            return error.PublisherKeyRevoked;
+        }
+        return error.UntrustedManifestSigner;
     }
 
     fn remove(self: *Service, bundle_id: []const u8) Error!RemoveResult {
@@ -223,6 +256,7 @@ pub const Service = struct {
     pub fn buildLaunchPlan(self: *const Service, bundle_id: []const u8) Error!LaunchPlan {
         const bundle = self.findConst(bundle_id) orelse return error.BundleNotFound;
         const active_revision = bundle.activeRevision();
+        try self.validateRevisionTrusted(active_revision);
         return .{
             .component_count = active_revision.component_count,
             .components = active_revision.components,
@@ -237,6 +271,7 @@ pub const Service = struct {
         resolved: *ResolvedManifest,
     ) Error!manifest.BundleManifest {
         const bundle = self.findConst(bundle_id) orelse return error.BundleNotFound;
+        try self.validateRevisionTrusted(bundle.activeRevision());
         return bundle_ops.resolveActiveManifest(bundle, resolved);
     }
 
@@ -361,6 +396,44 @@ pub const PackagePort = struct {
         );
     }
 };
+
+fn validateInstallRequestShape(request: InstallRequest) Error!void {
+    if (request.source_identity.len == 0) return error.InstallSourceMissing;
+    if (request.source_identity.len > MAX_INSTALL_SOURCE_BYTES) return error.InstallSourceTooLong;
+    for (request.source_identity) |byte| {
+        const allowed =
+            (byte >= 'a' and byte <= 'z') or
+            (byte >= 'A' and byte <= 'Z') or
+            (byte >= '0' and byte <= '9') or
+            byte == ':' or byte == '.' or byte == '_' or byte == '-' or byte == '/';
+        if (!allowed) return error.InstallSourceInvalid;
+    }
+    if (request.data_schema_version == 0) return error.InvalidDataSchemaVersion;
+}
+
+fn validateRevisionTransition(
+    active_revision: *const BundleRevision,
+    incoming: manifest.BundleManifest,
+    incoming_schema_version: u32,
+) Error!void {
+    if (!std.mem.eql(u8, active_revision.publisherSlice(), incoming.publisher)) {
+        return error.PublisherChanged;
+    }
+    if (active_revision.channel != incoming.update_channel) {
+        return error.UpdateChannelChanged;
+    }
+    if (incoming_schema_version < active_revision.schema_version) {
+        return error.SchemaVersionRegressionRejected;
+    }
+    if (incoming.version_major < active_revision.version_major or
+        (incoming.version_major == active_revision.version_major and incoming.version_minor < active_revision.version_minor))
+    {
+        return error.VersionRegressionRejected;
+    }
+    if (incoming.version_major == active_revision.version_major and incoming.version_minor == active_revision.version_minor) {
+        return error.VersionReplayRejected;
+    }
+}
 
 fn publisherKeyWasRevoked(
     trust_store: *const principal.Keyring,
@@ -609,6 +682,10 @@ test "package service enforces signed manifests policy gated sources updates rol
             .resource = "relay.notes.example",
             .rights = .{ .network_policy = .{ .network_remote = true } },
             .required = false,
+            .sensitivity = .private_user_data,
+            .user_visible_reason = "Sync notes through the user's chosen relay",
+            .purpose = .document_editing,
+            .retention_days = 30,
             .egress_intent = .{
                 .kind = .call_service,
                 .service = "notes.relay.sync",
@@ -650,7 +727,7 @@ test "package service enforces signed manifests policy gated sources updates rol
 
     const updated = try service.install(.{
         .bundle = v2,
-        .source_identity = "repo:corp",
+        .source_identity = "store:zigos",
         .data_schema_version = 2,
         .declared_permission_change = true,
     }, org_policy);
@@ -662,10 +739,15 @@ test "package service enforces signed manifests policy gated sources updates rol
     try std.testing.expectEqual(@as(u16, 1), installed.versionMajor());
     try std.testing.expectEqual(@as(u16, 1), installed.versionMinor());
     try std.testing.expectEqual(@as(u32, 2), installed.schemaVersion());
+    try std.testing.expectEqualStrings("store:zigos", installed.sourceIdentitySlice());
     try std.testing.expectEqual(@as(usize, 2), installed.componentCount());
     try std.testing.expectEqualStrings("zigos.notes.sync", installed.componentAt(1).entrySlice());
     var resolved: ResolvedManifest = undefined;
     const resolved_v2 = try service.resolveCurrentManifest("app.notes", &resolved);
+    try std.testing.expectEqual(manifest.DataSensitivity.private_user_data, resolved_v2.requested_permissions[1].sensitivity);
+    try std.testing.expectEqual(manifest.PermissionPurpose.document_editing, resolved_v2.requested_permissions[1].purpose);
+    try std.testing.expectEqual(@as(u16, 30), resolved_v2.requested_permissions[1].retention_days);
+    try std.testing.expectEqualStrings("Sync notes through the user's chosen relay", resolved_v2.requested_permissions[1].user_visible_reason);
     try std.testing.expectEqual(manifest.DataEgressIntentKind.call_service, resolved_v2.requested_permissions[1].egress_intent.kind);
     try std.testing.expectEqualStrings("notes.relay.sync", resolved_v2.requested_permissions[1].egress_intent.service);
 
@@ -680,6 +762,7 @@ test "package service enforces signed manifests policy gated sources updates rol
     try std.testing.expectEqual(@as(u16, 1), rolled_back.versionMajor());
     try std.testing.expectEqual(@as(u16, 0), rolled_back.versionMinor());
     try std.testing.expectEqual(@as(u32, 1), rolled_back.schemaVersion());
+    try std.testing.expectEqualStrings("store:zigos", rolled_back.sourceIdentitySlice());
     try std.testing.expectEqual(@as(usize, 1), rolled_back.componentCount());
 
     const removed = try service.remove("app.notes");
@@ -738,6 +821,210 @@ test "package service rejects invalid signatures and rollback before any update"
         .source_identity = "store:zigos",
     }, null);
     try std.testing.expectError(error.NoRollbackVersion, service.rollback("app.notes"));
+}
+
+test "package service rejects stale update metadata publisher drift and channel drift" {
+    var service = Service.init();
+    const signer_identity = signing.SignerIdentity{
+        .label = "pkg-test-update-freshness",
+        .seed = signing.seedFromByte(0x3A),
+    };
+    const other_signer_identity = signing.SignerIdentity{
+        .label = "pkg-test-other-publisher",
+        .seed = signing.seedFromByte(0x3B),
+    };
+    try trustTestPublisher(&service, signer_identity, "zigos.dev");
+    try trustTestPublisher(&service, other_signer_identity, "Other Software");
+
+    var v1 = manifest_fixtures.notesBundle();
+    v1.signature = try signTestReleaseBundle(signer_identity, v1);
+
+    try std.testing.expectError(error.InstallSourceMissing, service.install(.{
+        .bundle = v1,
+        .source_identity = "",
+        .data_schema_version = 1,
+    }, null));
+    try std.testing.expectError(error.InvalidDataSchemaVersion, service.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos",
+        .data_schema_version = 0,
+    }, null));
+    const oversized_source = [_]u8{'s'} ** (MAX_INSTALL_SOURCE_BYTES + 1);
+    try std.testing.expectError(error.InstallSourceTooLong, service.install(.{
+        .bundle = v1,
+        .source_identity = oversized_source[0..],
+        .data_schema_version = 1,
+    }, null));
+    try std.testing.expectError(error.InstallSourceInvalid, service.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos beta",
+        .data_schema_version = 1,
+    }, null));
+    try std.testing.expectError(error.InstallSourceInvalid, service.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos\nmirror",
+        .data_schema_version = 1,
+    }, null));
+
+    _ = try service.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null);
+
+    try std.testing.expectError(error.VersionReplayRejected, service.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
+
+    try std.testing.expectError(error.SchemaChangeRequiresExplicitVersion, service.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos",
+        .data_schema_version = 2,
+    }, null));
+
+    const widened_permissions = [_]manifest.PermissionRequest{
+        manifest_fixtures.notes_permissions[0],
+        manifest_fixtures.notes_permissions[1],
+        .{
+            .kind = .notification_post,
+            .resource = "notifications://notes",
+            .rights = .{ .task = .{ .notification_post = true } },
+            .required = false,
+        },
+    };
+    var same_version_permission_change = v1;
+    same_version_permission_change.requested_permissions = &widened_permissions;
+    same_version_permission_change.signature = try signTestReleaseBundle(signer_identity, same_version_permission_change);
+    try std.testing.expectError(error.VersionReplayRejected, service.install(.{
+        .bundle = same_version_permission_change,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+        .declared_permission_change = true,
+    }, null));
+
+    var other_publisher = v1;
+    other_publisher.publisher = "Other Software";
+    other_publisher.version_minor = 1;
+    other_publisher.signature = try signTestReleaseBundle(other_signer_identity, other_publisher);
+    try std.testing.expectError(error.PublisherChanged, service.install(.{
+        .bundle = other_publisher,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
+
+    var channel_changed = v1;
+    channel_changed.update_channel = .stable;
+    channel_changed.version_minor = 1;
+    channel_changed.signature = try signTestReleaseBundle(signer_identity, channel_changed);
+    try std.testing.expectError(error.UpdateChannelChanged, service.install(.{
+        .bundle = channel_changed,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
+
+    var v11 = v1;
+    v11.version_minor = 1;
+    v11.signature = try signTestReleaseBundle(signer_identity, v11);
+    try std.testing.expectError(error.UpdateSourceChanged, service.install(.{
+        .bundle = v11,
+        .source_identity = "repo:mirror",
+        .data_schema_version = 1,
+    }, null));
+    const updated_minor = try service.install(.{
+        .bundle = v11,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null);
+    try std.testing.expect(updated_minor.updated_existing);
+    try std.testing.expect(updated_minor.rollback_available);
+
+    try std.testing.expectError(error.VersionReplayRejected, service.install(.{
+        .bundle = v11,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
+    try std.testing.expectError(error.VersionRegressionRejected, service.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
+
+    var v20 = v1;
+    v20.version_major = 2;
+    v20.version_minor = 0;
+    v20.signature = try signTestReleaseBundle(signer_identity, v20);
+    const updated_major = try service.install(.{
+        .bundle = v20,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null);
+    try std.testing.expect(updated_major.updated_existing);
+    try std.testing.expectEqual(@as(u16, 2), service.find("app.notes").?.versionMajor());
+
+    var lower_major = v1;
+    lower_major.version_minor = 9;
+    lower_major.signature = try signTestReleaseBundle(signer_identity, lower_major);
+    try std.testing.expectError(error.VersionRegressionRejected, service.install(.{
+        .bundle = lower_major,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
+
+    const rollback = try service.rollback("app.notes");
+    try std.testing.expect(!rollback.permissions_changed);
+    try std.testing.expectEqual(@as(u16, 1), service.find("app.notes").?.versionMajor());
+    try std.testing.expectEqual(@as(u16, 1), service.find("app.notes").?.versionMinor());
+    try std.testing.expectError(error.VersionReplayRejected, service.install(.{
+        .bundle = v11,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
+}
+
+test "package service refuses rollback to a revision whose publisher key was revoked" {
+    var service = Service.init();
+    const signer_identity = signing.SignerIdentity{
+        .label = "pkg-test-revoked-rollback",
+        .seed = signing.seedFromByte(0x3C),
+    };
+    const publisher_principal = principal.PrincipalId{ .kind = .app, .serial = 3_900 };
+    _ = try service.trustPolicyAuthorityRoot(
+        .{ .kind = .policy_authority, .serial = 1 },
+        signing.publicKeyFromByte(0x51),
+    );
+    _ = try service.trustPublisher(
+        publisher_principal,
+        .{ .kind = .policy_authority, .serial = 1 },
+        "zigos.dev",
+        try signing.publicKey(signer_identity),
+    );
+
+    var v1 = manifest_fixtures.notesBundle();
+    v1.signature = try signTestReleaseBundle(signer_identity, v1);
+    _ = try service.install(.{
+        .bundle = v1,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null);
+
+    var v11 = v1;
+    v11.version_minor = 1;
+    v11.signature = try signTestReleaseBundle(signer_identity, v11);
+    _ = try service.install(.{
+        .bundle = v11,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null);
+
+    try service.revokePublisher(publisher_principal);
+    try std.testing.expectError(error.PublisherKeyRevoked, service.buildLaunchPlan("app.notes"));
+    var resolved: ResolvedManifest = undefined;
+    try std.testing.expectError(error.PublisherKeyRevoked, service.resolveCurrentManifest("app.notes", &resolved));
+    try std.testing.expectError(error.PublisherKeyRevoked, service.rollback("app.notes"));
+    const removed = try service.remove("app.notes");
+    try std.testing.expect(removed.removed_existing);
 }
 
 test "package service rejects untrusted self-signed and revoked publisher bundles" {
@@ -978,6 +1265,15 @@ test "package service requires schema changes to carry an explicit signed versio
     }, null);
     try std.testing.expect(updated.updated_existing);
     try std.testing.expectEqual(@as(u32, 2), service.find("app.notes").?.schemaVersion());
+
+    var schema_downgrade = v2;
+    schema_downgrade.version_minor = 2;
+    schema_downgrade.signature = try signTestReleaseBundle(signer_identity, schema_downgrade);
+    try std.testing.expectError(error.SchemaVersionRegressionRejected, service.install(.{
+        .bundle = schema_downgrade,
+        .source_identity = "store:zigos",
+        .data_schema_version = 1,
+    }, null));
 }
 
 test "package service resolves installed manifests with stable slices" {
@@ -1082,9 +1378,10 @@ test "package service indexes rebuild after persisted slots are loaded" {
         .seed = signing.seedFromByte(0x38),
     };
     bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
+    try trustTestPublisher(&service, signer_identity, "Example Software");
 
     service.slots[3].in_use = true;
-    try bundle_ops.installNew(&service.slots[3].bundle, bundle, 1, crypto_hash.digestFromByte(0x11));
+    try bundle_ops.installNew(&service.slots[3].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x11));
     service.rebuildIndexes();
 
     const launch_plan = try service.buildLaunchPlan("app.notes");
@@ -1151,7 +1448,7 @@ test "package bundle ops reject semantically invalid manifests before storage" {
 
     try std.testing.expectError(
         error.DuplicatePermissionRequest,
-        bundle_ops.installNew(&service.slots[0].bundle, bundle, 1, crypto_hash.digestFromByte(0x66)),
+        bundle_ops.installNew(&service.slots[0].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x66)),
     );
     try std.testing.expectEqual(@as(u32, 0), service.slots[0].bundle.revision_count);
 }
